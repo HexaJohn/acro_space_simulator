@@ -104,6 +104,11 @@ class _DeliverySchedule {
   /// from its payload). If false the colony fuels it from the spaceport's
   /// fuel+oxidizer stockpile; with neither, the craft stays grounded.
   bool spareFuel;
+
+  /// If true this run repeats every [intervalSec]; if false it's a ONE-TIME
+  /// delivery — dispatched once, then removed from the schedule. Defaults to a
+  /// one-time run; the editor's Recurring toggle sets it.
+  bool recurring = false;
   _DeliverySchedule({
     required this.resource,
     required this.intervalSec,
@@ -113,6 +118,11 @@ class _DeliverySchedule {
     this.timer = 0,
   });
 }
+
+/// Sentinel "resource" for a delivery that brings settlers instead of a
+/// commodity. People raise the population floor (like a relief drop) rather
+/// than topping up a stockpile.
+const String kDeliveryPeople = 'people';
 
 /// Colony architecture style — how buildings + connections are rendered and what
 /// they require. `open` = Earth-like (boxes + roads, needs breathable air);
@@ -4852,6 +4862,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     if (_reliefCooldown > 0) _reliefCooldown -= dt;
 
     // Dispatch scheduled deliveries that are due, IN LIST ORDER (priority).
+    final spent = <int, List<_DeliverySchedule>>{}; // one-time runs to drop
     _deliveries.forEach((anchor, list) {
       if (_utils[anchor]?.type != 'spaceport' || !_isConnected(anchor)) return;
       for (final sched in list) {
@@ -4864,9 +4875,22 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
           sched.timer = 0;
           continue;
         }
-        sched.timer = sched.intervalSec;
         _dispatchDelivery(anchor, pad, sched);
+        if (sched.recurring) {
+          sched.timer = sched.intervalSec;
+        } else {
+          // One-time: fired — remove it from the schedule after this pass.
+          (spent[anchor] ??= []).add(sched);
+        }
       }
+    });
+    // Drop spent one-time deliveries (after iterating, so we don't mutate the
+    // list we're walking). Clear the anchor entry when its list empties.
+    spent.forEach((anchor, runs) {
+      final list = _deliveries[anchor];
+      if (list == null) return;
+      list.removeWhere(runs.contains);
+      if (list.isEmpty) _deliveries.remove(anchor);
     });
 
     // Advance each craft; drop its payload once, at the start of the dwell.
@@ -4884,6 +4908,13 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
         c.granted = true;
         if (c.isRelief) {
           _grantReliefPayload();
+        } else if (c.resource == kDeliveryPeople) {
+          // Settlers stick: raise housing + the population floor (like relief).
+          final n = c.payload.round();
+          _housing += n;
+          _reliefCrew += n;
+          _population += n;
+          _blocked = 'Settler transport arrived: +$n colonists.';
         } else if (c.resource != null) {
           _stock[c.resource!] =
               (_stockOf(c.resource!) + c.payload).clamp(0.0, _stockCap);
@@ -4912,10 +4943,14 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
 
   /// Send one delivery craft to [pad], applying the schedule's fuel rule.
   void _dispatchDelivery(int anchor, int pad, _DeliverySchedule sched) {
+    // People are passengers, not cargo: their count isn't cut by return fuel.
+    // Commodities are: self-fuelling shaves the return propellant off the load.
+    final isPeople = sched.resource == kDeliveryPeople;
     final returnFuel = _returnFuelFor(sched.amount);
     double delivered;
     if (sched.spareFuel) {
-      delivered = (sched.amount - returnFuel).clamp(0.0, sched.amount);
+      delivered =
+          isPeople ? sched.amount : (sched.amount - returnFuel).clamp(0.0, sched.amount);
     } else {
       final half = returnFuel / 2;
       if (_stockOf(Commodity.fuel) < half ||
@@ -4940,8 +4975,10 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
         payload: delivered));
   }
 
-  /// Resources that can be flown in on a scheduled delivery.
+  /// Resources that can be flown in on a scheduled delivery. 'people' is a
+  /// special run that brings settlers instead of a commodity.
   static const List<String> _deliverable = [
+    kDeliveryPeople,
     Commodity.food,
     Commodity.water,
     Commodity.oxygen,
@@ -5007,10 +5044,10 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
                                   style: AppTheme.mono
                                       .copyWith(color: AppTheme.warn)),
                               title: Text(
-                                  '${list[i].resource} · ${list[i].amount.toStringAsFixed(0)}u',
+                                  '${list[i].resource} · ${list[i].amount.toStringAsFixed(0)}${list[i].resource == kDeliveryPeople ? " pax" : "u"}',
                                   style: AppTheme.body),
                               subtitle: Text(
-                                  'every ${list[i].intervalSec.toStringAsFixed(0)}s · ${padLabel(list[i].padIndex)}'
+                                  '${list[i].recurring ? "every ${list[i].intervalSec.toStringAsFixed(0)}s" : "one-time"} · ${padLabel(list[i].padIndex)}'
                                   '${list[i].spareFuel ? " · self-fuel" : " · colony-fuel"}',
                                   style: AppTheme.dim),
                               trailing: Row(
@@ -5074,6 +5111,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     var resource = sched.resource;
     var interval = sched.intervalSec;
     var spareFuel = sched.spareFuel;
+    var recurring = sched.recurring;
     var padIndex = sched.padIndex;
     final amount = sched.amount;
     final returnFuel = _returnFuelFor(amount);
@@ -5103,14 +5141,33 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
                     ),
                 ]),
                 const SizedBox(height: 10),
-                Text('Every ${interval.toStringAsFixed(0)} s', style: AppTheme.dim),
-                Slider(
-                  value: interval,
-                  min: 15,
-                  max: 120,
-                  divisions: 7,
-                  onChanged: (v) => setSheet(() => interval = v),
+                // Recurring toggle: off (default) = a single one-time run; on =
+                // repeats on the interval below.
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  activeColor: AppTheme.accent2,
+                  value: recurring,
+                  onChanged: (v) => setSheet(() => recurring = v ?? false),
+                  title: const Text('Recurring', style: AppTheme.body),
+                  subtitle: Text(
+                      recurring
+                          ? 'Repeats automatically on the interval below.'
+                          : 'One-time delivery — flies once, then clears.',
+                      style: AppTheme.dim),
                 ),
+                if (recurring) ...[
+                  Text('Every ${interval.toStringAsFixed(0)} s',
+                      style: AppTheme.dim),
+                  Slider(
+                    value: interval,
+                    min: 15,
+                    max: 120,
+                    divisions: 7,
+                    onChanged: (v) => setSheet(() => interval = v),
+                  ),
+                ],
                 const Text('Pad', style: AppTheme.dim),
                 Wrap(spacing: 6, runSpacing: 6, children: [
                   ChoiceChip(
@@ -5140,9 +5197,13 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
                   title: const Text('Craft carries spare fuel',
                       style: AppTheme.body),
                   subtitle: Text(
-                      spareFuel
-                          ? 'Delivers ${(amount - returnFuel).clamp(0, amount).toStringAsFixed(0)}u (return fuel cut from cargo).'
-                          : 'Delivers ${amount.toStringAsFixed(0)}u; colony burns ${returnFuel.toStringAsFixed(0)} fuel+oxidizer.',
+                      resource == kDeliveryPeople
+                          ? (spareFuel
+                              ? 'Brings ${amount.toStringAsFixed(0)} settlers; carries its own return fuel.'
+                              : 'Brings ${amount.toStringAsFixed(0)} settlers; colony burns ${returnFuel.toStringAsFixed(0)} fuel+oxidizer for the return.')
+                          : (spareFuel
+                              ? 'Delivers ${(amount - returnFuel).clamp(0, amount).toStringAsFixed(0)}u (return fuel cut from cargo).'
+                              : 'Delivers ${amount.toStringAsFixed(0)}u; colony burns ${returnFuel.toStringAsFixed(0)} fuel+oxidizer.'),
                       style: AppTheme.dim),
                 ),
                 const SizedBox(height: 6),
@@ -5158,9 +5219,12 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
                         ..resource = resource
                         ..intervalSec = interval
                         ..spareFuel = spareFuel
+                        ..recurring = recurring
                         ..padIndex = padIndex;
                       if (isNew) {
-                        sched.timer = interval;
+                        // One-time runs dispatch promptly (short delay so the
+                        // craft animation reads); recurring waits a full cycle.
+                        sched.timer = recurring ? interval : 2.0;
                         (_deliveries[anchor] ??= []).add(sched);
                       }
                     });
