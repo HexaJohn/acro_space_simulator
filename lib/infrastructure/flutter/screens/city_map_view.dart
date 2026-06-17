@@ -353,6 +353,9 @@ class _CityMapViewState extends State<CityMapView>
                 !_multiTouchGesture &&
                 d.pointerCount == 1) {
               _painting = true;
+              // A paint-drag is underway -> drop the hover preview highlight; the
+              // painted cells themselves show the result.
+              widget.onHoverCell?.call(null);
             }
             // Paint mode (LMB/touch): a drag paints each new cell it crosses.
             if (_painting && widget.onPaintCell != null) {
