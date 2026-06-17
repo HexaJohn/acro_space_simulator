@@ -108,6 +108,7 @@ class CityMapView extends StatefulWidget {
   final int? rectEnd; // rect-select opposite corner (hovered/dragged cell)
   final void Function(int? key)? onHoverCell; // cursor moved over this cell
   final Set<int> hoverCells; // cells to highlight under the cursor (placement)
+  final bool hoverDestructive; // true = bulldoze; highlight RED to warn
 
   const CityMapView({
     super.key,
@@ -165,6 +166,7 @@ class CityMapView extends StatefulWidget {
     this.rectEnd,
     this.onHoverCell,
     this.hoverCells = const {},
+    this.hoverDestructive = false,
   });
 
   @override
@@ -440,6 +442,7 @@ class _CityMapViewState extends State<CityMapView>
             rectStart: widget.rectStart,
             rectEnd: widget.rectEnd,
             hoverCells: widget.hoverCells,
+            hoverDestructive: widget.hoverDestructive,
             phase: _phase,
           ),
         ),
@@ -579,6 +582,7 @@ class _CityPainter extends CustomPainter {
   final int? rectStart;
   final int? rectEnd;
   final Set<int> hoverCells;
+  final bool hoverDestructive;
   final double phase;
 
   _CityPainter({
@@ -631,6 +635,7 @@ class _CityPainter extends CustomPainter {
     this.rectStart,
     this.rectEnd,
     this.hoverCells = const {},
+    this.hoverDestructive = false,
     this.phase = 0,
   });
 
@@ -853,13 +858,16 @@ class _CityPainter extends CustomPainter {
     // Placement highlight: tint the tile(s) under the cursor so it's clear a
     // placement tool is active + where (a multi-tile building shows its whole
     // footprint).
+    // Bulldoze (destructive) tints the cursor RED to warn; otherwise white.
+    final fillC = hoverDestructive ? const Color(0x55FF3B30) : const Color(0x40FFFFFF);
+    final strokeC = hoverDestructive ? const Color(0xEEFF3B30) : const Color(0xCCFFFFFF);
     for (final k in hoverCells) {
       final gx = k % grid, gy = k ~/ grid;
       final hz = 0.14 + _z(gx, gy); // drape on the terrain tile
       _fillRect(canvas, gx + 0.04, gy + 0.04, gx + 0.96, gy + 0.96, hz,
-          Paint()..color = const Color(0x40FFFFFF));
+          Paint()..color = fillC);
       _strokeRect(canvas, gx + 0.04, gy + 0.04, gx + 0.96, gy + 0.96, hz,
-          const Color(0xCCFFFFFF), 1.5);
+          strokeC, 1.5);
     }
   }
 

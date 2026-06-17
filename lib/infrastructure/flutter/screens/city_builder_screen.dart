@@ -3618,6 +3618,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
                 // Highlight the tile(s) under the cursor while a placement tool
                 // is active — single cell, or the footprint of a large building.
                 hoverCells: _hoverHighlight(),
+                hoverDestructive: _tool == _Tool.bulldoze,
                 onTapCell: _onTapCell,
                 // Drag-paint for Zone/Road/Bulldoze in PAINT style; single + rect
                 // styles use taps so the drag stays free for the camera.
