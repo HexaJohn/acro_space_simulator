@@ -3477,7 +3477,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
                 SizedBox(
                     height: (_drawerHeight ?? c.maxHeight * 0.42)
                         .clamp(160.0, c.maxHeight - 140),
-                    child: _sidePane(shrinkWrap: false, horizontal: true)),
+                    child: _sidePane(horizontal: true)),
               ],
             ],
           );
@@ -3486,11 +3486,18 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
         if (!_paneOpen) {
           return _mapPane();
         }
-        return ListView(children: [
-          SizedBox(height: 320, child: _mapPane()),
-          const Divider(height: 1, color: Color(0xFF223247)),
-          _sidePane(shrinkWrap: true),
-        ]);
+        // Narrow open: NO outer page scroll. A bounded Column gives the map a
+        // fixed slice and the side panel the rest; the panel's tab body scrolls
+        // INTERNALLY (single scroll). Avoids the double-scroll/overflow from
+        // nesting the tab ListView inside an outer page ListView.
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            SizedBox(height: 320, child: _mapPane()),
+            const Divider(height: 1, color: Color(0xFF223247)),
+            Expanded(child: _sidePane()),
+          ],
+        );
       }),
     );
   }
@@ -4284,7 +4291,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     );
   }
 
-  Widget _sidePane({required bool shrinkWrap, bool horizontal = false}) {
+  Widget _sidePane({bool horizontal = false}) {
     final tabBar = Container(
       color: AppTheme.panel,
       child: TabBar(
@@ -4315,17 +4322,6 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
         body(_stockTab()),
       ],
     );
-    if (shrinkWrap) {
-      // Inside an outer scroll (narrow layout) -> give the tab body a generous
-      // screen-relative height so long tabs (BUILD) get enough room; the inner
-      // ListView's own bottom padding then clears the safe area.
-      final h = MediaQuery.sizeOf(context).height * 0.9;
-      return ColoredBox(
-        color: AppTheme.bg,
-        child: Column(
-            children: [tabBar, SizedBox(height: h.clamp(420, 1400), child: views)]),
-      );
-    }
     return ColoredBox(
       color: AppTheme.bg,
       child: Column(children: [tabBar, Expanded(child: views)]),
