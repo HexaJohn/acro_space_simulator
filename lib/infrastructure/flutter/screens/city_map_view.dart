@@ -248,9 +248,14 @@ class _CityMapViewState extends State<CityMapView>
         },
         onPointerUp: (e) {
           _activePointers = (_activePointers - 1).clamp(0, 10);
+          // Only clear the pinch taint once EVERY finger is up. Fingers never
+          // release simultaneously, so a pinch dropping to one finger must stay
+          // tainted — otherwise the lingering finger places a tile on release.
+          if (_activePointers == 0) _multiTouchGesture = false;
         },
         onPointerCancel: (e) {
           _activePointers = (_activePointers - 1).clamp(0, 10);
+          if (_activePointers == 0) _multiTouchGesture = false;
         },
         // Mouse-wheel zoom (toward the cursor isn't needed; centre is fine).
         onPointerSignal: (sig) {
@@ -283,9 +288,14 @@ class _CityMapViewState extends State<CityMapView>
             _azStart = _azimuth;
             _elStart = _elevation;
             _zoomStart = _zoom;
-            // A fresh gesture: it's multi-touch only if it already has 2+ fingers
-            // down (the pointer handler also flips this if a 2nd finger arrives).
-            _multiTouchGesture = d.pointerCount >= 2 || _activePointers >= 2;
+            // Taint this gesture if it already has 2+ fingers. NEVER clear the
+            // taint here — a pinch that drops to one finger restarts the scale
+            // gesture with one finger down, and clearing it would let that
+            // lingering finger place a tile. The taint clears only when every
+            // finger is fully up (the pointer-up/cancel handlers).
+            if (d.pointerCount >= 2 || _activePointers >= 2) {
+              _multiTouchGesture = true;
+            }
             // Don't paint yet — wait for the first single-finger move. Painting on
             // touch-down would lay a tile before a second finger (pinch) can
             // cancel it. The move handler starts the paint when it's safe.
