@@ -6,7 +6,6 @@ import 'package:flutter/scheduler.dart';
 
 import '../../../domain/colony/building.dart';
 import '../../../domain/colony/city_network.dart';
-import '../../../domain/flight/delivery_flight.dart';
 import '../../../domain/planetary/atmospheric_composition.dart';
 import '../../../domain/planetary/liquid_mix.dart';
 import '../../../domain/planetary/planet_surface.dart';
@@ -79,19 +78,12 @@ class _LandedCraft {
   double phase = 0; // 0..1 PAD timeline (descend / dwell 30 s / ascend)
   bool granted = false; // one-shot payload guard
 
-  /// For a scheduled delivery, the live autonomous round-trip flight (ascent ->
-  /// orbit coast -> descent). Null = relief / a craft already on the pad (the
-  /// pad-only [phase] animation drives it). When set, the craft is rendered
-  /// in-flight at the flight's altitude/downrange until it touches down.
-  DeliveryFlight? flight;
-
   _LandedCraft({
     required this.anchor,
     required this.padTile,
     required this.isRelief,
     this.resource,
     this.payload = 0,
-    this.flight,
   });
 }
 
@@ -1165,18 +1157,18 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
       lonDeg: _cityLon,
       name: '${_body.name} Ascent',
     );
-    // Bridge the colony's live air/space traffic into the sim as named craft:
-    // each active delivery flight + a couple of other-player shuttles, on their
-    // own orbits so they appear with real trajectories.
+    // Bridge the colony's live cargo traffic into the sim as named craft on
+    // their own orbits, so they appear with real trajectories — one shuttle per
+    // active scheduled delivery, plus a couple of other-player shuttles.
     final traffic = <Vessel>[];
     var i = 0;
-    for (final c in _craft.where((c) => c.flight != null)) {
+    for (final c in _craft.where((c) => !c.isRelief && c.resource != null)) {
       traffic.add(SampleWorld.buildTrafficVessel(
         _body,
         id: 'cargo-$i',
-        name: '${c.resource ?? "cargo"} shuttle',
+        name: '${c.resource} shuttle',
         ownerId: 'logistics',
-        altitude: (c.flight!.altitude).clamp(50000, 800000),
+        altitude: 300000 + i * 40000,
         phase: i * 0.7,
       ));
       i++;
@@ -3597,17 +3589,14 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
                 landerPad: _landerPad,
                 landedCraft: [
                   for (final c in _craft)
+                    // All craft use the simple pad animation now (no free flight),
+                    // so they report no altitude/downrange — always on their pad.
                     (
                       tile: c.padTile,
                       phase: c.phase,
                       relief: c.isRelief,
-                      // In-flight craft: height (m) above ground + downrange
-                      // offset (tiles) so the painter draws the climb/descent
-                      // arc. On-pad craft report alt 0.
-                      altM: c.flight?.altitude ?? 0,
-                      downrange: c.flight == null
-                          ? 0.0
-                          : c.flight!.downrange * _grid * 0.5,
+                      altM: 0.0,
+                      downrange: 0.0,
                     )
                 ],
                 beaconCell: _beaconCell,
@@ -4887,26 +4876,8 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
         done.add(c);
         continue;
       }
-      final flight = c.flight;
-      if (flight != null) {
-        // REAL delivery flight: advance the autopilot (time-compressed, fixed
-        // sub-steps for stable integration).
-        var rem = dt * _deliveryTimeWarp;
-        while (rem > 1e-4 && flight.phase != DeliveryPhase.done) {
-          final s = math.min(0.1, rem);
-          rem -= s;
-          flight.advance(s);
-        }
-        // Cargo drops the moment it touches down to unload.
-        if (!c.granted && flight.phase == DeliveryPhase.unload) {
-          c.granted = true;
-          _stock[c.resource!] =
-              (_stockOf(c.resource!) + c.payload).clamp(0.0, _stockCap);
-        }
-        if (flight.phase == DeliveryPhase.done) done.add(c);
-        continue;
-      }
-      // Relief / simple pad-only craft: the original on-pad dwell animation.
+      // All visiting craft (relief + deliveries) use the simple pad animation:
+      // descend -> dwell (drop payload) -> lift off.
       c.phase += dt / _craftTotalSec;
       if (!c.granted && c.phase >= 0.12) {
         c.granted = true;
@@ -4957,38 +4928,16 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
       _stock[Commodity.oxidizer] = _stockOf(Commodity.oxidizer) - half;
       delivered = sched.amount;
     }
-    // The delivery flies a REAL inbound trip: it arrives from a parking orbit,
-    // descends onto the pad (autopilot), unloads, then climbs back to orbit.
-    final flight = DeliveryFlight.inbound(
-      mu: _body.mu,
-      bodyRadius: _body.radius,
-      dryMass: 3000,
-      maxThrust: 4.0 * 3000 * (_body.mu / (_body.radius * _body.radius)),
-      exhaustVelocity: 300 * 9.80665,
-      targetOrbitAlt: _deliveryOrbitAlt,
-      fuel: 6000,
-      loadSeconds: 8,
-      unloadSeconds: 30,
-    );
+    // A delivery uses the SIMPLE pad animation (like Request Assistance): the
+    // craft descends onto its pad, dwells while it unloads, then lifts off — no
+    // free-flight autopilot (which missed the pad + looked erratic).
     _craft.add(_LandedCraft(
         anchor: anchor,
         padTile: pad,
         isRelief: false,
         resource: sched.resource,
-        payload: delivered,
-        flight: flight));
+        payload: delivered));
   }
-
-  /// Parking-orbit altitude deliveries fly to/from — just above the atmosphere
-  /// (or a small fraction of the radius on airless worlds).
-  double get _deliveryOrbitAlt {
-    final atmo = _body.atmosphere?.atmosphereHeight ?? 0;
-    return math.max(atmo + 20000, _body.radius * 0.03);
-  }
-
-  /// Sim-seconds of flight advanced per real second — compresses a multi-minute
-  /// ascent/descent into a watchable trip.
-  static const double _deliveryTimeWarp = 25.0;
 
   /// Resources that can be flown in on a scheduled delivery.
   static const List<String> _deliverable = [
