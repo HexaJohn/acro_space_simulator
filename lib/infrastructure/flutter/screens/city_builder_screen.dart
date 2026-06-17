@@ -4655,36 +4655,39 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
       ];
 
   /// Corpses + death-rate readout — a CITY metric (vital stats), not politics.
-  List<Widget> _mortalityStats() => [
-        if (_corpses > 0.5)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 3),
-            child: Row(children: [
-              Icon(Icons.dangerous,
-                  size: 14,
-                  color: _corpses > _population * 0.05
-                      ? AppTheme.danger
-                      : AppTheme.warn),
-              const SizedBox(width: 6),
-              const Expanded(
-                  child: Text('Corpses (unprocessed)', style: AppTheme.body)),
-              Text(_corpses.toStringAsFixed(0),
-                  style: AppTheme.mono.copyWith(
-                      color: _corpses > _population * 0.05
-                          ? AppTheme.danger
-                          : AppTheme.warn)),
-            ]),
-          ),
-        if (_deathRate > 0.01)
-          _statRow('Deaths', '${_deathRate.toStringAsFixed(2)}/s'),
-        if (_corpses > _population * 0.03 && _population > 10)
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Text(
-                'Corpse backlog spreading disease — build morgues / crematoria.',
-                style: AppTheme.dim.copyWith(color: AppTheme.danger)),
-          ),
-      ];
+  ///
+  /// Rows render whenever the colony is populated (not gated on the live value)
+  /// so the panel doesn't THRASH as the death rate / corpse count crosses a
+  /// threshold frame-to-frame — at zero they just sit dimmed.
+  List<Widget> _mortalityStats() {
+    if (_population < 1) return const [];
+    final corpseAlarm = _corpses > _population * 0.05;
+    final corpseColor =
+        _corpses < 0.5 ? AppTheme.textDim : (corpseAlarm ? AppTheme.danger : AppTheme.warn);
+    return [
+      Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Row(children: [
+          Icon(Icons.dangerous, size: 14, color: corpseColor),
+          const SizedBox(width: 6),
+          const Expanded(
+              child: Text('Corpses (unprocessed)', style: AppTheme.body)),
+          Text(_corpses.toStringAsFixed(0),
+              style: AppTheme.mono.copyWith(color: corpseColor)),
+        ]),
+      ),
+      _statRow('Deaths', '${_deathRate.toStringAsFixed(2)}/s'),
+      // Disease warning still appears only when the backlog is dangerous, but
+      // it's the last line so toggling it can't shove the rows above it.
+      if (_corpses > _population * 0.03 && _population > 10)
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Text(
+              'Corpse backlog spreading disease — build morgues / crematoria.',
+              style: AppTheme.dim.copyWith(color: AppTheme.danger)),
+        ),
+    ];
+  }
 
   List<Widget> _stockTab() => [
         const Text('STOCKPILE', style: AppTheme.heading),
