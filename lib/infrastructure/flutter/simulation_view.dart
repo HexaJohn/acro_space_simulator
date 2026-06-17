@@ -724,7 +724,7 @@ class _SimulationViewState extends State<SimulationView>
             }),
             child: Padding(
               padding: const EdgeInsets.fromLTRB(4, 6, 4, 4),
-              child: Text('FOV: ${_fovDeg.toStringAsFixed(0)}Â°',
+              child: Text('FOV: ${_fovDeg.toStringAsFixed(0)}°',
                   style: const TextStyle(color: Color(0xFF7FB0E0), fontSize: 12)),
             ),
           ),
@@ -833,7 +833,7 @@ class _SimulationViewState extends State<SimulationView>
         },
         icon: const Icon(Icons.vrpano),
         label: Text(
-            _perspectiveMode ? 'PERSP ${_fovDeg.toStringAsFixed(0)}Â°' : 'ORTHO'),
+            _perspectiveMode ? 'PERSP ${_fovDeg.toStringAsFixed(0)}°' : 'ORTHO'),
       ),
     );
   }
