@@ -213,16 +213,16 @@ class _CraftAssemblyScreenState extends State<CraftAssemblyScreen> {
             ],
           );
         }
-        // Narrow (mobile): one scrolling page. The design pane shrink-wraps so
-        // the whole placed-parts list scrolls with the page (was running off
-        // the bottom). Bottom padding clears the device's safe area.
-        return ListView(
-          padding: EdgeInsets.only(
-              bottom: MediaQuery.viewPaddingOf(context).bottom + 24),
+        // Narrow (mobile): NO outer page scroll. A bounded Column splits the
+        // viewport between the catalog (top) and the design pane (bottom), each
+        // of which scrolls internally and sizes to fit — so nothing runs off the
+        // bottom of the screen.
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            SizedBox(height: 360, child: catalog),
+            Expanded(flex: 5, child: catalog),
             const Divider(height: 1, color: Color(0xFF223247)),
-            _designPane(v, wide: false),
+            Expanded(flex: 4, child: _designPane(v)),
           ],
         );
       }),
@@ -289,18 +289,14 @@ class _CraftAssemblyScreenState extends State<CraftAssemblyScreen> {
         ),
       );
 
-  Widget _designPane(Vessel? v, {bool wide = true}) {
-    // The placed-parts list. In the WIDE two-column layout it fills the column
-    // (Expanded, scrolls internally). In the NARROW layout the whole pane lives
-    // inside the page's outer ListView, so the list must SHRINK-WRAP (no
-    // Expanded, no inner scroll) — otherwise it has unbounded height and the
-    // bottom runs off-screen with nothing able to scroll to it.
+  Widget _designPane(Vessel? v) {
+    // The placed-parts list FILLS the remaining pane height (Expanded) and
+    // scrolls internally — the pane lives in a bounded Column in both the wide
+    // and narrow layouts, so nothing overflows the screen.
     final list = _placed.isEmpty
         ? const SizedBox()
         : ReorderableListView.builder(
             padding: const EdgeInsets.all(8),
-            shrinkWrap: !wide,
-            physics: wide ? null : const NeverScrollableScrollPhysics(),
             itemCount: _placed.length,
             onReorder: (a, b) => setState(() {
               if (b > a) b -= 1;
@@ -329,7 +325,6 @@ class _CraftAssemblyScreenState extends State<CraftAssemblyScreen> {
           );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
-      mainAxisSize: wide ? MainAxisSize.max : MainAxisSize.min,
       children: [
         Container(
           padding: const EdgeInsets.all(12),
@@ -343,7 +338,7 @@ class _CraftAssemblyScreenState extends State<CraftAssemblyScreen> {
               : _stats(v),
         ),
         if (v != null && widget.launchSites.isNotEmpty) _launchBar(v),
-        wide ? Expanded(child: list) : list,
+        Expanded(child: list),
       ],
     );
   }
