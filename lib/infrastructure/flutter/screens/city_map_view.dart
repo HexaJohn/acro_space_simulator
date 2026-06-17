@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/gestures.dart'
     show
         PointerScrollEvent,
+        PointerDeviceKind,
         kPrimaryButton,
         kMiddleMouseButton,
         kSecondaryMouseButton;
@@ -252,6 +253,8 @@ class _CityMapViewState extends State<CityMapView>
           // release simultaneously, so a pinch dropping to one finger must stay
           // tainted — otherwise the lingering finger places a tile on release.
           if (_activePointers == 0) _multiTouchGesture = false;
+          // Finger lifted -> no "cursor on screen", so drop the hover highlight.
+          if (e.kind != PointerDeviceKind.mouse) widget.onHoverCell?.call(null);
         },
         onPointerCancel: (e) {
           _activePointers = (_activePointers - 1).clamp(0, 10);
@@ -266,9 +269,16 @@ class _CityMapViewState extends State<CityMapView>
           }
         },
         child: MouseRegion(
+          // Only a REAL mouse hovers a cell. Touch/stylus has no "cursor when the
+          // finger is up", so we never show the hover highlight for those — and a
+          // stray touch-hover event clears it. (Touch placement uses tap/drag.)
           onHover: widget.onHoverCell == null
               ? null
               : (e) {
+                  if (e.kind != PointerDeviceKind.mouse) {
+                    widget.onHoverCell!(null);
+                    return;
+                  }
                   final c = cam.pick(e.localPosition, widget.grid, zAt);
                   widget.onHoverCell!(
                       c == null ? null : c.$2 * widget.grid + c.$1);
