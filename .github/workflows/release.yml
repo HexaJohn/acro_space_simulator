@@ -1,0 +1,95 @@
+name: Release
+
+# Fires on a pushed semver tag (v1.2.3). Builds the web app + a Windows desktop
+# build, attaches both to a GitHub Release, and deploys the web build to GitHub
+# Pages so the static app is served live.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write # create the release + upload assets
+  pages: write # deploy to GitHub Pages
+  id-token: write # Pages deployment auth
+
+# The repo name becomes the Pages sub-path (https://<user>.github.io/<repo>/),
+# so the web build must use a matching --base-href.
+env:
+  FLUTTER_VERSION: '3.38.5'
+
+jobs:
+  # ---- Web build + GitHub Pages deploy ----
+  web:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - name: Build web
+        run: |
+          flutter build web --release \
+            --base-href "/${{ github.event.repository.name }}/" \
+            --pwa-strategy=none
+      - name: Package web build
+        run: |
+          cd build/web && zip -r ../../acro-web-${{ github.ref_name }}.zip .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-zip
+          path: acro-web-${{ github.ref_name }}.zip
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/web
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
+
+  # ---- Windows desktop build ----
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter config --enable-windows-desktop
+      - run: flutter pub get
+      - run: flutter build windows --release
+      - name: Package Windows build
+        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath acro-windows-${{ github.ref_name }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-zip
+          path: acro-windows-${{ github.ref_name }}.zip
+
+  # ---- Create the GitHub Release with both build artifacts ----
+  release:
+    needs: [web, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-zip
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-zip
+      - name: Create / update the release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            acro-web-${{ github.ref_name }}.zip
+            acro-windows-${{ github.ref_name }}.zip

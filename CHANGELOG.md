@@ -3,6 +3,77 @@
 All notable changes to Acro Space Simulator.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.0] — 2026-06-17
+
+A large feature pass turning the engine into a playable game: a full
+Cities-Skylines-style **colony builder**, end-to-end **flight integration**
+(design → launch → orbit → land), and several new domains. **408 tests passing,
+`dart analyze` clean, web build compiles.**
+
+### Colony / city builder
+- Full city-builder screen: paint **zones** (RCI demand + building growth),
+  **roads**, **utilities**, **power grid**, **water table** + aquifer pumps,
+  bulldoze, retrofit, and support tools.
+- **Physical biomes** derived from surface scalars (temperature, humidity,
+  atmosphere, composition): habitability + flora density gate what grows.
+  Earth-like worlds grow trees/grass; new **coastal / ocean / wetland / volcano**
+  biomes.
+- **`LiquidMix`** oceans/lava as a molecular mixture — colour + properties
+  (molten / potable / combustible) derive from the blend; pollutable; tints
+  water/lava tiles (methane Titan, sulphuric Venus, lava Io).
+- **Per-tile elevation** (opt-in *Relief* toggle): rolling-hills heightfield,
+  terrain-following scatter/decals, building footprints level to their tile,
+  one-edge flat coastlines, fully-flooded oceans.
+- **Per-building colony styles** (open / domed / orbital) captured at build
+  time; **Retrofit** tool converts in place; open buildings decompress in
+  vacuum/anoxia. Stations get truss **grid floors** + pressurised **transport
+  tubes**; domed worlds get **pentagon-sphere** habs; spaceports render as
+  **L-shaped pad + tower** with one launch tower per footprint tile.
+- **Disasters**: per-tile spreading **fire** (blocked by roads, fought by
+  emergency services), slow drifting **tornado** + sweeping fronts that end when
+  they leave the map, mortality/health, pollution with an **ocean sink** so a
+  watery world stays clean unless map-filling industry. Screen effects fade
+  in/out.
+- **Spaceport logistics**: multiple ordered **delivery schedules** per pad,
+  per-pad assignment, **spare-fuel** option (self-fuel vs colony-fuel-or-
+  grounded), and **autonomous round-trip delivery flights** that fly a real
+  ascent → orbit-coast → descent. **Request-assistance** relief craft (anti-
+  soft-lock). Stacked **status notification** list (starving / no-spaceport /
+  fire / pollution / disease / power).
+
+### Flight ↔ simulation integration
+- **`FlightWorld`** + `FlightTraffic` provider — a shared, transport-agnostic
+  flight state (network seam via the existing snapshot/channel) for in-flight
+  craft, supply traffic, and collisions.
+- Dual-mode **ascent/descent flight screen**: flown trajectory trail +
+  **predicted ballistic rail**, nav-ball **zenith/nadir** up/down markers,
+  time-warp, per-tower **pads** across the bottom, traffic blips, and a 3D
+  N/E/S/W scene.
+- **Reuse the real 3D solar-system sim for ascent**: a **multi-stage** launch
+  vehicle spawns on the host body's **surface at the colony's lat/long**;
+  **STAGE / decouple** in flight; live **staging info** + **Found colony**
+  button when landed; bridged colony **traffic** (cargo shuttles + rival
+  players) as named orbiters; docked control panel; **atmospheric warp clamp**
+  (real-time near the ground so launches don't tear apart at max-Q); liftoff
+  un-lands a thrusting craft.
+- The **VAB** launches the actual designed craft into the 3D sim; the **lander**
+  launch routes there too.
+
+### New domains
+- **Megastructures**, **agriculture** (farms), **power plants**, **ground
+  vehicles** (assembler + catalog + parts).
+
+### Render & camera
+- **Perspective camera** alongside the ortho map cam; **sphere textures** for
+  bodies; lower zoom floor (0.5 m/px) so the surface/craft are reachable; sphere
+  render isolated behind a disc fallback.
+
+### Fixes / balance
+- Pollution no longer flips build style or demolishes buildings except at
+  extreme levels; abandoned buildings render as full-height grey ruins (no
+  shrinking); ascent has no "fail" outcome (orbit or destroyed-on-impact);
+  thunderstorm strike rate reduced.
+
 ## [0.1.0] — 2026-06-14
 
 First tagged release. A complete DDD/CLEAN space-flight + colony simulation

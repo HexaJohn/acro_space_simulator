@@ -1,0 +1,32 @@
+# dartdoc configuration — generates the API reference ("wiki") from the doc
+# comments on the domain/application/infrastructure classes.
+#
+#   dart doc --output doc/api
+#
+# The generated site is grounded directly on the Dart classes: every aggregate,
+# value object, service and catalog type is documented inline and shows up here.
+dartdoc:
+  # Pull the top-level library docs into the sidebar by category so the engine's
+  # bounded contexts are browsable.
+  categories:
+    Flight & Physics:
+      markdown: doc/categories/flight.md
+    Vessels & Parts:
+      markdown: doc/categories/vessels.md
+    Universe & Bodies:
+      markdown: doc/categories/universe.md
+    Colony & Cities:
+      markdown: doc/categories/colony.md
+    Planetary Science:
+      markdown: doc/categories/planetary.md
+  categoryOrder:
+    - Flight & Physics
+    - Vessels & Parts
+    - Universe & Bodies
+    - Colony & Cities
+    - Planetary Science
+  # Prose like [0,1] or [happiness] in existing comments isn't a symbol link;
+  # don't fail the docs build on those — just ignore them.
+  ignore:
+    - unresolved-doc-reference
+    - missing-from-search-index

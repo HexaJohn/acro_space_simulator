@@ -46,3 +46,6 @@ app.*.map.json
 
 # Claude Code local memory / plans / session data
 .claude/
+
+# Generated dartdoc API site (regenerate with: dart doc --output doc/api)
+doc/api/

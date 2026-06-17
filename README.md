@@ -38,6 +38,9 @@ Built across **23 bounded contexts**, pure domain (zero Flutter coupling),
 
 ## Documentation
 
+- [Docs index](docs/README.md) — how everything below is generated
+- [Reference: buildings, parts & bodies](docs/REFERENCE.md) — auto-generated from the catalogs
+- API wiki (class-level) — `dart doc --output doc/api`, then open `doc/api/index.html`
 - [User Guide](release/USER_GUIDE.md)
 - [Tutorial](release/TUTORIAL.md)
 - [Changelog](CHANGELOG.md)
