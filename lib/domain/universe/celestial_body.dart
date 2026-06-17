@@ -96,8 +96,51 @@ class CelestialBody {
     this.composition,
   });
 
+  /// Returns a copy with selected fields replaced. Used by debug/terraforming
+  /// tools that re-skin a body's atmosphere (its composition + air model) at
+  /// runtime to show the render react to a chemistry change.
+  CelestialBody copyWith({
+    AtmosphereModel? atmosphere,
+    AtmosphericComposition? composition,
+  }) =>
+      CelestialBody(
+        id: id,
+        name: name,
+        mu: mu,
+        radius: radius,
+        soiRadius: soiRadius,
+        siderealRotationPeriod: siderealRotationPeriod,
+        parent: parent,
+        orbitRadius: orbitRadius,
+        orbitPhase: orbitPhase,
+        orbitEccentricity: orbitEccentricity,
+        orbitInclination: orbitInclination,
+        orbitLongitudeAscending: orbitLongitudeAscending,
+        orbitArgPeriapsis: orbitArgPeriapsis,
+        atmosphere: atmosphere ?? this.atmosphere,
+        solarFlux: solarFlux,
+        axialTilt: axialTilt,
+        j2: j2,
+        dipoleMoment: dipoleMoment,
+        surface: surface,
+        composition: composition ?? this.composition,
+      );
+
   bool get isStar => parent == null;
   bool get hasAtmosphere => atmosphere != null;
+
+  /// Mean bulk density (kg/m^3) from mu (=> mass) and radius. ~5500 for rocky
+  /// worlds, ~1000-1600 for the gas/ice giants.
+  double get bulkDensity {
+    const g = 6.674e-11;
+    final mass = mu / g;
+    final volume = (4 / 3) * math.pi * radius * radius * radius;
+    return volume > 0 ? mass / volume : 0;
+  }
+
+  /// A gas/ice giant: big + low density => no solid surface to land on. Such
+  /// bodies only host floating (cloud-city) or orbital colonies.
+  bool get isGasGiant => radius > 2.0e7 && bulkDensity < 2500;
 
   /// Gravitational acceleration at body-centred position [r] (m, inertial).
   /// a = -mu * r / |r|^3.

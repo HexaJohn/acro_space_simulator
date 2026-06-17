@@ -1,5 +1,6 @@
 import '../../domain/autonomy/cargo_schedule.dart';
 import '../../domain/colony/colony.dart';
+import '../../domain/megastructure/megastructure.dart';
 import '../../domain/universe/celestial_body.dart';
 import '../../domain/weather/weather_system.dart';
 
@@ -26,6 +27,20 @@ abstract class WeatherRepository {
 abstract class CargoScheduleRepository {
   Iterable<CargoSchedule> all();
   void save(CargoSchedule schedule);
+}
+
+abstract class MegastructureRepository {
+  Iterable<Megastructure> all();
+  void save(Megastructure structure);
+}
+
+/// Empty default so a tick can run without any megaprojects.
+class NullMegastructureRepository implements MegastructureRepository {
+  const NullMegastructureRepository();
+  @override
+  Iterable<Megastructure> all() => const [];
+  @override
+  void save(Megastructure structure) {}
 }
 
 /// Empty default so a tick can be built without logistics. Defined in the

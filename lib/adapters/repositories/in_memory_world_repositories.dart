@@ -1,6 +1,7 @@
 import '../../application/ports/world_repositories.dart';
 import '../../domain/autonomy/cargo_schedule.dart';
 import '../../domain/colony/colony.dart';
+import '../../domain/megastructure/megastructure.dart';
 import '../../domain/universe/celestial_body.dart';
 import '../../domain/weather/weather_system.dart';
 
@@ -46,6 +47,19 @@ class NullWeatherRepository implements WeatherRepository {
   Iterable<WeatherSystem> all() => const [];
   @override
   void save(WeatherSystem system) {}
+}
+
+class InMemoryMegastructureRepository implements MegastructureRepository {
+  final Map<String, Megastructure> _store;
+
+  InMemoryMegastructureRepository([Iterable<Megastructure> seed = const []])
+      : _store = {for (final m in seed) m.id: m};
+
+  @override
+  Iterable<Megastructure> all() => _store.values;
+
+  @override
+  void save(Megastructure structure) => _store[structure.id] = structure;
 }
 
 class InMemoryCargoScheduleRepository implements CargoScheduleRepository {

@@ -10,6 +10,7 @@ import 'package:acro_space_simulator/domain/autonomy/maneuver_planner.dart';
 import 'package:acro_space_simulator/domain/contracts/contract.dart';
 import 'package:acro_space_simulator/domain/contracts/contract_tracker.dart';
 import 'package:acro_space_simulator/domain/economy/treasury.dart';
+import 'package:acro_space_simulator/domain/lifesupport/crew.dart';
 import 'package:acro_space_simulator/domain/orbits/soi_transition_service.dart';
 import 'package:acro_space_simulator/domain/orbits/state_vector_converter.dart';
 import 'package:acro_space_simulator/domain/science/experiment.dart';
@@ -27,7 +28,10 @@ void main() {
     final system = SampleWorld.buildSystem();
     final body = system.require(SampleWorld.kerbin);
 
-    final vessel = SampleWorld.buildVessel(altitude: 100000);
+    final vessel = SampleWorld.buildVessel(altitude: 100000)
+      // Crewed flight computer executes the planned burns even out of ground
+      // link (far side of the body).
+      ..crew = CrewModule(count: 1);
     vessel.experiments.addAll(const [
       Experiment(id: 'thermometer', baseValue: 6),
       Experiment(id: 'barometer', baseValue: 9),

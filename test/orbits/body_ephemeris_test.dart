@@ -63,4 +63,38 @@ void main() {
     // r . v ~ 0 for circular motion.
     expect(r.dot(v).abs() / (r.length * v.length), lessThan(1e-3));
   });
+
+  group('orbit path (rails)', () {
+    test('root body has no orbit path', () {
+      expect(ephemeris.orbitPathRelativeToParent(planet, system), isEmpty);
+    });
+
+    test('moon path is a closed ring at the orbit radius', () {
+      final pts = ephemeris.orbitPathRelativeToParent(moon, system, samples: 64);
+      expect(pts.length, 65); // samples + 1 (closing point)
+      // Every sample sits on the (circular) orbit radius.
+      for (final p in pts) {
+        expect(p.length, closeTo(moon.orbitRadius, moon.orbitRadius * 1e-3));
+      }
+      // The ring closes: last point == first.
+      expect((pts.last - pts.first).length,
+          lessThan(moon.orbitRadius * 1e-3));
+    });
+
+    test('rail vertex 0 sits exactly on the body at the given epoch', () {
+      final period = 2 *
+          math.pi *
+          math.sqrt(moon.orbitRadius * moon.orbitRadius * moon.orbitRadius /
+              planet.mu);
+      final epoch = Epoch(period * 0.3); // somewhere mid-orbit
+      final bodyPos =
+          ephemeris.positionRelativeToParent(moon, system, epoch);
+      final pts = ephemeris
+          .orbitPathRelativeToParent(moon, system, samples: 64, epoch: epoch);
+      // First rail point coincides with the body's actual position, so the rail
+      // passes through the marker instead of floating off.
+      expect((pts.first - bodyPos).length,
+          lessThan(moon.orbitRadius * 1e-3));
+    });
+  });
 }

@@ -83,6 +83,14 @@ class CrewIrradiated extends DomainEvent {
   CrewIrradiated(this.vessel, this.doseSv) : super(Epoch.zero);
 }
 
+class MegastructureMilestone extends DomainEvent {
+  final String structureId;
+  final String message; // "phase 3 complete" / "operational"
+  final bool completed; // true once fully operational
+  MegastructureMilestone(this.structureId, this.message, {this.completed = false})
+      : super(Epoch.zero);
+}
+
 class SituationEntered extends DomainEvent {
   final VesselId vessel;
   final String situation; // e.g. 'lowOrbit:mun'

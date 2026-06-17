@@ -61,6 +61,42 @@ class AtmosphericComposition {
     return math.sqrt(mmw / earthMmw);
   }
 
+  /// Representative scatter/absorption RGB per gas (0..255), the colour each
+  /// species lends an atmosphere when illuminated: Rayleigh-blue for the light
+  /// diatomics, warm tan for CO2 haze, cyan-teal for methane (it absorbs red),
+  /// pale cream for the gas-giant H2/He.
+  static const Map<AtmosphereGas, List<int>> _gasRgb = {
+    AtmosphereGas.nitrogen: [120, 160, 255], // Rayleigh blue
+    AtmosphereGas.oxygen: [140, 180, 255], // blue
+    AtmosphereGas.carbonDioxide: [220, 200, 150], // warm tan haze
+    AtmosphereGas.hydrogen: [230, 220, 200], // pale cream
+    AtmosphereGas.helium: [235, 230, 215], // near-white
+    AtmosphereGas.methane: [90, 200, 210], // cyan/teal (red-absorbing)
+    AtmosphereGas.argon: [180, 180, 190], // faint grey-blue
+    AtmosphereGas.water: [210, 225, 245], // white-blue
+  };
+
+  /// "True"-ish atmosphere tint as a packed ARGB int, derived from the gas mix
+  /// (mole-fraction-weighted blend of per-gas scatter colours). The render uses
+  /// this so each body's haze colour follows its real composition instead of a
+  /// hand-picked table. Falls back to a neutral blue for an empty composition.
+  int get scatterColorArgb {
+    if (fractions.isEmpty) return 0xFF6FB4FF;
+    var r = 0.0, g = 0.0, b = 0.0, w = 0.0;
+    fractions.forEach((gas, f) {
+      final rgb = _gasRgb[gas];
+      if (rgb != null) {
+        r += rgb[0] * f;
+        g += rgb[1] * f;
+        b += rgb[2] * f;
+        w += f;
+      }
+    });
+    if (w <= 0) return 0xFF6FB4FF;
+    int ch(double v) => (v / w).clamp(0, 255).round();
+    return (0xFF << 24) | (ch(r) << 16) | (ch(g) << 8) | ch(b);
+  }
+
   /// Normalise raw fractions so they sum to 1; drops non-positive entries. An
   /// all-zero (or empty) input is returned empty rather than dividing by zero.
   static Map<AtmosphereGas, double> _normalise(
@@ -77,12 +113,13 @@ class AtmosphericComposition {
     return positive.map((gas, fraction) => MapEntry(gas, fraction / total));
   }
 
-  /// Earth: ~78% N2, ~21% O2, ~0.93% Ar, ~0.04% CO2.
+  /// Earth: ~78% N2, ~21% O2, ~0.93% Ar, ~0.04% CO2, ~1% H2O vapour (humid).
   factory AtmosphericComposition.earth() => AtmosphericComposition(const {
-        AtmosphereGas.nitrogen: 0.7808,
-        AtmosphereGas.oxygen: 0.2095,
-        AtmosphereGas.argon: 0.0093,
+        AtmosphereGas.nitrogen: 0.7708,
+        AtmosphereGas.oxygen: 0.2069,
+        AtmosphereGas.argon: 0.0092,
         AtmosphereGas.carbonDioxide: 0.0004,
+        AtmosphereGas.water: 0.0127, // mean tropospheric water vapour
       });
 
   /// Mars: ~96% CO2, ~1.9% Ar, ~1.9% N2.

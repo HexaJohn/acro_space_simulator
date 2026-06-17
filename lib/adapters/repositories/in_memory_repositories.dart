@@ -1,5 +1,6 @@
 import '../../application/ports/repositories.dart';
 import '../../domain/mining/resource_deposit.dart';
+import '../../domain/universe/celestial_body.dart';
 import '../../domain/universe/star_system.dart';
 import '../../domain/vessel/vessel.dart';
 
@@ -30,11 +31,15 @@ class InMemoryVesselRepository implements VesselRepository {
 }
 
 class StaticUniverseRepository implements UniverseRepository {
-  final StarSystem system;
+  StarSystem system;
   StaticUniverseRepository(this.system);
 
   @override
   StarSystem current() => system;
+
+  /// Swap a body in-place (debug/terraforming re-skin). The presenter reads
+  /// `current()` each frame, so the next render picks up the change.
+  void replaceBody(CelestialBody body) => system = system.withBody(body);
 }
 
 class InMemoryDepositRepository implements DepositRepository {

@@ -40,10 +40,11 @@ class AutopilotUpdater {
 
     if (now.seconds < node.executeAt.seconds) return; // not due yet
 
-    // Comms gate: a blacked-out vessel can't act on commands — hold the burn
-    // until the control link is restored. (Attitude was set above, which is a
-    // passive on-board behaviour and may continue.)
-    if (!vessel.hasCommLink) return;
+    // Comms gate: a blacked-out vessel can't act on commands — UNLESS it has an
+    // on-board flight computer (crew). A pre-uploaded node then executes locally
+    // even with no link, so a planned transfer whose burn falls on the far side
+    // of the body isn't stranded. Uncrewed probes still need a live link.
+    if (!vessel.hasCommLink && vessel.crew == null) return;
 
     // Fuel-budget gate: when the first burn of the plan comes due, verify the
     // vessel can afford the whole plan. If not, abort rather than strand it

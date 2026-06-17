@@ -14,6 +14,46 @@ enum Biome {
   mountains,
   volcanic,
   barren, // airless rock/regolith
+  wetland, // swamp — high water table, spotty standing water
+  coastal, // beaches + a coastline (part sea, part land)
+  volcano, // a lava-lake biome (molten "ocean", inhospitable)
+}
+
+/// Per-biome surface traits used by the conditions model:
+/// - [surfaceMoisture]: how wet the GROUND is, independent of the air (0..1).
+/// - [floraPotential]: max plant cover this biome supports once climate allows
+///   (0 = nothing grows, 1 = lush). Together they make "humid desert" (wet air,
+///   low flora) differ from "dry forest" (low air moisture, high flora base).
+extension BiomeTraits on Biome {
+  double get surfaceMoisture => switch (this) {
+        Biome.ocean => 1.0,
+        Biome.coastal => 0.8,
+        Biome.wetland => 0.95,
+        Biome.forest => 0.85,
+        Biome.grassland => 0.6,
+        Biome.tundra => 0.5,
+        Biome.mountains => 0.4,
+        Biome.iceCap => 0.3, // frozen, not liquid-wet
+        Biome.desert => 0.15,
+        Biome.volcanic => 0.2,
+        Biome.volcano => 0.0,
+        Biome.barren => 0.0,
+      };
+
+  double get floraPotential => switch (this) {
+        Biome.forest => 1.0,
+        Biome.wetland => 0.95,
+        Biome.grassland => 0.8,
+        Biome.coastal => 0.6,
+        Biome.tundra => 0.35,
+        Biome.mountains => 0.4,
+        Biome.ocean => 0.15,
+        Biome.desert => 0.25,
+        Biome.iceCap => 0.05,
+        Biome.volcanic => 0.1,
+        Biome.volcano => 0.0,
+        Biome.barren => 0.0,
+      };
 }
 
 /// Per-body surface model: temperature map (latitude + albedo + insolation),

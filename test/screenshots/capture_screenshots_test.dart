@@ -24,10 +24,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 Future<void> _capture(TopDownSnapshot snap, String path,
-    {Size size = const Size(1280, 720)}) async {
+    {Size size = const Size(1280, 720), double mpp = 25000}) async {
   final recorder = ui.PictureRecorder();
   final canvas = Canvas(recorder, Offset.zero & size);
-  TopDownPainter(snap).paint(canvas, size);
+  TopDownPainter(snap, view: OrthoCamera(CameraOrbit.top, mpp)).paint(canvas, size);
   final picture = recorder.endRecording();
   final image = await picture.toImage(size.width.toInt(), size.height.toInt());
   final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
@@ -60,8 +60,11 @@ void main() {
     final presenter = TopDownSnapshotPresenter(
         vessels: vessels, universe: StaticUniverseRepository(system));
     final snap = presenter.present(
-        focus: vessel.id, metresPerPixel: 3500, epoch: clock.epoch, science: 42);
-    await _capture(snap, 'release/screenshots/01_orbit_overview.png');
+        focus: vessel.id,
+        camera: OrthoCamera(CameraOrbit.top, 3500),
+        epoch: clock.epoch,
+        science: 42);
+    await _capture(snap, 'release/screenshots/01_orbit_overview.png', mpp: 3500);
     expect(File('release/screenshots/01_orbit_overview.png').existsSync(), isTrue);
   });
 
@@ -82,8 +85,11 @@ void main() {
     final presenter = TopDownSnapshotPresenter(
         vessels: vessels, universe: StaticUniverseRepository(system));
     final snap = presenter.present(
-        focus: orbiter.id, metresPerPixel: 60000, epoch: Epoch.zero, science: 0);
-    await _capture(snap, 'release/screenshots/02_real_earth.png');
+        focus: orbiter.id,
+        camera: OrthoCamera(CameraOrbit.top, 60000),
+        epoch: Epoch.zero,
+        science: 0);
+    await _capture(snap, 'release/screenshots/02_real_earth.png', mpp: 60000);
     expect(r, greaterThan(0));
     expect(File('release/screenshots/02_real_earth.png').existsSync(), isTrue);
   });
@@ -109,8 +115,11 @@ void main() {
     final presenter = TopDownSnapshotPresenter(
         vessels: vessels, universe: StaticUniverseRepository(system));
     final snap = presenter.present(
-        focus: vessel.id, metresPerPixel: 1500, epoch: clock.epoch, science: 88);
-    await _capture(snap, 'release/screenshots/03_vessel_closeup.png');
+        focus: vessel.id,
+        camera: OrthoCamera(CameraOrbit.top, 1500),
+        epoch: clock.epoch,
+        science: 88);
+    await _capture(snap, 'release/screenshots/03_vessel_closeup.png', mpp: 1500);
     expect(File('release/screenshots/03_vessel_closeup.png').existsSync(), isTrue);
   });
 }

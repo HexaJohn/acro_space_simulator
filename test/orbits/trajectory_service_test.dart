@@ -22,10 +22,12 @@ void main() {
       samples: 32,
     );
 
-    expect(points.length, 32);
+    expect(points.length, 33); // samples + 1: the loop closes back to the start
     for (final p in points) {
       expect(p.length, closeTo(r, r * 1e-2));
     }
+    // The closing point coincides with the first (continuous, passes the craft).
+    expect((points.last - points.first).length, lessThan(r * 1e-3));
   });
 
   test('path samples span roughly one full orbit (covers all quadrants)', () {

@@ -23,6 +23,17 @@ class StarSystem {
 
   Iterable<CelestialBody> get all => _bodies.values;
 
+  /// A new system with [body] replacing the one of the same id (others kept).
+  /// Used by debug/terraforming tools that re-skin a body at runtime.
+  StarSystem withBody(CelestialBody body) => StarSystem(
+        name: name,
+        rootStar: rootStar,
+        bodies: [
+          for (final b in _bodies.values) if (b.id != body.id) b,
+          body,
+        ],
+      );
+
   CelestialBody? parentOf(CelestialBody b) =>
       b.parent == null ? null : _bodies[b.parent!];
 

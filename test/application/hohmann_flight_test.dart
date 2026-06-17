@@ -7,6 +7,7 @@ import 'package:acro_space_simulator/application/ports/compute_port.dart';
 import 'package:acro_space_simulator/application/usecases/advance_simulation_tick.dart';
 import 'package:acro_space_simulator/domain/autonomy/flight_plan.dart';
 import 'package:acro_space_simulator/domain/autonomy/maneuver_planner.dart';
+import 'package:acro_space_simulator/domain/lifesupport/crew.dart';
 import 'package:acro_space_simulator/domain/orbits/soi_transition_service.dart';
 import 'package:acro_space_simulator/domain/orbits/state_vector_converter.dart';
 import 'package:acro_space_simulator/domain/simulation/epoch.dart';
@@ -18,7 +19,10 @@ void main() {
   test('planned Hohmann transfer, flown by autopilot, raises the orbit', () {
     final system = SampleWorld.buildSystem();
     final body = system.require(SampleWorld.kerbin);
-    final vessel = SampleWorld.buildVessel(altitude: 100000);
+    final vessel = SampleWorld.buildVessel(altitude: 100000)
+      // A crewed flight computer executes the pre-planned circularization burn
+      // even when the craft is on the far side of the body (no ground link).
+      ..crew = CrewModule(count: 1);
 
     final r1 = body.radius + 100000;
     final r2 = body.radius + 250000;

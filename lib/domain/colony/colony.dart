@@ -1,3 +1,4 @@
+import '../agriculture/farm.dart';
 import '../universe/celestial_body.dart';
 import '../vessel/resource_container.dart';
 import 'building.dart';
@@ -44,6 +45,12 @@ class Colony {
   /// Optional road/utility network. When set, disconnected buildings can't
   /// function. Null = no connectivity requirement (legacy colonies).
   CityNetwork? network;
+
+  /// Surplus power (W) this colony can divert to megastructure construction.
+  double constructionPowerSurplus = 0;
+
+  /// Farms growing crops for food (the agriculture layer).
+  final List<Farm> farms = [];
 
   Colony({
     required this.id,

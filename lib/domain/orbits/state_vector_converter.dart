@@ -66,16 +66,46 @@ class StateVectorOrbitConverter {
     var raan = nMag < 1e-12 ? 0.0 : math.acos((n.x / nMag).clamp(-1.0, 1.0));
     if (n.y < 0) raan = 2 * math.pi - raan;
 
-    var argP = (nMag < 1e-12 || e < 1e-12)
-        ? 0.0
-        : math.acos((n.dot(eVec) / (nMag * e)).clamp(-1.0, 1.0));
-    if (eVec.z < 0) argP = 2 * math.pi - argP;
+    // Argument of periapsis. For an inclined orbit it's the node->periapsis
+    // angle. For an EQUATORIAL orbit the node vector is zero (n = Z x h = 0), so
+    // we instead take the periapsis longitude straight from the eccentricity
+    // vector — otherwise argP was forced to 0 and the periapsis snapped to +X,
+    // teleporting any vessel on an equatorial orbit whose periapsis lies
+    // elsewhere (e.g. right after a burn flips AP/PE).
+    double argP;
+    if (e < 1e-9) {
+      argP = 0.0; // circular: periapsis undefined, anomaly carries position
+    } else if (nMag >= 1e-9) {
+      argP = math.acos((n.dot(eVec) / (nMag * e)).clamp(-1.0, 1.0));
+      if (eVec.z < 0) argP = 2 * math.pi - argP;
+    } else {
+      // Equatorial: longitude of periapsis from +X, sign by the cross product
+      // direction relative to the orbit normal (h.z).
+      argP = math.atan2(eVec.y, eVec.x);
+      if (h.z < 0) argP = 2 * math.pi - argP; // retrograde equatorial
+      argP = _wrap(argP);
+    }
 
-    // True anomaly -> eccentric -> mean, so the orbit can be propagated.
-    var nu = e < 1e-12
-        ? 0.0
-        : math.acos((eVec.dot(r) / (e * rMag)).clamp(-1.0, 1.0));
-    if (r.dot(v) < 0) nu = 2 * math.pi - nu;
+    // True anomaly. For an eccentric orbit it's measured from periapsis (the
+    // eccentricity vector). For a (near-)circular orbit the periapsis direction
+    // is undefined, so we instead use the position angle measured from a stable
+    // reference — the ascending node (argument of latitude), or the +X axis for
+    // an equatorial circular orbit. WITHOUT this, a circular orbit always
+    // reported anomaly 0 (vessel pinned at "periapsis"), so on-rails propagation
+    // round-trips lost the vessel's position and it appeared frozen.
+    double nu;
+    if (e >= 1e-9) {
+      nu = math.acos((eVec.dot(r) / (e * rMag)).clamp(-1.0, 1.0));
+      if (r.dot(v) < 0) nu = 2 * math.pi - nu;
+    } else if (nMag >= 1e-9) {
+      // Circular inclined: argument of latitude (node -> position).
+      nu = math.acos((n.dot(r) / (nMag * rMag)).clamp(-1.0, 1.0));
+      if (r.z < 0) nu = 2 * math.pi - nu;
+    } else {
+      // Circular equatorial: true longitude from +X.
+      nu = math.acos((r.x / rMag).clamp(-1.0, 1.0));
+      if (r.y < 0) nu = 2 * math.pi - nu;
+    }
 
     final m0 = _trueToMean(nu, e);
 

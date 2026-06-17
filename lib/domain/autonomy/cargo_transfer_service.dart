@@ -1,4 +1,5 @@
 import '../colony/colony.dart';
+import '../megastructure/megastructure.dart';
 import '../vessel/resource_container.dart';
 import '../vessel/vessel.dart';
 
@@ -50,5 +51,22 @@ class CargoTransferService {
     // Anything that didn't fit goes back to the colony.
     if (remaining > 0) source.fill(remaining);
     return loaded;
+  }
+
+  /// Unload a vessel's ore/material cargo onto a megastructure build site,
+  /// converting it to delivered structural mass. Returns kg delivered. This is
+  /// the ONLY way material reaches a megastructure — it must be flown in.
+  double deliverToSite(Vessel vessel, Megastructure structure,
+      {double massPerUnit = 1000}) {
+    var deliveredUnits = 0.0;
+    for (final part in vessel.allParts) {
+      for (final hold in part.resources) {
+        if (hold.type != ResourceType.ore || hold.isEmpty) continue;
+        deliveredUnits += hold.draw(hold.amount);
+      }
+    }
+    final kg = deliveredUnits * massPerUnit;
+    structure.deliverMaterial(kg);
+    return kg;
   }
 }

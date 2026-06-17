@@ -2,12 +2,17 @@ import 'dart:math' as math;
 
 import '../../application/ports/repositories.dart';
 import '../../application/ports/world_repositories.dart';
+import '../../domain/orbits/body_ephemeris.dart';
 import '../../domain/orbits/trajectory_service.dart';
 import '../../domain/shared/vector3.dart';
 import '../../domain/simulation/epoch.dart';
 import '../../domain/universe/celestial_body.dart';
 import '../../domain/vessel/resource_container.dart';
 import '../../domain/vessel/vessel.dart';
+import 'camera_view.dart';
+
+export 'camera_view.dart';
+export 'perspective_camera.dart';
 
 /// Immutable, render-ready description of one body for the top-down painter.
 /// Positions are already projected to the XY plane in *metres relative to the
@@ -21,28 +26,146 @@ class BodyView {
   final bool isStar;
   final bool hasAtmosphere;
 
-  /// Sun direction (unit, XY plane) for lit-disc shading — from this body
-  /// toward the star. Stars use a zero vector (self-luminous).
+  /// Sun direction (unit, XY plane) for the flat lit-disc shading — from this
+  /// body toward the star. Stars use a zero vector (self-luminous).
   final double sunX;
   final double sunY;
 
+  /// Sun direction as a full 3D WORLD unit vector (body -> star), for the
+  /// textured-sphere Lambert shading. The sphere transforms it into the camera
+  /// frame itself, so lighting stays correct as the camera orbits (the 2D
+  /// sunX/sunY can't encode depth and lit the night side). Zero for stars.
+  final double sunWorldX;
+  final double sunWorldY;
+  final double sunWorldZ;
+
+  /// How much the sun points toward the camera: +1 = sun behind the viewer
+  /// (whole visible face lit), -1 = sun behind the body (face is night). Lets
+  /// the 2D shaders resolve the degenerate front-on/back-on case where the
+  /// projected sunX/sunY collapse to ~0.
+  final double sunFacing;
+
+  /// Texture key (e.g. 'earth') -> `assets/textures/<key>.jpg`, when this body
+  /// has a surface map. Null falls back to the procedural shaded disc.
+  final String? textureKey;
+
+  /// Rotation of the body about its spin axis (+Z) at this epoch, radians. The
+  /// sphere offsets the texture longitude by this so the surface visibly turns.
+  final double spin;
+
+  /// Dominant atmosphere tint as packed ARGB (the painter's Rayleigh sweep uses
+  /// it for the day-side glow). Defaults to Earth blue.
+  final int atmoColor;
+
+  /// True for gas giants — the debug "exaggerate atmosphere" option thickens
+  /// their haze since their real scale dwarfs the visible atmosphere band.
+  final bool isGasGiant;
+
+  /// Sphere-of-influence radius, metres (0 = none/root). The painter draws this
+  /// as a dashed circle when the SOI debug overlay is on.
+  final double soiRadius;
+
+  /// The body's orbit ellipse about its parent, focus-relative XY metres
+  /// (already projected for the current view). Empty for the root star. The
+  /// painter draws this as a faint closed ring ("rails"). [orbitBehind] flags
+  /// each point as behind the parent body so the painter occludes the far arc.
+  final List<({double x, double y})> orbitPath;
+  final List<bool> orbitBehind;
+
+  /// Projected inner/outer ring-circle sample points (focus-relative XY metres),
+  /// for bodies with a ring system. Empty when ringless. The painter strokes a
+  /// band between them. [ringBehind] is true for samples on the far side of the
+  /// body (drawn under the disc) so the planet occludes the back of the rings.
+  final List<({double x, double y})> ringInnerPath;
+  final List<({double x, double y})> ringOuterPath;
+  final List<bool> ringBehind;
+
+  /// Per-angle perpendicular distance (metres) from the planet's shadow cylinder
+  /// axis, at the inner and outer ring edges (1e30 when sunward = never shadow).
+  /// The painter shadows a band point when the interpolated value < body radius,
+  /// giving a straight-chord (U-shaped) shadow rather than a radial wedge.
+  final List<double> ringShadowInner;
+  final List<double> ringShadowOuter;
+
+  /// Ring material colour (packed ARGB). Defaults to Saturn tan.
+  final int ringColor;
+
+  /// Ring opacity multiplier (0..1) — gas giants are faint, Saturn brightest.
+  final double ringIntensity;
+
+  /// On-screen radius in pixels (camera already applied the projection — ortho
+  /// = radius/mpp, perspective = radius/depth*focal). The painter draws this
+  /// directly; [radius] (metres) is kept only for shadow/SOI world-space math.
+  final double radiusPx;
+
+  /// Body's camera-relative WORLD position (metres), so the painter can build a
+  /// per-body view basis for the sphere (the eye->body direction differs from
+  /// the camera forward off-axis — using forward slides the texture).
+  final Vector3 worldRel;
+
+  /// SOI radius already projected to pixels (0 = none).
+  final double soiRadiusPx;
+
+  /// Whether the painter should draw this body's name label. Cleared for
+  /// unrelated bodies when zoomed inside the active body's SOI (declutter).
+  final bool showLabel;
+
   const BodyView(this.name, this.x, this.y, this.radius, this.isStar,
-      {this.hasAtmosphere = false, this.sunX = 1, this.sunY = 0});
+      {this.hasAtmosphere = false,
+      this.sunX = 1,
+      this.sunY = 0,
+      this.sunWorldX = 1,
+      this.sunWorldY = 0,
+      this.sunWorldZ = 0,
+      this.sunFacing = 0,
+      this.spin = 0,
+      this.atmoColor = 0xFF6FB4FF,
+      this.isGasGiant = false,
+      this.soiRadius = 0,
+      this.textureKey,
+      this.orbitPath = const [],
+      this.orbitBehind = const [],
+      this.ringInnerPath = const [],
+      this.ringOuterPath = const [],
+      this.ringBehind = const [],
+      this.ringShadowInner = const [],
+      this.ringShadowOuter = const [],
+      this.ringColor = 0xFFE3D2A8,
+      this.ringIntensity = 1.0,
+      this.radiusPx = 0,
+      this.soiRadiusPx = 0,
+      this.showLabel = true,
+      this.worldRel = Vector3.zero});
 }
 
 class VesselView {
   final String name;
-  final double x; // m, relative to focus
+  final double x; // SCREEN px, relative to centre
   final double y;
-  final double headingRad; // facing in the XY plane
+  final double headingRad; // facing in the screen plane (flat-marker LOD)
   final bool onRails;
 
-  /// Predicted orbit path, focus-relative XY metres. Empty when unavailable
-  /// (e.g. landed). The painter draws this as a faint polyline.
+  /// Predicted orbit path, SCREEN px (a single ordered polyline). Empty when
+  /// unavailable (e.g. landed). [pathBehind] flags each point behind the
+  /// dominant body so the painter occludes the far arc.
   final List<({double x, double y})> path;
+  final List<bool> pathBehind;
+
+  /// 3D data for the lit-cone LOD (when the craft is big enough on screen): the
+  /// vessel's camera-relative WORLD position (metres) + its nose/up world axes +
+  /// the sun direction at the vessel (world unit).
+  final Vector3 worldRel;
+  final Vector3 forwardW;
+  final Vector3 upW;
+  final Vector3 sunW;
 
   const VesselView(this.name, this.x, this.y, this.headingRad, this.onRails,
-      {this.path = const []});
+      {this.path = const [],
+      this.pathBehind = const [],
+      this.worldRel = Vector3.zero,
+      this.forwardW = Vector3.unitZ,
+      this.upW = Vector3.unitY,
+      this.sunW = Vector3.unitZ});
 }
 
 /// Bare-minimum HUD readouts for the focus vessel + colony totals. Strings are
@@ -52,16 +175,15 @@ class HudView {
   const HudView(this.lines);
 }
 
-/// What the painter draws for one frame.
+/// What the painter draws for one frame. Coordinates are already in SCREEN px
+/// (the camera applied the projection), so the painter draws them directly.
 class TopDownSnapshot {
   final List<BodyView> bodies;
   final List<VesselView> vessels;
-  final double metresPerPixel; // current zoom
   final HudView hud;
   const TopDownSnapshot({
     required this.bodies,
     required this.vessels,
-    required this.metresPerPixel,
     required this.hud,
   });
 }
@@ -75,54 +197,298 @@ class TopDownSnapshotPresenter {
   final UniverseRepository universe;
   final ColonyRepository? colonies;
   final TrajectoryService trajectory;
+  final BodyEphemeris ephemeris;
 
   TopDownSnapshotPresenter({
     required this.vessels,
     required this.universe,
     this.colonies,
     this.trajectory = const TrajectoryService(),
+    this.ephemeris = const BodyEphemeris(),
   });
+
+  /// Body ids that ship with a surface map under `assets/textures/<id>.jpg`.
+  static const Set<String> _texturedBodies = {
+    'sun', 'mercury', 'venus', 'earth', 'moon',
+    'mars', 'jupiter', 'saturn', 'uranus', 'neptune',
+  };
+
+  /// Ring systems: (innerMult, outerMult, tiltRadians, colorARGB). Radii are in
+  /// body radii; tilt is the ring plane's inclination to the body's equator
+  /// (≈ obliquity); colour is the ring material's tone.
+  ///  - Saturn: bright icy tan, tilted ~26.7°.
+  ///  - Uranus: dark charcoal rings, nearly POLAR (~98°, the planet is on its
+  ///    side) so they appear edge-on/vertical relative to the ecliptic.
+  ///  - Neptune: dark bluish, ~28°.
+  ///  - Jupiter: faint reddish dust, ~3°.
+  static const Map<String, (double, double, double, int)> _rings = {
+    'saturn': (1.2, 2.3, 0.466, 0xFFE3D2A8), // 26.7°, pale gold
+    'uranus': (1.6, 2.1, 1.706, 0xFF6E6A74), // 97.8°, dark grey
+    'neptune': (1.7, 2.4, 0.494, 0xFF5A6E86), // 28.3°, dusky blue
+    'jupiter': (1.4, 1.8, 0.055, 0xFFB08A6A), // 3.1°, faint red-brown
+  };
+
+  /// Ring opacity per body. Only Saturn's rings are bright; the others are
+  /// tenuous dust/ice and barely visible.
+  static const Map<String, double> _ringIntensity = {
+    'saturn': 0.7,
+    'jupiter': 0.18,
+    'uranus': 0.22,
+    'neptune': 0.2,
+  };
+
+  /// Dominant atmosphere tint per body (packed ARGB). Falls back to Earth blue.
+  static const Map<String, int> _atmoColors = {
+    'earth': 0xFF6FB4FF, // blue
+    'venus': 0xFFE8D27A, // thick sulphuric yellow
+    'mars': 0xFFE2A172, // thin dusty pink-tan
+    'titan': 0xFFE89A4C, // orange organic haze
+    'jupiter': 0xFFD8C2A0, // banded cream/brown
+    'saturn': 0xFFE6D8B0, // pale gold
+    'uranus': 0xFF9FE6E0, // cyan methane
+    'neptune': 0xFF5A8CFF, // deep blue methane
+    'pluto': 0xFFBFC8D8, // faint bluish haze
+  };
+
+  /// Gas/ice giants — flagged so the debug option can exaggerate their haze.
+  static const Set<String> _gasGiants = {
+    'jupiter', 'saturn', 'uranus', 'neptune',
+  };
+
+  /// Angular samples around a ring circle (smoother ellipse + finer shadow edge).
+  static const int _ringSamples = 160;
 
   TopDownSnapshot present({
     required VesselId? focus,
-    required double metresPerPixel,
+    BodyId? focusBodyId, // lock the camera onto a body instead of a vessel
+    required SceneCamera camera, // ortho or perspective; owns metres->px
     Epoch epoch = Epoch.zero,
     double science = 0,
+    // A tilted view culls everything but the active body + its moons when the
+    // active body's apparent radius drops below this many pixels (zoomed out).
+    double tiltedCullRadiusPx = 6,
+    // Debug master switch: when false, never cull distant bodies (show all).
+    bool cullDistant = true,
+    // Hide unrelated bodies' rails + labels once the active body's SOI projects
+    // larger than this (we're zoomed inside its neighbourhood).
+    double declutterSoiPx = 1400,
   }) {
     final system = universe.current();
 
-    // Focus position (camera origin). Default to world origin if no focus.
+    // World position (relative to the system root) of any body, via ephemeris.
+    Vector3 bodyWorld(CelestialBody b) =>
+        ephemeris.positionRelativeToRoot(b, system, epoch);
+
+    // World position of a vessel = its dominant body's world pos + local state.
+    Vector3 vesselWorld(Vessel v) {
+      final b = system.body(v.dominantBody);
+      final base = b == null ? Vector3.zero : bodyWorld(b);
+      return base + v.state.position;
+    }
+
+    // Camera origin (world frame). Prefer a focused body, else a focused vessel.
     final focusVessel = focus == null ? null : vessels.byId(focus);
-    final focusBody =
-        focusVessel == null ? null : system.body(focusVessel.dominantBody);
-    final focusPos = focusVessel?.state.position ?? Vector3.zero;
+    final focusBodyLocked =
+        focusBodyId == null ? null : system.body(focusBodyId);
+    final focusBody = focusBodyLocked ??
+        (focusVessel == null ? null : system.body(focusVessel.dominantBody));
+    final Vector3 camWorld = focusBodyLocked != null
+        ? bodyWorld(focusBodyLocked)
+        : (focusVessel != null ? vesselWorld(focusVessel) : Vector3.zero);
+
+    // Camera projects target-relative metres -> screen px. These shorthands
+    // recentre on the focus before projecting/measuring depth.
+    ({double x, double y})? proj(Vector3 world) =>
+        camera.projectPx(world - camWorld);
+    double depthOf(Vector3 world) => camera.depth(world - camWorld);
+    // Projected point or NaN (so the painter's clip drops it) when culled.
+    ({double x, double y}) projOrNan(Vector3 world) =>
+        proj(world) ?? (x: double.nan, y: double.nan);
+
+    // In a tilted view the whole solar system collapses onto one line of sight
+    // and distant planets swamp the frame — so when the active body is small on
+    // screen we show ONLY it + its moons. When it's big (zoomed in), show all.
+    final activeBody = focusBody;
+    final activeRadiusPx = activeBody == null
+        ? double.infinity
+        : camera.radiusPx(bodyWorld(activeBody) - camWorld, activeBody.radius);
+    final cullActive = cullDistant &&
+        camera.usesDistanceCull &&
+        activeRadiusPx < tiltedCullRadiusPx;
+    bool visibleInView(CelestialBody b) {
+      if (camera.isTopish || activeBody == null || !cullActive) return true;
+      if (b.isStar) return true; // the star is the light source — always show it
+      if (b.id == activeBody.id) return true;
+      return system.parentOf(b)?.id == activeBody.id; // a moon of the active body
+    }
+
+    // Declutter: once zoomed inside the active body's sphere of influence, the
+    // orbit rails + name labels of unrelated bodies are just noise across the
+    // frame. We treat "inside the SOI" as the active body's SOI projecting larger
+    // than the [declutterSoiPx] threshold (its neighbourhood fills the view).
+    // Related bodies (the active body, its parent, and its moons) keep their rail
+    // + label so local context stays; everything else loses both.
+    final activeSoiPx = (activeBody == null || activeBody.soiRadius <= 0)
+        ? 0.0
+        : camera.radiusPx(
+            bodyWorld(activeBody) - camWorld, activeBody.soiRadius);
+    final declutter = cullDistant && activeBody != null &&
+        activeSoiPx > declutterSoiPx;
+    final activeParentId = activeBody == null
+        ? null
+        : system.parentOf(activeBody)?.id;
+    bool isRelated(CelestialBody b) {
+      if (activeBody == null) return true;
+      if (b.id == activeBody.id) return true;
+      if (b.id == activeParentId) return true; // the body we orbit
+      final p = system.parentOf(b)?.id;
+      return p == activeBody.id; // a moon of the active body
+    }
 
     final bodyViews = <BodyView>[];
     for (final b in system.all) {
-      // Body's position in the focus body's frame: approximate by its mean
-      // orbit (full impl uses propagated ephemeris). Same-frame bodies are at
-      // origin relative to themselves.
-      final rel = _bodyRelativeToFocus(b, focusBody, focusPos);
-      // Sun direction for shading: from this body toward the star (system root
-      // at the world origin). In focus-relative coords the star sits at -focus
-      // of the body's own position; approximate by pointing at the screen
-      // origin offset by the body's relative position.
-      final sun = (-rel).normalized;
+      if (!visibleInView(b)) continue;
+      final bw = bodyWorld(b);
+      final rel = proj(bw); // screen px, or null if behind the camera
+      if (rel == null) continue; // body behind the camera -> cull
+      // Declutter unrelated bodies when zoomed inside the active SOI: no rail,
+      // no label (the disc itself still draws so the body isn't invisible).
+      final decluttered = declutter && !isRelated(b);
+      // Sun (system root) direction from this body. Full 3D world unit vector
+      // for sphere Lambert; also a screen-plane projection (basis dots, NOT the
+      // perspective projectPx — it's a direction, not a point) for the disc.
+      final toSunWorld = (-bw).normalized;
+      final toSun = (x: toSunWorld.dot(camera.right), y: toSunWorld.dot(camera.up));
+      // Orbit "rails": the body's ellipse about its parent. Each point flagged
+      // behind the PARENT body so the painter occludes the far arc; NaN when
+      // behind the camera so the clip drops it.
+      final parent = system.parentOf(b);
+      var orbitPath = const <({double x, double y})>[];
+      var orbitBehind = const <bool>[];
+      if (parent != null && !decluttered) {
+        final parentWorld = bodyWorld(parent);
+        final parentDepth = depthOf(parentWorld);
+        final ring =
+            ephemeris.orbitPathRelativeToParent(b, system, epoch: epoch);
+        final pts = <({double x, double y})>[];
+        final beh = <bool>[];
+        for (final p in ring) {
+          final world = Vector3(
+              parentWorld.x + p.x, parentWorld.y + p.y, parentWorld.z + p.z);
+          pts.add(projOrNan(world));
+          beh.add(depthOf(world) > parentDepth);
+        }
+        orbitPath = pts;
+        orbitBehind = beh;
+      }
+
+      final key = b.id.value;
+
+      // Ring system: project sample points of the inner & outer ring circles
+      // (lying in the body's equatorial / ecliptic-XY plane) through the camera.
+      // Per sample, flag whether it's BEHIND the body so the planet occludes the
+      // far half of the rings.
+      var ringInnerPath = const <({double x, double y})>[];
+      var ringOuterPath = const <({double x, double y})>[];
+      var ringBehind = const <bool>[];
+      var ringShadowInner = const <double>[];
+      var ringShadowOuter = const <double>[];
+      final ring = _rings[key];
+      if (ring != null) {
+        final bodyDepth = depthOf(bw);
+        final sunDir = toSunWorld; // body -> star (unit)
+        final tilt = ring.$3;
+        final ct = math.cos(tilt), st = math.sin(tilt);
+        // Body-local sample on a ring circle, tilted about the X axis by the
+        // ring-plane inclination (Uranus is nearly polar, so its rings stand up
+        // edge-on to the ecliptic).
+        Vector3 localOffset(double mult, double a) {
+          final cx = b.radius * mult * math.cos(a);
+          final cy = b.radius * mult * math.sin(a);
+          return Vector3(cx, cy * ct, cy * st); // rotate (0..cy..0) about X
+        }
+        Vector3 ringWorld(double mult, double a) {
+          final o = localOffset(mult, a);
+          return Vector3(bw.x + o.x, bw.y + o.y, bw.z + o.z);
+        }
+        final inner = <({double x, double y})>[];
+        final outer = <({double x, double y})>[];
+        final behind = <bool>[];
+        // Shadow: signed perpendicular distance to the planet's shadow cylinder,
+        // at the inner/outer ring edges (huge when sunward = never shadowed).
+        final shadowInner = <double>[];
+        final shadowOuter = <double>[];
+        double shadowPerp(double mult, double a) {
+          final off = localOffset(mult, a);
+          final along = off.dot(sunDir);
+          if (along >= 0) return 1e30; // sunward -> never shadowed
+          return (off - sunDir * along).length; // perp distance to sun-line
+        }
+        for (var i = 0; i <= _ringSamples; i++) {
+          final a = i / _ringSamples * 2 * math.pi;
+          inner.add(projOrNan(ringWorld(ring.$1, a)));
+          final outW = ringWorld(ring.$2, a);
+          outer.add(projOrNan(outW));
+          behind.add(depthOf(outW) > bodyDepth);
+          shadowInner.add(shadowPerp(ring.$1, a));
+          shadowOuter.add(shadowPerp(ring.$2, a));
+        }
+        ringInnerPath = inner;
+        ringOuterPath = outer;
+        ringBehind = behind;
+        ringShadowInner = shadowInner;
+        ringShadowOuter = shadowOuter;
+      }
+
       bodyViews.add(BodyView(
         b.name, rel.x, rel.y, b.radius, b.isStar,
-        hasAtmosphere: b.hasAtmosphere,
-        sunX: b.isStar ? 0 : (sun.x == 0 && sun.y == 0 ? 1 : sun.x),
-        sunY: b.isStar ? 0 : sun.y,
+        // Visual atmosphere: any body we have a tint for (gas giants included,
+        // even though they carry no physics AtmosphereModel) gets the glow.
+        hasAtmosphere: b.hasAtmosphere || _atmoColors.containsKey(key),
+        sunX: b.isStar ? 0 : (toSun.x == 0 && toSun.y == 0 ? 1 : toSun.x),
+        sunY: b.isStar ? 0 : toSun.y,
+        sunWorldX: toSunWorld.x,
+        sunWorldY: toSunWorld.y,
+        sunWorldZ: toSunWorld.z,
+        sunFacing: toSunWorld.dot(camera.forward * -1),
+        spin: b.angularVelocity * epoch.seconds,
+        // True-ish haze colour from the body's real gas composition (Rayleigh +
+        // absorption blend); falls back to the hand-tuned table, then blue.
+        atmoColor: b.composition?.scatterColorArgb ??
+            _atmoColors[key] ??
+            0xFF6FB4FF,
+        isGasGiant: _gasGiants.contains(key),
+        soiRadius: b.soiRadius,
+        textureKey: _texturedBodies.contains(key) ? key : null,
+        orbitPath: orbitPath,
+        orbitBehind: orbitBehind,
+        ringInnerPath: ringInnerPath,
+        ringOuterPath: ringOuterPath,
+        ringBehind: ringBehind,
+        ringShadowInner: ringShadowInner,
+        ringShadowOuter: ringShadowOuter,
+        ringColor: ring?.$4 ?? 0xFFE3D2A8,
+        ringIntensity: _ringIntensity[key] ?? 1.0,
+        radiusPx: camera.radiusPx(bw - camWorld, b.radius),
+        soiRadiusPx: b.soiRadius > 0
+            ? camera.radiusPx(bw - camWorld, b.soiRadius)
+            : 0,
+        showLabel: !decluttered,
+        worldRel: bw - camWorld,
       ));
     }
 
     final vesselViews = <VesselView>[];
     for (final v in vessels.all()) {
-      final rel = v.state.position - focusPos; // small numbers (same frame)
+      final vWorld = vesselWorld(v);
+      final rel = proj(vWorld);
+      if (rel == null) continue; // behind the camera -> cull
       final fwd = v.state.attitude.rotate(Vector3.unitZ);
+      final upV = v.state.attitude.rotate(Vector3.unitY);
 
       // Predicted orbit path (skip for landed vessels — they don't orbit).
       var path = const <({double x, double y})>[];
+      var pathBehind = const <bool>[];
       final vBody = system.body(v.dominantBody);
       if (!v.landed && vBody != null && v.state.velocity.length > 1) {
         final pts = trajectory.predictPath(
@@ -132,8 +498,23 @@ class TopDownSnapshotPresenter {
           epoch: epoch,
           samples: 48,
         );
-        path = [for (final p in pts) (x: p.x - focusPos.x, y: p.y - focusPos.y)];
+        final bodyOrigin = bodyWorld(vBody);
+        final bodyDepth = depthOf(bodyOrigin);
+        final pp = <({double x, double y})>[];
+        final beh = <bool>[];
+        for (final p in pts) {
+          final world =
+              Vector3(bodyOrigin.x + p.x, bodyOrigin.y + p.y, bodyOrigin.z + p.z);
+          pp.add(projOrNan(world));
+          beh.add(depthOf(world) > bodyDepth);
+        }
+        path = pp;
+        pathBehind = beh;
       }
+
+      // Sun direction at the vessel (world unit), for cone-mesh lighting.
+      final sunW =
+          vWorld.length < 1 ? Vector3.unitZ : (-vWorld).normalized;
 
       vesselViews.add(VesselView(
         v.name,
@@ -142,13 +523,17 @@ class TopDownSnapshotPresenter {
         _headingXY(fwd),
         v.mode == PropagationMode.onRails,
         path: path,
+        pathBehind: pathBehind,
+        worldRel: vWorld - camWorld,
+        forwardW: fwd,
+        upW: upV,
+        sunW: sunW,
       ));
     }
 
     return TopDownSnapshot(
       bodies: bodyViews,
       vessels: vesselViews,
-      metresPerPixel: metresPerPixel,
       hud: _buildHud(focusVessel, focusBody, science),
     );
   }
@@ -215,19 +600,6 @@ class TopDownSnapshotPresenter {
       }
     }
     return found ? total : null;
-  }
-
-  Vector3 _bodyRelativeToFocus(
-    CelestialBody body,
-    CelestialBody? focusBody,
-    Vector3 focusPos,
-  ) {
-    if (focusBody != null && body.id == focusBody.id) {
-      // Focus body sits at the focus's negative position (vessel orbits it).
-      return -focusPos;
-    }
-    // Mean-orbit placeholder around its parent; refined by ephemeris later.
-    return Vector3(body.orbitRadius, 0, 0) - focusPos;
   }
 
   /// In-plane (XY) heading of the vessel's forward axis.

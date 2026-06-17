@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import 'infrastructure/flutter/simulation_view.dart';
+import 'infrastructure/flutter/screens/main_menu_screen.dart';
 
 void main() {
   runApp(const AcroSpaceSimulatorApp());
@@ -18,7 +18,7 @@ class AcroSpaceSimulatorApp extends StatelessWidget {
       title: 'Acro Space Simulator',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark(useMaterial3: true),
-      home: const SimulationView(),
+      home: const MainMenuScreen(),
     );
   }
 }

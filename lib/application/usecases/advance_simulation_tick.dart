@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import '../../domain/aerodynamics/aero_force.dart';
+import '../../domain/agriculture/farming_service.dart';
 import '../../domain/autonomy/attitude_controller.dart';
 import '../../domain/autonomy/autopilot_updater.dart';
 import '../../domain/autonomy/cargo_scheduler.dart';
@@ -17,6 +18,7 @@ import '../../domain/dynamics/jet_force.dart';
 import '../../domain/dynamics/structural_service.dart';
 import '../../domain/economy/treasury.dart';
 import '../../domain/lifesupport/life_support_service.dart';
+import '../../domain/megastructure/megastructure_construction.dart';
 import '../../domain/science/situation_service.dart';
 import '../../domain/dynamics/gravity_force.dart';
 import '../../domain/dynamics/state_vector.dart';
@@ -72,7 +74,10 @@ class AdvanceSimulationTick {
   final ZoneGrowthService zoneGrowth;
   final HappinessService happinessService;
   final CityMiningService cityMining;
+  final FarmingService farming;
   final IsruService isru;
+  final MegastructureRepository megastructures;
+  final MegastructureConstruction megaConstruction;
   final RadiationEnvironment radiationEnvironment;
   final RadiationService radiation;
   final SplashdownService splashdown;
@@ -120,7 +125,10 @@ class AdvanceSimulationTick {
     this.zoneGrowth = const ZoneGrowthService(),
     this.happinessService = const HappinessService(),
     this.cityMining = const CityMiningService(),
+    this.farming = const FarmingService(),
     this.isru = const IsruService(),
+    this.megastructures = const NullMegastructureRepository(),
+    this.megaConstruction = const MegastructureConstruction(),
     this.radiationEnvironment = const RadiationEnvironment(),
     this.radiation = const RadiationService(),
     this.splashdown = const SplashdownService(),
@@ -197,6 +205,10 @@ class AdvanceSimulationTick {
 
       // 3. Mode selection. Landed vessels also skip orbital propagation.
       final underThrust = vessel.throttle > 0;
+      // LIFTOFF: a landed vessel whose engines are firing un-lands so physics can
+      // carry it off the pad. (Until it throttles up it sits — no motion, so no
+      // spurious aero/gravity load on a craft just spawned on the surface.)
+      if (vessel.landed && underThrust) vessel.landed = false;
       final mode = (!vessel.landed && (forceRails || (!underThrust && !inAtmosphere)))
           ? PropagationMode.onRails
           : PropagationMode.physics;
@@ -251,11 +263,39 @@ class AdvanceSimulationTick {
           break;
         }
       }
+      // Agriculture: farms grow crops + harvest food (averaged daylight).
+      if (colony.farms.isNotEmpty) {
+        farming.advance(colony, dt: dt, sunlightFraction: 0.6);
+      }
       // Production, services/happiness, then RCI zone growth.
       supplyChain.advance(colony, dt);
       happinessService.update(colony, dt: dt);
       zoneGrowth.grow(colony, dt: dt);
+      // A colony's leftover generating capacity can fund megaprojects.
+      colony.constructionPowerSurplus =
+          (colony.powerOutput - colony.powerDemand).clamp(0.0, double.infinity);
       colonies.save(colony);
+    }
+
+    // ---- Megastructure phase: colonies pour mass + surplus power into the
+    // endgame builds (Dyson spheres, Halo rings, ...). Glacially slow on
+    // purpose — these are the long-game sinks for planetary-scale economies.
+    for (final mega in megastructures.all()) {
+      // On-site / connected power plants generate energy into the build buffer.
+      // (Material must be flown in by cargo craft via deliverToSite — never
+      // teleported from a remote colony.)
+      if (mega.siteGenerationWatts > 0) {
+        mega.deliverEnergy(mega.siteGenerationWatts * dt);
+      }
+      final milestones = megaConstruction.advance(mega, dt: dt);
+      for (final m in milestones) {
+        events.publish(MegastructureMilestone(
+          mega.id,
+          m,
+          completed: m.contains('complete') && !m.contains('phase'),
+        ));
+      }
+      megastructures.save(mega);
     }
 
     // ---- Weather phase: advect + decay cells per body ----
@@ -442,11 +482,17 @@ class AdvanceSimulationTick {
   }
 
   StateVector _onRails(Vessel vessel, CelestialBody body, SimulationClock clock) {
+    // clock.advance() has already moved clock.epoch to the END of this tick, but
+    // vessel.state is from the START. Anchor the orbit at the start epoch
+    // (clock.epoch - simStep) and propagate forward to the current epoch, so the
+    // craft advances exactly one warped step. (Anchoring AND evaluating at the
+    // same epoch gives zero delta — the craft appears frozen on rails.)
+    final startEpoch = clock.epoch - clock.simStep;
     final orbit = converter.toOrbit(
       position: vessel.state.position,
       velocity: vessel.state.velocity,
       body: body,
-      epoch: clock.epoch,
+      epoch: startEpoch,
     );
     final propagated = compute.propagate(orbit, clock.epoch);
     // Hyperbolic/escape conics aren't handled by the elliptical Kepler solver

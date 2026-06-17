@@ -20,9 +20,57 @@
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
   <meta name="description" content="A new Flutter project.">
 
+  <!-- Black browser chrome + draw into the safe area (notch). viewport-fit=cover
+       lets the renderer extend under the status bar / home indicator; the Flutter
+       UI uses SafeArea to stay clear. -->
+  <meta name="viewport"
+    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background-color: #000000; /* page bg behind/around the canvas */
+      overflow: hidden;
+    }
+  </style>
+
+  <!-- No-cache: keep the device from serving a stale build. -->
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+
+  <!-- Evict any previously-installed service worker + its caches, then reload
+       once so the fresh assets load. Runs before Flutter boots. -->
+  <script>
+    (function () {
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(function (regs) {
+          if (!regs.length) return;
+          Promise.all(regs.map(function (r) { return r.unregister(); }))
+            .then(function () {
+              if (window.caches && caches.keys) {
+                return caches.keys().then(function (keys) {
+                  return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+                });
+              }
+            })
+            .then(function () {
+              // Reload once to fetch fresh assets (guard against a loop).
+              if (!sessionStorage.getItem('sw-evicted')) {
+                sessionStorage.setItem('sw-evicted', '1');
+                location.reload();
+              }
+            });
+        });
+      }
+    })();
+  </script>
+
   <!-- iOS meta tags & icons -->
   <meta name="mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="acro_space_simulator">
   <link rel="apple-touch-icon" href="icons/Icon-192.png">
 

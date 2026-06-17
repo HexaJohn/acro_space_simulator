@@ -58,11 +58,14 @@ class SurfaceThermalModel {
       case Biome.tundra:
       case Biome.forest:
       case Biome.grassland:
+      case Biome.wetland:
+      case Biome.coastal:
         return 1.5e5;
       case Biome.mountains:
       case Biome.desert:
       case Biome.barren:
       case Biome.volcanic:
+      case Biome.volcano:
         return 5.0e4; // dry rock/sand responds fast
     }
   }
