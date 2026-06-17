@@ -198,6 +198,11 @@ class _CityMapViewState extends State<CityMapView>
   double _phase = 0; // commute animation phase (0..1, loops)
   bool _painting = false; // a paint-drag is in progress
   (int, int)? _lastPainted; // last cell painted this drag (dedupe)
+  // Number of fingers currently down + whether THIS gesture was ever multi-touch.
+  // A pinch-zoom must never place tiles, so placement (tap + paint) is gated on a
+  // gesture that stayed single-touch start to finish.
+  int _activePointers = 0;
+  bool _multiTouchGesture = false;
 
   @override
   void initState() {
@@ -231,7 +236,22 @@ class _CityMapViewState extends State<CityMapView>
       return Listener(
         // Capture which mouse button is pressed so the scale handlers can route
         // LMB -> place, MMB -> orbit, RMB -> pan. Touch reports buttons == 0.
-        onPointerDown: (e) => _btn = e.buttons,
+        // Also count fingers: a second finger marks the gesture multi-touch (a
+        // pinch), which disables placement so zooming never lays tiles.
+        onPointerDown: (e) {
+          _btn = e.buttons;
+          _activePointers++;
+          if (_activePointers >= 2) {
+            _multiTouchGesture = true;
+            _painting = false; // cancel any paint that the first finger started
+          }
+        },
+        onPointerUp: (e) {
+          _activePointers = (_activePointers - 1).clamp(0, 10);
+        },
+        onPointerCancel: (e) {
+          _activePointers = (_activePointers - 1).clamp(0, 10);
+        },
         // Mouse-wheel zoom (toward the cursor isn't needed; centre is fine).
         onPointerSignal: (sig) {
           if (sig is PointerScrollEvent) {
@@ -252,6 +272,8 @@ class _CityMapViewState extends State<CityMapView>
               widget.onHoverCell == null ? null : (_) => widget.onHoverCell!(null),
           child: GestureDetector(
           onTapUp: (d) {
+            // A tap that was part of a pinch (multi-touch) must not place a tile.
+            if (_multiTouchGesture) return;
             final cell = cam.pick(d.localPosition, widget.grid, zAt);
             if (cell != null) widget.onTapCell(cell.$1, cell.$2);
           },
@@ -261,21 +283,14 @@ class _CityMapViewState extends State<CityMapView>
             _azStart = _azimuth;
             _elStart = _elevation;
             _zoomStart = _zoom;
-            // Only the PRIMARY button (LMB) or touch may place/paint. MMB + RMB
-            // are reserved for the camera, so the middle button never lays tiles.
-            final placeBtn = _btn == 0 || _btn == kPrimaryButton;
-            if (placeBtn &&
-                widget.paintMode &&
-                widget.onPaintCell != null &&
-                d.pointerCount == 1) {
-              _painting = true;
-              _lastPainted = null;
-              final c = cam.pick(d.localFocalPoint, widget.grid, zAt);
-              if (c != null) {
-                _lastPainted = c;
-                widget.onPaintCell!(c.$1, c.$2);
-              }
-            }
+            // A fresh gesture: it's multi-touch only if it already has 2+ fingers
+            // down (the pointer handler also flips this if a 2nd finger arrives).
+            _multiTouchGesture = d.pointerCount >= 2 || _activePointers >= 2;
+            // Don't paint yet — wait for the first single-finger move. Painting on
+            // touch-down would lay a tile before a second finger (pinch) can
+            // cancel it. The move handler starts the paint when it's safe.
+            _painting = false;
+            _lastPainted = null;
           },
           onScaleUpdate: (d) {
             if (_dragStart == null) return;
@@ -307,6 +322,18 @@ class _CityMapViewState extends State<CityMapView>
               });
               return;
             }
+            // Begin painting on the FIRST single-finger move (deferred from
+            // touch-down so a pinch never lays a tile). Only when: paint mode, a
+            // primary/touch input, exactly one finger, and not a pinch gesture.
+            final placeBtn = _btn == 0 || _btn == kPrimaryButton;
+            if (!_painting &&
+                placeBtn &&
+                widget.paintMode &&
+                widget.onPaintCell != null &&
+                !_multiTouchGesture &&
+                d.pointerCount == 1) {
+              _painting = true;
+            }
             // Paint mode (LMB/touch): a drag paints each new cell it crosses.
             if (_painting && widget.onPaintCell != null) {
               final c = cam.pick(d.localFocalPoint, widget.grid, zAt);
@@ -333,6 +360,9 @@ class _CityMapViewState extends State<CityMapView>
             _painting = false;
             _lastPainted = null;
             _btn = 0;
+            // Clear the multi-touch flag only once all fingers are up, so a
+            // lingering finger after a pinch can't immediately start placing.
+            if (_activePointers <= 0) _multiTouchGesture = false;
           },
           child: ClipRect(
             child: CustomPaint(
