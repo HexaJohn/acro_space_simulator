@@ -5179,10 +5179,11 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
   /// Context menu for a functional building. Generic actions (bulldoze) plus a
   /// few type-specific ones (the reactor's "disable safety" easter egg).
   void _showBuildingMenu(int anchor, CitySpec spec) {
+    final status = _buildingStatus(anchor, spec);
     final actions = <Widget>[
       _ctxAction(Icons.info_outline, 'Details',
-          '${_utilStageLabel(anchor)} · ${_isConnected(anchor) ? "connected" : "cut off"}',
-          AppTheme.accent2, () => _showResourceDetailForBuilding(spec)),
+          '${status.label} · ${_isConnected(anchor) ? "connected" : "cut off"}',
+          status.color, () => _showResourceDetailForBuilding(anchor, spec)),
     ];
     // Reactor easter egg: SCRAM the safeties for a meltdown.
     if (spec.type == 'reactor' || spec.type == 'fusion') {
@@ -5274,10 +5275,92 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     _contextMenu(spec.label, spec.icon, spec.color, actions);
   }
 
-  String _utilStageLabel(int anchor) =>
-      _isConnected(anchor) ? 'Operating' : 'Idle';
+  /// Diagnose this building's worst current problem so the Details readout +
+  /// modal explain WHY it's flagged (matches the on-map status icons) instead
+  /// of always claiming "Operating". Checked worst-first; the first hit wins.
+  ({String label, String why, String fix, Color color}) _buildingStatus(
+      int anchor, CitySpec spec) {
+    final powerRatio =
+        _powerDraw <= 0 ? 1.0 : (_powerOut / _powerDraw).clamp(0.0, 1.0);
+    final needsPower = spec.powerDraw > 0;
+    final needsStaff = spec.jobs > 0;
 
-  void _showResourceDetailForBuilding(CitySpec spec) {
+    if (_abandoned.contains(anchor)) {
+      return (
+        label: 'Abandoned',
+        why: 'Its people walked out after this building lost road or power for '
+            'too long. An abandoned building produces nothing and decays into '
+            'rubble if the failure isn\'t fixed.',
+        fix: 'Reconnect it to the road network and restore power. Once '
+            'infrastructure is back it can be reoccupied.',
+        color: AppTheme.danger,
+      );
+    }
+    if (!_isConnected(anchor)) {
+      return (
+        label: 'Cut off',
+        why: 'This building has no road path back to the colony hub, so no '
+            'workers, goods, or services reach it. It produces nothing while '
+            'disconnected.',
+        fix: 'Lay a road connecting it to the hub network. Watch for gaps, '
+            'water, or demolished tiles breaking the path.',
+        color: AppTheme.danger,
+      );
+    }
+    if (needsPower && powerRatio < 0.95) {
+      return (
+        label: 'Unpowered',
+        why: 'The grid is supplying only ${(powerRatio * 100).toStringAsFixed(0)}% '
+            'of demand (${_powerOut.toStringAsFixed(0)}/${_powerDraw.toStringAsFixed(0)} '
+            'power). Under-powered buildings run throttled and risk abandonment.',
+        fix: 'Build more generators (solar / reactor / fusion) or demolish '
+            'non-essential draws until supply exceeds demand.',
+        color: AppTheme.warn,
+      );
+    }
+    if (needsStaff && _staffing < 0.95) {
+      return (
+        label: 'Understaffed',
+        why: 'The city can only fill ${(_staffing * 100).toStringAsFixed(0)}% of '
+            'its jobs, so this building runs short-handed and below full output. '
+            'Too few workers, or congestion stretching their commute.',
+        fix: 'Grow population (housing + a connected spaceport for immigrants), '
+            'or cut road congestion + excess jobs so workers go round.',
+        color: AppTheme.warn,
+      );
+    }
+    if (_corpses > 1) {
+      return (
+        label: 'Bodies unprocessed',
+        why: 'There are ${_corpses.toStringAsFixed(0)} unprocessed corpses in '
+            'the colony. The backlog breeds disease and litters the streets, '
+            'dragging happiness across every building.',
+        fix: 'Build / connect deathcare (cemetery, crematorium) and keep it '
+            'powered + staffed so bodies are processed faster than they pile up.',
+        color: AppTheme.warn,
+      );
+    }
+    if (_happiness < 0.5) {
+      return (
+        label: 'Unhappy',
+        why: 'Colony happiness is ${(_happiness * 100).toStringAsFixed(0)}%. '
+            'Low happiness slows growth and, if it keeps falling, risks unrest '
+            'and citizens fleeing.',
+        fix: 'Balance R/C/I demand, fund services (health, parks, transit), and '
+            'cut crime, pollution, and inequality. Some laws lift happiness.',
+        color: AppTheme.warn,
+      );
+    }
+    return (
+      label: 'Operating',
+      why: 'Connected, powered, and staffed — running at full output.',
+      fix: 'Keep it road-connected, powered, and the city well-staffed.',
+      color: AppTheme.accent2,
+    );
+  }
+
+  void _showResourceDetailForBuilding(int anchor, CitySpec spec) {
+    final status = _buildingStatus(anchor, spec);
     final io = <String>[];
     spec.inputs.forEach((k, v) => io.add('−${v.toStringAsFixed(1)} ${Commodity.name(k)}/s'));
     spec.outputs.forEach((k, v) => io.add('+${v.toStringAsFixed(1)} ${Commodity.name(k)}/s'));
@@ -5285,8 +5368,14 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     if (spec.powerDraw > 0) io.add('−${spec.powerDraw.toStringAsFixed(0)} power');
     if (spec.jobs > 0) io.add('${spec.jobs} jobs');
     if (spec.housing > 0) io.add('${spec.housing} housing');
-    _showExplain(spec.label, io.isEmpty ? 'A passive structure.' : io.join('\n'),
-        'Keep it road-connected and powered to run at full output.', spec.color);
+    // Lead the WHY with the status diagnosis, then the IO stats so the modal
+    // explains the flagged problem instead of just listing throughput.
+    final stats = io.isEmpty ? 'A passive structure.' : io.join('\n');
+    _showExplain(
+        '${spec.label} — ${status.label}',
+        '${status.why}\n\n$stats',
+        status.fix,
+        status.color);
   }
 
   /// Reactor meltdown easter egg: SCRAM the safeties and watch it go up — fires
