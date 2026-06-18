@@ -159,13 +159,18 @@ class VesselView {
   final Vector3 upW;
   final Vector3 sunW;
 
+  /// Current engine throttle 0..1 (0 = coasting). Drives the exhaust flame on
+  /// the cone-LOD marker.
+  final double throttle;
+
   const VesselView(this.name, this.x, this.y, this.headingRad, this.onRails,
       {this.path = const [],
       this.pathBehind = const [],
       this.worldRel = Vector3.zero,
       this.forwardW = Vector3.unitZ,
       this.upW = Vector3.unitY,
-      this.sunW = Vector3.unitZ});
+      this.sunW = Vector3.unitZ,
+      this.throttle = 0});
 }
 
 /// Bare-minimum HUD readouts for the focus vessel + colony totals. Strings are
@@ -528,6 +533,7 @@ class TopDownSnapshotPresenter {
         forwardW: fwd,
         upW: upV,
         sunW: sunW,
+        throttle: v.mode == PropagationMode.onRails ? 0.0 : v.throttle,
       ));
     }
 

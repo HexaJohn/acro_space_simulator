@@ -282,6 +282,27 @@ class TopDownPainter extends CustomPainter {
     final len = sizePx * 1.4;
     final rad = sizePx * 0.6;
     final apex = c + noseDir * len;
+    // Engine exhaust opposite the nose, scaled by throttle — drawn first so the
+    // pyramid overdraws its root (matches the lander flame on the other models).
+    if (v.throttle > 0.02) {
+      final flameLen = sizePx * (1.0 + 2.0 * v.throttle);
+      final tail = c - noseDir * flameLen;
+      canvas.drawLine(
+          c,
+          tail,
+          Paint()
+            ..color = const Color(0xCCFF8C42)
+            ..strokeWidth = (sizePx * 0.5).clamp(1.5, 8.0)
+            ..strokeCap = StrokeCap.round);
+      // Hot inner core.
+      canvas.drawLine(
+          c,
+          Offset.lerp(c, tail, 0.55)!,
+          Paint()
+            ..color = const Color(0xEEFFE08A)
+            ..strokeWidth = (sizePx * 0.25).clamp(1.0, 4.0)
+            ..strokeCap = StrokeCap.round);
+    }
     // 4 square-base corners (on the diagonals so the base reads as a square).
     final corner = <Offset>[];
     final corner3 = <Vector3>[]; // world-dir of each corner (for lighting/depth)
@@ -327,6 +348,22 @@ class TopDownPainter extends CustomPainter {
         dark: (2 * i + 1).isOdd, // = true -> dark
       ));
     }
+    // Square BASE cap so the pyramid isn't open underneath. Its outward normal
+    // is -nose; it sits opposite the apex, so its depth tracks the nose
+    // direction (base toward the viewer when the nose points away).
+    final baseNormal = (-v.forwardW).normalized;
+    final baseBright = 0.25 + 0.75 * (baseNormal.dot(v.sunW)).clamp(0.0, 1.0);
+    faces.add((
+      path: Path()
+        ..moveTo(corner[0].dx, corner[0].dy)
+        ..lineTo(corner[1].dx, corner[1].dy)
+        ..lineTo(corner[2].dx, corner[2].dy)
+        ..lineTo(corner[3].dx, corner[3].dy)
+        ..close(),
+      bright: baseBright,
+      depth: v.forwardW.dot(view.forward),
+      dark: true, // a flat dark underside
+    ));
     faces.sort((a, b) => a.depth.compareTo(b.depth)); // far first
     for (final f in faces) {
       final c = _scale(f.dark ? dark : tint, f.bright);
