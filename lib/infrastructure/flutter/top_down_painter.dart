@@ -121,20 +121,26 @@ class TopDownPainter extends CustomPainter {
       // Skia drops or mis-rasterizes geometry once coordinates blow past a few
       // thousand px, so when zoomed in the flat disc (drawn at TRUE rPx) and the
       // sphere (which self-limits its mesh to a screen-sized cap) stop agreeing.
+      // The cap only needs to reach the farthest screen CORNER FROM THIS BODY'S
+      // centre `c` — not from screen centre — so when `c` is off-screen (zoomed
+      // in, or an off-axis body under an orbiter lock) the textured patch still
+      // fills the whole viewport instead of a too-small circle stuck mid-screen.
+      final coverPx = _farthestCornerDist(c, size);
       // Clamp the DISC's draw radius to EXACTLY the sphere's capped on-screen
       // extent (cover*overscan, see the sphere's clipR) so the textured cap and
-      // the base disc share the same radius and stay aligned — important for an
+      // the base disc share one radius and stay aligned — important for an
       // off-centre body in perspective, where a mismatched radius reads as the
-      // texture floating off the disc. Past the cap both cover the viewport.
-      final coverPx = size.bottomRight(Offset.zero).distance / 2;
+      // texture floating off the disc.
       final discRPx = math.min(rPx, coverPx * SphereTexture.overscan);
 
-      // Disc covers the whole viewport (zoomed in close). Only the rim/halo/ring
-      // work is wasted — but the SURFACE still needs to show. If this body has a
-      // decoded texture, fall through to the sphere (its mesh radius is capped to
-      // screen size below so coords stay sane). Otherwise flat-fill and skip the
-      // expensive limb passes. This is the perspective-zoom lag fix.
-      final discCovers = !b.isStar && _discCoversScreen(c, rPx, size);
+      // "Disc covers the viewport" = the sphere mesh has hit its on-screen cap
+      // (rPx past coverPx*overscan), at which point the textured patch already
+      // spans every corner from `c`. Beyond that the rim/halo/ring work is all
+      // off-screen, so skip it. Keyed off the CAP, not raw rPx — rPx is the
+      // angular apparent radius and outran the drawn patch, flipping to the
+      // fullscreen flat fill while the texture was still smaller than the screen
+      // ("flat fill too soon").
+      final discCovers = !b.isStar && rPx >= coverPx * SphereTexture.overscan;
       final hasTex = layers.planetTexture &&
           b.textureKey != null &&
           textures?.image(b.textureKey!) != null;
@@ -889,22 +895,22 @@ class TopDownPainter extends CustomPainter {
         c.dy - rPx < size.height + 16;
   }
 
-  /// True when the disc fully covers the viewport: centre on/near screen and the
-  /// radius reaches past the farthest corner, so the limb (and everything beyond
-  /// it — halo, rings) is entirely off-screen and need not be drawn.
-  bool _discCoversScreen(Offset c, double rPx, Size size) {
-    if (!rPx.isFinite) return false;
+  /// Distance from [c] to the FARTHEST screen corner. A circle of this radius
+  /// centred on [c] just covers the whole viewport, wherever [c] sits (including
+  /// off-screen). The sphere/disc sizes its cap to this so the surface fills the
+  /// frame regardless of where the body centre projects.
+  double _farthestCornerDist(Offset c, Size size) {
+    if (!c.dx.isFinite || !c.dy.isFinite) return size.bottomRight(Offset.zero).distance;
     double d2(double x, double y) {
       final dx = c.dx - x, dy = c.dy - y;
       return dx * dx + dy * dy;
     }
-    final far = math.sqrt([
+    return math.sqrt([
       d2(0, 0),
       d2(size.width, 0),
       d2(0, size.height),
       d2(size.width, size.height),
     ].reduce(math.max));
-    return rPx >= far;
   }
 
   /// A dashed circle (segments around the circumference) for SOI boundaries.
