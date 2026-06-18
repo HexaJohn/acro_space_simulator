@@ -145,7 +145,12 @@ class AdvanceSimulationTick {
     this.lifeSupport = const LifeSupportService(),
     this.situations = const SituationService(),
     this.structural = const StructuralService(),
-    this.maxDynamicPressure = 80000, // ~ KSP overstress threshold
+    // Max-Q before structural failure. 80 kPa was too low — a heat-shielded
+    // reentry capsule routinely rides out higher dynamic pressure than a flimsy
+    // launch stack, and a normal descent was breaking up. 200 kPa survives a
+    // realistic reentry / steep launch; only a genuinely insane dive (very fast,
+    // very low) still tears the ship apart.
+    this.maxDynamicPressure = 200000,
     this.contracts,
     this.treasury,
     ResearchLedger? research,
