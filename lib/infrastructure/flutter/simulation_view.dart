@@ -36,7 +36,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 2026-06-17.120';
+const String kBuildStamp = 'build 2026-06-17.121';
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -203,6 +203,26 @@ class _SimulationViewState extends State<SimulationView>
   double _metresPerPixel = 25000; // Earth (~6371 km) fits a phone screen
   double _pinchBaseMpp = 25000; // mpp captured at the start of a pinch gesture
   double _pinchBaseRange = 2.0e7; // perspective range captured at pinch start
+
+  /// Debug zoom readout: the raw camera scale so a render issue can be pinned
+  /// to an exact zoom. ORTHO = metres-per-pixel (+ km across 100 px); PERSP =
+  /// eye range. Compact engineering form for the huge dynamic range.
+  String _zoomLabel() {
+    String eng(double v) {
+      if (v >= 1e9) return '${(v / 1e9).toStringAsFixed(2)}G';
+      if (v >= 1e6) return '${(v / 1e6).toStringAsFixed(2)}M';
+      if (v >= 1e3) return '${(v / 1e3).toStringAsFixed(2)}k';
+      if (v >= 1) return v.toStringAsFixed(2);
+      return v.toStringAsExponential(2);
+    }
+
+    if (_perspectiveMode) {
+      return 'PERSP  range ${eng(_range)} m  fov ${_fovDeg.toStringAsFixed(0)}°';
+    }
+    // 100 px spans this many km on screen — an intuitive "how zoomed" number.
+    final kmPer100px = _metresPerPixel * 100 / 1000;
+    return 'ORTHO  ${eng(_metresPerPixel)} m/px  (100px=${eng(kmPer100px)} km)';
+  }
 
   /// Zoom by [factor] (>1 = out): adjusts ortho mpp or perspective range.
   void _zoom(double factor) {
@@ -1251,6 +1271,26 @@ class _SimulationViewState extends State<SimulationView>
                       style: const TextStyle(
                         color: Color(0xFF001A0D),
                         fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ),
+                // Zoom-factor readout (debug): the camera scale so issues can be
+                // pinned to an exact zoom. ORTHO shows metres-per-pixel; PERSP
+                // shows the eye range (m). Sits just above the build stamp.
+                Positioned(
+                  left: 8,
+                  bottom: 46,
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    color: const Color(0xAA001A0D),
+                    child: Text(
+                      _zoomLabel(),
+                      style: const TextStyle(
+                        color: Color(0xFF7FE0A0),
+                        fontSize: 11,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
