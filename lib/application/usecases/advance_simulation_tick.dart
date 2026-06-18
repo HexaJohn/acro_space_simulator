@@ -98,6 +98,14 @@ class AdvanceSimulationTick {
   /// Dynamic-pressure limit (Pa) above which a vessel breaks apart in atmosphere.
   final double maxDynamicPressure;
 
+  /// Debug cheats: skip the aerodynamic (max-Q) structural-failure check, the
+  /// overheating destruction check, and/or impact destruction (any touchdown
+  /// speed lands instead of exploding), so a craft can fly an otherwise-fatal
+  /// reentry / launch / landing profile while testing.
+  final bool disableAeroStress;
+  final bool disableOverheat;
+  final bool disableImpact;
+
   /// Optional contracts board; when set, the tick raises SituationEntered events
   /// and feeds all vessel events to it. Completed-contract rewards flow into
   /// [research] (science) and [treasury] (funds) when those are provided.
@@ -151,6 +159,9 @@ class AdvanceSimulationTick {
     // realistic reentry / steep launch; only a genuinely insane dive (very fast,
     // very low) still tears the ship apart.
     this.maxDynamicPressure = 200000,
+    this.disableAeroStress = false,
+    this.disableOverheat = false,
+    this.disableImpact = false,
     this.contracts,
     this.treasury,
     ResearchLedger? research,
@@ -236,7 +247,8 @@ class AdvanceSimulationTick {
       }
 
       // 4c. Structural overstress: exceeding max-Q in atmosphere breaks the ship.
-      if (inAtmosphere &&
+      if (!disableAeroStress &&
+          inAtmosphere &&
           structural.check(vessel,
               ambient: sample, maxDynamicPressure: maxDynamicPressure)) {
         _publishEvents(vessel);
@@ -248,7 +260,7 @@ class AdvanceSimulationTick {
       _vesselSubsystems(vessel, activeBody, sample, inAtmosphere, dt, system, clock);
 
       // 5b. Destroy any vessel whose part overheated this tick.
-      if (_overheated(vessel)) {
+      if (!disableOverheat && _overheated(vessel)) {
         _publishEvents(vessel);
         vessels.remove(vessel.id);
         continue;
@@ -442,7 +454,8 @@ class AdvanceSimulationTick {
       quench = splashdown.heatQuenchFraction(biome);
     }
 
-    if (!splashdown.survivesSpeed(speed, safeSpeed)) {
+    // Impact destruction (skipped by the debug cheat — any speed just lands).
+    if (!disableImpact && !splashdown.survivesSpeed(speed, safeSpeed)) {
       vessel.raise(Impact(vessel.id, body.id, speed));
       return true; // destroyed
     }

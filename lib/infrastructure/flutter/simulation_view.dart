@@ -36,7 +36,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 2026-06-18.136';
+const String kBuildStamp = 'build 2026-06-18.137';
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -66,7 +66,15 @@ class _SimulationViewState extends State<SimulationView>
     with SingleTickerProviderStateMixin {
   late final Ticker _ticker;
   late final SimulationClock _clock;
-  late final AdvanceSimulationTick _advance;
+  late AdvanceSimulationTick _advance;
+  // Stashed tick deps so _advance can be rebuilt when a debug cheat toggles.
+  late final InMemoryEventBus _events;
+  late final InMemoryWeatherRepository _weather;
+  // Debug cheats: skip overheat / aero-stress / impact destruction. ON by
+  // default so flight testing isn't cut short; toggle off in the debug panel.
+  bool _disableOverheat = true;
+  bool _disableAeroStress = true;
+  bool _disableImpact = true;
   late final TopDownSnapshotPresenter _presenter;
   late final StaticUniverseRepository _universe;
   late final InMemoryVesselRepository _vessels;
@@ -306,12 +314,12 @@ class _SimulationViewState extends State<SimulationView>
     }
     final universe = StaticUniverseRepository(system);
     _universe = universe;
-    final events = InMemoryEventBus();
+    _events = InMemoryEventBus();
     // Pop a destruction menu when a vessel is lost.
-    events.subscribe(_onDomainEvent);
+    _events.subscribe(_onDomainEvent);
     _colonies = InMemoryColonyRepository();
     _deposits = InMemoryDepositRepository();
-    final weather = InMemoryWeatherRepository();
+    _weather = InMemoryWeatherRepository();
     _research = ResearchLedger(
       tree: TechTree(
         nodes: const [
@@ -322,17 +330,7 @@ class _SimulationViewState extends State<SimulationView>
     );
 
     _clock = SimulationClock(warpFactor: 1, fixedStep: 0.02); // dev start: 1x
-    _advance = AdvanceSimulationTick(
-      vessels: _vessels,
-      universe: universe,
-      compute: DartCompute(),
-      soi: const SoiTransitionService(),
-      events: events,
-      colonies: _colonies,
-      deposits: _deposits,
-      weather: weather,
-      research: _research,
-    );
+    _buildAdvance();
     _presenter = TopDownSnapshotPresenter(
       vessels: _vessels,
       universe: universe,
@@ -347,6 +345,25 @@ class _SimulationViewState extends State<SimulationView>
     );
 
     _ticker = createTicker(_onFrame)..start();
+  }
+
+  /// (Re)build the tick with the current debug-cheat flags. Called on init and
+  /// whenever a disable-overheat / aero / impact toggle changes.
+  void _buildAdvance() {
+    _advance = AdvanceSimulationTick(
+      vessels: _vessels,
+      universe: _universe,
+      compute: DartCompute(),
+      soi: const SoiTransitionService(),
+      events: _events,
+      colonies: _colonies,
+      deposits: _deposits,
+      weather: _weather,
+      research: _research,
+      disableOverheat: _disableOverheat,
+      disableAeroStress: _disableAeroStress,
+      disableImpact: _disableImpact,
+    );
   }
 
   /// React to simulation events. Right now: surface a destruction menu when a
@@ -712,6 +729,28 @@ class _SimulationViewState extends State<SimulationView>
   }
 
   /// Debug panel: a checkbox per draw layer so each pass can be isolated.
+  /// A debug-cheat checkbox row: flips [value] via [set], then rebuilds the tick
+  /// so the new flag takes effect immediately.
+  Widget _cheatRow(String label, bool value, void Function(bool) set) => InkWell(
+        onTap: () => setState(() {
+          set(!value);
+          _buildAdvance();
+        }),
+        child: Row(children: [
+          Checkbox(
+            value: value,
+            onChanged: (v) => setState(() {
+              set(v ?? false);
+              _buildAdvance();
+            }),
+            visualDensity: VisualDensity.compact,
+            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+          Text(label,
+              style: const TextStyle(color: Color(0xFFB9C9DC), fontSize: 12)),
+        ]),
+      );
+
   Widget _debugPanel() {
     final rows = <(String, bool, DebugLayers Function(bool))>[
       ('Skybox', _layers.skybox, (v) => _layers.copyWith(skybox: v)),
@@ -819,6 +858,22 @@ class _SimulationViewState extends State<SimulationView>
               ),
             ),
           ),
+          // Destruction cheats: skip overheat / aero-stress / impact so a craft
+          // survives an otherwise-fatal profile. Rebuilds the tick on change.
+          const Padding(
+            padding: EdgeInsets.only(left: 4, top: 6, bottom: 2),
+            child: Text('CHEATS',
+                style: TextStyle(
+                    color: Color(0xFF7FB0E0),
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold)),
+          ),
+          _cheatRow('No overheating', _disableOverheat,
+              (v) => _disableOverheat = v),
+          _cheatRow('No aero load', _disableAeroStress,
+              (v) => _disableAeroStress = v),
+          _cheatRow('No impact damage', _disableImpact,
+              (v) => _disableImpact = v),
           // Atmosphere chemistry demo: re-skin the focused planet's gas mix and
           // watch the limb's haze colour shift (driven by composition).
           const Padding(
