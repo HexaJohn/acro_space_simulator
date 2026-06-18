@@ -44,6 +44,8 @@ class SphereTexture {
     ui.Color? atmoTint, // atmosphere day colour; null = no atmosphere pass
     ui.Color atmoWarm = const ui.Color(0xFFFF9D5C), // terminator warm band
     double? coverPx, // on-screen half-extent the mesh must cover (see below)
+    double radiusM = 0, // body radius (m) — enables the near-surface path
+    ui.Offset? viewportCentre, // canvas px of the screen centre (near path)
   }) {
     // Bail on non-finite inputs (degenerate camera geometry can produce NaN/Inf
     // in the centre / worldRel); a single bad vertex makes Skia drop the whole
@@ -107,6 +109,19 @@ class SphereTexture {
       sunWorld.dot(fwd) * -1,
     );
 
+    // NEAR-SURFACE path: the flat billboard (eye-at-infinity) draws a full
+    // hemisphere as a disc, so an eye AT the surface sees no horizon. When the
+    // eye is within ~1 radius of the surface, project each surface vertex through
+    // the REAL camera instead, so the horizon (the tangent circle from the eye)
+    // falls out naturally. eyeDist = |body centre - eye|; altitude = that minus
+    // the radius. nearMode also needs the radius + a screen centre to project to.
+    final eyeDist = worldRel.length;
+    final altitude = eyeDist - radiusM;
+    final nearMode = radiusM > 0 &&
+        viewportCentre != null &&
+        altitude < radiusM &&
+        eyeDist > radiusM * 0.5; // ignore the eye-inside-body degenerate case
+
     // Build a (grid+1)^2 lattice of vertices over the unit disc; cells outside
     // the circle are skipped when emitting triangles.
     final verts = <List<_V?>>[];
@@ -128,6 +143,17 @@ class SphereTexture {
         final wx = right.x * nx + upv.x * ny - fwd.x * cz;
         final wy = right.y * nx + upv.y * ny - fwd.y * cz;
         final wz = right.z * nx + upv.z * ny - fwd.z * cz;
+        // NEAR path: cull vertices below the eye's local horizon. A surface point
+        // with outward normal n (= the world dir wx,wy,wz) is visible iff the eye
+        // sits above its tangent plane: (eye - centre)·n > radius. eye - centre =
+        // -worldRel, so the test is (-worldRel·n) > radiusM.
+        if (nearMode) {
+          final dotEye = -(worldRel.x * wx + worldRel.y * wy + worldRel.z * wz);
+          if (dotEye <= radiusM) {
+            row.add(null); // beyond the horizon
+            continue;
+          }
+        }
         // Body-fixed lon/lat: lon around +Z axis from +X, lat from equator.
         // Subtract the body's spin so the surface texture rotates with epoch.
         final lon = math.atan2(wy, wx) - spin; // -pi..pi (minus rotation)
@@ -169,8 +195,27 @@ class SphereTexture {
         final ps = span >= 1.0
             ? rPx * overscan
             : cover * overscan / span;
+        // NEAR: project the real surface point (centre + radius*n, relative to
+        // the eye) through the camera so the horizon emerges from true
+        // perspective. FAR: the flat billboard at centre + nx*ps.
+        ui.Offset pos;
+        if (nearMode) {
+          final relEye = Vector3(
+            worldRel.x + radiusM * wx,
+            worldRel.y + radiusM * wy,
+            worldRel.z + radiusM * wz,
+          );
+          final p = view.projectPx(relEye);
+          if (p == null) {
+            row.add(null); // behind the near plane
+            continue;
+          }
+          pos = ui.Offset(viewportCentre.dx + p.x, viewportCentre.dy - p.y);
+        } else {
+          pos = ui.Offset(centre.dx + nx * ps, centre.dy - ny * ps);
+        }
         row.add(_V(
-          pos: ui.Offset(centre.dx + nx * ps, centre.dy - ny * ps),
+          pos: pos,
           uv: ui.Offset(u * iw, v * ih),
           shade: shade,
           atmoA: atmoA,
@@ -215,10 +260,15 @@ class SphereTexture {
     // million-px clip path is never built and the clip tracks the patch exactly.
     final clipR = span >= 1.0 ? rPx : cover * overscan;
     canvas.save();
-    canvas.clipPath(
-      ui.Path()..addOval(ui.Rect.fromCircle(center: centre, radius: clipR)),
-      doAntiAlias: true,
-    );
+    // FAR: clip to the limb circle (crisp round planet). NEAR: the surface fills
+    // the frame and the limb is the projected horizon, not a circle at `centre`,
+    // so don't crop — let the mesh (already horizon-culled) define the shape.
+    if (!nearMode) {
+      canvas.clipPath(
+        ui.Path()..addOval(ui.Rect.fromCircle(center: centre, radius: clipR)),
+        doAntiAlias: true,
+      );
+    }
 
     // PASS 1 — the texture itself. We deliberately DON'T pass vertex colours
     // here: combining `colors` + an image shader in one ui.Vertices trips a

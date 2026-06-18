@@ -218,6 +218,11 @@ class TopDownPainter extends CustomPainter {
             view: view,
             worldRel: b.worldRel,
             coverPx: coverPx,
+            // Near-surface perspective horizon only applies to the perspective
+            // camera (ortho has no eye / horizon concept). Passing radius 0
+            // disables it for ortho.
+            radiusM: view.usesDistanceCull ? 0 : b.radius,
+            viewportCentre: centre,
             sunWorld: Vector3(b.sunWorldX, b.sunWorldY, b.sunWorldZ),
             spin: b.spin,
             selfLuminous: b.isStar,
