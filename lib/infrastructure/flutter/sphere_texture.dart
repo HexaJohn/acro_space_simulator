@@ -67,7 +67,6 @@ class SphereTexture {
     // unit sphere) where span covers [coverPx] on screen. So detail keeps
     // growing as you zoom, and coordinates stay ~screen-sized. span=1 = the full
     // hemisphere (normal, far-away case).
-    final cover = coverPx ?? rPx;
     final positions = <ui.Offset>[];
     final texCoords = <ui.Offset>[];
     final atmoColors = <ui.Color>[]; // per-vertex atmosphere scatter (pass 3)
@@ -76,31 +75,13 @@ class SphereTexture {
     final iw = image.width.toDouble();
     final ih = image.height.toDouble();
 
-    // Per-body view basis. The visible hemisphere faces the EYE, not the camera
-    // forward — for an off-axis body in perspective the eye->body ray differs
-    // from the camera's view axis, and using `forward` for every body maps the
-    // wrong hemisphere (the texture slides as the camera rotates). So forward is
-    // the actual eye->body direction; right/up are the camera's screen axes
-    // re-orthogonalized against it, keeping north-up on screen stable.
-    final fwd = view.viewDirTo(worldRel);
-    var right = _orthoNorm(view.right, fwd);
-    // up = right x forward (matches CameraOrbit's _upBase = right.cross(forward)).
-    var upv = right.cross(fwd).normalized;
-    // Guard the degenerate case (camera right nearly parallel to the ray).
-    if (!right.x.isFinite || !upv.x.isFinite) {
-      right = view.right;
-      upv = view.up;
-    }
-
-    // Transform the world sun direction into the CAMERA frame so the lit
-    // hemisphere is correct from any camera angle. Camera axes: x=right, y=up,
-    // z=toward viewer (= -forward). Vertices are also in this frame, so the
-    // Lambert dot below is a true cos(angle) — the night side reads dark even
-    // when the camera orbits behind the body.
+    // World sun direction in the CAMERA frame (x=right, y=up, z=toward viewer =
+    // -forward), matching the per-vertex camera-frame normals below, so the
+    // Lambert dot is a true cos(angle) from any camera angle.
     final sun = _norm3(
-      sunWorld.dot(right),
-      sunWorld.dot(upv),
-      sunWorld.dot(fwd) * -1,
+      sunWorld.dot(view.right),
+      sunWorld.dot(view.up),
+      sunWorld.dot(view.forward) * -1,
     );
 
     // Every surface vertex is projected through the REAL camera (no flat
@@ -129,105 +110,88 @@ class SphereTexture {
         ? (_grid * (1.0 + 3.0 * (1.0 - (alt / radiusM).clamp(0.0, 1.0)))).round()
         : _grid;
 
-    // Lattice extent over the eye-facing hemisphere (nx,ny in [-span, span]).
-    // FAR / ortho (circular silhouette): span tracks the silhouette
-    // (cover*overscan/rPx, floored tiny so detail keeps magnifying).
-    // NEAR the surface: from low altitude you only see a SMALL cap of the sphere
-    // (the horizon is close), at cz >= radius/eyeDist. In the nx,ny param the
-    // visible cap has radius sqrt(1 - (radius/eyeDist)^2). A uniform full-
-    // hemisphere lattice would put almost no samples in that thin cap (everything
-    // else is below the horizon and culled) — so concentrate the whole lattice
-    // ON the visible cap by setting span to its radius (with margin for the limb).
-    double span;
-    if (!clipCircle) {
-      final ratio = (radiusM / eyeDist).clamp(0.0, 1.0);
-      final capR = math.sqrt((1.0 - ratio * ratio).clamp(0.0, 1.0));
-      span = (capR * 1.3).clamp(0.0008, 1.0); // a little past the horizon
-    } else {
-      span = rPx <= 0 ? 1.0 : (cover * overscan / rPx).clamp(0.00004, 1.0);
-    }
+    // LAT/LONG BAND TESSELLATION (body space). The whole sphere is gridded in
+    // latitude × longitude; every vertex is projected through the real camera
+    // and culled if it's below the eye's local horizon or behind the near plane.
+    // Unlike the old eye-facing disc lattice, this makes NO assumption that the
+    // camera looks at the body centre — so it's correct for off-axis bodies,
+    // orbit tracking (centre off-screen), and a surface eye looking sideways.
+    //
+    // Resolution: enough bands to read smooth; boosted near the surface where a
+    // small patch fills the screen. A back-face cull on whole rows keeps the cost
+    // bounded (only the visible hemisphere's verts get projected).
+    final latBands = grid; // rows (lat)
+    final lonBands = grid * 2; // cols (lon) — twice for a square-ish cell aspect
 
-    // Build a (grid+1)^2 lattice of vertices over the unit disc; cells outside
-    // the circle are skipped when emitting triangles.
+    // Camera basis for the per-vertex shade (lit/limb): camera frame x=right,
+    // y=up, z=toward viewer (= -view.forward).
+    final camR = view.right, camU = view.up, camF = view.forward;
+
+    // Eye position relative to the FOCUS = view.eyeOffset; the body centre is at
+    // worldRel, so a surface point's vector FROM the eye is (worldRel + r*n) -
+    // eyeOffset. Visible iff (eye - centre)·n > radius i.e. (-centreFromEye)·n >
+    // radiusM (centreFromEye = worldRel - eyeOffset).
     final verts = <List<_V?>>[];
-    for (var iy = 0; iy <= grid; iy++) {
+    for (var iLat = 0; iLat <= latBands; iLat++) {
       final row = <_V?>[];
-      final ny = ((iy / grid) * 2 - 1) * span; // -span..span (screen up = +)
-      for (var ix = 0; ix <= grid; ix++) {
-        final nx = ((ix / grid) * 2 - 1) * span; // -span..span (screen right=+)
-        final r2 = nx * nx + ny * ny;
-        if (r2 > 1.0) {
-          row.add(null);
-          continue;
-        }
-        // Camera-frame point on the front hemisphere (z toward viewer).
-        final cz = math.sqrt(1.0 - r2);
-        final cam = [nx, ny, cz];
-        // Map camera-frame -> world/body frame via the camera basis. The visible
-        // hemisphere faces the camera, so its outward normal is -forward.
-        final wx = right.x * nx + upv.x * ny - fwd.x * cz;
-        final wy = right.y * nx + upv.y * ny - fwd.y * cz;
-        final wz = right.z * nx + upv.z * ny - fwd.z * cz;
-        // Cull vertices below the eye's local horizon. A surface point with
-        // outward normal n (= the world dir wx,wy,wz) is visible iff the eye sits
-        // above its tangent plane: (eye - centre)·n > radius. eye - centre =
-        // -centreFromEye, so the test is (-centreFromEye·n) > radiusM. (A no-op
-        // far away / ortho — the eye-facing hemisphere already passes.)
+      // lat: +pi/2 (north) down to -pi/2 (south) so v runs 0..1 top->bottom.
+      final lat = math.pi / 2 - (iLat / latBands) * math.pi;
+      final cl = math.cos(lat), sl = math.sin(lat);
+      final v = iLat / latBands; // texture row
+      for (var iLon = 0; iLon <= lonBands; iLon++) {
+        // lon 0..2pi from +X; ADD spin so the surface rotates with epoch (the
+        // texture column for a body-fixed point shifts opposite the old sign).
+        final lon = (iLon / lonBands) * 2 * math.pi + spin;
+        // Body-frame surface unit normal n (lon around +Z from +X, lat from eq).
+        final nx = cl * math.cos(lon);
+        final ny = cl * math.sin(lon);
+        final nz = sl;
+        // Horizon cull (skip the whole far hemisphere cheaply).
         if (radiusM > 0) {
-          final dotEye = -(centreFromEye.x * wx +
-              centreFromEye.y * wy +
-              centreFromEye.z * wz);
+          final dotEye =
+              -(centreFromEye.x * nx + centreFromEye.y * ny + centreFromEye.z * nz);
           if (dotEye <= radiusM) {
-            row.add(null); // beyond the horizon
+            row.add(null);
+            continue;
+          }
+        } else {
+          // Ortho / no radius: cull the back hemisphere (facing away from cam).
+          final facing = -(nx * camF.x + ny * camF.y + nz * camF.z);
+          if (facing <= 0) {
+            row.add(null);
             continue;
           }
         }
-        // Body-fixed lon/lat: lon around +Z axis from +X, lat from equator.
-        // Subtract the body's spin so the surface texture rotates with epoch.
-        final lon = math.atan2(wy, wx) - spin; // -pi..pi (minus rotation)
-        final lat = math.asin(wz.clamp(-1.0, 1.0)); // -pi/2..pi/2
-        // Keep u continuous (not wrapped) so the ImageShader's repeated tiling
-        // hides the longitude seam; wrapping per-vertex would smear a column.
-        final u = (lon + math.pi) / (2 * math.pi);
-        final v = (math.pi / 2 - lat) / math.pi; // 0..1 (north at top)
-
-        // Lambert brightness vs sun (camera-frame normal == cam point).
-        final lit = selfLuminous
-            ? 1.0
-            : (cam[0] * sun[0] + cam[1] * sun[1] + cam[2] * sun[2])
-                .clamp(0.0, 1.0);
-        final shade = selfLuminous ? 1.0 : (0.12 + 0.88 * lit);
-
-        // Atmosphere scatter (per-vertex, full 3D so it rotates with the camera
-        // and tracks the real day/night terminator):
-        //  * day  — only the sunlit hemisphere scatters (soft terminator).
-        //  * limb — SPHERICAL falloff: faint at the centre (cz≈1, looking
-        //    straight down through a short air column) ramping up toward the
-        //    limb (cz→0, long grazing path). (1 - cz)^1.6 gives the curve.
-        // Day mask: zero on the NIGHT side (lit<=0), ramping up just inside the
-        // terminator. This keeps the scatter a crescent on the lit hemisphere
-        // only — never on the dark side.
-        final day = _smoothstep(0.0, 0.12, lit);
-        final limb = math.pow(1.0 - cz, 1.6).toDouble();
-        final atmoA = (0.06 + 0.94 * limb) * day;
-        // Warm band: reddens toward the terminator (low but positive lit),
-        // fading to the day colour deeper into the lit side.
-        final warmF = (1.0 - _smoothstep(0.0, 0.45, lit)) * day;
-
-        // Project the real surface point (centre + radius*n, relative to the
-        // FOCUS) through the camera. projectPx handles the eye offset + the
-        // perspective divide, so the silhouette/horizon is always correct.
+        // Project the surface point through the camera.
         final relFocus = Vector3(
-          worldRel.x + radiusM * wx,
-          worldRel.y + radiusM * wy,
-          worldRel.z + radiusM * wz,
+          worldRel.x + radiusM * nx,
+          worldRel.y + radiusM * ny,
+          worldRel.z + radiusM * nz,
         );
         final p = view.projectPx(relFocus);
         if (p == null) {
-          row.add(null); // behind the near plane
+          row.add(null);
           continue;
         }
         final pos = ui.Offset(viewportCentre.dx + p.x, viewportCentre.dy - p.y);
+        // u from lon (continuous so TileMode.repeated hides the seam).
+        final u = (iLon / lonBands);
+
+        // Camera-frame normal for shade: n in (right, up, toward-viewer).
+        final cnx = nx * camR.x + ny * camR.y + nz * camR.z;
+        final cny = nx * camU.x + ny * camU.y + nz * camU.z;
+        final cnz = -(nx * camF.x + ny * camF.y + nz * camF.z); // toward viewer
+        final lit = selfLuminous
+            ? 1.0
+            : (cnx * sun[0] + cny * sun[1] + cnz * sun[2]).clamp(0.0, 1.0);
+        final shade = selfLuminous ? 1.0 : (0.12 + 0.88 * lit);
+        // Limb falloff for atmosphere: cnz ~ 1 at the sub-camera point, ~0 at the
+        // limb (grazing) — same (1 - facing)^1.6 curve.
+        final day = _smoothstep(0.0, 0.12, lit);
+        final limb = math.pow((1.0 - cnz.clamp(0.0, 1.0)), 1.6).toDouble();
+        final atmoA = (0.06 + 0.94 * limb) * day;
+        final warmF = (1.0 - _smoothstep(0.0, 0.45, lit)) * day;
+
         row.add(_V(
           pos: pos,
           uv: ui.Offset(u * iw, v * ih),
@@ -239,13 +203,13 @@ class SphereTexture {
       verts.add(row);
     }
 
-    // Emit two triangles per fully-inside cell.
-    for (var iy = 0; iy < grid; iy++) {
-      for (var ix = 0; ix < grid; ix++) {
-        final a = verts[iy][ix];
-        final b = verts[iy][ix + 1];
-        final c = verts[iy + 1][ix];
-        final d = verts[iy + 1][ix + 1];
+    // Emit two triangles per cell where all four corners are visible.
+    for (var iLat = 0; iLat < latBands; iLat++) {
+      for (var iLon = 0; iLon < lonBands; iLon++) {
+        final a = verts[iLat][iLon];
+        final b = verts[iLat][iLon + 1];
+        final c = verts[iLat + 1][iLon];
+        final d = verts[iLat + 1][iLon + 1];
         if (a == null || b == null || c == null || d == null) continue;
         _tri(positions, texCoords, shadowColors, atmoColors, atmoTint, atmoWarm,
             a, c, b, iw);
@@ -264,16 +228,15 @@ class SphereTexture {
           <double>[1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]),
     );
 
-    // FAR / ortho: the silhouette is a clean circle, so clip to it for a crisp
-    // antialiased limb (the triangle mesh edge is otherwise stairstepped). NEAR
-    // the surface: the limb is the projected horizon arc, not a circle at
-    // `centre`, so don't crop — the horizon-culled mesh defines the shape.
-    // clipR: the true limb circle far (span==1), else the bounded visible patch.
-    final clipR = span >= 1.0 ? rPx : cover * overscan;
+    // FAR / ortho: the silhouette is a clean circle (radius = the projected limb
+    // rPx), so clip to it for a crisp antialiased limb (the band mesh edge is
+    // otherwise stairstepped). NEAR the surface: the limb is the projected
+    // horizon arc, not a circle at `centre`, so don't crop — the horizon-culled
+    // mesh defines the shape.
     canvas.save();
     if (clipCircle) {
       canvas.clipPath(
-        ui.Path()..addOval(ui.Rect.fromCircle(center: centre, radius: clipR)),
+        ui.Path()..addOval(ui.Rect.fromCircle(center: centre, radius: rPx)),
         doAntiAlias: true,
       );
     }
@@ -367,10 +330,6 @@ class SphereTexture {
 
   ui.Color _shadow(double shade) =>
       ui.Color.fromARGB(((1.0 - shade) * 235).clamp(0, 255).round(), 0, 0, 0);
-
-  /// Component of [v] perpendicular to unit [axis], normalized (Gram-Schmidt).
-  Vector3 _orthoNorm(Vector3 v, Vector3 axis) =>
-      (v - axis * v.dot(axis)).normalized;
 
   List<double> _norm3(double x, double y, double z) {
     final len = math.sqrt(x * x + y * y + z * z);
