@@ -64,7 +64,11 @@ class SphereTexture {
     // growing as you zoom, and coordinates stay ~screen-sized. span=1 = the full
     // hemisphere (normal, far-away case).
     final cover = coverPx ?? rPx;
-    final span = rPx <= 0 ? 1.0 : (cover * _overscan / rPx).clamp(0.02, 1.0);
+    // Floor kept tiny so the surface KEEPS magnifying as you zoom in (a smaller
+    // sphere-fraction fills the same screen window = more zoom). At 0.02 the
+    // magnification used to freeze a couple dozen screen-diagonals in; 0.0008
+    // pushes that ~25x further.
+    final span = rPx <= 0 ? 1.0 : (cover * _overscan / rPx).clamp(0.0008, 1.0);
     final positions = <ui.Offset>[];
     final texCoords = <ui.Offset>[];
     final atmoColors = <ui.Color>[]; // per-vertex atmosphere scatter (pass 3)
@@ -153,10 +157,15 @@ class SphereTexture {
         // fading to the day colour deeper into the lit side.
         final warmF = (1.0 - _smoothstep(0.0, 0.45, lit)) * day;
 
-        // Positions at TRUE rPx (full magnification). When far away (span==1) add
-        // the overscan so the mesh's stairstepped edge falls outside the circular
-        // clip; when zoomed in (span<1) the mesh already runs past the screen.
-        final ps = rPx * (span >= 1.0 ? _overscan : 1.0);
+        // Screen scale for the cap. While span tracks rPx (cover*overscan/rPx)
+        // this equals rPx, so the surface magnifies with zoom. Once span hits its
+        // floor, span*rPx would keep growing (overflowing Skia + washing out the
+        // patch); instead map the FLOORED cap to exactly fill `cover` on screen
+        // (ps = cover*overscan/span, bounded), so detail keeps reading and coords
+        // stay screen-sized. Far away (span==1) it's the plain overscan'd radius.
+        final ps = span >= 1.0
+            ? rPx * _overscan
+            : cover * _overscan / span;
         row.add(_V(
           pos: ui.Offset(centre.dx + nx * ps, centre.dy - ny * ps),
           uv: ui.Offset(u * iw, v * ih),
@@ -198,9 +207,10 @@ class SphereTexture {
     // clipping to a smooth circle gives a crisp round limb regardless of mesh
     // resolution.
     // Clip to the true limb circle when far (span==1); when zoomed in, clip to
-    // the visible patch (span*rPx ~ screen) so a million-px clip path is never
-    // built. The patch covers the screen either way.
-    final clipR = span >= 1.0 ? rPx : span * rPx;
+    // the visible patch. The patch's on-screen half-extent is span*ps =
+    // cover*overscan (see ps above) — bounded even when span is floored — so a
+    // million-px clip path is never built and the clip tracks the patch exactly.
+    final clipR = span >= 1.0 ? rPx : cover * _overscan;
     canvas.save();
     canvas.clipPath(
       ui.Path()..addOval(ui.Rect.fromCircle(center: centre, radius: clipR)),
