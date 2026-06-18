@@ -141,18 +141,21 @@ class CitySpec {
 /// Grown-building specs per zone kind + density tier (Cities-Skylines RCI).
 const Map<String, Map<Density, CitySpec>> kZoneSpecs = {
   'residential': {
+    // Homes barely pollute (heating + cars) — a fraction of industry. Kept
+    // tiny so a residential-only colony never trips a critical-air alarm; real
+    // pollution comes from industry / power.
     Density.low: CitySpec(
         type: 'r-low', label: 'Low-Density Homes', icon: Icons.house,
         color: Color(0xFF7FE0A0), group: 'res', housing: 20, powerDraw: 2,
-        pollution: 0.2),
+        pollution: 0.02),
     Density.medium: CitySpec(
         type: 'r-med', label: 'Apartments', icon: Icons.apartment,
         color: Color(0xFF7FE0A0), group: 'res', housing: 60, powerDraw: 6,
-        pollution: 0.5),
+        pollution: 0.05),
     Density.high: CitySpec(
         type: 'r-high', label: 'Towers', icon: Icons.location_city,
         color: Color(0xFF7FE0A0), group: 'res', housing: 160, powerDraw: 16,
-        pollution: 1.0),
+        pollution: 0.1),
   },
   'commercial': {
     Density.low: CitySpec(
