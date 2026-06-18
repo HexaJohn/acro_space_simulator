@@ -2331,7 +2331,7 @@ class _CityPainter extends CustomPainter {
       rim.add(cam.project(wx, wy, baseZ));
       rimW.add((wx, wy));
     }
-    final faces = <({Path path, double shade, double depth})>[];
+    final faces = <({Path path, double shade, double depth, bool dark})>[];
     for (var i = 0; i < seg; i++) {
       final j = (i + 1) % seg;
       final p = Path()
@@ -2344,11 +2344,13 @@ class _CityPainter extends CustomPainter {
       final nx = mx - cx, ny = my - cy;
       final shade =
           (0.5 + 0.5 * ((nx * 0.5 + ny * -0.5) / rad + 1) / 2).clamp(0.35, 1.0);
-      faces.add((path: p, shade: shade, depth: cam.depth(mx, my, apexH)));
+      faces.add(
+          (path: p, shade: shade, depth: cam.depth(mx, my, apexH), dark: i.isOdd));
     }
     faces.sort((a, b) => b.depth.compareTo(a.depth));
     for (final f in faces) {
-      canvas.drawPath(f.path, Paint()..color = _scale(tint, f.shade));
+      canvas.drawPath(f.path,
+          Paint()..color = _checkerFace(tint, f.shade, f.dark));
     }
     // A red-cross style relief marker dot on the nose.
     canvas.drawCircle(apex, (cell * cam.scale) * 0.02,
@@ -2388,7 +2390,7 @@ class _CityPainter extends CustomPainter {
         cam.project(cx + r * math.cos(i / 10 * 2 * math.pi),
             cy + r * math.sin(i / 10 * 2 * math.pi), tz + renderZ),
     ];
-    final faces = <({Path path, double shade, double depth})>[];
+    final faces = <({Path path, double shade, double depth, bool dark})>[];
     for (var i = 0; i < rim.length; i++) {
       final j = (i + 1) % rim.length;
       final a = i / rim.length * 2 * math.pi;
@@ -2400,11 +2402,13 @@ class _CityPainter extends CustomPainter {
           ..close(),
         shade: (0.5 + 0.4 * math.sin(a)).clamp(0.35, 1.0),
         depth: a,
+        dark: i.isOdd,
       ));
     }
     faces.sort((p, q) => q.depth.compareTo(p.depth));
     for (final f in faces) {
-      canvas.drawPath(f.path, Paint()..color = _scale(tint, f.shade));
+      canvas.drawPath(f.path,
+          Paint()..color = _checkerFace(tint, f.shade, f.dark));
     }
     // Engine flame pointing down (climbing) or up... keep it simple: a short
     // glow below the craft.
@@ -2425,6 +2429,8 @@ class _CityPainter extends CustomPainter {
     final cx = (gx + 0.5) * cell, cy = (gy + 0.5) * cell;
     final rad = cell * 0.22;
     final apexH = cell * 0.7 + tz;
+    // Even segment count so the alternating light/dark checker reads cleanly all
+    // the way round (the ascent-mode lander look — now the de-facto craft icon).
     const seg = 14;
     const tint = Color(0xFFB0BEC5); // metallic grey
     final apex = cam.project(cx, cy, apexH);
@@ -2436,8 +2442,9 @@ class _CityPainter extends CustomPainter {
       rim.add(cam.project(wx, wy, 0.06 + tz));
       rimW.add((wx, wy));
     }
-    // Side faces, depth-sorted far->near so it reads solid.
-    final faces = <({Path path, double shade, double depth})>[];
+    // Side faces, depth-sorted far->near so it reads solid. Each face carries a
+    // checker bit so alternating segments paint light/dark (the lander look).
+    final faces = <({Path path, double shade, double depth, bool dark})>[];
     for (var i = 0; i < seg; i++) {
       final j = (i + 1) % seg;
       final p = Path()
@@ -2451,11 +2458,16 @@ class _CityPainter extends CustomPainter {
       final nx = mx - cx, ny = my - cy;
       final shade = (0.45 + 0.5 * ((nx * 0.5 + ny * -0.5) / rad + 1) / 2)
           .clamp(0.3, 1.0);
-      faces.add((path: p, shade: shade, depth: cam.depth(mx, my, apexH / 2)));
+      faces.add((
+        path: p,
+        shade: shade,
+        depth: cam.depth(mx, my, apexH / 2),
+        dark: i.isOdd,
+      ));
     }
     faces.sort((a, b) => b.depth.compareTo(a.depth));
     for (final f in faces) {
-      canvas.drawPath(f.path, Paint()..color = _scale(tint, f.shade));
+      canvas.drawPath(f.path, Paint()..color = _checkerFace(tint, f.shade, f.dark));
     }
     // Apex highlight + a thin nose tip.
     canvas.drawCircle(apex, (cell * cam.scale) * 0.012,
@@ -3079,6 +3091,12 @@ class _CityPainter extends CustomPainter {
         (c.g * 255 * f).clamp(0, 255).round(),
         (c.b * 255 * f).clamp(0, 255).round(),
       );
+
+  /// One face of the checkered lander cone: the depth-shaded base tint, dimmed
+  /// further on [dark] segments so alternating faces read as a checker pattern
+  /// (the ascent-mode lander look, now the shared craft icon).
+  Color _checkerFace(Color tint, double shade, bool dark) =>
+      _scale(tint, shade * (dark ? 0.6 : 1.0));
 
   @override
   bool shouldRepaint(covariant _CityPainter old) => true;
