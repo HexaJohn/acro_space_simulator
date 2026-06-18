@@ -280,6 +280,8 @@ class TopDownPainter extends CustomPainter {
       if (!_discTouchesScreen(c, 16, size)) continue; // off-screen ship
       final apparentPx = view.radiusPx(v.worldRel, craftLengthM);
       final col = v.onRails ? const Color(0xFF7FE0A0) : const Color(0xFFFF8C66);
+      // Surface-proximity cue (drop-line + alt + landed ring) UNDER the marker.
+      _drawSurfaceCue(canvas, v, c, project);
       if (apparentPx <= 10) {
         // Heading from the nose projected into the CAMERA screen plane, so the
         // flat triangle points the same way the 3D cone would (they must agree
@@ -292,6 +294,75 @@ class TopDownPainter extends CustomPainter {
       _label(canvas, v.name, c + Offset(8 + apparentPx.clamp(0, 30), -4), col);
     }
   }
+
+  /// Surface-approach cue for a vessel: when it's within ~one body radius of the
+  /// surface, draw a dashed drop-line from the craft down to the radial foot
+  /// (the point on the surface directly below it) plus an altitude label, so it's
+  /// obvious the craft is approaching the ground. When landed, a pulsing contact
+  /// ring instead. Reads at any zoom because the foot is projected through the
+  /// camera like everything else.
+  void _drawSurfaceCue(Canvas canvas, VesselView v, Offset c,
+      Offset Function(double, double) project) {
+    final alt = v.altSurfaceM;
+    if (!alt.isFinite || v.bodyRadiusM <= 0) return;
+    // Only cue once we're close-ish: within one body radius of the surface.
+    if (alt > v.bodyRadiusM && !v.landed) return;
+
+    final footPx = view.projectPx(v.surfaceFootRel);
+    if (footPx == null) return;
+    final foot = project(footPx.x, footPx.y);
+
+    if (v.landed) {
+      // Contact ring — landed.
+      canvas.drawCircle(
+          c,
+          10,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 2
+            ..color = const Color(0xFF7FE0A0));
+      _label(canvas, 'LANDED', c + const Offset(12, 6),
+          const Color(0xFF7FE0A0));
+      return;
+    }
+
+    // Approach: closer = redder + brighter (warns of impending ground contact).
+    final frac = (alt / v.bodyRadiusM).clamp(0.0, 1.0);
+    final warn = frac < 0.05; // < 5% of a radius up — very low
+    final lineCol =
+        (warn ? const Color(0xFFFF3B30) : const Color(0xFF8FE3FF))
+            .withValues(alpha: (1.0 - frac).clamp(0.25, 0.9));
+
+    // Dashed drop-line craft -> surface foot.
+    _dashLine(canvas, c, foot, lineCol);
+    // A little tick on the surface where it touches down.
+    canvas.drawCircle(foot, 3, Paint()..color = lineCol);
+    // Altitude label at the midpoint.
+    final mid = Offset.lerp(c, foot, 0.5)!;
+    _label(canvas, _altLabel(alt), mid + const Offset(6, -2), lineCol);
+  }
+
+  /// Dashed straight line between two screen points.
+  void _dashLine(Canvas canvas, Offset a, Offset b, Color color) {
+    const dash = 6.0, gap = 4.0;
+    final total = (b - a).distance;
+    if (total < 1) return;
+    final dir = (b - a) / total;
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 1.5;
+    var t = 0.0;
+    while (t < total) {
+      final s = a + dir * t;
+      final e = a + dir * math.min(t + dash, total);
+      canvas.drawLine(s, e, paint);
+      t += dash + gap;
+    }
+  }
+
+  String _altLabel(double m) => m.abs() < 10000
+      ? '${m.toStringAsFixed(0)} m'
+      : '${(m / 1000).toStringAsFixed(1)} km';
 
   /// The craft marker: a 4-sided SQUARE-base pyramid (the lander shape),
   /// oriented by the craft's real 3D attitude and projected through the camera.

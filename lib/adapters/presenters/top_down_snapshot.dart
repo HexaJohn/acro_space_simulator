@@ -164,6 +164,16 @@ class VesselView {
   /// the cone-LOD marker.
   final double throttle;
 
+  /// Surface-proximity cues: altitude above the dominant body's surface (m),
+  /// that body's radius (m), the camera-relative WORLD position of the point on
+  /// the surface directly BELOW the craft (the radial foot), and whether the
+  /// craft is landed. The painter draws a drop-line + alt label when low and a
+  /// contact ring when landed.
+  final double altSurfaceM;
+  final double bodyRadiusM;
+  final Vector3 surfaceFootRel;
+  final bool landed;
+
   const VesselView(this.name, this.x, this.y, this.headingRad, this.onRails,
       {this.path = const [],
       this.pathBehind = const [],
@@ -171,7 +181,11 @@ class VesselView {
       this.forwardW = Vector3.unitZ,
       this.upW = Vector3.unitY,
       this.sunW = Vector3.unitZ,
-      this.throttle = 0});
+      this.throttle = 0,
+      this.altSurfaceM = double.infinity,
+      this.bodyRadiusM = 0,
+      this.surfaceFootRel = Vector3.zero,
+      this.landed = false});
 }
 
 /// Bare-minimum HUD readouts for the focus vessel + colony totals. Strings are
@@ -540,6 +554,22 @@ class TopDownSnapshotPresenter {
       final sunW =
           vWorld.length < 1 ? Vector3.unitZ : (-vWorld).normalized;
 
+      // Surface-proximity cues. The radial foot is the point on the body's
+      // surface directly below the craft; altitude is the craft's height over it.
+      final vBodyForAlt = system.body(v.dominantBody);
+      var altSurface = double.infinity;
+      var bodyRadius = 0.0;
+      var footRel = Vector3.zero;
+      if (vBodyForAlt != null) {
+        bodyRadius = vBodyForAlt.radius;
+        final rLocal = v.state.position; // body-centred
+        final rMag = rLocal.length;
+        altSurface = rMag - bodyRadius;
+        final dir = rMag < 1e-6 ? Vector3.unitZ : rLocal * (1 / rMag);
+        final footWorld = bodyWorld(vBodyForAlt) + dir * bodyRadius;
+        footRel = footWorld - camWorld;
+      }
+
       vesselViews.add(VesselView(
         v.name,
         rel.x,
@@ -553,6 +583,10 @@ class TopDownSnapshotPresenter {
         upW: upV,
         sunW: sunW,
         throttle: v.mode == PropagationMode.onRails ? 0.0 : v.throttle,
+        altSurfaceM: altSurface,
+        bodyRadiusM: bodyRadius,
+        surfaceFootRel: footRel,
+        landed: v.landed,
       ));
     }
 
