@@ -19,6 +19,13 @@ import '../../domain/shared/vector3.dart';
 class SphereTexture {
   const SphereTexture();
 
+  /// Diagnostics (set by the last paint): recursion calls + emitted triangles.
+  /// Used by the screenshot harness to find where the mesh cost explodes.
+  static int debugFaceCalls = 0;
+  static int debugTris = 0;
+  static int debugMaxDepth = 0;
+  static double debugTargetPx = 0;
+
   /// Mesh is drawn this much larger than the clip circle so its faceted edge
   /// hides behind the antialiased circular clip (no grid stairsteps at the rim).
   /// Public so the painter can size the base disc to the SAME capped extent and
@@ -42,6 +49,8 @@ class SphereTexture {
     required double radiusM, // body radius (m), for the surface projection
     required ui.Offset viewportCentre, // canvas px of the screen centre
   }) {
+    debugFaceCalls = 0;
+    debugTris = 0;
     // Bail on non-finite inputs (degenerate camera geometry can produce NaN/Inf
     // in the centre / worldRel); a single bad vertex makes Skia drop the whole
     // mesh, blanking the body. Better to skip this body's sphere this frame.
@@ -138,9 +147,15 @@ class SphereTexture {
     // log2(radius/alt). The horizon/screen prune + vertex weld bound the cost.
     final alt = radiusM > 0 ? (eyeDist - radiusM) : double.infinity;
     var maxDepth = 7;
-    if (radiusM > 0 && alt > 0 && alt < radiusM * 0.2) {
+    // Only deepen VERY close to the surface (alt < 10% radius), and cap at 10.
+    // The projected-size test already stops interior leaves at the target px, so
+    // extra depth only buys a finer horizon edge. depth 11-14 + the 0.2-radius
+    // trigger exploded the recursion into MILLIONS of pruned faceRecurse calls
+    // (the <1 Mm slideshow) for almost no extra emitted triangles; a 0.1-radius
+    // trigger + ceiling 10 keeps the horizon smooth without the blow-up.
+    if (radiusM > 0 && alt > 0 && alt < radiusM * 0.1) {
       final extra = (math.log(radiusM / alt) / math.ln2).round();
-      maxDepth = (7 + extra).clamp(7, 14);
+      maxDepth = (6 + extra).clamp(7, 10);
     }
 
     // Weld-key resolution. A shared edge midpoint is the EXACT same float from
@@ -221,7 +236,14 @@ class SphereTexture {
     // disc needs fine leaves for a round limb (rPx/24); a big near disc that
     // fills the screen uses a coarse 64 px leaf — at that zoom the texture is
     // already sub-texel/blurry, so finer leaves cost a lot for no visible gain.
-    final targetPx = (rPx / 24.0).clamp(6.0, 64.0);
+    // Leaf target on screen (px). Bigger leaves = fewer triangles. The limb wants
+    // finer leaves for a round silhouette (rPx/24); a fine leaf in the cap
+    // interior is texture-bound and wasted. 18 px floor + 64 px cap keeps the
+    // triangle count bounded without a visible facet (the far view clips to a
+    // circle anyway).
+    final targetPx = (rPx / 20.0).clamp(26.0, 72.0);
+    debugMaxDepth = maxDepth;
+    debugTargetPx = targetPx;
     final screenW = viewportCentre.dx * 2, screenH = viewportCentre.dy * 2;
     // Tighter off-screen prune margin (was 0.5) so off-screen subtrees stop
     // recursing sooner — a perf win when zoomed in and most of the cap is off
@@ -243,6 +265,7 @@ class SphereTexture {
     // A spherical triangle of three unit body-directions. Recursively split into
     // four (edge midpoints, re-normalised onto the sphere) until small on screen.
     void faceRecurse(List<double> A, List<double> B, List<double> C, int depth) {
+      debugFaceCalls++;
       final mx = (A[0] + B[0] + C[0]), my = (A[1] + B[1] + C[1]), mz = (A[2] + B[2] + C[2]);
       final ml = math.sqrt(mx * mx + my * my + mz * mz);
       final cx = mx / ml, cy = my / ml, cz = mz / ml;
@@ -291,6 +314,39 @@ class SphereTexture {
         final sz = math.max(
             seg(va.pos, vb.pos), math.max(seg(vb.pos, vc.pos), seg(vc.pos, va.pos)));
         if (sz <= targetPx) split = false;
+      } else if (split) {
+        // NEAR-PLANE / HORIZON STRADDLE: at least one corner is behind the near
+        // plane, so the size test above (which needs all three) is skipped and
+        // the face otherwise splits to the FULL maxDepth unconditionally — the
+        // horizon ring of these was the recursion explosion (hundreds of k calls,
+        // the <1 Mm slideshow). Measure size from whichever corners DO project:
+        // if the visible ones are already within the target, stop. Only the few
+        // faces whose visible span is still large keep splitting to resolve the
+        // boundary, so we get a smooth horizon WITHOUT the blow-up.
+        ui.Offset? p0 = va?.pos, p1 = vb?.pos, p2 = vc?.pos;
+        var maxSeg = 0.0;
+        void acc(ui.Offset? a, ui.Offset? b) {
+          if (a == null || b == null) return;
+          final dx = a.dx - b.dx, dy = a.dy - b.dy;
+          final d = math.sqrt(dx * dx + dy * dy);
+          if (d > maxSeg) maxSeg = d;
+        }
+        acc(p0, p1);
+        acc(p1, p2);
+        acc(p2, p0);
+        // No two corners project (face almost entirely behind the near plane):
+        // a couple of levels resolve its sliver; cap it low. Otherwise stop once
+        // the visible span is within the target.
+        final projected = (va != null ? 1 : 0) + (vb != null ? 1 : 0) + (vc != null ? 1 : 0);
+        if (projected < 2) {
+          // Almost entirely behind the near plane: a few levels resolve its
+          // sliver. Scale the cap with maxDepth so low-altitude views (deeper
+          // maxDepth, surface very close) still subdivide enough to emit the
+          // near-horizon ground instead of dropping it to a bare line.
+          if (depth >= maxDepth - 2) split = false;
+        } else if (maxSeg <= targetPx) {
+          split = false;
+        }
       }
 
       if (split) {
@@ -308,6 +364,7 @@ class SphereTexture {
       }
       // Leaf: emit if all three corners projected (in front of the near plane).
       if (va != null && vb != null && vc != null) {
+        debugTris++;
         _tri(positions, texCoords, shadowColors, atmoColors, atmoTint, atmoWarm,
             va, vb, vc, iw);
       }
