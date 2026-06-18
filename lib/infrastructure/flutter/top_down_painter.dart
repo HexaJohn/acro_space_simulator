@@ -161,10 +161,11 @@ class TopDownPainter extends CustomPainter {
       if (!discCovers) _drawRings(canvas, b, project, true);
 
       // Surface map: draw the lit sphere when the texture is decoded and the disc
-      // is worth texturing (>=5px). No upper cap on rPx — when close the mesh
-      // radius is clamped (meshRPx) so vertex coords stay bounded; the sphere
-      // clips to the true circle. Below 5px it's not worth it.
-      final tex = (layers.planetTexture && b.textureKey != null && rPx >= 5)
+      // resolves at all (>=2.5px — same threshold as the shaded disc, so the
+      // texture<->disc handoff happens where the body is too small to see the
+      // difference, with no pop). No upper cap on rPx — when close the mesh
+      // clips to the true circle.
+      final tex = (layers.planetTexture && b.textureKey != null && rPx >= 2.5)
           ? textures?.image(b.textureKey!)
           : null;
       // (coverPx — the sphere-cap half-extent — is computed once above, by the
@@ -237,11 +238,14 @@ class TopDownPainter extends CustomPainter {
         continue;
       }
 
-      if (b.isStar || rPx < 6) {
-        // Tiny or self-luminous: flat fill (shading not worth it). Stars always
-        // draw; an untextured PLANET's generic fill obeys baseFill.
-        if (b.isStar || layers.baseFill) {
-          canvas.drawCircle(c, discRPx, Paint()..color = base);
+      if (b.isStar) {
+        // Self-luminous: flat fill (no day/night shading).
+        canvas.drawCircle(c, discRPx, Paint()..color = base);
+      } else if (rPx < 2.5) {
+        // Sub-pixel planet: a flat dot is all that resolves. (Shading is
+        // meaningless at this size and the lit/unlit edge would pop.)
+        if (layers.baseFill) {
+          canvas.drawCircle(c, discRPx, Paint()..color = _scale(base, 0.6));
         }
       } else {
         // Atmosphere halo first (drawn under the disc edge).
