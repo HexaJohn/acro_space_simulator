@@ -166,11 +166,11 @@ class TopDownPainter extends CustomPainter {
           b.textureKey != null &&
           textures?.image(b.textureKey!) != null;
       if (discCovers && !hasTex) {
-        // Zoomed inside a body whose texture isn't decoded yet (every body has a
-        // texture now — real map or the Moon fallback). Fill the viewport with a
-        // neutral lit tone for the one or two frames until it loads, so it doesn't
-        // flash black.
-        canvas.drawRect(Offset.zero & size, Paint()..color = _scale(base, 0.5));
+        // Zoomed inside a body but no texture image to draw — either the planet
+        // texture layer is OFF, or the image hasn't decoded yet. Draw NOTHING (no
+        // flat fill of any kind): the user wants no flat-colour disc/fill. With
+        // the layer off the body is simply invisible up close; with it on, the
+        // sphere appears the moment the image decodes.
         continue;
       }
 
