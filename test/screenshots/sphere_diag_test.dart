@@ -60,19 +60,41 @@ Future<void> _shootSphere(
   });
   final textures = TextureCache()..seed('earth', tex);
 
-  // Camera focus sits on the surface; the body centre is one radius "below"
-  // (along -Z, the local up). range = altitude above the surface.
+  // A craft sits at a FIXED surface foot point P; local-up = P (normalised),
+  // independent of where the camera looks. The body centre is one radius below
+  // the foot. The `elevation` param here is reinterpreted as TILT-FROM-NADIR:
+  // pi/2 = look straight down local-up; smaller = tilt up toward the horizon.
+  //
+  // We put the foot on the EQUATOR (+Y), NOT the +Z texture pole, so the normal
+  // ascent view never sits on the pole singularity (a separate test stresses the
+  // pole). The camera azimuth/elevation are chosen so forward aims from the eye
+  // toward the foot, tilted by (pi/2 - elevation) up off nadir within the
+  // foot's local vertical plane.
+  final tiltFromNadir = math.pi / 2 - elevation; // 0 = nadir
+  // Foot local frame: up=+Y, "north"=+Z, "east"=+X.
+  // Camera forward = look direction = tilt the down-vector (-Y) toward north
+  // (+Z) by tiltFromNadir.
+  final fwd = Vector3(
+    0,
+    -math.cos(tiltFromNadir),
+    math.sin(tiltFromNadir),
+  ).normalized;
+  // Recover the azimuth/elevation the PerspectiveCamera needs for this forward.
+  // forward = (cos e * sin a, cos e * cos a, -sin e)  =>  e = asin(-fwd.z)... but
+  // our fwd.z>=0, so elevation = -asin(fwd.z); azimuth from x,y.
+  final camElev = math.asin((-fwd.z).clamp(-1.0, 1.0));
+  final camAzim = math.atan2(fwd.x, fwd.y);
   final cam = PerspectiveCamera(
-    azimuth: 0,
-    elevation: elevation,
+    azimuth: camAzim,
+    elevation: camElev,
     range: altM,
     fovY: fovDeg * math.pi / 180,
     viewportH: size.height,
   );
-  // Body centre straight "below" the focus (along -Z). Looking down (elev pi/2)
-  // centres on the +Z body axis = the equirect texture's pole; the tests below
-  // mostly view it from an angle so the smear-prone pole isn't frame-centre.
-  final worldRel = Vector3(0, 0, -kEarthR);
+  final localUp = Vector3(0, 1, 0); // foot at the equator, +Y
+  final worldRel = localUp * -kEarthR; // body centre = foot - up*R, foot at focus
+  // Spin so the sub-camera longitude isn't on the antimeridian seam (lon=±pi).
+  const bodySpin = 0.7;
   final relScreen = cam.projectPx(worldRel);
   final bx = relScreen?.x ?? 0, by = relScreen?.y ?? 0;
 
@@ -83,6 +105,7 @@ Future<void> _shootSphere(
     sunWorldX: 0, sunWorldY: 1, sunWorldZ: 0,
     radiusPx: cam.radiusPx(worldRel, kEarthR),
     worldRel: worldRel,
+    spin: bodySpin,
   );
   final snapshot = TopDownSnapshot(
     bodies: [body],
@@ -137,5 +160,114 @@ void main() {
   testWidgets('sphere @ 100m looking at horizon', (t) async {
     await _shootSphere(t, 'surface_100m_horizon',
         altM: 100, elevation: math.pi / 2 - 0.03, fovDeg: 75);
+  });
+
+  // ASCENT-scenario repro: 10 km alt, fov 75, panning the camera through a few
+  // tilt angles toward the horizon. The reported bug: surface triangles drop out
+  // at some angles, and the atmosphere halo drifts off the limb.
+  for (final spec in <(String, double)>[
+    ('10km_down', math.pi / 2), // straight down (nadir)
+    ('10km_tilt30', math.pi / 2 - 0.52), // ~30 deg up off nadir
+    ('10km_tilt60', math.pi / 2 - 1.05), // ~60 deg up
+    ('10km_horizon', math.pi / 2 - 1.40), // near the horizon
+    ('10km_grazing', math.pi / 2 - 1.52), // grazing, horizon high in frame
+  ]) {
+    testWidgets('sphere @ 10km ${spec.$1}', (t) async {
+      await _shootSphere(t, 'ascent_${spec.$1}',
+          altM: 10000, elevation: spec.$2, fovDeg: 75);
+    });
+  }
+
+  // ORBIT-TRACKING repro — the DEFAULT in-game ascent start: camera focuses the
+  // orbiter at 3000 km altitude and the eye is pulled back a small range (the
+  // "10K m" zoom readout is the eye->focus RANGE, not the surface altitude).
+  // Earth is a distant disc below; this is the path where the SCREEN-SPACE
+  // atmosphere halo (a circle at the projected centre) is active and can drift
+  // off the limb. Pan the camera so Earth moves across / off frame.
+  for (final spec in <(String, double, double)>[
+    ('centre', 0.0, 0.6), // Earth centred below
+    ('limb', 0.9, 0.3), // Earth's limb across frame
+    ('offaxis', 1.3, 0.2), // Earth pushed toward the edge
+  ]) {
+    testWidgets('sphere orbit-track 3000km ${spec.$1}', (t) async {
+      await _shootOrbitTrack(t, 'orbit_${spec.$1}',
+          focusAltM: 3000000, rangeM: 10000, azimuth: spec.$2, elevation: spec.$3);
+    });
+  }
+}
+
+/// Orbit-tracking shot: the camera focuses a point at [focusAltM] above the
+/// surface (an orbiter), with the eye pulled back [rangeM] (the zoom readout).
+/// The body is the full Earth, [focusAltM]+R below the focus.
+Future<void> _shootOrbitTrack(
+  WidgetTester t,
+  String name, {
+  required double focusAltM,
+  required double rangeM,
+  required double azimuth,
+  required double elevation,
+}) async {
+  const size = Size(1280, 800);
+  t.view.physicalSize = size;
+  t.view.devicePixelRatio = 1.0;
+  addTearDown(t.view.resetPhysicalSize);
+  addTearDown(t.view.resetDevicePixelRatio);
+
+  late ui.Image tex;
+  await t.runAsync(() async {
+    tex = await _checker(512, 256);
+  });
+  final textures = TextureCache()..seed('earth', tex);
+
+  final cam = PerspectiveCamera(
+    azimuth: azimuth,
+    elevation: elevation,
+    range: rangeM,
+    fovY: 75 * math.pi / 180,
+    viewportH: size.height,
+  );
+  // Focus is the orbiter; Earth centre sits (R + focusAlt) straight below the
+  // focus along the world -Z (nadir of the focus).
+  final worldRel = Vector3(0, 0, -(kEarthR + focusAltM));
+  final relScreen = cam.projectPx(worldRel);
+  final bx = relScreen?.x ?? 0, by = relScreen?.y ?? 0;
+
+  final body = BodyView(
+    'Earth', bx, by, kEarthR, false,
+    hasAtmosphere: true,
+    textureKey: 'earth',
+    sunWorldX: 0, sunWorldY: 1, sunWorldZ: 0,
+    radiusPx: cam.radiusPx(worldRel, kEarthR),
+    worldRel: worldRel,
+  );
+  final snapshot = TopDownSnapshot(
+    bodies: [body],
+    vessels: const [],
+    hud: const HudView([]),
+  );
+  final painter = TopDownPainter(
+    snapshot,
+    textures: textures,
+    view: cam,
+    layers: const DebugLayers(skybox: false),
+  );
+
+  final key = GlobalKey();
+  await t.pumpWidget(MaterialApp(
+    home: RepaintBoundary(
+      key: key,
+      child: CustomPaint(size: size, painter: painter),
+    ),
+  ));
+  await t.pump();
+
+  await t.runAsync(() async {
+    final boundary =
+        key.currentContext!.findRenderObject()! as RenderRepaintBoundary;
+    final image = await boundary.toImage(pixelRatio: 1.0);
+    final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+    final file = File('test_out/sphere_$name.png');
+    await file.parent.create(recursive: true);
+    await file.writeAsBytes(bytes!.buffer.asUint8List());
   });
 }
