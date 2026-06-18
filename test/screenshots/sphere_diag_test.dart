@@ -279,6 +279,19 @@ void main() {
     });
   }
 
+  // 7.6 km landed at a range of shallow tilts — the in-game "range 7.61k m" view
+  // where a black wedge still cut into the surface from the top.
+  for (final spec in <(String, double)>[
+    ('el3', 3 * math.pi / 180),
+    ('el5', 5 * math.pi / 180),
+    ('el10', 10 * math.pi / 180),
+  ]) {
+    testWidgets('sphere landed 7.6km ${spec.$1}', (t) async {
+      await _shootSphere(t, 'land76_${spec.$1}',
+          altM: 7610, elevation: spec.$2, fovDeg: 75);
+    });
+  }
+
   // VERY low range (100 m) at the HORIZON (el ~0) — the in-game "range 100 m
   // el0" reading with a residual black wedge above the sub-camera point. At el0
   // the view axis is tangent to the surface, so the near plane slices through
@@ -309,6 +322,22 @@ void main() {
     testWidgets('sphere orbit-track 3000km ${spec.$1}', (t) async {
       await _shootOrbitTrack(t, 'orbit_${spec.$1}',
           focusAltM: 3000000, rangeM: 10000, azimuth: spec.$2, elevation: spec.$3);
+    });
+  }
+
+  // FLOATING-HAZE repro — focus a LANDED vessel (focus AT the surface, alt 0),
+  // eye pulled WAY back (range ~9.5 Mm). Earth's centre projects far off to the
+  // side; the in-game bug is the screen-space halo circle drawing detached in
+  // empty space on the OPPOSITE side from the limb. The screen halo must be
+  // suppressed here (the per-vertex atmosphere carries the limb glow).
+  for (final spec in <(String, double, double)>[
+    ('far_el0', 0.0, 0.0),
+    ('far_el10', 0.3, 10 * math.pi / 180),
+    ('far_el30', 0.6, 30 * math.pi / 180),
+  ]) {
+    testWidgets('sphere landed-far 9.5Mm ${spec.$1}', (t) async {
+      await _shootOrbitTrack(t, 'haze_${spec.$1}',
+          focusAltM: 0, rangeM: 9.5e6, azimuth: spec.$2, elevation: spec.$3);
     });
   }
 }

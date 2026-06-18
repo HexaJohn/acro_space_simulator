@@ -209,10 +209,26 @@ class TopDownPainter extends CustomPainter {
             : (b.worldRel - view.eyeOffset).length - b.radius;
         final circularLimb = eyeAlt >= b.radius * 0.05;
 
-        // The limb halo + rings + label all live at the rim, which is off-screen
-        // when the disc covers the viewport — skip them then (the lag fix) and
-        // draw only the (capped) textured surface.
-        if (!discCovers && b.hasAtmosphere && layers.atmoHalo && circularLimb) {
+        // The screen-space halo is a CIRCLE drawn at the projected centre `c`. It
+        // only reads as a rim glow when that whole circle is roughly on screen —
+        // i.e. the body is a small, centred disc far away. Zoomed in close
+        // (perspective), `c` projects far OFF screen while the limb fills one
+        // edge, so the halo circle's visible arc floats detached in empty space
+        // on the OPPOSITE side (the "haze floating away" bug). In that regime the
+        // per-vertex atmosphere pass inside the sphere already draws the glow on
+        // the real limb, so suppress the screen halo: require the projected
+        // centre to be near the viewport AND the disc radius to be modest.
+        final centreOnScreen = c.dx > -discRPx &&
+            c.dx < size.width + discRPx &&
+            c.dy > -discRPx &&
+            c.dy < size.height + discRPx;
+        final discFitsCircle = discRPx < size.longestSide;
+        if (!discCovers &&
+            b.hasAtmosphere &&
+            layers.atmoHalo &&
+            circularLimb &&
+            centreOnScreen &&
+            discFitsCircle) {
           _atmosphereHalo(canvas, c, discRPx, size,
               view: view,
               sunWorld: Vector3(b.sunWorldX, b.sunWorldY, b.sunWorldZ),
