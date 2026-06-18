@@ -2267,7 +2267,7 @@ class _CityPainter extends CustomPainter {
     final baseZ = tz + roofZ + cruise * hf;
     final rad = cell * 0.16;
     final apexH = baseZ + cell * 0.42;
-    const seg = 12;
+    const seg = 8; // 8-sided lander pyramid (matches the ascent-mode craft)
     final tint = relief
         ? Color.fromARGB((255 * fade).round(), 210, 224, 235) // white
         : Color.fromARGB((255 * fade).round(), 235, 200, 120); // amber cargo
@@ -2386,9 +2386,9 @@ class _CityPainter extends CustomPainter {
     final apex = cam.project(cx, cy, tz + renderZ + cell * 0.4);
     final r = cell * 0.14;
     final rim = <Offset>[
-      for (var i = 0; i < 10; i++)
-        cam.project(cx + r * math.cos(i / 10 * 2 * math.pi),
-            cy + r * math.sin(i / 10 * 2 * math.pi), tz + renderZ),
+      for (var i = 0; i < 8; i++) // 8-sided lander pyramid
+        cam.project(cx + r * math.cos(i / 8 * 2 * math.pi),
+            cy + r * math.sin(i / 8 * 2 * math.pi), tz + renderZ),
     ];
     final faces = <({Path path, double shade, double depth, bool dark})>[];
     for (var i = 0; i < rim.length; i++) {
@@ -2429,9 +2429,9 @@ class _CityPainter extends CustomPainter {
     final cx = (gx + 0.5) * cell, cy = (gy + 0.5) * cell;
     final rad = cell * 0.22;
     final apexH = cell * 0.7 + tz;
-    // Even segment count so the alternating light/dark checker reads cleanly all
-    // the way round (the ascent-mode lander look — now the de-facto craft icon).
-    const seg = 14;
+    // 8-sided pyramid (square-ish base) with alternating light/dark faces — the
+    // exact ascent-mode lander shape, now the de-facto craft icon.
+    const seg = 8;
     const tint = Color(0xFFB0BEC5); // metallic grey
     final apex = cam.project(cx, cy, apexH);
     final rim = <Offset>[];
