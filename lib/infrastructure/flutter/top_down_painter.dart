@@ -175,18 +175,18 @@ class TopDownPainter extends CustomPainter {
       final atmoThick = (b.isGasGiant && layers.exaggerateAtmosphere) ? 0.5 : 0.22;
       final atmoCol = Color(b.atmoColor);
       if (tex != null) {
+        // Circular-silhouette test: the limb halo + base-disc fallback only read
+        // as a circle when the eye is far (>= 1 radius up) or in ortho. Near the
+        // perspective surface the limb is the projected horizon arc, not a circle.
+        final eyeAlt = view.usesDistanceCull
+            ? double.infinity
+            : (b.worldRel - view.eyeOffset).length - b.radius;
+        final farEnough = eyeAlt >= b.radius;
+
         // The limb halo + base disc + rings + label all live at the rim, which
         // is off-screen when the disc covers the viewport — skip them then (the
         // lag fix) and draw only the (capped) textured surface.
         if (!discCovers) {
-          // The circular limb halo only reads when the silhouette IS a circle
-          // (far / ortho). Near the surface the limb is the projected horizon
-          // arc, so the circular ring is wrong — skip it there and let the
-          // in-sphere per-vertex scatter (pass 3) carry the horizon sky glow.
-          final eyeAlt = view.usesDistanceCull
-              ? double.infinity
-              : (b.worldRel - view.eyeOffset).length - b.radius;
-          final farEnough = eyeAlt >= b.radius;
           if (b.hasAtmosphere && layers.atmoHalo && farEnough) {
             _atmosphereHalo(canvas, c, discRPx, size,
                 view: view,
@@ -196,7 +196,8 @@ class TopDownPainter extends CustomPainter {
           }
           // Base disc underneath: if the textured sphere fails to rasterize on a
           // given backend (web CanvasKit drawVertices quirks), the body still
-          // reads as a lit circle instead of vanishing.
+          // reads as a lit circle instead of vanishing. Only valid when the
+          // silhouette IS a circle (far / ortho) — see the discCovers branch.
           final sun = Vector3(b.sunX, b.sunY, 0);
           if (layers.baseDisc) {
             if (b.isStar) {
@@ -205,12 +206,12 @@ class TopDownPainter extends CustomPainter {
               _drawShadedDisc(canvas, c, discRPx, base, sun, shading, b.sunFacing);
             }
           }
-        } else if (layers.baseDisc) {
-          // Cap reached: the textured sphere is the main surface, but if it
-          // fails to rasterize the planet would vanish. Paint a flat fallback
-          // UNDER it — but only within the disc circle (radius discRPx at `c`),
-          // NOT fullscreen, so the area beyond the limb stays empty and the
-          // horizon/space still shows when looking toward the edge of the body.
+        } else if (layers.baseDisc && farEnough) {
+          // Cap reached (zoomed in) but still a circular silhouette (ortho, or
+          // perspective from far): a circle at `c` is the right fallback shape.
+          // Near the perspective surface the silhouette is the horizon arc, not a
+          // circle, so we DON'T draw the disc there (a giant misplaced disc would
+          // be worse than a brief blank if the sphere ever failed).
           final sun = Vector3(b.sunX, b.sunY, 0);
           if (b.isStar) {
             canvas.drawCircle(c, discRPx, Paint()..color = base);
