@@ -145,7 +145,11 @@ class TopDownPainter extends CustomPainter {
           b.textureKey != null &&
           textures?.image(b.textureKey!) != null;
       if (discCovers && !hasTex) {
-        canvas.drawRect(Offset.zero & size, Paint()..color = _scale(base, 0.6));
+        // Fullscreen flat fill (the generic "blue fill") when zoomed inside an
+        // untextured body — gated on its own baseFill toggle.
+        if (layers.baseFill) {
+          canvas.drawRect(Offset.zero & size, Paint()..color = _scale(base, 0.6));
+        }
         continue;
       }
 
@@ -234,8 +238,11 @@ class TopDownPainter extends CustomPainter {
       }
 
       if (b.isStar || rPx < 6) {
-        // Tiny or self-luminous: flat fill (shading not worth it).
-        canvas.drawCircle(c, discRPx, Paint()..color = base);
+        // Tiny or self-luminous: flat fill (shading not worth it). Stars always
+        // draw; an untextured PLANET's generic fill obeys baseFill.
+        if (b.isStar || layers.baseFill) {
+          canvas.drawCircle(c, discRPx, Paint()..color = base);
+        }
       } else {
         // Atmosphere halo first (drawn under the disc edge).
         if (b.hasAtmosphere && layers.atmoHalo) {
@@ -245,9 +252,10 @@ class TopDownPainter extends CustomPainter {
               tint: atmoCol,
               thickness: atmoThick);
         }
-        // Shaded disc: sample brightness over a coarse grid, draw lit cells.
+        // Shaded disc for an untextured body — the generic "blue fill". Obeys
+        // baseFill (separate from the textured-sphere baseDisc fallback).
         final sun = Vector3(b.sunX, b.sunY, 0);
-        if (layers.baseDisc) {
+        if (layers.baseFill) {
           _drawShadedDisc(canvas, c, discRPx, base, sun, shading, b.sunFacing);
         }
       }
