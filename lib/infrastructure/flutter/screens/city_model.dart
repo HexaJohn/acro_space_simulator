@@ -408,8 +408,10 @@ const List<CitySpec> kUtilCatalog = [
       color: Color(0xFFEC407A), group: 'transport', jobs: 40, powerDraw: 40,
       inputs: {Commodity.fuel: 1, Commodity.oxidizer: 1},
       outputs: {
-        Commodity.food: 0.3, Commodity.water: 0.3, Commodity.ore: 0.3,
-        Commodity.oxygen: 0.3, // shuttled-in life support
+        // Life support trickles in on automatic shuttles; ORE only ever arrives
+        // via an explicit scheduled delivery, never produced passively.
+        Commodity.food: 0.3, Commodity.water: 0.3,
+        Commodity.oxygen: 0.3,
       }),
   // Bigger spaceports for colonies with many automatic shuttles arriving +
   // departing: more pads (footprint) = more throughput per build. They can be
@@ -420,7 +422,7 @@ const List<CitySpec> kUtilCatalog = [
       footW: 2, footH: 4,
       inputs: {Commodity.fuel: 2.6, Commodity.oxidizer: 2.6},
       outputs: {
-        Commodity.food: 0.9, Commodity.water: 0.9, Commodity.ore: 0.9,
+        Commodity.food: 0.9, Commodity.water: 0.9,
         Commodity.oxygen: 0.9,
       }),
   CitySpec(type: 'spaceport', label: 'Starport (3×6)',
@@ -429,7 +431,7 @@ const List<CitySpec> kUtilCatalog = [
       footW: 3, footH: 6,
       inputs: {Commodity.fuel: 6, Commodity.oxidizer: 6},
       outputs: {
-        Commodity.food: 2.2, Commodity.water: 2.2, Commodity.ore: 2.2,
+        Commodity.food: 2.2, Commodity.water: 2.2,
         Commodity.oxygen: 2.2,
       }),
 ];
