@@ -343,44 +343,39 @@ class SphereTexture {
         if (sz <= targetPx) split = false;
       } else if (split) {
         // NEAR-PLANE / HORIZON STRADDLE: at least one corner is behind the near
-        // plane, so the size test above (which needs all three) is skipped and
-        // the face otherwise splits to the FULL maxDepth unconditionally — the
-        // horizon ring of these was the recursion explosion (hundreds of k calls,
-        // the <1 Mm slideshow). Measure size from whichever corners DO project:
-        // if the visible ones are already within the target, stop. Only the few
-        // faces whose visible span is still large keep splitting to resolve the
-        // boundary, so we get a smooth horizon WITHOUT the blow-up.
-        ui.Offset? p0 = va?.pos, p1 = vb?.pos, p2 = vc?.pos;
-        var maxSeg = 0.0;
-        void acc(ui.Offset? a, ui.Offset? b) {
-          if (a == null || b == null) return;
-          final dx = a.dx - b.dx, dy = a.dy - b.dy;
-          final d = math.sqrt(dx * dx + dy * dy);
-          if (d > maxSeg) maxSeg = d;
-        }
-        acc(p0, p1);
-        acc(p1, p2);
-        acc(p2, p0);
-        // No two corners project (face almost entirely behind the near plane):
-        // a couple of levels resolve its sliver; cap it low. Otherwise stop once
-        // the visible span is within the target.
-        final projected = (va != null ? 1 : 0) + (vb != null ? 1 : 0) + (vc != null ? 1 : 0);
-        if (projected < 2) {
-          // Almost entirely behind the near plane: a few levels resolve its
-          // sliver. Scale the cap with maxDepth so low-altitude views (deeper
-          // maxDepth, surface very close) still subdivide enough to emit the
-          // near-horizon ground instead of dropping it to a bare line.
-          if (depth >= maxDepth - 2) split = false;
+        // plane, so the all-three size test above was skipped. The danger is a
+        // LARGE face that crosses the near plane: its corners may all be behind
+        // (nothing to emit) while its interior is in front — dropping it leaves a
+        // black WEDGE with a dead-straight near-plane edge (the landed/grazing
+        // bug). So decide by the face's forward-depth span, not by null corners:
+        //  - if the whole face is safely BEHIND the near plane (no crossing),
+        //    drop it (it's behind the camera — genuinely invisible);
+        //  - otherwise it CROSSES the plane: keep splitting until its on-sphere
+        //    angular size is tiny, so the boundary resolves into small faces that
+        //    the near-plane clip can emit cleanly with no wedge.
+        final dA = view.depth(Vector3(worldRel.x + radiusM * A[0],
+            worldRel.y + radiusM * A[1], worldRel.z + radiusM * A[2]));
+        final dB = view.depth(Vector3(worldRel.x + radiusM * B[0],
+            worldRel.y + radiusM * B[1], worldRel.z + radiusM * B[2]));
+        final dC = view.depth(Vector3(worldRel.x + radiusM * C[0],
+            worldRel.y + radiusM * C[1], worldRel.z + radiusM * C[2]));
+        final maxD = math.max(dA, math.max(dB, dC));
+        final minD = math.min(dA, math.min(dB, dC));
+        if (maxD <= view.nearPlane) {
+          split = false; // wholly behind the near plane -> not visible
         } else {
-          // Exactly one corner behind the near plane: this face sits ON the
-          // frustum boundary (the bottom edge of the visible ground at a shallow
-          // tilt). A leaf only emits when ALL three corners project, so the
-          // boundary is a ragged saw of dropped faces — the dark wedge/notch in
-          // the near-nadir ground when landed. Resolve it FINER than the interior
-          // target so the kept/dropped boundary is near pixel-tight (a clean
-          // edge) instead of a coarse notch — but still bounded by maxDepth.
-          final boundaryTarget = projected == 2 ? targetPx * 0.25 : targetPx;
-          if (maxSeg <= boundaryTarget) split = false;
+          // Crosses (or just clears) the near plane. Subdivide until the face's
+          // angular radius is small so the near-plane clip resolves a clean edge.
+          // A face that STRADDLES (minD <= near < maxD) but whose corners all
+          // fall just behind the plane has NOTHING to emit at the leaf and would
+          // drop -> a black wedge. So a straddling face is allowed a few EXTRA
+          // levels past maxDepth (it's a thin boundary band, cheap) until at
+          // least one corner projects and the clip can fill it.
+          final straddles = minD <= view.nearPlane;
+          final cap = straddles ? maxDepth + 4 : maxDepth;
+          final faceAng = math.acos(
+              (cx * A[0] + cy * A[1] + cz * A[2]).clamp(-1.0, 1.0));
+          if (faceAng <= 0.006 || depth >= cap) split = false;
         }
       }
 
@@ -492,7 +487,7 @@ class SphereTexture {
       _paintAtmoShell(
         canvas,
         radiusM: radiusM,
-        thick: 0.08, // shell extends ~8% of a radius beyond the surface
+        thick: 0.10, // shell extends ~10% of a radius beyond the surface
         worldRel: worldRel,
         view: view,
         viewportCentre: viewportCentre,
@@ -613,8 +608,8 @@ class SphereTexture {
     // Feather widths. Inward (toward the surface limb): the annulus gap, min a
     // few degrees so a far thin shell still reads as a soft band, not a line.
     // Outward (into space): a wider feather for the blurred falloff.
-    final featherIn = math.max(capS - capSurf, 0.02) * 1.6 + 0.02;
-    final featherOut = featherIn * 2.6;
+    final featherIn = (capSurf - capS).abs() * 1.4 + 0.05;
+    final featherOut = featherIn * 3.0;
 
     final positions = <ui.Offset>[];
     final colors = <ui.Color>[];
@@ -651,7 +646,7 @@ class SphereTexture {
       final bright = ui.Color.lerp(tint, const ui.Color(0xFFFFFFFF), 0.4) ?? tint;
       var col = ui.Color.lerp(tint, warm, warmF) ?? tint;
       if (lit > 0.55) col = ui.Color.lerp(col, bright, 0.5) ?? col;
-      final a = (glow * dayF * 2.4).clamp(0.0, 1.0);
+      final a = (glow * dayF * 2.9).clamp(0.0, 0.85);
       return _V0(
           ui.Offset(viewportCentre.dx + p.x, viewportCentre.dy - p.y),
           col.withValues(alpha: a));

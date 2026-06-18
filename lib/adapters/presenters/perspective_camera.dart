@@ -123,6 +123,9 @@ class PerspectiveCamera implements SceneCamera {
   }
 
   @override
+  double get nearPlane => near; // points with forward-depth <= near are culled
+
+  @override
   bool get isTopish => false; // perspective never skips the tilted cull
 
   @override

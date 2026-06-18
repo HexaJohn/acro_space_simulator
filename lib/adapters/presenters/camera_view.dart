@@ -148,6 +148,13 @@ abstract class SceneCamera {
   /// (e.g. the near-surface horizon) on [usesDistanceCull] being false.
   Vector3 get eyeOffset;
 
+  /// Forward-depth threshold below which [projectPx] returns null (a point is
+  /// behind the near plane / eye). The sphere renderer uses it to tell a face
+  /// that is wholly BEHIND the camera (drop it) from one that merely CROSSES the
+  /// near plane (keep subdividing so the near-plane clip can fill it). Ortho has
+  /// no finite near plane, so it returns negative infinity (nothing is "behind").
+  double get nearPlane;
+
   /// Skip the tilted-view distance cull when ~top-down (everything's in plane).
   bool get isTopish;
 
@@ -194,6 +201,9 @@ class OrthoCamera implements SceneCamera {
 
   @override
   Vector3 get eyeOffset => Vector3.zero; // no finite eye (parallel rays)
+
+  @override
+  double get nearPlane => double.negativeInfinity; // ortho never culls behind
 
   @override
   bool get isTopish => orbit.isTopish;
