@@ -123,11 +123,21 @@ class TopDownPainter extends CustomPainter {
       // the whole planet vanishes. Only center-cull a small/distant body.
       final cullR = b.isStar ? rPx * _starGlowScale : rPx;
       final screenDiag = size.bottomRight(Offset.zero).distance;
-      // Skip the centre-cull once the body is large on screen (apparent radius
-      // past ~a third of the diagonal): its centre may project off-screen / NaN
-      // while the surface still fills the frame (orbit tracking, grazing angles).
-      // The per-vertex horizon cull handles its real visibility.
-      final big = !b.isStar && rPx > screenDiag * 0.33;
+      // Skip the centre-cull when the body's SURFACE can reach the screen from an
+      // off-centre projection — i.e. the projected centre is a bad visibility
+      // proxy. Two cases:
+      //  1) the apparent disc already dwarfs the screen (rPx past a fraction of
+      //     the diagonal), or
+      //  2) the EYE is close to the body (perspective): within ~4 radii the
+      //     visible cap can land anywhere on screen while the centre projects far
+      //     off-frame or behind the near plane (orbit-tracking, grazing angles —
+      //     the case where Earth vanished when the camera panned). Distance-cull
+      //     bodies (ortho map) keep the strict centre test.
+      final eyeDist = view.usesDistanceCull
+          ? double.infinity
+          : (b.worldRel - view.eyeOffset).length;
+      final near = !b.isStar && b.radius > 0 && eyeDist < b.radius * 4;
+      final big = !b.isStar && (rPx > screenDiag * 0.33 || near);
       if (!big && !_discTouchesScreen(c, cullR, size)) continue;
       final base = b.isStar ? const Color(0xFFFFD66B) : const Color(0xFF4A90D9);
 
