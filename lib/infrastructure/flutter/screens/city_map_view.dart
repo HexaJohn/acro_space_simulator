@@ -2267,7 +2267,6 @@ class _CityPainter extends CustomPainter {
     final baseZ = tz + roofZ + cruise * hf;
     final rad = cell * 0.16;
     final apexH = baseZ + cell * 0.42;
-    const seg = 8; // 8-sided lander pyramid (matches the ascent-mode craft)
     final tint = relief
         ? Color.fromARGB((255 * fade).round(), 210, 224, 235) // white
         : Color.fromARGB((255 * fade).round(), 235, 200, 120); // amber cargo
@@ -2321,38 +2320,12 @@ class _CityPainter extends CustomPainter {
                 .withValues(alpha: 0.18 * (1 - hf / 0.2) * fade)
             ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5));
     }
-    // Cone body (apex up), depth-shaded like the lander.
-    final apex = cam.project(cx, cy, apexH);
-    final rim = <Offset>[];
-    final rimW = <(double, double)>[];
-    for (var i = 0; i < seg; i++) {
-      final a = i / seg * 2 * math.pi;
-      final wx = cx + rad * math.cos(a), wy = cy + rad * math.sin(a);
-      rim.add(cam.project(wx, wy, baseZ));
-      rimW.add((wx, wy));
-    }
-    final faces = <({Path path, double shade, double depth, bool dark})>[];
-    for (var i = 0; i < seg; i++) {
-      final j = (i + 1) % seg;
-      final p = Path()
-        ..moveTo(apex.dx, apex.dy)
-        ..lineTo(rim[i].dx, rim[i].dy)
-        ..lineTo(rim[j].dx, rim[j].dy)
-        ..close();
-      final mx = (rimW[i].$1 + rimW[j].$1) / 2;
-      final my = (rimW[i].$2 + rimW[j].$2) / 2;
-      final nx = mx - cx, ny = my - cy;
-      final shade =
-          (0.5 + 0.5 * ((nx * 0.5 + ny * -0.5) / rad + 1) / 2).clamp(0.35, 1.0);
-      faces.add(
-          (path: p, shade: shade, depth: cam.depth(mx, my, apexH), dark: i.isOdd));
-    }
-    faces.sort((a, b) => b.depth.compareTo(a.depth));
-    for (final f in faces) {
-      canvas.drawPath(f.path,
-          Paint()..color = _checkerFace(tint, f.shade, f.dark));
-    }
+    // The lander pyramid (square base, 8 checkered facets) — same icon as the
+    // founding lander.
+    _drawLanderPyramid(canvas,
+        cx: cx, cy: cy, baseZ: baseZ, apexZ: apexH, rad: rad, tint: tint);
     // A red-cross style relief marker dot on the nose.
+    final apex = cam.project(cx, cy, apexH);
     canvas.drawCircle(apex, (cell * cam.scale) * 0.02,
         Paint()..color = Color.fromARGB((255 * fade).round(), 255, 90, 90));
   }
@@ -2379,37 +2352,17 @@ class _CityPainter extends CustomPainter {
         Paint()
           ..color = const Color(0x33A9C6E0)
           ..strokeWidth = 1);
-    // A small cone marker (apex up) + engine flame below.
+    // The lander pyramid marker (square base, 8 checkered facets) + flame below.
     final tint = relief
         ? const Color(0xFFD2E0EB)
         : const Color(0xFFE0C878); // amber cargo
-    final apex = cam.project(cx, cy, tz + renderZ + cell * 0.4);
-    final r = cell * 0.14;
-    final rim = <Offset>[
-      for (var i = 0; i < 8; i++) // 8-sided lander pyramid
-        cam.project(cx + r * math.cos(i / 8 * 2 * math.pi),
-            cy + r * math.sin(i / 8 * 2 * math.pi), tz + renderZ),
-    ];
-    final faces = <({Path path, double shade, double depth, bool dark})>[];
-    for (var i = 0; i < rim.length; i++) {
-      final j = (i + 1) % rim.length;
-      final a = i / rim.length * 2 * math.pi;
-      faces.add((
-        path: Path()
-          ..moveTo(apex.dx, apex.dy)
-          ..lineTo(rim[i].dx, rim[i].dy)
-          ..lineTo(rim[j].dx, rim[j].dy)
-          ..close(),
-        shade: (0.5 + 0.4 * math.sin(a)).clamp(0.35, 1.0),
-        depth: a,
-        dark: i.isOdd,
-      ));
-    }
-    faces.sort((p, q) => q.depth.compareTo(p.depth));
-    for (final f in faces) {
-      canvas.drawPath(f.path,
-          Paint()..color = _checkerFace(tint, f.shade, f.dark));
-    }
+    _drawLanderPyramid(canvas,
+        cx: cx,
+        cy: cy,
+        baseZ: tz + renderZ,
+        apexZ: tz + renderZ + cell * 0.4,
+        rad: cell * 0.14,
+        tint: tint);
     // Engine flame pointing down (climbing) or up... keep it simple: a short
     // glow below the craft.
     canvas.drawLine(
@@ -2421,57 +2374,81 @@ class _CityPainter extends CustomPainter {
           ..strokeCap = StrokeCap.round);
   }
 
-  /// The lander cone standing on the city hub — a small 3D cone (base ring in
-  /// the ground plane, apex up) projected + depth-shaded so it reads as the
-  /// craft that founded the colony.
+  /// The lander standing on the city hub — the shared lander pyramid (4-sided
+  /// square base, 8 checkered facets) projected + depth-shaded so it reads as
+  /// the craft that founded the colony.
   void _drawLanderCone(Canvas canvas, int gx, int gy) {
     final tz = _z(gx, gy);
     final cx = (gx + 0.5) * cell, cy = (gy + 0.5) * cell;
-    final rad = cell * 0.22;
-    final apexH = cell * 0.7 + tz;
-    // 8-sided pyramid (square-ish base) with alternating light/dark faces — the
-    // exact ascent-mode lander shape, now the de-facto craft icon.
-    const seg = 8;
-    const tint = Color(0xFFB0BEC5); // metallic grey
-    final apex = cam.project(cx, cy, apexH);
-    final rim = <Offset>[];
-    final rimW = <(double, double)>[]; // world x,y for depth + normal
-    for (var i = 0; i < seg; i++) {
-      final a = i / seg * 2 * math.pi;
-      final wx = cx + rad * math.cos(a), wy = cy + rad * math.sin(a);
-      rim.add(cam.project(wx, wy, 0.06 + tz));
-      rimW.add((wx, wy));
-    }
-    // Side faces, depth-sorted far->near so it reads solid. Each face carries a
-    // checker bit so alternating segments paint light/dark (the lander look).
-    final faces = <({Path path, double shade, double depth, bool dark})>[];
-    for (var i = 0; i < seg; i++) {
-      final j = (i + 1) % seg;
-      final p = Path()
-        ..moveTo(apex.dx, apex.dy)
-        ..lineTo(rim[i].dx, rim[i].dy)
-        ..lineTo(rim[j].dx, rim[j].dy)
-        ..close();
-      final mx = (rimW[i].$1 + rimW[j].$1) / 2;
-      final my = (rimW[i].$2 + rimW[j].$2) / 2;
-      // Shade by facing the up-right light; depth for ordering.
-      final nx = mx - cx, ny = my - cy;
-      final shade = (0.45 + 0.5 * ((nx * 0.5 + ny * -0.5) / rad + 1) / 2)
-          .clamp(0.3, 1.0);
-      faces.add((
-        path: p,
-        shade: shade,
-        depth: cam.depth(mx, my, apexH / 2),
-        dark: i.isOdd,
-      ));
-    }
-    faces.sort((a, b) => b.depth.compareTo(a.depth));
-    for (final f in faces) {
-      canvas.drawPath(f.path, Paint()..color = _checkerFace(tint, f.shade, f.dark));
-    }
+    _drawLanderPyramid(canvas,
+        cx: cx,
+        cy: cy,
+        baseZ: 0.06 + tz,
+        apexZ: cell * 0.7 + tz,
+        rad: cell * 0.22,
+        tint: const Color(0xFFB0BEC5)); // metallic grey
     // Apex highlight + a thin nose tip.
+    final apex = cam.project(cx, cy, cell * 0.7 + tz);
     canvas.drawCircle(apex, (cell * cam.scale) * 0.012,
         Paint()..color = const Color(0xFFECEFF1));
+  }
+
+  /// Draw the lander craft icon: a 4-sided pyramid with a SQUARE base, each of
+  /// the four faces split down the middle into two triangles for 8 facets, the
+  /// facets painted in an alternating two-tone checker (depth-shaded for solidity
+  /// and sorted far->near). Base corners at the cardinal diagonals so it reads
+  /// as a square. Shared by the hub lander, visiting craft + in-flight craft.
+  void _drawLanderPyramid(Canvas canvas,
+      {required double cx,
+      required double cy,
+      required double baseZ,
+      required double apexZ,
+      required double rad,
+      required Color tint}) {
+    final apex = cam.project(cx, cy, apexZ);
+    // 4 base corners (a square, corners on the diagonals) + their world coords.
+    final corner = <Offset>[];
+    final cornerW = <(double, double)>[];
+    for (var i = 0; i < 4; i++) {
+      final a = (i + 0.5) / 4 * 2 * math.pi; // 45/135/225/315 -> axis-aligned square
+      final wx = cx + rad * math.cos(a), wy = cy + rad * math.sin(a);
+      corner.add(cam.project(wx, wy, baseZ));
+      cornerW.add((wx, wy));
+    }
+    // Each face = 2 triangles sharing the apex, split at the base-edge midpoint.
+    final facets = <({Path path, double shade, double depth, bool dark})>[];
+    for (var i = 0; i < 4; i++) {
+      final j = (i + 1) % 4;
+      final midWx = (cornerW[i].$1 + cornerW[j].$1) / 2;
+      final midWy = (cornerW[i].$2 + cornerW[j].$2) / 2;
+      final mid = cam.project(midWx, midWy, baseZ);
+      // Two sub-triangles: (apex, corner i, mid) and (apex, mid, corner j).
+      for (var h = 0; h < 2; h++) {
+        final cW = h == 0 ? cornerW[i] : cornerW[j];
+        final cP = h == 0 ? corner[i] : corner[j];
+        final path = Path()
+          ..moveTo(apex.dx, apex.dy)
+          ..lineTo(cP.dx, cP.dy)
+          ..lineTo(mid.dx, mid.dy)
+          ..close();
+        // Centroid of the facet for light + depth.
+        final fx = (cW.$1 + midWx) / 2, fy = (cW.$2 + midWy) / 2;
+        final nx = fx - cx, ny = fy - cy;
+        final shade =
+            (0.45 + 0.5 * ((nx * 0.5 + ny * -0.5) / rad + 1) / 2).clamp(0.3, 1.0);
+        facets.add((
+          path: path,
+          shade: shade,
+          depth: cam.depth(fx, fy, (apexZ + baseZ) / 2),
+          dark: (i + h).isOdd, // checker across the 8 facets
+        ));
+      }
+    }
+    facets.sort((a, b) => b.depth.compareTo(a.depth));
+    for (final f in facets) {
+      canvas.drawPath(
+          f.path, Paint()..color = _checkerFace(tint, f.shade, f.dark));
+    }
   }
 
   /// A low-poly faceted "pentagon sphere" pressurised hab — a geodesic dome of

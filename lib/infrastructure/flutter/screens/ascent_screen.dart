@@ -960,29 +960,39 @@ class _Scene3DPainter extends CustomPainter {
     final apexWorld = craftPos + craftNose.normalized * (span * 0.05);
     final apex = project(apexWorld);
     final base = project(craftPos);
-    // Base ring perpendicular to the nose.
+    // Base perpendicular to the nose: a SQUARE (4 corners), each face split at
+    // its edge midpoint into two triangles -> 8 checkered facets.
     final nose = craftNose.normalized;
     var ref = nose.cross(Vector3.unitZ);
     if (ref.length < 1e-3) ref = nose.cross(Vector3.unitX);
     ref = ref.normalized;
     final ref2 = nose.cross(ref).normalized;
     final r = span * 0.025;
-    final rim = <Offset>[
-      for (var i = 0; i < 8; i++)
-        project(craftPos +
-            ref * (r * math.cos(i / 8 * 2 * math.pi)) +
-            ref2 * (r * math.sin(i / 8 * 2 * math.pi)))
-    ];
+    Vector3 cornerW(int i) {
+      final a = (i + 0.5) / 4 * 2 * math.pi; // axis-aligned square corners
+      return craftPos + ref * (r * math.cos(a)) + ref2 * (r * math.sin(a));
+    }
+
     final dark = Color.lerp(craftColor, const Color(0xFF000000), 0.4)!;
-    for (var i = 0; i < rim.length; i++) {
-      final j = (i + 1) % rim.length;
+    for (var i = 0; i < 4; i++) {
+      final cI = cornerW(i), cJ = cornerW((i + 1) % 4);
+      final mid = project((cI + cJ) * 0.5);
+      final pI = project(cI), pJ = project(cJ);
+      // Two facets per face, alternating colour across all 8.
       canvas.drawPath(
           Path()
             ..moveTo(apex.dx, apex.dy)
-            ..lineTo(rim[i].dx, rim[i].dy)
-            ..lineTo(rim[j].dx, rim[j].dy)
+            ..lineTo(pI.dx, pI.dy)
+            ..lineTo(mid.dx, mid.dy)
             ..close(),
-          Paint()..color = i.isEven ? craftColor : dark);
+          Paint()..color = (i).isEven ? craftColor : dark);
+      canvas.drawPath(
+          Path()
+            ..moveTo(apex.dx, apex.dy)
+            ..lineTo(mid.dx, mid.dy)
+            ..lineTo(pJ.dx, pJ.dy)
+            ..close(),
+          Paint()..color = (i).isEven ? dark : craftColor);
     }
     // Engine flame opposite the nose when firing.
     if (firing) {
