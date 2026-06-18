@@ -36,7 +36,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 2026-06-17.121';
+const String kBuildStamp = 'build 2026-06-17.122';
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -97,14 +97,24 @@ class _SimulationViewState extends State<SimulationView>
   double _screenH = 800; // last viewport height (for the perspective focal len)
   bool _controlsExpanded = true; // collapsible FAB stack
 
+  /// Radius (m) of the body the camera is locked on, or 0 (vessel / none). Lets
+  /// the perspective eye measure its range from the SURFACE, not the centre.
+  double get _focusBodyRadius {
+    if (_focusBody == null) return 0;
+    return _universe.current().body(_focusBody!)?.radius ?? 0;
+  }
+
   /// The active camera for this frame: ortho or perspective, both driven by the
-  /// shared `_view` orientation (azimuth/elevation/roll).
+  /// shared `_view` orientation (azimuth/elevation/roll). In perspective the
+  /// eye sits [_range] from the body's SURFACE (range + radius from centre), so
+  /// _range is an altitude that can shrink to near-zero — you keep zooming all
+  /// the way down to the surface instead of stalling at centre-distance==radius.
   SceneCamera get _camera => _perspectiveMode
       ? PerspectiveCamera(
           azimuth: _view.azimuth,
           elevation: _view.elevation,
           roll: _view.roll,
-          range: _range,
+          range: _range + _focusBodyRadius,
           fovY: _fovDeg * math.pi / 180,
           viewportH: _screenH,
         )
@@ -217,7 +227,9 @@ class _SimulationViewState extends State<SimulationView>
     }
 
     if (_perspectiveMode) {
-      return 'PERSP  range ${eng(_range)} m  fov ${_fovDeg.toStringAsFixed(0)}°';
+      // _range is the eye's altitude above the focused body's surface.
+      final label = _focusBody != null ? 'alt' : 'range';
+      return 'PERSP  $label ${eng(_range)} m  fov ${_fovDeg.toStringAsFixed(0)}°';
     }
     // 100 px spans this many km on screen — an intuitive "how zoomed" number.
     final kmPer100px = _metresPerPixel * 100 / 1000;
