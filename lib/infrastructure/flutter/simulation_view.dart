@@ -36,7 +36,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 2026-06-18.149';
+const String kBuildStamp = 'build 2026-06-18.150';
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -758,8 +758,6 @@ class _SimulationViewState extends State<SimulationView>
       ('Orbit rails', _layers.orbitRails, (v) => _layers.copyWith(orbitRails: v)),
       ('Planet texture', _layers.planetTexture,
           (v) => _layers.copyWith(planetTexture: v)),
-      ('Base disc', _layers.baseDisc, (v) => _layers.copyWith(baseDisc: v)),
-      ('Blue fill', _layers.baseFill, (v) => _layers.copyWith(baseFill: v)),
       ('Sphere shadow', _layers.sphereShadow,
           (v) => _layers.copyWith(sphereShadow: v)),
       ('Atmo halo', _layers.atmoHalo, (v) => _layers.copyWith(atmoHalo: v)),

@@ -145,11 +145,11 @@ class TopDownPainter extends CustomPainter {
           b.textureKey != null &&
           textures?.image(b.textureKey!) != null;
       if (discCovers && !hasTex) {
-        // Fullscreen flat fill (the generic "blue fill") when zoomed inside an
-        // untextured body — gated on its own baseFill toggle.
-        if (layers.baseFill) {
-          canvas.drawRect(Offset.zero & size, Paint()..color = _scale(base, 0.6));
-        }
+        // Zoomed inside a body whose texture isn't decoded yet (every body has a
+        // texture now — real map or the Moon fallback). Fill the viewport with a
+        // neutral lit tone for the one or two frames until it loads, so it doesn't
+        // flash black.
+        canvas.drawRect(Offset.zero & size, Paint()..color = _scale(base, 0.5));
         continue;
       }
 
@@ -175,52 +175,29 @@ class TopDownPainter extends CustomPainter {
       final atmoThick = (b.isGasGiant && layers.exaggerateAtmosphere) ? 0.5 : 0.22;
       final atmoCol = Color(b.atmoColor);
       if (tex != null) {
-        // Circular-silhouette test: the limb halo + base-disc fallback only read
-        // as a circle when the eye is far (>= 1 radius up) or in ortho. Near the
-        // perspective surface the limb is the projected horizon arc, not a circle.
+        // The circular limb halo only reads as a ring while the silhouette IS a
+        // circle. That holds until the eye gets genuinely close to the surface
+        // (then the limb becomes the projected horizon arc). Suppress it only
+        // once the eye is within ~5% of a radius of the surface — NOT a full
+        // radius (that was killing the halo while still well out, e.g. zooming in
+        // past 7 Mm on Earth).
         final eyeAlt = view.usesDistanceCull
             ? double.infinity
             : (b.worldRel - view.eyeOffset).length - b.radius;
-        final farEnough = eyeAlt >= b.radius;
+        final circularLimb = eyeAlt >= b.radius * 0.05;
 
-        // The limb halo + base disc + rings + label all live at the rim, which
-        // is off-screen when the disc covers the viewport — skip them then (the
-        // lag fix) and draw only the (capped) textured surface.
-        if (!discCovers) {
-          if (b.hasAtmosphere && layers.atmoHalo && farEnough) {
-            _atmosphereHalo(canvas, c, discRPx, size,
-                view: view,
-                sunWorld: Vector3(b.sunWorldX, b.sunWorldY, b.sunWorldZ),
-                tint: atmoCol,
-                thickness: atmoThick);
-          }
-          // Base disc underneath: if the textured sphere fails to rasterize on a
-          // given backend (web CanvasKit drawVertices quirks), the body still
-          // reads as a lit circle instead of vanishing. Only valid when the
-          // silhouette IS a circle (far / ortho) — see the discCovers branch.
-          final sun = Vector3(b.sunX, b.sunY, 0);
-          if (layers.baseDisc) {
-            if (b.isStar) {
-              canvas.drawCircle(c, discRPx, Paint()..color = base);
-            } else {
-              _drawShadedDisc(canvas, c, discRPx, base, sun, shading, b.sunFacing);
-            }
-          }
-        } else if (layers.baseDisc && farEnough) {
-          // Cap reached (zoomed in) but still a circular silhouette (ortho, or
-          // perspective from far): a circle at `c` is the right fallback shape.
-          // Near the perspective surface the silhouette is the horizon arc, not a
-          // circle, so we DON'T draw the disc there (a giant misplaced disc would
-          // be worse than a brief blank if the sphere ever failed).
-          final sun = Vector3(b.sunX, b.sunY, 0);
-          if (b.isStar) {
-            canvas.drawCircle(c, discRPx, Paint()..color = base);
-          } else {
-            _drawShadedDisc(canvas, c, discRPx, base, sun, shading, b.sunFacing);
-          }
+        // The limb halo + rings + label all live at the rim, which is off-screen
+        // when the disc covers the viewport — skip them then (the lag fix) and
+        // draw only the (capped) textured surface.
+        if (!discCovers && b.hasAtmosphere && layers.atmoHalo && circularLimb) {
+          _atmosphereHalo(canvas, c, discRPx, size,
+              view: view,
+              sunWorld: Vector3(b.sunWorldX, b.sunWorldY, b.sunWorldZ),
+              tint: atmoCol,
+              thickness: atmoThick);
         }
-        // The sphere is the fragile part; isolate it so a failure leaves the
-        // already-drawn disc rather than blanking the world layer.
+        // The sphere is the surface — it always has a texture now (real or the
+        // Moon fallback), so there's no flat-disc fallback under it.
         try {
           _sphere.paint(
             canvas, tex, c, rPx,
@@ -249,17 +226,14 @@ class TopDownPainter extends CustomPainter {
         continue;
       }
 
+      // No texture (a star, the texture not yet decoded, sub-pixel, or the
+      // planet-texture layer is off): a simple lit/flat dot. Bodies normally have
+      // a texture (real map or Moon fallback), so this is the rare/tiny case.
       if (b.isStar) {
-        // Self-luminous: flat fill (no day/night shading).
-        canvas.drawCircle(c, discRPx, Paint()..color = base);
+        canvas.drawCircle(c, discRPx, Paint()..color = base); // self-luminous
       } else if (rPx < 2.5) {
-        // Sub-pixel planet: a flat dot is all that resolves. (Shading is
-        // meaningless at this size and the lit/unlit edge would pop.)
-        if (layers.baseFill) {
-          canvas.drawCircle(c, discRPx, Paint()..color = _scale(base, 0.6));
-        }
+        canvas.drawCircle(c, discRPx, Paint()..color = _scale(base, 0.6)); // dot
       } else {
-        // Atmosphere halo first (drawn under the disc edge).
         if (b.hasAtmosphere && layers.atmoHalo) {
           _atmosphereHalo(canvas, c, discRPx, size,
               view: view,
@@ -267,12 +241,8 @@ class TopDownPainter extends CustomPainter {
               tint: atmoCol,
               thickness: atmoThick);
         }
-        // Shaded disc for an untextured body — the generic "blue fill". Obeys
-        // baseFill (separate from the textured-sphere baseDisc fallback).
         final sun = Vector3(b.sunX, b.sunY, 0);
-        if (layers.baseFill) {
-          _drawShadedDisc(canvas, c, discRPx, base, sun, shading, b.sunFacing);
-        }
+        _drawShadedDisc(canvas, c, discRPx, base, sun, shading, b.sunFacing);
       }
 
       _drawRings(canvas, b, project, false); // near half, over the disc

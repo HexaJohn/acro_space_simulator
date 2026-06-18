@@ -492,7 +492,9 @@ class TopDownSnapshotPresenter {
             0xFF6FB4FF,
         isGasGiant: _gasGiants.contains(key),
         soiRadius: b.soiRadius,
-        textureKey: _texturedBodies.contains(key) ? key : null,
+        // Untextured bodies fall back to the Moon surface map so every body
+        // renders as a real lit sphere (no flat blue disc fallback).
+        textureKey: _texturedBodies.contains(key) ? key : 'moon',
         orbitPath: orbitPath,
         orbitBehind: orbitBehind,
         ringInnerPath: ringInnerPath,
