@@ -295,7 +295,12 @@ class TopDownPainter extends CustomPainter {
         // the atmosphere shell in 3D. Falls back to the radial halo above when the
         // shader isn't loaded.
         if (atmoShader != null && b.hasAtmosphere && layers.atmoHalo) {
-          _atmosphereShaderPass(canvas, size, b, atmoCol, atmoThick);
+          // The shader's path length wants a TIGHTER shell than the halo's band
+          // fraction — a thin shell gives a defined limb glow; a thick one washes
+          // over the disc. Gas giants get a fatter haze.
+          final shellThick =
+              (b.isGasGiant && layers.exaggerateAtmosphere) ? 0.22 : 0.12;
+          _atmosphereShaderPass(canvas, size, b, atmoCol, shellThick);
         }
 
         if (!discCovers) {
