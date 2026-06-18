@@ -104,6 +104,21 @@ class SphereTexture {
     // verts are welded via a cache so the mesh is ground-anchored (no swim).
     final camR = view.right, camU = view.up, camF = view.forward;
 
+    // Reference longitude = the body-fixed longitude of the sub-camera point (the
+    // surface point straight under the eye). We map each vertex's longitude as an
+    // UNWRAPPED offset from this reference, so the visible cap NEVER straddles the
+    // equirect antimeridian seam (lon=±pi). Without this, a triangle bridging the
+    // seam needs u on one side and u+width on the other; the welded vertex can
+    // only hold one, so neighbours disagree and the texture tears down the seam
+    // (the vertical split + radial shred seen during ascent). The cap is always
+    // < pi wide, so all offsets land in (-pi,pi): one continuous, tear-free patch.
+    final sdx = eyeDist > 1e-6 ? -centreFromEye.x / eyeDist : 0.0;
+    final sdy = eyeDist > 1e-6 ? -centreFromEye.y / eyeDist : 0.0;
+    // Undo the geometry spin to get the body-FIXED reference longitude.
+    final sbx = sdx * math.cos(spin) + sdy * math.sin(spin);
+    final sby = -sdx * math.sin(spin) + sdy * math.cos(spin);
+    final lon0 = math.atan2(sby, sbx);
+
     // Whether a body-frame surface direction n is visible (above the eye's local
     // horizon in perspective, front-facing in ortho).
     bool dirVisible(double nx, double ny, double nz) {
@@ -116,20 +131,40 @@ class SphereTexture {
       return -(nx * camF.x + ny * camF.y + nz * camF.z) > 0;
     }
 
-    // Project a unit body-direction (already spin-rotated for geometry) -> _V,
-    // cached by quantised direction so shared edge midpoints weld. Returns null
-    // when behind the near plane.
+    // Depth bound, scaled to how close the eye is (computed up here because the
+    // weld-key resolution below depends on it). Far / mid: a modest cap (the
+    // projected-size test stops early anyway). VERY low altitude (a few ico faces
+    // fill the screen) needs more depth to reach screen-sized leaves — scale by
+    // log2(radius/alt). The horizon/screen prune + vertex weld bound the cost.
+    final alt = radiusM > 0 ? (eyeDist - radiusM) : double.infinity;
+    var maxDepth = 7;
+    if (radiusM > 0 && alt > 0 && alt < radiusM * 0.2) {
+      final extra = (math.log(radiusM / alt) / math.ln2).round();
+      maxDepth = (7 + extra).clamp(7, 14);
+    }
+
+    // Weld-key resolution. A shared edge midpoint is the EXACT same float from
+    // both faces, so any grid welds it; the danger is the OPPOSITE — when zoomed
+    // in, adjacent-but-distinct deep-subdivision vertices (spacing ~ ico_edge /
+    // 2^maxDepth) must NOT collapse into the same cell, or one vertex inherits a
+    // wrong cached UV from elsewhere on the sphere and the texture shreds into a
+    // pinwheel. So the grid must be FINER than the leaf spacing. 15 bits
+    // (grid 3e-5) is far too coarse at low altitude (leaf spacing ~7e-5). Scale
+    // the bit count with maxDepth, capped at 17 bits/axis (3*17=51 < 53 safe).
+    final qBits = (12 + maxDepth).clamp(15, 17).toInt();
+    final qScale = (1 << (qBits - 1)).toDouble(); // half-range
+    final qMask = (1 << qBits) - 1;
+    final qShift = 1 << qBits;
     final cache = <int, _V?>{};
     _V? evalDir(double nx, double ny, double nz) {
-      // Fast NON-colliding weld key: quantise each component (in [-1,1]) to 15
-      // signed bits (x32768 -> [-32768,32767], offset to [0,65535]) and bit-pack
-      // into 48 bits — well within the web 53-bit-safe-int range, so no XOR
-      // collisions (which streaked the disc) and no per-vertex string alloc
-      // (which tanked the frame rate when zoomed in).
-      final qx = ((nx * 32768).round() + 32768) & 0xFFFF;
-      final qy = ((ny * 32768).round() + 32768) & 0xFFFF;
-      final qz = ((nz * 32768).round() + 32768) & 0xFFFF;
-      final key = qx * 0x100000000 + qy * 0x10000 + qz;
+      // NON-colliding weld key: quantise each component (in [-1,1]) to qBits and
+      // bit-pack — within the web 53-bit-safe-int range, so no XOR collisions
+      // (which streaked the disc) and no per-vertex string alloc (which tanked
+      // the frame rate when zoomed in).
+      final qx = ((nx * qScale).round() + (qShift >> 1)) & qMask;
+      final qy = ((ny * qScale).round() + (qShift >> 1)) & qMask;
+      final qz = ((nz * qScale).round() + (qShift >> 1)) & qMask;
+      final key = (qx * qShift + qy) * qShift + qz;
       final hit = cache[key];
       if (hit != null || cache.containsKey(key)) return hit;
       final relFocus = Vector3(
@@ -148,7 +183,16 @@ class SphereTexture {
       final by = -nx * math.sin(spin) + ny * math.cos(spin);
       final lon = math.atan2(by, bx);
       final lat = math.asin(nz.clamp(-1.0, 1.0));
-      final u = (lon + math.pi) / (2 * math.pi);
+      // Unwrap longitude relative to the sub-camera reference so the whole
+      // visible cap is one continuous strip (no seam straddle). dLon in (-pi,pi].
+      var dLon = lon - lon0;
+      while (dLon > math.pi) {
+        dLon -= 2 * math.pi;
+      }
+      while (dLon < -math.pi) {
+        dLon += 2 * math.pi;
+      }
+      final u = (lon0 + dLon + math.pi) / (2 * math.pi);
       final v = (math.pi / 2 - lat) / math.pi;
       final cnx = nx * camR.x + ny * camR.y + nz * camR.z;
       final cny = nx * camU.x + ny * camU.y + nz * camU.z;
@@ -178,16 +222,6 @@ class SphereTexture {
     // fills the screen uses a coarse 64 px leaf — at that zoom the texture is
     // already sub-texel/blurry, so finer leaves cost a lot for no visible gain.
     final targetPx = (rPx / 24.0).clamp(6.0, 64.0);
-    // Depth bound, scaled to how close the eye is. Far / mid: a modest cap (the
-    // projected-size test stops early anyway). VERY low altitude (a few ico faces
-    // fill the screen) needs more depth to reach screen-sized leaves — scale by
-    // log2(radius/alt). The horizon/screen prune + vertex weld bound the cost.
-    final alt = radiusM > 0 ? (eyeDist - radiusM) : double.infinity;
-    var maxDepth = 7;
-    if (radiusM > 0 && alt > 0 && alt < radiusM * 0.2) {
-      final extra = (math.log(radiusM / alt) / math.ln2).round();
-      maxDepth = (7 + extra).clamp(7, 14);
-    }
     final screenW = viewportCentre.dx * 2, screenH = viewportCentre.dy * 2;
     // Tighter off-screen prune margin (was 0.5) so off-screen subtrees stop
     // recursing sooner — a perf win when zoomed in and most of the cap is off
@@ -391,24 +425,20 @@ class SphereTexture {
     }
 
     var ua = a.uv.dx, ub = b.uv.dx, ud = d.uv.dx;
-    final maxU = math.max(ua, math.max(ub, ud));
-    final minU = math.min(ua, math.min(ub, ud));
 
+    // The cap-relative longitude unwrap (evalDir) already keeps the whole visible
+    // patch on one continuous side of the seam, so no per-triangle seam-lift is
+    // needed (it was the cause of the tears along the antimeridian). Only the
+    // genuine geographic pole still needs handling: there all longitudes converge,
+    // so the three u's fan out and linear interpolation smears the texture; the
+    // polar pixels are near-uniform, so collapse all three to the MEDIAN column.
     if (a.nearPole || b.nearPole || d.nearPole) {
-      // POLE FIX: at a geographic pole all longitudes converge, so the three u's
-      // fan out and linear interpolation smears the texture radially across the
-      // whole map. The polar pixels are nearly uniform, so collapse all three to
-      // the MEDIAN column — one consistent sample, no smear.
+      final maxU = math.max(ua, math.max(ub, ud));
+      final minU = math.min(ua, math.min(ub, ud));
       final med = ua + ub + ud - maxU - minU; // the middle value
       ua = med;
       ub = med;
       ud = med;
-    } else if (maxU - minU > iw / 2) {
-      // Clean longitude wrap (seam): lift the low-u verts by +iw so all three sit
-      // on the same side; TileMode.repeated samples the wrapped copy.
-      if (maxU - ua > iw / 2) ua += iw;
-      if (maxU - ub > iw / 2) ub += iw;
-      if (maxU - ud > iw / 2) ud += iw;
     }
     t
       ..add(ui.Offset(ua, a.uv.dy))
