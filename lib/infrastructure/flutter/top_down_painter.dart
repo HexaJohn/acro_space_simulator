@@ -179,7 +179,15 @@ class TopDownPainter extends CustomPainter {
         // is off-screen when the disc covers the viewport — skip them then (the
         // lag fix) and draw only the (capped) textured surface.
         if (!discCovers) {
-          if (b.hasAtmosphere && layers.atmoHalo) {
+          // The circular limb halo only reads when the silhouette IS a circle
+          // (far / ortho). Near the surface the limb is the projected horizon
+          // arc, so the circular ring is wrong — skip it there and let the
+          // in-sphere per-vertex scatter (pass 3) carry the horizon sky glow.
+          final eyeAlt = view.usesDistanceCull
+              ? double.infinity
+              : (b.worldRel - view.eyeOffset).length - b.radius;
+          final farEnough = eyeAlt >= b.radius;
+          if (b.hasAtmosphere && layers.atmoHalo && farEnough) {
             _atmosphereHalo(canvas, c, discRPx, size,
                 view: view,
                 sunWorld: Vector3(b.sunWorldX, b.sunWorldY, b.sunWorldZ),

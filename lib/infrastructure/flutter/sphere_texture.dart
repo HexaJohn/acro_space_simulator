@@ -126,14 +126,23 @@ class SphereTexture {
     final clipCircle =
         radiusM <= 0 || view.eyeOffset == Vector3.zero || (eyeDist - radiusM) >= radiusM;
 
+    // Adaptive tessellation: near the surface the visible cap spreads across the
+    // whole screen, so the uniform far-grid leaves huge near-camera quads. Boost
+    // the lattice resolution as the eye drops toward the surface (altitude -> 0),
+    // up to 4x the base grid, so the ground close to the camera subdivides finer.
+    final alt = radiusM > 0 ? (eyeDist - radiusM) : double.infinity;
+    final grid = (radiusM > 0 && alt < radiusM)
+        ? (_grid * (1.0 + 3.0 * (1.0 - (alt / radiusM).clamp(0.0, 1.0)))).round()
+        : _grid;
+
     // Build a (grid+1)^2 lattice of vertices over the unit disc; cells outside
     // the circle are skipped when emitting triangles.
     final verts = <List<_V?>>[];
-    for (var iy = 0; iy <= _grid; iy++) {
+    for (var iy = 0; iy <= grid; iy++) {
       final row = <_V?>[];
-      final ny = ((iy / _grid) * 2 - 1) * span; // -span..span (screen up = +)
-      for (var ix = 0; ix <= _grid; ix++) {
-        final nx = ((ix / _grid) * 2 - 1) * span; // -span..span (screen right=+)
+      final ny = ((iy / grid) * 2 - 1) * span; // -span..span (screen up = +)
+      for (var ix = 0; ix <= grid; ix++) {
+        final nx = ((ix / grid) * 2 - 1) * span; // -span..span (screen right=+)
         final r2 = nx * nx + ny * ny;
         if (r2 > 1.0) {
           row.add(null);
@@ -219,8 +228,8 @@ class SphereTexture {
     }
 
     // Emit two triangles per fully-inside cell.
-    for (var iy = 0; iy < _grid; iy++) {
-      for (var ix = 0; ix < _grid; ix++) {
+    for (var iy = 0; iy < grid; iy++) {
+      for (var ix = 0; ix < grid; ix++) {
         final a = verts[iy][ix];
         final b = verts[iy][ix + 1];
         final c = verts[iy + 1][ix];
