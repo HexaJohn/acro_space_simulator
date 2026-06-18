@@ -26,7 +26,9 @@ class SphereTexture {
 
   /// Mesh is drawn this much larger than the clip circle so its faceted edge
   /// hides behind the antialiased circular clip (no grid stairsteps at the rim).
-  static const double _overscan = 1.06;
+  /// Public so the painter can size the base disc to the SAME capped extent and
+  /// keep the two aligned.
+  static const double overscan = 1.06;
 
   void paint(
     ui.Canvas canvas,
@@ -69,7 +71,7 @@ class SphereTexture {
     // (4e-5) for a deep zoom range; the texture goes blurry near the floor
     // (magnifying texels) but never freezes. ps maps the cap to `cover` so coords
     // stay screen-sized no matter how small span gets.
-    final span = rPx <= 0 ? 1.0 : (cover * _overscan / rPx).clamp(0.00004, 1.0);
+    final span = rPx <= 0 ? 1.0 : (cover * overscan / rPx).clamp(0.00004, 1.0);
     final positions = <ui.Offset>[];
     final texCoords = <ui.Offset>[];
     final atmoColors = <ui.Color>[]; // per-vertex atmosphere scatter (pass 3)
@@ -165,8 +167,8 @@ class SphereTexture {
         // (ps = cover*overscan/span, bounded), so detail keeps reading and coords
         // stay screen-sized. Far away (span==1) it's the plain overscan'd radius.
         final ps = span >= 1.0
-            ? rPx * _overscan
-            : cover * _overscan / span;
+            ? rPx * overscan
+            : cover * overscan / span;
         row.add(_V(
           pos: ui.Offset(centre.dx + nx * ps, centre.dy - ny * ps),
           uv: ui.Offset(u * iw, v * ih),
@@ -211,7 +213,7 @@ class SphereTexture {
     // the visible patch. The patch's on-screen half-extent is span*ps =
     // cover*overscan (see ps above) — bounded even when span is floored — so a
     // million-px clip path is never built and the clip tracks the patch exactly.
-    final clipR = span >= 1.0 ? rPx : cover * _overscan;
+    final clipR = span >= 1.0 ? rPx : cover * overscan;
     canvas.save();
     canvas.clipPath(
       ui.Path()..addOval(ui.Rect.fromCircle(center: centre, radius: clipR)),

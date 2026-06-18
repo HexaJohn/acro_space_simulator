@@ -121,11 +121,13 @@ class TopDownPainter extends CustomPainter {
       // Skia drops or mis-rasterizes geometry once coordinates blow past a few
       // thousand px, so when zoomed in the flat disc (drawn at TRUE rPx) and the
       // sphere (which self-limits its mesh to a screen-sized cap) stop agreeing.
-      // Clamp the DISC's draw radius to a safe multiple of the screen diagonal:
-      // past that it fully covers the viewport anyway, so the look is identical
-      // but the coordinates stay bounded and aligned with the sphere cap.
-      final diag = size.bottomRight(Offset.zero).distance;
-      final discRPx = math.min(rPx, diag * 1.5);
+      // Clamp the DISC's draw radius to EXACTLY the sphere's capped on-screen
+      // extent (cover*overscan, see the sphere's clipR) so the textured cap and
+      // the base disc share the same radius and stay aligned — important for an
+      // off-centre body in perspective, where a mismatched radius reads as the
+      // texture floating off the disc. Past the cap both cover the viewport.
+      final coverPx = size.bottomRight(Offset.zero).distance / 2;
+      final discRPx = math.min(rPx, coverPx * SphereTexture.overscan);
 
       // Disc covers the whole viewport (zoomed in close). Only the rim/halo/ring
       // work is wasted — but the SURFACE still needs to show. If this body has a
@@ -155,10 +157,8 @@ class TopDownPainter extends CustomPainter {
       final tex = (layers.planetTexture && b.textureKey != null && rPx >= 5)
           ? textures?.image(b.textureKey!)
           : null;
-      // On-screen extent the sphere mesh must cover (its half-diagonal). When
-      // rPx dwarfs this, the sphere tessellates only the visible cap at full
-      // scale (so it keeps magnifying) instead of the whole hemisphere.
-      final coverPx = size.bottomRight(Offset.zero).distance / 2;
+      // (coverPx — the sphere-cap half-extent — is computed once above, by the
+      // disc-radius clamp, and reused for _sphere.paint below.)
       // Atmosphere thickness fraction — gas giants get a fatter haze when the
       // exaggerate-atmosphere debug option is on.
       final atmoThick = (b.isGasGiant && layers.exaggerateAtmosphere) ? 0.5 : 0.22;
