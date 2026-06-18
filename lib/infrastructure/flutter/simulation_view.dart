@@ -36,7 +36,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 2026-06-18.137';
+const String kBuildStamp = 'build 2026-06-18.138';
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -101,7 +101,8 @@ class _SimulationViewState extends State<SimulationView>
   // Perspective camera (independent toggle, any mode). On by default.
   bool _perspectiveMode = true;
   double _range = 2.0e7; // perspective eye distance from target, metres
-  double _fovDeg = 50; // perspective vertical field of view
+  double _fovDeg = 75; // perspective vertical field of view (wide enough that
+  // the horizon frames naturally at low altitude; 50 felt like a long lens)
   double _screenH = 800; // last viewport height (for the perspective focal len)
   bool _controlsExpanded = true; // collapsible FAB stack
 
@@ -833,7 +834,7 @@ class _SimulationViewState extends State<SimulationView>
           // FOV (tap to cycle), only meaningful in perspective.
           InkWell(
             onTap: () => setState(() {
-              const opts = [40.0, 55.0, 70.0, 90.0];
+              const opts = [50.0, 65.0, 75.0, 90.0, 105.0];
               final i = opts.indexWhere((o) => o >= _fovDeg);
               _fovDeg = opts[(i + 1) % opts.length];
             }),
@@ -1088,7 +1089,8 @@ class _SimulationViewState extends State<SimulationView>
   @override
   Widget build(BuildContext context) {
     final snap = _snapshot;
-    _screenH = MediaQuery.sizeOf(context).height; // for the perspective focal len
+    // _screenH (perspective focal length) is set from the real render-canvas
+    // height by the LayoutBuilder around the painter below.
     return Scaffold(
       backgroundColor: const Color(0xFF000000),
       // Keep the FAB stack clear of the notch/home indicator.
@@ -1326,15 +1328,27 @@ class _SimulationViewState extends State<SimulationView>
                 Positioned.fill(
                   child: snap == null
                       ? const Center(child: CircularProgressIndicator())
-                      : CustomPaint(
-                          size: Size.infinite,
-                          painter: TopDownPainter(
-                            snap,
-                            textures: _textures,
-                            view: _activeCamera ?? OrthoCamera(_view, _metresPerPixel),
-                            layers: _layers,
-                          ),
-                        ),
+                      : LayoutBuilder(builder: (context, constraints) {
+                          // The perspective focal length must use the ACTUAL
+                          // render-canvas height, not the full MediaQuery window
+                          // (which over-states it and makes the lens read long /
+                          // the planet a touch small). Update it from the real
+                          // layout height each build.
+                          if (constraints.maxHeight.isFinite &&
+                              constraints.maxHeight > 0) {
+                            _screenH = constraints.maxHeight;
+                          }
+                          return CustomPaint(
+                            size: Size.infinite,
+                            painter: TopDownPainter(
+                              snap,
+                              textures: _textures,
+                              view: _activeCamera ??
+                                  OrthoCamera(_view, _metresPerPixel),
+                              layers: _layers,
+                            ),
+                          );
+                        }),
                 ),
                 // All UI overlays stay INSIDE the safe area.
                 Positioned.fill(
