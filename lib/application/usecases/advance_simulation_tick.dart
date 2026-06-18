@@ -33,6 +33,7 @@ import '../../domain/science/research_ledger.dart';
 import '../../domain/simulation/domain_event.dart';
 import '../../domain/orbits/state_vector_converter.dart';
 import '../../domain/thermal/eclipse_service.dart';
+import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
 import '../../domain/simulation/simulation_clock.dart';
 import '../../domain/subsystems/vessel_mining_updater.dart';
@@ -230,12 +231,37 @@ class AdvanceSimulationTick {
           : PropagationMode.physics;
       vessel.mode = mode;
 
-      // 4. Advance motion (landed vessels stay put).
+      // 4. Advance motion. A landed vessel doesn't fly, but it must CO-ROTATE
+      // with the surface — otherwise the planet spins out from under it and it
+      // appears to drift. Rotate its body-centred position (and velocity, so it
+      // matches the local surface motion) about the body's spin axis (+Z) by
+      // omega*dt; spin the attitude to match so it stays oriented to the ground.
       if (!vessel.landed) {
         final next = mode == PropagationMode.onRails
             ? _onRails(vessel, activeBody, clock)
             : _physics(vessel, activeBody, sample, inAtmosphere, dt);
         vessel.updateState(next);
+      } else {
+        final omega = activeBody.angularVelocity;
+        if (omega != 0 && dt != 0) {
+          final dTheta = omega * dt;
+          final c = math.cos(dTheta), s = math.sin(dTheta);
+          final p = vessel.state.position;
+          // Rotate about +Z (the lon/lat pole axis).
+          final rp = Vector3(
+            p.x * c - p.y * s,
+            p.x * s + p.y * c,
+            p.z,
+          );
+          // Surface velocity at the new point = omega x r (so it tracks the spin).
+          final sv = Vector3(-omega * rp.y, omega * rp.x, 0);
+          final spinQ = Quaternion.axisAngle(Vector3(0, 0, 1), dTheta);
+          vessel.updateState(vessel.state.copyWith(
+            position: rp,
+            velocity: sv,
+            attitude: (spinQ * vessel.state.attitude).normalized,
+          ));
+        }
       }
 
       // 4b. Surface contact: a vessel that has descended below the surface
