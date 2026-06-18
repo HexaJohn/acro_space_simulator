@@ -155,7 +155,12 @@ class SphereTexture {
     // trigger + ceiling 10 keeps the horizon smooth without the blow-up.
     if (radiusM > 0 && alt > 0 && alt < radiusM * 0.1) {
       final extra = (math.log(radiusM / alt) / math.ln2).round();
-      maxDepth = (6 + extra).clamp(7, 10);
+      // Ceiling 12: enough to tessellate the small low-altitude cap to
+      // screen-sized leaves; the cap-angle prune + near-plane straddle cap keep
+      // the recursion bounded (the explosion that once forced this down to 10 is
+      // handled there now). Higher than 12 buys nothing the size test wouldn't
+      // stop anyway and only risks cost.
+      maxDepth = (6 + extra).clamp(7, 12);
     }
 
     // Weld-key resolution. A shared edge midpoint is the EXACT same float from
@@ -217,7 +222,29 @@ class SphereTexture {
           : (cnx * sun[0] + cny * sun[1] + cnz * sun[2]).clamp(0.0, 1.0);
       final shade = selfLuminous ? 1.0 : (0.12 + 0.88 * lit);
       final day = _smoothstep(0.0, 0.12, lit);
-      final limb = math.pow((1.0 - cnz.clamp(0.0, 1.0)), 1.6).toDouble();
+      // Atmosphere glow concentrates at the EYE's horizon, not the sphere's
+      // view-silhouette. Far away these coincide and (1-cnz) is fine; close to
+      // the surface the real horizon is far inside the cnz=0 great circle, so the
+      // old term lit a ring across mid-surface instead of along the horizon (the
+      // "atmosphere not aligned with the surface" report). Use the horizon
+      // coordinate h = -(centreFromEye . n)/radiusM: h=1 at the eye's horizon,
+      // h>1 toward the sub-point. Glow peaks at the horizon and fades inward.
+      double limb;
+      if (radiusM > 0 && eyeDist > radiusM) {
+        final h = -(centreFromEye.x * nx +
+                centreFromEye.y * ny +
+                centreFromEye.z * nz) /
+            radiusM; // 1 at horizon, larger toward nadir
+        // Width of the glow band (in h units) scales with altitude: a thin band
+        // hugging the horizon when low, broadening when high (where it tends back
+        // toward the view-silhouette look).
+        final hMax = eyeDist / radiusM; // h at the sub-point (nadir)
+        final band = (hMax - 1.0).clamp(0.02, 4.0);
+        final t = ((h - 1.0) / band).clamp(0.0, 1.0); // 0 at horizon -> 1 inward
+        limb = math.pow(1.0 - t, 2.2).toDouble();
+      } else {
+        limb = math.pow((1.0 - cnz.clamp(0.0, 1.0)), 1.6).toDouble();
+      }
       final atmoA = (0.06 + 0.94 * limb) * day;
       final warmF = (1.0 - _smoothstep(0.0, 0.45, lit)) * day;
       final vtx = _V(
