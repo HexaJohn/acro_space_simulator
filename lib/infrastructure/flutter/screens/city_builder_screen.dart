@@ -285,8 +285,12 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
   static const double _refundFraction = 0.5;
   static const double _foodPerPersonPerSec = 0.02;
   static const double _waterPerPersonPerSec = 0.03;
-  static const double _garbagePerPersonPerSec = 0.015;
-  static const double _sewagePerPersonPerSec = 0.02;
+  // Per-capita waste output. Kept low so a handful of landfills / sewage plants
+  // keep a mid-size colony clear — the old rates (0.015 / 0.02) buried even a
+  // small colony in backlog faster than reasonable waste infrastructure could
+  // process it.
+  static const double _garbagePerPersonPerSec = 0.006;
+  static const double _sewagePerPersonPerSec = 0.008;
   static const double _baseStockCap = 200;
   static const double _taxPerWorkerPerSec = 0.05;
   static const double _researchPerPopPerSec = 0.02;
