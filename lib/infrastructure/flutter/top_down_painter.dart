@@ -4,7 +4,6 @@ import 'dart:ui' as ui show Image, Gradient, Vertices, VertexMode;
 import 'package:flutter/material.dart';
 
 import '../../adapters/presenters/atmosphere_halo.dart';
-import '../../adapters/presenters/body_shading.dart';
 import '../../adapters/presenters/top_down_snapshot.dart';
 import '../../domain/shared/vector3.dart';
 import 'debug_layers.dart';
@@ -61,7 +60,6 @@ class TopDownPainter extends CustomPainter {
   }
 
   void _paintWorld(Canvas canvas, Size size, Offset centre) {
-    const shading = BodyShading();
     // Coordinates arrive as SCREEN px (centre-origin, +y up); place at the
     // viewport centre with Y flipped for Flutter's downward axis.
     Offset project(double xPx, double yPx) =>
@@ -265,23 +263,16 @@ class TopDownPainter extends CustomPainter {
         continue;
       }
 
-      // No texture (a star, the texture not yet decoded, sub-pixel, or the
-      // planet-texture layer is off): a simple lit/flat dot. Bodies normally have
-      // a texture (real map or Moon fallback), so this is the rare/tiny case.
+      // No texture IMAGE available. There is NO flat disc fallback of any kind
+      // any more — a body is ALWAYS the textured sphere once its image loads.
+      // The only non-sphere draws kept are: a self-luminous STAR, and a
+      // sub-pixel DOT (a body too small to resolve must still be one pixel, not
+      // invisible). A resolvable planet whose image hasn't decoded yet draws
+      // nothing for the frame or two until it loads (no disc flash).
       if (b.isStar) {
         canvas.drawCircle(c, discRPx, Paint()..color = base); // self-luminous
       } else if (rPx < 2.5) {
         canvas.drawCircle(c, discRPx, Paint()..color = _scale(base, 0.6)); // dot
-      } else {
-        if (b.hasAtmosphere && layers.atmoHalo) {
-          _atmosphereHalo(canvas, c, discRPx, size,
-              view: view,
-              sunWorld: Vector3(b.sunWorldX, b.sunWorldY, b.sunWorldZ),
-              tint: atmoCol,
-              thickness: atmoThick);
-        }
-        final sun = Vector3(b.sunX, b.sunY, 0);
-        _drawShadedDisc(canvas, c, discRPx, base, sun, shading, b.sunFacing);
       }
 
       _drawRings(canvas, b, project, false); // near half, over the disc
@@ -912,52 +903,6 @@ class TopDownPainter extends CustomPainter {
     return t * t * (3 - 2 * t);
   }
 
-  /// Ultra-basic shaded disc: clip to the body circle, fill dark, then paint a
-  /// coarse grid of cells tinted by Lambert brightness. The sun arrives as a full
-  /// 3D direction (screen x,y + [sunZ] = how much it faces the camera), so the
-  /// shading is correct even when the sun is along the view axis (front-on lights
-  /// the whole disc, back-on leaves it dark) — the old 2D-only sun couldn't tell.
-  void _drawShadedDisc(Canvas canvas, Offset c, double rPx, Color base,
-      Vector3 sun, BodyShading shading, double sunZ) {
-    canvas.save();
-    canvas.clipPath(Path()..addOval(Rect.fromCircle(center: c, radius: rPx)));
-    // Night side.
-    canvas.drawCircle(c, rPx, Paint()..color = _scale(base, 0.12));
-
-    // Full 3D sun direction. sun.x/.y are the screen-plane components; sunZ is
-    // toward the camera. Normalize so the Lambert dot is a true cosine.
-    var sx = sun.x, sy = sun.y, sz = sunZ;
-    final sl = math.sqrt(sx * sx + sy * sy + sz * sz);
-    if (sl < 1e-6) {
-      sx = 0;
-      sy = 0;
-      sz = 1;
-    } else {
-      sx /= sl;
-      sy /= sl;
-      sz /= sl;
-    }
-
-    final step = math.max(2.0, rPx / 10); // ~10 cells across
-    for (var py = -rPx; py <= rPx; py += step) {
-      for (var px = -rPx; px <= rPx; px += step) {
-        final dx = px / rPx;
-        final dy = py / rPx;
-        final r2 = dx * dx + dy * dy;
-        if (r2 > 1) continue;
-        // Surface normal of the visible hemisphere at this cell (z toward
-        // camera). Screen Y is flipped vs world, so the normal's y is -dy.
-        final nz = math.sqrt(1 - r2);
-        final bright = (dx * sx + (-dy) * sy + nz * sz).clamp(0.0, 1.0);
-        if (bright <= 0.02) continue;
-        canvas.drawRect(
-          Rect.fromLTWH(c.dx + px, c.dy + py, step + 0.6, step + 0.6),
-          Paint()..color = _scale(base, 0.15 + 0.85 * bright),
-        );
-      }
-    }
-    canvas.restore();
-  }
 
   Color _scale(Color base, double f) => Color.fromARGB(
         255,
