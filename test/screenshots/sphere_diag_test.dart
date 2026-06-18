@@ -212,7 +212,7 @@ void main() {
   // the zoom range the user reported as choppy (eye distance from Earth centre).
   testWidgets('PERF sweep tris vs altitude', (t) async {
     final marks = <double>[
-      1e9, 1e8, 5e7, 2.5e7, 5e6, 4e6, 2e6, 1e6, 5e5, 1e5, 2e4,
+      1e9, 1e8, 5e7, 2.5e7, 5e6, 4e6, 2e6, 1e6, 5e5, 1e5, 2e4, 1e3,
     ];
     final lines = <String>[];
     for (final d in marks) {
@@ -276,6 +276,22 @@ void main() {
     testWidgets('sphere landed 17.6km ${spec.$1}', (t) async {
       await _shootSphere(t, 'landed_${spec.$1}',
           altM: 17610, elevation: spec.$2, fovDeg: 75);
+    });
+  }
+
+  // VERY low range (100 m) at the HORIZON (el ~0) — the in-game "range 100 m
+  // el0" reading with a residual black wedge above the sub-camera point. At el0
+  // the view axis is tangent to the surface, so the near plane slices through
+  // the ground right at the vessel; the boundary above/behind it is the hard
+  // case for the near-plane clip.
+  for (final spec in <(String, double)>[
+    ('el0', 0.5 * math.pi / 180), // ~horizon
+    ('el2', 2 * math.pi / 180),
+    ('elneg', -3 * math.pi / 180), // looking slightly DOWN at the near ground
+  ]) {
+    testWidgets('sphere landed 100m ${spec.$1}', (t) async {
+      await _shootSphere(t, 'land100_${spec.$1}',
+          altM: 100, elevation: spec.$2, fovDeg: 75);
     });
   }
 
