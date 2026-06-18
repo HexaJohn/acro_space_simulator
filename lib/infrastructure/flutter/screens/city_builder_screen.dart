@@ -1081,6 +1081,24 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
   bool get _hasSpaceport =>
       _utils.entries.any((e) => e.value.type == 'spaceport' && _isConnected(e.key));
 
+  /// Honest one-word population trend for the status chip. Mirrors the pop
+  /// step's target so the label matches what's actually happening: without a
+  /// working spaceport the colony is stuck at its crew floor (no immigration),
+  /// so it's 'stable', not 'growing'. With a spaceport it's growing toward the
+  /// housing/happiness cap, shrinking past it, or stable at it.
+  String get _popTrend {
+    final liveHousing = math.max(0.0, _housing - _corpses);
+    final cap = liveHousing * (0.4 + 0.6 * _happiness);
+    final floor = (_landerCrew + _reliefCrew).toDouble();
+    final target = (_hasSpaceport ? math.max(cap, floor) : floor) * _foodSecurity;
+    if (!_hasSpaceport) return 'stable'; // no immigration without a spaceport
+    if (_commsDown) return 'isolated'; // blackout halts arrivals
+    const eps = 0.5;
+    if (_population < target - eps) return 'growing';
+    if (_population > target + eps) return 'shrinking';
+    return 'stable';
+  }
+
   /// True once the colony has built at least one spaceport — so if it later has
   /// none we can say it was DEMOLISHED rather than never built.
   bool _everHadSpaceport = false;
@@ -3800,7 +3818,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     if (notes.isEmpty) {
       return _statusChip(
           Icons.rocket_launch,
-          'Pop ${_population.round()} · growing',
+          'Pop ${_population.round()} · $_popTrend',
           AppTheme.accent2,
           () => _explainAlert('healthy'));
     }
