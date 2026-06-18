@@ -192,13 +192,18 @@ class TopDownPainter extends CustomPainter {
               _drawShadedDisc(canvas, c, discRPx, base, sun, shading, b.sunFacing);
             }
           }
-        } else {
-          // Disc covers the viewport: the rim-anchored base disc above is
-          // off-screen, so the textured sphere is the ONLY thing drawing the
-          // surface. If it fails to rasterize the planet would vanish — paint a
-          // fullscreen flat fill underneath as the fallback (same as the
-          // no-texture zoomed-in path) so the body always reads as solid.
-          canvas.drawRect(Offset.zero & size, Paint()..color = _scale(base, 0.6));
+        } else if (layers.baseDisc) {
+          // Cap reached: the textured sphere is the main surface, but if it
+          // fails to rasterize the planet would vanish. Paint a flat fallback
+          // UNDER it — but only within the disc circle (radius discRPx at `c`),
+          // NOT fullscreen, so the area beyond the limb stays empty and the
+          // horizon/space still shows when looking toward the edge of the body.
+          final sun = Vector3(b.sunX, b.sunY, 0);
+          if (b.isStar) {
+            canvas.drawCircle(c, discRPx, Paint()..color = base);
+          } else {
+            _drawShadedDisc(canvas, c, discRPx, base, sun, shading, b.sunFacing);
+          }
         }
         // The sphere is the fragile part; isolate it so a failure leaves the
         // already-drawn disc rather than blanking the world layer.
