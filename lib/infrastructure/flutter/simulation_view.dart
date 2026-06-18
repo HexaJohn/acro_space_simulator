@@ -36,7 +36,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 2026-06-17.134';
+const String kBuildStamp = 'build 2026-06-17.135';
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -150,7 +150,7 @@ class _SimulationViewState extends State<SimulationView>
   double _touchYaw = 0;
   double _touchRoll = 0;
   double _touchThrottle = 0; // 0..1 from the throttle slider
-  double _touchThrottleFine = 0.5; // self-centring fine-trim wheel (0.5 = idle)
+  double _touchThrottleFine = 0; // 0..1 -> absolute 0..1% throttle (fine landing)
 
   /// Build a PilotInput from keyboard + on-screen touch controls (whichever is
   /// active; they sum so either input device works).
@@ -1389,9 +1389,8 @@ class _SimulationViewState extends State<SimulationView>
             top: false,
             child: Column(mainAxisSize: MainAxisSize.min, children: [
               _flightStatusRow(),
-              // FINE throttle — a self-centring trim wheel: drag off centre to
-              // nudge the throttle by small amounts for precise settings, snaps
-              // back to centre on release. Sits ABOVE the coarse slider.
+              // FINE throttle — an absolute 0..1% throttle for delicate landing
+              // burns (full slider span = 1% thrust). Sits ABOVE the coarse one.
               Row(children: [
                 const SizedBox(
                     width: 56,
@@ -1405,19 +1404,23 @@ class _SimulationViewState extends State<SimulationView>
                         thumbColor: Color(0xFFFFC58A),
                         trackHeight: 2),
                     child: Slider(
+                      // 0..1 maps to an ABSOLUTE 0..1% throttle for fine landing
+                      // burns. Sets the throttle directly (held, not a trim).
                       value: _touchThrottleFine,
                       onChanged: (v) => setState(() {
-                        // Map the off-centre amount to a small throttle delta.
-                        _touchThrottle =
-                            (_touchThrottle + (v - 0.5) * 0.04).clamp(0.0, 1.0);
                         _touchThrottleFine = v;
+                        _touchThrottle = v * 0.01; // 0..1%
                       }),
-                      onChangeEnd: (_) =>
-                          setState(() => _touchThrottleFine = 0.5), // re-centre
                     ),
                   ),
                 ),
-                const SizedBox(width: 40),
+                SizedBox(
+                    width: 40,
+                    child: Text(
+                        '${(_touchThrottleFine).toStringAsFixed(2)}%',
+                        textAlign: TextAlign.right,
+                        style: const TextStyle(
+                            color: Color(0xFFFFC58A), fontSize: 11))),
               ]),
               // Throttle — held (does NOT self-centre).
               Row(children: [
