@@ -37,7 +37,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 2026-06-17.128';
+const String kBuildStamp = 'build 2026-06-17.129';
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -1532,6 +1532,26 @@ class _SimulationViewState extends State<SimulationView>
       peStr = _altStr(orbit.periapsis - body.radius);
     }
 
+    // Hottest part's temperature as a fraction of its destruction limit — the
+    // reentry heat gauge. White cool, amber warm, red near the limit.
+    double tempFrac = 0;
+    double tempK = 0;
+    double maxK = 0;
+    bool hasAblator = false;
+    for (final t in v.thermal) {
+      final f = t.maxTemperature > 0 ? t.temperature / t.maxTemperature : 0.0;
+      if (f > tempFrac) {
+        tempFrac = f;
+        tempK = t.temperature;
+        maxK = t.maxTemperature;
+      }
+      if (t.ablator > 0) hasAblator = true;
+    }
+    final hot = tempFrac > 0.55; // only show the gauge once it's heating up
+    final tempColor = tempFrac > 0.85
+        ? const Color(0xFFFF3B30)
+        : (tempFrac > 0.7 ? const Color(0xFFFF8C66) : const Color(0xFF9FB4CC));
+
     Widget line(String s, [Color c = const Color(0xFF9FB4CC)]) => Text(
         s, style: TextStyle(color: c, fontSize: 12, height: 1.3));
 
@@ -1551,6 +1571,19 @@ class _SimulationViewState extends State<SimulationView>
           line('Q    ${(q / 1000).toStringAsFixed(1)} kPa', qColor),
           line('AP   $apStr'),
           line('PE   $peStr'),
+          // Heat gauge + warning — only once the craft is actually heating up.
+          if (hot) ...[
+            line(
+                'TEMP ${tempK.toStringAsFixed(0)}/${maxK.toStringAsFixed(0)} K'
+                ' (${(tempFrac * 100).toStringAsFixed(0)}%)',
+                tempColor),
+            if (tempFrac > 0.85)
+              line(
+                  hasAblator
+                      ? '⚠ OVERHEATING — ablator burning'
+                      : '⚠ OVERHEATING — pull up / shed speed',
+                  const Color(0xFFFF3B30)),
+          ],
         ],
       ),
     );
