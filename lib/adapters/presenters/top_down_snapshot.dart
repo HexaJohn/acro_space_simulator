@@ -510,20 +510,25 @@ class TopDownSnapshotPresenter {
       var pathBehind = const <bool>[];
       final vBody = system.body(v.dominantBody);
       if (!v.landed && vBody != null && v.state.velocity.length > 1) {
-        final pts = trajectory.predictPath(
+        final bodyOrigin = bodyWorld(vBody);
+        final bodyDepth = depthOf(bodyOrigin);
+        // Lift a body-centred path point to world and project to screen px (null
+        // when culled) — the adaptive sampler bisects against this on-screen.
+        Vector3 toWorld(Vector3 p) =>
+            Vector3(bodyOrigin.x + p.x, bodyOrigin.y + p.y, bodyOrigin.z + p.z);
+        // Adaptive screen-space sampling: dense near the craft + at sharp
+        // turning points, sparse on far/straight arcs.
+        final pts = trajectory.predictPathAdaptive(
           position: v.state.position,
           velocity: v.state.velocity,
           body: vBody,
           epoch: epoch,
-          samples: 48,
+          projectPx: (p) => camera.projectPx(toWorld(p) - camWorld),
         );
-        final bodyOrigin = bodyWorld(vBody);
-        final bodyDepth = depthOf(bodyOrigin);
         final pp = <({double x, double y})>[];
         final beh = <bool>[];
         for (final p in pts) {
-          final world =
-              Vector3(bodyOrigin.x + p.x, bodyOrigin.y + p.y, bodyOrigin.z + p.z);
+          final world = toWorld(p);
           pp.add(projOrNan(world));
           beh.add(depthOf(world) > bodyDepth);
         }
