@@ -175,12 +175,14 @@ class SphereTexture {
       return vtx;
     }
 
-    // Target leaf size on screen (px) + recursion bound. Deeper near the surface
-    // (smaller leaves) where the ground fills the view; the cap on depth keeps a
-    // pathological grazing view from exploding the triangle count.
-    const targetPx = 22.0;
+    // Target leaf size on screen (px) + recursion bound. Bigger leaves (40 px)
+    // keep the triangle count sane across the whole near-planet range (~0.5–5 Mm
+    // where the disc fills the screen). Depth is capped so a grazing view can't
+    // explode; combined with the screen-bounds prune below, off-screen subtrees
+    // never recurse.
+    const targetPx = 40.0;
     final alt = radiusM > 0 ? (eyeDist - radiusM) : double.infinity;
-    final maxDepth = (radiusM > 0 && alt < radiusM) ? 8 : 6;
+    final maxDepth = (radiusM > 0 && alt < radiusM) ? 7 : 6;
 
     // Emit a leaf node's two triangles (corners already projected + visible).
     void emitLeaf(_V a, _V b, _V c, _V d) {
@@ -189,6 +191,11 @@ class SphereTexture {
       _tri(positions, texCoords, shadowColors, atmoColors, atmoTint, atmoWarm,
           b, c, d, iw);
     }
+
+    // Screen bounds (canvas px) with a generous margin so a node straddling the
+    // edge still tessellates; nodes entirely off ONE edge are pruned.
+    final screenW = viewportCentre.dx * 2, screenH = viewportCentre.dy * 2;
+    final marginX = screenW * 0.5, marginY = screenH * 0.5;
 
     // Recursively tessellate the lat/lon rectangle [la0,la1]x[lo0,lo1].
     void recurse(double la0, double la1, double lo0, double lo1, int depth) {
@@ -206,6 +213,24 @@ class SphereTexture {
       final b = evalCorner(la0, lo1);
       final c = evalCorner(la1, lo0);
       final d = evalCorner(la1, lo1);
+
+      // SCREEN-BOUNDS PRUNE: if every projected corner is in front (non-null) and
+      // they all lie off the SAME screen edge, the node can't be on screen — skip
+      // it (and its subtree). This is the big perf win at low altitude where the
+      // visible cap is large but most of it is off-screen. A node with any null
+      // corner (crosses the near plane) is kept so the boundary still resolves.
+      if (a != null && b != null && c != null && d != null) {
+        final minX = math.min(a.pos.dx, math.min(b.pos.dx, math.min(c.pos.dx, d.pos.dx)));
+        final maxX = math.max(a.pos.dx, math.max(b.pos.dx, math.max(c.pos.dx, d.pos.dx)));
+        final minY = math.min(a.pos.dy, math.min(b.pos.dy, math.min(c.pos.dy, d.pos.dy)));
+        final maxY = math.max(a.pos.dy, math.max(b.pos.dy, math.max(c.pos.dy, d.pos.dy)));
+        if (maxX < -marginX ||
+            minX > screenW + marginX ||
+            maxY < -marginY ||
+            minY > screenH + marginY) {
+          return; // wholly off one edge
+        }
+      }
 
       // Decide whether to split: too big on screen (use the projected diagonal of
       // whatever corners we have) and depth remains. If a corner is behind the
