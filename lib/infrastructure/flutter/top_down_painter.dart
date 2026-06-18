@@ -262,54 +262,77 @@ class TopDownPainter extends CustomPainter {
     }
   }
 
-  /// A lit cone marker oriented by the craft's real 3D attitude, projected
-  /// through the camera. Faces are flat-shaded by Lambert vs the sun and painted
-  /// back-to-front so the cone reads as solid.
+  /// The craft marker: a 4-sided SQUARE-base pyramid (the lander shape),
+  /// oriented by the craft's real 3D attitude and projected through the camera.
+  /// Each of the four faces is split at its base-edge midpoint into two
+  /// triangles -> 8 facets, painted in an alternating light/dark checker (the
+  /// lander look) modulated by Lambert vs the sun. Drawn back-to-front so it
+  /// reads as solid.
   void _drawCone(
       Canvas canvas, Offset c, VesselView v, double sizePx, Color tint) {
-    // Cone axes in screen px: nose (forward) and the base plane (right/up of the
-    // craft) projected onto the camera basis.
+    // Project a craft-space direction onto the camera screen plane (px).
     Offset axis(Vector3 worldDir) =>
         Offset(worldDir.dot(view.right), -worldDir.dot(view.up));
     final noseDir = axis(v.forwardW);
-    final rightDir = axis(v.upW.cross(v.forwardW).normalized);
+    // Craft right/up axes spanning the base plane (perpendicular to the nose).
+    final craftRight = v.upW.cross(v.forwardW).normalized;
+    final rightDir = axis(craftRight);
     final upDir = axis(v.upW);
 
     final len = sizePx * 1.4;
     final rad = sizePx * 0.6;
     final apex = c + noseDir * len;
-    const seg = 12;
-    final base = <Offset>[];
-    final base3 = <Vector3>[]; // world-dir of each rim point (for lighting)
-    for (var i = 0; i < seg; i++) {
-      final a = i / seg * 2 * math.pi;
-      final r = v.upW.cross(v.forwardW).normalized * math.cos(a) +
-          v.upW * math.sin(a);
-      base3.add(r);
-      base.add(c + (rightDir * math.cos(a) + upDir * math.sin(a)) * rad);
+    // 4 square-base corners (on the diagonals so the base reads as a square).
+    final corner = <Offset>[];
+    final corner3 = <Vector3>[]; // world-dir of each corner (for lighting/depth)
+    for (var i = 0; i < 4; i++) {
+      final a = (i + 0.5) / 4 * 2 * math.pi;
+      corner3.add((craftRight * math.cos(a) + v.upW * math.sin(a)).normalized);
+      corner.add(c + (rightDir * math.cos(a) + upDir * math.sin(a)) * rad);
     }
+    final dark = _scale(tint, 0.55); // the darker checker tone
 
-    // Each side face: apex + two adjacent rim points. Outward normal ~ the rim
-    // direction tilted toward the nose; Lambert vs the sun.
-    final faces = <({Path path, double bright, double depth})>[];
-    for (var i = 0; i < seg; i++) {
-      final j = (i + 1) % seg;
-      final p = Path()
-        ..moveTo(apex.dx, apex.dy)
-        ..lineTo(base[i].dx, base[i].dy)
-        ..lineTo(base[j].dx, base[j].dy)
-        ..close();
-      final normal = (base3[i] + base3[j]).normalized * 0.7 + v.forwardW * 0.3;
-      final bright = (normal.normalized.dot(v.sunW)).clamp(0.0, 1.0);
-      // Depth: toward/away — average the rim points' along-forward component.
-      final depth = -(base3[i] + base3[j]).dot(view.forward);
-      faces.add((path: p, bright: 0.25 + 0.75 * bright, depth: depth));
+    // Two facets per face (split at the edge midpoint) -> 8, checkered by the
+    // GLOBAL facet index so it goes light/dark/light/dark all the way round.
+    final faces = <({Path path, double bright, double depth, bool dark})>[];
+    for (var i = 0; i < 4; i++) {
+      final j = (i + 1) % 4;
+      final mid = Offset.lerp(corner[i], corner[j], 0.5)!;
+      final mid3 = (corner3[i] + corner3[j]).normalized;
+      // Face outward normal: base dirs tilted toward the nose. Lambert vs sun.
+      final normal = (corner3[i] + corner3[j]).normalized * 0.7 +
+          v.forwardW * 0.3;
+      final bright = 0.25 + 0.75 * (normal.normalized.dot(v.sunW)).clamp(0.0, 1.0);
+      final depth = -mid3.dot(view.forward);
+      // Sub-triangle A: apex, corner i, mid.
+      faces.add((
+        path: Path()
+          ..moveTo(apex.dx, apex.dy)
+          ..lineTo(corner[i].dx, corner[i].dy)
+          ..lineTo(mid.dx, mid.dy)
+          ..close(),
+        bright: bright,
+        depth: depth,
+        dark: (2 * i).isOdd, // = false -> light
+      ));
+      // Sub-triangle B: apex, mid, corner j.
+      faces.add((
+        path: Path()
+          ..moveTo(apex.dx, apex.dy)
+          ..lineTo(mid.dx, mid.dy)
+          ..lineTo(corner[j].dx, corner[j].dy)
+          ..close(),
+        bright: bright,
+        depth: depth,
+        dark: (2 * i + 1).isOdd, // = true -> dark
+      ));
     }
     faces.sort((a, b) => a.depth.compareTo(b.depth)); // far first
     for (final f in faces) {
-      canvas.drawPath(f.path, Paint()..color = _scale(tint, f.bright));
+      final c = _scale(f.dark ? dark : tint, f.bright);
+      canvas.drawPath(f.path, Paint()..color = c);
     }
-    // Outline for definition.
+    // Nose tip for definition.
     canvas.drawCircle(c, 1.5, Paint()..color = tint);
   }
 
