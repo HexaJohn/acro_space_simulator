@@ -268,6 +268,10 @@ class TopDownPainter extends CustomPainter {
       _drawVesselPath(canvas, v, project, clip, false);
     }
 
+    // The focused vessel's FLOWN trail (breadcrumb of where it has actually
+    // been), drawn over the rails so you can read the real trajectory.
+    _drawFlownTrail(canvas, project, clip);
+
     // Vessels: LOD — a flat heading triangle when small (<= ~10 px apparent),
     // a lit 3D cone when big enough to read (close-up / chase cam).
     const craftLengthM = 30.0; // nominal craft size for the cone projection
@@ -444,6 +448,29 @@ class TopDownPainter extends CustomPainter {
       if (ai && !bi) pb = Offset.lerp(pa, pb, 0.5)!;
       if (bi && !ai) pa = Offset.lerp(pa, pb, 0.5)!;
       final seg = _clipSegment(pa, pb, clip);
+      if (seg != null) canvas.drawLine(seg.$1, seg.$2, paint);
+    }
+  }
+
+  /// The focused vessel's FLOWN breadcrumb trail (screen px from the snapshot).
+  /// Solid cyan, fading toward the oldest point so the newest path reads
+  /// strongest. NaN points (camera-culled) break the line rather than streaking
+  /// across the screen.
+  void _drawFlownTrail(
+      Canvas canvas, Offset Function(double, double) project, Rect clip) {
+    final pts = snapshot.trailPx;
+    if (pts.length < 2) return;
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5
+      ..strokeCap = StrokeCap.round;
+    for (var i = 0; i < pts.length - 1; i++) {
+      final a = pts[i], b = pts[i + 1];
+      if (a.x.isNaN || a.y.isNaN || b.x.isNaN || b.y.isNaN) continue;
+      // Older points fade out: alpha ramps from ~0.1 (oldest) to 0.9 (newest).
+      final t = i / (pts.length - 1);
+      paint.color = const Color(0xFF4FC3F7).withValues(alpha: 0.1 + 0.8 * t);
+      final seg = _clipSegment(project(a.x, a.y), project(b.x, b.y), clip);
       if (seg != null) canvas.drawLine(seg.$1, seg.$2, paint);
     }
   }

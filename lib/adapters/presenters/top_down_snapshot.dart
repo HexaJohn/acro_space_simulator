@@ -186,10 +186,18 @@ class TopDownSnapshot {
   final List<BodyView> bodies;
   final List<VesselView> vessels;
   final HudView hud;
+
+  /// The focused vessel's FLOWN path (breadcrumb), in SCREEN px — the actual
+  /// trajectory already travelled, distinct from each vessel's predicted orbit
+  /// rail. Empty when no trail is supplied. Points the camera culled are NaN so
+  /// the painter's clip drops those segments.
+  final List<({double x, double y})> trailPx;
+
   const TopDownSnapshot({
     required this.bodies,
     required this.vessels,
     required this.hud,
+    this.trailPx = const [],
   });
 }
 
@@ -277,6 +285,11 @@ class TopDownSnapshotPresenter {
     // Hide unrelated bodies' rails + labels once the active body's SOI projects
     // larger than this (we're zoomed inside its neighbourhood).
     double declutterSoiPx = 1400,
+    // The focused vessel's flown breadcrumb, as positions RELATIVE TO its
+    // dominant body (the same frame as Vessel.state.position), plus that body's
+    // id so we can lift them to world coords. Projected to screen px below.
+    List<Vector3> flownTrail = const [],
+    BodyId? flownTrailBody,
   }) {
     final system = universe.current();
 
@@ -537,10 +550,23 @@ class TopDownSnapshotPresenter {
       ));
     }
 
+    // Flown breadcrumb -> screen px. Lift each body-relative point to world via
+    // its dominant body, then project through the same camera as everything else
+    // (NaN where culled so the painter drops that segment).
+    final trailPx = <({double x, double y})>[];
+    if (flownTrail.isNotEmpty) {
+      final tb = flownTrailBody == null ? null : system.body(flownTrailBody);
+      final tbWorld = tb == null ? Vector3.zero : bodyWorld(tb);
+      for (final p in flownTrail) {
+        trailPx.add(projOrNan(tbWorld + p));
+      }
+    }
+
     return TopDownSnapshot(
       bodies: bodyViews,
       vessels: vesselViews,
       hud: _buildHud(focusVessel, focusBody, science),
+      trailPx: trailPx,
     );
   }
 
