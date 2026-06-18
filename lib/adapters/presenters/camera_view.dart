@@ -170,6 +170,13 @@ abstract class SceneCamera {
   /// no finite near plane, so it returns negative infinity (nothing is "behind").
   double get nearPlane;
 
+  /// Focal length in pixels: `f` such that a camera-space point `(x,y,z)`
+  /// projects to `(x/z·f, y/z·f)`. The atmosphere fragment shader reconstructs the
+  /// per-pixel view ray as `(px, py, focalPx)`. Ortho has no perspective focal, so
+  /// it returns the pixels-per-radian-equivalent (1/metresPerPixel scaled) — only
+  /// the perspective camera drives the shader, so the ortho value is unused.
+  double get focalPx;
+
   /// Skip the tilted-view distance cull when ~top-down (everything's in plane).
   bool get isTopish;
 
@@ -219,6 +226,9 @@ class OrthoCamera implements SceneCamera {
 
   @override
   double get nearPlane => double.negativeInfinity; // ortho never culls behind
+
+  @override
+  double get focalPx => 1.0 / metresPerPixel; // unused (ortho drives no shader)
 
   @override
   bool get isTopish => orbit.isTopish;

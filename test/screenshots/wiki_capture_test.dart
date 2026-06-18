@@ -82,10 +82,18 @@ Future<void> _shoot(
 
   final cache = TextureCache();
   textures.forEach(cache.seed);
+  ui.FragmentShader? shader;
+  await t.runAsync(() async {
+    try {
+      final p = await ui.FragmentProgram.fromAsset('shaders/atmosphere.frag');
+      shader = p.fragmentShader();
+    } catch (_) {}
+  });
   final painter = TopDownPainter(
     snapshot,
     textures: cache,
     view: cam,
+    atmoShader: shader,
     layers: const DebugLayers(),
   );
 

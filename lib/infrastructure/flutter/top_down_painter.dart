@@ -1,5 +1,5 @@
 import 'dart:math' as math;
-import 'dart:ui' as ui show Image, Gradient, Vertices, VertexMode;
+import 'dart:ui' as ui show Image, Gradient, Vertices, VertexMode, FragmentShader;
 
 import 'package:flutter/material.dart';
 
@@ -36,6 +36,14 @@ class TopDownPainter extends CustomPainter {
   final TextureCache? textures;
   final SceneCamera view;
   final DebugLayers layers;
+
+  /// Per-pixel atmospheric-scattering fragment shader (loaded async by the view).
+  /// When present it draws a true path-length atmosphere correct at EVERY altitude
+  /// (orbit to surface). When null it falls back to the screen-space radial halo
+  /// (correct from orbit, degrades at the surface). Uniforms set in
+  /// [_atmosphereShaderPass].
+  final ui.FragmentShader? atmoShader;
+
   static const _sphere = SphereTexture();
 
   /// How far the star's corona glow reaches, in body radii.
@@ -44,7 +52,8 @@ class TopDownPainter extends CustomPainter {
   TopDownPainter(this.snapshot,
       {this.textures,
       required this.view,
-      this.layers = const DebugLayers()});
+      this.layers = const DebugLayers(),
+      this.atmoShader});
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -218,11 +227,10 @@ class TopDownPainter extends CustomPainter {
         // the horizon at orbital, mid, AND surface altitudes. The band runs from
         // the limb (inner, slight overlap so no gap) out by `thick` of the limb
         // radius, fading softly to space.
-        // NOTE: not gated on discCovers — even when the disc fills the viewport
-        // (low altitude), the HORIZON with space above it is visible, and that's
-        // exactly where the atmosphere band belongs. The radial mask keeps it
-        // transparent over the surface, so it only shows along the limb.
-        if (b.hasAtmosphere && layers.atmoHalo) {
+        // FALLBACK only: the radial-gradient halo is used when the per-pixel
+        // atmosphere SHADER isn't available (not loaded yet / no shader support).
+        // When the shader is present it draws below, AFTER the surface.
+        if (b.hasAtmosphere && layers.atmoHalo && atmoShader == null) {
           // Centre + radius for the radial-gradient band:
           //  * ORBITAL / MID (apparent radius moderate, centre projects): use the
           //    projected body centre `c` with the true apparent radius `rPx` — the
@@ -280,6 +288,16 @@ class TopDownPainter extends CustomPainter {
             atmoTint: (b.hasAtmosphere && layers.atmoOverlay) ? atmoCol : null,
           );
         } catch (_) {/* keep the disc fallback */}
+
+        // ATMOSPHERE (per-pixel shader) — drawn OVER the surface so it both tints
+        // the surface near the limb (atmospheric perspective) and glows above the
+        // horizon against space. Correct at every altitude because it ray-tests
+        // the atmosphere shell in 3D. Falls back to the radial halo above when the
+        // shader isn't loaded.
+        if (atmoShader != null && b.hasAtmosphere && layers.atmoHalo) {
+          _atmosphereShaderPass(canvas, size, b, atmoCol, atmoThick);
+        }
+
         if (!discCovers) {
           _drawRings(canvas, b, project, false); // near half, over the disc
           if (b.showLabel) {
@@ -848,6 +866,52 @@ class TopDownPainter extends CustomPainter {
 
   // Default day-sky tint (used when a body has no specific atmosphere colour).
   static const Color _rayleighBlue = Color(0xFF6FB4FF);
+
+  // Warm terminator / low-sun scatter colour.
+  static const Color _atmoWarm = Color(0xFFFF9D5C);
+
+  /// Draws the per-pixel atmosphere with [atmoShader]. Sets the shell geometry in
+  /// CAMERA space (the planet centre relative to the eye, scaled to planet-radius
+  /// units for float precision), the focal length (for the per-pixel ray), the
+  /// atmosphere thickness, the day + warm tints, and the sun direction; then
+  /// paints a viewport-filling rect — the shader returns 0 for rays that miss the
+  /// atmosphere, so only the limb/horizon band lights up. Correct at all altitudes.
+  void _atmosphereShaderPass(
+      Canvas canvas, Size size, BodyView b, Color tint, double thick) {
+    final shader = atmoShader!;
+    final r = b.radius;
+    if (r <= 0) return;
+    // Planet centre relative to the eye, in camera space (x=right, y=up, z=fwd),
+    // scaled by 1/R into planet-radius units.
+    final rel = b.worldRel - view.eyeOffset;
+    final cx = rel.dot(view.right) / r;
+    final cy = rel.dot(view.up) / r;
+    final cz = rel.dot(view.forward) / r;
+    // Sun direction in the same camera frame.
+    final sun = Vector3(b.sunWorldX, b.sunWorldY, b.sunWorldZ);
+    final sx = sun.dot(view.right), sy = sun.dot(view.up), sz = sun.dot(view.forward);
+
+    final day = tint;
+    const warm = _atmoWarm;
+    shader.setFloat(0, size.width);
+    shader.setFloat(1, size.height);
+    shader.setFloat(2, cx);
+    shader.setFloat(3, cy);
+    shader.setFloat(4, cz);
+    shader.setFloat(5, 1.0 + thick); // atmosphere top radius (radii)
+    shader.setFloat(6, view.focalPx);
+    shader.setFloat(7, day.r); // 0..1 channels (withValues exposes r/g/b doubles)
+    shader.setFloat(8, day.g);
+    shader.setFloat(9, day.b);
+    shader.setFloat(10, warm.r);
+    shader.setFloat(11, warm.g);
+    shader.setFloat(12, warm.b);
+    shader.setFloat(13, sx);
+    shader.setFloat(14, sy);
+    shader.setFloat(15, sz);
+    shader.setFloat(16, 1.0); // strength
+    canvas.drawRect(Offset.zero & size, Paint()..shader = shader);
+  }
 
   /// The body's visible LIMB as a projected screen circle — the TRUE silhouette.
   /// The tangent circle's centre is pulled toward the eye from the body centre by

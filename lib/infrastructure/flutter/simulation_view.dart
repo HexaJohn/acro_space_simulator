@@ -1,5 +1,6 @@
 ﻿import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:ui' as ui show FragmentProgram, FragmentShader;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
@@ -36,7 +37,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 2026-06-18.171';
+const String kBuildStamp = 'build 2026-06-18.172';
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -345,8 +346,24 @@ class _SimulationViewState extends State<SimulationView>
         if (mounted) setState(() {});
       },
     );
+    _loadAtmosphereShader();
 
     _ticker = createTicker(_onFrame)..start();
+  }
+
+  /// The per-pixel atmospheric-scattering shader, loaded once. Null until ready
+  /// (the painter falls back to the radial-gradient halo meanwhile) and on
+  /// platforms without shader support.
+  ui.FragmentShader? _atmoShader;
+  Future<void> _loadAtmosphereShader() async {
+    try {
+      final program =
+          await ui.FragmentProgram.fromAsset('shaders/atmosphere.frag');
+      if (!mounted) return;
+      setState(() => _atmoShader = program.fragmentShader());
+    } catch (_) {
+      // No shader support — keep the radial-gradient halo fallback.
+    }
   }
 
   /// (Re)build the tick with the current debug-cheat flags. Called on init and
@@ -1346,6 +1363,7 @@ class _SimulationViewState extends State<SimulationView>
                               view: _activeCamera ??
                                   OrthoCamera(_view, _metresPerPixel),
                               layers: _layers,
+                              atmoShader: _atmoShader,
                             ),
                           );
                         }),
