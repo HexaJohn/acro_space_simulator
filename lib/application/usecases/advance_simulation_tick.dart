@@ -368,7 +368,16 @@ class AdvanceSimulationTick {
   ) {
     // Thermal: solar (gated by eclipse shadow), reentry, radiative cooling.
     if (vessel.thermal.isNotEmpty) {
-      final airspeed = inAtmosphere ? vessel.state.velocity.length : 0.0;
+      // Airspeed is relative to the CO-ROTATING atmosphere, not the inertial
+      // frame: the air spins with the planet (v_air = omega x r). A landed (or
+      // slowly drifting) craft moves with the air, so its airspeed is ~0 — using
+      // the inertial speed made a landed craft on a fast-spinning body read as a
+      // reentry and burn up under time warp.
+      final omega = body.angularVelocity;
+      final r = vessel.state.position;
+      final vAir = Vector3(-omega * r.y, omega * r.x, 0);
+      final airspeed =
+          inAtmosphere ? (vessel.state.velocity - vAir).length : 0.0;
 
       // Sun direction = from the vessel's body toward the system root (star).
       // Body position relative to root, negated, points back to the star.
