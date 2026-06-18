@@ -20,7 +20,6 @@ import '../../application/persistence/game_state_codec.dart';
 import '../../application/ports/compute_port.dart';
 import '../../application/usecases/advance_simulation_tick.dart';
 import '../../domain/orbits/soi_transition_service.dart';
-import '../../domain/orbits/state_vector_converter.dart';
 import '../../domain/science/research_ledger.dart';
 import '../../domain/science/tech_tree.dart';
 import '../../domain/simulation/simulation_clock.dart';
@@ -37,7 +36,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 2026-06-17.129';
+const String kBuildStamp = 'build 2026-06-17.130';
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -1287,8 +1286,6 @@ class _SimulationViewState extends State<SimulationView>
                   child: SafeArea(
                     child: Stack(
                       children: [
-                // Flight telemetry (top-left): ALT / SPD / Q.
-                Positioned(top: 8, left: 8, child: _telemetryPanel()),
                 // Nav-ball: attitude/prograde of the locked vessel.
                 if (_layers.navBall && _navState() != null)
                   Positioned(
@@ -1495,105 +1492,6 @@ class _SimulationViewState extends State<SimulationView>
       ]),
     );
   }
-
-  /// Top-left flight telemetry HUD: altitude, speed, and dynamic pressure (q).
-  /// q drives structural failure, so it's coloured by how close it is to the
-  /// max-Q limit (white -> amber -> red). Only shown for a focused vessel.
-  Widget _telemetryPanel() {
-    final id = _focusVessel;
-    final v = id == null ? null : _vessels.byId(id);
-    if (v == null) return const SizedBox.shrink();
-    final body = _universe.current().body(v.dominantBody);
-    final alt = v.state.position.length - (body?.radius ?? 0);
-    final spd = v.state.velocity.length;
-    // Dynamic pressure q = 0.5 * rho * v^2 (Pa) from the atmosphere at altitude.
-    final sample = body?.atmosphere?.sampleAt(alt);
-    final rho = sample?.density ?? 0.0;
-    final q = 0.5 * rho * spd * spd;
-    const maxQ = 200000.0; // matches AdvanceSimulationTick.maxDynamicPressure
-    final qFrac = (q / maxQ).clamp(0.0, 1.0);
-    final qColor = qFrac > 0.85
-        ? const Color(0xFFFF6B6B)
-        : (qFrac > 0.5 ? const Color(0xFFFF8C66) : const Color(0xFF9FB4CC));
-
-    // Apoapsis / periapsis ALTITUDES (above the surface). Keplerian solve from
-    // the current state; only meaningful with a real body to orbit.
-    String apStr = '—', peStr = '—';
-    if (body != null) {
-      final orbit = const StateVectorOrbitConverter().toOrbit(
-        position: v.state.position,
-        velocity: v.state.velocity,
-        body: body,
-        epoch: _clock.epoch,
-      );
-      apStr = _altStr(orbit.apoapsis - body.radius);
-      // A hyperbolic / escape trajectory has no apoapsis (negative a).
-      if (orbit.apoapsis.isInfinite || orbit.apoapsis < 0) apStr = '∞ (escape)';
-      peStr = _altStr(orbit.periapsis - body.radius);
-    }
-
-    // Hottest part's temperature as a fraction of its destruction limit — the
-    // reentry heat gauge. White cool, amber warm, red near the limit.
-    double tempFrac = 0;
-    double tempK = 0;
-    double maxK = 0;
-    bool hasAblator = false;
-    for (final t in v.thermal) {
-      final f = t.maxTemperature > 0 ? t.temperature / t.maxTemperature : 0.0;
-      if (f > tempFrac) {
-        tempFrac = f;
-        tempK = t.temperature;
-        maxK = t.maxTemperature;
-      }
-      if (t.ablator > 0) hasAblator = true;
-    }
-    final hot = tempFrac > 0.55; // only show the gauge once it's heating up
-    final tempColor = tempFrac > 0.85
-        ? const Color(0xFFFF3B30)
-        : (tempFrac > 0.7 ? const Color(0xFFFF8C66) : const Color(0xFF9FB4CC));
-
-    Widget line(String s, [Color c = const Color(0xFF9FB4CC)]) => Text(
-        s, style: TextStyle(color: c, fontSize: 12, height: 1.3));
-
-    return Container(
-      padding: const EdgeInsets.fromLTRB(10, 6, 10, 8),
-      decoration: BoxDecoration(
-        color: const Color(0xCC0E1622),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: const Color(0x334FC3F7)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          line('ALT  ${_altStr(alt)}'),
-          line('SPD  ${spd.toStringAsFixed(0)} m/s'),
-          line('Q    ${(q / 1000).toStringAsFixed(1)} kPa', qColor),
-          line('AP   $apStr'),
-          line('PE   $peStr'),
-          // Heat gauge + warning — only once the craft is actually heating up.
-          if (hot) ...[
-            line(
-                'TEMP ${tempK.toStringAsFixed(0)}/${maxK.toStringAsFixed(0)} K'
-                ' (${(tempFrac * 100).toStringAsFixed(0)}%)',
-                tempColor),
-            if (tempFrac > 0.85)
-              line(
-                  hasAblator
-                      ? '⚠ OVERHEATING — ablator burning'
-                      : '⚠ OVERHEATING — pull up / shed speed',
-                  const Color(0xFFFF3B30)),
-          ],
-        ],
-      ),
-    );
-  }
-
-  /// Altitude readout: metres below 10 km (1 m precision near the surface),
-  /// kilometres above (where m-level digits are noise).
-  String _altStr(double m) => m.abs() < 10000
-      ? '${m.toStringAsFixed(0)} m'
-      : '${(m / 1000).toStringAsFixed(2)} km';
 
   /// Found a colony where the landed [v] sits: open the City Builder on that body
   /// at the craft's surface lat/long.

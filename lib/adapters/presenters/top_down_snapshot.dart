@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import '../../application/ports/repositories.dart';
 import '../../application/ports/world_repositories.dart';
 import '../../domain/orbits/body_ephemeris.dart';
+import '../../domain/orbits/state_vector_converter.dart';
 import '../../domain/orbits/trajectory_service.dart';
 import '../../domain/shared/vector3.dart';
 import '../../domain/simulation/epoch.dart';
@@ -565,12 +566,18 @@ class TopDownSnapshotPresenter {
     return TopDownSnapshot(
       bodies: bodyViews,
       vessels: vesselViews,
-      hud: _buildHud(focusVessel, focusBody, science),
+      hud: _buildHud(focusVessel, focusBody, science, epoch),
       trailPx: trailPx,
     );
   }
 
-  HudView _buildHud(Vessel? focus, CelestialBody? body, double science) {
+  /// Altitude string: metres below 10 km (surface precision), km above.
+  static String _altStr(double m) => m.abs() < 10000
+      ? '${m.toStringAsFixed(0)} m'
+      : '${(m / 1000).toStringAsFixed(2)} km';
+
+  HudView _buildHud(
+      Vessel? focus, CelestialBody? body, double science, Epoch epoch) {
     final lines = <String>[];
     if (science > 0) lines.add('SCIENCE ${science.toStringAsFixed(0)}');
     if (focus != null) {
@@ -581,16 +588,39 @@ class TopDownSnapshotPresenter {
           '${focus.mode == PropagationMode.onRails ? "ON-RAILS" : "PHYSICS"}'
           '${focus.landed ? "  LANDED" : ""}'
           '   ${focus.hasCommLink ? "LINK" : "NO SIGNAL"}');
-      lines.add('alt ${(alt / 1000).toStringAsFixed(1)} km   '
+      lines.add('alt ${_altStr(alt)}   '
           'vel ${speed.toStringAsFixed(0)} m/s   '
           'thr ${(focus.throttle * 100).toStringAsFixed(0)}%');
 
-      // Hottest part temperature, if any thermal state.
+      // Apoapsis / periapsis altitudes (Keplerian solve from the current state).
+      if (body != null) {
+        final orbit = const StateVectorOrbitConverter().toOrbit(
+          position: focus.state.position,
+          velocity: focus.state.velocity,
+          body: body,
+          epoch: epoch,
+        );
+        final apStr = (orbit.apoapsis.isInfinite || orbit.apoapsis < 0)
+            ? '∞ (escape)'
+            : _altStr(orbit.apoapsis - body.radius);
+        lines.add('AP $apStr   PE ${_altStr(orbit.periapsis - body.radius)}');
+      }
+
+      // Hottest part temperature + a heat fraction vs its limit; an OVERHEAT
+      // warning when it nears the destruction threshold.
       if (focus.thermal.isNotEmpty) {
-        final hottest = focus.thermal
-            .map((t) => t.temperature)
-            .reduce((a, b) => a > b ? a : b);
-        lines.add('temp ${hottest.toStringAsFixed(0)} K');
+        var frac = 0.0, hottest = 0.0, limit = 0.0;
+        for (final t in focus.thermal) {
+          final f = t.maxTemperature > 0 ? t.temperature / t.maxTemperature : 0.0;
+          if (f > frac) {
+            frac = f;
+            hottest = t.temperature;
+            limit = t.maxTemperature;
+          }
+        }
+        lines.add('temp ${hottest.toStringAsFixed(0)} K'
+            '${limit > 0 ? " (${(frac * 100).toStringAsFixed(0)}% of ${limit.toStringAsFixed(0)})" : ""}');
+        if (frac > 0.85) lines.add('⚠ OVERHEATING — shed speed / pull up');
       }
       // Fuel + ore fractions.
       final fuel = _resourceTotal(focus, ResourceType.liquidFuel);
