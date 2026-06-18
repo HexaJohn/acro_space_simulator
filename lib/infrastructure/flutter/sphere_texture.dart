@@ -110,38 +110,58 @@ class SphereTexture {
         ? (_grid * (1.0 + 3.0 * (1.0 - (alt / radiusM).clamp(0.0, 1.0)))).round()
         : _grid;
 
-    // LAT/LONG BAND TESSELLATION (body space). The whole sphere is gridded in
-    // latitude × longitude; every vertex is projected through the real camera
-    // and culled if it's below the eye's local horizon or behind the near plane.
-    // Unlike the old eye-facing disc lattice, this makes NO assumption that the
-    // camera looks at the body centre — so it's correct for off-axis bodies,
-    // orbit tracking (centre off-screen), and a surface eye looking sideways.
+    // LAT/LONG TESSELLATION (body space). The sphere is gridded in lat × lon;
+    // every vertex is projected through the real camera and culled if it's below
+    // the eye's local horizon (perspective) / back-facing (ortho) or behind the
+    // near plane. No assumption that the camera looks at the body centre — so it's
+    // correct for off-axis bodies, orbit tracking (centre off-screen), and a
+    // surface eye looking sideways.
     //
-    // Resolution: enough bands to read smooth; boosted near the surface where a
-    // small patch fills the screen. A back-face cull on whole rows keeps the cost
-    // bounded (only the visible hemisphere's verts get projected).
-    final latBands = grid; // rows (lat)
-    final lonBands = grid * 2; // cols (lon) — twice for a square-ish cell aspect
-
-    // Camera basis for the per-vertex shade (lit/limb): camera frame x=right,
-    // y=up, z=toward viewer (= -view.forward).
+    // WINDOWING: far away the visible region is ~a hemisphere, so grid the whole
+    // sphere (lat -pi/2..pi/2, lon 0..2pi). NEAR the surface you only see a small
+    // CAP (angular radius alpha = acos(radius/eyeDist)) around the sub-camera
+    // surface point — a uniform full-sphere grid would land almost no verts in
+    // that cap. So centre a lat/long WINDOW on the sub-camera point sized to the
+    // cap (+margin) and spend the whole grid there, giving dense near-ground
+    // detail. Texture UVs come from the absolute lat/lon either way.
     final camR = view.right, camU = view.up, camF = view.forward;
 
-    // Eye position relative to the FOCUS = view.eyeOffset; the body centre is at
-    // worldRel, so a surface point's vector FROM the eye is (worldRel + r*n) -
-    // eyeOffset. Visible iff (eye - centre)·n > radius i.e. (-centreFromEye)·n >
-    // radiusM (centreFromEye = worldRel - eyeOffset).
+    // Sub-camera surface direction (body frame) = from centre toward the eye =
+    // -centreFromEye normalized. Its lat/lon centres the near window.
+    final toEye =
+        eyeDist < 1e-6 ? Vector3(0, 0, 1) : (centreFromEye * (-1 / eyeDist));
+    final subLat = math.asin(toEye.z.clamp(-1.0, 1.0));
+    final subLon = math.atan2(toEye.y, toEye.x);
+    // Visible-cap half-angle (+margin); full hemisphere when far/ortho.
+    final windowed = radiusM > 0 && (eyeDist - radiusM) < radiusM;
+    final alpha = windowed
+        ? math.acos((radiusM / eyeDist).clamp(0.0, 1.0)) * 1.25
+        : math.pi; // full sphere
+
+    final latBands = grid; // rows
+    final lonBands = grid * 2; // cols
+    // Window half-extents in lat/lon. Far: full sphere. Near: the cap box.
+    final latHalf = windowed ? alpha : math.pi / 2;
+    final lonHalf = windowed ? alpha : math.pi; // full wrap when not windowed
+
     final verts = <List<_V?>>[];
     for (var iLat = 0; iLat <= latBands; iLat++) {
       final row = <_V?>[];
-      // lat: +pi/2 (north) down to -pi/2 (south) so v runs 0..1 top->bottom.
-      final lat = math.pi / 2 - (iLat / latBands) * math.pi;
+      // Walk lat across the window centred on subLat (far: -pi/2..pi/2).
+      final lat = windowed
+          ? (subLat + (iLat / latBands * 2 - 1) * latHalf)
+              .clamp(-math.pi / 2, math.pi / 2)
+          : math.pi / 2 - (iLat / latBands) * math.pi;
       final cl = math.cos(lat), sl = math.sin(lat);
-      final v = iLat / latBands; // texture row
+      // Texture row from ABSOLUTE lat (north=0 .. south=1).
+      final v = (math.pi / 2 - lat) / math.pi;
       for (var iLon = 0; iLon <= lonBands; iLon++) {
-        // lon 0..2pi from +X; ADD spin so the surface rotates with epoch (the
-        // texture column for a body-fixed point shifts opposite the old sign).
-        final lon = (iLon / lonBands) * 2 * math.pi + spin;
+        // lon: window centred on subLon (near) or full wrap (far). +spin so the
+        // surface rotates with epoch.
+        final lon = (windowed
+                ? subLon + (iLon / lonBands * 2 - 1) * lonHalf
+                : (iLon / lonBands) * 2 * math.pi) +
+            spin;
         // Body-frame surface unit normal n (lon around +Z from +X, lat from eq).
         final nx = cl * math.cos(lon);
         final ny = cl * math.sin(lon);
@@ -174,8 +194,9 @@ class SphereTexture {
           continue;
         }
         final pos = ui.Offset(viewportCentre.dx + p.x, viewportCentre.dy - p.y);
-        // u from lon (continuous so TileMode.repeated hides the seam).
-        final u = (iLon / lonBands);
+        // Texture column from the ABSOLUTE body-fixed longitude (lon minus the
+        // epoch spin), continuous so TileMode.repeated hides the wrap seam.
+        final u = ((lon - spin) + math.pi) / (2 * math.pi);
 
         // Camera-frame normal for shade: n in (right, up, toward-viewer).
         final cnx = nx * camR.x + ny * camR.y + nz * camR.z;

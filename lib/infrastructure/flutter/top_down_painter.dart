@@ -114,8 +114,17 @@ class TopDownPainter extends CustomPainter {
       // circles/meshes at million-pixel coordinates (which overflows and kills
       // the whole frame, HUD included). Stars test their wider GLOW radius so the
       // corona still shows even when the disc itself is off-screen / sub-pixel.
+      //
+      // BUT this test keys off the projected CENTRE, which goes NaN/off-screen
+      // when the eye is close to (or inside the near plane of) a large body —
+      // exactly orbit-tracking / sharp grazing angles, where the SURFACE is still
+      // very much on screen. The band sphere culls per-vertex, so for a large
+      // body (its apparent radius dwarfs the screen) we must NOT center-cull, or
+      // the whole planet vanishes. Only center-cull a small/distant body.
       final cullR = b.isStar ? rPx * _starGlowScale : rPx;
-      if (!_discTouchesScreen(c, cullR, size)) continue;
+      final screenDiag = size.bottomRight(Offset.zero).distance;
+      final big = !b.isStar && rPx > screenDiag; // fills well past the viewport
+      if (!big && !_discTouchesScreen(c, cullR, size)) continue;
       final base = b.isStar ? const Color(0xFFFFD66B) : const Color(0xFF4A90D9);
 
       // Skia drops or mis-rasterizes geometry once coordinates blow past a few
