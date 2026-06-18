@@ -36,7 +36,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 2026-06-17.135';
+const String kBuildStamp = 'build 2026-06-18.136';
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -150,7 +150,7 @@ class _SimulationViewState extends State<SimulationView>
   double _touchYaw = 0;
   double _touchRoll = 0;
   double _touchThrottle = 0; // 0..1 from the throttle slider
-  double _touchThrottleFine = 0; // 0..1 -> absolute 0..1% throttle (fine landing)
+  double _touchThrottleFine = 0; // 0..1 -> absolute 0..10% throttle (fine landing)
 
   /// Build a PilotInput from keyboard + on-screen touch controls (whichever is
   /// active; they sum so either input device works).
@@ -1389,8 +1389,8 @@ class _SimulationViewState extends State<SimulationView>
             top: false,
             child: Column(mainAxisSize: MainAxisSize.min, children: [
               _flightStatusRow(),
-              // FINE throttle — an absolute 0..1% throttle for delicate landing
-              // burns (full slider span = 1% thrust). Sits ABOVE the coarse one.
+              // FINE throttle — an absolute 0..10% throttle for delicate landing
+              // burns (full slider span = 10% thrust). Sits ABOVE the coarse one.
               Row(children: [
                 const SizedBox(
                     width: 56,
@@ -1404,12 +1404,12 @@ class _SimulationViewState extends State<SimulationView>
                         thumbColor: Color(0xFFFFC58A),
                         trackHeight: 2),
                     child: Slider(
-                      // 0..1 maps to an ABSOLUTE 0..1% throttle for fine landing
+                      // 0..1 maps to an ABSOLUTE 0..10% throttle for fine landing
                       // burns. Sets the throttle directly (held, not a trim).
                       value: _touchThrottleFine,
                       onChanged: (v) => setState(() {
                         _touchThrottleFine = v;
-                        _touchThrottle = v * 0.01; // 0..1%
+                        _touchThrottle = v * 0.10; // 0..10%
                       }),
                     ),
                   ),
@@ -1417,7 +1417,7 @@ class _SimulationViewState extends State<SimulationView>
                 SizedBox(
                     width: 40,
                     child: Text(
-                        '${(_touchThrottleFine).toStringAsFixed(2)}%',
+                        '${(_touchThrottleFine * 10).toStringAsFixed(1)}%',
                         textAlign: TextAlign.right,
                         style: const TextStyle(
                             color: Color(0xFFFFC58A), fontSize: 11))),
