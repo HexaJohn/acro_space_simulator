@@ -175,22 +175,16 @@ class SphereTexture {
       return vtx;
     }
 
-    // Target leaf size on screen (px) + recursion bound. Bigger leaves (40 px)
-    // keep the triangle count sane across the whole near-planet range (~0.5–5 Mm
-    // where the disc fills the screen). Depth is capped so a grazing view can't
-    // explode; combined with the screen-bounds prune below, off-screen subtrees
-    // never recurse.
-    const targetPx = 40.0;
+    // Target leaf size on screen (px), ADAPTIVE: a small/far disc needs fine
+    // leaves so its LIMB reads round (a 40 px leaf would facet a 200 px planet);
+    // a big near disc that fills the screen uses coarse leaves for perf. Scale
+    // the target so the disc always has roughly >= 24 leaves across its radius,
+    // clamped to [6, 40] px. Depth is capped so a grazing view can't explode;
+    // with the screen-bounds prune off-screen subtrees never recurse.
+    final targetPx = (rPx / 24.0).clamp(6.0, 40.0);
     final alt = radiusM > 0 ? (eyeDist - radiusM) : double.infinity;
     final maxDepth = (radiusM > 0 && alt < radiusM) ? 7 : 6;
 
-    // Emit a leaf node's two triangles (corners already projected + visible).
-    void emitLeaf(_V a, _V b, _V c, _V d) {
-      _tri(positions, texCoords, shadowColors, atmoColors, atmoTint, atmoWarm,
-          a, c, b, iw);
-      _tri(positions, texCoords, shadowColors, atmoColors, atmoTint, atmoWarm,
-          b, c, d, iw);
-    }
 
     // Screen bounds (canvas px) with a generous margin so a node straddling the
     // edge still tessellates; nodes entirely off ONE edge are pruned.
@@ -253,9 +247,18 @@ class SphereTexture {
         recurse(laM, la1, loM, lo1, depth + 1);
         return;
       }
-      // Leaf: emit only when all four corners projected (in front of near plane).
-      if (a != null && b != null && c != null && d != null) {
-        emitLeaf(a, c, b, d);
+      // Leaf: emit each of the quad's two triangles independently, so a node
+      // STRADDLING the near plane (one corner behind it -> null) still draws the
+      // triangle(s) whose three corners are all in front, instead of dropping the
+      // whole quad. That's what was culling the ground right in front of the
+      // camera at the surface.
+      if (a != null && c != null && b != null) {
+        _tri(positions, texCoords, shadowColors, atmoColors, atmoTint, atmoWarm,
+            a, c, b, iw);
+      }
+      if (b != null && c != null && d != null) {
+        _tri(positions, texCoords, shadowColors, atmoColors, atmoTint, atmoWarm,
+            b, c, d, iw);
       }
     }
 
