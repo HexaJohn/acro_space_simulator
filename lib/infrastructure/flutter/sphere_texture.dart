@@ -44,8 +44,8 @@ class SphereTexture {
     ui.Color? atmoTint, // atmosphere day colour; null = no atmosphere pass
     ui.Color atmoWarm = const ui.Color(0xFFFF9D5C), // terminator warm band
     double? coverPx, // on-screen half-extent the mesh must cover (see below)
-    double radiusM = 0, // body radius (m) — enables the near-surface path
-    ui.Offset? viewportCentre, // canvas px of the screen centre (near path)
+    required double radiusM, // body radius (m), for the surface projection
+    required ui.Offset viewportCentre, // canvas px of the screen centre
   }) {
     // Bail on non-finite inputs (degenerate camera geometry can produce NaN/Inf
     // in the centre / worldRel); a single bad vertex makes Skia drop the whole
@@ -109,24 +109,22 @@ class SphereTexture {
       sunWorld.dot(fwd) * -1,
     );
 
-    // NEAR-SURFACE path: the flat billboard (eye-at-infinity) draws a full
-    // hemisphere as a disc, so an eye AT the surface sees no horizon. When the
-    // eye is within ~1 radius of the surface, project each surface vertex through
-    // the REAL camera instead, so the horizon (the tangent circle from the eye)
-    // falls out naturally.
+    // Every surface vertex is projected through the REAL camera (no flat
+    // billboard) so the sphere is correct from any distance — including an eye
+    // at the surface, where the horizon (the tangent circle from the eye) falls
+    // out of the projection naturally.
     //
-    // worldRel is the body centre relative to the camera FOCUS, but the eye is
-    // pulled back from the focus by view.eyeOffset, so the centre relative to the
-    // EYE is worldRel - eyeOffset. Use that for the altitude + horizon tests
-    // (earlier this used the focus, which made it trigger on the craft instead of
-    // the camera position).
+    // worldRel is the body centre relative to the camera FOCUS; the eye is pulled
+    // back from the focus by view.eyeOffset, so the centre relative to the EYE is
+    // worldRel - eyeOffset (eyeOffset is zero for ortho's parallel rays). Used
+    // for the per-vertex horizon cull below.
     final centreFromEye = worldRel - view.eyeOffset;
     final eyeDist = centreFromEye.length;
-    final altitude = eyeDist - radiusM;
-    final nearMode = radiusM > 0 &&
-        viewportCentre != null &&
-        altitude < radiusM &&
-        eyeDist > radiusM * 0.5; // ignore the eye-inside-body degenerate case
+    // Clip the mesh to a crisp limb CIRCLE when the silhouette really is a circle
+    // (far away / ortho); skip the clip when the eye is within ~1 radius of the
+    // surface, where the limb is the projected horizon arc, not a circle.
+    final clipCircle =
+        radiusM <= 0 || view.eyeOffset == Vector3.zero || (eyeDist - radiusM) >= radiusM;
 
     // Build a (grid+1)^2 lattice of vertices over the unit disc; cells outside
     // the circle are skipped when emitting triangles.
@@ -149,11 +147,12 @@ class SphereTexture {
         final wx = right.x * nx + upv.x * ny - fwd.x * cz;
         final wy = right.y * nx + upv.y * ny - fwd.y * cz;
         final wz = right.z * nx + upv.z * ny - fwd.z * cz;
-        // NEAR path: cull vertices below the eye's local horizon. A surface point
-        // with outward normal n (= the world dir wx,wy,wz) is visible iff the eye
-        // sits above its tangent plane: (eye - centre)·n > radius. eye - centre =
-        // -centreFromEye, so the test is (-centreFromEye·n) > radiusM.
-        if (nearMode) {
+        // Cull vertices below the eye's local horizon. A surface point with
+        // outward normal n (= the world dir wx,wy,wz) is visible iff the eye sits
+        // above its tangent plane: (eye - centre)·n > radius. eye - centre =
+        // -centreFromEye, so the test is (-centreFromEye·n) > radiusM. (A no-op
+        // far away / ortho — the eye-facing hemisphere already passes.)
+        if (radiusM > 0) {
           final dotEye = -(centreFromEye.x * wx +
               centreFromEye.y * wy +
               centreFromEye.z * wz);
@@ -194,34 +193,20 @@ class SphereTexture {
         // fading to the day colour deeper into the lit side.
         final warmF = (1.0 - _smoothstep(0.0, 0.45, lit)) * day;
 
-        // Screen scale for the cap. While span tracks rPx (cover*overscan/rPx)
-        // this equals rPx, so the surface magnifies with zoom. Once span hits its
-        // floor, span*rPx would keep growing (overflowing Skia + washing out the
-        // patch); instead map the FLOORED cap to exactly fill `cover` on screen
-        // (ps = cover*overscan/span, bounded), so detail keeps reading and coords
-        // stay screen-sized. Far away (span==1) it's the plain overscan'd radius.
-        final ps = span >= 1.0
-            ? rPx * overscan
-            : cover * overscan / span;
-        // NEAR: project the real surface point (centre + radius*n, relative to
-        // the eye) through the camera so the horizon emerges from true
-        // perspective. FAR: the flat billboard at centre + nx*ps.
-        ui.Offset pos;
-        if (nearMode) {
-          final relEye = Vector3(
-            worldRel.x + radiusM * wx,
-            worldRel.y + radiusM * wy,
-            worldRel.z + radiusM * wz,
-          );
-          final p = view.projectPx(relEye);
-          if (p == null) {
-            row.add(null); // behind the near plane
-            continue;
-          }
-          pos = ui.Offset(viewportCentre.dx + p.x, viewportCentre.dy - p.y);
-        } else {
-          pos = ui.Offset(centre.dx + nx * ps, centre.dy - ny * ps);
+        // Project the real surface point (centre + radius*n, relative to the
+        // FOCUS) through the camera. projectPx handles the eye offset + the
+        // perspective divide, so the silhouette/horizon is always correct.
+        final relFocus = Vector3(
+          worldRel.x + radiusM * wx,
+          worldRel.y + radiusM * wy,
+          worldRel.z + radiusM * wz,
+        );
+        final p = view.projectPx(relFocus);
+        if (p == null) {
+          row.add(null); // behind the near plane
+          continue;
         }
+        final pos = ui.Offset(viewportCentre.dx + p.x, viewportCentre.dy - p.y);
         row.add(_V(
           pos: pos,
           uv: ui.Offset(u * iw, v * ih),
@@ -258,20 +243,14 @@ class SphereTexture {
           <double>[1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]),
     );
 
-    // Clip everything to a true antialiased circle. The triangle mesh only
-    // covers cells fully inside the unit disc, so its raw edge is stairstepped;
-    // clipping to a smooth circle gives a crisp round limb regardless of mesh
-    // resolution.
-    // Clip to the true limb circle when far (span==1); when zoomed in, clip to
-    // the visible patch. The patch's on-screen half-extent is span*ps =
-    // cover*overscan (see ps above) — bounded even when span is floored — so a
-    // million-px clip path is never built and the clip tracks the patch exactly.
+    // FAR / ortho: the silhouette is a clean circle, so clip to it for a crisp
+    // antialiased limb (the triangle mesh edge is otherwise stairstepped). NEAR
+    // the surface: the limb is the projected horizon arc, not a circle at
+    // `centre`, so don't crop — the horizon-culled mesh defines the shape.
+    // clipR: the true limb circle far (span==1), else the bounded visible patch.
     final clipR = span >= 1.0 ? rPx : cover * overscan;
     canvas.save();
-    // FAR: clip to the limb circle (crisp round planet). NEAR: the surface fills
-    // the frame and the limb is the projected horizon, not a circle at `centre`,
-    // so don't crop — let the mesh (already horizon-culled) define the shape.
-    if (!nearMode) {
+    if (clipCircle) {
       canvas.clipPath(
         ui.Path()..addOval(ui.Rect.fromCircle(center: centre, radius: clipR)),
         doAntiAlias: true,
