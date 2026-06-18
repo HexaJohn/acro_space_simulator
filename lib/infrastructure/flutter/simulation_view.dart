@@ -20,6 +20,7 @@ import '../../application/persistence/game_state_codec.dart';
 import '../../application/ports/compute_port.dart';
 import '../../application/usecases/advance_simulation_tick.dart';
 import '../../domain/orbits/soi_transition_service.dart';
+import '../../domain/orbits/state_vector_converter.dart';
 import '../../domain/science/research_ledger.dart';
 import '../../domain/science/tech_tree.dart';
 import '../../domain/simulation/simulation_clock.dart';
@@ -36,7 +37,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 2026-06-17.125';
+const String kBuildStamp = 'build 2026-06-17.128';
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -150,6 +151,7 @@ class _SimulationViewState extends State<SimulationView>
   double _touchYaw = 0;
   double _touchRoll = 0;
   double _touchThrottle = 0; // 0..1 from the throttle slider
+  double _touchThrottleFine = 0.5; // self-centring fine-trim wheel (0.5 = idle)
 
   /// Build a PilotInput from keyboard + on-screen touch controls (whichever is
   /// active; they sum so either input device works).
@@ -283,16 +285,21 @@ class _SimulationViewState extends State<SimulationView>
         (label: body.name, v: null, b: body.id),
     ];
     // If a craft was injected (ascent/descent), START LOCKED ON IT so the player
-    // is flying it immediately; otherwise lock on Earth so the demo fleet circles.
+    // is flying it immediately; otherwise lock on the ORBITER so the player can
+    // fly it directly from the start (manual mode, see the flags below).
     if (injected != null) {
       _targetIndex = _targets.indexWhere((t) => t.v == injected.id);
     } else {
-      final earthIdx = _targets.indexWhere((t) => t.b == SampleWorld.earth);
-      _targetIndex = earthIdx >= 0 ? earthIdx : 0;
+      _targetIndex = _targets.indexWhere((t) => t.v == vessel.id);
     }
     if (_targetIndex < 0) _targetIndex = 0;
     _focusVessel = _targets[_targetIndex].v;
     _focusBody = _targets[_targetIndex].b;
+
+    // Start ready to fly: manual control of the orbiter, infinite fuel, 1x warp.
+    _manualControl = true;
+    _layers = _layers.copyWith(infiniteFuel: true);
+    _warpIndex = 0; // 1x
 
     _vessels = InMemoryVesselRepository(fleet);
     for (final v in _vessels.all()) {
@@ -315,7 +322,7 @@ class _SimulationViewState extends State<SimulationView>
       ),
     );
 
-    _clock = SimulationClock(warpFactor: 50, fixedStep: 0.02);
+    _clock = SimulationClock(warpFactor: 1, fixedStep: 0.02); // dev start: 1x
     _advance = AdvanceSimulationTick(
       vessels: _vessels,
       universe: universe,
@@ -481,6 +488,8 @@ class _SimulationViewState extends State<SimulationView>
       }
     }
 
+    _recordTrail();
+
     final cam = _camera;
     setState(() {
       _activeCamera = cam;
@@ -491,8 +500,44 @@ class _SimulationViewState extends State<SimulationView>
         epoch: _clock.epoch,
         science: _research.science,
         cullDistant: _layers.cullDistant,
+        flownTrail: _trail,
+        flownTrailBody: _trailBody,
       );
     });
+  }
+
+  // ---- Flown trajectory trail (breadcrumb for the focused vessel) ----
+  // Body-relative positions of the focused vessel, sampled by distance. Reset
+  // when the focus or its dominant body changes so the line doesn't streak
+  // across an SOI switch.
+  final List<Vector3> _trail = [];
+  BodyId? _trailBody; // dominant body the trail points are relative to
+  VesselId? _trailVessel; // which vessel the trail belongs to
+  static const int _trailMax = 600; // cap; oldest points drop off
+  static const double _trailMinStep = 500; // metres between samples
+
+  /// Append the focused vessel's current position to the trail (sampled by
+  /// distance). Clears + restarts when the focus vessel or its dominant body
+  /// changes.
+  void _recordTrail() {
+    final id = _focusVessel;
+    final v = id == null ? null : _vessels.byId(id);
+    if (v == null) {
+      _trail.clear();
+      _trailVessel = null;
+      _trailBody = null;
+      return;
+    }
+    if (id != _trailVessel || v.dominantBody != _trailBody) {
+      _trail.clear();
+      _trailVessel = id;
+      _trailBody = v.dominantBody;
+    }
+    final p = v.state.position;
+    if (_trail.isEmpty || (p - _trail.last).length > _trailMinStep) {
+      _trail.add(p);
+      if (_trail.length > _trailMax) _trail.removeAt(0);
+    }
   }
 
   @override
@@ -1242,6 +1287,8 @@ class _SimulationViewState extends State<SimulationView>
                   child: SafeArea(
                     child: Stack(
                       children: [
+                // Flight telemetry (top-left): ALT / SPD / Q.
+                Positioned(top: 8, left: 8, child: _telemetryPanel()),
                 // Nav-ball: attitude/prograde of the locked vessel.
                 if (_layers.navBall && _navState() != null)
                   Positioned(
@@ -1345,6 +1392,36 @@ class _SimulationViewState extends State<SimulationView>
             top: false,
             child: Column(mainAxisSize: MainAxisSize.min, children: [
               _flightStatusRow(),
+              // FINE throttle — a self-centring trim wheel: drag off centre to
+              // nudge the throttle by small amounts for precise settings, snaps
+              // back to centre on release. Sits ABOVE the coarse slider.
+              Row(children: [
+                const SizedBox(
+                    width: 56,
+                    child: Text('FINE',
+                        style: TextStyle(color: Color(0xFFFFC58A), fontSize: 11))),
+                Expanded(
+                  child: SliderTheme(
+                    data: const SliderThemeData(
+                        activeTrackColor: Color(0xFFFFC58A),
+                        inactiveTrackColor: Color(0x33FFC58A),
+                        thumbColor: Color(0xFFFFC58A),
+                        trackHeight: 2),
+                    child: Slider(
+                      value: _touchThrottleFine,
+                      onChanged: (v) => setState(() {
+                        // Map the off-centre amount to a small throttle delta.
+                        _touchThrottle =
+                            (_touchThrottle + (v - 0.5) * 0.04).clamp(0.0, 1.0);
+                        _touchThrottleFine = v;
+                      }),
+                      onChangeEnd: (_) =>
+                          setState(() => _touchThrottleFine = 0.5), // re-centre
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 40),
+              ]),
               // Throttle — held (does NOT self-centre).
               Row(children: [
                 const SizedBox(
@@ -1418,6 +1495,72 @@ class _SimulationViewState extends State<SimulationView>
       ]),
     );
   }
+
+  /// Top-left flight telemetry HUD: altitude, speed, and dynamic pressure (q).
+  /// q drives structural failure, so it's coloured by how close it is to the
+  /// max-Q limit (white -> amber -> red). Only shown for a focused vessel.
+  Widget _telemetryPanel() {
+    final id = _focusVessel;
+    final v = id == null ? null : _vessels.byId(id);
+    if (v == null) return const SizedBox.shrink();
+    final body = _universe.current().body(v.dominantBody);
+    final alt = v.state.position.length - (body?.radius ?? 0);
+    final spd = v.state.velocity.length;
+    // Dynamic pressure q = 0.5 * rho * v^2 (Pa) from the atmosphere at altitude.
+    final sample = body?.atmosphere?.sampleAt(alt);
+    final rho = sample?.density ?? 0.0;
+    final q = 0.5 * rho * spd * spd;
+    const maxQ = 200000.0; // matches AdvanceSimulationTick.maxDynamicPressure
+    final qFrac = (q / maxQ).clamp(0.0, 1.0);
+    final qColor = qFrac > 0.85
+        ? const Color(0xFFFF6B6B)
+        : (qFrac > 0.5 ? const Color(0xFFFF8C66) : const Color(0xFF9FB4CC));
+
+    // Apoapsis / periapsis ALTITUDES (above the surface). Keplerian solve from
+    // the current state; only meaningful with a real body to orbit.
+    String apStr = '—', peStr = '—';
+    if (body != null) {
+      final orbit = const StateVectorOrbitConverter().toOrbit(
+        position: v.state.position,
+        velocity: v.state.velocity,
+        body: body,
+        epoch: _clock.epoch,
+      );
+      apStr = _altStr(orbit.apoapsis - body.radius);
+      // A hyperbolic / escape trajectory has no apoapsis (negative a).
+      if (orbit.apoapsis.isInfinite || orbit.apoapsis < 0) apStr = '∞ (escape)';
+      peStr = _altStr(orbit.periapsis - body.radius);
+    }
+
+    Widget line(String s, [Color c = const Color(0xFF9FB4CC)]) => Text(
+        s, style: TextStyle(color: c, fontSize: 12, height: 1.3));
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(10, 6, 10, 8),
+      decoration: BoxDecoration(
+        color: const Color(0xCC0E1622),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0x334FC3F7)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          line('ALT  ${_altStr(alt)}'),
+          line('SPD  ${spd.toStringAsFixed(0)} m/s'),
+          line('Q    ${(q / 1000).toStringAsFixed(1)} kPa', qColor),
+          line('AP   $apStr'),
+          line('PE   $peStr'),
+        ],
+      ),
+    );
+  }
+
+  /// Altitude readout: metres below 10 km (1 m precision near the surface),
+  /// kilometres above (where m-level digits are noise).
+  String _altStr(double m) => m.abs() < 10000
+      ? '${m.toStringAsFixed(0)} m'
+      : '${(m / 1000).toStringAsFixed(2)} km';
 
   /// Found a colony where the landed [v] sits: open the City Builder on that body
   /// at the craft's surface lat/long.
