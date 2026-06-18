@@ -9,13 +9,28 @@ import 'debug_layers.dart';
 import 'sphere_texture.dart';
 import 'texture_cache.dart';
 
-/// Renders a [TopDownSnapshot] in a top-down XY view with primitive shapes.
-/// No 3D rendering this pass — bodies are circles, vessels are triangles, the
-/// vessel's orbit-plane heading is the triangle's point.
+/// The scene painter: turns an immutable [TopDownSnapshot] (produced by
+/// [TopDownSnapshotPresenter] from the domain world) into pixels, through a
+/// [SceneCamera] that owns the world→screen mapping.
 ///
-/// Coordinates arrive as metres relative to the camera focus (already small),
-/// so projection is just: screen = centre + (worldXY / metresPerPixel), with Y
-/// flipped so +Y is up on screen.
+/// It draws, back to front:
+///  1. the **skybox** — the Milky Way star map as a sky window cropped to the
+///     camera heading;
+///  2. each **body** — a full lit, textured 3D sphere with a soft atmosphere
+///     limb glow, delegated to [SphereTexture]; stars add a corona, ringed
+///     planets get an elliptical ring split into back/front halves so the disc
+///     occludes the back arc; a body too small to resolve is a sub-pixel dot;
+///  3. **orbit rails** and **predicted vessel paths**, depth-sorted so the
+///     near arc draws over the disc and the far arc behind it;
+///  4. **vessels** — a heading marker oriented by the craft's attitude;
+///  5. the **HUD / nav-ball** overlay.
+///
+/// Despite the legacy name, this is **not** a flat top-down view — the same
+/// painter renders the strategic ortho MAP and the perspective 3D flight view;
+/// only the injected [SceneCamera] differs. All world geometry is projected via
+/// `view.projectPx`, so the painter itself never reasons about metres-per-pixel,
+/// perspective, or the near plane — the camera does. There is no flat-disc body
+/// fallback: a body is always the textured sphere (a star or sub-pixel dot aside).
 class TopDownPainter extends CustomPainter {
   final TopDownSnapshot snapshot;
   final TextureCache? textures;
@@ -411,9 +426,12 @@ class TopDownPainter extends CustomPainter {
       final mid = Offset.lerp(corner[i], corner[j], 0.5)!;
       final mid3 = (corner3[i] + corner3[j]).normalized;
       // Face outward normal: base dirs tilted toward the nose. Lambert vs sun.
+      // A high ambient floor (0.5) so the craft marker stays legible even on the
+      // night side — it's a UI marker, not a realistically-lit body, and a dark
+      // void box read as a render artifact.
       final normal = (corner3[i] + corner3[j]).normalized * 0.7 +
           v.forwardW * 0.3;
-      final bright = 0.25 + 0.75 * (normal.normalized.dot(v.sunW)).clamp(0.0, 1.0);
+      final bright = 0.5 + 0.5 * (normal.normalized.dot(v.sunW)).clamp(0.0, 1.0);
       final depth = -mid3.dot(view.forward);
       // Sub-triangle A: apex, corner i, mid.
       faces.add((
@@ -442,7 +460,7 @@ class TopDownPainter extends CustomPainter {
     // is -nose; it sits opposite the apex, so its depth tracks the nose
     // direction (base toward the viewer when the nose points away).
     final baseNormal = (-v.forwardW).normalized;
-    final baseBright = 0.25 + 0.75 * (baseNormal.dot(v.sunW)).clamp(0.0, 1.0);
+    final baseBright = 0.5 + 0.5 * (baseNormal.dot(v.sunW)).clamp(0.0, 1.0);
     faces.add((
       path: Path()
         ..moveTo(corner[0].dx, corner[0].dy)

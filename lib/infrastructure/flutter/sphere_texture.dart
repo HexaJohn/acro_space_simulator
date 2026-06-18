@@ -5,17 +5,78 @@ import 'dart:ui' as ui;
 import '../../adapters/presenters/camera_view.dart';
 import '../../domain/shared/vector3.dart';
 
-/// Draws an equirectangular surface map onto a body disc as a lit, orthographic
-/// sphere — the visible hemisphere facing the camera, UV-sampled from the map
-/// and shaded by the sun direction.
+/// Renders a celestial body as a **lit, textured, perspective-correct 3D sphere**
+/// with an atmosphere — the core of the planet renderer. Given a body's centre
+/// (relative to the camera focus), radius, surface map and sun direction, it
+/// tessellates the *visible* part of the sphere into a GPU triangle mesh, samples
+/// the equirectangular texture per vertex, shades it against the sun, and draws a
+/// soft atmospheric limb glow. It works identically from interplanetary distance
+/// down to standing on the surface.
 ///
-/// It works by tessellating the disc into a triangle mesh (a grid over the
-/// projected unit circle). Each vertex is a point on the front hemisphere of the
-/// unit sphere in *camera frame* (z toward viewer); we rotate it into the
-/// world/body frame for the current [CameraView] to get its longitude/latitude,
-/// which becomes the texture UV. Per-vertex Lambert shading vs. the sun is baked
-/// into the vertex colours and multiplied with the image. GPU-accelerated via
-/// [Canvas.drawVertices].
+/// ## Mesh: an adaptive icosphere
+/// The sphere is a **subdivided icosahedron** (20 near-equilateral triangular
+/// faces), recursively split into four (edge midpoints renormalised onto the unit
+/// sphere) until each leaf's *projected* on-screen edge length drops below a
+/// target (`targetPx`). An icosphere is used rather than a lat/long grid because
+/// lat/long has a pole singularity — a nadir/straight-down view collapsed it into
+/// a "pinwheel". Each candidate direction `n` (a unit body-direction) is projected
+/// to a screen pixel through the **real [SceneCamera]** (`view.projectPx` of
+/// `worldRel + radiusM*n`), so the sphere is geometrically correct from any
+/// distance, including an eye at the surface where the limb becomes the projected
+/// horizon arc rather than a circle.
+///
+/// Shared edge midpoints are **welded** through a cache keyed by a packed 48-bit
+/// quantised direction (an earlier XOR-hash key collided and streaked the disc; a
+/// string key was correct but tanked the frame rate). The weld makes the mesh
+/// *ground-anchored* — vertices don't swim as the camera moves.
+///
+/// ## Culling, cost control and the near plane
+/// Only the visible cap is tessellated:
+///  * **Cap-angle prune** — a face is dropped when it lies wholly past the eye's
+///    horizon (more than its own angular radius outside the visible cap).
+///  * **Screen-bounds prune** — a face whose projected bbox is fully off-screen
+///    (with margin) stops recursing.
+///  * **Depth bound** — `maxDepth` scales with `log2(radius/altitude)` only below
+///    ~10% of a radius (else a flat cap), so chase/orbital views stay cheap. The
+///    big historical cost was faces straddling the near plane: their corners are
+///    unprojectable so the size test couldn't fire and they split to full depth —
+///    millions of `faceRecurse` calls (the "<1 Mm slideshow"). They now stop once
+///    their *projecting* corners are within target.
+///
+/// A face that **crosses the near plane** (interior in front, all corners just
+/// behind) would emit nothing and leave a black **wedge** with a dead-straight
+/// edge (the landed/grazing bug). Such straddling faces are instead subdivided a
+/// few levels *past* `maxDepth` (a thin, cheap boundary band) and then
+/// **near-plane clipped**: each plane-crossing edge is bisected (on the lerped,
+/// renormalised direction) to the projectable boundary, evaluated there for a
+/// valid on-plane vertex, and the front polygon is fan-triangulated. The ground
+/// then fills cleanly right up to the frustum edge. Distinguishing "wholly behind
+/// the camera" (drop) from "crosses the plane" (keep) uses [SceneCamera.nearPlane].
+///
+/// ## Texture mapping
+/// UV comes from the body-fixed lat/lon of each direction (undoing the epoch
+/// `spin`). Longitude is **unwrapped relative to the sub-camera point** so the
+/// visible cap never straddles the equirectangular antimeridian seam (which would
+/// tear the texture); the geographic pole, where all longitudes converge, is
+/// handled by collapsing a polar triangle's u to its median column.
+///
+/// ## Draw passes (all `drawVertices`, GPU)
+///  1. **Surface** — the texture, via a repeating [ui.ImageShader]. Vertex colours
+///     are deliberately *not* combined with the shader in one `ui.Vertices` (that
+///     trips a null-check in the web canvas backend); lighting is a separate pass.
+///  2. **Shadow** — a translucent-black mesh whose per-vertex alpha is the
+///     night-side darkening (Lambert vs. the sun).
+///  3. **Atmosphere surface scatter** — a tinted mesh whose alpha concentrates at
+///     the eye's horizon (not the view silhouette), warm near the terminator.
+///
+/// Plus, drawn *before* the surface (so the surface occludes its inner part), a
+/// **3D atmosphere shell** ([_paintAtmoShell]) at `R*(1+thick)` whose soft glow
+/// hugs the true limb at every angle and position — replacing an old screen-space
+/// halo circle that floated off / vanished when the projected centre left frame.
+///
+/// The two render goals (a soft, gap-free atmosphere; no surface wedges) are held
+/// by `test/screenshots/pipeline_harness_test.dart`, which drives this class
+/// through the real pipeline and scores the output pixel-by-pixel.
 class SphereTexture {
   const SphereTexture();
 
@@ -487,7 +548,7 @@ class SphereTexture {
       _paintAtmoShell(
         canvas,
         radiusM: radiusM,
-        thick: 0.10, // shell extends ~10% of a radius beyond the surface
+        thick: 0.06, // shell extends ~6% of a radius beyond the surface (thin band)
         worldRel: worldRel,
         view: view,
         viewportCentre: viewportCentre,
@@ -605,11 +666,19 @@ class SphereTexture {
     // feathering OUTWARD into space; inward it's occluded by the surface anyway.
     final capSurf = math.acos((radiusM / eyeDist).clamp(0.0, 1.0));
     final capS = math.acos((rs / eyeDist).clamp(0.0, 1.0));
-    // Feather widths. Inward (toward the surface limb): the annulus gap, min a
-    // few degrees so a far thin shell still reads as a soft band, not a line.
-    // Outward (into space): a wider feather for the blurred falloff.
-    final featherIn = (capSurf - capS).abs() * 1.4 + 0.05;
-    final featherOut = featherIn * 3.0;
+    // Peak the glow at the SURFACE limb (capSurf), not the shell limb, so it can
+    // never detach from the surface — the inner feather then bleeds into the
+    // surface region (occluded, harmless) and the outer feather softens into
+    // space, keeping the haze welded to the horizon at every range. A thin band:
+    // featherIn reaches just into the surface; featherOut is a soft falloff.
+    final gap = (capSurf - capS).abs();
+    // featherIn is generous: the inner part of the band falls on the surface side
+    // of the limb, where the surface mesh (drawn AFTER the shell) overdraws it —
+    // so extending it well inward is free and guarantees the visible band always
+    // overlaps the true surface edge even if the mesh limb sits a little inside
+    // the analytic capSurf (no detached dark gap at any range).
+    final featherIn = gap * 3.0 + 0.12;
+    final featherOut = gap * 1.4 + 0.05; // soft falloff into space
 
     final positions = <ui.Offset>[];
     final colors = <ui.Color>[];
@@ -624,11 +693,13 @@ class SphereTexture {
       // Angle of this direction from the sub-eye direction.
       final dotToEye = (nx * toEx + ny * toEy + nz * toEz).clamp(-1.0, 1.0);
       final ang = math.acos(dotToEye);
-      // Glow peaks at the shell limb (ang == capS); feathers IN toward the
-      // surface limb and OUT (wider) into space, so it's a soft blurred band.
-      final d = ang >= capS
-          ? (ang - capS) / featherOut
-          : (capS - ang) / featherIn;
+      // Glow peaks at the SURFACE limb (ang == capSurf) and feathers both ways:
+      // toward the sub-point/surface (ang < capSurf, into the occluded interior)
+      // and outward past the shell into space (ang > capSurf). Peaking at the
+      // surface limb welds the band to the horizon — no detached gap.
+      final d = ang <= capSurf
+          ? (capSurf - ang) / featherIn
+          : (ang - capSurf) / featherOut;
       final glow = math.pow((1.0 - d).clamp(0.0, 1.0), 1.5).toDouble();
       if (glow <= 0.004) return null;
       // Day/night + warm terminator from the camera-frame normal vs the sun.
@@ -641,12 +712,15 @@ class SphereTexture {
       // Day-side scatter, but keep a dim ambient ring through the terminator and
       // a touch into the night side so the limb glow never hard-cuts to nothing
       // (a real atmosphere still scatters at a grazing terminator).
-      final dayF = 0.25 + 0.75 * _smoothstep(-0.15, 0.3, lit);
-      final warmF = 1.0 - _smoothstep(0.0, 0.45, lit); // warm at the terminator
-      final bright = ui.Color.lerp(tint, const ui.Color(0xFFFFFFFF), 0.4) ?? tint;
+      final dayF = 0.22 + 0.78 * _smoothstep(-0.12, 0.32, lit);
+      // Warm ONLY in a narrow band right at the terminator (low lit), and blend
+      // only part-way to the warm tone — so the band reads BLUE with a warm low
+      // edge (the old look), not an orange bloom.
+      final warmF = (1.0 - _smoothstep(0.0, 0.22, lit)) * 0.6;
+      final bright = ui.Color.lerp(tint, const ui.Color(0xFFFFFFFF), 0.45) ?? tint;
       var col = ui.Color.lerp(tint, warm, warmF) ?? tint;
-      if (lit > 0.55) col = ui.Color.lerp(col, bright, 0.5) ?? col;
-      final a = (glow * dayF * 2.9).clamp(0.0, 0.85);
+      if (lit > 0.5) col = ui.Color.lerp(col, bright, 0.45) ?? col;
+      final a = (glow * dayF * 2.7).clamp(0.0, 0.8);
       return _V0(
           ui.Offset(viewportCentre.dx + p.x, viewportCentre.dy - p.y),
           col.withValues(alpha: a));
@@ -663,7 +737,7 @@ class SphereTexture {
       final cAng = math.acos((cx * toEx + cy * toEy + cz * toEz).clamp(-1.0, 1.0));
       final faceRad = math.acos((cx * A[0] + cy * A[1] + cz * A[2]).clamp(-1.0, 1.0));
       final maxFeather = math.max(featherIn, featherOut);
-      if ((cAng - capS).abs() - faceRad > maxFeather) return;
+      if ((cAng - capSurf).abs() - faceRad > maxFeather) return;
       if (depth < 6) {
         List<double> mid(List<double> p, List<double> q) {
           final x = p[0] + q[0], y = p[1] + q[1], z = p[2] + q[2];
