@@ -19,11 +19,6 @@ import '../../domain/shared/vector3.dart';
 class SphereTexture {
   const SphereTexture();
 
-  /// Mesh resolution: cells across the disc. Higher = smoother sphere, more
-  /// triangles. The mesh is also clipped to a true circle, so this mainly
-  /// controls how round the *interior* texture warp looks.
-  static const int _grid = 40;
-
   /// Mesh is drawn this much larger than the clip circle so its faceted edge
   /// hides behind the antialiased circular clip (no grid stairsteps at the rim).
   /// Public so the painter can size the base disc to the SAME capped extent and
@@ -101,146 +96,155 @@ class SphereTexture {
     final clipCircle =
         radiusM <= 0 || view.eyeOffset == Vector3.zero || (eyeDist - radiusM) >= radiusM;
 
-    // Adaptive tessellation: near the surface the visible cap spreads across the
-    // whole screen, so the uniform far-grid leaves huge near-camera quads. Boost
-    // the lattice resolution as the eye drops toward the surface (altitude -> 0),
-    // up to 4x the base grid, so the ground close to the camera subdivides finer.
-    final alt = radiusM > 0 ? (eyeDist - radiusM) : double.infinity;
-    final grid = (radiusM > 0 && alt < radiusM)
-        ? (_grid * (1.0 + 5.0 * (1.0 - (alt / radiusM).clamp(0.0, 1.0)))).round()
-        : _grid;
-
-    // LAT/LONG TESSELLATION (body space). The sphere is gridded in lat × lon;
-    // every vertex is projected through the real camera and culled if it's below
-    // the eye's local horizon (perspective) / back-facing (ortho) or behind the
-    // near plane. No assumption that the camera looks at the body centre — so it's
-    // correct for off-axis bodies, orbit tracking (centre off-screen), and a
-    // surface eye looking sideways.
-    //
-    // WINDOWING: far away the visible region is ~a hemisphere, so grid the whole
-    // sphere (lat -pi/2..pi/2, lon 0..2pi). NEAR the surface you only see a small
-    // CAP (angular radius alpha = acos(radius/eyeDist)) around the sub-camera
-    // surface point — a uniform full-sphere grid would land almost no verts in
-    // that cap. So centre a lat/long WINDOW on the sub-camera point sized to the
-    // cap (+margin) and spend the whole grid there, giving dense near-ground
-    // detail. Texture UVs come from the absolute lat/lon either way.
+    // GROUND-ANCHORED ADAPTIVE QUADTREE (body space). Recursively subdivide the
+    // sphere in lat/lon; a node splits when its projected on-screen size exceeds
+    // a target, so detail concentrates wherever the camera actually looks
+    // (nadir, the horizon when tilted, an off-axis body) — not assumed at the
+    // centre. Vertices sit at FIXED lat/lon corners (welded via a cache), so the
+    // mesh is anchored to the ground and doesn't swim as the eye/planet moves.
     final camR = view.right, camU = view.up, camF = view.forward;
 
-    // Sub-camera surface direction (body frame) = from centre toward the eye =
-    // -centreFromEye normalized. Its lat/lon centres the near window.
-    final toEye =
-        eyeDist < 1e-6 ? Vector3(0, 0, 1) : (centreFromEye * (-1 / eyeDist));
-    final subLat = math.asin(toEye.z.clamp(-1.0, 1.0));
-    final subLon = math.atan2(toEye.y, toEye.x);
-    // Visible-cap half-angle. Use a generous margin (1.8x, min ~5 deg) so the
-    // window extends WELL past the horizon: ground entering view at the leading
-    // edge is already tessellated + just culled, so it appears at the true
-    // (small, far) horizon rather than popping in at the window edge.
-    final windowed = radiusM > 0 && (eyeDist - radiusM) < radiusM;
-    final alpha = windowed
-        ? math
-            .max(math.acos((radiusM / eyeDist).clamp(0.0, 1.0)) * 1.8, 0.09)
-            .clamp(0.0, math.pi)
-        : math.pi; // full sphere
+    // Evaluate a body-fixed (lat, lon) surface corner -> a projected _V, cached
+    // so shared corners weld (no cracks, no swim). Returns null if behind the
+    // near plane. [visible] also reports whether it's above the local horizon /
+    // front-facing, used to prune whole nodes.
+    final cache = <int, _V?>{};
+    final visCache = <int, bool>{};
+    const lonKeyScale = 100000.0;
+    int keyOf(double lat, double lon) =>
+        (lat * lonKeyScale).round() * 1000000007 + (lon * lonKeyScale).round();
 
-    final latBands = grid; // rows
-    final lonBands = grid * 2; // cols
-    // Window half-extents in lat/lon. Far: full sphere. Near: the cap box.
-    final latHalf = windowed ? alpha : math.pi / 2;
-    final lonHalf = windowed ? alpha : math.pi; // full wrap when not windowed
-
-    final verts = <List<_V?>>[];
-    for (var iLat = 0; iLat <= latBands; iLat++) {
-      final row = <_V?>[];
-      // Walk lat across the window centred on subLat (far: -pi/2..pi/2).
-      final lat = windowed
-          ? (subLat + (iLat / latBands * 2 - 1) * latHalf)
-              .clamp(-math.pi / 2, math.pi / 2)
-          : math.pi / 2 - (iLat / latBands) * math.pi;
+    bool cornerVisible(double lat, double lon) {
+      final k = keyOf(lat, lon);
+      final hit = visCache[k];
+      if (hit != null) return hit;
       final cl = math.cos(lat), sl = math.sin(lat);
-      // Texture row from ABSOLUTE lat (north=0 .. south=1).
-      final v = (math.pi / 2 - lat) / math.pi;
-      for (var iLon = 0; iLon <= lonBands; iLon++) {
-        // lon: window centred on subLon (near) or full wrap (far). +spin so the
-        // surface rotates with epoch.
-        final lon = (windowed
-                ? subLon + (iLon / lonBands * 2 - 1) * lonHalf
-                : (iLon / lonBands) * 2 * math.pi) +
-            spin;
-        // Body-frame surface unit normal n (lon around +Z from +X, lat from eq).
-        final nx = cl * math.cos(lon);
-        final ny = cl * math.sin(lon);
-        final nz = sl;
-        // Horizon cull (skip the whole far hemisphere cheaply).
-        if (radiusM > 0) {
-          final dotEye =
-              -(centreFromEye.x * nx + centreFromEye.y * ny + centreFromEye.z * nz);
-          if (dotEye <= radiusM) {
-            row.add(null);
-            continue;
-          }
-        } else {
-          // Ortho / no radius: cull the back hemisphere (facing away from cam).
-          final facing = -(nx * camF.x + ny * camF.y + nz * camF.z);
-          if (facing <= 0) {
-            row.add(null);
-            continue;
-          }
-        }
-        // Project the surface point through the camera.
-        final relFocus = Vector3(
-          worldRel.x + radiusM * nx,
-          worldRel.y + radiusM * ny,
-          worldRel.z + radiusM * nz,
-        );
-        final p = view.projectPx(relFocus);
-        if (p == null) {
-          row.add(null);
-          continue;
-        }
-        final pos = ui.Offset(viewportCentre.dx + p.x, viewportCentre.dy - p.y);
-        // Texture column from the ABSOLUTE body-fixed longitude (lon minus the
-        // epoch spin), continuous so TileMode.repeated hides the wrap seam.
-        final u = ((lon - spin) + math.pi) / (2 * math.pi);
-
-        // Camera-frame normal for shade: n in (right, up, toward-viewer).
-        final cnx = nx * camR.x + ny * camR.y + nz * camR.z;
-        final cny = nx * camU.x + ny * camU.y + nz * camU.z;
-        final cnz = -(nx * camF.x + ny * camF.y + nz * camF.z); // toward viewer
-        final lit = selfLuminous
-            ? 1.0
-            : (cnx * sun[0] + cny * sun[1] + cnz * sun[2]).clamp(0.0, 1.0);
-        final shade = selfLuminous ? 1.0 : (0.12 + 0.88 * lit);
-        // Limb falloff for atmosphere: cnz ~ 1 at the sub-camera point, ~0 at the
-        // limb (grazing) — same (1 - facing)^1.6 curve.
-        final day = _smoothstep(0.0, 0.12, lit);
-        final limb = math.pow((1.0 - cnz.clamp(0.0, 1.0)), 1.6).toDouble();
-        final atmoA = (0.06 + 0.94 * limb) * day;
-        final warmF = (1.0 - _smoothstep(0.0, 0.45, lit)) * day;
-
-        row.add(_V(
-          pos: pos,
-          uv: ui.Offset(u * iw, v * ih),
-          shade: shade,
-          atmoA: atmoA,
-          warmF: warmF,
-        ));
+      final nx = cl * math.cos(lon + spin),
+          ny = cl * math.sin(lon + spin),
+          nz = sl;
+      bool vis;
+      if (radiusM > 0) {
+        vis = -(centreFromEye.x * nx + centreFromEye.y * ny + centreFromEye.z * nz) >
+            radiusM;
+      } else {
+        vis = -(nx * camF.x + ny * camF.y + nz * camF.z) > 0;
       }
-      verts.add(row);
+      visCache[k] = vis;
+      return vis;
     }
 
-    // Emit two triangles per cell where all four corners are visible.
-    for (var iLat = 0; iLat < latBands; iLat++) {
-      for (var iLon = 0; iLon < lonBands; iLon++) {
-        final a = verts[iLat][iLon];
-        final b = verts[iLat][iLon + 1];
-        final c = verts[iLat + 1][iLon];
-        final d = verts[iLat + 1][iLon + 1];
-        if (a == null || b == null || c == null || d == null) continue;
-        _tri(positions, texCoords, shadowColors, atmoColors, atmoTint, atmoWarm,
-            a, c, b, iw);
-        _tri(positions, texCoords, shadowColors, atmoColors, atmoTint, atmoWarm,
-            b, c, d, iw);
+    _V? evalCorner(double lat, double lon) {
+      final k = keyOf(lat, lon);
+      if (cache.containsKey(k)) return cache[k];
+      final cl = math.cos(lat), sl = math.sin(lat);
+      // +spin rotates the geometry with epoch; the texture uses body-fixed lon.
+      final gLon = lon + spin;
+      final nx = cl * math.cos(gLon), ny = cl * math.sin(gLon), nz = sl;
+      final relFocus = Vector3(
+        worldRel.x + radiusM * nx,
+        worldRel.y + radiusM * ny,
+        worldRel.z + radiusM * nz,
+      );
+      final p = view.projectPx(relFocus);
+      if (p == null) {
+        cache[k] = null;
+        return null;
+      }
+      final pos = ui.Offset(viewportCentre.dx + p.x, viewportCentre.dy - p.y);
+      final u = (lon + math.pi) / (2 * math.pi); // body-fixed longitude -> u
+      final v = (math.pi / 2 - lat) / math.pi;
+      final cnx = nx * camR.x + ny * camR.y + nz * camR.z;
+      final cny = nx * camU.x + ny * camU.y + nz * camU.z;
+      final cnz = -(nx * camF.x + ny * camF.y + nz * camF.z);
+      final lit = selfLuminous
+          ? 1.0
+          : (cnx * sun[0] + cny * sun[1] + cnz * sun[2]).clamp(0.0, 1.0);
+      final shade = selfLuminous ? 1.0 : (0.12 + 0.88 * lit);
+      final day = _smoothstep(0.0, 0.12, lit);
+      final limb = math.pow((1.0 - cnz.clamp(0.0, 1.0)), 1.6).toDouble();
+      final atmoA = (0.06 + 0.94 * limb) * day;
+      final warmF = (1.0 - _smoothstep(0.0, 0.45, lit)) * day;
+      final vtx = _V(
+        pos: pos,
+        uv: ui.Offset(u * iw, v * ih),
+        shade: shade,
+        atmoA: atmoA,
+        warmF: warmF,
+      );
+      cache[k] = vtx;
+      return vtx;
+    }
+
+    // Target leaf size on screen (px) + recursion bound. Deeper near the surface
+    // (smaller leaves) where the ground fills the view; the cap on depth keeps a
+    // pathological grazing view from exploding the triangle count.
+    const targetPx = 22.0;
+    final alt = radiusM > 0 ? (eyeDist - radiusM) : double.infinity;
+    final maxDepth = (radiusM > 0 && alt < radiusM) ? 8 : 6;
+
+    // Emit a leaf node's two triangles (corners already projected + visible).
+    void emitLeaf(_V a, _V b, _V c, _V d) {
+      _tri(positions, texCoords, shadowColors, atmoColors, atmoTint, atmoWarm,
+          a, c, b, iw);
+      _tri(positions, texCoords, shadowColors, atmoColors, atmoTint, atmoWarm,
+          b, c, d, iw);
+    }
+
+    // Recursively tessellate the lat/lon rectangle [la0,la1]x[lo0,lo1].
+    void recurse(double la0, double la1, double lo0, double lo1, int depth) {
+      // Prune: skip a node with NO visible corner (its whole span is below the
+      // horizon / back-facing). Test the four corners + the centre.
+      final laM = (la0 + la1) / 2, loM = (lo0 + lo1) / 2;
+      final anyVis = cornerVisible(la0, lo0) ||
+          cornerVisible(la0, lo1) ||
+          cornerVisible(la1, lo0) ||
+          cornerVisible(la1, lo1) ||
+          cornerVisible(laM, loM);
+      if (!anyVis) return;
+
+      final a = evalCorner(la0, lo0);
+      final b = evalCorner(la0, lo1);
+      final c = evalCorner(la1, lo0);
+      final d = evalCorner(la1, lo1);
+
+      // Decide whether to split: too big on screen (use the projected diagonal of
+      // whatever corners we have) and depth remains. If a corner is behind the
+      // near plane (null) we must split to resolve the boundary.
+      var split = depth < maxDepth;
+      if (split && a != null && b != null && c != null && d != null) {
+        double seg(ui.Offset p, ui.Offset q) {
+          final dx = p.dx - q.dx, dy = p.dy - q.dy;
+          return math.sqrt(dx * dx + dy * dy);
+        }
+        final size = math.max(seg(a.pos, b.pos),
+            math.max(seg(a.pos, c.pos), math.max(seg(b.pos, d.pos), seg(c.pos, d.pos))));
+        if (size <= targetPx) split = false;
+      }
+
+      if (split) {
+        recurse(la0, laM, lo0, loM, depth + 1);
+        recurse(la0, laM, loM, lo1, depth + 1);
+        recurse(laM, la1, lo0, loM, depth + 1);
+        recurse(laM, la1, loM, lo1, depth + 1);
+        return;
+      }
+      // Leaf: emit only when all four corners projected (in front of near plane).
+      if (a != null && b != null && c != null && d != null) {
+        emitLeaf(a, c, b, d);
+      }
+    }
+
+    // Seed the recursion: split the sphere into coarse lat/lon root tiles
+    // (4 lat x 8 lon) so each root is small enough that the projected-size test
+    // is meaningful, and so a tile straddling the seam stays narrow.
+    const rootLat = 4, rootLon = 8;
+    for (var i = 0; i < rootLat; i++) {
+      final la0 = math.pi / 2 - (i / rootLat) * math.pi;
+      final la1 = math.pi / 2 - ((i + 1) / rootLat) * math.pi;
+      for (var j = 0; j < rootLon; j++) {
+        final lo0 = -math.pi + (j / rootLon) * 2 * math.pi;
+        final lo1 = -math.pi + ((j + 1) / rootLon) * 2 * math.pi;
+        recurse(la0, la1, lo0, lo1, 0);
       }
     }
 
