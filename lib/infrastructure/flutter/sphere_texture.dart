@@ -96,50 +96,37 @@ class SphereTexture {
     final clipCircle =
         radiusM <= 0 || view.eyeOffset == Vector3.zero || (eyeDist - radiusM) >= radiusM;
 
-    // GROUND-ANCHORED ADAPTIVE QUADTREE (body space). Recursively subdivide the
-    // sphere in lat/lon; a node splits when its projected on-screen size exceeds
-    // a target, so detail concentrates wherever the camera actually looks
-    // (nadir, the horizon when tilted, an off-axis body) — not assumed at the
-    // centre. Vertices sit at FIXED lat/lon corners (welded via a cache), so the
-    // mesh is anchored to the ground and doesn't swim as the eye/planet moves.
+    // ADAPTIVE ICOSPHERE (body space). The sphere is a subdivided icosahedron:
+    // 20 triangular faces of (near) uniform size, recursively split into 4 when
+    // their projected on-screen size exceeds a target. UNLIKE a lat/long grid it
+    // has NO pole singularity, so a straight-down / nadir view doesn't collapse.
+    // Each vertex is a unit body-direction projected through the real camera;
+    // verts are welded via a cache so the mesh is ground-anchored (no swim).
     final camR = view.right, camU = view.up, camF = view.forward;
 
-    // Evaluate a body-fixed (lat, lon) surface corner -> a projected _V, cached
-    // so shared corners weld (no cracks, no swim). Returns null if behind the
-    // near plane. [visible] also reports whether it's above the local horizon /
-    // front-facing, used to prune whole nodes.
-    final cache = <int, _V?>{};
-    final visCache = <int, bool>{};
-    const lonKeyScale = 100000.0;
-    int keyOf(double lat, double lon) =>
-        (lat * lonKeyScale).round() * 1000000007 + (lon * lonKeyScale).round();
-
-    bool cornerVisible(double lat, double lon) {
-      final k = keyOf(lat, lon);
-      final hit = visCache[k];
-      if (hit != null) return hit;
-      final cl = math.cos(lat), sl = math.sin(lat);
-      final nx = cl * math.cos(lon + spin),
-          ny = cl * math.sin(lon + spin),
-          nz = sl;
-      bool vis;
+    // Whether a body-frame surface direction n is visible (above the eye's local
+    // horizon in perspective, front-facing in ortho).
+    bool dirVisible(double nx, double ny, double nz) {
       if (radiusM > 0) {
-        vis = -(centreFromEye.x * nx + centreFromEye.y * ny + centreFromEye.z * nz) >
+        return -(centreFromEye.x * nx +
+                centreFromEye.y * ny +
+                centreFromEye.z * nz) >
             radiusM;
-      } else {
-        vis = -(nx * camF.x + ny * camF.y + nz * camF.z) > 0;
       }
-      visCache[k] = vis;
-      return vis;
+      return -(nx * camF.x + ny * camF.y + nz * camF.z) > 0;
     }
 
-    _V? evalCorner(double lat, double lon) {
-      final k = keyOf(lat, lon);
-      if (cache.containsKey(k)) return cache[k];
-      final cl = math.cos(lat), sl = math.sin(lat);
-      // +spin rotates the geometry with epoch; the texture uses body-fixed lon.
-      final gLon = lon + spin;
-      final nx = cl * math.cos(gLon), ny = cl * math.sin(gLon), nz = sl;
+    // Project a unit body-direction (already spin-rotated for geometry) -> _V,
+    // cached by quantised direction so shared edge midpoints weld. Returns null
+    // when behind the near plane. [lon0]/[lat0] are the body-FIXED angles for UV.
+    final cache = <String, _V?>{};
+    _V? evalDir(double nx, double ny, double nz) {
+      // Collision-free weld key: quantise each component to 1e-6 and join. (An
+      // XOR-of-hashes key collided, returning wrong cached verts -> degenerate
+      // triangles that streaked across the disc.)
+      final key = '${(nx * 1e6).round()},${(ny * 1e6).round()},'
+          '${(nz * 1e6).round()}';
+      if (cache.containsKey(key)) return cache[key];
       final relFocus = Vector3(
         worldRel.x + radiusM * nx,
         worldRel.y + radiusM * ny,
@@ -147,11 +134,16 @@ class SphereTexture {
       );
       final p = view.projectPx(relFocus);
       if (p == null) {
-        cache[k] = null;
+        cache[key] = null;
         return null;
       }
       final pos = ui.Offset(viewportCentre.dx + p.x, viewportCentre.dy - p.y);
-      final u = (lon + math.pi) / (2 * math.pi); // body-fixed longitude -> u
+      // UV from the BODY-FIXED lat/lon (undo the epoch spin we added to geometry).
+      final bx = nx * math.cos(spin) + ny * math.sin(spin);
+      final by = -nx * math.sin(spin) + ny * math.cos(spin);
+      final lon = math.atan2(by, bx);
+      final lat = math.asin(nz.clamp(-1.0, 1.0));
+      final u = (lon + math.pi) / (2 * math.pi);
       final v = (math.pi / 2 - lat) / math.pi;
       final cnx = nx * camR.x + ny * camR.y + nz * camR.z;
       final cny = nx * camU.x + ny * camU.y + nz * camU.z;
@@ -170,110 +162,132 @@ class SphereTexture {
         shade: shade,
         atmoA: atmoA,
         warmF: warmF,
+        nearPole: nz.abs() > 0.985, // within ~10 deg of a pole
       );
-      cache[k] = vtx;
+      cache[key] = vtx;
       return vtx;
     }
 
-    // Target leaf size on screen (px), ADAPTIVE: a small/far disc needs fine
-    // leaves so its LIMB reads round (a 40 px leaf would facet a 200 px planet);
-    // a big near disc that fills the screen uses coarse leaves for perf. Scale
-    // the target so the disc always has roughly >= 24 leaves across its radius,
-    // clamped to [6, 40] px. Depth is capped so a grazing view can't explode;
-    // with the screen-bounds prune off-screen subtrees never recurse.
     final targetPx = (rPx / 24.0).clamp(6.0, 40.0);
+    // Depth bound, scaled to how close the eye is. Far / mid: a modest cap (the
+    // projected-size test stops early anyway). VERY low altitude (a few ico faces
+    // fill the screen) needs more depth to reach screen-sized leaves — scale by
+    // log2(radius/alt). The horizon/screen prune + vertex weld bound the cost.
     final alt = radiusM > 0 ? (eyeDist - radiusM) : double.infinity;
-    final maxDepth = (radiusM > 0 && alt < radiusM) ? 7 : 6;
-
-
-    // Screen bounds (canvas px) with a generous margin so a node straddling the
-    // edge still tessellates; nodes entirely off ONE edge are pruned.
+    var maxDepth = 7;
+    if (radiusM > 0 && alt > 0 && alt < radiusM * 0.2) {
+      final extra = (math.log(radiusM / alt) / math.ln2).round();
+      maxDepth = (7 + extra).clamp(7, 14);
+    }
     final screenW = viewportCentre.dx * 2, screenH = viewportCentre.dy * 2;
     final marginX = screenW * 0.5, marginY = screenH * 0.5;
 
-    // Recursively tessellate the lat/lon rectangle [la0,la1]x[lo0,lo1].
-    void recurse(double la0, double la1, double lo0, double lo1, int depth) {
-      // Prune: skip a node with NO visible corner (its whole span is below the
-      // horizon / back-facing). Test the four corners + the centre.
-      final laM = (la0 + la1) / 2, loM = (lo0 + lo1) / 2;
-      final anyVis = cornerVisible(la0, lo0) ||
-          cornerVisible(la0, lo1) ||
-          cornerVisible(la1, lo0) ||
-          cornerVisible(la1, lo1) ||
-          cornerVisible(laM, loM);
-      if (!anyVis) return;
+    // Visible cap geometry: the cap is the spherical disc of directions within
+    // angle [capAngle] of [toEye] (the sub-camera direction); perspective only.
+    // A face is pruned only when it lies WHOLLY outside the cap by more than its
+    // own angular radius — never on corner-visibility alone, since at low
+    // altitude the visible cap is far smaller than a coarse ico face and would
+    // otherwise be pruned before the face subdivides down to it.
+    final toEyeX = eyeDist < 1e-6 ? 0.0 : -centreFromEye.x / eyeDist;
+    final toEyeY = eyeDist < 1e-6 ? 0.0 : -centreFromEye.y / eyeDist;
+    final toEyeZ = eyeDist < 1e-6 ? 1.0 : -centreFromEye.z / eyeDist;
+    final capAngle =
+        radiusM > 0 ? math.acos((radiusM / eyeDist).clamp(0.0, 1.0)) : math.pi;
 
-      final a = evalCorner(la0, lo0);
-      final b = evalCorner(la0, lo1);
-      final c = evalCorner(la1, lo0);
-      final d = evalCorner(la1, lo1);
+    // A spherical triangle of three unit body-directions. Recursively split into
+    // four (edge midpoints, re-normalised onto the sphere) until small on screen.
+    void faceRecurse(List<double> A, List<double> B, List<double> C, int depth) {
+      final mx = (A[0] + B[0] + C[0]), my = (A[1] + B[1] + C[1]), mz = (A[2] + B[2] + C[2]);
+      final ml = math.sqrt(mx * mx + my * my + mz * mz);
+      final cx = mx / ml, cy = my / ml, cz = mz / ml;
+      if (radiusM > 0) {
+        // Angle from the face centroid to the cap centre, and the face's angular
+        // radius (centroid->corner). Prune only if the face can't reach the cap.
+        final dotCap = (cx * toEyeX + cy * toEyeY + cz * toEyeZ).clamp(-1.0, 1.0);
+        final centAngle = math.acos(dotCap);
+        final dotCorner = (cx * A[0] + cy * A[1] + cz * A[2]).clamp(-1.0, 1.0);
+        final faceRad = math.acos(dotCorner);
+        if (centAngle - faceRad > capAngle) return; // wholly past the horizon
+      } else {
+        // Ortho: prune a face that's entirely back-facing.
+        if (!dirVisible(A[0], A[1], A[2]) &&
+            !dirVisible(B[0], B[1], B[2]) &&
+            !dirVisible(C[0], C[1], C[2]) &&
+            !dirVisible(cx, cy, cz)) {
+          return;
+        }
+      }
+      final va = evalDir(A[0], A[1], A[2]);
+      final vb = evalDir(B[0], B[1], B[2]);
+      final vc = evalDir(C[0], C[1], C[2]);
 
-      // SCREEN-BOUNDS PRUNE: if every projected corner is in front (non-null) and
-      // they all lie off the SAME screen edge, the node can't be on screen — skip
-      // it (and its subtree). This is the big perf win at low altitude where the
-      // visible cap is large but most of it is off-screen. A node with any null
-      // corner (crosses the near plane) is kept so the boundary still resolves.
-      if (a != null && b != null && c != null && d != null) {
-        final minX = math.min(a.pos.dx, math.min(b.pos.dx, math.min(c.pos.dx, d.pos.dx)));
-        final maxX = math.max(a.pos.dx, math.max(b.pos.dx, math.max(c.pos.dx, d.pos.dx)));
-        final minY = math.min(a.pos.dy, math.min(b.pos.dy, math.min(c.pos.dy, d.pos.dy)));
-        final maxY = math.max(a.pos.dy, math.max(b.pos.dy, math.max(c.pos.dy, d.pos.dy)));
+      // Off-screen prune (only when all corners projected — a near-plane crosser
+      // keeps splitting to resolve its boundary).
+      if (va != null && vb != null && vc != null) {
+        final minX = math.min(va.pos.dx, math.min(vb.pos.dx, vc.pos.dx));
+        final maxX = math.max(va.pos.dx, math.max(vb.pos.dx, vc.pos.dx));
+        final minY = math.min(va.pos.dy, math.min(vb.pos.dy, vc.pos.dy));
+        final maxY = math.max(va.pos.dy, math.max(vb.pos.dy, vc.pos.dy));
         if (maxX < -marginX ||
             minX > screenW + marginX ||
             maxY < -marginY ||
             minY > screenH + marginY) {
-          return; // wholly off one edge
+          return;
         }
       }
 
-      // Decide whether to split: too big on screen (use the projected diagonal of
-      // whatever corners we have) and depth remains. If a corner is behind the
-      // near plane (null) we must split to resolve the boundary.
       var split = depth < maxDepth;
-      if (split && a != null && b != null && c != null && d != null) {
+      if (split && va != null && vb != null && vc != null) {
         double seg(ui.Offset p, ui.Offset q) {
           final dx = p.dx - q.dx, dy = p.dy - q.dy;
           return math.sqrt(dx * dx + dy * dy);
         }
-        final size = math.max(seg(a.pos, b.pos),
-            math.max(seg(a.pos, c.pos), math.max(seg(b.pos, d.pos), seg(c.pos, d.pos))));
-        if (size <= targetPx) split = false;
+        final sz = math.max(
+            seg(va.pos, vb.pos), math.max(seg(vb.pos, vc.pos), seg(vc.pos, va.pos)));
+        if (sz <= targetPx) split = false;
       }
 
       if (split) {
-        recurse(la0, laM, lo0, loM, depth + 1);
-        recurse(la0, laM, loM, lo1, depth + 1);
-        recurse(laM, la1, lo0, loM, depth + 1);
-        recurse(laM, la1, loM, lo1, depth + 1);
+        List<double> mid(List<double> p, List<double> q) {
+          final x = p[0] + q[0], y = p[1] + q[1], z = p[2] + q[2];
+          final l = math.sqrt(x * x + y * y + z * z);
+          return [x / l, y / l, z / l];
+        }
+        final ab = mid(A, B), bc = mid(B, C), ca = mid(C, A);
+        faceRecurse(A, ab, ca, depth + 1);
+        faceRecurse(ab, B, bc, depth + 1);
+        faceRecurse(ca, bc, C, depth + 1);
+        faceRecurse(ab, bc, ca, depth + 1);
         return;
       }
-      // Leaf: emit each of the quad's two triangles independently, so a node
-      // STRADDLING the near plane (one corner behind it -> null) still draws the
-      // triangle(s) whose three corners are all in front, instead of dropping the
-      // whole quad. That's what was culling the ground right in front of the
-      // camera at the surface.
-      if (a != null && c != null && b != null) {
+      // Leaf: emit if all three corners projected (in front of the near plane).
+      if (va != null && vb != null && vc != null) {
         _tri(positions, texCoords, shadowColors, atmoColors, atmoTint, atmoWarm,
-            a, c, b, iw);
-      }
-      if (b != null && c != null && d != null) {
-        _tri(positions, texCoords, shadowColors, atmoColors, atmoTint, atmoWarm,
-            b, c, d, iw);
+            va, vb, vc, iw);
       }
     }
 
-    // Seed the recursion: split the sphere into coarse lat/lon root tiles
-    // (4 lat x 8 lon) so each root is small enough that the projected-size test
-    // is meaningful, and so a tile straddling the seam stays narrow.
-    const rootLat = 4, rootLon = 8;
-    for (var i = 0; i < rootLat; i++) {
-      final la0 = math.pi / 2 - (i / rootLat) * math.pi;
-      final la1 = math.pi / 2 - ((i + 1) / rootLat) * math.pi;
-      for (var j = 0; j < rootLon; j++) {
-        final lo0 = -math.pi + (j / rootLon) * 2 * math.pi;
-        final lo1 = -math.pi + ((j + 1) / rootLon) * 2 * math.pi;
-        recurse(la0, la1, lo0, lo1, 0);
-      }
+    // Icosahedron vertices (unit), then rotate each by +spin about +Z so the
+    // GEOMETRY turns with epoch (evalDir undoes the spin for the body-fixed UV).
+    const t = 1.618033988749895; // golden ratio
+    final ico = <List<double>>[
+      [-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0],
+      [0, -1, t], [0, 1, t], [0, -1, -t], [0, 1, -t],
+      [t, 0, -1], [t, 0, 1], [-t, 0, -1], [-t, 0, 1],
+    ].map((p) {
+      final l = math.sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+      final x = p[0] / l, y = p[1] / l, z = p[2] / l;
+      final cs = math.cos(spin), sn = math.sin(spin);
+      return [x * cs - y * sn, x * sn + y * cs, z]; // +spin about +Z
+    }).toList();
+    const faces = <List<int>>[
+      [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
+      [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
+      [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
+      [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1],
+    ];
+    for (final f in faces) {
+      faceRecurse(ico[f[0]], ico[f[1]], ico[f[2]], 0);
     }
 
     if (positions.isEmpty) return;
@@ -364,14 +378,22 @@ class SphereTexture {
       atmo..add(at(a))..add(at(b))..add(at(d));
     }
 
-    // Seam fix: a triangle straddling the longitude wrap has u values spanning
-    // nearly the whole texture (e.g. one vertex near 0, another near iw). Linear
-    // interpolation then runs the LONG way across the map — a smeared band. If
-    // the spread exceeds half the width, lift the low-u vertices by +iw so all
-    // three sit on the same side; TileMode.repeated samples the wrapped copy.
     var ua = a.uv.dx, ub = b.uv.dx, ud = d.uv.dx;
     final maxU = math.max(ua, math.max(ub, ud));
-    if (maxU - math.min(ua, math.min(ub, ud)) > iw / 2) {
+    final minU = math.min(ua, math.min(ub, ud));
+
+    if (a.nearPole || b.nearPole || d.nearPole) {
+      // POLE FIX: at a geographic pole all longitudes converge, so the three u's
+      // fan out and linear interpolation smears the texture radially across the
+      // whole map. The polar pixels are nearly uniform, so collapse all three to
+      // the MEDIAN column — one consistent sample, no smear.
+      final med = ua + ub + ud - maxU - minU; // the middle value
+      ua = med;
+      ub = med;
+      ud = med;
+    } else if (maxU - minU > iw / 2) {
+      // Clean longitude wrap (seam): lift the low-u verts by +iw so all three sit
+      // on the same side; TileMode.repeated samples the wrapped copy.
       if (maxU - ua > iw / 2) ua += iw;
       if (maxU - ub > iw / 2) ub += iw;
       if (maxU - ud > iw / 2) ud += iw;
@@ -407,10 +429,12 @@ class _V {
   final double shade;
   final double atmoA; // atmosphere scatter alpha at this vertex
   final double warmF; // 0=day colour, 1=warm terminator band
+  final bool nearPole; // |lat| near 90 -> equirect U is ill-defined here
   const _V(
       {required this.pos,
       required this.uv,
       required this.shade,
       this.atmoA = 0,
-      this.warmF = 0});
+      this.warmF = 0,
+      this.nearPole = false});
 }
