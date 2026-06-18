@@ -130,17 +130,22 @@ class SphereTexture {
         : _grid;
 
     // Lattice extent over the eye-facing hemisphere (nx,ny in [-span, span]).
-    // FAR / ortho (circular silhouette): the silhouette only covers a fraction
-    // of the hemisphere, so span tracks it (cover*overscan/rPx, floored tiny so
-    // detail keeps magnifying); the billboard-era reasoning still holds since the
-    // limb IS the silhouette. NEAR the surface: the visible ground runs from
-    // nadir all the way out to the horizon — a WIDE angular cap — so span must be
-    // the full hemisphere (1.0) or the lattice covers only a pinprick around
-    // nadir and the near ground draws no quads. Projection keeps coords bounded
-    // and the horizon cull trims the back side, so span=1 is safe here.
-    final span = !clipCircle
-        ? 1.0
-        : (rPx <= 0 ? 1.0 : (cover * overscan / rPx).clamp(0.00004, 1.0));
+    // FAR / ortho (circular silhouette): span tracks the silhouette
+    // (cover*overscan/rPx, floored tiny so detail keeps magnifying).
+    // NEAR the surface: from low altitude you only see a SMALL cap of the sphere
+    // (the horizon is close), at cz >= radius/eyeDist. In the nx,ny param the
+    // visible cap has radius sqrt(1 - (radius/eyeDist)^2). A uniform full-
+    // hemisphere lattice would put almost no samples in that thin cap (everything
+    // else is below the horizon and culled) — so concentrate the whole lattice
+    // ON the visible cap by setting span to its radius (with margin for the limb).
+    double span;
+    if (!clipCircle) {
+      final ratio = (radiusM / eyeDist).clamp(0.0, 1.0);
+      final capR = math.sqrt((1.0 - ratio * ratio).clamp(0.0, 1.0));
+      span = (capR * 1.3).clamp(0.0008, 1.0); // a little past the horizon
+    } else {
+      span = rPx <= 0 ? 1.0 : (cover * overscan / rPx).clamp(0.00004, 1.0);
+    }
 
     // Build a (grid+1)^2 lattice of vertices over the unit disc; cells outside
     // the circle are skipped when emitting triangles.
