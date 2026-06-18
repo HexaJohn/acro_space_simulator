@@ -512,6 +512,13 @@ class TopDownPainter extends CustomPainter {
       final ai = beh[i] == behindPass;
       final bi = beh[i + 1] == behindPass;
       if (!ai && !bi) continue;
+      // Break the line at NaN points (underground / culled) — no streak.
+      if (pts[i].x.isNaN ||
+          pts[i].y.isNaN ||
+          pts[i + 1].x.isNaN ||
+          pts[i + 1].y.isNaN) {
+        continue;
+      }
       var pa = project(pts[i].x, pts[i].y);
       var pb = project(pts[i + 1].x, pts[i + 1].y);
       // At a behind<->front transition draw only HALF the straddling segment (to

@@ -526,6 +526,11 @@ class TopDownSnapshotPresenter {
       if (!v.landed && vBody != null && v.state.velocity.length > 1) {
         final bodyOrigin = bodyWorld(vBody);
         final bodyDepth = depthOf(bodyOrigin);
+        final bodyR = vBody.radius;
+        // Projected body centre + radius, so we can test occlusion against the
+        // SILHOUETTE (limb) rather than the centre plane.
+        final bodyCentrePx = camera.projectPx(bodyOrigin - camWorld);
+        final bodyRadiusPx = camera.radiusPx(bodyOrigin - camWorld, bodyR);
         // Lift a body-centred path point to world and project to screen px (null
         // when culled) — the adaptive sampler bisects against this on-screen.
         Vector3 toWorld(Vector3 p) =>
@@ -542,9 +547,26 @@ class TopDownSnapshotPresenter {
         final pp = <({double x, double y})>[];
         final beh = <bool>[];
         for (final p in pts) {
+          // Suborbital / impacting arc: a point BELOW the surface is underground,
+          // so break the line there (NaN) instead of looping through the centre.
+          if (p.length < bodyR) {
+            pp.add((x: double.nan, y: double.nan));
+            beh.add(false);
+            continue;
+          }
           final world = toWorld(p);
-          pp.add(projOrNan(world));
-          beh.add(depthOf(world) > bodyDepth);
+          final sp = projOrNan(world);
+          pp.add(sp);
+          // Occluded only when BEHIND the centre plane AND inside the projected
+          // limb disc — i.e. the planet's silhouette actually covers it. A point
+          // behind the centre but outside the limb (e.g. just past the horizon on
+          // a low pass) stays visible.
+          var behind = depthOf(world) > bodyDepth;
+          if (behind && bodyCentrePx != null && !sp.x.isNaN) {
+            final dx = sp.x - bodyCentrePx.x, dy = sp.y - bodyCentrePx.y;
+            behind = (dx * dx + dy * dy) < bodyRadiusPx * bodyRadiusPx;
+          }
+          beh.add(behind);
         }
         path = pp;
         pathBehind = beh;
