@@ -177,6 +177,13 @@ class TopDownPainter extends CustomPainter {
               _drawShadedDisc(canvas, c, rPx, base, sun, shading, b.sunFacing);
             }
           }
+        } else {
+          // Disc covers the viewport: the rim-anchored base disc above is
+          // off-screen, so the textured sphere is the ONLY thing drawing the
+          // surface. If it fails to rasterize the planet would vanish — paint a
+          // fullscreen flat fill underneath as the fallback (same as the
+          // no-texture zoomed-in path) so the body always reads as solid.
+          canvas.drawRect(Offset.zero & size, Paint()..color = _scale(base, 0.6));
         }
         // The sphere is the fragile part; isolate it so a failure leaves the
         // already-drawn disc rather than blanking the world layer.
