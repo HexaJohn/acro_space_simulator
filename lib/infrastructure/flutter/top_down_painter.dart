@@ -205,13 +205,60 @@ class TopDownPainter extends CustomPainter {
           : null;
       // (coverPx — the sphere-cap half-extent — is computed once above, by the
       // disc-radius clamp, and reused for _sphere.paint below.)
+      final atmoThick = (b.isGasGiant && layers.exaggerateAtmosphere) ? 0.6 : 0.45;
       final atmoCol = Color(b.atmoColor);
       if (tex != null) {
-        // NOTE: the old screen-space halo (a CIRCLE at the projected centre) is
-        // gone — it floated off when the centre projected off-screen (close /
-        // glancing) and vanished entirely at grazing angles. The atmosphere is
-        // now a true 3D SHELL mesh inside _sphere.paint (Rs = R*1.025), so the
-        // soft limb glow tracks the real limb at every angle and position.
+        // ATMOSPHERE = a screen-space radial-gradient halo (soft-edged — a sphere
+        // MESH has a hard limb and can't fade into space; a RadialGradient can).
+        // It must sit on the body's TRUE projected silhouette. In perspective that
+        // silhouette is the LIMB CIRCLE — the tangent circle whose centre is pulled
+        // toward the eye from the body centre (NOT the projected body centre `c`,
+        // which is offset from the real limb up close and projects BEHIND the
+        // camera at the surface). Centring on the limb circle welds the band to
+        // the horizon at orbital, mid, AND surface altitudes. The band runs from
+        // the limb (inner, slight overlap so no gap) out by `thick` of the limb
+        // radius, fading softly to space.
+        // NOTE: not gated on discCovers — even when the disc fills the viewport
+        // (low altitude), the HORIZON with space above it is visible, and that's
+        // exactly where the atmosphere band belongs. The radial mask keeps it
+        // transparent over the surface, so it only shows along the limb.
+        if (b.hasAtmosphere && layers.atmoHalo) {
+          // Centre + radius for the radial-gradient band:
+          //  * ORBITAL / MID (apparent radius moderate, centre projects): use the
+          //    projected body centre `c` with the true apparent radius `rPx` — the
+          //    thick, soft, full-horizon band that matches the classic look.
+          //  * SURFACE / very close (rPx enormous, or `c` behind the camera): the
+          //    `c`-centred gradient would span millions of px and wash out, so use
+          //    the LIMB CIRCLE — its centre is pulled toward the eye, always
+          //    projects, and its radius is well-behaved, giving a horizon haze band.
+          final cFinite = c.dx.isFinite && c.dy.isFinite;
+          final moderate = rPx.isFinite && rPx < size.height * 5;
+          Offset? haloC;
+          double haloR = 0;
+          var bandFrac = atmoThick;
+          if (cFinite && moderate) {
+            haloC = c;
+            haloR = rPx;
+          } else {
+            final limb = _limbCircle(b, view, centre);
+            if (limb != null) {
+              haloC = limb.centre;
+              haloR = limb.radiusPx;
+              // Near the surface the limb circle is large; a fixed-ish screen band
+              // reads better than a big fraction of its radius.
+              bandFrac =
+                  (size.height * 0.35 / haloR).clamp(0.04, atmoThick);
+            }
+          }
+          if (haloC != null && haloR.isFinite && haloR > 0.5) {
+            final innerPx = haloR * 0.93; // overlap the surface -> no gap
+            final outerPx = haloR * (1.0 + bandFrac);
+            _atmosphereHalo(canvas, haloC, innerPx, outerPx, size,
+                view: view,
+                sunWorld: Vector3(b.sunWorldX, b.sunWorldY, b.sunWorldZ),
+                tint: atmoCol);
+          }
+        }
 
         // The sphere is the surface — it always has a texture now (real or the
         // Moon fallback), so there's no flat-disc fallback under it.
@@ -797,6 +844,124 @@ class TopDownPainter extends CustomPainter {
         ..blendMode = BlendMode.plus // additive bloom
         ..shader = glow.createShader(rect),
     );
+  }
+
+  // Default day-sky tint (used when a body has no specific atmosphere colour).
+  static const Color _rayleighBlue = Color(0xFF6FB4FF);
+
+  /// The body's visible LIMB as a projected screen circle — the TRUE silhouette.
+  /// The tangent circle's centre is pulled toward the eye from the body centre by
+  /// `R²/d` and its radius is `R·√(1−(R/d)²)`; we project that circle's centre and
+  /// an edge point to screen px. Centring the atmosphere on THIS (not the body
+  /// centre, which is offset from the real limb up close and projects behind the
+  /// camera at the surface) keeps the glow on the horizon at every altitude.
+  /// Returns null for ortho or when the eye is at/below the surface.
+  ({Offset centre, double radiusPx})? _limbCircle(
+      BodyView b, SceneCamera view, Offset viewportCentre) {
+    if (view.usesDistanceCull) return null; // ortho: no perspective limb
+    final centreRel = b.worldRel; // body centre relative to focus
+    final toEye = view.eyeOffset - centreRel; // body centre -> eye
+    final d = toEye.length;
+    final r = b.radius;
+    if (!d.isFinite || d <= r * 1.0001) return null; // eye at/below surface
+    final u = toEye / d; // unit centre->eye
+    final limbCentreRel = centreRel + u * (r * r / d);
+    final limbR3 = r * math.sqrt((1 - (r / d) * (r / d)).clamp(0.0, 1.0));
+    var perp = u.cross(Vector3.unitZ);
+    if (perp.length < 1e-6) perp = u.cross(Vector3.unitX);
+    perp = perp.normalized;
+    final pc = view.projectPx(limbCentreRel);
+    final pe = view.projectPx(limbCentreRel + perp * limbR3);
+    if (pc == null || pe == null) return null;
+    final centre = Offset(viewportCentre.dx + pc.x, viewportCentre.dy - pc.y);
+    final edge = Offset(viewportCentre.dx + pe.x, viewportCentre.dy - pe.y);
+    final radiusPx = (edge - centre).distance;
+    if (!radiusPx.isFinite || radiusPx < 0.5) return null;
+    return (centre: centre, radiusPx: radiusPx);
+  }
+
+  /// The atmosphere limb glow — a SCREEN-SPACE radial gradient, NOT a mesh. A
+  /// sphere mesh has a hard geometric edge at its limb and so can never fade
+  /// softly into space; a radial-gradient shader can. This is the original
+  /// (and only correct) atmosphere: a [SweepGradient] gives the per-angle scatter
+  /// colour around the limb (lit crescent, warm terminator, backlit rim), and a
+  /// [RadialGradient] mask makes it transparent inside the body, full at the
+  /// surface ([rPx]), and **fading smoothly to zero at the outer halo edge** —
+  /// the soft falloff. Drawn at the projected centre [c] with the true surface
+  /// radius [rPx], so it sits exactly on the textured sphere's circular limb.
+  void _atmosphereHalo(Canvas canvas, Offset c, double innerPx, double outerPx,
+      Size size,
+      {required SceneCamera view, required Vector3 sunWorld, Color tint = _rayleighBlue}) {
+    final right = view.right, upv = view.up, fwd = view.forward;
+    // Sun in camera frame: x=right, y=up, z=toward viewer (= -forward).
+    final sc = [
+      sunWorld.dot(right),
+      sunWorld.dot(upv),
+      -sunWorld.dot(fwd),
+    ];
+    // How much the sun is behind the body (forward-scatter / backlit rim glow).
+    final back = (-sc[2]).clamp(0.0, 1.0);
+
+    final day = tint;
+    final bright = Color.lerp(tint, const Color(0xFFFFFFFF), 0.35) ?? tint;
+    const warm = Color(0xFFFF9D5C);
+
+    // Per-angle scatter colour, baked into a SweepGradient — ONE shader, a few
+    // draw calls, instead of thousands of arcs. The Lambert + warm-band logic is
+    // sampled at N stops around the limb.
+    const stops = 48;
+    final colors = <Color>[];
+    final positions = <double>[];
+    for (var i = 0; i <= stops; i++) {
+      final t = i / stops;
+      final ang = t * 2 * math.pi;
+      final nx = math.cos(ang), ny = -math.sin(ang);
+      final lit = (nx * sc[0] + ny * sc[1]).clamp(-1.0, 1.0);
+      final dayF = _smoothstep01(lit, -0.45, 0.4);
+      final warmF = (1 - _smoothstep01(lit, -0.45, 0.6)) * dayF;
+      final scatter = (dayF + back * 0.8).clamp(0.0, 1.0);
+      var col = Color.lerp(day, warm, warmF) ?? day;
+      if (lit > 0.7) col = Color.lerp(col, bright, 0.4) ?? col;
+      if (back > 0.4) col = Color.lerp(col, warm, back * 0.5) ?? col;
+      colors.add(col.withValues(alpha: scatter));
+      positions.add(t);
+    }
+    final rect = Rect.fromCircle(center: c, radius: outerPx);
+    final sweep = SweepGradient(colors: colors, stops: positions);
+
+    // Radial mask: transparent inside the body (up to innerPx, the surface limb),
+    // full AT the surface, fading smoothly to 0 at the outer edge (outerPx) —
+    // the soft falloff into space.
+    final innerFrac = (innerPx / outerPx).clamp(0.0, 0.999);
+    final mask = RadialGradient(
+      colors: const [
+        Color(0x00000000), // inside the body: clear
+        Color(0x00000000),
+        Color(0xFFFFFFFF), // at the surface: full
+        Color(0x00000000), // fade to the halo edge
+      ],
+      stops: [0.0, innerFrac * 0.985, innerFrac, 1.0],
+    );
+
+    // Bound the offscreen layer to the viewport so a giant halo rect doesn't
+    // allocate a huge buffer.
+    final layerBounds = rect.intersect(Offset.zero & size);
+    if (layerBounds.isEmpty) return;
+    canvas.saveLayer(layerBounds, Paint());
+    canvas.drawCircle(c, outerPx, Paint()..shader = sweep.createShader(rect));
+    canvas.drawCircle(
+      c,
+      outerPx,
+      Paint()
+        ..blendMode = BlendMode.dstIn
+        ..shader = mask.createShader(rect),
+    );
+    canvas.restore();
+  }
+
+  double _smoothstep01(double x, double e0, double e1) {
+    final t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    return t * t * (3 - 2 * t);
   }
 
   Color _scale(Color base, double f) => Color.fromARGB(

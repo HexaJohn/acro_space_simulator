@@ -115,10 +115,25 @@ enum CameraView {
   CameraView get next => CameraView.values[(index + 1) % CameraView.values.length];
 }
 
-/// A camera that projects target-relative WORLD positions (metres) to SCREEN
-/// PIXELS (centre-origin, +x right, +y up; the painter flips Y for Flutter's
-/// downward axis). Owns the metres->pixels mapping so the painter never divides
-/// by metres-per-pixel — ortho and perspective differ only inside the camera.
+/// The projection seam between the world and the screen: maps **target-relative
+/// world positions (metres)** to **screen pixels** (centre-origin, +x right,
+/// +y up; the painter flips Y for Flutter's downward axis).
+///
+/// The camera *owns* the metres→pixels mapping, so the presenter and painter
+/// never divide by a metres-per-pixel scale themselves — orthographic and
+/// perspective rendering differ only *inside* the camera implementation:
+///  * [OrthoCamera] — the flat map projection (`rel·right / mpp`); parallel rays,
+///    never culls behind an eye, constant scale. Used for the strategic MAP view.
+///  * [PerspectiveCamera] — a real eye pulled back from the focus, with a
+///    perspective divide (distant bodies shrink, near ones grow) and a near
+///    plane. Used for the CRAFT / 3D flight view.
+///
+/// Everything that draws in world space — the presenter projecting bodies, rails,
+/// vessels and trails; the [SphereTexture] projecting every mesh vertex — goes
+/// through [projectPx] / [radiusPx] / [depth], so swapping the camera swaps the
+/// whole look with no other change. The sphere additionally reads the basis
+/// vectors ([right], [up], [forward]) for per-vertex shading and [nearPlane] to
+/// tell a face behind the camera (drop) from one crossing the near plane (clip).
 abstract class SceneCamera {
   Vector3 get forward; // into the screen (eye -> target)
   Vector3 get right;
