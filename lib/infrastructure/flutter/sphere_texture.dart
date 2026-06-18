@@ -65,10 +65,11 @@ class SphereTexture {
     // hemisphere (normal, far-away case).
     final cover = coverPx ?? rPx;
     // Floor kept tiny so the surface KEEPS magnifying as you zoom in (a smaller
-    // sphere-fraction fills the same screen window = more zoom). At 0.02 the
-    // magnification used to freeze a couple dozen screen-diagonals in; 0.0008
-    // pushes that ~25x further.
-    final span = rPx <= 0 ? 1.0 : (cover * _overscan / rPx).clamp(0.0008, 1.0);
+    // sphere-fraction fills the same screen window = more zoom). Pushed very low
+    // (4e-5) for a deep zoom range; the texture goes blurry near the floor
+    // (magnifying texels) but never freezes. ps maps the cap to `cover` so coords
+    // stay screen-sized no matter how small span gets.
+    final span = rPx <= 0 ? 1.0 : (cover * _overscan / rPx).clamp(0.00004, 1.0);
     final positions = <ui.Offset>[];
     final texCoords = <ui.Offset>[];
     final atmoColors = <ui.Color>[]; // per-vertex atmosphere scatter (pass 3)
