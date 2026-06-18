@@ -84,6 +84,9 @@ class PerspectiveCamera implements SceneCamera {
   /// Eye position relative to the target (= -forward * range).
   Vector3 get _eyeRel => forward * -range;
 
+  @override
+  Vector3 get eyeOffset => _eyeRel;
+
   double get _focal => (viewportH / 2) / math.tan(fovY / 2);
 
   @override

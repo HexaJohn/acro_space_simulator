@@ -142,6 +142,12 @@ abstract class SceneCamera {
   /// sliding for off-axis bodies).
   Vector3 viewDirTo(Vector3 rel);
 
+  /// The EYE position relative to the target/focus, in world metres. Perspective:
+  /// pulled back along -forward by the range. Ortho: a finite eye is undefined
+  /// (parallel rays), so it returns zero — callers gate eye-dependent effects
+  /// (e.g. the near-surface horizon) on [usesDistanceCull] being false.
+  Vector3 get eyeOffset;
+
   /// Skip the tilted-view distance cull when ~top-down (everything's in plane).
   bool get isTopish;
 
@@ -185,6 +191,9 @@ class OrthoCamera implements SceneCamera {
 
   @override
   Vector3 viewDirTo(Vector3 rel) => orbit.forward; // parallel rays
+
+  @override
+  Vector3 get eyeOffset => Vector3.zero; // no finite eye (parallel rays)
 
   @override
   bool get isTopish => orbit.isTopish;

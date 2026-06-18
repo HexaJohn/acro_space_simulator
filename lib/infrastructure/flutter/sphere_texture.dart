@@ -113,9 +113,15 @@ class SphereTexture {
     // hemisphere as a disc, so an eye AT the surface sees no horizon. When the
     // eye is within ~1 radius of the surface, project each surface vertex through
     // the REAL camera instead, so the horizon (the tangent circle from the eye)
-    // falls out naturally. eyeDist = |body centre - eye|; altitude = that minus
-    // the radius. nearMode also needs the radius + a screen centre to project to.
-    final eyeDist = worldRel.length;
+    // falls out naturally.
+    //
+    // worldRel is the body centre relative to the camera FOCUS, but the eye is
+    // pulled back from the focus by view.eyeOffset, so the centre relative to the
+    // EYE is worldRel - eyeOffset. Use that for the altitude + horizon tests
+    // (earlier this used the focus, which made it trigger on the craft instead of
+    // the camera position).
+    final centreFromEye = worldRel - view.eyeOffset;
+    final eyeDist = centreFromEye.length;
     final altitude = eyeDist - radiusM;
     final nearMode = radiusM > 0 &&
         viewportCentre != null &&
@@ -146,9 +152,11 @@ class SphereTexture {
         // NEAR path: cull vertices below the eye's local horizon. A surface point
         // with outward normal n (= the world dir wx,wy,wz) is visible iff the eye
         // sits above its tangent plane: (eye - centre)·n > radius. eye - centre =
-        // -worldRel, so the test is (-worldRel·n) > radiusM.
+        // -centreFromEye, so the test is (-centreFromEye·n) > radiusM.
         if (nearMode) {
-          final dotEye = -(worldRel.x * wx + worldRel.y * wy + worldRel.z * wz);
+          final dotEye = -(centreFromEye.x * wx +
+              centreFromEye.y * wy +
+              centreFromEye.z * wz);
           if (dotEye <= radiusM) {
             row.add(null); // beyond the horizon
             continue;
