@@ -978,21 +978,23 @@ class _Scene3DPainter extends CustomPainter {
       final cI = cornerW(i), cJ = cornerW((i + 1) % 4);
       final mid = project((cI + cJ) * 0.5);
       final pI = project(cI), pJ = project(cJ);
-      // Two facets per face, alternating colour across all 8.
+      // Two facets per face. Colour by GLOBAL facet index (2*i + h) so it goes
+      // light/dark/light/dark all the way round — not light/light/dark/dark at
+      // the face seams.
       canvas.drawPath(
           Path()
             ..moveTo(apex.dx, apex.dy)
             ..lineTo(pI.dx, pI.dy)
             ..lineTo(mid.dx, mid.dy)
             ..close(),
-          Paint()..color = (i).isEven ? craftColor : dark);
+          Paint()..color = (2 * i).isEven ? craftColor : dark);
       canvas.drawPath(
           Path()
             ..moveTo(apex.dx, apex.dy)
             ..lineTo(mid.dx, mid.dy)
             ..lineTo(pJ.dx, pJ.dy)
             ..close(),
-          Paint()..color = (i).isEven ? dark : craftColor);
+          Paint()..color = (2 * i + 1).isEven ? craftColor : dark);
     }
     // Engine flame opposite the nose when firing.
     if (firing) {

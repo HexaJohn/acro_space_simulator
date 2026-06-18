@@ -2440,7 +2440,9 @@ class _CityPainter extends CustomPainter {
           path: path,
           shade: shade,
           depth: cam.depth(fx, fy, (apexZ + baseZ) / 2),
-          dark: (i + h).isOdd, // checker across the 8 facets
+          // Global facet index 2*i+h -> strict light/dark/light/dark round the
+          // ring (not light/light/dark/dark at the face seams).
+          dark: (2 * i + h).isOdd,
         ));
       }
     }
