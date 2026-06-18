@@ -68,12 +68,6 @@ class SphereTexture {
     // growing as you zoom, and coordinates stay ~screen-sized. span=1 = the full
     // hemisphere (normal, far-away case).
     final cover = coverPx ?? rPx;
-    // Floor kept tiny so the surface KEEPS magnifying as you zoom in (a smaller
-    // sphere-fraction fills the same screen window = more zoom). Pushed very low
-    // (4e-5) for a deep zoom range; the texture goes blurry near the floor
-    // (magnifying texels) but never freezes. ps maps the cap to `cover` so coords
-    // stay screen-sized no matter how small span gets.
-    final span = rPx <= 0 ? 1.0 : (cover * overscan / rPx).clamp(0.00004, 1.0);
     final positions = <ui.Offset>[];
     final texCoords = <ui.Offset>[];
     final atmoColors = <ui.Color>[]; // per-vertex atmosphere scatter (pass 3)
@@ -134,6 +128,19 @@ class SphereTexture {
     final grid = (radiusM > 0 && alt < radiusM)
         ? (_grid * (1.0 + 3.0 * (1.0 - (alt / radiusM).clamp(0.0, 1.0)))).round()
         : _grid;
+
+    // Lattice extent over the eye-facing hemisphere (nx,ny in [-span, span]).
+    // FAR / ortho (circular silhouette): the silhouette only covers a fraction
+    // of the hemisphere, so span tracks it (cover*overscan/rPx, floored tiny so
+    // detail keeps magnifying); the billboard-era reasoning still holds since the
+    // limb IS the silhouette. NEAR the surface: the visible ground runs from
+    // nadir all the way out to the horizon — a WIDE angular cap — so span must be
+    // the full hemisphere (1.0) or the lattice covers only a pinprick around
+    // nadir and the near ground draws no quads. Projection keeps coords bounded
+    // and the horizon cull trims the back side, so span=1 is safe here.
+    final span = !clipCircle
+        ? 1.0
+        : (rPx <= 0 ? 1.0 : (cover * overscan / rPx).clamp(0.00004, 1.0));
 
     // Build a (grid+1)^2 lattice of vertices over the unit disc; cells outside
     // the circle are skipped when emitting triangles.
