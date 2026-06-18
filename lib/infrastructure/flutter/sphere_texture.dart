@@ -344,8 +344,16 @@ class SphereTexture {
           // maxDepth, surface very close) still subdivide enough to emit the
           // near-horizon ground instead of dropping it to a bare line.
           if (depth >= maxDepth - 2) split = false;
-        } else if (maxSeg <= targetPx) {
-          split = false;
+        } else {
+          // Exactly one corner behind the near plane: this face sits ON the
+          // frustum boundary (the bottom edge of the visible ground at a shallow
+          // tilt). A leaf only emits when ALL three corners project, so the
+          // boundary is a ragged saw of dropped faces — the dark wedge/notch in
+          // the near-nadir ground when landed. Resolve it FINER than the interior
+          // target so the kept/dropped boundary is near pixel-tight (a clean
+          // edge) instead of a coarse notch — but still bounded by maxDepth.
+          final boundaryTarget = projected == 2 ? targetPx * 0.25 : targetPx;
+          if (maxSeg <= boundaryTarget) split = false;
         }
       }
 
@@ -362,11 +370,62 @@ class SphereTexture {
         faceRecurse(ab, bc, ca, depth + 1);
         return;
       }
-      // Leaf: emit if all three corners projected (in front of the near plane).
+      // Leaf. If all three corners projected, emit directly. If some are behind
+      // the near plane (a straddle leaf on the frustum bottom edge — the landed
+      // shallow-tilt case), CLIP the triangle to the near plane and emit the
+      // front part, so the ground fills right up to the boundary instead of
+      // leaving a black wedge.
       if (va != null && vb != null && vc != null) {
         debugTris++;
         _tri(positions, texCoords, shadowColors, atmoColors, atmoTint, atmoWarm,
             va, vb, vc, iw);
+      } else if (radiusM > 0 && (va != null || vb != null || vc != null)) {
+        // Near-plane clip: walk the polygon corners; for each edge from a FRONT
+        // corner to a BACK corner, find the surface direction where the edge
+        // crosses the near plane (bisection on the lerped, re-normalised
+        // direction's forward depth) and evalDir there to get a valid on-plane
+        // vertex. Fan-triangulate the resulting front polygon.
+        final dirs = [A, B, C];
+        final front = [va != null, vb != null, vc != null];
+        final poly = <_V>[];
+        for (var i = 0; i < 3; i++) {
+          final cur = [va, vb, vc][i];
+          if (cur != null) poly.add(cur);
+          final j = (i + 1) % 3;
+          if (front[i] != front[j]) {
+            // Edge crosses the plane. Bisect the direction lerp for the crossing.
+            var loT = 0.0, hiT = 1.0; // loT side stays PROJECTABLE (in front)
+            final fi = front[i] ? dirs[i] : dirs[j];
+            final bi = front[i] ? dirs[j] : dirs[i];
+            // Bisect for the near-plane crossing: loT stays where the lerped,
+            // re-normalised direction still projects (in front of the near plane),
+            // hiT on the culled side. 14 iterations -> sub-pixel boundary.
+            for (var it = 0; it < 14; it++) {
+              final mt = (loT + hiT) / 2;
+              final dx = fi[0] + (bi[0] - fi[0]) * mt;
+              final dy = fi[1] + (bi[1] - fi[1]) * mt;
+              final dz = fi[2] + (bi[2] - fi[2]) * mt;
+              final l = math.sqrt(dx * dx + dy * dy + dz * dz);
+              if (evalDir(dx / l, dy / l, dz / l) != null) {
+                loT = mt;
+              } else {
+                hiT = mt;
+              }
+            }
+            final mt = loT; // last known front-side t
+            final dx = fi[0] + (bi[0] - fi[0]) * mt;
+            final dy = fi[1] + (bi[1] - fi[1]) * mt;
+            final dz = fi[2] + (bi[2] - fi[2]) * mt;
+            final l = math.sqrt(dx * dx + dy * dy + dz * dz);
+            final cv = evalDir(dx / l, dy / l, dz / l);
+            if (cv != null) poly.add(cv);
+          }
+        }
+        for (var i = 2; i < poly.length; i++) {
+          debugTris++;
+          _tri(positions, texCoords, shadowColors, atmoColors, atmoTint,
+              atmoWarm, poly[0], poly[i - 1], poly[i], iw);
+        }
       }
     }
 

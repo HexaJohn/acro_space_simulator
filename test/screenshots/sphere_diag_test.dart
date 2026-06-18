@@ -264,6 +264,21 @@ void main() {
     });
   }
 
+  // LANDED repro — camera focuses a vessel ON the surface (foot, alt 0), eye
+  // pulled back ~17.6 km at a SHALLOW elevation (el ~7 deg, the in-game
+  // "cam az-13 el7" reading where the ground vanished). Surface must fill the
+  // lower frame; the bug is it drops to a bare horizon line + dark wedges.
+  for (final spec in <(String, double)>[
+    ('el7', 7 * math.pi / 180),
+    ('el20', 20 * math.pi / 180),
+    ('el45', 45 * math.pi / 180),
+  ]) {
+    testWidgets('sphere landed 17.6km ${spec.$1}', (t) async {
+      await _shootSphere(t, 'landed_${spec.$1}',
+          altM: 17610, elevation: spec.$2, fovDeg: 75);
+    });
+  }
+
   // ORBIT-TRACKING repro — the DEFAULT in-game ascent start: camera focuses the
   // orbiter at 3000 km altitude and the eye is pulled back a small range (the
   // "10K m" zoom readout is the eye->focus RANGE, not the surface altitude).
