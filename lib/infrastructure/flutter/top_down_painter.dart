@@ -118,6 +118,15 @@ class TopDownPainter extends CustomPainter {
       if (!_discTouchesScreen(c, cullR, size)) continue;
       final base = b.isStar ? const Color(0xFFFFD66B) : const Color(0xFF4A90D9);
 
+      // Skia drops or mis-rasterizes geometry once coordinates blow past a few
+      // thousand px, so when zoomed in the flat disc (drawn at TRUE rPx) and the
+      // sphere (which self-limits its mesh to a screen-sized cap) stop agreeing.
+      // Clamp the DISC's draw radius to a safe multiple of the screen diagonal:
+      // past that it fully covers the viewport anyway, so the look is identical
+      // but the coordinates stay bounded and aligned with the sphere cap.
+      final diag = size.bottomRight(Offset.zero).distance;
+      final discRPx = math.min(rPx, diag * 1.5);
+
       // Disc covers the whole viewport (zoomed in close). Only the rim/halo/ring
       // work is wasted — but the SURFACE still needs to show. If this body has a
       // decoded texture, fall through to the sphere (its mesh radius is capped to
@@ -133,7 +142,7 @@ class TopDownPainter extends CustomPainter {
       }
 
       // Star corona glow (drawn first, under the disc).
-      if (b.isStar) _starGlow(canvas, c, rPx);
+      if (b.isStar) _starGlow(canvas, c, discRPx);
 
       // Back half of the rings — drawn BEFORE the body so the disc occludes it.
       // (Off-screen when the disc covers the viewport, so skip it then.)
@@ -160,7 +169,7 @@ class TopDownPainter extends CustomPainter {
         // lag fix) and draw only the (capped) textured surface.
         if (!discCovers) {
           if (b.hasAtmosphere && layers.atmoHalo) {
-            _atmosphereHalo(canvas, c, rPx, size,
+            _atmosphereHalo(canvas, c, discRPx, size,
                 view: view,
                 sunWorld: Vector3(b.sunWorldX, b.sunWorldY, b.sunWorldZ),
                 tint: atmoCol,
@@ -172,9 +181,9 @@ class TopDownPainter extends CustomPainter {
           final sun = Vector3(b.sunX, b.sunY, 0);
           if (layers.baseDisc) {
             if (b.isStar) {
-              canvas.drawCircle(c, rPx, Paint()..color = base);
+              canvas.drawCircle(c, discRPx, Paint()..color = base);
             } else {
-              _drawShadedDisc(canvas, c, rPx, base, sun, shading, b.sunFacing);
+              _drawShadedDisc(canvas, c, discRPx, base, sun, shading, b.sunFacing);
             }
           }
         } else {
@@ -215,11 +224,11 @@ class TopDownPainter extends CustomPainter {
 
       if (b.isStar || rPx < 6) {
         // Tiny or self-luminous: flat fill (shading not worth it).
-        canvas.drawCircle(c, rPx, Paint()..color = base);
+        canvas.drawCircle(c, discRPx, Paint()..color = base);
       } else {
         // Atmosphere halo first (drawn under the disc edge).
         if (b.hasAtmosphere && layers.atmoHalo) {
-          _atmosphereHalo(canvas, c, rPx, size,
+          _atmosphereHalo(canvas, c, discRPx, size,
               view: view,
               sunWorld: Vector3(b.sunWorldX, b.sunWorldY, b.sunWorldZ),
               tint: atmoCol,
@@ -228,7 +237,7 @@ class TopDownPainter extends CustomPainter {
         // Shaded disc: sample brightness over a coarse grid, draw lit cells.
         final sun = Vector3(b.sunX, b.sunY, 0);
         if (layers.baseDisc) {
-          _drawShadedDisc(canvas, c, rPx, base, sun, shading, b.sunFacing);
+          _drawShadedDisc(canvas, c, discRPx, base, sun, shading, b.sunFacing);
         }
       }
 

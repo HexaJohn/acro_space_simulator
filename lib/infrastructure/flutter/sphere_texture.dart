@@ -43,6 +43,18 @@ class SphereTexture {
     ui.Color atmoWarm = const ui.Color(0xFFFF9D5C), // terminator warm band
     double? coverPx, // on-screen half-extent the mesh must cover (see below)
   }) {
+    // Bail on non-finite inputs (degenerate camera geometry can produce NaN/Inf
+    // in the centre / worldRel); a single bad vertex makes Skia drop the whole
+    // mesh, blanking the body. Better to skip this body's sphere this frame.
+    if (!centre.dx.isFinite ||
+        !centre.dy.isFinite ||
+        !rPx.isFinite ||
+        !worldRel.x.isFinite ||
+        !worldRel.y.isFinite ||
+        !worldRel.z.isFinite) {
+      return;
+    }
+
     // When zoomed in so close the disc dwarfs the screen, [rPx] can be millions
     // of px. Spanning the WHOLE hemisphere at that scale overflows Skia (blank
     // frame) — and capping the mesh radius froze the zoom (the surface stopped
