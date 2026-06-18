@@ -36,7 +36,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 2026-06-18.150';
+const String kBuildStamp = 'build 2026-06-18.151';
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -176,9 +176,10 @@ class _SimulationViewState extends State<SimulationView>
               .clamp(-1.0, 1.0),
       yaw: (axis(LogicalKeyboardKey.keyA, LogicalKeyboardKey.keyD) + _touchYaw)
           .clamp(-1.0, 1.0),
-      roll:
-          (axis(LogicalKeyboardKey.keyQ, LogicalKeyboardKey.keyE) + _touchRoll)
-              .clamp(-1.0, 1.0),
+      // Negated: roll was inverted (Q/E + the touch slider rolled the wrong way).
+      roll: (-(axis(LogicalKeyboardKey.keyQ, LogicalKeyboardKey.keyE) +
+                  _touchRoll))
+          .clamp(-1.0, 1.0),
       throttle: keyThrottle > 0 ? keyThrottle : _touchThrottle,
     );
   }
