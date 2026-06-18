@@ -481,6 +481,29 @@ class SphereTexture {
 
     if (positions.isEmpty) return;
 
+    // ATMOSPHERE SHELL (drawn FIRST, unclipped, so its rim shows beyond the solid
+    // surface limb against space; the surface passes below then occlude its inner
+    // part). A translucent sphere at Rs = R*(1+thick): per-vertex alpha peaks at
+    // ITS OWN limb (line of sight tangent to the shell) and fades to 0 at the
+    // outer edge, giving the soft blurred glow at ANY camera angle/position —
+    // unlike the screen-space halo circle, which broke when the body centre
+    // projected off-screen. Day-side only, warm near the terminator.
+    if (atmoTint != null && radiusM > 0 && eyeDist > radiusM) {
+      _paintAtmoShell(
+        canvas,
+        radiusM: radiusM,
+        thick: 0.08, // shell extends ~8% of a radius beyond the surface
+        worldRel: worldRel,
+        view: view,
+        viewportCentre: viewportCentre,
+        centreFromEye: centreFromEye,
+        eyeDist: eyeDist,
+        sun: sun,
+        tint: atmoTint,
+        warm: atmoWarm,
+      );
+    }
+
     final shader = ui.ImageShader(
       image,
       ui.TileMode.repeated, // wrap longitude seam
@@ -552,6 +575,144 @@ class SphereTexture {
     canvas.restore(); // drop the circular clip
   }
 
+  /// Translucent atmosphere shell at Rs = R*(1+thick). A coarse icosphere whose
+  /// per-vertex alpha peaks at the shell's silhouette (line of sight tangent to
+  /// the shell) and fades to 0 toward the sub-point and past the limb, giving a
+  /// soft blurred glow ring that hugs the limb at ANY camera angle/position. Day
+  /// side only; warm near the terminator. Drawn before the surface so the surface
+  /// occludes the inner part and only the rim shows against space.
+  void _paintAtmoShell(
+    ui.Canvas canvas, {
+    required double radiusM,
+    required double thick,
+    required Vector3 worldRel,
+    required SceneCamera view,
+    required ui.Offset viewportCentre,
+    required Vector3 centreFromEye,
+    required double eyeDist,
+    required List<double> sun,
+    required ui.Color tint,
+    required ui.Color warm,
+  }) {
+    final rs = radiusM * (1 + thick);
+    // Eye inside the shell -> you're in the haze; the per-vertex surface pass
+    // carries it, a shell silhouette would wrap the whole screen. Skip.
+    if (eyeDist <= rs) return;
+
+    final camR = view.right, camU = view.up, camF = view.forward;
+    // Shell horizon: directions at angle capS from the sub-eye direction. Glow
+    // band spans a few degrees inside->outside that ring.
+    final toEx = -centreFromEye.x / eyeDist;
+    final toEy = -centreFromEye.y / eyeDist;
+    final toEz = -centreFromEye.z / eyeDist;
+    // Surface limb (capSurf) and shell limb (capS) angles from the sub-eye dir.
+    // The glow lives in the annulus between them, peaking near the shell limb and
+    // feathering OUTWARD into space; inward it's occluded by the surface anyway.
+    final capSurf = math.acos((radiusM / eyeDist).clamp(0.0, 1.0));
+    final capS = math.acos((rs / eyeDist).clamp(0.0, 1.0));
+    // Feather widths. Inward (toward the surface limb): the annulus gap, min a
+    // few degrees so a far thin shell still reads as a soft band, not a line.
+    // Outward (into space): a wider feather for the blurred falloff.
+    final featherIn = math.max(capS - capSurf, 0.02) * 1.6 + 0.02;
+    final featherOut = featherIn * 2.6;
+
+    final positions = <ui.Offset>[];
+    final colors = <ui.Color>[];
+
+    _V0? evalShell(double nx, double ny, double nz) {
+      final p = view.projectPx(Vector3(
+        worldRel.x + rs * nx,
+        worldRel.y + rs * ny,
+        worldRel.z + rs * nz,
+      ));
+      if (p == null) return null;
+      // Angle of this direction from the sub-eye direction.
+      final dotToEye = (nx * toEx + ny * toEy + nz * toEz).clamp(-1.0, 1.0);
+      final ang = math.acos(dotToEye);
+      // Glow peaks at the shell limb (ang == capS); feathers IN toward the
+      // surface limb and OUT (wider) into space, so it's a soft blurred band.
+      final d = ang >= capS
+          ? (ang - capS) / featherOut
+          : (capS - ang) / featherIn;
+      final glow = math.pow((1.0 - d).clamp(0.0, 1.0), 1.5).toDouble();
+      if (glow <= 0.004) return null;
+      // Day/night + warm terminator from the camera-frame normal vs the sun.
+      // lit in [0,1]; gate the glow off on the deep night side but keep a soft
+      // falloff through the terminator so the lit crescent reads bright.
+      final cnx = nx * camR.x + ny * camR.y + nz * camR.z;
+      final cny = nx * camU.x + ny * camU.y + nz * camU.z;
+      final cnz = -(nx * camF.x + ny * camF.y + nz * camF.z);
+      final lit = (cnx * sun[0] + cny * sun[1] + cnz * sun[2]).clamp(0.0, 1.0);
+      // Day-side scatter, but keep a dim ambient ring through the terminator and
+      // a touch into the night side so the limb glow never hard-cuts to nothing
+      // (a real atmosphere still scatters at a grazing terminator).
+      final dayF = 0.25 + 0.75 * _smoothstep(-0.15, 0.3, lit);
+      final warmF = 1.0 - _smoothstep(0.0, 0.45, lit); // warm at the terminator
+      final bright = ui.Color.lerp(tint, const ui.Color(0xFFFFFFFF), 0.4) ?? tint;
+      var col = ui.Color.lerp(tint, warm, warmF) ?? tint;
+      if (lit > 0.55) col = ui.Color.lerp(col, bright, 0.5) ?? col;
+      final a = (glow * dayF * 2.4).clamp(0.0, 1.0);
+      return _V0(
+          ui.Offset(viewportCentre.dx + p.x, viewportCentre.dy - p.y),
+          col.withValues(alpha: a));
+    }
+
+    void rec(List<double> A, List<double> B, List<double> C, int depth) {
+      // Cheap cull: skip a face wholly far from the horizon ring (its centroid
+      // angle from the ring exceeds the band + the face's angular size).
+      final cx0 = A[0] + B[0] + C[0],
+          cy0 = A[1] + B[1] + C[1],
+          cz0 = A[2] + B[2] + C[2];
+      final cl = math.sqrt(cx0 * cx0 + cy0 * cy0 + cz0 * cz0);
+      final cx = cx0 / cl, cy = cy0 / cl, cz = cz0 / cl;
+      final cAng = math.acos((cx * toEx + cy * toEy + cz * toEz).clamp(-1.0, 1.0));
+      final faceRad = math.acos((cx * A[0] + cy * A[1] + cz * A[2]).clamp(-1.0, 1.0));
+      final maxFeather = math.max(featherIn, featherOut);
+      if ((cAng - capS).abs() - faceRad > maxFeather) return;
+      if (depth < 6) {
+        List<double> mid(List<double> p, List<double> q) {
+          final x = p[0] + q[0], y = p[1] + q[1], z = p[2] + q[2];
+          final l = math.sqrt(x * x + y * y + z * z);
+          return [x / l, y / l, z / l];
+        }
+        final ab = mid(A, B), bc = mid(B, C), ca = mid(C, A);
+        rec(A, ab, ca, depth + 1);
+        rec(ab, B, bc, depth + 1);
+        rec(ca, bc, C, depth + 1);
+        rec(ab, bc, ca, depth + 1);
+        return;
+      }
+      final va = evalShell(A[0], A[1], A[2]);
+      final vb = evalShell(B[0], B[1], B[2]);
+      final vc = evalShell(C[0], C[1], C[2]);
+      if (va == null || vb == null || vc == null) return;
+      positions..add(va.pos)..add(vb.pos)..add(vc.pos);
+      colors..add(va.col)..add(vb.col)..add(vc.col);
+    }
+
+    const t = 1.618033988749895;
+    final ico = <List<double>>[
+      [-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0],
+      [0, -1, t], [0, 1, t], [0, -1, -t], [0, 1, -t],
+      [t, 0, -1], [t, 0, 1], [-t, 0, -1], [-t, 0, 1],
+    ].map((p) {
+      final l = math.sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+      return [p[0] / l, p[1] / l, p[2] / l];
+    }).toList();
+    const faces = <List<int>>[
+      [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
+      [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
+      [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
+      [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1],
+    ];
+    for (final f in faces) {
+      rec(ico[f[0]], ico[f[1]], ico[f[2]], 0);
+    }
+    if (positions.length < 3) return;
+    final verts = ui.Vertices(ui.VertexMode.triangles, positions, colors: colors);
+    canvas.drawVertices(verts, ui.BlendMode.plus, ui.Paint());
+  }
+
   void _tri(List<ui.Offset> p, List<ui.Offset> t, List<ui.Color> s,
       List<ui.Color> atmo, ui.Color? atmoTint, ui.Color atmoWarm, _V a, _V b,
       _V d, double iw) {
@@ -606,6 +767,13 @@ class SphereTexture {
     final t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
     return t * t * (3 - 2 * t);
   }
+}
+
+/// Minimal projected vertex for the atmosphere shell (position + colour only).
+class _V0 {
+  final ui.Offset pos;
+  final ui.Color col;
+  const _V0(this.pos, this.col);
 }
 
 class _V {

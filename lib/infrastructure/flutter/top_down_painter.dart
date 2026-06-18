@@ -3,7 +3,6 @@ import 'dart:ui' as ui show Image, Gradient, Vertices, VertexMode;
 
 import 'package:flutter/material.dart';
 
-import '../../adapters/presenters/atmosphere_halo.dart';
 import '../../adapters/presenters/top_down_snapshot.dart';
 import '../../domain/shared/vector3.dart';
 import 'debug_layers.dart';
@@ -191,48 +190,14 @@ class TopDownPainter extends CustomPainter {
           : null;
       // (coverPx — the sphere-cap half-extent — is computed once above, by the
       // disc-radius clamp, and reused for _sphere.paint below.)
-      // Atmosphere thickness fraction — gas giants get a fatter haze when the
-      // exaggerate-atmosphere debug option is on.
-      final atmoThick = (b.isGasGiant && layers.exaggerateAtmosphere) ? 0.5 : 0.22;
       final atmoCol = Color(b.atmoColor);
       if (tex != null) {
-        // The circular limb halo only reads as a ring while the silhouette IS a
-        // circle. That holds until the eye gets genuinely close to the surface
-        // (then the limb becomes the projected horizon arc). Suppress it only
-        // once the eye is within ~5% of a radius of the surface — NOT a full
-        // radius (that was killing the halo while still well out, e.g. zooming in
-        // past 7 Mm on Earth).
-        final eyeAlt = view.usesDistanceCull
-            ? double.infinity
-            : (b.worldRel - view.eyeOffset).length - b.radius;
-        final circularLimb = eyeAlt >= b.radius * 0.05;
+        // NOTE: the old screen-space halo (a CIRCLE at the projected centre) is
+        // gone — it floated off when the centre projected off-screen (close /
+        // glancing) and vanished entirely at grazing angles. The atmosphere is
+        // now a true 3D SHELL mesh inside _sphere.paint (Rs = R*1.025), so the
+        // soft limb glow tracks the real limb at every angle and position.
 
-        // The screen-space halo is a CIRCLE drawn at the projected centre `c`. It
-        // only reads as a rim glow when that whole circle is roughly on screen —
-        // i.e. the body is a small, centred disc far away. Zoomed in close
-        // (perspective), `c` projects far OFF screen while the limb fills one
-        // edge, so the halo circle's visible arc floats detached in empty space
-        // on the OPPOSITE side (the "haze floating away" bug). In that regime the
-        // per-vertex atmosphere pass inside the sphere already draws the glow on
-        // the real limb, so suppress the screen halo: require the projected
-        // centre to be near the viewport AND the disc radius to be modest.
-        final centreOnScreen = c.dx > -discRPx &&
-            c.dx < size.width + discRPx &&
-            c.dy > -discRPx &&
-            c.dy < size.height + discRPx;
-        final discFitsCircle = discRPx < size.longestSide;
-        if (!discCovers &&
-            b.hasAtmosphere &&
-            layers.atmoHalo &&
-            circularLimb &&
-            centreOnScreen &&
-            discFitsCircle) {
-          _atmosphereHalo(canvas, c, discRPx, size,
-              view: view,
-              sunWorld: Vector3(b.sunWorldX, b.sunWorldY, b.sunWorldZ),
-              tint: atmoCol,
-              thickness: atmoThick);
-        }
         // The sphere is the surface — it always has a texture now (real or the
         // Moon fallback), so there's no flat-disc fallback under it.
         try {
@@ -611,9 +576,6 @@ class TopDownPainter extends CustomPainter {
   // Direction to the sun arrives in screen space (sunX right, sunY up — but
   // screen Y is flipped vs world, so we negate sunY).
 
-  // Default day-sky tint (used when a body has no specific atmosphere colour).
-  static const Color _rayleighBlue = Color(0xFF6FB4FF);
-
   /// Draws the equirectangular star map as a sky window: instead of stretching
   /// the whole panorama flat, we crop a sub-rectangle of it centred on the
   /// camera's look direction (azimuth -> longitude, elevation -> latitude) and
@@ -818,91 +780,6 @@ class TopDownPainter extends CustomPainter {
         ..shader = glow.createShader(rect),
     );
   }
-
-  /// Outer atmosphere halo, lit by the SAME 3D Lambert model as the sphere (not
-  /// a 2D sweep — that snapped between modes). Each point around the limb has a
-  /// camera-frame normal (cosθ, sinθ, 0); we rotate it to world and dot with the
-  /// sun. This makes the lit crescent rotate smoothly and the night side go dark,
-  /// while a separate forward-scatter term lights the whole ring when the sun is
-  /// directly behind the body — all one continuous formula, no mode switch.
-  void _atmosphereHalo(Canvas canvas, Offset c, double rPx, Size size,
-      {required SceneCamera view,
-      required Vector3 sunWorld,
-      Color tint = _rayleighBlue,
-      double thickness = 0.22}) {
-    final halo = AtmosphereHalo(bodyRadiusPx: rPx, thicknessFraction: thickness);
-    final right = view.right, upv = view.up, fwd = view.forward;
-    // Sun in camera frame: x=right, y=up, z=toward viewer (= -forward).
-    final sc = [
-      sunWorld.dot(right),
-      sunWorld.dot(upv),
-      -sunWorld.dot(fwd),
-    ];
-    // How much the sun is behind the body (forward-scatter / backlit rim glow).
-    final back = (-sc[2]).clamp(0.0, 1.0);
-
-    final day = tint;
-    final bright = Color.lerp(tint, const Color(0xFFFFFFFF), 0.35) ?? tint;
-    const warm = Color(0xFFFF9D5C);
-
-    // Per-angle scatter colour, baked into a SweepGradient — ONE shader, a few
-    // draw calls, instead of thousands of arcs (the perspective-zoom lag). The
-    // Lambert + warm-band logic is the same, just sampled at N stops.
-    const stops = 48;
-    final colors = <Color>[];
-    final positions = <double>[];
-    for (var i = 0; i <= stops; i++) {
-      final t = i / stops;
-      final ang = t * 2 * math.pi;
-      final nx = math.cos(ang), ny = -math.sin(ang);
-      final lit = (nx * sc[0] + ny * sc[1]).clamp(-1.0, 1.0);
-      final dayF = _smoothstep01(lit, -0.45, 0.4);
-      final warmF = (1 - _smoothstep01(lit, -0.45, 0.6)) * dayF;
-      final scatter = (dayF + back * 0.8).clamp(0.0, 1.0);
-      var col = Color.lerp(day, warm, warmF) ?? day;
-      if (lit > 0.7) col = Color.lerp(col, bright, 0.4) ?? col;
-      if (back > 0.4) col = Color.lerp(col, warm, back * 0.5) ?? col;
-      colors.add(col.withValues(alpha: scatter));
-      positions.add(t);
-    }
-    final rect = Rect.fromCircle(center: c, radius: halo.outerRadius);
-    final sweep = SweepGradient(colors: colors, stops: positions);
-
-    // Radial mask: transparent inside the body, the glow building from the
-    // surface (rPx) out to the halo edge then fading. Multiplied with the sweep.
-    final innerFrac = halo.innerRadius / halo.outerRadius;
-    final mask = RadialGradient(
-      colors: const [
-        Color(0x00000000), // inside the body: clear
-        Color(0x00000000),
-        Color(0xFFFFFFFF), // at the surface: full
-        Color(0x00000000), // fade to the halo edge
-      ],
-      stops: [0.0, innerFrac * 0.98, innerFrac, 1.0],
-    );
-
-    // Bound the offscreen layer to the viewport so a giant halo rect doesn't
-    // allocate a huge buffer.
-    final layerBounds = rect.intersect(Offset.zero & size);
-    if (layerBounds.isEmpty) return;
-    canvas.saveLayer(layerBounds, Paint());
-    canvas.drawCircle(c, halo.outerRadius,
-        Paint()..shader = sweep.createShader(rect));
-    canvas.drawCircle(
-      c,
-      halo.outerRadius,
-      Paint()
-        ..blendMode = BlendMode.dstIn
-        ..shader = mask.createShader(rect),
-    );
-    canvas.restore();
-  }
-
-  double _smoothstep01(double x, double e0, double e1) {
-    final t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
-    return t * t * (3 - 2 * t);
-  }
-
 
   Color _scale(Color base, double f) => Color.fromARGB(
         255,
