@@ -13,6 +13,7 @@ import 'dart:ui' as ui;
 import 'package:acro_space_simulator/adapters/presenters/top_down_snapshot.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/infrastructure/flutter/debug_layers.dart';
+import 'package:acro_space_simulator/infrastructure/flutter/sphere_texture.dart';
 import 'package:acro_space_simulator/infrastructure/flutter/texture_cache.dart';
 import 'package:acro_space_simulator/infrastructure/flutter/top_down_painter.dart';
 import 'package:flutter/material.dart';
@@ -139,7 +140,92 @@ Future<void> _shootSphere(
   });
 }
 
+/// Renders one frame at [eyeDistFromCentreM] from Earth's centre, looking at the
+/// limb (so the cap fills part of the frame), and returns the sphere's recursion
+/// + triangle counts. No PNG — used to find where the mesh cost explodes.
+Future<({int calls, int tris})> _perfShot(
+  WidgetTester t, {
+  required double eyeDistFromCentreM,
+  required double fovDeg,
+}) async {
+  const size = Size(1280, 800);
+  t.view.physicalSize = size;
+  t.view.devicePixelRatio = 1.0;
+  addTearDown(t.view.resetPhysicalSize);
+  addTearDown(t.view.resetDevicePixelRatio);
+
+  late ui.Image tex;
+  await t.runAsync(() async {
+    tex = await _checker(512, 256);
+  });
+  final textures = TextureCache()..seed('earth', tex);
+
+  // Eye altitude above the surface; camera looks toward the horizon so the cap +
+  // limb are framed (worst case for tris). Foot at the equator; the eye is pulled
+  // back `altM` from the foot focus, so centreFromEye length = R + altM (the real
+  // in-game low-altitude geometry, which drives the deep maxDepth scaling).
+  final altM = eyeDistFromCentreM - kEarthR;
+  final horizonDip = math.acos((kEarthR / eyeDistFromCentreM).clamp(0.0, 1.0));
+  // Foot on +Y; camera forward aims down -Y tilted up by horizonDip toward +Z.
+  final tilt = (math.pi / 2 - horizonDip).clamp(0.0, math.pi / 2 - 0.02);
+  final fwd = Vector3(0, -math.cos(tilt), math.sin(tilt)).normalized;
+  final camElev = math.asin((-fwd.z).clamp(-1.0, 1.0));
+  final camAzim = math.atan2(fwd.x, fwd.y);
+  final cam = PerspectiveCamera(
+    azimuth: camAzim,
+    elevation: camElev,
+    range: altM,
+    fovY: fovDeg * math.pi / 180,
+    viewportH: size.height,
+  );
+  final localUp = Vector3(0, 1, 0);
+  final worldRel = localUp * -kEarthR;
+  final relScreen = cam.projectPx(worldRel);
+  final bx = relScreen?.x ?? 0, by = relScreen?.y ?? 0;
+  final body = BodyView(
+    'Earth', bx, by, kEarthR, false,
+    hasAtmosphere: true,
+    textureKey: 'earth',
+    sunWorldX: 0, sunWorldY: 1, sunWorldZ: 0,
+    radiusPx: cam.radiusPx(worldRel, kEarthR),
+    worldRel: worldRel,
+  );
+  final painter = TopDownPainter(
+    TopDownSnapshot(bodies: [body], vessels: const [], hud: const HudView([])),
+    textures: textures,
+    view: cam,
+    layers: const DebugLayers(skybox: false),
+  );
+  final key = GlobalKey();
+  await t.pumpWidget(MaterialApp(
+    home: RepaintBoundary(
+      key: key,
+      child: CustomPaint(size: size, painter: painter),
+    ),
+  ));
+  await t.pump();
+  return (calls: SphereTexture.debugFaceCalls, tris: SphereTexture.debugTris);
+}
+
 void main() {
+  // PERF SWEEP — print the sphere's recursion calls + emitted triangles across
+  // the zoom range the user reported as choppy (eye distance from Earth centre).
+  testWidgets('PERF sweep tris vs altitude', (t) async {
+    final marks = <double>[
+      1e9, 1e8, 5e7, 2.5e7, 5e6, 4e6, 2e6, 1e6, 5e5, 1e5, 2e4,
+    ];
+    final lines = <String>[];
+    for (final d in marks) {
+      final r = await _perfShot(t, eyeDistFromCentreM: d + kEarthR, fovDeg: 75);
+      lines.add('${(d / 1e6).toStringAsFixed(3)} Mm: '
+          'calls=${r.calls}  tris=${r.tris}  '
+          'maxDepth=${SphereTexture.debugMaxDepth}  '
+          'targetPx=${SphereTexture.debugTargetPx.toStringAsFixed(0)}');
+    }
+    // ignore: avoid_print
+    print('\n=== SPHERE PERF SWEEP (fov75, limb view) ===\n${lines.join('\n')}\n');
+  });
+
   // Sanity: far away the whole disc + checker must be visible. View from an
   // angle (elev 0.9) so the frame centre isn't the equirect texture pole.
   testWidgets('sphere far (3000 km up)', (t) async {
