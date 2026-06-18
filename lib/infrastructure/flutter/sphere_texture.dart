@@ -107,7 +107,7 @@ class SphereTexture {
     // up to 4x the base grid, so the ground close to the camera subdivides finer.
     final alt = radiusM > 0 ? (eyeDist - radiusM) : double.infinity;
     final grid = (radiusM > 0 && alt < radiusM)
-        ? (_grid * (1.0 + 3.0 * (1.0 - (alt / radiusM).clamp(0.0, 1.0)))).round()
+        ? (_grid * (1.0 + 5.0 * (1.0 - (alt / radiusM).clamp(0.0, 1.0)))).round()
         : _grid;
 
     // LAT/LONG TESSELLATION (body space). The sphere is gridded in lat × lon;
@@ -132,10 +132,15 @@ class SphereTexture {
         eyeDist < 1e-6 ? Vector3(0, 0, 1) : (centreFromEye * (-1 / eyeDist));
     final subLat = math.asin(toEye.z.clamp(-1.0, 1.0));
     final subLon = math.atan2(toEye.y, toEye.x);
-    // Visible-cap half-angle (+margin); full hemisphere when far/ortho.
+    // Visible-cap half-angle. Use a generous margin (1.8x, min ~5 deg) so the
+    // window extends WELL past the horizon: ground entering view at the leading
+    // edge is already tessellated + just culled, so it appears at the true
+    // (small, far) horizon rather than popping in at the window edge.
     final windowed = radiusM > 0 && (eyeDist - radiusM) < radiusM;
     final alpha = windowed
-        ? math.acos((radiusM / eyeDist).clamp(0.0, 1.0)) * 1.25
+        ? math
+            .max(math.acos((radiusM / eyeDist).clamp(0.0, 1.0)) * 1.8, 0.09)
+            .clamp(0.0, math.pi)
         : math.pi; // full sphere
 
     final latBands = grid; // rows

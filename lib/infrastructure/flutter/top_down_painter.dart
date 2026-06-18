@@ -123,7 +123,11 @@ class TopDownPainter extends CustomPainter {
       // the whole planet vanishes. Only center-cull a small/distant body.
       final cullR = b.isStar ? rPx * _starGlowScale : rPx;
       final screenDiag = size.bottomRight(Offset.zero).distance;
-      final big = !b.isStar && rPx > screenDiag; // fills well past the viewport
+      // Skip the centre-cull once the body is large on screen (apparent radius
+      // past ~a third of the diagonal): its centre may project off-screen / NaN
+      // while the surface still fills the frame (orbit tracking, grazing angles).
+      // The per-vertex horizon cull handles its real visibility.
+      final big = !b.isStar && rPx > screenDiag * 0.33;
       if (!big && !_discTouchesScreen(c, cullR, size)) continue;
       final base = b.isStar ? const Color(0xFFFFD66B) : const Color(0xFF4A90D9);
 
