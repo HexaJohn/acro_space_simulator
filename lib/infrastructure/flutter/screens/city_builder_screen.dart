@@ -2203,11 +2203,12 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     if (_hostility > 0.02 && _disaster == _Disaster.none && _population > 5) {
       _autoDisasterTimer -= dt;
       if (_autoDisasterTimer <= 0) {
-        // Calm spell between strikes. Much longer than before (disasters were
-        // firing back-to-back). Higher hostility shortens it; there's always a
-        // generous floor so the colony gets clear weather to recover.
+        // Calm spell between strikes — target roughly ONE disaster per ~30 min
+        // of sim time. Higher hostility shortens it (down to ~15 min at max),
+        // plus a random spread; there's always a generous floor so the colony
+        // gets long clear stretches to recover.
         _autoDisasterTimer =
-            (260 - _hostility * 180) + math.Random().nextDouble() * 120;
+            (1800 - _hostility * 900) + math.Random().nextDouble() * 600;
         final pool = _hostilityPool();
         _disaster = _pickDisaster(pool); // weighted by planet + biome
         _disasterTime = _disaster.duration;
