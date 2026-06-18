@@ -118,15 +118,20 @@ class SphereTexture {
 
     // Project a unit body-direction (already spin-rotated for geometry) -> _V,
     // cached by quantised direction so shared edge midpoints weld. Returns null
-    // when behind the near plane. [lon0]/[lat0] are the body-FIXED angles for UV.
-    final cache = <String, _V?>{};
+    // when behind the near plane.
+    final cache = <int, _V?>{};
     _V? evalDir(double nx, double ny, double nz) {
-      // Collision-free weld key: quantise each component to 1e-6 and join. (An
-      // XOR-of-hashes key collided, returning wrong cached verts -> degenerate
-      // triangles that streaked across the disc.)
-      final key = '${(nx * 1e6).round()},${(ny * 1e6).round()},'
-          '${(nz * 1e6).round()}';
-      if (cache.containsKey(key)) return cache[key];
+      // Fast NON-colliding weld key: quantise each component (in [-1,1]) to 15
+      // signed bits (x32768 -> [-32768,32767], offset to [0,65535]) and bit-pack
+      // into 48 bits — well within the web 53-bit-safe-int range, so no XOR
+      // collisions (which streaked the disc) and no per-vertex string alloc
+      // (which tanked the frame rate when zoomed in).
+      final qx = ((nx * 32768).round() + 32768) & 0xFFFF;
+      final qy = ((ny * 32768).round() + 32768) & 0xFFFF;
+      final qz = ((nz * 32768).round() + 32768) & 0xFFFF;
+      final key = qx * 0x100000000 + qy * 0x10000 + qz;
+      final hit = cache[key];
+      if (hit != null || cache.containsKey(key)) return hit;
       final relFocus = Vector3(
         worldRel.x + radiusM * nx,
         worldRel.y + radiusM * ny,
@@ -168,7 +173,11 @@ class SphereTexture {
       return vtx;
     }
 
-    final targetPx = (rPx / 24.0).clamp(6.0, 40.0);
+    // Leaf target on screen (px). Bigger leaves = fewer triangles. A small/far
+    // disc needs fine leaves for a round limb (rPx/24); a big near disc that
+    // fills the screen uses a coarse 64 px leaf — at that zoom the texture is
+    // already sub-texel/blurry, so finer leaves cost a lot for no visible gain.
+    final targetPx = (rPx / 24.0).clamp(6.0, 64.0);
     // Depth bound, scaled to how close the eye is. Far / mid: a modest cap (the
     // projected-size test stops early anyway). VERY low altitude (a few ico faces
     // fill the screen) needs more depth to reach screen-sized leaves — scale by
@@ -180,7 +189,10 @@ class SphereTexture {
       maxDepth = (7 + extra).clamp(7, 14);
     }
     final screenW = viewportCentre.dx * 2, screenH = viewportCentre.dy * 2;
-    final marginX = screenW * 0.5, marginY = screenH * 0.5;
+    // Tighter off-screen prune margin (was 0.5) so off-screen subtrees stop
+    // recursing sooner — a perf win when zoomed in and most of the cap is off
+    // screen. Still leaves a margin so an edge-straddling node tessellates.
+    final marginX = screenW * 0.25, marginY = screenH * 0.25;
 
     // Visible cap geometry: the cap is the spherical disc of directions within
     // angle [capAngle] of [toEye] (the sub-camera direction); perspective only.
