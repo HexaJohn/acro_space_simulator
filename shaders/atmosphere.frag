@@ -45,10 +45,16 @@ void main() {
   float ta0 = b - sA;           // atmosphere entry along the ray
   float ta1 = b + sA;           // atmosphere exit
 
-  // Intersect the surface sphere (radius 1).
+  // Intersect the surface sphere. Use a radius slightly UNDER 1 so the bright
+  // limb glow (full-chord rays just outside the surface) extends down ONTO the
+  // rendered surface edge instead of floating above it — the icosphere mesh's
+  // faceted limb sits a hair inside the true radius, which otherwise leaves a
+  // dark crescent gap between the surface and the glow. The small overlap reads
+  // as atmospheric haze on the limb.
+  const float rSurf = 0.985;
   float enter = max(ta0, 0.0);  // start in front of the eye
   float exitT;
-  float discS = b * b - oc2 + 1.0;
+  float discS = b * b - oc2 + rSurf * rSurf;
   if (discS > 0.0) {
     float sS = sqrt(discS);
     float ts0 = b - sS;         // first surface hit
@@ -59,9 +65,9 @@ void main() {
   float path = max(0.0, exitT - enter);
 
   // Normalise by the longest possible chord (a grazing ray at the surface limb).
-  float maxChord = 2.0 * sqrt(max(uRa * uRa - 1.0, 1e-4));
+  float maxChord = 2.0 * sqrt(max(uRa * uRa - rSurf * rSurf, 1e-4));
   float glow = clamp(path / maxChord, 0.0, 1.0);
-  glow = pow(glow, 0.75);       // soft shoulder
+  glow = pow(glow, 1.5);        // tighter falloff -> the glow hugs the limb
 
   // Day/night + warm terminator from the atmosphere point nearest the limb along
   // this ray (closest approach to the centre), lit vs the sun.
@@ -69,11 +75,15 @@ void main() {
   float nl = length(nearPt);
   vec3 nrm = nl > 1e-4 ? nearPt / nl : vec3(0.0, 0.0, 1.0);
   float lit = clamp(dot(nrm, uSun), -1.0, 1.0);
-  float dayF = smoothstep(-0.25, 0.25, lit);     // 0 night -> 1 day
-  float warmF = 1.0 - smoothstep(0.05, 0.6, lit); // warm low sun / terminator
+  // Day factor gates the WHOLE glow: 0 on the deep night side (the back of the
+  // limb fades fully to TRANSPARENT, never a warm/orange ring), rising through
+  // the terminator to 1 on the day side.
+  float dayF = smoothstep(-0.20, 0.12, lit);
+  // Warm only in a narrow band at the terminator; blue elsewhere.
+  float warmF = (1.0 - smoothstep(-0.05, 0.35, lit));
   vec3 col = mix(uTint, uWarm, warmF);
 
-  float a = glow * uStrength * (0.25 + 0.75 * dayF);
+  float a = glow * uStrength * dayF; // no night floor -> transparent on the back
   a = clamp(a, 0.0, 1.0);
   // Premultiplied output for srcOver compositing.
   fragColor = vec4(col * a, a);

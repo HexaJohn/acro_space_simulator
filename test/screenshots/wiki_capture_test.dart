@@ -149,6 +149,23 @@ void main() {
         fovDeg: 70);
   });
 
+  // The whole lit Earth from far (the in-app "range 15 Mm, full disc" view) —
+  // for tuning the atmosphere: night side must fade to transparent (not orange),
+  // the halo size, and no crescent gap to the surface.
+  testWidgets('wiki: earth full disc far', (t) async {
+    tex = {'earth': await _tex(t, 'earth'), 'starfield': await _tex(t, 'starfield')};
+    final look = _groundLook(10, 220, 0.0, 1.45);
+    await _shoot(t, 'earth_full',
+        universe: universe,
+        vessels: vessels,
+        focus: craft.id,
+        textures: tex,
+        azimuth: look.azimuth,
+        elevation: look.elevation,
+        rangeM: 1.5e7,
+        fovDeg: 75);
+  });
+
   testWidgets('wiki: atmosphere limb', (t) async {
     tex = {'earth': await _tex(t, 'earth'), 'starfield': await _tex(t, 'starfield')};
     final look = _groundLook(10, 220, 1.2, 1.30);

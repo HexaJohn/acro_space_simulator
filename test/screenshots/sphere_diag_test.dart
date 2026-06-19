@@ -232,6 +232,18 @@ void main() {
     await _shootSphere(t, 'far_3000km',
         altM: 3000000, elevation: 0.9, fovDeg: 60);
   });
+  // FULL DISC straight down (nadir) from far — the sub-camera point is the frame
+  // centre, where the user reported a visible 'pole'/seam artifact facing the
+  // camera. Checker makes any seam or UV convergence obvious.
+  testWidgets('sphere full disc nadir', (t) async {
+    await _shootSphere(t, 'full_disc_nadir',
+        altM: 1.5e7, elevation: math.pi / 2, fovDeg: 50);
+  });
+  // Full disc from a shallow angle (like the in-app equatorial view).
+  testWidgets('sphere full disc oblique', (t) async {
+    await _shootSphere(t, 'full_disc_oblique',
+        altM: 1.5e7, elevation: 0.4, fovDeg: 50);
+  });
   // elevation pi/2 = straight down at the nadir; less = tilt up toward the
   // horizon (the body centre is straight below, so the horizon is a small dip
   // off pi/2 at these low altitudes).

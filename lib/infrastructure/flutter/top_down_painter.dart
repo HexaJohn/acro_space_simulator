@@ -299,7 +299,7 @@ class TopDownPainter extends CustomPainter {
           // fraction — a thin shell gives a defined limb glow; a thick one washes
           // over the disc. Gas giants get a fatter haze.
           final shellThick =
-              (b.isGasGiant && layers.exaggerateAtmosphere) ? 0.22 : 0.12;
+              (b.isGasGiant && layers.exaggerateAtmosphere) ? 0.10 : 0.05;
           _atmosphereShaderPass(canvas, size, b, atmoCol, shellThick);
         }
 
