@@ -10,6 +10,7 @@ import '../../domain/simulation/simulation_clock.dart';
 import '../../domain/thermal/thermal_state.dart';
 import '../../domain/universe/celestial_body.dart';
 import '../../domain/vessel/part.dart';
+import '../../domain/vessel/propulsion.dart';
 import '../../domain/vessel/resource_container.dart';
 import '../../domain/vessel/stage.dart';
 import '../../domain/vessel/vessel.dart';
@@ -142,6 +143,20 @@ class GameStateCodec {
               'unitMass': r.unitMass,
             }
         ],
+        // Engine — WITHOUT this the part reloads as dead structural mass and the
+        // craft has no thrust after a load.
+        if (p.engine != null) 'engine': _engine(p.engine!),
+      };
+
+  Map<String, dynamic> _engine(Engine e) => {
+        'name': e.name,
+        'thrustVac': e.maxThrustVacuum,
+        'thrustSL': e.maxThrustSeaLevel,
+        'ispVac': e.ispVacuum,
+        'ispSL': e.ispSeaLevel,
+        'propellant': e.propellant.name,
+        'oxRatio': e.oxidizerRatio,
+        'gimbal': e.gimbalRange,
       };
 
   Map<String, dynamic> _colony(dynamic c) => {
@@ -331,8 +346,22 @@ class GameStateCodec {
         for (final rj in (m['resources'] as List))
           _decodeResource(rj as Map<String, dynamic>)
       ],
+      engine: m['engine'] == null
+          ? null
+          : _decodeEngine(m['engine'] as Map<String, dynamic>),
     );
   }
+
+  Engine _decodeEngine(Map<String, dynamic> m) => Engine(
+        name: m['name'] as String,
+        maxThrustVacuum: (m['thrustVac'] as num).toDouble(),
+        maxThrustSeaLevel: (m['thrustSL'] as num).toDouble(),
+        ispVacuum: (m['ispVac'] as num).toDouble(),
+        ispSeaLevel: (m['ispSL'] as num).toDouble(),
+        propellant: ResourceType.values.byName(m['propellant'] as String),
+        oxidizerRatio: (m['oxRatio'] as num).toDouble(),
+        gimbalRange: (m['gimbal'] as num).toDouble(),
+      );
 
   ResourceContainer _decodeResource(Map<String, dynamic> m) => ResourceContainer(
         type: ResourceType.values.byName(m['type'] as String),

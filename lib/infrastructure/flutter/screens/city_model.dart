@@ -141,18 +141,21 @@ class CitySpec {
 /// Grown-building specs per zone kind + density tier (Cities-Skylines RCI).
 const Map<String, Map<Density, CitySpec>> kZoneSpecs = {
   'residential': {
+    // Homes barely pollute (heating + cars) — a fraction of industry. Kept
+    // tiny so a residential-only colony never trips a critical-air alarm; real
+    // pollution comes from industry / power.
     Density.low: CitySpec(
         type: 'r-low', label: 'Low-Density Homes', icon: Icons.house,
         color: Color(0xFF7FE0A0), group: 'res', housing: 20, powerDraw: 2,
-        pollution: 0.2),
+        pollution: 0.02),
     Density.medium: CitySpec(
         type: 'r-med', label: 'Apartments', icon: Icons.apartment,
         color: Color(0xFF7FE0A0), group: 'res', housing: 60, powerDraw: 6,
-        pollution: 0.5),
+        pollution: 0.05),
     Density.high: CitySpec(
         type: 'r-high', label: 'Towers', icon: Icons.location_city,
         color: Color(0xFF7FE0A0), group: 'res', housing: 160, powerDraw: 16,
-        pollution: 1.0),
+        pollution: 0.1),
   },
   'commercial': {
     Density.low: CitySpec(
@@ -408,8 +411,10 @@ const List<CitySpec> kUtilCatalog = [
       color: Color(0xFFEC407A), group: 'transport', jobs: 40, powerDraw: 40,
       inputs: {Commodity.fuel: 1, Commodity.oxidizer: 1},
       outputs: {
-        Commodity.food: 0.3, Commodity.water: 0.3, Commodity.ore: 0.3,
-        Commodity.oxygen: 0.3, // shuttled-in life support
+        // Life support trickles in on automatic shuttles; ORE only ever arrives
+        // via an explicit scheduled delivery, never produced passively.
+        Commodity.food: 0.3, Commodity.water: 0.3,
+        Commodity.oxygen: 0.3,
       }),
   // Bigger spaceports for colonies with many automatic shuttles arriving +
   // departing: more pads (footprint) = more throughput per build. They can be
@@ -420,7 +425,7 @@ const List<CitySpec> kUtilCatalog = [
       footW: 2, footH: 4,
       inputs: {Commodity.fuel: 2.6, Commodity.oxidizer: 2.6},
       outputs: {
-        Commodity.food: 0.9, Commodity.water: 0.9, Commodity.ore: 0.9,
+        Commodity.food: 0.9, Commodity.water: 0.9,
         Commodity.oxygen: 0.9,
       }),
   CitySpec(type: 'spaceport', label: 'Starport (3×6)',
@@ -429,7 +434,7 @@ const List<CitySpec> kUtilCatalog = [
       footW: 3, footH: 6,
       inputs: {Commodity.fuel: 6, Commodity.oxidizer: 6},
       outputs: {
-        Commodity.food: 2.2, Commodity.water: 2.2, Commodity.ore: 2.2,
+        Commodity.food: 2.2, Commodity.water: 2.2,
         Commodity.oxygen: 2.2,
       }),
 ];

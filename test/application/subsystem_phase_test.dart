@@ -165,4 +165,50 @@ void main() {
     }
     expect(vessel.thermalOf(const PartId('hull'))!.temperature, greaterThan(300));
   });
+
+  test('a landed craft does NOT heat from co-rotation airspeed under warp', () {
+    final hull = PartThermalState(
+      part: const PartId('hull'),
+      temperature: 300,
+      heatCapacity: 2000,
+      maxTemperature: 2500,
+      surfaceArea: 6,
+    );
+    final body = SampleWorld.buildSystem().require(SampleWorld.kerbin);
+    // Sitting ON the surface, co-rotating with the planet: inertial velocity is
+    // the surface velocity (omega x r), but air-relative airspeed is ~0, so no
+    // reentry heating.
+    final omega = body.angularVelocity;
+    final r = Vector3(body.radius, 0, 0);
+    final vessel = Vessel(
+      id: const VesselId('landed'),
+      name: 'Landed',
+      ownerId: 'p',
+      state: StateVector(
+        position: r,
+        velocity: Vector3(-omega * r.y, omega * r.x, 0), // surface velocity
+      ),
+      dominantBody: SampleWorld.kerbin,
+      stages: const [],
+      thermal: [hull],
+    )..landed = true;
+
+    final vessels = InMemoryVesselRepository([vessel]);
+    final tick = buildTick(
+      vessels: vessels,
+      colonies: InMemoryColonyRepository(),
+      deposits: InMemoryDepositRepository(),
+    );
+    final clock = SimulationClock(warpFactor: 1000, fixedStep: 1.0);
+    for (var i = 0; i < 20; i++) {
+      tick.execute(clock);
+    }
+    // It must SURVIVE — the co-rotation speed must not read as reentry airspeed
+    // and cook it past its destruction limit. (A reentry at ~Kerbin's surface
+    // speed would spike thousands of K; air-relative airspeed is ~0 here.)
+    final hullState = vessel.thermalOf(const PartId('hull'));
+    expect(hullState, isNotNull, reason: 'vessel survived (not destroyed)');
+    expect(hullState!.temperature, lessThan(hull.maxTemperature),
+        reason: 'co-rotation must not read as reentry airspeed + burn it up');
+  });
 }

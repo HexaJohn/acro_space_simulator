@@ -3,15 +3,32 @@ import 'dart:math' as math;
 import '../../domain/shared/vector3.dart';
 import 'camera_view.dart';
 
-/// A true 3D perspective camera that orbits a focus point. The eye sits at
-/// [range] metres from the target, at the given azimuth/elevation, and looks at
-/// the target. Points are projected with a real perspective divide (distant
-/// things shrink, near things grow), unlike the orthographic [OrthoCamera].
+/// A true 3D perspective camera that **orbits a focus point** — the flight /
+/// CRAFT view camera. The eye sits [range] metres from the focus along the
+/// (azimuth, elevation) direction and looks back at it; points project with a
+/// real perspective divide, so distant bodies shrink and near ones grow (unlike
+/// the parallel-ray [OrthoCamera]).
 ///
-/// Inputs to [projectPx] are WORLD positions already recentred on the target
-/// (`world - targetWorld`) — the same camera-relative metres the painter uses.
+/// **Orbit-a-target model.** Azimuth/elevation/roll orient the view; [range] is
+/// the eye distance. In [SimulationView] the live `range` is measured from the
+/// focused body's *surface* (range + radius), so it reads as an altitude that can
+/// shrink to near zero — you keep zooming smoothly all the way down to standing on
+/// the ground instead of stalling when the eye distance equals the radius.
 ///
-/// World frame: X/Y ecliptic plane, +Z up (out of the ecliptic).
+/// **Projection.** Inputs to [projectPx] / [depth] / [radiusPx] are world
+/// positions already recentred on the focus (`world - focusWorld`). The focal
+/// length is `f = (viewportH/2) / tan(fovY/2)`; a point at view-depth `z` projects
+/// to `(rel·right / z · f, rel·up / z · f)`. Points with `z ≤ near` are behind the
+/// [nearPlane] and [projectPx] returns null — the [SphereTexture] uses that, plus
+/// [nearPlane] itself, to clip plane-crossing surface faces cleanly.
+///
+/// **Apparent radius** uses the *euclidean* distance to the eye (`asin(R/d)`
+/// projected through `f`), not the planar depth, so a body at the frame edge isn't
+/// drawn too large.
+///
+/// World frame: X/Y ecliptic plane, +Z up (out of the ecliptic). `forward` at
+/// (elevation 0, azimuth 0) points along +Y; elevation +π/2 looks straight down
+/// −Z.
 class PerspectiveCamera implements SceneCamera {
   @override
   final double azimuth; // spin about +Z
@@ -84,6 +101,9 @@ class PerspectiveCamera implements SceneCamera {
   /// Eye position relative to the target (= -forward * range).
   Vector3 get _eyeRel => forward * -range;
 
+  @override
+  Vector3 get eyeOffset => _eyeRel;
+
   double get _focal => (viewportH / 2) / math.tan(fovY / 2);
 
   @override
@@ -118,6 +138,12 @@ class PerspectiveCamera implements SceneCamera {
     final theta = math.asin((radiusM / d).clamp(0.0, 1.0));
     return _focal * math.tan(theta);
   }
+
+  @override
+  double get nearPlane => near; // points with forward-depth <= near are culled
+
+  @override
+  double get focalPx => _focal;
 
   @override
   bool get isTopish => false; // perspective never skips the tilted cull

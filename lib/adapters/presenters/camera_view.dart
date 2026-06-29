@@ -115,10 +115,25 @@ enum CameraView {
   CameraView get next => CameraView.values[(index + 1) % CameraView.values.length];
 }
 
-/// A camera that projects target-relative WORLD positions (metres) to SCREEN
-/// PIXELS (centre-origin, +x right, +y up; the painter flips Y for Flutter's
-/// downward axis). Owns the metres->pixels mapping so the painter never divides
-/// by metres-per-pixel — ortho and perspective differ only inside the camera.
+/// The projection seam between the world and the screen: maps **target-relative
+/// world positions (metres)** to **screen pixels** (centre-origin, +x right,
+/// +y up; the painter flips Y for Flutter's downward axis).
+///
+/// The camera *owns* the metres→pixels mapping, so the presenter and painter
+/// never divide by a metres-per-pixel scale themselves — orthographic and
+/// perspective rendering differ only *inside* the camera implementation:
+///  * [OrthoCamera] — the flat map projection (`rel·right / mpp`); parallel rays,
+///    never culls behind an eye, constant scale. Used for the strategic MAP view.
+///  * [PerspectiveCamera] — a real eye pulled back from the focus, with a
+///    perspective divide (distant bodies shrink, near ones grow) and a near
+///    plane. Used for the CRAFT / 3D flight view.
+///
+/// Everything that draws in world space — the presenter projecting bodies, rails,
+/// vessels and trails; the [SphereTexture] projecting every mesh vertex — goes
+/// through [projectPx] / [radiusPx] / [depth], so swapping the camera swaps the
+/// whole look with no other change. The sphere additionally reads the basis
+/// vectors ([right], [up], [forward]) for per-vertex shading and [nearPlane] to
+/// tell a face behind the camera (drop) from one crossing the near plane (clip).
 abstract class SceneCamera {
   Vector3 get forward; // into the screen (eye -> target)
   Vector3 get right;
@@ -141,6 +156,26 @@ abstract class SceneCamera {
   /// renderer can map the visible hemisphere from the right angle (no texture
   /// sliding for off-axis bodies).
   Vector3 viewDirTo(Vector3 rel);
+
+  /// The EYE position relative to the target/focus, in world metres. Perspective:
+  /// pulled back along -forward by the range. Ortho: a finite eye is undefined
+  /// (parallel rays), so it returns zero — callers gate eye-dependent effects
+  /// (e.g. the near-surface horizon) on [usesDistanceCull] being false.
+  Vector3 get eyeOffset;
+
+  /// Forward-depth threshold below which [projectPx] returns null (a point is
+  /// behind the near plane / eye). The sphere renderer uses it to tell a face
+  /// that is wholly BEHIND the camera (drop it) from one that merely CROSSES the
+  /// near plane (keep subdividing so the near-plane clip can fill it). Ortho has
+  /// no finite near plane, so it returns negative infinity (nothing is "behind").
+  double get nearPlane;
+
+  /// Focal length in pixels: `f` such that a camera-space point `(x,y,z)`
+  /// projects to `(x/z·f, y/z·f)`. The atmosphere fragment shader reconstructs the
+  /// per-pixel view ray as `(px, py, focalPx)`. Ortho has no perspective focal, so
+  /// it returns the pixels-per-radian-equivalent (1/metresPerPixel scaled) — only
+  /// the perspective camera drives the shader, so the ortho value is unused.
+  double get focalPx;
 
   /// Skip the tilted-view distance cull when ~top-down (everything's in plane).
   bool get isTopish;
@@ -185,6 +220,15 @@ class OrthoCamera implements SceneCamera {
 
   @override
   Vector3 viewDirTo(Vector3 rel) => orbit.forward; // parallel rays
+
+  @override
+  Vector3 get eyeOffset => Vector3.zero; // no finite eye (parallel rays)
+
+  @override
+  double get nearPlane => double.negativeInfinity; // ortho never culls behind
+
+  @override
+  double get focalPx => 1.0 / metresPerPixel; // unused (ortho drives no shader)
 
   @override
   bool get isTopish => orbit.isTopish;

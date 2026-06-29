@@ -203,22 +203,28 @@ class _CraftAssemblyScreenState extends State<CraftAssemblyScreen> {
       body: LayoutBuilder(builder: (context, c) {
         final wide = c.maxWidth > 720;
         final catalog = _catalogPane();
-        final design = _designPane(v);
         if (wide) {
           return Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Expanded(flex: 5, child: catalog),
               const VerticalDivider(width: 1, color: Color(0xFF223247)),
-              Expanded(flex: 4, child: design),
+              Expanded(flex: 4, child: _designPane(v)),
             ],
           );
         }
-        return ListView(children: [
-          SizedBox(height: 360, child: catalog),
-          const Divider(height: 1, color: Color(0xFF223247)),
-          design,
-        ]);
+        // Narrow (mobile): NO outer page scroll. A bounded Column splits the
+        // viewport between the catalog (top) and the design pane (bottom), each
+        // of which scrolls internally and sizes to fit — so nothing runs off the
+        // bottom of the screen.
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(flex: 5, child: catalog),
+            const Divider(height: 1, color: Color(0xFF223247)),
+            Expanded(flex: 4, child: _designPane(v)),
+          ],
+        );
       }),
     );
   }
@@ -283,56 +289,59 @@ class _CraftAssemblyScreenState extends State<CraftAssemblyScreen> {
         ),
       );
 
-  Widget _designPane(Vessel? v) => Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Container(
-            padding: const EdgeInsets.all(12),
-            color: AppTheme.panel,
-            child: v == null
-                ? const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 16),
-                    child: Text('Add parts to begin.',
-                        textAlign: TextAlign.center, style: AppTheme.dim),
-                  )
-                : _stats(v),
-          ),
-          if (v != null && widget.launchSites.isNotEmpty) _launchBar(v),
-          Expanded(
-            child: _placed.isEmpty
-                ? const SizedBox()
-                : ReorderableListView.builder(
-                    padding: const EdgeInsets.all(8),
-                    itemCount: _placed.length,
-                    onReorder: (a, b) => setState(() {
-                      if (b > a) b -= 1;
-                      final p = _placed.removeAt(a);
-                      _placed.insert(b, p);
-                    }),
-                    itemBuilder: (_, i) {
-                      final p = _placed[i];
-                      return Card(
-                        key: ValueKey(p.instanceId),
-                        color: AppTheme.panelLight,
-                        margin: const EdgeInsets.symmetric(vertical: 3),
-                        child: ListTile(
-                          dense: true,
-                          leading: Text('S${p.stage}',
-                              style: AppTheme.mono
-                                  .copyWith(color: AppTheme.warn)),
-                          title: Text(p.def.name, style: AppTheme.body),
-                          trailing: IconButton(
-                            icon: const Icon(Icons.remove_circle_outline,
-                                color: AppTheme.danger, size: 20),
-                            onPressed: () => _remove(i),
-                          ),
-                        ),
-                      );
-                    },
+  Widget _designPane(Vessel? v) {
+    // The placed-parts list FILLS the remaining pane height (Expanded) and
+    // scrolls internally — the pane lives in a bounded Column in both the wide
+    // and narrow layouts, so nothing overflows the screen.
+    final list = _placed.isEmpty
+        ? const SizedBox()
+        : ReorderableListView.builder(
+            padding: const EdgeInsets.all(8),
+            itemCount: _placed.length,
+            onReorder: (a, b) => setState(() {
+              if (b > a) b -= 1;
+              final p = _placed.removeAt(a);
+              _placed.insert(b, p);
+            }),
+            itemBuilder: (_, i) {
+              final p = _placed[i];
+              return Card(
+                key: ValueKey(p.instanceId),
+                color: AppTheme.panelLight,
+                margin: const EdgeInsets.symmetric(vertical: 3),
+                child: ListTile(
+                  dense: true,
+                  leading: Text('S${p.stage}',
+                      style: AppTheme.mono.copyWith(color: AppTheme.warn)),
+                  title: Text(p.def.name, style: AppTheme.body),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.remove_circle_outline,
+                        color: AppTheme.danger, size: 20),
+                    onPressed: () => _remove(i),
                   ),
-          ),
-        ],
-      );
+                ),
+              );
+            },
+          );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Container(
+          padding: const EdgeInsets.all(12),
+          color: AppTheme.panel,
+          child: v == null
+              ? const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 16),
+                  child: Text('Add parts to begin.',
+                      textAlign: TextAlign.center, style: AppTheme.dim),
+                )
+              : _stats(v),
+        ),
+        if (v != null && widget.launchSites.isNotEmpty) _launchBar(v),
+        Expanded(child: list),
+      ],
+    );
+  }
 
   /// Launch bar: shows the detected craft type + a type-gated LAUNCH button.
   Widget _launchBar(Vessel v) {
