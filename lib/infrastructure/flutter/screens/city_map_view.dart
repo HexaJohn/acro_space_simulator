@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/gestures.dart'
     show
         PointerScrollEvent,
+        PointerDeviceKind,
         kPrimaryButton,
         kMiddleMouseButton,
         kSecondaryMouseButton;
@@ -107,6 +108,7 @@ class CityMapView extends StatefulWidget {
   final int? rectEnd; // rect-select opposite corner (hovered/dragged cell)
   final void Function(int? key)? onHoverCell; // cursor moved over this cell
   final Set<int> hoverCells; // cells to highlight under the cursor (placement)
+  final bool hoverDestructive; // true = bulldoze; highlight RED to warn
 
   const CityMapView({
     super.key,
@@ -164,6 +166,7 @@ class CityMapView extends StatefulWidget {
     this.rectEnd,
     this.onHoverCell,
     this.hoverCells = const {},
+    this.hoverDestructive = false,
   });
 
   @override
@@ -198,6 +201,11 @@ class _CityMapViewState extends State<CityMapView>
   double _phase = 0; // commute animation phase (0..1, loops)
   bool _painting = false; // a paint-drag is in progress
   (int, int)? _lastPainted; // last cell painted this drag (dedupe)
+  // Number of fingers currently down + whether THIS gesture was ever multi-touch.
+  // A pinch-zoom must never place tiles, so placement (tap + paint) is gated on a
+  // gesture that stayed single-touch start to finish.
+  int _activePointers = 0;
+  bool _multiTouchGesture = false;
 
   @override
   void initState() {
@@ -231,7 +239,29 @@ class _CityMapViewState extends State<CityMapView>
       return Listener(
         // Capture which mouse button is pressed so the scale handlers can route
         // LMB -> place, MMB -> orbit, RMB -> pan. Touch reports buttons == 0.
-        onPointerDown: (e) => _btn = e.buttons,
+        // Also count fingers: a second finger marks the gesture multi-touch (a
+        // pinch), which disables placement so zooming never lays tiles.
+        onPointerDown: (e) {
+          _btn = e.buttons;
+          _activePointers++;
+          if (_activePointers >= 2) {
+            _multiTouchGesture = true;
+            _painting = false; // cancel any paint that the first finger started
+          }
+        },
+        onPointerUp: (e) {
+          _activePointers = (_activePointers - 1).clamp(0, 10);
+          // Only clear the pinch taint once EVERY finger is up. Fingers never
+          // release simultaneously, so a pinch dropping to one finger must stay
+          // tainted — otherwise the lingering finger places a tile on release.
+          if (_activePointers == 0) _multiTouchGesture = false;
+          // Finger lifted -> no "cursor on screen", so drop the hover highlight.
+          if (e.kind != PointerDeviceKind.mouse) widget.onHoverCell?.call(null);
+        },
+        onPointerCancel: (e) {
+          _activePointers = (_activePointers - 1).clamp(0, 10);
+          if (_activePointers == 0) _multiTouchGesture = false;
+        },
         // Mouse-wheel zoom (toward the cursor isn't needed; centre is fine).
         onPointerSignal: (sig) {
           if (sig is PointerScrollEvent) {
@@ -241,9 +271,16 @@ class _CityMapViewState extends State<CityMapView>
           }
         },
         child: MouseRegion(
+          // Only a REAL mouse hovers a cell. Touch/stylus has no "cursor when the
+          // finger is up", so we never show the hover highlight for those — and a
+          // stray touch-hover event clears it. (Touch placement uses tap/drag.)
           onHover: widget.onHoverCell == null
               ? null
               : (e) {
+                  if (e.kind != PointerDeviceKind.mouse) {
+                    widget.onHoverCell!(null);
+                    return;
+                  }
                   final c = cam.pick(e.localPosition, widget.grid, zAt);
                   widget.onHoverCell!(
                       c == null ? null : c.$2 * widget.grid + c.$1);
@@ -252,6 +289,8 @@ class _CityMapViewState extends State<CityMapView>
               widget.onHoverCell == null ? null : (_) => widget.onHoverCell!(null),
           child: GestureDetector(
           onTapUp: (d) {
+            // A tap that was part of a pinch (multi-touch) must not place a tile.
+            if (_multiTouchGesture) return;
             final cell = cam.pick(d.localPosition, widget.grid, zAt);
             if (cell != null) widget.onTapCell(cell.$1, cell.$2);
           },
@@ -261,21 +300,19 @@ class _CityMapViewState extends State<CityMapView>
             _azStart = _azimuth;
             _elStart = _elevation;
             _zoomStart = _zoom;
-            // Only the PRIMARY button (LMB) or touch may place/paint. MMB + RMB
-            // are reserved for the camera, so the middle button never lays tiles.
-            final placeBtn = _btn == 0 || _btn == kPrimaryButton;
-            if (placeBtn &&
-                widget.paintMode &&
-                widget.onPaintCell != null &&
-                d.pointerCount == 1) {
-              _painting = true;
-              _lastPainted = null;
-              final c = cam.pick(d.localFocalPoint, widget.grid, zAt);
-              if (c != null) {
-                _lastPainted = c;
-                widget.onPaintCell!(c.$1, c.$2);
-              }
+            // Taint this gesture if it already has 2+ fingers. NEVER clear the
+            // taint here — a pinch that drops to one finger restarts the scale
+            // gesture with one finger down, and clearing it would let that
+            // lingering finger place a tile. The taint clears only when every
+            // finger is fully up (the pointer-up/cancel handlers).
+            if (d.pointerCount >= 2 || _activePointers >= 2) {
+              _multiTouchGesture = true;
             }
+            // Don't paint yet — wait for the first single-finger move. Painting on
+            // touch-down would lay a tile before a second finger (pinch) can
+            // cancel it. The move handler starts the paint when it's safe.
+            _painting = false;
+            _lastPainted = null;
           },
           onScaleUpdate: (d) {
             if (_dragStart == null) return;
@@ -307,6 +344,21 @@ class _CityMapViewState extends State<CityMapView>
               });
               return;
             }
+            // Begin painting on the FIRST single-finger move (deferred from
+            // touch-down so a pinch never lays a tile). Only when: paint mode, a
+            // primary/touch input, exactly one finger, and not a pinch gesture.
+            final placeBtn = _btn == 0 || _btn == kPrimaryButton;
+            if (!_painting &&
+                placeBtn &&
+                widget.paintMode &&
+                widget.onPaintCell != null &&
+                !_multiTouchGesture &&
+                d.pointerCount == 1) {
+              _painting = true;
+              // A paint-drag is underway -> drop the hover preview highlight; the
+              // painted cells themselves show the result.
+              widget.onHoverCell?.call(null);
+            }
             // Paint mode (LMB/touch): a drag paints each new cell it crosses.
             if (_painting && widget.onPaintCell != null) {
               final c = cam.pick(d.localFocalPoint, widget.grid, zAt);
@@ -333,6 +385,9 @@ class _CityMapViewState extends State<CityMapView>
             _painting = false;
             _lastPainted = null;
             _btn = 0;
+            // Clear the multi-touch flag only once all fingers are up, so a
+            // lingering finger after a pinch can't immediately start placing.
+            if (_activePointers <= 0) _multiTouchGesture = false;
           },
           child: ClipRect(
             child: CustomPaint(
@@ -387,6 +442,7 @@ class _CityMapViewState extends State<CityMapView>
             rectStart: widget.rectStart,
             rectEnd: widget.rectEnd,
             hoverCells: widget.hoverCells,
+            hoverDestructive: widget.hoverDestructive,
             phase: _phase,
           ),
         ),
@@ -526,6 +582,7 @@ class _CityPainter extends CustomPainter {
   final int? rectStart;
   final int? rectEnd;
   final Set<int> hoverCells;
+  final bool hoverDestructive;
   final double phase;
 
   _CityPainter({
@@ -578,6 +635,7 @@ class _CityPainter extends CustomPainter {
     this.rectStart,
     this.rectEnd,
     this.hoverCells = const {},
+    this.hoverDestructive = false,
     this.phase = 0,
   });
 
@@ -800,13 +858,16 @@ class _CityPainter extends CustomPainter {
     // Placement highlight: tint the tile(s) under the cursor so it's clear a
     // placement tool is active + where (a multi-tile building shows its whole
     // footprint).
+    // Bulldoze (destructive) tints the cursor RED to warn; otherwise white.
+    final fillC = hoverDestructive ? const Color(0x55FF3B30) : const Color(0x40FFFFFF);
+    final strokeC = hoverDestructive ? const Color(0xEEFF3B30) : const Color(0xCCFFFFFF);
     for (final k in hoverCells) {
       final gx = k % grid, gy = k ~/ grid;
       final hz = 0.14 + _z(gx, gy); // drape on the terrain tile
       _fillRect(canvas, gx + 0.04, gy + 0.04, gx + 0.96, gy + 0.96, hz,
-          Paint()..color = const Color(0x40FFFFFF));
+          Paint()..color = fillC);
       _strokeRect(canvas, gx + 0.04, gy + 0.04, gx + 0.96, gy + 0.96, hz,
-          const Color(0xCCFFFFFF), 1.5);
+          strokeC, 1.5);
     }
   }
 
@@ -2206,7 +2267,6 @@ class _CityPainter extends CustomPainter {
     final baseZ = tz + roofZ + cruise * hf;
     final rad = cell * 0.16;
     final apexH = baseZ + cell * 0.42;
-    const seg = 12;
     final tint = relief
         ? Color.fromARGB((255 * fade).round(), 210, 224, 235) // white
         : Color.fromARGB((255 * fade).round(), 235, 200, 120); // amber cargo
@@ -2260,36 +2320,12 @@ class _CityPainter extends CustomPainter {
                 .withValues(alpha: 0.18 * (1 - hf / 0.2) * fade)
             ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5));
     }
-    // Cone body (apex up), depth-shaded like the lander.
-    final apex = cam.project(cx, cy, apexH);
-    final rim = <Offset>[];
-    final rimW = <(double, double)>[];
-    for (var i = 0; i < seg; i++) {
-      final a = i / seg * 2 * math.pi;
-      final wx = cx + rad * math.cos(a), wy = cy + rad * math.sin(a);
-      rim.add(cam.project(wx, wy, baseZ));
-      rimW.add((wx, wy));
-    }
-    final faces = <({Path path, double shade, double depth})>[];
-    for (var i = 0; i < seg; i++) {
-      final j = (i + 1) % seg;
-      final p = Path()
-        ..moveTo(apex.dx, apex.dy)
-        ..lineTo(rim[i].dx, rim[i].dy)
-        ..lineTo(rim[j].dx, rim[j].dy)
-        ..close();
-      final mx = (rimW[i].$1 + rimW[j].$1) / 2;
-      final my = (rimW[i].$2 + rimW[j].$2) / 2;
-      final nx = mx - cx, ny = my - cy;
-      final shade =
-          (0.5 + 0.5 * ((nx * 0.5 + ny * -0.5) / rad + 1) / 2).clamp(0.35, 1.0);
-      faces.add((path: p, shade: shade, depth: cam.depth(mx, my, apexH)));
-    }
-    faces.sort((a, b) => b.depth.compareTo(a.depth));
-    for (final f in faces) {
-      canvas.drawPath(f.path, Paint()..color = _scale(tint, f.shade));
-    }
+    // The lander pyramid (square base, 8 checkered facets) — same icon as the
+    // founding lander.
+    _drawLanderPyramid(canvas,
+        cx: cx, cy: cy, baseZ: baseZ, apexZ: apexH, rad: rad, tint: tint);
     // A red-cross style relief marker dot on the nose.
+    final apex = cam.project(cx, cy, apexH);
     canvas.drawCircle(apex, (cell * cam.scale) * 0.02,
         Paint()..color = Color.fromARGB((255 * fade).round(), 255, 90, 90));
   }
@@ -2316,35 +2352,17 @@ class _CityPainter extends CustomPainter {
         Paint()
           ..color = const Color(0x33A9C6E0)
           ..strokeWidth = 1);
-    // A small cone marker (apex up) + engine flame below.
+    // The lander pyramid marker (square base, 8 checkered facets) + flame below.
     final tint = relief
         ? const Color(0xFFD2E0EB)
         : const Color(0xFFE0C878); // amber cargo
-    final apex = cam.project(cx, cy, tz + renderZ + cell * 0.4);
-    final r = cell * 0.14;
-    final rim = <Offset>[
-      for (var i = 0; i < 10; i++)
-        cam.project(cx + r * math.cos(i / 10 * 2 * math.pi),
-            cy + r * math.sin(i / 10 * 2 * math.pi), tz + renderZ),
-    ];
-    final faces = <({Path path, double shade, double depth})>[];
-    for (var i = 0; i < rim.length; i++) {
-      final j = (i + 1) % rim.length;
-      final a = i / rim.length * 2 * math.pi;
-      faces.add((
-        path: Path()
-          ..moveTo(apex.dx, apex.dy)
-          ..lineTo(rim[i].dx, rim[i].dy)
-          ..lineTo(rim[j].dx, rim[j].dy)
-          ..close(),
-        shade: (0.5 + 0.4 * math.sin(a)).clamp(0.35, 1.0),
-        depth: a,
-      ));
-    }
-    faces.sort((p, q) => q.depth.compareTo(p.depth));
-    for (final f in faces) {
-      canvas.drawPath(f.path, Paint()..color = _scale(tint, f.shade));
-    }
+    _drawLanderPyramid(canvas,
+        cx: cx,
+        cy: cy,
+        baseZ: tz + renderZ,
+        apexZ: tz + renderZ + cell * 0.4,
+        rad: cell * 0.14,
+        tint: tint);
     // Engine flame pointing down (climbing) or up... keep it simple: a short
     // glow below the craft.
     canvas.drawLine(
@@ -2356,49 +2374,83 @@ class _CityPainter extends CustomPainter {
           ..strokeCap = StrokeCap.round);
   }
 
-  /// The lander cone standing on the city hub — a small 3D cone (base ring in
-  /// the ground plane, apex up) projected + depth-shaded so it reads as the
-  /// craft that founded the colony.
+  /// The lander standing on the city hub — the shared lander pyramid (4-sided
+  /// square base, 8 checkered facets) projected + depth-shaded so it reads as
+  /// the craft that founded the colony.
   void _drawLanderCone(Canvas canvas, int gx, int gy) {
     final tz = _z(gx, gy);
     final cx = (gx + 0.5) * cell, cy = (gy + 0.5) * cell;
-    final rad = cell * 0.22;
-    final apexH = cell * 0.7 + tz;
-    const seg = 14;
-    const tint = Color(0xFFB0BEC5); // metallic grey
-    final apex = cam.project(cx, cy, apexH);
-    final rim = <Offset>[];
-    final rimW = <(double, double)>[]; // world x,y for depth + normal
-    for (var i = 0; i < seg; i++) {
-      final a = i / seg * 2 * math.pi;
-      final wx = cx + rad * math.cos(a), wy = cy + rad * math.sin(a);
-      rim.add(cam.project(wx, wy, 0.06 + tz));
-      rimW.add((wx, wy));
-    }
-    // Side faces, depth-sorted far->near so it reads solid.
-    final faces = <({Path path, double shade, double depth})>[];
-    for (var i = 0; i < seg; i++) {
-      final j = (i + 1) % seg;
-      final p = Path()
-        ..moveTo(apex.dx, apex.dy)
-        ..lineTo(rim[i].dx, rim[i].dy)
-        ..lineTo(rim[j].dx, rim[j].dy)
-        ..close();
-      final mx = (rimW[i].$1 + rimW[j].$1) / 2;
-      final my = (rimW[i].$2 + rimW[j].$2) / 2;
-      // Shade by facing the up-right light; depth for ordering.
-      final nx = mx - cx, ny = my - cy;
-      final shade = (0.45 + 0.5 * ((nx * 0.5 + ny * -0.5) / rad + 1) / 2)
-          .clamp(0.3, 1.0);
-      faces.add((path: p, shade: shade, depth: cam.depth(mx, my, apexH / 2)));
-    }
-    faces.sort((a, b) => b.depth.compareTo(a.depth));
-    for (final f in faces) {
-      canvas.drawPath(f.path, Paint()..color = _scale(tint, f.shade));
-    }
+    _drawLanderPyramid(canvas,
+        cx: cx,
+        cy: cy,
+        baseZ: 0.06 + tz,
+        apexZ: cell * 0.7 + tz,
+        rad: cell * 0.22,
+        tint: const Color(0xFFB0BEC5)); // metallic grey
     // Apex highlight + a thin nose tip.
+    final apex = cam.project(cx, cy, cell * 0.7 + tz);
     canvas.drawCircle(apex, (cell * cam.scale) * 0.012,
         Paint()..color = const Color(0xFFECEFF1));
+  }
+
+  /// Draw the lander craft icon: a 4-sided pyramid with a SQUARE base, each of
+  /// the four faces split down the middle into two triangles for 8 facets, the
+  /// facets painted in an alternating two-tone checker (depth-shaded for solidity
+  /// and sorted far->near). Base corners at the cardinal diagonals so it reads
+  /// as a square. Shared by the hub lander, visiting craft + in-flight craft.
+  void _drawLanderPyramid(Canvas canvas,
+      {required double cx,
+      required double cy,
+      required double baseZ,
+      required double apexZ,
+      required double rad,
+      required Color tint}) {
+    final apex = cam.project(cx, cy, apexZ);
+    // 4 base corners (a square, corners on the diagonals) + their world coords.
+    final corner = <Offset>[];
+    final cornerW = <(double, double)>[];
+    for (var i = 0; i < 4; i++) {
+      final a = (i + 0.5) / 4 * 2 * math.pi; // 45/135/225/315 -> axis-aligned square
+      final wx = cx + rad * math.cos(a), wy = cy + rad * math.sin(a);
+      corner.add(cam.project(wx, wy, baseZ));
+      cornerW.add((wx, wy));
+    }
+    // Each face = 2 triangles sharing the apex, split at the base-edge midpoint.
+    final facets = <({Path path, double shade, double depth, bool dark})>[];
+    for (var i = 0; i < 4; i++) {
+      final j = (i + 1) % 4;
+      final midWx = (cornerW[i].$1 + cornerW[j].$1) / 2;
+      final midWy = (cornerW[i].$2 + cornerW[j].$2) / 2;
+      final mid = cam.project(midWx, midWy, baseZ);
+      // Two sub-triangles: (apex, corner i, mid) and (apex, mid, corner j).
+      for (var h = 0; h < 2; h++) {
+        final cW = h == 0 ? cornerW[i] : cornerW[j];
+        final cP = h == 0 ? corner[i] : corner[j];
+        final path = Path()
+          ..moveTo(apex.dx, apex.dy)
+          ..lineTo(cP.dx, cP.dy)
+          ..lineTo(mid.dx, mid.dy)
+          ..close();
+        // Centroid of the facet for light + depth.
+        final fx = (cW.$1 + midWx) / 2, fy = (cW.$2 + midWy) / 2;
+        final nx = fx - cx, ny = fy - cy;
+        final shade =
+            (0.45 + 0.5 * ((nx * 0.5 + ny * -0.5) / rad + 1) / 2).clamp(0.3, 1.0);
+        facets.add((
+          path: path,
+          shade: shade,
+          depth: cam.depth(fx, fy, (apexZ + baseZ) / 2),
+          // Global facet index 2*i+h -> strict light/dark/light/dark round the
+          // ring (not light/light/dark/dark at the face seams).
+          dark: (2 * i + h).isOdd,
+        ));
+      }
+    }
+    facets.sort((a, b) => b.depth.compareTo(a.depth));
+    for (final f in facets) {
+      canvas.drawPath(
+          f.path, Paint()..color = _checkerFace(tint, f.shade, f.dark));
+    }
   }
 
   /// A low-poly faceted "pentagon sphere" pressurised hab — a geodesic dome of
@@ -3018,6 +3070,12 @@ class _CityPainter extends CustomPainter {
         (c.g * 255 * f).clamp(0, 255).round(),
         (c.b * 255 * f).clamp(0, 255).round(),
       );
+
+  /// One face of the checkered lander cone: the depth-shaded base tint, dimmed
+  /// further on [dark] segments so alternating faces read as a checker pattern
+  /// (the ascent-mode lander look, now the shared craft icon).
+  Color _checkerFace(Color tint, double shade, bool dark) =>
+      _scale(tint, shade * (dark ? 0.6 : 1.0));
 
   @override
   bool shouldRepaint(covariant _CityPainter old) => true;

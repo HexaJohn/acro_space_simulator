@@ -4,7 +4,6 @@ class DebugLayers {
   final bool skybox; // Milky Way backdrop
   final bool orbitRails; // celestial-body orbit ellipses
   final bool planetTexture; // textured sphere (surface map)
-  final bool baseDisc; // flat shaded disc under the sphere
   final bool sphereShadow; // sphere night-side darkening pass
   final bool atmoHalo; // outer limb halo ring
   final bool atmoOverlay; // inner blue rim + dayside glow
@@ -19,7 +18,6 @@ class DebugLayers {
     this.skybox = true,
     this.orbitRails = true,
     this.planetTexture = true,
-    this.baseDisc = true,
     this.sphereShadow = true,
     this.atmoHalo = true,
     this.atmoOverlay = true,
@@ -35,7 +33,6 @@ class DebugLayers {
     bool? skybox,
     bool? orbitRails,
     bool? planetTexture,
-    bool? baseDisc,
     bool? sphereShadow,
     bool? atmoHalo,
     bool? atmoOverlay,
@@ -50,7 +47,6 @@ class DebugLayers {
       skybox: skybox ?? this.skybox,
       orbitRails: orbitRails ?? this.orbitRails,
       planetTexture: planetTexture ?? this.planetTexture,
-      baseDisc: baseDisc ?? this.baseDisc,
       sphereShadow: sphereShadow ?? this.sphereShadow,
       atmoHalo: atmoHalo ?? this.atmoHalo,
       atmoOverlay: atmoOverlay ?? this.atmoOverlay,
@@ -70,7 +66,6 @@ class DebugLayers {
       other.skybox == skybox &&
       other.orbitRails == orbitRails &&
       other.planetTexture == planetTexture &&
-      other.baseDisc == baseDisc &&
       other.sphereShadow == sphereShadow &&
       other.atmoHalo == atmoHalo &&
       other.atmoOverlay == atmoOverlay &&
@@ -82,7 +77,7 @@ class DebugLayers {
       other.cullDistant == cullDistant;
 
   @override
-  int get hashCode => Object.hash(skybox, orbitRails, planetTexture, baseDisc,
+  int get hashCode => Object.hash(skybox, orbitRails, planetTexture,
       sphereShadow, atmoHalo, atmoOverlay, navBall, exaggerateStar,
       exaggerateAtmosphere, infiniteFuel, showSoi, cullDistant);
 }

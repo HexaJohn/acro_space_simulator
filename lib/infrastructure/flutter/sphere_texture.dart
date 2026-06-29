@@ -5,28 +5,93 @@ import 'dart:ui' as ui;
 import '../../adapters/presenters/camera_view.dart';
 import '../../domain/shared/vector3.dart';
 
-/// Draws an equirectangular surface map onto a body disc as a lit, orthographic
-/// sphere — the visible hemisphere facing the camera, UV-sampled from the map
-/// and shaded by the sun direction.
+/// Renders a celestial body as a **lit, textured, perspective-correct 3D sphere**
+/// with an atmosphere — the core of the planet renderer. Given a body's centre
+/// (relative to the camera focus), radius, surface map and sun direction, it
+/// tessellates the *visible* part of the sphere into a GPU triangle mesh, samples
+/// the equirectangular texture per vertex, shades it against the sun, and draws a
+/// soft atmospheric limb glow. It works identically from interplanetary distance
+/// down to standing on the surface.
 ///
-/// It works by tessellating the disc into a triangle mesh (a grid over the
-/// projected unit circle). Each vertex is a point on the front hemisphere of the
-/// unit sphere in *camera frame* (z toward viewer); we rotate it into the
-/// world/body frame for the current [CameraView] to get its longitude/latitude,
-/// which becomes the texture UV. Per-vertex Lambert shading vs. the sun is baked
-/// into the vertex colours and multiplied with the image. GPU-accelerated via
-/// [Canvas.drawVertices].
+/// ## Mesh: an adaptive icosphere
+/// The sphere is a **subdivided icosahedron** (20 near-equilateral triangular
+/// faces), recursively split into four (edge midpoints renormalised onto the unit
+/// sphere) until each leaf's *projected* on-screen edge length drops below a
+/// target (`targetPx`). An icosphere is used rather than a lat/long grid because
+/// lat/long has a pole singularity — a nadir/straight-down view collapsed it into
+/// a "pinwheel". Each candidate direction `n` (a unit body-direction) is projected
+/// to a screen pixel through the **real [SceneCamera]** (`view.projectPx` of
+/// `worldRel + radiusM*n`), so the sphere is geometrically correct from any
+/// distance, including an eye at the surface where the limb becomes the projected
+/// horizon arc rather than a circle.
+///
+/// Shared edge midpoints are **welded** through a cache keyed by a packed 48-bit
+/// quantised direction (an earlier XOR-hash key collided and streaked the disc; a
+/// string key was correct but tanked the frame rate). The weld makes the mesh
+/// *ground-anchored* — vertices don't swim as the camera moves.
+///
+/// ## Culling, cost control and the near plane
+/// Only the visible cap is tessellated:
+///  * **Cap-angle prune** — a face is dropped when it lies wholly past the eye's
+///    horizon (more than its own angular radius outside the visible cap).
+///  * **Screen-bounds prune** — a face whose projected bbox is fully off-screen
+///    (with margin) stops recursing.
+///  * **Depth bound** — `maxDepth` scales with `log2(radius/altitude)` only below
+///    ~10% of a radius (else a flat cap), so chase/orbital views stay cheap. The
+///    big historical cost was faces straddling the near plane: their corners are
+///    unprojectable so the size test couldn't fire and they split to full depth —
+///    millions of `faceRecurse` calls (the "<1 Mm slideshow"). They now stop once
+///    their *projecting* corners are within target.
+///
+/// A face that **crosses the near plane** (interior in front, all corners just
+/// behind) would emit nothing and leave a black **wedge** with a dead-straight
+/// edge (the landed/grazing bug). Such straddling faces are instead subdivided a
+/// few levels *past* `maxDepth` (a thin, cheap boundary band) and then
+/// **near-plane clipped**: each plane-crossing edge is bisected (on the lerped,
+/// renormalised direction) to the projectable boundary, evaluated there for a
+/// valid on-plane vertex, and the front polygon is fan-triangulated. The ground
+/// then fills cleanly right up to the frustum edge. Distinguishing "wholly behind
+/// the camera" (drop) from "crosses the plane" (keep) uses [SceneCamera.nearPlane].
+///
+/// ## Texture mapping
+/// UV comes from the body-fixed lat/lon of each direction (undoing the epoch
+/// `spin`). Longitude is **unwrapped relative to the sub-camera point** so the
+/// visible cap never straddles the equirectangular antimeridian seam (which would
+/// tear the texture); the geographic pole, where all longitudes converge, is
+/// handled by collapsing a polar triangle's u to its median column.
+///
+/// ## Draw passes (all `drawVertices`, GPU)
+///  1. **Surface** — the texture, via a repeating [ui.ImageShader]. Vertex colours
+///     are deliberately *not* combined with the shader in one `ui.Vertices` (that
+///     trips a null-check in the web canvas backend); lighting is a separate pass.
+///  2. **Shadow** — a translucent-black mesh whose per-vertex alpha is the
+///     night-side darkening (Lambert vs. the sun).
+///  3. **Atmosphere surface scatter** — a tinted mesh whose alpha concentrates at
+///     the eye's horizon (not the view silhouette), warm near the terminator.
+///
+/// Plus, drawn *before* the surface (so the surface occludes its inner part), a
+/// **3D atmosphere shell** ([_paintAtmoShell]) at `R*(1+thick)` whose soft glow
+/// hugs the true limb at every angle and position — replacing an old screen-space
+/// halo circle that floated off / vanished when the projected centre left frame.
+///
+/// The two render goals (a soft, gap-free atmosphere; no surface wedges) are held
+/// by `test/screenshots/pipeline_harness_test.dart`, which drives this class
+/// through the real pipeline and scores the output pixel-by-pixel.
 class SphereTexture {
   const SphereTexture();
 
-  /// Mesh resolution: cells across the disc. Higher = smoother sphere, more
-  /// triangles. The mesh is also clipped to a true circle, so this mainly
-  /// controls how round the *interior* texture warp looks.
-  static const int _grid = 40;
+  /// Diagnostics (set by the last paint): recursion calls + emitted triangles.
+  /// Used by the screenshot harness to find where the mesh cost explodes.
+  static int debugFaceCalls = 0;
+  static int debugTris = 0;
+  static int debugMaxDepth = 0;
+  static double debugTargetPx = 0;
 
   /// Mesh is drawn this much larger than the clip circle so its faceted edge
   /// hides behind the antialiased circular clip (no grid stairsteps at the rim).
-  static const double _overscan = 1.06;
+  /// Public so the painter can size the base disc to the SAME capped extent and
+  /// keep the two aligned.
+  static const double overscan = 1.06;
 
   void paint(
     ui.Canvas canvas,
@@ -42,7 +107,23 @@ class SphereTexture {
     ui.Color? atmoTint, // atmosphere day colour; null = no atmosphere pass
     ui.Color atmoWarm = const ui.Color(0xFFFF9D5C), // terminator warm band
     double? coverPx, // on-screen half-extent the mesh must cover (see below)
+    required double radiusM, // body radius (m), for the surface projection
+    required ui.Offset viewportCentre, // canvas px of the screen centre
   }) {
+    debugFaceCalls = 0;
+    debugTris = 0;
+    // Bail on non-finite inputs (degenerate camera geometry can produce NaN/Inf
+    // in the centre / worldRel); a single bad vertex makes Skia drop the whole
+    // mesh, blanking the body. Better to skip this body's sphere this frame.
+    if (!centre.dx.isFinite ||
+        !centre.dy.isFinite ||
+        !rPx.isFinite ||
+        !worldRel.x.isFinite ||
+        !worldRel.y.isFinite ||
+        !worldRel.z.isFinite) {
+      return;
+    }
+
     // When zoomed in so close the disc dwarfs the screen, [rPx] can be millions
     // of px. Spanning the WHOLE hemisphere at that scale overflows Skia (blank
     // frame) — and capping the mesh radius froze the zoom (the surface stopped
@@ -51,8 +132,6 @@ class SphereTexture {
     // unit sphere) where span covers [coverPx] on screen. So detail keeps
     // growing as you zoom, and coordinates stay ~screen-sized. span=1 = the full
     // hemisphere (normal, far-away case).
-    final cover = coverPx ?? rPx;
-    final span = rPx <= 0 ? 1.0 : (cover * _overscan / rPx).clamp(0.02, 1.0);
     final positions = <ui.Offset>[];
     final texCoords = <ui.Offset>[];
     final atmoColors = <ui.Color>[]; // per-vertex atmosphere scatter (pass 3)
@@ -61,118 +140,408 @@ class SphereTexture {
     final iw = image.width.toDouble();
     final ih = image.height.toDouble();
 
-    // Per-body view basis. The visible hemisphere faces the EYE, not the camera
-    // forward — for an off-axis body in perspective the eye->body ray differs
-    // from the camera's view axis, and using `forward` for every body maps the
-    // wrong hemisphere (the texture slides as the camera rotates). So forward is
-    // the actual eye->body direction; right/up are the camera's screen axes
-    // re-orthogonalized against it, keeping north-up on screen stable.
-    final fwd = view.viewDirTo(worldRel);
-    var right = _orthoNorm(view.right, fwd);
-    // up = right x forward (matches CameraOrbit's _upBase = right.cross(forward)).
-    var upv = right.cross(fwd).normalized;
-    // Guard the degenerate case (camera right nearly parallel to the ray).
-    if (!right.x.isFinite || !upv.x.isFinite) {
-      right = view.right;
-      upv = view.up;
-    }
-
-    // Transform the world sun direction into the CAMERA frame so the lit
-    // hemisphere is correct from any camera angle. Camera axes: x=right, y=up,
-    // z=toward viewer (= -forward). Vertices are also in this frame, so the
-    // Lambert dot below is a true cos(angle) — the night side reads dark even
-    // when the camera orbits behind the body.
+    // World sun direction in the CAMERA frame (x=right, y=up, z=toward viewer =
+    // -forward), matching the per-vertex camera-frame normals below, so the
+    // Lambert dot is a true cos(angle) from any camera angle.
     final sun = _norm3(
-      sunWorld.dot(right),
-      sunWorld.dot(upv),
-      sunWorld.dot(fwd) * -1,
+      sunWorld.dot(view.right),
+      sunWorld.dot(view.up),
+      sunWorld.dot(view.forward) * -1,
     );
 
-    // Build a (grid+1)^2 lattice of vertices over the unit disc; cells outside
-    // the circle are skipped when emitting triangles.
-    final verts = <List<_V?>>[];
-    for (var iy = 0; iy <= _grid; iy++) {
-      final row = <_V?>[];
-      final ny = ((iy / _grid) * 2 - 1) * span; // -span..span (screen up = +)
-      for (var ix = 0; ix <= _grid; ix++) {
-        final nx = ((ix / _grid) * 2 - 1) * span; // -span..span (screen right=+)
-        final r2 = nx * nx + ny * ny;
-        if (r2 > 1.0) {
-          row.add(null);
-          continue;
-        }
-        // Camera-frame point on the front hemisphere (z toward viewer).
-        final cz = math.sqrt(1.0 - r2);
-        final cam = [nx, ny, cz];
-        // Map camera-frame -> world/body frame via the camera basis. The visible
-        // hemisphere faces the camera, so its outward normal is -forward.
-        final wx = right.x * nx + upv.x * ny - fwd.x * cz;
-        final wy = right.y * nx + upv.y * ny - fwd.y * cz;
-        final wz = right.z * nx + upv.z * ny - fwd.z * cz;
-        // Body-fixed lon/lat: lon around +Z axis from +X, lat from equator.
-        // Subtract the body's spin so the surface texture rotates with epoch.
-        final lon = math.atan2(wy, wx) - spin; // -pi..pi (minus rotation)
-        final lat = math.asin(wz.clamp(-1.0, 1.0)); // -pi/2..pi/2
-        // Keep u continuous (not wrapped) so the ImageShader's repeated tiling
-        // hides the longitude seam; wrapping per-vertex would smear a column.
-        final u = (lon + math.pi) / (2 * math.pi);
-        final v = (math.pi / 2 - lat) / math.pi; // 0..1 (north at top)
+    // Every surface vertex is projected through the REAL camera (no flat
+    // billboard) so the sphere is correct from any distance — including an eye
+    // at the surface, where the horizon (the tangent circle from the eye) falls
+    // out of the projection naturally.
+    //
+    // worldRel is the body centre relative to the camera FOCUS; the eye is pulled
+    // back from the focus by view.eyeOffset, so the centre relative to the EYE is
+    // worldRel - eyeOffset (eyeOffset is zero for ortho's parallel rays). Used
+    // for the per-vertex horizon cull below.
+    final centreFromEye = worldRel - view.eyeOffset;
+    final eyeDist = centreFromEye.length;
+    // Clip the mesh to a crisp limb CIRCLE when the silhouette really is a circle
+    // (far away / ortho); skip the clip when the eye is within ~1 radius of the
+    // surface, where the limb is the projected horizon arc, not a circle.
+    final clipCircle =
+        radiusM <= 0 || view.eyeOffset == Vector3.zero || (eyeDist - radiusM) >= radiusM;
 
-        // Lambert brightness vs sun (camera-frame normal == cam point).
-        final lit = selfLuminous
-            ? 1.0
-            : (cam[0] * sun[0] + cam[1] * sun[1] + cam[2] * sun[2])
-                .clamp(0.0, 1.0);
-        final shade = selfLuminous ? 1.0 : (0.12 + 0.88 * lit);
+    // ADAPTIVE ICOSPHERE (body space). The sphere is a subdivided icosahedron:
+    // 20 triangular faces of (near) uniform size, recursively split into 4 when
+    // their projected on-screen size exceeds a target. UNLIKE a lat/long grid it
+    // has NO pole singularity, so a straight-down / nadir view doesn't collapse.
+    // Each vertex is a unit body-direction projected through the real camera;
+    // verts are welded via a cache so the mesh is ground-anchored (no swim).
+    final camR = view.right, camU = view.up, camF = view.forward;
 
-        // Atmosphere scatter (per-vertex, full 3D so it rotates with the camera
-        // and tracks the real day/night terminator):
-        //  * day  — only the sunlit hemisphere scatters (soft terminator).
-        //  * limb — SPHERICAL falloff: faint at the centre (cz≈1, looking
-        //    straight down through a short air column) ramping up toward the
-        //    limb (cz→0, long grazing path). (1 - cz)^1.6 gives the curve.
-        // Day mask: zero on the NIGHT side (lit<=0), ramping up just inside the
-        // terminator. This keeps the scatter a crescent on the lit hemisphere
-        // only — never on the dark side.
-        final day = _smoothstep(0.0, 0.12, lit);
-        final limb = math.pow(1.0 - cz, 1.6).toDouble();
-        final atmoA = (0.06 + 0.94 * limb) * day;
-        // Warm band: reddens toward the terminator (low but positive lit),
-        // fading to the day colour deeper into the lit side.
-        final warmF = (1.0 - _smoothstep(0.0, 0.45, lit)) * day;
+    // Reference longitude = the body-fixed longitude of the sub-camera point (the
+    // surface point straight under the eye). We map each vertex's longitude as an
+    // UNWRAPPED offset from this reference, so the visible cap NEVER straddles the
+    // equirect antimeridian seam (lon=±pi). Without this, a triangle bridging the
+    // seam needs u on one side and u+width on the other; the welded vertex can
+    // only hold one, so neighbours disagree and the texture tears down the seam
+    // (the vertical split + radial shred seen during ascent). The cap is always
+    // < pi wide, so all offsets land in (-pi,pi): one continuous, tear-free patch.
+    final sdx = eyeDist > 1e-6 ? -centreFromEye.x / eyeDist : 0.0;
+    final sdy = eyeDist > 1e-6 ? -centreFromEye.y / eyeDist : 0.0;
+    // Undo the geometry spin to get the body-FIXED reference longitude.
+    final sbx = sdx * math.cos(spin) + sdy * math.sin(spin);
+    final sby = -sdx * math.sin(spin) + sdy * math.cos(spin);
+    final lon0 = math.atan2(sby, sbx);
 
-        // Positions at TRUE rPx (full magnification). When far away (span==1) add
-        // the overscan so the mesh's stairstepped edge falls outside the circular
-        // clip; when zoomed in (span<1) the mesh already runs past the screen.
-        final ps = rPx * (span >= 1.0 ? _overscan : 1.0);
-        row.add(_V(
-          pos: ui.Offset(centre.dx + nx * ps, centre.dy - ny * ps),
-          uv: ui.Offset(u * iw, v * ih),
-          shade: shade,
-          atmoA: atmoA,
-          warmF: warmF,
-        ));
+    // Whether a body-frame surface direction n is visible (above the eye's local
+    // horizon in perspective, front-facing in ortho).
+    bool dirVisible(double nx, double ny, double nz) {
+      if (radiusM > 0) {
+        return -(centreFromEye.x * nx +
+                centreFromEye.y * ny +
+                centreFromEye.z * nz) >
+            radiusM;
       }
-      verts.add(row);
+      return -(nx * camF.x + ny * camF.y + nz * camF.z) > 0;
     }
 
-    // Emit two triangles per fully-inside cell.
-    for (var iy = 0; iy < _grid; iy++) {
-      for (var ix = 0; ix < _grid; ix++) {
-        final a = verts[iy][ix];
-        final b = verts[iy][ix + 1];
-        final c = verts[iy + 1][ix];
-        final d = verts[iy + 1][ix + 1];
-        if (a == null || b == null || c == null || d == null) continue;
-        _tri(positions, texCoords, shadowColors, atmoColors, atmoTint, atmoWarm,
-            a, c, b, iw);
-        _tri(positions, texCoords, shadowColors, atmoColors, atmoTint, atmoWarm,
-            b, c, d, iw);
+    // Depth bound, scaled to how close the eye is (computed up here because the
+    // weld-key resolution below depends on it). Far / mid: a modest cap (the
+    // projected-size test stops early anyway). VERY low altitude (a few ico faces
+    // fill the screen) needs more depth to reach screen-sized leaves — scale by
+    // log2(radius/alt). The horizon/screen prune + vertex weld bound the cost.
+    final alt = radiusM > 0 ? (eyeDist - radiusM) : double.infinity;
+    var maxDepth = 7;
+    // Only deepen VERY close to the surface (alt < 10% radius), and cap at 10.
+    // The projected-size test already stops interior leaves at the target px, so
+    // extra depth only buys a finer horizon edge. depth 11-14 + the 0.2-radius
+    // trigger exploded the recursion into MILLIONS of pruned faceRecurse calls
+    // (the <1 Mm slideshow) for almost no extra emitted triangles; a 0.1-radius
+    // trigger + ceiling 10 keeps the horizon smooth without the blow-up.
+    if (radiusM > 0 && alt > 0 && alt < radiusM * 0.1) {
+      final extra = (math.log(radiusM / alt) / math.ln2).round();
+      // Ceiling 12: enough to tessellate the small low-altitude cap to
+      // screen-sized leaves; the cap-angle prune + near-plane straddle cap keep
+      // the recursion bounded (the explosion that once forced this down to 10 is
+      // handled there now). Higher than 12 buys nothing the size test wouldn't
+      // stop anyway and only risks cost.
+      maxDepth = (6 + extra).clamp(7, 12);
+    }
+
+    // Weld-key resolution. A shared edge midpoint is the EXACT same float from
+    // both faces, so any grid welds it; the danger is the OPPOSITE — when zoomed
+    // in, adjacent-but-distinct deep-subdivision vertices (spacing ~ ico_edge /
+    // 2^maxDepth) must NOT collapse into the same cell, or one vertex inherits a
+    // wrong cached UV from elsewhere on the sphere and the texture shreds into a
+    // pinwheel. So the grid must be FINER than the leaf spacing. 15 bits
+    // (grid 3e-5) is far too coarse at low altitude (leaf spacing ~7e-5). Scale
+    // the bit count with maxDepth, capped at 17 bits/axis (3*17=51 < 53 safe).
+    final qBits = (12 + maxDepth).clamp(15, 17).toInt();
+    final qScale = (1 << (qBits - 1)).toDouble(); // half-range
+    final qMask = (1 << qBits) - 1;
+    final qShift = 1 << qBits;
+    final cache = <int, _V?>{};
+    _V? evalDir(double nx, double ny, double nz) {
+      // NON-colliding weld key: quantise each component (in [-1,1]) to qBits and
+      // bit-pack — within the web 53-bit-safe-int range, so no XOR collisions
+      // (which streaked the disc) and no per-vertex string alloc (which tanked
+      // the frame rate when zoomed in).
+      final qx = ((nx * qScale).round() + (qShift >> 1)) & qMask;
+      final qy = ((ny * qScale).round() + (qShift >> 1)) & qMask;
+      final qz = ((nz * qScale).round() + (qShift >> 1)) & qMask;
+      final key = (qx * qShift + qy) * qShift + qz;
+      final hit = cache[key];
+      if (hit != null || cache.containsKey(key)) return hit;
+      final relFocus = Vector3(
+        worldRel.x + radiusM * nx,
+        worldRel.y + radiusM * ny,
+        worldRel.z + radiusM * nz,
+      );
+      final p = view.projectPx(relFocus);
+      if (p == null) {
+        cache[key] = null;
+        return null;
       }
+      final pos = ui.Offset(viewportCentre.dx + p.x, viewportCentre.dy - p.y);
+      // UV from the BODY-FIXED lat/lon (undo the epoch spin we added to geometry).
+      final bx = nx * math.cos(spin) + ny * math.sin(spin);
+      final by = -nx * math.sin(spin) + ny * math.cos(spin);
+      final lon = math.atan2(by, bx);
+      final lat = math.asin(nz.clamp(-1.0, 1.0));
+      // Unwrap longitude relative to the sub-camera reference so the whole
+      // visible cap is one continuous strip (no seam straddle). dLon in (-pi,pi].
+      var dLon = lon - lon0;
+      while (dLon > math.pi) {
+        dLon -= 2 * math.pi;
+      }
+      while (dLon < -math.pi) {
+        dLon += 2 * math.pi;
+      }
+      final u = (lon0 + dLon + math.pi) / (2 * math.pi);
+      final v = (math.pi / 2 - lat) / math.pi;
+      final cnx = nx * camR.x + ny * camR.y + nz * camR.z;
+      final cny = nx * camU.x + ny * camU.y + nz * camU.z;
+      final cnz = -(nx * camF.x + ny * camF.y + nz * camF.z);
+      final lit = selfLuminous
+          ? 1.0
+          : (cnx * sun[0] + cny * sun[1] + cnz * sun[2]).clamp(0.0, 1.0);
+      final shade = selfLuminous ? 1.0 : (0.12 + 0.88 * lit);
+      final day = _smoothstep(0.0, 0.12, lit);
+      // Atmosphere glow concentrates at the EYE's horizon, not the sphere's
+      // view-silhouette. Far away these coincide and (1-cnz) is fine; close to
+      // the surface the real horizon is far inside the cnz=0 great circle, so the
+      // old term lit a ring across mid-surface instead of along the horizon (the
+      // "atmosphere not aligned with the surface" report). Use the horizon
+      // coordinate h = -(centreFromEye . n)/radiusM: h=1 at the eye's horizon,
+      // h>1 toward the sub-point. Glow peaks at the horizon and fades inward.
+      double limb;
+      if (radiusM > 0 && eyeDist > radiusM) {
+        final h = -(centreFromEye.x * nx +
+                centreFromEye.y * ny +
+                centreFromEye.z * nz) /
+            radiusM; // 1 at horizon, larger toward nadir
+        // Width of the glow band (in h units) scales with altitude: a thin band
+        // hugging the horizon when low, broadening when high (where it tends back
+        // toward the view-silhouette look).
+        final hMax = eyeDist / radiusM; // h at the sub-point (nadir)
+        final band = (hMax - 1.0).clamp(0.02, 4.0);
+        final t = ((h - 1.0) / band).clamp(0.0, 1.0); // 0 at horizon -> 1 inward
+        limb = math.pow(1.0 - t, 2.2).toDouble();
+      } else {
+        limb = math.pow((1.0 - cnz.clamp(0.0, 1.0)), 1.6).toDouble();
+      }
+      final atmoA = (0.06 + 0.94 * limb) * day;
+      final warmF = (1.0 - _smoothstep(0.0, 0.45, lit)) * day;
+      final vtx = _V(
+        pos: pos,
+        uv: ui.Offset(u * iw, v * ih),
+        shade: shade,
+        atmoA: atmoA,
+        warmF: warmF,
+        nearPole: nz.abs() > 0.985, // within ~10 deg of a pole
+      );
+      cache[key] = vtx;
+      return vtx;
+    }
+
+    // Leaf target on screen (px). Bigger leaves = fewer triangles. A small/far
+    // disc needs fine leaves for a round limb (rPx/24); a big near disc that
+    // fills the screen uses a coarse 64 px leaf — at that zoom the texture is
+    // already sub-texel/blurry, so finer leaves cost a lot for no visible gain.
+    // Leaf target on screen (px). Bigger leaves = fewer triangles. The limb wants
+    // finer leaves for a round silhouette (rPx/24); a fine leaf in the cap
+    // interior is texture-bound and wasted. 18 px floor + 64 px cap keeps the
+    // triangle count bounded without a visible facet (the far view clips to a
+    // circle anyway).
+    final targetPx = (rPx / 20.0).clamp(26.0, 72.0);
+    debugMaxDepth = maxDepth;
+    debugTargetPx = targetPx;
+    final screenW = viewportCentre.dx * 2, screenH = viewportCentre.dy * 2;
+    // Tighter off-screen prune margin (was 0.5) so off-screen subtrees stop
+    // recursing sooner — a perf win when zoomed in and most of the cap is off
+    // screen. Still leaves a margin so an edge-straddling node tessellates.
+    final marginX = screenW * 0.25, marginY = screenH * 0.25;
+
+    // Visible cap geometry: the cap is the spherical disc of directions within
+    // angle [capAngle] of [toEye] (the sub-camera direction); perspective only.
+    // A face is pruned only when it lies WHOLLY outside the cap by more than its
+    // own angular radius — never on corner-visibility alone, since at low
+    // altitude the visible cap is far smaller than a coarse ico face and would
+    // otherwise be pruned before the face subdivides down to it.
+    final toEyeX = eyeDist < 1e-6 ? 0.0 : -centreFromEye.x / eyeDist;
+    final toEyeY = eyeDist < 1e-6 ? 0.0 : -centreFromEye.y / eyeDist;
+    final toEyeZ = eyeDist < 1e-6 ? 1.0 : -centreFromEye.z / eyeDist;
+    final capAngle =
+        radiusM > 0 ? math.acos((radiusM / eyeDist).clamp(0.0, 1.0)) : math.pi;
+
+    // A spherical triangle of three unit body-directions. Recursively split into
+    // four (edge midpoints, re-normalised onto the sphere) until small on screen.
+    void faceRecurse(List<double> A, List<double> B, List<double> C, int depth) {
+      debugFaceCalls++;
+      final mx = (A[0] + B[0] + C[0]), my = (A[1] + B[1] + C[1]), mz = (A[2] + B[2] + C[2]);
+      final ml = math.sqrt(mx * mx + my * my + mz * mz);
+      final cx = mx / ml, cy = my / ml, cz = mz / ml;
+      if (radiusM > 0) {
+        // Angle from the face centroid to the cap centre, and the face's angular
+        // radius (centroid->corner). Prune only if the face can't reach the cap.
+        final dotCap = (cx * toEyeX + cy * toEyeY + cz * toEyeZ).clamp(-1.0, 1.0);
+        final centAngle = math.acos(dotCap);
+        final dotCorner = (cx * A[0] + cy * A[1] + cz * A[2]).clamp(-1.0, 1.0);
+        final faceRad = math.acos(dotCorner);
+        if (centAngle - faceRad > capAngle) return; // wholly past the horizon
+      } else {
+        // Ortho: prune a face that's entirely back-facing.
+        if (!dirVisible(A[0], A[1], A[2]) &&
+            !dirVisible(B[0], B[1], B[2]) &&
+            !dirVisible(C[0], C[1], C[2]) &&
+            !dirVisible(cx, cy, cz)) {
+          return;
+        }
+      }
+      final va = evalDir(A[0], A[1], A[2]);
+      final vb = evalDir(B[0], B[1], B[2]);
+      final vc = evalDir(C[0], C[1], C[2]);
+
+      // Off-screen prune (only when all corners projected — a near-plane crosser
+      // keeps splitting to resolve its boundary).
+      if (va != null && vb != null && vc != null) {
+        final minX = math.min(va.pos.dx, math.min(vb.pos.dx, vc.pos.dx));
+        final maxX = math.max(va.pos.dx, math.max(vb.pos.dx, vc.pos.dx));
+        final minY = math.min(va.pos.dy, math.min(vb.pos.dy, vc.pos.dy));
+        final maxY = math.max(va.pos.dy, math.max(vb.pos.dy, vc.pos.dy));
+        if (maxX < -marginX ||
+            minX > screenW + marginX ||
+            maxY < -marginY ||
+            minY > screenH + marginY) {
+          return;
+        }
+      }
+
+      var split = depth < maxDepth;
+      if (split && va != null && vb != null && vc != null) {
+        double seg(ui.Offset p, ui.Offset q) {
+          final dx = p.dx - q.dx, dy = p.dy - q.dy;
+          return math.sqrt(dx * dx + dy * dy);
+        }
+        final sz = math.max(
+            seg(va.pos, vb.pos), math.max(seg(vb.pos, vc.pos), seg(vc.pos, va.pos)));
+        if (sz <= targetPx) split = false;
+      } else if (split) {
+        // NEAR-PLANE / HORIZON STRADDLE: at least one corner is behind the near
+        // plane, so the all-three size test above was skipped. The danger is a
+        // LARGE face that crosses the near plane: its corners may all be behind
+        // (nothing to emit) while its interior is in front — dropping it leaves a
+        // black WEDGE with a dead-straight near-plane edge (the landed/grazing
+        // bug). So decide by the face's forward-depth span, not by null corners:
+        //  - if the whole face is safely BEHIND the near plane (no crossing),
+        //    drop it (it's behind the camera — genuinely invisible);
+        //  - otherwise it CROSSES the plane: keep splitting until its on-sphere
+        //    angular size is tiny, so the boundary resolves into small faces that
+        //    the near-plane clip can emit cleanly with no wedge.
+        final dA = view.depth(Vector3(worldRel.x + radiusM * A[0],
+            worldRel.y + radiusM * A[1], worldRel.z + radiusM * A[2]));
+        final dB = view.depth(Vector3(worldRel.x + radiusM * B[0],
+            worldRel.y + radiusM * B[1], worldRel.z + radiusM * B[2]));
+        final dC = view.depth(Vector3(worldRel.x + radiusM * C[0],
+            worldRel.y + radiusM * C[1], worldRel.z + radiusM * C[2]));
+        final maxD = math.max(dA, math.max(dB, dC));
+        final minD = math.min(dA, math.min(dB, dC));
+        if (maxD <= view.nearPlane) {
+          split = false; // wholly behind the near plane -> not visible
+        } else {
+          // Crosses (or just clears) the near plane. Subdivide until the face's
+          // angular radius is small so the near-plane clip resolves a clean edge.
+          // A face that STRADDLES (minD <= near < maxD) but whose corners all
+          // fall just behind the plane has NOTHING to emit at the leaf and would
+          // drop -> a black wedge. So a straddling face is allowed a few EXTRA
+          // levels past maxDepth (it's a thin boundary band, cheap) until at
+          // least one corner projects and the clip can fill it.
+          final straddles = minD <= view.nearPlane;
+          final cap = straddles ? maxDepth + 4 : maxDepth;
+          final faceAng = math.acos(
+              (cx * A[0] + cy * A[1] + cz * A[2]).clamp(-1.0, 1.0));
+          if (faceAng <= 0.006 || depth >= cap) split = false;
+        }
+      }
+
+      if (split) {
+        List<double> mid(List<double> p, List<double> q) {
+          final x = p[0] + q[0], y = p[1] + q[1], z = p[2] + q[2];
+          final l = math.sqrt(x * x + y * y + z * z);
+          return [x / l, y / l, z / l];
+        }
+        final ab = mid(A, B), bc = mid(B, C), ca = mid(C, A);
+        faceRecurse(A, ab, ca, depth + 1);
+        faceRecurse(ab, B, bc, depth + 1);
+        faceRecurse(ca, bc, C, depth + 1);
+        faceRecurse(ab, bc, ca, depth + 1);
+        return;
+      }
+      // Leaf. If all three corners projected, emit directly. If some are behind
+      // the near plane (a straddle leaf on the frustum bottom edge — the landed
+      // shallow-tilt case), CLIP the triangle to the near plane and emit the
+      // front part, so the ground fills right up to the boundary instead of
+      // leaving a black wedge.
+      if (va != null && vb != null && vc != null) {
+        debugTris++;
+        _tri(positions, texCoords, shadowColors, atmoColors, atmoTint, atmoWarm,
+            va, vb, vc, iw);
+      } else if (radiusM > 0 && (va != null || vb != null || vc != null)) {
+        // Near-plane clip: walk the polygon corners; for each edge from a FRONT
+        // corner to a BACK corner, find the surface direction where the edge
+        // crosses the near plane (bisection on the lerped, re-normalised
+        // direction's forward depth) and evalDir there to get a valid on-plane
+        // vertex. Fan-triangulate the resulting front polygon.
+        final dirs = [A, B, C];
+        final front = [va != null, vb != null, vc != null];
+        final poly = <_V>[];
+        for (var i = 0; i < 3; i++) {
+          final cur = [va, vb, vc][i];
+          if (cur != null) poly.add(cur);
+          final j = (i + 1) % 3;
+          if (front[i] != front[j]) {
+            // Edge crosses the plane. Bisect the direction lerp for the crossing.
+            var loT = 0.0, hiT = 1.0; // loT side stays PROJECTABLE (in front)
+            final fi = front[i] ? dirs[i] : dirs[j];
+            final bi = front[i] ? dirs[j] : dirs[i];
+            // Bisect for the near-plane crossing: loT stays where the lerped,
+            // re-normalised direction still projects (in front of the near plane),
+            // hiT on the culled side. 14 iterations -> sub-pixel boundary.
+            for (var it = 0; it < 14; it++) {
+              final mt = (loT + hiT) / 2;
+              final dx = fi[0] + (bi[0] - fi[0]) * mt;
+              final dy = fi[1] + (bi[1] - fi[1]) * mt;
+              final dz = fi[2] + (bi[2] - fi[2]) * mt;
+              final l = math.sqrt(dx * dx + dy * dy + dz * dz);
+              if (evalDir(dx / l, dy / l, dz / l) != null) {
+                loT = mt;
+              } else {
+                hiT = mt;
+              }
+            }
+            final mt = loT; // last known front-side t
+            final dx = fi[0] + (bi[0] - fi[0]) * mt;
+            final dy = fi[1] + (bi[1] - fi[1]) * mt;
+            final dz = fi[2] + (bi[2] - fi[2]) * mt;
+            final l = math.sqrt(dx * dx + dy * dy + dz * dz);
+            final cv = evalDir(dx / l, dy / l, dz / l);
+            if (cv != null) poly.add(cv);
+          }
+        }
+        for (var i = 2; i < poly.length; i++) {
+          debugTris++;
+          _tri(positions, texCoords, shadowColors, atmoColors, atmoTint,
+              atmoWarm, poly[0], poly[i - 1], poly[i], iw);
+        }
+      }
+    }
+
+    // Icosahedron vertices (unit), then rotate each by +spin about +Z so the
+    // GEOMETRY turns with epoch (evalDir undoes the spin for the body-fixed UV).
+    const t = 1.618033988749895; // golden ratio
+    final ico = <List<double>>[
+      [-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0],
+      [0, -1, t], [0, 1, t], [0, -1, -t], [0, 1, -t],
+      [t, 0, -1], [t, 0, 1], [-t, 0, -1], [-t, 0, 1],
+    ].map((p) {
+      final l = math.sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+      final x = p[0] / l, y = p[1] / l, z = p[2] / l;
+      final cs = math.cos(spin), sn = math.sin(spin);
+      return [x * cs - y * sn, x * sn + y * cs, z]; // +spin about +Z
+    }).toList();
+    const faces = <List<int>>[
+      [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
+      [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
+      [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
+      [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1],
+    ];
+    for (final f in faces) {
+      faceRecurse(ico[f[0]], ico[f[1]], ico[f[2]], 0);
     }
 
     if (positions.isEmpty) return;
 
+    // NOTE: the atmosphere LIMB GLOW is drawn by the painter as a screen-space
+    // radial-gradient halo (TopDownPainter._atmosphereHalo) — a sphere mesh has a
+    // hard limb and cannot fade softly into space, only a gradient can. What
+    // happens HERE is the on-surface day-side scatter (PASS 3 below), which tints
+    // the lit surface toward the terminator; it is NOT the limb glow.
     final shader = ui.ImageShader(
       image,
       ui.TileMode.repeated, // wrap longitude seam
@@ -181,19 +550,18 @@ class SphereTexture {
           <double>[1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]),
     );
 
-    // Clip everything to a true antialiased circle. The triangle mesh only
-    // covers cells fully inside the unit disc, so its raw edge is stairstepped;
-    // clipping to a smooth circle gives a crisp round limb regardless of mesh
-    // resolution.
-    // Clip to the true limb circle when far (span==1); when zoomed in, clip to
-    // the visible patch (span*rPx ~ screen) so a million-px clip path is never
-    // built. The patch covers the screen either way.
-    final clipR = span >= 1.0 ? rPx : span * rPx;
+    // FAR / ortho: the silhouette is a clean circle (radius = the projected limb
+    // rPx), so clip to it for a crisp antialiased limb (the band mesh edge is
+    // otherwise stairstepped). NEAR the surface: the limb is the projected
+    // horizon arc, not a circle at `centre`, so don't crop — the horizon-culled
+    // mesh defines the shape.
     canvas.save();
-    canvas.clipPath(
-      ui.Path()..addOval(ui.Rect.fromCircle(center: centre, radius: clipR)),
-      doAntiAlias: true,
-    );
+    if (clipCircle) {
+      canvas.clipPath(
+        ui.Path()..addOval(ui.Rect.fromCircle(center: centre, radius: rPx)),
+        doAntiAlias: true,
+      );
+    }
 
     // PASS 1 — the texture itself. We deliberately DON'T pass vertex colours
     // here: combining `colors` + an image shader in one ui.Vertices trips a
@@ -260,17 +628,21 @@ class SphereTexture {
       atmo..add(at(a))..add(at(b))..add(at(d));
     }
 
-    // Seam fix: a triangle straddling the longitude wrap has u values spanning
-    // nearly the whole texture (e.g. one vertex near 0, another near iw). Linear
-    // interpolation then runs the LONG way across the map — a smeared band. If
-    // the spread exceeds half the width, lift the low-u vertices by +iw so all
-    // three sit on the same side; TileMode.repeated samples the wrapped copy.
     var ua = a.uv.dx, ub = b.uv.dx, ud = d.uv.dx;
-    final maxU = math.max(ua, math.max(ub, ud));
-    if (maxU - math.min(ua, math.min(ub, ud)) > iw / 2) {
-      if (maxU - ua > iw / 2) ua += iw;
-      if (maxU - ub > iw / 2) ub += iw;
-      if (maxU - ud > iw / 2) ud += iw;
+
+    // The cap-relative longitude unwrap (evalDir) already keeps the whole visible
+    // patch on one continuous side of the seam, so no per-triangle seam-lift is
+    // needed (it was the cause of the tears along the antimeridian). Only the
+    // genuine geographic pole still needs handling: there all longitudes converge,
+    // so the three u's fan out and linear interpolation smears the texture; the
+    // polar pixels are near-uniform, so collapse all three to the MEDIAN column.
+    if (a.nearPole || b.nearPole || d.nearPole) {
+      final maxU = math.max(ua, math.max(ub, ud));
+      final minU = math.min(ua, math.min(ub, ud));
+      final med = ua + ub + ud - maxU - minU; // the middle value
+      ua = med;
+      ub = med;
+      ud = med;
     }
     t
       ..add(ui.Offset(ua, a.uv.dy))
@@ -284,10 +656,6 @@ class SphereTexture {
 
   ui.Color _shadow(double shade) =>
       ui.Color.fromARGB(((1.0 - shade) * 235).clamp(0, 255).round(), 0, 0, 0);
-
-  /// Component of [v] perpendicular to unit [axis], normalized (Gram-Schmidt).
-  Vector3 _orthoNorm(Vector3 v, Vector3 axis) =>
-      (v - axis * v.dot(axis)).normalized;
 
   List<double> _norm3(double x, double y, double z) {
     final len = math.sqrt(x * x + y * y + z * z);
@@ -307,10 +675,12 @@ class _V {
   final double shade;
   final double atmoA; // atmosphere scatter alpha at this vertex
   final double warmF; // 0=day colour, 1=warm terminator band
+  final bool nearPole; // |lat| near 90 -> equirect U is ill-defined here
   const _V(
       {required this.pos,
       required this.uv,
       required this.shade,
       this.atmoA = 0,
-      this.warmF = 0});
+      this.warmF = 0,
+      this.nearPole = false});
 }

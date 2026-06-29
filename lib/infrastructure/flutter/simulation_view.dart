@@ -1,5 +1,6 @@
 ﻿import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:ui' as ui show FragmentProgram, FragmentShader;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
@@ -36,7 +37,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 2026-06-17.100';
+const String kBuildStamp = 'build 2026-06-19.173';
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -66,7 +67,15 @@ class _SimulationViewState extends State<SimulationView>
     with SingleTickerProviderStateMixin {
   late final Ticker _ticker;
   late final SimulationClock _clock;
-  late final AdvanceSimulationTick _advance;
+  late AdvanceSimulationTick _advance;
+  // Stashed tick deps so _advance can be rebuilt when a debug cheat toggles.
+  late final InMemoryEventBus _events;
+  late final InMemoryWeatherRepository _weather;
+  // Debug cheats: skip overheat / aero-stress / impact destruction. ON by
+  // default so flight testing isn't cut short; toggle off in the debug panel.
+  bool _disableOverheat = true;
+  bool _disableAeroStress = true;
+  bool _disableImpact = true;
   late final TopDownSnapshotPresenter _presenter;
   late final StaticUniverseRepository _universe;
   late final InMemoryVesselRepository _vessels;
@@ -93,18 +102,29 @@ class _SimulationViewState extends State<SimulationView>
   // Perspective camera (independent toggle, any mode). On by default.
   bool _perspectiveMode = true;
   double _range = 2.0e7; // perspective eye distance from target, metres
-  double _fovDeg = 50; // perspective vertical field of view
+  double _fovDeg = 75; // perspective vertical field of view (wide enough that
+  // the horizon frames naturally at low altitude; 50 felt like a long lens)
   double _screenH = 800; // last viewport height (for the perspective focal len)
   bool _controlsExpanded = true; // collapsible FAB stack
 
+  /// Radius (m) of the body the camera is locked on, or 0 (vessel / none). Lets
+  /// the perspective eye measure its range from the SURFACE, not the centre.
+  double get _focusBodyRadius {
+    if (_focusBody == null) return 0;
+    return _universe.current().body(_focusBody!)?.radius ?? 0;
+  }
+
   /// The active camera for this frame: ortho or perspective, both driven by the
-  /// shared `_view` orientation (azimuth/elevation/roll).
+  /// shared `_view` orientation (azimuth/elevation/roll). In perspective the
+  /// eye sits [_range] from the body's SURFACE (range + radius from centre), so
+  /// _range is an altitude that can shrink to near-zero — you keep zooming all
+  /// the way down to the surface instead of stalling at centre-distance==radius.
   SceneCamera get _camera => _perspectiveMode
       ? PerspectiveCamera(
           azimuth: _view.azimuth,
           elevation: _view.elevation,
           roll: _view.roll,
-          range: _range,
+          range: _range + _focusBodyRadius,
           fovY: _fovDeg * math.pi / 180,
           viewportH: _screenH,
         )
@@ -140,6 +160,7 @@ class _SimulationViewState extends State<SimulationView>
   double _touchYaw = 0;
   double _touchRoll = 0;
   double _touchThrottle = 0; // 0..1 from the throttle slider
+  double _touchThrottleFine = 0; // 0..1 -> absolute 0..10% throttle (fine landing)
 
   /// Build a PilotInput from keyboard + on-screen touch controls (whichever is
   /// active; they sum so either input device works).
@@ -156,9 +177,10 @@ class _SimulationViewState extends State<SimulationView>
               .clamp(-1.0, 1.0),
       yaw: (axis(LogicalKeyboardKey.keyA, LogicalKeyboardKey.keyD) + _touchYaw)
           .clamp(-1.0, 1.0),
-      roll:
-          (axis(LogicalKeyboardKey.keyQ, LogicalKeyboardKey.keyE) + _touchRoll)
-              .clamp(-1.0, 1.0),
+      // Negated: roll was inverted (Q/E + the touch slider rolled the wrong way).
+      roll: (-(axis(LogicalKeyboardKey.keyQ, LogicalKeyboardKey.keyE) +
+                  _touchRoll))
+          .clamp(-1.0, 1.0),
       throttle: keyThrottle > 0 ? keyThrottle : _touchThrottle,
     );
   }
@@ -203,6 +225,28 @@ class _SimulationViewState extends State<SimulationView>
   double _metresPerPixel = 25000; // Earth (~6371 km) fits a phone screen
   double _pinchBaseMpp = 25000; // mpp captured at the start of a pinch gesture
   double _pinchBaseRange = 2.0e7; // perspective range captured at pinch start
+
+  /// Debug zoom readout: the raw camera scale so a render issue can be pinned
+  /// to an exact zoom. ORTHO = metres-per-pixel (+ km across 100 px); PERSP =
+  /// eye range. Compact engineering form for the huge dynamic range.
+  String _zoomLabel() {
+    String eng(double v) {
+      if (v >= 1e9) return '${(v / 1e9).toStringAsFixed(2)}G';
+      if (v >= 1e6) return '${(v / 1e6).toStringAsFixed(2)}M';
+      if (v >= 1e3) return '${(v / 1e3).toStringAsFixed(2)}k';
+      if (v >= 1) return v.toStringAsFixed(2);
+      return v.toStringAsExponential(2);
+    }
+
+    if (_perspectiveMode) {
+      // _range is the eye's altitude above the focused body's surface.
+      final label = _focusBody != null ? 'alt' : 'range';
+      return 'PERSP  $label ${eng(_range)} m  fov ${_fovDeg.toStringAsFixed(0)}°';
+    }
+    // 100 px spans this many km on screen — an intuitive "how zoomed" number.
+    final kmPer100px = _metresPerPixel * 100 / 1000;
+    return 'ORTHO  ${eng(_metresPerPixel)} m/px  (100px=${eng(kmPer100px)} km)';
+  }
 
   /// Zoom by [factor] (>1 = out): adjusts ortho mpp or perspective range.
   void _zoom(double factor) {
@@ -251,16 +295,21 @@ class _SimulationViewState extends State<SimulationView>
         (label: body.name, v: null, b: body.id),
     ];
     // If a craft was injected (ascent/descent), START LOCKED ON IT so the player
-    // is flying it immediately; otherwise lock on Earth so the demo fleet circles.
+    // is flying it immediately; otherwise lock on the ORBITER so the player can
+    // fly it directly from the start (manual mode, see the flags below).
     if (injected != null) {
       _targetIndex = _targets.indexWhere((t) => t.v == injected.id);
     } else {
-      final earthIdx = _targets.indexWhere((t) => t.b == SampleWorld.earth);
-      _targetIndex = earthIdx >= 0 ? earthIdx : 0;
+      _targetIndex = _targets.indexWhere((t) => t.v == vessel.id);
     }
     if (_targetIndex < 0) _targetIndex = 0;
     _focusVessel = _targets[_targetIndex].v;
     _focusBody = _targets[_targetIndex].b;
+
+    // Start ready to fly: manual control of the orbiter, infinite fuel, 1x warp.
+    _manualControl = true;
+    _layers = _layers.copyWith(infiniteFuel: true);
+    _warpIndex = 0; // 1x
 
     _vessels = InMemoryVesselRepository(fleet);
     for (final v in _vessels.all()) {
@@ -268,12 +317,12 @@ class _SimulationViewState extends State<SimulationView>
     }
     final universe = StaticUniverseRepository(system);
     _universe = universe;
-    final events = InMemoryEventBus();
+    _events = InMemoryEventBus();
     // Pop a destruction menu when a vessel is lost.
-    events.subscribe(_onDomainEvent);
+    _events.subscribe(_onDomainEvent);
     _colonies = InMemoryColonyRepository();
     _deposits = InMemoryDepositRepository();
-    final weather = InMemoryWeatherRepository();
+    _weather = InMemoryWeatherRepository();
     _research = ResearchLedger(
       tree: TechTree(
         nodes: const [
@@ -283,18 +332,8 @@ class _SimulationViewState extends State<SimulationView>
       ),
     );
 
-    _clock = SimulationClock(warpFactor: 50, fixedStep: 0.02);
-    _advance = AdvanceSimulationTick(
-      vessels: _vessels,
-      universe: universe,
-      compute: DartCompute(),
-      soi: const SoiTransitionService(),
-      events: events,
-      colonies: _colonies,
-      deposits: _deposits,
-      weather: weather,
-      research: _research,
-    );
+    _clock = SimulationClock(warpFactor: 1, fixedStep: 0.02); // dev start: 1x
+    _buildAdvance();
     _presenter = TopDownSnapshotPresenter(
       vessels: _vessels,
       universe: universe,
@@ -307,8 +346,43 @@ class _SimulationViewState extends State<SimulationView>
         if (mounted) setState(() {});
       },
     );
+    _loadAtmosphereShader();
 
     _ticker = createTicker(_onFrame)..start();
+  }
+
+  /// The per-pixel atmospheric-scattering shader, loaded once. Null until ready
+  /// (the painter falls back to the radial-gradient halo meanwhile) and on
+  /// platforms without shader support.
+  ui.FragmentShader? _atmoShader;
+  Future<void> _loadAtmosphereShader() async {
+    try {
+      final program =
+          await ui.FragmentProgram.fromAsset('shaders/atmosphere.frag');
+      if (!mounted) return;
+      setState(() => _atmoShader = program.fragmentShader());
+    } catch (_) {
+      // No shader support — keep the radial-gradient halo fallback.
+    }
+  }
+
+  /// (Re)build the tick with the current debug-cheat flags. Called on init and
+  /// whenever a disable-overheat / aero / impact toggle changes.
+  void _buildAdvance() {
+    _advance = AdvanceSimulationTick(
+      vessels: _vessels,
+      universe: _universe,
+      compute: DartCompute(),
+      soi: const SoiTransitionService(),
+      events: _events,
+      colonies: _colonies,
+      deposits: _deposits,
+      weather: _weather,
+      research: _research,
+      disableOverheat: _disableOverheat,
+      disableAeroStress: _disableAeroStress,
+      disableImpact: _disableImpact,
+    );
   }
 
   /// React to simulation events. Right now: surface a destruction menu when a
@@ -449,6 +523,8 @@ class _SimulationViewState extends State<SimulationView>
       }
     }
 
+    _recordTrail();
+
     final cam = _camera;
     setState(() {
       _activeCamera = cam;
@@ -459,8 +535,44 @@ class _SimulationViewState extends State<SimulationView>
         epoch: _clock.epoch,
         science: _research.science,
         cullDistant: _layers.cullDistant,
+        flownTrail: _trail,
+        flownTrailBody: _trailBody,
       );
     });
+  }
+
+  // ---- Flown trajectory trail (breadcrumb for the focused vessel) ----
+  // Body-relative positions of the focused vessel, sampled by distance. Reset
+  // when the focus or its dominant body changes so the line doesn't streak
+  // across an SOI switch.
+  final List<Vector3> _trail = [];
+  BodyId? _trailBody; // dominant body the trail points are relative to
+  VesselId? _trailVessel; // which vessel the trail belongs to
+  static const int _trailMax = 600; // cap; oldest points drop off
+  static const double _trailMinStep = 500; // metres between samples
+
+  /// Append the focused vessel's current position to the trail (sampled by
+  /// distance). Clears + restarts when the focus vessel or its dominant body
+  /// changes.
+  void _recordTrail() {
+    final id = _focusVessel;
+    final v = id == null ? null : _vessels.byId(id);
+    if (v == null) {
+      _trail.clear();
+      _trailVessel = null;
+      _trailBody = null;
+      return;
+    }
+    if (id != _trailVessel || v.dominantBody != _trailBody) {
+      _trail.clear();
+      _trailVessel = id;
+      _trailBody = v.dominantBody;
+    }
+    final p = v.state.position;
+    if (_trail.isEmpty || (p - _trail.last).length > _trailMinStep) {
+      _trail.add(p);
+      if (_trail.length > _trailMax) _trail.removeAt(0);
+    }
   }
 
   @override
@@ -636,13 +748,34 @@ class _SimulationViewState extends State<SimulationView>
   }
 
   /// Debug panel: a checkbox per draw layer so each pass can be isolated.
+  /// A debug-cheat checkbox row: flips [value] via [set], then rebuilds the tick
+  /// so the new flag takes effect immediately.
+  Widget _cheatRow(String label, bool value, void Function(bool) set) => InkWell(
+        onTap: () => setState(() {
+          set(!value);
+          _buildAdvance();
+        }),
+        child: Row(children: [
+          Checkbox(
+            value: value,
+            onChanged: (v) => setState(() {
+              set(v ?? false);
+              _buildAdvance();
+            }),
+            visualDensity: VisualDensity.compact,
+            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+          Text(label,
+              style: const TextStyle(color: Color(0xFFB9C9DC), fontSize: 12)),
+        ]),
+      );
+
   Widget _debugPanel() {
     final rows = <(String, bool, DebugLayers Function(bool))>[
       ('Skybox', _layers.skybox, (v) => _layers.copyWith(skybox: v)),
       ('Orbit rails', _layers.orbitRails, (v) => _layers.copyWith(orbitRails: v)),
       ('Planet texture', _layers.planetTexture,
           (v) => _layers.copyWith(planetTexture: v)),
-      ('Base disc', _layers.baseDisc, (v) => _layers.copyWith(baseDisc: v)),
       ('Sphere shadow', _layers.sphereShadow,
           (v) => _layers.copyWith(sphereShadow: v)),
       ('Atmo halo', _layers.atmoHalo, (v) => _layers.copyWith(atmoHalo: v)),
@@ -718,13 +851,13 @@ class _SimulationViewState extends State<SimulationView>
           // FOV (tap to cycle), only meaningful in perspective.
           InkWell(
             onTap: () => setState(() {
-              const opts = [40.0, 55.0, 70.0, 90.0];
+              const opts = [50.0, 65.0, 75.0, 90.0, 105.0];
               final i = opts.indexWhere((o) => o >= _fovDeg);
               _fovDeg = opts[(i + 1) % opts.length];
             }),
             child: Padding(
               padding: const EdgeInsets.fromLTRB(4, 6, 4, 4),
-              child: Text('FOV: ${_fovDeg.toStringAsFixed(0)}Â°',
+              child: Text('FOV: ${_fovDeg.toStringAsFixed(0)}°',
                   style: const TextStyle(color: Color(0xFF7FB0E0), fontSize: 12)),
             ),
           ),
@@ -743,6 +876,22 @@ class _SimulationViewState extends State<SimulationView>
               ),
             ),
           ),
+          // Destruction cheats: skip overheat / aero-stress / impact so a craft
+          // survives an otherwise-fatal profile. Rebuilds the tick on change.
+          const Padding(
+            padding: EdgeInsets.only(left: 4, top: 6, bottom: 2),
+            child: Text('CHEATS',
+                style: TextStyle(
+                    color: Color(0xFF7FB0E0),
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold)),
+          ),
+          _cheatRow('No overheating', _disableOverheat,
+              (v) => _disableOverheat = v),
+          _cheatRow('No aero load', _disableAeroStress,
+              (v) => _disableAeroStress = v),
+          _cheatRow('No impact damage', _disableImpact,
+              (v) => _disableImpact = v),
           // Atmosphere chemistry demo: re-skin the focused planet's gas mix and
           // watch the limb's haze colour shift (driven by composition).
           const Padding(
@@ -833,7 +982,7 @@ class _SimulationViewState extends State<SimulationView>
         },
         icon: const Icon(Icons.vrpano),
         label: Text(
-            _perspectiveMode ? 'PERSP ${_fovDeg.toStringAsFixed(0)}Â°' : 'ORTHO'),
+            _perspectiveMode ? 'PERSP ${_fovDeg.toStringAsFixed(0)}°' : 'ORTHO'),
       ),
     );
   }
@@ -957,7 +1106,8 @@ class _SimulationViewState extends State<SimulationView>
   @override
   Widget build(BuildContext context) {
     final snap = _snapshot;
-    _screenH = MediaQuery.sizeOf(context).height; // for the perspective focal len
+    // _screenH (perspective focal length) is set from the real render-canvas
+    // height by the LayoutBuilder around the painter below.
     return Scaffold(
       backgroundColor: const Color(0xFF000000),
       // Keep the FAB stack clear of the notch/home indicator.
@@ -1195,15 +1345,28 @@ class _SimulationViewState extends State<SimulationView>
                 Positioned.fill(
                   child: snap == null
                       ? const Center(child: CircularProgressIndicator())
-                      : CustomPaint(
-                          size: Size.infinite,
-                          painter: TopDownPainter(
-                            snap,
-                            textures: _textures,
-                            view: _activeCamera ?? OrthoCamera(_view, _metresPerPixel),
-                            layers: _layers,
-                          ),
-                        ),
+                      : LayoutBuilder(builder: (context, constraints) {
+                          // The perspective focal length must use the ACTUAL
+                          // render-canvas height, not the full MediaQuery window
+                          // (which over-states it and makes the lens read long /
+                          // the planet a touch small). Update it from the real
+                          // layout height each build.
+                          if (constraints.maxHeight.isFinite &&
+                              constraints.maxHeight > 0) {
+                            _screenH = constraints.maxHeight;
+                          }
+                          return CustomPaint(
+                            size: Size.infinite,
+                            painter: TopDownPainter(
+                              snap,
+                              textures: _textures,
+                              view: _activeCamera ??
+                                  OrthoCamera(_view, _metresPerPixel),
+                              layers: _layers,
+                              atmoShader: _atmoShader,
+                            ),
+                          );
+                        }),
                 ),
                 // All UI overlays stay INSIDE the safe area.
                 Positioned.fill(
@@ -1256,6 +1419,26 @@ class _SimulationViewState extends State<SimulationView>
                     ),
                   ),
                 ),
+                // Zoom-factor readout (debug): the camera scale so issues can be
+                // pinned to an exact zoom. ORTHO shows metres-per-pixel; PERSP
+                // shows the eye range (m). Sits just above the build stamp.
+                Positioned(
+                  left: 8,
+                  bottom: 46,
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    color: const Color(0xAA001A0D),
+                    child: Text(
+                      _zoomLabel(),
+                      style: const TextStyle(
+                        color: Color(0xFF7FE0A0),
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ),
                 // On-screen flight controls (touch), only in manual mode.
                 if (_manualControl) ..._touchControls(),
                 // Vessel-lost menu (modal over everything).
@@ -1293,6 +1476,39 @@ class _SimulationViewState extends State<SimulationView>
             top: false,
             child: Column(mainAxisSize: MainAxisSize.min, children: [
               _flightStatusRow(),
+              // FINE throttle — an absolute 0..10% throttle for delicate landing
+              // burns (full slider span = 10% thrust). Sits ABOVE the coarse one.
+              Row(children: [
+                const SizedBox(
+                    width: 56,
+                    child: Text('FINE',
+                        style: TextStyle(color: Color(0xFFFFC58A), fontSize: 11))),
+                Expanded(
+                  child: SliderTheme(
+                    data: const SliderThemeData(
+                        activeTrackColor: Color(0xFFFFC58A),
+                        inactiveTrackColor: Color(0x33FFC58A),
+                        thumbColor: Color(0xFFFFC58A),
+                        trackHeight: 2),
+                    child: Slider(
+                      // 0..1 maps to an ABSOLUTE 0..10% throttle for fine landing
+                      // burns. Sets the throttle directly (held, not a trim).
+                      value: _touchThrottleFine,
+                      onChanged: (v) => setState(() {
+                        _touchThrottleFine = v;
+                        _touchThrottle = v * 0.10; // 0..10%
+                      }),
+                    ),
+                  ),
+                ),
+                SizedBox(
+                    width: 40,
+                    child: Text(
+                        '${(_touchThrottleFine * 10).toStringAsFixed(1)}%',
+                        textAlign: TextAlign.right,
+                        style: const TextStyle(
+                            color: Color(0xFFFFC58A), fontSize: 11))),
+              ]),
               // Throttle — held (does NOT self-centre).
               Row(children: [
                 const SizedBox(

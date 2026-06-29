@@ -44,4 +44,40 @@ void main() {
     expect(moved, greaterThan(1000),
         reason: 'on-rails craft must advance along its orbit, not freeze');
   });
+
+  test('a landed vessel co-rotates with the spinning body (does not drift)', () {
+    final system = SampleWorld.buildSystem(); // miner lands on this system's body
+    final miner = SampleWorld.buildMiner(); // landed on a body
+    final vessels = InMemoryVesselRepository([miner]);
+    final universe = StaticUniverseRepository(system);
+    final advance = AdvanceSimulationTick(
+      vessels: vessels,
+      universe: universe,
+      compute: DartCompute(),
+      soi: const SoiTransitionService(),
+      events: InMemoryEventBus(),
+      colonies: InMemoryColonyRepository(),
+      deposits: InMemoryDepositRepository(),
+      weather: InMemoryWeatherRepository(),
+    );
+    final body = system.body(miner.dominantBody)!;
+    final start = vessels.byId(miner.id)!.state.position;
+
+    // Warp so the body's spin advances appreciably over the ticks.
+    final clock = SimulationClock(warpFactor: 1000, fixedStep: 1.0);
+    for (var i = 0; i < 30; i++) {
+      advance.execute(clock);
+    }
+
+    final v = vessels.byId(miner.id)!;
+    expect(v.landed, isTrue, reason: 'still landed');
+    // Radius (altitude) is preserved — it only rotated, not drifted off.
+    expect(v.state.position.length, closeTo(start.length, 1.0),
+        reason: 'co-rotation keeps it on the surface, same radius');
+    if (body.angularVelocity != 0) {
+      // On a spinning body it must have MOVED (rotated with the surface).
+      expect((v.state.position - start).length, greaterThan(1.0),
+          reason: 'a landed craft must track the rotating surface');
+    }
+  });
 }

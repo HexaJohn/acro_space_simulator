@@ -1,28 +1,49 @@
 import 'dart:math' as math;
-import 'dart:ui' as ui show Image, Gradient, Vertices, VertexMode;
+import 'dart:ui' as ui show Image, Gradient, Vertices, VertexMode, FragmentShader;
 
 import 'package:flutter/material.dart';
 
-import '../../adapters/presenters/atmosphere_halo.dart';
-import '../../adapters/presenters/body_shading.dart';
 import '../../adapters/presenters/top_down_snapshot.dart';
 import '../../domain/shared/vector3.dart';
 import 'debug_layers.dart';
 import 'sphere_texture.dart';
 import 'texture_cache.dart';
 
-/// Renders a [TopDownSnapshot] in a top-down XY view with primitive shapes.
-/// No 3D rendering this pass — bodies are circles, vessels are triangles, the
-/// vessel's orbit-plane heading is the triangle's point.
+/// The scene painter: turns an immutable [TopDownSnapshot] (produced by
+/// [TopDownSnapshotPresenter] from the domain world) into pixels, through a
+/// [SceneCamera] that owns the world→screen mapping.
 ///
-/// Coordinates arrive as metres relative to the camera focus (already small),
-/// so projection is just: screen = centre + (worldXY / metresPerPixel), with Y
-/// flipped so +Y is up on screen.
+/// It draws, back to front:
+///  1. the **skybox** — the Milky Way star map as a sky window cropped to the
+///     camera heading;
+///  2. each **body** — a full lit, textured 3D sphere with a soft atmosphere
+///     limb glow, delegated to [SphereTexture]; stars add a corona, ringed
+///     planets get an elliptical ring split into back/front halves so the disc
+///     occludes the back arc; a body too small to resolve is a sub-pixel dot;
+///  3. **orbit rails** and **predicted vessel paths**, depth-sorted so the
+///     near arc draws over the disc and the far arc behind it;
+///  4. **vessels** — a heading marker oriented by the craft's attitude;
+///  5. the **HUD / nav-ball** overlay.
+///
+/// Despite the legacy name, this is **not** a flat top-down view — the same
+/// painter renders the strategic ortho MAP and the perspective 3D flight view;
+/// only the injected [SceneCamera] differs. All world geometry is projected via
+/// `view.projectPx`, so the painter itself never reasons about metres-per-pixel,
+/// perspective, or the near plane — the camera does. There is no flat-disc body
+/// fallback: a body is always the textured sphere (a star or sub-pixel dot aside).
 class TopDownPainter extends CustomPainter {
   final TopDownSnapshot snapshot;
   final TextureCache? textures;
   final SceneCamera view;
   final DebugLayers layers;
+
+  /// Per-pixel atmospheric-scattering fragment shader (loaded async by the view).
+  /// When present it draws a true path-length atmosphere correct at EVERY altitude
+  /// (orbit to surface). When null it falls back to the screen-space radial halo
+  /// (correct from orbit, degrades at the surface). Uniforms set in
+  /// [_atmosphereShaderPass].
+  final ui.FragmentShader? atmoShader;
+
   static const _sphere = SphereTexture();
 
   /// How far the star's corona glow reaches, in body radii.
@@ -31,7 +52,8 @@ class TopDownPainter extends CustomPainter {
   TopDownPainter(this.snapshot,
       {this.textures,
       required this.view,
-      this.layers = const DebugLayers()});
+      this.layers = const DebugLayers(),
+      this.atmoShader});
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -61,7 +83,6 @@ class TopDownPainter extends CustomPainter {
   }
 
   void _paintWorld(Canvas canvas, Size size, Offset centre) {
-    const shading = BodyShading();
     // Coordinates arrive as SCREEN px (centre-origin, +y up); place at the
     // viewport centre with Y flipped for Flutter's downward axis.
     Offset project(double xPx, double yPx) =>
@@ -114,78 +135,149 @@ class TopDownPainter extends CustomPainter {
       // circles/meshes at million-pixel coordinates (which overflows and kills
       // the whole frame, HUD included). Stars test their wider GLOW radius so the
       // corona still shows even when the disc itself is off-screen / sub-pixel.
+      //
+      // BUT this test keys off the projected CENTRE, which goes NaN/off-screen
+      // when the eye is close to (or inside the near plane of) a large body —
+      // exactly orbit-tracking / sharp grazing angles, where the SURFACE is still
+      // very much on screen. The band sphere culls per-vertex, so for a large
+      // body (its apparent radius dwarfs the screen) we must NOT center-cull, or
+      // the whole planet vanishes. Only center-cull a small/distant body.
       final cullR = b.isStar ? rPx * _starGlowScale : rPx;
-      if (!_discTouchesScreen(c, cullR, size)) continue;
+      final screenDiag = size.bottomRight(Offset.zero).distance;
+      // Skip the centre-cull when the body's SURFACE can reach the screen from an
+      // off-centre projection — i.e. the projected centre is a bad visibility
+      // proxy. Two cases:
+      //  1) the apparent disc already dwarfs the screen (rPx past a fraction of
+      //     the diagonal), or
+      //  2) the EYE is close to the body (perspective): within ~4 radii the
+      //     visible cap can land anywhere on screen while the centre projects far
+      //     off-frame or behind the near plane (orbit-tracking, grazing angles —
+      //     the case where Earth vanished when the camera panned). Distance-cull
+      //     bodies (ortho map) keep the strict centre test.
+      final eyeDist = view.usesDistanceCull
+          ? double.infinity
+          : (b.worldRel - view.eyeOffset).length;
+      final near = !b.isStar && b.radius > 0 && eyeDist < b.radius * 4;
+      final big = !b.isStar && (rPx > screenDiag * 0.33 || near);
+      if (!big && !_discTouchesScreen(c, cullR, size)) continue;
       final base = b.isStar ? const Color(0xFFFFD66B) : const Color(0xFF4A90D9);
 
-      // Disc covers the whole viewport (zoomed in close). Only the rim/halo/ring
-      // work is wasted — but the SURFACE still needs to show. If this body has a
-      // decoded texture, fall through to the sphere (its mesh radius is capped to
-      // screen size below so coords stay sane). Otherwise flat-fill and skip the
-      // expensive limb passes. This is the perspective-zoom lag fix.
-      final discCovers = !b.isStar && _discCoversScreen(c, rPx, size);
+      // Skia drops or mis-rasterizes geometry once coordinates blow past a few
+      // thousand px, so when zoomed in the flat disc (drawn at TRUE rPx) and the
+      // sphere (which self-limits its mesh to a screen-sized cap) stop agreeing.
+      // The cap only needs to reach the farthest screen CORNER FROM THIS BODY'S
+      // centre `c` — not from screen centre — so when `c` is off-screen (zoomed
+      // in, or an off-axis body under an orbiter lock) the textured patch still
+      // fills the whole viewport instead of a too-small circle stuck mid-screen.
+      final coverPx = _farthestCornerDist(c, size);
+      // Clamp the DISC's draw radius to EXACTLY the sphere's capped on-screen
+      // extent (cover*overscan, see the sphere's clipR) so the textured cap and
+      // the base disc share one radius and stay aligned — important for an
+      // off-centre body in perspective, where a mismatched radius reads as the
+      // texture floating off the disc.
+      final discRPx = math.min(rPx, coverPx * SphereTexture.overscan);
+
+      // "Disc covers the viewport" = the sphere mesh has hit its on-screen cap
+      // (rPx past coverPx*overscan), at which point the textured patch already
+      // spans every corner from `c`. Beyond that the rim/halo/ring work is all
+      // off-screen, so skip it. Keyed off the CAP, not raw rPx — rPx is the
+      // angular apparent radius and outran the drawn patch, flipping to the
+      // fullscreen flat fill while the texture was still smaller than the screen
+      // ("flat fill too soon").
+      final discCovers = !b.isStar && rPx >= coverPx * SphereTexture.overscan;
       final hasTex = layers.planetTexture &&
           b.textureKey != null &&
           textures?.image(b.textureKey!) != null;
       if (discCovers && !hasTex) {
-        canvas.drawRect(Offset.zero & size, Paint()..color = _scale(base, 0.6));
+        // Zoomed inside a body but no texture image to draw — either the planet
+        // texture layer is OFF, or the image hasn't decoded yet. Draw NOTHING (no
+        // flat fill of any kind): the user wants no flat-colour disc/fill. With
+        // the layer off the body is simply invisible up close; with it on, the
+        // sphere appears the moment the image decodes.
         continue;
       }
 
       // Star corona glow (drawn first, under the disc).
-      if (b.isStar) _starGlow(canvas, c, rPx);
+      if (b.isStar) _starGlow(canvas, c, discRPx);
 
       // Back half of the rings — drawn BEFORE the body so the disc occludes it.
       // (Off-screen when the disc covers the viewport, so skip it then.)
       if (!discCovers) _drawRings(canvas, b, project, true);
 
       // Surface map: draw the lit sphere when the texture is decoded and the disc
-      // is worth texturing (>=5px). No upper cap on rPx — when close the mesh
-      // radius is clamped (meshRPx) so vertex coords stay bounded; the sphere
-      // clips to the true circle. Below 5px it's not worth it.
-      final tex = (layers.planetTexture && b.textureKey != null && rPx >= 5)
+      // resolves at all (>=2.5px — same threshold as the shaded disc, so the
+      // texture<->disc handoff happens where the body is too small to see the
+      // difference, with no pop). No upper cap on rPx — when close the mesh
+      // clips to the true circle.
+      final tex = (layers.planetTexture && b.textureKey != null && rPx >= 2.5)
           ? textures?.image(b.textureKey!)
           : null;
-      // On-screen extent the sphere mesh must cover (its half-diagonal). When
-      // rPx dwarfs this, the sphere tessellates only the visible cap at full
-      // scale (so it keeps magnifying) instead of the whole hemisphere.
-      final coverPx = size.bottomRight(Offset.zero).distance / 2;
-      // Atmosphere thickness fraction — gas giants get a fatter haze when the
-      // exaggerate-atmosphere debug option is on.
-      final atmoThick = (b.isGasGiant && layers.exaggerateAtmosphere) ? 0.5 : 0.22;
+      // (coverPx — the sphere-cap half-extent — is computed once above, by the
+      // disc-radius clamp, and reused for _sphere.paint below.)
+      final atmoThick = (b.isGasGiant && layers.exaggerateAtmosphere) ? 0.6 : 0.45;
       final atmoCol = Color(b.atmoColor);
       if (tex != null) {
-        // The limb halo + base disc + rings + label all live at the rim, which
-        // is off-screen when the disc covers the viewport — skip them then (the
-        // lag fix) and draw only the (capped) textured surface.
-        if (!discCovers) {
-          if (b.hasAtmosphere && layers.atmoHalo) {
-            _atmosphereHalo(canvas, c, rPx, size,
-                view: view,
-                sunWorld: Vector3(b.sunWorldX, b.sunWorldY, b.sunWorldZ),
-                tint: atmoCol,
-                thickness: atmoThick);
-          }
-          // Base disc underneath: if the textured sphere fails to rasterize on a
-          // given backend (web CanvasKit drawVertices quirks), the body still
-          // reads as a lit circle instead of vanishing.
-          final sun = Vector3(b.sunX, b.sunY, 0);
-          if (layers.baseDisc) {
-            if (b.isStar) {
-              canvas.drawCircle(c, rPx, Paint()..color = base);
-            } else {
-              _drawShadedDisc(canvas, c, rPx, base, sun, shading, b.sunFacing);
+        // ATMOSPHERE = a screen-space radial-gradient halo (soft-edged — a sphere
+        // MESH has a hard limb and can't fade into space; a RadialGradient can).
+        // It must sit on the body's TRUE projected silhouette. In perspective that
+        // silhouette is the LIMB CIRCLE — the tangent circle whose centre is pulled
+        // toward the eye from the body centre (NOT the projected body centre `c`,
+        // which is offset from the real limb up close and projects BEHIND the
+        // camera at the surface). Centring on the limb circle welds the band to
+        // the horizon at orbital, mid, AND surface altitudes. The band runs from
+        // the limb (inner, slight overlap so no gap) out by `thick` of the limb
+        // radius, fading softly to space.
+        // FALLBACK only: the radial-gradient halo is used when the per-pixel
+        // atmosphere SHADER isn't available (not loaded yet / no shader support).
+        // When the shader is present it draws below, AFTER the surface.
+        if (b.hasAtmosphere && layers.atmoHalo && atmoShader == null) {
+          // Centre + radius for the radial-gradient band:
+          //  * ORBITAL / MID (apparent radius moderate, centre projects): use the
+          //    projected body centre `c` with the true apparent radius `rPx` — the
+          //    thick, soft, full-horizon band that matches the classic look.
+          //  * SURFACE / very close (rPx enormous, or `c` behind the camera): the
+          //    `c`-centred gradient would span millions of px and wash out, so use
+          //    the LIMB CIRCLE — its centre is pulled toward the eye, always
+          //    projects, and its radius is well-behaved, giving a horizon haze band.
+          final cFinite = c.dx.isFinite && c.dy.isFinite;
+          final moderate = rPx.isFinite && rPx < size.height * 5;
+          Offset? haloC;
+          double haloR = 0;
+          var bandFrac = atmoThick;
+          if (cFinite && moderate) {
+            haloC = c;
+            haloR = rPx;
+          } else {
+            final limb = _limbCircle(b, view, centre);
+            if (limb != null) {
+              haloC = limb.centre;
+              haloR = limb.radiusPx;
+              // Near the surface the limb circle is large; a fixed-ish screen band
+              // reads better than a big fraction of its radius.
+              bandFrac =
+                  (size.height * 0.35 / haloR).clamp(0.04, atmoThick);
             }
           }
+          if (haloC != null && haloR.isFinite && haloR > 0.5) {
+            final innerPx = haloR * 0.93; // overlap the surface -> no gap
+            final outerPx = haloR * (1.0 + bandFrac);
+            _atmosphereHalo(canvas, haloC, innerPx, outerPx, size,
+                view: view,
+                sunWorld: Vector3(b.sunWorldX, b.sunWorldY, b.sunWorldZ),
+                tint: atmoCol);
+          }
         }
-        // The sphere is the fragile part; isolate it so a failure leaves the
-        // already-drawn disc rather than blanking the world layer.
+
+        // The sphere is the surface — it always has a texture now (real or the
+        // Moon fallback), so there's no flat-disc fallback under it.
         try {
           _sphere.paint(
             canvas, tex, c, rPx,
             view: view,
             worldRel: b.worldRel,
             coverPx: coverPx,
+            radiusM: b.radius,
+            viewportCentre: centre,
             sunWorld: Vector3(b.sunWorldX, b.sunWorldY, b.sunWorldZ),
             spin: b.spin,
             selfLuminous: b.isStar,
@@ -196,6 +288,21 @@ class TopDownPainter extends CustomPainter {
             atmoTint: (b.hasAtmosphere && layers.atmoOverlay) ? atmoCol : null,
           );
         } catch (_) {/* keep the disc fallback */}
+
+        // ATMOSPHERE (per-pixel shader) — drawn OVER the surface so it both tints
+        // the surface near the limb (atmospheric perspective) and glows above the
+        // horizon against space. Correct at every altitude because it ray-tests
+        // the atmosphere shell in 3D. Falls back to the radial halo above when the
+        // shader isn't loaded.
+        if (atmoShader != null && b.hasAtmosphere && layers.atmoHalo) {
+          // The shader's path length wants a TIGHTER shell than the halo's band
+          // fraction — a thin shell gives a defined limb glow; a thick one washes
+          // over the disc. Gas giants get a fatter haze.
+          final shellThick =
+              (b.isGasGiant && layers.exaggerateAtmosphere) ? 0.10 : 0.05;
+          _atmosphereShaderPass(canvas, size, b, atmoCol, shellThick);
+        }
+
         if (!discCovers) {
           _drawRings(canvas, b, project, false); // near half, over the disc
           if (b.showLabel) {
@@ -206,23 +313,16 @@ class TopDownPainter extends CustomPainter {
         continue;
       }
 
-      if (b.isStar || rPx < 6) {
-        // Tiny or self-luminous: flat fill (shading not worth it).
-        canvas.drawCircle(c, rPx, Paint()..color = base);
-      } else {
-        // Atmosphere halo first (drawn under the disc edge).
-        if (b.hasAtmosphere && layers.atmoHalo) {
-          _atmosphereHalo(canvas, c, rPx, size,
-              view: view,
-              sunWorld: Vector3(b.sunWorldX, b.sunWorldY, b.sunWorldZ),
-              tint: atmoCol,
-              thickness: atmoThick);
-        }
-        // Shaded disc: sample brightness over a coarse grid, draw lit cells.
-        final sun = Vector3(b.sunX, b.sunY, 0);
-        if (layers.baseDisc) {
-          _drawShadedDisc(canvas, c, rPx, base, sun, shading, b.sunFacing);
-        }
+      // No texture IMAGE available. There is NO flat disc fallback of any kind
+      // any more — a body is ALWAYS the textured sphere once its image loads.
+      // The only non-sphere draws kept are: a self-luminous STAR, and a
+      // sub-pixel DOT (a body too small to resolve must still be one pixel, not
+      // invisible). A resolvable planet whose image hasn't decoded yet draws
+      // nothing for the frame or two until it loads (no disc flash).
+      if (b.isStar) {
+        canvas.drawCircle(c, discRPx, Paint()..color = base); // self-luminous
+      } else if (rPx < 2.5) {
+        canvas.drawCircle(c, discRPx, Paint()..color = _scale(base, 0.6)); // dot
       }
 
       _drawRings(canvas, b, project, false); // near half, over the disc
@@ -241,6 +341,10 @@ class TopDownPainter extends CustomPainter {
       _drawVesselPath(canvas, v, project, clip, false);
     }
 
+    // The focused vessel's FLOWN trail (breadcrumb of where it has actually
+    // been), drawn over the rails so you can read the real trajectory.
+    _drawFlownTrail(canvas, project, clip);
+
     // Vessels: LOD — a flat heading triangle when small (<= ~10 px apparent),
     // a lit 3D cone when big enough to read (close-up / chase cam).
     const craftLengthM = 30.0; // nominal craft size for the cone projection
@@ -249,6 +353,8 @@ class TopDownPainter extends CustomPainter {
       if (!_discTouchesScreen(c, 16, size)) continue; // off-screen ship
       final apparentPx = view.radiusPx(v.worldRel, craftLengthM);
       final col = v.onRails ? const Color(0xFF7FE0A0) : const Color(0xFFFF8C66);
+      // Surface-proximity cue (drop-line + alt + landed ring) UNDER the marker.
+      _drawSurfaceCue(canvas, v, c, project);
       if (apparentPx <= 10) {
         // Heading from the nose projected into the CAMERA screen plane, so the
         // flat triangle points the same way the 3D cone would (they must agree
@@ -262,54 +368,186 @@ class TopDownPainter extends CustomPainter {
     }
   }
 
-  /// A lit cone marker oriented by the craft's real 3D attitude, projected
-  /// through the camera. Faces are flat-shaded by Lambert vs the sun and painted
-  /// back-to-front so the cone reads as solid.
+  /// Surface-approach cue for a vessel: when it's within ~one body radius of the
+  /// surface, draw a dashed drop-line from the craft down to the radial foot
+  /// (the point on the surface directly below it) plus an altitude label, so it's
+  /// obvious the craft is approaching the ground. When landed, a pulsing contact
+  /// ring instead. Reads at any zoom because the foot is projected through the
+  /// camera like everything else.
+  void _drawSurfaceCue(Canvas canvas, VesselView v, Offset c,
+      Offset Function(double, double) project) {
+    final alt = v.altSurfaceM;
+    if (!alt.isFinite || v.bodyRadiusM <= 0) return;
+    // Only cue once we're close-ish: within one body radius of the surface.
+    if (alt > v.bodyRadiusM && !v.landed) return;
+
+    final footPx = view.projectPx(v.surfaceFootRel);
+    if (footPx == null) return;
+    final foot = project(footPx.x, footPx.y);
+
+    if (v.landed) {
+      // Contact ring — landed.
+      canvas.drawCircle(
+          c,
+          10,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 2
+            ..color = const Color(0xFF7FE0A0));
+      _label(canvas, 'LANDED', c + const Offset(12, 6),
+          const Color(0xFF7FE0A0));
+      return;
+    }
+
+    // Approach: closer = redder + brighter (warns of impending ground contact).
+    final frac = (alt / v.bodyRadiusM).clamp(0.0, 1.0);
+    final warn = frac < 0.05; // < 5% of a radius up — very low
+    final lineCol =
+        (warn ? const Color(0xFFFF3B30) : const Color(0xFF8FE3FF))
+            .withValues(alpha: (1.0 - frac).clamp(0.25, 0.9));
+
+    // Dashed drop-line craft -> surface foot.
+    _dashLine(canvas, c, foot, lineCol);
+    // A little tick on the surface where it touches down.
+    canvas.drawCircle(foot, 3, Paint()..color = lineCol);
+    // Altitude label at the midpoint.
+    final mid = Offset.lerp(c, foot, 0.5)!;
+    _label(canvas, _altLabel(alt), mid + const Offset(6, -2), lineCol);
+  }
+
+  /// Dashed straight line between two screen points.
+  void _dashLine(Canvas canvas, Offset a, Offset b, Color color) {
+    const dash = 6.0, gap = 4.0;
+    final total = (b - a).distance;
+    if (total < 1) return;
+    final dir = (b - a) / total;
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 1.5;
+    var t = 0.0;
+    while (t < total) {
+      final s = a + dir * t;
+      final e = a + dir * math.min(t + dash, total);
+      canvas.drawLine(s, e, paint);
+      t += dash + gap;
+    }
+  }
+
+  String _altLabel(double m) => m.abs() < 10000
+      ? '${m.toStringAsFixed(0)} m'
+      : '${(m / 1000).toStringAsFixed(1)} km';
+
+  /// The craft marker: a 4-sided SQUARE-base pyramid (the lander shape),
+  /// oriented by the craft's real 3D attitude and projected through the camera.
+  /// Each of the four faces is split at its base-edge midpoint into two
+  /// triangles -> 8 facets, painted in an alternating light/dark checker (the
+  /// lander look) modulated by Lambert vs the sun. Drawn back-to-front so it
+  /// reads as solid.
   void _drawCone(
       Canvas canvas, Offset c, VesselView v, double sizePx, Color tint) {
-    // Cone axes in screen px: nose (forward) and the base plane (right/up of the
-    // craft) projected onto the camera basis.
+    // Project a craft-space direction onto the camera screen plane (px).
     Offset axis(Vector3 worldDir) =>
         Offset(worldDir.dot(view.right), -worldDir.dot(view.up));
     final noseDir = axis(v.forwardW);
-    final rightDir = axis(v.upW.cross(v.forwardW).normalized);
+    // Craft right/up axes spanning the base plane (perpendicular to the nose).
+    final craftRight = v.upW.cross(v.forwardW).normalized;
+    final rightDir = axis(craftRight);
     final upDir = axis(v.upW);
 
     final len = sizePx * 1.4;
     final rad = sizePx * 0.6;
     final apex = c + noseDir * len;
-    const seg = 12;
-    final base = <Offset>[];
-    final base3 = <Vector3>[]; // world-dir of each rim point (for lighting)
-    for (var i = 0; i < seg; i++) {
-      final a = i / seg * 2 * math.pi;
-      final r = v.upW.cross(v.forwardW).normalized * math.cos(a) +
-          v.upW * math.sin(a);
-      base3.add(r);
-      base.add(c + (rightDir * math.cos(a) + upDir * math.sin(a)) * rad);
+    // Engine exhaust opposite the nose, scaled by throttle — drawn first so the
+    // pyramid overdraws its root (matches the lander flame on the other models).
+    if (v.throttle > 0.02) {
+      final flameLen = sizePx * (1.0 + 2.0 * v.throttle);
+      final tail = c - noseDir * flameLen;
+      canvas.drawLine(
+          c,
+          tail,
+          Paint()
+            ..color = const Color(0xCCFF8C42)
+            ..strokeWidth = (sizePx * 0.5).clamp(1.5, 8.0)
+            ..strokeCap = StrokeCap.round);
+      // Hot inner core.
+      canvas.drawLine(
+          c,
+          Offset.lerp(c, tail, 0.55)!,
+          Paint()
+            ..color = const Color(0xEEFFE08A)
+            ..strokeWidth = (sizePx * 0.25).clamp(1.0, 4.0)
+            ..strokeCap = StrokeCap.round);
     }
+    // 4 square-base corners (on the diagonals so the base reads as a square).
+    final corner = <Offset>[];
+    final corner3 = <Vector3>[]; // world-dir of each corner (for lighting/depth)
+    for (var i = 0; i < 4; i++) {
+      final a = (i + 0.5) / 4 * 2 * math.pi;
+      corner3.add((craftRight * math.cos(a) + v.upW * math.sin(a)).normalized);
+      corner.add(c + (rightDir * math.cos(a) + upDir * math.sin(a)) * rad);
+    }
+    final dark = _scale(tint, 0.55); // the darker checker tone
 
-    // Each side face: apex + two adjacent rim points. Outward normal ~ the rim
-    // direction tilted toward the nose; Lambert vs the sun.
-    final faces = <({Path path, double bright, double depth})>[];
-    for (var i = 0; i < seg; i++) {
-      final j = (i + 1) % seg;
-      final p = Path()
-        ..moveTo(apex.dx, apex.dy)
-        ..lineTo(base[i].dx, base[i].dy)
-        ..lineTo(base[j].dx, base[j].dy)
-        ..close();
-      final normal = (base3[i] + base3[j]).normalized * 0.7 + v.forwardW * 0.3;
-      final bright = (normal.normalized.dot(v.sunW)).clamp(0.0, 1.0);
-      // Depth: toward/away — average the rim points' along-forward component.
-      final depth = -(base3[i] + base3[j]).dot(view.forward);
-      faces.add((path: p, bright: 0.25 + 0.75 * bright, depth: depth));
+    // Two facets per face (split at the edge midpoint) -> 8, checkered by the
+    // GLOBAL facet index so it goes light/dark/light/dark all the way round.
+    final faces = <({Path path, double bright, double depth, bool dark})>[];
+    for (var i = 0; i < 4; i++) {
+      final j = (i + 1) % 4;
+      final mid = Offset.lerp(corner[i], corner[j], 0.5)!;
+      final mid3 = (corner3[i] + corner3[j]).normalized;
+      // Face outward normal: base dirs tilted toward the nose. Lambert vs sun.
+      // A high ambient floor (0.5) so the craft marker stays legible even on the
+      // night side — it's a UI marker, not a realistically-lit body, and a dark
+      // void box read as a render artifact.
+      final normal = (corner3[i] + corner3[j]).normalized * 0.7 +
+          v.forwardW * 0.3;
+      final bright = 0.5 + 0.5 * (normal.normalized.dot(v.sunW)).clamp(0.0, 1.0);
+      final depth = -mid3.dot(view.forward);
+      // Sub-triangle A: apex, corner i, mid.
+      faces.add((
+        path: Path()
+          ..moveTo(apex.dx, apex.dy)
+          ..lineTo(corner[i].dx, corner[i].dy)
+          ..lineTo(mid.dx, mid.dy)
+          ..close(),
+        bright: bright,
+        depth: depth,
+        dark: (2 * i).isOdd, // = false -> light
+      ));
+      // Sub-triangle B: apex, mid, corner j.
+      faces.add((
+        path: Path()
+          ..moveTo(apex.dx, apex.dy)
+          ..lineTo(mid.dx, mid.dy)
+          ..lineTo(corner[j].dx, corner[j].dy)
+          ..close(),
+        bright: bright,
+        depth: depth,
+        dark: (2 * i + 1).isOdd, // = true -> dark
+      ));
     }
+    // Square BASE cap so the pyramid isn't open underneath. Its outward normal
+    // is -nose; it sits opposite the apex, so its depth tracks the nose
+    // direction (base toward the viewer when the nose points away).
+    final baseNormal = (-v.forwardW).normalized;
+    final baseBright = 0.5 + 0.5 * (baseNormal.dot(v.sunW)).clamp(0.0, 1.0);
+    faces.add((
+      path: Path()
+        ..moveTo(corner[0].dx, corner[0].dy)
+        ..lineTo(corner[1].dx, corner[1].dy)
+        ..lineTo(corner[2].dx, corner[2].dy)
+        ..lineTo(corner[3].dx, corner[3].dy)
+        ..close(),
+      bright: baseBright,
+      depth: v.forwardW.dot(view.forward),
+      dark: true, // a flat dark underside
+    ));
     faces.sort((a, b) => a.depth.compareTo(b.depth)); // far first
     for (final f in faces) {
-      canvas.drawPath(f.path, Paint()..color = _scale(tint, f.bright));
+      final c = _scale(f.dark ? dark : tint, f.bright);
+      canvas.drawPath(f.path, Paint()..color = c);
     }
-    // Outline for definition.
+    // Nose tip for definition.
     canvas.drawCircle(c, 1.5, Paint()..color = tint);
   }
 
@@ -350,6 +588,13 @@ class TopDownPainter extends CustomPainter {
       final ai = beh[i] == behindPass;
       final bi = beh[i + 1] == behindPass;
       if (!ai && !bi) continue;
+      // Break the line at NaN points (underground / culled) — no streak.
+      if (pts[i].x.isNaN ||
+          pts[i].y.isNaN ||
+          pts[i + 1].x.isNaN ||
+          pts[i + 1].y.isNaN) {
+        continue;
+      }
       var pa = project(pts[i].x, pts[i].y);
       var pb = project(pts[i + 1].x, pts[i + 1].y);
       // At a behind<->front transition draw only HALF the straddling segment (to
@@ -357,6 +602,29 @@ class TopDownPainter extends CustomPainter {
       if (ai && !bi) pb = Offset.lerp(pa, pb, 0.5)!;
       if (bi && !ai) pa = Offset.lerp(pa, pb, 0.5)!;
       final seg = _clipSegment(pa, pb, clip);
+      if (seg != null) canvas.drawLine(seg.$1, seg.$2, paint);
+    }
+  }
+
+  /// The focused vessel's FLOWN breadcrumb trail (screen px from the snapshot).
+  /// Solid cyan, fading toward the oldest point so the newest path reads
+  /// strongest. NaN points (camera-culled) break the line rather than streaking
+  /// across the screen.
+  void _drawFlownTrail(
+      Canvas canvas, Offset Function(double, double) project, Rect clip) {
+    final pts = snapshot.trailPx;
+    if (pts.length < 2) return;
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5
+      ..strokeCap = StrokeCap.round;
+    for (var i = 0; i < pts.length - 1; i++) {
+      final a = pts[i], b = pts[i + 1];
+      if (a.x.isNaN || a.y.isNaN || b.x.isNaN || b.y.isNaN) continue;
+      // Older points fade out: alpha ramps from ~0.1 (oldest) to 0.9 (newest).
+      final t = i / (pts.length - 1);
+      paint.color = const Color(0xFF4FC3F7).withValues(alpha: 0.1 + 0.8 * t);
+      final seg = _clipSegment(project(a.x, a.y), project(b.x, b.y), clip);
       if (seg != null) canvas.drawLine(seg.$1, seg.$2, paint);
     }
   }
@@ -395,9 +663,6 @@ class TopDownPainter extends CustomPainter {
   //  * The NIGHT limb is dark (no incoming sunlight to scatter).
   // Direction to the sun arrives in screen space (sunX right, sunY up — but
   // screen Y is flipped vs world, so we negate sunY).
-
-  // Default day-sky tint (used when a body has no specific atmosphere colour).
-  static const Color _rayleighBlue = Color(0xFF6FB4FF);
 
   /// Draws the equirectangular star map as a sky window: instead of stretching
   /// the whole panorama flat, we crop a sub-rectangle of it centred on the
@@ -604,18 +869,98 @@ class TopDownPainter extends CustomPainter {
     );
   }
 
-  /// Outer atmosphere halo, lit by the SAME 3D Lambert model as the sphere (not
-  /// a 2D sweep — that snapped between modes). Each point around the limb has a
-  /// camera-frame normal (cosθ, sinθ, 0); we rotate it to world and dot with the
-  /// sun. This makes the lit crescent rotate smoothly and the night side go dark,
-  /// while a separate forward-scatter term lights the whole ring when the sun is
-  /// directly behind the body — all one continuous formula, no mode switch.
-  void _atmosphereHalo(Canvas canvas, Offset c, double rPx, Size size,
-      {required SceneCamera view,
-      required Vector3 sunWorld,
-      Color tint = _rayleighBlue,
-      double thickness = 0.22}) {
-    final halo = AtmosphereHalo(bodyRadiusPx: rPx, thicknessFraction: thickness);
+  // Default day-sky tint (used when a body has no specific atmosphere colour).
+  static const Color _rayleighBlue = Color(0xFF6FB4FF);
+
+  // Warm terminator / low-sun scatter colour.
+  static const Color _atmoWarm = Color(0xFFFF9D5C);
+
+  /// Draws the per-pixel atmosphere with [atmoShader]. Sets the shell geometry in
+  /// CAMERA space (the planet centre relative to the eye, scaled to planet-radius
+  /// units for float precision), the focal length (for the per-pixel ray), the
+  /// atmosphere thickness, the day + warm tints, and the sun direction; then
+  /// paints a viewport-filling rect — the shader returns 0 for rays that miss the
+  /// atmosphere, so only the limb/horizon band lights up. Correct at all altitudes.
+  void _atmosphereShaderPass(
+      Canvas canvas, Size size, BodyView b, Color tint, double thick) {
+    final shader = atmoShader!;
+    final r = b.radius;
+    if (r <= 0) return;
+    // Planet centre relative to the eye, in camera space (x=right, y=up, z=fwd),
+    // scaled by 1/R into planet-radius units.
+    final rel = b.worldRel - view.eyeOffset;
+    final cx = rel.dot(view.right) / r;
+    final cy = rel.dot(view.up) / r;
+    final cz = rel.dot(view.forward) / r;
+    // Sun direction in the same camera frame.
+    final sun = Vector3(b.sunWorldX, b.sunWorldY, b.sunWorldZ);
+    final sx = sun.dot(view.right), sy = sun.dot(view.up), sz = sun.dot(view.forward);
+
+    final day = tint;
+    const warm = _atmoWarm;
+    shader.setFloat(0, size.width);
+    shader.setFloat(1, size.height);
+    shader.setFloat(2, cx);
+    shader.setFloat(3, cy);
+    shader.setFloat(4, cz);
+    shader.setFloat(5, 1.0 + thick); // atmosphere top radius (radii)
+    shader.setFloat(6, view.focalPx);
+    shader.setFloat(7, day.r); // 0..1 channels (withValues exposes r/g/b doubles)
+    shader.setFloat(8, day.g);
+    shader.setFloat(9, day.b);
+    shader.setFloat(10, warm.r);
+    shader.setFloat(11, warm.g);
+    shader.setFloat(12, warm.b);
+    shader.setFloat(13, sx);
+    shader.setFloat(14, sy);
+    shader.setFloat(15, sz);
+    shader.setFloat(16, 1.0); // strength
+    canvas.drawRect(Offset.zero & size, Paint()..shader = shader);
+  }
+
+  /// The body's visible LIMB as a projected screen circle — the TRUE silhouette.
+  /// The tangent circle's centre is pulled toward the eye from the body centre by
+  /// `R²/d` and its radius is `R·√(1−(R/d)²)`; we project that circle's centre and
+  /// an edge point to screen px. Centring the atmosphere on THIS (not the body
+  /// centre, which is offset from the real limb up close and projects behind the
+  /// camera at the surface) keeps the glow on the horizon at every altitude.
+  /// Returns null for ortho or when the eye is at/below the surface.
+  ({Offset centre, double radiusPx})? _limbCircle(
+      BodyView b, SceneCamera view, Offset viewportCentre) {
+    if (view.usesDistanceCull) return null; // ortho: no perspective limb
+    final centreRel = b.worldRel; // body centre relative to focus
+    final toEye = view.eyeOffset - centreRel; // body centre -> eye
+    final d = toEye.length;
+    final r = b.radius;
+    if (!d.isFinite || d <= r * 1.0001) return null; // eye at/below surface
+    final u = toEye / d; // unit centre->eye
+    final limbCentreRel = centreRel + u * (r * r / d);
+    final limbR3 = r * math.sqrt((1 - (r / d) * (r / d)).clamp(0.0, 1.0));
+    var perp = u.cross(Vector3.unitZ);
+    if (perp.length < 1e-6) perp = u.cross(Vector3.unitX);
+    perp = perp.normalized;
+    final pc = view.projectPx(limbCentreRel);
+    final pe = view.projectPx(limbCentreRel + perp * limbR3);
+    if (pc == null || pe == null) return null;
+    final centre = Offset(viewportCentre.dx + pc.x, viewportCentre.dy - pc.y);
+    final edge = Offset(viewportCentre.dx + pe.x, viewportCentre.dy - pe.y);
+    final radiusPx = (edge - centre).distance;
+    if (!radiusPx.isFinite || radiusPx < 0.5) return null;
+    return (centre: centre, radiusPx: radiusPx);
+  }
+
+  /// The atmosphere limb glow — a SCREEN-SPACE radial gradient, NOT a mesh. A
+  /// sphere mesh has a hard geometric edge at its limb and so can never fade
+  /// softly into space; a radial-gradient shader can. This is the original
+  /// (and only correct) atmosphere: a [SweepGradient] gives the per-angle scatter
+  /// colour around the limb (lit crescent, warm terminator, backlit rim), and a
+  /// [RadialGradient] mask makes it transparent inside the body, full at the
+  /// surface ([rPx]), and **fading smoothly to zero at the outer halo edge** —
+  /// the soft falloff. Drawn at the projected centre [c] with the true surface
+  /// radius [rPx], so it sits exactly on the textured sphere's circular limb.
+  void _atmosphereHalo(Canvas canvas, Offset c, double innerPx, double outerPx,
+      Size size,
+      {required SceneCamera view, required Vector3 sunWorld, Color tint = _rayleighBlue}) {
     final right = view.right, upv = view.up, fwd = view.forward;
     // Sun in camera frame: x=right, y=up, z=toward viewer (= -forward).
     final sc = [
@@ -631,8 +976,8 @@ class TopDownPainter extends CustomPainter {
     const warm = Color(0xFFFF9D5C);
 
     // Per-angle scatter colour, baked into a SweepGradient — ONE shader, a few
-    // draw calls, instead of thousands of arcs (the perspective-zoom lag). The
-    // Lambert + warm-band logic is the same, just sampled at N stops.
+    // draw calls, instead of thousands of arcs. The Lambert + warm-band logic is
+    // sampled at N stops around the limb.
     const stops = 48;
     final colors = <Color>[];
     final positions = <double>[];
@@ -650,12 +995,13 @@ class TopDownPainter extends CustomPainter {
       colors.add(col.withValues(alpha: scatter));
       positions.add(t);
     }
-    final rect = Rect.fromCircle(center: c, radius: halo.outerRadius);
+    final rect = Rect.fromCircle(center: c, radius: outerPx);
     final sweep = SweepGradient(colors: colors, stops: positions);
 
-    // Radial mask: transparent inside the body, the glow building from the
-    // surface (rPx) out to the halo edge then fading. Multiplied with the sweep.
-    final innerFrac = halo.innerRadius / halo.outerRadius;
+    // Radial mask: transparent inside the body (up to innerPx, the surface limb),
+    // full AT the surface, fading smoothly to 0 at the outer edge (outerPx) —
+    // the soft falloff into space.
+    final innerFrac = (innerPx / outerPx).clamp(0.0, 0.999);
     final mask = RadialGradient(
       colors: const [
         Color(0x00000000), // inside the body: clear
@@ -663,7 +1009,7 @@ class TopDownPainter extends CustomPainter {
         Color(0xFFFFFFFF), // at the surface: full
         Color(0x00000000), // fade to the halo edge
       ],
-      stops: [0.0, innerFrac * 0.98, innerFrac, 1.0],
+      stops: [0.0, innerFrac * 0.985, innerFrac, 1.0],
     );
 
     // Bound the offscreen layer to the viewport so a giant halo rect doesn't
@@ -671,11 +1017,10 @@ class TopDownPainter extends CustomPainter {
     final layerBounds = rect.intersect(Offset.zero & size);
     if (layerBounds.isEmpty) return;
     canvas.saveLayer(layerBounds, Paint());
-    canvas.drawCircle(c, halo.outerRadius,
-        Paint()..shader = sweep.createShader(rect));
+    canvas.drawCircle(c, outerPx, Paint()..shader = sweep.createShader(rect));
     canvas.drawCircle(
       c,
-      halo.outerRadius,
+      outerPx,
       Paint()
         ..blendMode = BlendMode.dstIn
         ..shader = mask.createShader(rect),
@@ -686,53 +1031,6 @@ class TopDownPainter extends CustomPainter {
   double _smoothstep01(double x, double e0, double e1) {
     final t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
     return t * t * (3 - 2 * t);
-  }
-
-  /// Ultra-basic shaded disc: clip to the body circle, fill dark, then paint a
-  /// coarse grid of cells tinted by Lambert brightness. The sun arrives as a full
-  /// 3D direction (screen x,y + [sunZ] = how much it faces the camera), so the
-  /// shading is correct even when the sun is along the view axis (front-on lights
-  /// the whole disc, back-on leaves it dark) — the old 2D-only sun couldn't tell.
-  void _drawShadedDisc(Canvas canvas, Offset c, double rPx, Color base,
-      Vector3 sun, BodyShading shading, double sunZ) {
-    canvas.save();
-    canvas.clipPath(Path()..addOval(Rect.fromCircle(center: c, radius: rPx)));
-    // Night side.
-    canvas.drawCircle(c, rPx, Paint()..color = _scale(base, 0.12));
-
-    // Full 3D sun direction. sun.x/.y are the screen-plane components; sunZ is
-    // toward the camera. Normalize so the Lambert dot is a true cosine.
-    var sx = sun.x, sy = sun.y, sz = sunZ;
-    final sl = math.sqrt(sx * sx + sy * sy + sz * sz);
-    if (sl < 1e-6) {
-      sx = 0;
-      sy = 0;
-      sz = 1;
-    } else {
-      sx /= sl;
-      sy /= sl;
-      sz /= sl;
-    }
-
-    final step = math.max(2.0, rPx / 10); // ~10 cells across
-    for (var py = -rPx; py <= rPx; py += step) {
-      for (var px = -rPx; px <= rPx; px += step) {
-        final dx = px / rPx;
-        final dy = py / rPx;
-        final r2 = dx * dx + dy * dy;
-        if (r2 > 1) continue;
-        // Surface normal of the visible hemisphere at this cell (z toward
-        // camera). Screen Y is flipped vs world, so the normal's y is -dy.
-        final nz = math.sqrt(1 - r2);
-        final bright = (dx * sx + (-dy) * sy + nz * sz).clamp(0.0, 1.0);
-        if (bright <= 0.02) continue;
-        canvas.drawRect(
-          Rect.fromLTWH(c.dx + px, c.dy + py, step + 0.6, step + 0.6),
-          Paint()..color = _scale(base, 0.15 + 0.85 * bright),
-        );
-      }
-    }
-    canvas.restore();
   }
 
   Color _scale(Color base, double f) => Color.fromARGB(
@@ -813,22 +1111,22 @@ class TopDownPainter extends CustomPainter {
         c.dy - rPx < size.height + 16;
   }
 
-  /// True when the disc fully covers the viewport: centre on/near screen and the
-  /// radius reaches past the farthest corner, so the limb (and everything beyond
-  /// it — halo, rings) is entirely off-screen and need not be drawn.
-  bool _discCoversScreen(Offset c, double rPx, Size size) {
-    if (!rPx.isFinite) return false;
+  /// Distance from [c] to the FARTHEST screen corner. A circle of this radius
+  /// centred on [c] just covers the whole viewport, wherever [c] sits (including
+  /// off-screen). The sphere/disc sizes its cap to this so the surface fills the
+  /// frame regardless of where the body centre projects.
+  double _farthestCornerDist(Offset c, Size size) {
+    if (!c.dx.isFinite || !c.dy.isFinite) return size.bottomRight(Offset.zero).distance;
     double d2(double x, double y) {
       final dx = c.dx - x, dy = c.dy - y;
       return dx * dx + dy * dy;
     }
-    final far = math.sqrt([
+    return math.sqrt([
       d2(0, 0),
       d2(size.width, 0),
       d2(0, size.height),
       d2(size.width, size.height),
     ].reduce(math.max));
-    return rPx >= far;
   }
 
   /// A dashed circle (segments around the circumference) for SOI boundaries.

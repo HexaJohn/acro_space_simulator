@@ -6,7 +6,6 @@ import 'package:flutter/scheduler.dart';
 
 import '../../../domain/colony/building.dart';
 import '../../../domain/colony/city_network.dart';
-import '../../../domain/flight/delivery_flight.dart';
 import '../../../domain/planetary/atmospheric_composition.dart';
 import '../../../domain/planetary/liquid_mix.dart';
 import '../../../domain/planetary/planet_surface.dart';
@@ -79,19 +78,12 @@ class _LandedCraft {
   double phase = 0; // 0..1 PAD timeline (descend / dwell 30 s / ascend)
   bool granted = false; // one-shot payload guard
 
-  /// For a scheduled delivery, the live autonomous round-trip flight (ascent ->
-  /// orbit coast -> descent). Null = relief / a craft already on the pad (the
-  /// pad-only [phase] animation drives it). When set, the craft is rendered
-  /// in-flight at the flight's altitude/downrange until it touches down.
-  DeliveryFlight? flight;
-
   _LandedCraft({
     required this.anchor,
     required this.padTile,
     required this.isRelief,
     this.resource,
     this.payload = 0,
-    this.flight,
   });
 }
 
@@ -112,6 +104,11 @@ class _DeliverySchedule {
   /// from its payload). If false the colony fuels it from the spaceport's
   /// fuel+oxidizer stockpile; with neither, the craft stays grounded.
   bool spareFuel;
+
+  /// If true this run repeats every [intervalSec]; if false it's a ONE-TIME
+  /// delivery — dispatched once, then removed from the schedule. Defaults to a
+  /// one-time run; the editor's Recurring toggle sets it.
+  bool recurring = false;
   _DeliverySchedule({
     required this.resource,
     required this.intervalSec,
@@ -121,6 +118,11 @@ class _DeliverySchedule {
     this.timer = 0,
   });
 }
+
+/// Sentinel "resource" for a delivery that brings settlers instead of a
+/// commodity. People raise the population floor (like a relief drop) rather
+/// than topping up a stockpile.
+const String kDeliveryPeople = 'people';
 
 /// Colony architecture style — how buildings + connections are rendered and what
 /// they require. `open` = Earth-like (boxes + roads, needs breathable air);
@@ -283,8 +285,12 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
   static const double _refundFraction = 0.5;
   static const double _foodPerPersonPerSec = 0.02;
   static const double _waterPerPersonPerSec = 0.03;
-  static const double _garbagePerPersonPerSec = 0.015;
-  static const double _sewagePerPersonPerSec = 0.02;
+  // Per-capita waste output. Kept low so a handful of landfills / sewage plants
+  // keep a mid-size colony clear — the old rates (0.015 / 0.02) buried even a
+  // small colony in backlog faster than reasonable waste infrastructure could
+  // process it.
+  static const double _garbagePerPersonPerSec = 0.006;
+  static const double _sewagePerPersonPerSec = 0.008;
   static const double _baseStockCap = 200;
   static const double _taxPerWorkerPerSec = 0.05;
   static const double _researchPerPopPerSec = 0.02;
@@ -1079,6 +1085,24 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
   bool get _hasSpaceport =>
       _utils.entries.any((e) => e.value.type == 'spaceport' && _isConnected(e.key));
 
+  /// Honest one-word population trend for the status chip. Mirrors the pop
+  /// step's target so the label matches what's actually happening: without a
+  /// working spaceport the colony is stuck at its crew floor (no immigration),
+  /// so it's 'stable', not 'growing'. With a spaceport it's growing toward the
+  /// housing/happiness cap, shrinking past it, or stable at it.
+  String get _popTrend {
+    final liveHousing = math.max(0.0, _housing - _corpses);
+    final cap = liveHousing * (0.4 + 0.6 * _happiness);
+    final floor = (_landerCrew + _reliefCrew).toDouble();
+    final target = (_hasSpaceport ? math.max(cap, floor) : floor) * _foodSecurity;
+    if (!_hasSpaceport) return 'stable'; // no immigration without a spaceport
+    if (_commsDown) return 'isolated'; // blackout halts arrivals
+    const eps = 0.5;
+    if (_population < target - eps) return 'growing';
+    if (_population > target + eps) return 'shrinking';
+    return 'stable';
+  }
+
   /// True once the colony has built at least one spaceport — so if it later has
   /// none we can say it was DEMOLISHED rather than never built.
   bool _everHadSpaceport = false;
@@ -1165,18 +1189,18 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
       lonDeg: _cityLon,
       name: '${_body.name} Ascent',
     );
-    // Bridge the colony's live air/space traffic into the sim as named craft:
-    // each active delivery flight + a couple of other-player shuttles, on their
-    // own orbits so they appear with real trajectories.
+    // Bridge the colony's live cargo traffic into the sim as named craft on
+    // their own orbits, so they appear with real trajectories — one shuttle per
+    // active scheduled delivery, plus a couple of other-player shuttles.
     final traffic = <Vessel>[];
     var i = 0;
-    for (final c in _craft.where((c) => c.flight != null)) {
+    for (final c in _craft.where((c) => !c.isRelief && c.resource != null)) {
       traffic.add(SampleWorld.buildTrafficVessel(
         _body,
         id: 'cargo-$i',
-        name: '${c.resource ?? "cargo"} shuttle',
+        name: '${c.resource} shuttle',
         ownerId: 'logistics',
-        altitude: (c.flight!.altitude).clamp(50000, 800000),
+        altitude: 300000 + i * 40000,
         phase: i * 0.7,
       ));
       i++;
@@ -2201,11 +2225,12 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     if (_hostility > 0.02 && _disaster == _Disaster.none && _population > 5) {
       _autoDisasterTimer -= dt;
       if (_autoDisasterTimer <= 0) {
-        // Calm spell between strikes. Much longer than before (disasters were
-        // firing back-to-back). Higher hostility shortens it; there's always a
-        // generous floor so the colony gets clear weather to recover.
+        // Calm spell between strikes — target roughly ONE disaster per ~30 min
+        // of sim time. Higher hostility shortens it (down to ~15 min at max),
+        // plus a random spread; there's always a generous floor so the colony
+        // gets long clear stretches to recover.
         _autoDisasterTimer =
-            (260 - _hostility * 180) + math.Random().nextDouble() * 120;
+            (1800 - _hostility * 900) + math.Random().nextDouble() * 600;
         final pool = _hostilityPool();
         _disaster = _pickDisaster(pool); // weighted by planet + biome
         _disasterTime = _disaster.duration;
@@ -3477,7 +3502,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
                 SizedBox(
                     height: (_drawerHeight ?? c.maxHeight * 0.42)
                         .clamp(160.0, c.maxHeight - 140),
-                    child: _sidePane(shrinkWrap: false, horizontal: true)),
+                    child: _sidePane(horizontal: true)),
               ],
             ],
           );
@@ -3486,11 +3511,18 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
         if (!_paneOpen) {
           return _mapPane();
         }
-        return ListView(children: [
-          SizedBox(height: 320, child: _mapPane()),
-          const Divider(height: 1, color: Color(0xFF223247)),
-          _sidePane(shrinkWrap: true),
-        ]);
+        // Narrow open: NO outer page scroll. A bounded Column gives the map a
+        // fixed slice and the side panel the rest; the panel's tab body scrolls
+        // INTERNALLY (single scroll). Avoids the double-scroll/overflow from
+        // nesting the tab ListView inside an outer page ListView.
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            SizedBox(height: 320, child: _mapPane()),
+            const Divider(height: 1, color: Color(0xFF223247)),
+            Expanded(child: _sidePane()),
+          ],
+        );
       }),
     );
   }
@@ -3590,17 +3622,14 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
                 landerPad: _landerPad,
                 landedCraft: [
                   for (final c in _craft)
+                    // All craft use the simple pad animation now (no free flight),
+                    // so they report no altitude/downrange — always on their pad.
                     (
                       tile: c.padTile,
                       phase: c.phase,
                       relief: c.isRelief,
-                      // In-flight craft: height (m) above ground + downrange
-                      // offset (tiles) so the painter draws the climb/descent
-                      // arc. On-pad craft report alt 0.
-                      altM: c.flight?.altitude ?? 0,
-                      downrange: c.flight == null
-                          ? 0.0
-                          : c.flight!.downrange * _grid * 0.5,
+                      altM: 0.0,
+                      downrange: 0.0,
                     )
                 ],
                 beaconCell: _beaconCell,
@@ -3622,6 +3651,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
                 // Highlight the tile(s) under the cursor while a placement tool
                 // is active — single cell, or the footprint of a large building.
                 hoverCells: _hoverHighlight(),
+                hoverDestructive: _tool == _Tool.bulldoze,
                 onTapCell: _onTapCell,
                 // Drag-paint for Zone/Road/Bulldoze in PAINT style; single + rect
                 // styles use taps so the drag stays free for the camera.
@@ -3792,7 +3822,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     if (notes.isEmpty) {
       return _statusChip(
           Icons.rocket_launch,
-          'Pop ${_population.round()} · growing',
+          'Pop ${_population.round()} · $_popTrend',
           AppTheme.accent2,
           () => _explainAlert('healthy'));
     }
@@ -4284,7 +4314,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     );
   }
 
-  Widget _sidePane({required bool shrinkWrap, bool horizontal = false}) {
+  Widget _sidePane({bool horizontal = false}) {
     final tabBar = Container(
       color: AppTheme.panel,
       child: TabBar(
@@ -4315,17 +4345,6 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
         body(_stockTab()),
       ],
     );
-    if (shrinkWrap) {
-      // Inside an outer scroll (narrow layout) -> give the tab body a generous
-      // screen-relative height so long tabs (BUILD) get enough room; the inner
-      // ListView's own bottom padding then clears the safe area.
-      final h = MediaQuery.sizeOf(context).height * 0.9;
-      return ColoredBox(
-        color: AppTheme.bg,
-        child: Column(
-            children: [tabBar, SizedBox(height: h.clamp(420, 1400), child: views)]),
-      );
-    }
     return ColoredBox(
       color: AppTheme.bg,
       child: Column(children: [tabBar, Expanded(child: views)]),
@@ -4659,36 +4678,39 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
       ];
 
   /// Corpses + death-rate readout — a CITY metric (vital stats), not politics.
-  List<Widget> _mortalityStats() => [
-        if (_corpses > 0.5)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 3),
-            child: Row(children: [
-              Icon(Icons.dangerous,
-                  size: 14,
-                  color: _corpses > _population * 0.05
-                      ? AppTheme.danger
-                      : AppTheme.warn),
-              const SizedBox(width: 6),
-              const Expanded(
-                  child: Text('Corpses (unprocessed)', style: AppTheme.body)),
-              Text(_corpses.toStringAsFixed(0),
-                  style: AppTheme.mono.copyWith(
-                      color: _corpses > _population * 0.05
-                          ? AppTheme.danger
-                          : AppTheme.warn)),
-            ]),
-          ),
-        if (_deathRate > 0.01)
-          _statRow('Deaths', '${_deathRate.toStringAsFixed(2)}/s'),
-        if (_corpses > _population * 0.03 && _population > 10)
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Text(
-                'Corpse backlog spreading disease — build morgues / crematoria.',
-                style: AppTheme.dim.copyWith(color: AppTheme.danger)),
-          ),
-      ];
+  ///
+  /// Rows render whenever the colony is populated (not gated on the live value)
+  /// so the panel doesn't THRASH as the death rate / corpse count crosses a
+  /// threshold frame-to-frame — at zero they just sit dimmed.
+  List<Widget> _mortalityStats() {
+    if (_population < 1) return const [];
+    final corpseAlarm = _corpses > _population * 0.05;
+    final corpseColor =
+        _corpses < 0.5 ? AppTheme.textDim : (corpseAlarm ? AppTheme.danger : AppTheme.warn);
+    return [
+      Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Row(children: [
+          Icon(Icons.dangerous, size: 14, color: corpseColor),
+          const SizedBox(width: 6),
+          const Expanded(
+              child: Text('Corpses (unprocessed)', style: AppTheme.body)),
+          Text(_corpses.toStringAsFixed(0),
+              style: AppTheme.mono.copyWith(color: corpseColor)),
+        ]),
+      ),
+      _statRow('Deaths', '${_deathRate.toStringAsFixed(2)}/s'),
+      // Disease warning still appears only when the backlog is dangerous, but
+      // it's the last line so toggling it can't shove the rows above it.
+      if (_corpses > _population * 0.03 && _population > 10)
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Text(
+              'Corpse backlog spreading disease — build morgues / crematoria.',
+              style: AppTheme.dim.copyWith(color: AppTheme.danger)),
+        ),
+    ];
+  }
 
   List<Widget> _stockTab() => [
         const Text('STOCKPILE', style: AppTheme.heading),
@@ -4866,6 +4888,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     if (_reliefCooldown > 0) _reliefCooldown -= dt;
 
     // Dispatch scheduled deliveries that are due, IN LIST ORDER (priority).
+    final spent = <int, List<_DeliverySchedule>>{}; // one-time runs to drop
     _deliveries.forEach((anchor, list) {
       if (_utils[anchor]?.type != 'spaceport' || !_isConnected(anchor)) return;
       for (final sched in list) {
@@ -4878,9 +4901,22 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
           sched.timer = 0;
           continue;
         }
-        sched.timer = sched.intervalSec;
         _dispatchDelivery(anchor, pad, sched);
+        if (sched.recurring) {
+          sched.timer = sched.intervalSec;
+        } else {
+          // One-time: fired — remove it from the schedule after this pass.
+          (spent[anchor] ??= []).add(sched);
+        }
       }
+    });
+    // Drop spent one-time deliveries (after iterating, so we don't mutate the
+    // list we're walking). Clear the anchor entry when its list empties.
+    spent.forEach((anchor, runs) {
+      final list = _deliveries[anchor];
+      if (list == null) return;
+      list.removeWhere(runs.contains);
+      if (list.isEmpty) _deliveries.remove(anchor);
     });
 
     // Advance each craft; drop its payload once, at the start of the dwell.
@@ -4891,31 +4927,20 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
         done.add(c);
         continue;
       }
-      final flight = c.flight;
-      if (flight != null) {
-        // REAL delivery flight: advance the autopilot (time-compressed, fixed
-        // sub-steps for stable integration).
-        var rem = dt * _deliveryTimeWarp;
-        while (rem > 1e-4 && flight.phase != DeliveryPhase.done) {
-          final s = math.min(0.1, rem);
-          rem -= s;
-          flight.advance(s);
-        }
-        // Cargo drops the moment it touches down to unload.
-        if (!c.granted && flight.phase == DeliveryPhase.unload) {
-          c.granted = true;
-          _stock[c.resource!] =
-              (_stockOf(c.resource!) + c.payload).clamp(0.0, _stockCap);
-        }
-        if (flight.phase == DeliveryPhase.done) done.add(c);
-        continue;
-      }
-      // Relief / simple pad-only craft: the original on-pad dwell animation.
+      // All visiting craft (relief + deliveries) use the simple pad animation:
+      // descend -> dwell (drop payload) -> lift off.
       c.phase += dt / _craftTotalSec;
       if (!c.granted && c.phase >= 0.12) {
         c.granted = true;
         if (c.isRelief) {
           _grantReliefPayload();
+        } else if (c.resource == kDeliveryPeople) {
+          // Settlers stick: raise housing + the population floor (like relief).
+          final n = c.payload.round();
+          _housing += n;
+          _reliefCrew += n;
+          _population += n;
+          _blocked = 'Settler transport arrived: +$n colonists.';
         } else if (c.resource != null) {
           _stock[c.resource!] =
               (_stockOf(c.resource!) + c.payload).clamp(0.0, _stockCap);
@@ -4944,10 +4969,14 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
 
   /// Send one delivery craft to [pad], applying the schedule's fuel rule.
   void _dispatchDelivery(int anchor, int pad, _DeliverySchedule sched) {
+    // People are passengers, not cargo: their count isn't cut by return fuel.
+    // Commodities are: self-fuelling shaves the return propellant off the load.
+    final isPeople = sched.resource == kDeliveryPeople;
     final returnFuel = _returnFuelFor(sched.amount);
     double delivered;
     if (sched.spareFuel) {
-      delivered = (sched.amount - returnFuel).clamp(0.0, sched.amount);
+      delivered =
+          isPeople ? sched.amount : (sched.amount - returnFuel).clamp(0.0, sched.amount);
     } else {
       final half = returnFuel / 2;
       if (_stockOf(Commodity.fuel) < half ||
@@ -4961,41 +4990,21 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
       _stock[Commodity.oxidizer] = _stockOf(Commodity.oxidizer) - half;
       delivered = sched.amount;
     }
-    // The delivery flies a REAL inbound trip: it arrives from a parking orbit,
-    // descends onto the pad (autopilot), unloads, then climbs back to orbit.
-    final flight = DeliveryFlight.inbound(
-      mu: _body.mu,
-      bodyRadius: _body.radius,
-      dryMass: 3000,
-      maxThrust: 4.0 * 3000 * (_body.mu / (_body.radius * _body.radius)),
-      exhaustVelocity: 300 * 9.80665,
-      targetOrbitAlt: _deliveryOrbitAlt,
-      fuel: 6000,
-      loadSeconds: 8,
-      unloadSeconds: 30,
-    );
+    // A delivery uses the SIMPLE pad animation (like Request Assistance): the
+    // craft descends onto its pad, dwells while it unloads, then lifts off — no
+    // free-flight autopilot (which missed the pad + looked erratic).
     _craft.add(_LandedCraft(
         anchor: anchor,
         padTile: pad,
         isRelief: false,
         resource: sched.resource,
-        payload: delivered,
-        flight: flight));
+        payload: delivered));
   }
 
-  /// Parking-orbit altitude deliveries fly to/from — just above the atmosphere
-  /// (or a small fraction of the radius on airless worlds).
-  double get _deliveryOrbitAlt {
-    final atmo = _body.atmosphere?.atmosphereHeight ?? 0;
-    return math.max(atmo + 20000, _body.radius * 0.03);
-  }
-
-  /// Sim-seconds of flight advanced per real second — compresses a multi-minute
-  /// ascent/descent into a watchable trip.
-  static const double _deliveryTimeWarp = 25.0;
-
-  /// Resources that can be flown in on a scheduled delivery.
+  /// Resources that can be flown in on a scheduled delivery. 'people' is a
+  /// special run that brings settlers instead of a commodity.
   static const List<String> _deliverable = [
+    kDeliveryPeople,
     Commodity.food,
     Commodity.water,
     Commodity.oxygen,
@@ -5061,10 +5070,10 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
                                   style: AppTheme.mono
                                       .copyWith(color: AppTheme.warn)),
                               title: Text(
-                                  '${list[i].resource} · ${list[i].amount.toStringAsFixed(0)}u',
+                                  '${list[i].resource} · ${list[i].amount.toStringAsFixed(0)}${list[i].resource == kDeliveryPeople ? " pax" : "u"}',
                                   style: AppTheme.body),
                               subtitle: Text(
-                                  'every ${list[i].intervalSec.toStringAsFixed(0)}s · ${padLabel(list[i].padIndex)}'
+                                  '${list[i].recurring ? "every ${list[i].intervalSec.toStringAsFixed(0)}s" : "one-time"} · ${padLabel(list[i].padIndex)}'
                                   '${list[i].spareFuel ? " · self-fuel" : " · colony-fuel"}',
                                   style: AppTheme.dim),
                               trailing: Row(
@@ -5128,6 +5137,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     var resource = sched.resource;
     var interval = sched.intervalSec;
     var spareFuel = sched.spareFuel;
+    var recurring = sched.recurring;
     var padIndex = sched.padIndex;
     final amount = sched.amount;
     final returnFuel = _returnFuelFor(amount);
@@ -5157,14 +5167,33 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
                     ),
                 ]),
                 const SizedBox(height: 10),
-                Text('Every ${interval.toStringAsFixed(0)} s', style: AppTheme.dim),
-                Slider(
-                  value: interval,
-                  min: 15,
-                  max: 120,
-                  divisions: 7,
-                  onChanged: (v) => setSheet(() => interval = v),
+                // Recurring toggle: off (default) = a single one-time run; on =
+                // repeats on the interval below.
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  activeColor: AppTheme.accent2,
+                  value: recurring,
+                  onChanged: (v) => setSheet(() => recurring = v ?? false),
+                  title: const Text('Recurring', style: AppTheme.body),
+                  subtitle: Text(
+                      recurring
+                          ? 'Repeats automatically on the interval below.'
+                          : 'One-time delivery — flies once, then clears.',
+                      style: AppTheme.dim),
                 ),
+                if (recurring) ...[
+                  Text('Every ${interval.toStringAsFixed(0)} s',
+                      style: AppTheme.dim),
+                  Slider(
+                    value: interval,
+                    min: 15,
+                    max: 120,
+                    divisions: 7,
+                    onChanged: (v) => setSheet(() => interval = v),
+                  ),
+                ],
                 const Text('Pad', style: AppTheme.dim),
                 Wrap(spacing: 6, runSpacing: 6, children: [
                   ChoiceChip(
@@ -5194,9 +5223,13 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
                   title: const Text('Craft carries spare fuel',
                       style: AppTheme.body),
                   subtitle: Text(
-                      spareFuel
-                          ? 'Delivers ${(amount - returnFuel).clamp(0, amount).toStringAsFixed(0)}u (return fuel cut from cargo).'
-                          : 'Delivers ${amount.toStringAsFixed(0)}u; colony burns ${returnFuel.toStringAsFixed(0)} fuel+oxidizer.',
+                      resource == kDeliveryPeople
+                          ? (spareFuel
+                              ? 'Brings ${amount.toStringAsFixed(0)} settlers; carries its own return fuel.'
+                              : 'Brings ${amount.toStringAsFixed(0)} settlers; colony burns ${returnFuel.toStringAsFixed(0)} fuel+oxidizer for the return.')
+                          : (spareFuel
+                              ? 'Delivers ${(amount - returnFuel).clamp(0, amount).toStringAsFixed(0)}u (return fuel cut from cargo).'
+                              : 'Delivers ${amount.toStringAsFixed(0)}u; colony burns ${returnFuel.toStringAsFixed(0)} fuel+oxidizer.'),
                       style: AppTheme.dim),
                 ),
                 const SizedBox(height: 6),
@@ -5212,9 +5245,12 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
                         ..resource = resource
                         ..intervalSec = interval
                         ..spareFuel = spareFuel
+                        ..recurring = recurring
                         ..padIndex = padIndex;
                       if (isNew) {
-                        sched.timer = interval;
+                        // One-time runs dispatch promptly (short delay so the
+                        // craft animation reads); recurring waits a full cycle.
+                        sched.timer = recurring ? interval : 2.0;
                         (_deliveries[anchor] ??= []).add(sched);
                       }
                     });
@@ -5233,10 +5269,11 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
   /// Context menu for a functional building. Generic actions (bulldoze) plus a
   /// few type-specific ones (the reactor's "disable safety" easter egg).
   void _showBuildingMenu(int anchor, CitySpec spec) {
+    final status = _buildingStatus(anchor, spec);
     final actions = <Widget>[
       _ctxAction(Icons.info_outline, 'Details',
-          '${_utilStageLabel(anchor)} · ${_isConnected(anchor) ? "connected" : "cut off"}',
-          AppTheme.accent2, () => _showResourceDetailForBuilding(spec)),
+          '${status.label} · ${_isConnected(anchor) ? "connected" : "cut off"}',
+          status.color, () => _showResourceDetailForBuilding(anchor, spec)),
     ];
     // Reactor easter egg: SCRAM the safeties for a meltdown.
     if (spec.type == 'reactor' || spec.type == 'fusion') {
@@ -5328,10 +5365,92 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     _contextMenu(spec.label, spec.icon, spec.color, actions);
   }
 
-  String _utilStageLabel(int anchor) =>
-      _isConnected(anchor) ? 'Operating' : 'Idle';
+  /// Diagnose this building's worst current problem so the Details readout +
+  /// modal explain WHY it's flagged (matches the on-map status icons) instead
+  /// of always claiming "Operating". Checked worst-first; the first hit wins.
+  ({String label, String why, String fix, Color color}) _buildingStatus(
+      int anchor, CitySpec spec) {
+    final powerRatio =
+        _powerDraw <= 0 ? 1.0 : (_powerOut / _powerDraw).clamp(0.0, 1.0);
+    final needsPower = spec.powerDraw > 0;
+    final needsStaff = spec.jobs > 0;
 
-  void _showResourceDetailForBuilding(CitySpec spec) {
+    if (_abandoned.contains(anchor)) {
+      return (
+        label: 'Abandoned',
+        why: 'Its people walked out after this building lost road or power for '
+            'too long. An abandoned building produces nothing and decays into '
+            'rubble if the failure isn\'t fixed.',
+        fix: 'Reconnect it to the road network and restore power. Once '
+            'infrastructure is back it can be reoccupied.',
+        color: AppTheme.danger,
+      );
+    }
+    if (!_isConnected(anchor)) {
+      return (
+        label: 'Cut off',
+        why: 'This building has no road path back to the colony hub, so no '
+            'workers, goods, or services reach it. It produces nothing while '
+            'disconnected.',
+        fix: 'Lay a road connecting it to the hub network. Watch for gaps, '
+            'water, or demolished tiles breaking the path.',
+        color: AppTheme.danger,
+      );
+    }
+    if (needsPower && powerRatio < 0.95) {
+      return (
+        label: 'Unpowered',
+        why: 'The grid is supplying only ${(powerRatio * 100).toStringAsFixed(0)}% '
+            'of demand (${_powerOut.toStringAsFixed(0)}/${_powerDraw.toStringAsFixed(0)} '
+            'power). Under-powered buildings run throttled and risk abandonment.',
+        fix: 'Build more generators (solar / reactor / fusion) or demolish '
+            'non-essential draws until supply exceeds demand.',
+        color: AppTheme.warn,
+      );
+    }
+    if (needsStaff && _staffing < 0.95) {
+      return (
+        label: 'Understaffed',
+        why: 'The city can only fill ${(_staffing * 100).toStringAsFixed(0)}% of '
+            'its jobs, so this building runs short-handed and below full output. '
+            'Too few workers, or congestion stretching their commute.',
+        fix: 'Grow population (housing + a connected spaceport for immigrants), '
+            'or cut road congestion + excess jobs so workers go round.',
+        color: AppTheme.warn,
+      );
+    }
+    if (_corpses > 1) {
+      return (
+        label: 'Bodies unprocessed',
+        why: 'There are ${_corpses.toStringAsFixed(0)} unprocessed corpses in '
+            'the colony. The backlog breeds disease and litters the streets, '
+            'dragging happiness across every building.',
+        fix: 'Build / connect deathcare (cemetery, crematorium) and keep it '
+            'powered + staffed so bodies are processed faster than they pile up.',
+        color: AppTheme.warn,
+      );
+    }
+    if (_happiness < 0.5) {
+      return (
+        label: 'Unhappy',
+        why: 'Colony happiness is ${(_happiness * 100).toStringAsFixed(0)}%. '
+            'Low happiness slows growth and, if it keeps falling, risks unrest '
+            'and citizens fleeing.',
+        fix: 'Balance R/C/I demand, fund services (health, parks, transit), and '
+            'cut crime, pollution, and inequality. Some laws lift happiness.',
+        color: AppTheme.warn,
+      );
+    }
+    return (
+      label: 'Operating',
+      why: 'Connected, powered, and staffed — running at full output.',
+      fix: 'Keep it road-connected, powered, and the city well-staffed.',
+      color: AppTheme.accent2,
+    );
+  }
+
+  void _showResourceDetailForBuilding(int anchor, CitySpec spec) {
+    final status = _buildingStatus(anchor, spec);
     final io = <String>[];
     spec.inputs.forEach((k, v) => io.add('−${v.toStringAsFixed(1)} ${Commodity.name(k)}/s'));
     spec.outputs.forEach((k, v) => io.add('+${v.toStringAsFixed(1)} ${Commodity.name(k)}/s'));
@@ -5339,8 +5458,14 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     if (spec.powerDraw > 0) io.add('−${spec.powerDraw.toStringAsFixed(0)} power');
     if (spec.jobs > 0) io.add('${spec.jobs} jobs');
     if (spec.housing > 0) io.add('${spec.housing} housing');
-    _showExplain(spec.label, io.isEmpty ? 'A passive structure.' : io.join('\n'),
-        'Keep it road-connected and powered to run at full output.', spec.color);
+    // Lead the WHY with the status diagnosis, then the IO stats so the modal
+    // explains the flagged problem instead of just listing throughput.
+    final stats = io.isEmpty ? 'A passive structure.' : io.join('\n');
+    _showExplain(
+        '${spec.label} — ${status.label}',
+        '${status.why}\n\n$stats',
+        status.fix,
+        status.color);
   }
 
   /// Reactor meltdown easter egg: SCRAM the safeties and watch it go up — fires

@@ -3,6 +3,65 @@
 All notable changes to Acro Space Simulator.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.1] — 2026-06-29
+
+A render-focused bugfix + polish cycle. The headline is a ground-up rewrite of
+planet rendering — a true 3D **icosphere** with an adaptive surface quadtree and
+a physically-shaded **atmosphere shell** — plus a long tail of flight-HUD, city-
+builder, and mobile-touch fixes. **`dart analyze` clean, web build compiles.**
+
+### Planet sphere & atmosphere (render rewrite)
+- Replaced all flat-disc body fallbacks with a true 3D **icosphere** planet mesh
+  (no pole collapse); bodies are *always* the sphere, camera-UV-projected (the
+  flat billboard is gone).
+- **Ground-anchored adaptive quadtree** tessellation: densifies on the visible
+  cap near the surface, prunes off-screen nodes, coarser leaves — fixes the
+  ~0.5–5 Mm zoom-in slowdown and the low-altitude recursion explosion.
+- True 3D **atmosphere shell** with a per-pixel path-length **fragment shader**
+  (correct limb glow at every altitude), tightened shell for a defined limb, and
+  a night side that fades to transparent with no seam/gap.
+- Fixed a long tail of sphere bugs: antimeridian **seam tearing** (cap-relative
+  UV unwrap), surface quad **pop-in/swim**, the landed **dark wedge** (near-plane
+  clip), the detached **floating halo** when zoomed in, and the planet vanishing
+  in **orbit-track / grazing** views.
+- Near-surface **perspective horizon** keyed off the camera eye; deeper texture
+  zoom range; orbit line clips at the surface and occludes at the limb.
+- New **screenshot-diagnostic** + **perf-sweep** test harnesses for the sphere
+  (`test_out/` is git-ignored).
+
+### Flight & 3D sim
+- Reentry **heat gauge** + overheat warning folded into the existing HUD (no more
+  duplicate telemetry panel); flown-trajectory **breadcrumb trail** for the
+  focused vessel; flight-ready start; ALT shown in metres when low.
+- **Fine throttle** trim — an absolute 0–10% thrust scalar for landing burns —
+  plus surface-approach + landed visual cues and adaptive orbit-line resolution.
+- Fixes: engines survive **save/load** (no more dead-stick after a load); landed
+  craft co-rotate with the spinning body and no longer **burn up under time
+  warp**; inverted **roll** controls (Q/E + touch); raised max-Q so reentry
+  capsules survive a normal descent; real-canvas-height perspective FOV.
+- Debug **cheats** to disable overheat / aero-load / impact destruction (on by
+  default).
+
+### Lander / craft icon
+- The checkered 8-facet **square-base pyramid** lander is now the de-facto craft
+  icon across the city map and the 3D-sim orbiter (was a round cone); orbiter
+  gets a base cap + exhaust flame.
+
+### City builder
+- **Mobile/touch**: pinch-zoom no longer places tiles on the contact points;
+  fixed double-scroll, VAB part-list overflow, and the hover highlight stuck lit
+  while paint-dragging.
+- **Deliveries** default to one-time, add a **settler ("people")** run, and no
+  longer miss the pad / fire erratically.
+- **Balance**: residential barely pollutes (no critical air from housing);
+  spaceports are delivery-only (no passive ore); lower garbage/sewage rates;
+  auto-disaster frequency cut to ~1 per 30 min of sim time.
+- Building-details panel explains the actual status problem (not just
+  "Operating"); population chip shows the real trend; bulldoze cursor turns red.
+
+### Docs
+- Complete wiki **game guide**, promo copy, and release notes.
+
 ## [0.2.0] — 2026-06-17
 
 A large feature pass turning the engine into a playable game: a full

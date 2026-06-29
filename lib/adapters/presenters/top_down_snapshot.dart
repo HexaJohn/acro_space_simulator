@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import '../../application/ports/repositories.dart';
 import '../../application/ports/world_repositories.dart';
 import '../../domain/orbits/body_ephemeris.dart';
+import '../../domain/orbits/state_vector_converter.dart';
 import '../../domain/orbits/trajectory_service.dart';
 import '../../domain/shared/vector3.dart';
 import '../../domain/simulation/epoch.dart';
@@ -159,13 +160,32 @@ class VesselView {
   final Vector3 upW;
   final Vector3 sunW;
 
+  /// Current engine throttle 0..1 (0 = coasting). Drives the exhaust flame on
+  /// the cone-LOD marker.
+  final double throttle;
+
+  /// Surface-proximity cues: altitude above the dominant body's surface (m),
+  /// that body's radius (m), the camera-relative WORLD position of the point on
+  /// the surface directly BELOW the craft (the radial foot), and whether the
+  /// craft is landed. The painter draws a drop-line + alt label when low and a
+  /// contact ring when landed.
+  final double altSurfaceM;
+  final double bodyRadiusM;
+  final Vector3 surfaceFootRel;
+  final bool landed;
+
   const VesselView(this.name, this.x, this.y, this.headingRad, this.onRails,
       {this.path = const [],
       this.pathBehind = const [],
       this.worldRel = Vector3.zero,
       this.forwardW = Vector3.unitZ,
       this.upW = Vector3.unitY,
-      this.sunW = Vector3.unitZ});
+      this.sunW = Vector3.unitZ,
+      this.throttle = 0,
+      this.altSurfaceM = double.infinity,
+      this.bodyRadiusM = 0,
+      this.surfaceFootRel = Vector3.zero,
+      this.landed = false});
 }
 
 /// Bare-minimum HUD readouts for the focus vessel + colony totals. Strings are
@@ -181,10 +201,18 @@ class TopDownSnapshot {
   final List<BodyView> bodies;
   final List<VesselView> vessels;
   final HudView hud;
+
+  /// The focused vessel's FLOWN path (breadcrumb), in SCREEN px — the actual
+  /// trajectory already travelled, distinct from each vessel's predicted orbit
+  /// rail. Empty when no trail is supplied. Points the camera culled are NaN so
+  /// the painter's clip drops those segments.
+  final List<({double x, double y})> trailPx;
+
   const TopDownSnapshot({
     required this.bodies,
     required this.vessels,
     required this.hud,
+    this.trailPx = const [],
   });
 }
 
@@ -272,6 +300,11 @@ class TopDownSnapshotPresenter {
     // Hide unrelated bodies' rails + labels once the active body's SOI projects
     // larger than this (we're zoomed inside its neighbourhood).
     double declutterSoiPx = 1400,
+    // The focused vessel's flown breadcrumb, as positions RELATIVE TO its
+    // dominant body (the same frame as Vessel.state.position), plus that body's
+    // id so we can lift them to world coords. Projected to screen px below.
+    List<Vector3> flownTrail = const [],
+    BodyId? flownTrailBody,
   }) {
     final system = universe.current();
 
@@ -459,7 +492,9 @@ class TopDownSnapshotPresenter {
             0xFF6FB4FF,
         isGasGiant: _gasGiants.contains(key),
         soiRadius: b.soiRadius,
-        textureKey: _texturedBodies.contains(key) ? key : null,
+        // Untextured bodies fall back to the Moon surface map so every body
+        // renders as a real lit sphere (no flat blue disc fallback).
+        textureKey: _texturedBodies.contains(key) ? key : 'moon',
         orbitPath: orbitPath,
         orbitBehind: orbitBehind,
         ringInnerPath: ringInnerPath,
@@ -491,22 +526,49 @@ class TopDownSnapshotPresenter {
       var pathBehind = const <bool>[];
       final vBody = system.body(v.dominantBody);
       if (!v.landed && vBody != null && v.state.velocity.length > 1) {
-        final pts = trajectory.predictPath(
+        final bodyOrigin = bodyWorld(vBody);
+        final bodyDepth = depthOf(bodyOrigin);
+        final bodyR = vBody.radius;
+        // Projected body centre + radius, so we can test occlusion against the
+        // SILHOUETTE (limb) rather than the centre plane.
+        final bodyCentrePx = camera.projectPx(bodyOrigin - camWorld);
+        final bodyRadiusPx = camera.radiusPx(bodyOrigin - camWorld, bodyR);
+        // Lift a body-centred path point to world and project to screen px (null
+        // when culled) — the adaptive sampler bisects against this on-screen.
+        Vector3 toWorld(Vector3 p) =>
+            Vector3(bodyOrigin.x + p.x, bodyOrigin.y + p.y, bodyOrigin.z + p.z);
+        // Adaptive screen-space sampling: dense near the craft + at sharp
+        // turning points, sparse on far/straight arcs.
+        final pts = trajectory.predictPathAdaptive(
           position: v.state.position,
           velocity: v.state.velocity,
           body: vBody,
           epoch: epoch,
-          samples: 48,
+          projectPx: (p) => camera.projectPx(toWorld(p) - camWorld),
         );
-        final bodyOrigin = bodyWorld(vBody);
-        final bodyDepth = depthOf(bodyOrigin);
         final pp = <({double x, double y})>[];
         final beh = <bool>[];
         for (final p in pts) {
-          final world =
-              Vector3(bodyOrigin.x + p.x, bodyOrigin.y + p.y, bodyOrigin.z + p.z);
-          pp.add(projOrNan(world));
-          beh.add(depthOf(world) > bodyDepth);
+          // Suborbital / impacting arc: a point BELOW the surface is underground,
+          // so break the line there (NaN) instead of looping through the centre.
+          if (p.length < bodyR) {
+            pp.add((x: double.nan, y: double.nan));
+            beh.add(false);
+            continue;
+          }
+          final world = toWorld(p);
+          final sp = projOrNan(world);
+          pp.add(sp);
+          // Occluded only when BEHIND the centre plane AND inside the projected
+          // limb disc — i.e. the planet's silhouette actually covers it. A point
+          // behind the centre but outside the limb (e.g. just past the horizon on
+          // a low pass) stays visible.
+          var behind = depthOf(world) > bodyDepth;
+          if (behind && bodyCentrePx != null && !sp.x.isNaN) {
+            final dx = sp.x - bodyCentrePx.x, dy = sp.y - bodyCentrePx.y;
+            behind = (dx * dx + dy * dy) < bodyRadiusPx * bodyRadiusPx;
+          }
+          beh.add(behind);
         }
         path = pp;
         pathBehind = beh;
@@ -515,6 +577,22 @@ class TopDownSnapshotPresenter {
       // Sun direction at the vessel (world unit), for cone-mesh lighting.
       final sunW =
           vWorld.length < 1 ? Vector3.unitZ : (-vWorld).normalized;
+
+      // Surface-proximity cues. The radial foot is the point on the body's
+      // surface directly below the craft; altitude is the craft's height over it.
+      final vBodyForAlt = system.body(v.dominantBody);
+      var altSurface = double.infinity;
+      var bodyRadius = 0.0;
+      var footRel = Vector3.zero;
+      if (vBodyForAlt != null) {
+        bodyRadius = vBodyForAlt.radius;
+        final rLocal = v.state.position; // body-centred
+        final rMag = rLocal.length;
+        altSurface = rMag - bodyRadius;
+        final dir = rMag < 1e-6 ? Vector3.unitZ : rLocal * (1 / rMag);
+        final footWorld = bodyWorld(vBodyForAlt) + dir * bodyRadius;
+        footRel = footWorld - camWorld;
+      }
 
       vesselViews.add(VesselView(
         v.name,
@@ -528,17 +606,41 @@ class TopDownSnapshotPresenter {
         forwardW: fwd,
         upW: upV,
         sunW: sunW,
+        throttle: v.mode == PropagationMode.onRails ? 0.0 : v.throttle,
+        altSurfaceM: altSurface,
+        bodyRadiusM: bodyRadius,
+        surfaceFootRel: footRel,
+        landed: v.landed,
       ));
+    }
+
+    // Flown breadcrumb -> screen px. Lift each body-relative point to world via
+    // its dominant body, then project through the same camera as everything else
+    // (NaN where culled so the painter drops that segment).
+    final trailPx = <({double x, double y})>[];
+    if (flownTrail.isNotEmpty) {
+      final tb = flownTrailBody == null ? null : system.body(flownTrailBody);
+      final tbWorld = tb == null ? Vector3.zero : bodyWorld(tb);
+      for (final p in flownTrail) {
+        trailPx.add(projOrNan(tbWorld + p));
+      }
     }
 
     return TopDownSnapshot(
       bodies: bodyViews,
       vessels: vesselViews,
-      hud: _buildHud(focusVessel, focusBody, science),
+      hud: _buildHud(focusVessel, focusBody, science, epoch),
+      trailPx: trailPx,
     );
   }
 
-  HudView _buildHud(Vessel? focus, CelestialBody? body, double science) {
+  /// Altitude string: metres below 10 km (surface precision), km above.
+  static String _altStr(double m) => m.abs() < 10000
+      ? '${m.toStringAsFixed(0)} m'
+      : '${(m / 1000).toStringAsFixed(2)} km';
+
+  HudView _buildHud(
+      Vessel? focus, CelestialBody? body, double science, Epoch epoch) {
     final lines = <String>[];
     if (science > 0) lines.add('SCIENCE ${science.toStringAsFixed(0)}');
     if (focus != null) {
@@ -549,16 +651,39 @@ class TopDownSnapshotPresenter {
           '${focus.mode == PropagationMode.onRails ? "ON-RAILS" : "PHYSICS"}'
           '${focus.landed ? "  LANDED" : ""}'
           '   ${focus.hasCommLink ? "LINK" : "NO SIGNAL"}');
-      lines.add('alt ${(alt / 1000).toStringAsFixed(1)} km   '
+      lines.add('alt ${_altStr(alt)}   '
           'vel ${speed.toStringAsFixed(0)} m/s   '
           'thr ${(focus.throttle * 100).toStringAsFixed(0)}%');
 
-      // Hottest part temperature, if any thermal state.
+      // Apoapsis / periapsis altitudes (Keplerian solve from the current state).
+      if (body != null) {
+        final orbit = const StateVectorOrbitConverter().toOrbit(
+          position: focus.state.position,
+          velocity: focus.state.velocity,
+          body: body,
+          epoch: epoch,
+        );
+        final apStr = (orbit.apoapsis.isInfinite || orbit.apoapsis < 0)
+            ? '∞ (escape)'
+            : _altStr(orbit.apoapsis - body.radius);
+        lines.add('AP $apStr   PE ${_altStr(orbit.periapsis - body.radius)}');
+      }
+
+      // Hottest part temperature + a heat fraction vs its limit; an OVERHEAT
+      // warning when it nears the destruction threshold.
       if (focus.thermal.isNotEmpty) {
-        final hottest = focus.thermal
-            .map((t) => t.temperature)
-            .reduce((a, b) => a > b ? a : b);
-        lines.add('temp ${hottest.toStringAsFixed(0)} K');
+        var frac = 0.0, hottest = 0.0, limit = 0.0;
+        for (final t in focus.thermal) {
+          final f = t.maxTemperature > 0 ? t.temperature / t.maxTemperature : 0.0;
+          if (f > frac) {
+            frac = f;
+            hottest = t.temperature;
+            limit = t.maxTemperature;
+          }
+        }
+        lines.add('temp ${hottest.toStringAsFixed(0)} K'
+            '${limit > 0 ? " (${(frac * 100).toStringAsFixed(0)}% of ${limit.toStringAsFixed(0)})" : ""}');
+        if (frac > 0.85) lines.add('⚠ OVERHEATING — shed speed / pull up');
       }
       // Fuel + ore fractions.
       final fuel = _resourceTotal(focus, ResourceType.liquidFuel);

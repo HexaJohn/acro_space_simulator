@@ -33,6 +33,7 @@ import '../../domain/science/research_ledger.dart';
 import '../../domain/simulation/domain_event.dart';
 import '../../domain/orbits/state_vector_converter.dart';
 import '../../domain/thermal/eclipse_service.dart';
+import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
 import '../../domain/simulation/simulation_clock.dart';
 import '../../domain/subsystems/vessel_mining_updater.dart';
@@ -98,6 +99,14 @@ class AdvanceSimulationTick {
   /// Dynamic-pressure limit (Pa) above which a vessel breaks apart in atmosphere.
   final double maxDynamicPressure;
 
+  /// Debug cheats: skip the aerodynamic (max-Q) structural-failure check, the
+  /// overheating destruction check, and/or impact destruction (any touchdown
+  /// speed lands instead of exploding), so a craft can fly an otherwise-fatal
+  /// reentry / launch / landing profile while testing.
+  final bool disableAeroStress;
+  final bool disableOverheat;
+  final bool disableImpact;
+
   /// Optional contracts board; when set, the tick raises SituationEntered events
   /// and feeds all vessel events to it. Completed-contract rewards flow into
   /// [research] (science) and [treasury] (funds) when those are provided.
@@ -145,7 +154,15 @@ class AdvanceSimulationTick {
     this.lifeSupport = const LifeSupportService(),
     this.situations = const SituationService(),
     this.structural = const StructuralService(),
-    this.maxDynamicPressure = 80000, // ~ KSP overstress threshold
+    // Max-Q before structural failure. 80 kPa was too low — a heat-shielded
+    // reentry capsule routinely rides out higher dynamic pressure than a flimsy
+    // launch stack, and a normal descent was breaking up. 200 kPa survives a
+    // realistic reentry / steep launch; only a genuinely insane dive (very fast,
+    // very low) still tears the ship apart.
+    this.maxDynamicPressure = 200000,
+    this.disableAeroStress = false,
+    this.disableOverheat = false,
+    this.disableImpact = false,
     this.contracts,
     this.treasury,
     ResearchLedger? research,
@@ -214,12 +231,37 @@ class AdvanceSimulationTick {
           : PropagationMode.physics;
       vessel.mode = mode;
 
-      // 4. Advance motion (landed vessels stay put).
+      // 4. Advance motion. A landed vessel doesn't fly, but it must CO-ROTATE
+      // with the surface — otherwise the planet spins out from under it and it
+      // appears to drift. Rotate its body-centred position (and velocity, so it
+      // matches the local surface motion) about the body's spin axis (+Z) by
+      // omega*dt; spin the attitude to match so it stays oriented to the ground.
       if (!vessel.landed) {
         final next = mode == PropagationMode.onRails
             ? _onRails(vessel, activeBody, clock)
             : _physics(vessel, activeBody, sample, inAtmosphere, dt);
         vessel.updateState(next);
+      } else {
+        final omega = activeBody.angularVelocity;
+        if (omega != 0 && dt != 0) {
+          final dTheta = omega * dt;
+          final c = math.cos(dTheta), s = math.sin(dTheta);
+          final p = vessel.state.position;
+          // Rotate about +Z (the lon/lat pole axis).
+          final rp = Vector3(
+            p.x * c - p.y * s,
+            p.x * s + p.y * c,
+            p.z,
+          );
+          // Surface velocity at the new point = omega x r (so it tracks the spin).
+          final sv = Vector3(-omega * rp.y, omega * rp.x, 0);
+          final spinQ = Quaternion.axisAngle(Vector3(0, 0, 1), dTheta);
+          vessel.updateState(vessel.state.copyWith(
+            position: rp,
+            velocity: sv,
+            attitude: (spinQ * vessel.state.attitude).normalized,
+          ));
+        }
       }
 
       // 4b. Surface contact: a vessel that has descended below the surface
@@ -231,7 +273,8 @@ class AdvanceSimulationTick {
       }
 
       // 4c. Structural overstress: exceeding max-Q in atmosphere breaks the ship.
-      if (inAtmosphere &&
+      if (!disableAeroStress &&
+          inAtmosphere &&
           structural.check(vessel,
               ambient: sample, maxDynamicPressure: maxDynamicPressure)) {
         _publishEvents(vessel);
@@ -243,7 +286,7 @@ class AdvanceSimulationTick {
       _vesselSubsystems(vessel, activeBody, sample, inAtmosphere, dt, system, clock);
 
       // 5b. Destroy any vessel whose part overheated this tick.
-      if (_overheated(vessel)) {
+      if (!disableOverheat && _overheated(vessel)) {
         _publishEvents(vessel);
         vessels.remove(vessel.id);
         continue;
@@ -325,7 +368,16 @@ class AdvanceSimulationTick {
   ) {
     // Thermal: solar (gated by eclipse shadow), reentry, radiative cooling.
     if (vessel.thermal.isNotEmpty) {
-      final airspeed = inAtmosphere ? vessel.state.velocity.length : 0.0;
+      // Airspeed is relative to the CO-ROTATING atmosphere, not the inertial
+      // frame: the air spins with the planet (v_air = omega x r). A landed (or
+      // slowly drifting) craft moves with the air, so its airspeed is ~0 — using
+      // the inertial speed made a landed craft on a fast-spinning body read as a
+      // reentry and burn up under time warp.
+      final omega = body.angularVelocity;
+      final r = vessel.state.position;
+      final vAir = Vector3(-omega * r.y, omega * r.x, 0);
+      final airspeed =
+          inAtmosphere ? (vessel.state.velocity - vAir).length : 0.0;
 
       // Sun direction = from the vessel's body toward the system root (star).
       // Body position relative to root, negated, points back to the star.
@@ -437,7 +489,8 @@ class AdvanceSimulationTick {
       quench = splashdown.heatQuenchFraction(biome);
     }
 
-    if (!splashdown.survivesSpeed(speed, safeSpeed)) {
+    // Impact destruction (skipped by the debug cheat — any speed just lands).
+    if (!disableImpact && !splashdown.survivesSpeed(speed, safeSpeed)) {
       vessel.raise(Impact(vessel.id, body.id, speed));
       return true; // destroyed
     }

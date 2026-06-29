@@ -63,6 +63,22 @@ void main() {
     expect(r.mining, isNull);
   });
 
+  test('engines survive a save/load round-trip (thrust after load)', () {
+    final v = SampleWorld.buildVessel();
+    // The sample vessel must have at least one engine for this to be meaningful.
+    final srcEngines = v.allParts.where((p) => p.isEngine).toList();
+    expect(srcEngines, isNotEmpty,
+        reason: 'sample vessel should have an engine to test');
+    final r = restore(v);
+    final restoredEngines = r.allParts.where((p) => p.isEngine).toList();
+    expect(restoredEngines.length, srcEngines.length,
+        reason: 'all engines must restore as engines, not dead structural mass');
+    final e0 = srcEngines.first.engine!, r0 = restoredEngines.first.engine!;
+    expect(r0.maxThrustVacuum, closeTo(e0.maxThrustVacuum, 1e-6));
+    expect(r0.ispVacuum, closeTo(e0.ispVacuum, 1e-6));
+    expect(r0.propellant, e0.propellant);
+  });
+
   // Keep an unused import meaningful.
   test('mining rig fields default sensibly', () {
     final rig = MiningRig(id: 'x', baseRate: 1, powerDraw: 1);

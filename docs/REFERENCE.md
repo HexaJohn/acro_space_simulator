@@ -121,9 +121,9 @@ Source of truth:
 | Building | Size | Cost | Jobs | Power | Inputs | Outputs | Pollution | Unlock pop |
 |---|---|---|---|---|---|---|---|---|
 | **Transit Stop** | 1×1 | 30 | 4 | −5 | — | — | 0.0 | 0 |
-| **Spaceport** | 1×1 | 40 | 40 | −40 | fuel 1.00/s, oxidizer 1.00/s | food 0.30/s, water 0.30/s, ore 0.30/s, oxygen 0.30/s | 0.0 | 0 |
-| **Spaceport Complex (2×4)** | 2×4 | 160 | 110 | −110 | fuel 2.60/s, oxidizer 2.60/s | food 0.90/s, water 0.90/s, ore 0.90/s, oxygen 0.90/s | 0.0 | 200 |
-| **Starport (3×6)** | 3×6 | 360 | 240 | −240 | fuel 6.00/s, oxidizer 6.00/s | food 2.20/s, water 2.20/s, ore 2.20/s, oxygen 2.20/s | 0.0 | 800 |
+| **Spaceport** | 1×1 | 40 | 40 | −40 | fuel 1.00/s, oxidizer 1.00/s | food 0.30/s, water 0.30/s, oxygen 0.30/s | 0.0 | 0 |
+| **Spaceport Complex (2×4)** | 2×4 | 160 | 110 | −110 | fuel 2.60/s, oxidizer 2.60/s | food 0.90/s, water 0.90/s, oxygen 0.90/s | 0.0 | 200 |
+| **Starport (3×6)** | 3×6 | 360 | 240 | −240 | fuel 6.00/s, oxidizer 6.00/s | food 2.20/s, water 2.20/s, oxygen 2.20/s | 0.0 | 800 |
 
 ## Parts
 
