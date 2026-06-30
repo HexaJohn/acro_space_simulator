@@ -29,4 +29,11 @@ class InMemoryEventBus implements EventBus {
   }
 
   void clearRecent() => recent.clear();
+
+  @override
+  List<DomainEvent> drainRecent() {
+    final out = List<DomainEvent>.of(recent);
+    recent.clear();
+    return out;
+  }
 }

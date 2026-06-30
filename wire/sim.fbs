@@ -1,0 +1,175 @@
+// sim.fbs — the Dart <-> Unreal Engine wire contract for acro_space_simulator.
+//
+// ONE schema, generated for both sides so neither hand-writes marshalling:
+//   Dart:  flatc --dart -o lib/adapters/wire        wire/sim.fbs
+//   C++:   flatc --cpp  -o <UE>/Source/AcroSim/Wire wire/sim.fbs
+//
+// FRAME CONVENTIONS (sim/Dart side — the UE ingest layer MUST convert):
+//   * Right-handed, Z up. Positions in metres, velocities in m/s.
+//   * Quaternion is Hamilton convention, SCALAR-FIRST (w, x, y, z); identity
+//     is (1,0,0,0). Unreal (and glTF/Unity) use scalar-LAST (x,y,z,w) and are
+//     LEFT-handed — reorder the quaternion AND flip handedness on ingest.
+//   * Vessel pos/vel are in the dominant body's inertial frame (small numbers);
+//     body pos is relative to the system root (large numbers). Rebase to a
+//     floating origin on the UE side before casting to float.
+
+namespace acro.wire;
+
+// Fixed-size PODs — zero-copy, map straight onto C++/UE structs.
+struct Vec3 { x:double; y:double; z:double; }
+struct Quat { w:double; x:double; y:double; z:double; } // scalar-first (w,x,y,z)
+
+// ---------- sim -> renderer ----------
+
+// A part within a craft. Offset is in the vessel body frame (metres); parts
+// have no own orientation — they inherit the craft attitude. `type` is the
+// asset key (the sim's part name) the engine maps to a mesh.
+table PartFrame {
+  id:string;
+  type:string;
+  offset:Vec3;        // local offset in the vessel body frame, metres
+}
+
+// Aggregated resource gauge (summed across the craft's parts by type).
+table ResourceFrame { type:string; amount:double; capacity:double; }
+
+table VesselFrame {
+  id:string;
+  owner:string;
+  body:string;        // dominant body id
+  pos:Vec3;           // body-relative, metres
+  vel:Vec3;           // m/s
+  att:Quat;           // attitude
+  spin:Vec3;          // angular velocity, rad/s, body frame
+  throttle:double;
+  on_rails:bool;
+  landed:bool;
+  parts:[PartFrame];  // assembly manifest; rebuild the craft actor on change
+  // telemetry / gauges:
+  mass:double;        // kg
+  crew:int;
+  resources:[ResourceFrame];
+  max_temp:double;    // hottest part temperature, K
+  temp_limit:double;  // that part's destruction temperature, K
+  // orbit (about the dominant body). Radii in metres; -1 = escape / none.
+  // semi_major < 0 = hyperbolic. All -1 when landed / sub-orbital.
+  apoapsis:double;    // apoapsis radius, m (-1 = escape)
+  periapsis:double;   // periapsis radius, m
+  period:double;      // orbital period, s (-1 = escape)
+  eccentricity:double;
+  inclination:double; // rad
+  semi_major:double;  // m (negative = hyperbolic)
+  trajectory:[Vec3];  // predicted orbit-line points, body-relative metres (same frame as pos)
+  // comms:
+  connected:bool;     // relay-aware link state (v.hasCommLink)
+  comm_delay:double;  // one-way light-time to the nearest ground station, s
+}
+
+// A colony building, placed BODY-FIXED (rotates with the planet). pos/orient are
+// in the body frame; the engine parents it under the rotating body actor. lat/lon
+// (radians) let the engine ray-cast its own terrain and report a height back via
+// ReportTerrainHeight so both sides agree. `type` is the asset key (spec.type).
+table BuildingFrame {
+  id:string;
+  type:string;
+  colony:string;
+  body:string;
+  pos:Vec3;           // body-fixed, metres (includes any reported elevation)
+  orient:Quat;        // local +Z radial-up, +Y north
+  lat:double;         // radians
+  lon:double;         // radians
+}
+
+table BodyFrame {
+  id:string;
+  pos:Vec3;           // system-root-relative, metres
+  orient:Quat;        // spin about +Z composed with axial tilt
+  radius:double;      // equatorial radius, metres (scale the sphere)
+  orbit:[Vec3];       // closed orbit ring about the parent, system-root-relative
+                      // metres (SAME frame as pos). Empty for root bodies. Lets
+                      // the engine draw the body's orbit line without ephemerides.
+}
+
+// Coarse render classification of a body, so the engine can pick a master
+// material / shading path without hard-coding ids. Wire value is a ubyte.
+enum BodyKind : ubyte { Rocky = 0, Star, GasGiant, Moon, Ice }
+
+// STATIC per-body render descriptor — texture/heightmap/atmosphere mapping.
+// Unlike BodyFrame (dynamic, every tick), this is config: the engine binds it
+// once and caches it, joining to BodyFrame by `id`. The sim ships it every
+// frame anyway (it is tiny and stateless, so a late-joining client always gets
+// the catalog); gate emission in the host if body count ever grows large.
+//
+// Asset keys map to engine content (UTexture/UMaterial) via the engine's own
+// registry — the WIRE only carries the key, never the bound asset. An EMPTY key
+// means "derive from id" (engine convention, e.g. "earth" -> M_Body_earth).
+// The atmosphere fields are the sim's OWN physical numbers (it owns the air
+// model); the engine maps them onto its sky/scattering. This descriptor is
+// render-only — it never enters the determinism fingerprint.
+table BodyDescriptor {
+  id:string;                          // joins BodyFrame.id
+  kind:BodyKind = Rocky;
+  reference_radius:double;            // datum a heightmap perturbs, m (== BodyFrame.radius)
+  albedo_key:string;                  // surface/diffuse texture key ("" = derive from id)
+  height_key:string;                  // heightmap key ("" = none / derive from id)
+  material_key:string;                // master-material override key ("" = pick by kind)
+  height_scale:double;                // metres of relief at a full-white height sample (0 = engine default)
+  atmo_present:bool;                  // has an atmosphere to render at all
+  atmo_scale_height:double;           // pressure/density e-folding height, m
+  atmo_thickness:double;              // top of atmosphere above the datum, m
+  atmo_sea_level_pressure:double;     // Pa
+  atmo_sea_level_density:double;      // kg/m^3
+  atmo_sea_level_temperature:double;  // K
+}
+
+// A discrete sim event that fired this tick (staging, impact, destruction,
+// science, …). Flat shape covering every domain event: the engine switches on
+// `kind` and looks up `subject`'s transform in the frame for spatial FX.
+//   subject   = primary asset id (usually the vessel)
+//   target    = secondary id (body / 2nd vessel / part / deposit), else ""
+//   magnitude = numeric payload (speed / temperature / dose / stage index / Pa)
+//   info      = text payload (reason / cause / situation / message), else ""
+table EventFrame {
+  kind:string;
+  subject:string;
+  target:string;
+  magnitude:double;
+  info:string;
+}
+
+table WorldFrame {
+  tick:long;
+  epoch:double;       // sim time, seconds
+  fingerprint:string; // determinism hash — cheap cross-boundary desync check
+  bodies:[BodyFrame];
+  vessels:[VesselFrame];
+  buildings:[BuildingFrame];
+  events:[EventFrame]; // events that fired this tick (transient; best-effort)
+  descriptors:[BodyDescriptor]; // STATIC body render config; cache + join by id
+}
+
+// ---------- renderer -> sim ----------
+// Mirror the sealed SimCommand set exactly. Adding a case here means adding a
+// case to ApplyCommands on the Dart side and to the union below — keep in sync.
+
+table SetThrottle   { vessel:string; throttle:double; }
+table SeparateStage { vessel:string; }
+table SetAttitude   { vessel:string; heading:Vec3; }  // desired forward axis, NOT a quaternion
+table PlaceBuilding { colony:string; kind:string; gx:int; gy:int; }
+// Renderer -> sim terrain height report (render-reconciliation, not owned intent).
+table ReportTerrainHeight { body:string; lat:double; lon:double; height:double; }
+
+union Cmd { SetThrottle, SeparateStage, SetAttitude, PlaceBuilding, ReportTerrainHeight }
+
+table CmdEnvelope {
+  issued_by:string;   // PlayerId.value
+  tick:long;          // int64 — matches WorldFrame.tick and the domain tick
+  cmd:Cmd;
+}
+
+table CommandFrame {
+  at:double;          // Epoch seconds
+  cmds:[CmdEnvelope];
+}
+
+root_type WorldFrame;

@@ -35,7 +35,7 @@ extension type const KgPerCubicMetre(double value) {}
 /// Length, metres.
 extension type const Metres(double value) {}
 
-/// Standard gravity at Kerbin/Earth sea level, used in the rocket equation.
+/// Standard gravity at Earth sea level, used in the rocket equation.
 const double standardGravity = 9.80665; // m/s^2
 
 /// Stefan-Boltzmann constant, for radiative thermal transfer (W/m^2/K^4).

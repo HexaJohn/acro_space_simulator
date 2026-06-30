@@ -26,7 +26,7 @@ Vessel _withPort(String id, String portId, Vector3 pos, Vector3 vel) {
     name: id,
     ownerId: 'ai',
     state: StateVector(position: pos, velocity: vel),
-    dominantBody: const BodyId('kerbin'),
+    dominantBody: const BodyId('earth'),
     stages: [Stage(index: 0, parts: [part])],
   );
 }

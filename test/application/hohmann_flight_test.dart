@@ -17,15 +17,17 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test('planned Hohmann transfer, flown by autopilot, raises the orbit', () {
-    final system = SampleWorld.buildSystem();
-    final body = system.require(SampleWorld.kerbin);
-    final vessel = SampleWorld.buildVessel(altitude: 100000)
+    final system = SampleWorld.realSystem();
+    final body = system.require(SampleWorld.earth);
+    // Start in a clean low Earth orbit (200 km, clear of the ~140 km atmosphere)
+    // and Hohmann up to 350 km, so the craft never dips into atmospheric drag.
+    final vessel = SampleWorld.buildVessel(altitude: 200000)
       // A crewed flight computer executes the pre-planned circularization burn
       // even when the craft is on the far side of the body (no ground link).
       ..crew = CrewModule(count: 1);
 
-    final r1 = body.radius + 100000;
-    final r2 = body.radius + 250000;
+    final r1 = body.radius + 200000;
+    final r2 = body.radius + 350000;
 
     const planner = ManeuverPlanner();
     final nodes = planner.hohmann(
@@ -38,8 +40,8 @@ void main() {
       vessel: vessel.id,
       legs: [
         FlightLeg(
-          targetBody: SampleWorld.kerbin,
-          targetAltitude: 250000,
+          targetBody: SampleWorld.earth,
+          targetAltitude: 350000,
           nodes: nodes,
         ),
       ],
@@ -78,7 +80,7 @@ void main() {
 
     // Both burns spent.
     expect(after.flightPlan!.isComplete, isTrue);
-    // Apoapsis raised well above the original ~100 km orbit.
+    // Apoapsis raised well above the original ~200 km orbit.
     expect(orbit.apoapsis, greaterThan(r1 + 100000));
   });
 }

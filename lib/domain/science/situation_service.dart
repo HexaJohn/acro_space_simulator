@@ -2,9 +2,9 @@ import '../universe/celestial_body.dart';
 import '../vessel/vessel.dart';
 
 /// Classifies a vessel's flight situation into a science "situation" string
-/// (e.g. `surface:kerbin`, `lowOrbit:mun`). Domain service — the bridge between
+/// (e.g. `surface:earth`, `lowOrbit:moon`). Domain service — the bridge between
 /// the physics state and the science context, so experiment value depends on
-/// *where* it was run, exactly like KSP.
+/// *where* it was run.
 class SituationService {
   /// Altitude (m) above which an orbit counts as "high".
   final double highOrbitAltitude;

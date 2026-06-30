@@ -10,7 +10,7 @@ void main() {
       id: 'crew-report',
       baseValue: 5,
     );
-    final gained = ledger.runExperiment(exp, situation: 'lowOrbit:kerbin');
+    final gained = ledger.runExperiment(exp, situation: 'lowOrbit:earth');
     expect(gained, closeTo(5, 1e-9));
     expect(ledger.science, closeTo(5, 1e-9));
   });
@@ -19,11 +19,11 @@ void main() {
     final ledger = ResearchLedger();
     final exp = Experiment(id: 'crew-report', baseValue: 10, diminishing: 0.5);
 
-    final first = ledger.runExperiment(exp, situation: 'surface:mun');
-    final second = ledger.runExperiment(exp, situation: 'surface:mun');
+    final first = ledger.runExperiment(exp, situation: 'surface:moon');
+    final second = ledger.runExperiment(exp, situation: 'surface:moon');
     expect(second, lessThan(first));
     // Different situation resets the diminishing return.
-    final other = ledger.runExperiment(exp, situation: 'lowOrbit:mun');
+    final other = ledger.runExperiment(exp, situation: 'lowOrbit:moon');
     expect(other, closeTo(first, 1e-9));
   });
 

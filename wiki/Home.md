@@ -10,7 +10,7 @@ System, rendered from the ground to interplanetary distance without a seam.
 ACRO is **not** an arcade space game. Every flight is governed by Newtonian gravity,
 Keplerian orbits, atmospheric drag, aerodynamic heating, staging, and mass flow —
 the same systems a real mission planner reasons about, made playable. If you have
-flown Kerbal Space Program you will feel at home; if you have not, the
+flown other orbital-mechanics sims you will feel at home; if you have not, the
 [Quickstart](Quickstart.md) and [Tutorial](Tutorial.md) take you from the menu to a
 stable orbit step by step.
 

@@ -9,7 +9,7 @@ sealed class Objective {
   bool matches(DomainEvent event);
 }
 
-/// Completed by entering a particular flight situation (e.g. 'lowOrbit:mun').
+/// Completed by entering a particular flight situation (e.g. 'lowOrbit:moon').
 class ReachSituationObjective extends Objective {
   final String situation;
   ReachSituationObjective({required this.situation});

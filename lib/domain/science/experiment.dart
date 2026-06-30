@@ -1,7 +1,7 @@
 /// A science experiment a vessel can perform. Value object describing the
 /// experiment type; the [ResearchLedger] tracks how much value remains in each
-/// (experiment, situation) pair so repeats give diminishing returns — the KSP
-/// science model.
+/// (experiment, situation) pair so repeats give diminishing returns
+/// (situation-gated science).
 class Experiment {
   final String id;
 

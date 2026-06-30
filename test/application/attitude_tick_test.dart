@@ -15,7 +15,7 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   test('attitude controller slews the vessel toward its target facing in the tick',
       () {
-    final body = SampleWorld.buildSystem().require(SampleWorld.kerbin);
+    final body = SampleWorld.realSystem().require(SampleWorld.earth);
     // Landed so it stays put; we only test the attitude slew.
     final v = Vessel(
       id: const VesselId('turner'),
@@ -26,7 +26,7 @@ void main() {
         velocity: Vector3.zero,
         attitude: Quaternion.identity, // forward = +Z
       ),
-      dominantBody: SampleWorld.kerbin,
+      dominantBody: SampleWorld.earth,
       stages: const [],
       landed: true,
     )..targetFacing = Vector3.unitX;
@@ -34,7 +34,7 @@ void main() {
     final vessels = InMemoryVesselRepository([v]);
     final tick = AdvanceSimulationTick(
       vessels: vessels,
-      universe: StaticUniverseRepository(SampleWorld.buildSystem()),
+      universe: StaticUniverseRepository(SampleWorld.realSystem()),
       compute: DartCompute(),
       soi: const SoiTransitionService(),
       events: InMemoryEventBus(),

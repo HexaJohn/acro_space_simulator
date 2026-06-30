@@ -25,10 +25,13 @@ void main() {
       'end-to-end: an autonomous vessel flies a Hohmann transfer, collects '
       'science, and completes a contract that pays funds — all through the tick',
       () {
-    final system = SampleWorld.buildSystem();
-    final body = system.require(SampleWorld.kerbin);
+    final system = SampleWorld.realSystem();
+    final body = system.require(SampleWorld.earth);
 
-    final vessel = SampleWorld.buildVessel(altitude: 100000)
+    // Start in a TRUE low Earth orbit: 200 km is clear of Earth's ~140 km
+    // modelled atmosphere but below the 250 km high-orbit cutoff, so it
+    // classifies as lowOrbit:earth.
+    final vessel = SampleWorld.buildVessel(altitude: 200000)
       // Crewed flight computer executes the planned burns even out of ground
       // link (far side of the body).
       ..crew = CrewModule(count: 1);
@@ -37,15 +40,15 @@ void main() {
       Experiment(id: 'barometer', baseValue: 9),
     ]);
 
-    final r1 = body.radius + 100000;
-    final r2 = body.radius + 300000;
+    final r1 = body.radius + 200000;
+    final r2 = body.radius + 400000;
     const planner = ManeuverPlanner();
     vessel.flightPlan = FlightPlan(
       vessel: vessel.id,
       legs: [
         FlightLeg(
-          targetBody: SampleWorld.kerbin,
-          targetAltitude: 300000,
+          targetBody: SampleWorld.earth,
+          targetAltitude: 400000,
           nodes: planner.hohmann(
             mu: body.mu,
             fromRadius: r1,
@@ -59,10 +62,10 @@ void main() {
     final board = ContractBoard(contracts: [
       Contract(
         id: 'reach-orbit',
-        title: 'Reach low Kerbin orbit',
+        title: 'Reach low Earth orbit',
         rewardFunds: 40000,
         rewardScience: 5,
-        objectives: [ReachSituationObjective(situation: 'lowOrbit:kerbin')],
+        objectives: [ReachSituationObjective(situation: 'lowOrbit:earth')],
       ),
     ]);
     final treasury = Treasury(balance: 0);
