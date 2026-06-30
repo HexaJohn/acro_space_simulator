@@ -111,12 +111,6 @@ void USpaceSimSubsystem::Tick(float /*DeltaTime*/)
 	{
 		return;
 	}
-	if (Socket->GetConnectionState() == SCS_ConnectionError)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("AcroSim: connection error — disconnecting"));
-		Disconnect();
-		return;
-	}
 	FlushTx();    // drain queued outbound commands (also covers the connect race)
 	PumpSocket();
 }
@@ -169,9 +163,7 @@ void USpaceSimSubsystem::PumpSocket()
 	}
 	if (Offset > 0)
 	{
-		// NOTE: bool overload (UE 5.0-5.4). On UE 5.5+ this is also valid; if you
-		// pin to 5.5+ you may use EAllowShrinking::No instead.
-		RxBuffer.RemoveAt(0, Offset, false);
+		RxBuffer.RemoveAt(0, Offset, EAllowShrinking::No); // UE 5.5+
 	}
 }
 
@@ -456,6 +448,6 @@ void USpaceSimSubsystem::FlushTx()
 	}
 	if (TotalSent > 0)
 	{
-		TxBuffer.RemoveAt(0, TotalSent, false);
+		TxBuffer.RemoveAt(0, TotalSent, EAllowShrinking::No); // UE 5.5+
 	}
 }

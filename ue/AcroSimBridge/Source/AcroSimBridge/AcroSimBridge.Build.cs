@@ -6,7 +6,7 @@ public class AcroSimBridge : ModuleRules
 	public AcroSimBridge(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
-		CppStandard = CppStandardVersion.Cpp17;
+		CppStandard = CppStandardVersion.Cpp20; // UE 5.8 dropped C++17
 
 		PublicDependencyModuleNames.AddRange(new string[]
 		{
