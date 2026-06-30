@@ -71,6 +71,7 @@ class ClientSimulation {
       case SeparateStageCommand():
       case SetAttitudeCommand():
       case PlaceBuildingCommand():
+      case ReportTerrainHeightCommand():
         break; // not predicted in this slice
     }
   }

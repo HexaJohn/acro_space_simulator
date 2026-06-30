@@ -1,6 +1,8 @@
 import '../../domain/multiplayer/command.dart';
 import '../../domain/multiplayer/session.dart';
 import '../../domain/shared/vector3.dart';
+import '../../domain/universe/celestial_body.dart';
+import '../../domain/universe/terrain_heights.dart';
 import '../../domain/vessel/vessel.dart';
 import '../ports/repositories.dart';
 
@@ -12,9 +14,21 @@ import '../ports/repositories.dart';
 /// [SimCommand] guarantees every command type is handled.
 class ApplyCommands {
   final VesselRepository vessels;
-  ApplyCommands({required this.vessels});
+
+  /// Optional render-reconciliation terrain store fed by [ReportTerrainHeightCommand].
+  final TerrainHeights? terrain;
+
+  ApplyCommands({required this.vessels, this.terrain});
 
   void execute(Session session, CommandBatch batch) {
+    // Terrain reports are render hints, not owned player intent: apply them
+    // unconditionally (no ownership gate) and never let them touch physics.
+    for (final cmd in batch.commands) {
+      if (cmd is ReportTerrainHeightCommand) {
+        terrain?.report(BodyId(cmd.body), cmd.lat, cmd.lon, cmd.height);
+      }
+    }
+
     final allowed = session.validate(batch);
     for (final cmd in allowed) {
       switch (cmd) {
@@ -42,6 +56,9 @@ class ApplyCommands {
         case PlaceBuildingCommand():
           // Routed to the colony use case (not wired in this pass).
           break;
+
+        case ReportTerrainHeightCommand():
+          break; // handled above, ownership-exempt
       }
     }
   }

@@ -62,6 +62,26 @@ class PlaceBuildingCommand extends SimCommand {
   String get targetAssetId => colonyId;
 }
 
+/// Renderer-reported terrain height at a body surface point. NOT owned player
+/// intent — it is a render-reconciliation hint applied unconditionally and kept
+/// out of the deterministic physics and the determinism fingerprint, so it can
+/// never desync the authoritative sim. [body] is the body id; [lat]/[lon] are
+/// radians; [height] is metres above the smooth sphere.
+class ReportTerrainHeightCommand extends SimCommand {
+  final String body;
+  final double lat, lon, height;
+  const ReportTerrainHeightCommand(
+    super.issuedBy,
+    super.tick,
+    this.body,
+    this.lat,
+    this.lon,
+    this.height,
+  );
+  @override
+  String get targetAssetId => body;
+}
+
 /// A timestamped batch of commands for one tick, as received by the
 /// authoritative simulation. The clock the batch was sealed at is kept for
 /// ordering across clients.
