@@ -443,6 +443,115 @@ class BodySnapshot {
   }
 }
 
+/// Coarse render classification of a body, mirrored on the wire as a ubyte.
+/// Values MUST match `enum BodyKind` in wire/sim.fbs.
+enum BodyKind { rocky, star, gasGiant, moon, ice }
+
+/// STATIC per-body render descriptor — the texture/heightmap/atmosphere mapping
+/// an external engine binds ONCE and caches, joined to [BodySnapshot] by [id].
+/// Unlike [BodySnapshot] (dynamic transform, every tick) this is config.
+///
+/// The sim only ships what it authoritatively owns: the [kind] classification,
+/// the [referenceRadius] datum, and the atmosphere's physical numbers (it owns
+/// the air model). The asset [albedoKey]/[heightKey]/[materialKey] are forward
+/// hooks — empty means "the engine derives the asset from [id]". Render-only:
+/// never part of the determinism fingerprint.
+class BodyDescriptorSnapshot {
+  final String id;
+  final BodyKind kind;
+  final double referenceRadius; // m, datum a heightmap perturbs (== BodySnapshot.radius)
+  final String albedoKey;
+  final String heightKey;
+  final String materialKey;
+  final double heightScale; // m of relief at a full-white height sample
+  final bool atmoPresent;
+  final double atmoScaleHeight; // m
+  final double atmoThickness; // m
+  final double atmoSeaLevelPressure; // Pa
+  final double atmoSeaLevelDensity; // kg/m^3
+  final double atmoSeaLevelTemperature; // K
+
+  const BodyDescriptorSnapshot({
+    required this.id,
+    this.kind = BodyKind.rocky,
+    required this.referenceRadius,
+    this.albedoKey = '',
+    this.heightKey = '',
+    this.materialKey = '',
+    this.heightScale = 0,
+    this.atmoPresent = false,
+    this.atmoScaleHeight = 0,
+    this.atmoThickness = 0,
+    this.atmoSeaLevelPressure = 0,
+    this.atmoSeaLevelDensity = 0,
+    this.atmoSeaLevelTemperature = 0,
+  });
+
+  factory BodyDescriptorSnapshot.of(CelestialBody body, StarSystem system) {
+    final atmo = body.atmosphere;
+    return BodyDescriptorSnapshot(
+      id: body.id.value,
+      kind: _classify(body, system),
+      referenceRadius: body.radius,
+      // Keys left empty: the sim does not own art assets — the engine derives
+      // them from id. They exist so the sim CAN override per body later.
+      atmoPresent: atmo != null,
+      atmoScaleHeight: atmo?.scaleHeight ?? 0,
+      atmoThickness: atmo?.atmosphereHeight ?? 0,
+      atmoSeaLevelPressure: atmo?.seaLevelPressure ?? 0,
+      atmoSeaLevelDensity: atmo?.seaLevelDensity ?? 0,
+      atmoSeaLevelTemperature: atmo?.seaLevelTemperature ?? 0,
+    );
+  }
+
+  static BodyKind _classify(CelestialBody body, StarSystem system) {
+    if (body.isStar) return BodyKind.star;
+    if (body.isGasGiant) return BodyKind.gasGiant;
+    // A body whose parent is itself not a star (i.e. it orbits a planet) is a
+    // moon; one orbiting the star directly is a rocky planet.
+    final parent = body.parent == null ? null : system.body(body.parent!);
+    if (parent != null && !parent.isStar) return BodyKind.moon;
+    return BodyKind.rocky;
+  }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'kind': kind.index,
+        'r': referenceRadius,
+        if (albedoKey.isNotEmpty) 'albedo': albedoKey,
+        if (heightKey.isNotEmpty) 'height': heightKey,
+        if (materialKey.isNotEmpty) 'material': materialKey,
+        if (heightScale != 0) 'heightScale': heightScale,
+        'atmo': atmoPresent,
+        if (atmoPresent) ...{
+          'atmoH': atmoScaleHeight,
+          'atmoTop': atmoThickness,
+          'atmoP': atmoSeaLevelPressure,
+          'atmoRho': atmoSeaLevelDensity,
+          'atmoT': atmoSeaLevelTemperature,
+        },
+      };
+
+  factory BodyDescriptorSnapshot.fromJson(Map<String, dynamic> j) {
+    final ki = (j['kind'] as num?)?.toInt() ?? 0;
+    return BodyDescriptorSnapshot(
+      id: j['id'] as String,
+      kind: BodyKind.values[ki.clamp(0, BodyKind.values.length - 1)],
+      referenceRadius: (j['r'] as num?)?.toDouble() ?? 0,
+      albedoKey: (j['albedo'] as String?) ?? '',
+      heightKey: (j['height'] as String?) ?? '',
+      materialKey: (j['material'] as String?) ?? '',
+      heightScale: (j['heightScale'] as num?)?.toDouble() ?? 0,
+      atmoPresent: (j['atmo'] as bool?) ?? false,
+      atmoScaleHeight: (j['atmoH'] as num?)?.toDouble() ?? 0,
+      atmoThickness: (j['atmoTop'] as num?)?.toDouble() ?? 0,
+      atmoSeaLevelPressure: (j['atmoP'] as num?)?.toDouble() ?? 0,
+      atmoSeaLevelDensity: (j['atmoRho'] as num?)?.toDouble() ?? 0,
+      atmoSeaLevelTemperature: (j['atmoT'] as num?)?.toDouble() ?? 0,
+    );
+  }
+}
+
 /// A colony building, placed BODY-FIXED so it rotates with the planet. [px..pz]
 /// and the quaternion [qw..qz] are in the body frame (local +Z radial-up, +Y
 /// north); [lat]/[lon] (radians) is the surface point the renderer can ray-cast
@@ -652,6 +761,12 @@ class WorldSnapshot {
   final Map<String, VesselSnapshot> vessels;
   final Map<String, BuildingSnapshot> buildings;
 
+  /// STATIC per-body render config (texture/heightmap/atmosphere mapping), keyed
+  /// by body id — joins to [bodies]. Render-only; excluded from [fingerprint].
+  /// Shipped every frame (tiny + stateless) so a late-joining engine client
+  /// always receives the catalog without a separate handshake.
+  final Map<String, BodyDescriptorSnapshot> descriptors;
+
   /// Discrete events that fired this tick (transient; not keyed). Best-effort:
   /// a renderer that skips frames may miss some — fine for cosmetic FX/UI.
   final List<EventSnapshot> events;
@@ -662,6 +777,7 @@ class WorldSnapshot {
     this.epoch = 0,
     this.bodies = const {},
     this.buildings = const {},
+    this.descriptors = const {},
     this.events = const [],
   });
 
@@ -702,6 +818,12 @@ class WorldSnapshot {
               for (final b in system.all)
                 b.id.value: BodySnapshot.of(b, system, ephemeris, epoch),
             },
+      descriptors: system == null
+          ? const {}
+          : {
+              for (final b in system.all)
+                b.id.value: BodyDescriptorSnapshot.of(b, system),
+            },
       vessels: {
         for (final v in vessels.all())
           v.id.value: VesselSnapshot.of(v, system: system, epoch: epoch),
@@ -715,6 +837,7 @@ class WorldSnapshot {
         'tick': tick,
         'epoch': epoch,
         'bodies': [for (final b in bodies.values) b.toJson()],
+        'descriptors': [for (final d in descriptors.values) d.toJson()],
         'vessels': [for (final v in vessels.values) v.toJson()],
         'buildings': [for (final b in buildings.values) b.toJson()],
         'events': [for (final e in events) e.toJson()],
@@ -722,6 +845,7 @@ class WorldSnapshot {
 
   factory WorldSnapshot.fromJson(Map<String, dynamic> j) {
     final bodyList = (j['bodies'] as List?) ?? const [];
+    final descriptorList = (j['descriptors'] as List?) ?? const [];
     final vesselList = (j['vessels'] as List?) ?? const [];
     final buildingList = (j['buildings'] as List?) ?? const [];
     return WorldSnapshot(
@@ -731,6 +855,11 @@ class WorldSnapshot {
         for (final b in bodyList)
           (b as Map<String, dynamic>)['id'] as String:
               BodySnapshot.fromJson(b),
+      },
+      descriptors: {
+        for (final d in descriptorList)
+          (d as Map<String, dynamic>)['id'] as String:
+              BodyDescriptorSnapshot.fromJson(d),
       },
       vessels: {
         for (final v in vesselList)

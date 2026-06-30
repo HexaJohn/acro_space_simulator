@@ -96,3 +96,23 @@ struct FSimEvent
 	UPROPERTY(BlueprintReadOnly) FString Info;
 };
 
+/// STATIC body render config (texture/heightmap/atmosphere). Cache + join by Id.
+USTRUCT(BlueprintType)
+struct FSimBodyDescriptor
+{
+	GENERATED_BODY()
+	UPROPERTY(BlueprintReadOnly) FString Id;
+	UPROPERTY(BlueprintReadOnly) uint8 Kind = 0;
+	UPROPERTY(BlueprintReadOnly) float ReferenceRadiusM = 0.f;
+	UPROPERTY(BlueprintReadOnly) FString AlbedoKey;
+	UPROPERTY(BlueprintReadOnly) FString HeightKey;
+	UPROPERTY(BlueprintReadOnly) FString MaterialKey;
+	UPROPERTY(BlueprintReadOnly) float HeightScaleM = 0.f;
+	UPROPERTY(BlueprintReadOnly) bool bHasAtmosphere = false;
+	UPROPERTY(BlueprintReadOnly) float AtmoScaleHeightM = 0.f;
+	UPROPERTY(BlueprintReadOnly) float AtmoThicknessM = 0.f;
+	UPROPERTY(BlueprintReadOnly) float AtmoSeaLevelPressurePa = 0.f;
+	UPROPERTY(BlueprintReadOnly) float AtmoSeaLevelDensity = 0.f;
+	UPROPERTY(BlueprintReadOnly) float AtmoSeaLevelTempK = 0.f;
+};
+
