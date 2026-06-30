@@ -1,5 +1,7 @@
-﻿import 'dart:convert';
+﻿import 'dart:async' show StreamSubscription, unawaited;
+import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:typed_data' show Uint8List;
 import 'dart:ui' as ui show FragmentProgram, FragmentShader;
 
 import 'package:flutter/material.dart';
@@ -15,6 +17,10 @@ import '../../domain/shared/vector3.dart';
 
 import '../../adapters/events/in_memory_event_bus.dart';
 import '../../adapters/presenters/top_down_snapshot.dart';
+import '../../adapters/wire/flatbuffer_codec.dart';
+import '../../application/snapshot/world_snapshot.dart';
+import '../../domain/multiplayer/command.dart';
+import '../bridge/sim_bridge.dart';
 import '../../adapters/repositories/in_memory_repositories.dart';
 import '../../adapters/repositories/in_memory_world_repositories.dart';
 import '../../application/persistence/game_state_codec.dart';
@@ -82,6 +88,15 @@ class _SimulationViewState extends State<SimulationView>
   late final InMemoryColonyRepository _colonies;
   late final InMemoryDepositRepository _deposits;
   late final ResearchLedger _research;
+
+  // ---- Engine bridge ----
+  // Serves THIS in-process sim to an external renderer (Unreal) over the
+  // socket protocol, reusing the same repos the Flutter views render from. On
+  // web this is a no-op (no dart:io), so the game just runs in-process.
+  late final SimBridge _bridge;
+  static const FlatBufferCodec _wire = FlatBufferCodec();
+  StreamSubscription<Uint8List>? _bridgeCommands;
+  int _bridgeTick = 0;
 
   // ---- Camera target + view ----
   // The locked target cycles through vessels and major bodies. Exactly one of
@@ -348,7 +363,55 @@ class _SimulationViewState extends State<SimulationView>
     );
     _loadAtmosphereShader();
 
+    // Open the engine bridge: serve this sim to a connected Unreal renderer and
+    // apply the commands it sends back to the SAME repos the Flutter views use.
+    // No-op on web (the stub). Fire-and-forget — a bind failure (port in use)
+    // shouldn't stop the game from running in-process.
+    _bridge = createSimBridge();
+    unawaited(_bridge.start());
+    _bridgeCommands = _bridge.commandFrames.listen(_applyBridgeCommands);
+
     _ticker = createTicker(_onFrame)..start();
+  }
+
+  /// Apply a CommandFrame from a connected renderer (Unreal) to the live repos.
+  /// This is the local serve path: the single connected renderer is trusted, so
+  /// — unlike the networked [ApplyCommands] use case — there's no ownership gate.
+  /// Mirrors that use case's per-command handling so behaviour stays in step.
+  void _applyBridgeCommands(Uint8List frame) {
+    final CommandBatch batch;
+    try {
+      batch = _wire.decodeCommands(frame);
+    } catch (_) {
+      return; // ignore a malformed/foreign frame rather than crash the loop
+    }
+    for (final cmd in batch.commands) {
+      switch (cmd) {
+        case SetThrottleCommand(:final vesselId, :final throttle):
+          final v = _vessels.byId(VesselId(vesselId));
+          if (v != null) {
+            v.setThrottle(throttle);
+            _vessels.save(v);
+          }
+        case SeparateStageCommand(:final vesselId):
+          final v = _vessels.byId(VesselId(vesselId));
+          if (v != null && v.separateStage()) _vessels.save(v);
+        case SetAttitudeCommand(
+            :final vesselId,
+            :final headingX,
+            :final headingY,
+            :final headingZ
+          ):
+          final v = _vessels.byId(VesselId(vesselId));
+          if (v != null) {
+            v.targetFacing = Vector3(headingX, headingY, headingZ);
+            _vessels.save(v);
+          }
+        case PlaceBuildingCommand():
+        case ReportTerrainHeightCommand():
+          break; // colony/terrain intent not served on this path
+      }
+    }
   }
 
   /// The per-pixel atmospheric-scattering shader, loaded once. Null until ready
@@ -485,6 +548,19 @@ class _SimulationViewState extends State<SimulationView>
     // backlog instead of spiralling â€” better to skip time than freeze.
     if (steps >= 200) _accum = 0;
 
+    // Serve the freshly-advanced world to any connected renderer (Unreal). Gated
+    // on hasClients so capture+encode cost is zero when nothing's attached.
+    if (_bridge.hasClients) {
+      final world = WorldSnapshot.capture(
+        _bridgeTick++,
+        _vessels,
+        system: _universe.current(),
+        epoch: _clock.epoch,
+        colonies: _colonies,
+      );
+      _bridge.publish(_wire.encodeWorld(world));
+    }
+
     // Craft chase cam: align the camera EXACTLY with the craft's attitude so the
     // view tracks yaw, pitch AND roll. The camera builds its basis from
     // (azimuth, elevation, roll) as:
@@ -578,6 +654,8 @@ class _SimulationViewState extends State<SimulationView>
   @override
   void dispose() {
     _ticker.dispose();
+    unawaited(_bridgeCommands?.cancel());
+    unawaited(_bridge.stop());
     _keyFocus.dispose();
     _textures.dispose();
     super.dispose();
