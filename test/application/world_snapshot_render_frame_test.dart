@@ -19,7 +19,7 @@ void main() {
             angularVelocity: spin,
           );
     final vessels = InMemoryVesselRepository([vessel]);
-    final system = SampleWorld.buildSystem();
+    final system = SampleWorld.realSystem();
 
     test('VesselSnapshot carries attitude, angular velocity, and landed', () {
       final snap = WorldSnapshot.capture(0, vessels);
@@ -38,20 +38,27 @@ void main() {
       final snap =
           WorldSnapshot.capture(7, vessels, system: system, epoch: const Epoch(100));
       expect(snap.epoch, 100);
-      expect(snap.bodies.keys.toSet(), {'kerbin', 'mun'});
+      // The real system carries many bodies; assert the ones we care about are
+      // present rather than an exact set.
+      expect(snap.bodies.keys, contains('earth'));
+      expect(snap.bodies.keys, contains('moon'));
 
-      // Root star sits at the origin.
-      final kerbin = snap.bodies['kerbin']!;
-      expect(Vector3(kerbin.px, kerbin.py, kerbin.pz).length, closeTo(0, 1e-6));
-      expect(kerbin.radius, 600000);
+      // Root star (the Sun) sits at the origin.
+      final sun = snap.bodies['sun']!;
+      expect(Vector3(sun.px, sun.py, sun.pz).length, closeTo(0, 1e-6));
 
-      // Mun is offset by ~its orbit radius and its quaternion is unit-length.
-      final mun = snap.bodies['mun']!;
-      expect(Vector3(mun.px, mun.py, mun.pz).length, greaterThan(1e6));
-      final qLen = mun.qw * mun.qw +
-          mun.qx * mun.qx +
-          mun.qy * mun.qy +
-          mun.qz * mun.qz;
+      // Earth carries its real equatorial radius.
+      final earth = snap.bodies['earth']!;
+      expect(earth.radius, 6.371e6);
+
+      // The Moon is offset from the root (chains Moon -> Earth -> Sun) and its
+      // quaternion is unit-length.
+      final moon = snap.bodies['moon']!;
+      expect(Vector3(moon.px, moon.py, moon.pz).length, greaterThan(1e6));
+      final qLen = moon.qw * moon.qw +
+          moon.qx * moon.qx +
+          moon.qy * moon.qy +
+          moon.qz * moon.qz;
       expect(qLen, closeTo(1.0, 1e-9));
     });
 
@@ -74,8 +81,8 @@ void main() {
       expect(b.landed, a.landed);
 
       expect(back.bodies.keys.toSet(), snap.bodies.keys.toSet());
-      final am = snap.bodies['mun']!;
-      final bm = back.bodies['mun']!;
+      final am = snap.bodies['moon']!;
+      final bm = back.bodies['moon']!;
       expect(bm.px, closeTo(am.px, 1e-6));
       expect(bm.qw, closeTo(am.qw, 1e-12));
       expect(bm.radius, am.radius);
@@ -85,7 +92,7 @@ void main() {
       final v = VesselSnapshot.fromJson({
         'id': 'x',
         'ownerId': 'o',
-        'body': 'kerbin',
+        'body': 'earth',
         'p': [1, 2, 3],
         'v': [4, 5, 6],
         'throttle': 0.5,

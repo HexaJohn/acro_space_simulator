@@ -15,8 +15,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test('a vessel with an experiment accrues science through the tick', () {
-    final system = SampleWorld.buildSystem();
-    final body = system.require(SampleWorld.kerbin);
+    final system = SampleWorld.realSystem();
+    final body = system.require(SampleWorld.earth);
     final v = Vessel(
       id: const VesselId('probe'),
       name: 'Probe',
@@ -25,7 +25,7 @@ void main() {
         position: Vector3(body.radius + 100000, 0, 0),
         velocity: Vector3.zero,
       ),
-      dominantBody: SampleWorld.kerbin,
+      dominantBody: SampleWorld.earth,
       stages: const [],
       landed: true, // pin it so it stays in one situation
     )..experiments.add(const Experiment(id: 'goo', baseValue: 12));

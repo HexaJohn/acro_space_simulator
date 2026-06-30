@@ -10,7 +10,7 @@ import 'celestial_body.dart' show BodyId;
 /// the sim and the engine agree on where surface objects sit. Default 0 = a
 /// smooth sphere of the body's radius.
 class TerrainHeights {
-  /// Lat/lon quantization for keying (radians). ~0.0001 rad ≈ 60 m on Kerbin.
+  /// Lat/lon quantization for keying (radians). ~0.0001 rad ≈ 640 m on Earth.
   final double cellRadians;
   final Map<String, double> _heights = {};
 

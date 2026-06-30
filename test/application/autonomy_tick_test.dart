@@ -13,8 +13,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test('autopilot maneuver node raises apoapsis through the tick', () {
-    final system = SampleWorld.buildSystem();
-    final vessel = SampleWorld.buildVessel(altitude: 120000);
+    final system = SampleWorld.realSystem();
+    final vessel = SampleWorld.buildVessel(altitude: 200000);
     final apoBefore = vessel.state.velocity.length;
 
     // Schedule a 200 m/s prograde burn at t=2s.
@@ -22,7 +22,7 @@ void main() {
       vessel: vessel.id,
       legs: [
         FlightLeg(
-          targetBody: SampleWorld.kerbin,
+          targetBody: SampleWorld.earth,
           targetAltitude: 300000,
           nodes: [
             ManeuverNode(executeAt: const Epoch(2), deltaV: const Vector3(200, 0, 0)),

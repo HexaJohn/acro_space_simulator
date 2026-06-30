@@ -19,7 +19,7 @@ Vessel _coldSat(String id, Vector3 pos) {
     name: id,
     ownerId: 'p',
     state: StateVector(position: pos, velocity: Vector3.zero),
-    dominantBody: SampleWorld.kerbin,
+    dominantBody: SampleWorld.earth,
     stages: const [],
     landed: true, // pin position so the test isolates the eclipse effect
     thermal: [
@@ -37,10 +37,11 @@ Vessel _coldSat(String id, Vector3 pos) {
 
 void main() {
   test('sunlit satellite heats more than an eclipsed one', () {
-    final system = SampleWorld.buildSystem();
-    // Sun direction in the tick for the root body Kerbin is +X.
-    final sunlit = _coldSat('lit', const Vector3(3000000, 0, 0)); // +X, sunward
-    final eclipsed = _coldSat('dark', const Vector3(-3000000, 0, 0)); // -X, shadow
+    final system = SampleWorld.realSystem();
+    // Earth sits at +X relative to the Sun at epoch 0, so the sun direction in
+    // the tick (toward the Sun) is -X. Sunward hemisphere is -X; shadow is +X.
+    final sunlit = _coldSat('lit', const Vector3(-3000000, 0, 0)); // -X, sunward
+    final eclipsed = _coldSat('dark', const Vector3(3000000, 0, 0)); // +X, shadow
 
     final vessels = InMemoryVesselRepository([sunlit, eclipsed]);
     final tick = AdvanceSimulationTick(

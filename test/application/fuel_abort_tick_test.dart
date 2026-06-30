@@ -14,16 +14,16 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test('an under-fuelled autonomous transfer is aborted with an event', () {
-    final system = SampleWorld.buildSystem();
-    final body = system.require(SampleWorld.kerbin);
-    final vessel = SampleWorld.buildVessel(altitude: 100000);
+    final system = SampleWorld.realSystem();
+    final body = system.require(SampleWorld.earth);
+    final vessel = SampleWorld.buildVessel(altitude: 200000);
 
     // Demand a wildly unaffordable burn (10 km/s).
     vessel.flightPlan = FlightPlan(
       vessel: vessel.id,
       legs: [
         FlightLeg(
-          targetBody: SampleWorld.kerbin,
+          targetBody: SampleWorld.earth,
           targetAltitude: 5000000,
           nodes: [
             ManeuverNode(executeAt: const Epoch(1), deltaV: const Vector3(10000, 0, 0)),

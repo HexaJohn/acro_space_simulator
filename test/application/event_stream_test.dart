@@ -17,7 +17,7 @@ import 'package:acro_space_simulator/infrastructure/sample_world.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 ({AuthoritativeSimulation sim, InMemoryEventBus bus}) buildSim() {
-  final system = SampleWorld.buildSystem();
+  final system = SampleWorld.realSystem();
   final vessel = SampleWorld.buildVessel();
   final vessels = InMemoryVesselRepository([vessel]);
   final bus = InMemoryEventBus();
@@ -64,7 +64,7 @@ void main() {
     final (:sim, :bus) = buildSim();
 
     bus.publish(StageSeparation(const VesselId('demo-1'), 0));
-    bus.publish(Impact(const VesselId('demo-1'), const BodyId('kerbin'), 250.0));
+    bus.publish(Impact(const VesselId('demo-1'), const BodyId('earth'), 250.0));
 
     final snap = sim.snapshot();
     expect(snap.events.map((e) => e.kind), ['StageSeparation', 'Impact']);

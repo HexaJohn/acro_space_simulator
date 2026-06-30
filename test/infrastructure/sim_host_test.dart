@@ -22,7 +22,7 @@ void main() {
     final frame = codec.decodeWorld(host.frameBytes());
     expect(host.tick, 1);
     expect(frame.vessels['demo-1']!.throttle, 1.0);
-    expect(frame.bodies.keys, contains('kerbin'));
+    expect(frame.bodies.keys, contains('earth'));
   });
 
   test('an unowned command is rejected at the bridge', () {
@@ -44,7 +44,7 @@ void main() {
 
     expect(frame.vessels['demo-1']!.parts.map((p) => p.type), contains('LV-T45'));
     expect(frame.buildings.keys, contains('colony-1/refinery-1'));
-    expect(frame.buildings['colony-1/refinery-1']!.body, 'kerbin');
+    expect(frame.buildings['colony-1/refinery-1']!.body, 'earth');
   });
 
   test('a terrain-height report lifts a building radially (ownership-exempt)', () {

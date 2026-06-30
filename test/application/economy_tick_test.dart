@@ -14,16 +14,16 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test('completing a contract deposits funds and science via the tick', () {
-    final system = SampleWorld.buildSystem();
-    final vessel = SampleWorld.buildVessel(altitude: 120000);
+    final system = SampleWorld.realSystem();
+    final vessel = SampleWorld.buildVessel(altitude: 200000);
 
     final board = ContractBoard(contracts: [
       Contract(
         id: 'orbit',
-        title: 'Orbit Kerbin',
+        title: 'Orbit Earth',
         rewardFunds: 75000,
         rewardScience: 12,
-        objectives: [ReachSituationObjective(situation: 'lowOrbit:kerbin')],
+        objectives: [ReachSituationObjective(situation: 'lowOrbit:earth')],
       ),
     ]);
     final treasury = Treasury(balance: 1000);

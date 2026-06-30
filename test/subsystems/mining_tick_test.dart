@@ -29,7 +29,7 @@ void main() {
     );
     final deposit = ResourceDeposit(
       id: 'ore-field',
-      body: const BodyId('kerbin'),
+      body: const BodyId('earth'),
       latitude: 0,
       longitude: 0,
       resource: ResourceType.ore,
@@ -40,8 +40,8 @@ void main() {
       id: const VesselId('miner'),
       name: 'Miner',
       ownerId: 'p',
-      state: const StateVector(position: Vector3(600000, 0, 0), velocity: Vector3.zero),
-      dominantBody: const BodyId('kerbin'),
+      state: const StateVector(position: Vector3(6371000, 0, 0), velocity: Vector3.zero),
+      dominantBody: const BodyId('earth'),
       stages: [Stage(index: 0, parts: [drill])],
       landed: landed,
     );

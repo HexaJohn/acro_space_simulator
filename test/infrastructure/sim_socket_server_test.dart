@@ -115,7 +115,7 @@ void main() {
 
     expect(
       await first.future.timeout(const Duration(seconds: 5)),
-      containsAll(<String>{'kerbin', 'mun'}),
+      containsAll(<String>{'earth', 'moon'}),
     );
   });
 }

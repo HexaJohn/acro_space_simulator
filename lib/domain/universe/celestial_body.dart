@@ -21,7 +21,7 @@ class BodyId {
 /// context, but effectively immutable reference data — its orbit about its
 /// parent is on perfect rails.
 ///
-/// Gravity is point-mass (two-body) per KSP's patched-conic model: a vessel
+/// Gravity is point-mass (two-body) under a patched-conic model: a vessel
 /// feels exactly one body at a time, whichever sphere of influence it is in.
 class CelestialBody {
   final BodyId id;

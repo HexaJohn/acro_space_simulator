@@ -16,7 +16,7 @@ void main() {
   AdvanceSimulationTick buildTick(InMemoryVesselRepository vessels) =>
       AdvanceSimulationTick(
         vessels: vessels,
-        universe: StaticUniverseRepository(SampleWorld.buildSystem()),
+        universe: StaticUniverseRepository(SampleWorld.realSystem()),
         compute: DartCompute(),
         soi: const SoiTransitionService(),
         events: InMemoryEventBus(),
@@ -26,7 +26,7 @@ void main() {
       );
 
   Vessel faller({required double speed}) {
-    final body = SampleWorld.buildSystem().require(SampleWorld.kerbin);
+    final body = SampleWorld.realSystem().require(SampleWorld.earth);
     // Just above the surface, falling straight down.
     return Vessel(
       id: const VesselId('faller'),
@@ -36,7 +36,7 @@ void main() {
         position: Vector3(body.radius + 10, 0, 0),
         velocity: Vector3(-speed, 0, 0),
       ),
-      dominantBody: SampleWorld.kerbin,
+      dominantBody: SampleWorld.earth,
       stages: const [],
     );
   }
@@ -59,7 +59,7 @@ void main() {
     final vessels = InMemoryVesselRepository([v]);
     final tick = AdvanceSimulationTick(
       vessels: vessels,
-      universe: StaticUniverseRepository(SampleWorld.buildSystem()),
+      universe: StaticUniverseRepository(SampleWorld.realSystem()),
       compute: DartCompute(),
       soi: const SoiTransitionService(),
       events: events,

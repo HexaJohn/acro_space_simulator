@@ -26,7 +26,7 @@ void main() {
     required InMemoryColonyRepository colonies,
     required InMemoryDepositRepository deposits,
   }) {
-    final system = SampleWorld.buildSystem();
+    final system = SampleWorld.realSystem();
     return AdvanceSimulationTick(
       vessels: vessels,
       universe: StaticUniverseRepository(system),
@@ -42,7 +42,7 @@ void main() {
   }
 
   test('subsystem phase mines ore for a landed miner during the tick', () {
-    final body = SampleWorld.buildSystem().require(SampleWorld.kerbin);
+    final body = SampleWorld.realSystem().require(SampleWorld.earth);
     final ore = ResourceContainer(
         type: ResourceType.ore, capacity: 100, amount: 0, unitMass: 1);
     final power = ResourceContainer(
@@ -59,7 +59,7 @@ void main() {
       ownerId: 'p',
       // sitting on the surface (radius), zero velocity, landed
       state: StateVector(position: Vector3(body.radius, 0, 0), velocity: Vector3.zero),
-      dominantBody: SampleWorld.kerbin,
+      dominantBody: SampleWorld.earth,
       stages: [Stage(index: 0, parts: [drill])],
       landed: true,
     )..mining = MiningOperation(
@@ -70,7 +70,7 @@ void main() {
 
     final deposit = ResourceDeposit(
       id: 'd1',
-      body: SampleWorld.kerbin,
+      body: SampleWorld.earth,
       latitude: 0,
       longitude: 0,
       resource: ResourceType.ore,
@@ -98,7 +98,7 @@ void main() {
     final colony = Colony(
       id: 'base',
       name: 'Base',
-      body: SampleWorld.kerbin,
+      body: SampleWorld.earth,
       latitude: 0,
       longitude: 0,
       population: 5,
@@ -138,7 +138,7 @@ void main() {
       maxTemperature: 2500,
       surfaceArea: 6,
     );
-    final body = SampleWorld.buildSystem().require(SampleWorld.kerbin);
+    final body = SampleWorld.realSystem().require(SampleWorld.earth);
     // 10 km altitude, screaming fast horizontally -> reentry heating.
     final vessel = Vessel(
       id: const VesselId('reentry'),
@@ -148,7 +148,7 @@ void main() {
         position: Vector3(body.radius + 10000, 0, 0),
         velocity: Vector3(0, 2500, 0),
       ),
-      dominantBody: SampleWorld.kerbin,
+      dominantBody: SampleWorld.earth,
       stages: const [],
       thermal: [hull],
     );
@@ -174,7 +174,7 @@ void main() {
       maxTemperature: 2500,
       surfaceArea: 6,
     );
-    final body = SampleWorld.buildSystem().require(SampleWorld.kerbin);
+    final body = SampleWorld.realSystem().require(SampleWorld.earth);
     // Sitting ON the surface, co-rotating with the planet: inertial velocity is
     // the surface velocity (omega x r), but air-relative airspeed is ~0, so no
     // reentry heating.
@@ -188,7 +188,7 @@ void main() {
         position: r,
         velocity: Vector3(-omega * r.y, omega * r.x, 0), // surface velocity
       ),
-      dominantBody: SampleWorld.kerbin,
+      dominantBody: SampleWorld.earth,
       stages: const [],
       thermal: [hull],
     )..landed = true;
@@ -204,7 +204,7 @@ void main() {
       tick.execute(clock);
     }
     // It must SURVIVE — the co-rotation speed must not read as reentry airspeed
-    // and cook it past its destruction limit. (A reentry at ~Kerbin's surface
+    // and cook it past its destruction limit. (A reentry at ~Earth's surface
     // speed would spike thousands of K; air-relative airspeed is ~0 here.)
     final hullState = vessel.thermalOf(const PartId('hull'));
     expect(hullState, isNotNull, reason: 'vessel survived (not destroyed)');

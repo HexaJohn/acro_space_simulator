@@ -43,7 +43,7 @@ void main() {
 
     test('building offsets east/north by grid cell and stays orthonormal', () {
       final r = place.building(
-        radius: 600000,
+        radius: 6.371e6,
         lat: 0,
         lon: 0,
         gridX: 0,
@@ -51,7 +51,7 @@ void main() {
       );
       // (0,0) cell centre is 0.5 cell east + 0.5 cell north of the anchor.
       // east at lat0/lon0 is +Y, north is +Z; radius dominates +X.
-      expect(r.position.x, closeTo(600000, 1.0));
+      expect(r.position.x, closeTo(6.371e6, 1.0));
       expect(r.position.y, closeTo(0.5 * kCityCellMetres, 1e-6)); // east
       expect(r.position.z, closeTo(0.5 * kCityCellMetres, 1e-6)); // north
       // Orientation is a unit quaternion.
@@ -63,7 +63,7 @@ void main() {
   group('TerrainHeights', () {
     test('defaults to a smooth sphere (0) and stores reported heights', () {
       final t = TerrainHeights();
-      const body = BodyId('kerbin');
+      const body = BodyId('earth');
       expect(t.isEmpty, isTrue);
       expect(t.heightAt(body, 0.5, 1.0), 0);
       t.report(body, 0.5, 1.0, 123.0);
@@ -71,7 +71,7 @@ void main() {
       // A nearby lookup within a cell resolves to the same bucket.
       expect(t.heightAt(body, 0.500001, 1.000001), 123.0);
       // A different body is independent.
-      expect(t.heightAt(const BodyId('mun'), 0.5, 1.0), 0);
+      expect(t.heightAt(const BodyId('moon'), 0.5, 1.0), 0);
     });
   });
 }

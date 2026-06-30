@@ -54,11 +54,12 @@ class SimHost {
 
   int get tick => sim.session.authoritativeTick;
 
-  /// A host over the bundled sample world (Kerbin + Mun + a demo orbiter),
-  /// owned by [owner]. Single-process convenience and the server's default.
+  /// A host over the bundled sample world (the real Solar System + a demo
+  /// orbiter), owned by [owner]. Single-process convenience and the server's
+  /// default.
   factory SimHost.sample({String owner = 'player-1'}) {
-    final system = SampleWorld.buildSystem();
-    final vessel = SampleWorld.buildVessel(altitude: 120000);
+    final system = SampleWorld.realSystem();
+    final vessel = SampleWorld.buildVessel(altitude: 400000);
     final vessels = InMemoryVesselRepository([vessel]);
     final colonies = InMemoryColonyRepository()..save(SampleWorld.buildColony());
     final terrain = TerrainHeights();

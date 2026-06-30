@@ -118,7 +118,7 @@ public:
 
 	// The body whose root-relative position becomes the UE world origin.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim")
-	FString FocusBodyId = TEXT("kerbin");
+	FString FocusBodyId = TEXT("earth");
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim")
 	FString PlayerId = TEXT("player-1");

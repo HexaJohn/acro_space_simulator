@@ -14,7 +14,7 @@ void main() {
   AdvanceSimulationTick buildTick(InMemoryMegastructureRepository megas) =>
       AdvanceSimulationTick(
         vessels: InMemoryVesselRepository(),
-        universe: StaticUniverseRepository(SampleWorld.buildSystem()),
+        universe: StaticUniverseRepository(SampleWorld.realSystem()),
         compute: DartCompute(),
         soi: const SoiTransitionService(),
         events: InMemoryEventBus(),
@@ -66,7 +66,7 @@ void main() {
     final events = InMemoryEventBus();
     final tick = AdvanceSimulationTick(
       vessels: InMemoryVesselRepository(),
-      universe: StaticUniverseRepository(SampleWorld.buildSystem()),
+      universe: StaticUniverseRepository(SampleWorld.realSystem()),
       compute: DartCompute(),
       soi: const SoiTransitionService(),
       events: events,

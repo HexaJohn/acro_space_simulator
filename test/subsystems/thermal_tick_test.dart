@@ -14,7 +14,7 @@ Vessel _vesselWithThermal(PartThermalState thermal) => Vessel(
       name: 'Thermal Test',
       ownerId: 'p',
       state: const StateVector(position: Vector3(700000, 0, 0), velocity: Vector3.zero),
-      dominantBody: const BodyId('kerbin'),
+      dominantBody: const BodyId('earth'),
       stages: const [],
       thermal: [thermal],
     );

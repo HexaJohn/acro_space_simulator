@@ -6,7 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   const planner = ManeuverPlanner();
-  const mu = 3.5316e12; // Kerbin
+  const mu = 3.986004418e14; // Earth
 
   test('Hohmann from 100km to 200km gives two positive prograde burns', () {
     final r1 = 600000 + 100000.0;
