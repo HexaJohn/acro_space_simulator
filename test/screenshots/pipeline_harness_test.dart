@@ -75,21 +75,6 @@ Future<ui.Image> _loadEarthTexture(WidgetTester t) async {
   return img;
 }
 
-/// Loads the atmosphere fragment shader (null if shaders aren't available here).
-Future<ui.FragmentShader?> _loadAtmoShader(WidgetTester t) async {
-  ui.FragmentShader? s;
-  await t.runAsync(() async {
-    try {
-      final program =
-          await ui.FragmentProgram.fromAsset('shaders/atmosphere.frag');
-      s = program.fragmentShader();
-    } catch (_) {
-      s = null; // fall back to the radial halo
-    }
-  });
-  return s;
-}
-
 /// One render of the true pipeline at a camera (azimuth, elevation, range) on a
 /// landed craft at (latDeg, lonDeg). Returns the captured RGBA bytes + size for
 /// analysis, and writes the PNG.
@@ -100,7 +85,6 @@ Future<_Shot> _renderPipeline(
   required InMemoryVesselRepository vessels,
   required Vessel craft,
   required ui.Image earthTex,
-  required ui.FragmentShader? atmoShader,
   required double azimuth,
   required double elevation,
   required double rangeM,
@@ -133,7 +117,6 @@ Future<_Shot> _renderPipeline(
     snapshot,
     textures: textures,
     view: cam,
-    atmoShader: atmoShader,
     // Skybox + orbit rails OFF so space reads pure black and no thin rail lines
     // confuse the pixel analysis. Only the sphere + atmosphere + vessel marker +
     // HUD remain; the detector masks the HUD + marker regions.
@@ -317,14 +300,12 @@ void main() {
   for (final (n, azOff, tilt, rng) in atmoCombos) {
     testWidgets('PIPE atmosphere $n', (t) async {
       earthTex = await _loadEarthTexture(t);
-      final shader = await _loadAtmoShader(t);
       final look = _groundLook(azOff, tilt);
       final shot = await _renderPipeline(t, n,
           universe: universe,
           vessels: vessels,
           craft: craft,
           earthTex: earthTex,
-          atmoShader: shader,
           azimuth: look.azimuth,
           elevation: look.elevation,
           rangeM: rng);
@@ -355,14 +336,12 @@ void main() {
   for (final (n, azOff, tilt, rng) in surfCombos) {
     testWidgets('PIPE surface $n', (t) async {
       earthTex = await _loadEarthTexture(t);
-      final shader = await _loadAtmoShader(t);
       final look = _groundLook(azOff, tilt);
       final shot = await _renderPipeline(t, n,
           universe: universe,
           vessels: vessels,
           craft: craft,
           earthTex: earthTex,
-          atmoShader: shader,
           azimuth: look.azimuth,
           elevation: look.elevation,
           rangeM: rng);

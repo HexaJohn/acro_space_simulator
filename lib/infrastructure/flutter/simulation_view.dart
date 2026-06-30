@@ -2,7 +2,6 @@
 import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data' show Uint8List;
-import 'dart:ui' as ui show FragmentProgram, FragmentShader;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
@@ -361,7 +360,6 @@ class _SimulationViewState extends State<SimulationView>
         if (mounted) setState(() {});
       },
     );
-    _loadAtmosphereShader();
 
     // Open the engine bridge: serve this sim to a connected Unreal renderer and
     // apply the commands it sends back to the SAME repos the Flutter views use.
@@ -411,21 +409,6 @@ class _SimulationViewState extends State<SimulationView>
         case ReportTerrainHeightCommand():
           break; // colony/terrain intent not served on this path
       }
-    }
-  }
-
-  /// The per-pixel atmospheric-scattering shader, loaded once. Null until ready
-  /// (the painter falls back to the radial-gradient halo meanwhile) and on
-  /// platforms without shader support.
-  ui.FragmentShader? _atmoShader;
-  Future<void> _loadAtmosphereShader() async {
-    try {
-      final program =
-          await ui.FragmentProgram.fromAsset('shaders/atmosphere.frag');
-      if (!mounted) return;
-      setState(() => _atmoShader = program.fragmentShader());
-    } catch (_) {
-      // No shader support — keep the radial-gradient halo fallback.
     }
   }
 
@@ -1441,7 +1424,6 @@ class _SimulationViewState extends State<SimulationView>
                               view: _activeCamera ??
                                   OrthoCamera(_view, _metresPerPixel),
                               layers: _layers,
-                              atmoShader: _atmoShader,
                             ),
                           );
                         }),
