@@ -1,0 +1,19 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "Acro Sim Bridge",
+	"Description": "Streams the acro_space_simulator Dart simulation into Unreal over FlatBuffers/TCP and sends player intent back.",
+	"Category": "Simulation",
+	"CreatedBy": "Acro Visuals",
+	"EnabledByDefault": true,
+	"CanContainContent": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "AcroSimBridge",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	]
+}
