@@ -71,7 +71,7 @@ class NavState {
   }
 }
 
-/// A KSP-style nav-ball: the sky-sphere seen looking down the craft's nose, with
+/// A flight nav-ball: the sky-sphere seen looking down the craft's nose, with
 /// an artificial horizon (sky/ground from local-up) and prograde/retrograde
 /// markers that hide on the back hemisphere.
 class NavBall extends StatelessWidget {

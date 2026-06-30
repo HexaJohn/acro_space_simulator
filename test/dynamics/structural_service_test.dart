@@ -15,7 +15,7 @@ void main() {
         name: 'S',
         ownerId: 'p',
         state: StateVector(position: const Vector3(700000, 0, 0), velocity: velocity),
-        dominantBody: const BodyId('kerbin'),
+        dominantBody: const BodyId('earth'),
         stages: const [],
       );
 

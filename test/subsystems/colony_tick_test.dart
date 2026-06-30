@@ -16,7 +16,7 @@ void main() {
     return Colony(
       id: 'c1',
       name: 'Base',
-      body: const BodyId('kerbin'),
+      body: const BodyId('earth'),
       latitude: 0,
       longitude: 0,
       population: 5,

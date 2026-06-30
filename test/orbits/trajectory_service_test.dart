@@ -10,7 +10,7 @@ void main() {
   const service = TrajectoryService();
 
   test('predicted path of a circular orbit stays near constant radius', () {
-    final body = SampleWorld.buildSystem().require(SampleWorld.kerbin);
+    final body = SampleWorld.realSystem().require(SampleWorld.earth);
     final r = body.radius + 100000;
     final v = math.sqrt(body.mu / r);
 
@@ -31,7 +31,7 @@ void main() {
   });
 
   test('path samples span roughly one full orbit (covers all quadrants)', () {
-    final body = SampleWorld.buildSystem().require(SampleWorld.kerbin);
+    final body = SampleWorld.realSystem().require(SampleWorld.earth);
     final r = body.radius + 100000;
     final v = math.sqrt(body.mu / r);
 
@@ -51,7 +51,7 @@ void main() {
   });
 
   test('an open (hyperbolic-ish) fast trajectory still returns finite points', () {
-    final body = SampleWorld.buildSystem().require(SampleWorld.kerbin);
+    final body = SampleWorld.realSystem().require(SampleWorld.earth);
     final r = body.radius + 100000;
     final vEsc = math.sqrt(2 * body.mu / r);
 

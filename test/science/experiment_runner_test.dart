@@ -9,7 +9,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   const runner = ExperimentRunner();
-  final body = SampleWorld.buildSystem().require(SampleWorld.kerbin);
+  final body = SampleWorld.realSystem().require(SampleWorld.earth);
 
   Vessel sat(double altitude) {
     final v = Vessel(
@@ -20,7 +20,7 @@ void main() {
         position: Vector3(body.radius + altitude, 0, 0),
         velocity: Vector3.zero,
       ),
-      dominantBody: SampleWorld.kerbin,
+      dominantBody: SampleWorld.earth,
       stages: const [],
     );
     v.experiments.add(const Experiment(id: 'thermometer', baseValue: 8));
@@ -28,16 +28,16 @@ void main() {
   }
 
   test('collects science on entering a new situation', () {
-    final v = sat(100000); // lowOrbit:kerbin
+    final v = sat(200000); // lowOrbit:earth (above the ~140 km atmosphere)
     final ledger = ResearchLedger();
     final gained = runner.collect(v, body, ledger);
     expect(gained, greaterThan(0));
     expect(ledger.science, greaterThan(0));
-    expect(v.lastScienceSituation, 'lowOrbit:kerbin');
+    expect(v.lastScienceSituation, 'lowOrbit:earth');
   });
 
   test('does not re-collect in the same situation', () {
-    final v = sat(100000);
+    final v = sat(200000);
     final ledger = ResearchLedger();
     runner.collect(v, body, ledger);
     final before = ledger.science;
@@ -47,7 +47,7 @@ void main() {
   });
 
   test('collects again after moving to a different situation', () {
-    final v = sat(100000); // lowOrbit
+    final v = sat(200000); // lowOrbit
     final ledger = ResearchLedger();
     runner.collect(v, body, ledger);
     final afterFirst = ledger.science;
@@ -57,7 +57,7 @@ void main() {
     final gained = runner.collect(v, body, ledger);
     expect(gained, greaterThan(0));
     expect(ledger.science, greaterThan(afterFirst));
-    expect(v.lastScienceSituation, 'highOrbit:kerbin');
+    expect(v.lastScienceSituation, 'highOrbit:earth');
   });
 
   test('a vessel with no experiments collects nothing', () {
@@ -66,10 +66,10 @@ void main() {
       name: 'None',
       ownerId: 'p',
       state: StateVector(
-        position: Vector3(body.radius + 100000, 0, 0),
+        position: Vector3(body.radius + 200000, 0, 0),
         velocity: Vector3.zero,
       ),
-      dominantBody: SampleWorld.kerbin,
+      dominantBody: SampleWorld.earth,
       stages: const [],
     );
     final ledger = ResearchLedger();

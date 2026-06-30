@@ -15,26 +15,26 @@ import 'package:acro_space_simulator/infrastructure/sample_world.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('vessel inside the Mun SOI transitions to Mun and emits the event', () {
-    final system = SampleWorld.buildSystem();
+  test('vessel inside the Moon SOI transitions to Moon and emits the event', () {
+    final system = SampleWorld.realSystem();
     const ephemeris = BodyEphemeris();
-    final mun = system.require(SampleWorld.mun);
-    final munPos =
-        ephemeris.positionRelativeToParent(mun, system, Epoch.zero);
-    final munVel =
-        ephemeris.velocityRelativeToParent(mun, system, Epoch.zero);
+    final moon = system.require(SampleWorld.moon);
+    final moonPos =
+        ephemeris.positionRelativeToParent(moon, system, Epoch.zero);
+    final moonVel =
+        ephemeris.velocityRelativeToParent(moon, system, Epoch.zero);
 
-    // Start in the Kerbin (planet) frame, 500 km from Mun (inside its 2,429 km
-    // SOI), moving with the Mun.
+    // Start in the Earth (planet) frame, 2,000 km from the Moon — above its
+    // 1,737 km surface yet deep inside its 66,100 km SOI — moving with the Moon.
     final vessel = Vessel(
       id: const VesselId('explorer'),
       name: 'Explorer',
       ownerId: 'p',
       state: StateVector(
-        position: munPos + const Vector3(500000, 0, 0),
-        velocity: munVel + const Vector3(0, 200, 0), // 200 m/s rel to Mun
+        position: moonPos + const Vector3(2000000, 0, 0),
+        velocity: moonVel + const Vector3(0, 200, 0), // 200 m/s rel to Moon
       ),
-      dominantBody: SampleWorld.kerbin,
+      dominantBody: SampleWorld.earth,
 
       stages: const [],
     );
@@ -56,9 +56,9 @@ void main() {
     tick.execute(clock);
 
     final after = vessels.byId(vessel.id)!;
-    expect(after.dominantBody, SampleWorld.mun);
-    // In the Mun frame the vessel is now ~500 km out, not ~12,000 km.
-    expect(after.state.position.length, lessThan(mun.soiRadius));
+    expect(after.dominantBody, SampleWorld.moon);
+    // In the Moon frame the vessel is now ~2,000 km out, not ~384,400 km.
+    expect(after.state.position.length, lessThan(moon.soiRadius));
     expect(events.recent.whereType<SoiTransition>().isNotEmpty, isTrue);
   });
 }

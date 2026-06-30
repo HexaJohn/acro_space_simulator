@@ -10,7 +10,7 @@ void main() {
   const updater = WeatherUpdater();
 
   WeatherSystem system(WeatherCell cell) => WeatherSystem(
-        body: const BodyId('kerbin'),
+        body: const BodyId('earth'),
         cells: [cell],
       );
 
@@ -23,7 +23,7 @@ void main() {
       precipitation: 0.5,
       turbulence: 0.5,
     );
-    final next = updater.advance(system(cell), bodyRadius: 600000, dt: 3600);
+    final next = updater.advance(system(cell), bodyRadius: 6.371e6, dt: 3600);
     expect(next.cells.first.longitude, greaterThan(0));
   });
 
@@ -36,7 +36,7 @@ void main() {
       precipitation: 0.8,
       turbulence: 0.8,
     );
-    final next = updater.advance(system(cell), bodyRadius: 600000, dt: 3600);
+    final next = updater.advance(system(cell), bodyRadius: 6.371e6, dt: 3600);
     expect(next.cells.first.precipitation, lessThan(0.8));
     expect(next.cells.first.turbulence, lessThan(0.8));
   });
@@ -50,7 +50,7 @@ void main() {
       precipitation: 0.5,
       turbulence: 0.5,
     );
-    final next = updater.advance(system(cell), bodyRadius: 600000, dt: 3600);
+    final next = updater.advance(system(cell), bodyRadius: 6.371e6, dt: 3600);
     expect(next.cells.first.longitude, greaterThanOrEqualTo(-math.pi));
     expect(next.cells.first.longitude, lessThan(math.pi));
   });
@@ -67,7 +67,7 @@ void main() {
     // Many ticks -> decays below threshold -> dropped.
     var sys = system(cell);
     for (var i = 0; i < 50; i++) {
-      sys = updater.advance(sys, bodyRadius: 600000, dt: 3600);
+      sys = updater.advance(sys, bodyRadius: 6.371e6, dt: 3600);
     }
     expect(sys.cells, isEmpty);
   });

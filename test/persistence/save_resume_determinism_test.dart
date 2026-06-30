@@ -18,7 +18,7 @@ void main() {
   AdvanceSimulationTick tickFor(InMemoryVesselRepository vessels) =>
       AdvanceSimulationTick(
         vessels: vessels,
-        universe: StaticUniverseRepository(SampleWorld.buildSystem()),
+        universe: StaticUniverseRepository(SampleWorld.realSystem()),
         compute: DartCompute(),
         soi: const SoiTransitionService(),
         events: InMemoryEventBus(),

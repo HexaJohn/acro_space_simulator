@@ -7,7 +7,7 @@ import 'tech_tree.dart';
 /// Diminishing returns: each (experiment, situation) pair remembers how much of
 /// its value has already been harvested, so repeating an experiment in the same
 /// situation yields progressively less — encouraging exploration of new
-/// situations (KSP's science loop).
+/// situations (a situation-gated science loop).
 class ResearchLedger {
   double science;
   final TechTree tree;

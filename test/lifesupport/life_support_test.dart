@@ -29,7 +29,7 @@ void main() {
       name: 'Crewed',
       ownerId: 'p',
       state: const StateVector(position: Vector3(700000, 0, 0), velocity: Vector3.zero),
-      dominantBody: const BodyId('kerbin'),
+      dominantBody: const BodyId('earth'),
       stages: [Stage(index: 0, parts: [cabin])],
     );
     v.crew = CrewModule(
