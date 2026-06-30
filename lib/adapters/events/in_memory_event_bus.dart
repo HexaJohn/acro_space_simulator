@@ -13,6 +13,12 @@ class InMemoryEventBus implements EventBus {
   void subscribe(void Function(DomainEvent) listener) =>
       _listeners.add(listener);
 
+  /// Detach a previously [subscribe]d listener. Important now the bus is owned at
+  /// app scope (see SimEngine) and outlives any one UI screen: a screen MUST
+  /// unsubscribe on dispose or its callback leaks and fires after teardown.
+  void unsubscribe(void Function(DomainEvent) listener) =>
+      _listeners.remove(listener);
+
   @override
   void publish(DomainEvent event) {
     recent.add(event);

@@ -1,8 +1,14 @@
 import 'package:flutter/material.dart';
 
 import 'infrastructure/flutter/screens/main_menu_screen.dart';
+import 'infrastructure/sim_engine.dart';
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  // Bring the simulation up immediately — it runs (and serves Unreal over the
+  // bridge) from launch, independent of whether the player has entered flight.
+  // On web this is the in-process-only sim (the bridge is a no-op there).
+  simEngine.start();
   runApp(const AcroSpaceSimulatorApp());
 }
 
