@@ -7,6 +7,46 @@ import 'dart:typed_data' show Uint8List;
 import 'package:flat_buffers/flat_buffers.dart' as fb;
 
 
+enum BodyKind {
+  Rocky(0),
+  Star(1),
+  GasGiant(2),
+  Moon(3),
+  Ice(4);
+
+  final int value;
+  const BodyKind(this.value);
+
+  factory BodyKind.fromValue(int value) {
+    switch (value) {
+      case 0: return BodyKind.Rocky;
+      case 1: return BodyKind.Star;
+      case 2: return BodyKind.GasGiant;
+      case 3: return BodyKind.Moon;
+      case 4: return BodyKind.Ice;
+      default: throw StateError('Invalid value $value for bit flag enum');
+    }
+  }
+
+  static BodyKind? _createOrNull(int? value) =>
+      value == null ? null : BodyKind.fromValue(value);
+
+  static const int minValue = 0;
+  static const int maxValue = 4;
+  static const fb.Reader<BodyKind> reader = _BodyKindReader();
+}
+
+class _BodyKindReader extends fb.Reader<BodyKind> {
+  const _BodyKindReader();
+
+  @override
+  int get size => 1;
+
+  @override
+  BodyKind read(fb.BufferContext bc, int offset) =>
+      BodyKind.fromValue(const fb.Uint8Reader().read(bc, offset));
+}
+
 enum CmdTypeId {
   NONE(0),
   SetThrottle(1),
@@ -957,6 +997,193 @@ class BodyFrameObjectBuilder extends fb.ObjectBuilder {
     return fbBuilder.buffer;
   }
 }
+class BodyDescriptor {
+  BodyDescriptor._(this._bc, this._bcOffset);
+  factory BodyDescriptor(List<int> bytes) {
+    final rootRef = fb.BufferContext.fromBytes(bytes);
+    return reader.read(rootRef, 0);
+  }
+
+  static const fb.Reader<BodyDescriptor> reader = _BodyDescriptorReader();
+
+  final fb.BufferContext _bc;
+  final int _bcOffset;
+
+  String? get id => const fb.StringReader().vTableGetNullable(_bc, _bcOffset, 4);
+  BodyKind get kind => BodyKind.fromValue(const fb.Uint8Reader().vTableGet(_bc, _bcOffset, 6, 0));
+  double get referenceRadius => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 8, 0.0);
+  String? get albedoKey => const fb.StringReader().vTableGetNullable(_bc, _bcOffset, 10);
+  String? get heightKey => const fb.StringReader().vTableGetNullable(_bc, _bcOffset, 12);
+  String? get materialKey => const fb.StringReader().vTableGetNullable(_bc, _bcOffset, 14);
+  double get heightScale => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 16, 0.0);
+  bool get atmoPresent => const fb.BoolReader().vTableGet(_bc, _bcOffset, 18, false);
+  double get atmoScaleHeight => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 20, 0.0);
+  double get atmoThickness => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 22, 0.0);
+  double get atmoSeaLevelPressure => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 24, 0.0);
+  double get atmoSeaLevelDensity => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 26, 0.0);
+  double get atmoSeaLevelTemperature => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 28, 0.0);
+
+  @override
+  String toString() {
+    return 'BodyDescriptor{id: ${id}, kind: ${kind}, referenceRadius: ${referenceRadius}, albedoKey: ${albedoKey}, heightKey: ${heightKey}, materialKey: ${materialKey}, heightScale: ${heightScale}, atmoPresent: ${atmoPresent}, atmoScaleHeight: ${atmoScaleHeight}, atmoThickness: ${atmoThickness}, atmoSeaLevelPressure: ${atmoSeaLevelPressure}, atmoSeaLevelDensity: ${atmoSeaLevelDensity}, atmoSeaLevelTemperature: ${atmoSeaLevelTemperature}}';
+  }
+}
+
+class _BodyDescriptorReader extends fb.TableReader<BodyDescriptor> {
+  const _BodyDescriptorReader();
+
+  @override
+  BodyDescriptor createObject(fb.BufferContext bc, int offset) => 
+    BodyDescriptor._(bc, offset);
+}
+
+class BodyDescriptorBuilder {
+  BodyDescriptorBuilder(this.fbBuilder);
+
+  final fb.Builder fbBuilder;
+
+  void begin() {
+    fbBuilder.startTable(13);
+  }
+
+  int addIdOffset(int? offset) {
+    fbBuilder.addOffset(0, offset);
+    return fbBuilder.offset;
+  }
+  int addKind(BodyKind? kind) {
+    fbBuilder.addUint8(1, kind?.value);
+    return fbBuilder.offset;
+  }
+  int addReferenceRadius(double? referenceRadius) {
+    fbBuilder.addFloat64(2, referenceRadius);
+    return fbBuilder.offset;
+  }
+  int addAlbedoKeyOffset(int? offset) {
+    fbBuilder.addOffset(3, offset);
+    return fbBuilder.offset;
+  }
+  int addHeightKeyOffset(int? offset) {
+    fbBuilder.addOffset(4, offset);
+    return fbBuilder.offset;
+  }
+  int addMaterialKeyOffset(int? offset) {
+    fbBuilder.addOffset(5, offset);
+    return fbBuilder.offset;
+  }
+  int addHeightScale(double? heightScale) {
+    fbBuilder.addFloat64(6, heightScale);
+    return fbBuilder.offset;
+  }
+  int addAtmoPresent(bool? atmoPresent) {
+    fbBuilder.addBool(7, atmoPresent);
+    return fbBuilder.offset;
+  }
+  int addAtmoScaleHeight(double? atmoScaleHeight) {
+    fbBuilder.addFloat64(8, atmoScaleHeight);
+    return fbBuilder.offset;
+  }
+  int addAtmoThickness(double? atmoThickness) {
+    fbBuilder.addFloat64(9, atmoThickness);
+    return fbBuilder.offset;
+  }
+  int addAtmoSeaLevelPressure(double? atmoSeaLevelPressure) {
+    fbBuilder.addFloat64(10, atmoSeaLevelPressure);
+    return fbBuilder.offset;
+  }
+  int addAtmoSeaLevelDensity(double? atmoSeaLevelDensity) {
+    fbBuilder.addFloat64(11, atmoSeaLevelDensity);
+    return fbBuilder.offset;
+  }
+  int addAtmoSeaLevelTemperature(double? atmoSeaLevelTemperature) {
+    fbBuilder.addFloat64(12, atmoSeaLevelTemperature);
+    return fbBuilder.offset;
+  }
+
+  int finish() {
+    return fbBuilder.endTable();
+  }
+}
+
+class BodyDescriptorObjectBuilder extends fb.ObjectBuilder {
+  final String? _id;
+  final BodyKind? _kind;
+  final double? _referenceRadius;
+  final String? _albedoKey;
+  final String? _heightKey;
+  final String? _materialKey;
+  final double? _heightScale;
+  final bool? _atmoPresent;
+  final double? _atmoScaleHeight;
+  final double? _atmoThickness;
+  final double? _atmoSeaLevelPressure;
+  final double? _atmoSeaLevelDensity;
+  final double? _atmoSeaLevelTemperature;
+
+  BodyDescriptorObjectBuilder({
+    String? id,
+    BodyKind? kind,
+    double? referenceRadius,
+    String? albedoKey,
+    String? heightKey,
+    String? materialKey,
+    double? heightScale,
+    bool? atmoPresent,
+    double? atmoScaleHeight,
+    double? atmoThickness,
+    double? atmoSeaLevelPressure,
+    double? atmoSeaLevelDensity,
+    double? atmoSeaLevelTemperature,
+  })
+      : _id = id,
+        _kind = kind,
+        _referenceRadius = referenceRadius,
+        _albedoKey = albedoKey,
+        _heightKey = heightKey,
+        _materialKey = materialKey,
+        _heightScale = heightScale,
+        _atmoPresent = atmoPresent,
+        _atmoScaleHeight = atmoScaleHeight,
+        _atmoThickness = atmoThickness,
+        _atmoSeaLevelPressure = atmoSeaLevelPressure,
+        _atmoSeaLevelDensity = atmoSeaLevelDensity,
+        _atmoSeaLevelTemperature = atmoSeaLevelTemperature;
+
+  /// Finish building, and store into the [fbBuilder].
+  @override
+  int finish(fb.Builder fbBuilder) {
+    final int? idOffset = _id == null ? null
+        : fbBuilder.writeString(_id!);
+    final int? albedoKeyOffset = _albedoKey == null ? null
+        : fbBuilder.writeString(_albedoKey!);
+    final int? heightKeyOffset = _heightKey == null ? null
+        : fbBuilder.writeString(_heightKey!);
+    final int? materialKeyOffset = _materialKey == null ? null
+        : fbBuilder.writeString(_materialKey!);
+    fbBuilder.startTable(13);
+    fbBuilder.addOffset(0, idOffset);
+    fbBuilder.addUint8(1, _kind?.value);
+    fbBuilder.addFloat64(2, _referenceRadius);
+    fbBuilder.addOffset(3, albedoKeyOffset);
+    fbBuilder.addOffset(4, heightKeyOffset);
+    fbBuilder.addOffset(5, materialKeyOffset);
+    fbBuilder.addFloat64(6, _heightScale);
+    fbBuilder.addBool(7, _atmoPresent);
+    fbBuilder.addFloat64(8, _atmoScaleHeight);
+    fbBuilder.addFloat64(9, _atmoThickness);
+    fbBuilder.addFloat64(10, _atmoSeaLevelPressure);
+    fbBuilder.addFloat64(11, _atmoSeaLevelDensity);
+    fbBuilder.addFloat64(12, _atmoSeaLevelTemperature);
+    return fbBuilder.endTable();
+  }
+
+  /// Convenience method to serialize to byte list.
+  @override
+  Uint8List toBytes([String? fileIdentifier]) {
+    final fbBuilder = fb.Builder(deduplicateTables: false);
+    fbBuilder.finish(finish(fbBuilder), fileIdentifier);
+    return fbBuilder.buffer;
+  }
+}
 class EventFrame {
   EventFrame._(this._bc, this._bcOffset);
   factory EventFrame(List<int> bytes) {
@@ -1091,10 +1318,11 @@ class WorldFrame {
   List<VesselFrame>? get vessels => const fb.ListReader<VesselFrame>(VesselFrame.reader).vTableGetNullable(_bc, _bcOffset, 12);
   List<BuildingFrame>? get buildings => const fb.ListReader<BuildingFrame>(BuildingFrame.reader).vTableGetNullable(_bc, _bcOffset, 14);
   List<EventFrame>? get events => const fb.ListReader<EventFrame>(EventFrame.reader).vTableGetNullable(_bc, _bcOffset, 16);
+  List<BodyDescriptor>? get descriptors => const fb.ListReader<BodyDescriptor>(BodyDescriptor.reader).vTableGetNullable(_bc, _bcOffset, 18);
 
   @override
   String toString() {
-    return 'WorldFrame{tick: ${tick}, epoch: ${epoch}, fingerprint: ${fingerprint}, bodies: ${bodies}, vessels: ${vessels}, buildings: ${buildings}, events: ${events}}';
+    return 'WorldFrame{tick: ${tick}, epoch: ${epoch}, fingerprint: ${fingerprint}, bodies: ${bodies}, vessels: ${vessels}, buildings: ${buildings}, events: ${events}, descriptors: ${descriptors}}';
   }
 }
 
@@ -1112,7 +1340,7 @@ class WorldFrameBuilder {
   final fb.Builder fbBuilder;
 
   void begin() {
-    fbBuilder.startTable(7);
+    fbBuilder.startTable(8);
   }
 
   int addTick(int? tick) {
@@ -1143,6 +1371,10 @@ class WorldFrameBuilder {
     fbBuilder.addOffset(6, offset);
     return fbBuilder.offset;
   }
+  int addDescriptorsOffset(int? offset) {
+    fbBuilder.addOffset(7, offset);
+    return fbBuilder.offset;
+  }
 
   int finish() {
     return fbBuilder.endTable();
@@ -1157,6 +1389,7 @@ class WorldFrameObjectBuilder extends fb.ObjectBuilder {
   final List<VesselFrameObjectBuilder>? _vessels;
   final List<BuildingFrameObjectBuilder>? _buildings;
   final List<EventFrameObjectBuilder>? _events;
+  final List<BodyDescriptorObjectBuilder>? _descriptors;
 
   WorldFrameObjectBuilder({
     int? tick,
@@ -1166,6 +1399,7 @@ class WorldFrameObjectBuilder extends fb.ObjectBuilder {
     List<VesselFrameObjectBuilder>? vessels,
     List<BuildingFrameObjectBuilder>? buildings,
     List<EventFrameObjectBuilder>? events,
+    List<BodyDescriptorObjectBuilder>? descriptors,
   })
       : _tick = tick,
         _epoch = epoch,
@@ -1173,7 +1407,8 @@ class WorldFrameObjectBuilder extends fb.ObjectBuilder {
         _bodies = bodies,
         _vessels = vessels,
         _buildings = buildings,
-        _events = events;
+        _events = events,
+        _descriptors = descriptors;
 
   /// Finish building, and store into the [fbBuilder].
   @override
@@ -1188,7 +1423,9 @@ class WorldFrameObjectBuilder extends fb.ObjectBuilder {
         : fbBuilder.writeList(_buildings!.map((b) => b.getOrCreateOffset(fbBuilder)).toList());
     final int? eventsOffset = _events == null ? null
         : fbBuilder.writeList(_events!.map((b) => b.getOrCreateOffset(fbBuilder)).toList());
-    fbBuilder.startTable(7);
+    final int? descriptorsOffset = _descriptors == null ? null
+        : fbBuilder.writeList(_descriptors!.map((b) => b.getOrCreateOffset(fbBuilder)).toList());
+    fbBuilder.startTable(8);
     fbBuilder.addInt64(0, _tick);
     fbBuilder.addFloat64(1, _epoch);
     fbBuilder.addOffset(2, fingerprintOffset);
@@ -1196,6 +1433,7 @@ class WorldFrameObjectBuilder extends fb.ObjectBuilder {
     fbBuilder.addOffset(4, vesselsOffset);
     fbBuilder.addOffset(5, buildingsOffset);
     fbBuilder.addOffset(6, eventsOffset);
+    fbBuilder.addOffset(7, descriptorsOffset);
     return fbBuilder.endTable();
   }
 

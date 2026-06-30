@@ -112,6 +112,24 @@ class FlatBufferCodec {
           info: e.info,
         ),
     ];
+    final descriptors = [
+      for (final d in s.descriptors.values)
+        gen.BodyDescriptorObjectBuilder(
+          id: d.id,
+          kind: gen.BodyKind.fromValue(d.kind.index),
+          referenceRadius: d.referenceRadius,
+          albedoKey: d.albedoKey,
+          heightKey: d.heightKey,
+          materialKey: d.materialKey,
+          heightScale: d.heightScale,
+          atmoPresent: d.atmoPresent,
+          atmoScaleHeight: d.atmoScaleHeight,
+          atmoThickness: d.atmoThickness,
+          atmoSeaLevelPressure: d.atmoSeaLevelPressure,
+          atmoSeaLevelDensity: d.atmoSeaLevelDensity,
+          atmoSeaLevelTemperature: d.atmoSeaLevelTemperature,
+        ),
+    ];
     return gen.WorldFrameObjectBuilder(
       tick: s.tick,
       epoch: s.epoch,
@@ -120,6 +138,7 @@ class FlatBufferCodec {
       vessels: vessels,
       buildings: buildings,
       events: events,
+      descriptors: descriptors,
     ).toBytes();
   }
 
@@ -241,12 +260,34 @@ class FlatBufferCodec {
           info: e.info ?? '',
         ),
     ];
+    final descriptors = <String, BodyDescriptorSnapshot>{};
+    for (final d in w.descriptors ?? const <gen.BodyDescriptor>[]) {
+      final id = d.id;
+      if (id == null) continue;
+      final ki = d.kind.value;
+      descriptors[id] = BodyDescriptorSnapshot(
+        id: id,
+        kind: BodyKind.values[ki.clamp(0, BodyKind.values.length - 1)],
+        referenceRadius: d.referenceRadius,
+        albedoKey: d.albedoKey ?? '',
+        heightKey: d.heightKey ?? '',
+        materialKey: d.materialKey ?? '',
+        heightScale: d.heightScale,
+        atmoPresent: d.atmoPresent,
+        atmoScaleHeight: d.atmoScaleHeight,
+        atmoThickness: d.atmoThickness,
+        atmoSeaLevelPressure: d.atmoSeaLevelPressure,
+        atmoSeaLevelDensity: d.atmoSeaLevelDensity,
+        atmoSeaLevelTemperature: d.atmoSeaLevelTemperature,
+      );
+    }
     return WorldSnapshot(
       tick: w.tick,
       epoch: w.epoch,
       bodies: bodies,
       vessels: vessels,
       buildings: buildings,
+      descriptors: descriptors,
       events: events,
     );
   }

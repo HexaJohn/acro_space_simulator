@@ -90,6 +90,38 @@ table BodyFrame {
                       // the engine draw the body's orbit line without ephemerides.
 }
 
+// Coarse render classification of a body, so the engine can pick a master
+// material / shading path without hard-coding ids. Wire value is a ubyte.
+enum BodyKind : ubyte { Rocky = 0, Star, GasGiant, Moon, Ice }
+
+// STATIC per-body render descriptor — texture/heightmap/atmosphere mapping.
+// Unlike BodyFrame (dynamic, every tick), this is config: the engine binds it
+// once and caches it, joining to BodyFrame by `id`. The sim ships it every
+// frame anyway (it is tiny and stateless, so a late-joining client always gets
+// the catalog); gate emission in the host if body count ever grows large.
+//
+// Asset keys map to engine content (UTexture/UMaterial) via the engine's own
+// registry — the WIRE only carries the key, never the bound asset. An EMPTY key
+// means "derive from id" (engine convention, e.g. "earth" -> M_Body_earth).
+// The atmosphere fields are the sim's OWN physical numbers (it owns the air
+// model); the engine maps them onto its sky/scattering. This descriptor is
+// render-only — it never enters the determinism fingerprint.
+table BodyDescriptor {
+  id:string;                          // joins BodyFrame.id
+  kind:BodyKind = Rocky;
+  reference_radius:double;            // datum a heightmap perturbs, m (== BodyFrame.radius)
+  albedo_key:string;                  // surface/diffuse texture key ("" = derive from id)
+  height_key:string;                  // heightmap key ("" = none / derive from id)
+  material_key:string;                // master-material override key ("" = pick by kind)
+  height_scale:double;                // metres of relief at a full-white height sample (0 = engine default)
+  atmo_present:bool;                  // has an atmosphere to render at all
+  atmo_scale_height:double;           // pressure/density e-folding height, m
+  atmo_thickness:double;              // top of atmosphere above the datum, m
+  atmo_sea_level_pressure:double;     // Pa
+  atmo_sea_level_density:double;      // kg/m^3
+  atmo_sea_level_temperature:double;  // K
+}
+
 // A discrete sim event that fired this tick (staging, impact, destruction,
 // science, …). Flat shape covering every domain event: the engine switches on
 // `kind` and looks up `subject`'s transform in the frame for spatial FX.
@@ -113,6 +145,7 @@ table WorldFrame {
   vessels:[VesselFrame];
   buildings:[BuildingFrame];
   events:[EventFrame]; // events that fired this tick (transient; best-effort)
+  descriptors:[BodyDescriptor]; // STATIC body render config; cache + join by id
 }
 
 // ---------- renderer -> sim ----------

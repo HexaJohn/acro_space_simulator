@@ -76,6 +76,21 @@ const structs = <_Struct>[
     'magnitude': 'Magnitude',
     'info': 'Info',
   }),
+  _Struct('FSimBodyDescriptor', 'BodyDescriptor', 'STATIC body render config (texture/heightmap/atmosphere). Cache + join by Id.', {
+    'id': 'Id',
+    'kind': 'Kind', // BodyKind enum -> uint8 (Rocky=0, Star, GasGiant, Moon, Ice)
+    'reference_radius': 'ReferenceRadiusM',
+    'albedo_key': 'AlbedoKey',
+    'height_key': 'HeightKey',
+    'material_key': 'MaterialKey',
+    'height_scale': 'HeightScaleM',
+    'atmo_present': 'bHasAtmosphere',
+    'atmo_scale_height': 'AtmoScaleHeightM',
+    'atmo_thickness': 'AtmoThicknessM',
+    'atmo_sea_level_pressure': 'AtmoSeaLevelPressurePa',
+    'atmo_sea_level_density': 'AtmoSeaLevelDensity',
+    'atmo_sea_level_temperature': 'AtmoSeaLevelTempK',
+  }),
 ];
 
 class _Struct {
@@ -100,7 +115,10 @@ Never fail(String msg) {
 void main() {
   final fbs = File('wire/sim.fbs');
   if (!fbs.existsSync()) fail('run from the repo root (wire/sim.fbs not found)');
-  final tables = _parseTables(fbs.readAsStringSync());
+  final src = fbs.readAsStringSync();
+  final tables = _parseTables(src);
+  // Enum-typed fields are carried as their ubyte value on the UE side.
+  final enums = _parseEnums(src);
 
   // Map a wire table name to the generating UE struct, for [X] field nesting.
   final tableToStruct = {for (final s in structs) s.table: s.name};
@@ -140,7 +158,7 @@ void main() {
     buf.writeln('\tGENERATED_BODY()');
     for (final f in schema) {
       final ue = s.fields[f.name]!;
-      final (cppType, def) = _ueType(f.type, tableToStruct);
+      final (cppType, def) = _ueType(f.type, tableToStruct, enums);
       // A nested FSim* struct must be emitted before the struct that holds it
       // (engine types like FVector/FQuat are always available).
       if (cppType.startsWith('TArray<')) {
@@ -164,7 +182,8 @@ void main() {
 }
 
 /// (cppType, defaultExpr?) for a wire field type.
-(String, String?) _ueType(String t, Map<String, String> tableToStruct) {
+(String, String?) _ueType(
+    String t, Map<String, String> tableToStruct, Set<String> enums) {
   if (t.startsWith('[') && t.endsWith(']')) {
     final inner = t.substring(1, t.length - 1);
     if (inner == 'Vec3') return ('TArray<FVector>', null);
@@ -173,6 +192,9 @@ void main() {
     if (st == null) throw StateError('list of unmapped table "$inner"');
     return ('TArray<$st>', null);
   }
+  // An enum is carried as its underlying ubyte value (the engine ingest casts
+  // it back to the scoped enum from sim_generated.h).
+  if (enums.contains(t)) return ('uint8', '0');
   switch (t) {
     case 'double':
     case 'float':
@@ -194,6 +216,15 @@ void main() {
     default:
       throw StateError('unhandled wire type "$t"');
   }
+}
+
+/// Names of every `enum X : type { ... }` declared in the schema. Enum-typed
+/// table fields are emitted as their underlying ubyte on the UE side.
+Set<String> _parseEnums(String src) {
+  final clean = src.replaceAll(RegExp(r'//[^\n]*'), '');
+  return {
+    for (final m in RegExp(r'enum\s+(\w+)\s*:').allMatches(clean)) m.group(1)!,
+  };
 }
 
 /// Minimal sim.fbs table parser: { tableName: [(field, type)] }.

@@ -35,6 +35,9 @@ struct BuildingFrameBuilder;
 struct BodyFrame;
 struct BodyFrameBuilder;
 
+struct BodyDescriptor;
+struct BodyDescriptorBuilder;
+
 struct EventFrame;
 struct EventFrameBuilder;
 
@@ -61,6 +64,45 @@ struct CmdEnvelopeBuilder;
 
 struct CommandFrame;
 struct CommandFrameBuilder;
+
+enum class BodyKind : uint8_t {
+  Rocky = 0,
+  Star = 1,
+  GasGiant = 2,
+  Moon = 3,
+  Ice = 4,
+  MIN = Rocky,
+  MAX = Ice
+};
+
+inline const BodyKind (&EnumValuesBodyKind())[5] {
+  static const BodyKind values[] = {
+    BodyKind::Rocky,
+    BodyKind::Star,
+    BodyKind::GasGiant,
+    BodyKind::Moon,
+    BodyKind::Ice
+  };
+  return values;
+}
+
+inline const char * const *EnumNamesBodyKind() {
+  static const char * const names[6] = {
+    "Rocky",
+    "Star",
+    "GasGiant",
+    "Moon",
+    "Ice",
+    nullptr
+  };
+  return names;
+}
+
+inline const char *EnumNameBodyKind(BodyKind e) {
+  if (::flatbuffers::IsOutRange(e, BodyKind::Rocky, BodyKind::Ice)) return "";
+  const size_t index = static_cast<size_t>(e);
+  return EnumNamesBodyKind()[index];
+}
 
 enum class Cmd : uint8_t {
   NONE = 0,
@@ -940,6 +982,207 @@ inline ::flatbuffers::Offset<BodyFrame> CreateBodyFrameDirect(
       orbit__);
 }
 
+struct BodyDescriptor FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef BodyDescriptorBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_ID = 4,
+    VT_KIND = 6,
+    VT_REFERENCE_RADIUS = 8,
+    VT_ALBEDO_KEY = 10,
+    VT_HEIGHT_KEY = 12,
+    VT_MATERIAL_KEY = 14,
+    VT_HEIGHT_SCALE = 16,
+    VT_ATMO_PRESENT = 18,
+    VT_ATMO_SCALE_HEIGHT = 20,
+    VT_ATMO_THICKNESS = 22,
+    VT_ATMO_SEA_LEVEL_PRESSURE = 24,
+    VT_ATMO_SEA_LEVEL_DENSITY = 26,
+    VT_ATMO_SEA_LEVEL_TEMPERATURE = 28
+  };
+  const ::flatbuffers::String *id() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_ID);
+  }
+  acro::wire::BodyKind kind() const {
+    return static_cast<acro::wire::BodyKind>(GetField<uint8_t>(VT_KIND, 0));
+  }
+  double reference_radius() const {
+    return GetField<double>(VT_REFERENCE_RADIUS, 0.0);
+  }
+  const ::flatbuffers::String *albedo_key() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_ALBEDO_KEY);
+  }
+  const ::flatbuffers::String *height_key() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_HEIGHT_KEY);
+  }
+  const ::flatbuffers::String *material_key() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_MATERIAL_KEY);
+  }
+  double height_scale() const {
+    return GetField<double>(VT_HEIGHT_SCALE, 0.0);
+  }
+  bool atmo_present() const {
+    return GetField<uint8_t>(VT_ATMO_PRESENT, 0) != 0;
+  }
+  double atmo_scale_height() const {
+    return GetField<double>(VT_ATMO_SCALE_HEIGHT, 0.0);
+  }
+  double atmo_thickness() const {
+    return GetField<double>(VT_ATMO_THICKNESS, 0.0);
+  }
+  double atmo_sea_level_pressure() const {
+    return GetField<double>(VT_ATMO_SEA_LEVEL_PRESSURE, 0.0);
+  }
+  double atmo_sea_level_density() const {
+    return GetField<double>(VT_ATMO_SEA_LEVEL_DENSITY, 0.0);
+  }
+  double atmo_sea_level_temperature() const {
+    return GetField<double>(VT_ATMO_SEA_LEVEL_TEMPERATURE, 0.0);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_ID) &&
+           verifier.VerifyString(id()) &&
+           VerifyField<uint8_t>(verifier, VT_KIND, 1) &&
+           VerifyField<double>(verifier, VT_REFERENCE_RADIUS, 8) &&
+           VerifyOffset(verifier, VT_ALBEDO_KEY) &&
+           verifier.VerifyString(albedo_key()) &&
+           VerifyOffset(verifier, VT_HEIGHT_KEY) &&
+           verifier.VerifyString(height_key()) &&
+           VerifyOffset(verifier, VT_MATERIAL_KEY) &&
+           verifier.VerifyString(material_key()) &&
+           VerifyField<double>(verifier, VT_HEIGHT_SCALE, 8) &&
+           VerifyField<uint8_t>(verifier, VT_ATMO_PRESENT, 1) &&
+           VerifyField<double>(verifier, VT_ATMO_SCALE_HEIGHT, 8) &&
+           VerifyField<double>(verifier, VT_ATMO_THICKNESS, 8) &&
+           VerifyField<double>(verifier, VT_ATMO_SEA_LEVEL_PRESSURE, 8) &&
+           VerifyField<double>(verifier, VT_ATMO_SEA_LEVEL_DENSITY, 8) &&
+           VerifyField<double>(verifier, VT_ATMO_SEA_LEVEL_TEMPERATURE, 8) &&
+           verifier.EndTable();
+  }
+};
+
+struct BodyDescriptorBuilder {
+  typedef BodyDescriptor Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_id(::flatbuffers::Offset<::flatbuffers::String> id) {
+    fbb_.AddOffset(BodyDescriptor::VT_ID, id);
+  }
+  void add_kind(acro::wire::BodyKind kind) {
+    fbb_.AddElement<uint8_t>(BodyDescriptor::VT_KIND, static_cast<uint8_t>(kind), 0);
+  }
+  void add_reference_radius(double reference_radius) {
+    fbb_.AddElement<double>(BodyDescriptor::VT_REFERENCE_RADIUS, reference_radius, 0.0);
+  }
+  void add_albedo_key(::flatbuffers::Offset<::flatbuffers::String> albedo_key) {
+    fbb_.AddOffset(BodyDescriptor::VT_ALBEDO_KEY, albedo_key);
+  }
+  void add_height_key(::flatbuffers::Offset<::flatbuffers::String> height_key) {
+    fbb_.AddOffset(BodyDescriptor::VT_HEIGHT_KEY, height_key);
+  }
+  void add_material_key(::flatbuffers::Offset<::flatbuffers::String> material_key) {
+    fbb_.AddOffset(BodyDescriptor::VT_MATERIAL_KEY, material_key);
+  }
+  void add_height_scale(double height_scale) {
+    fbb_.AddElement<double>(BodyDescriptor::VT_HEIGHT_SCALE, height_scale, 0.0);
+  }
+  void add_atmo_present(bool atmo_present) {
+    fbb_.AddElement<uint8_t>(BodyDescriptor::VT_ATMO_PRESENT, static_cast<uint8_t>(atmo_present), 0);
+  }
+  void add_atmo_scale_height(double atmo_scale_height) {
+    fbb_.AddElement<double>(BodyDescriptor::VT_ATMO_SCALE_HEIGHT, atmo_scale_height, 0.0);
+  }
+  void add_atmo_thickness(double atmo_thickness) {
+    fbb_.AddElement<double>(BodyDescriptor::VT_ATMO_THICKNESS, atmo_thickness, 0.0);
+  }
+  void add_atmo_sea_level_pressure(double atmo_sea_level_pressure) {
+    fbb_.AddElement<double>(BodyDescriptor::VT_ATMO_SEA_LEVEL_PRESSURE, atmo_sea_level_pressure, 0.0);
+  }
+  void add_atmo_sea_level_density(double atmo_sea_level_density) {
+    fbb_.AddElement<double>(BodyDescriptor::VT_ATMO_SEA_LEVEL_DENSITY, atmo_sea_level_density, 0.0);
+  }
+  void add_atmo_sea_level_temperature(double atmo_sea_level_temperature) {
+    fbb_.AddElement<double>(BodyDescriptor::VT_ATMO_SEA_LEVEL_TEMPERATURE, atmo_sea_level_temperature, 0.0);
+  }
+  explicit BodyDescriptorBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<BodyDescriptor> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<BodyDescriptor>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<BodyDescriptor> CreateBodyDescriptor(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::String> id = 0,
+    acro::wire::BodyKind kind = acro::wire::BodyKind::Rocky,
+    double reference_radius = 0.0,
+    ::flatbuffers::Offset<::flatbuffers::String> albedo_key = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> height_key = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> material_key = 0,
+    double height_scale = 0.0,
+    bool atmo_present = false,
+    double atmo_scale_height = 0.0,
+    double atmo_thickness = 0.0,
+    double atmo_sea_level_pressure = 0.0,
+    double atmo_sea_level_density = 0.0,
+    double atmo_sea_level_temperature = 0.0) {
+  BodyDescriptorBuilder builder_(_fbb);
+  builder_.add_atmo_sea_level_temperature(atmo_sea_level_temperature);
+  builder_.add_atmo_sea_level_density(atmo_sea_level_density);
+  builder_.add_atmo_sea_level_pressure(atmo_sea_level_pressure);
+  builder_.add_atmo_thickness(atmo_thickness);
+  builder_.add_atmo_scale_height(atmo_scale_height);
+  builder_.add_height_scale(height_scale);
+  builder_.add_reference_radius(reference_radius);
+  builder_.add_material_key(material_key);
+  builder_.add_height_key(height_key);
+  builder_.add_albedo_key(albedo_key);
+  builder_.add_id(id);
+  builder_.add_atmo_present(atmo_present);
+  builder_.add_kind(kind);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<BodyDescriptor> CreateBodyDescriptorDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const char *id = nullptr,
+    acro::wire::BodyKind kind = acro::wire::BodyKind::Rocky,
+    double reference_radius = 0.0,
+    const char *albedo_key = nullptr,
+    const char *height_key = nullptr,
+    const char *material_key = nullptr,
+    double height_scale = 0.0,
+    bool atmo_present = false,
+    double atmo_scale_height = 0.0,
+    double atmo_thickness = 0.0,
+    double atmo_sea_level_pressure = 0.0,
+    double atmo_sea_level_density = 0.0,
+    double atmo_sea_level_temperature = 0.0) {
+  auto id__ = id ? _fbb.CreateString(id) : 0;
+  auto albedo_key__ = albedo_key ? _fbb.CreateString(albedo_key) : 0;
+  auto height_key__ = height_key ? _fbb.CreateString(height_key) : 0;
+  auto material_key__ = material_key ? _fbb.CreateString(material_key) : 0;
+  return acro::wire::CreateBodyDescriptor(
+      _fbb,
+      id__,
+      kind,
+      reference_radius,
+      albedo_key__,
+      height_key__,
+      material_key__,
+      height_scale,
+      atmo_present,
+      atmo_scale_height,
+      atmo_thickness,
+      atmo_sea_level_pressure,
+      atmo_sea_level_density,
+      atmo_sea_level_temperature);
+}
+
 struct EventFrame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef EventFrameBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
@@ -1054,7 +1297,8 @@ struct WorldFrame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_BODIES = 10,
     VT_VESSELS = 12,
     VT_BUILDINGS = 14,
-    VT_EVENTS = 16
+    VT_EVENTS = 16,
+    VT_DESCRIPTORS = 18
   };
   int64_t tick() const {
     return GetField<int64_t>(VT_TICK, 0);
@@ -1077,6 +1321,9 @@ struct WorldFrame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::EventFrame>> *events() const {
     return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::EventFrame>> *>(VT_EVENTS);
   }
+  const ::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::BodyDescriptor>> *descriptors() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::BodyDescriptor>> *>(VT_DESCRIPTORS);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<int64_t>(verifier, VT_TICK, 8) &&
@@ -1095,6 +1342,9 @@ struct WorldFrame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyOffset(verifier, VT_EVENTS) &&
            verifier.VerifyVector(events()) &&
            verifier.VerifyVectorOfTables(events()) &&
+           VerifyOffset(verifier, VT_DESCRIPTORS) &&
+           verifier.VerifyVector(descriptors()) &&
+           verifier.VerifyVectorOfTables(descriptors()) &&
            verifier.EndTable();
   }
 };
@@ -1124,6 +1374,9 @@ struct WorldFrameBuilder {
   void add_events(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::EventFrame>>> events) {
     fbb_.AddOffset(WorldFrame::VT_EVENTS, events);
   }
+  void add_descriptors(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::BodyDescriptor>>> descriptors) {
+    fbb_.AddOffset(WorldFrame::VT_DESCRIPTORS, descriptors);
+  }
   explicit WorldFrameBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -1143,10 +1396,12 @@ inline ::flatbuffers::Offset<WorldFrame> CreateWorldFrame(
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::BodyFrame>>> bodies = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::VesselFrame>>> vessels = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::BuildingFrame>>> buildings = 0,
-    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::EventFrame>>> events = 0) {
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::EventFrame>>> events = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::BodyDescriptor>>> descriptors = 0) {
   WorldFrameBuilder builder_(_fbb);
   builder_.add_epoch(epoch);
   builder_.add_tick(tick);
+  builder_.add_descriptors(descriptors);
   builder_.add_events(events);
   builder_.add_buildings(buildings);
   builder_.add_vessels(vessels);
@@ -1163,12 +1418,14 @@ inline ::flatbuffers::Offset<WorldFrame> CreateWorldFrameDirect(
     const std::vector<::flatbuffers::Offset<acro::wire::BodyFrame>> *bodies = nullptr,
     const std::vector<::flatbuffers::Offset<acro::wire::VesselFrame>> *vessels = nullptr,
     const std::vector<::flatbuffers::Offset<acro::wire::BuildingFrame>> *buildings = nullptr,
-    const std::vector<::flatbuffers::Offset<acro::wire::EventFrame>> *events = nullptr) {
+    const std::vector<::flatbuffers::Offset<acro::wire::EventFrame>> *events = nullptr,
+    const std::vector<::flatbuffers::Offset<acro::wire::BodyDescriptor>> *descriptors = nullptr) {
   auto fingerprint__ = fingerprint ? _fbb.CreateString(fingerprint) : 0;
   auto bodies__ = bodies ? _fbb.CreateVector<::flatbuffers::Offset<acro::wire::BodyFrame>>(*bodies) : 0;
   auto vessels__ = vessels ? _fbb.CreateVector<::flatbuffers::Offset<acro::wire::VesselFrame>>(*vessels) : 0;
   auto buildings__ = buildings ? _fbb.CreateVector<::flatbuffers::Offset<acro::wire::BuildingFrame>>(*buildings) : 0;
   auto events__ = events ? _fbb.CreateVector<::flatbuffers::Offset<acro::wire::EventFrame>>(*events) : 0;
+  auto descriptors__ = descriptors ? _fbb.CreateVector<::flatbuffers::Offset<acro::wire::BodyDescriptor>>(*descriptors) : 0;
   return acro::wire::CreateWorldFrame(
       _fbb,
       tick,
@@ -1177,7 +1434,8 @@ inline ::flatbuffers::Offset<WorldFrame> CreateWorldFrameDirect(
       bodies__,
       vessels__,
       buildings__,
-      events__);
+      events__,
+      descriptors__);
 }
 
 struct SetThrottle FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {

@@ -93,6 +93,34 @@ void main() {
     expect(b.commDelay, closeTo(a.commDelay, 1e-9));
   });
 
+  test('body render descriptors round-trip through the codec', () {
+    final vessels = InMemoryVesselRepository([SampleWorld.buildVessel()]);
+    final snap = WorldSnapshot.capture(7, vessels,
+        system: SampleWorld.realSystem(), epoch: const Epoch(0));
+
+    final back = codec.decodeWorld(codec.encodeWorld(snap));
+
+    // A descriptor exists for every body in the frame, joined by id.
+    expect(back.descriptors.keys.toSet(), back.bodies.keys.toSet());
+
+    // Classification survives: the star is a star, a planet's satellite a moon,
+    // a planet orbiting the star directly is rocky.
+    expect(back.descriptors['sun']!.kind, BodyKind.star);
+    expect(back.descriptors['moon']!.kind, BodyKind.moon);
+    expect(back.descriptors['earth']!.kind, BodyKind.rocky);
+
+    // The descriptor's datum matches the dynamic body's radius (same source).
+    final ed = back.descriptors['earth']!;
+    expect(ed.referenceRadius, back.bodies['earth']!.radius);
+
+    // Atmosphere physics survive the wire losslessly (whatever Earth's model is).
+    final es = snap.descriptors['earth']!;
+    expect(ed.atmoPresent, es.atmoPresent);
+    expect(ed.atmoScaleHeight, closeTo(es.atmoScaleHeight, 1e-6));
+    expect(ed.atmoThickness, closeTo(es.atmoThickness, 1e-6));
+    expect(ed.atmoSeaLevelPressure, closeTo(es.atmoSeaLevelPressure, 1e-6));
+  });
+
   test('events round-trip through the codec', () {
     final snap = WorldSnapshot(tick: 5, vessels: const {}, events: const [
       EventSnapshot(
