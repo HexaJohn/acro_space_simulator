@@ -23,6 +23,9 @@ struct Quat;
 struct PartFrame;
 struct PartFrameBuilder;
 
+struct ResourceFrame;
+struct ResourceFrameBuilder;
+
 struct VesselFrame;
 struct VesselFrameBuilder;
 
@@ -31,6 +34,9 @@ struct BuildingFrameBuilder;
 
 struct BodyFrame;
 struct BodyFrameBuilder;
+
+struct EventFrame;
+struct EventFrameBuilder;
 
 struct WorldFrame;
 struct WorldFrameBuilder;
@@ -266,6 +272,81 @@ inline ::flatbuffers::Offset<PartFrame> CreatePartFrameDirect(
       offset);
 }
 
+struct ResourceFrame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef ResourceFrameBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_TYPE = 4,
+    VT_AMOUNT = 6,
+    VT_CAPACITY = 8
+  };
+  const ::flatbuffers::String *type() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_TYPE);
+  }
+  double amount() const {
+    return GetField<double>(VT_AMOUNT, 0.0);
+  }
+  double capacity() const {
+    return GetField<double>(VT_CAPACITY, 0.0);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_TYPE) &&
+           verifier.VerifyString(type()) &&
+           VerifyField<double>(verifier, VT_AMOUNT, 8) &&
+           VerifyField<double>(verifier, VT_CAPACITY, 8) &&
+           verifier.EndTable();
+  }
+};
+
+struct ResourceFrameBuilder {
+  typedef ResourceFrame Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_type(::flatbuffers::Offset<::flatbuffers::String> type) {
+    fbb_.AddOffset(ResourceFrame::VT_TYPE, type);
+  }
+  void add_amount(double amount) {
+    fbb_.AddElement<double>(ResourceFrame::VT_AMOUNT, amount, 0.0);
+  }
+  void add_capacity(double capacity) {
+    fbb_.AddElement<double>(ResourceFrame::VT_CAPACITY, capacity, 0.0);
+  }
+  explicit ResourceFrameBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<ResourceFrame> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<ResourceFrame>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<ResourceFrame> CreateResourceFrame(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::String> type = 0,
+    double amount = 0.0,
+    double capacity = 0.0) {
+  ResourceFrameBuilder builder_(_fbb);
+  builder_.add_capacity(capacity);
+  builder_.add_amount(amount);
+  builder_.add_type(type);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<ResourceFrame> CreateResourceFrameDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const char *type = nullptr,
+    double amount = 0.0,
+    double capacity = 0.0) {
+  auto type__ = type ? _fbb.CreateString(type) : 0;
+  return acro::wire::CreateResourceFrame(
+      _fbb,
+      type__,
+      amount,
+      capacity);
+}
+
 struct VesselFrame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef VesselFrameBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
@@ -279,7 +360,12 @@ struct VesselFrame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_THROTTLE = 18,
     VT_ON_RAILS = 20,
     VT_LANDED = 22,
-    VT_PARTS = 24
+    VT_PARTS = 24,
+    VT_MASS = 26,
+    VT_CREW = 28,
+    VT_RESOURCES = 30,
+    VT_MAX_TEMP = 32,
+    VT_TEMP_LIMIT = 34
   };
   const ::flatbuffers::String *id() const {
     return GetPointer<const ::flatbuffers::String *>(VT_ID);
@@ -314,6 +400,21 @@ struct VesselFrame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::PartFrame>> *parts() const {
     return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::PartFrame>> *>(VT_PARTS);
   }
+  double mass() const {
+    return GetField<double>(VT_MASS, 0.0);
+  }
+  int32_t crew() const {
+    return GetField<int32_t>(VT_CREW, 0);
+  }
+  const ::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::ResourceFrame>> *resources() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::ResourceFrame>> *>(VT_RESOURCES);
+  }
+  double max_temp() const {
+    return GetField<double>(VT_MAX_TEMP, 0.0);
+  }
+  double temp_limit() const {
+    return GetField<double>(VT_TEMP_LIMIT, 0.0);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyOffset(verifier, VT_ID) &&
@@ -332,6 +433,13 @@ struct VesselFrame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyOffset(verifier, VT_PARTS) &&
            verifier.VerifyVector(parts()) &&
            verifier.VerifyVectorOfTables(parts()) &&
+           VerifyField<double>(verifier, VT_MASS, 8) &&
+           VerifyField<int32_t>(verifier, VT_CREW, 4) &&
+           VerifyOffset(verifier, VT_RESOURCES) &&
+           verifier.VerifyVector(resources()) &&
+           verifier.VerifyVectorOfTables(resources()) &&
+           VerifyField<double>(verifier, VT_MAX_TEMP, 8) &&
+           VerifyField<double>(verifier, VT_TEMP_LIMIT, 8) &&
            verifier.EndTable();
   }
 };
@@ -373,6 +481,21 @@ struct VesselFrameBuilder {
   void add_parts(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::PartFrame>>> parts) {
     fbb_.AddOffset(VesselFrame::VT_PARTS, parts);
   }
+  void add_mass(double mass) {
+    fbb_.AddElement<double>(VesselFrame::VT_MASS, mass, 0.0);
+  }
+  void add_crew(int32_t crew) {
+    fbb_.AddElement<int32_t>(VesselFrame::VT_CREW, crew, 0);
+  }
+  void add_resources(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::ResourceFrame>>> resources) {
+    fbb_.AddOffset(VesselFrame::VT_RESOURCES, resources);
+  }
+  void add_max_temp(double max_temp) {
+    fbb_.AddElement<double>(VesselFrame::VT_MAX_TEMP, max_temp, 0.0);
+  }
+  void add_temp_limit(double temp_limit) {
+    fbb_.AddElement<double>(VesselFrame::VT_TEMP_LIMIT, temp_limit, 0.0);
+  }
   explicit VesselFrameBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -396,9 +519,19 @@ inline ::flatbuffers::Offset<VesselFrame> CreateVesselFrame(
     double throttle = 0.0,
     bool on_rails = false,
     bool landed = false,
-    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::PartFrame>>> parts = 0) {
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::PartFrame>>> parts = 0,
+    double mass = 0.0,
+    int32_t crew = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::ResourceFrame>>> resources = 0,
+    double max_temp = 0.0,
+    double temp_limit = 0.0) {
   VesselFrameBuilder builder_(_fbb);
+  builder_.add_temp_limit(temp_limit);
+  builder_.add_max_temp(max_temp);
+  builder_.add_mass(mass);
   builder_.add_throttle(throttle);
+  builder_.add_resources(resources);
+  builder_.add_crew(crew);
   builder_.add_parts(parts);
   builder_.add_spin(spin);
   builder_.add_att(att);
@@ -424,11 +557,17 @@ inline ::flatbuffers::Offset<VesselFrame> CreateVesselFrameDirect(
     double throttle = 0.0,
     bool on_rails = false,
     bool landed = false,
-    const std::vector<::flatbuffers::Offset<acro::wire::PartFrame>> *parts = nullptr) {
+    const std::vector<::flatbuffers::Offset<acro::wire::PartFrame>> *parts = nullptr,
+    double mass = 0.0,
+    int32_t crew = 0,
+    const std::vector<::flatbuffers::Offset<acro::wire::ResourceFrame>> *resources = nullptr,
+    double max_temp = 0.0,
+    double temp_limit = 0.0) {
   auto id__ = id ? _fbb.CreateString(id) : 0;
   auto owner__ = owner ? _fbb.CreateString(owner) : 0;
   auto body__ = body ? _fbb.CreateString(body) : 0;
   auto parts__ = parts ? _fbb.CreateVector<::flatbuffers::Offset<acro::wire::PartFrame>>(*parts) : 0;
+  auto resources__ = resources ? _fbb.CreateVector<::flatbuffers::Offset<acro::wire::ResourceFrame>>(*resources) : 0;
   return acro::wire::CreateVesselFrame(
       _fbb,
       id__,
@@ -441,7 +580,12 @@ inline ::flatbuffers::Offset<VesselFrame> CreateVesselFrameDirect(
       throttle,
       on_rails,
       landed,
-      parts__);
+      parts__,
+      mass,
+      crew,
+      resources__,
+      max_temp,
+      temp_limit);
 }
 
 struct BuildingFrame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -672,6 +816,111 @@ inline ::flatbuffers::Offset<BodyFrame> CreateBodyFrameDirect(
       radius);
 }
 
+struct EventFrame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef EventFrameBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_KIND = 4,
+    VT_SUBJECT = 6,
+    VT_TARGET = 8,
+    VT_MAGNITUDE = 10,
+    VT_INFO = 12
+  };
+  const ::flatbuffers::String *kind() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_KIND);
+  }
+  const ::flatbuffers::String *subject() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_SUBJECT);
+  }
+  const ::flatbuffers::String *target() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_TARGET);
+  }
+  double magnitude() const {
+    return GetField<double>(VT_MAGNITUDE, 0.0);
+  }
+  const ::flatbuffers::String *info() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_INFO);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_KIND) &&
+           verifier.VerifyString(kind()) &&
+           VerifyOffset(verifier, VT_SUBJECT) &&
+           verifier.VerifyString(subject()) &&
+           VerifyOffset(verifier, VT_TARGET) &&
+           verifier.VerifyString(target()) &&
+           VerifyField<double>(verifier, VT_MAGNITUDE, 8) &&
+           VerifyOffset(verifier, VT_INFO) &&
+           verifier.VerifyString(info()) &&
+           verifier.EndTable();
+  }
+};
+
+struct EventFrameBuilder {
+  typedef EventFrame Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_kind(::flatbuffers::Offset<::flatbuffers::String> kind) {
+    fbb_.AddOffset(EventFrame::VT_KIND, kind);
+  }
+  void add_subject(::flatbuffers::Offset<::flatbuffers::String> subject) {
+    fbb_.AddOffset(EventFrame::VT_SUBJECT, subject);
+  }
+  void add_target(::flatbuffers::Offset<::flatbuffers::String> target) {
+    fbb_.AddOffset(EventFrame::VT_TARGET, target);
+  }
+  void add_magnitude(double magnitude) {
+    fbb_.AddElement<double>(EventFrame::VT_MAGNITUDE, magnitude, 0.0);
+  }
+  void add_info(::flatbuffers::Offset<::flatbuffers::String> info) {
+    fbb_.AddOffset(EventFrame::VT_INFO, info);
+  }
+  explicit EventFrameBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<EventFrame> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<EventFrame>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<EventFrame> CreateEventFrame(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::String> kind = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> subject = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> target = 0,
+    double magnitude = 0.0,
+    ::flatbuffers::Offset<::flatbuffers::String> info = 0) {
+  EventFrameBuilder builder_(_fbb);
+  builder_.add_magnitude(magnitude);
+  builder_.add_info(info);
+  builder_.add_target(target);
+  builder_.add_subject(subject);
+  builder_.add_kind(kind);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<EventFrame> CreateEventFrameDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const char *kind = nullptr,
+    const char *subject = nullptr,
+    const char *target = nullptr,
+    double magnitude = 0.0,
+    const char *info = nullptr) {
+  auto kind__ = kind ? _fbb.CreateString(kind) : 0;
+  auto subject__ = subject ? _fbb.CreateString(subject) : 0;
+  auto target__ = target ? _fbb.CreateString(target) : 0;
+  auto info__ = info ? _fbb.CreateString(info) : 0;
+  return acro::wire::CreateEventFrame(
+      _fbb,
+      kind__,
+      subject__,
+      target__,
+      magnitude,
+      info__);
+}
+
 struct WorldFrame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef WorldFrameBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
@@ -680,7 +929,8 @@ struct WorldFrame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_FINGERPRINT = 8,
     VT_BODIES = 10,
     VT_VESSELS = 12,
-    VT_BUILDINGS = 14
+    VT_BUILDINGS = 14,
+    VT_EVENTS = 16
   };
   int64_t tick() const {
     return GetField<int64_t>(VT_TICK, 0);
@@ -700,6 +950,9 @@ struct WorldFrame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::BuildingFrame>> *buildings() const {
     return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::BuildingFrame>> *>(VT_BUILDINGS);
   }
+  const ::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::EventFrame>> *events() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::EventFrame>> *>(VT_EVENTS);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<int64_t>(verifier, VT_TICK, 8) &&
@@ -715,6 +968,9 @@ struct WorldFrame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyOffset(verifier, VT_BUILDINGS) &&
            verifier.VerifyVector(buildings()) &&
            verifier.VerifyVectorOfTables(buildings()) &&
+           VerifyOffset(verifier, VT_EVENTS) &&
+           verifier.VerifyVector(events()) &&
+           verifier.VerifyVectorOfTables(events()) &&
            verifier.EndTable();
   }
 };
@@ -741,6 +997,9 @@ struct WorldFrameBuilder {
   void add_buildings(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::BuildingFrame>>> buildings) {
     fbb_.AddOffset(WorldFrame::VT_BUILDINGS, buildings);
   }
+  void add_events(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::EventFrame>>> events) {
+    fbb_.AddOffset(WorldFrame::VT_EVENTS, events);
+  }
   explicit WorldFrameBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -759,10 +1018,12 @@ inline ::flatbuffers::Offset<WorldFrame> CreateWorldFrame(
     ::flatbuffers::Offset<::flatbuffers::String> fingerprint = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::BodyFrame>>> bodies = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::VesselFrame>>> vessels = 0,
-    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::BuildingFrame>>> buildings = 0) {
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::BuildingFrame>>> buildings = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::EventFrame>>> events = 0) {
   WorldFrameBuilder builder_(_fbb);
   builder_.add_epoch(epoch);
   builder_.add_tick(tick);
+  builder_.add_events(events);
   builder_.add_buildings(buildings);
   builder_.add_vessels(vessels);
   builder_.add_bodies(bodies);
@@ -777,11 +1038,13 @@ inline ::flatbuffers::Offset<WorldFrame> CreateWorldFrameDirect(
     const char *fingerprint = nullptr,
     const std::vector<::flatbuffers::Offset<acro::wire::BodyFrame>> *bodies = nullptr,
     const std::vector<::flatbuffers::Offset<acro::wire::VesselFrame>> *vessels = nullptr,
-    const std::vector<::flatbuffers::Offset<acro::wire::BuildingFrame>> *buildings = nullptr) {
+    const std::vector<::flatbuffers::Offset<acro::wire::BuildingFrame>> *buildings = nullptr,
+    const std::vector<::flatbuffers::Offset<acro::wire::EventFrame>> *events = nullptr) {
   auto fingerprint__ = fingerprint ? _fbb.CreateString(fingerprint) : 0;
   auto bodies__ = bodies ? _fbb.CreateVector<::flatbuffers::Offset<acro::wire::BodyFrame>>(*bodies) : 0;
   auto vessels__ = vessels ? _fbb.CreateVector<::flatbuffers::Offset<acro::wire::VesselFrame>>(*vessels) : 0;
   auto buildings__ = buildings ? _fbb.CreateVector<::flatbuffers::Offset<acro::wire::BuildingFrame>>(*buildings) : 0;
+  auto events__ = events ? _fbb.CreateVector<::flatbuffers::Offset<acro::wire::EventFrame>>(*events) : 0;
   return acro::wire::CreateWorldFrame(
       _fbb,
       tick,
@@ -789,7 +1052,8 @@ inline ::flatbuffers::Offset<WorldFrame> CreateWorldFrameDirect(
       fingerprint__,
       bodies__,
       vessels__,
-      buildings__);
+      buildings__,
+      events__);
 }
 
 struct SetThrottle FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {

@@ -65,5 +65,7 @@ class AuthoritativeSimulation {
         epoch: clock.epoch,
         colonies: advance.colonies,
         terrain: terrain,
+        // Fold the events that fired this tick into the frame (drains the bus).
+        events: advance.events.drainRecent().map(EventSnapshot.of).toList(),
       );
 }
