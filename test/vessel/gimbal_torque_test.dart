@@ -36,7 +36,7 @@ void main() {
         velocity: Vector3.zero,
         attitude: Quaternion.identity, // forward = +Z
       ),
-      dominantBody: const BodyId('kerbin'),
+      dominantBody: const BodyId('earth'),
       stages: [Stage(index: 0, parts: [engine])],
     );
     v.setThrottle(1.0);

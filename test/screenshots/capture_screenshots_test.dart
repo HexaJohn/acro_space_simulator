@@ -37,9 +37,9 @@ Future<void> _capture(TopDownSnapshot snap, String path,
 }
 
 void main() {
-  test('capture: low-Kerbin-orbit overview', () async {
-    final system = SampleWorld.buildSystem();
-    final vessel = SampleWorld.buildVessel(altitude: 120000);
+  test('capture: low-Earth-orbit overview', () async {
+    final system = SampleWorld.realSystem();
+    final vessel = SampleWorld.buildVessel(altitude: 200000);
     final miner = SampleWorld.buildMiner();
     final freighter = SampleWorld.buildFreighter();
     final vessels = InMemoryVesselRepository([vessel, miner, freighter]);
@@ -95,8 +95,8 @@ void main() {
   });
 
   test('capture: vessel close-up with trajectory trail', () async {
-    final system = SampleWorld.buildSystem();
-    final vessel = SampleWorld.buildVessel(altitude: 90000);
+    final system = SampleWorld.realSystem();
+    final vessel = SampleWorld.buildVessel(altitude: 200000);
     final vessels = InMemoryVesselRepository([vessel]);
     final tick = AdvanceSimulationTick(
       vessels: vessels,

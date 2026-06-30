@@ -27,7 +27,7 @@ void main() {
 
     expect(frame.vessels['demo-1']!.throttle, 1.0);
     // The same frame carries the orbit + bodies the renderer uses.
-    expect(frame.bodies.keys, contains('kerbin'));
+    expect(frame.bodies.keys, contains('earth'));
     expect(frame.vessels['demo-1']!.periapsis, greaterThan(0));
   });
 }

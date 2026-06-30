@@ -51,7 +51,7 @@ void main() {
       vessel: v.id,
       legs: [
         FlightLeg(
-          targetBody: SampleWorld.kerbin,
+          targetBody: SampleWorld.earth,
           targetAltitude: 300000,
           nodes: [
             ManeuverNode(executeAt: const Epoch(12), deltaV: const Vector3(120, 0, 0)),
@@ -75,7 +75,7 @@ void main() {
       name: 'Bare',
       ownerId: 'p',
       state: SampleWorld.buildVessel().state,
-      dominantBody: SampleWorld.kerbin,
+      dominantBody: SampleWorld.earth,
       stages: const [],
     );
     final restored = restoreFrom(roundTrip(v));

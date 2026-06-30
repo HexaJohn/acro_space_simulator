@@ -46,7 +46,7 @@ void main() {
   });
 
   test('a landed vessel co-rotates with the spinning body (does not drift)', () {
-    final system = SampleWorld.buildSystem(); // miner lands on this system's body
+    final system = SampleWorld.realSystem(); // miner lands on this system's body
     final miner = SampleWorld.buildMiner(); // landed on a body
     final vessels = InMemoryVesselRepository([miner]);
     final universe = StaticUniverseRepository(system);

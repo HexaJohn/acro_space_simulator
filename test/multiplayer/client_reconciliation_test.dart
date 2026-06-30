@@ -18,7 +18,7 @@ import 'package:acro_space_simulator/infrastructure/sample_world.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 AuthoritativeSimulation buildServer() {
-  final system = SampleWorld.buildSystem();
+  final system = SampleWorld.realSystem();
   final base = SampleWorld.buildVessel();
   final owned = Vessel(
     id: base.id,

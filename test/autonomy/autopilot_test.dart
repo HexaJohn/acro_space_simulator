@@ -25,14 +25,14 @@ void main() {
         position: Vector3(700000, 0, 0),
         velocity: Vector3(0, 2000, 0),
       ),
-      dominantBody: const BodyId('kerbin'),
+      dominantBody: const BodyId('earth'),
       stages: const [],
     );
     v.flightPlan = FlightPlan(
       vessel: v.id,
       legs: [
         FlightLeg(
-          targetBody: const BodyId('kerbin'),
+          targetBody: const BodyId('earth'),
           targetAltitude: 100000,
           nodes: [ManeuverNode(executeAt: executeAt, deltaV: dv)],
         ),

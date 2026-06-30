@@ -14,8 +14,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test('a vessel screaming through dense atmosphere breaks apart', () {
-    final system = SampleWorld.buildSystem();
-    final body = system.require(SampleWorld.kerbin);
+    final system = SampleWorld.realSystem();
+    final body = system.require(SampleWorld.earth);
     // 5 km altitude (dense), horizontal at 1200 m/s -> very high dynamic pressure.
     final v = Vessel(
       id: const VesselId('overstressed'),
@@ -25,7 +25,7 @@ void main() {
         position: Vector3(body.radius + 5000, 0, 0),
         velocity: Vector3(0, 1200, 0),
       ),
-      dominantBody: SampleWorld.kerbin,
+      dominantBody: SampleWorld.earth,
       stages: const [],
     );
 
@@ -49,8 +49,8 @@ void main() {
   });
 
   test('the same vessel survives in vacuum (no dynamic pressure)', () {
-    final system = SampleWorld.buildSystem();
-    final body = system.require(SampleWorld.kerbin);
+    final system = SampleWorld.realSystem();
+    final body = system.require(SampleWorld.earth);
     final v = Vessel(
       id: const VesselId('vac'),
       name: 'Vac',
@@ -59,7 +59,7 @@ void main() {
         position: Vector3(body.radius + 200000, 0, 0), // above atmosphere
         velocity: Vector3(0, 3000, 0),
       ),
-      dominantBody: SampleWorld.kerbin,
+      dominantBody: SampleWorld.earth,
       stages: const [],
     );
     final vessels = InMemoryVesselRepository([v]);

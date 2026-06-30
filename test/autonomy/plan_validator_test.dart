@@ -39,7 +39,7 @@ Vessel rocket({required double fuelUnits, required double fuelUnitMass}) {
     name: 'R',
     ownerId: 'ai',
     state: const StateVector(position: Vector3(700000, 0, 0), velocity: Vector3.zero),
-    dominantBody: const BodyId('kerbin'),
+    dominantBody: const BodyId('earth'),
     stages: [Stage(index: 0, parts: [engine])],
   );
 }
@@ -62,7 +62,7 @@ void main() {
       vessel: v.id,
       legs: [
         FlightLeg(
-          targetBody: const BodyId('kerbin'),
+          targetBody: const BodyId('earth'),
           targetAltitude: 200000,
           nodes: [
             ManeuverNode(executeAt: Epoch.zero, deltaV: const Vector3(100, 0, 0)),
@@ -80,7 +80,7 @@ void main() {
       vessel: v.id,
       legs: [
         FlightLeg(
-          targetBody: const BodyId('kerbin'),
+          targetBody: const BodyId('earth'),
           targetAltitude: 200000,
           nodes: [
             ManeuverNode(executeAt: Epoch.zero, deltaV: const Vector3(5000, 0, 0)),

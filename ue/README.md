@@ -42,7 +42,7 @@ Fastest path — no per-frame code. Place an **AcroSimRenderer** actor in the le
 and set its **Asset Table** (a DataTable whose row struct is `FAcroAssetRow`). Row
 name = the type-key the sim sends:
 
-- a **body id** (`kerbin`, `mun`, `earth`) → planet mesh (a unit-radius sphere; the
+- a **body id** (`earth`, `moon`, `mars`, …) → planet mesh (a unit-radius sphere; the
   renderer scales it to the body's real radius — set **Body Mesh Unit Radius Cm**
   to your sphere's radius, `50` for UE's default sphere),
 - a **part name** (`LV-T45`, …) → part mesh,
@@ -64,7 +64,7 @@ effects, UI) bind `On World Updated` yourself — see below.
 
 ```cpp
 auto* Sim = GetGameInstance()->GetSubsystem<USpaceSimSubsystem>();
-Sim->FocusBodyId = TEXT("kerbin");   // becomes the UE world origin
+Sim->FocusBodyId = TEXT("earth");   // becomes the UE world origin
 Sim->Connect(TEXT("127.0.0.1"), 5800);
 ```
 

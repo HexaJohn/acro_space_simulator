@@ -23,8 +23,8 @@ void main() {
       id: const VesselId('freighter'),
       name: 'Freighter',
       ownerId: 'ai',
-      state: const StateVector(position: Vector3(600000, 0, 0), velocity: Vector3.zero),
-      dominantBody: const BodyId('kerbin'),
+      state: const StateVector(position: Vector3(6.371e6, 0, 0), velocity: Vector3.zero),
+      dominantBody: const BodyId('earth'),
       stages: [
         Stage(index: 0, parts: [
           Part(id: const PartId('hold'), name: 'hold', dryMass: 500, resources: [hold]),
@@ -37,7 +37,7 @@ void main() {
   Colony colony({double waterAmount = 0, double waterCapacity = 1000}) => Colony(
         id: 'base',
         name: 'Base',
-        body: const BodyId('kerbin'),
+        body: const BodyId('earth'),
         latitude: 0,
         longitude: 0,
         stockpile: {
@@ -78,7 +78,7 @@ void main() {
     final c = Colony(
       id: 'b',
       name: 'b',
-      body: const BodyId('kerbin'),
+      body: const BodyId('earth'),
       latitude: 0,
       longitude: 0,
       stockpile: {}, // no water slot

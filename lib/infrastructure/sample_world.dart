@@ -14,7 +14,6 @@ import '../domain/shared/quaternion.dart';
 import '../domain/shared/vector3.dart';
 import '../domain/simulation/epoch.dart';
 import '../domain/thermal/thermal_state.dart';
-import '../domain/universe/atmosphere_model.dart';
 import '../domain/universe/celestial_body.dart';
 import '../domain/universe/real_solar_system.dart';
 import '../domain/universe/star_system.dart';
@@ -25,56 +24,24 @@ import '../domain/vessel/stage.dart';
 import '../domain/vessel/vessel.dart';
 import '../domain/weather/weather_system.dart';
 
-/// Composition-root sample data: a small Kerbin-like system and a vessel in low
-/// orbit, used to drive the demo. This is infrastructure (concrete data), not
-/// domain — it just constructs domain aggregates.
+/// Composition-root sample data: the real Solar System plus demo craft, a
+/// colony, weather and a freighter in low Earth orbit, used to drive the demo
+/// and the tests. This is infrastructure (concrete data), not domain — it just
+/// constructs domain aggregates.
 class SampleWorld {
-  static final BodyId kerbin = const BodyId('kerbin');
-  static final BodyId mun = const BodyId('mun');
+  /// Canonical body ids in the real system (see [RealSolarSystem]).
+  static final BodyId earth = const BodyId('earth');
+  static final BodyId moon = const BodyId('moon');
 
-  static StarSystem buildSystem() {
-    final planet = CelestialBody(
-      id: kerbin,
-      name: 'Kerbin',
-      mu: 3.5316e12, // KSP Kerbin standard gravitational parameter
-      radius: 600000, // 600 km
-      soiRadius: 84159286,
-      siderealRotationPeriod: 21549.425,
-      parent: null,
-      atmosphere: const AtmosphereModel(
-        seaLevelPressure: 101325,
-        seaLevelDensity: 1.225,
-        seaLevelTemperature: 288,
-        scaleHeight: 5600,
-        atmosphereHeight: 70000,
-      ),
-      solarFlux: 1360,
-    );
-    final moon = CelestialBody(
-      id: mun,
-      name: 'Mun',
-      mu: 6.5138e10, // KSP Mun
-      radius: 200000,
-      soiRadius: 2429559,
-      siderealRotationPeriod: 138984,
-      parent: kerbin,
-      orbitRadius: 12000000, // semi-major axis, 12,000 km
-      orbitPhase: 0,
-      orbitEccentricity: 0.05, // slightly elliptical
-      orbitInclination: 0.05, // ~3 deg, out of the equatorial plane
-      solarFlux: 1360,
-    );
-    return StarSystem(
-      name: 'Kerbol (sample)',
-      rootStar: kerbin,
-      bodies: [planet, moon],
-    );
-  }
+  /// The real Solar System: Sun + planets + dwarf planets + moons.
+  static StarSystem realSystem() => RealSolarSystem.build();
 
-  /// A vessel on a circular low orbit at [altitude] above Kerbin, in the XY
-  /// plane (Z up), moving prograde. Circular speed v = sqrt(mu / r).
-  static Vessel buildVessel({double altitude = 100000}) {
-    final body = buildSystem().require(kerbin);
+  /// A vessel on a circular low orbit at [altitude] above Earth, in the XY
+  /// plane (Z up), moving prograde. Circular speed v = sqrt(mu / r). Defaults to
+  /// 200 km — clear of Earth's ~140 km modelled atmosphere but below the 250 km
+  /// high-orbit cutoff, so it classifies as a clean low Earth orbit.
+  static Vessel buildVessel({double altitude = 200000}) {
+    final body = realSystem().require(earth);
     final r = body.radius + altitude;
     final v = math.sqrt(body.mu / r);
 
@@ -111,7 +78,7 @@ class SampleWorld {
       name: 'Demo Orbiter',
       ownerId: 'player-1',
       state: state,
-      dominantBody: kerbin,
+      dominantBody: earth,
       stages: [
         Stage(index: 0, parts: [engine]),
       ],
@@ -129,7 +96,7 @@ class SampleWorld {
 
   /// A landed miner on the surface with an active ore drill, bound to [oreField].
   static Vessel buildMiner() {
-    final body = buildSystem().require(kerbin);
+    final body = realSystem().require(earth);
     final ore = ResourceContainer(
         type: ResourceType.ore, capacity: 200, amount: 0, unitMass: 1);
     final power = ResourceContainer(
@@ -152,7 +119,7 @@ class SampleWorld {
         position: Vector3(body.radius, 0, 0),
         velocity: Vector3.zero,
       ),
-      dominantBody: kerbin,
+      dominantBody: earth,
       stages: [Stage(index: 0, parts: [drill])],
       landed: true,
     )..mining = MiningOperation(
@@ -164,7 +131,7 @@ class SampleWorld {
 
   static ResourceDeposit buildDeposit() => ResourceDeposit(
         id: 'ore-field-1',
-        body: kerbin,
+        body: earth,
         latitude: 0,
         longitude: 0,
         resource: ResourceType.ore,
@@ -180,8 +147,8 @@ class SampleWorld {
         type: ResourceType.water, capacity: 5000, amount: 0, unitMass: 1);
     return Colony(
       id: 'colony-1',
-      name: 'New Kerbal City',
-      body: kerbin,
+      name: 'New Horizon City',
+      body: earth,
       latitude: 0,
       longitude: 0,
       population: 20,
@@ -218,9 +185,9 @@ class SampleWorld {
     );
   }
 
-  /// A weather system over Kerbin: a couple of drifting storm cells.
+  /// A weather system over Earth: a couple of drifting storm cells.
   static WeatherSystem buildWeather() => WeatherSystem(
-        body: kerbin,
+        body: earth,
         cells: [
           const WeatherCell(
             latitude: 0.2,
@@ -244,8 +211,8 @@ class SampleWorld {
   /// An autonomous freighter in low orbit with a Hohmann plan to raise its
   /// orbit — the autopilot flies it.
   static Vessel buildFreighter() {
-    final body = buildSystem().require(kerbin);
-    final r = body.radius + 90000;
+    final body = realSystem().require(earth);
+    final r = body.radius + 300000; // clean LEO, above the modelled atmosphere
     final v = math.sqrt(body.mu / r);
     final tank = ResourceContainer(
         type: ResourceType.liquidFuel, capacity: 300, amount: 300, unitMass: 5);
@@ -269,7 +236,7 @@ class SampleWorld {
       name: 'Auto Freighter',
       ownerId: 'ai',
       state: StateVector(position: Vector3(r, 0, 0), velocity: Vector3(0, v, 0)),
-      dominantBody: kerbin,
+      dominantBody: earth,
       stages: [Stage(index: 0, parts: [core])],
     );
     const planner = ManeuverPlanner();
@@ -277,12 +244,12 @@ class SampleWorld {
       vessel: freighter.id,
       legs: [
         FlightLeg(
-          targetBody: kerbin,
-          targetAltitude: 250000,
+          targetBody: earth,
+          targetAltitude: 600000,
           nodes: planner.hohmann(
             mu: body.mu,
             fromRadius: r,
-            toRadius: body.radius + 250000,
+            toRadius: body.radius + 600000,
             startEpoch: const Epoch(20),
           ),
         ),
@@ -292,17 +259,12 @@ class SampleWorld {
   }
 
   // ============================================================
-  //  REAL SOLAR SYSTEM demo (Earth + Moon + planets + dwarfs)
+  //  REAL SOLAR SYSTEM craft fixtures (Earth + Moon)
   // ============================================================
-
-  static final BodyId earth = const BodyId('earth');
-
-  /// The real Solar System with a small starter fleet around Earth.
-  static StarSystem realSystem() => RealSolarSystem.build();
 
   /// A demo vessel in Low Earth Orbit (~400 km), prograde, with experiments.
   static Vessel buildEarthOrbiter({double altitude = 400000}) {
-    final body = RealSolarSystem.build().require(earth);
+    final body = realSystem().require(earth);
     final r = body.radius + altitude;
     final v = math.sqrt(body.mu / r);
     final tank = ResourceContainer(
@@ -485,7 +447,7 @@ class SampleWorld {
 
   /// A second craft headed for the Moon on a Hohmann transfer, autopilot-flown.
   static Vessel buildEarthFreighter() {
-    final body = RealSolarSystem.build().require(earth);
+    final body = realSystem().require(earth);
     final r = body.radius + 300000;
     final v = math.sqrt(body.mu / r);
     final tank = ResourceContainer(

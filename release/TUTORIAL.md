@@ -14,8 +14,8 @@ Top-left, find your focus vessel's line:
 
 ```
 VESSEL Demo Orbiter
-body kerbin   ON-RAILS   LINK
-alt 120.0 km   vel 2280 m/s   thr 0%
+body earth   ON-RAILS   LINK
+alt 200.0 km   vel 7790 m/s   thr 0%
 fuel 400   dv 1850 m/s
 ```
 
@@ -28,7 +28,7 @@ Watch the faint ring around your vessel — that's your **predicted orbit**.
 ## Step 2 — Zoom & look around
 
 Press `]` a few times to zoom in on your ship, `[` to zoom out and see the whole
-orbit. Pinch/scroll works too. Notice the bright central body (Kerbin) and its
+orbit. Pinch/scroll works too. Notice the bright central body (Earth) and its
 atmosphere glow.
 
 ## Step 3 — Take manual control
@@ -66,7 +66,7 @@ propellant from home.
 
 ## Step 6 — The colony
 
-A colony, **New Kerbal City**, runs on the surface. Its HUD line shows
+A colony, **New Horizon City**, runs on the surface. Its HUD line shows
 population, power, and water. It has a refinery (ore → water), housing, and a
 solar plant. As cargo flights arrive they create **RCI demand**, and zoned cells
 grow new buildings — provided they're road-connected and the city is happy.

@@ -52,7 +52,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim")
 	int32 Port = 5800;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim")
-	FString FocusBodyId = TEXT("kerbin");
+	FString FocusBodyId = TEXT("earth");
 
 	// Fallback only: the body mesh radius (cm) at scale 1 is normally read from
 	// the mesh's own bounds, so the planet sizes correctly for ANY mesh. This is

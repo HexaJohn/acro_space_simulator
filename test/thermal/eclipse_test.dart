@@ -6,12 +6,12 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   const eclipse = EclipseService();
   final body = CelestialBody(
-    id: const BodyId('kerbin'),
-    name: 'Kerbin',
-    mu: 3.5316e12,
-    radius: 600000,
-    soiRadius: 84159286,
-    siderealRotationPeriod: 21549,
+    id: const BodyId('earth'),
+    name: 'Earth',
+    mu: 3.986004418e14,
+    radius: 6.371e6,
+    soiRadius: 9.24e8,
+    siderealRotationPeriod: 86164,
     parent: null,
   );
 
@@ -20,7 +20,7 @@ void main() {
 
   test('vessel on the sunward side is fully lit', () {
     final lit = eclipse.litFraction(
-      bodyCentredPosition: const Vector3(700000, 0, 0), // +X, toward the sun
+      bodyCentredPosition: const Vector3(7000000, 0, 0), // +X, toward the sun
       body: body,
       sunDirection: sunDir,
     );
@@ -29,7 +29,7 @@ void main() {
 
   test('vessel directly behind the body is in shadow', () {
     final lit = eclipse.litFraction(
-      bodyCentredPosition: const Vector3(-700000, 0, 0), // -X, anti-sun, low alt
+      bodyCentredPosition: const Vector3(-7000000, 0, 0), // -X, anti-sun, low alt
       body: body,
       sunDirection: sunDir,
     );
@@ -40,7 +40,7 @@ void main() {
     // Anti-sun side, but far off-axis (beyond the body radius) -> sunlight
     // passes by the planet.
     final lit = eclipse.litFraction(
-      bodyCentredPosition: const Vector3(-700000, 2000000, 0),
+      bodyCentredPosition: const Vector3(-7000000, 20000000, 0),
       body: body,
       sunDirection: sunDir,
     );
@@ -49,7 +49,7 @@ void main() {
 
   test('vessel on the terminator (perpendicular to sun) is lit', () {
     final lit = eclipse.litFraction(
-      bodyCentredPosition: const Vector3(0, 700000, 0), // +Y, side-on
+      bodyCentredPosition: const Vector3(0, 7000000, 0), // +Y, side-on
       body: body,
       sunDirection: sunDir,
     );

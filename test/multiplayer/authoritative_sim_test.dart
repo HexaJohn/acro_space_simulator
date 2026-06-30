@@ -16,8 +16,8 @@ import 'package:acro_space_simulator/infrastructure/sample_world.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 AuthoritativeSimulation buildSim({required String owner}) {
-  final system = SampleWorld.buildSystem();
-  final vessel = SampleWorld.buildVessel(altitude: 120000);
+  final system = SampleWorld.realSystem();
+  final vessel = SampleWorld.buildVessel(altitude: 200000);
   // Force ownership for the test.
   final owned = Vessel(
     id: vessel.id,

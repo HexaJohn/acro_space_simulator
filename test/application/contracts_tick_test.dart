@@ -12,15 +12,15 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test('a "reach low orbit" contract completes as the vessel flies the tick', () {
-    final system = SampleWorld.buildSystem();
-    final vessel = SampleWorld.buildVessel(altitude: 120000); // lowOrbit:kerbin
+    final system = SampleWorld.realSystem();
+    final vessel = SampleWorld.buildVessel(altitude: 200000); // lowOrbit:earth
 
     final contract = Contract(
       id: 'first-orbit',
-      title: 'Achieve orbit of Kerbin',
+      title: 'Achieve orbit of Earth',
       rewardFunds: 50000,
       rewardScience: 10,
-      objectives: [ReachSituationObjective(situation: 'lowOrbit:kerbin')],
+      objectives: [ReachSituationObjective(situation: 'lowOrbit:earth')],
     );
     final board = ContractBoard(contracts: [contract]);
 

@@ -18,8 +18,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test('crew run out of oxygen during the tick and are lost', () {
-    final system = SampleWorld.buildSystem();
-    final body = system.require(SampleWorld.kerbin);
+    final system = SampleWorld.realSystem();
+    final body = system.require(SampleWorld.earth);
     final oxy = ResourceContainer(
         type: ResourceType.oxygen, capacity: 100, amount: 0.5, unitMass: 1);
     final cabin = Part(
@@ -32,7 +32,7 @@ void main() {
         position: Vector3(body.radius + 100000, 0, 0),
         velocity: Vector3.zero,
       ),
-      dominantBody: SampleWorld.kerbin,
+      dominantBody: SampleWorld.earth,
       stages: [Stage(index: 0, parts: [cabin])],
       landed: true,
     )..crew = CrewModule(count: 3, oxygenPerCrewPerSecond: 0.1);

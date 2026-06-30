@@ -93,7 +93,7 @@ class MegastructureMilestone extends DomainEvent {
 
 class SituationEntered extends DomainEvent {
   final VesselId vessel;
-  final String situation; // e.g. 'lowOrbit:mun'
+  final String situation; // e.g. 'lowOrbit:moon'
   SituationEntered(this.vessel, this.situation) : super(Epoch.zero);
 }
 

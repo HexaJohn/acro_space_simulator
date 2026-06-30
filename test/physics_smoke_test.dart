@@ -42,7 +42,7 @@ void main() {
   group('Keplerian conversion', () {
     test('circular orbit: state -> elements -> state preserves radius & speed',
         () {
-      final body = SampleWorld.buildSystem().require(SampleWorld.kerbin);
+      final body = SampleWorld.realSystem().require(SampleWorld.earth);
       final r = body.radius + 100000;
       final v = math.sqrt(body.mu / r);
       const converter = StateVectorOrbitConverter();
@@ -67,8 +67,8 @@ void main() {
 
   group('AdvanceSimulationTick', () {
     test('on-rails vessel stays in a bound orbit over many ticks', () {
-      final system = SampleWorld.buildSystem();
-      final vessel = SampleWorld.buildVessel(altitude: 120000);
+      final system = SampleWorld.realSystem();
+      final vessel = SampleWorld.buildVessel(altitude: 200000);
       final r0 = vessel.state.position.length;
 
       final vessels = InMemoryVesselRepository([vessel]);

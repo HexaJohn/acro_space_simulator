@@ -22,7 +22,7 @@ void main() {
     final vessels = InMemoryVesselRepository([vessel]);
     final colonies = InMemoryColonyRepository()..save(SampleWorld.buildColony());
     final snap = WorldSnapshot.capture(99, vessels,
-        system: SampleWorld.buildSystem(),
+        system: SampleWorld.realSystem(),
         epoch: const Epoch(321.5),
         colonies: colonies);
 
@@ -45,8 +45,10 @@ void main() {
     expect(b.parts.map((p) => p.type), contains('LV-T45'));
     expect(b.parts.first.id, a.parts.first.id);
 
-    expect(back.bodies.keys.toSet(), {'kerbin', 'mun'});
-    final am = snap.bodies['mun']!, bm = back.bodies['mun']!;
+    // The real system has many bodies; assert the two we care about survived.
+    expect(back.bodies.keys, contains('earth'));
+    expect(back.bodies.keys, contains('moon'));
+    final am = snap.bodies['moon']!, bm = back.bodies['moon']!;
     expect(bm.px, closeTo(am.px, 1e-6));
     expect(bm.qw, closeTo(am.qw, 1e-12));
     expect(bm.radius, am.radius);
@@ -55,7 +57,7 @@ void main() {
     expect(back.buildings, isNotEmpty);
     final refinery = back.buildings['colony-1/refinery-1']!;
     expect(refinery.type, 'refinery');
-    expect(refinery.body, 'kerbin');
+    expect(refinery.body, 'earth');
     expect(refinery.colonyId, 'colony-1');
     final original = snap.buildings['colony-1/refinery-1']!;
     expect(refinery.px, closeTo(original.px, 1e-6));
@@ -67,8 +69,8 @@ void main() {
     final fuel = b.resources.firstWhere((r) => r.type == 'liquidFuel');
     expect(fuel.capacity, 400);
 
-    // Orbit + trajectory: demo-1 is in a ~circular low orbit (~100 km up).
-    expect(a.periapsis, greaterThan(600000)); // above Kerbin's 600 km surface
+    // Orbit + trajectory: demo-1 is in a ~circular low orbit (~200 km up).
+    expect(a.periapsis, greaterThan(6.371e6)); // above Earth's surface radius
     expect(a.apoapsis, closeTo(a.periapsis, a.periapsis * 0.05)); // near-circular
     expect(a.eccentricity, lessThan(0.05));
     expect(a.trajectory.length, greaterThan(0));
@@ -85,7 +87,7 @@ void main() {
   test('events round-trip through the codec', () {
     final snap = WorldSnapshot(tick: 5, vessels: const {}, events: const [
       EventSnapshot(
-          kind: 'Impact', subject: 'demo-1', target: 'kerbin', magnitude: 42.0),
+          kind: 'Impact', subject: 'demo-1', target: 'earth', magnitude: 42.0),
       EventSnapshot(kind: 'StageSeparation', subject: 'demo-1', magnitude: 1),
       EventSnapshot(kind: 'CrewLost', subject: 'demo-1', info: 'oxygen'),
     ]);
@@ -95,7 +97,7 @@ void main() {
     expect(back.events.length, 3);
     expect(back.events[0].kind, 'Impact');
     expect(back.events[0].subject, 'demo-1');
-    expect(back.events[0].target, 'kerbin');
+    expect(back.events[0].target, 'earth');
     expect(back.events[0].magnitude, 42.0);
     expect(back.events[1].kind, 'StageSeparation');
     expect(back.events[1].magnitude, 1);
@@ -110,7 +112,7 @@ void main() {
       SeparateStageCommand(by, 4, 'demo-1'),
       SetAttitudeCommand(by, 5, 'demo-1', 0.0, 1.0, 0.0),
       PlaceBuildingCommand(by, 6, 'colony-1', 'hab', 2, 3),
-      ReportTerrainHeightCommand(by, 7, 'kerbin', 0.1, 0.2, 42.0),
+      ReportTerrainHeightCommand(by, 7, 'earth', 0.1, 0.2, 42.0),
     ]);
 
     final back = codec.decodeCommands(codec.encodeCommands(batch));
@@ -135,7 +137,7 @@ void main() {
     expect([p.gridX, p.gridY], [2, 3]);
 
     final r = back.commands[4] as ReportTerrainHeightCommand;
-    expect(r.body, 'kerbin');
+    expect(r.body, 'earth');
     expect([r.lat, r.lon, r.height], [0.1, 0.2, 42.0]);
   });
 }

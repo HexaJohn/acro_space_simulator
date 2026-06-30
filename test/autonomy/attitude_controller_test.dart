@@ -18,7 +18,7 @@ void main() {
           velocity: Vector3.zero,
           attitude: Quaternion.identity, // forward = +Z
         ),
-        dominantBody: const BodyId('kerbin'),
+        dominantBody: const BodyId('earth'),
         stages: const [],
       );
 

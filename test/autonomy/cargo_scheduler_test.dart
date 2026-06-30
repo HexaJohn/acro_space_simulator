@@ -12,8 +12,8 @@ void main() {
   CargoSchedule schedule({required Epoch next}) => CargoSchedule(
         id: 'sch',
         carrier: const VesselId('freighter'),
-        origin: const BodyId('kerbin'),
-        destination: const BodyId('mun'),
+        origin: const BodyId('earth'),
+        destination: const BodyId('moon'),
         resource: ResourceType.ore,
         quantity: 100,
         period: 1000,
