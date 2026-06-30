@@ -120,6 +120,9 @@ void ASpaceSimRenderer::UpdateBodies(USpaceSimSubsystem* Sim)
 			MC->SetRelativeScale3D(FVector(K) * TableScale);
 
 			BodyActors.Add(B.Id, Actor);
+#if WITH_EDITOR
+			Actor->SetActorLabel(FString::Printf(TEXT("Body_%s"), *B.Id));
+#endif
 		}
 		Actor->SetActorLocationAndRotation(B.Position, B.Orientation);
 	}
@@ -156,6 +159,9 @@ void ASpaceSimRenderer::UpdateVessels(USpaceSimSubsystem* Sim)
 			Actor = SpawnVesselActor();
 			if (!Actor) continue;
 			VesselActors.Add(V.Id, Actor);
+#if WITH_EDITOR
+			Actor->SetActorLabel(FString::Printf(TEXT("Craft_%s"), *V.Id));
+#endif
 		}
 		Actor->SetActorLocationAndRotation(V.Position, V.Attitude);
 
