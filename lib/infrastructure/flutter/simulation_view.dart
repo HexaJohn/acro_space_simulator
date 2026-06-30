@@ -1,7 +1,5 @@
-﻿import 'dart:async' show StreamSubscription, unawaited;
-import 'dart:convert';
+﻿import 'dart:convert';
 import 'dart:math' as math;
-import 'dart:typed_data' show Uint8List;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
@@ -16,24 +14,16 @@ import '../../domain/shared/vector3.dart';
 
 import '../../adapters/events/in_memory_event_bus.dart';
 import '../../adapters/presenters/top_down_snapshot.dart';
-import '../../adapters/wire/flatbuffer_codec.dart';
-import '../../application/snapshot/world_snapshot.dart';
-import '../../domain/multiplayer/command.dart';
-import '../bridge/sim_bridge.dart';
 import '../../adapters/repositories/in_memory_repositories.dart';
 import '../../adapters/repositories/in_memory_world_repositories.dart';
 import '../../application/persistence/game_state_codec.dart';
-import '../../application/ports/compute_port.dart';
-import '../../application/usecases/advance_simulation_tick.dart';
-import '../../domain/orbits/soi_transition_service.dart';
 import '../../domain/science/research_ledger.dart';
-import '../../domain/science/tech_tree.dart';
 import '../../domain/simulation/simulation_clock.dart';
 import '../../domain/simulation/domain_event.dart';
 import '../../domain/planetary/atmospheric_composition.dart';
 import '../../domain/universe/celestial_body.dart' show BodyId, CelestialBody;
 import '../../domain/vessel/vessel.dart';
-import '../sample_world.dart';
+import '../sim_engine.dart';
 import 'debug_layers.dart';
 import 'nav_ball.dart';
 import 'screens/city_builder_screen.dart';
@@ -58,10 +48,15 @@ class SimulationView extends StatefulWidget {
   /// show as named craft with their own orbits/trajectories in the sim.
   final List<Vessel> trafficVessels;
 
+  /// The simulation to observe. Defaults to the app-scoped [simEngine] (running
+  /// since launch); inject a fresh [SimEngine] in tests for isolation.
+  final SimEngine? engine;
+
   const SimulationView({
     super.key,
     this.injectedVessel,
     this.trafficVessels = const [],
+    this.engine,
   });
 
   @override
@@ -71,13 +66,16 @@ class SimulationView extends StatefulWidget {
 class _SimulationViewState extends State<SimulationView>
     with SingleTickerProviderStateMixin {
   late final Ticker _ticker;
+  // The shared, app-scoped sim (built + ticking from boot — see SimEngine). This
+  // view OBSERVES it: the repos/clock below are the engine's instances, physics +
+  // the Unreal bridge run on the engine's own loop, and this widget only renders
+  // and feeds in pilot input.
+  late final SimEngine _engine;
   late final SimulationClock _clock;
-  late AdvanceSimulationTick _advance;
-  // Stashed tick deps so _advance can be rebuilt when a debug cheat toggles.
   late final InMemoryEventBus _events;
-  late final InMemoryWeatherRepository _weather;
   // Debug cheats: skip overheat / aero-stress / impact destruction. ON by
   // default so flight testing isn't cut short; toggle off in the debug panel.
+  // Mirrors the engine's flags (read on init, written back through the engine).
   bool _disableOverheat = true;
   bool _disableAeroStress = true;
   bool _disableImpact = true;
@@ -87,19 +85,6 @@ class _SimulationViewState extends State<SimulationView>
   late final InMemoryColonyRepository _colonies;
   late final InMemoryDepositRepository _deposits;
   late final ResearchLedger _research;
-
-  // ---- Engine bridge ----
-  // Serves THIS in-process sim to an external renderer (Unreal) over the
-  // socket protocol, reusing the same repos the Flutter views render from. On
-  // web this is a no-op (no dart:io), so the game just runs in-process.
-  late final SimBridge _bridge;
-  static const FlatBufferCodec _wire = FlatBufferCodec();
-  StreamSubscription<Uint8List>? _bridgeCommands;
-  int _bridgeTick = 0;
-  // Ticker time of the last frame that carried body descriptors. Starts in the
-  // past so the very first published frame includes them (a new client gets the
-  // static catalog at once); thereafter they ride along ~once a second.
-  Duration _lastDescriptorAt = const Duration(seconds: -2);
 
   // ---- Camera target + view ----
   // The locked target cycles through vessels and major bodies. Exactly one of
@@ -290,73 +275,71 @@ class _SimulationViewState extends State<SimulationView>
     });
   }
   Duration _last = Duration.zero;
-  double _accum = 0; // carried-over real time not yet consumed by a fixed step
 
   @override
   void initState() {
     super.initState();
 
-    // The REAL Solar System: Sun + planets + dwarf planets + moons.
-    final system = SampleWorld.realSystem();
-    // ~3000 km up so the craft is clearly off the surface at the default zoom
-    // (a 400 km LEO sits only a few px above Earth's limb and looks landed).
-    final vessel = SampleWorld.buildEarthOrbiter(altitude: 3000000);
-    // An ascent/descent craft injected by the caller (sits on a body surface).
-    final injected = widget.injectedVessel;
-    final fleet = [vessel, ?injected, ...widget.trafficVessels];
+    // OBSERVE the app-scoped engine (built + ticking since launch). Physics and
+    // the Unreal bridge run on its own loop; this view renders + feeds pilot
+    // input. The REAL Solar System: Sun + planets + dwarf planets + moons.
+    _engine = widget.engine ?? simEngine;
+    final system = _engine.universe.current();
 
-    // Camera-target cycle: every vessel first, then the major bodies. The
-    // switch-camera button steps through this list.
+    // Inject this entry's craft (ascent/descent) + any traffic into the live sim.
+    final injected = widget.injectedVessel;
+    if (injected != null) _engine.injectVessel(injected);
+    for (final t in widget.trafficVessels) {
+      _engine.injectVessel(t);
+    }
+
+    // Bind to the engine's repos + clock (these are the engine's instances).
+    _clock = _engine.clock;
+    _vessels = _engine.vessels;
+    _universe = _engine.universe;
+    _events = _engine.events;
+    _colonies = _engine.colonies;
+    _deposits = _engine.deposits;
+    _research = _engine.research;
+    // Reflect the engine's CURRENT cheat state — it kept running between flights,
+    // so a previous session's toggles may differ from the field defaults.
+    _disableOverheat = _engine.disableOverheat;
+    _disableAeroStress = _engine.disableAeroStress;
+    _disableImpact = _engine.disableImpact;
+
+    for (final v in _vessels.all()) {
+      _vesselNames[v.id.value] = v.name;
+    }
+
+    // Camera-target cycle: every vessel currently in the sim, then the bodies.
     _targets = [
-      for (final v in fleet) (label: v.name, v: v.id, b: null),
+      for (final v in _vessels.all()) (label: v.name, v: v.id, b: null),
       for (final body in system.all)
         (label: body.name, v: null, b: body.id),
     ];
-    // If a craft was injected (ascent/descent), START LOCKED ON IT so the player
-    // is flying it immediately; otherwise lock on the ORBITER so the player can
-    // fly it directly from the start (manual mode, see the flags below).
-    if (injected != null) {
-      _targetIndex = _targets.indexWhere((t) => t.v == injected.id);
-    } else {
-      _targetIndex = _targets.indexWhere((t) => t.v == vessel.id);
-    }
+    // Lock onto the injected craft if one was supplied (fly it immediately);
+    // otherwise the demo orbiter so the player can fly directly from the start.
+    final focusId = injected?.id ?? const VesselId('orbiter-1');
+    _targetIndex = _targets.indexWhere((t) => t.v == focusId);
     if (_targetIndex < 0) _targetIndex = 0;
     _focusVessel = _targets[_targetIndex].v;
     _focusBody = _targets[_targetIndex].b;
 
-    // Start ready to fly: manual control of the orbiter, infinite fuel, 1x warp.
+    // Start ready to fly: manual control, infinite fuel, 1x warp.
     _manualControl = true;
-    _layers = _layers.copyWith(infiniteFuel: true);
+    _engine.infiniteFuel = true;
+    _layers = _layers.copyWith(infiniteFuel: _engine.infiniteFuel);
     _warpIndex = 0; // 1x
+    _clock.warpFactor = _warpLevels[_warpIndex];
 
-    _vessels = InMemoryVesselRepository(fleet);
-    for (final v in _vessels.all()) {
-      _vesselNames[v.id.value] = v.name;
-    }
-    final universe = StaticUniverseRepository(system);
-    _universe = universe;
-    _events = InMemoryEventBus();
-    // Pop a destruction menu when a vessel is lost.
-    _events.subscribe(_onDomainEvent);
-    _colonies = InMemoryColonyRepository();
-    _deposits = InMemoryDepositRepository();
-    _weather = InMemoryWeatherRepository();
-    _research = ResearchLedger(
-      tree: TechTree(
-        nodes: const [
-          TechNode(id: 'start', cost: 0),
-          TechNode(id: 'generalRocketry', cost: 20, requires: ['start']),
-        ],
-      ),
-    );
-
-    _clock = SimulationClock(warpFactor: 1, fixedStep: 0.02); // dev start: 1x
-    _buildAdvance();
     _presenter = TopDownSnapshotPresenter(
       vessels: _vessels,
-      universe: universe,
+      universe: _universe,
       colonies: _colonies,
     );
+    // Pop a destruction menu when a vessel is lost. Detached in dispose — the
+    // shared bus outlives this screen now.
+    _events.subscribe(_onDomainEvent);
 
     // Body surface maps; repaint once each finishes decoding.
     _textures = TextureCache(
@@ -365,74 +348,17 @@ class _SimulationViewState extends State<SimulationView>
       },
     );
 
-    // Open the engine bridge: serve this sim to a connected Unreal renderer and
-    // apply the commands it sends back to the SAME repos the Flutter views use.
-    // No-op on web (the stub). Fire-and-forget — a bind failure (port in use)
-    // shouldn't stop the game from running in-process.
-    _bridge = createSimBridge();
-    unawaited(_bridge.start());
-    _bridgeCommands = _bridge.commandFrames.listen(_applyBridgeCommands);
-
     _ticker = createTicker(_onFrame)..start();
   }
 
-  /// Apply a CommandFrame from a connected renderer (Unreal) to the live repos.
-  /// This is the local serve path: the single connected renderer is trusted, so
-  /// — unlike the networked [ApplyCommands] use case — there's no ownership gate.
-  /// Mirrors that use case's per-command handling so behaviour stays in step.
-  void _applyBridgeCommands(Uint8List frame) {
-    final CommandBatch batch;
-    try {
-      batch = _wire.decodeCommands(frame);
-    } catch (_) {
-      return; // ignore a malformed/foreign frame rather than crash the loop
-    }
-    for (final cmd in batch.commands) {
-      switch (cmd) {
-        case SetThrottleCommand(:final vesselId, :final throttle):
-          final v = _vessels.byId(VesselId(vesselId));
-          if (v != null) {
-            v.setThrottle(throttle);
-            _vessels.save(v);
-          }
-        case SeparateStageCommand(:final vesselId):
-          final v = _vessels.byId(VesselId(vesselId));
-          if (v != null && v.separateStage()) _vessels.save(v);
-        case SetAttitudeCommand(
-            :final vesselId,
-            :final headingX,
-            :final headingY,
-            :final headingZ
-          ):
-          final v = _vessels.byId(VesselId(vesselId));
-          if (v != null) {
-            v.targetFacing = Vector3(headingX, headingY, headingZ);
-            _vessels.save(v);
-          }
-        case PlaceBuildingCommand():
-        case ReportTerrainHeightCommand():
-          break; // colony/terrain intent not served on this path
-      }
-    }
-  }
-
-  /// (Re)build the tick with the current debug-cheat flags. Called on init and
-  /// whenever a disable-overheat / aero / impact toggle changes.
-  void _buildAdvance() {
-    _advance = AdvanceSimulationTick(
-      vessels: _vessels,
-      universe: _universe,
-      compute: DartCompute(),
-      soi: const SoiTransitionService(),
-      events: _events,
-      colonies: _colonies,
-      deposits: _deposits,
-      weather: _weather,
-      research: _research,
-      disableOverheat: _disableOverheat,
-      disableAeroStress: _disableAeroStress,
-      disableImpact: _disableImpact,
-    );
+  /// Push the view's cheat flags onto the engine and rebuild its tick so a
+  /// debug-panel toggle takes effect immediately (the engine owns the tick now).
+  void _syncCheats() {
+    _engine
+      ..disableOverheat = _disableOverheat
+      ..disableAeroStress = _disableAeroStress
+      ..disableImpact = _disableImpact
+      ..rebuildAdvance();
   }
 
   /// React to simulation events. Right now: surface a destruction menu when a
@@ -509,50 +435,9 @@ class _SimulationViewState extends State<SimulationView>
       }
     }
 
-    // Infinite-fuel cheat: top every tank back to full each frame.
-    if (_layers.infiniteFuel) {
-      for (final v in _vessels.all()) {
-        for (final p in v.allParts) {
-          for (final r in p.resources) {
-            r.amount = r.capacity;
-          }
-        }
-      }
-    }
-
-    // Run as many fixed steps as real time accrued. Carry the leftover across
-    // frames â€” a 16ms frame is < the 20ms fixed step, so without accumulation
-    // most frames ran ZERO steps and the sim only advanced on the occasional
-    // slow frame (the jumpy "random update" motion).
-    _accum += frameDt;
-    var steps = 0;
-    while (_accum >= _clock.fixedStep && steps < 200) {
-      _advance.execute(_clock);
-      _accum -= _clock.fixedStep;
-      steps++;
-    }
-    // If we hit the step cap (e.g. a long first frame or a stall), drop the
-    // backlog instead of spiralling â€” better to skip time than freeze.
-    if (steps >= 200) _accum = 0;
-
-    // Serve the freshly-advanced world to any connected renderer (Unreal). Gated
-    // on hasClients so capture+encode cost is zero when nothing's attached. The
-    // static body descriptors (kind/atmosphere/composition) are sticky on the
-    // engine side, so ship them only ~1 Hz instead of every frame.
-    if (_bridge.hasClients) {
-      final sendDescriptors =
-          (elapsed - _lastDescriptorAt) >= const Duration(seconds: 1);
-      if (sendDescriptors) _lastDescriptorAt = elapsed;
-      final world = WorldSnapshot.capture(
-        _bridgeTick++,
-        _vessels,
-        system: _universe.current(),
-        epoch: _clock.epoch,
-        colonies: _colonies,
-        includeDescriptors: sendDescriptors,
-      );
-      _bridge.publish(_wire.encodeWorld(world));
-    }
+    // Physics (the fixed-step advance), the infinite-fuel cheat, and serving the
+    // world to Unreal all run on the SHARED engine's own loop now — this frame
+    // only reads the freshly-advanced state below to render + chase the camera.
 
     // Craft chase cam: align the camera EXACTLY with the craft's attitude so the
     // view tracks yaw, pitch AND roll. The camera builds its basis from
@@ -647,8 +532,14 @@ class _SimulationViewState extends State<SimulationView>
   @override
   void dispose() {
     _ticker.dispose();
-    unawaited(_bridgeCommands?.cancel());
-    unawaited(_bridge.stop());
+    _events.unsubscribe(_onDomainEvent); // the shared bus outlives this screen
+    // Remove the craft this flight session injected; the engine + its boot fleet
+    // keep running headless (serving Unreal) after we leave flight mode.
+    final injected = widget.injectedVessel;
+    if (injected != null) _engine.removeVessel(injected.id);
+    for (final t in widget.trafficVessels) {
+      _engine.removeVessel(t.id);
+    }
     _keyFocus.dispose();
     _textures.dispose();
     super.dispose();
@@ -824,14 +715,14 @@ class _SimulationViewState extends State<SimulationView>
   Widget _cheatRow(String label, bool value, void Function(bool) set) => InkWell(
         onTap: () => setState(() {
           set(!value);
-          _buildAdvance();
+          _syncCheats();
         }),
         child: Row(children: [
           Checkbox(
             value: value,
             onChanged: (v) => setState(() {
               set(v ?? false);
-              _buildAdvance();
+              _syncCheats();
             }),
             visualDensity: VisualDensity.compact,
             materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
@@ -885,13 +776,20 @@ class _SimulationViewState extends State<SimulationView>
           ),
           for (final (label, value, set) in rows)
             InkWell(
-              onTap: () => setState(() => _layers = set(!value)),
+              // Sync the engine after each toggle so the 'Infinite fuel' layer
+              // (the engine applies it) takes effect; a no-op for the others.
+              onTap: () => setState(() {
+                _layers = set(!value);
+                _engine.infiniteFuel = _layers.infiniteFuel;
+              }),
               child: Row(
                 children: [
                   Checkbox(
                     value: value,
-                    onChanged: (v) =>
-                        setState(() => _layers = set(v ?? false)),
+                    onChanged: (v) => setState(() {
+                      _layers = set(v ?? false);
+                      _engine.infiniteFuel = _layers.infiniteFuel;
+                    }),
                     visualDensity: VisualDensity.compact,
                     materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
