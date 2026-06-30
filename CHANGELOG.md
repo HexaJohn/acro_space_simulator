@@ -3,6 +3,44 @@
 All notable changes to Acro Space Simulator.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.2] — 2026-06-30
+
+The **Unreal Engine integration** release. The Dart sim now streams live world
+state into a drop-in UE 5.8 plugin that renders it as actors, with a wire-schema
+telemetry layer, a Solar-System universe refactor, and an atmosphere render
+revert. **`dart analyze` clean.**
+
+### Unreal Engine bridge
+- Dart ↔ Unreal bridge over **FlatBuffers/TCP** (`wire/sim.fbs`), then an
+  **embedded in-process `SimBridge`** so Unreal consumes the same sim the Flutter
+  views drive; plus a Flutter desktop remote-control client on the shared server.
+- `FSim*` UE structs **generated from the wire schema**, drift-checked against the
+  `.fbs`.
+
+### UE plugin (`ue/AcroSimBridge`)
+- Drop-in `AcroSimBridge.uplugin`; `ASpaceSimRenderer` turns the stream into
+  actors; bridge exposed to Blueprint; renders the **live sim in the editor
+  viewport**, not just PIE.
+- Fixes: `IMPLEMENT_MODULE` so the module loads at runtime, **UE 5.8** compile,
+  body mesh sized from bounds (craft was spawning inside the planet), World
+  Outliner labels for spawned actors.
+- `WorldScale` render knob + orbit-line thickness control.
+
+### Wire / telemetry
+- Per-vessel telemetry gauges + discrete event stream; per-vessel orbit,
+  trajectory line, and comms link; celestial-body **orbit rings** streamed so
+  Unreal can draw the whole system; static body render descriptors (texture /
+  heightmap / atmosphere).
+- Screen-space UMG orbit overlay with analytic body occlusion — **reverted** to
+  world-space debug-line orbits (overlay didn't hold up).
+
+### Universe
+- Real Solar System is now the **only** system; KSP body names purged.
+
+### Atmosphere
+- Reverted the 0.2.1 per-pixel path-length **shader shell** back to the 0.2.0
+  **screen-space radial halo** (it didn't read right). Sphere rewrite kept.
+
 ## [0.2.1] — 2026-06-29
 
 A render-focused bugfix + polish cycle. The headline is a ground-up rewrite of
