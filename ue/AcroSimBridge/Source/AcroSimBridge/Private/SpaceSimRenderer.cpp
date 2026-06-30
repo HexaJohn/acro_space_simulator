@@ -137,6 +137,19 @@ void ASpaceSimRenderer::UpdateBodies(USpaceSimSubsystem* Sim)
 		// WorldScale. Buildings parented under the root inherit it.
 		Actor->SetActorScale3D(FVector(WorldScale));
 		Actor->SetActorLocationAndRotation(B.Position * WorldScale, B.Orientation);
+
+		// Body orbit ring ("rails") about its parent: world-space cm points,
+		// scaled to match. Root bodies (the Sun) carry no ring, so this no-ops.
+		if (bDrawBodyOrbits && B.Orbit.Num() > 1)
+		{
+			for (int32 i = 0; i + 1 < B.Orbit.Num(); ++i)
+			{
+				DrawDebugLine(GetWorld(),
+					B.Orbit[i] * WorldScale, B.Orbit[i + 1] * WorldScale,
+					BodyOrbitColor, /*bPersistent*/ false, /*Lifetime*/ 0.2f,
+					/*DepthPriority*/ 0, OrbitThickness);
+			}
+		}
 	}
 	// Prune vanished bodies + their building HISMs/instances together.
 	for (auto It = BodyActors.CreateIterator(); It; ++It)

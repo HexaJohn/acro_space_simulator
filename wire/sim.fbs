@@ -85,6 +85,9 @@ table BodyFrame {
   pos:Vec3;           // system-root-relative, metres
   orient:Quat;        // spin about +Z composed with axial tilt
   radius:double;      // equatorial radius, metres (scale the sphere)
+  orbit:[Vec3];       // closed orbit ring about the parent, system-root-relative
+                      // metres (SAME frame as pos). Empty for root bodies. Lets
+                      // the engine draw the body's orbit line without ephemerides.
 }
 
 // A discrete sim event that fired this tick (staging, impact, destruction,

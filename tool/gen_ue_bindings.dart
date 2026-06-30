@@ -30,6 +30,7 @@ const structs = <_Struct>[
     'pos': 'Position',
     'orient': 'Orientation',
     'radius': 'RadiusCm',
+    'orbit': 'Orbit',
   }),
   _Struct('FSimVessel', 'VesselFrame', 'A vessel, world-space + rebased; Parts compose the craft.', {
     'id': 'Id',

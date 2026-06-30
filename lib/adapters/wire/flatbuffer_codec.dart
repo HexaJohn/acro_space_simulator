@@ -28,6 +28,14 @@ class FlatBufferCodec {
           pos: gen.Vec3ObjectBuilder(x: b.px, y: b.py, z: b.pz),
           orient: gen.QuatObjectBuilder(w: b.qw, x: b.qx, y: b.qy, z: b.qz),
           radius: b.radius,
+          orbit: [
+            for (var k = 0; k + 2 < b.orbit.length; k += 3)
+              gen.Vec3ObjectBuilder(
+                x: b.orbit[k],
+                y: b.orbit[k + 1],
+                z: b.orbit[k + 2],
+              ),
+          ],
         ),
     ];
     final vessels = [
@@ -196,6 +204,9 @@ class FlatBufferCodec {
         qy: orient?.y ?? 0,
         qz: orient?.z ?? 0,
         radius: b.radius,
+        orbit: [
+          for (final p in b.orbit ?? const <gen.Vec3>[]) ...[p.x, p.y, p.z],
+        ],
       );
     }
     final buildings = <String, BuildingSnapshot>{};

@@ -845,7 +845,8 @@ struct BodyFrame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_ID = 4,
     VT_POS = 6,
     VT_ORIENT = 8,
-    VT_RADIUS = 10
+    VT_RADIUS = 10,
+    VT_ORBIT = 12
   };
   const ::flatbuffers::String *id() const {
     return GetPointer<const ::flatbuffers::String *>(VT_ID);
@@ -859,6 +860,9 @@ struct BodyFrame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   double radius() const {
     return GetField<double>(VT_RADIUS, 0.0);
   }
+  const ::flatbuffers::Vector<const acro::wire::Vec3 *> *orbit() const {
+    return GetPointer<const ::flatbuffers::Vector<const acro::wire::Vec3 *> *>(VT_ORBIT);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyOffset(verifier, VT_ID) &&
@@ -866,6 +870,8 @@ struct BodyFrame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<acro::wire::Vec3>(verifier, VT_POS, 8) &&
            VerifyField<acro::wire::Quat>(verifier, VT_ORIENT, 8) &&
            VerifyField<double>(verifier, VT_RADIUS, 8) &&
+           VerifyOffset(verifier, VT_ORBIT) &&
+           verifier.VerifyVector(orbit()) &&
            verifier.EndTable();
   }
 };
@@ -886,6 +892,9 @@ struct BodyFrameBuilder {
   void add_radius(double radius) {
     fbb_.AddElement<double>(BodyFrame::VT_RADIUS, radius, 0.0);
   }
+  void add_orbit(::flatbuffers::Offset<::flatbuffers::Vector<const acro::wire::Vec3 *>> orbit) {
+    fbb_.AddOffset(BodyFrame::VT_ORBIT, orbit);
+  }
   explicit BodyFrameBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -902,9 +911,11 @@ inline ::flatbuffers::Offset<BodyFrame> CreateBodyFrame(
     ::flatbuffers::Offset<::flatbuffers::String> id = 0,
     const acro::wire::Vec3 *pos = nullptr,
     const acro::wire::Quat *orient = nullptr,
-    double radius = 0.0) {
+    double radius = 0.0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<const acro::wire::Vec3 *>> orbit = 0) {
   BodyFrameBuilder builder_(_fbb);
   builder_.add_radius(radius);
+  builder_.add_orbit(orbit);
   builder_.add_orient(orient);
   builder_.add_pos(pos);
   builder_.add_id(id);
@@ -916,14 +927,17 @@ inline ::flatbuffers::Offset<BodyFrame> CreateBodyFrameDirect(
     const char *id = nullptr,
     const acro::wire::Vec3 *pos = nullptr,
     const acro::wire::Quat *orient = nullptr,
-    double radius = 0.0) {
+    double radius = 0.0,
+    const std::vector<acro::wire::Vec3> *orbit = nullptr) {
   auto id__ = id ? _fbb.CreateString(id) : 0;
+  auto orbit__ = orbit ? _fbb.CreateVectorOfStructs<acro::wire::Vec3>(*orbit) : 0;
   return acro::wire::CreateBodyFrame(
       _fbb,
       id__,
       pos,
       orient,
-      radius);
+      radius,
+      orbit__);
 }
 
 struct EventFrame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {

@@ -213,6 +213,19 @@ void USpaceSimSubsystem::IngestWorldFrame(const uint8* Data, int32 Len)
 			Out.Position = SimToUEPosition(RebasedSim.X, RebasedSim.Y, RebasedSim.Z);
 			Out.Orientation = SimToUEQuat(Q->w(), Q->x(), Q->y(), Q->z());
 			Out.RadiusCm = static_cast<float>(B->radius() * kMetresToCm);
+
+				// Orbit ring: root-relative points -> the SAME rebase as the body
+				// position (point - OriginSim), in UE world cm. Drawn by the renderer.
+				if (const auto* OrbitVec = B->orbit())
+				{
+					Out.Orbit.Reserve(static_cast<int32>(OrbitVec->size()));
+					// vector-of-struct: elements are inline in the buffer, never null.
+					for (const acro::wire::Vec3* Pt : *OrbitVec)
+					{
+						const FVector Reb = FVector(Pt->x(), Pt->y(), Pt->z()) - OriginSim;
+						Out.Orbit.Add(SimToUEPosition(Reb.X, Reb.Y, Reb.Z));
+					}
+				}
 			Bodies.Add(MoveTemp(Out));
 		}
 	}
