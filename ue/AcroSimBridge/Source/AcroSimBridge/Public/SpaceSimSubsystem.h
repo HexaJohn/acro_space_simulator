@@ -76,6 +76,10 @@ struct FSimBuilding
 	UPROPERTY(BlueprintReadOnly) float Lon = 0.f; // radians
 };
 
+/// Fired (game thread) after each WorldFrame is ingested, so Blueprints can
+/// drive rendering on an event instead of polling every Tick.
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnWorldUpdated);
+
 UCLASS()
 class ACROSIMBRIDGE_API USpaceSimSubsystem : public UGameInstanceSubsystem, public FTickableGameObject
 {
@@ -100,11 +104,45 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "AcroSim")
 	bool IsConnected() const { return Socket != nullptr; }
 
-	// Latest world, already in UE space + rebased onto FocusBodyId.
-	const TArray<FSimVessel>& GetVessels() const { return Vessels; }
-	const TArray<FSimBody>& GetBodies() const { return Bodies; }
-	const TArray<FSimBuilding>& GetBuildings() const { return Buildings; }
+	// Latest world, already in UE space + rebased onto FocusBodyId. Returned by
+	// value so they are Blueprint-callable; cache the result in a BP variable and
+	// loop over it rather than calling per element.
+	UFUNCTION(BlueprintCallable, Category = "AcroSim")
+	TArray<FSimVessel> GetVessels() const { return Vessels; }
+
+	UFUNCTION(BlueprintCallable, Category = "AcroSim")
+	TArray<FSimBody> GetBodies() const { return Bodies; }
+
+	UFUNCTION(BlueprintCallable, Category = "AcroSim")
+	TArray<FSimBuilding> GetBuildings() const { return Buildings; }
+
+	UFUNCTION(BlueprintCallable, Category = "AcroSim")
 	int64 GetWorldTick() const { return WorldTick; }
+
+	// Bind this in Blueprint to render on each new frame (event-driven).
+	UPROPERTY(BlueprintAssignable, Category = "AcroSim")
+	FOnWorldUpdated OnWorldUpdated;
+
+	// FTransform helpers so Blueprints get a ready transform pin (FQuat pins are
+	// awkward in BP). Bodies/vessels are world-space; building is body-LOCAL —
+	// apply it as the relative transform under the matching body actor.
+	UFUNCTION(BlueprintPure, Category = "AcroSim")
+	static FTransform VesselTransform(const FSimVessel& Vessel)
+	{
+		return FTransform(Vessel.Attitude, Vessel.Position);
+	}
+
+	UFUNCTION(BlueprintPure, Category = "AcroSim")
+	static FTransform BodyTransform(const FSimBody& Body)
+	{
+		return FTransform(Body.Orientation, Body.Position);
+	}
+
+	UFUNCTION(BlueprintPure, Category = "AcroSim")
+	static FTransform BuildingLocalTransform(const FSimBuilding& Building)
+	{
+		return FTransform(Building.LocalOrientation, Building.LocalPosition);
+	}
 
 	// Commands (engine -> sim). HeadingSim is a forward axis in SIM coordinates
 	// (right-handed, Z up) — the same convention SetAttitudeCommand expects.

@@ -102,6 +102,30 @@ Sim->SubmitPlaceBuilding(TEXT("colony-1"), TEXT("hab"), 2, 3);
 > `ApplyCommands` currently handles `PlaceBuildingCommand` as a no-op (reserved).
 > It travels end-to-end with no gameplay effect until that case is implemented.
 
+## Blueprint usage
+
+Everything is exposed to Blueprint — no C++ needed to drive it:
+
+- **Get the subsystem:** `Get Game Instance Subsystem` → class `SpaceSimSubsystem`.
+- **Connect / commands:** `Connect`, `Disconnect`, `IsConnected`, `Submit Throttle`,
+  `Submit Attitude`, `Submit Separate Stage`, `Submit Place Building`,
+  `Submit Report Terrain Height` are all BlueprintCallable. `Focus Body Id` /
+  `Player Id` are editable variables.
+- **Render on an event, not Tick:** bind the **`On World Updated`** event (fires
+  after each frame). In the handler, call `Get Vessels` / `Get Bodies` /
+  `Get Buildings` (cache to a local array, then `For Each`).
+- **Transforms:** the `FSim*` structs expose every field, but use the pure nodes
+  `Vessel Transform` / `Body Transform` / `Building Local Transform` to get a
+  ready `Transform` pin (cleaner than the raw `FQuat` fields) for
+  `Set Actor Transform` / `Add Instance`.
+
+A pure-Blueprint consumer: on `On World Updated` → `Get Bodies` → For Each →
+find-or-spawn a body actor (keep a `Map<String, Actor>` variable) →
+`Set Actor Transform (Body Transform)`; same shape for vessels (+ `Parts`) and
+buildings (parent under the body actor, `Add Instance` to a per-type HISM with
+`Building Local Transform`). You still author the `Type → Mesh` mapping and the
+actor/instance bookkeeping in Blueprint.
+
 ## Coordinate conventions (important)
 
 | | Sim (Dart) | Unreal |

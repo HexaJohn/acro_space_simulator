@@ -165,6 +165,7 @@ void USpaceSimSubsystem::PumpSocket()
 	if (LastData)
 	{
 		IngestWorldFrame(LastData, LastLen);
+		OnWorldUpdated.Broadcast(); // game thread — BP can render on this event
 	}
 	if (Offset > 0)
 	{
