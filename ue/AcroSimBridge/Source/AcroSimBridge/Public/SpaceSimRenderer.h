@@ -14,6 +14,7 @@ class UStaticMesh;
 class UStaticMeshComponent;
 class UHierarchicalInstancedStaticMeshComponent;
 class UMaterialInterface;
+class UAcroOrbitOverlay;
 
 /// One row of the asset table. Row name (FName) is the type-key the sim sends:
 /// a craft part name, a building spec type, or a celestial body id.
@@ -85,6 +86,19 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim")
 	FColor BodyOrbitColor = FColor::Yellow;
 
+	// Draw orbit lines as constant-width SCREEN-SPACE lines (a UMG overlay) rather
+	// than world-space debug tubes, so they keep a fixed pixel width at any zoom
+	// and are occluded behind bodies. When true the DrawDebug* orbit paths are
+	// skipped (the overlay draws both body + vessel orbits instead).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim")
+	bool bScreenSpaceOrbits = true;
+	// Pixel width of the screen-space orbit lines.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim")
+	float OrbitWidthPx = 2.f;
+	// Hide orbit-line segments passing behind a body (analytic ray-vs-sphere).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim")
+	bool bOccludeOrbitsBehindBodies = true;
+
 	// Uniform render scale on all positions + sizes. The sim is 1:1 (a 600 km
 	// body is a 600,000 m sphere), which is unwieldy in-editor — set e.g. 0.001
 	// to shrink the whole scene to a navigable size. 1 = true scale.
@@ -98,6 +112,10 @@ private:
 	void UpdateBodies(USpaceSimSubsystem* Sim);
 	void UpdateVessels(USpaceSimSubsystem* Sim);
 	void UpdateBuildings(USpaceSimSubsystem* Sim);
+
+	// Push the current orbit-overlay config (scale, colors, widths, toggles) onto
+	// the widget so detail-panel edits take effect live.
+	void SyncOrbitOverlay();
 
 	UStaticMesh* MeshFor(const FString& Key, FVector& OutScale, UMaterialInterface*& OutMaterial) const;
 	AActor* SpawnVesselActor();
@@ -113,4 +131,8 @@ private:
 	TMap<FString, TPair<FString, int32>> BuildingInstances;
 
 	TWeakObjectPtr<USpaceSimSubsystem> SimRef;
+
+	// Screen-space orbit lines (constant pixel width + body occlusion). Null when
+	// bScreenSpaceOrbits is off or there's no local player to attach the UI to.
+	UPROPERTY() UAcroOrbitOverlay* OrbitOverlay = nullptr;
 };

@@ -15,6 +15,10 @@ public class AcroSimBridge : ModuleRules
 			"Engine",
 			"Sockets",
 			"Networking",
+			// Screen-space orbit overlay (UMG UUserWidget + Slate line drawing).
+			"UMG",
+			"Slate",
+			"SlateCore",
 		});
 
 		// FlatBuffers: the generated contract (Wire/) + the header-only runtime
