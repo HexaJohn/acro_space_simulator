@@ -356,6 +356,10 @@ class BodySnapshot {
   final double px, py, pz;
   final double qw, qx, qy, qz;
   final double radius;
+  // The body's closed orbit ring about its parent, flattened x,y,z triples in
+  // system-root-relative metres (SAME frame as px..pz). Empty for root bodies.
+  // Lets a renderer draw the orbit line without re-deriving ephemerides.
+  final List<double> orbit;
 
   const BodySnapshot({
     required this.id,
@@ -367,6 +371,7 @@ class BodySnapshot {
     required this.qy,
     required this.qz,
     required this.radius,
+    this.orbit = const [],
   });
 
   factory BodySnapshot.of(
@@ -382,6 +387,20 @@ class BodySnapshot {
     // with no axialTilt set, so the orientation is then pure spin.
     final tilt = Quaternion.axisAngle(Vector3.unitX, body.axialTilt);
     final q = (tilt * spin).normalized;
+    // Orbit ring: sampled about the parent, then shifted into root-relative
+    // space by the parent's current position so it sits in the SAME frame as
+    // pos (the engine rebases it onto the focus origin exactly like pos).
+    final orbit = <double>[];
+    final parent = system.parentOf(body);
+    if (parent != null && body.orbitRadius != 0) {
+      final parentRoot = ephemeris.positionRelativeToRoot(parent, system, epoch);
+      for (final p in ephemeris.orbitPathRelativeToParent(body, system, epoch: epoch)) {
+        orbit
+          ..add(parentRoot.x + p.x)
+          ..add(parentRoot.y + p.y)
+          ..add(parentRoot.z + p.z);
+      }
+    }
     return BodySnapshot(
       id: body.id.value,
       px: pos.x,
@@ -392,6 +411,7 @@ class BodySnapshot {
       qy: q.y,
       qz: q.z,
       radius: body.radius,
+      orbit: orbit,
     );
   }
 
@@ -400,6 +420,7 @@ class BodySnapshot {
         'p': [px, py, pz],
         'q': [qw, qx, qy, qz],
         'r': radius,
+        if (orbit.isNotEmpty) 'orbit': orbit,
       };
 
   factory BodySnapshot.fromJson(Map<String, dynamic> j) {
@@ -415,6 +436,9 @@ class BodySnapshot {
       qy: q[2].toDouble(),
       qz: q[3].toDouble(),
       radius: (j['r'] as num).toDouble(),
+      orbit: [
+        for (final n in (j['orbit'] as List?) ?? const []) (n as num).toDouble(),
+      ],
     );
   }
 }

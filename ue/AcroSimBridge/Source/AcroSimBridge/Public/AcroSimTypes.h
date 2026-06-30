@@ -34,6 +34,7 @@ struct FSimBody
 	UPROPERTY(BlueprintReadOnly) FVector Position = FVector::ZeroVector;
 	UPROPERTY(BlueprintReadOnly) FQuat Orientation = FQuat::Identity;
 	UPROPERTY(BlueprintReadOnly) float RadiusCm = 0.f;
+	UPROPERTY(BlueprintReadOnly) TArray<FVector> Orbit;
 };
 
 /// A vessel, world-space + rebased; Parts compose the craft.

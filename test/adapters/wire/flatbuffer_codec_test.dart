@@ -53,6 +53,15 @@ void main() {
     expect(bm.qw, closeTo(am.qw, 1e-12));
     expect(bm.radius, am.radius);
 
+    // Body orbit rings survive the wire: the Moon (a child) carries a closed
+    // ring of x,y,z triples; the Sun (system root) carries none. The ring sits
+    // ~the Moon's orbit radius from Earth (root-relative, same frame as pos).
+    expect(am.orbit, isNotEmpty);
+    expect(am.orbit.length % 3, 0);
+    expect(bm.orbit.length, am.orbit.length);
+    expect(bm.orbit.first, closeTo(am.orbit.first, 1e-6));
+    expect(back.bodies['sun']!.orbit, isEmpty);
+
     // Colony buildings survive, body-fixed near the planet radius.
     expect(back.buildings, isNotEmpty);
     final refinery = back.buildings['colony-1/refinery-1']!;

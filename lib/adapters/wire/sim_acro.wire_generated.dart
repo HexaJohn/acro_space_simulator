@@ -858,10 +858,11 @@ class BodyFrame {
   Vec3? get pos => Vec3.reader.vTableGetNullable(_bc, _bcOffset, 6);
   Quat? get orient => Quat.reader.vTableGetNullable(_bc, _bcOffset, 8);
   double get radius => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 10, 0.0);
+  List<Vec3>? get orbit => const fb.ListReader<Vec3>(Vec3.reader).vTableGetNullable(_bc, _bcOffset, 12);
 
   @override
   String toString() {
-    return 'BodyFrame{id: ${id}, pos: ${pos}, orient: ${orient}, radius: ${radius}}';
+    return 'BodyFrame{id: ${id}, pos: ${pos}, orient: ${orient}, radius: ${radius}, orbit: ${orbit}}';
   }
 }
 
@@ -879,7 +880,7 @@ class BodyFrameBuilder {
   final fb.Builder fbBuilder;
 
   void begin() {
-    fbBuilder.startTable(4);
+    fbBuilder.startTable(5);
   }
 
   int addIdOffset(int? offset) {
@@ -898,6 +899,10 @@ class BodyFrameBuilder {
     fbBuilder.addFloat64(3, radius);
     return fbBuilder.offset;
   }
+  int addOrbitOffset(int? offset) {
+    fbBuilder.addOffset(4, offset);
+    return fbBuilder.offset;
+  }
 
   int finish() {
     return fbBuilder.endTable();
@@ -909,24 +914,29 @@ class BodyFrameObjectBuilder extends fb.ObjectBuilder {
   final Vec3ObjectBuilder? _pos;
   final QuatObjectBuilder? _orient;
   final double? _radius;
+  final List<Vec3ObjectBuilder>? _orbit;
 
   BodyFrameObjectBuilder({
     String? id,
     Vec3ObjectBuilder? pos,
     QuatObjectBuilder? orient,
     double? radius,
+    List<Vec3ObjectBuilder>? orbit,
   })
       : _id = id,
         _pos = pos,
         _orient = orient,
-        _radius = radius;
+        _radius = radius,
+        _orbit = orbit;
 
   /// Finish building, and store into the [fbBuilder].
   @override
   int finish(fb.Builder fbBuilder) {
     final int? idOffset = _id == null ? null
         : fbBuilder.writeString(_id!);
-    fbBuilder.startTable(4);
+    final int? orbitOffset = _orbit == null ? null
+        : fbBuilder.writeListOfStructs(_orbit!);
+    fbBuilder.startTable(5);
     fbBuilder.addOffset(0, idOffset);
     if (_pos != null) {
       fbBuilder.addStruct(1, _pos!.finish(fbBuilder));
@@ -935,6 +945,7 @@ class BodyFrameObjectBuilder extends fb.ObjectBuilder {
       fbBuilder.addStruct(2, _orient!.finish(fbBuilder));
     }
     fbBuilder.addFloat64(3, _radius);
+    fbBuilder.addOffset(4, orbitOffset);
     return fbBuilder.endTable();
   }
 

@@ -78,6 +78,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim")
 	float OrbitThickness = 8.f;
 
+	// Draw each celestial body's orbit ring (FSimBody.Orbit) about its parent —
+	// the planet/moon "rails" of the whole system. Distinct color from craft orbits.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim")
+	bool bDrawBodyOrbits = true;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim")
+	FColor BodyOrbitColor = FColor::Yellow;
+
 	// Uniform render scale on all positions + sizes. The sim is 1:1 (a 600 km
 	// body is a 600,000 m sphere), which is unwieldy in-editor — set e.g. 0.001
 	// to shrink the whole scene to a navigable size. 1 = true scale.
