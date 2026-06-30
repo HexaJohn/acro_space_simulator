@@ -298,6 +298,97 @@ class PartFrameObjectBuilder extends fb.ObjectBuilder {
     return fbBuilder.buffer;
   }
 }
+class ResourceFrame {
+  ResourceFrame._(this._bc, this._bcOffset);
+  factory ResourceFrame(List<int> bytes) {
+    final rootRef = fb.BufferContext.fromBytes(bytes);
+    return reader.read(rootRef, 0);
+  }
+
+  static const fb.Reader<ResourceFrame> reader = _ResourceFrameReader();
+
+  final fb.BufferContext _bc;
+  final int _bcOffset;
+
+  String? get type => const fb.StringReader().vTableGetNullable(_bc, _bcOffset, 4);
+  double get amount => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 6, 0.0);
+  double get capacity => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 8, 0.0);
+
+  @override
+  String toString() {
+    return 'ResourceFrame{type: ${type}, amount: ${amount}, capacity: ${capacity}}';
+  }
+}
+
+class _ResourceFrameReader extends fb.TableReader<ResourceFrame> {
+  const _ResourceFrameReader();
+
+  @override
+  ResourceFrame createObject(fb.BufferContext bc, int offset) => 
+    ResourceFrame._(bc, offset);
+}
+
+class ResourceFrameBuilder {
+  ResourceFrameBuilder(this.fbBuilder);
+
+  final fb.Builder fbBuilder;
+
+  void begin() {
+    fbBuilder.startTable(3);
+  }
+
+  int addTypeOffset(int? offset) {
+    fbBuilder.addOffset(0, offset);
+    return fbBuilder.offset;
+  }
+  int addAmount(double? amount) {
+    fbBuilder.addFloat64(1, amount);
+    return fbBuilder.offset;
+  }
+  int addCapacity(double? capacity) {
+    fbBuilder.addFloat64(2, capacity);
+    return fbBuilder.offset;
+  }
+
+  int finish() {
+    return fbBuilder.endTable();
+  }
+}
+
+class ResourceFrameObjectBuilder extends fb.ObjectBuilder {
+  final String? _type;
+  final double? _amount;
+  final double? _capacity;
+
+  ResourceFrameObjectBuilder({
+    String? type,
+    double? amount,
+    double? capacity,
+  })
+      : _type = type,
+        _amount = amount,
+        _capacity = capacity;
+
+  /// Finish building, and store into the [fbBuilder].
+  @override
+  int finish(fb.Builder fbBuilder) {
+    final int? typeOffset = _type == null ? null
+        : fbBuilder.writeString(_type!);
+    fbBuilder.startTable(3);
+    fbBuilder.addOffset(0, typeOffset);
+    fbBuilder.addFloat64(1, _amount);
+    fbBuilder.addFloat64(2, _capacity);
+    return fbBuilder.endTable();
+  }
+
+  /// Convenience method to serialize to byte list.
+  @override
+  Uint8List toBytes([String? fileIdentifier]) {
+    final fbBuilder = fb.Builder(deduplicateTables: false);
+    fbBuilder.finish(finish(fbBuilder), fileIdentifier);
+    return fbBuilder.buffer;
+  }
+}
 class VesselFrame {
   VesselFrame._(this._bc, this._bcOffset);
   factory VesselFrame(List<int> bytes) {
@@ -321,10 +412,15 @@ class VesselFrame {
   bool get onRails => const fb.BoolReader().vTableGet(_bc, _bcOffset, 20, false);
   bool get landed => const fb.BoolReader().vTableGet(_bc, _bcOffset, 22, false);
   List<PartFrame>? get parts => const fb.ListReader<PartFrame>(PartFrame.reader).vTableGetNullable(_bc, _bcOffset, 24);
+  double get mass => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 26, 0.0);
+  int get crew => const fb.Int32Reader().vTableGet(_bc, _bcOffset, 28, 0);
+  List<ResourceFrame>? get resources => const fb.ListReader<ResourceFrame>(ResourceFrame.reader).vTableGetNullable(_bc, _bcOffset, 30);
+  double get maxTemp => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 32, 0.0);
+  double get tempLimit => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 34, 0.0);
 
   @override
   String toString() {
-    return 'VesselFrame{id: ${id}, owner: ${owner}, body: ${body}, pos: ${pos}, vel: ${vel}, att: ${att}, spin: ${spin}, throttle: ${throttle}, onRails: ${onRails}, landed: ${landed}, parts: ${parts}}';
+    return 'VesselFrame{id: ${id}, owner: ${owner}, body: ${body}, pos: ${pos}, vel: ${vel}, att: ${att}, spin: ${spin}, throttle: ${throttle}, onRails: ${onRails}, landed: ${landed}, parts: ${parts}, mass: ${mass}, crew: ${crew}, resources: ${resources}, maxTemp: ${maxTemp}, tempLimit: ${tempLimit}}';
   }
 }
 
@@ -342,7 +438,7 @@ class VesselFrameBuilder {
   final fb.Builder fbBuilder;
 
   void begin() {
-    fbBuilder.startTable(11);
+    fbBuilder.startTable(16);
   }
 
   int addIdOffset(int? offset) {
@@ -389,6 +485,26 @@ class VesselFrameBuilder {
     fbBuilder.addOffset(10, offset);
     return fbBuilder.offset;
   }
+  int addMass(double? mass) {
+    fbBuilder.addFloat64(11, mass);
+    return fbBuilder.offset;
+  }
+  int addCrew(int? crew) {
+    fbBuilder.addInt32(12, crew);
+    return fbBuilder.offset;
+  }
+  int addResourcesOffset(int? offset) {
+    fbBuilder.addOffset(13, offset);
+    return fbBuilder.offset;
+  }
+  int addMaxTemp(double? maxTemp) {
+    fbBuilder.addFloat64(14, maxTemp);
+    return fbBuilder.offset;
+  }
+  int addTempLimit(double? tempLimit) {
+    fbBuilder.addFloat64(15, tempLimit);
+    return fbBuilder.offset;
+  }
 
   int finish() {
     return fbBuilder.endTable();
@@ -407,6 +523,11 @@ class VesselFrameObjectBuilder extends fb.ObjectBuilder {
   final bool? _onRails;
   final bool? _landed;
   final List<PartFrameObjectBuilder>? _parts;
+  final double? _mass;
+  final int? _crew;
+  final List<ResourceFrameObjectBuilder>? _resources;
+  final double? _maxTemp;
+  final double? _tempLimit;
 
   VesselFrameObjectBuilder({
     String? id,
@@ -420,6 +541,11 @@ class VesselFrameObjectBuilder extends fb.ObjectBuilder {
     bool? onRails,
     bool? landed,
     List<PartFrameObjectBuilder>? parts,
+    double? mass,
+    int? crew,
+    List<ResourceFrameObjectBuilder>? resources,
+    double? maxTemp,
+    double? tempLimit,
   })
       : _id = id,
         _owner = owner,
@@ -431,7 +557,12 @@ class VesselFrameObjectBuilder extends fb.ObjectBuilder {
         _throttle = throttle,
         _onRails = onRails,
         _landed = landed,
-        _parts = parts;
+        _parts = parts,
+        _mass = mass,
+        _crew = crew,
+        _resources = resources,
+        _maxTemp = maxTemp,
+        _tempLimit = tempLimit;
 
   /// Finish building, and store into the [fbBuilder].
   @override
@@ -444,7 +575,9 @@ class VesselFrameObjectBuilder extends fb.ObjectBuilder {
         : fbBuilder.writeString(_body!);
     final int? partsOffset = _parts == null ? null
         : fbBuilder.writeList(_parts!.map((b) => b.getOrCreateOffset(fbBuilder)).toList());
-    fbBuilder.startTable(11);
+    final int? resourcesOffset = _resources == null ? null
+        : fbBuilder.writeList(_resources!.map((b) => b.getOrCreateOffset(fbBuilder)).toList());
+    fbBuilder.startTable(16);
     fbBuilder.addOffset(0, idOffset);
     fbBuilder.addOffset(1, ownerOffset);
     fbBuilder.addOffset(2, bodyOffset);
@@ -464,6 +597,11 @@ class VesselFrameObjectBuilder extends fb.ObjectBuilder {
     fbBuilder.addBool(8, _onRails);
     fbBuilder.addBool(9, _landed);
     fbBuilder.addOffset(10, partsOffset);
+    fbBuilder.addFloat64(11, _mass);
+    fbBuilder.addInt32(12, _crew);
+    fbBuilder.addOffset(13, resourcesOffset);
+    fbBuilder.addFloat64(14, _maxTemp);
+    fbBuilder.addFloat64(15, _tempLimit);
     return fbBuilder.endTable();
   }
 
@@ -725,6 +863,121 @@ class BodyFrameObjectBuilder extends fb.ObjectBuilder {
     return fbBuilder.buffer;
   }
 }
+class EventFrame {
+  EventFrame._(this._bc, this._bcOffset);
+  factory EventFrame(List<int> bytes) {
+    final rootRef = fb.BufferContext.fromBytes(bytes);
+    return reader.read(rootRef, 0);
+  }
+
+  static const fb.Reader<EventFrame> reader = _EventFrameReader();
+
+  final fb.BufferContext _bc;
+  final int _bcOffset;
+
+  String? get kind => const fb.StringReader().vTableGetNullable(_bc, _bcOffset, 4);
+  String? get subject => const fb.StringReader().vTableGetNullable(_bc, _bcOffset, 6);
+  String? get target => const fb.StringReader().vTableGetNullable(_bc, _bcOffset, 8);
+  double get magnitude => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 10, 0.0);
+  String? get info => const fb.StringReader().vTableGetNullable(_bc, _bcOffset, 12);
+
+  @override
+  String toString() {
+    return 'EventFrame{kind: ${kind}, subject: ${subject}, target: ${target}, magnitude: ${magnitude}, info: ${info}}';
+  }
+}
+
+class _EventFrameReader extends fb.TableReader<EventFrame> {
+  const _EventFrameReader();
+
+  @override
+  EventFrame createObject(fb.BufferContext bc, int offset) => 
+    EventFrame._(bc, offset);
+}
+
+class EventFrameBuilder {
+  EventFrameBuilder(this.fbBuilder);
+
+  final fb.Builder fbBuilder;
+
+  void begin() {
+    fbBuilder.startTable(5);
+  }
+
+  int addKindOffset(int? offset) {
+    fbBuilder.addOffset(0, offset);
+    return fbBuilder.offset;
+  }
+  int addSubjectOffset(int? offset) {
+    fbBuilder.addOffset(1, offset);
+    return fbBuilder.offset;
+  }
+  int addTargetOffset(int? offset) {
+    fbBuilder.addOffset(2, offset);
+    return fbBuilder.offset;
+  }
+  int addMagnitude(double? magnitude) {
+    fbBuilder.addFloat64(3, magnitude);
+    return fbBuilder.offset;
+  }
+  int addInfoOffset(int? offset) {
+    fbBuilder.addOffset(4, offset);
+    return fbBuilder.offset;
+  }
+
+  int finish() {
+    return fbBuilder.endTable();
+  }
+}
+
+class EventFrameObjectBuilder extends fb.ObjectBuilder {
+  final String? _kind;
+  final String? _subject;
+  final String? _target;
+  final double? _magnitude;
+  final String? _info;
+
+  EventFrameObjectBuilder({
+    String? kind,
+    String? subject,
+    String? target,
+    double? magnitude,
+    String? info,
+  })
+      : _kind = kind,
+        _subject = subject,
+        _target = target,
+        _magnitude = magnitude,
+        _info = info;
+
+  /// Finish building, and store into the [fbBuilder].
+  @override
+  int finish(fb.Builder fbBuilder) {
+    final int? kindOffset = _kind == null ? null
+        : fbBuilder.writeString(_kind!);
+    final int? subjectOffset = _subject == null ? null
+        : fbBuilder.writeString(_subject!);
+    final int? targetOffset = _target == null ? null
+        : fbBuilder.writeString(_target!);
+    final int? infoOffset = _info == null ? null
+        : fbBuilder.writeString(_info!);
+    fbBuilder.startTable(5);
+    fbBuilder.addOffset(0, kindOffset);
+    fbBuilder.addOffset(1, subjectOffset);
+    fbBuilder.addOffset(2, targetOffset);
+    fbBuilder.addFloat64(3, _magnitude);
+    fbBuilder.addOffset(4, infoOffset);
+    return fbBuilder.endTable();
+  }
+
+  /// Convenience method to serialize to byte list.
+  @override
+  Uint8List toBytes([String? fileIdentifier]) {
+    final fbBuilder = fb.Builder(deduplicateTables: false);
+    fbBuilder.finish(finish(fbBuilder), fileIdentifier);
+    return fbBuilder.buffer;
+  }
+}
 class WorldFrame {
   WorldFrame._(this._bc, this._bcOffset);
   factory WorldFrame(List<int> bytes) {
@@ -743,10 +996,11 @@ class WorldFrame {
   List<BodyFrame>? get bodies => const fb.ListReader<BodyFrame>(BodyFrame.reader).vTableGetNullable(_bc, _bcOffset, 10);
   List<VesselFrame>? get vessels => const fb.ListReader<VesselFrame>(VesselFrame.reader).vTableGetNullable(_bc, _bcOffset, 12);
   List<BuildingFrame>? get buildings => const fb.ListReader<BuildingFrame>(BuildingFrame.reader).vTableGetNullable(_bc, _bcOffset, 14);
+  List<EventFrame>? get events => const fb.ListReader<EventFrame>(EventFrame.reader).vTableGetNullable(_bc, _bcOffset, 16);
 
   @override
   String toString() {
-    return 'WorldFrame{tick: ${tick}, epoch: ${epoch}, fingerprint: ${fingerprint}, bodies: ${bodies}, vessels: ${vessels}, buildings: ${buildings}}';
+    return 'WorldFrame{tick: ${tick}, epoch: ${epoch}, fingerprint: ${fingerprint}, bodies: ${bodies}, vessels: ${vessels}, buildings: ${buildings}, events: ${events}}';
   }
 }
 
@@ -764,7 +1018,7 @@ class WorldFrameBuilder {
   final fb.Builder fbBuilder;
 
   void begin() {
-    fbBuilder.startTable(6);
+    fbBuilder.startTable(7);
   }
 
   int addTick(int? tick) {
@@ -791,6 +1045,10 @@ class WorldFrameBuilder {
     fbBuilder.addOffset(5, offset);
     return fbBuilder.offset;
   }
+  int addEventsOffset(int? offset) {
+    fbBuilder.addOffset(6, offset);
+    return fbBuilder.offset;
+  }
 
   int finish() {
     return fbBuilder.endTable();
@@ -804,6 +1062,7 @@ class WorldFrameObjectBuilder extends fb.ObjectBuilder {
   final List<BodyFrameObjectBuilder>? _bodies;
   final List<VesselFrameObjectBuilder>? _vessels;
   final List<BuildingFrameObjectBuilder>? _buildings;
+  final List<EventFrameObjectBuilder>? _events;
 
   WorldFrameObjectBuilder({
     int? tick,
@@ -812,13 +1071,15 @@ class WorldFrameObjectBuilder extends fb.ObjectBuilder {
     List<BodyFrameObjectBuilder>? bodies,
     List<VesselFrameObjectBuilder>? vessels,
     List<BuildingFrameObjectBuilder>? buildings,
+    List<EventFrameObjectBuilder>? events,
   })
       : _tick = tick,
         _epoch = epoch,
         _fingerprint = fingerprint,
         _bodies = bodies,
         _vessels = vessels,
-        _buildings = buildings;
+        _buildings = buildings,
+        _events = events;
 
   /// Finish building, and store into the [fbBuilder].
   @override
@@ -831,13 +1092,16 @@ class WorldFrameObjectBuilder extends fb.ObjectBuilder {
         : fbBuilder.writeList(_vessels!.map((b) => b.getOrCreateOffset(fbBuilder)).toList());
     final int? buildingsOffset = _buildings == null ? null
         : fbBuilder.writeList(_buildings!.map((b) => b.getOrCreateOffset(fbBuilder)).toList());
-    fbBuilder.startTable(6);
+    final int? eventsOffset = _events == null ? null
+        : fbBuilder.writeList(_events!.map((b) => b.getOrCreateOffset(fbBuilder)).toList());
+    fbBuilder.startTable(7);
     fbBuilder.addInt64(0, _tick);
     fbBuilder.addFloat64(1, _epoch);
     fbBuilder.addOffset(2, fingerprintOffset);
     fbBuilder.addOffset(3, bodiesOffset);
     fbBuilder.addOffset(4, vesselsOffset);
     fbBuilder.addOffset(5, buildingsOffset);
+    fbBuilder.addOffset(6, eventsOffset);
     return fbBuilder.endTable();
   }
 

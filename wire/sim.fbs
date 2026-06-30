@@ -30,6 +30,9 @@ table PartFrame {
   offset:Vec3;        // local offset in the vessel body frame, metres
 }
 
+// Aggregated resource gauge (summed across the craft's parts by type).
+table ResourceFrame { type:string; amount:double; capacity:double; }
+
 table VesselFrame {
   id:string;
   owner:string;
@@ -42,6 +45,12 @@ table VesselFrame {
   on_rails:bool;
   landed:bool;
   parts:[PartFrame];  // assembly manifest; rebuild the craft actor on change
+  // telemetry / gauges:
+  mass:double;        // kg
+  crew:int;
+  resources:[ResourceFrame];
+  max_temp:double;    // hottest part temperature, K
+  temp_limit:double;  // that part's destruction temperature, K
 }
 
 // A colony building, placed BODY-FIXED (rotates with the planet). pos/orient are
@@ -66,6 +75,21 @@ table BodyFrame {
   radius:double;      // equatorial radius, metres (scale the sphere)
 }
 
+// A discrete sim event that fired this tick (staging, impact, destruction,
+// science, …). Flat shape covering every domain event: the engine switches on
+// `kind` and looks up `subject`'s transform in the frame for spatial FX.
+//   subject   = primary asset id (usually the vessel)
+//   target    = secondary id (body / 2nd vessel / part / deposit), else ""
+//   magnitude = numeric payload (speed / temperature / dose / stage index / Pa)
+//   info      = text payload (reason / cause / situation / message), else ""
+table EventFrame {
+  kind:string;
+  subject:string;
+  target:string;
+  magnitude:double;
+  info:string;
+}
+
 table WorldFrame {
   tick:long;
   epoch:double;       // sim time, seconds
@@ -73,6 +97,7 @@ table WorldFrame {
   bodies:[BodyFrame];
   vessels:[VesselFrame];
   buildings:[BuildingFrame];
+  events:[EventFrame]; // events that fired this tick (transient; best-effort)
 }
 
 // ---------- renderer -> sim ----------

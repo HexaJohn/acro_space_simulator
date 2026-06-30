@@ -60,6 +60,33 @@ void main() {
     final original = snap.buildings['colony-1/refinery-1']!;
     expect(refinery.px, closeTo(original.px, 1e-6));
     expect(refinery.lat, closeTo(original.lat, 1e-12));
+
+    // Telemetry survives: mass + aggregated resource gauge.
+    expect(b.mass, closeTo(a.mass, 1e-6));
+    expect(b.mass, greaterThan(0));
+    final fuel = b.resources.firstWhere((r) => r.type == 'liquidFuel');
+    expect(fuel.capacity, 400);
+  });
+
+  test('events round-trip through the codec', () {
+    final snap = WorldSnapshot(tick: 5, vessels: const {}, events: const [
+      EventSnapshot(
+          kind: 'Impact', subject: 'demo-1', target: 'kerbin', magnitude: 42.0),
+      EventSnapshot(kind: 'StageSeparation', subject: 'demo-1', magnitude: 1),
+      EventSnapshot(kind: 'CrewLost', subject: 'demo-1', info: 'oxygen'),
+    ]);
+
+    final back = codec.decodeWorld(codec.encodeWorld(snap));
+
+    expect(back.events.length, 3);
+    expect(back.events[0].kind, 'Impact');
+    expect(back.events[0].subject, 'demo-1');
+    expect(back.events[0].target, 'kerbin');
+    expect(back.events[0].magnitude, 42.0);
+    expect(back.events[1].kind, 'StageSeparation');
+    expect(back.events[1].magnitude, 1);
+    expect(back.events[2].kind, 'CrewLost');
+    expect(back.events[2].info, 'oxygen');
   });
 
   test('CommandBatch round-trips all four command variants', () {

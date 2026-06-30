@@ -270,6 +270,24 @@ void USpaceSimSubsystem::IngestWorldFrame(const uint8* Data, int32 Len)
 					Out.Parts.Add(MoveTemp(Part));
 				}
 			}
+
+			// Telemetry / gauges.
+			Out.MassKg = static_cast<float>(V->mass());
+			Out.Crew = V->crew();
+			Out.MaxTempK = static_cast<float>(V->max_temp());
+			Out.TempLimitK = static_cast<float>(V->temp_limit());
+			if (const auto* ResVec = V->resources())
+			{
+				for (const auto* R : *ResVec)
+				{
+					if (!R) continue;
+					FSimResource Res;
+					Res.Type = R->type() ? FString(UTF8_TO_TCHAR(R->type()->c_str())) : FString();
+					Res.Amount = static_cast<float>(R->amount());
+					Res.Capacity = static_cast<float>(R->capacity());
+					Out.Resources.Add(MoveTemp(Res));
+				}
+			}
 			Vessels.Add(MoveTemp(Out));
 		}
 	}
@@ -298,6 +316,22 @@ void USpaceSimSubsystem::IngestWorldFrame(const uint8* Data, int32 Len)
 			Out.Lat = static_cast<float>(B->lat());
 			Out.Lon = static_cast<float>(B->lon());
 			Buildings.Add(MoveTemp(Out));
+		}
+	}
+
+	// Discrete events that fired this tick — fire one delegate each (FX/UI).
+	if (const auto* EventVec = World->events())
+	{
+		for (const auto* E : *EventVec)
+		{
+			if (!E) continue;
+			FSimEvent Ev;
+			Ev.Kind = E->kind() ? FString(UTF8_TO_TCHAR(E->kind()->c_str())) : FString();
+			Ev.Subject = E->subject() ? FString(UTF8_TO_TCHAR(E->subject()->c_str())) : FString();
+			Ev.Target = E->target() ? FString(UTF8_TO_TCHAR(E->target()->c_str())) : FString();
+			Ev.Magnitude = static_cast<float>(E->magnitude());
+			Ev.Info = E->info() ? FString(UTF8_TO_TCHAR(E->info()->c_str())) : FString();
+			OnSimEvent.Broadcast(Ev);
 		}
 	}
 }

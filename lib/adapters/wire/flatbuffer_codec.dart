@@ -51,6 +51,18 @@ class FlatBufferCodec {
                 offset: gen.Vec3ObjectBuilder(x: p.ox, y: p.oy, z: p.oz),
               ),
           ],
+          mass: v.mass,
+          crew: v.crew,
+          resources: [
+            for (final r in v.resources)
+              gen.ResourceFrameObjectBuilder(
+                type: r.type,
+                amount: r.amount,
+                capacity: r.capacity,
+              ),
+          ],
+          maxTemp: v.maxTemp,
+          tempLimit: v.tempLimit,
         ),
     ];
     final buildings = [
@@ -66,6 +78,16 @@ class FlatBufferCodec {
           lon: b.lon,
         ),
     ];
+    final events = [
+      for (final e in s.events)
+        gen.EventFrameObjectBuilder(
+          kind: e.kind,
+          subject: e.subject,
+          target: e.target,
+          magnitude: e.magnitude,
+          info: e.info,
+        ),
+    ];
     return gen.WorldFrameObjectBuilder(
       tick: s.tick,
       epoch: s.epoch,
@@ -73,6 +95,7 @@ class FlatBufferCodec {
       bodies: bodies,
       vessels: vessels,
       buildings: buildings,
+      events: events,
     ).toBytes();
   }
 
@@ -117,6 +140,18 @@ class FlatBufferCodec {
                 oz: p.offset?.z ?? 0,
               ),
         ],
+        mass: v.mass,
+        crew: v.crew,
+        resources: [
+          for (final r in v.resources ?? const <gen.ResourceFrame>[])
+            ResourceSnapshot(
+              type: r.type ?? '',
+              amount: r.amount,
+              capacity: r.capacity,
+            ),
+        ],
+        maxTemp: v.maxTemp,
+        tempLimit: v.tempLimit,
       );
     }
     final bodies = <String, BodySnapshot>{};
@@ -158,12 +193,23 @@ class FlatBufferCodec {
         lon: b.lon,
       );
     }
+    final events = [
+      for (final e in w.events ?? const <gen.EventFrame>[])
+        EventSnapshot(
+          kind: e.kind ?? '',
+          subject: e.subject ?? '',
+          target: e.target ?? '',
+          magnitude: e.magnitude,
+          info: e.info ?? '',
+        ),
+    ];
     return WorldSnapshot(
       tick: w.tick,
       epoch: w.epoch,
       bodies: bodies,
       vessels: vessels,
       buildings: buildings,
+      events: events,
     );
   }
 

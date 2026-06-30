@@ -36,6 +36,16 @@ struct FSimPart
 	UPROPERTY(BlueprintReadOnly) FVector LocalOffset = FVector::ZeroVector; // cm, craft-local
 };
 
+/// An aggregated resource gauge (total across the craft's parts, by type).
+USTRUCT(BlueprintType)
+struct FSimResource
+{
+	GENERATED_BODY()
+	UPROPERTY(BlueprintReadOnly) FString Type;     // e.g. "liquidFuel"
+	UPROPERTY(BlueprintReadOnly) float Amount = 0.f;
+	UPROPERTY(BlueprintReadOnly) float Capacity = 0.f;
+};
+
 /// One vessel, converted to UE space and rebased. Position already folds in the
 /// vessel's dominant-body world position, so it is a true scene-space location.
 /// [Parts] is the assembly manifest — rebuild the craft actor's child meshes
@@ -55,6 +65,12 @@ struct FSimVessel
 	UPROPERTY(BlueprintReadOnly) bool bOnRails = false;
 	UPROPERTY(BlueprintReadOnly) bool bLanded = false;
 	UPROPERTY(BlueprintReadOnly) TArray<FSimPart> Parts;
+	// Telemetry / gauges.
+	UPROPERTY(BlueprintReadOnly) float MassKg = 0.f;
+	UPROPERTY(BlueprintReadOnly) int32 Crew = 0;
+	UPROPERTY(BlueprintReadOnly) TArray<FSimResource> Resources;
+	UPROPERTY(BlueprintReadOnly) float MaxTempK = 0.f;    // hottest part temperature
+	UPROPERTY(BlueprintReadOnly) float TempLimitK = 0.f;  // its destruction temperature
 };
 
 /// A colony building, placed BODY-FIXED. Parent it under the body actor whose
@@ -76,9 +92,25 @@ struct FSimBuilding
 	UPROPERTY(BlueprintReadOnly) float Lon = 0.f; // radians
 };
 
+/// A discrete sim event that fired this tick (staging, impact, destruction,
+/// science, …). Switch on [Kind]; look up [Subject] in GetVessels() for FX.
+USTRUCT(BlueprintType)
+struct FSimEvent
+{
+	GENERATED_BODY()
+	UPROPERTY(BlueprintReadOnly) FString Kind;    // "Impact", "StageSeparation", …
+	UPROPERTY(BlueprintReadOnly) FString Subject; // primary asset id (usually vessel)
+	UPROPERTY(BlueprintReadOnly) FString Target;  // body / 2nd vessel / part / deposit
+	UPROPERTY(BlueprintReadOnly) float Magnitude = 0.f; // speed / temp / dose / index / Pa
+	UPROPERTY(BlueprintReadOnly) FString Info;    // reason / cause / situation / message
+};
+
 /// Fired (game thread) after each WorldFrame is ingested, so Blueprints can
 /// drive rendering on an event instead of polling every Tick.
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnWorldUpdated);
+
+/// Fired once per discrete sim event in the frame — bind for FX/UI.
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSimEvent, const FSimEvent&, Event);
 
 UCLASS()
 class ACROSIMBRIDGE_API USpaceSimSubsystem : public UGameInstanceSubsystem, public FTickableGameObject
@@ -122,6 +154,10 @@ public:
 	// Bind this in Blueprint to render on each new frame (event-driven).
 	UPROPERTY(BlueprintAssignable, Category = "AcroSim")
 	FOnWorldUpdated OnWorldUpdated;
+
+	// Bind for FX/UI: fires once per discrete sim event in the frame.
+	UPROPERTY(BlueprintAssignable, Category = "AcroSim")
+	FOnSimEvent OnSimEvent;
 
 	// FTransform helpers so Blueprints get a ready transform pin (FQuat pins are
 	// awkward in BP). Bodies/vessels are world-space; building is body-LOCAL —

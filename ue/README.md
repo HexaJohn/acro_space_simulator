@@ -140,6 +140,14 @@ Everything is exposed to Blueprint — no C++ needed to drive it:
   `Vessel Transform` / `Body Transform` / `Building Local Transform` to get a
   ready `Transform` pin (cleaner than the raw `FQuat` fields) for
   `Set Actor Transform` / `Add Instance`.
+- **Telemetry / gauges:** each `FSimVessel` carries `Mass Kg`, `Crew`,
+  `Resources` (type / amount / capacity, summed by type), and `Max Temp K` /
+  `Temp Limit K` — wire straight to HUD gauges or a reentry-glow material param.
+- **Events / FX:** bind **`On Sim Event`** — fires once per discrete sim event
+  (staging, impact, destruction, crew lost, structural failure, science, …).
+  Switch on `Kind`; `Subject` is the asset id (look it up in `Get Vessels` for
+  the spawn point, e.g. an explosion at an `Impact`), `Magnitude`/`Info` carry
+  the payload (impact speed, overheat temperature, crew-loss cause).
 
 A pure-Blueprint consumer: on `On World Updated` → `Get Bodies` → For Each →
 find-or-spawn a body actor (keep a `Map<String, Actor>` variable) →

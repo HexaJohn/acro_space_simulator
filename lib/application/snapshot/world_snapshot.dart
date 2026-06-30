@@ -6,6 +6,7 @@ import '../../domain/colony/surface_placement.dart';
 import '../../domain/orbits/body_ephemeris.dart';
 import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
+import '../../domain/simulation/domain_event.dart';
 import '../../domain/simulation/epoch.dart';
 import '../../domain/universe/celestial_body.dart';
 import '../../domain/universe/star_system.dart';
@@ -48,6 +49,32 @@ class PartSnapshot {
   }
 }
 
+/// An aggregated resource gauge: the craft's total [amount]/[capacity] of one
+/// [type] (e.g. liquidFuel), summed across all its parts.
+class ResourceSnapshot {
+  final String type;
+  final double amount;
+  final double capacity;
+
+  const ResourceSnapshot({
+    required this.type,
+    required this.amount,
+    required this.capacity,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'type': type,
+        'amount': amount,
+        'capacity': capacity,
+      };
+
+  factory ResourceSnapshot.fromJson(Map<String, dynamic> j) => ResourceSnapshot(
+        type: j['type'] as String,
+        amount: (j['amount'] as num).toDouble(),
+        capacity: (j['capacity'] as num).toDouble(),
+      );
+}
+
 /// Serializable per-vessel state for network sync, save/load, determinism
 /// checks, and external renderers (e.g. a game engine consuming the snapshot
 /// over the wire). Plain numbers only — no domain objects — so it round-trips
@@ -72,6 +99,12 @@ class VesselSnapshot {
   final bool onRails;
   final bool landed;
   final List<PartSnapshot> parts;
+  // Telemetry / gauges.
+  final double mass; // kg
+  final int crew;
+  final List<ResourceSnapshot> resources;
+  final double maxTemp; // hottest part temperature, K
+  final double tempLimit; // that part's destruction temperature, K
 
   const VesselSnapshot({
     required this.id,
@@ -94,39 +127,75 @@ class VesselSnapshot {
     required this.onRails,
     this.landed = false,
     this.parts = const [],
+    this.mass = 0,
+    this.crew = 0,
+    this.resources = const [],
+    this.maxTemp = 0,
+    this.tempLimit = 0,
   });
 
-  factory VesselSnapshot.of(Vessel v) => VesselSnapshot(
-        id: v.id.value,
-        ownerId: v.ownerId,
-        body: v.dominantBody.value,
-        px: v.state.position.x,
-        py: v.state.position.y,
-        pz: v.state.position.z,
-        vx: v.state.velocity.x,
-        vy: v.state.velocity.y,
-        vz: v.state.velocity.z,
-        qw: v.state.attitude.w,
-        qx: v.state.attitude.x,
-        qy: v.state.attitude.y,
-        qz: v.state.attitude.z,
-        wx: v.state.angularVelocity.x,
-        wy: v.state.angularVelocity.y,
-        wz: v.state.angularVelocity.z,
-        throttle: v.throttle,
-        onRails: v.mode == PropagationMode.onRails,
-        landed: v.landed,
-        parts: [
-          for (final p in v.allParts)
-            PartSnapshot(
-              id: p.id.value,
-              type: p.name,
-              ox: p.positionInVessel.x,
-              oy: p.positionInVessel.y,
-              oz: p.positionInVessel.z,
-            ),
-        ],
-      );
+  factory VesselSnapshot.of(Vessel v) {
+    // Aggregate resources across parts by type, and find the hottest part.
+    final amounts = <String, double>{};
+    final capacities = <String, double>{};
+    for (final p in v.allParts) {
+      for (final r in p.resources) {
+        final k = r.type.name;
+        amounts[k] = (amounts[k] ?? 0) + r.amount;
+        capacities[k] = (capacities[k] ?? 0) + r.capacity;
+      }
+    }
+    var maxTemp = 0.0, tempLimit = 0.0;
+    for (final t in v.thermal) {
+      if (t.temperature > maxTemp) {
+        maxTemp = t.temperature;
+        tempLimit = t.maxTemperature;
+      }
+    }
+    return VesselSnapshot(
+      id: v.id.value,
+      ownerId: v.ownerId,
+      body: v.dominantBody.value,
+      px: v.state.position.x,
+      py: v.state.position.y,
+      pz: v.state.position.z,
+      vx: v.state.velocity.x,
+      vy: v.state.velocity.y,
+      vz: v.state.velocity.z,
+      qw: v.state.attitude.w,
+      qx: v.state.attitude.x,
+      qy: v.state.attitude.y,
+      qz: v.state.attitude.z,
+      wx: v.state.angularVelocity.x,
+      wy: v.state.angularVelocity.y,
+      wz: v.state.angularVelocity.z,
+      throttle: v.throttle,
+      onRails: v.mode == PropagationMode.onRails,
+      landed: v.landed,
+      parts: [
+        for (final p in v.allParts)
+          PartSnapshot(
+            id: p.id.value,
+            type: p.name,
+            ox: p.positionInVessel.x,
+            oy: p.positionInVessel.y,
+            oz: p.positionInVessel.z,
+          ),
+      ],
+      mass: v.mass,
+      crew: v.crew?.count ?? 0,
+      resources: [
+        for (final k in amounts.keys)
+          ResourceSnapshot(
+            type: k,
+            amount: amounts[k]!,
+            capacity: capacities[k] ?? 0,
+          ),
+      ],
+      maxTemp: maxTemp,
+      tempLimit: tempLimit,
+    );
+  }
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -140,6 +209,11 @@ class VesselSnapshot {
         'onRails': onRails,
         'landed': landed,
         'parts': [for (final p in parts) p.toJson()],
+        'mass': mass,
+        'crew': crew,
+        'resources': [for (final r in resources) r.toJson()],
+        'maxTemp': maxTemp,
+        'tempLimit': tempLimit,
       };
 
   /// Tolerant of older payloads that lack attitude / angularVelocity / landed:
@@ -173,6 +247,14 @@ class VesselSnapshot {
         for (final p in (j['parts'] as List?) ?? const [])
           PartSnapshot.fromJson(p as Map<String, dynamic>),
       ],
+      mass: (j['mass'] as num?)?.toDouble() ?? 0,
+      crew: (j['crew'] as num?)?.toInt() ?? 0,
+      resources: [
+        for (final r in (j['resources'] as List?) ?? const [])
+          ResourceSnapshot.fromJson(r as Map<String, dynamic>),
+      ],
+      maxTemp: (j['maxTemp'] as num?)?.toDouble() ?? 0,
+      tempLimit: (j['tempLimit'] as num?)?.toDouble() ?? 0,
     );
   }
 }
@@ -363,6 +445,91 @@ class BuildingSnapshot {
   }
 }
 
+/// A discrete sim event that fired this tick, flattened for the wire. The
+/// renderer switches on [kind] and looks up [subject] in the frame for FX.
+///   subject   = primary asset id (usually the vessel)
+///   target    = secondary id (body / 2nd vessel / part / deposit), else ''
+///   magnitude = numeric payload (speed/temp/dose/stage index/Pa), else 0
+///   info      = text payload (reason/cause/situation/message), else ''
+class EventSnapshot {
+  final String kind;
+  final String subject;
+  final String target;
+  final double magnitude;
+  final String info;
+
+  const EventSnapshot({
+    required this.kind,
+    this.subject = '',
+    this.target = '',
+    this.magnitude = 0,
+    this.info = '',
+  });
+
+  /// Flatten a [DomainEvent] to the wire shape. Unknown types fall back to the
+  /// runtime type name so the renderer at least sees that something happened.
+  factory EventSnapshot.of(DomainEvent e) {
+    switch (e) {
+      case SoiTransition x:
+        return EventSnapshot(
+            kind: 'SoiTransition', subject: x.vessel.value, target: x.to.value, info: x.from.value);
+      case StageSeparation x:
+        return EventSnapshot(
+            kind: 'StageSeparation', subject: x.vessel.value, magnitude: x.stageIndex.toDouble());
+      case ApoapsisReached x:
+        return EventSnapshot(kind: 'ApoapsisReached', subject: x.vessel.value);
+      case AtmosphericEntry x:
+        return EventSnapshot(kind: 'AtmosphericEntry', subject: x.vessel.value, target: x.body.value);
+      case Impact x:
+        return EventSnapshot(
+            kind: 'Impact', subject: x.vessel.value, target: x.body.value, magnitude: x.speed);
+      case DockingCompleted x:
+        return EventSnapshot(kind: 'DockingCompleted', subject: x.a.value, target: x.b.value);
+      case PartOverheated x:
+        return EventSnapshot(
+            kind: 'PartOverheated', subject: x.vessel.value, target: x.part.value, magnitude: x.temperature);
+      case ResourceMined x:
+        return EventSnapshot(
+            kind: 'ResourceMined', subject: x.vessel.value, target: x.depositId, magnitude: x.amount);
+      case PlanAborted x:
+        return EventSnapshot(kind: 'PlanAborted', subject: x.vessel.value, info: x.reason);
+      case CrewLost x:
+        return EventSnapshot(kind: 'CrewLost', subject: x.vessel.value, info: x.cause);
+      case CrewIrradiated x:
+        return EventSnapshot(kind: 'CrewIrradiated', subject: x.vessel.value, magnitude: x.doseSv);
+      case MegastructureMilestone x:
+        return EventSnapshot(
+            kind: 'MegastructureMilestone',
+            subject: x.structureId,
+            info: x.message,
+            magnitude: x.completed ? 1 : 0);
+      case SituationEntered x:
+        return EventSnapshot(kind: 'SituationEntered', subject: x.vessel.value, info: x.situation);
+      case StructuralFailure x:
+        return EventSnapshot(
+            kind: 'StructuralFailure', subject: x.vessel.value, magnitude: x.dynamicPressure);
+      default:
+        return EventSnapshot(kind: e.runtimeType.toString());
+    }
+  }
+
+  Map<String, dynamic> toJson() => {
+        'kind': kind,
+        'subject': subject,
+        'target': target,
+        'magnitude': magnitude,
+        'info': info,
+      };
+
+  factory EventSnapshot.fromJson(Map<String, dynamic> j) => EventSnapshot(
+        kind: j['kind'] as String,
+        subject: (j['subject'] as String?) ?? '',
+        target: (j['target'] as String?) ?? '',
+        magnitude: (j['magnitude'] as num?)?.toDouble() ?? 0,
+        info: (j['info'] as String?) ?? '',
+      );
+}
+
 /// Full authoritative world state for one tick: a complete render frame.
 /// Sent to clients for reconciliation, compared between runs to verify
 /// deterministic simulation, and consumed by external renderers.
@@ -376,12 +543,17 @@ class WorldSnapshot {
   final Map<String, VesselSnapshot> vessels;
   final Map<String, BuildingSnapshot> buildings;
 
+  /// Discrete events that fired this tick (transient; not keyed). Best-effort:
+  /// a renderer that skips frames may miss some — fine for cosmetic FX/UI.
+  final List<EventSnapshot> events;
+
   const WorldSnapshot({
     required this.tick,
     required this.vessels,
     this.epoch = 0,
     this.bodies = const {},
     this.buildings = const {},
+    this.events = const [],
   });
 
   /// Capture the world. Pass [system] (+ [ephemeris] and [epoch]) to include
@@ -396,6 +568,7 @@ class WorldSnapshot {
     ColonyRepository? colonies,
     TerrainHeights? terrain,
     SurfacePlacement placement = const SurfacePlacement(),
+    List<EventSnapshot> events = const [],
   }) {
     final heights = terrain ?? TerrainHeights();
     final buildings = <String, BuildingSnapshot>{};
@@ -424,6 +597,7 @@ class WorldSnapshot {
         for (final v in vessels.all()) v.id.value: VesselSnapshot.of(v),
       },
       buildings: buildings,
+      events: events,
     );
   }
 
@@ -433,6 +607,7 @@ class WorldSnapshot {
         'bodies': [for (final b in bodies.values) b.toJson()],
         'vessels': [for (final v in vessels.values) v.toJson()],
         'buildings': [for (final b in buildings.values) b.toJson()],
+        'events': [for (final e in events) e.toJson()],
       };
 
   factory WorldSnapshot.fromJson(Map<String, dynamic> j) {
@@ -457,6 +632,10 @@ class WorldSnapshot {
           '${(b as Map<String, dynamic>)['colony']}/${b['id']}':
               BuildingSnapshot.fromJson(b),
       },
+      events: [
+        for (final e in (j['events'] as List?) ?? const [])
+          EventSnapshot.fromJson(e as Map<String, dynamic>),
+      ],
     );
   }
 
