@@ -57,6 +57,14 @@ void USpaceSimSubsystem::Deinitialize()
 	Super::Deinitialize();
 }
 
+void USpaceSimSubsystem::BeginDestroy()
+{
+	// Backstop for the editor-owned (NewObject'd) instance, whose Deinitialize()
+	// never runs. Runs on the game thread during GC; Disconnect() is idempotent.
+	Disconnect();
+	Super::BeginDestroy();
+}
+
 bool USpaceSimSubsystem::Connect(const FString& Host, int32 Port)
 {
 	Disconnect();
@@ -112,6 +120,16 @@ void USpaceSimSubsystem::Tick(float /*DeltaTime*/)
 		return;
 	}
 	FlushTx();    // drain queued outbound commands (also covers the connect race)
+	PumpSocket();
+}
+
+void USpaceSimSubsystem::EditorPump()
+{
+	if (!Socket)
+	{
+		return;
+	}
+	FlushTx();
 	PumpSocket();
 }
 

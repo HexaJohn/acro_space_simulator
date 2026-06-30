@@ -36,6 +36,14 @@ public:
 
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type Reason) override;
+	// Editor delete / map change does NOT reliably route EndPlay for an actor that
+	// never had BeginPlay (editor world), so tear the editor preview down here too.
+	virtual void Destroyed() override;
+
+	// Tick even in the editor (no PIE) so the renderer can preview the live sim in
+	// the level viewport. Enable the viewport's Realtime mode for a smooth update.
+	virtual void Tick(float DeltaSeconds) override;
+	virtual bool ShouldTickIfViewportsOnly() const override { return true; }
 
 	// Type-key -> mesh. Row name = sim part name / building spec type / body id.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim")
@@ -47,6 +55,10 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim")
 	bool bAutoConnect = true;
+	// Preview the live sim in the EDITOR viewport (not just PIE). The renderer
+	// owns its own connection in-editor; turn off to disable the editor preview.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim")
+	bool bRunInEditor = true;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim")
 	FString Host = TEXT("127.0.0.1");
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim")
@@ -102,6 +114,15 @@ private:
 	UStaticMesh* MeshFor(const FString& Key, FVector& OutScale, UMaterialInterface*& OutMaterial) const;
 	AActor* SpawnVesselActor();
 
+	// Destroy every spawned body/vessel actor + tracking state. Runtime worlds tear
+	// these down automatically, but an editor-spawned renderer must clean up its
+	// own transient preview actors when it stops.
+	void DestroySpawnedActors();
+
+	// Idempotent editor-preview shutdown: unbind + disconnect + drop EditorSim and
+	// destroy the spawned preview actors. Safe to call repeatedly / at runtime.
+	void TeardownEditorPreview();
+
 	UPROPERTY() TMap<FString, AActor*> BodyActors;   // body id -> actor (scale-1 root)
 	UPROPERTY() TMap<FString, AActor*> VesselActors; // vessel id -> actor
 	UPROPERTY() TMap<FString, UStaticMeshComponent*> PartComps; // "vesselId/partId" -> comp
@@ -113,4 +134,17 @@ private:
 	TMap<FString, TPair<FString, int32>> BuildingInstances;
 
 	TWeakObjectPtr<USpaceSimSubsystem> SimRef;
+
+	// EDITOR ONLY: there is no GameInstance (and thus no USpaceSimSubsystem) in the
+	// editor world, so the renderer owns one here and pumps it from its editor
+	// Tick. Null at runtime/PIE, where the real GameInstance subsystem is used.
+	UPROPERTY(Transient) USpaceSimSubsystem* EditorSim = nullptr;
+
+	// Editor-preview connection bookkeeping: the endpoint currently dialed (so a
+	// Host/Port edit reconnects), a throttle for retrying a dead/missing server,
+	// and the wall-clock time of the last received frame (for staleness detection).
+	FString ConnectedHost;
+	int32 ConnectedPort = 0;
+	float ReconnectAccum = 0.f;
+	double LastFrameTime = 0.0;
 };
