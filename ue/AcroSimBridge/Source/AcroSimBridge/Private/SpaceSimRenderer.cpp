@@ -11,8 +11,71 @@
 
 ASpaceSimRenderer::ASpaceSimRenderer()
 {
-	PrimaryActorTick.bCanEverTick = false; // event-driven via OnWorldUpdated
+	// Runtime/PIE is event-driven (OnWorldUpdated). We still tick so the EDITOR
+	// preview path can pump its own connection (see Tick); the tick early-outs in
+	// game worlds. ShouldTickIfViewportsOnly() lets it run without PIE.
+	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bStartWithTickEnabled = true;
 	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
+}
+
+void ASpaceSimRenderer::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+
+	UWorld* World = GetWorld();
+	// Game/PIE worlds are driven by the GameInstance subsystem's OnWorldUpdated
+	// event set up in BeginPlay — nothing to do here.
+	if (!World || World->IsGameWorld())
+	{
+		return;
+	}
+
+	// Editor preview disabled (or just toggled off): tear down any live connection.
+	if (!bRunInEditor)
+	{
+		TeardownEditorPreview();
+		return;
+	}
+
+	// Stand up the editor-owned subsystem once (the connection is handled below so
+	// it can also reconnect on endpoint changes / drops).
+	if (!EditorSim)
+	{
+		EditorSim = NewObject<USpaceSimSubsystem>(this);
+		EditorSim->OnWorldUpdated.AddDynamic(this, &ASpaceSimRenderer::HandleWorldUpdated);
+		SimRef = EditorSim;
+	}
+
+	// (Re)connect on: first run, a Host/Port edit, a dropped socket, or a stale
+	// stream (server restarted -> half-open socket that never delivers frames).
+	// Throttled so a missing server isn't dialed every frame.
+	if (bAutoConnect)
+	{
+		const bool bEndpointChanged = (Host != ConnectedHost || Port != ConnectedPort);
+		const double Now = FPlatformTime::Seconds();
+		const bool bStale = EditorSim->IsConnected() && LastFrameTime > 0.0 &&
+							(Now - LastFrameTime) > 5.0;
+		if (bEndpointChanged || !EditorSim->IsConnected() || bStale)
+		{
+			ReconnectAccum += DeltaSeconds;
+			if (bEndpointChanged || ReconnectAccum >= 2.0f)
+			{
+				ReconnectAccum = 0.f;
+				EditorSim->Connect(Host, Port); // Connect() closes any prior socket first
+				ConnectedHost = Host;
+				ConnectedPort = Port;
+				LastFrameTime = Now; // grace before the next staleness check
+			}
+		}
+		else
+		{
+			ReconnectAccum = 0.f;
+		}
+	}
+
+	EditorSim->FocusBodyId = FocusBodyId; // live-editable in the detail panel
+	EditorSim->EditorPump();              // recv -> ingest -> OnWorldUpdated -> render
 }
 
 void ASpaceSimRenderer::BeginPlay()
@@ -38,11 +101,57 @@ void ASpaceSimRenderer::BeginPlay()
 
 void ASpaceSimRenderer::EndPlay(const EEndPlayReason::Type Reason)
 {
+	// Runtime/PIE: unbind from the GameInstance subsystem (SimRef). In the editor
+	// SimRef IS EditorSim, which TeardownEditorPreview() unbinds — RemoveDynamic is
+	// idempotent so the double-unbind is harmless.
 	if (USpaceSimSubsystem* Sim = SimRef.Get())
 	{
 		Sim->OnWorldUpdated.RemoveDynamic(this, &ASpaceSimRenderer::HandleWorldUpdated);
 	}
+	TeardownEditorPreview(); // editor socket + preview actors (no-op extras at runtime)
 	Super::EndPlay(Reason);
+}
+
+void ASpaceSimRenderer::Destroyed()
+{
+	// In-editor delete / map change tears the actor down WITHOUT a routed EndPlay
+	// (it never had BeginPlay in the editor world), so clean up here too.
+	TeardownEditorPreview();
+	Super::Destroyed();
+}
+
+void ASpaceSimRenderer::TeardownEditorPreview()
+{
+	if (EditorSim)
+	{
+		EditorSim->OnWorldUpdated.RemoveDynamic(this, &ASpaceSimRenderer::HandleWorldUpdated);
+		EditorSim->Disconnect(); // close the editor-owned socket
+		EditorSim = nullptr;
+	}
+	ConnectedHost.Reset();
+	ConnectedPort = 0;
+	ReconnectAccum = 0.f;
+	LastFrameTime = 0.0;
+	DestroySpawnedActors();
+}
+
+void ASpaceSimRenderer::DestroySpawnedActors()
+{
+	for (const auto& Pair : BodyActors)
+	{
+		if (Pair.Value) Pair.Value->Destroy(); // destroys child meshes + building HISMs
+	}
+	for (const auto& Pair : VesselActors)
+	{
+		if (Pair.Value) Pair.Value->Destroy(); // destroys child part comps
+	}
+	BodyActors.Reset();
+	VesselActors.Reset();
+	PartComps.Reset();
+	BuildingHisms.Reset();
+	BuildingInstances.Reset();
+	BuildingTypeScale.Reset();
+	BodyRadiiCm.Reset();
 }
 
 void ASpaceSimRenderer::HandleWorldUpdated()
@@ -52,6 +161,7 @@ void ASpaceSimRenderer::HandleWorldUpdated()
 	{
 		return;
 	}
+	LastFrameTime = FPlatformTime::Seconds(); // for editor staleness/reconnect
 	UpdateBodies(Sim);
 	UpdateVessels(Sim);
 	UpdateBuildings(Sim); // after bodies — buildings parent under body actors
@@ -78,7 +188,12 @@ UStaticMesh* ASpaceSimRenderer::MeshFor(const FString& Key, FVector& OutScale, U
 
 AActor* ASpaceSimRenderer::SpawnVesselActor()
 {
-	AActor* A = GetWorld()->SpawnActor<AActor>();
+	// Transient + outliner-hidden: these are live render proxies, never saved into
+	// the map (matters for the editor-preview path, harmless at runtime).
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.ObjectFlags |= RF_Transient;
+	SpawnParams.bHideFromSceneOutliner = true;
+	AActor* A = GetWorld()->SpawnActor<AActor>(SpawnParams);
 	if (!A) return nullptr;
 	USceneComponent* Root = NewObject<USceneComponent>(A, TEXT("CraftRoot"));
 	A->SetRootComponent(Root);
@@ -97,7 +212,10 @@ void ASpaceSimRenderer::UpdateBodies(USpaceSimSubsystem* Sim)
 		AActor* Actor = BodyActors.FindRef(B.Id);
 		if (!Actor)
 		{
-			Actor = GetWorld()->SpawnActor<AActor>();
+			FActorSpawnParameters SpawnParams;
+			SpawnParams.ObjectFlags |= RF_Transient;       // never saved into the map
+			SpawnParams.bHideFromSceneOutliner = true;     // keep the editor outliner clean
+			Actor = GetWorld()->SpawnActor<AActor>(SpawnParams);
 			if (!Actor) continue;
 			// Scale-1 root so attached buildings/HISMs are NOT multiplied by the
 			// planet's display size; the planet mesh is a child carrying the scale.

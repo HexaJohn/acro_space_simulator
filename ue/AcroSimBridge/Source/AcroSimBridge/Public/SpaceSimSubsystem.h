@@ -35,11 +35,21 @@ public:
 	// UGameInstanceSubsystem
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
+	// Resource backstop: the editor-preview path (ASpaceSimRenderer) creates an
+	// instance via NewObject, so Deinitialize() never fires for it. Closing the
+	// socket here guarantees no leak whichever way the object dies. Disconnect() is
+	// idempotent, so this is safe alongside Deinitialize()/EndPlay teardown.
+	virtual void BeginDestroy() override;
 
 	// FTickableGameObject
 	virtual void Tick(float DeltaTime) override;
 	virtual TStatId GetStatId() const override;
 	virtual bool IsTickable() const override { return Socket != nullptr; }
+	// MUST stay false. In the editor the ASpaceSimRenderer preview owns an instance
+	// and pumps it MANUALLY (EditorPump). If this returned true the tickable manager
+	// would ALSO call Tick() in editor worlds → double pump (socket drained + TxBuffer
+	// flushed twice per frame, racing the de-framer).
+	virtual bool IsTickableInEditor() const override { return false; }
 
 	UFUNCTION(BlueprintCallable, Category = "AcroSim")
 	bool Connect(const FString& Host = TEXT("127.0.0.1"), int32 Port = 5800);
@@ -49,6 +59,12 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "AcroSim")
 	bool IsConnected() const { return Socket != nullptr; }
+
+	// Drive one outbound-flush + receive/ingest pass manually. The FTickableGameObject
+	// auto-tick only runs in game worlds, so the editor-preview path (ASpaceSimRenderer
+	// owning a subsystem outside PIE) calls this from its editor Tick. No-op if not
+	// connected; fires OnWorldUpdated when a frame arrives, same as the auto Tick.
+	void EditorPump();
 
 	// Latest world, already in UE space + rebased onto FocusBodyId. Returned by
 	// value so they are Blueprint-callable; cache the result in a BP variable and
