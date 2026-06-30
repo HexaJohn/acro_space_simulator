@@ -36,7 +36,29 @@ Add `"AcroSimBridge"` to your `.uproject`/`.uplugin` modules (or paste the
 subsystem + the two include paths from `Build.cs` into your existing game
 module). Regenerate project files, build.
 
-## 3. Use it
+## Quick render: drop in `ASpaceSimRenderer`
+
+Fastest path — no per-frame code. Place an **AcroSimRenderer** actor in the level
+and set its **Asset Table** (a DataTable whose row struct is `FAcroAssetRow`). Row
+name = the type-key the sim sends:
+
+- a **body id** (`kerbin`, `mun`, `earth`) → planet mesh (a unit-radius sphere; the
+  renderer scales it to the body's real radius — set **Body Mesh Unit Radius Cm**
+  to your sphere's radius, `50` for UE's default sphere),
+- a **part name** (`LV-T45`, …) → part mesh,
+- a **building spec type** (`refinery`, `hab`, `solar`, …) → building mesh.
+
+Set a **Fallback Mesh** (debug cube) so missing keys stay visible. With **Auto
+Connect** on, it connects on BeginPlay and each frame: find-or-spawns body/craft
+actors, composes craft from `Parts`, HISM-instances buildings under the rotating
+body actor, and prunes anything that leaves the stream (staging drops part meshes;
+despawns vanish). Enable **Report Terrain** (+ a trace channel) to raycast your
+landscape and reconcile heights.
+
+Author the DataTable, press Play. For bespoke control (custom actor classes,
+effects, UI) bind `On World Updated` yourself — see below.
+
+## 3. Use it (manual / Blueprint)
 
 `USpaceSimSubsystem` is a `UGameInstanceSubsystem`, so `GetGameInstance()->GetSubsystem<USpaceSimSubsystem>()` from anywhere. From your level/pawn `BeginPlay`:
 
