@@ -417,10 +417,19 @@ class VesselFrame {
   List<ResourceFrame>? get resources => const fb.ListReader<ResourceFrame>(ResourceFrame.reader).vTableGetNullable(_bc, _bcOffset, 30);
   double get maxTemp => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 32, 0.0);
   double get tempLimit => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 34, 0.0);
+  double get apoapsis => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 36, 0.0);
+  double get periapsis => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 38, 0.0);
+  double get period => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 40, 0.0);
+  double get eccentricity => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 42, 0.0);
+  double get inclination => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 44, 0.0);
+  double get semiMajor => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 46, 0.0);
+  List<Vec3>? get trajectory => const fb.ListReader<Vec3>(Vec3.reader).vTableGetNullable(_bc, _bcOffset, 48);
+  bool get connected => const fb.BoolReader().vTableGet(_bc, _bcOffset, 50, false);
+  double get commDelay => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 52, 0.0);
 
   @override
   String toString() {
-    return 'VesselFrame{id: ${id}, owner: ${owner}, body: ${body}, pos: ${pos}, vel: ${vel}, att: ${att}, spin: ${spin}, throttle: ${throttle}, onRails: ${onRails}, landed: ${landed}, parts: ${parts}, mass: ${mass}, crew: ${crew}, resources: ${resources}, maxTemp: ${maxTemp}, tempLimit: ${tempLimit}}';
+    return 'VesselFrame{id: ${id}, owner: ${owner}, body: ${body}, pos: ${pos}, vel: ${vel}, att: ${att}, spin: ${spin}, throttle: ${throttle}, onRails: ${onRails}, landed: ${landed}, parts: ${parts}, mass: ${mass}, crew: ${crew}, resources: ${resources}, maxTemp: ${maxTemp}, tempLimit: ${tempLimit}, apoapsis: ${apoapsis}, periapsis: ${periapsis}, period: ${period}, eccentricity: ${eccentricity}, inclination: ${inclination}, semiMajor: ${semiMajor}, trajectory: ${trajectory}, connected: ${connected}, commDelay: ${commDelay}}';
   }
 }
 
@@ -438,7 +447,7 @@ class VesselFrameBuilder {
   final fb.Builder fbBuilder;
 
   void begin() {
-    fbBuilder.startTable(16);
+    fbBuilder.startTable(25);
   }
 
   int addIdOffset(int? offset) {
@@ -505,6 +514,42 @@ class VesselFrameBuilder {
     fbBuilder.addFloat64(15, tempLimit);
     return fbBuilder.offset;
   }
+  int addApoapsis(double? apoapsis) {
+    fbBuilder.addFloat64(16, apoapsis);
+    return fbBuilder.offset;
+  }
+  int addPeriapsis(double? periapsis) {
+    fbBuilder.addFloat64(17, periapsis);
+    return fbBuilder.offset;
+  }
+  int addPeriod(double? period) {
+    fbBuilder.addFloat64(18, period);
+    return fbBuilder.offset;
+  }
+  int addEccentricity(double? eccentricity) {
+    fbBuilder.addFloat64(19, eccentricity);
+    return fbBuilder.offset;
+  }
+  int addInclination(double? inclination) {
+    fbBuilder.addFloat64(20, inclination);
+    return fbBuilder.offset;
+  }
+  int addSemiMajor(double? semiMajor) {
+    fbBuilder.addFloat64(21, semiMajor);
+    return fbBuilder.offset;
+  }
+  int addTrajectoryOffset(int? offset) {
+    fbBuilder.addOffset(22, offset);
+    return fbBuilder.offset;
+  }
+  int addConnected(bool? connected) {
+    fbBuilder.addBool(23, connected);
+    return fbBuilder.offset;
+  }
+  int addCommDelay(double? commDelay) {
+    fbBuilder.addFloat64(24, commDelay);
+    return fbBuilder.offset;
+  }
 
   int finish() {
     return fbBuilder.endTable();
@@ -528,6 +573,15 @@ class VesselFrameObjectBuilder extends fb.ObjectBuilder {
   final List<ResourceFrameObjectBuilder>? _resources;
   final double? _maxTemp;
   final double? _tempLimit;
+  final double? _apoapsis;
+  final double? _periapsis;
+  final double? _period;
+  final double? _eccentricity;
+  final double? _inclination;
+  final double? _semiMajor;
+  final List<Vec3ObjectBuilder>? _trajectory;
+  final bool? _connected;
+  final double? _commDelay;
 
   VesselFrameObjectBuilder({
     String? id,
@@ -546,6 +600,15 @@ class VesselFrameObjectBuilder extends fb.ObjectBuilder {
     List<ResourceFrameObjectBuilder>? resources,
     double? maxTemp,
     double? tempLimit,
+    double? apoapsis,
+    double? periapsis,
+    double? period,
+    double? eccentricity,
+    double? inclination,
+    double? semiMajor,
+    List<Vec3ObjectBuilder>? trajectory,
+    bool? connected,
+    double? commDelay,
   })
       : _id = id,
         _owner = owner,
@@ -562,7 +625,16 @@ class VesselFrameObjectBuilder extends fb.ObjectBuilder {
         _crew = crew,
         _resources = resources,
         _maxTemp = maxTemp,
-        _tempLimit = tempLimit;
+        _tempLimit = tempLimit,
+        _apoapsis = apoapsis,
+        _periapsis = periapsis,
+        _period = period,
+        _eccentricity = eccentricity,
+        _inclination = inclination,
+        _semiMajor = semiMajor,
+        _trajectory = trajectory,
+        _connected = connected,
+        _commDelay = commDelay;
 
   /// Finish building, and store into the [fbBuilder].
   @override
@@ -577,7 +649,9 @@ class VesselFrameObjectBuilder extends fb.ObjectBuilder {
         : fbBuilder.writeList(_parts!.map((b) => b.getOrCreateOffset(fbBuilder)).toList());
     final int? resourcesOffset = _resources == null ? null
         : fbBuilder.writeList(_resources!.map((b) => b.getOrCreateOffset(fbBuilder)).toList());
-    fbBuilder.startTable(16);
+    final int? trajectoryOffset = _trajectory == null ? null
+        : fbBuilder.writeListOfStructs(_trajectory!);
+    fbBuilder.startTable(25);
     fbBuilder.addOffset(0, idOffset);
     fbBuilder.addOffset(1, ownerOffset);
     fbBuilder.addOffset(2, bodyOffset);
@@ -602,6 +676,15 @@ class VesselFrameObjectBuilder extends fb.ObjectBuilder {
     fbBuilder.addOffset(13, resourcesOffset);
     fbBuilder.addFloat64(14, _maxTemp);
     fbBuilder.addFloat64(15, _tempLimit);
+    fbBuilder.addFloat64(16, _apoapsis);
+    fbBuilder.addFloat64(17, _periapsis);
+    fbBuilder.addFloat64(18, _period);
+    fbBuilder.addFloat64(19, _eccentricity);
+    fbBuilder.addFloat64(20, _inclination);
+    fbBuilder.addFloat64(21, _semiMajor);
+    fbBuilder.addOffset(22, trajectoryOffset);
+    fbBuilder.addBool(23, _connected);
+    fbBuilder.addFloat64(24, _commDelay);
     return fbBuilder.endTable();
   }
 

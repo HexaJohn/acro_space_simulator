@@ -66,6 +66,20 @@ void main() {
     expect(b.mass, greaterThan(0));
     final fuel = b.resources.firstWhere((r) => r.type == 'liquidFuel');
     expect(fuel.capacity, 400);
+
+    // Orbit + trajectory: demo-1 is in a ~circular low orbit (~100 km up).
+    expect(a.periapsis, greaterThan(600000)); // above Kerbin's 600 km surface
+    expect(a.apoapsis, closeTo(a.periapsis, a.periapsis * 0.05)); // near-circular
+    expect(a.eccentricity, lessThan(0.05));
+    expect(a.trajectory.length, greaterThan(0));
+    expect(a.trajectory.length % 3, 0); // flat x,y,z triples
+    // ...and they survive the wire.
+    expect(b.periapsis, closeTo(a.periapsis, 1e-3));
+    expect(b.apoapsis, closeTo(a.apoapsis, 1e-3));
+    expect(b.period, closeTo(a.period, 1e-3));
+    expect(b.trajectory.length, a.trajectory.length);
+    expect(b.connected, a.connected);
+    expect(b.commDelay, closeTo(a.commDelay, 1e-9));
   });
 
   test('events round-trip through the codec', () {

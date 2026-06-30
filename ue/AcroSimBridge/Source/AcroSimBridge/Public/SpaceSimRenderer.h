@@ -67,6 +67,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim")
 	TEnumAsByte<ECollisionChannel> TerrainTraceChannel = ECC_WorldStatic;
 
+	// Draw each vessel's predicted orbit line (FSimVessel.Trajectory) as debug
+	// lines. Quick "see it" visual; swap for a spline/ribbon mesh in production.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim")
+	bool bDrawOrbits = true;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim")
+	FColor OrbitColor = FColor::Cyan;
+
 private:
 	UFUNCTION()
 	void HandleWorldUpdated();

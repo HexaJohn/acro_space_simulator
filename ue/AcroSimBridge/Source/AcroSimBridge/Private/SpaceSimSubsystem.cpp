@@ -288,6 +288,30 @@ void USpaceSimSubsystem::IngestWorldFrame(const uint8* Data, int32 Len)
 					Out.Resources.Add(MoveTemp(Res));
 				}
 			}
+
+			// Orbit + comms scalars (metres / seconds; -1 = escape/none).
+			Out.ApoapsisM = static_cast<float>(V->apoapsis());
+			Out.PeriapsisM = static_cast<float>(V->periapsis());
+			Out.PeriodSeconds = static_cast<float>(V->period());
+			Out.Eccentricity = static_cast<float>(V->eccentricity());
+			Out.InclinationRad = static_cast<float>(V->inclination());
+			Out.SemiMajorM = static_cast<float>(V->semi_major());
+			Out.bConnected = V->connected();
+			Out.CommDelaySeconds = static_cast<float>(V->comm_delay());
+
+			// Trajectory (orbit line): body-relative points -> the SAME rebase as
+			// the vessel position (BodyRoot + point - OriginSim), in UE world cm.
+			if (const auto* TrajVec = V->trajectory())
+			{
+				Out.Trajectory.Reserve(static_cast<int32>(TrajVec->size()));
+				// vector-of-struct: elements are inline in the buffer, never null.
+				for (const acro::wire::Vec3* Pt : *TrajVec)
+				{
+					const FVector RootSim = BodyRoot + FVector(Pt->x(), Pt->y(), Pt->z());
+					const FVector Reb = RootSim - OriginSim;
+					Out.Trajectory.Add(SimToUEPosition(Reb.X, Reb.Y, Reb.Z));
+				}
+			}
 			Vessels.Add(MoveTemp(Out));
 		}
 	}

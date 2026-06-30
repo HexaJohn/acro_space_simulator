@@ -365,7 +365,16 @@ struct VesselFrame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_CREW = 28,
     VT_RESOURCES = 30,
     VT_MAX_TEMP = 32,
-    VT_TEMP_LIMIT = 34
+    VT_TEMP_LIMIT = 34,
+    VT_APOAPSIS = 36,
+    VT_PERIAPSIS = 38,
+    VT_PERIOD = 40,
+    VT_ECCENTRICITY = 42,
+    VT_INCLINATION = 44,
+    VT_SEMI_MAJOR = 46,
+    VT_TRAJECTORY = 48,
+    VT_CONNECTED = 50,
+    VT_COMM_DELAY = 52
   };
   const ::flatbuffers::String *id() const {
     return GetPointer<const ::flatbuffers::String *>(VT_ID);
@@ -415,6 +424,33 @@ struct VesselFrame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   double temp_limit() const {
     return GetField<double>(VT_TEMP_LIMIT, 0.0);
   }
+  double apoapsis() const {
+    return GetField<double>(VT_APOAPSIS, 0.0);
+  }
+  double periapsis() const {
+    return GetField<double>(VT_PERIAPSIS, 0.0);
+  }
+  double period() const {
+    return GetField<double>(VT_PERIOD, 0.0);
+  }
+  double eccentricity() const {
+    return GetField<double>(VT_ECCENTRICITY, 0.0);
+  }
+  double inclination() const {
+    return GetField<double>(VT_INCLINATION, 0.0);
+  }
+  double semi_major() const {
+    return GetField<double>(VT_SEMI_MAJOR, 0.0);
+  }
+  const ::flatbuffers::Vector<const acro::wire::Vec3 *> *trajectory() const {
+    return GetPointer<const ::flatbuffers::Vector<const acro::wire::Vec3 *> *>(VT_TRAJECTORY);
+  }
+  bool connected() const {
+    return GetField<uint8_t>(VT_CONNECTED, 0) != 0;
+  }
+  double comm_delay() const {
+    return GetField<double>(VT_COMM_DELAY, 0.0);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyOffset(verifier, VT_ID) &&
@@ -440,6 +476,16 @@ struct VesselFrame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyVectorOfTables(resources()) &&
            VerifyField<double>(verifier, VT_MAX_TEMP, 8) &&
            VerifyField<double>(verifier, VT_TEMP_LIMIT, 8) &&
+           VerifyField<double>(verifier, VT_APOAPSIS, 8) &&
+           VerifyField<double>(verifier, VT_PERIAPSIS, 8) &&
+           VerifyField<double>(verifier, VT_PERIOD, 8) &&
+           VerifyField<double>(verifier, VT_ECCENTRICITY, 8) &&
+           VerifyField<double>(verifier, VT_INCLINATION, 8) &&
+           VerifyField<double>(verifier, VT_SEMI_MAJOR, 8) &&
+           VerifyOffset(verifier, VT_TRAJECTORY) &&
+           verifier.VerifyVector(trajectory()) &&
+           VerifyField<uint8_t>(verifier, VT_CONNECTED, 1) &&
+           VerifyField<double>(verifier, VT_COMM_DELAY, 8) &&
            verifier.EndTable();
   }
 };
@@ -496,6 +542,33 @@ struct VesselFrameBuilder {
   void add_temp_limit(double temp_limit) {
     fbb_.AddElement<double>(VesselFrame::VT_TEMP_LIMIT, temp_limit, 0.0);
   }
+  void add_apoapsis(double apoapsis) {
+    fbb_.AddElement<double>(VesselFrame::VT_APOAPSIS, apoapsis, 0.0);
+  }
+  void add_periapsis(double periapsis) {
+    fbb_.AddElement<double>(VesselFrame::VT_PERIAPSIS, periapsis, 0.0);
+  }
+  void add_period(double period) {
+    fbb_.AddElement<double>(VesselFrame::VT_PERIOD, period, 0.0);
+  }
+  void add_eccentricity(double eccentricity) {
+    fbb_.AddElement<double>(VesselFrame::VT_ECCENTRICITY, eccentricity, 0.0);
+  }
+  void add_inclination(double inclination) {
+    fbb_.AddElement<double>(VesselFrame::VT_INCLINATION, inclination, 0.0);
+  }
+  void add_semi_major(double semi_major) {
+    fbb_.AddElement<double>(VesselFrame::VT_SEMI_MAJOR, semi_major, 0.0);
+  }
+  void add_trajectory(::flatbuffers::Offset<::flatbuffers::Vector<const acro::wire::Vec3 *>> trajectory) {
+    fbb_.AddOffset(VesselFrame::VT_TRAJECTORY, trajectory);
+  }
+  void add_connected(bool connected) {
+    fbb_.AddElement<uint8_t>(VesselFrame::VT_CONNECTED, static_cast<uint8_t>(connected), 0);
+  }
+  void add_comm_delay(double comm_delay) {
+    fbb_.AddElement<double>(VesselFrame::VT_COMM_DELAY, comm_delay, 0.0);
+  }
   explicit VesselFrameBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -524,12 +597,29 @@ inline ::flatbuffers::Offset<VesselFrame> CreateVesselFrame(
     int32_t crew = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::ResourceFrame>>> resources = 0,
     double max_temp = 0.0,
-    double temp_limit = 0.0) {
+    double temp_limit = 0.0,
+    double apoapsis = 0.0,
+    double periapsis = 0.0,
+    double period = 0.0,
+    double eccentricity = 0.0,
+    double inclination = 0.0,
+    double semi_major = 0.0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<const acro::wire::Vec3 *>> trajectory = 0,
+    bool connected = false,
+    double comm_delay = 0.0) {
   VesselFrameBuilder builder_(_fbb);
+  builder_.add_comm_delay(comm_delay);
+  builder_.add_semi_major(semi_major);
+  builder_.add_inclination(inclination);
+  builder_.add_eccentricity(eccentricity);
+  builder_.add_period(period);
+  builder_.add_periapsis(periapsis);
+  builder_.add_apoapsis(apoapsis);
   builder_.add_temp_limit(temp_limit);
   builder_.add_max_temp(max_temp);
   builder_.add_mass(mass);
   builder_.add_throttle(throttle);
+  builder_.add_trajectory(trajectory);
   builder_.add_resources(resources);
   builder_.add_crew(crew);
   builder_.add_parts(parts);
@@ -540,6 +630,7 @@ inline ::flatbuffers::Offset<VesselFrame> CreateVesselFrame(
   builder_.add_body(body);
   builder_.add_owner(owner);
   builder_.add_id(id);
+  builder_.add_connected(connected);
   builder_.add_landed(landed);
   builder_.add_on_rails(on_rails);
   return builder_.Finish();
@@ -562,12 +653,22 @@ inline ::flatbuffers::Offset<VesselFrame> CreateVesselFrameDirect(
     int32_t crew = 0,
     const std::vector<::flatbuffers::Offset<acro::wire::ResourceFrame>> *resources = nullptr,
     double max_temp = 0.0,
-    double temp_limit = 0.0) {
+    double temp_limit = 0.0,
+    double apoapsis = 0.0,
+    double periapsis = 0.0,
+    double period = 0.0,
+    double eccentricity = 0.0,
+    double inclination = 0.0,
+    double semi_major = 0.0,
+    const std::vector<acro::wire::Vec3> *trajectory = nullptr,
+    bool connected = false,
+    double comm_delay = 0.0) {
   auto id__ = id ? _fbb.CreateString(id) : 0;
   auto owner__ = owner ? _fbb.CreateString(owner) : 0;
   auto body__ = body ? _fbb.CreateString(body) : 0;
   auto parts__ = parts ? _fbb.CreateVector<::flatbuffers::Offset<acro::wire::PartFrame>>(*parts) : 0;
   auto resources__ = resources ? _fbb.CreateVector<::flatbuffers::Offset<acro::wire::ResourceFrame>>(*resources) : 0;
+  auto trajectory__ = trajectory ? _fbb.CreateVectorOfStructs<acro::wire::Vec3>(*trajectory) : 0;
   return acro::wire::CreateVesselFrame(
       _fbb,
       id__,
@@ -585,7 +686,16 @@ inline ::flatbuffers::Offset<VesselFrame> CreateVesselFrameDirect(
       crew,
       resources__,
       max_temp,
-      temp_limit);
+      temp_limit,
+      apoapsis,
+      periapsis,
+      period,
+      eccentricity,
+      inclination,
+      semi_major,
+      trajectory__,
+      connected,
+      comm_delay);
 }
 
 struct BuildingFrame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
