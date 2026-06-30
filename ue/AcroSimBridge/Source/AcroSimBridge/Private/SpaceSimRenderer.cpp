@@ -113,9 +113,18 @@ void ASpaceSimRenderer::UpdateBodies(USpaceSimSubsystem* Sim)
 			UStaticMesh* Mesh = MeshFor(B.Id, TableScale, Mat);
 			MC->SetStaticMesh(Mesh);
 			if (Mat) MC->SetMaterial(0, Mat);
-			// Body radius is constant — scale the unit-radius sphere mesh once.
-			const float K = (BodyMeshUnitRadiusCm > KINDA_SMALL_NUMBER)
-								? B.RadiusCm / BodyMeshUnitRadiusCm
+			// Scale the body mesh so its visual radius == the real RadiusCm.
+			// Read the mesh's actual radius from its bounds (works for ANY mesh —
+			// ArcadeEditorSphere, a unit sphere, a custom planet); fall back to
+			// BodyMeshUnitRadiusCm only if bounds are unavailable.
+			float UnitRadiusCm = BodyMeshUnitRadiusCm;
+			if (Mesh)
+			{
+				const float R = Mesh->GetBounds().SphereRadius;
+				if (R > KINDA_SMALL_NUMBER) UnitRadiusCm = R;
+			}
+			const float K = (UnitRadiusCm > KINDA_SMALL_NUMBER)
+								? B.RadiusCm / UnitRadiusCm
 								: 1.f;
 			MC->SetRelativeScale3D(FVector(K) * TableScale);
 

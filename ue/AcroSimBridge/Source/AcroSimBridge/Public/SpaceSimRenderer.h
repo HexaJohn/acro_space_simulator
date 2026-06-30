@@ -54,8 +54,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim")
 	FString FocusBodyId = TEXT("kerbin");
 
-	// Radius (cm) of the body mesh at scale 1. UE's engine sphere is 50 cm radius,
-	// so the default maps RadiusCm -> uniform scale of RadiusCm / 50.
+	// Fallback only: the body mesh radius (cm) at scale 1 is normally read from
+	// the mesh's own bounds, so the planet sizes correctly for ANY mesh. This is
+	// used only if the mesh has no usable bounds.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim")
 	float BodyMeshUnitRadiusCm = 50.f;
 
