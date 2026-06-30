@@ -35,6 +35,9 @@ struct BuildingFrameBuilder;
 struct BodyFrame;
 struct BodyFrameBuilder;
 
+struct GasFraction;
+struct GasFractionBuilder;
+
 struct BodyDescriptor;
 struct BodyDescriptorBuilder;
 
@@ -102,6 +105,54 @@ inline const char *EnumNameBodyKind(BodyKind e) {
   if (::flatbuffers::IsOutRange(e, BodyKind::Rocky, BodyKind::Ice)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesBodyKind()[index];
+}
+
+enum class AtmosphereGas : uint8_t {
+  Nitrogen = 0,
+  Oxygen = 1,
+  CarbonDioxide = 2,
+  Hydrogen = 3,
+  Helium = 4,
+  Methane = 5,
+  Argon = 6,
+  Water = 7,
+  MIN = Nitrogen,
+  MAX = Water
+};
+
+inline const AtmosphereGas (&EnumValuesAtmosphereGas())[8] {
+  static const AtmosphereGas values[] = {
+    AtmosphereGas::Nitrogen,
+    AtmosphereGas::Oxygen,
+    AtmosphereGas::CarbonDioxide,
+    AtmosphereGas::Hydrogen,
+    AtmosphereGas::Helium,
+    AtmosphereGas::Methane,
+    AtmosphereGas::Argon,
+    AtmosphereGas::Water
+  };
+  return values;
+}
+
+inline const char * const *EnumNamesAtmosphereGas() {
+  static const char * const names[9] = {
+    "Nitrogen",
+    "Oxygen",
+    "CarbonDioxide",
+    "Hydrogen",
+    "Helium",
+    "Methane",
+    "Argon",
+    "Water",
+    nullptr
+  };
+  return names;
+}
+
+inline const char *EnumNameAtmosphereGas(AtmosphereGas e) {
+  if (::flatbuffers::IsOutRange(e, AtmosphereGas::Nitrogen, AtmosphereGas::Water)) return "";
+  const size_t index = static_cast<size_t>(e);
+  return EnumNamesAtmosphereGas()[index];
 }
 
 enum class Cmd : uint8_t {
@@ -982,6 +1033,57 @@ inline ::flatbuffers::Offset<BodyFrame> CreateBodyFrameDirect(
       orbit__);
 }
 
+struct GasFraction FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef GasFractionBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_GAS = 4,
+    VT_FRACTION = 6
+  };
+  acro::wire::AtmosphereGas gas() const {
+    return static_cast<acro::wire::AtmosphereGas>(GetField<uint8_t>(VT_GAS, 0));
+  }
+  double fraction() const {
+    return GetField<double>(VT_FRACTION, 0.0);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint8_t>(verifier, VT_GAS, 1) &&
+           VerifyField<double>(verifier, VT_FRACTION, 8) &&
+           verifier.EndTable();
+  }
+};
+
+struct GasFractionBuilder {
+  typedef GasFraction Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_gas(acro::wire::AtmosphereGas gas) {
+    fbb_.AddElement<uint8_t>(GasFraction::VT_GAS, static_cast<uint8_t>(gas), 0);
+  }
+  void add_fraction(double fraction) {
+    fbb_.AddElement<double>(GasFraction::VT_FRACTION, fraction, 0.0);
+  }
+  explicit GasFractionBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<GasFraction> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<GasFraction>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<GasFraction> CreateGasFraction(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    acro::wire::AtmosphereGas gas = acro::wire::AtmosphereGas::Nitrogen,
+    double fraction = 0.0) {
+  GasFractionBuilder builder_(_fbb);
+  builder_.add_fraction(fraction);
+  builder_.add_gas(gas);
+  return builder_.Finish();
+}
+
 struct BodyDescriptor FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef BodyDescriptorBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
@@ -997,7 +1099,10 @@ struct BodyDescriptor FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_ATMO_THICKNESS = 22,
     VT_ATMO_SEA_LEVEL_PRESSURE = 24,
     VT_ATMO_SEA_LEVEL_DENSITY = 26,
-    VT_ATMO_SEA_LEVEL_TEMPERATURE = 28
+    VT_ATMO_SEA_LEVEL_TEMPERATURE = 28,
+    VT_ATMO_MEAN_MOLECULAR_WEIGHT = 30,
+    VT_ATMO_SCATTER_COLOR = 32,
+    VT_ATMO_GASES = 34
   };
   const ::flatbuffers::String *id() const {
     return GetPointer<const ::flatbuffers::String *>(VT_ID);
@@ -1038,6 +1143,15 @@ struct BodyDescriptor FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   double atmo_sea_level_temperature() const {
     return GetField<double>(VT_ATMO_SEA_LEVEL_TEMPERATURE, 0.0);
   }
+  double atmo_mean_molecular_weight() const {
+    return GetField<double>(VT_ATMO_MEAN_MOLECULAR_WEIGHT, 0.0);
+  }
+  uint32_t atmo_scatter_color() const {
+    return GetField<uint32_t>(VT_ATMO_SCATTER_COLOR, 0);
+  }
+  const ::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::GasFraction>> *atmo_gases() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::GasFraction>> *>(VT_ATMO_GASES);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyOffset(verifier, VT_ID) &&
@@ -1057,6 +1171,11 @@ struct BodyDescriptor FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<double>(verifier, VT_ATMO_SEA_LEVEL_PRESSURE, 8) &&
            VerifyField<double>(verifier, VT_ATMO_SEA_LEVEL_DENSITY, 8) &&
            VerifyField<double>(verifier, VT_ATMO_SEA_LEVEL_TEMPERATURE, 8) &&
+           VerifyField<double>(verifier, VT_ATMO_MEAN_MOLECULAR_WEIGHT, 8) &&
+           VerifyField<uint32_t>(verifier, VT_ATMO_SCATTER_COLOR, 4) &&
+           VerifyOffset(verifier, VT_ATMO_GASES) &&
+           verifier.VerifyVector(atmo_gases()) &&
+           verifier.VerifyVectorOfTables(atmo_gases()) &&
            verifier.EndTable();
   }
 };
@@ -1104,6 +1223,15 @@ struct BodyDescriptorBuilder {
   void add_atmo_sea_level_temperature(double atmo_sea_level_temperature) {
     fbb_.AddElement<double>(BodyDescriptor::VT_ATMO_SEA_LEVEL_TEMPERATURE, atmo_sea_level_temperature, 0.0);
   }
+  void add_atmo_mean_molecular_weight(double atmo_mean_molecular_weight) {
+    fbb_.AddElement<double>(BodyDescriptor::VT_ATMO_MEAN_MOLECULAR_WEIGHT, atmo_mean_molecular_weight, 0.0);
+  }
+  void add_atmo_scatter_color(uint32_t atmo_scatter_color) {
+    fbb_.AddElement<uint32_t>(BodyDescriptor::VT_ATMO_SCATTER_COLOR, atmo_scatter_color, 0);
+  }
+  void add_atmo_gases(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::GasFraction>>> atmo_gases) {
+    fbb_.AddOffset(BodyDescriptor::VT_ATMO_GASES, atmo_gases);
+  }
   explicit BodyDescriptorBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -1129,8 +1257,12 @@ inline ::flatbuffers::Offset<BodyDescriptor> CreateBodyDescriptor(
     double atmo_thickness = 0.0,
     double atmo_sea_level_pressure = 0.0,
     double atmo_sea_level_density = 0.0,
-    double atmo_sea_level_temperature = 0.0) {
+    double atmo_sea_level_temperature = 0.0,
+    double atmo_mean_molecular_weight = 0.0,
+    uint32_t atmo_scatter_color = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<acro::wire::GasFraction>>> atmo_gases = 0) {
   BodyDescriptorBuilder builder_(_fbb);
+  builder_.add_atmo_mean_molecular_weight(atmo_mean_molecular_weight);
   builder_.add_atmo_sea_level_temperature(atmo_sea_level_temperature);
   builder_.add_atmo_sea_level_density(atmo_sea_level_density);
   builder_.add_atmo_sea_level_pressure(atmo_sea_level_pressure);
@@ -1138,6 +1270,8 @@ inline ::flatbuffers::Offset<BodyDescriptor> CreateBodyDescriptor(
   builder_.add_atmo_scale_height(atmo_scale_height);
   builder_.add_height_scale(height_scale);
   builder_.add_reference_radius(reference_radius);
+  builder_.add_atmo_gases(atmo_gases);
+  builder_.add_atmo_scatter_color(atmo_scatter_color);
   builder_.add_material_key(material_key);
   builder_.add_height_key(height_key);
   builder_.add_albedo_key(albedo_key);
@@ -1161,11 +1295,15 @@ inline ::flatbuffers::Offset<BodyDescriptor> CreateBodyDescriptorDirect(
     double atmo_thickness = 0.0,
     double atmo_sea_level_pressure = 0.0,
     double atmo_sea_level_density = 0.0,
-    double atmo_sea_level_temperature = 0.0) {
+    double atmo_sea_level_temperature = 0.0,
+    double atmo_mean_molecular_weight = 0.0,
+    uint32_t atmo_scatter_color = 0,
+    const std::vector<::flatbuffers::Offset<acro::wire::GasFraction>> *atmo_gases = nullptr) {
   auto id__ = id ? _fbb.CreateString(id) : 0;
   auto albedo_key__ = albedo_key ? _fbb.CreateString(albedo_key) : 0;
   auto height_key__ = height_key ? _fbb.CreateString(height_key) : 0;
   auto material_key__ = material_key ? _fbb.CreateString(material_key) : 0;
+  auto atmo_gases__ = atmo_gases ? _fbb.CreateVector<::flatbuffers::Offset<acro::wire::GasFraction>>(*atmo_gases) : 0;
   return acro::wire::CreateBodyDescriptor(
       _fbb,
       id__,
@@ -1180,7 +1318,10 @@ inline ::flatbuffers::Offset<BodyDescriptor> CreateBodyDescriptorDirect(
       atmo_thickness,
       atmo_sea_level_pressure,
       atmo_sea_level_density,
-      atmo_sea_level_temperature);
+      atmo_sea_level_temperature,
+      atmo_mean_molecular_weight,
+      atmo_scatter_color,
+      atmo_gases__);
 }
 
 struct EventFrame FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {

@@ -128,6 +128,15 @@ class FlatBufferCodec {
           atmoSeaLevelPressure: d.atmoSeaLevelPressure,
           atmoSeaLevelDensity: d.atmoSeaLevelDensity,
           atmoSeaLevelTemperature: d.atmoSeaLevelTemperature,
+          atmoMeanMolecularWeight: d.atmoMeanMolecularWeight,
+          atmoScatterColor: d.atmoScatterColorArgb,
+          atmoGases: [
+            for (final g in d.atmoGases)
+              gen.GasFractionObjectBuilder(
+                gas: gen.AtmosphereGas.fromValue(g.gas),
+                fraction: g.fraction,
+              ),
+          ],
         ),
     ];
     return gen.WorldFrameObjectBuilder(
@@ -279,6 +288,12 @@ class FlatBufferCodec {
         atmoSeaLevelPressure: d.atmoSeaLevelPressure,
         atmoSeaLevelDensity: d.atmoSeaLevelDensity,
         atmoSeaLevelTemperature: d.atmoSeaLevelTemperature,
+        atmoMeanMolecularWeight: d.atmoMeanMolecularWeight,
+        atmoScatterColorArgb: d.atmoScatterColor,
+        atmoGases: [
+          for (final g in d.atmoGases ?? const <gen.GasFraction>[])
+            GasFractionSnapshot(gas: g.gas.value, fraction: g.fraction),
+        ],
       );
     }
     return WorldSnapshot(

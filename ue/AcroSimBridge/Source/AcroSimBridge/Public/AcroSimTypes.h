@@ -96,6 +96,15 @@ struct FSimEvent
 	UPROPERTY(BlueprintReadOnly) FString Info;
 };
 
+/// One atmospheric gas species + its mole fraction (0..1).
+USTRUCT(BlueprintType)
+struct FSimGasFraction
+{
+	GENERATED_BODY()
+	UPROPERTY(BlueprintReadOnly) uint8 Gas = 0;
+	UPROPERTY(BlueprintReadOnly) float Fraction = 0.f;
+};
+
 /// STATIC body render config (texture/heightmap/atmosphere). Cache + join by Id.
 USTRUCT(BlueprintType)
 struct FSimBodyDescriptor
@@ -114,5 +123,8 @@ struct FSimBodyDescriptor
 	UPROPERTY(BlueprintReadOnly) float AtmoSeaLevelPressurePa = 0.f;
 	UPROPERTY(BlueprintReadOnly) float AtmoSeaLevelDensity = 0.f;
 	UPROPERTY(BlueprintReadOnly) float AtmoSeaLevelTempK = 0.f;
+	UPROPERTY(BlueprintReadOnly) float AtmoMeanMolecularWeightKgMol = 0.f;
+	UPROPERTY(BlueprintReadOnly) int32 AtmoScatterColorArgb = 0;
+	UPROPERTY(BlueprintReadOnly) TArray<FSimGasFraction> AtmoGases;
 };
 

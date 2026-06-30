@@ -96,6 +96,10 @@ class _SimulationViewState extends State<SimulationView>
   static const FlatBufferCodec _wire = FlatBufferCodec();
   StreamSubscription<Uint8List>? _bridgeCommands;
   int _bridgeTick = 0;
+  // Ticker time of the last frame that carried body descriptors. Starts in the
+  // past so the very first published frame includes them (a new client gets the
+  // static catalog at once); thereafter they ride along ~once a second.
+  Duration _lastDescriptorAt = const Duration(seconds: -2);
 
   // ---- Camera target + view ----
   // The locked target cycles through vessels and major bodies. Exactly one of
@@ -532,14 +536,20 @@ class _SimulationViewState extends State<SimulationView>
     if (steps >= 200) _accum = 0;
 
     // Serve the freshly-advanced world to any connected renderer (Unreal). Gated
-    // on hasClients so capture+encode cost is zero when nothing's attached.
+    // on hasClients so capture+encode cost is zero when nothing's attached. The
+    // static body descriptors (kind/atmosphere/composition) are sticky on the
+    // engine side, so ship them only ~1 Hz instead of every frame.
     if (_bridge.hasClients) {
+      final sendDescriptors =
+          (elapsed - _lastDescriptorAt) >= const Duration(seconds: 1);
+      if (sendDescriptors) _lastDescriptorAt = elapsed;
       final world = WorldSnapshot.capture(
         _bridgeTick++,
         _vessels,
         system: _universe.current(),
         epoch: _clock.epoch,
         colonies: _colonies,
+        includeDescriptors: sendDescriptors,
       );
       _bridge.publish(_wire.encodeWorld(world));
     }

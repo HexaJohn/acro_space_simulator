@@ -94,6 +94,17 @@ table BodyFrame {
 // material / shading path without hard-coding ids. Wire value is a ubyte.
 enum BodyKind : ubyte { Rocky = 0, Star, GasGiant, Moon, Ice }
 
+// Atmospheric gas species. ubyte on the wire; the ORDER MUST match the Dart
+// AtmosphereGas enum (lib/domain/planetary/atmospheric_composition.dart) so the
+// index maps 1:1 across the boundary.
+enum AtmosphereGas : ubyte {
+  Nitrogen = 0, Oxygen, CarbonDioxide, Hydrogen, Helium, Methane, Argon, Water
+}
+
+// One gas in a body's atmosphere: species + mole (volume) fraction (0..1). The
+// fractions across a body's GasFractions sum to ~1.
+table GasFraction { gas:AtmosphereGas; fraction:double; }
+
 // STATIC per-body render descriptor — texture/heightmap/atmosphere mapping.
 // Unlike BodyFrame (dynamic, every tick), this is config: the engine binds it
 // once and caches it, joining to BodyFrame by `id`. The sim ships it every
@@ -120,6 +131,11 @@ table BodyDescriptor {
   atmo_sea_level_pressure:double;     // Pa
   atmo_sea_level_density:double;      // kg/m^3
   atmo_sea_level_temperature:double;  // K
+  // Chemical composition (the sim owns the air model). The engine can shade the
+  // sky straight from the derived values, or roll its own from atmo_gases.
+  atmo_mean_molecular_weight:double;  // kg/mol, mole-fraction-weighted
+  atmo_scatter_color:uint;            // packed 0xAARRGGBB haze tint blended from the mix
+  atmo_gases:[GasFraction];           // per-species mole fractions (empty = unknown)
 }
 
 // A discrete sim event that fired this tick (staging, impact, destruction,

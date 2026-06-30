@@ -447,6 +447,23 @@ class BodySnapshot {
 /// Values MUST match `enum BodyKind` in wire/sim.fbs.
 enum BodyKind { rocky, star, gasGiant, moon, ice }
 
+/// One gas in a body's atmosphere: [gas] is the AtmosphereGas enum INDEX (the
+/// wire ubyte; see lib/domain/planetary/atmospheric_composition.dart) and
+/// [fraction] its mole (volume) fraction, 0..1.
+class GasFractionSnapshot {
+  final int gas;
+  final double fraction;
+  const GasFractionSnapshot({required this.gas, required this.fraction});
+
+  Map<String, dynamic> toJson() => {'g': gas, 'f': fraction};
+
+  factory GasFractionSnapshot.fromJson(Map<String, dynamic> j) =>
+      GasFractionSnapshot(
+        gas: (j['g'] as num).toInt(),
+        fraction: (j['f'] as num).toDouble(),
+      );
+}
+
 /// STATIC per-body render descriptor — the texture/heightmap/atmosphere mapping
 /// an external engine binds ONCE and caches, joined to [BodySnapshot] by [id].
 /// Unlike [BodySnapshot] (dynamic transform, every tick) this is config.
@@ -470,6 +487,11 @@ class BodyDescriptorSnapshot {
   final double atmoSeaLevelPressure; // Pa
   final double atmoSeaLevelDensity; // kg/m^3
   final double atmoSeaLevelTemperature; // K
+  // Chemical composition (from the body's AtmosphericComposition). Empty/zero
+  // when the body has no composition model.
+  final double atmoMeanMolecularWeight; // kg/mol, mole-fraction-weighted
+  final int atmoScatterColorArgb; // packed 0xAARRGGBB haze tint from the gas mix
+  final List<GasFractionSnapshot> atmoGases; // per-species mole fractions
 
   const BodyDescriptorSnapshot({
     required this.id,
@@ -485,10 +507,14 @@ class BodyDescriptorSnapshot {
     this.atmoSeaLevelPressure = 0,
     this.atmoSeaLevelDensity = 0,
     this.atmoSeaLevelTemperature = 0,
+    this.atmoMeanMolecularWeight = 0,
+    this.atmoScatterColorArgb = 0,
+    this.atmoGases = const [],
   });
 
   factory BodyDescriptorSnapshot.of(CelestialBody body, StarSystem system) {
     final atmo = body.atmosphere;
+    final comp = body.composition;
     return BodyDescriptorSnapshot(
       id: body.id.value,
       kind: _classify(body, system),
@@ -501,6 +527,14 @@ class BodyDescriptorSnapshot {
       atmoSeaLevelPressure: atmo?.seaLevelPressure ?? 0,
       atmoSeaLevelDensity: atmo?.seaLevelDensity ?? 0,
       atmoSeaLevelTemperature: atmo?.seaLevelTemperature ?? 0,
+      atmoMeanMolecularWeight: comp?.meanMolecularWeight ?? 0,
+      atmoScatterColorArgb: comp?.scatterColorArgb ?? 0,
+      atmoGases: comp == null
+          ? const []
+          : [
+              for (final e in comp.fractions.entries)
+                GasFractionSnapshot(gas: e.key.index, fraction: e.value),
+            ],
     );
   }
 
@@ -529,6 +563,10 @@ class BodyDescriptorSnapshot {
           'atmoP': atmoSeaLevelPressure,
           'atmoRho': atmoSeaLevelDensity,
           'atmoT': atmoSeaLevelTemperature,
+          if (atmoMeanMolecularWeight != 0) 'atmoMmw': atmoMeanMolecularWeight,
+          if (atmoScatterColorArgb != 0) 'atmoTint': atmoScatterColorArgb,
+          if (atmoGases.isNotEmpty)
+            'atmoGases': [for (final g in atmoGases) g.toJson()],
         },
       };
 
@@ -548,6 +586,12 @@ class BodyDescriptorSnapshot {
       atmoSeaLevelPressure: (j['atmoP'] as num?)?.toDouble() ?? 0,
       atmoSeaLevelDensity: (j['atmoRho'] as num?)?.toDouble() ?? 0,
       atmoSeaLevelTemperature: (j['atmoT'] as num?)?.toDouble() ?? 0,
+      atmoMeanMolecularWeight: (j['atmoMmw'] as num?)?.toDouble() ?? 0,
+      atmoScatterColorArgb: (j['atmoTint'] as num?)?.toInt() ?? 0,
+      atmoGases: [
+        for (final g in (j['atmoGases'] as List?) ?? const [])
+          GasFractionSnapshot.fromJson(g as Map<String, dynamic>),
+      ],
     );
   }
 }
@@ -794,6 +838,10 @@ class WorldSnapshot {
     TerrainHeights? terrain,
     SurfacePlacement placement = const SurfacePlacement(),
     List<EventSnapshot> events = const [],
+    // Body descriptors (static render config: kind/atmosphere/composition) are
+    // STICKY on the engine side — it caches + joins by id — so a publisher can
+    // omit them on most frames and re-send only ~1 Hz. Pass false to skip them.
+    bool includeDescriptors = true,
   }) {
     final heights = terrain ?? TerrainHeights();
     final buildings = <String, BuildingSnapshot>{};
@@ -818,7 +866,7 @@ class WorldSnapshot {
               for (final b in system.all)
                 b.id.value: BodySnapshot.of(b, system, ephemeris, epoch),
             },
-      descriptors: system == null
+      descriptors: (system == null || !includeDescriptors)
           ? const {}
           : {
               for (final b in system.all)

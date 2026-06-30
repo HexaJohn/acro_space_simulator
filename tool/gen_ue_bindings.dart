@@ -76,6 +76,11 @@ const structs = <_Struct>[
     'magnitude': 'Magnitude',
     'info': 'Info',
   }),
+  // Must precede FSimBodyDescriptor (nested in its atmo_gases list).
+  _Struct('FSimGasFraction', 'GasFraction', 'One atmospheric gas species + its mole fraction (0..1).', {
+    'gas': 'Gas', // AtmosphereGas enum -> uint8 (Nitrogen=0, Oxygen, CO2, H2, He, CH4, Ar, H2O)
+    'fraction': 'Fraction',
+  }),
   _Struct('FSimBodyDescriptor', 'BodyDescriptor', 'STATIC body render config (texture/heightmap/atmosphere). Cache + join by Id.', {
     'id': 'Id',
     'kind': 'Kind', // BodyKind enum -> uint8 (Rocky=0, Star, GasGiant, Moon, Ice)
@@ -90,6 +95,9 @@ const structs = <_Struct>[
     'atmo_sea_level_pressure': 'AtmoSeaLevelPressurePa',
     'atmo_sea_level_density': 'AtmoSeaLevelDensity',
     'atmo_sea_level_temperature': 'AtmoSeaLevelTempK',
+    'atmo_mean_molecular_weight': 'AtmoMeanMolecularWeightKgMol',
+    'atmo_scatter_color': 'AtmoScatterColorArgb', // packed 0xAARRGGBB (int32 bit pattern)
+    'atmo_gases': 'AtmoGases',
   }),
 ];
 
@@ -201,6 +209,11 @@ void main() {
       return ('float', '0.f');
     case 'int':
     case 'int32':
+      return ('int32', '0');
+    // uint (e.g. a packed ARGB color): Blueprint has no uint32, so carry the bit
+    // pattern in an int32 — the ingest reinterprets it (FColor / bit ops).
+    case 'uint':
+    case 'uint32':
       return ('int32', '0');
     case 'long':
     case 'int64':

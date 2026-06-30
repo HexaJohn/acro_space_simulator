@@ -57,7 +57,8 @@ class AuthoritativeSimulation {
     session.epoch = clock.epoch;
   }
 
-  WorldSnapshot snapshot() => WorldSnapshot.capture(
+  WorldSnapshot snapshot({bool includeDescriptors = true}) =>
+      WorldSnapshot.capture(
         session.authoritativeTick,
         vessels,
         system: advance.universe.current(),
@@ -67,5 +68,8 @@ class AuthoritativeSimulation {
         terrain: terrain,
         // Fold the events that fired this tick into the frame (drains the bus).
         events: advance.events.drainRecent().map(EventSnapshot.of).toList(),
+        // Static body descriptors are sticky on the engine side; the host gates
+        // them to ~1 Hz (see SimHost.frameBytes) so they don't ship every frame.
+        includeDescriptors: includeDescriptors,
       );
 }
