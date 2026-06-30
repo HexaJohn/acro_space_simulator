@@ -57,6 +57,15 @@ struct FSimVessel
 	UPROPERTY(BlueprintReadOnly) TArray<FSimResource> Resources;
 	UPROPERTY(BlueprintReadOnly) float MaxTempK = 0.f;
 	UPROPERTY(BlueprintReadOnly) float TempLimitK = 0.f;
+	UPROPERTY(BlueprintReadOnly) float ApoapsisM = 0.f;
+	UPROPERTY(BlueprintReadOnly) float PeriapsisM = 0.f;
+	UPROPERTY(BlueprintReadOnly) float PeriodSeconds = 0.f;
+	UPROPERTY(BlueprintReadOnly) float Eccentricity = 0.f;
+	UPROPERTY(BlueprintReadOnly) float InclinationRad = 0.f;
+	UPROPERTY(BlueprintReadOnly) float SemiMajorM = 0.f;
+	UPROPERTY(BlueprintReadOnly) TArray<FVector> Trajectory;
+	UPROPERTY(BlueprintReadOnly) bool bConnected = false;
+	UPROPERTY(BlueprintReadOnly) float CommDelaySeconds = 0.f;
 };
 
 /// A colony building, body-LOCAL (parent under the body actor).

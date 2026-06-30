@@ -51,6 +51,18 @@ table VesselFrame {
   resources:[ResourceFrame];
   max_temp:double;    // hottest part temperature, K
   temp_limit:double;  // that part's destruction temperature, K
+  // orbit (about the dominant body). Radii in metres; -1 = escape / none.
+  // semi_major < 0 = hyperbolic. All -1 when landed / sub-orbital.
+  apoapsis:double;    // apoapsis radius, m (-1 = escape)
+  periapsis:double;   // periapsis radius, m
+  period:double;      // orbital period, s (-1 = escape)
+  eccentricity:double;
+  inclination:double; // rad
+  semi_major:double;  // m (negative = hyperbolic)
+  trajectory:[Vec3];  // predicted orbit-line points, body-relative metres (same frame as pos)
+  // comms:
+  connected:bool;     // relay-aware link state (v.hasCommLink)
+  comm_delay:double;  // one-way light-time to the nearest ground station, s
 }
 
 // A colony building, placed BODY-FIXED (rotates with the planet). pos/orient are

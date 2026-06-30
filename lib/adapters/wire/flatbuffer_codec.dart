@@ -63,6 +63,22 @@ class FlatBufferCodec {
           ],
           maxTemp: v.maxTemp,
           tempLimit: v.tempLimit,
+          apoapsis: v.apoapsis,
+          periapsis: v.periapsis,
+          period: v.period,
+          eccentricity: v.eccentricity,
+          inclination: v.inclination,
+          semiMajor: v.semiMajor,
+          trajectory: [
+            for (var k = 0; k + 2 < v.trajectory.length; k += 3)
+              gen.Vec3ObjectBuilder(
+                x: v.trajectory[k],
+                y: v.trajectory[k + 1],
+                z: v.trajectory[k + 2],
+              ),
+          ],
+          connected: v.connected,
+          commDelay: v.commDelay,
         ),
     ];
     final buildings = [
@@ -152,6 +168,17 @@ class FlatBufferCodec {
         ],
         maxTemp: v.maxTemp,
         tempLimit: v.tempLimit,
+        apoapsis: v.apoapsis,
+        periapsis: v.periapsis,
+        period: v.period,
+        eccentricity: v.eccentricity,
+        inclination: v.inclination,
+        semiMajor: v.semiMajor,
+        trajectory: [
+          for (final p in v.trajectory ?? const <gen.Vec3>[]) ...[p.x, p.y, p.z],
+        ],
+        connected: v.connected,
+        commDelay: v.commDelay,
       );
     }
     final bodies = <String, BodySnapshot>{};

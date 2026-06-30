@@ -143,6 +143,14 @@ Everything is exposed to Blueprint — no C++ needed to drive it:
 - **Telemetry / gauges:** each `FSimVessel` carries `Mass Kg`, `Crew`,
   `Resources` (type / amount / capacity, summed by type), and `Max Temp K` /
   `Temp Limit K` — wire straight to HUD gauges or a reentry-glow material param.
+- **Orbit / comms:** `FSimVessel` also has `Apoapsis M` / `Periapsis M`
+  (body-centred RADII — subtract the body radius for altitude), `Period Seconds`,
+  `Eccentricity`, `Inclination Rad`, `Semi Major M` (a value of `-1`, or a
+  negative semi-major, means an escape / hyperbolic trajectory), plus
+  `b Connected` and `Comm Delay Seconds` for a signal + light-lag HUD.
+  `Trajectory` is a ready **world-space polyline** (the orbit line). The drop-in
+  `AcroSimRenderer` draws it as debug lines (toggle **Draw Orbits**, set
+  **Orbit Color**); for production feed the points to a spline/ribbon mesh.
 - **Events / FX:** bind **`On Sim Event`** — fires once per discrete sim event
   (staging, impact, destruction, crew lost, structural failure, science, …).
   Switch on `Kind`; `Subject` is the asset id (look it up in `Get Vessels` for

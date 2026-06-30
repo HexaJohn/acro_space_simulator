@@ -3,6 +3,7 @@
 #include "SpaceSimSubsystem.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "DrawDebugHelpers.h"
 #include "Engine/GameInstance.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
@@ -157,6 +158,17 @@ void ASpaceSimRenderer::UpdateVessels(USpaceSimSubsystem* Sim)
 			VesselActors.Add(V.Id, Actor);
 		}
 		Actor->SetActorLocationAndRotation(V.Position, V.Attitude);
+
+		// Orbit line: the trajectory is already world-space (rebased) cm points.
+		if (bDrawOrbits && V.Trajectory.Num() > 1)
+		{
+			for (int32 i = 0; i + 1 < V.Trajectory.Num(); ++i)
+			{
+				DrawDebugLine(GetWorld(), V.Trajectory[i], V.Trajectory[i + 1],
+					OrbitColor, /*bPersistent*/ false, /*Lifetime*/ 0.2f,
+					/*DepthPriority*/ 0, /*Thickness*/ 2.f);
+			}
+		}
 
 		// Compose / refresh the craft's part meshes (vessel root is scale 1).
 		TSet<FString> SeenParts;

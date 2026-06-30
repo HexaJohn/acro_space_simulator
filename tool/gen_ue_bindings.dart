@@ -48,6 +48,15 @@ const structs = <_Struct>[
     'resources': 'Resources',
     'max_temp': 'MaxTempK',
     'temp_limit': 'TempLimitK',
+    'apoapsis': 'ApoapsisM',
+    'periapsis': 'PeriapsisM',
+    'period': 'PeriodSeconds',
+    'eccentricity': 'Eccentricity',
+    'inclination': 'InclinationRad',
+    'semi_major': 'SemiMajorM',
+    'trajectory': 'Trajectory',
+    'connected': 'bConnected',
+    'comm_delay': 'CommDelaySeconds',
   }),
   _Struct('FSimBuilding', 'BuildingFrame', 'A colony building, body-LOCAL (parent under the body actor).', {
     'id': 'Id',
@@ -131,11 +140,14 @@ void main() {
     for (final f in schema) {
       final ue = s.fields[f.name]!;
       final (cppType, def) = _ueType(f.type, tableToStruct);
-      // A nested struct must be emitted before the struct that holds it.
-      if (cppType.startsWith('TArray<') &&
-          !emitted.contains(cppType.substring(7, cppType.length - 1))) {
-        fail('${s.name}.$ue uses $cppType before it is defined — '
-            'reorder `structs` in tool/gen_ue_bindings.dart so nested types come first.');
+      // A nested FSim* struct must be emitted before the struct that holds it
+      // (engine types like FVector/FQuat are always available).
+      if (cppType.startsWith('TArray<')) {
+        final inner = cppType.substring(7, cppType.length - 1);
+        if (inner.startsWith('FSim') && !emitted.contains(inner)) {
+          fail('${s.name}.$ue uses $cppType before it is defined — '
+              'reorder `structs` in tool/gen_ue_bindings.dart so nested types come first.');
+        }
       }
       final defClause = def == null ? '' : ' = $def';
       buf.writeln('\tUPROPERTY(BlueprintReadOnly) $cppType $ue$defClause;');
@@ -154,6 +166,8 @@ void main() {
 (String, String?) _ueType(String t, Map<String, String> tableToStruct) {
   if (t.startsWith('[') && t.endsWith(']')) {
     final inner = t.substring(1, t.length - 1);
+    if (inner == 'Vec3') return ('TArray<FVector>', null);
+    if (inner == 'Quat') return ('TArray<FQuat>', null);
     final st = tableToStruct[inner];
     if (st == null) throw StateError('list of unmapped table "$inner"');
     return ('TArray<$st>', null);

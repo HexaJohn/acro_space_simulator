@@ -3,7 +3,10 @@ import 'dart:math' as math;
 import '../../domain/colony/building.dart';
 import '../../domain/colony/colony.dart';
 import '../../domain/colony/surface_placement.dart';
+import '../../domain/comms/comms_service.dart';
 import '../../domain/orbits/body_ephemeris.dart';
+import '../../domain/orbits/state_vector_converter.dart';
+import '../../domain/orbits/trajectory_service.dart';
 import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
 import '../../domain/simulation/domain_event.dart';
@@ -105,6 +108,14 @@ class VesselSnapshot {
   final List<ResourceSnapshot> resources;
   final double maxTemp; // hottest part temperature, K
   final double tempLimit; // that part's destruction temperature, K
+  // Orbit about the dominant body. Radii in metres; -1 = escape/none.
+  final double apoapsis, periapsis, period;
+  final double eccentricity, inclination, semiMajor;
+  // Predicted orbit-line points, flattened x,y,z triples (body-relative metres).
+  final List<double> trajectory;
+  // Comms.
+  final bool connected;
+  final double commDelay; // one-way light-time, s
 
   const VesselSnapshot({
     required this.id,
@@ -132,9 +143,19 @@ class VesselSnapshot {
     this.resources = const [],
     this.maxTemp = 0,
     this.tempLimit = 0,
+    this.apoapsis = -1,
+    this.periapsis = -1,
+    this.period = -1,
+    this.eccentricity = 0,
+    this.inclination = 0,
+    this.semiMajor = 0,
+    this.trajectory = const [],
+    this.connected = true,
+    this.commDelay = 0,
   });
 
-  factory VesselSnapshot.of(Vessel v) {
+  factory VesselSnapshot.of(Vessel v,
+      {StarSystem? system, Epoch epoch = Epoch.zero}) {
     // Aggregate resources across parts by type, and find the hottest part.
     final amounts = <String, double>{};
     final capacities = <String, double>{};
@@ -152,6 +173,41 @@ class VesselSnapshot {
         tempLimit = t.maxTemperature;
       }
     }
+
+    // Orbit / trajectory / comms — need the dominant body + current epoch.
+    var apoapsis = -1.0, periapsis = -1.0, period = -1.0;
+    var eccentricity = 0.0, inclination = 0.0, semiMajor = 0.0;
+    var trajectory = const <double>[];
+    var commDelay = 0.0;
+    final body = system?.body(v.dominantBody);
+    if (body != null) {
+      commDelay = const CommsService()
+          .signalDelaySeconds(v.state.position, Vector3(body.radius, 0, 0));
+      if (!v.landed && v.state.velocity.length > 1) {
+        double fin(double x) => x.isFinite ? x : -1.0;
+        final orbit = const StateVectorOrbitConverter().toOrbit(
+          position: v.state.position,
+          velocity: v.state.velocity,
+          body: body,
+          epoch: epoch,
+        );
+        apoapsis = fin(orbit.apoapsis);
+        periapsis = fin(orbit.periapsis);
+        period = fin(orbit.period);
+        semiMajor = fin(orbit.elements.semiMajorAxis);
+        eccentricity = orbit.elements.eccentricity;
+        inclination = orbit.elements.inclination;
+        final path = const TrajectoryService().predictPath(
+          position: v.state.position,
+          velocity: v.state.velocity,
+          body: body,
+          epoch: epoch,
+          samples: 48,
+        );
+        trajectory = [for (final p in path) ...[p.x, p.y, p.z]];
+      }
+    }
+
     return VesselSnapshot(
       id: v.id.value,
       ownerId: v.ownerId,
@@ -194,6 +250,15 @@ class VesselSnapshot {
       ],
       maxTemp: maxTemp,
       tempLimit: tempLimit,
+      apoapsis: apoapsis,
+      periapsis: periapsis,
+      period: period,
+      eccentricity: eccentricity,
+      inclination: inclination,
+      semiMajor: semiMajor,
+      trajectory: trajectory,
+      connected: v.hasCommLink,
+      commDelay: commDelay,
     );
   }
 
@@ -214,6 +279,15 @@ class VesselSnapshot {
         'resources': [for (final r in resources) r.toJson()],
         'maxTemp': maxTemp,
         'tempLimit': tempLimit,
+        'apoapsis': apoapsis,
+        'periapsis': periapsis,
+        'period': period,
+        'eccentricity': eccentricity,
+        'inclination': inclination,
+        'semiMajor': semiMajor,
+        'traj': trajectory,
+        'connected': connected,
+        'commDelay': commDelay,
       };
 
   /// Tolerant of older payloads that lack attitude / angularVelocity / landed:
@@ -255,6 +329,17 @@ class VesselSnapshot {
       ],
       maxTemp: (j['maxTemp'] as num?)?.toDouble() ?? 0,
       tempLimit: (j['tempLimit'] as num?)?.toDouble() ?? 0,
+      apoapsis: (j['apoapsis'] as num?)?.toDouble() ?? -1,
+      periapsis: (j['periapsis'] as num?)?.toDouble() ?? -1,
+      period: (j['period'] as num?)?.toDouble() ?? -1,
+      eccentricity: (j['eccentricity'] as num?)?.toDouble() ?? 0,
+      inclination: (j['inclination'] as num?)?.toDouble() ?? 0,
+      semiMajor: (j['semiMajor'] as num?)?.toDouble() ?? 0,
+      trajectory: [
+        for (final n in (j['traj'] as List?) ?? const []) (n as num).toDouble(),
+      ],
+      connected: (j['connected'] as bool?) ?? true,
+      commDelay: (j['commDelay'] as num?)?.toDouble() ?? 0,
     );
   }
 }
@@ -594,7 +679,8 @@ class WorldSnapshot {
                 b.id.value: BodySnapshot.of(b, system, ephemeris, epoch),
             },
       vessels: {
-        for (final v in vessels.all()) v.id.value: VesselSnapshot.of(v),
+        for (final v in vessels.all())
+          v.id.value: VesselSnapshot.of(v, system: system, epoch: epoch),
       },
       buildings: buildings,
       events: events,
