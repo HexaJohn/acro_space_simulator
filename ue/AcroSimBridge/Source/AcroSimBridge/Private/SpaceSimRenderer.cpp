@@ -1,15 +1,12 @@
 #include "SpaceSimRenderer.h"
 
-#include "AcroOrbitOverlay.h"
 #include "SpaceSimSubsystem.h"
-#include "Blueprint/UserWidget.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/GameInstance.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
-#include "GameFramework/PlayerController.h"
 #include "Materials/MaterialInterface.h"
 
 ASpaceSimRenderer::ASpaceSimRenderer()
@@ -33,38 +30,10 @@ void ASpaceSimRenderer::BeginPlay()
 	SimRef = Sim;
 	Sim->FocusBodyId = FocusBodyId;
 	Sim->OnWorldUpdated.AddDynamic(this, &ASpaceSimRenderer::HandleWorldUpdated);
-
-	// Screen-space orbit overlay: a constant-pixel-width UMG layer over the scene.
-	if (bScreenSpaceOrbits)
-	{
-		if (APlayerController* PC = World->GetFirstPlayerController())
-		{
-			OrbitOverlay = CreateWidget<UAcroOrbitOverlay>(PC, UAcroOrbitOverlay::StaticClass());
-			if (OrbitOverlay)
-			{
-				OrbitOverlay->SetVisibility(ESlateVisibility::HitTestInvisible); // never eats input
-				OrbitOverlay->AddToViewport(0); // over the 3D scene, under HUD widgets
-				SyncOrbitOverlay();
-			}
-		}
-	}
-
 	if (bAutoConnect)
 	{
 		Sim->Connect(Host, Port);
 	}
-}
-
-void ASpaceSimRenderer::SyncOrbitOverlay()
-{
-	if (!OrbitOverlay) return;
-	OrbitOverlay->WorldScale = WorldScale;
-	OrbitOverlay->OrbitWidthPx = OrbitWidthPx;
-	OrbitOverlay->bDrawBodyOrbits = bDrawBodyOrbits;
-	OrbitOverlay->bDrawVesselOrbits = bDrawOrbits;
-	OrbitOverlay->bOccludeBehindBodies = bOccludeOrbitsBehindBodies;
-	OrbitOverlay->VesselOrbitColor = OrbitColor.ReinterpretAsLinear();
-	OrbitOverlay->BodyOrbitColor = BodyOrbitColor.ReinterpretAsLinear();
 }
 
 void ASpaceSimRenderer::EndPlay(const EEndPlayReason::Type Reason)
@@ -72,11 +41,6 @@ void ASpaceSimRenderer::EndPlay(const EEndPlayReason::Type Reason)
 	if (USpaceSimSubsystem* Sim = SimRef.Get())
 	{
 		Sim->OnWorldUpdated.RemoveDynamic(this, &ASpaceSimRenderer::HandleWorldUpdated);
-	}
-	if (OrbitOverlay)
-	{
-		OrbitOverlay->RemoveFromParent();
-		OrbitOverlay = nullptr;
 	}
 	Super::EndPlay(Reason);
 }
@@ -91,7 +55,6 @@ void ASpaceSimRenderer::HandleWorldUpdated()
 	UpdateBodies(Sim);
 	UpdateVessels(Sim);
 	UpdateBuildings(Sim); // after bodies — buildings parent under body actors
-	SyncOrbitOverlay();   // keep the screen-space overlay's config live
 }
 
 UStaticMesh* ASpaceSimRenderer::MeshFor(const FString& Key, FVector& OutScale, UMaterialInterface*& OutMaterial) const
@@ -177,8 +140,7 @@ void ASpaceSimRenderer::UpdateBodies(USpaceSimSubsystem* Sim)
 
 		// Body orbit ring ("rails") about its parent: world-space cm points,
 		// scaled to match. Root bodies (the Sun) carry no ring, so this no-ops.
-		// Skipped when the screen-space overlay is drawing orbits instead.
-		if (bDrawBodyOrbits && !bScreenSpaceOrbits && B.Orbit.Num() > 1)
+		if (bDrawBodyOrbits && B.Orbit.Num() > 1)
 		{
 			for (int32 i = 0; i + 1 < B.Orbit.Num(); ++i)
 			{
@@ -231,8 +193,7 @@ void ASpaceSimRenderer::UpdateVessels(USpaceSimSubsystem* Sim)
 		Actor->SetActorLocationAndRotation(V.Position * WorldScale, V.Attitude);
 
 		// Orbit line: world-space cm points, scaled to match; OrbitThickness wide.
-		// Skipped when the screen-space overlay is drawing orbits instead.
-		if (bDrawOrbits && !bScreenSpaceOrbits && V.Trajectory.Num() > 1)
+		if (bDrawOrbits && V.Trajectory.Num() > 1)
 		{
 			for (int32 i = 0; i + 1 < V.Trajectory.Num(); ++i)
 			{
