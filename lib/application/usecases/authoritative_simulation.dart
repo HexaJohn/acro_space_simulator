@@ -1,6 +1,7 @@
 import '../../domain/multiplayer/command.dart';
 import '../../domain/multiplayer/session.dart';
 import '../../domain/simulation/simulation_clock.dart';
+import '../../domain/universe/terrain_heights.dart';
 import '../ports/repositories.dart';
 import '../snapshot/world_snapshot.dart';
 import 'advance_simulation_tick.dart';
@@ -28,13 +29,18 @@ class AuthoritativeSimulation {
   final SimulationClock clock;
   final VesselRepository vessels;
 
+  /// Render-side terrain heights (shared with [applyCommands]). Used only to
+  /// place surface objects in the snapshot — never by the physics tick.
+  final TerrainHeights terrain;
+
   AuthoritativeSimulation({
     required this.session,
     required this.applyCommands,
     required this.advance,
     required this.clock,
     required this.vessels,
-  });
+    TerrainHeights? terrain,
+  }) : terrain = terrain ?? TerrainHeights();
 
   void step(List<CommandBatch> batches) {
     // 1 + 2. Apply commands in a deterministic order: batch order, then the
@@ -51,6 +57,13 @@ class AuthoritativeSimulation {
     session.epoch = clock.epoch;
   }
 
-  WorldSnapshot snapshot() =>
-      WorldSnapshot.capture(session.authoritativeTick, vessels);
+  WorldSnapshot snapshot() => WorldSnapshot.capture(
+        session.authoritativeTick,
+        vessels,
+        system: advance.universe.current(),
+        ephemeris: advance.ephemeris,
+        epoch: clock.epoch,
+        colonies: advance.colonies,
+        terrain: terrain,
+      );
 }

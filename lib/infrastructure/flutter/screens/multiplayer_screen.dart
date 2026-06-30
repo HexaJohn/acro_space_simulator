@@ -218,6 +218,7 @@ class _MultiplayerScreenState extends State<MultiplayerScreen> {
         SeparateStageCommand() => 'Separate stage',
         SetAttitudeCommand() => 'Set attitude',
         PlaceBuildingCommand() => 'Place building',
+        ReportTerrainHeightCommand() => 'Report terrain',
       };
 
   Widget _dropdownPlayer() => Row(children: [
