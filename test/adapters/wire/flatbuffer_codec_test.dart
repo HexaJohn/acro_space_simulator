@@ -119,6 +119,43 @@ void main() {
     expect(ed.atmoScaleHeight, closeTo(es.atmoScaleHeight, 1e-6));
     expect(ed.atmoThickness, closeTo(es.atmoThickness, 1e-6));
     expect(ed.atmoSeaLevelPressure, closeTo(es.atmoSeaLevelPressure, 1e-6));
+
+    // Atmospheric COMPOSITION survives: Earth's mix is nitrogen-dominated, its
+    // mean molecular weight sits near air's ~0.029 kg/mol, and the derived
+    // composition-blended scatter tint is non-zero — all round-trip exactly.
+    expect(ed.atmoGases, isNotEmpty);
+    expect(ed.atmoGases.length, es.atmoGases.length);
+    expect(ed.atmoMeanMolecularWeight, closeTo(es.atmoMeanMolecularWeight, 1e-12));
+    expect(ed.atmoMeanMolecularWeight, closeTo(0.029, 0.003));
+    expect(ed.atmoScatterColorArgb, es.atmoScatterColorArgb);
+    expect(ed.atmoScatterColorArgb, isNot(0));
+    final dominant =
+        ed.atmoGases.reduce((a, b) => a.fraction >= b.fraction ? a : b);
+    expect(dominant.gas, 0); // AtmosphereGas.nitrogen
+    expect(dominant.fraction, greaterThan(0.5));
+    final fractionSum =
+        ed.atmoGases.fold<double>(0, (s, g) => s + g.fraction);
+    expect(fractionSum, closeTo(1.0, 1e-9)); // mole fractions normalise to 1
+
+    // The airless Sun carries no composition.
+    expect(back.descriptors['sun']!.atmoGases, isEmpty);
+    expect(back.descriptors['sun']!.atmoScatterColorArgb, 0);
+  });
+
+  test('body descriptors gate out of the frame for low-frequency publish', () {
+    final vessels = InMemoryVesselRepository([SampleWorld.buildVessel()]);
+    final system = SampleWorld.realSystem();
+
+    final withDesc = WorldSnapshot.capture(1, vessels, system: system);
+    final without = WorldSnapshot.capture(2, vessels,
+        system: system, includeDescriptors: false);
+
+    expect(withDesc.descriptors, isNotEmpty);
+    expect(without.descriptors, isEmpty);
+    // Dynamic bodies still ship every frame — only the static descriptors gate.
+    expect(without.bodies, isNotEmpty);
+    // A gated frame round-trips with no descriptors (engine keeps its cache).
+    expect(codec.decodeWorld(codec.encodeWorld(without)).descriptors, isEmpty);
   });
 
   test('events round-trip through the codec', () {
