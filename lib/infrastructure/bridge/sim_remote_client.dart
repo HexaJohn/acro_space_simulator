@@ -8,13 +8,14 @@ import '../../domain/simulation/epoch.dart';
 import '../../adapters/wire/flatbuffer_codec.dart';
 import 'frame_protocol.dart';
 
-/// Client side of the engine bridge: connects to `bin/sim_server.dart` over TCP,
-/// decodes the streamed [WorldSnapshot]s, and sends player commands — the same
-/// shared authoritative server Unreal renders. Lets a Flutter desktop app drive
-/// the sim while Unreal watches (both are clients of one server).
+/// Client side of the engine bridge: connects to a standalone authoritative
+/// server (`bin/sim_server.dart`) over TCP, decodes the streamed
+/// [WorldSnapshot]s, and sends player commands. Kept for the future multiplayer
+/// path (many desktop clients of one shared server); the in-process serve path
+/// — the app hosting its own sim for Unreal — is [SimBridge] instead.
 ///
 /// Uses `dart:io` sockets, so this is DESKTOP/mobile only — keep it out of the
-/// web build (it lives behind the separate `main_remote.dart` entry point).
+/// web build (only import it behind a `dart.library.io` conditional).
 class SimRemoteClient {
   final FlatBufferCodec codec;
   String playerId;
