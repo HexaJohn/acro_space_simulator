@@ -124,7 +124,10 @@ void ASpaceSimRenderer::UpdateBodies(USpaceSimSubsystem* Sim)
 			Actor->SetActorLabel(FString::Printf(TEXT("Body_%s"), *B.Id));
 #endif
 		}
-		Actor->SetActorLocationAndRotation(B.Position, B.Orientation);
+		// Bodies are full-scale (size matters): shrink size + position together by
+		// WorldScale. Buildings parented under the root inherit it.
+		Actor->SetActorScale3D(FVector(WorldScale));
+		Actor->SetActorLocationAndRotation(B.Position * WorldScale, B.Orientation);
 	}
 	// Prune vanished bodies + their building HISMs/instances together.
 	for (auto It = BodyActors.CreateIterator(); It; ++It)
@@ -163,16 +166,19 @@ void ASpaceSimRenderer::UpdateVessels(USpaceSimSubsystem* Sim)
 			Actor->SetActorLabel(FString::Printf(TEXT("Craft_%s"), *V.Id));
 #endif
 		}
-		Actor->SetActorLocationAndRotation(V.Position, V.Attitude);
+		// Position scaled by WorldScale, but the craft itself is kept at marker
+		// size (NOT scaled) so it stays visible against a huge planet.
+		Actor->SetActorLocationAndRotation(V.Position * WorldScale, V.Attitude);
 
-		// Orbit line: the trajectory is already world-space (rebased) cm points.
+		// Orbit line: world-space cm points, scaled to match; OrbitThickness wide.
 		if (bDrawOrbits && V.Trajectory.Num() > 1)
 		{
 			for (int32 i = 0; i + 1 < V.Trajectory.Num(); ++i)
 			{
-				DrawDebugLine(GetWorld(), V.Trajectory[i], V.Trajectory[i + 1],
+				DrawDebugLine(GetWorld(),
+					V.Trajectory[i] * WorldScale, V.Trajectory[i + 1] * WorldScale,
 					OrbitColor, /*bPersistent*/ false, /*Lifetime*/ 0.2f,
-					/*DepthPriority*/ 0, /*Thickness*/ 2.f);
+					/*DepthPriority*/ 0, OrbitThickness);
 			}
 		}
 

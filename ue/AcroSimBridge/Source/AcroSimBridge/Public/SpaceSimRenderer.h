@@ -73,6 +73,15 @@ public:
 	bool bDrawOrbits = true;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim")
 	FColor OrbitColor = FColor::Cyan;
+	// Orbit-line thickness (cm in the SCALED scene). Bump it up for visibility.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim")
+	float OrbitThickness = 8.f;
+
+	// Uniform render scale on all positions + sizes. The sim is 1:1 (a 600 km
+	// body is a 600,000 m sphere), which is unwieldy in-editor — set e.g. 0.001
+	// to shrink the whole scene to a navigable size. 1 = true scale.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim")
+	float WorldScale = 1.0f;
 
 private:
 	UFUNCTION()
