@@ -199,12 +199,21 @@ change, only how often you send it.
 
 ## Regenerating the contract
 
-After editing `../wire/sim.fbs`, regenerate both sides:
+After editing `../wire/sim.fbs`, regenerate:
 
 ```
-flatc --dart            -o ../lib/adapters/wire   ../wire/sim.fbs
-flatc --cpp --scoped-enums -o Wire                ../wire/sim.fbs
+flatc --dart            -o ../lib/adapters/wire   ../wire/sim.fbs   # Dart wire codec
+flatc --cpp --scoped-enums -o Wire                ../wire/sim.fbs   # C++ wire header
+dart run tool/gen_ue_bindings.dart                                  # FSim* USTRUCTs
 ```
+
+The third step regenerates the `FSim*` structs in `Source/AcroSimBridge/Public/AcroSimTypes.h`
+from the render tables. It **validates drift**: add a field to a render table
+(VesselFrame/BodyFrame/BuildingFrame/PartFrame/ResourceFrame/EventFrame) and the
+generator fails until you map it in `tool/gen_ue_bindings.dart` — so you can't
+widen the wire and silently forget the UE struct. What stays hand-written: the
+field copy + coordinate conversion in `IngestWorldFrame` (the rebasing is
+semantic, not generatable), and the command builders.
 
 Keep the union cases in `sim.fbs`, `ApplyCommands` (Dart), and the
 `flatbuffer_codec.dart` switch in lockstep.

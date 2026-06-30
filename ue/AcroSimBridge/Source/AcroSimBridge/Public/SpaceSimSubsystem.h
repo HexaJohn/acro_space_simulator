@@ -9,101 +9,15 @@
 #include "CoreMinimal.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "Tickable.h"
+#include "AcroSimTypes.h" // generated FSim* structs (dart run tool/gen_ue_bindings.dart)
 #include "SpaceSimSubsystem.generated.h"
 
 class FSocket;
 
-/// One celestial body, already converted to UE space and rebased onto the
-/// floating origin (FocusBodyId sits at the world origin).
-USTRUCT(BlueprintType)
-struct FSimBody
-{
-	GENERATED_BODY()
-	UPROPERTY(BlueprintReadOnly) FString Id;
-	UPROPERTY(BlueprintReadOnly) FVector Position = FVector::ZeroVector; // cm, UE world
-	UPROPERTY(BlueprintReadOnly) FQuat Orientation = FQuat::Identity;
-	UPROPERTY(BlueprintReadOnly) float RadiusCm = 0.f;
-};
-
-/// One part of a craft. Attach a mesh for [Type] under the craft actor at
-/// [LocalOffset] (craft-local); it inherits the craft's world transform.
-USTRUCT(BlueprintType)
-struct FSimPart
-{
-	GENERATED_BODY()
-	UPROPERTY(BlueprintReadOnly) FString Id;
-	UPROPERTY(BlueprintReadOnly) FString Type;        // asset key (sim part name)
-	UPROPERTY(BlueprintReadOnly) FVector LocalOffset = FVector::ZeroVector; // cm, craft-local
-};
-
-/// An aggregated resource gauge (total across the craft's parts, by type).
-USTRUCT(BlueprintType)
-struct FSimResource
-{
-	GENERATED_BODY()
-	UPROPERTY(BlueprintReadOnly) FString Type;     // e.g. "liquidFuel"
-	UPROPERTY(BlueprintReadOnly) float Amount = 0.f;
-	UPROPERTY(BlueprintReadOnly) float Capacity = 0.f;
-};
-
-/// One vessel, converted to UE space and rebased. Position already folds in the
-/// vessel's dominant-body world position, so it is a true scene-space location.
-/// [Parts] is the assembly manifest — rebuild the craft actor's child meshes
-/// when the part set changes (e.g. on staging).
-USTRUCT(BlueprintType)
-struct FSimVessel
-{
-	GENERATED_BODY()
-	UPROPERTY(BlueprintReadOnly) FString Id;
-	UPROPERTY(BlueprintReadOnly) FString Owner;
-	UPROPERTY(BlueprintReadOnly) FString Body;
-	UPROPERTY(BlueprintReadOnly) FVector Position = FVector::ZeroVector; // cm, UE world
-	UPROPERTY(BlueprintReadOnly) FVector Velocity = FVector::ZeroVector; // cm/s, UE
-	UPROPERTY(BlueprintReadOnly) FVector AngularVelocity = FVector::ZeroVector; // rad/s, UE
-	UPROPERTY(BlueprintReadOnly) FQuat Attitude = FQuat::Identity;
-	UPROPERTY(BlueprintReadOnly) float Throttle = 0.f;
-	UPROPERTY(BlueprintReadOnly) bool bOnRails = false;
-	UPROPERTY(BlueprintReadOnly) bool bLanded = false;
-	UPROPERTY(BlueprintReadOnly) TArray<FSimPart> Parts;
-	// Telemetry / gauges.
-	UPROPERTY(BlueprintReadOnly) float MassKg = 0.f;
-	UPROPERTY(BlueprintReadOnly) int32 Crew = 0;
-	UPROPERTY(BlueprintReadOnly) TArray<FSimResource> Resources;
-	UPROPERTY(BlueprintReadOnly) float MaxTempK = 0.f;    // hottest part temperature
-	UPROPERTY(BlueprintReadOnly) float TempLimitK = 0.f;  // its destruction temperature
-};
-
-/// A colony building, placed BODY-FIXED. Parent it under the body actor whose
-/// id is [Body], then apply [LocalPosition]/[LocalOrientation] as the RELATIVE
-/// transform — it spins with the planet for free. [Lat]/[Lon] (radians) let the
-/// engine ray-cast its own landscape and report a height back via
-/// SubmitReportTerrainHeight so the sim re-places the building to agree.
-USTRUCT(BlueprintType)
-struct FSimBuilding
-{
-	GENERATED_BODY()
-	UPROPERTY(BlueprintReadOnly) FString Id;
-	UPROPERTY(BlueprintReadOnly) FString Type;   // asset key (building spec type)
-	UPROPERTY(BlueprintReadOnly) FString Colony;
-	UPROPERTY(BlueprintReadOnly) FString Body;
-	UPROPERTY(BlueprintReadOnly) FVector LocalPosition = FVector::ZeroVector; // cm, body-local
-	UPROPERTY(BlueprintReadOnly) FQuat LocalOrientation = FQuat::Identity;
-	UPROPERTY(BlueprintReadOnly) float Lat = 0.f; // radians
-	UPROPERTY(BlueprintReadOnly) float Lon = 0.f; // radians
-};
-
-/// A discrete sim event that fired this tick (staging, impact, destruction,
-/// science, …). Switch on [Kind]; look up [Subject] in GetVessels() for FX.
-USTRUCT(BlueprintType)
-struct FSimEvent
-{
-	GENERATED_BODY()
-	UPROPERTY(BlueprintReadOnly) FString Kind;    // "Impact", "StageSeparation", …
-	UPROPERTY(BlueprintReadOnly) FString Subject; // primary asset id (usually vessel)
-	UPROPERTY(BlueprintReadOnly) FString Target;  // body / 2nd vessel / part / deposit
-	UPROPERTY(BlueprintReadOnly) float Magnitude = 0.f; // speed / temp / dose / index / Pa
-	UPROPERTY(BlueprintReadOnly) FString Info;    // reason / cause / situation / message
-};
+// The FSim* data structs (FSimBody/FSimVessel/FSimBuilding/FSimPart/
+// FSimResource/FSimEvent) are GENERATED from wire/sim.fbs into AcroSimTypes.h.
+// To change them, edit the schema + tool/gen_ue_bindings.dart and regenerate —
+// not here. The ingest/rebasing that fills them stays hand-written below.
 
 /// Fired (game thread) after each WorldFrame is ingested, so Blueprints can
 /// drive rendering on an event instead of polling every Tick.
@@ -155,7 +69,10 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "AcroSim")
 	FOnWorldUpdated OnWorldUpdated;
 
-	// Bind for FX/UI: fires once per discrete sim event in the frame.
+	// Bind for FX/UI: fires once per discrete sim event in the frame. Fired
+	// during ingest, BEFORE OnWorldUpdated, but with the new frame already
+	// applied to GetVessels/GetBodies/GetBuildings — so Event.Subject's
+	// transform is current when you handle it.
 	UPROPERTY(BlueprintAssignable, Category = "AcroSim")
 	FOnSimEvent OnSimEvent;
 
