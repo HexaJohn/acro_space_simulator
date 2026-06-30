@@ -1,5 +1,38 @@
 # Release Notes
 
+## v0.2.2 — Unreal Engine Integration
+
+The Dart space sim now drives a real-time renderer in **Unreal Engine 5.8**.
+
+### Unreal Engine bridge
+- The sim streams live world state to a drop-in UE plugin over **FlatBuffers/TCP**
+  (`wire/sim.fbs`). The bridge runs **in-process** (`SimBridge`), so Unreal renders
+  the very same simulation the Flutter views drive — with a Flutter desktop
+  remote-control client on the shared server.
+- UE `FSim*` structs are **generated from the wire schema** and drift-checked, so
+  the C++ and Dart sides can't fall out of sync.
+
+### UE plugin (`ue/AcroSimBridge`)
+- A drop-in `AcroSimBridge.uplugin`: `ASpaceSimRenderer` turns the telemetry stream
+  into actors, the bridge is exposed to Blueprint, and the **live sim renders in the
+  editor viewport** (not just Play-In-Editor).
+- Bodies are sized from their bounds (craft no longer spawn inside the planet),
+  spawned actors are labelled in the World Outliner, and a `WorldScale` knob plus
+  orbit-line thickness control tune the look. Compiles clean on UE 5.8.
+
+### Telemetry & orbits
+- Per-vessel telemetry gauges, a discrete event stream, and per-vessel orbit,
+  trajectory, and comms-link lines.
+- Celestial-body **orbit rings** stream so Unreal can draw the whole system; static
+  body render descriptors carry texture, heightmap, and atmosphere data.
+
+### Universe
+- The **real Solar System** is now the only system; legacy KSP body names are gone.
+
+### Atmosphere
+- The 0.2.1 per-pixel path-length atmosphere shader was reverted to the **0.2.0
+  screen-space radial halo** — it reads better. The icosphere render rewrite stays.
+
 ## v0.2.1 — The Rendering & Atmosphere Overhaul
 
 This release rebuilds the planet renderer end to end and adds a complete game guide.
