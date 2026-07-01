@@ -43,12 +43,14 @@ class SimEngine {
   late final ResearchLedger research;
   late AdvanceSimulationTick advance;
 
-  // Debug cheats. Defaults mirror SimulationView's so headless == flight: skip
-  // destruction (overheat/aero/impact) and keep tanks topped up while testing.
-  bool disableOverheat = true;
-  bool disableAeroStress = true;
-  bool disableImpact = true;
-  bool infiniteFuel = true;
+  // Debug cheats. The HEADLESS engine idles REALISTIC (destruction on, fuel
+  // burns); the flight view forces its dev cheats on while it's open and restores
+  // these on exit, so a flight session can't leave the app-scoped sim permanently
+  // cheated.
+  bool disableOverheat = false;
+  bool disableAeroStress = false;
+  bool disableImpact = false;
+  bool infiniteFuel = false;
 
   // ---- Engine bridge (serves the world to Unreal) ----
   final SimBridge bridge = createSimBridge();
@@ -209,13 +211,29 @@ class SimEngine {
     }
   }
 
+  // Ref-count of injected craft ids so an id shared across two overlapping flight
+  // sessions (route pop->push) isn't yanked out from under the new one: the craft
+  // is only removed when the LAST injector detaches.
+  final Map<VesselId, int> _injectedRefs = {};
+
   /// Add a vessel to the live sim (e.g. an ascent craft chosen at flight entry).
-  /// Idempotent by id, so re-entering flight doesn't duplicate it.
+  /// Idempotent by id (won't duplicate); ref-counted for safe removal.
   void injectVessel(Vessel v) {
+    _injectedRefs.update(v.id, (n) => n + 1, ifAbsent: () => 1);
     if (vessels.byId(v.id) == null) vessels.save(v);
   }
 
-  void removeVessel(VesselId id) => vessels.remove(id);
+  /// Drop a previously [injectVessel]ed craft. Removes it only when its last
+  /// injector detaches (matching ref-count), so overlapping sessions are safe.
+  void removeVessel(VesselId id) {
+    final remaining = (_injectedRefs[id] ?? 1) - 1;
+    if (remaining <= 0) {
+      _injectedRefs.remove(id);
+      vessels.remove(id);
+    } else {
+      _injectedRefs[id] = remaining;
+    }
+  }
 
   void dispose() {
     _timer?.cancel();
