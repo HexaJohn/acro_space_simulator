@@ -167,6 +167,10 @@ class SimEngine {
         epoch: clock.epoch,
         colonies: colonies,
         includeDescriptors: sendDescriptors,
+        // Coarse orbit rings: full-res (96) per body per tick makes a ~85 KB
+        // frame the bridge can't reassemble fast enough. 32 keeps it ~30 KB —
+        // small enough to land in one recv — and still reads as a smooth ellipse.
+        orbitSamples: 32,
       );
       bridge.publish(_wire.encodeWorld(world));
     }
