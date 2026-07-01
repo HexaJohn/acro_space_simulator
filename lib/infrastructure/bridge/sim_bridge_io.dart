@@ -40,11 +40,16 @@ class _IoSimBridge implements SimBridge {
       return;
     }
     _server!.listen(_accept);
+    // ignore: avoid_print
+    print('SimBridge: serving on 127.0.0.1:$port — waiting for a renderer.');
   }
 
   void _accept(Socket socket) {
     socket.setOption(SocketOption.tcpNoDelay, true);
     _clients.add(socket);
+    // ignore: avoid_print
+    print('SimBridge: renderer connected from ${socket.remoteAddress.address}:'
+        '${socket.remotePort} (${_clients.length} total).');
     // Async write failures surface on done, not as a throw — catch so a dropped
     // renderer can't take the app down.
     unawaited(socket.done.then((_) => _drop(socket)).catchError((_) => _drop(socket)));
@@ -71,6 +76,8 @@ class _IoSimBridge implements SimBridge {
   void _drop(Socket socket) {
     if (!_clients.remove(socket)) return; // teardown once
     socket.destroy();
+    // ignore: avoid_print
+    print('SimBridge: renderer disconnected (${_clients.length} left).');
   }
 
   @override
