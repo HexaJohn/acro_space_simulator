@@ -34,6 +34,8 @@ import '../../domain/planetary/atmospheric_composition.dart';
 import '../../domain/universe/celestial_body.dart' show BodyId, CelestialBody;
 import '../../domain/vessel/vessel.dart';
 import '../sample_world.dart';
+import '../flutter_scene/render_backend.dart';
+import '../flutter_scene/scene_render_view.dart';
 import 'debug_layers.dart';
 import 'nav_ball.dart';
 import 'screens/city_builder_screen.dart';
@@ -153,6 +155,10 @@ class _SimulationViewState extends State<SimulationView>
   static const double _orbitStep = 0.1309; // ~7.5 deg per arrow press
   DebugLayers _layers = const DebugLayers();
   bool _showDebugPanel = false;
+  // World-viewport backend. Software (TopDownPainter) is the default; the
+  // flutter_scene 3D backend mounts in its place when toggled. Camera state,
+  // input handling, and every HUD overlay stay shared between the two.
+  RenderBackend _renderBackend = RenderBackend.software;
   late final TextureCache _textures;
 
   // Destruction notice: set when a vessel is lost (impact / overstress / burn-up)
@@ -1346,6 +1352,18 @@ class _SimulationViewState extends State<SimulationView>
                     setState(() => _showDebugPanel = !_showDebugPanel),
                 child: const Icon(Icons.bug_report),
               ),
+              const SizedBox(width: 8),
+              FloatingActionButton.small(
+                heroTag: 'renderBackend',
+                tooltip: _renderBackend.label,
+                backgroundColor:
+                    _renderBackend == RenderBackend.flutterScene
+                        ? const Color(0xFF7FB0E0)
+                        : const Color(0xFF2A3A4A),
+                onPressed: () => setState(
+                    () => _renderBackend = _renderBackend.next),
+                child: const Icon(Icons.view_in_ar),
+              ),
             ],
           ),
           ], // end if (_controlsExpanded)
@@ -1413,6 +1431,11 @@ class _SimulationViewState extends State<SimulationView>
             child: Stack(
               children: [
                 // Renderer fills edge-to-edge (into the notch / safe area).
+                // The backend toggle swaps ONLY this subtree — camera state,
+                // input handling, and the HUD overlays above are shared.
+                if (_renderBackend == RenderBackend.flutterScene)
+                  const Positioned.fill(child: SceneRenderView())
+                else
                 Positioned.fill(
                   child: snap == null
                       ? const Center(child: CircularProgressIndicator())

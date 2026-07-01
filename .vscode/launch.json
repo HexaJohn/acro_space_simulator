@@ -1,0 +1,20 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Windows (Impeller)",
+      "request": "launch",
+      "type": "dart",
+      "deviceId": "windows",
+      // flutter_scene renders through Impeller; on Windows desktop Impeller
+      // is not yet the default, so it must be enabled explicitly.
+      "args": ["--enable-impeller"]
+    },
+    {
+      "name": "Windows (software renderer only)",
+      "request": "launch",
+      "type": "dart",
+      "deviceId": "windows"
+    }
+  ]
+}

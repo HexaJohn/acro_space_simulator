@@ -35,6 +35,10 @@ dependencies:
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
   flat_buffers: ^25.9.23
+  # 3D backend. EXACT pins — flutter_scene/flutter_gpu are early-preview and
+  # track the master channel; upgrades are deliberate (bump pin + re-verify),
+  # never drift. See .fvmrc for the matching pinned Flutter master commit.
+  flutter_scene: 0.18.1
 
 dev_dependencies:
   flutter_test:
