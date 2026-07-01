@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../../domain/universe/celestial_body.dart';
 import '../../../domain/universe/real_solar_system.dart';
+import '../../app_version.dart';
 import '../../sample_world.dart';
 import '../simulation_view.dart';
 import 'app_theme.dart';
@@ -68,7 +69,7 @@ class MainMenuScreen extends StatelessWidget {
                     color: const Color(0x3300FF7F),
                     borderRadius: BorderRadius.circular(4),
                   ),
-                  child: Text(kBuildStamp,
+                  child: Text(appVersionLabel,
                       style: AppTheme.mono.copyWith(
                           color: AppTheme.accent2, fontSize: 11)),
                 ),
