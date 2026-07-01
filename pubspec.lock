@@ -134,10 +134,11 @@ packages:
   flutter_scene:
     dependency: "direct main"
     description:
-      name: flutter_scene
-      sha256: "7b83266bf851ea33968c1d361a6798875ea50d7f51e052e3eeca11a1e840bbc7"
-      url: "https://pub.dev"
-    source: hosted
+      path: "packages/flutter_scene"
+      ref: d3ebfb6a589b475e08b3acce43a71ce8c5f0b72f
+      resolved-ref: d3ebfb6a589b475e08b3acce43a71ce8c5f0b72f
+      url: "https://github.com/bdero/flutter_scene.git"
+    source: git
     version: "0.18.1"
   flutter_test:
     dependency: "direct dev"
@@ -326,7 +327,7 @@ packages:
     source: hosted
     version: "1.4.0"
   vector_math:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: vector_math
       sha256: "1d774bbdf6b72a0b12122fc1560c9c2d2a67db5a4a4cc2bd8a5c990ab20e3188"

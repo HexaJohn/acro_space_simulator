@@ -6,9 +6,9 @@
       "request": "launch",
       "type": "dart",
       "deviceId": "windows",
-      // flutter_scene renders through Impeller; on Windows desktop Impeller
-      // is not yet the default, so it must be enabled explicitly.
-      "args": ["--enable-impeller"]
+      // flutter_scene renders through Impeller + Flutter GPU; neither is
+      // default on Windows desktop yet, so both must be enabled explicitly.
+      "args": ["--enable-impeller", "--enable-flutter-gpu"]
     },
     {
       "name": "Windows (software renderer only)",

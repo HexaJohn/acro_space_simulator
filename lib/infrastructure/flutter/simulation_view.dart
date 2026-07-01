@@ -60,10 +60,15 @@ class SimulationView extends StatefulWidget {
   /// show as named craft with their own orbits/trajectories in the sim.
   final List<Vessel> trafficVessels;
 
+  /// World-viewport backend to start with. Software remains the default;
+  /// dev entrypoints (main_scene_dev.dart) boot straight into flutter_scene.
+  final RenderBackend initialBackend;
+
   const SimulationView({
     super.key,
     this.injectedVessel,
     this.trafficVessels = const [],
+    this.initialBackend = RenderBackend.software,
   });
 
   @override
@@ -158,7 +163,7 @@ class _SimulationViewState extends State<SimulationView>
   // World-viewport backend. Software (TopDownPainter) is the default; the
   // flutter_scene 3D backend mounts in its place when toggled. Camera state,
   // input handling, and every HUD overlay stay shared between the two.
-  RenderBackend _renderBackend = RenderBackend.software;
+  late RenderBackend _renderBackend = widget.initialBackend;
   late final TextureCache _textures;
 
   // Destruction notice: set when a vessel is lost (impact / overstress / burn-up)
@@ -1434,7 +1439,7 @@ class _SimulationViewState extends State<SimulationView>
                 // The backend toggle swaps ONLY this subtree — camera state,
                 // input handling, and the HUD overlays above are shared.
                 if (_renderBackend == RenderBackend.flutterScene)
-                  const Positioned.fill(child: SceneRenderView())
+                  Positioned.fill(child: SceneRenderView(camera: _camera))
                 else
                 Positioned.fill(
                   child: snap == null
