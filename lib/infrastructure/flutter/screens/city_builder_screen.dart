@@ -1036,6 +1036,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     _roads.add(_hubKey);
     _genElevation(); // sculpt rolling terrain + the sea/lava level
     _seedScatter(); // dress the virgin land in biome-appropriate flora/rocks
+    _seedStarterTown(); // found a working town around the hub (not a blank lot)
     _recompute();
     _tabs = TabController(length: 5, vsync: this);
     _ticker = createTicker(_onTick)..start();
@@ -1049,6 +1050,73 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     _tabs.dispose();
     _drawerScroll.dispose();
     super.dispose();
+  }
+
+  /// Found a working town around the hub so a new colony opens established, not
+  /// as a blank lot. Lays a road grid (even offsets) over the land near the hub
+  /// and drops a fully-grown building on each ringed 1x1 plot (odd offsets): a
+  /// central core of power + water + food utilities, an industrial corner, a
+  /// commercial ring, and residential sprawl. Skips liquid tiles; everything is
+  /// road-served so [_recompute] wires up the economy immediately.
+  void _seedStarterTown() {
+    final cx = _grid ~/ 2, cy = _grid ~/ 2;
+    // Largest district that fits the grid (cap so it stays a town, not a slab).
+    final r = [6, cx, cy, _grid - 1 - cx, _grid - 1 - cy]
+        .reduce((a, b) => a < b ? a : b);
+    if (r < 2) return; // grid too small for a town
+
+    final x0 = cx - r, y0 = cy - r;
+    final plots = <int>[];
+    for (var dy = 0; dy <= 2 * r; dy++) {
+      for (var dx = 0; dx <= 2 * r; dx++) {
+        final x = x0 + dx, y = y0 + dy;
+        final k = _key(x, y);
+        if (_isWaterTile(k)) continue; // never build/road on liquid
+        if (dx.isOdd && dy.isOdd) {
+          plots.add(k); // a 1x1 plot, ringed 4-way by road corridors
+        } else if (k != _hubKey) {
+          _addRoad(k);
+        }
+      }
+    }
+
+    int dist2(int k) {
+      final dx = (k % _grid) - cx, dy = (k ~/ _grid) - cy;
+      return dx * dx + dy * dy;
+    }
+
+    // Core utilities sit nearest the hub; residential sprawls outward.
+    plots.sort((a, b) => dist2(a).compareTo(dist2(b)));
+
+    final solar = kUtilCatalog.firstWhere((u) => u.type == 'solar');
+    final water = kUtilCatalog.firstWhere((u) => u.type == 'water');
+    final farm = kUtilCatalog.firstWhere((u) => u.type == 'farm');
+
+    void grow(int k, String kind, Density d) {
+      _clearCell(k, keepSupport: true);
+      _zones[k] = ZoneType(kind, d);
+      _grown.add(k);
+      _growProgress[k] = 1.0; // fully built + occupied (not under construction)
+      _buildStyle[k] = _currentStyle.index;
+    }
+
+    for (var i = 0; i < plots.length; i++) {
+      final k = plots[i];
+      final x = k % _grid, y = k ~/ _grid;
+      if (i < 5) {
+        _placeUtil(k, solar); // power core (5 farms comfortably cover the town)
+      } else if (i < 7) {
+        _placeUtil(k, water); // water service
+      } else if (i < 10) {
+        _placeUtil(k, farm); // food
+      } else if (x > cx && y > cy) {
+        grow(k, 'industrial', i.isEven ? Density.low : Density.medium);
+      } else if (i < 16) {
+        grow(k, 'commercial', Density.low); // a commercial ring around the core
+      } else {
+        grow(k, 'residential', i.isEven ? Density.medium : Density.low);
+      }
+    }
   }
 
   // ---- Building enumeration ----
