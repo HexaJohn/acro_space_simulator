@@ -29,7 +29,16 @@ class _IoSimBridge implements SimBridge {
   @override
   Future<void> start({int port = 5800}) async {
     if (_server != null) return;
-    _server = await ServerSocket.bind(InternetAddress.loopbackIPv4, port);
+    try {
+      _server = await ServerSocket.bind(InternetAddress.loopbackIPv4, port);
+    } on SocketException catch (e) {
+      // Port busy (e.g. a hot-restart's old server still holds it) — degrade
+      // gracefully instead of throwing an unhandled async error. The sim still
+      // runs in-process; the bridge just doesn't serve until the port frees up.
+      // ignore: avoid_print
+      print('SimBridge: could not bind port $port ($e); serving disabled.');
+      return;
+    }
     _server!.listen(_accept);
   }
 

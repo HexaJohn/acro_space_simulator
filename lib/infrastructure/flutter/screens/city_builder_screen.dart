@@ -1059,6 +1059,11 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
   /// commercial ring, and residential sprawl. Skips liquid tiles; everything is
   /// road-served so [_recompute] wires up the economy immediately.
   void _seedStarterTown() {
+    // Only seed OPEN surface colonies (breathable, good sun). Domed / orbital /
+    // gas-giant colonies need support tiles under every building (or the support
+    // tick flattens them) and can't run on solar off-world — those start blank.
+    if (_colonyMode != _ColonyStyle.open) return;
+
     final cx = _grid ~/ 2, cy = _grid ~/ 2;
     // Largest district that fits the grid (cap so it stays a town, not a slab).
     final r = [6, cx, cy, _grid - 1 - cx, _grid - 1 - cy]
@@ -1072,9 +1077,10 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
         final x = x0 + dx, y = y0 + dy;
         final k = _key(x, y);
         if (_isWaterTile(k)) continue; // never build/road on liquid
+        if (k == _hubKey) continue; // keep the hub a clean landing-pad / road root
         if (dx.isOdd && dy.isOdd) {
           plots.add(k); // a 1x1 plot, ringed 4-way by road corridors
-        } else if (k != _hubKey) {
+        } else {
           _addRoad(k);
         }
       }

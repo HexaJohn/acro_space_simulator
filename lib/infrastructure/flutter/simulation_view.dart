@@ -79,6 +79,13 @@ class _SimulationViewState extends State<SimulationView>
   bool _disableOverheat = true;
   bool _disableAeroStress = true;
   bool _disableImpact = true;
+  // The engine's idle state captured on entry + restored on exit, so a flight
+  // session's dev cheats / time-warp don't leak into the headless app-scoped sim.
+  late final bool _priorInfiniteFuel;
+  late final bool _priorDisableOverheat;
+  late final bool _priorDisableAeroStress;
+  late final bool _priorDisableImpact;
+  late final double _priorWarp;
   late final TopDownSnapshotPresenter _presenter;
   late final StaticUniverseRepository _universe;
   late final InMemoryVesselRepository _vessels;
@@ -301,11 +308,18 @@ class _SimulationViewState extends State<SimulationView>
     _colonies = _engine.colonies;
     _deposits = _engine.deposits;
     _research = _engine.research;
-    // Reflect the engine's CURRENT cheat state — it kept running between flights,
-    // so a previous session's toggles may differ from the field defaults.
-    _disableOverheat = _engine.disableOverheat;
-    _disableAeroStress = _engine.disableAeroStress;
-    _disableImpact = _engine.disableImpact;
+    // Snapshot the engine's idle state so dispose can RESTORE it — a flight
+    // session's dev cheats + warp must not leak into the headless sim.
+    _priorInfiniteFuel = _engine.infiniteFuel;
+    _priorDisableOverheat = _engine.disableOverheat;
+    _priorDisableAeroStress = _engine.disableAeroStress;
+    _priorDisableImpact = _engine.disableImpact;
+    _priorWarp = _engine.clock.warpFactor;
+    // Flight starts with the dev cheats ON (skip destruction) — pushed to the
+    // engine via _syncCheats below.
+    _disableOverheat = true;
+    _disableAeroStress = true;
+    _disableImpact = true;
 
     for (final v in _vessels.all()) {
       _vesselNames[v.id.value] = v.name;
@@ -325,10 +339,11 @@ class _SimulationViewState extends State<SimulationView>
     _focusVessel = _targets[_targetIndex].v;
     _focusBody = _targets[_targetIndex].b;
 
-    // Start ready to fly: manual control, infinite fuel, 1x warp.
+    // Start ready to fly: manual control, dev cheats + infinite fuel, 1x warp.
     _manualControl = true;
+    _syncCheats(); // push the (on) cheat flags onto the engine + rebuild its tick
     _engine.infiniteFuel = true;
-    _layers = _layers.copyWith(infiniteFuel: _engine.infiniteFuel);
+    _layers = _layers.copyWith(infiniteFuel: true);
     _warpIndex = 0; // 1x
     _clock.warpFactor = _warpLevels[_warpIndex];
 
@@ -533,6 +548,15 @@ class _SimulationViewState extends State<SimulationView>
   void dispose() {
     _ticker.dispose();
     _events.unsubscribe(_onDomainEvent); // the shared bus outlives this screen
+    // Return the shared engine to its pre-flight idle state — don't leak this
+    // session's dev cheats / time-warp into the headless sim that keeps running.
+    _engine
+      ..infiniteFuel = _priorInfiniteFuel
+      ..disableOverheat = _priorDisableOverheat
+      ..disableAeroStress = _priorDisableAeroStress
+      ..disableImpact = _priorDisableImpact
+      ..rebuildAdvance();
+    _engine.clock.warpFactor = _priorWarp;
     // Remove the craft this flight session injected; the engine + its boot fleet
     // keep running headless (serving Unreal) after we leave flight mode.
     final injected = widget.injectedVessel;
