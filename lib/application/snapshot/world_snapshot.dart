@@ -378,8 +378,13 @@ class BodySnapshot {
     CelestialBody body,
     StarSystem system,
     BodyEphemeris ephemeris,
-    Epoch epoch,
-  ) {
+    Epoch epoch, {
+    // Orbit-ring resolution. The wire uses a coarse ring (the whole ring is ~90%
+    // of a WorldFrame; a full-res ring per body per tick bloats the frame to
+    // ~85 KB, which the engine bridge struggles to reassemble). The on-screen
+    // painter passes the default 96 for smooth ellipses.
+    int orbitSamples = 96,
+  }) {
     final pos = ephemeris.positionRelativeToRoot(body, system, epoch);
     // Spin about the body's +Z axis; angularVelocity = 2*pi / siderealPeriod.
     final spin = Quaternion.axisAngle(Vector3.unitZ, body.angularVelocity * epoch.seconds);
@@ -394,7 +399,8 @@ class BodySnapshot {
     final parent = system.parentOf(body);
     if (parent != null && body.orbitRadius != 0) {
       final parentRoot = ephemeris.positionRelativeToRoot(parent, system, epoch);
-      for (final p in ephemeris.orbitPathRelativeToParent(body, system, epoch: epoch)) {
+      for (final p in ephemeris.orbitPathRelativeToParent(body, system,
+          epoch: epoch, samples: orbitSamples)) {
         orbit
           ..add(parentRoot.x + p.x)
           ..add(parentRoot.y + p.y)
@@ -842,6 +848,9 @@ class WorldSnapshot {
     // STICKY on the engine side — it caches + joins by id — so a publisher can
     // omit them on most frames and re-send only ~1 Hz. Pass false to skip them.
     bool includeDescriptors = true,
+    // Orbit-ring resolution per body. The engine bridge passes a coarse value to
+    // keep the WorldFrame small enough to reassemble; the in-app painter uses 96.
+    int orbitSamples = 96,
   }) {
     final heights = terrain ?? TerrainHeights();
     final buildings = <String, BuildingSnapshot>{};
@@ -864,7 +873,8 @@ class WorldSnapshot {
           ? const {}
           : {
               for (final b in system.all)
-                b.id.value: BodySnapshot.of(b, system, ephemeris, epoch),
+                b.id.value:
+                    BodySnapshot.of(b, system, ephemeris, epoch, orbitSamples: orbitSamples),
             },
       descriptors: (system == null || !includeDescriptors)
           ? const {}

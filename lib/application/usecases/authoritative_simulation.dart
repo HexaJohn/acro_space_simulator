@@ -71,5 +71,8 @@ class AuthoritativeSimulation {
         // Static body descriptors are sticky on the engine side; the host gates
         // them to ~1 Hz (see SimHost.frameBytes) so they don't ship every frame.
         includeDescriptors: includeDescriptors,
+        // Coarse orbit rings keep the WorldFrame small enough for the renderer to
+        // reassemble (a full-res ring per body per tick bloats it to ~85 KB).
+        orbitSamples: 32,
       );
 }
