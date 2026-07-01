@@ -38,7 +38,16 @@ dependencies:
   # 3D backend. EXACT pins — flutter_scene/flutter_gpu are early-preview and
   # track the master channel; upgrades are deliberate (bump pin + re-verify),
   # never drift. See .fvmrc for the matching pinned Flutter master commit.
-  flutter_scene: 0.18.1
+  # Git-pinned past the 0.18.1 pub release: the published archive crashes on
+  # Windows (GLES shadow-sampler compile, d3dcompiler access violation —
+  # bdero/flutter_scene#182, fixed by #188 on master only). Master also adds
+  # the MeshData isolate remeshing path the voxel-terrain roadmap needs.
+  flutter_scene:
+    git:
+      url: https://github.com/bdero/flutter_scene.git
+      ref: d3ebfb6a589b475e08b3acce43a71ce8c5f0b72f
+      path: packages/flutter_scene
+  vector_math: ^2.4.0 # flutter_scene's math types (Matrix4, vm.Vector3)
 
 dev_dependencies:
   flutter_test:
