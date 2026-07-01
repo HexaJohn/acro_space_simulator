@@ -10,10 +10,13 @@
 #include "SpaceSimRenderer.generated.h"
 
 class USpaceSimSubsystem;
+class UGameInstance;
 class UStaticMesh;
 class UStaticMeshComponent;
 class UHierarchicalInstancedStaticMeshComponent;
 class UMaterialInterface;
+class UMaterialInstanceDynamic;
+class UPointLightComponent;
 
 /// One row of the asset table. Row name (FName) is the type-key the sim sends:
 /// a craft part name, a building spec type, or a celestial body id.
@@ -24,6 +27,48 @@ struct FAcroAssetRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, Category = "AcroSim") TSoftObjectPtr<UStaticMesh> Mesh;
 	UPROPERTY(EditAnywhere, Category = "AcroSim") FVector Scale = FVector::OneVector;
 	UPROPERTY(EditAnywhere, Category = "AcroSim") TSoftObjectPtr<UMaterialInterface> OverrideMaterial;
+};
+
+/// One row of the atmosphere table. Row name (FName) = celestial body id
+/// ('earth','mars','venus',...). Bodies with no row get no atmosphere.
+USTRUCT(BlueprintType)
+struct FAcroAtmosphereRow : public FTableRowBase
+{
+	GENERATED_BODY()
+	// Per-body look preset — a MaterialInstance of M_PlanetAtmosphere
+	// (see /Game/Acro/Atmosphere/Presets/MI_Atmo_*).
+	UPROPERTY(EditAnywhere, Category = "AcroSim") TSoftObjectPtr<UMaterialInterface> Material;
+	// Visible atmosphere thickness above the surface, in km.
+	UPROPERTY(EditAnywhere, Category = "AcroSim") float AtmosphereHeightKm = 100.f;
+};
+
+/// One row of the ring table. Row name (FName) = ringed body id
+/// ('saturn','jupiter','uranus','neptune'). Bodies with no row get no ring.
+USTRUCT(BlueprintType)
+struct FAcroRingRow : public FTableRowBase
+{
+	GENERATED_BODY()
+	// Flat ring-disk mesh (e.g. Cassini /Game/GPU/Assets/PlanetSphereRing).
+	UPROPERTY(EditAnywhere, Category = "AcroSim") TSoftObjectPtr<UStaticMesh> Mesh;
+	// Optional material override (slot 0). Null = keep the mesh's own (Ring_M).
+	UPROPERTY(EditAnywhere, Category = "AcroSim") TSoftObjectPtr<UMaterialInterface> Material;
+	// Ring outer edge as a multiple of the planet radius (Saturn ~2.3).
+	UPROPERTY(EditAnywhere, Category = "AcroSim") float OuterRadiusFactor = 2.3f;
+
+	// If non-empty, scatter these meshes as a HISM asteroid field instead of the flat
+	// disk (e.g. Cassini Asteroid_01/02/03). Body-local → follows the planet.
+	UPROPERTY(EditAnywhere, Category = "AcroSim") TArray<TSoftObjectPtr<UStaticMesh>> AsteroidMeshes;
+	UPROPERTY(EditAnywhere, Category = "AcroSim") int32 AsteroidCount = 3000;
+	// Ring inner edge as a multiple of planet radius (just above the surface).
+	UPROPERTY(EditAnywhere, Category = "AcroSim") float InnerRadiusFactor = 1.25f;
+	// Vertical scatter (ring thickness) as a fraction of planet radius.
+	UPROPERTY(EditAnywhere, Category = "AcroSim") float ThicknessFactor = 0.03f;
+	// Per-asteroid size as a fraction of planet radius (random in this range).
+	UPROPERTY(EditAnywhere, Category = "AcroSim") float AsteroidMinScaleFactor = 0.002f;
+	UPROPERTY(EditAnywhere, Category = "AcroSim") float AsteroidMaxScaleFactor = 0.012f;
+	// Material override for the asteroid HISMs — use the distance-fade LOD material so
+	// they fade OUT as the disk (Material, above) fades IN. Null = mesh's own material.
+	UPROPERTY(EditAnywhere, Category = "AcroSim") TSoftObjectPtr<UMaterialInterface> AsteroidMaterial;
 };
 
 UCLASS()
@@ -103,6 +148,46 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim")
 	float WorldScale = 1.0f;
 
+	// --- Atmospheres ---
+	// Body id -> atmosphere preset (Material + height). Bodies with no row get
+	// no atmosphere. Row name = body id ('earth','mars',...). See FAcroAtmosphereRow.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim|Atmosphere")
+	UDataTable* AtmosphereTable = nullptr;
+
+	// Proxy sphere the atmosphere shader draws on. It is rendered camera-enclosing
+	// (huge, depth-test off) and its WorldPosition is never read, so any sphere works.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim|Atmosphere")
+	TSoftObjectPtr<UStaticMesh> AtmosphereProxyMesh;
+
+	// The body whose position is the light source — each planet's sun direction is
+	// normalize(SunPos - PlanetPos), so every planet is lit from its own angle.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim|Atmosphere")
+	FString SunBodyId = TEXT("sun");
+
+	// World radius (cm) of the proxy sphere. Must exceed the camera's distance to any
+	// body so the camera stays inside it (the fly-through fix). Default spans the system.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim|Atmosphere")
+	float AtmosphereProxyRadiusCm = 1.0e16f;
+
+	// Body id -> ring (mesh + material + extent). Bodies with no row get no ring.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim|Rings")
+	UDataTable* RingTable = nullptr;
+
+	// --- Sun light ---
+	// Spawn a movable point light on the star body so planets are lit from the real
+	// sun position (the atmosphere already reads the sun body directly, separately).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim|Sun")
+	bool bSpawnSunLight = true;
+	// Candela. Inverse-square over the scaled scene falls off HARD — at WorldScale
+	// 1e-6 the planets are ~1e5 m from the sun, so this needs to be large. Tune here.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim|Sun")
+	float SunLightIntensity = 5.0e13f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim|Sun")
+	FLinearColor SunLightColor = FLinearColor(1.0f, 0.96f, 0.9f);
+	// Max reach (cm) — must span to the outer planets you want lit.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AcroSim|Sun")
+	float SunLightAttenuationCm = 1.0e15f;
+
 private:
 	UFUNCTION()
 	void HandleWorldUpdated();
@@ -127,6 +212,11 @@ private:
 	UPROPERTY() TMap<FString, AActor*> VesselActors; // vessel id -> actor
 	UPROPERTY() TMap<FString, UStaticMeshComponent*> PartComps; // "vesselId/partId" -> comp
 	UPROPERTY() TMap<FString, UHierarchicalInstancedStaticMeshComponent*> BuildingHisms; // "bodyId|type" -> HISM
+	UPROPERTY() TMap<FString, UStaticMeshComponent*> AtmoComps;        // body id -> atmosphere proxy comp
+	UPROPERTY() TMap<FString, UMaterialInstanceDynamic*> AtmoMIDs;     // body id -> atmosphere MID
+	UPROPERTY() UPointLightComponent* SunLight = nullptr;             // point light on the star body
+	UPROPERTY() TMap<FString, UStaticMeshComponent*> RingComps;       // body id -> ring disk comp
+	TSet<FString> AsteroidRingBuilt;                                  // body ids whose asteroid ring is scattered
 
 	TMap<FString, float> BodyRadiiCm;       // body id -> radius (cm), for terrain baseline
 	TMap<FString, FVector> BuildingTypeScale; // building type -> asset table scale
@@ -138,7 +228,14 @@ private:
 	// EDITOR ONLY: there is no GameInstance (and thus no USpaceSimSubsystem) in the
 	// editor world, so the renderer owns one here and pumps it from its editor
 	// Tick. Null at runtime/PIE, where the real GameInstance subsystem is used.
-	UPROPERTY(Transient) USpaceSimSubsystem* EditorSim = nullptr;
+	// NOT UPROPERTY on purpose: as an actor property it gets snapshotted into undo
+	// transactions, and the transaction buffer then holds it past End-PIE GC -> crash.
+	// Kept alive manually via AddToRoot()/RemoveFromRoot() instead.
+	USpaceSimSubsystem* EditorSim = nullptr;
+	// A GameInstanceSubsystem's ClassWithin is UGameInstance, so EditorSim must be
+	// created UNDER a UGameInstance. The editor world has none, so we host a transient
+	// one (in the transient package) solely as EditorSim's outer (never Init'd / used).
+	UGameInstance* EditorGameInstance = nullptr;
 
 	// Editor-preview connection bookkeeping: the endpoint currently dialed (so a
 	// Host/Port edit reconnects), a throttle for retrying a dead/missing server,
