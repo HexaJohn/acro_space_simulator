@@ -80,10 +80,18 @@ class _IoSimBridge implements SimBridge {
     print('SimBridge: renderer disconnected (${_clients.length} left).');
   }
 
+  int _publishCount = 0;
+
   @override
   void publish(Uint8List worldFrame) {
     _latest = worldFrame;
     final framed = frameMessage(worldFrame);
+    // Periodic size readout so an oversize/mis-framed payload is obvious.
+    if (_clients.isNotEmpty && _publishCount++ % 120 == 0) {
+      // ignore: avoid_print
+      print('SimBridge: publishing ${worldFrame.length} B payload '
+          '(${framed.length} B framed) to ${_clients.length} client(s).');
+    }
     for (final client in _clients.toList()) {
       try {
         client.add(framed);
