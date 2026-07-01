@@ -23,6 +23,7 @@ import '../../domain/simulation/domain_event.dart';
 import '../../domain/planetary/atmospheric_composition.dart';
 import '../../domain/universe/celestial_body.dart' show BodyId, CelestialBody;
 import '../../domain/vessel/vessel.dart';
+import '../app_version.dart';
 import '../sim_engine.dart';
 import 'debug_layers.dart';
 import 'nav_ball.dart';
@@ -30,9 +31,6 @@ import 'screens/city_builder_screen.dart';
 import 'texture_cache.dart';
 import 'top_down_painter.dart';
 
-/// Build stamp shown bottom-left so a deploy can be confirmed live (cache
-/// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 2026-06-19.173';
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -1402,7 +1400,7 @@ class _SimulationViewState extends State<SimulationView>
                         const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                     color: const Color(0xCC00FF7F),
                     child: Text(
-                      kBuildStamp,
+                      appVersionLabel,
                       style: const TextStyle(
                         color: Color(0xFF001A0D),
                         fontSize: 12,
