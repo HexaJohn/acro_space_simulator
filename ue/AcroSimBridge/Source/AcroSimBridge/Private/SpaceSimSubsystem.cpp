@@ -193,10 +193,31 @@ void USpaceSimSubsystem::IngestWorldFrame(const uint8* Data, int32 Len)
 	flatbuffers::Verifier Verifier(LatestBytes.GetData(), LatestBytes.Num());
 	if (!acro::wire::VerifyWorldFrameBuffer(Verifier))
 	{
+		// DIAGNOSTIC (throttled): a persistent verify failure = the frame's schema
+		// doesn't match this build's generated header (stale sim_generated.h).
+		static int32 FailDiag = 0;
+		if (FailDiag++ % 60 == 0)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("AcroSim: frame verify FAILED (%d bytes) — stale generated header?"), Len);
+		}
 		return; // corrupt/partial — drop
 	}
 	const acro::wire::WorldFrame* World = acro::wire::GetWorldFrame(LatestBytes.GetData());
 	WorldTick = World->tick();
+
+	// DIAGNOSTIC (throttled ~1/s at 60 Hz): confirms frames are being parsed and
+	// how many bodies/vessels came through. If you never see this line, the pump
+	// isn't running (editor viewport not in Realtime); if you see it but the
+	// Outliner is empty, the renderer isn't spawning (mesh / WorldScale).
+	static int32 OkDiag = 0;
+	if (OkDiag++ % 60 == 0)
+	{
+		const int32 NumBodies = World->bodies() ? static_cast<int32>(World->bodies()->size()) : 0;
+		const int32 NumVessels = World->vessels() ? static_cast<int32>(World->vessels()->size()) : 0;
+		UE_LOG(LogTemp, Log, TEXT("AcroSim: ingested frame tick=%lld bodies=%d vessels=%d"),
+			static_cast<long long>(WorldTick), NumBodies, NumVessels);
+	}
 
 	// Body root positions in SIM metres (FVector used only as a triple here).
 	TMap<FString, FVector> BodyRootSim;

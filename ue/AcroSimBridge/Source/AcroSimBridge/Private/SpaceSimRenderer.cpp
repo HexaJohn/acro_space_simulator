@@ -4,10 +4,13 @@
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "DrawDebugHelpers.h"
+#include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "Materials/MaterialInterface.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "Components/PointLightComponent.h"
 
 ASpaceSimRenderer::ASpaceSimRenderer()
 {
@@ -17,6 +20,9 @@ ASpaceSimRenderer::ASpaceSimRenderer()
 	PrimaryActorTick.bCanEverTick = true;
 	PrimaryActorTick.bStartWithTickEnabled = true;
 	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
+
+	// Any sphere works as the atmosphere proxy — its WorldPosition is never read.
+	AtmosphereProxyMesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Engine/BasicShapes/Sphere.Sphere")));
 }
 
 void ASpaceSimRenderer::Tick(float DeltaSeconds)
@@ -31,6 +37,22 @@ void ASpaceSimRenderer::Tick(float DeltaSeconds)
 		return;
 	}
 
+	// While a PIE/game session is running, do NOT keep the editor-preview subsystem
+	// alive. Its transient GameInstance gets held by the transaction buffer and lingers
+	// into End-PIE GC verification -> "PIE object still referenced" assert -> crash.
+	// Tear it down; the preview rebuilds automatically once PIE stops.
+	if (GEngine)
+	{
+		for (const FWorldContext& WC : GEngine->GetWorldContexts())
+		{
+			if (WC.WorldType == EWorldType::PIE)
+			{
+				TeardownEditorPreview();
+				return;
+			}
+		}
+	}
+
 	// Editor preview disabled (or just toggled off): tear down any live connection.
 	if (!bRunInEditor)
 	{
@@ -42,21 +64,36 @@ void ASpaceSimRenderer::Tick(float DeltaSeconds)
 	// it can also reconnect on endpoint changes / drops).
 	if (!EditorSim)
 	{
-		EditorSim = NewObject<USpaceSimSubsystem>(this);
+		// USpaceSimSubsystem is a UGameInstanceSubsystem — its ClassWithin is
+		// UGameInstance, so it CANNOT be NewObject'd under the actor (UE ensures on
+		// an invalid Outer). The editor world has no GameInstance, so host a
+		// transient one purely as the required outer; the subsystem never calls
+		// into it (it only uses sockets), so an uninitialised instance is fine.
+		if (!EditorGameInstance)
+		{
+			// Outer to the TRANSIENT PACKAGE (not this actor) + RF_Transient. If it is a
+			// subobject of the actor, PIE duplicates it and the transaction buffer holds
+			// it, tripping the "PIE object still referenced" GC assert on End PIE (crash).
+			// The UPROPERTY(Transient) refs below keep both alive; teardown nulls them.
+			EditorGameInstance = NewObject<UGameInstance>(GetTransientPackage(), UGameInstance::StaticClass(), NAME_None, RF_Transient);
+			EditorGameInstance->AddToRoot(); // not a UPROPERTY — root it so GC keeps it
+		}
+		EditorSim = NewObject<USpaceSimSubsystem>(EditorGameInstance, USpaceSimSubsystem::StaticClass(), NAME_None, RF_Transient);
+		EditorSim->AddToRoot();
 		EditorSim->OnWorldUpdated.AddDynamic(this, &ASpaceSimRenderer::HandleWorldUpdated);
 		SimRef = EditorSim;
 	}
 
-	// (Re)connect on: first run, a Host/Port edit, a dropped socket, or a stale
-	// stream (server restarted -> half-open socket that never delivers frames).
-	// Throttled so a missing server isn't dialed every frame.
+	// (Re)connect ONLY on first run, a Host/Port edit, or a genuinely dropped
+	// socket — never on a "stale" frame gap. A large frame spans many non-blocking
+	// Recv calls / editor ticks, and Connect() calls Disconnect() which RESETS the
+	// RxBuffer: a staleness re-dial would wipe a frame mid-assembly so it could
+	// never complete, and the link flapped every few seconds. Throttled so a
+	// missing server isn't dialed every frame.
 	if (bAutoConnect)
 	{
 		const bool bEndpointChanged = (Host != ConnectedHost || Port != ConnectedPort);
-		const double Now = FPlatformTime::Seconds();
-		const bool bStale = EditorSim->IsConnected() && LastFrameTime > 0.0 &&
-							(Now - LastFrameTime) > 5.0;
-		if (bEndpointChanged || !EditorSim->IsConnected() || bStale)
+		if (bEndpointChanged || !EditorSim->IsConnected())
 		{
 			ReconnectAccum += DeltaSeconds;
 			if (bEndpointChanged || ReconnectAccum >= 2.0f)
@@ -65,7 +102,6 @@ void ASpaceSimRenderer::Tick(float DeltaSeconds)
 				EditorSim->Connect(Host, Port); // Connect() closes any prior socket first
 				ConnectedHost = Host;
 				ConnectedPort = Port;
-				LastFrameTime = Now; // grace before the next staleness check
 			}
 		}
 		else
@@ -126,7 +162,13 @@ void ASpaceSimRenderer::TeardownEditorPreview()
 	{
 		EditorSim->OnWorldUpdated.RemoveDynamic(this, &ASpaceSimRenderer::HandleWorldUpdated);
 		EditorSim->Disconnect(); // close the editor-owned socket
+		EditorSim->RemoveFromRoot();
 		EditorSim = nullptr;
+	}
+	if (EditorGameInstance)
+	{
+		EditorGameInstance->RemoveFromRoot();
+		EditorGameInstance = nullptr;
 	}
 	ConnectedHost.Reset();
 	ConnectedPort = 0;
@@ -152,6 +194,11 @@ void ASpaceSimRenderer::DestroySpawnedActors()
 	BuildingInstances.Reset();
 	BuildingTypeScale.Reset();
 	BodyRadiiCm.Reset();
+	AtmoComps.Reset();
+	AtmoMIDs.Reset();
+	RingComps.Reset();
+	AsteroidRingBuilt.Reset();
+	SunLight = nullptr;
 }
 
 void ASpaceSimRenderer::HandleWorldUpdated()
@@ -191,8 +238,7 @@ AActor* ASpaceSimRenderer::SpawnVesselActor()
 	// Transient + outliner-hidden: these are live render proxies, never saved into
 	// the map (matters for the editor-preview path, harmless at runtime).
 	FActorSpawnParameters SpawnParams;
-	SpawnParams.ObjectFlags |= RF_Transient;
-	SpawnParams.bHideFromSceneOutliner = true;
+	SpawnParams.ObjectFlags |= RF_Transient; // never saved into the map
 	AActor* A = GetWorld()->SpawnActor<AActor>(SpawnParams);
 	if (!A) return nullptr;
 	USceneComponent* Root = NewObject<USceneComponent>(A, TEXT("CraftRoot"));
@@ -204,6 +250,14 @@ AActor* ASpaceSimRenderer::SpawnVesselActor()
 void ASpaceSimRenderer::UpdateBodies(USpaceSimSubsystem* Sim)
 {
 	TSet<FString> Seen;
+
+	// The star's UE-space position drives every planet's sun direction below.
+	FVector SunWorldPos = FVector::ZeroVector;
+	for (const FSimBody& Star : Sim->GetBodies())
+	{
+		if (Star.Id == SunBodyId) { SunWorldPos = Star.Position * WorldScale; break; }
+	}
+
 	for (const FSimBody& B : Sim->GetBodies())
 	{
 		Seen.Add(B.Id);
@@ -213,8 +267,7 @@ void ASpaceSimRenderer::UpdateBodies(USpaceSimSubsystem* Sim)
 		if (!Actor)
 		{
 			FActorSpawnParameters SpawnParams;
-			SpawnParams.ObjectFlags |= RF_Transient;       // never saved into the map
-			SpawnParams.bHideFromSceneOutliner = true;     // keep the editor outliner clean
+			SpawnParams.ObjectFlags |= RF_Transient; // never saved into the map
 			Actor = GetWorld()->SpawnActor<AActor>(SpawnParams);
 			if (!Actor) continue;
 			// Scale-1 root so attached buildings/HISMs are NOT multiplied by the
@@ -246,6 +299,10 @@ void ASpaceSimRenderer::UpdateBodies(USpaceSimSubsystem* Sim)
 								: 1.f;
 			MC->SetRelativeScale3D(FVector(K) * TableScale);
 
+			// The star is a light source, not an occluder: if its own mesh casts a
+			// shadow it blocks the point light at its centre and nothing gets lit.
+			if (B.Id == SunBodyId) MC->SetCastShadow(false);
+
 			BodyActors.Add(B.Id, Actor);
 #if WITH_EDITOR
 			Actor->SetActorLabel(FString::Printf(TEXT("Body_%s"), *B.Id));
@@ -255,6 +312,154 @@ void ASpaceSimRenderer::UpdateBodies(USpaceSimSubsystem* Sim)
 		// WorldScale. Buildings parented under the root inherit it.
 		Actor->SetActorScale3D(FVector(WorldScale));
 		Actor->SetActorLocationAndRotation(B.Position * WorldScale, B.Orientation);
+
+		// --- Sun point light (on the star body) ---
+		if (bSpawnSunLight && B.Id == SunBodyId)
+		{
+			if (!SunLight)
+			{
+				SunLight = NewObject<UPointLightComponent>(Actor, TEXT("SunLight"));
+				SunLight->SetMobility(EComponentMobility::Movable);
+				SunLight->RegisterComponent();
+				SunLight->AttachToComponent(Actor->GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
+				SunLight->SetUsingAbsoluteScale(true); // don't inherit the body's WorldScale
+			}
+			SunLight->SetIntensity(SunLightIntensity);
+			SunLight->SetLightColor(SunLightColor);
+			SunLight->SetAttenuationRadius(SunLightAttenuationCm);
+			SunLight->SetSourceRadius(B.RadiusCm * WorldScale); // soft-shadow size = the sun disk
+		}
+
+		// --- Atmosphere (optional, per body) ---
+		// A camera-enclosing proxy sphere drawing M_PlanetAtmosphere. Its center
+		// (ObjectPosition) is the body center; PlanetRadius/AtmosphereRadius are the
+		// visual (WorldScale'd) radii; SunDirection points at the star body.
+		if (AtmosphereTable)
+		{
+			const FAcroAtmosphereRow* ARow =
+				AtmosphereTable->FindRow<FAcroAtmosphereRow>(FName(*B.Id), TEXT(""), false);
+			if (ARow && !ARow->Material.IsNull())
+			{
+				UStaticMeshComponent* Atmo = AtmoComps.FindRef(B.Id);
+				if (!Atmo)
+				{
+					Atmo = NewObject<UStaticMeshComponent>(Actor, *FString::Printf(TEXT("Atmo_%s"), *B.Id));
+					Atmo->RegisterComponent();
+					Atmo->AttachToComponent(Actor->GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
+					if (UStaticMesh* Sphere = AtmosphereProxyMesh.LoadSynchronous()) Atmo->SetStaticMesh(Sphere);
+					Atmo->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+					Atmo->SetCastShadow(false);
+					UMaterialInstanceDynamic* MID =
+						UMaterialInstanceDynamic::Create(ARow->Material.LoadSynchronous(), Atmo);
+					Atmo->SetMaterial(0, MID);
+					AtmoComps.Add(B.Id, Atmo);
+					AtmoMIDs.Add(B.Id, MID);
+				}
+				// Hold the proxy at AtmosphereProxyRadiusCm in WORLD space (it is a child
+				// of the WorldScale'd actor, so divide that back out).
+				float UnitR = 50.f;
+				if (UStaticMesh* PM = AtmosphereProxyMesh.LoadSynchronous())
+				{
+					const float R = PM->GetBounds().SphereRadius;
+					if (R > KINDA_SMALL_NUMBER) UnitR = R;
+				}
+				const float WS = (FMath::Abs(WorldScale) > KINDA_SMALL_NUMBER) ? WorldScale : 1.f;
+				Atmo->SetRelativeScale3D(FVector((AtmosphereProxyRadiusCm / UnitR) / WS));
+				if (UMaterialInstanceDynamic* MID = AtmoMIDs.FindRef(B.Id))
+				{
+					MID->SetScalarParameterValue(TEXT("PlanetRadius"), B.RadiusCm * WorldScale);
+					MID->SetScalarParameterValue(TEXT("AtmosphereRadius"),
+						(B.RadiusCm + ARow->AtmosphereHeightKm * 100000.f) * WorldScale);
+					const FVector ToSun = (SunWorldPos - B.Position * WorldScale).GetSafeNormal();
+					MID->SetVectorParameterValue(TEXT("SunDirection"),
+						FLinearColor(ToSun.X, ToSun.Y, ToSun.Z, 0.f));
+				}
+			}
+		}
+
+		// --- Rings (optional, per body) ---
+		if (RingTable)
+		{
+			const FAcroRingRow* RRow = RingTable->FindRow<FAcroRingRow>(FName(*B.Id), TEXT(""), false);
+			if (RRow)
+			{
+				// Disk (fades IN with camera distance via its material) — independent of
+				// the asteroids so a body can carry BOTH for a LOD crossfade.
+				if (!RRow->Mesh.IsNull())
+				{
+					UStaticMeshComponent* Ring = RingComps.FindRef(B.Id);
+					if (!Ring)
+					{
+						Ring = NewObject<UStaticMeshComponent>(Actor, *FString::Printf(TEXT("Ring_%s"), *B.Id));
+						Ring->RegisterComponent();
+						Ring->AttachToComponent(Actor->GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
+						if (UStaticMesh* RM = RRow->Mesh.LoadSynchronous()) Ring->SetStaticMesh(RM);
+						if (!RRow->Material.IsNull()) Ring->SetMaterial(0, RRow->Material.LoadSynchronous());
+						Ring->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+						Ring->SetCastShadow(false);
+						RingComps.Add(B.Id, Ring);
+					}
+					// Outer edge = OuterRadiusFactor * planet radius; child of the WorldScale'd
+					// root + sized off RadiusCm, so it tracks the planet's size + equatorial tilt.
+					float RingUnitR = 1.f;
+					if (UStaticMesh* RM = RRow->Mesh.LoadSynchronous())
+					{
+						const FVector BE = RM->GetBounds().BoxExtent;
+						RingUnitR = FMath::Max(BE.X, BE.Y);
+						if (RingUnitR < KINDA_SMALL_NUMBER) RingUnitR = RM->GetBounds().SphereRadius;
+					}
+					if (RingUnitR < KINDA_SMALL_NUMBER) RingUnitR = 1.f;
+					Ring->SetRelativeScale3D(FVector(RRow->OuterRadiusFactor * B.RadiusCm / RingUnitR));
+				}
+
+				// Asteroid field (fades OUT with camera distance via its material): scatter
+				// ONCE into HISMs in body-LOCAL space so it rides the planet's transform.
+				// Deterministic per body id. Independent of the disk above.
+				if (RRow->AsteroidMeshes.Num() > 0 && !AsteroidRingBuilt.Contains(B.Id))
+				{
+					AsteroidRingBuilt.Add(B.Id);
+					UMaterialInterface* AstMat = RRow->AsteroidMaterial.IsNull() ? nullptr : RRow->AsteroidMaterial.LoadSynchronous();
+					TArray<UHierarchicalInstancedStaticMeshComponent*> Hisms;
+					for (const TSoftObjectPtr<UStaticMesh>& MeshPtr : RRow->AsteroidMeshes)
+					{
+						UStaticMesh* AM = MeshPtr.LoadSynchronous();
+						if (!AM) continue;
+						UHierarchicalInstancedStaticMeshComponent* H =
+							NewObject<UHierarchicalInstancedStaticMeshComponent>(Actor);
+						H->RegisterComponent();
+						H->AttachToComponent(Actor->GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
+						H->SetStaticMesh(AM);
+						if (AstMat) H->SetMaterial(0, AstMat); // distance-fade LOD material
+						H->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+						H->SetCastShadow(false);
+						Hisms.Add(H);
+					}
+					if (Hisms.Num() > 0)
+					{
+						FRandomStream Rand(GetTypeHash(B.Id));
+						const float Inner = RRow->InnerRadiusFactor * B.RadiusCm;
+						const float Outer = RRow->OuterRadiusFactor * B.RadiusCm;
+						const float Thick = RRow->ThicknessFactor * B.RadiusCm;
+						for (int32 i = 0; i < RRow->AsteroidCount; ++i)
+						{
+							UHierarchicalInstancedStaticMeshComponent* H = Hisms[Rand.RandHelper(Hisms.Num())];
+							const float Ang = Rand.FRandRange(0.f, 2.f * PI);
+							const float Rr = FMath::Sqrt(Rand.FRandRange(Inner * Inner, Outer * Outer)); // area-uniform radial
+							const FVector Pos(Rr * FMath::Cos(Ang), Rr * FMath::Sin(Ang), Rand.FRandRange(-Thick, Thick));
+							const FRotator Rot(Rand.FRandRange(0.f, 360.f), Rand.FRandRange(0.f, 360.f), Rand.FRandRange(0.f, 360.f));
+							float MeshR = 50.f;
+							if (UStaticMesh* SM = H->GetStaticMesh())
+							{
+								const float Rb = SM->GetBounds().SphereRadius;
+								if (Rb > KINDA_SMALL_NUMBER) MeshR = Rb;
+							}
+							const float DesiredR = Rand.FRandRange(RRow->AsteroidMinScaleFactor, RRow->AsteroidMaxScaleFactor) * B.RadiusCm;
+							H->AddInstance(FTransform(Rot, Pos, FVector(DesiredR / MeshR))); // local space
+						}
+					}
+				}
+			}
+		}
 
 		// Body orbit ring ("rails") about its parent: world-space cm points,
 		// scaled to match. Root bodies (the Sun) carry no ring, so this no-ops.
@@ -284,7 +489,12 @@ void ASpaceSimRenderer::UpdateBodies(USpaceSimSubsystem* Sim)
 				if (I.Value().Key.StartsWith(Prefix)) I.RemoveCurrent();
 			}
 			BodyRadiiCm.Remove(It.Key());
-			if (It.Value()) It.Value()->Destroy(); // destroys its child HISMs too
+			AtmoComps.Remove(It.Key());  // proxy component dies with the body actor below
+			AtmoMIDs.Remove(It.Key());
+			RingComps.Remove(It.Key());
+			AsteroidRingBuilt.Remove(It.Key());
+			if (It.Key() == SunBodyId) SunLight = nullptr; // dies with the star actor
+			if (It.Value()) It.Value()->Destroy(); // destroys its child HISMs + atmosphere too
 			It.RemoveCurrent();
 		}
 	}
