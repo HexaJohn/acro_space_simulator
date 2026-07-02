@@ -30,8 +30,13 @@ class SceneHudOverlayPainter extends CustomPainter {
       // but moon systems span <= ~4e9 m while interplanetary gaps start at
       // ~6e10 — a camera within 1e10 m is "visiting" that system.
       if (b.isMoon && b.worldRel.length > 1e10) continue;
+      // Anchor: 10 px right of the sphere's edge, atmosphere included
+      // (the scene shell extends ~6% past the surface), vertically
+      // centred on the body.
+      final edgePx =
+          b.hasAtmosphere ? b.radiusPx * 1.06 : b.radiusPx;
       _label(canvas, b.name,
-          centre + Offset(b.x + b.radiusPx + 4, -b.y - 6),
+          centre + Offset(b.x + edgePx + 10, -b.y - 5),
           const Color(0xFF9FB4CC));
     }
     for (final v in snapshot.vessels) {

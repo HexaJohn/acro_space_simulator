@@ -46,7 +46,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.0.208';
+const String kBuildStamp = 'build 0.3.0.209';
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -1510,13 +1510,25 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                 // input handling, and the HUD overlays above are shared.
                 if (_renderBackend == RenderBackend.flutterScene) ...[
                   Positioned.fill(
-                    child: SceneRenderView(
-                      camera: _camera,
-                      textures: _textures,
-                      snapshot: _sceneWorld,
-                      focusVesselId: _focusVessel?.value,
-                      focusBodyId: _focusBody?.value,
-                    ),
+                    child: LayoutBuilder(builder: (context, constraints) {
+                      // Keep the shared focal length in sync with the REAL
+                      // canvas height in scene mode too. Only the software
+                      // branch updated it before, so in scene mode the HUD
+                      // overlay's projection used a stale height: labels
+                      // scaled differently from the rendered bodies and
+                      // drifted apart, worse with distance from centre.
+                      if (constraints.maxHeight.isFinite &&
+                          constraints.maxHeight > 0) {
+                        _screenH = constraints.maxHeight;
+                      }
+                      return SceneRenderView(
+                        camera: _camera,
+                        textures: _textures,
+                        snapshot: _sceneWorld,
+                        focusVesselId: _focusVessel?.value,
+                        focusBodyId: _focusBody?.value,
+                      );
+                    }),
                   ),
                   // Painter-parity text HUD (telemetry block + name labels)
                   // from the SAME presenter snapshot the software path uses.
