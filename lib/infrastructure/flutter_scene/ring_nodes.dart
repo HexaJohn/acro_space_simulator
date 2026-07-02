@@ -378,9 +378,13 @@ class _RockField {
   // camera — far below float32 resolution in a planet-scaled frame. The
   // field therefore hangs off its OWN scene-root node anchored at the
   // camera's grid cell (double-precision anchor, metre-scale offsets).
-  static const double visRM = 2200.0;
-  static const double _cellM = 220.0;
-  static const int _rocksPerCell = 24;
+  // 10x density over the 220 m / 24-per-cell field: finer cells, more
+  // rocks, HALF the mesh radius so the instance count stays tractable
+  // (~15k in dense bands — the billboard far field now starts at ~0.9 km
+  // and carries everything beyond).
+  static const double visRM = 1100.0;
+  static const double _cellM = 110.0;
+  static const int _rocksPerCell = 60;
   static const double _thicknessM = 90.0; // +/- around the plane
   static const double _rockMinM = 0.4, _rockMaxM = 2.6; // radii (0.8-5 m)
 
