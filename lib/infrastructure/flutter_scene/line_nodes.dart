@@ -49,7 +49,12 @@ class LineNodes {
   // render in either frame. Parent-relative (default) co-moves with the
   // body and traces the orbit as a ring; inertial (sun-relative) keeps the
   // absolute points and traces the true wavy path through space.
-  final Map<String, List<({Vector3 abs, Vector3 rel})>> _trails = {};
+  // [body] is the frame the rel offset was captured in: after an SOI
+  // switch (Earth -> Moon) the old crumbs' offsets are meaningless in the
+  // new parent's frame — "moonPos + earthRel" painted garbage streaks — so
+  // the relative trail drops them and restarts at SOI entry.
+  final Map<String, List<({Vector3 abs, Vector3 rel, String body})>> _trails =
+      {};
   static const int _trailCap = 240;
   static const double _trailMinStepM = 500.0;
 
@@ -188,25 +193,31 @@ class LineNodes {
       final trail = _trails.putIfAbsent(v.id, () => []);
       if (trail.isEmpty ||
           trail.last.abs.distanceTo(world) >= _trailMinStepM) {
-        trail.add((abs: world, rel: relPos));
+        trail.add((abs: world, rel: relPos, body: v.body));
         if (trail.length > _trailCap) trail.removeAt(0);
       }
       if (v.id == focusVesselId && trail.length >= 2) {
+        // Relative frame: only crumbs captured in the CURRENT parent's
+        // frame are renderable there (see _trails doc).
         final pts = [
-          for (final p in trail)
-            origin.worldToScene(
-                inertialTrails ? p.abs : bodyPos + p.rel),
+          if (inertialTrails)
+            for (final p in trail) origin.worldToScene(p.abs)
+          else
+            for (final p in trail)
+              if (p.body == v.body) origin.worldToScene(bodyPos + p.rel),
         ];
-        final colors = <vm.Vector4>[
-          for (var i = 0; i < pts.length; i++)
-            () {
-              final a = _trailColor.w * i / (pts.length - 1);
-              return vm.Vector4(_trailColor.x * a, _trailColor.y * a,
-                  _trailColor.z * a, a);
-            }(),
-        ];
-        _setSpec('trail/${v.id}', seen, pts, _trailColor,
-            width: 2.0, perVertexColor: colors);
+        if (pts.length >= 2) {
+          final colors = <vm.Vector4>[
+            for (var i = 0; i < pts.length; i++)
+              () {
+                final a = _trailColor.w * i / (pts.length - 1);
+                return vm.Vector4(_trailColor.x * a, _trailColor.y * a,
+                    _trailColor.z * a, a);
+              }(),
+          ];
+          _setSpec('trail/${v.id}', seen, pts, _trailColor,
+              width: 2.0, perVertexColor: colors);
+        }
       }
     }
 
