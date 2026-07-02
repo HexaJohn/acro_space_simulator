@@ -355,6 +355,7 @@ class _RockField {
   fs.Node? _node;
   fs.InstancedMesh? _mesh;
   fs.PhysicallyBasedMaterial? _rockMaterial;
+  bool _texApplied = false;
   fs.Node? _farNode;
   fs.BillboardGeometry? _farGeo;
   fs.Scene? _inScene;
@@ -460,17 +461,24 @@ class _RockField {
     final mesh = _mesh ??= fs.InstancedMesh(
       geometry: uvSphereZUp(segments: 6, rings: 4),
       // A slice of the Moon's albedo gives the rocks cratered texture
-      // instead of flat colour; the ring-hued base factor tints it. The
-      // map may still be decoding on first spawn — retried on rebuilds.
+      // instead of flat colour; the ring-hued base factor tints it.
       material: _rockMaterial ??= fs.PhysicallyBasedMaterial()
-        ..baseColorTexture = textures.texture('moon')
         ..baseColorFactor = _rockColor()
         ..roughnessFactor = 1.0
         ..metallicFactor = 0.0,
     );
-    final mat = _rockMaterial;
-    if (mat != null && mat.baseColorTexture == null) {
-      mat.baseColorTexture = textures.texture('moon');
+    // The moon map may still be DECODING on first spawn (nothing else
+    // requests it unless the Moon itself was rendered) — retry on rebuilds
+    // until it lands. Track with a flag: reading baseColorTexture back
+    // returns the white PLACEHOLDER, never null, so a null-check retry
+    // silently never fired and the rocks stayed untextured whenever the
+    // cache was cold.
+    if (!_texApplied) {
+      final t = textures.texture('moon');
+      if (t != null) {
+        _rockMaterial!.baseColorTexture = t;
+        _texApplied = true;
+      }
     }
     if (_node == null) {
       final n = fs.Node()..addComponent(fs.InstancedMeshComponent(mesh));
@@ -612,6 +620,7 @@ class _RockField {
       _node = null;
       _mesh = null;
       _rockMaterial = null;
+      _texApplied = false;
       _builtAt = null;
       _anchor = null;
     }

@@ -35,6 +35,7 @@ import '../../domain/planetary/atmospheric_composition.dart';
 import '../../domain/universe/celestial_body.dart' show BodyId, CelestialBody;
 import '../../domain/vessel/vessel.dart';
 import '../sample_world.dart';
+import '../flutter_scene/atmosphere_nodes.dart';
 import '../flutter_scene/line_nodes.dart';
 import '../flutter_scene/render_backend.dart';
 import '../flutter_scene/ring_nodes.dart';
@@ -51,7 +52,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.0.233';
+const String kBuildStamp = 'build 0.3.0.234';
 
 /// What the camera treats as "up" while orbiting the focus.
 enum CameraUpMode {
@@ -1377,7 +1378,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       ('Orbit rails', _layers.orbitRails, (v) => _layers.copyWith(orbitRails: v)),
       ('Planet texture', _layers.planetTexture, (v) => _layers.copyWith(planetTexture: v)),
       ('Sphere shadow', _layers.sphereShadow, (v) => _layers.copyWith(sphereShadow: v)),
-      ('Atmo halo', _layers.atmoHalo, (v) => _layers.copyWith(atmoHalo: v)),
+      // Drives BOTH renderers: the software painter's halo layer and the
+      // 3D backend's raymarched shells.
+      ('Atmo halo', _layers.atmoHalo, (v) {
+        AtmosphereNodes.hidden = !v;
+        return _layers.copyWith(atmoHalo: v);
+      }),
       ('Atmo overlay', _layers.atmoOverlay, (v) => _layers.copyWith(atmoOverlay: v)),
       ('Nav-ball', _layers.navBall, (v) => _layers.copyWith(navBall: v)),
       ('Exaggerate star', _layers.exaggerateStar, (v) => _layers.copyWith(exaggerateStar: v)),

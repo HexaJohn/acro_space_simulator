@@ -111,18 +111,11 @@ class AtmosphereNodes {
     // (shell/10) — 0.04 on Jupiter's 2000 km shell matches Earth's haze.
     // Live-tuned via ext.acro.atmo (1.3-1.5 washed the discs to cream).
     'jupiter': AtmoStyle(shellHeightM: 2.0e6, heightScale: 3.0, falloff: 5.0, density: 0.04, tintMix: 0.8),
-    'saturn': AtmoStyle(
-      shellHeightM: 1.8e6,
-      heightScale: 1.0,
-      falloff: 5.0,
-      density: 0.01,
-      intensity: 10,
-      tintMix: 0.8,
-    ),
+    'saturn': AtmoStyle(shellHeightM: 1.8e6, heightScale: 5, falloff: 1.0, density: 0.04, intensity: 10, tintMix: 0.8),
     'uranus': AtmoStyle(
       shellHeightM: 8.0e5,
       heightScale: 3.0,
-      falloff: 5.0,
+      falloff: 2.0,
       density: 0.09,
       tintArgb: 0xFFA8D8DC,
       tintMix: 0.85,
@@ -136,6 +129,11 @@ class AtmosphereNodes {
       tintMix: 0.85,
     ),
   };
+
+  /// Runtime kill switch for ALL shells — the debug panel's 'Atmo halo'
+  /// layer toggle drives this for the 3D backend (the compile-time
+  /// SCENE_NO_ATMO dart-define still exists for bisection).
+  static bool hidden = false;
 
   /// The compiled atmosphere fragment shader, loaded once per app from the
   /// bundle the build hook produces. Null until [loadShader] completes
@@ -157,8 +155,12 @@ class AtmosphereNodes {
   void update(WorldSnapshot snap, FloatingOrigin origin, {Vector3 cameraEye = Vector3.zero, Vector3? starWorld}) {
     final shader = _shader;
     if (shader == null) return; // bundle still loading
+    // Hidden: seen stays empty, so the removeWhere below strips every
+    // live shell this frame.
     final seen = <String>{};
-    for (final b in snap.bodies.values) {
+    final bodies =
+        hidden ? const Iterable<BodySnapshot>.empty() : snap.bodies.values;
+    for (final b in bodies) {
       final d = snap.descriptors[b.id];
       if (d == null || d.kind == BodyKind.star) continue;
 
