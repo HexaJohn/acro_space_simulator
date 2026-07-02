@@ -47,9 +47,10 @@ class BodyNodes {
   /// AFTER the snapshot quaternion so it rotates the texture about the
   /// body's own spin axis. Runtime-mutable (radians) so the offset can be
   /// dialled in live over the control API instead of a rebuild per guess.
-  /// -90 deg matched the software renderer in the A/B yaw ladder
-  /// (test_out/scene_samples/yaw_*.png vs yawref_software.png).
-  static double textureYawRad = -math.pi / 2;
+  /// User-verified in-app against the software backend: my capture-ladder
+  /// pick of -90 was still 90 off on screen; 180 is the next candidate.
+  /// Tune live with ext.acro.camera?textureYawDeg=N and lock the winner.
+  static double textureYawRad = math.pi;
 
   void update(
     WorldSnapshot snap,

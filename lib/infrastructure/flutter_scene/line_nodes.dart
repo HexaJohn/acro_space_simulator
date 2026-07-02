@@ -82,14 +82,19 @@ class LineNodes {
         final centre = Vector3(cx / n, cy / n, cz / n);
         final ringRadiusM = (first - centre).length;
 
-        // Camera inside the ring: an edge-on giant ring sweeps the sky as
-        // near-plane-clipped dashes. CAMERA distance, not focus distance,
-        // so zooming out brings rails back. 1.1x: the rail appears as soon
-        // as the camera clears the ring (a 2x margin held the Moon's rail
-        // hostage until ~870 Mm); the px ceiling handles residual clutter.
-        final centreDist =
-            (origin.worldToRel(centre) - camera.eyeOffset).length;
-        if (centreDist < 1.1 * ringRadiusM) continue;
+        // A ring that ENCIRCLES the focus (the Moon's orbit while focused
+        // on Earth/orbiter) frames the view as a closed ellipse around the
+        // screen centre — always wanted, at any zoom, even from deep
+        // inside it. The clutter case is a ring centred far away seen
+        // edge-on from inside (other planets' rails from Earth), which
+        // sweeps the sky as clipped dashes: those wait until the camera
+        // clears the ring.
+        final centreRel = origin.worldToRel(centre);
+        final encirclesFocus = centreRel.length < ringRadiusM;
+        if (!encirclesFocus) {
+          final centreDist = (centreRel - camera.eyeOffset).length;
+          if (centreDist < 1.1 * ringRadiusM) continue;
+        }
 
         final apparentPx =
             camera.radiusPx(origin.worldToRel(centre), ringRadiusM);

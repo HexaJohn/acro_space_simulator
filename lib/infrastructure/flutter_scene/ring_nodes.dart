@@ -92,7 +92,11 @@ class RingNodes {
   }
 
   /// Flat annulus in the local XY plane (Z = ring normal), radii in body-
-  /// radius multiples.
+  /// radius multiples. BOTH triangle windings are emitted: translucent
+  /// materials always backface-cull (Material.bind:
+  /// `cullBackFace = !doubleSided || !isOpaque()`), so a single-winding
+  /// flat ring vanishes from one side of the ring plane — doubleSided
+  /// cannot save a blended material.
   static fs.MeshGeometry _annulus(double inner, double outer,
       {int segments = 96}) {
     final positions = <double>[];
@@ -105,7 +109,8 @@ class RingNodes {
     }
     for (var s = 0; s < segments; s++) {
       final i0 = 2 * s, o0 = 2 * s + 1, i1 = 2 * (s + 1), o1 = 2 * (s + 1) + 1;
-      indices.addAll([i0, o0, i1, i1, o0, o1]);
+      indices.addAll([i0, o0, i1, i1, o0, o1]); // top face
+      indices.addAll([i0, i1, o0, o0, i1, o1]); // bottom face (reversed)
     }
     return fs.MeshGeometry.fromArrays(
       positions: Float32List.fromList(positions),

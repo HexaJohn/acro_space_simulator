@@ -68,7 +68,14 @@ class SceneSync {
     if (!_noLines) {
       _lines.update(snap, origin, camera: camera, viewport: viewport);
     }
-    if (!_noAtmo) _atmospheres.update(snap, origin);
+    if (!_noAtmo) {
+      _atmospheres.update(
+        snap,
+        origin,
+        cameraEye: camera?.eyeOffset ?? Vector3.zero,
+        starWorld: _bodies.starWorld(snap),
+      );
+    }
     _rings.update(snap, origin);
     _skybox.update();
     _updateSun(snap);

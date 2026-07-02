@@ -45,7 +45,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.0.189 scene-texture-lon';
+const String kBuildStamp = 'build 0.3.0.193 scene-ring-winding';
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -222,10 +222,11 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     };
     c.focusBody = (bodyId) {
       if (!mounted) return;
-      setState(() {
-        _focusBody = BodyId(bodyId);
-        _focusVessel = null;
-      });
+      // Route through the SAME path as the LOOK AT dropdown: setting
+      // _focusBody directly skips its bookkeeping (_targetIndex, dropping
+      // manual mode for an unpilotable body) and crashed downstream.
+      final idx = _targets.indexWhere((t) => t.b?.value == bodyId);
+      if (idx >= 0) _selectTarget(idx);
     };
     c.status = () => {
           'azimuth': _view.azimuth,

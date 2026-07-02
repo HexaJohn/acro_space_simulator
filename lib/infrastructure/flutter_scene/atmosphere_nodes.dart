@@ -25,7 +25,8 @@ class AtmosphereNodes {
 
   final Map<String, _Shell> _shells = {};
 
-  void update(WorldSnapshot snap, FloatingOrigin origin) {
+  void update(WorldSnapshot snap, FloatingOrigin origin,
+      {Vector3 cameraEye = Vector3.zero, Vector3? starWorld}) {
     final seen = <String>{};
     for (final b in snap.bodies.values) {
       final d = snap.descriptors[b.id];
@@ -56,14 +57,22 @@ class AtmosphereNodes {
         vm.Vector3.all(radius),
       );
 
-      // View-dependent limb alpha, computed in shell-local unit space: the
-      // camera position relative to the shell centre, unscaled (scene and
-      // domain share the same frame; the mirror lives at the image level).
-      // Inside the shell the limb model is meaningless — hide it.
-      final camLocal = (Vector3.zero - rel) / shellM;
+      // View-dependent limb alpha in shell-local unit space: the CAMERA
+      // EYE relative to the shell centre. Using the focus point instead
+      // was a bug with two faces: focused on the body itself the vector
+      // was zero (shell read as "camera inside" and vanished), and focused
+      // on a vessel the glow tracked the vessel, not the viewer. The sun
+      // direction shades the halo day-bright / night-faint.
+      final camLocal = (cameraEye - rel) / shellM;
       final inside = camLocal.length <= 1.02;
       shell.node.visible = !inside;
-      if (!inside) shell.updateColors(camLocal);
+      if (!inside) {
+        // Per-body sun direction (body -> star, unit, world frame).
+        final toSun = starWorld == null
+            ? null
+            : (starWorld - world).normalized;
+        shell.updateColors(camLocal, toSun: toSun);
+      }
     }
 
     _shells.removeWhere((id, shell) {
@@ -130,6 +139,7 @@ class _Shell {
 
   // View state of the last colour bake, for the update throttle.
   vm.Vector3? _lastCam;
+  vm.Vector3? _lastSun;
 
   static int _vertexCount(int segments, int rings) =>
       (rings + 1) * (segments + 1);
@@ -176,23 +186,28 @@ class _Shell {
 
   /// Recompute per-vertex premultiplied colours for the camera at
   /// [camLocal] (shell-local unit space) and swap in a fresh mesh. Caller
-  /// guarantees the camera is outside the shell. Throttled: the limb
-  /// pattern only shifts with the VIEW DIRECTION to the body, so a small
-  /// angular/radial delta skips the rebake entirely.
-  void updateColors(Vector3 camLocal) {
+  /// guarantees the camera is outside the shell. [toSun] (unit, world
+  /// frame) shades the halo: bright on the day side, faint on the night
+  /// side, like the software renderer's sun-facing halo. Throttled: small
+  /// view deltas skip the rebake (drag-rate mesh churn is what tears).
+  void updateColors(Vector3 camLocal, {Vector3? toSun}) {
     final cam = vm.Vector3(
         camLocal.x.toDouble(), camLocal.y.toDouble(), camLocal.z.toDouble());
+    final sun = toSun == null
+        ? null
+        : vm.Vector3(toSun.x, toSun.y, toSun.z);
     final last = _lastCam;
     if (last != null) {
-      // ~2.5 deg / 3% — the limb band moves slowly with view direction, so
-      // coarse steps are invisible, and drag-rate rebake churn (a mesh swap
-      // per pointer event) is what tears.
       final angleSmall = last.normalized().dot(cam.normalized()) > 0.999;
       final radiusSimilar = last.length > 0 &&
           ((cam.length / last.length) - 1.0).abs() < 0.03;
-      if (angleSmall && radiusSimilar) return;
+      final sunSimilar = sun == null ||
+          _lastSun == null ||
+          _lastSun!.dot(sun) > 0.999;
+      if (angleSmall && radiusSimilar && sunSimilar) return;
     }
     _lastCam = cam.clone();
+    _lastSun = sun?.clone();
     for (var i = 0; i < _dirs.length; i++) {
       final n = _dirs[i];
       double alpha;
@@ -200,14 +215,18 @@ class _Shell {
         final toCam = (cam - n)..normalize();
         final facing = n.dot(toCam); // 1 at sub-camera point, 0 at limb
         // SYMMETRIC silhouette glow: |facing| ~ 0 marks the shell's own
-        // silhouette as seen from the camera. The near side of that band
-        // glows just inside the planet's limb; the FAR side is visible
-        // AROUND the planet (the shell is larger), giving the halo ring
-        // outside the disc like the software renderer's screen-space halo.
-        // Steep power keeps the planet face itself haze-free.
+        // silhouette as seen from the camera; the far side of that band is
+        // visible AROUND the planet, ringing the disc like the software
+        // halo. Steep power keeps the planet face haze-free.
         alpha = (math.pow(1.0 - facing.abs(), 4.0) * 1.2)
             .clamp(0.0, 0.9)
             .toDouble();
+        // Sunlight term: scattered light needs sunlight. Day-side limb at
+        // full strength, night side a dimmer (but still visible) airglow.
+        if (sun != null) {
+          final dayness = (n.dot(sun) + 1.0) / 2.0; // 0 night pole..1 day
+          alpha *= 0.35 + 0.65 * dayness;
+        }
       }
       final o = i * 4;
       _colors[o] = _tint.x * alpha;

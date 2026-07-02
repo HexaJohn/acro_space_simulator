@@ -106,12 +106,19 @@ void main() {
       title: 'Acro — flutter_scene dev',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark(useMaterial3: true),
-      home: RepaintBoundary(
-        key: _shotKey,
-        child: SimulationView(
-          initialBackend: backend == 'software'
-              ? RenderBackend.software
-              : RenderBackend.flutterScene,
+      // ExcludeSemantics: the Windows accessibility bridge AVs in
+      // flutter_windows.dll (+0x3bc6a) when the semantics tree mutates on
+      // a focus switch — every crash log is preceded by a stream of
+      // 'Failed to update ui::AXTree' errors. No semantics nodes, nothing
+      // to corrupt. Dev harness only; revisit for prod builds.
+      home: ExcludeSemantics(
+        child: RepaintBoundary(
+          key: _shotKey,
+          child: SimulationView(
+            initialBackend: backend == 'software'
+                ? RenderBackend.software
+                : RenderBackend.flutterScene,
+          ),
         ),
       ),
     ),
