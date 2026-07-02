@@ -5,10 +5,9 @@ import 'dart:typed_data' show Uint8List;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
-import 'package:flutter/gestures.dart'
-    show PointerScrollEvent, kMiddleMouseButton;
-import 'package:flutter/services.dart'
-    show LogicalKeyboardKey, KeyEvent, KeyDownEvent, KeyUpEvent;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter/gestures.dart' show PointerScrollEvent, kMiddleMouseButton;
+import 'package:flutter/services.dart' show LogicalKeyboardKey, KeyEvent, KeyDownEvent, KeyUpEvent;
 
 import '../../domain/autonomy/pilot_input.dart';
 import '../../domain/shared/quaternion.dart';
@@ -35,6 +34,7 @@ import '../../domain/universe/celestial_body.dart' show BodyId, CelestialBody;
 import '../../domain/vessel/vessel.dart';
 import '../sample_world.dart';
 import '../flutter_scene/render_backend.dart';
+import '../flutter_scene/scene_hud_overlay.dart';
 import '../flutter_scene/scene_render_view.dart';
 import 'debug_layers.dart';
 import 'nav_ball.dart';
@@ -44,7 +44,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 2026-06-19.173';
+const String kBuildStamp = 'build 0.3.0.174';
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -75,8 +75,7 @@ class SimulationView extends StatefulWidget {
   State<SimulationView> createState() => _SimulationViewState();
 }
 
-class _SimulationViewState extends State<SimulationView>
-    with SingleTickerProviderStateMixin {
+class _SimulationViewState extends State<SimulationView> with SingleTickerProviderStateMixin {
   late final Ticker _ticker;
   late final SimulationClock _clock;
   late AdvanceSimulationTick _advance;
@@ -163,7 +162,34 @@ class _SimulationViewState extends State<SimulationView>
   // World-viewport backend. Software (TopDownPainter) is the default; the
   // flutter_scene 3D backend mounts in its place when toggled. Camera state,
   // input handling, and every HUD overlay stay shared between the two.
+  // Persisted: the FAB toggle saves the choice; the saved value wins over
+  // [SimulationView.initialBackend] once loaded (dev entrypoints that pass
+  // an explicit backend skip persistence entirely).
   late RenderBackend _renderBackend = widget.initialBackend;
+  static const String _backendPrefKey = 'renderBackend';
+
+  Future<void> _loadBackendPref() async {
+    if (widget.initialBackend != RenderBackend.software) return; // dev override
+    final prefs = await SharedPreferences.getInstance();
+    final name = prefs.getString(_backendPrefKey);
+    final saved = RenderBackend.values
+        .where((b) => b.name == name)
+        .firstOrNull;
+    if (saved != null && mounted && saved != _renderBackend) {
+      setState(() => _renderBackend = saved);
+    }
+  }
+
+  void _setBackend(RenderBackend backend) {
+    setState(() => _renderBackend = backend);
+    // Fire-and-forget: preference loss is cosmetic.
+    unawaited(SharedPreferences.getInstance()
+        .then((p) => p.setString(_backendPrefKey, backend.name)));
+  }
+  // Latest world snapshot for the flutter_scene backend (null when the
+  // software backend is active — capture cost is zero when unused).
+  WorldSnapshot? _sceneWorld;
+  int _sceneTick = 0;
   late final TextureCache _textures;
 
   // Destruction notice: set when a vessel is lost (impact / overstress / burn-up)
@@ -181,8 +207,7 @@ class _SimulationViewState extends State<SimulationView>
   final FocusNode _keyFocus = FocusNode();
   final Set<LogicalKeyboardKey> _keysDown = {};
   // ignore: prefer_final_fields
-  bool _manualControl =
-      false; // when true, autopilot for the focus vessel is off
+  bool _manualControl = false; // when true, autopilot for the focus vessel is off
 
   // ---- Touchscreen flight inputs (on-screen controls) ----
   double _touchPitch = 0; // -1..1 from the virtual joystick
@@ -195,21 +220,13 @@ class _SimulationViewState extends State<SimulationView>
   /// active; they sum so either input device works).
   PilotInput _readPilotInput() {
     double axis(LogicalKeyboardKey neg, LogicalKeyboardKey pos) =>
-        (_keysDown.contains(pos) ? 1.0 : 0.0) -
-        (_keysDown.contains(neg) ? 1.0 : 0.0);
-    final keyThrottle = _keysDown.contains(LogicalKeyboardKey.shiftLeft)
-        ? 1.0
-        : 0.0;
+        (_keysDown.contains(pos) ? 1.0 : 0.0) - (_keysDown.contains(neg) ? 1.0 : 0.0);
+    final keyThrottle = _keysDown.contains(LogicalKeyboardKey.shiftLeft) ? 1.0 : 0.0;
     return PilotInput(
-      pitch:
-          (axis(LogicalKeyboardKey.keyS, LogicalKeyboardKey.keyW) + _touchPitch)
-              .clamp(-1.0, 1.0),
-      yaw: (axis(LogicalKeyboardKey.keyA, LogicalKeyboardKey.keyD) + _touchYaw)
-          .clamp(-1.0, 1.0),
+      pitch: (axis(LogicalKeyboardKey.keyS, LogicalKeyboardKey.keyW) + _touchPitch).clamp(-1.0, 1.0),
+      yaw: (axis(LogicalKeyboardKey.keyA, LogicalKeyboardKey.keyD) + _touchYaw).clamp(-1.0, 1.0),
       // Negated: roll was inverted (Q/E + the touch slider rolled the wrong way).
-      roll: (-(axis(LogicalKeyboardKey.keyQ, LogicalKeyboardKey.keyE) +
-                  _touchRoll))
-          .clamp(-1.0, 1.0),
+      roll: (-(axis(LogicalKeyboardKey.keyQ, LogicalKeyboardKey.keyE) + _touchRoll)).clamp(-1.0, 1.0),
       throttle: keyThrottle > 0 ? keyThrottle : _touchThrottle,
     );
   }
@@ -224,13 +241,9 @@ class _SimulationViewState extends State<SimulationView>
       _keysDown.add(e.logicalKey);
       // Camera zoom with [ and ].
       if (e.logicalKey == LogicalKeyboardKey.bracketLeft) {
-        setState(
-          () => _metresPerPixel = (_metresPerPixel * 1.25).clamp(0.5, 2e10),
-        );
+        setState(() => _metresPerPixel = (_metresPerPixel * 1.25).clamp(0.5, 2e10));
       } else if (e.logicalKey == LogicalKeyboardKey.bracketRight) {
-        setState(
-          () => _metresPerPixel = (_metresPerPixel / 1.25).clamp(0.5, 2e10),
-        );
+        setState(() => _metresPerPixel = (_metresPerPixel / 1.25).clamp(0.5, 2e10));
       } else if (e.logicalKey == LogicalKeyboardKey.comma) {
         _stepWarp(-1); // , slows time
       } else if (e.logicalKey == LogicalKeyboardKey.period) {
@@ -287,9 +300,7 @@ class _SimulationViewState extends State<SimulationView>
   }
 
   // Time-warp ladder (sim seconds per real second). ',' / '.' step through it.
-  static const List<double> _warpLevels = [
-    1, 5, 10, 50, 100, 1000, 10000, 100000, 1000000
-  ];
+  static const List<double> _warpLevels = [1, 5, 10, 50, 100, 1000, 10000, 100000, 1000000];
   int _warpIndex = 3; // starts at 50x (matches the initial clock warp)
 
   void _stepWarp(int delta) {
@@ -300,12 +311,14 @@ class _SimulationViewState extends State<SimulationView>
       _clock.warpFactor = _warpLevels[_warpIndex];
     });
   }
+
   Duration _last = Duration.zero;
   double _accum = 0; // carried-over real time not yet consumed by a fixed step
 
   @override
   void initState() {
     super.initState();
+    unawaited(_loadBackendPref());
 
     // The REAL Solar System: Sun + planets + dwarf planets + moons.
     final system = SampleWorld.realSystem();
@@ -320,8 +333,7 @@ class _SimulationViewState extends State<SimulationView>
     // switch-camera button steps through this list.
     _targets = [
       for (final v in fleet) (label: v.name, v: v.id, b: null),
-      for (final body in system.all)
-        (label: body.name, v: null, b: body.id),
+      for (final body in system.all) (label: body.name, v: null, b: body.id),
     ];
     // If a craft was injected (ascent/descent), START LOCKED ON IT so the player
     // is flying it immediately; otherwise lock on the ORBITER so the player can
@@ -363,11 +375,7 @@ class _SimulationViewState extends State<SimulationView>
 
     _clock = SimulationClock(warpFactor: 1, fixedStep: 0.02); // dev start: 1x
     _buildAdvance();
-    _presenter = TopDownSnapshotPresenter(
-      vessels: _vessels,
-      universe: universe,
-      colonies: _colonies,
-    );
+    _presenter = TopDownSnapshotPresenter(vessels: _vessels, universe: universe, colonies: _colonies);
 
     // Body surface maps; repaint once each finishes decoding.
     _textures = TextureCache(
@@ -409,12 +417,7 @@ class _SimulationViewState extends State<SimulationView>
         case SeparateStageCommand(:final vesselId):
           final v = _vessels.byId(VesselId(vesselId));
           if (v != null && v.separateStage()) _vessels.save(v);
-        case SetAttitudeCommand(
-            :final vesselId,
-            :final headingX,
-            :final headingY,
-            :final headingZ
-          ):
+        case SetAttitudeCommand(:final vesselId, :final headingX, :final headingY, :final headingZ):
           final v = _vessels.byId(VesselId(vesselId));
           if (v != null) {
             v.targetFacing = Vector3(headingX, headingY, headingZ);
@@ -454,19 +457,22 @@ class _SimulationViewState extends State<SimulationView>
     if (e is Impact) {
       notice = (
         title: '${nameOf(e.vessel)} destroyed',
-        detail: 'Hard impact with ${e.body.value} at '
+        detail:
+            'Hard impact with ${e.body.value} at '
             '${e.speed.toStringAsFixed(0)} m/s. The craft was lost.',
       );
     } else if (e is StructuralFailure) {
       notice = (
         title: '${nameOf(e.vessel)} broke up',
-        detail: 'Structural failure under aerodynamic load '
+        detail:
+            'Structural failure under aerodynamic load '
             '(${(e.dynamicPressure / 1000).toStringAsFixed(1)} kPa).',
       );
     } else if (e is PartOverheated) {
       notice = (
         title: '${nameOf(e.vessel)} burned up',
-        detail: 'A part exceeded its temperature limit '
+        detail:
+            'A part exceeded its temperature limit '
             '(${e.temperature.toStringAsFixed(0)} K) on reentry.',
       );
     }
@@ -551,8 +557,7 @@ class _SimulationViewState extends State<SimulationView>
     // static body descriptors (kind/atmosphere/composition) are sticky on the
     // engine side, so ship them only ~1 Hz instead of every frame.
     if (_bridge.hasClients) {
-      final sendDescriptors =
-          (elapsed - _lastDescriptorAt) >= const Duration(seconds: 1);
+      final sendDescriptors = (elapsed - _lastDescriptorAt) >= const Duration(seconds: 1);
       if (sendDescriptors) _lastDescriptorAt = elapsed;
       final world = WorldSnapshot.capture(
         _bridgeTick++,
@@ -563,6 +568,21 @@ class _SimulationViewState extends State<SimulationView>
         includeDescriptors: sendDescriptors,
       );
       _bridge.publish(_wire.encodeWorld(world));
+    }
+
+    // The flutter_scene backend consumes the SAME world feed in-process (no
+    // serialization). Descriptors ride along every frame — the join is by
+    // reference, not over a wire.
+    if (_renderBackend == RenderBackend.flutterScene) {
+      _sceneWorld = WorldSnapshot.capture(
+        _sceneTick++,
+        _vessels,
+        system: _universe.current(),
+        epoch: _clock.epoch,
+        colonies: _colonies,
+      );
+    } else {
+      _sceneWorld = null;
     }
 
     // Craft chase cam: align the camera EXACTLY with the craft's attitude so the
@@ -592,14 +612,9 @@ class _SimulationViewState extends State<SimulationView>
         final upBase = rightBase.cross(nose).normalized;
         // camera up = upBase*cosR - rightBase*sinR  =>  sinR = -craftUp.rightBase,
         // cosR = craftUp.upBase  =>  roll = atan2(-craftUp.rightBase, craftUp.upBase).
-        final roll =
-            math.atan2(-craftUp.dot(rightBase), craftUp.dot(upBase));
+        final roll = math.atan2(-craftUp.dot(rightBase), craftUp.dot(upBase));
 
-        _view = _view.copyWith(
-          azimuth: azimuth,
-          elevation: elevation,
-          roll: roll,
-        );
+        _view = _view.copyWith(azimuth: azimuth, elevation: elevation, roll: roll);
       }
     }
 
@@ -681,8 +696,7 @@ class _SimulationViewState extends State<SimulationView>
   }
 
   /// Cycle the projection through the named presets (snaps the orbit angles).
-  void _cycleView() => setState(
-      () => _view = CameraOrbit.preset(_view.nearestPreset.next));
+  void _cycleView() => setState(() => _view = CameraOrbit.preset(_view.nearestPreset.next));
 
   /// Toggle MAP <-> CRAFT chase cam. Entering craft cam locks onto a vessel and
   /// zooms in close; leaving it restores the saved map zoom + view.
@@ -762,10 +776,7 @@ class _SimulationViewState extends State<SimulationView>
 
   /// Orbit the camera around the focus by arrow-key deltas (radians).
   void _orbitCamera(double dAz, double dEl) {
-    setState(() => _view = _view.copyWith(
-          azimuth: _view.azimuth + dAz,
-          elevation: _view.elevation + dEl,
-        ));
+    setState(() => _view = _view.copyWith(azimuth: _view.azimuth + dAz, elevation: _view.elevation + dEl));
   }
 
   /// Modal "vessel lost" menu shown when a craft is destroyed. Fills the screen
@@ -789,27 +800,26 @@ class _SimulationViewState extends State<SimulationView>
             children: [
               Row(
                 children: const [
-                  Icon(Icons.warning_amber_rounded,
-                      color: Color(0xFFFF6B6B), size: 26),
+                  Icon(Icons.warning_amber_rounded, color: Color(0xFFFF6B6B), size: 26),
                   SizedBox(width: 8),
-                  Text('VESSEL LOST',
-                      style: TextStyle(
-                          color: Color(0xFFFF6B6B),
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          letterSpacing: 1.2)),
+                  Text(
+                    'VESSEL LOST',
+                    style: TextStyle(
+                      color: Color(0xFFFF6B6B),
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 1.2,
+                    ),
+                  ),
                 ],
               ),
               const SizedBox(height: 14),
-              Text(notice.title,
-                  style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 15,
-                      fontWeight: FontWeight.bold)),
+              Text(
+                notice.title,
+                style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold),
+              ),
               const SizedBox(height: 6),
-              Text(notice.detail,
-                  style: const TextStyle(
-                      color: Color(0xFFC9B8BC), fontSize: 13, height: 1.35)),
+              Text(notice.detail, style: const TextStyle(color: Color(0xFFC9B8BC), fontSize: 13, height: 1.35)),
               const SizedBox(height: 18),
               Align(
                 alignment: Alignment.centerRight,
@@ -833,46 +843,40 @@ class _SimulationViewState extends State<SimulationView>
   /// A debug-cheat checkbox row: flips [value] via [set], then rebuilds the tick
   /// so the new flag takes effect immediately.
   Widget _cheatRow(String label, bool value, void Function(bool) set) => InkWell(
-        onTap: () => setState(() {
-          set(!value);
-          _buildAdvance();
-        }),
-        child: Row(children: [
-          Checkbox(
-            value: value,
-            onChanged: (v) => setState(() {
-              set(v ?? false);
-              _buildAdvance();
-            }),
-            visualDensity: VisualDensity.compact,
-            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          ),
-          Text(label,
-              style: const TextStyle(color: Color(0xFFB9C9DC), fontSize: 12)),
-        ]),
-      );
+    onTap: () => setState(() {
+      set(!value);
+      _buildAdvance();
+    }),
+    child: Row(
+      children: [
+        Checkbox(
+          value: value,
+          onChanged: (v) => setState(() {
+            set(v ?? false);
+            _buildAdvance();
+          }),
+          visualDensity: VisualDensity.compact,
+          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
+        Text(label, style: const TextStyle(color: Color(0xFFB9C9DC), fontSize: 12)),
+      ],
+    ),
+  );
 
   Widget _debugPanel() {
     final rows = <(String, bool, DebugLayers Function(bool))>[
       ('Skybox', _layers.skybox, (v) => _layers.copyWith(skybox: v)),
       ('Orbit rails', _layers.orbitRails, (v) => _layers.copyWith(orbitRails: v)),
-      ('Planet texture', _layers.planetTexture,
-          (v) => _layers.copyWith(planetTexture: v)),
-      ('Sphere shadow', _layers.sphereShadow,
-          (v) => _layers.copyWith(sphereShadow: v)),
+      ('Planet texture', _layers.planetTexture, (v) => _layers.copyWith(planetTexture: v)),
+      ('Sphere shadow', _layers.sphereShadow, (v) => _layers.copyWith(sphereShadow: v)),
       ('Atmo halo', _layers.atmoHalo, (v) => _layers.copyWith(atmoHalo: v)),
-      ('Atmo overlay', _layers.atmoOverlay,
-          (v) => _layers.copyWith(atmoOverlay: v)),
+      ('Atmo overlay', _layers.atmoOverlay, (v) => _layers.copyWith(atmoOverlay: v)),
       ('Nav-ball', _layers.navBall, (v) => _layers.copyWith(navBall: v)),
-      ('Exaggerate star', _layers.exaggerateStar,
-          (v) => _layers.copyWith(exaggerateStar: v)),
-      ('Exaggerate atmo', _layers.exaggerateAtmosphere,
-          (v) => _layers.copyWith(exaggerateAtmosphere: v)),
+      ('Exaggerate star', _layers.exaggerateStar, (v) => _layers.copyWith(exaggerateStar: v)),
+      ('Exaggerate atmo', _layers.exaggerateAtmosphere, (v) => _layers.copyWith(exaggerateAtmosphere: v)),
       ('Show SOIs', _layers.showSoi, (v) => _layers.copyWith(showSoi: v)),
-      ('Cull distant', _layers.cullDistant,
-          (v) => _layers.copyWith(cullDistant: v)),
-      ('Infinite fuel', _layers.infiniteFuel,
-          (v) => _layers.copyWith(infiniteFuel: v)),
+      ('Cull distant', _layers.cullDistant, (v) => _layers.copyWith(cullDistant: v)),
+      ('Infinite fuel', _layers.infiniteFuel, (v) => _layers.copyWith(infiniteFuel: v)),
     ];
     return Container(
       width: 190,
@@ -888,11 +892,10 @@ class _SimulationViewState extends State<SimulationView>
         children: [
           const Padding(
             padding: EdgeInsets.only(left: 4, top: 4, bottom: 2),
-            child: Text('DRAW LAYERS',
-                style: TextStyle(
-                    color: Color(0xFF7FB0E0),
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold)),
+            child: Text(
+              'DRAW LAYERS',
+              style: TextStyle(color: Color(0xFF7FB0E0), fontSize: 11, fontWeight: FontWeight.bold),
+            ),
           ),
           for (final (label, value, set) in rows)
             InkWell(
@@ -901,32 +904,26 @@ class _SimulationViewState extends State<SimulationView>
                 children: [
                   Checkbox(
                     value: value,
-                    onChanged: (v) =>
-                        setState(() => _layers = set(v ?? false)),
+                    onChanged: (v) => setState(() => _layers = set(v ?? false)),
                     visualDensity: VisualDensity.compact,
                     materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
-                  Text(label,
-                      style: const TextStyle(
-                          color: Color(0xFFB9C9DC), fontSize: 12)),
+                  Text(label, style: const TextStyle(color: Color(0xFFB9C9DC), fontSize: 12)),
                 ],
               ),
             ),
           // Perspective camera toggle.
           InkWell(
-            onTap: () =>
-                setState(() => _perspectiveMode = !_perspectiveMode),
+            onTap: () => setState(() => _perspectiveMode = !_perspectiveMode),
             child: Row(
               children: [
                 Checkbox(
                   value: _perspectiveMode,
-                  onChanged: (v) =>
-                      setState(() => _perspectiveMode = v ?? false),
+                  onChanged: (v) => setState(() => _perspectiveMode = v ?? false),
                   visualDensity: VisualDensity.compact,
                   materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 ),
-                const Text('Perspective',
-                    style: TextStyle(color: Color(0xFFB9C9DC), fontSize: 12)),
+                const Text('Perspective', style: TextStyle(color: Color(0xFFB9C9DC), fontSize: 12)),
               ],
             ),
           ),
@@ -939,8 +936,10 @@ class _SimulationViewState extends State<SimulationView>
             }),
             child: Padding(
               padding: const EdgeInsets.fromLTRB(4, 6, 4, 4),
-              child: Text('FOV: ${_fovDeg.toStringAsFixed(0)}°',
-                  style: const TextStyle(color: Color(0xFF7FB0E0), fontSize: 12)),
+              child: Text(
+                'FOV: ${_fovDeg.toStringAsFixed(0)}°',
+                style: const TextStyle(color: Color(0xFF7FB0E0), fontSize: 12),
+              ),
             ),
           ),
           // Tilted-view cull zoom threshold (tap to cycle).
@@ -962,48 +961,45 @@ class _SimulationViewState extends State<SimulationView>
           // survives an otherwise-fatal profile. Rebuilds the tick on change.
           const Padding(
             padding: EdgeInsets.only(left: 4, top: 6, bottom: 2),
-            child: Text('CHEATS',
-                style: TextStyle(
-                    color: Color(0xFF7FB0E0),
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold)),
+            child: Text(
+              'CHEATS',
+              style: TextStyle(color: Color(0xFF7FB0E0), fontSize: 11, fontWeight: FontWeight.bold),
+            ),
           ),
-          _cheatRow('No overheating', _disableOverheat,
-              (v) => _disableOverheat = v),
-          _cheatRow('No aero load', _disableAeroStress,
-              (v) => _disableAeroStress = v),
-          _cheatRow('No impact damage', _disableImpact,
-              (v) => _disableImpact = v),
+          _cheatRow('No overheating', _disableOverheat, (v) => _disableOverheat = v),
+          _cheatRow('No aero load', _disableAeroStress, (v) => _disableAeroStress = v),
+          _cheatRow('No impact damage', _disableImpact, (v) => _disableImpact = v),
           // Atmosphere chemistry demo: re-skin the focused planet's gas mix and
           // watch the limb's haze colour shift (driven by composition).
           const Padding(
             padding: EdgeInsets.only(left: 4, top: 6, bottom: 2),
-            child: Text('ATMOSPHERE',
-                style: TextStyle(
-                    color: Color(0xFF7FB0E0),
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold)),
+            child: Text(
+              'ATMOSPHERE',
+              style: TextStyle(color: Color(0xFF7FB0E0), fontSize: 11, fontWeight: FontWeight.bold),
+            ),
           ),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
-            child: Row(children: [
-              Expanded(
-                child: _atmoButton('☢ Nuke', const Color(0xFFFF7043),
-                    _targetBody == null ? null : _nukePlanet),
-              ),
-              const SizedBox(width: 6),
-              Expanded(
-                child: _atmoButton('Terraform', const Color(0xFF4FC3F7),
-                    _targetBody == null ? null : _terraformPlanet),
-              ),
-            ]),
+            child: Row(
+              children: [
+                Expanded(
+                  child: _atmoButton('☢ Nuke', const Color(0xFFFF7043), _targetBody == null ? null : _nukePlanet),
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: _atmoButton(
+                    'Terraform',
+                    const Color(0xFF4FC3F7),
+                    _targetBody == null ? null : _terraformPlanet,
+                  ),
+                ),
+              ],
+            ),
           ),
           Padding(
             padding: const EdgeInsets.fromLTRB(4, 0, 4, 4),
             child: Text(
-              _targetBody == null
-                  ? 'Lock a planet to enable.'
-                  : 'Target: ${_targetBody!.name}',
+              _targetBody == null ? 'Lock a planet to enable.' : 'Target: ${_targetBody!.name}',
               style: const TextStyle(color: Color(0xFF7E93A8), fontSize: 11),
             ),
           ),
@@ -1012,27 +1008,26 @@ class _SimulationViewState extends State<SimulationView>
     );
   }
 
-  Widget _atmoButton(String label, Color color, VoidCallback? onTap) =>
-      InkWell(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 6),
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: onTap == null
-                ? const Color(0x22556677)
-                : color.withValues(alpha: 0.18),
-            borderRadius: BorderRadius.circular(6),
-            border: Border.all(
-                color: onTap == null ? const Color(0x33889999) : color, width: 1),
-          ),
-          child: Text(label,
-              style: TextStyle(
-                  color: onTap == null ? const Color(0xFF66788A) : color,
-                  fontSize: 12,
-                  fontWeight: FontWeight.bold)),
+  Widget _atmoButton(String label, Color color, VoidCallback? onTap) => InkWell(
+    onTap: onTap,
+    child: Container(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: onTap == null ? const Color(0x22556677) : color.withValues(alpha: 0.18),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: onTap == null ? const Color(0x33889999) : color, width: 1),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: onTap == null ? const Color(0xFF66788A) : color,
+          fontSize: 12,
+          fontWeight: FontWeight.bold,
         ),
-      );
+      ),
+    ),
+  );
 
   /// Nav-ball state for the currently-locked vessel, or null when a body is the
   /// camera target (no craft attitude to show).
@@ -1055,16 +1050,13 @@ class _SimulationViewState extends State<SimulationView>
       },
       child: FloatingActionButton.extended(
         heroTag: 'persp',
-        backgroundColor: _perspectiveMode
-            ? const Color(0xFF7FB0E0)
-            : const Color(0xFF2A3A4A),
+        backgroundColor: _perspectiveMode ? const Color(0xFF7FB0E0) : const Color(0xFF2A3A4A),
         onPressed: () {
           setState(() => _perspectiveMode = !_perspectiveMode);
           _keyFocus.requestFocus();
         },
         icon: const Icon(Icons.vrpano),
-        label: Text(
-            _perspectiveMode ? 'PERSP ${_fovDeg.toStringAsFixed(0)}°' : 'ORTHO'),
+        label: Text(_perspectiveMode ? 'PERSP ${_fovDeg.toStringAsFixed(0)}°' : 'ORTHO'),
       ),
     );
   }
@@ -1072,10 +1064,7 @@ class _SimulationViewState extends State<SimulationView>
   Widget _targetDropdown() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12),
-      decoration: BoxDecoration(
-        color: const Color(0xFF2A3A4A),
-        borderRadius: BorderRadius.circular(28),
-      ),
+      decoration: BoxDecoration(color: const Color(0xFF2A3A4A), borderRadius: BorderRadius.circular(28)),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -1091,11 +1080,7 @@ class _SimulationViewState extends State<SimulationView>
               if (i != null) _selectTarget(i);
             },
             items: [
-              for (var i = 0; i < _targets.length; i++)
-                DropdownMenuItem(
-                  value: i,
-                  child: Text(_targets[i].label),
-                ),
+              for (var i = 0; i < _targets.length; i++) DropdownMenuItem(value: i, child: Text(_targets[i].label)),
             ],
           ),
         ],
@@ -1117,49 +1102,44 @@ class _SimulationViewState extends State<SimulationView>
   void _reskinAtmosphere(AtmosphericComposition comp, String note) {
     final b = _targetBody;
     if (b == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
           content: Text('Lock the camera on a planet first (switch target).'),
-          duration: Duration(seconds: 2)));
+          duration: Duration(seconds: 2),
+        ),
+      );
       return;
     }
     _universe.replaceBody(b.copyWith(composition: comp));
     setState(() {}); // next _tick rebuilds the snapshot from the repo
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('${b.name}: $note'), duration: const Duration(seconds: 3)));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('${b.name}: $note'), duration: const Duration(seconds: 3)));
   }
 
   /// Nuke the focused planet: choke its air with CO2 + soot-methane haze — the
   /// limb warms to a tan/teal smog (a "nuclear winter" chemistry).
   void _nukePlanet() => _reskinAtmosphere(
-      AtmosphericComposition(const {
-        AtmosphereGas.carbonDioxide: 0.55,
-        AtmosphereGas.methane: 0.20,
-        AtmosphereGas.nitrogen: 0.20,
-        AtmosphereGas.water: 0.05,
-      }),
-      'atmosphere choked with CO₂ + soot — haze warms to smog.');
+    AtmosphericComposition(const {
+      AtmosphereGas.carbonDioxide: 0.55,
+      AtmosphereGas.methane: 0.20,
+      AtmosphereGas.nitrogen: 0.20,
+      AtmosphereGas.water: 0.05,
+    }),
+    'atmosphere choked with CO₂ + soot — haze warms to smog.',
+  );
 
   /// Terraform the focused planet to an Earthlike N2/O2 mix — the limb shifts to
   /// a clean Rayleigh blue.
-  void _terraformPlanet() => _reskinAtmosphere(
-      AtmosphericComposition.earth(), 'terraformed to N₂/O₂ — clean blue sky.');
+  void _terraformPlanet() =>
+      _reskinAtmosphere(AtmosphericComposition.earth(), 'terraformed to N₂/O₂ — clean blue sky.');
 
   /// Serialize the whole world into the in-memory save slot.
   void _save() {
-    _savedGame = jsonEncode(
-      _codec.encode(
-        vessels: _vessels,
-        colonies: _colonies,
-        deposits: _deposits,
-        clock: _clock,
-      ),
-    );
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Saved at tick ${_clock.tick}'),
-        duration: const Duration(seconds: 1),
-      ),
-    );
+    _savedGame = jsonEncode(_codec.encode(vessels: _vessels, colonies: _colonies, deposits: _deposits, clock: _clock));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('Saved at tick ${_clock.tick}'), duration: const Duration(seconds: 1)));
   }
 
   /// Restore the world from the in-memory save slot.
@@ -1177,12 +1157,9 @@ class _SimulationViewState extends State<SimulationView>
       deposits: _deposits,
       clock: _clock,
     );
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Loaded tick ${_clock.tick}'),
-        duration: const Duration(seconds: 1),
-      ),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('Loaded tick ${_clock.tick}'), duration: const Duration(seconds: 1)));
   }
 
   @override
@@ -1195,185 +1172,162 @@ class _SimulationViewState extends State<SimulationView>
       // Keep the FAB stack clear of the notch/home indicator.
       floatingActionButton: SafeArea(
         child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // Collapse/expand the control stack to free up the viewport.
-          FloatingActionButton.small(
-            heroTag: 'collapse',
-            backgroundColor: const Color(0xFF2A3A4A),
-            onPressed: () =>
-                setState(() => _controlsExpanded = !_controlsExpanded),
-            child: Icon(
-                _controlsExpanded ? Icons.expand_more : Icons.expand_less),
-          ),
-          const SizedBox(height: 8),
-          // Return to the main menu (the flight view is pushed from it).
-          if (Navigator.of(context).canPop())
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Collapse/expand the control stack to free up the viewport.
             FloatingActionButton.small(
-              heroTag: 'menu',
+              heroTag: 'collapse',
               backgroundColor: const Color(0xFF2A3A4A),
-              onPressed: () => Navigator.of(context).maybePop(),
-              child: const Icon(Icons.home),
+              onPressed: () => setState(() => _controlsExpanded = !_controlsExpanded),
+              child: Icon(_controlsExpanded ? Icons.expand_more : Icons.expand_less),
             ),
-          if (Navigator.of(context).canPop()) const SizedBox(height: 8),
-          // Collapsed: only PERSP for quick access.
-          // Manual-flight toggle (so touch users can fly without a keyboard).
-          if (_controlsExpanded)
-          FloatingActionButton.extended(
-            heroTag: 'manual',
-            backgroundColor: _manualControl
-                ? const Color(0xFFFF8C66)
-                : const Color(0xFF2A3A4A),
-            onPressed: () => setState(() => _manualControl = !_manualControl),
-            icon: Icon(_manualControl ? Icons.flight : Icons.smart_toy),
-            label: Text(_manualControl ? 'MANUAL' : 'AUTO'),
-          ),
-          // STAGE / decouple: drop the active (lowest) stage off the focused
-          // craft. Shown when a stageable vessel is locked. The outline of the
-          // remaining stack is the craft itself in the 3D view.
-          if (_canStageFocus()) ...[
             const SizedBox(height: 8),
-            FloatingActionButton.extended(
-              heroTag: 'stage',
-              backgroundColor: const Color(0xFFE0A040),
-              foregroundColor: Colors.black,
-              onPressed: _separateFocusStage,
-              icon: const Icon(Icons.layers_clear),
-              label: const Text('STAGE'),
-            ),
-          ],
-          if (_controlsExpanded) const SizedBox(height: 8),
-          // Perspective toggle + FOV.
-          if (_controlsExpanded) _perspToggleFab(),
-          if (_controlsExpanded) const SizedBox(height: 8),
-          if (_controlsExpanded) ...[
-          // Camera lock: pick the target (vessel or body) from a dropdown.
-          _targetDropdown(),
-          const SizedBox(height: 8),
-          // Point the focus craft's nose at its planet.
-          if (_focusVessel != null)
-            FloatingActionButton.extended(
-              heroTag: 'lookplanet',
-              backgroundColor: const Color(0xFF2A3A4A),
-              onPressed: _lookAtPlanet,
-              icon: const Icon(Icons.my_location),
-              label: const Text('LOOK AT'),
-            ),
-          if (_focusVessel != null) const SizedBox(height: 8),
-          // MAP / CRAFT chase-cam toggle.
-          FloatingActionButton.extended(
-            heroTag: 'cammode',
-            backgroundColor: _craftCam
-                ? const Color(0xFF7FE0A0)
-                : const Color(0xFF2A3A4A),
-            onPressed: _toggleCraftCam,
-            icon: Icon(_craftCam ? Icons.rocket_launch : Icons.public),
-            label: Text(_craftCam ? 'CRAFT' : 'MAP'),
-          ),
-          const SizedBox(height: 8),
-          // View-angle gizmo: top / front / side / 3-quarter projection.
-          FloatingActionButton.extended(
-            heroTag: 'view',
-            backgroundColor: const Color(0xFF2A3A4A),
-            onPressed: _cycleView,
-            icon: const Icon(Icons.threed_rotation),
-            label: Text(_view.nearestPreset.label),
-          ),
-          const SizedBox(height: 8),
-          // Time-warp control: minus / readout / plus (also ',' and '.' keys).
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
+            // Return to the main menu (the flight view is pushed from it).
+            if (Navigator.of(context).canPop())
               FloatingActionButton.small(
-                heroTag: 'warpdown',
-                onPressed: () => _stepWarp(-1),
-                child: const Icon(Icons.fast_rewind),
+                heroTag: 'menu',
+                backgroundColor: const Color(0xFF2A3A4A),
+                onPressed: () => Navigator.of(context).maybePop(),
+                child: const Icon(Icons.home),
               ),
-              const SizedBox(width: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF2A3A4A),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Text(
-                  '${_warpLevels[_warpIndex].toStringAsFixed(0)}x',
-                  style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 13,
-                      fontWeight: FontWeight.bold),
-                ),
+            if (Navigator.of(context).canPop()) const SizedBox(height: 8),
+            // Collapsed: only PERSP for quick access.
+            // Manual-flight toggle (so touch users can fly without a keyboard).
+            if (_controlsExpanded)
+              FloatingActionButton.extended(
+                heroTag: 'manual',
+                backgroundColor: _manualControl ? const Color(0xFFFF8C66) : const Color(0xFF2A3A4A),
+                onPressed: () => setState(() => _manualControl = !_manualControl),
+                icon: Icon(_manualControl ? Icons.flight : Icons.smart_toy),
+                label: Text(_manualControl ? 'MANUAL' : 'AUTO'),
               ),
-              const SizedBox(width: 8),
-              FloatingActionButton.small(
-                heroTag: 'warpup',
-                onPressed: () => _stepWarp(1),
-                child: const Icon(Icons.fast_forward),
+            // STAGE / decouple: drop the active (lowest) stage off the focused
+            // craft. Shown when a stageable vessel is locked. The outline of the
+            // remaining stack is the craft itself in the 3D view.
+            if (_canStageFocus()) ...[
+              const SizedBox(height: 8),
+              FloatingActionButton.extended(
+                heroTag: 'stage',
+                backgroundColor: const Color(0xFFE0A040),
+                foregroundColor: Colors.black,
+                onPressed: _separateFocusStage,
+                icon: const Icon(Icons.layers_clear),
+                label: const Text('STAGE'),
               ),
             ],
-          ),
-          const SizedBox(height: 8),
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              FloatingActionButton.small(
-                heroTag: 'zoomout',
-                onPressed: () => setState(() =>
-                    _metresPerPixel = (_metresPerPixel * 1.4).clamp(0.5, 2e10)),
-                child: const Icon(Icons.zoom_out),
+            if (_controlsExpanded) const SizedBox(height: 8),
+            // Perspective toggle + FOV.
+            if (_controlsExpanded) _perspToggleFab(),
+            if (_controlsExpanded) const SizedBox(height: 8),
+            if (_controlsExpanded) ...[
+              // Camera lock: pick the target (vessel or body) from a dropdown.
+              _targetDropdown(),
+              const SizedBox(height: 8),
+              // Point the focus craft's nose at its planet.
+              if (_focusVessel != null)
+                FloatingActionButton.extended(
+                  heroTag: 'lookplanet',
+                  backgroundColor: const Color(0xFF2A3A4A),
+                  onPressed: _lookAtPlanet,
+                  icon: const Icon(Icons.my_location),
+                  label: const Text('LOOK AT'),
+                ),
+              if (_focusVessel != null) const SizedBox(height: 8),
+              // MAP / CRAFT chase-cam toggle.
+              FloatingActionButton.extended(
+                heroTag: 'cammode',
+                backgroundColor: _craftCam ? const Color(0xFF7FE0A0) : const Color(0xFF2A3A4A),
+                onPressed: _toggleCraftCam,
+                icon: Icon(_craftCam ? Icons.rocket_launch : Icons.public),
+                label: Text(_craftCam ? 'CRAFT' : 'MAP'),
               ),
-              const SizedBox(width: 8),
-              FloatingActionButton.small(
-                heroTag: 'zoomin',
-                onPressed: () => setState(() =>
-                    _metresPerPixel = (_metresPerPixel / 1.4).clamp(0.5, 2e10)),
-                child: const Icon(Icons.zoom_in),
+              const SizedBox(height: 8),
+              // View-angle gizmo: top / front / side / 3-quarter projection.
+              FloatingActionButton.extended(
+                heroTag: 'view',
+                backgroundColor: const Color(0xFF2A3A4A),
+                onPressed: _cycleView,
+                icon: const Icon(Icons.threed_rotation),
+                label: Text(_view.nearestPreset.label),
               ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              FloatingActionButton.small(
-                heroTag: 'save',
-                onPressed: _save,
-                child: const Icon(Icons.save),
+              const SizedBox(height: 8),
+              // Time-warp control: minus / readout / plus (also ',' and '.' keys).
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  FloatingActionButton.small(
+                    heroTag: 'warpdown',
+                    onPressed: () => _stepWarp(-1),
+                    child: const Icon(Icons.fast_rewind),
+                  ),
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    decoration: BoxDecoration(color: const Color(0xFF2A3A4A), borderRadius: BorderRadius.circular(20)),
+                    child: Text(
+                      '${_warpLevels[_warpIndex].toStringAsFixed(0)}x',
+                      style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  FloatingActionButton.small(
+                    heroTag: 'warpup',
+                    onPressed: () => _stepWarp(1),
+                    child: const Icon(Icons.fast_forward),
+                  ),
+                ],
               ),
-              const SizedBox(width: 8),
-              FloatingActionButton.small(
-                heroTag: 'load',
-                onPressed: _savedGame == null ? null : _load,
-                backgroundColor: _savedGame == null ? Colors.grey : null,
-                child: const Icon(Icons.folder_open),
+              const SizedBox(height: 8),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  FloatingActionButton.small(
+                    heroTag: 'zoomout',
+                    onPressed: () => setState(() => _metresPerPixel = (_metresPerPixel * 1.4).clamp(0.5, 2e10)),
+                    child: const Icon(Icons.zoom_out),
+                  ),
+                  const SizedBox(width: 8),
+                  FloatingActionButton.small(
+                    heroTag: 'zoomin',
+                    onPressed: () => setState(() => _metresPerPixel = (_metresPerPixel / 1.4).clamp(0.5, 2e10)),
+                    child: const Icon(Icons.zoom_in),
+                  ),
+                ],
               ),
-              const SizedBox(width: 8),
-              FloatingActionButton.small(
-                heroTag: 'debug',
-                backgroundColor: _showDebugPanel
-                    ? const Color(0xFF7FB0E0)
-                    : const Color(0xFF2A3A4A),
-                onPressed: () =>
-                    setState(() => _showDebugPanel = !_showDebugPanel),
-                child: const Icon(Icons.bug_report),
-              ),
-              const SizedBox(width: 8),
-              FloatingActionButton.small(
-                heroTag: 'renderBackend',
-                tooltip: _renderBackend.label,
-                backgroundColor:
-                    _renderBackend == RenderBackend.flutterScene
+              const SizedBox(height: 8),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  FloatingActionButton.small(heroTag: 'save', onPressed: _save, child: const Icon(Icons.save)),
+                  const SizedBox(width: 8),
+                  FloatingActionButton.small(
+                    heroTag: 'load',
+                    onPressed: _savedGame == null ? null : _load,
+                    backgroundColor: _savedGame == null ? Colors.grey : null,
+                    child: const Icon(Icons.folder_open),
+                  ),
+                  const SizedBox(width: 8),
+                  FloatingActionButton.small(
+                    heroTag: 'debug',
+                    backgroundColor: _showDebugPanel ? const Color(0xFF7FB0E0) : const Color(0xFF2A3A4A),
+                    onPressed: () => setState(() => _showDebugPanel = !_showDebugPanel),
+                    child: const Icon(Icons.bug_report),
+                  ),
+                  const SizedBox(width: 8),
+                  FloatingActionButton.small(
+                    heroTag: 'renderBackend',
+                    tooltip: _renderBackend.label,
+                    backgroundColor: _renderBackend == RenderBackend.flutterScene
                         ? const Color(0xFF7FB0E0)
                         : const Color(0xFF2A3A4A),
-                onPressed: () => setState(
-                    () => _renderBackend = _renderBackend.next),
-                child: const Icon(Icons.view_in_ar),
+                    onPressed: () => _setBackend(_renderBackend.next),
+                    child: const Icon(Icons.view_in_ar),
+                  ),
+                ],
               ),
-            ],
-          ),
-          ], // end if (_controlsExpanded)
-        ],
-      ),
+            ], // end if (_controlsExpanded)
+          ],
+        ),
       ), // end SafeArea(floatingActionButton)
       body: KeyboardListener(
         focusNode: _keyFocus,
@@ -1423,8 +1377,7 @@ class _SimulationViewState extends State<SimulationView>
                   if (_perspectiveMode) {
                     _range = (_pinchBaseRange / d.scale).clamp(100.0, 1e13);
                   } else {
-                    _metresPerPixel =
-                        (_pinchBaseMpp / d.scale).clamp(0.5, 2e10);
+                    _metresPerPixel = (_pinchBaseMpp / d.scale).clamp(0.5, 2e10);
                   }
                 });
               } else {
@@ -1438,109 +1391,120 @@ class _SimulationViewState extends State<SimulationView>
                 // Renderer fills edge-to-edge (into the notch / safe area).
                 // The backend toggle swaps ONLY this subtree — camera state,
                 // input handling, and the HUD overlays above are shared.
-                if (_renderBackend == RenderBackend.flutterScene)
-                  Positioned.fill(child: SceneRenderView(camera: _camera))
-                else
-                Positioned.fill(
-                  child: snap == null
-                      ? const Center(child: CircularProgressIndicator())
-                      : LayoutBuilder(builder: (context, constraints) {
-                          // The perspective focal length must use the ACTUAL
-                          // render-canvas height, not the full MediaQuery window
-                          // (which over-states it and makes the lens read long /
-                          // the planet a touch small). Update it from the real
-                          // layout height each build.
-                          if (constraints.maxHeight.isFinite &&
-                              constraints.maxHeight > 0) {
-                            _screenH = constraints.maxHeight;
-                          }
-                          return CustomPaint(
-                            size: Size.infinite,
-                            painter: TopDownPainter(
-                              snap,
-                              textures: _textures,
-                              view: _activeCamera ??
-                                  OrthoCamera(_view, _metresPerPixel),
-                              layers: _layers,
-                            ),
-                          );
-                        }),
-                ),
+                if (_renderBackend == RenderBackend.flutterScene) ...[
+                  Positioned.fill(
+                    child: SceneRenderView(
+                      camera: _camera,
+                      textures: _textures,
+                      snapshot: _sceneWorld,
+                      focusVesselId: _focusVessel?.value,
+                      focusBodyId: _focusBody?.value,
+                    ),
+                  ),
+                  // Painter-parity text HUD (telemetry block + name labels)
+                  // from the SAME presenter snapshot the software path uses.
+                  if (snap != null)
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        child: CustomPaint(
+                          painter: SceneHudOverlayPainter(snap, _camera),
+                        ),
+                      ),
+                    ),
+                ] else
+                  Positioned.fill(
+                    child: snap == null
+                        ? const Center(child: CircularProgressIndicator())
+                        : LayoutBuilder(
+                            builder: (context, constraints) {
+                              // The perspective focal length must use the ACTUAL
+                              // render-canvas height, not the full MediaQuery window
+                              // (which over-states it and makes the lens read long /
+                              // the planet a touch small). Update it from the real
+                              // layout height each build.
+                              if (constraints.maxHeight.isFinite && constraints.maxHeight > 0) {
+                                _screenH = constraints.maxHeight;
+                              }
+                              return CustomPaint(
+                                size: Size.infinite,
+                                painter: TopDownPainter(
+                                  snap,
+                                  textures: _textures,
+                                  view: _activeCamera ?? OrthoCamera(_view, _metresPerPixel),
+                                  layers: _layers,
+                                ),
+                              );
+                            },
+                          ),
+                  ),
                 // All UI overlays stay INSIDE the safe area.
                 Positioned.fill(
                   child: SafeArea(
                     child: Stack(
                       children: [
-                // Nav-ball: attitude/prograde of the locked vessel.
-                if (_layers.navBall && _navState() != null)
-                  Positioned(
-                    bottom: 16,
-                    left: 0,
-                    right: 0,
-                    child: Center(
-                      child: NavBall(state: _navState()!, size: 120),
-                    ),
-                  ),
-                // Debug draw-layer toggle panel (top-right).
-                if (_showDebugPanel)
-                  Positioned(top: 8, right: 8, child: _debugPanel()),
-                Positioned(
-                  left: 8,
-                  bottom: 8,
-                  child: Text(
-                    _manualControl
-                        ? 'MANUAL  keys: W/S A/D Q/E Shift  |  touch: joystick + throttle  |  M auto  |  pinch/wheel/[ ] zoom'
-                        : 'AUTO  (M or tap for manual flight)  |  pinch/scroll/[ ] zoom',
-                    style: TextStyle(
-                      color: _manualControl
-                          ? const Color(0xFFFF8C66)
-                          : const Color(0xFF6E8299),
-                      fontSize: 11,
-                    ),
-                  ),
-                ),
-                // Build stamp (bottom-left, bright) to confirm a fresh deploy.
-                Positioned(
-                  left: 8,
-                  bottom: 28,
-                  child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                    color: const Color(0xCC00FF7F),
-                    child: Text(
-                      kBuildStamp,
-                      style: const TextStyle(
-                        color: Color(0xFF001A0D),
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                ),
-                // Zoom-factor readout (debug): the camera scale so issues can be
-                // pinned to an exact zoom. ORTHO shows metres-per-pixel; PERSP
-                // shows the eye range (m). Sits just above the build stamp.
-                Positioned(
-                  left: 8,
-                  bottom: 46,
-                  child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                    color: const Color(0xAA001A0D),
-                    child: Text(
-                      _zoomLabel(),
-                      style: const TextStyle(
-                        color: Color(0xFF7FE0A0),
-                        fontSize: 11,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                ),
-                // On-screen flight controls (touch), only in manual mode.
-                if (_manualControl) ..._touchControls(),
-                // Vessel-lost menu (modal over everything).
-                if (_crashNotice != null) _crashMenu(_crashNotice!),
+                        // Nav-ball: attitude/prograde of the locked vessel.
+                        if (_layers.navBall && _navState() != null)
+                          Positioned(
+                            bottom: 16,
+                            left: 0,
+                            right: 0,
+                            child: Center(child: NavBall(state: _navState()!, size: 120)),
+                          ),
+                        // Debug draw-layer toggle panel (top-right).
+                        if (_showDebugPanel) Positioned(top: 8, right: 8, child: _debugPanel()),
+                        Positioned(
+                          left: 8,
+                          bottom: 8,
+                          child: Text(
+                            _manualControl
+                                ? 'MANUAL  keys: W/S A/D Q/E Shift  |  touch: joystick + throttle  |  M auto  |  pinch/wheel/[ ] zoom'
+                                : 'AUTO  (M or tap for manual flight)  |  pinch/scroll/[ ] zoom',
+                            style: TextStyle(
+                              color: _manualControl ? const Color(0xFFFF8C66) : const Color(0xFF6E8299),
+                              fontSize: 11,
+                            ),
+                          ),
+                        ),
+                        // Build stamp (bottom-left, bright) to confirm a fresh deploy.
+                        Positioned(
+                          left: 8,
+                          bottom: 28,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            color: const Color(0xCC00FF7F),
+                            child: Text(
+                              kBuildStamp,
+                              style: const TextStyle(
+                                color: Color(0xFF001A0D),
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ),
+                        // Zoom-factor readout (debug): the camera scale so issues can be
+                        // pinned to an exact zoom. ORTHO shows metres-per-pixel; PERSP
+                        // shows the eye range (m). Sits just above the build stamp.
+                        Positioned(
+                          left: 8,
+                          bottom: 46,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            color: const Color(0xAA001A0D),
+                            child: Text(
+                              _zoomLabel(),
+                              style: const TextStyle(
+                                color: Color(0xFF7FE0A0),
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ),
+                        // On-screen flight controls (touch), only in manual mode.
+                        if (_manualControl) ..._touchControls(),
+                        // Vessel-lost menu (modal over everything).
+                        if (_crashNotice != null) _crashMenu(_crashNotice!),
                       ],
                     ),
                   ),
@@ -1564,77 +1528,88 @@ class _SimulationViewState extends State<SimulationView>
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 320),
           child: Container(
-          padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
-          decoration: BoxDecoration(
-            color: const Color(0xDD0E1622),
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: const Color(0x33FF8C66)),
-          ),
-          child: SafeArea(
-            top: false,
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              _flightStatusRow(),
-              // FINE throttle — an absolute 0..10% throttle for delicate landing
-              // burns (full slider span = 10% thrust). Sits ABOVE the coarse one.
-              Row(children: [
-                const SizedBox(
-                    width: 56,
-                    child: Text('FINE',
-                        style: TextStyle(color: Color(0xFFFFC58A), fontSize: 11))),
-                Expanded(
-                  child: SliderTheme(
-                    data: const SliderThemeData(
-                        activeTrackColor: Color(0xFFFFC58A),
-                        inactiveTrackColor: Color(0x33FFC58A),
-                        thumbColor: Color(0xFFFFC58A),
-                        trackHeight: 2),
-                    child: Slider(
-                      // 0..1 maps to an ABSOLUTE 0..10% throttle for fine landing
-                      // burns. Sets the throttle directly (held, not a trim).
-                      value: _touchThrottleFine,
-                      onChanged: (v) => setState(() {
-                        _touchThrottleFine = v;
-                        _touchThrottle = v * 0.10; // 0..10%
-                      }),
-                    ),
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+            decoration: BoxDecoration(
+              color: const Color(0xDD0E1622),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: const Color(0x33FF8C66)),
+            ),
+            child: SafeArea(
+              top: false,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _flightStatusRow(),
+                  // FINE throttle — an absolute 0..10% throttle for delicate landing
+                  // burns (full slider span = 10% thrust). Sits ABOVE the coarse one.
+                  Row(
+                    children: [
+                      const SizedBox(
+                        width: 56,
+                        child: Text('FINE', style: TextStyle(color: Color(0xFFFFC58A), fontSize: 11)),
+                      ),
+                      Expanded(
+                        child: SliderTheme(
+                          data: const SliderThemeData(
+                            activeTrackColor: Color(0xFFFFC58A),
+                            inactiveTrackColor: Color(0x33FFC58A),
+                            thumbColor: Color(0xFFFFC58A),
+                            trackHeight: 2,
+                          ),
+                          child: Slider(
+                            // 0..1 maps to an ABSOLUTE 0..10% throttle for fine landing
+                            // burns. Sets the throttle directly (held, not a trim).
+                            value: _touchThrottleFine,
+                            onChanged: (v) => setState(() {
+                              _touchThrottleFine = v;
+                              _touchThrottle = v * 0.10; // 0..10%
+                            }),
+                          ),
+                        ),
+                      ),
+                      SizedBox(
+                        width: 40,
+                        child: Text(
+                          '${(_touchThrottleFine * 10).toStringAsFixed(1)}%',
+                          textAlign: TextAlign.right,
+                          style: const TextStyle(color: Color(0xFFFFC58A), fontSize: 11),
+                        ),
+                      ),
+                    ],
                   ),
-                ),
-                SizedBox(
-                    width: 40,
-                    child: Text(
-                        '${(_touchThrottleFine * 10).toStringAsFixed(1)}%',
-                        textAlign: TextAlign.right,
-                        style: const TextStyle(
-                            color: Color(0xFFFFC58A), fontSize: 11))),
-              ]),
-              // Throttle — held (does NOT self-centre).
-              Row(children: [
-                const SizedBox(
-                    width: 56,
-                    child: Text('THR', style: TextStyle(color: Color(0xFFFF8C66), fontSize: 12))),
-                Expanded(
-                  child: SliderTheme(
-                    data: const SliderThemeData(
-                        activeTrackColor: Color(0xFFFF8C66),
-                        thumbColor: Color(0xFFFF8C66),
-                        trackHeight: 3),
-                    child: Slider(
-                      value: _touchThrottle,
-                      onChanged: (v) => setState(() => _touchThrottle = v),
-                    ),
+                  // Throttle — held (does NOT self-centre).
+                  Row(
+                    children: [
+                      const SizedBox(
+                        width: 56,
+                        child: Text('THR', style: TextStyle(color: Color(0xFFFF8C66), fontSize: 12)),
+                      ),
+                      Expanded(
+                        child: SliderTheme(
+                          data: const SliderThemeData(
+                            activeTrackColor: Color(0xFFFF8C66),
+                            thumbColor: Color(0xFFFF8C66),
+                            trackHeight: 3,
+                          ),
+                          child: Slider(value: _touchThrottle, onChanged: (v) => setState(() => _touchThrottle = v)),
+                        ),
+                      ),
+                      SizedBox(
+                        width: 40,
+                        child: Text(
+                          '${(_touchThrottle * 100).round()}%',
+                          textAlign: TextAlign.right,
+                          style: const TextStyle(color: Color(0xFFFF8C66), fontSize: 12),
+                        ),
+                      ),
+                    ],
                   ),
-                ),
-                SizedBox(
-                    width: 40,
-                    child: Text('${(_touchThrottle * 100).round()}%',
-                        textAlign: TextAlign.right,
-                        style: const TextStyle(color: Color(0xFFFF8C66), fontSize: 12))),
-              ]),
-              _axisRow('PITCH', _touchPitch, (v) => _touchPitch = v),
-              _axisRow('YAW', _touchYaw, (v) => _touchYaw = v),
-              _axisRow('ROLL', _touchRoll, (v) => _touchRoll = v),
-            ]),
-          ),
+                  _axisRow('PITCH', _touchPitch, (v) => _touchPitch = v),
+                  _axisRow('YAW', _touchYaw, (v) => _touchYaw = v),
+                  _axisRow('ROLL', _touchRoll, (v) => _touchRoll = v),
+                ],
+              ),
+            ),
           ),
         ),
       ),
@@ -1656,28 +1631,31 @@ class _SimulationViewState extends State<SimulationView>
     final stageNo = total; // current bottom-most remaining stage
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
-      child: Row(children: [
-        Expanded(
-          child: Text(
-            'ALT ${(alt / 1000).toStringAsFixed(1)}km · ${spd.toStringAsFixed(0)} m/s · STAGE $stageNo/$total',
-            style: const TextStyle(color: Color(0xFF9FB4CC), fontSize: 11),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              'ALT ${(alt / 1000).toStringAsFixed(1)}km · ${spd.toStringAsFixed(0)} m/s · STAGE $stageNo/$total',
+              style: const TextStyle(color: Color(0xFF9FB4CC), fontSize: 11),
+            ),
           ),
-        ),
-        if (v.landed)
-          Padding(
-            padding: const EdgeInsets.only(left: 6),
-            child: TextButton.icon(
-              style: TextButton.styleFrom(
+          if (v.landed)
+            Padding(
+              padding: const EdgeInsets.only(left: 6),
+              child: TextButton.icon(
+                style: TextButton.styleFrom(
                   backgroundColor: const Color(0xFF7FE0A0),
                   foregroundColor: Colors.black,
                   padding: const EdgeInsets.symmetric(horizontal: 8),
-                  minimumSize: const Size(0, 30)),
-              icon: const Icon(Icons.location_city, size: 16),
-              label: const Text('FOUND', style: TextStyle(fontSize: 11)),
-              onPressed: () => _foundColony(v),
+                  minimumSize: const Size(0, 30),
+                ),
+                icon: const Icon(Icons.location_city, size: 16),
+                label: const Text('FOUND', style: TextStyle(fontSize: 11)),
+                onPressed: () => _foundColony(v),
+              ),
             ),
-          ),
-      ]),
+        ],
+      ),
     );
   }
 
@@ -1689,39 +1667,39 @@ class _SimulationViewState extends State<SimulationView>
     final dir = v.state.position.normalized;
     final latDeg = math.asin(dir.z.clamp(-1.0, 1.0)) * 180 / math.pi;
     final lonDeg = math.atan2(dir.y, dir.x) * 180 / math.pi;
-    Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => CityBuilderScreen(
-        config: CityConfig(
-          bodyId: body.id.value,
-          latitude: latDeg,
-          longitude: lonDeg,
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => CityBuilderScreen(
+          config: CityConfig(bodyId: body.id.value, latitude: latDeg, longitude: lonDeg),
         ),
       ),
-    ));
+    );
   }
 
   /// A self-centring attitude axis slider (-1..1), snapping back to 0 on release.
-  Widget _axisRow(String label, double value, void Function(double) set) =>
-      Row(children: [
-        SizedBox(
-            width: 56,
-            child: Text(label,
-                style: const TextStyle(color: Color(0xFF9FB4CC), fontSize: 12))),
-        Expanded(
-          child: SliderTheme(
-            data: const SliderThemeData(
-                activeTrackColor: Color(0xFF7FE0A0),
-                thumbColor: Color(0xFF7FE0A0),
-                trackHeight: 2),
-            child: Slider(
-              value: value,
-              min: -1,
-              max: 1,
-              onChanged: (v) => setState(() => set(v)),
-              onChangeEnd: (_) => setState(() => set(0)), // self-centre
-            ),
+  Widget _axisRow(String label, double value, void Function(double) set) => Row(
+    children: [
+      SizedBox(
+        width: 56,
+        child: Text(label, style: const TextStyle(color: Color(0xFF9FB4CC), fontSize: 12)),
+      ),
+      Expanded(
+        child: SliderTheme(
+          data: const SliderThemeData(
+            activeTrackColor: Color(0xFF7FE0A0),
+            thumbColor: Color(0xFF7FE0A0),
+            trackHeight: 2,
+          ),
+          child: Slider(
+            value: value,
+            min: -1,
+            max: 1,
+            onChanged: (v) => setState(() => set(v)),
+            onChangeEnd: (_) => setState(() => set(0)), // self-centre
           ),
         ),
-        const SizedBox(width: 40),
-      ]);
+      ),
+      const SizedBox(width: 40),
+    ],
+  );
 }
