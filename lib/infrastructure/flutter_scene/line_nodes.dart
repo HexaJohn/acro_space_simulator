@@ -82,12 +82,14 @@ class LineNodes {
         final centre = Vector3(cx / n, cy / n, cz / n);
         final ringRadiusM = (first - centre).length;
 
-        // Camera inside (or near) the ring: an edge-on giant ring sweeps
-        // the sky as near-plane-clipped dashes. CAMERA distance, not focus
-        // distance, so zooming way out brings the system rails back.
+        // Camera inside the ring: an edge-on giant ring sweeps the sky as
+        // near-plane-clipped dashes. CAMERA distance, not focus distance,
+        // so zooming out brings rails back. 1.1x: the rail appears as soon
+        // as the camera clears the ring (a 2x margin held the Moon's rail
+        // hostage until ~870 Mm); the px ceiling handles residual clutter.
         final centreDist =
             (origin.worldToRel(centre) - camera.eyeOffset).length;
-        if (centreDist < 2.0 * ringRadiusM) continue;
+        if (centreDist < 1.1 * ringRadiusM) continue;
 
         final apparentPx =
             camera.radiusPx(origin.worldToRel(centre), ringRadiusM);

@@ -26,6 +26,10 @@ class SimViewControl {
   /// Switch the world-viewport backend.
   void Function(RenderBackend backend)? setBackend;
 
+  /// Lock the camera focus onto a body by id (e.g. 'saturn'), clearing any
+  /// vessel lock.
+  void Function(String bodyId)? focusBody;
+
   /// Current camera/backend state for assertions and closed-loop control.
   Map<String, Object?> Function()? status;
 
@@ -34,6 +38,7 @@ class SimViewControl {
     zoom = null;
     setPerspective = null;
     setBackend = null;
+    focusBody = null;
     status = null;
   }
 }

@@ -41,23 +41,26 @@ class AtmosphereNodes {
         return s;
       });
 
-      // Shell sits at the top of the atmosphere. Positions/scale follow the
-      // body; spin is irrelevant (the shell is view-dependent, not surface-
-      // locked).
+      // Shell radius: visually exaggerated above the physical atmosphere
+      // top so the glow rings OUTSIDE the planet silhouette like the
+      // software renderer's screen-space halo (a physically-thin Earth
+      // shell hides its glow within a couple of pixels of the limb).
       final world = Vector3(b.px, b.py, b.pz);
       final rel = origin.worldToRel(world);
-      final radius = lengthToScene(b.radius + d.atmoThickness);
+      final shellM = b.radius +
+          math.max(d.atmoThickness * 4.0, b.radius * 0.05);
+      final radius = lengthToScene(shellM);
       shell.node.localTransform = vm.Matrix4.compose(
         relToScene(rel),
         vm.Quaternion.identity(),
         vm.Vector3.all(radius),
       );
 
-      // View-dependent limb alpha, computed in body-local unit space: the
+      // View-dependent limb alpha, computed in shell-local unit space: the
       // camera position relative to the shell centre, unscaled (scene and
       // domain share the same frame; the mirror lives at the image level).
       // Inside the shell the limb model is meaningless — hide it.
-      final camLocal = (Vector3.zero - rel) / (b.radius + d.atmoThickness);
+      final camLocal = (Vector3.zero - rel) / shellM;
       final inside = camLocal.length <= 1.02;
       shell.node.visible = !inside;
       if (!inside) shell.updateColors(camLocal);
@@ -196,16 +199,15 @@ class _Shell {
       {
         final toCam = (cam - n)..normalize();
         final facing = n.dot(toCam); // 1 at sub-camera point, 0 at limb
-        if (facing <= 0) {
-          alpha = 0; // back hemisphere
-        } else {
-          // Concentrated at the limb (last ~20 deg of grazing angle). A
-          // gentler curve veils the whole visible disc in pale haze — the
-          // glow must ring the silhouette like the software halo, not fog
-          // the planet.
-          alpha = (math.pow(1.0 - facing, 6.0) * 1.4).clamp(0.0, 0.9)
-              .toDouble();
-        }
+        // SYMMETRIC silhouette glow: |facing| ~ 0 marks the shell's own
+        // silhouette as seen from the camera. The near side of that band
+        // glows just inside the planet's limb; the FAR side is visible
+        // AROUND the planet (the shell is larger), giving the halo ring
+        // outside the disc like the software renderer's screen-space halo.
+        // Steep power keeps the planet face itself haze-free.
+        alpha = (math.pow(1.0 - facing.abs(), 4.0) * 1.2)
+            .clamp(0.0, 0.9)
+            .toDouble();
       }
       final o = i * 4;
       _colors[o] = _tint.x * alpha;

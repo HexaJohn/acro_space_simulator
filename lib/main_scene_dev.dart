@@ -9,6 +9,7 @@ import 'package:flutter/rendering.dart';
 
 import 'infrastructure/flutter/sim_view_control.dart';
 import 'infrastructure/flutter/simulation_view.dart';
+import 'infrastructure/flutter_scene/body_nodes.dart';
 import 'infrastructure/flutter_scene/render_backend.dart';
 
 /// Dev entrypoint: boots STRAIGHT into [SimulationView] with the
@@ -83,6 +84,14 @@ void main() {
       c.setBackend?.call(params['backend'] == 'software'
           ? RenderBackend.software
           : RenderBackend.flutterScene);
+    }
+    // Live tuning knob: planet texture longitude alignment (degrees).
+    final texYaw = deg('textureYawDeg');
+    if (texYaw != null) {
+      BodyNodes.textureYawRad = texYaw * math.pi / 180;
+    }
+    if (params['focusBody'] != null) {
+      c.focusBody?.call(params['focusBody']!);
     }
     return developer.ServiceExtensionResponse.result(
         jsonEncode(c.status?.call() ?? {'error': 'no live view'}));

@@ -76,9 +76,11 @@ class VesselNodes {
       return;
     }
     for (final p in v.parts) {
+      // Primitives are unit-metre; real craft parts read better at a few
+      // metres (a 1 m cube is sub-pixel at typical camera ranges).
       vesselNode.add(
         fs.Node(mesh: PartPrimitives.forType(p.type))
-          ..localTransform = _partTransform(p.ox, p.oy, p.oz, 1.0),
+          ..localTransform = _partTransform(p.ox, p.oy, p.oz, 3.0),
       );
     }
   }

@@ -11,6 +11,7 @@ import 'atmosphere_nodes.dart';
 import 'body_nodes.dart';
 import 'coord_convert.dart';
 import 'line_nodes.dart';
+import 'ring_nodes.dart';
 import 'scene_textures.dart';
 import 'vessel_nodes.dart';
 
@@ -25,11 +26,17 @@ import 'vessel_nodes.dart';
 class SceneSync {
   SceneSync(this.scene, TextureCache textures, {void Function()? onTexture})
       : _textures = SceneTextures(textures, onReady: onTexture) {
+    // Space is not a photo studio: the default image-based lighting
+    // (environmentIntensity 1.0) washes every body in ambient white and
+    // drowns the sun's terminator. A trace remains so night sides read as
+    // dim spheres rather than voids.
+    scene.environmentIntensity = 0.05;
     _bodies = BodyNodes(scene, _textures);
     _skybox = SkyboxNode(scene, _textures);
     _vessels = VesselNodes(scene);
     _lines = LineNodes(scene);
     _atmospheres = AtmosphereNodes(scene);
+    _rings = RingNodes(scene);
   }
 
   final fs.Scene scene;
@@ -39,6 +46,7 @@ class SceneSync {
   late final VesselNodes _vessels;
   late final LineNodes _lines;
   late final AtmosphereNodes _atmospheres;
+  late final RingNodes _rings;
 
   final FloatingOrigin origin = FloatingOrigin();
 
@@ -61,6 +69,7 @@ class SceneSync {
       _lines.update(snap, origin, camera: camera, viewport: viewport);
     }
     if (!_noAtmo) _atmospheres.update(snap, origin);
+    _rings.update(snap, origin);
     _skybox.update();
     _updateSun(snap);
   }
@@ -87,7 +96,12 @@ class SceneSync {
             final rel = origin.worldToRel(star);
             final len = rel.length;
             if (len < 1.0) return vm.Vector3(-1.0, -0.2, -0.1);
-            // Light TRAVELS from the star toward the focus: -starDir.
+            // Light TRAVELS from the star toward the focus (-starDir), per
+            // the DirectionalLight docs. Verified against the software
+            // renderer's terminator top-down A/B WITH the ambient IBL
+            // killed — with it at full strength the terminator is invisible
+            // and the sign cannot be judged (a first attempt inverted this
+            // based on exactly that mistake).
             final d = rel / len;
             return vm.Vector3(-d.x, -d.y, -d.z);
           })();

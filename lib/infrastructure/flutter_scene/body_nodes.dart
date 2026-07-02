@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter_scene/scene.dart' as fs;
 import 'package:vector_math/vector_math.dart' as vm;
 
@@ -40,6 +42,15 @@ class BodyNodes {
   /// includes them; keep the join tolerant anyway.
   final Map<String, BodyKind> _kinds = {};
 
+  /// Longitude alignment between the stock sphere's U seam and the
+  /// software renderer's equirect convention. Body-frame yaw: composed
+  /// AFTER the snapshot quaternion so it rotates the texture about the
+  /// body's own spin axis. Runtime-mutable (radians) so the offset can be
+  /// dialled in live over the control API instead of a rebuild per guess.
+  /// -90 deg matched the software renderer in the A/B yaw ladder
+  /// (test_out/scene_samples/yaw_*.png vs yawref_software.png).
+  static double textureYawRad = -math.pi / 2;
+
   void update(
     WorldSnapshot snap,
     FloatingOrigin origin,
@@ -54,9 +65,13 @@ class BodyNodes {
       final node = _nodes.putIfAbsent(b.id, () => _createNode(b, snap));
       _retryTexture(b.id, snap);
 
-      // Focus-relative position (doubles) -> scene units; spin/tilt as-is.
+      // Focus-relative position (doubles) -> scene units; spin/tilt from
+      // the snapshot, composed with a fixed yaw so the equirect texture's
+      // longitude origin lines up with the software renderer's mapping
+      // (stock SphereGeometry starts its U seam 90 deg away).
       final pos = origin.worldToScene(Vector3(b.px, b.py, b.pz));
-      final rot = quatToScene(Quaternion(b.qw, b.qx, b.qy, b.qz));
+      final rot = quatToScene(Quaternion(b.qw, b.qx, b.qy, b.qz) *
+          Quaternion.axisAngle(Vector3.unitZ, textureYawRad));
       final scale = lengthToScene(b.radius);
       node.localTransform = Matrix4Compose.compose(pos, rot, scale);
     }

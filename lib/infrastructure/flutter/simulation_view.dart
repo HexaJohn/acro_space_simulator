@@ -45,7 +45,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.0.186 scene-chirality-fixed';
+const String kBuildStamp = 'build 0.3.0.189 scene-texture-lon';
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -219,6 +219,13 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     c.setBackend = (backend) {
       if (!mounted) return;
       _setBackend(backend);
+    };
+    c.focusBody = (bodyId) {
+      if (!mounted) return;
+      setState(() {
+        _focusBody = BodyId(bodyId);
+        _focusVessel = null;
+      });
     };
     c.status = () => {
           'azimuth': _view.azimuth,
