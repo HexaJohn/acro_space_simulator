@@ -278,9 +278,14 @@ class LineNodes {
   static const int _densifyMaxPerSeg = 64;
   static const int _densifyMaxPts = 4096;
 
+  /// Fade floor: the leading edge keeps this fraction of the base alpha
+  /// (a fully invisible leading arc made rails hard to trace end-to-end).
+  static const double _fadeFloor = 0.25;
+
   /// Absolute world polyline -> (scene points, premultiplied vertex colors),
   /// densified in screen space and alpha-ramped by [frac] per vertex:
-  /// 0 = leading edge (invisible), 1 = trailing edge (full [base] alpha).
+  /// 0 = leading edge ([_fadeFloor] of the base alpha), 1 = trailing edge
+  /// (full [base] alpha).
   (List<vm.Vector3>, List<vm.Vector4>) _fadedStrip(
     List<Vector3> world,
     List<double> frac,
@@ -294,7 +299,7 @@ class LineNodes {
     final focal = camera?.focalPx ?? 0;
     void emit(Vector3 rel, double f) {
       pts.add(relToScene(rel));
-      final a = base.w * f;
+      final a = base.w * (_fadeFloor + (1.0 - _fadeFloor) * f);
       cols.add(vm.Vector4(base.x * a, base.y * a, base.z * a, a));
     }
 
