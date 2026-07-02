@@ -67,7 +67,9 @@ class BodyEphemeris {
   List<Vector3> orbitPathRelativeToParent(
     CelestialBody body,
     StarSystem system, {
-    int samples = 96,
+    // 96 left ~4°-kink facets on rails seen up close; 256 keeps joints
+    // under 1.5° (the render also densifies long chords in screen space).
+    int samples = 256,
     Epoch epoch = Epoch.zero,
   }) {
     final parent = system.parentOf(body);

@@ -146,15 +146,20 @@ class LineNodes {
         if (apparentPx < _railMinApparentPx || apparentPx > maxPx) continue;
       }
 
-      final pts = <vm.Vector3>[];
-      for (var i = 0; i + 2 < b.orbit.length; i += 3) {
-        pts.add(origin.worldToScene(
-            Vector3(b.orbit[i], b.orbit[i + 1], b.orbit[i + 2])));
-      }
-      pts.add(pts.first); // close the ring
-      _setSpec('rail/${b.id}', seen, pts,
-          _railColors[b.id] ?? _railFallback,
-          width: 2.5);
+      final world = <Vector3>[
+        for (var i = 0; i + 2 < b.orbit.length; i += 3)
+          Vector3(b.orbit[i], b.orbit[i + 1], b.orbit[i + 2]),
+      ];
+      world.add(world.first); // close the ring
+      // Leading-edge fade: rail vertex 0 IS the body (ephemeris contract)
+      // and indices march forward in time, so i/m ramps from invisible
+      // just ahead of the body around the loop to full right behind it.
+      final m = world.length - 1;
+      final frac = [for (var i = 0; i <= m; i++) i / m];
+      final (pts, cols) = _fadedStrip(
+          world, frac, _railColors[b.id] ?? _railFallback, origin, camera);
+      _setSpec('rail/${b.id}', seen, pts, _railFallback,
+          width: 2.5, perVertexColor: cols);
     }
 
     for (final v in snap.vessels.values) {
@@ -171,16 +176,44 @@ class LineNodes {
           (v.body == focusBodyId && focusBodyId != null) ||
           camera == null ||
           camera.eyeOffset.length > 0.05 * math.max(v.semiMajor, 1.0);
-      if (pathRelevant && v.trajectory.length >= 6) {
-        final pts = <vm.Vector3>[];
-        for (var i = 0; i + 2 < v.trajectory.length; i += 3) {
-          pts.add(origin.worldToScene(bodyPos +
-              Vector3(
-                  v.trajectory[i], v.trajectory[i + 1], v.trajectory[i + 2])));
+      if (pathRelevant && v.trajectory.length >= 9) {
+        final world = <Vector3>[
+          for (var i = 0; i + 2 < v.trajectory.length; i += 3)
+            bodyPos +
+                Vector3(
+                    v.trajectory[i], v.trajectory[i + 1], v.trajectory[i + 2]),
+        ];
+        // Leading-edge fade anchored at the CRAFT: trajectory samples sit at
+        // a fixed phase from periapsis (the craft slides along them), so
+        // find its nearest vertex and ramp forward-in-time from there —
+        // invisible just ahead, full alpha arriving from behind. A closed
+        // ellipse wraps the ramp; an open escape path fades ahead from the
+        // craft (its samples DO start at the craft).
+        final craftWorld = bodyPos + Vector3(v.px, v.py, v.pz);
+        final closed = v.eccentricity < 1 && v.semiMajor > 0;
+        final List<double> frac;
+        if (closed) {
+          final m = world.length - 1; // last vertex repeats the first
+          var i0 = 0;
+          var best = double.infinity;
+          for (var i = 0; i < m; i++) {
+            final d = world[i].distanceTo(craftWorld);
+            if (d < best) {
+              best = d;
+              i0 = i;
+            }
+          }
+          frac = [
+            for (var i = 0; i < world.length; i++) ((i - i0) % m + m) % m / m,
+          ];
+        } else {
+          final m = world.length - 1;
+          frac = [for (var i = 0; i <= m; i++) 1.0 - i / m];
         }
-        _setSpec('path/${v.id}', seen, pts,
-            v.id == focusVesselId ? _pathColor : _pathDimColor,
-            width: 2.0);
+        final (pts, cols) = _fadedStrip(world, frac,
+            v.id == focusVesselId ? _pathColor : _pathDimColor, origin, camera);
+        _setSpec('path/${v.id}', seen, pts, _pathColor,
+            width: 2.0, perVertexColor: cols);
       }
 
       // Flown trail: world breadcrumbs, faded tail -> head. PREMULTIPLIED
@@ -234,6 +267,61 @@ class LineNodes {
       return true;
     });
     _trails.removeWhere((id, _) => !snap.vessels.containsKey(id));
+  }
+
+  // Screen-space chord densification targets: split any segment longer than
+  // ~[_densifyTargetPx] on screen. Long chords otherwise interpolate their
+  // endpoint screen-widths across wildly different depths (thickness swings
+  // along the segment) and meet at visible miter kinks. Caps bound the cost
+  // when a chord crosses the whole frame at extreme close zoom.
+  static const double _densifyTargetPx = 24.0;
+  static const int _densifyMaxPerSeg = 64;
+  static const int _densifyMaxPts = 4096;
+
+  /// Absolute world polyline -> (scene points, premultiplied vertex colors),
+  /// densified in screen space and alpha-ramped by [frac] per vertex:
+  /// 0 = leading edge (invisible), 1 = trailing edge (full [base] alpha).
+  (List<vm.Vector3>, List<vm.Vector4>) _fadedStrip(
+    List<Vector3> world,
+    List<double> frac,
+    vm.Vector4 base,
+    FloatingOrigin origin,
+    SceneCamera? camera,
+  ) {
+    final pts = <vm.Vector3>[];
+    final cols = <vm.Vector4>[];
+    final eye = camera?.eyeOffset;
+    final focal = camera?.focalPx ?? 0;
+    void emit(Vector3 rel, double f) {
+      pts.add(relToScene(rel));
+      final a = base.w * f;
+      cols.add(vm.Vector4(base.x * a, base.y * a, base.z * a, a));
+    }
+
+    Vector3? prevRel;
+    var prevF = 0.0;
+    for (var i = 0; i < world.length; i++) {
+      final rel = origin.worldToRel(world[i]);
+      final f = frac[i];
+      if (prevRel != null && eye != null && pts.length < _densifyMaxPts) {
+        final seg = rel - prevRel;
+        final segLen = seg.length;
+        final dist = ((prevRel + seg * 0.5) - eye).length;
+        if (dist > 1e-3) {
+          final px = focal * segLen / dist;
+          final n =
+              math.min((px / _densifyTargetPx).floor(), _densifyMaxPerSeg);
+          for (var k = 1; k < n; k++) {
+            final t = k / n;
+            emit(prevRel + seg * t, prevF + (f - prevF) * t);
+          }
+        }
+      }
+      emit(rel, f);
+      prevRel = rel;
+      prevF = f;
+    }
+    return (pts, cols);
   }
 
   void _setSpec(

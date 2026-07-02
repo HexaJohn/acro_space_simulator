@@ -202,7 +202,9 @@ class VesselSnapshot {
           velocity: v.state.velocity,
           body: body,
           epoch: epoch,
-          samples: 48,
+          // 48 faceted visibly (7.5° kink per joint on the line you stare
+          // at while flying); 256 keeps joints under 1.5°.
+          samples: 256,
         );
         trajectory = [for (final p in path) ...[p.x, p.y, p.z]];
       }
