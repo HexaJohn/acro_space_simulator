@@ -79,6 +79,8 @@ flutter:
   # (solarsystemscope.com), CC-BY 4.0 — attribution shown in-app credits.
   assets:
     - assets/textures/
+    # Craft models (glTF binary), loaded at runtime via Node.fromGlbAsset.
+    - assets/mesh/
     # Compiled GPU shader bundle (hook/build.dart output). Same packaging
     # trick flutter_scene uses for its base bundle: the hook writes into
     # build/shaderbundles/ and normal asset bundling ships it.

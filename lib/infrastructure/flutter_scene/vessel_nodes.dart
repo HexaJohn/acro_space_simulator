@@ -29,6 +29,15 @@ class VesselNodes {
   // (staging events), not every frame.
   final Map<String, String> _partsKey = {};
 
+  /// Craft model: the Apollo CSM glb replaces the procedural part
+  /// composition once decoded (it's 55 MB — async; primitives show until
+  /// then). Loaded per vessel: a Node can't be parented twice.
+  static const String _craftGlb =
+      'assets/mesh/apollo_command_and_service_module.glb';
+  final Set<String> _glbLoading = {};
+  final Set<String> _glbApplied = {};
+  static bool _glbFailed = false; // missing/corrupt asset: stay procedural
+
   void update(WorldSnapshot snap, FloatingOrigin origin) {
     final seen = <String>{};
     for (final v in snap.vessels.values) {
@@ -45,8 +54,9 @@ class VesselNodes {
         _scene.add(n);
         return n;
       });
+      _ensureCraftModel(v.id, node);
       final partsKey = v.parts.map((p) => '${p.type}@${p.ox},${p.oy},${p.oz}').join('|');
-      if (_partsKey[v.id] != partsKey) {
+      if (!_glbApplied.contains(v.id) && _partsKey[v.id] != partsKey) {
         _partsKey[v.id] = partsKey;
         _rebuildParts(node, v);
       }
@@ -58,7 +68,40 @@ class VesselNodes {
       if (seen.contains(id)) return false;
       _scene.remove(node);
       _partsKey.remove(id);
+      _glbApplied.remove(id);
       return true;
+    });
+  }
+
+  void _ensureCraftModel(String vesselId, fs.Node parent) {
+    if (_glbFailed ||
+        _glbApplied.contains(vesselId) ||
+        _glbLoading.contains(vesselId)) {
+      return;
+    }
+    _glbLoading.add(vesselId);
+    fs.Node.fromGlbAsset(_craftGlb).then((model) {
+      _glbLoading.remove(vesselId);
+      final node = _nodes[vesselId];
+      if (node == null) return; // vessel vanished while decoding
+      for (final child in List.of(node.children)) {
+        node.remove(child);
+      }
+      // glTF is Y-up; the vessel body frame is Z-up with the nose on +Z.
+      // THIS model is authored in MILLIMETRES (it rendered ~11 km long when
+      // read as metres) -> 0.001 to metres, then metres to scene km.
+      model.localTransform = vm.Matrix4.compose(
+        vm.Vector3.zero(),
+        vm.Quaternion.axisAngle(vm.Vector3(1, 0, 0), math.pi / 2),
+        vm.Vector3.all(lengthToScene(0.001)),
+      );
+      node.add(model);
+      _glbApplied.add(vesselId);
+    }).catchError((Object e) {
+      _glbLoading.remove(vesselId);
+      _glbFailed = true; // don't hammer a broken asset for every vessel
+      // ignore: avoid_print
+      print('craft glb load failed: $e');
     });
   }
 
