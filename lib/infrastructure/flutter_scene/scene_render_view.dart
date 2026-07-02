@@ -5,6 +5,7 @@ import 'package:flutter_scene/scene.dart' as fs;
 import '../../adapters/presenters/camera_view.dart';
 import '../../application/snapshot/world_snapshot.dart';
 import '../flutter/texture_cache.dart';
+import 'atmosphere_nodes.dart';
 import 'scene_camera_adapter.dart';
 import 'scene_sync.dart';
 
@@ -64,6 +65,12 @@ class _SceneRenderViewState extends State<SceneRenderView> {
   @override
   void initState() {
     super.initState();
+    // Custom shader bundle (raymarched atmosphere). Independent of the base
+    // bundle; on failure the shells simply never spawn — log, don't brick
+    // the whole viewport.
+    AtmosphereNodes.loadShader().catchError((Object e) {
+      debugPrint('atmosphere shader load failed: $e');
+    });
     _staticInit.then((_) {
       if (!mounted) return;
       _sync = SceneSync(

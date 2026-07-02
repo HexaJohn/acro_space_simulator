@@ -49,6 +49,10 @@ dependencies:
       path: packages/flutter_scene
   vector_math: ^2.4.0 # flutter_scene's math types (Matrix4, vm.Vector3)
   shared_preferences: ^2.5.3 # persisted render-backend selection
+  # Custom GPU shader pipeline (hook/build.dart compiles shaders/*.frag
+  # into build/shaderbundles/acro.shaderbundle for the atmosphere shader).
+  flutter_gpu_shaders: ^0.5.1
+  hooks: ^2.0.0
 
 dev_dependencies:
   flutter_test:
@@ -75,6 +79,10 @@ flutter:
   # (solarsystemscope.com), CC-BY 4.0 — attribution shown in-app credits.
   assets:
     - assets/textures/
+    # Compiled GPU shader bundle (hook/build.dart output). Same packaging
+    # trick flutter_scene uses for its base bundle: the hook writes into
+    # build/shaderbundles/ and normal asset bundling ships it.
+    - build/shaderbundles/
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

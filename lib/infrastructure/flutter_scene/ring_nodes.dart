@@ -8,6 +8,7 @@ import '../../application/snapshot/world_snapshot.dart';
 import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
 import 'coord_convert.dart';
+import 'depth_materials.dart';
 
 /// Planetary ring systems as flat translucent annulus meshes in each ringed
 /// body's ring plane.
@@ -56,7 +57,7 @@ class RingNodes {
         final n = fs.Node(
           mesh: fs.Mesh(
             _annulus(spec.$1, spec.$2),
-            fs.UnlitMaterial()
+            DepthSafeUnlitMaterial()
               ..baseColorFactor = _premul(spec.$4, _intensity[b.id] ?? 0.3)
               ..alphaMode = fs.AlphaMode.blend
               ..doubleSided = true,

@@ -144,6 +144,42 @@ void main() {
               'renders above centre before and after the flip');
     });
 
+    test('projection scale matches the software projectPx (label overlay '
+        'alignment)', () {
+      // The HUD overlay places labels with the SOFTWARE projection while
+      // bodies render through the flutter_scene projection: any scale
+      // mismatch makes labels drift from their bodies, growing with
+      // distance from the screen centre (field report: the Moon's label
+      // floats far from it when viewed from other bodies).
+      const w = 1280.0, h = 720.0;
+      const cam = PerspectiveCamera(
+        azimuth: 0.4,
+        elevation: 0.2,
+        range: 2.0e7,
+        viewportH: h,
+      );
+      final scene = toSceneCamera(cam, viewportH: h);
+      final vp = scene.getViewTransform(const Size(w, h));
+
+      for (final rel in [
+        cam.right * 3.0e6 + cam.up * 1.0e6,
+        cam.right * -8.0e6 + cam.up * 4.0e6, // far off-centre
+        cam.up * -6.0e6,
+      ]) {
+        final sw = cam.projectPx(rel)!;
+        final p = relToScene(rel);
+        final clip = vp.transformed(vm.Vector4(p.x, p.y, p.z, 1.0));
+        final ndcX = clip.x / clip.w, ndcY = clip.y / clip.w;
+        // Raw scene px (centre-origin, y up), then undo the image flipX.
+        final fsX = -(ndcX * w / 2);
+        final fsY = ndcY * h / 2;
+        expect(fsX, closeTo(sw.x, 1.5),
+            reason: 'horizontal projection scale mismatch at $rel');
+        expect(fsY, closeTo(sw.y, 1.5),
+            reason: 'vertical projection scale mismatch at $rel');
+      }
+    });
+
     test('ortho camera gets a finite synthetic eye (no singular lookAt)', () {
       // OrthoCamera.eyeOffset is ZERO (parallel rays). Feeding that through
       // lookAt made position == target -> singular view matrix ->

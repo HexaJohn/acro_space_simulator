@@ -13,9 +13,14 @@ import 'package:flutter_scene/scene.dart' as fs;
 /// and no rotation un-mirrors. A first version of this builder showed a
 /// pale backface veil: its triangle winding was inward (front faces
 /// culled); the winding below is outward (CCW from outside).
+/// [invert] flips the triangle winding so the INSIDE faces survive the
+/// default backface cull — for shells that must render with the camera
+/// inside or outside (the raymarched atmosphere; ShaderMaterial's culling
+/// enum isn't exported from the gpu shim, so winding does the job).
 fs.MeshGeometry uvSphereZUp({
   int segments = 96,
   int rings = 48,
+  bool invert = false,
 }) {
   final positions = <double>[];
   final normals = <double>[];
@@ -41,8 +46,12 @@ fs.MeshGeometry uvSphereZUp({
     for (var s = 0; s < segments; s++) {
       final a = r * (segments + 1) + s;
       final b = a + segments + 1;
-      // Outward (counter-clockwise seen from outside the sphere).
-      indices.addAll([a, a + 1, b, b, a + 1, b + 1]);
+      if (invert) {
+        indices.addAll([a, b, a + 1, a + 1, b, b + 1]);
+      } else {
+        // Outward (counter-clockwise seen from outside the sphere).
+        indices.addAll([a, a + 1, b, b, a + 1, b + 1]);
+      }
     }
   }
   return fs.MeshGeometry.fromArrays(

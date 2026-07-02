@@ -1,0 +1,6 @@
+{
+    "AtmosphereFragment": {
+        "type": "fragment",
+        "file": "shaders/atmosphere.frag"
+    }
+}

@@ -124,7 +124,7 @@ packages:
     source: sdk
     version: "0.0.0"
   flutter_gpu_shaders:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: flutter_gpu_shaders
       sha256: "191ae97721e56e498040f9be8bd26f981793d682e74ea24a76b59ed24b9ab3cb"
@@ -159,7 +159,7 @@ packages:
     source: sdk
     version: "0.0.0"
   hooks:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: hooks
       sha256: "9a62a50b50b769a737bc0a8ff381f333529df3ab746b2f6b02e83760231455ba"

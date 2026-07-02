@@ -8,6 +8,7 @@ import '../../adapters/presenters/camera_view.dart';
 import '../../application/snapshot/world_snapshot.dart';
 import '../../domain/shared/vector3.dart';
 import 'coord_convert.dart';
+import 'depth_materials.dart';
 
 /// Orbit rails, predicted trajectories, and flown trails as camera-facing
 /// [fs.PolylineGeometry] strips (screen-pixel width — same visual weight as
@@ -282,7 +283,7 @@ class LineNodes {
           : vm.Vector4(c.x * c.w, c.y * c.w, c.z * c.w, c.w);
       final mesh = fs.Mesh(
         geometry,
-        fs.UnlitMaterial()
+        DepthSafeUnlitMaterial()
           ..baseColorFactor = tint
           ..alphaMode = fs.AlphaMode.blend,
       );
