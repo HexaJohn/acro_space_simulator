@@ -48,7 +48,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.0.223';
+const String kBuildStamp = 'build 0.3.0.224';
 
 /// What the camera treats as "up" while orbiting the focus.
 enum CameraUpMode {
@@ -313,6 +313,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   // focused body's tilted spin frame, GRAVITY gimbals about the local
   // vertical at the focused vessel (surface flying: the ground reads down).
   CameraUpMode _upMode = CameraUpMode.free;
+  // Gravity-mode frame state for the INCREMENTAL update (see the frame
+  // block): fresh shortest-arc per frame flips when the radial nears -Z.
+  Quaternion? _gravFrame;
+  Vector3? _gravRadial;
 
   // Freecam: the camera orbits a FREE ANCHOR flown with WASD/QE (Shift
   // boosts) instead of the locked target; MMB orbit and wheel zoom keep
@@ -326,6 +330,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   bool _freecam = false;
   BodyId? _freecamRef;
   Vector3 _freecamRel = Vector3.zero;
+
+  /// Freecam flight-speed multiplier, driven by the scroll wheel while the
+  /// freecam is active (wheel = speed, not zoom, when flying).
+  double _freecamSpeedMul = 1.0;
 
   Vector3 get _freecamWorld {
     final snap = _sceneWorld;
@@ -488,6 +496,14 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     }
 
     if (_perspectiveMode) {
+      if (_freecam) {
+        // Scroll wheel drives the flight-speed multiplier while flying.
+        final mul = _freecamSpeedMul >= 10
+            ? _freecamSpeedMul.toStringAsFixed(0)
+            : _freecamSpeedMul.toStringAsFixed(2);
+        return 'FREECAM  range ${eng(_range)} m  spd x$mul  '
+            'fov ${_fovDeg.toStringAsFixed(0)}°';
+      }
       // _range is the eye's altitude above the focused body's surface.
       final label = _focusBody != null ? 'alt' : 'range';
       return 'PERSP  $label ${eng(_range)} m  fov ${_fovDeg.toStringAsFixed(0)}°';
@@ -817,7 +833,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         final cam = _camera;
         final boost =
             _keysDown.contains(LogicalKeyboardKey.shiftLeft) ? 8.0 : 1.0;
-        final speed = math.max(_range, 5.0) * 1.5 * boost; // m/s
+        final speed =
+            math.max(_range, 5.0) * 1.5 * boost * _freecamSpeedMul; // m/s
         final dt = frameDt.clamp(0.0, 0.1);
         _freecamRel = _freecamRel +
             (cam.forward * fwd + cam.right * strafe + cam.up * lift) *
@@ -917,8 +934,25 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         // dominant-body-centred with root-parallel axes, so the direction
         // needs no reframing). Gimbal +Z onto it — azimuth then circles
         // the horizon and elevation climbs from horizon to zenith.
-        frame = _shortestArc(Vector3.unitZ, vessel.state.position);
+        //
+        // Updated INCREMENTALLY (small arc from the previous radial
+        // composed onto the previous frame): a fresh shortest-arc from
+        // +Z each frame is discontinuous when the radial passes near -Z
+        // (the arc axis flips 180 degrees) — the camera snapped to a
+        // "random" orientation when the vessel crossed under the body.
+        final radial = vessel.state.position.normalized;
+        final prevFrame = _gravFrame;
+        final prevRadial = _gravRadial;
+        if (prevFrame == null || prevRadial == null) {
+          frame = _shortestArc(Vector3.unitZ, radial);
+        } else {
+          frame = (_shortestArc(prevRadial, radial) * prevFrame).normalized;
+        }
+        _gravFrame = frame;
+        _gravRadial = radial;
       } else {
+        _gravFrame = null;
+        _gravRadial = null;
         final t = body?.axialTilt ?? 0;
         frame = t == 0
             ? Quaternion.identity
@@ -1050,6 +1084,13 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   void _toggleCraftCam() {
     setState(() {
       _craftCam = !_craftCam;
+      if (!_craftCam) {
+        // The chase cam drives roll from the craft attitude every frame;
+        // leaving it with that roll makes every subsequent MMB drag
+        // rotate through the STALE angle (drags feel diagonal/reversed —
+        // "the camera jumps around").
+        _view = _view.copyWith(roll: 0);
+      }
       if (_craftCam) {
         // Ensure a vessel is the target (fall back to the first vessel).
         if (_focusVessel == null) {
@@ -1803,11 +1844,19 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           },
           onPointerCancel: (_) => _mmbDragging = false,
           // Mouse wheel: scroll up = zoom in. Drives mpp (ortho) or range
-          // (perspective).
+          // (perspective). In FREECAM the wheel sets the flight-speed
+          // multiplier instead — speed control matters more than zoom
+          // while flying, and the range still zooms via [ ] keys.
           onPointerSignal: (signal) {
             if (signal is PointerScrollEvent) {
-              final factor = signal.scrollDelta.dy > 0 ? 1.15 : 1 / 1.15;
-              setState(() => _zoom(factor));
+              if (_freecam) {
+                final factor = signal.scrollDelta.dy > 0 ? 1 / 1.3 : 1.3;
+                setState(() => _freecamSpeedMul =
+                    (_freecamSpeedMul * factor).clamp(0.01, 10000.0));
+              } else {
+                final factor = signal.scrollDelta.dy > 0 ? 1.15 : 1 / 1.15;
+                setState(() => _zoom(factor));
+              }
             }
           },
           child: GestureDetector(
