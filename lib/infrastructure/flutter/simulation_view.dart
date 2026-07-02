@@ -46,7 +46,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.0.203';
+const String kBuildStamp = 'build 0.3.0.204';
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -661,9 +661,19 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         if (projected.length > 1e-6) {
           final desired = projected.normalized;
           final upB = zeroRoll.up, rightB = zeroRoll.right;
-          final roll =
+          final target =
               math.atan2(desired.dot(rightB), desired.dot(upB));
-          _view = _view.copyWith(roll: roll);
+          // Ease toward the target roll (shortest way around) instead of
+          // snapping: toggling the mode or fast orbits otherwise JUMP the
+          // horizon.
+          var delta = target - _view.roll;
+          while (delta > math.pi) {
+            delta -= 2 * math.pi;
+          }
+          while (delta < -math.pi) {
+            delta += 2 * math.pi;
+          }
+          _view = _view.copyWith(roll: _view.roll + delta * 0.15);
         }
       }
     }
@@ -860,7 +870,16 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
 
   /// Orbit the camera around the focus by arrow-key deltas (radians).
   void _orbitCamera(double dAz, double dEl) {
-    setState(() => _view = _view.copyWith(azimuth: _view.azimuth + dAz, elevation: _view.elevation + dEl));
+    // Screen-drag deltas are in VIEW space: when the camera is rolled
+    // (align-up mode tracks a tilted spin axis), a horizontal drag must
+    // still pan horizontally ON SCREEN — rotate the deltas through the
+    // roll, or drags feel 90-degrees-wrong under a rolled camera.
+    final r = _view.roll;
+    final ca = math.cos(r), sa = math.sin(r);
+    final az = dAz * ca - dEl * sa;
+    final el = dAz * sa + dEl * ca;
+    setState(() => _view =
+        _view.copyWith(azimuth: _view.azimuth + az, elevation: _view.elevation + el));
   }
 
   /// Modal "vessel lost" menu shown when a craft is destroyed. Fills the screen
