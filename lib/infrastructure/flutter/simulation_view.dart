@@ -36,6 +36,7 @@ import '../sample_world.dart';
 import '../flutter_scene/render_backend.dart';
 import '../flutter_scene/scene_hud_overlay.dart';
 import '../flutter_scene/scene_render_view.dart';
+import 'sim_view_control.dart';
 import 'debug_layers.dart';
 import 'nav_ball.dart';
 import 'screens/city_builder_screen.dart';
@@ -186,6 +187,51 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     unawaited(SharedPreferences.getInstance()
         .then((p) => p.setString(_backendPrefKey, backend.name)));
   }
+
+  /// Wire the programmatic control surface (VM-service extensions in
+  /// main_scene_dev.dart drive these). Every mutation goes through
+  /// setState, exactly like user input.
+  void _registerControl() {
+    final c = SimViewControl.instance;
+    c.orbit = ({double? azimuth, double? elevation, double? roll}) {
+      if (!mounted) return;
+      setState(() {
+        _view = _view.copyWith(
+          azimuth: azimuth,
+          elevation: elevation,
+          roll: roll,
+        );
+      });
+    };
+    c.zoom = ({double? rangeM, double? metresPerPixel}) {
+      if (!mounted) return;
+      setState(() {
+        if (rangeM != null) _range = rangeM.clamp(1.0, 1e13);
+        if (metresPerPixel != null) {
+          _metresPerPixel = metresPerPixel.clamp(1e-3, 1e12);
+        }
+      });
+    };
+    c.setPerspective = (perspective) {
+      if (!mounted) return;
+      setState(() => _perspectiveMode = perspective);
+    };
+    c.setBackend = (backend) {
+      if (!mounted) return;
+      _setBackend(backend);
+    };
+    c.status = () => {
+          'azimuth': _view.azimuth,
+          'elevation': _view.elevation,
+          'roll': _view.roll,
+          'rangeM': _range,
+          'metresPerPixel': _metresPerPixel,
+          'perspective': _perspectiveMode,
+          'backend': _renderBackend.name,
+          'focusVessel': _focusVessel?.value,
+          'focusBody': _focusBody?.value,
+        };
+  }
   // Latest world snapshot for the flutter_scene backend (null when the
   // software backend is active — capture cost is zero when unused).
   WorldSnapshot? _sceneWorld;
@@ -319,6 +365,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   void initState() {
     super.initState();
     unawaited(_loadBackendPref());
+    _registerControl();
 
     // The REAL Solar System: Sun + planets + dwarf planets + moons.
     final system = SampleWorld.realSystem();
@@ -672,6 +719,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
 
   @override
   void dispose() {
+    SimViewControl.instance.clear();
     _ticker.dispose();
     unawaited(_bridgeCommands?.cancel());
     unawaited(_bridge.stop());

@@ -1,11 +1,13 @@
 import 'dart:convert';
 import 'dart:developer' as developer;
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 
+import 'infrastructure/flutter/sim_view_control.dart';
 import 'infrastructure/flutter/simulation_view.dart';
 import 'infrastructure/flutter_scene/render_backend.dart';
 
@@ -51,6 +53,43 @@ void main() {
       return developer.ServiceExtensionResponse.error(
           developer.ServiceExtensionResponse.extensionError, '$e');
     }
+  });
+
+  // Programmatic camera/renderer control over the VM service, e.g.
+  //   ext.acro.camera?azimuthDeg=90&elevationDeg=20&rangeM=2e7
+  //   ext.acro.camera?backend=software        (or flutterScene)
+  //   ext.acro.status                          -> current camera/backend
+  // Drives the live view through SimViewControl exactly like user input.
+  developer.registerExtension('ext.acro.camera', (method, params) async {
+    final c = SimViewControl.instance;
+    double? deg(String k) =>
+        params[k] == null ? null : double.tryParse(params[k]!);
+    final az = deg('azimuthDeg'), el = deg('elevationDeg'), ro = deg('rollDeg');
+    if (az != null || el != null || ro != null) {
+      c.orbit?.call(
+        azimuth: az == null ? null : az * math.pi / 180,
+        elevation: el == null ? null : el * math.pi / 180,
+        roll: ro == null ? null : ro * math.pi / 180,
+      );
+    }
+    final range = deg('rangeM'), mpp = deg('metresPerPixel');
+    if (range != null || mpp != null) {
+      c.zoom?.call(rangeM: range, metresPerPixel: mpp);
+    }
+    if (params['perspective'] != null) {
+      c.setPerspective?.call(params['perspective'] == 'true');
+    }
+    if (params['backend'] != null) {
+      c.setBackend?.call(params['backend'] == 'software'
+          ? RenderBackend.software
+          : RenderBackend.flutterScene);
+    }
+    return developer.ServiceExtensionResponse.result(
+        jsonEncode(c.status?.call() ?? {'error': 'no live view'}));
+  });
+  developer.registerExtension('ext.acro.status', (method, params) async {
+    return developer.ServiceExtensionResponse.result(jsonEncode(
+        SimViewControl.instance.status?.call() ?? {'error': 'no live view'}));
   });
 
   runApp(
