@@ -100,9 +100,11 @@ class AtmosphereNodes {
   /// weighted) — the only hand tint is Titan's, whose orange is
   /// photochemical tholin smog, not its N2 gas mix.
   static final Map<String, AtmoStyle> styles = {
+    // Mars/Uranus/Neptune tints are keyed to their SURFACE TEXTURE colours
+    // (art direction) rather than the composition-derived gas tint.
     'earth': AtmoStyle(heightScale: 8.0, falloff: 10.0, intensity: 28.0),
     'venus': AtmoStyle(falloff: 8.0, tintMix: 0.6),
-    'mars': AtmoStyle(falloff: 8.0),
+    'mars': AtmoStyle(falloff: 8.0, tintArgb: 0xFFC97B4F, tintMix: 0.65),
     'titan': AtmoStyle(tintArgb: 0xFFCC7A33, tintMix: 0.85),
     // Giant densities look tiny but aren't: the synthetic shells are
     // hundreds of km thick, so vertical optical depth = density * beta *
@@ -125,12 +127,14 @@ class AtmosphereNodes {
         heightScale: 3.0,
         falloff: 5.0,
         density: 0.09,
+        tintArgb: 0xFFA8D8DC,
         tintMix: 0.85),
     'neptune': AtmoStyle(
         shellHeightM: 8.0e5,
         heightScale: 3.0,
         falloff: 5.0,
         density: 0.07,
+        tintArgb: 0xFF3D66E0,
         tintMix: 0.85),
   };
 
