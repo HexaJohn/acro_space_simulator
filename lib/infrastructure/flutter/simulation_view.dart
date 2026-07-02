@@ -46,7 +46,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.0.205';
+const String kBuildStamp = 'build 0.3.0.206';
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -661,8 +661,11 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         if (projected.length > 1e-6) {
           final desired = projected.normalized;
           final upB = zeroRoll.up, rightB = zeroRoll.right;
+          // Camera basis under roll r: up = upB*cos(r) - rightB*sin(r), so
+          // matching `desired` needs desired.rightB = -sin(r): the right-dot
+          // enters atan2 NEGATED (the original +sign rolled the wrong way).
           final target =
-              math.atan2(desired.dot(rightB), desired.dot(upB));
+              math.atan2(-desired.dot(rightB), desired.dot(upB));
           // Ease toward the target roll (shortest way around) instead of
           // snapping: toggling the mode or fast orbits otherwise JUMP the
           // horizon.
