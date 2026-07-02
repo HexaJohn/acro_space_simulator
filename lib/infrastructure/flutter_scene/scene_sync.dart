@@ -3,6 +3,7 @@ import 'dart:ui' as ui;
 import 'package:flutter_scene/scene.dart' as fs;
 import 'package:vector_math/vector_math.dart' as vm;
 
+import '../../adapters/presenters/camera_view.dart';
 import '../../application/snapshot/world_snapshot.dart';
 import '../../domain/shared/vector3.dart';
 import '../flutter/texture_cache.dart';
@@ -43,9 +44,12 @@ class SceneSync {
 
   /// Reconcile the scene with this frame's snapshot. [focusVesselId] /
   /// [focusBodyId]: exactly one is non-null (the camera lock target); the
-  /// floating origin follows it.
+  /// floating origin follows it. [camera]/[viewport] drive apparent-size
+  /// culling (distant orbit rails are skipped until zoomed way out).
   void update(
     WorldSnapshot snap, {
+    SceneCamera? camera,
+    ui.Size? viewport,
     String? focusVesselId,
     String? focusBodyId,
   }) {
@@ -53,7 +57,7 @@ class SceneSync {
 
     _bodies.update(snap, origin);
     _vessels.update(snap, origin);
-    _lines.update(snap, origin);
+    _lines.update(snap, origin, camera: camera, viewport: viewport);
     _atmospheres.update(snap, origin);
     _skybox.update();
     _updateSun(snap);

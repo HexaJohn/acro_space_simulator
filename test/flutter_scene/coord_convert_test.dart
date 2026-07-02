@@ -1,6 +1,10 @@
+import 'dart:math' as math;
+import 'dart:ui' show Size;
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vector_math/vector_math.dart' as vm;
 
+import 'package:acro_space_simulator/adapters/presenters/camera_view.dart';
 import 'package:acro_space_simulator/adapters/presenters/perspective_camera.dart';
 import 'package:acro_space_simulator/domain/shared/quaternion.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
@@ -96,6 +100,31 @@ void main() {
       expect(up.x, closeTo(cam.up.x, 1e-5));
       expect(up.y, closeTo(cam.up.y, 1e-5));
       expect(up.z, closeTo(cam.up.z, 1e-5));
+    });
+
+    test('ortho camera gets a finite synthetic eye (no singular lookAt)', () {
+      // OrthoCamera.eyeOffset is ZERO (parallel rays). Feeding that through
+      // lookAt made position == target -> singular view matrix ->
+      // "Matrix cannot be inverted" downstream (polyline expansion) when
+      // switching to the map view. The adapter must synthesize an eye at
+      // the perspective-equivalent distance instead.
+      const ortho = OrthoCamera(CameraOrbit.top, 25000 /* m per px */);
+      final scene = toSceneCamera(ortho, viewportH: 800);
+
+      final eyeDistance = (scene.position - scene.target).length;
+      expect(eyeDistance, greaterThan(0.0));
+
+      // Perspective scale matches the ortho scale at the focus:
+      // d = focal_px * mpp (in scene km here).
+      final focalPx = (800 / 2) / math.tan(scene.fovRadiansY / 2);
+      expect(eyeDistance, closeTo(focalPx * 25000 * 1e-3, 1.0));
+
+      // The full view transform must be invertible (what the polyline
+      // screen-space expansion does every frame).
+      final vp = scene.getViewTransform(const Size(1280, 720));
+      expect(vp.determinant().abs(), greaterThan(1e-20));
+      // Throws if singular:
+      vm.Matrix4.inverted(vp);
     });
   });
 }

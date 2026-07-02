@@ -74,18 +74,30 @@ class AtmosphereNodes {
 class _Shell {
   _Shell(int scatterArgb) {
     _tint = _tintFromArgb(scatterArgb);
-    _geometry = _buildSphere();
-    node = fs.Node(
-      mesh: fs.Mesh(
-        _geometry,
-        fs.UnlitMaterial()
-          // Vertex colours carry all the shading; the factor stays white.
-          // CRITICAL: AlphaMode.opaque (the default) IGNORES alpha — the
-          // shell would draw as a solid ball. Blend routes it through the
-          // depth-sorted translucent pass.
-          ..baseColorFactor = vm.Vector4(1, 1, 1, 1)
-          ..alphaMode = fs.AlphaMode.blend,
+    _buildSphereArrays();
+    node = fs.Node();
+    _swapMesh();
+  }
+
+  /// Rebuild the mesh with FRESH GPU buffers. In-place updateColors() on a
+  /// persistent geometry tears against in-flight frames (black shards over
+  /// the planet); a new geometry's buffers can't be referenced by any
+  /// frame already recording. A few KB per change, throttled by
+  /// [updateColors]' view-delta check.
+  void _swapMesh() {
+    node.mesh = fs.Mesh(
+      fs.MeshGeometry.fromArrays(
+        positions: _positions,
+        colors: _colors,
+        indices: _indices,
       ),
+      fs.UnlitMaterial()
+        // Vertex colours carry all the shading; the factor stays white.
+        // CRITICAL: AlphaMode.opaque (the default) IGNORES alpha — the
+        // shell would draw as a solid ball. Blend routes it through the
+        // depth-sorted translucent pass.
+        ..baseColorFactor = vm.Vector4(1, 1, 1, 1)
+        ..alphaMode = fs.AlphaMode.blend,
     );
   }
 
@@ -93,14 +105,18 @@ class _Shell {
   static const int _rings = 24;
 
   late final fs.Node node;
-  late final fs.MeshGeometry _geometry;
   late final vm.Vector3 _tint;
+  late final Float32List _positions;
+  late final List<int> _indices;
   late final Float32List _colors =
       Float32List(_vertexCount(_segments, _rings) * 4);
 
-  // Unit-sphere vertex directions (== normals), retained for the per-frame
-  // colour pass.
+  // Unit-sphere vertex directions (== normals), retained for the colour
+  // pass.
   late final List<vm.Vector3> _dirs;
+
+  // View state of the last colour bake, for the update throttle.
+  vm.Vector3? _lastCam;
 
   static int _vertexCount(int segments, int rings) =>
       (rings + 1) * (segments + 1);
@@ -116,7 +132,7 @@ class _Shell {
     );
   }
 
-  fs.MeshGeometry _buildSphere() {
+  void _buildSphereArrays() {
     final positions = <double>[];
     final dirs = <vm.Vector3>[];
     final indices = <int>[];
@@ -141,20 +157,26 @@ class _Shell {
       }
     }
     _dirs = dirs;
-    return fs.MeshGeometry.fromArrays(
-      positions: Float32List.fromList(positions),
-      colors: _colors, // placeholder; updated per frame
-      indices: indices,
-      storage: fs.GeometryStorage.updatable,
-    );
+    _positions = Float32List.fromList(positions);
+    _indices = indices;
   }
 
   /// Recompute per-vertex premultiplied colours for the camera at
-  /// [camLocal] (shell-local unit space). Caller guarantees the camera is
-  /// outside the shell.
+  /// [camLocal] (shell-local unit space) and swap in a fresh mesh. Caller
+  /// guarantees the camera is outside the shell. Throttled: the limb
+  /// pattern only shifts with the VIEW DIRECTION to the body, so a small
+  /// angular/radial delta skips the rebake entirely.
   void updateColors(Vector3 camLocal) {
     final cam = vm.Vector3(
         camLocal.x.toDouble(), camLocal.y.toDouble(), camLocal.z.toDouble());
+    final last = _lastCam;
+    if (last != null) {
+      final angleSmall = last.normalized().dot(cam.normalized()) > 0.99997;
+      final radiusSimilar = last.length > 0 &&
+          ((cam.length / last.length) - 1.0).abs() < 0.01;
+      if (angleSmall && radiusSimilar) return;
+    }
+    _lastCam = cam.clone();
     for (var i = 0; i < _dirs.length; i++) {
       final n = _dirs[i];
       double alpha;
@@ -175,6 +197,6 @@ class _Shell {
       _colors[o + 2] = _tint.z * alpha;
       _colors[o + 3] = alpha;
     }
-    _geometry.updateColors(_colors);
+    _swapMesh(); // fresh buffers — never mutate in-flight geometry
   }
 }

@@ -1,8 +1,10 @@
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter_scene/scene.dart' as fs;
 import 'package:vector_math/vector_math.dart' as vm;
 
+import '../../adapters/presenters/camera_view.dart';
 import '../../application/snapshot/world_snapshot.dart';
 import '../../domain/shared/vector3.dart';
 import 'coord_convert.dart';
@@ -37,12 +39,43 @@ class LineNodes {
   static final vm.Vector4 _pathColor = vm.Vector4(0.5, 0.88, 0.56, 0.9);
   static final vm.Vector4 _trailColor = vm.Vector4(0.35, 0.75, 1.0, 0.9);
 
-  void update(WorldSnapshot snap, FloatingOrigin origin) {
+  /// Apparent-size window (px) for orbit rails. Below the floor a rail is
+  /// sub-pixel shimmer; above the ceiling the ring dwarfs the viewport and
+  /// its arc is just a clutter line through the frame (the "zoomed way in"
+  /// case) — rails belong to the zoomed-out map view.
+  static const double _railMinApparentPx = 40.0;
+
+  void update(WorldSnapshot snap, FloatingOrigin origin,
+      {SceneCamera? camera, ui.Size? viewport}) {
     final seen = <String>{};
 
     // Body orbit rails (closed rings, root-relative metres).
     for (final b in snap.bodies.values) {
       if (b.orbit.length < 6) continue;
+
+      if (camera != null) {
+        // Apparent ring size: the orbit's radius about its parent projected
+        // at the ring centre's distance. Rails draw only when the ring is
+        // both resolvable and roughly frameable.
+        final first =
+            Vector3(b.orbit[0], b.orbit[1], b.orbit[2]);
+        var cx = 0.0, cy = 0.0, cz = 0.0;
+        final n = b.orbit.length ~/ 3;
+        for (var i = 0; i + 2 < b.orbit.length; i += 3) {
+          cx += b.orbit[i];
+          cy += b.orbit[i + 1];
+          cz += b.orbit[i + 2];
+        }
+        final centre = Vector3(cx / n, cy / n, cz / n);
+        final ringRadiusM = (first - centre).length;
+        final apparentPx =
+            camera.radiusPx(origin.worldToRel(centre), ringRadiusM);
+        final maxPx = viewport == null
+            ? double.infinity
+            : 2.0 * math.max(viewport.width, viewport.height);
+        if (apparentPx < _railMinApparentPx || apparentPx > maxPx) continue;
+      }
+
       final pts = <vm.Vector3>[];
       for (var i = 0; i + 2 < b.orbit.length; i += 3) {
         pts.add(origin.worldToScene(
@@ -105,9 +138,19 @@ class LineNodes {
 
   /// Regenerate every camera-facing strip for this frame's camera. Must run
   /// after [update] and before the scene renders.
+  ///
+  /// Defensive per-line: a transient degenerate camera (e.g. mid camera-mode
+  /// switch, zero-size viewport) makes the view-projection singular and
+  /// PolylineGeometry's screen-space expansion throws — skip that line for
+  /// one frame rather than killing the render.
   void updateForCamera(fs.Camera camera, ui.Size viewport) {
+    if (viewport.width <= 0 || viewport.height <= 0) return;
     for (final line in _lines.values) {
-      line.updateForCamera(camera, viewport);
+      try {
+        line.updateForCamera(camera, viewport);
+      } on ArgumentError {
+        // Singular matrix this frame; the strip keeps last frame's shape.
+      }
     }
   }
 
