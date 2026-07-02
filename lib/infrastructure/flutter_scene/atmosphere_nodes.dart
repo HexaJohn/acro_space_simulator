@@ -54,9 +54,9 @@ class AtmosphereNodes {
       );
 
       // View-dependent limb alpha, computed in body-local unit space: the
-      // camera position relative to the shell centre, unscaled. Inside the
-      // shell the limb model is meaningless — hide it (the surface-view
-      // sky is a future refinement).
+      // camera position relative to the shell centre, unscaled (scene and
+      // domain share the same frame; the mirror lives at the image level).
+      // Inside the shell the limb model is meaningless — hide it.
       final camLocal = (Vector3.zero - rel) / (b.radius + d.atmoThickness);
       final inside = camLocal.length <= 1.02;
       shell.node.visible = !inside;
@@ -199,9 +199,12 @@ class _Shell {
         if (facing <= 0) {
           alpha = 0; // back hemisphere
         } else {
-          // Peak at the limb, like the 0.2.0 halo. Quadratic falloff + a
-          // high cap: the software halo is bold, not a faint rim.
-          alpha = math.pow(1.0 - facing, 2.0).toDouble();
+          // Concentrated at the limb (last ~20 deg of grazing angle). A
+          // gentler curve veils the whole visible disc in pale haze — the
+          // glow must ring the silhouette like the software halo, not fog
+          // the planet.
+          alpha = (math.pow(1.0 - facing, 6.0) * 1.4).clamp(0.0, 0.9)
+              .toDouble();
         }
       }
       final o = i * 4;

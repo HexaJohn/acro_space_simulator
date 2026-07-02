@@ -22,8 +22,11 @@ class BodyNodes {
   final SceneTextures _textures;
 
   // One shared unit sphere; each body is a node scaling it. Radius 1 scene
-  // unit; node scale = radius in km.
-  late final fs.SphereGeometry _unitSphere =
+  // unit; node scale = radius in km. STOCK fs.SphereGeometry on purpose:
+  // its native equirect UV orientation composes correctly with the
+  // image-level chirality flip in SceneRenderView (continents read true),
+  // and a hand-rolled replacement rendered a pale backface veil.
+  late final fs.MeshGeometry _unitSphere =
       fs.SphereGeometry(radius: 1.0, segments: 96, rings: 48);
 
   final Map<String, fs.Node> _nodes = {};

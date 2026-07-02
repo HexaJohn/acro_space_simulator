@@ -42,6 +42,16 @@ vm.Vector3 relToScene(Vector3 rel) {
     'relToScene() expects a focus-relative position, got $rel — '
     'rebase against the FloatingOrigin first.',
   );
+  // CHIRALITY NOTE: the domain camera basis satisfies
+  // right × up = -forward, while flutter_scene's lookAt derives
+  // right = up × forward — opposite triple chirality, so the raw render is
+  // a MIRROR IMAGE (reversed panning, backwards orbits). Reflecting the
+  // world here instead breaks triangle winding scene-wide (Material.bind
+  // hardcodes CCW culling → every opaque mesh shows its backfaces as a
+  // pale veil). The mirror is therefore corrected at the very end of the
+  // pipeline: SceneRenderView flips the finished image horizontally
+  // (Transform.flip), and the equirect U direction is pre-mirrored in
+  // sphere_geometry_util.dart so textures read correctly after the flip.
   return vm.Vector3(
     rel.x * kRenderScale,
     rel.y * kRenderScale,
@@ -61,7 +71,8 @@ Vector3 sceneToRel(vm.Vector3 scene) => Vector3(
 double lengthToScene(double metres) => metres * kRenderScale;
 
 /// Domain quaternion (Hamilton, scalar-first w,x,y,z) → vector_math
-/// (scalar-last x,y,z,w). No axis change: the scene keeps the domain frame.
+/// (scalar-last x,y,z,w). No axis change: the scene keeps the domain frame
+/// (the mirror is corrected at the image level — see [relToScene]).
 ///
 /// TRAP: `vm.Quaternion.rotate()` applies the INVERSE rotation (vector_math
 /// convention quirk) — the matrix path (`asRotationMatrix`, Matrix4.compose,

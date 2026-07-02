@@ -93,8 +93,11 @@ class SceneSync {
           })();
     final light = scene.directionalLight;
     if (light == null) {
+      // Intensity tuned against the tonemapper: 5.0 blows the lit
+      // hemisphere out to white (oceans wash pale); ~2.2 keeps the albedo
+      // readable across the disc like the software renderer.
       scene.directionalLight =
-          fs.DirectionalLight(direction: dir, intensity: 5.0);
+          fs.DirectionalLight(direction: dir, intensity: 2.2);
     } else {
       light.direction = dir;
     }

@@ -109,7 +109,17 @@ class _SceneRenderViewState extends State<SceneRenderView> {
       if (firstBuildThisFrame) {
         sync.updateForCamera(camera, viewport);
       }
-      return fs.SceneView(sync.scene, camera: camera);
+      // CHIRALITY: the domain camera basis and flutter_scene's lookAt have
+      // opposite triple handedness, so the raw render is a mirror image
+      // (reversed panning, backwards orbits). Reflecting the WORLD instead
+      // flips triangle winding scene-wide (backface culling then shows
+      // every mesh inside-out). Correcting the finished IMAGE is winding-
+      // and lighting-neutral; equirect textures are pre-mirrored in
+      // sphere_geometry_util.dart so they read correctly after this flip.
+      return Transform.flip(
+        flipX: true,
+        child: fs.SceneView(sync.scene, camera: camera),
+      );
     });
   }
 }

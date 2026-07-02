@@ -53,10 +53,11 @@ void main() {
       expect(back.x, closeTo(q.x, 1e-6));
 
       // Same rotation in both math libraries (same axes, same handedness —
-      // only the argument order differs). Compare through the MATRIX path:
+      // only the argument order differs; the chirality mirror lives at the
+      // image level, not in the frame). Compare through the MATRIX path:
       // that is what flutter_scene node transforms use (Matrix4.compose).
       // vm.Quaternion.rotate() is NOT equivalent — it applies the inverse
-      // rotation (long-standing vector_math convention quirk); never use it.
+      // rotation (vector_math quirk).
       const v = Vector3(0.3, -1.1, 2.0);
       final domainRotated = q.rotate(v);
       final sceneRotated =
@@ -89,7 +90,7 @@ void main() {
       expect(eye.y, closeTo(expectedEye.y, 1e-3));
       expect(eye.z, closeTo(expectedEye.z, 1e-3));
 
-      // Recovered forward matches the domain forward (unit, both frames).
+      // Recovered forward matches the domain forward (same frame).
       final fwd = (scene.target - scene.position).normalized();
       expect(fwd.x, closeTo(cam.forward.x, 1e-5));
       expect(fwd.y, closeTo(cam.forward.y, 1e-5));
@@ -100,6 +101,47 @@ void main() {
       expect(up.x, closeTo(cam.up.x, 1e-5));
       expect(up.y, closeTo(cam.up.y, 1e-5));
       expect(up.z, closeTo(cam.up.z, 1e-5));
+    });
+
+    test('screen chirality matches the software projection after the '
+        'image flip', () {
+      // THE mirror-image regression test. The domain basis satisfies
+      // right x up = -forward while fs lookAt derives right = up x forward:
+      // the RAW flutter_scene render is horizontally mirrored, and
+      // SceneRenderView corrects it with a final Transform.flip(flipX).
+      // So a point to the camera's RIGHT must land at NEGATIVE raw NDC x
+      // (the flip then puts it on the right half of the screen, matching
+      // the software renderer); vertical must match WITHOUT flipping.
+      const cam = PerspectiveCamera(
+        azimuth: 0.7,
+        elevation: 0.3,
+        roll: 0.0,
+        range: 2.0e7,
+        viewportH: 800,
+      );
+      const d = 5.0e6; // m, well inside the view
+      final domainRight = cam.right * d;
+      final domainUp = cam.up * d;
+
+      // Software backend: projectPx x+ is screen right, y+ is screen up.
+      expect(cam.projectPx(domainRight)!.x, greaterThan(0));
+      expect(cam.projectPx(domainUp)!.y, greaterThan(0));
+
+      // flutter_scene: full view transform to raw NDC (pre image flip).
+      final scene = toSceneCamera(cam, viewportH: 800);
+      final vp = scene.getViewTransform(const Size(1280, 720));
+      vm.Vector4 ndc(Vector3 rel) {
+        final p = relToScene(rel);
+        final clip = vp.transformed(vm.Vector4(p.x, p.y, p.z, 1.0));
+        return clip / clip.w;
+      }
+
+      expect(ndc(domainRight).x, lessThan(0),
+          reason: 'raw render is mirrored; Transform.flip(flipX) in '
+              'SceneRenderView puts this on screen-right');
+      expect(ndc(domainUp).y, greaterThan(0),
+          reason: 'vertical is NOT mirrored — a point above the focus '
+              'renders above centre before and after the flip');
     });
 
     test('ortho camera gets a finite synthetic eye (no singular lookAt)', () {
