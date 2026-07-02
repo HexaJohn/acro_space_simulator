@@ -42,16 +42,27 @@ fs.PerspectiveCamera toSceneCamera(
     eye = cam.forward * -d;
   }
 
+  // DEPTH PRECISION: perspective depth quantization grows as d^2/near. A
+  // fixed 1 m near plane with a system-scale far plane leaves a depth
+  // quantum of ~10,000 km at a planet seen from orbit — planet-sized, so
+  // the sphere's own far side z-fights through as angular black shards
+  // that shift with every camera matrix change. Scale the near plane with
+  // the eye distance instead: at range d the closest visible geometry is
+  // ~d (the focus), so near = d/2000 wastes nothing and pins the quantum
+  // at ~d^2/near/2^24 ≈ d/8000 — always sub-pixel-scale relative to the
+  // framed scene. Floor 1 m for surface/close-up work.
+  final eyeDistanceM = eye.length;
+  final adaptiveNearM = math.max(1.0, eyeDistanceM / 2000.0);
+
   return fs.PerspectiveCamera(
     position: relToScene(eye),
     target: relToScene(eye * 0), // the focus == scene origin
     up: relToScene(cam.up * 1e3), // unit direction; scale cancels kRenderScale
     fovRadiansY: fovY,
-    fovNear: lengthToScene(near).clamp(1e-4, double.infinity),
+    fovNear: lengthToScene(math.max(near, adaptiveNearM)),
     // Far plane: cover the whole system from anywhere (Neptune-ish scales,
-    // ~5e12 m). Depth precision at that ratio is fine between BODIES (they
-    // are astronomically separated); near-field layering (vessel vs terrain)
-    // concentrates depth near the near plane. Verified visually in WS0/WS6.
+    // ~5e12 m). With the adaptive near plane the near-field depth quantum
+    // stays proportional to the framed scale regardless of this ratio.
     fovFar: lengthToScene(5e12),
   );
 }
