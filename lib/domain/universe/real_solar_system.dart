@@ -234,6 +234,8 @@ class RealSolarSystem {
         parent: const BodyId('mars'),
         orbitRadius: 9.376e6,
         orbitEccentricity: 0.0151,
+        orbitInclination: _deg(1.08), // to Mars' equator
+        orbitsParentEquator: true,
         solarFlux: 586,
       ),
 
@@ -248,6 +250,8 @@ class RealSolarSystem {
         parent: const BodyId('jupiter'),
         orbitRadius: 4.217e8,
         orbitEccentricity: 0.0041,
+        orbitInclination: _deg(0.05), // to Jupiter's equator
+        orbitsParentEquator: true,
         solarFlux: 50,
       ),
       CelestialBody(
@@ -260,6 +264,8 @@ class RealSolarSystem {
         parent: const BodyId('jupiter'),
         orbitRadius: 6.711e8,
         orbitEccentricity: 0.0094,
+        orbitInclination: _deg(0.47), // to Jupiter's equator
+        orbitsParentEquator: true,
         solarFlux: 50,
       ),
       CelestialBody(
@@ -272,6 +278,8 @@ class RealSolarSystem {
         parent: const BodyId('jupiter'),
         orbitRadius: 1.0704e9,
         orbitEccentricity: 0.0013,
+        orbitInclination: _deg(0.20), // to Jupiter's equator
+        orbitsParentEquator: true,
         solarFlux: 50,
       ),
       CelestialBody(
@@ -284,6 +292,8 @@ class RealSolarSystem {
         parent: const BodyId('jupiter'),
         orbitRadius: 1.8827e9,
         orbitEccentricity: 0.0074,
+        orbitInclination: _deg(0.28), // to Jupiter's equator
+        orbitsParentEquator: true,
         solarFlux: 50,
       ),
 
@@ -298,6 +308,8 @@ class RealSolarSystem {
         parent: const BodyId('saturn'),
         orbitRadius: 1.22187e9,
         orbitEccentricity: 0.0288,
+        orbitInclination: _deg(0.35), // to Saturn's equator (ring plane)
+        orbitsParentEquator: true,
         atmosphere: const AtmosphereModel(
           seaLevelPressure: 146700, // 1.45 bar
           seaLevelDensity: 5.3,
@@ -321,6 +333,8 @@ class RealSolarSystem {
         parent: const BodyId('mars'),
         orbitRadius: 2.346e7,
         orbitEccentricity: 0.00033,
+        orbitInclination: _deg(1.79), // to Mars' equator
+        orbitsParentEquator: true,
         solarFlux: 586,
       ),
 

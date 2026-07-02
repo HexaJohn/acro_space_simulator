@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import '../shared/quaternion.dart';
 import '../shared/vector3.dart';
 import '../simulation/epoch.dart';
 import '../universe/celestial_body.dart';
@@ -30,7 +31,8 @@ class BodyEphemeris {
   ) {
     final parent = system.parentOf(body);
     if (parent == null || body.orbitRadius == 0) return Vector3.zero;
-    return converter.toStateVector(_orbitOf(body, parent), epoch).position;
+    return _toParentFrame(body, parent,
+        converter.toStateVector(_orbitOf(body, parent), epoch).position);
   }
 
   /// Body orbital velocity relative to its parent, at [epoch].
@@ -41,7 +43,18 @@ class BodyEphemeris {
   ) {
     final parent = system.parentOf(body);
     if (parent == null || body.orbitRadius == 0) return Vector3.zero;
-    return converter.toStateVector(_orbitOf(body, parent), epoch).velocity;
+    return _toParentFrame(body, parent,
+        converter.toStateVector(_orbitOf(body, parent), epoch).velocity);
+  }
+
+  /// Regular moons ([CelestialBody.orbitsParentEquator]) have their orbital
+  /// elements referenced to the parent's EQUATOR: rotate the propagated
+  /// vector by the parent's axial tilt (about +X, the same convention the
+  /// body-orientation snapshot uses) to express it in the ecliptic frame.
+  Vector3 _toParentFrame(
+      CelestialBody body, CelestialBody parent, Vector3 v) {
+    if (!body.orbitsParentEquator || parent.axialTilt == 0) return v;
+    return Quaternion.axisAngle(Vector3.unitX, parent.axialTilt).rotate(v);
   }
 
   /// One full closed orbit of [body] about its parent, sampled into points in
@@ -73,7 +86,8 @@ class BodyEphemeris {
     for (var i = 0; i <= samples; i++) {
       final ecc = eNow + 2 * math.pi * i / samples; // start at the body
       final m = ecc - e * math.sin(ecc); // Kepler's equation -> mean anomaly
-      pts.add(converter.toStateVector(orbit, Epoch(m / n)).position);
+      pts.add(_toParentFrame(body, parent,
+          converter.toStateVector(orbit, Epoch(m / n)).position));
     }
     return pts;
   }
