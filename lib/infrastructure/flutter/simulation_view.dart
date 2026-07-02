@@ -39,6 +39,7 @@ import '../flutter_scene/line_nodes.dart';
 import '../flutter_scene/render_backend.dart';
 import '../flutter_scene/ring_nodes.dart';
 import '../flutter_scene/scene_camera_adapter.dart';
+import '../flutter_scene/scene_sync.dart';
 import '../flutter_scene/scene_hud_overlay.dart';
 import '../flutter_scene/scene_render_view.dart';
 import 'sim_view_control.dart';
@@ -50,7 +51,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.0.226';
+const String kBuildStamp = 'build 0.3.0.227';
 
 /// What the camera treats as "up" while orbiting the focus.
 enum CameraUpMode {
@@ -539,7 +540,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                 : '${v.toStringAsFixed(1)}m';
     final rings = RingNodes.debugLine;
     return 'near ${eng(nearM)}${nearOv != null ? '*' : ''}  '
-        'far ${eng(farM)}${farOv != null ? '*' : ''}'
+        'far ${eng(farM)}${farOv != null ? '*' : ''}  '
+        'exp ${SceneSync.lastExposure.toStringAsFixed(2)}'
         '${rings == null ? '' : '  |  $rings'}';
   }
 

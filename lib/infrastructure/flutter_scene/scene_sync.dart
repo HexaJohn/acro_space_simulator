@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter_scene/scene.dart' as fs;
@@ -88,6 +89,58 @@ class SceneSync {
         cameraRangeKm:
             camera == null ? 0 : camera.eyeOffset.length * kRenderScale);
     _updateSun(snap);
+    _updateExposure(snap, camera, focusVesselId, focusBodyId);
+  }
+
+  /// Adaptive exposure — heuristic eye adaptation, no GPU luminance pass
+  /// available (no compute on this stack). Target exposure derives from
+  /// what's framed: looking at the focus body's NIGHT side brightens (up
+  /// to ~3.2x, like eyes adjusting to the dark), and the sun entering the
+  /// frame pulls it down (glare). scene.exposure eases toward the target
+  /// with a ~0.8 s time constant so transitions read as adaptation, not
+  /// flicker.
+  static bool autoExposure = true;
+  static double lastExposure = 1.0;
+  DateTime? _lastExposureTick;
+
+  void _updateExposure(WorldSnapshot snap, SceneCamera? camera,
+      String? focusVesselId, String? focusBodyId) {
+    if (camera == null) return;
+    final star = _bodies.starWorld(snap);
+    double target = 1.0;
+    if (autoExposure && star != null) {
+      final bodyId = focusBodyId ??
+          (focusVesselId == null ? null : snap.vessels[focusVesselId]?.body);
+      final b = bodyId == null ? null : snap.bodies[bodyId];
+      final eyeWorld = origin.focusWorld + camera.eyeOffset;
+      if (b != null && b.id != 'sun') {
+        final bodyWorld = Vector3(b.px, b.py, b.pz);
+        final toSun = (star - bodyWorld).normalized;
+        final toCam = (eyeWorld - bodyWorld).normalized;
+        // 1 = fully lit face toward the camera, 0 = looking at midnight.
+        final litness = 0.5 + 0.5 * toSun.dot(toCam);
+        target = 1.0 + 2.2 * (1.0 - _smooth01(litness / 0.35));
+      }
+      // Sun glare: the sun inside ~45 degrees of the view axis dims the
+      // frame toward 55%.
+      final sunDir = (star - eyeWorld).normalized;
+      final glare = _smooth01((camera.forward.dot(sunDir) - 0.7) / 0.25);
+      target *= 1.0 - 0.45 * glare;
+    }
+    final now = DateTime.now();
+    final dt = _lastExposureTick == null
+        ? 0.016
+        : (now.difference(_lastExposureTick!).inMicroseconds / 1e6)
+            .clamp(0.0, 0.25);
+    _lastExposureTick = now;
+    final k = 1.0 - math.exp(-dt / 0.8);
+    scene.exposure += (target - scene.exposure) * k;
+    lastExposure = scene.exposure;
+  }
+
+  static double _smooth01(double x) {
+    final t = x.clamp(0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
   }
 
   // Layer kill switches for artifact bisection, e.g.

@@ -14,6 +14,7 @@ import 'infrastructure/flutter_scene/atmosphere_nodes.dart';
 import 'infrastructure/flutter_scene/body_nodes.dart';
 import 'infrastructure/flutter_scene/render_backend.dart';
 import 'infrastructure/flutter_scene/scene_camera_adapter.dart';
+import 'infrastructure/flutter_scene/scene_sync.dart';
 
 /// Dev entrypoint: boots STRAIGHT into [SimulationView] with the
 /// flutter_scene backend active — no menu, no clicking. For iterating on the
@@ -116,6 +117,10 @@ void main() {
       }
       c.setFreecam?.call(
           params['freecam'] == null ? true : params['freecam'] == 'true', pos);
+    }
+    // Adaptive exposure toggle: autoExposure=true|false.
+    if (params['autoExposure'] != null) {
+      SceneSync.autoExposure = params['autoExposure'] == 'true';
     }
     // Depth-plane overrides (metres): near=5&far=1e12; <=0 restores the
     // adaptive formula.
