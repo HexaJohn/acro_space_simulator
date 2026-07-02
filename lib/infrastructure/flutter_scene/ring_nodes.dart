@@ -377,8 +377,11 @@ class _RockField {
   // camera's grid cell (double-precision anchor, metre-scale offsets).
   static const double visRM = 2200.0;
   static const double _cellM = 220.0;
-  static const int _rocksPerCell = 7;
-  static const double _thicknessM = 60.0; // +/- around the plane
+  // ~7k live instances in dense bands (hardware instanced: still 1-2 draw
+  // calls; the cost is the O(N) per-frame transform repack, fine at this
+  // count). Was 7/cell (~2k) — read as sparse.
+  static const int _rocksPerCell = 24;
+  static const double _thicknessM = 90.0; // +/- around the plane
   static const double _rockMinM = 0.4, _rockMaxM = 2.6; // radii (0.8-5 m)
 
   void update({

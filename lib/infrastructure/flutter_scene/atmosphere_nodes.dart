@@ -61,16 +61,16 @@ class AtmoStyle {
   double? twilightM;
 
   Map<String, Object?> toJson() => {
-        'enabled': enabled,
-        'heightScale': heightScale,
-        'falloff': falloff,
-        'intensity': intensity,
-        'density': density,
-        'tint': tintArgb?.toRadixString(16),
-        'tintMix': tintMix,
-        'shellKm': shellHeightM == null ? null : shellHeightM! / 1000,
-        'twilightKm': twilightM == null ? null : twilightM! / 1000,
-      };
+    'enabled': enabled,
+    'heightScale': heightScale,
+    'falloff': falloff,
+    'intensity': intensity,
+    'density': density,
+    'tint': tintArgb?.toRadixString(16),
+    'tintMix': tintMix,
+    'shellKm': shellHeightM == null ? null : shellHeightM! / 1000,
+    'twilightKm': twilightM == null ? null : twilightM! / 1000,
+  };
 }
 
 /// Raymarched planetary atmospheres (Nishita-style single scattering) —
@@ -102,7 +102,7 @@ class AtmosphereNodes {
   static final Map<String, AtmoStyle> styles = {
     // Mars/Uranus/Neptune tints are keyed to their SURFACE TEXTURE colours
     // (art direction) rather than the composition-derived gas tint.
-    'earth': AtmoStyle(heightScale: 8.0, falloff: 10.0, intensity: 28.0),
+    'earth': AtmoStyle(heightScale: 4.0, falloff: 5.0, intensity: 14.0),
     'venus': AtmoStyle(falloff: 8.0, tintMix: 0.6),
     'mars': AtmoStyle(falloff: 8.0, tintArgb: 0xFFC97B4F, tintMix: 0.65),
     'titan': AtmoStyle(tintArgb: 0xFFCC7A33, tintMix: 0.85),
@@ -110,32 +110,31 @@ class AtmosphereNodes {
     // hundreds of km thick, so vertical optical depth = density * beta *
     // (shell/10) — 0.04 on Jupiter's 2000 km shell matches Earth's haze.
     // Live-tuned via ext.acro.atmo (1.3-1.5 washed the discs to cream).
-    'jupiter': AtmoStyle(
-        shellHeightM: 2.0e6,
-        heightScale: 3.0,
-        falloff: 5.0,
-        density: 0.04,
-        tintMix: 0.8),
+    'jupiter': AtmoStyle(shellHeightM: 2.0e6, heightScale: 3.0, falloff: 5.0, density: 0.04, tintMix: 0.8),
     'saturn': AtmoStyle(
-        shellHeightM: 1.8e6,
-        heightScale: 3.0,
-        falloff: 5.0,
-        density: 0.05,
-        tintMix: 0.8),
+      shellHeightM: 1.8e6,
+      heightScale: 1.0,
+      falloff: 5.0,
+      density: 0.01,
+      intensity: 10,
+      tintMix: 0.8,
+    ),
     'uranus': AtmoStyle(
-        shellHeightM: 8.0e5,
-        heightScale: 3.0,
-        falloff: 5.0,
-        density: 0.09,
-        tintArgb: 0xFFA8D8DC,
-        tintMix: 0.85),
+      shellHeightM: 8.0e5,
+      heightScale: 3.0,
+      falloff: 5.0,
+      density: 0.09,
+      tintArgb: 0xFFA8D8DC,
+      tintMix: 0.85,
+    ),
     'neptune': AtmoStyle(
-        shellHeightM: 8.0e5,
-        heightScale: 3.0,
-        falloff: 5.0,
-        density: 0.07,
-        tintArgb: 0xFF3D66E0,
-        tintMix: 0.85),
+      shellHeightM: 8.0e5,
+      heightScale: 3.0,
+      falloff: 5.0,
+      density: 0.07,
+      tintArgb: 0xFF3D66E0,
+      tintMix: 0.85,
+    ),
   };
 
   /// The compiled atmosphere fragment shader, loaded once per app from the
@@ -145,20 +144,17 @@ class AtmosphereNodes {
   static Future<void>? _loading;
 
   static Future<void> loadShader() => _loading ??= () async {
-        final library = await gpu.loadShaderLibraryAsync(
-          'build/shaderbundles/acro.shaderbundle',
-        );
-        _shader = library?['AtmosphereFragment'];
-        if (_shader == null) {
-          throw StateError(
-            'AtmosphereFragment missing from acro.shaderbundle — the '
-            'hook/build.dart shader compile should have produced it.',
-          );
-        }
-      }();
+    final library = await gpu.loadShaderLibraryAsync('build/shaderbundles/acro.shaderbundle');
+    _shader = library?['AtmosphereFragment'];
+    if (_shader == null) {
+      throw StateError(
+        'AtmosphereFragment missing from acro.shaderbundle — the '
+        'hook/build.dart shader compile should have produced it.',
+      );
+    }
+  }();
 
-  void update(WorldSnapshot snap, FloatingOrigin origin,
-      {Vector3 cameraEye = Vector3.zero, Vector3? starWorld}) {
+  void update(WorldSnapshot snap, FloatingOrigin origin, {Vector3 cameraEye = Vector3.zero, Vector3? starWorld}) {
     final shader = _shader;
     if (shader == null) return; // bundle still loading
     final seen = <String>{};
@@ -173,8 +169,7 @@ class AtmosphereNodes {
         style = styles[b.id] = AtmoStyle();
       }
       if (!style.enabled) continue;
-      final thicknessM =
-          hasPhysical ? d.atmoThickness : (style.shellHeightM ?? 0);
+      final thicknessM = hasPhysical ? d.atmoThickness : (style.shellHeightM ?? 0);
       if (thicknessM <= 0) continue;
       seen.add(b.id);
 
@@ -198,23 +193,19 @@ class AtmosphereNodes {
         vm.Vector3.all(lengthToScene(atmoTopM)),
       );
 
-      final toSun = starWorld == null
-          ? Vector3.unitX
-          : (starWorld - world).normalized;
+      final toSun = starWorld == null ? Vector3.unitX : (starWorld - world).normalized;
       // Scattering strength relative to Earth sea level, from the body's
       // REAL surface density unless the style overrides it. Clamped:
       // Venus' 65x must stay a translucent shroud, not a billiard ball.
-      final baseDensity = style.density ??
-          (d.atmoSeaLevelDensity > 0
-              ? (d.atmoSeaLevelDensity / 1.225).clamp(0.04, 4.0).toDouble()
-              : 1.0);
+      final baseDensity =
+          style.density ??
+          (d.atmoSeaLevelDensity > 0 ? (d.atmoSeaLevelDensity / 1.225).clamp(0.04, 4.0).toDouble() : 1.0);
       // Falloff invariance lives in the shader now: the density profile is
       // normalised by 1/falloff (params2.z), so stretching the scale
       // height grows the LIMB glow without thickening the nadir haze —
       // and the betas stay full strength (dividing them here collapsed
       // the halo brightness as falloff^1.5: no visible rim in space).
-      final baseScaleHM =
-          d.atmoScaleHeight > 0 ? d.atmoScaleHeight : thicknessM / 10.0;
+      final baseScaleHM = d.atmoScaleHeight > 0 ? d.atmoScaleHeight : thicknessM / 10.0;
       shell.updateUniforms(
         centreScene: relToScene(rel),
         planetRadiusScene: lengthToScene(b.radius),
@@ -246,17 +237,10 @@ class _Shell {
     //    behind the planet so lessEqual would cull the disc).
     //  * exterior faces + normal depth — camera outside; depth-correct
     //    against opaque scene geometry (ring asteroids, vessels).
-    _inMaterial = AtmosphereShaderMaterial(
-        fragmentShader: shader as gpu.Shader, depthAlways: true);
-    _outMaterial =
-        AtmosphereShaderMaterial(fragmentShader: shader, depthAlways: false);
-    _inNode = fs.Node(
-      mesh: fs.Mesh(
-          uvSphereZUp(segments: 48, rings: 24, invert: true), _inMaterial),
-    );
-    _outNode = fs.Node(
-      mesh: fs.Mesh(uvSphereZUp(segments: 48, rings: 24), _outMaterial),
-    );
+    _inMaterial = AtmosphereShaderMaterial(fragmentShader: shader as gpu.Shader, depthAlways: true);
+    _outMaterial = AtmosphereShaderMaterial(fragmentShader: shader, depthAlways: false);
+    _inNode = fs.Node(mesh: fs.Mesh(uvSphereZUp(segments: 48, rings: 24, invert: true), _inMaterial));
+    _outNode = fs.Node(mesh: fs.Mesh(uvSphereZUp(segments: 48, rings: 24), _outMaterial));
     _scene.add(_outNode); // start outside
     _active = _outNode;
   }
