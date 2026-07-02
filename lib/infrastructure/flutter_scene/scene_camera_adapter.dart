@@ -61,8 +61,9 @@ fs.PerspectiveCamera toSceneCamera(
     fovRadiansY: fovY,
     fovNear: lengthToScene(math.max(near, adaptiveNearM)),
     // Far plane: cover the whole system from anywhere (Neptune-ish scales,
-    // ~5e12 m). With the adaptive near plane the near-field depth quantum
-    // stays proportional to the framed scale regardless of this ratio.
-    fovFar: lengthToScene(5e12),
+    // ~5e12 m), and GROW with extreme zoom-outs so the sky sphere (which
+    // tracks camera range) always fits inside it. The adaptive near plane
+    // keeps the depth quantum proportional to the framed scale regardless.
+    fovFar: lengthToScene(math.max(5e12, eyeDistanceM * 40)),
   );
 }

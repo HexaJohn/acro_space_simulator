@@ -111,6 +111,10 @@ class BodyView {
   /// unrelated bodies when zoomed inside the active body's SOI (declutter).
   final bool showLabel;
 
+  /// True when this body orbits a non-star parent (a moon). Lets renderers
+  /// hide moon labels until the camera is near enough for them to matter.
+  final bool isMoon;
+
   const BodyView(this.name, this.x, this.y, this.radius, this.isStar,
       {this.hasAtmosphere = false,
       this.sunX = 1,
@@ -136,6 +140,7 @@ class BodyView {
       this.radiusPx = 0,
       this.soiRadiusPx = 0,
       this.showLabel = true,
+      this.isMoon = false,
       this.worldRel = Vector3.zero});
 }
 
@@ -509,6 +514,8 @@ class TopDownSnapshotPresenter {
             ? camera.radiusPx(bw - camWorld, b.soiRadius)
             : 0,
         showLabel: !decluttered,
+        // Orbits a non-star parent -> a moon (drives label distance-culls).
+        isMoon: (system.parentOf(b)?.isStar ?? true) == false,
         worldRel: bw - camWorld,
       ));
     }

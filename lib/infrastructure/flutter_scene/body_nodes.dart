@@ -165,8 +165,9 @@ class SkyboxNode {
   /// walks the camera up to (and past) the starfield ball, which then
   /// reads as a small textured sphere instead of the sky.
   void update({double cameraRangeKm = 0}) {
-    final wanted =
-        math.max(_minRadius, cameraRangeKm * 20).clamp(_minRadius, 4e9);
+    // No upper clamp: the far plane grows with range too (adapter), so the
+    // backdrop always encloses the camera at any zoom.
+    final wanted = math.max(_minRadius, cameraRangeKm * 20);
     if (_node == null) {
       final tex = _textures.texture('starfield');
       if (tex == null) return; // retry next frame
