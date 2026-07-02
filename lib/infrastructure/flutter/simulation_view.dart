@@ -46,7 +46,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.0.209';
+const String kBuildStamp = 'build 0.3.0.210';
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -513,21 +513,26 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   void _onDomainEvent(DomainEvent e) {
     String nameOf(VesselId id) => _vesselNames[id.value] ?? id.value;
     ({String title, String detail})? notice;
-    if (e is Impact) {
+    // Cheat-gated: the thermal/structural SUBSYSTEMS still raise their
+    // events when a limit is exceeded — only the tick's DESTRUCTION check
+    // honours the cheats. With a cheat on, the craft survives, so popping
+    // the death menu for the event alone is a lie ("burned up" while the
+    // ship flies on).
+    if (e is Impact && !_disableImpact) {
       notice = (
         title: '${nameOf(e.vessel)} destroyed',
         detail:
             'Hard impact with ${e.body.value} at '
             '${e.speed.toStringAsFixed(0)} m/s. The craft was lost.',
       );
-    } else if (e is StructuralFailure) {
+    } else if (e is StructuralFailure && !_disableAeroStress) {
       notice = (
         title: '${nameOf(e.vessel)} broke up',
         detail:
             'Structural failure under aerodynamic load '
             '(${(e.dynamicPressure / 1000).toStringAsFixed(1)} kPa).',
       );
-    } else if (e is PartOverheated) {
+    } else if (e is PartOverheated && !_disableOverheat) {
       notice = (
         title: '${nameOf(e.vessel)} burned up',
         detail:
