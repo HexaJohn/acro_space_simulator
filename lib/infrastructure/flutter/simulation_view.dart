@@ -46,7 +46,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.0.206';
+const String kBuildStamp = 'build 0.3.0.207';
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -150,6 +150,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           azimuth: _view.azimuth,
           elevation: _view.elevation,
           roll: _view.roll,
+          frame: _view.frame,
           range: _range + _focusBodyRadius,
           fovY: _fovDeg * math.pi / 180,
           viewportH: _screenH,
@@ -643,42 +644,25 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       _sceneWorld = null;
     }
 
-    // Equator-aligned camera: roll the view so screen-up tracks the focused
-    // body's spin axis (rings/equator read level). Recomputed per frame —
-    // the needed roll changes with azimuth/elevation.
+    // Equator-aligned camera: gimbal the whole orbit in the focused body's
+    // TILTED frame — azimuth then circles the body's equator, elevation
+    // climbs toward its pole, and the pole reads upright on screen. (A
+    // roll-only alignment was tried first: it levelled the horizon but the
+    // orbit axes still followed the ecliptic, which felt wrong on every
+    // drag.)
     if (_alignUpWithBody && !_craftCam) {
       final bodyId = _focusBody ?? _lastFocusBody;
       final body = bodyId == null ? null : _universe.current().body(bodyId);
-      if (body != null) {
-        // Spin axis: axial tilt about +X applied to +Z (spin about the
-        // axis itself never moves it) — same construction as the snapshot.
-        final t = body.axialTilt;
-        final axis = Vector3(0, -math.sin(t), math.cos(t));
-        final zeroRoll = CameraOrbit(
-            azimuth: _view.azimuth, elevation: _view.elevation);
-        final f = zeroRoll.forward;
-        final projected = axis - f * axis.dot(f);
-        if (projected.length > 1e-6) {
-          final desired = projected.normalized;
-          final upB = zeroRoll.up, rightB = zeroRoll.right;
-          // Camera basis under roll r: up = upB*cos(r) - rightB*sin(r), so
-          // matching `desired` needs desired.rightB = -sin(r): the right-dot
-          // enters atan2 NEGATED (the original +sign rolled the wrong way).
-          final target =
-              math.atan2(-desired.dot(rightB), desired.dot(upB));
-          // Ease toward the target roll (shortest way around) instead of
-          // snapping: toggling the mode or fast orbits otherwise JUMP the
-          // horizon.
-          var delta = target - _view.roll;
-          while (delta > math.pi) {
-            delta -= 2 * math.pi;
-          }
-          while (delta < -math.pi) {
-            delta += 2 * math.pi;
-          }
-          _view = _view.copyWith(roll: _view.roll + delta * 0.15);
-        }
-      }
+      final t = body?.axialTilt ?? 0;
+      _view = _view.copyWith(
+          frame: t == 0
+              ? Quaternion.identity
+              : Quaternion.axisAngle(Vector3.unitX, t),
+          roll: 0);
+    } else if (_view.frame.x != 0 ||
+        _view.frame.y != 0 ||
+        _view.frame.z != 0) {
+      _view = _view.copyWith(frame: Quaternion.identity);
     }
 
     // Craft chase cam: align the camera EXACTLY with the craft's attitude so the

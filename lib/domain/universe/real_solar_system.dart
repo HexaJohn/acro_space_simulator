@@ -17,7 +17,9 @@ class RealSolarSystem {
   static const double _au = 1.495978707e11; // metres
   static double _deg(double d) => d * math.pi / 180.0;
 
-  /// Compact factory for a moon (tidally-locked, near-circular, no atmosphere).
+  /// Compact factory for a moon (tidally-locked, near-circular, no
+  /// atmosphere). [inclinationDeg] is referenced to the PARENT'S EQUATOR
+  /// (regular moons orbit near it and inherit the parent's axial tilt).
   static CelestialBody _moon(
     String id,
     String name,
@@ -27,8 +29,9 @@ class RealSolarSystem {
     String parent,
     double orbitRadius,
     double eccentricity,
-    double solarFlux,
-  ) =>
+    double solarFlux, {
+    double inclinationDeg = 0,
+  }) =>
       CelestialBody(
         id: BodyId(id),
         name: name,
@@ -39,6 +42,8 @@ class RealSolarSystem {
         parent: BodyId(parent),
         orbitRadius: orbitRadius,
         orbitEccentricity: eccentricity,
+        orbitInclination: _deg(inclinationDeg),
+        orbitsParentEquator: true,
         solarFlux: solarFlux,
       );
 
@@ -340,30 +345,34 @@ class RealSolarSystem {
 
       // ---- More Saturn moons ----
       _moon('enceladus', 'Enceladus', 7.21e9, 252100, 1.8e6, 'saturn', 2.380e8,
-          0.0047, 15),
-      _moon('mimas', 'Mimas', 2.503e9, 198200, 8.9e5, 'saturn', 1.855e8, 0.0196, 15),
-      _moon('rhea', 'Rhea', 1.539e11, 763800, 2.8e7, 'saturn', 5.270e8, 0.0013, 15),
+          0.0047, 15, inclinationDeg: 0.02),
+      _moon('mimas', 'Mimas', 2.503e9, 198200, 8.9e5, 'saturn', 1.855e8, 0.0196,
+          15, inclinationDeg: 1.57),
+      _moon('rhea', 'Rhea', 1.539e11, 763800, 2.8e7, 'saturn', 5.270e8, 0.0013,
+          15, inclinationDeg: 0.35),
       _moon('iapetus', 'Iapetus', 1.205e11, 734500, 1.0e8, 'saturn', 3.561e9,
-          0.0286, 15),
-      _moon('dione', 'Dione', 7.311e10, 561400, 2.0e7, 'saturn', 3.774e8, 0.0022, 15),
+          0.0286, 15, inclinationDeg: 15.47),
+      _moon('dione', 'Dione', 7.311e10, 561400, 2.0e7, 'saturn', 3.774e8, 0.0022,
+          15, inclinationDeg: 0.02),
       _moon('tethys', 'Tethys', 4.121e10, 531100, 1.4e7, 'saturn', 2.947e8,
-          0.0001, 15),
+          0.0001, 15, inclinationDeg: 1.12),
 
-      // ---- Uranus moons ----
+      // ---- Uranus moons (near-polar with Uranus's 97.8 deg tilt) ----
       _moon('titania', 'Titania', 2.347e11, 788400, 2.9e7, 'uranus', 4.358e8,
-          0.0011, 3.7),
+          0.0011, 3.7, inclinationDeg: 0.34),
       _moon('oberon', 'Oberon', 1.923e11, 761400, 3.0e7, 'uranus', 5.835e8,
-          0.0014, 3.7),
+          0.0014, 3.7, inclinationDeg: 0.06),
       _moon('miranda', 'Miranda', 4.4e9, 235800, 4.0e6, 'uranus', 1.299e8, 0.0013,
-          3.7),
+          3.7, inclinationDeg: 4.23),
       _moon('ariel', 'Ariel', 8.346e10, 578900, 1.5e7, 'uranus', 1.909e8, 0.0012,
-          3.7),
+          3.7, inclinationDeg: 0.26),
       _moon('umbriel', 'Umbriel', 8.509e10, 584700, 1.7e7, 'uranus', 2.660e8,
-          0.0039, 3.7),
+          0.0039, 3.7, inclinationDeg: 0.13),
 
-      // ---- Neptune moon ----
+      // ---- Neptune moon (Triton: captured, RETROGRADE — inclination past
+      // 90 deg to Neptune's equator) ----
       _moon('triton', 'Triton', 1.428e12, 1353400, 1.0e8, 'neptune', 3.548e8,
-          0.000016, 1.5),
+          0.000016, 1.5, inclinationDeg: 156.87),
 
       // ---- Dwarf planets ----
       CelestialBody(
@@ -394,7 +403,7 @@ class RealSolarSystem {
         solarFlux: 0.88,
       ),
       _moon('charon', 'Charon', 1.058e11, 6.06e5, 1.0e7, 'pluto', 1.9591e7,
-          0.0002, 0.88),
+          0.0002, 0.88, inclinationDeg: 0.08),
       CelestialBody(
         id: const BodyId('eris'),
         name: 'Eris',
