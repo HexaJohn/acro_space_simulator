@@ -79,21 +79,27 @@ class _SceneRenderViewState extends State<SceneRenderView> {
       );
     }
     final snap = widget.snapshot;
-    if (snap != null) {
-      sync.update(
-        snap,
-        focusVesselId: widget.focusVesselId,
-        focusBodyId: widget.focusBodyId,
-      );
-    }
-    final camera = toSceneCamera(widget.camera);
     return LayoutBuilder(builder: (context, constraints) {
-      // Camera-facing polylines regenerate against the REAL viewport size
-      // (screen-pixel width mode needs it).
-      sync.updateForCamera(
-        camera,
-        Size(constraints.maxWidth, constraints.maxHeight),
-      );
+      final viewport = Size(constraints.maxWidth, constraints.maxHeight);
+      if (snap != null) {
+        sync.update(
+          snap,
+          camera: widget.camera,
+          viewport: viewport,
+          focusVesselId: widget.focusVesselId,
+          focusBodyId: widget.focusBodyId,
+        );
+      }
+      // Strip expansion happens exactly ONCE per app frame, here, on
+      // freshly created geometry (sync.update recreates every polyline's
+      // buffers each frame). Never inside SceneView's own repaint ticker:
+      // in-place writes to GPU buffers that an in-flight frame is reading
+      // tear visibly (black shards). The camera only changes when
+      // SimulationView rebuilds — the same build that runs this — so
+      // SceneView's extra repaints between builds render a CONSTANT
+      // camera against valid strips.
+      final camera = toSceneCamera(widget.camera, viewportH: viewport.height);
+      sync.updateForCamera(camera, viewport);
       return fs.SceneView(sync.scene, camera: camera);
     });
   }
