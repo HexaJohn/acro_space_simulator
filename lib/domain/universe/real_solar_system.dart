@@ -52,6 +52,10 @@ class RealSolarSystem {
   static final AtmosphericComposition _marsAir = AtmosphericComposition.mars();
   static final AtmosphericComposition _venusAir = AtmosphericComposition.venus();
   static final AtmosphericComposition _titanAir = AtmosphericComposition.titan();
+  static final AtmosphericComposition _jupiterAir = AtmosphericComposition.jupiter();
+  static final AtmosphericComposition _saturnAir = AtmosphericComposition.saturn();
+  static final AtmosphericComposition _uranusAir = AtmosphericComposition.uranus();
+  static final AtmosphericComposition _neptuneAir = AtmosphericComposition.neptune();
 
   static StarSystem build() {
     final bodies = <CelestialBody>[
@@ -167,6 +171,7 @@ class RealSolarSystem {
         orbitInclination: _deg(1.303),
         solarFlux: 50,
         axialTilt: 0.0546, // 3.13 deg
+        composition: _jupiterAir,
       ),
       CelestialBody(
         id: const BodyId('saturn'),
@@ -181,6 +186,7 @@ class RealSolarSystem {
         orbitInclination: _deg(2.485),
         solarFlux: 15,
         axialTilt: 0.4665, // 26.73 deg -> the ring plane's tilt
+        composition: _saturnAir,
       ),
       CelestialBody(
         id: const BodyId('uranus'),
@@ -195,6 +201,7 @@ class RealSolarSystem {
         orbitInclination: _deg(0.773),
         solarFlux: 3.7,
         axialTilt: 1.7064, // 97.77 deg -> rolls on its side; rings near-polar
+        composition: _uranusAir,
       ),
       CelestialBody(
         id: const BodyId('neptune'),
@@ -209,6 +216,7 @@ class RealSolarSystem {
         orbitInclination: _deg(1.770),
         solarFlux: 1.5,
         axialTilt: 0.4943, // 28.32 deg
+        composition: _neptuneAir,
       ),
 
       // ---- Earth's Moon ----

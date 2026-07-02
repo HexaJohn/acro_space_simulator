@@ -23,7 +23,9 @@ uniform AtmosphereInfo {
   // x: sun intensity. y: tint mix (0 = physical colour, 1 = full tint).
   // zw: tint red/green... packed: z = tint r, w = tint g (b in params2.x).
   vec4 params;
-  // x: tint b, yzw: unused padding.
+  // x: tint b. y: twilight softness (scene units) — width of the smooth
+  // day/night transition band; the terminator blurs across it instead of
+  // cutting at the geometric horizon. zw: unused padding.
   vec4 params2;
 }
 atmosphere_info;
@@ -47,6 +49,19 @@ vec2 raySphere(vec3 ro, vec3 rd, vec3 c, float r) {
   if (h < 0.0) return vec2(1.0, -1.0);
   float s = sqrt(h);
   return vec2(-b - s, -b + s);
+}
+
+// Soft planet shadow toward the sun. A binary horizon test cut the
+// terminator to a hard line; instead attenuate by the sun ray's closest
+// approach altitude over a twilight band [soft] wide — dusk glow bleeds
+// smoothly past the geometric terminator. The slight negative lower edge
+// keeps a little scatter alive just past grazing.
+float sunVisibility(vec3 p, vec3 sunDir, vec3 c, float planetR, float soft) {
+  vec3 op = p - c;
+  float tStar = -dot(op, sunDir);
+  if (tStar <= 0.0) return 1.0; // closest approach is behind: sun side
+  float minAlt = length(op + sunDir * tStar) - planetR;
+  return smoothstep(-0.3 * soft, soft, minAlt);
 }
 
 void main() {
@@ -87,10 +102,11 @@ void main() {
     float density = exp(-h / scaleH) * stepLen;
     viewDepth += density;
 
-    // Optical depth toward the sun from this sample. If the sun ray hits
-    // the planet the sample is in shadow (night side falls out naturally).
-    vec2 sunGround = raySphere(p, sunDir, centre, planetR);
-    if (sunGround.x > 0.0) continue;
+    // Sunlight reaching this sample: soft twilight shadow (see
+    // sunVisibility) times the optical depth along the sun ray.
+    float vis =
+        sunVisibility(p, sunDir, centre, planetR, atmosphere_info.params2.y);
+    if (vis <= 0.0) continue;
     vec2 sunShell = raySphere(p, sunDir, centre, atmoR);
     float sunPath = max(sunShell.y, 0.0);
     float sunStep = sunPath / float(LIGHT_SAMPLES);
@@ -102,7 +118,7 @@ void main() {
     }
 
     vec3 transmittance = exp(-beta * (viewDepth + sunDepth));
-    inscatter += density * transmittance;
+    inscatter += density * transmittance * vis;
   }
 
   // Rayleigh phase.

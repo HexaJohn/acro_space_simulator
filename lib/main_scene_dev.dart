@@ -9,6 +9,7 @@ import 'package:flutter/rendering.dart';
 
 import 'infrastructure/flutter/sim_view_control.dart';
 import 'infrastructure/flutter/simulation_view.dart';
+import 'infrastructure/flutter_scene/atmosphere_nodes.dart';
 import 'infrastructure/flutter_scene/body_nodes.dart';
 import 'infrastructure/flutter_scene/render_backend.dart';
 
@@ -107,6 +108,35 @@ void main() {
   developer.registerExtension('ext.acro.status', (method, params) async {
     return developer.ServiceExtensionResponse.result(jsonEncode(
         SimViewControl.instance.status?.call() ?? {'error': 'no live view'}));
+  });
+
+  // Live atmosphere art-pass knobs (applied next frame; render-side only):
+  //   ext.acro.atmo?body=earth&falloff=8&height=6&intensity=25
+  //     &density=1.2&tint=cc7a33&mix=0.6&twilightKm=800&shellKm=2000
+  //     &enabled=true
+  // Any call (also with no params) returns the FULL current style table —
+  // tune live, then bake the numbers into AtmosphereNodes.styles.
+  developer.registerExtension('ext.acro.atmo', (method, params) async {
+    final id = params['body'];
+    if (id != null) {
+      final s = AtmosphereNodes.styles.putIfAbsent(id, AtmoStyle.new);
+      double? num(String k) =>
+          params[k] == null ? null : double.tryParse(params[k]!);
+      if (num('height') != null) s.heightScale = num('height')!;
+      if (num('falloff') != null) s.falloff = num('falloff')!;
+      if (num('intensity') != null) s.intensity = num('intensity')!;
+      if (num('density') != null) s.density = num('density')!;
+      if (num('mix') != null) s.tintMix = num('mix')!;
+      if (num('shellKm') != null) s.shellHeightM = num('shellKm')! * 1000;
+      if (num('twilightKm') != null) s.twilightM = num('twilightKm')! * 1000;
+      if (params['tint'] != null) {
+        s.tintArgb = 0xFF000000 | int.parse(params['tint']!, radix: 16);
+      }
+      if (params['enabled'] != null) s.enabled = params['enabled'] == 'true';
+    }
+    return developer.ServiceExtensionResponse.result(jsonEncode({
+      for (final e in AtmosphereNodes.styles.entries) e.key: e.value.toJson(),
+    }));
   });
 
   runApp(
