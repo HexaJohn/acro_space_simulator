@@ -79,10 +79,11 @@ class _Shell {
     _swapMesh();
   }
 
-  // Replaced meshes held a few frames so their GPU buffers can't free
-  // while an in-flight frame still reads them (see LineNodes._retired).
+  // Replaced meshes held by WALL CLOCK so their GPU buffers can't free
+  // while an in-flight frame still reads them (see LineNodes._retired —
+  // swap-count windows shrink under drag-rate rebuilds and tear).
   final List<(int, fs.Mesh)> _retired = [];
-  int _swapCount = 0;
+  static const int _retireAfterMs = 400;
 
   /// Rebuild the mesh with FRESH GPU buffers. In-place updateColors() on a
   /// persistent geometry tears against in-flight frames (black shards over
@@ -90,10 +91,10 @@ class _Shell {
   /// frame already recording. A few KB per change, throttled by
   /// [updateColors]' view-delta check.
   void _swapMesh() {
-    _swapCount++;
-    _retired.removeWhere((e) => _swapCount - e.$1 > 6);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _retired.removeWhere((e) => now - e.$1 > _retireAfterMs);
     final old = node.mesh;
-    if (old != null) _retired.add((_swapCount, old));
+    if (old != null) _retired.add((now, old));
     node.mesh = fs.Mesh(
       fs.MeshGeometry.fromArrays(
         positions: _positions,
@@ -180,9 +181,12 @@ class _Shell {
         camLocal.x.toDouble(), camLocal.y.toDouble(), camLocal.z.toDouble());
     final last = _lastCam;
     if (last != null) {
-      final angleSmall = last.normalized().dot(cam.normalized()) > 0.99997;
+      // ~2.5 deg / 3% — the limb band moves slowly with view direction, so
+      // coarse steps are invisible, and drag-rate rebake churn (a mesh swap
+      // per pointer event) is what tears.
+      final angleSmall = last.normalized().dot(cam.normalized()) > 0.999;
       final radiusSimilar = last.length > 0 &&
-          ((cam.length / last.length) - 1.0).abs() < 0.01;
+          ((cam.length / last.length) - 1.0).abs() < 0.03;
       if (angleSmall && radiusSimilar) return;
     }
     _lastCam = cam.clone();

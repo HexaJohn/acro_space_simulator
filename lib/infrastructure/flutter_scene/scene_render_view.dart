@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter_scene/scene.dart' as fs;
 
 import '../../adapters/presenters/camera_view.dart';
@@ -52,6 +53,14 @@ class _SceneRenderViewState extends State<SceneRenderView> {
 
   SceneSync? _sync;
 
+  /// Frame-coalescing guard: pointer events can trigger several builds per
+  /// vsync, and each GPU-touching sync pass rebuilds geometry through the
+  /// engine's transient upload path — overlapping rebuilds inside one
+  /// painted frame alias and tear (pale shards under mouse drag). Only the
+  /// FIRST build in a given frame does GPU work; later builds this frame
+  /// reuse it (the last one's camera wins next frame).
+  Duration? _lastSyncFrame;
+
   @override
   void initState() {
     super.initState();
@@ -81,7 +90,10 @@ class _SceneRenderViewState extends State<SceneRenderView> {
     final snap = widget.snapshot;
     return LayoutBuilder(builder: (context, constraints) {
       final viewport = Size(constraints.maxWidth, constraints.maxHeight);
-      if (snap != null) {
+      final frame = SchedulerBinding.instance.currentSystemFrameTimeStamp;
+      final firstBuildThisFrame = _lastSyncFrame != frame;
+      _lastSyncFrame = frame;
+      if (snap != null && firstBuildThisFrame) {
         sync.update(
           snap,
           camera: widget.camera,
@@ -90,16 +102,13 @@ class _SceneRenderViewState extends State<SceneRenderView> {
           focusBodyId: widget.focusBodyId,
         );
       }
-      // Strip expansion happens exactly ONCE per app frame, here, on
-      // freshly created geometry (sync.update recreates every polyline's
-      // buffers each frame). Never inside SceneView's own repaint ticker:
-      // in-place writes to GPU buffers that an in-flight frame is reading
-      // tear visibly (black shards). The camera only changes when
-      // SimulationView rebuilds — the same build that runs this — so
-      // SceneView's extra repaints between builds render a CONSTANT
-      // camera against valid strips.
+      // Strip expansion is copy-on-write inside updateForCamera and, like
+      // sync.update, runs at most once per painted frame. Never inside
+      // SceneView's own repaint ticker, and never twice per vsync.
       final camera = toSceneCamera(widget.camera, viewportH: viewport.height);
-      sync.updateForCamera(camera, viewport);
+      if (firstBuildThisFrame) {
+        sync.updateForCamera(camera, viewport);
+      }
       return fs.SceneView(sync.scene, camera: camera);
     });
   }

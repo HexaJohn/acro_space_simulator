@@ -71,9 +71,9 @@ class SceneSync {
   static const bool _noAtmo = bool.fromEnvironment('SCENE_NO_ATMO');
   static const bool _noVessels = bool.fromEnvironment('SCENE_NO_VESSELS');
 
-  /// Rebuild the camera-facing line strips for this frame's camera + viewport.
-  /// Call after [update], before rendering (PolylineGeometry contract).
-  void updateForCamera(fs.Camera camera, ui.Size viewport) =>
+  /// Rebuild the camera-facing line strips for this frame's camera + viewport
+  /// (copy-on-write; skips when camera, viewport, and content are unchanged).
+  void updateForCamera(fs.PerspectiveCamera camera, ui.Size viewport) =>
       _lines.updateForCamera(camera, viewport);
 
   /// Sunlight: aims from the star through the focus. Bodies/vessels away
