@@ -33,8 +33,12 @@ const double kRenderScale = 1e-3;
 /// guard against absolute world positions sneaking through and silently
 /// losing precision in the cast.
 vm.Vector3 relToScene(Vector3 rel) {
+  // Focus-relative positions are legitimately up to ~1e13 m (an outer
+  // planet's orbit ring viewed from the inner system). The guard exists to
+  // catch UNREBASED absolutes and double-scaling bugs, which overshoot this
+  // by orders of magnitude.
   assert(
-    rel.x.abs() < 1e12 && rel.y.abs() < 1e12 && rel.z.abs() < 1e12,
+    rel.x.abs() < 1e14 && rel.y.abs() < 1e14 && rel.z.abs() < 1e14,
     'relToScene() expects a focus-relative position, got $rel — '
     'rebase against the FloatingOrigin first.',
   );

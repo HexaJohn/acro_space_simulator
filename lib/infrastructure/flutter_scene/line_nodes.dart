@@ -1,0 +1,155 @@
+import 'dart:ui' as ui;
+
+import 'package:flutter_scene/scene.dart' as fs;
+import 'package:vector_math/vector_math.dart' as vm;
+
+import '../../application/snapshot/world_snapshot.dart';
+import '../../domain/shared/vector3.dart';
+import 'coord_convert.dart';
+
+/// Orbit rails, predicted trajectories, and flown trails as camera-facing
+/// [fs.PolylineGeometry] strips (screen-pixel width — same visual weight as
+/// the software renderer's 2D lines at any distance).
+///
+/// Line points are world positions rebased against the floating origin, so
+/// every polyline is rebuilt each frame (the origin moves with the focus).
+/// Point counts are small (tens to hundreds); the rebuild is cheap relative
+/// to the per-frame camera update PolylineGeometry does internally anyway.
+class LineNodes {
+  LineNodes(this._scene);
+
+  final fs.Scene _scene;
+
+  final Map<String, fs.Node> _nodes = {};
+  // Live polyline geometries: each needs updateForCamera every frame (the
+  // strip is a collapsed placeholder until then — SceneView does NOT call
+  // it; that is the caller's job per the PolylineGeometry contract).
+  final Map<String, fs.PolylineGeometry> _lines = {};
+
+  // Flown-trail breadcrumbs per vessel, absolute world metres (doubles).
+  final Map<String, List<Vector3>> _trails = {};
+  static const int _trailCap = 240;
+  static const double _trailMinStepM = 500.0; // drop denser samples
+
+  // Parity with the software painter: rails cool gray, predicted paths the
+  // painter's green, trails fading cyan.
+  static final vm.Vector4 _railColor = vm.Vector4(0.45, 0.5, 0.55, 0.55);
+  static final vm.Vector4 _pathColor = vm.Vector4(0.5, 0.88, 0.56, 0.9);
+  static final vm.Vector4 _trailColor = vm.Vector4(0.35, 0.75, 1.0, 0.9);
+
+  void update(WorldSnapshot snap, FloatingOrigin origin) {
+    final seen = <String>{};
+
+    // Body orbit rails (closed rings, root-relative metres).
+    for (final b in snap.bodies.values) {
+      if (b.orbit.length < 6) continue;
+      final pts = <vm.Vector3>[];
+      for (var i = 0; i + 2 < b.orbit.length; i += 3) {
+        pts.add(origin.worldToScene(
+            Vector3(b.orbit[i], b.orbit[i + 1], b.orbit[i + 2])));
+      }
+      pts.add(pts.first); // close the ring
+      _upsert('rail/${b.id}', seen, pts, _railColor, width: 1.5);
+    }
+
+    for (final v in snap.vessels.values) {
+      final body = snap.bodies[v.body];
+      if (body == null) continue;
+      final bodyPos = Vector3(body.px, body.py, body.pz);
+
+      // Predicted trajectory (body-relative metres).
+      if (v.trajectory.length >= 6) {
+        final pts = <vm.Vector3>[];
+        for (var i = 0; i + 2 < v.trajectory.length; i += 3) {
+          pts.add(origin.worldToScene(bodyPos +
+              Vector3(v.trajectory[i], v.trajectory[i + 1],
+                  v.trajectory[i + 2])));
+        }
+        _upsert('path/${v.id}', seen, pts, _pathColor, width: 2.0);
+      }
+
+      // Flown trail: accumulate world breadcrumbs, faded tail -> head.
+      final world = bodyPos + Vector3(v.px, v.py, v.pz);
+      final trail = _trails.putIfAbsent(v.id, () => []);
+      if (trail.isEmpty ||
+          trail.last.distanceTo(world) >= _trailMinStepM) {
+        trail.add(world);
+        if (trail.length > _trailCap) trail.removeAt(0);
+      }
+      if (trail.length >= 2) {
+        final pts = [for (final p in trail) origin.worldToScene(p)];
+        // PREMULTIPLIED alpha: the pipeline blends premultiplied colors, so
+        // a fading tail must scale RGB by alpha too — straight-alpha vertex
+        // colors render as dark boxes where alpha approaches zero.
+        final colors = <vm.Vector4>[
+          for (var i = 0; i < pts.length; i++)
+            () {
+              final a = _trailColor.w * i / (pts.length - 1);
+              return vm.Vector4(_trailColor.x * a, _trailColor.y * a,
+                  _trailColor.z * a, a);
+            }(),
+        ];
+        _upsert('trail/${v.id}', seen, pts, _trailColor,
+            width: 2.0, perVertexColor: colors);
+      }
+    }
+
+    _nodes.removeWhere((id, node) {
+      if (seen.contains(id)) return false;
+      _scene.remove(node);
+      _lines.remove(id);
+      return true;
+    });
+    _trails.removeWhere((id, _) => !snap.vessels.containsKey(id));
+  }
+
+  /// Regenerate every camera-facing strip for this frame's camera. Must run
+  /// after [update] and before the scene renders.
+  void updateForCamera(fs.Camera camera, ui.Size viewport) {
+    for (final line in _lines.values) {
+      line.updateForCamera(camera, viewport);
+    }
+  }
+
+  void _upsert(
+    String id,
+    Set<String> seen,
+    List<vm.Vector3> pts,
+    vm.Vector4 color, {
+    required double width,
+    List<vm.Vector4>? perVertexColor,
+  }) {
+    if (pts.length < 2) return;
+    seen.add(id);
+    final geometry = fs.PolylineGeometry(
+      pts,
+      width: width,
+      widthMode: fs.PolylineWidthMode.screenPixels,
+      perVertexColor: perVertexColor,
+    );
+    _lines[id] = geometry;
+    // Blend + PREMULTIPLIED colour: AlphaMode.opaque (default) ignores
+    // alpha entirely, and the translucent pass blends premultiplied — a
+    // straight-alpha tint darkens the line against bright surfaces. When
+    // per-vertex colours (already premultiplied) carry the shading, the
+    // material stays white so the tint isn't applied twice.
+    final tint = perVertexColor != null
+        ? vm.Vector4(1, 1, 1, 1)
+        : vm.Vector4(
+            color.x * color.w, color.y * color.w, color.z * color.w, color.w);
+    final mesh = fs.Mesh(
+      geometry,
+      fs.UnlitMaterial()
+        ..baseColorFactor = tint
+        ..alphaMode = fs.AlphaMode.blend,
+    );
+    final node = _nodes[id];
+    if (node == null) {
+      final n = fs.Node(mesh: mesh);
+      _scene.add(n);
+      _nodes[id] = n;
+    } else {
+      node.mesh = mesh;
+    }
+  }
+}
