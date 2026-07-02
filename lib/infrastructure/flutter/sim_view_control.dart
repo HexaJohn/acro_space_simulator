@@ -30,6 +30,10 @@ class SimViewControl {
   /// vessel lock.
   void Function(String bodyId)? focusBody;
 
+  /// Auto-warp the focused vessel to its next apsis ('ap' | 'pe'), exactly
+  /// like the AP/PE buttons.
+  void Function(bool periapsis)? warpToApsis;
+
   /// Current camera/backend state for assertions and closed-loop control.
   Map<String, Object?> Function()? status;
 
@@ -39,6 +43,7 @@ class SimViewControl {
     setPerspective = null;
     setBackend = null;
     focusBody = null;
+    warpToApsis = null;
     status = null;
   }
 }

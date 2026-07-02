@@ -93,6 +93,10 @@ void main() {
     if (params['focusBody'] != null) {
       c.focusBody?.call(params['focusBody']!);
     }
+    // Auto-warp to the focused vessel's next apsis: warpApsis=ap|pe.
+    if (params['warpApsis'] != null) {
+      c.warpToApsis?.call(params['warpApsis'] == 'pe');
+    }
     return developer.ServiceExtensionResponse.result(
         jsonEncode(c.status?.call() ?? {'error': 'no live view'}));
   });

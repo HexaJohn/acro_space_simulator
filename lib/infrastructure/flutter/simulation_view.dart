@@ -25,6 +25,8 @@ import '../../application/persistence/game_state_codec.dart';
 import '../../application/ports/compute_port.dart';
 import '../../application/usecases/advance_simulation_tick.dart';
 import '../../domain/orbits/soi_transition_service.dart';
+import '../../domain/orbits/state_vector_converter.dart';
+import '../../domain/simulation/epoch.dart';
 import '../../domain/science/research_ledger.dart';
 import '../../domain/science/tech_tree.dart';
 import '../../domain/simulation/simulation_clock.dart';
@@ -46,7 +48,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.0.210';
+const String kBuildStamp = 'build 0.3.0.211';
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -230,6 +232,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       final idx = _targets.indexWhere((t) => t.b?.value == bodyId);
       if (idx >= 0) _selectTarget(idx);
     };
+    c.warpToApsis = (periapsis) {
+      if (!mounted) return;
+      _warpToApsis(periapsis: periapsis);
+    };
     c.status = () => {
           'azimuth': _view.azimuth,
           'elevation': _view.elevation,
@@ -240,6 +246,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           'backend': _renderBackend.name,
           'focusVessel': _focusVessel?.value,
           'focusBody': _focusBody?.value,
+          'warpFactor': _clock.warpFactor,
+          'warpTarget': _warpTargetLabel,
+          'epochS': _clock.epoch.seconds,
         };
   }
   // Latest world snapshot for the flutter_scene backend (null when the
@@ -363,10 +372,73 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
 
   void _stepWarp(int delta) {
     final next = (_warpIndex + delta).clamp(0, _warpLevels.length - 1);
-    if (next == _warpIndex) return;
+    if (next == _warpIndex && _warpTarget == null) return;
     setState(() {
+      _warpTarget = null; // manual warp input cancels an auto warp-to-apsis
+      _warpTargetLabel = null;
       _warpIndex = next;
       _clock.warpFactor = _warpLevels[_warpIndex];
+    });
+  }
+
+  /// Warp-to-AP/PE: sim epoch to auto-warp to, or null when inactive. Each
+  /// frame the warp factor is re-fit to the remaining time (arrive in ~1.5
+  /// real seconds), so the approach decelerates smoothly and lands within a
+  /// tick of the apsis before dropping back to 1x.
+  Epoch? _warpTarget;
+  String? _warpTargetLabel; // 'AP' / 'PE' chip text while active
+
+  /// Compact sim-time countdown for the warp chip: 42s / 12m34s / 3h07m.
+  static String _fmtCountdown(double s) {
+    if (s < 60) return '${s.toStringAsFixed(0)}s';
+    if (s < 3600) {
+      return '${s ~/ 60}m${(s % 60).toStringAsFixed(0).padLeft(2, '0')}s';
+    }
+    final h = s ~/ 3600;
+    final m = (s % 3600) ~/ 60;
+    return '${h}h${m.toString().padLeft(2, '0')}m';
+  }
+
+  void _warpToApsis({required bool periapsis}) {
+    final id = _focusVessel;
+    final v = id == null ? null : _vessels.byId(id);
+    if (v == null || v.landed) return;
+    final body = _universe.current().body(v.dominantBody);
+    if (body == null) return;
+    final label = periapsis ? 'PE' : 'AP';
+    // Pressing the active button again cancels.
+    if (_warpTarget != null && _warpTargetLabel == label) {
+      setState(() {
+        _warpTarget = null;
+        _warpTargetLabel = null;
+        _clock.warpFactor = _warpLevels[_warpIndex];
+      });
+      return;
+    }
+    final orbit = const StateVectorOrbitConverter().toOrbit(
+      position: v.state.position,
+      velocity: v.state.velocity,
+      body: body,
+      epoch: _clock.epoch,
+    );
+    final el = orbit.elements;
+    // Escape / radial-degenerate: no closed orbit, no apses to warp to.
+    if (el.eccentricity >= 1 ||
+        !el.semiMajorAxis.isFinite ||
+        el.semiMajorAxis <= 0) {
+      return;
+    }
+    final n = el.meanMotion(orbit.mu);
+    if (!n.isFinite || n <= 0) return;
+    final twoPi = 2 * math.pi;
+    final m = ((orbit.meanAnomalyAt(_clock.epoch) % twoPi) + twoPi) % twoPi;
+    // Mean anomaly of the target apsis: PE at 0 (2pi ahead), AP at pi.
+    var ahead = ((periapsis ? twoPi : math.pi) - m + twoPi) % twoPi;
+    // Already sitting on the apsis: wrap a full orbit instead of a 0s warp.
+    if (ahead / n < 2.0) ahead += twoPi;
+    setState(() {
+      _warpTarget = _clock.epoch + ahead / n;
+      _warpTargetLabel = label;
     });
   }
 
@@ -586,6 +658,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         if (atmoH > 0 && alt < atmoH && _clock.warpFactor > 1) {
           _warpIndex = 0;
           _clock.warpFactor = _warpLevels[0];
+          _warpTarget = null; // atmosphere overrides an auto warp-to-apsis
+          _warpTargetLabel = null;
         }
       }
     }
@@ -598,6 +672,20 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
             r.amount = r.capacity;
           }
         }
+      }
+    }
+
+    // Auto warp-to-apsis: refit the warp factor to the remaining time every
+    // frame (smooth deceleration), drop to 1x on arrival.
+    if (_warpTarget != null) {
+      final remaining = _warpTarget!.seconds - _clock.epoch.seconds;
+      if (remaining <= 0.5) {
+        _warpTarget = null;
+        _warpTargetLabel = null;
+        _warpIndex = 0;
+        _clock.warpFactor = _warpLevels[0];
+      } else {
+        _clock.warpFactor = (remaining / 1.5).clamp(1.0, 1e6);
       }
     }
 
@@ -1360,7 +1448,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                     decoration: BoxDecoration(color: const Color(0xFF2A3A4A), borderRadius: BorderRadius.circular(20)),
                     child: Text(
-                      '${_warpLevels[_warpIndex].toStringAsFixed(0)}x',
+                      _warpTarget != null
+                          ? '→$_warpTargetLabel ${_fmtCountdown(_warpTarget!.seconds - _clock.epoch.seconds)}'
+                          : '${_warpLevels[_warpIndex].toStringAsFixed(0)}x',
                       style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold),
                     ),
                   ),
@@ -1372,6 +1462,35 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                   ),
                 ],
               ),
+              // Warp straight to the focused vessel's next apsis. Active
+              // button re-press cancels; manual warp steps also cancel.
+              if (_focusVessel != null) ...[
+                const SizedBox(height: 8),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    FloatingActionButton.small(
+                      heroTag: 'warpap',
+                      backgroundColor: _warpTargetLabel == 'AP'
+                          ? const Color(0xFF7FE0A0)
+                          : const Color(0xFF2A3A4A),
+                      onPressed: () => _warpToApsis(periapsis: false),
+                      child: const Text('AP',
+                          style: TextStyle(fontWeight: FontWeight.bold)),
+                    ),
+                    const SizedBox(width: 8),
+                    FloatingActionButton.small(
+                      heroTag: 'warppe',
+                      backgroundColor: _warpTargetLabel == 'PE'
+                          ? const Color(0xFF7FE0A0)
+                          : const Color(0xFF2A3A4A),
+                      onPressed: () => _warpToApsis(periapsis: true),
+                      child: const Text('PE',
+                          style: TextStyle(fontWeight: FontWeight.bold)),
+                    ),
+                  ],
+                ),
+              ],
               const SizedBox(height: 8),
               Row(
                 mainAxisSize: MainAxisSize.min,
