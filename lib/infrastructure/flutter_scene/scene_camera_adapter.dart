@@ -54,7 +54,8 @@ fs.PerspectiveCamera toSceneCamera(
   // near plane at 1 m and the planet+ring stack 100,000 km away shimmered
   // in depth-quantum flicker while flying. Floor 1 m.
   final eyeDistanceM = eye.length;
-  final adaptiveNearM = math.max(1.0, eyeDistanceM / 20.0);
+  final adaptiveNearM = SceneCameraDebug.nearOverrideM ??
+      math.max(1.0, eyeDistanceM / 20.0);
 
   return fs.PerspectiveCamera(
     position: relToScene(eye),
@@ -66,6 +67,16 @@ fs.PerspectiveCamera toSceneCamera(
     // ~5e12 m), and GROW with extreme zoom-outs so the sky sphere (which
     // tracks camera range) always fits inside it. The adaptive near plane
     // keeps the depth quantum proportional to the framed scale regardless.
-    fovFar: lengthToScene(math.max(5e12, eyeDistanceM * 40)),
+    fovFar: lengthToScene(
+        SceneCameraDebug.farOverrideM ?? math.max(5e12, eyeDistanceM * 40)),
   );
+}
+
+/// Debug overrides for the adaptive depth planes (metres) — set from the
+/// `ext.acro.camera?near=..&far=..` dev extension to pin depth-precision
+/// issues live; null = adaptive formula. Values also surface in the HUD
+/// depth diagnostics line.
+class SceneCameraDebug {
+  static double? nearOverrideM;
+  static double? farOverrideM;
 }

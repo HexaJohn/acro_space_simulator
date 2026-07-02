@@ -108,6 +108,11 @@ class RingNodes {
     ],
   };
 
+  /// One-line diagnostic for the HUD (nearest ringed body's field state):
+  /// "saturn z=1.2km r=1.65R fade=0.88 rocks=2116". Null when no ringed
+  /// body is within diagnostic interest (camera > 3 body radii off-plane).
+  static String? debugLine;
+
   /// The compiled ring fragment shader (same bundle as the atmosphere).
   /// Sheets don't spawn until it's loaded.
   static Object? _shader;
@@ -130,6 +135,8 @@ class RingNodes {
       {SceneCamera? camera, Vector3? starWorld}) {
     final shader = _shader;
     if (shader == null) return; // bundle still loading
+    debugLine = null;
+    var debugDist = double.infinity;
     final seen = <String>{};
     for (final b in snap.bodies.values) {
       final spec = _rings[b.id];
@@ -166,6 +173,20 @@ class RingNodes {
         origin: origin,
         camera: camera,
       );
+
+      // Nearest ringed body wins the HUD diagnostic line.
+      if (camera != null) {
+        final d = (camera.eyeOffset -
+                origin.worldToRel(Vector3(b.px, b.py, b.pz)))
+            .length;
+        if (d < debugDist && d < 3.5 * spec.$2 * b.radius) {
+          debugDist = d;
+          debugLine = '${b.id}  z=${(field.lastZM / 1000).toStringAsFixed(1)}km '
+              'r=${(field.lastRadialM / b.radius).toStringAsFixed(2)}R '
+              'fade=${field.fade.toStringAsFixed(2)} '
+              'rocks=${field.instanceCount}';
+        }
+      }
 
       sheet.updateUniforms(
         centreScene: centreScene,
@@ -344,6 +365,11 @@ class _RockField {
   /// sheet scales its camera hole by this so the two cross-fade.
   double fade = 0.0;
 
+  /// Last-measured camera state in the ring frame (HUD diagnostics).
+  double lastZM = double.nan;
+  double lastRadialM = double.nan;
+  int get instanceCount => _mesh?.instanceCount ?? 0;
+
   // All lengths in METRES, ring-local. Real ring debris tops out at a few
   // metres diameter, so the whole field lives within a couple of km of the
   // camera — far below float32 resolution in a planet-scaled frame. The
@@ -373,6 +399,8 @@ class _RockField {
     final local = bodyQuat.conjugate.rotate(eyeRelBody);
     final radialM = math.sqrt(local.x * local.x + local.y * local.y);
     final innerM = inner * body.radius, outerM = outer * body.radius;
+    lastZM = local.z;
+    lastRadialM = radialM;
 
     // Wide vertical activation/fade band: approaching the plane eases the
     // rocks in (and the sheet's hole open) over tens of km, not a snap.

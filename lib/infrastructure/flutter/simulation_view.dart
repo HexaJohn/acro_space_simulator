@@ -37,6 +37,8 @@ import '../../domain/vessel/vessel.dart';
 import '../sample_world.dart';
 import '../flutter_scene/line_nodes.dart';
 import '../flutter_scene/render_backend.dart';
+import '../flutter_scene/ring_nodes.dart';
+import '../flutter_scene/scene_camera_adapter.dart';
 import '../flutter_scene/scene_hud_overlay.dart';
 import '../flutter_scene/scene_render_view.dart';
 import 'sim_view_control.dart';
@@ -48,7 +50,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.0.224';
+const String kBuildStamp = 'build 0.3.0.226';
 
 /// What the camera treats as "up" while orbiting the focus.
 enum CameraUpMode {
@@ -363,6 +365,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         _freecamRel = _currentFocusWorld() - _refBodyWorld();
         _manualControl = false;
         _craftCam = false;
+        // Fly cam wants the eye AT the anchor: a stale multi-thousand-km
+        // orbit range keeps the camera far away AND (near = range/20)
+        // clips everything within kilometres — the entire ring asteroid
+        // field vanished behind the near plane. The wheel is the speed
+        // knob in freecam, so it can't zoom back in; [ ] still can.
+        _range = math.min(_range, 100.0);
       }
     });
   }
@@ -511,6 +519,28 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     // 100 px spans this many km on screen — an intuitive "how zoomed" number.
     final kmPer100px = _metresPerPixel * 100 / 1000;
     return 'ORTHO  ${eng(_metresPerPixel)} m/px  (100px=${eng(kmPer100px)} km)';
+  }
+
+  /// Depth-plane + ring-field diagnostics for the 3D backend HUD: mirrors
+  /// the near/far formula in scene_camera_adapter (keep in sync) and
+  /// appends [RingNodes.debugLine] when a ringed body is near.
+  String _depthDebugLabel() {
+    final eyeM = _range + _focusBodyRadius;
+    final nearOv = SceneCameraDebug.nearOverrideM;
+    final farOv = SceneCameraDebug.farOverrideM;
+    final nearM = nearOv ?? math.max(1.0, eyeM / 20.0);
+    final farM = farOv ?? math.max(5e12, eyeM * 40);
+    String eng(double v) => v >= 1e9
+        ? '${(v / 1e9).toStringAsFixed(1)}Gm'
+        : v >= 1e6
+            ? '${(v / 1e6).toStringAsFixed(1)}Mm'
+            : v >= 1e3
+                ? '${(v / 1e3).toStringAsFixed(1)}km'
+                : '${v.toStringAsFixed(1)}m';
+    final rings = RingNodes.debugLine;
+    return 'near ${eng(nearM)}${nearOv != null ? '*' : ''}  '
+        'far ${eng(farM)}${farOv != null ? '*' : ''}'
+        '${rings == null ? '' : '  |  $rings'}';
   }
 
   /// Zoom by [factor] (>1 = out): adjusts ortho mpp or perspective range.
@@ -1172,8 +1202,21 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     final ca = math.cos(r), sa = math.sin(r);
     final az = dAz * ca - dEl * sa;
     final el = dAz * sa + dEl * ca;
-    setState(() => _view =
-        _view.copyWith(azimuth: _view.azimuth + az, elevation: _view.elevation + el));
+    setState(() {
+      if (_freecam) {
+        // FPS-style look: the EYE stays put and the view direction pans —
+        // the anchor swings around the eye instead of the eye orbiting
+        // the anchor (which read as "panning around a point massively far
+        // away"). Keep the eye world-invariant across the rotation.
+        final eyeBefore = _camera.eyeOffset;
+        _view = _view.copyWith(
+            azimuth: _view.azimuth + az, elevation: _view.elevation + el);
+        _freecamRel = _freecamRel + (eyeBefore - _camera.eyeOffset);
+      } else {
+        _view = _view.copyWith(
+            azimuth: _view.azimuth + az, elevation: _view.elevation + el);
+      }
+    });
   }
 
   /// Modal "vessel lost" menu shown when a craft is destroyed. Fills the screen
@@ -2013,6 +2056,28 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                             ),
                           ),
                         ),
+                        // Depth-plane + ring-field diagnostics (3D backend):
+                        // the near/far the adapter will derive this frame,
+                        // and the nearest ring's field state — for pinning
+                        // "where did the rocks go" style reports.
+                        if (_renderBackend == RenderBackend.flutterScene)
+                          Positioned(
+                            left: 8,
+                            bottom: 68,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 2),
+                              color: const Color(0xAA0D0D1A),
+                              child: Text(
+                                _depthDebugLabel(),
+                                style: const TextStyle(
+                                  color: Color(0xFFB0C4E8),
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ),
                         // On-screen flight controls (touch), only in manual mode.
                         if (_manualControl) ..._touchControls(),
                         // Vessel-lost menu (modal over everything).

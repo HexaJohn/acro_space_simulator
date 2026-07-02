@@ -13,6 +13,7 @@ import 'infrastructure/flutter/simulation_view.dart';
 import 'infrastructure/flutter_scene/atmosphere_nodes.dart';
 import 'infrastructure/flutter_scene/body_nodes.dart';
 import 'infrastructure/flutter_scene/render_backend.dart';
+import 'infrastructure/flutter_scene/scene_camera_adapter.dart';
 
 /// Dev entrypoint: boots STRAIGHT into [SimulationView] with the
 /// flutter_scene backend active — no menu, no clicking. For iterating on the
@@ -115,6 +116,17 @@ void main() {
       }
       c.setFreecam?.call(
           params['freecam'] == null ? true : params['freecam'] == 'true', pos);
+    }
+    // Depth-plane overrides (metres): near=5&far=1e12; <=0 restores the
+    // adaptive formula.
+    final nearOv = params['near'], farOv = params['far'];
+    if (nearOv != null) {
+      final v = double.tryParse(nearOv);
+      SceneCameraDebug.nearOverrideM = (v == null || v <= 0) ? null : v;
+    }
+    if (farOv != null) {
+      final v = double.tryParse(farOv);
+      SceneCameraDebug.farOverrideM = (v == null || v <= 0) ? null : v;
     }
     // Exact ring-plane teleport: freeRing=bodyId,radialMult,zMetres.
     if (params['freeRing'] != null) {
