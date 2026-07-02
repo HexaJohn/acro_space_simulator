@@ -51,7 +51,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.0.228';
+const String kBuildStamp = 'build 0.3.0.229';
 
 /// What the camera treats as "up" while orbiting the focus.
 enum CameraUpMode {
@@ -554,8 +554,13 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     }
   }
 
-  // Time-warp ladder (sim seconds per real second). ',' / '.' step through it.
-  static const List<double> _warpLevels = [1, 5, 10, 50, 100, 1000, 10000, 100000, 1000000];
+  // Time-warp ladder (sim seconds per real second). ',' / '.' step through
+  // it. Level 0 = PAUSE (the tick loop skips entirely — subsystems never
+  // see a dt of zero).
+  static const List<double> _warpLevels = [0, 1, 5, 10, 50, 100, 1000, 10000, 100000, 1000000];
+  // Ladder index of 1x — the level forced by atmosphere entry and
+  // warp-to-apsis arrival (index 0 is now the pause).
+  static const int _warp1x = 1;
   int _warpIndex = 3; // starts at 50x (matches the initial clock warp)
 
   void _stepWarp(int delta) {
@@ -669,7 +674,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     // Start ready to fly: manual control of the orbiter, infinite fuel, 1x warp.
     _manualControl = true;
     _layers = _layers.copyWith(infiniteFuel: true);
-    _warpIndex = 0; // 1x
+    _warpIndex = _warp1x;
 
     _vessels = InMemoryVesselRepository(fleet);
     for (final v in _vessels.all()) {
@@ -844,8 +849,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         final alt = vessel.state.position.length - (body?.radius ?? 0);
         final atmoH = body?.atmosphere?.atmosphereHeight ?? 0;
         if (atmoH > 0 && alt < atmoH && _clock.warpFactor > 1) {
-          _warpIndex = 0;
-          _clock.warpFactor = _warpLevels[0];
+          _warpIndex = _warp1x;
+          _clock.warpFactor = _warpLevels[_warp1x];
           _warpTarget = null; // atmosphere overrides an auto warp-to-apsis
           _warpTargetLabel = null;
         }
@@ -892,8 +897,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       if (remaining <= 0.5) {
         _warpTarget = null;
         _warpTargetLabel = null;
-        _warpIndex = 0;
-        _clock.warpFactor = _warpLevels[0];
+        _warpIndex = _warp1x;
+        _clock.warpFactor = _warpLevels[_warp1x];
       } else {
         _clock.warpFactor = (remaining / 1.5).clamp(1.0, 1e6);
       }
@@ -905,6 +910,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     // slow frame (the jumpy "random update" motion).
     _accum += frameDt;
     var steps = 0;
+    // PAUSE (warp 0): skip the tick entirely — running subsystems with a
+    // zero dt is untested ground, and draining the backlog keeps unpausing
+    // from replaying accumulated time.
+    if (_clock.warpFactor <= 0) _accum = 0;
     while (_accum >= _clock.fixedStep && steps < 200) {
       _advance.execute(_clock);
       _accum -= _clock.fixedStep;
@@ -1830,7 +1839,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                     child: Text(
                       _warpTarget != null
                           ? '→$_warpTargetLabel ${_fmtCountdown(_warpTarget!.seconds - _clock.epoch.seconds)}'
-                          : '${_warpLevels[_warpIndex].toStringAsFixed(0)}x',
+                          : _warpLevels[_warpIndex] == 0
+                              ? '⏸'
+                              : '${_warpLevels[_warpIndex].toStringAsFixed(0)}x',
                       style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold),
                     ),
                   ),
