@@ -63,6 +63,23 @@ the haze on a surface-level horizon — only per-pixel ray marching is right eve
 
 ![The full lit Earth with atmosphere and an orbiter](images/orbiter_over_earth.png)
 
+## Planetary rings & debris fields
+
+Ring sheets are shaded per fragment from real radial band profiles — Saturn's C
+and B rings, the Cassini division, the Encke gap and F ring; Uranus' epsilon
+ring; Neptune's ringlets — with fuzzy band edges and the parent body's shadow
+computed analytically in the shader.
+
+![Saturn's banded rings with the planet's shadow](images/saturn_rings.png)
+
+Fly into the plane and the sheet dissolves into an actual debris field:
+thousands of hardware-instanced, moon-textured rocks at real ring-debris scale
+(a few metres), scattered deterministically in the ring's rotating frame, with
+billboard clumps carrying the density out to the sheet. Rock density follows
+the band profile, so the gaps really are empty.
+
+![Inside Saturn's B ring among metre-scale debris](images/ring_debris.png)
+
 ## Why 1 : 1 scale holds together
 
 Distances span metres to hundreds of millions of kilometres. Physics runs in a
