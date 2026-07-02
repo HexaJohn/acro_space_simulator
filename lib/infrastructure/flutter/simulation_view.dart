@@ -51,7 +51,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.0.230';
+const String kBuildStamp = 'build 0.3.0.231';
 
 /// What the camera treats as "up" while orbiting the focus.
 enum CameraUpMode {
@@ -268,7 +268,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       if (!mounted) return;
       setState(() {
         if (on != _freecam) _toggleFreecam();
-        if (pos != null) _freecamRel = pos - _refBodyWorld();
+        if (pos != null) {
+          _freecamRelLocal =
+              _refBodyQuat().conjugate.rotate(pos - _refBodyWorld());
+        }
       });
     };
     c.freecamToRing = (bodyId, radialMult, zM) {
@@ -276,11 +279,11 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       final snap = _sceneWorld;
       final b = snap?.bodies[bodyId];
       if (b == null) return;
-      final q = Quaternion(b.qw, b.qx, b.qy, b.qz);
       setState(() {
         if (!_freecam) _toggleFreecam();
         _freecamRef = BodyId(bodyId);
-        _freecamRel = q.rotate(Vector3(radialMult * b.radius, 0, zM));
+        // Body-local IS the ring frame — no rotation needed.
+        _freecamRelLocal = Vector3(radialMult * b.radius, 0, zM);
       });
     };
     c.status = () => {
@@ -327,35 +330,46 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   // on the locked target). Mutually exclusive with manual flight — both
   // want WASD.
   //
-  // The anchor is stored RELATIVE to a reference body (inertial axes, no
-  // spin) and co-moves with it: an absolute anchor near Saturn fell out of
-  // its 9.7 km/s ring plane within a second of hovering.
+  // The anchor is stored in the reference body's ROTATING frame (body-
+  // local coordinates, spin included). Two reasons: an absolute anchor
+  // near Saturn fell out of its 9.7 km/s ring plane within a second of
+  // hovering, and an inertial (non-spinning) anchor watched the ring
+  // debris — which rides the spin frame — sweep past at ~16 km/s (real
+  // B-ring orbital speed: "they zip through the screen"). Co-rotating
+  // makes hovering read like station-keeping: the rocks sit still and
+  // flying through them is YOUR motion.
   bool _freecam = false;
   BodyId? _freecamRef;
-  Vector3 _freecamRel = Vector3.zero;
+  Vector3 _freecamRelLocal = Vector3.zero;
 
   /// Freecam flight-speed multiplier, driven by the scroll wheel while the
   /// freecam is active (wheel = speed, not zoom, when flying).
   double _freecamSpeedMul = 1.0;
 
-  Vector3 get _freecamWorld {
-    final snap = _sceneWorld;
+  BodySnapshot? _refBody() {
     final ref = _freecamRef?.value;
-    if (snap != null && ref != null) {
-      final b = snap.bodies[ref];
-      if (b != null) return Vector3(b.px, b.py, b.pz) + _freecamRel;
+    if (ref == null) return null;
+    return _sceneWorld?.bodies[ref];
+  }
+
+  Quaternion _refBodyQuat() {
+    final b = _refBody();
+    return b == null
+        ? Quaternion.identity
+        : Quaternion(b.qw, b.qx, b.qy, b.qz);
+  }
+
+  Vector3 get _freecamWorld {
+    final b = _refBody();
+    if (b != null) {
+      return Vector3(b.px, b.py, b.pz) + _refBodyQuat().rotate(_freecamRelLocal);
     }
-    return _freecamRel; // absolute fallback (no ref body in the snapshot)
+    return _freecamRelLocal; // absolute fallback (ref not in the snapshot)
   }
 
   Vector3 _refBodyWorld() {
-    final snap = _sceneWorld;
-    final ref = _freecamRef?.value;
-    if (snap != null && ref != null) {
-      final b = snap.bodies[ref];
-      if (b != null) return Vector3(b.px, b.py, b.pz);
-    }
-    return Vector3.zero;
+    final b = _refBody();
+    return b == null ? Vector3.zero : Vector3(b.px, b.py, b.pz);
   }
 
   void _toggleFreecam() {
@@ -363,7 +377,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       _freecam = !_freecam;
       if (_freecam) {
         _freecamRef = _focusBody ?? _lastFocusBody;
-        _freecamRel = _currentFocusWorld() - _refBodyWorld();
+        _freecamRelLocal = _refBodyQuat()
+            .conjugate
+            .rotate(_currentFocusWorld() - _refBodyWorld());
         _manualControl = false;
         _craftCam = false;
         // Fly cam wants the eye AT the anchor: a stale multi-thousand-km
@@ -873,9 +889,11 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         final speed =
             math.max(_range, 5.0) * 1.5 * boost * _freecamSpeedMul; // m/s
         final dt = frameDt.clamp(0.0, 0.1);
-        _freecamRel = _freecamRel +
-            (cam.forward * fwd + cam.right * strafe + cam.up * lift) *
-                (speed * dt);
+        // World-frame flight delta, banked into the rotating frame.
+        _freecamRelLocal = _freecamRelLocal +
+            _refBodyQuat().conjugate.rotate(
+                (cam.forward * fwd + cam.right * strafe + cam.up * lift) *
+                    (speed * dt));
       }
     }
 
@@ -1222,7 +1240,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         final eyeBefore = _camera.eyeOffset;
         _view = _view.copyWith(
             azimuth: _view.azimuth + az, elevation: _view.elevation + el);
-        _freecamRel = _freecamRel + (eyeBefore - _camera.eyeOffset);
+        _freecamRelLocal = _freecamRelLocal +
+            _refBodyQuat().conjugate.rotate(eyeBefore - _camera.eyeOffset);
       } else {
         _view = _view.copyWith(
             azimuth: _view.azimuth + az, elevation: _view.elevation + el);
