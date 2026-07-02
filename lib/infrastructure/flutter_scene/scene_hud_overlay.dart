@@ -25,9 +25,11 @@ class SceneHudOverlayPainter extends CustomPainter {
     // centre-relative with +y up; flip y like the painter does).
     for (final b in snapshot.bodies) {
       if (!b.showLabel) continue;
-      // Moon labels only near their neighbourhood: below ~2 px apparent
-      // size a distant planet's moons stack into unreadable clutter.
-      if (b.isMoon && b.radiusPx < 2.0) continue;
+      // Moon labels only near their neighbourhood. Distance, NOT apparent
+      // size: moons are tiny (Mimas is sub-2 px even from Saturn orbit),
+      // but moon systems span <= ~4e9 m while interplanetary gaps start at
+      // ~6e10 — a camera within 1e10 m is "visiting" that system.
+      if (b.isMoon && b.worldRel.length > 1e10) continue;
       _label(canvas, b.name,
           centre + Offset(b.x + b.radiusPx + 4, -b.y - 6),
           const Color(0xFF9FB4CC));
