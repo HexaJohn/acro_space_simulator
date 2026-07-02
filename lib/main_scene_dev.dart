@@ -7,6 +7,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 
+import 'domain/shared/vector3.dart';
 import 'infrastructure/flutter/sim_view_control.dart';
 import 'infrastructure/flutter/simulation_view.dart';
 import 'infrastructure/flutter_scene/atmosphere_nodes.dart';
@@ -101,6 +102,29 @@ void main() {
     // Camera up alignment: alignUp=free|axis|gravity.
     if (params['alignUp'] != null) {
       c.setUpMode?.call(params['alignUp']!);
+    }
+    // Freecam: freecam=true|false, optional freePos=x,y,z (world metres).
+    if (params['freecam'] != null || params['freePos'] != null) {
+      Vector3? pos;
+      final raw = params['freePos'];
+      if (raw != null) {
+        final p = raw.split(',').map(double.tryParse).toList();
+        if (p.length == 3 && !p.contains(null)) {
+          pos = Vector3(p[0]!, p[1]!, p[2]!);
+        }
+      }
+      c.setFreecam?.call(
+          params['freecam'] == null ? true : params['freecam'] == 'true', pos);
+    }
+    // Exact ring-plane teleport: freeRing=bodyId,radialMult,zMetres.
+    if (params['freeRing'] != null) {
+      final p = params['freeRing']!.split(',');
+      if (p.length == 3) {
+        final mult = double.tryParse(p[1]), z = double.tryParse(p[2]);
+        if (mult != null && z != null) {
+          c.freecamToRing?.call(p[0], mult, z);
+        }
+      }
     }
     return developer.ServiceExtensionResponse.result(
         jsonEncode(c.status?.call() ?? {'error': 'no live view'}));

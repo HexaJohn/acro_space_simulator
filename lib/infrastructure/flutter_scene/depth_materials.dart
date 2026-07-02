@@ -18,7 +18,36 @@ import 'package:flutter_scene/src/gpu/gpu.dart' as igpu;
 ///    `lessEqual` as it binds; every other translucent material in the app
 ///    (lines, rings) uses this so draw order never inherits the shell's op.
 class AtmosphereShaderMaterial extends fs.ShaderMaterial {
-  AtmosphereShaderMaterial({super.fragmentShader})
+  AtmosphereShaderMaterial({super.fragmentShader, this.depthAlways = true})
+      : super(isOpaqueOverride: false);
+
+  /// True for the INTERIOR-faces shell (camera inside the atmosphere): its
+  /// faces sit behind the planet, so comparing against the opaque planet
+  /// would cull the whole disc — occlusion is analytic in the shader.
+  /// False for the EXTERIOR-faces shell (camera outside): normal lessEqual
+  /// keeps it depth-correct against opaque geometry INSIDE the scene —
+  /// without it the haze composited over ring asteroids and vessels that
+  /// were clearly in front of the atmosphere.
+  final bool depthAlways;
+
+  @override
+  void bind(
+    igpu.RenderPass pass,
+    igpu.HostBuffer transientsBuffer,
+    fs.Lighting lighting,
+  ) {
+    super.bind(pass, transientsBuffer, lighting);
+    pass.setDepthCompareOperation(depthAlways
+        ? igpu.CompareFunction.always
+        : igpu.CompareFunction.lessEqual);
+  }
+}
+
+/// A custom-shader material for NORMAL depth-tested translucency (the ring
+/// sheet): restores lessEqual like [DepthSafeUnlitMaterial], so it never
+/// inherits the atmosphere shell's `always`.
+class DepthSafeShaderMaterial extends fs.ShaderMaterial {
+  DepthSafeShaderMaterial({super.fragmentShader})
       : super(isOpaqueOverride: false);
 
   @override
@@ -28,10 +57,7 @@ class AtmosphereShaderMaterial extends fs.ShaderMaterial {
     fs.Lighting lighting,
   ) {
     super.bind(pass, transientsBuffer, lighting);
-    // Depth writes are already off in the translucent phase; comparing
-    // against the opaque planet would cull the whole disc. The shader clips
-    // rays against the planet sphere analytically.
-    pass.setDepthCompareOperation(igpu.CompareFunction.always);
+    pass.setDepthCompareOperation(igpu.CompareFunction.lessEqual);
   }
 }
 

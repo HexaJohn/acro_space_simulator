@@ -178,15 +178,19 @@ class AtmosphereNodes {
       if (thicknessM <= 0) continue;
       seen.add(b.id);
 
-      final shell = _shells.putIfAbsent(b.id, () {
-        final s = _Shell(shader);
-        _scene.add(s.node);
-        return s;
-      });
+      final shell = _shells.putIfAbsent(b.id, () => _Shell(shader, _scene));
 
       final world = Vector3(b.px, b.py, b.pz);
       final rel = origin.worldToRel(world);
       final atmoTopM = b.radius + thicknessM * style.heightScale;
+
+      // Camera inside the shell -> interior faces + depth ALWAYS (planet
+      // occlusion is analytic; lessEqual would cull the disc). Outside ->
+      // exterior faces + normal depth, so opaque geometry INSIDE the scene
+      // (ring asteroids, vessels) correctly occludes/pokes through the
+      // haze. Small hysteresis so the boundary doesn't flicker.
+      final camDistM = (cameraEye - rel).length;
+      shell.setInside(camDistM < atmoTopM * 1.02);
 
       shell.node.localTransform = vm.Matrix4.compose(
         relToScene(rel),
@@ -235,23 +239,46 @@ class AtmosphereNodes {
 }
 
 class _Shell {
-  _Shell(Object shader) {
-    // Depth compare ALWAYS (see depth_materials.dart): the interior faces
-    // sit behind the planet's opaque surface, so the pass's lessEqual
-    // would cull the entire disc — occlusion is analytic in the shader.
-    _material = AtmosphereShaderMaterial(fragmentShader: shader as gpu.Shader);
-    // INVERTED sphere + default backface culling = interior faces only:
-    // exactly one raymarch fragment per pixel, and the shell keeps
-    // rendering with the camera inside it (its exterior faces would sit
-    // behind the eye).
-    node = fs.Node(
+  _Shell(Object shader, this._scene) {
+    // TWO windings, ONE active at a time (see setInside):
+    //  * interior faces + depth ALWAYS — camera inside the shell (the
+    //    exterior faces would sit behind the eye; interior faces sit
+    //    behind the planet so lessEqual would cull the disc).
+    //  * exterior faces + normal depth — camera outside; depth-correct
+    //    against opaque scene geometry (ring asteroids, vessels).
+    _inMaterial = AtmosphereShaderMaterial(
+        fragmentShader: shader as gpu.Shader, depthAlways: true);
+    _outMaterial =
+        AtmosphereShaderMaterial(fragmentShader: shader, depthAlways: false);
+    _inNode = fs.Node(
       mesh: fs.Mesh(
-          uvSphereZUp(segments: 48, rings: 24, invert: true), _material),
+          uvSphereZUp(segments: 48, rings: 24, invert: true), _inMaterial),
     );
+    _outNode = fs.Node(
+      mesh: fs.Mesh(uvSphereZUp(segments: 48, rings: 24), _outMaterial),
+    );
+    _scene.add(_outNode); // start outside
+    _active = _outNode;
   }
 
-  late final fs.Node node;
-  late final AtmosphereShaderMaterial _material;
+  final fs.Scene _scene;
+  late final fs.Node _inNode, _outNode;
+  late final AtmosphereShaderMaterial _inMaterial, _outMaterial;
+  late fs.Node _active;
+
+  fs.Node get node => _active;
+
+  void setInside(bool inside) {
+    final want = inside ? _inNode : _outNode;
+    if (identical(want, _active)) return;
+    _scene.remove(_active);
+    _scene.add(want);
+    // Carry the transform across the swap so the frame stays coherent.
+    want.localTransform = _active.localTransform;
+    _active = want;
+  }
+
+  void removeFrom(fs.Scene scene) => scene.remove(_active);
 
   // Physical Earth Rayleigh coefficients, per KILOMETRE (scene unit):
   // beta = (5.8e-3, 1.35e-2, 3.31e-2). Non-Earth hues come from the
@@ -300,6 +327,8 @@ class _Shell {
     _uniforms[17] = twilightScene;
     _uniforms[18] = densityNorm;
     _uniforms[19] = 0.0;
-    _material.setUniformBlockFromFloats('AtmosphereInfo', _uniforms);
+    // Both windings share the block; only one node is in the scene.
+    _inMaterial.setUniformBlockFromFloats('AtmosphereInfo', _uniforms);
+    _outMaterial.setUniformBlockFromFloats('AtmosphereInfo', _uniforms);
   }
 }

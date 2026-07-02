@@ -1,3 +1,4 @@
+import '../../domain/shared/vector3.dart';
 import '../flutter_scene/render_backend.dart';
 
 /// Programmatic control surface for the live [SimulationView] — lets dev
@@ -37,6 +38,15 @@ class SimViewControl {
   /// Camera up alignment by name: 'free' | 'axis' | 'gravity'.
   void Function(String mode)? setUpMode;
 
+  /// Freecam on/off, optionally teleporting the anchor (world metres).
+  void Function(bool on, Vector3? pos)? setFreecam;
+
+  /// Freecam teleport INTO a body's ring plane: radial in body radii,
+  /// height above the plane in metres. Exact — computed through the body's
+  /// live orientation quaternion (guessing the plane from axial tilt
+  /// conventions goes thousands of km wrong).
+  void Function(String bodyId, double radialMult, double zM)? freecamToRing;
+
   /// Current camera/backend state for assertions and closed-loop control.
   Map<String, Object?> Function()? status;
 
@@ -48,6 +58,8 @@ class SimViewControl {
     focusBody = null;
     warpToApsis = null;
     setUpMode = null;
+    setFreecam = null;
+    freecamToRing = null;
     status = null;
   }
 }

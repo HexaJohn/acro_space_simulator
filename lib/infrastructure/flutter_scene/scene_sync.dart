@@ -36,7 +36,7 @@ class SceneSync {
     _vessels = VesselNodes(scene);
     _lines = LineNodes(scene);
     _atmospheres = AtmosphereNodes(scene);
-    _rings = RingNodes(scene);
+    _rings = RingNodes(scene, _textures);
   }
 
   final fs.Scene scene;
@@ -60,8 +60,10 @@ class SceneSync {
     ui.Size? viewport,
     String? focusVesselId,
     String? focusBodyId,
+    Vector3? focusWorldOverride,
   }) {
-    origin.focusWorld = _focusWorld(snap, focusVesselId, focusBodyId);
+    origin.focusWorld =
+        focusWorldOverride ?? _focusWorld(snap, focusVesselId, focusBodyId);
 
     _bodies.update(snap, origin);
     if (!_noVessels) _vessels.update(snap, origin);
@@ -80,7 +82,8 @@ class SceneSync {
         starWorld: _bodies.starWorld(snap),
       );
     }
-    _rings.update(snap, origin, camera: camera);
+    _rings.update(snap, origin,
+        camera: camera, starWorld: _bodies.starWorld(snap));
     _skybox.update(
         cameraRangeKm:
             camera == null ? 0 : camera.eyeOffset.length * kRenderScale);

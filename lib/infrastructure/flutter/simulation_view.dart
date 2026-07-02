@@ -48,7 +48,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.0.220';
+const String kBuildStamp = 'build 0.3.0.222';
 
 /// What the camera treats as "up" while orbiting the focus.
 enum CameraUpMode {
@@ -154,6 +154,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   /// Radius (m) of the body the camera is locked on, or 0 (vessel / none). Lets
   /// the perspective eye measure its range from the SURFACE, not the centre.
   double get _focusBodyRadius {
+    // Freecam: the range measures from the FREE ANCHOR, not a body surface
+    // (leaving the locked body's radius in put the eye 58,000 km from the
+    // anchor at "range 250 m" over Saturn).
+    if (_freecam) return 0;
     if (_focusBody == null) return 0;
     return _universe.current().body(_focusBody!)?.radius ?? 0;
   }
@@ -257,6 +261,25 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       final m = CameraUpMode.values.where((v) => v.name == mode).firstOrNull;
       if (m != null) setState(() => _upMode = m);
     };
+    c.setFreecam = (on, pos) {
+      if (!mounted) return;
+      setState(() {
+        if (on != _freecam) _toggleFreecam();
+        if (pos != null) _freecamRel = pos - _refBodyWorld();
+      });
+    };
+    c.freecamToRing = (bodyId, radialMult, zM) {
+      if (!mounted) return;
+      final snap = _sceneWorld;
+      final b = snap?.bodies[bodyId];
+      if (b == null) return;
+      final q = Quaternion(b.qw, b.qx, b.qy, b.qz);
+      setState(() {
+        if (!_freecam) _toggleFreecam();
+        _freecamRef = BodyId(bodyId);
+        _freecamRel = q.rotate(Vector3(radialMult * b.radius, 0, zM));
+      });
+    };
     c.status = () => {
           'azimuth': _view.azimuth,
           'elevation': _view.elevation,
@@ -271,6 +294,15 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           'warpTarget': _warpTargetLabel,
           'epochS': _clock.epoch.seconds,
           'upMode': _upMode.name,
+          'freecam': _freecam,
+          'freePos': () {
+            final p = _freecamWorld;
+            return [p.x, p.y, p.z];
+          }(),
+          'focusWorld': () {
+            final f = _currentFocusWorld();
+            return [f.x, f.y, f.z];
+          }(),
         };
   }
   // Latest world snapshot for the flutter_scene backend (null when the
@@ -281,6 +313,75 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   // focused body's tilted spin frame, GRAVITY gimbals about the local
   // vertical at the focused vessel (surface flying: the ground reads down).
   CameraUpMode _upMode = CameraUpMode.free;
+
+  // Freecam: the camera orbits a FREE ANCHOR flown with WASD/QE (Shift
+  // boosts) instead of the locked target; MMB orbit and wheel zoom keep
+  // working around it. 3D backend only (the software painter still centres
+  // on the locked target). Mutually exclusive with manual flight — both
+  // want WASD.
+  //
+  // The anchor is stored RELATIVE to a reference body (inertial axes, no
+  // spin) and co-moves with it: an absolute anchor near Saturn fell out of
+  // its 9.7 km/s ring plane within a second of hovering.
+  bool _freecam = false;
+  BodyId? _freecamRef;
+  Vector3 _freecamRel = Vector3.zero;
+
+  Vector3 get _freecamWorld {
+    final snap = _sceneWorld;
+    final ref = _freecamRef?.value;
+    if (snap != null && ref != null) {
+      final b = snap.bodies[ref];
+      if (b != null) return Vector3(b.px, b.py, b.pz) + _freecamRel;
+    }
+    return _freecamRel; // absolute fallback (no ref body in the snapshot)
+  }
+
+  Vector3 _refBodyWorld() {
+    final snap = _sceneWorld;
+    final ref = _freecamRef?.value;
+    if (snap != null && ref != null) {
+      final b = snap.bodies[ref];
+      if (b != null) return Vector3(b.px, b.py, b.pz);
+    }
+    return Vector3.zero;
+  }
+
+  void _toggleFreecam() {
+    setState(() {
+      _freecam = !_freecam;
+      if (_freecam) {
+        _freecamRef = _focusBody ?? _lastFocusBody;
+        _freecamRel = _currentFocusWorld() - _refBodyWorld();
+        _manualControl = false;
+        _craftCam = false;
+      }
+    });
+  }
+
+  /// Absolute world position (metres) of the current camera focus, from the
+  /// latest snapshot — the freecam anchor starts here so toggling is
+  /// seamless.
+  Vector3 _currentFocusWorld() {
+    final snap = _sceneWorld;
+    if (snap == null) return _freecamWorld;
+    final vid = _focusVessel?.value;
+    if (vid != null) {
+      final v = snap.vessels[vid];
+      if (v != null) {
+        final b = snap.bodies[v.body];
+        final bodyPos =
+            b == null ? Vector3.zero : Vector3(b.px, b.py, b.pz);
+        return bodyPos + Vector3(v.px, v.py, v.pz);
+      }
+    }
+    final bid = _focusBody?.value;
+    if (bid != null) {
+      final b = snap.bodies[bid];
+      if (b != null) return Vector3(b.px, b.py, b.pz);
+    }
+    return _freecamWorld;
+  }
 
   /// Shortest rotation taking [from] onto [to] (both need not be unit).
   static Quaternion _shortestArc(Vector3 from, Vector3 to) {
@@ -700,6 +801,27 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           _warpTarget = null; // atmosphere overrides an auto warp-to-apsis
           _warpTargetLabel = null;
         }
+      }
+    }
+
+    // Freecam flight: WASD in the camera frame, Q/E down/up, Shift boosts.
+    // Speed scales with zoom range so it feels right from surface to map.
+    if (_freecam) {
+      double axis(LogicalKeyboardKey neg, LogicalKeyboardKey pos) =>
+          (_keysDown.contains(pos) ? 1.0 : 0.0) -
+          (_keysDown.contains(neg) ? 1.0 : 0.0);
+      final fwd = axis(LogicalKeyboardKey.keyS, LogicalKeyboardKey.keyW);
+      final strafe = axis(LogicalKeyboardKey.keyA, LogicalKeyboardKey.keyD);
+      final lift = axis(LogicalKeyboardKey.keyQ, LogicalKeyboardKey.keyE);
+      if (fwd != 0 || strafe != 0 || lift != 0) {
+        final cam = _camera;
+        final boost =
+            _keysDown.contains(LogicalKeyboardKey.shiftLeft) ? 8.0 : 1.0;
+        final speed = math.max(_range, 5.0) * 1.5 * boost; // m/s
+        final dt = frameDt.clamp(0.0, 0.1);
+        _freecamRel = _freecamRel +
+            (cam.forward * fwd + cam.right * strafe + cam.up * lift) *
+                (speed * dt);
       }
     }
 
@@ -1619,6 +1741,18 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                   ),
                   const SizedBox(width: 8),
                   FloatingActionButton.small(
+                    heroTag: 'freecam',
+                    tooltip: _freecam
+                        ? 'Freecam ON — WASD/QE fly, Shift boosts'
+                        : 'Freecam: detach and fly the camera anchor',
+                    backgroundColor: _freecam
+                        ? const Color(0xFF7FE0A0)
+                        : const Color(0xFF2A3A4A),
+                    onPressed: _toggleFreecam,
+                    child: const Icon(Icons.videocam),
+                  ),
+                  const SizedBox(width: 8),
+                  FloatingActionButton.small(
                     heroTag: 'renderBackend',
                     tooltip: _renderBackend.label,
                     backgroundColor: _renderBackend == RenderBackend.flutterScene
@@ -1723,12 +1857,16 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                         snapshot: _sceneWorld,
                         focusVesselId: _focusVessel?.value,
                         focusBodyId: _focusBody?.value,
+                        focusWorldOverride: _freecam ? _freecamWorld : null,
                       );
                     }),
                   ),
                   // Painter-parity text HUD (telemetry block + name labels)
                   // from the SAME presenter snapshot the software path uses.
-                  if (snap != null)
+                  // Hidden in freecam: the presenter still projects around
+                  // the locked target, so its labels would sit off the
+                  // freecam-rendered world.
+                  if (snap != null && !_freecam)
                     Positioned.fill(
                       child: IgnorePointer(
                         child: CustomPaint(

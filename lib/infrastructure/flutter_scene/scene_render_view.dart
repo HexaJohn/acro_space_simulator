@@ -4,8 +4,10 @@ import 'package:flutter_scene/scene.dart' as fs;
 
 import '../../adapters/presenters/camera_view.dart';
 import '../../application/snapshot/world_snapshot.dart';
+import '../../domain/shared/vector3.dart';
 import '../flutter/texture_cache.dart';
 import 'atmosphere_nodes.dart';
+import 'ring_nodes.dart';
 import 'scene_camera_adapter.dart';
 import 'scene_sync.dart';
 
@@ -24,6 +26,7 @@ class SceneRenderView extends StatefulWidget {
     this.snapshot,
     this.focusVesselId,
     this.focusBodyId,
+    this.focusWorldOverride,
   });
 
   /// The app camera for this frame (shared with the software renderer).
@@ -40,6 +43,10 @@ class SceneRenderView extends StatefulWidget {
   /// follows it.
   final String? focusVesselId;
   final String? focusBodyId;
+
+  /// Freecam: when set, the floating origin follows this absolute world
+  /// position (metres) instead of the focus target.
+  final Vector3? focusWorldOverride;
 
   @override
   State<SceneRenderView> createState() => _SceneRenderViewState();
@@ -65,11 +72,14 @@ class _SceneRenderViewState extends State<SceneRenderView> {
   @override
   void initState() {
     super.initState();
-    // Custom shader bundle (raymarched atmosphere). Independent of the base
-    // bundle; on failure the shells simply never spawn — log, don't brick
-    // the whole viewport.
+    // Custom shader bundle (raymarched atmosphere + ring sheet).
+    // Independent of the base bundle; on failure those layers simply never
+    // spawn — log, don't brick the whole viewport.
     AtmosphereNodes.loadShader().catchError((Object e) {
       debugPrint('atmosphere shader load failed: $e');
+    });
+    RingNodes.loadShader().catchError((Object e) {
+      debugPrint('ring shader load failed: $e');
     });
     _staticInit.then((_) {
       if (!mounted) return;
@@ -107,6 +117,7 @@ class _SceneRenderViewState extends State<SceneRenderView> {
           viewport: viewport,
           focusVesselId: widget.focusVesselId,
           focusBodyId: widget.focusBodyId,
+          focusWorldOverride: widget.focusWorldOverride,
         );
       }
       // Strip expansion is copy-on-write inside updateForCamera and, like

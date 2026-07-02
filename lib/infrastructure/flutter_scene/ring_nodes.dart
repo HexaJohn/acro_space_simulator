@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:flutter_scene/gpu.dart' as gpu;
 import 'package:flutter_scene/scene.dart' as fs;
 import 'package:vector_math/vector_math.dart' as vm;
 
@@ -10,6 +11,7 @@ import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
 import 'coord_convert.dart';
 import 'depth_materials.dart';
+import 'scene_textures.dart';
 import 'sphere_geometry_util.dart';
 
 /// A radial ring band: [t0, t1] normalised across the annulus (0 = inner
@@ -22,20 +24,22 @@ class RingBand {
   final int? argb;
 }
 
-/// Planetary ring systems: a banded translucent annulus (per-vertex colours
-/// from real ring-structure profiles — Cassini division, Encke gap...) plus
-/// a GPU-instanced asteroid field that fades in when the camera flies into
-/// the ring plane.
+/// Planetary ring systems: a flat annulus running shaders/ring.frag — the
+/// radial band profile is evaluated PER FRAGMENT (fuzzy smoothstep edges,
+/// resolution independent of tessellation) with a soft camera-centred hole
+/// where the instanced asteroid field spawns, so sheet and rocks
+/// cross-fade — plus the fly-through rock field itself.
 ///
 /// Ring extents/colour mirror the software renderer's tables in
-/// `TopDownSnapshotPresenter` (source of truth for extents; the banding and
+/// `TopDownSnapshotPresenter` (source of truth for extents; banding and
 /// rocks are 3D-backend-only).
 class RingNodes {
-  RingNodes(this._scene);
+  RingNodes(this._scene, this._textures);
 
   final fs.Scene _scene;
+  final SceneTextures _textures;
 
-  final Map<String, fs.Node> _nodes = {};
+  final Map<String, _RingSheet> _sheets = {};
   final Map<String, _RockField> _rocks = {};
 
   /// (innerMult, outerMult, tiltRad, argb) — multipliers of body radius.
@@ -60,7 +64,7 @@ class RingNodes {
   /// 1.95-2.03 R, A ring with the Encke gap, F ring thread); Uranus is
   /// narrow threads on a near-empty base (epsilon ring brightest); Jupiter
   /// a faint halo climbing to its main ring; Neptune the Galle sheet plus
-  /// the Le Verrier and Adams ringlets.
+  /// the Le Verrier and Adams ringlets. Max 12 bands (shader array size).
   static const Map<String, List<RingBand>> _bands = {
     // Saturn: inner 1.2 R, outer 2.3 R  ->  t = (r/R - 1.2) / 1.1
     'saturn': [
@@ -104,8 +108,28 @@ class RingNodes {
     ],
   };
 
+  /// The compiled ring fragment shader (same bundle as the atmosphere).
+  /// Sheets don't spawn until it's loaded.
+  static Object? _shader;
+  static Future<void>? _loading;
+
+  static Future<void> loadShader() => _loading ??= () async {
+        final library = await gpu.loadShaderLibraryAsync(
+          'build/shaderbundles/acro.shaderbundle',
+        );
+        _shader = library?['RingFragment'];
+        if (_shader == null) {
+          throw StateError(
+            'RingFragment missing from acro.shaderbundle — the '
+            'hook/build.dart shader compile should have produced it.',
+          );
+        }
+      }();
+
   void update(WorldSnapshot snap, FloatingOrigin origin,
-      {SceneCamera? camera}) {
+      {SceneCamera? camera, Vector3? starWorld}) {
+    final shader = _shader;
+    if (shader == null) return; // bundle still loading
     final seen = <String>{};
     for (final b in snap.bodies.values) {
       final spec = _rings[b.id];
@@ -113,20 +137,10 @@ class RingNodes {
       seen.add(b.id);
 
       final bands = _bands[b.id] ?? const [RingBand(0, 1, 1)];
-      final node = _nodes.putIfAbsent(b.id, () {
-        final n = fs.Node(
-          mesh: fs.Mesh(
-            _bandedAnnulus(spec.$1, spec.$2, bands,
-                _premul(spec.$4, _intensity[b.id] ?? 0.3)),
-            // Vertex colours carry the banding; material stays white.
-            DepthSafeUnlitMaterial()
-              ..baseColorFactor = vm.Vector4(1, 1, 1, 1)
-              ..alphaMode = fs.AlphaMode.blend
-              ..doubleSided = true,
-          ),
-        );
-        _scene.add(n);
-        return n;
+      final sheet = _sheets.putIfAbsent(b.id, () {
+        final s = _RingSheet(shader, spec.$1, spec.$2);
+        _scene.add(s.node);
+        return s;
       });
 
       // Rings live in the body's EQUATORIAL plane (real rings are orbiting
@@ -135,95 +149,161 @@ class RingNodes {
       // for a flat annulus, and the axial tilt (now in the domain data for
       // the gas giants) tilts rings and equator together.
       final bodyQuat = Quaternion(b.qw, b.qx, b.qy, b.qz);
-      node.localTransform = vm.Matrix4.compose(
-        origin.worldToScene(Vector3(b.px, b.py, b.pz)),
+      final centreScene = origin.worldToScene(Vector3(b.px, b.py, b.pz));
+      sheet.node.localTransform = vm.Matrix4.compose(
+        centreScene,
         quatToScene(bodyQuat),
         vm.Vector3.all(lengthToScene(b.radius)),
       );
 
-      // Asteroid field: spawn/refresh when the camera is near the ring
-      // plane and radially inside the annulus (plus margin).
-      final field = _rocks.putIfAbsent(
-          b.id, () => _RockField(spec.$1, spec.$2, bands, spec.$4));
+      // Asteroid field first: its fade drives the sheet's camera hole.
+      final field = _rocks.putIfAbsent(b.id,
+          () => _RockField(spec.$1, spec.$2, bands, spec.$4, _textures));
       field.update(
-        parent: node,
+        scene: _scene,
         body: b,
         bodyQuat: bodyQuat,
         origin: origin,
         camera: camera,
       );
+
+      sheet.updateUniforms(
+        centreScene: centreScene,
+        axisU: bodyQuat.rotate(Vector3.unitX),
+        axisV: bodyQuat.rotate(Vector3.unitY),
+        innerScene: lengthToScene(spec.$1 * b.radius),
+        outerScene: lengthToScene(spec.$2 * b.radius),
+        eyeScene: camera == null
+            ? vm.Vector3.zero()
+            : relToScene(camera.eyeOffset),
+        // The hole where the rocks live: several times the field radius
+        // so the sheet never sits in your face while flying with the
+        // debris; scaled by the field's vertical fade so sheet and rocks
+        // cross-fade together when climbing out of the plane.
+        holeScene: field.fade * lengthToScene(_RockField.visRM) * 3.0,
+        bands: bands,
+        baseArgb: spec.$4,
+        intensity: _intensity[b.id] ?? 0.3,
+        toSun: starWorld == null
+            ? Vector3.unitX
+            : (starWorld - Vector3(b.px, b.py, b.pz)).normalized,
+        planetRadiusScene: lengthToScene(b.radius),
+      );
     }
 
-    _nodes.removeWhere((id, node) {
+    _sheets.removeWhere((id, sheet) {
       if (seen.contains(id)) return false;
-      _scene.remove(node);
+      _scene.remove(sheet.node);
       _rocks.remove(id);
       return true;
     });
   }
+}
 
-  static vm.Vector4 _premul(int argb, double intensity) {
-    final a = ((argb >> 24) & 0xff) / 255.0 * intensity;
-    return vm.Vector4(
-      ((argb >> 16) & 0xff) / 255.0 * a,
-      ((argb >> 8) & 0xff) / 255.0 * a,
-      (argb & 0xff) / 255.0 * a,
-      a,
-    );
+/// The shader-driven ring sheet node: a plain flat annulus (both windings —
+/// translucent materials always backface-cull, so a single winding vanishes
+/// from one side of the plane) whose banding lives entirely in
+/// shaders/ring.frag via the RingInfo uniform block.
+class _RingSheet {
+  _RingSheet(Object shader, double inner, double outer) {
+    _material = DepthSafeShaderMaterial(fragmentShader: shader as gpu.Shader);
+    node = fs.Node(mesh: fs.Mesh(_annulus(inner, outer), _material));
   }
 
-  /// Flat annulus in the local XY plane (Z = ring normal), radii in body-
-  /// radius multiples, one quad strip per [RingBand] with premultiplied
-  /// vertex colours (base colour x band alpha; hard edges by duplicated
-  /// rows). BOTH triangle windings are emitted: translucent materials
-  /// always backface-cull (Material.bind:
-  /// `cullBackFace = !doubleSided || !isOpaque()`), so a single-winding
-  /// flat ring vanishes from one side of the ring plane — doubleSided
-  /// cannot save a blended material.
-  static fs.MeshGeometry _bandedAnnulus(
-    double inner,
-    double outer,
-    List<RingBand> bands,
-    vm.Vector4 base, {
-    int segments = 96,
-  }) {
-    final positions = <double>[];
-    final colors = <double>[];
-    final indices = <int>[];
+  late final fs.Node node;
+  late final DepthSafeShaderMaterial _material;
 
-    void ring(double t, vm.Vector4 c) {
-      final r = inner + t * (outer - inner);
-      for (var s = 0; s <= segments; s++) {
-        final a = 2 * math.pi * s / segments;
-        positions.addAll([r * math.cos(a), r * math.sin(a), 0.0]);
-        colors.addAll([c.x, c.y, c.z, c.w]);
+  final Float32List _u = Float32List(124); // 31 x vec4, std140
+
+  void updateUniforms({
+    required vm.Vector3 centreScene,
+    required Vector3 axisU,
+    required Vector3 axisV,
+    required double innerScene,
+    required double outerScene,
+    required vm.Vector3 eyeScene,
+    required double holeScene,
+    required List<RingBand> bands,
+    required int baseArgb,
+    required double intensity,
+    required Vector3 toSun,
+    required double planetRadiusScene,
+  }) {
+    _u[0] = centreScene.x;
+    _u[1] = centreScene.y;
+    _u[2] = centreScene.z;
+    _u[3] = innerScene;
+    _u[4] = axisU.x;
+    _u[5] = axisU.y;
+    _u[6] = axisU.z;
+    _u[7] = outerScene;
+    _u[8] = axisV.x;
+    _u[9] = axisV.y;
+    _u[10] = axisV.z;
+    _u[11] = holeScene;
+    _u[12] = eyeScene.x;
+    _u[13] = eyeScene.y;
+    _u[14] = eyeScene.z;
+    _u[15] = 0.006; // band edge fuzz (t units)
+    final n = math.min(bands.length, 12);
+    for (var i = 0; i < 12; i++) {
+      final o = 16 + i * 4;
+      final co = 64 + i * 4;
+      if (i < n) {
+        final band = bands[i];
+        _u[o] = band.t0;
+        _u[o + 1] = band.t1;
+        _u[o + 2] = band.alpha * intensity;
+        _u[o + 3] = 0;
+        final argb = band.argb ?? baseArgb;
+        _u[co] = ((argb >> 16) & 0xff) / 255.0;
+        _u[co + 1] = ((argb >> 8) & 0xff) / 255.0;
+        _u[co + 2] = (argb & 0xff) / 255.0;
+        _u[co + 3] = 0;
+      } else {
+        _u[o] = 0;
+        _u[o + 1] = 0;
+        _u[o + 2] = 0;
+        _u[o + 3] = 0;
+        _u[co] = 0;
+        _u[co + 1] = 0;
+        _u[co + 2] = 0;
+        _u[co + 3] = 0;
       }
     }
+    _u[112] = n.toDouble();
+    _u[113] = 0;
+    _u[114] = 0;
+    _u[115] = 0;
+    // vec4 sun_planet: toward-sun direction + shadow-caster radius.
+    _u[116] = toSun.x;
+    _u[117] = toSun.y;
+    _u[118] = toSun.z;
+    _u[119] = planetRadiusScene;
+    _u[120] = 0;
+    _u[121] = 0;
+    _u[122] = 0;
+    _u[123] = 0;
+    _material.setUniformBlockFromFloats('RingInfo', _u);
+  }
 
-    for (final band in bands) {
-      final c = band.argb == null
-          ? vm.Vector4(base.x * band.alpha, base.y * band.alpha,
-              base.z * band.alpha, base.w * band.alpha)
-          : () {
-              final argb = band.argb!;
-              final a = base.w * band.alpha;
-              return vm.Vector4(((argb >> 16) & 0xff) / 255.0 * a,
-                  ((argb >> 8) & 0xff) / 255.0 * a, (argb & 0xff) / 255.0 * a, a);
-            }();
-      final row0 = positions.length ~/ 3;
-      ring(band.t0, c);
-      ring(band.t1, c);
-      final rowN = row0 + segments + 1;
-      for (var s = 0; s < segments; s++) {
-        final i0 = row0 + s, i1 = row0 + s + 1;
-        final o0 = rowN + s, o1 = rowN + s + 1;
-        indices.addAll([i0, o0, i1, i1, o0, o1]); // top face
-        indices.addAll([i0, i1, o0, o0, i1, o1]); // bottom face (reversed)
-      }
+  static fs.MeshGeometry _annulus(double inner, double outer,
+      {int segments = 96}) {
+    final positions = <double>[];
+    final indices = <int>[];
+    for (var s = 0; s <= segments; s++) {
+      final a = 2 * math.pi * s / segments;
+      final c = math.cos(a), si = math.sin(a);
+      positions.addAll([inner * c, inner * si, 0.0]); // 2s
+      positions.addAll([outer * c, outer * si, 0.0]); // 2s+1
+    }
+    for (var s = 0; s < segments; s++) {
+      final i0 = 2 * s, o0 = 2 * s + 1, i1 = 2 * (s + 1), o1 = 2 * (s + 1) + 1;
+      indices.addAll([i0, o0, i1, i1, o0, o1]); // top face
+      indices.addAll([i0, i1, o0, o0, i1, o1]); // bottom face (reversed)
     }
     return fs.MeshGeometry.fromArrays(
       positions: Float32List.fromList(positions),
-      colors: Float32List.fromList(colors),
       indices: indices,
     );
   }
@@ -234,8 +314,9 @@ class RingNodes {
 /// camera. OPAQUE by constraint — the translucent pass explodes instanced
 /// items into one draw call per instance, while the opaque path is 1-2
 /// calls total. The distance fade is therefore a SCALE fade: rocks shrink
-/// to nothing toward the visibility radius and the 2D annulus underneath
-/// carries the far field.
+/// to nothing toward the visibility radius, and the ring sheet opens a
+/// matching camera hole (see ring.frag) so rocks REPLACE the sheet rather
+/// than floating on top of it.
 ///
 /// Placement is a seeded hash over ring-plane grid cells, so the field is
 /// stable frame to frame and only REBUILDS when the camera has moved half a
@@ -243,79 +324,126 @@ class RingNodes {
 /// coasting). Rock density follows the band profile — the Cassini division
 /// is genuinely empty.
 class _RockField {
-  _RockField(this.inner, this.outer, this.bands, this.argb);
+  _RockField(this.inner, this.outer, this.bands, this.argb, this.textures);
 
   final double inner, outer;
   final List<RingBand> bands;
   final int argb;
+  final SceneTextures textures;
 
   fs.Node? _node;
   fs.InstancedMesh? _mesh;
-  // Camera position (ring-local, body radii) at the last rebuild.
-  vm.Vector3? _builtAt;
+  fs.PhysicallyBasedMaterial? _rockMaterial;
+  fs.Scene? _inScene;
+  // Camera position (ring-local METRES) at the last rebuild.
+  Vector3? _builtAt;
+  // Ring-local anchor (metres) the node + instance offsets are built from.
+  Vector3? _anchor;
 
-  // All lengths in BODY RADII (the ring node's scale maps them to scene
-  // units). ~0.05 R visibility on Saturn = ~2900 km of rock field. Rock
-  // sizes are game-scaled (tens of km — physical ring debris is metres and
-  // would be invisible at any flyable speed).
-  static const double _visR = 0.05;
-  static const double _cell = 0.01;
-  static const int _rocksPerCell = 12;
-  static const double _thickness = 0.004; // +/- around the plane
-  static const double _rockMin = 0.0008, _rockMax = 0.003;
+  /// Current layer strength 0..1 (the vertical plane-exit fade); the ring
+  /// sheet scales its camera hole by this so the two cross-fade.
+  double fade = 0.0;
+
+  // All lengths in METRES, ring-local. Real ring debris tops out at a few
+  // metres diameter, so the whole field lives within a couple of km of the
+  // camera — far below float32 resolution in a planet-scaled frame. The
+  // field therefore hangs off its OWN scene-root node anchored at the
+  // camera's grid cell (double-precision anchor, metre-scale offsets).
+  static const double visRM = 2200.0;
+  static const double _cellM = 220.0;
+  static const int _rocksPerCell = 7;
+  static const double _thicknessM = 60.0; // +/- around the plane
+  static const double _rockMinM = 0.4, _rockMaxM = 2.6; // radii (0.8-5 m)
 
   void update({
-    required fs.Node parent,
+    required fs.Scene scene,
     required BodySnapshot body,
     required Quaternion bodyQuat,
     required FloatingOrigin origin,
     SceneCamera? camera,
   }) {
-    // Camera in the ring's LOCAL frame (body radii), double precision:
-    // eye is focus-relative; re-base to the body, un-rotate, normalise.
+    // Camera in the ring's LOCAL frame (metres), double precision: eye is
+    // focus-relative; re-base to the body, un-rotate.
     if (camera == null) {
-      _despawn(parent);
+      _despawn();
       return;
     }
-    final eyeRelBody = camera.eyeOffset -
-        origin.worldToRel(Vector3(body.px, body.py, body.pz));
-    final local = bodyQuat.conjugate.rotate(eyeRelBody) * (1.0 / body.radius);
-    final radial = math.sqrt(local.x * local.x + local.y * local.y);
+    final bodyWorld = Vector3(body.px, body.py, body.pz);
+    final eyeRelBody = camera.eyeOffset - origin.worldToRel(bodyWorld);
+    final local = bodyQuat.conjugate.rotate(eyeRelBody);
+    final radialM = math.sqrt(local.x * local.x + local.y * local.y);
+    final innerM = inner * body.radius, outerM = outer * body.radius;
 
-    final active = local.z.abs() < 0.06 &&
-        radial > inner - 0.1 &&
-        radial < outer + 0.1;
+    const fadeBandM = 3000.0; // vertical activation/fade band
+    final active = local.z.abs() < fadeBandM &&
+        radialM > innerM - 50000 &&
+        radialM < outerM + 50000;
     if (!active) {
-      _despawn(parent);
+      _despawn();
       return;
     }
-
-    final eye = vm.Vector3(local.x, local.y, local.z);
-    if (_builtAt != null && (_builtAt! - eye).length < _cell * 0.5) {
-      return; // field still valid — zero work while coasting
-    }
-    _builtAt = eye;
 
     // Climbing out of the ring plane shrinks the whole field smoothly
-    // instead of popping at the activation edge.
-    final vFade = (1.0 - local.z.abs() / 0.06).clamp(0.0, 1.0);
+    // instead of popping at the activation edge; the sheet's camera hole
+    // follows the same fade.
+    fade = (1.0 - local.z.abs() / fadeBandM).clamp(0.0, 1.0);
+
+    // The anchor transform must refresh EVERY frame: the floating origin
+    // follows the focus and the ring's body moves km/s along its orbit —
+    // a coasting-frame skip left the field at a stale scene position
+    // (kilometres off within a second; the rocks were simply never where
+    // the camera was).
+    final anchor = _anchor;
+    if (_node != null && anchor != null) {
+      _node!.localTransform = vm.Matrix4.compose(
+        origin.worldToScene(bodyWorld + bodyQuat.rotate(anchor)),
+        quatToScene(bodyQuat),
+        vm.Vector3.all(1.0),
+      );
+    }
+
+    if (_builtAt != null && (_builtAt! - local).length < _cellM * 0.5) {
+      return; // field still valid — zero instance work while coasting
+    }
+    _builtAt = local;
 
     final mesh = _mesh ??= fs.InstancedMesh(
       geometry: uvSphereZUp(segments: 6, rings: 4),
-      material: fs.PhysicallyBasedMaterial()
+      // A slice of the Moon's albedo gives the rocks cratered texture
+      // instead of flat colour; the ring-hued base factor tints it. The
+      // map may still be decoding on first spawn — retried on rebuilds.
+      material: _rockMaterial ??= fs.PhysicallyBasedMaterial()
+        ..baseColorTexture = textures.texture('moon')
         ..baseColorFactor = _rockColor()
         ..roughnessFactor = 1.0
         ..metallicFactor = 0.0,
     );
+    final mat = _rockMaterial;
+    if (mat != null && mat.baseColorTexture == null) {
+      mat.baseColorTexture = textures.texture('moon');
+    }
     if (_node == null) {
       final n = fs.Node()..addComponent(fs.InstancedMeshComponent(mesh));
-      parent.add(n);
+      scene.add(n);
       _node = n;
+      _inScene = scene;
     }
 
+    // Anchor the node at the camera's grid cell centre, in the ring plane:
+    // world position computed in doubles, instance offsets stay metre-
+    // scale floats. (Per-frame transform refresh above uses this anchor.)
+    final ax = ((local.x / _cellM).floor() + 0.5) * _cellM;
+    final ay = ((local.y / _cellM).floor() + 0.5) * _cellM;
+    _anchor = Vector3(ax, ay, 0);
+    _node!.localTransform = vm.Matrix4.compose(
+      origin.worldToScene(bodyWorld + bodyQuat.rotate(_anchor!)),
+      quatToScene(bodyQuat),
+      vm.Vector3.all(1.0),
+    );
+
     mesh.clearInstances();
-    final cells = (_visR / _cell).ceil();
-    final cx = (local.x / _cell).floor(), cy = (local.y / _cell).floor();
+    final cells = (visRM / _cellM).ceil();
+    final cx = (local.x / _cellM).floor(), cy = (local.y / _cellM).floor();
     for (var gx = cx - cells; gx <= cx + cells; gx++) {
       for (var gy = cy - cells; gy <= cy + cells; gy++) {
         for (var k = 0; k < _rocksPerCell; k++) {
@@ -323,33 +451,35 @@ class _RockField {
           final h2 = _hash(gx, gy, k * 4 + 1);
           final h3 = _hash(gx, gy, k * 4 + 2);
           final h4 = _hash(gx, gy, k * 4 + 3);
-          final px = (gx + h1) * _cell;
-          final py = (gy + h2) * _cell;
-          final r = math.sqrt(px * px + py * py);
-          if (r < inner || r > outer) continue;
+          final pxM = (gx + h1) * _cellM;
+          final pyM = (gy + h2) * _cellM;
+          final rM = math.sqrt(pxM * pxM + pyM * pyM);
+          if (rM < innerM || rM > outerM) continue;
           // Density follows the band profile: gaps stay empty.
-          final t = (r - inner) / (outer - inner);
+          final t = (rM - innerM) / (outerM - innerM);
           if (h3 > _bandAlpha(t) * 1.15 + 0.02) continue;
 
-          final dx = px - local.x, dy = py - local.y;
-          final pz = (h4 - 0.5) * 2.0 * _thickness;
-          final dz = pz - local.z;
-          final dist = math.sqrt(dx * dx + dy * dy + dz * dz);
+          final pzM = (h4 - 0.5) * 2.0 * _thicknessM;
+          final dx = pxM - local.x, dy = pyM - local.y, dz = pzM - local.z;
+          final distM = math.sqrt(dx * dx + dy * dy + dz * dz);
           // Scale fade toward the visibility edge (the "2D ring takes
           // over" transition — per-instance alpha doesn't exist for the
           // hardware-instanced path, scale does).
-          final fade = (1.0 - dist / _visR).clamp(0.0, 1.0) * vFade;
-          if (fade <= 0.01) continue;
-          final size = (_rockMin + h1 * h2 * (_rockMax - _rockMin)) *
-              (fade * (2.0 - fade)); // smooth ease-out
+          final f = (1.0 - distM / visRM).clamp(0.0, 1.0) * fade;
+          if (f <= 0.01) continue;
+          final sizeScene = lengthToScene(
+              (_rockMinM + h1 * h2 * (_rockMaxM - _rockMinM)) *
+                  (f * (2.0 - f))); // smooth ease-out
           // Potato rocks: irregular non-uniform scale + arbitrary spin.
+          // Offsets are node-relative (anchor at the camera's cell).
           final m = vm.Matrix4.compose(
-            vm.Vector3(px, py, pz),
+            vm.Vector3(lengthToScene(pxM - ax), lengthToScene(pyM - ay),
+                lengthToScene(pzM)),
             vm.Quaternion.axisAngle(
                 vm.Vector3(h2 - 0.5, h3 - 0.5, h4 - 0.5).normalized(),
                 h1 * math.pi * 2),
-            vm.Vector3(size * (0.6 + h3 * 0.8), size * (0.6 + h4 * 0.8),
-                size * (0.6 + h1 * 0.8)),
+            vm.Vector3(sizeScene * (0.6 + h3 * 0.8),
+                sizeScene * (0.6 + h4 * 0.8), sizeScene * (0.6 + h1 * 0.8)),
           );
           mesh.addInstance(m);
         }
@@ -357,13 +487,17 @@ class _RockField {
     }
   }
 
-  void _despawn(fs.Node parent) {
+  void _despawn() {
+    fade = 0.0;
     final n = _node;
     if (n != null) {
-      parent.remove(n);
+      _inScene?.remove(n);
       _node = null;
       _mesh = null;
+      _rockMaterial = null;
       _builtAt = null;
+      _anchor = null;
+      _inScene = null;
     }
   }
 
