@@ -80,7 +80,7 @@ class SceneSync {
         starWorld: _bodies.starWorld(snap),
       );
     }
-    _rings.update(snap, origin);
+    _rings.update(snap, origin, camera: camera);
     _skybox.update(
         cameraRangeKm:
             camera == null ? 0 : camera.eyeOffset.length * kRenderScale);
