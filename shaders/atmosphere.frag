@@ -54,17 +54,22 @@ vec2 raySphere(vec3 ro, vec3 rd, vec3 c, float r) {
   return vec2(-b - s, -b + s);
 }
 
-// Soft planet shadow toward the sun. A binary horizon test cut the
-// terminator to a hard line; instead attenuate by the sun ray's closest
-// approach altitude over a twilight band [soft] wide — dusk glow bleeds
-// smoothly past the geometric terminator. The slight negative lower edge
-// keeps a little scatter alive just past grazing.
+// Soft planet shadow toward the sun, as a smooth function of the sun's
+// elevation against the local horizon. A binary horizon test cut the
+// terminator to a hard line — and an earlier closest-approach form had a
+// DISCONTINUITY at the terminator plane (its "sun ahead" early-out
+// returned exactly 1 while the shadowed branch approached ~0.3, a sharp
+// jump across the disc). Elevation form is continuous everywhere: x is
+// the sun-direction cosine at the sample, horiz the geometric horizon
+// for its radius (0 at the surface: twilight centres on sunset), and
+// [soft] the twilight band width converted to an angular half-width.
 float sunVisibility(vec3 p, vec3 sunDir, vec3 c, float planetR, float soft) {
   vec3 op = p - c;
-  float tStar = -dot(op, sunDir);
-  if (tStar <= 0.0) return 1.0; // closest approach is behind: sun side
-  float minAlt = length(op + sunDir * tStar) - planetR;
-  return smoothstep(-0.3 * soft, soft, minAlt);
+  float r = max(length(op), planetR);
+  float x = dot(op, sunDir) / r;
+  float horiz = -sqrt(max(1.0 - (planetR * planetR) / (r * r), 0.0));
+  float w = soft / planetR;
+  return smoothstep(horiz - w, horiz + w, x);
 }
 
 void main() {
