@@ -161,6 +161,7 @@ class RealSolarSystem {
         orbitEccentricity: 0.0489,
         orbitInclination: _deg(1.303),
         solarFlux: 50,
+        axialTilt: 0.0546, // 3.13 deg
       ),
       CelestialBody(
         id: const BodyId('saturn'),
@@ -174,6 +175,7 @@ class RealSolarSystem {
         orbitEccentricity: 0.0565,
         orbitInclination: _deg(2.485),
         solarFlux: 15,
+        axialTilt: 0.4665, // 26.73 deg -> the ring plane's tilt
       ),
       CelestialBody(
         id: const BodyId('uranus'),
@@ -187,6 +189,7 @@ class RealSolarSystem {
         orbitEccentricity: 0.0457,
         orbitInclination: _deg(0.773),
         solarFlux: 3.7,
+        axialTilt: 1.7064, // 97.77 deg -> rolls on its side; rings near-polar
       ),
       CelestialBody(
         id: const BodyId('neptune'),
@@ -200,6 +203,7 @@ class RealSolarSystem {
         orbitEccentricity: 0.0113,
         orbitInclination: _deg(1.770),
         solarFlux: 1.5,
+        axialTilt: 0.4943, // 28.32 deg
       ),
 
       // ---- Earth's Moon ----

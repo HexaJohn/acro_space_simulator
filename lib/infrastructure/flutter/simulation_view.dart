@@ -33,6 +33,7 @@ import '../../domain/planetary/atmospheric_composition.dart';
 import '../../domain/universe/celestial_body.dart' show BodyId, CelestialBody;
 import '../../domain/vessel/vessel.dart';
 import '../sample_world.dart';
+import '../flutter_scene/line_nodes.dart';
 import '../flutter_scene/render_backend.dart';
 import '../flutter_scene/scene_hud_overlay.dart';
 import '../flutter_scene/scene_render_view.dart';
@@ -45,7 +46,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.0.193 scene-ring-winding';
+const String kBuildStamp = 'build 0.3.0.202';
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -244,6 +245,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   // software backend is active — capture cost is zero when unused).
   WorldSnapshot? _sceneWorld;
   int _sceneTick = 0;
+  // Roll the camera so screen-up follows the focused body's spin axis.
+  bool _alignUpWithBody = false;
   late final TextureCache _textures;
 
   // Destruction notice: set when a vessel is lost (impact / overstress / burn-up)
@@ -638,6 +641,31 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       );
     } else {
       _sceneWorld = null;
+    }
+
+    // Equator-aligned camera: roll the view so screen-up tracks the focused
+    // body's spin axis (rings/equator read level). Recomputed per frame —
+    // the needed roll changes with azimuth/elevation.
+    if (_alignUpWithBody && !_craftCam) {
+      final bodyId = _focusBody ?? _lastFocusBody;
+      final body = bodyId == null ? null : _universe.current().body(bodyId);
+      if (body != null) {
+        // Spin axis: axial tilt about +X applied to +Z (spin about the
+        // axis itself never moves it) — same construction as the snapshot.
+        final t = body.axialTilt;
+        final axis = Vector3(0, -math.sin(t), math.cos(t));
+        final zeroRoll = CameraOrbit(
+            azimuth: _view.azimuth, elevation: _view.elevation);
+        final f = zeroRoll.forward;
+        final projected = axis - f * axis.dot(f);
+        if (projected.length > 1e-6) {
+          final desired = projected.normalized;
+          final upB = zeroRoll.up, rightB = zeroRoll.right;
+          final roll =
+              math.atan2(desired.dot(rightB), desired.dot(upB));
+          _view = _view.copyWith(roll: roll);
+        }
+      }
     }
 
     // Craft chase cam: align the camera EXACTLY with the craft's attitude so the
@@ -1368,6 +1396,33 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                     backgroundColor: _showDebugPanel ? const Color(0xFF7FB0E0) : const Color(0xFF2A3A4A),
                     onPressed: () => setState(() => _showDebugPanel = !_showDebugPanel),
                     child: const Icon(Icons.bug_report),
+                  ),
+                  const SizedBox(width: 8),
+                  FloatingActionButton.small(
+                    heroTag: 'inertialTrails',
+                    tooltip: 'Trail frame: body-relative vs sun-inertial',
+                    backgroundColor: LineNodes.inertialTrails
+                        ? const Color(0xFF7FB0E0)
+                        : const Color(0xFF2A3A4A),
+                    onPressed: () => setState(() {
+                      LineNodes.inertialTrails = !LineNodes.inertialTrails;
+                    }),
+                    child: const Icon(Icons.gesture),
+                  ),
+                  const SizedBox(width: 8),
+                  FloatingActionButton.small(
+                    heroTag: 'alignUp',
+                    tooltip: "Align camera up with the body's spin axis",
+                    backgroundColor: _alignUpWithBody
+                        ? const Color(0xFF7FB0E0)
+                        : const Color(0xFF2A3A4A),
+                    onPressed: () => setState(() {
+                      _alignUpWithBody = !_alignUpWithBody;
+                      if (!_alignUpWithBody) {
+                        _view = _view.copyWith(roll: 0);
+                      }
+                    }),
+                    child: const Icon(Icons.align_vertical_center),
                   ),
                   const SizedBox(width: 8),
                   FloatingActionButton.small(

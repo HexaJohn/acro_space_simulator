@@ -8,6 +8,7 @@ import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
 import 'coord_convert.dart';
 import 'scene_textures.dart';
+import 'sphere_geometry_util.dart';
 
 /// Maintains one scene node per celestial body from the frame's
 /// [BodySnapshot]s: a shared unit sphere scaled to the body radius, textured
@@ -24,12 +25,11 @@ class BodyNodes {
   final SceneTextures _textures;
 
   // One shared unit sphere; each body is a node scaling it. Radius 1 scene
-  // unit; node scale = radius in km. STOCK fs.SphereGeometry on purpose:
-  // its native equirect UV orientation composes correctly with the
-  // image-level chirality flip in SceneRenderView (continents read true),
-  // and a hand-rolled replacement rendered a pale backface veil.
-  late final fs.MeshGeometry _unitSphere =
-      fs.SphereGeometry(radius: 1.0, segments: 96, rings: 48);
+  // unit; node scale = radius in km. Own Z-up builder: stock
+  // fs.SphereGeometry has poles on ±Y (pole renders on the equator) and
+  // its UV mirrors through the image-level chirality flip — no rotation
+  // can fix a mirror.
+  late final fs.MeshGeometry _unitSphere = uvSphereZUp();
 
   final Map<String, fs.Node> _nodes = {};
   final Map<String, fs.Material> _materials = {};
@@ -47,10 +47,8 @@ class BodyNodes {
   /// AFTER the snapshot quaternion so it rotates the texture about the
   /// body's own spin axis. Runtime-mutable (radians) so the offset can be
   /// dialled in live over the control API instead of a rebuild per guess.
-  /// User-verified in-app against the software backend: my capture-ladder
-  /// pick of -90 was still 90 off on screen; 180 is the next candidate.
-  /// Tune live with ext.acro.camera?textureYawDeg=N and lock the winner.
-  static double textureYawRad = math.pi;
+  /// Longitude seam offset, tunable live (ext.acro.camera?textureYawDeg=N).
+  static double textureYawRad = 0.0;
 
   void update(
     WorldSnapshot snap,
@@ -66,10 +64,10 @@ class BodyNodes {
       final node = _nodes.putIfAbsent(b.id, () => _createNode(b, snap));
       _retryTexture(b.id, snap);
 
-      // Focus-relative position (doubles) -> scene units; spin/tilt from
-      // the snapshot, composed with a fixed yaw so the equirect texture's
-      // longitude origin lines up with the software renderer's mapping
-      // (stock SphereGeometry starts its U seam 90 deg away).
+      // Focus-relative position (doubles) -> scene units. The sphere is
+      // built Z-up (poles on the spin axis natively); Rz(yaw) aligns the
+      // equirect seam longitude, then the snapshot quaternion applies the
+      // body's spin+tilt.
       final pos = origin.worldToScene(Vector3(b.px, b.py, b.pz));
       final rot = quatToScene(Quaternion(b.qw, b.qx, b.qy, b.qz) *
           Quaternion.axisAngle(Vector3.unitZ, textureYawRad));
@@ -155,30 +153,41 @@ class BodyNodes {
 class SkyboxNode {
   SkyboxNode(this._scene, this._textures);
 
-  static const double _radius = 1e9; // km — inside far plane (5e9 km)
+  static const double _minRadius = 1e9; // km — inside far plane (5e9 km)
 
   final fs.Scene _scene;
   final SceneTextures _textures;
   fs.Node? _node;
+  double _radius = _minRadius;
 
-  void update() {
-    if (_node != null) return; // static once created
-    final tex = _textures.texture('starfield');
-    if (tex == null) return; // retry next frame
-    final node = fs.Node(
-      mesh: fs.Mesh(
-        fs.SphereGeometry(radius: 1.0, segments: 48, rings: 24),
-        fs.UnlitMaterial()
-          ..baseColorTexture = tex
-          ..doubleSided = true,
-      ),
-    )..localTransform = vm.Matrix4.compose(
-        vm.Vector3.zero(),
-        vm.Quaternion.identity(),
-        vm.Vector3.all(_radius),
+  /// [cameraRangeKm]: current eye distance (scene units). The backdrop
+  /// sphere grows with zoom — at a fixed radius a system-scale zoom-out
+  /// walks the camera up to (and past) the starfield ball, which then
+  /// reads as a small textured sphere instead of the sky.
+  void update({double cameraRangeKm = 0}) {
+    final wanted =
+        math.max(_minRadius, cameraRangeKm * 20).clamp(_minRadius, 4e9);
+    if (_node == null) {
+      final tex = _textures.texture('starfield');
+      if (tex == null) return; // retry next frame
+      final node = fs.Node(
+        mesh: fs.Mesh(
+          fs.SphereGeometry(radius: 1.0, segments: 48, rings: 24),
+          fs.UnlitMaterial()
+            ..baseColorTexture = tex
+            ..doubleSided = true,
+        ),
       );
-    _scene.add(node);
-    _node = node;
+      _scene.add(node);
+      _node = node;
+    }
+    // Transform-only update — no buffer writes involved.
+    _radius = wanted.toDouble();
+    _node!.localTransform = vm.Matrix4.compose(
+      vm.Vector3.zero(),
+      vm.Quaternion.identity(),
+      vm.Vector3.all(_radius),
+    );
   }
 }
 

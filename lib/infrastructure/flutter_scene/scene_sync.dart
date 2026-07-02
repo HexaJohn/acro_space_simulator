@@ -66,7 +66,11 @@ class SceneSync {
     _bodies.update(snap, origin);
     if (!_noVessels) _vessels.update(snap, origin);
     if (!_noLines) {
-      _lines.update(snap, origin, camera: camera, viewport: viewport);
+      _lines.update(snap, origin,
+          camera: camera,
+          viewport: viewport,
+          focusVesselId: focusVesselId,
+          focusBodyId: focusBodyId);
     }
     if (!_noAtmo) {
       _atmospheres.update(
@@ -77,7 +81,9 @@ class SceneSync {
       );
     }
     _rings.update(snap, origin);
-    _skybox.update();
+    _skybox.update(
+        cameraRangeKm:
+            camera == null ? 0 : camera.eyeOffset.length * kRenderScale);
     _updateSun(snap);
   }
 

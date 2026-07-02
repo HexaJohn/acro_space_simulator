@@ -43,27 +43,53 @@ class LineNodes {
   ui.Size? _lastViewport;
   bool _contentDirty = false;
 
-  // Flown-trail breadcrumbs per vessel, absolute world metres (doubles).
-  final Map<String, List<Vector3>> _trails = {};
+  // Flown-trail breadcrumbs per vessel: BOTH the absolute world position
+  // and the parent-body-relative offset at capture time, so the trail can
+  // render in either frame. Parent-relative (default) co-moves with the
+  // body and traces the orbit as a ring; inertial (sun-relative) keeps the
+  // absolute points and traces the true wavy path through space.
+  final Map<String, List<({Vector3 abs, Vector3 rel})>> _trails = {};
   static const int _trailCap = 240;
   static const double _trailMinStepM = 500.0;
+
+  /// Render trails in the sun-inertial frame instead of parent-relative.
+  /// Toggled from the UI / control API.
+  static bool inertialTrails = false;
 
   /// Apparent-size window (px) for orbit rails: below the floor a rail is
   /// sub-pixel shimmer; above the ceiling the ring dwarfs the viewport and
   /// its arc is clutter. Rails belong to the zoomed-out map view.
   static const double _railMinApparentPx = 40.0;
 
-  // Parity with the software painter: rails cool gray (brighter than the
-  // painter's — at system zoom they compete with the Milky Way), predicted
-  // paths the painter's green, trails fading cyan.
-  static final vm.Vector4 _railColor = vm.Vector4(0.55, 0.62, 0.7, 0.85);
+  // Predicted paths green (focused vessel bright, others dimmed), trails
+  // fading cyan.
   static final vm.Vector4 _pathColor = vm.Vector4(0.5, 0.88, 0.56, 0.9);
+  static final vm.Vector4 _pathDimColor = vm.Vector4(0.5, 0.88, 0.56, 0.35);
   static final vm.Vector4 _trailColor = vm.Vector4(0.35, 0.75, 1.0, 0.9);
+
+  /// Rail colour per body — each orbit line wears its body's identity
+  /// (Mars red, Jupiter tan, the Moon grey...). Fallback: cool gray.
+  static final Map<String, vm.Vector4> _railColors = {
+    'mercury': vm.Vector4(0.55, 0.5, 0.45, 0.85),
+    'venus': vm.Vector4(0.9, 0.8, 0.55, 0.85),
+    'earth': vm.Vector4(0.35, 0.55, 0.95, 0.85),
+    'moon': vm.Vector4(0.7, 0.7, 0.72, 0.85),
+    'mars': vm.Vector4(0.9, 0.4, 0.25, 0.85),
+    'jupiter': vm.Vector4(0.85, 0.6, 0.35, 0.85),
+    'saturn': vm.Vector4(0.9, 0.8, 0.5, 0.85),
+    'uranus': vm.Vector4(0.5, 0.8, 0.85, 0.85),
+    'neptune': vm.Vector4(0.35, 0.5, 0.9, 0.85),
+    'pluto': vm.Vector4(0.65, 0.55, 0.5, 0.85),
+  };
+  static final vm.Vector4 _railFallback = vm.Vector4(0.55, 0.62, 0.7, 0.85);
 
   /// Refresh CPU-side line specs from this frame's snapshot. GPU work
   /// happens later in [updateForCamera].
   void update(WorldSnapshot snap, FloatingOrigin origin,
-      {SceneCamera? camera, ui.Size? viewport}) {
+      {SceneCamera? camera,
+      ui.Size? viewport,
+      String? focusVesselId,
+      String? focusBodyId}) {
     final seen = <String>{};
 
     // Body orbit rails (closed rings, root-relative metres).
@@ -90,10 +116,20 @@ class LineNodes {
         // sweeps the sky as clipped dashes: those wait until the camera
         // clears the ring.
         final centreRel = origin.worldToRel(centre);
-        final encirclesFocus = centreRel.length < ringRadiusM;
-        if (!encirclesFocus) {
+        // Exempt only rings CENTRED ON the focus (the Moon's orbit while
+        // focused on Earth): centre within a tenth of the ring radius.
+        // A naive "focus inside the ring" test also matched every OUTER
+        // planet's rail (Earth sits inside Mars..Neptune's orbits), which
+        // drew the whole system's rails through every close-up frame.
+        final centredOnFocus = centreRel.length < 0.1 * ringRadiusM;
+        if (!centredOnFocus) {
           final centreDist = (centreRel - camera.eyeOffset).length;
           if (centreDist < 1.1 * ringRadiusM) continue;
+          // Other planets' rails are map-scale context: zoomed in tight on
+          // a body/vessel they read as stray arcs across the sky. Require
+          // the camera range to be within an order of magnitude or two of
+          // the ring's own scale before they join the frame.
+          if (camera.eyeOffset.length < 0.05 * ringRadiusM) continue;
         }
 
         final apparentPx =
@@ -110,7 +146,9 @@ class LineNodes {
             Vector3(b.orbit[i], b.orbit[i + 1], b.orbit[i + 2])));
       }
       pts.add(pts.first); // close the ring
-      _setSpec('rail/${b.id}', seen, pts, _railColor, width: 2.5);
+      _setSpec('rail/${b.id}', seen, pts,
+          _railColors[b.id] ?? _railFallback,
+          width: 2.5);
     }
 
     for (final v in snap.vessels.values) {
@@ -118,27 +156,46 @@ class LineNodes {
       if (body == null) continue;
       final bodyPos = Vector3(body.px, body.py, body.pz);
 
-      // Predicted trajectory (body-relative metres).
-      if (v.trajectory.length >= 6) {
+      // Predicted trajectory (body-relative metres). Foreign vessels' paths
+      // (the demo fleet across the system) slice the close-up frame as
+      // stray arcs: draw a path only when it's OURS (the focused vessel or
+      // one orbiting the focused body) or the camera is zoomed out to the
+      // path's own scale.
+      final pathRelevant = v.id == focusVesselId ||
+          (v.body == focusBodyId && focusBodyId != null) ||
+          camera == null ||
+          camera.eyeOffset.length > 0.05 * math.max(v.semiMajor, 1.0);
+      if (pathRelevant && v.trajectory.length >= 6) {
         final pts = <vm.Vector3>[];
         for (var i = 0; i + 2 < v.trajectory.length; i += 3) {
           pts.add(origin.worldToScene(bodyPos +
               Vector3(
                   v.trajectory[i], v.trajectory[i + 1], v.trajectory[i + 2])));
         }
-        _setSpec('path/${v.id}', seen, pts, _pathColor, width: 2.0);
+        _setSpec('path/${v.id}', seen, pts,
+            v.id == focusVesselId ? _pathColor : _pathDimColor,
+            width: 2.0);
       }
 
       // Flown trail: world breadcrumbs, faded tail -> head. PREMULTIPLIED
-      // alpha (the pipeline blends premultiplied).
-      final world = bodyPos + Vector3(v.px, v.py, v.pz);
+      // alpha (the pipeline blends premultiplied). Accumulated for every
+      // vessel (history survives focus switches) but DRAWN only for the
+      // focused one — software parity (TopDownSnapshot.trailPx is the
+      // focus vessel's alone), and a fleet of trails reads as stray lines.
+      final relPos = Vector3(v.px, v.py, v.pz);
+      final world = bodyPos + relPos;
       final trail = _trails.putIfAbsent(v.id, () => []);
-      if (trail.isEmpty || trail.last.distanceTo(world) >= _trailMinStepM) {
-        trail.add(world);
+      if (trail.isEmpty ||
+          trail.last.abs.distanceTo(world) >= _trailMinStepM) {
+        trail.add((abs: world, rel: relPos));
         if (trail.length > _trailCap) trail.removeAt(0);
       }
-      if (trail.length >= 2) {
-        final pts = [for (final p in trail) origin.worldToScene(p)];
+      if (v.id == focusVesselId && trail.length >= 2) {
+        final pts = [
+          for (final p in trail)
+            origin.worldToScene(
+                inertialTrails ? p.abs : bodyPos + p.rel),
+        ];
         final colors = <vm.Vector4>[
           for (var i = 0; i < pts.length; i++)
             () {

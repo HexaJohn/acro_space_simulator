@@ -5,6 +5,7 @@ import 'package:flutter_scene/scene.dart' as fs;
 import 'package:vector_math/vector_math.dart' as vm;
 
 import '../../application/snapshot/world_snapshot.dart';
+import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
 import 'coord_convert.dart';
 
@@ -65,11 +66,14 @@ class RingNodes {
         return n;
       });
 
-      // Body position + ring-plane tilt about +X; scale = body radius (the
-      // annulus is built in radius multiples).
+      // Rings live in the body's EQUATORIAL plane (real rings are orbiting
+      // debris in the equator), so the ring plane comes straight from the
+      // body's orientation quaternion — spin about the axis is invisible
+      // for a flat annulus, and the axial tilt (now in the domain data for
+      // the gas giants) tilts rings and equator together.
       node.localTransform = vm.Matrix4.compose(
         origin.worldToScene(Vector3(b.px, b.py, b.pz)),
-        vm.Quaternion.axisAngle(vm.Vector3(1, 0, 0), spec.$3),
+        quatToScene(Quaternion(b.qw, b.qx, b.qy, b.qz)),
         vm.Vector3.all(lengthToScene(b.radius)),
       );
     }
