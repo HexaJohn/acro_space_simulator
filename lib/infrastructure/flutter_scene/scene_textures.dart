@@ -25,6 +25,11 @@ class SceneTextures {
   final Map<String, Object> _textures = {};
   final Set<String> _uploading = {};
 
+  /// The decoded CPU-side image for [key], or null while it decodes (kicks
+  /// the decode on first miss) — for consumers compositing their own
+  /// procedural textures from the source maps.
+  ui.Image? image(String key) => _images.image(key);
+
   /// The GPU texture for [key], or null while it loads. Kicks off the image
   /// decode (via the shared [TextureCache]) and GPU upload on first miss.
   Object? texture(String key) {

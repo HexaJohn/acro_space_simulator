@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter_scene/gpu.dart' as gpu;
 import 'package:flutter_scene/scene.dart' as fs;
@@ -112,6 +113,77 @@ class RingNodes {
   /// "saturn z=1.2km r=1.65R fade=0.88 rocks=2116". Null when no ringed
   /// body is within diagnostic interest (camera > 3 body radii off-plane).
   static String? debugLine;
+
+  /// Procedural billboard sprite: a patch of the MOON's albedo clipped to a
+  /// soft-edged circle and multiplied by an off-centre radial gradient, so
+  /// distant debris quads read as small lit cratered spheres (and blend
+  /// with the mesh rocks, which wear the same map) instead of flat white
+  /// squares. Built once when the moon image finishes decoding; tinted per
+  /// instance.
+  static Object? rockSprite;
+  static bool _spriteBuilding = false;
+
+  static void ensureRockSprite(ui.Image? moon) {
+    if (rockSprite != null || _spriteBuilding || moon == null) return;
+    _spriteBuilding = true;
+    const s = 64;
+    final rec = ui.PictureRecorder();
+    final canvas = ui.Canvas(rec);
+    const rect = ui.Rect.fromLTWH(0, 0, 64, 64);
+    // Cratered base: a mid-latitude patch of the moon map, circle-clipped.
+    canvas.save();
+    canvas.clipPath(ui.Path()
+      ..addOval(ui.Rect.fromCircle(
+          center: const ui.Offset(32, 32), radius: 30)));
+    final srcSize =
+        math.min(moon.width, moon.height) * 0.22; // small patch = big detail
+    canvas.drawImageRect(
+      moon,
+      ui.Rect.fromLTWH(moon.width * 0.31, moon.height * 0.42, srcSize, srcSize),
+      rect,
+      ui.Paint(),
+    );
+    // Lit-sphere shading: multiply by a radial gradient whose bright core
+    // is pulled toward the upper-left.
+    canvas.drawRect(
+      rect,
+      ui.Paint()
+        ..blendMode = ui.BlendMode.modulate
+        ..shader = ui.Gradient.radial(
+          const ui.Offset(26, 24),
+          44,
+          const [
+            ui.Color(0xFFFFFFFF),
+            ui.Color(0xFFC4C4C4),
+            ui.Color(0xFF474747),
+            ui.Color(0xFF161616),
+          ],
+          const [0.0, 0.35, 0.75, 1.0],
+        ),
+    );
+    canvas.restore();
+    // Soft silhouette: fade the outer rim of the circle to transparent.
+    canvas.drawRect(
+      rect,
+      ui.Paint()
+        ..blendMode = ui.BlendMode.dstIn
+        ..shader = ui.Gradient.radial(
+          const ui.Offset(32, 32),
+          30,
+          const [ui.Color(0xFFFFFFFF), ui.Color(0xFFFFFFFF), ui.Color(0x00FFFFFF)],
+          const [0.0, 0.82, 1.0],
+        ),
+    );
+    rec
+        .endRecording()
+        .toImage(s, s)
+        .then((img) => fs.gpuTextureFromImage(img))
+        .then((tex) {
+      rockSprite = tex as Object;
+    }).catchError((Object _) {
+      _spriteBuilding = false; // retry on a later rebuild
+    });
+  }
 
   /// The compiled ring fragment shader (same bundle as the atmosphere).
   /// Sheets don't spawn until it's loaded.
@@ -358,6 +430,8 @@ class _RockField {
   bool _texApplied = false;
   fs.Node? _farNode;
   fs.BillboardGeometry? _farGeo;
+  fs.SpriteMaterial? _farMat;
+  bool _farSpriteApplied = false;
   fs.Scene? _inScene;
   // Camera position (ring-local METRES) at the last rebuild.
   Vector3? _builtAt;
@@ -379,13 +453,20 @@ class _RockField {
   // camera — far below float32 resolution in a planet-scaled frame. The
   // field therefore hangs off its OWN scene-root node anchored at the
   // camera's grid cell (double-precision anchor, metre-scale offsets).
-  // 10x density over the 220 m / 24-per-cell field: finer cells, more
-  // rocks, HALF the mesh radius so the instance count stays tractable
-  // (~15k in dense bands — the billboard far field now starts at ~0.9 km
-  // and carries everything beyond).
-  static const double visRM = 1100.0;
+  // 10x density over the original 220 m / 24-per-cell field: finer cells,
+  // more rocks, HALF the mesh radius so the instance count stays
+  // tractable; the billboard far field starts at ~0.8 km and carries
+  // everything beyond.
+  //
+  // HARD CEILING: the engine's per-frame transient arena allocates in
+  // 1 MiB blocks and an instanced draw uploads ALL transforms in ONE
+  // write — 16,384 x 64 B mat4s is the block limit. 18k rocks overflowed
+  // it, aborting the whole SceneView render (full-frame BLACK at any
+  // angle with the field in frustum).
+  static const double visRM = 1000.0;
   static const double _cellM = 110.0;
-  static const int _rocksPerCell = 60;
+  static const int _rocksPerCell = 45;
+  static const int _maxMeshInstances = 14000;
   static const double _thicknessM = 90.0; // +/- around the plane
   static const double _rockMinM = 0.4, _rockMaxM = 2.6; // radii (0.8-5 m)
 
@@ -397,7 +478,9 @@ class _RockField {
   static const double farVisRM = 25000.0;
   static const double _farCellM = 700.0;
   static const int _farPerCell = 12;
-  static const int _farCapacity = 12000;
+  // 56 B/instance; keep the single transient write well under the 1 MiB
+  // block (see _maxMeshInstances).
+  static const int _farCapacity = 8000;
   static const double _farSizeMinM = 6.0, _farSizeMaxM = 40.0;
 
   void update({
@@ -453,6 +536,23 @@ class _RockField {
       _farNode?.localTransform = anchorTransform;
     }
 
+    // Texture decodes land whenever they like — retry EVERY frame (cheap
+    // null checks); the rebuild path below only runs when the camera
+    // crosses half a cell, so a parked camera would otherwise never see
+    // the moon map or the lit-sphere sprite arrive.
+    if (!_texApplied && _rockMaterial != null) {
+      final t = textures.texture('moon');
+      if (t != null) {
+        _rockMaterial!.baseColorTexture = t;
+        _texApplied = true;
+      }
+    }
+    RingNodes.ensureRockSprite(textures.image('moon'));
+    if (!_farSpriteApplied && _farMat != null && RingNodes.rockSprite != null) {
+      _farMat!.colorTexture = RingNodes.rockSprite;
+      _farSpriteApplied = true;
+    }
+
     if (_builtAt != null && (_builtAt! - local).length < _cellM * 0.5) {
       return; // field still valid — zero instance work while coasting
     }
@@ -467,19 +567,9 @@ class _RockField {
         ..roughnessFactor = 1.0
         ..metallicFactor = 0.0,
     );
-    // The moon map may still be DECODING on first spawn (nothing else
-    // requests it unless the Moon itself was rendered) — retry on rebuilds
-    // until it lands. Track with a flag: reading baseColorTexture back
-    // returns the white PLACEHOLDER, never null, so a null-check retry
-    // silently never fired and the rocks stayed untextured whenever the
-    // cache was cold.
-    if (!_texApplied) {
-      final t = textures.texture('moon');
-      if (t != null) {
-        _rockMaterial!.baseColorTexture = t;
-        _texApplied = true;
-      }
-    }
+    // Moon-map + sprite application happens in the per-frame retry block
+    // above (reading baseColorTexture back returns the white PLACEHOLDER,
+    // never null — track application with flags, not getter null-checks).
     if (_node == null) {
       final n = fs.Node()..addComponent(fs.InstancedMeshComponent(mesh));
       scene.add(n);
@@ -491,9 +581,11 @@ class _RockField {
       final n = fs.Node(
         mesh: fs.Mesh(
           farGeo,
-          // Untextured quads tinted per instance — a few px each, they
-          // read as debris specks; alpha-blended into the sheet.
-          fs.SpriteMaterial()..blendMode = fs.SpriteBlendMode.alpha,
+          // Lit-sphere moon-patch sprite (see RingNodes.ensureRockSprite),
+          // tinted per instance; alpha-blended into the sheet. The sprite
+          // may still be compositing on first spawn — retried below.
+          _farMat ??= fs.SpriteMaterial()
+            ..blendMode = fs.SpriteBlendMode.alpha,
         ),
       );
       scene.add(n);
@@ -515,9 +607,11 @@ class _RockField {
     mesh.clearInstances();
     final cells = (visRM / _cellM).ceil();
     final cx = (local.x / _cellM).floor(), cy = (local.y / _cellM).floor();
+    meshLoop:
     for (var gx = cx - cells; gx <= cx + cells; gx++) {
       for (var gy = cy - cells; gy <= cy + cells; gy++) {
         for (var k = 0; k < _rocksPerCell; k++) {
+          if (mesh.instanceCount >= _maxMeshInstances) break meshLoop;
           final h1 = _hash(gx, gy, k * 4);
           final h2 = _hash(gx, gy, k * 4 + 1);
           final h3 = _hash(gx, gy, k * 4 + 2);
@@ -629,6 +723,8 @@ class _RockField {
       _inScene?.remove(fn);
       _farNode = null;
       _farGeo = null;
+      _farMat = null;
+      _farSpriteApplied = false;
     }
     _inScene = null;
   }
