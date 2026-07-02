@@ -51,7 +51,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.0.231';
+const String kBuildStamp = 'build 0.3.0.232';
 
 /// What the camera treats as "up" while orbiting the focus.
 enum CameraUpMode {
@@ -2048,7 +2048,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
               if (_freecam) {
                 final factor = signal.scrollDelta.dy > 0 ? 1 / 1.3 : 1.3;
                 setState(() => _freecamSpeedMul =
-                    (_freecamSpeedMul * factor).clamp(0.01, 10000.0));
+                    (_freecamSpeedMul * factor).clamp(0.01, 100000.0));
               } else {
                 final factor = signal.scrollDelta.dy > 0 ? 1.15 : 1 / 1.15;
                 setState(() => _zoom(factor));
