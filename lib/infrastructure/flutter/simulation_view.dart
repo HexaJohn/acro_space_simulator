@@ -48,7 +48,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.0.213';
+const String kBuildStamp = 'build 0.3.0.214';
 
 /// What the camera treats as "up" while orbiting the focus.
 enum CameraUpMode {
@@ -1649,6 +1649,15 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           },
           onPointerMove: (e) {
             if (!_mmbDragging) return;
+            // A missed pointer-up (MMB released off-window, focus stolen)
+            // leaves the drag armed; the next unrelated drag then applies
+            // the delta from the STALE anchor and the camera leaps to a
+            // "random" orientation. Consume deltas only while the middle
+            // button is actually still held.
+            if (e.buttons & kMiddleMouseButton == 0) {
+              _mmbDragging = false;
+              return;
+            }
             final d = e.position - _lastMmb;
             _lastMmb = e.position;
             // Middle-mouse drag free-orbits the camera (azimuth/elevation).
