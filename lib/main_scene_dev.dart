@@ -97,6 +97,10 @@ void main() {
     if (params['warpApsis'] != null) {
       c.warpToApsis?.call(params['warpApsis'] == 'pe');
     }
+    // Camera up alignment: alignUp=free|axis|gravity.
+    if (params['alignUp'] != null) {
+      c.setUpMode?.call(params['alignUp']!);
+    }
     return developer.ServiceExtensionResponse.result(
         jsonEncode(c.status?.call() ?? {'error': 'no live view'}));
   });

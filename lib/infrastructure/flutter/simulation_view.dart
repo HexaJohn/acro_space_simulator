@@ -48,7 +48,23 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.0.211';
+const String kBuildStamp = 'build 0.3.0.212';
+
+/// What the camera treats as "up" while orbiting the focus.
+enum CameraUpMode {
+  /// Orbit in the ecliptic (world) frame — the default free camera.
+  free,
+
+  /// Gimbal in the focused body's tilted spin frame: azimuth circles its
+  /// equator, the pole reads upright on screen.
+  axis,
+
+  /// Gimbal about the local vertical (the gravity direction) at the focused
+  /// vessel: azimuth circles the horizon and the ground reads down —
+  /// the surface-flying view. Falls back to [axis] when a body (not a
+  /// vessel) is focused: a body focus has no single surface point.
+  gravity,
+}
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -236,6 +252,11 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       if (!mounted) return;
       _warpToApsis(periapsis: periapsis);
     };
+    c.setUpMode = (mode) {
+      if (!mounted) return;
+      final m = CameraUpMode.values.where((v) => v.name == mode).firstOrNull;
+      if (m != null) setState(() => _upMode = m);
+    };
     c.status = () => {
           'azimuth': _view.azimuth,
           'elevation': _view.elevation,
@@ -249,14 +270,32 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           'warpFactor': _clock.warpFactor,
           'warpTarget': _warpTargetLabel,
           'epochS': _clock.epoch.seconds,
+          'upMode': _upMode.name,
         };
   }
   // Latest world snapshot for the flutter_scene backend (null when the
   // software backend is active — capture cost is zero when unused).
   WorldSnapshot? _sceneWorld;
   int _sceneTick = 0;
-  // Roll the camera so screen-up follows the focused body's spin axis.
-  bool _alignUpWithBody = false;
+  // Camera up alignment: FREE orbits the ecliptic, AXIS gimbals in the
+  // focused body's tilted spin frame, GRAVITY gimbals about the local
+  // vertical at the focused vessel (surface flying: the ground reads down).
+  CameraUpMode _upMode = CameraUpMode.free;
+
+  /// Shortest rotation taking [from] onto [to] (both need not be unit).
+  static Quaternion _shortestArc(Vector3 from, Vector3 to) {
+    final f = from.normalized, t = to.normalized;
+    final d = f.dot(t).clamp(-1.0, 1.0);
+    if (d > 1 - 1e-9) return Quaternion.identity;
+    if (d < -1 + 1e-9) {
+      // Antiparallel: 180° about any axis perpendicular to [from].
+      final axis = f.cross(Vector3.unitX).lengthSquared < 1e-12
+          ? f.cross(Vector3.unitY)
+          : f.cross(Vector3.unitX);
+      return Quaternion.axisAngle(axis, math.pi);
+    }
+    return Quaternion.axisAngle(f.cross(t), math.acos(d));
+  }
   late final TextureCache _textures;
 
   // Destruction notice: set when a vessel is lost (impact / overstress / burn-up)
@@ -743,15 +782,27 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     // roll-only alignment was tried first: it levelled the horizon but the
     // orbit axes still followed the ecliptic, which felt wrong on every
     // drag.)
-    if (_alignUpWithBody && !_craftCam) {
+    if (_upMode != CameraUpMode.free && !_craftCam) {
       final bodyId = _focusBody ?? _lastFocusBody;
       final body = bodyId == null ? null : _universe.current().body(bodyId);
-      final t = body?.axialTilt ?? 0;
-      _view = _view.copyWith(
-          frame: t == 0
-              ? Quaternion.identity
-              : Quaternion.axisAngle(Vector3.unitX, t),
-          roll: 0);
+      final vessel =
+          _focusVessel == null ? null : _vessels.byId(_focusVessel!);
+      Quaternion frame;
+      if (_upMode == CameraUpMode.gravity &&
+          vessel != null &&
+          vessel.state.position.length > 1e-3) {
+        // Local vertical: the radial through the vessel (its position is
+        // dominant-body-centred with root-parallel axes, so the direction
+        // needs no reframing). Gimbal +Z onto it — azimuth then circles
+        // the horizon and elevation climbs from horizon to zenith.
+        frame = _shortestArc(Vector3.unitZ, vessel.state.position);
+      } else {
+        final t = body?.axialTilt ?? 0;
+        frame = t == 0
+            ? Quaternion.identity
+            : Quaternion.axisAngle(Vector3.unitX, t);
+      }
+      _view = _view.copyWith(frame: frame, roll: 0);
     } else if (_view.frame.x != 0 ||
         _view.frame.y != 0 ||
         _view.frame.z != 0) {
@@ -1542,17 +1593,29 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                   const SizedBox(width: 8),
                   FloatingActionButton.small(
                     heroTag: 'alignUp',
-                    tooltip: "Align camera up with the body's spin axis",
-                    backgroundColor: _alignUpWithBody
-                        ? const Color(0xFF7FB0E0)
-                        : const Color(0xFF2A3A4A),
+                    tooltip: switch (_upMode) {
+                      CameraUpMode.free =>
+                        'Camera up: free (tap: body spin axis)',
+                      CameraUpMode.axis =>
+                        'Camera up: body spin axis (tap: gravity)',
+                      CameraUpMode.gravity =>
+                        'Camera up: gravity / local vertical (tap: free)',
+                    },
+                    backgroundColor: switch (_upMode) {
+                      CameraUpMode.free => const Color(0xFF2A3A4A),
+                      CameraUpMode.axis => const Color(0xFF7FB0E0),
+                      CameraUpMode.gravity => const Color(0xFF7FE0A0),
+                    },
                     onPressed: () => setState(() {
-                      _alignUpWithBody = !_alignUpWithBody;
-                      if (!_alignUpWithBody) {
+                      _upMode = CameraUpMode
+                          .values[(_upMode.index + 1) % CameraUpMode.values.length];
+                      if (_upMode == CameraUpMode.free) {
                         _view = _view.copyWith(roll: 0);
                       }
                     }),
-                    child: const Icon(Icons.align_vertical_center),
+                    child: Icon(_upMode == CameraUpMode.gravity
+                        ? Icons.explore
+                        : Icons.align_vertical_center),
                   ),
                   const SizedBox(width: 8),
                   FloatingActionButton.small(

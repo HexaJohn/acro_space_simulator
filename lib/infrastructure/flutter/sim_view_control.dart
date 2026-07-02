@@ -34,6 +34,9 @@ class SimViewControl {
   /// like the AP/PE buttons.
   void Function(bool periapsis)? warpToApsis;
 
+  /// Camera up alignment by name: 'free' | 'axis' | 'gravity'.
+  void Function(String mode)? setUpMode;
+
   /// Current camera/backend state for assertions and closed-loop control.
   Map<String, Object?> Function()? status;
 
@@ -44,6 +47,7 @@ class SimViewControl {
     setBackend = null;
     focusBody = null;
     warpToApsis = null;
+    setUpMode = null;
     status = null;
   }
 }
