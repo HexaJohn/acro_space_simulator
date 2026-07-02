@@ -28,14 +28,23 @@ class LineNodes {
   // it; that is the caller's job per the PolylineGeometry contract).
   final Map<String, fs.PolylineGeometry> _lines = {};
 
+  // DEFERRED RETIREMENT: replaced meshes are held here for a few frames
+  // before their last reference drops. Releasing immediately lets the GPU
+  // buffers free while a previous frame still reads them (use-after-free:
+  // broken dashes / garbage shards, worse the faster the camera moves).
+  final List<(int, fs.Mesh)> _retired = [];
+  int _frame = 0;
+  static const int _retireAfterFrames = 6;
+
   // Flown-trail breadcrumbs per vessel, absolute world metres (doubles).
   final Map<String, List<Vector3>> _trails = {};
   static const int _trailCap = 240;
   static const double _trailMinStepM = 500.0; // drop denser samples
 
   // Parity with the software painter: rails cool gray, predicted paths the
-  // painter's green, trails fading cyan.
-  static final vm.Vector4 _railColor = vm.Vector4(0.45, 0.5, 0.55, 0.55);
+  // painter's green, trails fading cyan. Rails run brighter than the
+  // painter's: at system zoom they compete with the Milky Way backdrop.
+  static final vm.Vector4 _railColor = vm.Vector4(0.55, 0.62, 0.7, 0.85);
   static final vm.Vector4 _pathColor = vm.Vector4(0.5, 0.88, 0.56, 0.9);
   static final vm.Vector4 _trailColor = vm.Vector4(0.35, 0.75, 1.0, 0.9);
 
@@ -47,6 +56,8 @@ class LineNodes {
 
   void update(WorldSnapshot snap, FloatingOrigin origin,
       {SceneCamera? camera, ui.Size? viewport}) {
+    _frame++;
+    _retired.removeWhere((e) => _frame - e.$1 > _retireAfterFrames);
     final seen = <String>{};
 
     // Body orbit rails (closed rings, root-relative metres).
@@ -68,8 +79,18 @@ class LineNodes {
         }
         final centre = Vector3(cx / n, cy / n, cz / n);
         final ringRadiusM = (first - centre).length;
-        final apparentPx =
-            camera.radiusPx(origin.worldToRel(centre), ringRadiusM);
+
+        // Camera inside (or near) the ring: an edge-on giant ring sweeps
+        // the sky as near-plane-clipped dashes — pure clutter (the Moon's
+        // rail seen from Earth orbit, Earth's own rail at close zoom).
+        // CAMERA distance, not focus distance: zooming way out moves the
+        // eye far outside these rings, and the rails come back for the
+        // system map.
+        final centreDist =
+            (origin.worldToRel(centre) - camera.eyeOffset).length;
+        if (centreDist < 2.0 * ringRadiusM) continue;
+
+        final apparentPx = camera.radiusPx(origin.worldToRel(centre), ringRadiusM);
         final maxPx = viewport == null
             ? double.infinity
             : 2.0 * math.max(viewport.width, viewport.height);
@@ -82,7 +103,7 @@ class LineNodes {
             Vector3(b.orbit[i], b.orbit[i + 1], b.orbit[i + 2])));
       }
       pts.add(pts.first); // close the ring
-      _upsert('rail/${b.id}', seen, pts, _railColor, width: 1.5);
+      _upsert('rail/${b.id}', seen, pts, _railColor, width: 2.5);
     }
 
     for (final v in snap.vessels.values) {
@@ -192,6 +213,8 @@ class LineNodes {
       _scene.add(n);
       _nodes[id] = n;
     } else {
+      final old = node.mesh;
+      if (old != null) _retired.add((_frame, old));
       node.mesh = mesh;
     }
   }

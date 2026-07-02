@@ -56,12 +56,20 @@ class SceneSync {
     origin.focusWorld = _focusWorld(snap, focusVesselId, focusBodyId);
 
     _bodies.update(snap, origin);
-    _vessels.update(snap, origin);
-    _lines.update(snap, origin, camera: camera, viewport: viewport);
-    _atmospheres.update(snap, origin);
+    if (!_noVessels) _vessels.update(snap, origin);
+    if (!_noLines) {
+      _lines.update(snap, origin, camera: camera, viewport: viewport);
+    }
+    if (!_noAtmo) _atmospheres.update(snap, origin);
     _skybox.update();
     _updateSun(snap);
   }
+
+  // Layer kill switches for artifact bisection, e.g.
+  //   flutter run ... --dart-define=SCENE_NO_LINES=true
+  static const bool _noLines = bool.fromEnvironment('SCENE_NO_LINES');
+  static const bool _noAtmo = bool.fromEnvironment('SCENE_NO_ATMO');
+  static const bool _noVessels = bool.fromEnvironment('SCENE_NO_VESSELS');
 
   /// Rebuild the camera-facing line strips for this frame's camera + viewport.
   /// Call after [update], before rendering (PolylineGeometry contract).

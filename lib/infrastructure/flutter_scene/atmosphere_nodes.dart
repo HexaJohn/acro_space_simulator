@@ -79,12 +79,21 @@ class _Shell {
     _swapMesh();
   }
 
+  // Replaced meshes held a few frames so their GPU buffers can't free
+  // while an in-flight frame still reads them (see LineNodes._retired).
+  final List<(int, fs.Mesh)> _retired = [];
+  int _swapCount = 0;
+
   /// Rebuild the mesh with FRESH GPU buffers. In-place updateColors() on a
   /// persistent geometry tears against in-flight frames (black shards over
   /// the planet); a new geometry's buffers can't be referenced by any
   /// frame already recording. A few KB per change, throttled by
   /// [updateColors]' view-delta check.
   void _swapMesh() {
+    _swapCount++;
+    _retired.removeWhere((e) => _swapCount - e.$1 > 6);
+    final old = node.mesh;
+    if (old != null) _retired.add((_swapCount, old));
     node.mesh = fs.Mesh(
       fs.MeshGeometry.fromArrays(
         positions: _positions,
