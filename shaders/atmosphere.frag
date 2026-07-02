@@ -25,7 +25,10 @@ uniform AtmosphereInfo {
   vec4 params;
   // x: tint b. y: twilight softness (scene units) — width of the smooth
   // day/night transition band; the terminator blurs across it instead of
-  // cutting at the geometric horizon. zw: unused padding.
+  // cutting at the geometric horizon. z: density normalisation (1/falloff)
+  // — keeps the VERTICAL air mass constant as the falloff knob stretches
+  // the scale height, so a taller glow doesn't thicken the disc haze.
+  // w: unused padding.
   vec4 params2;
 }
 atmosphere_info;
@@ -84,22 +87,28 @@ void main() {
   float t0 = max(shell.x, 0.0);
   float t1 = shell.y;
 
-  // The planet blocks the far part of the ray.
+  // The planet blocks the far part of the ray. GUARD the miss sentinel
+  // (tFar < tNear): its tNear of 1.0 read as a real hit 1 unit ahead, so
+  // every ray that MISSED the planet clamped to a zero-length march and
+  // discarded — the limb halo never rendered at all.
   vec2 ground = raySphere(ro, rd, centre, planetR);
-  if (ground.x > 0.0 && ground.x < t1) t1 = ground.x;
+  if (ground.y >= ground.x && ground.x > 0.0 && ground.x < t1) {
+    t1 = ground.x;
+  }
   if (t1 <= t0) {
     frag_color = vec4(0.0);
     return;
   }
 
   float stepLen = (t1 - t0) / float(VIEW_SAMPLES);
+  float densNorm = atmosphere_info.params2.z;
   vec3 inscatter = vec3(0.0);
   float viewDepth = 0.0; // optical depth along the view ray so far
 
   for (int i = 0; i < VIEW_SAMPLES; i++) {
     vec3 p = ro + rd * (t0 + (float(i) + 0.5) * stepLen);
     float h = max(length(p - centre) - planetR, 0.0);
-    float density = exp(-h / scaleH) * stepLen;
+    float density = exp(-h / scaleH) * densNorm * stepLen;
     viewDepth += density;
 
     // Sunlight reaching this sample: soft twilight shadow (see
@@ -114,7 +123,7 @@ void main() {
     for (int j = 0; j < LIGHT_SAMPLES; j++) {
       vec3 q = p + sunDir * ((float(j) + 0.5) * sunStep);
       float hq = max(length(q - centre) - planetR, 0.0);
-      sunDepth += exp(-hq / scaleH) * sunStep;
+      sunDepth += exp(-hq / scaleH) * densNorm * sunStep;
     }
 
     vec3 transmittance = exp(-beta * (viewDepth + sunDepth));

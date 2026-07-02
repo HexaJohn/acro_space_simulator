@@ -200,9 +200,11 @@ class AtmosphereNodes {
           (d.atmoSeaLevelDensity > 0
               ? (d.atmoSeaLevelDensity / 1.225).clamp(0.04, 4.0).toDouble()
               : 1.0);
-      // Falloff invariance: stretching the scale height (taller glow) also
-      // divides beta, keeping the vertical optical depth — the haze
-      // thickness looking straight down — unchanged.
+      // Falloff invariance lives in the shader now: the density profile is
+      // normalised by 1/falloff (params2.z), so stretching the scale
+      // height grows the LIMB glow without thickening the nadir haze —
+      // and the betas stay full strength (dividing them here collapsed
+      // the halo brightness as falloff^1.5: no visible rim in space).
       final baseScaleHM =
           d.atmoScaleHeight > 0 ? d.atmoScaleHeight : thicknessM / 10.0;
       shell.updateUniforms(
@@ -213,7 +215,8 @@ class AtmosphereNodes {
         scaleHeightScene: lengthToScene(baseScaleHM * style.falloff),
         tintArgb: style.tintArgb ?? d.atmoScatterColorArgb,
         tintMix: style.tintMix,
-        density: baseDensity / style.falloff,
+        density: baseDensity,
+        densityNorm: 1.0 / style.falloff,
         intensity: style.intensity,
         twilightScene: lengthToScene(style.twilightM ?? 0.12 * b.radius),
       );
@@ -262,6 +265,7 @@ class _Shell {
     required int tintArgb,
     double? tintMix,
     double density = 1.0,
+    double densityNorm = 1.0,
     double intensity = 22.0,
     double twilightScene = 0.0,
   }) {
@@ -287,10 +291,10 @@ class _Shell {
     _uniforms[13] = hasTint ? (tintMix ?? 0.5) : 0.0;
     _uniforms[14] = hasTint ? ((tintArgb >> 16) & 0xff) / 255.0 : 0.0;
     _uniforms[15] = hasTint ? ((tintArgb >> 8) & 0xff) / 255.0 : 0.0;
-    // vec4 params2: tint b, twilight softness (scene units)
+    // vec4 params2: tint b, twilight softness (scene units), density norm
     _uniforms[16] = hasTint ? (tintArgb & 0xff) / 255.0 : 0.0;
     _uniforms[17] = twilightScene;
-    _uniforms[18] = 0.0;
+    _uniforms[18] = densityNorm;
     _uniforms[19] = 0.0;
     _material.setUniformBlockFromFloats('AtmosphereInfo', _uniforms);
   }
