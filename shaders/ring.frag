@@ -68,12 +68,13 @@ void main() {
   }
   colour /= alpha; // opacity-weighted band colour
 
-  // Camera hole: the asteroid field takes over inside it. Ease from 55%
-  // of the radius so the sheet dissolves under the rocks, not at a rim.
+  // Camera hole: the asteroid field takes over inside it. A very soft,
+  // wide dissolve (from 10% of the radius) so approaching the sheet reads
+  // as gradually melting into debris, never hitting a visible rim.
   float hole = ring_info.axis_v.w;
   if (hole > 0.0) {
     float d = distance(v_position, ring_info.eye_fuzz.xyz);
-    alpha *= smoothstep(hole * 0.55, hole, d);
+    alpha *= smoothstep(hole * 0.1, hole, d);
   }
 
   // Planet shadow: a fragment whose sun ray dips into the planet sphere

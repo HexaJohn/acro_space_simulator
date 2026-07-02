@@ -176,11 +176,11 @@ class RingNodes {
         eyeScene: camera == null
             ? vm.Vector3.zero()
             : relToScene(camera.eyeOffset),
-        // The hole where the rocks live: several times the field radius
-        // so the sheet never sits in your face while flying with the
-        // debris; scaled by the field's vertical fade so sheet and rocks
+        // The hole where the rocks live: many times the field radius so
+        // the sheet never sits in your face while flying with the debris;
+        // scaled by the field's vertical fade so sheet and rocks
         // cross-fade together when climbing out of the plane.
-        holeScene: field.fade * lengthToScene(_RockField.visRM) * 3.0,
+        holeScene: field.fade * lengthToScene(_RockField.visRM) * 10.0,
         bands: bands,
         baseArgb: spec.$4,
         intensity: _intensity[b.id] ?? 0.3,
@@ -374,7 +374,9 @@ class _RockField {
     final radialM = math.sqrt(local.x * local.x + local.y * local.y);
     final innerM = inner * body.radius, outerM = outer * body.radius;
 
-    const fadeBandM = 3000.0; // vertical activation/fade band
+    // Wide vertical activation/fade band: approaching the plane eases the
+    // rocks in (and the sheet's hole open) over tens of km, not a snap.
+    const fadeBandM = 10000.0;
     final active = local.z.abs() < fadeBandM &&
         radialM > innerM - 50000 &&
         radialM < outerM + 50000;

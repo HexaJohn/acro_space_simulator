@@ -47,12 +47,14 @@ fs.PerspectiveCamera toSceneCamera(
   // quantum of ~10,000 km at a planet seen from orbit — planet-sized, so
   // the sphere's own far side z-fights through as angular black shards
   // that shift with every camera matrix change. Scale the near plane with
-  // the eye distance instead: at range d the closest visible geometry is
-  // ~d (the focus), so near = d/2000 wastes nothing and pins the quantum
-  // at ~d^2/near/2^24 ≈ d/8000 — always sub-pixel-scale relative to the
-  // framed scene. Floor 1 m for surface/close-up work.
+  // the eye distance instead. d/20 (not the earlier d/2000): the closest
+  // content is essentially never inside a twentieth of the framed range,
+  // and the 100x larger near buys 100x finer far-field depth — at freecam
+  // ranges of a few hundred metres INSIDE Saturn's rings, d/2000 put the
+  // near plane at 1 m and the planet+ring stack 100,000 km away shimmered
+  // in depth-quantum flicker while flying. Floor 1 m.
   final eyeDistanceM = eye.length;
-  final adaptiveNearM = math.max(1.0, eyeDistanceM / 2000.0);
+  final adaptiveNearM = math.max(1.0, eyeDistanceM / 20.0);
 
   return fs.PerspectiveCamera(
     position: relToScene(eye),
