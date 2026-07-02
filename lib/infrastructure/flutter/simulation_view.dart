@@ -51,7 +51,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.0.227';
+const String kBuildStamp = 'build 0.3.0.228';
 
 /// What the camera treats as "up" while orbiting the focus.
 enum CameraUpMode {
@@ -1305,6 +1305,44 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     ),
   );
 
+  /// Metres with an engineering suffix, for the depth-plane sliders.
+  static String _engM(double v) => v >= 1e9
+      ? '${(v / 1e9).toStringAsFixed(1)} Gm'
+      : v >= 1e6
+          ? '${(v / 1e6).toStringAsFixed(1)} Mm'
+          : v >= 1e3
+              ? '${(v / 1e3).toStringAsFixed(1)} km'
+              : '${v.toStringAsFixed(1)} m';
+
+  /// Compact log10-scale slider spanning 10^[minExp]..10^[maxExp] metres.
+  Widget _logSlider({
+    required double value,
+    required double minExp,
+    required double maxExp,
+    required ValueChanged<double> onChanged,
+  }) {
+    final exp = (math.log(value) / math.ln10).clamp(minExp, maxExp).toDouble();
+    return SizedBox(
+      height: 26,
+      child: SliderTheme(
+        data: SliderThemeData(
+          trackHeight: 2,
+          thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+          overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
+          activeTrackColor: const Color(0xFF7FB0E0),
+          inactiveTrackColor: const Color(0x337FB0E0),
+          thumbColor: const Color(0xFF7FB0E0),
+        ),
+        child: Slider(
+          value: exp,
+          min: minExp,
+          max: maxExp,
+          onChanged: (e) => onChanged(math.pow(10.0, e).toDouble()),
+        ),
+      ),
+    );
+  }
+
   Widget _debugPanel() {
     final rows = <(String, bool, DebugLayers Function(bool))>[
       ('Skybox', _layers.skybox, (v) => _layers.copyWith(skybox: v)),
@@ -1399,6 +1437,89 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
               ),
             ),
           ),
+          // Depth planes (3D backend): adaptive by default; unchecking pins
+          // near/far to log-scale sliders (same overrides as the
+          // ext.acro.camera?near=&far= dev extension — the HUD depth line
+          // marks pinned values with '*').
+          const Padding(
+            padding: EdgeInsets.only(left: 4, top: 6, bottom: 2),
+            child: Text(
+              'DEPTH PLANES',
+              style: TextStyle(color: Color(0xFF7FB0E0), fontSize: 11, fontWeight: FontWeight.bold),
+            ),
+          ),
+          InkWell(
+            onTap: () => setState(() {
+              final adaptive = SceneCameraDebug.nearOverrideM == null &&
+                  SceneCameraDebug.farOverrideM == null;
+              if (adaptive) {
+                // Seed the sliders from what the adaptive formula gives now.
+                final eyeM = _range + _focusBodyRadius;
+                SceneCameraDebug.nearOverrideM = math.max(1.0, eyeM / 20.0);
+                SceneCameraDebug.farOverrideM = math.max(5e12, eyeM * 40);
+              } else {
+                SceneCameraDebug.nearOverrideM = null;
+                SceneCameraDebug.farOverrideM = null;
+              }
+            }),
+            child: Row(
+              children: [
+                Checkbox(
+                  value: SceneCameraDebug.nearOverrideM == null &&
+                      SceneCameraDebug.farOverrideM == null,
+                  onChanged: (_) => setState(() {
+                    final adaptive = SceneCameraDebug.nearOverrideM == null &&
+                        SceneCameraDebug.farOverrideM == null;
+                    if (adaptive) {
+                      final eyeM = _range + _focusBodyRadius;
+                      SceneCameraDebug.nearOverrideM =
+                          math.max(1.0, eyeM / 20.0);
+                      SceneCameraDebug.farOverrideM = math.max(5e12, eyeM * 40);
+                    } else {
+                      SceneCameraDebug.nearOverrideM = null;
+                      SceneCameraDebug.farOverrideM = null;
+                    }
+                  }),
+                  visualDensity: VisualDensity.compact,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                const Text('Adaptive',
+                    style: TextStyle(color: Color(0xFFB9C9DC), fontSize: 12)),
+              ],
+            ),
+          ),
+          if (SceneCameraDebug.nearOverrideM != null) ...[
+            Padding(
+              padding: const EdgeInsets.only(left: 4),
+              child: Text(
+                'near ${_engM(SceneCameraDebug.nearOverrideM!)}',
+                style: const TextStyle(color: Color(0xFF7FB0E0), fontSize: 11),
+              ),
+            ),
+            _logSlider(
+              value: SceneCameraDebug.nearOverrideM!,
+              minExp: -1, // 0.1 m
+              maxExp: 9, // 1,000,000 km
+              onChanged: (v) =>
+                  setState(() => SceneCameraDebug.nearOverrideM = v),
+            ),
+          ],
+          if (SceneCameraDebug.farOverrideM != null) ...[
+            Padding(
+              padding: const EdgeInsets.only(left: 4),
+              child: Text(
+                'far ${_engM(SceneCameraDebug.farOverrideM!)}',
+                style: const TextStyle(color: Color(0xFF7FB0E0), fontSize: 11),
+              ),
+            ),
+            _logSlider(
+              value: SceneCameraDebug.farOverrideM!,
+              minExp: 5, // 100 km
+              maxExp: 14, // beyond the system
+              onChanged: (v) =>
+                  setState(() => SceneCameraDebug.farOverrideM = v),
+            ),
+          ],
           // Destruction cheats: skip overheat / aero-stress / impact so a craft
           // survives an otherwise-fatal profile. Rebuilds the tick on change.
           const Padding(
