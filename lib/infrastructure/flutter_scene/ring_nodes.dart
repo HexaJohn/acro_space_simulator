@@ -184,7 +184,7 @@ class RingNodes {
           debugLine = '${b.id}  z=${(field.lastZM / 1000).toStringAsFixed(1)}km '
               'r=${(field.lastRadialM / b.radius).toStringAsFixed(2)}R '
               'fade=${field.fade.toStringAsFixed(2)} '
-              'rocks=${field.instanceCount}';
+              'rocks=${field.instanceCount} far=${field.farCount}';
         }
       }
 
@@ -355,6 +355,8 @@ class _RockField {
   fs.Node? _node;
   fs.InstancedMesh? _mesh;
   fs.PhysicallyBasedMaterial? _rockMaterial;
+  fs.Node? _farNode;
+  fs.BillboardGeometry? _farGeo;
   fs.Scene? _inScene;
   // Camera position (ring-local METRES) at the last rebuild.
   Vector3? _builtAt;
@@ -369,6 +371,7 @@ class _RockField {
   double lastZM = double.nan;
   double lastRadialM = double.nan;
   int get instanceCount => _mesh?.instanceCount ?? 0;
+  int get farCount => _farGeo?.instanceCount ?? 0;
 
   // All lengths in METRES, ring-local. Real ring debris tops out at a few
   // metres diameter, so the whole field lives within a couple of km of the
@@ -377,12 +380,20 @@ class _RockField {
   // camera's grid cell (double-precision anchor, metre-scale offsets).
   static const double visRM = 2200.0;
   static const double _cellM = 220.0;
-  // ~7k live instances in dense bands (hardware instanced: still 1-2 draw
-  // calls; the cost is the O(N) per-frame transform repack, fine at this
-  // count). Was 7/cell (~2k) — read as sparse.
   static const int _rocksPerCell = 24;
   static const double _thicknessM = 90.0; // +/- around the plane
   static const double _rockMinM = 0.4, _rockMaxM = 2.6; // radii (0.8-5 m)
+
+  // FAR FIELD: distant debris as camera-facing billboards (one instanced
+  // draw for the whole batch — BillboardGeometry carries centre/size/colour
+  // per instance). Bridges the mesh rocks to the flat sheet: quads stand in
+  // for CLUMPS (larger than any single rock), thinning with distance until
+  // the sheet takes over near the camera-hole radius.
+  static const double farVisRM = 25000.0;
+  static const double _farCellM = 700.0;
+  static const int _farPerCell = 12;
+  static const int _farCapacity = 12000;
+  static const double _farSizeMinM = 6.0, _farSizeMaxM = 40.0;
 
   void update({
     required fs.Scene scene,
@@ -427,12 +438,14 @@ class _RockField {
     // (kilometres off within a second; the rocks were simply never where
     // the camera was).
     final anchor = _anchor;
-    if (_node != null && anchor != null) {
-      _node!.localTransform = vm.Matrix4.compose(
+    if (anchor != null) {
+      final anchorTransform = vm.Matrix4.compose(
         origin.worldToScene(bodyWorld + bodyQuat.rotate(anchor)),
         quatToScene(bodyQuat),
         vm.Vector3.all(1.0),
       );
+      _node?.localTransform = anchorTransform;
+      _farNode?.localTransform = anchorTransform;
     }
 
     if (_builtAt != null && (_builtAt! - local).length < _cellM * 0.5) {
@@ -460,6 +473,19 @@ class _RockField {
       scene.add(n);
       _node = n;
       _inScene = scene;
+    }
+    final farGeo = _farGeo ??= fs.BillboardGeometry(capacity: _farCapacity);
+    if (_farNode == null) {
+      final n = fs.Node(
+        mesh: fs.Mesh(
+          farGeo,
+          // Untextured quads tinted per instance — a few px each, they
+          // read as debris specks; alpha-blended into the sheet.
+          fs.SpriteMaterial()..blendMode = fs.SpriteBlendMode.alpha,
+        ),
+      );
+      scene.add(n);
+      _farNode = n;
     }
 
     // Anchor the node at the camera's grid cell centre, in the ring plane:
@@ -518,6 +544,60 @@ class _RockField {
         }
       }
     }
+
+    // FAR FIELD: billboard clumps from the mesh edge out to [farVisRM],
+    // thinning with distance (constant-ish angular density) until the
+    // sheet's own brightness takes over. Same seeded-hash determinism on a
+    // coarser grid; positions are node-local scene units like the mesh
+    // rocks, sizes grow with distance so a "clump" stays a few px.
+    final rockRgb = _rockColor();
+    var farN = 0;
+    final fCells = (farVisRM / _farCellM).ceil();
+    final fcx = (local.x / _farCellM).floor(),
+        fcy = (local.y / _farCellM).floor();
+    outer:
+    for (var gx = fcx - fCells; gx <= fcx + fCells; gx++) {
+      for (var gy = fcy - fCells; gy <= fcy + fCells; gy++) {
+        for (var k = 0; k < _farPerCell; k++) {
+          final h1 = _hash(gx, gy, k * 4 + 101);
+          final h2 = _hash(gx, gy, k * 4 + 102);
+          final h3 = _hash(gx, gy, k * 4 + 103);
+          final h4 = _hash(gx, gy, k * 4 + 104);
+          final pxM = (gx + h1) * _farCellM;
+          final pyM = (gy + h2) * _farCellM;
+          final rM = math.sqrt(pxM * pxM + pyM * pyM);
+          if (rM < innerM || rM > outerM) continue;
+          final t = (rM - innerM) / (outerM - innerM);
+
+          final pzM = (h4 - 0.5) * 2.0 * _thicknessM;
+          final dx = pxM - local.x, dy = pyM - local.y, dz = pzM - local.z;
+          final distM = math.sqrt(dx * dx + dy * dy + dz * dz);
+          if (distM < visRM * 0.8 || distM > farVisRM) continue;
+          // Density: band profile x 1/distance thinning (keeps the screen
+          // density roughly constant instead of quadratically exploding).
+          if (h3 > _bandAlpha(t) * (2500.0 / distM).clamp(0.0, 1.0) * 1.2) {
+            continue;
+          }
+
+          final sizeM = _farSizeMinM +
+              (distM / farVisRM) * (_farSizeMaxM - _farSizeMinM);
+          final s = lengthToScene(sizeM) * (0.7 + h4 * 0.6);
+          farGeo.setInstance(
+            farN,
+            center: vm.Vector3(lengthToScene(pxM - ax),
+                lengthToScene(pyM - ay), lengthToScene(pzM)),
+            width: s,
+            height: s,
+            rotation: h1 * math.pi * 2,
+            color: vm.Vector4(
+                rockRgb.x, rockRgb.y, rockRgb.z, 0.85 * fade),
+          );
+          farN++;
+          if (farN >= _farCapacity) break outer;
+        }
+      }
+    }
+    farGeo.commit(farN);
   }
 
   void _despawn() {
@@ -530,8 +610,14 @@ class _RockField {
       _rockMaterial = null;
       _builtAt = null;
       _anchor = null;
-      _inScene = null;
     }
+    final fn = _farNode;
+    if (fn != null) {
+      _inScene?.remove(fn);
+      _farNode = null;
+      _farGeo = null;
+    }
+    _inScene = null;
   }
 
   double _bandAlpha(double t) {
