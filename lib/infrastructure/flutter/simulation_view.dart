@@ -2,13 +2,13 @@
 import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data' show Uint8List;
+import 'dart:ui' as ui show Image;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
-import 'package:flutter/gestures.dart'
-    show PointerScrollEvent, kMiddleMouseButton;
-import 'package:flutter/services.dart'
-    show LogicalKeyboardKey, KeyEvent, KeyDownEvent, KeyUpEvent;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter/gestures.dart' show PointerScrollEvent, kMiddleMouseButton;
+import 'package:flutter/services.dart' show LogicalKeyboardKey, KeyEvent, KeyDownEvent, KeyUpEvent;
 
 import '../../domain/autonomy/pilot_input.dart';
 import '../../domain/shared/quaternion.dart';
@@ -26,6 +26,8 @@ import '../../application/persistence/game_state_codec.dart';
 import '../../application/ports/compute_port.dart';
 import '../../application/usecases/advance_simulation_tick.dart';
 import '../../domain/orbits/soi_transition_service.dart';
+import '../../domain/orbits/state_vector_converter.dart';
+import '../../domain/simulation/epoch.dart';
 import '../../domain/science/research_ledger.dart';
 import '../../domain/science/tech_tree.dart';
 import '../../domain/simulation/simulation_clock.dart';
@@ -34,6 +36,16 @@ import '../../domain/planetary/atmospheric_composition.dart';
 import '../../domain/universe/celestial_body.dart' show BodyId, CelestialBody;
 import '../../domain/vessel/vessel.dart';
 import '../sample_world.dart';
+import '../flutter_scene/atmosphere_nodes.dart';
+import '../flutter_scene/environment_baker.dart';
+import '../flutter_scene/line_nodes.dart';
+import '../flutter_scene/render_backend.dart';
+import '../flutter_scene/ring_nodes.dart';
+import '../flutter_scene/scene_camera_adapter.dart';
+import '../flutter_scene/scene_sync.dart';
+import '../flutter_scene/scene_hud_overlay.dart';
+import '../flutter_scene/scene_render_view.dart';
+import 'sim_view_control.dart';
 import 'debug_layers.dart';
 import 'nav_ball.dart';
 import 'screens/city_builder_screen.dart';
@@ -42,7 +54,23 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 2026-06-19.173';
+const String kBuildStamp = 'build 0.3.0.252';
+
+/// What the camera treats as "up" while orbiting the focus.
+enum CameraUpMode {
+  /// Orbit in the ecliptic (world) frame — the default free camera.
+  free,
+
+  /// Gimbal in the focused body's tilted spin frame: azimuth circles its
+  /// equator, the pole reads upright on screen.
+  axis,
+
+  /// Gimbal about the local vertical (the gravity direction) at the focused
+  /// vessel: azimuth circles the horizon and the ground reads down —
+  /// the surface-flying view. Falls back to [axis] when a body (not a
+  /// vessel) is focused: a body focus has no single surface point.
+  gravity,
+}
 
 /// Infrastructure widget: owns the game loop (a Flutter [Ticker]), drives the
 /// [AdvanceSimulationTick] use case, and repaints the [TopDownPainter] from a
@@ -58,18 +86,22 @@ class SimulationView extends StatefulWidget {
   /// show as named craft with their own orbits/trajectories in the sim.
   final List<Vessel> trafficVessels;
 
+  /// World-viewport backend to start with. Software remains the default;
+  /// dev entrypoints (main_scene_dev.dart) boot straight into flutter_scene.
+  final RenderBackend initialBackend;
+
   const SimulationView({
     super.key,
     this.injectedVessel,
     this.trafficVessels = const [],
+    this.initialBackend = RenderBackend.software,
   });
 
   @override
   State<SimulationView> createState() => _SimulationViewState();
 }
 
-class _SimulationViewState extends State<SimulationView>
-    with SingleTickerProviderStateMixin {
+class _SimulationViewState extends State<SimulationView> with SingleTickerProviderStateMixin {
   late final Ticker _ticker;
   late final SimulationClock _clock;
   late AdvanceSimulationTick _advance;
@@ -128,6 +160,10 @@ class _SimulationViewState extends State<SimulationView>
   /// Radius (m) of the body the camera is locked on, or 0 (vessel / none). Lets
   /// the perspective eye measure its range from the SURFACE, not the centre.
   double get _focusBodyRadius {
+    // Freecam: the range measures from the FREE ANCHOR, not a body surface
+    // (leaving the locked body's radius in put the eye 58,000 km from the
+    // anchor at "range 250 m" over Saturn).
+    if (_freecam) return 0;
     if (_focusBody == null) return 0;
     return _universe.current().body(_focusBody!)?.radius ?? 0;
   }
@@ -142,7 +178,12 @@ class _SimulationViewState extends State<SimulationView>
           azimuth: _view.azimuth,
           elevation: _view.elevation,
           roll: _view.roll,
+          frame: _view.frame,
           range: _range + _focusBodyRadius,
+          // Range can go to 1 m; a fixed 1 m near plane would clip the
+          // whole craft there. Track the range down (never above 1 m so
+          // nothing else changes).
+          near: math.min(1.0, _range * 0.05),
           fovY: _fovDeg * math.pi / 180,
           viewportH: _screenH,
         )
@@ -153,6 +194,249 @@ class _SimulationViewState extends State<SimulationView>
   static const double _orbitStep = 0.1309; // ~7.5 deg per arrow press
   DebugLayers _layers = const DebugLayers();
   bool _showDebugPanel = false;
+  // World-viewport backend. Software (TopDownPainter) is the default; the
+  // flutter_scene 3D backend mounts in its place when toggled. Camera state,
+  // input handling, and every HUD overlay stay shared between the two.
+  // Persisted: the FAB toggle saves the choice; the saved value wins over
+  // [SimulationView.initialBackend] once loaded (dev entrypoints that pass
+  // an explicit backend skip persistence entirely).
+  late RenderBackend _renderBackend = widget.initialBackend;
+  static const String _backendPrefKey = 'renderBackend';
+
+  Future<void> _loadBackendPref() async {
+    if (widget.initialBackend != RenderBackend.software) return; // dev override
+    final prefs = await SharedPreferences.getInstance();
+    final name = prefs.getString(_backendPrefKey);
+    final saved = RenderBackend.values
+        .where((b) => b.name == name)
+        .firstOrNull;
+    if (saved != null && mounted && saved != _renderBackend) {
+      setState(() => _renderBackend = saved);
+    }
+  }
+
+  void _setBackend(RenderBackend backend) {
+    setState(() => _renderBackend = backend);
+    // Fire-and-forget: preference loss is cosmetic.
+    unawaited(SharedPreferences.getInstance()
+        .then((p) => p.setString(_backendPrefKey, backend.name)));
+  }
+
+  /// Wire the programmatic control surface (VM-service extensions in
+  /// main_scene_dev.dart drive these). Every mutation goes through
+  /// setState, exactly like user input.
+  void _registerControl() {
+    final c = SimViewControl.instance;
+    c.orbit = ({double? azimuth, double? elevation, double? roll}) {
+      if (!mounted) return;
+      setState(() {
+        _view = _view.copyWith(
+          azimuth: azimuth,
+          elevation: elevation,
+          roll: roll,
+        );
+      });
+    };
+    c.zoom = ({double? rangeM, double? metresPerPixel}) {
+      if (!mounted) return;
+      setState(() {
+        if (rangeM != null) _range = rangeM.clamp(1.0, 1e13);
+        if (metresPerPixel != null) {
+          _metresPerPixel = metresPerPixel.clamp(1e-3, 1e12);
+        }
+      });
+    };
+    c.setPerspective = (perspective) {
+      if (!mounted) return;
+      setState(() => _perspectiveMode = perspective);
+    };
+    c.setBackend = (backend) {
+      if (!mounted) return;
+      _setBackend(backend);
+    };
+    c.focusBody = (bodyId) {
+      if (!mounted) return;
+      // Route through the SAME path as the LOOK AT dropdown: setting
+      // _focusBody directly skips its bookkeeping (_targetIndex, dropping
+      // manual mode for an unpilotable body) and crashed downstream.
+      final idx = _targets.indexWhere((t) => t.b?.value == bodyId);
+      if (idx >= 0) _selectTarget(idx);
+    };
+    c.warpToApsis = (periapsis) {
+      if (!mounted) return;
+      _warpToApsis(periapsis: periapsis);
+    };
+    c.setUpMode = (mode) {
+      if (!mounted) return;
+      final m = CameraUpMode.values.where((v) => v.name == mode).firstOrNull;
+      if (m != null) setState(() => _upMode = m);
+    };
+    c.setFreecam = (on, pos) {
+      if (!mounted) return;
+      setState(() {
+        if (on != _freecam) _toggleFreecam();
+        if (pos != null) {
+          _freecamRelLocal =
+              _refBodyQuat().conjugate.rotate(pos - _refBodyWorld());
+        }
+      });
+    };
+    c.freecamToRing = (bodyId, radialMult, zM) {
+      if (!mounted) return;
+      final snap = _sceneWorld;
+      final b = snap?.bodies[bodyId];
+      if (b == null) return;
+      setState(() {
+        if (!_freecam) _toggleFreecam();
+        _freecamRef = BodyId(bodyId);
+        // Body-local IS the ring frame — no rotation needed.
+        _freecamRelLocal = Vector3(radialMult * b.radius, 0, zM);
+      });
+    };
+    c.status = () => {
+          'azimuth': _view.azimuth,
+          'elevation': _view.elevation,
+          'roll': _view.roll,
+          'rangeM': _range,
+          'metresPerPixel': _metresPerPixel,
+          'perspective': _perspectiveMode,
+          'backend': _renderBackend.name,
+          'focusVessel': _focusVessel?.value,
+          'focusBody': _focusBody?.value,
+          'warpFactor': _clock.warpFactor,
+          'warpTarget': _warpTargetLabel,
+          'epochS': _clock.epoch.seconds,
+          'upMode': _upMode.name,
+          'freecam': _freecam,
+          'freePos': () {
+            final p = _freecamWorld;
+            return [p.x, p.y, p.z];
+          }(),
+          'focusWorld': () {
+            final f = _currentFocusWorld();
+            return [f.x, f.y, f.z];
+          }(),
+        };
+  }
+  // Latest world snapshot for the flutter_scene backend (null when the
+  // software backend is active — capture cost is zero when unused).
+  WorldSnapshot? _sceneWorld;
+  int _sceneTick = 0;
+  // Camera up alignment: FREE orbits the ecliptic, AXIS gimbals in the
+  // focused body's tilted spin frame, GRAVITY gimbals about the local
+  // vertical at the focused vessel (surface flying: the ground reads down).
+  CameraUpMode _upMode = CameraUpMode.free;
+  // Gravity-mode frame state for the INCREMENTAL update (see the frame
+  // block): fresh shortest-arc per frame flips when the radial nears -Z.
+  Quaternion? _gravFrame;
+  Vector3? _gravRadial;
+
+  // Freecam: the camera orbits a FREE ANCHOR flown with WASD/QE (Shift
+  // boosts) instead of the locked target; MMB orbit and wheel zoom keep
+  // working around it. 3D backend only (the software painter still centres
+  // on the locked target). Mutually exclusive with manual flight — both
+  // want WASD.
+  //
+  // The anchor is stored in the reference body's ROTATING frame (body-
+  // local coordinates, spin included). Two reasons: an absolute anchor
+  // near Saturn fell out of its 9.7 km/s ring plane within a second of
+  // hovering, and an inertial (non-spinning) anchor watched the ring
+  // debris — which rides the spin frame — sweep past at ~16 km/s (real
+  // B-ring orbital speed: "they zip through the screen"). Co-rotating
+  // makes hovering read like station-keeping: the rocks sit still and
+  // flying through them is YOUR motion.
+  bool _freecam = false;
+  BodyId? _freecamRef;
+  Vector3 _freecamRelLocal = Vector3.zero;
+
+  /// Freecam flight-speed multiplier, driven by the scroll wheel while the
+  /// freecam is active (wheel = speed, not zoom, when flying).
+  double _freecamSpeedMul = 1.0;
+
+  BodySnapshot? _refBody() {
+    final ref = _freecamRef?.value;
+    if (ref == null) return null;
+    return _sceneWorld?.bodies[ref];
+  }
+
+  Quaternion _refBodyQuat() {
+    final b = _refBody();
+    return b == null
+        ? Quaternion.identity
+        : Quaternion(b.qw, b.qx, b.qy, b.qz);
+  }
+
+  Vector3 get _freecamWorld {
+    final b = _refBody();
+    if (b != null) {
+      return Vector3(b.px, b.py, b.pz) + _refBodyQuat().rotate(_freecamRelLocal);
+    }
+    return _freecamRelLocal; // absolute fallback (ref not in the snapshot)
+  }
+
+  Vector3 _refBodyWorld() {
+    final b = _refBody();
+    return b == null ? Vector3.zero : Vector3(b.px, b.py, b.pz);
+  }
+
+  void _toggleFreecam() {
+    setState(() {
+      _freecam = !_freecam;
+      if (_freecam) {
+        _freecamRef = _focusBody ?? _lastFocusBody;
+        _freecamRelLocal = _refBodyQuat()
+            .conjugate
+            .rotate(_currentFocusWorld() - _refBodyWorld());
+        _manualControl = false;
+        _craftCam = false;
+        // Fly cam wants the eye AT the anchor: a stale multi-thousand-km
+        // orbit range keeps the camera far away AND (near = range/20)
+        // clips everything within kilometres — the entire ring asteroid
+        // field vanished behind the near plane. The wheel is the speed
+        // knob in freecam, so it can't zoom back in; [ ] still can.
+        _range = math.min(_range, 100.0);
+      }
+    });
+  }
+
+  /// Absolute world position (metres) of the current camera focus, from the
+  /// latest snapshot — the freecam anchor starts here so toggling is
+  /// seamless.
+  Vector3 _currentFocusWorld() {
+    final snap = _sceneWorld;
+    if (snap == null) return _freecamWorld;
+    final vid = _focusVessel?.value;
+    if (vid != null) {
+      final v = snap.vessels[vid];
+      if (v != null) {
+        final b = snap.bodies[v.body];
+        final bodyPos =
+            b == null ? Vector3.zero : Vector3(b.px, b.py, b.pz);
+        return bodyPos + Vector3(v.px, v.py, v.pz);
+      }
+    }
+    final bid = _focusBody?.value;
+    if (bid != null) {
+      final b = snap.bodies[bid];
+      if (b != null) return Vector3(b.px, b.py, b.pz);
+    }
+    return _freecamWorld;
+  }
+
+  /// Shortest rotation taking [from] onto [to] (both need not be unit).
+  static Quaternion _shortestArc(Vector3 from, Vector3 to) {
+    final f = from.normalized, t = to.normalized;
+    final d = f.dot(t).clamp(-1.0, 1.0);
+    if (d > 1 - 1e-9) return Quaternion.identity;
+    if (d < -1 + 1e-9) {
+      // Antiparallel: 180° about any axis perpendicular to [from].
+      final axis = f.cross(Vector3.unitX).lengthSquared < 1e-12
+          ? f.cross(Vector3.unitY)
+          : f.cross(Vector3.unitX);
+      return Quaternion.axisAngle(axis, math.pi);
+    }
+    return Quaternion.axisAngle(f.cross(t), math.acos(d));
+  }
   late final TextureCache _textures;
 
   // Destruction notice: set when a vessel is lost (impact / overstress / burn-up)
@@ -170,8 +454,7 @@ class _SimulationViewState extends State<SimulationView>
   final FocusNode _keyFocus = FocusNode();
   final Set<LogicalKeyboardKey> _keysDown = {};
   // ignore: prefer_final_fields
-  bool _manualControl =
-      false; // when true, autopilot for the focus vessel is off
+  bool _manualControl = false; // when true, autopilot for the focus vessel is off
 
   // ---- Touchscreen flight inputs (on-screen controls) ----
   double _touchPitch = 0; // -1..1 from the virtual joystick
@@ -184,21 +467,13 @@ class _SimulationViewState extends State<SimulationView>
   /// active; they sum so either input device works).
   PilotInput _readPilotInput() {
     double axis(LogicalKeyboardKey neg, LogicalKeyboardKey pos) =>
-        (_keysDown.contains(pos) ? 1.0 : 0.0) -
-        (_keysDown.contains(neg) ? 1.0 : 0.0);
-    final keyThrottle = _keysDown.contains(LogicalKeyboardKey.shiftLeft)
-        ? 1.0
-        : 0.0;
+        (_keysDown.contains(pos) ? 1.0 : 0.0) - (_keysDown.contains(neg) ? 1.0 : 0.0);
+    final keyThrottle = _keysDown.contains(LogicalKeyboardKey.shiftLeft) ? 1.0 : 0.0;
     return PilotInput(
-      pitch:
-          (axis(LogicalKeyboardKey.keyS, LogicalKeyboardKey.keyW) + _touchPitch)
-              .clamp(-1.0, 1.0),
-      yaw: (axis(LogicalKeyboardKey.keyA, LogicalKeyboardKey.keyD) + _touchYaw)
-          .clamp(-1.0, 1.0),
+      pitch: (axis(LogicalKeyboardKey.keyS, LogicalKeyboardKey.keyW) + _touchPitch).clamp(-1.0, 1.0),
+      yaw: (axis(LogicalKeyboardKey.keyA, LogicalKeyboardKey.keyD) + _touchYaw).clamp(-1.0, 1.0),
       // Negated: roll was inverted (Q/E + the touch slider rolled the wrong way).
-      roll: (-(axis(LogicalKeyboardKey.keyQ, LogicalKeyboardKey.keyE) +
-                  _touchRoll))
-          .clamp(-1.0, 1.0),
+      roll: (-(axis(LogicalKeyboardKey.keyQ, LogicalKeyboardKey.keyE) + _touchRoll)).clamp(-1.0, 1.0),
       throttle: keyThrottle > 0 ? keyThrottle : _touchThrottle,
     );
   }
@@ -213,13 +488,9 @@ class _SimulationViewState extends State<SimulationView>
       _keysDown.add(e.logicalKey);
       // Camera zoom with [ and ].
       if (e.logicalKey == LogicalKeyboardKey.bracketLeft) {
-        setState(
-          () => _metresPerPixel = (_metresPerPixel * 1.25).clamp(0.5, 2e10),
-        );
+        setState(() => _metresPerPixel = (_metresPerPixel * 1.25).clamp(0.5, 2e10));
       } else if (e.logicalKey == LogicalKeyboardKey.bracketRight) {
-        setState(
-          () => _metresPerPixel = (_metresPerPixel / 1.25).clamp(0.5, 2e10),
-        );
+        setState(() => _metresPerPixel = (_metresPerPixel / 1.25).clamp(0.5, 2e10));
       } else if (e.logicalKey == LogicalKeyboardKey.comma) {
         _stepWarp(-1); // , slows time
       } else if (e.logicalKey == LogicalKeyboardKey.period) {
@@ -257,6 +528,14 @@ class _SimulationViewState extends State<SimulationView>
     }
 
     if (_perspectiveMode) {
+      if (_freecam) {
+        // Scroll wheel drives the flight-speed multiplier while flying.
+        final mul = _freecamSpeedMul >= 10
+            ? _freecamSpeedMul.toStringAsFixed(0)
+            : _freecamSpeedMul.toStringAsFixed(2);
+        return 'FREECAM  range ${eng(_range)} m  spd x$mul  '
+            'fov ${_fovDeg.toStringAsFixed(0)}°';
+      }
       // _range is the eye's altitude above the focused body's surface.
       final label = _focusBody != null ? 'alt' : 'range';
       return 'PERSP  $label ${eng(_range)} m  fov ${_fovDeg.toStringAsFixed(0)}°';
@@ -266,41 +545,134 @@ class _SimulationViewState extends State<SimulationView>
     return 'ORTHO  ${eng(_metresPerPixel)} m/px  (100px=${eng(kmPer100px)} km)';
   }
 
+  /// Depth-plane + ring-field diagnostics for the 3D backend HUD: mirrors
+  /// the near/far formula in scene_camera_adapter (keep in sync) and
+  /// appends [RingNodes.debugLine] when a ringed body is near.
+  String _depthDebugLabel() {
+    final eyeM = _range + _focusBodyRadius;
+    final nearOv = SceneCameraDebug.nearOverrideM;
+    final farOv = SceneCameraDebug.farOverrideM;
+    final nearM = nearOv ?? math.max(0.05, eyeM / 20.0);
+    final farM = farOv ?? math.max(5e12, eyeM * 40);
+    String eng(double v) => v >= 1e9
+        ? '${(v / 1e9).toStringAsFixed(1)}Gm'
+        : v >= 1e6
+            ? '${(v / 1e6).toStringAsFixed(1)}Mm'
+            : v >= 1e3
+                ? '${(v / 1e3).toStringAsFixed(1)}km'
+                : '${v.toStringAsFixed(1)}m';
+    final rings = RingNodes.debugLine;
+    return 'near ${eng(nearM)}${nearOv != null ? '*' : ''}  '
+        'far ${eng(farM)}${farOv != null ? '*' : ''}  '
+        'exp ${SceneSync.lastExposure.toStringAsFixed(2)}  '
+        'aa=${SceneSync.effectiveAa}'
+        '${rings == null ? '' : '  |  $rings'}';
+  }
+
   /// Zoom by [factor] (>1 = out): adjusts ortho mpp or perspective range.
   void _zoom(double factor) {
     if (_perspectiveMode) {
-      _range = (_range * factor).clamp(100.0, 1e13);
+      _range = (_range * factor).clamp(1.0, 1e13);
     } else {
       _metresPerPixel = (_metresPerPixel * factor).clamp(0.5, 2e10);
     }
   }
 
-  // Time-warp ladder (sim seconds per real second). ',' / '.' step through it.
-  static const List<double> _warpLevels = [
-    1, 5, 10, 50, 100, 1000, 10000, 100000, 1000000
-  ];
+  // Time-warp ladder (sim seconds per real second). ',' / '.' step through
+  // it. Level 0 = PAUSE (the tick loop skips entirely — subsystems never
+  // see a dt of zero).
+  static const List<double> _warpLevels = [0, 1, 5, 10, 50, 100, 1000, 10000, 100000, 1000000];
+  // Ladder index of 1x — the level forced by atmosphere entry and
+  // warp-to-apsis arrival (index 0 is now the pause).
+  static const int _warp1x = 1;
   int _warpIndex = 3; // starts at 50x (matches the initial clock warp)
 
   void _stepWarp(int delta) {
     final next = (_warpIndex + delta).clamp(0, _warpLevels.length - 1);
-    if (next == _warpIndex) return;
+    if (next == _warpIndex && _warpTarget == null) return;
     setState(() {
+      _warpTarget = null; // manual warp input cancels an auto warp-to-apsis
+      _warpTargetLabel = null;
       _warpIndex = next;
       _clock.warpFactor = _warpLevels[_warpIndex];
     });
   }
+
+  /// Warp-to-AP/PE: sim epoch to auto-warp to, or null when inactive. Each
+  /// frame the warp factor is re-fit to the remaining time (arrive in ~1.5
+  /// real seconds), so the approach decelerates smoothly and lands within a
+  /// tick of the apsis before dropping back to 1x.
+  Epoch? _warpTarget;
+  String? _warpTargetLabel; // 'AP' / 'PE' chip text while active
+
+  /// Compact sim-time countdown for the warp chip: 42s / 12m34s / 3h07m.
+  static String _fmtCountdown(double s) {
+    if (s < 60) return '${s.toStringAsFixed(0)}s';
+    if (s < 3600) {
+      return '${s ~/ 60}m${(s % 60).toStringAsFixed(0).padLeft(2, '0')}s';
+    }
+    final h = s ~/ 3600;
+    final m = (s % 3600) ~/ 60;
+    return '${h}h${m.toString().padLeft(2, '0')}m';
+  }
+
+  void _warpToApsis({required bool periapsis}) {
+    final id = _focusVessel;
+    final v = id == null ? null : _vessels.byId(id);
+    if (v == null || v.landed) return;
+    final body = _universe.current().body(v.dominantBody);
+    if (body == null) return;
+    final label = periapsis ? 'PE' : 'AP';
+    // Pressing the active button again cancels.
+    if (_warpTarget != null && _warpTargetLabel == label) {
+      setState(() {
+        _warpTarget = null;
+        _warpTargetLabel = null;
+        _clock.warpFactor = _warpLevels[_warpIndex];
+      });
+      return;
+    }
+    final orbit = const StateVectorOrbitConverter().toOrbit(
+      position: v.state.position,
+      velocity: v.state.velocity,
+      body: body,
+      epoch: _clock.epoch,
+    );
+    final el = orbit.elements;
+    // Escape / radial-degenerate: no closed orbit, no apses to warp to.
+    if (el.eccentricity >= 1 ||
+        !el.semiMajorAxis.isFinite ||
+        el.semiMajorAxis <= 0) {
+      return;
+    }
+    final n = el.meanMotion(orbit.mu);
+    if (!n.isFinite || n <= 0) return;
+    final twoPi = 2 * math.pi;
+    final m = ((orbit.meanAnomalyAt(_clock.epoch) % twoPi) + twoPi) % twoPi;
+    // Mean anomaly of the target apsis: PE at 0 (2pi ahead), AP at pi.
+    var ahead = ((periapsis ? twoPi : math.pi) - m + twoPi) % twoPi;
+    // Already sitting on the apsis: wrap a full orbit instead of a 0s warp.
+    if (ahead / n < 2.0) ahead += twoPi;
+    setState(() {
+      _warpTarget = _clock.epoch + ahead / n;
+      _warpTargetLabel = label;
+    });
+  }
+
   Duration _last = Duration.zero;
   double _accum = 0; // carried-over real time not yet consumed by a fixed step
 
   @override
   void initState() {
     super.initState();
+    unawaited(_loadBackendPref());
+    _registerControl();
 
     // The REAL Solar System: Sun + planets + dwarf planets + moons.
     final system = SampleWorld.realSystem();
-    // ~3000 km up so the craft is clearly off the surface at the default zoom
-    // (a 400 km LEO sits only a few px above Earth's limb and looks landed).
-    final vessel = SampleWorld.buildEarthOrbiter(altitude: 3000000);
+    // Low lunar orbit (~100 km) around the Moon.
+    final vessel = SampleWorld.buildEarthOrbiter(
+        bodyId: SampleWorld.moon, altitude: 100000);
     // An ascent/descent craft injected by the caller (sits on a body surface).
     final injected = widget.injectedVessel;
     final fleet = [vessel, ?injected, ...widget.trafficVessels];
@@ -309,8 +681,7 @@ class _SimulationViewState extends State<SimulationView>
     // switch-camera button steps through this list.
     _targets = [
       for (final v in fleet) (label: v.name, v: v.id, b: null),
-      for (final body in system.all)
-        (label: body.name, v: null, b: body.id),
+      for (final body in system.all) (label: body.name, v: null, b: body.id),
     ];
     // If a craft was injected (ascent/descent), START LOCKED ON IT so the player
     // is flying it immediately; otherwise lock on the ORBITER so the player can
@@ -327,7 +698,7 @@ class _SimulationViewState extends State<SimulationView>
     // Start ready to fly: manual control of the orbiter, infinite fuel, 1x warp.
     _manualControl = true;
     _layers = _layers.copyWith(infiniteFuel: true);
-    _warpIndex = 0; // 1x
+    _warpIndex = _warp1x;
 
     _vessels = InMemoryVesselRepository(fleet);
     for (final v in _vessels.all()) {
@@ -352,11 +723,7 @@ class _SimulationViewState extends State<SimulationView>
 
     _clock = SimulationClock(warpFactor: 1, fixedStep: 0.02); // dev start: 1x
     _buildAdvance();
-    _presenter = TopDownSnapshotPresenter(
-      vessels: _vessels,
-      universe: universe,
-      colonies: _colonies,
-    );
+    _presenter = TopDownSnapshotPresenter(vessels: _vessels, universe: universe, colonies: _colonies);
 
     // Body surface maps; repaint once each finishes decoding.
     _textures = TextureCache(
@@ -398,12 +765,7 @@ class _SimulationViewState extends State<SimulationView>
         case SeparateStageCommand(:final vesselId):
           final v = _vessels.byId(VesselId(vesselId));
           if (v != null && v.separateStage()) _vessels.save(v);
-        case SetAttitudeCommand(
-            :final vesselId,
-            :final headingX,
-            :final headingY,
-            :final headingZ
-          ):
+        case SetAttitudeCommand(:final vesselId, :final headingX, :final headingY, :final headingZ):
           final v = _vessels.byId(VesselId(vesselId));
           if (v != null) {
             v.targetFacing = Vector3(headingX, headingY, headingZ);
@@ -440,22 +802,30 @@ class _SimulationViewState extends State<SimulationView>
   void _onDomainEvent(DomainEvent e) {
     String nameOf(VesselId id) => _vesselNames[id.value] ?? id.value;
     ({String title, String detail})? notice;
-    if (e is Impact) {
+    // Cheat-gated: the thermal/structural SUBSYSTEMS still raise their
+    // events when a limit is exceeded — only the tick's DESTRUCTION check
+    // honours the cheats. With a cheat on, the craft survives, so popping
+    // the death menu for the event alone is a lie ("burned up" while the
+    // ship flies on).
+    if (e is Impact && !_disableImpact) {
       notice = (
         title: '${nameOf(e.vessel)} destroyed',
-        detail: 'Hard impact with ${e.body.value} at '
+        detail:
+            'Hard impact with ${e.body.value} at '
             '${e.speed.toStringAsFixed(0)} m/s. The craft was lost.',
       );
-    } else if (e is StructuralFailure) {
+    } else if (e is StructuralFailure && !_disableAeroStress) {
       notice = (
         title: '${nameOf(e.vessel)} broke up',
-        detail: 'Structural failure under aerodynamic load '
+        detail:
+            'Structural failure under aerodynamic load '
             '(${(e.dynamicPressure / 1000).toStringAsFixed(1)} kPa).',
       );
-    } else if (e is PartOverheated) {
+    } else if (e is PartOverheated && !_disableOverheat) {
       notice = (
         title: '${nameOf(e.vessel)} burned up',
-        detail: 'A part exceeded its temperature limit '
+        detail:
+            'A part exceeded its temperature limit '
             '(${e.temperature.toStringAsFixed(0)} K) on reentry.',
       );
     }
@@ -503,9 +873,35 @@ class _SimulationViewState extends State<SimulationView>
         final alt = vessel.state.position.length - (body?.radius ?? 0);
         final atmoH = body?.atmosphere?.atmosphereHeight ?? 0;
         if (atmoH > 0 && alt < atmoH && _clock.warpFactor > 1) {
-          _warpIndex = 0;
-          _clock.warpFactor = _warpLevels[0];
+          _warpIndex = _warp1x;
+          _clock.warpFactor = _warpLevels[_warp1x];
+          _warpTarget = null; // atmosphere overrides an auto warp-to-apsis
+          _warpTargetLabel = null;
         }
+      }
+    }
+
+    // Freecam flight: WASD in the camera frame, Q/E down/up, Shift boosts.
+    // Speed scales with zoom range so it feels right from surface to map.
+    if (_freecam) {
+      double axis(LogicalKeyboardKey neg, LogicalKeyboardKey pos) =>
+          (_keysDown.contains(pos) ? 1.0 : 0.0) -
+          (_keysDown.contains(neg) ? 1.0 : 0.0);
+      final fwd = axis(LogicalKeyboardKey.keyS, LogicalKeyboardKey.keyW);
+      final strafe = axis(LogicalKeyboardKey.keyA, LogicalKeyboardKey.keyD);
+      final lift = axis(LogicalKeyboardKey.keyQ, LogicalKeyboardKey.keyE);
+      if (fwd != 0 || strafe != 0 || lift != 0) {
+        final cam = _camera;
+        final boost =
+            _keysDown.contains(LogicalKeyboardKey.shiftLeft) ? 8.0 : 1.0;
+        final speed =
+            math.max(_range, 5.0) * 1.5 * boost * _freecamSpeedMul; // m/s
+        final dt = frameDt.clamp(0.0, 0.1);
+        // World-frame flight delta, banked into the rotating frame.
+        _freecamRelLocal = _freecamRelLocal +
+            _refBodyQuat().conjugate.rotate(
+                (cam.forward * fwd + cam.right * strafe + cam.up * lift) *
+                    (speed * dt));
       }
     }
 
@@ -520,12 +916,30 @@ class _SimulationViewState extends State<SimulationView>
       }
     }
 
+    // Auto warp-to-apsis: refit the warp factor to the remaining time every
+    // frame (smooth deceleration), drop to 1x on arrival.
+    if (_warpTarget != null) {
+      final remaining = _warpTarget!.seconds - _clock.epoch.seconds;
+      if (remaining <= 0.5) {
+        _warpTarget = null;
+        _warpTargetLabel = null;
+        _warpIndex = _warp1x;
+        _clock.warpFactor = _warpLevels[_warp1x];
+      } else {
+        _clock.warpFactor = (remaining / 1.5).clamp(1.0, 1e6);
+      }
+    }
+
     // Run as many fixed steps as real time accrued. Carry the leftover across
     // frames â€” a 16ms frame is < the 20ms fixed step, so without accumulation
     // most frames ran ZERO steps and the sim only advanced on the occasional
     // slow frame (the jumpy "random update" motion).
     _accum += frameDt;
     var steps = 0;
+    // PAUSE (warp 0): skip the tick entirely — running subsystems with a
+    // zero dt is untested ground, and draining the backlog keeps unpausing
+    // from replaying accumulated time.
+    if (_clock.warpFactor <= 0) _accum = 0;
     while (_accum >= _clock.fixedStep && steps < 200) {
       _advance.execute(_clock);
       _accum -= _clock.fixedStep;
@@ -540,8 +954,7 @@ class _SimulationViewState extends State<SimulationView>
     // static body descriptors (kind/atmosphere/composition) are sticky on the
     // engine side, so ship them only ~1 Hz instead of every frame.
     if (_bridge.hasClients) {
-      final sendDescriptors =
-          (elapsed - _lastDescriptorAt) >= const Duration(seconds: 1);
+      final sendDescriptors = (elapsed - _lastDescriptorAt) >= const Duration(seconds: 1);
       if (sendDescriptors) _lastDescriptorAt = elapsed;
       final world = WorldSnapshot.capture(
         _bridgeTick++,
@@ -552,6 +965,71 @@ class _SimulationViewState extends State<SimulationView>
         includeDescriptors: sendDescriptors,
       );
       _bridge.publish(_wire.encodeWorld(world));
+    }
+
+    // The flutter_scene backend consumes the SAME world feed in-process (no
+    // serialization). Descriptors ride along every frame — the join is by
+    // reference, not over a wire.
+    if (_renderBackend == RenderBackend.flutterScene) {
+      _sceneWorld = WorldSnapshot.capture(
+        _sceneTick++,
+        _vessels,
+        system: _universe.current(),
+        epoch: _clock.epoch,
+        colonies: _colonies,
+      );
+    } else {
+      _sceneWorld = null;
+    }
+
+    // Equator-aligned camera: gimbal the whole orbit in the focused body's
+    // TILTED frame — azimuth then circles the body's equator, elevation
+    // climbs toward its pole, and the pole reads upright on screen. (A
+    // roll-only alignment was tried first: it levelled the horizon but the
+    // orbit axes still followed the ecliptic, which felt wrong on every
+    // drag.)
+    if (_upMode != CameraUpMode.free && !_craftCam) {
+      final bodyId = _focusBody ?? _lastFocusBody;
+      final body = bodyId == null ? null : _universe.current().body(bodyId);
+      final vessel =
+          _focusVessel == null ? null : _vessels.byId(_focusVessel!);
+      Quaternion frame;
+      if (_upMode == CameraUpMode.gravity &&
+          vessel != null &&
+          vessel.state.position.length > 1e-3) {
+        // Local vertical: the radial through the vessel (its position is
+        // dominant-body-centred with root-parallel axes, so the direction
+        // needs no reframing). Gimbal +Z onto it — azimuth then circles
+        // the horizon and elevation climbs from horizon to zenith.
+        //
+        // Updated INCREMENTALLY (small arc from the previous radial
+        // composed onto the previous frame): a fresh shortest-arc from
+        // +Z each frame is discontinuous when the radial passes near -Z
+        // (the arc axis flips 180 degrees) — the camera snapped to a
+        // "random" orientation when the vessel crossed under the body.
+        final radial = vessel.state.position.normalized;
+        final prevFrame = _gravFrame;
+        final prevRadial = _gravRadial;
+        if (prevFrame == null || prevRadial == null) {
+          frame = _shortestArc(Vector3.unitZ, radial);
+        } else {
+          frame = (_shortestArc(prevRadial, radial) * prevFrame).normalized;
+        }
+        _gravFrame = frame;
+        _gravRadial = radial;
+      } else {
+        _gravFrame = null;
+        _gravRadial = null;
+        final t = body?.axialTilt ?? 0;
+        frame = t == 0
+            ? Quaternion.identity
+            : Quaternion.axisAngle(Vector3.unitX, t);
+      }
+      _view = _view.copyWith(frame: frame, roll: 0);
+    } else if (_view.frame.x != 0 ||
+        _view.frame.y != 0 ||
+        _view.frame.z != 0) {
+      _view = _view.copyWith(frame: Quaternion.identity);
     }
 
     // Craft chase cam: align the camera EXACTLY with the craft's attitude so the
@@ -581,14 +1059,9 @@ class _SimulationViewState extends State<SimulationView>
         final upBase = rightBase.cross(nose).normalized;
         // camera up = upBase*cosR - rightBase*sinR  =>  sinR = -craftUp.rightBase,
         // cosR = craftUp.upBase  =>  roll = atan2(-craftUp.rightBase, craftUp.upBase).
-        final roll =
-            math.atan2(-craftUp.dot(rightBase), craftUp.dot(upBase));
+        final roll = math.atan2(-craftUp.dot(rightBase), craftUp.dot(upBase));
 
-        _view = _view.copyWith(
-          azimuth: azimuth,
-          elevation: elevation,
-          roll: roll,
-        );
+        _view = _view.copyWith(azimuth: azimuth, elevation: elevation, roll: roll);
       }
     }
 
@@ -646,6 +1119,7 @@ class _SimulationViewState extends State<SimulationView>
 
   @override
   void dispose() {
+    SimViewControl.instance.clear();
     _ticker.dispose();
     unawaited(_bridgeCommands?.cancel());
     unawaited(_bridge.stop());
@@ -670,14 +1144,20 @@ class _SimulationViewState extends State<SimulationView>
   }
 
   /// Cycle the projection through the named presets (snaps the orbit angles).
-  void _cycleView() => setState(
-      () => _view = CameraOrbit.preset(_view.nearestPreset.next));
+  void _cycleView() => setState(() => _view = CameraOrbit.preset(_view.nearestPreset.next));
 
   /// Toggle MAP <-> CRAFT chase cam. Entering craft cam locks onto a vessel and
   /// zooms in close; leaving it restores the saved map zoom + view.
   void _toggleCraftCam() {
     setState(() {
       _craftCam = !_craftCam;
+      if (!_craftCam) {
+        // The chase cam drives roll from the craft attitude every frame;
+        // leaving it with that roll makes every subsequent MMB drag
+        // rotate through the STALE angle (drags feel diagonal/reversed —
+        // "the camera jumps around").
+        _view = _view.copyWith(roll: 0);
+      }
       if (_craftCam) {
         // Ensure a vessel is the target (fall back to the first vessel).
         if (_focusVessel == null) {
@@ -751,10 +1231,30 @@ class _SimulationViewState extends State<SimulationView>
 
   /// Orbit the camera around the focus by arrow-key deltas (radians).
   void _orbitCamera(double dAz, double dEl) {
-    setState(() => _view = _view.copyWith(
-          azimuth: _view.azimuth + dAz,
-          elevation: _view.elevation + dEl,
-        ));
+    // Screen-drag deltas are in VIEW space: when the camera is rolled
+    // (align-up mode tracks a tilted spin axis), a horizontal drag must
+    // still pan horizontally ON SCREEN — rotate the deltas through the
+    // roll, or drags feel 90-degrees-wrong under a rolled camera.
+    final r = _view.roll;
+    final ca = math.cos(r), sa = math.sin(r);
+    final az = dAz * ca - dEl * sa;
+    final el = dAz * sa + dEl * ca;
+    setState(() {
+      if (_freecam) {
+        // FPS-style look: the EYE stays put and the view direction pans —
+        // the anchor swings around the eye instead of the eye orbiting
+        // the anchor (which read as "panning around a point massively far
+        // away"). Keep the eye world-invariant across the rotation.
+        final eyeBefore = _camera.eyeOffset;
+        _view = _view.copyWith(
+            azimuth: _view.azimuth + az, elevation: _view.elevation + el);
+        _freecamRelLocal = _freecamRelLocal +
+            _refBodyQuat().conjugate.rotate(eyeBefore - _camera.eyeOffset);
+      } else {
+        _view = _view.copyWith(
+            azimuth: _view.azimuth + az, elevation: _view.elevation + el);
+      }
+    });
   }
 
   /// Modal "vessel lost" menu shown when a craft is destroyed. Fills the screen
@@ -778,27 +1278,26 @@ class _SimulationViewState extends State<SimulationView>
             children: [
               Row(
                 children: const [
-                  Icon(Icons.warning_amber_rounded,
-                      color: Color(0xFFFF6B6B), size: 26),
+                  Icon(Icons.warning_amber_rounded, color: Color(0xFFFF6B6B), size: 26),
                   SizedBox(width: 8),
-                  Text('VESSEL LOST',
-                      style: TextStyle(
-                          color: Color(0xFFFF6B6B),
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          letterSpacing: 1.2)),
+                  Text(
+                    'VESSEL LOST',
+                    style: TextStyle(
+                      color: Color(0xFFFF6B6B),
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 1.2,
+                    ),
+                  ),
                 ],
               ),
               const SizedBox(height: 14),
-              Text(notice.title,
-                  style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 15,
-                      fontWeight: FontWeight.bold)),
+              Text(
+                notice.title,
+                style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold),
+              ),
               const SizedBox(height: 6),
-              Text(notice.detail,
-                  style: const TextStyle(
-                      color: Color(0xFFC9B8BC), fontSize: 13, height: 1.35)),
+              Text(notice.detail, style: const TextStyle(color: Color(0xFFC9B8BC), fontSize: 13, height: 1.35)),
               const SizedBox(height: 18),
               Align(
                 alignment: Alignment.centerRight,
@@ -822,46 +1321,89 @@ class _SimulationViewState extends State<SimulationView>
   /// A debug-cheat checkbox row: flips [value] via [set], then rebuilds the tick
   /// so the new flag takes effect immediately.
   Widget _cheatRow(String label, bool value, void Function(bool) set) => InkWell(
-        onTap: () => setState(() {
-          set(!value);
-          _buildAdvance();
-        }),
-        child: Row(children: [
-          Checkbox(
-            value: value,
-            onChanged: (v) => setState(() {
-              set(v ?? false);
-              _buildAdvance();
-            }),
-            visualDensity: VisualDensity.compact,
-            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          ),
-          Text(label,
-              style: const TextStyle(color: Color(0xFFB9C9DC), fontSize: 12)),
-        ]),
-      );
+    onTap: () => setState(() {
+      set(!value);
+      _buildAdvance();
+    }),
+    child: Row(
+      children: [
+        Checkbox(
+          value: value,
+          onChanged: (v) => setState(() {
+            set(v ?? false);
+            _buildAdvance();
+          }),
+          visualDensity: VisualDensity.compact,
+          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
+        Text(label, style: const TextStyle(color: Color(0xFFB9C9DC), fontSize: 12)),
+      ],
+    ),
+  );
+
+  /// Metres with an engineering suffix, for the depth-plane sliders.
+  static String _engM(double v) => v >= 1e9
+      ? '${(v / 1e9).toStringAsFixed(1)} Gm'
+      : v >= 1e6
+          ? '${(v / 1e6).toStringAsFixed(1)} Mm'
+          : v >= 1e3
+              ? '${(v / 1e3).toStringAsFixed(1)} km'
+              : '${v.toStringAsFixed(1)} m';
+
+  /// Compact log10-scale slider spanning 10^[minExp]..10^[maxExp] metres.
+  Widget _logSlider({
+    required double value,
+    required double minExp,
+    required double maxExp,
+    required ValueChanged<double> onChanged,
+  }) {
+    final exp = (math.log(value) / math.ln10).clamp(minExp, maxExp).toDouble();
+    return SizedBox(
+      height: 26,
+      child: SliderTheme(
+        data: SliderThemeData(
+          trackHeight: 2,
+          thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+          overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
+          activeTrackColor: const Color(0xFF7FB0E0),
+          inactiveTrackColor: const Color(0x337FB0E0),
+          thumbColor: const Color(0xFF7FB0E0),
+        ),
+        child: Slider(
+          value: exp,
+          min: minExp,
+          max: maxExp,
+          onChanged: (e) => onChanged(math.pow(10.0, e).toDouble()),
+        ),
+      ),
+    );
+  }
 
   Widget _debugPanel() {
     final rows = <(String, bool, DebugLayers Function(bool))>[
       ('Skybox', _layers.skybox, (v) => _layers.copyWith(skybox: v)),
       ('Orbit rails', _layers.orbitRails, (v) => _layers.copyWith(orbitRails: v)),
-      ('Planet texture', _layers.planetTexture,
-          (v) => _layers.copyWith(planetTexture: v)),
-      ('Sphere shadow', _layers.sphereShadow,
-          (v) => _layers.copyWith(sphereShadow: v)),
-      ('Atmo halo', _layers.atmoHalo, (v) => _layers.copyWith(atmoHalo: v)),
-      ('Atmo overlay', _layers.atmoOverlay,
-          (v) => _layers.copyWith(atmoOverlay: v)),
+      ('Planet texture', _layers.planetTexture, (v) => _layers.copyWith(planetTexture: v)),
+      ('Sphere shadow', _layers.sphereShadow, (v) => _layers.copyWith(sphereShadow: v)),
+      // Drives BOTH renderers: the software painter's halo layer and the
+      // 3D backend's raymarched shells.
+      ('Atmo halo', _layers.atmoHalo, (v) {
+        AtmosphereNodes.hidden = !v;
+        return _layers.copyWith(atmoHalo: v);
+      }),
+      ('Atmo overlay', _layers.atmoOverlay, (v) => _layers.copyWith(atmoOverlay: v)),
       ('Nav-ball', _layers.navBall, (v) => _layers.copyWith(navBall: v)),
-      ('Exaggerate star', _layers.exaggerateStar,
-          (v) => _layers.copyWith(exaggerateStar: v)),
-      ('Exaggerate atmo', _layers.exaggerateAtmosphere,
-          (v) => _layers.copyWith(exaggerateAtmosphere: v)),
+      ('Exaggerate star', _layers.exaggerateStar, (v) => _layers.copyWith(exaggerateStar: v)),
+      ('Exaggerate atmo', _layers.exaggerateAtmosphere, (v) => _layers.copyWith(exaggerateAtmosphere: v)),
       ('Show SOIs', _layers.showSoi, (v) => _layers.copyWith(showSoi: v)),
-      ('Cull distant', _layers.cullDistant,
-          (v) => _layers.copyWith(cullDistant: v)),
-      ('Infinite fuel', _layers.infiniteFuel,
-          (v) => _layers.copyWith(infiniteFuel: v)),
+      ('Cull distant', _layers.cullDistant, (v) => _layers.copyWith(cullDistant: v)),
+      ('Infinite fuel', _layers.infiniteFuel, (v) => _layers.copyWith(infiniteFuel: v)),
+      // 3D backend only: overlay the reflection-capture equirect (what the
+      // craft's IBL reflects). Static flag, so leave _layers untouched.
+      ('Env reflection', PlanetEnvironmentBaker.showDebug, (v) {
+        PlanetEnvironmentBaker.showDebug = v;
+        return _layers;
+      }),
     ];
     return Container(
       width: 190,
@@ -877,11 +1419,10 @@ class _SimulationViewState extends State<SimulationView>
         children: [
           const Padding(
             padding: EdgeInsets.only(left: 4, top: 4, bottom: 2),
-            child: Text('DRAW LAYERS',
-                style: TextStyle(
-                    color: Color(0xFF7FB0E0),
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold)),
+            child: Text(
+              'DRAW LAYERS',
+              style: TextStyle(color: Color(0xFF7FB0E0), fontSize: 11, fontWeight: FontWeight.bold),
+            ),
           ),
           for (final (label, value, set) in rows)
             InkWell(
@@ -890,32 +1431,26 @@ class _SimulationViewState extends State<SimulationView>
                 children: [
                   Checkbox(
                     value: value,
-                    onChanged: (v) =>
-                        setState(() => _layers = set(v ?? false)),
+                    onChanged: (v) => setState(() => _layers = set(v ?? false)),
                     visualDensity: VisualDensity.compact,
                     materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
-                  Text(label,
-                      style: const TextStyle(
-                          color: Color(0xFFB9C9DC), fontSize: 12)),
+                  Text(label, style: const TextStyle(color: Color(0xFFB9C9DC), fontSize: 12)),
                 ],
               ),
             ),
           // Perspective camera toggle.
           InkWell(
-            onTap: () =>
-                setState(() => _perspectiveMode = !_perspectiveMode),
+            onTap: () => setState(() => _perspectiveMode = !_perspectiveMode),
             child: Row(
               children: [
                 Checkbox(
                   value: _perspectiveMode,
-                  onChanged: (v) =>
-                      setState(() => _perspectiveMode = v ?? false),
+                  onChanged: (v) => setState(() => _perspectiveMode = v ?? false),
                   visualDensity: VisualDensity.compact,
                   materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 ),
-                const Text('Perspective',
-                    style: TextStyle(color: Color(0xFFB9C9DC), fontSize: 12)),
+                const Text('Perspective', style: TextStyle(color: Color(0xFFB9C9DC), fontSize: 12)),
               ],
             ),
           ),
@@ -928,8 +1463,10 @@ class _SimulationViewState extends State<SimulationView>
             }),
             child: Padding(
               padding: const EdgeInsets.fromLTRB(4, 6, 4, 4),
-              child: Text('FOV: ${_fovDeg.toStringAsFixed(0)}°',
-                  style: const TextStyle(color: Color(0xFF7FB0E0), fontSize: 12)),
+              child: Text(
+                'FOV: ${_fovDeg.toStringAsFixed(0)}°',
+                style: const TextStyle(color: Color(0xFF7FB0E0), fontSize: 12),
+              ),
             ),
           ),
           // Tilted-view cull zoom threshold (tap to cycle).
@@ -947,52 +1484,132 @@ class _SimulationViewState extends State<SimulationView>
               ),
             ),
           ),
+          // Depth planes (3D backend): adaptive by default; unchecking pins
+          // near/far to log-scale sliders (same overrides as the
+          // ext.acro.camera?near=&far= dev extension — the HUD depth line
+          // marks pinned values with '*').
+          const Padding(
+            padding: EdgeInsets.only(left: 4, top: 6, bottom: 2),
+            child: Text(
+              'DEPTH PLANES',
+              style: TextStyle(color: Color(0xFF7FB0E0), fontSize: 11, fontWeight: FontWeight.bold),
+            ),
+          ),
+          InkWell(
+            onTap: () => setState(() {
+              final adaptive = SceneCameraDebug.nearOverrideM == null &&
+                  SceneCameraDebug.farOverrideM == null;
+              if (adaptive) {
+                // Seed the sliders from what the adaptive formula gives now.
+                final eyeM = _range + _focusBodyRadius;
+                SceneCameraDebug.nearOverrideM = math.max(1.0, eyeM / 20.0);
+                SceneCameraDebug.farOverrideM = math.max(5e12, eyeM * 40);
+              } else {
+                SceneCameraDebug.nearOverrideM = null;
+                SceneCameraDebug.farOverrideM = null;
+              }
+            }),
+            child: Row(
+              children: [
+                Checkbox(
+                  value: SceneCameraDebug.nearOverrideM == null &&
+                      SceneCameraDebug.farOverrideM == null,
+                  onChanged: (_) => setState(() {
+                    final adaptive = SceneCameraDebug.nearOverrideM == null &&
+                        SceneCameraDebug.farOverrideM == null;
+                    if (adaptive) {
+                      final eyeM = _range + _focusBodyRadius;
+                      SceneCameraDebug.nearOverrideM =
+                          math.max(1.0, eyeM / 20.0);
+                      SceneCameraDebug.farOverrideM = math.max(5e12, eyeM * 40);
+                    } else {
+                      SceneCameraDebug.nearOverrideM = null;
+                      SceneCameraDebug.farOverrideM = null;
+                    }
+                  }),
+                  visualDensity: VisualDensity.compact,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                const Text('Adaptive',
+                    style: TextStyle(color: Color(0xFFB9C9DC), fontSize: 12)),
+              ],
+            ),
+          ),
+          if (SceneCameraDebug.nearOverrideM != null) ...[
+            Padding(
+              padding: const EdgeInsets.only(left: 4),
+              child: Text(
+                'near ${_engM(SceneCameraDebug.nearOverrideM!)}',
+                style: const TextStyle(color: Color(0xFF7FB0E0), fontSize: 11),
+              ),
+            ),
+            _logSlider(
+              value: SceneCameraDebug.nearOverrideM!,
+              minExp: -1, // 0.1 m
+              maxExp: 9, // 1,000,000 km
+              onChanged: (v) =>
+                  setState(() => SceneCameraDebug.nearOverrideM = v),
+            ),
+          ],
+          if (SceneCameraDebug.farOverrideM != null) ...[
+            Padding(
+              padding: const EdgeInsets.only(left: 4),
+              child: Text(
+                'far ${_engM(SceneCameraDebug.farOverrideM!)}',
+                style: const TextStyle(color: Color(0xFF7FB0E0), fontSize: 11),
+              ),
+            ),
+            _logSlider(
+              value: SceneCameraDebug.farOverrideM!,
+              minExp: 5, // 100 km
+              maxExp: 14, // beyond the system
+              onChanged: (v) =>
+                  setState(() => SceneCameraDebug.farOverrideM = v),
+            ),
+          ],
           // Destruction cheats: skip overheat / aero-stress / impact so a craft
           // survives an otherwise-fatal profile. Rebuilds the tick on change.
           const Padding(
             padding: EdgeInsets.only(left: 4, top: 6, bottom: 2),
-            child: Text('CHEATS',
-                style: TextStyle(
-                    color: Color(0xFF7FB0E0),
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold)),
+            child: Text(
+              'CHEATS',
+              style: TextStyle(color: Color(0xFF7FB0E0), fontSize: 11, fontWeight: FontWeight.bold),
+            ),
           ),
-          _cheatRow('No overheating', _disableOverheat,
-              (v) => _disableOverheat = v),
-          _cheatRow('No aero load', _disableAeroStress,
-              (v) => _disableAeroStress = v),
-          _cheatRow('No impact damage', _disableImpact,
-              (v) => _disableImpact = v),
+          _cheatRow('No overheating', _disableOverheat, (v) => _disableOverheat = v),
+          _cheatRow('No aero load', _disableAeroStress, (v) => _disableAeroStress = v),
+          _cheatRow('No impact damage', _disableImpact, (v) => _disableImpact = v),
           // Atmosphere chemistry demo: re-skin the focused planet's gas mix and
           // watch the limb's haze colour shift (driven by composition).
           const Padding(
             padding: EdgeInsets.only(left: 4, top: 6, bottom: 2),
-            child: Text('ATMOSPHERE',
-                style: TextStyle(
-                    color: Color(0xFF7FB0E0),
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold)),
+            child: Text(
+              'ATMOSPHERE',
+              style: TextStyle(color: Color(0xFF7FB0E0), fontSize: 11, fontWeight: FontWeight.bold),
+            ),
           ),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
-            child: Row(children: [
-              Expanded(
-                child: _atmoButton('☢ Nuke', const Color(0xFFFF7043),
-                    _targetBody == null ? null : _nukePlanet),
-              ),
-              const SizedBox(width: 6),
-              Expanded(
-                child: _atmoButton('Terraform', const Color(0xFF4FC3F7),
-                    _targetBody == null ? null : _terraformPlanet),
-              ),
-            ]),
+            child: Row(
+              children: [
+                Expanded(
+                  child: _atmoButton('☢ Nuke', const Color(0xFFFF7043), _targetBody == null ? null : _nukePlanet),
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: _atmoButton(
+                    'Terraform',
+                    const Color(0xFF4FC3F7),
+                    _targetBody == null ? null : _terraformPlanet,
+                  ),
+                ),
+              ],
+            ),
           ),
           Padding(
             padding: const EdgeInsets.fromLTRB(4, 0, 4, 4),
             child: Text(
-              _targetBody == null
-                  ? 'Lock a planet to enable.'
-                  : 'Target: ${_targetBody!.name}',
+              _targetBody == null ? 'Lock a planet to enable.' : 'Target: ${_targetBody!.name}',
               style: const TextStyle(color: Color(0xFF7E93A8), fontSize: 11),
             ),
           ),
@@ -1001,27 +1618,26 @@ class _SimulationViewState extends State<SimulationView>
     );
   }
 
-  Widget _atmoButton(String label, Color color, VoidCallback? onTap) =>
-      InkWell(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 6),
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: onTap == null
-                ? const Color(0x22556677)
-                : color.withValues(alpha: 0.18),
-            borderRadius: BorderRadius.circular(6),
-            border: Border.all(
-                color: onTap == null ? const Color(0x33889999) : color, width: 1),
-          ),
-          child: Text(label,
-              style: TextStyle(
-                  color: onTap == null ? const Color(0xFF66788A) : color,
-                  fontSize: 12,
-                  fontWeight: FontWeight.bold)),
+  Widget _atmoButton(String label, Color color, VoidCallback? onTap) => InkWell(
+    onTap: onTap,
+    child: Container(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: onTap == null ? const Color(0x22556677) : color.withValues(alpha: 0.18),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: onTap == null ? const Color(0x33889999) : color, width: 1),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: onTap == null ? const Color(0xFF66788A) : color,
+          fontSize: 12,
+          fontWeight: FontWeight.bold,
         ),
-      );
+      ),
+    ),
+  );
 
   /// Nav-ball state for the currently-locked vessel, or null when a body is the
   /// camera target (no craft attitude to show).
@@ -1044,16 +1660,13 @@ class _SimulationViewState extends State<SimulationView>
       },
       child: FloatingActionButton.extended(
         heroTag: 'persp',
-        backgroundColor: _perspectiveMode
-            ? const Color(0xFF7FB0E0)
-            : const Color(0xFF2A3A4A),
+        backgroundColor: _perspectiveMode ? const Color(0xFF7FB0E0) : const Color(0xFF2A3A4A),
         onPressed: () {
           setState(() => _perspectiveMode = !_perspectiveMode);
           _keyFocus.requestFocus();
         },
         icon: const Icon(Icons.vrpano),
-        label: Text(
-            _perspectiveMode ? 'PERSP ${_fovDeg.toStringAsFixed(0)}°' : 'ORTHO'),
+        label: Text(_perspectiveMode ? 'PERSP ${_fovDeg.toStringAsFixed(0)}°' : 'ORTHO'),
       ),
     );
   }
@@ -1061,10 +1674,7 @@ class _SimulationViewState extends State<SimulationView>
   Widget _targetDropdown() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12),
-      decoration: BoxDecoration(
-        color: const Color(0xFF2A3A4A),
-        borderRadius: BorderRadius.circular(28),
-      ),
+      decoration: BoxDecoration(color: const Color(0xFF2A3A4A), borderRadius: BorderRadius.circular(28)),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -1080,11 +1690,7 @@ class _SimulationViewState extends State<SimulationView>
               if (i != null) _selectTarget(i);
             },
             items: [
-              for (var i = 0; i < _targets.length; i++)
-                DropdownMenuItem(
-                  value: i,
-                  child: Text(_targets[i].label),
-                ),
+              for (var i = 0; i < _targets.length; i++) DropdownMenuItem(value: i, child: Text(_targets[i].label)),
             ],
           ),
         ],
@@ -1106,49 +1712,44 @@ class _SimulationViewState extends State<SimulationView>
   void _reskinAtmosphere(AtmosphericComposition comp, String note) {
     final b = _targetBody;
     if (b == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
           content: Text('Lock the camera on a planet first (switch target).'),
-          duration: Duration(seconds: 2)));
+          duration: Duration(seconds: 2),
+        ),
+      );
       return;
     }
     _universe.replaceBody(b.copyWith(composition: comp));
     setState(() {}); // next _tick rebuilds the snapshot from the repo
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('${b.name}: $note'), duration: const Duration(seconds: 3)));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('${b.name}: $note'), duration: const Duration(seconds: 3)));
   }
 
   /// Nuke the focused planet: choke its air with CO2 + soot-methane haze — the
   /// limb warms to a tan/teal smog (a "nuclear winter" chemistry).
   void _nukePlanet() => _reskinAtmosphere(
-      AtmosphericComposition(const {
-        AtmosphereGas.carbonDioxide: 0.55,
-        AtmosphereGas.methane: 0.20,
-        AtmosphereGas.nitrogen: 0.20,
-        AtmosphereGas.water: 0.05,
-      }),
-      'atmosphere choked with CO₂ + soot — haze warms to smog.');
+    AtmosphericComposition(const {
+      AtmosphereGas.carbonDioxide: 0.55,
+      AtmosphereGas.methane: 0.20,
+      AtmosphereGas.nitrogen: 0.20,
+      AtmosphereGas.water: 0.05,
+    }),
+    'atmosphere choked with CO₂ + soot — haze warms to smog.',
+  );
 
   /// Terraform the focused planet to an Earthlike N2/O2 mix — the limb shifts to
   /// a clean Rayleigh blue.
-  void _terraformPlanet() => _reskinAtmosphere(
-      AtmosphericComposition.earth(), 'terraformed to N₂/O₂ — clean blue sky.');
+  void _terraformPlanet() =>
+      _reskinAtmosphere(AtmosphericComposition.earth(), 'terraformed to N₂/O₂ — clean blue sky.');
 
   /// Serialize the whole world into the in-memory save slot.
   void _save() {
-    _savedGame = jsonEncode(
-      _codec.encode(
-        vessels: _vessels,
-        colonies: _colonies,
-        deposits: _deposits,
-        clock: _clock,
-      ),
-    );
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Saved at tick ${_clock.tick}'),
-        duration: const Duration(seconds: 1),
-      ),
-    );
+    _savedGame = jsonEncode(_codec.encode(vessels: _vessels, colonies: _colonies, deposits: _deposits, clock: _clock));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('Saved at tick ${_clock.tick}'), duration: const Duration(seconds: 1)));
   }
 
   /// Restore the world from the in-memory save slot.
@@ -1166,12 +1767,9 @@ class _SimulationViewState extends State<SimulationView>
       deposits: _deposits,
       clock: _clock,
     );
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Loaded tick ${_clock.tick}'),
-        duration: const Duration(seconds: 1),
-      ),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('Loaded tick ${_clock.tick}'), duration: const Duration(seconds: 1)));
   }
 
   @override
@@ -1184,173 +1782,246 @@ class _SimulationViewState extends State<SimulationView>
       // Keep the FAB stack clear of the notch/home indicator.
       floatingActionButton: SafeArea(
         child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // Collapse/expand the control stack to free up the viewport.
-          FloatingActionButton.small(
-            heroTag: 'collapse',
-            backgroundColor: const Color(0xFF2A3A4A),
-            onPressed: () =>
-                setState(() => _controlsExpanded = !_controlsExpanded),
-            child: Icon(
-                _controlsExpanded ? Icons.expand_more : Icons.expand_less),
-          ),
-          const SizedBox(height: 8),
-          // Return to the main menu (the flight view is pushed from it).
-          if (Navigator.of(context).canPop())
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Collapse/expand the control stack to free up the viewport.
             FloatingActionButton.small(
-              heroTag: 'menu',
+              heroTag: 'collapse',
               backgroundColor: const Color(0xFF2A3A4A),
-              onPressed: () => Navigator.of(context).maybePop(),
-              child: const Icon(Icons.home),
+              onPressed: () => setState(() => _controlsExpanded = !_controlsExpanded),
+              child: Icon(_controlsExpanded ? Icons.expand_more : Icons.expand_less),
             ),
-          if (Navigator.of(context).canPop()) const SizedBox(height: 8),
-          // Collapsed: only PERSP for quick access.
-          // Manual-flight toggle (so touch users can fly without a keyboard).
-          if (_controlsExpanded)
-          FloatingActionButton.extended(
-            heroTag: 'manual',
-            backgroundColor: _manualControl
-                ? const Color(0xFFFF8C66)
-                : const Color(0xFF2A3A4A),
-            onPressed: () => setState(() => _manualControl = !_manualControl),
-            icon: Icon(_manualControl ? Icons.flight : Icons.smart_toy),
-            label: Text(_manualControl ? 'MANUAL' : 'AUTO'),
-          ),
-          // STAGE / decouple: drop the active (lowest) stage off the focused
-          // craft. Shown when a stageable vessel is locked. The outline of the
-          // remaining stack is the craft itself in the 3D view.
-          if (_canStageFocus()) ...[
             const SizedBox(height: 8),
-            FloatingActionButton.extended(
-              heroTag: 'stage',
-              backgroundColor: const Color(0xFFE0A040),
-              foregroundColor: Colors.black,
-              onPressed: _separateFocusStage,
-              icon: const Icon(Icons.layers_clear),
-              label: const Text('STAGE'),
-            ),
+            // Return to the main menu (the flight view is pushed from it).
+            if (Navigator.of(context).canPop())
+              FloatingActionButton.small(
+                heroTag: 'menu',
+                backgroundColor: const Color(0xFF2A3A4A),
+                onPressed: () => Navigator.of(context).maybePop(),
+                child: const Icon(Icons.home),
+              ),
+            if (Navigator.of(context).canPop()) const SizedBox(height: 8),
+            // Collapsed: only PERSP for quick access.
+            // Manual-flight toggle (so touch users can fly without a keyboard).
+            if (_controlsExpanded)
+              FloatingActionButton.extended(
+                heroTag: 'manual',
+                backgroundColor: _manualControl ? const Color(0xFFFF8C66) : const Color(0xFF2A3A4A),
+                onPressed: () => setState(() => _manualControl = !_manualControl),
+                icon: Icon(_manualControl ? Icons.flight : Icons.smart_toy),
+                label: Text(_manualControl ? 'MANUAL' : 'AUTO'),
+              ),
+            // STAGE / decouple: drop the active (lowest) stage off the focused
+            // craft. Shown when a stageable vessel is locked. The outline of the
+            // remaining stack is the craft itself in the 3D view.
+            if (_canStageFocus()) ...[
+              const SizedBox(height: 8),
+              FloatingActionButton.extended(
+                heroTag: 'stage',
+                backgroundColor: const Color(0xFFE0A040),
+                foregroundColor: Colors.black,
+                onPressed: _separateFocusStage,
+                icon: const Icon(Icons.layers_clear),
+                label: const Text('STAGE'),
+              ),
+            ],
+            if (_controlsExpanded) const SizedBox(height: 8),
+            // Perspective toggle + FOV.
+            if (_controlsExpanded) _perspToggleFab(),
+            if (_controlsExpanded) const SizedBox(height: 8),
+            if (_controlsExpanded) ...[
+              // Camera lock: pick the target (vessel or body) from a dropdown.
+              _targetDropdown(),
+              const SizedBox(height: 8),
+              // Point the focus craft's nose at its planet.
+              if (_focusVessel != null)
+                FloatingActionButton.extended(
+                  heroTag: 'lookplanet',
+                  backgroundColor: const Color(0xFF2A3A4A),
+                  onPressed: _lookAtPlanet,
+                  icon: const Icon(Icons.my_location),
+                  label: const Text('LOOK AT'),
+                ),
+              if (_focusVessel != null) const SizedBox(height: 8),
+              // MAP / CRAFT chase-cam toggle.
+              FloatingActionButton.extended(
+                heroTag: 'cammode',
+                backgroundColor: _craftCam ? const Color(0xFF7FE0A0) : const Color(0xFF2A3A4A),
+                onPressed: _toggleCraftCam,
+                icon: Icon(_craftCam ? Icons.rocket_launch : Icons.public),
+                label: Text(_craftCam ? 'CRAFT' : 'MAP'),
+              ),
+              const SizedBox(height: 8),
+              // View-angle gizmo: top / front / side / 3-quarter projection.
+              FloatingActionButton.extended(
+                heroTag: 'view',
+                backgroundColor: const Color(0xFF2A3A4A),
+                onPressed: _cycleView,
+                icon: const Icon(Icons.threed_rotation),
+                label: Text(_view.nearestPreset.label),
+              ),
+              const SizedBox(height: 8),
+              // Time-warp control: minus / readout / plus (also ',' and '.' keys).
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  FloatingActionButton.small(
+                    heroTag: 'warpdown',
+                    onPressed: () => _stepWarp(-1),
+                    child: const Icon(Icons.fast_rewind),
+                  ),
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    decoration: BoxDecoration(color: const Color(0xFF2A3A4A), borderRadius: BorderRadius.circular(20)),
+                    child: Text(
+                      _warpTarget != null
+                          ? '→$_warpTargetLabel ${_fmtCountdown(_warpTarget!.seconds - _clock.epoch.seconds)}'
+                          : _warpLevels[_warpIndex] == 0
+                              ? '⏸'
+                              : '${_warpLevels[_warpIndex].toStringAsFixed(0)}x',
+                      style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  FloatingActionButton.small(
+                    heroTag: 'warpup',
+                    onPressed: () => _stepWarp(1),
+                    child: const Icon(Icons.fast_forward),
+                  ),
+                ],
+              ),
+              // Warp straight to the focused vessel's next apsis. Active
+              // button re-press cancels; manual warp steps also cancel.
+              if (_focusVessel != null) ...[
+                const SizedBox(height: 8),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    FloatingActionButton.small(
+                      heroTag: 'warpap',
+                      backgroundColor: _warpTargetLabel == 'AP'
+                          ? const Color(0xFF7FE0A0)
+                          : const Color(0xFF2A3A4A),
+                      onPressed: () => _warpToApsis(periapsis: false),
+                      child: const Text('AP',
+                          style: TextStyle(fontWeight: FontWeight.bold)),
+                    ),
+                    const SizedBox(width: 8),
+                    FloatingActionButton.small(
+                      heroTag: 'warppe',
+                      backgroundColor: _warpTargetLabel == 'PE'
+                          ? const Color(0xFF7FE0A0)
+                          : const Color(0xFF2A3A4A),
+                      onPressed: () => _warpToApsis(periapsis: true),
+                      child: const Text('PE',
+                          style: TextStyle(fontWeight: FontWeight.bold)),
+                    ),
+                  ],
+                ),
+              ],
+              const SizedBox(height: 8),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  FloatingActionButton.small(
+                    heroTag: 'zoomout',
+                    onPressed: () => setState(() => _metresPerPixel = (_metresPerPixel * 1.4).clamp(0.5, 2e10)),
+                    child: const Icon(Icons.zoom_out),
+                  ),
+                  const SizedBox(width: 8),
+                  FloatingActionButton.small(
+                    heroTag: 'zoomin',
+                    onPressed: () => setState(() => _metresPerPixel = (_metresPerPixel / 1.4).clamp(0.5, 2e10)),
+                    child: const Icon(Icons.zoom_in),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  FloatingActionButton.small(heroTag: 'save', onPressed: _save, child: const Icon(Icons.save)),
+                  const SizedBox(width: 8),
+                  FloatingActionButton.small(
+                    heroTag: 'load',
+                    onPressed: _savedGame == null ? null : _load,
+                    backgroundColor: _savedGame == null ? Colors.grey : null,
+                    child: const Icon(Icons.folder_open),
+                  ),
+                  const SizedBox(width: 8),
+                  FloatingActionButton.small(
+                    heroTag: 'debug',
+                    backgroundColor: _showDebugPanel ? const Color(0xFF7FB0E0) : const Color(0xFF2A3A4A),
+                    onPressed: () => setState(() => _showDebugPanel = !_showDebugPanel),
+                    child: const Icon(Icons.bug_report),
+                  ),
+                  const SizedBox(width: 8),
+                  FloatingActionButton.small(
+                    heroTag: 'inertialTrails',
+                    tooltip: 'Trail frame: body-relative vs sun-inertial',
+                    backgroundColor: LineNodes.inertialTrails
+                        ? const Color(0xFF7FB0E0)
+                        : const Color(0xFF2A3A4A),
+                    onPressed: () => setState(() {
+                      LineNodes.inertialTrails = !LineNodes.inertialTrails;
+                    }),
+                    child: const Icon(Icons.gesture),
+                  ),
+                  const SizedBox(width: 8),
+                  FloatingActionButton.small(
+                    heroTag: 'alignUp',
+                    tooltip: switch (_upMode) {
+                      CameraUpMode.free =>
+                        'Camera up: free (tap: body spin axis)',
+                      CameraUpMode.axis =>
+                        'Camera up: body spin axis (tap: gravity)',
+                      CameraUpMode.gravity =>
+                        'Camera up: gravity / local vertical (tap: free)',
+                    },
+                    backgroundColor: switch (_upMode) {
+                      CameraUpMode.free => const Color(0xFF2A3A4A),
+                      CameraUpMode.axis => const Color(0xFF7FB0E0),
+                      CameraUpMode.gravity => const Color(0xFF7FE0A0),
+                    },
+                    onPressed: () => setState(() {
+                      _upMode = CameraUpMode
+                          .values[(_upMode.index + 1) % CameraUpMode.values.length];
+                      if (_upMode == CameraUpMode.free) {
+                        _view = _view.copyWith(roll: 0);
+                      }
+                    }),
+                    child: Icon(_upMode == CameraUpMode.gravity
+                        ? Icons.explore
+                        : Icons.align_vertical_center),
+                  ),
+                  const SizedBox(width: 8),
+                  FloatingActionButton.small(
+                    heroTag: 'freecam',
+                    tooltip: _freecam
+                        ? 'Freecam ON — WASD/QE fly, Shift boosts'
+                        : 'Freecam: detach and fly the camera anchor',
+                    backgroundColor: _freecam
+                        ? const Color(0xFF7FE0A0)
+                        : const Color(0xFF2A3A4A),
+                    onPressed: _toggleFreecam,
+                    child: const Icon(Icons.videocam),
+                  ),
+                  const SizedBox(width: 8),
+                  FloatingActionButton.small(
+                    heroTag: 'renderBackend',
+                    tooltip: _renderBackend.label,
+                    backgroundColor: _renderBackend == RenderBackend.flutterScene
+                        ? const Color(0xFF7FB0E0)
+                        : const Color(0xFF2A3A4A),
+                    onPressed: () => _setBackend(_renderBackend.next),
+                    child: const Icon(Icons.view_in_ar),
+                  ),
+                ],
+              ),
+            ], // end if (_controlsExpanded)
           ],
-          if (_controlsExpanded) const SizedBox(height: 8),
-          // Perspective toggle + FOV.
-          if (_controlsExpanded) _perspToggleFab(),
-          if (_controlsExpanded) const SizedBox(height: 8),
-          if (_controlsExpanded) ...[
-          // Camera lock: pick the target (vessel or body) from a dropdown.
-          _targetDropdown(),
-          const SizedBox(height: 8),
-          // Point the focus craft's nose at its planet.
-          if (_focusVessel != null)
-            FloatingActionButton.extended(
-              heroTag: 'lookplanet',
-              backgroundColor: const Color(0xFF2A3A4A),
-              onPressed: _lookAtPlanet,
-              icon: const Icon(Icons.my_location),
-              label: const Text('LOOK AT'),
-            ),
-          if (_focusVessel != null) const SizedBox(height: 8),
-          // MAP / CRAFT chase-cam toggle.
-          FloatingActionButton.extended(
-            heroTag: 'cammode',
-            backgroundColor: _craftCam
-                ? const Color(0xFF7FE0A0)
-                : const Color(0xFF2A3A4A),
-            onPressed: _toggleCraftCam,
-            icon: Icon(_craftCam ? Icons.rocket_launch : Icons.public),
-            label: Text(_craftCam ? 'CRAFT' : 'MAP'),
-          ),
-          const SizedBox(height: 8),
-          // View-angle gizmo: top / front / side / 3-quarter projection.
-          FloatingActionButton.extended(
-            heroTag: 'view',
-            backgroundColor: const Color(0xFF2A3A4A),
-            onPressed: _cycleView,
-            icon: const Icon(Icons.threed_rotation),
-            label: Text(_view.nearestPreset.label),
-          ),
-          const SizedBox(height: 8),
-          // Time-warp control: minus / readout / plus (also ',' and '.' keys).
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              FloatingActionButton.small(
-                heroTag: 'warpdown',
-                onPressed: () => _stepWarp(-1),
-                child: const Icon(Icons.fast_rewind),
-              ),
-              const SizedBox(width: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF2A3A4A),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Text(
-                  '${_warpLevels[_warpIndex].toStringAsFixed(0)}x',
-                  style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 13,
-                      fontWeight: FontWeight.bold),
-                ),
-              ),
-              const SizedBox(width: 8),
-              FloatingActionButton.small(
-                heroTag: 'warpup',
-                onPressed: () => _stepWarp(1),
-                child: const Icon(Icons.fast_forward),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              FloatingActionButton.small(
-                heroTag: 'zoomout',
-                onPressed: () => setState(() =>
-                    _metresPerPixel = (_metresPerPixel * 1.4).clamp(0.5, 2e10)),
-                child: const Icon(Icons.zoom_out),
-              ),
-              const SizedBox(width: 8),
-              FloatingActionButton.small(
-                heroTag: 'zoomin',
-                onPressed: () => setState(() =>
-                    _metresPerPixel = (_metresPerPixel / 1.4).clamp(0.5, 2e10)),
-                child: const Icon(Icons.zoom_in),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              FloatingActionButton.small(
-                heroTag: 'save',
-                onPressed: _save,
-                child: const Icon(Icons.save),
-              ),
-              const SizedBox(width: 8),
-              FloatingActionButton.small(
-                heroTag: 'load',
-                onPressed: _savedGame == null ? null : _load,
-                backgroundColor: _savedGame == null ? Colors.grey : null,
-                child: const Icon(Icons.folder_open),
-              ),
-              const SizedBox(width: 8),
-              FloatingActionButton.small(
-                heroTag: 'debug',
-                backgroundColor: _showDebugPanel
-                    ? const Color(0xFF7FB0E0)
-                    : const Color(0xFF2A3A4A),
-                onPressed: () =>
-                    setState(() => _showDebugPanel = !_showDebugPanel),
-                child: const Icon(Icons.bug_report),
-              ),
-            ],
-          ),
-          ], // end if (_controlsExpanded)
-        ],
-      ),
+        ),
       ), // end SafeArea(floatingActionButton)
       body: KeyboardListener(
         focusNode: _keyFocus,
@@ -1368,6 +2039,15 @@ class _SimulationViewState extends State<SimulationView>
           },
           onPointerMove: (e) {
             if (!_mmbDragging) return;
+            // A missed pointer-up (MMB released off-window, focus stolen)
+            // leaves the drag armed; the next unrelated drag then applies
+            // the delta from the STALE anchor and the camera leaps to a
+            // "random" orientation. Consume deltas only while the middle
+            // button is actually still held.
+            if (e.buttons & kMiddleMouseButton == 0) {
+              _mmbDragging = false;
+              return;
+            }
             final d = e.position - _lastMmb;
             _lastMmb = e.position;
             // Middle-mouse drag free-orbits the camera (azimuth/elevation).
@@ -1379,11 +2059,19 @@ class _SimulationViewState extends State<SimulationView>
           },
           onPointerCancel: (_) => _mmbDragging = false,
           // Mouse wheel: scroll up = zoom in. Drives mpp (ortho) or range
-          // (perspective).
+          // (perspective). In FREECAM the wheel sets the flight-speed
+          // multiplier instead — speed control matters more than zoom
+          // while flying, and the range still zooms via [ ] keys.
           onPointerSignal: (signal) {
             if (signal is PointerScrollEvent) {
-              final factor = signal.scrollDelta.dy > 0 ? 1.15 : 1 / 1.15;
-              setState(() => _zoom(factor));
+              if (_freecam) {
+                final factor = signal.scrollDelta.dy > 0 ? 1 / 1.3 : 1.3;
+                setState(() => _freecamSpeedMul =
+                    (_freecamSpeedMul * factor).clamp(0.01, 100000.0));
+              } else {
+                final factor = signal.scrollDelta.dy > 0 ? 1.15 : 1 / 1.15;
+                setState(() => _zoom(factor));
+              }
             }
           },
           child: GestureDetector(
@@ -1398,10 +2086,9 @@ class _SimulationViewState extends State<SimulationView>
                 // Two-finger pinch -> zoom.
                 setState(() {
                   if (_perspectiveMode) {
-                    _range = (_pinchBaseRange / d.scale).clamp(100.0, 1e13);
+                    _range = (_pinchBaseRange / d.scale).clamp(1.0, 1e13);
                   } else {
-                    _metresPerPixel =
-                        (_pinchBaseMpp / d.scale).clamp(0.5, 2e10);
+                    _metresPerPixel = (_pinchBaseMpp / d.scale).clamp(0.5, 2e10);
                   }
                 });
               } else {
@@ -1413,106 +2100,168 @@ class _SimulationViewState extends State<SimulationView>
             child: Stack(
               children: [
                 // Renderer fills edge-to-edge (into the notch / safe area).
-                Positioned.fill(
-                  child: snap == null
-                      ? const Center(child: CircularProgressIndicator())
-                      : LayoutBuilder(builder: (context, constraints) {
-                          // The perspective focal length must use the ACTUAL
-                          // render-canvas height, not the full MediaQuery window
-                          // (which over-states it and makes the lens read long /
-                          // the planet a touch small). Update it from the real
-                          // layout height each build.
-                          if (constraints.maxHeight.isFinite &&
-                              constraints.maxHeight > 0) {
-                            _screenH = constraints.maxHeight;
-                          }
-                          return CustomPaint(
-                            size: Size.infinite,
-                            painter: TopDownPainter(
-                              snap,
-                              textures: _textures,
-                              view: _activeCamera ??
-                                  OrthoCamera(_view, _metresPerPixel),
-                              layers: _layers,
-                            ),
-                          );
-                        }),
-                ),
+                // The backend toggle swaps ONLY this subtree — camera state,
+                // input handling, and the HUD overlays above are shared.
+                if (_renderBackend == RenderBackend.flutterScene) ...[
+                  Positioned.fill(
+                    child: LayoutBuilder(builder: (context, constraints) {
+                      // Keep the shared focal length in sync with the REAL
+                      // canvas height in scene mode too. Only the software
+                      // branch updated it before, so in scene mode the HUD
+                      // overlay's projection used a stale height: labels
+                      // scaled differently from the rendered bodies and
+                      // drifted apart, worse with distance from centre.
+                      if (constraints.maxHeight.isFinite &&
+                          constraints.maxHeight > 0) {
+                        _screenH = constraints.maxHeight;
+                      }
+                      return SceneRenderView(
+                        camera: _camera,
+                        textures: _textures,
+                        snapshot: _sceneWorld,
+                        focusVesselId: _focusVessel?.value,
+                        focusBodyId: _focusBody?.value,
+                        focusWorldOverride: _freecam ? _freecamWorld : null,
+                      );
+                    }),
+                  ),
+                  // Painter-parity text HUD (telemetry block + name labels)
+                  // from the SAME presenter snapshot the software path uses.
+                  // Hidden in freecam: the presenter still projects around
+                  // the locked target, so its labels would sit off the
+                  // freecam-rendered world.
+                  if (snap != null && !_freecam)
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        child: CustomPaint(
+                          painter: SceneHudOverlayPainter(snap, _camera),
+                        ),
+                      ),
+                    ),
+                  // Reflection-capture debug overlay (bottom-left, above the
+                  // build stamp) — the equirect the craft's IBL reflects.
+                  if (PlanetEnvironmentBaker.showDebug)
+                    const Positioned(
+                      left: 8,
+                      bottom: 40,
+                      child: IgnorePointer(child: _EnvBakeDebugView()),
+                    ),
+                ] else
+                  Positioned.fill(
+                    child: snap == null
+                        ? const Center(child: CircularProgressIndicator())
+                        : LayoutBuilder(
+                            builder: (context, constraints) {
+                              // The perspective focal length must use the ACTUAL
+                              // render-canvas height, not the full MediaQuery window
+                              // (which over-states it and makes the lens read long /
+                              // the planet a touch small). Update it from the real
+                              // layout height each build.
+                              if (constraints.maxHeight.isFinite && constraints.maxHeight > 0) {
+                                _screenH = constraints.maxHeight;
+                              }
+                              return CustomPaint(
+                                size: Size.infinite,
+                                painter: TopDownPainter(
+                                  snap,
+                                  textures: _textures,
+                                  view: _activeCamera ?? OrthoCamera(_view, _metresPerPixel),
+                                  layers: _layers,
+                                ),
+                              );
+                            },
+                          ),
+                  ),
                 // All UI overlays stay INSIDE the safe area.
                 Positioned.fill(
                   child: SafeArea(
                     child: Stack(
                       children: [
-                // Nav-ball: attitude/prograde of the locked vessel.
-                if (_layers.navBall && _navState() != null)
-                  Positioned(
-                    bottom: 16,
-                    left: 0,
-                    right: 0,
-                    child: Center(
-                      child: NavBall(state: _navState()!, size: 120),
-                    ),
-                  ),
-                // Debug draw-layer toggle panel (top-right).
-                if (_showDebugPanel)
-                  Positioned(top: 8, right: 8, child: _debugPanel()),
-                Positioned(
-                  left: 8,
-                  bottom: 8,
-                  child: Text(
-                    _manualControl
-                        ? 'MANUAL  keys: W/S A/D Q/E Shift  |  touch: joystick + throttle  |  M auto  |  pinch/wheel/[ ] zoom'
-                        : 'AUTO  (M or tap for manual flight)  |  pinch/scroll/[ ] zoom',
-                    style: TextStyle(
-                      color: _manualControl
-                          ? const Color(0xFFFF8C66)
-                          : const Color(0xFF6E8299),
-                      fontSize: 11,
-                    ),
-                  ),
-                ),
-                // Build stamp (bottom-left, bright) to confirm a fresh deploy.
-                Positioned(
-                  left: 8,
-                  bottom: 28,
-                  child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                    color: const Color(0xCC00FF7F),
-                    child: Text(
-                      kBuildStamp,
-                      style: const TextStyle(
-                        color: Color(0xFF001A0D),
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                ),
-                // Zoom-factor readout (debug): the camera scale so issues can be
-                // pinned to an exact zoom. ORTHO shows metres-per-pixel; PERSP
-                // shows the eye range (m). Sits just above the build stamp.
-                Positioned(
-                  left: 8,
-                  bottom: 46,
-                  child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                    color: const Color(0xAA001A0D),
-                    child: Text(
-                      _zoomLabel(),
-                      style: const TextStyle(
-                        color: Color(0xFF7FE0A0),
-                        fontSize: 11,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                ),
-                // On-screen flight controls (touch), only in manual mode.
-                if (_manualControl) ..._touchControls(),
-                // Vessel-lost menu (modal over everything).
-                if (_crashNotice != null) _crashMenu(_crashNotice!),
+                        // Nav-ball: attitude/prograde of the locked vessel.
+                        if (_layers.navBall && _navState() != null)
+                          Positioned(
+                            bottom: 16,
+                            left: 0,
+                            right: 0,
+                            child: Center(child: NavBall(state: _navState()!, size: 120)),
+                          ),
+                        // Debug draw-layer toggle panel (top-right).
+                        if (_showDebugPanel) Positioned(top: 8, right: 8, child: _debugPanel()),
+                        Positioned(
+                          left: 8,
+                          bottom: 8,
+                          child: Text(
+                            _manualControl
+                                ? 'MANUAL  keys: W/S A/D Q/E Shift  |  touch: joystick + throttle  |  M auto  |  pinch/wheel/[ ] zoom'
+                                : 'AUTO  (M or tap for manual flight)  |  pinch/scroll/[ ] zoom',
+                            style: TextStyle(
+                              color: _manualControl ? const Color(0xFFFF8C66) : const Color(0xFF6E8299),
+                              fontSize: 11,
+                            ),
+                          ),
+                        ),
+                        // Build stamp (bottom-left, bright) to confirm a fresh deploy.
+                        Positioned(
+                          left: 8,
+                          bottom: 28,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            color: const Color(0xCC00FF7F),
+                            child: Text(
+                              kBuildStamp,
+                              style: const TextStyle(
+                                color: Color(0xFF001A0D),
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ),
+                        // Zoom-factor readout (debug): the camera scale so issues can be
+                        // pinned to an exact zoom. ORTHO shows metres-per-pixel; PERSP
+                        // shows the eye range (m). Sits just above the build stamp.
+                        Positioned(
+                          left: 8,
+                          bottom: 46,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            color: const Color(0xAA001A0D),
+                            child: Text(
+                              _zoomLabel(),
+                              style: const TextStyle(
+                                color: Color(0xFF7FE0A0),
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ),
+                        // Depth-plane + ring-field diagnostics (3D backend):
+                        // the near/far the adapter will derive this frame,
+                        // and the nearest ring's field state — for pinning
+                        // "where did the rocks go" style reports.
+                        if (_renderBackend == RenderBackend.flutterScene)
+                          Positioned(
+                            left: 8,
+                            bottom: 68,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 2),
+                              color: const Color(0xAA0D0D1A),
+                              child: Text(
+                                _depthDebugLabel(),
+                                style: const TextStyle(
+                                  color: Color(0xFFB0C4E8),
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ),
+                        // On-screen flight controls (touch), only in manual mode.
+                        if (_manualControl) ..._touchControls(),
+                        // Vessel-lost menu (modal over everything).
+                        if (_crashNotice != null) _crashMenu(_crashNotice!),
                       ],
                     ),
                   ),
@@ -1536,77 +2285,88 @@ class _SimulationViewState extends State<SimulationView>
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 320),
           child: Container(
-          padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
-          decoration: BoxDecoration(
-            color: const Color(0xDD0E1622),
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: const Color(0x33FF8C66)),
-          ),
-          child: SafeArea(
-            top: false,
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              _flightStatusRow(),
-              // FINE throttle — an absolute 0..10% throttle for delicate landing
-              // burns (full slider span = 10% thrust). Sits ABOVE the coarse one.
-              Row(children: [
-                const SizedBox(
-                    width: 56,
-                    child: Text('FINE',
-                        style: TextStyle(color: Color(0xFFFFC58A), fontSize: 11))),
-                Expanded(
-                  child: SliderTheme(
-                    data: const SliderThemeData(
-                        activeTrackColor: Color(0xFFFFC58A),
-                        inactiveTrackColor: Color(0x33FFC58A),
-                        thumbColor: Color(0xFFFFC58A),
-                        trackHeight: 2),
-                    child: Slider(
-                      // 0..1 maps to an ABSOLUTE 0..10% throttle for fine landing
-                      // burns. Sets the throttle directly (held, not a trim).
-                      value: _touchThrottleFine,
-                      onChanged: (v) => setState(() {
-                        _touchThrottleFine = v;
-                        _touchThrottle = v * 0.10; // 0..10%
-                      }),
-                    ),
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+            decoration: BoxDecoration(
+              color: const Color(0xDD0E1622),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: const Color(0x33FF8C66)),
+            ),
+            child: SafeArea(
+              top: false,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _flightStatusRow(),
+                  // FINE throttle — an absolute 0..10% throttle for delicate landing
+                  // burns (full slider span = 10% thrust). Sits ABOVE the coarse one.
+                  Row(
+                    children: [
+                      const SizedBox(
+                        width: 56,
+                        child: Text('FINE', style: TextStyle(color: Color(0xFFFFC58A), fontSize: 11)),
+                      ),
+                      Expanded(
+                        child: SliderTheme(
+                          data: const SliderThemeData(
+                            activeTrackColor: Color(0xFFFFC58A),
+                            inactiveTrackColor: Color(0x33FFC58A),
+                            thumbColor: Color(0xFFFFC58A),
+                            trackHeight: 2,
+                          ),
+                          child: Slider(
+                            // 0..1 maps to an ABSOLUTE 0..10% throttle for fine landing
+                            // burns. Sets the throttle directly (held, not a trim).
+                            value: _touchThrottleFine,
+                            onChanged: (v) => setState(() {
+                              _touchThrottleFine = v;
+                              _touchThrottle = v * 0.10; // 0..10%
+                            }),
+                          ),
+                        ),
+                      ),
+                      SizedBox(
+                        width: 40,
+                        child: Text(
+                          '${(_touchThrottleFine * 10).toStringAsFixed(1)}%',
+                          textAlign: TextAlign.right,
+                          style: const TextStyle(color: Color(0xFFFFC58A), fontSize: 11),
+                        ),
+                      ),
+                    ],
                   ),
-                ),
-                SizedBox(
-                    width: 40,
-                    child: Text(
-                        '${(_touchThrottleFine * 10).toStringAsFixed(1)}%',
-                        textAlign: TextAlign.right,
-                        style: const TextStyle(
-                            color: Color(0xFFFFC58A), fontSize: 11))),
-              ]),
-              // Throttle — held (does NOT self-centre).
-              Row(children: [
-                const SizedBox(
-                    width: 56,
-                    child: Text('THR', style: TextStyle(color: Color(0xFFFF8C66), fontSize: 12))),
-                Expanded(
-                  child: SliderTheme(
-                    data: const SliderThemeData(
-                        activeTrackColor: Color(0xFFFF8C66),
-                        thumbColor: Color(0xFFFF8C66),
-                        trackHeight: 3),
-                    child: Slider(
-                      value: _touchThrottle,
-                      onChanged: (v) => setState(() => _touchThrottle = v),
-                    ),
+                  // Throttle — held (does NOT self-centre).
+                  Row(
+                    children: [
+                      const SizedBox(
+                        width: 56,
+                        child: Text('THR', style: TextStyle(color: Color(0xFFFF8C66), fontSize: 12)),
+                      ),
+                      Expanded(
+                        child: SliderTheme(
+                          data: const SliderThemeData(
+                            activeTrackColor: Color(0xFFFF8C66),
+                            thumbColor: Color(0xFFFF8C66),
+                            trackHeight: 3,
+                          ),
+                          child: Slider(value: _touchThrottle, onChanged: (v) => setState(() => _touchThrottle = v)),
+                        ),
+                      ),
+                      SizedBox(
+                        width: 40,
+                        child: Text(
+                          '${(_touchThrottle * 100).round()}%',
+                          textAlign: TextAlign.right,
+                          style: const TextStyle(color: Color(0xFFFF8C66), fontSize: 12),
+                        ),
+                      ),
+                    ],
                   ),
-                ),
-                SizedBox(
-                    width: 40,
-                    child: Text('${(_touchThrottle * 100).round()}%',
-                        textAlign: TextAlign.right,
-                        style: const TextStyle(color: Color(0xFFFF8C66), fontSize: 12))),
-              ]),
-              _axisRow('PITCH', _touchPitch, (v) => _touchPitch = v),
-              _axisRow('YAW', _touchYaw, (v) => _touchYaw = v),
-              _axisRow('ROLL', _touchRoll, (v) => _touchRoll = v),
-            ]),
-          ),
+                  _axisRow('PITCH', _touchPitch, (v) => _touchPitch = v),
+                  _axisRow('YAW', _touchYaw, (v) => _touchYaw = v),
+                  _axisRow('ROLL', _touchRoll, (v) => _touchRoll = v),
+                ],
+              ),
+            ),
           ),
         ),
       ),
@@ -1628,28 +2388,31 @@ class _SimulationViewState extends State<SimulationView>
     final stageNo = total; // current bottom-most remaining stage
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
-      child: Row(children: [
-        Expanded(
-          child: Text(
-            'ALT ${(alt / 1000).toStringAsFixed(1)}km · ${spd.toStringAsFixed(0)} m/s · STAGE $stageNo/$total',
-            style: const TextStyle(color: Color(0xFF9FB4CC), fontSize: 11),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              'ALT ${(alt / 1000).toStringAsFixed(1)}km · ${spd.toStringAsFixed(0)} m/s · STAGE $stageNo/$total',
+              style: const TextStyle(color: Color(0xFF9FB4CC), fontSize: 11),
+            ),
           ),
-        ),
-        if (v.landed)
-          Padding(
-            padding: const EdgeInsets.only(left: 6),
-            child: TextButton.icon(
-              style: TextButton.styleFrom(
+          if (v.landed)
+            Padding(
+              padding: const EdgeInsets.only(left: 6),
+              child: TextButton.icon(
+                style: TextButton.styleFrom(
                   backgroundColor: const Color(0xFF7FE0A0),
                   foregroundColor: Colors.black,
                   padding: const EdgeInsets.symmetric(horizontal: 8),
-                  minimumSize: const Size(0, 30)),
-              icon: const Icon(Icons.location_city, size: 16),
-              label: const Text('FOUND', style: TextStyle(fontSize: 11)),
-              onPressed: () => _foundColony(v),
+                  minimumSize: const Size(0, 30),
+                ),
+                icon: const Icon(Icons.location_city, size: 16),
+                label: const Text('FOUND', style: TextStyle(fontSize: 11)),
+                onPressed: () => _foundColony(v),
+              ),
             ),
-          ),
-      ]),
+        ],
+      ),
     );
   }
 
@@ -1661,39 +2424,104 @@ class _SimulationViewState extends State<SimulationView>
     final dir = v.state.position.normalized;
     final latDeg = math.asin(dir.z.clamp(-1.0, 1.0)) * 180 / math.pi;
     final lonDeg = math.atan2(dir.y, dir.x) * 180 / math.pi;
-    Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => CityBuilderScreen(
-        config: CityConfig(
-          bodyId: body.id.value,
-          latitude: latDeg,
-          longitude: lonDeg,
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => CityBuilderScreen(
+          config: CityConfig(bodyId: body.id.value, latitude: latDeg, longitude: lonDeg),
         ),
       ),
-    ));
+    );
   }
 
   /// A self-centring attitude axis slider (-1..1), snapping back to 0 on release.
-  Widget _axisRow(String label, double value, void Function(double) set) =>
-      Row(children: [
-        SizedBox(
-            width: 56,
-            child: Text(label,
-                style: const TextStyle(color: Color(0xFF9FB4CC), fontSize: 12))),
-        Expanded(
-          child: SliderTheme(
-            data: const SliderThemeData(
-                activeTrackColor: Color(0xFF7FE0A0),
-                thumbColor: Color(0xFF7FE0A0),
-                trackHeight: 2),
-            child: Slider(
-              value: value,
-              min: -1,
-              max: 1,
-              onChanged: (v) => setState(() => set(v)),
-              onChangeEnd: (_) => setState(() => set(0)), // self-centre
-            ),
+  Widget _axisRow(String label, double value, void Function(double) set) => Row(
+    children: [
+      SizedBox(
+        width: 56,
+        child: Text(label, style: const TextStyle(color: Color(0xFF9FB4CC), fontSize: 12)),
+      ),
+      Expanded(
+        child: SliderTheme(
+          data: const SliderThemeData(
+            activeTrackColor: Color(0xFF7FE0A0),
+            thumbColor: Color(0xFF7FE0A0),
+            trackHeight: 2,
+          ),
+          child: Slider(
+            value: value,
+            min: -1,
+            max: 1,
+            onChanged: (v) => setState(() => set(v)),
+            onChangeEnd: (_) => setState(() => set(0)), // self-centre
           ),
         ),
-        const SizedBox(width: 40),
-      ]);
+      ),
+      const SizedBox(width: 40),
+    ],
+  );
+}
+
+/// On-screen view of the reflection-capture equirect the craft's IBL
+/// reflects (toggle: debug panel 'Env reflection', or
+/// `ext.acro.camera?envDebug=true`). Rebuilds itself as each rebake
+/// publishes a new image — independent of the sim frame so it updates even
+/// when the camera is parked.
+class _EnvBakeDebugView extends StatelessWidget {
+  const _EnvBakeDebugView();
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<ui.Image?>(
+      valueListenable: PlanetEnvironmentBaker.latestBake,
+      builder: (context, img, _) {
+        if (img == null) return const SizedBox.shrink();
+        return Container(
+          decoration: BoxDecoration(
+            border: Border.all(color: const Color(0xFF33CCCC)),
+            color: const Color(0xFF000000),
+          ),
+          child: CustomPaint(
+            size: const Size(320, 160),
+            painter: _EnvBakePainter(img),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _EnvBakePainter extends CustomPainter {
+  _EnvBakePainter(this.image);
+
+  final ui.Image image;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawImageRect(
+      image,
+      Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble()),
+      Rect.fromLTWH(0, 0, size.width, size.height),
+      Paint()..filterQuality = FilterQuality.none,
+    );
+    // Reference axes: the equator (v=0.5) and the u=0.5 meridian, so a
+    // mispositioned sun/body disc is easy to read off the projection.
+    final axis = Paint()
+      ..color = const Color(0x3333CCCC)
+      ..strokeWidth = 1;
+    canvas.drawLine(
+        Offset(0, size.height / 2), Offset(size.width, size.height / 2), axis);
+    canvas.drawLine(
+        Offset(size.width / 2, 0), Offset(size.width / 2, size.height), axis);
+    final tp = TextPainter(
+      text: const TextSpan(
+        text: 'ENV BAKE  (u: atan2 z,x — v: asin y)',
+        style: TextStyle(color: Color(0xCC33CCCC), fontSize: 9),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    tp.paint(canvas, const Offset(3, 2));
+  }
+
+  @override
+  bool shouldRepaint(_EnvBakePainter old) => !identical(old.image, image);
 }

@@ -15,6 +15,8 @@
 | ![Atmosphere on the limb](images/atmosphere_limb.png) | **A real atmosphere.** A per-pixel scattering shader glows on the limb from orbit and hazes your horizon on the ground — correct at every altitude. |
 | ![Standing on the surface](images/surface_horizon.png) | **Stand on another world.** Zoom continuously from interplanetary space down to a craft on the surface, the planet a true 3-D sphere the whole way. |
 | ![Earth from orbit](images/hero_earth_orbit.png) | **One scale, no fakery.** Earth is 6 371 km. Orbit is 1 000 km up. The Moon is 384 000 km away. The engine holds all of it at once. |
+| ![Saturn's rings with the planet's shadow](images/saturn_rings.png) | **Rings with real structure.** The C and B rings, the Cassini division, the Encke gap — banded per-pixel, with the planet's shadow sweeping across them. |
+| ![Inside the B ring with metre-scale debris](images/ring_debris.png) | **Fly INSIDE the rings.** Thousands of metre-scale moon-textured rocks around your craft, thinning into billboard clumps and then the sheet — the Cassini division is genuinely empty. |
 
 ---
 

@@ -1,0 +1,10 @@
+{
+    "AtmosphereFragment": {
+        "type": "fragment",
+        "file": "shaders/atmosphere.frag"
+    },
+    "RingFragment": {
+        "type": "fragment",
+        "file": "shaders/ring.frag"
+    }
+}

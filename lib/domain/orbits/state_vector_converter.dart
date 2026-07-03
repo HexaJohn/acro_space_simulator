@@ -59,7 +59,11 @@ class StateVectorOrbitConverter {
     final e = eVec.length;
 
     final energy = v.lengthSquared / 2 - mu / rMag;
-    final a = (e - 1.0).abs() < 1e-12 ? double.infinity : -mu / (2 * energy);
+    // Semi-major axis from vis-viva. Exactly-parabolic energy (a -> inf) is a
+    // measure-zero edge that used to poison propagation with NaN (inf * 0);
+    // clamp to a huge finite conic of the right family instead.
+    var a = -mu / (2 * energy);
+    if (!a.isFinite || a.abs() > 1e18) a = energy <= 0 ? 1e18 : -1e18;
 
     final i = math.acos((h.z / hMag).clamp(-1.0, 1.0));
 
@@ -131,20 +135,37 @@ class StateVectorOrbitConverter {
     final mu = orbit.mu;
     final e = el.eccentricity;
     final m = orbit.meanAnomalyAt(t);
-    final eccAnom = _solveKepler(m, e);
-
-    // Perifocal coordinates.
     final a = el.semiMajorAxis;
-    final cosE = math.cos(eccAnom);
-    final sinE = math.sin(eccAnom);
-
-    final xP = a * (cosE - e);
-    final yP = a * math.sqrt(1 - e * e) * sinE;
-
     final n = el.meanMotion(mu);
-    final rDot = (a * n) / (1 - e * cosE);
-    final vxP = -rDot * sinE;
-    final vyP = rDot * math.sqrt(1 - e * e) * cosE;
+
+    double xP, yP, vxP, vyP;
+    if (e >= 1.0) {
+      // Hyperbolic (escape) conic: a < 0, anomaly is the hyperbolic H from
+      // M = e sinh H - H. Exactly-parabolic e is nudged hyperbolic so the
+      // formulas stay finite (sqrt(e^2 - 1) = 0 would collapse the y axis).
+      final eH = math.max(e, 1.0 + 1e-9);
+      final hAnom = _solveKeplerHyperbolic(m, eH);
+      final coshH = _cosh(hAnom);
+      final sinhH = _sinh(hAnom);
+      final r = a * (1 - eH * coshH); // > 0 since a < 0
+      xP = a * (coshH - eH);
+      yP = -a * math.sqrt(eH * eH - 1) * sinhH;
+      vxP = -n * a * a * sinhH / r;
+      vyP = n * a * a * math.sqrt(eH * eH - 1) * coshH / r;
+    } else {
+      final eccAnom = _solveKepler(m, e);
+
+      // Perifocal coordinates.
+      final cosE = math.cos(eccAnom);
+      final sinE = math.sin(eccAnom);
+
+      xP = a * (cosE - e);
+      yP = a * math.sqrt(1 - e * e) * sinE;
+
+      final rDot = (a * n) / (1 - e * cosE);
+      vxP = -rDot * sinE;
+      vyP = rDot * math.sqrt(1 - e * e) * cosE;
+    }
 
     // Rotate perifocal -> inertial via (RAAN, inclination, argP).
     final pos = _perifocalToInertial(Vector3(xP, yP, 0), el);
@@ -189,11 +210,42 @@ class StateVectorOrbitConverter {
     return ecc;
   }
 
+  /// Solve the hyperbolic Kepler equation M = e sinh H - H via Newton-Raphson.
+  /// M is unbounded (no wrap); sign carries inbound (< 0) vs outbound (> 0).
+  double _solveKeplerHyperbolic(double m, double e, {int maxIter = 64}) {
+    var h = _asinh(m / e);
+    for (var k = 0; k < maxIter; k++) {
+      final f = e * _sinh(h) - h - m;
+      var fp = e * _cosh(h) - 1;
+      if (fp < 1e-12) fp = 1e-12; // near-parabolic: f' -> 0 at H ~ 0
+      final d = f / fp;
+      h -= d;
+      if (d.abs() < 1e-12 * (1 + h.abs())) break;
+    }
+    return h;
+  }
+
   double _trueToMean(double nu, double e) {
+    if (e >= 1.0) {
+      // Hyperbolic: H from true anomaly via robust sinh form (avoids the
+      // tan(nu/2) blowup near the asymptotes), then M = e sinh H - H.
+      // NOT wrapped — hyperbolic mean anomaly is unbounded and signed.
+      final eH = math.max(e, 1.0 + 1e-9);
+      final denom = 1 + eH * math.cos(nu);
+      final sinhH =
+          math.sqrt(eH * eH - 1) * math.sin(nu) / math.max(denom, 1e-12);
+      final h = _asinh(sinhH);
+      return eH * sinhH - h;
+    }
     final eccAnom =
         2 * math.atan2(math.sqrt(1 - e) * math.sin(nu / 2), math.sqrt(1 + e) * math.cos(nu / 2));
     return _wrap(eccAnom - e * math.sin(eccAnom));
   }
+
+  // dart:math has no hyperbolic functions.
+  double _sinh(double x) => (math.exp(x) - math.exp(-x)) / 2;
+  double _cosh(double x) => (math.exp(x) + math.exp(-x)) / 2;
+  double _asinh(double x) => math.log(x + math.sqrt(x * x + 1));
 
   double _wrap(double a) {
     final twoPi = 2 * math.pi;

@@ -548,9 +548,12 @@ class AdvanceSimulationTick {
       epoch: startEpoch,
     );
     final propagated = compute.propagate(orbit, clock.epoch);
-    // Hyperbolic/escape conics aren't handled by the elliptical Kepler solver
-    // and can produce non-finite output — fall back to keeping the current
-    // state (the next physics tick advances it numerically) rather than NaN.
+    // Defensive: the solver covers elliptic AND hyperbolic conics, but a
+    // non-finite result must never enter the vessel state — keep the current
+    // state for a tick rather than poisoning it with NaN. (Before the
+    // hyperbolic solver existed this guard fired EVERY tick of an escape
+    // trajectory, which is why the sim appeared to stop once AP read
+    // infinity: rails never advanced and physics never took over.)
     if (!propagated.position.x.isFinite || !propagated.position.y.isFinite) {
       return vessel.state;
     }
