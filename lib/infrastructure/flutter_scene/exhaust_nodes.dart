@@ -41,7 +41,7 @@ class ExhaustNodes {
   static double maxRate = 260;
 
   /// Nozzle position on the body Z axis when the part list names no engine.
-  static double defaultNozzleZM = -5.5;
+  static double defaultNozzleZM = -2.75;
 
   final Map<String, _Plume> _plumes = {};
   double _lastEpoch = double.nan;
@@ -157,7 +157,7 @@ class ExhaustNodes {
     var nozzleZ = defaultNozzleZM;
     for (final p in v.parts) {
       if (p.type.toLowerCase().contains('engine')) {
-        nozzleZ = math.min(p.oz, 0.0) - 2.5;
+        nozzleZ = math.min(p.oz, 0.0) - 1.25;
         break;
       }
     }
