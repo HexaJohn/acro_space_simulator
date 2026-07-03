@@ -225,10 +225,41 @@ class PlanetEnvironmentBaker {
   }) async {
     final rec = ui.PictureRecorder();
     final canvas = ui.Canvas(rec);
+    final full = ui.Rect.fromLTWH(0, 0, _w.toDouble(), _h.toDouble());
     canvas.drawRect(
-      ui.Rect.fromLTWH(0, 0, _w.toDouble(), _h.toDouble()),
-      ui.Paint()..color = testPattern == 'white' ? const ui.Color(0xFFFFFFFF) : const ui.Color(0xFF000000),
+      full,
+      ui.Paint()
+        ..color = testPattern == 'white'
+            ? const ui.Color(0xFFFFFFFF)
+            : const ui.Color(0xFF000000),
     );
+    // Starfield backdrop: the same equirect the skybox uses, dimmed to a
+    // faint reflection (stars are dim; they must not compete with the body
+    // or sun). Drawn as a direct equirect copy — infinitely-distant stars
+    // are fixed in world directions, so a static fill sampled by the
+    // reflection vector is correct as the craft moves. NOTE: this maps 1:1
+    // to flutter_scene's equirect convention (u=atan2 z,x, v=asin y); the
+    // visible skybox sphere uses a different (Z-up) UV layout, so reflected
+    // stars won't line up 1:1 with the background sky yet.
+    if (testPattern != 'white') {
+      final stars = _textures.image('starfield');
+      if (stars != null) {
+        canvas.drawImageRect(
+          stars,
+          ui.Rect.fromLTWH(
+              0, 0, stars.width.toDouble(), stars.height.toDouble()),
+          full,
+          ui.Paint()
+            ..filterQuality = ui.FilterQuality.low
+            ..colorFilter = const ui.ColorFilter.matrix([
+              0.35, 0, 0, 0, 0, //
+              0, 0.35, 0, 0, 0, //
+              0, 0, 0.35, 0, 0, //
+              0, 0, 0, 1, 0,
+            ]),
+        );
+      }
+    }
 
     // Sun: a small hot disc with a glow skirt, so smooth hulls carry a glint.
     // Occluded when the BODY eclipses it as seen from the craft: the body is
@@ -279,12 +310,13 @@ class PlanetEnvironmentBaker {
     // A flat average-albedo disc reads as an invisible grey wash in a
     // reflection (a full moon fills 90 degrees but averages ~0.35 sRGB on
     // a dark hull). Draw the body's actual map into the disc instead, and
-    // NORMALIZE its brightness so the brightest channel lands near full
-    // scale at full phase — the reflection then reads as "the moon", not
-    // as faint ambient. Falls back to the flat gradient until the map
-    // decodes.
+    // gently normalise its brightness so a dark map (the moon's ~0.35
+    // albedo) still reads without blowing the day side to pure white.
+    // Target ~0.55 of full scale at full phase (was 0.95, which clipped
+    // the sunlit moon to white through the metallic hull); the envIntensity
+    // knob does the final loudness.
     final maxAlbedo = [tint.r, tint.g, tint.b].reduce(math.max).clamp(0.15, 1.0);
-    final boost = (lit * 0.95 / maxAlbedo).clamp(0.0, 3.5);
+    final boost = (lit * 0.55 / maxAlbedo).clamp(0.0, 2.0);
     final centre = scale(tint, lit);
     final edge = scale(tint, lit * 0.55);
     _wrapped(uv.dx, (x) {
