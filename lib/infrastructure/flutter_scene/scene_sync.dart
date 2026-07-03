@@ -74,7 +74,7 @@ class SceneSync {
 
     _bodies.update(snap, origin);
     if (!_noVessels) {
-      _vessels.update(snap, origin);
+      _vessels.update(snap, origin, starWorld: _bodies.starWorld(snap));
       _exhaust.update(snap, origin);
     }
     if (!_noLines) {
@@ -97,7 +97,7 @@ class SceneSync {
     _skybox.update(
         cameraRangeKm:
             camera == null ? 0 : camera.eyeOffset.length * kRenderScale);
-    _updateSun(snap, focusVesselId);
+    _updateSun(snap);
     _updateExposure(snap, camera, focusVesselId, focusBodyId);
     if (camera != null) {
       _environment.update(
@@ -193,19 +193,12 @@ class SceneSync {
   /// the disc like the software renderer.
   static const double _sunIntensity = 2.2;
 
-  /// Eclipse the sun on the focused craft: dim the (single, global)
-  /// directional light when the focus vessel is in its body's umbra, so the
-  /// craft loses its sun highlight in shadow. Toggle for A/B. LIMITATION:
-  /// one global light means this dims the WHOLE scene by the FOCUS vessel's
-  /// shadow — harmless for a chase camera (from behind the body, the only
-  /// sunlit things are out of view), but a wide shot of a lit body while the
-  /// craft happens to be eclipsed would darken too.
-  static bool eclipseCraft = true;
-
   /// Sunlight: aims from the star through the focus. Bodies/vessels away
   /// from the star get lit on the star-facing side. Falls back to a fixed
-  /// direction until the star is known (first descriptor frame).
-  void _updateSun(WorldSnapshot snap, String? focusVesselId) {
+  /// direction until the star is known (first descriptor frame). The GLOBAL
+  /// light stays full strength — craft eclipse is applied per-vessel in
+  /// [VesselNodes] so it never dims other bodies.
+  void _updateSun(WorldSnapshot snap) {
     final star = _bodies.starWorld(snap);
     final dir = star == null
         ? vm.Vector3(-1.0, -0.2, -0.1)
@@ -222,36 +215,14 @@ class SceneSync {
             final d = rel / len;
             return vm.Vector3(-d.x, -d.y, -d.z);
           })();
-    final intensity = _sunIntensity * _eclipseFactor(snap, star, focusVesselId);
     final light = scene.directionalLight;
     if (light == null) {
       scene.directionalLight =
-          fs.DirectionalLight(direction: dir, intensity: intensity);
+          fs.DirectionalLight(direction: dir, intensity: _sunIntensity);
     } else {
       light.direction = dir;
-      light.intensity = intensity;
+      light.intensity = _sunIntensity;
     }
-  }
-
-  /// 1 = full sun, 0 = the focus vessel is deep in its body's umbra. The sun
-  /// is at infinity and the body is near+huge (71 deg radius in low lunar
-  /// orbit), so the craft is in shadow whenever the sun direction falls
-  /// inside the body's disc as seen from the craft. Fades over the last ~3
-  /// deg to the limb (a soft penumbra).
-  double _eclipseFactor(WorldSnapshot snap, Vector3? star, String? focusVesselId) {
-    if (!eclipseCraft || star == null || focusVesselId == null) return 1.0;
-    final v = snap.vessels[focusVesselId];
-    if (v == null) return 1.0;
-    final b = snap.bodies[v.body];
-    if (b == null) return 1.0;
-    final pv = Vector3(b.px + v.px, b.py + v.py, b.pz + v.pz);
-    final toBody = Vector3(b.px, b.py, b.pz) - pv;
-    final dist = toBody.length;
-    if (dist <= b.radius) return 1.0; // on/inside the surface: leave lit
-    final ang = math.asin((b.radius / dist).clamp(0.0, 1.0));
-    final sunAng = math.acos(
-        ((star - pv).normalized).dot(toBody / dist).clamp(-1.0, 1.0));
-    return ((sunAng - ang) / 0.05).clamp(0.0, 1.0);
   }
 
   Vector3 _focusWorld(

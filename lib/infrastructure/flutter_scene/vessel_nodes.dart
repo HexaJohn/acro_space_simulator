@@ -49,7 +49,17 @@ class VesselNodes {
   final Set<String> _glbApplied = {};
   static bool _glbFailed = false; // missing/corrupt asset: stay procedural
 
-  void update(WorldSnapshot snap, FloatingOrigin origin) {
+  /// Per-vessel eclipse of the sun on the craft (dims its materials when it
+  /// is in the body's umbra). Applied HERE, not on the scene's global
+  /// directional light, so other bodies stay sunlit. Toggle for A/B.
+  static bool eclipseCraft = true;
+
+  /// Original baseColorFactor per craft material, captured on first sight so
+  /// the eclipse dim can be re-scaled from the true base every frame rather
+  /// than accumulating.
+  final Map<fs.PhysicallyBasedMaterial, vm.Vector4> _baseColor = {};
+
+  void update(WorldSnapshot snap, FloatingOrigin origin, {Vector3? starWorld}) {
     final seen = <String>{};
     for (final v in snap.vessels.values) {
       final body = snap.bodies[v.body];
@@ -72,6 +82,7 @@ class VesselNodes {
         _rebuildParts(node, v);
       }
       node.localTransform = vm.Matrix4.compose(pos, rot, vm.Vector3.all(1.0));
+      _applyEclipse(node, _eclipseFactor(body, v, starWorld));
 
       // glTF is Y-up; the vessel body frame is Z-up with the nose on +Z.
       // Model units differ per export — [glbUnitScale] converts model
@@ -93,6 +104,47 @@ class VesselNodes {
       _glbModels.remove(id);
       return true;
     });
+  }
+
+  /// 1 = full sun, 0 = the craft is deep in [body]'s umbra. The sun is at
+  /// infinity and the body is near+huge (71 deg radius in low lunar orbit),
+  /// so the craft is shadowed whenever the sun direction falls inside the
+  /// body's disc as seen from the craft; fades over the last ~3 deg to the
+  /// limb (a soft penumbra).
+  double _eclipseFactor(BodySnapshot body, VesselSnapshot v, Vector3? star) {
+    if (!eclipseCraft || star == null) return 1.0;
+    final pv = Vector3(body.px + v.px, body.py + v.py, body.pz + v.pz);
+    final toBody = Vector3(body.px, body.py, body.pz) - pv;
+    final dist = toBody.length;
+    if (dist <= body.radius) return 1.0; // on/inside the surface
+    final ang = math.asin((body.radius / dist).clamp(0.0, 1.0));
+    final sunAng = math.acos(
+        (star - pv).normalized.dot(toBody / dist).clamp(-1.0, 1.0));
+    return ((sunAng - ang) / 0.05).clamp(0.0, 1.0);
+  }
+
+  /// Scale every PBR material's base colour under [node] by the eclipse
+  /// factor (RGB only; alpha kept), re-derived from the captured original so
+  /// it never drifts. Floored so a shadowed craft is very dark but not a
+  /// pure-black silhouette (a little earthshine/ambient survives). Metallic
+  /// hulls lose their sun highlight this way (F0 = base colour); a dielectric
+  /// part keeps a faint ~4% highlight, which reads fine.
+  void _applyEclipse(fs.Node node, double e) {
+    final mesh = node.mesh;
+    if (mesh != null) {
+      for (final prim in mesh.primitives) {
+        final m = prim.material;
+        if (m is fs.PhysicallyBasedMaterial) {
+          final base = _baseColor.putIfAbsent(m, () => m.baseColorFactor);
+          final f = e >= 1.0 ? 1.0 : e.clamp(0.05, 1.0);
+          m.baseColorFactor =
+              vm.Vector4(base.r * f, base.g * f, base.b * f, base.a);
+        }
+      }
+    }
+    for (final child in node.children) {
+      _applyEclipse(child, e);
+    }
   }
 
   void _ensureCraftModel(String vesselId, fs.Node parent) {
