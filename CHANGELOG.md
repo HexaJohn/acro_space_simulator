@@ -3,6 +3,19 @@
 All notable changes to Acro Space Simulator.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.3.1] — 2026-07-03
+
+Hotfix.
+
+- **Craft eclipse no longer darkens other bodies.** The sun is now eclipsed
+  on the craft per-vessel (dimming its own materials) instead of by dimming
+  the single global directional light, which had darkened the moon and
+  planets whenever the focused craft was in shadow.
+- **Craft model ships to the web build too.** The baked `.fsceneb` is now
+  fetched from the private assets repo for the Pages deploy as well as the
+  desktop zip, so the craft renders on web instead of falling back to
+  procedural primitives.
+
 ## [0.3.0] — 2026-07-02
 
 **The rendering overhaul.** A ground-up in-process 3D backend on
