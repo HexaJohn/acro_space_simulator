@@ -14,6 +14,14 @@ fvm dart run tool/import_mesh.dart
 Builds without the models fall back to procedural part meshes
 (`VesselNodes._glbFailed`).
 
-Current sources (keep private backups — the repo does not have them):
+Canonical storage is the **private** repo
+[HexaJohn/acro-space-assets](https://github.com/HexaJohn/acro-space-assets):
+each release carries the `.glb` sources (backup) and baked `.fsceneb`
+(what CI ships). The release workflow's Windows job downloads the latest
+release's `*.fsceneb` using the `ASSETS_TOKEN` secret (fine-grained PAT,
+Contents:Read on that repo). The web/Pages build deliberately gets no
+models — Pages would serve the raw file publicly.
+
+Current sources:
 
 - `apollo.glb` — Apollo CSM craft model.
