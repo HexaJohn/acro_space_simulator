@@ -26,6 +26,9 @@ migrate_working_dir/
 # FVM (pinned SDK cache — .fvmrc IS committed)
 .fvm/
 
+# Licensed 3D model assets — NOT redistributable, keep local only
+*.glb
+
 # Flutter/Dart/Pub related
 **/doc/api/
 **/ios/Flutter/.last_build_id
