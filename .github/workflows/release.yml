@@ -20,26 +20,18 @@ jobs:
   # ---- Web build + GitHub Pages deploy ----
   web:
     runs-on: ubuntu-latest
-    env:
-      # Fine-grained PAT with Contents:Read on HexaJohn/acro-space-assets
-      # (private). Unset (e.g. forked PRs) -> models skipped, craft renders
-      # as procedural part meshes.
-      ASSETS_TOKEN: ${{ secrets.ASSETS_TOKEN }}
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-      # Licensed craft models: fetched from the private assets repo into the
-      # web build too. The baked .fsceneb is deemed acceptable to serve from
-      # public Pages — it is not the raw source model, and it requires
-      # running the app to decode/use — so the craft renders on web as well
-      # as desktop.
-      - name: Fetch licensed craft models
-        if: env.ASSETS_TOKEN != ''
-        env:
-          GH_TOKEN: ${{ env.ASSETS_TOKEN }}
-        run: gh release download --repo HexaJohn/acro-space-assets --pattern "*.fsceneb" --dir assets/mesh
+      # NOTE: the craft model is deliberately NOT bundled into the web build.
+      # Bundling the 86 MB baked .fsceneb makes the GitHub Pages server-side
+      # build fail ("Deployment failed, try again later") even though it is
+      # under the documented 100 MB/file and 1 GB/site limits — an effective
+      # Pages constraint on the large binary. The web craft is served via a
+      # runtime fetch from a Release asset instead (see the app's model
+      # loader); the desktop zip still bundles it directly (windows job).
       # flutter_scene / Flutter GPU track a pinned master commit (.fvmrc);
       # stable can't resolve the deps (vector_math 2.2.0 vs 2.4.0) or build the
       # GPU backend. Check out the exact pinned commit so CI == local dev.
@@ -82,9 +74,9 @@ jobs:
       ASSETS_TOKEN: ${{ secrets.ASSETS_TOKEN }}
     steps:
       - uses: actions/checkout@v4
-      # Licensed craft models: never committed to this repo; fetched here
-      # from the private assets repo for the desktop zip (and likewise in the
-      # web job, see there).
+      # Licensed craft models: never committed to this repo; fetched from the
+      # private assets repo for the desktop zip. (The web build omits it — see
+      # the web job — because GitHub Pages can't build the 86 MB binary.)
       - name: Fetch licensed craft models
         if: env.ASSETS_TOKEN != ''
         env:

@@ -11,10 +11,10 @@ Hotfix.
   on the craft per-vessel (dimming its own materials) instead of by dimming
   the single global directional light, which had darkened the moon and
   planets whenever the focused craft was in shadow.
-- **Craft model ships to the web build too.** The baked `.fsceneb` is now
-  fetched from the private assets repo for the Pages deploy as well as the
-  desktop zip, so the craft renders on web instead of falling back to
-  procedural primitives.
+
+(The craft model stays desktop-only on the web build for now: GitHub Pages
+fails to deploy the 86 MB baked `.fsceneb`. A runtime fetch for the web craft
+is a follow-up.)
 
 ## [0.3.0] — 2026-07-02
 
