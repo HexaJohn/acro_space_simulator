@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart' show ValueNotifier;
 import 'package:flutter_scene/scene.dart' as fs;
 import 'package:vector_math/vector_math.dart' as vm;
 
@@ -48,6 +49,14 @@ class PlanetEnvironmentBaker {
   /// the planet composite — an absurd-value probe that separates "the IBL
   /// pipeline is broken" from "the planet disc is just dim".
   static String testPattern = '';
+
+  /// On-screen debug view of the reflection capture: the latest baked
+  /// equirect, published for an overlay painter. Toggle the overlay with
+  /// `ext.acro.camera?envDebug=true` (drives [showDebug]); the image
+  /// updates on every rebake.
+  static final ValueNotifier<ui.Image?> latestBake =
+      ValueNotifier<ui.Image?>(null);
+  static bool showDebug = false;
 
   /// IBL intensity while a baked environment is active. The studio default
   /// runs at 0.05 to keep space from looking like a photo booth; the baked
@@ -318,6 +327,7 @@ class PlanetEnvironmentBaker {
 
     final img = await rec.endRecording().toImage(_w, _h);
     debugDump?.call(img);
+    latestBake.value = img; // feeds the on-screen debug overlay
     // Diffuse SH KILLED (except a flat DC ambient): fromUIImages otherwise
     // projects the map onto 9 diffuse spherical-harmonic coefficients, and a
     // large dim body disc dumps almost all its energy into the L1

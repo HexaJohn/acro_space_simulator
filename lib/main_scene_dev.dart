@@ -164,6 +164,10 @@ void main() {
       PlanetEnvironmentBaker.testPattern =
           params['envTest'] == 'white' ? 'white' : '';
     }
+    // On-screen reflection-capture overlay: envDebug=true|false.
+    if (params['envDebug'] != null) {
+      PlanetEnvironmentBaker.showDebug = params['envDebug'] == 'true';
+    }
     // Depth-plane overrides (metres): near=5&far=1e12; <=0 restores the
     // adaptive formula.
     final nearOv = params['near'], farOv = params['far'];

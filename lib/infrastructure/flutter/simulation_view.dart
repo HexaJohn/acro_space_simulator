@@ -2,6 +2,7 @@
 import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data' show Uint8List;
+import 'dart:ui' as ui show Image;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
@@ -36,6 +37,7 @@ import '../../domain/universe/celestial_body.dart' show BodyId, CelestialBody;
 import '../../domain/vessel/vessel.dart';
 import '../sample_world.dart';
 import '../flutter_scene/atmosphere_nodes.dart';
+import '../flutter_scene/environment_baker.dart';
 import '../flutter_scene/line_nodes.dart';
 import '../flutter_scene/render_backend.dart';
 import '../flutter_scene/ring_nodes.dart';
@@ -52,7 +54,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.0.249';
+const String kBuildStamp = 'build 0.3.0.250';
 
 /// What the camera treats as "up" while orbiting the focus.
 enum CameraUpMode {
@@ -1396,6 +1398,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       ('Show SOIs', _layers.showSoi, (v) => _layers.copyWith(showSoi: v)),
       ('Cull distant', _layers.cullDistant, (v) => _layers.copyWith(cullDistant: v)),
       ('Infinite fuel', _layers.infiniteFuel, (v) => _layers.copyWith(infiniteFuel: v)),
+      // 3D backend only: overlay the reflection-capture equirect (what the
+      // craft's IBL reflects). Static flag, so leave _layers untouched.
+      ('Env reflection', PlanetEnvironmentBaker.showDebug, (v) {
+        PlanetEnvironmentBaker.showDebug = v;
+        return _layers;
+      }),
     ];
     return Container(
       width: 190,
@@ -2130,6 +2138,14 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                         ),
                       ),
                     ),
+                  // Reflection-capture debug overlay (bottom-left, above the
+                  // build stamp) — the equirect the craft's IBL reflects.
+                  if (PlanetEnvironmentBaker.showDebug)
+                    const Positioned(
+                      left: 8,
+                      bottom: 40,
+                      child: IgnorePointer(child: _EnvBakeDebugView()),
+                    ),
                 ] else
                   Positioned.fill(
                     child: snap == null
@@ -2443,4 +2459,69 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       const SizedBox(width: 40),
     ],
   );
+}
+
+/// On-screen view of the reflection-capture equirect the craft's IBL
+/// reflects (toggle: debug panel 'Env reflection', or
+/// `ext.acro.camera?envDebug=true`). Rebuilds itself as each rebake
+/// publishes a new image — independent of the sim frame so it updates even
+/// when the camera is parked.
+class _EnvBakeDebugView extends StatelessWidget {
+  const _EnvBakeDebugView();
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<ui.Image?>(
+      valueListenable: PlanetEnvironmentBaker.latestBake,
+      builder: (context, img, _) {
+        if (img == null) return const SizedBox.shrink();
+        return Container(
+          decoration: BoxDecoration(
+            border: Border.all(color: const Color(0xFF33CCCC)),
+            color: const Color(0xFF000000),
+          ),
+          child: CustomPaint(
+            size: const Size(320, 160),
+            painter: _EnvBakePainter(img),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _EnvBakePainter extends CustomPainter {
+  _EnvBakePainter(this.image);
+
+  final ui.Image image;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawImageRect(
+      image,
+      Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble()),
+      Rect.fromLTWH(0, 0, size.width, size.height),
+      Paint()..filterQuality = FilterQuality.none,
+    );
+    // Reference axes: the equator (v=0.5) and the u=0.5 meridian, so a
+    // mispositioned sun/body disc is easy to read off the projection.
+    final axis = Paint()
+      ..color = const Color(0x3333CCCC)
+      ..strokeWidth = 1;
+    canvas.drawLine(
+        Offset(0, size.height / 2), Offset(size.width, size.height / 2), axis);
+    canvas.drawLine(
+        Offset(size.width / 2, 0), Offset(size.width / 2, size.height), axis);
+    final tp = TextPainter(
+      text: const TextSpan(
+        text: 'ENV BAKE  (u: atan2 z,x — v: asin y)',
+        style: TextStyle(color: Color(0xCC33CCCC), fontSize: 9),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    tp.paint(canvas, const Offset(3, 2));
+  }
+
+  @override
+  bool shouldRepaint(_EnvBakePainter old) => !identical(old.image, image);
 }
