@@ -668,9 +668,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
 
     // The REAL Solar System: Sun + planets + dwarf planets + moons.
     final system = SampleWorld.realSystem();
-    // ~3000 km up so the craft is clearly off the surface at the default zoom
-    // (a 400 km LEO sits only a few px above Earth's limb and looks landed).
-    final vessel = SampleWorld.buildEarthOrbiter(altitude: 3000000);
+    // Low lunar orbit (~100 km) around the Moon.
+    final vessel = SampleWorld.buildEarthOrbiter(
+        bodyId: SampleWorld.moon, altitude: 100000);
     // An ascent/descent craft injected by the caller (sits on a body surface).
     final injected = widget.injectedVessel;
     final fleet = [vessel, ?injected, ...widget.trafficVessels];

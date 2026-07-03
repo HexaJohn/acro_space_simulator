@@ -262,9 +262,10 @@ class SampleWorld {
   //  REAL SOLAR SYSTEM craft fixtures (Earth + Moon)
   // ============================================================
 
-  /// A demo vessel in Low Earth Orbit (~400 km), prograde, with experiments.
-  static Vessel buildEarthOrbiter({double altitude = 400000}) {
-    final body = realSystem().require(earth);
+  /// A demo vessel in a low circular orbit above [bodyId] (Earth by default),
+  /// prograde, with experiments.
+  static Vessel buildEarthOrbiter({BodyId? bodyId, double altitude = 400000}) {
+    final body = realSystem().require(bodyId ?? earth);
     final r = body.radius + altitude;
     final v = math.sqrt(body.mu / r);
     final tank = ResourceContainer(
@@ -279,7 +280,7 @@ class SampleWorld {
         // Nose (+Z) pointed prograde (+Y) so the chase cam has a real heading.
         attitude: Quaternion.axisAngle(Vector3.unitX, -math.pi / 2),
       ),
-      dominantBody: earth,
+      dominantBody: bodyId ?? earth,
       stages: [
         Stage(index: 0, parts: [
           Part(
