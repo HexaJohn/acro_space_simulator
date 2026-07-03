@@ -222,21 +222,35 @@ class PlanetEnvironmentBaker {
     );
 
     // Sun: a small hot disc with a glow skirt, so smooth hulls carry a glint.
+    // Occluded when the BODY eclipses it as seen from the craft: the body is
+    // near and huge (71 deg radius in low lunar orbit) and the sun is at
+    // infinity, so whenever the sun direction falls inside the body's disc
+    // the craft is in the body's shadow and no glint should reach the hull.
+    // Fade over the last ~3 deg to the limb so it doesn't pop.
     if (sunFromEye != null) {
-      final uv = _uv(sunFromEye);
-      _wrapped(uv.dx, (x) {
-        canvas.drawCircle(
-          ui.Offset(x, uv.dy),
-          6,
-          ui.Paint()
-            ..shader = ui.Gradient.radial(
-              ui.Offset(x, uv.dy),
-              6,
-              const [ui.Color(0xFFFFFFFF), ui.Color(0xFFFFF2CC), ui.Color(0x00FFF2CC)],
-              const [0.0, 0.35, 1.0],
-            ),
-        );
-      });
+      final sunAng = math.acos(sunFromEye.dot(dir).clamp(-1.0, 1.0));
+      final vis = ((sunAng - angular) / 0.05).clamp(0.0, 1.0);
+      if (vis > 0.0) {
+        int s(int c) => (c * vis).round().clamp(0, 255);
+        final uv = _uv(sunFromEye);
+        _wrapped(uv.dx, (x) {
+          canvas.drawCircle(
+            ui.Offset(x, uv.dy),
+            6,
+            ui.Paint()
+              ..shader = ui.Gradient.radial(
+                ui.Offset(x, uv.dy),
+                6,
+                [
+                  ui.Color.fromARGB(255, s(255), s(255), s(255)),
+                  ui.Color.fromARGB(255, s(255), s(242), s(204)),
+                  const ui.Color(0x00FFF2CC),
+                ],
+                const [0.0, 0.35, 1.0],
+              ),
+          );
+        });
+      }
     }
 
     // Planet disc at its real angular size, phase-dimmed. Equirect
