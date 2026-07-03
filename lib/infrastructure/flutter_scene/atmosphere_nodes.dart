@@ -189,10 +189,10 @@ class AtmosphereNodes {
       final camDistM = (cameraEye - rel).length;
       shell.setInside(camDistM < atmoTopM * 1.02);
 
-      shell.node.localTransform = vm.Matrix4.compose(
+      shell.setTransforms(
         relToScene(rel),
-        vm.Quaternion.identity(),
-        vm.Vector3.all(lengthToScene(atmoTopM)),
+        lengthToScene(atmoTopM),
+        lengthToScene(b.radius),
       );
 
       final toSun = starWorld == null ? Vector3.unitX : (starWorld - world).normalized;
@@ -225,7 +225,7 @@ class AtmosphereNodes {
 
     _shells.removeWhere((id, shell) {
       if (seen.contains(id)) return false;
-      _scene.remove(shell.node);
+      shell.removeFrom(_scene);
       return true;
     });
   }
@@ -233,38 +233,69 @@ class AtmosphereNodes {
 
 class _Shell {
   _Shell(Object shader, this._scene) {
-    // TWO windings, ONE active at a time (see setInside):
-    //  * interior faces + depth ALWAYS — camera inside the shell (the
-    //    exterior faces would sit behind the eye; interior faces sit
-    //    behind the planet so lessEqual would cull the disc).
-    //  * exterior faces + normal depth — camera outside; depth-correct
-    //    against opaque scene geometry (ring asteroids, vessels).
-    _inMaterial = AtmosphereShaderMaterial(fragmentShader: shader as gpu.Shader, depthAlways: true);
+    // The scatter integral only depends on the RAY (camera -> fragment
+    // direction); the rasterized geometry just decides WHICH pixels get it
+    // and at WHAT depth the depth test runs. All windings therefore share
+    // the shader and depth-test lessEqual — an opaque craft in front of
+    // the haze always wins. Camera outside: exterior shell faces. Camera
+    // inside: the shell's interior faces sit BEHIND the planet, so alone
+    // they'd lose the disc to the depth test — a surface-hugging proxy
+    // sphere (just above the planet surface, correct depth) rasterizes the
+    // disc pixels instead. (The old interior mode used depth ALWAYS, which
+    // painted haze OVER the vessel while flying inside an atmosphere.)
+    _inMaterial = AtmosphereShaderMaterial(fragmentShader: shader as gpu.Shader, depthAlways: false);
     _outMaterial = AtmosphereShaderMaterial(fragmentShader: shader, depthAlways: false);
+    _surfMaterial = AtmosphereShaderMaterial(fragmentShader: shader, depthAlways: false);
     _inNode = fs.Node(mesh: fs.Mesh(uvSphereZUp(segments: 48, rings: 24, invert: true), _inMaterial));
     _outNode = fs.Node(mesh: fs.Mesh(uvSphereZUp(segments: 48, rings: 24), _outMaterial));
+    _surfNode = fs.Node(mesh: fs.Mesh(uvSphereZUp(segments: 48, rings: 24), _surfMaterial));
     _scene.add(_outNode); // start outside
-    _active = _outNode;
+    _active = [_outNode];
   }
 
   final fs.Scene _scene;
-  late final fs.Node _inNode, _outNode;
-  late final AtmosphereShaderMaterial _inMaterial, _outMaterial;
-  late fs.Node _active;
-
-  fs.Node get node => _active;
+  late final fs.Node _inNode, _outNode, _surfNode;
+  late final AtmosphereShaderMaterial _inMaterial, _outMaterial, _surfMaterial;
+  late List<fs.Node> _active;
 
   void setInside(bool inside) {
-    final want = inside ? _inNode : _outNode;
-    if (identical(want, _active)) return;
-    _scene.remove(_active);
-    _scene.add(want);
-    // Carry the transform across the swap so the frame stays coherent.
-    want.localTransform = _active.localTransform;
+    // Inside: sky/limb pixels come from the shell's far interior wall,
+    // disc pixels from the surface proxy (both lessEqual). Outside: the
+    // exterior shell alone is depth-correct.
+    final want = inside ? [_inNode, _surfNode] : [_outNode];
+    if (want.length == _active.length && identical(want.first, _active.first)) {
+      return;
+    }
+    for (final n in _active) {
+      _scene.remove(n);
+    }
+    for (final n in want) {
+      _scene.add(n);
+    }
     _active = want;
   }
 
-  void removeFrom(fs.Scene scene) => scene.remove(_active);
+  /// Position/scale all windings for this frame. The shell nodes span the
+  /// atmosphere top; the surface proxy hugs the planet just above the
+  /// surface (0.02% up: below any terrain-scale feature, but in FRONT of
+  /// the opaque sphere in the depth buffer so the disc haze survives the
+  /// lessEqual test).
+  void setTransforms(vm.Vector3 centreScene, double atmoTopScene, double planetRadiusScene) {
+    final shellScale = vm.Matrix4.compose(centreScene, vm.Quaternion.identity(), vm.Vector3.all(atmoTopScene));
+    _inNode.localTransform = shellScale;
+    _outNode.localTransform = shellScale;
+    _surfNode.localTransform = vm.Matrix4.compose(
+      centreScene,
+      vm.Quaternion.identity(),
+      vm.Vector3.all(planetRadiusScene * 1.0002),
+    );
+  }
+
+  void removeFrom(fs.Scene scene) {
+    for (final n in _active) {
+      scene.remove(n);
+    }
+  }
 
   // Physical Earth Rayleigh coefficients, per KILOMETRE (scene unit):
   // beta = (5.8e-3, 1.35e-2, 3.31e-2). Non-Earth hues come from the
@@ -313,8 +344,9 @@ class _Shell {
     _uniforms[17] = twilightScene;
     _uniforms[18] = densityNorm;
     _uniforms[19] = 0.0;
-    // Both windings share the block; only one node is in the scene.
+    // All windings share the block; only the active set is in the scene.
     _inMaterial.setUniformBlockFromFloats('AtmosphereInfo', _uniforms);
     _outMaterial.setUniformBlockFromFloats('AtmosphereInfo', _uniforms);
+    _surfMaterial.setUniformBlockFromFloats('AtmosphereInfo', _uniforms);
   }
 }

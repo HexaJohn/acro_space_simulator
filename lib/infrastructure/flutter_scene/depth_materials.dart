@@ -21,13 +21,10 @@ class AtmosphereShaderMaterial extends fs.ShaderMaterial {
   AtmosphereShaderMaterial({super.fragmentShader, this.depthAlways = true})
       : super(isOpaqueOverride: false);
 
-  /// True for the INTERIOR-faces shell (camera inside the atmosphere): its
-  /// faces sit behind the planet, so comparing against the opaque planet
-  /// would cull the whole disc — occlusion is analytic in the shader.
-  /// False for the EXTERIOR-faces shell (camera outside): normal lessEqual
-  /// keeps it depth-correct against opaque geometry INSIDE the scene —
-  /// without it the haze composited over ring asteroids and vessels that
-  /// were clearly in front of the atmosphere.
+  /// `always` skips the depth test entirely for this draw. No shell uses
+  /// it anymore — the camera-inside case is covered by a surface-hugging
+  /// proxy sphere at correct depth (see _Shell) after `always` was found
+  /// painting haze OVER the vessel in flight. Kept for debug bisection.
   final bool depthAlways;
 
   @override
