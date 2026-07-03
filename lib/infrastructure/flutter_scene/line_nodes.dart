@@ -303,30 +303,64 @@ class LineNodes {
       cols.add(vm.Vector4(base.x * a, base.y * a, base.z * a, a));
     }
 
-    Vector3? prevRel;
-    var prevF = 0.0;
-    for (var i = 0; i < world.length; i++) {
-      final rel = origin.worldToRel(world[i]);
+    // Pre-project every sample into the scene-relative frame. Densified points
+    // ride a Catmull-Rom spline through these samples, so they bow onto the
+    // true curve instead of cutting the chord: the craft — always ON a sample
+    // — sees a smooth arc hugging it, not a polyline it pulls off of between
+    // vertices. The spline passes exactly through every sample, so the coarse
+    // shape is untouched; only the gaps fill in.
+    final n = world.length;
+    final rel = [for (final w in world) origin.worldToRel(w)];
+    // Closed loop when the first and last sample coincide (rail rings append
+    // their seam vertex; closed ellipse paths repeat periapsis): wrap the
+    // spline's neighbour lookups across the seam; otherwise clamp at the ends.
+    final closed = n > 2 && rel.first.distanceTo(rel.last) < 1.0; // metres
+    final loopN = n - 1; // unique vertices when closed (last repeats first)
+    Vector3 ctrl(int i) => closed
+        ? rel[((i % loopN) + loopN) % loopN]
+        : rel[i < 0 ? 0 : (i >= n ? n - 1 : i)];
+
+    for (var i = 0; i < n; i++) {
       final f = frac[i];
-      if (prevRel != null && eye != null && pts.length < _densifyMaxPts) {
-        final seg = rel - prevRel;
-        final segLen = seg.length;
-        final dist = ((prevRel + seg * 0.5) - eye).length;
+      if (i > 0 && eye != null && pts.length < _densifyMaxPts) {
+        final p1 = rel[i - 1];
+        final p2 = rel[i];
+        final seg = p2 - p1;
+        final dist = ((p1 + seg * 0.5) - eye).length;
         if (dist > 1e-3) {
-          final px = focal * segLen / dist;
-          final n =
+          final px = focal * seg.length / dist;
+          final splits =
               math.min((px / _densifyTargetPx).floor(), _densifyMaxPerSeg);
-          for (var k = 1; k < n; k++) {
-            final t = k / n;
-            emit(prevRel + seg * t, prevF + (f - prevF) * t);
+          if (splits > 1) {
+            final p0 = ctrl(i - 2);
+            final p3 = ctrl(i + 1);
+            final prevF = frac[i - 1];
+            for (var k = 1; k < splits; k++) {
+              final t = k / splits;
+              emit(_catmullRom(p0, p1, p2, p3, t), prevF + (f - prevF) * t);
+            }
           }
         }
       }
-      emit(rel, f);
-      prevRel = rel;
-      prevF = f;
+      emit(rel[i], f);
     }
     return (pts, cols);
+  }
+
+  /// Uniform Catmull-Rom point at parameter [t] (0..1) on the segment
+  /// [p1]->[p2], with [p0]/[p3] the flanking samples that set the tangents.
+  /// Interpolates (passes through p1 at t=0, p2 at t=1) and curves toward the
+  /// neighbours between them.
+  static Vector3 _catmullRom(
+      Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3, double t) {
+    final t2 = t * t;
+    final t3 = t2 * t;
+    // 0.5 * (2p1 + (p2-p0)t + (2p0-5p1+4p2-p3)t^2 + (3p1-3p2+p3-p0)t^3)
+    return (p1 * 2.0 +
+            (p2 - p0) * t +
+            (p0 * 2.0 - p1 * 5.0 + p2 * 4.0 - p3) * t2 +
+            (p1 * 3.0 - p2 * 3.0 + p3 - p0) * t3) *
+        0.5;
   }
 
   void _setSpec(
