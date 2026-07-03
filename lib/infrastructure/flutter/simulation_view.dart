@@ -54,7 +54,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.1.255';
+const String kBuildStamp = 'build 0.3.2.256';
 
 /// What the camera treats as "up" while orbiting the focus.
 enum CameraUpMode {

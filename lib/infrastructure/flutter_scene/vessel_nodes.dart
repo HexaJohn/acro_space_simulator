@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_scene/fscene.dart' as fsb;
 import 'package:flutter_scene/scene.dart' as fs;
 import 'package:vector_math/vector_math.dart' as vm;
@@ -38,6 +39,17 @@ class VesselNodes {
   /// neither format is committed (license bars redistribution), so clones
   /// without the asset stay procedural via [_glbFailed].
   static const String _craftModel = 'assets/mesh/apollo.fsceneb';
+
+  /// Web bundles a SMALLER, lower-res bake: the full 86 MB model breaks the
+  /// GitHub Pages server-side build (over an effective size threshold), and
+  /// GitHub Release assets aren't CORS-enabled so it can't be fetched at
+  /// runtime either. The web bake is fetched into the Pages build by the
+  /// release workflow's web job; absent (e.g. not yet published) the craft
+  /// stays procedural via [_glbFailed].
+  static const String _craftModelWeb = 'assets/mesh/apollo-web.fsceneb';
+
+  /// The model asset for this platform.
+  static String get _craftModelAsset => kIsWeb ? _craftModelWeb : _craftModel;
 
   /// Model-unit -> metre factor for [_craftModel]. Live-tunable via
   /// `ext.acro.camera?glbScale=` while calibrating a new export; the
@@ -152,7 +164,7 @@ class VesselNodes {
       return;
     }
     _glbLoading.add(vesselId);
-    fsb.loadFscenebAsset(_craftModel)
+    fsb.loadFscenebAsset(_craftModelAsset)
         .then((model) {
           _glbLoading.remove(vesselId);
           final node = _nodes[vesselId];
@@ -176,30 +188,50 @@ class VesselNodes {
     for (final child in List.of(vesselNode.children)) {
       vesselNode.remove(child);
     }
-    if (v.parts.isEmpty) {
-      // No part detail: a lone hull cone, like the software renderer's ship
-      // glyph (~10 m).
-      vesselNode.add(
-        fs.Node(mesh: fs.Mesh(PartPrimitives.cone(), PartPrimitives.hull()))
-          ..localTransform = _partTransform(0, 0, 0, 10.0),
-      );
-      return;
-    }
-    for (final p in v.parts) {
-      // Primitives are unit-metre; real craft parts read better at a few
-      // metres (a 1 m cube is sub-pixel at typical camera ranges).
-      vesselNode.add(
-        fs.Node(mesh: PartPrimitives.forType(p.type))..localTransform = _partTransform(p.ox, p.oy, p.oz, 3.0),
-      );
-    }
+    // The craft is represented by the Apollo model ([_craftModelAsset]); the
+    // procedural stand-in is the same Apollo CSM silhouette, used wherever
+    // that model isn't available (no asset, or the web build before its bake
+    // decodes). We don't render the raw part list — a generic vessel would
+    // need its own registry, but every craft here is the Apollo, so the
+    // silhouette reads as the real ship instead of a cluster of grey blocks.
+    _addApolloFallback(vesselNode);
   }
 
-  /// Part offset is metres in the vessel body frame; scene units are km.
-  vm.Matrix4 _partTransform(double ox, double oy, double oz, double scaleM) => vm.Matrix4.compose(
-    vm.Vector3(lengthToScene(ox), lengthToScene(oy), lengthToScene(oz)),
-    vm.Quaternion.identity(),
-    vm.Vector3.all(lengthToScene(scaleM)),
-  );
+  /// A rough Apollo Command + Service Module built from primitives, nose on
+  /// +Z: a blunt conical Command Module, a cylindrical Service Module, a
+  /// flared SPS engine bell, and a stub high-gain antenna dish — ~11 m, the
+  /// same scale as the baked model so the two are interchangeable. Stands in
+  /// wherever the .fsceneb isn't available (no asset, or the web build before
+  /// its bake decodes).
+  void _addApolloFallback(fs.Node vesselNode) {
+    void add(fs.MeshGeometry g, fs.Material m, double z, double dia, double len) {
+      vesselNode.add(
+        fs.Node(mesh: fs.Mesh(g, m))
+          ..localTransform = vm.Matrix4.compose(
+            vm.Vector3(0, 0, lengthToScene(z)),
+            vm.Quaternion.identity(),
+            vm.Vector3(lengthToScene(dia), lengthToScene(dia), lengthToScene(len)),
+          ),
+      );
+    }
+
+    // Command Module: blunt cone, apex = nose (wide base mates the SM).
+    add(PartPrimitives.cone(), PartPrimitives.hull(), 3.75, 3.9, 3.5);
+    // Service Module: cylinder body, same diameter as the CM base.
+    add(PartPrimitives.cylinder(), PartPrimitives.hull(), -1.5, 3.9, 7.0);
+    // SPS engine bell: flared cone at the aft.
+    add(PartPrimitives.cone(flip: true), PartPrimitives.dark(), -5.7, 2.4, 1.8);
+    // High-gain antenna: a small dish on a boom off the aft quarter.
+    vesselNode.add(
+      fs.Node(mesh: fs.Mesh(PartPrimitives.cone(), PartPrimitives.panel()))
+        ..localTransform = vm.Matrix4.compose(
+          vm.Vector3(lengthToScene(3.0), 0, lengthToScene(-4.0)),
+          vm.Quaternion.axisAngle(vm.Vector3(0, 1, 0), math.pi / 2),
+          vm.Vector3.all(lengthToScene(1.6)),
+        ),
+    );
+  }
+
 }
 
 /// Procedural primitive meshes for part type keys. All geometry is unit

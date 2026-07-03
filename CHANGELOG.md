@@ -3,6 +3,20 @@
 All notable changes to Acro Space Simulator.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.3.2] — 2026-07-03
+
+- **Craft on web, via a smaller bake.** The web build bundles a
+  lower-res `apollo-web.fsceneb` (the full 86 MB model breaks the GitHub
+  Pages build, and Release assets aren't CORS-enabled for a runtime
+  fetch); desktop keeps the full model. Until the web bake is published to
+  the assets repo the deploy still succeeds and the craft uses the
+  procedural fallback.
+- **Apollo-shaped procedural fallback.** Wherever the baked model isn't
+  available (no asset, or the web build before its bake loads) the craft
+  now renders as an Apollo CSM silhouette — conical Command Module,
+  cylindrical Service Module, flared engine bell, stub antenna, at the
+  model's scale — instead of a cluster of grey blocks.
+
 ## [0.3.1] — 2026-07-03
 
 Hotfix.
