@@ -52,10 +52,12 @@ fs.PerspectiveCamera toSceneCamera(
   // and the 100x larger near buys 100x finer far-field depth — at freecam
   // ranges of a few hundred metres INSIDE Saturn's rings, d/2000 put the
   // near plane at 1 m and the planet+ring stack 100,000 km away shimmered
-  // in depth-quantum flicker while flying. Floor 1 m.
+  // in depth-quantum flicker while flying. Floor 0.05 m — only reachable
+  // when the framed range itself is ~1 m (craft inspection), where the
+  // far field doesn't matter.
   final eyeDistanceM = eye.length;
   final adaptiveNearM = SceneCameraDebug.nearOverrideM ??
-      math.max(1.0, eyeDistanceM / 20.0);
+      math.max(0.05, eyeDistanceM / 20.0);
 
   return fs.PerspectiveCamera(
     position: relToScene(eye),

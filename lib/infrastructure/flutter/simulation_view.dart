@@ -52,7 +52,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.0.238';
+const String kBuildStamp = 'build 0.3.0.239';
 
 /// What the camera treats as "up" while orbiting the focus.
 enum CameraUpMode {
@@ -178,6 +178,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           roll: _view.roll,
           frame: _view.frame,
           range: _range + _focusBodyRadius,
+          // Range can go to 1 m; a fixed 1 m near plane would clip the
+          // whole craft there. Track the range down (never above 1 m so
+          // nothing else changes).
+          near: math.min(1.0, _range * 0.05),
           fovY: _fovDeg * math.pi / 180,
           viewportH: _screenH,
         )
@@ -546,7 +550,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     final eyeM = _range + _focusBodyRadius;
     final nearOv = SceneCameraDebug.nearOverrideM;
     final farOv = SceneCameraDebug.farOverrideM;
-    final nearM = nearOv ?? math.max(1.0, eyeM / 20.0);
+    final nearM = nearOv ?? math.max(0.05, eyeM / 20.0);
     final farM = farOv ?? math.max(5e12, eyeM * 40);
     String eng(double v) => v >= 1e9
         ? '${(v / 1e9).toStringAsFixed(1)}Gm'
@@ -566,7 +570,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   /// Zoom by [factor] (>1 = out): adjusts ortho mpp or perspective range.
   void _zoom(double factor) {
     if (_perspectiveMode) {
-      _range = (_range * factor).clamp(100.0, 1e13);
+      _range = (_range * factor).clamp(1.0, 1e13);
     } else {
       _metresPerPixel = (_metresPerPixel * factor).clamp(0.5, 2e10);
     }
@@ -2074,7 +2078,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                 // Two-finger pinch -> zoom.
                 setState(() {
                   if (_perspectiveMode) {
-                    _range = (_pinchBaseRange / d.scale).clamp(100.0, 1e13);
+                    _range = (_pinchBaseRange / d.scale).clamp(1.0, 1e13);
                   } else {
                     _metresPerPixel = (_pinchBaseMpp / d.scale).clamp(0.5, 2e10);
                   }
