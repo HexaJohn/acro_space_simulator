@@ -69,6 +69,7 @@ class PlanetEnvironmentBaker {
   bool _applied = false;
   double _appliedIntensity = -1;
   String _appliedPattern = '';
+  bool _bakedHadTexture = false;
 
   // Average albedo colour per texture key, computed once by downscaling the
   // planet map to a single pixel. Grey until the image decodes.
@@ -106,11 +107,16 @@ class PlanetEnvironmentBaker {
     // Phase: how much of the visible face is lit (1 full, 0 new).
     final phase = sunDir == null ? 1.0 : 0.5 - 0.5 * sunDir.dot(dir);
 
+    final key0 = snap.descriptors[b.id]?.albedoKey ?? '';
+    final texKey = key0.isNotEmpty ? key0 : b.id;
+    final albedo = _textures.image(texKey); // kicks the decode on first miss
+
     final now = DateTime.now();
     final since = now.difference(_lastBake);
     final knobTurned = !_applied ||
         bakedIntensity != _appliedIntensity ||
-        testPattern != _appliedPattern;
+        testPattern != _appliedPattern ||
+        (albedo != null) != _bakedHadTexture;
     final moved = knobTurned ||
         _bakedBody != bodyId ||
         _bakedDir.dot(dir) < math.cos(0.05) || // ~3 degrees
@@ -118,17 +124,20 @@ class PlanetEnvironmentBaker {
         (phase - _bakedPhase).abs() > 0.08;
     if (!moved) return;
     // Geometry drift is throttled; a knob change (re-enable, intensity
-    // tuning) applies immediately so live A/B comparisons work.
+    // tuning, the body map finishing its decode) applies immediately so
+    // live A/B comparisons work.
     if (!knobTurned && since < _minInterval) return;
 
     final tint = _averageAlbedo(b.id, snap);
     _baking = true;
+    _bakedHadTexture = albedo != null;
     _bake(
       bodyId: bodyId!,
       dir: dir,
       angular: angular,
       phase: phase,
       tint: tint,
+      albedo: albedo,
       sunFromEye: starWorld == null ? null : (starWorld - eyeWorld).normalized,
     ).then((_) {
       // ignore: avoid_print
@@ -181,6 +190,7 @@ class PlanetEnvironmentBaker {
     required double angular,
     required double phase,
     required ui.Color tint,
+    ui.Image? albedo,
     Vector3? sunFromEye,
   }) async {
     final rec = ui.PictureRecorder();
@@ -210,9 +220,9 @@ class PlanetEnvironmentBaker {
       });
     }
 
-    // Planet disc at its real angular size, phase-dimmed, albedo-tinted.
-    // Equirect stretches horizontally by 1/cos(latitude); the vertical
-    // radius maps angular size directly (v spans pi).
+    // Planet disc at its real angular size, phase-dimmed. Equirect
+    // stretches horizontally by 1/cos(latitude); the vertical radius maps
+    // angular size directly (v spans pi).
     final uv = _uv(dir);
     final lat = math.asin(dir.y.clamp(-1.0, 1.0));
     final rV = (angular / math.pi) * _h;
@@ -223,11 +233,52 @@ class PlanetEnvironmentBaker {
         (c.r * 255.0 * f).round().clamp(0, 255),
         (c.g * 255.0 * f).round().clamp(0, 255),
         (c.b * 255.0 * f).round().clamp(0, 255));
+    // A flat average-albedo disc reads as an invisible grey wash in a
+    // reflection (a full moon fills 90 degrees but averages ~0.35 sRGB on
+    // a dark hull). Draw the body's actual map into the disc instead, and
+    // NORMALIZE its brightness so the brightest channel lands near full
+    // scale at full phase — the reflection then reads as "the moon", not
+    // as faint ambient. Falls back to the flat gradient until the map
+    // decodes.
+    final maxAlbedo =
+        [tint.r, tint.g, tint.b].reduce(math.max).clamp(0.15, 1.0);
+    final boost = (lit * 0.95 / maxAlbedo).clamp(0.0, 3.5);
     final centre = scale(tint, lit);
     final edge = scale(tint, lit * 0.55);
     _wrapped(uv.dx, (x) {
       final rect = ui.Rect.fromCenter(
           center: ui.Offset(x, uv.dy), width: rH * 2, height: rV * 2);
+      if (albedo != null) {
+        canvas.save();
+        canvas.clipPath(ui.Path()..addOval(rect));
+        canvas.drawImageRect(
+          albedo,
+          ui.Rect.fromLTWH(
+              0, 0, albedo.width.toDouble(), albedo.height.toDouble()),
+          rect,
+          ui.Paint()
+            ..filterQuality = ui.FilterQuality.low
+            ..colorFilter = ui.ColorFilter.matrix([
+              boost, 0, 0, 0, 0, //
+              0, boost, 0, 0, 0, //
+              0, 0, boost, 0, 0, //
+              0, 0, 0, 1, 0,
+            ]),
+        );
+        // Limb darkening so the disc edge doesn't cut off hard.
+        canvas.drawOval(
+          rect,
+          ui.Paint()
+            ..shader = ui.Gradient.radial(
+                ui.Offset(x, uv.dy), math.max(rH, rV), const [
+              ui.Color(0x00000000),
+              ui.Color(0x00000000),
+              ui.Color(0xB3000000),
+            ], const [0.0, 0.75, 1.0]),
+        );
+        canvas.restore();
+        return;
+      }
       canvas.drawOval(
         rect,
         ui.Paint()
