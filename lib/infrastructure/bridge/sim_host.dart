@@ -49,8 +49,19 @@ class SimHost {
     _inbox.removeRange(0, batches.length);
   }
 
-  /// The current world encoded as a FlatBuffer WorldFrame.
-  Uint8List frameBytes() => codec.encodeWorld(sim.snapshot());
+  /// How often (in ticks) to include the static body descriptors. They're sticky
+  /// on the engine side (cached + joined by id), so re-sending ~once a second is
+  /// plenty for a late-joining client; every other frame omits them.
+  static const int descriptorEveryTicks = 20; // ~1 Hz at the default 20 Hz server
+
+  /// The current world encoded as a FlatBuffer WorldFrame. Body descriptors
+  /// (kind/atmosphere/composition) ride along only every [descriptorEveryTicks].
+  Uint8List frameBytes() => codec.encodeWorld(
+        sim.snapshot(
+          includeDescriptors:
+              sim.session.authoritativeTick % descriptorEveryTicks == 0,
+        ),
+      );
 
   int get tick => sim.session.authoritativeTick;
 

@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
 import 'camera_view.dart';
 
@@ -40,6 +41,10 @@ class PerspectiveCamera implements SceneCamera {
   final double viewportH; // screen height, px (sets focal length)
   final double near; // near-plane distance from the eye, metres
 
+  /// Orbit gimbal frame — identity orbits in the ecliptic; a body's tilt
+  /// quaternion gimbals around that body's spin axis (see CameraOrbit.frame).
+  final Quaternion frame;
+
   const PerspectiveCamera({
     this.azimuth = 0,
     this.elevation = 0.5,
@@ -48,6 +53,7 @@ class PerspectiveCamera implements SceneCamera {
     this.roll = 0,
     this.viewportH = 800,
     this.near = 1.0,
+    this.frame = Quaternion.identity,
   });
 
   PerspectiveCamera copyWith({
@@ -57,6 +63,7 @@ class PerspectiveCamera implements SceneCamera {
     double? fovY,
     double? roll,
     double? viewportH,
+    Quaternion? frame,
   }) =>
       PerspectiveCamera(
         azimuth: azimuth ?? this.azimuth,
@@ -67,19 +74,24 @@ class PerspectiveCamera implements SceneCamera {
         roll: roll ?? this.roll,
         viewportH: viewportH ?? this.viewportH,
         near: near,
+        frame: frame ?? this.frame,
       );
+
+  bool get _framed => frame.x != 0 || frame.y != 0 || frame.z != 0;
 
   // --- Camera basis (world space) ---
   @override
   Vector3 get forward {
     final ce = math.cos(elevation), se = math.sin(elevation);
     final ca = math.cos(azimuth), sa = math.sin(azimuth);
-    return Vector3(ce * sa, ce * ca, -se);
+    final f = Vector3(ce * sa, ce * ca, -se);
+    return _framed ? frame.rotate(f) : f;
   }
 
   Vector3 get _rightBase {
     final ca = math.cos(azimuth), sa = math.sin(azimuth);
-    return Vector3(ca, -sa, 0);
+    final r = Vector3(ca, -sa, 0);
+    return _framed ? frame.rotate(r) : r;
   }
 
   Vector3 get _upBase => _rightBase.cross(forward).normalized;

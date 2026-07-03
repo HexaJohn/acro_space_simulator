@@ -47,6 +47,52 @@ class _BodyKindReader extends fb.Reader<BodyKind> {
       BodyKind.fromValue(const fb.Uint8Reader().read(bc, offset));
 }
 
+enum AtmosphereGas {
+  Nitrogen(0),
+  Oxygen(1),
+  CarbonDioxide(2),
+  Hydrogen(3),
+  Helium(4),
+  Methane(5),
+  Argon(6),
+  Water(7);
+
+  final int value;
+  const AtmosphereGas(this.value);
+
+  factory AtmosphereGas.fromValue(int value) {
+    switch (value) {
+      case 0: return AtmosphereGas.Nitrogen;
+      case 1: return AtmosphereGas.Oxygen;
+      case 2: return AtmosphereGas.CarbonDioxide;
+      case 3: return AtmosphereGas.Hydrogen;
+      case 4: return AtmosphereGas.Helium;
+      case 5: return AtmosphereGas.Methane;
+      case 6: return AtmosphereGas.Argon;
+      case 7: return AtmosphereGas.Water;
+      default: throw StateError('Invalid value $value for bit flag enum');
+    }
+  }
+
+  static AtmosphereGas? _createOrNull(int? value) =>
+      value == null ? null : AtmosphereGas.fromValue(value);
+
+  static const int minValue = 0;
+  static const int maxValue = 7;
+  static const fb.Reader<AtmosphereGas> reader = _AtmosphereGasReader();
+}
+
+class _AtmosphereGasReader extends fb.Reader<AtmosphereGas> {
+  const _AtmosphereGasReader();
+
+  @override
+  int get size => 1;
+
+  @override
+  AtmosphereGas read(fb.BufferContext bc, int offset) =>
+      AtmosphereGas.fromValue(const fb.Uint8Reader().read(bc, offset));
+}
+
 enum CmdTypeId {
   NONE(0),
   SetThrottle(1),
@@ -997,6 +1043,86 @@ class BodyFrameObjectBuilder extends fb.ObjectBuilder {
     return fbBuilder.buffer;
   }
 }
+class GasFraction {
+  GasFraction._(this._bc, this._bcOffset);
+  factory GasFraction(List<int> bytes) {
+    final rootRef = fb.BufferContext.fromBytes(bytes);
+    return reader.read(rootRef, 0);
+  }
+
+  static const fb.Reader<GasFraction> reader = _GasFractionReader();
+
+  final fb.BufferContext _bc;
+  final int _bcOffset;
+
+  AtmosphereGas get gas => AtmosphereGas.fromValue(const fb.Uint8Reader().vTableGet(_bc, _bcOffset, 4, 0));
+  double get fraction => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 6, 0.0);
+
+  @override
+  String toString() {
+    return 'GasFraction{gas: ${gas}, fraction: ${fraction}}';
+  }
+}
+
+class _GasFractionReader extends fb.TableReader<GasFraction> {
+  const _GasFractionReader();
+
+  @override
+  GasFraction createObject(fb.BufferContext bc, int offset) => 
+    GasFraction._(bc, offset);
+}
+
+class GasFractionBuilder {
+  GasFractionBuilder(this.fbBuilder);
+
+  final fb.Builder fbBuilder;
+
+  void begin() {
+    fbBuilder.startTable(2);
+  }
+
+  int addGas(AtmosphereGas? gas) {
+    fbBuilder.addUint8(0, gas?.value);
+    return fbBuilder.offset;
+  }
+  int addFraction(double? fraction) {
+    fbBuilder.addFloat64(1, fraction);
+    return fbBuilder.offset;
+  }
+
+  int finish() {
+    return fbBuilder.endTable();
+  }
+}
+
+class GasFractionObjectBuilder extends fb.ObjectBuilder {
+  final AtmosphereGas? _gas;
+  final double? _fraction;
+
+  GasFractionObjectBuilder({
+    AtmosphereGas? gas,
+    double? fraction,
+  })
+      : _gas = gas,
+        _fraction = fraction;
+
+  /// Finish building, and store into the [fbBuilder].
+  @override
+  int finish(fb.Builder fbBuilder) {
+    fbBuilder.startTable(2);
+    fbBuilder.addUint8(0, _gas?.value);
+    fbBuilder.addFloat64(1, _fraction);
+    return fbBuilder.endTable();
+  }
+
+  /// Convenience method to serialize to byte list.
+  @override
+  Uint8List toBytes([String? fileIdentifier]) {
+    final fbBuilder = fb.Builder(deduplicateTables: false);
+    fbBuilder.finish(finish(fbBuilder), fileIdentifier);
+    return fbBuilder.buffer;
+  }
+}
 class BodyDescriptor {
   BodyDescriptor._(this._bc, this._bcOffset);
   factory BodyDescriptor(List<int> bytes) {
@@ -1022,10 +1148,13 @@ class BodyDescriptor {
   double get atmoSeaLevelPressure => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 24, 0.0);
   double get atmoSeaLevelDensity => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 26, 0.0);
   double get atmoSeaLevelTemperature => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 28, 0.0);
+  double get atmoMeanMolecularWeight => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 30, 0.0);
+  int get atmoScatterColor => const fb.Uint32Reader().vTableGet(_bc, _bcOffset, 32, 0);
+  List<GasFraction>? get atmoGases => const fb.ListReader<GasFraction>(GasFraction.reader).vTableGetNullable(_bc, _bcOffset, 34);
 
   @override
   String toString() {
-    return 'BodyDescriptor{id: ${id}, kind: ${kind}, referenceRadius: ${referenceRadius}, albedoKey: ${albedoKey}, heightKey: ${heightKey}, materialKey: ${materialKey}, heightScale: ${heightScale}, atmoPresent: ${atmoPresent}, atmoScaleHeight: ${atmoScaleHeight}, atmoThickness: ${atmoThickness}, atmoSeaLevelPressure: ${atmoSeaLevelPressure}, atmoSeaLevelDensity: ${atmoSeaLevelDensity}, atmoSeaLevelTemperature: ${atmoSeaLevelTemperature}}';
+    return 'BodyDescriptor{id: ${id}, kind: ${kind}, referenceRadius: ${referenceRadius}, albedoKey: ${albedoKey}, heightKey: ${heightKey}, materialKey: ${materialKey}, heightScale: ${heightScale}, atmoPresent: ${atmoPresent}, atmoScaleHeight: ${atmoScaleHeight}, atmoThickness: ${atmoThickness}, atmoSeaLevelPressure: ${atmoSeaLevelPressure}, atmoSeaLevelDensity: ${atmoSeaLevelDensity}, atmoSeaLevelTemperature: ${atmoSeaLevelTemperature}, atmoMeanMolecularWeight: ${atmoMeanMolecularWeight}, atmoScatterColor: ${atmoScatterColor}, atmoGases: ${atmoGases}}';
   }
 }
 
@@ -1043,7 +1172,7 @@ class BodyDescriptorBuilder {
   final fb.Builder fbBuilder;
 
   void begin() {
-    fbBuilder.startTable(13);
+    fbBuilder.startTable(16);
   }
 
   int addIdOffset(int? offset) {
@@ -1098,6 +1227,18 @@ class BodyDescriptorBuilder {
     fbBuilder.addFloat64(12, atmoSeaLevelTemperature);
     return fbBuilder.offset;
   }
+  int addAtmoMeanMolecularWeight(double? atmoMeanMolecularWeight) {
+    fbBuilder.addFloat64(13, atmoMeanMolecularWeight);
+    return fbBuilder.offset;
+  }
+  int addAtmoScatterColor(int? atmoScatterColor) {
+    fbBuilder.addUint32(14, atmoScatterColor);
+    return fbBuilder.offset;
+  }
+  int addAtmoGasesOffset(int? offset) {
+    fbBuilder.addOffset(15, offset);
+    return fbBuilder.offset;
+  }
 
   int finish() {
     return fbBuilder.endTable();
@@ -1118,6 +1259,9 @@ class BodyDescriptorObjectBuilder extends fb.ObjectBuilder {
   final double? _atmoSeaLevelPressure;
   final double? _atmoSeaLevelDensity;
   final double? _atmoSeaLevelTemperature;
+  final double? _atmoMeanMolecularWeight;
+  final int? _atmoScatterColor;
+  final List<GasFractionObjectBuilder>? _atmoGases;
 
   BodyDescriptorObjectBuilder({
     String? id,
@@ -1133,6 +1277,9 @@ class BodyDescriptorObjectBuilder extends fb.ObjectBuilder {
     double? atmoSeaLevelPressure,
     double? atmoSeaLevelDensity,
     double? atmoSeaLevelTemperature,
+    double? atmoMeanMolecularWeight,
+    int? atmoScatterColor,
+    List<GasFractionObjectBuilder>? atmoGases,
   })
       : _id = id,
         _kind = kind,
@@ -1146,7 +1293,10 @@ class BodyDescriptorObjectBuilder extends fb.ObjectBuilder {
         _atmoThickness = atmoThickness,
         _atmoSeaLevelPressure = atmoSeaLevelPressure,
         _atmoSeaLevelDensity = atmoSeaLevelDensity,
-        _atmoSeaLevelTemperature = atmoSeaLevelTemperature;
+        _atmoSeaLevelTemperature = atmoSeaLevelTemperature,
+        _atmoMeanMolecularWeight = atmoMeanMolecularWeight,
+        _atmoScatterColor = atmoScatterColor,
+        _atmoGases = atmoGases;
 
   /// Finish building, and store into the [fbBuilder].
   @override
@@ -1159,7 +1309,9 @@ class BodyDescriptorObjectBuilder extends fb.ObjectBuilder {
         : fbBuilder.writeString(_heightKey!);
     final int? materialKeyOffset = _materialKey == null ? null
         : fbBuilder.writeString(_materialKey!);
-    fbBuilder.startTable(13);
+    final int? atmoGasesOffset = _atmoGases == null ? null
+        : fbBuilder.writeList(_atmoGases!.map((b) => b.getOrCreateOffset(fbBuilder)).toList());
+    fbBuilder.startTable(16);
     fbBuilder.addOffset(0, idOffset);
     fbBuilder.addUint8(1, _kind?.value);
     fbBuilder.addFloat64(2, _referenceRadius);
@@ -1173,6 +1325,9 @@ class BodyDescriptorObjectBuilder extends fb.ObjectBuilder {
     fbBuilder.addFloat64(10, _atmoSeaLevelPressure);
     fbBuilder.addFloat64(11, _atmoSeaLevelDensity);
     fbBuilder.addFloat64(12, _atmoSeaLevelTemperature);
+    fbBuilder.addFloat64(13, _atmoMeanMolecularWeight);
+    fbBuilder.addUint32(14, _atmoScatterColor);
+    fbBuilder.addOffset(15, atmoGasesOffset);
     return fbBuilder.endTable();
   }
 

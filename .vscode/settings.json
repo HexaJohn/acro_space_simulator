@@ -1,0 +1,11 @@
+{
+  // Pinned Flutter master SDK (FVM-managed — see .fvmrc). Keeps this project
+  // off the global stable install; flutter_scene requires master.
+  "dart.flutterSdkPath": ".fvm\\flutter_sdk",
+  "search.exclude": {
+    "**/.fvm": true
+  },
+  "files.watcherExclude": {
+    "**/.fvm": true
+  }
+}

@@ -16,7 +16,7 @@ publish_to: "none" # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 0.2.2+174
+version: 0.3.0+174
 
 environment:
   sdk: ^3.10.4
@@ -35,6 +35,24 @@ dependencies:
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
   flat_buffers: ^25.9.23
+  # 3D backend. EXACT pins — flutter_scene/flutter_gpu are early-preview and
+  # track the master channel; upgrades are deliberate (bump pin + re-verify),
+  # never drift. See .fvmrc for the matching pinned Flutter master commit.
+  # Git-pinned past the 0.18.1 pub release: the published archive crashes on
+  # Windows (GLES shadow-sampler compile, d3dcompiler access violation —
+  # bdero/flutter_scene#182, fixed by #188 on master only). Master also adds
+  # the MeshData isolate remeshing path the voxel-terrain roadmap needs.
+  flutter_scene:
+    git:
+      url: https://github.com/bdero/flutter_scene.git
+      ref: d3ebfb6a589b475e08b3acce43a71ce8c5f0b72f
+      path: packages/flutter_scene
+  vector_math: ^2.4.0 # flutter_scene's math types (Matrix4, vm.Vector3)
+  shared_preferences: ^2.5.3 # persisted render-backend selection
+  # Custom GPU shader pipeline (hook/build.dart compiles shaders/*.frag
+  # into build/shaderbundles/acro.shaderbundle for the atmosphere shader).
+  flutter_gpu_shaders: ^0.5.1
+  hooks: ^2.0.0
 
 dev_dependencies:
   flutter_test:
@@ -61,6 +79,14 @@ flutter:
   # (solarsystemscope.com), CC-BY 4.0 — attribution shown in-app credits.
   assets:
     - assets/textures/
+    # Craft models: baked .fsceneb packages only (licensed .glb sources live
+    # in mesh_src/, gitignored and never bundled — tool/import_mesh.dart
+    # bakes them). Missing models degrade to procedural part meshes.
+    - assets/mesh/
+    # Compiled GPU shader bundle (hook/build.dart output). Same packaging
+    # trick flutter_scene uses for its base bundle: the hook writes into
+    # build/shaderbundles/ and normal asset bundling ships it.
+    - build/shaderbundles/
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

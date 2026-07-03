@@ -61,6 +61,13 @@ class CelestialBody {
   /// Axial tilt / obliquity (rad), drives seasons via the subsolar latitude.
   final double axialTilt;
 
+  /// When true, this body's orbital elements are referenced to its PARENT'S
+  /// EQUATORIAL plane instead of the ecliptic. Regular moons (formed from
+  /// the parent's accretion disk — the Galileans, Saturn's and Uranus's
+  /// majors, Phobos/Deimos) orbit near the parent equator and inherit its
+  /// axial tilt; Earth's Moon and captured moons (Triton) do NOT.
+  final bool orbitsParentEquator;
+
   /// J2 zonal harmonic (oblateness). 0 = perfect sphere (point-mass gravity).
   final double j2;
 
@@ -90,6 +97,7 @@ class CelestialBody {
     this.atmosphere,
     this.solarFlux = 0,
     this.axialTilt = 0,
+    this.orbitsParentEquator = false,
     this.j2 = 0,
     this.dipoleMoment = 0,
     this.surface,
@@ -120,6 +128,7 @@ class CelestialBody {
         atmosphere: atmosphere ?? this.atmosphere,
         solarFlux: solarFlux,
         axialTilt: axialTilt,
+        orbitsParentEquator: orbitsParentEquator,
         j2: j2,
         dipoleMoment: dipoleMoment,
         surface: surface,

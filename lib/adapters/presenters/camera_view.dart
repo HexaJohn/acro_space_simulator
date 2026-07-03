@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
 
 /// A free-orbit camera around the focus point, defined by two angles. The render
@@ -14,18 +15,34 @@ class CameraOrbit {
   final double azimuth;
   final double elevation;
   final double roll; // rotation of the screen about the view axis
+
+  /// The reference frame the orbit gimbal lives in. Identity (the default)
+  /// orbits in the ecliptic; set to a body's tilt quaternion to gimbal
+  /// around that body's spin axis instead — azimuth then circles the
+  /// body's equator and elevation climbs toward its pole, with the pole
+  /// upright on screen for free.
+  final Quaternion frame;
+
   const CameraOrbit(
-      {this.azimuth = 0, this.elevation = math.pi / 2, this.roll = 0});
+      {this.azimuth = 0,
+      this.elevation = math.pi / 2,
+      this.roll = 0,
+      this.frame = Quaternion.identity});
 
   /// Top-down default.
   static const CameraOrbit top = CameraOrbit(azimuth: 0, elevation: math.pi / 2);
 
-  CameraOrbit copyWith({double? azimuth, double? elevation, double? roll}) =>
+  CameraOrbit copyWith(
+          {double? azimuth,
+          double? elevation,
+          double? roll,
+          Quaternion? frame}) =>
       CameraOrbit(
         azimuth: azimuth ?? this.azimuth,
         elevation: (elevation ?? this.elevation)
             .clamp(-math.pi / 2 + 0.01, math.pi / 2 - 0.01),
         roll: roll ?? this.roll,
+        frame: frame ?? this.frame,
       );
 
   /// Snap to one of the named presets.
@@ -63,17 +80,21 @@ class CameraOrbit {
   Vector3 get right => _right;
   Vector3 get up => _up;
 
+  bool get _framed => frame.x != 0 || frame.y != 0 || frame.z != 0;
+
   Vector3 get _forward {
     final ce = math.cos(elevation), se = math.sin(elevation);
     final ca = math.cos(azimuth), sa = math.sin(azimuth);
     // At elevation 0, azimuth 0: forward = +Y (camera south of target looking N).
-    return Vector3(ce * sa, ce * ca, -se);
+    final f = Vector3(ce * sa, ce * ca, -se);
+    return _framed ? frame.rotate(f) : f;
   }
 
   // Base (un-rolled) horizontal right + up, then rolled about the view axis.
   Vector3 get _rightBase {
     final ca = math.cos(azimuth), sa = math.sin(azimuth);
-    return Vector3(ca, -sa, 0); // horizontal, perpendicular to forward heading
+    final r = Vector3(ca, -sa, 0); // horizontal, perpendicular to heading
+    return _framed ? frame.rotate(r) : r;
   }
 
   Vector3 get _upBase => _rightBase.cross(_forward).normalized;

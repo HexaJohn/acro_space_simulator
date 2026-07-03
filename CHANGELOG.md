@@ -3,6 +3,81 @@
 All notable changes to Acro Space Simulator.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.3.0] — 2026-07-02
+
+**The rendering overhaul.** A ground-up in-process 3D backend on
+**flutter_scene / Flutter GPU (Impeller)** replaces the Unreal round-trip as
+the high-fidelity renderer: raymarched atmospheres, banded rings with a
+fly-through asteroid field, a freecam, adaptive exposure, and a pile of camera
+QOL — all live-tunable and all driven by the same `WorldSnapshot` feed. The
+software painter stays as default/fallback; the whole app moved to a pinned
+Flutter master via FVM to get Flutter GPU.
+
+### 3D scene backend (flutter_scene, Windows + web)
+- In-process scene graph consuming the domain `WorldSnapshot` (the same feed
+  the Unreal bridge serializes) — no TCP, no C++ rebuilds; hot reload works.
+- **Floating origin** (camera-relative rebasing, km render scale) holds
+  float32 precision anywhere in the Solar System; adaptive near/far planes
+  keep depth-buffer quantization sub-feature-size at every zoom.
+- Z-up UV-sphere planet meshes with real textures, correct poles/chirality/
+  longitudes; per-body orbit rails coloured by body, parent-relative flown
+  trails (SOI-aware), screen-space-densified lines with leading-edge fade.
+- Runs alongside the software renderer behind a live toggle; camera, input,
+  and HUD are shared between backends.
+
+### Atmospheres (custom fragment shader)
+- **Raymarched Nishita single-scattering** atmosphere shell per body
+  (compiled through a `flutter_gpu_shaders` build hook): analytic planet
+  occlusion, per-channel extinction, physical Rayleigh betas scaled by each
+  body's real sea-level density, and a **seamless transition** flying from
+  space down through the atmosphere.
+- Smooth **twilight terminator** (sun-elevation model — no hard line) and a
+  proper limb **halo** with art-directable height/falloff.
+- Colour derives from each body's **gas composition** (methane-potency
+  weighted: 2% CH4 is what makes Uranus/Neptune blue-green); gas giants get
+  visual-only shells; Titan keeps its tholin smog; Mars/Uranus/Neptune keyed
+  to their surface palettes.
+- **Adaptive exposure**: heuristic eye adaptation — night-side views brighten
+  up to ~3x, sun glare dims the frame, eased like eyes adjusting.
+- Live art-pass tooling: every knob per body via `ext.acro.atmo`.
+
+### Planetary rings & asteroid fields
+- Ring sheets moved to a **per-fragment band-profile shader**: real structure
+  (Saturn's C/B rings, Cassini division, Encke gap, F ring; Uranus' epsilon
+  ring; Neptune's ringlets), fuzzy band edges, an analytic **planet shadow**
+  sweeping the rings, and a soft camera hole where the debris field lives.
+- **Fly-through asteroid fields**: ~11k hardware-instanced moon-textured
+  rocks at REAL debris scale (0.8–5 m) scattered deterministically in the
+  ring plane, density following the band profile (the Cassini division is
+  genuinely empty); ~8k **billboard clumps** (single instanced draw, lit
+  circular moon-patch sprites) carry the field out to 25 km where the sheet
+  takes over.
+- Rocks live in the ring's rotating frame — hovering reads as station-keeping
+  instead of debris streaking past at 16 km/s orbital speed.
+
+### Camera
+- **Freecam**: fly a free anchor with WASD/QE (Shift boost, scroll-wheel
+  speed multiplier), FPS-style mouse look, body-relative + co-rotating so you
+  can park inside a ring; exact ring-plane teleports via the control API.
+- Up-modes: free / **body-axis aligned** / **gravity aligned** (horizon-locked
+  surface flying); orbit-gimbal in the body frame, continuous through poles.
+- **Warp-to-AP/PE** buttons with smooth deceleration; **timewarp 0 = pause**;
+  auto 1x in atmosphere.
+- Moons orbit their parents' real equatorial planes with real inclinations.
+
+### Debug & tooling
+- On-screen depth diagnostics (near/far + ring-field state), near/far
+  overrides (debug-panel log sliders + control API), layer kill switches,
+  per-body atmosphere tuning, headless screenshot + camera control via VM
+  service extensions.
+
+### Engine fixes
+- Patched a **flutter_gpu `HostBuffer` block-straddle bug** (writes crossing
+  the 1 MB block boundary threw and blacked out whole frames) — patch +
+  reapply instructions in `tool/patches/`.
+- Found/fixed depth-quantization z-fighting classes (adaptive near-plane
+  scaling, atmosphere shell depth modes vs opaque scene content).
+
 ## [0.2.2] — 2026-06-30
 
 The **Unreal Engine integration** release. The Dart sim now streams live world

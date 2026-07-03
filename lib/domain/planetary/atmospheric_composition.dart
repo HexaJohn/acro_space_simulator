@@ -71,13 +71,22 @@ class AtmosphericComposition {
     AtmosphereGas.carbonDioxide: [220, 200, 150], // warm tan haze
     AtmosphereGas.hydrogen: [230, 220, 200], // pale cream
     AtmosphereGas.helium: [235, 230, 215], // near-white
-    AtmosphereGas.methane: [90, 200, 210], // cyan/teal (red-absorbing)
+    AtmosphereGas.methane: [85, 180, 220], // cyan-azure (red-absorbing)
     AtmosphereGas.argon: [180, 180, 190], // faint grey-blue
     AtmosphereGas.water: [210, 225, 245], // white-blue
   };
 
+  /// Colouring POTENCY per gas: how strongly a mole of it drives the visible
+  /// hue relative to the bland diatomics. Methane is a ferocious red
+  /// absorber — a 2% CH4 fraction is what makes Uranus/Neptune blue-green,
+  /// which a plain mole-fraction average would bury under 98% cream H2/He.
+  static const Map<AtmosphereGas, double> _gasColorPotency = {
+    AtmosphereGas.methane: 30.0,
+    AtmosphereGas.water: 2.0,
+  };
+
   /// "True"-ish atmosphere tint as a packed ARGB int, derived from the gas mix
-  /// (mole-fraction-weighted blend of per-gas scatter colours). The render uses
+  /// (potency-weighted blend of per-gas scatter colours). The render uses
   /// this so each body's haze colour follows its real composition instead of a
   /// hand-picked table. Falls back to a neutral blue for an empty composition.
   int get scatterColorArgb {
@@ -86,10 +95,11 @@ class AtmosphericComposition {
     fractions.forEach((gas, f) {
       final rgb = _gasRgb[gas];
       if (rgb != null) {
-        r += rgb[0] * f;
-        g += rgb[1] * f;
-        b += rgb[2] * f;
-        w += f;
+        final wf = f * (_gasColorPotency[gas] ?? 1.0);
+        r += rgb[0] * wf;
+        g += rgb[1] * wf;
+        b += rgb[2] * wf;
+        w += wf;
       }
     });
     if (w <= 0) return 0xFF6FB4FF;
@@ -140,5 +150,33 @@ class AtmosphericComposition {
   factory AtmosphericComposition.venus() => AtmosphericComposition(const {
         AtmosphereGas.carbonDioxide: 0.965,
         AtmosphereGas.nitrogen: 0.035,
+      });
+
+  /// Jupiter: ~89.5% H2, ~10.2% He, trace CH4.
+  factory AtmosphericComposition.jupiter() => AtmosphericComposition(const {
+        AtmosphereGas.hydrogen: 0.895,
+        AtmosphereGas.helium: 0.102,
+        AtmosphereGas.methane: 0.003,
+      });
+
+  /// Saturn: ~96.3% H2, ~3.25% He, ~0.45% CH4.
+  factory AtmosphericComposition.saturn() => AtmosphericComposition(const {
+        AtmosphereGas.hydrogen: 0.963,
+        AtmosphereGas.helium: 0.0325,
+        AtmosphereGas.methane: 0.0045,
+      });
+
+  /// Uranus: ~82.5% H2, ~15.2% He, ~2.3% CH4 (the methane IS the colour).
+  factory AtmosphericComposition.uranus() => AtmosphericComposition(const {
+        AtmosphereGas.hydrogen: 0.825,
+        AtmosphereGas.helium: 0.152,
+        AtmosphereGas.methane: 0.023,
+      });
+
+  /// Neptune: ~80% H2, ~18.5% He, ~1.5% CH4.
+  factory AtmosphericComposition.neptune() => AtmosphericComposition(const {
+        AtmosphereGas.hydrogen: 0.80,
+        AtmosphereGas.helium: 0.185,
+        AtmosphereGas.methane: 0.015,
       });
 }
