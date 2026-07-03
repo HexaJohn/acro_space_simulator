@@ -128,8 +128,27 @@ class BodyNodes {
           ? vm.Vector4(0.5, 0.5, 0.55, 1.0) // flat fallback while loading
           : vm.Vector4(1.0, 1.0, 1.0, 1.0)
       ..roughnessFactor = 1.0
-      ..metallicFactor = 0.0;
+      ..metallicFactor = 0.0
+      // Planets are matte: even at roughness 1 a PBR dielectric keeps a
+      // ~4% fresnel term plus the IBL's roughest band, and with the baked
+      // planet environment active the body would pick up a sheen from its
+      // OWN disc in the reflection map. Override with a specular-black
+      // environment whose only content is a tiny constant diffuse SH so
+      // night sides still read as dim spheres, not voids.
+      ..environment = _matteEnvironment();
   }
+
+  static fs.EnvironmentMap? _matteEnv;
+  static fs.EnvironmentMap _matteEnvironment() =>
+      _matteEnv ??= fs.EnvironmentMap.fromGpuTextures(
+        prefilteredRadiance: fs.Material.getBlackPlaceholderTexture(),
+        diffuseSphericalHarmonics: [
+          // DC term only: flat ambient. Scaled so at the baked env's 1.5
+          // scene intensity it lands near the old 0.05-studio fill.
+          vm.Vector3.all(0.012),
+          for (var i = 1; i < 9; i++) vm.Vector3.zero(),
+        ],
+      );
 
   void _retryTexture(String id, WorldSnapshot snap) {
     if (!_untextured.contains(id)) return;
