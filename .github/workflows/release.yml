@@ -15,8 +15,6 @@ permissions:
 
 # The repo name becomes the Pages sub-path (https://<user>.github.io/<repo>/),
 # so the web build must use a matching --base-href.
-env:
-  FLUTTER_VERSION: '3.38.5'
 
 jobs:
   # ---- Web build + GitHub Pages deploy ----
@@ -27,11 +25,17 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          channel: stable
-          cache: true
+      # flutter_scene / Flutter GPU track a pinned master commit (.fvmrc);
+      # stable can't resolve the deps (vector_math 2.2.0 vs 2.4.0) or build the
+      # GPU backend. Check out the exact pinned commit so CI == local dev.
+      - name: Set up pinned Flutter master (.fvmrc)
+        shell: bash
+        run: |
+          REF=$(jq -r .flutter .fvmrc)
+          git clone https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          git -C "$RUNNER_TEMP/flutter" checkout "$REF"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+      - run: flutter --version
       - run: flutter pub get
       - name: Build web
         run: |
@@ -71,11 +75,15 @@ jobs:
         env:
           GH_TOKEN: ${{ env.ASSETS_TOKEN }}
         run: gh release download --repo HexaJohn/acro-space-assets --pattern "*.fsceneb" --dir assets/mesh
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          channel: stable
-          cache: true
+      # Same pinned Flutter master as the web job (see .fvmrc).
+      - name: Set up pinned Flutter master (.fvmrc)
+        shell: bash
+        run: |
+          REF=$(jq -r .flutter .fvmrc)
+          git clone https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          git -C "$RUNNER_TEMP/flutter" checkout "$REF"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+      - run: flutter --version
       - run: flutter config --enable-windows-desktop
       - run: flutter pub get
       - run: flutter build windows --release
