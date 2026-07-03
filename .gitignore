@@ -26,8 +26,11 @@ migrate_working_dir/
 # FVM (pinned SDK cache — .fvmrc IS committed)
 .fvm/
 
-# Licensed 3D model assets — NOT redistributable, keep local only
+# Licensed 3D model assets — NOT redistributable, keep local only.
+# .glb = purchased source; .fsceneb = baked ship-format (tool/import_mesh.dart).
+# Both stay out of the repo; app falls back to procedural parts without them.
 *.glb
+*.fsceneb
 
 # Flutter/Dart/Pub related
 **/doc/api/

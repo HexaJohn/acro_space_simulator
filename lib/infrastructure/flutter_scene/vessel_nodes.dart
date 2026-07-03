@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:flutter_scene/fscene.dart' as fsb;
 import 'package:flutter_scene/scene.dart' as fs;
 import 'package:vector_math/vector_math.dart' as vm;
 
@@ -29,16 +30,20 @@ class VesselNodes {
   // (staging events), not every frame.
   final Map<String, String> _partsKey = {};
 
-  /// Craft model: the Apollo CSM glb replaces the procedural part
-  /// composition once decoded (it's 55 MB — async; primitives show until
-  /// then). Loaded per vessel: a Node can't be parented twice.
-  static const String _craftGlb = 'assets/mesh/apollo.glb';
+  /// Craft model: the Apollo CSM replaces the procedural part composition
+  /// once decoded (87 MB — async; primitives show until then). Loaded per
+  /// vessel: a Node can't be parented twice.
+  ///
+  /// `.fsceneb` baked from the licensed .glb by `tool/import_mesh.dart`;
+  /// neither format is committed (license bars redistribution), so clones
+  /// without the asset stay procedural via [_glbFailed].
+  static const String _craftModel = 'assets/mesh/apollo.fsceneb';
 
-  /// Model-unit -> metre factor for [_craftGlb]. Live-tunable via
+  /// Model-unit -> metre factor for [_craftModel]. Live-tunable via
   /// `ext.acro.camera?glbScale=` while calibrating a new export; the
   /// transform reapplies every frame so changes land immediately.
   /// (apollo.glb calibrated by screenshot: 0.0002 -> ~11 m craft.)
-  static double glbUnitScale = 0.0002;
+  static double glbUnitScale = 0.02;
   final Map<String, fs.Node> _glbModels = {};
   final Set<String> _glbLoading = {};
   final Set<String> _glbApplied = {};
@@ -95,7 +100,7 @@ class VesselNodes {
       return;
     }
     _glbLoading.add(vesselId);
-    fs.Node.fromGlbAsset(_craftGlb)
+    fsb.loadFscenebAsset(_craftModel)
         .then((model) {
           _glbLoading.remove(vesselId);
           final node = _nodes[vesselId];
@@ -111,7 +116,7 @@ class VesselNodes {
           _glbLoading.remove(vesselId);
           _glbFailed = true; // don't hammer a broken asset for every vessel
           // ignore: avoid_print
-          print('craft glb load failed: $e');
+          print('craft model load failed: $e');
         });
   }
 
