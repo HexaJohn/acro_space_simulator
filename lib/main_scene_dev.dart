@@ -6,6 +6,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter_scene/scene.dart' show AntiAliasingMode;
 
 import 'domain/shared/vector3.dart';
 import 'infrastructure/flutter/sim_view_control.dart';
@@ -15,6 +16,7 @@ import 'infrastructure/flutter_scene/body_nodes.dart';
 import 'infrastructure/flutter_scene/render_backend.dart';
 import 'infrastructure/flutter_scene/scene_camera_adapter.dart';
 import 'infrastructure/flutter_scene/scene_sync.dart';
+import 'infrastructure/flutter_scene/vessel_nodes.dart';
 
 /// Dev entrypoint: boots STRAIGHT into [SimulationView] with the
 /// flutter_scene backend active — no menu, no clicking. For iterating on the
@@ -117,6 +119,21 @@ void main() {
       }
       c.setFreecam?.call(
           params['freecam'] == null ? true : params['freecam'] == 'true', pos);
+    }
+    // Craft glb unit calibration: glbScale=<model units to metres>.
+    final glbScale = params['glbScale'];
+    if (glbScale != null) {
+      final v = double.tryParse(glbScale);
+      if (v != null && v > 0) VesselNodes.glbUnitScale = v;
+    }
+    // Anti-aliasing: aa=msaa|fxaa|auto (auto restores the engine default).
+    final aa = params['aa'];
+    if (aa != null) {
+      SceneSync.aaRequest = switch (aa) {
+        'msaa' => AntiAliasingMode.msaa,
+        'fxaa' => AntiAliasingMode.fxaa,
+        _ => AntiAliasingMode.auto,
+      };
     }
     // Adaptive exposure toggle: autoExposure=true|false.
     if (params['autoExposure'] != null) {

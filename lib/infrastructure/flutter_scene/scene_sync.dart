@@ -90,6 +90,22 @@ class SceneSync {
             camera == null ? 0 : camera.eyeOffset.length * kRenderScale);
     _updateSun(snap);
     _updateExposure(snap, camera, focusVesselId, focusBodyId);
+    _applyAa();
+  }
+
+  /// Anti-aliasing override (null = the engine's auto: MSAA where the
+  /// backend supports offscreen MSAA, FXAA otherwise). Set from
+  /// `ext.acro.camera?aa=msaa|fxaa|auto`; the HUD depth line reports what
+  /// actually runs.
+  static fs.AntiAliasingMode? aaRequest;
+  static String effectiveAa = '?';
+
+  void _applyAa() {
+    final req = aaRequest;
+    if (req != null && scene.antiAliasingMode != req) {
+      scene.antiAliasingMode = req;
+    }
+    effectiveAa = scene.effectiveAntiAliasingMode.name;
   }
 
   /// Adaptive exposure — heuristic eye adaptation, no GPU luminance pass

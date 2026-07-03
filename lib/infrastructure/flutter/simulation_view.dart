@@ -52,7 +52,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.0.237';
+const String kBuildStamp = 'build 0.3.0.238';
 
 /// What the camera treats as "up" while orbiting the focus.
 enum CameraUpMode {
@@ -558,7 +558,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     final rings = RingNodes.debugLine;
     return 'near ${eng(nearM)}${nearOv != null ? '*' : ''}  '
         'far ${eng(farM)}${farOv != null ? '*' : ''}  '
-        'exp ${SceneSync.lastExposure.toStringAsFixed(2)}'
+        'exp ${SceneSync.lastExposure.toStringAsFixed(2)}  '
+        'aa=${SceneSync.effectiveAa}'
         '${rings == null ? '' : '  |  $rings'}';
   }
 

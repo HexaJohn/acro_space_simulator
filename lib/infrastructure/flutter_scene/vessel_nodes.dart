@@ -32,8 +32,14 @@ class VesselNodes {
   /// Craft model: the Apollo CSM glb replaces the procedural part
   /// composition once decoded (it's 55 MB — async; primitives show until
   /// then). Loaded per vessel: a Node can't be parented twice.
-  static const String _craftGlb =
-      'assets/mesh/apollo_command_and_service_module.glb';
+  static const String _craftGlb = 'assets/mesh/apollo.glb';
+
+  /// Model-unit -> metre factor for [_craftGlb]. Live-tunable via
+  /// `ext.acro.camera?glbScale=` while calibrating a new export; the
+  /// transform reapplies every frame so changes land immediately.
+  /// (apollo.glb calibrated by screenshot: 0.0002 -> ~11 m craft.)
+  static double glbUnitScale = 0.0002;
+  final Map<String, fs.Node> _glbModels = {};
   final Set<String> _glbLoading = {};
   final Set<String> _glbApplied = {};
   static bool _glbFailed = false; // missing/corrupt asset: stay procedural
@@ -60,8 +66,18 @@ class VesselNodes {
         _partsKey[v.id] = partsKey;
         _rebuildParts(node, v);
       }
-      node.localTransform =
-          vm.Matrix4.compose(pos, rot, vm.Vector3.all(1.0));
+      node.localTransform = vm.Matrix4.compose(pos, rot, vm.Vector3.all(1.0));
+
+      // glTF is Y-up; the vessel body frame is Z-up with the nose on +Z.
+      // Model units differ per export — [glbUnitScale] converts model
+      // units to METRES (sleuthed by screenshot at a known range), then
+      // metres to scene km. Reapplied per frame so live calibration via
+      // the dev extension takes effect immediately.
+      _glbModels[v.id]?.localTransform = vm.Matrix4.compose(
+        vm.Vector3.zero(),
+        vm.Quaternion.axisAngle(vm.Vector3(1, 0, 0), math.pi / 2),
+        vm.Vector3.all(lengthToScene(glbUnitScale)),
+      );
     }
 
     _nodes.removeWhere((id, node) {
@@ -69,40 +85,34 @@ class VesselNodes {
       _scene.remove(node);
       _partsKey.remove(id);
       _glbApplied.remove(id);
+      _glbModels.remove(id);
       return true;
     });
   }
 
   void _ensureCraftModel(String vesselId, fs.Node parent) {
-    if (_glbFailed ||
-        _glbApplied.contains(vesselId) ||
-        _glbLoading.contains(vesselId)) {
+    if (_glbFailed || _glbApplied.contains(vesselId) || _glbLoading.contains(vesselId)) {
       return;
     }
     _glbLoading.add(vesselId);
-    fs.Node.fromGlbAsset(_craftGlb).then((model) {
-      _glbLoading.remove(vesselId);
-      final node = _nodes[vesselId];
-      if (node == null) return; // vessel vanished while decoding
-      for (final child in List.of(node.children)) {
-        node.remove(child);
-      }
-      // glTF is Y-up; the vessel body frame is Z-up with the nose on +Z.
-      // THIS model is authored in MILLIMETRES (it rendered ~11 km long when
-      // read as metres) -> 0.001 to metres, then metres to scene km.
-      model.localTransform = vm.Matrix4.compose(
-        vm.Vector3.zero(),
-        vm.Quaternion.axisAngle(vm.Vector3(1, 0, 0), math.pi / 2),
-        vm.Vector3.all(lengthToScene(0.001)),
-      );
-      node.add(model);
-      _glbApplied.add(vesselId);
-    }).catchError((Object e) {
-      _glbLoading.remove(vesselId);
-      _glbFailed = true; // don't hammer a broken asset for every vessel
-      // ignore: avoid_print
-      print('craft glb load failed: $e');
-    });
+    fs.Node.fromGlbAsset(_craftGlb)
+        .then((model) {
+          _glbLoading.remove(vesselId);
+          final node = _nodes[vesselId];
+          if (node == null) return; // vessel vanished while decoding
+          for (final child in List.of(node.children)) {
+            node.remove(child);
+          }
+          node.add(model);
+          _glbModels[vesselId] = model;
+          _glbApplied.add(vesselId);
+        })
+        .catchError((Object e) {
+          _glbLoading.remove(vesselId);
+          _glbFailed = true; // don't hammer a broken asset for every vessel
+          // ignore: avoid_print
+          print('craft glb load failed: $e');
+        });
   }
 
   void _rebuildParts(fs.Node vesselNode, VesselSnapshot v) {
@@ -122,23 +132,17 @@ class VesselNodes {
       // Primitives are unit-metre; real craft parts read better at a few
       // metres (a 1 m cube is sub-pixel at typical camera ranges).
       vesselNode.add(
-        fs.Node(mesh: PartPrimitives.forType(p.type))
-          ..localTransform = _partTransform(p.ox, p.oy, p.oz, 3.0),
+        fs.Node(mesh: PartPrimitives.forType(p.type))..localTransform = _partTransform(p.ox, p.oy, p.oz, 3.0),
       );
     }
   }
 
   /// Part offset is metres in the vessel body frame; scene units are km.
-  vm.Matrix4 _partTransform(double ox, double oy, double oz, double scaleM) =>
-      vm.Matrix4.compose(
-        vm.Vector3(
-          lengthToScene(ox),
-          lengthToScene(oy),
-          lengthToScene(oz),
-        ),
-        vm.Quaternion.identity(),
-        vm.Vector3.all(lengthToScene(scaleM)),
-      );
+  vm.Matrix4 _partTransform(double ox, double oy, double oz, double scaleM) => vm.Matrix4.compose(
+    vm.Vector3(lengthToScene(ox), lengthToScene(oy), lengthToScene(oz)),
+    vm.Quaternion.identity(),
+    vm.Vector3.all(lengthToScene(scaleM)),
+  );
 }
 
 /// Procedural primitive meshes for part type keys. All geometry is unit
@@ -161,10 +165,7 @@ class PartPrimitives {
     for (final e in _registry.entries) {
       if (t.contains(e.key)) return e.value();
     }
-    return fs.Mesh(
-      fs.CuboidGeometry(vm.Vector3(1.0, 1.0, 1.0)),
-      hull(),
-    );
+    return fs.Mesh(fs.CuboidGeometry(vm.Vector3(1.0, 1.0, 1.0)), hull());
   }
 
   static fs.Material hull() => fs.PhysicallyBasedMaterial()
@@ -205,10 +206,7 @@ class PartPrimitives {
         indices.addAll([0, b0, b1, centre, b1, b0]);
       }
     }
-    return fs.MeshGeometry.fromArrays(
-      positions: Float32List.fromList(positions),
-      indices: indices,
-    );
+    return fs.MeshGeometry.fromArrays(positions: Float32List.fromList(positions), indices: indices);
   }
 
   /// Cylinder along Z: unit height, unit diameter.
@@ -231,10 +229,7 @@ class PartPrimitives {
       indices.addAll([top, t0, t1]); // top cap
       indices.addAll([bottom, b1, b0]); // bottom cap
     }
-    return fs.MeshGeometry.fromArrays(
-      positions: Float32List.fromList(positions),
-      indices: indices,
-    );
+    return fs.MeshGeometry.fromArrays(positions: Float32List.fromList(positions), indices: indices);
   }
 
   /// Thin slab (wing/panel): 1 x 0.4 x 0.06.
