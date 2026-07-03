@@ -222,18 +222,23 @@ void main() {
     }));
   });
 
+  // ExcludeSemantics wraps the ENTIRE app (above MaterialApp): the Windows
+  // accessibility bridge AVs in flutter_windows.dll (+0x3bc6a) when the
+  // semantics tree mutates on a focus switch, and every crash is preceded
+  // by a stream of 'Failed to update ui::AXTree ... will not be in the tree'
+  // errors. Excluding only home (below MaterialApp) left MaterialApp's OWN
+  // navigator/overlay/focus semantics mutating every frame — still spammed.
+  // Excluding the whole app yields an empty, static semantics tree: the
+  // bridge has nothing to reconcile. Pointer input, gestures, and the
+  // RepaintBoundary screenshot path don't depend on semantics. Dev harness
+  // only; revisit for prod builds.
   runApp(
-    MaterialApp(
-      title: 'Acro — flutter_scene dev',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark(useMaterial3: true),
-      // ExcludeSemantics: the Windows accessibility bridge AVs in
-      // flutter_windows.dll (+0x3bc6a) when the semantics tree mutates on
-      // a focus switch — every crash log is preceded by a stream of
-      // 'Failed to update ui::AXTree' errors. No semantics nodes, nothing
-      // to corrupt. Dev harness only; revisit for prod builds.
-      home: ExcludeSemantics(
-        child: RepaintBoundary(
+    ExcludeSemantics(
+      child: MaterialApp(
+        title: 'Acro — flutter_scene dev',
+        debugShowCheckedModeBanner: false,
+        theme: ThemeData.dark(useMaterial3: true),
+        home: RepaintBoundary(
           key: _shotKey,
           child: SimulationView(
             initialBackend: backend == 'software'
