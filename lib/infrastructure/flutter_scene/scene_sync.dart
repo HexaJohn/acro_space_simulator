@@ -11,6 +11,7 @@ import '../flutter/texture_cache.dart';
 import 'atmosphere_nodes.dart';
 import 'body_nodes.dart';
 import 'coord_convert.dart';
+import 'exhaust_nodes.dart';
 import 'line_nodes.dart';
 import 'ring_nodes.dart';
 import 'scene_textures.dart';
@@ -35,6 +36,7 @@ class SceneSync {
     _bodies = BodyNodes(scene, _textures);
     _skybox = SkyboxNode(scene, _textures);
     _vessels = VesselNodes(scene);
+    _exhaust = ExhaustNodes(scene);
     _lines = LineNodes(scene);
     _atmospheres = AtmosphereNodes(scene);
     _rings = RingNodes(scene, _textures);
@@ -45,6 +47,7 @@ class SceneSync {
   late final BodyNodes _bodies;
   late final SkyboxNode _skybox;
   late final VesselNodes _vessels;
+  late final ExhaustNodes _exhaust;
   late final LineNodes _lines;
   late final AtmosphereNodes _atmospheres;
   late final RingNodes _rings;
@@ -67,7 +70,10 @@ class SceneSync {
         focusWorldOverride ?? _focusWorld(snap, focusVesselId, focusBodyId);
 
     _bodies.update(snap, origin);
-    if (!_noVessels) _vessels.update(snap, origin);
+    if (!_noVessels) {
+      _vessels.update(snap, origin);
+      _exhaust.update(snap, origin);
+    }
     if (!_noLines) {
       _lines.update(snap, origin,
           camera: camera,
