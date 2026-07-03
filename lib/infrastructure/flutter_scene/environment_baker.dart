@@ -2,6 +2,7 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter_scene/scene.dart' as fs;
+import 'package:vector_math/vector_math.dart' as vm;
 
 import '../../application/snapshot/world_snapshot.dart';
 import '../../domain/shared/vector3.dart';
@@ -92,13 +93,31 @@ class PlanetEnvironmentBaker {
       }
       return;
     }
-    final bodyId = focusBodyId ??
-        (focusVesselId == null ? null : snap.vessels[focusVesselId]?.body);
+    final bodyId = focusBodyId ?? (focusVesselId == null ? null : snap.vessels[focusVesselId]?.body);
     final b = bodyId == null ? null : snap.bodies[bodyId];
     if (b == null || _baking) return;
 
+    // Reflection origin = the CRAFT, not the camera. The reflection lives on
+    // the hull; the body's apparent direction and size must be computed from
+    // where the craft is, or orbiting the CAMERA around a stationary craft
+    // would wrongly swing the reflected body across the hull. Critically,
+    // the body is near and huge (a 100 km lunar orbit puts the moon at ~71
+    // deg angular RADIUS — 142 deg of sky), so eye-vs-craft parallax is
+    // enormous; only the craft origin tracks the orbit correctly. The sun
+    // is at infinity, so its glint is unaffected by this choice. Falls back
+    // to the eye when there's no focused vessel (e.g. a body-locked camera).
+    var reflectorWorld = eyeWorld;
+    final fv = focusVesselId == null ? null : snap.vessels[focusVesselId];
+    if (fv != null) {
+      final vb = snap.bodies[fv.body];
+      if (vb != null) {
+        reflectorWorld =
+            Vector3(vb.px + fv.px, vb.py + fv.py, vb.pz + fv.pz);
+      }
+    }
+
     final bodyWorld = Vector3(b.px, b.py, b.pz);
-    final toBody = bodyWorld - eyeWorld;
+    final toBody = bodyWorld - reflectorWorld;
     final dist = toBody.length;
     if (dist <= b.radius) return; // inside the body: degenerate
     final dir = toBody / dist;
@@ -113,11 +132,13 @@ class PlanetEnvironmentBaker {
 
     final now = DateTime.now();
     final since = now.difference(_lastBake);
-    final knobTurned = !_applied ||
+    final knobTurned =
+        !_applied ||
         bakedIntensity != _appliedIntensity ||
         testPattern != _appliedPattern ||
         (albedo != null) != _bakedHadTexture;
-    final moved = knobTurned ||
+    final moved =
+        knobTurned ||
         _bakedBody != bodyId ||
         _bakedDir.dot(dir) < math.cos(0.05) || // ~3 degrees
         (angular - _bakedAngular).abs() > 0.10 * math.max(_bakedAngular, 0.01) ||
@@ -132,21 +153,26 @@ class PlanetEnvironmentBaker {
     _baking = true;
     _bakedHadTexture = albedo != null;
     _bake(
-      bodyId: bodyId!,
-      dir: dir,
-      angular: angular,
-      phase: phase,
-      tint: tint,
-      albedo: albedo,
-      sunFromEye: starWorld == null ? null : (starWorld - eyeWorld).normalized,
-    ).then((_) {
-      // ignore: avoid_print
-      print('planetEnv: baked $bodyId ang=${(angular * 180 / math.pi).toStringAsFixed(1)}deg '
-          'phase=${phase.toStringAsFixed(2)} intensity=$bakedIntensity');
-    }).catchError((Object e, StackTrace st) {
-      // ignore: avoid_print
-      print('planetEnv: bake FAILED: $e\n$st');
-    }).whenComplete(() => _baking = false);
+          bodyId: bodyId!,
+          dir: dir,
+          angular: angular,
+          phase: phase,
+          tint: tint,
+          albedo: albedo,
+          sunFromEye: starWorld == null ? null : (starWorld - reflectorWorld).normalized,
+        )
+        .then((_) {
+          // ignore: avoid_print
+          print(
+            'planetEnv: baked $bodyId ang=${(angular * 180 / math.pi).toStringAsFixed(1)}deg '
+            'phase=${phase.toStringAsFixed(2)} intensity=$bakedIntensity',
+          );
+        })
+        .catchError((Object e, StackTrace st) {
+          // ignore: avoid_print
+          print('planetEnv: bake FAILED: $e\n$st');
+        })
+        .whenComplete(() => _baking = false);
   }
 
   /// Kick (or read) the 1-px downscale of the body's albedo map.
@@ -171,12 +197,7 @@ class PlanetEnvironmentBaker {
         final data = await one.toByteData(format: ui.ImageByteFormat.rawRgba);
         one.dispose();
         if (data != null && data.lengthInBytes >= 4) {
-          _avgColor[key] = ui.Color.fromARGB(
-            255,
-            data.getUint8(0),
-            data.getUint8(1),
-            data.getUint8(2),
-          );
+          _avgColor[key] = ui.Color.fromARGB(255, data.getUint8(0), data.getUint8(1), data.getUint8(2));
         }
         _avgPending.remove(key);
       }();
@@ -197,10 +218,7 @@ class PlanetEnvironmentBaker {
     final canvas = ui.Canvas(rec);
     canvas.drawRect(
       ui.Rect.fromLTWH(0, 0, _w.toDouble(), _h.toDouble()),
-      ui.Paint()
-        ..color = testPattern == 'white'
-            ? const ui.Color(0xFFFFFFFF)
-            : const ui.Color(0xFF000000),
+      ui.Paint()..color = testPattern == 'white' ? const ui.Color(0xFFFFFFFF) : const ui.Color(0xFF000000),
     );
 
     // Sun: a small hot disc with a glow skirt, so smooth hulls carry a glint.
@@ -211,11 +229,12 @@ class PlanetEnvironmentBaker {
           ui.Offset(x, uv.dy),
           6,
           ui.Paint()
-            ..shader = ui.Gradient.radial(ui.Offset(x, uv.dy), 6, const [
-              ui.Color(0xFFFFFFFF),
-              ui.Color(0xFFFFF2CC),
-              ui.Color(0x00FFF2CC),
-            ], const [0.0, 0.35, 1.0]),
+            ..shader = ui.Gradient.radial(
+              ui.Offset(x, uv.dy),
+              6,
+              const [ui.Color(0xFFFFFFFF), ui.Color(0xFFFFF2CC), ui.Color(0x00FFF2CC)],
+              const [0.0, 0.35, 1.0],
+            ),
         );
       });
     }
@@ -229,10 +248,11 @@ class PlanetEnvironmentBaker {
     final rH = math.min(_w.toDouble(), rV / math.max(0.15, math.cos(lat)));
     final lit = 0.15 + 0.85 * phase; // never fully black: sky bounce reads odd
     ui.Color scale(ui.Color c, double f) => ui.Color.fromARGB(
-        255,
-        (c.r * 255.0 * f).round().clamp(0, 255),
-        (c.g * 255.0 * f).round().clamp(0, 255),
-        (c.b * 255.0 * f).round().clamp(0, 255));
+      255,
+      (c.r * 255.0 * f).round().clamp(0, 255),
+      (c.g * 255.0 * f).round().clamp(0, 255),
+      (c.b * 255.0 * f).round().clamp(0, 255),
+    );
     // A flat average-albedo disc reads as an invisible grey wash in a
     // reflection (a full moon fills 90 degrees but averages ~0.35 sRGB on
     // a dark hull). Draw the body's actual map into the disc instead, and
@@ -240,21 +260,18 @@ class PlanetEnvironmentBaker {
     // scale at full phase — the reflection then reads as "the moon", not
     // as faint ambient. Falls back to the flat gradient until the map
     // decodes.
-    final maxAlbedo =
-        [tint.r, tint.g, tint.b].reduce(math.max).clamp(0.15, 1.0);
+    final maxAlbedo = [tint.r, tint.g, tint.b].reduce(math.max).clamp(0.15, 1.0);
     final boost = (lit * 0.95 / maxAlbedo).clamp(0.0, 3.5);
     final centre = scale(tint, lit);
     final edge = scale(tint, lit * 0.55);
     _wrapped(uv.dx, (x) {
-      final rect = ui.Rect.fromCenter(
-          center: ui.Offset(x, uv.dy), width: rH * 2, height: rV * 2);
+      final rect = ui.Rect.fromCenter(center: ui.Offset(x, uv.dy), width: rH * 2, height: rV * 2);
       if (albedo != null) {
         canvas.save();
         canvas.clipPath(ui.Path()..addOval(rect));
         canvas.drawImageRect(
           albedo,
-          ui.Rect.fromLTWH(
-              0, 0, albedo.width.toDouble(), albedo.height.toDouble()),
+          ui.Rect.fromLTWH(0, 0, albedo.width.toDouble(), albedo.height.toDouble()),
           rect,
           ui.Paint()
             ..filterQuality = ui.FilterQuality.low
@@ -270,29 +287,41 @@ class PlanetEnvironmentBaker {
           rect,
           ui.Paint()
             ..shader = ui.Gradient.radial(
-                ui.Offset(x, uv.dy), math.max(rH, rV), const [
-              ui.Color(0x00000000),
-              ui.Color(0x00000000),
-              ui.Color(0xB3000000),
-            ], const [0.0, 0.75, 1.0]),
+              ui.Offset(x, uv.dy),
+              math.max(rH, rV),
+              const [ui.Color(0x00000000), ui.Color(0x00000000), ui.Color(0xB3000000)],
+              const [0.0, 0.75, 1.0],
+            ),
         );
         canvas.restore();
         return;
       }
       canvas.drawOval(
         rect,
-        ui.Paint()
-          ..shader = ui.Gradient.radial(
-            ui.Offset(x, uv.dy),
-            math.max(rH, rV),
-            [centre, edge],
-          ),
+        ui.Paint()..shader = ui.Gradient.radial(ui.Offset(x, uv.dy), math.max(rH, rV), [centre, edge]),
       );
     });
 
     final img = await rec.endRecording().toImage(_w, _h);
     debugDump?.call(img);
-    final env = await fs.EnvironmentMap.fromUIImages(radianceImage: img);
+    // Diffuse SH KILLED (except a flat DC ambient): fromUIImages otherwise
+    // projects the map onto 9 diffuse spherical-harmonic coefficients, and a
+    // large dim body disc dumps almost all its energy into the L1
+    // (directional) terms — which light the body-FACING hull faces by their
+    // NORMAL (Lambert), reading as a soft "backwards" glow (bright facing
+    // the body, dark facing away) instead of a mirror image. The sun, a
+    // tiny bright point, survives into the sharp SPECULAR band and reflects
+    // correctly regardless. Forcing L1..L8 to zero leaves only the
+    // reflection-vector specular path, so the body appears as an actual
+    // reflection; the DC term keeps a little uniform ambient fill (no
+    // direction, so no backwards glow) on night hulls.
+    final env = await fs.EnvironmentMap.fromUIImages(
+      radianceImage: img,
+      diffuseSphericalHarmonics: [
+        vm.Vector3.all(0.03),
+        for (var i = 1; i < 9; i++) vm.Vector3.zero(),
+      ],
+    );
     _scene.environment = env;
     _scene.environmentIntensity = bakedIntensity;
     _applied = true;
