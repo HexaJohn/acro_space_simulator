@@ -11,6 +11,7 @@ import '../flutter/texture_cache.dart';
 import 'atmosphere_nodes.dart';
 import 'body_nodes.dart';
 import 'coord_convert.dart';
+import 'environment_baker.dart';
 import 'exhaust_nodes.dart';
 import 'line_nodes.dart';
 import 'ring_nodes.dart';
@@ -40,6 +41,7 @@ class SceneSync {
     _lines = LineNodes(scene);
     _atmospheres = AtmosphereNodes(scene);
     _rings = RingNodes(scene, _textures);
+    _environment = PlanetEnvironmentBaker(scene, _textures);
   }
 
   final fs.Scene scene;
@@ -51,6 +53,7 @@ class SceneSync {
   late final LineNodes _lines;
   late final AtmosphereNodes _atmospheres;
   late final RingNodes _rings;
+  late final PlanetEnvironmentBaker _environment;
 
   final FloatingOrigin origin = FloatingOrigin();
 
@@ -96,6 +99,15 @@ class SceneSync {
             camera == null ? 0 : camera.eyeOffset.length * kRenderScale);
     _updateSun(snap);
     _updateExposure(snap, camera, focusVesselId, focusBodyId);
+    if (camera != null) {
+      _environment.update(
+        snap,
+        eyeWorld: origin.focusWorld + camera.eyeOffset,
+        focusBodyId: focusBodyId,
+        focusVesselId: focusVesselId,
+        starWorld: _bodies.starWorld(snap),
+      );
+    }
     _applyAa();
   }
 

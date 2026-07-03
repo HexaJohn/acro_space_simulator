@@ -13,6 +13,7 @@ import 'infrastructure/flutter/sim_view_control.dart';
 import 'infrastructure/flutter/simulation_view.dart';
 import 'infrastructure/flutter_scene/atmosphere_nodes.dart';
 import 'infrastructure/flutter_scene/body_nodes.dart';
+import 'infrastructure/flutter_scene/environment_baker.dart';
 import 'infrastructure/flutter_scene/render_backend.dart';
 import 'infrastructure/flutter_scene/scene_camera_adapter.dart';
 import 'infrastructure/flutter_scene/scene_sync.dart';
@@ -34,6 +35,15 @@ final GlobalKey _shotKey = GlobalKey();
 void main() {
   const backend =
       String.fromEnvironment('BACKEND', defaultValue: 'flutterScene');
+
+  // Dump every baked IBL equirect for eyeballing (dev only).
+  PlanetEnvironmentBaker.debugDump = (img) async {
+    final data = await img.toByteData(format: ui.ImageByteFormat.png);
+    if (data != null) {
+      await File('test_out/scene_samples/env_bake_latest.png')
+          .writeAsBytes(data.buffer.asUint8List());
+    }
+  };
 
   // Headless-friendly screenshot: `ext.acro.screenshot` captures the app's
   // RepaintBoundary and writes a PNG — reliable even when the OS window is
@@ -138,6 +148,21 @@ void main() {
     // Adaptive exposure toggle: autoExposure=true|false.
     if (params['autoExposure'] != null) {
       SceneSync.autoExposure = params['autoExposure'] == 'true';
+    }
+    // Planet-in-reflections IBL baker: planetEnv=true|false,
+    // envIntensity=<double> (baked-map IBL strength, default 1.0).
+    if (params['planetEnv'] != null) {
+      PlanetEnvironmentBaker.enabled = params['planetEnv'] == 'true';
+    }
+    final envInt = deg('envIntensity');
+    if (envInt != null && envInt >= 0) {
+      PlanetEnvironmentBaker.bakedIntensity = envInt;
+    }
+    // envTest=white bakes a solid-white map (IBL pipeline probe); envTest=
+    // (empty) restores the planet composite.
+    if (params['envTest'] != null) {
+      PlanetEnvironmentBaker.testPattern =
+          params['envTest'] == 'white' ? 'white' : '';
     }
     // Depth-plane overrides (metres): near=5&far=1e12; <=0 restores the
     // adaptive formula.

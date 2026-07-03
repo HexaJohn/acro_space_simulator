@@ -1,0 +1,272 @@
+import 'dart:math' as math;
+import 'dart:ui' as ui;
+
+import 'package:flutter_scene/scene.dart' as fs;
+
+import '../../application/snapshot/world_snapshot.dart';
+import '../../domain/shared/vector3.dart';
+import 'scene_textures.dart';
+
+/// Bakes the focus body into the scene's image-based-lighting environment so
+/// the planet shows up in the craft's reflections (and contributes diffuse
+/// bounce — earthshine on the night-facing hull).
+///
+/// flutter_scene's PBR samples one global [fs.EnvironmentMap]; the default is
+/// a neutral "studio" that reads as a photo booth in space. This baker paints
+/// a tiny equirectangular radiance image — black space, a sun glint, and the
+/// focus body's lit disc (average albedo colour, phase-weighted) — and swaps
+/// it in via [fs.EnvironmentMap.fromUIImages], which GPU-prefilters the
+/// roughness bands and projects the diffuse spherical harmonics.
+///
+/// Rebakes are throttled: only when the focus body changes, or the
+/// body-to-eye geometry moves materially (direction, apparent size, phase),
+/// and never more than once every few seconds — a bake costs an upload +
+/// prefilter chain, and each one allocates a fresh radiance atlas (the old
+/// one is reclaimed by the GPU texture finalizer).
+///
+/// The equirect convention matches flutter_scene's sampler
+/// (`EquirectangularToSpherical` in texture.glsl): u encodes
+/// `atan2(dir.z, dir.x)`, v encodes `asin(dir.y)` with +y at the image
+/// bottom. Directions are scene-frame (= domain frame, Z-up); no remap, the
+/// formula is just applied verbatim.
+class PlanetEnvironmentBaker {
+  PlanetEnvironmentBaker(this._scene, this._textures);
+
+  final fs.Scene _scene;
+  final SceneTextures _textures;
+
+  /// Kill switch (dev panel / ext.acro.camera?planetEnv=). Turning it off
+  /// restores the neutral studio environment at the original intensity.
+  static bool enabled = true;
+
+  /// Dev hook: receives every baked radiance image (main_scene_dev wires it
+  /// to a PNG dump so the equirect can be eyeballed). Null in production.
+  static void Function(ui.Image img)? debugDump;
+
+  /// Dev diagnostic: 'white' bakes a solid-white radiance map instead of
+  /// the planet composite — an absurd-value probe that separates "the IBL
+  /// pipeline is broken" from "the planet disc is just dim".
+  static String testPattern = '';
+
+  /// IBL intensity while a baked environment is active. The studio default
+  /// runs at 0.05 to keep space from looking like a photo booth; the baked
+  /// map is black everywhere except the sun + planet, so full strength is
+  /// what makes the hull actually mirror the planet. 1.5 leans slightly
+  /// hot because the canvas radiance is LDR-clamped at 1.0 while the
+  /// analytic sun runs at 2.2 — verified against a solid-white probe
+  /// (envTest=white) that the pipeline itself is sound.
+  static double bakedIntensity = 1.5;
+
+  static const int _w = 256, _h = 128;
+  static const Duration _minInterval = Duration(seconds: 3);
+
+  String? _bakedBody;
+  Vector3 _bakedDir = Vector3.zero;
+  double _bakedAngular = 0;
+  double _bakedPhase = -9;
+  DateTime _lastBake = DateTime.fromMillisecondsSinceEpoch(0);
+  bool _baking = false;
+  bool _applied = false;
+  double _appliedIntensity = -1;
+  String _appliedPattern = '';
+
+  // Average albedo colour per texture key, computed once by downscaling the
+  // planet map to a single pixel. Grey until the image decodes.
+  final Map<String, ui.Color> _avgColor = {};
+  final Set<String> _avgPending = {};
+
+  void update(
+    WorldSnapshot snap, {
+    required Vector3 eyeWorld,
+    String? focusBodyId,
+    String? focusVesselId,
+    Vector3? starWorld,
+  }) {
+    if (!enabled) {
+      if (_applied) {
+        _scene.environment = fs.EnvironmentMap.studio();
+        _scene.environmentIntensity = 0.05;
+        _applied = false;
+        _bakedBody = null;
+      }
+      return;
+    }
+    final bodyId = focusBodyId ??
+        (focusVesselId == null ? null : snap.vessels[focusVesselId]?.body);
+    final b = bodyId == null ? null : snap.bodies[bodyId];
+    if (b == null || _baking) return;
+
+    final bodyWorld = Vector3(b.px, b.py, b.pz);
+    final toBody = bodyWorld - eyeWorld;
+    final dist = toBody.length;
+    if (dist <= b.radius) return; // inside the body: degenerate
+    final dir = toBody / dist;
+    final angular = math.asin((b.radius / dist).clamp(0.0, 1.0));
+    final sunDir = starWorld == null ? null : (starWorld - bodyWorld).normalized;
+    // Phase: how much of the visible face is lit (1 full, 0 new).
+    final phase = sunDir == null ? 1.0 : 0.5 - 0.5 * sunDir.dot(dir);
+
+    final now = DateTime.now();
+    final since = now.difference(_lastBake);
+    final knobTurned = !_applied ||
+        bakedIntensity != _appliedIntensity ||
+        testPattern != _appliedPattern;
+    final moved = knobTurned ||
+        _bakedBody != bodyId ||
+        _bakedDir.dot(dir) < math.cos(0.05) || // ~3 degrees
+        (angular - _bakedAngular).abs() > 0.10 * math.max(_bakedAngular, 0.01) ||
+        (phase - _bakedPhase).abs() > 0.08;
+    if (!moved) return;
+    // Geometry drift is throttled; a knob change (re-enable, intensity
+    // tuning) applies immediately so live A/B comparisons work.
+    if (!knobTurned && since < _minInterval) return;
+
+    final tint = _averageAlbedo(b.id, snap);
+    _baking = true;
+    _bake(
+      bodyId: bodyId!,
+      dir: dir,
+      angular: angular,
+      phase: phase,
+      tint: tint,
+      sunFromEye: starWorld == null ? null : (starWorld - eyeWorld).normalized,
+    ).then((_) {
+      // ignore: avoid_print
+      print('planetEnv: baked $bodyId ang=${(angular * 180 / math.pi).toStringAsFixed(1)}deg '
+          'phase=${phase.toStringAsFixed(2)} intensity=$bakedIntensity');
+    }).catchError((Object e, StackTrace st) {
+      // ignore: avoid_print
+      print('planetEnv: bake FAILED: $e\n$st');
+    }).whenComplete(() => _baking = false);
+  }
+
+  /// Kick (or read) the 1-px downscale of the body's albedo map.
+  ui.Color _averageAlbedo(String bodyId, WorldSnapshot snap) {
+    final key0 = snap.descriptors[bodyId]?.albedoKey ?? '';
+    final key = key0.isNotEmpty ? key0 : bodyId;
+    final hit = _avgColor[key];
+    if (hit != null) return hit;
+    final img = _textures.image(key); // starts the decode on first miss
+    if (img != null && !_avgPending.contains(key)) {
+      _avgPending.add(key);
+      () async {
+        final rec = ui.PictureRecorder();
+        final canvas = ui.Canvas(rec);
+        canvas.drawImageRect(
+          img,
+          ui.Rect.fromLTWH(0, 0, img.width.toDouble(), img.height.toDouble()),
+          const ui.Rect.fromLTWH(0, 0, 1, 1),
+          ui.Paint()..filterQuality = ui.FilterQuality.low,
+        );
+        final one = await rec.endRecording().toImage(1, 1);
+        final data = await one.toByteData(format: ui.ImageByteFormat.rawRgba);
+        one.dispose();
+        if (data != null && data.lengthInBytes >= 4) {
+          _avgColor[key] = ui.Color.fromARGB(
+            255,
+            data.getUint8(0),
+            data.getUint8(1),
+            data.getUint8(2),
+          );
+        }
+        _avgPending.remove(key);
+      }();
+    }
+    return _avgColor[key] ?? const ui.Color(0xFF9A9A9A);
+  }
+
+  Future<void> _bake({
+    required String bodyId,
+    required Vector3 dir,
+    required double angular,
+    required double phase,
+    required ui.Color tint,
+    Vector3? sunFromEye,
+  }) async {
+    final rec = ui.PictureRecorder();
+    final canvas = ui.Canvas(rec);
+    canvas.drawRect(
+      ui.Rect.fromLTWH(0, 0, _w.toDouble(), _h.toDouble()),
+      ui.Paint()
+        ..color = testPattern == 'white'
+            ? const ui.Color(0xFFFFFFFF)
+            : const ui.Color(0xFF000000),
+    );
+
+    // Sun: a small hot disc with a glow skirt, so smooth hulls carry a glint.
+    if (sunFromEye != null) {
+      final uv = _uv(sunFromEye);
+      _wrapped(uv.dx, (x) {
+        canvas.drawCircle(
+          ui.Offset(x, uv.dy),
+          6,
+          ui.Paint()
+            ..shader = ui.Gradient.radial(ui.Offset(x, uv.dy), 6, const [
+              ui.Color(0xFFFFFFFF),
+              ui.Color(0xFFFFF2CC),
+              ui.Color(0x00FFF2CC),
+            ], const [0.0, 0.35, 1.0]),
+        );
+      });
+    }
+
+    // Planet disc at its real angular size, phase-dimmed, albedo-tinted.
+    // Equirect stretches horizontally by 1/cos(latitude); the vertical
+    // radius maps angular size directly (v spans pi).
+    final uv = _uv(dir);
+    final lat = math.asin(dir.y.clamp(-1.0, 1.0));
+    final rV = (angular / math.pi) * _h;
+    final rH = math.min(_w.toDouble(), rV / math.max(0.15, math.cos(lat)));
+    final lit = 0.15 + 0.85 * phase; // never fully black: sky bounce reads odd
+    ui.Color scale(ui.Color c, double f) => ui.Color.fromARGB(
+        255,
+        (c.r * 255.0 * f).round().clamp(0, 255),
+        (c.g * 255.0 * f).round().clamp(0, 255),
+        (c.b * 255.0 * f).round().clamp(0, 255));
+    final centre = scale(tint, lit);
+    final edge = scale(tint, lit * 0.55);
+    _wrapped(uv.dx, (x) {
+      final rect = ui.Rect.fromCenter(
+          center: ui.Offset(x, uv.dy), width: rH * 2, height: rV * 2);
+      canvas.drawOval(
+        rect,
+        ui.Paint()
+          ..shader = ui.Gradient.radial(
+            ui.Offset(x, uv.dy),
+            math.max(rH, rV),
+            [centre, edge],
+          ),
+      );
+    });
+
+    final img = await rec.endRecording().toImage(_w, _h);
+    debugDump?.call(img);
+    final env = await fs.EnvironmentMap.fromUIImages(radianceImage: img);
+    _scene.environment = env;
+    _scene.environmentIntensity = bakedIntensity;
+    _applied = true;
+    _appliedIntensity = bakedIntensity;
+    _appliedPattern = testPattern;
+    _bakedBody = bodyId;
+    _bakedDir = dir;
+    _bakedAngular = angular;
+    _bakedPhase = phase;
+    _lastBake = DateTime.now();
+  }
+
+  /// Direction (unit, scene frame) -> equirect pixel position, matching
+  /// texture.glsl: u = 0.5 + atan2(d.z, d.x) / 2pi, v = 0.5 + asin(d.y) / pi.
+  ui.Offset _uv(Vector3 d) {
+    final u = 0.5 + math.atan2(d.z, d.x) / (2 * math.pi);
+    final v = 0.5 + math.asin(d.y.clamp(-1.0, 1.0)) / math.pi;
+    return ui.Offset(u * _w, v * _h);
+  }
+
+  /// Draw at x and its seam-wrapped copies so discs crossing u = 0/1 stay
+  /// whole.
+  void _wrapped(double x, void Function(double x) draw) {
+    draw(x);
+    draw(x - _w);
+    draw(x + _w);
+  }
+}
