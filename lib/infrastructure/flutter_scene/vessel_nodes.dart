@@ -197,41 +197,75 @@ class VesselNodes {
     _addApolloFallback(vesselNode);
   }
 
-  /// A rough Apollo Command + Service Module built from primitives, nose on
-  /// +Z: a blunt conical Command Module, a cylindrical Service Module, a
-  /// flared SPS engine bell, and a stub high-gain antenna dish — ~11 m, the
-  /// same scale as the baked model so the two are interchangeable. Stands in
-  /// wherever the .fsceneb isn't available (no asset, or the web build before
-  /// its bake decodes).
+  /// A rough Apollo Command + Service Module, nose on +Z: a blunt truncated-
+  /// cone Command Module, a cylindrical Service Module, a flared SPS engine
+  /// bell, and a stub high-gain antenna dish — ~11 m, the same scale as the
+  /// baked model so the two are interchangeable. Stands in wherever the
+  /// .fsceneb isn't available (no asset, or the web build before its bake
+  /// decodes).
+  ///
+  /// Built from [fs.CylinderGeometry] (outward winding + generated normals):
+  /// the hand-rolled cone/cylinder primitives had inward winding (backfaces).
+  /// Its axis is +Y — top row = [topRadius], bottom = [bottomRadius] — so the
+  /// +90 deg X rotation maps +Y to +Z, putting [topRadius] at the nose and
+  /// [bottomRadius] at the aft. Geometry is authored in METRES; the uniform
+  /// lengthToScene(1) node scale converts to scene km.
   void _addApolloFallback(fs.Node vesselNode) {
-    void add(fs.MeshGeometry g, fs.Material m, double z, double dia, double len) {
+    final noseUp = vm.Quaternion.axisAngle(vm.Vector3(1, 0, 0), math.pi / 2);
+    void add({
+      required double noseR, // radius at the +Z (forward) end
+      required double aftR, //  radius at the -Z (aft) end
+      required double height,
+      required double z, //     centre along +Z, metres
+      required fs.Material mat,
+    }) {
       vesselNode.add(
-        fs.Node(mesh: fs.Mesh(g, m))
-          ..localTransform = vm.Matrix4.compose(
-            vm.Vector3(0, 0, lengthToScene(z)),
-            vm.Quaternion.identity(),
-            vm.Vector3(lengthToScene(dia), lengthToScene(dia), lengthToScene(len)),
+        fs.Node(
+          mesh: fs.Mesh(
+            fs.CylinderGeometry(
+              topRadius: noseR,
+              bottomRadius: aftR,
+              height: height,
+              radialSegments: 28,
+            ),
+            mat,
           ),
+        )..localTransform = vm.Matrix4.compose(
+          vm.Vector3(0, 0, lengthToScene(z)),
+          noseUp,
+          vm.Vector3.all(lengthToScene(1.0)),
+        ),
       );
     }
 
-    // Command Module: blunt cone, apex = nose (wide base mates the SM).
-    add(PartPrimitives.cone(), PartPrimitives.hull(), 3.75, 3.9, 3.5);
-    // Service Module: cylinder body, same diameter as the CM base.
-    add(PartPrimitives.cylinder(), PartPrimitives.hull(), -1.5, 3.9, 7.0);
-    // SPS engine bell: flared cone at the aft.
-    add(PartPrimitives.cone(flip: true), PartPrimitives.dark(), -5.7, 2.4, 1.8);
-    // High-gain antenna: a small dish on a boom off the aft quarter.
+    // Command Module: blunt truncated cone — narrow nose (+Z), wide base
+    // mating the SM (-Z).
+    add(noseR: 0.7, aftR: 1.95, height: 3.2, z: 3.9, mat: PartPrimitives.hull());
+    // Service Module: straight cylinder, CM-base diameter.
+    add(noseR: 1.95, aftR: 1.95, height: 7.0, z: -1.3, mat: PartPrimitives.hull());
+    // SPS engine bell: narrow throat toward the body (+Z), wide OPENING aft
+    // (-Z).
+    add(noseR: 0.35, aftR: 1.2, height: 1.8, z: -5.6, mat: PartPrimitives.dark());
+    // High-gain antenna: a shallow dish (wide rim forward) on a short boom off
+    // the aft quarter.
     vesselNode.add(
-      fs.Node(mesh: fs.Mesh(PartPrimitives.cone(), PartPrimitives.panel()))
-        ..localTransform = vm.Matrix4.compose(
-          vm.Vector3(lengthToScene(3.0), 0, lengthToScene(-4.0)),
-          vm.Quaternion.axisAngle(vm.Vector3(0, 1, 0), math.pi / 2),
-          vm.Vector3.all(lengthToScene(1.6)),
+      fs.Node(
+        mesh: fs.Mesh(
+          fs.CylinderGeometry(
+            topRadius: 0.9,
+            bottomRadius: 0.05,
+            height: 0.25,
+            radialSegments: 20,
+          ),
+          PartPrimitives.panel(),
         ),
+      )..localTransform = vm.Matrix4.compose(
+        vm.Vector3(lengthToScene(2.6), 0, lengthToScene(-3.5)),
+        noseUp,
+        vm.Vector3.all(lengthToScene(1.0)),
+      ),
     );
   }
-
 }
 
 /// Procedural primitive meshes for part type keys. All geometry is unit

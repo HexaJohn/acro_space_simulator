@@ -3,6 +3,17 @@
 All notable changes to Acro Space Simulator.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.3.3] — 2026-07-04
+
+Hotfix.
+
+- **Fixed the Apollo procedural fallback.** The hand-rolled cone/cylinder
+  primitives had inverted (backfacing) normals, and the engine bell was
+  reversed (flat base toward the body). Rebuilt from the engine's
+  `CylinderGeometry` (correct outward winding + normals): truncated-cone
+  Command Module, cylindrical Service Module, and a flared bell whose
+  opening now faces aft.
+
 ## [0.3.2] — 2026-07-03
 
 - **Craft on web, via a smaller bake.** The web build bundles a
