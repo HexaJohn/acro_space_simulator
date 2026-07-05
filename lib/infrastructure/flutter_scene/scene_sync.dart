@@ -16,6 +16,7 @@ import 'exhaust_nodes.dart';
 import 'line_nodes.dart';
 import 'ring_nodes.dart';
 import 'scene_textures.dart';
+import 'terrain/terrain_nodes.dart';
 import 'vessel_nodes.dart';
 
 /// Per-frame reconciliation of the flutter_scene graph against the
@@ -42,6 +43,7 @@ class SceneSync {
     _atmospheres = AtmosphereNodes(scene);
     _rings = RingNodes(scene, _textures);
     _environment = PlanetEnvironmentBaker(scene, _textures);
+    _terrain = TerrainNodes(scene);
   }
 
   final fs.Scene scene;
@@ -54,6 +56,7 @@ class SceneSync {
   late final AtmosphereNodes _atmospheres;
   late final RingNodes _rings;
   late final PlanetEnvironmentBaker _environment;
+  late final TerrainNodes _terrain;
 
   final FloatingOrigin origin = FloatingOrigin();
 
@@ -94,6 +97,14 @@ class SceneSync {
     }
     _rings.update(snap, origin,
         camera: camera, starWorld: _bodies.starWorld(snap));
+    _terrain.update(
+      snap,
+      origin,
+      cameraEye: camera?.eyeOffset ?? Vector3.zero,
+      focusBodyId: focusBodyId,
+      focusVesselId: focusVesselId,
+      starWorld: _bodies.starWorld(snap),
+    );
     _skybox.update(
         cameraRangeKm:
             camera == null ? 0 : camera.eyeOffset.length * kRenderScale);

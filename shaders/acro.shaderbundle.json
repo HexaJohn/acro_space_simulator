@@ -6,5 +6,9 @@
     "RingFragment": {
         "type": "fragment",
         "file": "shaders/ring.frag"
+    },
+    "TerrainFragment": {
+        "type": "fragment",
+        "file": "shaders/terrain.frag"
     }
 }

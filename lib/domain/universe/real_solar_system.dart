@@ -235,12 +235,13 @@ class RealSolarSystem {
         solarFlux: 1361,
         axialTilt: 0.0269,
         surface: SurfacePresets.moon,
-        // First voxel-terrain body: ~4 km relief over 60 km features. No
-        // ocean (seaLevel 0). Landing + meshing sample this deterministically.
+        // First voxel-terrain body: ~3 km relief over ~18 km features (rolling
+        // hills visible at chunk scale). No ocean (seaLevel 0). Landing +
+        // meshing sample this deterministically.
         terrain: const TerrainConfig(
           seed: 0x11A00,
-          amplitude: 4000,
-          featureScale: 60000,
+          amplitude: 3000,
+          featureScale: 18000,
         ),
       ),
 
