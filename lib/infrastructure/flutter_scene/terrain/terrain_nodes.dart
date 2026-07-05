@@ -51,7 +51,7 @@ class TerrainNodes {
   fs.Node? _node;
   _TerrainMaterial? _material;
   String? _bodyId;
-  Vector3 _lastCenter = Vector3.zero;
+  Vector3 _centerBF = Vector3.zero; // body-fixed chunk centre
 
   /// Debug line for the HUD (chunk tri count / state).
   static String debugLine = '';
@@ -96,42 +96,45 @@ class TerrainNodes {
       octaves: d.terrainOctaves,
     );
 
-    // Anchor the chunk to the FOCUS on the surface — the followed vessel if
-    // any, else the camera. Using the focus (not the camera eye) is what keeps
-    // the patch planet-fixed: orbiting the camera around a landed craft no
-    // longer drags the terrain with it.
+    // Focus on the surface — the followed vessel if any, else the camera.
     final fv = focusVesselId == null ? null : snap.vessels[focusVesselId];
+    final vesselFocus = fv != null;
     var anchorWorld = eyeWorld;
-    if (fv != null) {
+    if (vesselFocus) {
       final vb = snap.bodies[fv.body];
       if (vb != null) {
         anchorWorld = Vector3(vb.px + fv.px, vb.py + fv.py, vb.pz + fv.pz);
       }
     }
 
-    // Sub-anchor surface point in the BODY-FIXED frame (matches body_nodes'
-    // rotation exactly so terrain and the textured sphere share a frame).
+    // The body's orientation (matches body_nodes exactly). The chunk MESH is
+    // stored in the body-fixed frame; the node applies this quaternion, so the
+    // terrain SPINS WITH THE BODY between re-anchors.
     final bodyQuat = Quaternion(b.qw, b.qx, b.qy, b.qz) *
         Quaternion.axisAngle(Vector3.unitZ, BodyNodes.textureYawRad);
-    final dirBF = bodyQuat.conjugate.rotate(anchorWorld - bodyWorld).normalized;
-    final groundR = field.groundRadiusAt(dirBF.x, dirBF.y, dirBF.z);
-    // Snap the surface point to a body-fixed grid so the chunk sits at a FIXED
-    // planet location and only jumps to a neighbour when the anchor crosses a
-    // cell — no continuous slide. A quarter-chunk grid keeps the true surface
-    // well inside the box.
-    final raw = dirBF * groundR;
-    final g = chunkSizeM / 4;
-    final center = Vector3(
-      (raw.x / g).roundToDouble() * g,
-      (raw.y / g).roundToDouble() * g,
-      (raw.z / g).roundToDouble() * g,
-    );
 
-    final moved = _bodyId != bodyId || (center - _lastCenter).length > 1.0;
-    if (_node == null || moved) {
+    // Re-anchor only when the chunk's CURRENT WORLD position (which spins with
+    // the body) drifts a chunk-width from where the focus is looking:
+    //  * landed/co-rotating craft: chunk and craft co-rotate -> zero drift ->
+    //    the chunk stays pinned and rotates with the planet;
+    //  * fixed camera watching the body spin: the chunk rotates away with the
+    //    surface and only re-anchors once it has drifted ~a chunk, so terrain
+    //    visibly turns past like the texture instead of freezing under the eye.
+    final chunkWorld = bodyWorld + bodyQuat.rotate(_centerBF);
+    final focusSurf = vesselFocus
+        ? anchorWorld
+        : bodyWorld + (eyeWorld - bodyWorld).normalized * b.radius;
+    final reanchor = _node == null ||
+        _bodyId != bodyId ||
+        (chunkWorld - focusSurf).length > chunkSizeM * 0.4;
+    if (reanchor) {
+      final dirBF =
+          bodyQuat.conjugate.rotate(anchorWorld - bodyWorld).normalized;
+      final groundR = field.groundRadiusAt(dirBF.x, dirBF.y, dirBF.z);
+      final center = dirBF * groundR; // body-fixed chunk centre
       _remesh(field, center, shader as gpu.Shader);
       _bodyId = bodyId;
-      _lastCenter = center;
+      _centerBF = center;
     }
     if (_node == null) return;
 
