@@ -54,7 +54,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.3.262-corotate';
+const String kBuildStamp = 'build 0.3.3.263-terraintex';
 
 /// What the camera treats as "up" while orbiting the focus.
 enum CameraUpMode {
@@ -90,11 +90,17 @@ class SimulationView extends StatefulWidget {
   /// dev entrypoints (main_scene_dev.dart) boot straight into flutter_scene.
   final RenderBackend initialBackend;
 
+  /// Whether to also spawn the built-in demo orbiter (a generic craft in low
+  /// lunar orbit). Dev scenarios that inject their OWN full fleet set this
+  /// false so the scene is exactly the injected/traffic craft.
+  final bool spawnDemoOrbiter;
+
   const SimulationView({
     super.key,
     this.injectedVessel,
     this.trafficVessels = const [],
     this.initialBackend = RenderBackend.software,
+    this.spawnDemoOrbiter = true,
   });
 
   @override
@@ -670,12 +676,15 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
 
     // The REAL Solar System: Sun + planets + dwarf planets + moons.
     final system = SampleWorld.realSystem();
-    // Low lunar orbit (~100 km) around the Moon.
-    final vessel = SampleWorld.buildEarthOrbiter(
-        bodyId: SampleWorld.moon, altitude: 100000);
+    // Built-in demo orbiter: a generic craft in low lunar orbit (~100 km).
+    // Suppressed when the caller injects its own full fleet.
+    final demo = widget.spawnDemoOrbiter
+        ? SampleWorld.buildEarthOrbiter(
+            bodyId: SampleWorld.moon, altitude: 100000)
+        : null;
     // An ascent/descent craft injected by the caller (sits on a body surface).
     final injected = widget.injectedVessel;
-    final fleet = [vessel, ?injected, ...widget.trafficVessels];
+    final fleet = [?demo, ?injected, ...widget.trafficVessels];
 
     // Camera-target cycle: every vessel first, then the major bodies. The
     // switch-camera button steps through this list.
@@ -683,14 +692,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       for (final v in fleet) (label: v.name, v: v.id, b: null),
       for (final body in system.all) (label: body.name, v: null, b: body.id),
     ];
-    // If a craft was injected (ascent/descent), START LOCKED ON IT so the player
-    // is flying it immediately; otherwise lock on the ORBITER so the player can
-    // fly it directly from the start (manual mode, see the flags below).
-    if (injected != null) {
-      _targetIndex = _targets.indexWhere((t) => t.v == injected.id);
-    } else {
-      _targetIndex = _targets.indexWhere((t) => t.v == vessel.id);
-    }
+    // START LOCKED ON the injected craft if any (fly it immediately); else the
+    // demo orbiter so the player can fly it directly from the start (manual
+    // mode, see the flags below).
+    final focusId = injected?.id ?? demo?.id;
+    _targetIndex =
+        focusId == null ? 0 : _targets.indexWhere((t) => t.v == focusId);
     if (_targetIndex < 0) _targetIndex = 0;
     _focusVessel = _targets[_targetIndex].v;
     _focusBody = _targets[_targetIndex].b;

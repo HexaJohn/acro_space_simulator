@@ -25,6 +25,9 @@ uniform TerrainInfo {
   vec4 col_high;
   vec4 col_rock;
   vec4 col_snow;
+  // x: tile size (m) for triplanar detail. y: sand weight, z: grass weight
+  // (per-body blend of the FLAT material, 0 = pure regolith). w: detail mix.
+  vec4 detail;
 }
 terrain;
 
@@ -40,6 +43,13 @@ uniform ShadowInfo {
 sh;
 
 uniform sampler2D shadow_map; // fp32 depth-in-.r cascade atlas (horizontal strip)
+
+// Tileable material tiles (procedural, generated in terrain_textures.dart),
+// sampled triplanar so slopes/caves don't stretch.
+uniform sampler2D tex_regolith;
+uniform sampler2D tex_rock;
+uniform sampler2D tex_sand;
+uniform sampler2D tex_grass;
 
 in vec3 v_position;
 in vec3 v_normal;
@@ -150,6 +160,22 @@ float SampleShadow(vec3 world_pos, vec3 n) {
 }
 #undef _TRY_CASCADE
 
+// --- Triplanar material sampling ---------------------------------------------
+
+// Sample a tileable material at world position, projected on the three axis
+// planes and blended by the (sharpened) normal so no axis stretches. v_position
+// is in SCENE km; convert to metres, then to tile units by the tile size.
+vec3 triplanar(sampler2D tex, vec3 wpos_m, vec3 n, float tile_m) {
+  vec3 uvw = wpos_m / max(tile_m, 0.001);
+  vec3 bw = abs(n);
+  bw = pow(bw, vec3(4.0));         // sharpen so seams between planes are narrow
+  bw /= (bw.x + bw.y + bw.z + 1e-5);
+  vec3 cx = texture(tex, uvw.yz).rgb; // plane facing X
+  vec3 cy = texture(tex, uvw.zx).rgb; // plane facing Y
+  vec3 cz = texture(tex, uvw.xy).rgb; // plane facing Z
+  return cx * bw.x + cy * bw.y + cz * bw.z;
+}
+
 // -----------------------------------------------------------------------------
 
 void main() {
@@ -170,15 +196,30 @@ void main() {
   float amp = max(terrain.sun_amp.w, 1e-6);
   float altN = clamp((dist - terrain.params.x) / amp, -1.0, 1.0);
 
-  // Flat ground: low->high by altitude. Snow blends in up high.
-  vec3 flat_col = mix(terrain.col_low.rgb, terrain.col_high.rgb,
-                      smoothstep(-0.2, 0.6, altN));
+  // Triplanar material tiles at this fragment (world metres = scene km * 1000).
+  vec3 wpos_m = v_position * 1000.0;
+  float tile_m = terrain.detail.x;
+  vec3 c_reg = triplanar(tex_regolith, wpos_m, n, tile_m);
+  vec3 c_rock = triplanar(tex_rock, wpos_m, n, tile_m);
+  vec3 c_sand = triplanar(tex_sand, wpos_m, n, tile_m);
+  vec3 c_grass = triplanar(tex_grass, wpos_m, n, tile_m);
+
+  // FLAT ground material: regolith by default, blended toward sand/grass per the
+  // body's weights (0 on the Moon). A gentle altitude tint from the palette.
+  vec3 flat_col = c_reg;
+  flat_col = mix(flat_col, c_sand, clamp(terrain.detail.y, 0.0, 1.0));
+  flat_col = mix(flat_col, c_grass, clamp(terrain.detail.z, 0.0, 1.0));
+  // Subtle altitude brightening (highs catch more light/dust); textures carry
+  // the base albedo, so this is a gentle ramp, not a full recolor.
+  flat_col *= mix(0.9, 1.12, smoothstep(-0.2, 0.6, altN));
+
+  // Snow caps up high on gentle slopes.
   float snow = smoothstep(terrain.params.z, terrain.params.z + 0.25, altN);
   flat_col = mix(flat_col, terrain.col_snow.rgb, snow * smoothstep(0.4, 0.9, slope));
 
   // Steep faces are rock regardless of altitude.
   float rockw = 1.0 - smoothstep(terrain.params.w, terrain.params.w + 0.15, slope);
-  vec3 albedo = mix(flat_col, terrain.col_rock.rgb, rockw);
+  vec3 albedo = mix(flat_col, c_rock, rockw);
 
   // Sun Lambert + ambient. Light travels along sun_amp.xyz, so a surface is
   // lit by the component facing back toward the sun (-dir).

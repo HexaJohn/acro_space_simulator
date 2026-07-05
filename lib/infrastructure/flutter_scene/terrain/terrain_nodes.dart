@@ -13,6 +13,7 @@ import '../../../domain/terrain/terrain_field.dart';
 import '../body_nodes.dart';
 import '../coord_convert.dart';
 import 'terrain_mesher.dart';
+import 'terrain_textures.dart';
 
 /// Renders a voxel-terrain patch on the focused body's surface.
 ///
@@ -35,6 +36,16 @@ class TerrainNodes {
   static double chunkSizeM = 6000;
   static int resolution = 48;
   static double maxAltitudeM = 60000;
+
+  /// Triplanar detail tuning (dev-tunable via ext.acro.camera). [tileMeters] =
+  /// world size of one material tile; [sandWeight]/[grassWeight] blend the flat
+  /// material toward sand/grass (0 = pure regolith, right for the Moon).
+  static double tileMeters = 6.0;
+  static double sandWeight = 0.0;
+  static double grassWeight = 0.0;
+
+  /// Generate + upload the procedural material tiles (idempotent).
+  static Future<void> loadTextures() => TerrainTextures.load();
 
   static Object? _shader;
   static Future<void>? _loading;
@@ -67,7 +78,9 @@ class TerrainNodes {
     Vector3? starWorld,
   }) {
     final shader = _shader;
-    if (shader == null || !enabled) {
+    // Hold off until the shader AND the material tiles are uploaded — the
+    // fragment declares the tex_* samplers, and drawing with them unbound faults.
+    if (shader == null || !enabled || !TerrainTextures.ready) {
       _clear();
       return;
     }
@@ -155,7 +168,12 @@ class TerrainNodes {
       sunTravel: vm.Vector3(sun.x, sun.y, sun.z),
       amplitudeScene: lengthToScene(field.amplitude),
       seaRadiusScene: lengthToScene(field.seaRadius),
+      tileMeters: tileMeters,
+      sandWeight: sandWeight,
+      grassWeight: grassWeight,
     );
+    // Bind the procedural material tiles once they've finished uploading.
+    _material?.bindTiles();
   }
 
   void _remesh(TerrainField field, Vector3 center, gpu.Shader shader) {
@@ -194,9 +212,9 @@ class TerrainNodes {
   }
 }
 
-/// Opaque triplanar-procedural terrain material. Double-sided for now (the
-/// shader flips the normal viewer-ward), so Surface Nets winding never shows
-/// backfaces; back-face culling is a later optimisation.
+/// Opaque triplanar-procedural terrain material. Double-sided (CullMode.none)
+/// for now so Surface Nets winding never drops a face; the material tiles are
+/// sampled triplanar and lit by the outward gradient normal.
 class _TerrainMaterial extends fs.ShaderMaterial {
   _TerrainMaterial(gpu.Shader shader)
       : super(
@@ -205,22 +223,45 @@ class _TerrainMaterial extends fs.ShaderMaterial {
           isOpaqueOverride: true,
         );
 
+  bool _tilesBound = false;
+
   void setUniforms({
     required vm.Vector3 centreScene,
     required double radiusScene,
     required vm.Vector3 sunTravel,
     required double amplitudeScene,
     required double seaRadiusScene,
+    required double tileMeters,
+    required double sandWeight,
+    required double grassWeight,
   }) {
     setUniformBlockFromFloats('TerrainInfo', [
       centreScene.x, centreScene.y, centreScene.z, radiusScene,
       sunTravel.x, sunTravel.y, sunTravel.z, amplitudeScene,
-      seaRadiusScene, 0.08, 0.6, 0.6, // sea, ambient, snowStart, rockSlope
+      seaRadiusScene, 0.14, 0.6, 0.6, // sea, ambient, snowStart, rockSlope
       0.34, 0.32, 0.29, 0.0, // col_low  (dark tan/grey)
       0.55, 0.53, 0.50, 0.0, // col_high (light grey)
-      0.30, 0.28, 0.27, 0.0, // col_rock
+      0.30, 0.28, 0.27, 0.0, // col_rock (unused now; tex_rock carries colour)
       0.90, 0.92, 0.95, 0.0, // col_snow
+      tileMeters, sandWeight, grassWeight, 1.0, // detail
     ]);
+  }
+
+  /// Bind the procedural material tiles once, after they finish uploading.
+  /// Repeat wrapping + linear filtering for clean triplanar tiling.
+  void bindTiles() {
+    if (_tilesBound || !TerrainTextures.ready) return;
+    final sampler = igpu.SamplerOptions(
+      minFilter: igpu.MinMagFilter.linear,
+      magFilter: igpu.MinMagFilter.linear,
+      widthAddressMode: igpu.SamplerAddressMode.repeat,
+      heightAddressMode: igpu.SamplerAddressMode.repeat,
+    );
+    setTexture('tex_regolith', TerrainTextures.regolith, sampler: sampler);
+    setTexture('tex_rock', TerrainTextures.rock, sampler: sampler);
+    setTexture('tex_sand', TerrainTextures.sand, sampler: sampler);
+    setTexture('tex_grass', TerrainTextures.grass, sampler: sampler);
+    _tilesBound = true;
   }
 
   @override

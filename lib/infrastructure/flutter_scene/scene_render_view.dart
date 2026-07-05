@@ -85,6 +85,9 @@ class _SceneRenderViewState extends State<SceneRenderView> {
     TerrainNodes.loadShader().catchError((Object e) {
       debugPrint('terrain shader load failed: $e');
     });
+    TerrainNodes.loadTextures().catchError((Object e) {
+      debugPrint('terrain textures load failed: $e');
+    });
     _staticInit.then((_) {
       if (!mounted) return;
       _sync = SceneSync(

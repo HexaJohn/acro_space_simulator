@@ -18,6 +18,7 @@ import 'infrastructure/flutter_scene/environment_baker.dart';
 import 'infrastructure/flutter_scene/render_backend.dart';
 import 'infrastructure/flutter_scene/scene_camera_adapter.dart';
 import 'infrastructure/flutter_scene/scene_sync.dart';
+import 'infrastructure/flutter_scene/terrain/terrain_nodes.dart';
 import 'infrastructure/flutter_scene/vessel_nodes.dart';
 
 /// Dev entrypoint: boots STRAIGHT into [SimulationView] with the
@@ -154,6 +155,13 @@ void main() {
     if (params['shadows'] != null) {
       SceneSync.shadowsEnabled = params['shadows'] == 'true';
     }
+    // Terrain material tuning: tileM=<metres>, sandW/grassW=0..1.
+    final tileM = deg('tileM');
+    if (tileM != null && tileM > 0) TerrainNodes.tileMeters = tileM;
+    final sandW = deg('sandW');
+    if (sandW != null) TerrainNodes.sandWeight = sandW.clamp(0.0, 1.0);
+    final grassW = deg('grassW');
+    if (grassW != null) TerrainNodes.grassWeight = grassW.clamp(0.0, 1.0);
     // Planet-in-reflections IBL baker: planetEnv=true|false,
     // envIntensity=<double> (baked-map IBL strength, default 1.0).
     if (params['planetEnv'] != null) {
@@ -253,17 +261,25 @@ void main() {
             initialBackend: backend == 'software'
                 ? RenderBackend.software
                 : RenderBackend.flutterScene,
-            // Dev-only: a lander resting on the Moon's voxel terrain, so the
-            // scene boots looking at a craft on real ground (shadow-cast demo +
-            // landing iteration). The collision clamp settles it onto the
-            // terrain height on the first tick.
-            injectedVessel: SampleWorld.buildSurfaceCraft(
-              SampleWorld.realSystem().require(SampleWorld.moon),
-              latDeg: 12,
-              lonDeg: 34,
+            // Dev scene: the Apollo CSM (service module) + the Lunar Module in
+            // a low lunar orbit on the Moon's DAYLIGHT side, in loose formation
+            // (the CSM a touch higher and ahead). The built-in demo orbiter is
+            // suppressed so the scene is exactly these two craft. Model wiring
+            // (VesselNodes._assetFor): the 'lander' id renders lander.fsceneb,
+            // the CSM renders apollo.fsceneb.
+            spawnDemoOrbiter: false,
+            injectedVessel: SampleWorld.buildLunarOrbiter(
               id: 'moon-lander',
-              name: 'Moon Lander',
+              name: 'Lunar Module',
             ),
+            trafficVessels: [
+              SampleWorld.buildLunarOrbiter(
+                id: 'csm',
+                name: 'Service Module',
+                altitude: 108000,
+                phaseDeg: 3,
+              ),
+            ],
           ),
         ),
       ),
