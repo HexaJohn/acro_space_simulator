@@ -108,7 +108,7 @@ class SceneSync {
     _skybox.update(
         cameraRangeKm:
             camera == null ? 0 : camera.eyeOffset.length * kRenderScale);
-    _updateSun(snap);
+    _updateSun(snap, camera, focusVesselId, focusBodyId);
     _updateExposure(snap, camera, focusVesselId, focusBodyId);
     if (camera != null) {
       _environment.update(
@@ -209,7 +209,8 @@ class SceneSync {
   /// direction until the star is known (first descriptor frame). The GLOBAL
   /// light stays full strength — craft eclipse is applied per-vessel in
   /// [VesselNodes] so it never dims other bodies.
-  void _updateSun(WorldSnapshot snap) {
+  void _updateSun(WorldSnapshot snap, SceneCamera? camera,
+      String? focusVesselId, String? focusBodyId) {
     final star = _bodies.starWorld(snap);
     final dir = star == null
         ? vm.Vector3(-1.0, -0.2, -0.1)
@@ -226,14 +227,64 @@ class SceneSync {
             final d = rel / len;
             return vm.Vector3(-d.x, -d.y, -d.z);
           })();
-    final light = scene.directionalLight;
+    var light = scene.directionalLight;
     if (light == null) {
-      scene.directionalLight =
-          fs.DirectionalLight(direction: dir, intensity: _sunIntensity);
+      light = fs.DirectionalLight(direction: dir, intensity: _sunIntensity);
+      scene.directionalLight = light;
     } else {
       light.direction = dir;
       light.intensity = _sunIntensity;
     }
+    _tuneShadows(light, snap, camera, focusVesselId, focusBodyId);
+  }
+
+  /// Highest eye-altitude (m above the datum) at which the directional light
+  /// casts shadows. Above it there is no terrain to receive them and the craft
+  /// is a sub-pixel speck, so the shadow pass is pure cost — skip it.
+  static const double _shadowMaxAltM = 8000;
+
+  /// Enable + scale the cascaded shadow map for the landing use-case. The sim
+  /// renders in kilometres with metre-scale craft, so the engine's default
+  /// world-unit shadow distances (150 u = 150 km) would smear a 15 m craft
+  /// across one texel. Tie the cascade reach to eye altitude so a low craft
+  /// casts a tight, crisp shadow; disable entirely away from a terrain surface.
+  /// Dev kill switch for the cast-shadow pass (`ext.acro.camera?shadows=off`),
+  /// for A/B comparison. Production leaves it on.
+  static bool shadowsEnabled = true;
+
+  void _tuneShadows(fs.DirectionalLight light, WorldSnapshot snap,
+      SceneCamera? camera, String? focusVesselId, String? focusBodyId) {
+    final bodyId = focusBodyId ??
+        (focusVesselId == null ? null : snap.vessels[focusVesselId]?.body);
+    final b = bodyId == null ? null : snap.bodies[bodyId];
+    final d = bodyId == null ? null : snap.descriptors[bodyId];
+    if (!shadowsEnabled ||
+        camera == null ||
+        b == null ||
+        d == null ||
+        !d.hasTerrain) {
+      light.castsShadow = false;
+      return;
+    }
+    final bodyWorld = Vector3(b.px, b.py, b.pz);
+    final eyeWorld = origin.focusWorld + camera.eyeOffset;
+    final altM = (eyeWorld - bodyWorld).length - b.radius;
+    if (altM > _shadowMaxAltM) {
+      light.castsShadow = false;
+      return;
+    }
+    light.castsShadow = true;
+    // Second-depth casting: solid, watertight voxel terrain + craft, so record
+    // the far face and let the offset hide inside the solid (no grazing acne).
+    light.shadowCasterFaces = fs.ShadowCasterFaces.back;
+    // Cascades reach a few craft-heights out, growing with altitude; clamped so
+    // a landed craft still shadows ~300 m of ground and a descent stays covered.
+    final rangeM = (altM * 3.0 + 300.0).clamp(300.0, 6000.0);
+    light.shadowMaxDistance = lengthToScene(rangeM);
+    light.shadowFadeRange = lengthToScene(rangeM * 0.12);
+    light.shadowSoftness = lengthToScene(1.5); // ~1.5 m penumbra
+    light.shadowNormalBias = lengthToScene(1.0);
+    light.shadowDepthBias = lengthToScene(1.0);
   }
 
   Vector3 _focusWorld(

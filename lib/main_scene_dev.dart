@@ -10,6 +10,7 @@ import 'package:flutter_scene/scene.dart' show AntiAliasingMode;
 
 import 'domain/shared/vector3.dart';
 import 'infrastructure/flutter/sim_view_control.dart';
+import 'infrastructure/sample_world.dart';
 import 'infrastructure/flutter/simulation_view.dart';
 import 'infrastructure/flutter_scene/atmosphere_nodes.dart';
 import 'infrastructure/flutter_scene/body_nodes.dart';
@@ -149,6 +150,10 @@ void main() {
     if (params['autoExposure'] != null) {
       SceneSync.autoExposure = params['autoExposure'] == 'true';
     }
+    // Cast-shadow pass toggle (A/B): shadows=true|false.
+    if (params['shadows'] != null) {
+      SceneSync.shadowsEnabled = params['shadows'] == 'true';
+    }
     // Planet-in-reflections IBL baker: planetEnv=true|false,
     // envIntensity=<double> (baked-map IBL strength, default 1.0).
     if (params['planetEnv'] != null) {
@@ -248,6 +253,17 @@ void main() {
             initialBackend: backend == 'software'
                 ? RenderBackend.software
                 : RenderBackend.flutterScene,
+            // Dev-only: a lander resting on the Moon's voxel terrain, so the
+            // scene boots looking at a craft on real ground (shadow-cast demo +
+            // landing iteration). The collision clamp settles it onto the
+            // terrain height on the first tick.
+            injectedVessel: SampleWorld.buildSurfaceCraft(
+              SampleWorld.realSystem().require(SampleWorld.moon),
+              latDeg: 12,
+              lonDeg: 34,
+              id: 'moon-lander',
+              name: 'Moon Lander',
+            ),
           ),
         ),
       ),

@@ -1,4 +1,6 @@
 // ignore_for_file: implementation_imports
+import 'dart:typed_data';
+
 import 'package:flutter_scene/gpu.dart' as gpu;
 import 'package:flutter_scene/scene.dart' as fs;
 import 'package:flutter_scene/src/gpu/gpu.dart' as igpu;
@@ -219,5 +221,58 @@ class _TerrainMaterial extends fs.ShaderMaterial {
       0.30, 0.28, 0.27, 0.0, // col_rock
       0.90, 0.92, 0.95, 0.0, // col_snow
     ]);
+  }
+
+  @override
+  void bind(
+    igpu.RenderPass pass,
+    igpu.HostBuffer transientsBuffer,
+    fs.Lighting lighting,
+  ) {
+    // Pack this frame's cascaded-shadow state into ShadowInfo before the base
+    // bind flushes the material's uniform blocks.
+    _packShadow(lighting);
+    super.bind(pass, transientsBuffer, lighting);
+    // The depth atlas is fp32; the shader does its own PCF, so nearest sampling
+    // is the portable choice (matches EngineLightingUniforms). A white
+    // placeholder keeps the slot live when shadows are off this frame.
+    pass.bindTexture(
+      fragmentShader.getUniformSlot('shadow_map'),
+      fs.Material.whitePlaceholder(lighting.shadowMap),
+      sampler: igpu.SamplerOptions(
+        minFilter: igpu.MinMagFilter.nearest,
+        magFilter: igpu.MinMagFilter.nearest,
+      ),
+    );
+  }
+
+  /// Fills the `ShadowInfo` block (see terrain.frag) from [lighting] — the
+  /// cascade matrices + world-space shadow params the fork's PCF path needs.
+  /// std140 layout: mat4[4] (0..63), cascade_box_sizes vec4 (64..67),
+  /// light_dir_count vec4 (68..71), sp0 vec4 (72..75), sp1 vec4 (76..79).
+  void _packShadow(fs.Lighting lighting) {
+    final cascades = lighting.shadowMap == null
+        ? const <fs.ShadowCascade>[]
+        : lighting.cascades;
+    final f = Float32List(80);
+    for (var i = 0; i < cascades.length && i < 4; i++) {
+      f.setRange(i * 16, i * 16 + 16, cascades[i].lightSpaceMatrix.storage);
+      f[64 + i] = cascades[i].boxSize;
+    }
+    final light = lighting.directionalLight;
+    final dir = lighting.directionalLightDirection ??
+        light?.direction ??
+        vm.Vector3(0.0, -1.0, 0.0);
+    f[68] = dir.x;
+    f[69] = dir.y;
+    f[70] = dir.z;
+    f[71] = cascades.length.toDouble();
+    f[72] = light == null ? 0.0 : 1.0 / light.shadowMapResolution;
+    f[73] = light?.shadowNormalBias ?? 0.0;
+    f[74] = light?.shadowSoftness ?? 0.0;
+    f[75] = light?.shadowDepthBias ?? 0.0;
+    f[76] = light?.shadowFadeRange ?? 0.0;
+    f[77] = cascades.isEmpty ? 0.0 : 1.0;
+    setUniformBlock('ShadowInfo', ByteData.sublistView(f));
   }
 }
