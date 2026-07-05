@@ -37,12 +37,13 @@ class TerrainNodes {
   static int resolution = 48;
   static double maxAltitudeM = 60000;
 
-  /// Triplanar detail tuning (dev-tunable via ext.acro.camera). [tileMeters] =
-  /// world size of one material tile; [sandWeight]/[grassWeight] blend the flat
-  /// material toward sand/grass (0 = pure regolith, right for the Moon).
+  /// Triplanar detail tuning. [tileMeters] = world size of one material tile.
+  /// [sandWeight]/[grassWeight] are dev OVERRIDES of the body's own sand/grass
+  /// amount (ext.acro.camera): < 0 means "use the body value" (the default, so
+  /// each body picks its own materials); >= 0 forces that cap for preview.
   static double tileMeters = 6.0;
-  static double sandWeight = 0.0;
-  static double grassWeight = 0.0;
+  static double sandWeight = -1.0;
+  static double grassWeight = -1.0;
 
   /// Generate + upload the procedural material tiles (idempotent).
   static Future<void> loadTextures() => TerrainTextures.load();
@@ -169,8 +170,12 @@ class TerrainNodes {
       amplitudeScene: lengthToScene(field.amplitude),
       seaRadiusScene: lengthToScene(field.seaRadius),
       tileMeters: tileMeters,
-      sandWeight: sandWeight,
-      grassWeight: grassWeight,
+      // Per-body material amounts, unless a dev override (>= 0) is set.
+      sandAmount: sandWeight >= 0 ? sandWeight : d.terrainSandAmount,
+      grassAmount: grassWeight >= 0 ? grassWeight : d.terrainGrassAmount,
+      // Spin axis (+Z) rotated the same way the node rotates vertices, so it
+      // lands in v_position's world frame -> dot(up, pole) = latitude sine.
+      poleWorld: quatToScene(bodyQuat).rotated(vm.Vector3(0.0, 0.0, 1.0)),
     );
     // Bind the procedural material tiles once they've finished uploading.
     _material?.bindTiles();
@@ -232,8 +237,9 @@ class _TerrainMaterial extends fs.ShaderMaterial {
     required double amplitudeScene,
     required double seaRadiusScene,
     required double tileMeters,
-    required double sandWeight,
-    required double grassWeight,
+    required double sandAmount,
+    required double grassAmount,
+    required vm.Vector3 poleWorld,
   }) {
     setUniformBlockFromFloats('TerrainInfo', [
       centreScene.x, centreScene.y, centreScene.z, radiusScene,
@@ -243,7 +249,8 @@ class _TerrainMaterial extends fs.ShaderMaterial {
       0.55, 0.53, 0.50, 0.0, // col_high (light grey)
       0.30, 0.28, 0.27, 0.0, // col_rock (unused now; tex_rock carries colour)
       0.90, 0.92, 0.95, 0.0, // col_snow
-      tileMeters, sandWeight, grassWeight, 1.0, // detail
+      tileMeters, sandAmount, grassAmount, 1.0, // detail
+      poleWorld.x, poleWorld.y, poleWorld.z, 0.0, // pole (world)
     ]);
   }
 
@@ -254,6 +261,9 @@ class _TerrainMaterial extends fs.ShaderMaterial {
     final sampler = igpu.SamplerOptions(
       minFilter: igpu.MinMagFilter.linear,
       magFilter: igpu.MinMagFilter.linear,
+      mipFilter: TerrainTextures.mipmapped
+          ? igpu.MipFilter.linear
+          : igpu.MipFilter.nearest,
       widthAddressMode: igpu.SamplerAddressMode.repeat,
       heightAddressMode: igpu.SamplerAddressMode.repeat,
     );

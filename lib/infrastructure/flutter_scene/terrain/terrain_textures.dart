@@ -1,9 +1,8 @@
-import 'dart:async';
+// ignore_for_file: implementation_imports
 import 'dart:math' as math;
 import 'dart:typed_data';
-import 'dart:ui' as ui;
 
-import 'package:flutter_scene/scene.dart' as fs;
+import 'package:flutter_scene/src/gpu/gpu.dart' as gpu;
 
 /// Procedurally-generated, SEAMLESSLY TILEABLE material textures for the voxel
 /// terrain — regolith, rock, sand, grass. Generated once at startup (no asset
@@ -31,25 +30,71 @@ class TerrainTextures {
   static Future<void>? _loading;
   static bool get ready => regolith != null;
 
+  /// Whether the uploaded tiles carry a mip chain (so the sampler can trilinear-
+  /// filter them). False when the backend can't take manually-mipped textures.
+  static bool mipmapped = false;
+
   /// Generate + upload all four tiles once. Idempotent.
   static Future<void> load() => _loading ??= () async {
-        final results = await Future.wait([
-          _upload(_regolith),
-          _upload(_rock),
-          _upload(_sand),
-          _upload(_grass),
-        ]);
-        regolith = results[0];
-        rock = results[1];
-        sand = results[2];
-        grass = results[3];
+        regolith = _upload(_regolith);
+        rock = _upload(_rock);
+        sand = _upload(_sand);
+        grass = _upload(_grass);
       }();
 
-  static Future<Object> _upload(_Fill fill) async {
-    final rgba = _bake(fill);
-    final img = await _imageFromRgba(rgba, size, size);
-    final tex = await fs.gpuTextureFromImage(img);
+  /// Bake the base tile, build its mip chain, and upload every level to a GPU
+  /// texture. Manual mips (no hardware generate on this shim) let the sampler
+  /// trilinear-filter the tiles so distant/grazing terrain doesn't shimmer;
+  /// falls back to a single level where the backend can't take mipped uploads.
+  static Object _upload(_Fill fill) {
+    final ctx = gpu.gpuContext;
+    final base = _bake(fill);
+    // The backend caps the level count (e.g. 8 for 256^2 — it stops at 2x2, not
+    // 1x1). fullMipCount reports its limit; truncate the chain to it.
+    final wantMips = ctx.doesSupportManuallyMippedTextures;
+    final maxLevels = wantMips ? gpu.Texture.fullMipCount(size, size) : 1;
+    var levels = maxLevels > 1 ? _mipChain(base, size) : [base];
+    if (levels.length > maxLevels) levels = levels.sublist(0, maxLevels);
+    final tex = ctx.createTexture(
+      gpu.StorageMode.hostVisible,
+      size,
+      size,
+      mipLevelCount: levels.length,
+    );
+    for (var i = 0; i < levels.length; i++) {
+      tex.overwrite(ByteData.sublistView(levels[i]), mipLevel: i);
+    }
+    mipmapped = levels.length > 1;
     return tex as Object;
+  }
+
+  /// Box-downsample [base] (RGBA, [size]x[size], power-of-two) into the full mip
+  /// chain, level 0 = base down to 1x1.
+  static List<Uint8List> _mipChain(Uint8List base, int size) {
+    final chain = <Uint8List>[base];
+    var cur = base, w = size, h = size;
+    while (w > 1 || h > 1) {
+      final nw = w > 1 ? w >> 1 : 1, nh = h > 1 ? h >> 1 : 1;
+      final next = Uint8List(nw * nh * 4);
+      for (var y = 0; y < nh; y++) {
+        final y0 = y * 2, y1 = math.min(y * 2 + 1, h - 1);
+        for (var x = 0; x < nw; x++) {
+          final x0 = x * 2, x1 = math.min(x * 2 + 1, w - 1);
+          final i00 = (y0 * w + x0) * 4, i01 = (y0 * w + x1) * 4;
+          final i10 = (y1 * w + x0) * 4, i11 = (y1 * w + x1) * 4;
+          final o = (y * nw + x) * 4;
+          for (var c = 0; c < 4; c++) {
+            next[o + c] =
+                (cur[i00 + c] + cur[i01 + c] + cur[i10 + c] + cur[i11 + c]) >> 2;
+          }
+        }
+      }
+      chain.add(next);
+      cur = next;
+      w = nw;
+      h = nh;
+    }
+    return chain;
   }
 
   // ---- Baking -------------------------------------------------------------
@@ -72,12 +117,6 @@ class TerrainTextures {
   }
 
   static int _b(double v) => (v.clamp(0.0, 1.0) * 255.0).round();
-
-  static Future<ui.Image> _imageFromRgba(Uint8List rgba, int w, int h) {
-    final c = Completer<ui.Image>();
-    ui.decodeImageFromPixels(rgba, w, h, ui.PixelFormat.rgba8888, c.complete);
-    return c.future;
-  }
 
   // ---- Material recipes (u,v in [0,1), tileable) --------------------------
 

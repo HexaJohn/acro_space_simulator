@@ -25,9 +25,12 @@ uniform TerrainInfo {
   vec4 col_high;
   vec4 col_rock;
   vec4 col_snow;
-  // x: tile size (m) for triplanar detail. y: sand weight, z: grass weight
-  // (per-body blend of the FLAT material, 0 = pure regolith). w: detail mix.
+  // x: tile size (m) for triplanar detail. y: sand amount, z: grass amount
+  // (per-body caps; the shader modulates them by latitude+altitude). w: unused.
   vec4 detail;
+  // xyz: body spin-axis (pole) in the SAME world frame as v_position, so
+  // dot(up, pole) = the body-fixed latitude sine regardless of body rotation.
+  vec4 pole;
 }
 terrain;
 
@@ -204,11 +207,17 @@ void main() {
   vec3 c_sand = triplanar(tex_sand, wpos_m, n, tile_m);
   vec3 c_grass = triplanar(tex_grass, wpos_m, n, tile_m);
 
-  // FLAT ground material: regolith by default, blended toward sand/grass per the
-  // body's weights (0 on the Moon). A gentle altitude tint from the palette.
+  // FLAT ground material: regolith by default, with grass/sand auto-selected by
+  // LATITUDE + ALTITUDE up to the body's caps (both 0 on the Moon -> regolith).
+  float latSin = clamp(dot(up, terrain.pole.xyz), -1.0, 1.0);
+  float warm = sqrt(max(1.0 - latSin * latSin, 0.0)); // cos(lat): 1 eq .. 0 pole
+  float lowland = 1.0 - smoothstep(0.0, 0.5, altN);    // near/below the datum
+  float grassW = clamp(terrain.detail.z, 0.0, 1.0) * warm * lowland;
+  float sandW = clamp(terrain.detail.y, 0.0, 1.0) *
+                smoothstep(0.6, 0.95, warm) * lowland; // hot, dry, low
   vec3 flat_col = c_reg;
-  flat_col = mix(flat_col, c_sand, clamp(terrain.detail.y, 0.0, 1.0));
-  flat_col = mix(flat_col, c_grass, clamp(terrain.detail.z, 0.0, 1.0));
+  flat_col = mix(flat_col, c_grass, grassW);
+  flat_col = mix(flat_col, c_sand, sandW); // desert paints over grass
   // Subtle altitude brightening (highs catch more light/dust); textures carry
   // the base albedo, so this is a gentle ramp, not a full recolor.
   flat_col *= mix(0.9, 1.12, smoothstep(-0.2, 0.6, altN));

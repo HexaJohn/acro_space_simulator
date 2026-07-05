@@ -503,6 +503,8 @@ class BodyDescriptorSnapshot {
   final double terrainFeatureScale; // m feature wavelength
   final double terrainSeaLevel; // m above datum
   final int terrainOctaves;
+  final double terrainGrassAmount; // 0..1 vegetation cover
+  final double terrainSandAmount; // 0..1 desert cover
 
   const BodyDescriptorSnapshot({
     required this.id,
@@ -527,6 +529,8 @@ class BodyDescriptorSnapshot {
     this.terrainFeatureScale = 0,
     this.terrainSeaLevel = 0,
     this.terrainOctaves = 5,
+    this.terrainGrassAmount = 0,
+    this.terrainSandAmount = 0,
   });
 
   factory BodyDescriptorSnapshot.of(CelestialBody body, StarSystem system) {
@@ -558,6 +562,8 @@ class BodyDescriptorSnapshot {
       terrainFeatureScale: body.terrain?.featureScale ?? 0,
       terrainSeaLevel: body.terrain?.seaLevel ?? 0,
       terrainOctaves: body.terrain?.octaves ?? 5,
+      terrainGrassAmount: body.terrain?.grassAmount ?? 0,
+      terrainSandAmount: body.terrain?.sandAmount ?? 0,
     );
   }
 
@@ -598,6 +604,8 @@ class BodyDescriptorSnapshot {
             'feat': terrainFeatureScale,
             'sea': terrainSeaLevel,
             'oct': terrainOctaves,
+            'grass': terrainGrassAmount,
+            'sand': terrainSandAmount,
           },
       };
 
@@ -632,6 +640,10 @@ class BodyDescriptorSnapshot {
       terrainSeaLevel:
           (((j['terrain'] as Map?)?['sea']) as num?)?.toDouble() ?? 0,
       terrainOctaves: (((j['terrain'] as Map?)?['oct']) as num?)?.toInt() ?? 5,
+      terrainGrassAmount:
+          (((j['terrain'] as Map?)?['grass']) as num?)?.toDouble() ?? 0,
+      terrainSandAmount:
+          (((j['terrain'] as Map?)?['sand']) as num?)?.toDouble() ?? 0,
     );
   }
 }

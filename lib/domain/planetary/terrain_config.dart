@@ -14,6 +14,8 @@ class TerrainConfig {
     required this.featureScale,
     this.seaLevel = 0,
     this.octaves = 5,
+    this.grassAmount = 0,
+    this.sandAmount = 0,
   });
 
   /// Noise seed (independent of [PlanetSurface.seed], which drives biomes).
@@ -30,6 +32,14 @@ class TerrainConfig {
 
   /// fBm octaves (detail layers).
   final int octaves;
+
+  /// Vegetation cover (0 = barren/regolith, 1 = fully vegetated). The renderer
+  /// blends grass into temperate lowlands up to this cap; 0 on airless bodies.
+  final double grassAmount;
+
+  /// Desert/sand cover (0..1). Blended into hot, low, dry latitudes up to this
+  /// cap; 0 on airless bodies.
+  final double sandAmount;
 
   /// Build the sampler for a body of the given datum [radius] (m).
   TerrainField fieldFor(double radius) => TerrainField(
