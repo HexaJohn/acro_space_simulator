@@ -191,6 +191,21 @@ class CelestialBody {
     return (tilt * spin).normalized;
   }
 
+  /// The body's spin axis as a UNIT vector in the INERTIAL frame — its pole
+  /// after [axialTilt]. Equals `tilt · (+Z)`, the instantaneous rotation axis of
+  /// [orientationAt] (= tilt·spin); it is constant (tilt is fixed), so the body
+  /// does not precess. Landed co-rotation and surface velocity MUST rotate about
+  /// this, not a bare +Z, or a tilted body drags landed craft in latitude (N/S).
+  Vector3 get spinAxisInertial =>
+      Quaternion.axisAngle(Vector3.unitX, axialTilt).rotate(Vector3.unitZ);
+
+  /// Inertial velocity of a co-rotating point at body-centred position [r]:
+  /// Ω × r with Ω = [angularVelocity] · [spinAxisInertial]. Zero for a
+  /// non-spinning body. Used by landed co-rotation and the atmospheric wind
+  /// frame so both agree with the tilted spin.
+  Vector3 surfaceVelocityAt(Vector3 r) =>
+      spinAxisInertial.cross(r) * angularVelocity;
+
   /// The solid-surface radius (m) beneath a body-centred INERTIAL position,
   /// accounting for the body's spin (so terrain is body-fixed). Falls back to
   /// [radius] when the body has no terrain.

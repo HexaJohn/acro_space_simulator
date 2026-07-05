@@ -235,8 +235,11 @@ class AdvanceSimulationTick {
       // 4. Advance motion. A landed vessel doesn't fly, but it must CO-ROTATE
       // with the surface — otherwise the planet spins out from under it and it
       // appears to drift. Rotate its body-centred position (and velocity, so it
-      // matches the local surface motion) about the body's spin axis (+Z) by
-      // omega*dt; spin the attitude to match so it stays oriented to the ground.
+      // matches the local surface motion) about the body's TRUE inertial spin
+      // axis (tilt·+Z, matching orientationAt) by omega*dt; spin the attitude to
+      // match so it stays oriented to the ground. Rotating about a bare +Z on a
+      // tilted body left a residual rotation about an equatorial axis, so landed
+      // craft crept in latitude (a slow N/S slide, ∝ omega·sin(axialTilt)).
       if (!vessel.landed) {
         final next = mode == PropagationMode.onRails
             ? _onRails(vessel, activeBody, clock)
@@ -246,17 +249,11 @@ class AdvanceSimulationTick {
         final omega = activeBody.angularVelocity;
         if (omega != 0 && dt != 0) {
           final dTheta = omega * dt;
-          final c = math.cos(dTheta), s = math.sin(dTheta);
-          final p = vessel.state.position;
-          // Rotate about +Z (the lon/lat pole axis).
-          final rp = Vector3(
-            p.x * c - p.y * s,
-            p.x * s + p.y * c,
-            p.z,
-          );
-          // Surface velocity at the new point = omega x r (so it tracks the spin).
-          final sv = Vector3(-omega * rp.y, omega * rp.x, 0);
-          final spinQ = Quaternion.axisAngle(Vector3(0, 0, 1), dTheta);
+          final axis = activeBody.spinAxisInertial; // = tilt·(+Z), unit
+          final spinQ = Quaternion.axisAngle(axis, dTheta);
+          final rp = spinQ.rotate(vessel.state.position);
+          // Surface velocity at the new point = Ω × r (tracks the tilted spin).
+          final sv = axis.cross(rp) * omega;
           vessel.updateState(vessel.state.copyWith(
             position: rp,
             velocity: sv,
@@ -370,13 +367,13 @@ class AdvanceSimulationTick {
     // Thermal: solar (gated by eclipse shadow), reentry, radiative cooling.
     if (vessel.thermal.isNotEmpty) {
       // Airspeed is relative to the CO-ROTATING atmosphere, not the inertial
-      // frame: the air spins with the planet (v_air = omega x r). A landed (or
-      // slowly drifting) craft moves with the air, so its airspeed is ~0 — using
-      // the inertial speed made a landed craft on a fast-spinning body read as a
-      // reentry and burn up under time warp.
-      final omega = body.angularVelocity;
+      // frame: the air spins with the planet (v_air = Ω × r about the tilted
+      // spin axis, so it matches landed co-rotation on a tilted body). A landed
+      // (or slowly drifting) craft moves with the air, so its airspeed is ~0 —
+      // using the inertial speed made a landed craft on a fast-spinning body
+      // read as a reentry and burn up under time warp.
       final r = vessel.state.position;
-      final vAir = Vector3(-omega * r.y, omega * r.x, 0);
+      final vAir = body.surfaceVelocityAt(r);
       final airspeed =
           inAtmosphere ? (vessel.state.velocity - vAir).length : 0.0;
 
