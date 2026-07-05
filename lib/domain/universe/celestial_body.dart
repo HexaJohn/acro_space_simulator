@@ -3,7 +3,9 @@ import 'dart:math' as math;
 import '../planetary/atmospheric_composition.dart';
 import '../planetary/planet_surface.dart';
 import '../planetary/terrain_config.dart';
+import '../shared/quaternion.dart';
 import '../shared/vector3.dart';
+import '../simulation/epoch.dart';
 import '../terrain/terrain_field.dart';
 import 'atmosphere_model.dart';
 
@@ -174,8 +176,35 @@ class CelestialBody {
     return r * (-mu / (d2 * d));
   }
 
-  /// Altitude above the surface for a body-centred position.
+  /// Altitude above the DATUM sphere for a body-centred position. Terrain
+  /// relief is NOT included here — atmosphere/mode checks want the datum. Use
+  /// [terrainAltitude] for surface contact against voxel terrain.
   double altitudeOf(Vector3 r) => r.length - radius;
+
+  /// The body's orientation quaternion at [epoch] — spin about +Z at
+  /// [angularVelocity], tilted by [axialTilt] about +X. MUST match the value
+  /// the render snapshot computes (world_snapshot BodySnapshot) so collision
+  /// and the rendered terrain share a body-fixed frame.
+  Quaternion orientationAt(Epoch epoch) {
+    final spin = Quaternion.axisAngle(Vector3.unitZ, angularVelocity * epoch.seconds);
+    final tilt = Quaternion.axisAngle(Vector3.unitX, axialTilt);
+    return (tilt * spin).normalized;
+  }
+
+  /// The solid-surface radius (m) beneath a body-centred INERTIAL position,
+  /// accounting for the body's spin (so terrain is body-fixed). Falls back to
+  /// [radius] when the body has no terrain.
+  double terrainGroundRadius(Vector3 rInertial, Epoch epoch) {
+    final f = terrainField;
+    if (f == null) return radius;
+    // Inertial -> body-fixed, then sample the field along that direction.
+    final bf = orientationAt(epoch).conjugate.rotate(rInertial);
+    return f.groundRadiusAt(bf.x, bf.y, bf.z);
+  }
+
+  /// Altitude above the voxel-terrain surface (m); negative = below it.
+  double terrainAltitude(Vector3 rInertial, Epoch epoch) =>
+      rInertial.length - terrainGroundRadius(rInertial, epoch);
 
   /// Surface rotation rate, rad/s, about the body's spin axis (+Z).
   double get angularVelocity =>

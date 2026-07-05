@@ -35,6 +35,7 @@ import '../../domain/orbits/state_vector_converter.dart';
 import '../../domain/thermal/eclipse_service.dart';
 import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
+import '../../domain/simulation/epoch.dart';
 import '../../domain/simulation/simulation_clock.dart';
 import '../../domain/subsystems/vessel_mining_updater.dart';
 import '../../domain/subsystems/vessel_thermal_updater.dart';
@@ -266,7 +267,7 @@ class AdvanceSimulationTick {
 
       // 4b. Surface contact: a vessel that has descended below the surface
       // either lands (slow) or is destroyed on impact (fast).
-      if (_handleSurfaceContact(vessel, activeBody)) {
+      if (_handleSurfaceContact(vessel, activeBody, clock.epoch)) {
         _publishEvents(vessel);
         vessels.remove(vessel.id);
         continue; // destroyed — skip subsystems
@@ -465,12 +466,16 @@ class AdvanceSimulationTick {
   /// Handle a vessel that has descended to/through the surface. Returns true if
   /// the vessel was destroyed (caller removes it). A gentle touchdown lands it
   /// (clamped to the surface, velocity zeroed); a fast one raises [Impact].
-  bool _handleSurfaceContact(Vessel vessel, CelestialBody body) {
+  bool _handleSurfaceContact(Vessel vessel, CelestialBody body, Epoch epoch) {
     if (vessel.landed) return false;
-    final altitude = body.altitudeOf(vessel.state.position);
+    // Contact against the VOXEL TERRAIN surface (falls back to the datum
+    // sphere for bodies without terrain), so the craft lands on hills and can
+    // descend into sub-datum valleys instead of stopping at a perfect sphere.
+    final groundR = body.terrainGroundRadius(vessel.state.position, epoch);
+    final len = vessel.state.position.length;
     // Non-finite state (e.g. an unpropagatable hyperbolic conic) is not a
     // surface contact — leave it to the physics path rather than "impacting".
-    if (!altitude.isFinite || altitude > 0) return false;
+    if (!len.isFinite || len > groundR) return false;
 
     final speed = vessel.state.velocity.length;
 
@@ -502,7 +507,7 @@ class AdvanceSimulationTick {
       }
     }
     vessel.updateState(vessel.state.copyWith(
-      position: dir * body.radius,
+      position: dir * groundR,
       velocity: Vector3.zero,
     ));
     vessel.landed = true;

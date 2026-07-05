@@ -96,16 +96,38 @@ class TerrainNodes {
       octaves: d.terrainOctaves,
     );
 
-    // Sub-camera surface point in the BODY-FIXED frame (matches body_nodes'
+    // Anchor the chunk to the FOCUS on the surface — the followed vessel if
+    // any, else the camera. Using the focus (not the camera eye) is what keeps
+    // the patch planet-fixed: orbiting the camera around a landed craft no
+    // longer drags the terrain with it.
+    final fv = focusVesselId == null ? null : snap.vessels[focusVesselId];
+    var anchorWorld = eyeWorld;
+    if (fv != null) {
+      final vb = snap.bodies[fv.body];
+      if (vb != null) {
+        anchorWorld = Vector3(vb.px + fv.px, vb.py + fv.py, vb.pz + fv.pz);
+      }
+    }
+
+    // Sub-anchor surface point in the BODY-FIXED frame (matches body_nodes'
     // rotation exactly so terrain and the textured sphere share a frame).
     final bodyQuat = Quaternion(b.qw, b.qx, b.qy, b.qz) *
         Quaternion.axisAngle(Vector3.unitZ, BodyNodes.textureYawRad);
-    final dirBF = bodyQuat.conjugate.rotate(eyeWorld - bodyWorld).normalized;
+    final dirBF = bodyQuat.conjugate.rotate(anchorWorld - bodyWorld).normalized;
     final groundR = field.groundRadiusAt(dirBF.x, dirBF.y, dirBF.z);
-    final center = dirBF * groundR;
+    // Snap the surface point to a body-fixed grid so the chunk sits at a FIXED
+    // planet location and only jumps to a neighbour when the anchor crosses a
+    // cell — no continuous slide. A quarter-chunk grid keeps the true surface
+    // well inside the box.
+    final raw = dirBF * groundR;
+    final g = chunkSizeM / 4;
+    final center = Vector3(
+      (raw.x / g).roundToDouble() * g,
+      (raw.y / g).roundToDouble() * g,
+      (raw.z / g).roundToDouble() * g,
+    );
 
-    final moved = _bodyId != bodyId ||
-        (center - _lastCenter).length > chunkSizeM * 0.35;
+    final moved = _bodyId != bodyId || (center - _lastCenter).length > 1.0;
     if (_node == null || moved) {
       _remesh(field, center, shader as gpu.Shader);
       _bodyId = bodyId;
