@@ -2,7 +2,9 @@ import 'dart:math' as math;
 
 import '../planetary/atmospheric_composition.dart';
 import '../planetary/planet_surface.dart';
+import '../planetary/terrain_config.dart';
 import '../shared/vector3.dart';
+import '../terrain/terrain_field.dart';
 import 'atmosphere_model.dart';
 
 class BodyId {
@@ -80,6 +82,11 @@ class CelestialBody {
   /// Atmospheric gas composition (mole fractions, mean molecular weight).
   final AtmosphericComposition? composition;
 
+  /// Voxel-terrain parameters. Null = a perfect sphere at [radius] (legacy
+  /// behaviour; landing clamps to the datum). Non-null = isosurface terrain
+  /// sampled deterministically from the seed.
+  final TerrainConfig? terrain;
+
   const CelestialBody({
     required this.id,
     required this.name,
@@ -102,6 +109,7 @@ class CelestialBody {
     this.dipoleMoment = 0,
     this.surface,
     this.composition,
+    this.terrain,
   });
 
   /// Returns a copy with selected fields replaced. Used by debug/terraforming
@@ -133,7 +141,13 @@ class CelestialBody {
         dipoleMoment: dipoleMoment,
         surface: surface,
         composition: composition ?? this.composition,
+        terrain: terrain,
       );
+
+  /// The deterministic terrain sampler for this body, or null for a perfect
+  /// sphere. Built on demand from [terrain] + [radius]; both the collision code
+  /// and the renderer call this so they agree on the surface.
+  TerrainField? get terrainField => terrain?.fieldFor(radius);
 
   bool get isStar => parent == null;
   bool get hasAtmosphere => atmosphere != null;

@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import '../planetary/atmospheric_composition.dart';
 import '../planetary/surface_presets.dart';
+import '../planetary/terrain_config.dart';
 import 'atmosphere_model.dart';
 import 'celestial_body.dart';
 import 'star_system.dart';
@@ -234,6 +235,13 @@ class RealSolarSystem {
         solarFlux: 1361,
         axialTilt: 0.0269,
         surface: SurfacePresets.moon,
+        // First voxel-terrain body: ~4 km relief over 60 km features. No
+        // ocean (seaLevel 0). Landing + meshing sample this deterministically.
+        terrain: const TerrainConfig(
+          seed: 0x11A00,
+          amplitude: 4000,
+          featureScale: 60000,
+        ),
       ),
 
       // ---- Mars' moons ----
