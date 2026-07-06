@@ -10,6 +10,7 @@ import '../../domain/shared/vector3.dart';
 import '../flutter/texture_cache.dart';
 import 'atmosphere_nodes.dart';
 import 'body_nodes.dart';
+import 'cloud_nodes.dart';
 import 'coord_convert.dart';
 import 'environment_baker.dart';
 import 'exhaust_nodes.dart';
@@ -40,6 +41,7 @@ class SceneSync {
     _exhaust = ExhaustNodes(scene);
     _lines = LineNodes(scene);
     _atmospheres = AtmosphereNodes(scene);
+    _clouds = CloudNodes(scene);
     _rings = RingNodes(scene, _textures);
     _environment = PlanetEnvironmentBaker(scene, _textures);
   }
@@ -52,6 +54,7 @@ class SceneSync {
   late final ExhaustNodes _exhaust;
   late final LineNodes _lines;
   late final AtmosphereNodes _atmospheres;
+  late final CloudNodes _clouds;
   late final RingNodes _rings;
   late final PlanetEnvironmentBaker _environment;
 
@@ -90,6 +93,15 @@ class SceneSync {
         origin,
         cameraEye: camera?.eyeOffset ?? Vector3.zero,
         starWorld: _bodies.starWorld(snap),
+      );
+    }
+    if (!_noClouds) {
+      _clouds.update(
+        snap,
+        origin,
+        cameraEye: camera?.eyeOffset ?? Vector3.zero,
+        starWorld: _bodies.starWorld(snap),
+        time: snap.epoch,
       );
     }
     _rings.update(snap, origin,
@@ -181,6 +193,7 @@ class SceneSync {
   //   flutter run ... --dart-define=SCENE_NO_LINES=true
   static const bool _noLines = bool.fromEnvironment('SCENE_NO_LINES');
   static const bool _noAtmo = bool.fromEnvironment('SCENE_NO_ATMO');
+  static const bool _noClouds = bool.fromEnvironment('SCENE_NO_CLOUDS');
   static const bool _noVessels = bool.fromEnvironment('SCENE_NO_VESSELS');
 
   /// Rebuild the camera-facing line strips for this frame's camera + viewport
