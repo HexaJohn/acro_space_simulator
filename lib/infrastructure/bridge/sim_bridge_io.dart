@@ -14,8 +14,7 @@ class _IoSimBridge implements SimBridge {
   ServerSocket? _server;
   final Set<Socket> _clients = {};
   Uint8List _latest = Uint8List(0);
-  final StreamController<Uint8List> _commands =
-      StreamController<Uint8List>.broadcast();
+  final StreamController<Uint8List> _commands = StreamController<Uint8List>.broadcast();
 
   @override
   int get port => _server?.port ?? 0;
@@ -27,7 +26,7 @@ class _IoSimBridge implements SimBridge {
   Stream<Uint8List> get commandFrames => _commands.stream;
 
   @override
-  Future<void> start({int port = 5800}) async {
+  Future<void> start({int port = 5801}) async {
     if (_server != null) return;
     _server = await ServerSocket.bind(InternetAddress.loopbackIPv4, port);
     _server!.listen(_accept);
