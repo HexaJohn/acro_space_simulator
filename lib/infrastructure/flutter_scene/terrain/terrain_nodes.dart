@@ -45,6 +45,13 @@ class TerrainNodes {
   static double sandWeight = -1.0;
   static double grassWeight = -1.0;
 
+  /// Cast-shadow contact hardening (dev-tunable). [shadowHardness] = how fast the
+  /// penumbra grows with the caster's height above the receiver (UV per clip-z
+  /// gap); [maxPenumbraFactor] scales the light's softness into the maximum
+  /// (far) penumbra width.
+  static double shadowHardness = 4.0;
+  static double maxPenumbraFactor = 3.0;
+
   /// Generate + upload the procedural material tiles (idempotent).
   static Future<void> loadTextures() => TerrainTextures.load();
 
@@ -154,9 +161,11 @@ class TerrainNodes {
     }
     if (_node == null) return;
 
-    // Per-frame: body-fixed transform + shader uniforms.
+    // Per-frame transform. The mesh is LOCAL to the chunk centre, so anchor the
+    // node at the chunk centre (near the render origin for a landed craft) — not
+    // the body centre ~1e6 m away, which cancelled in float32 and jittered.
     _node!.localTransform = vm.Matrix4.compose(
-      origin.worldToScene(bodyWorld),
+      origin.worldToScene(chunkWorld),
       quatToScene(bodyQuat),
       vm.Vector3.all(lengthToScene(1.0)),
     );
@@ -320,10 +329,16 @@ class _TerrainMaterial extends fs.ShaderMaterial {
     f[71] = cascades.length.toDouble();
     f[72] = light == null ? 0.0 : 1.0 / light.shadowMapResolution;
     f[73] = light?.shadowNormalBias ?? 0.0;
-    f[74] = light?.shadowSoftness ?? 0.0;
+    f[74] = light?.shadowSoftness ?? 0.0; // normal-offset bias softness
     f[75] = light?.shadowDepthBias ?? 0.0;
     f[76] = light?.shadowFadeRange ?? 0.0;
     f[77] = cascades.isEmpty ? 0.0 : 1.0;
+    // Contact hardening: hardness (UV penumbra per clip-z gap) + max penumbra
+    // (world). Sharp where the caster meets the ground, softening with the
+    // caster's height above the receiver. Scaled off softness so scene_sync's
+    // altitude tuning still moves it.
+    f[78] = TerrainNodes.shadowHardness;
+    f[79] = (light?.shadowSoftness ?? 0.0) * TerrainNodes.maxPenumbraFactor;
     setUniformBlock('ShadowInfo', ByteData.sublistView(f));
   }
 }

@@ -93,7 +93,6 @@ float SampleCascade(int cascade, int count, mat4 cascade_matrix, float box,
   // World-space depth bias -> this cascade's clip-z (its depth range is 7*box).
   float receiver_depth = proj.z - sh.sp0.w / (7.0 * box);
 
-  float radius = max(sh.sp0.z / box, sh.sp0.x);
   float inv_count = 1.0 / float(count);
 
   float noise = fract(
@@ -101,6 +100,32 @@ float SampleCascade(int cascade, int count, mat4 cascade_matrix, float box,
   float angle = noise * 6.28318530718;
   float ca = cos(angle);
   float sa = sin(angle);
+
+  // Contact hardening (PCSS-lite). Search the max-penumbra disk for occluders,
+  // then scale the PCF radius by how far the receiver sits BELOW them: gap ~ 0
+  // right where the caster meets the ground -> a crisp edge; a receiver well
+  // below a tall caster (the far end of its shadow) -> a soft edge. sp1.w = max
+  // penumbra (world), sp1.z = hardness (UV penumbra per unit clip-z gap).
+  float maxR = max(sh.sp1.w / box, sh.sp0.x);
+  float bsum = 0.0;
+  float bcount = 0.0;
+#define _BLK(px, py)                                                   \
+  {                                                                    \
+    vec2 o = vec2(px * ca - py * sa, px * sa + py * ca) * maxR;        \
+    vec2 cuv = clamp(uv + o, vec2(sh.sp0.x), vec2(1.0 - sh.sp0.x));    \
+    vec2 auv = vec2((float(cascade) + cuv.x) * inv_count, 1.0 - cuv.y); \
+    float d = texture(shadow_map, auv).r;                              \
+    if (d < receiver_depth) {                                          \
+      bsum += d;                                                       \
+      bcount += 1.0;                                                   \
+    }                                                                  \
+  }
+  _BLK(-0.7, -0.7) _BLK(0.7, -0.7) _BLK(-0.7, 0.7) _BLK(0.7, 0.7)
+  _BLK(0.0, -1.0) _BLK(0.0, 1.0) _BLK(-1.0, 0.0) _BLK(1.0, 0.0)
+#undef _BLK
+  if (bcount < 0.5) return 1.0; // nothing occludes here -> fully lit
+  float gap = max(receiver_depth - bsum / bcount, 0.0);
+  float radius = clamp(gap * sh.sp1.z, sh.sp0.x, maxR);
 
 #define _SHADOW_TAP(px, py) \
   ShadowTap(vec2(px, py), ca, sa, radius, uv, cascade, inv_count, receiver_depth)
@@ -143,7 +168,7 @@ float SampleCascade(int cascade, int count, mat4 cascade_matrix, float box,
     vec4 light_clip = cascade_matrix * vec4(world_pos, 1.0);                  \
     vec3 proj = light_clip.xyz / light_clip.w;                                \
     vec2 uv = proj.xy * 0.5 + 0.5;                                            \
-    float margin = max(sh.sp0.z / box, sh.sp0.x);                             \
+    float margin = max(sh.sp1.w / box, sh.sp0.x);                             \
     if (!(uv.x < margin || uv.x > 1.0 - margin || uv.y < margin ||           \
           uv.y > 1.0 - margin || proj.z < 0.0 || proj.z > 1.0)) {            \
       result = SampleCascade(IDX, count, cascade_matrix, box, world_pos, n);  \
