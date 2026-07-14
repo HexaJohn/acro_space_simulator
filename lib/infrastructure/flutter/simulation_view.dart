@@ -44,6 +44,7 @@ import '../flutter_scene/ring_nodes.dart';
 import '../flutter_scene/scene_camera_adapter.dart';
 import '../flutter_scene/scene_sync.dart';
 import '../flutter_scene/scene_hud_overlay.dart';
+import '../flutter_scene/vessel_nodes.dart';
 import '../flutter_scene/scene_render_view.dart';
 import 'sim_view_control.dart';
 import 'debug_layers.dart';
@@ -1409,6 +1410,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       // craft's IBL reflects). Static flag, so leave _layers untouched.
       ('Env reflection', PlanetEnvironmentBaker.showDebug, (v) {
         PlanetEnvironmentBaker.showDebug = v;
+        return _layers;
+      }),
+      // 3D backend only: per-craft origin + 1-metre axis ruler (X red, Y
+      // green, Z blue = nose). Static flag, so leave _layers untouched.
+      ('Axis gizmo', VesselNodes.showAxes, (v) {
+        VesselNodes.showAxes = v;
         return _layers;
       }),
     ];

@@ -9,6 +9,7 @@ import '../domain/lifesupport/crew.dart';
 import '../domain/mining/mining_operation.dart';
 import '../domain/mining/mining_rig.dart';
 import '../domain/mining/resource_deposit.dart';
+import '../domain/orbits/body_ephemeris.dart';
 import '../domain/science/experiment.dart';
 import '../domain/shared/quaternion.dart';
 import '../domain/shared/vector3.dart';
@@ -431,6 +432,88 @@ class SampleWorld {
             resources: [tank],
           ),
         ]),
+      ],
+    );
+  }
+
+  /// A craft in a low circular orbit on the Moon's DAYLIGHT side.
+  ///
+  /// The Sun sits at the system root, so the Moon's sunlit hemisphere faces
+  /// `-moonRootPos` (its heliocentric position at epoch 0). The craft starts at
+  /// that subsolar point offset along-track by [alongTrackM] METRES (arc length
+  /// along the circle) — small values keep it fully sunlit and let two craft on
+  /// the SAME [altitude] sit almost touching in formation (same period, so they
+  /// don't drift apart). Circular, prograde, nose along the velocity vector.
+  /// Used to stage the Apollo CSM (service module) and the Lunar Module.
+  static Vessel buildLunarOrbiter({
+    required String id,
+    required String name,
+    double altitude = 100000,
+    double alongTrackM = 0, // along-track offset from the subsolar point (m)
+    String ownerId = 'player-1',
+  }) {
+    final system = realSystem();
+    final body = system.require(moon);
+    const ephemeris = BodyEphemeris();
+    final moonRoot = ephemeris.positionRelativeToRoot(body, system, Epoch.zero);
+
+    // Daylight hemisphere: the Sun is at the system root, so it faces -moonRoot.
+    final sunward = (-moonRoot).normalized;
+    // Velocity tangent at the subsolar point, in the plane through the ecliptic
+    // up axis (guarded when the Sun line is nearly polar).
+    var up = Vector3.unitZ;
+    if (sunward.cross(up).length < 1e-6) up = Vector3.unitX;
+    final tangent = up.cross(sunward).normalized; // prograde velocity direction
+
+    final r = body.radius + altitude;
+    // Arc length -> central angle (exact on the circle), so the two craft stay
+    // [alongTrackM] apart regardless of orbit size.
+    final theta = alongTrackM / r;
+    final ct = math.cos(theta), st = math.sin(theta);
+    final posDir = sunward * ct + tangent * st; // still on the daylight side
+    final velDir = sunward * -st + tangent * ct; // tangent to the circle
+
+    final v = math.sqrt(body.mu / r);
+    final tank = ResourceContainer(
+        type: ResourceType.liquidFuel, capacity: 400, amount: 400, unitMass: 5);
+    return Vessel(
+      id: VesselId(id),
+      name: name,
+      ownerId: ownerId,
+      state: StateVector(
+        position: posDir * r,
+        velocity: velDir * v,
+        attitude: _alignZTo(velDir), // nose (+Z) prograde
+      ),
+      dominantBody: moon,
+      stages: [
+        Stage(index: 0, parts: [
+          Part(
+            id: PartId('$id-core'),
+            name: 'Core',
+            dryMass: 1500,
+            inertiaContribution: Vector3(2000, 2000, 1000),
+            engine: const Engine(
+              name: 'orbiter',
+              maxThrustVacuum: 2.3e6,
+              maxThrustSeaLevel: 1.8e6,
+              ispVacuum: 350,
+              ispSeaLevel: 330,
+              gimbalRange: 0.12,
+            ),
+            resources: [tank],
+            crossSectionArea: 1.5,
+          ),
+        ]),
+      ],
+      thermal: [
+        PartThermalState(
+          part: PartId('$id-core'),
+          temperature: 290,
+          heatCapacity: 8000,
+          maxTemperature: 2200,
+          surfaceArea: 6,
+        ),
       ],
     );
   }

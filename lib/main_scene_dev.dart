@@ -138,6 +138,10 @@ void main() {
       final v = double.tryParse(glbScale);
       if (v != null && v > 0) VesselNodes.glbUnitScale = v;
     }
+    // Per-craft origin + 1-metre axis ruler: axes=true|false.
+    if (params['axes'] != null) {
+      VesselNodes.showAxes = params['axes'] == 'true';
+    }
     // Anti-aliasing: aa=msaa|fxaa|auto (auto restores the engine default).
     final aa = params['aa'];
     if (aa != null) {
@@ -162,6 +166,11 @@ void main() {
     if (sandW != null) TerrainNodes.sandWeight = sandW.clamp(0.0, 1.0);
     final grassW = deg('grassW');
     if (grassW != null) TerrainNodes.grassWeight = grassW.clamp(0.0, 1.0);
+    // Shadow contact hardening: shHard=<hardness>, shPen=<max penumbra factor>.
+    final shHard = deg('shHard');
+    if (shHard != null && shHard >= 0) TerrainNodes.shadowHardness = shHard;
+    final shPen = deg('shPen');
+    if (shPen != null && shPen >= 0) TerrainNodes.maxPenumbraFactor = shPen;
     // Planet-in-reflections IBL baker: planetEnv=true|false,
     // envIntensity=<double> (baked-map IBL strength, default 1.0).
     if (params['planetEnv'] != null) {
@@ -273,11 +282,11 @@ void main() {
               name: 'Lunar Module',
             ),
             trafficVessels: [
+              // Same orbit, ~14 m ahead — almost touching, no drift.
               SampleWorld.buildLunarOrbiter(
                 id: 'csm',
                 name: 'Service Module',
-                altitude: 108000,
-                phaseDeg: 3,
+                alongTrackM: 14,
               ),
             ],
           ),

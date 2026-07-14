@@ -10,6 +10,7 @@ import '../../application/snapshot/world_snapshot.dart';
 import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
 import 'coord_convert.dart';
+import 'depth_materials.dart';
 
 /// Maintains one scene node per vessel: a parent node placed at the
 /// vessel's world position (dominant-body position + body-relative vessel
@@ -37,29 +38,56 @@ class VesselNodes {
   ///
   /// `.fsceneb` baked from the licensed .glb by `tool/import_mesh.dart`;
   /// neither format is committed (license bars redistribution), so clones
-  /// without the asset stay procedural via [_glbFailed].
-  static const String _craftModel = 'assets/mesh/apollo.fsceneb';
+  /// without the asset stay procedural (see [_failedAssets]).
+  ///
+  /// TWO craft models: the Apollo CSM (default) and the Lunar Module. A vessel
+  /// whose id contains 'lander' renders the LM export; everything else is the
+  /// CSM. Web bundles a SMALLER, lower-res bake per model: the full-res models
+  /// break the GitHub Pages server-side build (over an effective size
+  /// threshold) and Release assets aren't CORS-enabled to fetch at runtime.
+  /// The web bakes are fetched into the Pages build by the release workflow's
+  /// web job; absent (e.g. not yet published) the craft stays procedural.
+  static const String _apolloModel = 'assets/mesh/apollo.fsceneb';
+  static const String _apolloModelWeb = 'assets/mesh/apollo-web.fsceneb';
+  static const String _landerModel = 'assets/mesh/lander.fsceneb';
+  static const String _landerModelWeb = 'assets/mesh/lander-web.fsceneb';
 
-  /// Web bundles a SMALLER, lower-res bake: the full 86 MB model breaks the
-  /// GitHub Pages server-side build (over an effective size threshold), and
-  /// GitHub Release assets aren't CORS-enabled so it can't be fetched at
-  /// runtime either. The web bake is fetched into the Pages build by the
-  /// release workflow's web job; absent (e.g. not yet published) the craft
-  /// stays procedural via [_glbFailed].
-  static const String _craftModelWeb = 'assets/mesh/apollo-web.fsceneb';
+  /// The model asset [vesselId] renders, per platform.
+  static String _assetFor(String vesselId) {
+    if (vesselId.toLowerCase().contains('lander')) {
+      return kIsWeb ? _landerModelWeb : _landerModel;
+    }
+    return kIsWeb ? _apolloModelWeb : _apolloModel;
+  }
 
-  /// The model asset for this platform.
-  static String get _craftModelAsset => kIsWeb ? _craftModelWeb : _craftModel;
-
-  /// Model-unit -> metre factor for [_craftModel]. Live-tunable via
-  /// `ext.acro.camera?glbScale=` while calibrating a new export; the
-  /// transform reapplies every frame so changes land immediately.
-  /// (apollo.glb calibrated by screenshot: 0.0002 -> ~11 m craft.)
+  /// Model-unit -> metre factor. Live-tunable via `ext.acro.camera?glbScale=`
+  /// while calibrating a new export; the transform reapplies every frame so
+  /// changes land immediately. (apollo.glb calibrated by screenshot: 0.02 ->
+  /// ~11 m craft.) The LM export has its own units, so [assetScale] pins a
+  /// per-asset override; entries fall back to [glbUnitScale] when unset.
   static double glbUnitScale = 0.02;
+  static final Map<String, double> assetScale = {
+    // LM export units differ from the CSM's. 1.8 is screenshot-calibrated to
+    // render the LM at roughly its real size (~7 m tall) beside the apollo CSM.
+    _landerModel: 1.8,
+    _landerModelWeb: 1.8,
+  };
+  static double _scaleFor(String asset) => assetScale[asset] ?? glbUnitScale;
   final Map<String, fs.Node> _glbModels = {};
   final Set<String> _glbLoading = {};
   final Set<String> _glbApplied = {};
-  static bool _glbFailed = false; // missing/corrupt asset: stay procedural
+  // Per-asset: a missing/corrupt bake stops retrying THAT asset only, so a
+  // missing LM export doesn't disable the CSM (and vice versa).
+  static final Set<String> _failedAssets = {};
+
+  /// Debug reference gizmo at each craft's ORIGIN: three 1-metre-ticked axes
+  /// in the vessel body frame (X red, Y green, Z blue = nose) plus an origin
+  /// cube. Authored in TRUE metres — NOT glb-scaled — so the ticks are a ruler
+  /// against the model, revealing both origin offset and any scale mismatch.
+  /// Toggle from the debug panel or `ext.acro.camera?axes=`.
+  static bool showAxes = false;
+  static const double _axisLenM = 10.0; // axis length + tick count, metres
+  final Map<String, fs.Node> _axisNodes = {};
 
   /// Per-vessel eclipse of the sun on the craft (dims its materials when it
   /// is in the body's umbra). Applied HERE, not on the scene's global
@@ -97,15 +125,17 @@ class VesselNodes {
       _applyEclipse(node, _eclipseFactor(body, v, starWorld));
 
       // glTF is Y-up; the vessel body frame is Z-up with the nose on +Z.
-      // Model units differ per export — [glbUnitScale] converts model
-      // units to METRES (sleuthed by screenshot at a known range), then
+      // Model units differ per export — [_scaleFor] converts this vessel's
+      // model units to METRES (sleuthed by screenshot at a known range), then
       // metres to scene km. Reapplied per frame so live calibration via
       // the dev extension takes effect immediately.
       _glbModels[v.id]?.localTransform = vm.Matrix4.compose(
         vm.Vector3.zero(),
         vm.Quaternion.axisAngle(vm.Vector3(1, 0, 0), math.pi / 2),
-        vm.Vector3.all(lengthToScene(glbUnitScale)),
+        vm.Vector3.all(lengthToScene(_scaleFor(_assetFor(v.id)))),
       );
+
+      _syncAxisGizmo(v.id, node);
     }
 
     _nodes.removeWhere((id, node) {
@@ -114,8 +144,82 @@ class VesselNodes {
       _partsKey.remove(id);
       _glbApplied.remove(id);
       _glbModels.remove(id);
+      _axisNodes.remove(id);
       return true;
     });
+  }
+
+  /// Attach/detach the debug axis gizmo for [vesselId] per [showAxes]. Rebuilt
+  /// if a glb reload wiped it from the vessel node's children.
+  void _syncAxisGizmo(String vesselId, fs.Node node) {
+    final existing = _axisNodes[vesselId];
+    if (showAxes) {
+      if (existing == null || !node.children.contains(existing)) {
+        final gizmo = _buildAxisGizmo();
+        node.add(gizmo);
+        _axisNodes[vesselId] = gizmo;
+      }
+    } else if (existing != null) {
+      if (node.children.contains(existing)) node.remove(existing);
+      _axisNodes.remove(vesselId);
+    }
+  }
+
+  /// A body-frame axis gizmo: X red / Y green / Z blue (nose) shafts of
+  /// [_axisLenM] metres, a crossbar tick at every metre, and a white origin
+  /// cube. Geometry is authored in metres; the root's uniform
+  /// lengthToScene(1) scale converts to scene units (same convention as
+  /// [_addApolloFallback]). Unlit, so the eclipse dim never touches it.
+  fs.Node _buildAxisGizmo() {
+    final root = fs.Node()
+      ..localTransform = vm.Matrix4.compose(
+        vm.Vector3.zero(),
+        vm.Quaternion.identity(),
+        vm.Vector3.all(lengthToScene(1.0)),
+      );
+    void box(vm.Vector3 posM, vm.Vector3 sizeM, fs.Material mat) {
+      root.add(
+        fs.Node(mesh: fs.Mesh(fs.CuboidGeometry(sizeM), mat))
+          ..localTransform = vm.Matrix4.compose(
+            posM,
+            vm.Quaternion.identity(),
+            vm.Vector3.all(1.0),
+          ),
+      );
+    }
+
+    // Origin marker.
+    box(vm.Vector3.zero(), vm.Vector3.all(0.4),
+        DepthSafeUnlitMaterial()..baseColorFactor = vm.Vector4(1, 1, 1, 1));
+
+    const w = 0.08; // shaft cross-section, metres
+    const len = _axisLenM;
+    void axis(int comp, vm.Vector4 color) {
+      final mat = DepthSafeUnlitMaterial()..baseColorFactor = color;
+      vm.Vector3 along(double s) => comp == 0
+          ? vm.Vector3(s, 0, 0)
+          : comp == 1
+              ? vm.Vector3(0, s, 0)
+              : vm.Vector3(0, 0, s);
+      // Shaft: thin box spanning 0..len along this axis.
+      final shaft = along(len);
+      box(along(len / 2),
+          vm.Vector3(shaft.x.abs().clamp(w, len), shaft.y.abs().clamp(w, len),
+              shaft.z.abs().clamp(w, len)),
+          mat);
+      // Crossbar tick every metre: wide across the OTHER two axes.
+      for (var i = 1; i <= len.floor(); i++) {
+        box(along(i.toDouble()),
+            vm.Vector3(comp == 0 ? 0.06 : 0.5, comp == 1 ? 0.06 : 0.5,
+                comp == 2 ? 0.06 : 0.5),
+            mat);
+      }
+    }
+
+    axis(0, vm.Vector4(1.0, 0.2, 0.2, 1.0)); // X red
+    axis(1, vm.Vector4(0.2, 1.0, 0.2, 1.0)); // Y green
+    axis(2, vm.Vector4(0.35, 0.5, 1.0, 1.0)); // Z blue (nose)
+    return root;
   }
 
   /// 1 = full sun, 0 = the craft is deep in [body]'s umbra. The sun is at
@@ -160,11 +264,14 @@ class VesselNodes {
   }
 
   void _ensureCraftModel(String vesselId, fs.Node parent) {
-    if (_glbFailed || _glbApplied.contains(vesselId) || _glbLoading.contains(vesselId)) {
+    final asset = _assetFor(vesselId);
+    if (_failedAssets.contains(asset) ||
+        _glbApplied.contains(vesselId) ||
+        _glbLoading.contains(vesselId)) {
       return;
     }
     _glbLoading.add(vesselId);
-    fsb.loadFscenebAsset(_craftModelAsset)
+    fsb.loadFscenebAsset(asset)
         .then((model) {
           _glbLoading.remove(vesselId);
           final node = _nodes[vesselId];
@@ -178,9 +285,9 @@ class VesselNodes {
         })
         .catchError((Object e) {
           _glbLoading.remove(vesselId);
-          _glbFailed = true; // don't hammer a broken asset for every vessel
+          _failedAssets.add(asset); // don't hammer this broken/missing bake
           // ignore: avoid_print
-          print('craft model load failed: $e');
+          print('craft model load failed ($asset): $e');
         });
   }
 
@@ -188,12 +295,13 @@ class VesselNodes {
     for (final child in List.of(vesselNode.children)) {
       vesselNode.remove(child);
     }
-    // The craft is represented by the Apollo model ([_craftModelAsset]); the
-    // procedural stand-in is the same Apollo CSM silhouette, used wherever
-    // that model isn't available (no asset, or the web build before its bake
-    // decodes). We don't render the raw part list — a generic vessel would
-    // need its own registry, but every craft here is the Apollo, so the
-    // silhouette reads as the real ship instead of a cluster of grey blocks.
+    // The craft is represented by its baked model ([_assetFor]); the
+    // procedural stand-in is an Apollo CSM silhouette, used wherever that model
+    // isn't available (no asset, or the web build before its bake decodes). We
+    // don't render the raw part list — a generic vessel would need its own
+    // registry, so the silhouette reads as a real ship instead of a cluster of
+    // grey blocks. (The LM falls back to the CSM silhouette until its bake
+    // lands — a rough stand-in, not an exact shape.)
     _addApolloFallback(vesselNode);
   }
 

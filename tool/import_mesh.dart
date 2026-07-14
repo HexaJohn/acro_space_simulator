@@ -10,7 +10,7 @@
 /// models are licensed for commercial use but NOT redistribution, so they
 /// live only on dev machines and inside built app bundles, never the repo.
 /// Clones without them fall back to procedural part meshes (see
-/// VesselNodes._glbFailed).
+/// VesselNodes._failedAssets).
 library;
 
 import 'dart:io';
