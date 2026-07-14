@@ -65,6 +65,35 @@ dev_dependencies:
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
 
+  # Generates the per-platform launcher/app icons from assets/image/icon.png.
+  # Regenerate with: dart run flutter_launcher_icons
+  flutter_launcher_icons: ^0.14.4
+
+# App/launcher icon generation (dart run flutter_launcher_icons). Source is the
+# brand mark; iOS is flattened onto white (no alpha), Android uses an adaptive
+# icon on a white background, web/windows/macOS scale from the same mark.
+flutter_launcher_icons:
+  image_path: "assets/image/icon.png"
+  android: true
+  min_sdk_android: 21
+  adaptive_icon_background: "#ffffff"
+  adaptive_icon_foreground: "assets/image/icon.png"
+  ios: true
+  remove_alpha_ios: true
+  background_color_ios: "#ffffff"
+  web:
+    generate: true
+    image_path: "assets/image/icon.png"
+    background_color: "#ffffff"
+    theme_color: "#931609"
+  windows:
+    generate: true
+    image_path: "assets/image/icon.png"
+    icon_size: 256
+  macos:
+    generate: true
+    image_path: "assets/image/icon.png"
+
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
 
@@ -78,6 +107,7 @@ flutter:
   # Planet/body surface maps (equirectangular). Source: Solar System Scope
   # (solarsystemscope.com), CC-BY 4.0 — attribution shown in-app credits.
   assets:
+    - assets/image/
     - assets/textures/
     # Craft models: baked .fsceneb packages only (licensed .glb sources live
     # in mesh_src/, gitignored and never bundled — tool/import_mesh.dart

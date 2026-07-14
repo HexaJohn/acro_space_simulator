@@ -1,3 +1,15 @@
+<p align="center">
+  <img src="assets/image/logo.png" alt="Acro Space Simulator" width="480">
+</p>
+
+<p align="center">
+  <a href="https://github.com/HexaJohn/acro_space_simulator/actions/workflows/release.yml"><img src="https://github.com/HexaJohn/acro_space_simulator/actions/workflows/release.yml/badge.svg" alt="Release"></a>
+  <a href="https://github.com/HexaJohn/acro_space_simulator/releases/latest"><img src="https://img.shields.io/github/v/release/HexaJohn/acro_space_simulator" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/platform-Web%20%7C%20Windows-blue" alt="Platforms: Web, Windows">
+  <img src="https://img.shields.io/badge/Flutter-master%20(pinned)-02569B?logo=flutter" alt="Flutter master (pinned)">
+  <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/"><img src="https://img.shields.io/badge/license-CC%20BY--NC--SA%204.0-blue.svg" alt="License: CC BY-NC-SA 4.0"></a>
+</p>
+
 # Acro Space Simulator
 
 A 1:1-scale space-flight + colony simulator built on a Domain-Driven /
