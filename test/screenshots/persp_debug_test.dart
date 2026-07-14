@@ -1,3 +1,9 @@
+// Copyright (c) 2026 John Peroutka
+//
+// This work is licensed under the Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License.
+// To view a copy of this license, visit http://creativecommons.org/licenses/by-nc-sa/4.0/ or send a letter to
+// Creative Commons, PO Box 1866, Mountain View, CA 94042, USA.
+
 // Diagnostic: the user's scenario (Earth orbiter at 3000 km, the in-app default)
 // under time warp 50 for ~15 s, LOOK-AT once at t0 then let the orbit carry the
 // planet toward the disk edge, viewed through the chase cam with the real Earth

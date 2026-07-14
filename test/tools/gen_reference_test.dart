@@ -1,3 +1,9 @@
+// Copyright (c) 2026 John Peroutka
+//
+// This work is licensed under the Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License.
+// To view a copy of this license, visit http://creativecommons.org/licenses/by-nc-sa/4.0/ or send a letter to
+// Creative Commons, PO Box 1866, Mountain View, CA 94042, USA.
+
 // Generates docs/REFERENCE.md — the in-depth wiki of every building, part, and
 // celestial body, read DIRECTLY from the live catalogs so it can never drift
 // from the code. Runs as a test (the building catalog pulls in Flutter, which

@@ -1,3 +1,9 @@
+// Copyright (c) 2026 John Peroutka
+//
+// This work is licensed under the Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License.
+// To view a copy of this license, visit http://creativecommons.org/licenses/by-nc-sa/4.0/ or send a letter to
+// Creative Commons, PO Box 1866, Mountain View, CA 94042, USA.
+
 // TRUE-PIPELINE render harness. Unlike sphere_diag_test.dart (which hand-builds
 // a BodyView + checker), this drives the REAL in-game rendering pipeline end to
 // end: the real solar system + a real landed craft + the real

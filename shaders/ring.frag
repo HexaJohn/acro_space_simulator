@@ -1,3 +1,9 @@
+// Copyright (c) 2026 John Peroutka
+//
+// This work is licensed under the Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License.
+// To view a copy of this license, visit http://creativecommons.org/licenses/by-nc-sa/4.0/ or send a letter to
+// Creative Commons, PO Box 1866, Mountain View, CA 94042, USA.
+
 // Planetary ring sheet: per-fragment radial band profile with fuzzy band
 // edges, plus a camera-centred hole where the instanced asteroid field
 // spawns (the rocks REPLACE the sheet up close; the hole radius tracks the

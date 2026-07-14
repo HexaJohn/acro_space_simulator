@@ -1,3 +1,9 @@
+// Copyright (c) 2026 John Peroutka
+//
+// This work is licensed under the Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License.
+// To view a copy of this license, visit http://creativecommons.org/licenses/by-nc-sa/4.0/ or send a letter to
+// Creative Commons, PO Box 1866, Mountain View, CA 94042, USA.
+
 /// A surface liquid as a molecular/elemental mixture — the makeup of a world's
 /// ocean / aquifer / lava lake. Components are keyed by a short symbol (e.g.
 /// 'H2O', 'CH4', 'NH3', 'H2SO4', 'Fe', 'SiO2', 'oil') mapping to a fraction; the
