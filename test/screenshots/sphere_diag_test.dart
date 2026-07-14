@@ -1,8 +1,7 @@
 // Copyright (c) 2026 John Peroutka
 //
-// This work is licensed under the Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License.
-// To view a copy of this license, visit http://creativecommons.org/licenses/by-nc-sa/4.0/ or send a letter to
-// Creative Commons, PO Box 1866, Mountain View, CA 94042, USA.
+// This work is licensed under the PolyForm Noncommercial License 1.0.0.
+// To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
 // Diagnostic capture of the textured planet sphere at a chosen camera state,
 // so the renderer can be inspected as a PNG instead of described. Renders the

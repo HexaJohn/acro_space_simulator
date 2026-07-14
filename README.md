@@ -7,7 +7,7 @@
   <a href="https://github.com/HexaJohn/acro_space_simulator/releases/latest"><img src="https://img.shields.io/github/v/release/HexaJohn/acro_space_simulator" alt="Latest release"></a>
   <img src="https://img.shields.io/badge/platform-Web%20%7C%20Windows-blue" alt="Platforms: Web, Windows">
   <img src="https://img.shields.io/badge/Flutter-master%20(pinned)-02569B?logo=flutter" alt="Flutter master (pinned)">
-  <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/"><img src="https://img.shields.io/badge/license-CC%20BY--NC--SA%204.0-blue.svg" alt="License: CC BY-NC-SA 4.0"></a>
+  <a href="https://polyformproject.org/licenses/noncommercial/1.0.0/"><img src="https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue.svg" alt="License: PolyForm Noncommercial 1.0.0"></a>
 </p>
 
 # Acro Space Simulator
@@ -72,24 +72,10 @@ Architecture: `domain/` (pure) ← `application/` (use cases + ports) ←
 
 # License
 
-This project is licensed under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/). See [LICENSE](LICENSE) for the full text.
+This project is licensed under the [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0/). See [LICENSE](LICENSE) for the full text.
 
-**You are free to:**
+You may use, copy, modify, and distribute this software for **any noncommercial purpose** — personal projects, research, experimentation, education, and use by noncommercial organizations — as long as you pass along the license notice with any copies.
 
-- **Share** — copy and redistribute the material in any medium or format
-- **Adapt** — remix, transform, and build upon the material
+**Commercial use is not permitted** under this license. For a commercial license, contact the author.
 
-The licensor cannot revoke these freedoms as long as you follow the license terms.
-
-**Under the following terms:**
-
-- **Attribution** — You must give appropriate credit, provide a link to the license, and indicate if changes were made. You may do so in any reasonable manner, but not in any way that suggests the licensor endorses you or your use.
-- **NonCommercial** — You may not use the material for commercial purposes.
-- **ShareAlike** — If you remix, transform, or build upon the material, you must distribute your contributions under the same license as the original.
-- **No additional restrictions** — You may not apply legal terms or technological measures that legally restrict others from doing anything the license permits.
-
-**Notices:**
-
-You do not have to comply with the license for elements of the material in the public domain or where your use is permitted by an applicable exception or limitation.
-
-No warranties are given. The license may not give you all of the permissions necessary for your intended use. For example, other rights such as publicity, privacy, or moral rights may limit how you use the material.
+The software is provided as-is, without warranty; the licensor is not liable for any damages arising from its use.
