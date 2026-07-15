@@ -13,6 +13,7 @@ import '../../domain/shared/vector3.dart';
 import '../flutter/texture_cache.dart';
 import 'atmosphere_nodes.dart';
 import 'ring_nodes.dart';
+import 'terrain/terrain_nodes.dart';
 import 'scene_camera_adapter.dart';
 import 'scene_sync.dart';
 
@@ -85,6 +86,12 @@ class _SceneRenderViewState extends State<SceneRenderView> {
     });
     RingNodes.loadShader().catchError((Object e) {
       debugPrint('ring shader load failed: $e');
+    });
+    TerrainNodes.loadShader().catchError((Object e) {
+      debugPrint('terrain shader load failed: $e');
+    });
+    TerrainNodes.loadTextures().catchError((Object e) {
+      debugPrint('terrain textures load failed: $e');
     });
     _staticInit.then((_) {
       if (!mounted) return;

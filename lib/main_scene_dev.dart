@@ -15,6 +15,7 @@ import 'package:flutter_scene/scene.dart' show AntiAliasingMode;
 
 import 'domain/shared/vector3.dart';
 import 'infrastructure/flutter/sim_view_control.dart';
+import 'infrastructure/sample_world.dart';
 import 'infrastructure/flutter/simulation_view.dart';
 import 'infrastructure/flutter_scene/atmosphere_nodes.dart';
 import 'infrastructure/flutter_scene/body_nodes.dart';
@@ -22,6 +23,7 @@ import 'infrastructure/flutter_scene/environment_baker.dart';
 import 'infrastructure/flutter_scene/render_backend.dart';
 import 'infrastructure/flutter_scene/scene_camera_adapter.dart';
 import 'infrastructure/flutter_scene/scene_sync.dart';
+import 'infrastructure/flutter_scene/terrain/terrain_nodes.dart';
 import 'infrastructure/flutter_scene/vessel_nodes.dart';
 
 /// Dev entrypoint: boots STRAIGHT into [SimulationView] with the
@@ -141,6 +143,10 @@ void main() {
       final v = double.tryParse(glbScale);
       if (v != null && v > 0) VesselNodes.glbUnitScale = v;
     }
+    // Per-craft origin + 1-metre axis ruler: axes=true|false.
+    if (params['axes'] != null) {
+      VesselNodes.showAxes = params['axes'] == 'true';
+    }
     // Anti-aliasing: aa=msaa|fxaa|auto (auto restores the engine default).
     final aa = params['aa'];
     if (aa != null) {
@@ -154,6 +160,22 @@ void main() {
     if (params['autoExposure'] != null) {
       SceneSync.autoExposure = params['autoExposure'] == 'true';
     }
+    // Cast-shadow pass toggle (A/B): shadows=true|false.
+    if (params['shadows'] != null) {
+      SceneSync.shadowsEnabled = params['shadows'] == 'true';
+    }
+    // Terrain material tuning: tileM=<metres>, sandW/grassW=0..1.
+    final tileM = deg('tileM');
+    if (tileM != null && tileM > 0) TerrainNodes.tileMeters = tileM;
+    final sandW = deg('sandW');
+    if (sandW != null) TerrainNodes.sandWeight = sandW.clamp(0.0, 1.0);
+    final grassW = deg('grassW');
+    if (grassW != null) TerrainNodes.grassWeight = grassW.clamp(0.0, 1.0);
+    // Shadow contact hardening: shHard=<hardness>, shPen=<max penumbra factor>.
+    final shHard = deg('shHard');
+    if (shHard != null && shHard >= 0) TerrainNodes.shadowHardness = shHard;
+    final shPen = deg('shPen');
+    if (shPen != null && shPen >= 0) TerrainNodes.maxPenumbraFactor = shPen;
     // Planet-in-reflections IBL baker: planetEnv=true|false,
     // envIntensity=<double> (baked-map IBL strength, default 1.0).
     if (params['planetEnv'] != null) {
@@ -253,6 +275,25 @@ void main() {
             initialBackend: backend == 'software'
                 ? RenderBackend.software
                 : RenderBackend.flutterScene,
+            // Dev scene: the Apollo CSM (service module) + the Lunar Module in
+            // a low lunar orbit on the Moon's DAYLIGHT side, in loose formation
+            // (the CSM a touch higher and ahead). The built-in demo orbiter is
+            // suppressed so the scene is exactly these two craft. Model wiring
+            // (VesselNodes._assetFor): the 'lander' id renders lander.fsceneb,
+            // the CSM renders apollo.fsceneb.
+            spawnDemoOrbiter: false,
+            injectedVessel: SampleWorld.buildLunarOrbiter(
+              id: 'moon-lander',
+              name: 'Lunar Module',
+            ),
+            trafficVessels: [
+              // Same orbit, ~14 m ahead — almost touching, no drift.
+              SampleWorld.buildLunarOrbiter(
+                id: 'csm',
+                name: 'Service Module',
+                alongTrackM: 14,
+              ),
+            ],
           ),
         ),
       ),

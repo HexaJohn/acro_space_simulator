@@ -500,6 +500,17 @@ class BodyDescriptorSnapshot {
   final int atmoScatterColorArgb; // packed 0xAARRGGBB haze tint from the gas mix
   final List<GasFractionSnapshot> atmoGases; // per-species mole fractions
 
+  // Voxel terrain (render-only; the renderer rebuilds the same deterministic
+  // field from these). [hasTerrain] false = a perfect sphere at referenceRadius.
+  final bool hasTerrain;
+  final int terrainSeed;
+  final double terrainAmplitude; // m relief
+  final double terrainFeatureScale; // m feature wavelength
+  final double terrainSeaLevel; // m above datum
+  final int terrainOctaves;
+  final double terrainGrassAmount; // 0..1 vegetation cover
+  final double terrainSandAmount; // 0..1 desert cover
+
   const BodyDescriptorSnapshot({
     required this.id,
     this.kind = BodyKind.rocky,
@@ -517,6 +528,14 @@ class BodyDescriptorSnapshot {
     this.atmoMeanMolecularWeight = 0,
     this.atmoScatterColorArgb = 0,
     this.atmoGases = const [],
+    this.hasTerrain = false,
+    this.terrainSeed = 0,
+    this.terrainAmplitude = 0,
+    this.terrainFeatureScale = 0,
+    this.terrainSeaLevel = 0,
+    this.terrainOctaves = 5,
+    this.terrainGrassAmount = 0,
+    this.terrainSandAmount = 0,
   });
 
   factory BodyDescriptorSnapshot.of(CelestialBody body, StarSystem system) {
@@ -542,6 +561,14 @@ class BodyDescriptorSnapshot {
               for (final e in comp.fractions.entries)
                 GasFractionSnapshot(gas: e.key.index, fraction: e.value),
             ],
+      hasTerrain: body.terrain != null,
+      terrainSeed: body.terrain?.seed ?? 0,
+      terrainAmplitude: body.terrain?.amplitude ?? 0,
+      terrainFeatureScale: body.terrain?.featureScale ?? 0,
+      terrainSeaLevel: body.terrain?.seaLevel ?? 0,
+      terrainOctaves: body.terrain?.octaves ?? 5,
+      terrainGrassAmount: body.terrain?.grassAmount ?? 0,
+      terrainSandAmount: body.terrain?.sandAmount ?? 0,
     );
   }
 
@@ -575,6 +602,16 @@ class BodyDescriptorSnapshot {
           if (atmoGases.isNotEmpty)
             'atmoGases': [for (final g in atmoGases) g.toJson()],
         },
+        if (hasTerrain)
+          'terrain': {
+            'seed': terrainSeed,
+            'amp': terrainAmplitude,
+            'feat': terrainFeatureScale,
+            'sea': terrainSeaLevel,
+            'oct': terrainOctaves,
+            'grass': terrainGrassAmount,
+            'sand': terrainSandAmount,
+          },
       };
 
   factory BodyDescriptorSnapshot.fromJson(Map<String, dynamic> j) {
@@ -599,6 +636,19 @@ class BodyDescriptorSnapshot {
         for (final g in (j['atmoGases'] as List?) ?? const [])
           GasFractionSnapshot.fromJson(g as Map<String, dynamic>),
       ],
+      hasTerrain: j['terrain'] != null,
+      terrainSeed: (((j['terrain'] as Map?)?['seed']) as num?)?.toInt() ?? 0,
+      terrainAmplitude:
+          (((j['terrain'] as Map?)?['amp']) as num?)?.toDouble() ?? 0,
+      terrainFeatureScale:
+          (((j['terrain'] as Map?)?['feat']) as num?)?.toDouble() ?? 0,
+      terrainSeaLevel:
+          (((j['terrain'] as Map?)?['sea']) as num?)?.toDouble() ?? 0,
+      terrainOctaves: (((j['terrain'] as Map?)?['oct']) as num?)?.toInt() ?? 5,
+      terrainGrassAmount:
+          (((j['terrain'] as Map?)?['grass']) as num?)?.toDouble() ?? 0,
+      terrainSandAmount:
+          (((j['terrain'] as Map?)?['sand']) as num?)?.toDouble() ?? 0,
     );
   }
 }

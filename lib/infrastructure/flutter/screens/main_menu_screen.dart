@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 
 import '../../../domain/universe/celestial_body.dart';
 import '../../../domain/universe/real_solar_system.dart';
+import '../../flutter_scene/render_backend.dart';
 import '../../sample_world.dart';
 import '../simulation_view.dart';
 import 'app_theme.dart';
@@ -28,7 +29,21 @@ class MainMenuScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final items = <_MenuItem>[
       _MenuItem('FLIGHT', 'Launch the live solar-system simulation', Icons.rocket_launch,
-          AppTheme.accent2, (c) => const SimulationView()),
+          AppTheme.accent2, (c) => SimulationView(
+                // The Apollo CSM (service module) + Lunar Module in a low lunar
+                // orbit on the Moon's DAYLIGHT side, loose formation. No demo
+                // orbiter — the scene is exactly these two craft. Boots the
+                // flutter_scene backend so the baked glb models render.
+                initialBackend: RenderBackend.flutterScene,
+                spawnDemoOrbiter: false,
+                injectedVessel: SampleWorld.buildLunarOrbiter(
+                    id: 'moon-lander', name: 'Lunar Module'),
+                trafficVessels: [
+                  // Same orbit, ~14 m ahead — almost touching, no drift.
+                  SampleWorld.buildLunarOrbiter(
+                      id: 'csm', name: 'Service Module', alongTrackM: 14),
+                ],
+              )),
       _MenuItem('CRAFT ASSEMBLY', 'Build a vessel from the part catalog',
           Icons.precision_manufacturing, AppTheme.accent,
           (c) => const CraftAssemblyScreen()),

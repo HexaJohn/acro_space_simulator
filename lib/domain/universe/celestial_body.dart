@@ -7,7 +7,11 @@ import 'dart:math' as math;
 
 import '../planetary/atmospheric_composition.dart';
 import '../planetary/planet_surface.dart';
+import '../planetary/terrain_config.dart';
+import '../shared/quaternion.dart';
 import '../shared/vector3.dart';
+import '../simulation/epoch.dart';
+import '../terrain/terrain_field.dart';
 import 'atmosphere_model.dart';
 
 class BodyId {
@@ -85,6 +89,11 @@ class CelestialBody {
   /// Atmospheric gas composition (mole fractions, mean molecular weight).
   final AtmosphericComposition? composition;
 
+  /// Voxel-terrain parameters. Null = a perfect sphere at [radius] (legacy
+  /// behaviour; landing clamps to the datum). Non-null = isosurface terrain
+  /// sampled deterministically from the seed.
+  final TerrainConfig? terrain;
+
   const CelestialBody({
     required this.id,
     required this.name,
@@ -107,6 +116,7 @@ class CelestialBody {
     this.dipoleMoment = 0,
     this.surface,
     this.composition,
+    this.terrain,
   });
 
   /// Returns a copy with selected fields replaced. Used by debug/terraforming
@@ -138,7 +148,13 @@ class CelestialBody {
         dipoleMoment: dipoleMoment,
         surface: surface,
         composition: composition ?? this.composition,
+        terrain: terrain,
       );
+
+  /// The deterministic terrain sampler for this body, or null for a perfect
+  /// sphere. Built on demand from [terrain] + [radius]; both the collision code
+  /// and the renderer call this so they agree on the surface.
+  TerrainField? get terrainField => terrain?.fieldFor(radius);
 
   bool get isStar => parent == null;
   bool get hasAtmosphere => atmosphere != null;
@@ -165,8 +181,50 @@ class CelestialBody {
     return r * (-mu / (d2 * d));
   }
 
-  /// Altitude above the surface for a body-centred position.
+  /// Altitude above the DATUM sphere for a body-centred position. Terrain
+  /// relief is NOT included here — atmosphere/mode checks want the datum. Use
+  /// [terrainAltitude] for surface contact against voxel terrain.
   double altitudeOf(Vector3 r) => r.length - radius;
+
+  /// The body's orientation quaternion at [epoch] — spin about +Z at
+  /// [angularVelocity], tilted by [axialTilt] about +X. MUST match the value
+  /// the render snapshot computes (world_snapshot BodySnapshot) so collision
+  /// and the rendered terrain share a body-fixed frame.
+  Quaternion orientationAt(Epoch epoch) {
+    final spin = Quaternion.axisAngle(Vector3.unitZ, angularVelocity * epoch.seconds);
+    final tilt = Quaternion.axisAngle(Vector3.unitX, axialTilt);
+    return (tilt * spin).normalized;
+  }
+
+  /// The body's spin axis as a UNIT vector in the INERTIAL frame — its pole
+  /// after [axialTilt]. Equals `tilt · (+Z)`, the instantaneous rotation axis of
+  /// [orientationAt] (= tilt·spin); it is constant (tilt is fixed), so the body
+  /// does not precess. Landed co-rotation and surface velocity MUST rotate about
+  /// this, not a bare +Z, or a tilted body drags landed craft in latitude (N/S).
+  Vector3 get spinAxisInertial =>
+      Quaternion.axisAngle(Vector3.unitX, axialTilt).rotate(Vector3.unitZ);
+
+  /// Inertial velocity of a co-rotating point at body-centred position [r]:
+  /// Ω × r with Ω = [angularVelocity] · [spinAxisInertial]. Zero for a
+  /// non-spinning body. Used by landed co-rotation and the atmospheric wind
+  /// frame so both agree with the tilted spin.
+  Vector3 surfaceVelocityAt(Vector3 r) =>
+      spinAxisInertial.cross(r) * angularVelocity;
+
+  /// The solid-surface radius (m) beneath a body-centred INERTIAL position,
+  /// accounting for the body's spin (so terrain is body-fixed). Falls back to
+  /// [radius] when the body has no terrain.
+  double terrainGroundRadius(Vector3 rInertial, Epoch epoch) {
+    final f = terrainField;
+    if (f == null) return radius;
+    // Inertial -> body-fixed, then sample the field along that direction.
+    final bf = orientationAt(epoch).conjugate.rotate(rInertial);
+    return f.groundRadiusAt(bf.x, bf.y, bf.z);
+  }
+
+  /// Altitude above the voxel-terrain surface (m); negative = below it.
+  double terrainAltitude(Vector3 rInertial, Epoch epoch) =>
+      rInertial.length - terrainGroundRadius(rInertial, epoch);
 
   /// Surface rotation rate, rad/s, about the body's spin axis (+Z).
   double get angularVelocity =>
