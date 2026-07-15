@@ -1,3 +1,8 @@
+// Copyright (c) 2026 John Peroutka
+//
+// This work is licensed under the PolyForm Noncommercial License 1.0.0.
+// To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
+
 /// Seeded 3D value noise with fractal (fBm) summation. Deterministic: the same
 /// seed + coordinate always yields the same value, so it is safe to sample
 /// identically in the domain (collision) and the renderer (meshing). Pure Dart,

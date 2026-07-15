@@ -1,3 +1,8 @@
+// Copyright (c) 2026 John Peroutka
+//
+// This work is licensed under the PolyForm Noncommercial License 1.0.0.
+// To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
+
 // Voxel-terrain surface: procedural per-fragment shading by SLOPE + ALTITUDE,
 // with a sun Lambert term. No texture assets yet — the triplanar blend weights
 // are computed here so tileable rock/sand/snow textures can drop in later
