@@ -49,8 +49,20 @@ class TerrainNodes {
   /// penumbra grows with the caster's height above the receiver (UV per clip-z
   /// gap); [maxPenumbraFactor] scales the light's softness into the maximum
   /// (far) penumbra width.
-  static double shadowHardness = 4.0;
-  static double maxPenumbraFactor = 3.0;
+  ///
+  /// The sun is a ~0.53 deg disc (9.3e-3 rad), so a caster a gap `g` above the
+  /// receiver throws a penumbra of radius `g * 9.3e-3 / 2`. A cascade's clip-z
+  /// spans `7 * box` world units (see terrain.frag) and the PCF radius is in UV
+  /// (1.0 = box), so world cancels: hardness = 7 * 9.3e-3 / 2. Anything larger
+  /// smears the 16-tap kernel over hundreds of texels, and the per-fragment IGN
+  /// rotation that hides the undersampling then reads as dither. Real airless
+  /// shadows are knife-edged; keep this physical.
+  static double shadowHardness = 0.0326;
+
+  /// Caps the far penumbra (and so the blocker-search disc, which the 8-tap
+  /// search has to cover). softness is ~1.5 m, so 0.35 caps the penumbra near
+  /// 0.5 m — generous for a ~15 m craft, whose true far penumbra is ~0.14 m.
+  static double maxPenumbraFactor = 0.35;
 
   /// Generate + upload the procedural material tiles (idempotent).
   static Future<void> loadTextures() => TerrainTextures.load();

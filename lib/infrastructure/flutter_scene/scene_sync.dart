@@ -287,7 +287,15 @@ class SceneSync {
     final rangeM = (altM * 3.0 + 300.0).clamp(300.0, 6000.0);
     light.shadowMaxDistance = lengthToScene(rangeM);
     light.shadowFadeRange = lengthToScene(rangeM * 0.12);
-    light.shadowSoftness = lengthToScene(1.5); // ~1.5 m penumbra
+    // Doubled off the engine's 1024 default: a landed craft's near cascade spans
+    // ~30 m, so 2048 buys ~1.5 cm/texel — fine enough that the sun's true (few
+    // cm) penumbra resolves as an edge instead of a filtered smear.
+    light.shadowMapResolution = 2048;
+    // Softness does double duty: the far-penumbra cap (scaled by
+    // TerrainNodes.maxPenumbraFactor) AND the grazing-angle normal-offset bias
+    // (sp0.z). Hold it at 1.5 m — the penumbra is cut via hardness, so dropping
+    // this would only starve the bias and bring acne back.
+    light.shadowSoftness = lengthToScene(1.5);
     light.shadowNormalBias = lengthToScene(1.0);
     light.shadowDepthBias = lengthToScene(1.0);
   }
