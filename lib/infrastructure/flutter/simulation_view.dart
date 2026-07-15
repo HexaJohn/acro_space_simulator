@@ -49,6 +49,7 @@ import '../flutter_scene/ring_nodes.dart';
 import '../flutter_scene/scene_camera_adapter.dart';
 import '../flutter_scene/scene_sync.dart';
 import '../flutter_scene/scene_hud_overlay.dart';
+import '../flutter_scene/scene_star_bloom.dart';
 import '../flutter_scene/vessel_nodes.dart';
 import '../flutter_scene/scene_render_view.dart';
 import 'sim_view_control.dart';
@@ -2144,6 +2145,19 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                       );
                     }),
                   ),
+                  // Star bloom, over the 3D frame but UNDER the text HUD (the
+                  // additive core would wash out a label drawn beneath it).
+                  // The scene backend has no post-process pass, so this is the
+                  // software painter's corona trick in screen space; it shares
+                  // the HUD's freecam guard and projection space.
+                  if (snap != null && !_freecam)
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        child: CustomPaint(
+                          painter: SceneStarBloomPainter(snap),
+                        ),
+                      ),
+                    ),
                   // Painter-parity text HUD (telemetry block + name labels)
                   // from the SAME presenter snapshot the software path uses.
                   // Hidden in freecam: the presenter still projects around
