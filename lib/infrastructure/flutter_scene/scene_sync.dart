@@ -21,6 +21,7 @@ import 'exhaust_nodes.dart';
 import 'line_nodes.dart';
 import 'ring_nodes.dart';
 import 'scene_textures.dart';
+import 'star_bloom_nodes.dart';
 import 'terrain/terrain_nodes.dart';
 import 'vessel_nodes.dart';
 
@@ -49,6 +50,7 @@ class SceneSync {
     _rings = RingNodes(scene, _textures);
     _environment = PlanetEnvironmentBaker(scene, _textures);
     _terrain = TerrainNodes(scene);
+    _starBloom = StarBloomNodes(scene);
   }
 
   final fs.Scene scene;
@@ -62,6 +64,7 @@ class SceneSync {
   late final RingNodes _rings;
   late final PlanetEnvironmentBaker _environment;
   late final TerrainNodes _terrain;
+  late final StarBloomNodes _starBloom;
 
   final FloatingOrigin origin = FloatingOrigin();
 
@@ -113,6 +116,10 @@ class SceneSync {
     _skybox.update(
         cameraRangeKm:
             camera == null ? 0 : camera.eyeOffset.length * kRenderScale);
+    // Occlusion is the depth buffer's job, not this call's position: the sprite
+    // is translucent, so the engine draws it after every opaque record and the
+    // terrain/vessel/body depth it tests against is already laid down.
+    _starBloom.update(snap, origin, _bodies, camera: camera);
     _updateSun(snap, camera, focusVesselId, focusBodyId);
     _updateExposure(snap, camera, focusVesselId, focusBodyId);
     if (camera != null) {

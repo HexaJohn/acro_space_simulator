@@ -77,3 +77,24 @@ class DepthSafeUnlitMaterial extends fs.UnlitMaterial {
     pass.setDepthCompareOperation(igpu.CompareFunction.lessEqual);
   }
 }
+
+/// A [fs.SpriteMaterial] for NORMAL depth-tested billboards (the star bloom).
+///
+/// Sprites never write depth, but they must still be depth-TESTED: the bloom's
+/// whole occlusion model is "the depth buffer hides it behind terrain, vessels
+/// and planets", which silently breaks if it inherits an `always` op from a
+/// shell drawn earlier in the frame. Restoring lessEqual here makes that
+/// independent of draw order.
+class DepthSafeSpriteMaterial extends fs.SpriteMaterial {
+  DepthSafeSpriteMaterial({super.colorTexture});
+
+  @override
+  void bind(
+    igpu.RenderPass pass,
+    igpu.HostBuffer transientsBuffer,
+    fs.Lighting lighting,
+  ) {
+    super.bind(pass, transientsBuffer, lighting);
+    pass.setDepthCompareOperation(igpu.CompareFunction.lessEqual);
+  }
+}
