@@ -15,6 +15,7 @@ import 'package:flutter_scene/scene.dart' show AntiAliasingMode;
 
 import 'domain/shared/vector3.dart';
 import 'infrastructure/flutter/sim_view_control.dart';
+import 'infrastructure/flutter/windows_key_event_workaround.dart';
 import 'infrastructure/sample_world.dart';
 import 'infrastructure/flutter/simulation_view.dart';
 import 'infrastructure/flutter_scene/atmosphere_nodes.dart';
@@ -40,6 +41,7 @@ import 'infrastructure/flutter_scene/vessel_nodes.dart';
 final GlobalKey _shotKey = GlobalKey();
 
 void main() {
+  installWindowsAltKeyAssertFilter();
   const backend =
       String.fromEnvironment('BACKEND', defaultValue: 'flutterScene');
 

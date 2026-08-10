@@ -6,8 +6,10 @@
 import 'package:flutter/material.dart';
 
 import 'infrastructure/flutter/screens/main_menu_screen.dart';
+import 'infrastructure/flutter/windows_key_event_workaround.dart';
 
 void main() {
+  installWindowsAltKeyAssertFilter();
   runApp(const AcroSpaceSimulatorApp());
 }
 
@@ -19,11 +21,19 @@ class AcroSpaceSimulatorApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Acro Space Simulator',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark(useMaterial3: true),
-      home: const MainMenuScreen(),
+    // ExcludeSemantics above MaterialApp: the Windows accessibility bridge
+    // spams 'Failed to update ui::AXTree ... will not be in the tree' (and can
+    // AV in flutter_windows.dll) whenever the semantics tree mutates on a
+    // focus switch. An empty, static semantics tree gives the bridge nothing
+    // to reconcile. Same workaround as main_scene_dev.dart — see the rationale
+    // there. Costs screen-reader support; pointer/keyboard input unaffected.
+    return ExcludeSemantics(
+      child: MaterialApp(
+        title: 'Acro Space Simulator',
+        debugShowCheckedModeBanner: false,
+        theme: ThemeData.dark(useMaterial3: true),
+        home: const MainMenuScreen(),
+      ),
     );
   }
 }
