@@ -1,6 +1,11 @@
 # Engine vs Project Split — acro → flintlock
 
-**Status:** analysis for review. **Method:** static read of the whole repo (196 Dart
+**Status:** ON HOLD — slice 1 (sim-math via flintlock_engine path dep, 937f2a2) was
+**reverted 2026-08-10**: the four domain/shared files are vendored back into this repo
+(flintlock's current versions, keeping its ScaledTransform fixes; Vector3 docs restored
+to acro's Z-up convention) and the path dependency is removed. Reason: avoid the
+cross-repo coupling/bloat for now. This doc remains the analysis if the split resumes.
+**Method:** static read of the whole repo (196 Dart
 files + shaders) by four parallel investigators. Nothing built or run — verdicts are
 from code + imports, not runtime.
 

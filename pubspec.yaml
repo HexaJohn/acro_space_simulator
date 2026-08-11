@@ -48,12 +48,6 @@ dependencies:
       ref: d3ebfb6a589b475e08b3acce43a71ce8c5f0b72f
       path: packages/flutter_scene
   vector_math: ^2.4.0 # flutter_scene's math types (Matrix4, vm.Vector3)
-  # Shared engine core (sister project). Slice 1 = the sim-math foundation
-  # (immutable Vector3/Quaternion + large-world PreciseVector3/ScaledTransform),
-  # which used to live in domain/shared/. Pure Dart, zero transitive deps.
-  # Absolute path: cross-drive (C: -> F:), so no relative path is expressible.
-  flintlock_engine:
-    path: F:/GitHub/flintlock/packages/flintlock_engine
   shared_preferences: ^2.5.3 # persisted render-backend selection
   # Custom GPU shader pipeline (hook/build.dart compiles shaders/*.frag
   # into build/shaderbundles/acro.shaderbundle for the atmosphere shader).
