@@ -253,7 +253,14 @@ class _Shell {
     _surfMaterial = AtmosphereShaderMaterial(fragmentShader: shader, depthAlways: false);
     _inNode = fs.Node(mesh: fs.Mesh(uvSphereZUp(segments: 48, rings: 24, invert: true), _inMaterial));
     _outNode = fs.Node(mesh: fs.Mesh(uvSphereZUp(segments: 48, rings: 24), _outMaterial));
-    _surfNode = fs.Node(mesh: fs.Mesh(uvSphereZUp(segments: 48, rings: 24), _surfMaterial));
+    // The proxy MUST out-tessellate its own chord sag (see setTransforms):
+    // at 48x24 a facet chord dips R*(1-cos(pi/48)) ~ 13.6 km below the true
+    // sphere on Earth — deeper than any offset that still hugs the surface —
+    // so facet interiors sat INSIDE the opaque planet, depth-failed, and the
+    // disc haze vanished on shell entry (only vertex slivers survived, as
+    // pale triangles over the ocean). 96x48 sags ~3.4 km, safely under the
+    // proxy's ~6.4 km lift.
+    _surfNode = fs.Node(mesh: fs.Mesh(uvSphereZUp(segments: 96, rings: 48), _surfMaterial));
     _scene.add(_outNode); // start outside
     _active = [_outNode];
   }
@@ -280,11 +287,23 @@ class _Shell {
     _active = want;
   }
 
+  /// Every point of the proxy's FACETED surface must clear the planet
+  /// sphere or the disc haze depth-fails: a 96-segment facet's lowest chord
+  /// point sits at scale*cos(pi/96) of the vertex radius, so the scale must
+  /// exceed 1/cos(pi/96) ~ 1.00054. It must ALSO clear the D24 depth
+  /// QUANTUM, d^2/(near * 2^24) — from shell-entry altitudes (~600 km) the
+  /// mid-disc quantum runs 5-10 km, and a 1.001 lift (+6.4 km) left green
+  /// z-fight speckle where the gap dipped under it. 1.002 (+12.7 km on
+  /// Earth) clears both and still tops Earth's 4.5 km terrain relief.
+  /// Cost: flying BELOW the lift height puts the camera inside the proxy
+  /// (backface-culled, no ground haze) — ground haze over a <13 km path is
+  /// minor, and the sky wall still hazes everything above the horizon.
+  static const double _surfProxyLift = 1.002;
+
   /// Position/scale all windings for this frame. The shell nodes span the
   /// atmosphere top; the surface proxy hugs the planet just above the
-  /// surface (0.02% up: below any terrain-scale feature, but in FRONT of
-  /// the opaque sphere in the depth buffer so the disc haze survives the
-  /// lessEqual test).
+  /// surface — in FRONT of the opaque sphere in the depth buffer, so the
+  /// disc haze survives the lessEqual test.
   void setTransforms(vm.Vector3 centreScene, double atmoTopScene, double planetRadiusScene) {
     final shellScale = vm.Matrix4.compose(centreScene, vm.Quaternion.identity(), vm.Vector3.all(atmoTopScene));
     _inNode.localTransform = shellScale;
@@ -292,7 +311,7 @@ class _Shell {
     _surfNode.localTransform = vm.Matrix4.compose(
       centreScene,
       vm.Quaternion.identity(),
-      vm.Vector3.all(planetRadiusScene * 1.0002),
+      vm.Vector3.all(planetRadiusScene * _surfProxyLift),
     );
   }
 

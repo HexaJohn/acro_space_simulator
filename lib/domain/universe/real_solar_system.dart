@@ -139,6 +139,17 @@ class RealSolarSystem {
         dipoleMoment: 8.0e22, // A*m^2
         surface: SurfacePresets.earth,
         composition: _earthAir,
+        // ~4.5 km relief over ~30 km features: continental hills at chunk
+        // scale. seaLevel stays 0 (no ocean shell rendered yet — the datum
+        // doubles as the shading sea). Grass/sand caps drive the triplanar
+        // material blend (latitude+altitude weighted in terrain.frag).
+        terrain: const TerrainConfig(
+          seed: 0xEA47B,
+          amplitude: 4500,
+          featureScale: 30000,
+          grassAmount: 0.85,
+          sandAmount: 0.35,
+        ),
       ),
       CelestialBody(
         id: const BodyId('mars'),

@@ -25,6 +25,7 @@ import 'infrastructure/flutter_scene/render_backend.dart';
 import 'infrastructure/flutter_scene/scene_camera_adapter.dart';
 import 'infrastructure/flutter_scene/scene_sync.dart';
 import 'infrastructure/flutter_scene/terrain/terrain_nodes.dart';
+import 'infrastructure/flutter_scene/terrain/terrain_textures.dart';
 import 'infrastructure/flutter_scene/vessel_nodes.dart';
 
 /// Dev entrypoint: boots STRAIGHT into [SimulationView] with the
@@ -252,6 +253,20 @@ void main() {
     }
     return developer.ServiceExtensionResponse.result(jsonEncode({
       for (final e in AtmosphereNodes.styles.entries) e.key: e.value.toJson(),
+    }));
+  });
+
+  // Live terrain-gate probe:
+  //   callServiceExtension?...&method=ext.acro.terrain
+  // Reports the chunk state (debugLine) and every gate that can silently
+  // suppress the chunk, so "no terrain on <body>" is diagnosable without a
+  // rebuild-per-guess loop.
+  developer.registerExtension('ext.acro.terrain', (method, params) async {
+    return developer.ServiceExtensionResponse.result(jsonEncode({
+      'debug': TerrainNodes.debugLine,
+      'enabled': TerrainNodes.enabled,
+      'texturesReady': TerrainTextures.ready,
+      'maxAltitudeM': TerrainNodes.maxAltitudeM,
     }));
   });
 

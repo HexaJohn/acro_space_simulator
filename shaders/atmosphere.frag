@@ -159,5 +159,13 @@ void main() {
   // form of out = inscatter + T * surface.
   vec3 T = exp(-beta * viewDepth);
   float alpha = clamp(1.0 - dot(T, vec3(1.0 / 3.0)), 0.0, 1.0);
+  // Extinction alone is honest but tiny at flight altitudes (~0.1 at 10 km
+  // over Earth), so the DAYTIME sky stayed transparent and the starfield
+  // punched through the blue. A bright sky must also read as COVERAGE: the
+  // eye can't see stars against scattered daylight. Fold the inscatter
+  // luminance into alpha; at night (lum -> 0) this is a no-op and coverage
+  // stays pure extinction, so stars return after dusk.
+  float skyLum = dot(colour, vec3(0.2126, 0.7152, 0.0722));
+  alpha = clamp(max(alpha, 1.0 - exp(-skyLum * 4.0)), 0.0, 1.0);
   frag_color = vec4(colour, alpha);
 }
