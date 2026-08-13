@@ -6,6 +6,8 @@
 import '../../domain/autonomy/cargo_schedule.dart';
 import '../../domain/colony/colony.dart';
 import '../../domain/megastructure/megastructure.dart';
+import '../../domain/terrain/terrain_brush.dart';
+import '../../domain/terrain/terrain_edits.dart';
 import '../../domain/universe/celestial_body.dart';
 import '../../domain/weather/weather_system.dart';
 
@@ -37,6 +39,37 @@ abstract class CargoScheduleRepository {
 abstract class MegastructureRepository {
   Iterable<Megastructure> all();
   void save(Megastructure structure);
+}
+
+/// Terrain deformations per body — impact craters now, excavation later.
+///
+/// Unlike [TerrainHeights] (a render-reconciliation cache that physics never
+/// reads), these edits DO change the collision surface: they move
+/// `CelestialBody.terrainGroundRadius`. That makes them authoritative
+/// simulation state — part of the determinism fingerprint, replicated to
+/// clients, and never writable by a renderer.
+abstract class TerrainEditsRepository {
+  /// The edit list for [body], or null when it has never been deformed. Null
+  /// rather than an empty list so the pristine path stays allocation-free.
+  TerrainEdits? forBody(BodyId body);
+
+  /// Append [brush] to [body]'s edits, creating the list on first deformation.
+  void record(BodyId body, TerrainBrush brush);
+
+  /// Every deformed body, for snapshotting and persistence.
+  Iterable<MapEntry<BodyId, TerrainEdits>> all();
+}
+
+/// Non-deformable adapter: impacts leave no mark. The default, so a tick can be
+/// built without terrain deformation wired in.
+class NullTerrainEditsRepository implements TerrainEditsRepository {
+  const NullTerrainEditsRepository();
+  @override
+  TerrainEdits? forBody(BodyId body) => null;
+  @override
+  void record(BodyId body, TerrainBrush brush) {}
+  @override
+  Iterable<MapEntry<BodyId, TerrainEdits>> all() => const [];
 }
 
 /// Empty default so a tick can run without any megaprojects.

@@ -71,6 +71,10 @@ class AuthoritativeSimulation {
         epoch: clock.epoch,
         colonies: advance.colonies,
         terrain: terrain,
+        // Deformation is authoritative state, so it ships with every frame and
+        // is hashed into the fingerprint — a client that missed a crater would
+        // reconcile onto ground the server does not have.
+        terrainEdits: advance.terrainEdits,
         // Fold the events that fired this tick into the frame (drains the bus).
         events: advance.events.drainRecent().map(EventSnapshot.of).toList(),
         // Static body descriptors are sticky on the engine side; the host gates

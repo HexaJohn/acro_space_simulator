@@ -158,6 +158,29 @@ table EventFrame {
   info:string;
 }
 
+// One terrain deformation — an analytic CSG brush cut into a body's density
+// field (impact crater, excavation). Unlike BodyDescriptor this is NOT render
+// config: it MOVES THE COLLISION SURFACE, so it is authoritative state, it is
+// hashed into WorldFrame.fingerprint, and the engine must apply the list in
+// the order received (the brushes compose by SDF min/max, which do not
+// commute — a reordered list is a different surface).
+//   kind   = 0 sphere (subtracted ball), 1 crater (bowl + raised rim)
+//   centre = body-fixed contact point, m
+//   axis   = body-fixed surface normal at contact (crater orientation)
+//   radius = rim crest radius / ball radius, m
+//   depth  = bowl floor below the contact plane, m (craters only)
+//   rim    = rim crest above the contact plane, m (craters only)
+table TerrainEditFrame {
+  body:string;        // joins BodyFrame.id
+  kind:ubyte = 0;
+  centre:Vec3;
+  axis:Vec3;
+  radius:double;
+  depth:double;
+  rim:double;
+  tick:long;          // tick the edit was made on (provenance; order is the list's)
+}
+
 table WorldFrame {
   tick:long;
   epoch:double;       // sim time, seconds
@@ -167,6 +190,7 @@ table WorldFrame {
   buildings:[BuildingFrame];
   events:[EventFrame]; // events that fired this tick (transient; best-effort)
   descriptors:[BodyDescriptor]; // STATIC body render config; cache + join by id
+  terrain_edits:[TerrainEditFrame]; // AUTHORITATIVE deformation; apply in order
 }
 
 // ---------- renderer -> sim ----------

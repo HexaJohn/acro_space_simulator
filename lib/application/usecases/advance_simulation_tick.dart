@@ -43,6 +43,7 @@ import '../../domain/shared/vector3.dart';
 import '../../domain/simulation/epoch.dart';
 import '../../domain/simulation/simulation_clock.dart';
 import '../../domain/subsystems/vessel_mining_updater.dart';
+import '../../domain/terrain/impact_scaling.dart';
 import '../../domain/subsystems/vessel_thermal_updater.dart';
 import '../../domain/vessel/isru_service.dart';
 import '../../domain/universe/atmosphere_model.dart';
@@ -102,6 +103,15 @@ class AdvanceSimulationTick {
   final SituationService situations;
   final StructuralService structural;
 
+  /// Where hard impacts deposit their craters, and where surface contact reads
+  /// existing deformation back from. Defaults to a non-deformable world.
+  final TerrainEditsRepository terrainEdits;
+
+  /// Bulk density (kg/m^3) of the target surface used to size impact craters.
+  /// Loose regolith by default; a single global figure because the sim has no
+  /// per-body surface-strength model to draw a better one from.
+  final double craterTargetDensity;
+
   /// Dynamic-pressure limit (Pa) above which a vessel breaks apart in atmosphere.
   final double maxDynamicPressure;
 
@@ -160,6 +170,8 @@ class AdvanceSimulationTick {
     this.lifeSupport = const LifeSupportService(),
     this.situations = const SituationService(),
     this.structural = const StructuralService(),
+    this.terrainEdits = const NullTerrainEditsRepository(),
+    this.craterTargetDensity = 1500,
     // Max-Q before structural failure. 80 kPa was too low — a heat-shielded
     // reentry capsule routinely rides out higher dynamic pressure than a flimsy
     // launch stack, and a normal descent was breaking up. 200 kPa survives a
@@ -269,7 +281,7 @@ class AdvanceSimulationTick {
 
       // 4b. Surface contact: a vessel that has descended below the surface
       // either lands (slow) or is destroyed on impact (fast).
-      if (_handleSurfaceContact(vessel, activeBody, clock.epoch)) {
+      if (_handleSurfaceContact(vessel, activeBody, clock.epoch, clock.tick)) {
         _publishEvents(vessel);
         vessels.remove(vessel.id);
         continue; // destroyed — skip subsystems
@@ -468,12 +480,16 @@ class AdvanceSimulationTick {
   /// Handle a vessel that has descended to/through the surface. Returns true if
   /// the vessel was destroyed (caller removes it). A gentle touchdown lands it
   /// (clamped to the surface, velocity zeroed); a fast one raises [Impact].
-  bool _handleSurfaceContact(Vessel vessel, CelestialBody body, Epoch epoch) {
+  bool _handleSurfaceContact(
+      Vessel vessel, CelestialBody body, Epoch epoch, int tick) {
     if (vessel.landed) return false;
     // Contact against the VOXEL TERRAIN surface (falls back to the datum
     // sphere for bodies without terrain), so the craft lands on hills and can
     // descend into sub-datum valleys instead of stopping at a perfect sphere.
-    final groundR = body.terrainGroundRadius(vessel.state.position, epoch);
+    // Deformation is included: a craft can settle inside an earlier crater.
+    final edits = terrainEdits.forBody(body.id);
+    final groundR =
+        body.terrainGroundRadius(vessel.state.position, epoch, edits: edits);
     final len = vessel.state.position.length;
     // Non-finite state (e.g. an unpropagatable hyperbolic conic) is not a
     // surface contact — leave it to the physics path rather than "impacting".
@@ -498,6 +514,8 @@ class AdvanceSimulationTick {
 
     // Impact destruction (skipped by the debug cheat — any speed just lands).
     if (!disableImpact && !splashdown.survivesSpeed(speed, safeSpeed)) {
+      _recordImpactCrater(vessel, body, epoch, tick, dir, groundR, speed,
+          quench);
       vessel.raise(Impact(vessel.id, body.id, speed));
       return true; // destroyed
     }
@@ -514,6 +532,54 @@ class AdvanceSimulationTick {
     ));
     vessel.landed = true;
     return false;
+  }
+
+  /// Cut the crater a destroyed craft leaves in the ground.
+  ///
+  /// Deformation is AUTHORITATIVE state — it moves the collision surface for
+  /// every craft that lands here afterwards — so it is written here in the
+  /// deterministic tick, never from a renderer, and it lands in the store in
+  /// tick order (which is the order the brushes compose in).
+  ///
+  /// A body with no [TerrainConfig] is a perfect sphere with no field to
+  /// deform, and a water impact closes over instead of holding a crater, so
+  /// both are skipped. [quench] is the touchdown biome's heat-quench fraction —
+  /// non-zero exactly when the craft came down in water.
+  void _recordImpactCrater(
+    Vessel vessel,
+    CelestialBody body,
+    Epoch epoch,
+    int tick,
+    Vector3 dir,
+    double groundR,
+    double speed,
+    double quench,
+  ) {
+    // A splashdown closes over instead of holding a crater — but only where
+    // liquid can actually exist. `PlanetSurface.biomeAt` classifies purely on
+    // temperature and noise, with no notion of atmosphere, so it reports
+    // Biome.ocean across much of the airless Moon; taking that at face value
+    // here would mean no lunar craters at all.
+    final splashed = quench > 0 && body.hasAtmosphere;
+    if (body.terrain == null || splashed) return;
+    // The brush lives in the BODY-FIXED frame, the frame the terrain field and
+    // the render meshes share, so the crater co-rotates with the planet.
+    final contactBF = body.orientationAt(epoch).conjugate.rotate(dir * groundR);
+    // Radial normal. On a slope the true surface normal tilts away from this,
+    // which would matter for an oblique strike; the height-field foundation is
+    // gentle enough at crater scale that the radial is within a few degrees.
+    final normalBF = contactBF.normalized;
+    final brush = impactBrush(
+      contactBF: contactBF,
+      normalBF: normalBF,
+      kineticEnergyJ: kineticEnergy(vessel.mass, speed),
+      // Local surface gravity, so the same crash digs a wider hole on a small
+      // moon than on a planet.
+      surfaceGravityMs2: body.mu / (groundR * groundR),
+      targetDensityKgM3: craterTargetDensity,
+      tick: tick,
+    );
+    if (brush != null) terrainEdits.record(body.id, brush);
   }
 
   /// Drain a vessel's queued events: feed them to the contracts board (if any),

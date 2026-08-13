@@ -11,6 +11,7 @@ import '../planetary/terrain_config.dart';
 import '../shared/quaternion.dart';
 import '../shared/vector3.dart';
 import '../simulation/epoch.dart';
+import '../terrain/terrain_edits.dart';
 import '../terrain/terrain_field.dart';
 import 'atmosphere_model.dart';
 
@@ -151,10 +152,19 @@ class CelestialBody {
         terrain: terrain,
       );
 
-  /// The deterministic terrain sampler for this body, or null for a perfect
-  /// sphere. Built on demand from [terrain] + [radius]; both the collision code
-  /// and the renderer call this so they agree on the surface.
+  /// The deterministic terrain sampler for this body's PRISTINE relief, or null
+  /// for a perfect sphere. Built on demand from [terrain] + [radius].
+  ///
+  /// Deformations are mutable world state and cannot live on this immutable
+  /// reference object — use [terrainFieldWith] and pass the body's edit list
+  /// wherever craters and excavation have to be visible.
   TerrainField? get terrainField => terrain?.fieldFor(radius);
+
+  /// The terrain sampler with [edits] composed on top of the relief. Null
+  /// [edits] (the default everywhere terrain is undeformed) yields exactly
+  /// [terrainField].
+  TerrainField? terrainFieldWith(TerrainEdits? edits) =>
+      terrain?.fieldFor(radius, edits: edits);
 
   bool get isStar => parent == null;
   bool get hasAtmosphere => atmosphere != null;
@@ -214,8 +224,9 @@ class CelestialBody {
   /// The solid-surface radius (m) beneath a body-centred INERTIAL position,
   /// accounting for the body's spin (so terrain is body-fixed). Falls back to
   /// [radius] when the body has no terrain.
-  double terrainGroundRadius(Vector3 rInertial, Epoch epoch) {
-    final f = terrainField;
+  double terrainGroundRadius(Vector3 rInertial, Epoch epoch,
+      {TerrainEdits? edits}) {
+    final f = terrainFieldWith(edits);
     if (f == null) return radius;
     // Inertial -> body-fixed, then sample the field along that direction.
     final bf = orientationAt(epoch).conjugate.rotate(rInertial);
@@ -223,8 +234,9 @@ class CelestialBody {
   }
 
   /// Altitude above the voxel-terrain surface (m); negative = below it.
-  double terrainAltitude(Vector3 rInertial, Epoch epoch) =>
-      rInertial.length - terrainGroundRadius(rInertial, epoch);
+  double terrainAltitude(Vector3 rInertial, Epoch epoch,
+          {TerrainEdits? edits}) =>
+      rInertial.length - terrainGroundRadius(rInertial, epoch, edits: edits);
 
   /// Surface rotation rate, rad/s, about the body's spin axis (+Z).
   double get angularVelocity =>

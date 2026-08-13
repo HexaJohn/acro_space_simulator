@@ -7,6 +7,8 @@ import '../../application/ports/world_repositories.dart';
 import '../../domain/autonomy/cargo_schedule.dart';
 import '../../domain/colony/colony.dart';
 import '../../domain/megastructure/megastructure.dart';
+import '../../domain/terrain/terrain_brush.dart';
+import '../../domain/terrain/terrain_edits.dart';
 import '../../domain/universe/celestial_body.dart';
 import '../../domain/weather/weather_system.dart';
 
@@ -78,4 +80,28 @@ class InMemoryCargoScheduleRepository implements CargoScheduleRepository {
 
   @override
   void save(CargoSchedule schedule) => _store[schedule.id] = schedule;
+}
+
+/// Deformable-terrain store. Lists are created lazily on a body's first edit,
+/// so an untouched world holds nothing and every terrain lookup takes the
+/// pristine analytic path.
+class InMemoryTerrainEditsRepository implements TerrainEditsRepository {
+  InMemoryTerrainEditsRepository(
+      [Map<BodyId, Iterable<TerrainBrush>> seed = const {}]) {
+    for (final e in seed.entries) {
+      _byBody[e.key] = TerrainEdits.of(e.value);
+    }
+  }
+
+  final Map<BodyId, TerrainEdits> _byBody = {};
+
+  @override
+  TerrainEdits? forBody(BodyId body) => _byBody[body];
+
+  @override
+  void record(BodyId body, TerrainBrush brush) =>
+      (_byBody[body] ??= TerrainEdits()).add(brush);
+
+  @override
+  Iterable<MapEntry<BodyId, TerrainEdits>> all() => _byBody.entries;
 }

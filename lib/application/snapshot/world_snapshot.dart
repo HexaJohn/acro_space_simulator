@@ -16,6 +16,9 @@ import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
 import '../../domain/simulation/domain_event.dart';
 import '../../domain/simulation/epoch.dart';
+import '../../domain/terrain/terrain_brush.dart';
+import '../../domain/terrain/terrain_edits.dart';
+import '../../domain/terrain/terrain_profile.dart';
 import '../../domain/universe/celestial_body.dart';
 import '../../domain/universe/star_system.dart';
 import '../../domain/universe/terrain_heights.dart';
@@ -511,6 +514,19 @@ class BodyDescriptorSnapshot {
   final double terrainGrassAmount; // 0..1 vegetation cover
   final double terrainSandAmount; // 0..1 desert cover
 
+  /// Whether the body uses the erosion-aware detail layer.
+  final bool terrainErodedDetail;
+
+  /// The body's landform recipe.
+  ///
+  /// This has to travel. `TerrainField` is reconstructed independently on the
+  /// render side, and the seed and amplitude alone do not determine the
+  /// surface any more — the profile decides which features run at all. Ship
+  /// only the scalars and the renderer draws plain fBm while collision resolves
+  /// against eroded, cratered ground: a craft then sinks straight through the
+  /// terrain on screen, chasing a surface that is drawn nowhere.
+  final TerrainProfile? terrainProfile;
+
   const BodyDescriptorSnapshot({
     required this.id,
     this.kind = BodyKind.rocky,
@@ -536,6 +552,8 @@ class BodyDescriptorSnapshot {
     this.terrainOctaves = 5,
     this.terrainGrassAmount = 0,
     this.terrainSandAmount = 0,
+    this.terrainErodedDetail = false,
+    this.terrainProfile,
   });
 
   factory BodyDescriptorSnapshot.of(CelestialBody body, StarSystem system) {
@@ -569,6 +587,8 @@ class BodyDescriptorSnapshot {
       terrainOctaves: body.terrain?.octaves ?? 5,
       terrainGrassAmount: body.terrain?.grassAmount ?? 0,
       terrainSandAmount: body.terrain?.sandAmount ?? 0,
+      terrainErodedDetail: body.terrain?.erodedDetail ?? false,
+      terrainProfile: body.terrain?.profile,
     );
   }
 
@@ -611,6 +631,11 @@ class BodyDescriptorSnapshot {
             'oct': terrainOctaves,
             'grass': terrainGrassAmount,
             'sand': terrainSandAmount,
+            // The generator recipe, not just its scale. Without this the
+            // renderer rebuilds a DIFFERENT surface from the one physics
+            // collides against — see [terrainProfile].
+            if (terrainErodedDetail) 'eroded': true,
+            if (terrainProfile != null) 'profile': terrainProfile!.toJson(),
           },
       };
 
@@ -649,6 +674,12 @@ class BodyDescriptorSnapshot {
           (((j['terrain'] as Map?)?['grass']) as num?)?.toDouble() ?? 0,
       terrainSandAmount:
           (((j['terrain'] as Map?)?['sand']) as num?)?.toDouble() ?? 0,
+      terrainErodedDetail:
+          (((j['terrain'] as Map?)?['eroded']) as bool?) ?? false,
+      terrainProfile: ((j['terrain'] as Map?)?['profile']) == null
+          ? null
+          : TerrainProfile.fromJson(
+              ((j['terrain'] as Map)['profile'] as Map).cast<String, dynamic>()),
     );
   }
 }
@@ -849,6 +880,105 @@ class EventSnapshot {
       );
 }
 
+/// One terrain deformation, in the body-fixed frame.
+///
+/// Contrast [BodyDescriptorSnapshot], which is static render config excluded
+/// from the fingerprint: these edits MOVE THE COLLISION SURFACE, so they are
+/// authoritative simulation state. They are replicated in application order and
+/// hashed into [WorldSnapshot.fingerprint] — a client whose edit list has
+/// drifted would otherwise land craft on ground the server does not have.
+class TerrainEditSnapshot {
+  const TerrainEditSnapshot({
+    required this.body,
+    required this.kind,
+    required this.cx,
+    required this.cy,
+    required this.cz,
+    required this.ax,
+    required this.ay,
+    required this.az,
+    required this.radius,
+    this.depth = 0,
+    this.rimHeight = 0,
+    this.tick = 0,
+  });
+
+  /// Body id — joins to [WorldSnapshot.bodies].
+  final String body;
+
+  /// Index into [TerrainBrushKind.values].
+  final int kind;
+
+  /// Body-fixed centre (m).
+  final double cx, cy, cz;
+
+  /// Body-fixed orientation axis (surface normal at contact).
+  final double ax, ay, az;
+
+  final double radius;
+  final double depth;
+  final double rimHeight;
+  final int tick;
+
+  static TerrainEditSnapshot of(BodyId body, TerrainBrush b) =>
+      TerrainEditSnapshot(
+        body: body.value,
+        kind: b.kind.index,
+        cx: b.centreBF.x,
+        cy: b.centreBF.y,
+        cz: b.centreBF.z,
+        ax: b.axisBF.x,
+        ay: b.axisBF.y,
+        az: b.axisBF.z,
+        radius: b.radiusM,
+        depth: b.depthM,
+        rimHeight: b.rimHeightM,
+        tick: b.tick,
+      );
+
+  /// Rebuild the domain brush. Round-trips [of] exactly.
+  TerrainBrush toBrush() => TerrainBrush(
+        kind:
+            TerrainBrushKind.values[kind.clamp(0, TerrainBrushKind.values.length - 1)],
+        centreBF: Vector3(cx, cy, cz),
+        axisBF: Vector3(ax, ay, az),
+        radiusM: radius,
+        depthM: depth,
+        rimHeightM: rimHeight,
+        tick: tick,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'body': body,
+        'kind': kind,
+        'c': [cx, cy, cz],
+        'a': [ax, ay, az],
+        'r': radius,
+        if (depth != 0) 'd': depth,
+        if (rimHeight != 0) 'rim': rimHeight,
+        'tick': tick,
+      };
+
+  factory TerrainEditSnapshot.fromJson(Map<String, dynamic> j) {
+    final c = (j['c'] as List?) ?? const [0, 0, 0];
+    final a = (j['a'] as List?) ?? const [0, 0, 1];
+    return TerrainEditSnapshot(
+      body: j['body'] as String,
+      kind: (j['kind'] as num?)?.toInt() ?? 0,
+      cx: (c[0] as num).toDouble(),
+      cy: (c[1] as num).toDouble(),
+      cz: (c[2] as num).toDouble(),
+      ax: (a[0] as num).toDouble(),
+      ay: (a[1] as num).toDouble(),
+      az: (a[2] as num).toDouble(),
+      radius: (j['r'] as num?)?.toDouble() ?? 0,
+      depth: (j['d'] as num?)?.toDouble() ?? 0,
+      rimHeight: (j['rim'] as num?)?.toDouble() ?? 0,
+      tick: (j['tick'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
+
 /// Full authoritative world state for one tick: a complete render frame.
 /// Sent to clients for reconciliation, compared between runs to verify
 /// deterministic simulation, and consumed by external renderers.
@@ -872,6 +1002,15 @@ class WorldSnapshot {
   /// a renderer that skips frames may miss some — fine for cosmetic FX/UI.
   final List<EventSnapshot> events;
 
+  /// Terrain deformations, in application order. Authoritative state, NOT
+  /// render config: they move the collision surface, so they are hashed into
+  /// [fingerprint] and a client must replay them in exactly this order.
+  ///
+  /// Sent in full every frame while the list is short. Once bodies accumulate
+  /// real history this wants an incremental channel keyed on the store's
+  /// version rather than a full resend.
+  final List<TerrainEditSnapshot> terrainEdits;
+
   const WorldSnapshot({
     required this.tick,
     required this.vessels,
@@ -880,7 +1019,19 @@ class WorldSnapshot {
     this.buildings = const {},
     this.descriptors = const {},
     this.events = const [],
+    this.terrainEdits = const [],
   });
+
+  /// The deformations for [bodyId], rebuilt as a domain store ready to hand to
+  /// `CelestialBody.terrainFieldWith`. Null when the body is pristine, which
+  /// keeps the untouched path on the analytic fast path.
+  TerrainEdits? editsForBody(String bodyId) {
+    List<TerrainBrush>? brushes;
+    for (final e in terrainEdits) {
+      if (e.body == bodyId) (brushes ??= []).add(e.toBrush());
+    }
+    return brushes == null ? null : TerrainEdits.of(brushes);
+  }
 
   /// Capture the world. Pass [system] (+ [ephemeris] and [epoch]) to include
   /// celestial-body transforms; pass [colonies] (with [system]) to include
@@ -893,6 +1044,7 @@ class WorldSnapshot {
     Epoch epoch = Epoch.zero,
     ColonyRepository? colonies,
     TerrainHeights? terrain,
+    TerrainEditsRepository? terrainEdits,
     SurfacePlacement placement = const SurfacePlacement(),
     List<EventSnapshot> events = const [],
     // Body descriptors (static render config: kind/atmosphere/composition) are
@@ -935,6 +1087,17 @@ class WorldSnapshot {
       },
       buildings: buildings,
       events: events,
+      terrainEdits: terrainEdits == null
+          ? const []
+          : [
+              // Bodies in a stable order, each body's edits in application
+              // order — the snapshot has to be reproducible for the
+              // fingerprint to mean anything.
+              for (final entry in terrainEdits.all().toList()
+                ..sort((x, y) => x.key.value.compareTo(y.key.value)))
+                for (final b in entry.value.all)
+                  TerrainEditSnapshot.of(entry.key, b),
+            ],
     );
   }
 
@@ -946,6 +1109,8 @@ class WorldSnapshot {
         'vessels': [for (final v in vessels.values) v.toJson()],
         'buildings': [for (final b in buildings.values) b.toJson()],
         'events': [for (final e in events) e.toJson()],
+        if (terrainEdits.isNotEmpty)
+          'terrainEdits': [for (final e in terrainEdits) e.toJson()],
       };
 
   factory WorldSnapshot.fromJson(Map<String, dynamic> j) {
@@ -979,6 +1144,10 @@ class WorldSnapshot {
       events: [
         for (final e in (j['events'] as List?) ?? const [])
           EventSnapshot.fromJson(e as Map<String, dynamic>),
+      ],
+      terrainEdits: [
+        for (final e in (j['terrainEdits'] as List?) ?? const [])
+          TerrainEditSnapshot.fromJson(e as Map<String, dynamic>),
       ],
     );
   }
@@ -1026,6 +1195,33 @@ class WorldSnapshot {
         ..write(',')
         ..write(_q(s.wz))
         ..write(';');
+    }
+    // Terrain deformation. Unlike the render descriptors, these MOVE THE
+    // COLLISION SURFACE — two runs that disagree about a crater will disagree
+    // about where a craft touches down — so divergence has to be caught here.
+    // Hashed in application order, because the brushes compose by SDF min/max
+    // and a reordered list is a different surface, not the same one shuffled.
+    if (terrainEdits.isNotEmpty) {
+      buf.write('#');
+      for (final e in terrainEdits) {
+        buf
+          ..write(e.body)
+          ..write(':')
+          ..write(e.kind)
+          ..write(':')
+          ..write(_q(e.cx))
+          ..write(',')
+          ..write(_q(e.cy))
+          ..write(',')
+          ..write(_q(e.cz))
+          ..write('|')
+          ..write(_q(e.radius))
+          ..write(',')
+          ..write(_q(e.depth))
+          ..write(',')
+          ..write(_q(e.rimHeight))
+          ..write(';');
+      }
     }
     return buf.toString();
   }

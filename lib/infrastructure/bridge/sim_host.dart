@@ -88,6 +88,7 @@ class SimHost {
       colonies: colonies,
       deposits: InMemoryDepositRepository(),
       weather: const NullWeatherRepository(),
+      terrainEdits: InMemoryTerrainEditsRepository(),
     );
     final session = Session(
       id: 'bridge',
