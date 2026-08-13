@@ -1,6 +1,6 @@
 # Voxel Terrain — Full-Planet LOD (phase 4)
 
-**Status:** 4a + 4b + 4c landed (see §7); 4d outstanding. **Scope:** replace the single chunk
+**Status:** 4a–4d landed (see §7). **Scope:** replace the single chunk
 under the craft with cubed-sphere terrain over the whole body, voxel resolution
 degrading with camera distance.
 
@@ -122,9 +122,27 @@ full-planet terrain the two overlap everywhere, so:
 | 4a ✅ | Cubed-sphere addressing + quadtree + LOD select + 2:1 balance. Fixed ring of chunks around the sub-camera point, still synchronous. | Unit tests on addressing/neighbour/balance. No renderer change visible beyond more ground. |
 | 4b ✅ | Skirts. | Visual gate accepted on the positive half only — see below. |
 | 4c ✅ | Async scheduler + upload budget. | No frame hitch on a fast descent. |
-| 4d | Full-planet coverage + sphere handoff. | Orbit → landing with no pop. |
+| 4d ✅ | Full-planet coverage + sphere handoff. | Orbit → landing with no pop. |
 
-Each phase ships independently. **4d is the one to start.**
+### What 4d shipped
+
+Terrain is ALWAYS on for the focused body — the minBodyPx gate is gone (at a
+few pixels the tree collapses to the six face roots, which cost nothing). The
+§5 recommendation stands: the textured sphere survives only as an under-shell,
+sunk below the field's DERIVED relief bound (`TerrainNodes.activeReliefM` →
+`BodyNodes`; the descriptor amplitude under-sank DEM bodies and the shell
+surfaced through deep basins). Two supporting fixes made this viable:
+
+- **Relief-aware horizon cull.** `isBeyondHorizon` occludes with the inner
+  ball (`radius - relief`) compared arc-wise against the chunk's highest
+  point, and an eye at/inside the inner ball culls nothing. The old
+  `P.E >= R^2` test culled the ENTIRE planet whenever the camera sat below
+  datum — which on the DEM Moon is every mare.
+- **Stand-in retirement.** A resident chunk not in the wanted set is kept
+  while any wanted-but-absent chunk overlaps it (quadtree ancestor/descendant
+  either way), so LOD splits/merges never open a hole through to the
+  under-shell; the stale surface overlaps its replacement for a frame and the
+  depth test picks the nearer.
 
 ### What 4c shipped
 
