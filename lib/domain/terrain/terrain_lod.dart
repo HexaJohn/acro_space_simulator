@@ -79,18 +79,35 @@ Set<ChunkKey> enforceBalance(Set<ChunkKey> input, {int maxIterations = 64}) {
 
 /// Whether the chunk centred at [chunk] is over the horizon from [eyeBF].
 ///
-/// Both in the body-fixed frame. A surface point `P` on a sphere of radius `R`
-/// is visible from `E` exactly when `P·E >= R^2`; [marginM] pulls the cut back
-/// so a chunk whose centre has just dipped under still counts (its near edge
-/// is likely still visible).
+/// Both in the body-fixed frame. The occluder is NOT the datum sphere: relief
+/// runs [reliefM] both ways around it, so the solid ball that can actually
+/// hide a chunk has radius `radiusM - reliefM`, and the chunk's terrain can
+/// stand as tall as `radiusM + reliefM`. Comparing arcs: the chunk is hidden
+/// only when its angular distance from the eye exceeds the eye's horizon arc
+/// over that inner ball plus the arc from which the chunk's HIGHEST point can
+/// still peek over it. [marginM] adds the chunk's own angular extent so a
+/// chunk whose centre has just dipped under keeps its visible near edge.
+///
+/// Using the datum as the occluder was a real bug: on a DEM body the maria
+/// sit kilometres BELOW datum, so a landed camera had `|eye| < radiusM` and
+/// every chunk on the planet — including the one underfoot — failed the old
+/// `P·E >= R^2` test. An eye at or inside the inner ball culls nothing.
 bool isBeyondHorizon(
   ChunkKey chunk,
   Vector3 eyeBF,
   double radiusM, {
   double marginM = 0,
+  double reliefM = 0,
 }) {
-  final p = chunk.centreDirection * radiusM;
-  return p.dot(eyeBF) < radiusM * (radiusM - marginM);
+  final inner = math.max(1e-6, radiusM - reliefM);
+  final eye = eyeBF.length;
+  if (eye <= inner) return false;
+  final peak = radiusM + reliefM;
+  final horizonArc = math.acos((inner / eye).clamp(0.0, 1.0)) +
+      math.acos((inner / peak).clamp(0.0, 1.0)) +
+      math.asin((marginM / radiusM).clamp(0.0, 1.0));
+  final cosA = (chunk.centreDirection.dot(eyeBF) / eye).clamp(-1.0, 1.0);
+  return math.acos(cosA) > horizonArc;
 }
 
 /// A demand for detail that screen-space selection would never produce on its

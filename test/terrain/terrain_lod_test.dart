@@ -250,6 +250,40 @@ void main() {
       expect(isBeyondHorizon(side, high, r), isFalse);
     });
 
+    test('an eye below the datum still sees the ground (DEM mare regression)', () {
+      // Moon DEM: the maria sit kilometres BELOW the datum sphere, so a
+      // landed camera has |eye| < radius. The old P.E >= R^2 test culled the
+      // whole planet in that state — including the chunk underfoot.
+      final eye = const Vector3(0, 0, 1) * (r - 2500);
+      final near = chunkAt(const Vector3(0, 0, 1), 8);
+      final far = chunkAt(const Vector3(0, 0, -1), 4);
+      expect(isBeyondHorizon(near, eye, r, reliefM: 9000), isFalse,
+          reason: 'the chunk underfoot must never cull');
+      expect(isBeyondHorizon(far, eye, r, reliefM: 9000), isTrue,
+          reason: 'the far side is still hidden by the body');
+    });
+
+    test('an eye at or under the lowest ground culls nothing', () {
+      final buried = const Vector3(0, 0, 1) * (r - 20000);
+      for (final k in ChunkKey.roots) {
+        expect(isBeyondHorizon(k, buried, r, reliefM: 9000), isFalse);
+      }
+    });
+
+    test('relief keeps a tall far peak visible', () {
+      // A chunk whose centre has dipped just under the geometric horizon can
+      // still show its peaks; reliefM must widen the kept set, never shrink.
+      final eye = const Vector3(0, 0, 1) * (r + 5000);
+      var culledFlat = 0, culledRelief = 0;
+      for (var i = 1; i < 100; i++) {
+        final ang = i * 0.01;
+        final k = chunkAt(Vector3(math.sin(ang), 0, math.cos(ang)).normalized, 6);
+        if (isBeyondHorizon(k, eye, r)) culledFlat++;
+        if (isBeyondHorizon(k, eye, r, reliefM: 9000)) culledRelief++;
+      }
+      expect(culledRelief, lessThan(culledFlat));
+    });
+
     test('margin keeps a chunk just past the edge alive', () {
       final eye = const Vector3(0, 0, 1) * (r + 50000);
       // Find a chunk that is exactly over the horizon with no margin.

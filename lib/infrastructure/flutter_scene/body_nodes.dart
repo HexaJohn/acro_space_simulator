@@ -57,8 +57,16 @@ class BodyNodes {
 
   void update(
     WorldSnapshot snap,
-    FloatingOrigin origin,
-  ) {
+    FloatingOrigin origin, {
+    // The body TerrainNodes is actively covering, and its field's DERIVED
+    // relief bound. On a DEM body the derived bound (real elevation span +
+    // detail headroom) is larger than the descriptor's amplitude, and the
+    // sphere must sink below the DEEPEST real basin or it surfaces through
+    // crater floors. One frame stale (bodies sync before terrain) — harmless,
+    // the value only changes on a focus switch.
+    String? terrainBodyId,
+    double terrainReliefM = 0,
+  }) {
     for (final d in snap.descriptors.values) {
       _kinds[d.id] = d.kind;
     }
@@ -85,9 +93,12 @@ class BodyNodes {
       // inside the relief, where it still does its real job: backing the gaps
       // while distant chunks are still being meshed.
       final terrain = snap.descriptors[b.id];
-      final sink = (terrain != null && terrain.hasTerrain)
+      var sink = (terrain != null && terrain.hasTerrain)
           ? terrain.terrainAmplitude
           : 0.0;
+      if (b.id == terrainBodyId && terrainReliefM > sink) {
+        sink = terrainReliefM;
+      }
       final scale = lengthToScene(b.radius - sink);
       node.localTransform = Matrix4Compose.compose(pos, rot, scale);
     }

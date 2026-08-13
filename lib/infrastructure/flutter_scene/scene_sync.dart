@@ -86,7 +86,11 @@ class SceneSync {
     origin.focusWorld =
         focusWorldOverride ?? _focusWorld(snap, focusVesselId, focusBodyId);
 
-    _bodies.update(snap, origin);
+    // Terrain's active body + relief are last frame's (terrain syncs below);
+    // they only change on a focus switch, so the one-frame lag is harmless.
+    _bodies.update(snap, origin,
+        terrainBodyId: _terrain.activeBodyId,
+        terrainReliefM: _terrain.activeReliefM);
     if (!_noVessels) {
       _vessels.update(snap, origin, starWorld: _bodies.starWorld(snap));
       _exhaust.update(snap, origin);
