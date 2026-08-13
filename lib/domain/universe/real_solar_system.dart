@@ -8,6 +8,7 @@ import 'dart:math' as math;
 import '../planetary/atmospheric_composition.dart';
 import '../planetary/surface_presets.dart';
 import '../planetary/terrain_config.dart';
+import '../terrain/terrain_profile.dart';
 import 'atmosphere_model.dart';
 import 'celestial_body.dart';
 import 'star_system.dart';
@@ -149,6 +150,10 @@ class RealSolarSystem {
           featureScale: 30000,
           grassAmount: 0.85,
           sandAmount: 0.35,
+          // Weather erases craters and rounds relief, so this profile leans on
+          // erosion damping and keeps only the largest, faintest impacts.
+          erodedDetail: true,
+          profile: TerrainProfile.terrestrial,
         ),
       ),
       CelestialBody(
@@ -258,6 +263,11 @@ class RealSolarSystem {
           seed: 0x11A00,
           amplitude: 3000,
           featureScale: 18000,
+          // Airless and ancient: erosion-aware relief plus a saturated crater
+          // population. The craters are what make it read as the Moon rather
+          // than as generic bumpy ground.
+          erodedDetail: true,
+          profile: TerrainProfile.moonlike,
         ),
       ),
 

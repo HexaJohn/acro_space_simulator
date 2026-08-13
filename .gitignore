@@ -32,6 +32,13 @@ migrate_working_dir/
 *.glb
 *.fsceneb
 
+# Raw DEM/albedo source rasters — gigabytes of working data in dem_src/ that
+# gets BAKED into a small shipped tile pyramid, exactly like the .glb ->
+# .fsceneb path above. Never commit the source; never bundle it. (dem_src/
+# deliberately sits outside assets/, which pubspec packages wholesale.)
+*.tif
+*.tiff
+
 # Flutter/Dart/Pub related
 **/doc/api/
 **/ios/Flutter/.last_build_id
