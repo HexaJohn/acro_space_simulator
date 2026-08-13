@@ -71,7 +71,7 @@ class TerrainTextures {
     if (_albedoTried.contains(bodyId)) return;
     _albedoTried.add(bodyId);
     try {
-      final data = await rootBundle.load('assets/terrain/\$bodyId.acroalb');
+      final data = await rootBundle.load('assets/terrain/$bodyId.acroalb');
       final bytes = data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
       final view = ByteData.sublistView(bytes);
       if (view.lengthInBytes < 16 ||
