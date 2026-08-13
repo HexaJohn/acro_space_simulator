@@ -29,6 +29,38 @@ class Quaternion {
     return Quaternion(math.cos(h), n.x * s, n.y * s, n.z * s);
   }
 
+  /// Orientation from an orthonormal, right-handed basis: [xAxis]/[yAxis]/
+  /// [zAxis] are where local +X/+Y/+Z end up. Shepperd's method on the rotation
+  /// matrix R = [x|y|z]. Callers pass a frame they've already built (a craft's
+  /// right/up/nose, a surface east/north/up) instead of chaining axis-angles.
+  factory Quaternion.fromBasis(Vector3 xAxis, Vector3 yAxis, Vector3 zAxis) {
+    final m00 = xAxis.x, m10 = xAxis.y, m20 = xAxis.z;
+    final m01 = yAxis.x, m11 = yAxis.y, m21 = yAxis.z;
+    final m02 = zAxis.x, m12 = zAxis.y, m22 = zAxis.z;
+    final trace = m00 + m11 + m22;
+    if (trace > 0) {
+      final s = math.sqrt(trace + 1.0) * 2;
+      return Quaternion(
+              0.25 * s, (m21 - m12) / s, (m02 - m20) / s, (m10 - m01) / s)
+          .normalized;
+    } else if (m00 > m11 && m00 > m22) {
+      final s = math.sqrt(1.0 + m00 - m11 - m22) * 2;
+      return Quaternion(
+              (m21 - m12) / s, 0.25 * s, (m01 + m10) / s, (m02 + m20) / s)
+          .normalized;
+    } else if (m11 > m22) {
+      final s = math.sqrt(1.0 + m11 - m00 - m22) * 2;
+      return Quaternion(
+              (m02 - m20) / s, (m01 + m10) / s, 0.25 * s, (m12 + m21) / s)
+          .normalized;
+    } else {
+      final s = math.sqrt(1.0 + m22 - m00 - m11) * 2;
+      return Quaternion(
+              (m10 - m01) / s, (m02 + m20) / s, (m12 + m21) / s, 0.25 * s)
+          .normalized;
+    }
+  }
+
   Quaternion operator *(Quaternion q) => Quaternion(
         w * q.w - x * q.x - y * q.y - z * q.z,
         w * q.x + x * q.w + y * q.z - z * q.y,

@@ -41,7 +41,9 @@ class SurfacePlacement {
     final northAxis = up.cross(eastAxis); // unit; completes the right-handed frame
     final position =
         up * (radius + elevation) + eastAxis * east + northAxis * north;
-    final orientation = _basisToQuaternion(eastAxis, northAxis, up);
+    // Local (+X, +Y, +Z) = (east, north, up), so a building's "up" points away
+    // from the planet centre.
+    final orientation = Quaternion.fromBasis(eastAxis, northAxis, up);
     return (position: position, orientation: orientation);
   }
 
@@ -67,28 +69,3 @@ class SurfacePlacement {
       );
 }
 
-/// Quaternion from an orthonormal basis whose axes are the images of local
-/// (+X, +Y, +Z) = (east, north, up). Shepperd's method on R = [east|north|up].
-Quaternion _basisToQuaternion(Vector3 east, Vector3 north, Vector3 up) {
-  final m00 = east.x, m10 = east.y, m20 = east.z;
-  final m01 = north.x, m11 = north.y, m21 = north.z;
-  final m02 = up.x, m12 = up.y, m22 = up.z;
-  final trace = m00 + m11 + m22;
-  if (trace > 0) {
-    final s = math.sqrt(trace + 1.0) * 2;
-    return Quaternion(0.25 * s, (m21 - m12) / s, (m02 - m20) / s, (m10 - m01) / s)
-        .normalized;
-  } else if (m00 > m11 && m00 > m22) {
-    final s = math.sqrt(1.0 + m00 - m11 - m22) * 2;
-    return Quaternion((m21 - m12) / s, 0.25 * s, (m01 + m10) / s, (m02 + m20) / s)
-        .normalized;
-  } else if (m11 > m22) {
-    final s = math.sqrt(1.0 + m11 - m00 - m22) * 2;
-    return Quaternion((m02 - m20) / s, (m01 + m10) / s, 0.25 * s, (m12 + m21) / s)
-        .normalized;
-  } else {
-    final s = math.sqrt(1.0 + m22 - m00 - m11) * 2;
-    return Quaternion((m10 - m01) / s, (m02 + m20) / s, (m12 + m21) / s, 0.25 * s)
-        .normalized;
-  }
-}

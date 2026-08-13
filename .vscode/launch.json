@@ -2,6 +2,17 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "macOS (Impeller)",
+      "request": "launch",
+      "type": "dart",
+      "deviceId": "macos",
+      // Impeller (Metal) is already the macOS default, but Flutter GPU — the
+      // API flutter_scene renders through — is opt-in everywhere and is only
+      // supported on Impeller. Both are passed explicitly so the requirement
+      // is documented and survives any change to the platform default.
+      "args": ["--enable-impeller", "--enable-flutter-gpu"]
+    },
+    {
       "name": "Windows (Impeller)",
       "request": "launch",
       "type": "dart",

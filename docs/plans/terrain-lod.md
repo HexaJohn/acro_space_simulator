@@ -1,8 +1,8 @@
 # Voxel Terrain — Full-Planet LOD (phase 4)
 
-**Status:** design, awaiting go-ahead. **Scope:** replace the single chunk under the
-craft with cubed-sphere terrain over the whole body, voxel resolution degrading with
-camera distance.
+**Status:** 4a + 4b landed (see §7); 4c–4d outstanding. **Scope:** replace the single chunk
+under the craft with cubed-sphere terrain over the whole body, voxel resolution
+degrading with camera distance.
 
 Today `TerrainNodes` meshes exactly ONE axis-aligned box at the sub-camera surface
 point (`chunkSizeM = 6000`, `resolution = 48`, only below `maxAltitudeM = 60000`) and
@@ -119,12 +119,52 @@ full-planet terrain the two overlap everywhere, so:
 
 | Phase | Deliverable | Gate |
 |---|---|---|
-| 4a | Cubed-sphere addressing + quadtree + LOD select + 2:1 balance. Fixed ring of chunks around the sub-camera point, still synchronous. | Unit tests on addressing/neighbour/balance. No renderer change visible beyond more ground. |
-| 4b | Skirts. | Visual: no cracks at a level boundary. |
+| 4a ✅ | Cubed-sphere addressing + quadtree + LOD select + 2:1 balance. Fixed ring of chunks around the sub-camera point, still synchronous. | Unit tests on addressing/neighbour/balance. No renderer change visible beyond more ground. |
+| 4b ✅ | Skirts. | Visual gate accepted on the positive half only — see below. |
 | 4c | Async scheduler + upload budget + LRU. | No frame hitch on a fast descent. |
 | 4d | Full-planet coverage + sphere handoff. | Orbit → landing with no pop. |
 
-Each phase ships independently. **4a is the one to start.**
+Each phase ships independently. **4c is the one to start.**
+
+### What 4b shipped, and what its gate actually covers
+
+`_addSkirt` in `cell_mesher.dart` is verified geometrically: the apron closes
+every open edge among surface vertices, hangs inward by its depth, and that depth
+out-reaches how far the ground moves over one COARSE voxel (the 2:1 bound) at
+levels 5/7/9. Depth defaults to 2.5 voxels, not the §3 "one voxel" — 2:1 balance
+means the neighbour's voxels are twice ours, so one of ours cannot span the worst
+case. Cost is ~28% more triangles (128.6k vs 100.3k on a 50-chunk ring).
+
+A nadir capture at 100 km (50 chunks, levels 5–6) shows continuous terrain with
+no cracks. The negative control — same framing, `skirtVoxels=0` — was **not**
+shot, so what is established is "skirts do not break anything", not "skirts fix
+the cracks". That was accepted deliberately, not overlooked: cracks had not been
+observed as a problem in the first place, and the geometric tests bound the case
+the apron exists to cover.
+
+If cracks ever DO show, run the A/B before touching the mesher —
+`ext.acro.terrain?skirtVoxels=0` toggles it live (resident chunks re-mesh on the
+change), so it is two commands. Only reach for Transvoxel (§3) after seeing a
+crack that a deeper skirt cannot hide.
+
+### What 4a actually shipped
+
+`domain/terrain/cubed_sphere.dart` (addressing), `terrain_lod.dart` (hysteretic
+quadtree + `enforceBalance` + `isBeyondHorizon`), `cell_mesher.dart` (thin-shell
+`(s, t, r)` mesher), and a `Map<ChunkKey, _ResidentChunk>` in `TerrainNodes`.
+
+Two notes for whoever picks up 4b:
+
+- **Seam neighbours are derived, not stepped.** Stepping one cell in `(s, t)` and
+  re-projecting lands exactly ON a cell boundary near face corners (at `n=4`, a
+  corner cell projects to `t' = 0.5`). The transform is instead read off the face
+  bases, giving coordinates that are exactly `±1` and `±a`. Do not "simplify" it
+  back.
+- **Two pre-existing blockers found while verifying.** The adaptive near plane is
+  `(range + bodyRadius)/20`, so a BODY focus clips everything within ~87 km on the
+  Moon and terrain is invisible at any altitude — only vessel focus works. And on
+  macOS the app is sandboxed, so `ext.acro.screenshot` can only write under
+  `~/Library/Containers/com.example.acroSpaceSimulator/Data`.
 
 ## 8. Tests
 

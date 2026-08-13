@@ -13,6 +13,7 @@ import '../../domain/shared/vector3.dart';
 import '../flutter/texture_cache.dart';
 import 'atmosphere_nodes.dart';
 import 'ring_nodes.dart';
+import 'scatter/scatter_prop_library.dart';
 import 'terrain/terrain_nodes.dart';
 import 'scene_camera_adapter.dart';
 import 'scene_sync.dart';
@@ -89,6 +90,17 @@ class _SceneRenderViewState extends State<SceneRenderView> {
     });
     TerrainNodes.loadShader().catchError((Object e) {
       debugPrint('terrain shader load failed: $e');
+    });
+    // Prop textures + the variant pool. Growing every variant here moves a
+    // few hundred milliseconds of mesh generation off the moment the first
+    // treeline appears, where it would land as a visible stall.
+    ScatterPropLibrary.loadTextures().then((_) {
+      if (mounted) {
+        ScatterPropLibrary.instance.warmUp();
+        setState(() {});
+      }
+    }).catchError((Object e) {
+      debugPrint('scatter textures load failed: $e');
     });
     TerrainNodes.loadTextures().catchError((Object e) {
       debugPrint('terrain textures load failed: $e');

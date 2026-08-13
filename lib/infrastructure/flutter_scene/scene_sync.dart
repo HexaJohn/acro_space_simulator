@@ -22,6 +22,7 @@ import 'line_nodes.dart';
 import 'ring_nodes.dart';
 import 'scene_textures.dart';
 import 'star_bloom_nodes.dart';
+import 'scatter/scatter_nodes.dart';
 import 'terrain/terrain_nodes.dart';
 import 'vessel_nodes.dart';
 
@@ -50,6 +51,7 @@ class SceneSync {
     _rings = RingNodes(scene, _textures);
     _environment = PlanetEnvironmentBaker(scene, _textures);
     _terrain = TerrainNodes(scene);
+    _scatter = ScatterNodes(scene);
     _starBloom = StarBloomNodes(scene);
   }
 
@@ -64,6 +66,7 @@ class SceneSync {
   late final RingNodes _rings;
   late final PlanetEnvironmentBaker _environment;
   late final TerrainNodes _terrain;
+  late final ScatterNodes _scatter;
   late final StarBloomNodes _starBloom;
 
   final FloatingOrigin origin = FloatingOrigin();
@@ -109,9 +112,21 @@ class SceneSync {
       snap,
       origin,
       cameraEye: camera?.eyeOffset ?? Vector3.zero,
+      camera: camera,
       focusBodyId: focusBodyId,
       focusVesselId: focusVesselId,
       starWorld: _bodies.starWorld(snap),
+    );
+    // Immediately after terrain, and from the same inputs: props stand on the
+    // ground the chunk above just meshed, so anything that changes one has to
+    // reach the other in the same frame.
+    _scatter.update(
+      snap,
+      origin,
+      cameraEye: camera?.eyeOffset ?? Vector3.zero,
+      camera: camera,
+      focusBodyId: focusBodyId,
+      focusVesselId: focusVesselId,
     );
     _skybox.update(
         cameraRangeKm:

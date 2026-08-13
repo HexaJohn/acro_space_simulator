@@ -19,6 +19,7 @@ import 'megastructure_screen.dart';
 import 'mining_screen.dart';
 import 'multiplayer_screen.dart';
 import 'options_screen.dart';
+import 'scatter_lab_screen.dart';
 
 /// Top-level menu. The composition root's [home]; routes to the live sim and to
 /// every feature screen so each implemented system has a place in the UI.
@@ -64,6 +65,8 @@ class MainMenuScreen extends StatelessWidget {
           Icons.hub, AppTheme.accent, (c) => const MegastructureScreen()),
       _MenuItem('MULTIPLAYER', 'Sessions, players, command authority',
           Icons.groups, AppTheme.accent, (c) => const MultiplayerScreen()),
+      _MenuItem('SCATTER LAB', 'Preview procedural trees, plants + rocks',
+          Icons.park, AppTheme.accent2, (c) => const ScatterLabScreen()),
       _MenuItem('OPTIONS', 'Graphics, simulation, controls', Icons.settings,
           AppTheme.textDim, (c) => const OptionsScreen()),
     ];

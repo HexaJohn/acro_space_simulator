@@ -13,7 +13,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/gestures.dart' show PointerScrollEvent, kMiddleMouseButton;
-import 'package:flutter/services.dart' show LogicalKeyboardKey, KeyEvent, KeyDownEvent, KeyUpEvent;
+import 'package:flutter/services.dart'
+    show
+        HardwareKeyboard,
+        LogicalKeyboardKey,
+        KeyEvent,
+        KeyDownEvent,
+        KeyUpEvent;
 
 import '../../domain/autonomy/pilot_input.dart';
 import '../../domain/shared/quaternion.dart';
@@ -31,6 +37,7 @@ import '../../application/persistence/game_state_codec.dart';
 import '../../application/ports/compute_port.dart';
 import '../../application/usecases/advance_simulation_tick.dart';
 import '../../domain/orbits/soi_transition_service.dart';
+import '../../domain/orbits/spawn_presets.dart';
 import '../../domain/orbits/state_vector_converter.dart';
 import '../../domain/simulation/epoch.dart';
 import '../../domain/science/research_ledger.dart';
@@ -60,7 +67,7 @@ import 'top_down_painter.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.3.267-atmo';
+const String kBuildStamp = 'build 0.3.3.268-spawn';
 
 /// What the camera treats as "up" while orbiting the focus.
 enum CameraUpMode {
@@ -131,6 +138,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   late final InMemoryColonyRepository _colonies;
   late final InMemoryDepositRepository _deposits;
   late final ResearchLedger _research;
+
+  /// Craters and excavation, accumulated for the life of the session. Owned
+  /// here rather than by the tick, which gets rebuilt whenever a debug cheat
+  /// toggles.
+  final InMemoryTerrainEditsRepository _terrainEdits =
+      InMemoryTerrainEditsRepository();
 
   // ---- Engine bridge ----
   // Serves THIS in-process sim to an external renderer (Unreal) over the
@@ -490,19 +503,80 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     );
   }
 
-  void _onKey(KeyEvent e) {
+  /// Every key the sim consumes — flight (W/S A/D Q/E, Shift), mode (M),
+  /// zoom ([ ]), time warp (, .) and camera orbit (arrows).
+  ///
+  /// [_onKey] must report exactly these to the focus system as `handled`.
+  /// macOS rings the system alert sound for any key an app leaves unhandled:
+  /// the event walks the AppKit responder chain, matches no menu equivalent,
+  /// and ends in NSBeep. Holding a key repeats the beep once per key-repeat.
+  /// Windows has no such fallback, so the old always-unhandled path was only
+  /// ever audible on macOS. Anything outside this set stays `ignored` so menu
+  /// and system shortcuts still reach the platform.
+  ///
+  /// Both Shift keys are listed although only [LogicalKeyboardKey.shiftLeft]
+  /// drives throttle — right-Shift stays silent rather than beeping.
+  /// Per-keypress zoom factor for the [ ] and - = keys (>1 = out).
+  static const double _keyZoomStep = 1.25;
+
+  // Not `const`: LogicalKeyboardKey overrides `==`, which const sets forbid.
+  static final Set<LogicalKeyboardKey> _simKeys = {
+    LogicalKeyboardKey.keyW,
+    LogicalKeyboardKey.keyS,
+    LogicalKeyboardKey.keyA,
+    LogicalKeyboardKey.keyD,
+    LogicalKeyboardKey.keyQ,
+    LogicalKeyboardKey.keyE,
+    LogicalKeyboardKey.keyM,
+    LogicalKeyboardKey.shiftLeft,
+    LogicalKeyboardKey.shiftRight,
+    LogicalKeyboardKey.bracketLeft,
+    LogicalKeyboardKey.bracketRight,
+    LogicalKeyboardKey.minus,
+    LogicalKeyboardKey.equal,
+    LogicalKeyboardKey.comma,
+    LogicalKeyboardKey.period,
+    LogicalKeyboardKey.arrowLeft,
+    LogicalKeyboardKey.arrowRight,
+    LogicalKeyboardKey.arrowUp,
+    LogicalKeyboardKey.arrowDown,
+  };
+
+  KeyEventResult _keyResult(KeyEvent e) => _simKeys.contains(e.logicalKey)
+      ? KeyEventResult.handled
+      : KeyEventResult.ignored;
+
+  KeyEventResult _onKey(FocusNode node, KeyEvent e) {
+    // Key-up clears unconditionally — even under a modifier chord — so a key
+    // can't stay latched in [_keysDown] if a shortcut is pressed mid-hold.
+    if (e is KeyUpEvent) {
+      _keysDown.remove(e.logicalKey);
+      return _keyResult(e);
+    }
+    // A modifier chord is a shortcut, not a flight input: Cmd+Q must quit
+    // rather than roll the craft, so let those bubble to the platform.
+    if (HardwareKeyboard.instance.isMetaPressed ||
+        HardwareKeyboard.instance.isControlPressed ||
+        HardwareKeyboard.instance.isAltPressed) {
+      return KeyEventResult.ignored;
+    }
     if (e is KeyDownEvent) {
       // Toggle manual control with M.
       if (e.logicalKey == LogicalKeyboardKey.keyM) {
         setState(() => _manualControl = !_manualControl);
-        return;
+        return KeyEventResult.handled;
       }
       _keysDown.add(e.logicalKey);
-      // Camera zoom with [ and ].
-      if (e.logicalKey == LogicalKeyboardKey.bracketLeft) {
-        setState(() => _metresPerPixel = (_metresPerPixel * 1.25).clamp(0.5, 2e10));
-      } else if (e.logicalKey == LogicalKeyboardKey.bracketRight) {
-        setState(() => _metresPerPixel = (_metresPerPixel / 1.25).clamp(0.5, 2e10));
+      // Camera zoom: [ / ] and - / = are equivalent pairs (out / in). Both go
+      // through _zoom so they track perspective range as well as ortho
+      // metres-per-pixel, exactly like the scroll wheel — the old path wrote
+      // _metresPerPixel directly and so did nothing in perspective mode.
+      if (e.logicalKey == LogicalKeyboardKey.bracketLeft ||
+          e.logicalKey == LogicalKeyboardKey.minus) {
+        setState(() => _zoom(_keyZoomStep));
+      } else if (e.logicalKey == LogicalKeyboardKey.bracketRight ||
+          e.logicalKey == LogicalKeyboardKey.equal) {
+        setState(() => _zoom(1 / _keyZoomStep));
       } else if (e.logicalKey == LogicalKeyboardKey.comma) {
         _stepWarp(-1); // , slows time
       } else if (e.logicalKey == LogicalKeyboardKey.period) {
@@ -516,9 +590,11 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       } else if (e.logicalKey == LogicalKeyboardKey.arrowDown) {
         _orbitCamera(0, -_orbitStep);
       }
-    } else if (e is KeyUpEvent) {
-      _keysDown.remove(e.logicalKey);
     }
+    // KeyRepeatEvent lands here and deliberately re-triggers nothing: held
+    // keys act through [_keysDown], polled per frame. It still has to report
+    // as handled, or every repeat tick rings the macOS alert sound.
+    return _keyResult(e);
   }
 
   TopDownSnapshot? _snapshot;
@@ -750,7 +826,11 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     // No-op on web (the stub). Fire-and-forget — a bind failure (port in use)
     // shouldn't stop the game from running in-process.
     _bridge = createSimBridge();
-    unawaited(_bridge.start());
+    // A failed bind (port 5800 already held by a second instance or the
+    // standalone sim_server) must not surface as an unhandled async error —
+    // `unawaited` only silences the lint, not the throw. The game runs fine
+    // in-process; only the external-renderer bridge is unavailable.
+    unawaited(_bridge.start().catchError((Object _) {}));
     _bridgeCommands = _bridge.commandFrames.listen(_applyBridgeCommands);
 
     _ticker = createTicker(_onFrame)..start();
@@ -804,6 +884,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       deposits: _deposits,
       weather: _weather,
       research: _research,
+      // Persist across rebuilds: the cheat toggles rebuild the tick, and
+      // dropping the store would erase every crater already dug.
+      terrainEdits: _terrainEdits,
       disableOverheat: _disableOverheat,
       disableAeroStress: _disableAeroStress,
       disableImpact: _disableImpact,
@@ -975,6 +1058,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         system: _universe.current(),
         epoch: _clock.epoch,
         colonies: _colonies,
+        terrainEdits: _terrainEdits,
         includeDescriptors: sendDescriptors,
       );
       _bridge.publish(_wire.encodeWorld(world));
@@ -990,6 +1074,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         system: _universe.current(),
         epoch: _clock.epoch,
         colonies: _colonies,
+        terrainEdits: _terrainEdits,
       );
     } else {
       _sceneWorld = null;
@@ -1349,7 +1434,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           visualDensity: VisualDensity.compact,
           materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
         ),
-        Text(label, style: const TextStyle(color: Color(0xFFB9C9DC), fontSize: 12)),
+        Expanded(
+          child: Text(label,
+              style: const TextStyle(color: Color(0xFFB9C9DC), fontSize: 12)),
+        ),
       ],
     ),
   );
@@ -1426,18 +1514,49 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     ];
     return Container(
       width: 190,
+      // The panel grew past a short viewport (spawn presets + depth sliders +
+      // cheats); cap it to the screen and scroll instead of overflowing.
+      constraints: BoxConstraints(
+          maxHeight: math.max(160.0, MediaQuery.sizeOf(context).height - 24)),
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
         color: const Color(0xE6101820),
         borderRadius: BorderRadius.circular(8),
         border: Border.all(color: const Color(0x447FB0E0)),
       ),
-      child: Column(
+      child: SingleChildScrollView(
+        child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // Spawn presets first: the fastest way to get a scene on screen.
           const Padding(
             padding: EdgeInsets.only(left: 4, top: 4, bottom: 2),
+            child: Text(
+              'SPAWN',
+              style: TextStyle(color: Color(0xFF7FB0E0), fontSize: 11, fontWeight: FontWeight.bold),
+            ),
+          ),
+          for (final preset in SpawnPreset.values)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
+              child: _atmoButton(
+                preset.label,
+                const Color(0xFF7FE0A0),
+                _vessels.all().isEmpty ? null : () => _spawnAt(preset),
+              ),
+            ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 2, 4, 4),
+            child: Text(
+              _vessels.all().isEmpty
+                  ? 'No craft to move.'
+                  : 'Moves the locked craft (warp → 1x).',
+              style: const TextStyle(color: Color(0xFF7E93A8), fontSize: 11),
+            ),
+          ),
+          const Padding(
+            padding: EdgeInsets.only(left: 4, top: 6, bottom: 2),
             child: Text(
               'DRAW LAYERS',
               style: TextStyle(color: Color(0xFF7FB0E0), fontSize: 11, fontWeight: FontWeight.bold),
@@ -1454,7 +1573,13 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                     visualDensity: VisualDensity.compact,
                     materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
-                  Text(label, style: const TextStyle(color: Color(0xFFB9C9DC), fontSize: 12)),
+                  // Flexible: the longest labels ('Exaggerate atmosphere')
+                  // overflow the 190 px panel otherwise.
+                  Expanded(
+                    child: Text(label,
+                        style: const TextStyle(
+                            color: Color(0xFFB9C9DC), fontSize: 12)),
+                  ),
                 ],
               ),
             ),
@@ -1633,6 +1758,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
             ),
           ),
         ],
+        ),
       ),
     );
   }
@@ -1657,6 +1783,76 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       ),
     ),
   );
+
+  /// How far the camera should sit off the craft after a spawn (m). Surface
+  /// sites want to read the ground, the ring orbit wants the particle field
+  /// (visible within ~1 km), and the orbits want the planet behind the craft.
+  static double _spawnViewRange(SpawnPreset preset) => switch (preset) {
+        SpawnPreset.earthSurface || SpawnPreset.earthOcean => 150,
+        SpawnPreset.moonSurface => 150,
+        SpawnPreset.saturnRings => 400,
+        SpawnPreset.lowEarthOrbit || SpawnPreset.lowLunarOrbit => 600,
+      };
+
+  /// Teleport the focused craft to a debug spawn preset — the quick way to get
+  /// eyes on a scene (ground, water, low orbit, another world, the rings)
+  /// without flying there. Warp drops to 1x and the camera re-frames on the
+  /// craft so what you asked for is on screen the moment it lands.
+  void _spawnAt(SpawnPreset preset) {
+    final all = _vessels.all();
+    final id = _focusVessel ?? (all.isEmpty ? null : all.first.id);
+    if (id == null) return;
+    final vessel = _vessels.byId(id);
+    if (vessel == null) return;
+    final placement = const SpawnPresets()
+        .resolve(preset, system: _universe.current(), epoch: _clock.epoch);
+    if (placement == null) return; // body not in this system
+
+    // Nothing from the old flight carries across a teleport.
+    vessel.flightPlan = null;
+    vessel.docking = null;
+    vessel.targetFacing = null;
+    vessel.setThrottle(0);
+    vessel.dominantBody = placement.body;
+    vessel.landed = placement.landed;
+    vessel.mode =
+        placement.landed ? PropagationMode.physics : PropagationMode.onRails;
+    vessel.updateState(placement.state);
+    _vessels.save(vessel);
+
+    setState(() {
+      // Lock onto the craft we just moved (a body lock would look at the wrong
+      // world entirely).
+      _focusVessel = id;
+      _focusBody = null;
+      _lastFocusBody = placement.body;
+      final idx = _targets.indexWhere((t) => t.v == id);
+      if (idx >= 0) _targetIndex = idx;
+      _freecam = false; // its anchor is a whole planet away now
+      // The breadcrumb would streak across the jump (it only self-clears on an
+      // SOI change, and a same-body teleport isn't one).
+      _trail.clear();
+      _trailVessel = null;
+      _trailBody = null;
+      // A warp-to-apsis was aimed at the OLD orbit; high warp on a fresh
+      // surface spawn just throws the craft around.
+      _warpTarget = null;
+      _warpTargetLabel = null;
+      _warpIndex = _warp1x;
+      _clock.warpFactor = _warpLevels[_warp1x];
+      // Local-vertical gimbal, re-seeded: the frame is integrated from the
+      // previous radial each frame, so a teleport would compose a huge bogus
+      // arc onto it.
+      _upMode = CameraUpMode.gravity;
+      _gravFrame = null;
+      _gravRadial = null;
+      _view = CameraOrbit.preset(CameraView.threeQuarter);
+      _perspectiveMode = true;
+      _range = _spawnViewRange(preset);
+      _metresPerPixel = (_range / 100).clamp(0.5, 2e10); // ortho fallback
+    });
+    _keyFocus.requestFocus();
+  }
 
   /// Nav-ball state for the currently-locked vessel, or null when a body is the
   /// camera target (no craft attitude to show).
@@ -2042,7 +2238,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           ],
         ),
       ), // end SafeArea(floatingActionButton)
-      body: KeyboardListener(
+      // Focus, not KeyboardListener: the latter reports every key as
+      // `ignored`, which on macOS falls through to AppKit and rings the
+      // system alert sound. See [_simKeys].
+      body: Focus(
         focusNode: _keyFocus,
         autofocus: true,
         onKeyEvent: _onKey,
@@ -2211,8 +2410,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                           bottom: 8,
                           child: Text(
                             _manualControl
-                                ? 'MANUAL  keys: W/S A/D Q/E Shift  |  touch: joystick + throttle  |  M auto  |  pinch/wheel/[ ] zoom'
-                                : 'AUTO  (M or tap for manual flight)  |  pinch/scroll/[ ] zoom',
+                                ? 'MANUAL  keys: W/S A/D Q/E Shift  |  touch: joystick + throttle  |  M auto  |  pinch/wheel/[ ]/-= zoom'
+                                : 'AUTO  (M or tap for manual flight)  |  pinch/scroll/[ ]/-= zoom',
                             style: TextStyle(
                               color: _manualControl ? const Color(0xFFFF8C66) : const Color(0xFF6E8299),
                               fontSize: 11,
