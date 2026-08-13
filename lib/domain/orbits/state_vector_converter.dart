@@ -21,6 +21,12 @@ import 'orbital_elements.dart';
 class StateVectorOrbitConverter {
   const StateVectorOrbitConverter();
 
+  /// How far `e` is held clear of exactly 1, so that it and the semi-major axis
+  /// never disagree about which conic they describe. Small enough to be
+  /// physically irrelevant (it moves a rectilinear periapsis by `a * 1e-12` —
+  /// sub-micron at planetary scale), large enough to survive double rounding.
+  static const double _familyEpsilon = 1e-12;
+
   /// Cartesian (body-centred inertial) -> Keplerian elements.
   Orbit toOrbit({
     required Vector3 position,
@@ -36,23 +42,22 @@ class StateVectorOrbitConverter {
     final h = r.cross(v); // specific angular momentum
     final hMag = h.length;
 
-    // Degenerate: (near-)zero angular momentum — radial fall or a body at rest
-    // in this frame. A conic is ill-defined; return a trivial circular orbit at
-    // the current radius so propagation is a no-op rather than producing NaN.
-    if (hMag < 1e-3 || rMag < 1e-6) {
-      return Orbit(
-        elements: OrbitalElements(
-          semiMajorAxis: rMag,
-          eccentricity: 0,
-          inclination: 0,
-          longitudeOfAscendingNode: 0,
-          argumentOfPeriapsis: 0,
-          meanAnomalyAtEpoch: 0,
-        ),
-        body: body.id,
-        mu: mu,
-        epoch: epoch,
-      );
+    // (Near-)zero angular momentum: a RECTILINEAR trajectory — a craft dropped
+    // straight down, or thrown straight up. This is a real conic (the e -> 1
+    // limit at finite a), not an error case, and it is handled below rather
+    // than papered over.
+    //
+    // The threshold is relative to the circular angular momentum at this
+    // radius, so it means the same thing on every body. Below it the periapsis
+    // is a fraction of a millimetre from the body's CENTRE and the classical
+    // element set stops carrying position: with e == 1 the conic equation
+    // r = p/(1 + e cos v) degenerates to 0/0, so true anomaly — which the
+    // general path below derives position from — encodes nothing. The
+    // eccentric anomaly still does, so [_rectilinear] goes at it from there.
+    if (rMag < 1e-6) return _zeroRadiusOrbit(body, mu, epoch);
+    if (hMag < 1e-6 * math.sqrt(mu * rMag)) {
+      return _rectilinear(
+          r: r, v: v, rMag: rMag, mu: mu, body: body, epoch: epoch);
     }
 
     final n = Vector3.unitZ.cross(h); // node vector
@@ -61,7 +66,7 @@ class StateVectorOrbitConverter {
     // Eccentricity vector.
     final eVec =
         (r * (v.lengthSquared - mu / rMag) - v * r.dot(v)) * (1.0 / mu);
-    final e = eVec.length;
+    var e = eVec.length;
 
     final energy = v.lengthSquared / 2 - mu / rMag;
     // Semi-major axis from vis-viva. Exactly-parabolic energy (a -> inf) is a
@@ -69,6 +74,17 @@ class StateVectorOrbitConverter {
     // clamp to a huge finite conic of the right family instead.
     var a = -mu / (2 * energy);
     if (!a.isFinite || a.abs() > 1e18) a = energy <= 0 ? 1e18 : -1e18;
+
+    // Keep `e` and `a` agreeing about which conic this is. `e` comes out of a
+    // vector difference, and on a very eccentric BOUND orbit it rounds to
+    // exactly 1.0 while `a` stays positive. Everything downstream — the branch
+    // in [toStateVector], [_trueToMean], `OrbitalElements.isElliptical` — picks
+    // the conic family off `e` alone, so an unclamped value sends a bound orbit
+    // through the hyperbolic formulas, which assume `a < 0` and hand back
+    // negative radii. Pinning the family at construction is the one place that
+    // fixes every consumer at once.
+    if (a > 0 && e >= 1.0) e = 1.0 - _familyEpsilon;
+    if (a < 0 && e <= 1.0) e = 1.0 + _familyEpsilon;
 
     final i = math.acos((h.z / hMag).clamp(-1.0, 1.0));
 
@@ -132,6 +148,121 @@ class StateVectorOrbitConverter {
       epoch: epoch,
     );
   }
+
+  /// The conic for a RECTILINEAR trajectory — falling straight toward the
+  /// body's centre, or rising straight away from it.
+  ///
+  /// Such a trajectory has no orbital PLANE: with `h = 0` the plane normal, the
+  /// node vector, and therefore inclination and RAAN are all undefined. It is
+  /// nonetheless a perfectly real conic — the degenerate ellipse `e = 1` at
+  /// FINITE positive `a`, apoapsis `2a`, periapsis the centre itself. (The
+  /// parabola is the other degenerate case, the one where `a` runs to infinity;
+  /// conflating the two is what makes this look unrepresentable.)
+  ///
+  /// Two observations make the classical element set carry it anyway:
+  ///
+  ///  * Any plane containing the line of motion reproduces that motion exactly,
+  ///    so one is synthesised deterministically. The choice cannot affect where
+  ///    the craft ends up — it travels along the apsidal line either way.
+  ///  * Position must come from the ECCENTRIC anomaly, solved from the radius.
+  ///    True anomaly is useless here: at `e = 1` the conic equation
+  ///    `r = p / (1 + e cos v)` has `p = 0`, so it degenerates to `0/0` and
+  ///    every radius on the line reports the same anomaly.
+  ///
+  /// The perifocal x axis is `-r`: periapsis is at the centre, so a craft out
+  /// at radius `r` sits on the apoapsis side of it.
+  ///
+  /// [toStateVector]'s elliptic branch then reproduces this EXACTLY, not
+  /// approximately. At `e -> 1` it collapses to `xP = a(cos E - 1) = -r` and
+  /// `yP = 0`, and `_solveKepler` is solving `E - sin E = M` — which is the
+  /// radial Kepler equation itself.
+  Orbit _rectilinear({
+    required Vector3 r,
+    required Vector3 v,
+    required double rMag,
+    required double mu,
+    required CelestialBody body,
+    required Epoch epoch,
+  }) {
+    final rHat = r * (1.0 / rMag);
+    final vr = r.dot(v) / rMag; // signed radial speed; negative = falling
+
+    final energy = v.lengthSquared / 2 - mu / rMag;
+    var a = -mu / (2 * energy);
+    if (!a.isFinite || a.abs() > 1e18) a = energy <= 0 ? 1e18 : -1e18;
+    final e = a > 0 ? 1.0 - _familyEpsilon : 1.0 + _familyEpsilon;
+
+    // Perifocal x: toward periapsis, which is straight down the radial.
+    final xHat = -rHat;
+    // Any plane through the line of motion; take the one it spans with +Z, and
+    // fall back to +X when the motion is along the pole and that degenerates.
+    var w = rHat.cross(Vector3.unitZ);
+    if (w.lengthSquared < 1e-18) w = rHat.cross(Vector3.unitX);
+    w = w.normalized;
+
+    final i = math.acos(w.z.clamp(-1.0, 1.0));
+    var nVec = Vector3.unitZ.cross(w);
+    var raan = 0.0;
+    if (nVec.lengthSquared < 1e-18) {
+      nVec = Vector3.unitX; // equatorial plane: no node, anchor the frame at +X
+    } else {
+      nVec = nVec.normalized;
+      raan = _wrap(math.atan2(nVec.y, nVec.x));
+    }
+    // Signed node -> periapsis angle, taken about the orbit normal.
+    final argP = _wrap(math.atan2(nVec.cross(xHat).dot(w), nVec.dot(xHat)));
+
+    // Phase from the RADIUS via the eccentric anomaly.
+    double m0;
+    if (a > 0) {
+      // r = a(1 - e cos E). E runs 0 (periapsis) -> pi (apoapsis) -> 2pi, so
+      // rising is E in (0, pi) and falling is (pi, 2pi).
+      var eccAnom = math.acos((((1 - rMag / a) / e)).clamp(-1.0, 1.0));
+      if (vr < 0) eccAnom = 2 * math.pi - eccAnom;
+      m0 = _wrap(eccAnom - e * math.sin(eccAnom));
+    } else {
+      // r = a(1 - e cosh H) with a < 0. H < 0 inbound, H > 0 outbound.
+      final coshH = math.max((1 - rMag / a) / e, 1.0);
+      var hAnom = math.log(coshH + math.sqrt(coshH * coshH - 1));
+      if (vr < 0) hAnom = -hAnom;
+      m0 = e * _sinh(hAnom) - hAnom;
+    }
+
+    return Orbit(
+      elements: OrbitalElements(
+        semiMajorAxis: a,
+        eccentricity: e,
+        inclination: i,
+        longitudeOfAscendingNode: raan,
+        argumentOfPeriapsis: argP,
+        meanAnomalyAtEpoch: m0,
+      ),
+      body: body.id,
+      mu: mu,
+      epoch: epoch,
+    );
+  }
+
+  /// A craft at (or within a micron of) the body's CENTRE.
+  ///
+  /// There is no conic here — no radius, no direction — and no answer more
+  /// correct than any other. The zero semi-major axis makes propagation
+  /// non-finite, which the rails path already checks for and answers by holding
+  /// the craft's current state for the tick. Unreachable in practice; kept
+  /// total so [toOrbit] never divides by a zero radius.
+  Orbit _zeroRadiusOrbit(CelestialBody body, double mu, Epoch epoch) => Orbit(
+        elements: const OrbitalElements(
+          semiMajorAxis: 0,
+          eccentricity: 0,
+          inclination: 0,
+          longitudeOfAscendingNode: 0,
+          argumentOfPeriapsis: 0,
+          meanAnomalyAtEpoch: 0,
+        ),
+        body: body.id,
+        mu: mu,
+        epoch: epoch,
+      );
 
   /// Keplerian -> Cartesian state at time [t] (translational part only;
   /// attitude is left at identity — propagation is for the trajectory).
