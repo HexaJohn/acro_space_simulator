@@ -494,13 +494,15 @@ class TerrainNodes {
     // the only part of streaming still on the render thread (plan §4). A
     // result that went stale while in flight (wrong generation, no longer
     // wanted, already resident) is dropped; if the chunk is still needed it is
-    // simply resubmitted below.
+    // simply resubmitted below. A chunk that is NOT wanted but stands in for
+    // one that is (a coverage root, see below) is accepted — dropping it here
+    // would defeat the point of meshing it.
     var uploads = 0;
     while (_arrived.isNotEmpty && uploads < uploadBudgetPerFrame) {
       final a = _arrived.removeAt(0);
       if (a.generation != _generation ||
-          !wanted.contains(a.key) ||
-          _chunks.containsKey(a.key)) {
+          _chunks.containsKey(a.key) ||
+          (!wanted.contains(a.key) && !standsIn(a.key))) {
         continue;
       }
       _addChunk(a.key, a.cell, shader as gpu.Shader);
@@ -525,8 +527,40 @@ class TerrainNodes {
           : SyncTerrainMeshScheduler();
       _schedulerAsync = asyncMeshing;
     }
+    // --- Coarse-first coverage -------------------------------------------
+    // Zooming out WIDENS the horizon, so freshly revealed regions enter the
+    // wanted set with no resident chunk at any level — nothing stands in, and
+    // they render as holes for the whole time the backlog takes to drain
+    // (measured: a fast zoom-out demanded ~190 leaves with a 100-chunk
+    // backlog). Invariant instead: every visible face keeps SOMETHING
+    // resident — if a missing chunk has no resident cover above or below it,
+    // its face ROOT is meshed first (a root is a handful of triangles and
+    // meshes in ~ms), and refinement replaces it from there. This is what
+    // "tiles never unload completely" means operationally.
+    final coveredBelow = <ChunkKey>{
+      for (final r in _chunks.keys) ...r.ancestors,
+    };
+    final coverageRoots = <ChunkKey>{};
     for (final k in missing) {
+      if (coveredBelow.contains(k)) continue; // finer residents stand in
+      var covered = false;
+      for (final a in k.ancestors) {
+        if (_chunks.containsKey(a)) {
+          covered = true;
+          break;
+        }
+      }
+      if (covered) continue;
+      final root = ChunkKey.root(k.face);
+      if (!_chunks.containsKey(root) &&
+          !_pending.contains(root) &&
+          !_emptyChunks.contains(root)) {
+        coverageRoots.add(root);
+      }
+    }
+    for (final k in coverageRoots.followedBy(missing)) {
       if (_pending.length >= meshBudgetPerFrame) break;
+      if (_pending.contains(k)) continue;
       _submit(field, k);
     }
 
