@@ -7,6 +7,7 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_scene/src/gpu/gpu.dart' as gpu;
 
 /// Procedurally-generated, SEAMLESSLY TILEABLE material textures for the voxel
@@ -32,6 +33,18 @@ class TerrainTextures {
   static Object? sand;
   static Object? grass;
 
+  /// Per-body real albedo maps, keyed by body id, equirectangular in the
+  /// body-fixed frame. Null for any body with no baked map — the shader then
+  /// falls back to the procedural blend alone.
+  static final Map<String, Object> albedo = {};
+
+  /// A 1x1 white texture bound wherever a body has no albedo map. The fragment
+  /// declares `tex_albedo` unconditionally and drawing with a sampler unbound
+  /// faults, so there has to be something in the slot.
+  static Object? albedoPlaceholder;
+
+  static final Set<String> _albedoTried = {};
+
   static Future<void>? _loading;
   static bool get ready => regolith != null;
 
@@ -45,7 +58,49 @@ class TerrainTextures {
         rock = _upload(_rock);
         sand = _upload(_sand);
         grass = _upload(_grass);
+        albedoPlaceholder = _uploadRgba(
+            Uint8List.fromList([255, 255, 255, 255]), 1, 1);
       }();
+
+  /// Load `assets/terrain/<body>.acroalb` if it exists, once per body.
+  ///
+  /// Missing is the NORMAL case — only bodies with real survey data get a map,
+  /// and there are 21 bodies in the catalogue. A miss is remembered so a failed
+  /// lookup does not retry the asset bundle every frame.
+  static Future<void> loadAlbedo(String bodyId) async {
+    if (_albedoTried.contains(bodyId)) return;
+    _albedoTried.add(bodyId);
+    try {
+      final data = await rootBundle.load('assets/terrain/\$bodyId.acroalb');
+      final bytes = data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
+      final view = ByteData.sublistView(bytes);
+      if (view.lengthInBytes < 16 ||
+          view.getUint32(0) != 0x4143524F ||
+          view.getUint32(4) != 0x414C4201) {
+        return; // not an ACROALB map; leave the body on the procedural blend
+      }
+      final w = view.getUint32(8), h = view.getUint32(12);
+      if (w <= 0 || h <= 0 || bytes.length < 16 + w * h * 3) return;
+      // RGB on disk (25% smaller), RGBA on the GPU.
+      final rgba = Uint8List(w * h * 4);
+      for (var i = 0; i < w * h; i++) {
+        rgba[i * 4] = bytes[16 + i * 3];
+        rgba[i * 4 + 1] = bytes[16 + i * 3 + 1];
+        rgba[i * 4 + 2] = bytes[16 + i * 3 + 2];
+        rgba[i * 4 + 3] = 255;
+      }
+      albedo[bodyId] = _uploadRgba(rgba, w, h);
+    } catch (_) {
+      // No map for this body. Not an error.
+    }
+  }
+
+  /// Upload raw RGBA at an arbitrary size, single mip level.
+  static Object _uploadRgba(Uint8List rgba, int w, int h) {
+    final tex = gpu.gpuContext.createTexture(gpu.StorageMode.hostVisible, w, h);
+    tex.overwrite(ByteData.sublistView(rgba));
+    return tex as Object;
+  }
 
   /// Bake the base tile, build its mip chain, and upload every level to a GPU
   /// texture. Manual mips (no hardware generate on this shim) let the sampler

@@ -36,6 +36,12 @@ uniform TerrainInfo {
   // xyz: body spin-axis (pole) in the SAME world frame as v_position, so
   // dot(up, pole) = the body-fixed latitude sine regardless of body rotation.
   vec4 pole;
+  // xyz: the body's PRIME MERIDIAN axis (body +X) in that same world frame.
+  // Latitude alone cannot index an equirectangular map — longitude needs a
+  // second body-fixed axis to measure from, and v_position is world-space, so
+  // it has to be supplied rather than derived. w: albedo strength (0 = the
+  // procedural blend alone, as before; 1 = full real albedo).
+  vec4 meridian_albedo;
 }
 terrain;
 
@@ -58,6 +64,12 @@ uniform sampler2D tex_regolith;
 uniform sampler2D tex_rock;
 uniform sampler2D tex_sand;
 uniform sampler2D tex_grass;
+
+// Real per-body surface colour, equirectangular in the BODY-FIXED frame
+// (tool/bake_albedo.dart). Carries what no procedural blend can invent: where
+// the maria actually are. The tiles above still supply close-up grain, because
+// this map is only ~5 km per texel.
+uniform sampler2D tex_albedo;
 
 in vec3 v_position;
 in vec3 v_normal;
@@ -259,6 +271,31 @@ void main() {
   // Steep faces are rock regardless of altitude.
   float rockw = 1.0 - smoothstep(terrain.params.w, terrain.params.w + 0.15, slope);
   vec3 albedo = mix(flat_col, c_rock, rockw);
+
+  // Real surface colour, where the body has a baked map.
+  //
+  // Applied as a MODULATION rather than a replacement: the map is ~5 km per
+  // texel, so on its own it is a flat wash with no close-up structure, while
+  // the procedural blend has all the grain and none of the truth. Dividing the
+  // procedural colour by its own mean turns it into a detail ratio around 1.0,
+  // which then multiplies the real albedo — maria come out dark and highlands
+  // bright, and both keep their texture.
+  float albedoMix = clamp(terrain.meridian_albedo.w, 0.0, 1.0);
+  if (albedoMix > 0.0) {
+    vec3 mer = normalize(terrain.meridian_albedo.xyz);
+    vec3 pol = normalize(terrain.pole.xyz);
+    // Complete the body-fixed frame. east = pole x meridian is already unit
+    // (both are unit and perpendicular).
+    vec3 east = cross(pol, mer);
+    float sinLat = clamp(dot(up, pol), -1.0, 1.0);
+    float lat = asin(sinLat);
+    float lon = atan(dot(up, east), dot(up, mer));
+    vec2 uv = vec2(lon / 6.2831853 + 0.5, 0.5 - lat / 3.14159265);
+    vec3 real = texture(tex_albedo, uv).rgb;
+    float m = max((albedo.r + albedo.g + albedo.b) / 3.0, 1e-3);
+    vec3 detailRatio = albedo / m;
+    albedo = mix(albedo, real * detailRatio, albedoMix);
+  }
 
   // Sun Lambert + ambient. Light travels along sun_amp.xyz, so a surface is
   // lit by the component facing back toward the sun (-dir).

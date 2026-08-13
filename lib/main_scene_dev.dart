@@ -262,11 +262,42 @@ void main() {
   // suppress the chunk, so "no terrain on <body>" is diagnosable without a
   // rebuild-per-guess loop.
   developer.registerExtension('ext.acro.terrain', (method, params) async {
+    // Settable knobs, e.g.
+    //   ext.acro.terrain?minBodyPx=8&splitPx=180&maxResidentChunks=256
+    // Coverage is body-wide now, so there is no altitude gate to raise and no
+    // ring to widen; lowering minBodyPx is what makes terrain appear from
+    // further out. Note the camera's near plane is (range + bodyRadius)/20, so
+    // a BODY focus still clips everything within ~87 km on the Moon.
+    double? num(String k) =>
+        params[k] == null ? null : double.tryParse(params[k]!);
+    final minPx = num('minBodyPx');
+    if (minPx != null && minPx > 0) TerrainNodes.minBodyPx = minPx;
+    final sp = num('splitPx');
+    if (sp != null && sp > 0) TerrainNodes.splitPx = sp;
+    final cap = num('maxResidentChunks');
+    if (cap != null && cap >= 6) TerrainNodes.maxResidentChunks = cap.round();
+    final res = num('resolution');
+    if (res != null && res >= 2) TerrainNodes.resolution = res.round();
+    final budget = num('meshBudgetPerFrame');
+    if (budget != null && budget >= 1) {
+      TerrainNodes.meshBudgetPerFrame = budget.round();
+    }
+    // skirtVoxels=0 shows the LOD cracks the apron hides — the 4b A/B.
+    final skirt = num('skirtVoxels');
+    if (skirt != null && skirt >= 0) TerrainNodes.skirtVoxels = skirt;
+    if (params['enabled'] != null) {
+      TerrainNodes.enabled = params['enabled'] == 'true';
+    }
     return developer.ServiceExtensionResponse.result(jsonEncode({
       'debug': TerrainNodes.debugLine,
+      'gate': TerrainNodes.gateReason,
       'enabled': TerrainNodes.enabled,
       'texturesReady': TerrainTextures.ready,
-      'maxAltitudeM': TerrainNodes.maxAltitudeM,
+      'minBodyPx': TerrainNodes.minBodyPx,
+      'splitPx': TerrainNodes.splitPx,
+      'maxResidentChunks': TerrainNodes.maxResidentChunks,
+      'resolution': TerrainNodes.resolution,
+      'skirtVoxels': TerrainNodes.skirtVoxels,
     }));
   });
 

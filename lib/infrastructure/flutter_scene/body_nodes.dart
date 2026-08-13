@@ -76,7 +76,19 @@ class BodyNodes {
       final pos = origin.worldToScene(Vector3(b.px, b.py, b.pz));
       final rot = quatToScene(Quaternion(b.qw, b.qx, b.qy, b.qz) *
           Quaternion.axisAngle(Vector3.unitZ, textureYawRad));
-      final scale = lengthToScene(b.radius);
+      // Sink the sphere below a terrain body's LOWEST ground.
+      //
+      // The sphere sits at the datum radius, but relief runs both ways around
+      // it, so once terrain covers the whole body the sphere pokes through
+      // every basin and crater floor — a textured shell surfacing through the
+      // meshed ground. Dropping it by the terrain amplitude puts it strictly
+      // inside the relief, where it still does its real job: backing the gaps
+      // while distant chunks are still being meshed.
+      final terrain = snap.descriptors[b.id];
+      final sink = (terrain != null && terrain.hasTerrain)
+          ? terrain.terrainAmplitude
+          : 0.0;
+      final scale = lengthToScene(b.radius - sink);
       node.localTransform = Matrix4Compose.compose(pos, rot, scale);
     }
 
