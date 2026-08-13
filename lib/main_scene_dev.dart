@@ -282,11 +282,19 @@ void main() {
     if (budget != null && budget >= 1) {
       TerrainNodes.meshBudgetPerFrame = budget.round();
     }
+    final uploads = num('uploadBudgetPerFrame');
+    if (uploads != null && uploads >= 1) {
+      TerrainNodes.uploadBudgetPerFrame = uploads.round();
+    }
     // skirtVoxels=0 shows the LOD cracks the apron hides — the 4b A/B.
     final skirt = num('skirtVoxels');
     if (skirt != null && skirt >= 0) TerrainNodes.skirtVoxels = skirt;
     if (params['enabled'] != null) {
       TerrainNodes.enabled = params['enabled'] == 'true';
+    }
+    // asyncMeshing=false is the 4c A/B: meshing back on the render thread.
+    if (params['asyncMeshing'] != null) {
+      TerrainNodes.asyncMeshing = params['asyncMeshing'] == 'true';
     }
     return developer.ServiceExtensionResponse.result(jsonEncode({
       'debug': TerrainNodes.debugLine,
@@ -298,6 +306,9 @@ void main() {
       'maxResidentChunks': TerrainNodes.maxResidentChunks,
       'resolution': TerrainNodes.resolution,
       'skirtVoxels': TerrainNodes.skirtVoxels,
+      'meshBudgetPerFrame': TerrainNodes.meshBudgetPerFrame,
+      'uploadBudgetPerFrame': TerrainNodes.uploadBudgetPerFrame,
+      'asyncMeshing': TerrainNodes.asyncMeshing,
     }));
   });
 

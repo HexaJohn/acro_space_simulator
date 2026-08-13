@@ -24,6 +24,7 @@ import 'dart:typed_data';
 import '../shared/vector3.dart';
 import 'cubed_sphere.dart';
 import 'surface_nets.dart';
+import 'terrain_brush.dart';
 import 'terrain_field.dart';
 
 /// A meshed chunk, positioned RELATIVE TO [anchorBF].
@@ -86,6 +87,20 @@ class CellMesh {
 /// OUTSIDE the cell proper and neighbouring chunks at the same level overlap
 /// instead of cracking. (Cracks at a LEVEL boundary are a different problem —
 /// that is phase 4b, skirts.)
+///
+/// ## Why the field is sampled per COLUMN, not per voxel
+///
+/// The base relief is a height field: its density along one radial is
+/// `r - (radius + h(dir))`, and `h` depends only on the direction. Every voxel
+/// in a lateral column shares that direction, so `h` is evaluated ONCE per
+/// column and the ~50 voxels above it are pure arithmetic. `h` is the expensive
+/// part (erosion fBm + ridged blend + crater field on a cratered body), so this
+/// is a ~voxel-band-height× reduction in field cost — the difference between
+/// meshing a Moon chunk in hundreds of milliseconds and a handful.
+///
+/// [TerrainEdits] are genuinely 3D and cannot be column-collapsed, so columns
+/// whose direction an edit covers fall back to per-voxel composition — but only
+/// those columns, and only when the chunk has edits at all.
 CellMesh meshTerrainCell(
   TerrainField field,
   ChunkKey chunk, {
@@ -96,17 +111,29 @@ CellMesh meshTerrainCell(
 }) {
   assert(resolution >= 2);
 
-  // --- 1. The radial band this cell needs -----------------------------------
-  // Probe ground radius across the cell. Denser than a corner check: relief
-  // between corners is exactly what would otherwise be clipped.
-  final probe = math.min(resolution + 1, 17);
+  final n = resolution + 3; // resolution cells + 2 apron cells -> +3 samples
+  final ds = (chunk.s1 - chunk.s0) / resolution;
+  final dt = (chunk.t1 - chunk.t0) / resolution;
+
+  // --- 1. The heavy pass: one direction + one ground height per column ------
+  // This lattice doubles as the band probe the old 17x17 pre-pass did — it is
+  // strictly denser, so relief between samples is bounded the same way.
+  final dirX = Float64List(n * n);
+  final dirY = Float64List(n * n);
+  final dirZ = Float64List(n * n);
+  final ground = Float64List(n * n); // radius + h(dir), base relief only
   var minGround = double.infinity, maxGround = -double.infinity;
-  for (var a = 0; a < probe; a++) {
-    final s = chunk.s0 + (chunk.s1 - chunk.s0) * a / (probe - 1);
-    for (var b = 0; b < probe; b++) {
-      final t = chunk.t0 + (chunk.t1 - chunk.t0) * b / (probe - 1);
+  for (var j = 0; j < n; j++) {
+    final t = chunk.t0 + (j - 1) * dt;
+    for (var i = 0; i < n; i++) {
+      final s = chunk.s0 + (i - 1) * ds;
       final d = directionOf(chunk.face, s, t);
-      final g = field.groundRadiusAt(d.x, d.y, d.z);
+      final c = j * n + i;
+      dirX[c] = d.x;
+      dirY[c] = d.y;
+      dirZ[c] = d.z;
+      final g = field.radius + field.heightInDirection(d.x, d.y, d.z);
+      ground[c] = g;
       if (g < minGround) minGround = g;
       if (g > maxGround) maxGround = g;
     }
@@ -116,23 +143,51 @@ CellMesh meshTerrainCell(
   final lateralM =
       math.max(1e-3, chunk.circumradiusM(field.radius) * 2.0 / resolution);
 
-  // Pad the band so a peak that fell BETWEEN probes still fits. Both terms
+  // --- 2. Edit candidates, resolved once per column --------------------------
+  // `edits.at` is a handful of map probes; doing it per column instead of per
+  // voxel keeps the index out of the hot loop. Null list = untouched column.
+  final edits = field.edits;
+  List<List<TerrainBrush>?>? columnBrushes;
+  var editLo = double.infinity, editHi = double.negativeInfinity;
+  if (edits != null && edits.isNotEmpty) {
+    for (var c = 0; c < n * n; c++) {
+      final cands = edits.at(Vector3(dirX[c], dirY[c], dirZ[c]));
+      if (cands.isEmpty) continue;
+      columnBrushes ??= List<List<TerrainBrush>?>.filled(n * n, null);
+      columnBrushes[c] = cands;
+      // An edit can move the surface outside the base band (a bowl digs below
+      // it, a rim stands above it). Its influence sphere bounds both, so the
+      // band is widened to that — conservative, and the `clipped` self-check
+      // still guards the construction.
+      for (final b in cands) {
+        final centreR = b.centreBF.length;
+        if (centreR - b.boundingRadiusM < editLo) {
+          editLo = centreR - b.boundingRadiusM;
+        }
+        if (centreR + b.boundingRadiusM > editHi) {
+          editHi = centreR + b.boundingRadiusM;
+        }
+      }
+    }
+  }
+
+  // --- 3. The radial band ----------------------------------------------------
+  // Pad the band so a peak that fell BETWEEN samples still fits. Both terms
   // scale with the cell: a few voxels, plus a slice of the relief this cell
   // actually spans. Deliberately not a fraction of the body's global
   // amplitude — that is constant in metres, so at high levels it would dwarf
   // the voxel size and the shell would stop thinning just as chunk count grows.
   final pad = marginVoxels * lateralM + (maxGround - minGround) * 0.25;
-  final rLo = minGround - pad;
-  final rHi = maxGround + pad;
+  var rLo = minGround - pad;
+  var rHi = maxGround + pad;
+  if (columnBrushes != null) {
+    rLo = math.min(rLo, editLo - marginVoxels * lateralM);
+    rHi = math.max(rHi, editHi + marginVoxels * lateralM);
+  }
 
   final radialCells =
       ((rHi - rLo) / lateralM).ceil().clamp(2, maxRadialSamples);
   final nr = radialCells + 1; // samples
-
-  // --- 2. Lattice -> body-frame mapping ------------------------------------
-  final n = resolution + 3; // resolution cells + 2 apron cells -> +3 samples
-  final ds = (chunk.s1 - chunk.s0) / resolution;
-  final dt = (chunk.t1 - chunk.t0) / resolution;
   final dr = (rHi - rLo) / (nr - 1);
 
   // Lattice index 1 sits on the cell's low edge, index resolution+1 on its
@@ -144,14 +199,33 @@ CellMesh meshTerrainCell(
     return directionOf(chunk.face, s, t) * r;
   }
 
-  // --- 3. Sample the field on that lattice ---------------------------------
+  // --- 4. Fill the density lattice ------------------------------------------
   // voxelSize 1 / origin 0, so Surface Nets' "world" coordinates ARE lattice
   // coordinates and the mapping above is the only place geometry is decided.
-  final grid = DensityGrid.sample(
-    (x, y, z) {
-      final p = bodyAt(x, y, z);
-      return field.density(p.x, p.y, p.z);
-    },
+  // Base density along a column is `r - ground`, exactly what
+  // `TerrainField.density` computes for these positions (the direction is the
+  // column's own, `|dir * r| == r`); only edited columns compose brushes.
+  final samples = Float64List(n * n * nr);
+  for (var k = 0; k < nr; k++) {
+    final r = rLo + k * dr;
+    final slab = k * n * n;
+    for (var c = 0; c < n * n; c++) {
+      final base = r - ground[c];
+      final brushes = columnBrushes?[c];
+      if (brushes == null) {
+        samples[slab + c] = base;
+      } else {
+        final p = Vector3(dirX[c] * r, dirY[c] * r, dirZ[c] * r);
+        var d = base;
+        for (final b in brushes) {
+          d = b.apply(d, p);
+        }
+        samples[slab + c] = d;
+      }
+    }
+  }
+  final grid = DensityGrid(
+    samples: samples,
     nx: n,
     ny: n,
     nz: nr,
@@ -187,11 +261,41 @@ CellMesh meshTerrainCell(
     );
   }
 
-  // --- 4. Map vertices to the body frame, re-derive normals ----------------
+  // Bilinear ground radius at fractional lattice coordinates, clamped at the
+  // lattice border (one-sided differences there).
+  double groundAt(double fi, double fj) {
+    final ci = fi.clamp(0.0, (n - 1).toDouble());
+    final cj = fj.clamp(0.0, (n - 1).toDouble());
+    final i0 = ci.floor(), j0 = cj.floor();
+    final i1 = math.min(i0 + 1, n - 1), j1 = math.min(j0 + 1, n - 1);
+    final fx = ci - i0, fy = cj - j0;
+    final g00 = ground[j0 * n + i0], g10 = ground[j0 * n + i1];
+    final g01 = ground[j1 * n + i0], g11 = ground[j1 * n + i1];
+    final g0 = g00 + (g10 - g00) * fx;
+    final g1 = g01 + (g11 - g01) * fx;
+    return g0 + (g1 - g0) * fy;
+  }
+
+  // Whether a vertex inside cell (floor(fi), floor(fj)) has an edited column
+  // among the four it interpolates between.
+  bool nearEdit(double fi, double fj) {
+    final touched = columnBrushes;
+    if (touched == null) return false;
+    final i0 = fi.floor().clamp(0, n - 2), j0 = fj.floor().clamp(0, n - 2);
+    return touched[j0 * n + i0] != null ||
+        touched[j0 * n + i0 + 1] != null ||
+        touched[(j0 + 1) * n + i0] != null ||
+        touched[(j0 + 1) * n + i0 + 1] != null;
+  }
+
+  // --- 5. Map vertices to the body frame, re-derive normals ----------------
   // The lattice-space normals Surface Nets produced are gradients of the
   // WARPED grid and are wrong once vertices are unwarped, so they are
-  // discarded. The field is analytic, so a central difference in body space is
-  // both cheaper to reason about and more accurate.
+  // discarded. On the base relief the surface is the height field
+  // `P(s,t) = dir(s,t) * g(s,t)`, so the normal is the (cheap, analytic)
+  // cross product of its tangents, with `dh` read off the ground lattice —
+  // no further field evaluations. Near an edit the surface is genuinely 3D
+  // and the normal falls back to a central difference of the composed field.
   final src = lattice.positions;
   final count = src.length ~/ 3;
   final positions = Float32List(src.length);
@@ -199,23 +303,50 @@ CellMesh meshTerrainCell(
   final eps = lateralM * 0.5;
   for (var v = 0; v < count; v++) {
     final o = v * 3;
-    final p = bodyAt(src[o], src[o + 1], src[o + 2]);
+    final fi = src[o], fj = src[o + 1], fk = src[o + 2];
+    final p = bodyAt(fi, fj, fk);
     positions[o] = p.x - anchorBF.x;
     positions[o + 1] = p.y - anchorBF.y;
     positions[o + 2] = p.z - anchorBF.z;
 
-    // Density rises from solid (<0) to air (>0), so +grad points outward.
-    final gx = field.density(p.x + eps, p.y, p.z) -
-        field.density(p.x - eps, p.y, p.z);
-    final gy = field.density(p.x, p.y + eps, p.z) -
-        field.density(p.x, p.y - eps, p.z);
-    final gz = field.density(p.x, p.y, p.z + eps) -
-        field.density(p.x, p.y, p.z - eps);
-    final len = math.sqrt(gx * gx + gy * gy + gz * gz);
+    var nx = 0.0, ny = 0.0, nz = 0.0;
+    if (nearEdit(fi, fj)) {
+      // Density rises from solid (<0) to air (>0), so +grad points outward.
+      nx = field.density(p.x + eps, p.y, p.z) -
+          field.density(p.x - eps, p.y, p.z);
+      ny = field.density(p.x, p.y + eps, p.z) -
+          field.density(p.x, p.y - eps, p.z);
+      nz = field.density(p.x, p.y, p.z + eps) -
+          field.density(p.x, p.y, p.z - eps);
+    } else {
+      final s = chunk.s0 + (fi - 1) * ds;
+      final t = chunk.t0 + (fj - 1) * dt;
+      final g = groundAt(fi, fj);
+      final r = rLo + fk * dr;
+      final dir = p / r;
+      // Tangents of dir(s,t), central-differenced in face coordinates (pure
+      // algebra — no noise), and dh off the ground lattice.
+      final dirS = (directionOf(chunk.face, s + ds * 0.5, t) -
+              directionOf(chunk.face, s - ds * 0.5, t)) /
+          ds;
+      final dirT = (directionOf(chunk.face, s, t + dt * 0.5) -
+              directionOf(chunk.face, s, t - dt * 0.5)) /
+          dt;
+      final hs = (groundAt(fi + 1, fj) - groundAt(fi - 1, fj)) / (2 * ds);
+      final ht = (groundAt(fi, fj + 1) - groundAt(fi, fj - 1)) / (2 * dt);
+      final ps = dirS * g + dir * hs;
+      final pt = dirT * g + dir * ht;
+      var cr = ps.cross(pt);
+      if (cr.dot(dir) < 0) cr = -cr;
+      nx = cr.x;
+      ny = cr.y;
+      nz = cr.z;
+    }
+    final len = math.sqrt(nx * nx + ny * ny + nz * nz);
     if (len > 1e-12) {
-      normals[o] = gx / len;
-      normals[o + 1] = gy / len;
-      normals[o + 2] = gz / len;
+      normals[o] = nx / len;
+      normals[o + 1] = ny / len;
+      normals[o + 2] = nz / len;
     } else {
       // Degenerate flat sample: fall back to straight up.
       final d = p.normalized;

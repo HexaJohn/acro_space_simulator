@@ -8,6 +8,8 @@ import 'dart:math' as math;
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/domain/terrain/cell_mesher.dart';
 import 'package:acro_space_simulator/domain/terrain/cubed_sphere.dart';
+import 'package:acro_space_simulator/domain/terrain/terrain_brush.dart';
+import 'package:acro_space_simulator/domain/terrain/terrain_edits.dart';
 import 'package:acro_space_simulator/domain/terrain/terrain_field.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -313,6 +315,86 @@ void main() {
       final a = meshTerrainCell(field, k, resolution: res);
       final b = meshTerrainCell(_moon(), k, resolution: res);
       expect(a.mesh.positions, b.mesh.positions);
+      expect(a.mesh.indices, b.mesh.indices);
+    });
+  });
+
+  group('edits', () {
+    // A crater brush forces the mesher off the column-cached fast path for the
+    // columns it covers; the mesh must then follow the COMPOSED field, not the
+    // base relief.
+    final dir = const Vector3(0.31, 0.42, 0.85).normalized;
+    final contact = dir *
+        field.groundRadiusAt(dir.x, dir.y, dir.z);
+    final brush = TerrainBrush.crater(
+      contactBF: contact,
+      normalBF: dir,
+      radiusM: 220,
+      depthM: 60,
+      rimHeightM: 15,
+    );
+    TerrainField edited() => TerrainField(
+          radius: 1.7374e6,
+          amplitude: 4000,
+          featureScale: 60000,
+          seed: 0x11A00,
+          edits: TerrainEdits.of([brush]),
+        );
+    // Deep enough that the cell resolves the crater (level 14 cells are a few
+    // hundred metres on the Moon).
+    final k = chunkAt(dir, 14);
+
+    test('vertices lie on the edited isosurface', () {
+      final f = edited();
+      final cell = meshTerrainCell(f, k, resolution: 16, skirtVoxels: 0);
+      expect(cell.isEmpty, isFalse);
+      expect(cell.clipped, isFalse);
+      final voxel = k.circumradiusM(f.radius) * 2 / 16;
+      final p = cell.mesh.positions;
+      var worst = 0.0;
+      for (var i = 0; i < p.length; i += 3) {
+        final w = cell.anchorBF + Vector3(p[i], p[i + 1], p[i + 2]);
+        final dens = f.density(w.x, w.y, w.z).abs();
+        if (dens > worst) worst = dens;
+      }
+      expect(worst, lessThan(voxel),
+          reason: 'worst |density| $worst exceeded one voxel $voxel');
+    });
+
+    test('the bowl actually digs below the base ground', () {
+      final f = edited();
+      final cell = meshTerrainCell(f, k, resolution: 16, skirtVoxels: 0);
+      var deepest = 0.0;
+      final p = cell.mesh.positions;
+      for (var i = 0; i < p.length; i += 3) {
+        final w = cell.anchorBF + Vector3(p[i], p[i + 1], p[i + 2]);
+        final base = f.baseGroundRadiusAt(w.x, w.y, w.z);
+        final below = base - w.length;
+        if (below > deepest) deepest = below;
+      }
+      expect(deepest, greaterThan(brush.depthM * 0.5),
+          reason: 'no vertex descended into the bowl ($deepest m)');
+    });
+
+    test('normals stay unit and outward-ish across the crater', () {
+      final f = edited();
+      final cell = meshTerrainCell(f, k, resolution: 16, skirtVoxels: 0);
+      final p = cell.mesh.positions, nrm = cell.mesh.normals;
+      for (var i = 0; i < nrm.length; i += 3) {
+        final nv = Vector3(nrm[i], nrm[i + 1], nrm[i + 2]);
+        expect(nv.length, closeTo(1.0, 1e-5));
+        // A bowl wall tilts far from the radial but must never fully invert.
+        final w = cell.anchorBF + Vector3(p[i], p[i + 1], p[i + 2]);
+        expect(nv.dot(w.normalized), greaterThan(-0.5),
+            reason: 'inverted normal at vertex ${i ~/ 3}');
+      }
+    });
+
+    test('deterministic with edits present', () {
+      final a = meshTerrainCell(edited(), k, resolution: 16);
+      final b = meshTerrainCell(edited(), k, resolution: 16);
+      expect(a.mesh.positions, b.mesh.positions);
+      expect(a.mesh.normals, b.mesh.normals);
       expect(a.mesh.indices, b.mesh.indices);
     });
   });

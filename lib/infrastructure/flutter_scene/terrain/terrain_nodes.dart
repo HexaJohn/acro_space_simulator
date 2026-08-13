@@ -17,6 +17,7 @@ import '../../../domain/shared/quaternion.dart';
 import '../../../domain/shared/vector3.dart';
 import '../../../domain/terrain/cell_mesher.dart';
 import '../../../domain/terrain/cubed_sphere.dart';
+import '../../../domain/terrain/mesh_scheduler.dart';
 import '../../../domain/terrain/terrain_edits.dart';
 import '../../../domain/terrain/terrain_feature.dart';
 import '../../../domain/terrain/terrain_field.dart';
@@ -71,15 +72,21 @@ class TerrainNodes {
   /// chunks on the boundary cannot thrash.
   static double splitPx = 220;
 
-  /// New chunks meshed per frame. Synchronous meshing is 4a's stated
-  /// simplification (4c moves it off-thread behind a scheduler); this cap is
-  /// what stops a fast descent from collapsing into one enormous frame.
-  ///
-  /// Raised from 2 with body-wide coverage: first sight of a planet now needs
-  /// tens of chunks rather than a handful, and at 2 per frame the horizon took
-  /// visible seconds to fill in. Still bounded, because this runs on the main
-  /// thread until the scheduler lands.
+  /// Mesh jobs in flight at once (phase 4c). Meshing runs on background
+  /// isolates on native (inline on web), so this caps CPU occupancy, not a
+  /// per-frame stall. Nearest-first submission order means the ground under
+  /// the craft is always in the earliest batch.
   static int meshBudgetPerFrame = 6;
+
+  /// Finished meshes turned into scene nodes per painted frame. THIS is the
+  /// main-thread budget the plan says to enforce (§4: "budget the uploads,
+  /// not the meshing") — geometry upload is the only part of streaming that
+  /// still happens on the render thread.
+  static int uploadBudgetPerFrame = 4;
+
+  /// Kill switch: false forces inline meshing (the pre-4c behaviour) for A/B
+  /// comparisons from the dev ext.
+  static bool asyncMeshing = true;
 
   /// How close (m) the focus must be to a terrain edit before its chunks are
   /// force-refined. Deformation needs levels far past what screen-space
@@ -152,6 +159,23 @@ class TerrainNodes {
   /// One resident chunk: its scene node plus the body-fixed point its vertices
   /// are relative to (see [CellMesh.anchorBF] for why they are not absolute).
   final Map<ChunkKey, _ResidentChunk> _chunks = {};
+
+  // --- Async meshing state (phase 4c) --------------------------------------
+  // In-flight jobs cannot be cancelled (see mesh_scheduler.dart); staleness is
+  // handled by tagging every job with [_generation] and dropping results whose
+  // tag no longer matches. Bump the generation whenever the field the jobs
+  // were built from stops being true: body switch, geometry knob, new edit.
+  TerrainMeshScheduler? _scheduler;
+  bool _schedulerAsync = true;
+  final Set<ChunkKey> _pending = {};
+  final List<_ArrivedMesh> _arrived = [];
+
+  /// Chunks that meshed to NO geometry (isosurface not in their shell —
+  /// legitimate, e.g. below a sea floor). Remembered so they are not
+  /// resubmitted every frame; cleared with the generation.
+  final Set<ChunkKey> _emptyChunks = {};
+  int _generation = 0;
+
   TerrainLodTree? _tree;
   double _treeSplitPx = 0;
   // Geometry knobs the resident meshes were built with; a change invalidates
@@ -328,11 +352,13 @@ class TerrainNodes {
     }
     // A geometry knob moved (dev toggle): drop every resident mesh so the ring
     // rebuilds with the new setting. Cheap because it only happens on a change.
+    // In-flight jobs were built with the old knobs — invalidate them too.
     if (_builtSkirtVoxels != skirtVoxels || _builtResolution != resolution) {
       for (final c in _chunks.values) {
         _scene.remove(c.node);
       }
       _chunks.clear();
+      _invalidateInFlight();
       _builtSkirtVoxels = skirtVoxels;
       _builtResolution = resolution;
     }
@@ -368,7 +394,10 @@ class TerrainNodes {
     // A new edit rewrites the density inside its footprint, so a resident chunk
     // overlapping it is stale even when its KEY is unchanged — the split path
     // alone would not retire it. Only runs on the frame the edit arrives.
+    // In-flight jobs sampled the pre-edit field; drop their results wholesale
+    // rather than intersecting each against the brush (edits are rare).
     if (editsChanged && edits != null) {
+      _invalidateInFlight();
       for (final k in _chunks.keys.toList()) {
         final centre = k.centreDirection * field.radius;
         final reach = k.circumradiusM(field.radius);
@@ -412,18 +441,44 @@ class TerrainNodes {
       }
     }
 
-    // Mesh what is missing, capped per frame. `visible` is already sorted
-    // nearest-first, so filtering it preserves that order and the ground under
-    // the craft fills in before the horizon does.
+    // Turn finished meshes into scene nodes, capped per frame — the upload is
+    // the only part of streaming still on the render thread (plan §4). A
+    // result that went stale while in flight (wrong generation, no longer
+    // wanted, already resident) is dropped; if the chunk is still needed it is
+    // simply resubmitted below.
+    var uploads = 0;
+    while (_arrived.isNotEmpty && uploads < uploadBudgetPerFrame) {
+      final a = _arrived.removeAt(0);
+      if (a.generation != _generation ||
+          !wanted.contains(a.key) ||
+          _chunks.containsKey(a.key)) {
+        continue;
+      }
+      _addChunk(a.key, a.cell, shader as gpu.Shader);
+      uploads++;
+    }
+
+    // Submit what is missing, up to the in-flight cap. `visible` is already
+    // sorted nearest-first, so filtering it preserves that order and the
+    // ground under the craft fills in before the horizon does.
     final missing = [
       for (final k in visible)
-        if (wanted.contains(k) && !_chunks.containsKey(k)) k,
+        if (wanted.contains(k) &&
+            !_chunks.containsKey(k) &&
+            !_pending.contains(k) &&
+            !_emptyChunks.contains(k))
+          k,
     ];
-    var built = 0;
+    if (_scheduler == null || _schedulerAsync != asyncMeshing) {
+      _scheduler?.dispose();
+      _scheduler = asyncMeshing
+          ? TerrainMeshScheduler.platform()
+          : SyncTerrainMeshScheduler();
+      _schedulerAsync = asyncMeshing;
+    }
     for (final k in missing) {
-      if (built >= meshBudgetPerFrame) break;
-      _meshChunk(field, k, shader as gpu.Shader);
-      built++;
+      if (_pending.length >= meshBudgetPerFrame) break;
+      _submit(field, k);
     }
 
     if (_chunks.isEmpty) {
@@ -451,7 +506,8 @@ class TerrainNodes {
     }
     debugLine = 'terrain: ${_chunks.length} chunks  $tris tris  '
         'lvl $minLevel-$maxLevel  q${leaves.length}'
-        '${missing.length > built ? '  +${missing.length - built}' : ''}';
+        '${_pending.isNotEmpty ? '  ~${_pending.length}' : ''}'
+        '${missing.length > _pending.length ? '  +${missing.length - _pending.length}' : ''}';
 
     final sun = starWorld == null
         ? Vector3(-1, -0.2, -0.1).normalized
@@ -483,13 +539,32 @@ class TerrainNodes {
     _material?.bindTiles();
   }
 
-  /// Mesh one chunk and add it to the scene. A chunk whose shell holds no
-  /// isosurface (nothing crosses zero) yields no geometry — legitimate, e.g.
-  /// entirely below a sea floor — and is simply skipped.
-  void _meshChunk(TerrainField field, ChunkKey key, gpu.Shader shader) {
-    final cell = meshTerrainCell(field, key,
-        resolution: resolution, skirtVoxels: skirtVoxels);
-    if (cell.isEmpty) return;
+  /// Queue one chunk for meshing. The result lands in [_arrived] and becomes
+  /// a node inside the next frame's upload budget; a result whose generation
+  /// went stale in flight is dropped there.
+  void _submit(TerrainField field, ChunkKey key) {
+    final generation = _generation;
+    _pending.add(key);
+    _scheduler!
+        .mesh(field, key, resolution: resolution, skirtVoxels: skirtVoxels)
+        .then((cell) {
+      _pending.remove(key);
+      if (generation != _generation) return;
+      if (cell.isEmpty) {
+        // No isosurface in the shell (legitimate, e.g. below a sea floor).
+        // Remember it, or the chunk would be resubmitted every frame.
+        _emptyChunks.add(key);
+      } else {
+        _arrived.add(_ArrivedMesh(key, cell, generation));
+      }
+    }).catchError((Object e) {
+      _pending.remove(key);
+      debugLine = 'terrain: mesh $key failed: $e';
+    });
+  }
+
+  /// Turn a finished mesh into a scene node (the GPU upload).
+  void _addChunk(ChunkKey key, CellMesh cell, gpu.Shader shader) {
     _material ??= _TerrainMaterial(shader);
     final geom = fs.MeshGeometry.fromArrays(
       positions: cell.mesh.positions,
@@ -505,12 +580,22 @@ class TerrainNodes {
     );
   }
 
+  /// Invalidate every job in flight and every result not yet uploaded. The
+  /// jobs still complete (no cancellation, see mesh_scheduler.dart); their
+  /// results are dropped by the generation check.
+  void _invalidateInFlight() {
+    _generation++;
+    _arrived.clear();
+    _emptyChunks.clear();
+  }
+
   void _clear() {
-    if (_chunks.isEmpty && _bodyId == null) return;
+    if (_chunks.isEmpty && _bodyId == null && _pending.isEmpty) return;
     for (final c in _chunks.values) {
       _scene.remove(c.node);
     }
     _chunks.clear();
+    _invalidateInFlight();
     _tree?.reset();
     _bodyId = null;
     // Force the edit store to rebuild on the next frame that renders — the
@@ -520,6 +605,18 @@ class TerrainNodes {
     _edits = null;
     debugLine = '';
   }
+}
+
+/// A mesh that came back from the scheduler and is waiting for upload budget.
+class _ArrivedMesh {
+  _ArrivedMesh(this.key, this.cell, this.generation);
+
+  final ChunkKey key;
+  final CellMesh cell;
+
+  /// [TerrainNodes._generation] at submit time; a mismatch at upload time
+  /// means the field the mesh sampled is no longer the one on screen.
+  final int generation;
 }
 
 /// A chunk currently in the scene.

@@ -1,6 +1,6 @@
 # Voxel Terrain — Full-Planet LOD (phase 4)
 
-**Status:** 4a + 4b landed (see §7); 4c–4d outstanding. **Scope:** replace the single chunk
+**Status:** 4a + 4b + 4c landed (see §7); 4d outstanding. **Scope:** replace the single chunk
 under the craft with cubed-sphere terrain over the whole body, voxel resolution
 degrading with camera distance.
 
@@ -121,10 +121,44 @@ full-planet terrain the two overlap everywhere, so:
 |---|---|---|
 | 4a ✅ | Cubed-sphere addressing + quadtree + LOD select + 2:1 balance. Fixed ring of chunks around the sub-camera point, still synchronous. | Unit tests on addressing/neighbour/balance. No renderer change visible beyond more ground. |
 | 4b ✅ | Skirts. | Visual gate accepted on the positive half only — see below. |
-| 4c | Async scheduler + upload budget + LRU. | No frame hitch on a fast descent. |
+| 4c ✅ | Async scheduler + upload budget. | No frame hitch on a fast descent. |
 | 4d | Full-planet coverage + sphere handoff. | Orbit → landing with no pop. |
 
-Each phase ships independently. **4c is the one to start.**
+Each phase ships independently. **4d is the one to start.**
+
+### What 4c shipped
+
+Two independent fixes, either of which alone would have moved the needle;
+together they took a Moon chunk from 108–335 ms ON the render thread to ~12–20
+ms OFF it (debug JIT; release is faster still).
+
+- **Column-cached meshing** (`cell_mesher.dart`). The base relief is a height
+  field — density along a radial is `r - (radius + h(dir))` and `h` depends only
+  on direction — so `h` is evaluated once per lateral column instead of once per
+  voxel (~50× fewer field evaluations for a 24×24×~50 chunk; the erosion fBm +
+  ridged blend + crater walk in `h` is where all the time was). The same lattice
+  replaces the old 17×17 band probe, and vertex normals on unedited ground come
+  from the height-field tangent cross product (zero field evaluations) instead
+  of six-tap density differences. Edited columns (`TerrainEdits.at` per column,
+  resolved once) keep the exact per-voxel compose + density-gradient normals —
+  the 3D CSG cannot be column-collapsed.
+- **`TerrainMeshScheduler`** (`mesh_scheduler.dart` + `_isolate`/`_sync`
+  bindings via conditional import, per §0.2). Native meshes each chunk with
+  `Isolate.run` (the field is plain seed-driven data, so the closure copy is
+  cheap and the determinism test in `mesh_scheduler_test.dart` gates it); web
+  gets the inline scheduler. `TerrainNodes` submits nearest-first up to
+  `meshBudgetPerFrame` jobs IN FLIGHT, and turns results into nodes under
+  `uploadBudgetPerFrame` per painted frame — the upload is now the only
+  streaming work on the render thread. No cancellation: in-flight results are
+  dropped by a generation check (body switch, geometry knob, new edit all bump
+  it), and chunks that mesh to nothing are remembered per generation so they
+  are not resubmitted every frame. `ext.acro.terrain?asyncMeshing=false` is the
+  A/B back to inline meshing.
+
+LRU eviction was NOT built: the resident cap + nearest-first truncation from 4a
+already bounds residency, and chunks outside `wanted` are retired immediately —
+there is nothing left to age out. Revisit only if re-mesh churn at the horizon
+ever shows up in practice.
 
 ### What 4b shipped, and what its gate actually covers
 
