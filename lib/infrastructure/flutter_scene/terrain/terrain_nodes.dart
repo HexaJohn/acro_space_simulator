@@ -611,11 +611,14 @@ class TerrainNodes {
       ambient: d.terrainAmbient ?? (d.atmoPresent ? 0.14 : 0.005),
       // Spin axis (+Z) rotated the same way the node rotates vertices, so it
       // lands in v_position's world frame -> dot(up, pole) = latitude sine.
-      poleWorld: quatToScene(bodyQuat).rotated(vm.Vector3(0.0, 0.0, 1.0)),
+      // Rotated in the DOMAIN quaternion: vm's rotate()/rotated() applies the
+      // inverse rotation (see coord_convert.dart), which counter-spun the
+      // albedo longitude against the mesh.
+      poleWorld: _rotatedAxis(bodyQuat, Vector3.unitZ),
       // Body +X through the same rotation. Latitude alone cannot index an
       // equirectangular map — longitude needs a second body-fixed axis, and
       // v_position is world-space so it cannot be recovered there.
-      meridianWorld: quatToScene(bodyQuat).rotated(vm.Vector3(1.0, 0.0, 0.0)),
+      meridianWorld: _rotatedAxis(bodyQuat, Vector3.unitX),
       // Only bodies with a baked map get real colour; everything else stays on
       // the procedural blend exactly as before.
       albedoStrength:
@@ -624,6 +627,15 @@ class TerrainNodes {
     _material?.bindAlbedo(TerrainTextures.albedo[bodyId]);
     // Bind the procedural material tiles once they've finished uploading.
     _material?.bindTiles();
+  }
+
+  /// A body axis through the DOMAIN rotation (standard Hamilton, matching the
+  /// node's matrix transform), then component-copied into the scene frame.
+  /// vm.Quaternion.rotate()/rotated() must not be used here — they apply the
+  /// INVERSE rotation (see coord_convert.dart).
+  static vm.Vector3 _rotatedAxis(Quaternion q, Vector3 axis) {
+    final w = q.rotate(axis);
+    return vm.Vector3(w.x, w.y, w.z);
   }
 
   /// Queue one chunk for meshing. The result lands in [_arrived] and becomes
