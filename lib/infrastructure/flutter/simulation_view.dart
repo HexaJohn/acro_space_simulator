@@ -56,6 +56,7 @@ import '../flutter_scene/ring_nodes.dart';
 import '../flutter_scene/scene_camera_adapter.dart';
 import '../flutter_scene/scene_sync.dart';
 import '../flutter_scene/scene_hud_overlay.dart';
+import '../flutter_scene/terrain/terrain_nodes.dart';
 import '../flutter_scene/vessel_nodes.dart';
 import '../flutter_scene/scene_render_view.dart';
 import 'sim_view_control.dart';
@@ -1609,6 +1610,24 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
               padding: const EdgeInsets.fromLTRB(4, 6, 4, 4),
               child: Text(
                 'FOV: ${_fovDeg.toStringAsFixed(0)}°',
+                style: const TextStyle(color: Color(0xFF7FB0E0), fontSize: 12),
+              ),
+            ),
+          ),
+          // Terrain shader debug view (tap to cycle; 3D backend only).
+          // height = hypsometric bands of the meshed field, albedo = the raw
+          // baked map through the shader's uv path, align = albedo grey +
+          // altitude contours + graticule (contours hugging maria = aligned).
+          InkWell(
+            onTap: () => setState(() {
+              TerrainNodes.debugView =
+                  (TerrainNodes.debugView + 1) % TerrainNodes.debugViewCount;
+            }),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(4, 6, 4, 4),
+              child: Text(
+                'Terrain view: '
+                '${TerrainNodes.debugViewNames[TerrainNodes.debugView]}',
                 style: const TextStyle(color: Color(0xFF7FB0E0), fontSize: 12),
               ),
             ),

@@ -31,7 +31,9 @@ uniform TerrainInfo {
   vec4 col_rock;
   vec4 col_snow;
   // x: tile size (m) for triplanar detail. y: sand amount, z: grass amount
-  // (per-body caps; the shader modulates them by latitude+altitude). w: unused.
+  // (per-body caps; the shader modulates them by latitude+altitude).
+  // w: debug view — 0 normal, 1 height bands, 2 raw albedo, 3 albedo+contour
+  // alignment overlay (see TerrainNodes.debugView).
   vec4 detail;
   // xyz: body spin-axis (pole) in the SAME world frame as v_position, so
   // dot(up, pole) = the body-fixed latitude sine regardless of body rotation.
@@ -221,6 +223,28 @@ vec3 triplanar(sampler2D tex, vec3 wpos_m, vec3 n, float tile_m) {
   return cx * bw.x + cy * bw.y + cz * bw.z;
 }
 
+// --- Debug-view helpers ------------------------------------------------------
+
+// Hypsometric tint for a normalised altitude t in [0,1]:
+// deep blue -> cyan -> green -> yellow -> red -> white.
+vec3 Hypso(float t) {
+  vec3 c = mix(vec3(0.05, 0.15, 0.60), vec3(0.00, 0.70, 0.80),
+      smoothstep(0.00, 0.25, t));
+  c = mix(c, vec3(0.10, 0.60, 0.15), smoothstep(0.25, 0.45, t));
+  c = mix(c, vec3(0.90, 0.85, 0.20), smoothstep(0.45, 0.65, t));
+  c = mix(c, vec3(0.85, 0.25, 0.10), smoothstep(0.65, 0.85, t));
+  c = mix(c, vec3(1.00), smoothstep(0.85, 1.00, t));
+  return c;
+}
+
+// 1 on an iso-line of `v` at integer multiples of `step`, 0 elsewhere.
+// Fixed fractional width (no derivatives — this profile has none), so line
+// thickness varies with slope; fine for a debug view.
+float IsoLine(float v, float step_, float width) {
+  float f = fract(v / step_);
+  return 1.0 - smoothstep(0.0, width, min(f, 1.0 - f));
+}
+
 // -----------------------------------------------------------------------------
 
 void main() {
@@ -280,17 +304,20 @@ void main() {
   // procedural colour by its own mean turns it into a detail ratio around 1.0,
   // which then multiplies the real albedo — maria come out dark and highlands
   // bright, and both keep their texture.
+  // Body-fixed latitude/longitude + the equirect uv. Needed by the real-albedo
+  // path AND the debug views below, so computed unconditionally.
+  vec3 mer = normalize(terrain.meridian_albedo.xyz);
+  vec3 pol = normalize(terrain.pole.xyz);
+  // Complete the body-fixed frame. east = pole x meridian is already unit
+  // (both are unit and perpendicular).
+  vec3 east = cross(pol, mer);
+  float sinLat = clamp(dot(up, pol), -1.0, 1.0);
+  float lat = asin(sinLat);
+  float lon = atan(dot(up, east), dot(up, mer));
+  vec2 uv = vec2(lon / 6.2831853 + 0.5, 0.5 - lat / 3.14159265);
+
   float albedoMix = clamp(terrain.meridian_albedo.w, 0.0, 1.0);
   if (albedoMix > 0.0) {
-    vec3 mer = normalize(terrain.meridian_albedo.xyz);
-    vec3 pol = normalize(terrain.pole.xyz);
-    // Complete the body-fixed frame. east = pole x meridian is already unit
-    // (both are unit and perpendicular).
-    vec3 east = cross(pol, mer);
-    float sinLat = clamp(dot(up, pol), -1.0, 1.0);
-    float lat = asin(sinLat);
-    float lon = atan(dot(up, east), dot(up, mer));
-    vec2 uv = vec2(lon / 6.2831853 + 0.5, 0.5 - lat / 3.14159265);
     vec3 real = texture(tex_albedo, uv).rgb;
     float m = max((albedo.r + albedo.g + albedo.b) / 3.0, 1e-3);
     vec3 detailRatio = albedo / m;
@@ -300,6 +327,39 @@ void main() {
   // Sun Lambert + ambient. Light travels along sun_amp.xyz, so a surface is
   // lit by the component facing back toward the sun (-dir).
   float lit = max(dot(n, -terrain.sun_amp.xyz), 0.0);
+
+  // Debug views (detail.w, cycled from the debug panel). Placed before the
+  // shadow tap so the map views stay readable on the night side.
+  float dbg = terrain.detail.w;
+  if (dbg > 0.5) {
+    // Altitude in metres above the DATUM radius (scene km -> m).
+    float alt_m = (dist - terrain.centre_radius.w) * 1000.0;
+    float amp_m = max(terrain.sun_amp.w, 1e-6) * 1000.0;
+    if (dbg < 1.5) {
+      // HEIGHT: hypsometric bands of the meshed field + 1 km contours,
+      // lightly sun-shaded so relief still reads as 3D.
+      vec3 c = Hypso(clamp(alt_m / amp_m, -1.0, 1.0) * 0.5 + 0.5);
+      c *= 1.0 - 0.5 * IsoLine(alt_m, 1000.0, 0.05);
+      frag_color = vec4(c * (0.55 + 0.45 * lit), 1.0);
+    } else if (dbg < 2.5) {
+      // ALBEDO: the raw baked map through the shader's own uv path — unlit
+      // and unmodulated, so what's on screen IS the mapping.
+      frag_color = vec4(texture(tex_albedo, uv).rgb, 1.0);
+    } else {
+      // ALIGN: albedo as a grey underlay, 1 km altitude contours in orange,
+      // 15-degree body-fixed graticule in blue. Contours hugging the maria
+      // edges = the height field and the colour map agree.
+      float lum = dot(texture(tex_albedo, uv).rgb, vec3(1.0 / 3.0));
+      vec3 c = vec3(lum);
+      float grid = max(IsoLine(degrees(lat), 15.0, 0.03),
+                       IsoLine(degrees(lon), 15.0, 0.03));
+      c = mix(c, vec3(0.28, 0.47, 1.00), 0.55 * grid);
+      c = mix(c, vec3(1.00, 0.51, 0.08), IsoLine(alt_m, 1000.0, 0.04));
+      frag_color = vec4(c, 1.0);
+    }
+    return;
+  }
+
   // Cast-shadow occlusion (1 lit .. 0 shadowed) from the craft/terrain atlas.
   float shadow = sh.sp1.y > 0.5 ? SampleShadow(v_position, n) : 1.0;
   float shade = terrain.params.y + (1.0 - terrain.params.y) * lit * shadow;

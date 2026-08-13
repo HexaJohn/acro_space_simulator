@@ -266,15 +266,13 @@ Future<void> main() async {
   // rebuild-per-guess loop.
   developer.registerExtension('ext.acro.terrain', (method, params) async {
     // Settable knobs, e.g.
-    //   ext.acro.terrain?minBodyPx=8&splitPx=180&maxResidentChunks=256
-    // Coverage is body-wide now, so there is no altitude gate to raise and no
-    // ring to widen; lowering minBodyPx is what makes terrain appear from
-    // further out. Note the camera's near plane is (range + bodyRadius)/20, so
-    // a BODY focus still clips everything within ~87 km on the Moon.
+    //   ext.acro.terrain?splitPx=180&maxResidentChunks=256
+    // Terrain is always on for the focused body (no apparent-size gate any
+    // more — at a few pixels it collapses to the six face roots). Note the
+    // camera's near plane is (range + bodyRadius)/20, so a BODY focus still
+    // clips everything within ~87 km on the Moon.
     double? num(String k) =>
         params[k] == null ? null : double.tryParse(params[k]!);
-    final minPx = num('minBodyPx');
-    if (minPx != null && minPx > 0) TerrainNodes.minBodyPx = minPx;
     final sp = num('splitPx');
     if (sp != null && sp > 0) TerrainNodes.splitPx = sp;
     final cap = num('maxResidentChunks');
@@ -299,12 +297,19 @@ Future<void> main() async {
     if (params['asyncMeshing'] != null) {
       TerrainNodes.asyncMeshing = params['asyncMeshing'] == 'true';
     }
+    // debugView=0..3 cycles the shader debug view (normal/height/albedo/align)
+    // for headless alignment captures.
+    final view = num('debugView');
+    if (view != null) {
+      TerrainNodes.debugView =
+          view.round().clamp(0, TerrainNodes.debugViewCount - 1);
+    }
     return developer.ServiceExtensionResponse.result(jsonEncode({
       'debug': TerrainNodes.debugLine,
       'gate': TerrainNodes.gateReason,
       'enabled': TerrainNodes.enabled,
+      'debugView': TerrainNodes.debugView,
       'texturesReady': TerrainTextures.ready,
-      'minBodyPx': TerrainNodes.minBodyPx,
       'splitPx': TerrainNodes.splitPx,
       'maxResidentChunks': TerrainNodes.maxResidentChunks,
       'resolution': TerrainNodes.resolution,
