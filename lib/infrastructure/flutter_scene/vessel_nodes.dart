@@ -6,7 +6,8 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show compute, debugPrint, kIsWeb;
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_scene/fscene.dart' as fsb;
 import 'package:flutter_scene/scene.dart' as fs;
 import 'package:vector_math/vector_math.dart' as vm;
@@ -268,6 +269,73 @@ class VesselNodes {
     }
   }
 
+  /// One fully-loaded bake per asset, shared by every vessel that uses it:
+  /// the parsed document plus its preloaded [fsb.ResourceRealizer], from
+  /// which per-vessel node graphs realize in milliseconds against shared GPU
+  /// resources. The expensive part — the ~90 MB container parse and the
+  /// KTX2 texture transcode (pure-Dart, ~30–60 s of CPU per bake in a debug
+  /// build) — is paid once per asset, not once per vessel.
+  static final Map<String, Future<(fsb.SceneDocument, fsb.ResourceRealizer)>>
+      _bakes = {};
+
+  /// Serializes bake loads. Loading both craft bakes at once doubles the
+  /// isolate-group heap churn (parse copies + per-texture transcode
+  /// isolates), and the resulting GC pauses land on the UI isolate as
+  /// multi-second frame stalls.
+  static Future<void> _bakeChain = Future<void>.value();
+
+  static Future<(fsb.SceneDocument, fsb.ResourceRealizer)> _bake(
+          String asset) =>
+      _bakes.putIfAbsent(asset, () {
+        final done = _bakeChain.then((_) => _loadBake(asset));
+        _bakeChain = done.then((_) {}, onError: (Object _) {});
+        return done;
+      });
+
+  /// Loads + parses + GPU-preloads one bake. The container parse runs in a
+  /// background isolate (`compute`); the document is pure data, so it
+  /// crosses back via `Isolate.exit` without a copy. `preload` transcodes
+  /// each KTX2 texture in its own isolate and only uploads on this one.
+  /// After a first throwaway realize (which memoizes geometry into the
+  /// realizer), the payload bytes are dropped — they otherwise pin the whole
+  /// container's decoded bytes in the heap for the life of the cache.
+  static Future<(fsb.SceneDocument, fsb.ResourceRealizer)> _loadBake(
+      String asset) async {
+    final sw = Stopwatch()..start();
+    final data = await rootBundle.load(asset);
+    debugPrint('craftBake $asset: bundle ${sw.elapsedMilliseconds}ms');
+    final bytes =
+        data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
+    final doc =
+        await compute(fsb.readFsceneb, bytes, debugLabel: 'parse $asset');
+    debugPrint('craftBake $asset: parsed ${sw.elapsedMilliseconds}ms');
+    final realizer = fsb.ResourceRealizer(doc);
+    await realizer.preload();
+    debugPrint('craftBake $asset: preloaded ${sw.elapsedMilliseconds}ms');
+    await fsb.realizeSceneAsync(doc, resources: realizer);
+    for (final p in doc.payloads.values) {
+      p.bytes = null;
+    }
+    debugPrint('craftBake $asset ready in ${sw.elapsedMilliseconds}ms');
+    return (doc, realizer);
+  }
+
+  /// Starts loading every craft bake in the background so a later flight
+  /// entry only realizes node graphs from the shared cache (~ms) instead of
+  /// paying parse + texture transcode at the moment the scene appears. Call
+  /// from the menu. No-op on web: `compute` runs same-isolate there, so
+  /// prewarming would freeze the menu for the exact cost it tries to hide.
+  static void prewarm() {
+    if (kIsWeb) return;
+    for (final asset in const [_apolloModel, _landerModel]) {
+      _bake(asset).then((_) {}, onError: (Object e) {
+        _failedAssets.add(asset);
+        // ignore: avoid_print
+        print('craft model prewarm failed ($asset): $e');
+      });
+    }
+  }
+
   void _ensureCraftModel(String vesselId, fs.Node parent) {
     final asset = _assetFor(vesselId);
     if (_failedAssets.contains(asset) ||
@@ -276,7 +344,8 @@ class VesselNodes {
       return;
     }
     _glbLoading.add(vesselId);
-    fsb.loadFscenebAsset(asset)
+    _bake(asset)
+        .then((bake) => fsb.realizeSceneAsync(bake.$1, resources: bake.$2))
         .then((model) {
           _glbLoading.remove(vesselId);
           final node = _nodes[vesselId];

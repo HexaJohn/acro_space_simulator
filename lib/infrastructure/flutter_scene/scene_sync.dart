@@ -6,6 +6,7 @@
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_scene/scene.dart' as fs;
 import 'package:vector_math/vector_math.dart' as vm;
 
@@ -86,15 +87,28 @@ class SceneSync {
     origin.focusWorld =
         focusWorldOverride ?? _focusWorld(snap, focusVesselId, focusBodyId);
 
+    // Stage timing: a stage burning >300ms of the UI thread in one frame is
+    // named in the console, so a load-time stall is attributable to a
+    // subsystem without a DevTools trace.
+    final sw = Stopwatch()..start();
+    var last = 0;
+    void mark(String stage) {
+      final now = sw.elapsedMilliseconds;
+      if (now - last > 300) debugPrint('sceneSync: $stage ${now - last}ms');
+      last = now;
+    }
+
     // Terrain's active body + relief are last frame's (terrain syncs below);
     // they only change on a focus switch, so the one-frame lag is harmless.
     _bodies.update(snap, origin,
         terrainBodyId: _terrain.activeBodyId,
         terrainReliefM: _terrain.activeReliefM);
+    mark('bodies');
     if (!_noVessels) {
       _vessels.update(snap, origin, starWorld: _bodies.starWorld(snap));
       _exhaust.update(snap, origin);
     }
+    mark('vessels');
     if (!_noLines) {
       _lines.update(snap, origin,
           camera: camera,
@@ -102,6 +116,7 @@ class SceneSync {
           focusVesselId: focusVesselId,
           focusBodyId: focusBodyId);
     }
+    mark('lines');
     if (!_noAtmo) {
       _atmospheres.update(
         snap,
@@ -112,6 +127,7 @@ class SceneSync {
     }
     _rings.update(snap, origin,
         camera: camera, starWorld: _bodies.starWorld(snap));
+    mark('atmo+rings');
     _terrain.update(
       snap,
       origin,
@@ -121,6 +137,7 @@ class SceneSync {
       focusVesselId: focusVesselId,
       starWorld: _bodies.starWorld(snap),
     );
+    mark('terrain');
     // Immediately after terrain, and from the same inputs: props stand on the
     // ground the chunk above just meshed, so anything that changes one has to
     // reach the other in the same frame.
@@ -132,6 +149,7 @@ class SceneSync {
       focusBodyId: focusBodyId,
       focusVesselId: focusVesselId,
     );
+    mark('scatter');
     _skybox.update(
         cameraRangeKm:
             camera == null ? 0 : camera.eyeOffset.length * kRenderScale);
@@ -151,6 +169,7 @@ class SceneSync {
       );
     }
     _applyAa();
+    mark('tail');
   }
 
   /// Anti-aliasing override (null = the engine's auto: MSAA where the

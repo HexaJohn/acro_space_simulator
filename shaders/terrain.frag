@@ -128,44 +128,43 @@ float SampleCascade(int cascade, int count, mat4 cascade_matrix, float box,
   float maxR = max(sh.sp1.w / box, sh.sp0.x);
   float bsum = 0.0;
   float bcount = 0.0;
-#define _BLK(px, py)                                                   \
-  {                                                                    \
-    vec2 o = vec2(px * ca - py * sa, px * sa + py * ca) * maxR;        \
-    vec2 cuv = clamp(uv + o, vec2(sh.sp0.x), vec2(1.0 - sh.sp0.x));    \
-    vec2 auv = vec2((float(cascade) + cuv.x) * inv_count, 1.0 - cuv.y); \
-    float d = texture(shadow_map, auv).r;                              \
-    if (d < receiver_depth) {                                          \
-      bsum += d;                                                       \
-      bcount += 1.0;                                                   \
-    }                                                                  \
+  // Loops over const arrays, NOT macro expansion: each textual copy of the
+  // tap body survives into the translated HLSL, and the downstream compile
+  // cost scales with it — unrolling 8+16 taps inline (plus 4 cascade copies
+  // of this whole function, see SampleShadow) took ~30 s of the UI thread at
+  // first draw. Same offsets, same result, a fraction of the compile.
+  const vec2 kBlocker[8] = vec2[8](
+      vec2(-0.7, -0.7), vec2(0.7, -0.7), vec2(-0.7, 0.7), vec2(0.7, 0.7),
+      vec2(0.0, -1.0), vec2(0.0, 1.0), vec2(-1.0, 0.0), vec2(1.0, 0.0));
+  for (int i = 0; i < 8; i++) {
+    vec2 p = kBlocker[i];
+    vec2 o = vec2(p.x * ca - p.y * sa, p.x * sa + p.y * ca) * maxR;
+    vec2 cuv = clamp(uv + o, vec2(sh.sp0.x), vec2(1.0 - sh.sp0.x));
+    vec2 auv = vec2((float(cascade) + cuv.x) * inv_count, 1.0 - cuv.y);
+    float d = texture(shadow_map, auv).r;
+    if (d < receiver_depth) {
+      bsum += d;
+      bcount += 1.0;
+    }
   }
-  _BLK(-0.7, -0.7) _BLK(0.7, -0.7) _BLK(-0.7, 0.7) _BLK(0.7, 0.7)
-  _BLK(0.0, -1.0) _BLK(0.0, 1.0) _BLK(-1.0, 0.0) _BLK(1.0, 0.0)
-#undef _BLK
   if (bcount < 0.5) return 1.0; // nothing occludes here -> fully lit
   float gap = max(receiver_depth - bsum / bcount, 0.0);
   float radius = clamp(gap * sh.sp1.z, sh.sp0.x, maxR);
 
-#define _SHADOW_TAP(px, py) \
-  ShadowTap(vec2(px, py), ca, sa, radius, uv, cascade, inv_count, receiver_depth)
+  const vec2 kPoisson[16] = vec2[16](
+      vec2(-0.94201624, -0.39906216), vec2(0.94558609, -0.76890725),
+      vec2(-0.09418410, -0.92938870), vec2(0.34495938, 0.29387760),
+      vec2(-0.91588581, 0.45771432), vec2(-0.81544232, -0.87912464),
+      vec2(-0.38277543, 0.27676845), vec2(0.97484398, 0.75648379),
+      vec2(0.44323325, -0.97511554), vec2(0.53742981, -0.47373420),
+      vec2(-0.26496911, -0.41893023), vec2(0.79197514, 0.19090188),
+      vec2(-0.24188840, 0.99706507), vec2(-0.81409955, 0.91437590),
+      vec2(0.19984126, 0.78641367), vec2(0.14383161, -0.14100790));
   float lit = 0.0;
-  lit += _SHADOW_TAP(-0.94201624, -0.39906216);
-  lit += _SHADOW_TAP(0.94558609, -0.76890725);
-  lit += _SHADOW_TAP(-0.09418410, -0.92938870);
-  lit += _SHADOW_TAP(0.34495938, 0.29387760);
-  lit += _SHADOW_TAP(-0.91588581, 0.45771432);
-  lit += _SHADOW_TAP(-0.81544232, -0.87912464);
-  lit += _SHADOW_TAP(-0.38277543, 0.27676845);
-  lit += _SHADOW_TAP(0.97484398, 0.75648379);
-  lit += _SHADOW_TAP(0.44323325, -0.97511554);
-  lit += _SHADOW_TAP(0.53742981, -0.47373420);
-  lit += _SHADOW_TAP(-0.26496911, -0.41893023);
-  lit += _SHADOW_TAP(0.79197514, 0.19090188);
-  lit += _SHADOW_TAP(-0.24188840, 0.99706507);
-  lit += _SHADOW_TAP(-0.81409955, 0.91437590);
-  lit += _SHADOW_TAP(0.19984126, 0.78641367);
-  lit += _SHADOW_TAP(0.14383161, -0.14100790);
-#undef _SHADOW_TAP
+  for (int i = 0; i < 16; i++) {
+    lit += ShadowTap(kPoisson[i], ca, sa, radius, uv, cascade, inv_count,
+                     receiver_depth);
+  }
   float shadow = lit / 16.0;
 
   // Fade the last cascade back to lit at its outer edge (no next cascade).
@@ -180,30 +179,39 @@ float SampleCascade(int cascade, int count, mat4 cascade_matrix, float box,
 
 // Picks the first (highest-res) cascade whose tile contains the fragment.
 // Unrolled with literal indices (no dynamic uniform-array indexing in ES 1.00).
+//
+// SELECTION ONLY — the heavy sampler runs once, after. With SampleCascade
+// called inside each cascade's branch, the translator inlined its ~96-tap
+// body four times and the downstream HLSL compile took ~30 s of the UI
+// thread at first draw (the flight-mode "loading hang"). One call site
+// compiles in a fraction of that; same math, same picture.
 #define _TRY_CASCADE(IDX)                                                     \
-  if (!found && count > IDX) {                                                \
-    mat4 cascade_matrix = sh.light_space_matrix[IDX];                         \
-    float box = sh.cascade_box_sizes[IDX];                                    \
-    vec4 light_clip = cascade_matrix * vec4(world_pos, 1.0);                  \
+  if (cascade < 0 && count > IDX) {                                           \
+    mat4 m = sh.light_space_matrix[IDX];                                      \
+    float b = sh.cascade_box_sizes[IDX];                                      \
+    vec4 light_clip = m * vec4(world_pos, 1.0);                               \
     vec3 proj = light_clip.xyz / light_clip.w;                                \
     vec2 uv = proj.xy * 0.5 + 0.5;                                            \
-    float margin = max(sh.sp1.w / box, sh.sp0.x);                             \
+    float margin = max(sh.sp1.w / b, sh.sp0.x);                               \
     if (!(uv.x < margin || uv.x > 1.0 - margin || uv.y < margin ||           \
           uv.y > 1.0 - margin || proj.z < 0.0 || proj.z > 1.0)) {            \
-      result = SampleCascade(IDX, count, cascade_matrix, box, world_pos, n);  \
-      found = true;                                                           \
+      cascade = IDX;                                                          \
+      cascade_matrix = m;                                                     \
+      box = b;                                                                \
     }                                                                         \
   }
 
 float SampleShadow(vec3 world_pos, vec3 n) {
   int count = int(sh.light_dir_count.w);
-  float result = 1.0;
-  bool found = false;
+  int cascade = -1;
+  mat4 cascade_matrix = mat4(1.0);
+  float box = 1.0;
   _TRY_CASCADE(0)
   _TRY_CASCADE(1)
   _TRY_CASCADE(2)
   _TRY_CASCADE(3)
-  return result;
+  if (cascade < 0) return 1.0; // outside every cascade -> fully lit
+  return SampleCascade(cascade, count, cascade_matrix, box, world_pos, n);
 }
 #undef _TRY_CASCADE
 

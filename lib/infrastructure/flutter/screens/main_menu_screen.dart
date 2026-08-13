@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import '../../../domain/universe/celestial_body.dart';
 import '../../../domain/universe/real_solar_system.dart';
 import '../../flutter_scene/render_backend.dart';
+import '../../flutter_scene/vessel_nodes.dart';
 import '../../sample_world.dart';
 import '../simulation_view.dart';
 import 'app_theme.dart';
@@ -28,6 +29,11 @@ class MainMenuScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Craft bakes cost ~a minute of parse + KTX2 transcode in a debug build;
+    // start them while the player reads the menu so FLIGHT/ASCENT entry only
+    // realizes node graphs from the warm cache. After the first frame, so the
+    // menu paints before the loads contend for the UI thread. Idempotent.
+    WidgetsBinding.instance.addPostFrameCallback((_) => VesselNodes.prewarm());
     final items = <_MenuItem>[
       _MenuItem('FLIGHT', 'Launch the live solar-system simulation', Icons.rocket_launch,
           AppTheme.accent2, (c) => SimulationView(

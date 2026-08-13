@@ -45,7 +45,21 @@ final GlobalKey _shotKey = GlobalKey();
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   installWindowsAltKeyAssertFilter();
+  // Jank watchdog: prints any frame over 100 ms with its build/raster split,
+  // so a load-time hang is attributable from the console without DevTools.
+  WidgetsBinding.instance.addTimingsCallback((timings) {
+    for (final t in timings) {
+      final total = t.totalSpan.inMilliseconds;
+      if (total > 100) {
+        debugPrint('JANK: frame ${total}ms '
+            '(build ${t.buildDuration.inMilliseconds}ms, '
+            'raster ${t.rasterDuration.inMilliseconds}ms)');
+      }
+    }
+  });
+  final swDem = Stopwatch()..start();
   await loadBakedTerrainData();
+  debugPrint('boot: loadBakedTerrainData ${swDem.elapsedMilliseconds}ms');
   const backend =
       String.fromEnvironment('BACKEND', defaultValue: 'flutterScene');
 

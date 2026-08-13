@@ -1033,18 +1033,24 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     // slow frame (the jumpy "random update" motion).
     _accum += frameDt;
     var steps = 0;
+    final swSteps = Stopwatch()..start();
     // PAUSE (warp 0): skip the tick entirely — running subsystems with a
     // zero dt is untested ground, and draining the backlog keeps unpausing
     // from replaying accumulated time.
     if (_clock.warpFactor <= 0) _accum = 0;
-    while (_accum >= _clock.fixedStep && steps < 200) {
+    while (_accum >= _clock.fixedStep && steps < 25) {
       _advance.execute(_clock);
       _accum -= _clock.fixedStep;
       steps++;
     }
     // If we hit the step cap (e.g. a long first frame or a stall), drop the
-    // backlog instead of spiralling â€” better to skip time than freeze.
-    if (steps >= 200) _accum = 0;
+    // backlog instead of spiralling â€” better to skip time than freeze. 25
+    // steps absorbs a half-second hiccup; a longer stall (asset loads, GC)
+    // skips time rather than replaying it at ~10-30ms a step.
+    if (steps >= 25) _accum = 0;
+    if (swSteps.elapsedMilliseconds > 500) {
+      debugPrint('simSteps: $steps steps in ${swSteps.elapsedMilliseconds}ms');
+    }
 
     // Serve the freshly-advanced world to any connected renderer (Unreal). Gated
     // on hasClients so capture+encode cost is zero when nothing's attached. The
