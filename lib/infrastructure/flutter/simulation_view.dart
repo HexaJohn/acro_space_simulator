@@ -1614,22 +1614,25 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
               ),
             ),
           ),
-          // Terrain shader debug view (tap to cycle; 3D backend only).
+          // Terrain shader debug view (tap to cycle). Only the 3D backend
+          // runs terrain.frag — on the software painter the choice is stored
+          // but has no visual effect, hence the suffix.
           // height = hypsometric bands of the meshed field, albedo = the raw
           // baked map through the shader's uv path, align = albedo grey +
           // altitude contours + graticule (contours hugging maria = aligned).
-          InkWell(
-            onTap: () => setState(() {
-              TerrainNodes.debugView =
-                  (TerrainNodes.debugView + 1) % TerrainNodes.debugViewCount;
-            }),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(4, 6, 4, 4),
-              child: Text(
-                'Terrain view: '
-                '${TerrainNodes.debugViewNames[TerrainNodes.debugView]}',
-                style: const TextStyle(color: Color(0xFF7FB0E0), fontSize: 12),
-              ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
+            child: _atmoButton(
+              'Terrain view: '
+              '${TerrainNodes.debugViewNames[TerrainNodes.debugView]}'
+              '${_renderBackend == RenderBackend.flutterScene ? '' : ' (3D only)'}',
+              TerrainNodes.debugView == 0
+                  ? const Color(0xFF7FB0E0)
+                  : const Color(0xFFFFB347),
+              () => setState(() {
+                TerrainNodes.debugView =
+                    (TerrainNodes.debugView + 1) % TerrainNodes.debugViewCount;
+              }),
             ),
           ),
           // Tilted-view cull zoom threshold (tap to cycle).
