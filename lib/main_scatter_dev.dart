@@ -14,6 +14,7 @@ import 'package:flutter/scheduler.dart';
 
 import 'domain/scatter/prop_catalog.dart';
 import 'domain/scatter/prop_model.dart';
+import 'infrastructure/baked_terrain_data.dart';
 import 'infrastructure/flutter/scatter_lab_control.dart';
 import 'infrastructure/flutter/screens/scatter_lab_screen.dart';
 import 'infrastructure/flutter/windows_key_event_workaround.dart';
@@ -34,8 +35,10 @@ import 'infrastructure/flutter/windows_key_event_workaround.dart';
 ///   `callServiceExtension?...&method=ext.acro.screenshot&path=<out.png>`
 final GlobalKey _shotKey = GlobalKey();
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
   installWindowsAltKeyAssertFilter();
+  await loadBakedTerrainData();
 
   developer.registerExtension('ext.acro.screenshot', (method, params) async {
     try {

@@ -22,6 +22,8 @@ import 'package:acro_space_simulator/domain/vessel/vessel.dart';
 import 'package:acro_space_simulator/infrastructure/sample_world.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../helpers/register_baked_dems.dart';
+
 /// A craft with real mass dropped straight down at the Moon (a terrain body).
 ///
 /// Spawned just above the LOCAL ground, not the datum. The Moon's relief runs
@@ -104,6 +106,8 @@ SimulationClock _run(
 }
 
 void main() {
+  registerBakedDemsForTest(); // moon terrain now reads the baked DEM
+
   test('a hard impact digs a crater into the body', () {
     final w = _build(_faller(speed: 300));
     expect(w.edits.forBody(SampleWorld.moon), isNull, reason: 'starts pristine');

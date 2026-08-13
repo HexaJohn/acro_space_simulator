@@ -18,6 +18,7 @@ import '../../../domain/scatter/scatter_placement.dart';
 import '../../../domain/shared/quaternion.dart';
 import '../../../domain/shared/vector3.dart';
 import '../../../domain/terrain/cubed_sphere.dart';
+import '../../../domain/terrain/dem_registry.dart';
 import '../../../domain/terrain/terrain_edits.dart';
 import '../../../domain/terrain/terrain_field.dart';
 import '../../../domain/planetary/planet_surface.dart';
@@ -147,6 +148,9 @@ class ScatterNodes {
       seed: d.terrainSeed,
       octaves: d.terrainOctaves,
       edits: _edits,
+      dem: d.terrainDemBodyId == null
+          ? null
+          : DemRegistry.require(d.terrainDemBodyId!),
     );
 
     final bodyQuat = Quaternion(b.qw, b.qx, b.qy, b.qz) *

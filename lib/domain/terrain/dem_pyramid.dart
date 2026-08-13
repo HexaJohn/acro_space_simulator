@@ -219,10 +219,14 @@ class DemPyramid {
 class DemDerivedControl implements TerrainControl {
   const DemDerivedControl(
     this.dem, {
-    this.detailFraction = 0.35,
+    this.detailFraction = defaultDetailFraction,
     this.roughnessReliefM = 4000,
     this.statLevel = 2,
   });
+
+  /// The default [detailFraction]. Named so `TerrainField` can derive its
+  /// amplitude bound from the same number the control actually applies.
+  static const double defaultDetailFraction = 0.35;
 
   final DemPyramid dem;
 

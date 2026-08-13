@@ -14,6 +14,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter_scene/scene.dart' show AntiAliasingMode;
 
 import 'domain/shared/vector3.dart';
+import 'infrastructure/baked_terrain_data.dart';
 import 'infrastructure/flutter/sim_view_control.dart';
 import 'infrastructure/flutter/windows_key_event_workaround.dart';
 import 'infrastructure/sample_world.dart';
@@ -41,8 +42,10 @@ import 'infrastructure/flutter_scene/vessel_nodes.dart';
 /// used for side-by-side parity captures of the SAME scene.
 final GlobalKey _shotKey = GlobalKey();
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
   installWindowsAltKeyAssertFilter();
+  await loadBakedTerrainData();
   const backend =
       String.fromEnvironment('BACKEND', defaultValue: 'flutterScene');
 

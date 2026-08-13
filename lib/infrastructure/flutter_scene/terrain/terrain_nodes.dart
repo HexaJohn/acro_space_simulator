@@ -17,6 +17,8 @@ import '../../../domain/shared/quaternion.dart';
 import '../../../domain/shared/vector3.dart';
 import '../../../domain/terrain/cell_mesher.dart';
 import '../../../domain/terrain/cubed_sphere.dart';
+import '../../../domain/terrain/dem_pyramid.dart';
+import '../../../domain/terrain/dem_registry.dart';
 import '../../../domain/terrain/mesh_scheduler.dart';
 import '../../../domain/terrain/terrain_edits.dart';
 import '../../../domain/terrain/terrain_feature.dart';
@@ -280,6 +282,12 @@ class TerrainNodes {
     // side. Omitting it was a real bug: the renderer drew plain fBm relief
     // while collision resolved against eroded, cratered ground, so a craft sank
     // straight through the visible surface hunting one that was drawn nowhere.
+    // Same registry the sim-side `TerrainConfig.fieldFor` consults, so both
+    // resolve the identical pyramid (or both throw — never one of each).
+    final dem = d.terrainDemBodyId == null
+        ? null
+        : DemRegistry.require(d.terrainDemBodyId!);
+
     if (_detailBodyId != bodyId) {
       _detail = d.terrainErodedDetail
           ? (d.terrainProfile ?? TerrainProfile.barren).detailFor(
@@ -288,6 +296,7 @@ class TerrainNodes {
               amplitudeM: d.terrainAmplitude,
               featureScaleM: d.terrainFeatureScale,
               octaves: d.terrainOctaves + 1,
+              control: dem == null ? null : DemDerivedControl(dem),
             )
           : null;
       _detailBodyId = bodyId;
@@ -304,6 +313,7 @@ class TerrainNodes {
       seed: d.terrainSeed,
       octaves: d.terrainOctaves,
       edits: _edits,
+      dem: dem,
       detail: _detail,
     );
 

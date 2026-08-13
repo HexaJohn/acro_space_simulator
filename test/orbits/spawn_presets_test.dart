@@ -14,7 +14,10 @@ import 'package:acro_space_simulator/domain/universe/real_solar_system.dart';
 import 'package:acro_space_simulator/domain/universe/star_system.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../helpers/register_baked_dems.dart';
+
 void main() {
+  registerBakedDemsForTest(); // moon terrain now reads the baked DEM
   const presets = SpawnPresets();
   final system = RealSolarSystem.build();
   const epoch = Epoch.zero;

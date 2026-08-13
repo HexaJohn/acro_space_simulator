@@ -261,6 +261,9 @@ class RealSolarSystem {
         // meshing sample this deterministically.
         terrain: const TerrainConfig(
           seed: 0x11A00,
+          // Base relief comes from the baked LOLA DEM; amplitude only feeds
+          // the legacy fBm path and is superseded by the DEM's own span.
+          demBodyId: 'moon',
           amplitude: 3000,
           featureScale: 18000,
           // Airless and ancient: erosion-aware relief plus a saturated crater

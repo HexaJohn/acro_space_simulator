@@ -527,6 +527,12 @@ class BodyDescriptorSnapshot {
   /// terrain on screen, chasing a surface that is drawn nowhere.
   final TerrainProfile? terrainProfile;
 
+  /// Body id of the baked DEM replacing the procedural base relief, or null.
+  /// Travels for the same reason [terrainProfile] does: the renderer rebuilds
+  /// the field independently, and without this it would mesh procedural
+  /// ground while collision resolves against the real map.
+  final String? terrainDemBodyId;
+
   const BodyDescriptorSnapshot({
     required this.id,
     this.kind = BodyKind.rocky,
@@ -554,6 +560,7 @@ class BodyDescriptorSnapshot {
     this.terrainSandAmount = 0,
     this.terrainErodedDetail = false,
     this.terrainProfile,
+    this.terrainDemBodyId,
   });
 
   factory BodyDescriptorSnapshot.of(CelestialBody body, StarSystem system) {
@@ -589,6 +596,7 @@ class BodyDescriptorSnapshot {
       terrainSandAmount: body.terrain?.sandAmount ?? 0,
       terrainErodedDetail: body.terrain?.erodedDetail ?? false,
       terrainProfile: body.terrain?.profile,
+      terrainDemBodyId: body.terrain?.demBodyId,
     );
   }
 
@@ -636,6 +644,7 @@ class BodyDescriptorSnapshot {
             // collides against — see [terrainProfile].
             if (terrainErodedDetail) 'eroded': true,
             if (terrainProfile != null) 'profile': terrainProfile!.toJson(),
+            if (terrainDemBodyId != null) 'dem': terrainDemBodyId,
           },
       };
 
@@ -680,6 +689,7 @@ class BodyDescriptorSnapshot {
           ? null
           : TerrainProfile.fromJson(
               ((j['terrain'] as Map)['profile'] as Map).cast<String, dynamic>()),
+      terrainDemBodyId: ((j['terrain'] as Map?)?['dem']) as String?,
     );
   }
 }

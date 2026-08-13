@@ -5,11 +5,16 @@
 
 import 'package:flutter/material.dart';
 
+import 'infrastructure/baked_terrain_data.dart';
 import 'infrastructure/flutter/screens/main_menu_screen.dart';
 import 'infrastructure/flutter/windows_key_event_workaround.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
   installWindowsAltKeyAssertFilter();
+  // Awaited: collision reads the DEM registry synchronously from the tick, so
+  // the pyramids must be resident before any screen can build a sim.
+  await loadBakedTerrainData();
   runApp(const AcroSpaceSimulatorApp());
 }
 

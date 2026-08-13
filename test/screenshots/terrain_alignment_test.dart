@@ -22,9 +22,9 @@
 //     or axis error in either mapping fails this.
 //   - Mare Crisium must be lower AND darker than the southern highlands.
 //
-// The TerrainField panel is procedural relief, deliberately uncorrelated with
-// the real data until the DEM drives the field; its correlation is printed,
-// not asserted.
+// The TerrainField panel rides the registered DEM (base relief + a
+// DemDerivedControl detail layer), so its correlation with the raw DEM is
+// asserted high — this is the regression gate for the registry wiring.
 //
 //   flutter test test/screenshots/terrain_alignment_test.dart
 
@@ -40,6 +40,8 @@ import 'package:acro_space_simulator/domain/universe/celestial_body.dart';
 import 'package:acro_space_simulator/domain/universe/real_solar_system.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_test/flutter_test.dart';
+
+import '../helpers/register_baked_dems.dart';
 
 const int panelW = 1024, panelH = 512;
 const int fieldW = 512, fieldH = 256; // field sampling is the expensive one
@@ -221,6 +223,7 @@ void main() {
       return;
     }
 
+    registerBakedDemsForTest();
     final moon = RealSolarSystem.build().require(const BodyId('moon'));
     final field = moon.terrainFieldWith(null)!;
 
@@ -384,8 +387,8 @@ void main() {
         '${rLon.toStringAsFixed(3)}');
     debugPrint('corr(DEM elev, albedo lat-flipped)    = '
         '${rLat.toStringAsFixed(3)}');
-    debugPrint('corr(DEM elev, procedural field)      = '
-        '${rFld.toStringAsFixed(3)}  (expected ~0 until DEM drives the field)');
+    debugPrint('corr(DEM elev, terrain field)         = '
+        '${rFld.toStringAsFixed(3)}  (DEM base + detail; must stay high)');
 
     for (final (name, la, lo) in const [
       ('Mare Crisium', 17.0, 59.1),
@@ -411,5 +414,8 @@ void main() {
         reason: 'Mare Crisium must be lower than the southern highlands');
     expect(alb.lumDir(crisium), lessThan(alb.lumDir(high)),
         reason: 'Mare Crisium must be darker than the southern highlands');
+    expect(rFld, greaterThan(0.8),
+        reason: 'the runtime TerrainField rides the DEM now — low correlation '
+            'means the registry wiring or the detail layer regressed');
   }, timeout: const Timeout(Duration(minutes: 5)));
 }

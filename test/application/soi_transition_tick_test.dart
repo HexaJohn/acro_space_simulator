@@ -19,7 +19,11 @@ import 'package:acro_space_simulator/domain/vessel/vessel.dart';
 import 'package:acro_space_simulator/infrastructure/sample_world.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../helpers/register_baked_dems.dart';
+
 void main() {
+  registerBakedDemsForTest(); // the tick's surface-contact check samples moon terrain
+
   test('vessel inside the Moon SOI transitions to Moon and emits the event', () {
     final system = SampleWorld.realSystem();
     const ephemeris = BodyEphemeris();

@@ -129,14 +129,20 @@ class TerrainProfile {
   /// the mesher's shell sizing and the collision raymarch both depend on.
   /// Features that can exceed it (craters dig below the local relief) declare
   /// that through [TerrainDetail.maxMagnitude] instead.
+  ///
+  /// [control] overrides the synthetic control field — a surveyed body passes
+  /// a `DemDerivedControl` so the SAME feature stack is steered by real
+  /// elevation statistics instead of invented ones (and [amplitudeM] then
+  /// stops mattering: the DEM's own relief bounds the detail).
   TerrainDetail detailFor({
     required int seed,
     required double radiusM,
     required double amplitudeM,
     required double featureScaleM,
     int octaves = 6,
+    TerrainControl? control,
   }) {
-    final control = SyntheticControl(
+    control ??= SyntheticControl(
       seed: seed,
       radiusM: radiusM,
       reliefScaleM: amplitudeM,

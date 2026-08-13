@@ -6,6 +6,7 @@
 import 'dart:math' as math;
 
 import '../shared/vector3.dart';
+import 'dem_pyramid.dart';
 import 'noise3.dart';
 import 'terrain_edits.dart';
 import 'terrain_feature.dart';
@@ -31,21 +32,43 @@ import 'terrain_feature.dart';
 class TerrainField {
   TerrainField({
     required this.radius,
-    required this.amplitude,
+    required double amplitude,
     required this.featureScale,
     this.seaLevel = 0,
     required int seed,
     this.octaves = 5,
     this.edits,
     this.detail,
-  }) : _noise = ValueNoise3(seed);
+    DemPyramid? dem,
+  })  : dem = dem,
+        // With a DEM the height bound is the DEM's own span, not the config
+        // scalar: the map decides the relief. The detail layer's ceiling is
+        // its declared maxMagnitude at the largest control relief a
+        // DemDerivedControl can report (detailFraction of the full elevation
+        // span) — craters contribute absolute metres there, so a flat factor
+        // would under-bound and clip terrain.
+        amplitude = dem == null
+            ? amplitude
+            : math.max(dem.maxElevM.abs(), dem.minElevM.abs()) +
+                (detail?.maxMagnitude((dem.maxElevM - dem.minElevM) *
+                        DemDerivedControl.defaultDetailFraction) ??
+                    0.0),
+        _noise = ValueNoise3(seed);
 
   /// Datum radius (m) — the mean surface; relief rides on top of this.
   final double radius;
 
   /// Peak relief either side of the datum (m). Base surface height is
   /// `[-amplitude, +amplitude]` (fBm re-centred); [edits] may exceed it.
+  /// When [dem] is present this is DERIVED from the DEM's elevation span and
+  /// the constructor argument is ignored — real data outranks the config.
   final double amplitude;
+
+  /// Baked real elevation, or null for a fully procedural body. When present
+  /// it IS the base relief: the fBm base is not evaluated at all, and the
+  /// [detail] layer (riding a `DemDerivedControl`) only adds structure below
+  /// the DEM's ~texel resolution.
+  final DemPyramid? dem;
 
   /// World wavelength (m) of the largest terrain feature; smaller detail comes
   /// from the fBm octaves. Independent of [radius].
@@ -82,7 +105,12 @@ class TerrainField {
   /// Base relief only either way — [edits] are 3D CSG, not a height offset,
   /// and cannot be expressed here.
   double heightInDirection(double dx, double dy, double dz) {
+    final dm = dem;
     final d = detail;
+    if (dm != null) {
+      final real = dm.elevationAt(Vector3(dx, dy, dz));
+      return d == null ? real : real + d.heightAt(Vector3(dx, dy, dz));
+    }
     if (d != null) return d.heightAt(Vector3(dx, dy, dz));
     final n = directionFbm(_noise, dx, dy, dz, radius, featureScale,
         octaves: octaves);

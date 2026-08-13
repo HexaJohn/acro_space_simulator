@@ -3,6 +3,8 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
+import '../terrain/dem_pyramid.dart';
+import '../terrain/dem_registry.dart';
 import '../terrain/terrain_edits.dart';
 import '../terrain/terrain_feature.dart';
 import '../terrain/terrain_field.dart';
@@ -26,6 +28,7 @@ class TerrainConfig {
     this.sandAmount = 0,
     this.erodedDetail = false,
     this.profile,
+    this.demBodyId,
   });
 
   /// Noise seed (independent of [PlanetSurface.seed], which drives biomes).
@@ -64,18 +67,32 @@ class TerrainConfig {
   /// [TerrainProfile.barren] — plain eroded relief and nothing characteristic.
   final TerrainProfile? profile;
 
+  /// Body id of a baked DEM (`assets/terrain/<id>.acrodem`) that REPLACES the
+  /// procedural base relief. Null = fully procedural.
+  ///
+  /// The pyramid itself lives in [DemRegistry] — this config is `const`
+  /// catalogue data and cannot hold a decoded map. Declaring an id makes
+  /// registration mandatory: [fieldFor] throws if the pyramid was never
+  /// loaded, because a silent procedural fallback would put this peer's
+  /// ground somewhere the server's is not.
+  final String? demBodyId;
+
   /// Build the sampler for a body of the given datum [radius] (m), optionally
   /// composing that body's accumulated deformations on top of the relief.
-  TerrainField fieldFor(double radius, {TerrainEdits? edits}) => TerrainField(
-        radius: radius,
-        amplitude: amplitude,
-        featureScale: featureScale,
-        seaLevel: seaLevel,
-        seed: seed,
-        octaves: octaves,
-        edits: edits,
-        detail: erodedDetail ? detailFor(radius) : null,
-      );
+  TerrainField fieldFor(double radius, {TerrainEdits? edits}) {
+    final dem = demBodyId == null ? null : DemRegistry.require(demBodyId!);
+    return TerrainField(
+      radius: radius,
+      amplitude: amplitude,
+      featureScale: featureScale,
+      seaLevel: seaLevel,
+      seed: seed,
+      octaves: octaves,
+      edits: edits,
+      dem: dem,
+      detail: erodedDetail ? detailFor(radius, dem: dem) : null,
+    );
+  }
 
   /// The composed detail layer for this body, assembled by its [profile].
   ///
@@ -84,12 +101,16 @@ class TerrainConfig {
   /// contract the mesher's shell sizing and the collision raymarch depend on.
   /// Features that legitimately exceed it (a crater digs below the local
   /// relief) declare that through `TerrainDetail.maxMagnitude`.
-  TerrainDetail detailFor(double radius) =>
+  ///
+  /// With a [dem], the detail rides a [DemDerivedControl] instead: the same
+  /// feature stack, steered and bounded by the DEM's own local relief.
+  TerrainDetail detailFor(double radius, {DemPyramid? dem}) =>
       (profile ?? TerrainProfile.barren).detailFor(
         seed: seed,
         radiusM: radius,
         amplitudeM: amplitude,
         featureScaleM: featureScale,
         octaves: octaves + 1,
+        control: dem == null ? null : DemDerivedControl(dem),
       );
 }
