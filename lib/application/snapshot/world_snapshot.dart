@@ -513,6 +513,9 @@ class BodyDescriptorSnapshot {
   final int terrainOctaves;
   final double terrainGrassAmount; // 0..1 vegetation cover
   final double terrainSandAmount; // 0..1 desert cover
+  // Night-side ambient floor override; null = renderer derives it from the
+  // atmosphere (see TerrainConfig.ambient).
+  final double? terrainAmbient;
 
   /// Whether the body uses the erosion-aware detail layer.
   final bool terrainErodedDetail;
@@ -558,6 +561,7 @@ class BodyDescriptorSnapshot {
     this.terrainOctaves = 5,
     this.terrainGrassAmount = 0,
     this.terrainSandAmount = 0,
+    this.terrainAmbient,
     this.terrainErodedDetail = false,
     this.terrainProfile,
     this.terrainDemBodyId,
@@ -594,6 +598,7 @@ class BodyDescriptorSnapshot {
       terrainOctaves: body.terrain?.octaves ?? 5,
       terrainGrassAmount: body.terrain?.grassAmount ?? 0,
       terrainSandAmount: body.terrain?.sandAmount ?? 0,
+      terrainAmbient: body.terrain?.ambient,
       terrainErodedDetail: body.terrain?.erodedDetail ?? false,
       terrainProfile: body.terrain?.profile,
       terrainDemBodyId: body.terrain?.demBodyId,
@@ -639,6 +644,7 @@ class BodyDescriptorSnapshot {
             'oct': terrainOctaves,
             'grass': terrainGrassAmount,
             'sand': terrainSandAmount,
+            if (terrainAmbient != null) 'amb': terrainAmbient,
             // The generator recipe, not just its scale. Without this the
             // renderer rebuilds a DIFFERENT surface from the one physics
             // collides against — see [terrainProfile].
@@ -683,6 +689,7 @@ class BodyDescriptorSnapshot {
           (((j['terrain'] as Map?)?['grass']) as num?)?.toDouble() ?? 0,
       terrainSandAmount:
           (((j['terrain'] as Map?)?['sand']) as num?)?.toDouble() ?? 0,
+      terrainAmbient: (((j['terrain'] as Map?)?['amb']) as num?)?.toDouble(),
       terrainErodedDetail:
           (((j['terrain'] as Map?)?['eroded']) as bool?) ?? false,
       terrainProfile: ((j['terrain'] as Map?)?['profile']) == null

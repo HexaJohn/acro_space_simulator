@@ -26,6 +26,7 @@ class TerrainConfig {
     this.octaves = 5,
     this.grassAmount = 0,
     this.sandAmount = 0,
+    this.ambient,
     this.erodedDetail = false,
     this.profile,
     this.demBodyId,
@@ -53,6 +54,12 @@ class TerrainConfig {
   /// Desert/sand cover (0..1). Blended into hot, low, dry latitudes up to this
   /// cap; 0 on airless bodies.
   final double sandAmount;
+
+  /// Night-side ambient floor (0..1): the fraction of full sun the surface
+  /// keeps where the sun term is zero. Null derives it from the atmosphere —
+  /// sky scatter on atmospheric bodies, earthshine-scale on airless ones —
+  /// so set it only where a body needs a hand-tuned look.
+  final double? ambient;
 
   /// Opt in to the erosion-aware detail layer (control fields + composable
   /// features) instead of the original single-fBm relief.

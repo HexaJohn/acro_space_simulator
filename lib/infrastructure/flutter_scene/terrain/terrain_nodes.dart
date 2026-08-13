@@ -45,14 +45,24 @@ class TerrainNodes {
   /// Runtime kill switch (debug panel / dev ext).
   static bool enabled = true;
 
+  /// Debug view for the terrain shader (debug panel / dev ext):
+  /// 0 normal, 1 height bands + 1 km contours, 2 raw albedo map,
+  /// 3 alignment overlay (albedo grey + contours + graticule).
+  static int debugView = 0;
+  static const int debugViewCount = 4;
+  static const List<String> debugViewNames = [
+    'normal', 'height', 'albedo', 'align',
+  ];
+
   /// Lateral cells across one chunk.
   static int resolution = 24;
 
-  /// Apparent body radius (px) below which terrain does not mesh at all and the
-  /// textured sphere carries the body on its own. Replaces the old altitude
-  /// cutoff: coverage is now body-wide, so what decides whether meshing is
-  /// worth doing is how much screen the body occupies, not how far away it is.
-  static double minBodyPx = 24;
+  // NOTE: there is deliberately NO apparent-size gate any more (the old
+  // minBodyPx). Terrain draws whenever the focused body has any: at a few
+  // pixels of screen the LOD tree collapses to the six cube-face roots — a
+  // handful of triangles — so "always on" costs nothing, and the textured
+  // sphere stops being the thing you see (it survives only as an under-shell
+  // sunk below the lowest ground, backing gaps while chunks stream in).
 
   /// Hard cap on resident chunks. Screen-space LOD plus horizon culling already
   /// bound the leaf count, but forced refinement around terrain edits can push
@@ -187,6 +197,15 @@ class TerrainNodes {
   _TerrainMaterial? _material;
   String? _bodyId;
 
+  /// The body terrain covered this frame (null when gated out), plus the
+  /// field's relief bound. `SceneSync` hands these to [BodyNodes], which sinks
+  /// that body's textured sphere fully inside the relief — the sphere is an
+  /// under-shell backing streaming gaps, never the thing on screen. The
+  /// descriptor's own amplitude is NOT enough for this on a DEM body: the
+  /// field DERIVES a larger bound from the DEM's real elevation span.
+  String? activeBodyId;
+  double activeReliefM = 0;
+
   /// The focused body's deformations, rebuilt from the snapshot only when the
   /// edit count moves. Re-indexing every brush every frame would cost more than
   /// meshing does.
@@ -244,21 +263,6 @@ class TerrainNodes {
 
     final bodyWorld = Vector3(b.px, b.py, b.pz);
     final eyeWorld = origin.focusWorld + cameraEye;
-    // Terrain now covers the WHOLE body, so the gate is apparent size rather
-    // than altitude: mesh whenever the body is big enough on screen to be worth
-    // it, at whatever LOD that works out to, and leave it to the textured
-    // sphere when it is a few pixels wide. An altitude cutoff could not express
-    // that — 60 km above the Moon and 60 km above Jupiter are not remotely the
-    // same amount of screen.
-    final bodyPx = camera == null
-        ? double.infinity
-        : camera.radiusPx(bodyWorld - origin.focusWorld, b.radius);
-    if (bodyPx < minBodyPx) {
-      gateReason = 'body ${bodyPx.toStringAsFixed(0)}px '
-          '< minBodyPx ${minBodyPx.toStringAsFixed(0)}px';
-      _clear();
-      return;
-    }
     gateReason = '';
 
     // Terrain deformation, replayed from the authoritative snapshot. The SAME
@@ -316,6 +320,8 @@ class TerrainNodes {
       dem: dem,
       detail: _detail,
     );
+    activeBodyId = bodyId;
+    activeReliefM = field.amplitude;
 
     // Focus on the surface — the followed vessel if any, else the camera.
     final fv = focusVesselId == null ? null : snap.vessels[focusVesselId];
@@ -377,7 +383,12 @@ class TerrainNodes {
       final radius = k.circumradiusM(field.radius);
       // Over the horizon: not worth detail, and the margin keeps a chunk whose
       // centre has just dipped under from popping while its near edge shows.
-      if (isBeyondHorizon(k, eyeBF, field.radius, marginM: radius)) return 0;
+      // reliefM matters: on a DEM body the ground — and the eye standing on
+      // it — can sit kilometres below the datum sphere.
+      if (isBeyondHorizon(k, eyeBF, field.radius,
+          marginM: radius, reliefM: field.amplitude)) {
+        return 0;
+      }
       final centreWorld =
           bodyWorld + bodyQuat.rotate(k.centreDirection * field.radius);
       return camera.radiusPx(centreWorld - origin.focusWorld, radius);
@@ -430,7 +441,10 @@ class TerrainNodes {
     final visible = <ChunkKey>[];
     for (final k in leaves) {
       final radius = k.circumradiusM(field.radius);
-      if (isBeyondHorizon(k, eyeBF, field.radius, marginM: radius)) continue;
+      if (isBeyondHorizon(k, eyeBF, field.radius,
+          marginM: radius, reliefM: field.amplitude)) {
+        continue;
+      }
       visible.add(k);
     }
     // Nearest first: it decides both what gets meshed within this frame's
@@ -444,9 +458,34 @@ class TerrainNodes {
         ? visible.take(maxResidentChunks).toSet()
         : visible.toSet();
 
-    // Retire chunks that dropped out of view or changed level.
+    // Retire chunks that dropped out of view or changed level — EXCEPT a
+    // stale chunk standing in where its replacement has not arrived yet.
+    // Retiring a parent before its children upload (or the children before
+    // their parent) opens a hole straight through to the under-sphere for a
+    // few frames on every LOD transition; with the sphere sunk below the
+    // lowest ground, that hole reads as a dark pit. The stand-in overlaps its
+    // replacement for a frame or two instead — the surfaces differ by less
+    // than a voxel, so the nearer one simply wins the depth test.
+    final missingNow = <ChunkKey>{
+      for (final k in wanted)
+        if (!_chunks.containsKey(k) && !_emptyChunks.contains(k)) k,
+    };
+    // Every ancestor of a missing chunk: a resident in this set is the coarse
+    // stand-in for a pending split. The other direction — a resident whose
+    // own ancestor is missing — is the fine stand-in for a pending merge.
+    final missingAncestors = <ChunkKey>{
+      for (final m in missingNow) ...m.ancestors,
+    };
+    bool standsIn(ChunkKey k) {
+      if (missingAncestors.contains(k)) return true;
+      for (final a in k.ancestors) {
+        if (missingNow.contains(a)) return true;
+      }
+      return false;
+    }
+
     for (final k in _chunks.keys.toList()) {
-      if (!wanted.contains(k)) {
+      if (!wanted.contains(k) && !standsIn(k)) {
         _scene.remove(_chunks.remove(k)!.node);
       }
     }
@@ -532,6 +571,10 @@ class TerrainNodes {
       // Per-body material amounts, unless a dev override (>= 0) is set.
       sandAmount: sandWeight >= 0 ? sandWeight : d.terrainSandAmount,
       grassAmount: grassWeight >= 0 ? grassWeight : d.terrainGrassAmount,
+      // Night-side light floor: per-body override, else derived — sky scatter
+      // keeps atmospheric bodies at the old 0.14, airless bodies drop to an
+      // earthshine-scale floor so lunar night reads dark instead of mid-grey.
+      ambient: d.terrainAmbient ?? (d.atmoPresent ? 0.14 : 0.005),
       // Spin axis (+Z) rotated the same way the node rotates vertices, so it
       // lands in v_position's world frame -> dot(up, pole) = latitude sine.
       poleWorld: quatToScene(bodyQuat).rotated(vm.Vector3(0.0, 0.0, 1.0)),
@@ -608,6 +651,8 @@ class TerrainNodes {
     _invalidateInFlight();
     _tree?.reset();
     _bodyId = null;
+    activeBodyId = null;
+    activeReliefM = 0;
     // Force the edit store to rebuild on the next frame that renders — the
     // count alone cannot distinguish "same body, unchanged" from "gated out
     // and back with a different body's edits resident".
@@ -667,6 +712,7 @@ class _TerrainMaterial extends fs.ShaderMaterial {
     required double tileMeters,
     required double sandAmount,
     required double grassAmount,
+    required double ambient,
     required vm.Vector3 poleWorld,
     required vm.Vector3 meridianWorld,
     required double albedoStrength,
@@ -674,12 +720,13 @@ class _TerrainMaterial extends fs.ShaderMaterial {
     setUniformBlockFromFloats('TerrainInfo', [
       centreScene.x, centreScene.y, centreScene.z, radiusScene,
       sunTravel.x, sunTravel.y, sunTravel.z, amplitudeScene,
-      seaRadiusScene, 0.14, 0.6, 0.6, // sea, ambient, snowStart, rockSlope
+      seaRadiusScene, ambient, 0.6, 0.6, // sea, ambient, snowStart, rockSlope
       0.34, 0.32, 0.29, 0.0, // col_low  (dark tan/grey)
       0.55, 0.53, 0.50, 0.0, // col_high (light grey)
       0.30, 0.28, 0.27, 0.0, // col_rock (unused now; tex_rock carries colour)
       0.90, 0.92, 0.95, 0.0, // col_snow
-      tileMeters, sandAmount, grassAmount, 1.0, // detail
+      tileMeters, sandAmount, grassAmount,
+      TerrainNodes.debugView.toDouble(), // detail (w = debug view)
       poleWorld.x, poleWorld.y, poleWorld.z, 0.0, // pole (world)
       meridianWorld.x, meridianWorld.y, meridianWorld.z,
       albedoStrength, // meridian (world) + real-albedo mix
