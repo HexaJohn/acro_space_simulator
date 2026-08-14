@@ -3,6 +3,7 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
+import '../shared/vector3.dart';
 import '../universe/celestial_body.dart';
 import '../vessel/part.dart';
 import '../vessel/vessel.dart';
@@ -47,7 +48,16 @@ class Impact extends DomainEvent {
   final VesselId vessel;
   final BodyId body;
   final double speed;
-  Impact(this.vessel, this.body, this.speed) : super(Epoch.zero);
+
+  /// Contact point in the BODY-FIXED frame (metres from the body centre) — the
+  /// frame the terrain field and crater brushes live in, so a renderer can
+  /// anchor impact FX to the spot on the ground and have it co-rotate with the
+  /// planet. [Vector3.zero] when the raiser could not resolve a contact point.
+  final Vector3 contactBF;
+
+  Impact(this.vessel, this.body, this.speed,
+      {this.contactBF = Vector3.zero})
+      : super(Epoch.zero);
 }
 
 class DockingCompleted extends DomainEvent {

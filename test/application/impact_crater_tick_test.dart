@@ -66,7 +66,8 @@ Vessel _faller({required double speed, double mass = 9000}) {
   InMemoryVesselRepository vessels,
   InMemoryTerrainEditsRepository edits,
   CelestialBody moon,
-}) _build(Vessel v, {bool disableImpact = false, bool disableCrater = false}) {
+}) _build(Vessel v,
+    {bool disableCraftDestruction = false, bool disableCrater = false}) {
   final system = SampleWorld.realSystem();
   final vessels = InMemoryVesselRepository([v]);
   final edits = InMemoryTerrainEditsRepository();
@@ -81,7 +82,7 @@ Vessel _faller({required double speed, double mass = 9000}) {
       deposits: InMemoryDepositRepository(),
       weather: const NullWeatherRepository(),
       terrainEdits: edits,
-      disableImpact: disableImpact,
+      disableCraftDestruction: disableCraftDestruction,
       disableCrater: disableCrater,
     ),
     vessels: vessels,
@@ -146,11 +147,26 @@ void main() {
     expect(w.edits.forBody(SampleWorld.moon), isNull);
   });
 
-  test('the impact cheat suppresses the crater along with the destruction', () {
-    final w = _build(_faller(speed: 300), disableImpact: true);
-    _run(w.tick);
-    expect(w.vessels.byId(const VesselId('faller')), isNotNull);
-    expect(w.edits.forBody(SampleWorld.moon), isNull);
+  test('destruction cheat: the craft survives but the crater is still dug', () {
+    // The cheats are ORTHOGONAL: one switch for the craft's fate, one for the
+    // ground's. A destruction-cheated hard impact keeps deforming terrain.
+    final w = _build(_faller(speed: 300), disableCraftDestruction: true);
+    final clock = _run(w.tick);
+    final survivor = w.vessels.byId(const VesselId('faller'));
+    expect(survivor, isNotNull, reason: 'destruction was cheated off');
+    expect(survivor!.landed, isTrue);
+    final edits = w.edits.forBody(SampleWorld.moon);
+    expect(edits, isNotNull, reason: 'cratering is independent of destruction');
+    // And the survivor settled onto the DEFORMED ground, not the surface the
+    // impact just removed from under it. Probed through the EPOCH-AWARE
+    // helper: the landed craft co-rotates with the body, so its inertial
+    // position must be rotated into the body frame before sampling the field
+    // or the probe walks off the crater as the body spins.
+    final ground = w.moon.terrainGroundRadius(
+        survivor.state.position, clock.epoch,
+        edits: edits);
+    expect((survivor.state.position.length - ground).abs(), lessThan(1.0),
+        reason: 'survivor floats over its own crater');
   });
 
   test('the crater cheat keeps the destruction but not the deformation', () {
@@ -160,6 +176,14 @@ void main() {
         reason: 'disableCrater must not shield the craft');
     expect(w.edits.forBody(SampleWorld.moon), isNull,
         reason: 'the deformation was cheated off');
+  });
+
+  test('both cheats: the craft survives and the ground stays pristine', () {
+    final w = _build(_faller(speed: 300),
+        disableCraftDestruction: true, disableCrater: true);
+    _run(w.tick);
+    expect(w.vessels.byId(const VesselId('faller')), isNotNull);
+    expect(w.edits.forBody(SampleWorld.moon), isNull);
   });
 
   test('a tiny impactor is not worth a permanent edit', () {

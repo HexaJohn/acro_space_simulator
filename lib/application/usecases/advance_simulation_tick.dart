@@ -121,12 +121,15 @@ class AdvanceSimulationTick {
   /// reentry / launch / landing profile while testing.
   final bool disableAeroStress;
   final bool disableOverheat;
-  final bool disableImpact;
 
-  /// Debug cheat: hard impacts still destroy the craft, but leave no crater.
-  /// Independent of [disableImpact], which suppresses the destruction itself
-  /// (and with it the crater — deformation is only ever cut by a destroying
-  /// impact).
+  /// Debug cheat: a hard impact no longer destroys the CRAFT — it settles onto
+  /// the ground instead. ORTHOGONAL to [disableCrater]: the impact still digs
+  /// its crater (and the cheated-alive craft settles into it).
+  final bool disableCraftDestruction;
+
+  /// Debug cheat: hard impacts leave no crater. Orthogonal to
+  /// [disableCraftDestruction] — one switch for the craft's fate, one for the
+  /// ground's.
   final bool disableCrater;
 
   /// Optional contracts board; when set, the tick raises SituationEntered events
@@ -186,7 +189,7 @@ class AdvanceSimulationTick {
     this.maxDynamicPressure = 200000,
     this.disableAeroStress = false,
     this.disableOverheat = false,
-    this.disableImpact = false,
+    this.disableCraftDestruction = false,
     this.disableCrater = false,
     this.contracts,
     this.treasury,
@@ -519,24 +522,42 @@ class AdvanceSimulationTick {
       quench = splashdown.heatQuenchFraction(biome);
     }
 
-    // Impact destruction (skipped by the debug cheat — any speed just lands).
-    if (!disableImpact && !splashdown.survivesSpeed(speed, safeSpeed)) {
+    // A hard contact is judged ONCE, then the two cheats take their halves
+    // independently: [disableCrater] decides the ground's fate,
+    // [disableCraftDestruction] the craft's.
+    final hard = !splashdown.survivesSpeed(speed, safeSpeed);
+    var settleR = groundR;
+    if (hard) {
+      // Body-fixed contact point, computed once and shared by the crater brush
+      // and the Impact event, so the render FX and the dug crater name the
+      // same spot on the ground.
+      final contactBF =
+          body.orientationAt(epoch).conjugate.rotate(dir * groundR);
       if (!disableCrater) {
-        _recordImpactCrater(vessel, body, epoch, tick, dir, groundR, speed,
-            quench);
+        _recordImpactCrater(vessel, body, tick, contactBF, speed, quench);
+        // A destruction-cheated craft survives its own crater — settle it onto
+        // the ground the impact just dug, not the surface that no longer
+        // exists under it.
+        if (disableCraftDestruction) {
+          settleR = body.terrainGroundRadius(vessel.state.position, epoch,
+              edits: terrainEdits.forBody(body.id));
+        }
       }
-      vessel.raise(Impact(vessel.id, body.id, speed));
-      return true; // destroyed
+      if (!disableCraftDestruction) {
+        vessel.raise(Impact(vessel.id, body.id, speed, contactBF: contactBF));
+        return true; // destroyed
+      }
     }
 
-    // Gentle: clamp onto the surface, mark landed, quench heat on water.
+    // Gentle (or destruction-cheated): clamp onto the surface, mark landed,
+    // quench heat on water.
     if (quench > 0) {
       for (final t in vessel.thermal) {
         t.temperature = 2.7 + (t.temperature - 2.7) * (1 - quench);
       }
     }
     vessel.updateState(vessel.state.copyWith(
-      position: dir * groundR,
+      position: dir * settleR,
       velocity: Vector3.zero,
     ));
     vessel.landed = true;
@@ -557,10 +578,8 @@ class AdvanceSimulationTick {
   void _recordImpactCrater(
     Vessel vessel,
     CelestialBody body,
-    Epoch epoch,
     int tick,
-    Vector3 dir,
-    double groundR,
+    Vector3 contactBF,
     double speed,
     double quench,
   ) {
@@ -571,9 +590,9 @@ class AdvanceSimulationTick {
     // here would mean no lunar craters at all.
     final splashed = quench > 0 && body.hasAtmosphere;
     if (body.terrain == null || splashed) return;
-    // The brush lives in the BODY-FIXED frame, the frame the terrain field and
-    // the render meshes share, so the crater co-rotates with the planet.
-    final contactBF = body.orientationAt(epoch).conjugate.rotate(dir * groundR);
+    // The brush lives in the BODY-FIXED frame (the caller already rotated the
+    // contact there), the frame the terrain field and the render meshes share,
+    // so the crater co-rotates with the planet.
     // Radial normal. On a slope the true surface normal tilts away from this,
     // which would matter for an oblique strike; the height-field foundation is
     // gentle enough at crater scale that the radial is within a few degrees.
@@ -583,8 +602,9 @@ class AdvanceSimulationTick {
       normalBF: normalBF,
       kineticEnergyJ: kineticEnergy(vessel.mass, speed),
       // Local surface gravity, so the same crash digs a wider hole on a small
-      // moon than on a planet.
-      surfaceGravityMs2: body.mu / (groundR * groundR),
+      // moon than on a planet. |contactBF| is the ground radius (the rotation
+      // into the body frame preserves length).
+      surfaceGravityMs2: body.mu / contactBF.lengthSquared,
       targetDensityKgM3: craterTargetDensity,
       tick: tick,
     );

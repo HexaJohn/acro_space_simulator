@@ -10,6 +10,7 @@ import '../../domain/colony/colony.dart';
 import '../../domain/colony/surface_placement.dart';
 import '../../domain/comms/comms_service.dart';
 import '../../domain/orbits/body_ephemeris.dart';
+import '../../domain/orbits/patched_conic_service.dart';
 import '../../domain/orbits/state_vector_converter.dart';
 import '../../domain/orbits/trajectory_service.dart';
 import '../../domain/shared/quaternion.dart';
@@ -125,6 +126,10 @@ class VesselSnapshot {
   final double eccentricity, inclination, semiMajor;
   // Predicted orbit-line points, flattened x,y,z triples (body-relative metres).
   final List<double> trajectory;
+  // True when [trajectory] is an OPEN arc truncated at a predicted SOI
+  // handoff (patched conics) rather than the full closed ellipse — renderers
+  // must not treat first/last as a seam or wrap fades around it.
+  final bool trajectoryOpen;
   // Comms.
   final bool connected;
   final double commDelay; // one-way light-time, s
@@ -162,6 +167,7 @@ class VesselSnapshot {
     this.inclination = 0,
     this.semiMajor = 0,
     this.trajectory = const [],
+    this.trajectoryOpen = false,
     this.connected = true,
     this.commDelay = 0,
   });
@@ -190,6 +196,7 @@ class VesselSnapshot {
     var apoapsis = -1.0, periapsis = -1.0, period = -1.0;
     var eccentricity = 0.0, inclination = 0.0, semiMajor = 0.0;
     var trajectory = const <double>[];
+    var trajectoryOpen = false;
     var commDelay = 0.0;
     final body = system?.body(v.dominantBody);
     if (body != null) {
@@ -209,16 +216,35 @@ class VesselSnapshot {
         semiMajor = fin(orbit.elements.semiMajorAxis);
         eccentricity = orbit.elements.eccentricity;
         inclination = orbit.elements.inclination;
-        final path = const TrajectoryService().predictPath(
+        // Patched conics: when the current conic runs into an SOI handoff,
+        // the drawn line must STOP at the boundary (the continuation legs are
+        // rendered from the presenter's patch paths) instead of tracing the
+        // stale full ellipse through space the craft will never fly.
+        final patches = const PatchedConicService().predict(
           position: v.state.position,
           velocity: v.state.velocity,
           body: body,
+          system: system!,
           epoch: epoch,
-          // 48 faceted visibly (7.5° kink per joint on the line you stare
-          // at while flying); 256 keeps joints under 1.5°.
-          samples: 256,
+          pointsPerPatch: 256,
         );
-        trajectory = [for (final p in path) ...[p.x, p.y, p.z]];
+        if (patches.length > 1) {
+          trajectory = [
+            for (final p in patches.first.points) ...[p.x, p.y, p.z]
+          ];
+          trajectoryOpen = true;
+        } else {
+          final path = const TrajectoryService().predictPath(
+            position: v.state.position,
+            velocity: v.state.velocity,
+            body: body,
+            epoch: epoch,
+            // 48 faceted visibly (7.5° kink per joint on the line you stare
+            // at while flying); 256 keeps joints under 1.5°.
+            samples: 256,
+          );
+          trajectory = [for (final p in path) ...[p.x, p.y, p.z]];
+        }
       }
     }
 
@@ -271,6 +297,7 @@ class VesselSnapshot {
       inclination: inclination,
       semiMajor: semiMajor,
       trajectory: trajectory,
+      trajectoryOpen: trajectoryOpen,
       connected: v.hasCommLink,
       commDelay: commDelay,
     );
@@ -300,6 +327,7 @@ class VesselSnapshot {
         'inclination': inclination,
         'semiMajor': semiMajor,
         'traj': trajectory,
+        'trajOpen': trajectoryOpen,
         'connected': connected,
         'commDelay': commDelay,
       };
@@ -352,6 +380,7 @@ class VesselSnapshot {
       trajectory: [
         for (final n in (j['traj'] as List?) ?? const []) (n as num).toDouble(),
       ],
+      trajectoryOpen: (j['trajOpen'] as bool?) ?? false,
       connected: (j['connected'] as bool?) ?? true,
       commDelay: (j['commDelay'] as num?)?.toDouble() ?? 0,
     );
@@ -878,12 +907,21 @@ class EventSnapshot {
   final double magnitude;
   final String info;
 
+  /// Event site, when the event has one (all zero otherwise). For 'Impact'
+  /// this is the BODY-FIXED contact point in metres from [target]'s centre —
+  /// the frame terrain edits live in — so FX anchored here co-rotate with the
+  /// planet.
+  final double px, py, pz;
+
   const EventSnapshot({
     required this.kind,
     this.subject = '',
     this.target = '',
     this.magnitude = 0,
     this.info = '',
+    this.px = 0,
+    this.py = 0,
+    this.pz = 0,
   });
 
   /// Flatten a [DomainEvent] to the wire shape. Unknown types fall back to the
@@ -902,7 +940,13 @@ class EventSnapshot {
         return EventSnapshot(kind: 'AtmosphericEntry', subject: x.vessel.value, target: x.body.value);
       case Impact x:
         return EventSnapshot(
-            kind: 'Impact', subject: x.vessel.value, target: x.body.value, magnitude: x.speed);
+            kind: 'Impact',
+            subject: x.vessel.value,
+            target: x.body.value,
+            magnitude: x.speed,
+            px: x.contactBF.x,
+            py: x.contactBF.y,
+            pz: x.contactBF.z);
       case DockingCompleted x:
         return EventSnapshot(kind: 'DockingCompleted', subject: x.a.value, target: x.b.value);
       case PartOverheated x:
@@ -939,6 +983,7 @@ class EventSnapshot {
         'target': target,
         'magnitude': magnitude,
         'info': info,
+        if (px != 0 || py != 0 || pz != 0) ...{'px': px, 'py': py, 'pz': pz},
       };
 
   factory EventSnapshot.fromJson(Map<String, dynamic> j) => EventSnapshot(
@@ -947,6 +992,9 @@ class EventSnapshot {
         target: (j['target'] as String?) ?? '',
         magnitude: (j['magnitude'] as num?)?.toDouble() ?? 0,
         info: (j['info'] as String?) ?? '',
+        px: (j['px'] as num?)?.toDouble() ?? 0,
+        py: (j['py'] as num?)?.toDouble() ?? 0,
+        pz: (j['pz'] as num?)?.toDouble() ?? 0,
       );
 }
 

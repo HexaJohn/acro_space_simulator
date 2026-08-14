@@ -133,13 +133,14 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   // Stashed tick deps so _advance can be rebuilt when a debug cheat toggles.
   late final InMemoryEventBus _events;
   late final InMemoryWeatherRepository _weather;
-  // Debug cheats: skip overheat / aero-stress / impact destruction. ON by
+  // Debug cheats: skip overheat / aero-stress / craft destruction. ON by
   // default so flight testing isn't cut short; toggle off in the debug panel.
   bool _disableOverheat = true;
   bool _disableAeroStress = true;
-  bool _disableImpact = true;
-  // Craters stay ON when impacts destroy: deformation is the payoff of a
-  // crash, so it only needs its own switch, not the same default as damage.
+  bool _disableCraftDestruction = true;
+  // Orthogonal to destruction: hard impacts crater the ground even while the
+  // craft itself is destruction-cheated. Deformation is the payoff of a
+  // crash, so it defaults ON.
   bool _disableCrater = false;
   late final TopDownSnapshotPresenter _presenter;
   late final StaticUniverseRepository _universe;
@@ -533,6 +534,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   // Destruction notice: set when a vessel is lost (impact / overstress / burn-up)
   // so the UI can pop a menu. Cleared when the user dismisses it.
   ({String title, String detail})? _crashNotice;
+  // Events raised since the last frame's snapshot captures, flattened for the
+  // renderers (drained every frame in _onFrame).
+  final List<EventSnapshot> _frameEvents = [];
   // Vessel id -> display name, so a destruction event (which only carries the id,
   // and fires as the vessel is removed) can still be reported by name.
   final Map<String, String> _vesselNames = {};
@@ -955,7 +959,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       terrainEdits: _terrainEdits,
       disableOverheat: _disableOverheat,
       disableAeroStress: _disableAeroStress,
-      disableImpact: _disableImpact,
+      disableCraftDestruction: _disableCraftDestruction,
       disableCrater: _disableCrater,
     );
   }
@@ -963,6 +967,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   /// React to simulation events. Right now: surface a destruction menu when a
   /// vessel is lost (hard impact, structural overstress, or part burn-up).
   void _onDomainEvent(DomainEvent e) {
+    // Every event also rides the next frame's WorldSnapshot so renderers can
+    // key FX off it (e.g. terrain-impact dust). Capped: a runaway warp frame
+    // must not balloon a cosmetic list.
+    if (_frameEvents.length < 64) _frameEvents.add(EventSnapshot.of(e));
     String nameOf(VesselId id) => _vesselNames[id.value] ?? id.value;
     ({String title, String detail})? notice;
     // Cheat-gated: the thermal/structural SUBSYSTEMS still raise their
@@ -973,7 +981,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     // Test impactors are SUPPOSED to die — their loss is the experiment's
     // result, not an emergency worth a death dialog over the readouts.
     if (e is Impact && e.vessel.value.startsWith('impactor-')) return;
-    if (e is Impact && !_disableImpact) {
+    if (e is Impact && !_disableCraftDestruction) {
       notice = (
         title: '${nameOf(e.vessel)} destroyed',
         detail:
@@ -1121,6 +1129,14 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       debugPrint('simSteps: $steps steps in ${swSteps.elapsedMilliseconds}ms');
     }
 
+    // Events raised by the steps above, flattened for the renderers. Drained
+    // per frame whether or not anyone captures — the software backend must not
+    // let the list grow without bound.
+    final frameEvents = _frameEvents.isEmpty
+        ? const <EventSnapshot>[]
+        : List<EventSnapshot>.unmodifiable(_frameEvents);
+    _frameEvents.clear();
+
     // Serve the freshly-advanced world to any connected renderer (Unreal). Gated
     // on hasClients so capture+encode cost is zero when nothing's attached. The
     // static body descriptors (kind/atmosphere/composition) are sticky on the
@@ -1136,6 +1152,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         colonies: _colonies,
         terrainEdits: _terrainEdits,
         includeDescriptors: sendDescriptors,
+        events: frameEvents,
       );
       _bridge.publish(_wire.encodeWorld(world));
     }
@@ -1151,6 +1168,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         epoch: _clock.epoch,
         colonies: _colonies,
         terrainEdits: _terrainEdits,
+        events: frameEvents,
       );
     } else {
       _sceneWorld = null;
@@ -2006,7 +2024,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           ),
           _cheatRow('No overheating', _disableOverheat, (v) => _disableOverheat = v),
           _cheatRow('No aero load', _disableAeroStress, (v) => _disableAeroStress = v),
-          _cheatRow('No impact damage', _disableImpact, (v) => _disableImpact = v),
+          _cheatRow('No craft destruction', _disableCraftDestruction,
+              (v) => _disableCraftDestruction = v),
           _cheatRow('No impact craters', _disableCrater, (v) => _disableCrater = v),
           // Impact tester: drop a test mass beside the focused craft and watch
           // what the tick does with it (destruction threshold, crater size).
@@ -2189,9 +2208,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   ///
   /// Spawns 60 m to the side so the crater (and the destruction) land next to
   /// the observer, not under it, and 30 m up so the fall adds little speed of
-  /// its own. Forces the impact-damage cheat OFF — a drop test with impacts
-  /// cheated away just piles inert lumps — but leaves the crater cheat as the
-  /// panel has it, so both halves of the fork stay testable.
+  /// its own. Respects both cheats as the panel has them: cratering is
+  /// orthogonal to craft destruction, so a drop digs its hole even while
+  /// "No craft destruction" is on (the surviving lump settles into it).
   void _dropImpactor() {
     final id = _focusVessel;
     final v = id == null ? null : _vessels.byId(id);
@@ -2234,10 +2253,6 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         ]),
       ],
     ));
-    setState(() {
-      _disableImpact = false;
-      _buildAdvance();
-    });
   }
 
   /// The custom-spawn target: the panel's pick when set, else the body the

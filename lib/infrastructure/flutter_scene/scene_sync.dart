@@ -20,6 +20,7 @@ import 'cloud_nodes.dart';
 import 'coord_convert.dart';
 import 'environment_baker.dart';
 import 'exhaust_nodes.dart';
+import 'impact_fx_nodes.dart';
 import 'line_nodes.dart';
 import 'ring_nodes.dart';
 import 'scene_textures.dart';
@@ -48,6 +49,7 @@ class SceneSync {
     _skybox = SkyboxNode(scene, _textures);
     _vessels = VesselNodes(scene);
     _exhaust = ExhaustNodes(scene);
+    _impactFx = ImpactFxNodes(scene);
     _lines = LineNodes(scene);
     _atmospheres = AtmosphereNodes(scene);
     _clouds = CloudNodes(scene);
@@ -64,6 +66,7 @@ class SceneSync {
   late final SkyboxNode _skybox;
   late final VesselNodes _vessels;
   late final ExhaustNodes _exhaust;
+  late final ImpactFxNodes _impactFx;
   late final LineNodes _lines;
   late final AtmosphereNodes _atmospheres;
   late final CloudNodes _clouds;
@@ -111,6 +114,9 @@ class SceneSync {
       _vessels.update(snap, origin, starWorld: _bodies.starWorld(snap));
       _exhaust.update(snap, origin);
     }
+    // Terrain-impact dust/debris. Outside the vessel kill-switch: the effect
+    // belongs to the ground, and its trigger vessel is already gone.
+    _impactFx.update(snap, origin);
     mark('vessels');
     if (!_noLines) {
       _lines.update(snap, origin,
