@@ -98,6 +98,13 @@ class TerrainNodes {
   /// comparisons from the dev ext.
   static bool asyncMeshing = true;
 
+  /// Frames a resident chunk may stay INVISIBLE before it is retired. The
+  /// horizon cull has no hysteresis of its own, so without a grace window an
+  /// orbiting camera retires and remeshes the same horizon ring every few
+  /// frames. ~1.5 s at 60 fps; the watermark eviction still reclaims memory
+  /// under real pressure.
+  static int retireGraceFrames = 90;
+
   /// How close (m) the focus must be to a terrain edit before its chunks are
   /// force-refined. Deformation needs levels far past what screen-space
   /// selection picks, so refining a crater seen from orbit would carry a deep
@@ -223,6 +230,15 @@ class TerrainNodes {
   /// legitimate, e.g. below a sea floor). Remembered so they are not
   /// resubmitted every frame; cleared with the generation.
   final Set<ChunkKey> _emptyChunks = {};
+
+  /// Update counter driving the retirement grace window.
+  int _frame = 0;
+
+  /// Cells that came back BOTH empty and clipped — the shell failed to
+  /// contain the isosurface, which the mesher's own containment check calls
+  /// a bug, and which renders as a permanently missing tile. Surfaced in
+  /// [debugLine] so `ext.acro.terrain` answers "why is that tile missing".
+  int _clippedEmpty = 0;
   int _generation = 0;
 
   TerrainLodTree? _tree;
@@ -525,8 +541,51 @@ class TerrainNodes {
       return false;
     }
 
+    // Retire against the UNTRUNCATED visible set, not `wanted`. When impact
+    // refinement (plus its 2:1 staircase) pushes visible demand past the
+    // resident cap, the nearest-first sort reorders with every camera move
+    // and a different tail falls past the cap each frame — retiring on
+    // `wanted` made the horizon tiles churn in and out (flicker) and the
+    // farthest ring vanish outright. The cap below is ADMISSION control for
+    // new work; residency ends only when a chunk stops being visible (or its
+    // replacement arrived).
+    //
+    // And "stops being visible" carries a GRACE PERIOD (plan §4: evict by
+    // "not visible + oldest"). The horizon cull has margins but no
+    // hysteresis: an orbiting camera walks chunks across the horizon edge
+    // every frame, and instant retirement turned each crossing into retire →
+    // want again → remesh — a flickering ring of missing tiles at exactly
+    // the range the player reads as "the horizon". A chunk now has to stay
+    // invisible for [retireGraceFrames] consecutive frames before it is
+    // dropped; drawing a just-hidden chunk for another second is free (the
+    // planet occludes it), remeshing it every other frame is not.
+    final visibleSet = visible.toSet();
+    _frame++;
+    for (final e in _chunks.entries) {
+      if (visibleSet.contains(e.key)) e.value.lastVisibleFrame = _frame;
+    }
     for (final k in _chunks.keys.toList()) {
-      if (!wanted.contains(k) && !standsIn(k)) {
+      if (_frame - _chunks[k]!.lastVisibleFrame > retireGraceFrames &&
+          !standsIn(k)) {
+        _scene.remove(_chunks.remove(k)!.node);
+      }
+    }
+    // High-watermark eviction keeps the GPU set bounded when visible demand
+    // genuinely exceeds the cap for a while: above cap+25%, drop the
+    // FARTHEST residents that are neither wanted nor standing in, back down
+    // to the cap. Hysteresis (the 25% band) is what stops the cap boundary
+    // itself from thrashing.
+    if (_chunks.length > maxResidentChunks + maxResidentChunks ~/ 4) {
+      final evictable = [
+        for (final k in _chunks.keys)
+          if (!wanted.contains(k) && !standsIn(k)) k,
+      ]..sort((x, y) {
+          final dx = (x.centreDirection * field.radius - anchorPoint).length;
+          final dy = (y.centreDirection * field.radius - anchorPoint).length;
+          return dy.compareTo(dx); // farthest first
+        });
+      for (final k in evictable) {
+        if (_chunks.length <= maxResidentChunks) break;
         _scene.remove(_chunks.remove(k)!.node);
       }
     }
@@ -645,7 +704,9 @@ class TerrainNodes {
     debugLine = 'terrain: ${_chunks.length} chunks  $tris tris  '
         'lvl $minLevel-$maxLevel  q${leaves.length}'
         '${_pending.isNotEmpty ? '  ~${_pending.length}' : ''}'
-        '${missing.length > _pending.length ? '  +${missing.length - _pending.length}' : ''}';
+        '${missing.length > _pending.length ? '  +${missing.length - _pending.length}' : ''}'
+        '${_emptyChunks.isNotEmpty ? '  e${_emptyChunks.length}' : ''}'
+        '${_clippedEmpty > 0 ? '  CLIPPED $_clippedEmpty' : ''}';
 
     final sun = starWorld == null
         ? Vector3(-1, -0.2, -0.1).normalized
@@ -714,8 +775,11 @@ class TerrainNodes {
       if (generation != _generation) return;
       if (cell.isEmpty) {
         // No isosurface in the shell (legitimate, e.g. below a sea floor).
-        // Remember it, or the chunk would be resubmitted every frame.
+        // Remember it, or the chunk would be resubmitted every frame. An
+        // empty AND clipped cell is different: the band failed to contain
+        // the surface, i.e. the mesher was wrong — count it for the HUD.
         _emptyChunks.add(key);
+        if (cell.clipped) _clippedEmpty++;
       } else {
         _arrived.add(_ArrivedMesh(key, cell, generation));
       }
@@ -740,7 +804,7 @@ class TerrainNodes {
       anchorBF: cell.anchorBF,
       triangleCount: cell.mesh.triangleCount,
       bandM: cell.outerRadiusM - cell.innerRadiusM,
-    );
+    )..lastVisibleFrame = _frame;
   }
 
   /// Invalidate every job in flight and every result not yet uploaded. The
@@ -750,6 +814,7 @@ class TerrainNodes {
     _generation++;
     _arrived.clear();
     _emptyChunks.clear();
+    _clippedEmpty = 0;
   }
 
   void _clear() {
@@ -799,6 +864,11 @@ class _ResidentChunk {
   final Vector3 anchorBF;
 
   final int triangleCount;
+
+  /// Last [TerrainNodes._frame] this chunk was in the visible set. Fresh
+  /// chunks start at the frame they were added; retirement waits until the
+  /// chunk has been invisible for [TerrainNodes.retireGraceFrames].
+  int lastVisibleFrame = 0;
 
   /// Radial thickness (m) of the shell the chunk was meshed in. By
   /// construction (the mesher's `clipped` self-check) both this chunk's
