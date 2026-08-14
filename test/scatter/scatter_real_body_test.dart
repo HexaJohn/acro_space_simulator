@@ -24,6 +24,7 @@ import 'package:acro_space_simulator/domain/scatter/scatter_placement.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/domain/terrain/cubed_sphere.dart';
 import 'package:acro_space_simulator/domain/universe/celestial_body.dart';
+import 'package:acro_space_simulator/infrastructure/flutter_scene/scatter/scatter_nodes.dart';
 import 'package:acro_space_simulator/infrastructure/sample_world.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -93,4 +94,41 @@ void main() {
       }
     });
   }
+
+  test('cell residency reaches a landed craft on DEM relief', () {
+    // Landed in Mare Crisium the ground is ~3.6 km BELOW the datum. The old
+    // residency filter measured anchor ground point -> cell centre AT THE
+    // DATUM, so the radial gap alone exceeded the rock layer's 450 m view
+    // distance and every cell was rejected: a landed craft saw no scatter at
+    // all. The filter must measure along the ground instead.
+    final body = system.require(const BodyId('moon'));
+    final descriptor = BodyDescriptorSnapshot.of(body, system);
+    final field = descriptor.buildTerrainField()!;
+
+    // Mare Crisium (17.0N, 59.1E) — deep mare floor, the regression case.
+    const latDeg = 17.0, lonDeg = 59.1;
+    final lat = latDeg * math.pi / 180, lon = lonDeg * math.pi / 180;
+    final anchorDir = Vector3(math.cos(lat) * math.cos(lon),
+        math.cos(lat) * math.sin(lon), math.sin(lat));
+    // Sanity: this really is kilometres below the datum, or the test is
+    // no longer exercising the radial-gap failure.
+    final ground = field.groundRadiusAt(anchorDir.x, anchorDir.y, anchorDir.z);
+    expect(ground - field.radius, lessThan(-2000));
+
+    final layer = ScatterLayers.rocks;
+    final cell = chunkAt(anchorDir, layer.levelFor(field.radius));
+    expect(
+        ScatterNodes.cellInReach(
+            cell, anchorDir, field.radius, layer.viewDistanceM),
+        isTrue,
+        reason: 'the cell under a landed craft must always be resident');
+
+    // And the reach still bounds: a cell a quarter turn away is not wanted.
+    final farDir = Vector3(-anchorDir.y, anchorDir.x, anchorDir.z).normalized;
+    final farCell = chunkAt(farDir, layer.levelFor(field.radius));
+    expect(
+        ScatterNodes.cellInReach(
+            farCell, anchorDir, field.radius, layer.viewDistanceM),
+        isFalse);
+  });
 }

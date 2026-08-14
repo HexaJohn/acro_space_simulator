@@ -116,13 +116,6 @@ class ScatterNodes {
 
     final bodyWorld = Vector3(b.px, b.py, b.pz);
     final eyeWorld = origin.focusWorld + cameraEye;
-    final altitude = (eyeWorld - bodyWorld).length - b.radius;
-    if (altitude > maxAltitudeM) {
-      gateReason = 'altitude ${altitude.toStringAsFixed(0)}m';
-      _clear();
-      return;
-    }
-    gateReason = '';
 
     // Same edits the terrain mesher and collision use, replayed from the
     // authoritative snapshot — so a crater that swallowed a tree swallowed it
@@ -158,6 +151,21 @@ class ScatterNodes {
     final bodyQuat = Quaternion(b.qw, b.qx, b.qy, b.qz) *
         Quaternion.axisAngle(Vector3.unitZ, BodyNodes.textureYawRad);
     final invQuat = bodyQuat.conjugate;
+
+    // Altitude gate, against the GROUND under the eye — not the datum. With a
+    // real DEM the datum is nowhere near the surface: a mare floor sits ~3 km
+    // below it and the far-side highlands ~10 km above, so a datum-relative
+    // altitude either never gates or gates a craft PARKED ON the ground.
+    final eyeBF = invQuat.rotate(eyeWorld - bodyWorld);
+    final eyeDir = eyeBF.lengthSquared > 0 ? eyeBF.normalized : Vector3.unitZ;
+    final altitude =
+        eyeBF.length - field.groundRadiusAt(eyeDir.x, eyeDir.y, eyeDir.z);
+    if (altitude > maxAltitudeM) {
+      gateReason = 'altitude ${altitude.toStringAsFixed(0)}m';
+      _clear();
+      return;
+    }
+    gateReason = '';
 
     // Follow the vessel when there is one — that is what the player is looking
     // at, and scattering around the camera instead pops props in and out as the
@@ -198,9 +206,9 @@ class ScatterNodes {
           anchorDir, layer.viewDistanceM / field.radius, level)) {
         // Cells are picked by their own reach, so a cell whose centre is past
         // the view distance still joins when its near edge is inside it.
-        final centre = cell.centreDirection * field.radius;
-        final reach = cell.circumradiusM(field.radius);
-        if ((centre - focusPoint).length - reach > layer.viewDistanceM) continue;
+        if (!cellInReach(cell, anchorDir, field.radius, layer.viewDistanceM)) {
+          continue;
+        }
         wanted.add(_CellId(li, cell));
       }
     }
@@ -478,6 +486,23 @@ class ScatterNodes {
         }
       }
     }
+  }
+
+  /// Whether [cell] is within [viewDistanceM] of the surface point under
+  /// [anchorDir], measured ALONG THE GROUND (great-circle arc), with the
+  /// cell's own reach credited.
+  ///
+  /// Along the ground, not between 3D points: the old test measured from the
+  /// anchor's ground point to the cell centre AT THE DATUM RADIUS, so on a
+  /// DEM body the radial gap alone (a mare floor is ~3 km below datum) put
+  /// every cell past a 450 m view distance and scatter silently vanished for
+  /// a landed craft. Radial offsets are irrelevant to "how far away is this
+  /// patch of ground"; the arc is the honest metric and needs no field sample.
+  static bool cellInReach(
+      ChunkKey cell, Vector3 anchorDir, double radiusM, double viewDistanceM) {
+    final cosA = cell.centreDirection.dot(anchorDir).clamp(-1.0, 1.0);
+    final surfaceDistM = math.acos(cosA) * radiusM;
+    return surfaceDistM - cell.circumradiusM(radiusM) <= viewDistanceM;
   }
 
   /// Cells at [level] covering a cap of [angularRadius] about [dir].
