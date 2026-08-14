@@ -17,14 +17,11 @@ import '../../../domain/shared/quaternion.dart';
 import '../../../domain/shared/vector3.dart';
 import '../../../domain/terrain/cell_mesher.dart';
 import '../../../domain/terrain/cubed_sphere.dart';
-import '../../../domain/terrain/dem_pyramid.dart';
-import '../../../domain/terrain/dem_registry.dart';
 import '../../../domain/terrain/mesh_scheduler.dart';
 import '../../../domain/terrain/terrain_edits.dart';
 import '../../../domain/terrain/terrain_feature.dart';
 import '../../../domain/terrain/terrain_field.dart';
 import '../../../domain/terrain/terrain_lod.dart';
-import '../../../domain/terrain/terrain_profile.dart';
 import '../body_nodes.dart';
 import '../coord_convert.dart';
 import 'terrain_textures.dart';
@@ -294,29 +291,14 @@ class TerrainNodes {
       _builtEditCount = editCount;
     }
 
-    // The generator recipe, rebuilt from the descriptor and cached per body.
-    //
-    // This MUST match what `CelestialBody.terrainFieldWith` builds on the sim
-    // side. Omitting it was a real bug: the renderer drew plain fBm relief
-    // while collision resolved against eroded, cratered ground, so a craft sank
-    // straight through the visible surface hunting one that was drawn nowhere.
-    // Same registry the sim-side `TerrainConfig.fieldFor` consults, so both
-    // resolve the identical pyramid (or both throw — never one of each).
-    final dem = d.terrainDemBodyId == null
-        ? null
-        : DemRegistry.require(d.terrainDemBodyId!);
-
+    // The generator recipe, rebuilt from the descriptor via the ONE shared
+    // builder (BodyDescriptorSnapshot.buildTerrainField — it must match what
+    // `CelestialBody.terrainFieldWith` builds on the sim side; hand-rolling
+    // the field here was a real bug class: the renderer drew plain fBm relief
+    // while collision resolved against eroded, cratered ground). The detail
+    // layer is cached per body — it is the expensive part.
     if (_detailBodyId != bodyId) {
-      _detail = d.terrainErodedDetail
-          ? (d.terrainProfile ?? TerrainProfile.barren).detailFor(
-              seed: d.terrainSeed,
-              radiusM: d.referenceRadius,
-              amplitudeM: d.terrainAmplitude,
-              featureScaleM: d.terrainFeatureScale,
-              octaves: d.terrainOctaves + 1,
-              control: dem == null ? null : DemDerivedControl(dem),
-            )
-          : null;
+      _detail = d.buildTerrainDetail();
       _detailBodyId = bodyId;
       // Fire-and-forget: the first frames draw with the placeholder and the
       // real colour appears when the upload lands.
@@ -324,17 +306,7 @@ class TerrainNodes {
       TerrainTextures.loadNormals(bodyId);
     }
 
-    final field = TerrainField(
-      radius: d.referenceRadius,
-      amplitude: d.terrainAmplitude,
-      featureScale: d.terrainFeatureScale,
-      seaLevel: d.terrainSeaLevel,
-      seed: d.terrainSeed,
-      octaves: d.terrainOctaves,
-      edits: _edits,
-      dem: dem,
-      detail: _detail,
-    );
+    final field = d.buildTerrainField(edits: _edits, detail: _detail)!;
     activeBodyId = bodyId;
     activeReliefM = field.amplitude;
 
@@ -485,14 +457,42 @@ class TerrainNodes {
       for (final k in wanted)
         if (!_chunks.containsKey(k) && !_emptyChunks.contains(k)) k,
     };
-    // Every ancestor of a missing chunk: a resident in this set is the coarse
-    // stand-in for a pending split. The other direction — a resident whose
-    // own ancestor is missing — is the fine stand-in for a pending merge.
-    final missingAncestors = <ChunkKey>{
-      for (final m in missingNow) ...m.ancestors,
+    // The NEAREST resident ancestor of each missing chunk is its coarse
+    // stand-in for a pending split — and ONLY the nearest. Protecting every
+    // ancestor pinned the face ROOT for as long as anything anywhere on that
+    // face was streaming, which near the surface is always; a root's surface
+    // is sampled at ~100 km per cell, so in deep basins it floats kilometres
+    // ABOVE the refined floor and drew as flat sphere-segment slabs over the
+    // maria and crater floors (highlands hid it — there the root sits below).
+    // `bareAncestors` marks the ancestors of missing chunks with NO resident
+    // cover at all: the coverage-root path below meshes those, and the upload
+    // pump must accept them on arrival even though they are not wanted.
+    // Ancestors of every resident: `coveredBelow.contains(k)` == some finer
+    // resident lies under k's region (the merge-direction cover).
+    final coveredBelow = <ChunkKey>{
+      for (final r in _chunks.keys) ...r.ancestors,
     };
+    final protected = <ChunkKey>{};
+    final bareAncestors = <ChunkKey>{};
+    for (final m in missingNow) {
+      ChunkKey? nearest;
+      for (final a in m.ancestors) {
+        if (_chunks.containsKey(a)) {
+          nearest = a;
+          break;
+        }
+      }
+      if (nearest != null) {
+        protected.add(nearest);
+      } else if (!coveredBelow.contains(m)) {
+        bareAncestors.addAll(m.ancestors);
+      }
+    }
     bool standsIn(ChunkKey k) {
-      if (missingAncestors.contains(k)) return true;
+      if (protected.contains(k)) return true;
+      // The fine stand-in for a pending merge: a resident whose own ancestor
+      // is the missing chunk. Keep every such descendant — each covers a
+      // distinct part of the missing region.
       for (final a in k.ancestors) {
         if (missingNow.contains(a)) return true;
       }
@@ -509,15 +509,16 @@ class TerrainNodes {
     // the only part of streaming still on the render thread (plan §4). A
     // result that went stale while in flight (wrong generation, no longer
     // wanted, already resident) is dropped; if the chunk is still needed it is
-    // simply resubmitted below. A chunk that is NOT wanted but stands in for
-    // one that is (a coverage root, see below) is accepted — dropping it here
-    // would defeat the point of meshing it.
+    // simply resubmitted below. A chunk that is NOT wanted is accepted only
+    // when it covers a missing region that has no resident cover at all (a
+    // coverage root, see below) — dropping it there would defeat the point of
+    // meshing it; anywhere else a stale unwanted mesh is just churn.
     var uploads = 0;
     while (_arrived.isNotEmpty && uploads < uploadBudgetPerFrame) {
       final a = _arrived.removeAt(0);
       if (a.generation != _generation ||
           _chunks.containsKey(a.key) ||
-          (!wanted.contains(a.key) && !standsIn(a.key))) {
+          (!wanted.contains(a.key) && !bareAncestors.contains(a.key))) {
         continue;
       }
       _addChunk(a.key, a.cell, shader as gpu.Shader);
@@ -551,28 +552,17 @@ class TerrainNodes {
     // resident — if a missing chunk has no resident cover above or below it,
     // its face ROOT is meshed first (a root is a handful of triangles and
     // meshes in ~ms), and refinement replaces it from there. This is what
-    // "tiles never unload completely" means operationally.
-    final coveredBelow = <ChunkKey>{
-      for (final r in _chunks.keys) ...r.ancestors,
+    // "tiles never unload completely" means operationally. `bareAncestors`
+    // (computed with the stand-in protection above) already marks exactly
+    // those regions: the roots in it are the faces needing coverage.
+    final coverageRoots = <ChunkKey>{
+      for (final a in bareAncestors)
+        if (a.level == 0 &&
+            !_chunks.containsKey(a) &&
+            !_pending.contains(a) &&
+            !_emptyChunks.contains(a))
+          a,
     };
-    final coverageRoots = <ChunkKey>{};
-    for (final k in missing) {
-      if (coveredBelow.contains(k)) continue; // finer residents stand in
-      var covered = false;
-      for (final a in k.ancestors) {
-        if (_chunks.containsKey(a)) {
-          covered = true;
-          break;
-        }
-      }
-      if (covered) continue;
-      final root = ChunkKey.root(k.face);
-      if (!_chunks.containsKey(root) &&
-          !_pending.contains(root) &&
-          !_emptyChunks.contains(root)) {
-        coverageRoots.add(root);
-      }
-    }
     for (final k in coverageRoots.followedBy(missing)) {
       if (_pending.length >= meshBudgetPerFrame) break;
       if (_pending.contains(k)) continue;
