@@ -351,6 +351,24 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       final idx = _targets.indexWhere((t) => t.b?.value == bodyId);
       if (idx >= 0) _selectTarget(idx);
     };
+    c.dropImpactor =
+        ({double massKg = 9000, double speedMs = 300, bool destroy = true}) {
+      if (!mounted) return;
+      _impactMassCtrl.text = massKg.toString();
+      _impactSpeedCtrl.text = speedMs.toString();
+      if (destroy && _disableCraftDestruction) {
+        setState(() {
+          _disableCraftDestruction = false;
+          _buildAdvance();
+        });
+      }
+      _dropImpactor();
+    };
+    c.spawnLanded = (bodyId) {
+      if (!mounted) return;
+      setState(() => _spawnBody = BodyId(bodyId));
+      _spawnCustom(landed: true);
+    };
     c.warpToApsis = (periapsis) {
       if (!mounted) return;
       _warpToApsis(periapsis: periapsis);

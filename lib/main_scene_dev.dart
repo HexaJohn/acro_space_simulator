@@ -223,6 +223,15 @@ Future<void> main() async {
     if (macroBump != null && macroBump >= 0) {
       TerrainNodes.macroBumpStrength = macroBump;
     }
+    final macroFadeNear = deg('macroFadeNear');
+    if (macroFadeNear != null && macroFadeNear >= 0) {
+      TerrainNodes.macroFadeNearKm = macroFadeNear;
+    }
+    final macroFadeFar = deg('macroFadeFar');
+    if (macroFadeFar != null && macroFadeFar > 0) {
+      TerrainNodes.macroFadeFarKm =
+          math.max(macroFadeFar, TerrainNodes.macroFadeNearKm + 1.0);
+    }
     // Shadow contact hardening: shHard=<hardness>, shPen=<max penumbra factor>.
     final shHard = deg('shHard');
     if (shHard != null && shHard >= 0) TerrainNodes.shadowHardness = shHard;
@@ -274,6 +283,35 @@ Future<void> main() async {
   developer.registerExtension('ext.acro.status', (method, params) async {
     return developer.ServiceExtensionResponse.result(jsonEncode(
         SimViewControl.instance.status?.call() ?? {'error': 'no live view'}));
+  });
+
+  // Drop a test impactor beside the focused craft (the debug panel's button,
+  // remotely): ext.acro.impact?massKg=9000&speedMs=300
+  // Drives the terrain-impact FX path headlessly for captures.
+  developer.registerExtension('ext.acro.impact', (method, params) async {
+    final drop = SimViewControl.instance.dropImpactor;
+    if (drop == null) {
+      return developer.ServiceExtensionResponse.result(
+          jsonEncode({'error': 'no live view'}));
+    }
+    drop(
+      massKg: double.tryParse(params['massKg'] ?? '') ?? 9000,
+      speedMs: double.tryParse(params['speedMs'] ?? '') ?? 300,
+      destroy: params['destroy'] != 'false',
+    );
+    return developer.ServiceExtensionResponse.result(jsonEncode({'ok': true}));
+  });
+
+  // Teleport the focused craft to a landing site: ext.acro.spawn?body=moon
+  developer.registerExtension('ext.acro.spawn', (method, params) async {
+    final spawn = SimViewControl.instance.spawnLanded;
+    final body = params['body'];
+    if (spawn == null || body == null) {
+      return developer.ServiceExtensionResponse.result(
+          jsonEncode({'error': spawn == null ? 'no live view' : 'body required'}));
+    }
+    spawn(body);
+    return developer.ServiceExtensionResponse.result(jsonEncode({'ok': true}));
   });
 
   // Live atmosphere art-pass knobs (applied next frame; render-side only):

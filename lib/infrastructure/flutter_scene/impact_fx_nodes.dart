@@ -42,7 +42,11 @@ import 'terrain/terrain_textures.dart';
 /// surface normal), so the whole effect is floating-origin-safe by
 /// construction.
 class ImpactFxNodes {
-  ImpactFxNodes(this._scene);
+  // Sprite build kicks off at construction (not first update) so it is
+  // near-certainly ready before the first crash can happen.
+  ImpactFxNodes(this._scene) {
+    _ensureSprite();
+  }
 
   final fs.Scene _scene;
 
@@ -88,6 +92,11 @@ class ImpactFxNodes {
   // than once with the same snapshot (paint vs tick cadence), and one crash
   // must not stack N clouds.
   final Set<String> _spawned = {};
+  // Impacts that arrived while the sprite texture was still building. The
+  // event is TRANSIENT (one snapshot only) but the anchor is body-fixed, so
+  // holding the flattened event and spawning a few frames late is exact —
+  // dropping it would silently eat the FIRST crash after app start.
+  final List<(EventSnapshot, double)> _pendingSprite = [];
   double _lastEpoch = double.nan;
 
   void update(WorldSnapshot snap, FloatingOrigin origin) {
@@ -96,8 +105,15 @@ class ImpactFxNodes {
     final frozen = snap.epoch == _lastEpoch;
     _lastEpoch = snap.epoch;
 
+    if (_sprite != null && _pendingSprite.isNotEmpty) {
+      for (final (e, epoch) in _pendingSprite) {
+        _live.add(_spawn(e, snap, startEpoch: epoch));
+      }
+      _pendingSprite.clear();
+    }
+
     for (final e in snap.events) {
-      if (e.kind != 'Impact' || _sprite == null) continue;
+      if (e.kind != 'Impact') continue;
       final body = snap.bodies[e.target];
       if (body == null) continue;
       // No contact point resolved (older publisher) — nowhere to stand the FX.
@@ -105,6 +121,10 @@ class ImpactFxNodes {
       final key = '${e.subject}:${snap.tick}';
       if (!_spawned.add(key)) continue;
       if (_spawned.length > 256) _spawned.clear(); // bounded scratch memory
+      if (_sprite == null) {
+        if (_pendingSprite.length < 8) _pendingSprite.add((e, snap.epoch));
+        continue;
+      }
       _live.add(_spawn(e, snap));
     }
 
@@ -130,7 +150,7 @@ class ImpactFxNodes {
     });
   }
 
-  _ImpactFx _spawn(EventSnapshot e, WorldSnapshot snap) {
+  _ImpactFx _spawn(EventSnapshot e, WorldSnapshot snap, {double? startEpoch}) {
     final contactBF = Vector3(e.px, e.py, e.pz);
     final normalBF = contactBF.normalized;
     final (r, g, b) = _groundColor(e.target, normalBF);
@@ -231,7 +251,7 @@ class ImpactFxNodes {
       bodyId: e.target,
       contactBF: contactBF,
       alignBF: _yOnto(normalBF),
-      startEpoch: snap.epoch,
+      startEpoch: startEpoch ?? snap.epoch,
       ttlS: dustTtl + 1.0,
     );
   }

@@ -52,6 +52,18 @@ class SimViewControl {
   /// conventions goes thousands of km wrong).
   void Function(String bodyId, double radialMult, double zM)? freecamToRing;
 
+  /// Drop a test impactor beside the focused craft (the debug panel's
+  /// "Drop impactor" button), with explicit mass/speed. For driving the
+  /// impact-FX path from dev tooling. [destroy] true forces the
+  /// craft-destruction cheat OFF first so the hit raises its Impact event
+  /// (the FX trigger) instead of settling a cheated-alive lump.
+  void Function({double massKg, double speedMs, bool destroy})? dropImpactor;
+
+  /// Teleport the focused craft to a scored landing site on [bodyId] (the
+  /// debug panel's custom spawn, landed mode) — puts the camera at ground
+  /// level for surface/FX captures.
+  void Function(String bodyId)? spawnLanded;
+
   /// Current camera/backend state for assertions and closed-loop control.
   Map<String, Object?> Function()? status;
 
@@ -65,6 +77,8 @@ class SimViewControl {
     setUpMode = null;
     setFreecam = null;
     freecamToRing = null;
+    dropImpactor = null;
+    spawnLanded = null;
     status = null;
   }
 }
