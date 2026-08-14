@@ -66,7 +66,7 @@ Vessel _faller({required double speed, double mass = 9000}) {
   InMemoryVesselRepository vessels,
   InMemoryTerrainEditsRepository edits,
   CelestialBody moon,
-}) _build(Vessel v, {bool disableImpact = false}) {
+}) _build(Vessel v, {bool disableImpact = false, bool disableCrater = false}) {
   final system = SampleWorld.realSystem();
   final vessels = InMemoryVesselRepository([v]);
   final edits = InMemoryTerrainEditsRepository();
@@ -82,6 +82,7 @@ Vessel _faller({required double speed, double mass = 9000}) {
       weather: const NullWeatherRepository(),
       terrainEdits: edits,
       disableImpact: disableImpact,
+      disableCrater: disableCrater,
     ),
     vessels: vessels,
     edits: edits,
@@ -150,6 +151,15 @@ void main() {
     _run(w.tick);
     expect(w.vessels.byId(const VesselId('faller')), isNotNull);
     expect(w.edits.forBody(SampleWorld.moon), isNull);
+  });
+
+  test('the crater cheat keeps the destruction but not the deformation', () {
+    final w = _build(_faller(speed: 300), disableCrater: true);
+    _run(w.tick);
+    expect(w.vessels.byId(const VesselId('faller')), isNull,
+        reason: 'disableCrater must not shield the craft');
+    expect(w.edits.forBody(SampleWorld.moon), isNull,
+        reason: 'the deformation was cheated off');
   });
 
   test('a tiny impactor is not worth a permanent edit', () {

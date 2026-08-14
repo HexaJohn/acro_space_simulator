@@ -37,6 +37,7 @@ import '../../adapters/repositories/in_memory_world_repositories.dart';
 import '../../application/persistence/game_state_codec.dart';
 import '../../application/ports/compute_port.dart';
 import '../../application/usecases/advance_simulation_tick.dart';
+import '../../domain/dynamics/state_vector.dart';
 import '../../domain/orbits/soi_transition_service.dart';
 import '../../domain/orbits/spawn_presets.dart';
 import '../../domain/orbits/state_vector_converter.dart';
@@ -47,6 +48,8 @@ import '../../domain/simulation/simulation_clock.dart';
 import '../../domain/simulation/domain_event.dart';
 import '../../domain/planetary/atmospheric_composition.dart';
 import '../../domain/universe/celestial_body.dart' show BodyId, CelestialBody;
+import '../../domain/vessel/part.dart';
+import '../../domain/vessel/stage.dart';
 import '../../domain/vessel/vessel.dart';
 import '../sample_world.dart';
 import '../flutter_scene/atmosphere_nodes.dart';
@@ -135,6 +138,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   bool _disableOverheat = true;
   bool _disableAeroStress = true;
   bool _disableImpact = true;
+  // Craters stay ON when impacts destroy: deformation is the payoff of a
+  // crash, so it only needs its own switch, not the same default as damage.
+  bool _disableCrater = false;
   late final TopDownSnapshotPresenter _presenter;
   late final StaticUniverseRepository _universe;
   late final InMemoryVesselRepository _vessels;
@@ -262,6 +268,15 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   // teleport. Null body = follow the camera (the panel resolves a default).
   BodyId? _spawnBody;
   final TextEditingController _spawnAltCtrl = TextEditingController(text: '200');
+
+  // Impact tester: mass/speed of a throwaway impactor dropped beside the
+  // focused craft (debug panel). Defaults sized to dig an obvious ~10 m
+  // crater on the Moon.
+  final TextEditingController _impactMassCtrl =
+      TextEditingController(text: '9000');
+  final TextEditingController _impactSpeedCtrl =
+      TextEditingController(text: '300');
+  int _impactorCount = 0;
   // World-viewport backend. Software (TopDownPainter) is the default; the
   // flutter_scene 3D backend mounts in its place when toggled. Camera state,
   // input handling, and every HUD overlay stay shared between the two.
@@ -941,6 +956,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       disableOverheat: _disableOverheat,
       disableAeroStress: _disableAeroStress,
       disableImpact: _disableImpact,
+      disableCrater: _disableCrater,
     );
   }
 
@@ -954,6 +970,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     // honours the cheats. With a cheat on, the craft survives, so popping
     // the death menu for the event alone is a lie ("burned up" while the
     // ship flies on).
+    // Test impactors are SUPPOSED to die — their loss is the experiment's
+    // result, not an emergency worth a death dialog over the readouts.
+    if (e is Impact && e.vessel.value.startsWith('impactor-')) return;
     if (e is Impact && !_disableImpact) {
       notice = (
         title: '${nameOf(e.vessel)} destroyed',
@@ -1281,6 +1300,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     _keyFocus.dispose();
     _textures.dispose();
     _spawnAltCtrl.dispose();
+    _impactMassCtrl.dispose();
+    _impactSpeedCtrl.dispose();
     super.dispose();
   }
 
@@ -1986,6 +2007,76 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           _cheatRow('No overheating', _disableOverheat, (v) => _disableOverheat = v),
           _cheatRow('No aero load', _disableAeroStress, (v) => _disableAeroStress = v),
           _cheatRow('No impact damage', _disableImpact, (v) => _disableImpact = v),
+          _cheatRow('No impact craters', _disableCrater, (v) => _disableCrater = v),
+          // Impact tester: drop a test mass beside the focused craft and watch
+          // what the tick does with it (destruction threshold, crater size).
+          const Padding(
+            padding: EdgeInsets.only(left: 4, top: 6, bottom: 2),
+            child: Text(
+              'IMPACT TEST',
+              style: TextStyle(color: Color(0xFF7FB0E0), fontSize: 11, fontWeight: FontWeight.bold),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
+            child: Row(children: [
+              const Text('Mass ',
+                  style: TextStyle(color: Color(0xFFB9C9DC), fontSize: 12)),
+              Expanded(
+                child: TextField(
+                  controller: _impactMassCtrl,
+                  style:
+                      const TextStyle(color: Color(0xFFB9C9DC), fontSize: 12),
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    suffixText: 'kg',
+                    suffixStyle:
+                        TextStyle(color: Color(0xFF7E93A8), fontSize: 11),
+                    contentPadding:
+                        EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                    enabledBorder: OutlineInputBorder(
+                        borderSide: BorderSide(color: Color(0x447FB0E0))),
+                    focusedBorder: OutlineInputBorder(
+                        borderSide: BorderSide(color: Color(0xFF7FB0E0))),
+                  ),
+                  keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true),
+                ),
+              ),
+              const SizedBox(width: 4),
+              const Text('Speed ',
+                  style: TextStyle(color: Color(0xFFB9C9DC), fontSize: 12)),
+              Expanded(
+                child: TextField(
+                  controller: _impactSpeedCtrl,
+                  style:
+                      const TextStyle(color: Color(0xFFB9C9DC), fontSize: 12),
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    suffixText: 'm/s',
+                    suffixStyle:
+                        TextStyle(color: Color(0xFF7E93A8), fontSize: 11),
+                    contentPadding:
+                        EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                    enabledBorder: OutlineInputBorder(
+                        borderSide: BorderSide(color: Color(0x447FB0E0))),
+                    focusedBorder: OutlineInputBorder(
+                        borderSide: BorderSide(color: Color(0xFF7FB0E0))),
+                  ),
+                  keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true),
+                ),
+              ),
+            ]),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
+            child: _atmoButton(
+              '☄ Drop impactor',
+              const Color(0xFFFFB74D),
+              _focusVessel == null ? null : _dropImpactor,
+            ),
+          ),
           // Atmosphere chemistry demo: re-skin the focused planet's gas mix and
           // watch the limb's haze colour shift (driven by composition).
           const Padding(
@@ -2089,6 +2180,64 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     // Surface framing wants to read the ground; orbit wants the planet behind
     // the craft — the same distances the fixed presets use.
     _applyPlacement(placement, viewRange: landed ? 150 : 600);
+  }
+
+  /// Drop a throwaway test mass beside the focused craft, falling straight
+  /// down at the panel's typed mass and speed — the quick way to compare
+  /// impact outcomes (bounce/land/destroy, crater size vs energy) without
+  /// re-flying a crash profile each time.
+  ///
+  /// Spawns 60 m to the side so the crater (and the destruction) land next to
+  /// the observer, not under it, and 30 m up so the fall adds little speed of
+  /// its own. Forces the impact-damage cheat OFF — a drop test with impacts
+  /// cheated away just piles inert lumps — but leaves the crater cheat as the
+  /// panel has it, so both halves of the fork stay testable.
+  void _dropImpactor() {
+    final id = _focusVessel;
+    final v = id == null ? null : _vessels.byId(id);
+    if (v == null) return;
+    final body = _universe.current().body(v.dominantBody);
+    if (body == null) return;
+    final mass = double.tryParse(_impactMassCtrl.text.trim());
+    final speed = double.tryParse(_impactSpeedCtrl.text.trim());
+    if (mass == null || mass <= 0 || !mass.isFinite) return;
+    if (speed == null || speed <= 0 || !speed.isFinite) return;
+
+    final dir = v.state.position.lengthSquared > 0
+        ? v.state.position.normalized
+        : Vector3.unitX;
+    final ref = dir.z.abs() < 0.9 ? Vector3.unitZ : Vector3.unitX;
+    final side = ref.cross(dir).normalized;
+    final beside = v.state.position + side * 60.0;
+    final besideDir = beside.normalized;
+    final ground = body.terrainGroundRadius(beside, _clock.epoch,
+        edits: _terrainEdits.forBody(body.id));
+
+    _impactorCount++;
+    _vessels.save(Vessel(
+      id: VesselId('impactor-$_impactorCount'),
+      name: 'Impactor $_impactorCount',
+      ownerId: v.ownerId,
+      state: StateVector(
+        position: besideDir * (ground + 30.0),
+        velocity: besideDir * -speed,
+      ),
+      dominantBody: v.dominantBody,
+      stages: [
+        Stage(index: 0, parts: [
+          Part(
+            id: PartId('impactor-$_impactorCount-hull'),
+            name: 'Test mass',
+            dryMass: mass,
+            crossSectionArea: 4,
+          ),
+        ]),
+      ],
+    ));
+    setState(() {
+      _disableImpact = false;
+      _buildAdvance();
+    });
   }
 
   /// The custom-spawn target: the panel's pick when set, else the body the

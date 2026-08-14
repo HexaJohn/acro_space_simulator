@@ -123,6 +123,12 @@ class AdvanceSimulationTick {
   final bool disableOverheat;
   final bool disableImpact;
 
+  /// Debug cheat: hard impacts still destroy the craft, but leave no crater.
+  /// Independent of [disableImpact], which suppresses the destruction itself
+  /// (and with it the crater — deformation is only ever cut by a destroying
+  /// impact).
+  final bool disableCrater;
+
   /// Optional contracts board; when set, the tick raises SituationEntered events
   /// and feeds all vessel events to it. Completed-contract rewards flow into
   /// [research] (science) and [treasury] (funds) when those are provided.
@@ -181,6 +187,7 @@ class AdvanceSimulationTick {
     this.disableAeroStress = false,
     this.disableOverheat = false,
     this.disableImpact = false,
+    this.disableCrater = false,
     this.contracts,
     this.treasury,
     ResearchLedger? research,
@@ -514,8 +521,10 @@ class AdvanceSimulationTick {
 
     // Impact destruction (skipped by the debug cheat — any speed just lands).
     if (!disableImpact && !splashdown.survivesSpeed(speed, safeSpeed)) {
-      _recordImpactCrater(vessel, body, epoch, tick, dir, groundR, speed,
-          quench);
+      if (!disableCrater) {
+        _recordImpactCrater(vessel, body, epoch, tick, dir, groundR, speed,
+            quench);
+      }
       vessel.raise(Impact(vessel.id, body.id, speed));
       return true; // destroyed
     }
