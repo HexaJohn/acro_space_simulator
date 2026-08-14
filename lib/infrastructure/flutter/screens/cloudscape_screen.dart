@@ -687,7 +687,7 @@ class _CloudscapeScreenState extends State<CloudscapeScreen>
     ('sulfur', 0xFFE8D8B0),
     ('haze', 0xFFD8A860),
     ('dust', 0xFFE8D0C0),
-    ('rust', 0xFFFC7F4E),
+    ('rust', 0xFF783317),
     ('storm', 0xFFB8C0D0),
   ];
 

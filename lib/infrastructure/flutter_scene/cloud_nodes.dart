@@ -328,7 +328,7 @@ class CloudNodes {
       // Deep rust, not the pale 'dust' swatch: at intensity 16 the sun term
       // clips toward white in the tonemapper, so a pale tint reads grey —
       // the hue has to start saturated to survive.
-      tintArgb: 0xFFFC7F4E,
+      tintArgb: 0xFF783317,
       tint2Argb: 0xFFB8C0D0,
       tintMix: 0.0,
       freq: 2.0,
