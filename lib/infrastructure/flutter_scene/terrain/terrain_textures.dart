@@ -33,6 +33,10 @@ class TerrainTextures {
   static Object? sand;
   static Object? grass;
 
+  /// Tangent-space normal tile derived from the ground recipe's own height
+  /// field — the macro octave's lighting counterpart. RGB = biased xyz.
+  static Object? tileNormal;
+
   /// Per-body real albedo maps, keyed by body id, equirectangular in the
   /// body-fixed frame. Null for any body with no baked map — the shader then
   /// falls back to the procedural blend alone.
@@ -54,6 +58,11 @@ class TerrainTextures {
   /// [albedoPlaceholder]; the strength uniform gates it to zero effect.
   static Object? normalPlaceholder;
 
+  /// Small CPU-side copies of the baked albedo maps (box-downsampled at load),
+  /// so gameplay FX can ask "what colour is the ground HERE" (impact dust,
+  /// debris tint) without a GPU readback. ~100 KB per mapped body.
+  static final Map<String, CpuAlbedo> albedoCpu = {};
+
   static final Set<String> _albedoTried = {};
   static final Set<String> _normalsTried = {};
 
@@ -70,6 +79,7 @@ class TerrainTextures {
         rock = _upload(_rock);
         sand = _upload(_sand);
         grass = _upload(_grass);
+        tileNormal = _upload(_groundNormal);
         albedoPlaceholder = _uploadRgba(
             Uint8List.fromList([255, 255, 255, 255]), 1, 1);
         normalPlaceholder = _uploadRgba(
@@ -104,6 +114,7 @@ class TerrainTextures {
         rgba[i * 4 + 3] = 255;
       }
       albedo[bodyId] = _uploadRgba(rgba, w, h);
+      albedoCpu[bodyId] = CpuAlbedo.downsample(bytes, 16, w, h);
     } catch (_) {
       // No map for this body. Not an error.
     }
@@ -272,6 +283,32 @@ class TerrainTextures {
     return c;
   }
 
+  /// Height field behind [_groundNormal] — the regolith recipe's broad + grain
+  /// octaves (no specks: a one-texel pebble makes normal glitter, not relief).
+  /// Tileable for the same reason every recipe is.
+  static double _groundHeight(double u, double v) {
+    final broad = _fbm(u, v, 1, octaves: 5, basePeriod: 8);
+    final grain = _fbm(u, v, 2, octaves: 3, basePeriod: 32);
+    return broad * 0.8 + grain * 0.2;
+  }
+
+  /// Tangent-space normal of [_groundHeight], central differences, biased into
+  /// RGB. The height/width ratio (relief as a fraction of the tile side) is
+  /// what sets bump amplitude: 0.05 reads as rolling dust at a 900 m macro
+  /// tile (~45 m of implied relief); the shader's strength knob scales it.
+  static _Rgb _groundNormal(double u, double v) {
+    const e = 1.0 / size;
+    const heightRatio = 0.05;
+    final hx =
+        (_groundHeight(u + e, v) - _groundHeight(u - e, v)) / (2 * e);
+    final hy =
+        (_groundHeight(u, v + e) - _groundHeight(u, v - e)) / (2 * e);
+    final nx = -hx * heightRatio, ny = -hy * heightRatio;
+    final len = math.sqrt(nx * nx + ny * ny + 1.0);
+    return _Rgb(
+        nx / len * 0.5 + 0.5, ny / len * 0.5 + 0.5, 1.0 / len * 0.5 + 0.5);
+  }
+
   // ---- Tileable value-noise -----------------------------------------------
 
   /// Periodic value noise: lattice coords wrap `mod period`, so sampling u,v in
@@ -322,4 +359,67 @@ typedef _Fill = _Rgb Function(double u, double v);
 class _Rgb {
   const _Rgb(this.r, this.g, this.b);
   final double r, g, b;
+}
+
+/// A small CPU-resident copy of a body's baked equirect albedo map, for
+/// point-sampling ground colour on the CPU (impact FX tint). Downsampled from
+/// the full bake so the retained copy stays ~100 KB.
+class CpuAlbedo {
+  const CpuAlbedo(this.width, this.height, this.rgb);
+
+  final int width, height;
+
+  /// Tightly-packed rows of r,g,b bytes, [width]*[height]*3 long.
+  final Uint8List rgb;
+
+  /// Retained width cap. 512x256 is ~2.6 km/texel on the Moon — far finer
+  /// than a dust cloud needs.
+  static const int maxWidth = 512;
+
+  /// Box-average [srcW]x[srcH] RGB data (starting at [offset] in [bytes],
+  /// rows tightly packed) down to at most [maxWidth] across.
+  factory CpuAlbedo.downsample(Uint8List bytes, int offset, int srcW, int srcH) {
+    final step = (srcW / maxWidth).ceil().clamp(1, 1 << 16);
+    final w = (srcW / step).ceil(), h = (srcH / step).ceil();
+    final out = Uint8List(w * h * 3);
+    for (var y = 0; y < h; y++) {
+      final y0 = y * step, y1 = math.min(y0 + step, srcH);
+      for (var x = 0; x < w; x++) {
+        final x0 = x * step, x1 = math.min(x0 + step, srcW);
+        var r = 0, g = 0, b = 0, n = 0;
+        for (var sy = y0; sy < y1; sy++) {
+          var i = offset + (sy * srcW + x0) * 3;
+          for (var sx = x0; sx < x1; sx++) {
+            r += bytes[i];
+            g += bytes[i + 1];
+            b += bytes[i + 2];
+            i += 3;
+            n++;
+          }
+        }
+        final o = (y * w + x) * 3;
+        out[o] = r ~/ n;
+        out[o + 1] = g ~/ n;
+        out[o + 2] = b ~/ n;
+      }
+    }
+    return CpuAlbedo(w, h, out);
+  }
+
+  /// Sample the map along body-fixed unit direction [dirBF] (+Z pole, +X prime
+  /// meridian — the terrain shader's frame; see terrain.frag's uv derivation).
+  /// Returns r,g,b in 0..1.
+  ({double r, double g, double b}) sample(double dx, double dy, double dz) {
+    final lat = math.asin(dz.clamp(-1.0, 1.0));
+    final lon = math.atan2(dy, dx);
+    // Same equirect mapping as the shader: u wraps at the date line, v runs
+    // north pole (0) to south pole (1).
+    final u = lon / (2 * math.pi) + 0.5;
+    final v = 0.5 - lat / math.pi;
+    var x = (u * width).floor() % width;
+    if (x < 0) x += width;
+    final y = (v * height).floor().clamp(0, height - 1);
+    final i = (y * width + x) * 3;
+    return (r: rgb[i] / 255.0, g: rgb[i + 1] / 255.0, b: rgb[i + 2] / 255.0);
+  }
 }

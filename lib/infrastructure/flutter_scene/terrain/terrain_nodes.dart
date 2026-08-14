@@ -154,6 +154,14 @@ class TerrainNodes {
   static double macroTileMeters = 900.0;
   static double macroWeight = 0.8;
 
+  /// Lighting counterpart of the macro octave: how hard the baked tile
+  /// normal (sampled at [macroTileMeters]) tilts the lighting normal. The
+  /// tile itself implies ~5% relief-to-tile; this scales that. Also gated by
+  /// [macroWeight], so one pair of knobs governs colour + bump together.
+  /// Dev-tunable: ext.acro.camera?macroBump=. 1.5 verified by A/B at a
+  /// grazing sun angle: visible hummocky relief without crunchy over-shading.
+  static double macroBumpStrength = 1.5;
+
   /// Cast-shadow contact hardening (dev-tunable). [shadowHardness] = how fast the
   /// penumbra grows with the caster's height above the receiver (UV per clip-z
   /// gap); [maxPenumbraFactor] scales the light's softness into the maximum
@@ -834,7 +842,9 @@ class _TerrainMaterial extends fs.ShaderMaterial {
       0.90, 0.92, 0.95, 0.0, // col_snow
       tileMeters, sandAmount, grassAmount,
       TerrainNodes.debugView.toDouble(), // detail (w = debug view)
-      poleWorld.x, poleWorld.y, poleWorld.z, 0.0, // pole (world)
+      poleWorld.x, poleWorld.y, poleWorld.z,
+      TerrainNodes.macroBumpStrength, // pole (world) + w = macro bump
+
       meridianWorld.x, meridianWorld.y, meridianWorld.z,
       albedoStrength, // meridian (world) + real-albedo mix
       normalStrength, normalFadeNear, normalFadeFar,
@@ -859,6 +869,7 @@ class _TerrainMaterial extends fs.ShaderMaterial {
     setTexture('tex_rock', TerrainTextures.rock, sampler: sampler);
     setTexture('tex_sand', TerrainTextures.sand, sampler: sampler);
     setTexture('tex_grass', TerrainTextures.grass, sampler: sampler);
+    setTexture('tex_tile_normal', TerrainTextures.tileNormal, sampler: sampler);
     _tilesBound = true;
   }
 

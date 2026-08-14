@@ -38,6 +38,8 @@ uniform TerrainInfo {
   vec4 detail;
   // xyz: body spin-axis (pole) in the SAME world frame as v_position, so
   // dot(up, pole) = the body-fixed latitude sine regardless of body rotation.
+  // w: macro BUMP strength — how hard the tile normal (tex_tile_normal,
+  // sampled at the macro tile) tilts the lighting normal. 0 disables.
   vec4 pole;
   // xyz: the body's PRIME MERIDIAN axis (body +X) in that same world frame.
   // Latitude alone cannot index an equirectangular map — longitude needs a
@@ -75,6 +77,12 @@ uniform sampler2D tex_regolith;
 uniform sampler2D tex_rock;
 uniform sampler2D tex_sand;
 uniform sampler2D tex_grass;
+
+// Tangent-space normal tile baked from the ground recipe's own height field
+// (terrain_textures.dart), sampled at the MACRO tile so the colour octave's
+// patches get matching hillside-scale lighting relief. Its mip chain averages
+// toward flat, so the bump self-fades once a tile shrinks below a pixel.
+uniform sampler2D tex_tile_normal;
 
 // Real per-body surface colour, equirectangular in the BODY-FIXED frame
 // (tool/bake_albedo.dart). Carries what no procedural blend can invent: where
@@ -386,6 +394,27 @@ void main() {
       vec3 mapN = normalize(t.x * eastL + t.y * northL + tz * up);
       n = normalize(mix(n, mapN, w));
     }
+  }
+
+  // Macro bump: the tile normal at the SAME macro tile as the colour octave,
+  // blended triplanar (per-plane UDN add, weighted exactly like triplanar()).
+  // Gives the dust hillside-scale lighting undulation the mesh is too coarse
+  // to carry, matched to the macro colour patches. Applied AFTER the DEM
+  // normal so both compose; material/slope selection above stays geometric.
+  float bumpK = terrain.pole.w * clamp(terrain.normal_params.w, 0.0, 1.0);
+  if (macro_tile > 0.0 && bumpK > 0.0) {
+    vec3 buvw = wpos_m / macro_tile;
+    vec3 bbw = pow(abs(n), vec3(4.0));
+    bbw /= (bbw.x + bbw.y + bbw.z + 1e-5);
+    vec3 tX = texture(tex_tile_normal, buvw.yz).rgb * 2.0 - 1.0;
+    vec3 tY = texture(tex_tile_normal, buvw.zx).rgb * 2.0 - 1.0;
+    vec3 tZ = texture(tex_tile_normal, buvw.xy).rgb * 2.0 - 1.0;
+    // Each plane's tangent xy lands on that plane's world axes — the same
+    // swizzles triplanar() uses for its uv projections.
+    vec3 bump = vec3(0.0, tX.x, tX.y) * bbw.x +
+                vec3(tY.y, 0.0, tY.x) * bbw.y +
+                vec3(tZ.x, tZ.y, 0.0) * bbw.z;
+    n = normalize(n + bump * bumpK);
   }
 
   // Sun Lambert + ambient. Light travels along sun_amp.xyz, so a surface is

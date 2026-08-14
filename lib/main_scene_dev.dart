@@ -219,6 +219,10 @@ Future<void> main() async {
     }
     final macroW = deg('macroW');
     if (macroW != null) TerrainNodes.macroWeight = macroW.clamp(0.0, 1.0);
+    final macroBump = deg('macroBump');
+    if (macroBump != null && macroBump >= 0) {
+      TerrainNodes.macroBumpStrength = macroBump;
+    }
     // Shadow contact hardening: shHard=<hardness>, shPen=<max penumbra factor>.
     final shHard = deg('shHard');
     if (shHard != null && shHard >= 0) TerrainNodes.shadowHardness = shHard;
