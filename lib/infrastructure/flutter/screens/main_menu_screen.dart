@@ -15,6 +15,7 @@ import 'app_theme.dart';
 import 'ascent_screen.dart';
 import 'craft_assembly_screen.dart';
 import 'city_builder_screen.dart';
+import 'cloudscape_screen.dart';
 import 'maneuver_planner_screen.dart';
 import 'megastructure_screen.dart';
 import 'mining_screen.dart';
@@ -73,6 +74,8 @@ class MainMenuScreen extends StatelessWidget {
           Icons.groups, AppTheme.accent, (c) => const MultiplayerScreen()),
       _MenuItem('SCATTER LAB', 'Preview procedural trees, plants + rocks',
           Icons.park, AppTheme.accent2, (c) => const ScatterLabScreen()),
+      _MenuItem('CLOUDSCAPE', 'Tune the volumetric cloud decks per planet',
+          Icons.cloud, AppTheme.accent2, (c) => const CloudscapeScreen()),
       _MenuItem('OPTIONS', 'Graphics, simulation, controls', Icons.settings,
           AppTheme.textDim, (c) => const OptionsScreen()),
     ];

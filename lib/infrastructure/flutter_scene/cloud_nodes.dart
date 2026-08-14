@@ -396,3 +396,66 @@ class _CloudShell {
     _surfMaterial.setUniformBlockFromFloats('CloudInfo', _uniforms);
   }
 }
+
+/// One cloud shell over a bare sphere for the CLOUDSCAPE editor — the cloud
+/// sibling of the scatter lab's PropPreviewNodes. It drives the REAL
+/// [_CloudShell] rig (same windings, same materials, same uniform packing),
+/// so what the editor shows is exactly what the sim draws; only the world
+/// plumbing (snapshot, floating origin, body orientation) is replaced by
+/// direct values. The planet sits at the scene origin with identity
+/// orientation, so the wind knob reads as pure noise-domain drift.
+class CloudPreviewNodes {
+  CloudPreviewNodes(this._scene);
+
+  final fs.Scene _scene;
+  _CloudShell? _shell;
+
+  /// Positions the shell and pushes the style's uniforms. Safe to call every
+  /// frame: a no-op while the shader bundle is still loading (the shell
+  /// spawns on a later call) and while [style.enabled] is off.
+  void update({
+    required CloudStyle style,
+    required double planetRadiusM,
+    required double timeS,
+    required Vector3 toSun,
+    required vm.Vector3 cameraEyeScene,
+  }) {
+    final shader = CloudNodes._shader;
+    if (shader == null) return;
+    if (!style.enabled || style.topM <= style.baseM) {
+      _shell?.removeFrom(_scene);
+      _shell = null;
+      return;
+    }
+    final shell = _shell ??= _CloudShell(shader, _scene);
+    final planetScene = lengthToScene(planetRadiusM);
+    final topScene = lengthToScene(planetRadiusM + style.topM);
+    shell.setInside(cameraEyeScene.length < topScene * 1.02);
+    shell.setTransforms(vm.Vector3.zero(), topScene, planetScene);
+    shell.updateUniforms(
+      centreScene: vm.Vector3.zero(),
+      planetRadiusScene: planetScene,
+      cloudTopScene: topScene,
+      cloudBaseScene: lengthToScene(planetRadiusM + style.baseM),
+      toSun: toSun,
+      coverage: style.coverage,
+      density: style.density,
+      time: timeS,
+      wind: style.wind,
+      detail: style.detail,
+      ambient: style.ambient,
+      intensity: style.intensity,
+      tintArgb: style.tintArgb,
+      freq: style.freq,
+      orient: vm.Quaternion.identity(),
+    );
+  }
+
+  /// Pulls the shell out of the scene. Nodes/materials are dropped, not
+  /// disposed — the same discipline as [CloudNodes.update]'s removeWhere
+  /// (disposing GPU resources inline blanks the frame on web).
+  void dispose() {
+    _shell?.removeFrom(_scene);
+    _shell = null;
+  }
+}
