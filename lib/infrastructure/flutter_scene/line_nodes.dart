@@ -195,7 +195,10 @@ class LineNodes {
         // ellipse wraps the ramp; an open escape path fades ahead from the
         // craft (its samples DO start at the craft).
         final craftWorld = bodyPos + Vector3(v.px, v.py, v.pz);
-        final closed = v.eccentricity < 1 && v.semiMajor > 0;
+        // An arc truncated at a predicted SOI handoff is OPEN even when e < 1:
+        // fade forward from the craft, don't wrap the ramp around a seam.
+        final closed =
+            !v.trajectoryOpen && v.eccentricity < 1 && v.semiMajor > 0;
         final List<double> frac;
         if (closed) {
           final m = world.length - 1; // last vertex repeats the first

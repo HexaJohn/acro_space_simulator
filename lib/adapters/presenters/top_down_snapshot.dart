@@ -8,6 +8,7 @@ import 'dart:math' as math;
 import '../../application/ports/repositories.dart';
 import '../../application/ports/world_repositories.dart';
 import '../../domain/orbits/body_ephemeris.dart';
+import '../../domain/orbits/patched_conic_service.dart';
 import '../../domain/orbits/state_vector_converter.dart';
 import '../../domain/orbits/trajectory_service.dart';
 import '../../domain/shared/vector3.dart';
@@ -184,9 +185,21 @@ class VesselView {
   final Vector3 surfaceFootRel;
   final bool landed;
 
+  /// Patched-conic CONTINUATION legs (SCREEN px) after each predicted SOI
+  /// handoff: the same trajectory carried on in the NEXT frame's conic, drawn
+  /// anchored to that body's current position. Empty when the current conic has
+  /// no SOI event ahead (or for non-focused vessels — only the focus pays for
+  /// the prediction). When these are present, [path] is patch 0 of the same
+  /// prediction, TRUNCATED at the first handoff. [patchLabels] names the target
+  /// frame body per leg, for the handoff marker.
+  final List<List<({double x, double y})>> patchPaths;
+  final List<String> patchLabels;
+
   const VesselView(this.name, this.x, this.y, this.headingRad, this.onRails,
       {this.path = const [],
       this.pathBehind = const [],
+      this.patchPaths = const [],
+      this.patchLabels = const [],
       this.worldRel = Vector3.zero,
       this.forwardW = Vector3.unitZ,
       this.upW = Vector3.unitY,
@@ -236,6 +249,7 @@ class TopDownSnapshotPresenter {
   final ColonyRepository? colonies;
   final TrajectoryService trajectory;
   final BodyEphemeris ephemeris;
+  final PatchedConicService patchedConics;
 
   TopDownSnapshotPresenter({
     required this.vessels,
@@ -243,6 +257,7 @@ class TopDownSnapshotPresenter {
     this.colonies,
     this.trajectory = const TrajectoryService(),
     this.ephemeris = const BodyEphemeris(),
+    this.patchedConics = const PatchedConicService(),
   });
 
   /// Body ids that ship with a surface map under `assets/textures/<id>.jpg`.
@@ -536,6 +551,8 @@ class TopDownSnapshotPresenter {
       // Predicted orbit path (skip for landed vessels — they don't orbit).
       var path = const <({double x, double y})>[];
       var pathBehind = const <bool>[];
+      var patchPaths = const <List<({double x, double y})>>[];
+      var patchLabels = const <String>[];
       final vBody = system.body(v.dominantBody);
       if (!v.landed && vBody != null && v.state.velocity.length > 1) {
         final bodyOrigin = bodyWorld(vBody);
@@ -549,15 +566,51 @@ class TopDownSnapshotPresenter {
         // when culled) — the adaptive sampler bisects against this on-screen.
         Vector3 toWorld(Vector3 p) =>
             Vector3(bodyOrigin.x + p.x, bodyOrigin.y + p.y, bodyOrigin.z + p.z);
+
+        // Patched conics — FOCUSED vessel only (the prediction scans the real
+        // ephemeris for encounters; one craft per frame is the budget). When
+        // the current conic runs into an SOI event, patch 0 (truncated at the
+        // handoff) replaces the plain one-conic path and the continuation legs
+        // ride along as [patchPaths], each anchored to ITS body's current
+        // position (KSP-style local-to-body drawing).
+        List<Vector3>? patchZeroPts;
+        if (focusVessel != null && v.id == focusVessel.id) {
+          final patches = patchedConics.predict(
+            position: v.state.position,
+            velocity: v.state.velocity,
+            body: vBody,
+            system: system,
+            epoch: epoch,
+          );
+          if (patches.length > 1) {
+            patchZeroPts = patches.first.points;
+            final legs = <List<({double x, double y})>>[];
+            final labels = <String>[];
+            for (final patch in patches.skip(1)) {
+              final pBody = system.body(patch.body);
+              if (pBody == null) continue;
+              final pw = bodyWorld(pBody);
+              legs.add([
+                for (final p in patch.points)
+                  projOrNan(Vector3(pw.x + p.x, pw.y + p.y, pw.z + p.z)),
+              ]);
+              labels.add(pBody.name);
+            }
+            patchPaths = legs;
+            patchLabels = labels;
+          }
+        }
+
         // Adaptive screen-space sampling: dense near the craft + at sharp
         // turning points, sparse on far/straight arcs.
-        final pts = trajectory.predictPathAdaptive(
-          position: v.state.position,
-          velocity: v.state.velocity,
-          body: vBody,
-          epoch: epoch,
-          projectPx: (p) => camera.projectPx(toWorld(p) - camWorld),
-        );
+        final pts = patchZeroPts ??
+            trajectory.predictPathAdaptive(
+              position: v.state.position,
+              velocity: v.state.velocity,
+              body: vBody,
+              epoch: epoch,
+              projectPx: (p) => camera.projectPx(toWorld(p) - camWorld),
+            );
         final pp = <({double x, double y})>[];
         final beh = <bool>[];
         for (final p in pts) {
@@ -614,6 +667,8 @@ class TopDownSnapshotPresenter {
         v.mode == PropagationMode.onRails,
         path: path,
         pathBehind: pathBehind,
+        patchPaths: patchPaths,
+        patchLabels: patchLabels,
         worldRel: vWorld - camWorld,
         forwardW: fwd,
         upW: upV,

@@ -289,6 +289,7 @@ class TopDownPainter extends CustomPainter {
     }
     for (final v in snapshot.vessels) {
       _drawVesselPath(canvas, v, project, clip, false);
+      _drawPatchPaths(canvas, v, project, clip);
     }
 
     // The focused vessel's FLOWN trail (breadcrumb of where it has actually
@@ -553,6 +554,58 @@ class TopDownPainter extends CustomPainter {
       if (bi && !ai) pa = Offset.lerp(pa, pb, 0.5)!;
       final seg = _clipSegment(pa, pb, clip);
       if (seg != null) canvas.drawLine(seg.$1, seg.$2, paint);
+    }
+  }
+
+  /// Patched-conic continuation colours by leg index (first handoff amber,
+  /// second violet) — shared with the 3D backend's HUD overlay so the two
+  /// renderers agree.
+  static const List<Color> patchColors = [
+    Color(0xB3FFC04D), // amber
+    Color(0xB3B08CFF), // violet
+  ];
+
+  /// Patched-conic continuation legs: the predicted trajectory carried across
+  /// each SOI handoff into the next body's frame. One polyline per leg (NaN
+  /// points break the line), colour-coded by leg index, with a small ring +
+  /// "→ body" label at the handoff point so the boundary reads at a glance.
+  void _drawPatchPaths(Canvas canvas, VesselView v,
+      Offset Function(double, double) project, Rect clip) {
+    for (var leg = 0; leg < v.patchPaths.length; leg++) {
+      final pts = v.patchPaths[leg];
+      if (pts.length < 2) continue;
+      final color = patchColors[leg % patchColors.length];
+      final paint = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.2
+        ..color = color;
+      Offset? first;
+      for (var i = 0; i < pts.length - 1; i++) {
+        if (pts[i].x.isNaN ||
+            pts[i].y.isNaN ||
+            pts[i + 1].x.isNaN ||
+            pts[i + 1].y.isNaN) {
+          continue;
+        }
+        final pa = project(pts[i].x, pts[i].y);
+        final pb = project(pts[i + 1].x, pts[i + 1].y);
+        first ??= pa;
+        final seg = _clipSegment(pa, pb, clip);
+        if (seg != null) canvas.drawLine(seg.$1, seg.$2, paint);
+      }
+      // Handoff marker at the leg's entry point (the SOI boundary).
+      if (first != null) {
+        canvas.drawCircle(
+            first,
+            4,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 1.5
+              ..color = color);
+        final label =
+            leg < v.patchLabels.length ? '→ ${v.patchLabels[leg]}' : '→ SOI';
+        _label(canvas, label, first + const Offset(7, -5), color);
+      }
     }
   }
 

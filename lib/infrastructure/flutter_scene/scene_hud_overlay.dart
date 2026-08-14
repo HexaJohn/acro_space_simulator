@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 
 import '../../adapters/presenters/top_down_snapshot.dart';
 import '../flutter/debug_layers.dart';
+import '../flutter/top_down_painter.dart' show TopDownPainter;
 
 /// Painter-parity HUD for the flutter_scene backend: the text readouts and
 /// body/vessel name labels that [TopDownPainter] draws in-canvas (top-left
@@ -45,6 +46,47 @@ class SceneHudOverlayPainter extends CustomPainter {
             c.dy - rPx < size.height + 16;
         if (!onScreen) continue;
         _dashedCircle(canvas, c, rPx, const Color(0x55B0E0A0));
+      }
+    }
+
+    // Patched-conic continuation legs + SOI handoff markers, painter parity
+    // with [TopDownPainter._drawPatchPaths] (same colours). The 3D scene
+    // (LineNodes) draws only the CURRENT conic; the legs after each predicted
+    // SOI handoff are drawn here through the same projection as the labels,
+    // so the two backends agree about the handoff.
+    for (final v in snapshot.vessels) {
+      for (var leg = 0; leg < v.patchPaths.length; leg++) {
+        final pts = v.patchPaths[leg];
+        if (pts.length < 2) continue;
+        final color = TopDownPainter
+            .patchColors[leg % TopDownPainter.patchColors.length];
+        final paint = Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.2
+          ..color = color;
+        Offset? first;
+        for (var i = 0; i < pts.length - 1; i++) {
+          final a = pts[i], b = pts[i + 1];
+          // NaN = camera-culled; huge coords blow up Skia — skip both.
+          if (!_drawable(a) || !_drawable(b)) continue;
+          final pa = centre + Offset(a.x, -a.y);
+          final pb = centre + Offset(b.x, -b.y);
+          first ??= pa;
+          canvas.drawLine(pa, pb, paint);
+        }
+        if (first != null) {
+          canvas.drawCircle(
+              first,
+              4,
+              Paint()
+                ..style = PaintingStyle.stroke
+                ..strokeWidth = 1.5
+                ..color = color);
+          final label = leg < v.patchLabels.length
+              ? '→ ${v.patchLabels[leg]}'
+              : '→ SOI';
+          _label(canvas, label, first + const Offset(7, -5), color);
+        }
       }
     }
 
@@ -89,6 +131,12 @@ class SceneHudOverlayPainter extends CustomPainter {
       const Color(0xFF4A5A6A),
     );
   }
+
+  /// A patch-leg point the overlay can hand to Skia: finite and within a sane
+  /// pixel range (extreme zoom projects far legs to millions of px, which
+  /// mis-rasterizes; the leg is map-scale UI, so just skip those segments).
+  bool _drawable(({double x, double y}) p) =>
+      p.x.isFinite && p.y.isFinite && p.x.abs() < 8000 && p.y.abs() < 8000;
 
   void _label(Canvas canvas, String text, Offset at, Color color) {
     final tp = TextPainter(
