@@ -7,10 +7,8 @@ import 'dart:math' as math;
 
 import 'package:acro_space_simulator/application/snapshot/world_snapshot.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
-import 'package:acro_space_simulator/domain/terrain/dem_pyramid.dart';
 import 'package:acro_space_simulator/domain/terrain/dem_registry.dart';
 import 'package:acro_space_simulator/domain/terrain/terrain_field.dart';
-import 'package:acro_space_simulator/domain/terrain/terrain_profile.dart';
 import 'package:acro_space_simulator/domain/universe/celestial_body.dart';
 import 'package:acro_space_simulator/infrastructure/sample_world.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -29,32 +27,10 @@ import '../helpers/register_baked_dems.dart';
 void main() {
   registerBakedDemsForTest();
 
-  /// Rebuild the render-side field from a descriptor, mirroring
-  /// `TerrainNodes.update`. If that code changes, this must change with it.
-  TerrainField renderField(BodyDescriptorSnapshot d) {
-    final dem = d.terrainDemBodyId == null
-        ? null
-        : DemRegistry.require(d.terrainDemBodyId!);
-    return TerrainField(
-      radius: d.referenceRadius,
-      amplitude: d.terrainAmplitude,
-      featureScale: d.terrainFeatureScale,
-      seaLevel: d.terrainSeaLevel,
-      seed: d.terrainSeed,
-      octaves: d.terrainOctaves,
-      dem: dem,
-      detail: d.terrainErodedDetail
-          ? (d.terrainProfile ?? TerrainProfile.barren).detailFor(
-              seed: d.terrainSeed,
-              radiusM: d.referenceRadius,
-              amplitudeM: d.terrainAmplitude,
-              featureScaleM: d.terrainFeatureScale,
-              octaves: d.terrainOctaves + 1,
-              control: dem == null ? null : DemDerivedControl(dem),
-            )
-          : null,
-    );
-  }
+  /// Rebuild the render-side field the way every render consumer now does —
+  /// through the ONE shared builder (used by the terrain mesher AND scatter,
+  /// so this test gates both).
+  TerrainField renderField(BodyDescriptorSnapshot d) => d.buildTerrainField()!;
 
   List<Vector3> directions(int n) {
     final golden = math.pi * (3.0 - math.sqrt(5.0));

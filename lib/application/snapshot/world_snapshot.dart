@@ -16,8 +16,12 @@ import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
 import '../../domain/simulation/domain_event.dart';
 import '../../domain/simulation/epoch.dart';
+import '../../domain/terrain/dem_pyramid.dart';
+import '../../domain/terrain/dem_registry.dart';
 import '../../domain/terrain/terrain_brush.dart';
 import '../../domain/terrain/terrain_edits.dart';
+import '../../domain/terrain/terrain_feature.dart';
+import '../../domain/terrain/terrain_field.dart';
 import '../../domain/terrain/terrain_profile.dart';
 import '../../domain/universe/celestial_body.dart';
 import '../../domain/universe/star_system.dart';
@@ -535,6 +539,55 @@ class BodyDescriptorSnapshot {
   /// the field independently, and without this it would mesh procedural
   /// ground while collision resolves against the real map.
   final String? terrainDemBodyId;
+
+  /// The DEM pyramid this descriptor references, from the registry (throws
+  /// unregistered — the same contract as `TerrainConfig.fieldFor`).
+  DemPyramid? resolveDem() =>
+      terrainDemBodyId == null ? null : DemRegistry.require(terrainDemBodyId!);
+
+  /// The composed detail layer this descriptor describes, or null for a body
+  /// on the original single-fBm relief.
+  ///
+  /// Somewhat costly to assemble (a feature stack) — render-side callers cache
+  /// it per body and hand it back through [buildTerrainField].
+  TerrainDetail? buildTerrainDetail() {
+    if (!terrainErodedDetail) return null;
+    final dem = resolveDem();
+    return (terrainProfile ?? TerrainProfile.barren).detailFor(
+      seed: terrainSeed,
+      radiusM: referenceRadius,
+      amplitudeM: terrainAmplitude,
+      featureScaleM: terrainFeatureScale,
+      octaves: terrainOctaves + 1,
+      control: dem == null ? null : DemDerivedControl(dem),
+    );
+  }
+
+  /// The render-side [TerrainField] for this body — THE one way to rebuild it
+  /// from a descriptor.
+  ///
+  /// MUST produce the field `CelestialBody.terrainFieldWith` builds on the sim
+  /// side (test/terrain/render_sim_agreement_test.dart is the gate). Every
+  /// render consumer (terrain mesher, scatter, previews) goes through here:
+  /// scatter once rebuilt the field by hand, omitted [buildTerrainDetail], and
+  /// seated every prop on ground the mesher never drew.
+  ///
+  /// Null when the body has no terrain. [detail] takes a caller's cached
+  /// layer; omitted, it is built fresh.
+  TerrainField? buildTerrainField({TerrainEdits? edits, TerrainDetail? detail}) {
+    if (!hasTerrain) return null;
+    return TerrainField(
+      radius: referenceRadius,
+      amplitude: terrainAmplitude,
+      featureScale: terrainFeatureScale,
+      seaLevel: terrainSeaLevel,
+      seed: terrainSeed,
+      octaves: terrainOctaves,
+      edits: edits,
+      dem: resolveDem(),
+      detail: detail ?? buildTerrainDetail(),
+    );
+  }
 
   const BodyDescriptorSnapshot({
     required this.id,

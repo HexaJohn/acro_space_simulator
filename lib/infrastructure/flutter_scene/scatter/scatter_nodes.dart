@@ -18,9 +18,8 @@ import '../../../domain/scatter/scatter_placement.dart';
 import '../../../domain/shared/quaternion.dart';
 import '../../../domain/shared/vector3.dart';
 import '../../../domain/terrain/cubed_sphere.dart';
-import '../../../domain/terrain/dem_registry.dart';
 import '../../../domain/terrain/terrain_edits.dart';
-import '../../../domain/terrain/terrain_field.dart';
+import '../../../domain/terrain/terrain_feature.dart';
 import '../../../domain/planetary/planet_surface.dart';
 import '../../../domain/universe/real_solar_system.dart';
 import '../body_nodes.dart';
@@ -82,6 +81,12 @@ class ScatterNodes {
   Vector3 _anchorBF = Vector3.zero;
   bool _dirty = true;
 
+  /// The body's composed detail layer, cached per body exactly as
+  /// [TerrainNodes] caches its own — assembling the feature stack every frame
+  /// is the expensive part of the field.
+  TerrainDetail? _detail;
+  String? _detailBodyId;
+
   int _instanceCount = 0;
   int _drawCalls = 0;
 
@@ -140,18 +145,15 @@ class ScatterNodes {
       _bodyId = bodyId;
     }
 
-    final field = TerrainField(
-      radius: d.referenceRadius,
-      amplitude: d.terrainAmplitude,
-      featureScale: d.terrainFeatureScale,
-      seaLevel: d.terrainSeaLevel,
-      seed: d.terrainSeed,
-      octaves: d.terrainOctaves,
-      edits: _edits,
-      dem: d.terrainDemBodyId == null
-          ? null
-          : DemRegistry.require(d.terrainDemBodyId!),
-    );
+    // The SAME field the terrain mesher draws, through the one shared builder.
+    // Hand-rolling it here once omitted the detail layer, which seated every
+    // prop on ground the mesher never drew — buried in crater rims or hovering
+    // above valleys by the detail relief.
+    if (_detailBodyId != bodyId) {
+      _detail = d.buildTerrainDetail();
+      _detailBodyId = bodyId;
+    }
+    final field = d.buildTerrainField(edits: _edits, detail: _detail)!;
 
     final bodyQuat = Quaternion(b.qw, b.qx, b.qy, b.qz) *
         Quaternion.axisAngle(Vector3.unitZ, BodyNodes.textureYawRad);
