@@ -25,8 +25,11 @@ uniform TerrainInfo {
   // above sea). w: rock slope threshold (cos angle; below this = cliff rock).
   vec4 params;
   // Straight RGB palette: low flat ground, high flat ground, steep rock,
-  // snow. Alphas unused EXCEPT col_rock.a = macro material tile size (m),
-  // the second, larger octave of the ground textures (0 disables).
+  // snow. Alphas repurposed: col_rock.a = macro material tile size (m, the
+  // second octave of the ground textures, 0 disables); col_low.a /
+  // col_high.a = the macro octave's camera-distance fade near/far (scene
+  // units) — beyond far the octave is fully off, killing the shimmer it
+  // costs in whole-disc renders.
   vec4 col_low;
   vec4 col_high;
   vec4 col_rock;
@@ -296,13 +299,29 @@ void main() {
   float amp = max(terrain.sun_amp.w, 1e-6);
   float altN = clamp((dist - terrain.params.x) / amp, -1.0, 1.0);
 
-  // Triplanar material tiles at this fragment (world metres = scene km * 1000).
-  vec3 wpos_m = v_position * 1000.0;
+  // Body-fixed frame (unit, orthogonal): meridian = body +X, east = body +Y,
+  // pole = body +Z, all supplied in v_position's world frame. Needed HERE for
+  // material sampling and again below for the equirect uv.
+  vec3 mer = normalize(terrain.meridian_albedo.xyz);
+  vec3 pol = normalize(terrain.pole.xyz);
+  vec3 east = cross(pol, mer);
+
+  // Triplanar material tiles at this fragment — sampled in the BODY-FIXED
+  // frame, NOT world space. World space is wrong twice over: the floating
+  // origin rides the camera focus, so the pattern slid whenever the craft
+  // moved, and the body spins under a world-anchored pattern. Projecting the
+  // body-centre-relative position (and the normal, for the plane weights)
+  // onto the body axes pins every octave to the ground. Millimetre texture
+  // phase is not float32-exact at body-radius magnitudes (~0.2 m quantum at
+  // Moon scale), but a fraction of a texel of shimmer beats sliding.
+  vec3 rel_m = rel * 1000.0;
+  vec3 bf_m = vec3(dot(rel_m, mer), dot(rel_m, east), dot(rel_m, pol));
+  vec3 n_bf = vec3(dot(n, mer), dot(n, east), dot(n, pol));
   float tile_m = terrain.detail.x;
-  vec3 c_reg = triplanar(tex_regolith, wpos_m, n, tile_m);
-  vec3 c_rock = triplanar(tex_rock, wpos_m, n, tile_m);
-  vec3 c_sand = triplanar(tex_sand, wpos_m, n, tile_m);
-  vec3 c_grass = triplanar(tex_grass, wpos_m, n, tile_m);
+  vec3 c_reg = triplanar(tex_regolith, bf_m, n_bf, tile_m);
+  vec3 c_rock = triplanar(tex_rock, bf_m, n_bf, tile_m);
+  vec3 c_sand = triplanar(tex_sand, bf_m, n_bf, tile_m);
+  vec3 c_grass = triplanar(tex_grass, bf_m, n_bf, tile_m);
 
   // Second octave of the ground materials: regolith + rock sampled AGAIN at
   // a macro tile (col_rock.a metres, ~40x the fine tile) and lerped in. One
@@ -312,10 +331,17 @@ void main() {
   // drift, just structure. Weight w halves the lerp so the fine grain always
   // survives underneath.
   float macro_tile = terrain.col_rock.a;
-  float macro_w = clamp(terrain.normal_params.w, 0.0, 1.0) * 0.5;
+  // Camera-distance fade: a 900 m pattern a thousand kilometres away is
+  // sub-pixel — it can only alias, so the whole octave (colour AND bump)
+  // ramps out between col_low.a and col_high.a and is exactly zero beyond.
+  float macro_fade =
+      1.0 - smoothstep(terrain.col_low.a, terrain.col_high.a,
+                       length(v_viewvector));
+  float macro_w =
+      clamp(terrain.normal_params.w, 0.0, 1.0) * 0.5 * macro_fade;
   if (macro_tile > 0.0 && macro_w > 0.0) {
-    c_reg = mix(c_reg, triplanar(tex_regolith, wpos_m, n, macro_tile), macro_w);
-    c_rock = mix(c_rock, triplanar(tex_rock, wpos_m, n, macro_tile), macro_w);
+    c_reg = mix(c_reg, triplanar(tex_regolith, bf_m, n_bf, macro_tile), macro_w);
+    c_rock = mix(c_rock, triplanar(tex_rock, bf_m, n_bf, macro_tile), macro_w);
   }
 
   // FLAT ground material: regolith by default, with grass/sand auto-selected by
@@ -349,13 +375,9 @@ void main() {
   // procedural colour by its own mean turns it into a detail ratio around 1.0,
   // which then multiplies the real albedo — maria come out dark and highlands
   // bright, and both keep their texture.
-  // Body-fixed latitude/longitude + the equirect uv. Needed by the real-albedo
-  // path AND the debug views below, so computed unconditionally.
-  vec3 mer = normalize(terrain.meridian_albedo.xyz);
-  vec3 pol = normalize(terrain.pole.xyz);
-  // Complete the body-fixed frame. east = pole x meridian is already unit
-  // (both are unit and perpendicular).
-  vec3 east = cross(pol, mer);
+  // Body-fixed latitude/longitude + the equirect uv (basis computed with the
+  // material sampling above). Needed by the real-albedo path AND the debug
+  // views below, so computed unconditionally.
   float sinLat = clamp(dot(up, pol), -1.0, 1.0);
   float lat = asin(sinLat);
   float lon = atan(dot(up, east), dot(up, mer));
@@ -401,19 +423,25 @@ void main() {
   // Gives the dust hillside-scale lighting undulation the mesh is too coarse
   // to carry, matched to the macro colour patches. Applied AFTER the DEM
   // normal so both compose; material/slope selection above stays geometric.
-  float bumpK = terrain.pole.w * clamp(terrain.normal_params.w, 0.0, 1.0);
+  float bumpK =
+      terrain.pole.w * clamp(terrain.normal_params.w, 0.0, 1.0) * macro_fade;
   if (macro_tile > 0.0 && bumpK > 0.0) {
-    vec3 buvw = wpos_m / macro_tile;
-    vec3 bbw = pow(abs(n), vec3(4.0));
+    // Same body-fixed coordinates as the colour octave, so light and colour
+    // agree about where the hummocks are and neither slides.
+    vec3 buvw = bf_m / macro_tile;
+    vec3 bbw = pow(abs(n_bf), vec3(4.0));
     bbw /= (bbw.x + bbw.y + bbw.z + 1e-5);
     vec3 tX = texture(tex_tile_normal, buvw.yz).rgb * 2.0 - 1.0;
     vec3 tY = texture(tex_tile_normal, buvw.zx).rgb * 2.0 - 1.0;
     vec3 tZ = texture(tex_tile_normal, buvw.xy).rgb * 2.0 - 1.0;
-    // Each plane's tangent xy lands on that plane's world axes — the same
-    // swizzles triplanar() uses for its uv projections.
-    vec3 bump = vec3(0.0, tX.x, tX.y) * bbw.x +
-                vec3(tY.y, 0.0, tY.x) * bbw.y +
-                vec3(tZ.x, tZ.y, 0.0) * bbw.z;
+    // Each plane's tangent xy lands on that plane's BODY axes — the same
+    // swizzles triplanar() uses for its uv projections — so the summed bump
+    // is a body-frame vector and must rotate back into the world frame the
+    // lighting normal lives in.
+    vec3 bump_bf = vec3(0.0, tX.x, tX.y) * bbw.x +
+                   vec3(tY.y, 0.0, tY.x) * bbw.y +
+                   vec3(tZ.x, tZ.y, 0.0) * bbw.z;
+    vec3 bump = mer * bump_bf.x + east * bump_bf.y + pol * bump_bf.z;
     n = normalize(n + bump * bumpK);
   }
 

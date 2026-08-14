@@ -162,6 +162,13 @@ class TerrainNodes {
   /// grazing sun angle: visible hummocky relief without crunchy over-shading.
   static double macroBumpStrength = 1.5;
 
+  /// Camera-distance fade for the whole macro octave (colour + bump), scene
+  /// km. A 900 m pattern is ~1 px from ~800 km, below that it only aliases —
+  /// whole-disc renders shimmered. Full below [macroFadeNearKm], off above
+  /// [macroFadeFarKm]. ext.acro.camera?macroFadeNear=&macroFadeFar=.
+  static double macroFadeNearKm = 200.0;
+  static double macroFadeFarKm = 600.0;
+
   /// Cast-shadow contact hardening (dev-tunable). [shadowHardness] = how fast the
   /// penumbra grows with the caster's height above the receiver (UV per clip-z
   /// gap); [maxPenumbraFactor] scales the light's softness into the maximum
@@ -835,8 +842,10 @@ class _TerrainMaterial extends fs.ShaderMaterial {
       centreScene.x, centreScene.y, centreScene.z, radiusScene,
       sunTravel.x, sunTravel.y, sunTravel.z, amplitudeScene,
       seaRadiusScene, ambient, 0.6, 0.6, // sea, ambient, snowStart, rockSlope
-      0.34, 0.32, 0.29, 0.0, // col_low  (dark tan/grey)
-      0.55, 0.53, 0.50, 0.0, // col_high (light grey)
+      0.34, 0.32, 0.29, // col_low rgb (dark tan/grey)
+      TerrainNodes.macroFadeNearKm, // col_low.a = macro fade near (scene km)
+      0.55, 0.53, 0.50, // col_high rgb (light grey)
+      TerrainNodes.macroFadeFarKm, // col_high.a = macro fade far (scene km)
       0.30, 0.28, 0.27, // col_rock rgb (unused; tex_rock carries colour)
       TerrainNodes.macroTileMeters, // col_rock.a = macro material tile (m)
       0.90, 0.92, 0.95, 0.0, // col_snow
