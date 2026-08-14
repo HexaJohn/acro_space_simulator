@@ -430,27 +430,24 @@ void main() {
   float topR = cloud_info.sun_top.w;
   float baseR = cloud_info.base_cov_dens_t.x;
 
-  // FLOW-MAP RECYCLE for the banded drift. The differential rotation
+  // PING-PONG SHEAR for the banded drift. The differential rotation
   // between latitudes grows linearly with time, so left alone the band
-  // interfaces stretch WITHOUT BOUND (visible after long runs or high
-  // warp). Fix: the differential part runs on a recycled clock — two
-  // phases staggered half a period apart, each carrying at most ±0.6 rad
-  // of accumulated shear, crossfaded so a phase has zero weight exactly
-  // when its shear is at maximum. The rigid part (same rotation for every
-  // latitude) keeps true time: a rigid rotation cannot stretch anything,
-  // so the bands still stream past each other indefinitely.
+  // interfaces stretch WITHOUT BOUND (infinite streaks after long runs or
+  // high warp). The differential clock therefore runs on a TRIANGLE wave:
+  // the shear builds to +1.2 rad, then reverses and unwinds through zero
+  // to -1.2 rad, and loops. The interfaces stretch, relax, and stretch
+  // the other way instead of smearing forever — and it stays a single
+  // field evaluation (an earlier two-phase crossfade fix produced ghosted
+  // cross-streaks where the phases blended). The rigid part of the drift
+  // (same rotation for every latitude) keeps true time: rigid rotation
+  // cannot stretch anything, so the bands still stream on average.
   float timeU = cloud_info.base_cov_dens_t.w;
   float shearRate =
       abs(cloud_info.swirl_global.w) * max(cloud_info.band_info.x, 0.0);
-  float period = shearRate > 1e-9 ? 1.2 / shearRate : 0.0;
-  float phA = period > 0.0 ? fract(timeU / period) : 0.5;
-  float tA = (phA - 0.5) * period;
-  float tB = (fract(phA + 0.5) - 0.5) * period;
-  float wA = 1.0 - abs(2.0 * phA - 1.0);
-  bool banded = period > 0.0;
-  // Single-sample consumers (light march, debug maps) use the phase that
-  // currently dominates the blend.
-  float tDom = wA >= 0.5 ? tA : tB;
+  float period = shearRate > 1e-9 ? 2.4 / shearRate : 0.0;
+  float tShear = period > 0.0
+      ? (abs(fract(timeU / period) * 2.0 - 1.0) - 0.5) * period
+      : 0.0;
 
   // DEBUG MAPS: paint the mid-shell field as a flat unlit map on the shell
   // and skip the march entirely. The fragment is already ON the shell
@@ -463,11 +460,11 @@ void main() {
         normalize(v_position - centre) * mix(baseR, topR, 0.5);
     float lat;
     float band;
-    vec3 P = debugDomain(spos, tDom, lat, band);
+    vec3 P = debugDomain(spos, tShear, lat, band);
     vec3 col;
     if (dbg < 1.5) {
       // DENSITY: the full field (warp + erosion + veil) at mid-shell.
-      col = heat(cloudDensity(spos, tDom));
+      col = heat(cloudDensity(spos, tShear));
     } else if (dbg < 2.5) {
       // COVERAGE: the effective threshold after the coverage-weather
       // modulation and the latitude bands.
@@ -557,11 +554,7 @@ void main() {
   for (int i = 0; i < VIEW_SAMPLES; i++) {
     if (i >= samples) break;
     vec3 p = ro + rd * (t0 + (float(i) + marchPhase) * stepLen);
-    // Banded drift active -> blend the two recycled shear phases (the
-    // crossfade is what keeps the interfaces from stretching forever).
-    float density = (banded
-        ? mix(cloudDensity(p, tB), cloudDensity(p, tA), wA)
-        : cloudDensity(p, 0.0)) * densMul;
+    float density = cloudDensity(p, tShear) * densMul;
     if (density <= 0.0) continue;
 
     // Powder term: darkens the illuminated edges toward the core, the cue
@@ -586,9 +579,7 @@ void main() {
       float sunTau = 0.0;
       for (int j = 0; j < LIGHT_SAMPLES; j++) {
         vec3 q = p + sunDir * ((float(j) + 0.5) * sunStep);
-        // Dominant phase only: the tau integral can't show the subtle
-        // phase handoff, and it keeps the light march single-sample.
-        sunTau += cloudDensityLo(q, tDom) * densMul * sunStep;
+        sunTau += cloudDensityLo(q, tShear) * densMul * sunStep;
         if (sunTau > 6.0) break;
       }
       sun = sunI * ct * exp(-sunTau) * phase * powder * vis;

@@ -217,7 +217,7 @@ class CloudNodes {
     // living swirl (speed 0.026) and full coverage weather, trade-wind band
     // shear past stall (1.26).
     'earth': CloudStyle(
-      baseM: 0,
+      baseM: 40000,
       topM: 90000,
       coverage: 0.62,
       density: 0.4082,
