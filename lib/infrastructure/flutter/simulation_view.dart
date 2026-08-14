@@ -49,6 +49,7 @@ import '../../domain/universe/celestial_body.dart' show BodyId, CelestialBody;
 import '../../domain/vessel/vessel.dart';
 import '../sample_world.dart';
 import '../flutter_scene/atmosphere_nodes.dart';
+import '../flutter_scene/cloud_nodes.dart';
 import '../flutter_scene/environment_baker.dart';
 import '../flutter_scene/line_nodes.dart';
 import '../flutter_scene/render_backend.dart';
@@ -1498,6 +1499,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       ('Atmo halo', _layers.atmoHalo, (v) {
         AtmosphereNodes.hidden = !v;
         return _layers.copyWith(atmoHalo: v);
+      }),
+      // 3D backend only: raymarched volumetric cloud shells. Static flag
+      // (no software-renderer analogue), so leave _layers untouched.
+      ('Clouds', !CloudNodes.hidden, (v) {
+        CloudNodes.hidden = !v;
+        return _layers;
       }),
       ('Atmo overlay', _layers.atmoOverlay, (v) => _layers.copyWith(atmoOverlay: v)),
       ('Nav-ball', _layers.navBall, (v) => _layers.copyWith(navBall: v)),

@@ -10,5 +10,9 @@
     "TerrainFragment": {
         "type": "fragment",
         "file": "shaders/terrain.frag"
+    },
+    "CloudFragment": {
+        "type": "fragment",
+        "file": "shaders/clouds.frag"
     }
 }

@@ -20,6 +20,7 @@ import 'infrastructure/flutter/windows_key_event_workaround.dart';
 import 'infrastructure/sample_world.dart';
 import 'infrastructure/flutter/simulation_view.dart';
 import 'infrastructure/flutter_scene/atmosphere_nodes.dart';
+import 'infrastructure/flutter_scene/cloud_nodes.dart';
 import 'infrastructure/flutter_scene/body_nodes.dart';
 import 'infrastructure/flutter_scene/environment_baker.dart';
 import 'infrastructure/flutter_scene/render_backend.dart';
@@ -331,6 +332,37 @@ Future<void> main() async {
       'meshBudgetPerFrame': TerrainNodes.meshBudgetPerFrame,
       'uploadBudgetPerFrame': TerrainNodes.uploadBudgetPerFrame,
       'asyncMeshing': TerrainNodes.asyncMeshing,
+    }));
+  });
+
+  // Live cloud art-pass knobs (applied next frame; render-side only):
+  //   ext.acro.clouds?body=earth&coverage=0.5&density=16&baseKm=2&topKm=15
+  //     &wind=0.004&detail=0.4&ambient=0.25&intensity=1.4&freq=14
+  //     &tint=f2f5ff&enabled=true
+  // Any call (also with no params) returns the FULL current style table —
+  // tune live, then bake the numbers into CloudNodes.styles.
+  developer.registerExtension('ext.acro.clouds', (method, params) async {
+    final id = params['body'];
+    if (id != null) {
+      final s = CloudNodes.styles.putIfAbsent(id, CloudStyle.new);
+      double? num(String k) =>
+          params[k] == null ? null : double.tryParse(params[k]!);
+      if (num('baseKm') != null) s.baseM = num('baseKm')! * 1000;
+      if (num('topKm') != null) s.topM = num('topKm')! * 1000;
+      if (num('coverage') != null) s.coverage = num('coverage')!;
+      if (num('density') != null) s.density = num('density')!;
+      if (num('wind') != null) s.wind = num('wind')!;
+      if (num('detail') != null) s.detail = num('detail')!;
+      if (num('ambient') != null) s.ambient = num('ambient')!;
+      if (num('intensity') != null) s.intensity = num('intensity')!;
+      if (num('freq') != null) s.freq = num('freq')!;
+      if (params['tint'] != null) {
+        s.tintArgb = 0xFF000000 | int.parse(params['tint']!, radix: 16);
+      }
+      if (params['enabled'] != null) s.enabled = params['enabled'] == 'true';
+    }
+    return developer.ServiceExtensionResponse.result(jsonEncode({
+      for (final e in CloudNodes.styles.entries) e.key: e.value.toJson(),
     }));
   });
 

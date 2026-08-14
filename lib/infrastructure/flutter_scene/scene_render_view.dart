@@ -12,6 +12,7 @@ import '../../application/snapshot/world_snapshot.dart';
 import '../../domain/shared/vector3.dart';
 import '../flutter/texture_cache.dart';
 import 'atmosphere_nodes.dart';
+import 'cloud_nodes.dart';
 import 'ring_nodes.dart';
 import 'scatter/scatter_prop_library.dart';
 import 'terrain/terrain_nodes.dart';
@@ -87,6 +88,9 @@ class _SceneRenderViewState extends State<SceneRenderView> {
     });
     RingNodes.loadShader().catchError((Object e) {
       debugPrint('ring shader load failed: $e');
+    });
+    CloudNodes.loadShader().catchError((Object e) {
+      debugPrint('cloud shader load failed: $e');
     });
     TerrainNodes.loadShader().catchError((Object e) {
       debugPrint('terrain shader load failed: $e');
