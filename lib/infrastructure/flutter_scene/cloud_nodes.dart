@@ -200,7 +200,30 @@ class CloudNodes {
   /// (Venus, Titan) run near-total coverage; Earth is broken cumulus; Mars
   /// is a thin high haze.
   static final Map<String, CloudStyle> styles = {
-    'earth': CloudStyle(),
+    // Tuned in CLOUDSCAPE 2026-08-14: deep 0-90 km shell, slow winds with
+    // living swirl (speed 0.026) and full coverage weather, trade-wind band
+    // shear past stall (1.26).
+    'earth': CloudStyle(
+      baseM: 0,
+      topM: 90000,
+      coverage: 0.62,
+      density: 0.4082,
+      wind: 0.0001,
+      windGlobal: 0.0001,
+      swirlStrength: 4.5918,
+      swirlFreq: 0.5832,
+      swirlSpeed: 0.0263,
+      bandShear: 1.2551,
+      bandWidth: 0.4595,
+      coverageVar: 1.0,
+      coverageFreq: 0.1561,
+      coverageSpeed: 0.05,
+      detail: 0.55,
+      ambient: 0.08,
+      intensity: 16.0,
+      tintArgb: 0xFFF2F5FF,
+      freq: 14.0,
+    ),
     'venus': CloudStyle(
       baseM: 48000,
       topM: 70000,
