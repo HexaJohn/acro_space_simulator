@@ -2497,7 +2497,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                     Positioned.fill(
                       child: IgnorePointer(
                         child: CustomPaint(
-                          painter: SceneHudOverlayPainter(snap, _camera),
+                          painter: SceneHudOverlayPainter(snap, _camera,
+                              layers: _layers),
                         ),
                       ),
                     ),
