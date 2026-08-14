@@ -435,21 +435,22 @@ void main() {
   // PING-PONG SHEAR for the banded drift. The differential rotation
   // between latitudes grows linearly with time, so left alone the band
   // interfaces stretch WITHOUT BOUND (infinite streaks after long runs or
-  // high warp). The differential clock therefore runs on a TRIANGLE wave:
-  // the shear builds to +1.2 rad, then reverses and unwinds through zero
-  // to -1.2 rad, and loops. The interfaces stretch, relax, and stretch
-  // the other way instead of smearing forever — and it stays a single
-  // field evaluation (an earlier two-phase crossfade fix produced ghosted
-  // cross-streaks where the phases blended). The rigid part of the drift
-  // (same rotation for every latitude) keeps true time: rigid rotation
-  // cannot stretch anything, so the bands still stream on average.
+  // high warp). The differential clock therefore runs on a SINE wave: the
+  // shear swings smoothly between +maxShear and -maxShear and loops, so
+  // the interfaces stretch, relax, and stretch the other way instead of
+  // smearing forever — and the reversal eases in and out rather than
+  // kinking (a triangle wave read as an abrupt direction snap; a still
+  // earlier two-phase crossfade ghosted cross-streaks). Stays a single
+  // field evaluation. The rigid part of the drift (same rotation for
+  // every latitude) keeps true time: rigid rotation cannot stretch
+  // anything, so the bands still stream on average.
   float timeU = cloud_info.base_cov_dens_t.w;
   float shearRate =
       abs(cloud_info.swirl_global.w) * max(cloud_info.band_info.x, 0.0);
   float maxShear = max(cloud_info.band_info.z, 0.05);
   float period = shearRate > 1e-9 ? 2.0 * maxShear / shearRate : 0.0;
   float tShear = period > 0.0
-      ? (abs(fract(timeU / period) * 2.0 - 1.0) - 0.5) * period
+      ? 0.5 * period * sin(6.2831853 * timeU / period)
       : 0.0;
 
   // DEBUG MAPS: paint the mid-shell field as a flat unlit map on the shell
