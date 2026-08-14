@@ -12,6 +12,7 @@ import 'package:acro_space_simulator/domain/dynamics/state_vector.dart';
 import 'package:acro_space_simulator/domain/orbits/soi_transition_service.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/domain/simulation/domain_event.dart';
+import 'package:acro_space_simulator/domain/simulation/epoch.dart';
 import 'package:acro_space_simulator/domain/simulation/simulation_clock.dart';
 import 'package:acro_space_simulator/domain/vessel/vessel.dart';
 import 'package:acro_space_simulator/infrastructure/sample_world.dart';
@@ -32,13 +33,20 @@ void main() {
 
   Vessel faller({required double speed}) {
     final body = SampleWorld.realSystem().require(SampleWorld.earth);
-    // Just above the surface, falling straight down.
+    // Just above the REAL surface under this direction, falling straight
+    // down. With Earth on the GEBCO DEM the datum is no longer the ground —
+    // (+X, epoch 0) sits over the Gulf of Guinea, ~4.9 km of water column
+    // above the sea floor a datum-relative spawn would start from. Contact is
+    // checked per fixed step, so the drop must stay SHORT or gravity accrued
+    // during the overshoot turns a gentle release into a >12 m/s "impact".
+    final ground =
+        body.terrainGroundRadius(Vector3(body.radius, 0, 0), Epoch.zero);
     return Vessel(
       id: const VesselId('faller'),
       name: 'Faller',
       ownerId: 'p',
       state: StateVector(
-        position: Vector3(body.radius + 10, 0, 0),
+        position: Vector3(ground + 1, 0, 0),
         velocity: Vector3(-speed, 0, 0),
       ),
       dominantBody: SampleWorld.earth,
@@ -50,7 +58,10 @@ void main() {
     final v = faller(speed: 2); // gentle
     final vessels = InMemoryVesselRepository([v]);
     final tick = buildTick(vessels);
-    final clock = SimulationClock(warpFactor: 1, fixedStep: 1.0);
+    // Fine steps so contact lands within ~0.5 s of release: at 1 s steps the
+    // craft accrues ~2 s of gravity (>20 m/s) before the surface check sees
+    // it, which reads as a crash, not a touchdown.
+    final clock = SimulationClock(warpFactor: 1, fixedStep: 0.25);
     for (var i = 0; i < 20; i++) {
       tick.execute(clock);
     }

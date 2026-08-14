@@ -11,7 +11,21 @@
 /// ```
 /// fvm dart run tool/bake_dem.dart \
 ///   --in dem_src/ldem_64.tif --out assets/terrain/moon.acrodem \
-///   --radius 1737400 --units km --face 1024
+///   --radius 1737400 --units km --face 512
+/// ```
+///
+/// (The shipped moon.acrodem is `--face 512` — byte-verified against a rebake.
+/// `--face` defaults to 1024, which is what Earth uses.)
+///
+/// Earth uses the Blue Marble GEBCO_08 8-bit pair instead of one raster —
+/// `--bath` switches to it (see `ElevBathHeight` in src/dem_source.dart for
+/// the mask/ramp rules):
+///
+/// ```
+/// fvm dart run tool/bake_dem.dart \
+///   --in dem_src/gebco_08_rev_elev_21600x10800.tif \
+///   --bath dem_src/gebco_08_rev_bath_21600x10800.tif \
+///   --out assets/terrain/earth.acrodem --radius 6371000 --face 1024
 /// ```
 ///
 /// ## Why it streams
@@ -35,178 +49,54 @@ import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/domain/terrain/cubed_sphere.dart';
 import 'package:acro_space_simulator/domain/terrain/dem_pyramid.dart';
 
-/// The only tags this reader consumes: width, height, bits/sample,
-/// compression, strip offsets, sample format.
-const _wantedTags = {256, 257, 258, 259, 273, 339};
-
-/// Bytes per element for the integer TIFF types. Anything else (rationals,
-/// ASCII, floats) only ever appears in tags outside [_wantedTags].
-const _typeSize = <int, int>{1: 1, 3: 2, 4: 4};
-
-/// Minimal TIFF directory reader — enough for the uncompressed, strip-per-row
-/// rasters these DEM products ship as. Not a general TIFF decoder.
-class _Tiff {
-  _Tiff(this.file, this.width, this.height, this.bits, this.sampleFormat,
-      this.stripOffsets, this.little);
-
-  final RandomAccessFile file;
-  final int width, height, bits, sampleFormat;
-  final List<int> stripOffsets;
-  final bool little;
-
-  static _Tiff open(String path) {
-    final f = File(path).openSync();
-    final head = f.readSync(8);
-    final little = head[0] == 0x49 && head[1] == 0x49;
-    final bd = ByteData.sublistView(Uint8List.fromList(head));
-    final ifd = bd.getUint32(4, little ? Endian.little : Endian.big);
-    f.setPositionSync(ifd);
-    final endian = little ? Endian.little : Endian.big;
-    final countBytes = f.readSync(2);
-    final n = ByteData.sublistView(Uint8List.fromList(countBytes))
-        .getUint16(0, endian);
-
-    int? width, height, bitsPerSample, sampleFormat, compression;
-    var stripOffsets = <int>[];
-    for (var i = 0; i < n; i++) {
-      final e = Uint8List.fromList(f.readSync(12));
-      final ed = ByteData.sublistView(e);
-      final tag = ed.getUint16(0, endian);
-      final type = ed.getUint16(2, endian);
-      final count = ed.getUint32(4, endian);
-      // Skip every tag we do not consume BEFORE decoding anything. A DEM
-      // GeoTIFF carries rationals, ASCII and doubles in its geo-keys, and
-      // trying to read those through an integer path walks off the end of the
-      // value buffer.
-      if (!_wantedTags.contains(tag)) continue;
-      final size = _typeSize[type];
-      if (size == null) continue; // unknown type in a tag we wanted; ignore
-      List<int> values;
-      if (size * count <= 4) {
-        values = _read(ed.buffer.asByteData(ed.offsetInBytes + 8, 4), type,
-            count, endian);
-      } else {
-        final off = ed.getUint32(8, endian);
-        final save = f.positionSync();
-        f.setPositionSync(off);
-        final raw = Uint8List.fromList(f.readSync(size * count));
-        f.setPositionSync(save);
-        values = _read(ByteData.sublistView(raw), type, count, endian);
-      }
-      switch (tag) {
-        case 256:
-          width = values.first;
-        case 257:
-          height = values.first;
-        case 258:
-          bitsPerSample = values.first;
-        case 259:
-          compression = values.first;
-        case 273:
-          stripOffsets = values;
-        case 339:
-          sampleFormat = values.first;
-      }
-    }
-    if (width == null || height == null) {
-      throw StateError('TIFF missing dimensions');
-    }
-    if (compression != null && compression != 1) {
-      throw StateError(
-          'compressed TIFF (compression=$compression) not supported; '
-          'export an uncompressed copy');
-    }
-    if (stripOffsets.length != height) {
-      throw StateError(
-          'expected one strip per row, got ${stripOffsets.length} for $height');
-    }
-    return _Tiff(f, width, height, bitsPerSample ?? 8, sampleFormat ?? 1,
-        stripOffsets, little);
-  }
-
-  static List<int> _read(ByteData d, int type, int count, Endian e) => [
-        for (var i = 0; i < count; i++)
-          switch (type) {
-            1 => d.getUint8(i),
-            3 => d.getUint16(i * 2, e),
-            _ => d.getUint32(i * 4, e),
-          }
-      ];
-
-  /// One raster row as doubles, whatever the on-disk sample format.
-  Float64List readRow(int y, Uint8List scratch) {
-    file.setPositionSync(stripOffsets[y]);
-    file.readIntoSync(scratch);
-    final d = ByteData.sublistView(scratch);
-    final e = little ? Endian.little : Endian.big;
-    final out = Float64List(width);
-    final bytes = bits ~/ 8;
-    for (var x = 0; x < width; x++) {
-      final o = x * bytes;
-      out[x] = switch ((bits, sampleFormat)) {
-        (32, 3) => d.getFloat32(o, e),
-        (32, 2) => d.getInt32(o, e).toDouble(),
-        (32, _) => d.getUint32(o, e).toDouble(),
-        (16, 2) => d.getInt16(o, e).toDouble(),
-        (16, _) => d.getUint16(o, e).toDouble(),
-        _ => d.getUint8(o).toDouble(),
-      };
-    }
-    return out;
-  }
-
-  int get rowBytes => width * (bits ~/ 8);
-}
+import 'src/dem_source.dart';
 
 void main(List<String> args) {
   final opts = _parse(args);
-  final inPath = opts['in'] ?? 'dem_src/ldem_64.tif';
   final outPath = opts['out'] ?? 'assets/terrain/moon.acrodem';
   final radiusM = double.parse(opts['radius'] ?? '1737400');
-  final unitScale = (opts['units'] ?? 'm') == 'km' ? 1000.0 : 1.0;
   final faceSize = int.parse(opts['face'] ?? '1024');
   final levelCount = int.parse(opts['levels'] ?? '5');
 
-  if (!File(inPath).existsSync()) {
-    stderr.writeln('source not found: $inPath');
+  final HeightSource source;
+  try {
+    source = heightSourceFromOpts(opts, defaultIn: 'dem_src/ldem_64.tif');
+  } on StateError catch (e) {
+    stderr.writeln(e.message);
     exitCode = 2;
     return;
   }
-
-  final tiff = _Tiff.open(inPath);
-  stdout.writeln('source ${tiff.width}x${tiff.height} '
-      'bits=${tiff.bits} format=${tiff.sampleFormat}');
+  stdout.writeln('source ${source.width}x${source.height}');
 
   // --- Pass 1: stream down to an intermediate equirectangular grid ----------
   // Sized ~4x the finest cube face edge so the box filter has real support and
   // the cube resample is an interpolation rather than a magnification.
-  final interW = math.min(tiff.width, faceSize * 4);
+  final interW = math.min(source.width, faceSize * 4);
   final interH = math.max(1, interW ~/ 2);
   stdout.writeln('downsampling to ${interW}x$interH ...');
 
   final acc = Float64List(interW * interH);
   final counts = Int32List(interW * interH);
-  final scratch = Uint8List(tiff.rowBytes);
   var minElev = double.infinity, maxElev = double.negativeInfinity;
 
-  for (var y = 0; y < tiff.height; y++) {
-    final row = tiff.readRow(y, scratch);
-    final ty = (y * interH ~/ tiff.height).clamp(0, interH - 1);
+  for (var y = 0; y < source.height; y++) {
+    final row = source.row(y);
+    final ty = (y * interH ~/ source.height).clamp(0, interH - 1);
     final base = ty * interW;
-    for (var x = 0; x < tiff.width; x++) {
-      final v = row[x] * unitScale;
+    for (var x = 0; x < source.width; x++) {
+      final v = row[x];
       if (!v.isFinite) continue;
-      final tx = (x * interW ~/ tiff.width).clamp(0, interW - 1);
+      final tx = (x * interW ~/ source.width).clamp(0, interW - 1);
       acc[base + tx] += v;
       counts[base + tx]++;
       if (v < minElev) minElev = v;
       if (v > maxElev) maxElev = v;
     }
     if (y % 1000 == 0) {
-      stdout.writeln('  row $y / ${tiff.height}');
+      stdout.writeln('  row $y / ${source.height}');
     }
   }
-  tiff.file.closeSync();
+  source.close();
 
   final inter = Float64List(interW * interH);
   for (var i = 0; i < inter.length; i++) {
@@ -299,16 +189,13 @@ void main(List<String> args) {
       '${(bytes.length / 1024 / 1024).toStringAsFixed(1)} MB');
 
   // Spot-check against the source so a silently-wrong bake is caught here
-  // rather than by someone wondering why the Moon looks off.
-  for (final probe in [
-    ('Mare Imbrium', 33.0, -16.0),
-    ('Apollo 11', 0.67, 23.47),
-    ('South Pole-Aitken', -53.0, -169.0),
-  ]) {
-    final lat = probe.$2 * math.pi / 180, lon = probe.$3 * math.pi / 180;
+  // rather than by someone wondering why the body looks off. Landmarks come
+  // from the OUTPUT body id — probing Earth with Moon labels hides errors.
+  for (final probe in landmarksForOut(outPath)) {
+    final lat = probe.latDeg * math.pi / 180, lon = probe.lonDeg * math.pi / 180;
     final dir = Vector3(math.cos(lat) * math.cos(lon),
         math.cos(lat) * math.sin(lon), math.sin(lat));
-    stdout.writeln('  ${probe.$1}: baked '
+    stdout.writeln('  ${probe.name}: baked '
         '${pyramid.elevationAt(dir).toStringAsFixed(0)} m, source '
         '${sampleEquirect(lat, lon).toStringAsFixed(0)} m');
   }

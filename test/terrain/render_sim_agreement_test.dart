@@ -84,7 +84,8 @@ void main() {
         expect(descriptor.terrainProfile, isNotNull,
             reason: 'without the profile the renderer cannot rebuild the '
                 'surface physics uses');
-        expect(descriptor.terrainDemBodyId, id == 'moon' ? 'moon' : isNull,
+        // Both bodies are surveyed now: moon (LOLA), earth (GEBCO_08).
+        expect(descriptor.terrainDemBodyId, id,
             reason: 'a surveyed body must ship its DEM reference, or the '
                 'renderer meshes procedural ground under real collision');
       });

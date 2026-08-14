@@ -140,12 +140,16 @@ class RealSolarSystem {
         dipoleMoment: 8.0e22, // A*m^2
         surface: SurfacePresets.earth,
         composition: _earthAir,
-        // ~4.5 km relief over ~30 km features: continental hills at chunk
-        // scale. seaLevel stays 0 (no ocean shell rendered yet — the datum
-        // doubles as the shading sea). Grass/sand caps drive the triplanar
-        // material blend (latitude+altitude weighted in terrain.frag).
+        // seaLevel stays 0 (no ocean shell rendered yet — the datum doubles
+        // as the shading sea; GEBCO's 0 IS sea level, so the bathymetry sits
+        // below it). Grass/sand caps drive the triplanar material blend
+        // (latitude+altitude weighted in terrain.frag).
         terrain: const TerrainConfig(
           seed: 0xEA47B,
+          // Base relief comes from the baked GEBCO_08 topo+bathy DEM;
+          // amplitude only scales the detail layer's control field and is
+          // superseded by the DEM's own span (-8 km .. +6.4 km).
+          demBodyId: 'earth',
           amplitude: 4500,
           featureScale: 30000,
           grassAmount: 0.85,

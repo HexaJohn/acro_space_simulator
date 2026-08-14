@@ -32,6 +32,8 @@ library;
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'src/dem_source.dart' show landmarksForOut;
+
 const _wantedTags = {256, 257, 258, 259, 273, 277, 278, 279, 317};
 const _typeSize = <int, int>{1: 1, 3: 2, 4: 4};
 
@@ -213,7 +215,13 @@ class _Tiff {
     file.setPositionSync(stripOffsets[index]);
     final raw = Uint8List.fromList(
         file.readSync(stripBytes.isEmpty ? expected : stripBytes[index]));
-    final data = compression == 5 ? lzwDecode(raw, expected) : raw;
+    // 5 = TIFF LZW, 8 = Adobe deflate (a plain zlib stream per strip — the
+    // Blue Marble world.* GeoTIFFs ship this way).
+    final data = switch (compression) {
+      5 => lzwDecode(raw, expected),
+      8 => Uint8List.fromList(zlib.decode(raw)),
+      _ => raw,
+    };
     if (predictor == 2) {
       for (var r = 0; r < rows; r++) {
         final o = r * width * samples;
@@ -310,8 +318,7 @@ void main(List<String> args) {
     final i = (y * outW + x) * 3;
     return ((rgb[i] + rgb[i + 1] + rgb[i + 2]) / 3).round();
   }
-  stdout.writeln('  Mare Tranquillitatis (mare):  ${lum(8.5, 31.4)}');
-  stdout.writeln('  Oceanus Procellarum (mare):   ${lum(18.4, -57.4)}');
-  stdout.writeln('  southern highlands:           ${lum(-40, 10)}');
-  stdout.writeln('  far-side highlands:           ${lum(0, 160)}');
+  for (final m in landmarksForOut(outPath)) {
+    stdout.writeln('  ${m.name}: ${lum(m.latDeg, m.lonDeg)}');
+  }
 }

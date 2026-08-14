@@ -13,15 +13,17 @@ conversion. The bake target is a **cubed-sphere tile pyramid** keyed by
 equirectangular carries a pole singularity and a permanent projection
 mismatch against the chunk grid.
 
-Three bakes come from these sources (all default to the Moon files):
+Three bakes come from these sources (all default to the Moon files; each
+tool's doc comment carries the Earth command line):
 
-- `tool/bake_dem.dart` → `moon.acrodem` — the cubed-sphere elevation pyramid
-  (meshing + collision).
-- `tool/bake_albedo.dart` → `moon.acroalb` — equirect real surface colour.
-- `tool/bake_normals.dart` → `moon.acronrm` — equirect tangent-space normal
-  map from the full-resolution DEM; the terrain shader fades it in with
-  camera distance so coarse LOD chunks keep crater-rim LIGHTING the mesh can
-  no longer carry (silhouettes stay mesh-bound).
+- `tool/bake_dem.dart` → `<body>.acrodem` — the cubed-sphere elevation
+  pyramid (meshing + collision). Moon ships `--face 512`; Earth `--face
+  1024`. `--bath` switches to the GEBCO elev/bath pair path for Earth.
+- `tool/bake_albedo.dart` → `<body>.acroalb` — equirect real surface colour.
+- `tool/bake_normals.dart` → `<body>.acronrm` — equirect tangent-space
+  normal map from the full-resolution DEM; the terrain shader fades it in
+  with camera distance so coarse LOD chunks keep relief LIGHTING the mesh
+  can no longer carry (silhouettes stay mesh-bound).
 
 All sources below are NASA/NOAA public-domain products; they still want
 attribution in the in-app credits alongside the existing Solar System Scope
@@ -82,9 +84,19 @@ cannot span both ranges, so:
 - `bath` — ocean only and **inverted**, land masked to 255 (Pacific abyss 123,
   Marianas 44, all land 255)
 
-Combining them needs a land/sea mask, and the exact value->metres ramp has to
-come from the dataset documentation before this is usable quantitatively.
+The value→metre ramps are linear, per NASA's Blue Marble topography/
+bathymetry page (science.nasa.gov/earth/earth-observatory/
+blue-marble-next-generation/topography-bathymetry-maps/): elevation
+"scaled 0-6400 meters", depths "between -8000m and 0m". `ElevBathHeight`
+(`tool/src/dem_source.dart`) combines the pair with those ramps: elev>0 is
+land, else bath<255 is ocean, else coastline at 0. Note both ramps CLIP —
+Everest and the deep trenches saturate at +6400/-8000.
 
-For quantitative Earth prefer **ETOPO 2022** or the **GEBCO 2024 grid** —
-15 arc-second, 16-bit/float GeoTIFF, bathymetry included. These BMNG rasters
-are fine as a continental mask or colour base.
+For sharper Earth later prefer **ETOPO 2022** or the **GEBCO 2024 grid** —
+15 arc-second, 16-bit/float GeoTIFF, bathymetry included, no clipping.
+
+### `world.200401.3x21600x10800_geo.tif` — Earth albedo (NOT height)
+
+Blue Marble Next Generation, January composite. 21600 x 10800, 8-bit RGB,
+**deflate** (compression 8) — `bake_albedo.dart` inflates per strip. Feeds
+`earth.acroalb`.

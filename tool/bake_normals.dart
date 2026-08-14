@@ -15,6 +15,16 @@
 ///   --radius 1737400 --units km --width 4096
 /// ```
 ///
+/// Earth combines the Blue Marble GEBCO_08 elev/bath pair (`--bath` switches
+/// modes, same as bake_dem.dart):
+///
+/// ```
+/// fvm dart run tool/bake_normals.dart \
+///   --in dem_src/gebco_08_rev_elev_21600x10800.tif \
+///   --bath dem_src/gebco_08_rev_bath_21600x10800.tif \
+///   --out assets/terrain/earth.acronrm --radius 6371000 --width 4096
+/// ```
+///
 /// Why this exists: a coarse LOD chunk carries a handful of triangles, so
 /// crater rims and ridges vanish from LIGHTING long before they leave the
 /// data. The DEM pyramid can't help the fragment shader (it's CPU-side and
@@ -35,142 +45,27 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
-/// The only tags this reader consumes: width, height, bits/sample,
-/// compression, strip offsets, sample format.
-const _wantedTags = {256, 257, 258, 259, 273, 339};
-
-/// Bytes per element for the integer TIFF types (rationals/ASCII/doubles only
-/// appear in tags outside [_wantedTags]).
-const _typeSize = <int, int>{1: 1, 3: 2, 4: 4};
-
-/// Minimal TIFF reader for the uncompressed, strip-per-row rasters the DEM
-/// products ship as (same shape as tool/bake_dem.dart's).
-class _Tiff {
-  _Tiff(this.file, this.width, this.height, this.bits, this.sampleFormat,
-      this.stripOffsets, this.little);
-
-  final RandomAccessFile file;
-  final int width, height, bits, sampleFormat;
-  final List<int> stripOffsets;
-  final bool little;
-
-  static _Tiff open(String path) {
-    final f = File(path).openSync();
-    final head = f.readSync(8);
-    final little = head[0] == 0x49 && head[1] == 0x49;
-    final bd = ByteData.sublistView(Uint8List.fromList(head));
-    final ifd = bd.getUint32(4, little ? Endian.little : Endian.big);
-    f.setPositionSync(ifd);
-    final endian = little ? Endian.little : Endian.big;
-    final n = ByteData.sublistView(Uint8List.fromList(f.readSync(2)))
-        .getUint16(0, endian);
-
-    int? width, height, bitsPerSample, sampleFormat, compression;
-    var stripOffsets = <int>[];
-    for (var i = 0; i < n; i++) {
-      final e = Uint8List.fromList(f.readSync(12));
-      final ed = ByteData.sublistView(e);
-      final tag = ed.getUint16(0, endian);
-      final type = ed.getUint16(2, endian);
-      final count = ed.getUint32(4, endian);
-      if (!_wantedTags.contains(tag)) continue;
-      final size = _typeSize[type];
-      if (size == null) continue;
-      List<int> values;
-      if (size * count <= 4) {
-        values = _read(ed.buffer.asByteData(ed.offsetInBytes + 8, 4), type,
-            count, endian);
-      } else {
-        final off = ed.getUint32(8, endian);
-        final save = f.positionSync();
-        f.setPositionSync(off);
-        final raw = Uint8List.fromList(f.readSync(size * count));
-        f.setPositionSync(save);
-        values = _read(ByteData.sublistView(raw), type, count, endian);
-      }
-      switch (tag) {
-        case 256:
-          width = values.first;
-        case 257:
-          height = values.first;
-        case 258:
-          bitsPerSample = values.first;
-        case 259:
-          compression = values.first;
-        case 273:
-          stripOffsets = values;
-        case 339:
-          sampleFormat = values.first;
-      }
-    }
-    if (width == null || height == null) {
-      throw StateError('TIFF missing dimensions');
-    }
-    if (compression != null && compression != 1) {
-      throw StateError(
-          'compressed TIFF (compression=$compression) not supported; '
-          'export an uncompressed copy');
-    }
-    if (stripOffsets.length != height) {
-      throw StateError(
-          'expected one strip per row, got ${stripOffsets.length} for $height');
-    }
-    return _Tiff(f, width, height, bitsPerSample ?? 8, sampleFormat ?? 1,
-        stripOffsets, little);
-  }
-
-  static List<int> _read(ByteData d, int type, int count, Endian e) => [
-        for (var i = 0; i < count; i++)
-          switch (type) {
-            1 => d.getUint8(i),
-            3 => d.getUint16(i * 2, e),
-            _ => d.getUint32(i * 4, e),
-          }
-      ];
-
-  /// One raster row as doubles, whatever the on-disk sample format.
-  Float64List readRow(int y, Uint8List scratch) {
-    file.setPositionSync(stripOffsets[y]);
-    file.readIntoSync(scratch);
-    final d = ByteData.sublistView(scratch);
-    final e = little ? Endian.little : Endian.big;
-    final out = Float64List(width);
-    final bytes = bits ~/ 8;
-    for (var x = 0; x < width; x++) {
-      final o = x * bytes;
-      out[x] = switch ((bits, sampleFormat)) {
-        (32, 3) => d.getFloat32(o, e),
-        (32, 2) => d.getInt32(o, e).toDouble(),
-        (32, _) => d.getUint32(o, e).toDouble(),
-        (16, 2) => d.getInt16(o, e).toDouble(),
-        (16, _) => d.getUint16(o, e).toDouble(),
-        _ => d.getUint8(o).toDouble(),
-      };
-    }
-    return out;
-  }
-
-  int get rowBytes => width * (bits ~/ 8);
-}
+import 'src/dem_source.dart';
 
 void main(List<String> args) {
   final opts = _parse(args);
-  final inPath = opts['in'] ?? 'dem_src/ldem_64.tif';
   final outPath = opts['out'] ?? 'assets/terrain/moon.acronrm';
   final radiusM = double.parse(opts['radius'] ?? '1737400');
-  final unitScale = (opts['units'] ?? 'km') == 'km' ? 1000.0 : 1.0;
   final outW = int.parse(opts['width'] ?? '4096');
   final outH = outW ~/ 2;
 
-  if (!File(inPath).existsSync()) {
-    stderr.writeln('source not found: $inPath');
+  final HeightSource source;
+  try {
+    // ldem_64.tif is in kilometres, hence the km default — the GEBCO pair
+    // path ignores units (its ramps are metres by definition).
+    source = heightSourceFromOpts(opts,
+        defaultIn: 'dem_src/ldem_64.tif', defaultUnits: 'km');
+  } on StateError catch (e) {
+    stderr.writeln(e.message);
     exitCode = 2;
     return;
   }
-
-  final tiff = _Tiff.open(inPath);
-  stdout.writeln('source ${tiff.width}x${tiff.height} '
-      'bits=${tiff.bits} format=${tiff.sampleFormat}');
+  stdout.writeln('source ${source.width}x${source.height}');
   stdout.writeln('height grid ${outW}x$outH ...');
 
   // --- Pass 1: stream source rows ONCE, box-filter into the output grid -----
@@ -180,21 +75,20 @@ void main(List<String> args) {
   // is all a ~2.7 km/texel map can honestly carry anyway.
   final acc = Float64List(outW * outH);
   final counts = Int32List(outW * outH);
-  final scratch = Uint8List(tiff.rowBytes);
-  for (var y = 0; y < tiff.height; y++) {
-    final row = tiff.readRow(y, scratch);
-    final ty = (y * outH ~/ tiff.height).clamp(0, outH - 1);
+  for (var y = 0; y < source.height; y++) {
+    final row = source.row(y);
+    final ty = (y * outH ~/ source.height).clamp(0, outH - 1);
     final base = ty * outW;
-    for (var x = 0; x < tiff.width; x++) {
-      final v = row[x] * unitScale;
+    for (var x = 0; x < source.width; x++) {
+      final v = row[x];
       if (!v.isFinite) continue;
-      final tx = (x * outW ~/ tiff.width).clamp(0, outW - 1);
+      final tx = (x * outW ~/ source.width).clamp(0, outW - 1);
       acc[base + tx] += v;
       counts[base + tx]++;
     }
-    if (y % 2000 == 0) stdout.writeln('  row $y / ${tiff.height}');
+    if (y % 2000 == 0) stdout.writeln('  row $y / ${source.height}');
   }
-  tiff.file.closeSync();
+  source.close();
   final h = Float64List(outW * outH);
   for (var i = 0; i < h.length; i++) {
     h[i] = counts[i] > 0 ? acc[i] / counts[i] : 0.0;
@@ -265,10 +159,14 @@ void main(List<String> args) {
     return sum / n;
   }
 
-  stdout.writeln('  Mare Serenitatis (flat):   '
-      '${meanTilt(28.0, 17.5, 8).toStringAsFixed(4)}');
-  stdout.writeln('  southern highlands (rough): '
-      '${meanTilt(-40.0, 10.0, 8).toStringAsFixed(4)}');
+  final pair = flatRoughForOut(outPath);
+  if (pair != null) {
+    final (flat, rough) = pair;
+    stdout.writeln('  ${flat.name} (flat):   '
+        '${meanTilt(flat.latDeg, flat.lonDeg, 8).toStringAsFixed(4)}');
+    stdout.writeln('  ${rough.name} (rough): '
+        '${meanTilt(rough.latDeg, rough.lonDeg, 8).toStringAsFixed(4)}');
+  }
 }
 
 Map<String, String> _parse(List<String> args) {
