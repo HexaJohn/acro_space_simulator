@@ -76,6 +76,11 @@ class CloudStyle {
     // normalisation (~0.07 mid-lobe); ~16 lands lit clouds near white.
     this.intensity = 16.0,
     this.tintArgb = 0xFFF2F5FF,
+    // Storm tint: dense samples blend from [tintArgb] toward this, so heavy
+    // cores read grey-blue while thin wisps stay white. Mix 0 disables (the
+    // single-tint look).
+    this.tint2Argb = 0xFFB8C0D0,
+    this.tintMix = 0.0,
     this.freq = 14.0,
   });
 
@@ -145,6 +150,12 @@ class CloudStyle {
   /// Cloud tint (0xAARRGGBB, near-white); the alpha byte is ignored.
   int tintArgb;
 
+  /// Storm tint (0xAARRGGBB) that dense cores blend toward; alpha ignored.
+  int tint2Argb;
+
+  /// Storm-tint blend strength 0..1; 0 keeps the single-tint look.
+  double tintMix;
+
   /// Base noise frequency (cycles per planet radius) — lower = bigger
   /// weather systems.
   double freq;
@@ -169,6 +180,8 @@ class CloudStyle {
         'ambient': ambient,
         'intensity': intensity,
         'tint': tintArgb.toRadixString(16),
+        'tint2': tint2Argb.toRadixString(16),
+        'tintMix': tintMix,
         'freq': freq,
       };
 }
@@ -222,6 +235,8 @@ class CloudNodes {
       ambient: 0.08,
       intensity: 16.0,
       tintArgb: 0xFFF2F5FF,
+      tint2Argb: 0xFFB8C0D0,
+      tintMix: 0.65,
       freq: 14.0,
     ),
     'venus': CloudStyle(
@@ -364,6 +379,8 @@ class CloudNodes {
         ambient: style.ambient,
         intensity: style.intensity,
         tintArgb: style.tintArgb,
+        tint2Argb: style.tint2Argb,
+        tintMix: style.tintMix,
         freq: style.freq,
         orient: orient,
       );
@@ -447,7 +464,7 @@ class _CloudShell {
     }
   }
 
-  final Float32List _uniforms = Float32List(36); // 9 x vec4, std140
+  final Float32List _uniforms = Float32List(40); // 10 x vec4, std140
 
   void updateUniforms({
     required vm.Vector3 centreScene,
@@ -472,6 +489,8 @@ class _CloudShell {
     required double ambient,
     required double intensity,
     required int tintArgb,
+    required int tint2Argb,
+    required double tintMix,
     required double freq,
     required vm.Quaternion orient,
     // Editor-only field maps (see the shader's cov_info.w): 0 renders
@@ -528,6 +547,11 @@ class _CloudShell {
     _uniforms[33] = coverageFreq;
     _uniforms[34] = coverageSpeed;
     _uniforms[35] = debugView;
+    // vec4 tint2_mix: storm tint rgb + blend strength.
+    _uniforms[36] = ((tint2Argb >> 16) & 0xff) / 255.0;
+    _uniforms[37] = ((tint2Argb >> 8) & 0xff) / 255.0;
+    _uniforms[38] = (tint2Argb & 0xff) / 255.0;
+    _uniforms[39] = tintMix;
     // All windings share the block; only the active set is in the scene.
     _inMaterial.setUniformBlockFromFloats('CloudInfo', _uniforms);
     _outMaterial.setUniformBlockFromFloats('CloudInfo', _uniforms);
@@ -594,6 +618,8 @@ class CloudPreviewNodes {
       ambient: style.ambient,
       intensity: style.intensity,
       tintArgb: style.tintArgb,
+      tint2Argb: style.tint2Argb,
+      tintMix: style.tintMix,
       freq: style.freq,
       orient: vm.Quaternion.identity(),
       debugView: debugView.toDouble(),

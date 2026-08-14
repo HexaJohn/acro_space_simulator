@@ -66,6 +66,11 @@ uniform CloudInfo {
   // 2 effective coverage heat, 3 zonal wind diverging blue-west/red-east,
   // 4 swirl drag heat). Editor-only; the sim always sends 0.
   vec4 cov_info;
+  // STORM TINT: xyz is a second tint (straight rgb, CPU-prescaled like
+  // tint_freq.xyz) that dense samples blend toward, so heavy storm cores
+  // read grey-blue while thin wisps stay white. w: mix strength 0..1 —
+  // 0 keeps the single-tint look.
+  vec4 tint2_mix;
 }
 cloud_info;
 
@@ -529,6 +534,13 @@ void main() {
     // that reads as cloud VOLUME rather than a flat lit shell.
     float powder = 1.0 - exp(-density * stepLen * 2.0);
 
+    // Storm tint: dense samples slide from the base tint toward the storm
+    // tint, keyed on the RAW field density (densMul removed) so the split
+    // point doesn't move when optical thickness is tuned.
+    float storm = cloud_info.tint2_mix.w *
+        smoothstep(0.35, 0.85, density / max(densMul, 1e-4));
+    vec3 ct = mix(tint, cloud_info.tint2_mix.xyz, storm);
+
     float vis = sunVisibility(p, sunDir, centre, planetR);
     // Self-shadow: march a few steps toward the sun, accumulate density,
     // Beer's law — but only where sunlight actually reaches: past the
@@ -543,13 +555,13 @@ void main() {
         sunTau += cloudDensityLo(q) * densMul * sunStep;
         if (sunTau > 6.0) break;
       }
-      sun = sunI * tint * exp(-sunTau) * phase * powder * vis;
+      sun = sunI * ct * exp(-sunTau) * phase * powder * vis;
     }
     // Sky/ambient fill is scattered SUNLIGHT — gate it by the same day/night
     // visibility as the direct term, else the shadowed hemisphere glows at
     // full ambient (clouds bright on the night side). A small floor keeps a
     // hint of earthshine so the dark limb isn't pure black.
-    vec3 sky = ambient * tint * (0.06 + 0.94 * vis);
+    vec3 sky = ambient * ct * (0.06 + 0.94 * vis);
     vec3 lit = sun + sky;
 
     // Front-to-back accumulation (premultiplied): the extinction over this

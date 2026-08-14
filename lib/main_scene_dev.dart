@@ -393,6 +393,10 @@ Future<void> main() async {
       if (params['tint'] != null) {
         s.tintArgb = 0xFF000000 | int.parse(params['tint']!, radix: 16);
       }
+      if (params['tint2'] != null) {
+        s.tint2Argb = 0xFF000000 | int.parse(params['tint2']!, radix: 16);
+      }
+      if (num('tintMix') != null) s.tintMix = num('tintMix')!;
       if (params['enabled'] != null) s.enabled = params['enabled'] == 'true';
     }
     return developer.ServiceExtensionResponse.result(jsonEncode({

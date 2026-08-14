@@ -195,6 +195,8 @@ class _CloudscapeScreenState extends State<CloudscapeScreen>
         '  ambient: ${n(s.ambient)},\n'
         '  intensity: ${n(s.intensity)},\n'
         '  tintArgb: 0x${s.tintArgb.toRadixString(16).toUpperCase()},\n'
+        '  tint2Argb: 0x${s.tint2Argb.toRadixString(16).toUpperCase()},\n'
+        '  tintMix: ${n(s.tintMix)},\n'
         '  freq: ${n(s.freq)},\n'
         ')';
   }
@@ -236,6 +238,8 @@ class _CloudscapeScreenState extends State<CloudscapeScreen>
       ..ambient = d('ambient')
       ..intensity = d('intensity')
       ..tintArgb = 0xFF000000 | int.parse(j['tint']! as String, radix: 16)
+      ..tint2Argb = 0xFF000000 | int.parse(j['tint2']! as String, radix: 16)
+      ..tintMix = d('tintMix')
       ..freq = d('freq');
   }
 
@@ -567,17 +571,27 @@ class _CloudscapeScreenState extends State<CloudscapeScreen>
             spacing: 6,
             runSpacing: 6,
             children: [
-              for (final (label, argb) in const [
-                ('white', 0xFFF2F5FF),
-                ('pure', 0xFFFFFFFF),
-                ('sulfur', 0xFFE8D8B0),
-                ('haze', 0xFFD8A860),
-                ('dust', 0xFFE8D0C0),
-                ('storm', 0xFFB8C0D0),
-              ])
-                _swatch(label, argb, s),
+              for (final (label, argb) in _tintSwatches)
+                _swatch(label, argb,
+                    selected: s.tintArgb == argb,
+                    onTap: () => _apply(() => s.tintArgb = argb)),
             ],
           ),
+          _sectionLabel('STORM TINT'),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (final (label, argb) in _tintSwatches)
+                _swatch(label, argb,
+                    selected: s.tint2Argb == argb,
+                    onTap: () => _apply(() => s.tint2Argb = argb)),
+            ],
+          ),
+          // How hard dense cores pull from TINT toward STORM TINT; thin
+          // wisps always keep the base tint.
+          _knob('storm mix', s.tintMix, 0, 1, decimals: 2,
+              (v) => s.tintMix = v),
           const SizedBox(height: 12),
           _sectionLabel('SUN'),
           _knob('azimuth', _sunAzimuth, 0, 2 * math.pi, decimals: 2,
@@ -659,11 +673,24 @@ class _CloudscapeScreenState extends State<CloudscapeScreen>
                 AppTheme.mono.copyWith(fontSize: 10, color: AppTheme.textDim)),
       );
 
-  Widget _swatch(String label, int argb, CloudStyle s) {
-    final selected = s.tintArgb == argb;
+  static const List<(String, int)> _tintSwatches = [
+    ('white', 0xFFF2F5FF),
+    ('pure', 0xFFFFFFFF),
+    ('sulfur', 0xFFE8D8B0),
+    ('haze', 0xFFD8A860),
+    ('dust', 0xFFE8D0C0),
+    ('storm', 0xFFB8C0D0),
+  ];
+
+  Widget _swatch(
+    String label,
+    int argb, {
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
     return InkWell(
       borderRadius: BorderRadius.circular(5),
-      onTap: () => _apply(() => s.tintArgb = argb),
+      onTap: onTap,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
         decoration: BoxDecoration(
