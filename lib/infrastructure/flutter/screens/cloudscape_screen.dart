@@ -174,6 +174,9 @@ class _CloudscapeScreenState extends State<CloudscapeScreen>
         '  swirlSpeed: ${n(s.swirlSpeed)},\n'
         '  bandShear: ${n(s.bandShear)},\n'
         '  bandWidth: ${n(s.bandWidth)},\n'
+        '  coverageVar: ${n(s.coverageVar)},\n'
+        '  coverageFreq: ${n(s.coverageFreq)},\n'
+        '  coverageSpeed: ${n(s.coverageSpeed)},\n'
         '  detail: ${n(s.detail)},\n'
         '  ambient: ${n(s.ambient)},\n'
         '  intensity: ${n(s.intensity)},\n'
@@ -212,6 +215,9 @@ class _CloudscapeScreenState extends State<CloudscapeScreen>
       ..swirlSpeed = d('swirlSpeed')
       ..bandShear = d('bandShear')
       ..bandWidth = d('bandWidth')
+      ..coverageVar = d('coverageVar')
+      ..coverageFreq = d('coverageFreq')
+      ..coverageSpeed = d('coverageSpeed')
       ..detail = d('detail')
       ..ambient = d('ambient')
       ..intensity = d('intensity')
@@ -471,6 +477,15 @@ class _CloudscapeScreenState extends State<CloudscapeScreen>
           _sectionLabel('FIELD'),
           _knob('coverage', s.coverage, 0, 1, decimals: 2,
               (v) => s.coverage = v),
+          // Coverage weather: coverage above becomes the MEAN of a slow
+          // continent-scale noise field. Var 0 = static (classic), 1 =
+          // regions swing between clear and doubled coverage.
+          _knob('cov var', s.coverageVar, 0, 1, decimals: 2,
+              (v) => s.coverageVar = v),
+          _knob('cov freq', s.coverageFreq, 0.02, 0.6, decimals: 2,
+              (v) => s.coverageFreq = v),
+          _knob('cov speed', s.coverageSpeed, 0, 0.05, decimals: 4,
+              (v) => s.coverageSpeed = v),
           _knob('density', s.density, 0, 40, decimals: 1,
               (v) => s.density = v),
           _knob('detail', s.detail, 0, 1, decimals: 2, (v) => s.detail = v),

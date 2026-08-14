@@ -381,6 +381,11 @@ Future<void> main() async {
       if (num('bandWidthDeg') != null) {
         s.bandWidth = num('bandWidthDeg')! * math.pi / 180;
       }
+      if (num('coverageVar') != null) s.coverageVar = num('coverageVar')!;
+      if (num('coverageFreq') != null) s.coverageFreq = num('coverageFreq')!;
+      if (num('coverageSpeed') != null) {
+        s.coverageSpeed = num('coverageSpeed')!;
+      }
       if (num('detail') != null) s.detail = num('detail')!;
       if (num('ambient') != null) s.ambient = num('ambient')!;
       if (num('intensity') != null) s.intensity = num('intensity')!;

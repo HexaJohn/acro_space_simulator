@@ -59,6 +59,14 @@ class CloudStyle {
     // Width is the equatorial band's half-extent in radians of latitude.
     this.bandShear = 0.0,
     this.bandWidth = 0.35,
+    // Coverage weather: the coverage knob becomes the MEAN of a slow
+    // continent-scale noise field, so cloudiness itself varies by region
+    // and evolves. Var 0 keeps coverage static (the old look); 1 swings
+    // regions between fully clear and doubled. Freq is the field scale as
+    // a fraction of the base noise frequency; speed its evolution rate.
+    this.coverageVar = 0.0,
+    this.coverageFreq = 0.15,
+    this.coverageSpeed = 0.005,
     this.detail = 0.55,
     // Ambient is scattered SUNLIGHT — the shader gates it by day/night so the
     // night hemisphere stays dark; keep it low so the sun term (not flat fill)
@@ -114,6 +122,17 @@ class CloudStyle {
   /// its outer half).
   double bandWidth;
 
+  /// Coverage-weather swing: 0 = static coverage, 1 = regions swing between
+  /// fully clear and doubled coverage.
+  double coverageVar;
+
+  /// Coverage field scale, as a fraction of the base noise frequency
+  /// (continent scale).
+  double coverageFreq;
+
+  /// Coverage field evolution rate (noise-domain scroll per sim-second).
+  double coverageSpeed;
+
   /// Detail-erosion strength 0..1 — turns round blobs wispy at the edges.
   double detail;
 
@@ -143,6 +162,9 @@ class CloudStyle {
         'swirlSpeed': swirlSpeed,
         'bandShear': bandShear,
         'bandWidth': bandWidth,
+        'coverageVar': coverageVar,
+        'coverageFreq': coverageFreq,
+        'coverageSpeed': coverageSpeed,
         'detail': detail,
         'ambient': ambient,
         'intensity': intensity,
@@ -312,6 +334,9 @@ class CloudNodes {
         swirlSpeed: style.swirlSpeed,
         bandShear: style.bandShear,
         bandWidth: style.bandWidth,
+        coverageVar: style.coverageVar,
+        coverageFreq: style.coverageFreq,
+        coverageSpeed: style.coverageSpeed,
         detail: style.detail,
         ambient: style.ambient,
         intensity: style.intensity,
@@ -399,7 +424,7 @@ class _CloudShell {
     }
   }
 
-  final Float32List _uniforms = Float32List(32); // 8 x vec4, std140
+  final Float32List _uniforms = Float32List(36); // 9 x vec4, std140
 
   void updateUniforms({
     required vm.Vector3 centreScene,
@@ -417,6 +442,9 @@ class _CloudShell {
     required double swirlSpeed,
     required double bandShear,
     required double bandWidth,
+    required double coverageVar,
+    required double coverageFreq,
+    required double coverageSpeed,
     required double detail,
     required double ambient,
     required double intensity,
@@ -467,6 +495,12 @@ class _CloudShell {
     _uniforms[29] = bandWidth;
     _uniforms[30] = 0;
     _uniforms[31] = 0;
+    // vec4 cov_info: coverage-weather swing, field frequency (x base freq),
+    // evolution rate.
+    _uniforms[32] = coverageVar;
+    _uniforms[33] = coverageFreq;
+    _uniforms[34] = coverageSpeed;
+    _uniforms[35] = 0;
     // All windings share the block; only the active set is in the scene.
     _inMaterial.setUniformBlockFromFloats('CloudInfo', _uniforms);
     _outMaterial.setUniformBlockFromFloats('CloudInfo', _uniforms);
@@ -525,6 +559,9 @@ class CloudPreviewNodes {
       swirlSpeed: style.swirlSpeed,
       bandShear: style.bandShear,
       bandWidth: style.bandWidth,
+      coverageVar: style.coverageVar,
+      coverageFreq: style.coverageFreq,
+      coverageSpeed: style.coverageSpeed,
       detail: style.detail,
       ambient: style.ambient,
       intensity: style.intensity,

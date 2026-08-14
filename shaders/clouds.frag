@@ -55,6 +55,14 @@ uniform CloudInfo {
   // style). x: band shear. y: equatorial band half-width (radians of
   // latitude; the profile blends over the outer half of it). z, w: unused.
   vec4 band_info;
+  // COVERAGE FIELD: the coverage knob is the MEAN of a slow, continent-
+  // scale noise field instead of a constant, so cloudiness itself has
+  // weather — regions clear up while others sock in, and the pattern
+  // advects with the flow and evolves over time. x: variation amplitude
+  // (0 = static coverage, the old behaviour). y: field frequency, as a
+  // fraction of the base noise frequency (continent scale). z: evolution
+  // rate (domain scroll per sim-second). w: unused.
+  vec4 cov_info;
 }
 cloud_info;
 
@@ -258,7 +266,20 @@ float cloudDensity(vec3 p) {
 
   // Latitude-banded coverage threshold: `coverage` slides the split, the
   // band profile carves the ITCZ / subtropics / storm-belt structure.
-  float cov = clamp(coverage * latBands(lat), 0.0, 1.0);
+  // COVERAGE WEATHER: modulate the knob by a slow continent-scale noise
+  // (sampled in the drift+wind-carried domain P, so cloudy regions advect
+  // with the flow). fbm3 is centred on 0.4375; the 2.286 renormalizes the
+  // swing so amplitude 1 spans clear..doubled. Branch skips the octaves
+  // entirely at the static default.
+  float cov = coverage;
+  float cvar = cloud_info.cov_info.x;
+  if (cvar > 0.0) {
+    float cn = fbm3(P * cloud_info.cov_info.y + 91.3 +
+                    vec3(time * cloud_info.cov_info.z,
+                         time * cloud_info.cov_info.z * -0.5, 0.0));
+    cov *= clamp(1.0 + cvar * (cn - 0.4375) * 2.286, 0.0, 2.0);
+  }
+  cov = clamp(cov * latBands(lat), 0.0, 1.0);
   float d = base - (1.0 - cov);
   if (d <= 0.0) return 0.0;
   d = d / max(cov, 1e-3);
@@ -331,7 +352,18 @@ float cloudDensityLo(vec3 p) {
   vec3 Pw = P + cloud_info.swirl_global.x * (Q - 0.5);
 
   float base = fbm(Pw);
-  float cov = clamp(coverage * latBands(lat), 0.0, 1.0);
+  // Coverage weather, lo-fi: fbm2 is mean-matched to fbm3 (0.4375), so the
+  // same centring keeps the shadow field's cloudy regions aligned with the
+  // view field's.
+  float cov = coverage;
+  float cvar = cloud_info.cov_info.x;
+  if (cvar > 0.0) {
+    float cn = fbm2(P * cloud_info.cov_info.y + 91.3 +
+                    vec3(time * cloud_info.cov_info.z,
+                         time * cloud_info.cov_info.z * -0.5, 0.0));
+    cov *= clamp(1.0 + cvar * (cn - 0.4375) * 2.286, 0.0, 2.0);
+  }
+  cov = clamp(cov * latBands(lat), 0.0, 1.0);
   float d = base - (1.0 - cov);
   if (d <= 0.0) return 0.0;
   d = d / max(cov, 1e-3);
