@@ -500,8 +500,12 @@ class _CloudscapeScreenState extends State<CloudscapeScreen>
               (v) => s.swirlStrength = v),
           _knob('freq', s.swirlFreq, 0.05, 1, decimals: 2,
               (v) => s.swirlFreq = v),
-          _knob('speed', s.swirlSpeed, 0, 0.03, decimals: 4,
-              (v) => s.swirlSpeed = v),
+          // Square-law slider: full travel spans 0..0.3 but half the throw
+          // stays under 0.075, so the subtle end keeps its resolution while
+          // the top end reaches churn-speed.
+          _knob('speed', math.sqrt(s.swirlSpeed.clamp(0, 0.3) / 0.3), 0, 1,
+              decimals: 4, display: s.swirlSpeed,
+              (v) => s.swirlSpeed = v * v * 0.3),
           const SizedBox(height: 8),
           _sectionLabel('LIGHT'),
           _knob('intensity', s.intensity, 0, 40, decimals: 1,
