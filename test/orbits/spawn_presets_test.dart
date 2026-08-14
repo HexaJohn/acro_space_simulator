@@ -166,6 +166,74 @@ void main() {
     });
   });
 
+  group('SpawnPresets — custom body/altitude', () {
+    test('customOrbit is circular + equatorial at the asked altitude', () {
+      final moon = system.require(const BodyId('moon'));
+      final p = presets.customOrbit(const BodyId('moon'),
+          system: system, altitude: 250000)!;
+
+      expect(p.body, const BodyId('moon'));
+      expect(p.landed, isFalse);
+      final r = p.state.position.length;
+      expect(r, closeTo(moon.radius + 250000, 1e-6));
+      expect(p.state.velocity.length, closeTo(math.sqrt(moon.mu / r), 1e-6));
+      expect(
+          p.state.velocity.dot(p.state.position.normalized), closeTo(0, 1e-6));
+      // Equatorial: the orbit normal is the body's spin axis.
+      final h = p.state.position.cross(p.state.velocity).normalized;
+      expect(h.dot(moon.spinAxisInertial), closeTo(1.0, 1e-9));
+      // Prograde attitude, same as the fixed orbital presets.
+      final nose = p.state.attitude.rotate(Vector3.unitZ);
+      expect(nose.dot(p.state.velocity.normalized), closeTo(1.0, 1e-9));
+    });
+
+    test('customOrbit floors a too-low altitude just above the relief', () {
+      final earth = system.require(const BodyId('earth'));
+      final p = presets.customOrbit(const BodyId('earth'),
+          system: system, altitude: 0)!;
+
+      // Terrain rides ±amplitude around the datum; "0 km" must come out
+      // skimming above the highest possible peak, not inside it.
+      final floor = earth.radius + earth.terrainField!.amplitude + 500;
+      expect(p.state.position.length, closeTo(floor, 1e-6));
+      expect(p.state.position.length,
+          greaterThan(earth.terrainGroundRadius(p.state.position, epoch)));
+      // And a HIGH altitude passes through untouched.
+      final high = presets.customOrbit(const BodyId('earth'),
+          system: system, altitude: 1.0e6)!;
+      expect(high.state.position.length, closeTo(earth.radius + 1.0e6, 1e-6));
+    });
+
+    test('customLanded lands on terrain, upright, co-rotating', () {
+      final moon = system.require(const BodyId('moon'));
+      final p = presets.customLanded(const BodyId('moon'),
+          system: system, epoch: epoch)!;
+
+      expect(p.body, const BodyId('moon'));
+      expect(p.landed, isTrue);
+      // Millimetre tolerance for the same direction-renormalisation round trip
+      // the Moon preset documents above.
+      expect(p.state.position.length,
+          closeTo(moon.terrainGroundRadius(p.state.position, epoch), 1e-3));
+      final nose = p.state.attitude.rotate(Vector3.unitZ);
+      expect(nose.dot(p.state.position.normalized), closeTo(1.0, 1e-9));
+      expect(
+          (p.state.velocity - moon.surfaceVelocityAt(p.state.position)).length,
+          lessThan(1e-6));
+    });
+
+    test('custom resolvers decline a body that is not in the system', () {
+      expect(
+          presets.customOrbit(const BodyId('nope'),
+              system: system, altitude: 100000),
+          isNull);
+      expect(
+          presets.customLanded(const BodyId('nope'),
+              system: system, epoch: epoch),
+          isNull);
+    });
+  });
+
   test('every preset resolves, and does so deterministically', () {
     for (final preset in SpawnPreset.values) {
       final a = resolve(preset);

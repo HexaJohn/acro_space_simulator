@@ -82,6 +82,37 @@ class SpawnPresets {
   /// read as ice caps on every body with a surface map.
   static const double _polarCutoff = 0.75;
 
+  /// A custom circular EQUATORIAL orbit [altitude] metres above [bodyId]'s
+  /// datum, or null when the body isn't in [system]. The radius is floored
+  /// just above the body's relief ceiling (terrain rides ±amplitude around
+  /// the datum), so a typed "0 km" starts skimming the peaks instead of
+  /// inside them.
+  SpawnPlacement? customOrbit(
+    BodyId bodyId, {
+    required StarSystem system,
+    required double altitude,
+  }) {
+    final body = system.body(bodyId);
+    if (body == null) return null;
+    final relief = body.terrainField?.amplitude ?? 0.0;
+    final radius =
+        math.max(body.radius + altitude, body.radius + relief + 500);
+    return _circular(body, radius: radius, inclination: 0);
+  }
+
+  /// A custom LANDED placement on [bodyId] — the same scored land-site hunt
+  /// the surface presets use, so it works for any body with (or without) a
+  /// terrain field. Null when the body isn't in [system].
+  SpawnPlacement? customLanded(
+    BodyId bodyId, {
+    required StarSystem system,
+    required Epoch epoch,
+  }) {
+    final body = system.body(bodyId);
+    if (body == null) return null;
+    return _surface(body, system, epoch, onWater: false);
+  }
+
   /// The placement for [preset], or null when the body isn't in [system].
   SpawnPlacement? resolve(
     SpawnPreset preset, {

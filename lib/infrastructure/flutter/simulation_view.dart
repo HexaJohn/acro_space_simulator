@@ -26,6 +26,7 @@ import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
 
 import '../../adapters/events/in_memory_event_bus.dart';
+import '../../adapters/presenters/camera_ground_clamp.dart';
 import '../../adapters/presenters/top_down_snapshot.dart';
 import '../../adapters/wire/flatbuffer_codec.dart';
 import '../../application/snapshot/world_snapshot.dart';
@@ -201,7 +202,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   /// _range is an altitude that can shrink to near-zero — you keep zooming all
   /// the way down to the surface instead of stalling at centre-distance==radius.
   SceneCamera get _camera => _perspectiveMode
-      ? PerspectiveCamera(
+      ? _clampEyeAboveTerrain(PerspectiveCamera(
           azimuth: _view.azimuth,
           elevation: _view.elevation,
           roll: _view.roll,
@@ -213,14 +214,54 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           near: math.min(1.0, _range * 0.05),
           fovY: _fovDeg * math.pi / 180,
           viewportH: _screenH,
-        )
+        ))
       : OrthoCamera(_view, _metresPerPixel);
+
+  /// Keep the perspective EYE above the focused body's terrain — the transient
+  /// per-frame clamp in [clampPerspectiveEyeAboveTerrain]. This wrapper only
+  /// resolves WHICH body sits under the camera (the locked body, else the
+  /// locked craft's dominant body) and its crater edits; `_view` / `_range`
+  /// are never written, so the camera returns to the user's own pose the
+  /// moment it clears the ground.
+  PerspectiveCamera _clampEyeAboveTerrain(PerspectiveCamera cam) {
+    // Freecam orbits a free anchor, not a body — the body-centred geometry
+    // doesn't apply (and the anchor is the player's own flying problem).
+    if (_freecam) return cam;
+
+    final system = _universe.current();
+    CelestialBody? body;
+    var focusRelBody = Vector3.zero;
+    if (_focusBody != null) {
+      body = system.body(_focusBody!);
+    } else if (_focusVessel != null) {
+      final v = _vessels.byId(_focusVessel!);
+      if (v != null) {
+        body = system.body(v.dominantBody);
+        focusRelBody = v.state.position;
+      }
+    }
+    if (body == null) return cam;
+
+    return clampPerspectiveEyeAboveTerrain(
+      cam,
+      body: body,
+      focusRelBody: focusRelBody,
+      epoch: _clock.epoch,
+      edits: _terrainEdits.forBody(body.id),
+    );
+  }
   // Tilted-view distance-cull kicks in above this zoom (m/px). 1e6 == 100 px /
   // 100,000 km. Configurable via the debug panel.
   double _tiltedCullMpp = 1e6;
   static const double _orbitStep = 0.1309; // ~7.5 deg per arrow press
   DebugLayers _layers = const DebugLayers();
   bool _showDebugPanel = false;
+
+  // ---- Custom spawn (debug panel) ----
+  // Body pick + typed altitude for the "any body, any altitude, or landed"
+  // teleport. Null body = follow the camera (the panel resolves a default).
+  BodyId? _spawnBody;
+  final TextEditingController _spawnAltCtrl = TextEditingController(text: '200');
   // World-viewport backend. Software (TopDownPainter) is the default; the
   // flutter_scene 3D backend mounts in its place when toggled. Camera state,
   // input handling, and every HUD overlay stay shared between the two.
@@ -1239,6 +1280,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     unawaited(_bridge.stop());
     _keyFocus.dispose();
     _textures.dispose();
+    _spawnAltCtrl.dispose();
     super.dispose();
   }
 
@@ -1568,6 +1610,82 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                 _vessels.all().isEmpty ? null : () => _spawnAt(preset),
               ),
             ),
+          // Custom spawn: any body, at a typed altitude or landed. The body
+          // pick defaults to whatever the camera is looking at.
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
+            child: Row(children: [
+              const Text('Body ',
+                  style: TextStyle(color: Color(0xFFB9C9DC), fontSize: 12)),
+              Expanded(
+                child: DropdownButton<BodyId>(
+                  value: _spawnCustomBodyId(),
+                  isExpanded: true,
+                  isDense: true,
+                  dropdownColor: const Color(0xE6101820),
+                  style:
+                      const TextStyle(color: Color(0xFFB9C9DC), fontSize: 12),
+                  items: [
+                    for (final b in _universe.current().all)
+                      DropdownMenuItem(value: b.id, child: Text(b.name)),
+                  ],
+                  onChanged: (id) => setState(() => _spawnBody = id),
+                ),
+              ),
+            ]),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
+            child: Row(children: [
+              const Text('Alt ',
+                  style: TextStyle(color: Color(0xFFB9C9DC), fontSize: 12)),
+              Expanded(
+                child: TextField(
+                  controller: _spawnAltCtrl,
+                  style:
+                      const TextStyle(color: Color(0xFFB9C9DC), fontSize: 12),
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    suffixText: 'km',
+                    suffixStyle:
+                        TextStyle(color: Color(0xFF7E93A8), fontSize: 11),
+                    contentPadding:
+                        EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                    enabledBorder: OutlineInputBorder(
+                        borderSide: BorderSide(color: Color(0x447FB0E0))),
+                    focusedBorder: OutlineInputBorder(
+                        borderSide: BorderSide(color: Color(0xFF7FB0E0))),
+                  ),
+                  keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true),
+                ),
+              ),
+            ]),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
+            child: Row(children: [
+              Expanded(
+                child: _atmoButton(
+                  'Orbit @ alt',
+                  const Color(0xFF7FE0A0),
+                  _vessels.all().isEmpty
+                      ? null
+                      : () => _spawnCustom(landed: false),
+                ),
+              ),
+              const SizedBox(width: 4),
+              Expanded(
+                child: _atmoButton(
+                  'Landed',
+                  const Color(0xFF7FE0A0),
+                  _vessels.all().isEmpty
+                      ? null
+                      : () => _spawnCustom(landed: true),
+                ),
+              ),
+            ]),
+          ),
           Padding(
             padding: const EdgeInsets.fromLTRB(4, 2, 4, 4),
             child: Text(
@@ -1941,17 +2059,60 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
 
   /// Teleport the focused craft to a debug spawn preset — the quick way to get
   /// eyes on a scene (ground, water, low orbit, another world, the rings)
-  /// without flying there. Warp drops to 1x and the camera re-frames on the
-  /// craft so what you asked for is on screen the moment it lands.
+  /// without flying there.
   void _spawnAt(SpawnPreset preset) {
+    final placement = const SpawnPresets()
+        .resolve(preset, system: _universe.current(), epoch: _clock.epoch);
+    if (placement == null) return; // body not in this system
+    _applyPlacement(placement, viewRange: _spawnViewRange(preset));
+  }
+
+  /// Teleport the focused craft to the CUSTOM spawn the panel describes: the
+  /// picked body, either landed (scored land-site hunt) or on a circular
+  /// equatorial orbit at the typed altitude. A non-numeric altitude no-ops
+  /// rather than guessing.
+  void _spawnCustom({required bool landed}) {
+    final system = _universe.current();
+    final bodyId = _spawnCustomBodyId();
+    if (bodyId == null) return;
+    SpawnPlacement? placement;
+    if (landed) {
+      placement = const SpawnPresets()
+          .customLanded(bodyId, system: system, epoch: _clock.epoch);
+    } else {
+      final altKm = double.tryParse(_spawnAltCtrl.text.trim());
+      if (altKm == null || !altKm.isFinite || altKm < 0) return;
+      placement = const SpawnPresets()
+          .customOrbit(bodyId, system: system, altitude: altKm * 1000);
+    }
+    if (placement == null) return;
+    // Surface framing wants to read the ground; orbit wants the planet behind
+    // the craft — the same distances the fixed presets use.
+    _applyPlacement(placement, viewRange: landed ? 150 : 600);
+  }
+
+  /// The custom-spawn target: the panel's pick when set, else the body the
+  /// camera last cared about, else the first body in the system.
+  BodyId? _spawnCustomBodyId() {
+    final system = _universe.current();
+    final picked = _spawnBody;
+    if (picked != null && system.body(picked) != null) return picked;
+    final last = _focusBody ?? _lastFocusBody;
+    if (last != null && system.body(last) != null) return last;
+    final all = system.all;
+    return all.isEmpty ? null : all.first.id;
+  }
+
+  /// Write [placement] onto the focused craft and re-frame the camera [viewRange]
+  /// metres off it. Warp drops to 1x and the camera locks on so what was asked
+  /// for is on screen the moment it lands. Shared by the preset buttons and the
+  /// custom body/altitude spawn.
+  void _applyPlacement(SpawnPlacement placement, {required double viewRange}) {
     final all = _vessels.all();
     final id = _focusVessel ?? (all.isEmpty ? null : all.first.id);
     if (id == null) return;
     final vessel = _vessels.byId(id);
     if (vessel == null) return;
-    final placement = const SpawnPresets()
-        .resolve(preset, system: _universe.current(), epoch: _clock.epoch);
-    if (placement == null) return; // body not in this system
 
     // Nothing from the old flight carries across a teleport.
     vessel.flightPlan = null;
@@ -1993,7 +2154,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       _gravRadial = null;
       _view = CameraOrbit.preset(CameraView.threeQuarter);
       _perspectiveMode = true;
-      _range = _spawnViewRange(preset);
+      _range = viewRange;
       _metresPerPixel = (_range / 100).clamp(0.5, 2e10); // ortho fallback
     });
     _keyFocus.requestFocus();
