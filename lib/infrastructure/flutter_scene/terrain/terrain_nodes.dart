@@ -578,9 +578,33 @@ class TerrainNodes {
     // the node sits at that anchor (near the render origin for a landed craft)
     // — not at the body centre ~1e6 m away, which cancelled in float32 and
     // jittered.
-    for (final c in _chunks.values) {
+    //
+    // Fine-over-coarse guarantee: a stand-in still resident UNDER finer
+    // replacements must never win the depth test against them — its surface
+    // can float above the true floor by up to its radial band (deep basins),
+    // where it reads as a flat slab over the refined ground. Draw order
+    // cannot fix that (chunks are opaque and depth-tested) and this
+    // flutter_gpu pin has no per-draw depth bias, so the bias is geometric:
+    // a chunk that is not LOD-selected and has ANY finer resident over its
+    // region is sunk radially by its own band. Both its surface and the true
+    // surface lie inside that band (the mesher's containment check), so the
+    // sunken copy sits strictly below every finer chunk. Sole-cover chunks
+    // stay at the true radius, keeping silhouettes exact when they are all
+    // there is.
+    final residentAncestors = <ChunkKey>{
+      for (final r in _chunks.keys) ...r.ancestors,
+    };
+    for (final e in _chunks.entries) {
+      final c = e.value;
+      final sunk =
+          !wanted.contains(e.key) && residentAncestors.contains(e.key);
+      var anchor = c.anchorBF;
+      if (sunk) {
+        final len = anchor.length;
+        if (len > 1e-6) anchor = anchor * ((len - c.bandM * 1.1) / len);
+      }
       c.node.localTransform = vm.Matrix4.compose(
-        origin.worldToScene(bodyWorld + bodyQuat.rotate(c.anchorBF)),
+        origin.worldToScene(bodyWorld + bodyQuat.rotate(anchor)),
         quatToScene(bodyQuat),
         vm.Vector3.all(lengthToScene(1.0)),
       );
@@ -689,6 +713,7 @@ class TerrainNodes {
       node: node,
       anchorBF: cell.anchorBF,
       triangleCount: cell.mesh.triangleCount,
+      bandM: cell.outerRadiusM - cell.innerRadiusM,
     );
   }
 
@@ -739,6 +764,7 @@ class _ResidentChunk {
     required this.node,
     required this.anchorBF,
     required this.triangleCount,
+    required this.bandM,
   });
 
   final fs.Node node;
@@ -747,6 +773,13 @@ class _ResidentChunk {
   final Vector3 anchorBF;
 
   final int triangleCount;
+
+  /// Radial thickness (m) of the shell the chunk was meshed in. By
+  /// construction (the mesher's `clipped` self-check) both this chunk's
+  /// surface and the TRUE surface lie inside that band, so sinking the chunk
+  /// by the band puts it strictly below any finer chunk over the same region
+  /// — the geometric depth bias the stand-in overlap needs.
+  final double bandM;
 }
 
 /// Opaque triplanar-procedural terrain material. Double-sided (CullMode.none)
