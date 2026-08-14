@@ -192,7 +192,8 @@ class AtmosphereNodes {
       // (ring asteroids, vessels) correctly occludes/pokes through the
       // haze. Small hysteresis so the boundary doesn't flicker.
       final camDistM = (cameraEye - rel).length;
-      shell.setInside(camDistM < atmoTopM * 1.02);
+      shell.setInside(camDistM < atmoTopM * 1.02,
+          camDistM: camDistM, planetRadiusM: b.radius);
 
       shell.setTransforms(
         relToScene(rel),
@@ -261,20 +262,46 @@ class _Shell {
     // pale triangles over the ocean). 96x48 sags ~3.4 km, safely under the
     // proxy's ~6.4 km lift.
     _surfNode = fs.Node(mesh: fs.Mesh(uvSphereZUp(segments: 96, rings: 48), _surfMaterial));
+    // BELOW the proxy lift the exterior proxy is backface-culled and the
+    // whole ground used to lose its haze along a hard horizon seam. This
+    // inverted twin is visible from INSIDE: it encloses the camera, so
+    // every ray (ground AND sky) crosses it exactly once and the shader's
+    // analytic ray does the rest — near ground gets its correctly-tiny
+    // haze instead of none.
+    _surfInMaterial = AtmosphereShaderMaterial(fragmentShader: shader, depthAlways: false);
+    _surfInNode = fs.Node(mesh: fs.Mesh(uvSphereZUp(segments: 96, rings: 48, invert: true), _surfInMaterial));
     _scene.add(_outNode); // start outside
     _active = [_outNode];
   }
 
   final fs.Scene _scene;
-  late final fs.Node _inNode, _outNode, _surfNode;
-  late final AtmosphereShaderMaterial _inMaterial, _outMaterial, _surfMaterial;
+  late final fs.Node _inNode, _outNode, _surfNode, _surfInNode;
+  late final AtmosphereShaderMaterial _inMaterial, _outMaterial, _surfMaterial, _surfInMaterial;
   late List<fs.Node> _active;
 
-  void setInside(bool inside) {
+  /// Sticky below-the-proxy flag (hysteresis band so the swap can't
+  /// flicker on the boundary).
+  bool _belowProxy = false;
+
+  void setInside(bool inside,
+      {required double camDistM, required double planetRadiusM}) {
     // Inside: sky/limb pixels come from the shell's far interior wall,
     // disc pixels from the surface proxy (both lessEqual). Outside: the
-    // exterior shell alone is depth-correct.
-    final want = inside ? [_inNode, _surfNode] : [_outNode];
+    // exterior shell alone is depth-correct. Below the proxy lift, the
+    // inverted proxy ALONE covers every pixel (the interior wall must come
+    // out with it, or sky pixels would integrate the haze twice).
+    if (_belowProxy) {
+      if (camDistM > planetRadiusM * (_surfProxyLift + 0.0005)) {
+        _belowProxy = false;
+      }
+    } else {
+      if (camDistM < planetRadiusM * (_surfProxyLift - 0.0005)) {
+        _belowProxy = true;
+      }
+    }
+    final want = inside
+        ? (_belowProxy ? [_surfInNode] : [_inNode, _surfNode])
+        : [_outNode];
     if (want.length == _active.length && identical(want.first, _active.first)) {
       return;
     }
@@ -308,11 +335,13 @@ class _Shell {
     final shellScale = vm.Matrix4.compose(centreScene, vm.Quaternion.identity(), vm.Vector3.all(atmoTopScene));
     _inNode.localTransform = shellScale;
     _outNode.localTransform = shellScale;
-    _surfNode.localTransform = vm.Matrix4.compose(
+    final proxy = vm.Matrix4.compose(
       centreScene,
       vm.Quaternion.identity(),
       vm.Vector3.all(planetRadiusScene * _surfProxyLift),
     );
+    _surfNode.localTransform = proxy;
+    _surfInNode.localTransform = proxy;
   }
 
   void removeFrom(fs.Scene scene) {
@@ -372,5 +401,6 @@ class _Shell {
     _inMaterial.setUniformBlockFromFloats('AtmosphereInfo', _uniforms);
     _outMaterial.setUniformBlockFromFloats('AtmosphereInfo', _uniforms);
     _surfMaterial.setUniformBlockFromFloats('AtmosphereInfo', _uniforms);
+    _surfInMaterial.setUniformBlockFromFloats('AtmosphereInfo', _uniforms);
   }
 }

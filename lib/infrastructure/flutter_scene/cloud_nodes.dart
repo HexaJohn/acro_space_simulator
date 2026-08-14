@@ -389,7 +389,8 @@ class CloudNodes {
       // lessEqual). Outside -> exterior faces. Small hysteresis so the
       // boundary doesn't flicker. Same rig as AtmosphereNodes.
       final camDistM = (cameraEye - rel).length;
-      shell.setInside(camDistM < cloudTopM * 1.02);
+      shell.setInside(camDistM < cloudTopM * 1.02,
+          camDist: camDistM, planetRadius: b.radius);
 
       // Draw-order bias so the ATMOSPHERE haze composites OVER the clouds
       // (aerial perspective: clouds pick up the soft blue tint instead of
@@ -474,19 +475,57 @@ class _CloudShell {
             _inMaterial));
     _outNode =
         fs.Node(mesh: fs.Mesh(uvSphereZUp(segments: 48, rings: 24), _outMaterial));
+    // The proxy must out-tessellate its own chord sag (see the atmosphere
+    // shell's note — 48x24 sags ~13.6 km on Earth, deeper than any lift
+    // that still hugs the surface).
     _surfNode = fs.Node(
-        mesh: fs.Mesh(uvSphereZUp(segments: 48, rings: 24), _surfMaterial));
+        mesh: fs.Mesh(uvSphereZUp(segments: 96, rings: 48), _surfMaterial));
+    // Inverted twin for BELOW the proxy lift, where the exterior proxy is
+    // backface-culled: encloses the camera so every ray crosses it once
+    // and the march's analytic shell entry does the rest (same rig as the
+    // atmosphere's _surfInNode).
+    _surfInMaterial =
+        AtmosphereShaderMaterial(fragmentShader: shader, depthAlways: false);
+    _surfInNode = fs.Node(
+        mesh: fs.Mesh(
+            uvSphereZUp(segments: 96, rings: 48, invert: true),
+            _surfInMaterial));
     _scene.add(_outNode); // start outside
     _active = [_outNode];
   }
 
   final fs.Scene _scene;
-  late final fs.Node _inNode, _outNode, _surfNode;
-  late final AtmosphereShaderMaterial _inMaterial, _outMaterial, _surfMaterial;
+  late final fs.Node _inNode, _outNode, _surfNode, _surfInNode;
+  late final AtmosphereShaderMaterial _inMaterial,
+      _outMaterial,
+      _surfMaterial,
+      _surfInMaterial;
   late List<fs.Node> _active;
 
-  void setInside(bool inside) {
-    final want = inside ? [_inNode, _surfNode] : [_outNode];
+  /// Same D24/facet-sag reasoning as the atmosphere shell's proxy lift.
+  static const double _surfProxyLift = 1.002;
+
+  /// Sticky below-the-proxy flag (hysteresis so the swap can't flicker).
+  bool _belowProxy = false;
+
+  /// [camDist] and [planetRadius] just need matching units — only their
+  /// ratio is used (the sim passes metres, the preview scene units).
+  void setInside(bool inside,
+      {required double camDist, required double planetRadius}) {
+    if (_belowProxy) {
+      if (camDist > planetRadius * (_surfProxyLift + 0.0005)) {
+        _belowProxy = false;
+      }
+    } else {
+      if (camDist < planetRadius * (_surfProxyLift - 0.0005)) {
+        _belowProxy = true;
+      }
+    }
+    // Below the proxy: the inverted proxy ALONE covers every pixel — the
+    // interior wall must come out with it or sky pixels march twice.
+    final want = inside
+        ? (_belowProxy ? [_surfInNode] : [_inNode, _surfNode])
+        : [_outNode];
     if (want.length == _active.length &&
         identical(want.first, _active.first)) {
       return;
@@ -510,11 +549,13 @@ class _CloudShell {
         centreScene, vm.Quaternion.identity(), vm.Vector3.all(cloudTopScene));
     _inNode.localTransform = shellScale;
     _outNode.localTransform = shellScale;
-    _surfNode.localTransform = vm.Matrix4.compose(
+    final proxy = vm.Matrix4.compose(
       centreScene,
       vm.Quaternion.identity(),
-      vm.Vector3.all(planetRadiusScene * 1.0002),
+      vm.Vector3.all(planetRadiusScene * _surfProxyLift),
     );
+    _surfNode.localTransform = proxy;
+    _surfInNode.localTransform = proxy;
   }
 
   void removeFrom(fs.Scene scene) {
@@ -616,6 +657,7 @@ class _CloudShell {
     _inMaterial.setUniformBlockFromFloats('CloudInfo', _uniforms);
     _outMaterial.setUniformBlockFromFloats('CloudInfo', _uniforms);
     _surfMaterial.setUniformBlockFromFloats('CloudInfo', _uniforms);
+    _surfInMaterial.setUniformBlockFromFloats('CloudInfo', _uniforms);
   }
 }
 
@@ -653,7 +695,8 @@ class CloudPreviewNodes {
     final shell = _shell ??= _CloudShell(shader, _scene);
     final planetScene = lengthToScene(planetRadiusM);
     final topScene = lengthToScene(planetRadiusM + style.topM);
-    shell.setInside(cameraEyeScene.length < topScene * 1.02);
+    shell.setInside(cameraEyeScene.length < topScene * 1.02,
+        camDist: cameraEyeScene.length, planetRadius: planetScene);
     shell.setTransforms(vm.Vector3.zero(), topScene, planetScene);
     shell.updateUniforms(
       centreScene: vm.Vector3.zero(),
