@@ -50,6 +50,9 @@ in vec4 v_color;
 
 out vec4 frag_color;
 
+// Hard CAP on the view march — the actual count adapts to the shell chord
+// (see main) so a nadir ray, whose chord is ~1 shell thickness, stops paying
+// the same 40-sample bill as a limb ray whose chord is ~40 thicknesses.
 const int VIEW_SAMPLES = 40;
 const int LIGHT_SAMPLES = 5;
 const float PI = 3.14159265;
@@ -128,6 +131,15 @@ float fbm3(vec3 p) {
     amp *= 0.5;
   }
   return sum;
+}
+
+// 2-octave FBM — warp field for the LIGHT march only, where the swirl arms
+// need to be POSITIONED right for self-shadowing but not fully detailed.
+// The +0.0625 stands in for the dropped third octave's mean so this field
+// stays CENTRED on fbm3 — without it the 5x warp drag shifts the whole lo
+// domain ~0.3 feature units sideways and shadows detach from their clouds.
+float fbm2(vec3 p) {
+  return 0.5 * vnoise(p) + 0.25 * vnoise(p * 2.03) + 0.0625;
 }
 
 // Ridged turbulence: sum of squared |signed noise|, which builds SHARP
@@ -233,10 +245,60 @@ float cloudDensity(vec3 p) {
   // transparent cloud (the gauzy grey layer that covers most of a real cloud
   // map). max() so it only ADDS translucency where the structured clouds are
   // absent — it never thins the bright cores. The cap is tiny because the
-  // veil accumulates over the whole march column.
-  float veil = smoothstep(0.42, 0.82, fbm3(Pw * 0.32 + 7.3));
-  d = max(d, veil * 0.008);
+  // veil accumulates over the whole march column. The veil term can never
+  // exceed 0.008, so once d has beaten that the max() is decided and the
+  // three noise octaves behind it are pure waste — skip them.
+  if (d < 0.008) {
+    float veil = smoothstep(0.42, 0.82, fbm3(Pw * 0.32 + 7.3));
+    d = max(d, veil * 0.008);
+  }
 
+  return clamp(d, 0.0, 1.0) * vert;
+}
+
+// Low-fidelity density for the LIGHT march. The sun tau is an INTEGRAL that
+// Beer's law then exponentiates — fine edge sculpting is invisible in it, so
+// this drops exactly the terms that only shape edges: ridged erosion, the
+// cirrus veil, and the warp's third octave (fbm2 positions the swirl arms;
+// the missing octave only wobbled their outline). Skipping erosion slightly
+// OVERSTATES tau inside thick systems (erosion only removed density), which
+// deepens core shadows a touch — the safe direction for the look.
+float cloudDensityLo(vec3 p) {
+  vec3 centre = cloud_info.center_radius.xyz;
+  float planetR = cloud_info.center_radius.w;
+  float topR = cloud_info.sun_top.w;
+  float baseR = cloud_info.base_cov_dens_t.x;
+  float coverage = cloud_info.base_cov_dens_t.y;
+  float time = cloud_info.base_cov_dens_t.w;
+  float windSpeed = cloud_info.wind_detail_amb_int.x;
+  float freq = cloud_info.tint_freq.w;
+
+  vec3 op = p - centre;
+  float r = length(op);
+  float ha = (r - baseR) / max(topR - baseR, 1e-4);
+  if (ha <= 0.0 || ha >= 1.0) return 0.0;
+  float vert = smoothstep(0.0, 0.25, ha) * (1.0 - smoothstep(0.5, 1.0, ha));
+
+  vec3 local = qrot(vec4(-cloud_info.orient.xyz, cloud_info.orient.w), op);
+  float drift = time * windSpeed * 1.5;
+  float cd = cos(drift), sd = sin(drift);
+  local = vec3(local.x * cd - local.y * sd, local.x * sd + local.y * cd, local.z);
+  float lat = asin(clamp(local.z / max(r, 1e-4), -1.0, 1.0));
+  vec3 sp = local / planetR;
+  vec3 wind = vec3(time * windSpeed, time * windSpeed * 0.3, 0.0);
+
+  vec3 P = sp * freq + wind;
+  vec3 Q = vec3(fbm2(P * 0.28 + 11.5),
+                fbm2(P * 0.28 + 31.7),
+                fbm2(P * 0.28 + 57.1));
+  vec3 Pw = P + 5.0 * (Q - 0.5);
+
+  float base = fbm(Pw);
+  float cov = clamp(coverage * latBands(lat), 0.0, 1.0);
+  float d = base - (1.0 - cov);
+  if (d <= 0.0) return 0.0;
+  d = d / max(cov, 1e-3);
+  d = smoothstep(0.02, 0.45, d);
   return clamp(d, 0.0, 1.0) * vert;
 }
 
@@ -276,34 +338,57 @@ void main() {
     return;
   }
 
-  float stepLen = (t1 - t0) / float(VIEW_SAMPLES);
+  // Adaptive march: hold the sample PITCH (samples per shell thickness of
+  // chord) constant instead of the sample COUNT. A nadir ray's chord is ~1
+  // thickness and keeps ~10 samples; only the long limb chords climb to the
+  // 40-sample cap. The density field has no structure finer than the shell
+  // profile, so the coarser interior pitch resolves everything it did before.
+  float chord = t1 - t0;
+  float samplesF =
+      clamp(chord / max(topR - baseR, 1e-4) * 10.0, 10.0, float(VIEW_SAMPLES));
+  int samples = int(samplesF + 0.5);
+  float stepLen = chord / float(samples);
   float mu = dot(rd, sunDir);
   float phase = hgPhase(mu, 0.2);
+  float sunStep = (topR - baseR) / float(LIGHT_SAMPLES);
+
+  // Half-amplitude per-pixel jitter of the march phase: decorrelates the
+  // sample lattice between neighbouring pixels so the coarser adaptive pitch
+  // reads as faint grain instead of contour bands. Half-strength keeps the
+  // grain under the noise floor of the density field itself.
+  float jitter =
+      fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+  float marchPhase = 0.25 + 0.5 * jitter;
 
   vec3 scatter = vec3(0.0);
   float transmittance = 1.0;
 
   for (int i = 0; i < VIEW_SAMPLES; i++) {
-    vec3 p = ro + rd * (t0 + (float(i) + 0.5) * stepLen);
+    if (i >= samples) break;
+    vec3 p = ro + rd * (t0 + (float(i) + marchPhase) * stepLen);
     float density = cloudDensity(p) * densMul;
     if (density <= 0.0) continue;
 
-    // Self-shadow: march a few steps toward the sun, accumulate density,
-    // Beer's law. Steps grow (geometric) so a short march still reaches the
-    // top of a thick tower.
-    float sunTau = 0.0;
-    float sunStep = (topR - baseR) / float(LIGHT_SAMPLES);
-    for (int j = 0; j < LIGHT_SAMPLES; j++) {
-      vec3 q = p + sunDir * ((float(j) + 0.5) * sunStep);
-      sunTau += cloudDensity(q) * densMul * sunStep;
-    }
-    float sunT = exp(-sunTau);
     // Powder term: darkens the illuminated edges toward the core, the cue
     // that reads as cloud VOLUME rather than a flat lit shell.
     float powder = 1.0 - exp(-density * stepLen * 2.0);
 
     float vis = sunVisibility(p, sunDir, centre, planetR);
-    vec3 sun = sunI * tint * sunT * phase * powder * vis;
+    // Self-shadow: march a few steps toward the sun, accumulate density,
+    // Beer's law — but only where sunlight actually reaches: past the
+    // terminator the direct term is multiplied to nothing by `vis`, so the
+    // whole light march is skipped on the night side. Inside the march,
+    // exp(-6) is invisible — stop integrating once tau is past it.
+    vec3 sun = vec3(0.0);
+    if (vis > 0.004) {
+      float sunTau = 0.0;
+      for (int j = 0; j < LIGHT_SAMPLES; j++) {
+        vec3 q = p + sunDir * ((float(j) + 0.5) * sunStep);
+        sunTau += cloudDensityLo(q) * densMul * sunStep;
+        if (sunTau > 6.0) break;
+      }
+      sun = sunI * tint * exp(-sunTau) * phase * powder * vis;
+    }
     // Sky/ambient fill is scattered SUNLIGHT — gate it by the same day/night
     // visibility as the direct term, else the shadowed hemisphere glows at
     // full ambient (clouds bright on the night side). A small floor keeps a
