@@ -95,11 +95,18 @@ class TerrainBrush {
       _bowlOffset = 0;
     }
 
+    // Rim band half-width: how far the raised ring extends either side of the
+    // crest radius before fading to nothing. Proportional to the crater, not
+    // to the rim height — a wide crater throws a wide apron.
+    _rimWidth = radiusM * 0.35;
+
     // Influence bound. Deliberately a little larger than the primitives reach
     // (see [boundingRadiusM]) so the hard cutoff in [apply] can never land ON a
-    // primitive's own surface and fabricate an isosurface there.
+    // primitive's own surface and fabricate an isosurface there. The rim's
+    // falloff reaches zero AT radiusM + _rimWidth, so the cutoff beyond it
+    // steps over nothing.
     final reach = kind == TerrainBrushKind.crater
-        ? math.max(_bowlOffset + _bowlRadius, radiusM + rimHeightM)
+        ? math.max(_bowlOffset + _bowlRadius, radiusM + _rimWidth)
         : radiusM;
     boundingRadiusM = reach * 1.08 + 1.0;
   }
@@ -182,6 +189,7 @@ class TerrainBrush {
   late final Vector3 _axis;
   late final double _bowlRadius;
   late final double _bowlOffset;
+  late final double _rimWidth;
 
   /// Bowl sphere radius (m) — solved from [radiusM] and [depthM].
   double get bowlRadiusM => _bowlRadius;
@@ -204,7 +212,22 @@ class TerrainBrush {
     if (kind == TerrainBrushKind.crater && rimHeightM > 0) {
       // Rim first, bowl second: the crest is material thrown UP around the
       // hole, so the excavation has to win wherever the two overlap.
-      d = _smin(d, _rimSdf(w), rimHeightM);
+      //
+      // The rim is a CONFORMAL ground lift, not a solid torus. Near the
+      // surface, density magnitude IS metres along the radial, so subtracting
+      // a ring-shaped bump raises the LOCAL surface by that bump — wherever
+      // that surface happens to be. A torus seated on the contact plane was
+      // the previous design, and on real DEM relief it floated: any hillside
+      // (or just rough ground at crater scale) drops away from the plane by
+      // more than the rim height, leaving the ring hanging in air on the low
+      // side. Anchoring to the local density can't detach by construction.
+      final along = w.dot(_axis);
+      final lateral = (w - _axis * along).length;
+      final t = 1.0 - (lateral - radiusM).abs() / _rimWidth;
+      if (t > 0) {
+        final s = t * t * (3 - 2 * t); // smooth crest, zero-sloped edges
+        d -= rimHeightM * s;
+      }
     }
     return math.max(d, -_bowlSdf(w));
   }
@@ -213,26 +236,7 @@ class TerrainBrush {
   double _bowlSdf(Vector3 w) =>
       (w - _axis * _bowlOffset).length - _bowlRadius;
 
-  /// Signed distance to the rim torus: major radius [radiusM] on the contact
-  /// plane, minor radius [rimHeightM], so the crest stands exactly
-  /// [rimHeightM] proud of the surface.
-  double _rimSdf(Vector3 w) {
-    final along = w.dot(_axis);
-    final lateral = (w - _axis * along).length;
-    final a = lateral - radiusM;
-    return math.sqrt(a * a + along * along) - rimHeightM;
-  }
-
   @override
   String toString() => 'TerrainBrush(${kind.name}, r=${radiusM.toStringAsFixed(1)}m, '
       'd=${depthM.toStringAsFixed(1)}m @ $centreBF)';
-}
-
-/// Polynomial smooth minimum (Quílez). Blends two SDFs over a width [k] instead
-/// of creasing them together, so a rim meets the surrounding ground in a fillet
-/// rather than a fold. Degrades to plain `min` as [k] goes to zero.
-double _smin(double a, double b, double k) {
-  if (k <= 0) return math.min(a, b);
-  final h = (0.5 + 0.5 * (b - a) / k).clamp(0.0, 1.0);
-  return b * (1.0 - h) + a * h - k * h * (1.0 - h);
 }

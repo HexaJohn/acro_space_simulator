@@ -175,35 +175,19 @@ class ScatterPlacement {
     return exact;
   }
 
-  /// Outward surface normal of the base relief, by central differences in the
-  /// local tangent plane.
+  /// Outward surface normal of the base relief (see
+  /// [TerrainField.surfaceNormalAt] — the shared central-difference probe).
   ///
   /// Sampled off the BASE relief deliberately: an edit's walls are near-vertical
   /// and would tip props over onto the rim of every crater, when what is wanted
   /// is props standing on the terrain the crater was cut into (and removed
   /// outright where it cut them away — see [_settleOnEdits]).
-  Vector3 _surfaceNormal(Vector3 dir) {
-    // Step a fixed arc so the estimate is scale-free across body sizes, and
-    // wide enough not to be dominated by the fBm's finest octave.
-    final h = math.max(field.featureScale * 0.02, 1.0);
-    final ref = dir.z.abs() < 0.9 ? Vector3.unitZ : Vector3.unitX;
-    final east = ref.cross(dir).normalized;
-    final north = dir.cross(east);
-
-    final dEast = _radiusAlong(dir, east, h) - _radiusAlong(dir, east, -h);
-    final dNorth = _radiusAlong(dir, north, h) - _radiusAlong(dir, north, -h);
-
-    // Gradient of height over the tangent plane; the normal tilts away from
-    // radial by that gradient.
-    final n = dir - east * (dEast / (2 * h)) - north * (dNorth / (2 * h));
-    final len = n.length;
-    return len < 1e-9 ? dir : n / len;
-  }
-
-  double _radiusAlong(Vector3 dir, Vector3 axis, double arcM) {
-    final d = (dir + axis * (arcM / field.radius)).normalized;
-    return field.baseGroundRadiusAt(d.x, d.y, d.z);
-  }
+  ///
+  /// Step: a fraction of the feature scale, so the estimate is scale-free
+  /// across body sizes and wide enough not to be dominated by the fBm's
+  /// finest octave.
+  Vector3 _surfaceNormal(Vector3 dir) =>
+      field.surfaceNormalAt(dir, stepM: field.featureScale * 0.02);
 
   /// Area of a cell (m^2), from the sphere's area shared equally between the
   /// level's cells.

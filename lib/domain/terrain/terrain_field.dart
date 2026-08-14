@@ -145,6 +145,34 @@ class TerrainField {
     return radius + heightInDirection(dx * inv, dy * inv, dz * inv);
   }
 
+  /// Outward surface normal of the BASE relief under unit direction [dir], by
+  /// central differences over [stepM] metres of arc in the local tangent
+  /// plane.
+  ///
+  /// [stepM] sets which slope the normal reports: sample at a feature's own
+  /// scale to get the slope that feature sits on (a crater wants the hillside
+  /// averaged across its rim, not the boulder-scale texture under the contact
+  /// point). Unaware of [edits], like every base sampler.
+  Vector3 surfaceNormalAt(Vector3 dir, {required double stepM}) {
+    final h = math.max(stepM, 1.0);
+    final ref = dir.z.abs() < 0.9 ? Vector3.unitZ : Vector3.unitX;
+    final east = ref.cross(dir).normalized;
+    final north = dir.cross(east);
+
+    double along(Vector3 axis, double arcM) {
+      final d = (dir + axis * (arcM / radius)).normalized;
+      return baseGroundRadiusAt(d.x, d.y, d.z);
+    }
+
+    final dEast = along(east, h) - along(east, -h);
+    final dNorth = along(north, h) - along(north, -h);
+    // Gradient of height over the tangent plane; the normal tilts away from
+    // radial by that gradient.
+    final n = dir - east * (dEast / (2 * h)) - north * (dNorth / (2 * h));
+    final len = n.length;
+    return len < 1e-9 ? dir : n / len;
+  }
+
   /// The outermost solid-surface radius along a direction (m) — what a lander
   /// rests on.
   ///

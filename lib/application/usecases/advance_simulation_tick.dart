@@ -44,6 +44,7 @@ import '../../domain/simulation/epoch.dart';
 import '../../domain/simulation/simulation_clock.dart';
 import '../../domain/subsystems/vessel_mining_updater.dart';
 import '../../domain/terrain/impact_scaling.dart';
+import '../../domain/terrain/terrain_brush.dart';
 import '../../domain/subsystems/vessel_thermal_updater.dart';
 import '../../domain/vessel/isru_service.dart';
 import '../../domain/universe/atmosphere_model.dart';
@@ -590,25 +591,41 @@ class AdvanceSimulationTick {
     // here would mean no lunar craters at all.
     final splashed = quench > 0 && body.hasAtmosphere;
     if (body.terrain == null || splashed) return;
-    // The brush lives in the BODY-FIXED frame (the caller already rotated the
-    // contact there), the frame the terrain field and the render meshes share,
-    // so the crater co-rotates with the planet.
-    // Radial normal. On a slope the true surface normal tilts away from this,
-    // which would matter for an oblique strike; the height-field foundation is
-    // gentle enough at crater scale that the radial is within a few degrees.
-    final normalBF = contactBF.normalized;
-    final brush = impactBrush(
-      contactBF: contactBF,
-      normalBF: normalBF,
+    // Crater dimensions first: the surface-normal probe below wants to sample
+    // at the crater's own scale, which isn't known until the energy is sized.
+    final c = craterForImpact(
       kineticEnergyJ: kineticEnergy(vessel.mass, speed),
       // Local surface gravity, so the same crash digs a wider hole on a small
       // moon than on a planet. |contactBF| is the ground radius (the rotation
       // into the body frame preserves length).
       surfaceGravityMs2: body.mu / contactBF.lengthSquared,
       targetDensityKgM3: craterTargetDensity,
-      tick: tick,
     );
-    if (brush != null) terrainEdits.record(body.id, brush);
+    if (c == null) return; // too small to be worth a permanent edit
+    // The brush lives in the BODY-FIXED frame (the caller already rotated the
+    // contact there), the frame the terrain field and the render meshes share,
+    // so the crater co-rotates with the planet.
+    //
+    // Seated on the TRUE local surface normal, sampled across the crater's own
+    // footprint — with real DEM relief a hillside tilts tens of degrees, and a
+    // radially-seated rim torus comes out floating in air on the downhill side
+    // (and buried uphill). The slope averaged over the rim radius is the plane
+    // the crater actually forms on.
+    final dirBF = contactBF.normalized;
+    final field = body.terrainField;
+    final normalBF = field == null
+        ? dirBF
+        : field.surfaceNormalAt(dirBF, stepM: c.rimRadiusM);
+    terrainEdits.record(
+        body.id,
+        TerrainBrush.crater(
+          contactBF: contactBF,
+          normalBF: normalBF,
+          radiusM: c.rimRadiusM,
+          depthM: c.depthM,
+          rimHeightM: c.rimHeightM,
+          tick: tick,
+        ));
   }
 
   /// Drain a vessel's queued events: feed them to the contracts board (if any),
