@@ -206,7 +206,9 @@ float latBands(float lat) {
 // look like PLANETARY weather (see the equirect reference): domain-warped
 // FBM for swirled cyclonic filaments, a latitude-banded coverage threshold,
 // and ridged-turbulence erosion for torn wispy edges.
-float cloudDensity(vec3 p) {
+// [tShear] is the RECYCLED clock for the differential (banded) part of the
+// drift — see main's flow-map note. The rigid part always uses true time.
+float cloudDensity(vec3 p, float tShear) {
   vec3 centre = cloud_info.center_radius.xyz;
   float planetR = cloud_info.center_radius.w;
   float topR = cloud_info.sun_top.w;
@@ -246,7 +248,11 @@ float cloudDensity(vec3 p) {
   float bandW = max(cloud_info.band_info.y, 1e-3);
   float band = 1.0 - cloud_info.band_info.x *
       (1.0 - smoothstep(bandW * 0.5, bandW, abs(lat)));
-  float drift = time * cloud_info.swirl_global.w * band;  // radians
+  // Rigid rotation on TRUE time (mod 2pi keeps the trig arg small at high
+  // warp); differential rotation on the bounded recycled clock so the
+  // interfaces can never accumulate more than ~0.6 rad of shear.
+  float drift = mod(time * cloud_info.swirl_global.w, 6.2831853) +
+      (band - 1.0) * cloud_info.swirl_global.w * tShear;
   float cd = cos(drift), sd = sin(drift);
   local = vec3(local.x * cd - local.y * sd, local.x * sd + local.y * cd, local.z);
   vec3 sp = local / planetR;
@@ -323,7 +329,7 @@ float cloudDensity(vec3 p) {
 // the missing octave only wobbled their outline). Skipping erosion slightly
 // OVERSTATES tau inside thick systems (erosion only removed density), which
 // deepens core shadows a touch — the safe direction for the look.
-float cloudDensityLo(vec3 p) {
+float cloudDensityLo(vec3 p, float tShear) {
   vec3 centre = cloud_info.center_radius.xyz;
   float planetR = cloud_info.center_radius.w;
   float topR = cloud_info.sun_top.w;
@@ -344,7 +350,8 @@ float cloudDensityLo(vec3 p) {
   float bandW = max(cloud_info.band_info.y, 1e-3);
   float band = 1.0 - cloud_info.band_info.x *
       (1.0 - smoothstep(bandW * 0.5, bandW, abs(lat)));
-  float drift = time * cloud_info.swirl_global.w * band;
+  float drift = mod(time * cloud_info.swirl_global.w, 6.2831853) +
+      (band - 1.0) * cloud_info.swirl_global.w * tShear;
   float cd = cos(drift), sd = sin(drift);
   local = vec3(local.x * cd - local.y * sd, local.x * sd + local.y * cd, local.z);
   vec3 sp = local / planetR;
@@ -397,7 +404,7 @@ vec3 diverge(float v) {
 // Shared domain transform for the debug maps — the same body rotation,
 // banded drift and wind scroll the density fields apply, so every map shows
 // the field exactly where the render samples it.
-vec3 debugDomain(vec3 p, out float lat, out float band) {
+vec3 debugDomain(vec3 p, float tShear, out float lat, out float band) {
   vec3 centre = cloud_info.center_radius.xyz;
   float planetR = cloud_info.center_radius.w;
   float time = cloud_info.base_cov_dens_t.w;
@@ -409,7 +416,8 @@ vec3 debugDomain(vec3 p, out float lat, out float band) {
   float bandW = max(cloud_info.band_info.y, 1e-3);
   band = 1.0 - cloud_info.band_info.x *
       (1.0 - smoothstep(bandW * 0.5, bandW, abs(lat)));
-  float drift = time * cloud_info.swirl_global.w * band;
+  float drift = mod(time * cloud_info.swirl_global.w, 6.2831853) +
+      (band - 1.0) * cloud_info.swirl_global.w * tShear;
   float cd = cos(drift), sd = sin(drift);
   local = vec3(local.x * cd - local.y * sd, local.x * sd + local.y * cd, local.z);
   return local / planetR * cloud_info.tint_freq.w +
@@ -422,22 +430,44 @@ void main() {
   float topR = cloud_info.sun_top.w;
   float baseR = cloud_info.base_cov_dens_t.x;
 
+  // FLOW-MAP RECYCLE for the banded drift. The differential rotation
+  // between latitudes grows linearly with time, so left alone the band
+  // interfaces stretch WITHOUT BOUND (visible after long runs or high
+  // warp). Fix: the differential part runs on a recycled clock — two
+  // phases staggered half a period apart, each carrying at most ±0.6 rad
+  // of accumulated shear, crossfaded so a phase has zero weight exactly
+  // when its shear is at maximum. The rigid part (same rotation for every
+  // latitude) keeps true time: a rigid rotation cannot stretch anything,
+  // so the bands still stream past each other indefinitely.
+  float timeU = cloud_info.base_cov_dens_t.w;
+  float shearRate =
+      abs(cloud_info.swirl_global.w) * max(cloud_info.band_info.x, 0.0);
+  float period = shearRate > 1e-9 ? 1.2 / shearRate : 0.0;
+  float phA = period > 0.0 ? fract(timeU / period) : 0.5;
+  float tA = (phA - 0.5) * period;
+  float tB = (fract(phA + 0.5) - 0.5) * period;
+  float wA = 1.0 - abs(2.0 * phA - 1.0);
+  bool banded = period > 0.0;
+  // Single-sample consumers (light march, debug maps) use the phase that
+  // currently dominates the blend.
+  float tDom = wA >= 0.5 ? tA : tB;
+
   // DEBUG MAPS: paint the mid-shell field as a flat unlit map on the shell
   // and skip the march entirely. The fragment is already ON the shell
   // sphere, so projecting it to the mid-shell radius gives the sample
   // point the render's view samples pass through.
   float dbg = cloud_info.cov_info.w;
   if (dbg > 0.5) {
-    float time = cloud_info.base_cov_dens_t.w;
+    float time = timeU;
     vec3 spos = centre +
         normalize(v_position - centre) * mix(baseR, topR, 0.5);
     float lat;
     float band;
-    vec3 P = debugDomain(spos, lat, band);
+    vec3 P = debugDomain(spos, tDom, lat, band);
     vec3 col;
     if (dbg < 1.5) {
       // DENSITY: the full field (warp + erosion + veil) at mid-shell.
-      col = heat(cloudDensity(spos));
+      col = heat(cloudDensity(spos, tDom));
     } else if (dbg < 2.5) {
       // COVERAGE: the effective threshold after the coverage-weather
       // modulation and the latitude bands.
@@ -527,7 +557,11 @@ void main() {
   for (int i = 0; i < VIEW_SAMPLES; i++) {
     if (i >= samples) break;
     vec3 p = ro + rd * (t0 + (float(i) + marchPhase) * stepLen);
-    float density = cloudDensity(p) * densMul;
+    // Banded drift active -> blend the two recycled shear phases (the
+    // crossfade is what keeps the interfaces from stretching forever).
+    float density = (banded
+        ? mix(cloudDensity(p, tB), cloudDensity(p, tA), wA)
+        : cloudDensity(p, 0.0)) * densMul;
     if (density <= 0.0) continue;
 
     // Powder term: darkens the illuminated edges toward the core, the cue
@@ -552,7 +586,9 @@ void main() {
       float sunTau = 0.0;
       for (int j = 0; j < LIGHT_SAMPLES; j++) {
         vec3 q = p + sunDir * ((float(j) + 0.5) * sunStep);
-        sunTau += cloudDensityLo(q) * densMul * sunStep;
+        // Dominant phase only: the tau integral can't show the subtle
+        // phase handoff, and it keeps the light march single-sample.
+        sunTau += cloudDensityLo(q, tDom) * densMul * sunStep;
         if (sunTau > 6.0) break;
       }
       sun = sunI * ct * exp(-sunTau) * phase * powder * vis;
