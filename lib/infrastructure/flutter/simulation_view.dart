@@ -12,7 +12,12 @@ import 'dart:ui' as ui show Image;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:flutter/gestures.dart' show PointerScrollEvent, kMiddleMouseButton;
+import 'package:flutter/gestures.dart'
+    show
+        PointerScrollEvent,
+        ScaleGestureRecognizer,
+        kMiddleMouseButton,
+        kPrimaryButton;
 import 'package:flutter/services.dart'
     show
         HardwareKeyboard,
@@ -2762,28 +2767,48 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
               }
             }
           },
-          child: GestureDetector(
-            // Pinch zoom + single-finger drag orbit. d.scale is cumulative from
-            // the gesture START, so anchor it to the value captured at start.
-            onScaleStart: (_) {
-              _pinchBaseMpp = _metresPerPixel;
-              _pinchBaseRange = _range;
-            },
-            onScaleUpdate: (d) {
-              if (d.pointerCount >= 2 && d.scale != 1.0) {
-                // Two-finger pinch -> zoom.
-                setState(() {
-                  if (_perspectiveMode) {
-                    _range = (_pinchBaseRange / d.scale).clamp(1.0, 1e13);
-                  } else {
-                    _metresPerPixel = (_pinchBaseMpp / d.scale).clamp(0.5, 2e10);
+          // RawGestureDetector, NOT GestureDetector: the stock scale gesture
+          // accepts EVERY mouse button, so a middle-drag orbited twice (once
+          // here, once in the Listener above) and a right-press orbited on the
+          // few pixels of jitter every physical click carries — the "camera
+          // jumps on a bare MMB/RMB press" bug. The scale gesture is for touch
+          // (pinch + one-finger orbit) and the primary button only; MMB stays
+          // the Listener's, RMB stays nobody's. Guarded by
+          // camera_mouse_button_test.dart.
+          child: RawGestureDetector(
+            gestures: {
+              ScaleGestureRecognizer:
+                  GestureRecognizerFactoryWithHandlers<ScaleGestureRecognizer>(
+                () => ScaleGestureRecognizer(
+                    allowedButtonsFilter: (int buttons) =>
+                        buttons == kPrimaryButton),
+                (r) => r
+                  // Pinch zoom + single-finger drag orbit. d.scale is
+                  // cumulative from the gesture START, so anchor it to the
+                  // value captured at start.
+                  ..onStart = (_) {
+                    _pinchBaseMpp = _metresPerPixel;
+                    _pinchBaseRange = _range;
                   }
-                });
-              } else {
-                // Single-finger drag -> orbit the camera (pitch inverted).
-                final dd = d.focalPointDelta;
-                _orbitCamera(dd.dx * 0.005, dd.dy * 0.005);
-              }
+                  ..onUpdate = (d) {
+                    if (d.pointerCount >= 2 && d.scale != 1.0) {
+                      // Two-finger pinch -> zoom.
+                      setState(() {
+                        if (_perspectiveMode) {
+                          _range =
+                              (_pinchBaseRange / d.scale).clamp(1.0, 1e13);
+                        } else {
+                          _metresPerPixel =
+                              (_pinchBaseMpp / d.scale).clamp(0.5, 2e10);
+                        }
+                      });
+                    } else {
+                      // Single-finger drag -> orbit (pitch inverted).
+                      final dd = d.focalPointDelta;
+                      _orbitCamera(dd.dx * 0.005, dd.dy * 0.005);
+                    }
+                  },
+              ),
             },
             child: Stack(
               children: [
