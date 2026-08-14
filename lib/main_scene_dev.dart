@@ -357,8 +357,9 @@ Future<void> main() async {
 
   // Live cloud art-pass knobs (applied next frame; render-side only):
   //   ext.acro.clouds?body=earth&coverage=0.5&density=16&baseKm=2&topKm=15
-  //     &wind=0.004&detail=0.4&ambient=0.25&intensity=1.4&freq=14
-  //     &tint=f2f5ff&enabled=true
+  //     &wind=0.004&windGlobal=0.02&swirlStrength=5&swirlFreq=0.28
+  //     &swirlSpeed=0.005&bandShear=2&bandWidthDeg=20&detail=0.4
+  //     &ambient=0.25&intensity=1.4&freq=14&tint=f2f5ff&enabled=true
   // Any call (also with no params) returns the FULL current style table —
   // tune live, then bake the numbers into CloudNodes.styles.
   developer.registerExtension('ext.acro.clouds', (method, params) async {
@@ -372,6 +373,14 @@ Future<void> main() async {
       if (num('coverage') != null) s.coverage = num('coverage')!;
       if (num('density') != null) s.density = num('density')!;
       if (num('wind') != null) s.wind = num('wind')!;
+      if (num('windGlobal') != null) s.windGlobal = num('windGlobal')!;
+      if (num('swirlStrength') != null) s.swirlStrength = num('swirlStrength')!;
+      if (num('swirlFreq') != null) s.swirlFreq = num('swirlFreq')!;
+      if (num('swirlSpeed') != null) s.swirlSpeed = num('swirlSpeed')!;
+      if (num('bandShear') != null) s.bandShear = num('bandShear')!;
+      if (num('bandWidthDeg') != null) {
+        s.bandWidth = num('bandWidthDeg')! * math.pi / 180;
+      }
       if (num('detail') != null) s.detail = num('detail')!;
       if (num('ambient') != null) s.ambient = num('ambient')!;
       if (num('intensity') != null) s.intensity = num('intensity')!;

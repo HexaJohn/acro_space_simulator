@@ -39,6 +39,22 @@ uniform CloudInfo {
   // body's rotating frame — clouds co-rotate with the surface instead of
   // swimming across it as the planet spins.
   vec4 orient;
+  // x: swirl strength — the domain-warp drag, in feature units. y: swirl
+  // frequency, as a fraction of the base noise frequency (storm-system
+  // scale). z: swirl speed — scroll rate of the warp field's own domain, so
+  // the cyclone arms themselves curl and reform over time (0 = arms frozen
+  // in the wind-carried domain). w: GLOBAL wind — eastward precession of the
+  // whole sample domain about the spin axis, radians per sim-second (the
+  // planet-scale advection; the LOCAL wind in wind_detail_amb_int.x is the
+  // noise-domain scroll that morphs weather in place).
+  vec4 swirl_global;
+  // Zonal wind BANDS: the global drift is multiplied by a latitude profile
+  // of (1 - shear * equatorBump), so the hemispheres run the full global
+  // wind (eastward for positive windGlobal) while the equatorial band lags
+  // (shear 0..1), stalls (1) or counter-flows westward (>1, trade-wind
+  // style). x: band shear. y: equatorial band half-width (radians of
+  // latitude; the profile blends over the outer half of it). z, w: unused.
+  vec4 band_info;
 }
 cloud_info;
 
@@ -194,19 +210,29 @@ float cloudDensity(vec3 p) {
   float vert = smoothstep(0.0, 0.25, ha) * (1.0 - smoothstep(0.5, 1.0, ha));
 
   // Sample in the body's rotating frame, normalised by planet radius so the
-  // frequency is "cycles per radius" (resolution-independent). Wind scrolls
-  // the domain for slow evolution + drift.
+  // frequency is "cycles per radius" (resolution-independent). The LOCAL
+  // wind scrolls the domain for slow in-place evolution.
   vec3 local = qrot(vec4(-cloud_info.orient.xyz, cloud_info.orient.w), op);
-  // Weather ADVECTS eastward relative to the surface: precess the sample
-  // domain about the spin axis over time. Without this the co-rotating noise
-  // is locked to geography, so a longitude that starts clear stays clear
-  // forever (North America / China / Egypt never cloud over). Latitude is
-  // preserved, so the (gentle) bands stay put while cloud systems drift
-  // through them. Tied to the wind knob.
-  float drift = time * windSpeed * 1.5;  // radians
+  // GLOBAL wind: weather ADVECTS eastward relative to the surface — precess
+  // the sample domain about the spin axis over time. Without this the
+  // co-rotating noise is locked to geography, so a longitude that starts
+  // clear stays clear forever (North America / China / Egypt never cloud
+  // over). Latitude is preserved, so the (gentle) bands stay put while
+  // cloud systems drift through them.
+  // Latitude BEFORE the drift rotation — the rotation is about the spin
+  // axis, so z (and with it the latitude) is invariant and the band profile
+  // stays glued to its latitudes as the domain precesses.
+  float lat = asin(clamp(local.z / max(r, 1e-4), -1.0, 1.0));
+  // Zonal band profile: 1 in the hemispheres, (1 - shear) inside the
+  // equatorial band. The latitude-dependent drift SHEARS the domain at the
+  // band edges over time — the smoothstep keeps that continuous, so it
+  // reads as zonal streaking rather than tearing.
+  float bandW = max(cloud_info.band_info.y, 1e-3);
+  float band = 1.0 - cloud_info.band_info.x *
+      (1.0 - smoothstep(bandW * 0.5, bandW, abs(lat)));
+  float drift = time * cloud_info.swirl_global.w * band;  // radians
   float cd = cos(drift), sd = sin(drift);
   local = vec3(local.x * cd - local.y * sd, local.x * sd + local.y * cd, local.z);
-  float lat = asin(clamp(local.z / max(r, 1e-4), -1.0, 1.0));
   vec3 sp = local / planetR;
   vec3 wind = vec3(time * windSpeed, time * windSpeed * 0.3, 0.0);
 
@@ -215,13 +241,18 @@ float cloudDensity(vec3 p) {
 
   // DOMAIN WARP: drag the sample by a lower-frequency vector noise. This is
   // what turns isotropic blobs into the stretched, swirled cyclonic
-  // filaments of a real cloud map (iq-style fbm-of-fbm). The warp field runs
-  // at ~0.28x frequency (storm-system scale) and a STRONG drag so the swirl
-  // arms stay bold even under dense coverage + the cirrus veil.
-  vec3 Q = vec3(fbm3(P * 0.28 + 11.5),
-                fbm3(P * 0.28 + 31.7),
-                fbm3(P * 0.28 + 57.1));
-  vec3 Pw = P + 5.0 * (Q - 0.5);
+  // filaments of a real cloud map (iq-style fbm-of-fbm). The warp field
+  // runs at swirl-frequency (a fraction of the base — storm-system scale)
+  // with a STRONG drag so the swirl arms stay bold even under dense
+  // coverage + the cirrus veil. Swirl SPEED scrolls the warp field's own
+  // domain so the arms curl and reform instead of riding the wind frozen.
+  vec3 sw = vec3(time * cloud_info.swirl_global.z,
+                 time * cloud_info.swirl_global.z * -0.6, 0.0);
+  float sfreq = cloud_info.swirl_global.y;
+  vec3 Q = vec3(fbm3(P * sfreq + 11.5 + sw),
+                fbm3(P * sfreq + 31.7 + sw),
+                fbm3(P * sfreq + 57.1 + sw));
+  vec3 Pw = P + cloud_info.swirl_global.x * (Q - 0.5);
 
   float base = fbm(Pw);
 
@@ -280,18 +311,24 @@ float cloudDensityLo(vec3 p) {
   float vert = smoothstep(0.0, 0.25, ha) * (1.0 - smoothstep(0.5, 1.0, ha));
 
   vec3 local = qrot(vec4(-cloud_info.orient.xyz, cloud_info.orient.w), op);
-  float drift = time * windSpeed * 1.5;
+  float lat = asin(clamp(local.z / max(r, 1e-4), -1.0, 1.0));
+  float bandW = max(cloud_info.band_info.y, 1e-3);
+  float band = 1.0 - cloud_info.band_info.x *
+      (1.0 - smoothstep(bandW * 0.5, bandW, abs(lat)));
+  float drift = time * cloud_info.swirl_global.w * band;
   float cd = cos(drift), sd = sin(drift);
   local = vec3(local.x * cd - local.y * sd, local.x * sd + local.y * cd, local.z);
-  float lat = asin(clamp(local.z / max(r, 1e-4), -1.0, 1.0));
   vec3 sp = local / planetR;
   vec3 wind = vec3(time * windSpeed, time * windSpeed * 0.3, 0.0);
 
   vec3 P = sp * freq + wind;
-  vec3 Q = vec3(fbm2(P * 0.28 + 11.5),
-                fbm2(P * 0.28 + 31.7),
-                fbm2(P * 0.28 + 57.1));
-  vec3 Pw = P + 5.0 * (Q - 0.5);
+  vec3 sw = vec3(time * cloud_info.swirl_global.z,
+                 time * cloud_info.swirl_global.z * -0.6, 0.0);
+  float sfreq = cloud_info.swirl_global.y;
+  vec3 Q = vec3(fbm2(P * sfreq + 11.5 + sw),
+                fbm2(P * sfreq + 31.7 + sw),
+                fbm2(P * sfreq + 57.1 + sw));
+  vec3 Pw = P + cloud_info.swirl_global.x * (Q - 0.5);
 
   float base = fbm(Pw);
   float cov = clamp(coverage * latBands(lat), 0.0, 1.0);

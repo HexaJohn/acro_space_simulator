@@ -33,11 +33,32 @@ class CloudStyle {
     this.topM = 30000,
     this.coverage = 0.62,
     this.density = 9.0,
-    // Noise-domain evolution rate. Weather MORPHS (forms/dissipates) and
-    // drifts at this rate PER SIM-SECOND, so apparent motion scales with the
-    // time-warp: gentle at 1x (realistic), a lively churn at 50-100x. Old
-    // default (0.004) was a crawl below ~500x.
+    // LOCAL wind: noise-domain evolution rate. Weather MORPHS (forms and
+    // dissipates in place) at this rate PER SIM-SECOND, so apparent motion
+    // scales with the time-warp: gentle at 1x (realistic), a lively churn
+    // at 50-100x. Old default (0.004) was a crawl below ~500x.
     this.wind = 0.015,
+    // GLOBAL wind: eastward precession of the whole sample domain about the
+    // spin axis (radians/sim-second) — the planet-scale advection that
+    // carries weather systems across geography. Default preserves the old
+    // hardwired drift of 1.5x the local wind.
+    this.windGlobal = 0.0225,
+    // Swirl: the domain warp that turns isotropic blobs into cyclonic
+    // filaments. Strength is the warp drag (feature units), freq the warp
+    // field's scale as a fraction of the base frequency (storm-system
+    // scale), speed the scroll rate of the warp field's own domain — 0
+    // keeps the arms frozen in the wind-carried domain (the old look),
+    // higher values curl and reform the arms over time.
+    this.swirlStrength = 5.0,
+    this.swirlFreq = 0.28,
+    this.swirlSpeed = 0.0,
+    // Zonal wind bands: the global drift is multiplied by a latitude
+    // profile of (1 - bandShear * equatorBump). Shear 0 keeps the drift
+    // uniform (the old look); 1 stalls the equatorial band; >1 counter-
+    // rotates it westward while the hemispheres run east (trade winds).
+    // Width is the equatorial band's half-extent in radians of latitude.
+    this.bandShear = 0.0,
+    this.bandWidth = 0.35,
     this.detail = 0.55,
     // Ambient is scattered SUNLIGHT — the shader gates it by day/night so the
     // night hemisphere stays dark; keep it low so the sun term (not flat fill)
@@ -65,9 +86,33 @@ class CloudStyle {
   /// Optical thickness multiplier (how opaque a full column reads).
   double density;
 
-  /// Noise-domain scroll speed (slow evolution + drift; the planet's own
-  /// spin is handled separately by the orientation quaternion).
+  /// LOCAL wind: noise-domain scroll speed — weather morphing in place (the
+  /// planet's own spin is handled separately by the orientation quaternion).
   double wind;
+
+  /// GLOBAL wind: eastward precession of the sample domain about the spin
+  /// axis (radians/sim-second) — planet-scale advection across geography.
+  double windGlobal;
+
+  /// Domain-warp drag in feature units — how hard the swirl field stretches
+  /// blobs into cyclonic filaments.
+  double swirlStrength;
+
+  /// Warp field frequency as a fraction of the base noise frequency
+  /// (storm-system scale).
+  double swirlFreq;
+
+  /// Scroll rate of the warp field's own domain — 0 freezes the arms in the
+  /// wind-carried domain; higher values curl and reform them over time.
+  double swirlSpeed;
+
+  /// Zonal band shear: 0 = uniform global wind, 1 = equatorial band stalls,
+  /// >1 = equator counter-flows westward while the hemispheres run east.
+  double bandShear;
+
+  /// Equatorial band half-extent, radians of latitude (profile blends over
+  /// its outer half).
+  double bandWidth;
 
   /// Detail-erosion strength 0..1 — turns round blobs wispy at the edges.
   double detail;
@@ -92,6 +137,12 @@ class CloudStyle {
         'coverage': coverage,
         'density': density,
         'wind': wind,
+        'windGlobal': windGlobal,
+        'swirlStrength': swirlStrength,
+        'swirlFreq': swirlFreq,
+        'swirlSpeed': swirlSpeed,
+        'bandShear': bandShear,
+        'bandWidth': bandWidth,
         'detail': detail,
         'ambient': ambient,
         'intensity': intensity,
@@ -134,6 +185,7 @@ class CloudNodes {
       coverage: 0.95,
       density: 26.0,
       wind: 0.002,
+      windGlobal: 0.003,
       detail: 0.25,
       freq: 6.0,
       tintArgb: 0xFFE8D8B0,
@@ -144,6 +196,7 @@ class CloudNodes {
       coverage: 0.9,
       density: 18.0,
       wind: 0.0015,
+      windGlobal: 0.00225,
       detail: 0.3,
       freq: 8.0,
       tintArgb: 0xFFD8A860,
@@ -154,6 +207,7 @@ class CloudNodes {
       coverage: 0.22,
       density: 6.0,
       wind: 0.006,
+      windGlobal: 0.009,
       detail: 0.5,
       freq: 16.0,
       tintArgb: 0xFFE8D0C0,
@@ -252,6 +306,12 @@ class CloudNodes {
         density: style.density,
         time: time,
         wind: style.wind,
+        windGlobal: style.windGlobal,
+        swirlStrength: style.swirlStrength,
+        swirlFreq: style.swirlFreq,
+        swirlSpeed: style.swirlSpeed,
+        bandShear: style.bandShear,
+        bandWidth: style.bandWidth,
         detail: style.detail,
         ambient: style.ambient,
         intensity: style.intensity,
@@ -339,7 +399,7 @@ class _CloudShell {
     }
   }
 
-  final Float32List _uniforms = Float32List(24); // 6 x vec4, std140
+  final Float32List _uniforms = Float32List(32); // 8 x vec4, std140
 
   void updateUniforms({
     required vm.Vector3 centreScene,
@@ -351,6 +411,12 @@ class _CloudShell {
     required double density,
     required double time,
     required double wind,
+    required double windGlobal,
+    required double swirlStrength,
+    required double swirlFreq,
+    required double swirlSpeed,
+    required double bandShear,
+    required double bandWidth,
     required double detail,
     required double ambient,
     required double intensity,
@@ -390,6 +456,17 @@ class _CloudShell {
     _uniforms[21] = orient.y;
     _uniforms[22] = orient.z;
     _uniforms[23] = orient.w;
+    // vec4 swirl_global: warp drag, warp frequency (x base freq), warp
+    // domain scroll rate, global eastward wind (rad/sim-second).
+    _uniforms[24] = swirlStrength;
+    _uniforms[25] = swirlFreq;
+    _uniforms[26] = swirlSpeed;
+    _uniforms[27] = windGlobal;
+    // vec4 band_info: zonal band shear + equatorial band half-width (rad).
+    _uniforms[28] = bandShear;
+    _uniforms[29] = bandWidth;
+    _uniforms[30] = 0;
+    _uniforms[31] = 0;
     // All windings share the block; only the active set is in the scene.
     _inMaterial.setUniformBlockFromFloats('CloudInfo', _uniforms);
     _outMaterial.setUniformBlockFromFloats('CloudInfo', _uniforms);
@@ -442,6 +519,12 @@ class CloudPreviewNodes {
       density: style.density,
       time: timeS,
       wind: style.wind,
+      windGlobal: style.windGlobal,
+      swirlStrength: style.swirlStrength,
+      swirlFreq: style.swirlFreq,
+      swirlSpeed: style.swirlSpeed,
+      bandShear: style.bandShear,
+      bandWidth: style.bandWidth,
       detail: style.detail,
       ambient: style.ambient,
       intensity: style.intensity,

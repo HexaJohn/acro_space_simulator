@@ -168,6 +168,12 @@ class _CloudscapeScreenState extends State<CloudscapeScreen>
         '  coverage: ${n(s.coverage)},\n'
         '  density: ${n(s.density)},\n'
         '  wind: ${n(s.wind)},\n'
+        '  windGlobal: ${n(s.windGlobal)},\n'
+        '  swirlStrength: ${n(s.swirlStrength)},\n'
+        '  swirlFreq: ${n(s.swirlFreq)},\n'
+        '  swirlSpeed: ${n(s.swirlSpeed)},\n'
+        '  bandShear: ${n(s.bandShear)},\n'
+        '  bandWidth: ${n(s.bandWidth)},\n'
         '  detail: ${n(s.detail)},\n'
         '  ambient: ${n(s.ambient)},\n'
         '  intensity: ${n(s.intensity)},\n'
@@ -200,6 +206,12 @@ class _CloudscapeScreenState extends State<CloudscapeScreen>
       ..coverage = d('coverage')
       ..density = d('density')
       ..wind = d('wind')
+      ..windGlobal = d('windGlobal')
+      ..swirlStrength = d('swirlStrength')
+      ..swirlFreq = d('swirlFreq')
+      ..swirlSpeed = d('swirlSpeed')
+      ..bandShear = d('bandShear')
+      ..bandWidth = d('bandWidth')
       ..detail = d('detail')
       ..ambient = d('ambient')
       ..intensity = d('intensity')
@@ -463,10 +475,33 @@ class _CloudscapeScreenState extends State<CloudscapeScreen>
               (v) => s.density = v),
           _knob('detail', s.detail, 0, 1, decimals: 2, (v) => s.detail = v),
           _knob('freq', s.freq, 2, 30, decimals: 1, (v) => s.freq = v),
-          // Log scale: Titan crawls at 0.0015 while Earth churns at 0.015 —
+          const SizedBox(height: 8),
+          _sectionLabel('WIND'),
+          // Log scales: Titan crawls at 0.0015 while Earth churns at 0.015 —
           // a linear slider wastes its whole travel on the top decade.
-          _knob('wind', _log10(s.wind.clamp(1e-4, 0.1)), -4, -1, decimals: 4,
+          // LOCAL morphs weather in place; GLOBAL carries systems eastward
+          // around the planet.
+          _knob('local', _log10(s.wind.clamp(1e-4, 0.1)), -4, -1, decimals: 4,
               display: s.wind, (v) => s.wind = math.pow(10, v).toDouble()),
+          _knob('global', _log10(s.windGlobal.clamp(1e-4, 0.1)), -4, -1,
+              decimals: 4, display: s.windGlobal,
+              (v) => s.windGlobal = math.pow(10, v).toDouble()),
+          // Zonal bands: shear 0 = one uniform flow, 1 = the equatorial
+          // band stalls, 2 = it counter-flows west at full speed while the
+          // hemispheres run east (trade winds).
+          _knob('band shear', s.bandShear, 0, 3, decimals: 2,
+              (v) => s.bandShear = v),
+          _knob('band width', s.bandWidth * 180 / math.pi, 5, 60,
+              unit: '°', decimals: 0,
+              (v) => s.bandWidth = v * math.pi / 180),
+          const SizedBox(height: 8),
+          _sectionLabel('SWIRL'),
+          _knob('strength', s.swirlStrength, 0, 10, decimals: 2,
+              (v) => s.swirlStrength = v),
+          _knob('freq', s.swirlFreq, 0.05, 1, decimals: 2,
+              (v) => s.swirlFreq = v),
+          _knob('speed', s.swirlSpeed, 0, 0.03, decimals: 4,
+              (v) => s.swirlSpeed = v),
           const SizedBox(height: 8),
           _sectionLabel('LIGHT'),
           _knob('intensity', s.intensity, 0, 40, decimals: 1,
