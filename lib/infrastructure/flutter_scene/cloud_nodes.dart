@@ -238,6 +238,7 @@ class CloudNodes {
       swirlSpeed: 0.0263,
       bandShear: 1.2551,
       bandWidth: 0.4595,
+      bandMaxShear: 0.4595,
       coverageVar: 1.0,
       coverageFreq: 0.1561,
       coverageSpeed: 0.05,
