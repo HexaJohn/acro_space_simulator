@@ -188,6 +188,7 @@ class _CloudscapeScreenState extends State<CloudscapeScreen>
         '  swirlSpeed: ${n(s.swirlSpeed)},\n'
         '  bandShear: ${n(s.bandShear)},\n'
         '  bandWidth: ${n(s.bandWidth)},\n'
+        '  bandMaxShear: ${n(s.bandMaxShear)},\n'
         '  coverageVar: ${n(s.coverageVar)},\n'
         '  coverageFreq: ${n(s.coverageFreq)},\n'
         '  coverageSpeed: ${n(s.coverageSpeed)},\n'
@@ -231,6 +232,7 @@ class _CloudscapeScreenState extends State<CloudscapeScreen>
       ..swirlSpeed = d('swirlSpeed')
       ..bandShear = d('bandShear')
       ..bandWidth = d('bandWidth')
+      ..bandMaxShear = d('bandMaxShear')
       ..coverageVar = d('coverageVar')
       ..coverageFreq = d('coverageFreq')
       ..coverageSpeed = d('coverageSpeed')
@@ -548,6 +550,12 @@ class _CloudscapeScreenState extends State<CloudscapeScreen>
           _knob('band width', s.bandWidth * 180 / math.pi, 5, 60,
               unit: '°', decimals: 0,
               (v) => s.bandWidth = v * math.pi / 180),
+          // Ping-pong amplitude: how far the interface shears before the
+          // band flow reverses. Bigger = longer, strongly-stretched
+          // excursions; smaller = gentle quick oscillation.
+          _knob('max shear', s.bandMaxShear * 180 / math.pi, 10, 170,
+              unit: '°', decimals: 0,
+              (v) => s.bandMaxShear = v * math.pi / 180),
           const SizedBox(height: 8),
           _sectionLabel('SWIRL'),
           _knob('strength', s.swirlStrength, 0, 10, decimals: 2,

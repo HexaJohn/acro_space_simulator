@@ -53,7 +53,9 @@ uniform CloudInfo {
   // wind (eastward for positive windGlobal) while the equatorial band lags
   // (shear 0..1), stalls (1) or counter-flows westward (>1, trade-wind
   // style). x: band shear. y: equatorial band half-width (radians of
-  // latitude; the profile blends over the outer half of it). z, w: unused.
+  // latitude; the profile blends over the outer half of it). z: MAX SHEAR —
+  // the ping-pong amplitude (radians of accumulated domain shear at the
+  // interface before the direction reverses; see main). w: unused.
   vec4 band_info;
   // COVERAGE FIELD: the coverage knob is the MEAN of a slow, continent-
   // scale noise field instead of a constant, so cloudiness itself has
@@ -444,7 +446,8 @@ void main() {
   float timeU = cloud_info.base_cov_dens_t.w;
   float shearRate =
       abs(cloud_info.swirl_global.w) * max(cloud_info.band_info.x, 0.0);
-  float period = shearRate > 1e-9 ? 2.4 / shearRate : 0.0;
+  float maxShear = max(cloud_info.band_info.z, 0.05);
+  float period = shearRate > 1e-9 ? 2.0 * maxShear / shearRate : 0.0;
   float tShear = period > 0.0
       ? (abs(fract(timeU / period) * 2.0 - 1.0) - 0.5) * period
       : 0.0;

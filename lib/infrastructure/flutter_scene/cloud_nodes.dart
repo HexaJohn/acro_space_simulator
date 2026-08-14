@@ -59,6 +59,11 @@ class CloudStyle {
     // Width is the equatorial band's half-extent in radians of latitude.
     this.bandShear = 0.0,
     this.bandWidth = 0.35,
+    // Ping-pong amplitude: radians of accumulated domain shear at the band
+    // interface before the differential flow reverses. Bigger = longer
+    // stretches with stronger distortion; smaller = gentler, quicker
+    // oscillation.
+    this.bandMaxShear = 1.2,
     // Coverage weather: the coverage knob becomes the MEAN of a slow
     // continent-scale noise field, so cloudiness itself varies by region
     // and evolves. Var 0 keeps coverage static (the old look); 1 swings
@@ -127,6 +132,10 @@ class CloudStyle {
   /// its outer half).
   double bandWidth;
 
+  /// Ping-pong amplitude: accumulated interface shear (radians) before the
+  /// differential band flow reverses direction.
+  double bandMaxShear;
+
   /// Coverage-weather swing: 0 = static coverage, 1 = regions swing between
   /// fully clear and doubled coverage.
   double coverageVar;
@@ -173,6 +182,7 @@ class CloudStyle {
         'swirlSpeed': swirlSpeed,
         'bandShear': bandShear,
         'bandWidth': bandWidth,
+        'bandMaxShear': bandMaxShear,
         'coverageVar': coverageVar,
         'coverageFreq': coverageFreq,
         'coverageSpeed': coverageSpeed,
@@ -372,6 +382,7 @@ class CloudNodes {
         swirlSpeed: style.swirlSpeed,
         bandShear: style.bandShear,
         bandWidth: style.bandWidth,
+        bandMaxShear: style.bandMaxShear,
         coverageVar: style.coverageVar,
         coverageFreq: style.coverageFreq,
         coverageSpeed: style.coverageSpeed,
@@ -482,6 +493,7 @@ class _CloudShell {
     required double swirlSpeed,
     required double bandShear,
     required double bandWidth,
+    required double bandMaxShear,
     required double coverageVar,
     required double coverageFreq,
     required double coverageSpeed,
@@ -539,7 +551,7 @@ class _CloudShell {
     // vec4 band_info: zonal band shear + equatorial band half-width (rad).
     _uniforms[28] = bandShear;
     _uniforms[29] = bandWidth;
-    _uniforms[30] = 0;
+    _uniforms[30] = bandMaxShear;
     _uniforms[31] = 0;
     // vec4 cov_info: coverage-weather swing, field frequency (x base freq),
     // evolution rate.
@@ -611,6 +623,7 @@ class CloudPreviewNodes {
       swirlSpeed: style.swirlSpeed,
       bandShear: style.bandShear,
       bandWidth: style.bandWidth,
+      bandMaxShear: style.bandMaxShear,
       coverageVar: style.coverageVar,
       coverageFreq: style.coverageFreq,
       coverageSpeed: style.coverageSpeed,

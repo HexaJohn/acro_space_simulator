@@ -381,6 +381,9 @@ Future<void> main() async {
       if (num('bandWidthDeg') != null) {
         s.bandWidth = num('bandWidthDeg')! * math.pi / 180;
       }
+      if (num('bandMaxShearDeg') != null) {
+        s.bandMaxShear = num('bandMaxShearDeg')! * math.pi / 180;
+      }
       if (num('coverageVar') != null) s.coverageVar = num('coverageVar')!;
       if (num('coverageFreq') != null) s.coverageFreq = num('coverageFreq')!;
       if (num('coverageSpeed') != null) {
