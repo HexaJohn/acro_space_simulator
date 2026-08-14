@@ -201,20 +201,40 @@ class SceneSync {
 
   /// Adaptive exposure — heuristic eye adaptation, no GPU luminance pass
   /// available (no compute on this stack). Target exposure derives from
-  /// what's framed: looking at the focus body's NIGHT side brightens (up
-  /// to ~3.2x, like eyes adjusting to the dark), and the sun entering the
-  /// frame pulls it down (glare). scene.exposure eases toward the target
-  /// with a ~0.8 s time constant so transitions read as adaptation, not
-  /// flicker.
+  /// what's framed: looking at the focus body's NIGHT side brightens (like
+  /// eyes adjusting to the dark), and the sun entering the frame pulls it
+  /// down (glare). scene.exposure eases toward the target so transitions
+  /// read as adaptation, not flicker.
+  ///
+  /// Every knob is a static so the debug panel and `ext.acro.camera` can
+  /// drive it live. With [autoExposure] off, [manualExposure] becomes the
+  /// target (still eased — a slider drag reads as adaptation, not a cut).
   static bool autoExposure = true;
+  static double manualExposure = 1.0;
+
+  /// Clamp on the AUTO target. Defaults bracket exactly what the heuristic
+  /// could already produce (glare floor 1.0*0.55, night ceiling 1.0+2.2), so
+  /// stock behaviour is unchanged; tightening them tames the adaptation.
+  static double minExposure = 0.55;
+  static double maxExposure = 3.2;
+
+  /// Ease time constants (s). Brightening (walking into shadow) and
+  /// darkening (sun swinging into frame) are separately tunable — real eyes
+  /// dark-adapt far slower than they glare-adapt.
+  static double adaptUpS = 0.8;
+  static double adaptDownS = 0.8;
+
+  /// Readouts: the eased exposure actually applied this frame, and the
+  /// target it is chasing.
   static double lastExposure = 1.0;
+  static double lastTarget = 1.0;
   DateTime? _lastExposureTick;
 
   void _updateExposure(WorldSnapshot snap, SceneCamera? camera,
       String? focusVesselId, String? focusBodyId) {
     if (camera == null) return;
     final star = _bodies.starWorld(snap);
-    double target = 1.0;
+    double target = autoExposure ? 1.0 : manualExposure;
     if (autoExposure && star != null) {
       final bodyId = focusBodyId ??
           (focusVesselId == null ? null : snap.vessels[focusVesselId]?.body);
@@ -233,6 +253,7 @@ class SceneSync {
       final sunDir = (star - eyeWorld).normalized;
       final glare = _smooth01((camera.forward.dot(sunDir) - 0.7) / 0.25);
       target *= 1.0 - 0.45 * glare;
+      target = target.clamp(minExposure, maxExposure);
     }
     final now = DateTime.now();
     final dt = _lastExposureTick == null
@@ -240,9 +261,11 @@ class SceneSync {
         : (now.difference(_lastExposureTick!).inMicroseconds / 1e6)
             .clamp(0.0, 0.25);
     _lastExposureTick = now;
-    final k = 1.0 - math.exp(-dt / 0.8);
+    final tau = target > scene.exposure ? adaptUpS : adaptDownS;
+    final k = 1.0 - math.exp(-dt / math.max(0.01, tau));
     scene.exposure += (target - scene.exposure) * k;
     lastExposure = scene.exposure;
+    lastTarget = target;
   }
 
   static double _smooth01(double x) {

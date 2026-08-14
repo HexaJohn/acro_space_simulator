@@ -343,6 +343,14 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
             final f = _currentFocusWorld();
             return [f.x, f.y, f.z];
           }(),
+          'autoExposure': SceneSync.autoExposure,
+          'exposure': SceneSync.lastExposure,
+          'exposureTarget': SceneSync.lastTarget,
+          'manualExposure': SceneSync.manualExposure,
+          'expMin': SceneSync.minExposure,
+          'expMax': SceneSync.maxExposure,
+          'expUp': SceneSync.adaptUpS,
+          'expDown': SceneSync.adaptDownS,
         };
   }
   // Latest world snapshot for the flutter_scene backend (null when the
@@ -1746,6 +1754,108 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                   setState(() => SceneCameraDebug.farOverrideM = v),
             ),
           ],
+          // Eye adaptation: auto heuristic vs a manual override, with the
+          // auto clamp and the up/down ease times exposed. The readout shows
+          // the eased exposure actually applied and the target it chases —
+          // 3D backend only (the software painter has no exposure).
+          const Padding(
+            padding: EdgeInsets.only(left: 4, top: 6, bottom: 2),
+            child: Text(
+              'EXPOSURE',
+              style: TextStyle(color: Color(0xFF7FB0E0), fontSize: 11, fontWeight: FontWeight.bold),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
+            child: _atmoButton(
+              'Exposure: ${SceneSync.autoExposure ? 'auto' : 'manual'}'
+              '${_renderBackend == RenderBackend.flutterScene ? '' : ' (3D only)'}',
+              SceneSync.autoExposure
+                  ? const Color(0xFF7FB0E0)
+                  : const Color(0xFFFFB347),
+              () => setState(
+                  () => SceneSync.autoExposure = !SceneSync.autoExposure),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(left: 4),
+            child: Text(
+              'now ${SceneSync.lastExposure.toStringAsFixed(2)}'
+              ' → target ${SceneSync.lastTarget.toStringAsFixed(2)}',
+              style: const TextStyle(color: Color(0xFF7FB0E0), fontSize: 11),
+            ),
+          ),
+          if (!SceneSync.autoExposure) ...[
+            Padding(
+              padding: const EdgeInsets.only(left: 4),
+              child: Text(
+                'manual ${SceneSync.manualExposure.toStringAsFixed(2)}x',
+                style: const TextStyle(color: Color(0xFFB9C9DC), fontSize: 11),
+              ),
+            ),
+            _logSlider(
+              value: SceneSync.manualExposure,
+              minExp: -0.7, // 0.2x
+              maxExp: 0.7, // 5x
+              onChanged: (v) =>
+                  setState(() => SceneSync.manualExposure = v),
+            ),
+          ] else ...[
+            Padding(
+              padding: const EdgeInsets.only(left: 4),
+              child: Text(
+                'auto min ${SceneSync.minExposure.toStringAsFixed(2)}x',
+                style: const TextStyle(color: Color(0xFFB9C9DC), fontSize: 11),
+              ),
+            ),
+            _logSlider(
+              value: SceneSync.minExposure,
+              minExp: -0.7, // 0.2x
+              maxExp: 0.3, // 2x
+              onChanged: (v) => setState(() => SceneSync.minExposure =
+                  math.min(v, SceneSync.maxExposure)),
+            ),
+            Padding(
+              padding: const EdgeInsets.only(left: 4),
+              child: Text(
+                'auto max ${SceneSync.maxExposure.toStringAsFixed(2)}x',
+                style: const TextStyle(color: Color(0xFFB9C9DC), fontSize: 11),
+              ),
+            ),
+            _logSlider(
+              value: SceneSync.maxExposure,
+              minExp: 0.0, // 1x
+              maxExp: 0.7, // 5x
+              onChanged: (v) => setState(() => SceneSync.maxExposure =
+                  math.max(v, SceneSync.minExposure)),
+            ),
+          ],
+          Padding(
+            padding: const EdgeInsets.only(left: 4),
+            child: Text(
+              'up ${SceneSync.adaptUpS.toStringAsFixed(2)}s',
+              style: const TextStyle(color: Color(0xFFB9C9DC), fontSize: 11),
+            ),
+          ),
+          _logSlider(
+            value: SceneSync.adaptUpS,
+            minExp: -1.3, // 0.05 s
+            maxExp: 0.7, // 5 s
+            onChanged: (v) => setState(() => SceneSync.adaptUpS = v),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(left: 4),
+            child: Text(
+              'down ${SceneSync.adaptDownS.toStringAsFixed(2)}s',
+              style: const TextStyle(color: Color(0xFFB9C9DC), fontSize: 11),
+            ),
+          ),
+          _logSlider(
+            value: SceneSync.adaptDownS,
+            minExp: -1.3, // 0.05 s
+            maxExp: 0.7, // 5 s
+            onChanged: (v) => setState(() => SceneSync.adaptDownS = v),
+          ),
           // Destruction cheats: skip overheat / aero-stress / impact so a craft
           // survives an otherwise-fatal profile. Rebuilds the tick on change.
           const Padding(

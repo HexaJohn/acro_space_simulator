@@ -177,10 +177,30 @@ Future<void> main() async {
         _ => AntiAliasingMode.auto,
       };
     }
-    // Adaptive exposure toggle: autoExposure=true|false.
+    // Adaptive exposure toggle: autoExposure=true|false. exposure=<x> sets a
+    // manual value AND switches auto off (that is what setting it means);
+    // expMin/expMax clamp the auto target, expUp/expDown are the ease time
+    // constants in seconds. Same knobs as the debug panel's EXPOSURE section.
     if (params['autoExposure'] != null) {
       SceneSync.autoExposure = params['autoExposure'] == 'true';
     }
+    final exposure = deg('exposure');
+    if (exposure != null && exposure > 0) {
+      SceneSync.manualExposure = exposure;
+      SceneSync.autoExposure = false;
+    }
+    final expMin = deg('expMin');
+    if (expMin != null && expMin > 0) {
+      SceneSync.minExposure = math.min(expMin, SceneSync.maxExposure);
+    }
+    final expMax = deg('expMax');
+    if (expMax != null && expMax > 0) {
+      SceneSync.maxExposure = math.max(expMax, SceneSync.minExposure);
+    }
+    final expUp = deg('expUp');
+    if (expUp != null && expUp > 0) SceneSync.adaptUpS = expUp;
+    final expDown = deg('expDown');
+    if (expDown != null && expDown > 0) SceneSync.adaptDownS = expDown;
     // Cast-shadow pass toggle (A/B): shadows=true|false.
     if (params['shadows'] != null) {
       SceneSync.shadowsEnabled = params['shadows'] == 'true';
