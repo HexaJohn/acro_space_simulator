@@ -43,7 +43,19 @@ class TerrainTextures {
   /// faults, so there has to be something in the slot.
   static Object? albedoPlaceholder;
 
+  /// Per-body DEM-derived tangent-space normal maps (`.acronrm`), same
+  /// equirect layout as [albedo]. r/g carry the east/north components; the
+  /// shader reconstructs z. Puts crater rims back into the lighting on
+  /// coarse-LOD chunks whose triangles can no longer carry them.
+  static final Map<String, Object> normals = {};
+
+  /// 1x1 "flat" normal (east=0, north=0 -> straight up) for bodies with no
+  /// baked map — the slot must be live for the same reason as
+  /// [albedoPlaceholder]; the strength uniform gates it to zero effect.
+  static Object? normalPlaceholder;
+
   static final Set<String> _albedoTried = {};
+  static final Set<String> _normalsTried = {};
 
   static Future<void>? _loading;
   static bool get ready => regolith != null;
@@ -60,6 +72,8 @@ class TerrainTextures {
         grass = _upload(_grass);
         albedoPlaceholder = _uploadRgba(
             Uint8List.fromList([255, 255, 255, 255]), 1, 1);
+        normalPlaceholder = _uploadRgba(
+            Uint8List.fromList([128, 128, 255, 255]), 1, 1);
       }();
 
   /// Load `assets/terrain/<body>.acroalb` if it exists, once per body.
@@ -90,6 +104,40 @@ class TerrainTextures {
         rgba[i * 4 + 3] = 255;
       }
       albedo[bodyId] = _uploadRgba(rgba, w, h);
+    } catch (_) {
+      // No map for this body. Not an error.
+    }
+  }
+
+  /// Load `assets/terrain/<body>.acronrm` if it exists, once per body.
+  /// Missing is the normal case, exactly as [loadAlbedo].
+  static Future<void> loadNormals(String bodyId) async {
+    if (_normalsTried.contains(bodyId)) return;
+    _normalsTried.add(bodyId);
+    try {
+      final data = await rootBundle.load('assets/terrain/$bodyId.acronrm');
+      final bytes = data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
+      final view = ByteData.sublistView(bytes);
+      if (view.lengthInBytes < 16 ||
+          view.getUint32(0) != 0x4143524F ||
+          view.getUint32(4) != 0x4E524D01) {
+        return; // not an ACRONRM map; body keeps the geometric normal alone
+      }
+      final w = view.getUint32(8), h = view.getUint32(12);
+      if (w <= 0 || h <= 0 || bytes.length < 16 + w * h * 2) return;
+      // RG on disk (east/north), RGBA on the GPU; b is a decode-side z so the
+      // texture is a valid normal even where a debug view samples it raw.
+      final rgba = Uint8List(w * h * 4);
+      for (var i = 0; i < w * h; i++) {
+        final e = bytes[16 + i * 2] / 127.5 - 1.0;
+        final n = bytes[16 + i * 2 + 1] / 127.5 - 1.0;
+        final z = math.sqrt(math.max(1.0 - e * e - n * n, 0.0));
+        rgba[i * 4] = bytes[16 + i * 2];
+        rgba[i * 4 + 1] = bytes[16 + i * 2 + 1];
+        rgba[i * 4 + 2] = ((z * 0.5 + 0.5) * 255.0).round();
+        rgba[i * 4 + 3] = 255;
+      }
+      normals[bodyId] = _uploadRgba(rgba, w, h);
     } catch (_) {
       // No map for this body. Not an error.
     }

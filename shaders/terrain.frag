@@ -44,6 +44,12 @@ uniform TerrainInfo {
   // it has to be supplied rather than derived. w: albedo strength (0 = the
   // procedural blend alone, as before; 1 = full real albedo).
   vec4 meridian_albedo;
+  // Detail-normal (tex_normal) controls. x: strength (0 = off — bodies with
+  // no baked map). y/z: camera-distance fade near/far (scene units): below y
+  // the MESH carries the relief so the map stays out (double-counting the
+  // same ridge in geometry AND lighting exaggerates it); above z coarse
+  // chunks have lost the relief and the map takes over fully. w: unused.
+  vec4 normal_params;
 }
 terrain;
 
@@ -72,6 +78,12 @@ uniform sampler2D tex_grass;
 // the maria actually are. The tiles above still supply close-up grain, because
 // this map is only ~5 km per texel.
 uniform sampler2D tex_albedo;
+
+// DEM-derived tangent-space normal map (tool/bake_normals.dart), same equirect
+// body-fixed layout as tex_albedo. r/g = east/north components ([0,1] biased),
+// z reconstructed. Restores crater-rim lighting on coarse LOD chunks whose
+// triangles can no longer carry the relief; silhouettes stay mesh-bound.
+uniform sampler2D tex_normal;
 
 in vec3 v_position;
 in vec3 v_normal;
@@ -332,6 +344,33 @@ void main() {
     albedo = mix(albedo, real * detailRatio, albedoMix);
   }
 
+  // Detail normal: fade the baked map in with CAMERA DISTANCE. The map is the
+  // full-relief normal (every frequency the DEM has), so at full strength it
+  // REPLACES the geometric normal rather than perturbing it — near the ground
+  // the mesh resolves the same ridges and the map must stay out or they'd be
+  // counted twice. Material/slope selection above stays on the geometric
+  // normal: it only matters close up, where the map is faded out anyway.
+  float nStrength = clamp(terrain.normal_params.x, 0.0, 1.0);
+  if (nStrength > 0.0) {
+    // v_viewvector = camera - fragment (scene units).
+    float eyeDist = length(v_viewvector);
+    float w =
+        nStrength *
+        smoothstep(terrain.normal_params.y, terrain.normal_params.z, eyeDist);
+    // Local east degenerates at the poles (cross of near-parallel vectors);
+    // the guard leaves the geometric normal there.
+    vec3 eastL = cross(pol, up);
+    float el = length(eastL);
+    if (w > 0.001 && el > 1e-4) {
+      eastL /= el;
+      vec3 northL = cross(up, eastL);
+      vec2 t = texture(tex_normal, uv).rg * 2.0 - 1.0;
+      float tz = sqrt(max(1.0 - dot(t, t), 0.0));
+      vec3 mapN = normalize(t.x * eastL + t.y * northL + tz * up);
+      n = normalize(mix(n, mapN, w));
+    }
+  }
+
   // Sun Lambert + ambient. Light travels along sun_amp.xyz, so a surface is
   // lit by the component facing back toward the sun (-dir).
   float lit = max(dot(n, -terrain.sun_amp.xyz), 0.0);
@@ -353,7 +392,7 @@ void main() {
       // ALBEDO: the raw baked map through the shader's own uv path — unlit
       // and unmodulated, so what's on screen IS the mapping.
       frag_color = vec4(texture(tex_albedo, uv).rgb, 1.0);
-    } else {
+    } else if (dbg < 3.5) {
       // ALIGN: albedo as a grey underlay, 1 km altitude contours in orange,
       // 15-degree body-fixed graticule in blue. Contours hugging the maria
       // edges = the height field and the colour map agree.
@@ -364,6 +403,10 @@ void main() {
       c = mix(c, vec3(0.28, 0.47, 1.00), 0.55 * grid);
       c = mix(c, vec3(1.00, 0.51, 0.08), IsoLine(alt_m, 1000.0, 0.04));
       frag_color = vec4(c, 1.0);
+    } else {
+      // NRM: the raw detail-normal map through the shader's own uv path
+      // (flat = lavender 128/128/255, slopes tint toward red/green).
+      frag_color = vec4(texture(tex_normal, uv).rgb, 1.0);
     }
     return;
   }

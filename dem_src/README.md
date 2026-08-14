@@ -13,6 +13,16 @@ conversion. The bake target is a **cubed-sphere tile pyramid** keyed by
 equirectangular carries a pole singularity and a permanent projection
 mismatch against the chunk grid.
 
+Three bakes come from these sources (all default to the Moon files):
+
+- `tool/bake_dem.dart` → `moon.acrodem` — the cubed-sphere elevation pyramid
+  (meshing + collision).
+- `tool/bake_albedo.dart` → `moon.acroalb` — equirect real surface colour.
+- `tool/bake_normals.dart` → `moon.acronrm` — equirect tangent-space normal
+  map from the full-resolution DEM; the terrain shader fades it in with
+  camera distance so coarse LOD chunks keep crater-rim LIGHTING the mesh can
+  no longer carry (silhouettes stay mesh-bound).
+
 All sources below are NASA/NOAA public-domain products; they still want
 attribution in the in-app credits alongside the existing Solar System Scope
 line.

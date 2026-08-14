@@ -47,11 +47,12 @@ class TerrainNodes {
 
   /// Debug view for the terrain shader (debug panel / dev ext):
   /// 0 normal, 1 height bands + 1 km contours, 2 raw albedo map,
-  /// 3 alignment overlay (albedo grey + contours + graticule).
+  /// 3 alignment overlay (albedo grey + contours + graticule),
+  /// 4 raw detail-normal map (flat ground reads lavender 128/128/255).
   static int debugView = 0;
-  static const int debugViewCount = 4;
+  static const int debugViewCount = 5;
   static const List<String> debugViewNames = [
-    'normal', 'height', 'albedo', 'align',
+    'normal', 'height', 'albedo', 'align', 'nrm',
   ];
 
   /// Lateral cells across one chunk.
@@ -112,6 +113,19 @@ class TerrainNodes {
   /// modulation of the procedural blend rather than a replacement — it supplies
   /// the truth (where the maria are), the tiles supply the grain.
   static double albedoStrength = 1.0;
+
+  /// How much of the baked DEM normal map (`.acronrm`) to blend into the
+  /// lighting where one exists, 0..1. Restores crater-rim lighting on coarse
+  /// LOD chunks; see the fade range below for why it is distance-gated.
+  static double detailNormalStrength = 1.0;
+
+  /// Camera-distance fade for the detail normal, in scene units (km). Below
+  /// [normalFadeNearKm] the mesh resolves the same relief the map carries
+  /// (~2.7 km/texel), so the map stays out — lighting a ridge that geometry
+  /// already lights exaggerates it. Above [normalFadeFarKm] chunks are coarse
+  /// and the map carries the relief alone.
+  static double normalFadeNearKm = 10.0;
+  static double normalFadeFarKm = 60.0;
 
   /// Voxels across an edit's diameter once refined. Below ~6 a crater reads as
   /// a dent; much above it the chunk count climbs for detail the material
@@ -307,6 +321,7 @@ class TerrainNodes {
       // Fire-and-forget: the first frames draw with the placeholder and the
       // real colour appears when the upload lands.
       TerrainTextures.loadAlbedo(bodyId!);
+      TerrainTextures.loadNormals(bodyId);
     }
 
     final field = TerrainField(
@@ -623,8 +638,16 @@ class TerrainNodes {
       // the procedural blend exactly as before.
       albedoStrength:
           TerrainTextures.albedo.containsKey(bodyId) ? albedoStrength : 0.0,
+      // Same gate for the DEM normal map: strength 0 keeps the geometric
+      // normal alone on bodies without one.
+      normalStrength: TerrainTextures.normals.containsKey(bodyId)
+          ? detailNormalStrength
+          : 0.0,
+      normalFadeNear: normalFadeNearKm,
+      normalFadeFar: normalFadeFarKm,
     );
     _material?.bindAlbedo(TerrainTextures.albedo[bodyId]);
+    _material?.bindNormals(TerrainTextures.normals[bodyId]);
     // Bind the procedural material tiles once they've finished uploading.
     _material?.bindTiles();
   }
@@ -762,6 +785,9 @@ class _TerrainMaterial extends fs.ShaderMaterial {
     required vm.Vector3 poleWorld,
     required vm.Vector3 meridianWorld,
     required double albedoStrength,
+    required double normalStrength,
+    required double normalFadeNear,
+    required double normalFadeFar,
   }) {
     setUniformBlockFromFloats('TerrainInfo', [
       centreScene.x, centreScene.y, centreScene.z, radiusScene,
@@ -776,6 +802,8 @@ class _TerrainMaterial extends fs.ShaderMaterial {
       poleWorld.x, poleWorld.y, poleWorld.z, 0.0, // pole (world)
       meridianWorld.x, meridianWorld.y, meridianWorld.z,
       albedoStrength, // meridian (world) + real-albedo mix
+      normalStrength, normalFadeNear, normalFadeFar,
+      0.0, // normal_params (w unused)
     ]);
   }
 
@@ -827,6 +855,30 @@ class _TerrainMaterial extends fs.ShaderMaterial {
     );
     _boundAlbedo = want;
     _albedoEverBound = true;
+  }
+
+  Object? _boundNormals;
+  bool _normalsEverBound = false;
+
+  /// Bind the body's DEM normal map, or the flat placeholder when it has
+  /// none — same live-slot requirement and strength gating as [bindAlbedo].
+  void bindNormals(Object? texture) {
+    final want = texture ?? TerrainTextures.normalPlaceholder;
+    if (want == null) return;
+    if (_normalsEverBound && identical(want, _boundNormals)) return;
+    setTexture(
+      'tex_normal',
+      want,
+      sampler: igpu.SamplerOptions(
+        minFilter: igpu.MinMagFilter.linear,
+        magFilter: igpu.MinMagFilter.linear,
+        // Longitude wraps, latitude clamps — matches tex_albedo.
+        widthAddressMode: igpu.SamplerAddressMode.repeat,
+        heightAddressMode: igpu.SamplerAddressMode.clampToEdge,
+      ),
+    );
+    _boundNormals = want;
+    _normalsEverBound = true;
   }
 
   @override

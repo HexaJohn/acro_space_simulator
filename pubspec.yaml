@@ -109,9 +109,10 @@ flutter:
   assets:
     - assets/image/
     - assets/textures/
-    # Baked terrain data: cubed-sphere elevation pyramids (.acrodem) and
-    # equirectangular albedo maps (.acroalb), produced by tool/bake_dem.dart
-    # and tool/bake_albedo.dart from the gigabyte sources in dem_src/.
+    # Baked terrain data: cubed-sphere elevation pyramids (.acrodem),
+    # equirectangular albedo maps (.acroalb) and DEM normal maps (.acronrm),
+    # produced by tool/bake_dem.dart, tool/bake_albedo.dart and
+    # tool/bake_normals.dart from the gigabyte sources in dem_src/.
     - assets/terrain/
     # Craft models: baked .fsceneb packages only (licensed .glb sources live
     # in mesh_src/, gitignored and never bundled — tool/import_mesh.dart
