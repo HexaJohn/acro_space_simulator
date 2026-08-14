@@ -24,8 +24,9 @@ uniform TerrainInfo {
   // x: sea radius (scene). y: ambient. z: snow altitude start (0..1 of relief
   // above sea). w: rock slope threshold (cos angle; below this = cliff rock).
   vec4 params;
-  // Straight RGB palette (a = unused): low flat ground, high flat ground,
-  // steep rock, snow.
+  // Straight RGB palette: low flat ground, high flat ground, steep rock,
+  // snow. Alphas unused EXCEPT col_rock.a = macro material tile size (m),
+  // the second, larger octave of the ground textures (0 disables).
   vec4 col_low;
   vec4 col_high;
   vec4 col_rock;
@@ -48,7 +49,9 @@ uniform TerrainInfo {
   // no baked map). y/z: camera-distance fade near/far (scene units): below y
   // the MESH carries the relief so the map stays out (double-counting the
   // same ridge in geometry AND lighting exaggerates it); above z coarse
-  // chunks have lost the relief and the map takes over fully. w: unused.
+  // chunks have lost the relief and the map takes over fully.
+  // w: macro material weight 0..1 — how much of the second (col_rock.a)
+  // texture octave blends into regolith/rock.
   vec4 normal_params;
 }
 terrain;
@@ -292,6 +295,20 @@ void main() {
   vec3 c_rock = triplanar(tex_rock, wpos_m, n, tile_m);
   vec3 c_sand = triplanar(tex_sand, wpos_m, n, tile_m);
   vec3 c_grass = triplanar(tex_grass, wpos_m, n, tile_m);
+
+  // Second octave of the ground materials: regolith + rock sampled AGAIN at
+  // a macro tile (col_rock.a metres, ~40x the fine tile) and lerped in. One
+  // 6 m tile repeated across a planet reads as wallpaper from a few hundred
+  // metres up; the macro octave modulates it at hillside scale, and being
+  // the SAME texture the lerp preserves the mean — no hue or brightness
+  // drift, just structure. Weight w halves the lerp so the fine grain always
+  // survives underneath.
+  float macro_tile = terrain.col_rock.a;
+  float macro_w = clamp(terrain.normal_params.w, 0.0, 1.0) * 0.5;
+  if (macro_tile > 0.0 && macro_w > 0.0) {
+    c_reg = mix(c_reg, triplanar(tex_regolith, wpos_m, n, macro_tile), macro_w);
+    c_rock = mix(c_rock, triplanar(tex_rock, wpos_m, n, macro_tile), macro_w);
+  }
 
   // FLAT ground material: regolith by default, with grass/sand auto-selected by
   // LATITUDE + ALTITUDE up to the body's caps (both 0 on the Moon -> regolith).

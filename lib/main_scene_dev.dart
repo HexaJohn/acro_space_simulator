@@ -205,13 +205,20 @@ Future<void> main() async {
     if (params['shadows'] != null) {
       SceneSync.shadowsEnabled = params['shadows'] == 'true';
     }
-    // Terrain material tuning: tileM=<metres>, sandW/grassW=0..1.
+    // Terrain material tuning: tileM=<metres>, sandW/grassW=0..1, plus the
+    // macro texture octave: macroTileM=<metres> (0 disables), macroW=0..1.
     final tileM = deg('tileM');
     if (tileM != null && tileM > 0) TerrainNodes.tileMeters = tileM;
     final sandW = deg('sandW');
     if (sandW != null) TerrainNodes.sandWeight = sandW.clamp(0.0, 1.0);
     final grassW = deg('grassW');
     if (grassW != null) TerrainNodes.grassWeight = grassW.clamp(0.0, 1.0);
+    final macroTileM = deg('macroTileM');
+    if (macroTileM != null && macroTileM >= 0) {
+      TerrainNodes.macroTileMeters = macroTileM;
+    }
+    final macroW = deg('macroW');
+    if (macroW != null) TerrainNodes.macroWeight = macroW.clamp(0.0, 1.0);
     // Shadow contact hardening: shHard=<hardness>, shPen=<max penumbra factor>.
     final shHard = deg('shHard');
     if (shHard != null && shHard >= 0) TerrainNodes.shadowHardness = shHard;

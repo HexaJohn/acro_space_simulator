@@ -143,6 +143,17 @@ class TerrainNodes {
   static double sandWeight = -1.0;
   static double grassWeight = -1.0;
 
+  /// Second, macro octave of the ground materials: regolith + rock sampled
+  /// again at [macroTileMeters] and blended in at [macroWeight] (0..1, 0
+  /// disables). One 6 m tile repeated across a planet reads as wallpaper
+  /// from a few hundred metres up; the macro octave breaks the repetition
+  /// at hillside scale. 900 m sits in the gap between the fine tile and the
+  /// baked albedo's ~5 km texel — visibly mottles the ground from orbit
+  /// (A/B at 100 km: flat cream vs dappled) while acting as a slow local
+  /// tint at ground level. Dev-tunable: ext.acro.camera?macroTileM=&macroW=.
+  static double macroTileMeters = 900.0;
+  static double macroWeight = 0.8;
+
   /// Cast-shadow contact hardening (dev-tunable). [shadowHardness] = how fast the
   /// penumbra grows with the caster's height above the receiver (UV per clip-z
   /// gap); [maxPenumbraFactor] scales the light's softness into the maximum
@@ -818,7 +829,8 @@ class _TerrainMaterial extends fs.ShaderMaterial {
       seaRadiusScene, ambient, 0.6, 0.6, // sea, ambient, snowStart, rockSlope
       0.34, 0.32, 0.29, 0.0, // col_low  (dark tan/grey)
       0.55, 0.53, 0.50, 0.0, // col_high (light grey)
-      0.30, 0.28, 0.27, 0.0, // col_rock (unused now; tex_rock carries colour)
+      0.30, 0.28, 0.27, // col_rock rgb (unused; tex_rock carries colour)
+      TerrainNodes.macroTileMeters, // col_rock.a = macro material tile (m)
       0.90, 0.92, 0.95, 0.0, // col_snow
       tileMeters, sandAmount, grassAmount,
       TerrainNodes.debugView.toDouble(), // detail (w = debug view)
@@ -826,7 +838,7 @@ class _TerrainMaterial extends fs.ShaderMaterial {
       meridianWorld.x, meridianWorld.y, meridianWorld.z,
       albedoStrength, // meridian (world) + real-albedo mix
       normalStrength, normalFadeNear, normalFadeFar,
-      0.0, // normal_params (w unused)
+      TerrainNodes.macroWeight.clamp(0.0, 1.0), // normal_params.w = macro mix
     ]);
   }
 
