@@ -256,11 +256,7 @@ class ScatterNodes {
     // --- Per-frame placement ------------------------------------------------
     // Every batch shares the anchor, so one transform per node per frame keeps
     // the whole field pinned to a spinning planet.
-    final transform = vm.Matrix4.compose(
-      origin.worldToScene(bodyWorld + bodyQuat.rotate(_anchorBF)),
-      quatToScene(bodyQuat),
-      vm.Vector3.all(lengthToScene(1.0)),
-    );
+    final transform = batchTransform(origin, bodyWorld, bodyQuat, _anchorBF);
     for (final node in _batches.values) {
       node.localTransform = transform;
     }
@@ -420,13 +416,42 @@ class ScatterNodes {
     });
   }
 
+  /// The shared per-frame node transform: anchor position in scene units,
+  /// body rotation, UNIT scale.
+  ///
+  /// Unit scale is load-bearing: every value under this node — instance
+  /// offsets ([instanceTransform]) and billboard centres — is written in
+  /// scene units already. The node once scaled by [lengthToScene] on top,
+  /// which collapsed every prop mesh to millimetres (nothing but billboards
+  /// ever showed) and crushed all the imposter cards onto the anchor point —
+  /// a 256 m-quantised grid point that can sit well off the ground, read as
+  /// "scatter floats in the sky". The ring debris field is the reference
+  /// pattern: node at 1.0, conversions in the per-instance data.
+  static vm.Matrix4 batchTransform(
+    FloatingOrigin origin,
+    Vector3 bodyWorld,
+    Quaternion bodyQuat,
+    Vector3 anchorBF,
+  ) =>
+      vm.Matrix4.compose(
+        origin.worldToScene(bodyWorld + bodyQuat.rotate(anchorBF)),
+        quatToScene(bodyQuat),
+        vm.Vector3.all(1.0),
+      );
+
   /// The instance's model transform, relative to the shared anchor.
   ///
   /// Props stand along the SURFACE NORMAL, not the radius: on a hillside the
   /// two differ by the slope, and a tree planted radially leans visibly
   /// downhill.
-  vm.Matrix4 _transformOf(ScatterInstance instance) {
-    final offset = instance.positionBF - _anchorBF;
+  vm.Matrix4 _transformOf(ScatterInstance instance) =>
+      instanceTransform(instance, _anchorBF);
+
+  /// See [_transformOf]; static and anchor-explicit so the frame maths is
+  /// testable against [batchTransform] without a live scene.
+  static vm.Matrix4 instanceTransform(
+      ScatterInstance instance, Vector3 anchorBF) {
+    final offset = instance.positionBF - anchorBF;
     final tilt = _alignZTo(instance.upBF);
     final spin = Quaternion.axisAngle(Vector3.unitZ, instance.yaw);
     return vm.Matrix4.compose(
