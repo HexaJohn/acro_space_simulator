@@ -451,6 +451,10 @@ class _CloudShell {
     required int tintArgb,
     required double freq,
     required vm.Quaternion orient,
+    // Editor-only field maps (see the shader's cov_info.w): 0 renders
+    // clouds, 1..4 paint density/coverage/wind/swirl heatmaps. The sim
+    // never passes this.
+    double debugView = 0,
   }) {
     // vec4 center_radius: planet centre + radius (analytic occluder).
     _uniforms[0] = centreScene.x;
@@ -500,7 +504,7 @@ class _CloudShell {
     _uniforms[32] = coverageVar;
     _uniforms[33] = coverageFreq;
     _uniforms[34] = coverageSpeed;
-    _uniforms[35] = 0;
+    _uniforms[35] = debugView;
     // All windings share the block; only the active set is in the scene.
     _inMaterial.setUniformBlockFromFloats('CloudInfo', _uniforms);
     _outMaterial.setUniformBlockFromFloats('CloudInfo', _uniforms);
@@ -530,6 +534,7 @@ class CloudPreviewNodes {
     required double timeS,
     required Vector3 toSun,
     required vm.Vector3 cameraEyeScene,
+    int debugView = 0,
   }) {
     final shader = CloudNodes._shader;
     if (shader == null) return;
@@ -568,6 +573,7 @@ class CloudPreviewNodes {
       tintArgb: style.tintArgb,
       freq: style.freq,
       orient: vm.Quaternion.identity(),
+      debugView: debugView.toDouble(),
     );
   }
 

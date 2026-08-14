@@ -61,7 +61,10 @@ uniform CloudInfo {
   // advects with the flow and evolves over time. x: variation amplitude
   // (0 = static coverage, the old behaviour). y: field frequency, as a
   // fraction of the base noise frequency (continent scale). z: evolution
-  // rate (domain scroll per sim-second). w: unused.
+  // rate (domain scroll per sim-second). w: DEBUG VIEW — 0 renders clouds;
+  // 1..4 paint the mid-shell field as a flat map instead (1 density heat,
+  // 2 effective coverage heat, 3 zonal wind diverging blue-west/red-east,
+  // 4 swirl drag heat). Editor-only; the sim always sends 0.
   vec4 cov_info;
 }
 cloud_info;
@@ -371,11 +374,95 @@ float cloudDensityLo(vec3 p) {
   return clamp(d, 0.0, 1.0) * vert;
 }
 
+// Heat ramp: blue 0 -> green 0.5 -> red 1.
+vec3 heat(float t) {
+  t = clamp(t, 0.0, 1.0) * 3.0;
+  return vec3(clamp(t - 1.5, 0.0, 1.0),
+              clamp(1.5 - abs(t - 1.5), 0.0, 1.0),
+              clamp(1.5 - t, 0.0, 1.0));
+}
+
+// Diverging ramp: blue -1 (westward) -> light grey 0 -> red +1 (eastward).
+vec3 diverge(float v) {
+  v = clamp(v, -1.0, 1.0);
+  return v < 0.0 ? mix(vec3(0.85), vec3(0.10, 0.30, 0.90), -v)
+                 : mix(vec3(0.85), vec3(0.90, 0.15, 0.10), v);
+}
+
+// Shared domain transform for the debug maps — the same body rotation,
+// banded drift and wind scroll the density fields apply, so every map shows
+// the field exactly where the render samples it.
+vec3 debugDomain(vec3 p, out float lat, out float band) {
+  vec3 centre = cloud_info.center_radius.xyz;
+  float planetR = cloud_info.center_radius.w;
+  float time = cloud_info.base_cov_dens_t.w;
+  float windSpeed = cloud_info.wind_detail_amb_int.x;
+  vec3 op = p - centre;
+  float r = max(length(op), 1e-4);
+  vec3 local = qrot(vec4(-cloud_info.orient.xyz, cloud_info.orient.w), op);
+  lat = asin(clamp(local.z / r, -1.0, 1.0));
+  float bandW = max(cloud_info.band_info.y, 1e-3);
+  band = 1.0 - cloud_info.band_info.x *
+      (1.0 - smoothstep(bandW * 0.5, bandW, abs(lat)));
+  float drift = time * cloud_info.swirl_global.w * band;
+  float cd = cos(drift), sd = sin(drift);
+  local = vec3(local.x * cd - local.y * sd, local.x * sd + local.y * cd, local.z);
+  return local / planetR * cloud_info.tint_freq.w +
+      vec3(time * windSpeed, time * windSpeed * 0.3, 0.0);
+}
+
 void main() {
   vec3 centre = cloud_info.center_radius.xyz;
   float planetR = cloud_info.center_radius.w;
   float topR = cloud_info.sun_top.w;
   float baseR = cloud_info.base_cov_dens_t.x;
+
+  // DEBUG MAPS: paint the mid-shell field as a flat unlit map on the shell
+  // and skip the march entirely. The fragment is already ON the shell
+  // sphere, so projecting it to the mid-shell radius gives the sample
+  // point the render's view samples pass through.
+  float dbg = cloud_info.cov_info.w;
+  if (dbg > 0.5) {
+    float time = cloud_info.base_cov_dens_t.w;
+    vec3 spos = centre +
+        normalize(v_position - centre) * mix(baseR, topR, 0.5);
+    float lat;
+    float band;
+    vec3 P = debugDomain(spos, lat, band);
+    vec3 col;
+    if (dbg < 1.5) {
+      // DENSITY: the full field (warp + erosion + veil) at mid-shell.
+      col = heat(cloudDensity(spos));
+    } else if (dbg < 2.5) {
+      // COVERAGE: the effective threshold after the coverage-weather
+      // modulation and the latitude bands.
+      float cov = cloud_info.base_cov_dens_t.y;
+      float cvar = cloud_info.cov_info.x;
+      if (cvar > 0.0) {
+        float cn = fbm3(P * cloud_info.cov_info.y + 91.3 +
+                        vec3(time * cloud_info.cov_info.z,
+                             time * cloud_info.cov_info.z * -0.5, 0.0));
+        cov *= clamp(1.0 + cvar * (cn - 0.4375) * 2.286, 0.0, 2.0);
+      }
+      col = heat(clamp(cov * latBands(lat), 0.0, 1.0));
+    } else if (dbg < 3.5) {
+      // WIND: signed zonal drift by latitude — red east, blue west,
+      // normalised so the strongest band in either direction saturates.
+      float norm = max(1.0, abs(1.0 - cloud_info.band_info.x));
+      col = diverge(band / norm * sign(cloud_info.swirl_global.w));
+    } else {
+      // SWIRL: the warp drag magnitude in feature units (3 = saturated).
+      float sfreq = cloud_info.swirl_global.y;
+      vec3 sw = vec3(time * cloud_info.swirl_global.z,
+                     time * cloud_info.swirl_global.z * -0.6, 0.0);
+      vec3 Q = vec3(fbm3(P * sfreq + 11.5 + sw),
+                    fbm3(P * sfreq + 31.7 + sw),
+                    fbm3(P * sfreq + 57.1 + sw));
+      col = heat(length(cloud_info.swirl_global.x * (Q - 0.5)) / 3.0);
+    }
+    frag_color = vec4(col, 1.0);
+    return;
+  }
   vec3 sunDir = normalize(cloud_info.sun_top.xyz);
   float densMul = cloud_info.base_cov_dens_t.z;
   float ambient = cloud_info.wind_detail_amb_int.z;

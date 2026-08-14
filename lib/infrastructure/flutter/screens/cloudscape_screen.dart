@@ -86,6 +86,20 @@ class _CloudscapeScreenState extends State<CloudscapeScreen>
   double _sunAzimuth = 0.6;
   double _sunElevation = 0.15;
 
+  /// Shader field map: 0 renders clouds, 1..4 paint density / coverage /
+  /// wind / swirl on the shell (see the shader's cov_info.w).
+  int _debugView = 0;
+  static const List<String> _viewLabels = [
+    'RENDER', 'DENSITY', 'COVERAGE', 'WIND', 'SWIRL',
+  ];
+  static const List<String> _viewLegends = [
+    '',
+    'density at mid-shell — blue 0, green 0.5, red 1',
+    'effective coverage after weather + bands — blue 0, red 1',
+    'zonal drift by latitude — red east, blue west',
+    'domain-warp drag — blue none, red 3+ feature units',
+  ];
+
   // Cloud-time animation: the shader's time uniform advances at [_warp]
   // sim-seconds per wall-second, mirroring how the sim's time-warp drives
   // the morph. 0 freezes the deck for still judgement.
@@ -297,6 +311,7 @@ class _CloudscapeScreenState extends State<CloudscapeScreen>
       timeS: _cloudTimeS,
       toSun: Vector3(toSun.x, toSun.y, toSun.z),
       cameraEyeScene: camera.position,
+      debugView: _debugView,
     );
 
     return Stack(
@@ -461,6 +476,26 @@ class _CloudscapeScreenState extends State<CloudscapeScreen>
             activeThumbColor: AppTheme.accent2,
             onChanged: (v) => _apply(() => s.enabled = v),
           ),
+          const SizedBox(height: 8),
+          _sectionLabel('VIEW'),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (var i = 0; i < _viewLabels.length; i++)
+                _chip(
+                  _viewLabels[i],
+                  selected: _debugView == i,
+                  onTap: () => _apply(() => _debugView = i),
+                ),
+            ],
+          ),
+          if (_debugView > 0)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(_viewLegends[_debugView],
+                  style: AppTheme.dim.copyWith(fontSize: 10)),
+            ),
           const SizedBox(height: 8),
           _sectionLabel('SHELL'),
           _knob('base', s.baseM / 1000, 0, 60, unit: 'km', decimals: 1,
