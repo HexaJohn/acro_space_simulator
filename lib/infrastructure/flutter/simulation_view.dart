@@ -30,11 +30,11 @@ import '../../domain/autonomy/pilot_input.dart';
 import '../../domain/colony/city/city_config.dart';
 import '../../domain/colony/city/city_sim.dart';
 import '../../adapters/presenters/surface_picker.dart';
+import 'flight_session.dart';
 import 'screens/city_edit_overlay.dart';
 import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
 
-import '../../adapters/events/in_memory_event_bus.dart';
 import '../../adapters/presenters/camera_ground_clamp.dart';
 import '../../adapters/presenters/top_down_snapshot.dart';
 import '../../adapters/wire/flatbuffer_codec.dart';
@@ -44,15 +44,12 @@ import '../bridge/sim_bridge.dart';
 import '../../adapters/repositories/in_memory_repositories.dart';
 import '../../adapters/repositories/in_memory_world_repositories.dart';
 import '../../application/persistence/game_state_codec.dart';
-import '../../application/ports/compute_port.dart';
 import '../../application/usecases/advance_simulation_tick.dart';
 import '../../domain/dynamics/state_vector.dart';
-import '../../domain/orbits/soi_transition_service.dart';
 import '../../domain/orbits/spawn_presets.dart';
 import '../../domain/orbits/state_vector_converter.dart';
 import '../../domain/simulation/epoch.dart';
 import '../../domain/science/research_ledger.dart';
-import '../../domain/science/tech_tree.dart';
 import '../../domain/simulation/simulation_clock.dart';
 import '../../domain/simulation/domain_event.dart';
 import '../../domain/planetary/atmospheric_composition.dart';
@@ -140,38 +137,49 @@ class SimulationView extends StatefulWidget {
 
 class _SimulationViewState extends State<SimulationView> with SingleTickerProviderStateMixin {
   late final Ticker _ticker;
-  late final SimulationClock _clock;
-  late AdvanceSimulationTick _advance;
+  /// The world this screen is looking at. Everything below forwards to it,
+  /// so the ~200 call sites in this library keep their original vocabulary
+  /// while the state itself lives somewhere a test can build without a
+  /// widget.
+  late final FlightSession _session;
+
+  SimulationClock get _clock => _session.clock;
+  AdvanceSimulationTick get _advance => _session.advance;
   // Stashed tick deps so _advance can be rebuilt when a debug cheat toggles.
-  late final InMemoryEventBus _events;
-  late final InMemoryWeatherRepository _weather;
   // Debug cheats: skip overheat / aero-stress / craft destruction. ON by
   // default so flight testing isn't cut short; toggle off in the debug panel.
-  bool _disableOverheat = true;
-  bool _disableAeroStress = true;
-  bool _disableCraftDestruction = true;
+  bool get _disableOverheat => _session.cheats.disableOverheat;
+  set _disableOverheat(bool v) =>
+      _session.cheats = _session.cheats.copyWith(disableOverheat: v);
+  bool get _disableAeroStress => _session.cheats.disableAeroStress;
+  set _disableAeroStress(bool v) =>
+      _session.cheats = _session.cheats.copyWith(disableAeroStress: v);
+  bool get _disableCraftDestruction => _session.cheats.disableCraftDestruction;
+  set _disableCraftDestruction(bool v) =>
+      _session.cheats = _session.cheats.copyWith(disableCraftDestruction: v);
   // Orthogonal to destruction: hard impacts crater the ground even while the
   // craft itself is destruction-cheated. Deformation is the payoff of a
   // crash, so it defaults ON.
-  bool _disableCrater = false;
+  bool get _disableCrater => _session.cheats.disableCrater;
+  set _disableCrater(bool v) =>
+      _session.cheats = _session.cheats.copyWith(disableCrater: v);
   late final TopDownSnapshotPresenter _presenter;
-  late final StaticUniverseRepository _universe;
-  late final InMemoryVesselRepository _vessels;
-  late final InMemoryColonyRepository _colonies;
+  StaticUniverseRepository get _universe => _session.universe;
+  InMemoryVesselRepository get _vessels => _session.vessels;
+  InMemoryColonyRepository get _colonies => _session.colonies;
 
   /// City-builder colonies this world owns. Founding writes here, the tick
   /// advances them, and the scene draws them — so a colony founded from the
   /// cockpit exists in the same world the craft is standing in, rather than in
   /// a screen that happens to be open.
-  final InMemoryCityRepository _cities = InMemoryCityRepository();
-  late final InMemoryDepositRepository _deposits;
-  late final ResearchLedger _research;
+  InMemoryCityRepository get _cities => _session.cities;
+  InMemoryDepositRepository get _deposits => _session.deposits;
+  ResearchLedger get _research => _session.research;
 
   /// Craters and excavation, accumulated for the life of the session. Owned
   /// here rather than by the tick, which gets rebuilt whenever a debug cheat
   /// toggles.
-  final InMemoryTerrainEditsRepository _terrainEdits =
-      InMemoryTerrainEditsRepository();
+  InMemoryTerrainEditsRepository get _terrainEdits => _session.terrainEdits;
 
   // ---- Engine bridge ----
   // Serves THIS in-process sim to an external renderer (Unreal) over the
@@ -911,30 +919,17 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     _layers = _layers.copyWith(infiniteFuel: true);
     _warpIndex = _warp1x;
 
-    _vessels = InMemoryVesselRepository(fleet);
+    _session = FlightSession(
+      system: system,
+      fleet: fleet,
+      // Pop a destruction menu when a vessel is lost.
+      onEvent: _onDomainEvent,
+    );
     for (final v in _vessels.all()) {
       _vesselNames[v.id.value] = v.name;
     }
-    final universe = StaticUniverseRepository(system);
-    _universe = universe;
-    _events = InMemoryEventBus();
-    // Pop a destruction menu when a vessel is lost.
-    _events.subscribe(_onDomainEvent);
-    _colonies = InMemoryColonyRepository();
-    _deposits = InMemoryDepositRepository();
-    _weather = InMemoryWeatherRepository();
-    _research = ResearchLedger(
-      tree: TechTree(
-        nodes: const [
-          TechNode(id: 'start', cost: 0),
-          TechNode(id: 'generalRocketry', cost: 20, requires: ['start']),
-        ],
-      ),
-    );
-
-    _clock = SimulationClock(warpFactor: 1, fixedStep: 0.02); // dev start: 1x
-    _buildAdvance();
-    _presenter = TopDownSnapshotPresenter(vessels: _vessels, universe: universe, colonies: _colonies);
+    _presenter = TopDownSnapshotPresenter(
+        vessels: _vessels, universe: _universe, colonies: _colonies);
 
     // Body surface maps; repaint once each finishes decoding.
     _textures = TextureCache(
@@ -993,29 +988,11 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     }
   }
 
-  /// (Re)build the tick with the current debug-cheat flags. Called on init and
-  /// whenever a disable-overheat / aero / impact toggle changes.
-  void _buildAdvance() {
-    _advance = AdvanceSimulationTick(
-      vessels: _vessels,
-      universe: _universe,
-      compute: DartCompute(),
-      soi: const SoiTransitionService(),
-      events: _events,
-      colonies: _colonies,
-      cities: _cities,
-      deposits: _deposits,
-      weather: _weather,
-      research: _research,
-      // Persist across rebuilds: the cheat toggles rebuild the tick, and
-      // dropping the store would erase every crater already dug.
-      terrainEdits: _terrainEdits,
-      disableOverheat: _disableOverheat,
-      disableAeroStress: _disableAeroStress,
-      disableCraftDestruction: _disableCraftDestruction,
-      disableCrater: _disableCrater,
-    );
-  }
+  /// (Re)build the tick with the current debug-cheat flags.
+  ///
+  /// The cheat setters already rebuild the tick through the session, so
+  /// this only exists for the call sites that toggle several at once.
+  void _buildAdvance() => _session.rebuildTick();
 
   /// React to simulation events. Right now: surface a destruction menu when a
   /// vessel is lost (hard impact, structural overstress, or part burn-up).
