@@ -14,6 +14,7 @@ import '../../../domain/scatter/prop_catalog.dart';
 import '../../../domain/scatter/prop_model.dart';
 import '../../flutter_scene/coord_convert.dart';
 import '../../flutter_scene/scatter/prop_preview_nodes.dart';
+import '../../flutter_scene/scatter/sample_scene_nodes.dart';
 import '../../flutter_scene/scatter/scatter_prop_library.dart';
 import '../scatter_lab_control.dart';
 import 'app_theme.dart';
@@ -43,7 +44,12 @@ class _ScatterLabScreenState extends State<ScatterLabScreen> {
 
   fs.Scene? _scene;
   PropPreviewNodes? _nodes;
+  SampleSceneNodes? _sample;
   String? _error;
+
+  /// false = the species grid; true = the sample-scene diorama (real
+  /// placement over a real terrain patch).
+  bool _sceneMode = false;
 
   // Camera (turntable): azimuth/elevation about the layout centre.
   double _azimuth = 0.9;
@@ -83,6 +89,7 @@ class _ScatterLabScreenState extends State<ScatterLabScreen> {
       setState(() {
         _scene = scene;
         _nodes = PropPreviewNodes(scene);
+        _sample = SampleSceneNodes(scene);
         _frameSubject();
       });
     }).catchError((Object e) {
@@ -148,6 +155,7 @@ class _ScatterLabScreenState extends State<ScatterLabScreen> {
   void _onLibraryChanged() {
     if (!mounted) return;
     _nodes?.invalidate();
+    _sample?.invalidate();
     setState(() {});
   }
 
@@ -158,6 +166,7 @@ class _ScatterLabScreenState extends State<ScatterLabScreen> {
     control.apply = null;
     control.status = null;
     _nodes?.dispose();
+    _sample?.dispose();
     super.dispose();
   }
 
@@ -183,6 +192,14 @@ class _ScatterLabScreenState extends State<ScatterLabScreen> {
     final radius = math.max(extent * 0.71, prop.heightM * 0.6) + spacing * 0.6;
     _pivotZM = prop.heightM * 0.45;
     _distanceM = radius / math.tan(_fovY * 0.5) * 1.15;
+  }
+
+  /// Frame the diorama: eye pulled back to hold the whole patch, pivot at
+  /// standing height so the ground fills the lower half of the frame.
+  void _frameScene() {
+    _pivotZM = 2.0;
+    _distanceM = 95.0;
+    _elevation = 0.35;
   }
 
   void _apply(VoidCallback change) => setState(change);
@@ -237,12 +254,24 @@ class _ScatterLabScreenState extends State<ScatterLabScreen> {
     return LayoutBuilder(builder: (context, constraints) {
       final viewport = Size(constraints.maxWidth, constraints.maxHeight);
       _syncSun(scene);
-      nodes.update(
-        _request,
-        cameraDistanceM: _distanceM,
-        fovY: _fovY,
-        viewportHeightPx: viewport.height,
-      );
+      if (_sceneMode) {
+        // Swap layers wholesale: the grid's nodes come down so the diorama
+        // isn't drawn through a forest of leftover preview props.
+        nodes.dispose();
+        _sample?.update(
+          cameraDistanceM: _distanceM,
+          fovY: _fovY,
+          viewportHeightPx: viewport.height,
+        );
+      } else {
+        _sample?.dispose();
+        nodes.update(
+          _request,
+          cameraDistanceM: _distanceM,
+          fovY: _fovY,
+          viewportHeightPx: viewport.height,
+        );
+      }
       final camera = _camera();
 
       return Stack(
@@ -282,7 +311,13 @@ class _ScatterLabScreenState extends State<ScatterLabScreen> {
               ),
             ),
           ),
-          Positioned(left: 12, top: 12, child: _statsPanel(nodes.stats)),
+          Positioned(
+              left: 12,
+              top: 12,
+              child: _sceneMode
+                  ? _sceneStatsPanel(
+                      _sample?.stats ?? SampleSceneStats.empty)
+                  : _statsPanel(nodes.stats)),
         ],
       );
     });
@@ -381,6 +416,37 @@ class _ScatterLabScreenState extends State<ScatterLabScreen> {
     );
   }
 
+  Widget _sceneStatsPanel(SampleSceneStats s) {
+    final mono = AppTheme.mono.copyWith(fontSize: 11, color: AppTheme.text);
+    String row(String k, String v) => '${k.padRight(11)}$v';
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xCC0B0E12),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: AppTheme.accent2.withValues(alpha: 0.35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text('SAMPLE SCENE',
+              style: AppTheme.mono
+                  .copyWith(fontSize: 12, color: AppTheme.accent2)),
+          const SizedBox(height: 4),
+          Text(row('biome', s.biome), style: mono),
+          Text(row('props', '${s.instances}'), style: mono),
+          for (final e in s.byLayer.entries)
+            Text(row('  ${e.key}', '${e.value}'), style: mono),
+          Text(row('drawing', '${s.triangles} tris  ${s.drawCalls} draws'),
+              style: mono),
+          Text(row('camera', '${_distanceM.toStringAsFixed(1)} m'),
+              style: mono.copyWith(color: AppTheme.textDim)),
+        ],
+      ),
+    );
+  }
+
   static String _lodLabel(PropLod lod) => switch (lod) {
         PropLod.lod0 => 'LOD0',
         PropLod.lod1 => 'LOD1',
@@ -399,6 +465,34 @@ class _ScatterLabScreenState extends State<ScatterLabScreen> {
       child: ListView(
         padding: const EdgeInsets.all(12),
         children: [
+          _sectionLabel('MODE'),
+          Wrap(
+            spacing: 6,
+            children: [
+              _chip('Species', selected: !_sceneMode, onTap: () => _apply(() {
+                _sceneMode = false;
+                _frameSubject();
+              })),
+              _chip('Sample scene', selected: _sceneMode, onTap: () => _apply(() {
+                _sceneMode = true;
+                _frameScene();
+              })),
+            ],
+          ),
+          if (_sceneMode) ...[
+            const SizedBox(height: 10),
+            Text(
+              'A real terrain patch with every scatter layer placed by the '
+              'REAL placement rules — density, biome and slope gates, seeded '
+              'determinism — and drawn through the same instanced path the '
+              'flight scene uses. Nothing here is arranged by hand: the '
+              'forest clumps, the rocks and the ground cover are all '
+              'emergent. Zoom out to watch the detail levels step down.',
+              style: AppTheme.dim.copyWith(fontSize: 10),
+            ),
+            const SizedBox(height: 14),
+          ],
+          if (!_sceneMode) ...[
           _sectionLabel('SPECIES'),
           for (final family in PropFamily.values) ...[
             Padding(
@@ -508,6 +602,7 @@ class _ScatterLabScreenState extends State<ScatterLabScreen> {
             onChanged: (v) => _apply(() => _varySeeds = v),
           ),
           const SizedBox(height: 8),
+          ],
           _sectionLabel('SUN'),
           Slider(
             value: _sunAzimuth,
