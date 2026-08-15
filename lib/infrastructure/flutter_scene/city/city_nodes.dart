@@ -14,6 +14,7 @@
 /// to a few hundred meshes and a few hundred draws, not ten thousand of either.
 library;
 
+import 'dart:async' show unawaited;
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart' show debugPrint;
@@ -27,8 +28,10 @@ import '../../../domain/colony/city/parcel.dart';
 import '../../../domain/scatter/prop_mesh.dart';
 import '../../../domain/shared/quaternion.dart';
 import '../../../domain/shared/vector3.dart';
+import '../../../domain/architecture/city_lighting.dart';
 import '../coord_convert.dart';
-import '../scatter/scatter_prop_library.dart';
+import 'city_materials.dart';
+import 'city_textures.dart';
 
 /// One generated archetype, uploaded.
 class _CityMesh {
@@ -114,6 +117,12 @@ class CityNodes {
       return;
     }
 
+    // Textures load once, off the first frame that needs them; until they
+    // land the materials draw against the engine's white placeholder rather
+    // than blocking the frame.
+    if (!CityTextures.ready) unawaited(CityTextures.load());
+    CityMaterials.nightFactor = _nightFactorAt(snap, byBody);
+
     final detail = nearest > blockRangeM
         ? BuildingDetail.block
         : (nearest > interiorRangeM
@@ -135,6 +144,39 @@ class CityNodes {
     debugLine =
         'city: ${snap.buildings.length} bldg, $_drawCalls draws (${detail.name}), '
         'meshes ${_uploaded.length}';
+  }
+
+  /// How dark it is over the colony, from the frame's own sun.
+  ///
+  /// Uses the same ramp the colony sim lights its windows by — a second copy
+  /// of the curve here would drift from the domain's the first time either was
+  /// tuned.
+  double _nightFactorAt(
+    WorldSnapshot snap,
+    Map<String, List<BuildingSnapshot>> byBody,
+  ) {
+    // The star is the light source. A frame carries no "is a star" flag on the
+    // body itself (descriptors are sticky and often absent), so it is found by
+    // being the biggest thing present — which on any real system it is, by
+    // orders of magnitude.
+    BodySnapshot? star;
+    for (final b in snap.bodies.values) {
+      if (star == null || b.radius > star.radius) star = b;
+    }
+    if (star == null) return 0;
+    final entry = byBody.entries.first;
+    final body = snap.bodies[entry.key];
+    if (body == null) return 0;
+    final bodyWorld = Vector3(body.px, body.py, body.pz);
+    final quat = Quaternion(body.qw, body.qx, body.qy, body.qz);
+    final first = entry.value.first;
+    final siteWorld =
+        bodyWorld + quat.rotate(Vector3(first.px, first.py, first.pz));
+    final up = quat.rotate(Vector3(first.px, first.py, first.pz)).normalized;
+    final toSun = (Vector3(star.px, star.py, star.pz) - siteWorld).normalized;
+    return const CityLighting().nightFactor(
+      up.x * toSun.x + up.y * toSun.y + up.z * toSun.z,
+    );
   }
 
   void _rebuild(
@@ -180,7 +222,6 @@ class CityNodes {
     required String bodyId,
     required Vector3 anchorBF,
   }) {
-    final library = ScatterPropLibrary.instance;
     groups.forEach((key, transforms) {
       final mesh = _uploaded[key];
       if (mesh == null) return;
@@ -188,8 +229,8 @@ class CityNodes {
       // glazing takes the foliage one, which is the alpha-capable pass and is
       // where the night lighting hooks in.
       for (final (geometry, material) in [
-        (mesh.solid, library.stoneMaterial),
-        (mesh.glazing, library.foliageMaterial),
+        (mesh.solid, CityMaterials.facade),
+        (mesh.glazing, CityMaterials.glazing),
       ]) {
         if (geometry == null) continue;
         for (var start = 0; start < transforms.length; start += _maxPerDraw) {

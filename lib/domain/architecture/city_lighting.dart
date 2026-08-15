@@ -166,6 +166,21 @@ class CityLighting {
     return out;
   }
 
+  /// The twilight ramp alone, 0 in full day to 1 in full night.
+  ///
+  /// Exposed separately because the RENDERER needs it without a colony in hand
+  /// — it lights window emissives from the frame's sun direction — and two
+  /// copies of this curve would drift apart the first time either was tuned.
+  /// Smoothstep so lights fade up over dusk instead of snapping on with the
+  /// first shadow.
+  double nightFactor(double sunUpComponent) {
+    final elevation = math.asin(sunUpComponent.clamp(-1.0, 1.0));
+    if (elevation >= dawnElevation) return 0;
+    if (elevation <= duskElevation) return 1;
+    final t = (dawnElevation - elevation) / (dawnElevation - duskElevation);
+    return t * t * (3 - 2 * t);
+  }
+
   /// Lighting state for [city] given the sun's direction in the colony's local
   /// frame ([sunUpComponent] is the dot product of the sun direction with local
   /// up, i.e. the sine of its elevation).
@@ -175,18 +190,7 @@ class CityLighting {
     bool? previousLampsOn,
   }) {
     final elevation = math.asin(sunUpComponent.clamp(-1.0, 1.0));
-
-    // Twilight ramp. Smoothstep so lights fade up over dusk instead of
-    // snapping on with the first shadow.
-    double night;
-    if (elevation >= dawnElevation) {
-      night = 0;
-    } else if (elevation <= duskElevation) {
-      night = 1;
-    } else {
-      final t = (dawnElevation - elevation) / (dawnElevation - duskElevation);
-      night = t * t * (3 - 2 * t);
-    }
+    final night = nightFactor(sunUpComponent);
 
     final wasOn = previousLampsOn ?? false;
     final lampsOn = wasOn
