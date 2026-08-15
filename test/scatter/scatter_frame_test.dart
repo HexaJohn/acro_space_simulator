@@ -93,4 +93,16 @@ void main() {
         reason: 'prop up axis tilted ${err * 180 / math.pi} deg off the '
             'surface normal');
   });
+
+  test('zoom gate retriggers LOD selection when the eye genuinely moves', () {
+    // The first build must always fire...
+    expect(ScatterNodes.zoomInvalidates(double.nan, 50), isTrue);
+    // ...a sub-threshold drift must not (per-frame instance churn)...
+    expect(ScatterNodes.zoomInvalidates(100, 105), isFalse);
+    // ...and crossing 10% either way must. Without this the levels picked at
+    // the spawn camera (150 m out -> all billboards) froze forever: walking
+    // up to a rock never promoted it to a mesh.
+    expect(ScatterNodes.zoomInvalidates(100, 80), isTrue);
+    expect(ScatterNodes.zoomInvalidates(100, 130), isTrue);
+  });
 }

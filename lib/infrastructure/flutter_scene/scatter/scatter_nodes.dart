@@ -41,9 +41,17 @@ import 'scatter_prop_library.dart';
 /// the whole field every time the camera moved and reshuffle every prop with
 /// it.
 class ScatterNodes {
-  ScatterNodes(this._scene);
+  ScatterNodes(this._scene) {
+    // An imposter bake landing must reach the NEXT rebuild: the first build
+    // typically runs while cards are still baking, and those instances are
+    // skipped rather than drawn white — without this they'd stay missing
+    // until a cell happened to churn.
+    ScatterPropLibrary.instance.addListener(_onLibraryChanged);
+  }
 
   final fs.Scene _scene;
+
+  void _onLibraryChanged() => _dirty = true;
 
   /// Runtime kill switch (debug panel / dev ext).
   static bool enabled = true;
@@ -80,6 +88,14 @@ class ScatterNodes {
   int _builtEditCount = -1;
   Vector3 _anchorBF = Vector3.zero;
   bool _dirty = true;
+
+  /// Eye-to-anchor distance (m) at the last batch build — the LOD refresh
+  /// trigger. Levels are chosen inside the rebuild, so without this the
+  /// selection made at the FIRST build (often from the spawn camera, 150 m+
+  /// out, where everything resolves to a billboard) froze until a cell
+  /// happened to churn: walking right up to a rock never promoted it to a
+  /// mesh.
+  double _builtEyeM = double.nan;
 
   /// The body's composed detail layer, cached per body exactly as
   /// [TerrainNodes] caches its own — assembling the feature stack every frame
@@ -248,9 +264,18 @@ class ScatterNodes {
       _dirty = true;
     }
 
+    // LOD refresh: level selection happens inside the rebuild, so a camera
+    // moving through a STATIC field (landed craft, orbiting eye) must retrigger
+    // it — the relative gate keeps a slow zoom from rewriting every instance
+    // per frame, same discipline as the lab preview.
+    final eyeM =
+        (eyeWorld - (bodyWorld + bodyQuat.rotate(_anchorBF))).length;
+    if (zoomInvalidates(_builtEyeM, eyeM)) _dirty = true;
+
     if (_dirty) {
       _rebuildBatches(camera, origin, bodyWorld, bodyQuat, field.radius);
       _dirty = false;
+      _builtEyeM = eyeM;
     }
 
     // --- Per-frame placement ------------------------------------------------
@@ -427,6 +452,13 @@ class ScatterNodes {
   /// a 256 m-quantised grid point that can sit well off the ground, read as
   /// "scatter floats in the sky". The ring debris field is the reference
   /// pattern: node at 1.0, conversions in the per-instance data.
+  /// Whether the eye has moved enough since the last batch build to re-pick
+  /// detail levels. 10% relative: a prop's apparent size moves with 1/d, so
+  /// smaller changes cannot cross an LOD threshold that matters, and the gate
+  /// keeps a slow zoom from rewriting every instance per frame.
+  static bool zoomInvalidates(double builtEyeM, double eyeM) =>
+      builtEyeM.isNaN || (eyeM - builtEyeM).abs() > builtEyeM * 0.1;
+
   static vm.Matrix4 batchTransform(
     FloatingOrigin origin,
     Vector3 bodyWorld,
@@ -589,10 +621,14 @@ class ScatterNodes {
     _instanceCount = 0;
     _drawCalls = 0;
     _dirty = true;
+    _builtEyeM = double.nan;
     debugLine = '';
   }
 
-  void dispose() => _clear();
+  void dispose() {
+    ScatterPropLibrary.instance.removeListener(_onLibraryChanged);
+    _clear();
+  }
 }
 
 /// One resident cell of one layer.
