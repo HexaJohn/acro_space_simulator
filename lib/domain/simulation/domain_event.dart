@@ -55,8 +55,13 @@ class Impact extends DomainEvent {
   /// planet. [Vector3.zero] when the raiser could not resolve a contact point.
   final Vector3 contactBF;
 
+  /// Rim radius (m) of the crater this impact sizes to, so render FX scale
+  /// with the hole. Sized even when the crater cheat suppresses the terrain
+  /// edit; 0 when the impact is below crater threshold (or unresolved).
+  final double craterRadiusM;
+
   Impact(this.vessel, this.body, this.speed,
-      {this.contactBF = Vector3.zero})
+      {this.contactBF = Vector3.zero, this.craterRadiusM = 0})
       : super(Epoch.zero);
 }
 

@@ -534,8 +534,19 @@ class AdvanceSimulationTick {
       // same spot on the ground.
       final contactBF =
           body.orientationAt(epoch).conjugate.rotate(dir * groundR);
+      // Crater dimensions sized HERE, not inside the record call, because the
+      // Impact event carries the rim radius (it scales the render FX) even
+      // when the crater cheat leaves the ground itself untouched.
+      final crater = craterForImpact(
+        kineticEnergyJ: kineticEnergy(vessel.mass, speed),
+        // Local surface gravity, so the same crash digs a wider hole on a
+        // small moon than on a planet. |contactBF| is the ground radius (the
+        // rotation into the body frame preserves length).
+        surfaceGravityMs2: body.mu / contactBF.lengthSquared,
+        targetDensityKgM3: craterTargetDensity,
+      );
       if (!disableCrater) {
-        _recordImpactCrater(vessel, body, tick, contactBF, speed, quench);
+        _recordImpactCrater(body, tick, contactBF, crater, quench);
         // A destruction-cheated craft survives its own crater — settle it onto
         // the ground the impact just dug, not the surface that no longer
         // exists under it.
@@ -545,7 +556,8 @@ class AdvanceSimulationTick {
         }
       }
       if (!disableCraftDestruction) {
-        vessel.raise(Impact(vessel.id, body.id, speed, contactBF: contactBF));
+        vessel.raise(Impact(vessel.id, body.id, speed,
+            contactBF: contactBF, craterRadiusM: crater?.rimRadiusM ?? 0));
         return true; // destroyed
       }
     }
@@ -577,11 +589,10 @@ class AdvanceSimulationTick {
   /// both are skipped. [quench] is the touchdown biome's heat-quench fraction —
   /// non-zero exactly when the craft came down in water.
   void _recordImpactCrater(
-    Vessel vessel,
     CelestialBody body,
     int tick,
     Vector3 contactBF,
-    double speed,
+    ImpactCrater? c,
     double quench,
   ) {
     // A splashdown closes over instead of holding a crater — but only where
@@ -591,16 +602,6 @@ class AdvanceSimulationTick {
     // here would mean no lunar craters at all.
     final splashed = quench > 0 && body.hasAtmosphere;
     if (body.terrain == null || splashed) return;
-    // Crater dimensions first: the surface-normal probe below wants to sample
-    // at the crater's own scale, which isn't known until the energy is sized.
-    final c = craterForImpact(
-      kineticEnergyJ: kineticEnergy(vessel.mass, speed),
-      // Local surface gravity, so the same crash digs a wider hole on a small
-      // moon than on a planet. |contactBF| is the ground radius (the rotation
-      // into the body frame preserves length).
-      surfaceGravityMs2: body.mu / contactBF.lengthSquared,
-      targetDensityKgM3: craterTargetDensity,
-    );
     if (c == null) return; // too small to be worth a permanent edit
     // The brush lives in the BODY-FIXED frame (the caller already rotated the
     // contact there), the frame the terrain field and the render meshes share,

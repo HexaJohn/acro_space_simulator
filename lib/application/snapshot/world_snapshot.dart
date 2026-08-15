@@ -913,6 +913,10 @@ class EventSnapshot {
   /// planet.
   final double px, py, pz;
 
+  /// Spatial extent of the event site in metres, 0 when the event has none.
+  /// For 'Impact' this is the crater rim radius, so FX scale with the hole.
+  final double size;
+
   const EventSnapshot({
     required this.kind,
     this.subject = '',
@@ -922,6 +926,7 @@ class EventSnapshot {
     this.px = 0,
     this.py = 0,
     this.pz = 0,
+    this.size = 0,
   });
 
   /// Flatten a [DomainEvent] to the wire shape. Unknown types fall back to the
@@ -946,7 +951,8 @@ class EventSnapshot {
             magnitude: x.speed,
             px: x.contactBF.x,
             py: x.contactBF.y,
-            pz: x.contactBF.z);
+            pz: x.contactBF.z,
+            size: x.craterRadiusM);
       case DockingCompleted x:
         return EventSnapshot(kind: 'DockingCompleted', subject: x.a.value, target: x.b.value);
       case PartOverheated x:
@@ -984,6 +990,7 @@ class EventSnapshot {
         'magnitude': magnitude,
         'info': info,
         if (px != 0 || py != 0 || pz != 0) ...{'px': px, 'py': py, 'pz': pz},
+        if (size != 0) 'size': size,
       };
 
   factory EventSnapshot.fromJson(Map<String, dynamic> j) => EventSnapshot(
@@ -995,6 +1002,7 @@ class EventSnapshot {
         px: (j['px'] as num?)?.toDouble() ?? 0,
         py: (j['py'] as num?)?.toDouble() ?? 0,
         pz: (j['pz'] as num?)?.toDouble() ?? 0,
+        size: (j['size'] as num?)?.toDouble() ?? 0,
       );
 }
 

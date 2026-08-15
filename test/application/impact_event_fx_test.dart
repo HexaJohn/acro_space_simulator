@@ -88,6 +88,9 @@ void main() {
     // Same body-fixed point the crater brush was cut at — FX and hole agree.
     final crater = edits.forBody(SampleWorld.moon)!.all.single;
     expect(impact!.contactBF, crater.centreBF);
+    // And the same size: the event's radius is what scales the render FX.
+    expect(impact!.craterRadiusM, crater.radiusM);
+    expect(impact!.craterRadiusM, greaterThan(0));
 
     // And the flattened event keeps it, through JSON and back.
     final snap = EventSnapshot.of(impact!);
@@ -95,8 +98,10 @@ void main() {
     expect(snap.px, impact!.contactBF.x);
     expect(snap.py, impact!.contactBF.y);
     expect(snap.pz, impact!.contactBF.z);
+    expect(snap.size, impact!.craterRadiusM);
     final round = EventSnapshot.fromJson(snap.toJson());
     expect((round.px, round.py, round.pz), (snap.px, snap.py, snap.pz));
+    expect(round.size, snap.size);
   });
 
   test('events without a site keep the compact wire shape', () {

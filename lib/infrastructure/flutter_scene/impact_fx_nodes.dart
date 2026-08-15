@@ -155,8 +155,15 @@ class ImpactFxNodes {
     final normalBF = contactBF.normalized;
     final (r, g, b) = _groundColor(e.target, normalBF);
 
-    // Severity 0..1 from touchdown speed: ~60 m/s a puff, 600+ m/s the works.
-    final t = ((e.magnitude - 40.0) / 560.0).clamp(0.1, 1.0);
+    // Effective disturbance radius R (m): the crater rim radius when the
+    // event sized one, else a modest speed-based stand-in (water strikes,
+    // sub-crater taps). EVERY length below derives from R, tuned so the
+    // finished cloud reads about DOUBLE the crater's size: spawn shell R,
+    // sprite growth to ~2R across, drift ~0.5R — together ~4R across vs the
+    // crater's 2R. Clamped: below ~1.5 m nothing is legible, above ~500 m a
+    // few dozen billboards cannot fill the volume anyway.
+    final speedT = ((e.magnitude - 40.0) / 560.0).clamp(0.1, 1.0);
+    final R = (e.size > 0 ? e.size : 2.0 + 8.0 * speedT).clamp(1.5, 500.0);
     // Cosmetic surface gravity from the body's size (the snapshot carries no
     // mu): Earth-radius → ~9.8, Moon-radius → ~2.7. Close enough for arcs.
     final radius = snap.bodies[e.target]?.radius ?? 6.371e6;
@@ -164,18 +171,23 @@ class ImpactFxNodes {
 
     // DEBRIS: a hard, fast fan of dark chunks kicked up the surface normal,
     // pulled back down by local gravity. Alpha-blended — rocks, not sparks.
+    // Launch speed sized so the arcs top out around 3R and land inside the
+    // cloud's footprint; lifetime covers the ballistic flight and no more.
+    final debrisV = math.sqrt(6.0 * gMs2 * R).clamp(8.0, 90.0);
+    final flightS = (2.2 * debrisV / gMs2).clamp(1.0, 4.5);
     final debris = ParticleSystem(
       maxParticles: 160,
-      shape: ConeShape(angle: 0.55, radius: lengthToScene(1.0)),
+      shape: ConeShape(angle: 0.55, radius: lengthToScene(R * 0.35)),
       spawner: Spawner(rate: 0, bursts: [
-        ParticleBurst(time: 0, count: (30 + 90 * t).round()),
+        ParticleBurst(time: 0, count: (24 + R * 5).clamp(24, 120).round()),
       ]),
       looping: false,
       duration: 1.0,
-      lifetime: UniformFloat(1.2, 2.6),
+      lifetime: UniformFloat(flightS * 0.6, flightS),
       startSpeed:
-          UniformFloat(lengthToScene(10 + 30 * t), lengthToScene(25 + 65 * t)),
-      startSize: UniformFloat(lengthToScene(0.35), lengthToScene(1.1)),
+          UniformFloat(lengthToScene(debrisV * 0.4), lengthToScene(debrisV)),
+      startSize: UniformFloat(lengthToScene((R * 0.06).clamp(0.25, 4.0)),
+          lengthToScene((R * 0.16).clamp(0.7, 10.0))),
       startColor: ConstantColor(vm.Vector4(r * 0.55, g * 0.55, b * 0.55, 1.0)),
       gravity: vm.Vector3(0, -lengthToScene(gMs2), 0),
       modules: [
@@ -190,21 +202,25 @@ class ImpactFxNodes {
 
     // DUST: a slow hemispherical billow that hangs, swells, and thins out.
     // Premultiplied alpha so the cloud occludes the ground it came from.
-    final dustTtl = 6.0 + 6.0 * t;
+    // Bigger holes breathe longer.
+    final dustTtl = (5.0 + R * 0.35).clamp(6.0, 18.0);
     final dust = ParticleSystem(
-      maxParticles: 128,
-      shape: SphereShape(radius: lengthToScene(2.0 + 6.0 * t), hemisphere: true),
+      maxParticles: 224,
+      shape: SphereShape(radius: lengthToScene(R), hemisphere: true),
       spawner: Spawner(rate: 0, bursts: [
-        ParticleBurst(time: 0, count: (24 + 48 * t).round()),
+        ParticleBurst(time: 0, count: (18 + R * 4).clamp(24, 120).round()),
         // A softer second breath as the first wave clears the crater lip.
-        ParticleBurst(time: 0.25, count: (10 + 20 * t).round()),
+        ParticleBurst(time: 0.25, count: (9 + R * 2).clamp(12, 60).round()),
       ]),
       looping: false,
       duration: 1.0,
-      lifetime: UniformFloat(dustTtl * 0.5, dustTtl),
+      // Narrow spread biased long: an early die-off thins the cloud to a
+      // whisper halfway through its nominal hang time.
+      lifetime: UniformFloat(dustTtl * 0.65, dustTtl),
       startSpeed:
-          UniformFloat(lengthToScene(3 + 6 * t), lengthToScene(8 + 14 * t)),
-      startSize: UniformFloat(lengthToScene(1.5 + 2 * t), lengthToScene(3 + 4 * t)),
+          UniformFloat(lengthToScene(R * 0.35), lengthToScene(R * 0.8)),
+      startSize:
+          UniformFloat(lengthToScene(R * 0.35), lengthToScene(R * 0.6)),
       // Dust reads lighter than the ground it rose from.
       startColor: ConstantColor(vm.Vector4(
           (r * 1.15).clamp(0.0, 1.0),
@@ -215,13 +231,18 @@ class ImpactFxNodes {
       gravity: vm.Vector3(0, -lengthToScene(gMs2 * 0.04), 0),
       modules: [
         LinearDragModule(1.4),
-        SizeOverLifeModule(CurveFloat(ParticleCurve.linear(from: 1.0, to: 5.0))),
+        // Growth to ~3.5x: a startSize around R*0.5 swells to ~1.8R across,
+        // the last piece of the ~2x-crater cloud footprint.
+        SizeOverLifeModule(CurveFloat(ParticleCurve.linear(from: 1.0, to: 3.5))),
+        // Alpha HOLDS through most of the life and collapses near the end —
+        // an early linear fade read as the whole cloud vanishing within a
+        // couple of seconds while its particles were still alive.
         ColorOverLifeModule(GradientColor(ColorGradient([
           ColorStop(
               0.0,
               vm.Vector4((r * 1.2).clamp(0.0, 1.0), (g * 1.2).clamp(0.0, 1.0),
-                  (b * 1.2).clamp(0.0, 1.0), 0.55)),
-          ColorStop(0.3, vm.Vector4(r, g, b, 0.4)),
+                  (b * 1.2).clamp(0.0, 1.0), 0.65)),
+          ColorStop(0.6, vm.Vector4(r, g, b, 0.5)),
           ColorStop(1.0, vm.Vector4(r * 0.9, g * 0.9, b * 0.9, 0.0)),
         ]))),
       ],
