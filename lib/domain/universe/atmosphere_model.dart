@@ -63,6 +63,44 @@ class AtmosphereModel {
     this.specificGasConstant = 287.05,
   });
 
+  /// This model re-derived for a CHANGED gas mix.
+  ///
+  /// Composition and the air model were decoupled: a body's mix drove reentry
+  /// heating and the sky's colour, but not a single number a wing feels. So a
+  /// colony could thicken a world's CO2 for a century and the drag would not
+  /// budge.
+  ///
+  /// The coupling is through scale height, which is `R*T / (M*g)` — inversely
+  /// proportional to mean molar mass. Applying it as a RATIO against the
+  /// model's existing scale height rather than recomputing from scratch is
+  /// deliberate: every body's air is hand-tuned, and an unpolluted mix must
+  /// come back bit-identical (the ratio is exactly 1), so this can only ever
+  /// change a world a colony has actually changed.
+  ///
+  /// Heavier air sits lower — denser at the surface, thinner aloft — which is
+  /// the right sign for a CO2-loaded atmosphere.
+  AtmosphereModel withMeanMolarMass({
+    required double baselineKgPerMol,
+    required double currentKgPerMol,
+  }) {
+    if (baselineKgPerMol <= 0 || currentKgPerMol <= 0) return this;
+    final ratio = baselineKgPerMol / currentKgPerMol;
+    if ((ratio - 1).abs() < 1e-9) return this;
+    return AtmosphereModel(
+      seaLevelPressure: seaLevelPressure,
+      // Surface density follows the molar mass directly at fixed pressure and
+      // temperature (ideal gas): heavier molecules, more kilograms per cubic
+      // metre.
+      seaLevelDensity: seaLevelDensity / ratio,
+      seaLevelTemperature: seaLevelTemperature,
+      scaleHeight: scaleHeight * ratio,
+      atmosphereHeight: atmosphereHeight,
+      lapseRate: lapseRate,
+      gamma: gamma,
+      specificGasConstant: specificGasConstant,
+    );
+  }
+
   bool hasAtmosphere(double altitude) =>
       altitude >= 0 && altitude < atmosphereHeight;
 
