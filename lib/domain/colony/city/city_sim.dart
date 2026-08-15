@@ -377,6 +377,11 @@ class CitySim {
   double funds = 0;
   double research = 0;
   double pollution = 0; // accumulated atmospheric pollution 0..~
+
+  /// Emissions this tick, in the city's own pollution units per second. Read by
+  /// the atmosphere model so a colony's industry actually changes the air it
+  /// breathes, rather than only its own local pollution number.
+  double emissionRate = 0;
   double computeSupply = 0; // current compute capacity
   double computeDemand = 0;
   Economy economy = Economy.capitalism;
@@ -1166,6 +1171,8 @@ class CitySim {
           v * run * biomeMult(k) * bountyMult * eventProductionMult * dt);
       pollutionRate += s.pollution * (s.powerOutput > 0 ? 1 : run) * emissionCut;
     }
+
+    emissionRate = pollutionRate;
 
     // 1.4 Pollution accumulates (industry/power emit, parks + low activity decay).
     var parks = 0.0;

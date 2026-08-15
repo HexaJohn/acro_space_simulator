@@ -31,6 +31,7 @@ import '../../domain/dynamics/gravity_force.dart';
 import '../../domain/dynamics/state_vector.dart';
 import '../../domain/orbits/body_ephemeris.dart';
 import '../../domain/orbits/soi_transition_service.dart';
+import '../../domain/planetary/atmosphere_pollution.dart';
 import '../../domain/planetary/magnetosphere.dart';
 import '../../domain/planetary/splashdown_service.dart';
 import '../../domain/radiation/radiation_environment.dart';
@@ -84,6 +85,11 @@ class AdvanceSimulationTick {
   /// Turns colony construction into terrain deformation (pads, road grading,
   /// quarry pits).
   final CityTerrainShaper cityShaper;
+
+  /// Accumulated atmospheric change per body, written by colony emissions.
+  final AtmosphereRepository atmosphere;
+
+  final AtmospherePollutionService atmospherePollution;
   final DepositRepository deposits;
   final WeatherRepository weather;
   final CargoScheduleRepository cargo;
@@ -165,6 +171,8 @@ class AdvanceSimulationTick {
     required this.weather,
     this.cities = const NullCityRepository(),
     this.cityShaper = const CityTerrainShaper(),
+    this.atmosphere = const NullAtmosphereRepository(),
+    this.atmospherePollution = const AtmospherePollutionService(),
     this.cargo = const NullCargoScheduleRepository(),
     this.converter = const StateVectorOrbitConverter(),
     this.thermalUpdater = const VesselThermalUpdater(),
@@ -342,6 +350,7 @@ class AdvanceSimulationTick {
     for (final city in cities.all()) {
       city.advance(dt);
       _shapeCityTerrain(city, system, clock);
+      _polluteAtmosphere(city, dt);
     }
 
     // ---- Colony / city phase ----
@@ -432,6 +441,22 @@ class AdvanceSimulationTick {
       terrainEdits.record(body.id, p.brush);
       city.shapedTerrain.add(p.key);
     }
+  }
+
+  /// Fold a colony's emissions into its host body's air.
+  ///
+  /// Against the real mole count of an atmosphere, so the answer is honest
+  /// rather than arbitrary: an Earth-thick sky absorbs a colony without
+  /// noticing, a Mars-thin one does not.
+  void _polluteAtmosphere(CitySim city, double dt) {
+    final state = atmosphere.forBody(city.body.id.value);
+    if (state == null) return;
+    atmospherePollution.advance(
+      state,
+      pollutionRate: city.emissionRate,
+      dt: dt,
+    );
+    atmosphere.save(state);
   }
 
   void _vesselSubsystems(

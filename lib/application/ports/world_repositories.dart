@@ -7,6 +7,7 @@ import '../../domain/autonomy/cargo_schedule.dart';
 import '../../domain/colony/city/city_sim.dart';
 import '../../domain/colony/colony.dart';
 import '../../domain/megastructure/megastructure.dart';
+import '../../domain/planetary/atmosphere_pollution.dart';
 import '../../domain/terrain/terrain_brush.dart';
 import '../../domain/terrain/terrain_edits.dart';
 import '../../domain/universe/celestial_body.dart';
@@ -34,6 +35,21 @@ abstract class CityRepository {
   CitySim? byId(String id);
   void add(CitySim city);
   void remove(String id);
+}
+
+/// Per-body accumulated atmospheric change from colony emissions.
+abstract class AtmosphereRepository {
+  AtmospherePollution? forBody(String bodyId);
+  void save(AtmospherePollution state);
+}
+
+/// Inert default: emissions vanish, as they did before the loop was closed.
+class NullAtmosphereRepository implements AtmosphereRepository {
+  const NullAtmosphereRepository();
+  @override
+  AtmospherePollution? forBody(String bodyId) => null;
+  @override
+  void save(AtmospherePollution state) {}
 }
 
 /// Empty default so a tick can be built with no colonies.
