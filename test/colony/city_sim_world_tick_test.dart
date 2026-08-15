@@ -18,6 +18,7 @@ import 'package:acro_space_simulator/domain/colony/city/commodity.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/orbits/soi_transition_service.dart';
 import 'package:acro_space_simulator/domain/simulation/simulation_clock.dart';
+import 'package:acro_space_simulator/domain/terrain/terrain_brush.dart';
 import 'package:acro_space_simulator/domain/universe/real_solar_system.dart';
 import 'package:acro_space_simulator/infrastructure/sample_world.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -122,6 +123,43 @@ void main() {
 
     final placed = city.buildingParcels().toList();
     expect(placed.map((e) => e.$1.id), contains(lot.id));
+  });
+
+  test('building a colony levels its ground and grades its roads', () {
+    final city = foundColony();
+    addMine(city);
+    city.layout.addRoad(const RoadSpline(
+      id: 'main',
+      controls: [Vec2(0, 0), Vec2(0, 240)],
+    ));
+
+    final edits = InMemoryTerrainEditsRepository();
+    final tick = AdvanceSimulationTick(
+      vessels: InMemoryVesselRepository(const []),
+      universe: StaticUniverseRepository(SampleWorld.realSystem()),
+      compute: DartCompute(),
+      soi: const SoiTransitionService(),
+      events: InMemoryEventBus(),
+      colonies: InMemoryColonyRepository(),
+      deposits: InMemoryDepositRepository(),
+      weather: const NullWeatherRepository(),
+      cities: InMemoryCityRepository([city]),
+      terrainEdits: edits,
+    );
+    final clock = SimulationClock(warpFactor: 1, fixedStep: 1.0);
+    tick.execute(clock);
+
+    final recorded = edits.forBody(city.body.id)!;
+    final kinds = recorded.all.map((b) => b.kind).toSet();
+    expect(kinds, contains(TerrainBrushKind.pad), reason: 'building pads');
+    expect(kinds, contains(TerrainBrushKind.cutFill), reason: 'road grading');
+
+    // Ticking again must NOT re-emit: brushes are permanent and order-sensitive.
+    final count = recorded.length;
+    for (var i = 0; i < 5; i++) {
+      tick.execute(clock);
+    }
+    expect(edits.forBody(city.body.id)!.length, count);
   });
 
   test('city buildings reach the world snapshot', () {

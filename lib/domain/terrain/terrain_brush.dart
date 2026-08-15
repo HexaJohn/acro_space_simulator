@@ -42,6 +42,20 @@ enum TerrainBrushKind {
   /// An impact crater: a subtracted spherical bowl plus a smoothly unioned
   /// raised rim, oriented against the surface normal at the contact point.
   crater,
+
+  /// A levelled building pad: forces the surface to a target radius inside a
+  /// disc, easing back to the natural ground over a falloff ring. Cuts hills
+  /// AND fills hollows, which is what "level the site" actually means.
+  pad,
+
+  /// An open-pit mine: a levelled floor with concentric benches stepping up to
+  /// the rim, so the excavation reads as a worked quarry rather than a dent.
+  steppedPit,
+
+  /// A road corridor: levels a strip between two points to a datum that
+  /// interpolates along it, cutting through rises and filling dips so the
+  /// carriageway holds a constant grade.
+  cutFill,
 }
 
 /// One analytic edit to a body's density field, in the BODY-FIXED frame.
@@ -69,6 +83,11 @@ class TerrainBrush {
     this.depthM = 0,
     this.rimHeightM = 0,
     this.tick = 0,
+    this.datumRadiusM = 0,
+    this.datumRadiusEndM = 0,
+    this.falloffM = 0,
+    this.benches = 1,
+    this.endBF,
   })  : assert(radiusM > 0, 'a zero-radius brush cuts nothing'),
         _axis = axisBF.normalized {
     // Bowl geometry, solved from the cavity mouth radius and the depth. A
@@ -105,9 +124,23 @@ class TerrainBrush {
     // primitive's own surface and fabricate an isosurface there. The rim's
     // falloff reaches zero AT radiusM + _rimWidth, so the cutoff beyond it
     // steps over nothing.
-    final reach = kind == TerrainBrushKind.crater
-        ? math.max(_bowlOffset + _bowlRadius, radiusM + _rimWidth)
-        : radiusM;
+    final reach = switch (kind) {
+      TerrainBrushKind.crater =>
+        math.max(_bowlOffset + _bowlRadius, radiusM + _rimWidth),
+      // A levelling brush reaches its disc plus the easing ring. Vertically it
+      // reaches as far as the ground it is moving, so the bound also has to
+      // clear the cut/fill itself — a pad sliced into a hillside rewrites
+      // density well above and below its own datum.
+      TerrainBrushKind.pad => radiusM + falloffM + depthM,
+      TerrainBrushKind.steppedPit => radiusM + falloffM + depthM,
+      // centreBF is the corridor MIDPOINT, so half its length is the reach
+      // along the axis (see [TerrainBrush.cutFill]).
+      TerrainBrushKind.cutFill => (endBF == null ? 0.0 : (endBF! - centreBF).length) +
+          radiusM +
+          falloffM +
+          depthM,
+      TerrainBrushKind.sphere => radiusM,
+    };
     boundingRadiusM = reach * 1.08 + 1.0;
   }
 
@@ -151,10 +184,88 @@ class TerrainBrush {
         tick: tick,
       );
 
+  /// A levelled building pad centred on [centreBF] (a point ON the surface).
+  ///
+  /// [datumRadiusM] is the finished floor level, measured from the body centre;
+  /// pass the natural ground radius at the site to level it in place, or offset
+  /// it to raise/sink the platform. [maxCutM] only sizes the influence bound —
+  /// it should be at least as large as the relief being flattened.
+  factory TerrainBrush.pad({
+    required Vector3 centreBF,
+    required double radiusM,
+    required double datumRadiusM,
+    double falloffM = 12,
+    double maxCutM = 60,
+    int tick = 0,
+  }) =>
+      TerrainBrush(
+        kind: TerrainBrushKind.pad,
+        centreBF: centreBF,
+        axisBF: centreBF.lengthSquared > 0 ? centreBF : Vector3.unitZ,
+        radiusM: radiusM,
+        depthM: maxCutM,
+        datumRadiusM: datumRadiusM,
+        falloffM: falloffM,
+        tick: tick,
+      );
+
+  /// An open-pit mine at [centreBF]: a floor [depthM] below [datumRadiusM],
+  /// with [benches] terraces stepping up to the rim at [radiusM].
+  factory TerrainBrush.steppedPit({
+    required Vector3 centreBF,
+    required double radiusM,
+    required double datumRadiusM,
+    required double depthM,
+    int benches = 6,
+    double falloffM = 30,
+    int tick = 0,
+  }) =>
+      TerrainBrush(
+        kind: TerrainBrushKind.steppedPit,
+        centreBF: centreBF,
+        axisBF: centreBF.lengthSquared > 0 ? centreBF : Vector3.unitZ,
+        radiusM: radiusM,
+        depthM: depthM,
+        datumRadiusM: datumRadiusM,
+        benches: math.max(1, benches),
+        falloffM: falloffM,
+        tick: tick,
+      );
+
+  /// A levelled road corridor from [startBF] to [endBF], [radiusM] to either
+  /// side of the centreline, grading from [datumRadiusM] to [datumRadiusEndM].
+  factory TerrainBrush.cutFill({
+    required Vector3 startBF,
+    required Vector3 endBF,
+    required double radiusM,
+    required double datumRadiusM,
+    required double datumRadiusEndM,
+    double falloffM = 8,
+    double maxCutM = 40,
+    int tick = 0,
+  }) {
+    // Stored centre is the MIDPOINT so the spherical influence bound (and the
+    // spatial index built on it) actually encloses the whole corridor.
+    final mid = (startBF + endBF) * 0.5;
+    return TerrainBrush(
+      kind: TerrainBrushKind.cutFill,
+      centreBF: mid,
+      axisBF: mid.lengthSquared > 0 ? mid : Vector3.unitZ,
+      radiusM: radiusM,
+      depthM: maxCutM,
+      datumRadiusM: datumRadiusM,
+      datumRadiusEndM: datumRadiusEndM,
+      falloffM: falloffM,
+      endBF: endBF,
+      tick: tick,
+    );
+  }
+
   final TerrainBrushKind kind;
 
   /// Body-fixed centre (m). For a crater this is the contact point ON the
-  /// surface, not the impactor's position.
+  /// surface, not the impactor's position; for a cut/fill corridor it is the
+  /// MIDPOINT of the run.
   final Vector3 centreBF;
 
   /// Body-fixed orientation — the surface normal at contact for a crater. Not
@@ -173,6 +284,28 @@ class TerrainBrush {
   /// Simulation tick the edit was made on. Ordering/provenance only — the
   /// composed field depends on list ORDER, not on this value.
   final int tick;
+
+  /// Target surface radius from the body centre (m) for the levelling kinds.
+  ///
+  /// A RADIUS, not a height offset, because that is what makes a pad flat: a
+  /// constant radius over a disc is a level surface, whereas a constant offset
+  /// from the existing ground just reproduces the hill it was cut into.
+  final double datumRadiusM;
+
+  /// Datum at [endBF] for a [TerrainBrushKind.cutFill] corridor. The datum
+  /// interpolates along the segment, which is how a road holds a steady grade
+  /// through rolling ground instead of stepping between flat benches.
+  final double datumRadiusEndM;
+
+  /// Width of the ring over which a levelled surface eases back into natural
+  /// ground (m). Zero would leave a vertical wall at the pad edge.
+  final double falloffM;
+
+  /// Bench count for [TerrainBrushKind.steppedPit]. 1 is a flat-bottomed hole.
+  final int benches;
+
+  /// Far end of a [TerrainBrushKind.cutFill] corridor (body-fixed metres).
+  final Vector3? endBF;
 
   /// Radius (m) beyond which this brush provably changes nothing, measured
   /// from [centreBF]. [apply] hard-cuts here, and [TerrainEdits] indexes on it.
@@ -208,6 +341,24 @@ class TerrainBrush {
     final w = p - centreBF;
     if (w.lengthSquared > boundingRadiusM * boundingRadiusM) return density;
 
+    // ---- Levelling kinds ------------------------------------------------
+    //
+    // These do not carve a shape out of the field; they REPLACE it with the
+    // distance to a target surface, blended out over the falloff ring. That is
+    // what makes them cut and fill in one operation — above the datum the
+    // replacement is positive (air where rock was), below it negative (rock
+    // where air was) — and it is why they take a target RADIUS rather than a
+    // depth offset. The blend keeps the seam continuous, so no isosurface
+    // appears at the pad edge.
+    if (kind == TerrainBrushKind.pad ||
+        kind == TerrainBrushKind.steppedPit ||
+        kind == TerrainBrushKind.cutFill) {
+      final ({double weight, double datum})? level = _levelAt(p, w);
+      if (level == null || level.weight <= 0) return density;
+      final target = p.length - level.datum;
+      return density * (1 - level.weight) + target * level.weight;
+    }
+
     var d = density;
     if (kind == TerrainBrushKind.crater && rimHeightM > 0) {
       // Rim first, bowl second: the crest is material thrown UP around the
@@ -230,6 +381,78 @@ class TerrainBrush {
       }
     }
     return math.max(d, -_bowlSdf(w));
+  }
+
+  /// Blend weight and target surface radius for the levelling kinds at [p]
+  /// ([w] is `p - centreBF`). Null when this brush does not level.
+  ({double weight, double datum})? _levelAt(Vector3 p, Vector3 w) {
+    switch (kind) {
+      case TerrainBrushKind.pad:
+        // Lateral distance measured in the tangent plane, so a pad stays round
+        // on the ground rather than being foreshortened by the body's curve.
+        final lateral = _lateral(w);
+        return (weight: _falloffWeight(lateral, radiusM), datum: datumRadiusM);
+
+      case TerrainBrushKind.steppedPit:
+        final lateral = _lateral(w);
+        if (lateral > radiusM + falloffM) return (weight: 0, datum: datumRadiusM);
+        // Benches step DOWN toward the centre. Quantising the normalised
+        // radius gives each terrace a level floor and a vertical riser, which
+        // is what a worked pit looks like; a smooth cone would read as a
+        // sinkhole.
+        final u = (lateral / radiusM).clamp(0.0, 1.0);
+        final step = (u * benches).ceil().clamp(1, benches);
+        final cut = depthM * (1 - (step - 1) / benches);
+        return (
+          weight: _falloffWeight(lateral, radiusM),
+          datum: datumRadiusM - cut,
+        );
+
+      case TerrainBrushKind.cutFill:
+        final end = endBF;
+        if (end == null) return null;
+        // centreBF is the midpoint, so the start mirrors the end through it.
+        final start = centreBF * 2 - end;
+        final axis = end - start;
+        final len2 = axis.lengthSquared;
+        if (len2 <= 1e-9) return null;
+        final t = ((p - start).dot(axis) / len2).clamp(0.0, 1.0);
+        final onAxis = start + axis * t;
+        // Horizontal offset only. A 3D distance would make the corridor a
+        // capsule, so a sample well above or below the carriageway would fall
+        // outside it and never get levelled — the field would keep its natural
+        // value there and the graded surface would be cut off at the ends.
+        // Stripping the LOCAL radial component makes it a radially extruded
+        // prism instead, which is what a road cutting actually is.
+        final v = p - onAxis;
+        final up = p.normalized;
+        final lateral = (v - up * v.dot(up)).length;
+        return (
+          weight: _falloffWeight(lateral, radiusM),
+          datum: datumRadiusM + (datumRadiusEndM - datumRadiusM) * t,
+        );
+
+      case TerrainBrushKind.sphere:
+      case TerrainBrushKind.crater:
+        return null;
+    }
+  }
+
+  /// Distance from the brush axis, measured perpendicular to it.
+  double _lateral(Vector3 w) {
+    final along = w.dot(_axis);
+    return (w - _axis * along).length;
+  }
+
+  /// 1 inside [core], easing to 0 at `core + falloffM`. Smoothstep so the
+  /// levelled ground meets the natural ground with a matching slope — a linear
+  /// ramp would leave a visible crease at both ends of the blend.
+  double _falloffWeight(double lateral, double core) {
+    if (lateral <= core) return 1;
+    if (falloffM <= 0) return 0;
+    final t = ((lateral - core) / falloffM).clamp(0.0, 1.0);
+    final s = 1 - t;
+    return s * s * (3 - 2 * s);
   }
 
   /// Signed distance to the excavated bowl. [w] is relative to [centreBF].

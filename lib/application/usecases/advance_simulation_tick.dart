@@ -11,6 +11,8 @@ import '../../domain/autonomy/attitude_controller.dart';
 import '../../domain/autonomy/autopilot_updater.dart';
 import '../../domain/autonomy/cargo_scheduler.dart';
 import '../../domain/autonomy/docking_updater.dart';
+import '../../domain/colony/city/city_sim.dart';
+import '../../domain/colony/city/city_terrain_shaper.dart';
 import '../../domain/colony/city_mining_service.dart';
 import '../../domain/colony/happiness_service.dart';
 import '../../domain/colony/supply_chain.dart';
@@ -78,6 +80,10 @@ class AdvanceSimulationTick {
   /// the colony sim and the flight sim ONE world: a city keeps producing,
   /// growing and burning through its stockpile while the player is in orbit.
   final CityRepository cities;
+
+  /// Turns colony construction into terrain deformation (pads, road grading,
+  /// quarry pits).
+  final CityTerrainShaper cityShaper;
   final DepositRepository deposits;
   final WeatherRepository weather;
   final CargoScheduleRepository cargo;
@@ -158,6 +164,7 @@ class AdvanceSimulationTick {
     required this.deposits,
     required this.weather,
     this.cities = const NullCityRepository(),
+    this.cityShaper = const CityTerrainShaper(),
     this.cargo = const NullCargoScheduleRepository(),
     this.converter = const StateVectorOrbitConverter(),
     this.thermalUpdater = const VesselThermalUpdater(),
@@ -334,6 +341,7 @@ class AdvanceSimulationTick {
     // a colony and a craft in orbit above it share one clock.
     for (final city in cities.all()) {
       city.advance(dt);
+      _shapeCityTerrain(city, system, clock);
     }
 
     // ---- Colony / city phase ----
@@ -393,6 +401,36 @@ class AdvanceSimulationTick {
       for (final s in cargo.all()) {
         if (s.id == id) cargo.save(s);
       }
+    }
+  }
+
+  /// Record the terrain edits a colony's new construction implies: levelled
+  /// building pads, graded road corridors, stepped quarry pits.
+  ///
+  /// Only work not yet shaped is emitted, and each feature is marked as it is
+  /// recorded — terrain brushes are permanent and compose in list order, so a
+  /// pad emitted twice would both bloat the edit list and make the composed
+  /// surface depend on how many ticks had run.
+  void _shapeCityTerrain(CitySim city, StarSystem system, SimulationClock clock) {
+    final body = system.body(city.body.id);
+    if (body == null) return;
+    final edits = terrainEdits.forBody(body.id);
+    final pending = cityShaper.pending(
+      city,
+      bodyRadiusM: body.radius,
+      tick: clock.tick,
+      // Body-fixed direction in, ground radius out. Sampling the field WITH the
+      // existing edits means a second pad next to the first levels to the
+      // ground the first one left behind, not to the pristine hillside.
+      groundRadiusAt: (dirBF) {
+        final f = body.terrainFieldWith(edits);
+        if (f == null) return body.radius;
+        return f.groundRadiusAt(dirBF.x, dirBF.y, dirBF.z);
+      },
+    );
+    for (final p in pending) {
+      terrainEdits.record(body.id, p.brush);
+      city.shapedTerrain.add(p.key);
     }
   }
 

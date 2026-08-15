@@ -3049,6 +3049,14 @@ class CitySim {
   /// buildings stay in [utils] / [zones] and are converted on demand.
   final Map<String, CityBuildingSpec> parcelBuildings = {};
 
+  /// Keys of the layout features whose terrain edit has already been recorded.
+  ///
+  /// Terrain brushes compose by ORDERED min/max and are permanent, so each pad,
+  /// road segment and pit may only ever be emitted once — re-emitting would
+  /// both grow the edit list without bound and make the composed field depend
+  /// on how long the session had been running.
+  final Set<String> shapedTerrain = {};
+
   /// Place [spec] on the parcel [parcelId]. Returns false if that parcel is
   /// unknown or already built on.
   bool placeOnParcel(String parcelId, CityBuildingSpec spec) {
