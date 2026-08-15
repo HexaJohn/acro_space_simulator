@@ -101,11 +101,14 @@ void main() {
     expect(placed.length, 2); // the mine and its solar farm
 
     for (final (parcel, spec) in placed) {
-      // A 1x1 grid building is one cell square in METRES, not "one cell".
-      expect(parcel.area,
-          closeTo(spec.footW * spec.footH * CitySim.cellM * CitySim.cellM, 1));
+      // Parcels carry the spec's REAL site in metres — which for a mine is
+      // hundreds of metres across, not one 24 m cell.
+      expect(parcel.area, closeTo(spec.siteArea(cellM: CitySim.cellM), 1));
       expect(parcel.frontageWidth, greaterThan(0));
     }
+    // And that really is bigger than the grid could express.
+    final mine = placed.firstWhere((e) => e.$2.label == 'Mine');
+    expect(mine.$1.area, greaterThan(CitySim.cellM * CitySim.cellM * 100));
   });
 
   test('a colony can build on a subdivided parcel, not just a cell', () {

@@ -98,8 +98,8 @@ class CityTerrainShaper {
                 centreBF: toBodyFixed(centre),
                 radiusM: radius,
                 datumRadiusM: datum,
-                depthM: _pitDepthFor(radius),
-                benches: _benchesFor(radius),
+                depthM: pitDepthFor(radius),
+                benches: benchesFor(radius),
                 falloffM: padFalloffM * 3,
                 tick: tick,
               )
@@ -153,16 +153,15 @@ class CityTerrainShaper {
   }
 
   /// Which buildings dig instead of levelling.
-  bool _isPit(CityBuildingSpec spec) =>
-      spec.type == 'mine' || spec.type == 'quarry';
+  bool _isPit(CityBuildingSpec spec) => spec.siteKind == SiteKind.pit;
 
   /// Pit depth from its radius. Real open-pit mines run roughly 1:4 depth to
   /// width at a stable bench angle, and holding to that is what makes a big
   /// quarry read as genuinely huge rather than as a wide scrape.
-  double _pitDepthFor(double radiusM) => (radiusM * 0.5).clamp(12.0, 900.0);
+  double pitDepthFor(double radiusM) => (radiusM * 0.5).clamp(12.0, 900.0);
 
   /// One bench per ~25 m of depth, which is the working height of real
   /// haul-truck terraces.
-  int _benchesFor(double radiusM) =>
-      (_pitDepthFor(radiusM) / 25).round().clamp(3, 24);
+  int benchesFor(double radiusM) =>
+      (pitDepthFor(radiusM) / 25).round().clamp(3, 24);
 }

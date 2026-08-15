@@ -178,8 +178,27 @@ class BuildingMassingRules {
 
     // Land available once the setbacks are taken off, in the parcel's own
     // frontage-aligned axes: width runs ALONG the street, depth away from it.
-    final availW = math.max(6.0, extent.width - setbackM * 2);
-    final availD = math.max(6.0, extent.depth - setbackM * 2);
+    // Capped to the spec's real site size — a solar farm dropped on a
+    // ten-kilometre manual lot is still a solar farm, not a ten-kilometre one.
+    // The cap applies ONLY to specs that declare a site: ordinary street
+    // buildings have no fixed extent and must keep taking their shape from the
+    // parcel, or every lot in the city would produce the same building.
+    final site = spec.siteMetres();
+    final capW = spec.siteWidthM > 0 ? site.width : double.infinity;
+    final capD = spec.siteDepthM > 0 ? site.depth : double.infinity;
+    final availW = math.min(math.max(6.0, extent.width - setbackM * 2), capW);
+    final availD = math.min(math.max(6.0, extent.depth - setbackM * 2), capD);
+
+    switch (spec.siteKind) {
+      case SiteKind.field:
+        return _field(spec, availW, availD);
+      case SiteKind.pit:
+        return _pit(spec, availW, availD, storey);
+      case SiteKind.pad:
+        return _apron(spec, availW, availD, storey);
+      case SiteKind.building:
+        break;
+    }
 
     final needed = requiredArea(spec);
     final spaces = parkingSpaces(spec);
@@ -292,6 +311,129 @@ class BuildingMassingRules {
               lampPosts: _lampGrid(availW, parkDepth,
                   y0: buildCentreY - footD / 2 - parkDepth),
             ),
+    );
+  }
+
+  /// An open installation: rows of low racks across the site, plus a small
+  /// control/maintenance building at one corner.
+  ///
+  /// Rows rather than one slab because that is what makes the scale legible
+  /// from the air — a kilometre of undifferentiated grey reads as a car park,
+  /// while a kilometre of repeating rows reads as a solar farm.
+  BuildingMassing _field(CityBuildingSpec spec, double w, double d) {
+    const rowPitch = 9.0; // row spacing, set by inter-row shading
+    const rowDepth = 3.6; // panel run depth
+    const rackHeight = 2.6;
+    final rows = math.max(1, (d / rowPitch).floor());
+    final volumes = <MassBox>[
+      for (var i = 0; i < rows; i++)
+        MassBox(
+          x: 0,
+          y: -d / 2 + rowPitch * (i + 0.5),
+          z: 0.8,
+          width: w * 0.96,
+          depth: rowDepth,
+          height: rackHeight,
+          glazed: false,
+        ),
+      // Substation / control room on the access side.
+      MassBox(
+        x: -w / 2 + 12,
+        y: -d / 2 + 8,
+        z: 0,
+        width: 18,
+        depth: 12,
+        height: 5,
+        floors: 1,
+      ),
+    ];
+    return BuildingMassing(
+      volumes: volumes,
+      storeyM: storeyM,
+      floorArea: 18 * 12,
+      entrance: (-w / 2 + 12, -d / 2),
+      parking: _lotFor(spec, w, y0: -d / 2 - 20),
+    );
+  }
+
+  /// An excavation. The hole itself is terrain, cut by a stepped-pit brush; all
+  /// that stands here is the plant around its rim.
+  BuildingMassing _pit(CityBuildingSpec spec, double w, double d, double storey) {
+    final volumes = <MassBox>[
+      // Processing shed and ore bins, set back from the crest.
+      MassBox(
+        x: -w / 2 + math.min(60, w * 0.12),
+        y: -d / 2 + math.min(50, d * 0.1),
+        z: 0,
+        width: math.min(90, w * 0.16),
+        depth: math.min(60, d * 0.12),
+        height: storey * 2,
+        floors: 2,
+      ),
+      MassBox(
+        x: -w / 2 + math.min(140, w * 0.22),
+        y: -d / 2 + math.min(46, d * 0.09),
+        z: 0,
+        width: math.min(28, w * 0.05),
+        depth: math.min(28, d * 0.05),
+        height: 26,
+        glazed: false,
+      ),
+    ];
+    return BuildingMassing(
+      volumes: volumes,
+      storeyM: storey,
+      floorArea: volumes.first.floorArea,
+      entrance: (-w / 2, -d / 2),
+      parking: _lotFor(spec, math.min(w, 160), y0: -d / 2 - 30),
+    );
+  }
+
+  /// A paved apron: hardstanding with a control tower beside it.
+  BuildingMassing _apron(CityBuildingSpec spec, double w, double d, double storey) {
+    final volumes = <MassBox>[
+      // The apron itself — flat, but real geometry so it takes the pad's
+      // material rather than showing bare regolith between the pads.
+      MassBox(
+        x: 0,
+        y: 0,
+        z: 0,
+        width: w,
+        depth: d,
+        height: 0.25,
+        glazed: false,
+      ),
+      MassBox(
+        x: -w / 2 + 30,
+        y: -d / 2 + 30,
+        z: 0,
+        width: 22,
+        depth: 22,
+        height: math.max(24.0, storey * 8),
+        floors: 8,
+      ),
+    ];
+    return BuildingMassing(
+      volumes: volumes,
+      storeyM: storey,
+      floorArea: 22 * 22 * 8,
+      entrance: (-w / 2 + 30, -d / 2),
+      parking: _lotFor(spec, math.min(w, 240), y0: -d / 2 - 40),
+    );
+  }
+
+  /// A car park for a site whose building does not front a street.
+  ParkingLot? _lotFor(CityBuildingSpec spec, double w, {required double y0}) {
+    final spaces = parkingSpaces(spec);
+    if (spaces <= 0) return null;
+    final depth = (spaces * parkingSpaceM2 / math.max(20.0, w)).clamp(8.0, 140.0);
+    return ParkingLot(
+      x: 0,
+      y: y0 - depth / 2,
+      width: w,
+      depth: depth,
+      spaces: spaces,
+      lampPosts: _lampGrid(w, depth, y0: y0 - depth),
     );
   }
 

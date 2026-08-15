@@ -8,6 +8,29 @@ import 'commodity.dart';
 /// Residential / commercial / industrial zone density tiers.
 enum Density { low, medium, high }
 
+/// What KIND of site a spec occupies.
+///
+/// Games routinely draw a nuclear plant and a corner shop at the same size,
+/// which is a gameplay compromise for a bounded map. Here land is not the
+/// constraint, so these are built at the scale the real thing occupies — and
+/// that only works if the generator knows a solar farm is a FIELD of racks and
+/// a quarry is a HOLE, not a building with a big footprint.
+enum SiteKind {
+  /// An enclosed structure: housing, offices, factories, sheds.
+  building,
+
+  /// An open installation covering its site — solar arrays, tank farms,
+  /// antenna fields. Mostly low, mostly repeating.
+  field,
+
+  /// An excavation. The site IS the hole; any buildings are ancillary plant
+  /// around its rim.
+  pit,
+
+  /// A paved apron: spaceport pads, runways, hardstanding.
+  pad,
+}
+
 /// A zone kind + density. Higher density grows bigger buildings (more
 /// housing/jobs) but needs more services + power.
 class CityZoneType {
@@ -46,6 +69,16 @@ class CityBuildingSpec {
   final int footW; // footprint width in cells (>=1)
   final int footH; // footprint height in cells (>=1)
 
+  /// REAL site size in metres. Zero means "derive it from the cell footprint",
+  /// which is what the ordinary street-scale buildings do. The heavy
+  /// installations state their true extent here instead, because a fixed grid
+  /// cannot express a two-kilometre solar farm and rounding one to the nearest
+  /// cell is how these end up comically undersized.
+  final double siteWidthM;
+  final double siteDepthM;
+
+  final SiteKind siteKind;
+
   const CityBuildingSpec({
     required this.type,
     required this.label,
@@ -67,9 +100,24 @@ class CityBuildingSpec {
     this.deathcareRate = 0,
     this.footW = 1,
     this.footH = 1,
+    this.siteWidthM = 0,
+    this.siteDepthM = 0,
+    this.siteKind = SiteKind.building,
   });
 
   int get cellCount => footW * footH;
+
+  /// Site extent in metres, falling back to the cell footprint.
+  ({double width, double depth}) siteMetres({double cellM = 24}) => (
+        width: siteWidthM > 0 ? siteWidthM : footW * cellM,
+        depth: siteDepthM > 0 ? siteDepthM : footH * cellM,
+      );
+
+  /// Ground area the installation needs, m².
+  double siteArea({double cellM = 24}) {
+    final s = siteMetres(cellM: cellM);
+    return s.width * s.depth;
+  }
 
   double height() {
     if (housing > 0) return 14 + housing * 0.18;
@@ -137,18 +185,23 @@ const List<CityBuildingSpec> kUtilCatalog = [
   // ---- POWER ----
   // (solar/wind outputs are scaled by the host planet's sun-distance + air.)
   CityBuildingSpec(type: 'solar', label: 'Solar Farm',
-      colorArgb: 0xFFFFD23F, group: 'power', powerOutput: 60, buildCost: 40),
+      colorArgb: 0xFFFFD23F, group: 'power', powerOutput: 60, buildCost: 40,
+      siteWidthM: 780, siteDepthM: 780, siteKind: SiteKind.field),
   CityBuildingSpec(type: 'wind', label: 'Wind Turbine',
-      colorArgb: 0xFFB2DFDB, group: 'power', powerOutput: 50, buildCost: 40),
+      colorArgb: 0xFFB2DFDB, group: 'power', powerOutput: 50, buildCost: 40,
+      siteWidthM: 420, siteDepthM: 420, siteKind: SiteKind.field),
   CityBuildingSpec(type: 'gas', label: 'Gas Generator',
       colorArgb: 0xFFFF8A65, group: 'power', powerOutput: 120, jobs: 6,
-      inputs: {Commodity.fuel: 0.6}, pollution: 2.5, buildCost: 50),
+      inputs: {Commodity.fuel: 0.6}, pollution: 2.5, buildCost: 50,
+      siteWidthM: 260, siteDepthM: 200),
   CityBuildingSpec(type: 'reactor', label: 'Fission Reactor',
       colorArgb: 0xFF7FE0A0, group: 'power', powerOutput: 240, jobs: 12,
-      unlockPop: 120, buildCost: 80, pollution: 1.0),
+      unlockPop: 120, buildCost: 80, pollution: 1.0,
+      siteWidthM: 1400, siteDepthM: 1100),
   CityBuildingSpec(type: 'fusion', label: 'Fusion Plant',
       colorArgb: 0xFF80D8FF, group: 'power', powerOutput: 800, jobs: 30,
-      computeDraw: 4, unlockPop: 600, buildCost: 200),
+      computeDraw: 4, unlockPop: 600, buildCost: 200,
+      siteWidthM: 2200, siteDepthM: 1800),
   // ---- CITY SERVICES ----
   // Aquifer Pump: extracts water from the ground table — cheap + plentiful, but
   // it DRAWS DOWN the water table, drying the surface (and eventually killing
@@ -162,13 +215,15 @@ const List<CityBuildingSpec> kUtilCatalog = [
       outputs: {Commodity.water: 2.0}, services: {'water': 300}, pollution: 0.5),
   CityBuildingSpec(type: 'farm', label: 'Farm',
       colorArgb: 0xFF8BC34A, group: 'svc', jobs: 10, powerDraw: 4,
-      inputs: {Commodity.water: 0.5}, outputs: {Commodity.food: 1.0}),
+      inputs: {Commodity.water: 0.5}, outputs: {Commodity.food: 1.0},
+      siteWidthM: 400, siteDepthM: 400, siteKind: SiteKind.field),
   // Industrial Farm: a 2x2 mega-farm. ~4x the yield of a Farm but only ~3x the
   // build cost + ~2.4x the jobs — economy of scale, at the cost of land + sprawl.
   CityBuildingSpec(type: 'farm-big', label: 'Industrial Farm',
       colorArgb: 0xFFAED581, group: 'svc', jobs: 24, powerDraw: 14,
       inputs: {Commodity.water: 1.8}, outputs: {Commodity.food: 4.2},
-      pollution: 1.0, unlockPop: 80, buildCost: 110, footW: 2, footH: 2),
+      pollution: 1.0, unlockPop: 80, buildCost: 110, footW: 2, footH: 2,
+      siteWidthM: 1600, siteDepthM: 1600, siteKind: SiteKind.field),
   // Hydroponics: a 1x2 indoor stack. No open ground / sunlight needed (great
   // off-world), but power-hungry and water-fed. Compact, high yield per tile.
   CityBuildingSpec(type: 'hydroponics', label: 'Hydroponics',
@@ -186,7 +241,8 @@ const List<CityBuildingSpec> kUtilCatalog = [
   // the cost — pack more panels per footprint at a premium.
   CityBuildingSpec(type: 'solar-big', label: 'Solar Array',
       colorArgb: 0xFFFFD23F, group: 'power', powerOutput: 270,
-      unlockPop: 60, buildCost: 140, footW: 2, footH: 2),
+      unlockPop: 60, buildCost: 140, footW: 2, footH: 2,
+      siteWidthM: 2000, siteDepthM: 2000, siteKind: SiteKind.field),
   // ---- LIFE SUPPORT: oxygen (only needed off breathable worlds) ----
   CityBuildingSpec(type: 'electrolysis', label: 'Electrolysis Plant',
       colorArgb: 0xFF80DEEA, group: 'svc', jobs: 12,
@@ -222,7 +278,8 @@ const List<CityBuildingSpec> kUtilCatalog = [
   // ---- WASTE MANAGEMENT (process garbage + sewage the population generates) ----
   CityBuildingSpec(type: 'landfill', label: 'Landfill',
       colorArgb: 0xFF8D6E63, group: 'waste', jobs: 6, powerDraw: 3,
-      inputs: {Commodity.garbage: 2.0}, pollution: 1.5, buildCost: 30),
+      inputs: {Commodity.garbage: 2.0}, pollution: 1.5, buildCost: 30,
+      siteWidthM: 700, siteDepthM: 700, siteKind: SiteKind.pit),
   CityBuildingSpec(type: 'recycler', label: 'Recycling Center',
       colorArgb: 0xFF66BB6A, group: 'waste', jobs: 18, powerDraw: 14,
       inputs: {Commodity.garbage: 3.0},
@@ -245,21 +302,25 @@ const List<CityBuildingSpec> kUtilCatalog = [
   // ---- RESOURCES / FACTORIES ----
   CityBuildingSpec(type: 'mine', label: 'Mine',
       colorArgb: 0xFFB388FF, group: 'res-x', jobs: 20, powerDraw: 15,
-      outputs: {Commodity.ore: 2}, pollution: 2.0),
+      outputs: {Commodity.ore: 2}, pollution: 2.0,
+      siteWidthM: 420, siteDepthM: 420, siteKind: SiteKind.pit),
   // Quarry: a 5×5 open-pit megamine. ~11x a Mine's ore for ~9x the jobs at a
   // steep land + pollution cost — bulk extraction for big colonies.
   CityBuildingSpec(type: 'mine', label: 'Quarry',
       colorArgb: 0xFF9575CD, group: 'res-x', jobs: 180, powerDraw: 130,
       outputs: {Commodity.ore: 22}, pollution: 14.0, unlockPop: 400,
-      buildCost: 360, footW: 5, footH: 5),
+      buildCost: 360, footW: 5, footH: 5,
+      siteWidthM: 3000, siteDepthM: 3000, siteKind: SiteKind.pit),
   CityBuildingSpec(type: 'refinery', label: 'Refinery',
       colorArgb: 0xFFE3A857, group: 'res-x', jobs: 30, powerDraw: 25,
       inputs: {Commodity.ore: 1}, outputs: {Commodity.fuel: 0.4, Commodity.oxidizer: 0.3},
-      pollution: 4.0, unlockPop: 80),
+      pollution: 4.0, unlockPop: 80,
+      siteWidthM: 900, siteDepthM: 700),
   CityBuildingSpec(type: 'steelmill', label: 'Steel Mill',
       colorArgb: 0xFFBCAAA4, group: 'res-x', jobs: 35, powerDraw: 30,
       inputs: {Commodity.ore: 2}, outputs: {Commodity.steel: 1.5, Commodity.tubes: 0.4},
-      pollution: 5.0, unlockPop: 120),
+      pollution: 5.0, unlockPop: 120,
+      siteWidthM: 1100, siteDepthM: 800),
   CityBuildingSpec(type: 'electronics', label: 'Electronics Plant',
       colorArgb: 0xFF64FFDA, group: 'res-x', jobs: 40,
       powerDraw: 35, computeDraw: 1,
@@ -269,7 +330,8 @@ const List<CityBuildingSpec> kUtilCatalog = [
   CityBuildingSpec(type: 'datacenter', label: 'Data Center',
       colorArgb: 0xFF40C4FF, group: 'compute', jobs: 25, powerDraw: 60,
       inputs: {Commodity.electronics: 0.2}, computeOutput: 20,
-      pollution: 1.0, unlockPop: 250, buildCost: 120),
+      pollution: 1.0, unlockPop: 250, buildCost: 120,
+      siteWidthM: 520, siteDepthM: 380),
   // ---- AEROSPACE ----
   CityBuildingSpec(type: 'rocketfactory', label: 'Rocket Parts Factory',
       colorArgb: 0xFFFF8A65, group: 'aero', jobs: 50,
@@ -281,7 +343,8 @@ const List<CityBuildingSpec> kUtilCatalog = [
       jobs: 80, powerDraw: 80, computeDraw: 8,
       inputs: {Commodity.rocketParts: 0.3, Commodity.tubes: 0.2,
         Commodity.electronics: 0.2, Commodity.fuel: 0.5},
-      pollution: 2.0, unlockPop: 700, buildCost: 300),
+      pollution: 2.0, unlockPop: 700, buildCost: 300,
+      siteWidthM: 260, siteDepthM: 220),
   // ---- MILITARY ----
   CityBuildingSpec(type: 'gunfactory', label: 'Arms Factory',
       colorArgb: 0xFF8D6E63, group: 'mil', jobs: 35, powerDraw: 25,
@@ -305,7 +368,8 @@ const List<CityBuildingSpec> kUtilCatalog = [
   CityBuildingSpec(type: 'base', label: 'Military Base',
       colorArgb: 0xFF455A64, group: 'mil', jobs: 80, powerDraw: 40,
       inputs: {Commodity.rations: 1.5, Commodity.fuel: 0.5, Commodity.ammo: 1.0},
-      services: {'safety': 400}, unlockPop: 600, buildCost: 200),
+      services: {'safety': 400}, unlockPop: 600, buildCost: 200,
+      siteWidthM: 1600, siteDepthM: 1600),
   CityBuildingSpec(type: 'gunemplacement', label: 'Gun Emplacement',
       colorArgb: 0xFF6D4C41, group: 'mil', jobs: 8, powerDraw: 6,
       inputs: {Commodity.ammo: 0.5}, services: {'safety': 120}, unlockPop: 400),
@@ -317,7 +381,8 @@ const List<CityBuildingSpec> kUtilCatalog = [
       colorArgb: 0xFF78909C, group: 'mil', jobs: 50, powerDraw: 30,
       footW: 1, footH: 10, // a long runway strip
       inputs: {Commodity.fuel: 1.0, Commodity.ammo: 0.5},
-      services: {'safety': 200}, unlockPop: 700, buildCost: 200),
+      services: {'safety': 200}, unlockPop: 700, buildCost: 200,
+      siteWidthM: 300, siteDepthM: 3200, siteKind: SiteKind.pad),
   // ---- STORAGE ----
   CityBuildingSpec(type: 'warehouse', label: 'Warehouse',
       colorArgb: 0xFFA1887F, group: 'storage', powerDraw: 3,
@@ -329,7 +394,8 @@ const List<CityBuildingSpec> kUtilCatalog = [
   CityBuildingSpec(type: 'terraformer', label: 'Terraforming Tower',
       colorArgb: 0xFF66BB6A, group: 'env', jobs: 30, powerDraw: 60,
       computeDraw: 4, outputs: {Commodity.oxygen: 0.5}, pollution: -2.0,
-      unlockPop: 300, buildCost: 150),
+      unlockPop: 300, buildCost: 150,
+      siteWidthM: 320, siteDepthM: 320),
   CityBuildingSpec(type: 'shelter', label: 'Fallout Shelter',
       colorArgb: 0xFF78909C, group: 'env', housing: 30, powerDraw: 8,
       buildCost: 60),
@@ -356,7 +422,8 @@ const List<CityBuildingSpec> kUtilCatalog = [
         // via an explicit scheduled delivery, never produced passively.
         Commodity.food: 0.3, Commodity.water: 0.3,
         Commodity.oxygen: 0.3,
-      }),
+      },
+      siteWidthM: 900, siteDepthM: 900, siteKind: SiteKind.pad),
   // Bigger spaceports for colonies with many automatic shuttles arriving +
   // departing: more pads (footprint) = more throughput per build. They can be
   // landed ON (occupied state) by the lander.
@@ -368,7 +435,8 @@ const List<CityBuildingSpec> kUtilCatalog = [
       outputs: {
         Commodity.food: 0.9, Commodity.water: 0.9,
         Commodity.oxygen: 0.9,
-      }),
+      },
+      siteWidthM: 1800, siteDepthM: 2600, siteKind: SiteKind.pad),
   CityBuildingSpec(type: 'spaceport', label: 'Starport (3×6)',
       colorArgb: 0xFFEC407A, group: 'transport',
       jobs: 240, powerDraw: 240, unlockPop: 800, buildCost: 360,
@@ -377,7 +445,8 @@ const List<CityBuildingSpec> kUtilCatalog = [
       outputs: {
         Commodity.food: 2.2, Commodity.water: 2.2,
         Commodity.oxygen: 2.2,
-      }),
+      },
+      siteWidthM: 3200, siteDepthM: 4200, siteKind: SiteKind.pad),
 ];
 
 const Map<String, String> kGroupLabels = {

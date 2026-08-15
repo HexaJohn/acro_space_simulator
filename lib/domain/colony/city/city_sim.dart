@@ -3074,10 +3074,13 @@ class CitySim {
     final half = grid / 2.0;
     final gx = (anchor % grid) - half;
     final gy = (anchor ~/ grid) - half;
+    // Real site metres, not cell counts: the heavy installations state a true
+    // extent that no whole number of cells can express.
+    final site = spec.siteMetres(cellM: cellM);
     final e0 = gx * cellM;
     final n0 = gy * cellM;
-    final e1 = e0 + spec.footW * cellM;
-    final n1 = n0 + spec.footH * cellM;
+    final e1 = e0 + site.width;
+    final n1 = n0 + site.depth;
     // Front onto the cell's north edge — the 2D map has no road direction to
     // read, so a consistent facing beats an arbitrary one.
     return Parcel(
