@@ -4,7 +4,9 @@
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
 // ignore_for_file: implementation_imports
+import 'dart:math' as math;
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter_scene/gpu.dart' as gpu;
 import 'package:flutter_scene/scene.dart' as fs;
@@ -24,6 +26,7 @@ import '../../../domain/terrain/terrain_field.dart';
 import '../../../domain/terrain/terrain_lod.dart';
 import '../body_nodes.dart';
 import '../coord_convert.dart';
+import '../depth_materials.dart';
 import 'terrain_textures.dart';
 
 /// Renders a voxel-terrain patch on the focused body's surface.
@@ -104,6 +107,23 @@ class TerrainNodes {
   /// frames. ~1.5 s at 60 fps; the watermark eviction still reclaims memory
   /// under real pressure.
   static int retireGraceFrames = 90;
+
+  /// Retired meshes kept in the in-memory cache (see [_meshCache]).
+  static int meshCacheSize = 512;
+
+  /// Draw a wireframe "loading" grid (plus a spinner) over regions whose
+  /// resident cover is missing entirely OR at least [placeholderLevelGap]
+  /// LOD levels coarser than what selection wants — the honest "this ground
+  /// is still streaming" state. Coverage roots land within a frame, so bare
+  /// regions alone would almost never show it; the level gap is what makes
+  /// the initial refine-in read as loading instead of as blurry ground.
+  static bool loadingGrid = true;
+
+  /// Cover this many levels coarser than wanted counts as "still loading".
+  static int placeholderLevelGap = 6;
+
+  /// At most this many grid patches at once (nearest first).
+  static int maxPlaceholders = 48;
 
   /// How close (m) the focus must be to a terrain edit before its chunks are
   /// force-refined. Deformation needs levels far past what screen-space
@@ -231,8 +251,55 @@ class TerrainNodes {
   /// resubmitted every frame; cleared with the generation.
   final Set<ChunkKey> _emptyChunks = {};
 
+  /// Retired chunks' meshes, kept in memory so a revisit re-UPLOADS instead
+  /// of re-MESHING — a camera swinging back gets its ground the same frame.
+  /// Dart maps iterate in insertion order, so re-inserting on hit makes this
+  /// an LRU; [meshCacheSize] bounds it (~100 KB per entry at resolution 24).
+  /// Cleared with the generation — a cached mesh of a stale field is a lie.
+  final Map<ChunkKey, CellMesh> _meshCache = {};
+
   /// Update counter driving the retirement grace window.
   int _frame = 0;
+
+  // --- Loading placeholder ---------------------------------------------------
+  /// Wireframe patch per bare (no cover at any LOD) chunk, plus one spinner
+  /// billboard over the nearest of them.
+  final Map<ChunkKey, _GridPatch> _gridPatches = {};
+  fs.Node? _spinnerNode;
+  fs.BillboardGeometry? _spinnerGeo;
+  DepthSafeSpriteMaterial? _spinnerMat;
+  bool _spinnerTexApplied = false;
+  static Object? _spinnerTex;
+  static bool _spinnerTexBuilding = false;
+
+  /// 270-degree arc, the universal "working on it" glyph, baked once.
+  static void _ensureSpinnerTex() {
+    if (_spinnerTex != null || _spinnerTexBuilding) return;
+    _spinnerTexBuilding = true;
+    const s = 64.0;
+    final rec = ui.PictureRecorder();
+    final canvas = ui.Canvas(rec);
+    canvas.drawArc(
+      const ui.Rect.fromLTWH(8, 8, s - 16, s - 16),
+      0,
+      4.7, // ~270 deg
+      false,
+      ui.Paint()
+        ..style = ui.PaintingStyle.stroke
+        ..strokeWidth = 7
+        ..strokeCap = ui.StrokeCap.round
+        ..color = const ui.Color(0xFFBFE3FF),
+    );
+    rec
+        .endRecording()
+        .toImage(s.toInt(), s.toInt())
+        .then((img) => fs.gpuTextureFromImage(img))
+        .then((tex) {
+      _spinnerTex = tex as Object;
+    }).catchError((Object _) {
+      _spinnerTexBuilding = false;
+    });
+  }
 
   /// Cells that came back BOTH empty and clipped — the shell failed to
   /// contain the isosurface, which the mesher's own containment check calls
@@ -516,6 +583,10 @@ class TerrainNodes {
     };
     final protected = <ChunkKey>{};
     final bareAncestors = <ChunkKey>{};
+    // Missing chunks whose cover is absent or far coarser than wanted — the
+    // loading placeholder draws over them (the coverage-root path handles
+    // the truly bare subset).
+    final stillLoading = <ChunkKey>{};
     for (final m in missingNow) {
       ChunkKey? nearest;
       for (final a in m.ancestors) {
@@ -526,7 +597,11 @@ class TerrainNodes {
       }
       if (nearest != null) {
         protected.add(nearest);
+        if (m.level - nearest.level >= placeholderLevelGap) {
+          stillLoading.add(m);
+        }
       } else if (!coveredBelow.contains(m)) {
+        stillLoading.add(m);
         bareAncestors.addAll(m.ancestors);
       }
     }
@@ -567,7 +642,7 @@ class TerrainNodes {
     for (final k in _chunks.keys.toList()) {
       if (_frame - _chunks[k]!.lastVisibleFrame > retireGraceFrames &&
           !standsIn(k)) {
-        _scene.remove(_chunks.remove(k)!.node);
+        _removeResident(k);
       }
     }
     // High-watermark eviction keeps the GPU set bounded when visible demand
@@ -586,38 +661,87 @@ class TerrainNodes {
         });
       for (final k in evictable) {
         if (_chunks.length <= maxResidentChunks) break;
-        _scene.remove(_chunks.remove(k)!.node);
+        _removeResident(k);
       }
     }
 
-    // Turn finished meshes into scene nodes, capped per frame — the upload is
-    // the only part of streaming still on the render thread (plan §4). A
-    // result that went stale while in flight (wrong generation, no longer
-    // wanted, already resident) is dropped; if the chunk is still needed it is
-    // simply resubmitted below. A chunk that is NOT wanted is accepted only
-    // when it covers a missing region that has no resident cover at all (a
-    // coverage root, see below) — dropping it there would defeat the point of
-    // meshing it; anywhere else a stale unwanted mesh is just churn.
+    // Turn finished meshes into scene nodes — the upload is the only part of
+    // streaming still on the render thread (plan §4). Stale results (wrong
+    // generation, no longer wanted, already resident) are dropped; a chunk
+    // that is NOT wanted is accepted only when it covers a bare region (a
+    // coverage root).
+    //
+    // LOD transitions are ATOMIC. Coarse and fine never draw together — the
+    // sunk-stand-in overlap tried that and read as layered ground in every
+    // basin. A split's children WAIT in the arrival queue until every
+    // sibling needed to cover the parent's region is on hand, then the whole
+    // set uploads and the parent leaves in the same frame; a merge uploads
+    // the parent and drops its resident descendants in the same frame. Until
+    // then the OLD LOD simply stays on screen, which is exactly "low detail
+    // until the higher detail finishes loading". Atomic groups may overrun
+    // the upload budget — a torn swap is worse than a long frame.
     var uploads = 0;
-    while (_arrived.isNotEmpty && uploads < uploadBudgetPerFrame) {
-      final a = _arrived.removeAt(0);
-      if (a.generation != _generation ||
-          _chunks.containsKey(a.key) ||
-          (!wanted.contains(a.key) && !bareAncestors.contains(a.key))) {
+    final byKey = <ChunkKey, _ArrivedMesh>{};
+    for (final a in _arrived) {
+      if (a.generation != _generation || _chunks.containsKey(a.key)) continue;
+      if (!wanted.contains(a.key) && !bareAncestors.contains(a.key)) continue;
+      byKey[a.key] = a;
+    }
+    _arrived.clear();
+    for (final a in byKey.values.toList()) {
+      if (_chunks.containsKey(a.key)) continue; // landed in an earlier group
+      if (uploads >= uploadBudgetPerFrame) {
+        _arrived.add(a); // over budget: hold for next frame
         continue;
       }
-      _addChunk(a.key, a.cell, shader as gpu.Shader);
-      uploads++;
+      ChunkKey? coarse;
+      for (final an in a.key.ancestors) {
+        if (_chunks.containsKey(an)) {
+          coarse = an;
+          break;
+        }
+      }
+      if (coarse != null) {
+        // Split swap: every missing wanted chunk under `coarse` must be
+        // resident or on hand before anything uploads.
+        final under = [
+          for (final m in missingNow)
+            if (m == coarse || m.ancestors.contains(coarse)) m,
+        ];
+        final ready = under.every(
+            (m) => _chunks.containsKey(m) || byKey.containsKey(m));
+        if (!ready) {
+          _arrived.add(a);
+          continue;
+        }
+        for (final m in under) {
+          final w = byKey[m];
+          if (w == null || _chunks.containsKey(m)) continue;
+          _addChunk(m, w.cell, shader as gpu.Shader);
+          uploads++;
+        }
+        _removeResident(coarse);
+      } else {
+        _addChunk(a.key, a.cell, shader as gpu.Shader);
+        uploads++;
+        // Merge swap: this chunk replaces any finer residents under it, in
+        // the same frame.
+        for (final r in _chunks.keys.toList()) {
+          if (r != a.key && r.ancestors.contains(a.key)) _removeResident(r);
+        }
+      }
     }
 
     // Submit what is missing, up to the in-flight cap. `visible` is already
     // sorted nearest-first, so filtering it preserves that order and the
     // ground under the craft fills in before the horizon does.
+    final held = <ChunkKey>{for (final a in _arrived) a.key};
     final missing = [
       for (final k in visible)
         if (wanted.contains(k) &&
             !_chunks.containsKey(k) &&
             !_pending.contains(k) &&
+            !held.contains(k) &&
             !_emptyChunks.contains(k))
           k,
     ];
@@ -649,10 +773,26 @@ class TerrainNodes {
           a,
     };
     for (final k in coverageRoots.followedBy(missing)) {
+      // Cache first: a retired mesh re-enters through the normal arrival
+      // path (same generation gating, same atomic swaps) without costing an
+      // isolate round-trip or a slot in the in-flight budget.
+      final cached = _meshCache.remove(k);
+      if (cached != null) {
+        // `held` (arrival-queue membership) keeps it out of `missing` next
+        // frame, so it cannot double-submit while it waits for upload.
+        _arrived.add(_ArrivedMesh(k, cached, _generation));
+        continue;
+      }
       if (_pending.length >= meshBudgetPerFrame) break;
       if (_pending.contains(k)) continue;
       _submit(field, k);
     }
+
+    // "This ground is still streaming": wireframe patches + a spinner over
+    // regions that have NO cover at any LOD. Runs before the no-chunks early
+    // return — the initial fill is exactly when the placeholder matters.
+    _updatePlaceholders(
+        field, missing, stillLoading, bodyWorld, bodyQuat, origin);
 
     if (_chunks.isEmpty) {
       debugLine = 'terrain: no chunks';
@@ -662,34 +802,11 @@ class TerrainNodes {
     // Per-frame transform per chunk. Each mesh is LOCAL to its own anchor, so
     // the node sits at that anchor (near the render origin for a landed craft)
     // — not at the body centre ~1e6 m away, which cancelled in float32 and
-    // jittered.
-    //
-    // Fine-over-coarse guarantee: a stand-in still resident UNDER finer
-    // replacements must never win the depth test against them — its surface
-    // can float above the true floor by up to its radial band (deep basins),
-    // where it reads as a flat slab over the refined ground. Draw order
-    // cannot fix that (chunks are opaque and depth-tested) and this
-    // flutter_gpu pin has no per-draw depth bias, so the bias is geometric:
-    // a chunk that is not LOD-selected and has ANY finer resident over its
-    // region is sunk radially by its own band. Both its surface and the true
-    // surface lie inside that band (the mesher's containment check), so the
-    // sunken copy sits strictly below every finer chunk. Sole-cover chunks
-    // stay at the true radius, keeping silhouettes exact when they are all
-    // there is.
-    final residentAncestors = <ChunkKey>{
-      for (final r in _chunks.keys) ...r.ancestors,
-    };
-    for (final e in _chunks.entries) {
-      final c = e.value;
-      final sunk =
-          !wanted.contains(e.key) && residentAncestors.contains(e.key);
-      var anchor = c.anchorBF;
-      if (sunk) {
-        final len = anchor.length;
-        if (len > 1e-6) anchor = anchor * ((len - c.bandM * 1.1) / len);
-      }
+    // jittered. (LOD transitions are atomic — see the upload pump — so
+    // coarse and fine never coexist and no depth trickery is needed here.)
+    for (final c in _chunks.values) {
       c.node.localTransform = vm.Matrix4.compose(
-        origin.worldToScene(bodyWorld + bodyQuat.rotate(anchor)),
+        origin.worldToScene(bodyWorld + bodyQuat.rotate(c.anchorBF)),
         quatToScene(bodyQuat),
         vm.Vector3.all(lengthToScene(1.0)),
       );
@@ -706,6 +823,8 @@ class TerrainNodes {
         '${_pending.isNotEmpty ? '  ~${_pending.length}' : ''}'
         '${missing.length > _pending.length ? '  +${missing.length - _pending.length}' : ''}'
         '${_emptyChunks.isNotEmpty ? '  e${_emptyChunks.length}' : ''}'
+        '${_meshCache.isNotEmpty ? '  mc${_meshCache.length}' : ''}'
+        '${_gridPatches.isNotEmpty ? '  grid${_gridPatches.length}' : ''}'
         '${_clippedEmpty > 0 ? '  CLIPPED $_clippedEmpty' : ''}';
 
     final sun = starWorld == null
@@ -789,7 +908,8 @@ class TerrainNodes {
     });
   }
 
-  /// Turn a finished mesh into a scene node (the GPU upload).
+  /// Turn a finished mesh into a scene node (the GPU upload). The [CellMesh]
+  /// is retained on the resident so retirement can drop it into [_meshCache].
   void _addChunk(ChunkKey key, CellMesh cell, gpu.Shader shader) {
     _material ??= _TerrainMaterial(shader);
     final geom = fs.MeshGeometry.fromArrays(
@@ -801,19 +921,182 @@ class TerrainNodes {
     _scene.add(node);
     _chunks[key] = _ResidentChunk(
       node: node,
-      anchorBF: cell.anchorBF,
-      triangleCount: cell.mesh.triangleCount,
-      bandM: cell.outerRadiusM - cell.innerRadiusM,
+      cell: cell,
     )..lastVisibleFrame = _frame;
+  }
+
+  /// Maintain the loading placeholders: one wireframe patch per bare missing
+  /// chunk (nearest [maxPlaceholders]), one spinner over the nearest patch.
+  ///
+  /// The patch is honest geometry — its lattice corners sample the REAL
+  /// field, lifted a few metres — so the grid hugs the ground that is about
+  /// to appear there instead of floating at the datum. Depth-tested like
+  /// terrain: hills in front hide it.
+  void _updatePlaceholders(
+    TerrainField field,
+    List<ChunkKey> missing,
+    Set<ChunkKey> stillLoading,
+    Vector3 bodyWorld,
+    Quaternion bodyQuat,
+    FloatingOrigin origin,
+  ) {
+    _ensureSpinnerTex();
+    final want = <ChunkKey>[];
+    if (loadingGrid) {
+      for (final k in missing) {
+        if (stillLoading.contains(k)) {
+          want.add(k);
+          if (want.length >= maxPlaceholders) break;
+        }
+      }
+    }
+    final wantSet = want.toSet();
+    for (final k in _gridPatches.keys.toList()) {
+      if (!wantSet.contains(k)) {
+        _scene.remove(_gridPatches.remove(k)!.node);
+      }
+    }
+    for (final k in want) {
+      _gridPatches.putIfAbsent(k, () => _buildGridPatch(field, k));
+    }
+    for (final p in _gridPatches.values) {
+      p.node.localTransform = vm.Matrix4.compose(
+        origin.worldToScene(bodyWorld + bodyQuat.rotate(p.anchorBF)),
+        quatToScene(bodyQuat),
+        vm.Vector3.all(lengthToScene(1.0)),
+      );
+    }
+
+    // Spinner over the nearest patch (want[0] — `missing` arrives sorted).
+    if (want.isEmpty) {
+      _clearSpinner();
+    } else {
+      final geo = _spinnerGeo ??= fs.BillboardGeometry(capacity: 1);
+      final mat = _spinnerMat ??= DepthSafeSpriteMaterial()
+        ..blendMode = fs.SpriteBlendMode.additive;
+      if (!_spinnerTexApplied && _spinnerTex != null) {
+        mat.colorTexture = _spinnerTex;
+        _spinnerTexApplied = true;
+      }
+      final anchor = _gridPatches[want.first]!.anchorBF;
+      final centre = bodyWorld + bodyQuat.rotate(anchor);
+      // A third of the chunk across, spinning ~1 rev / 1.5 s of wall time —
+      // UI feedback, deliberately independent of sim warp.
+      final sizeM = want.first.circumradiusM(field.radius) * 0.6;
+      final spin =
+          (DateTime.now().millisecondsSinceEpoch % 1500) / 1500 * 2 * math.pi;
+      geo.setInstance(
+        0,
+        center: origin.worldToScene(centre),
+        width: lengthToScene(sizeM),
+        height: lengthToScene(sizeM),
+        rotation: spin,
+      );
+      geo.commit(1);
+      if (_spinnerNode == null) {
+        final n = fs.Node(mesh: fs.Mesh(geo, mat));
+        _scene.add(n);
+        _spinnerNode = n;
+      }
+    }
+  }
+
+  /// A wireframe lattice over [key]'s footprint, vertices on the real ground
+  /// (+ a small lift so terrain arriving underneath never z-fights it).
+  _GridPatch _buildGridPatch(TerrainField field, ChunkKey key) {
+    const lines = 5; // per direction, incl. borders
+    const segs = 6; // segments per line, following curvature
+    final anchorDir = key.centreDirection;
+    final liftM = key.circumradiusM(field.radius) * 0.01 + 2.0;
+    double radiusAt(Vector3 dir) =>
+        field.radius + field.heightInDirection(dir.x, dir.y, dir.z) + liftM;
+    final anchorBF = anchorDir * radiusAt(anchorDir);
+
+    final positions = <double>[];
+    final indices = <int>[];
+    void polyline(List<Vector3> pts) {
+      final base = positions.length ~/ 3;
+      for (final p in pts) {
+        positions.addAll([
+          p.x - anchorBF.x,
+          p.y - anchorBF.y,
+          p.z - anchorBF.z,
+        ]);
+      }
+      for (var i = 0; i < pts.length - 1; i++) {
+        indices.addAll([base + i, base + i + 1]);
+      }
+    }
+
+    Vector3 at(double s, double t) {
+      final dir = directionOf(key.face, s, t);
+      return dir * radiusAt(dir);
+    }
+
+    for (var l = 0; l < lines; l++) {
+      final f = l / (lines - 1);
+      final s = key.s0 + (key.s1 - key.s0) * f;
+      final t = key.t0 + (key.t1 - key.t0) * f;
+      polyline([
+        for (var i = 0; i <= segs; i++)
+          at(s, key.t0 + (key.t1 - key.t0) * i / segs),
+      ]);
+      polyline([
+        for (var i = 0; i <= segs; i++)
+          at(key.s0 + (key.s1 - key.s0) * i / segs, t),
+      ]);
+    }
+
+    final geom = fs.MeshGeometry.fromArrays(
+      positions: Float32List.fromList(positions),
+      indices: indices,
+      primitiveType: igpu.PrimitiveType.line,
+    );
+    final mat = DepthSafeUnlitMaterial()
+      ..baseColorFactor = vm.Vector4(0.45, 0.78, 1.0, 0.55);
+    final node = fs.Node(mesh: fs.Mesh(geom, mat));
+    _scene.add(node);
+    return _GridPatch(node: node, anchorBF: anchorBF);
+  }
+
+  void _clearSpinner() {
+    final n = _spinnerNode;
+    if (n != null) {
+      _scene.remove(n);
+      _spinnerNode = null;
+    }
+  }
+
+  void _clearPlaceholders() {
+    for (final p in _gridPatches.values) {
+      _scene.remove(p.node);
+    }
+    _gridPatches.clear();
+    _clearSpinner();
+  }
+
+  /// Retire a resident chunk, keeping its mesh in the LRU cache so a revisit
+  /// re-uploads instead of re-meshing.
+  void _removeResident(ChunkKey key) {
+    final c = _chunks.remove(key);
+    if (c == null) return;
+    _scene.remove(c.node);
+    _meshCache.remove(key); // re-insert -> newest LRU position
+    _meshCache[key] = c.cell;
+    while (_meshCache.length > meshCacheSize) {
+      _meshCache.remove(_meshCache.keys.first);
+    }
   }
 
   /// Invalidate every job in flight and every result not yet uploaded. The
   /// jobs still complete (no cancellation, see mesh_scheduler.dart); their
-  /// results are dropped by the generation check.
+  /// results are dropped by the generation check. Cached meshes were built
+  /// from the same now-stale field, so they go too.
   void _invalidateInFlight() {
     _generation++;
     _arrived.clear();
     _emptyChunks.clear();
+    _meshCache.clear();
     _clippedEmpty = 0;
   }
 
@@ -823,6 +1106,7 @@ class TerrainNodes {
       _scene.remove(c.node);
     }
     _chunks.clear();
+    _clearPlaceholders();
     _invalidateInFlight();
     _tree?.reset();
     _bodyId = null;
@@ -849,33 +1133,32 @@ class _ArrivedMesh {
   final int generation;
 }
 
-/// A chunk currently in the scene.
+/// A chunk currently in the scene. Keeps its [CellMesh] so retirement can
+/// hand the mesh to the in-memory cache instead of discarding it.
 class _ResidentChunk {
   _ResidentChunk({
     required this.node,
-    required this.anchorBF,
-    required this.triangleCount,
-    required this.bandM,
+    required this.cell,
   });
 
   final fs.Node node;
+  final CellMesh cell;
 
-  /// Body-fixed point the node's vertices are relative to.
-  final Vector3 anchorBF;
-
-  final int triangleCount;
+  Vector3 get anchorBF => cell.anchorBF;
+  int get triangleCount => cell.mesh.triangleCount;
 
   /// Last [TerrainNodes._frame] this chunk was in the visible set. Fresh
   /// chunks start at the frame they were added; retirement waits until the
   /// chunk has been invisible for [TerrainNodes.retireGraceFrames].
   int lastVisibleFrame = 0;
+}
 
-  /// Radial thickness (m) of the shell the chunk was meshed in. By
-  /// construction (the mesher's `clipped` self-check) both this chunk's
-  /// surface and the TRUE surface lie inside that band, so sinking the chunk
-  /// by the band puts it strictly below any finer chunk over the same region
-  /// — the geometric depth bias the stand-in overlap needs.
-  final double bandM;
+/// One loading-grid wireframe patch (see [TerrainNodes.loadingGrid]).
+class _GridPatch {
+  _GridPatch({required this.node, required this.anchorBF});
+
+  final fs.Node node;
+  final Vector3 anchorBF;
 }
 
 /// Opaque triplanar-procedural terrain material. Double-sided (CullMode.none)
