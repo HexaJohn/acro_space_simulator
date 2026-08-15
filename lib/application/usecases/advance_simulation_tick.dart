@@ -13,6 +13,7 @@ import '../../domain/autonomy/cargo_scheduler.dart';
 import '../../domain/autonomy/docking_updater.dart';
 import '../../domain/colony/city/city_sim.dart';
 import '../../domain/colony/city/city_terrain_shaper.dart';
+import '../../domain/colony/city/shuttle_cargo.dart';
 import '../../domain/colony/city_mining_service.dart';
 import '../../domain/colony/happiness_service.dart';
 import '../../domain/colony/supply_chain.dart';
@@ -90,6 +91,9 @@ class AdvanceSimulationTick {
   final AtmosphereRepository atmosphere;
 
   final AtmospherePollutionService atmospherePollution;
+
+  /// Moves goods between a craft standing on a pad and the colony under it.
+  final ShuttleCargoService shuttleCargo;
   final DepositRepository deposits;
   final WeatherRepository weather;
   final CargoScheduleRepository cargo;
@@ -173,6 +177,7 @@ class AdvanceSimulationTick {
     this.cityShaper = const CityTerrainShaper(),
     this.atmosphere = const NullAtmosphereRepository(),
     this.atmospherePollution = const AtmospherePollutionService(),
+    this.shuttleCargo = const ShuttleCargoService(),
     this.cargo = const NullCargoScheduleRepository(),
     this.converter = const StateVectorOrbitConverter(),
     this.thermalUpdater = const VesselThermalUpdater(),
@@ -351,6 +356,7 @@ class AdvanceSimulationTick {
       city.advance(dt);
       _shapeCityTerrain(city, system, clock);
       _polluteAtmosphere(city, dt);
+      _unloadShuttles(city, system);
     }
 
     // ---- Colony / city phase ----
@@ -457,6 +463,28 @@ class AdvanceSimulationTick {
       dt: dt,
     );
     atmosphere.save(state);
+  }
+
+  /// Unload any craft standing on one of this colony's pads.
+  ///
+  /// Run over the colony's pads rather than over every vessel: a world has far
+  /// more craft than pads, and all but a handful are nowhere near the ground.
+  void _unloadShuttles(CitySim city, StarSystem system) {
+    if (city.landingPads().isEmpty) return;
+    final body = system.body(city.body.id);
+    if (body == null) return;
+    for (final vessel in vessels.all().toList()) {
+      final moved =
+          shuttleCargo.unload(city, vessel, bodyRadiusM: body.radius);
+      if (moved == null) continue;
+      vessels.save(vessel);
+      events.publish(CargoDelivered(
+        vessel.id,
+        colonyId: city.id,
+        padId: moved.padId,
+        units: moved.totalDelivered,
+      ));
+    }
   }
 
   void _vesselSubsystems(

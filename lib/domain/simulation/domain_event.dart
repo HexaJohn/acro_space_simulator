@@ -111,6 +111,24 @@ class MegastructureMilestone extends DomainEvent {
       : super(Epoch.zero);
 }
 
+/// A craft standing on a colony pad handed its cargo over.
+///
+/// Raised by the tick rather than by the colony so a listener sees WHICH craft
+/// served WHICH pad — the renderer's unload FX and the contract tracker both
+/// need the vessel, not just the stockpile going up.
+class CargoDelivered extends DomainEvent {
+  final VesselId vessel;
+  final String colonyId;
+  final String padId;
+  final double units;
+  CargoDelivered(
+    this.vessel, {
+    required this.colonyId,
+    required this.padId,
+    required this.units,
+  }) : super(Epoch.zero);
+}
+
 class SituationEntered extends DomainEvent {
   final VesselId vessel;
   final String situation; // e.g. 'lowOrbit:moon'
