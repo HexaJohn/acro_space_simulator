@@ -26,6 +26,8 @@ import '../building.dart';
 import '../city_network.dart';
 import 'city_building_spec.dart';
 import 'city_config.dart';
+import 'city_layout.dart';
+import 'parcel.dart';
 import 'commodity.dart';
 
 /// A craft visiting a spaceport — a relief mission or a scheduled delivery. It
@@ -3032,6 +3034,73 @@ class CitySim {
   // ---- Map data (Building bridge for the painter) ----
   // The painter only reads Building.id; we key buildings by '$cellKey' and look
   // the CityBuildingSpec back up via specAt() for colour/height.
+
+  /// The colony's road network and land parcels.
+  ///
+  /// Parcels — not cells — are what land is measured and built on from here
+  /// out: they carry real metric polygons, a frontage, and an orientation, so a
+  /// building can be sized and turned to face its street. The legacy cell grid
+  /// is still the 2D map's index; [buildingParcels] is the seam that presents
+  /// both as one list of real polygons to anything downstream (the 3D scene,
+  /// the terrain pad, the lighting pass).
+  final CityLayout layout = CityLayout();
+
+  /// Buildings placed directly on a parcel, as parcel id -> spec. Grid-placed
+  /// buildings stay in [utils] / [zones] and are converted on demand.
+  final Map<String, CityBuildingSpec> parcelBuildings = {};
+
+  /// Place [spec] on the parcel [parcelId]. Returns false if that parcel is
+  /// unknown or already built on.
+  bool placeOnParcel(String parcelId, CityBuildingSpec spec) {
+    if (parcelBuildings.containsKey(parcelId)) return false;
+    final exists = layout.parcels.any((p) => p.id == parcelId);
+    if (!exists) return false;
+    parcelBuildings[parcelId] = spec;
+    return true;
+  }
+
+  /// The parcel a GRID-placed building occupies, derived from its cell
+  /// footprint. The grid is centred on the colony site (as the snapshot places
+  /// it), and a cell is [cellM] metres square.
+  Parcel parcelForCell(int anchor, CityBuildingSpec spec) {
+    final half = grid / 2.0;
+    final gx = (anchor % grid) - half;
+    final gy = (anchor ~/ grid) - half;
+    final e0 = gx * cellM;
+    final n0 = gy * cellM;
+    final e1 = e0 + spec.footW * cellM;
+    final n1 = n0 + spec.footH * cellM;
+    // Front onto the cell's north edge — the 2D map has no road direction to
+    // read, so a consistent facing beats an arbitrary one.
+    return Parcel(
+      id: 'cell-$anchor',
+      polygon: [Vec2(e0, n0), Vec2(e1, n0), Vec2(e1, n1), Vec2(e0, n1)],
+      frontage: (Vec2(e0, n1), Vec2(e1, n1)),
+      use: _useFor(spec),
+    );
+  }
+
+  static ParcelUse _useFor(CityBuildingSpec spec) => switch (spec.group) {
+        'res' => ParcelUse.residential,
+        'com' => ParcelUse.commercial,
+        'ind' || 'res-x' || 'aero' || 'mil' => ParcelUse.industrial,
+        'power' || 'waste' || 'storage' || 'compute' => ParcelUse.utility,
+        _ => ParcelUse.civic,
+      };
+
+  /// Every building in the colony as a (parcel, spec) pair, whatever placed it.
+  ///
+  /// One list, real polygons, correct orientation — the single source the 3D
+  /// scene, terrain levelling and street lighting all read.
+  Iterable<(Parcel, CityBuildingSpec)> buildingParcels() sync* {
+    for (final e in parcelBuildings.entries) {
+      final parcel = layout.parcels.where((p) => p.id == e.key).firstOrNull;
+      if (parcel != null) yield (parcel, e.value);
+    }
+    for (final e in occupiedCells()) {
+      yield (parcelForCell(e.key, e.value), e.value);
+    }
+  }
 
   /// Every cell that carries a building, as (cell key -> spec).
   ///

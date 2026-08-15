@@ -15,6 +15,7 @@ import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart'
 import 'package:acro_space_simulator/domain/colony/city/city_config.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/commodity.dart';
+import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/orbits/soi_transition_service.dart';
 import 'package:acro_space_simulator/domain/simulation/simulation_clock.dart';
 import 'package:acro_space_simulator/domain/universe/real_solar_system.dart';
@@ -89,6 +90,38 @@ void main() {
     }
 
     expect(fast.stock[Commodity.ore], closeTo(slow.stock[Commodity.ore]!, 1e-6));
+  });
+
+  test('every building reports a real metric parcel, however it was placed', () {
+    final city = foundColony();
+    addMine(city);
+
+    final placed = city.buildingParcels().toList();
+    expect(placed.length, 2); // the mine and its solar farm
+
+    for (final (parcel, spec) in placed) {
+      // A 1x1 grid building is one cell square in METRES, not "one cell".
+      expect(parcel.area,
+          closeTo(spec.footW * spec.footH * CitySim.cellM * CitySim.cellM, 1));
+      expect(parcel.frontageWidth, greaterThan(0));
+    }
+  });
+
+  test('a colony can build on a subdivided parcel, not just a cell', () {
+    final city = foundColony();
+    city.layout.addRoad(const RoadSpline(
+      id: 'main',
+      controls: [Vec2(0, 0), Vec2(0, 240)],
+    ));
+    expect(city.layout.autoParcels, isNotEmpty);
+
+    final lot = city.layout.autoParcels.first;
+    final mine = kUtilCatalog.firstWhere((s) => s.label == 'Mine');
+    expect(city.placeOnParcel(lot.id, mine), isTrue);
+    expect(city.placeOnParcel(lot.id, mine), isFalse, reason: 'lot is taken');
+
+    final placed = city.buildingParcels().toList();
+    expect(placed.map((e) => e.$1.id), contains(lot.id));
   });
 
   test('city buildings reach the world snapshot', () {
