@@ -22,7 +22,9 @@ import '../../planetary/liquid_mix.dart';
 import '../../planetary/planet_surface.dart';
 import '../../planetary/surface_conditions.dart';
 import '../../universe/celestial_body.dart';
+import '../../shared/vector3.dart';
 import '../building.dart';
+import '../surface_placement.dart';
 import '../city_network.dart';
 import 'city_building_spec.dart';
 import 'city_config.dart';
@@ -3112,6 +3114,36 @@ class CitySim {
       yield (parcelForCell(e.key, e.value), e.value);
     }
   }
+
+  /// The colony's designated landing sites: spaceports, starports, airfields.
+  ///
+  /// These are what an arriving shuttle's guidance is aimed at, so they are
+  /// derived from the same parcels everything else is built on rather than from
+  /// a separate table that could drift out of step with what is actually there.
+  Iterable<(Parcel, CityBuildingSpec)> landingPads() sync* {
+    for (final (parcel, spec) in buildingParcels()) {
+      if (spec.siteKind == SiteKind.pad) yield (parcel, spec);
+    }
+  }
+
+  /// Convert a point in the colony's local east/north plane to body-fixed
+  /// metres on the surface of a body of [bodyRadiusM].
+  Vector3 localToBodyFixed(
+    Vec2 local, {
+    required double bodyRadiusM,
+    double elevationM = 0,
+    SurfacePlacement placement = const SurfacePlacement(),
+  }) =>
+      placement
+          .place(
+            radius: bodyRadiusM,
+            lat: cityLat * math.pi / 180.0,
+            lon: cityLon * math.pi / 180.0,
+            east: local.e,
+            north: local.n,
+            elevation: elevationM,
+          )
+          .position;
 
   /// Every cell that carries a building, as (cell key -> spec).
   ///
