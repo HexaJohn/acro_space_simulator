@@ -28,6 +28,7 @@ import 'package:flutter/services.dart'
 
 import '../../domain/autonomy/pilot_input.dart';
 import '../../domain/colony/city/city_config.dart';
+import '../../domain/colony/city/city_sim.dart';
 import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
 
@@ -152,6 +153,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   late final StaticUniverseRepository _universe;
   late final InMemoryVesselRepository _vessels;
   late final InMemoryColonyRepository _colonies;
+
+  /// City-builder colonies this world owns. Founding writes here, the tick
+  /// advances them, and the scene draws them — so a colony founded from the
+  /// cockpit exists in the same world the craft is standing in, rather than in
+  /// a screen that happens to be open.
+  final InMemoryCityRepository _cities = InMemoryCityRepository();
   late final InMemoryDepositRepository _deposits;
   late final ResearchLedger _research;
 
@@ -975,6 +982,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       soi: const SoiTransitionService(),
       events: _events,
       colonies: _colonies,
+      cities: _cities,
       deposits: _deposits,
       weather: _weather,
       research: _research,
@@ -1174,6 +1182,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         system: _universe.current(),
         epoch: _clock.epoch,
         colonies: _colonies,
+        cities: _cities,
         terrainEdits: _terrainEdits,
         includeDescriptors: sendDescriptors,
         events: frameEvents,
@@ -1191,6 +1200,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         system: _universe.current(),
         epoch: _clock.epoch,
         colonies: _colonies,
+        cities: _cities,
         terrainEdits: _terrainEdits,
         events: frameEvents,
       );
@@ -3149,19 +3159,61 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     );
   }
 
-  /// Found a colony where the landed [v] sits: open the City Builder on that body
-  /// at the craft's surface lat/long.
+  /// Found a colony where the landed [v] sits.
+  ///
+  /// The colony is registered with the WORLD, not handed to a screen. It then
+  /// advances on the same tick as the craft that founded it and appears in the
+  /// scene under the ship — which is the whole point of the merge. Opening the
+  /// builder afterwards is a VIEW of that live colony, not a second one.
   void _foundColony(Vessel v) {
-    final body = _universe.current().body(v.dominantBody);
+    final system = _universe.current();
+    final body = system.body(v.dominantBody);
     if (body == null) return;
+
+    // The craft's surface point, in degrees.
     final dir = v.state.position.normalized;
     final latDeg = math.asin(dir.z.clamp(-1.0, 1.0)) * 180 / math.pi;
     final lonDeg = math.atan2(dir.y, dir.x) * 180 / math.pi;
+
+    // One colony per site: founding twice on the same spot should open the
+    // existing town, not stack a second one on top of it.
+    final existing = _colonyNear(body.id.value, latDeg, lonDeg);
+    final colony = existing ??
+        CitySim.found(
+          CityConfig(
+            bodyId: body.id.value,
+            latitude: latDeg,
+            longitude: lonDeg,
+          ),
+          bodies: system.all.where((b) => !b.isStar).toList(),
+          id: 'colony-${_cities.all().length + 1}',
+          name: '${body.name} Colony',
+        );
+    if (existing == null) _cities.add(colony);
+
+    _openCity(colony);
+  }
+
+  /// The colony already sited within ~5 km of this point, if any.
+  CitySim? _colonyNear(String bodyId, double latDeg, double lonDeg) {
+    for (final c in _cities.all()) {
+      if (c.body.id.value != bodyId) continue;
+      final dLat = (c.cityLat - latDeg).abs();
+      final dLon = (c.cityLon - lonDeg).abs();
+      if (dLat < 0.05 && dLon < 0.05) return c;
+    }
+    return null;
+  }
+
+  /// Open the builder as a view onto a live colony.
+  ///
+  /// `driveLocally: false` matters: the authoritative tick is already
+  /// advancing this colony, and letting the screen advance it too would run
+  /// the city at double speed for as long as it was open.
+  void _openCity(CitySim colony) {
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => CityBuilderScreen(
-          config: CityConfig(bodyId: body.id.value, latitude: latDeg, longitude: lonDeg),
-        ),
+        builder: (_) => CityBuilderScreen(sim: colony, driveLocally: false),
       ),
     );
   }
