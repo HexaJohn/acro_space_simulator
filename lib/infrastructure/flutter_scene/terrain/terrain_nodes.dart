@@ -640,8 +640,16 @@ class TerrainNodes {
       if (visibleSet.contains(e.key)) e.value.lastVisibleFrame = _frame;
     }
     for (final k in _chunks.keys.toList()) {
-      if (_frame - _chunks[k]!.lastVisibleFrame > retireGraceFrames &&
-          !standsIn(k)) {
+      // Two ways out of the scene: fell invisible past the grace window
+      // (horizon churn protection), or REPLACED — still visible but no
+      // longer LOD-selected, with no missing chunk left standing on it,
+      // i.e. its finer (or coarser) successors are all resident. The
+      // replaced case must not wait out the grace: the split's last child
+      // just landed and the parent underneath is pure overdraw now.
+      final c = _chunks[k]!;
+      final invisible = _frame - c.lastVisibleFrame > retireGraceFrames;
+      final replaced = visibleSet.contains(k) && !wanted.contains(k);
+      if ((invisible || replaced) && !standsIn(k)) {
         _removeResident(k);
       }
     }
@@ -671,66 +679,34 @@ class TerrainNodes {
     // that is NOT wanted is accepted only when it covers a bare region (a
     // coverage root).
     //
-    // LOD transitions are ATOMIC. Coarse and fine never draw together — the
-    // sunk-stand-in overlap tried that and read as layered ground in every
-    // basin. A split's children WAIT in the arrival queue until every
-    // sibling needed to cover the parent's region is on hand, then the whole
-    // set uploads and the parent leaves in the same frame; a merge uploads
-    // the parent and drops its resident descendants in the same frame. Until
-    // then the OLD LOD simply stays on screen, which is exactly "low detail
-    // until the higher detail finishes loading". Atomic groups may overrun
-    // the upload budget — a torn swap is worse than a long frame.
+    // Splits reveal INCREMENTALLY: every fine chunk draws the moment it
+    // arrives, and the coarse parent stays underneath only until its LAST
+    // missing child lands (the stand-in protection above), then retires in
+    // the retire pass — a one-level overlap whose surfaces coincide within
+    // a voxel, not the displaced layering the old sink produced. A merge is
+    // the reverse LOD decision and swaps in one frame: the arriving coarse
+    // chunk replaces every finer resident under it immediately.
     var uploads = 0;
-    final byKey = <ChunkKey, _ArrivedMesh>{};
+    final held2 = <_ArrivedMesh>[];
     for (final a in _arrived) {
       if (a.generation != _generation || _chunks.containsKey(a.key)) continue;
       if (!wanted.contains(a.key) && !bareAncestors.contains(a.key)) continue;
-      byKey[a.key] = a;
-    }
-    _arrived.clear();
-    for (final a in byKey.values.toList()) {
-      if (_chunks.containsKey(a.key)) continue; // landed in an earlier group
       if (uploads >= uploadBudgetPerFrame) {
-        _arrived.add(a); // over budget: hold for next frame
+        held2.add(a); // over budget: hold for next frame
         continue;
       }
-      ChunkKey? coarse;
-      for (final an in a.key.ancestors) {
-        if (_chunks.containsKey(an)) {
-          coarse = an;
-          break;
-        }
-      }
-      if (coarse != null) {
-        // Split swap: every missing wanted chunk under `coarse` must be
-        // resident or on hand before anything uploads.
-        final under = [
-          for (final m in missingNow)
-            if (m == coarse || m.ancestors.contains(coarse)) m,
-        ];
-        final ready = under.every(
-            (m) => _chunks.containsKey(m) || byKey.containsKey(m));
-        if (!ready) {
-          _arrived.add(a);
-          continue;
-        }
-        for (final m in under) {
-          final w = byKey[m];
-          if (w == null || _chunks.containsKey(m)) continue;
-          _addChunk(m, w.cell, shader as gpu.Shader);
-          uploads++;
-        }
-        _removeResident(coarse);
-      } else {
-        _addChunk(a.key, a.cell, shader as gpu.Shader);
-        uploads++;
-        // Merge swap: this chunk replaces any finer residents under it, in
-        // the same frame.
-        for (final r in _chunks.keys.toList()) {
-          if (r != a.key && r.ancestors.contains(a.key)) _removeResident(r);
-        }
+      _addChunk(a.key, a.cell, shader as gpu.Shader);
+      uploads++;
+      // Merge: replace finer residents under the new chunk in the same
+      // frame. (For a split child this loop finds nothing — children have
+      // no finer residents beneath them.)
+      for (final r in _chunks.keys.toList()) {
+        if (r != a.key && r.ancestors.contains(a.key)) _removeResident(r);
       }
     }
+    _arrived
+      ..clear()
+      ..addAll(held2);
 
     // Submit what is missing, up to the in-flight cap. `visible` is already
     // sorted nearest-first, so filtering it preserves that order and the
