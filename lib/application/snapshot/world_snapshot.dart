@@ -6,6 +6,8 @@
 import 'dart:math' as math;
 
 import '../../domain/colony/building.dart';
+import '../../domain/colony/city/city_building_spec.dart';
+import '../../domain/colony/city/city_sim.dart';
 import '../../domain/colony/colony.dart';
 import '../../domain/colony/surface_placement.dart';
 import '../../domain/comms/comms_service.dart';
@@ -862,6 +864,63 @@ class BuildingSnapshot {
     );
   }
 
+  /// Place one CITY-BUILDER cell. The city's grid is centred on the colony
+  /// site, so cell offsets are measured from the middle of the map — without
+  /// the recentre the whole city would sit off to the north-east of the lat/lon
+  /// it was founded at, and the lander (hub) would not be under the pad.
+  factory BuildingSnapshot.ofCityCell(
+    CitySim city,
+    int cell,
+    CityBuildingSpec spec,
+    CelestialBody body,
+    SurfacePlacement placement,
+    TerrainHeights terrain,
+  ) {
+    final half = city.grid / 2.0;
+    final gx = (cell % city.grid) - half;
+    final gy = (cell ~/ city.grid) - half;
+    final lat = city.cityLat * math.pi / 180.0;
+    final lon = city.cityLon * math.pi / 180.0;
+    final base = placement.building(
+      radius: body.radius,
+      lat: lat,
+      lon: lon,
+      gridX: gx.round(),
+      gridY: gy.round(),
+      cell: CitySim.cellM,
+    );
+    // Recover the TRUE spherical lat/lon of the placed point so the terrain
+    // cache is keyed off where the building actually is (see the colony path).
+    final dir = base.position.normalized;
+    final trueLat = math.asin(dir.z.clamp(-1.0, 1.0));
+    final trueLon = math.atan2(dir.y, dir.x);
+    final elevation = terrain.heightAt(body.id, trueLat, trueLon);
+    final t = placement.building(
+      radius: body.radius,
+      lat: lat,
+      lon: lon,
+      gridX: gx.round(),
+      gridY: gy.round(),
+      cell: CitySim.cellM,
+      elevation: elevation,
+    );
+    return BuildingSnapshot(
+      id: '$cell',
+      type: spec.type,
+      colonyId: city.id,
+      body: body.id.value,
+      px: t.position.x,
+      py: t.position.y,
+      pz: t.position.z,
+      qw: t.orientation.w,
+      qx: t.orientation.x,
+      qy: t.orientation.y,
+      qz: t.orientation.z,
+      lat: trueLat,
+      lon: trueLon,
+    );
+  }
+
   Map<String, dynamic> toJson() => {
         'id': id,
         'type': type,
@@ -1169,6 +1228,7 @@ class WorldSnapshot {
     BodyEphemeris ephemeris = const BodyEphemeris(),
     Epoch epoch = Epoch.zero,
     ColonyRepository? colonies,
+    CityRepository? cities,
     TerrainHeights? terrain,
     TerrainEditsRepository? terrainEdits,
     SurfacePlacement placement = const SurfacePlacement(),
@@ -1189,6 +1249,26 @@ class WorldSnapshot {
           // colonies sharing an id (e.g. each a 'hab-1') don't clobber.
           buildings['${colony.id}/${b.id}'] =
               BuildingSnapshot.of(colony, b, body, placement, heights);
+        }
+      }
+    }
+    // City-builder colonies. Their cells are placed on the same tangent grid as
+    // the legacy colonies, but centred on the colony site rather than running
+    // out from it, so the lander (the hub, at the middle cell) sits on the
+    // configured lat/lon instead of a corner of the map.
+    if (system != null && cities != null) {
+      for (final city in cities.all()) {
+        final body = system.body(city.body.id);
+        if (body == null) continue;
+        for (final e in city.occupiedCells()) {
+          buildings['${city.id}/${e.key}'] = BuildingSnapshot.ofCityCell(
+            city,
+            e.key,
+            e.value,
+            body,
+            placement,
+            heights,
+          );
         }
       }
     }

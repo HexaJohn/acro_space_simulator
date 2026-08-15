@@ -27,6 +27,7 @@ import 'package:flutter/services.dart'
         KeyUpEvent;
 
 import '../../domain/autonomy/pilot_input.dart';
+import '../../domain/colony/city/city_config.dart';
 import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
 

@@ -5,6 +5,7 @@
 
 import '../../application/ports/world_repositories.dart';
 import '../../domain/autonomy/cargo_schedule.dart';
+import '../../domain/colony/city/city_sim.dart';
 import '../../domain/colony/colony.dart';
 import '../../domain/megastructure/megastructure.dart';
 import '../../domain/terrain/terrain_brush.dart';
@@ -26,6 +27,28 @@ class InMemoryColonyRepository implements ColonyRepository {
 
   @override
   void save(Colony colony) => _store[colony.id] = colony;
+}
+
+/// Holds live [CitySim] aggregates. Note there is no save-back: the tick
+/// mutates the very object stored here, so a colony fetched by id and handed to
+/// the city screen IS the one the world is advancing.
+class InMemoryCityRepository implements CityRepository {
+  final Map<String, CitySim> _store;
+
+  InMemoryCityRepository([Iterable<CitySim> seed = const []])
+      : _store = {for (final c in seed) c.id: c};
+
+  @override
+  Iterable<CitySim> all() => _store.values;
+
+  @override
+  CitySim? byId(String id) => _store[id];
+
+  @override
+  void add(CitySim city) => _store[city.id] = city;
+
+  @override
+  void remove(String id) => _store.remove(id);
 }
 
 class InMemoryWeatherRepository implements WeatherRepository {

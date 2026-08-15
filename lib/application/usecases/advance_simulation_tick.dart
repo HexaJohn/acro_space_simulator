@@ -73,6 +73,11 @@ class AdvanceSimulationTick {
   final SoiTransitionService soi;
   final EventBus events;
   final ColonyRepository colonies;
+
+  /// City-builder colonies the world owns. Advancing them here is what makes
+  /// the colony sim and the flight sim ONE world: a city keeps producing,
+  /// growing and burning through its stockpile while the player is in orbit.
+  final CityRepository cities;
   final DepositRepository deposits;
   final WeatherRepository weather;
   final CargoScheduleRepository cargo;
@@ -152,6 +157,7 @@ class AdvanceSimulationTick {
     required this.colonies,
     required this.deposits,
     required this.weather,
+    this.cities = const NullCityRepository(),
     this.cargo = const NullCargoScheduleRepository(),
     this.converter = const StateVectorOrbitConverter(),
     this.thermalUpdater = const VesselThermalUpdater(),
@@ -321,6 +327,13 @@ class AdvanceSimulationTick {
       // 6. Persist + publish.
       vessels.save(vessel);
       _publishEvents(vessel);
+    }
+
+    // ---- City-builder phase: every registered colony advances with the world,
+    // mounted or not. dt is the same simulation step the vessels just took, so
+    // a colony and a craft in orbit above it share one clock.
+    for (final city in cities.all()) {
+      city.advance(dt);
     }
 
     // ---- Colony / city phase ----

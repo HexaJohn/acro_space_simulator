@@ -4,6 +4,7 @@
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
 import '../../domain/autonomy/cargo_schedule.dart';
+import '../../domain/colony/city/city_sim.dart';
 import '../../domain/colony/colony.dart';
 import '../../domain/megastructure/megastructure.dart';
 import '../../domain/terrain/terrain_brush.dart';
@@ -19,6 +20,33 @@ abstract class ColonyRepository {
   Iterable<Colony> all();
   Colony? byId(String id);
   void save(Colony colony);
+}
+
+/// The city-builder colonies the world owns.
+///
+/// Separate from [ColonyRepository] because [CitySim] is a live, mutable
+/// aggregate the tick advances in place — there is no save-back step, and
+/// nothing outside it may hold a divergent copy. A colony registered here keeps
+/// running whether or not its screen is mounted, which is the whole point of
+/// moving it out of the widget.
+abstract class CityRepository {
+  Iterable<CitySim> all();
+  CitySim? byId(String id);
+  void add(CitySim city);
+  void remove(String id);
+}
+
+/// Empty default so a tick can be built with no colonies.
+class NullCityRepository implements CityRepository {
+  const NullCityRepository();
+  @override
+  Iterable<CitySim> all() => const [];
+  @override
+  CitySim? byId(String id) => null;
+  @override
+  void add(CitySim city) {}
+  @override
+  void remove(String id) {}
 }
 
 abstract class WeatherRepository {
