@@ -980,6 +980,52 @@ class BuildingSnapshot {
   }
 }
 
+/// A colony road, flattened for the wire.
+///
+/// Sampled centreline points in BODY-FIXED metres rather than the spline's
+/// control points: the client would otherwise have to re-run the same
+/// Catmull-Rom to know where the tarmac is, and any difference between the two
+/// implementations would put the road somewhere the buildings are not.
+class RoadSnapshot {
+  final String colonyId;
+  final String body;
+
+  /// Flattened x,y,z triples, body-fixed metres.
+  final List<double> points;
+
+  /// Carriageway half-width, metres.
+  final double halfWidthM;
+
+  /// Index into RoadClass.values — drives lamp spacing and column height.
+  final int roadClassIndex;
+
+  const RoadSnapshot({
+    required this.colonyId,
+    required this.body,
+    required this.points,
+    required this.halfWidthM,
+    required this.roadClassIndex,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'colony': colonyId,
+        'body': body,
+        'pts': points,
+        'hw': halfWidthM,
+        'cls': roadClassIndex,
+      };
+
+  factory RoadSnapshot.fromJson(Map<String, dynamic> j) => RoadSnapshot(
+        colonyId: j['colony'] as String,
+        body: j['body'] as String,
+        points: [
+          for (final n in (j['pts'] as List?) ?? const []) (n as num).toDouble()
+        ],
+        halfWidthM: (j['hw'] as num).toDouble(),
+        roadClassIndex: (j['cls'] as num?)?.toInt() ?? 0,
+      );
+}
+
 /// A discrete sim event that fired this tick, flattened for the wire. The
 /// renderer switches on [kind] and looks up [subject] in the frame for FX.
 ///   subject   = primary asset id (usually the vessel)
@@ -1204,6 +1250,11 @@ class WorldSnapshot {
   final Map<String, VesselSnapshot> vessels;
   final Map<String, BuildingSnapshot> buildings;
 
+  /// Colony roads. A separate list rather than a field on the colony because
+  /// the renderer consumes them on their own — road ribbons and street lamps
+  /// are drawn from these without any building being involved.
+  final List<RoadSnapshot> roads;
+
   /// STATIC per-body render config (texture/heightmap/atmosphere mapping), keyed
   /// by body id — joins to [bodies]. Render-only; excluded from [fingerprint].
   /// Shipped every frame (tiny + stateless) so a late-joining engine client
@@ -1229,6 +1280,7 @@ class WorldSnapshot {
     this.epoch = 0,
     this.bodies = const {},
     this.buildings = const {},
+    this.roads = const [],
     this.descriptors = const {},
     this.events = const [],
     this.terrainEdits = const [],
@@ -1279,6 +1331,7 @@ class WorldSnapshot {
         }
       }
     }
+    final roads = <RoadSnapshot>[];
     // City-builder colonies. Their cells are placed on the same tangent grid as
     // the legacy colonies, but centred on the colony site rather than running
     // out from it, so the lander (the hub, at the middle cell) sits on the
@@ -1287,6 +1340,22 @@ class WorldSnapshot {
       for (final city in cities.all()) {
         final body = system.body(city.body.id);
         if (body == null) continue;
+        for (final road in city.layout.roads) {
+          final pts = road.sample(stepM: 6);
+          if (pts.length < 2) continue;
+          final flat = <double>[];
+          for (final p in pts) {
+            final bf = city.localToBodyFixed(p, bodyRadiusM: body.radius);
+            flat.addAll([bf.x, bf.y, bf.z]);
+          }
+          roads.add(RoadSnapshot(
+            colonyId: city.id,
+            body: body.id.value,
+            points: flat,
+            halfWidthM: road.halfWidth,
+            roadClassIndex: road.roadClass.index,
+          ));
+        }
         for (final e in city.occupiedCells()) {
           buildings['${city.id}/${e.key}'] = BuildingSnapshot.ofCityCell(
             city,
@@ -1319,6 +1388,7 @@ class WorldSnapshot {
           v.id.value: VesselSnapshot.of(v, system: system, epoch: epoch),
       },
       buildings: buildings,
+      roads: roads,
       events: events,
       terrainEdits: terrainEdits == null
           ? const []
@@ -1341,6 +1411,7 @@ class WorldSnapshot {
         'descriptors': [for (final d in descriptors.values) d.toJson()],
         'vessels': [for (final v in vessels.values) v.toJson()],
         'buildings': [for (final b in buildings.values) b.toJson()],
+        'roads': [for (final r in roads) r.toJson()],
         'events': [for (final e in events) e.toJson()],
         if (terrainEdits.isNotEmpty)
           'terrainEdits': [for (final e in terrainEdits) e.toJson()],
@@ -1351,6 +1422,7 @@ class WorldSnapshot {
     final descriptorList = (j['descriptors'] as List?) ?? const [];
     final vesselList = (j['vessels'] as List?) ?? const [];
     final buildingList = (j['buildings'] as List?) ?? const [];
+    final roadList = (j['roads'] as List?) ?? const [];
     return WorldSnapshot(
       tick: (j['tick'] as num).toInt(),
       epoch: (j['epoch'] as num?)?.toDouble() ?? 0,
@@ -1369,6 +1441,10 @@ class WorldSnapshot {
           (v as Map<String, dynamic>)['id'] as String:
               VesselSnapshot.fromJson(v),
       },
+      roads: [
+        for (final r in roadList)
+          RoadSnapshot.fromJson(r as Map<String, dynamic>),
+      ],
       buildings: {
         for (final b in buildingList)
           '${(b as Map<String, dynamic>)['colony']}/${b['id']}':

@@ -25,6 +25,7 @@ import '../../../application/snapshot/world_snapshot.dart';
 import '../../../domain/architecture/building_generator.dart';
 import '../../../domain/colony/city/city_building_spec.dart';
 import '../../../domain/colony/city/parcel.dart';
+import '../../../domain/scatter/mesh_builder.dart';
 import '../../../domain/scatter/prop_mesh.dart';
 import '../../../domain/shared/quaternion.dart';
 import '../../../domain/shared/vector3.dart';
@@ -83,7 +84,7 @@ class CityNodes {
     FloatingOrigin origin, {
     required Vector3 focusWorld,
   }) {
-    if (!enabled || snap.buildings.isEmpty) {
+    if (!enabled || (snap.buildings.isEmpty && snap.roads.isEmpty)) {
       if (_batches.isNotEmpty) _clear();
       debugLine = '';
       return;
@@ -132,8 +133,8 @@ class CityNodes {
     // Rebuild only when something the geometry depends on actually changed.
     // Colonies are static between construction events, so this is normally a
     // string compare per frame rather than a scene rebuild.
-    final key = '${snap.buildings.length}|${detail.index}|'
-        '${byBody.keys.join(",")}';
+    final key = '${snap.buildings.length}|${snap.roads.length}|'
+        '${detail.index}|${byBody.keys.join(",")}';
     if (_builtKey != key || _batches.isEmpty) {
       _builtKey = key;
       _rebuild(snap, byBody, detail);
@@ -214,7 +215,165 @@ class CityNodes {
         groups.putIfAbsent(key, () => []).add(instanceTransform(anchorBF, b));
       }
       _emit(groups, bodyId: entry.key, anchorBF: anchorBF);
+      _emitRoads(snap, bodyId: entry.key, anchorBF: anchorBF);
     }
+  }
+
+  /// Road ribbons and their street lamps.
+  ///
+  /// Built as one mesh per colony rather than instanced: a road is a unique
+  /// polyline, so there is nothing to share between two of them, and one
+  /// stretched ribbon is a single draw either way.
+  void _emitRoads(
+    WorldSnapshot snap, {
+    required String bodyId,
+    required Vector3 anchorBF,
+  }) {
+    final roads = snap.roads.where((r) => r.body == bodyId).toList();
+    if (roads.isEmpty) return;
+
+    final ribbon = MeshBuilder();
+    final lampSolid = MeshBuilder();
+    final lampGlow = MeshBuilder();
+
+    for (final road in roads) {
+      final pts = <Vector3>[];
+      for (var i = 0; i + 2 < road.points.length; i += 3) {
+        pts.add(Vector3(
+          road.points[i] - anchorBF.x,
+          road.points[i + 1] - anchorBF.y,
+          road.points[i + 2] - anchorBF.z,
+        ));
+      }
+      if (pts.length < 2) continue;
+      _ribbonFor(ribbon, pts, road.halfWidthM, anchorBF);
+      _lampsFor(lampSolid, lampGlow, pts, road, anchorBF);
+    }
+
+    for (final (builder, material) in [
+      (ribbon, CityMaterials.facade),
+      (lampSolid, CityMaterials.facade),
+      (lampGlow, CityMaterials.glazing),
+    ]) {
+      final mesh = builder.build();
+      if (mesh.isEmpty) continue;
+      final geometry = _geometryOf(mesh);
+      if (geometry == null) continue;
+      final node = fs.Node(
+        mesh: fs.Mesh.primitives(primitives: [
+          fs.MeshPrimitive(geometry, material),
+        ]),
+      );
+      _scene.add(node);
+      _batches.add(_CityBatch(node, bodyId, anchorBF));
+      _drawCalls++;
+    }
+  }
+
+  /// A flat strip along the centreline, lifted a few centimetres so it wins the
+  /// depth test against the graded corridor it sits in instead of z-fighting
+  /// the terrain that was levelled for it.
+  static void _ribbonFor(
+    MeshBuilder m,
+    List<Vector3> pts,
+    double halfWidth,
+    Vector3 anchorBF,
+  ) {
+    const lift = 0.12;
+    var v = 0.0;
+    int? prevL, prevR;
+    for (var i = 0; i < pts.length; i++) {
+      final p = pts[i];
+      // Local up is radial at the point itself, not at the anchor: a long road
+      // curves with the body, and a single shared up would bury one end.
+      final up = (p + anchorBF).normalized;
+      final ahead = i + 1 < pts.length ? pts[i + 1] - p : p - pts[i - 1];
+      final along = ahead.length > 1e-6 ? ahead.normalized : Vector3.unitX;
+      final side = along.cross(up).normalized;
+      if (i > 0) v += (p - pts[i - 1]).length / (halfWidth * 2);
+      final l = m.vertex(p + side * -halfWidth + up * lift, up, 0, v);
+      final r = m.vertex(p + side * halfWidth + up * lift, up, 1, v);
+      if (prevL != null && prevR != null) {
+        m.quad(prevL, prevR, r, l);
+      }
+      prevL = l;
+      prevR = r;
+    }
+  }
+
+  /// Lamp columns down the verge, spaced by road class.
+  ///
+  /// Derived on the client from the road itself rather than shipped: the rule
+  /// is deterministic, and a thousand lamp positions per colony is a lot of
+  /// wire for something both ends can compute.
+  static void _lampsFor(
+    MeshBuilder solid,
+    MeshBuilder glow,
+    List<Vector3> pts,
+    RoadSnapshot road,
+    Vector3 anchorBF,
+  ) {
+    final scale = road.halfWidthM / 4.0; // street half-width is 4 m
+    final spacing = 34.0 * math.sqrt(math.max(scale, 0.25));
+    final height = 9.0 * math.sqrt(math.max(scale, 0.25));
+    final both = road.roadClassIndex > 0;
+    var travelled = 0.0;
+    var next = spacing * 0.5;
+    var flip = 1.0;
+
+    for (var i = 1; i < pts.length; i++) {
+      travelled += (pts[i] - pts[i - 1]).length;
+      if (travelled < next) continue;
+      next += spacing;
+      final p = pts[i];
+      final up = (p + anchorBF).normalized;
+      final along = (pts[i] - pts[i - 1]).normalized;
+      final side = along.cross(up).normalized;
+      final offset = road.halfWidthM + 1.2;
+      for (final s in both ? const [1.0, -1.0] : [flip]) {
+        final base = p + side * (offset * s) + up * 0.1;
+        _column(solid, base, up, along, height);
+        _head(glow, base + up * height, up, along);
+      }
+      flip = -flip;
+    }
+  }
+
+  static void _column(
+      MeshBuilder m, Vector3 base, Vector3 up, Vector3 along, double h) {
+    final side = along.cross(up).normalized;
+    const r = 0.14;
+    final corners = [
+      base + side * -r + along * -r,
+      base + side * r + along * -r,
+      base + side * r + along * r,
+      base + side * -r + along * r,
+    ];
+    for (var i = 0; i < 4; i++) {
+      final a = corners[i], b = corners[(i + 1) % 4];
+      final n = ((a + b) * 0.5 - base).normalized;
+      final i0 = m.vertex(a, n, 0, 1);
+      final i1 = m.vertex(b, n, 1, 1);
+      final i2 = m.vertex(b + up * h, n, 1, 0);
+      final i3 = m.vertex(a + up * h, n, 0, 0);
+      m.quad(i0, i1, i2, i3);
+    }
+  }
+
+  static void _head(MeshBuilder m, Vector3 at, Vector3 up, Vector3 along) {
+    final side = along.cross(up).normalized;
+    const hw = 0.55, hd = 0.22;
+    final a = at + side * -hw + along * -hd;
+    final b = at + side * hw + along * -hd;
+    final c = at + side * hw + along * hd;
+    final d = at + side * -hw + along * hd;
+    // Downward-facing lens: it is the lit surface, so it points at the road.
+    final n = up * -1;
+    final i0 = m.vertex(a, n, 0, 0);
+    final i1 = m.vertex(b, n, 1, 0);
+    final i2 = m.vertex(c, n, 1, 1);
+    final i3 = m.vertex(d, n, 0, 1);
+    m.quad(i0, i3, i2, i1);
   }
 
   void _emit(
