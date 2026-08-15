@@ -85,11 +85,15 @@ class PropLodSet {
       lod == PropLod.billboard ? PropModel.empty : levels[lod.index];
 
   /// Screen height (logical px) at or below which each level takes over.
-  /// Generous at the top: foliage cards alias badly once a tree is only a few
-  /// dozen pixels tall, and the imposter is both cheaper AND steadier there.
-  static const double lod1BelowPx = 220.0;
-  static const double lod2BelowPx = 90.0;
-  static const double billboardBelowPx = 34.0;
+  ///
+  /// A tenth of the original tuning (220/90/34): meshes now carry ~10x the
+  /// distance before falling back to a card, because a field of rocks
+  /// flattening into billboards at 50 m read as a pop wall. The imposter only
+  /// takes over once a prop is down to ~3 px — genuinely sub-detail — and
+  /// instancing keeps the extra mesh draws to one per (kind, variant, level).
+  static const double lod1BelowPx = 22.0;
+  static const double lod2BelowPx = 9.0;
+  static const double billboardBelowPx = 3.4;
 
   /// The level to draw for a prop covering [px] logical pixels of screen
   /// height.
