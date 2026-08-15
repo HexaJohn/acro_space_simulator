@@ -29,6 +29,8 @@ import 'package:flutter/services.dart'
 import '../../domain/autonomy/pilot_input.dart';
 import '../../domain/colony/city/city_config.dart';
 import '../../domain/colony/city/city_sim.dart';
+import '../../adapters/presenters/surface_picker.dart';
+import 'screens/city_edit_overlay.dart';
 import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
 
@@ -203,6 +205,14 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   double _fovDeg = 75; // perspective vertical field of view (wide enough that
   // the horizon frames naturally at low altitude; 50 felt like a long lens)
   double _screenH = 800; // last viewport height (for the perspective focal len)
+
+  /// Last viewport WIDTH. Only the height mattered while the focal length was
+  /// the sole consumer; ground picking needs both to find the screen centre.
+  double _screenW = 1200;
+
+  /// The colony being edited in-world, and the tool held over it.
+  CitySim? _editingCity;
+  final CityEditController _cityEdit = CityEditController();
   bool _controlsExpanded = true; // collapsible FAB stack
 
   /// Radius (m) of the body the camera is locked on, or 0 (vessel / none). Lets
@@ -2841,6 +2851,16 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
             },
             child: Stack(
               children: [
+                // Ground-picking layer. Claims taps ONLY while a tool is held,
+                // or it would swallow every click the flight controls need.
+                if (_editingCity != null && _cityEdit.active)
+                  Positioned.fill(
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.translucent,
+                      onTapUp: (d) => _editCityAt(d.localPosition),
+                      onPanUpdate: (d) => _editCityAt(d.localPosition),
+                    ),
+                  ),
                 // Renderer fills edge-to-edge (into the notch / safe area).
                 // The backend toggle swaps ONLY this subtree — camera state,
                 // input handling, and the HUD overlays above are shared.
@@ -2856,6 +2876,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                       if (constraints.maxHeight.isFinite &&
                           constraints.maxHeight > 0) {
                         _screenH = constraints.maxHeight;
+                        _screenW = constraints.maxWidth;
                       }
                       return SceneRenderView(
                         camera: _camera,
@@ -2902,6 +2923,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                               // layout height each build.
                               if (constraints.maxHeight.isFinite && constraints.maxHeight > 0) {
                                 _screenH = constraints.maxHeight;
+                                _screenW = constraints.maxWidth;
+                        _screenW = constraints.maxWidth;
                               }
                               return CustomPaint(
                                 size: Size.infinite,
@@ -3009,6 +3032,18 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                     ),
                   ),
                 ), // end overlay SafeArea Positioned.fill
+                // City editor toolbar. LAST in the stack so it sits over the
+                // HUD rather than under it — a toolbar you cannot click is
+                // worse than no toolbar.
+                if (_editingCity != null)
+                  Positioned.fill(
+                    child: CityEditOverlay(
+                      controller: _cityEdit,
+                      city: _editingCity!,
+                      onClose: () => setState(() => _editingCity = null),
+                      onOpenPanels: () => _openCity(_editingCity!),
+                    ),
+                  ),
               ],
             ),
           ),
@@ -3191,7 +3226,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         );
     if (existing == null) _cities.add(colony);
 
-    _openCity(colony);
+    // Edit it IN THE WORLD. The 2D builder stays one button away for the
+    // panels that have no 3D equivalent — politics, budgets, stockpiles.
+    setState(() {
+      _editingCity = colony;
+      _cityEdit.set(CityEditTool.zone);
+    });
   }
 
   /// The colony already sited within ~5 km of this point, if any.
@@ -3203,6 +3243,74 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       if (dLat < 0.05 && dLon < 0.05) return c;
     }
     return null;
+  }
+
+  /// The world point the scene's floating origin is centred on.
+  ///
+  /// Mirrors `SceneSync`'s own rule rather than approximating it: the camera
+  /// reports its eye RELATIVE to this point, so any disagreement between the
+  /// two would offset every pick by the difference.
+  Vector3? _focusWorldForPick(WorldSnapshot snap) {
+    if (_freecam) return _freecamWorld;
+    final vid = _focusVessel?.value;
+    if (vid != null) {
+      final v = snap.vessels[vid];
+      if (v != null) {
+        final b = snap.bodies[v.body];
+        return b == null
+            ? Vector3(v.px, v.py, v.pz)
+            : Vector3(b.px + v.px, b.py + v.py, b.pz + v.pz);
+      }
+    }
+    final bid = _focusBody?.value;
+    if (bid != null) {
+      final b = snap.bodies[bid];
+      if (b != null) return Vector3(b.px, b.py, b.pz);
+    }
+    return null;
+  }
+
+  /// Apply the held city tool to the ground under [local].
+  ///
+  /// The tap resolves to a real point on the planet — the same ground the craft
+  /// is standing on — rather than to a cell in a separate top-down map. Body
+  /// transforms come from the SNAPSHOT the renderer drew, so the cell the
+  /// player clicks is the cell they saw.
+  void _editCityAt(Offset local) {
+    final city = _editingCity;
+    final snap = _sceneWorld;
+    if (city == null || snap == null) return;
+    final body = snap.bodies[city.body.id.value];
+    final focus = _focusWorldForPick(snap);
+    if (body == null || focus == null) return;
+
+    const picker = SurfacePicker();
+    final hit = picker.pick(
+      tapX: local.dx,
+      tapY: local.dy,
+      viewportW: _screenW,
+      viewportH: _screenH,
+      camera: _camera,
+      focusWorld: focus,
+      bodyWorld: Vector3(body.px, body.py, body.pz),
+      bodyOrientation: Quaternion(body.qw, body.qx, body.qy, body.qz),
+      groundRadiusM: body.radius,
+      colonyLatDeg: city.cityLat,
+      colonyLonDeg: city.cityLon,
+    );
+    if (hit == null) return;
+
+    final cell = picker.cellAt(
+      east: hit.east,
+      north: hit.north,
+      grid: city.grid,
+      cellM: CitySim.cellM,
+    );
+    if (cell == null) return;
+    setState(() {
+      _cityEdit.setHover(cell);
+      _cityEdit.applyTo(city, cell);
+    });
   }
 
   /// Open the builder as a view onto a live colony.

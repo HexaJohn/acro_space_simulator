@@ -119,11 +119,17 @@ class CityEditOverlay extends StatelessWidget {
     required this.controller,
     required this.city,
     required this.onClose,
+    this.onOpenPanels,
   });
 
   final CityEditController controller;
   final CitySim city;
   final VoidCallback onClose;
+
+  /// Opens the full 2D builder. The in-world editor covers PLACEMENT; the
+  /// panels it has no 3D equivalent for — politics, budgets, stockpiles,
+  /// delivery schedules — still live there.
+  final VoidCallback? onOpenPanels;
 
   @override
   Widget build(BuildContext context) {
@@ -164,6 +170,13 @@ class CityEditOverlay extends StatelessWidget {
                 _stat('Ore', city.stockOf('ore')),
                 _stat('Pop', city.population),
                 const SizedBox(width: 8),
+                if (onOpenPanels != null)
+                  IconButton(
+                    onPressed: onOpenPanels,
+                    icon: const Icon(Icons.dashboard, size: 16),
+                    color: const Color(0xFF9FB4CC),
+                    tooltip: 'City panels',
+                  ),
                 IconButton(
                   onPressed: onClose,
                   icon: const Icon(Icons.close, size: 16),
