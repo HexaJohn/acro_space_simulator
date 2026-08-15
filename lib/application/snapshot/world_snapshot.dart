@@ -799,6 +799,17 @@ class BuildingSnapshot {
   final double qw, qx, qy, qz;
   final double lat, lon;
 
+  /// Real site size in metres, and what kind of site it is.
+  ///
+  /// Carried on the WIRE rather than looked up client-side because a renderer
+  /// must be able to build a colony from a frame alone — it has no access to
+  /// the authoritative `CitySim`, and a networked client never will.
+  final double siteWidthM, siteDepthM;
+  final int siteKindIndex;
+
+  /// Palette colour, so a client tints facades without a spec table.
+  final int colorArgb;
+
   const BuildingSnapshot({
     required this.id,
     required this.type,
@@ -813,6 +824,10 @@ class BuildingSnapshot {
     required this.qz,
     required this.lat,
     required this.lon,
+    this.siteWidthM = 24,
+    this.siteDepthM = 24,
+    this.siteKindIndex = 0,
+    this.colorArgb = 0xFF9E9E9E,
   });
 
   factory BuildingSnapshot.of(
@@ -918,6 +933,10 @@ class BuildingSnapshot {
       qz: t.orientation.z,
       lat: trueLat,
       lon: trueLon,
+      siteWidthM: spec.siteMetres(cellM: CitySim.cellM).width,
+      siteDepthM: spec.siteMetres(cellM: CitySim.cellM).depth,
+      siteKindIndex: spec.siteKind.index,
+      colorArgb: spec.colorArgb,
     );
   }
 
@@ -930,6 +949,10 @@ class BuildingSnapshot {
         'q': [qw, qx, qy, qz],
         'lat': lat,
         'lon': lon,
+        'sw': siteWidthM,
+        'sd': siteDepthM,
+        'sk': siteKindIndex,
+        'c': colorArgb,
       };
 
   factory BuildingSnapshot.fromJson(Map<String, dynamic> j) {
@@ -949,6 +972,10 @@ class BuildingSnapshot {
       qz: q[3].toDouble(),
       lat: (j['lat'] as num).toDouble(),
       lon: (j['lon'] as num).toDouble(),
+      siteWidthM: (j['sw'] as num?)?.toDouble() ?? 24,
+      siteDepthM: (j['sd'] as num?)?.toDouble() ?? 24,
+      siteKindIndex: (j['sk'] as num?)?.toInt() ?? 0,
+      colorArgb: (j['c'] as num?)?.toInt() ?? 0xFF9E9E9E,
     );
   }
 }
