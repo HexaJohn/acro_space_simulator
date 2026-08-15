@@ -174,7 +174,8 @@ class SceneSync {
     // Occlusion is the depth buffer's job, not this call's position: the sprite
     // is translucent, so the engine draws it after every opaque record and the
     // terrain/vessel/body depth it tests against is already laid down.
-    _starBloom.update(snap, origin, _bodies, camera: camera);
+    _starBloom.update(snap, origin, _bodies,
+        camera: camera, viewport: viewport);
     _updateSun(snap, camera, focusVesselId, focusBodyId);
     _updateExposure(snap, camera, focusVesselId, focusBodyId);
     if (camera != null) {

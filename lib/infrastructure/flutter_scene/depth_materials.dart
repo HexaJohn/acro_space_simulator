@@ -85,6 +85,26 @@ class DepthSafeUnlitMaterial extends fs.UnlitMaterial {
 /// and planets", which silently breaks if it inherits an `always` op from a
 /// shell drawn earlier in the frame. Restoring lessEqual here makes that
 /// independent of draw order.
+/// Sprite material for screen-space overlays — the lens-flare ghosts. Depth
+/// compare forced to `always` for its own draw: a flare is an optical
+/// artifact of the LENS, not an object in the world, so scene geometry must
+/// never clip it (whether the SUN is hidden is decided analytically by the
+/// flare code instead). Safe under this file's contract: every other
+/// translucent material restores lessEqual as it binds.
+class OverlaySpriteMaterial extends fs.SpriteMaterial {
+  OverlaySpriteMaterial({super.colorTexture});
+
+  @override
+  void bind(
+    igpu.RenderPass pass,
+    igpu.HostBuffer transientsBuffer,
+    fs.Lighting lighting,
+  ) {
+    super.bind(pass, transientsBuffer, lighting);
+    pass.setDepthCompareOperation(igpu.CompareFunction.always);
+  }
+}
+
 class DepthSafeSpriteMaterial extends fs.SpriteMaterial {
   DepthSafeSpriteMaterial({super.colorTexture});
 

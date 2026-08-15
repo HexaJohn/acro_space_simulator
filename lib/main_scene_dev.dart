@@ -26,6 +26,7 @@ import 'infrastructure/flutter_scene/environment_baker.dart';
 import 'infrastructure/flutter_scene/render_backend.dart';
 import 'infrastructure/flutter_scene/scene_camera_adapter.dart';
 import 'infrastructure/flutter_scene/scene_sync.dart';
+import 'infrastructure/flutter_scene/star_bloom_nodes.dart';
 import 'infrastructure/flutter_scene/terrain/terrain_nodes.dart';
 import 'infrastructure/flutter_scene/terrain/terrain_textures.dart';
 import 'infrastructure/flutter_scene/vessel_nodes.dart';
@@ -232,6 +233,15 @@ Future<void> main() async {
       TerrainNodes.macroFadeFarKm =
           math.max(macroFadeFar, TerrainNodes.macroFadeNearKm + 1.0);
     }
+    // Star bloom + lens flare: bloomScale=<x star radius>, flares=true|false,
+    // flareW=0..2 (overall ghost intensity).
+    final bloomScale = deg('bloomScale');
+    if (bloomScale != null && bloomScale > 0) StarBloomNodes.scale = bloomScale;
+    if (params['flares'] != null) {
+      StarBloomNodes.flares = params['flares'] == 'true';
+    }
+    final flareW = deg('flareW');
+    if (flareW != null && flareW >= 0) StarBloomNodes.flareStrength = flareW;
     // Shadow contact hardening: shHard=<hardness>, shPen=<max penumbra factor>.
     final shHard = deg('shHard');
     if (shHard != null && shHard >= 0) TerrainNodes.shadowHardness = shHard;
