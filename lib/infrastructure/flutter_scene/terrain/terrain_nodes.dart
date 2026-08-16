@@ -783,8 +783,13 @@ class TerrainNodes {
     // "This ground is still streaming": wireframe patches + a spinner over
     // regions that have NO cover at any LOD. Runs before the no-chunks early
     // return — the initial fill is exactly when the placeholder matters.
+    // Candidates come from `visible` (nearest-sorted, complete), NOT from
+    // `missing`: that list excludes pending/arrived chunks, so a patch
+    // vanished the moment its chunk was SUBMITTED — seconds before the mesh
+    // actually landed, leaving the region drawing nothing at all. The grid
+    // must track "not yet resident", not "not yet queued".
     _updatePlaceholders(
-        field, missing, stillLoading, bodyWorld, bodyQuat, origin);
+        field, visible, stillLoading, bodyWorld, bodyQuat, origin);
 
     if (_chunks.isEmpty) {
       debugLine = 'terrain: no chunks';
@@ -926,7 +931,7 @@ class TerrainNodes {
   /// terrain: hills in front hide it.
   void _updatePlaceholders(
     TerrainField field,
-    List<ChunkKey> missing,
+    List<ChunkKey> sortedCandidates,
     Set<ChunkKey> stillLoading,
     Vector3 bodyWorld,
     Quaternion bodyQuat,
@@ -935,7 +940,7 @@ class TerrainNodes {
     _ensureSpinnerTex();
     final want = <ChunkKey>[];
     if (loadingGrid) {
-      for (final k in missing) {
+      for (final k in sortedCandidates) {
         if (stillLoading.contains(k)) {
           want.add(k);
           if (want.length >= maxPlaceholders) break;
