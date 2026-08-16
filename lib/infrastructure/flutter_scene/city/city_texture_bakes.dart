@@ -144,4 +144,37 @@ class CityTextureBakes {
     }
     return out;
   }
+
+  /// Ground-patch palette: one vertical swatch per patch kind.
+  ///
+  /// A palette rather than a per-patch colour because the mesh format carries
+  /// position, normal and UV only — no vertex colour — and one material per
+  /// colour would be five draws for what is a single sheet of ground. Every
+  /// vertex of a patch samples the CENTRE of its swatch, so no filtering or
+  /// mip level can bleed one kind's colour into its neighbour.
+  static Uint8List groundPalette(int size, {int swatches = 5}) {
+    // road, residential, commercial, industrial, support
+    const colours = [
+      [56, 58, 62],
+      [86, 128, 96],
+      [72, 108, 138],
+      [138, 116, 74],
+      [96, 102, 112],
+    ];
+    final out = Uint8List(size * size * 4);
+    final band = math.max(1, size ~/ swatches);
+    for (var y = 0; y < size; y++) {
+      for (var x = 0; x < size; x++) {
+        final i = (y * size + x) * 4;
+        final c = colours[math.min(x ~/ band, colours.length - 1)];
+        // A little vertical grain so a big zoned block is not a flat slab.
+        final n = ((y * 37) % 11) - 5;
+        out[i] = (c[0] + n).clamp(0, 255);
+        out[i + 1] = (c[1] + n).clamp(0, 255);
+        out[i + 2] = (c[2] + n).clamp(0, 255);
+        out[i + 3] = 255;
+      }
+    }
+    return out;
+  }
 }

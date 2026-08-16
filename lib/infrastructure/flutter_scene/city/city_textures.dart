@@ -24,11 +24,15 @@ class CityTextures {
   static Object? facade;
   static Object? glazing;
   static Object? windowEmissive;
+  static Object? groundPalette;
 
   static Future<void>? _loading;
 
   static bool get ready =>
-      facade != null && glazing != null && windowEmissive != null;
+      facade != null &&
+      glazing != null &&
+      windowEmissive != null &&
+      groundPalette != null;
 
   static Future<void> load() => _loading ??= () async {
         facade = _upload(CityTextureBakes.facade(facadeSize), facadeSize);
@@ -40,6 +44,8 @@ class CityTextures {
         // (a few panes per tile) so the first few levels still resolve panes.
         windowEmissive =
             _upload(CityTextureBakes.windowEmissive(glassSize), glassSize);
+        groundPalette =
+            _upload(CityTextureBakes.groundPalette(glassSize), glassSize);
       }();
 
   static bool mipmapped = false;

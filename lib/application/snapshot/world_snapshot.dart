@@ -980,6 +980,73 @@ class BuildingSnapshot {
   }
 }
 
+/// A flat patch of colony ground: a road tile, a zoned-but-not-yet-built lot,
+/// or a support platform.
+///
+/// Without these a freshly zoned colony renders as empty ground — the frame
+/// only ever carried BUILDINGS, and a zone holds nothing until it grows. From
+/// the cockpit that reads as the editor being broken rather than as a city
+/// waiting to be built.
+class CityPatchSnapshot {
+  /// What the patch is. Index into the renderer's ground palette, so a client
+  /// needs no spec table to colour it.
+  static const int kindRoad = 0;
+  static const int kindResidential = 1;
+  static const int kindCommercial = 2;
+  static const int kindIndustrial = 3;
+  static const int kindSupport = 4;
+
+  final String colonyId;
+  final String body;
+  final double px, py, pz;
+  final double qw, qx, qy, qz;
+
+  /// Side length in metres.
+  final double sizeM;
+  final int kind;
+
+  const CityPatchSnapshot({
+    required this.colonyId,
+    required this.body,
+    required this.px,
+    required this.py,
+    required this.pz,
+    required this.qw,
+    required this.qx,
+    required this.qy,
+    required this.qz,
+    required this.sizeM,
+    required this.kind,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'colony': colonyId,
+        'body': body,
+        'p': [px, py, pz],
+        'q': [qw, qx, qy, qz],
+        's': sizeM,
+        'k': kind,
+      };
+
+  factory CityPatchSnapshot.fromJson(Map<String, dynamic> j) {
+    final p = (j['p'] as List).cast<num>();
+    final q = (j['q'] as List).cast<num>();
+    return CityPatchSnapshot(
+      colonyId: j['colony'] as String,
+      body: j['body'] as String,
+      px: p[0].toDouble(),
+      py: p[1].toDouble(),
+      pz: p[2].toDouble(),
+      qw: q[0].toDouble(),
+      qx: q[1].toDouble(),
+      qy: q[2].toDouble(),
+      qz: q[3].toDouble(),
+      sizeM: (j['s'] as num).toDouble(),
+      kind: (j['k'] as num).toInt(),
+    );
+  }
+}
+
 /// A colony road, flattened for the wire.
 ///
 /// Sampled centreline points in BODY-FIXED metres rather than the spline's
@@ -1255,6 +1322,9 @@ class WorldSnapshot {
   /// are drawn from these without any building being involved.
   final List<RoadSnapshot> roads;
 
+  /// Ground patches: roads, zoned lots, support platforms.
+  final List<CityPatchSnapshot> patches;
+
   /// STATIC per-body render config (texture/heightmap/atmosphere mapping), keyed
   /// by body id — joins to [bodies]. Render-only; excluded from [fingerprint].
   /// Shipped every frame (tiny + stateless) so a late-joining engine client
@@ -1281,6 +1351,7 @@ class WorldSnapshot {
     this.bodies = const {},
     this.buildings = const {},
     this.roads = const [],
+    this.patches = const [],
     this.descriptors = const {},
     this.events = const [],
     this.terrainEdits = const [],
@@ -1332,6 +1403,7 @@ class WorldSnapshot {
       }
     }
     final roads = <RoadSnapshot>[];
+    final patches = <CityPatchSnapshot>[];
     // City-builder colonies. Their cells are placed on the same tangent grid as
     // the legacy colonies, but centred on the colony site rather than running
     // out from it, so the lander (the hub, at the middle cell) sits on the
@@ -1355,6 +1427,52 @@ class WorldSnapshot {
             halfWidthM: road.halfWidth,
             roadClassIndex: road.roadClass.index,
           ));
+        }
+        // Roads, zoned-but-unbuilt lots and support platforms. These are what
+        // the player has actually placed a moment after founding, so leaving
+        // them out is what made a new colony look like nothing happened.
+        void patch(int cell, int kind) {
+          final half = city.grid / 2.0;
+          final t = placement.building(
+            radius: body.radius,
+            lat: city.cityLat * math.pi / 180.0,
+            lon: city.cityLon * math.pi / 180.0,
+            gridX: ((cell % city.grid) - half).round(),
+            gridY: ((cell ~/ city.grid) - half).round(),
+            cell: CitySim.cellM,
+          );
+          patches.add(CityPatchSnapshot(
+            colonyId: city.id,
+            body: body.id.value,
+            px: t.position.x,
+            py: t.position.y,
+            pz: t.position.z,
+            qw: t.orientation.w,
+            qx: t.orientation.x,
+            qy: t.orientation.y,
+            qz: t.orientation.z,
+            sizeM: CitySim.cellM,
+            kind: kind,
+          ));
+        }
+
+        for (final cell in city.roads) {
+          patch(cell, CityPatchSnapshot.kindRoad);
+        }
+        for (final cell in city.support) {
+          patch(cell, CityPatchSnapshot.kindSupport);
+        }
+        for (final e in city.zones.entries) {
+          // A grown lot is drawn as a building instead.
+          if (city.grown.contains(e.key)) continue;
+          patch(
+            e.key,
+            switch (e.value.kind) {
+              'commercial' => CityPatchSnapshot.kindCommercial,
+              'industrial' => CityPatchSnapshot.kindIndustrial,
+              _ => CityPatchSnapshot.kindResidential,
+            },
+          );
         }
         for (final e in city.occupiedCells()) {
           buildings['${city.id}/${e.key}'] = BuildingSnapshot.ofCityCell(
@@ -1389,6 +1507,7 @@ class WorldSnapshot {
       },
       buildings: buildings,
       roads: roads,
+      patches: patches,
       events: events,
       terrainEdits: terrainEdits == null
           ? const []
@@ -1412,6 +1531,7 @@ class WorldSnapshot {
         'vessels': [for (final v in vessels.values) v.toJson()],
         'buildings': [for (final b in buildings.values) b.toJson()],
         'roads': [for (final r in roads) r.toJson()],
+        'patches': [for (final p in patches) p.toJson()],
         'events': [for (final e in events) e.toJson()],
         if (terrainEdits.isNotEmpty)
           'terrainEdits': [for (final e in terrainEdits) e.toJson()],
@@ -1423,6 +1543,7 @@ class WorldSnapshot {
     final vesselList = (j['vessels'] as List?) ?? const [];
     final buildingList = (j['buildings'] as List?) ?? const [];
     final roadList = (j['roads'] as List?) ?? const [];
+    final patchList = (j['patches'] as List?) ?? const [];
     return WorldSnapshot(
       tick: (j['tick'] as num).toInt(),
       epoch: (j['epoch'] as num?)?.toDouble() ?? 0,
@@ -1444,6 +1565,10 @@ class WorldSnapshot {
       roads: [
         for (final r in roadList)
           RoadSnapshot.fromJson(r as Map<String, dynamic>),
+      ],
+      patches: [
+        for (final p in patchList)
+          CityPatchSnapshot.fromJson(p as Map<String, dynamic>),
       ],
       buildings: {
         for (final b in buildingList)

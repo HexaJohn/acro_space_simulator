@@ -84,16 +84,24 @@ class CityNodes {
     FloatingOrigin origin, {
     required Vector3 focusWorld,
   }) {
-    if (!enabled || (snap.buildings.isEmpty && snap.roads.isEmpty)) {
+    if (!enabled ||
+        (snap.buildings.isEmpty &&
+            snap.roads.isEmpty &&
+            snap.patches.isEmpty)) {
       if (_batches.isNotEmpty) _clear();
       debugLine = '';
       return;
     }
 
-    // Group by body so each colony can use its own body transform.
+    // Group by body so each colony can use its own body transform. Patches
+    // count too: a colony that has been zoned but not yet built is exactly the
+    // case that used to render as nothing at all.
     final byBody = <String, List<BuildingSnapshot>>{};
     for (final b in snap.buildings.values) {
       byBody.putIfAbsent(b.body, () => []).add(b);
+    }
+    for (final p in snap.patches) {
+      byBody.putIfAbsent(p.body, () => []);
     }
 
     // Range gate off the nearest colony, and pick a detail tier from it. The
@@ -108,6 +116,12 @@ class CityNodes {
       final quat = Quaternion(body.qw, body.qx, body.qy, body.qz);
       for (final b in entry.value) {
         final world = bodyWorld + quat.rotate(Vector3(b.px, b.py, b.pz));
+        final d = (world - focusWorld).length;
+        if (d < nearest) nearest = d;
+      }
+      for (final p in snap.patches) {
+        if (p.body != entry.key) continue;
+        final world = bodyWorld + quat.rotate(Vector3(p.px, p.py, p.pz));
         final d = (world - focusWorld).length;
         if (d < nearest) nearest = d;
       }
@@ -134,7 +148,7 @@ class CityNodes {
     // Colonies are static between construction events, so this is normally a
     // string compare per frame rather than a scene rebuild.
     final key = '${snap.buildings.length}|${snap.roads.length}|'
-        '${detail.index}|${byBody.keys.join(",")}';
+        '${snap.patches.length}|${detail.index}|${byBody.keys.join(",")}';
     if (_builtKey != key || _batches.isEmpty) {
       _builtKey = key;
       _rebuild(snap, byBody, detail);
@@ -192,10 +206,18 @@ class CityNodes {
       // Anchor at the colony's centroid, so instance offsets stay small and
       // keep their precision even on a body millions of metres across.
       var sum = Vector3.zero;
+      var count = 0;
       for (final b in entry.value) {
         sum = sum + Vector3(b.px, b.py, b.pz);
+        count++;
       }
-      final anchorBF = sum * (1.0 / entry.value.length);
+      for (final p in snap.patches) {
+        if (p.body != entry.key) continue;
+        sum = sum + Vector3(p.px, p.py, p.pz);
+        count++;
+      }
+      if (count == 0) continue;
+      final anchorBF = sum * (1.0 / count);
 
       final groups = <BuildingArchetype, List<vm.Matrix4>>{};
       for (final b in entry.value) {
@@ -216,7 +238,58 @@ class CityNodes {
       }
       _emit(groups, bodyId: entry.key, anchorBF: anchorBF);
       _emitRoads(snap, bodyId: entry.key, anchorBF: anchorBF);
+      _emitPatches(snap, bodyId: entry.key, anchorBF: anchorBF);
     }
+  }
+
+  /// Flat ground patches: roads, zoned lots, support decks.
+  ///
+  /// One mesh for all of them, coloured by a UV into the ground palette. The
+  /// mesh format has no vertex-colour channel, and a material per colour would
+  /// be five draws for what is a single sheet of ground.
+  void _emitPatches(
+    WorldSnapshot snap, {
+    required String bodyId,
+    required Vector3 anchorBF,
+  }) {
+    final m = MeshBuilder();
+    const kinds = 5;
+    var any = false;
+    for (final p in snap.patches) {
+      if (p.body != bodyId) continue;
+      any = true;
+      final centre = Vector3(p.px, p.py, p.pz) - anchorBF;
+      final up = (centre + anchorBF).normalized;
+      final basis = Quaternion(p.qw, p.qx, p.qy, p.qz);
+      final east = basis.rotate(Vector3.unitX);
+      final north = basis.rotate(Vector3.unitY);
+      final h = p.sizeM / 2;
+      // Lifted clear of the levelled pad, and each kind by a different amount,
+      // so a road drawn over a zoned lot does not z-fight it.
+      final lift = up * (0.05 + p.kind * 0.01);
+      // Every corner samples the CENTRE of its swatch: no filtering or mip
+      // level can then bleed a neighbouring kind's colour in.
+      final u = (p.kind + 0.5) / kinds;
+      final c = [
+        centre + east * -h + north * -h + lift,
+        centre + east * h + north * -h + lift,
+        centre + east * h + north * h + lift,
+        centre + east * -h + north * h + lift,
+      ];
+      final idx = [for (final v in c) m.vertex(v, up, u, 0.5)];
+      m.quad(idx[0], idx[1], idx[2], idx[3]);
+    }
+    if (!any) return;
+    final geometry = _geometryOf(m.build());
+    if (geometry == null) return;
+    final node = fs.Node(
+      mesh: fs.Mesh.primitives(primitives: [
+        fs.MeshPrimitive(geometry, CityMaterials.ground),
+      ]),
+    );
+    _scene.add(node);
+    _batches.add(_CityBatch(node, bodyId, anchorBF));
+    _drawCalls++;
   }
 
   /// Road ribbons and their street lamps.
