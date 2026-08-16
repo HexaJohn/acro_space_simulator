@@ -92,4 +92,62 @@ void main() {
     expect(c.selectedUtil.label, 'Solar Farm');
     expect(c.tool, CityEditTool.utility);
   });
+
+  testWidgets('a palette row expands to the full effect breakdown', (t) async {
+    final c = CityEditController();
+    await pumpPalette(t, colony(population: 5000), c: c);
+
+    // Filter to one row first: the palette virtualises, so an unsearched
+    // catalogue leaves most rows off-screen and unhittable.
+    await t.enterText(find.byType(TextField), 'refinery');
+    await t.pump();
+    expect(find.text('Makes Fuel'), findsNothing); // collapsed
+
+    await t.tap(find.byIcon(Icons.expand_more).first);
+    await t.pump();
+
+    // The detail names every flow, not just the headline.
+    expect(find.text('Needs Ore'), findsOneWidget);
+    expect(find.text('Makes Fuel'), findsOneWidget);
+    expect(find.textContaining('Site'), findsWidgets);
+  });
+
+  testWidgets('only one row is open at a time', (t) async {
+    final c = CityEditController()
+      ..buildSearch = 'refinery'
+      ..expandedLabel = 'Refinery';
+    await pumpPalette(t, colony(population: 5000), c: c);
+    expect(find.text('Makes Fuel'), findsOneWidget);
+
+    // Opening another row closes this one.
+    c.expandedLabel = 'Steel Mill';
+    c.changed();
+    await t.pump();
+    expect(find.text('Makes Fuel'), findsNothing);
+  });
+
+  testWidgets('the zone picker names kind and density, as the 2D one does',
+      (t) async {
+    final c = CityEditController()..set(CityEditTool.zone);
+    await t.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: CityEditOverlay(
+            controller: c, city: colony(), onClose: () {}),
+      ),
+    ));
+    await t.pump();
+
+    for (final label in ['Residential', 'Commercial', 'Industrial']) {
+      expect(find.text(label), findsOneWidget);
+    }
+    for (final label in ['Low', 'Medium', 'High']) {
+      expect(find.text(label), findsOneWidget);
+    }
+
+    // And it says what the chosen combination grows.
+    await t.tap(find.text('High'));
+    await t.pump();
+    expect(c.density, Density.high);
+    expect(find.textContaining('Towers'), findsOneWidget);
+  });
 }

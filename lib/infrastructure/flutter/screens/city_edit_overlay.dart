@@ -64,6 +64,10 @@ class CityEditController extends ChangeNotifier {
   double frontageM = 24;
   double lotDepthM = 32;
 
+  /// The palette row currently expanded for detail, by label. One at a
+  /// time: the panel is short, and two open rows push the rest off it.
+  String? expandedLabel;
+
   /// Build-palette filter, lowercased on read. Same search the 2D builder has.
   String buildSearch = '';
 
@@ -402,34 +406,78 @@ class CityEditOverlay extends StatelessWidget {
     ]);
   }
 
-  Widget _zoneRow() => Padding(
-        padding: const EdgeInsets.only(top: 5),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          for (final kind in const ['residential', 'commercial', 'industrial'])
-            for (final d in Density.values)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 2),
-                child: InkWell(
-                  onTap: () => controller.pickZone(kind, d),
-                  child: Container(
-                    width: 26,
-                    height: 20,
-                    decoration: BoxDecoration(
-                      color: Color(kZoneSpecs[kind]![d]!.colorArgb)
-                          .withValues(alpha: 0.35 + d.index * 0.2),
-                      borderRadius: BorderRadius.circular(3),
-                      border: Border.all(
-                        color: controller.zoneKind == kind &&
-                                controller.density == d
-                            ? Colors.white
-                            : Colors.transparent,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-        ]),
+  /// Zone kind and density: the 2D builder's picker, brought across. Named
+  /// chips rather than anonymous colour swatches, because "Residential /
+  /// Medium" is what the player is choosing, not a shade of green.
+  Widget _zoneRow() {
+    Widget kindChip(String kind, String label, int argb) {
+      final sel = controller.zoneKind == kind;
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 3),
+        child: GestureDetector(
+          onTap: () => controller.pickZone(kind, controller.density),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            decoration: BoxDecoration(
+              color: sel ? Color(argb) : const Color(0xFF16202B),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Text(label,
+                style: TextStyle(
+                    fontSize: 11,
+                    color: sel
+                        ? const Color(0xFF0B1017)
+                        : const Color(0xFFD6E2EE))),
+          ),
+        ),
       );
+    }
+
+    Widget densityChip(Density d, String label) {
+      final sel = controller.density == d;
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 3),
+        child: GestureDetector(
+          onTap: () => controller.pickZone(controller.zoneKind, d),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            decoration: BoxDecoration(
+              color: sel ? AppTheme.accent : const Color(0xFF16202B),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Text(label,
+                style: TextStyle(
+                    fontSize: 10,
+                    color: sel
+                        ? const Color(0xFF0B1017)
+                        : const Color(0xFFD6E2EE))),
+          ),
+        ),
+      );
+    }
+
+    final spec = kZoneSpecs[controller.zoneKind]![controller.density]!;
+    final what = spec.housing > 0 ? '+${spec.housing} hab' : '${spec.jobs} jobs';
+    return Padding(
+      padding: const EdgeInsets.only(top: 5),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          kindChip('residential', 'Residential', 0xFF7FE0A0),
+          kindChip('commercial', 'Commercial', 0xFF4FC3F7),
+          kindChip('industrial', 'Industrial', 0xFFE3A857),
+          const SizedBox(width: 10),
+          densityChip(Density.low, 'Low'),
+          densityChip(Density.medium, 'Medium'),
+          densityChip(Density.high, 'High'),
+          const SizedBox(width: 10),
+          // What this combination actually grows, so the choice is not blind.
+          Text('${spec.label} - $what',
+              style: const TextStyle(fontSize: 10, color: Color(0xFF9FB4CC))),
+        ]),
+      ),
+    );
+  }
 
   /// The FULL building palette, exactly as the 2D builder presents it:
   /// grouped, searchable, and showing locked entries rather than hiding them.
@@ -521,9 +569,11 @@ class CityEditOverlay extends StatelessWidget {
     final sel = controller.selectedUtil.label == u.label;
     final locked = !city.unlocked(u);
     final colour = Color(u.colorArgb);
-    return InkWell(
-      onTap: () => controller.pickUtil(u),
-      child: Container(
+    final open = controller.expandedLabel == u.label;
+    return Column(mainAxisSize: MainAxisSize.min, children: [
+      InkWell(
+        onTap: () => controller.pickUtil(u),
+        child: Container(
         margin: const EdgeInsets.symmetric(vertical: 1),
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
         decoration: BoxDecoration(
@@ -555,8 +605,90 @@ class CityEditOverlay extends StatelessWidget {
                     ? const Color(0xFFFFB74D)
                     : const Color(0xFF7FE0A0)),
           ),
+          InkWell(
+            onTap: () {
+              controller.expandedLabel = open ? null : u.label;
+              controller.changed();
+            },
+            child: Icon(open ? Icons.expand_less : Icons.expand_more,
+                size: 14, color: const Color(0xFF6D8095)),
+          ),
         ]),
       ),
+      ),
+      if (open) _effectDetail(u),
+    ]);
+  }
+
+  /// The full effect breakdown - the 2D builder's expandable detail, brought
+  /// across whole. The one-line summary is for scanning; this is for deciding.
+  Widget _effectDetail(CityBuildingSpec s) {
+    Widget line(String l, String v, Color c) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 1),
+          child: Row(children: [
+            Expanded(
+                child: Text(l,
+                    style: const TextStyle(
+                        fontSize: 10, color: Color(0xFF6D8095)))),
+            Text(v,
+                style: TextStyle(
+                    fontSize: 10, fontFamily: 'monospace', color: c)),
+          ]),
+        );
+    const good = Color(0xFF7FE0A0);
+    const bad = Color(0xFFFFB74D);
+    const info = Color(0xFF4FC3F7);
+    // Power output is shown AS BUILT HERE: solar on Mars is not solar on
+    // Earth, and the nameplate figure would be a lie at the point of deciding.
+    final pf = city.powerFactor(s.type);
+    return Container(
+      margin: const EdgeInsets.only(left: 18, right: 4, bottom: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+      decoration: BoxDecoration(
+        color: const Color(0x22101820),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        if (s.housing > 0) line('Housing', '+${s.housing}', good),
+        if (s.jobs > 0) line('Jobs', '${s.jobs}', info),
+        if (s.powerOutput > 0)
+          line(
+              'Power',
+              pf == 1.0
+                  ? '+${s.powerOutput.toStringAsFixed(0)}'
+                  : '+${(s.powerOutput * pf).toStringAsFixed(0)} '
+                      '(x${pf.toStringAsFixed(2)} here)',
+              good),
+        if (s.powerDraw > 0)
+          line('Power draw', '-${s.powerDraw.toStringAsFixed(0)}', bad),
+        if (s.computeOutput > 0)
+          line('Compute', '+${s.computeOutput.toStringAsFixed(0)}', good),
+        if (s.computeDraw > 0)
+          line('Compute use', '-${s.computeDraw.toStringAsFixed(0)}', bad),
+        for (final e in s.inputs.entries)
+          line('Needs ${Commodity.name(e.key)}',
+              '-${e.value.toStringAsFixed(1)}/s', bad),
+        for (final e in s.outputs.entries)
+          line('Makes ${Commodity.name(e.key)}',
+              '+${e.value.toStringAsFixed(1)}/s', good),
+        for (final e in s.services.entries)
+          line('${e.key} service', '${e.value.toStringAsFixed(0)} pop', info),
+        if (s.pollution > 0)
+          line('Pollution', '+${s.pollution.toStringAsFixed(1)}/s', bad),
+        if (s.pollution < 0)
+          line('Scrubs', '${s.pollution.toStringAsFixed(1)}/s', good),
+        if (s.storageBonus > 0)
+          line('Storage', '+${s.storageBonus.toStringAsFixed(0)}', good),
+        if (s.deathcareRate > 0)
+          line('Deathcare', '${s.deathcareRate.toStringAsFixed(1)}/s', info),
+        line(
+            'Site',
+            '${s.siteMetres().width.round()}x'
+                '${s.siteMetres().depth.round()} m',
+            const Color(0xFF9FB4CC)),
+        line('Build', '${s.buildCost.toStringAsFixed(0)} ore',
+            city.stockOf('ore') >= s.buildCost ? good : bad),
+      ]),
     );
   }
 

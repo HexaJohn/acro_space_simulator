@@ -3,10 +3,12 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
+import '../shared/quaternion.dart';
 import '../shared/vector3.dart';
 import '../vessel/docking_port.dart';
 import '../vessel/propulsion.dart';
 import '../vessel/resource_container.dart';
+import 'attach_node.dart';
 import 'jet_engine.dart';
 import 'lifting_surface.dart';
 
@@ -55,6 +57,30 @@ class PartDef {
   final int crewCapacity; // command pods
   final double ablator; // heat shields
 
+  // ---------------- Render binding ----------------
+  // The sim does not need any of this to fly a craft; it travels so the editor
+  // and the renderer agree on what a part LOOKS like without a second table
+  // keyed off names that change.
+
+  /// Baked mesh for this part (an `assets/mesh/*.fsceneb` path), or null when
+  /// the part has no art yet and the renderer must fall back to a procedural
+  /// stand-in. Keyed off [id], never [name] — names are display text.
+  final String? modelAsset;
+
+  /// Model units -> METRES. The bakes come out of glTF at whatever scale the
+  /// artist worked in; this is the one multiplier that makes a part the size
+  /// its [size] box claims.
+  final double modelScale;
+
+  /// Extra body-frame correction applied ON TOP of the standard glTF Y-up ->
+  /// Z-up fix, for models whose authored axis is not the nose. Identity for a
+  /// model already baked nose-on-+Z.
+  final Quaternion modelRotation;
+
+  /// Where other parts may mate to this one. Empty means the part cannot be
+  /// attached to (or from) — the editor then only allows free placement.
+  final List<AttachNode> attachNodes;
+
   const PartDef({
     required this.id,
     required this.name,
@@ -72,9 +98,22 @@ class PartDef {
     this.intakeArea = 0,
     this.crewCapacity = 0,
     this.ablator = 0,
+    this.modelAsset,
+    this.modelScale = 1.0,
+    this.modelRotation = Quaternion.identity,
+    this.attachNodes = const [],
   });
 
   bool get isEngine => rocketEngine != null || jetEngine != null;
+
+  /// The named attach node, or null. Linear scan — parts carry a handful of
+  /// nodes, so an index would cost more than it saves.
+  AttachNode? node(String name) {
+    for (final n in attachNodes) {
+      if (n.name == name) return n;
+    }
+    return null;
+  }
 }
 
 /// A [PartDef] placed at a position/orientation within a craft being assembled.
@@ -84,10 +123,57 @@ class PlacedPart {
   final Vector3 position; // m, relative to the craft origin
   final int stage; // staging group index
 
+  /// Orientation of the part within the craft body frame (Z-up, nose on +Z).
+  /// Identity means the part sits the way it was authored. Radial parts (RCS
+  /// blocks, legs, side boosters) are turned by this, not by a second mesh.
+  final Quaternion rotation;
+
+  /// The mate that put this part where it is, or null for a root/free part.
+  ///
+  /// [position] and [rotation] stay authoritative — the assembler never
+  /// re-solves geometry from this. It exists so the editor can walk the tree
+  /// to move or detach a whole subtree, and so a saved design reloads with its
+  /// structure intact rather than as a pile of loose coordinates.
+  final PartAttachment? attachment;
+
   const PlacedPart({
     required this.def,
     required this.instanceId,
     this.position = Vector3.zero,
     this.stage = 0,
+    this.rotation = Quaternion.identity,
+    this.attachment,
   });
+
+  PlacedPart copyWith({
+    Vector3? position,
+    int? stage,
+    Quaternion? rotation,
+    PartAttachment? attachment,
+    bool clearAttachment = false,
+  }) =>
+      PlacedPart(
+        def: def,
+        instanceId: instanceId,
+        position: position ?? this.position,
+        stage: stage ?? this.stage,
+        rotation: rotation ?? this.rotation,
+        attachment: clearAttachment ? null : (attachment ?? this.attachment),
+      );
+
+  /// [node] of this part's def, expressed in the CRAFT body frame (metres,
+  /// origin at the craft origin). This is what a mate is solved against, so it
+  /// lives here rather than being re-derived at each editor call site.
+  AttachNode? nodeInBody(String name) {
+    final n = def.node(name);
+    if (n == null) return null;
+    final r = n.rotated(rotation);
+    return AttachNode(
+      name: r.name,
+      position: position + r.position,
+      direction: r.direction,
+      size: r.size,
+      kind: r.kind,
+    );
+  }
 }
