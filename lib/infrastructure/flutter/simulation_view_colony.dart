@@ -25,8 +25,18 @@ extension SimulationViewColony on _SimulationViewState {
     final body = system.body(v.dominantBody);
     if (body == null) return;
 
-    // The craft's surface point, in degrees.
-    final dir = v.state.position.normalized;
+    // The craft's surface point, in degrees — in the BODY-FIXED frame.
+    //
+    // `state.position` is body-centred INERTIAL, and a colony's lat/lon is
+    // body-fixed by definition: the ground turns under the inertial frame.
+    // Reading the longitude straight off the inertial vector planted the town
+    // at whatever longitude happened to face that direction at epoch zero,
+    // which on Earth is up to half a planet from the craft that founded it.
+    // Everything downstream then agreed with each other and disagreed with
+    // reality — the buildings rendered (far away, so at block detail) and every
+    // tap resolved to a cell outside the map, so nothing could be placed.
+    final bf = body.orientationAt(_clock.epoch).conjugate.rotate(v.state.position);
+    final dir = bf.normalized;
     final latDeg = math.asin(dir.z.clamp(-1.0, 1.0)) * 180 / math.pi;
     final lonDeg = math.atan2(dir.y, dir.x) * 180 / math.pi;
 
