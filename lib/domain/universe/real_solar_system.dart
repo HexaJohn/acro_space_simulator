@@ -154,6 +154,12 @@ class RealSolarSystem {
           featureScale: 30000,
           grassAmount: 0.85,
           sandAmount: 0.35,
+          // Below the 0.14 shared by atmospheric bodies. That default has to
+          // cover Venus and Titan, whose thick hazes really do keep the ground
+          // lit well after sunset; Earth's thinner, clearer air scatters far
+          // less, and at 0.14 the terminator washed out and the night side
+          // never looked like night.
+          ambient: 0.085,
           // Weather erases craters and rounds relief, so this profile leans on
           // erosion damping and keeps only the largest, faintest impacts.
           erodedDetail: true,
