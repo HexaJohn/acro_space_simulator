@@ -96,16 +96,34 @@ extension SimulationViewColony on _SimulationViewState {
   /// is standing on — rather than to a cell in a separate top-down map. Body
   /// transforms come from the SNAPSHOT the renderer drew, so the cell the
   /// player clicks is the cell they saw.
-  void _editCityAt(Offset local) {
+  /// Move the ground cursor without editing anything.
+  ///
+  /// Split from [_editCityAt] because hover fires on every mouse move: it must
+  /// never apply a tool, and it must not call setState — the cursor lives in
+  /// the renderer, so moving it costs one static write and no rebuild.
+  void _hoverCityAt(Offset local) {
+    final hit = _pickCityGround(local);
+    final city = _editingCity;
+    if (hit == null || city == null) {
+      CityNodes.cursorBF = null;
+      return;
+    }
+    CityNodes.cursorBF = hit.bodyFixed;
+    CityNodes.cursorBodyId = city.body.id.value;
+    CityNodes.cursorSizeM = _cityEdit.tool == CityEditTool.utility
+        ? _cityEdit.selectedUtil.siteMetres(cellM: CitySim.cellM).width
+        : CitySim.cellM;
+  }
+
+  /// The ground point under [local], or null if the tap missed the planet.
+  SurfaceHit? _pickCityGround(Offset local) {
     final city = _editingCity;
     final snap = _sceneWorld;
-    if (city == null || snap == null) return;
+    if (city == null || snap == null) return null;
     final body = snap.bodies[city.body.id.value];
     final focus = _focusWorldForPick(snap);
-    if (body == null || focus == null) return;
-
-    const picker = SurfacePicker();
-    final hit = picker.pick(
+    if (body == null || focus == null) return null;
+    return const SurfacePicker().pick(
       tapX: local.dx,
       tapY: local.dy,
       viewportW: _screenW,
@@ -118,9 +136,16 @@ extension SimulationViewColony on _SimulationViewState {
       colonyLatDeg: city.cityLat,
       colonyLonDeg: city.cityLon,
     );
-    if (hit == null) return;
+  }
 
-    final cell = picker.cellAt(
+  void _editCityAt(Offset local) {
+    final city = _editingCity;
+    if (city == null) return;
+    final hit = _pickCityGround(local);
+    if (hit == null) return;
+    _hoverCityAt(local);
+
+    final cell = const SurfacePicker().cellAt(
       east: hit.east,
       north: hit.north,
       grid: city.grid,

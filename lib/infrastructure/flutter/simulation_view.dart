@@ -30,6 +30,7 @@ import '../../domain/autonomy/pilot_input.dart';
 import '../../domain/colony/city/city_config.dart';
 import '../../domain/colony/city/city_sim.dart';
 import '../../adapters/presenters/surface_picker.dart';
+import '../flutter_scene/city/city_nodes.dart';
 import 'flight_session.dart';
 import 'screens/city_edit_overlay.dart';
 import '../../domain/shared/quaternion.dart';
@@ -2124,16 +2125,6 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
             },
             child: Stack(
               children: [
-                // Ground-picking layer. Claims taps ONLY while a tool is held,
-                // or it would swallow every click the flight controls need.
-                if (_editingCity != null && _cityEdit.active)
-                  Positioned.fill(
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.translucent,
-                      onTapUp: (d) => _editCityAt(d.localPosition),
-                      onPanUpdate: (d) => _editCityAt(d.localPosition),
-                    ),
-                  ),
                 // Renderer fills edge-to-edge (into the notch / safe area).
                 // The backend toggle swaps ONLY this subtree — camera state,
                 // input handling, and the HUD overlays above are shared.
@@ -2305,6 +2296,32 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                     ),
                   ),
                 ), // end overlay SafeArea Positioned.fill
+                // Ground picking. LAST but one, so it wins the gesture arena
+                // against the camera's own drag handler wrapping this stack —
+                // as a lower sibling it lost every pan, which is why painting
+                // did nothing. Opaque only while a tool is held; on Inspect it
+                // still tracks hover but lets the flight controls have the
+                // gesture.
+                if (_editingCity != null)
+                  Positioned.fill(
+                    child: MouseRegion(
+                      opaque: false,
+                      onHover: (e) => _hoverCityAt(e.localPosition),
+                      onExit: (_) => CityNodes.cursorBF = null,
+                      child: GestureDetector(
+                        behavior: _cityEdit.active
+                            ? HitTestBehavior.opaque
+                            : HitTestBehavior.translucent,
+                        onTapUp: _cityEdit.active
+                            ? (d) => _editCityAt(d.localPosition)
+                            : null,
+                        onPanStart: _cityEdit.active ? (_) {} : null,
+                        onPanUpdate: _cityEdit.active
+                            ? (d) => _editCityAt(d.localPosition)
+                            : null,
+                      ),
+                    ),
+                  ),
                 // City editor toolbar. LAST in the stack so it sits over the
                 // HUD rather than under it — a toolbar you cannot click is
                 // worse than no toolbar.

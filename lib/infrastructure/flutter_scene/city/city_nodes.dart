@@ -61,6 +61,22 @@ class CityNodes {
 
   static String debugLine = '';
 
+  /// The editor's ground cursor, in BODY-FIXED metres, or null when nothing is
+  /// being pointed at.
+  ///
+  /// A static rather than snapshot state, deliberately: where the mouse is
+  /// hovering is a property of the VIEW, not of the world. Putting it in the
+  /// frame would replicate a cursor to every multiplayer client and make the
+  /// snapshot change on every mouse move.
+  static Vector3? cursorBF;
+  static String cursorBodyId = '';
+  static double cursorSizeM = 24;
+
+  /// Cursor node, rebuilt every frame it is visible. One quad — cheap enough
+  /// that tracking the mouse never touches the city's cached batches, which is
+  /// the whole point of keeping it separate from them.
+  fs.Node? _cursorNode;
+
   final BuildingLibrary _library = BuildingLibrary();
   final Map<BuildingArchetype, _CityMesh> _uploaded = {};
 
@@ -90,6 +106,9 @@ class CityNodes {
             snap.patches.isEmpty)) {
       if (_batches.isNotEmpty) _clear();
       debugLine = '';
+      // The cursor still draws over bare ground: pointing at an empty site is
+      // exactly when the player most needs to see where a building would go.
+      _syncCursor(snap, origin);
       return;
     }
 
@@ -156,6 +175,7 @@ class CityNodes {
     // Every frame: re-place the anchors. A planet spins, so even a completely
     // static colony needs new node matrices — but only the matrices.
     _placeAnchors(snap, origin);
+    _syncCursor(snap, origin);
     debugLine =
         'city: ${snap.buildings.length} bldg, $_drawCalls draws (${detail.name}), '
         'meshes ${_uploaded.length}';
@@ -240,6 +260,60 @@ class CityNodes {
       _emitRoads(snap, bodyId: entry.key, anchorBF: anchorBF);
       _emitPatches(snap, bodyId: entry.key, anchorBF: anchorBF);
     }
+  }
+
+  /// Draw (or clear) the editor's ground cursor.
+  void _syncCursor(WorldSnapshot snap, FloatingOrigin origin) {
+    final existing = _cursorNode;
+    if (existing != null) {
+      _scene.remove(existing);
+      _cursorNode = null;
+    }
+    final at = cursorBF;
+    if (at == null) return;
+    final body = snap.bodies[cursorBodyId];
+    if (body == null) return;
+
+    final up = at.normalized;
+    // A stable tangent frame: any vector not parallel to up will do, and the
+    // cursor is a square, so its spin about the normal does not matter.
+    final east = (up.cross(Vector3.unitZ).lengthSquared > 1e-9
+            ? up.cross(Vector3.unitZ)
+            : up.cross(Vector3.unitX))
+        .normalized;
+    final north = up.cross(east);
+    final h = cursorSizeM / 2;
+    // Above every patch kind, so the cursor always reads on top of whatever it
+    // is hovering over.
+    final lift = up * 0.3;
+
+    final m = MeshBuilder();
+    const u = 5.5 / 6; // the cursor swatch
+    final corners = [
+      east * -h + north * -h + lift,
+      east * h + north * -h + lift,
+      east * h + north * h + lift,
+      east * -h + north * h + lift,
+    ];
+    final idx = [for (final c in corners) m.vertex(c, up, u, 0.5)];
+    m.quad(idx[0], idx[1], idx[2], idx[3]);
+
+    final geometry = _geometryOf(m.build());
+    if (geometry == null) return;
+    final node = fs.Node(
+      mesh: fs.Mesh.primitives(primitives: [
+        fs.MeshPrimitive(geometry, CityMaterials.ground),
+      ]),
+    );
+    final bodyWorld = Vector3(body.px, body.py, body.pz);
+    final bodyQuat = Quaternion(body.qw, body.qx, body.qy, body.qz);
+    node.localTransform = vm.Matrix4.compose(
+      origin.worldToScene(bodyWorld + bodyQuat.rotate(at)),
+      quatToScene(bodyQuat),
+      vm.Vector3.all(1.0),
+    );
+    _scene.add(node);
+    _cursorNode = node;
   }
 
   /// Flat ground patches: roads, zoned lots, support decks.

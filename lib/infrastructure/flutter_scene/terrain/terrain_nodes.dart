@@ -602,7 +602,14 @@ class TerrainNodes {
         }
       } else if (!coveredBelow.contains(m)) {
         stillLoading.add(m);
-        bareAncestors.addAll(m.ancestors);
+        // Coverage roots are for FRESHLY REVEALED regions only. A split in
+        // progress — some sibling already resident under the same parent —
+        // must not queue one: re-meshing coarse cover under ground the
+        // player is watching refine would flash the whole face back over it.
+        final p = m.parent;
+        if (p == null || !coveredBelow.contains(p)) {
+          bareAncestors.addAll(m.ancestors);
+        }
       }
     }
     bool standsIn(ChunkKey k) {
@@ -697,6 +704,12 @@ class TerrainNodes {
       }
       _addChunk(a.key, a.cell, shader as gpu.Shader);
       uploads++;
+      // The finest ground shows the moment it exists: any coarse cover
+      // still resident ABOVE the new chunk goes now — missing siblings wear
+      // the loading grid instead of a stale parent underneath.
+      for (final an in a.key.ancestors) {
+        if (_chunks.containsKey(an)) _removeResident(an);
+      }
       // Merge: replace finer residents under the new chunk in the same
       // frame. (For a split child this loop finds nothing — children have
       // no finer residents beneath them.)
