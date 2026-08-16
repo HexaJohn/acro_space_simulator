@@ -659,9 +659,16 @@ class AdvanceSimulationTick {
               edits: terrainEdits.forBody(body.id));
         }
       }
+      // The Impact EVENT marks the hard contact itself — dust/debris FX and
+      // the death notice feed off it — so it is tied to the CRATER FORMING,
+      // not to the craft's fate. Raising it only on destruction silenced
+      // every impact effect in normal play, where the destruction cheat
+      // defaults on: the ground cratered, the craft bounced, nothing flashed.
+      // (The death dialog gates on the cheat separately, so a surviving
+      // craft's impact never pops a false "destroyed" notice.)
+      vessel.raise(Impact(vessel.id, body.id, speed,
+          contactBF: contactBF, craterRadiusM: crater?.rimRadiusM ?? 0));
       if (!disableCraftDestruction) {
-        vessel.raise(Impact(vessel.id, body.id, speed,
-            contactBF: contactBF, craterRadiusM: crater?.rimRadiusM ?? 0));
         return true; // destroyed
       }
     }

@@ -91,4 +91,31 @@ void main() {
     expect(vessels.byId(const VesselId('faller')), isNull);
     expect(events.recent.whereType<Impact>().isNotEmpty, isTrue);
   });
+
+  test('destruction-cheated hard impact STILL emits the Impact event', () {
+    // The event marks the hard contact (crater FX hang off it), not the
+    // craft's fate. It used to be raised only on destruction, which silenced
+    // every impact effect in normal play where the cheat defaults on.
+    final v = faller(speed: 300);
+    final events = InMemoryEventBus();
+    final vessels = InMemoryVesselRepository([v]);
+    final tick = AdvanceSimulationTick(
+      vessels: vessels,
+      universe: StaticUniverseRepository(SampleWorld.realSystem()),
+      compute: DartCompute(),
+      soi: const SoiTransitionService(),
+      events: events,
+      colonies: InMemoryColonyRepository(),
+      deposits: InMemoryDepositRepository(),
+      weather: const NullWeatherRepository(),
+      disableCraftDestruction: true,
+    );
+    final clock = SimulationClock(warpFactor: 1, fixedStep: 0.5);
+    for (var i = 0; i < 10; i++) {
+      tick.execute(clock);
+    }
+    // The craft survives (cheat) but the impact still announced itself.
+    expect(vessels.byId(const VesselId('faller')), isNotNull);
+    expect(events.recent.whereType<Impact>().isNotEmpty, isTrue);
+  });
 }
