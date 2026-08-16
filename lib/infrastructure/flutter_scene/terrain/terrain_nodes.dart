@@ -704,11 +704,14 @@ class TerrainNodes {
       }
       _addChunk(a.key, a.cell, shader as gpu.Shader);
       uploads++;
-      // The finest ground shows the moment it exists: any coarse cover
-      // still resident ABOVE the new chunk goes now — missing siblings wear
-      // the loading grid instead of a stale parent underneath.
+      // The finest ground shows the moment it exists — and the coarse cover
+      // above it is MASKED, not removed: its index buffer is refiltered so
+      // it renders around the refined quadrant instead of underneath it
+      // (removing it outright flickered — the whole region dropped to the
+      // loading grid on every first-child arrival). When the last quadrant
+      // refines, the mask empties the parent's interior and it leaves.
       for (final an in a.key.ancestors) {
-        if (_chunks.containsKey(an)) _removeResident(an);
+        if (_chunks.containsKey(an)) _maskResident(an, a.key);
       }
       // Merge: replace finer residents under the new chunk in the same
       // frame. (For a split child this loop finds nothing — children have
@@ -1064,16 +1067,49 @@ class TerrainNodes {
     _clearSpinner();
   }
 
+  /// Mask [coveredBy]'s footprint out of resident [ancestorKey]: refilter
+  /// its index buffer (fresh geometry, swapped in — never a mutated live
+  /// buffer) so the coarse chunk draws around the refined region. An empty
+  /// interior means every quadrant has refined: the chunk leaves entirely.
+  void _maskResident(ChunkKey ancestorKey, ChunkKey coveredBy) {
+    final c = _chunks[ancestorKey];
+    if (c == null) return;
+    c.maskedBy.add(coveredBy);
+    _rebuildMasked(ancestorKey, c);
+  }
+
+  void _rebuildMasked(ChunkKey key, _ResidentChunk c) {
+    final masked = maskCellIndices(c.cell, c.maskedBy);
+    if (masked.interiorRemaining == 0) {
+      _removeResident(key);
+      return;
+    }
+    final geom = fs.MeshGeometry.fromArrays(
+      positions: c.cell.mesh.positions,
+      normals: c.cell.mesh.normals,
+      indices: masked.indices,
+    );
+    c.node.mesh = fs.Mesh(geom, _material!);
+  }
+
   /// Retire a resident chunk, keeping its mesh in the LRU cache so a revisit
-  /// re-uploads instead of re-meshing.
+  /// re-uploads instead of re-meshing. Any coarser resident that was masking
+  /// this chunk out UNMASKS it (the coarse ground reappears under the hole
+  /// the departure would otherwise leave).
   void _removeResident(ChunkKey key) {
     final c = _chunks.remove(key);
     if (c == null) return;
     _scene.remove(c.node);
     _meshCache.remove(key); // re-insert -> newest LRU position
-    _meshCache[key] = c.cell;
+    _meshCache[key] = c.cell; // the FULL mesh — masks are runtime state
     while (_meshCache.length > meshCacheSize) {
       _meshCache.remove(_meshCache.keys.first);
+    }
+    for (final e in _chunks.entries) {
+      if (e.value.maskedBy.remove(key)) {
+        _rebuildMasked(e.key, e.value);
+        break; // only one ancestor can have been masking it
+      }
     }
   }
 
@@ -1132,6 +1168,11 @@ class _ResidentChunk {
 
   final fs.Node node;
   final CellMesh cell;
+
+  /// Finer resident chunks whose footprints are filtered OUT of this chunk's
+  /// index buffer (the geometric LOD mask). Runtime state — the cached
+  /// [cell] always keeps the full mesh.
+  final Set<ChunkKey> maskedBy = {};
 
   Vector3 get anchorBF => cell.anchorBF;
   int get triangleCount => cell.mesh.triangleCount;

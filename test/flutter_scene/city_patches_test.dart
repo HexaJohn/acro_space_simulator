@@ -84,6 +84,31 @@ void main() {
     expect(snap.buildings, isNotEmpty);
   });
 
+  test('a colony with patches but no buildings is a valid frame', () {
+    // The case that crashed the whole scene build: zone a colony, build
+    // nothing. Every consumer that reaches for "the first building" has to
+    // cope, because there is not one.
+    final city = colony();
+    city.zones[city.hubKey + 1] =
+        const CityZoneType('residential', Density.low);
+    final snap = capture(city);
+
+    expect(snap.buildings, isEmpty);
+    expect(snap.patches, isNotEmpty);
+    // Grouped by body the way the renderer groups them, the building list for
+    // that body is EMPTY while the colony is plainly present.
+    final byBody = <String, List<BuildingSnapshot>>{};
+    for (final b in snap.buildings.values) {
+      byBody.putIfAbsent(b.body, () => []).add(b);
+    }
+    for (final p in snap.patches) {
+      byBody.putIfAbsent(p.body, () => []);
+    }
+    expect(byBody['earth'], isEmpty);
+    expect(() => byBody['earth']!.first, throwsStateError,
+        reason: 'this is the shape that took the frame down');
+  });
+
   test('patches survive the wire', () {
     final city = colony()..addRoad(0);
     final snap = capture(city);

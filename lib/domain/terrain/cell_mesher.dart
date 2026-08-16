@@ -385,6 +385,50 @@ CellMesh meshTerrainCell(
   );
 }
 
+/// Filter [cell]'s index buffer against finer chunks that now cover parts of
+/// its footprint: a triangle whose centroid direction falls inside any chunk
+/// in [masked] is dropped. The coarse chunk then renders AROUND its refined
+/// quadrants instead of underneath them — the geometric LOD mask.
+///
+/// The centroid decides boundary triangles whole, so the cut can be ragged by
+/// up to one coarse cell; the finer chunk's apron (skirt) hangs over exactly
+/// that seam. [interiorRemaining] counts surviving triangles whose centroid
+/// is INSIDE [cell]'s own footprint — when it reaches zero every quadrant is
+/// refined and the caller can drop the chunk outright (the apron ring that
+/// spills outside the footprint never blocks completion).
+({Uint32List indices, int interiorRemaining}) maskCellIndices(
+  CellMesh cell,
+  Set<ChunkKey> masked,
+) {
+  final src = cell.mesh.indices;
+  final pos = cell.mesh.positions;
+  final a = cell.anchorBF;
+  final out = Uint32List(src.length);
+  var w = 0;
+  var interior = 0;
+  for (var t = 0; t < src.length; t += 3) {
+    final i0 = src[t] * 3, i1 = src[t + 1] * 3, i2 = src[t + 2] * 3;
+    final cx = a.x + (pos[i0] + pos[i1] + pos[i2]) / 3.0;
+    final cy = a.y + (pos[i0 + 1] + pos[i1 + 1] + pos[i2 + 1]) / 3.0;
+    final cz = a.z + (pos[i0 + 2] + pos[i1 + 2] + pos[i2 + 2]) / 3.0;
+    final dir = Vector3(cx, cy, cz).normalized;
+    var covered = false;
+    for (final m in masked) {
+      if (m.contains(dir)) {
+        covered = true;
+        break;
+      }
+    }
+    if (covered) continue;
+    out[w] = src[t];
+    out[w + 1] = src[t + 1];
+    out[w + 2] = src[t + 2];
+    w += 3;
+    if (cell.chunk.contains(dir)) interior++;
+  }
+  return (indices: Uint32List.sublistView(out, 0, w), interiorRemaining: interior);
+}
+
 /// Hang an apron inward from the mesh's open boundary.
 ///
 /// Across an LOD boundary the two sides sample the field at different rates, so

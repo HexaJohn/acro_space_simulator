@@ -218,15 +218,42 @@ class CityNodes {
       if (star == null || b.radius > star.radius) star = b;
     }
     if (star == null) return 0;
-    final entry = byBody.entries.first;
-    final body = snap.bodies[entry.key];
+
+    // Any point in the colony will do — this only needs a surface normal to
+    // measure the sun against. A BUILDING is not guaranteed to exist: a colony
+    // that has only been zoned carries patches and nothing else, and taking
+    // `first` of that empty list threw straight out of the scene build, which
+    // took down the entire frame rather than just the city.
+    ({String bodyId, Vector3 posBF})? site;
+    for (final entry in byBody.entries) {
+      if (entry.value.isNotEmpty) {
+        final b = entry.value.first;
+        site = (bodyId: entry.key, posBF: Vector3(b.px, b.py, b.pz));
+        break;
+      }
+    }
+    site ??= () {
+      for (final p in snap.patches) {
+        return (bodyId: p.body, posBF: Vector3(p.px, p.py, p.pz));
+      }
+      for (final r in snap.roads) {
+        if (r.points.length >= 3) {
+          return (
+            bodyId: r.body,
+            posBF: Vector3(r.points[0], r.points[1], r.points[2]),
+          );
+        }
+      }
+      return null;
+    }();
+    if (site == null) return 0;
+
+    final body = snap.bodies[site.bodyId];
     if (body == null) return 0;
     final bodyWorld = Vector3(body.px, body.py, body.pz);
     final quat = Quaternion(body.qw, body.qx, body.qy, body.qz);
-    final first = entry.value.first;
-    final siteWorld =
-        bodyWorld + quat.rotate(Vector3(first.px, first.py, first.pz));
-    final up = quat.rotate(Vector3(first.px, first.py, first.pz)).normalized;
+    final siteWorld = bodyWorld + quat.rotate(site.posBF);
+    final up = quat.rotate(site.posBF).normalized;
     final toSun = (Vector3(star.px, star.py, star.pz) - siteWorld).normalized;
     return const CityLighting().nightFactor(
       up.x * toSun.x + up.y * toSun.y + up.z * toSun.z,
