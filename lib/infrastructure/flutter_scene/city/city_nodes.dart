@@ -72,6 +72,9 @@ class CityNodes {
   static String cursorBodyId = '';
   static double cursorSizeM = 24;
 
+  /// Whether a texture upload is still in flight (see [update]).
+  bool _texturesPending = false;
+
   /// Cursor node, rebuilt every frame it is visible. One quad — cheap enough
   /// that tracking the mouse never touches the city's cached batches, which is
   /// the whole point of keeping it separate from them.
@@ -158,7 +161,19 @@ class CityNodes {
     // Textures load once, off the first frame that needs them; until they
     // land the materials draw against the engine's white placeholder rather
     // than blocking the frame.
-    if (!CityTextures.ready) unawaited(CityTextures.load());
+    //
+    // The materials cache their texture handle at first use, so the ones built
+    // during that wait captured NULL and would have stayed untextured for the
+    // rest of the session. Dropping them the frame the upload lands is what
+    // makes the city actually take its facades — the first colony founded in a
+    // session is always the one that races the load.
+    if (!CityTextures.ready) {
+      unawaited(CityTextures.load());
+      _texturesPending = true;
+    } else if (_texturesPending) {
+      _texturesPending = false;
+      CityMaterials.reset();
+    }
     CityMaterials.nightFactor = _nightFactorAt(snap, byBody);
 
     final detail = nearest > blockRangeM
