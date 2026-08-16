@@ -81,4 +81,46 @@ void main() {
     final b = CityTextureBakes.windowEmissive(size);
     expect(a, equals(b));
   });
+
+  test('the road swatch is a painted tile, not a flat colour', () {
+    // A road cell maps its whole quad across this swatch, so the swatch has to
+    // carry the pavement: markings, kerbs and aggregate. Flat grey reads as a
+    // hole in the ground rather than as a road.
+    const s = 96;
+    const swatches = 6;
+    final t = CityTextureBakes.groundPalette(s, swatches: swatches);
+    final band = s ~/ swatches;
+
+    ({int r, int g, int b}) at(int x, int y) {
+      final i = (y * s + x) * 4;
+      return (r: t[i], g: t[i + 1], b: t[i + 2]);
+    }
+
+    // Centre line: markings are markedly brighter and warmer than tarmac.
+    final line = at(band ~/ 2, band ~/ 12);
+    final tarmac = at(band ~/ 4, band ~/ 3);
+    expect(line.r, greaterThan(tarmac.r + 40));
+    expect(line.b, lessThan(line.r), reason: 'road paint is warm, not blue');
+
+    // The tile is not uniform — aggregate speckle plus kerbs.
+    final tones = <int>{};
+    for (var y = 0; y < band; y++) {
+      for (var x = 0; x < band; x++) {
+        tones.add(at(x, y).r);
+      }
+    }
+    expect(tones.length, greaterThan(15));
+  });
+
+  test('a flat-colour swatch stays flat, so its centre never bleeds', () {
+    const s = 96;
+    const swatches = 6;
+    final t = CityTextureBakes.groundPalette(s, swatches: swatches);
+    final band = s ~/ swatches;
+    // Residential is swatch 1: sampled at its centre by every zone patch.
+    int red(int x, int y) => t[(y * s + x) * 4];
+    final a = red(band + band ~/ 2, s ~/ 2);
+    final b = red(band + band ~/ 2, s ~/ 2 + 1);
+    expect((a - b).abs(), lessThan(14), reason: 'grain only, no structure');
+  });
 }

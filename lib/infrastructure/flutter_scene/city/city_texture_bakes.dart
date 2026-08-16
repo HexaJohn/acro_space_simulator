@@ -155,7 +155,7 @@ class CityTextureBakes {
   static Uint8List groundPalette(int size, {int swatches = 6}) {
     // road, residential, commercial, industrial, support, CURSOR
     const colours = [
-      [56, 58, 62],
+      [92, 94, 99],
       [86, 128, 96],
       [72, 108, 138],
       [138, 116, 74],
@@ -164,15 +164,53 @@ class CityTextureBakes {
     ];
     final out = Uint8List(size * size * 4);
     final band = math.max(1, size ~/ swatches);
+    final rnd = math.Random(0x0ADD);
     for (var y = 0; y < size; y++) {
       for (var x = 0; x < size; x++) {
         final i = (y * size + x) * 4;
-        final c = colours[math.min(x ~/ band, colours.length - 1)];
-        // A little vertical grain so a big zoned block is not a flat slab.
-        final n = ((y * 37) % 11) - 5;
-        out[i] = (c[0] + n).clamp(0, 255);
-        out[i + 1] = (c[1] + n).clamp(0, 255);
-        out[i + 2] = (c[2] + n).clamp(0, 255);
+        final swatch = math.min(x ~/ band, colours.length - 1);
+        final c = colours[swatch];
+        var r = c[0].toDouble(), g = c[1].toDouble(), b = c[2].toDouble();
+
+        if (swatch == 0) {
+          // The ROAD swatch is a real tile, not a flat colour: a cell maps its
+          // whole quad across it, so what is painted here is the road surface.
+          // Aggregate speckle first — a uniform grey slab reads as a hole in
+          // the ground rather than as pavement.
+          final speck = (rnd.nextDouble() - 0.5) * 26;
+          r += speck;
+          g += speck;
+          b += speck;
+          final u = (x % band) / band, v = (y % band) / band;
+          // Dashed centre lines along BOTH axes. The grid network has no
+          // travel direction to key off, and a cross reads correctly either
+          // way: on a straight run it is a centre line, at a junction it is
+          // the junction markings.
+          const lineHalf = 0.022;
+          bool dash(double along) => (along * 6).floor().isEven;
+          final onV = (u - 0.5).abs() < lineHalf && dash(v);
+          final onH = (v - 0.5).abs() < lineHalf && dash(u);
+          if (onV || onH) {
+            r = 196;
+            g = 190;
+            b = 150;
+          } else if (u < 0.045 || u > 0.955 || v < 0.045 || v > 0.955) {
+            // Kerb: a touch lighter than the carriageway, so a run of cells
+            // shows its edges and the road is legible against dark ground.
+            r += 26;
+            g += 26;
+            b += 26;
+          }
+        } else {
+          // A little vertical grain so a big zoned block is not a flat slab.
+          final n = ((y * 37) % 11) - 5;
+          r += n;
+          g += n;
+          b += n;
+        }
+        out[i] = r.clamp(0, 255).round();
+        out[i + 1] = g.clamp(0, 255).round();
+        out[i + 2] = b.clamp(0, 255).round();
         out[i + 3] = 255;
       }
     }

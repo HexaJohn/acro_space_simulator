@@ -387,16 +387,30 @@ class CityNodes {
       // Lifted clear of the levelled pad, and each kind by a different amount,
       // so a road drawn over a zoned lot does not z-fight it.
       final lift = up * (0.05 + p.kind * 0.01);
-      // Every corner samples the CENTRE of its swatch: no filtering or mip
-      // level can then bleed a neighbouring kind's colour in.
-      final u = (p.kind + 0.5) / kinds;
       final c = [
         centre + east * -h + north * -h + lift,
         centre + east * h + north * -h + lift,
         centre + east * h + north * h + lift,
         centre + east * -h + north * h + lift,
       ];
-      final idx = [for (final v in c) m.vertex(_scenePos(v), up, u, 0.5)];
+      // A road maps its whole quad ACROSS its swatch, so the tile's markings
+      // and kerbs land on the pavement. Every other kind is a flat colour and
+      // samples the swatch CENTRE, where no filtering or mip level can bleed a
+      // neighbouring kind's colour in.
+      final List<(double, double)> uv;
+      if (p.kind == CityPatchSnapshot.kindRoad) {
+        // Inset by a texel's worth so the sampler cannot reach the next swatch.
+        const e = 0.004;
+        final u0 = p.kind / kinds + e, u1 = (p.kind + 1) / kinds - e;
+        uv = [(u0, 1.0), (u1, 1.0), (u1, 0.0), (u0, 0.0)];
+      } else {
+        final u = (p.kind + 0.5) / kinds;
+        uv = [(u, 0.5), (u, 0.5), (u, 0.5), (u, 0.5)];
+      }
+      final idx = [
+        for (var k = 0; k < 4; k++)
+          m.vertex(_scenePos(c[k]), up, uv[k].$1, uv[k].$2)
+      ];
       m.quad(idx[0], idx[1], idx[2], idx[3]);
     }
     if (!any) return;

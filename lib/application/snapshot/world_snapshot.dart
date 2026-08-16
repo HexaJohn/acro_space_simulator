@@ -1432,6 +1432,28 @@ class WorldSnapshot {
         final siteRadius = field == null
             ? body.radius
             : field.groundRadiusAt(siteDirBF.x, siteDirBF.y, siteDirBF.z);
+
+        /// Ground radius under one CELL, so the colony drapes over the
+        /// landscape instead of hovering on a disc cut at the site's own
+        /// height. Cached on the colony: the shaper levels each pad to the
+        /// first value sampled here, and re-sampling afterwards would read
+        /// back the pad it just cut.
+        double radiusOf(int cell) {
+          if (field == null) return siteRadius;
+          return city.cellGroundRadius.putIfAbsent(cell, () {
+            final half = city.grid / 2.0;
+            final probe = placement.building(
+              radius: siteRadius,
+              lat: city.cityLat * math.pi / 180.0,
+              lon: city.cityLon * math.pi / 180.0,
+              gridX: ((cell % city.grid) - half).round(),
+              gridY: ((cell ~/ city.grid) - half).round(),
+              cell: CitySim.cellM,
+            );
+            final d = probe.position.normalized;
+            return field.groundRadiusAt(d.x, d.y, d.z);
+          });
+        }
         for (final road in city.layout.roads) {
           final pts = road.sample(stepM: 6);
           if (pts.length < 2) continue;
@@ -1454,7 +1476,7 @@ class WorldSnapshot {
         void patch(int cell, int kind) {
           final half = city.grid / 2.0;
           final t = placement.building(
-            radius: siteRadius,
+            radius: radiusOf(cell),
             lat: city.cityLat * math.pi / 180.0,
             lon: city.cityLon * math.pi / 180.0,
             gridX: ((cell % city.grid) - half).round(),
@@ -1502,7 +1524,7 @@ class WorldSnapshot {
             body,
             placement,
             heights,
-            siteRadiusM: siteRadius,
+            siteRadiusM: radiusOf(e.key),
           );
         }
       }

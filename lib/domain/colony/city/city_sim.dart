@@ -3066,6 +3066,14 @@ class CitySim {
   /// on how long the session had been running.
   final Set<String> shapedTerrain = {};
 
+  /// Ground radius (m from the body centre) under each occupied cell.
+  ///
+  /// Filled by whoever has the terrain field — the snapshot, normally — and
+  /// then held, because the terrain shaper LEVELS each site to the value first
+  /// sampled there. Re-sampling after levelling would read back the pad it just
+  /// cut and creep the colony downhill a little every frame.
+  final Map<int, double> cellGroundRadius = {};
+
   /// Place [spec] on the parcel [parcelId]. Returns false if that parcel is
   /// unknown or already built on.
   bool placeOnParcel(String parcelId, CityBuildingSpec spec) {
