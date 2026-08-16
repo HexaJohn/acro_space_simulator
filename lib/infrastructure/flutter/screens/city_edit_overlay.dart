@@ -11,10 +11,13 @@
 /// simulation owns, so a building placed here is standing there the next frame.
 library;
 
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../../../domain/colony/city/city_building_spec.dart';
 import '../../../domain/colony/city/city_sim.dart';
+import '../../../domain/colony/city/commodity.dart';
 import '../../../domain/colony/city/parcel.dart';
 import 'app_theme.dart';
 import 'city_model.dart';
@@ -60,6 +63,9 @@ class CityEditController extends ChangeNotifier {
   /// parcels are drawn from — change them and the same street re-subdivides.
   double frontageM = 24;
   double lotDepthM = 32;
+
+  /// Build-palette filter, lowercased on read. Same search the 2D builder has.
+  String buildSearch = '';
 
   int _roadSeq = 0;
 
@@ -220,8 +226,13 @@ class CityEditOverlay extends StatelessWidget {
   /// delivery schedules — still live there.
   final VoidCallback? onOpenPanels;
 
+  /// Window width, captured on build so the panel widgets can bound
+  /// themselves without each plumbing a LayoutBuilder.
+  static double _maxWidth = 560;
+
   @override
   Widget build(BuildContext context) {
+    _maxWidth = math.max(240.0, MediaQuery.sizeOf(context).width - 24);
     return AnimatedBuilder(
       animation: controller,
       builder: (context, _) => Align(
@@ -246,7 +257,12 @@ class CityEditOverlay extends StatelessWidget {
                         color: Color(0xFFFFB74D), fontSize: 11),
                   ),
                 ),
-              Row(mainAxisSize: MainAxisSize.min, children: [
+              // Horizontally scrollable: the tool strip plus the readouts is
+              // wider than a narrow window, and a toolbar that overflows is a
+              // toolbar with unreachable tools on it.
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
                 _tool(CityEditTool.inspect, Icons.search, 'Look'),
                 _tool(CityEditTool.zone, Icons.grid_view, 'Zone'),
                 _tool(CityEditTool.road, Icons.add_road, 'Road'),
@@ -273,7 +289,8 @@ class CityEditOverlay extends StatelessWidget {
                   color: const Color(0xFF9FB4CC),
                   tooltip: 'Close editor',
                 ),
-              ]),
+                ]),
+              ),
               if (controller.tool == CityEditTool.zone) _zoneRow(),
               if (controller.tool == CityEditTool.roadSpline) _splineRow(),
               if (controller.tool == CityEditTool.utility) _buildRow(),
@@ -322,7 +339,9 @@ class CityEditOverlay extends StatelessWidget {
   /// Road class and the frontage/depth the blocks get cut at.
   Widget _splineRow() => Padding(
         padding: const EdgeInsets.only(top: 5),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
           for (final c in RoadClass.values)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 2),
@@ -359,7 +378,8 @@ class CityEditOverlay extends StatelessWidget {
                   style: const TextStyle(
                       fontSize: 10, color: Color(0xFF7FE0A0))),
             ),
-        ]),
+          ]),
+        ),
       );
 
   Widget _slider(
@@ -411,44 +431,150 @@ class CityEditOverlay extends StatelessWidget {
         ]),
       );
 
-  /// The build palette, filtered to what this colony can actually put up —
-  /// showing locked entries here would be a list of things that do nothing.
+  /// The FULL building palette, exactly as the 2D builder presents it:
+  /// grouped, searchable, and showing locked entries rather than hiding them.
+  ///
+  /// Hiding what you cannot build yet was the wrong call — a palette that
+  /// silently omits half the catalogue reads as a shorter game, and the
+  /// population gate is the thing that tells you what to grow toward.
   Widget _buildRow() {
-    final available =
-        kUtilCatalog.where((s) => city.unlocked(s)).toList();
+    final q = controller.buildSearch.trim().toLowerCase();
+    final groups = <String, List<CityBuildingSpec>>{};
+    for (final u in kUtilCatalog) {
+      if (!_matches(u, q)) continue;
+      groups.putIfAbsent(u.group, () => []).add(u);
+    }
+
     return SizedBox(
-      height: 30,
-      width: 520,
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        itemCount: available.length,
-        itemBuilder: (context, i) {
-          final s = available[i];
-          final on = identical(controller.selectedUtil, s);
-          return Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 3),
-            child: InkWell(
-              onTap: () => controller.pickUtil(s),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(4),
-                  border: Border.all(
-                      color: on ? Colors.white : const Color(0xFF2A3948)),
-                  color: Color(s.colorArgb).withValues(alpha: 0.18),
+      // Bounded by the window: the palette is a panel, not a reason for the
+      // whole toolbar to overflow off-screen.
+      width: math.min(560.0, _maxWidth),
+      height: 240,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: SizedBox(
+              height: 28,
+              child: TextField(
+                style: const TextStyle(fontSize: 11, color: Color(0xFFD6E2EE)),
+                decoration: const InputDecoration(
+                  isDense: true,
+                  prefixIcon: Icon(Icons.search, size: 14),
+                  prefixIconConstraints:
+                      BoxConstraints(minWidth: 26, minHeight: 26),
+                  hintText: 'Search buildings',
+                  hintStyle: TextStyle(fontSize: 11),
+                  border: OutlineInputBorder(),
+                  contentPadding: EdgeInsets.symmetric(horizontal: 6),
                 ),
-                child: Row(children: [
-                  Icon(s.icon, size: 13, color: Color(s.colorArgb)),
-                  const SizedBox(width: 4),
-                  Text(s.label,
-                      style: const TextStyle(
-                          fontSize: 10, color: Color(0xFFD6E2EE))),
-                ]),
+                onChanged: (v) {
+                  controller.buildSearch = v;
+                  controller.changed();
+                },
               ),
             ),
-          );
-        },
+          ),
+          Expanded(
+            child: groups.isEmpty
+                ? Center(
+                    child: Text('No buildings match "$q".',
+                        style: const TextStyle(
+                            fontSize: 11, color: Color(0xFF6D8095))),
+                  )
+                : ListView(
+                    children: [
+                      // Catalogue order, not map order: the groups read
+                      // power -> services -> industry -> the rest, and that
+                      // ordering is meaningful to anyone who knows the 2D one.
+                      for (final grp in kGroupLabels.keys)
+                        if (groups[grp] != null) ...[
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(2, 6, 2, 2),
+                            child: Text(kGroupLabels[grp] ?? grp,
+                                style: const TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.bold,
+                                    letterSpacing: 0.6,
+                                    color: Color(0xFF4FC3F7))),
+                          ),
+                          for (final u in groups[grp]!) _paletteRow(u),
+                        ],
+                    ],
+                  ),
+          ),
+        ],
       ),
     );
   }
+
+  bool _matches(CityBuildingSpec u, String q) =>
+      q.isEmpty ||
+      u.label.toLowerCase().contains(q) ||
+      u.type.toLowerCase().contains(q) ||
+      (kGroupLabels[u.group] ?? '').toLowerCase().contains(q);
+
+  Widget _paletteRow(CityBuildingSpec u) {
+    // Compare by LABEL, not type: three spaceport sizes share a type, and
+    // keying selection off it highlights all three at once.
+    final sel = controller.selectedUtil.label == u.label;
+    final locked = !city.unlocked(u);
+    final colour = Color(u.colorArgb);
+    return InkWell(
+      onTap: () => controller.pickUtil(u),
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 1),
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        decoration: BoxDecoration(
+          color: sel ? colour.withValues(alpha: 0.18) : null,
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(
+              color: sel ? colour : const Color(0xFF223247)),
+        ),
+        child: Row(children: [
+          Icon(u.icon,
+              size: 14, color: locked ? const Color(0xFF5A6B7D) : colour),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(u.label,
+                style: TextStyle(
+                    fontSize: 11,
+                    color: locked
+                        ? const Color(0xFF6D8095)
+                        : const Color(0xFFD6E2EE))),
+          ),
+          Text(_summary(u),
+              style: const TextStyle(fontSize: 9, color: Color(0xFF6D8095))),
+          const SizedBox(width: 8),
+          Text(
+            locked ? 'pop ${u.unlockPop}' : '${u.buildCost.round()} ore',
+            style: TextStyle(
+                fontSize: 10,
+                color: locked
+                    ? const Color(0xFFFFB74D)
+                    : const Color(0xFF7FE0A0)),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  /// One-line effect summary, so a row says what the building DOES without
+  /// needing the 2D builder's expandable detail panel.
+  String _summary(CityBuildingSpec u) {
+    final bits = <String>[];
+    if (u.housing > 0) bits.add('+${u.housing} hab');
+    if (u.jobs > 0) bits.add('${u.jobs} jobs');
+    if (u.powerOutput > 0) bits.add('+${u.powerOutput.round()} pw');
+    if (u.powerDraw > 0) bits.add('-${u.powerDraw.round()} pw');
+    for (final e in u.outputs.entries) {
+      bits.add('+${Commodity.name(e.key)}');
+    }
+    if (u.siteWidthM > 0) {
+      bits.add('${(u.siteWidthM / 1000).toStringAsFixed(1)}km site');
+    }
+    return bits.take(3).join('  ');
+  }
+
 }
