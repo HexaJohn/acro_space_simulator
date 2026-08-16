@@ -889,15 +889,19 @@ class BuildingSnapshot {
     CityBuildingSpec spec,
     CelestialBody body,
     SurfacePlacement placement,
-    TerrainHeights terrain,
-  ) {
+    TerrainHeights terrain, {
+    /// Ground radius under the colony. Defaults to the body's datum for the
+    /// callers that have no terrain field to sample.
+    double? siteRadiusM,
+  }) {
+    final radius = siteRadiusM ?? body.radius;
     final half = city.grid / 2.0;
     final gx = (cell % city.grid) - half;
     final gy = (cell ~/ city.grid) - half;
     final lat = city.cityLat * math.pi / 180.0;
     final lon = city.cityLon * math.pi / 180.0;
     final base = placement.building(
-      radius: body.radius,
+      radius: radius,
       lat: lat,
       lon: lon,
       gridX: gx.round(),
@@ -911,7 +915,7 @@ class BuildingSnapshot {
     final trueLon = math.atan2(dir.y, dir.x);
     final elevation = terrain.heightAt(body.id, trueLat, trueLon);
     final t = placement.building(
-      radius: body.radius,
+      radius: radius,
       lat: lat,
       lon: lon,
       gridX: gx.round(),
@@ -1412,12 +1416,28 @@ class WorldSnapshot {
       for (final city in cities.all()) {
         final body = system.body(city.body.id);
         if (body == null) continue;
+        // Radius of the REAL ground at the colony site, not the datum sphere.
+        // On a body with kilometres of relief the datum is underground as
+        // often as not, and a colony placed on it disappears into the hill it
+        // was built on. One sample for the whole site is right rather than
+        // merely cheap: the terrain shaper LEVELS the site to this radius, so
+        // every pad in the colony really is at this height.
+        final siteDirBF = () {
+          final lat = city.cityLat * math.pi / 180.0;
+          final lon = city.cityLon * math.pi / 180.0;
+          return Vector3(math.cos(lat) * math.cos(lon),
+              math.cos(lat) * math.sin(lon), math.sin(lat));
+        }();
+        final field = body.terrainFieldWith(terrainEdits?.forBody(body.id));
+        final siteRadius = field == null
+            ? body.radius
+            : field.groundRadiusAt(siteDirBF.x, siteDirBF.y, siteDirBF.z);
         for (final road in city.layout.roads) {
           final pts = road.sample(stepM: 6);
           if (pts.length < 2) continue;
           final flat = <double>[];
           for (final p in pts) {
-            final bf = city.localToBodyFixed(p, bodyRadiusM: body.radius);
+            final bf = city.localToBodyFixed(p, bodyRadiusM: siteRadius);
             flat.addAll([bf.x, bf.y, bf.z]);
           }
           roads.add(RoadSnapshot(
@@ -1434,7 +1454,7 @@ class WorldSnapshot {
         void patch(int cell, int kind) {
           final half = city.grid / 2.0;
           final t = placement.building(
-            radius: body.radius,
+            radius: siteRadius,
             lat: city.cityLat * math.pi / 180.0,
             lon: city.cityLon * math.pi / 180.0,
             gridX: ((cell % city.grid) - half).round(),
@@ -1482,6 +1502,7 @@ class WorldSnapshot {
             body,
             placement,
             heights,
+            siteRadiusM: siteRadius,
           );
         }
       }

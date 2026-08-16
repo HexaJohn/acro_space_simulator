@@ -142,10 +142,25 @@ extension SimulationViewColony on _SimulationViewState {
       focusWorld: focus,
       bodyWorld: Vector3(body.px, body.py, body.pz),
       bodyOrientation: Quaternion(body.qw, body.qx, body.qy, body.qz),
-      groundRadiusM: body.radius,
+      // The REAL ground at the site, matching what the snapshot placed the
+      // colony on. Picking against the datum sphere while the buildings stand
+      // on terrain puts the cursor under the hill they are on.
+      groundRadiusM: _colonySiteRadius(city),
       colonyLatDeg: city.cityLat,
       colonyLonDeg: city.cityLon,
     );
+  }
+
+  /// Ground radius under [city]'s site, or the body datum if it has no terrain.
+  double _colonySiteRadius(CitySim city) {
+    final body = _universe.current().body(city.body.id);
+    if (body == null) return 0;
+    final lat = city.cityLat * math.pi / 180.0;
+    final lon = city.cityLon * math.pi / 180.0;
+    final dir = Vector3(math.cos(lat) * math.cos(lon),
+        math.cos(lat) * math.sin(lon), math.sin(lat));
+    final field = body.terrainFieldWith(_terrainEdits.forBody(body.id));
+    return field?.groundRadiusAt(dir.x, dir.y, dir.z) ?? body.radius;
   }
 
   void _editCityAt(Offset local) {

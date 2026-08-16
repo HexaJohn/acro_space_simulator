@@ -341,7 +341,7 @@ class CityNodes {
       east * h + north * h + lift,
       east * -h + north * h + lift,
     ];
-    final idx = [for (final c in corners) m.vertex(c, up, u, 0.5)];
+    final idx = [for (final c in corners) m.vertex(_scenePos(c), up, u, 0.5)];
     m.quad(idx[0], idx[1], idx[2], idx[3]);
 
     final geometry = _geometryOf(m.build());
@@ -396,7 +396,7 @@ class CityNodes {
         centre + east * h + north * h + lift,
         centre + east * -h + north * h + lift,
       ];
-      final idx = [for (final v in c) m.vertex(v, up, u, 0.5)];
+      final idx = [for (final v in c) m.vertex(_scenePos(v), up, u, 0.5)];
       m.quad(idx[0], idx[1], idx[2], idx[3]);
     }
     if (!any) return;
@@ -484,8 +484,8 @@ class CityNodes {
       final along = ahead.length > 1e-6 ? ahead.normalized : Vector3.unitX;
       final side = along.cross(up).normalized;
       if (i > 0) v += (p - pts[i - 1]).length / (halfWidth * 2);
-      final l = m.vertex(p + side * -halfWidth + up * lift, up, 0, v);
-      final r = m.vertex(p + side * halfWidth + up * lift, up, 1, v);
+      final l = m.vertex(_scenePos(p + side * -halfWidth + up * lift), up, 0, v);
+      final r = m.vertex(_scenePos(p + side * halfWidth + up * lift), up, 1, v);
       if (prevL != null && prevR != null) {
         m.quad(prevL, prevR, r, l);
       }
@@ -545,10 +545,10 @@ class CityNodes {
     for (var i = 0; i < 4; i++) {
       final a = corners[i], b = corners[(i + 1) % 4];
       final n = ((a + b) * 0.5 - base).normalized;
-      final i0 = m.vertex(a, n, 0, 1);
-      final i1 = m.vertex(b, n, 1, 1);
-      final i2 = m.vertex(b + up * h, n, 1, 0);
-      final i3 = m.vertex(a + up * h, n, 0, 0);
+      final i0 = m.vertex(_scenePos(a), n, 0, 1);
+      final i1 = m.vertex(_scenePos(b), n, 1, 1);
+      final i2 = m.vertex(_scenePos(b + up * h), n, 1, 0);
+      final i3 = m.vertex(_scenePos(a + up * h), n, 0, 0);
       m.quad(i0, i1, i2, i3);
     }
   }
@@ -562,10 +562,10 @@ class CityNodes {
     final d = at + side * -hw + along * hd;
     // Downward-facing lens: it is the lit surface, so it points at the road.
     final n = up * -1;
-    final i0 = m.vertex(a, n, 0, 0);
-    final i1 = m.vertex(b, n, 1, 0);
-    final i2 = m.vertex(c, n, 1, 1);
-    final i3 = m.vertex(d, n, 0, 1);
+    final i0 = m.vertex(_scenePos(a), n, 0, 0);
+    final i1 = m.vertex(_scenePos(b), n, 1, 0);
+    final i2 = m.vertex(_scenePos(c), n, 1, 1);
+    final i3 = m.vertex(_scenePos(d), n, 0, 1);
     m.quad(i0, i3, i2, i1);
   }
 
@@ -678,6 +678,15 @@ class CityNodes {
       vm.Vector3.all(lengthToScene(1.0)),
     );
   }
+
+  /// Metres -> scene units.
+  ///
+  /// The scene renders in kilometres. Building INSTANCES get this through
+  /// their transform's scale, but the patch, road, lamp and cursor meshes bake
+  /// their vertices directly and carry an unscaled node transform — so without
+  /// this they came out a thousand times life size, which is a colony wider
+  /// than the moon it stands on.
+  static Vector3 _scenePos(Vector3 metres) => metres * kRenderScale;
 
   static fs.MeshGeometry? _geometryOf(PropMesh mesh) {
     if (mesh.isEmpty) return null;

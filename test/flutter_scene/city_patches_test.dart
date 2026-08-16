@@ -109,6 +109,31 @@ void main() {
         reason: 'this is the shape that took the frame down');
   });
 
+  test('a colony spans hundreds of metres, not hundreds of kilometres', () {
+    // The grid is 20 cells of 24 m — about half a kilometre across. When that
+    // scale is lost the colony ends up wider than the body it stands on.
+    final city = colony();
+    for (final c in [0, 1, city.grid, city.grid * city.grid - 1]) {
+      city.addRoad(c);
+    }
+    final snap = capture(city);
+    final earth = SampleWorld.realSystem().body(city.body.id)!;
+
+    final expectedSpan = city.grid * CitySim.cellM; // ~480 m
+    for (final p in snap.patches) {
+      final r = _len(p.px, p.py, p.pz);
+      // Sits ON the body, not out in space or down at its centre.
+      expect(r, closeTo(earth.radius, 12000),
+          reason: 'patch radius ${r.toStringAsFixed(0)} vs body '
+              '${earth.radius.toStringAsFixed(0)}');
+      // And within the map's own footprint of the site.
+      final arc = _arcTo(p.px, p.py, p.pz, city, earth.radius);
+      expect(arc, lessThan(expectedSpan),
+          reason: 'a cell ${(arc / 1000).toStringAsFixed(1)} km from the site '
+              'means the grid scale was lost');
+    }
+  });
+
   test('patches survive the wire', () {
     final city = colony()..addRoad(0);
     final snap = capture(city);
@@ -117,6 +142,17 @@ void main() {
     expect(back.patches.first.kind, snap.patches.first.kind);
     expect(back.patches.first.sizeM, snap.patches.first.sizeM);
   });
+}
+
+/// Great-circle distance from the colony site to a body-fixed point.
+double _arcTo(double x, double y, double z, CitySim city, double radius) {
+  final lat = city.cityLat * math.pi / 180, lon = city.cityLon * math.pi / 180;
+  final sx = math.cos(lat) * math.cos(lon);
+  final sy = math.cos(lat) * math.sin(lon);
+  final sz = math.sin(lat);
+  final r = _len(x, y, z);
+  final dot = ((x * sx + y * sy + z * sz) / r).clamp(-1.0, 1.0);
+  return math.acos(dot) * radius;
 }
 
 double _len(double x, double y, double z) =>
