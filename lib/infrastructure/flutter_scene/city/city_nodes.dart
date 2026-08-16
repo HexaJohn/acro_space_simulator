@@ -105,7 +105,9 @@ class CityNodes {
             snap.roads.isEmpty &&
             snap.patches.isEmpty)) {
       if (_batches.isNotEmpty) _clear();
-      debugLine = '';
+      debugLine = 'city: frame carries none '
+          '(b=${snap.buildings.length} r=${snap.roads.length} '
+          'p=${snap.patches.length})';
       // The cursor still draws over bare ground: pointing at an empty site is
       // exactly when the player most needs to see where a building would go.
       _syncCursor(snap, origin);
@@ -147,7 +149,9 @@ class CityNodes {
     }
     if (nearest > maxRangeM) {
       if (_batches.isNotEmpty) _clear();
-      debugLine = 'city: out of range';
+      debugLine = 'city: culled, nearest '
+          '${(nearest / 1000).toStringAsFixed(1)}km > '
+          '${(maxRangeM / 1000).toStringAsFixed(0)}km';
       return;
     }
 

@@ -781,11 +781,16 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                 ? '${(v / 1e3).toStringAsFixed(1)}km'
                 : '${v.toStringAsFixed(1)}m';
     final rings = RingNodes.debugLine;
+    // The city line is the only window into why a colony is not on screen —
+    // culled by range, zero buildings in the frame, or drawn but somewhere
+    // else. Without it every "nothing shows" report is a guessing game.
+    final city = CityNodes.debugLine;
     return 'near ${eng(nearM)}${nearOv != null ? '*' : ''}  '
         'far ${eng(farM)}${farOv != null ? '*' : ''}  '
         'exp ${SceneSync.lastExposure.toStringAsFixed(2)}  '
         'aa=${SceneSync.effectiveAa}'
-        '${rings == null ? '' : '  |  $rings'}';
+        '${rings == null ? '' : '  |  $rings'}'
+        '${city.isEmpty ? '  |  city: none in frame' : '  |  $city'}';
   }
 
   /// Zoom by [factor] (>1 = out): adjusts ortho mpp or perspective range.
