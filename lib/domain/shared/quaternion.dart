@@ -100,6 +100,26 @@ class Quaternion {
   /// Component-wise scalar multiply (not a rotation — used by integrators).
   Quaternion scaled(double s) => Quaternion(w * s, x * s, y * s, z * s);
 
+  /// Component-wise equality, matching [Vector3]: these are immutable value
+  /// objects and two orientations built the same way are the same orientation.
+  ///
+  /// EXACT, not approximate. It answers "is this the value that was written
+  /// down" — a catalog's [Quaternion.identity], a decoded field — and cannot
+  /// answer "do these two rotations point the same way": that needs a tolerance
+  /// the caller chooses, and it is also false for `q` and `-q`, which are the
+  /// same rotation. Compare integrated attitudes component-wise with a
+  /// tolerance instead.
+  @override
+  bool operator ==(Object other) =>
+      other is Quaternion &&
+      other.w == w &&
+      other.x == x &&
+      other.y == y &&
+      other.z == z;
+
+  @override
+  int get hashCode => Object.hash(w, x, y, z);
+
   @override
   String toString() => 'Quaternion($w, $x, $y, $z)';
 }

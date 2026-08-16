@@ -133,8 +133,25 @@ class GameStateCodec {
   Map<String, dynamic> _part(Part p) => {
         'id': p.id.value,
         'name': p.name,
+        // Catalog id — WITHOUT this the part reloads with an empty defId, so
+        // Part.assetKey falls back to the display name, no part resolves in the
+        // renderer's model library, and a craft built in the VAB comes back
+        // from a save drawn as a whole-craft Apollo silhouette. Omitted when
+        // empty so hand-built vessels don't grow a null field in every save.
+        if (p.defId.isNotEmpty) 'defId': p.defId,
         'dryMass': p.dryMass,
         'pos': [p.positionInVessel.x, p.positionInVessel.y, p.positionInVessel.z],
+        // Orientation within the body frame. Render-only (the bake is rigid),
+        // but a leg or an RCS quad that reloads unrotated points the wrong way.
+        // Identity is the overwhelmingly common case and is left out: these are
+        // unit quaternions, so w == 1 forces x = y = z = 0.
+        if (p.rotationInVessel.w != 1.0)
+          'rot': [
+            p.rotationInVessel.w,
+            p.rotationInVessel.x,
+            p.rotationInVessel.y,
+            p.rotationInVessel.z,
+          ],
         'inertia': [p.inertiaContribution.x, p.inertiaContribution.y, p.inertiaContribution.z],
         'maxTemp': p.maxTemperature,
         'cd': p.dragCoefficient,
@@ -336,9 +353,18 @@ class GameStateCodec {
   Part _decodePart(Map<String, dynamic> m) {
     final pos = (m['pos'] as List).cast<num>();
     final inertia = (m['inertia'] as List).cast<num>();
+    // Both tolerate saves written before parts carried a catalog id or an
+    // orientation: absent means "hand-built" and "unrotated", which is what
+    // those parts meant.
+    final rot = (m['rot'] as List?)?.cast<num>();
     return Part(
       id: PartId(m['id'] as String),
       name: m['name'] as String,
+      defId: m['defId'] as String? ?? '',
+      rotationInVessel: rot == null
+          ? Quaternion.identity
+          : Quaternion(rot[0].toDouble(), rot[1].toDouble(), rot[2].toDouble(),
+              rot[3].toDouble()),
       dryMass: (m['dryMass'] as num).toDouble(),
       positionInVessel:
           Vector3(pos[0].toDouble(), pos[1].toDouble(), pos[2].toDouble()),

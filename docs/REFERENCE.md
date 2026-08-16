@@ -127,7 +127,7 @@ Source of truth:
 
 ## Parts
 
-18 craft parts.
+25 craft parts.
 
 ### commandPod
 
@@ -135,6 +135,7 @@ Source of truth:
 |---|---|---|---|---|---|---|
 | **Mk1 Command Capsule** | 840 kg | — | — | 1 | — | — |
 | **Mk1 Aircraft Cockpit** | 1000 kg | — | — | 1 | — | — |
+| **Eagle Ascent Stage** | 2060 kg | 16 kN | 311 s | 2 | 471 | — |
 
 ### fuelTank
 
@@ -142,6 +143,7 @@ Source of truth:
 |---|---|---|---|---|---|---|
 | **FL-T400 Fuel Tank** | 250 kg | — | — | 0 | 400 | — |
 | **Wing Fuel Tank (Jet)** | 150 kg | — | — | 0 | 400 | — |
+| **Eagle Descent Stage** | 1374 kg | — | — | 0 | 1640 | — |
 
 ### rocketEngine
 
@@ -149,6 +151,7 @@ Source of truth:
 |---|---|---|---|---|---|---|
 | **Merlin 1D (Falcon 9)** | 470 kg | 981 kN | 311 s | 0 | — | — |
 | **RL10 (Centaur, vacuum)** | 277 kg | 110 kN | 465 s | 0 | — | — |
+| **Eagle Descent Engine (DPS)** | 180 kg | 45 kN | 311 s | 0 | — | — |
 
 ### jetEngine
 
@@ -186,6 +189,7 @@ Source of truth:
 | Part | Dry mass | Thrust (vac) | Isp | Crew | Fuel | Notes |
 |---|---|---|---|---|---|---|
 | **Retractable Landing Gear** | 60 kg | — | — | 0 | — | — |
+| **Eagle Landing Gear Leg** | 120 kg | — | — | 0 | — | — |
 
 ### parachute
 
@@ -210,12 +214,15 @@ Source of truth:
 | Part | Dry mass | Thrust (vac) | Isp | Crew | Fuel | Notes |
 |---|---|---|---|---|---|---|
 | **RCS Thruster Block** | 50 kg | — | — | 0 | 60 | — |
+| **Eagle RCS Quad (4 x R-4D)** | 23 kg | — | — | 0 | 18 | — |
+| **R-4D Thruster** | 4 kg | — | — | 0 | — | — |
 
 ### structural
 
 | Part | Dry mass | Thrust (vac) | Isp | Crew | Fuel | Notes |
 |---|---|---|---|---|---|---|
 | **Standard Docking Port** | 50 kg | — | — | 0 | — | — |
+| **Eagle RCS Plume Deflector** | 9 kg | — | — | 0 | — | — |
 
 ## Celestial bodies
 

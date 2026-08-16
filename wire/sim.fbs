@@ -26,12 +26,36 @@ struct Quat { w:double; x:double; y:double; z:double; } // scalar-first (w,x,y,z
 
 // ---------- sim -> renderer ----------
 
-// A part within a craft. Offset is in the vessel body frame (metres); parts
-// have no own orientation — they inherit the craft attitude. `type` is the
-// asset key (the sim's part name) the engine maps to a mesh.
+// A part within a craft. Offset is in the vessel body frame (metres).
+//
+// `type` is the asset key the engine maps to a mesh: the CATALOG ID of the
+// part's definition — kebab-case, e.g. `eagle-legs`, `merlin-1d` — NOT its
+// display name, so renaming a part in the UI cannot break an asset table. A
+// part built without a catalog definition (a hand-assembled sample vessel) has
+// no id and falls back to its display name, so a table that must draw those too
+// wants a row for each spelling it expects.
+//
+// GAP — per-part ORIENTATION is not on this wire. Parts DO carry their own
+// orientation in the sim: a body-frame Hamilton quaternion composed under the
+// craft attitude, so one mesh can be placed at several facings. This table has
+// no field for it, the Dart encoder in lib/adapters/wire/flatbuffer_codec.dart
+// therefore drops it, and the decoder restores identity. A bridged client draws
+// every part exactly as it was authored, which is wrong wherever a craft repeats
+// a part around an axis: an LM's four landing legs are ONE mesh mounted at four
+// yaws (nodes `leg-1`..`leg-4`, a quarter turn apart), so all four arrive facing
+// the same way — while the in-process renderer, which reads the snapshot with no
+// serialisation, draws them correctly. Two renderers, two craft shapes.
+//
+// Closing it is a coordinated change, not a one-liner: add
+//     rot:Quat;       // part orientation in the vessel body frame
+// below (appending keeps older buffers readable — the field simply reads as
+// absent), re-run BOTH flatc commands at the top of this file, relay the
+// quaternion in the encoder and read it in the decoder, add a `rot` -> UE field
+// mapping to the FSimPart entry in tool/gen_ue_bindings.dart (it fails loudly on
+// an unmapped field, by design), and rebuild the UE plugin.
 table PartFrame {
   id:string;
-  type:string;
+  type:string;        // catalog part id; display name for catalog-less parts
   offset:Vec3;        // local offset in the vessel body frame, metres
 }
 

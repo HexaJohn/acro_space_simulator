@@ -24,6 +24,8 @@ import '../../application/snapshot/world_snapshot.dart';
 import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
 import 'coord_convert.dart';
+import 'part_model_library.dart';
+import 'vessel_nodes.dart';
 
 /// Engine-exhaust plumes: one throttle-driven particle emitter per vessel,
 /// streaming out of the tail (-Z in the body frame, nose is +Z).
@@ -45,8 +47,23 @@ class ExhaustNodes {
   /// Peak emission at full throttle, particles/second.
   static double maxRate = 260;
 
-  /// Nozzle position on the body Z axis when the part list names no engine.
+  /// Nozzle position on the body Z axis for a craft drawn as ONE whole-craft
+  /// model instead of from its part list — every hand-built sample vessel.
+  ///
+  /// Calibrated against that model's silhouette, which ends at
+  /// [VesselNodes.fallbackAftM], so the plume ignites well inside the hull. It
+  /// describes NO craft drawn from its parts, which is why [nozzleZM] checks
+  /// the render path before reaching for it.
   static double defaultNozzleZM = -2.75;
+
+  /// How far below the engine part's ORIGIN the plume starts, metres. Part
+  /// origins sit at the part's geometric centre, so the plume would otherwise
+  /// begin inside the combustion chamber; this clears the bell.
+  ///
+  /// It is therefore also the ONE distance by which the plume anchor is
+  /// allowed to sit aft of the drawn hull: the flame starts at the nozzle exit,
+  /// and anything beyond that reads as a plume detached from the craft.
+  static const double bellStandoffM = 1.25;
 
   final Map<String, _Plume> _plumes = {};
   double _lastEpoch = double.nan;
@@ -129,6 +146,56 @@ class ExhaustNodes {
     });
   }
 
+  /// Where the plume starts on the body Z axis, METRES.
+  ///
+  /// The anchor has to sit on the craft that is DRAWN, and which craft that is
+  /// depends on the render path: [VesselNodes] draws a vessel either from its
+  /// PART LIST or as ONE whole-craft model, and the part list describes the
+  /// hull on screen only in the first case. So this asks the renderer's own
+  /// question first ([VesselNodes.partsDrawThemselves]) and measures against
+  /// the body that answer selects:
+  ///
+  ///  * WHOLE-CRAFT — [defaultNozzleZM], calibrated against the tail of that
+  ///    model. Reading a tail position out of the part list here is what hangs
+  ///    the flame in empty space: a hand-built vessel's part offsets were never
+  ///    meant to describe the silhouette drawn for it, which ends at
+  ///    [VesselNodes.fallbackAftM] whatever they say.
+  ///  * PER-PART, with an engine — just aft of the aft-most engine's origin.
+  ///    AFT-MOST, not first: a craft can carry several engines and gets one
+  ///    plume, and an Eagle mounts its APS high on the ascent stage with the
+  ///    descent engine hanging below, so "first in the list" would vent the
+  ///    exhaust out of the cabin.
+  ///  * PER-PART, with none left — the aft-most part's ORIGIN, which is inside
+  ///    that part's own box by construction. Reachable by staging the last
+  ///    engine away, or by building a stage without one; the throttle still
+  ///    moves either way.
+  ///
+  /// Which part is an engine is asked of the catalog
+  /// ([PartModelLibrary.isEngine]), not of the type string. A snapshot's type
+  /// is a catalog id for an assembled craft (`eagle-thruster`, `merlin-1d`) and
+  /// a display name for a hand-built one (`Raptor`, `Booster`), and neither
+  /// spelling contains a word worth matching on — a substring test finds
+  /// nothing on either.
+  ///
+  /// Positive offsets are clamped to the origin: a part mounted above it still
+  /// vents aft, never out of the nose.
+  static double nozzleZM(Iterable<PartSnapshot> parts) {
+    if (!VesselNodes.partsDrawThemselves(parts)) return defaultNozzleZM;
+    var aftEngineZ = double.infinity;
+    // A craft on the per-part path has at least one part, so the origin is the
+    // floor rather than a sentinel: it is the honest answer for a craft whose
+    // every part sits forward of it.
+    var aftPartZ = 0.0;
+    for (final p in parts) {
+      if (p.oz < aftPartZ) aftPartZ = p.oz;
+      if (PartModelLibrary.isEngine(p.type) && p.oz < aftEngineZ) {
+        aftEngineZ = p.oz;
+      }
+    }
+    if (aftEngineZ == double.infinity) return aftPartZ;
+    return math.min(aftEngineZ, 0.0) - bellStandoffM;
+  }
+
   _Plume _spawn(VesselSnapshot v) {
     // All lengths/speeds are metres converted to scene km. The plume is a
     // game-feel visual (tens of metres), not the physical exhaust jet.
@@ -157,20 +224,11 @@ class ExhaustNodes {
         ..blendMode = fs.SpriteBlendMode.additive,
     );
 
-    // The engine's part offset locates the nozzle; fall back to a fixed tail
-    // offset when the craft has no named engine (or the glb replaced parts).
-    var nozzleZ = defaultNozzleZM;
-    for (final p in v.parts) {
-      if (p.type.toLowerCase().contains('engine')) {
-        nozzleZ = math.min(p.oz, 0.0) - 1.25;
-        break;
-      }
-    }
     // ConeShape emits about local +Y; rotate +Y onto body -Z (exhaust
     // streams out of the tail).
     final emitterNode = fs.Node()
       ..localTransform = vm.Matrix4.compose(
-        vm.Vector3(0, 0, lengthToScene(nozzleZ)),
+        vm.Vector3(0, 0, lengthToScene(nozzleZM(v.parts))),
         vm.Quaternion.axisAngle(vm.Vector3(1, 0, 0), -math.pi / 2),
         vm.Vector3.all(1.0),
       )

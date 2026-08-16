@@ -32,6 +32,20 @@ class ResourceContainer {
     required this.unitMass,
   });
 
+  /// An independent container holding the same resource at the same level.
+  ///
+  /// [amount] is mutable and a container belongs to exactly ONE part, so any
+  /// code that stamps several parts from a single template must copy rather
+  /// than share the template's containers. Two parts pointing at one container
+  /// drain as a single tank while the mass model still counts both, so the
+  /// craft loses twice the propellant it burned.
+  ResourceContainer copy() => ResourceContainer(
+        type: type,
+        capacity: capacity,
+        amount: amount,
+        unitMass: unitMass,
+      );
+
   double get fraction => capacity == 0 ? 0 : amount / capacity;
   double get mass => amount * unitMass;
   bool get isEmpty => amount <= 0;

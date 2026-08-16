@@ -77,6 +77,21 @@ class PartDef {
   /// model already baked nose-on-+Z.
   final Quaternion modelRotation;
 
+  /// Where the model sits relative to the PART ORIGIN: METRES, part-local frame
+  /// (Z-up, nose on +Z), applied AFTER [modelScale] and [modelRotation] and
+  /// BEFORE the part's placement in the craft.
+  ///
+  /// An export's origin is wherever the exporter left it, which is rarely the
+  /// geometric centre that [size] and [attachNodes] are measured from. Without
+  /// this the art hangs off the joints the domain believes in. The value is the
+  /// translation that brings the mesh back onto the origin, so a model whose
+  /// geometry sits 0.4 m too low needs `Vector3(0, 0, 0.4)`.
+  ///
+  /// ART ONLY. Mass, centre of mass, inertia, attach nodes, docking ports and
+  /// every other physical quantity are anchored to the part origin and never
+  /// see this — moving it re-seats the picture, never the craft.
+  final Vector3 modelOffset;
+
   /// Where other parts may mate to this one. Empty means the part cannot be
   /// attached to (or from) — the editor then only allows free placement.
   final List<AttachNode> attachNodes;
@@ -101,6 +116,7 @@ class PartDef {
     this.modelAsset,
     this.modelScale = 1.0,
     this.modelRotation = Quaternion.identity,
+    this.modelOffset = Vector3.zero,
     this.attachNodes = const [],
   });
 

@@ -84,15 +84,26 @@ jobs:
       ASSETS_TOKEN: ${{ secrets.ASSETS_TOKEN }}
     steps:
       - uses: actions/checkout@v4
-      # Licensed craft model: never committed to this repo; the full-res
-      # apollo.fsceneb is fetched from the private assets repo for the desktop
+      # Licensed craft + part models: never committed to this repo; the
+      # full-res bakes are fetched from the private assets repo for the desktop
       # zip only. (The web build bundles the smaller apollo-web.fsceneb — see
       # the web job — because Pages can't build the 86 MB binary.)
-      - name: Fetch licensed craft model (full)
+      #
+      # A glob, not a list of names: the VAB part catalog grows a bake per
+      # part (eagle_*, rcs_*), and a named list would silently ship a craft
+      # with missing models every time one was added. The pattern takes only
+      # baked .fsceneb, so the .glb sources archived in the same release stay
+      # out of the build.
+      - name: Fetch licensed craft + part models (full)
         if: env.ASSETS_TOKEN != ''
         env:
           GH_TOKEN: ${{ env.ASSETS_TOKEN }}
-        run: gh release download --repo HexaJohn/acro-space-assets --pattern "apollo.fsceneb" --dir assets/mesh
+        run: |
+          gh release download --repo HexaJohn/acro-space-assets --pattern "*.fsceneb" --dir assets/mesh
+          # The *-web bakes are the low-res Pages variants. pubspec bundles
+          # assets/mesh wholesale, so leaving them here would pad the desktop
+          # zip with models the desktop build never loads.
+          Get-ChildItem assets/mesh -Filter '*-web.fsceneb' | Remove-Item -Force
       # Same pinned Flutter master as the web job (see .fvmrc).
       - name: Set up pinned Flutter master (.fvmrc)
         shell: bash

@@ -13,6 +13,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_scene/scene.dart' show AntiAliasingMode;
 
+import 'domain/shared/quaternion.dart';
 import 'domain/shared/vector3.dart';
 import 'infrastructure/baked_terrain_data.dart';
 import 'infrastructure/flutter/sim_view_control.dart';
@@ -23,6 +24,7 @@ import 'infrastructure/flutter_scene/atmosphere_nodes.dart';
 import 'infrastructure/flutter_scene/cloud_nodes.dart';
 import 'infrastructure/flutter_scene/body_nodes.dart';
 import 'infrastructure/flutter_scene/environment_baker.dart';
+import 'infrastructure/flutter_scene/part_model_library.dart';
 import 'infrastructure/flutter_scene/render_backend.dart';
 import 'infrastructure/flutter_scene/scene_camera_adapter.dart';
 import 'infrastructure/flutter_scene/scene_sync.dart';
@@ -43,6 +45,28 @@ import 'infrastructure/flutter_scene/vessel_nodes.dart';
 /// `--dart-define=BACKEND=software` boots the software renderer instead —
 /// used for side-by-side parity captures of the SAME scene.
 final GlobalKey _shotKey = GlobalKey();
+
+/// A `x,y,z` service-extension parameter as a vector, or null when it is absent
+/// or malformed. Null means "leave this alone", so a typo can never quietly
+/// zero a knob it failed to parse.
+Vector3? _triple(String? raw) {
+  if (raw == null) return null;
+  final p = raw.split(',').map(double.tryParse).toList();
+  if (p.length != 3 || p.contains(null)) return null;
+  return Vector3(p[0]!, p[1]!, p[2]!);
+}
+
+/// Degrees about a part's own X, Y and Z axes as one orientation, applied X
+/// first, then Y, then Z about the FIXED (unrotated) axes — so `90,0,0` and
+/// `0,90,0` each name one of the axis-aligned quarter turns that a mis-authored
+/// export needs, and the pair composes without the reader having to know an
+/// intrinsic-rotation convention.
+Quaternion _eulerDeg(Vector3 deg) {
+  const k = math.pi / 180;
+  return Quaternion.axisAngle(Vector3.unitZ, deg.z * k) *
+      Quaternion.axisAngle(Vector3.unitY, deg.y * k) *
+      Quaternion.axisAngle(Vector3.unitX, deg.x * k);
+}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -148,22 +172,47 @@ Future<void> main() async {
     }
     // Freecam: freecam=true|false, optional freePos=x,y,z (world metres).
     if (params['freecam'] != null || params['freePos'] != null) {
-      Vector3? pos;
-      final raw = params['freePos'];
-      if (raw != null) {
-        final p = raw.split(',').map(double.tryParse).toList();
-        if (p.length == 3 && !p.contains(null)) {
-          pos = Vector3(p[0]!, p[1]!, p[2]!);
-        }
-      }
       c.setFreecam?.call(
-          params['freecam'] == null ? true : params['freecam'] == 'true', pos);
+          params['freecam'] == null ? true : params['freecam'] == 'true',
+          _triple(params['freePos']));
     }
-    // Craft glb unit calibration: glbScale=<model units to metres>.
+    // Craft glb unit calibration: glbScale=<model units to metres>. WHOLE-CRAFT
+    // path only (the apollo/lander bakes). A craft drawn from its PART LIST is
+    // calibrated per part — see `part=` below.
     final glbScale = params['glbScale'];
     if (glbScale != null) {
       final v = double.tryParse(glbScale);
       if (v != null && v > 0) VesselNodes.glbUnitScale = v;
+    }
+    // Per-PART art calibration, for settling a new export against the axis
+    // ruler (axes=true) by screenshot:
+    //   ext.acro.camera?part=eagle-legs&partRotDeg=90,0,0
+    //   ext.acro.camera?part=eagle-legs&partScale=2.4&partOffsetM=0,0,0.4
+    //   ext.acro.camera?partScaleAll=1.1   (every part at once, on top of each
+    //                                       part's own scale)
+    //   ext.acro.camera?partReset=true     (drop every override)
+    // `part=` names the part in any spelling of its catalog id; the three
+    // part* values replace that part's PartDef render fields for the rest of
+    // the session, and unnamed ones keep whatever is already in force. The
+    // kitbash renderer re-resolves the binding every frame, so each call lands
+    // on the next one. EVERY reply carries `partCalibration`: the settled
+    // values as Dart literals, to paste into the catalog (`lem_parts.dart`) —
+    // the sweep is finished when that map is empty again.
+    final partScaleAll = deg('partScaleAll');
+    if (partScaleAll != null && partScaleAll > 0) {
+      PartModelLibrary.scaleMultiplier = partScaleAll;
+    }
+    if (params['partReset'] == 'true') PartModelLibrary.resetCalibration();
+    final partKey = params['part'];
+    if (partKey != null) {
+      final partScale = deg('partScale');
+      final rotDeg = _triple(params['partRotDeg']);
+      PartModelLibrary.calibrate(
+        partKey,
+        scale: partScale != null && partScale > 0 ? partScale : null,
+        rotation: rotDeg == null ? null : _eulerDeg(rotDeg),
+        offset: _triple(params['partOffsetM']),
+      );
     }
     // Per-craft origin + 1-metre axis ruler: axes=true|false.
     if (params['axes'] != null) {
@@ -287,8 +336,13 @@ Future<void> main() async {
         }
       }
     }
-    return developer.ServiceExtensionResponse.result(
-        jsonEncode(c.status?.call() ?? {'error': 'no live view'}));
+    return developer.ServiceExtensionResponse.result(jsonEncode({
+      ...(c.status?.call() ?? const {'error': 'no live view'}),
+      // Always reported, empty or not: a calibration sweep is only over once
+      // these literals are in the catalog and this map is empty again.
+      'partCalibration': PartModelLibrary.calibrationSource(),
+      'partScaleAll': PartModelLibrary.scaleMultiplier,
+    }));
   });
   developer.registerExtension('ext.acro.status', (method, params) async {
     return developer.ServiceExtensionResponse.result(jsonEncode(

@@ -30,6 +30,16 @@ import 'sim_acro.wire_generated.dart' as gen;
 /// renderer — which consumes `WorldSnapshot` directly, no serialisation — sees
 /// the craters. The fingerprint already covers the edits, so a bridged client
 /// running its own prediction would report the desync rather than hide it.
+///
+/// GAP: per-part ORIENTATION does not cross either direction. [PartSnapshot]
+/// carries a body-frame quaternion per part so one mesh can be mounted at
+/// several facings, but `PartFrame` in `wire/sim.fbs` has no field for it — it
+/// needs the same `flatc` regen plus a matching Unreal build, and the .fbs
+/// records what that costs. Until then [encodeWorld] drops the quaternion and
+/// [decodeWorld] substitutes identity, so a craft that repeats a part around an
+/// axis (an LM's four landing legs are one mesh at four yaws) reaches a bridged
+/// client with every copy facing the same way while the in-process renderer
+/// draws it correctly.
 class FlatBufferCodec {
   const FlatBufferCodec();
 
@@ -68,6 +78,13 @@ class FlatBufferCodec {
           landed: v.landed,
           parts: [
             for (final p in v.parts)
+              // `type` goes out as the sim's asset key, which is the part's
+              // CATALOG id and not its display name (see `Part.assetKey`) — an
+              // engine-side asset table keys on the id. Orientation is dropped
+              // here: `PartFrame` in wire/sim.fbs has no quaternion field, so
+              // `p.qw`..`p.qz` cannot cross and a bridged client draws every
+              // part as authored (see the GAP note above). Closing it needs a
+              // flatc regen and a matching Unreal build, not an edit here.
               gen.PartFrameObjectBuilder(
                 id: p.id,
                 type: p.type,
@@ -199,6 +216,11 @@ class FlatBufferCodec {
         parts: [
           for (final p in v.parts ?? const <gen.PartFrame>[])
             if (p.id != null)
+              // Orientation defaults to identity: `PartFrame` in wire/sim.fbs
+              // carries no per-part quaternion, and adding one needs a flatc
+              // regen plus a matching Unreal build (see the GAP note above).
+              // A bridged client therefore draws every part unrotated until
+              // the schema catches up.
               PartSnapshot(
                 id: p.id!,
                 type: p.type ?? '',

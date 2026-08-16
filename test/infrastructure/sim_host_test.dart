@@ -47,6 +47,9 @@ void main() {
     host.step();
     final frame = codec.decodeWorld(host.frameBytes());
 
+    // 'LV-T45' is a DISPLAY NAME, which is the fallback: SampleWorld's vessels
+    // are hand-built and their parts have no catalog definition to take an id
+    // from. A craft assembled from the catalog sends kebab-case ids instead.
     expect(frame.vessels['demo-1']!.parts.map((p) => p.type), contains('LV-T45'));
     expect(frame.buildings.keys, contains('colony-1/refinery-1'));
     expect(frame.buildings['colony-1/refinery-1']!.body, 'earth');

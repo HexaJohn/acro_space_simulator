@@ -34,13 +34,19 @@ import '../../domain/vessel/vessel.dart';
 import '../ports/repositories.dart';
 import '../ports/world_repositories.dart';
 
-/// One part of a craft for asset binding: [type] is the asset key (the sim's
-/// part name) and [ox]/[oy]/[oz] is the local offset in the vessel body frame
-/// (metres). Parts have no own orientation — they inherit the craft attitude.
+/// One part of a craft for asset binding: [type] is the asset key (the catalog
+/// [PartDef] id, so it survives a display-name change) and [ox]/[oy]/[oz] is
+/// the local offset in the vessel body frame (metres, Z-up).
+///
+/// [qw]..[qz] is the part's own orientation WITHIN that body frame (Hamilton,
+/// scalar-first; identity = (1,0,0,0)), composed under the craft attitude by
+/// the renderer. Radial parts — RCS blocks, legs, side boosters — are turned by
+/// this rather than by a separately baked mesh per facing.
 class PartSnapshot {
   final String id;
   final String type;
   final double ox, oy, oz;
+  final double qw, qx, qy, qz;
 
   const PartSnapshot({
     required this.id,
@@ -48,22 +54,38 @@ class PartSnapshot {
     required this.ox,
     required this.oy,
     required this.oz,
+    this.qw = 1,
+    this.qx = 0,
+    this.qy = 0,
+    this.qz = 0,
   });
+
+  /// True when the part sits the way it was authored. Lets the wire skip the
+  /// quaternion for the overwhelmingly common case.
+  bool get isUnrotated => qw == 1 && qx == 0 && qy == 0 && qz == 0;
 
   Map<String, dynamic> toJson() => {
         'id': id,
         'type': type,
         'o': [ox, oy, oz],
+        if (!isUnrotated) 'q': [qw, qx, qy, qz],
       };
 
+  /// Tolerant of payloads written before parts had an orientation: a missing
+  /// 'q' decodes to identity, which is exactly what those parts meant.
   factory PartSnapshot.fromJson(Map<String, dynamic> j) {
     final o = (j['o'] as List).cast<num>();
+    final q = (j['q'] as List?)?.cast<num>() ?? const [1, 0, 0, 0];
     return PartSnapshot(
       id: j['id'] as String,
       type: j['type'] as String,
       ox: o[0].toDouble(),
       oy: o[1].toDouble(),
       oz: o[2].toDouble(),
+      qw: q[0].toDouble(),
+      qx: q[1].toDouble(),
+      qy: q[2].toDouble(),
+      qz: q[3].toDouble(),
     );
   }
 }
@@ -275,10 +297,15 @@ class VesselSnapshot {
         for (final p in v.allParts)
           PartSnapshot(
             id: p.id.value,
-            type: p.name,
+            // The catalog id, not the display name — see [Part.assetKey].
+            type: p.assetKey,
             ox: p.positionInVessel.x,
             oy: p.positionInVessel.y,
             oz: p.positionInVessel.z,
+            qw: p.rotationInVessel.w,
+            qx: p.rotationInVessel.x,
+            qy: p.rotationInVessel.y,
+            qz: p.rotationInVessel.z,
           ),
       ],
       mass: v.mass,

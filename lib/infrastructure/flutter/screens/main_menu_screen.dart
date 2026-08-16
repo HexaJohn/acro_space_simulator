@@ -30,10 +30,15 @@ class MainMenuScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Craft bakes cost ~a minute of parse + KTX2 transcode in a debug build;
-    // start them while the player reads the menu so FLIGHT/ASCENT entry only
-    // realizes node graphs from the warm cache. After the first frame, so the
-    // menu paints before the loads contend for the UI thread. Idempotent.
+    // A mesh bake costs ~a minute of parse + KTX2 transcode in a debug build;
+    // start them while the player reads the menu so entering a flight only
+    // realizes node graphs from the warm cache. Just the two whole-craft
+    // models — every flight reachable from HERE (FLIGHT, ASCENT) spawns a
+    // hand-built sample craft, which draws one of them. The part bakes belong
+    // to craft built in CRAFT ASSEMBLY, and that screen warms them itself on
+    // open; see [VesselNodes.prewarm] for why the menu must not queue them too.
+    // After the first frame, so the menu paints before the loads contend for
+    // the UI thread. Idempotent.
     WidgetsBinding.instance.addPostFrameCallback((_) => VesselNodes.prewarm());
     final items = <_MenuItem>[
       _MenuItem('FLIGHT', 'Launch the live solar-system simulation', Icons.rocket_launch,

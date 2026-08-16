@@ -45,7 +45,11 @@ void main() {
     expect(b.px, closeTo(a.px, 1e-9));
     expect(b.landed, a.landed);
 
-    // Per-part manifest survives the wire.
+    // Per-part manifest survives the wire. `type` is the asset key: a part's
+    // CATALOG ID, or — as here — its display name, because SampleWorld builds
+    // its vessels by hand and their parts carry no catalog definition. See
+    // part_frame_contract_test.dart for the catalog-id case, which is what a
+    // player-built craft sends.
     expect(b.parts, isNotEmpty);
     expect(b.parts.map((p) => p.type), contains('LV-T45'));
     expect(b.parts.first.id, a.parts.first.id);

@@ -45,7 +45,11 @@ name = the type-key the sim sends:
 - a **body id** (`earth`, `moon`, `mars`, …) → planet mesh (a unit-radius sphere; the
   renderer scales it to the body's real radius — set **Body Mesh Unit Radius Cm**
   to your sphere's radius, `50` for UE's default sphere),
-- a **part name** (`LV-T45`, …) → part mesh,
+- a **part id** (`eagle-legs`, `merlin-1d`, …) → part mesh. This is the catalog
+  id of the part's definition, kebab-case — *not* its display name, so renaming
+  a part in the UI cannot break your table. A part built without a catalog
+  definition (the hand-assembled sample vessels) has no id and falls back to its
+  display name (`LV-T45`, `Raptor`), so add a row per spelling you expect,
 - a **building spec type** (`refinery`, `hab`, `solar`, …) → building mesh.
 
 Set a **Fallback Mesh** (debug cube) so missing keys stay visible. With **Auto

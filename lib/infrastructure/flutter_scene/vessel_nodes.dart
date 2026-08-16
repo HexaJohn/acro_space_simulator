@@ -6,9 +6,7 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart' show compute, debugPrint, kIsWeb;
-import 'package:flutter/services.dart' show rootBundle;
-import 'package:flutter_scene/fscene.dart' as fsb;
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_scene/scene.dart' as fs;
 import 'package:vector_math/vector_math.dart' as vm;
 
@@ -17,17 +15,42 @@ import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
 import 'coord_convert.dart';
 import 'depth_materials.dart';
+import 'part_bake_cache.dart';
+import 'part_model_library.dart';
+import 'part_primitives_category.dart';
 
 /// Maintains one scene node per vessel: a parent node placed at the
 /// vessel's world position (dominant-body position + body-relative vessel
-/// position) carrying the attitude quaternion, with one child node per part
-/// at its body-frame offset.
+/// position) carrying the attitude quaternion.
 ///
-/// Part meshes are procedural primitives from a type-key registry —
-/// matching the software renderer's cone/pyramid fidelity — with a cuboid
-/// placeholder for unknown keys. Real art can replace registry entries
-/// whenever without touching the sync. Sizes are in METRES (converted);
-/// vessel body frame is Z-up like everything else.
+/// A vessel is drawn one of two ways, decided per frame by [isKitbash]:
+///
+///  * KITBASH — at least one part came from the part catalog, so the PART LIST
+///    is the model: one child node per part, at the part's body-frame offset
+///    and orientation, carrying that part's bake, or the same procedural
+///    silhouette the VAB drew it with until/unless that bake loads. Every craft
+///    the player assembles takes this path, and it changes shape when it
+///    stages.
+///  * WHOLE-CRAFT — no part came from the catalog, so the craft is drawn as one
+///    baked model chosen from its id ([_assetFor]), with an Apollo CSM
+///    silhouette standing in while that decodes. Every hand-built vessel —
+///    the sample world's fleet, a spawned test mass — takes this path.
+///
+/// The predicate is PROVENANCE, not art. What the player assembled must be what
+/// the player flies, and that has to hold on the very first stock craft, before
+/// any of the roster has a bake: the stand-ins are the first frame of that
+/// stack, not a different craft. Art only decides what fills a slot, never how
+/// many slots there are.
+///
+/// The two populations cannot overlap, which is what keeps hand-built vessels
+/// on the model they were authored and calibrated for. `PartSnapshot.type` is
+/// `Part.assetKey`, and the only writers of a non-empty `Part.defId` in the
+/// whole app are [VesselAssembler] — reached only from the VAB's launch — and
+/// the save codec that round-trips its output. Everything hand-built reports a
+/// display name instead, which the catalog has never heard of.
+///
+/// Sizes are in METRES (converted); vessel body frame is Z-up with the nose on
+/// +Z, like everything else.
 class VesselNodes {
   VesselNodes(this._scene);
 
@@ -38,13 +61,20 @@ class VesselNodes {
   // (staging events), not every frame.
   final Map<String, String> _partsKey = {};
 
+  /// Kitbash slots per vessel, in snapshot part order. Present ONLY for craft
+  /// on the per-part path, so its keys double as "this vessel is a kitbash" —
+  /// which is how an in-flight whole-craft realize learns it has been
+  /// superseded. The list identity is the generation token: a rebuild installs
+  /// a NEW list, so a decode that started against the old one bails.
+  final Map<String, List<_PartSlot>> _partSlots = {};
+
   /// Craft model: the Apollo CSM replaces the procedural part composition
   /// once decoded (87 MB — async; primitives show until then). Loaded per
   /// vessel: a Node can't be parented twice.
   ///
   /// `.fsceneb` baked from the licensed .glb by `tool/import_mesh.dart`;
   /// neither format is committed (license bars redistribution), so clones
-  /// without the asset stay procedural (see [_failedAssets]).
+  /// without the asset stay procedural (see [PartBakeCache.hasFailed]).
   ///
   /// TWO craft models: the Apollo CSM (default) and the Lunar Module. A vessel
   /// whose id contains 'lander' renders the LM export; everything else is the
@@ -82,9 +112,6 @@ class VesselNodes {
   final Map<String, fs.Node> _glbModels = {};
   final Set<String> _glbLoading = {};
   final Set<String> _glbApplied = {};
-  // Per-asset: a missing/corrupt bake stops retrying THAT asset only, so a
-  // missing LM export doesn't disable the CSM (and vice versa).
-  static final Set<String> _failedAssets = {};
 
   /// Debug reference gizmo at each craft's ORIGIN: three 1-metre-ticked axes
   /// in the vessel body frame (X red, Y green, Z blue = nose) plus an origin
@@ -94,6 +121,20 @@ class VesselNodes {
   static bool showAxes = false;
   static const double _axisLenM = 10.0; // axis length + tick count, metres
   final Map<String, fs.Node> _axisNodes = {};
+
+  /// Aft-most surface of the WHOLE-CRAFT silhouette on the body Z axis,
+  /// METRES: the exit plane of the Apollo fallback's SPS bell, and the scale
+  /// the baked models are calibrated to match.
+  ///
+  /// A named constant because it is what anything anchored to the tail is
+  /// calibrated AGAINST — [ExhaustNodes.defaultNozzleZM] is the live example —
+  /// and a number that exists only as the sum of two literals inside
+  /// [_addApolloFallback] cannot be calibrated against at all.
+  static const double fallbackAftM = -6.5;
+
+  /// Height of that bell, metres. Only [_addApolloFallback] and the constant
+  /// above need it.
+  static const double _spsBellM = 1.8;
 
   /// Per-vessel eclipse of the sun on the craft (dims its materials when it
   /// is in the body's umbra). Applied HERE, not on the scene's global
@@ -121,25 +162,44 @@ class VesselNodes {
         _scene.add(n);
         return n;
       });
-      _ensureCraftModel(v.id, node);
-      final partsKey = v.parts.map((p) => '${p.type}@${p.ox},${p.oy},${p.oz}').join('|');
-      if (!_glbApplied.contains(v.id) && _partsKey[v.id] != partsKey) {
+      // Which of the two draw paths this craft is on. Re-evaluated every frame
+      // because staging can drop the last catalog part (or, on a craft that
+      // docked with one, reveal the first).
+      final kitbash = isKitbash(v);
+      if (!kitbash) _ensureCraftModel(v.id, node);
+      final partsKey = _partsFingerprint(v);
+      // Whole-craft: once its model is applied the part list no longer drives
+      // anything, so stop rebuilding the silhouette. Kitbash: the part list IS
+      // the model, so it always rebuilds on a fingerprint change.
+      if (_partsKey[v.id] != partsKey &&
+          (kitbash || !_glbApplied.contains(v.id))) {
         _partsKey[v.id] = partsKey;
-        _rebuildParts(node, v);
+        if (kitbash) {
+          _rebuildKitbash(node, v);
+        } else {
+          _rebuildParts(node, v);
+        }
       }
       node.localTransform = vm.Matrix4.compose(pos, rot, vm.Vector3.all(1.0));
       _applyEclipse(node, _eclipseFactor(body, v, starWorld));
 
-      // glTF is Y-up; the vessel body frame is Z-up with the nose on +Z.
-      // Model units differ per export — [_scaleFor] converts this vessel's
-      // model units to METRES (sleuthed by screenshot at a known range), then
-      // metres to scene km. Reapplied per frame so live calibration via
-      // the dev extension takes effect immediately.
-      _glbModels[v.id]?.localTransform = vm.Matrix4.compose(
-        vm.Vector3.zero(),
-        vm.Quaternion.axisAngle(vm.Vector3(1, 0, 0), math.pi / 2),
-        vm.Vector3.all(lengthToScene(_scaleFor(_assetFor(v.id)))),
-      );
+      if (kitbash) {
+        // O(parts) matrix writes, no allocation of scene nodes: placement is
+        // reapplied per frame for the same reason the whole-craft transform is
+        // — so live scale calibration lands immediately.
+        _syncPartTransforms(v.id);
+      } else {
+        // glTF is Y-up; the vessel body frame is Z-up with the nose on +Z.
+        // Model units differ per export — [_scaleFor] converts this vessel's
+        // model units to METRES (sleuthed by screenshot at a known range), then
+        // metres to scene km. Reapplied per frame so live calibration via
+        // the dev extension takes effect immediately.
+        _glbModels[v.id]?.localTransform = vm.Matrix4.compose(
+          vm.Vector3.zero(),
+          _noseUp(),
+          vm.Vector3.all(lengthToScene(_scaleFor(_assetFor(v.id)))),
+        );
+      }
 
       _syncAxisGizmo(v.id, node);
     }
@@ -150,10 +210,61 @@ class VesselNodes {
       _partsKey.remove(id);
       _glbApplied.remove(id);
       _glbModels.remove(id);
+      // Drops the generation token too: a part bake still decoding for this
+      // vessel finds no slot list and discards its realized graph instead of
+      // parenting it into a scene the craft has left.
+      _partSlots.remove(id);
       _axisNodes.remove(id);
       return true;
     });
   }
+
+  /// Whether [v] draws from its part list. TRUE as soon as ONE part came from
+  /// the catalog: an assembled craft is its parts, and a lone hand-built part
+  /// welded onto one (a docked test mass, a legacy save) must not demote the
+  /// whole stack to an unrelated silhouette.
+  ///
+  /// FALSE for a craft with no catalog part at all — the hand-built sample
+  /// fleet, whose parts carry display names and which were authored AS the
+  /// whole-craft model.
+  ///
+  /// O(parts) map reads, no I/O: called for every vessel every frame.
+  static bool isKitbash(VesselSnapshot v) => partsDrawThemselves(v.parts);
+
+  /// [isKitbash] asked of a bare part list.
+  ///
+  /// Exposed because anything anchored to the craft's GEOMETRY — the exhaust
+  /// plume ([ExhaustNodes.nozzleZM]) — has to know WHICH of the two bodies is
+  /// on screen before it can measure against it. Deriving a tail position from
+  /// the part list of a craft that is drawn as one whole-craft model puts the
+  /// anchor on a hull nobody can see.
+  static bool partsDrawThemselves(Iterable<PartSnapshot> parts) {
+    for (final p in parts) {
+      if (PartModelLibrary.isCatalogPart(p.type)) return true;
+    }
+    return false;
+  }
+
+  /// Fingerprint of everything about the part list that changes what is DRAWN:
+  /// which parts, where they sit, and how they are turned. Staging changes it;
+  /// flying does not. Orientation has to be in here — a part that only rotates
+  /// (a leg deploying, an RCS quad re-facing) would otherwise keep the pose it
+  /// was built with forever.
+  static String _partsFingerprint(VesselSnapshot v) {
+    final b = StringBuffer();
+    for (final p in v.parts) {
+      b.write('${p.type}@${p.ox},${p.oy},${p.oz}');
+      if (!p.isUnrotated) b.write('~${p.qw},${p.qx},${p.qy},${p.qz}');
+      b.write('|');
+    }
+    return b.toString();
+  }
+
+  /// glTF Y-up -> body Z-up, nose on +Z. Built fresh per call: vector_math
+  /// quaternions are mutable, and a shared instance is one careless in-place
+  /// op away from rotating the entire fleet.
+  static vm.Quaternion _noseUp() =>
+      vm.Quaternion.axisAngle(vm.Vector3(1, 0, 0), math.pi / 2);
 
   /// Attach/detach the debug axis gizmo for [vesselId] per [showAxes]. Rebuilt
   /// if a glb reload wiped it from the vessel node's children.
@@ -269,87 +380,64 @@ class VesselNodes {
     }
   }
 
-  /// One fully-loaded bake per asset, shared by every vessel that uses it:
-  /// the parsed document plus its preloaded [fsb.ResourceRealizer], from
-  /// which per-vessel node graphs realize in milliseconds against shared GPU
-  /// resources. The expensive part — the ~90 MB container parse and the
-  /// KTX2 texture transcode (pure-Dart, ~30–60 s of CPU per bake in a debug
-  /// build) — is paid once per asset, not once per vessel.
-  static final Map<String, Future<(fsb.SceneDocument, fsb.ResourceRealizer)>>
-      _bakes = {};
+  /// Every bake [prewarm] queues, IN QUEUE ORDER: the two whole-craft models.
+  ///
+  /// The order is the policy. [PartBakeCache] runs these strictly in sequence,
+  /// so whatever is first is warm first, and the Apollo leads because it is the
+  /// silhouette every craft on the whole-craft path falls back to.
+  ///
+  /// Separate from [prewarm] so the policy is assertable without a GPU, a
+  /// bundle or a menu.
+  static List<String> prewarmAssets() => const [_apolloModel, _landerModel];
 
-  /// Serializes bake loads. Loading both craft bakes at once doubles the
-  /// isolate-group heap churn (parse copies + per-texture transcode
-  /// isolates), and the resulting GC pauses land on the UI isolate as
-  /// multi-second frame stalls.
-  static Future<void> _bakeChain = Future<void>.value();
-
-  static Future<(fsb.SceneDocument, fsb.ResourceRealizer)> _bake(
-          String asset) =>
-      _bakes.putIfAbsent(asset, () {
-        final done = _bakeChain.then((_) => _loadBake(asset));
-        _bakeChain = done.then((_) {}, onError: (Object _) {});
-        return done;
-      });
-
-  /// Loads + parses + GPU-preloads one bake. The container parse runs in a
-  /// background isolate (`compute`); the document is pure data, so it
-  /// crosses back via `Isolate.exit` without a copy. `preload` transcodes
-  /// each KTX2 texture in its own isolate and only uploads on this one.
-  /// After a first throwaway realize (which memoizes geometry into the
-  /// realizer), the payload bytes are dropped — they otherwise pin the whole
-  /// container's decoded bytes in the heap for the life of the cache.
-  static Future<(fsb.SceneDocument, fsb.ResourceRealizer)> _loadBake(
-      String asset) async {
-    final sw = Stopwatch()..start();
-    final data = await rootBundle.load(asset);
-    debugPrint('craftBake $asset: bundle ${sw.elapsedMilliseconds}ms');
-    final bytes =
-        data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
-    final doc =
-        await compute(fsb.readFsceneb, bytes, debugLabel: 'parse $asset');
-    debugPrint('craftBake $asset: parsed ${sw.elapsedMilliseconds}ms');
-    final realizer = fsb.ResourceRealizer(doc);
-    await realizer.preload();
-    debugPrint('craftBake $asset: preloaded ${sw.elapsedMilliseconds}ms');
-    await fsb.realizeSceneAsync(doc, resources: realizer);
-    for (final p in doc.payloads.values) {
-      p.bytes = null;
-    }
-    debugPrint('craftBake $asset ready in ${sw.elapsedMilliseconds}ms');
-    return (doc, realizer);
-  }
-
-  /// Starts loading every craft bake in the background so a later flight
+  /// Starts loading the whole-craft bakes in the background so a later flight
   /// entry only realizes node graphs from the shared cache (~ms) instead of
   /// paying parse + texture transcode at the moment the scene appears. Call
-  /// from the menu. No-op on web: `compute` runs same-isolate there, so
-  /// prewarming would freeze the menu for the exact cost it tries to hide.
-  static void prewarm() {
-    if (kIsWeb) return;
-    for (final asset in const [_apolloModel, _landerModel]) {
-      _bake(asset).then((_) {}, onError: (Object e) {
-        _failedAssets.add(asset);
-        // ignore: avoid_print
-        print('craft model prewarm failed ($asset): $e');
-      });
-    }
-  }
+  /// from the menu.
+  ///
+  /// POLICY: warm what THIS screen leads to, and nothing else. Every route from
+  /// the menu into a flight spawns a hand-built sample craft, which draws a
+  /// whole-craft model ([isKitbash] is false for all of them). Part bakes
+  /// belong to craft that cannot exist until the player has been through the
+  /// VAB, and the VAB warms them itself when it opens
+  /// (`CraftEditorViewportState.initState`) — so queueing them here buys
+  /// latency for nobody and costs every player who only ever presses FLIGHT
+  /// seven extra parses, KTX2 transcodes and UI-isolate texture uploads,
+  /// running behind the flight they just entered. Each `realizer.preload()`
+  /// uploads on the UI isolate, so that is a run of staggered stalls on the
+  /// render thread for art the flight will never draw.
+  ///
+  /// COST, measured on this checkout: 91 MB (Apollo) + 39 MB (LM) = 130 MB of
+  /// parsed document plus preloaded GPU textures, resident for the life of the
+  /// process. Both are drawn by the menu's own FLIGHT and ASCENT entries, so
+  /// none of it is speculative. (The seven LM part bakes are ~36 MB EACH — 256
+  /// MB more — which is as much as a whole vehicle apiece for sub-assemblies
+  /// cut from ONE source model, and says the exporter duplicates a shared
+  /// texture set. Deduplicating it at bake time is what would make warming them
+  /// anywhere cheap.)
+  ///
+  /// No-op on web — see [PartBakeCache.prewarm] for why prewarming there would
+  /// cost the stall it is meant to hide. (Web has no part bakes to warm either,
+  /// see [PartModelLibrary.assetFor].)
+  static void prewarm() => PartBakeCache.prewarm(prewarmAssets());
 
   void _ensureCraftModel(String vesselId, fs.Node parent) {
     final asset = _assetFor(vesselId);
-    if (_failedAssets.contains(asset) ||
+    if (PartBakeCache.hasFailed(asset) ||
         _glbApplied.contains(vesselId) ||
         _glbLoading.contains(vesselId)) {
       return;
     }
     _glbLoading.add(vesselId);
-    _bake(asset)
-        .then((bake) => fsb.realizeSceneAsync(bake.$1, resources: bake.$2))
+    PartBakeCache.realize(asset)
         .then((model) {
           _glbLoading.remove(vesselId);
           final node = _nodes[vesselId];
           if (node == null) return; // vessel vanished while decoding
+          // Staging can turn a craft into a kitbash while its whole-craft model
+          // is still decoding. Dropping the realized graph here is what stops
+          // the two paths from both drawing (this clears ALL children).
+          if (_partSlots.containsKey(vesselId)) return;
           for (final child in List.of(node.children)) {
             node.remove(child);
           }
@@ -359,23 +447,222 @@ class VesselNodes {
         })
         .catchError((Object e) {
           _glbLoading.remove(vesselId);
-          _failedAssets.add(asset); // don't hammer this broken/missing bake
+          // Don't hammer this broken/missing bake.
+          PartBakeCache.markFailed(asset);
           // ignore: avoid_print
           print('craft model load failed ($asset): $e');
         });
   }
 
+  /// Rebuild a kitbash craft: one SLOT node per part carrying that part's
+  /// body-frame placement, holding the part's realized bake once it lands and a
+  /// procedural stand-in until then.
+  ///
+  /// The two-level split (slot = placement, child = asset-space correction) is
+  /// what lets the stand-in be swapped for the model without recomputing
+  /// placement, and lets [_syncPartTransforms] retune scale without rebuilding.
+  ///
+  /// Called only on a [_partsFingerprint] change — realizing a bake per part is
+  /// milliseconds, not microseconds, and must never be per-frame work.
+  void _rebuildKitbash(fs.Node vesselNode, VesselSnapshot v) {
+    for (final child in List.of(vesselNode.children)) {
+      vesselNode.remove(child);
+    }
+    // A craft that just became a kitbash drops its whole-craft model with the
+    // children above; forget it so [_ensureCraftModel] doesn't think it is
+    // still on screen (and so a later flip back re-realizes it).
+    _glbApplied.remove(v.id);
+    _glbModels.remove(v.id);
+    final slots = <_PartSlot>[];
+    _partSlots[v.id] = slots;
+    for (final p in v.parts) {
+      final slot = _PartSlot(p);
+      slots.add(slot);
+      vesselNode.add(slot.node);
+      // Something is on screen from this frame on, whatever happens to the
+      // bake — a part must never simply vanish.
+      slot.node.add(_standIn(p.type));
+      // Null when the part has no art at all, and on web, where no part bake
+      // ships — the stand-in above is the whole picture there.
+      final asset = PartModelLibrary.assetFor(p.type);
+      // A bake that already failed is not retried: [PartBakeCache]'s failure
+      // record is per ASSET and process-wide, so one missing part model costs
+      // one attempt per process, not one per rebuild.
+      if (asset == null || PartBakeCache.hasFailed(asset)) continue;
+      _realizePart(v.id, slots, slot, asset);
+    }
+    // No transform sync here: [update] is the only caller and syncs every
+    // kitbash vessel later in the same frame, rebuilt or not.
+  }
+
+  /// The procedural stand-in for one part: the shape the VAB drew that part
+  /// with, at the size the VAB drew it at.
+  ///
+  /// It resolves the [PartDef] behind the type key and goes through
+  /// [PartPrimitivesByCategory] — the same table the VAB draws with — rather
+  /// than through [PartPrimitives.forType], which can only match display words
+  /// an id happens to contain. Most of the stock roster contains none of them
+  /// and would otherwise be a row of identical grey cubes, so the same craft
+  /// would read as two different vehicles either side of the LAUNCH button.
+  ///
+  /// A part with no [PartDef] behind it keeps the type-key registry: it has no
+  /// category to shape it and no declared box to fill.
+  fs.Node _standIn(String type) {
+    final def = PartModelLibrary.defFor(type);
+    return fs.Node(
+      mesh: def == null
+          ? PartPrimitives.forType(type)
+          : PartPrimitivesByCategory.forPart(def),
+    )..localTransform = vm.Matrix4.compose(
+        vm.Vector3.zero(),
+        vm.Quaternion.identity(),
+        standInScale(type),
+      );
+  }
+
+  /// Scale of that stand-in: SCENE units per authored mesh unit, per axis.
+  ///
+  /// For a catalog part, the factor that makes the DRAWN box equal
+  /// [PartDef.size] ([PartPrimitivesByCategory.standInScaleM]) — non-uniform,
+  /// because parts are not cubes and the primitives are not all unit cubes.
+  /// This is the same number `CraftEditorNodes.standInScale` applies, which is
+  /// what makes the craft in the VAB and the craft on the pad one craft.
+  ///
+  /// For anything else, ONE uniform scale off the longest side the renderer
+  /// knows about ([PartModelLibrary.fallbackSizeM], 1 m when it knows nothing):
+  /// with no declared box there is nothing per-axis to fill, and a uniform
+  /// scale at least never draws a part smaller than it is.
+  static vm.Vector3 standInScale(String type) {
+    final def = PartModelLibrary.defFor(type);
+    if (def == null) {
+      return vm.Vector3.all(lengthToScene(PartModelLibrary.fallbackSizeM(type)));
+    }
+    final f = PartPrimitivesByCategory.standInScaleM(def);
+    return vm.Vector3(
+        lengthToScene(f.x), lengthToScene(f.y), lengthToScene(f.z));
+  }
+
+  /// Realize [asset] into [slot] off the SHARED bake cache. Each part instance
+  /// needs its own node graph (a node cannot be parented twice) but shares the
+  /// parse and the GPU resources with every other part and vessel using the
+  /// same asset.
+  void _realizePart(
+    String vesselId,
+    List<_PartSlot> slots,
+    _PartSlot slot,
+    String asset,
+  ) {
+    PartBakeCache.realize(asset)
+        .then((model) {
+          // The craft may have staged, flipped to whole-craft, or been
+          // destroyed while this decoded. The slot list installed by the
+          // rebuild that started this load is the generation token: if it is no
+          // longer the current one, this graph belongs to a craft that no
+          // longer exists and is dropped unparented (no inline dispose — see
+          // the web Vertices/ImageShader trap).
+          if (!identical(_partSlots[vesselId], slots)) return;
+          if (_nodes[vesselId] == null) return;
+          for (final child in List.of(slot.node.children)) {
+            slot.node.remove(child); // retire the stand-in
+          }
+          slot.node.add(model);
+          slot.modelNode = model;
+          _syncPartTransforms(vesselId);
+        })
+        .catchError((Object e) {
+          // Don't hammer this broken/missing bake.
+          PartBakeCache.markFailed(asset);
+          // ignore: avoid_print
+          print('part model load failed ($asset): $e');
+        });
+  }
+
+  /// Reapply every slot's transform for one kitbash vessel. O(parts) matrix
+  /// writes with no allocation beyond the matrices themselves.
+  ///
+  /// Slot: the part's body-frame offset (METRES -> scene km) and its own
+  /// orientation within that frame. Model child: [partModelTransform]. Both are
+  /// recomputed per frame, and the binding is re-RESOLVED per frame rather than
+  /// read off the slot, so a live calibration ([PartModelLibrary.calibrate],
+  /// [PartModelLibrary.scaleMultiplier]) lands on the next frame without a
+  /// rebuild.
+  void _syncPartTransforms(String vesselId) {
+    final slots = _partSlots[vesselId];
+    if (slots == null) return;
+    for (final slot in slots) {
+      final p = slot.part;
+      slot.node.localTransform = partSlotTransform(p);
+      final modelNode = slot.modelNode;
+      if (modelNode == null) continue; // stand-in showing: nothing to correct
+      final model = PartModelLibrary.resolve(p.type);
+      if (model == null) continue; // unreachable: a bake implies a binding
+      modelNode.localTransform = partModelTransform(model);
+    }
+  }
+
+  /// The transform of ONE part's slot: where that part sits on the craft and
+  /// which way it faces, and nothing else.
+  ///
+  /// `T(offset) * R(orientation)`, with no scale — a slot is a PLACEMENT, and
+  /// whatever fills it (a bake through [partModelTransform], a procedural
+  /// stand-in through [standInScale]) carries its own asset-space correction.
+  /// Keeping the two apart is what lets a bake replace a stand-in without
+  /// recomputing where the part is.
+  ///
+  /// The offset is [PartSnapshot]'s body-frame position in METRES, converted to
+  /// scene km; the rotation is the part's own orientation WITHIN the body frame,
+  /// so the craft attitude on the parent vessel node still multiplies in from
+  /// the left.
+  static vm.Matrix4 partSlotTransform(PartSnapshot p) => vm.Matrix4.compose(
+        vm.Vector3(
+            lengthToScene(p.ox), lengthToScene(p.oy), lengthToScene(p.oz)),
+        quatToScene(Quaternion(p.qw, p.qx, p.qy, p.qz)),
+        vm.Vector3.all(1.0),
+      );
+
+  /// The transform of the model child INSIDE a part slot: everything needed to
+  /// take an export's own axes and units into the part frame the slot places.
+  ///
+  /// `T(offset) * R(rotation * glTF Y-up fix) * S(scale)`, which is exactly what
+  /// [vm.Matrix4.compose] builds, and the order is the whole point:
+  ///
+  ///  * SCALE innermost, so [PartModel.scale] converts model units to metres
+  ///    before anything else looks at the mesh;
+  ///  * ROTATION next, so [PartModel.rotation] is read in the BODY frame on top
+  ///    of the Y-up fix, not in the export's authored axes;
+  ///  * OFFSET last, so it is metres along the part's OWN corrected axes. An
+  ///    artist who sees the mesh sitting 0.4 m low writes `Vector3(0, 0, 0.4)`
+  ///    and it moves up, whatever units the model was authored in and whichever
+  ///    way up it was baked. Scaling the offset with the mesh would silently
+  ///    redefine it as model units; rotating it would redefine it as authored
+  ///    axes. Both make a screenshot-driven calibration unrepeatable.
+  ///
+  /// The slot's own placement multiplies in from the left, so the full per-part
+  /// chain is `T(positionInVessel) * R(rotationInVessel) * this`. The offset
+  /// therefore moves ART ONLY: the slot — and with it every attach node, mass
+  /// and inertia the domain anchored to the part origin — does not move.
+  static vm.Matrix4 partModelTransform(PartModel model) => vm.Matrix4.compose(
+        relToScene(model.offset),
+        quatToScene(model.rotation) * _noseUp(),
+        vm.Vector3.all(
+            lengthToScene(model.scale * PartModelLibrary.scaleMultiplier)),
+      );
+
   void _rebuildParts(fs.Node vesselNode, VesselSnapshot v) {
     for (final child in List.of(vesselNode.children)) {
       vesselNode.remove(child);
     }
+    // Leaving the kitbash path (staging dropped the last catalog part):
+    // forgetting the slots also tells any in-flight part realize to bail.
+    _partSlots.remove(v.id);
     // The craft is represented by its baked model ([_assetFor]); the
     // procedural stand-in is an Apollo CSM silhouette, used wherever that model
     // isn't available (no asset, or the web build before its bake decodes). We
-    // don't render the raw part list — a generic vessel would need its own
-    // registry, so the silhouette reads as a real ship instead of a cluster of
-    // grey blocks. (The LM falls back to the CSM silhouette until its bake
-    // lands — a rough stand-in, not an exact shape.)
+    // don't render the raw part list here — a hand-built part carries a display
+    // name and nothing the catalog can size or shape it from, so the silhouette
+    // reads as a real ship instead of a cluster of 1 m grey blocks. (The LM
+    // falls back to the CSM silhouette until its bake lands — a rough stand-in,
+    // not an exact shape.)
     _addApolloFallback(vesselNode);
   }
 
@@ -386,6 +673,8 @@ class VesselNodes {
   /// .fsceneb isn't available (no asset, or the web build before its bake
   /// decodes).
   ///
+  /// Its AFT-MOST surface is [fallbackAftM].
+  ///
   /// Built from [fs.CylinderGeometry] (outward winding + generated normals):
   /// the hand-rolled cone/cylinder primitives had inward winding (backfaces).
   /// Its axis is +Y — top row = [topRadius], bottom = [bottomRadius] — so the
@@ -393,7 +682,7 @@ class VesselNodes {
   /// [bottomRadius] at the aft. Geometry is authored in METRES; the uniform
   /// lengthToScene(1) node scale converts to scene km.
   void _addApolloFallback(fs.Node vesselNode) {
-    final noseUp = vm.Quaternion.axisAngle(vm.Vector3(1, 0, 0), math.pi / 2);
+    final noseUp = _noseUp();
     void add({
       required double noseR, // radius at the +Z (forward) end
       required double aftR, //  radius at the -Z (aft) end
@@ -426,8 +715,15 @@ class VesselNodes {
     // Service Module: straight cylinder, CM-base diameter.
     add(noseR: 1.95, aftR: 1.95, height: 7.0, z: -1.3, mat: PartPrimitives.hull());
     // SPS engine bell: narrow throat toward the body (+Z), wide OPENING aft
-    // (-Z).
-    add(noseR: 0.35, aftR: 1.2, height: 1.8, z: -5.6, mat: PartPrimitives.dark());
+    // (-Z). Its exit plane is the tail of the whole craft, so it is placed FROM
+    // [fallbackAftM] rather than the other way round.
+    add(
+      noseR: 0.35,
+      aftR: 1.2,
+      height: _spsBellM,
+      z: fallbackAftM + _spsBellM / 2,
+      mat: PartPrimitives.dark(),
+    );
     // High-gain antenna: a shallow dish (wide rim forward) on a short boom off
     // the aft quarter.
     vesselNode.add(
@@ -450,6 +746,24 @@ class VesselNodes {
   }
 }
 
+/// One part of a kitbash craft on screen.
+///
+/// [node] is the slot: it holds the part's placement in the vessel body frame
+/// and NOTHING else, so its single child can be swapped from the procedural
+/// stand-in to the realized bake without touching that placement. [part] is the
+/// snapshot the slot was built from — it cannot change without changing the
+/// parts fingerprint, which rebuilds the slots outright.
+class _PartSlot {
+  _PartSlot(this.part);
+
+  final PartSnapshot part;
+
+  final fs.Node node = fs.Node();
+
+  /// The realized bake, once it has landed. Null while the stand-in is showing.
+  fs.Node? modelNode;
+}
+
 /// Procedural primitive meshes for part type keys. All geometry is unit
 /// scale (1 m before the node's scale), Z-up, centred on the part origin.
 class PartPrimitives {
@@ -459,6 +773,12 @@ class PartPrimitives {
     'fuselage': () => fs.Mesh(cylinder(), hull()),
     'tank': () => fs.Mesh(cylinder(), hull()),
     'engine': () => fs.Mesh(cone(flip: true), dark()),
+    // Named separately from 'engine': a thruster reads as an engine but shares
+    // no substring with it, and every LM part would otherwise land on the
+    // unknown-key cuboid.
+    'thruster': () => fs.Mesh(cone(flip: true), dark()),
+    'rcs': () => fs.Mesh(fs.CuboidGeometry(vm.Vector3(1.0, 1.0, 1.0)), dark()),
+    'leg': () => fs.Mesh(slab(), hull()),
     'wing': () => fs.Mesh(slab(), hull()),
     'panel': () => fs.Mesh(slab(), panel()),
   };
