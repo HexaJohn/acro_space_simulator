@@ -107,11 +107,9 @@ class SceneSync {
       last = now;
     }
 
-    // Terrain's active body + relief are last frame's (terrain syncs below);
-    // they only change on a focus switch, so the one-frame lag is harmless.
-    _bodies.update(snap, origin,
-        terrainBodyId: _terrain.activeBodyId,
-        terrainReliefM: _terrain.activeReliefM);
+    // Terrain's active body is last frame's (terrain syncs below); it only
+    // changes on a focus switch, so the one-frame lag is harmless.
+    _bodies.update(snap, origin, terrainBodyId: _terrain.activeBodyId);
     mark('bodies');
     if (!_noVessels) {
       _vessels.update(snap, origin, starWorld: _bodies.starWorld(snap));

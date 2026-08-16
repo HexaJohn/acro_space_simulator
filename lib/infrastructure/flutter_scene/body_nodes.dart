@@ -58,14 +58,14 @@ class BodyNodes {
   void update(
     WorldSnapshot snap,
     FloatingOrigin origin, {
-    // The body TerrainNodes is actively covering, and its field's DERIVED
-    // relief bound. On a DEM body the derived bound (real elevation span +
-    // detail headroom) is larger than the descriptor's amplitude, and the
-    // sphere must sink below the DEEPEST real basin or it surfaces through
-    // crater floors. One frame stale (bodies sync before terrain) — harmless,
-    // the value only changes on a focus switch.
+    // The body TerrainNodes is actively covering. Its sphere is switched OFF
+    // entirely — voxel terrain plus the loading grid own that body's look
+    // now; a textured shell underneath is pure overdraw and pokes through
+    // deep basins besides. Only the FOCUSED body: TerrainNodes meshes
+    // nothing else, and a sphere is all a non-focused Moon has from Earth
+    // orbit. One frame stale (bodies sync before terrain) — harmless, the
+    // value only changes on a focus switch.
     String? terrainBodyId,
-    double terrainReliefM = 0,
   }) {
     for (final d in snap.descriptors.values) {
       _kinds[d.id] = d.kind;
@@ -84,22 +84,16 @@ class BodyNodes {
       final pos = origin.worldToScene(Vector3(b.px, b.py, b.pz));
       final rot = quatToScene(Quaternion(b.qw, b.qx, b.qy, b.qz) *
           Quaternion.axisAngle(Vector3.unitZ, textureYawRad));
-      // Sink the sphere below a terrain body's LOWEST ground.
-      //
-      // The sphere sits at the datum radius, but relief runs both ways around
-      // it, so once terrain covers the whole body the sphere pokes through
-      // every basin and crater floor — a textured shell surfacing through the
-      // meshed ground. Dropping it by the terrain amplitude puts it strictly
-      // inside the relief, where it still does its real job: backing the gaps
-      // while distant chunks are still being meshed.
+      // The terrain-covered body draws no sphere at all (zero scale: no
+      // fragments, node kept so a focus switch restores it next frame).
+      // Other terrain bodies keep theirs, sunk by the descriptor amplitude
+      // so relief never pokes through if terrain ever covers them.
       final terrain = snap.descriptors[b.id];
-      var sink = (terrain != null && terrain.hasTerrain)
+      final sink = (terrain != null && terrain.hasTerrain)
           ? terrain.terrainAmplitude
           : 0.0;
-      if (b.id == terrainBodyId && terrainReliefM > sink) {
-        sink = terrainReliefM;
-      }
-      final scale = lengthToScene(b.radius - sink);
+      final scale =
+          b.id == terrainBodyId ? 0.0 : lengthToScene(b.radius - sink);
       node.localTransform = Matrix4Compose.compose(pos, rot, scale);
     }
 
