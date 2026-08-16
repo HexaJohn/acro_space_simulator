@@ -8,6 +8,7 @@ import 'dart:math' as math;
 import '../../domain/colony/building.dart';
 import '../../domain/colony/city/city_building_spec.dart';
 import '../../domain/colony/city/city_sim.dart';
+import '../../domain/colony/city/parcel.dart';
 import '../../domain/colony/colony.dart';
 import '../../domain/colony/surface_placement.dart';
 import '../../domain/comms/comms_service.dart';
@@ -879,6 +880,43 @@ class BuildingSnapshot {
     );
   }
 
+  /// Place a building on a PARCEL.
+  ///
+  /// The lot supplies everything: where it stands, how big it is, and which
+  /// way it faces. Facing is a rotation about the local up by the parcel's
+  /// heading, so the building turns to its street rather than to the grid's
+  /// idea of north.
+  factory BuildingSnapshot.ofParcel(
+    CitySim city,
+    Parcel parcel,
+    CityBuildingSpec spec,
+    CelestialBody body, {
+    required double siteRadiusM,
+  }) {
+    final t = _parcelTransform(city, parcel, siteRadiusM);
+    final dir = t.position.normalized;
+    final extent = parcel.buildableExtent;
+    return BuildingSnapshot(
+      id: parcel.id,
+      type: spec.type,
+      colonyId: city.id,
+      body: body.id.value,
+      px: t.position.x,
+      py: t.position.y,
+      pz: t.position.z,
+      qw: t.orientation.w,
+      qx: t.orientation.x,
+      qy: t.orientation.y,
+      qz: t.orientation.z,
+      lat: math.asin(dir.z.clamp(-1.0, 1.0)),
+      lon: math.atan2(dir.y, dir.x),
+      siteWidthM: extent.width,
+      siteDepthM: extent.depth,
+      siteKindIndex: spec.siteKind.index,
+      colorArgb: spec.colorArgb,
+    );
+  }
+
   /// Place one CITY-BUILDER cell. The city's grid is centred on the colony
   /// site, so cell offsets are measured from the middle of the map — without
   /// the recentre the whole city would sit off to the north-east of the lat/lon
@@ -984,6 +1022,28 @@ class BuildingSnapshot {
   }
 }
 
+/// Surface transform of a parcel: its centroid, turned to face its street.
+({Vector3 position, Quaternion orientation}) _parcelTransform(
+  CitySim city,
+  Parcel parcel,
+  double siteRadiusM, [
+  SurfacePlacement placement = const SurfacePlacement(),
+]) {
+  final c = parcel.centroid;
+  final base = placement.place(
+    radius: siteRadiusM,
+    lat: city.cityLat * math.pi / 180.0,
+    lon: city.cityLon * math.pi / 180.0,
+    east: c.e,
+    north: c.n,
+  );
+  // place() gives local +X east, +Y north, +Z up. A parcel's heading is
+  // measured from north toward east, and a building is authored facing +Y, so
+  // the spin about up is the NEGATIVE of that heading.
+  final spin = Quaternion.axisAngle(Vector3.unitZ, -parcel.heading);
+  return (position: base.position, orientation: base.orientation * spin);
+}
+
 /// A flat patch of colony ground: a road tile, a zoned-but-not-yet-built lot,
 /// or a support platform.
 ///
@@ -1005,8 +1065,10 @@ class CityPatchSnapshot {
   final double px, py, pz;
   final double qw, qx, qy, qz;
 
-  /// Side length in metres.
+  /// Extent in metres, along the patch's own east (width) and north (depth)
+  /// axes. Grid cells are square; parcels are not.
   final double sizeM;
+  final double depthM;
   final int kind;
 
   const CityPatchSnapshot({
@@ -1021,7 +1083,8 @@ class CityPatchSnapshot {
     required this.qz,
     required this.sizeM,
     required this.kind,
-  });
+    double? depthM,
+  }) : depthM = depthM ?? sizeM;
 
   Map<String, dynamic> toJson() => {
         'colony': colonyId,
@@ -1029,6 +1092,7 @@ class CityPatchSnapshot {
         'p': [px, py, pz],
         'q': [qw, qx, qy, qz],
         's': sizeM,
+        'd': depthM,
         'k': kind,
       };
 
@@ -1046,6 +1110,7 @@ class CityPatchSnapshot {
       qy: q[2].toDouble(),
       qz: q[3].toDouble(),
       sizeM: (j['s'] as num).toDouble(),
+      depthM: (j['d'] as num?)?.toDouble(),
       kind: (j['k'] as num).toInt(),
     );
   }
@@ -1515,6 +1580,49 @@ class WorldSnapshot {
               _ => CityPatchSnapshot.kindResidential,
             },
           );
+        }
+        // Buildings placed on PARCELS. Position, facing and size all come from
+        // the lot, so a building on a subdivided street lot stands at that
+        // lot's real width and turns to face its road — which is the whole
+        // reason parcels exist.
+        for (final entry in city.parcelBuildings.entries) {
+          final parcel = city.layout.parcels
+              .where((p) => p.id == entry.key)
+              .firstOrNull;
+          if (parcel == null) continue;
+          buildings['${city.id}/${parcel.id}'] = BuildingSnapshot.ofParcel(
+            city,
+            parcel,
+            entry.value,
+            body,
+            siteRadiusM: siteRadius,
+          );
+        }
+        // Empty lots, drawn so the subdivision is visible before anything is
+        // built on it.
+        for (final parcel in city.layout.parcels) {
+          if (city.parcelBuildings.containsKey(parcel.id)) continue;
+          final t = _parcelTransform(city, parcel, siteRadius);
+          final extent = parcel.buildableExtent;
+          patches.add(CityPatchSnapshot(
+            colonyId: city.id,
+            body: body.id.value,
+            px: t.position.x,
+            py: t.position.y,
+            pz: t.position.z,
+            qw: t.orientation.w,
+            qx: t.orientation.x,
+            qy: t.orientation.y,
+            qz: t.orientation.z,
+            sizeM: extent.width,
+            depthM: extent.depth,
+            kind: switch (parcel.use) {
+              ParcelUse.commercial => CityPatchSnapshot.kindCommercial,
+              ParcelUse.industrial => CityPatchSnapshot.kindIndustrial,
+              ParcelUse.residential => CityPatchSnapshot.kindResidential,
+              _ => CityPatchSnapshot.kindSupport,
+            },
+          ));
         }
         for (final e in city.occupiedCells()) {
           buildings['${city.id}/${e.key}'] = BuildingSnapshot.ofCityCell(

@@ -383,15 +383,16 @@ class CityNodes {
       final basis = Quaternion(p.qw, p.qx, p.qy, p.qz);
       final east = basis.rotate(Vector3.unitX);
       final north = basis.rotate(Vector3.unitY);
-      final h = p.sizeM / 2;
+      final hw = p.sizeM / 2;
+      final hd = p.depthM / 2;
       // Lifted clear of the levelled pad, and each kind by a different amount,
       // so a road drawn over a zoned lot does not z-fight it.
       final lift = up * (0.05 + p.kind * 0.01);
       final c = [
-        centre + east * -h + north * -h + lift,
-        centre + east * h + north * -h + lift,
-        centre + east * h + north * h + lift,
-        centre + east * -h + north * h + lift,
+        centre + east * -hw + north * -hd + lift,
+        centre + east * hw + north * -hd + lift,
+        centre + east * hw + north * hd + lift,
+        centre + east * -hw + north * hd + lift,
       ];
       // A road maps its whole quad ACROSS its swatch, so the tile's markings
       // and kerbs land on the pavement. Every other kind is a flat colour and

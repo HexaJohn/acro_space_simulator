@@ -29,6 +29,7 @@ import 'package:flutter/services.dart'
 import '../../domain/autonomy/pilot_input.dart';
 import '../../domain/colony/city/city_config.dart';
 import '../../domain/colony/city/city_sim.dart';
+import '../../domain/colony/city/parcel.dart';
 import '../../adapters/presenters/surface_picker.dart';
 import '../flutter_scene/city/city_nodes.dart';
 import 'flight_session.dart';
@@ -2321,6 +2322,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                             ? (d) => _editCityAt(d.localPosition)
                             : null,
                         onPanStart: _cityEdit.active ? (_) {} : null,
+                        // Releasing a spline drag commits the road and cuts
+                        // the blocks either side into parcels.
+                        onPanEnd: _cityEdit.tool == CityEditTool.roadSpline
+                            ? (_) => rebuild(
+                                () => _cityEdit.commitSpline(_editingCity!))
+                            : null,
                         onPanUpdate: _cityEdit.active
                             ? (d) => _editCityAt(d.localPosition)
                             : null,

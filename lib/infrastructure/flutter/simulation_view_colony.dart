@@ -170,6 +170,22 @@ extension SimulationViewColony on _SimulationViewState {
     if (hit == null) return;
     _hoverCityAt(local);
 
+    // Spline drawing works in continuous metres — no cell involved.
+    if (_cityEdit.tool == CityEditTool.roadSpline) {
+      _cityEdit.addSplinePoint(Vec2(hit.east, hit.north));
+      return;
+    }
+
+    // A tap on a PARCEL places on the lot, which knows its own size and
+    // frontage. Only fall back to the cell grid where no lot has been cut.
+    if (_cityEdit.tool == CityEditTool.utility) {
+      final lot = city.layout.parcelAt(Vec2(hit.east, hit.north));
+      if (lot != null) {
+        rebuild(() => _cityEdit.applyToParcel(city, lot.id));
+        return;
+      }
+    }
+
     final cell = const SurfacePicker().cellAt(
       east: hit.east,
       north: hit.north,
