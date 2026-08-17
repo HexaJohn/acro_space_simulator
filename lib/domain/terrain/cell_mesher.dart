@@ -156,17 +156,15 @@ CellMesh meshTerrainCell(
       columnBrushes ??= List<List<TerrainBrush>?>.filled(n * n, null);
       columnBrushes[c] = cands;
       // An edit can move the surface outside the base band (a bowl digs below
-      // it, a rim stands above it). Its influence sphere bounds both, so the
-      // band is widened to that — conservative, and the `clipped` self-check
-      // still guards the construction.
+      // it, a rim stands above it). Each brush knows the exact radial interval
+      // it can move the surface into ([TerrainBrush.surfaceBand]); the old
+      // `centre ± boundingRadiusM` bound was a LATERAL radius pressed into
+      // radial service and cost 2x the radial samples on every edited chunk.
+      // The `clipped` self-check still guards the construction.
       for (final b in cands) {
-        final centreR = b.centreBF.length;
-        if (centreR - b.boundingRadiusM < editLo) {
-          editLo = centreR - b.boundingRadiusM;
-        }
-        if (centreR + b.boundingRadiusM > editHi) {
-          editHi = centreR + b.boundingRadiusM;
-        }
+        final band = b.surfaceBand(minGround, maxGround);
+        if (band.lo < editLo) editLo = band.lo;
+        if (band.hi > editHi) editHi = band.hi;
       }
     }
   }
@@ -248,7 +246,9 @@ CellMesh meshTerrainCell(
   final anchorBF = anchorDir *
       field.groundRadiusAt(anchorDir.x, anchorDir.y, anchorDir.z);
 
-  final lattice = surfaceNets(grid);
+  // Lattice normals are discarded below (they are gradients of the WARPED
+  // grid) — don't pay for them.
+  final lattice = surfaceNets(grid, normalMode: NormalMode.none);
   if (lattice.isEmpty) {
     return CellMesh(
       chunk: chunk,
@@ -294,13 +294,15 @@ CellMesh meshTerrainCell(
   // discarded. On the base relief the surface is the height field
   // `P(s,t) = dir(s,t) * g(s,t)`, so the normal is the (cheap, analytic)
   // cross product of its tangents, with `dh` read off the ground lattice —
-  // no further field evaluations. Near an edit the surface is genuinely 3D
-  // and the normal falls back to a central difference of the composed field.
+  // no further field evaluations. Near an edit the surface is genuinely 3D,
+  // and the normal is the gradient of the density LATTICE already in memory,
+  // pushed through the warp's Jacobian — NOT a central difference of the
+  // composed field, which cost six full field evaluations per vertex and was
+  // the single largest term in an edited chunk's meshing time.
   final src = lattice.positions;
   final count = src.length ~/ 3;
   final positions = Float32List(src.length);
   final normals = Float32List(src.length);
-  final eps = lateralM * 0.5;
   for (var v = 0; v < count; v++) {
     final o = v * 3;
     final fi = src[o], fj = src[o + 1], fk = src[o + 2];
@@ -309,29 +311,48 @@ CellMesh meshTerrainCell(
     positions[o + 1] = p.y - anchorBF.y;
     positions[o + 2] = p.z - anchorBF.z;
 
+    final s = chunk.s0 + (fi - 1) * ds;
+    final t = chunk.t0 + (fj - 1) * dt;
+    final r = rLo + fk * dr;
+    final dir = p / r;
+    // Tangents of dir(s,t), central-differenced in face coordinates (pure
+    // algebra — no noise).
+    final dirS = (directionOf(chunk.face, s + ds * 0.5, t) -
+            directionOf(chunk.face, s - ds * 0.5, t)) /
+        ds;
+    final dirT = (directionOf(chunk.face, s, t + dt * 0.5) -
+            directionOf(chunk.face, s, t - dt * 0.5)) /
+        dt;
+
     var nx = 0.0, ny = 0.0, nz = 0.0;
     if (nearEdit(fi, fj)) {
-      // Density rises from solid (<0) to air (>0), so +grad points outward.
-      nx = field.density(p.x + eps, p.y, p.z) -
-          field.density(p.x - eps, p.y, p.z);
-      ny = field.density(p.x, p.y + eps, p.z) -
-          field.density(p.x, p.y - eps, p.z);
-      nz = field.density(p.x, p.y, p.z + eps) -
-          field.density(p.x, p.y, p.z - eps);
+      // Gradient in LATTICE space (voxelSize 1, origin 0 — world coordinates
+      // of the grid ARE lattice coordinates), from the samples in hand.
+      final gi = grid.sampleWorld(fi + 0.5, fj, fk) -
+          grid.sampleWorld(fi - 0.5, fj, fk);
+      final gj = grid.sampleWorld(fi, fj + 0.5, fk) -
+          grid.sampleWorld(fi, fj - 0.5, fk);
+      final gk = grid.sampleWorld(fi, fj, fk + 0.5) -
+          grid.sampleWorld(fi, fj, fk - 0.5);
+      // Push through the warp: world position is P(fi,fj,fk) = dir(s,t)*r, so
+      // the Jacobian's columns are ci = dirS*ds*r, cj = dirT*dt*r, ck = dir*dr,
+      // and a lattice gradient maps to the body frame by J^-T, i.e. the
+      // cross-product columns below over det(J). Only the direction matters —
+      // the determinant's magnitude washes out in normalisation, its sign is
+      // applied so the normal still points from solid toward air.
+      final ci = dirS * (ds * r);
+      final cj = dirT * (dt * r);
+      final ck = dir * dr;
+      final rjk = cj.cross(ck);
+      final rki = ck.cross(ci);
+      final rij = ci.cross(cj);
+      final flip = ci.dot(rjk) < 0 ? -1.0 : 1.0;
+      nx = (rjk.x * gi + rki.x * gj + rij.x * gk) * flip;
+      ny = (rjk.y * gi + rki.y * gj + rij.y * gk) * flip;
+      nz = (rjk.z * gi + rki.z * gj + rij.z * gk) * flip;
     } else {
-      final s = chunk.s0 + (fi - 1) * ds;
-      final t = chunk.t0 + (fj - 1) * dt;
       final g = groundAt(fi, fj);
-      final r = rLo + fk * dr;
-      final dir = p / r;
-      // Tangents of dir(s,t), central-differenced in face coordinates (pure
-      // algebra — no noise), and dh off the ground lattice.
-      final dirS = (directionOf(chunk.face, s + ds * 0.5, t) -
-              directionOf(chunk.face, s - ds * 0.5, t)) /
-          ds;
-      final dirT = (directionOf(chunk.face, s, t + dt * 0.5) -
-              directionOf(chunk.face, s, t - dt * 0.5)) /
-          dt;
+      // dh off the ground lattice.
       final hs = (groundAt(fi + 1, fj) - groundAt(fi - 1, fj)) / (2 * ds);
       final ht = (groundAt(fi, fj + 1) - groundAt(fi, fj - 1)) / (2 * dt);
       final ps = dirS * g + dir * hs;

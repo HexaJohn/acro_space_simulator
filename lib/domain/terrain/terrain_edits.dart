@@ -199,10 +199,17 @@ class TerrainEdits {
     return out;
   }
 
-  /// Angular radius (rad) of [brush]'s influence seen from the body centre.
+  /// Angular radius (rad) of [brush]'s footprint seen from the body centre.
+  ///
+  /// Uses [TerrainBrush.lateralReachM], not the bounding sphere: a ray's
+  /// bucket decides whether the brush is a CANDIDATE for surface work along
+  /// it, and sign changes only happen within the lateral reach. The bounding
+  /// sphere over-covered badly for levelling brushes (a 12 m pad indexed a
+  /// ~92 m footprint), and every false-positive cell sends the mesher's whole
+  /// column down the per-voxel slow path.
   static double _angularRadius(TerrainBrush brush) {
     final dist = brush.centreBF.length;
-    if (dist <= brush.boundingRadiusM) return math.pi / 2;
-    return math.asin((brush.boundingRadiusM / dist).clamp(0.0, 1.0));
+    if (dist <= brush.lateralReachM) return math.pi / 2;
+    return math.asin((brush.lateralReachM / dist).clamp(0.0, 1.0));
   }
 }

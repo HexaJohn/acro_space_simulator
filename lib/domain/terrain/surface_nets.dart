@@ -130,6 +130,12 @@ enum NormalMode {
 
   /// Area-weighted average of adjacent triangle face normals.
   faceAveraged,
+
+  /// Not computed — the normals buffer is zero-filled. For callers that
+  /// derive their own normals and would only throw these away (the cell
+  /// mesher re-derives after unwarping the lattice); skipping the gradient
+  /// pass saves six trilinear field samples per vertex.
+  none,
 }
 
 /// An indexed triangle mesh. Positions/normals are packed 3 floats/vertex in
@@ -303,9 +309,11 @@ SurfaceMesh surfaceNets(
 
   final pos = Float32List.fromList(positions);
   final idx = Uint32List.fromList(indices);
-  final nrm = normalMode == NormalMode.gradient
-      ? _gradientNormals(grid, pos, isoLevel)
-      : _faceAveragedNormals(pos, idx);
+  final nrm = switch (normalMode) {
+    NormalMode.gradient => _gradientNormals(grid, pos, isoLevel),
+    NormalMode.faceAveraged => _faceAveragedNormals(pos, idx),
+    NormalMode.none => Float32List(pos.length),
+  };
   return SurfaceMesh(
     positions: pos,
     normals: nrm,

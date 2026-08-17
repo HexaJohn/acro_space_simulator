@@ -217,7 +217,7 @@ class DemPyramid {
 /// come out of the pyramid's own statistics rather than being invented, so the
 /// detail layer extends real terrain instead of competing with it.
 class DemDerivedControl implements TerrainControl {
-  const DemDerivedControl(
+  DemDerivedControl(
     this.dem, {
     this.detailFraction = defaultDetailFraction,
     this.roughnessReliefM = 4000,
@@ -243,20 +243,38 @@ class DemDerivedControl implements TerrainControl {
   /// regional character, not a per-sample one.
   final int statLevel;
 
+  // One-entry memo of the last localReliefAt. The three channels are queried
+  // back-to-back for the SAME direction by every feature's heightAt — and
+  // each localReliefAt is nine bilinear pyramid taps, so without the memo one
+  // height query cost ~28 DEM reads where ~11 carry information. Plain
+  // mutable fields: each isolate gets its own copy of the control, and a miss
+  // just recomputes, so there is no cross-thread hazard.
+  double _memoX = double.nan, _memoY = 0, _memoZ = 0, _memoRelief = 0;
+
+  double _localRelief(Vector3 dir) {
+    if (dir.x == _memoX && dir.y == _memoY && dir.z == _memoZ) {
+      return _memoRelief;
+    }
+    final relief = dem.localReliefAt(dir, level: statLevel);
+    _memoX = dir.x;
+    _memoY = dir.y;
+    _memoZ = dir.z;
+    _memoRelief = relief;
+    return relief;
+  }
+
   @override
-  double reliefAt(Vector3 dir) =>
-      dem.localReliefAt(dir, level: statLevel) * detailFraction;
+  double reliefAt(Vector3 dir) => _localRelief(dir) * detailFraction;
 
   @override
   double roughnessAt(Vector3 dir) =>
-      (dem.localReliefAt(dir, level: statLevel) / roughnessReliefM)
-          .clamp(0.0, 1.0);
+      (_localRelief(dir) / roughnessReliefM).clamp(0.0, 1.0);
 
   @override
   double ridgednessAt(Vector3 dir) {
     // Ridged where the ground is both high AND broken — the signature of an
     // uplifted range rather than a rough basin floor.
-    final relief = dem.localReliefAt(dir, level: statLevel);
+    final relief = _localRelief(dir);
     final elev = dem.elevationAt(dir, level: statLevel);
     final span = dem.maxElevM - dem.minElevM;
     if (span <= 0) return 0;

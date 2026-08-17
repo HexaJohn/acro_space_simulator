@@ -142,6 +142,28 @@ class TerrainBrush {
       TerrainBrushKind.sphere => radiusM,
     };
     boundingRadiusM = reach * 1.08 + 1.0;
+
+    // Lateral reach: how far from the brush AXIS a sign change (surface
+    // created or removed) can occur. Much tighter than [boundingRadiusM] for
+    // the levelling kinds, whose bound is inflated by their vertical cut
+    // budget (a 12 m pad with the default 60 m maxCut has a ~92 m bounding
+    // sphere but levels nothing outside radius + falloff). The crater term is
+    // the bowl SPHERE radius, not the crest: on a hillside the bowl's
+    // equator can gouge ground that rises to the height of its centre, and
+    // the sphere's full lateral extent is exactly [_bowlRadius].
+    final lateral = switch (kind) {
+      TerrainBrushKind.sphere => radiusM,
+      TerrainBrushKind.crater => math.max(radiusM + _rimWidth, _bowlRadius),
+      TerrainBrushKind.pad => radiusM + falloffM,
+      TerrainBrushKind.steppedPit => radiusM + falloffM,
+      // centreBF is the corridor midpoint, so |endBF - centreBF| is already
+      // the half-length (same convention as the bounding reach above).
+      TerrainBrushKind.cutFill =>
+        (endBF == null ? 0.0 : (endBF! - centreBF).length) +
+            radiusM +
+            falloffM,
+    };
+    lateralReachM = lateral * 1.05 + 1.0;
   }
 
   /// A plain subtracted ball centred at [centreBF].
@@ -319,6 +341,16 @@ class TerrainBrush {
   /// deep solid or open air, where nothing samples the gradient.
   late final double boundingRadiusM;
 
+  /// Distance from the brush AXIS (m) beyond which this brush provably cannot
+  /// move the isosurface. Tighter than [boundingRadiusM] — that sphere also
+  /// covers regions where only deep-solid density VALUES shift (which never
+  /// moves a surface) and, for the levelling kinds, the vertical cut budget.
+  ///
+  /// Drives the spatial-index footprint, deformation refinement rings, and
+  /// the mesher's "is this column edited" candidacy — the places where an
+  /// over-wide bound multiplies work rather than merely wasting one test.
+  late final double lateralReachM;
+
   late final Vector3 _axis;
   late final double _bowlRadius;
   late final double _bowlOffset;
@@ -333,6 +365,57 @@ class TerrainBrush {
   /// Whether [p] (body-fixed metres) is inside this brush's influence.
   bool affects(Vector3 p) =>
       (p - centreBF).lengthSquared <= boundingRadiusM * boundingRadiusM;
+
+  /// The absolute radial interval (m from the body centre) the composed
+  /// SURFACE can occupy under this brush, given that the base ground spans
+  /// `[groundLoM, groundHiM]` over the region being meshed.
+  ///
+  /// This is what the mesher's radial band needs — the old `centre ±
+  /// boundingRadiusM` bound answered a different (3D) question and cost a
+  /// band tens of metres tall for a crater whose relief is four:
+  ///
+  ///  * a subtracted ball's cavity walls lie ON the ball, and a cavity roof
+  ///    is always below the ground above it;
+  ///  * a crater floor cannot descend below the bowl sphere's own bottom,
+  ///    and its rim lifts the local ground by at most [rimHeightM];
+  ///  * the levelling kinds blend the surface TOWARD their datum with a
+  ///    0..1 smoothstep weight, which cannot overshoot either endpoint.
+  ({double lo, double hi}) surfaceBand(double groundLoM, double groundHiM) {
+    switch (kind) {
+      case TerrainBrushKind.sphere:
+        // Mining ball, possibly buried: the cavity floor is the ball bottom.
+        // Subtraction never raises the surface, so the top stays at ground.
+        return (
+          lo: math.min(groundLoM, centreBF.length - radiusM),
+          hi: groundHiM,
+        );
+      case TerrainBrushKind.crater:
+        // Bowl bottom, exact and cheap (the sphere's inner radius from the
+        // body centre) — correct even when the impact normal is tilted.
+        final bowlLo = (centreBF + _axis * _bowlOffset).length - _bowlRadius;
+        return (
+          lo: math.min(groundLoM, bowlLo),
+          hi: groundHiM + rimHeightM,
+        );
+      case TerrainBrushKind.pad:
+        return (
+          lo: math.min(groundLoM, datumRadiusM),
+          hi: math.max(groundHiM, datumRadiusM),
+        );
+      case TerrainBrushKind.steppedPit:
+        return (
+          lo: math.min(groundLoM, datumRadiusM - depthM),
+          hi: math.max(groundHiM, datumRadiusM),
+        );
+      case TerrainBrushKind.cutFill:
+        final dLo = math.min(datumRadiusM, datumRadiusEndM);
+        final dHi = math.max(datumRadiusM, datumRadiusEndM);
+        return (
+          lo: math.min(groundLoM, dLo),
+          hi: math.max(groundHiM, dHi),
+        );
+    }
+  }
 
   /// Compose this brush onto [density] at body-fixed point [p].
   ///

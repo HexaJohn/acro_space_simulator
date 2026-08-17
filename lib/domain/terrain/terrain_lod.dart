@@ -174,7 +174,10 @@ List<TerrainRefinement> refinementsFor(
             maxLevel: maxLevel)),
   ];
 
-  final alpha = math.asin((brush.boundingRadiusM / dist).clamp(0.0, 1.0));
+  // Ring on the true surface footprint (lateral reach), not the bounding
+  // sphere — a pad's bound is inflated by its vertical cut budget, and a ring
+  // placed there refines chunks the pad never touches.
+  final alpha = math.asin((brush.lateralReachM / dist).clamp(0.0, 1.0));
   if (alpha <= 0) return out;
   final seed = dir.x.abs() < 0.9 ? Vector3.unitX : Vector3.unitY;
   final tangent = seed.cross(dir).normalized;
@@ -255,6 +258,23 @@ class TerrainLodTree {
     int maxIterations = 32,
     List<TerrainRefinement> refine = const [],
   }) {
+    // A refined island's leaves project ~0 px, so without this guard the
+    // merge pass collapsed the island level by level every frame and
+    // `_applyRefinements` re-split it — a stable leaf set, but bought with
+    // ~(levels-forced) iterations of the whole select loop per frame. A
+    // parent that a refinement target still demands depth under is pinned:
+    // its children never merge, the island persists, and on a quiet frame
+    // the loop exits after one iteration having changed nothing.
+    bool pinned(ChunkKey parent) {
+      for (final t in refine) {
+        if (parent.level < t.level.clamp(0, maxRefineLevel) &&
+            parent.contains(t.direction)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
     final leaves = Set<ChunkKey>.of(_leaves);
     for (var iter = 0; iter < maxIterations; iter++) {
       var changed = false;
@@ -278,7 +298,9 @@ class TerrainLodTree {
         if (p != null) (byParent[p] ??= []).add(k);
       }
       for (final e in byParent.entries) {
-        if (e.value.length == 4 && apparentPx(e.key) < mergePx) {
+        if (e.value.length == 4 &&
+            apparentPx(e.key) < mergePx &&
+            !pinned(e.key)) {
           leaves.removeAll(e.value);
           leaves.add(e.key);
           changed = true;

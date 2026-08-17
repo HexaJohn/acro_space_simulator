@@ -20,6 +20,7 @@ import '../../../domain/shared/vector3.dart';
 import '../../../domain/terrain/cell_mesher.dart';
 import '../../../domain/terrain/cubed_sphere.dart';
 import '../../../domain/terrain/mesh_scheduler.dart';
+import '../../../domain/terrain/terrain_brush.dart';
 import '../../../domain/terrain/terrain_edits.dart';
 import '../../../domain/terrain/terrain_feature.dart';
 import '../../../domain/terrain/terrain_field.dart';
@@ -156,6 +157,16 @@ class TerrainNodes {
   /// shading already carries.
   static double editVoxelsAcross = 8;
 
+  /// Max per-chunk lateral resolution multiplier for chunks overlapping an
+  /// edit (power of two). Instead of forcing the quadtree log2(this) levels
+  /// deeper — every level of which drags a ~21-chunk 2:1 staircase behind it
+  /// (measured: ONE 16 m crater forced +117 chunks at boost 1) — the chunk
+  /// covering the edit is meshed at `resolution * boost`: the same voxel
+  /// size on the ground from far fewer, slightly heavier chunks. 1 restores
+  /// the old split-only behaviour (A/B kill switch). Neighbours at unequal
+  /// resolution mismatch like an LOD seam, which the skirts already cover.
+  static int editResBoost = 4;
+
   /// Depth of the crack-hiding apron, in chunk voxels (phase 4b). 2:1 balance
   /// caps a neighbour at one level coarser — voxels twice ours — so anything
   /// under 2 can leave a gap. 0 disables skirts, which is how you SEE the
@@ -246,6 +257,12 @@ class TerrainNodes {
   final Set<ChunkKey> _pending = {};
   final List<_ArrivedMesh> _arrived = [];
 
+  /// In-flight jobs whose chunk a NEW edit overlaps: they sampled the
+  /// pre-edit field, so their results are dropped on arrival. The scoped
+  /// alternative to bumping [_generation], which threw away every in-flight
+  /// job and the whole mesh cache for an edit that touches a few chunks.
+  final Set<ChunkKey> _staleInFlight = {};
+
   /// Chunks that meshed to NO geometry (isosurface not in their shell —
   /// legitimate, e.g. below a sea floor). Remembered so they are not
   /// resubmitted every frame; cleared with the generation.
@@ -314,6 +331,7 @@ class TerrainNodes {
   // them (dev toggles), since the chunks themselves carry no record of it.
   double _builtSkirtVoxels = double.nan;
   int _builtResolution = -1;
+  int _builtResBoost = -1;
   _TerrainMaterial? _material;
   String? _bodyId;
 
@@ -331,6 +349,15 @@ class TerrainNodes {
   /// meshing does.
   TerrainEdits? _edits;
   int _builtEditCount = -1;
+
+  /// Cached refinement targets + the range-gated brush list they came from.
+  /// A pure function of (brush set, anchor, knobs); rebuilding every frame
+  /// walked `levelForVoxelSize` per ring sample per brush — measurable once
+  /// a colony has tens of pads.
+  List<TerrainRefinement> _refine = const [];
+  List<TerrainBrush> _nearBrushes = const [];
+  Vector3 _refineAnchor = Vector3.zero;
+  int _refineEditCount = -1;
 
   /// The focused body's detail layer, rebuilt only when the body changes —
   /// assembling it allocates the control field and every feature.
@@ -390,13 +417,23 @@ class TerrainNodes {
     // (via CelestialBody.terrainFieldWith), so a crater the physics knows about
     // is the crater that gets drawn.
     var editsChanged = false;
+    // Brushes added THIS frame, when knowable: the store is append-only in
+    // tick order, so on the same body the new brushes are exactly the tail.
+    // Empty when the added set is unknowable (body switch, count shrank,
+    // first build) — invalidation then falls back to wholesale.
+    var addedBrushes = const <TerrainBrush>[];
     var editCount = 0;
     for (final e in snap.terrainEdits) {
       if (e.body == bodyId) editCount++;
     }
     if (_builtEditCount != editCount || _bodyId != bodyId) {
+      final prevCount = _builtEditCount;
+      final sameBody = _bodyId == bodyId;
       _edits = editCount == 0 ? null : snap.editsForBody(bodyId!);
-      editsChanged = _builtEditCount != editCount;
+      editsChanged = prevCount != editCount;
+      if (sameBody && _edits != null && prevCount >= 0 && editCount > prevCount) {
+        addedBrushes = _edits!.all.sublist(prevCount);
+      }
       _builtEditCount = editCount;
     }
 
@@ -465,7 +502,9 @@ class TerrainNodes {
     // A geometry knob moved (dev toggle): drop every resident mesh so the ring
     // rebuilds with the new setting. Cheap because it only happens on a change.
     // In-flight jobs were built with the old knobs — invalidate them too.
-    if (_builtSkirtVoxels != skirtVoxels || _builtResolution != resolution) {
+    if (_builtSkirtVoxels != skirtVoxels ||
+        _builtResolution != resolution ||
+        _builtResBoost != editResBoost) {
       for (final c in _chunks.values) {
         _scene.remove(c.node);
       }
@@ -473,6 +512,8 @@ class TerrainNodes {
       _invalidateInFlight();
       _builtSkirtVoxels = skirtVoxels;
       _builtResolution = resolution;
+      _builtResBoost = editResBoost;
+      _refineEditCount = -1; // refine targets depend on the boost knob
     }
     double apparentPx(ChunkKey k) {
       if (camera == null) return 0;
@@ -495,34 +536,79 @@ class TerrainNodes {
     // from orbit would carry a deep quadtree island, and the balanced staircase
     // joining it to the coarse terrain around it, for a pixel of screen.
     final edits = _edits;
-    final refine = <TerrainRefinement>[];
-    if (edits != null) {
+    if (edits == null) {
+      _refine = const [];
+      _nearBrushes = const [];
+      _refineEditCount = -1;
+    } else if (editsChanged ||
+        _refineEditCount != edits.length ||
+        (anchorPoint - _refineAnchor).length > editRefineRangeM * 0.05) {
+      final near = <TerrainBrush>[];
+      final targets = <TerrainRefinement>[];
       for (final brush in edits.all) {
         if ((brush.centreBF - anchorPoint).length > editRefineRangeM) continue;
-        refine.addAll(refinementsFor(
+        near.add(brush);
+        // `resolution * editResBoost` makes levelForVoxelSize account for the
+        // boosted meshing the overlapping chunks will actually get, so the
+        // forced level lands log2(boost) levels SHALLOWER — the boost carries
+        // the rest of the way to the target voxel size (see [editResBoost]).
+        targets.addAll(refinementsFor(
           brush,
           field.radius,
-          resolution,
+          resolution * editResBoost,
           voxelsAcrossBrush: editVoxelsAcross,
           maxLevel: _tree!.maxRefineLevel,
         ));
       }
+      _refine = targets;
+      _nearBrushes = near;
+      _refineAnchor = anchorPoint;
+      _refineEditCount = edits.length;
     }
-    // A new edit rewrites the density inside its footprint, so a resident chunk
-    // overlapping it is stale even when its KEY is unchanged — the split path
-    // alone would not retire it. Only runs on the frame the edit arrives.
-    // In-flight jobs sampled the pre-edit field; drop their results wholesale
-    // rather than intersecting each against the brush (edits are rare).
+    final refine = _refine;
+    // A new edit rewrites the density inside its footprint, so everything
+    // built from the pre-edit field and overlapping it is stale: resident
+    // chunks (their KEY is unchanged, the split path would not retire them),
+    // cached meshes, remembered-empty chunks, and jobs still in flight.
+    // Scoped to the ADDED brushes — the old wholesale invalidation cleared
+    // the whole mesh cache and every in-flight job, so each placed building
+    // re-meshed the entire resident set. The surface can only move within a
+    // brush's lateralReachM of its axis, hence that as the overlap radius.
     if (editsChanged && edits != null) {
-      _invalidateInFlight();
-      for (final k in _chunks.keys.toList()) {
-        final centre = k.centreDirection * field.radius;
-        final reach = k.circumradiusM(field.radius);
-        for (final brush in edits.all) {
-          if ((brush.centreBF - centre).length <= reach + brush.boundingRadiusM) {
-            _scene.remove(_chunks.remove(k)!.node);
-            break;
+      if (addedBrushes.isEmpty) {
+        // Added set unknowable (count shrank / first sight of this body's
+        // edits): fall back to invalidating everything against every brush.
+        _invalidateInFlight();
+        for (final k in _chunks.keys.toList()) {
+          final centre = k.centreDirection * field.radius;
+          final reach = k.circumradiusM(field.radius);
+          for (final brush in edits.all) {
+            if ((brush.centreBF - centre).length <=
+                reach + brush.lateralReachM) {
+              _scene.remove(_chunks.remove(k)!.node);
+              break;
+            }
           }
+        }
+      } else {
+        bool touches(ChunkKey k) {
+          final centre = k.centreDirection * field.radius;
+          final reach = k.circumradiusM(field.radius);
+          for (final brush in addedBrushes) {
+            if ((brush.centreBF - centre).length <=
+                reach + brush.lateralReachM) {
+              return true;
+            }
+          }
+          return false;
+        }
+
+        _arrived.removeWhere((a) => touches(a.key));
+        _staleInFlight.addAll(_pending.where(touches));
+        _emptyChunks.removeWhere(touches);
+        _meshCache.removeWhere((k, _) => touches(k));
+        for (final k in _chunks.keys.toList()) {
+          if (touches(k)) _scene.remove(_chunks.remove(k)!.node);
         }
       }
     }
@@ -544,12 +630,14 @@ class TerrainNodes {
       visible.add(k);
     }
     // Nearest first: it decides both what gets meshed within this frame's
-    // budget and what survives the resident cap.
-    visible.sort((x, y) {
-      final dx = (x.centreDirection * field.radius - anchorPoint).length;
-      final dy = (y.centreDirection * field.radius - anchorPoint).length;
-      return dx.compareTo(dy);
-    });
+    // budget and what survives the resident cap. Distances are computed once
+    // per chunk, not twice per comparison — centreDirection allocates, and a
+    // deformation-refined set sorts hundreds of keys every frame.
+    final distByKey = <ChunkKey, double>{
+      for (final k in visible)
+        k: (k.centreDirection * field.radius - anchorPoint).length,
+    };
+    visible.sort((x, y) => distByKey[x]!.compareTo(distByKey[y]!));
     final wanted = visible.length > maxResidentChunks
         ? visible.take(maxResidentChunks).toSet()
         : visible.toSet();
@@ -669,11 +757,13 @@ class TerrainNodes {
       final evictable = [
         for (final k in _chunks.keys)
           if (!wanted.contains(k) && !standsIn(k)) k,
-      ]..sort((x, y) {
-          final dx = (x.centreDirection * field.radius - anchorPoint).length;
-          final dy = (y.centreDirection * field.radius - anchorPoint).length;
-          return dy.compareTo(dx); // farthest first
-        });
+      ];
+      final evictDist = <ChunkKey, double>{
+        for (final k in evictable)
+          k: (k.centreDirection * field.radius - anchorPoint).length,
+      };
+      evictable.sort(
+          (x, y) => evictDist[y]!.compareTo(evictDist[x]!)); // farthest first
       for (final k in evictable) {
         if (_chunks.length <= maxResidentChunks) break;
         _removeResident(k);
@@ -777,7 +867,7 @@ class TerrainNodes {
       }
       if (_pending.length >= meshBudgetPerFrame) break;
       if (_pending.contains(k)) continue;
-      _submit(field, k);
+      _submit(field, k, _resolutionFor(k, field.radius));
     }
 
     // "This ground is still streaming": wireframe patches + a spinner over
@@ -878,17 +968,43 @@ class TerrainNodes {
     return vm.Vector3(w.x, w.y, w.z);
   }
 
+  /// Resolution [k] should mesh at: the global knob, times the smallest
+  /// power-of-two boost (capped at [editResBoost]) that resolves the finest
+  /// nearby brush's target voxel — the "mesh finer instead of splitting
+  /// deeper" half of the deformation strategy. Chunks too coarse for even
+  /// the full boost to reach the target stay at base resolution; forced
+  /// refinement is what descends to them.
+  int _resolutionFor(ChunkKey k, double radiusM) {
+    if (_nearBrushes.isEmpty || editResBoost <= 1) return resolution;
+    final centre = k.centreDirection * radiusM;
+    final reach = k.circumradiusM(radiusM);
+    final chunkVoxelM = reach * 2.0 / resolution;
+    var boost = 1;
+    for (final b in _nearBrushes) {
+      if ((b.centreBF - centre).length > reach + b.lateralReachM) continue;
+      final targetM = b.radiusM * 2.0 / editVoxelsAcross;
+      if (chunkVoxelM > targetM * editResBoost) continue; // splitting's job
+      while (boost < editResBoost && chunkVoxelM > targetM * boost) {
+        boost <<= 1;
+      }
+      if (boost >= editResBoost) break;
+    }
+    return resolution * boost;
+  }
+
   /// Queue one chunk for meshing. The result lands in [_arrived] and becomes
   /// a node inside the next frame's upload budget; a result whose generation
   /// went stale in flight is dropped there.
-  void _submit(TerrainField field, ChunkKey key) {
+  void _submit(TerrainField field, ChunkKey key, int chunkResolution) {
     final generation = _generation;
     _pending.add(key);
     _scheduler!
-        .mesh(field, key, resolution: resolution, skirtVoxels: skirtVoxels)
+        .mesh(field, key,
+            resolution: chunkResolution, skirtVoxels: skirtVoxels)
         .then((cell) {
       _pending.remove(key);
       if (generation != _generation) return;
+      if (_staleInFlight.remove(key)) return; // sampled a pre-edit field
       if (cell.isEmpty) {
         // No isosurface in the shell (legitimate, e.g. below a sea floor).
         // Remember it, or the chunk would be resubmitted every frame. An
@@ -901,6 +1017,7 @@ class TerrainNodes {
       }
     }).catchError((Object e) {
       _pending.remove(key);
+      _staleInFlight.remove(key);
       debugLine = 'terrain: mesh $key failed: $e';
     });
   }
@@ -1127,6 +1244,7 @@ class TerrainNodes {
     _arrived.clear();
     _emptyChunks.clear();
     _meshCache.clear();
+    _staleInFlight.clear(); // generation check already drops these
     _clippedEmpty = 0;
   }
 
