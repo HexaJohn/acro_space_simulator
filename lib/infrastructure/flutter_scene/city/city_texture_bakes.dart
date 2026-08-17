@@ -216,4 +216,45 @@ class CityTextureBakes {
     }
     return out;
   }
+
+  /// The spline-road surface: asphalt with kerbs at the edges and a dashed
+  /// centre line ALONG the tile.
+  ///
+  /// Separate from [groundPalette]'s road swatch on purpose. The grid draws a
+  /// square cell, where markings must read at any junction, so its tile
+  /// carries a cross; a ribbon has a direction, and wrapping the cross tile
+  /// along it would paint transverse stripes across the carriageway every few
+  /// metres. U runs ACROSS the road, V along it.
+  static Uint8List roadStrip(int size) {
+    final out = Uint8List(size * size * 4);
+    final rnd = math.Random(0x0AD5);
+    for (var y = 0; y < size; y++) {
+      for (var x = 0; x < size; x++) {
+        final i = (y * size + x) * 4;
+        final u = x / size, v = y / size;
+        var r = 92.0, g = 94.0, b = 99.0;
+        // Aggregate speckle: a uniform grey slab reads as a hole, not tarmac.
+        final speck = (rnd.nextDouble() - 0.5) * 26;
+        r += speck;
+        g += speck;
+        b += speck;
+        if ((u - 0.5).abs() < 0.022 && (v * 4).floor().isEven) {
+          // Dashed centre line, warm road paint.
+          r = 196;
+          g = 190;
+          b = 150;
+        } else if (u < 0.045 || u > 0.955) {
+          // Kerbs, so a run of road shows its edges against dark ground.
+          r += 26;
+          g += 26;
+          b += 26;
+        }
+        out[i] = r.clamp(0, 255).round();
+        out[i + 1] = g.clamp(0, 255).round();
+        out[i + 2] = b.clamp(0, 255).round();
+        out[i + 3] = 255;
+      }
+    }
+    return out;
+  }
 }

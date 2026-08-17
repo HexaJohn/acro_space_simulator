@@ -459,7 +459,10 @@ class CityNodes {
     }
 
     for (final (builder, material) in [
-      (ribbon, CityMaterials.facade),
+      // The ribbon takes the dedicated road strip — on the facade material it
+      // rendered as a run of blank concrete with no kerbs and no centre line,
+      // which from the cockpit read as "roads are missing".
+      (ribbon, CityMaterials.road),
       (lampSolid, CityMaterials.facade),
       (lampGlow, CityMaterials.glazing),
     ]) {

@@ -26,6 +26,7 @@ class CityMaterials {
   static fs.PhysicallyBasedMaterial? _facade;
   static fs.PhysicallyBasedMaterial? _glazing;
   static fs.PhysicallyBasedMaterial? _ground;
+  static fs.PhysicallyBasedMaterial? _road;
 
   static fs.PhysicallyBasedMaterial get facade =>
       _facade ??= _CitySurfaceMaterial()
@@ -53,11 +54,19 @@ class CityMaterials {
         ..roughnessFactor = 1.0
         ..metallicFactor = 0.0;
 
+  /// Spline-road ribbons: kerbs and a dashed centre line, V along the road.
+  static fs.PhysicallyBasedMaterial get road => _road ??= _CitySurfaceMaterial()
+    ..baseColorTexture = CityTextures.roadStrip
+    ..baseColorFactor = vm.Vector4(1, 1, 1, 1)
+    ..roughnessFactor = 1.0
+    ..metallicFactor = 0.0;
+
   /// Drop the cached materials so a texture reload rebinds.
   static void reset() {
     _facade = null;
     _glazing = null;
     _ground = null;
+    _road = null;
   }
 }
 

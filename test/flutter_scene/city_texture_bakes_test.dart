@@ -123,4 +123,31 @@ void main() {
     final b = red(band + band ~/ 2, s ~/ 2 + 1);
     expect((a - b).abs(), lessThan(14), reason: 'grain only, no structure');
   });
+
+  test('the road strip runs its markings ALONG the tile, not across it', () {
+    const s = 96;
+    final t = CityTextureBakes.roadStrip(s);
+    ({int r, int g, int b}) at(int x, int y) {
+      final i = (y * s + x) * 4;
+      return (r: t[i], g: t[i + 1], b: t[i + 2]);
+    }
+
+    // Centre line at u=0.5: painted on some v (dash), tarmac on others.
+    final dashOn = at(s ~/ 2, s ~/ 8); // first dash band
+    final dashOff = at(s ~/ 2, (s * 3) ~/ 8); // first gap band
+    expect(dashOn.r, greaterThan(160));
+    expect(dashOn.b, lessThan(dashOn.r), reason: 'road paint is warm');
+    expect(dashOff.r, lessThan(140), reason: 'the line is dashed');
+
+    // Kerbs at both edges, lighter than the mid-lane tarmac.
+    final kerb = at(1, s ~/ 2);
+    final lane = at(s ~/ 4, s ~/ 2);
+    expect(kerb.r, greaterThan(lane.r + 10));
+
+    // And NO transverse stripe: mid-lane tarmac is tarmac at every v.
+    for (var y = 0; y < s; y += 4) {
+      expect(at(s ~/ 4, y).r, lessThan(150),
+          reason: 'a cross-tile stripe would band the carriageway');
+    }
+  });
 }
