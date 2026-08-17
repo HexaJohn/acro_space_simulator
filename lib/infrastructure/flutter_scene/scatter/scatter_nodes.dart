@@ -15,9 +15,11 @@ import '../../../domain/scatter/prop_model.dart';
 import '../../../domain/scatter/scatter_instance.dart';
 import '../../../domain/scatter/scatter_layer.dart';
 import '../../../domain/scatter/scatter_placement.dart';
+import '../../../domain/scatter/scatter_scheduler.dart';
 import '../../../domain/shared/quaternion.dart';
 import '../../../domain/shared/vector3.dart';
 import '../../../domain/terrain/cubed_sphere.dart';
+import '../../../domain/terrain/terrain_brush.dart';
 import '../../../domain/terrain/terrain_edits.dart';
 import '../../../domain/terrain/terrain_feature.dart';
 import '../../../domain/planetary/planet_surface.dart';
@@ -60,9 +62,15 @@ class ScatterNodes {
   /// costs too much. 0 draws nothing without changing any layer.
   static double densityScale = 1.0;
 
-  /// Cells generated per frame. Placement is cheap per candidate but a whole
-  /// ring at once is not, and a walk into fresh ground must not stutter.
+  /// Cell-generation jobs in flight at once. Generation runs on background
+  /// isolates on native (inline on web) — a cell is 5-30 ms of field
+  /// sampling, and doing several INLINE per frame was a visible hitch on
+  /// every walk into fresh ground. This caps CPU occupancy, not a per-frame
+  /// stall (same discipline as [TerrainNodes.meshBudgetPerFrame]).
   static int cellBudgetPerFrame = 6;
+
+  /// Kill switch: false forces inline generation for A/B from the dev ext.
+  static bool asyncGeneration = true;
 
   /// Highest eye altitude (m) at which props draw at all. Above it the biggest
   /// tree is well under a pixel.
@@ -79,9 +87,33 @@ class ScatterNodes {
   /// Which gate suppressed scatter this frame, or '' when it drew.
   static String gateReason = '';
 
-  final Map<_CellId, List<ScatterInstance>> _cells = {};
+  final Map<_CellId, _CellData> _cells = {};
   final Map<_BatchKey, fs.Node> _batches = {};
   final Map<PropKind, _ImposterBatch> _imposters = {};
+
+  // --- Async generation state (mirrors TerrainNodes' meshing state) --------
+  ScatterGenScheduler? _scheduler;
+  bool _schedulerAsync = true;
+  final Set<_CellId> _pendingCells = {};
+
+  /// In-flight cells a new edit overlaps — their placement sampled the
+  /// pre-edit field, so their results are dropped on arrival.
+  final Set<_CellId> _stalePending = {};
+
+  /// This frame's wanted set; an arriving cell not in it is dropped rather
+  /// than parked (regeneration is cheap and deterministic).
+  Set<_CellId> _wantedNow = const {};
+
+  /// Bumped on [_clear] (body switch); results tagged with an older epoch
+  /// are another body's props.
+  int _genEpoch = 0;
+
+  /// Per-layer cache of the cell set around the anchor, keyed by the cell
+  /// the anchor direction falls in at the layer's own level. `_cellsWithin`
+  /// is ~700 chunkAt probes per layer; the answer only changes when the
+  /// anchor crosses into a new cell, so recomputing it per frame bought
+  /// nothing.
+  final Map<int, (ChunkKey, Set<ChunkKey>)> _wantedCache = {};
 
   String? _bodyId;
   TerrainEdits? _edits;
@@ -141,10 +173,24 @@ class ScatterNodes {
       if (e.body == bodyId) editCount++;
     }
     if (_builtEditCount != editCount || _bodyId != bodyId) {
+      final prevCount = _builtEditCount;
+      final sameBody = _bodyId == bodyId;
       _edits = editCount == 0 ? null : snap.editsForBody(bodyId!);
-      if (_builtEditCount != editCount) {
-        // An edit rewrote the ground: every cached cell it touches is stale.
-        _invalidateAround(_edits);
+      if (prevCount != editCount) {
+        // An edit rewrote the ground: every cell it touches — resident OR in
+        // flight — is stale. The store is append-only in tick order, so on
+        // the same body the new brushes are exactly the tail; when that is
+        // unknowable (body switch, count shrank) everything goes.
+        if (sameBody &&
+            _edits != null &&
+            prevCount >= 0 &&
+            editCount > prevCount) {
+          _invalidateAround(_edits!.all.sublist(prevCount));
+        } else {
+          _cells.clear();
+          _stalePending.addAll(_pendingCells);
+          _dirty = true;
+        }
       }
       _builtEditCount = editCount;
     }
@@ -213,21 +259,37 @@ class ScatterNodes {
     );
 
     // --- Cell residency ----------------------------------------------------
+    // Per layer, the cell set around the anchor is cached against the cell
+    // the anchor falls in at that layer's level — it cannot change without
+    // the anchor crossing a cell boundary, and computing it fresh was ~700
+    // chunkAt probes per layer per frame.
     final wanted = <_CellId>{};
     for (var li = 0; li < ScatterLayers.all.length; li++) {
       final layer = ScatterLayers.all[li];
       if (densityScale <= 0) break;
       final level = layer.levelFor(field.radius);
-      for (final cell in _cellsWithin(
-          anchorDir, layer.viewDistanceM / field.radius, level)) {
-        // Cells are picked by their own reach, so a cell whose centre is past
-        // the view distance still joins when its near edge is inside it.
-        if (!cellInReach(cell, anchorDir, field.radius, layer.viewDistanceM)) {
-          continue;
+      final anchorCell = chunkAt(anchorDir, level);
+      var cached = _wantedCache[li];
+      if (cached == null || cached.$1 != anchorCell) {
+        final cells = <ChunkKey>{};
+        for (final cell in _cellsWithin(
+            anchorDir, layer.viewDistanceM / field.radius, level)) {
+          // Cells are picked by their own reach, so a cell whose centre is
+          // past the view distance still joins when its near edge is inside.
+          if (!cellInReach(
+              cell, anchorDir, field.radius, layer.viewDistanceM)) {
+            continue;
+          }
+          cells.add(cell);
         }
+        cached = (anchorCell, cells);
+        _wantedCache[li] = cached;
+      }
+      for (final cell in cached.$2) {
         wanted.add(_CellId(li, cell));
       }
     }
+    _wantedNow = wanted;
 
     for (final id in _cells.keys.toList()) {
       if (!wanted.contains(id)) {
@@ -236,18 +298,33 @@ class ScatterNodes {
       }
     }
 
-    final missing = wanted.where((id) => !_cells.containsKey(id)).toList()
-      ..sort((x, y) {
-        final dx = (x.cell.centreDirection * field.radius - focusPoint).length;
-        final dy = (y.cell.centreDirection * field.radius - focusPoint).length;
-        return dx.compareTo(dy);
-      });
-    var built = 0;
-    for (final id in missing) {
-      if (built >= cellBudgetPerFrame) break;
-      _cells[id] = placement.instancesFor(id.cell, ScatterLayers.all[id.layer]);
-      _dirty = true;
-      built++;
+    // Submit missing cells to the scheduler, nearest first, up to the
+    // in-flight cap. Results land in [_cells] from the arrival callback —
+    // generation itself happens on a background isolate (see
+    // scatter_scheduler.dart), which is what keeps a walk into fresh ground
+    // from hitching: a cell is 5-30 ms of field sampling, and this loop used
+    // to run several of them inline every frame.
+    if (_scheduler == null || _schedulerAsync != asyncGeneration) {
+      _scheduler?.dispose();
+      _scheduler = asyncGeneration
+          ? ScatterGenScheduler.platform()
+          : SyncScatterScheduler();
+      _schedulerAsync = asyncGeneration;
+    }
+    final missing = [
+      for (final id in wanted)
+        if (!_cells.containsKey(id) && !_pendingCells.contains(id)) id,
+    ];
+    if (missing.isNotEmpty && _pendingCells.length < cellBudgetPerFrame) {
+      final distById = <_CellId, double>{
+        for (final id in missing)
+          id: (id.cell.centreDirection * field.radius - focusPoint).length,
+      };
+      missing.sort((x, y) => distById[x]!.compareTo(distById[y]!));
+      for (final id in missing) {
+        if (_pendingCells.length >= cellBudgetPerFrame) break;
+        _submit(placement, id);
+      }
     }
 
     // Re-anchor on a quantised grid: instance transforms are float32 and hold
@@ -261,6 +338,10 @@ class ScatterNodes {
     );
     if ((quantised - _anchorBF).length > 1e-3) {
       _anchorBF = quantised;
+      // Cached instance matrices are anchor-relative — all stale now.
+      for (final data in _cells.values) {
+        data.matrices = null;
+      }
       _dirty = true;
     }
 
@@ -315,11 +396,56 @@ class ScatterNodes {
     final imposterCards = <PropKind, List<_Card>>{};
     _instanceCount = 0;
 
+    final library = ScatterPropLibrary.instance;
+    final eyeOffset = camera?.eyeOffset ?? Vector3.zero;
+
     for (final entry in _cells.entries) {
-      for (final instance in entry.value) {
-        final prop = ScatterPropLibrary.instance.variantFor(instance);
-        final lod = _lodFor(instance, prop, camera, origin, bodyWorld, bodyQuat);
+      final data = entry.value;
+      if (data.instances.isEmpty) continue;
+
+      // Per-cell projection price: radiusPx is linear in its radius argument
+      // for every camera, so ONE probe at the cell centre prices every prop
+      // in the cell (px = pxPerM * halfHeight) — the per-instance probe was
+      // a third of the rebuild's cost. The eye can stand inside or beside a
+      // NEAR cell, where the centre distance misprices its props by a large
+      // factor; those few cells keep exact per-instance probes. The far
+      // majority (ring area grows quadratically) take the cheap path, where
+      // the centre-vs-prop distance error is under one part in eight — far
+      // below the 2.2x hysteresis between LOD thresholds.
+      final cellRel = bodyWorld +
+          bodyQuat.rotate(entry.key.cell.centreDirection * bodyRadius) -
+          origin.focusWorld;
+      final cellRadiusM = entry.key.cell.circumradiusM(bodyRadius);
+      final near = camera != null &&
+          (cellRel - eyeOffset).length < cellRadiusM * 8;
+      final pxPerM = camera == null ? 0.0 : camera.radiusPx(cellRel, 1.0);
+
+      // Instance matrices are anchor-relative and LOD-independent: cached on
+      // the cell, rebuilt only after a re-anchor. A zoom that only re-picks
+      // levels reuses every matrix.
+      final matrices = data.matrices ??= [
+        for (final instance in data.instances)
+          instanceTransform(instance, _anchorBF),
+      ];
+
+      for (var i = 0; i < data.instances.length; i++) {
+        final instance = data.instances[i];
+        final prop = library.variantFor(instance);
         _instanceCount++;
+
+        final PropLod lod;
+        if (camera == null) {
+          lod = PropLod.lod2;
+        } else {
+          final halfHeight = prop.heightM * instance.scale * 0.5;
+          final px = near
+              ? camera.radiusPx(
+                  bodyWorld + bodyQuat.rotate(instance.positionBF) -
+                      origin.focusWorld,
+                  halfHeight)
+              : pxPerM * halfHeight;
+          lod = PropLodSet.lodForApparentPx(px * 2);
+        }
 
         if (lod == PropLod.billboard) {
           final tex = prop.imposterTexture;
@@ -336,7 +462,7 @@ class ScatterNodes {
           continue;
         }
 
-        final matrix = _transformOf(instance);
+        final matrix = matrices[i];
         if (prop.solidFor(lod) != null) {
           groups
               .putIfAbsent(
@@ -361,7 +487,6 @@ class ScatterNodes {
     _batches.clear();
     _drawCalls = 0;
 
-    final library = ScatterPropLibrary.instance;
     groups.forEach((key, transforms) {
       final prop = library.get(key.kind, seed: key.variantSeed);
       final geometry =
@@ -475,12 +600,8 @@ class ScatterNodes {
   ///
   /// Props stand along the SURFACE NORMAL, not the radius: on a hillside the
   /// two differ by the slope, and a tree planted radially leans visibly
-  /// downhill.
-  vm.Matrix4 _transformOf(ScatterInstance instance) =>
-      instanceTransform(instance, _anchorBF);
-
-  /// See [_transformOf]; static and anchor-explicit so the frame maths is
-  /// testable against [batchTransform] without a live scene.
+  /// downhill. Static and anchor-explicit so the frame maths is testable
+  /// against [batchTransform] without a live scene.
   static vm.Matrix4 instanceTransform(
       ScatterInstance instance, Vector3 anchorBF) {
     final offset = instance.positionBF - anchorBF;
@@ -506,41 +627,59 @@ class ScatterNodes {
     return Quaternion.axisAngle(axis, math.atan2(sin, up.z));
   }
 
-  /// Detail level for one instance, from its on-screen size.
-  ///
-  /// Measured through the SAME camera the terrain LOD and the rail culls use,
-  /// so a prop and the chunk it stands on cannot disagree about how big they
-  /// are.
-  PropLod _lodFor(
-    ScatterInstance instance,
-    ScatterProp prop,
-    SceneCamera? camera,
-    FloatingOrigin origin,
-    Vector3 bodyWorld,
-    Quaternion bodyQuat,
-  ) {
-    if (camera == null) return PropLod.lod2;
-    final world = bodyWorld + bodyQuat.rotate(instance.positionBF);
-    final halfHeight = prop.heightM * instance.scale * 0.5;
-    final px = camera.radiusPx(world - origin.focusWorld, halfHeight);
-    return PropLodSet.lodForApparentPx(px * 2);
-  }
-
   // ---- Housekeeping -------------------------------------------------------
 
-  /// Drop cached cells an edit has touched, so their props are regenerated
-  /// against the new ground.
-  void _invalidateAround(TerrainEdits? edits) {
-    if (edits == null) return;
+  /// Queue one cell for generation; the result installs itself and marks the
+  /// batches dirty. Results that went stale in flight — wrong body (epoch),
+  /// pre-edit field ([_stalePending]), or simply no longer wanted — are
+  /// dropped: regeneration is deterministic and cheap, so nothing is parked.
+  void _submit(ScatterPlacement placement, _CellId id) {
+    final epoch = _genEpoch;
+    _pendingCells.add(id);
+    _scheduler!
+        .generate(placement, id.cell, ScatterLayers.all[id.layer])
+        .then((instances) {
+      _pendingCells.remove(id);
+      if (epoch != _genEpoch) return;
+      if (_stalePending.remove(id)) return;
+      if (!_wantedNow.contains(id)) return;
+      _cells[id] = _CellData(instances);
+      _dirty = true;
+    }).catchError((Object e) {
+      _pendingCells.remove(id);
+      _stalePending.remove(id);
+      debugLine = 'scatter: cell ${id.cell} failed: $e';
+    });
+  }
+
+  /// Drop every cell — resident or in flight — that a newly added brush
+  /// touches, so its props regenerate against the new ground.
+  ///
+  /// Touched cells are computed ONCE per (brush, level) — the old loop
+  /// recomputed `chunksTouchedBy` per resident cell, and only ever against
+  /// the LAST brush, missing invalidation whenever one frame carried two.
+  void _invalidateAround(List<TerrainBrush> added) {
+    if (added.isEmpty || (_cells.isEmpty && _pendingCells.isEmpty)) return;
+    final levels = <int>{
+      for (final id in _cells.keys) id.cell.level,
+      for (final id in _pendingCells) id.cell.level,
+    };
+    final touched = <int, Set<ChunkKey>>{
+      for (final level in levels)
+        level: {
+          for (final brush in added)
+            ...TerrainEdits.chunksTouchedBy(brush, level),
+        },
+    };
     for (final id in _cells.keys.toList()) {
-      final layer = ScatterLayers.all[id.layer];
-      for (final key in TerrainEdits.chunksTouchedBy(
-          edits.all.last, layer.levelFor(1.0) == 0 ? 0 : id.cell.level)) {
-        if (key == id.cell) {
-          _cells.remove(id);
-          _dirty = true;
-          break;
-        }
+      if (touched[id.cell.level]!.contains(id.cell)) {
+        _cells.remove(id);
+        _dirty = true;
+      }
+    }
+    for (final id in _pendingCells) {
+      if (touched[id.cell.level]!.contains(id.cell)) {
+        _stalePending.add(id);
       }
     }
   }
@@ -617,6 +756,11 @@ class ScatterNodes {
     _batches.clear();
     _imposters.clear();
     _cells.clear();
+    // In-flight jobs drain on their own; the epoch bump drops their results.
+    _genEpoch++;
+    _stalePending.clear();
+    _wantedCache.clear();
+    _wantedNow = const {};
     _bodyId = null;
     _instanceCount = 0;
     _drawCalls = 0;
@@ -627,8 +771,22 @@ class ScatterNodes {
 
   void dispose() {
     ScatterPropLibrary.instance.removeListener(_onLibraryChanged);
+    _scheduler?.dispose();
+    _scheduler = null;
     _clear();
   }
+}
+
+/// One resident cell's instances plus its cached anchor-relative matrices.
+class _CellData {
+  _CellData(this.instances);
+
+  final List<ScatterInstance> instances;
+
+  /// One matrix per instance, relative to [ScatterNodes._anchorBF]. Built
+  /// lazily on first rebuild, nulled when the anchor rebases — a rebuild
+  /// that only re-picks LOD levels (the common kind) reuses all of them.
+  List<vm.Matrix4>? matrices;
 }
 
 /// One resident cell of one layer.

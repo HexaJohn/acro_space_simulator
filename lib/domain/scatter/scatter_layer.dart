@@ -98,24 +98,48 @@ class ScatterLayer {
   }
 
   /// Habitat suitability at a point, 0 (absent) to 1 (ideal).
+  ///
+  /// Composed of [habitatWeight] x [slopeFactor]. Split so placement can
+  /// evaluate the CHEAP half first: the slope needs a four-tap surface-normal
+  /// probe (four full field evaluations), while biome/vegetation/altitude
+  /// need at most one — and on a barren world they reject nearly every
+  /// candidate of every vegetation layer before the normal is ever probed.
   double suitability({
     required Biome biome,
     required double slopeCos,
     required double altitudeM,
     required double vegetationCap,
   }) {
-    if (slopeCos < minSlopeCos) return 0.0;
     if (altitudeM > maxAltitudeM) return 0.0;
+    return habitatWeight(biome: biome, vegetationCap: vegetationCap) *
+        slopeFactor(slopeCos);
+  }
+
+  /// The field-free gates: biome weight and vegetation. 0 means "never here,
+  /// whatever the ground shape" — decided before a single field sample.
+  /// (The tree line, [maxAltitudeM], needs a ground height and so sits with
+  /// the caller between this and [slopeFactor].)
+  double habitatWeight({
+    required Biome biome,
+    required double vegetationCap,
+  }) {
     final biomeWeight = biomeWeights[biome] ?? 0.0;
     if (biomeWeight <= 0.0) return 0.0;
     final veg = requiresVegetation ? vegetationCap : 1.0;
     if (veg <= 0.0) return 0.0;
-    // Ease off toward the steepest tolerated slope instead of stopping dead at
-    // it, so a hillside thins out rather than ending on a contour line.
+    return biomeWeight * veg;
+  }
+
+  /// The slope gate, 0 past [minSlopeCos].
+  ///
+  /// Eases off toward the steepest tolerated slope instead of stopping dead
+  /// at it, so a hillside thins out rather than ending on a contour line.
+  double slopeFactor(double slopeCos) {
+    if (slopeCos < minSlopeCos) return 0.0;
     final slopeEase =
         ((slopeCos - minSlopeCos) / math.max(1.0 - minSlopeCos, 1e-6))
             .clamp(0.0, 1.0);
-    return biomeWeight * veg * (0.35 + 0.65 * slopeEase);
+    return 0.35 + 0.65 * slopeEase;
   }
 }
 

@@ -113,20 +113,27 @@ class ScatterPlacement {
   // ---- One candidate ------------------------------------------------------
 
   ScatterInstance? _place(Vector3 dir, ScatterLayer layer, PropRandom rnd) {
-    final groundR = field.baseGroundRadiusAt(dir.x, dir.y, dir.z);
-    final normal = _surfaceNormal(dir);
-    final slopeCos = normal.dot(dir); // both unit; 1 = flat ground
-
+    // Cheapest gates first, and only then the field samples. The order is
+    // strictly increasing cost: biome (climate noise, no field), altitude
+    // (one field height), slope (a four-tap normal probe = four more). A
+    // candidate rejected by an earlier gate never pays for a later one —
+    // which is most candidates of most layers on any body, and ALL of a
+    // vegetation layer's candidates on a barren one. RNG draw order is
+    // untouched: no gate consumes randomness, so the composed stream (and
+    // therefore every placement) is byte-identical to the old ordering.
     final lat = math.asin(dir.z.clamp(-1.0, 1.0));
     final lon = math.atan2(dir.y, dir.x);
     final biome = surface.biomeAt(latitude: lat, longitude: lon);
+    final habitat =
+        layer.habitatWeight(biome: biome, vegetationCap: vegetationCap);
+    if (habitat <= 0.0) return null;
 
-    final fit = layer.suitability(
-      biome: biome,
-      slopeCos: slopeCos,
-      altitudeM: groundR - field.radius,
-      vegetationCap: vegetationCap,
-    );
+    final groundR = field.baseGroundRadiusAt(dir.x, dir.y, dir.z);
+    if (groundR - field.radius > layer.maxAltitudeM) return null;
+
+    final normal = _surfaceNormal(dir);
+    final slopeCos = normal.dot(dir); // both unit; 1 = flat ground
+    final fit = habitat * layer.slopeFactor(slopeCos);
     if (fit <= 0.0 || !rnd.chance(fit)) return null;
 
     final radius = _settleOnEdits(dir, groundR);
