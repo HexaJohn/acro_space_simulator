@@ -123,8 +123,26 @@ class CityLayout {
       if (p.overlaps(other)) return null;
     }
     _manual.add(p);
+    if (use != ParcelUse.unzoned) _uses[p.id] = use;
     regenerate();
     return p;
+  }
+
+  /// Re-insert a saved manual lot AS IS, preserving its id.
+  ///
+  /// [addManualParcel] assigns fresh ids from a counter, which is correct for
+  /// a new lot and wrong for a loaded one — the save's buildings are keyed by
+  /// the old id. The counter is bumped past the restored id so the next new
+  /// lot cannot collide with it.
+  void restoreManualParcel(Parcel p) {
+    _manual.add(p);
+    if (p.use != ParcelUse.unzoned) _uses[p.id] = p.use;
+    final m = RegExp(r'^lot-m(\d+)$').firstMatch(p.id);
+    if (m != null) {
+      final n = int.parse(m.group(1)!);
+      if (n >= _nextId) _nextId = n + 1;
+    }
+    regenerate();
   }
 
   void removeParcel(String id) {
@@ -132,27 +150,41 @@ class CityLayout {
     regenerate();
   }
 
-  /// Zone a parcel.
+  /// Zoning by lot id — the SOURCE OF TRUTH, not the [Parcel.use] fields.
   ///
-  /// Parcels are immutable values, so this replaces the entry rather than
-  /// mutating it — which also means a regenerate wipes the zoning of AUTO
-  /// lots, exactly as it wipes the lots themselves. Manual lots keep theirs.
+  /// Auto lots are re-cut from scratch on every [regenerate], so zoning kept
+  /// only on the parcel objects evaporated whenever a road was drawn: the
+  /// player laid a second street and the whole town silently unzoned, and
+  /// every grown building on it began to decay. The map survives because lot
+  /// ids are deterministic; [regenerate] re-applies it to the fresh cut.
+  final Map<String, ParcelUse> _uses = {};
+
+  /// Zone a parcel. Returns false for an unknown id.
   bool setUse(String id, ParcelUse use) {
+    var found = false;
     for (var i = 0; i < _manual.length; i++) {
       if (_manual[i].id == id) {
         _manual[i] = _manual[i].copyWith(use: use);
-        return true;
+        found = true;
       }
     }
-    final auto = List.of(_auto);
-    for (var i = 0; i < auto.length; i++) {
-      if (auto[i].id == id) {
-        auto[i] = auto[i].copyWith(use: use);
-        _auto = auto;
-        return true;
+    if (!found) {
+      final auto = List.of(_auto);
+      for (var i = 0; i < auto.length; i++) {
+        if (auto[i].id == id) {
+          auto[i] = auto[i].copyWith(use: use);
+          _auto = auto;
+          found = true;
+        }
       }
     }
-    return false;
+    if (!found) return false;
+    if (use == ParcelUse.unzoned) {
+      _uses.remove(id);
+    } else {
+      _uses[id] = use;
+    }
+    return true;
   }
 
   /// The parcel under a point, or null. Manual lots win.
@@ -170,7 +202,12 @@ class CityLayout {
     for (final road in _roads.values) {
       out.addAll(_subdivide(road, out));
     }
-    _auto = out;
+    // Re-apply zoning: the fresh lots carry the same deterministic ids their
+    // predecessors did, so the district survives its own street being redrawn.
+    _auto = [
+      for (final p in out)
+        _uses.containsKey(p.id) ? p.copyWith(use: _uses[p.id]!) : p,
+    ];
   }
 
   /// Lay lots along one road.
@@ -203,6 +240,7 @@ class CityLayout {
 
     for (final side in sides) {
       var s = start;
+      var index = 0;
       while (s < end - 1e-6) {
         var s1 = s + _settings.frontageM;
         if (s1 > end) {
@@ -218,6 +256,7 @@ class CityLayout {
           _pointAt(pts, cum, s1),
           side,
           setback,
+          index++,
         );
         if (parcel != null &&
             !_hitsRoad(parcel, exclude: road.id) &&
@@ -247,7 +286,8 @@ class CityLayout {
   }
 
   /// Build one lot quad spanning centreline points [a]..[b] on [side].
-  Parcel? _lot(RoadSpline road, Vec2 a, Vec2 b, double side, double setback) {
+  Parcel? _lot(RoadSpline road, Vec2 a, Vec2 b, double side, double setback,
+      int index) {
     final along = (b - a);
     if (along.length < 1e-6) return null;
     // Outward normal for this side of the road.
@@ -262,7 +302,11 @@ class CityLayout {
         : [frontB, frontA, backA, backB];
     final frontage = side > 0 ? (frontA, frontB) : (frontB, frontA);
     return Parcel(
-      id: 'lot-${road.id}-${_nextId++}',
+      // DETERMINISTIC id — road, side, position along it — so a lot keeps
+      // its identity across regenerations. Buildings are keyed by lot id, and
+      // a save that replays its roads must produce the same ids or every
+      // building in it dangles. A counter here did exactly that.
+      id: 'lot-${road.id}-${side > 0 ? 'r' : 'l'}$index',
       polygon: poly,
       roadId: road.id,
       frontage: frontage,

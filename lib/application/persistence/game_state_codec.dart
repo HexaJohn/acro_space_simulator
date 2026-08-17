@@ -4,6 +4,7 @@
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
 import '../../domain/autonomy/flight_plan.dart';
+import '../../domain/colony/city/city_sim.dart';
 import '../../domain/dynamics/state_vector.dart';
 import '../../domain/lifesupport/crew.dart';
 import '../../domain/mining/mining_operation.dart';
@@ -41,6 +42,7 @@ class GameStateCodec {
     required ColonyRepository colonies,
     required DepositRepository deposits,
     required SimulationClock clock,
+    CityRepository? cities,
   }) {
     return {
       'version': schemaVersion,
@@ -53,6 +55,8 @@ class GameStateCodec {
       'vessels': [for (final v in vessels.all()) _vessel(v)],
       'colonies': [for (final c in colonies.all()) _colony(c)],
       'deposits': [for (final d in deposits.all()) _deposit(d)],
+      if (cities != null)
+        'cities': [for (final c in cities.all()) c.toJson()],
     };
   }
 
@@ -207,7 +211,21 @@ class GameStateCodec {
     required ColonyRepository colonies,
     required DepositRepository deposits,
     required SimulationClock clock,
+    CityRepository? cities,
+    List<CelestialBody> bodies = const [],
   }) {
+    // City-builder colonies. Replaced wholesale rather than mutated in place:
+    // a CitySim is one aggregate, and half-merging a save into a live one is
+    // how a city ends up with the old roads and the new buildings.
+    if (cities != null && json['cities'] != null) {
+      for (final existing in cities.all().toList()) {
+        cities.remove(existing.id);
+      }
+      for (final cj in (json['cities'] as List)) {
+        cities.add(
+            CitySim.fromJson(cj as Map<String, dynamic>, bodies: bodies));
+      }
+    }
     final clockJson = json['clock'] as Map<String, dynamic>;
     clock.tick = clockJson['tick'] as int;
     clock.epoch = Epoch((clockJson['epoch'] as num).toDouble());

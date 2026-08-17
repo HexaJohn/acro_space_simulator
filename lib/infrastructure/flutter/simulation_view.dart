@@ -283,9 +283,18 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           range: _walkMode ? 0.0 : _range + _focusBodyRadius,
           // Range can go to 1 m; a fixed 1 m near plane would clip the
           // whole craft there. Track the range down (never above 1 m so
-          // nothing else changes). Walk's range is zero, which would put the
-          // near plane ON the eye — hold it at 10 cm there.
-          near: _walkMode ? 0.1 : math.min(1.0, _range * 0.05),
+          // nothing else changes).
+          //
+          // Walk's range is zero, so the adaptive near plane (range/20) would
+          // sit ON the eye. It gets a fixed floor instead, and that floor is a
+          // DEPTH-PRECISION decision, not a clipping one: the far plane stays
+          // at 5e12 m, and with a 24-bit buffer the quantum runs d²/(n·2²⁴) —
+          // at n = 0.1 m the terrain a kilometre out lands in the same depth
+          // bucket as the starfield backdrop and the sky paints over it. Half
+          // a metre is 5x finer and still clips nothing a standing figure can
+          // see: looking level, the nearest ground in a 75° frame is ~2.8 m
+          // away, and straight down it is the 1.7 m under their boots.
+          near: _walkMode ? 0.5 : math.min(1.0, _range * 0.05),
           fovY: _fovDeg * math.pi / 180,
           viewportH: _screenH,
         ))
@@ -1938,7 +1947,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
 
   /// Serialize the whole world into the in-memory save slot.
   void _save() {
-    _savedGame = jsonEncode(_codec.encode(vessels: _vessels, colonies: _colonies, deposits: _deposits, clock: _clock));
+    _savedGame = jsonEncode(_codec.encode(
+        vessels: _vessels,
+        colonies: _colonies,
+        deposits: _deposits,
+        clock: _clock,
+        cities: _cities));
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text('Saved at tick ${_clock.tick}'), duration: const Duration(seconds: 1)));
@@ -1952,12 +1966,18 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     for (final v in _vessels.all().toList()) {
       _vessels.remove(v.id);
     }
+    // The load replaces the city list, so a view open on a pre-load colony
+    // would be editing a ghost. Closing the editor is the honest move.
+    _editingCity = null;
     _codec.decode(
       jsonDecode(save) as Map<String, dynamic>,
       vessels: _vessels,
       colonies: _colonies,
       deposits: _deposits,
       clock: _clock,
+      cities: _cities,
+      bodies:
+          _universe.current().all.where((b) => !b.isStar).toList(),
     );
     ScaffoldMessenger.of(
       context,

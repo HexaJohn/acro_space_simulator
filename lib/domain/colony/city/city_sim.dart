@@ -3393,6 +3393,208 @@ class CitySim {
     }
   }
 
+  // ---- Persistence ----
+
+  /// Structural state for a save.
+  ///
+  /// Deliberately NOT every field: transient machinery — disaster timers,
+  /// storm tracks, per-tick aggregates, active fires — re-derives within
+  /// seconds of ticking, and persisting it would freeze half the schema to a
+  /// shape that churns weekly. What is saved is what the player MADE: the
+  /// land, the buildings, the stockpile, and the meters that took hours to
+  /// move. `shapedTerrain` is intentionally dropped, so the shaper re-levels
+  /// every site on the first tick after a load — terrain edits are not in the
+  /// save, and restoring the "already shaped" set without them would leave
+  /// buildings floating over unlevelled ground.
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'body': body.id.value,
+        'lat': cityLat,
+        'lon': cityLon,
+        'grid': grid,
+        'biome': biome.index,
+        'colonyMode': colonyMode.index,
+        'govt': govt.index,
+        'economy': economy.index,
+        'complexity': complexity,
+        'hostility': hostility,
+        'forgiveness': forgiveness,
+        'bounty': bounty,
+        'population': population,
+        'happiness': happiness,
+        'funds': funds,
+        'research': research,
+        'pollution': pollution,
+        'terraform': terraform,
+        'waterTable': waterTable,
+        'timeWarp': timeWarp,
+        'stock': Map<String, double>.from(stock),
+        'settings': {
+          'frontage': layout.settings.frontageM,
+          'depth': layout.settings.depthM,
+          'sidewalk': layout.settings.sidewalkM,
+          'minFrontage': layout.settings.minFrontageFraction,
+          'cornerClear': layout.settings.cornerClearM,
+          'bothSides': layout.settings.bothSides,
+        },
+        'roads': [
+          for (final r in layout.roads)
+            {
+              'id': r.id,
+              'class': r.roadClass.index,
+              'closed': r.closed,
+              'pts': [
+                for (final c in r.controls) ...[c.e, c.n]
+              ],
+            },
+        ],
+        'manualLots': [
+          for (final p in layout.manualParcels)
+            {
+              'id': p.id,
+              'use': p.use.index,
+              'poly': [
+                for (final v in p.polygon) ...[v.e, v.n]
+              ],
+            },
+        ],
+        'parcelUse': {
+          for (final p in layout.autoParcels)
+            if (p.use != ParcelUse.unzoned) p.id: p.use.index,
+        },
+        'parcelBuildings': {
+          for (final e in parcelBuildings.entries) e.key: e.value.label,
+        },
+        'grownParcels': Map<String, double>.from(grownParcels),
+        'shuttleInterval': shuttleIntervalSec,
+        'nextShuttle': nextShuttleEpoch,
+        // Legacy cell state, so a grid colony survives a save too.
+        'zones': {
+          for (final e in zones.entries)
+            '${e.key}': '${e.value.kind}|${e.value.density.index}',
+        },
+        'utils': {
+          for (final e in utils.entries) '${e.key}': e.value.label,
+        },
+        'cellRoads': roads.toList(),
+        'grown': grown.toList(),
+        'growProgress': {
+          for (final e in growProgress.entries) '${e.key}': e.value,
+        },
+        'support': support.toList(),
+      };
+
+  factory CitySim.fromJson(
+    Map<String, dynamic> j, {
+    required List<CelestialBody> bodies,
+  }) {
+    final sim = CitySim.found(
+      CityConfig(
+        gridSize: (j['grid'] as num).toInt(),
+        bodyId: j['body'] as String,
+        biome: Biome.values[(j['biome'] as num).toInt()],
+        govtIndex: (j['govt'] as num).toInt(),
+        economyIndex: (j['economy'] as num).toInt(),
+        colonyModeIndex: (j['colonyMode'] as num).toInt(),
+        latitude: (j['lat'] as num).toDouble(),
+        longitude: (j['lon'] as num).toDouble(),
+        complexity: (j['complexity'] as num).toDouble(),
+        hostility: (j['hostility'] as num).toDouble(),
+        forgiveness: (j['forgiveness'] as num).toDouble(),
+        bounty: (j['bounty'] as num).toDouble(),
+      ),
+      bodies: bodies,
+      id: j['id'] as String,
+      name: j['name'] as String? ?? 'Colony',
+    );
+    sim
+      ..population = (j['population'] as num).toDouble()
+      ..happiness = (j['happiness'] as num).toDouble()
+      ..funds = (j['funds'] as num).toDouble()
+      ..research = (j['research'] as num).toDouble()
+      ..pollution = (j['pollution'] as num).toDouble()
+      ..terraform = (j['terraform'] as num).toDouble()
+      ..waterTable = (j['waterTable'] as num).toDouble()
+      ..timeWarp = (j['timeWarp'] as num).toDouble()
+      ..shuttleIntervalSec = (j['shuttleInterval'] as num).toDouble()
+      ..nextShuttleEpoch = (j['nextShuttle'] as num).toDouble();
+    sim.stock
+      ..clear()
+      ..addAll({
+        for (final e in (j['stock'] as Map).entries)
+          e.key as String: (e.value as num).toDouble(),
+      });
+
+    final st = j['settings'] as Map;
+    sim.layout.settings = ParcelSettings(
+      frontageM: (st['frontage'] as num).toDouble(),
+      depthM: (st['depth'] as num).toDouble(),
+      sidewalkM: (st['sidewalk'] as num).toDouble(),
+      minFrontageFraction: (st['minFrontage'] as num).toDouble(),
+      cornerClearM: (st['cornerClear'] as num).toDouble(),
+      bothSides: st['bothSides'] as bool,
+    );
+    for (final rj in (j['roads'] as List)) {
+      final r = rj as Map;
+      final pts = (r['pts'] as List).cast<num>();
+      sim.layout.addRoad(RoadSpline(
+        id: r['id'] as String,
+        roadClass: RoadClass.values[(r['class'] as num).toInt()],
+        closed: r['closed'] as bool,
+        controls: [
+          for (var i = 0; i + 1 < pts.length; i += 2)
+            Vec2(pts[i].toDouble(), pts[i + 1].toDouble()),
+        ],
+      ));
+    }
+    for (final mj in (j['manualLots'] as List)) {
+      final m = mj as Map;
+      final poly = (m['poly'] as List).cast<num>();
+      sim.layout.restoreManualParcel(Parcel(
+        id: m['id'] as String,
+        use: ParcelUse.values[(m['use'] as num).toInt()],
+        manual: true,
+        polygon: [
+          for (var i = 0; i + 1 < poly.length; i += 2)
+            Vec2(poly[i].toDouble(), poly[i + 1].toDouble()),
+        ],
+      ));
+    }
+    (j['parcelUse'] as Map).forEach((id, use) {
+      sim.layout.setUse(id as String, ParcelUse.values[(use as num).toInt()]);
+    });
+    (j['parcelBuildings'] as Map).forEach((id, label) {
+      final spec =
+          kUtilCatalog.where((s) => s.label == label).firstOrNull;
+      if (spec != null) sim.parcelBuildings[id as String] = spec;
+    });
+    sim.grownParcels.addAll({
+      for (final e in (j['grownParcels'] as Map).entries)
+        e.key as String: (e.value as num).toDouble(),
+    });
+
+    // Legacy cells.
+    (j['zones'] as Map).forEach((cell, packed) {
+      final parts = (packed as String).split('|');
+      sim.zones[int.parse(cell as String)] =
+          CityZoneType(parts[0], Density.values[int.parse(parts[1])]);
+    });
+    (j['utils'] as Map).forEach((cell, label) {
+      final spec =
+          kUtilCatalog.where((s) => s.label == label).firstOrNull;
+      if (spec != null) sim.utils[int.parse(cell as String)] = spec;
+    });
+    sim.roads.addAll((j['cellRoads'] as List).cast<int>());
+    sim.grown.addAll((j['grown'] as List).cast<int>());
+    (j['growProgress'] as Map).forEach((cell, v) {
+      sim.growProgress[int.parse(cell as String)] = (v as num).toDouble();
+    });
+    sim.support.addAll((j['support'] as List).cast<int>());
+    sim.recompute();
+    return sim;
+  }
+
   /// The colony's designated landing sites: spaceports, starports, airfields.
   ///
   /// These are what an arriving shuttle's guidance is aimed at, so they are
