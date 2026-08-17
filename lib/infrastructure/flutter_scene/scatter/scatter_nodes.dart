@@ -21,6 +21,7 @@ import '../../../domain/shared/vector3.dart';
 import '../../../domain/terrain/cubed_sphere.dart';
 import '../../../domain/terrain/terrain_brush.dart';
 import '../../../domain/terrain/terrain_edits.dart';
+import '../../../domain/terrain/terrain_field.dart';
 import '../../../domain/terrain/terrain_feature.dart';
 import '../../../domain/planetary/planet_surface.dart';
 import '../../../domain/universe/real_solar_system.dart';
@@ -135,6 +136,24 @@ class ScatterNodes {
   TerrainDetail? _detail;
   String? _detailBodyId;
 
+  /// Cached fields, mirroring [TerrainNodes]: base per body, edits composed
+  /// via [TerrainField.withEdits]. A stable base instance is what lets the
+  /// pooled scatter scheduler ship the DEM to its workers once instead of
+  /// per job.
+  TerrainField? _baseField;
+  TerrainField? _composedField;
+  Object? _composedEditsId = _unset;
+  static const Object _unset = Object();
+
+  /// Cached edit-aware ground radii under the eye (altitude gate) and the
+  /// anchor (focus point). `groundRadiusAt` RAYMARCHES wherever an edit
+  /// covers the ray — which over a colony pad is every frame, for ground
+  /// that moves only when an edit lands or the point drifts.
+  Vector3 _groundEyeBF = const Vector3(double.infinity, 0, 0);
+  double _groundEyeR = 0;
+  Vector3 _groundAnchorBF = const Vector3(double.infinity, 0, 0);
+  double _groundAnchorR = 0;
+
   int _instanceCount = 0;
   int _drawCalls = 0;
 
@@ -169,10 +188,12 @@ class ScatterNodes {
     // authoritative snapshot — so a crater that swallowed a tree swallowed it
     // for the physics too.
     var editCount = 0;
+    var editsRebuilt = false;
     for (final e in snap.terrainEdits) {
       if (e.body == bodyId) editCount++;
     }
     if (_builtEditCount != editCount || _bodyId != bodyId) {
+      editsRebuilt = true;
       final prevCount = _builtEditCount;
       final sameBody = _bodyId == bodyId;
       _edits = editCount == 0 ? null : snap.editsForBody(bodyId!);
@@ -207,8 +228,17 @@ class ScatterNodes {
     if (_detailBodyId != bodyId) {
       _detail = d.buildTerrainDetail();
       _detailBodyId = bodyId;
+      _baseField = null;
     }
-    final field = d.buildTerrainField(edits: _edits, detail: _detail)!;
+    // Cached exactly as TerrainNodes caches its field: base per body, edits
+    // composed by instance. The stable base identity is what the pooled
+    // scheduler keys its "ship the DEM once" logic on.
+    _baseField ??= d.buildTerrainField(detail: _detail)!;
+    if (!identical(_composedEditsId, _edits)) {
+      _composedField = _baseField!.withEdits(_edits);
+      _composedEditsId = _edits;
+    }
+    final field = _composedField!;
 
     final bodyQuat = Quaternion(b.qw, b.qx, b.qy, b.qz) *
         Quaternion.axisAngle(Vector3.unitZ, BodyNodes.textureYawRad);
@@ -220,8 +250,15 @@ class ScatterNodes {
     // altitude either never gates or gates a craft PARKED ON the ground.
     final eyeBF = invQuat.rotate(eyeWorld - bodyWorld);
     final eyeDir = eyeBF.lengthSquared > 0 ? eyeBF.normalized : Vector3.unitZ;
-    final altitude =
-        eyeBF.length - field.groundRadiusAt(eyeDir.x, eyeDir.y, eyeDir.z);
+    // Edit-aware ground radius, cached against eye drift: over a colony pad
+    // groundRadiusAt raymarches, and the answer only moves when an edit
+    // lands or the eye leaves the neighbourhood. 5 m of drift against a
+    // 4000 m gate cannot change the verdict.
+    if (editsRebuilt || (eyeBF - _groundEyeBF).length > 5.0) {
+      _groundEyeR = field.groundRadiusAt(eyeDir.x, eyeDir.y, eyeDir.z);
+      _groundEyeBF = eyeBF;
+    }
+    final altitude = eyeBF.length - _groundEyeR;
     if (altitude > maxAltitudeM) {
       gateReason = 'altitude ${altitude.toStringAsFixed(0)}m';
       _clear();
@@ -242,8 +279,15 @@ class ScatterNodes {
     }
     final anchorBF = invQuat.rotate(anchorWorld - bodyWorld);
     final anchorDir = anchorBF.normalized;
-    final focusPoint = anchorDir * field.groundRadiusAt(
-        anchorDir.x, anchorDir.y, anchorDir.z);
+    // Same caching as the eye's ground radius above — the anchor is a landed
+    // craft for most of a session, sitting exactly on the pads whose brushes
+    // make this a raymarch.
+    if (editsRebuilt || (anchorBF - _groundAnchorBF).length > 2.0) {
+      _groundAnchorR =
+          field.groundRadiusAt(anchorDir.x, anchorDir.y, anchorDir.z);
+      _groundAnchorBF = anchorBF;
+    }
+    final focusPoint = anchorDir * _groundAnchorR;
 
     final surface = _surfaceFor(bodyId!);
     if (surface == null) {
@@ -761,6 +805,10 @@ class ScatterNodes {
     _stalePending.clear();
     _wantedCache.clear();
     _wantedNow = const {};
+    _composedField = null;
+    _composedEditsId = _unset;
+    _groundEyeBF = const Vector3(double.infinity, 0, 0);
+    _groundAnchorBF = const Vector3(double.infinity, 0, 0);
     _bodyId = null;
     _instanceCount = 0;
     _drawCalls = 0;

@@ -278,10 +278,41 @@ class TerrainNodes {
   /// Update counter driving the retirement grace window.
   int _frame = 0;
 
+  // --- Selection cadence ----------------------------------------------------
+  // The heavy half of update() — quadtree selection, horizon culling, the
+  // nearest-first sort, retirement and eviction — is a pure function of the
+  // eye, the camera zoom, and the edit set. None of those change on most
+  // frames (a landed craft's body-fixed eye is STILL), yet it all ran every
+  // frame and dominated the frame cost once a deformation island made the
+  // leaf set big. Selection now reruns only when an input moved; the frames
+  // between reuse its outputs below, which streaming (upload pump + submits)
+  // consumes unchanged.
+  List<ChunkKey> _selVisible = const [];
+  Set<ChunkKey> _selVisibleSet = const {};
+  Set<ChunkKey> _selWanted = const {};
+  Set<ChunkKey> _selBareAncestors = const {};
+  Set<ChunkKey> _selStillLoading = const {};
+  Vector3 _selEyeBF = Vector3.zero;
+  double _selProbePx = -1;
+  int _selFrame = -1 << 30;
+  bool _selectForce = true;
+
+  /// Frames between forced re-selections when nothing else triggers one —
+  /// the safety net, not the mechanism.
+  static int selectEveryFrames = 30;
+
+  /// Section timings for the last frame, updated when [profile] is true —
+  /// readable through `ext.acro.terrain` next to [debugLine].
+  static bool profile = false;
+  static String profileLine = '';
+
   // --- Loading placeholder ---------------------------------------------------
   /// Wireframe patch per bare (no cover at any LOD) chunk, plus one spinner
   /// billboard over the nearest of them.
   final Map<ChunkKey, _GridPatch> _gridPatches = {};
+
+  /// The patch the spinner sits over, picked on placeholder-rebuild frames.
+  ChunkKey? _spinnerKey;
   fs.Node? _spinnerNode;
   fs.BillboardGeometry? _spinnerGeo;
   DepthSafeSpriteMaterial? _spinnerMat;
@@ -364,6 +395,16 @@ class TerrainNodes {
   TerrainDetail? _detail;
   String? _detailBodyId;
 
+  /// The cached fields: [_baseField] is the pristine (no-edits) field for
+  /// [_detailBodyId]; [_composedField] is it with [_edits] composed via
+  /// [TerrainField.withEdits], re-derived only when the edit store instance
+  /// changes. Stable instances are load-bearing: the pooled mesh scheduler
+  /// keys "re-ship the DEM?" on the base field's identity.
+  TerrainField? _baseField;
+  TerrainField? _composedField;
+  Object? _composedEditsId = _unset;
+  static const Object _unset = Object();
+
   /// Debug line for the HUD (chunk tri count / state).
   static String debugLine = '';
 
@@ -381,6 +422,9 @@ class TerrainNodes {
     String? focusVesselId,
     Vector3? starWorld,
   }) {
+    final profSw = profile ? (Stopwatch()..start()) : null;
+    var profPreUs = 0, profSelUs = 0, profStreamUs = 0;
+
     final shader = _shader;
     // Hold off until the shader AND the material tiles are uploaded — the
     // fragment declares the tex_* samplers, and drawing with them unbound faults.
@@ -446,13 +490,25 @@ class TerrainNodes {
     if (_detailBodyId != bodyId) {
       _detail = d.buildTerrainDetail();
       _detailBodyId = bodyId;
+      _baseField = null;
       // Fire-and-forget: the first frames draw with the placeholder and the
       // real colour appears when the upload lands.
       TerrainTextures.loadAlbedo(bodyId!);
       TerrainTextures.loadNormals(bodyId);
     }
 
-    final field = d.buildTerrainField(edits: _edits, detail: _detail)!;
+    // The field is cached: base per body, edits composed via withEdits per
+    // edit-store instance. A fresh TerrainField per frame was not just waste —
+    // the pooled mesh scheduler keys "do I need to re-ship the DEM to the
+    // worker" on the BASE FIELD'S IDENTITY, so a stable instance is what lets
+    // a submit cost a chunk key instead of a pyramid copy. (Descriptor terrain
+    // knobs are reference data; a body switch resets the cache.)
+    _baseField ??= d.buildTerrainField(detail: _detail)!;
+    if (!identical(_composedEditsId, _edits)) {
+      _composedField = _baseField!.withEdits(_edits);
+      _composedEditsId = _edits;
+    }
+    final field = _composedField!;
     activeBodyId = bodyId;
     activeReliefM = field.amplitude;
 
@@ -498,6 +554,7 @@ class TerrainNodes {
     if (_tree == null || _treeSplitPx != splitPx) {
       _tree = TerrainLodTree(splitPx: splitPx);
       _treeSplitPx = splitPx;
+      _selectForce = true;
     }
     // A geometry knob moved (dev toggle): drop every resident mesh so the ring
     // rebuilds with the new setting. Cheap because it only happens on a change.
@@ -514,6 +571,7 @@ class TerrainNodes {
       _builtResolution = resolution;
       _builtResBoost = editResBoost;
       _refineEditCount = -1; // refine targets depend on the boost knob
+      _selectForce = true;
     }
     double apparentPx(ChunkKey k) {
       if (camera == null) return 0;
@@ -612,162 +670,213 @@ class TerrainNodes {
         }
       }
     }
-    final leaves = _tree!.update(apparentPx, refine: refine);
-
-    // --- Visibility: the whole body, not a patch under the craft ------------
-    // Every leaf this side of the horizon is meshed. LOD does the work of
-    // keeping that affordable — distant chunks stay at coarse levels, where a
-    // whole cube face is a handful of triangles — so full coverage costs far
-    // less than the leaf COUNT suggests. The horizon test is the only spatial
-    // cull needed, because a sphere hides its own far side.
-    final visible = <ChunkKey>[];
-    for (final k in leaves) {
-      final radius = k.circumradiusM(field.radius);
-      if (isBeyondHorizon(k, eyeBF, field.radius,
-          marginM: radius, reliefM: field.amplitude)) {
-        continue;
-      }
-      visible.add(k);
-    }
-    // Nearest first: it decides both what gets meshed within this frame's
-    // budget and what survives the resident cap. Distances are computed once
-    // per chunk, not twice per comparison — centreDirection allocates, and a
-    // deformation-refined set sorts hundreds of keys every frame.
-    final distByKey = <ChunkKey, double>{
-      for (final k in visible)
-        k: (k.centreDirection * field.radius - anchorPoint).length,
-    };
-    visible.sort((x, y) => distByKey[x]!.compareTo(distByKey[y]!));
-    final wanted = visible.length > maxResidentChunks
-        ? visible.take(maxResidentChunks).toSet()
-        : visible.toSet();
-
-    // Retire chunks that dropped out of view or changed level — EXCEPT a
-    // stale chunk standing in where its replacement has not arrived yet.
-    // Retiring a parent before its children upload (or the children before
-    // their parent) opens a hole straight through to the under-sphere for a
-    // few frames on every LOD transition; with the sphere sunk below the
-    // lowest ground, that hole reads as a dark pit. The stand-in overlaps its
-    // replacement for a frame or two instead — the surfaces differ by less
-    // than a voxel, so the nearer one simply wins the depth test.
-    final missingNow = <ChunkKey>{
-      for (final k in wanted)
-        if (!_chunks.containsKey(k) && !_emptyChunks.contains(k)) k,
-    };
-    // The NEAREST resident ancestor of each missing chunk is its coarse
-    // stand-in for a pending split — and ONLY the nearest. Protecting every
-    // ancestor pinned the face ROOT for as long as anything anywhere on that
-    // face was streaming, which near the surface is always; a root's surface
-    // is sampled at ~100 km per cell, so in deep basins it floats kilometres
-    // ABOVE the refined floor and drew as flat sphere-segment slabs over the
-    // maria and crater floors (highlands hid it — there the root sits below).
-    // `bareAncestors` marks the ancestors of missing chunks with NO resident
-    // cover at all: the coverage-root path below meshes those, and the upload
-    // pump must accept them on arrival even though they are not wanted.
-    // Ancestors of every resident: `coveredBelow.contains(k)` == some finer
-    // resident lies under k's region (the merge-direction cover).
-    final coveredBelow = <ChunkKey>{
-      for (final r in _chunks.keys) ...r.ancestors,
-    };
-    final protected = <ChunkKey>{};
-    final bareAncestors = <ChunkKey>{};
-    // Missing chunks whose cover is absent or far coarser than wanted — the
-    // loading placeholder draws over them (the coverage-root path handles
-    // the truly bare subset).
-    final stillLoading = <ChunkKey>{};
-    for (final m in missingNow) {
-      ChunkKey? nearest;
-      for (final a in m.ancestors) {
-        if (_chunks.containsKey(a)) {
-          nearest = a;
-          break;
-        }
-      }
-      if (nearest != null) {
-        protected.add(nearest);
-        if (m.level - nearest.level >= placeholderLevelGap) {
-          stillLoading.add(m);
-        }
-      } else if (!coveredBelow.contains(m)) {
-        stillLoading.add(m);
-        // Coverage roots are for FRESHLY REVEALED regions only. A split in
-        // progress — some sibling already resident under the same parent —
-        // must not queue one: re-meshing coarse cover under ground the
-        // player is watching refine would flash the whole face back over it.
-        final p = m.parent;
-        if (p == null || !coveredBelow.contains(p)) {
-          bareAncestors.addAll(m.ancestors);
-        }
-      }
-    }
-    bool standsIn(ChunkKey k) {
-      if (protected.contains(k)) return true;
-      // The fine stand-in for a pending merge: a resident whose own ancestor
-      // is the missing chunk. Keep every such descendant — each covers a
-      // distinct part of the missing region.
-      for (final a in k.ancestors) {
-        if (missingNow.contains(a)) return true;
-      }
-      return false;
-    }
-
-    // Retire against the UNTRUNCATED visible set, not `wanted`. When impact
-    // refinement (plus its 2:1 staircase) pushes visible demand past the
-    // resident cap, the nearest-first sort reorders with every camera move
-    // and a different tail falls past the cap each frame — retiring on
-    // `wanted` made the horizon tiles churn in and out (flicker) and the
-    // farthest ring vanish outright. The cap below is ADMISSION control for
-    // new work; residency ends only when a chunk stops being visible (or its
-    // replacement arrived).
-    //
-    // And "stops being visible" carries a GRACE PERIOD (plan §4: evict by
-    // "not visible + oldest"). The horizon cull has margins but no
-    // hysteresis: an orbiting camera walks chunks across the horizon edge
-    // every frame, and instant retirement turned each crossing into retire →
-    // want again → remesh — a flickering ring of missing tiles at exactly
-    // the range the player reads as "the horizon". A chunk now has to stay
-    // invisible for [retireGraceFrames] consecutive frames before it is
-    // dropped; drawing a just-hidden chunk for another second is free (the
-    // planet occludes it), remeshing it every other frame is not.
-    final visibleSet = visible.toSet();
+    // --- Selection cadence gate --------------------------------------------
+    // Everything from the quadtree walk to eviction reruns only when one of
+    // its inputs moved (see the field docs). The zoom probe is the apparent
+    // size of a fixed 1 km ball at the anchor — cheap, and it moves with both
+    // camera range and focal changes, the two things besides the eye and the
+    // edits that can change what selection would pick.
     _frame++;
-    for (final e in _chunks.entries) {
-      if (visibleSet.contains(e.key)) e.value.lastVisibleFrame = _frame;
-    }
-    for (final k in _chunks.keys.toList()) {
-      // Two ways out of the scene: fell invisible past the grace window
-      // (horizon churn protection), or REPLACED — still visible but no
-      // longer LOD-selected, with no missing chunk left standing on it,
-      // i.e. its finer (or coarser) successors are all resident. The
-      // replaced case must not wait out the grace: the split's last child
-      // just landed and the parent underneath is pure overdraw now.
-      final c = _chunks[k]!;
-      final invisible = _frame - c.lastVisibleFrame > retireGraceFrames;
-      final replaced = visibleSet.contains(k) && !wanted.contains(k);
-      if ((invisible || replaced) && !standsIn(k)) {
-        _removeResident(k);
+    if (profSw != null) profPreUs = profSw.elapsedMicroseconds;
+    final probePx = camera == null
+        ? 0.0
+        : camera.radiusPx(anchorWorld - origin.focusWorld, 1000.0);
+    final moved = (eyeBF - _selEyeBF).length >
+        math.max(1.0, 0.02 * (eyeBF - anchorPoint).length);
+    final probeMoved = _selProbePx < 0 ||
+        (probePx - _selProbePx).abs() > math.max(_selProbePx, 1e-6) * 0.02;
+    final reselect = _selectForce ||
+        editsChanged ||
+        moved ||
+        probeMoved ||
+        _frame - _selFrame >= selectEveryFrames;
+
+    if (reselect) {
+      _selectForce = false;
+      _selEyeBF = eyeBF;
+      _selProbePx = probePx;
+      _selFrame = _frame;
+
+      final leaves = _tree!.update(apparentPx, refine: refine);
+
+      // --- Visibility: the whole body, not a patch under the craft ----------
+      // Every leaf this side of the horizon is meshed. LOD does the work of
+      // keeping that affordable — distant chunks stay at coarse levels, where
+      // a whole cube face is a handful of triangles — so full coverage costs
+      // far less than the leaf COUNT suggests. The horizon test is the only
+      // spatial cull needed, because a sphere hides its own far side.
+      final visible = <ChunkKey>[];
+      for (final k in leaves) {
+        final radius = k.circumradiusM(field.radius);
+        if (isBeyondHorizon(k, eyeBF, field.radius,
+            marginM: radius, reliefM: field.amplitude)) {
+          continue;
+        }
+        visible.add(k);
       }
-    }
-    // High-watermark eviction keeps the GPU set bounded when visible demand
-    // genuinely exceeds the cap for a while: above cap+25%, drop the
-    // FARTHEST residents that are neither wanted nor standing in, back down
-    // to the cap. Hysteresis (the 25% band) is what stops the cap boundary
-    // itself from thrashing.
-    if (_chunks.length > maxResidentChunks + maxResidentChunks ~/ 4) {
-      final evictable = [
-        for (final k in _chunks.keys)
-          if (!wanted.contains(k) && !standsIn(k)) k,
-      ];
-      final evictDist = <ChunkKey, double>{
-        for (final k in evictable)
+      // Nearest first: it decides both what gets meshed within this frame's
+      // budget and what survives the resident cap. Distances are computed
+      // once per chunk, not twice per comparison — centreDirection allocates,
+      // and a deformation-refined set sorts hundreds of keys.
+      final distByKey = <ChunkKey, double>{
+        for (final k in visible)
           k: (k.centreDirection * field.radius - anchorPoint).length,
       };
-      evictable.sort(
-          (x, y) => evictDist[y]!.compareTo(evictDist[x]!)); // farthest first
-      for (final k in evictable) {
-        if (_chunks.length <= maxResidentChunks) break;
-        _removeResident(k);
+      visible.sort((x, y) => distByKey[x]!.compareTo(distByKey[y]!));
+      final wanted = visible.length > maxResidentChunks
+          ? visible.take(maxResidentChunks).toSet()
+          : visible.toSet();
+
+      // Retire chunks that dropped out of view or changed level — EXCEPT a
+      // stale chunk standing in where its replacement has not arrived yet.
+      // Retiring a parent before its children upload (or the children before
+      // their parent) opens a hole straight through to the under-sphere for a
+      // few frames on every LOD transition; with the sphere sunk below the
+      // lowest ground, that hole reads as a dark pit. The stand-in overlaps
+      // its replacement for a frame or two instead — the surfaces differ by
+      // less than a voxel, so the nearer one simply wins the depth test.
+      final missingNow = <ChunkKey>{
+        for (final k in wanted)
+          if (!_chunks.containsKey(k) && !_emptyChunks.contains(k)) k,
+      };
+      // The NEAREST resident ancestor of each missing chunk is its coarse
+      // stand-in for a pending split — and ONLY the nearest. Protecting every
+      // ancestor pinned the face ROOT for as long as anything anywhere on
+      // that face was streaming, which near the surface is always; a root's
+      // surface is sampled at ~100 km per cell, so in deep basins it floats
+      // kilometres ABOVE the refined floor and drew as flat sphere-segment
+      // slabs over the maria and crater floors (highlands hid it — there the
+      // root sits below). `bareAncestors` marks the ancestors of missing
+      // chunks with NO resident cover at all: the coverage-root path below
+      // meshes those, and the upload pump must accept them on arrival even
+      // though they are not wanted. Ancestors of every resident:
+      // `coveredBelow.contains(k)` == some finer resident lies under k's
+      // region (the merge-direction cover).
+      final coveredBelow = <ChunkKey>{
+        for (final r in _chunks.keys) ...r.ancestors,
+      };
+      final protected = <ChunkKey>{};
+      final bareAncestors = <ChunkKey>{};
+      // Missing chunks whose cover is absent or far coarser than wanted — the
+      // loading placeholder draws over them (the coverage-root path handles
+      // the truly bare subset).
+      final stillLoading = <ChunkKey>{};
+      for (final m in missingNow) {
+        ChunkKey? nearest;
+        for (final a in m.ancestors) {
+          if (_chunks.containsKey(a)) {
+            nearest = a;
+            break;
+          }
+        }
+        if (nearest != null) {
+          protected.add(nearest);
+          if (m.level - nearest.level >= placeholderLevelGap) {
+            stillLoading.add(m);
+          }
+        } else if (!coveredBelow.contains(m)) {
+          stillLoading.add(m);
+          // Coverage roots are for FRESHLY REVEALED regions only. A split in
+          // progress — some sibling already resident under the same parent —
+          // must not queue one: re-meshing coarse cover under ground the
+          // player is watching refine would flash the whole face back over
+          // it.
+          final p = m.parent;
+          if (p == null || !coveredBelow.contains(p)) {
+            bareAncestors.addAll(m.ancestors);
+          }
+        }
       }
+      bool standsIn(ChunkKey k) {
+        if (protected.contains(k)) return true;
+        // The fine stand-in for a pending merge: a resident whose own
+        // ancestor is the missing chunk. Keep every such descendant — each
+        // covers a distinct part of the missing region.
+        for (final a in k.ancestors) {
+          if (missingNow.contains(a)) return true;
+        }
+        return false;
+      }
+
+      // Retire against the UNTRUNCATED visible set, not `wanted`. When impact
+      // refinement (plus its 2:1 staircase) pushes visible demand past the
+      // resident cap, the nearest-first sort reorders with every camera move
+      // and a different tail falls past the cap each frame — retiring on
+      // `wanted` made the horizon tiles churn in and out (flicker) and the
+      // farthest ring vanish outright. The cap below is ADMISSION control for
+      // new work; residency ends only when a chunk stops being visible (or
+      // its replacement arrived).
+      //
+      // And "stops being visible" carries a GRACE PERIOD (plan §4: evict by
+      // "not visible + oldest"). The horizon cull has margins but no
+      // hysteresis: an orbiting camera walks chunks across the horizon edge
+      // every frame, and instant retirement turned each crossing into retire
+      // → want again → remesh — a flickering ring of missing tiles at exactly
+      // the range the player reads as "the horizon". A chunk now has to stay
+      // invisible for [retireGraceFrames] consecutive frames before it is
+      // dropped; drawing a just-hidden chunk for another second is free (the
+      // planet occludes it), remeshing it every other frame is not.
+      final visibleSet = visible.toSet();
+      for (final e in _chunks.entries) {
+        if (visibleSet.contains(e.key)) e.value.lastVisibleFrame = _frame;
+      }
+      for (final k in _chunks.keys.toList()) {
+        // Two ways out of the scene: fell invisible past the grace window
+        // (horizon churn protection), or REPLACED — still visible but no
+        // longer LOD-selected, with no missing chunk left standing on it,
+        // i.e. its finer (or coarser) successors are all resident. The
+        // replaced case must not wait out the grace: the split's last child
+        // just landed and the parent underneath is pure overdraw now.
+        final c = _chunks[k]!;
+        final invisible = _frame - c.lastVisibleFrame > retireGraceFrames;
+        final replaced = visibleSet.contains(k) && !wanted.contains(k);
+        if ((invisible || replaced) && !standsIn(k)) {
+          _removeResident(k);
+        }
+      }
+      // High-watermark eviction keeps the GPU set bounded when visible demand
+      // genuinely exceeds the cap for a while: above cap+25%, drop the
+      // FARTHEST residents that are neither wanted nor standing in, back down
+      // to the cap. Hysteresis (the 25% band) is what stops the cap boundary
+      // itself from thrashing.
+      if (_chunks.length > maxResidentChunks + maxResidentChunks ~/ 4) {
+        final evictable = [
+          for (final k in _chunks.keys)
+            if (!wanted.contains(k) && !standsIn(k)) k,
+        ];
+        final evictDist = <ChunkKey, double>{
+          for (final k in evictable)
+            k: (k.centreDirection * field.radius - anchorPoint).length,
+        };
+        evictable.sort(
+            (x, y) => evictDist[y]!.compareTo(evictDist[x]!)); // farthest 1st
+        for (final k in evictable) {
+          if (_chunks.length <= maxResidentChunks) break;
+          _removeResident(k);
+        }
+      }
+
+      // Publish this selection for the frames between reselections: the
+      // upload pump and submit loop below consume these caches every frame.
+      _selVisible = visible;
+      _selVisibleSet = visibleSet;
+      _selWanted = wanted;
+      _selBareAncestors = bareAncestors;
+      _selStillLoading = stillLoading;
+    } else {
+      // Between selections, keep the retirement grace clock honest against
+      // the cached visible set — cheap, and it stops a burst of skipped
+      // frames from reading as "invisible" when the camera never moved.
+      for (final e in _chunks.entries) {
+        if (_selVisibleSet.contains(e.key)) e.value.lastVisibleFrame = _frame;
+      }
+    }
+    final visible = _selVisible;
+    final wanted = _selWanted;
+    final bareAncestors = _selBareAncestors;
+    final stillLoading = _selStillLoading;
+    if (profSw != null) {
+      profSelUs = profSw.elapsedMicroseconds - profPreUs;
     }
 
     // Turn finished meshes into scene nodes — the upload is the only part of
@@ -870,6 +979,10 @@ class TerrainNodes {
       _submit(field, k, _resolutionFor(k, field.radius));
     }
 
+    if (profSw != null) {
+      profStreamUs = profSw.elapsedMicroseconds - profPreUs - profSelUs;
+    }
+
     // "This ground is still streaming": wireframe patches + a spinner over
     // regions that have NO cover at any LOD. Runs before the no-chunks early
     // return — the initial fill is exactly when the placeholder matters.
@@ -877,9 +990,24 @@ class TerrainNodes {
     // `missing`: that list excludes pending/arrived chunks, so a patch
     // vanished the moment its chunk was SUBMITTED — seconds before the mesh
     // actually landed, leaving the region drawing nothing at all. The grid
-    // must track "not yet resident", not "not yet queued".
-    _updatePlaceholders(
-        field, visible, stillLoading, bodyWorld, bodyQuat, origin);
+    // must track "not yet resident", not "not yet queued". The want-list only
+    // shifts when selection or residency does, so it rebuilds on selection
+    // frames or after an upload; between those only transforms update.
+    _updatePlaceholders(field, visible, stillLoading, bodyWorld, bodyQuat,
+        origin,
+        rebuild: reselect || uploads > 0);
+
+    if (profSw != null) {
+      final restUs = profSw.elapsedMicroseconds -
+          profPreUs -
+          profSelUs -
+          profStreamUs;
+      profileLine = 'terrain: pre ${profPreUs ~/ 1000}ms '
+          'sel ${profSelUs ~/ 1000}ms${reselect ? '*' : ''} '
+          'stream ${profStreamUs ~/ 1000}ms '
+          'ph ${restUs ~/ 1000}ms '
+          'total ${profSw.elapsedMicroseconds ~/ 1000}ms';
+    }
 
     if (_chunks.isEmpty) {
       debugLine = 'terrain: no chunks';
@@ -906,7 +1034,7 @@ class TerrainNodes {
       if (e.key.level > maxLevel) maxLevel = e.key.level;
     }
     debugLine = 'terrain: ${_chunks.length} chunks  $tris tris  '
-        'lvl $minLevel-$maxLevel  q${leaves.length}'
+        'lvl $minLevel-$maxLevel  q${_tree!.leaves.length}'
         '${_pending.isNotEmpty ? '  ~${_pending.length}' : ''}'
         '${missing.length > _pending.length ? '  +${missing.length - _pending.length}' : ''}'
         '${_emptyChunks.isNotEmpty ? '  e${_emptyChunks.length}' : ''}'
@@ -1052,26 +1180,32 @@ class TerrainNodes {
     Set<ChunkKey> stillLoading,
     Vector3 bodyWorld,
     Quaternion bodyQuat,
-    FloatingOrigin origin,
-  ) {
+    FloatingOrigin origin, {
+    required bool rebuild,
+  }) {
     _ensureSpinnerTex();
-    final want = <ChunkKey>[];
-    if (loadingGrid) {
-      for (final k in sortedCandidates) {
-        if (stillLoading.contains(k)) {
-          want.add(k);
-          if (want.length >= maxPlaceholders) break;
+    if (rebuild) {
+      final want = <ChunkKey>[];
+      if (loadingGrid) {
+        for (final k in sortedCandidates) {
+          if (stillLoading.contains(k) && !_chunks.containsKey(k)) {
+            want.add(k);
+            if (want.length >= maxPlaceholders) break;
+          }
         }
       }
-    }
-    final wantSet = want.toSet();
-    for (final k in _gridPatches.keys.toList()) {
-      if (!wantSet.contains(k)) {
-        _scene.remove(_gridPatches.remove(k)!.node);
+      final wantSet = want.toSet();
+      for (final k in _gridPatches.keys.toList()) {
+        if (!wantSet.contains(k)) {
+          _scene.remove(_gridPatches.remove(k)!.node);
+        }
       }
-    }
-    for (final k in want) {
-      _gridPatches.putIfAbsent(k, () => _buildGridPatch(field, k));
+      for (final k in want) {
+        // Building a patch samples the field ~70 times; only on rebuild
+        // frames, and only for patches that do not already exist.
+        _gridPatches.putIfAbsent(k, () => _buildGridPatch(field, k));
+      }
+      _spinnerKey = want.isEmpty ? null : want.first;
     }
     for (final p in _gridPatches.values) {
       p.node.localTransform = vm.Matrix4.compose(
@@ -1081,8 +1215,11 @@ class TerrainNodes {
       );
     }
 
-    // Spinner over the nearest patch (want[0] — `missing` arrives sorted).
-    if (want.isEmpty) {
+    // Spinner over the nearest patch (chosen on rebuild frames — candidates
+    // arrive nearest-sorted).
+    final spinnerKey = _spinnerKey;
+    final spinnerPatch = spinnerKey == null ? null : _gridPatches[spinnerKey];
+    if (spinnerPatch == null) {
       _clearSpinner();
     } else {
       final geo = _spinnerGeo ??= fs.BillboardGeometry(capacity: 1);
@@ -1092,11 +1229,11 @@ class TerrainNodes {
         mat.colorTexture = _spinnerTex;
         _spinnerTexApplied = true;
       }
-      final anchor = _gridPatches[want.first]!.anchorBF;
+      final anchor = spinnerPatch.anchorBF;
       final centre = bodyWorld + bodyQuat.rotate(anchor);
       // A third of the chunk across, spinning ~1 rev / 1.5 s of wall time —
       // UI feedback, deliberately independent of sim warp.
-      final sizeM = want.first.circumradiusM(field.radius) * 0.6;
+      final sizeM = spinnerKey!.circumradiusM(field.radius) * 0.6;
       final spin =
           (DateTime.now().millisecondsSinceEpoch % 1500) / 1500 * 2 * math.pi;
       geo.setInstance(
@@ -1186,6 +1323,7 @@ class TerrainNodes {
       _scene.remove(p.node);
     }
     _gridPatches.clear();
+    _spinnerKey = null;
     _clearSpinner();
   }
 
@@ -1257,6 +1395,15 @@ class TerrainNodes {
     _clearPlaceholders();
     _invalidateInFlight();
     _tree?.reset();
+    // Selection caches describe the old body/tree — force a fresh pass.
+    _selVisible = const [];
+    _selVisibleSet = const {};
+    _selWanted = const {};
+    _selBareAncestors = const {};
+    _selStillLoading = const {};
+    _selectForce = true;
+    _composedField = null;
+    _composedEditsId = _unset;
     _bodyId = null;
     activeBodyId = null;
     activeReliefM = 0;

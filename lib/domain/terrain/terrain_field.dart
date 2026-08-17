@@ -53,7 +53,41 @@ class TerrainField {
                 (detail?.maxMagnitude((dem.maxElevM - dem.minElevM) *
                         DemDerivedControl.defaultDetailFraction) ??
                     0.0),
-        _noise = ValueNoise3(seed);
+        _noise = ValueNoise3(seed),
+        _base = null;
+
+  /// Share every generator with [base] but compose [edits] instead. See
+  /// [withEdits].
+  TerrainField._shared(TerrainField base, this.edits)
+      : radius = base.radius,
+        amplitude = base.amplitude,
+        dem = base.dem,
+        featureScale = base.featureScale,
+        seaLevel = base.seaLevel,
+        octaves = base.octaves,
+        detail = base.detail,
+        _noise = base._noise,
+        _base = base.base;
+
+  /// This field with [edits] swapped, sharing (not rebuilding) the noise,
+  /// detail layer, and DEM pyramid.
+  ///
+  /// Two reasons this exists rather than reconstructing:
+  ///  * the constructor needs the seed, which is consumed into [_noise] and
+  ///    not stored;
+  ///  * shared generator INSTANCES give downstream consumers an identity to
+  ///    key on — the pooled mesh scheduler ships [base] to its workers once
+  ///    and thereafter sends only the (small) brush list, instead of copying
+  ///    a multi-megabyte DEM pyramid into a fresh isolate per job.
+  TerrainField withEdits(TerrainEdits? edits) =>
+      identical(edits, this.edits) ? this : TerrainField._shared(this, edits);
+
+  /// The pristine (no-edits) field this one shares generators with — itself
+  /// when it has no progenitor. Stable across [withEdits] calls, which is
+  /// what makes it usable as a send-once identity.
+  TerrainField get base => _base ?? this;
+
+  final TerrainField? _base;
 
   /// Datum radius (m) — the mean surface; relief rides on top of this.
   final double radius;
