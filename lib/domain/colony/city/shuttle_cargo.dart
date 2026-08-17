@@ -13,6 +13,8 @@ library;
 
 import 'dart:math' as math;
 
+import '../../shared/quaternion.dart';
+
 import '../../vessel/resource_container.dart';
 import '../../vessel/vessel.dart';
 import 'city_sim.dart';
@@ -79,11 +81,12 @@ class ShuttleCargoService {
     CitySim city,
     Vessel vessel, {
     required double bodyRadiusM,
+    Quaternion bodyOrientation = Quaternion.identity,
   }) {
     if (!vessel.landed) return null;
     if (vessel.dominantBody != city.body.id) return null;
 
-    final padId = _padUnder(city, vessel, bodyRadiusM);
+    final padId = _padUnder(city, vessel, bodyRadiusM, bodyOrientation);
     if (padId == null) return null;
 
     final delivered = <String, double>{};
@@ -118,12 +121,15 @@ class ShuttleCargoService {
   }
 
   /// The pad the vessel is standing on, or null.
-  String? _padUnder(CitySim city, Vessel vessel, double bodyRadiusM) {
-    // The craft's position is inertial; a pad is body-fixed. Compare along the
-    // SURFACE DIRECTION rather than in raw coordinates, which sidesteps the
-    // body's rotation entirely — a landed craft and the pad under it share a
-    // direction from the body centre whatever the planet has turned to.
-    final craftDir = vessel.state.position.normalized;
+  String? _padUnder(CitySim city, Vessel vessel, double bodyRadiusM,
+      Quaternion bodyOrientation) {
+    // The craft's position is INERTIAL; a pad is BODY-FIXED. The craft must be
+    // rotated into the body frame before directions are compared — comparing
+    // raw directions looked fine at epoch zero and drifted with the planet's
+    // spin: even the Moon's crawl put a landed shuttle 600 m of false miss
+    // from the pad it was standing on within two minutes of sim time.
+    final craftDir =
+        bodyOrientation.conjugate.rotate(vessel.state.position).normalized;
     for (final (parcel, _) in city.landingPads()) {
       final padBF = city.localToBodyFixed(
         parcel.centroid,

@@ -11,9 +11,12 @@ import '../../domain/autonomy/attitude_controller.dart';
 import '../../domain/autonomy/autopilot_updater.dart';
 import '../../domain/autonomy/cargo_scheduler.dart';
 import '../../domain/autonomy/docking_updater.dart';
+import '../../domain/autonomy/landing_guidance.dart';
 import '../../domain/colony/city/city_sim.dart';
 import '../../domain/colony/city/city_terrain_shaper.dart';
+import '../../domain/colony/city/parcel.dart';
 import '../../domain/colony/city/shuttle_cargo.dart';
+import '../../domain/colony/city/shuttle_run.dart';
 import '../../domain/colony/city_mining_service.dart';
 import '../../domain/colony/happiness_service.dart';
 import '../../domain/colony/supply_chain.dart';
@@ -356,7 +359,8 @@ class AdvanceSimulationTick {
       city.advance(dt);
       _shapeCityTerrain(city, system, clock);
       _polluteAtmosphere(city, dt);
-      _unloadShuttles(city, system);
+      _unloadShuttles(city, system, clock);
+      _runColonyShuttles(city, system, clock, dt);
     }
 
     // ---- Colony / city phase ----
@@ -465,17 +469,180 @@ class AdvanceSimulationTick {
     atmosphere.save(state);
   }
 
+  static const LandingGuidance _shuttleGuidance = LandingGuidance();
+  static const ColonyShuttleFactory _shuttleFactory = ColonyShuttleFactory();
+  int _shuttleSeq = 0;
+
+  /// Dispatch, fly and recover the colony's automatic supply shuttles.
+  ///
+  /// A shuttle is a REAL vessel in the same repository as the player's craft:
+  /// the guidance only sets its throttle and attitude, and the ordinary motion
+  /// phase flies it. Touchdown, cargo transfer and liftoff all go through the
+  /// same paths a player landing does — which is the point.
+  void _runColonyShuttles(
+      CitySim city, StarSystem system, SimulationClock clock, double dt) {
+    final body = system.body(city.body.id);
+    if (body == null) return;
+    final epoch = clock.epoch.seconds;
+
+    city.shuttleRuns.removeWhere((r) => !r.active);
+
+    // ---- Dispatch ----
+    if (city.shuttleRuns.isEmpty && epoch >= city.nextShuttleEpoch) {
+      final net = city.parcelNetwork();
+      final pad = city
+          .landingPads()
+          .where((e) => net.lotServed(e.$1.id))
+          .map((e) => e.$1)
+          .firstOrNull;
+      if (pad != null) {
+        final padBF = _shuttlePadBF(city, pad.centroid, body);
+        final vessel = _shuttleFactory.build(
+          id: 'shuttle-${city.id}-${_shuttleSeq++}',
+          body: body,
+          padBF: padBF,
+          bodyOrientation: body.orientationAt(clock.epoch),
+        );
+        vessels.save(vessel);
+        city.shuttleRuns.add(ShuttleRun(
+          vesselId: vessel.id.value,
+          colonyId: city.id,
+          padId: pad.id,
+        ));
+        city.nextShuttleEpoch = epoch + city.shuttleIntervalSec;
+      }
+    }
+
+    // ---- Fly ----
+    for (final run in city.shuttleRuns) {
+      final vessel = vessels.byId(VesselId(run.vesselId));
+      if (vessel == null) {
+        run.phase = ShuttleRunPhase.done; // lost; the next dispatch replaces it
+        continue;
+      }
+      final pad = city.layout.parcels
+          .where((p) => p.id == run.padId)
+          .firstOrNull;
+      if (pad == null) {
+        run.phase = ShuttleRunPhase.done;
+        continue;
+      }
+      final orientation = body.orientationAt(clock.epoch);
+      final padBF = _shuttlePadBF(city, pad.centroid, body);
+
+      switch (run.phase) {
+        case ShuttleRunPhase.inbound:
+          if (vessel.landed) {
+            vessel.setThrottle(0);
+            run.phase = ShuttleRunPhase.unloading;
+            break;
+          }
+          // Guidance works in the BODY-FIXED frame on SURFACE-RELATIVE
+          // velocity: the pad turns with the planet, and steering on inertial
+          // velocity misses by the co-rotation speed.
+          final posBF = orientation.conjugate.rotate(vessel.state.position);
+          final period = body.siderealRotationPeriod;
+          final omega = period.abs() < 1
+              ? Vector3.zero
+              : Vector3(0, 0, 2 * math.pi / period);
+          final velBF =
+              orientation.conjugate.rotate(vessel.state.velocity) -
+                  omega.cross(posBF);
+          final cmd = _shuttleGuidance.command(
+            posBF: posBF,
+            velBF: velBF,
+            padBF: padBF,
+            mu: body.mu,
+            mass: vessel.mass,
+            maxThrust: ColonyShuttleFactory.maxThrust,
+          );
+          vessel.setThrottle(cmd.throttle);
+          _pointShuttle(vessel, orientation.rotate(cmd.facing));
+        case ShuttleRunPhase.unloading:
+          // The pad-side cargo service has already emptied the holds — landed
+          // craft on pads unload every tick. The dwell is turnaround time.
+          run.dwell -= dt;
+          if (run.dwell <= 0) {
+            run.phase = ShuttleRunPhase.departing;
+          }
+        case ShuttleRunPhase.departing:
+          final posBF = orientation.conjugate.rotate(vessel.state.position);
+          final up = orientation.rotate(posBF.normalized);
+          vessel.setThrottle(1);
+          _pointShuttle(vessel, up);
+          final altitude = posBF.length - padBF.length;
+          // Clear of any terrain and visually gone: the shuttle is "back in
+          // orbit" and the hull is recovered. Kept low on purpose — every
+          // metre of recovery altitude is climb propellant the tank has to
+          // carry down first.
+          if (altitude > 4000) {
+            vessels.remove(vessel.id);
+            run.phase = ShuttleRunPhase.done;
+          }
+        case ShuttleRunPhase.done:
+          break;
+      }
+      if (run.active && vessels.byId(vessel.id) != null) {
+        vessels.save(vessel);
+      }
+    }
+  }
+
+  /// Body-fixed pad point on the REAL ground under the PAD.
+  ///
+  /// Sampled along the pad's own direction, not the colony site's: on rough
+  /// ground the two can differ by tens of metres, and that difference is the
+  /// gap between the guidance's zero altitude and the terrain the collision
+  /// check will actually stop the vessel on.
+  Vector3 _shuttlePadBF(CitySim city, Vec2 centroid, CelestialBody body) {
+    final dir = city
+        .localToBodyFixed(centroid, bodyRadiusM: body.radius)
+        .normalized;
+    final field = body.terrainFieldWith(terrainEdits.forBody(body.id));
+    final ground = field == null
+        ? body.radius
+        : field.groundRadiusAt(dir.x, dir.y, dir.z);
+    return dir * ground;
+  }
+
+  /// Snap the shuttle's attitude so its thrust axis (+Z) lies along [dir].
+  ///
+  /// Snapped, not slewed: an AI freighter gains nothing from the attitude
+  /// controller's transient, and a guidance loop closed through a slewing
+  /// attitude is a tuning problem this feature does not need.
+  static void _pointShuttle(Vessel vessel, Vector3 dir) {
+    final d = dir.normalized;
+    final axis = Vector3.unitZ.cross(d);
+    final sin = axis.length;
+    final cos = Vector3.unitZ.dot(d);
+    final att = sin < 1e-9
+        ? (cos > 0
+            ? Quaternion.identity
+            : Quaternion.axisAngle(Vector3.unitX, math.pi))
+        : Quaternion.axisAngle(axis.normalized, math.atan2(sin, cos));
+    vessel.updateState(StateVector(
+      position: vessel.state.position,
+      velocity: vessel.state.velocity,
+      attitude: att,
+    ));
+    vessel.targetFacing = d;
+  }
+
   /// Unload any craft standing on one of this colony's pads.
   ///
   /// Run over the colony's pads rather than over every vessel: a world has far
   /// more craft than pads, and all but a handful are nowhere near the ground.
-  void _unloadShuttles(CitySim city, StarSystem system) {
+  void _unloadShuttles(CitySim city, StarSystem system, SimulationClock clock) {
     if (city.landingPads().isEmpty) return;
     final body = system.body(city.body.id);
     if (body == null) return;
     for (final vessel in vessels.all().toList()) {
-      final moved =
-          shuttleCargo.unload(city, vessel, bodyRadiusM: body.radius);
+      final moved = shuttleCargo.unload(
+        city,
+        vessel,
+        bodyRadiusM: body.radius,
+        bodyOrientation: body.orientationAt(clock.epoch),
+      );
       if (moved == null) continue;
       vessels.save(vessel);
       events.publish(CargoDelivered(

@@ -31,6 +31,7 @@ import 'city_config.dart';
 import 'city_layout.dart';
 import 'parcel.dart';
 import 'parcel_network.dart';
+import 'shuttle_run.dart';
 import 'commodity.dart';
 
 /// A craft visiting a spaceport — a relief mission or a scheduled delivery. It
@@ -3159,6 +3160,16 @@ class CitySim {
 
   /// Burning lots: parcel id -> intensity 0..1.
   final Map<String, double> lotFires = {};
+
+  /// Seconds between automatic supply shuttles. The player's resupply knob.
+  double shuttleIntervalSec = 480;
+
+  /// Sim epoch (s) after which the next shuttle may launch. Zero = as soon as
+  /// there is a served pad to land it on.
+  double nextShuttleEpoch = 0;
+
+  /// Shuttle round trips in progress (normally one; done runs are pruned).
+  final List<ShuttleRun> shuttleRuns = [];
 
   /// Peak road load on the spline network, 0..1. The parcel city's congestion,
   /// feeding the same commute penalty the cell traffic does.
