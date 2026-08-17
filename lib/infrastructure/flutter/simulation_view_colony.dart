@@ -176,27 +176,19 @@ extension SimulationViewColony on _SimulationViewState {
       return;
     }
 
-    // A tap on a PARCEL places on the lot, which knows its own size and
-    // frontage. Only fall back to the cell grid where no lot has been cut.
-    if (_cityEdit.tool == CityEditTool.utility) {
-      final lot = city.layout.parcelAt(Vec2(hit.east, hit.north));
-      if (lot != null) {
-        rebuild(() => _cityEdit.applyToParcel(city, lot.id));
-        return;
-      }
+    // Every other tool acts on the LOT under the tap.
+    //
+    // The in-flight editor is parcel-only. The cell grid is still the legacy
+    // 2D builder's model, and still what the economy is keyed on, but nothing
+    // new is created on it here — so a colony founded in flight is
+    // parcel-native from the moment it exists.
+    final lot = city.layout.parcelAt(Vec2(hit.east, hit.north));
+    if (lot == null) {
+      rebuild(() => _cityEdit.blocked =
+          'No lot here — draw a road to subdivide the ground first.');
+      return;
     }
-
-    final cell = const SurfacePicker().cellAt(
-      east: hit.east,
-      north: hit.north,
-      grid: city.grid,
-      cellM: CitySim.cellM,
-    );
-    if (cell == null) return;
-    rebuild(() {
-      _cityEdit.setHover(cell);
-      _cityEdit.applyTo(city, cell);
-    });
+    rebuild(() => _cityEdit.applyToLot(city, lot.id));
   }
 
   /// Open the builder as a view onto a live colony.

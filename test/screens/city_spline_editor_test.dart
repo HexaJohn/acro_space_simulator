@@ -111,4 +111,69 @@ void main() {
     expect(city.parcelBuildings, isEmpty);
     expect(c.blocked, contains('ore'));
   });
+
+  test('zoning acts on the lot, not on a cell', () {
+    final city = colony();
+    final c = CityEditController()..set(CityEditTool.roadSpline);
+    for (final p in const [Vec2(0, -150), Vec2(0, 150)]) {
+      c.addSplinePoint(p);
+    }
+    c.commitSpline(city);
+
+    final lot = city.layout.autoParcels.first;
+    c.pickZone('industrial', Density.high);
+    c.applyToLot(city, lot.id);
+
+    final zoned =
+        city.layout.parcels.firstWhere((p) => p.id == lot.id);
+    expect(zoned.use, ParcelUse.industrial);
+    // And nothing was written to the cell grid.
+    expect(city.zones, isEmpty);
+  });
+
+  test('clearing a lot frees it and unzones it', () {
+    final city = colony();
+    final c = CityEditController()..set(CityEditTool.roadSpline);
+    for (final p in const [Vec2(0, -150), Vec2(0, 150)]) {
+      c.addSplinePoint(p);
+    }
+    c.commitSpline(city);
+
+    final lot = city.layout.autoParcels.first;
+    city.stock['ore'] = 500;
+    c.pickUtil(kUtilCatalog.firstWhere((s) => s.label == 'Clinic'));
+    c.applyToLot(city, lot.id);
+    expect(city.parcelBuildings[lot.id], isNotNull);
+
+    c.set(CityEditTool.bulldoze);
+    c.applyToLot(city, lot.id);
+    expect(city.parcelBuildings[lot.id], isNull);
+    expect(
+        city.layout.parcels.firstWhere((p) => p.id == lot.id).use,
+        ParcelUse.unzoned);
+    // The lot itself survives — clearing a building is not deleting the land.
+    expect(city.layout.parcels.any((p) => p.id == lot.id), isTrue);
+  });
+
+  test('the editor writes nothing to the cell grid at all', () {
+    final city = colony();
+    final before = city.roads.length; // the founding hub road
+    final c = CityEditController()..set(CityEditTool.roadSpline);
+    for (final p in const [Vec2(-100, -100), Vec2(0, 0), Vec2(120, 140)]) {
+      c.addSplinePoint(p);
+    }
+    c.commitSpline(city);
+
+    final lot = city.layout.autoParcels.first;
+    city.stock['ore'] = 900;
+    c.pickUtil(kUtilCatalog.firstWhere((s) => s.label == 'Clinic'));
+    c.applyToLot(city, lot.id);
+    c.pickZone('residential', Density.low);
+    c.applyToLot(city, city.layout.autoParcels[1].id);
+
+    expect(city.zones, isEmpty);
+    expect(city.utils, isEmpty);
+    expect(city.roads.length, before,
+        reason: 'roads are splines now, not tiles');
+  });
 }

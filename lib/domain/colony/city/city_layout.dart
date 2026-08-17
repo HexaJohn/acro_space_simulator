@@ -127,6 +127,29 @@ class CityLayout {
     regenerate();
   }
 
+  /// Zone a parcel.
+  ///
+  /// Parcels are immutable values, so this replaces the entry rather than
+  /// mutating it — which also means a regenerate wipes the zoning of AUTO
+  /// lots, exactly as it wipes the lots themselves. Manual lots keep theirs.
+  bool setUse(String id, ParcelUse use) {
+    for (var i = 0; i < _manual.length; i++) {
+      if (_manual[i].id == id) {
+        _manual[i] = _manual[i].copyWith(use: use);
+        return true;
+      }
+    }
+    final auto = List.of(_auto);
+    for (var i = 0; i < auto.length; i++) {
+      if (auto[i].id == id) {
+        auto[i] = auto[i].copyWith(use: use);
+        _auto = auto;
+        return true;
+      }
+    }
+    return false;
+  }
+
   /// The parcel under a point, or null. Manual lots win.
   Parcel? parcelAt(Vec2 p) {
     for (final parcel in parcels) {

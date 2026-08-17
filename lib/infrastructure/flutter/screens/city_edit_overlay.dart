@@ -134,6 +134,39 @@ class CityEditController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Apply the held tool to a PARCEL.
+  ///
+  /// The parcel path is the one the in-flight editor uses for everything now.
+  /// A lot knows its own size, frontage and orientation, so none of the cell
+  /// path's questions — does the footprint fit, is it road-adjacent, which way
+  /// does it face — have to be asked.
+  void applyToLot(CitySim city, String parcelId) {
+    blocked = null;
+    switch (tool) {
+      case CityEditTool.utility:
+        applyToParcel(city, parcelId);
+      case CityEditTool.zone:
+        city.layout.setUse(parcelId, _useForKind());
+        notifyListeners();
+      case CityEditTool.bulldoze:
+        city.parcelBuildings.remove(parcelId);
+        city.layout.setUse(parcelId, ParcelUse.unzoned);
+        notifyListeners();
+      case CityEditTool.inspect:
+      case CityEditTool.roadSpline:
+      case CityEditTool.road:
+      case CityEditTool.retrofit:
+      case CityEditTool.support:
+        return;
+    }
+  }
+
+  ParcelUse _useForKind() => switch (zoneKind) {
+        'commercial' => ParcelUse.commercial,
+        'industrial' => ParcelUse.industrial,
+        _ => ParcelUse.residential,
+      };
+
   /// Place the held building on the parcel [parcelId].
   ///
   /// The parcel path bypasses the cell rules entirely: a lot already knows its
@@ -269,12 +302,9 @@ class CityEditOverlay extends StatelessWidget {
                 child: Row(mainAxisSize: MainAxisSize.min, children: [
                 _tool(CityEditTool.inspect, Icons.search, 'Look'),
                 _tool(CityEditTool.zone, Icons.grid_view, 'Zone'),
-                _tool(CityEditTool.road, Icons.add_road, 'Road'),
-                _tool(CityEditTool.roadSpline, Icons.timeline, 'Draw Road'),
+                _tool(CityEditTool.roadSpline, Icons.timeline, 'Road'),
                 _tool(CityEditTool.utility, Icons.factory, 'Build'),
                 _tool(CityEditTool.bulldoze, Icons.clear, 'Clear'),
-                _tool(CityEditTool.retrofit, Icons.sync, 'Retrofit'),
-                _tool(CityEditTool.support, Icons.foundation, 'Support'),
                 const SizedBox(width: 8),
                 _stat('§', city.funds),
                 _stat('Ore', city.stockOf('ore')),
