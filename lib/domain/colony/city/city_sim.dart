@@ -3226,6 +3226,23 @@ class CitySim {
     }
   }
 
+  /// Draw a road through the editor: junctions split, lots re-cut, and every
+  /// building keyed by a renamed lot carried across to the lot now standing on
+  /// the same ground.
+  String commitRoad(List<Vec2> controls, RoadClass roadClass) {
+    final result =
+        layout.commitRoad(controls: controls, roadClass: roadClass);
+    for (final e in result.renamedLots.entries) {
+      final placed = parcelBuildings.remove(e.key);
+      if (placed != null) parcelBuildings[e.value] = placed;
+      final grown = grownParcels.remove(e.key);
+      if (grown != null) grownParcels[e.value] = grown;
+      final fire = lotFires.remove(e.key);
+      if (fire != null) lotFires[e.value] = fire;
+    }
+    return result.roadId;
+  }
+
   /// Grow (or abandon) buildings on zoned lots under RCI demand.
   ///
   /// Mirrors the cell system's rules: growth needs a SERVED lot and demand
@@ -3276,8 +3293,11 @@ class CitySim {
       if (l == null) continue;
       // ~30 built lots' worth of activity per lane before gridlock. Low
       // enough that a street of towers chokes, high enough that the same
-      // district on a highway breathes — lanes must buy something.
-      peak = math.max(peak, l / (road.roadClass.lanesEachWay * 30.0));
+      // district on a highway breathes — lanes must buy something. A dirt
+      // path carries a fraction of that: the first upgrade pressure a young
+      // colony feels.
+      final perLane = road.roadClass.paved ? 30.0 : 8.0;
+      peak = math.max(peak, l / (road.roadClass.lanesEachWay * perLane));
     }
     parcelCongestion = peak.clamp(0.0, 1.0);
   }

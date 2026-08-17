@@ -71,8 +71,6 @@ class CityEditController extends ChangeNotifier {
   /// Build-palette filter, lowercased on read. Same search the 2D builder has.
   String buildSearch = '';
 
-  int _roadSeq = 0;
-
   /// Add a control point to the road being drawn.
   void addSplinePoint(Vec2 p) {
     // Skip points a hand-drag dumps almost on top of each other: they make the
@@ -82,7 +80,8 @@ class CityEditController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Commit the drawn road and re-cut the parcels around it.
+  /// Commit the drawn road: junctions split, lots re-cut, buildings carried
+  /// across any lot renames.
   void commitSpline(CitySim city) {
     if (pending.length < 2) {
       pending.clear();
@@ -93,11 +92,7 @@ class CityEditController extends ChangeNotifier {
       frontageM: frontageM,
       depthM: lotDepthM,
     );
-    city.layout.addRoad(RoadSpline(
-      id: 'road-${_roadSeq++}',
-      roadClass: roadClass,
-      controls: List.of(pending),
-    ));
+    city.commitRoad(List.of(pending), roadClass);
     pending.clear();
     notifyListeners();
   }

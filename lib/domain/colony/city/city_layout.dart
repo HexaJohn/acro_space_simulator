@@ -98,9 +98,213 @@ class CityLayout {
   List<Parcel> get autoParcels => List.unmodifiable(_auto);
   List<Parcel> get manualParcels => List.unmodifiable(_manual);
 
+  /// Raw insert: no splitting, no snapping. The LOAD path — a save stores
+  /// roads already split at their junctions, and re-splitting on restore
+  /// would double every cut. The editor goes through [commitRoad].
   void addRoad(RoadSpline road) {
     _roads[road.id] = road;
+    final m = RegExp(r'^r(\d+)').firstMatch(road.id);
+    if (m != null) {
+      final n = int.parse(m.group(1)!);
+      if (n >= _commitSeq) _commitSeq = n + 1;
+    }
     regenerate();
+  }
+
+  int _commitSeq = 0;
+
+  List<({RoadSpline road, List<Vec2> pts})> _obstacles = const [];
+
+  /// The nearest point on any road within [withinM] of [p], for endpoint
+  /// snapping — drawing toward an existing street should join it, not stop a
+  /// metre short of it.
+  ({String roadId, Vec2 point})? nearestRoadPoint(Vec2 p, {double withinM = 15}) {
+    String? bestId;
+    Vec2? bestPt;
+    var best = withinM;
+    for (final road in _roads.values) {
+      final pts = road.sample(stepM: 4);
+      for (var i = 1; i < pts.length; i++) {
+        final a = pts[i - 1], b = pts[i];
+        final ab = b - a;
+        final len2 = ab.dot(ab);
+        final t = len2 <= 1e-12
+            ? 0.0
+            : ((p - a).dot(ab) / len2).clamp(0.0, 1.0);
+        final q = a + ab * t;
+        final d = p.distanceTo(q);
+        if (d < best) {
+          best = d;
+          bestId = road.id;
+          bestPt = q;
+        }
+      }
+    }
+    return bestId == null ? null : (roadId: bestId, point: bestPt!);
+  }
+
+  /// Add a road THE EDITOR way: split it and everything it crosses at the
+  /// junctions, so intersections are real topology rather than two ribbons
+  /// overlapping.
+  ///
+  /// Splitting renames the cut roads' segments, which renames their LOTS —
+  /// and buildings are keyed by lot id. The returned map (old lot id -> new
+  /// lot id, matched by centroid containment) is how the caller carries its
+  /// buildings across the rename; without it, crossing a road through a built
+  /// district would orphan every building on it.
+  ({String roadId, Map<String, String> renamedLots}) commitRoad({
+    required List<Vec2> controls,
+    RoadClass roadClass = RoadClass.street,
+    double snapM = 15,
+  }) {
+    // Where every keyed thing stood, before the ground moves.
+    final before = <String, Vec2>{
+      for (final p in autoParcels) p.id: p.centroid,
+    };
+
+    final id = 'r${_commitSeq++}';
+    var pts =
+        RoadSpline(id: id, controls: controls, roadClass: roadClass)
+            .sample(stepM: 2);
+
+    // Endpoint snap: an end drawn near an existing road lands ON it.
+    for (final endIndex in [0, pts.length - 1]) {
+      final hit = nearestRoadPoint(pts[endIndex], withinM: snapM);
+      if (hit != null) pts[endIndex] = hit.point;
+    }
+
+    // Crossings with every existing road, in both parametrisations.
+    final newCuts = <double>{};
+    final existingCuts = <String, Set<double>>{};
+    final newCum = _cumulative(pts);
+    for (final other in _roads.values.toList()) {
+      final opts = other.sample(stepM: 2);
+      final ocum = _cumulative(opts);
+      for (var i = 1; i < pts.length; i++) {
+        for (var j = 1; j < opts.length; j++) {
+          final hit =
+              segmentSegment(pts[i - 1], pts[i], opts[j - 1], opts[j]);
+          if (hit == null) continue;
+          final sNew = newCum[i - 1] +
+              (newCum[i] - newCum[i - 1]) * hit.$1;
+          final sOld =
+              ocum[j - 1] + (ocum[j] - ocum[j - 1]) * hit.$2;
+          // Ends meeting a road are junctions, not cuts of the new road.
+          if (sNew > 6 && sNew < newCum.last - 6) newCuts.add(sNew);
+          if (sOld > 6 && sOld < ocum.last - 6) {
+            existingCuts.putIfAbsent(other.id, () => {}).add(sOld);
+          }
+        }
+      }
+    }
+
+    // Split the crossed roads.
+    existingCuts.forEach((rid, cuts) {
+      final road = _roads.remove(rid)!;
+      final pieces = _splitPolyline(road.sample(stepM: 2), cuts.toList());
+      for (var i = 0; i < pieces.length; i++) {
+        _roads['${rid}x$i'] = RoadSpline(
+          id: '${rid}x$i',
+          roadClass: road.roadClass,
+          controls: _decimate(pieces[i]),
+        );
+      }
+    });
+
+    // And the new one.
+    final pieces = _splitPolyline(pts, newCuts.toList());
+    for (var i = 0; i < pieces.length; i++) {
+      final pid = pieces.length == 1 ? id : '${id}x$i';
+      _roads[pid] = RoadSpline(
+        id: pid,
+        roadClass: roadClass,
+        controls: _decimate(pieces[i]),
+      );
+    }
+    regenerate();
+
+    // Old lot -> the new lot standing on the same ground.
+    final renamed = <String, String>{};
+    final newIds = {for (final p in autoParcels) p.id};
+    before.forEach((oldId, centroid) {
+      if (newIds.contains(oldId)) return; // survived the cut untouched
+      final now = parcelAt(centroid);
+      if (now != null && !now.manual) renamed[oldId] = now.id;
+    });
+    // Zoning rides along.
+    for (final e in renamed.entries) {
+      final use = _uses.remove(e.key);
+      if (use != null) {
+        _uses[e.value] = use;
+      }
+    }
+    if (renamed.isNotEmpty) regenerate(); // re-apply the moved zoning
+
+    return (roadId: id, renamedLots: renamed);
+  }
+
+  static List<double> _cumulative(List<Vec2> pts) {
+    final cum = <double>[0];
+    for (var i = 1; i < pts.length; i++) {
+      cum.add(cum[i - 1] + pts[i].distanceTo(pts[i - 1]));
+    }
+    return cum;
+  }
+
+  /// Cut a polyline at the given arc positions (deduped, sorted).
+  static List<List<Vec2>> _splitPolyline(List<Vec2> pts, List<double> cuts) {
+    if (cuts.isEmpty) return [pts];
+    final cum = _cumulative(pts);
+    // Dedupe near-coincident cuts: a crossing found by two sample pairs is
+    // one junction, not two.
+    final sorted = cuts.toList()..sort();
+    final unique = <double>[];
+    for (final c in sorted) {
+      if (unique.isEmpty || c - unique.last > 2.0) unique.add(c);
+    }
+    final out = <List<Vec2>>[];
+    var piece = <Vec2>[pts.first];
+    var next = 0;
+    for (var i = 1; i < pts.length; i++) {
+      while (next < unique.length &&
+          unique[next] <= cum[i] &&
+          unique[next] > cum[i - 1]) {
+        final segLen = cum[i] - cum[i - 1];
+        final t = segLen <= 1e-9
+            ? 0.0
+            : (unique[next] - cum[i - 1]) / segLen;
+        final cut = pts[i - 1] + (pts[i] - pts[i - 1]) * t;
+        piece.add(cut);
+        out.add(piece);
+        piece = <Vec2>[cut];
+        next++;
+      }
+      piece.add(pts[i]);
+    }
+    out.add(piece);
+    return [
+      for (final p in out)
+        if (_cumulative(p).last > 8) p // drop slivers shorter than a car
+    ];
+  }
+
+  /// Thin a 2 m-sampled polyline back to control points every ~16 m. The
+  /// spline through them reproduces the original curve to well under a lane
+  /// width, and a road stored as 400 controls would make every regenerate pay
+  /// for the editor's sampling rate forever.
+  static List<Vec2> _decimate(List<Vec2> pts) {
+    if (pts.length <= 2) return List.of(pts);
+    final out = <Vec2>[pts.first];
+    var since = 0.0;
+    for (var i = 1; i < pts.length - 1; i++) {
+      since += pts[i].distanceTo(pts[i - 1]);
+      if (since >= 16) {
+        out.add(pts[i]);
+        since = 0;
+      }
+    }
+    out.add(pts.last);
+    return out;
   }
 
   void removeRoad(String id) {
@@ -198,6 +402,11 @@ class CityLayout {
   /// Re-cut every auto parcel from the current roads and settings.
   void regenerate() {
     version++;
+    // Coarse samples of every road, shared by all the ray casts below. Without
+    // the cache each lot's depth probe would re-sample the whole network.
+    _obstacles = [
+      for (final r in _roads.values) (road: r, pts: r.sample(stepM: 6)),
+    ];
     final out = <Parcel>[];
     for (final road in _roads.values) {
       out.addAll(_subdivide(road, out));
@@ -210,23 +419,19 @@ class CityLayout {
     ];
   }
 
-  /// Lay lots along one road.
+  /// Lay lots along one road, the way a surveyor actually plats a block.
   ///
-  /// The centreline is walked at a fine step and lots are emitted whenever a
-  /// full frontage of arc length has accumulated. Working in arc length rather
-  /// than in control-point spans is what keeps lot widths even around a curve —
-  /// stepping by parameter instead would make outside-of-the-bend lots wider
-  /// than inside ones.
+  /// Frontages are still cut at even arc-length intervals — that part of real
+  /// subdivision IS regular — but each lot's DEPTH is found by casting rays
+  /// into the block: a lot runs back until it meets the lots of the facing
+  /// street at the block's midline, or reaches the maximum depth where the
+  /// block is open. Corners are then clipped against the crossing street's
+  /// setback. The result is what plat maps look like: even fronts, ragged
+  /// backs, angled corner lots — and no dead ground between facing streets.
   List<Parcel> _subdivide(RoadSpline road, List<Parcel> soFar) {
     final pts = road.sample(stepM: 2.0);
     if (pts.length < 2) return const [];
-    // Cumulative arc length, so cuts land at exact frontage distances instead
-    // of snapping to whichever sample happened to cross the threshold — that
-    // rounding is what would make lot widths drift by up to a sample step.
-    final cum = <double>[0];
-    for (var i = 1; i < pts.length; i++) {
-      cum.add(cum[i - 1] + pts[i].distanceTo(pts[i - 1]));
-    }
+    final cum = _cumulative(pts);
     final total = cum.last;
     final start = _settings.cornerClearM;
     final end = total - _settings.cornerClearM;
@@ -244,29 +449,125 @@ class CityLayout {
       while (s < end - 1e-6) {
         var s1 = s + _settings.frontageM;
         if (s1 > end) {
-          // Trailing remainder: keep it only if it is a usable lot, else stop.
           if (end - s < _settings.frontageM * _settings.minFrontageFraction) {
             break;
           }
           s1 = end;
         }
-        final parcel = _lot(
-          road,
-          _pointAt(pts, cum, s),
-          _pointAt(pts, cum, s1),
-          side,
-          setback,
-          index++,
+        final a = _pointAt(pts, cum, s);
+        final b = _pointAt(pts, cum, s1);
+        final outA = _outwardAt(pts, cum, s) * side;
+        final outB = _outwardAt(pts, cum, s1) * side;
+        final frontA = a + outA * setback;
+        final frontB = b + outB * setback;
+
+        // Depth per corner: to the block midline against whatever the ray
+        // hits, or the configured depth where the block is open.
+        final dA = _depthAt(frontA, outA, road);
+        final dB = _depthAt(frontB, outB, road);
+        final lotIndex = index++;
+        s = s1;
+        if (math.min(dA, dB) < 8) continue; // an alley, not a lot
+
+        var poly = <Vec2>[
+          frontA,
+          frontB,
+          frontB + outB * dB,
+          frontA + outA * dA,
+        ];
+        poly = _clipAgainstRoads(poly, road);
+        if (poly.length < 3) continue;
+
+        final parcel = Parcel(
+          id: 'lot-${road.id}-${side > 0 ? 'r' : 'l'}$lotIndex',
+          polygon: poly,
+          roadId: road.id,
+          frontage: (frontA, frontB),
         );
-        if (parcel != null &&
-            !_hitsRoad(parcel, exclude: road.id) &&
-            !_clashes(parcel, [...soFar, ...out, ..._manual])) {
+        if (parcel.area < 30) continue;
+        if (!_clashes(parcel, [...soFar, ...out, ..._manual])) {
           out.add(parcel);
         }
-        s = s1;
       }
     }
     return out;
+  }
+
+  /// Outward unit normal of the centreline at arc position [s] (left side;
+  /// the caller flips it for the right).
+  Vec2 _outwardAt(List<Vec2> pts, List<double> cum, double s) {
+    final ahead = _pointAt(pts, cum, math.min(s + 2, cum.last));
+    final behind = _pointAt(pts, cum, math.max(s - 2, 0));
+    final along = (ahead - behind);
+    return along.length <= 1e-9 ? const Vec2(1, 0) : along.normalized.perp;
+  }
+
+  /// How deep a lot may run from [front] along [outward].
+  ///
+  /// Rays at every OTHER road: the nearest hit, less that road's own setback,
+  /// is the gap across the block — and the lot takes half of it, which is the
+  /// planning rule that makes facing streets' lots meet at the midline with
+  /// no sliver of dead ground between them. An open block runs to the
+  /// configured depth.
+  double _depthAt(Vec2 front, Vec2 outward, RoadSpline own) {
+    final probe = _settings.depthM * 3;
+    var nearest = double.infinity;
+    for (final ob in _obstacles) {
+      if (identical(ob.road, own) || ob.road.id == own.id) continue;
+      for (var i = 1; i < ob.pts.length; i++) {
+        final t = raySegment(front, outward, ob.pts[i - 1], ob.pts[i]);
+        if (t == null || t > probe) continue;
+        final gap = t - (ob.road.halfWidth + _settings.sidewalkM);
+        if (gap < nearest) nearest = gap;
+      }
+    }
+    if (nearest == double.infinity) return _settings.depthM;
+    return math.min(_settings.depthM, nearest / 2);
+  }
+
+  /// Clip a lot against every foreign carriageway it strays near, so corner
+  /// lots end at the crossing street's setback instead of poking into the
+  /// junction. Local straight-line approximation of the other road — lots are
+  /// small against any road's curvature.
+  List<Vec2> _clipAgainstRoads(List<Vec2> poly, RoadSpline own) {
+    var clipped = poly;
+    for (final ob in _obstacles) {
+      if (clipped.length < 3) return clipped;
+      if (identical(ob.road, own) || ob.road.id == own.id) continue;
+      final margin = ob.road.halfWidth + _settings.sidewalkM;
+      // Broad phase: any vertex near this road?
+      var near = false;
+      for (final v in clipped) {
+        if (ob.road.distanceTo(v) < margin) {
+          near = true;
+          break;
+        }
+      }
+      if (!near) continue;
+      // Local line: the obstacle's nearest sample pair to the lot.
+      var c = const Vec2(0, 0);
+      for (final v in clipped) {
+        c = c + v;
+      }
+      c = c * (1.0 / clipped.length);
+      var bi = 1;
+      var best = double.infinity;
+      for (var i = 1; i < ob.pts.length; i++) {
+        final m = (ob.pts[i - 1] + ob.pts[i]) * 0.5;
+        final d = c.distanceTo(m);
+        if (d < best) {
+          best = d;
+          bi = i;
+        }
+      }
+      final p = ob.pts[bi - 1];
+      final along = (ob.pts[bi] - p);
+      if (along.length <= 1e-9) continue;
+      var n = along.normalized.perp;
+      if (n.dot(c - p) < 0) n = n * -1.0; // keep the lot's own side
+      clipped = clipHalfPlane(clipped, p, n, margin);
+    }
+    return clipped;
   }
 
   /// Point at arc length [s] along the sampled polyline.
@@ -283,34 +584,6 @@ class CityLayout {
       }
     }
     return pts.last;
-  }
-
-  /// Build one lot quad spanning centreline points [a]..[b] on [side].
-  Parcel? _lot(RoadSpline road, Vec2 a, Vec2 b, double side, double setback,
-      int index) {
-    final along = (b - a);
-    if (along.length < 1e-6) return null;
-    // Outward normal for this side of the road.
-    final outward = along.normalized.perp * side;
-    final frontA = a + outward * setback;
-    final frontB = b + outward * setback;
-    final backB = frontB + outward * _settings.depthM;
-    final backA = frontA + outward * _settings.depthM;
-    // Wind counter-clockwise: on the -1 side the frontage runs the other way.
-    final poly = side > 0
-        ? [frontA, frontB, backB, backA]
-        : [frontB, frontA, backA, backB];
-    final frontage = side > 0 ? (frontA, frontB) : (frontB, frontA);
-    return Parcel(
-      // DETERMINISTIC id — road, side, position along it — so a lot keeps
-      // its identity across regenerations. Buildings are keyed by lot id, and
-      // a save that replays its roads must produce the same ids or every
-      // building in it dangles. A counter here did exactly that.
-      id: 'lot-${road.id}-${side > 0 ? 'r' : 'l'}$index',
-      polygon: poly,
-      roadId: road.id,
-      frontage: frontage,
-    );
   }
 
   /// Does this parcel sit on any carriageway? Tested against the road centre

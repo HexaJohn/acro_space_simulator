@@ -68,7 +68,13 @@ enum RoadClass {
   avenue('Avenue', 16.0, 2),
 
   /// Grade-separated link between districts and out to the industrial sites.
-  highway('Highway', 32.0, 4);
+  highway('Highway', 32.0, 4),
+
+  /// A graded dirt track — the first road a colony has. Cheap, slow, unlit.
+  ///
+  /// Appended after the paved tiers because saves persist this enum by INDEX;
+  /// inserting it first would turn every saved street into a path.
+  path('Dirt Path', 4.0, 1);
 
   final String label;
 
@@ -79,6 +85,11 @@ enum RoadClass {
   final int lanesEachWay;
 
   const RoadClass(this.label, this.width, this.lanesEachWay);
+
+  /// Whether this tier is paved — drives the surface texture, the lamps, and
+  /// the traffic capacity. A dirt path is a road to the network and a track to
+  /// everything else.
+  bool get paved => this != RoadClass.path;
 
   double get halfWidth => width / 2;
 }
@@ -186,6 +197,56 @@ class RoadSpline {
   }
 }
 
+/// Intersection parameter of ray (o, d) with segment p->q, or null.
+///
+/// Returns the ray's t (metres along [d] when it is unit length). The graph
+/// and the lot subdivision both live on this: junction finding is
+/// segment-segment intersection, and lot depth is a ray cast at the block.
+double? raySegment(Vec2 o, Vec2 d, Vec2 p, Vec2 q) {
+  final r = q - p;
+  final denom = d.cross(r);
+  if (denom.abs() < 1e-12) return null; // parallel
+  final w = p - o;
+  final t = w.cross(r) / denom;
+  final u = w.cross(d) / denom;
+  if (t < 0 || u < -1e-9 || u > 1 + 1e-9) return null;
+  return t;
+}
+
+/// Intersection of segments a0->a1 and b0->b1 as (paramA, paramB), or null.
+(double, double)? segmentSegment(Vec2 a0, Vec2 a1, Vec2 b0, Vec2 b1) {
+  final d = a1 - a0;
+  final r = b1 - b0;
+  final denom = d.cross(r);
+  if (denom.abs() < 1e-12) return null;
+  final w = b0 - a0;
+  final t = w.cross(r) / denom;
+  final u = w.cross(d) / denom;
+  if (t < -1e-9 || t > 1 + 1e-9 || u < -1e-9 || u > 1 + 1e-9) return null;
+  return (t.clamp(0.0, 1.0), u.clamp(0.0, 1.0));
+}
+
+/// Clip [poly] to the half-plane `n . (x - p) >= keep` (Sutherland-Hodgman).
+///
+/// Convex in, convex out — which holds for every lot this file cuts, since
+/// they start as quads and only ever lose corners to half-planes.
+List<Vec2> clipHalfPlane(List<Vec2> poly, Vec2 p, Vec2 n, double keep) {
+  if (poly.isEmpty) return poly;
+  final out = <Vec2>[];
+  double side(Vec2 v) => n.dot(v - p) - keep;
+  for (var i = 0; i < poly.length; i++) {
+    final a = poly[i];
+    final b = poly[(i + 1) % poly.length];
+    final sa = side(a), sb = side(b);
+    if (sa >= 0) out.add(a);
+    if ((sa >= 0) != (sb >= 0)) {
+      final t = sa / (sa - sb);
+      out.add(a + (b - a) * t);
+    }
+  }
+  return out;
+}
+
 double _distanceToSegment(Vec2 p, Vec2 a, Vec2 b) {
   final ab = b - a;
   final len2 = ab.dot(ab);
@@ -279,9 +340,15 @@ class Parcel {
   /// Yaw (radians, north-toward-east) for a building placed on this lot.
   double get heading => facing.heading;
 
-  /// The largest axis-aligned-to-the-frontage rectangle that fits, as
-  /// (width along the frontage, depth away from it). Building generators size
-  /// their massing to this rather than to a cell count.
+  /// The SAFE building envelope, as (width along the frontage, depth away
+  /// from it).
+  ///
+  /// Width spans the frontage; depth is the distance to the NEAREST back
+  /// vertex, not the farthest. Lots are irregular now — slanted backs against
+  /// a facing street, corners clipped at a junction — and a building sized to
+  /// the bounding box would overhang the clipped part of its own lot. The
+  /// conservative depth keeps the building inside the polygon; the slack
+  /// beyond it is the yard.
   ({double width, double depth}) get buildableExtent {
     if (polygon.isEmpty) return (width: 0, depth: 0);
     final f = frontage;
@@ -296,7 +363,19 @@ class Parcel {
       if (b < minB) minB = b;
       if (b > maxB) maxB = b;
     }
-    return (width: maxA - minA, depth: maxB - minB);
+    final width = maxA - minA;
+    var depth = maxB - minB;
+    if (f != null) {
+      final frontB = f.$1.dot(away);
+      var nearestBack = double.infinity;
+      for (final p in polygon) {
+        final d = (p.dot(away) - frontB).abs();
+        // Vertices ON the frontage edge are the front, not a shallow back.
+        if (d > 1.0 && d < nearestBack) nearestBack = d;
+      }
+      if (nearestBack.isFinite) depth = math.min(depth, nearestBack);
+    }
+    return (width: width, depth: depth);
   }
 
   bool contains(Vec2 p) {
