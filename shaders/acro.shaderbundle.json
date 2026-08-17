@@ -7,6 +7,10 @@
         "type": "fragment",
         "file": "shaders/ring.frag"
     },
+    "GravityGridFragment": {
+        "type": "fragment",
+        "file": "shaders/gravity_grid.frag"
+    },
     "TerrainFragment": {
         "type": "fragment",
         "file": "shaders/terrain.frag"

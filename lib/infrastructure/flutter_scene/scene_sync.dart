@@ -11,6 +11,7 @@ import 'package:flutter_scene/scene.dart' as fs;
 import 'package:vector_math/vector_math.dart' as vm;
 
 import '../../adapters/presenters/camera_view.dart';
+import '../../application/snapshot/planner_overlay.dart';
 import '../../application/snapshot/world_snapshot.dart';
 import '../../domain/shared/vector3.dart';
 import '../flutter/texture_cache.dart';
@@ -20,8 +21,10 @@ import 'cloud_nodes.dart';
 import 'coord_convert.dart';
 import 'environment_baker.dart';
 import 'exhaust_nodes.dart';
+import 'gravity_grid_nodes.dart';
 import 'impact_fx_nodes.dart';
 import 'line_nodes.dart';
+import 'planner_plane_nodes.dart';
 import 'ring_nodes.dart';
 import 'scene_textures.dart';
 import 'star_bloom_nodes.dart';
@@ -52,9 +55,11 @@ class SceneSync {
     _exhaust = ExhaustNodes(scene);
     _impactFx = ImpactFxNodes(scene);
     _lines = LineNodes(scene);
+    _plannerPlane = PlannerPlaneNodes(scene);
     _atmospheres = AtmosphereNodes(scene);
     _clouds = CloudNodes(scene);
     _rings = RingNodes(scene, _textures);
+    _gravityGrid = GravityGridNodes(scene);
     _environment = PlanetEnvironmentBaker(scene, _textures);
     _terrain = TerrainNodes(scene);
     _scatter = ScatterNodes(scene);
@@ -70,9 +75,11 @@ class SceneSync {
   late final ExhaustNodes _exhaust;
   late final ImpactFxNodes _impactFx;
   late final LineNodes _lines;
+  late final PlannerPlaneNodes _plannerPlane;
   late final AtmosphereNodes _atmospheres;
   late final CloudNodes _clouds;
   late final RingNodes _rings;
+  late final GravityGridNodes _gravityGrid;
   late final PlanetEnvironmentBaker _environment;
   late final TerrainNodes _terrain;
   late final ScatterNodes _scatter;
@@ -92,6 +99,7 @@ class SceneSync {
     String? focusVesselId,
     String? focusBodyId,
     Vector3? focusWorldOverride,
+    PlannerOverlay? planner,
   }) {
     origin.focusWorld =
         focusWorldOverride ?? _focusWorld(snap, focusVesselId, focusBodyId);
@@ -124,8 +132,10 @@ class SceneSync {
           camera: camera,
           viewport: viewport,
           focusVesselId: focusVesselId,
-          focusBodyId: focusBodyId);
+          focusBodyId: focusBodyId,
+          planner: planner);
     }
+    _plannerPlane.update(snap, origin, planner);
     mark('lines');
     if (!_noAtmo) {
       _atmospheres.update(
@@ -146,6 +156,7 @@ class SceneSync {
     }
     _rings.update(snap, origin,
         camera: camera, starWorld: _bodies.starWorld(snap));
+    _gravityGrid.update(snap, origin, camera: camera);
     mark('atmo+rings');
     _terrain.update(
       snap,

@@ -8,11 +8,13 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter_scene/scene.dart' as fs;
 
 import '../../adapters/presenters/camera_view.dart';
+import '../../application/snapshot/planner_overlay.dart';
 import '../../application/snapshot/world_snapshot.dart';
 import '../../domain/shared/vector3.dart';
 import '../flutter/texture_cache.dart';
 import 'atmosphere_nodes.dart';
 import 'cloud_nodes.dart';
+import 'gravity_grid_nodes.dart';
 import 'ring_nodes.dart';
 import 'scatter/scatter_prop_library.dart';
 import 'terrain/terrain_nodes.dart';
@@ -35,6 +37,7 @@ class SceneRenderView extends StatefulWidget {
     this.focusVesselId,
     this.focusBodyId,
     this.focusWorldOverride,
+    this.planner,
   });
 
   /// The app camera for this frame (shared with the software renderer).
@@ -55,6 +58,10 @@ class SceneRenderView extends StatefulWidget {
   /// Freecam: when set, the floating origin follows this absolute world
   /// position (metres) instead of the focus target.
   final Vector3? focusWorldOverride;
+
+  /// Encounter-planner render feed (plane + planned trajectory), or null
+  /// when the planner is closed.
+  final PlannerOverlay? planner;
 
   @override
   State<SceneRenderView> createState() => _SceneRenderViewState();
@@ -88,6 +95,9 @@ class _SceneRenderViewState extends State<SceneRenderView> {
     });
     RingNodes.loadShader().catchError((Object e) {
       debugPrint('ring shader load failed: $e');
+    });
+    GravityGridNodes.loadShader().catchError((Object e) {
+      debugPrint('gravity grid shader load failed: $e');
     });
     CloudNodes.loadShader().catchError((Object e) {
       debugPrint('cloud shader load failed: $e');
@@ -146,6 +156,7 @@ class _SceneRenderViewState extends State<SceneRenderView> {
           focusVesselId: widget.focusVesselId,
           focusBodyId: widget.focusBodyId,
           focusWorldOverride: widget.focusWorldOverride,
+          planner: widget.planner,
         );
       }
       // Strip expansion is copy-on-write inside updateForCamera and, like

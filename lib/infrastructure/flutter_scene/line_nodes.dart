@@ -10,6 +10,7 @@ import 'package:flutter_scene/scene.dart' as fs;
 import 'package:vector_math/vector_math.dart' as vm;
 
 import '../../adapters/presenters/camera_view.dart';
+import '../../application/snapshot/planner_overlay.dart';
 import '../../application/snapshot/world_snapshot.dart';
 import '../../domain/shared/vector3.dart';
 import 'coord_convert.dart';
@@ -94,13 +95,23 @@ class LineNodes {
   };
   static final vm.Vector4 _railFallback = vm.Vector4(0.55, 0.62, 0.7, 0.85);
 
+  // Encounter-planner styling: planned legs amber (later legs dimmer), the
+  // AN/DN node line violet, closest-approach pair red.
+  static final vm.Vector4 _planColor = vm.Vector4(1.0, 0.72, 0.30, 0.95);
+  static final vm.Vector4 _planDimColor = vm.Vector4(1.0, 0.72, 0.30, 0.5);
+  static final vm.Vector4 _planNodeColor = vm.Vector4(1.0, 0.9, 0.6, 1.0);
+  static final vm.Vector4 _planNodeLineColor =
+      vm.Vector4(0.75, 0.55, 1.0, 0.55);
+  static final vm.Vector4 _planCaColor = vm.Vector4(1.0, 0.4, 0.4, 0.95);
+
   /// Refresh CPU-side line specs from this frame's snapshot. GPU work
   /// happens later in [updateForCamera].
   void update(WorldSnapshot snap, FloatingOrigin origin,
       {SceneCamera? camera,
       ui.Size? viewport,
       String? focusVesselId,
-      String? focusBodyId}) {
+      String? focusBodyId,
+      PlannerOverlay? planner}) {
     final seen = <String>{};
 
     // Body orbit rails (closed rings, root-relative metres).
@@ -258,6 +269,87 @@ class LineNodes {
           ];
           _setSpec('trail/${v.id}', seen, pts, _trailColor,
               width: 2.0, perVertexColor: colors);
+        }
+      }
+    }
+
+    // Encounter-planner overlay: planned legs, burn-node marker, AN/DN line,
+    // closest-approach pair. All positions are body-relative; frame bodies
+    // resolve through the snapshot like vessel trajectories do.
+    if (planner != null) {
+      final frame = snap.bodies[planner.frameBody];
+      for (var k = 0; k < planner.legs.length; k++) {
+        final leg = planner.legs[k];
+        final legBody = snap.bodies[leg.body];
+        if (legBody == null || leg.points.length < 6) continue;
+        final legPos = Vector3(legBody.px, legBody.py, legBody.pz);
+        final world = <Vector3>[
+          for (var i = 0; i + 2 < leg.points.length; i += 3)
+            legPos +
+                Vector3(leg.points[i], leg.points[i + 1], leg.points[i + 2]),
+        ];
+        if (leg.closed) world.add(world.first);
+        final frac = List<double>.filled(world.length, 1.0);
+        final (pts, cols) = _fadedStrip(
+            world, frac, k == 0 ? _planColor : _planDimColor, origin, camera);
+        _setSpec('planner/leg$k', seen, pts, _planColor,
+            width: 2.5, perVertexColor: cols);
+      }
+
+      if (frame != null) {
+        final framePos = Vector3(frame.px, frame.py, frame.pz);
+
+        // Camera-scaled marker ring in the planning plane around a point.
+        void marker(String id, Vector3 world, vm.Vector4 color) {
+          final rel = origin.worldToRel(world);
+          final dist = camera == null
+              ? planner.planeRadiusM * 0.5
+              : (rel - camera.eyeOffset).length;
+          final radius = dist * 0.018;
+          final n = planner.planeNormal;
+          final u = _perpTo(n);
+          final w = n.cross(u).normalized;
+          final pts = <vm.Vector3>[
+            for (var i = 0; i <= 32; i++)
+              relToScene(rel +
+                  (u * math.cos(2 * math.pi * i / 32) +
+                          w * math.sin(2 * math.pi * i / 32)) *
+                      radius),
+          ];
+          _setSpec(id, seen, pts, color, width: 2.5);
+        }
+
+        marker('planner/node', framePos + planner.nodePosition,
+            _planNodeColor);
+
+        final dir = planner.nodeLineDirection;
+        if (dir != null) {
+          final r = planner.planeRadiusM;
+          _setSpec(
+              'planner/nodeline',
+              seen,
+              [
+                origin.worldToScene(framePos - dir * r),
+                origin.worldToScene(framePos),
+                origin.worldToScene(framePos + dir * r),
+              ],
+              _planNodeLineColor,
+              width: 1.5);
+        }
+
+        final caCraft = planner.closeApproachCraft;
+        final caTarget = planner.closeApproachTarget;
+        if (caCraft != null && caTarget != null) {
+          final a = framePos + caCraft;
+          final b = framePos + caTarget;
+          marker('planner/caCraft', a, _planColor);
+          marker('planner/caTarget', b, _planCaColor);
+          _setSpec(
+              'planner/ca',
+              seen,
+              [origin.worldToScene(a), origin.worldToScene(b)],
+              _planCaColor,
+              width: 1.5);
         }
       }
     }
@@ -447,6 +539,13 @@ class LineNodes {
   }
 
   static int _nowMs() => DateTime.now().millisecondsSinceEpoch;
+
+  /// Any unit vector perpendicular to [v] (marker-ring basis).
+  static Vector3 _perpTo(Vector3 v) {
+    final ref = v.x.abs() < 0.9 ? Vector3.unitX : Vector3.unitY;
+    final p = v.cross(ref);
+    return p.length > 1e-12 ? p.normalized : Vector3.unitZ;
+  }
 }
 
 class _LineSpec {

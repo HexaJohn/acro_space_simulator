@@ -38,7 +38,14 @@ fs.PerspectiveCamera toSceneCamera(
   final near = cam is domain.PerspectiveCamera ? cam.near : 1.0;
 
   var eye = cam.eyeOffset;
-  if (cam is OrthoCamera || eye.length < 1.0) {
+  // FIRST PERSON: a perspective camera at range ~0 (the on-foot walk cam) has
+  // its eye ON the focus. That is not a degenerate ortho camera — it is the
+  // real eye — so it must NOT be pushed back onto a synthesized boom, which
+  // would render the walker's own view from half a kilometre behind their
+  // head. lookAt still needs a target distinct from the position: aim down
+  // the view axis instead of at the (coincident) focus.
+  final firstPerson = cam is domain.PerspectiveCamera && eye.length < 1.0;
+  if (cam is OrthoCamera || (eye.length < 1.0 && !firstPerson)) {
     // Perspective-equivalent distance: px-per-metre at the focus matches
     // the ortho scale (focal_px / d == 1 / mpp).
     final mpp = cam is OrthoCamera ? cam.metresPerPixel : 1.0;
@@ -46,6 +53,11 @@ fs.PerspectiveCamera toSceneCamera(
     final d = math.max(focalPx * mpp, 10.0); // metres; floor avoids d ~ 0
     eye = cam.forward * -d;
   }
+  // Aim point in focus-relative metres. Normally the focus itself (the scene
+  // origin); a kilometre down the view axis when the eye is already there —
+  // far enough that the scene-unit position/target pair stays distinct in
+  // float32 (the same reason `up` is scaled before conversion).
+  final aim = firstPerson ? cam.forward * 1e3 : eye * 0;
 
   // DEPTH PRECISION: perspective depth quantization grows as d^2/near. A
   // fixed 1 m near plane with a system-scale far plane leaves a depth
@@ -66,7 +78,7 @@ fs.PerspectiveCamera toSceneCamera(
 
   return fs.PerspectiveCamera(
     position: relToScene(eye),
-    target: relToScene(eye * 0), // the focus == scene origin
+    target: relToScene(aim), // the focus == scene origin
     up: relToScene(cam.up * 1e3), // unit direction; scale cancels kRenderScale
     fovRadiansY: fovY,
     fovNear: lengthToScene(math.max(near, adaptiveNearM)),

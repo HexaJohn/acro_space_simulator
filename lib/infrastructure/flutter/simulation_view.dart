@@ -38,6 +38,7 @@ import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
 
 import '../../adapters/presenters/camera_ground_clamp.dart';
+import '../../adapters/presenters/first_person_walker.dart';
 import '../../adapters/presenters/top_down_snapshot.dart';
 import '../../adapters/wire/flatbuffer_codec.dart';
 import '../../application/snapshot/world_snapshot.dart';
@@ -46,8 +47,12 @@ import '../bridge/sim_bridge.dart';
 import '../../adapters/repositories/in_memory_repositories.dart';
 import '../../adapters/repositories/in_memory_world_repositories.dart';
 import '../../application/persistence/game_state_codec.dart';
+import '../../application/snapshot/planner_overlay.dart';
 import '../../application/usecases/advance_simulation_tick.dart';
+import '../../domain/autonomy/flight_plan.dart' show ManeuverNode;
 import '../../domain/dynamics/state_vector.dart';
+import '../../domain/orbits/encounter_planner.dart';
+import '../../domain/orbits/patched_conic_service.dart' show PatchEndKind;
 import '../../domain/orbits/spawn_presets.dart';
 import '../../domain/orbits/state_vector_converter.dart';
 import '../../domain/simulation/epoch.dart';
@@ -63,6 +68,7 @@ import '../sample_world.dart';
 import '../flutter_scene/atmosphere_nodes.dart';
 import '../flutter_scene/cloud_nodes.dart';
 import '../flutter_scene/environment_baker.dart';
+import '../flutter_scene/gravity_grid_nodes.dart';
 import '../flutter_scene/line_nodes.dart';
 import '../flutter_scene/render_backend.dart';
 import '../flutter_scene/ring_nodes.dart';
@@ -81,10 +87,11 @@ import 'top_down_painter.dart';
 
 part 'simulation_view_debug_panel.dart';
 part 'simulation_view_colony.dart';
+part 'simulation_view_planner.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.3.268-spawn';
+const String kBuildStamp = 'build 0.3.3.269-walk';
 
 /// What the camera treats as "up" while orbiting the focus.
 enum CameraUpMode {
@@ -231,6 +238,19 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   /// leaves a single place to instrument if a rebuild storm ever needs finding.
   void rebuild(VoidCallback fn) => setState(fn);
 
+  // ---- Encounter planner ----
+  // A trial maneuver node the player drags against a target: burn epoch +
+  // PNR delta-v. The plan/overlay are recomputed (throttled) each frame while
+  // active; the overlay feeds the 3D plane + planned-trajectory render.
+  bool _plannerActive = false;
+  int _plannerTargetIndex = -1; // index into _targets; -1 = no target
+  Epoch? _plannerBurnEpoch;
+  double _dvPrograde = 0, _dvNormal = 0, _dvRadial = 0;
+  EncounterPlan? _plan;
+  PlannerOverlay? _plannerOverlay;
+  bool _plannerDirty = true;
+  int _plannerComputedMs = 0;
+
   /// The colony being edited in-world, and the tool held over it.
   CitySim? _editingCity;
   final CityEditController _cityEdit = CityEditController();
@@ -258,11 +278,14 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           elevation: _view.elevation,
           roll: _view.roll,
           frame: _view.frame,
-          range: _range + _focusBodyRadius,
+          // WALK puts the eye exactly AT the anchor (range 0) — first person,
+          // no third-person boom to push through the walls of a habitat.
+          range: _walkMode ? 0.0 : _range + _focusBodyRadius,
           // Range can go to 1 m; a fixed 1 m near plane would clip the
           // whole craft there. Track the range down (never above 1 m so
-          // nothing else changes).
-          near: math.min(1.0, _range * 0.05),
+          // nothing else changes). Walk's range is zero, which would put the
+          // near plane ON the eye — hold it at 10 cm there.
+          near: _walkMode ? 0.1 : math.min(1.0, _range * 0.05),
           fovY: _fovDeg * math.pi / 180,
           viewportH: _screenH,
         ))
@@ -427,6 +450,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         }
       });
     };
+    c.setWalk = (on) {
+      if (!mounted) return;
+      if (on != _walkMode) _toggleWalk();
+    };
     c.freecamToRing = (bodyId, radialMult, zM) {
       if (!mounted) return;
       final snap = _sceneWorld;
@@ -454,6 +481,17 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           'epochS': _clock.epoch.seconds,
           'upMode': _upMode.name,
           'freecam': _freecam,
+          'walk': _walkMode,
+          'walkGrounded': _walkGrounded,
+          // Eye height above the terrain under the walker, metres (null when
+          // not on foot) — the readout a surface capture is framed by.
+          'walkEyeAltM': () {
+            final body = _walkBody;
+            if (!_walkMode || body == null) return null;
+            final r = _freecamRelLocal.length;
+            if (r <= 0) return null;
+            return r - _walkGroundRadius(body, _freecamRelLocal);
+          }(),
           'freePos': () {
             final p = _freecamWorld;
             return [p.x, p.y, p.z];
@@ -507,6 +545,111 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   /// freecam is active (wheel = speed, not zoom, when flying).
   double _freecamSpeedMul = 1.0;
 
+  // WALK: first person on foot. A sub-mode of the freecam — it reuses the
+  // anchor (body-fixed, spin-carried) and the FPS-style look in [_orbitCamera]
+  // wholesale, and only replaces the FLIGHT with surface-bound motion: the
+  // anchor is pinned to terrain height + eye height, WASD moves in the tangent
+  // plane at human pace, and Space hops under the body's own gravity. The eye
+  // sits AT the anchor (range 0), so the anchor IS the head.
+  bool _walkMode = false;
+  double _walkVertVel = 0; // m/s along local up
+  bool _walkGrounded = false;
+  double _rangeBeforeWalk = 100.0; // orbit range restored when walk ends
+
+  /// The body being walked on — the freecam's reference body, resolved in the
+  /// domain (the snapshot carries no terrain field).
+  CelestialBody? get _walkBody {
+    final ref = _freecamRef?.value;
+    return ref == null ? null : _universe.current().body(BodyId(ref));
+  }
+
+  /// Terrain radius (m from centre) under a body-FIXED position, craters and
+  /// all. Round-trips through the inertial frame so it lands on exactly the
+  /// same sampler a craft touches down against.
+  double _walkGroundRadius(CelestialBody body, Vector3 posLocal) =>
+      body.terrainGroundRadius(_refBodyQuat().rotate(posLocal), _clock.epoch,
+          edits: _terrainEdits.forBody(body.id));
+
+  /// Toggle first-person walk. Entering implies freecam (walk owns the same
+  /// anchor) and DROPS the anchor onto the ground beneath wherever the camera
+  /// is looking from — so it doubles as "put me on the surface here".
+  void _toggleWalk() {
+    setState(() {
+      _walkMode = !_walkMode;
+      if (_walkMode) {
+        // Stand where the user is looking FROM, not at what they are looking
+        // AT: a body lock focuses the body's CENTRE, so anchoring on the focus
+        // buried the walker at the core of the planet. The EYE is already
+        // outside, above the ground it is looking down at.
+        final eyeWorld = _currentFocusWorld() + _camera.eyeOffset;
+        _rangeBeforeWalk = _range;
+        if (!_freecam) {
+          _toggleFreecamInner();
+        }
+        _walkVertVel = 0;
+        _walkGrounded = false;
+        final body = _walkBody;
+        if (body != null) {
+          var dir = _refBodyQuat().conjugate.rotate(eyeWorld - _refBodyWorld());
+          // Eye exactly on the axis of a body (or no snapshot yet to place one)
+          // leaves no radial to stand on — start at the north pole rather than
+          // divide by zero.
+          if (dir.length < 1.0) dir = Vector3.unitZ;
+          dir = dir.normalized;
+          _freecamRelLocal = dir * (_walkGroundRadius(body, dir) + walkEyeHeight);
+          _walkGrounded = true;
+        }
+      } else {
+        _range = _rangeBeforeWalk;
+      }
+    });
+  }
+
+  /// One frame of on-foot motion: WASD in the tangent plane, Space jumps,
+  /// Shift runs. Pure motion lives in [stepFirstPersonWalk]; this only feeds
+  /// it the camera heading (rotated into the body-fixed frame the anchor lives
+  /// in), the local gravity, and the terrain sampler.
+  ///
+  /// Runs every frame even with no key down — gravity, the ground clamp and a
+  /// jump in flight all need to keep integrating.
+  void _stepWalk(double moveForward, double moveRight, double frameDt) {
+    final body = _walkBody;
+    if (body == null) return;
+    final dt = frameDt.clamp(0.0, 0.1);
+    if (dt <= 0) return;
+
+    final r = _freecamRelLocal.length;
+    if (r <= 0) return;
+    final gravity = body.mu / (r * r);
+
+    // Camera basis is INERTIAL; the anchor is body-fixed. Rotate the heading
+    // into the rotating frame or the walk direction drifts with the spin.
+    final cam = _camera;
+    final qc = _refBodyQuat().conjugate;
+    final running = _keysDown.contains(LogicalKeyboardKey.shiftLeft) ||
+        _keysDown.contains(LogicalKeyboardKey.shiftRight);
+
+    final step = stepFirstPersonWalk(
+      posLocal: _freecamRelLocal,
+      vertVel: _walkVertVel,
+      grounded: _walkGrounded,
+      forwardLocal: qc.rotate(cam.forward),
+      rightLocal: qc.rotate(cam.right),
+      moveForward: moveForward,
+      moveRight: moveRight,
+      jump: _keysDown.contains(LogicalKeyboardKey.space),
+      dt: dt,
+      gravity: gravity,
+      groundRadiusAt: (p) => _walkGroundRadius(body, p),
+      // The freecam's scroll-wheel speed knob doubles as the walk pace, so a
+      // 40 km hike across a moon does not have to happen at 1.4 m/s.
+      speed: (running ? walkRunSpeed : walkSpeed) * _freecamSpeedMul,
+    );
+    _freecamRelLocal = step.posLocal;
+    _walkVertVel = step.vertVel;
+    _walkGrounded = step.grounded;
+  }
+
   BodySnapshot? _refBody() {
     final ref = _freecamRef?.value;
     if (ref == null) return null;
@@ -533,24 +676,31 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     return b == null ? Vector3.zero : Vector3(b.px, b.py, b.pz);
   }
 
-  void _toggleFreecam() {
-    setState(() {
-      _freecam = !_freecam;
-      if (_freecam) {
-        _freecamRef = _focusBody ?? _lastFocusBody;
-        _freecamRelLocal = _refBodyQuat()
-            .conjugate
-            .rotate(_currentFocusWorld() - _refBodyWorld());
-        _manualControl = false;
-        _craftCam = false;
-        // Fly cam wants the eye AT the anchor: a stale multi-thousand-km
-        // orbit range keeps the camera far away AND (near = range/20)
-        // clips everything within kilometres — the entire ring asteroid
-        // field vanished behind the near plane. The wheel is the speed
-        // knob in freecam, so it can't zoom back in; [ ] still can.
-        _range = math.min(_range, 100.0);
-      }
-    });
+  void _toggleFreecam() => setState(_toggleFreecamInner);
+
+  /// The freecam toggle itself, outside `setState` so walk mode — which turns
+  /// the freecam on as part of its own transition — can reuse it.
+  void _toggleFreecamInner() {
+    _freecam = !_freecam;
+    // Walk is a freecam sub-mode: leaving the freecam leaves the ground too.
+    if (!_freecam && _walkMode) {
+      _walkMode = false;
+      _range = _rangeBeforeWalk;
+    }
+    if (_freecam) {
+      _freecamRef = _focusBody ?? _lastFocusBody;
+      _freecamRelLocal = _refBodyQuat()
+          .conjugate
+          .rotate(_currentFocusWorld() - _refBodyWorld());
+      _manualControl = false;
+      _craftCam = false;
+      // Fly cam wants the eye AT the anchor: a stale multi-thousand-km
+      // orbit range keeps the camera far away AND (near = range/20)
+      // clips everything within kilometres — the entire ring asteroid
+      // field vanished behind the near plane. The wheel is the speed
+      // knob in freecam, so it can't zoom back in; [ ] still can.
+      _range = math.min(_range, 100.0);
+    }
   }
 
   /// Absolute world position (metres) of the current camera focus, from the
@@ -660,6 +810,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     LogicalKeyboardKey.keyQ,
     LogicalKeyboardKey.keyE,
     LogicalKeyboardKey.keyM,
+    LogicalKeyboardKey.keyG,
+    LogicalKeyboardKey.space,
     LogicalKeyboardKey.shiftLeft,
     LogicalKeyboardKey.shiftRight,
     LogicalKeyboardKey.bracketLeft,
@@ -696,6 +848,11 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       // Toggle manual control with M.
       if (e.logicalKey == LogicalKeyboardKey.keyM) {
         setState(() => _manualControl = !_manualControl);
+        return KeyEventResult.handled;
+      }
+      // G gets out and walks (and back in again).
+      if (e.logicalKey == LogicalKeyboardKey.keyG) {
+        _toggleWalk();
         return KeyEventResult.handled;
       }
       _keysDown.add(e.logicalKey);
@@ -748,6 +905,18 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     }
 
     if (_perspectiveMode) {
+      if (_walkMode) {
+        final body = _walkBody;
+        final r = _freecamRelLocal.length;
+        final alt = body == null || r <= 0
+            ? 0.0
+            : r - _walkGroundRadius(body, _freecamRelLocal);
+        final g = body == null || r <= 0 ? 0.0 : body.mu / (r * r);
+        return 'WALK  ${_walkGrounded ? 'ground' : 'air'}  '
+            'eye ${alt.toStringAsFixed(1)} m  '
+            'g ${g.toStringAsFixed(2)} m/s²  '
+            'pace x${_freecamSpeedMul.toStringAsFixed(2)}';
+      }
       if (_freecam) {
         // Scroll wheel drives the flight-speed multiplier while flying.
         final mul = _freecamSpeedMul >= 10
@@ -769,10 +938,16 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   /// the near/far formula in scene_camera_adapter (keep in sync) and
   /// appends [RingNodes.debugLine] when a ringed body is near.
   String _depthDebugLabel() {
-    final eyeM = _range + _focusBodyRadius;
+    // Read the eye off the LIVE camera rather than _range: on foot the eye is
+    // at the anchor (range 0) while _range still holds the orbit range the
+    // walker will get back, and the label has to mirror what the adapter sees.
+    final cam = _camera;
+    final eyeM = cam.eyeOffset.length;
     final nearOv = SceneCameraDebug.nearOverrideM;
     final farOv = SceneCameraDebug.farOverrideM;
-    final nearM = nearOv ?? math.max(0.05, eyeM / 20.0);
+    final nearM = nearOv ??
+        math.max(cam is PerspectiveCamera ? cam.near : 0.0,
+            math.max(0.05, eyeM / 20.0));
     final farM = farOv ?? math.max(5e12, eyeM * 40);
     String eng(double v) => v >= 1e9
         ? '${(v / 1e9).toStringAsFixed(1)}Gm'
@@ -796,6 +971,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
 
   /// Zoom by [factor] (>1 = out): adjusts ortho mpp or perspective range.
   void _zoom(double factor) {
+    // On foot the eye IS the head: zooming would pull it out of the body.
+    if (_walkMode) return;
     if (_perspectiveMode) {
       _range = (_range * factor).clamp(1.0, 1e13);
     } else {
@@ -1101,7 +1278,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       final fwd = axis(LogicalKeyboardKey.keyS, LogicalKeyboardKey.keyW);
       final strafe = axis(LogicalKeyboardKey.keyA, LogicalKeyboardKey.keyD);
       final lift = axis(LogicalKeyboardKey.keyQ, LogicalKeyboardKey.keyE);
-      if (fwd != 0 || strafe != 0 || lift != 0) {
+      if (_walkMode) {
+        _stepWalk(fwd, strafe, frameDt);
+      } else if (fwd != 0 || strafe != 0 || lift != 0) {
         final cam = _camera;
         final boost =
             _keysDown.contains(LogicalKeyboardKey.shiftLeft) ? 8.0 : 1.0;
@@ -1212,6 +1391,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     } else {
       _sceneWorld = null;
     }
+
+    // Encounter planner: refresh the trial plan + its render overlay
+    // (throttled inside; cheap no-op when the planner is closed).
+    _updatePlannerPlan();
 
     // Equator-aligned camera: gimbal the whole orbit in the focused body's
     // TILTED frame — azimuth then circles the body's equator, elevation
@@ -1842,6 +2025,20 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
               // Camera lock: pick the target (vessel or body) from a dropdown.
               _targetDropdown(),
               const SizedBox(height: 8),
+              // Encounter planner: trial burn + transfer/rendezvous preview.
+              if (_focusVessel != null) ...[
+                FloatingActionButton.extended(
+                  heroTag: 'planner',
+                  backgroundColor: _plannerActive
+                      ? const Color(0xFFE0A040)
+                      : const Color(0xFF2A3A4A),
+                  foregroundColor: _plannerActive ? Colors.black : null,
+                  onPressed: _togglePlanner,
+                  icon: const Icon(Icons.route),
+                  label: const Text('PLAN'),
+                ),
+                const SizedBox(height: 8),
+              ],
               // Point the focus craft's nose at its planet.
               if (_focusVessel != null)
                 FloatingActionButton.extended(
@@ -2018,6 +2215,18 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                   ),
                   const SizedBox(width: 8),
                   FloatingActionButton.small(
+                    heroTag: 'walk',
+                    tooltip: _walkMode
+                        ? 'Walking — WASD, Space jumps, Shift runs (G)'
+                        : 'Walk: stand on the surface, first person (G)',
+                    backgroundColor: _walkMode
+                        ? const Color(0xFFE0C77F)
+                        : const Color(0xFF2A3A4A),
+                    onPressed: _toggleWalk,
+                    child: const Icon(Icons.directions_walk),
+                  ),
+                  const SizedBox(width: 8),
+                  FloatingActionButton.small(
                     heroTag: 'renderBackend',
                     tooltip: _renderBackend.label,
                     backgroundColor: _renderBackend == RenderBackend.flutterScene
@@ -2155,6 +2364,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                         focusVesselId: _focusVessel?.value,
                         focusBodyId: _focusBody?.value,
                         focusWorldOverride: _freecam ? _freecamWorld : null,
+                        planner: _plannerOverlay,
                       );
                     }),
                   ),
@@ -2223,6 +2433,14 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                           ),
                         // Debug draw-layer toggle panel (top-right).
                         if (_showDebugPanel) Positioned(top: 8, right: 8, child: _debugPanel()),
+                        // Encounter-planner panel (top-right; slides left of
+                        // the debug panel when both are open).
+                        if (_plannerActive)
+                          Positioned(
+                            top: 8,
+                            right: _showDebugPanel ? 348 : 8,
+                            child: _plannerPanel(),
+                          ),
                         Positioned(
                           left: 8,
                           bottom: 8,

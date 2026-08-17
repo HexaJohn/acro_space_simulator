@@ -46,6 +46,11 @@ class SimViewControl {
   /// Freecam on/off, optionally teleporting the anchor (world metres).
   void Function(bool on, Vector3? pos)? setFreecam;
 
+  /// First-person walk on/off. Turning it on implies the freecam and drops
+  /// the anchor onto the terrain under the current view — the one-call way to
+  /// put a surface capture at eye height.
+  void Function(bool on)? setWalk;
+
   /// Freecam teleport INTO a body's ring plane: radial in body radii,
   /// height above the plane in metres. Exact — computed through the body's
   /// live orientation quaternion (guessing the plane from axial tilt
@@ -76,6 +81,7 @@ class SimViewControl {
     warpToApsis = null;
     setUpMode = null;
     setFreecam = null;
+    setWalk = null;
     freecamToRing = null;
     dropImpactor = null;
     spawnLanded = null;

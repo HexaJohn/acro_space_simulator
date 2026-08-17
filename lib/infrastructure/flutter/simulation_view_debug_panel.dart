@@ -157,6 +157,12 @@ extension SimulationViewDebugPanel on _SimulationViewState {
         CloudNodes.hidden = !v;
         return _layers;
       }),
+      // 3D backend only: the spacetime-distortion grid floor under planets
+      // and moons. Static flag, so leave _layers untouched.
+      ('Gravity grid', GravityGridNodes.enabled, (v) {
+        GravityGridNodes.enabled = v;
+        return _layers;
+      }),
       ('Atmo overlay', _layers.atmoOverlay, (v) => _layers.copyWith(atmoOverlay: v)),
       ('Nav-ball', _layers.navBall, (v) => _layers.copyWith(navBall: v)),
       ('Exaggerate star', _layers.exaggerateStar, (v) => _layers.copyWith(exaggerateStar: v)),
