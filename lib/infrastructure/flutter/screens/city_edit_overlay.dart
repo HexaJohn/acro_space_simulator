@@ -150,6 +150,8 @@ class CityEditController extends ChangeNotifier {
         notifyListeners();
       case CityEditTool.bulldoze:
         city.parcelBuildings.remove(parcelId);
+        city.grownParcels.remove(parcelId);
+        city.lotFires.remove(parcelId);
         city.layout.setUse(parcelId, ParcelUse.unzoned);
         notifyListeners();
       case CityEditTool.inspect:

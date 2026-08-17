@@ -78,6 +78,11 @@ class CityLayout {
   ParcelSettings _settings;
   int _nextId = 0;
 
+  /// Bumped on every [regenerate], which every mutation goes through.
+  /// The connectivity cache is keyed on it, so the graph walk runs when a
+  /// road is drawn, not every tick.
+  int version = 0;
+
   ParcelSettings get settings => _settings;
 
   set settings(ParcelSettings value) {
@@ -160,6 +165,7 @@ class CityLayout {
 
   /// Re-cut every auto parcel from the current roads and settings.
   void regenerate() {
+    version++;
     final out = <Parcel>[];
     for (final road in _roads.values) {
       out.addAll(_subdivide(road, out));

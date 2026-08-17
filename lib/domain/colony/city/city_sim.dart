@@ -30,6 +30,7 @@ import 'city_building_spec.dart';
 import 'city_config.dart';
 import 'city_layout.dart';
 import 'parcel.dart';
+import 'parcel_network.dart';
 import 'commodity.dart';
 
 /// A craft visiting a spaceport — a relief mission or a scheduled delivery. It
@@ -1001,7 +1002,20 @@ class CitySim {
   }
 
   bool get hasSpaceport =>
-      utils.entries.any((e) => e.value.type == 'spaceport' && isConnected(e.key));
+      utils.entries
+          .any((e) => e.value.type == 'spaceport' && isConnected(e.key)) ||
+      servedParcelOfType('spaceport');
+
+  /// Whether a SERVED parcel carries a building of [type]. The parcel twin of
+  /// "connected util of type" — immigration, storage and terraforming all ask.
+  bool servedParcelOfType(String type) {
+    if (layout.parcels.isEmpty) return false;
+    final net = parcelNetwork();
+    for (final (parcel, spec) in parcelBuiltLots()) {
+      if (spec.type == type && net.lotServed(parcel.id)) return true;
+    }
+    return false;
+  }
 
   /// Honest one-word population trend for the status chip. Mirrors the pop
   /// step's target so the label matches what's actually happening: without a
@@ -1043,6 +1057,12 @@ class CitySim {
     var cap = baseStockCap;
     for (final e in utils.entries) {
       if (isConnected(e.key)) cap += e.value.storageBonus;
+    }
+    if (layout.parcels.isNotEmpty) {
+      final net = parcelNetwork();
+      for (final (parcel, spec) in parcelBuiltLots()) {
+        if (net.lotServed(parcel.id)) cap += spec.storageBonus;
+      }
     }
     return cap;
   }
@@ -1116,6 +1136,29 @@ class CitySim {
     // The lander itself is a tiny residential building: its crew live in the
     // capsule and count toward population, so a colony has a starter housing of
     // a few people from the moment it touches down — no spaceport needed yet.
+    // Parcel-city contributions. Hand-placed lots run at full utilisation,
+    // grown lots ramp with occupancy, and only SERVED lots take part — an
+    // unreachable building no more works here than a disconnected one does on
+    // the grid.
+    final parcelActive = <(CityBuildingSpec, double)>[];
+    if (layout.parcels.isNotEmpty) {
+      final parcelNet = parcelNetwork();
+      for (final (parcel, s) in parcelBuiltLots()) {
+        if (!parcelNet.lotServed(parcel.id)) continue;
+        final uf = parcelBuildings.containsKey(parcel.id)
+            ? 1.0
+            : parcelUtil(parcel.id);
+        if (uf <= 0) continue;
+        parcelActive.add((s, uf));
+        powerOut += s.powerOutput * powerFactor(s.type);
+        powerDraw += s.powerDraw * (s.housing > 0 || s.jobs > 0 ? uf : 1.0);
+        housing += (s.housing * uf).round();
+        jobs += (s.jobs * uf).round();
+        computeSupply += s.computeOutput;
+        computeDemand += s.computeDraw;
+        s.services.forEach((k, v) => services[k] = (services[k] ?? 0) + v * uf);
+      }
+    }
     housing += landerCrew;
     final powerRatio = powerDraw <= 0 ? 1.0 : (powerOut / powerDraw).clamp(0.0, 1.0);
     final computeRatio =
@@ -1126,7 +1169,7 @@ class CitySim {
     // Commute efficiency: heavy road congestion means workers spend longer
     // travelling, so fewer effective worker-hours reach the jobs. Up to a 40%
     // staffing penalty at full gridlock.
-    final commuteEff = 1 - congestion * 0.4;
+    final commuteEff = 1 - math.max(congestion, parcelCongestion) * 0.4;
     // Infinite Robotics: automated labour fills every job — buildings run at full
     // staffing with no workers (demo aid + foreshadows the endgame where robotics
     // + compute progressively replace human labour).
@@ -1147,6 +1190,9 @@ class CitySim {
     for (final e in active) {
       medDemand += e.value.inputs[Commodity.medicine] ?? 0;
     }
+    for (final (s, _) in parcelActive) {
+      medDemand += s.inputs[Commodity.medicine] ?? 0;
+    }
     if (medDemand > 0) {
       final medCov =
           (stockOf(Commodity.medicine) / (medDemand + 0.01)).clamp(0.0, 1.0);
@@ -1165,6 +1211,23 @@ class CitySim {
         if (stockOf(k) < v * throttle * dt) canRun = false;
       });
       final run = canRun ? throttle : 0.0;
+      s.inputs.forEach(
+          (k, v) => stock[k] = (stockOf(k) - v * run * dt).clamp(0, 1e12));
+      s.outputs.forEach((k, v) => stock[k] = stockOf(k) +
+          v * run * biomeMult(k) * bountyMult * eventProductionMult * dt);
+      pollutionRate += s.pollution * (s.powerOutput > 0 ? 1 : run) * emissionCut;
+    }
+
+    // Parcel lots. Run is additionally scaled by occupancy: a half-occupied
+    // grown block consumes and produces half, where the cell path lets an
+    // under-construction tile produce at full rate — a quirk not worth
+    // reproducing.
+    for (final (s, uf) in parcelActive) {
+      var canRun = true;
+      s.inputs.forEach((k, v) {
+        if (stockOf(k) < v * throttle * uf * dt) canRun = false;
+      });
+      final run = canRun ? throttle * uf : 0.0;
       s.inputs.forEach(
           (k, v) => stock[k] = (stockOf(k) - v * run * dt).clamp(0, 1e12));
       s.outputs.forEach((k, v) => stock[k] = stockOf(k) +
@@ -1525,6 +1588,12 @@ class CitySim {
       growProgress.remove(k);
     }
 
+    // 5.9 Parcel-city dynamics: zoned lots grow under demand, roads load
+    // up, fires burn along blocks.
+    advanceParcelGrowth(dt);
+    advanceParcelTraffic();
+    advanceParcelFires(dt);
+
     // 6. Storage cap.
     final sc = stockCap;
     for (final t in stock.keys.toList()) {
@@ -1698,13 +1767,16 @@ class CitySim {
       cur + (tgt - cur) * (rate * dt).clamp(0.0, 1.0);
 
   /// Count connected terraformers (utility type 'terraformer').
-  int get terraformers => utils.entries
-      .where((e) => e.value.type == 'terraformer' && isConnected(e.key))
-      .length;
+  int get terraformers => countUtil('terraformer');
 
-  int countUtil(String type) => utils.entries
-      .where((e) => e.value.type == type && isConnected(e.key))
-      .length;
+  int countUtil(String type) =>
+      utils.entries
+          .where((e) => e.value.type == type && isConnected(e.key))
+          .length +
+      parcelBuiltLots()
+          .where((e) =>
+              e.$2.type == type && parcelNetwork().lotServed(e.$1.id))
+          .length;
 
   /// Disaster severity multiplier (<1 = better protected). Emergency services +
   /// bunkers cut the harm; floors at 0.3.
@@ -3074,6 +3146,189 @@ class CitySim {
   /// cut and creep the colony downhill a little every frame.
   final Map<int, double> cellGroundRadius = {};
 
+  // ---- Parcel city: growth, connectivity, traffic, fire ----
+
+  /// Progress below which a growing lot has no building yet — the same
+  /// construction line the cell system draws.
+  static const double parcelConstructFrac = 0.3;
+
+  /// Growth progress per zoned lot, 0..~3.2. Crossing [parcelConstructFrac]
+  /// raises the building; 2.0 and 3.0 upgrade its density tier, so a lot under
+  /// sustained demand densifies in place instead of needing to be repainted.
+  final Map<String, double> grownParcels = {};
+
+  /// Burning lots: parcel id -> intensity 0..1.
+  final Map<String, double> lotFires = {};
+
+  /// Peak road load on the spline network, 0..1. The parcel city's congestion,
+  /// feeding the same commute penalty the cell traffic does.
+  double parcelCongestion = 0;
+
+  ParcelNetwork? _parcelNet;
+  int _parcelNetVersion = -1;
+
+  /// Road-graph connectivity, rebuilt only when the layout changes.
+  ParcelNetwork parcelNetwork() {
+    if (_parcelNet == null || _parcelNetVersion != layout.version) {
+      _parcelNet = ParcelNetwork.of(layout);
+      _parcelNetVersion = layout.version;
+    }
+    return _parcelNet!;
+  }
+
+  /// Zone kind string for a parcel use, or null for the non-RCI uses.
+  static String? zoneKindOf(ParcelUse use) => switch (use) {
+        ParcelUse.residential => 'residential',
+        ParcelUse.commercial => 'commercial',
+        ParcelUse.industrial => 'industrial',
+        _ => null,
+      };
+
+  /// The building a grown lot currently carries, or null while it is bare or
+  /// under construction. Density is derived from progress, not stored: the lot
+  /// IS its history.
+  CityBuildingSpec? parcelGrownSpec(String id, ParcelUse use) {
+    final p = grownParcels[id];
+    final kind = zoneKindOf(use);
+    if (p == null || kind == null || p < parcelConstructFrac) return null;
+    final d = p >= 3.0
+        ? Density.high
+        : p >= 2.0
+            ? Density.medium
+            : Density.low;
+    return kZoneSpecs[kind]![d];
+  }
+
+  /// Occupancy ramp of a grown lot, 0..1.
+  double parcelUtil(String id) {
+    final p = grownParcels[id] ?? 0;
+    return ((p - parcelConstructFrac) / 0.7).clamp(0.0, 1.0);
+  }
+
+  /// Every BUILT lot — hand-placed and demand-grown alike. The one list the
+  /// snapshot, the terrain shaper and the lighting pass all read.
+  Iterable<(Parcel, CityBuildingSpec)> parcelBuiltLots() sync* {
+    for (final parcel in layout.parcels) {
+      final spec = parcelBuildings[parcel.id] ??
+          parcelGrownSpec(parcel.id, parcel.use);
+      if (spec != null) yield (parcel, spec);
+    }
+  }
+
+  /// Grow (or abandon) buildings on zoned lots under RCI demand.
+  ///
+  /// Mirrors the cell system's rules: growth needs a SERVED lot and demand
+  /// above [growThreshold]; losing either decays the lot back toward bare
+  /// ground. ~35 s of full demand raises a building; the density upgrades
+  /// take multiples of that, so towers are earned, not instant.
+  void advanceParcelGrowth(double dt) {
+    if (layout.parcels.isEmpty) return;
+    final net = parcelNetwork();
+    for (final parcel in layout.parcels) {
+      final kind = zoneKindOf(parcel.use);
+      if (kind == null) continue;
+      if (parcelBuildings.containsKey(parcel.id)) continue;
+      final demand = infiniteDemand ? 1.0 : demandFor(kind);
+      final cur = grownParcels[parcel.id] ?? 0;
+      if (!net.lotServed(parcel.id) || demand < growThreshold) {
+        final next = cur - dt * 0.02;
+        if (next <= 0) {
+          grownParcels.remove(parcel.id);
+        } else {
+          grownParcels[parcel.id] = next;
+        }
+        continue;
+      }
+      grownParcels[parcel.id] = math.min(3.2, cur + dt * 0.03 * demand);
+    }
+  }
+
+  /// Per-road load from the built lots fronting it, against lane capacity.
+  ///
+  /// Deliberately frontage-local rather than routed: real flow accumulates
+  /// toward the trunk, but per-road occupancy is the honest cheap version and
+  /// already rewards laying an avenue through a dense district.
+  void advanceParcelTraffic() {
+    if (layout.parcels.isEmpty) {
+      parcelCongestion = 0;
+      return;
+    }
+    final load = <String, double>{};
+    for (final (parcel, spec) in parcelBuiltLots()) {
+      final rid = parcel.roadId;
+      if (rid == null) continue;
+      load[rid] = (load[rid] ?? 0) + (spec.housing + spec.jobs) / 40.0;
+    }
+    var peak = 0.0;
+    for (final road in layout.roads) {
+      final l = load[road.id];
+      if (l == null) continue;
+      // ~30 built lots' worth of activity per lane before gridlock. Low
+      // enough that a street of towers chokes, high enough that the same
+      // district on a highway breathes — lanes must buy something.
+      peak = math.max(peak, l / (road.roadClass.lanesEachWay * 30.0));
+    }
+    parcelCongestion = peak.clamp(0.0, 1.0);
+  }
+
+  /// Fires on lots: spread along the block, suppressed by safety coverage.
+  ///
+  /// Roads act as firebreaks WITHOUT a rule saying so: adjacent lots on a
+  /// block share boundaries, while lots facing across a street sit a full
+  /// carriageway apart, outside the spread radius. The geometry does it.
+  void advanceParcelFires(double dt) {
+    // A fire disaster throws sparks at the parcel city too.
+    if (disaster == Disaster.fire && math.Random().nextDouble() < 0.05 * dt) {
+      final built = parcelBuiltLots().toList();
+      if (built.isNotEmpty) {
+        final victim = built[math.Random().nextInt(built.length)].$1.id;
+        lotFires.putIfAbsent(victim, () => 0.05);
+      }
+    }
+    if (lotFires.isEmpty) return;
+
+    final byId = {for (final p in layout.parcels) p.id: p};
+    // Aggregate safety coverage stands in for the cell system's per-building
+    // emergency proximity — the parcel city has no per-cell coverage field.
+    final suppression = population <= 0
+        ? 0.0
+        : ((services['safety'] ?? 0) / population).clamp(0.0, 1.0);
+
+    final spread = <String>[];
+    final done = <String>[];
+    lotFires.forEach((id, intensity) {
+      final next = intensity + (0.25 - suppression * 0.45) * dt;
+      if (next <= 0) {
+        done.add(id); // put out before it took the building
+        return;
+      }
+      if (next >= 1.0) {
+        // Burned out: the building is gone, the lot reverts to zoned ground.
+        parcelBuildings.remove(id);
+        grownParcels.remove(id);
+        done.add(id);
+        return;
+      }
+      lotFires[id] = next;
+      final at = byId[id];
+      if (at == null) return;
+      for (final (other, _) in parcelBuiltLots()) {
+        if (other.id == id || lotFires.containsKey(other.id)) continue;
+        if (at.centroid.distanceTo(other.centroid) > 30) continue;
+        if (math.Random().nextDouble() < next * 0.15 * dt) {
+          spread.add(other.id);
+        }
+      }
+    });
+    for (final id in done) {
+      lotFires.remove(id);
+    }
+    for (final id in spread) {
+      lotFires.putIfAbsent(id, () => 0.05);
+    }
+  }
+
+
   /// Place [spec] on the parcel [parcelId]. Returns false if that parcel is
   /// unknown or already built on.
   bool placeOnParcel(String parcelId, CityBuildingSpec spec) {
@@ -3121,10 +3376,7 @@ class CitySim {
   /// One list, real polygons, correct orientation — the single source the 3D
   /// scene, terrain levelling and street lighting all read.
   Iterable<(Parcel, CityBuildingSpec)> buildingParcels() sync* {
-    for (final e in parcelBuildings.entries) {
-      final parcel = layout.parcels.where((p) => p.id == e.key).firstOrNull;
-      if (parcel != null) yield (parcel, e.value);
-    }
+    yield* parcelBuiltLots();
     for (final e in occupiedCells()) {
       yield (parcelForCell(e.key, e.value), e.value);
     }

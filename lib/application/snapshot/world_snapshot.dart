@@ -550,6 +550,12 @@ class BodyDescriptorSnapshot {
   final String id;
   final BodyKind kind;
   final double referenceRadius; // m, datum a heightmap perturbs (== BodySnapshot.radius)
+
+  /// Standard gravitational parameter mu = G*M (m^3/s^2), straight from the
+  /// domain body. Render-side gravity effects (the spacetime grid keys its
+  /// bow depth and opacity on surface gravity) derive g = mu/r^2 from this;
+  /// 0 when a wire producer predates the field.
+  final double mu;
   final String albedoKey;
   final String heightKey;
   final String materialKey;
@@ -652,6 +658,7 @@ class BodyDescriptorSnapshot {
     required this.id,
     this.kind = BodyKind.rocky,
     required this.referenceRadius,
+    this.mu = 0,
     this.albedoKey = '',
     this.heightKey = '',
     this.materialKey = '',
@@ -686,6 +693,7 @@ class BodyDescriptorSnapshot {
       id: body.id.value,
       kind: _classify(body, system),
       referenceRadius: body.radius,
+      mu: body.mu,
       // Keys left empty: the sim does not own art assets — the engine derives
       // them from id. They exist so the sim CAN override per body later.
       atmoPresent: atmo != null,
@@ -731,6 +739,7 @@ class BodyDescriptorSnapshot {
         'id': id,
         'kind': kind.index,
         'r': referenceRadius,
+        if (mu != 0) 'mu': mu,
         if (albedoKey.isNotEmpty) 'albedo': albedoKey,
         if (heightKey.isNotEmpty) 'height': heightKey,
         if (materialKey.isNotEmpty) 'material': materialKey,
@@ -772,6 +781,7 @@ class BodyDescriptorSnapshot {
       id: j['id'] as String,
       kind: BodyKind.values[ki.clamp(0, BodyKind.values.length - 1)],
       referenceRadius: (j['r'] as num?)?.toDouble() ?? 0,
+      mu: (j['mu'] as num?)?.toDouble() ?? 0,
       albedoKey: (j['albedo'] as String?) ?? '',
       heightKey: (j['height'] as String?) ?? '',
       materialKey: (j['material'] as String?) ?? '',
@@ -1612,15 +1622,11 @@ class WorldSnapshot {
         // the lot, so a building on a subdivided street lot stands at that
         // lot's real width and turns to face its road — which is the whole
         // reason parcels exist.
-        for (final entry in city.parcelBuildings.entries) {
-          final parcel = city.layout.parcels
-              .where((p) => p.id == entry.key)
-              .firstOrNull;
-          if (parcel == null) continue;
+        for (final (parcel, spec) in city.parcelBuiltLots()) {
           buildings['${city.id}/${parcel.id}'] = BuildingSnapshot.ofParcel(
             city,
             parcel,
-            entry.value,
+            spec,
             body,
             siteRadiusM: siteRadius,
           );
@@ -1628,7 +1634,12 @@ class WorldSnapshot {
         // Empty lots, drawn so the subdivision is visible before anything is
         // built on it.
         for (final parcel in city.layout.parcels) {
-          if (city.parcelBuildings.containsKey(parcel.id)) continue;
+          // A BUILT lot renders as its building; drawing the lot under it too
+          // would z-fight the building against its own ground.
+          if (city.parcelBuildings.containsKey(parcel.id) ||
+              city.parcelGrownSpec(parcel.id, parcel.use) != null) {
+            continue;
+          }
           final t = _parcelTransform(city, parcel, siteRadius);
           final extent = parcel.buildableExtent;
           patches.add(CityPatchSnapshot(
