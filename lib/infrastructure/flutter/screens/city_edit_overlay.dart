@@ -80,6 +80,12 @@ class CityEditController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Throw the half-drawn road away.
+  void cancelSpline() {
+    pending.clear();
+    notifyListeners();
+  }
+
   /// Commit the drawn road: junctions split, lots re-cut, buildings carried
   /// across any lot renames.
   void commitSpline(CitySim city) {
@@ -402,13 +408,26 @@ class CityEditOverlay extends StatelessWidget {
               (v) => controller.frontageM = v),
           _slider('Depth', controller.lotDepthM, 12, 120,
               (v) => controller.lotDepthM = v),
-          if (controller.pending.isNotEmpty)
+          if (controller.pending.isNotEmpty) ...[
             Padding(
               padding: const EdgeInsets.only(left: 8),
               child: Text('${controller.pending.length} pts',
                   style: const TextStyle(
                       fontSize: 10, color: Color(0xFF7FE0A0))),
             ),
+            IconButton(
+              onPressed: () => controller.commitSpline(city),
+              icon: const Icon(Icons.check, size: 16),
+              color: const Color(0xFF7FE0A0),
+              tooltip: 'Build road',
+            ),
+            IconButton(
+              onPressed: controller.cancelSpline,
+              icon: const Icon(Icons.close, size: 16),
+              color: const Color(0xFFFF8A80),
+              tooltip: 'Discard',
+            ),
+          ],
           ]),
         ),
       );

@@ -151,6 +151,18 @@ extension SimulationViewColony on _SimulationViewState {
     );
   }
 
+  /// Push the in-progress road into the renderer as a ghost ribbon.
+  void _syncRoutePreview(CitySim city) {
+    final body = _universe.current().body(city.body.id);
+    if (body == null) return;
+    final ground = _colonySiteRadius(city);
+    CityNodes.pendingWidthM = _cityEdit.roadClass.width;
+    CityNodes.pendingRouteBF = [
+      for (final p in _cityEdit.pending)
+        city.localToBodyFixed(p, bodyRadiusM: ground),
+    ];
+  }
+
   /// Ground radius under [city]'s site, or the body datum if it has no terrain.
   double _colonySiteRadius(CitySim city) {
     final body = _universe.current().body(city.body.id);
@@ -170,9 +182,15 @@ extension SimulationViewColony on _SimulationViewState {
     if (hit == null) return;
     _hoverCityAt(local);
 
-    // Spline drawing works in continuous metres — no cell involved.
+    // Road drawing works in continuous metres — no cell involved. Points
+    // near an existing road SNAP onto it, so drawing toward a street joins it
+    // (and the commit splits it there: a junction).
     if (_cityEdit.tool == CityEditTool.roadSpline) {
-      _cityEdit.addSplinePoint(Vec2(hit.east, hit.north));
+      var p = Vec2(hit.east, hit.north);
+      final near = city.layout.nearestRoadPoint(p, withinM: 15);
+      if (near != null) p = near.point;
+      _cityEdit.addSplinePoint(p);
+      _syncRoutePreview(city);
       return;
     }
 

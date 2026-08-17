@@ -26,6 +26,7 @@ class CityTextures {
   static Object? windowEmissive;
   static Object? groundPalette;
   static Object? roadStrip;
+  static Object? dirtStrip;
 
   static Future<void>? _loading;
 
@@ -34,7 +35,8 @@ class CityTextures {
       glazing != null &&
       windowEmissive != null &&
       groundPalette != null &&
-      roadStrip != null;
+      roadStrip != null &&
+      dirtStrip != null;
 
   static Future<void> load() => _loading ??= () async {
         facade = _upload(CityTextureBakes.facade(facadeSize), facadeSize);
@@ -49,6 +51,7 @@ class CityTextures {
         groundPalette =
             _upload(CityTextureBakes.groundPalette(glassSize), glassSize);
         roadStrip = _upload(CityTextureBakes.roadStrip(glassSize), glassSize);
+        dirtStrip = _upload(CityTextureBakes.dirtStrip(glassSize), glassSize);
       }();
 
   static bool mipmapped = false;

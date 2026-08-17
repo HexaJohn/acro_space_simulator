@@ -257,4 +257,39 @@ class CityTextureBakes {
     }
     return out;
   }
+
+  /// The dirt-path surface: graded earth with wheel ruts, no kerbs and no
+  /// paint — a path is a road to the network and a track to the eye.
+  static Uint8List dirtStrip(int size) {
+    final out = Uint8List(size * size * 4);
+    final rnd = math.Random(0xD1127);
+    for (var y = 0; y < size; y++) {
+      for (var x = 0; x < size; x++) {
+        final i = (y * size + x) * 4;
+        final u = x / size;
+        var r = 118.0, g = 96.0, b = 72.0;
+        final speck = (rnd.nextDouble() - 0.5) * 30;
+        r += speck;
+        g += speck * 0.9;
+        b += speck * 0.8;
+        // Twin wheel ruts, compacted darker.
+        if ((u - 0.3).abs() < 0.055 || (u - 0.7).abs() < 0.055) {
+          r *= 0.82;
+          g *= 0.82;
+          b *= 0.82;
+        }
+        // Soft verge fade at the edges rather than a kerb.
+        if (u < 0.08 || u > 0.92) {
+          r *= 0.9;
+          g *= 0.94;
+          b *= 0.9;
+        }
+        out[i] = r.clamp(0, 255).round();
+        out[i + 1] = g.clamp(0, 255).round();
+        out[i + 2] = b.clamp(0, 255).round();
+        out[i + 3] = 255;
+      }
+    }
+    return out;
+  }
 }

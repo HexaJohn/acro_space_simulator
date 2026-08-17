@@ -72,6 +72,12 @@ class CityNodes {
   static String cursorBodyId = '';
   static double cursorSizeM = 24;
 
+  /// The road being DRAWN: committed control points plus the hover point, in
+  /// body-fixed metres. The editor writes it; the cursor pass draws it as a
+  /// ghost ribbon so the player sees the road before paying for it.
+  static List<Vector3> pendingRouteBF = const [];
+  static double pendingWidthM = 8;
+
   /// Whether a texture upload is still in flight (see [update]).
   bool _texturesPending = false;
 
@@ -315,7 +321,10 @@ class CityNodes {
       _scene.remove(existing);
       _cursorNode = null;
     }
-    final at = cursorBF;
+    final route = pendingRouteBF;
+    // The anchor: the cursor when there is one, else the route's first point —
+    // a half-drawn road must stay visible while the mouse is off the map.
+    final at = cursorBF ?? (route.length >= 2 ? route.first : null);
     if (at == null) return;
     final body = snap.bodies[cursorBodyId];
     if (body == null) return;
@@ -335,14 +344,41 @@ class CityNodes {
 
     final m = MeshBuilder();
     const u = 5.5 / 6; // the cursor swatch
-    final corners = [
-      east * -h + north * -h + lift,
-      east * h + north * -h + lift,
-      east * h + north * h + lift,
-      east * -h + north * h + lift,
-    ];
-    final idx = [for (final c in corners) m.vertex(_scenePos(c), up, u, 0.5)];
-    m.quad(idx[0], idx[1], idx[2], idx[3]);
+    if (cursorBF != null) {
+      final corners = [
+        east * -h + north * -h + lift,
+        east * h + north * -h + lift,
+        east * h + north * h + lift,
+        east * -h + north * h + lift,
+      ];
+      final idx = [
+        for (final c in corners) m.vertex(_scenePos(c), up, u, 0.5)
+      ];
+      m.quad(idx[0], idx[1], idx[2], idx[3]);
+    }
+    // Ghost ribbon for the road being drawn, relative to the cursor's anchor
+    // frame (the cursor node is placed at [at]; route points are body-fixed,
+    // so they are expressed relative to it here).
+    if (route.length >= 2) {
+      final hw = pendingWidthM / 2;
+      int? pl, pr;
+      for (var i = 0; i < route.length; i++) {
+        final p = route[i] - at;
+        final upI = route[i].normalized;
+        final ahead =
+            i + 1 < route.length ? route[i + 1] - route[i] : route[i] - route[i - 1];
+        if (ahead.length <= 1e-9) continue;
+        final along = ahead.normalized;
+        final side = along.cross(upI).normalized;
+        final l = m.vertex(
+            _scenePos(p + side * -hw + upI * 0.35), upI, u, 0.5);
+        final r = m.vertex(
+            _scenePos(p + side * hw + upI * 0.35), upI, u, 0.5);
+        if (pl != null && pr != null) m.quad(pl, pr, r, l);
+        pl = l;
+        pr = r;
+      }
+    }
 
     final geometry = _geometryOf(m.build());
     if (geometry == null) return;
@@ -441,6 +477,7 @@ class CityNodes {
     if (roads.isEmpty) return;
 
     final ribbon = MeshBuilder();
+    final dirtRibbon = MeshBuilder();
     final lampSolid = MeshBuilder();
     final lampGlow = MeshBuilder();
 
@@ -454,8 +491,12 @@ class CityNodes {
         ));
       }
       if (pts.length < 2) continue;
-      _ribbonFor(ribbon, pts, road.halfWidthM, anchorBF);
-      _lampsFor(lampSolid, lampGlow, pts, road, anchorBF);
+      final paved = RoadClass
+          .values[road.roadClassIndex.clamp(0, RoadClass.values.length - 1)]
+          .paved;
+      _ribbonFor(paved ? ribbon : dirtRibbon, pts, road.halfWidthM, anchorBF);
+      // Nobody lights a dirt track.
+      if (paved) _lampsFor(lampSolid, lampGlow, pts, road, anchorBF);
     }
 
     for (final (builder, material) in [
@@ -463,6 +504,7 @@ class CityNodes {
       // rendered as a run of blank concrete with no kerbs and no centre line,
       // which from the cockpit read as "roads are missing".
       (ribbon, CityMaterials.road),
+      (dirtRibbon, CityMaterials.dirt),
       (lampSolid, CityMaterials.facade),
       (lampGlow, CityMaterials.glazing),
     ]) {

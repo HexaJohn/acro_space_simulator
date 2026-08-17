@@ -1115,6 +1115,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     _session = FlightSession(
       system: system,
       fleet: fleet,
+      // Minable asteroid lodes — mining them excavates the voxel terrain.
+      deposits: SampleWorld.buildAsteroidDeposits(),
       // Pop a destruction menu when a vessel is lost.
       onEvent: _onDomainEvent,
     );
@@ -2560,13 +2562,13 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                             ? (d) => _editCityAt(d.localPosition)
                             : null,
                         onPanStart: _cityEdit.active ? (_) {} : null,
-                        // Releasing a spline drag commits the road and cuts
-                        // the blocks either side into parcels.
-                        onPanEnd: _cityEdit.tool == CityEditTool.roadSpline
-                            ? (_) => rebuild(
-                                () => _cityEdit.commitSpline(_editingCity!))
-                            : null,
-                        onPanUpdate: _cityEdit.active
+                        // Panning PAINTS for the lot tools but does not draw
+                        // roads: the road tool is click-to-place, Skylines
+                        // style — each tap a control point, the toolbar's
+                        // check to build. A freehand scribble is not how
+                        // anyone lays an avenue.
+                        onPanUpdate: _cityEdit.active &&
+                                _cityEdit.tool != CityEditTool.roadSpline
                             ? (d) => _editCityAt(d.localPosition)
                             : null,
                       ),

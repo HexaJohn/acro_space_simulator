@@ -27,6 +27,7 @@ class CityMaterials {
   static fs.PhysicallyBasedMaterial? _glazing;
   static fs.PhysicallyBasedMaterial? _ground;
   static fs.PhysicallyBasedMaterial? _road;
+  static fs.PhysicallyBasedMaterial? _dirt;
 
   static fs.PhysicallyBasedMaterial get facade =>
       _facade ??= _CitySurfaceMaterial()
@@ -61,12 +62,20 @@ class CityMaterials {
     ..roughnessFactor = 1.0
     ..metallicFactor = 0.0;
 
+  /// Dirt paths: graded earth, ruts, no kerbs.
+  static fs.PhysicallyBasedMaterial get dirt => _dirt ??= _CitySurfaceMaterial()
+    ..baseColorTexture = CityTextures.dirtStrip
+    ..baseColorFactor = vm.Vector4(1, 1, 1, 1)
+    ..roughnessFactor = 1.0
+    ..metallicFactor = 0.0;
+
   /// Drop the cached materials so a texture reload rebinds.
   static void reset() {
     _facade = null;
     _glazing = null;
     _ground = null;
     _road = null;
+    _dirt = null;
   }
 }
 
