@@ -162,6 +162,8 @@ class _FakeCamera implements SceneCamera {
   @override
   final Vector3 up;
   @override
+  Vector3 get referenceUp => Vector3.unitZ;
+  @override
   final Vector3 eyeOffset;
 
   @override

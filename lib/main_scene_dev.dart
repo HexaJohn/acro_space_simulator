@@ -24,6 +24,7 @@ import 'infrastructure/flutter_scene/atmosphere_nodes.dart';
 import 'infrastructure/flutter_scene/cloud_nodes.dart';
 import 'infrastructure/flutter_scene/body_nodes.dart';
 import 'infrastructure/flutter_scene/environment_baker.dart';
+import 'infrastructure/flutter_scene/gravity_grid_nodes.dart';
 import 'infrastructure/flutter_scene/part_model_library.dart';
 import 'infrastructure/flutter_scene/render_backend.dart';
 import 'infrastructure/flutter_scene/scene_camera_adapter.dart';
@@ -176,6 +177,12 @@ Future<void> main() async {
           params['freecam'] == null ? true : params['freecam'] == 'true',
           _triple(params['freePos']));
     }
+    // First-person walk: walk=true|false. Standing up implies the freecam and
+    // drops the anchor onto the terrain under the current view, so a surface
+    // capture at eye height is one call (optionally after focusBody=).
+    if (params['walk'] != null) {
+      c.setWalk?.call(params['walk'] == 'true');
+    }
     // Craft glb unit calibration: glbScale=<model units to metres>. WHOLE-CRAFT
     // path only (the apollo/lander bakes). A craft drawn from its PART LIST is
     // calibrated per part — see `part=` below.
@@ -254,6 +261,10 @@ Future<void> main() async {
     // Cast-shadow pass toggle (A/B): shadows=true|false.
     if (params['shadows'] != null) {
       SceneSync.shadowsEnabled = params['shadows'] == 'true';
+    }
+    // Spacetime-grid floor toggle (A/B): gravityGrid=true|false.
+    if (params['gravityGrid'] != null) {
+      GravityGridNodes.enabled = params['gravityGrid'] == 'true';
     }
     // Terrain material tuning: tileM=<metres>, sandW/grassW=0..1, plus the
     // macro texture octave: macroTileM=<metres> (0 disables), macroW=0..1.

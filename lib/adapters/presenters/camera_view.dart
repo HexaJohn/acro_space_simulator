@@ -164,6 +164,14 @@ abstract class SceneCamera {
   Vector3 get forward; // into the screen (eye -> target)
   Vector3 get right;
   Vector3 get up;
+
+  /// The up-ALIGNMENT reference: the orbit gimbal frame's +Z, independent of
+  /// where the camera currently looks. Free mode = ecliptic +Z; axis mode =
+  /// the focused body's spin axis; gravity mode = the local radial. Unlike
+  /// [up] (the screen-space basis vector, forward-orthogonalised) this is
+  /// what "up" MEANS in the current alignment mode — the gravity grid floor
+  /// orients to it.
+  Vector3 get referenceUp;
   double get azimuth; // orientation (skybox window + chase math)
   double get elevation;
 
@@ -229,6 +237,11 @@ class OrthoCamera implements SceneCamera {
   Vector3 get right => orbit.right;
   @override
   Vector3 get up => orbit.up;
+  @override
+  Vector3 get referenceUp =>
+      orbit.frame.x != 0 || orbit.frame.y != 0 || orbit.frame.z != 0
+          ? orbit.frame.rotate(Vector3.unitZ)
+          : Vector3.unitZ;
   @override
   double get azimuth => orbit.azimuth;
   @override

@@ -115,6 +115,10 @@ class PerspectiveCamera implements SceneCamera {
     return (_upBase * cr - _rightBase * sr).normalized;
   }
 
+  @override
+  Vector3 get referenceUp =>
+      _framed ? frame.rotate(Vector3.unitZ) : Vector3.unitZ;
+
   /// Eye position relative to the target (= -forward * range).
   Vector3 get _eyeRel => forward * -range;
 

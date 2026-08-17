@@ -22,22 +22,29 @@ import 'depth_materials.dart';
 /// descriptor's [BodyDescriptorSnapshot.mu]).
 ///
 /// The sheet always reads as a FLOOR: its plane normal follows the camera's
-/// up vector every frame (a rubber-sheet demo held under the planet for
-/// whoever is looking), positioned a fixed fraction of the body radius below
-/// the body along that up axis. Orientation-only updates — the funnel shape
-/// is baked once into one shared mesh (hole radius = 1/[extentRadii] of the
-/// rim, hyperbolic 1/r profile) and reused by every body: the well DEPTH is
-/// the node's z scale, so gravity strength costs no geometry.
+/// up-ALIGNMENT reference every frame ([SceneCamera.referenceUp] — ecliptic
+/// +Z in free mode, the body's spin axis in axis mode, the local radial in
+/// gravity mode), hugging the body's underside: the sheet plane sits a
+/// fraction of a radius below the centre with a body-sized hole, and the
+/// funnel dips from the hole's rim.
 ///
-/// Stars are skipped — the grid is a navigation aid for the bodies you orbit,
-/// and the sun's funnel would swallow the whole inner system's sheets.
+/// The funnel DEPTH is baked into each sheet's own geometry (depth is a
+/// per-body constant — gravity doesn't change frame to frame), so the node
+/// transform stays a uniform scale + pure rotation, exactly the shape the
+/// ring sheets use. An earlier draft scaled a shared unit funnel per axis
+/// through a hand-built matrix; keeping the proven compose(translation,
+/// rotation, uniform scale) path costs one small mesh per body and removes
+/// the only structural difference from the known-good translucent draws.
+///
+/// Stars are skipped — the grid is a navigation aid for the bodies you
+/// orbit, and the sun's funnel would swallow the whole inner system.
 class GravityGridNodes {
   GravityGridNodes(this._scene);
 
   final fs.Scene _scene;
   final Map<String, _GridSheet> _sheets = {};
 
-  /// Panel toggle (3D backend only, like [fs.Node]-layer statics elsewhere).
+  /// Panel toggle (3D backend only, like CloudNodes.hidden and friends).
   static bool enabled = true;
 
   /// Grid rim radius in body radii. The hole the body sits over is exactly
@@ -45,10 +52,10 @@ class GravityGridNodes {
   static const double extentRadii = 4.0;
   static const double _r0 = 1.0 / extentRadii;
 
-  /// Sheet plane offset below the body centre, in body radii — far enough
-  /// that the funnel never intersects the sphere, close enough to read as
-  /// "under the planet".
-  static const double _planeOffsetRadii = 1.2;
+  /// Sheet plane offset below the body centre, in body radii. Shallow on
+  /// purpose: the hole rim hugs the body's lower limb (classic rubber-sheet
+  /// framing) instead of floating a full diameter beneath it.
+  static const double _planeOffsetRadii = 0.35;
 
   /// Surface gravity (m/s^2) → well depth in body radii. sqrt keeps the
   /// Moon (1.6 m/s^2) visibly shallow and Jupiter (24.8) visibly deep
@@ -56,9 +63,10 @@ class GravityGridNodes {
   static double _depthRadii(double g) =>
       (0.55 * math.sqrt(g / _gEarth)).clamp(0.15, 2.5);
 
-  /// Surface gravity → base opacity: saturating g/(g+1g₀) so Earth sits
-  /// mid-scale (0.54), the Moon faint (0.28), Jupiter strong (0.72).
-  static double _alphaFor(double g) => 0.18 + 0.72 * g / (g + _gEarth);
+  /// Surface gravity → base opacity: saturating g/(g+g_earth) so Earth sits
+  /// mid-scale (~0.65), the Moon faint (~0.44), Jupiter strong (~0.78).
+  /// Floor high enough that the weakest moons still read against space.
+  static double _alphaFor(double g) => 0.35 + 0.6 * g / (g + _gEarth);
 
   static const double _gEarth = 9.80665;
 
@@ -88,15 +96,21 @@ class GravityGridNodes {
       return;
     }
 
-    // Camera-up basis for the sheet plane, shared by every body this frame.
-    // In-plane spoke direction anchors to the WORLD axes (projected), not
-    // the camera basis — otherwise orbiting the camera visibly spins the
-    // spokes with it.
-    final up = camera.up.normalized;
+    // Up-alignment basis for the sheet plane, shared by every body this
+    // frame. The MODE's reference (not the screen-space up basis): the grid
+    // must stay a floor when the camera tilts to look down at it. In-plane
+    // spoke direction anchors to the WORLD axes (projected), not the camera
+    // basis — otherwise orbiting the camera visibly spins the spokes.
+    final up = camera.referenceUp.normalized;
     var ex = Vector3.unitX - up * up.dot(Vector3.unitX);
     if (ex.length < 0.1) ex = Vector3.unitY - up * up.dot(Vector3.unitY);
     ex = ex.normalized;
-    final ey = up.cross(ex); // ex × ey = up: winding preserved
+    final ey = up.cross(ex); // ex × ey = up: right-handed, no reflection
+    final rot = vm.Quaternion.fromRotation(vm.Matrix3(
+      ex.x, ex.y, ex.z, // column 0 = image of local +X
+      ey.x, ey.y, ey.z,
+      up.x, up.y, up.z,
+    ));
 
     final seen = <String>{};
     for (final b in snap.bodies.values) {
@@ -111,27 +125,23 @@ class GravityGridNodes {
       if (sizeFade <= 0.0) continue;
       seen.add(b.id);
 
+      final g = d.mu / (b.radius * b.radius);
       final sheet = _sheets.putIfAbsent(b.id, () {
-        final s = _GridSheet(shader);
+        // Funnel depth baked into this body's own mesh, normalised to the
+        // rim radius so the node scale stays uniform.
+        final s =
+            _GridSheet(shader, zFrac: _depthRadii(g) / extentRadii);
         _scene.add(s.node);
         return s;
       });
 
-      final g = d.mu / (b.radius * b.radius);
-      final sxy = lengthToScene(b.radius * extentRadii);
-      final sz = lengthToScene(b.radius * _depthRadii(g));
-      final pos = origin.worldToScene(
-          Vector3(b.px, b.py, b.pz) - up * (b.radius * _planeOffsetRadii));
-
-      // Column-major basis * per-axis scale: local +Z (the funnel's "up",
-      // dips are negative z) maps onto the camera's up axis.
-      sheet.node.localTransform = vm.Matrix4(
-        ex.x * sxy, ex.y * sxy, ex.z * sxy, 0,
-        ey.x * sxy, ey.y * sxy, ey.z * sxy, 0,
-        up.x * sz, up.y * sz, up.z * sz, 0,
-        pos.x, pos.y, pos.z, 1,
+      sheet.node.localTransform = vm.Matrix4.compose(
+        origin.worldToScene(
+            Vector3(b.px, b.py, b.pz) - up * (b.radius * _planeOffsetRadii)),
+        rot,
+        vm.Vector3.all(lengthToScene(b.radius * extentRadii)),
       );
-      sheet.updateUniforms(alpha: _alphaFor(g) * sizeFade);
+      sheet.updateUniforms(alpha: _alphaFor(g) * sizeFade, rimPx: rimPx);
     }
 
     _sheets.removeWhere((id, sheet) {
@@ -149,23 +159,23 @@ class GravityGridNodes {
   }
 }
 
-/// One body's grid sheet: the shared funnel mesh under gravity_grid.frag,
-/// with a per-body opacity uniform.
+/// One body's grid sheet: its own funnel mesh (depth baked in) under
+/// gravity_grid.frag, with a per-body opacity uniform.
 class _GridSheet {
-  _GridSheet(Object shader) {
+  _GridSheet(Object shader, {required double zFrac}) {
     _material = DepthSafeShaderMaterial(fragmentShader: shader as gpu.Shader);
-    node = fs.Node(mesh: fs.Mesh(_sharedFunnel(), _material));
+    node = fs.Node(mesh: fs.Mesh(_funnelDisc(zFrac: zFrac), _material));
   }
 
   late final fs.Node node;
   late final DepthSafeShaderMaterial _material;
 
-  final Float32List _u = Float32List(8); // 2 x vec4, std140
+  final Float32List _u = Float32List(12); // 3 x vec4, std140
 
   /// Line colour: pale spacetime-diagram cyan.
-  static const double _rCol = 0.45, _gCol = 0.78, _bCol = 1.0;
+  static const double _rCol = 0.55, _gCol = 0.85, _bCol = 1.0;
 
-  void updateUniforms({required double alpha}) {
+  void updateUniforms({required double alpha, required double rimPx}) {
     _u[0] = _rCol;
     _u[1] = _gCol;
     _u[2] = _bCol;
@@ -174,20 +184,22 @@ class _GridSheet {
     _u[5] = 24; // spokes
     _u[6] = GravityGridNodes._r0;
     _u[7] = 0.72; // rim fade start (normalised radius)
+    // Apparent rim radius (px): the shader derives line widths from it in
+    // uv space (fwidth is unusable on this backend — see gravity_grid.frag).
+    _u[8] = rimPx;
     _material.setUniformBlockFromFloats('GridInfo', _u);
   }
 
-  static fs.MeshGeometry? _geom;
-  static fs.MeshGeometry _sharedFunnel() => _geom ??= _funnelDisc();
-
-  /// The funnel disc, unit planar radius, both windings (translucent
+  /// The funnel disc: unit planar radius, both windings (translucent
   /// materials backface-cull, and the bowed sheet shows its underside near
   /// the rim). z = 0 at the outer rim falling hyperbolically (1/r, the
-  /// point-mass potential's shape) to -1 at the hole rim; the node's z
-  /// scale turns that into the per-body well depth. Radial sampling is
-  /// biased toward the hole (t^2) where the curvature lives; uv carries
-  /// (angle/2pi, planar radius) for the fragment shader's graticule.
-  static fs.MeshGeometry _funnelDisc({int radial = 48, int segments = 96}) {
+  /// point-mass potential's shape) to -[zFrac] at the hole rim — depth in
+  /// the same normalised units as the planar radius, so the node scale is
+  /// UNIFORM. Radial sampling is biased toward the hole (t^2) where the
+  /// curvature lives; uv carries (angle/2pi, planar radius) for the
+  /// fragment shader's graticule.
+  static fs.MeshGeometry _funnelDisc(
+      {required double zFrac, int radial = 48, int segments = 96}) {
     const r0 = GravityGridNodes._r0;
     final positions = <double>[];
     final texCoords = <double>[];
@@ -195,7 +207,7 @@ class _GridSheet {
     for (var ir = 0; ir <= radial; ir++) {
       final t = ir / radial;
       final r = r0 + (1.0 - r0) * t * t;
-      final z = -((1.0 / r) - 1.0) / ((1.0 / r0) - 1.0);
+      final z = -zFrac * ((1.0 / r) - 1.0) / ((1.0 / r0) - 1.0);
       for (var s = 0; s <= segments; s++) {
         final a = 2 * math.pi * s / segments;
         positions.addAll([r * math.cos(a), r * math.sin(a), z]);

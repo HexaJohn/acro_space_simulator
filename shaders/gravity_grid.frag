@@ -21,6 +21,11 @@ uniform GridInfo {
   // z: hole radius r0 (normalised planar units, = 1/extent multiplier).
   // w: rim fade start (normalised radius; alpha reaches 0 at 1.0).
   vec4 shape;
+  // x: the sheet rim's current apparent radius in PIXELS (CPU-estimated).
+  // Line widths are derived from it in uv space — fwidth is useless here:
+  // on this GLES backend it overestimates varying derivatives ~10x, fading
+  // every line into invisibility. yzw: unused.
+  vec4 px_info;
 }
 grid_info;
 
@@ -32,13 +37,16 @@ in vec4 v_color;
 
 out vec4 frag_color;
 
-// Anti-aliased distance to the nearest integer multiple of 1/count in
-// coord's 0..1 span: ~1.2 px wide lines whatever the zoom.
-float gridLine(float coord, float count) {
+// Anti-aliased lines at integer multiples of 1/count in coord's 0..1 span.
+// [halfW] is the half-width of a line as a FRACTION OF ONE PERIOD,
+// CPU-derived from the sheet's apparent size (~1.6 px lines). When lines
+// approach a whole period (unresolvable grid) they would merge into a
+// solid film dimming everything behind the sheet — fade out instead.
+float gridLine(float coord, float count, float halfW) {
   float x = coord * count;
   float dist = abs(x - floor(x + 0.5));      // distance to nearest integer
-  float px = fwidth(x);                      // integer units per pixel
-  return 1.0 - smoothstep(0.0, max(px * 1.2, 1e-6), dist);
+  float line = 1.0 - smoothstep(halfW * 0.7, halfW * 1.6, dist);
+  return line * (1.0 - smoothstep(0.3, 0.6, halfW));
 }
 
 void main() {
@@ -49,11 +57,18 @@ void main() {
   // Radial position normalised across the sheet (0 = hole rim, 1 = outer).
   float t = clamp((v - r0) / (1.0 - r0), 0.0, 1.0);
 
+  // Screen-space period estimates from the CPU-supplied rim radius:
+  // rings span (1-r0) of the rim over shape.x periods; a spoke period at
+  // the local radius v is 2*pi*v*rimPx / count.
+  float rimPx = max(grid_info.px_info.x, 1.0);
+  float ringPeriodPx = rimPx * (1.0 - r0) / grid_info.shape.x;
+  float spokePeriodPx = 6.2832 * max(v, r0) * rimPx / grid_info.shape.y;
+
   // Rings evenly spaced in radius; spokes evenly spaced in angle. The u
   // seam duplicates vertices at u=0/u=1, and integer spoke counts put a
   // line on both sides of it, so the seam is invisible.
-  float lines = max(gridLine(t, grid_info.shape.x),
-                    gridLine(u, grid_info.shape.y));
+  float lines = max(gridLine(t, grid_info.shape.x, 0.8 / ringPeriodPx),
+                    gridLine(u, grid_info.shape.y, 0.8 / spokePeriodPx));
   if (lines <= 1e-3) {
     frag_color = vec4(0.0);
     return;
@@ -61,7 +76,7 @@ void main() {
 
   // Deeper in the well reads denser (local gravity is stronger); the outer
   // rim dissolves so the sheet has no hard edge.
-  float depthBoost = mix(1.0, 0.4, t);
+  float depthBoost = mix(1.0, 0.55, t);
   float rim = 1.0 - smoothstep(grid_info.shape.w, 1.0, v);
 
   float alpha = clamp(
