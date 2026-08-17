@@ -22,6 +22,7 @@ import '../../adapters/repositories/in_memory_repositories.dart';
 import '../../adapters/repositories/in_memory_world_repositories.dart';
 import '../../application/ports/compute_port.dart';
 import '../../application/usecases/advance_simulation_tick.dart';
+import '../../domain/mining/resource_deposit.dart';
 import '../../domain/orbits/soi_transition_service.dart';
 import '../../domain/science/research_ledger.dart';
 import '../../domain/science/tech_tree.dart';
@@ -65,14 +66,17 @@ class FlightCheats {
 }
 
 class FlightSession {
-  /// Build a world from a starting [system] and [fleet].
+  /// Build a world from a starting [system] and [fleet], with any minable
+  /// [deposits] the world starts holding.
   FlightSession({
     required StarSystem system,
     required Iterable<Vessel> fleet,
+    Iterable<ResourceDeposit> deposits = const [],
     FlightCheats cheats = const FlightCheats(),
     void Function(DomainEvent)? onEvent,
   })  : universe = StaticUniverseRepository(system),
         vessels = InMemoryVesselRepository(fleet),
+        deposits = InMemoryDepositRepository(deposits),
         _cheats = cheats {
     if (onEvent != null) events.subscribe(onEvent);
     rebuildTick();
@@ -82,7 +86,7 @@ class FlightSession {
   final InMemoryVesselRepository vessels;
   final InMemoryEventBus events = InMemoryEventBus();
   final InMemoryColonyRepository colonies = InMemoryColonyRepository();
-  final InMemoryDepositRepository deposits = InMemoryDepositRepository();
+  final InMemoryDepositRepository deposits;
   final InMemoryWeatherRepository weather = InMemoryWeatherRepository();
 
   /// City-builder colonies this world owns. A colony registered here keeps

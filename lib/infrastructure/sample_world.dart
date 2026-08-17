@@ -38,6 +38,9 @@ class SampleWorld {
   /// Canonical body ids in the real system (see [RealSolarSystem]).
   static final BodyId earth = const BodyId('earth');
   static final BodyId moon = const BodyId('moon');
+  static final BodyId psyche = const BodyId('psyche');
+  static final BodyId eros = const BodyId('eros');
+  static final BodyId ryugu = const BodyId('ryugu');
 
   /// The real Solar System: Sun + planets + dwarf planets + moons.
   static StarSystem realSystem() => RealSolarSystem.build();
@@ -144,6 +147,89 @@ class SampleWorld {
         concentration: 0.9,
         reserves: 100000,
       );
+
+  /// Minable lodes on the asteroids — the bodies whose voxel terrain exists to
+  /// be dug up. Mining any of these visibly excavates a growing quarry pit at
+  /// the site (see `DepositExcavation`).
+  static List<ResourceDeposit> buildAsteroidDeposits() => [
+        // A metal world: essentially solid ore, and lots of it.
+        ResourceDeposit(
+          id: 'psyche-metal-1',
+          body: psyche,
+          latitude: 0.2,
+          longitude: 0.7,
+          resource: ResourceType.ore,
+          concentration: 0.95,
+          reserves: 500000,
+        ),
+        ResourceDeposit(
+          id: 'eros-regolith-1',
+          body: eros,
+          latitude: -0.4,
+          longitude: 2.1,
+          resource: ResourceType.ore,
+          concentration: 0.6,
+          reserves: 80000,
+        ),
+        // C-type rubble pile: hydrated minerals — water for life support and
+        // ISRU propellant.
+        ResourceDeposit(
+          id: 'ryugu-ice-1',
+          body: ryugu,
+          latitude: 0.9,
+          longitude: -1.3,
+          resource: ResourceType.water,
+          concentration: 0.5,
+          reserves: 30000,
+        ),
+      ];
+
+  /// A landed miner working the Psyche metal lode — drops onto asteroid voxel
+  /// terrain with an active drill, so the excavation loop runs end to end in
+  /// the live world.
+  static Vessel buildAsteroidMiner() {
+    final body = realSystem().require(psyche);
+    final deposit = buildAsteroidDeposits().first;
+    final ore = ResourceContainer(
+        type: ResourceType.ore, capacity: 4000, amount: 0, unitMass: 1);
+    final power = ResourceContainer(
+        type: ResourceType.electricCharge,
+        capacity: 5000,
+        amount: 5000,
+        unitMass: 0);
+    final drill = Part(
+      id: const PartId('asteroid-drill-0'),
+      name: 'Regolith Auger',
+      dryMass: 900,
+      resources: [ore, power],
+      crossSectionArea: 2.0,
+    );
+    // Sit ON the deposit so the pit grows under the craft. The exact ground
+    // radius is settled by the landed frame-lock against the terrain field;
+    // the datum radius is close enough for the spawn.
+    final cosLat = math.cos(deposit.latitude);
+    final dir = Vector3(
+      cosLat * math.cos(deposit.longitude),
+      cosLat * math.sin(deposit.longitude),
+      math.sin(deposit.latitude),
+    );
+    return Vessel(
+      id: const VesselId('asteroid-miner-1'),
+      name: 'Psyche Prospector',
+      ownerId: 'player-1',
+      state: StateVector(
+        position: dir * body.radius,
+        velocity: Vector3.zero,
+      ),
+      dominantBody: psyche,
+      stages: [Stage(index: 0, parts: [drill])],
+      landed: true,
+    )..mining = MiningOperation(
+        rig: MiningRig(id: 'asteroid-rig-0', baseRate: 8, powerDraw: 4, active: true),
+        depositId: deposit.id,
+        targetType: ResourceType.ore,
+      );
+  }
 
   /// A small surface colony: a refinery turning ore into water plus housing.
   static Colony buildColony() {

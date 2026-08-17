@@ -21,6 +21,17 @@ class ResourceDeposit {
   /// Remaining reserves in resource units; null = effectively infinite.
   double? reserves;
 
+  /// Lifetime units taken out of the ground here, by anyone — vessel rigs and
+  /// city mining both funnel through [extract]. PERSISTED: the excavation pit
+  /// at the site is re-derived deterministically from this total, so a loaded
+  /// save re-digs the same hole without storing any terrain brushes.
+  double extractedTotal;
+
+  /// How many excavation quanta have already been carved into the terrain for
+  /// this deposit. TRANSIENT bookkeeping for `DepositExcavation` — starts at 0
+  /// each session so the pit is reconstructed from [extractedTotal].
+  int carvedQuanta;
+
   ResourceDeposit({
     required this.id,
     required this.body,
@@ -29,6 +40,8 @@ class ResourceDeposit {
     required this.resource,
     required this.concentration,
     this.reserves,
+    this.extractedTotal = 0,
+    this.carvedQuanta = 0,
   });
 
   bool get isDepleted => reserves != null && reserves! <= 0;
@@ -36,9 +49,13 @@ class ResourceDeposit {
   /// Remove up to [units]; returns the amount actually extracted (respecting
   /// finite reserves). Invariant: reserves never go negative.
   double extract(double units) {
-    if (reserves == null) return units; // infinite
+    if (reserves == null) {
+      extractedTotal += units; // infinite
+      return units;
+    }
     final taken = units.clamp(0, reserves!).toDouble();
     reserves = reserves! - taken;
+    extractedTotal += taken;
     return taken;
   }
 }

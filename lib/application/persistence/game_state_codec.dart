@@ -201,6 +201,9 @@ class GameStateCodec {
   Map<String, dynamic> _deposit(dynamic d) => {
         'id': d.id,
         'reserves': d.reserves,
+        // Lifetime extraction — the excavation pit at the site is re-derived
+        // from this on load, so no terrain brushes need saving.
+        'extracted': d.extractedTotal,
       };
 
   // ---------------- decode ----------------
@@ -260,6 +263,11 @@ class GameStateCodec {
       if (d == null) continue;
       final res = m['reserves'];
       d.reserves = res == null ? null : (res as num).toDouble();
+      // Pre-excavation saves lack the key; 0 means "no pit yet". carvedQuanta
+      // is deliberately NOT reset: within a session the already-recorded pit
+      // brushes survive the load (terrain edits are append-only), so re-carving
+      // would only duplicate them. A fresh session starts at 0 and rebuilds.
+      d.extractedTotal = (m['extracted'] as num?)?.toDouble() ?? 0.0;
     }
   }
 

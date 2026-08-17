@@ -430,6 +430,121 @@ class RealSolarSystem {
       _moon('triton', 'Triton', 1.428e12, 1353400, 1.0e8, 'neptune', 3.548e8,
           0.000016, 1.5, inclinationDeg: 156.87),
 
+      // ---- Asteroids ----
+      //
+      // First bodies whose voxel terrain exists to be MINED, not just landed
+      // on. All fully procedural (no DEM): relief is a large fraction of the
+      // radius, so they read as battered potatoes rather than shrunken
+      // planets. Crater populations are scaled per body — the moonlike
+      // preset's 8 km craters would swallow Eros whole.
+      //
+      // The base relief is still a height field on the datum sphere (single
+      // valued per direction), so a genuinely bilobed contact binary is not
+      // representable yet; mining edits on top ARE full 3D CSG.
+      CelestialBody(
+        id: const BodyId('vesta'),
+        name: 'Vesta',
+        mu: 1.729e10,
+        radius: 2.627e5,
+        soiRadius: 4.0e7,
+        siderealRotationPeriod: 19232, // 5.342 h
+        parent: const BodyId('sun'),
+        orbitRadius: 2.3615 * _au,
+        orbitEccentricity: 0.0887,
+        orbitInclination: _deg(7.14),
+        solarFlux: 244,
+        terrain: TerrainConfig(
+          seed: 0x4E57A,
+          // Rheasilvia-scale relief: the south-pole basin's central peak rises
+          // ~20 km. Huge relative to the radius (~7%) — that is what makes
+          // Vesta visibly non-spherical from orbit.
+          amplitude: 18000,
+          featureScale: 120000,
+          erodedDetail: true,
+          profile: TerrainProfile.moonlike,
+        ),
+      ),
+      CelestialBody(
+        id: const BodyId('psyche'),
+        name: 'Psyche',
+        mu: 1.53e9,
+        radius: 1.13e5,
+        soiRadius: 1.8e7,
+        siderealRotationPeriod: 15106, // 4.196 h
+        parent: const BodyId('sun'),
+        orbitRadius: 2.924 * _au,
+        orbitEccentricity: 0.1396,
+        orbitInclination: _deg(3.10),
+        solarFlux: 159,
+        terrain: TerrainConfig(
+          seed: 0x951CE,
+          amplitude: 9000,
+          featureScale: 60000,
+          erodedDetail: true,
+          profile: TerrainProfile(
+            archetype: TerrainArchetype.crateredHighland,
+            regionScaleM: 250000,
+            slopeDamping: 0.6,
+            craterLargestRadiusM: 6000,
+          ),
+        ),
+      ),
+      CelestialBody(
+        id: const BodyId('eros'),
+        name: 'Eros',
+        mu: 4.463e5,
+        radius: 8420,
+        soiRadius: 3.6e5,
+        siderealRotationPeriod: 18972, // 5.27 h
+        parent: const BodyId('sun'),
+        orbitRadius: 1.4581 * _au,
+        orbitEccentricity: 0.2227,
+        orbitInclination: _deg(10.83),
+        solarFlux: 640,
+        terrain: TerrainConfig(
+          seed: 0xE05,
+          // ~30% of the radius: an 8 km body with 2.4 km bumps is a proper
+          // potato, and every landing is on a slope.
+          amplitude: 2400,
+          featureScale: 9000,
+          erodedDetail: true,
+          profile: TerrainProfile(
+            archetype: TerrainArchetype.crateredHighland,
+            regionScaleM: 20000,
+            slopeDamping: 0.5,
+            craterLargestRadiusM: 1200,
+            craterDecades: 3,
+          ),
+        ),
+      ),
+      CelestialBody(
+        id: const BodyId('ryugu'),
+        name: 'Ryugu',
+        mu: 30.0, // 450 Mt rubble pile — escape velocity well under walking pace
+        radius: 448,
+        soiRadius: 6.0e3,
+        siderealRotationPeriod: 27400, // 7.63 h
+        parent: const BodyId('sun'),
+        orbitRadius: 1.1896 * _au,
+        orbitEccentricity: 0.1902,
+        orbitInclination: _deg(5.88),
+        solarFlux: 961,
+        terrain: TerrainConfig(
+          seed: 0x4A61,
+          amplitude: 90,
+          featureScale: 500,
+          octaves: 4,
+          erodedDetail: true,
+          profile: TerrainProfile(
+            archetype: TerrainArchetype.crateredHighland,
+            regionScaleM: 1200,
+            slopeDamping: 0.4,
+            craterLargestRadiusM: 80,
+            craterDecades: 2,
+          ),
+        ),
+      ),
+
       // ---- Dwarf planets ----
       CelestialBody(
         id: const BodyId('ceres'),

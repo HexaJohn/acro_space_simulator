@@ -49,6 +49,7 @@ import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
 import '../../domain/simulation/epoch.dart';
 import '../../domain/simulation/simulation_clock.dart';
+import '../../domain/mining/deposit_excavation.dart';
 import '../../domain/subsystems/vessel_mining_updater.dart';
 import '../../domain/terrain/impact_scaling.dart';
 import '../../domain/terrain/terrain_brush.dart';
@@ -103,6 +104,10 @@ class AdvanceSimulationTick {
   final StateVectorOrbitConverter converter;
   final VesselThermalUpdater thermalUpdater;
   final VesselMiningUpdater miningUpdater;
+
+  /// Grows each mined deposit's quarry pit in the terrain as its reserves
+  /// come out of the ground (vessel rigs and city mining alike).
+  final DepositExcavation excavation;
   final SupplyChain supplyChain;
   final ZoneGrowthService zoneGrowth;
   final HappinessService happinessService;
@@ -185,6 +190,7 @@ class AdvanceSimulationTick {
     this.converter = const StateVectorOrbitConverter(),
     this.thermalUpdater = const VesselThermalUpdater(),
     this.miningUpdater = const VesselMiningUpdater(),
+    this.excavation = const DepositExcavation(),
     this.supplyChain = const SupplyChain(),
     this.zoneGrowth = const ZoneGrowthService(),
     this.happinessService = const HappinessService(),
@@ -386,6 +392,12 @@ class AdvanceSimulationTick {
       colonies.save(colony);
     }
 
+    // ---- Excavation phase: reflect this tick's extraction in the ground.
+    // One pass after both mining paths (vessel rigs in the per-vessel
+    // subsystems, city mining just above) because both deplete the DEPOSIT —
+    // the pit tracks what left the ground, not who took it.
+    _excavateDeposits(system, clock);
+
     // ---- Megastructure phase: colonies pour mass + surplus power into the
     // endgame builds (Dyson spheres, Halo rings, ...). Glacially slow on
     // purpose — these are the long-game sinks for planetary-scale economies.
@@ -419,6 +431,23 @@ class AdvanceSimulationTick {
     for (final id in dispatched) {
       for (final s in cargo.all()) {
         if (s.id == id) cargo.save(s);
+      }
+    }
+  }
+
+  /// Append every deposit's newly earned excavation-pit brushes to its body's
+  /// terrain edits. The pit geometry is a pure function of the deposit's
+  /// lifetime extraction (see [DepositExcavation]), so this also silently
+  /// RECONSTRUCTS pits on the first tick after a save-load, where
+  /// `carvedQuanta` restarts at 0 while `extractedTotal` was persisted.
+  void _excavateDeposits(StarSystem system, SimulationClock clock) {
+    for (final deposit in deposits.all()) {
+      final body = system.body(deposit.body);
+      if (body == null) continue;
+      final brushes = excavation.pendingBrushes(
+          deposit: deposit, body: body, tick: clock.tick);
+      for (final b in brushes) {
+        terrainEdits.record(body.id, b);
       }
     }
   }
