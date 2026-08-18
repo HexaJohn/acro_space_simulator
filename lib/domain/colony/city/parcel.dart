@@ -62,19 +62,19 @@ class Vec2 {
 /// pushed back from the centreline.
 enum RoadClass {
   /// Local street: houses, shops, the default.
-  street('Street', 8.0, 1),
+  street('Street', 8.0, 1, 12),
 
   /// Multi-lane arterial through the city.
-  avenue('Avenue', 16.0, 2),
+  avenue('Avenue', 16.0, 2, 8),
 
   /// Grade-separated link between districts and out to the industrial sites.
-  highway('Highway', 32.0, 4),
+  highway('Highway', 32.0, 4, 5),
 
   /// A graded dirt track — the first road a colony has. Cheap, slow, unlit.
   ///
   /// Appended after the paved tiers because saves persist this enum by INDEX;
   /// inserting it first would turn every saved street into a path.
-  path('Dirt Path', 4.0, 1);
+  path('Dirt Path', 4.0, 1, 20);
 
   final String label;
 
@@ -84,7 +84,14 @@ enum RoadClass {
   /// Lanes per direction — used for traffic capacity and lamp spacing.
   final int lanesEachWay;
 
-  const RoadClass(this.label, this.width, this.lanesEachWay);
+  /// Steepest grade this tier can be built at, percent. Real limits: a local
+  /// street tolerates ~12%, an arterial ~8%, a grade-separated highway ~5%,
+  /// and a dirt track will climb what a wheel can grip. This is what makes
+  /// mountains COST something: the highway has to go around, the path can go
+  /// over.
+  final double maxGradePct;
+
+  const RoadClass(this.label, this.width, this.lanesEachWay, this.maxGradePct);
 
   /// Whether this tier is paved — drives the surface texture, the lamps, and
   /// the traffic capacity. A dirt path is a road to the network and a track to
@@ -454,4 +461,49 @@ class Parcel {
         use: use ?? this.use,
         manual: manual,
       );
+}
+
+/// Grade (slope) audit of a route against a road tier's limit.
+class RoadGradeCheck {
+  const RoadGradeCheck({required this.maxPct, required this.limitPct});
+
+  /// Steepest grade found along the route, percent.
+  final double maxPct;
+
+  /// The tier's limit.
+  final double limitPct;
+
+  bool get ok => maxPct <= limitPct + 1e-9;
+
+  /// Walk [samples] (already spline-sampled route points) over [groundAt]
+  /// (metres of ground radius under a local point) and find the steepest
+  /// run. Windows shorter than [windowM] are ignored: sampling noise over a
+  /// couple of metres is not a hill, and real grade limits are measured over
+  /// tens of metres of carriageway.
+  static RoadGradeCheck of(
+    List<Vec2> samples,
+    double Function(Vec2) groundAt,
+    RoadClass roadClass, {
+    double windowM = 10,
+  }) {
+    var worst = 0.0;
+    if (samples.length >= 2) {
+      var anchor = samples.first;
+      var anchorH = groundAt(anchor);
+      var arc = 0.0;
+      for (var i = 1; i < samples.length; i++) {
+        arc += samples[i].distanceTo(samples[i - 1]);
+        if (arc < windowM && i < samples.length - 1) continue;
+        final h = groundAt(samples[i]);
+        if (arc > 1e-6) {
+          final grade = ((h - anchorH).abs() / arc) * 100;
+          if (grade > worst) worst = grade;
+        }
+        anchor = samples[i];
+        anchorH = h;
+        arc = 0;
+      }
+    }
+    return RoadGradeCheck(maxPct: worst, limitPct: roadClass.maxGradePct);
+  }
 }

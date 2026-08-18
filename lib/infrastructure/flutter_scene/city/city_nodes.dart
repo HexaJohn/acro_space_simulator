@@ -41,6 +41,12 @@ class _CityMesh {
   final fs.MeshGeometry? glazing;
 }
 
+/// Swatch count of the ground palette. ONE constant for the bake and every
+/// sampler of it: the patch pass used to divide by 5 against a 6-band texture,
+/// which quietly recoloured commercial lots industrial-tan and support decks
+/// cursor-cyan.
+const int kGroundSwatches = 7;
+
 class CityNodes {
   CityNodes(this._scene);
 
@@ -77,6 +83,10 @@ class CityNodes {
   /// ghost ribbon so the player sees the road before paying for it.
   static List<Vector3> pendingRouteBF = const [];
   static double pendingWidthM = 8;
+
+  /// Whether the pending route violates its tier's grade limit — drawn in the
+  /// refusal red so the player sees the problem BEFORE paying for the road.
+  static bool pendingRouteBad = false;
 
   /// Whether a texture upload is still in flight (see [update]).
   bool _texturesPending = false;
@@ -343,7 +353,7 @@ class CityNodes {
     final lift = up * 0.3;
 
     final m = MeshBuilder();
-    const u = 5.5 / 6; // the cursor swatch
+    const u = 5.5 / kGroundSwatches; // the cursor swatch
     if (cursorBF != null) {
       final corners = [
         east * -h + north * -h + lift,
@@ -360,6 +370,9 @@ class CityNodes {
     // frame (the cursor node is placed at [at]; route points are body-fixed,
     // so they are expressed relative to it here).
     if (route.length >= 2) {
+      final ghostU = pendingRouteBad
+          ? 6.5 / kGroundSwatches // refusal red
+          : 5.5 / kGroundSwatches;
       final hw = pendingWidthM / 2;
       int? pl, pr;
       for (var i = 0; i < route.length; i++) {
@@ -371,9 +384,9 @@ class CityNodes {
         final along = ahead.normalized;
         final side = along.cross(upI).normalized;
         final l = m.vertex(
-            _scenePos(p + side * -hw + upI * 0.35), upI, u, 0.5);
+            _scenePos(p + side * -hw + upI * 0.35), upI, ghostU, 0.5);
         final r = m.vertex(
-            _scenePos(p + side * hw + upI * 0.35), upI, u, 0.5);
+            _scenePos(p + side * hw + upI * 0.35), upI, ghostU, 0.5);
         if (pl != null && pr != null) m.quad(pl, pr, r, l);
         pl = l;
         pr = r;

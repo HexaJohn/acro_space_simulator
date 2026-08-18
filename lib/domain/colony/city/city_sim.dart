@@ -3147,6 +3147,15 @@ class CitySim {
   /// cut and creep the colony downhill a little every frame.
   final Map<int, double> cellGroundRadius = {};
 
+  /// Ground radius under parcel-city geometry (lots, road samples), keyed by
+  /// feature. Filled by the snapshot from the terrain field WITH edits, so a
+  /// road reads the corridor that was graded for it and a building reads its
+  /// own levelled pad. Cleared whenever the shaper records new brushes —
+  /// [groundCacheStamp] tracks [shapedTerrain]'s size — because that is
+  /// exactly when the ground under the colony changes.
+  final Map<String, double> groundCache = {};
+  int groundCacheStamp = -1;
+
   // ---- Parcel city: growth, connectivity, traffic, fire ----
 
   /// Progress below which a growing lot has no building yet — the same
@@ -3229,7 +3238,26 @@ class CitySim {
   /// Draw a road through the editor: junctions split, lots re-cut, and every
   /// building keyed by a renamed lot carried across to the lot now standing on
   /// the same ground.
-  String commitRoad(List<Vec2> controls, RoadClass roadClass) {
+  ///
+  /// With [groundAt] supplied, the route is grade-checked against the tier's
+  /// limit FIRST and refused outright when too steep — returns null and
+  /// commits nothing. Terrain cut/fill smooths a corridor; it does not repeal
+  /// the slope, and a street pinned to a cliff face should be a routing
+  /// problem, not a rendering one.
+  String? commitRoad(
+    List<Vec2> controls,
+    RoadClass roadClass, {
+    double Function(Vec2)? groundAt,
+  }) {
+    if (groundAt != null && controls.length >= 2) {
+      final samples = RoadSpline(
+        id: 'probe',
+        controls: controls,
+        roadClass: roadClass,
+      ).sample(stepM: 12);
+      final grade = RoadGradeCheck.of(samples, groundAt, roadClass);
+      if (!grade.ok) return null;
+    }
     final result =
         layout.commitRoad(controls: controls, roadClass: roadClass);
     for (final e in result.renamedLots.entries) {

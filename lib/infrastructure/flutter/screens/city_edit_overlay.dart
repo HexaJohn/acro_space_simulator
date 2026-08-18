@@ -59,6 +59,15 @@ class CityEditController extends ChangeNotifier {
   /// Road class the spline tool lays.
   RoadClass roadClass = RoadClass.street;
 
+  /// Ground height under a colony-local point, injected by the flight view
+  /// (the overlay has no terrain access of its own). Null leaves road grades
+  /// ungated, which is what headless callers and tests want.
+  double Function(Vec2)? groundAt;
+
+  /// Steepest grade of the route being drawn, percent — the live readout the
+  /// player steers by. Null until two points exist.
+  double? previewGradePct;
+
   /// Frontage/depth the blocks are cut at. These are the "user settings" the
   /// parcels are drawn from — change them and the same street re-subdivides.
   double frontageM = 24;
@@ -83,6 +92,7 @@ class CityEditController extends ChangeNotifier {
   /// Throw the half-drawn road away.
   void cancelSpline() {
     pending.clear();
+    previewGradePct = null;
     notifyListeners();
   }
 
@@ -98,8 +108,18 @@ class CityEditController extends ChangeNotifier {
       frontageM: frontageM,
       depthM: lotDepthM,
     );
-    city.commitRoad(List.of(pending), roadClass);
+    final id =
+        city.commitRoad(List.of(pending), roadClass, groundAt: groundAt);
+    if (id == null) {
+      // Refused on grade. The pending points are KEPT: the player adjusts the
+      // route or drops a tier, rather than redrawing from nothing.
+      blocked = 'Too steep for a ${roadClass.label} '
+          '(limit ${roadClass.maxGradePct.toStringAsFixed(0)}%).';
+      notifyListeners();
+      return;
+    }
     pending.clear();
+    previewGradePct = null;
     notifyListeners();
   }
 
@@ -415,6 +435,21 @@ class CityEditOverlay extends StatelessWidget {
                   style: const TextStyle(
                       fontSize: 10, color: Color(0xFF7FE0A0))),
             ),
+            if (controller.previewGradePct != null)
+              Padding(
+                padding: const EdgeInsets.only(left: 6),
+                child: Text(
+                  '${controller.previewGradePct!.toStringAsFixed(1)}% '
+                  '/ ${controller.roadClass.maxGradePct.toStringAsFixed(0)}%',
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: controller.previewGradePct! >
+                            controller.roadClass.maxGradePct
+                        ? const Color(0xFFFF8A80)
+                        : const Color(0xFF9FB4CC),
+                  ),
+                ),
+              ),
             IconButton(
               onPressed: () => controller.commitSpline(city),
               icon: const Icon(Icons.check, size: 16),

@@ -152,8 +152,8 @@ class CityTextureBakes {
   /// colour would be five draws for what is a single sheet of ground. Every
   /// vertex of a patch samples the CENTRE of its swatch, so no filtering or
   /// mip level can bleed one kind's colour into its neighbour.
-  static Uint8List groundPalette(int size, {int swatches = 6}) {
-    // road, residential, commercial, industrial, support, CURSOR
+  static Uint8List groundPalette(int size, {int swatches = 7}) {
+    // road, residential, commercial, industrial, support, CURSOR, REFUSED
     const colours = [
       [92, 94, 99],
       [86, 128, 96],
@@ -161,6 +161,7 @@ class CityTextureBakes {
       [138, 116, 74],
       [96, 102, 112],
       [120, 240, 255],
+      [235, 84, 64],
     ];
     final out = Uint8List(size * size * 4);
     final band = math.max(1, size ~/ swatches);

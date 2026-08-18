@@ -60,6 +60,7 @@ extension SimulationViewColony on _SimulationViewState {
     // panels that have no 3D equivalent — politics, budgets, stockpiles.
     rebuild(() {
       _editingCity = colony;
+      _cityEdit.groundAt = (p) => _groundAtLocal(colony, p);
       _cityEdit.set(CityEditTool.zone);
     });
   }
@@ -123,6 +124,13 @@ extension SimulationViewColony on _SimulationViewState {
     CityNodes.cursorSizeM = _cityEdit.tool == CityEditTool.utility
         ? _cityEdit.selectedUtil.siteMetres(cellM: CitySim.cellM).width
         : CitySim.cellM;
+    // While a road is being drawn, the ghost follows the mouse: the next
+    // segment is visible BEFORE it is clicked, which is the whole difference
+    // between placing a road and discovering one.
+    if (_cityEdit.tool == CityEditTool.roadSpline &&
+        _cityEdit.pending.isNotEmpty) {
+      _syncRoutePreview(city, hover: Vec2(hit.east, hit.north));
+    }
   }
 
   /// The ground point under [local], or null if the tap missed the planet.
@@ -151,15 +159,48 @@ extension SimulationViewColony on _SimulationViewState {
     );
   }
 
-  /// Push the in-progress road into the renderer as a ghost ribbon.
-  void _syncRoutePreview(CitySim city) {
+  /// Ground radius under a colony-local point, terrain edits included — so
+  /// the preview and the grade check both read the same ground a committed
+  /// road would be graded against.
+  double _groundAtLocal(CitySim city, Vec2 p) {
+    final body = _universe.current().body(city.body.id);
+    if (body == null) return 0;
+    final dir = city
+        .localToBodyFixed(p, bodyRadiusM: body.radius)
+        .normalized;
+    final field = body.terrainFieldWith(_terrainEdits.forBody(body.id));
+    return field?.groundRadiusAt(dir.x, dir.y, dir.z) ?? body.radius;
+  }
+
+  /// Push the in-progress road into the renderer: the true SPLINE through the
+  /// placed points (plus the hover point as a ghost segment), draped point by
+  /// point on the real ground, red when the grade check refuses it.
+  void _syncRoutePreview(CitySim city, {Vec2? hover}) {
     final body = _universe.current().body(city.body.id);
     if (body == null) return;
-    final ground = _colonySiteRadius(city);
+    final controls = [
+      ..._cityEdit.pending,
+      if (hover != null) hover,
+    ];
+    if (controls.length < 2) {
+      CityNodes.pendingRouteBF = const [];
+      CityNodes.pendingRouteBad = false;
+      _cityEdit.previewGradePct = null;
+      return;
+    }
+    final samples = RoadSpline(
+      id: 'preview',
+      controls: controls,
+      roadClass: _cityEdit.roadClass,
+    ).sample(stepM: 8);
+    final grade = RoadGradeCheck.of(
+        samples, (p) => _groundAtLocal(city, p), _cityEdit.roadClass);
+    _cityEdit.previewGradePct = grade.maxPct;
+    CityNodes.pendingRouteBad = !grade.ok;
     CityNodes.pendingWidthM = _cityEdit.roadClass.width;
     CityNodes.pendingRouteBF = [
-      for (final p in _cityEdit.pending)
-        city.localToBodyFixed(p, bodyRadiusM: ground),
+      for (final p in samples)
+        city.localToBodyFixed(p, bodyRadiusM: _groundAtLocal(city, p)),
     ];
   }
 

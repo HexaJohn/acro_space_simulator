@@ -1535,6 +1535,26 @@ class WorldSnapshot {
             ? body.radius
             : field.groundRadiusAt(siteDirBF.x, siteDirBF.y, siteDirBF.z);
 
+        // The shaper just changed the ground? Every cached height is stale.
+        if (city.groundCacheStamp != city.shapedTerrain.length) {
+          city.groundCache.clear();
+          city.groundCacheStamp = city.shapedTerrain.length;
+        }
+
+        /// Ground radius under a parcel-city feature, cached by key. Sampled
+        /// WITH the terrain edits, so geometry reads the pad that was levelled
+        /// for it — sampling the pristine field would re-open the exact gap
+        /// the shaper closed.
+        double groundFor(String key, Vec2 local) {
+          if (field == null) return siteRadius;
+          return city.groundCache.putIfAbsent(key, () {
+            final dir = city
+                .localToBodyFixed(local, bodyRadiusM: siteRadius)
+                .normalized;
+            return field.groundRadiusAt(dir.x, dir.y, dir.z);
+          });
+        }
+
         /// Ground radius under one CELL, so the colony drapes over the
         /// landscape instead of hovering on a disc cut at the site's own
         /// height. Cached on the colony: the shaper levels each pad to the
@@ -1559,9 +1579,13 @@ class WorldSnapshot {
         for (final road in city.layout.roads) {
           final pts = road.sample(stepM: 6);
           if (pts.length < 2) continue;
+          // Each point at ITS OWN ground: a road crossing a slope follows the
+          // corridor graded for it, instead of holding the site's height and
+          // floating off (or tunnelling into) the hillside.
           final flat = <double>[];
-          for (final p in pts) {
-            final bf = city.localToBodyFixed(p, bodyRadiusM: siteRadius);
+          for (var i = 0; i < pts.length; i++) {
+            final bf = city.localToBodyFixed(pts[i],
+                bodyRadiusM: groundFor('road:${road.id}:$i', pts[i]));
             flat.addAll([bf.x, bf.y, bf.z]);
           }
           roads.add(RoadSnapshot(
@@ -1628,7 +1652,8 @@ class WorldSnapshot {
             parcel,
             spec,
             body,
-            siteRadiusM: siteRadius,
+            siteRadiusM:
+                groundFor('lot:${parcel.id}', parcel.centroid),
           );
         }
         // Empty lots, drawn so the subdivision is visible before anything is
@@ -1640,7 +1665,8 @@ class WorldSnapshot {
               city.parcelGrownSpec(parcel.id, parcel.use) != null) {
             continue;
           }
-          final t = _parcelTransform(city, parcel, siteRadius);
+          final t = _parcelTransform(
+              city, parcel, groundFor('lot:${parcel.id}', parcel.centroid));
           final extent = parcel.buildableExtent;
           patches.add(CityPatchSnapshot(
             colonyId: city.id,
