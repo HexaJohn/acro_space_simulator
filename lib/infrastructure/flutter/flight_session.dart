@@ -22,6 +22,7 @@ import '../../adapters/repositories/in_memory_repositories.dart';
 import '../../adapters/repositories/in_memory_world_repositories.dart';
 import '../../application/ports/compute_port.dart';
 import '../../application/usecases/advance_simulation_tick.dart';
+import '../../domain/megastructure/megastructure.dart';
 import '../../domain/mining/resource_deposit.dart';
 import '../../domain/orbits/soi_transition_service.dart';
 import '../../domain/science/research_ledger.dart';
@@ -72,11 +73,13 @@ class FlightSession {
     required StarSystem system,
     required Iterable<Vessel> fleet,
     Iterable<ResourceDeposit> deposits = const [],
+    Iterable<Megastructure> megastructures = const [],
     FlightCheats cheats = const FlightCheats(),
     void Function(DomainEvent)? onEvent,
   })  : universe = StaticUniverseRepository(system),
         vessels = InMemoryVesselRepository(fleet),
         deposits = InMemoryDepositRepository(deposits),
+        megastructures = InMemoryMegastructureRepository(megastructures),
         _cheats = cheats {
     if (onEvent != null) events.subscribe(onEvent);
     rebuildTick();
@@ -84,6 +87,11 @@ class FlightSession {
 
   final StaticUniverseRepository universe;
   final InMemoryVesselRepository vessels;
+
+  /// Megaprojects under construction in this world. In the tick loop so their
+  /// builds actually advance in-sim (the megastructure screen's own ticker is
+  /// a standalone toy — this repo is the one the world renders from).
+  final InMemoryMegastructureRepository megastructures;
   final InMemoryEventBus events = InMemoryEventBus();
   final InMemoryColonyRepository colonies = InMemoryColonyRepository();
   final InMemoryDepositRepository deposits;
@@ -136,6 +144,7 @@ class FlightSession {
       weather: weather,
       research: research,
       terrainEdits: terrainEdits,
+      megastructures: megastructures,
       disableOverheat: _cheats.disableOverheat,
       disableAeroStress: _cheats.disableAeroStress,
       disableCraftDestruction: _cheats.disableCraftDestruction,

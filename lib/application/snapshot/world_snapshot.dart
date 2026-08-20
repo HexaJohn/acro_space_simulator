@@ -12,6 +12,8 @@ import '../../domain/colony/city/parcel.dart';
 import '../../domain/colony/colony.dart';
 import '../../domain/colony/surface_placement.dart';
 import '../../domain/comms/comms_service.dart';
+import '../../domain/megastructure/halo_ring.dart';
+import '../../domain/megastructure/megastructure.dart';
 import '../../domain/orbits/body_ephemeris.dart';
 import '../../domain/orbits/patched_conic_service.dart';
 import '../../domain/orbits/state_vector_converter.dart';
@@ -512,6 +514,191 @@ class BodySnapshot {
       orbit: [
         for (final n in (j['orbit'] as List?) ?? const []) (n as num).toDouble(),
       ],
+    );
+  }
+}
+
+/// One physically-sited megastructure for the renderer: world pose + the ring
+/// recipe + build progress. Only projects with a [Megastructure.site] AND a
+/// physical shape cross — pure economy projects stay sim-side.
+///
+/// The pose is derived, not stored: a circular orbit about the parent in the
+/// root frame, and spin about the structure's +Z at the spec's rate. The
+/// renderer rebuilds the terrain field from the spec (same seed => same
+/// surface), mirroring how `BodyDescriptorSnapshot.buildTerrainField` works
+/// for planets.
+class MegastructureSnapshot {
+  final String id;
+  final int type; // MegastructureType enum index
+  final String parentBodyId;
+  final double px, py, pz; // root-relative metres
+  final double qw, qx, qy, qz; // Hamilton, scalar-first
+
+  /// Build progress: completed phase count + fraction of the current phase.
+  /// Together they reconstruct `HaloRingBuildState` renderer-side.
+  final int completedPhases;
+  final double stageFraction;
+
+  // HaloRingSpec, flattened for the wire.
+  final double ringRadiusM;
+  final double bandWidthM;
+  final double shellThicknessM;
+  final double wallHeightM;
+  final double wallThicknessM;
+  final double terrainAmplitudeM;
+  final double terrainFeatureScaleM;
+  final int terrainOctaves;
+  final int seed;
+  final double spinPeriodS;
+
+  const MegastructureSnapshot({
+    required this.id,
+    required this.type,
+    required this.parentBodyId,
+    required this.px,
+    required this.py,
+    required this.pz,
+    required this.qw,
+    required this.qx,
+    required this.qy,
+    required this.qz,
+    required this.completedPhases,
+    required this.stageFraction,
+    required this.ringRadiusM,
+    required this.bandWidthM,
+    required this.shellThicknessM,
+    required this.wallHeightM,
+    required this.wallThicknessM,
+    required this.terrainAmplitudeM,
+    required this.terrainFeatureScaleM,
+    required this.terrainOctaves,
+    required this.seed,
+    required this.spinPeriodS,
+  });
+
+  /// Null when the structure has no site or no physical shape yet.
+  static MegastructureSnapshot? of(
+    Megastructure m,
+    StarSystem system,
+    BodyEphemeris ephemeris,
+    Epoch epoch,
+  ) {
+    final site = m.site;
+    final spec = m.ringSpec;
+    if (site == null || spec == null) return null;
+    final parent = system.body(BodyId(site.parentBodyId));
+    if (parent == null) return null;
+    final parentRoot =
+        ephemeris.positionRelativeToRoot(parent, system, epoch);
+    // Circular orbit in the root XY plane. Mean motion from the parent's mu —
+    // the ring is a station, not a Keplerian body, so this stays out of the
+    // patched-conic machinery entirely.
+    final n = math.sqrt(parent.mu /
+        (site.orbitRadiusM * site.orbitRadiusM * site.orbitRadiusM));
+    final theta = site.orbitPhaseRad + n * epoch.seconds;
+    final pos = Vector3(
+      parentRoot.x + math.cos(theta) * site.orbitRadiusM,
+      parentRoot.y + math.sin(theta) * site.orbitRadiusM,
+      parentRoot.z,
+    );
+    // Spin about +Z from t=0. The skeleton "already rotating" is accepted so
+    // the orientation needs no spin-start bookkeeping; construction in spin
+    // reads fine at these angular rates (~75 min period).
+    final q = Quaternion.axisAngle(
+        Vector3.unitZ, spec.spinAngularVelocity * epoch.seconds);
+    return MegastructureSnapshot(
+      id: m.id,
+      type: m.type.index,
+      parentBodyId: site.parentBodyId,
+      px: pos.x,
+      py: pos.y,
+      pz: pos.z,
+      qw: q.w,
+      qx: q.x,
+      qy: q.y,
+      qz: q.z,
+      completedPhases: m.completedPhases,
+      stageFraction: m.currentPhase?.fraction ?? 1.0,
+      ringRadiusM: spec.radiusM,
+      bandWidthM: spec.bandWidthM,
+      shellThicknessM: spec.shellThicknessM,
+      wallHeightM: spec.wallHeightM,
+      wallThicknessM: spec.wallThicknessM,
+      terrainAmplitudeM: spec.terrainAmplitudeM,
+      terrainFeatureScaleM: spec.terrainFeatureScaleM,
+      terrainOctaves: spec.terrainOctaves,
+      seed: spec.seed,
+      spinPeriodS: spec.spinPeriodS,
+    );
+  }
+
+  /// The ring recipe this snapshot carries, ready to build a field.
+  HaloRingSpec toRingSpec() => HaloRingSpec(
+        radiusM: ringRadiusM,
+        bandWidthM: bandWidthM,
+        shellThicknessM: shellThicknessM,
+        wallHeightM: wallHeightM,
+        wallThicknessM: wallThicknessM,
+        terrainAmplitudeM: terrainAmplitudeM,
+        terrainFeatureScaleM: terrainFeatureScaleM,
+        terrainOctaves: terrainOctaves,
+        seed: seed,
+        spinPeriodOverrideS: spinPeriodS,
+      );
+
+  /// Per-layer arc coverage for the construction visuals.
+  HaloRingBuildState buildState() =>
+      HaloRingBuildState.of(completedPhases, stageFraction);
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'type': type,
+        'parent': parentBodyId,
+        'p': [px, py, pz],
+        'q': [qw, qx, qy, qz],
+        'phases': completedPhases,
+        'frac': stageFraction,
+        'ring': [
+          ringRadiusM,
+          bandWidthM,
+          shellThicknessM,
+          wallHeightM,
+          wallThicknessM,
+          terrainAmplitudeM,
+          terrainFeatureScaleM,
+        ],
+        'octaves': terrainOctaves,
+        'seed': seed,
+        'spin': spinPeriodS,
+      };
+
+  factory MegastructureSnapshot.fromJson(Map<String, dynamic> j) {
+    final p = (j['p'] as List).cast<num>();
+    final q = (j['q'] as List).cast<num>();
+    final ring = (j['ring'] as List).cast<num>();
+    return MegastructureSnapshot(
+      id: j['id'] as String,
+      type: (j['type'] as num).toInt(),
+      parentBodyId: j['parent'] as String,
+      px: p[0].toDouble(),
+      py: p[1].toDouble(),
+      pz: p[2].toDouble(),
+      qw: q[0].toDouble(),
+      qx: q[1].toDouble(),
+      qy: q[2].toDouble(),
+      qz: q[3].toDouble(),
+      completedPhases: (j['phases'] as num).toInt(),
+      stageFraction: (j['frac'] as num).toDouble(),
+      ringRadiusM: ring[0].toDouble(),
+      bandWidthM: ring[1].toDouble(),
+      shellThicknessM: ring[2].toDouble(),
+      wallHeightM: ring[3].toDouble(),
+      wallThicknessM: ring[4].toDouble(),
+      terrainAmplitudeM: ring[5].toDouble(),
+      terrainFeatureScaleM: ring[6].toDouble(),
+      terrainOctaves: (j['octaves'] as num).toInt(),
+      seed: (j['seed'] as num).toInt(),
+      spinPeriodS: (j['spin'] as num).toDouble(),
     );
   }
 }
@@ -1450,6 +1637,12 @@ class WorldSnapshot {
   /// version rather than a full resend.
   final List<TerrainEditSnapshot> terrainEdits;
 
+  /// Physically-sited megastructures (halo rings, so far): world pose + build
+  /// progress + shape recipe. NOT in [bodies] on purpose — a near-massless
+  /// ring must never enter the patched-conic machinery (SOI scans, rails
+  /// conversion) or be drawn as a textured sphere.
+  final List<MegastructureSnapshot> megastructures;
+
   const WorldSnapshot({
     required this.tick,
     required this.vessels,
@@ -1461,6 +1654,7 @@ class WorldSnapshot {
     this.descriptors = const {},
     this.events = const [],
     this.terrainEdits = const [],
+    this.megastructures = const [],
   });
 
   /// The deformations for [bodyId], rebuilt as a domain store ready to hand to
@@ -1487,6 +1681,7 @@ class WorldSnapshot {
     CityRepository? cities,
     TerrainHeights? terrain,
     TerrainEditsRepository? terrainEdits,
+    MegastructureRepository? megastructures,
     SurfacePlacement placement = const SurfacePlacement(),
     List<EventSnapshot> events = const [],
     // Body descriptors (static render config: kind/atmosphere/composition) are
@@ -1735,6 +1930,12 @@ class WorldSnapshot {
                 for (final b in entry.value.all)
                   TerrainEditSnapshot.of(entry.key, b),
             ],
+      megastructures: (megastructures == null || system == null)
+          ? const []
+          : [
+              for (final m in megastructures.all())
+                ?MegastructureSnapshot.of(m, system, ephemeris, epoch),
+            ],
     );
   }
 
@@ -1750,6 +1951,8 @@ class WorldSnapshot {
         'events': [for (final e in events) e.toJson()],
         if (terrainEdits.isNotEmpty)
           'terrainEdits': [for (final e in terrainEdits) e.toJson()],
+        if (megastructures.isNotEmpty)
+          'megastructures': [for (final m in megastructures) m.toJson()],
       };
 
   factory WorldSnapshot.fromJson(Map<String, dynamic> j) {
@@ -1797,6 +2000,10 @@ class WorldSnapshot {
       terrainEdits: [
         for (final e in (j['terrainEdits'] as List?) ?? const [])
           TerrainEditSnapshot.fromJson(e as Map<String, dynamic>),
+      ],
+      megastructures: [
+        for (final m in (j['megastructures'] as List?) ?? const [])
+          MegastructureSnapshot.fromJson(m as Map<String, dynamic>),
       ],
     );
   }

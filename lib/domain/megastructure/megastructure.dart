@@ -5,6 +5,8 @@
 
 import 'dart:math' as math;
 
+import 'halo_ring.dart';
+
 /// Endgame megaprojects — planet-to-stellar-scale builds that consume absurd
 /// amounts of mass and energy over very long timescales.
 enum MegastructureType {
@@ -45,6 +47,22 @@ class BuildPhase {
   }
 }
 
+/// WHERE a megastructure is being built: a circular orbit about a parent
+/// body, in the parent's root-relative frame. Null site = a pure economy
+/// project with no physical presence in the world (the pre-physical builds,
+/// and swarm types with no single location).
+class MegastructureSite {
+  const MegastructureSite({
+    required this.parentBodyId,
+    required this.orbitRadiusM,
+    this.orbitPhaseRad = 0,
+  });
+
+  final String parentBodyId;
+  final double orbitRadiusM;
+  final double orbitPhaseRad;
+}
+
 /// A megastructure under construction (or complete). Aggregate root for the
 /// megastructure context. Built in [phases]; contributions flow in over many
 /// ticks from colonies/fleets. Once every phase is complete it becomes
@@ -53,6 +71,13 @@ class Megastructure {
   final String id;
   final MegastructureType type;
   final List<BuildPhase> phases;
+
+  /// Physical placement, when the project exists somewhere in the world.
+  final MegastructureSite? site;
+
+  /// Physical shape for halo rings — drives the field, meshing, spin and the
+  /// per-stage construction visuals. Null for non-ring types (so far).
+  final HaloRingSpec? ringSpec;
 
   /// Cached operational parameters (set by the factories).
   final double designOutputWatts; // power produced when operational (Dyson)
@@ -73,9 +98,17 @@ class Megastructure {
     required this.id,
     required this.type,
     required this.phases,
+    this.site,
+    this.ringSpec,
     this.designOutputWatts = 0,
     this.habitableAreaM2 = 0,
   });
+
+  /// Build progress translated into per-layer geometry coverage — only
+  /// meaningful for ring types (null otherwise).
+  HaloRingBuildState? get ringBuildState => ringSpec == null
+      ? null
+      : HaloRingBuildState.of(completedPhases, currentPhase?.fraction ?? 1.0);
 
   // ---- Progress ----
 
@@ -156,15 +189,23 @@ class Megastructure {
     ];
   }
 
-  factory Megastructure.haloRing({required String id, required double radius}) {
-    // ~10 km wide band, steel-ish areal density ~1e5 kg/m^2.
-    final area = 2 * math.pi * radius * 1.0e4;
+  factory Megastructure.haloRing({
+    required String id,
+    required double radius,
+    MegastructureSite? site,
+    HaloRingSpec? spec,
+  }) {
+    final ring = spec ?? HaloRingSpec(radiusM: radius);
+    // Steel-ish areal density ~1e5 kg/m^2 across the band.
+    final area = 2 * math.pi * ring.radiusM * ring.bandWidthM;
     final mass = area * 1.0e5;
     final energy = mass * 5.0e7; // ~refining + lift energy per kg
     return Megastructure(
       id: id,
       type: MegastructureType.haloRing,
       phases: _phases('Halo', mass, energy, 4),
+      site: site,
+      ringSpec: ring,
       habitableAreaM2: area,
     );
   }

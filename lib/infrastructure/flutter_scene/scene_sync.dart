@@ -22,6 +22,7 @@ import 'coord_convert.dart';
 import 'environment_baker.dart';
 import 'exhaust_nodes.dart';
 import 'gravity_grid_nodes.dart';
+import 'halo_ring_nodes.dart';
 import 'impact_fx_nodes.dart';
 import 'line_nodes.dart';
 import 'planner_plane_nodes.dart';
@@ -60,6 +61,7 @@ class SceneSync {
     _atmospheres = AtmosphereNodes(scene);
     _clouds = CloudNodes(scene);
     _rings = RingNodes(scene, _textures);
+    _haloRings = HaloRingNodes(scene);
     _gravityGrid = GravityGridNodes(scene);
     _walker = WalkerNodes(scene);
     _environment = PlanetEnvironmentBaker(scene, _textures);
@@ -81,6 +83,7 @@ class SceneSync {
   late final AtmosphereNodes _atmospheres;
   late final CloudNodes _clouds;
   late final RingNodes _rings;
+  late final HaloRingNodes _haloRings;
   late final GravityGridNodes _gravityGrid;
   late final WalkerNodes _walker;
   late final PlanetEnvironmentBaker _environment;
@@ -159,6 +162,9 @@ class SceneSync {
     }
     _rings.update(snap, origin,
         camera: camera, starWorld: _bodies.starWorld(snap));
+    // Megastructures: halo rings under construction (stage visuals + voxel
+    // terrain cells near the camera).
+    _haloRings.update(snap, origin, cameraEye: camera?.eyeOffset);
     _gravityGrid.update(snap, origin, camera: camera);
     // The walker's own body. View state, not snapshot state — the static
     // fields are written by SimulationView the same frame it moves the anchor.
