@@ -307,8 +307,7 @@ void main() {
       // and a 3.22 m landing leg 0.19 m deep, and both still read as "grey
       // primitive, art not loaded".
       for (final def in catalog.all) {
-        final extent =
-            PartPrimitivesByCategory.shapeFor(def).authoredExtentM;
+        final extent = PartPrimitivesByCategory.authoredExtentM(def);
         final scale = VesselNodes.standInScale(def.id);
         // The box the mesh actually occupies once scaled, in scene units.
         expect(scale.x * extent.x, closeTo(lengthToScene(def.size.x), 1e-9),
@@ -676,7 +675,7 @@ void main() {
         if (PartModelLibrary.isEngine(def.id)) engines++;
         expectPlumeOnTheHull(snap, 'a lone ${def.id}');
       }
-      expect(catalog.all, hasLength(25));
+      expect(catalog.all, hasLength(38));
       expect(engines, greaterThanOrEqualTo(4),
           reason: 'the engine arm has to be exercised, not just the other one');
     });

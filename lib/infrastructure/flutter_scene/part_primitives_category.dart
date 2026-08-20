@@ -8,6 +8,7 @@ import 'package:vector_math/vector_math.dart' as vm;
 
 import '../../domain/parts/part_def.dart';
 import '../../domain/shared/vector3.dart';
+import 'proc_part_geometry.dart';
 import 'vessel_nodes.dart';
 
 /// One procedural silhouette, together with the box that silhouette fills in
@@ -189,7 +190,7 @@ class PartPrimitivesByCategory {
   /// Every component is strictly positive: [PartStandInShape.authoredExtentM]
   /// is, and the numerator is floored at [minExtentM].
   static Vector3 standInScaleM(PartDef def) {
-    final extent = shapeFor(def).authoredExtentM;
+    final extent = authoredExtentM(def);
     double side(double s) => s > minExtentM ? s : minExtentM;
     return Vector3(
       side(def.size.x) / extent.x,
@@ -197,6 +198,19 @@ class PartPrimitivesByCategory {
       side(def.size.z) / extent.z,
     );
   }
+
+  /// The box the mesh [forPart] returns is AUTHORED in, metres — the
+  /// denominator of [standInScaleM], and the number a test multiplies that
+  /// scale back through to recover the drawn box.
+  ///
+  /// A procedural part's mesh is generated at TRUE size, so its authored
+  /// extent is its own spec's — and because the catalog pins spec == size,
+  /// the resulting scale is exactly 1 per axis for the shipped roster. Going
+  /// through the division anyway keeps the invariant structural: a def whose
+  /// spec and size ever disagreed would still draw filling its declared
+  /// (picked) box. Pure and GPU-free, like [shapeFor].
+  static Vector3 authoredExtentM(PartDef def) =>
+      def.procShape?.extentM ?? shapeFor(def).authoredExtentM;
 
   /// The type-key substrings the id tier has a shaped silhouette for.
   static Iterable<String> get idShapeKeys => _byIdKey.keys;
@@ -229,9 +243,19 @@ class PartPrimitivesByCategory {
 
   /// The mesh to draw [def] with.
   ///
+  /// TIER ZERO: a def carrying a [PartDef.procShape] gets its GENERATED mesh —
+  /// for such a part this is not a stand-in but the art itself, which is why
+  /// the spec outranks both the id table and the category (an id like
+  /// `sphere-tank-s` contains 'tank' and would otherwise draw as the id
+  /// tier's cylinder).
+  ///
   /// Built per call and never cached: an [fs.Mesh] is bound into the node that
   /// draws it, so one shared instance would couple every part using it.
-  static fs.Mesh forPart(PartDef def) => _mesh(_rowFor(def));
+  static fs.Mesh forPart(PartDef def) {
+    final proc = def.procShape;
+    if (proc != null) return ProcPartGeometry.meshFor(proc);
+    return _mesh(_rowFor(def));
+  }
 
   /// The mesh for a category; the cuboid for one this file does not shape.
   static fs.Mesh forCategory(PartCategory c) => _mesh(_byCategory[c] ?? _fallback);

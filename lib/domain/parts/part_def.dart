@@ -11,6 +11,7 @@ import '../vessel/resource_container.dart';
 import 'attach_node.dart';
 import 'jet_engine.dart';
 import 'lifting_surface.dart';
+import 'proc_shape.dart';
 
 enum PartCategory {
   commandPod, // crewed control + reaction wheels
@@ -92,6 +93,15 @@ class PartDef {
   /// see this — moving it re-seats the picture, never the craft.
   final Vector3 modelOffset;
 
+  /// The parametric recipe for a GENERATED mesh, or null for a part whose art
+  /// is baked (or pending). Mutually exclusive with [modelAsset]: a def
+  /// carrying both would have the renderer race a bake against a generator for
+  /// the same slot. A procedural part's spec must agree with [size]
+  /// ([ProcShape.extentM] equal component for component), so the drawn box,
+  /// the declared box and the editor's picked box are one box by construction
+  /// — `proc_parts_catalog_test` pins that for the shipped roster.
+  final ProcShape? procShape;
+
   /// Where other parts may mate to this one. Empty means the part cannot be
   /// attached to (or from) — the editor then only allows free placement.
   final List<AttachNode> attachNodes;
@@ -117,8 +127,10 @@ class PartDef {
     this.modelScale = 1.0,
     this.modelRotation = Quaternion.identity,
     this.modelOffset = Vector3.zero,
+    this.procShape,
     this.attachNodes = const [],
-  });
+  }) : assert(modelAsset == null || procShape == null,
+            'a part is baked or generated, never both');
 
   bool get isEngine => rocketEngine != null || jetEngine != null;
 

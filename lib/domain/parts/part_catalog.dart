@@ -14,6 +14,7 @@ import 'jet_engine.dart';
 import 'lem_parts.dart';
 import 'lifting_surface.dart';
 import 'part_def.dart';
+import 'proc_parts.dart';
 
 /// The roster of available parts, grounded in real launch vehicles and
 /// aircraft. Reference data; the [VesselAssembler] picks from it.
@@ -763,6 +764,12 @@ class PartCatalog {
         // 'eagle-rcs-block' does not collide with the generic 'rcs-block'
         // above and silently replace it in the id map). See [LemParts].
         ...LemParts.all,
+
+        // ---------------- Procedural construction ----------------
+        // Sphere/pill tanks, girders and plating whose meshes are GENERATED
+        // from a [ProcShape] rather than baked — no art pipeline behind them,
+        // identical on web and desktop. See [ProcParts].
+        ...ProcParts.all,
       ]);
 
   // ---------------- Attach node helpers ----------------

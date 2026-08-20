@@ -60,7 +60,7 @@ void main() {
   /// units. This is the number a player sees; [PartDef.size] is the number the
   /// picker tests.
   vm.Vector3 drawnBoxM(PartDef def) {
-    final extent = PartPrimitivesByCategory.shapeFor(def).authoredExtentM;
+    final extent = PartPrimitivesByCategory.authoredExtentM(def);
     final s = CraftEditorNodes.standInScale(def);
     return vm.Vector3(
       s.x * extent.x / kRenderScale,

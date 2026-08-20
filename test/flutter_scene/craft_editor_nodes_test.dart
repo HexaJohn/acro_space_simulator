@@ -91,7 +91,7 @@ void main() {
   /// [PartDef.size], which is the number `CraftEditorPick` tests.
   Vector3 drawnBoxM(PartDef def) {
     final s = CraftEditorNodes.standInScale(def);
-    final e = PartPrimitivesByCategory.shapeFor(def).authoredExtentM;
+    final e = PartPrimitivesByCategory.authoredExtentM(def);
     return Vector3(
       s.x * e.x / kRenderScale,
       s.y * e.y / kRenderScale,
