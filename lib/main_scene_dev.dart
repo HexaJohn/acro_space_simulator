@@ -183,6 +183,21 @@ Future<void> main() async {
     if (params['walk'] != null) {
       c.setWalk?.call(params['walk'] == 'true');
     }
+    // Third person: thirdPerson=true|false. EVA pack: eva=true|false.
+    if (params['thirdPerson'] != null) {
+      c.setThirdPerson?.call(params['thirdPerson'] == 'true');
+    }
+    if (params['eva'] != null) {
+      c.setEvaPack?.call(params['eva'] == 'true');
+    }
+    // Head lamp: lamp=true|false.
+    if (params['lamp'] != null) {
+      c.setLamp?.call(params['lamp'] == 'true');
+    }
+    // Walker drill trigger: drill=true|false (held until released).
+    if (params['drill'] != null) {
+      c.setDrill?.call(params['drill'] == 'true');
+    }
     // Craft glb unit calibration: glbScale=<model units to metres>. WHOLE-CRAFT
     // path only (the apollo/lander bakes). A craft drawn from its PART LIST is
     // calibrated per part — see `part=` below.

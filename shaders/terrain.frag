@@ -58,6 +58,17 @@ uniform TerrainInfo {
   // w: macro material weight 0..1 — how much of the second (col_rock.a)
   // texture octave blends into regolith/rock.
   vec4 normal_params;
+  // HEAD LAMP — the walker's flashlight. The engine has exactly one light, a
+  // DirectionalLight, so a spot has to be done here. All values live in
+  // v_position's frame and units (scene).
+  // xyz: lamp position. w: range — 0 disables the term entirely, which is the
+  // state every frame that is not a walker with the lamp on.
+  vec4 lamp_pos_range;
+  // xyz: aim direction (unit, pointing away from the lamp). w: cosine of the
+  // cone half-angle.
+  vec4 lamp_dir_cone;
+  // x: intensity. y: cosine width of the soft edge outside the cone. zw spare.
+  vec4 lamp_params;
 }
 terrain;
 
@@ -246,6 +257,29 @@ float SampleShadow(vec3 world_pos, vec3 n) {
 // Sample a tileable material at world position, projected on the three axis
 // planes and blended by the (sharpened) normal so no axis stretches. v_position
 // is in SCENE km; convert to metres, then to tile units by the tile size.
+// Head-lamp contribution at a point: cone x distance falloff x Lambert.
+// Returns light to ADD to the sun/ambient shade, so an unlit night surface
+// inside the beam comes up out of black without touching anything outside it.
+float LampShade(vec3 world_pos, vec3 n) {
+  float range = terrain.lamp_pos_range.w;
+  if (range <= 0.0) return 0.0;
+  vec3 to_frag = world_pos - terrain.lamp_pos_range.xyz;
+  float dist = length(to_frag);
+  if (dist >= range) return 0.0;
+  vec3 l = to_frag / max(dist, 1e-9);
+  // Cone: full inside the hot spot, easing out over lamp_params.y of cosine.
+  float cone = smoothstep(terrain.lamp_dir_cone.w,
+                          terrain.lamp_dir_cone.w + terrain.lamp_params.y,
+                          dot(l, terrain.lamp_dir_cone.xyz));
+  if (cone <= 0.0) return 0.0;
+  // Squared linear falloff to the range rather than inverse-square: it cannot
+  // blow up at the lamp itself, and across a 60 m beam the two are visually
+  // the same curve.
+  float fall = 1.0 - dist / range;
+  fall *= fall;
+  return terrain.lamp_params.x * cone * fall * max(dot(n, -l), 0.0);
+}
+
 vec3 triplanar(sampler2D tex, vec3 wpos_m, vec3 n, float tile_m) {
   vec3 uvw = wpos_m / max(tile_m, 0.001);
   vec3 bw = abs(n);
@@ -488,6 +522,9 @@ void main() {
   // Cast-shadow occlusion (1 lit .. 0 shadowed) from the craft/terrain atlas.
   float shadow = sh.sp1.y > 0.5 ? SampleShadow(v_position, n) : 1.0;
   float shade = terrain.params.y + (1.0 - terrain.params.y) * lit * shadow;
+  // The lamp is additive and unshadowed: it is mounted on the eye, so nothing
+  // the eye can see is ever occluded from it.
+  shade += LampShade(v_position, n);
 
   frag_color = vec4(albedo * shade, 1.0);
 }

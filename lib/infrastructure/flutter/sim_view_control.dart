@@ -51,6 +51,19 @@ class SimViewControl {
   /// put a surface capture at eye height.
   void Function(bool on)? setWalk;
 
+  /// Hold or release the walker's drill trigger. Tooling only — a held key
+  /// cannot be synthesized over the VM service.
+  void Function(bool on)? setDrill;
+
+  /// Head lamp on/off.
+  void Function(bool on)? setLamp;
+
+  /// Third-person boom on/off (walk mode only).
+  void Function(bool on)? setThirdPerson;
+
+  /// EVA thruster pack deployed/stowed (walk mode only).
+  void Function(bool on)? setEvaPack;
+
   /// Freecam teleport INTO a body's ring plane: radial in body radii,
   /// height above the plane in metres. Exact — computed through the body's
   /// live orientation quaternion (guessing the plane from axial tilt
@@ -82,6 +95,10 @@ class SimViewControl {
     setUpMode = null;
     setFreecam = null;
     setWalk = null;
+    setDrill = null;
+    setLamp = null;
+    setThirdPerson = null;
+    setEvaPack = null;
     freecamToRing = null;
     dropImpactor = null;
     spawnLanded = null;

@@ -192,6 +192,26 @@ class TerrainNodes {
   static double macroTileMeters = 900.0;
   static double macroWeight = 0.8;
 
+  // ---- Head lamp (the walker's flashlight) ----
+  // flutter_scene gives a scene exactly one light and it is directional, so a
+  // spot has to live in the terrain shader. These are the CPU side of the
+  // lamp_* uniforms; the lamp rides the camera, so only the switch and its
+  // shape are state.
+  static bool lampOn = false;
+
+  /// Beam length, metres. Past this the lamp contributes nothing.
+  static double lampRangeM = 60.0;
+
+  /// Cone half-angle, degrees — the hot spot.
+  static double lampConeDeg = 26.0;
+
+  /// Soft edge outside the hot spot, degrees.
+  static double lampEdgeDeg = 10.0;
+
+  /// Peak added shade at the centre of the beam, in the same units as the
+  /// sun's Lambert term (1.0 ~ full sunlight).
+  static double lampIntensity = 1.7;
+
   /// Lighting counterpart of the macro octave: how hard the baked tile
   /// normal (sampled at [macroTileMeters]) tilts the lighting normal. The
   /// tile itself implies ~5% relief-to-tile; this scales that. Also gated by
@@ -1080,6 +1100,19 @@ class TerrainNodes {
           : 0.0,
       normalFadeNear: normalFadeNearKm,
       normalFadeFar: normalFadeFarKm,
+      // The lamp is mounted on the eye and aims down the view axis. Scene
+      // units, focus-relative — the same frame v_position arrives in.
+      lampPosScene: relToScene(cameraEye),
+      lampDirScene: camera == null
+          ? vm.Vector3(0, 0, 1)
+          : vm.Vector3(camera.forward.x, camera.forward.y, camera.forward.z)
+            ..normalize(),
+      lampRangeScene: lampOn ? lengthToScene(lampRangeM) : 0.0,
+      lampConeCos: math.cos(lampConeDeg * math.pi / 180),
+      lampEdgeCos: (math.cos(lampConeDeg * math.pi / 180) -
+              math.cos((lampConeDeg + lampEdgeDeg) * math.pi / 180))
+          .abs(),
+      lampIntensity: lampIntensity,
     );
     _material?.bindAlbedo(TerrainTextures.albedo[bodyId]);
     _material?.bindNormals(TerrainTextures.normals[bodyId]);
@@ -1490,6 +1523,12 @@ class _TerrainMaterial extends fs.ShaderMaterial {
     required double normalStrength,
     required double normalFadeNear,
     required double normalFadeFar,
+    required vm.Vector3 lampPosScene,
+    required vm.Vector3 lampDirScene,
+    required double lampRangeScene,
+    required double lampConeCos,
+    required double lampEdgeCos,
+    required double lampIntensity,
   }) {
     setUniformBlockFromFloats('TerrainInfo', [
       centreScene.x, centreScene.y, centreScene.z, radiusScene,
@@ -1511,6 +1550,11 @@ class _TerrainMaterial extends fs.ShaderMaterial {
       albedoStrength, // meridian (world) + real-albedo mix
       normalStrength, normalFadeNear, normalFadeFar,
       TerrainNodes.macroWeight.clamp(0.0, 1.0), // normal_params.w = macro mix
+      // lamp_pos_range / lamp_dir_cone / lamp_params — range 0 = lamp off,
+      // which is the shader's own early out.
+      lampPosScene.x, lampPosScene.y, lampPosScene.z, lampRangeScene,
+      lampDirScene.x, lampDirScene.y, lampDirScene.z, lampConeCos,
+      lampIntensity, lampEdgeCos, 0.0, 0.0,
     ]);
   }
 

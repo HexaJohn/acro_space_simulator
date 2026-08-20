@@ -17,7 +17,7 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   test('a range-0 perspective camera keeps its eye on the focus', () {
     const cam = PerspectiveCamera(
-        azimuth: 0.7, elevation: 0.2, range: 0, near: 0.1, viewportH: 800);
+        azimuth: 0.7, elevation: 0.2, range: 0, near: 0.5, viewportH: 800);
     final scene = toSceneCamera(cam, viewportH: 800);
 
     expect(scene.position.length, 0,
@@ -29,9 +29,10 @@ void main() {
     expect(scene.target.z, closeTo(aim.z, 1e-9));
     expect(scene.target.length, greaterThan(0),
         reason: 'position == target would make the view matrix singular');
-    // Near plane is the camera's own (0.1 m), so the ground 1.7 m below the
-    // eye is comfortably inside the frustum.
-    expect(scene.fovNear, closeTo(lengthToScene(0.1), 1e-12));
+    // Near plane is the camera's own (0.5 m) — the adaptive range/20 rule
+    // would put it at zero — so the ground 1.7 m below the eye stays inside
+    // the frustum while the depth buffer keeps a usable far-field quantum.
+    expect(scene.fovNear, closeTo(lengthToScene(0.5), 1e-12));
   });
 
   test('an orbit camera still looks at the focus from its range', () {

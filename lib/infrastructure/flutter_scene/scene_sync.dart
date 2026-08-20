@@ -28,6 +28,7 @@ import 'planner_plane_nodes.dart';
 import 'ring_nodes.dart';
 import 'scene_textures.dart';
 import 'star_bloom_nodes.dart';
+import 'walker_nodes.dart';
 import 'city/city_nodes.dart';
 import 'scatter/scatter_nodes.dart';
 import 'terrain/terrain_nodes.dart';
@@ -60,6 +61,7 @@ class SceneSync {
     _clouds = CloudNodes(scene);
     _rings = RingNodes(scene, _textures);
     _gravityGrid = GravityGridNodes(scene);
+    _walker = WalkerNodes(scene);
     _environment = PlanetEnvironmentBaker(scene, _textures);
     _terrain = TerrainNodes(scene);
     _scatter = ScatterNodes(scene);
@@ -80,6 +82,7 @@ class SceneSync {
   late final CloudNodes _clouds;
   late final RingNodes _rings;
   late final GravityGridNodes _gravityGrid;
+  late final WalkerNodes _walker;
   late final PlanetEnvironmentBaker _environment;
   late final TerrainNodes _terrain;
   late final ScatterNodes _scatter;
@@ -157,6 +160,9 @@ class SceneSync {
     _rings.update(snap, origin,
         camera: camera, starWorld: _bodies.starWorld(snap));
     _gravityGrid.update(snap, origin, camera: camera);
+    // The walker's own body. View state, not snapshot state — the static
+    // fields are written by SimulationView the same frame it moves the anchor.
+    _walker.update();
     mark('atmo+rings');
     _terrain.update(
       snap,

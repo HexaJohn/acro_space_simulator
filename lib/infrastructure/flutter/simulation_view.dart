@@ -53,6 +53,8 @@ import '../../domain/autonomy/flight_plan.dart' show ManeuverNode;
 import '../../domain/dynamics/state_vector.dart';
 import '../../domain/orbits/encounter_planner.dart';
 import '../../domain/orbits/patched_conic_service.dart' show PatchEndKind;
+import '../../adapters/presenters/eva_pack.dart';
+import '../../domain/mining/hand_drill.dart';
 import '../../domain/orbits/spawn_presets.dart';
 import '../../domain/orbits/state_vector_converter.dart';
 import '../../domain/simulation/epoch.dart';
@@ -77,6 +79,7 @@ import '../flutter_scene/scene_sync.dart';
 import '../flutter_scene/scene_hud_overlay.dart';
 import '../flutter_scene/terrain/terrain_nodes.dart';
 import '../flutter_scene/vessel_nodes.dart';
+import '../flutter_scene/walker_nodes.dart';
 import '../flutter_scene/scene_render_view.dart';
 import 'sim_view_control.dart';
 import 'debug_layers.dart';
@@ -280,7 +283,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           frame: _view.frame,
           // WALK puts the eye exactly AT the anchor (range 0) — first person,
           // no third-person boom to push through the walls of a habitat.
-          range: _walkMode ? 0.0 : _range + _focusBodyRadius,
+          range: _walkMode
+              ? (_thirdPerson ? _walkBoomM : 0.0)
+              : _range + _focusBodyRadius,
           // Range can go to 1 m; a fixed 1 m near plane would clip the
           // whole craft there. Track the range down (never above 1 m so
           // nothing else changes).
@@ -309,6 +314,23 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   PerspectiveCamera _clampEyeAboveTerrain(PerspectiveCamera cam) {
     // Freecam orbits a free anchor, not a body — the body-centred geometry
     // doesn't apply (and the anchor is the player's own flying problem).
+    // The third-person boom is the one freecam pose that must respect the
+    // ground: swing it downhill and it would otherwise sink into the slope
+    // behind the walker and frame the planet's insides.
+    if (_walkMode && _thirdPerson) {
+      final body = _walkBody;
+      if (body == null) return cam;
+      return clampPerspectiveEyeAboveTerrain(
+        cam,
+        body: body,
+        focusRelBody: _freecamRelLocal.length > 0
+            ? _refBodyQuat().rotate(_freecamRelLocal)
+            : Vector3.zero,
+        epoch: _clock.epoch,
+        edits: _terrainEdits.forBody(body.id),
+        clearance: 0.5,
+      );
+    }
     if (_freecam) return cam;
 
     final system = _universe.current();
@@ -463,6 +485,27 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       if (!mounted) return;
       if (on != _walkMode) _toggleWalk();
     };
+    c.setDrill = (on) {
+      if (!mounted) return;
+      setState(() => _drillLatched = on);
+    };
+    c.setLamp = (on) {
+      if (!mounted) return;
+      setState(() => TerrainNodes.lampOn = on);
+    };
+    c.setThirdPerson = (on) {
+      if (!mounted) return;
+      setState(() => _thirdPerson = on);
+    };
+    c.setEvaPack = (on) {
+      if (!mounted) return;
+      setState(() {
+        _evaPack = on;
+        _evaVel = on
+            ? _freecamRelLocal.normalized * _walkVertVel
+            : Vector3.zero;
+      });
+    };
     c.freecamToRing = (bodyId, radialMult, zM) {
       if (!mounted) return;
       final snap = _sceneWorld;
@@ -492,6 +535,36 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           'freecam': _freecam,
           'walk': _walkMode,
           'walkGrounded': _walkGrounded,
+          'lamp': TerrainNodes.lampOn,
+          'thirdPerson': _thirdPerson,
+          'evaPack': _evaPack,
+          'evaSpeedMs': _evaVel.length,
+          'evaFuelKg': _evaFuelKg,
+          'drilling': _bore != null,
+          'drillLatched': _drillLatched,
+          // Diagnostics for "the trigger is held and nothing happens": which
+          // way the drill is actually pointing in the frame the anchor lives
+          // in (-1 = straight down the radial), and whether the march found
+          // ground inside its reach.
+          'drillAimDot': () {
+            if (!_walkMode || _freecamRelLocal.length <= 0) return null;
+            final aim = _refBodyQuat().conjugate.rotate(_camera.forward);
+            return aim.normalized.dot(_freecamRelLocal.normalized);
+          }(),
+          'drillContact': () {
+            final body = _walkBody;
+            if (body == null || !_walkMode) return false;
+            return _drill.contact(
+                  eyeBF: _freecamRelLocal,
+                  aimDirBF: _refBodyQuat().conjugate.rotate(_camera.forward),
+                  groundRadiusAt: (p) => _walkGroundRadius(body, p),
+                ) !=
+                null;
+          }(),
+          'boreRadiusM': _bore?.radiusM,
+          'drilledM3': _drilledM3,
+          'terrainEditCount':
+              _walkBody == null ? 0 : (_terrainEdits.forBody(_walkBody!.id)?.length ?? 0),
           // Eye height above the terrain under the walker, metres (null when
           // not on foot) — the readout a surface capture is framed by.
           'walkEyeAltM': () {
@@ -563,7 +636,21 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   bool _walkMode = false;
   double _walkVertVel = 0; // m/s along local up
   bool _walkGrounded = false;
+
+  // EVA pack: J lifts off, and the walker flies velocity-controlled until the
+  // ground catches them again. Held ACROSS the walk/float switch so a hop into
+  // a burn and back down is continuous.
+  bool _evaPack = false;
+  Vector3 _evaVel = Vector3.zero;
+  double _evaFuelKg = evaPropellantKg;
+
+  /// Third person: the camera pulls back onto a boom and the walker's own body
+  /// is drawn. The anchor is unchanged — it is still the head — so switching
+  /// views mid-stride moves nothing but the eye.
+  bool _thirdPerson = false;
+  static const double _walkBoomM = 3.5;
   double _rangeBeforeWalk = 100.0; // orbit range restored when walk ends
+  CameraUpMode _upModeBeforeWalk = CameraUpMode.free;
 
   /// The body being walked on — the freecam's reference body, resolved in the
   /// domain (the snapshot carries no terrain field).
@@ -573,11 +660,22 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   }
 
   /// Terrain radius (m from centre) under a body-FIXED position, craters and
-  /// all. Round-trips through the inertial frame so it lands on exactly the
-  /// same sampler a craft touches down against.
-  double _walkGroundRadius(CelestialBody body, Vector3 posLocal) =>
-      body.terrainGroundRadius(_refBodyQuat().rotate(posLocal), _clock.epoch,
-          edits: _terrainEdits.forBody(body.id));
+  /// all.
+  ///
+  /// Samples the field DIRECTLY in body-fixed coordinates. An earlier version
+  /// rotated the position out to the inertial frame with the snapshot's
+  /// orientation and let `CelestialBody.terrainGroundRadius` rotate it back
+  /// with `orientationAt(epoch)` — and those two are never quite the same
+  /// quaternion, because the snapshot is a frame behind the clock. On a
+  /// spinning body that mismatch slides the sample point across the surface
+  /// every frame, so the ground under a standing walker kept moving and they
+  /// fell forever, landing and un-landing a couple of metres at a time.
+  double _walkGroundRadius(CelestialBody body, Vector3 posBF) {
+    final field = body.terrainFieldWith(_terrainEdits.forBody(body.id));
+    if (field == null) return body.radius;
+    return field.groundRadiusAt(posBF.x, posBF.y, posBF.z);
+  }
+
 
   /// Toggle first-person walk. Entering implies freecam (walk owns the same
   /// anchor) and DROPS the anchor onto the ground beneath wherever the camera
@@ -592,6 +690,14 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         // outside, above the ground it is looking down at.
         final eyeWorld = _currentFocusWorld() + _camera.eyeOffset;
         _rangeBeforeWalk = _range;
+        // A walker's horizon has to be level, which means the camera gimbal
+        // has to be the local vertical — see the walk branch in the frame
+        // block. FREE mode skips that block entirely, so walking owns the
+        // up-mode and hands it back on the way out.
+        _upModeBeforeWalk = _upMode;
+        _upMode = CameraUpMode.gravity;
+        _gravFrame = null;
+        _gravRadial = null;
         if (!_freecam) {
           _toggleFreecamInner();
         }
@@ -610,6 +716,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         }
       } else {
         _range = _rangeBeforeWalk;
+        _upMode = _upModeBeforeWalk;
+        _gravFrame = null;
+        _gravRadial = null;
+        _evaPack = false;
+        _evaVel = Vector3.zero;
+        WalkerNodes.visible = false;
       }
     });
   }
@@ -657,6 +769,116 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     _freecamRelLocal = step.posLocal;
     _walkVertVel = step.vertVel;
     _walkGrounded = step.grounded;
+  }
+
+  /// One frame on the thruster pack. Takes over from [_stepWalk] entirely
+  /// while [_evaPack] is on: the two integrate the same anchor in the same
+  /// frame, so control hands back and forth without a seam.
+  ///
+  /// Touching down does NOT switch the pack off — you can hop, burn, land and
+  /// burn again. J is the only thing that stows it.
+  void _stepEva(double moveForward, double moveRight, double frameDt) {
+    final body = _walkBody;
+    if (body == null) return;
+    final dt = frameDt.clamp(0.0, 0.1);
+    if (dt <= 0) return;
+    final r = _freecamRelLocal.length;
+    if (r <= 0) return;
+
+    final cam = _camera;
+    final qc = _refBodyQuat().conjugate;
+    final up = (_keysDown.contains(LogicalKeyboardKey.space) ? 1.0 : 0.0) -
+        (_keysDown.contains(LogicalKeyboardKey.keyC) ? 1.0 : 0.0);
+
+    final step = stepEvaPack(
+      posLocal: _freecamRelLocal,
+      velLocal: _evaVel,
+      forwardLocal: qc.rotate(cam.forward),
+      rightLocal: qc.rotate(cam.right),
+      throttleForward: moveForward,
+      throttleRight: moveRight,
+      throttleUp: up,
+      dt: dt,
+      gravity: body.mu / (r * r),
+      propellantKg: _evaFuelKg,
+      groundRadiusAt: (p) => _walkGroundRadius(body, p),
+    );
+    _freecamRelLocal = step.posLocal;
+    _evaVel = step.velLocal;
+    _evaFuelKg = step.propellantKg;
+    _walkGrounded = step.grounded;
+    // Hand the walker a consistent vertical speed for the moment the pack is
+    // stowed mid-air: the walk integrator owns one scalar, not a vector.
+    _walkVertVel = step.grounded
+        ? 0
+        : step.velLocal.dot(_freecamRelLocal.normalized);
+  }
+
+  /// Publish the walker's pose to the renderer's avatar.
+  ///
+  /// The scene is focus-relative and the focus IS the walker while on foot, so
+  /// the body sits at the origin; only its orientation has to be sent. Static
+  /// fields rather than the snapshot because the walker never crosses the
+  /// wire — no other client has one.
+  void _syncWalkerBody() {
+    WalkerNodes.visible = _walkMode && _thirdPerson;
+    if (!WalkerNodes.visible) return;
+    final q = _refBodyQuat();
+    WalkerNodes.eyeRel = Vector3.zero;
+    WalkerNodes.up = _freecamRelLocal.length > 0
+        ? q.rotate(_freecamRelLocal.normalized)
+        : Vector3.unitZ;
+    WalkerNodes.forward = _camera.forward;
+    WalkerNodes.eyeHeightM = walkEyeHeight;
+  }
+
+  // ---- Hand drill ----
+  // Held E excavates the ground the operator is pointing at. The bore state
+  // rides across frames so a held trigger keeps deepening ONE hole; the drill
+  // itself decides when that has earned a terrain brush (rarely — a brush per
+  // frame would flood the edit list the snapshot ships every tick).
+  static const HandDrill _drill = HandDrill();
+  DrillBore? _bore;
+  double _drilledM3 = 0; // session total, for the HUD
+
+  /// Trigger held by tooling rather than by a finger on E — the dev
+  /// extension's way to drill, since a held key cannot be synthesized over
+  /// the VM service.
+  bool _drillLatched = false;
+
+  /// One frame of drilling. Clearing [_bore] whenever the trigger is up (or
+  /// the aim leaves the ground) is what makes a new press start a new hole
+  /// instead of resuming the last one from across the valley.
+  void _stepDrill(double frameDt) {
+    final body = _walkBody;
+    final held = _drillLatched || _keysDown.contains(LogicalKeyboardKey.keyE);
+    if (body == null || !held) {
+      _bore = null;
+      return;
+    }
+    final dt = frameDt.clamp(0.0, 0.1);
+    if (dt <= 0) return;
+
+    // The contact march samples the LIVE field, edits included, so the bite
+    // point follows the hole down as it deepens instead of hovering at the
+    // pristine surface.
+    final qc = _refBodyQuat().conjugate;
+    final aim = _drill.contact(
+      eyeBF: _freecamRelLocal,
+      aimDirBF: qc.rotate(_camera.forward),
+      groundRadiusAt: (p) => _walkGroundRadius(body, p),
+    );
+    if (aim == null) {
+      _bore = null; // pointing at the sky, or across a gap
+      return;
+    }
+    final t = _drill.drill(
+        bore: _bore, aimBF: aim, dt: dt, tick: _sceneTick);
+    _bore = t.bore;
+    _drilledM3 += t.excavatedM3;
+    for (final brush in t.brushes) {
+      _terrainEdits.record(body.id, brush);
+    }
   }
 
   BodySnapshot? _refBody() {
@@ -820,6 +1042,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     LogicalKeyboardKey.keyE,
     LogicalKeyboardKey.keyM,
     LogicalKeyboardKey.keyG,
+    LogicalKeyboardKey.keyF,
+    LogicalKeyboardKey.keyT,
+    LogicalKeyboardKey.keyJ,
+    LogicalKeyboardKey.keyC,
     LogicalKeyboardKey.space,
     LogicalKeyboardKey.shiftLeft,
     LogicalKeyboardKey.shiftRight,
@@ -862,6 +1088,33 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       // G gets out and walks (and back in again).
       if (e.logicalKey == LogicalKeyboardKey.keyG) {
         _toggleWalk();
+        return KeyEventResult.handled;
+      }
+      // T swaps between first and third person while on foot.
+      if (e.logicalKey == LogicalKeyboardKey.keyT) {
+        if (_walkMode) setState(() => _thirdPerson = !_thirdPerson);
+        return KeyEventResult.handled;
+      }
+
+      // J stows/deploys the thruster pack. Only means anything on foot.
+      if (e.logicalKey == LogicalKeyboardKey.keyJ) {
+        if (_walkMode) {
+          setState(() {
+            _evaPack = !_evaPack;
+            // Deploying inherits the walker's current vertical motion so a
+            // burn at the top of a jump continues the arc.
+            _evaVel = _evaPack
+                ? _freecamRelLocal.normalized * _walkVertVel
+                : Vector3.zero;
+          });
+        }
+        return KeyEventResult.handled;
+      }
+
+      // F is the head lamp. Lives on the terrain material, not the scene:
+      // the engine has one directional light and it belongs to the sun.
+      if (e.logicalKey == LogicalKeyboardKey.keyF) {
+        setState(() => TerrainNodes.lampOn = !TerrainNodes.lampOn);
         return KeyEventResult.handled;
       }
       _keysDown.add(e.logicalKey);
@@ -921,10 +1174,21 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
             ? 0.0
             : r - _walkGroundRadius(body, _freecamRelLocal);
         final g = body == null || r <= 0 ? 0.0 : body.mu / (r * r);
+        final bore = _bore;
+        if (_evaPack) {
+          return 'EVA  ${_walkGrounded ? 'contact' : 'float'}  '
+              'v ${_evaVel.length.toStringAsFixed(1)} m/s  '
+              'prop ${_evaFuelKg.toStringAsFixed(1)} kg  '
+              'g ${g.toStringAsFixed(2)} m/s²'
+              '${TerrainNodes.lampOn ? '  LAMP' : ''}';
+        }
         return 'WALK  ${_walkGrounded ? 'ground' : 'air'}  '
             'eye ${alt.toStringAsFixed(1)} m  '
             'g ${g.toStringAsFixed(2)} m/s²  '
-            'pace x${_freecamSpeedMul.toStringAsFixed(2)}';
+            'pace x${_freecamSpeedMul.toStringAsFixed(2)}'
+            '${TerrainNodes.lampOn ? '  LAMP' : ''}'
+            '${bore == null ? '' : '  DRILL r${bore.radiusM.toStringAsFixed(2)} m'}'
+            '${_drilledM3 <= 0 ? '' : '  dug ${_drilledM3.toStringAsFixed(1)} m³'}';
       }
       if (_freecam) {
         // Scroll wheel drives the flight-speed multiplier while flying.
@@ -1117,6 +1381,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       fleet: fleet,
       // Minable asteroid lodes — mining them excavates the voxel terrain.
       deposits: SampleWorld.buildAsteroidDeposits(),
+      // A halo ring mid-construction in high Earth orbit.
+      megastructures: [SampleWorld.buildHaloRing()],
       // Pop a destruction menu when a vessel is lost.
       onEvent: _onDomainEvent,
     );
@@ -1290,7 +1556,13 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       final strafe = axis(LogicalKeyboardKey.keyA, LogicalKeyboardKey.keyD);
       final lift = axis(LogicalKeyboardKey.keyQ, LogicalKeyboardKey.keyE);
       if (_walkMode) {
-        _stepWalk(fwd, strafe, frameDt);
+        if (_evaPack) {
+          _stepEva(fwd, strafe, frameDt);
+        } else {
+          _stepWalk(fwd, strafe, frameDt);
+        }
+        _stepDrill(frameDt);
+        _syncWalkerBody();
       } else if (fwd != 0 || strafe != 0 || lift != 0) {
         final cam = _camera;
         final boost =
@@ -1379,6 +1651,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         colonies: _colonies,
         cities: _cities,
         terrainEdits: _terrainEdits,
+        megastructures: _session.megastructures,
         includeDescriptors: sendDescriptors,
         events: frameEvents,
       );
@@ -1397,6 +1670,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         colonies: _colonies,
         cities: _cities,
         terrainEdits: _terrainEdits,
+        megastructures: _session.megastructures,
         events: frameEvents,
       );
     } else {
@@ -1419,7 +1693,23 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       final vessel =
           _focusVessel == null ? null : _vessels.byId(_focusVessel!);
       Quaternion frame;
-      if (_upMode == CameraUpMode.gravity &&
+      // ON FOOT the walker IS the local vertical. Without this the gimbal fell
+      // back to the body's equator (there is no focused vessel while walking),
+      // so "elevation" tilted toward the pole instead of toward the ground:
+      // looking down was impossible, the horizon sat askew, and anything that
+      // aims by looking — the drill, the lamp — pointed at the sky.
+      final walkRadial = _walkMode && _freecamRelLocal.length > 1e-3
+          ? _refBodyQuat().rotate(_freecamRelLocal).normalized
+          : null;
+      if (walkRadial != null) {
+        final prevFrame = _gravFrame;
+        final prevRadial = _gravRadial;
+        frame = prevFrame == null || prevRadial == null
+            ? _shortestArc(Vector3.unitZ, walkRadial)
+            : (_shortestArc(prevRadial, walkRadial) * prevFrame).normalized;
+        _gravFrame = frame;
+        _gravRadial = walkRadial;
+      } else if (_upMode == CameraUpMode.gravity &&
           vessel != null &&
           vessel.state.position.length > 1e-3) {
         // Local vertical: the radial through the vessel (its position is
@@ -2234,6 +2524,19 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                         : const Color(0xFF2A3A4A),
                     onPressed: _toggleFreecam,
                     child: const Icon(Icons.videocam),
+                  ),
+                  const SizedBox(width: 8),
+                  FloatingActionButton.small(
+                    heroTag: 'lamp',
+                    tooltip: TerrainNodes.lampOn
+                        ? 'Head lamp ON (F)'
+                        : 'Head lamp: light the ground ahead (F)',
+                    backgroundColor: TerrainNodes.lampOn
+                        ? const Color(0xFFF0E080)
+                        : const Color(0xFF2A3A4A),
+                    onPressed: () =>
+                        setState(() => TerrainNodes.lampOn = !TerrainNodes.lampOn),
+                    child: const Icon(Icons.flashlight_on),
                   ),
                   const SizedBox(width: 8),
                   FloatingActionButton.small(
