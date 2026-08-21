@@ -31,6 +31,24 @@ class ParcelNetwork {
   bool roadRooted(String id) => rootedRoads.contains(id);
   bool lotServed(String id) => servedLots.contains(id);
 
+  /// Distance from [r] to the closest point of [p] — its boundary if the road
+  /// is outside it, zero if the road runs through it.
+  static double _reachToLot(RoadSpline r, Parcel p) {
+    var best = r.distanceTo(p.centroid);
+    for (final v in p.polygon) {
+      final d = r.distanceTo(v);
+      if (d < best) best = d;
+    }
+    // Edge midpoints too: a road can pass a long edge without coming near
+    // either of its ends.
+    for (var i = 0; i < p.polygon.length; i++) {
+      final a = p.polygon[i], b = p.polygon[(i + 1) % p.polygon.length];
+      final d = r.distanceTo(Vec2((a.e + b.e) / 2, (a.n + b.n) / 2));
+      if (d < best) best = d;
+    }
+    return best;
+  }
+
   factory ParcelNetwork.of(
     CityLayout layout, {
     Vec2 root = const Vec2(0, 0),
@@ -110,7 +128,12 @@ class ParcelNetwork {
       }
       for (final r in roads) {
         if (!rooted.contains(r.id)) continue;
-        if (r.distanceTo(p.centroid) <= manualServeM + r.halfWidth) {
+        // Reach to the lot's NEAREST POINT, not its centre. A claimed site can
+        // be enormous — a quarry is 3 km across — so a road running along its
+        // edge is still 1.5 km from the centroid, and a centre-only test
+        // reported every big installation as cut off however well connected it
+        // was.
+        if (_reachToLot(r, p) <= manualServeM + r.halfWidth) {
           served.add(p.id);
           break;
         }

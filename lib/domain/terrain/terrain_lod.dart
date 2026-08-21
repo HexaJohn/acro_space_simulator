@@ -156,6 +156,56 @@ int levelForVoxelSize(
 /// refining only the one under its centre would leave the rim meshed at the
 /// coarse rate. [voxelsAcrossBrush] is how many voxels should span the brush's
 /// diameter — 8 is enough for a crater to read as a bowl rather than a dent.
+/// Refinement targets for a whole EDIT SET, merged.
+///
+/// A crater is one small edit and deserves its own island of deep quadtree.
+/// A city is not: it hands the terrain one brush per building, and a six-block
+/// colony emits 1,719 of them asking for 15,471 targets down to level 17 —
+/// most of it redundant, because the brushes sit on top of one another and
+/// because a LEVELLED pad is a PLANE, which any level meshes exactly.
+///
+/// Two things collapse it:
+///
+///  * A levelling brush (pad, box, polygon, corridor) only needs resolution
+///    where its surface CURVES, which is the falloff ring at its edge — the
+///    interior is flat. So those contribute their rim, not their middle.
+///  * Targets that would force the same leaf are the same target. Deduping
+///    against the chunk each one lands in removes the overlap between
+///    neighbouring lots, which is most of what a city produces.
+///
+/// Craters and excavations are untouched: they are curved everywhere, so they
+/// still get the full centre-plus-ring treatment.
+List<TerrainRefinement> mergedRefinementsFor(
+  Iterable<TerrainBrush> brushes,
+  double radiusM,
+  int resolution, {
+  double voxelsAcrossBrush = 8,
+  int maxLevel = 20,
+  int ringSamples = 8,
+  int cap = 4096,
+}) {
+  // Keyed by the leaf a target would force, keeping the deepest level asked
+  // for it. Two lots either side of a street want the same chunk refined once.
+  final byLeaf = <String, TerrainRefinement>{};
+  for (final brush in brushes) {
+    for (final t in refinementsFor(
+      brush,
+      radiusM,
+      resolution,
+      voxelsAcrossBrush: voxelsAcrossBrush,
+      maxLevel: maxLevel,
+      ringSamples: ringSamples,
+    )) {
+      final c = chunkAt(t.direction, t.level);
+      final key = '${c.face.index}:${c.level}:${c.u}:${c.v}';
+      final prior = byLeaf[key];
+      if (prior == null || t.level > prior.level) byLeaf[key] = t;
+    }
+    if (byLeaf.length > cap) break;
+  }
+  return byLeaf.values.toList();
+}
+
 List<TerrainRefinement> refinementsFor(
   TerrainBrush brush,
   double radiusM,
@@ -167,11 +217,21 @@ List<TerrainRefinement> refinementsFor(
   final dist = brush.centreBF.length;
   if (dist <= 0 || radiusM <= 0) return const [];
   final dir = brush.centreBF.normalized;
+  // A LEVELLED surface is a plane, and a plane meshes exactly at any level, so
+  // its interior needs no refinement at all — only the falloff ring at its
+  // edge, where the surface actually bends back into the natural ground. A
+  // crater is curved throughout and keeps the fine interior it needs.
+  final flatTopped = brush.kind == TerrainBrushKind.pad ||
+      brush.kind == TerrainBrushKind.padBox ||
+      brush.kind == TerrainBrushKind.padPoly ||
+      brush.kind == TerrainBrushKind.cutFill;
   final targetVoxelM = brush.radiusM * 2.0 / voxelsAcrossBrush;
   final out = <TerrainRefinement>[
-    TerrainRefinement(
-        dir, levelForVoxelSize(dir, radiusM, resolution, targetVoxelM,
-            maxLevel: maxLevel)),
+    if (!flatTopped)
+      TerrainRefinement(
+          dir,
+          levelForVoxelSize(dir, radiusM, resolution, targetVoxelM,
+              maxLevel: maxLevel)),
   ];
 
   // Ring on the true surface footprint (lateral reach), not the bounding

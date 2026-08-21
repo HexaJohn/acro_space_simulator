@@ -84,7 +84,7 @@ void main() {
 
   test('the road swatch is a painted tile, not a flat colour', () {
     // A road cell maps its whole quad across this swatch, so the swatch has to
-    // carry the pavement: markings, kerbs and aggregate. Flat grey reads as a
+    // carry the pavement: markings, curbs and aggregate. Flat grey reads as a
     // hole in the ground rather than as a road.
     const s = 96;
     const swatches = 6;
@@ -102,7 +102,7 @@ void main() {
     expect(line.r, greaterThan(tarmac.r + 40));
     expect(line.b, lessThan(line.r), reason: 'road paint is warm, not blue');
 
-    // The tile is not uniform — aggregate speckle plus kerbs.
+    // The tile is not uniform — aggregate speckle plus curbs.
     final tones = <int>{};
     for (var y = 0; y < band; y++) {
       for (var x = 0; x < band; x++) {
@@ -139,10 +139,10 @@ void main() {
     expect(dashOn.b, lessThan(dashOn.r), reason: 'road paint is warm');
     expect(dashOff.r, lessThan(140), reason: 'the line is dashed');
 
-    // Kerbs at both edges, lighter than the mid-lane tarmac.
-    final kerb = at(1, s ~/ 2);
+    // Curbs at both edges, lighter than the mid-lane tarmac.
+    final curb = at(1, s ~/ 2);
     final lane = at(s ~/ 4, s ~/ 2);
-    expect(kerb.r, greaterThan(lane.r + 10));
+    expect(curb.r, greaterThan(lane.r + 10));
 
     // And NO transverse stripe: mid-lane tarmac is tarmac at every v.
     for (var y = 0; y < s; y += 4) {

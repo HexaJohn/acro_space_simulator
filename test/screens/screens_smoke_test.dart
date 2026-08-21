@@ -6,7 +6,9 @@
 // Smoke test: pump each menu/feature screen and confirm it builds without
 // throwing (catches init-time domain-binding errors the analyzer can't see).
 import 'package:acro_space_simulator/infrastructure/flutter/screens/ascent_screen.dart';
+import 'package:acro_space_simulator/infrastructure/flutter/screens/building_studio_screen.dart';
 import 'package:acro_space_simulator/infrastructure/flutter/screens/city_builder_screen.dart';
+import 'package:acro_space_simulator/infrastructure/flutter/screens/city_studio_screen.dart';
 import 'package:acro_space_simulator/infrastructure/flutter/screens/craft/craft_editor_viewport.dart';
 import 'package:acro_space_simulator/infrastructure/flutter/screens/craft_assembly_screen.dart';
 import 'package:acro_space_simulator/infrastructure/flutter/screens/main_menu_screen.dart';
@@ -40,6 +42,10 @@ void main() {
       (t) async => _pump(t, const NewCityScreen()));
   testWidgets('city builder builds',
       (t) async => _pump(t, const CityBuilderScreen()));
+  testWidgets('city studio builds',
+      (t) async => _pump(t, const CityStudioScreen()));
+  testWidgets('building studio builds',
+      (t) async => _pump(t, const BuildingStudioScreen()));
   testWidgets('mining builds', (t) async => _pump(t, const MiningScreen()));
   testWidgets('landing builds',
       (t) async => _pump(t, const AscentScreen(descent: true)));

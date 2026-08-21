@@ -284,6 +284,12 @@ class AdvanceSimulationTick {
           ? activeBody.atmosphere!.sampleAt(altitude)
           : AtmosphereSample.vacuum;
 
+      // 2b. Landing guidance: a craft the player has aimed at a pad flies the
+      // same law the colony's shuttles do. After the environment sample, so the
+      // braking burn is sized on the thrust the engines actually make at this
+      // ambient pressure — a sea-level figure would over-brake in vacuum.
+      _flyLandingTarget(vessel, activeBody, sample, clock);
+
       // 3. Mode selection. Landed vessels also skip orbital propagation.
       final underThrust = vessel.throttle > 0;
       // LIFTOFF: a landed vessel whose engines are firing un-lands so physics can
@@ -499,6 +505,54 @@ class AdvanceSimulationTick {
   }
 
   static const LandingGuidance _shuttleGuidance = LandingGuidance();
+
+  /// Fly [vessel] onto the pad it was aimed at, if it was aimed at one.
+  ///
+  /// The player's counterpart to the shuttle loop: same [LandingGuidance], same
+  /// body-fixed pad, so a hand-aimed descent and an automatic supply run are
+  /// flown by identical maths. The target clears itself once the craft is down
+  /// (or if it leaves the pad's body), handing the controls back.
+  void _flyLandingTarget(Vessel vessel, CelestialBody body,
+      AtmosphereSample sample, SimulationClock clock) {
+    final target = vessel.landingTarget;
+    if (target == null) return;
+    // Somewhere else entirely, or already down: the target has done its job.
+    if (target.bodyId != vessel.dominantBody.value || vessel.landed) {
+      vessel.landingTarget = null;
+      vessel.setThrottle(0);
+      return;
+    }
+    final pressureFraction =
+        body.hasAtmosphere && body.atmosphere!.seaLevelPressure > 0
+            ? (sample.pressure / body.atmosphere!.seaLevelPressure)
+                .clamp(0.0, 1.0)
+                .toDouble()
+            : 0.0;
+    final maxThrust = vessel.maxThrustAt(pressureFraction);
+    if (maxThrust <= 0) return; // nothing to steer with; leave the craft alone
+
+    final orientation = body.orientationAt(clock.epoch);
+    final posBF = orientation.conjugate.rotate(vessel.state.position);
+    // Velocity relative to the TURNING ground, not to inertial space: closing on
+    // a pad means matching the pad's motion, and at the equator the difference
+    // is a few hundred metres per second.
+    final period = body.siderealRotationPeriod;
+    final omega = period.abs() < 1
+        ? Vector3.zero
+        : Vector3(0, 0, 2 * math.pi / period);
+    final velBF = orientation.conjugate.rotate(vessel.state.velocity) -
+        omega.cross(posBF);
+    final cmd = _shuttleGuidance.command(
+      posBF: posBF,
+      velBF: velBF,
+      padBF: target.padBF,
+      mu: body.mu,
+      mass: vessel.mass,
+      maxThrust: maxThrust,
+    );
+    vessel.setThrottle(cmd.throttle);
+    vessel.targetFacing = orientation.rotate(cmd.facing);
+  }
   static const ColonyShuttleFactory _shuttleFactory = ColonyShuttleFactory();
   int _shuttleSeq = 0;
 

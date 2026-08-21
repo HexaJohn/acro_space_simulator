@@ -154,7 +154,10 @@ void main() {
 
     final recorded = edits.forBody(city.body.id)!;
     final kinds = recorded.all.map((b) => b.kind).toSet();
-    expect(kinds, contains(TerrainBrushKind.pad), reason: 'building pads');
+    // padPoly, not pad: a lot's pad is cut to the lot's own POLYGON, so it
+    // tiles against its neighbours instead of re-levelling them. Every parcel
+    // is a polygon — lots taper wherever a road bends.
+    expect(kinds, contains(TerrainBrushKind.padPoly), reason: 'building pads');
     expect(kinds, contains(TerrainBrushKind.cutFill), reason: 'road grading');
 
     // Ticking again must NOT re-emit: brushes are permanent and order-sensitive.

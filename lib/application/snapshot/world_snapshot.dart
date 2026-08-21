@@ -1010,6 +1010,118 @@ class BodyDescriptorSnapshot {
   }
 }
 
+/// The four strips of zoned ground left visible around a building.
+///
+/// A [CityPatchSnapshot] is one quad, so a ring is four of them: two spanning
+/// the full width front and back, two filling the sides between. Strips of
+/// zero extent are skipped, which is what happens when a building genuinely
+/// does fill its plot.
+void _emitYardRing(
+  List<CityPatchSnapshot> out,
+  CitySim city,
+  Parcel parcel,
+  CityBuildingSpec spec,
+  CelestialBody body,
+  ({Vector3 position, Quaternion orientation}) t,
+  ({double width, double depth}) extent,
+) {
+  final foot = buildingFootprint(parcel, spec);
+  final kind = switch (parcel.use) {
+    ParcelUse.commercial => CityPatchSnapshot.kindCommercial,
+    ParcelUse.industrial => CityPatchSnapshot.kindIndustrial,
+    ParcelUse.residential => CityPatchSnapshot.kindResidential,
+    _ => CityPatchSnapshot.kindSupport,
+  };
+  final hw = extent.width / 2, hd = extent.depth / 2;
+  final fw = foot.width / 2, fd = foot.depth / 2;
+  final sideW = hw - fw, endD = hd - fd;
+  if (sideW <= 0.05 && endD <= 0.05) return;
+
+  // Local offsets from the lot centre, in the lot's own east/north axes; the
+  // parcel transform already carries the spin onto its street.
+  final strips = <({double e, double n, double w, double d})>[
+    if (endD > 0.05) (e: 0, n: -(fd + endD / 2), w: extent.width, d: endD),
+    if (endD > 0.05) (e: 0, n: fd + endD / 2, w: extent.width, d: endD),
+    if (sideW > 0.05)
+      (e: -(fw + sideW / 2), n: 0, w: sideW, d: foot.depth),
+    if (sideW > 0.05) (e: fw + sideW / 2, n: 0, w: sideW, d: foot.depth),
+  ];
+  for (final s in strips) {
+    // Offset in the lot's frame, then back out to body-fixed.
+    final off = t.orientation.rotate(Vector3(s.e, s.n, 0));
+    final p = t.position + off;
+    out.add(CityPatchSnapshot(
+      colonyId: city.id,
+      body: body.id.value,
+      px: p.x,
+      py: p.y,
+      pz: p.z,
+      qw: t.orientation.w,
+      qx: t.orientation.x,
+      qy: t.orientation.y,
+      qz: t.orientation.z,
+      sizeM: s.w,
+      depthM: s.d,
+      kind: kind,
+    ));
+  }
+}
+
+/// The footprint a building takes on [parcel], metres.
+///
+/// One rule, because two things need the same answer: the building itself, and
+/// the ring of ZONED GROUND drawn around it. Compute them separately and the
+/// yard either overlaps the walls or leaves a gap of bare terrain.
+({double width, double depth}) buildingFootprint(
+    Parcel parcel, CityBuildingSpec spec) {
+  final extent = parcel.inscribedExtent;
+  final back = lotSetbackFor(spec);
+  final cover = lotCoverageFor(spec);
+  final lotW = math.max((extent.width - 2 * back) * cover, extent.width * 0.35);
+  final lotD = math.max((extent.depth - 2 * back) * cover, extent.depth * 0.35);
+  return (
+    width: spec.siteWidthM > 0 ? math.min(lotW, spec.siteWidthM) : lotW,
+    depth: spec.siteDepthM > 0 ? math.min(lotD, spec.siteDepthM) : lotD,
+  );
+}
+
+/// Smallest setback from a lot line, metres.
+///
+/// Wider than `CityTerrainShaper.padEdgeM`, which is what makes it work: the
+/// pad is flat right out to the lot line and eases off over that edge, so a
+/// building inset past the ease-off stands wholly on level ground. Nothing may
+/// be inset less than this or it starts straddling the step to the terrace
+/// next door.
+const double kLotSetbackM = 1.2;
+
+/// Setback for [spec], metres.
+///
+/// Density decides how much of its plot a building takes. A tower downtown
+/// meets the pavement and leaves no slack; a low-density house sits back
+/// behind a garden. Every building used the SAME setback before, so a dense
+/// street had the same gaps as a suburban one and the whole colony read at one
+/// density however it was zoned.
+///
+/// Intensity — residents plus workers per building — is the density signal a
+/// spec actually carries; `Density` itself does not survive onto the spec.
+double lotSetbackFor(CityBuildingSpec spec) {
+  final intensity = spec.housing + spec.jobs;
+  if (intensity >= 90) return kLotSetbackM; // towers meet the street
+  if (intensity >= 30) return 2.2;
+  return 4.0; // detached, with room around it
+}
+
+/// Share of its plot [spec] covers, once set back.
+///
+/// The other half of the same idea: a dense block fills what it is given, a
+/// low-density one leaves garden around the footprint.
+double lotCoverageFor(CityBuildingSpec spec) {
+  final intensity = spec.housing + spec.jobs;
+  if (intensity >= 90) return 0.96;
+  if (intensity >= 30) return 0.86;
+  return 0.72;
+}
+
 /// A colony building, placed BODY-FIXED so it rotates with the planet. [px..pz]
 /// and the quaternion [qw..qz] are in the body frame (local +Z radial-up, +Y
 /// north); [lat]/[lon] (radians) is the surface point the renderer can ray-cast
@@ -1032,10 +1144,21 @@ class BuildingSnapshot {
   final double siteWidthM, siteDepthM;
   final int siteKindIndex;
 
+  /// This building stands on a CORNER — its lot touches a second street.
+  ///
+  /// On the frame rather than derived at the renderer because the plat is the
+  /// only place that knows it: by the time a building reaches the frame it is
+  /// a position and a footprint, and which of its walls faces a street is
+  /// unrecoverable from those. A corner building is a genuinely different
+  /// building — two public faces, no blank flank, entrance on the chamfer —
+  /// so this also has to reach the archetype key.
+  final bool corner;
+
   /// Palette colour, so a client tints facades without a spec table.
   final int colorArgb;
 
   const BuildingSnapshot({
+    this.corner = false,
     required this.id,
     required this.type,
     required this.colonyId,
@@ -1119,7 +1242,22 @@ class BuildingSnapshot {
   }) {
     final t = _parcelTransform(city, parcel, siteRadiusM);
     final dir = t.position.normalized;
-    final extent = parcel.buildableExtent;
+    // Stand the building INSIDE its own terrace.
+    //
+    // The shaper levels each lot to its own datum and stops at the lot line,
+    // because abutting lots at different heights cannot both be flat and blend
+    // into one another — the ground steps at the boundary, the way a graded
+    // hillside does. A building filling its lot edge to edge therefore
+    // straddles that step: flush at the centre, hanging 6 m in the air at the
+    // corner nearest the lower neighbour. A setback wider than the terrace
+    // edge puts every corner on its own flat ground.
+    // ...and capped by the building's own DECLARED site, where it has one. A
+    // lot is a plot of land, not a size: a structure dropped on a generous lot
+    // was drawn to fill it, so buildings that state their own extent came out
+    // far larger than they are. Specs that state nothing keep taking the lot,
+    // which is the parcel-native sizing the grid never allowed.
+    final foot = buildingFootprint(parcel, spec);
+    final w = foot.width, d = foot.depth;
     return BuildingSnapshot(
       id: parcel.id,
       type: spec.type,
@@ -1134,10 +1272,11 @@ class BuildingSnapshot {
       qz: t.orientation.z,
       lat: math.asin(dir.z.clamp(-1.0, 1.0)),
       lon: math.atan2(dir.y, dir.x),
-      siteWidthM: extent.width,
-      siteDepthM: extent.depth,
+      siteWidthM: w,
+      siteDepthM: d,
       siteKindIndex: spec.siteKind.index,
       colorArgb: spec.colorArgb,
+      corner: parcel.isCorner,
     );
   }
 
@@ -1359,12 +1498,17 @@ class RoadSnapshot {
   /// Index into RoadClass.values — drives lamp spacing and column height.
   final int roadClassIndex;
 
+  /// Built in unbreathable air: pedestrians travel in a sealed pressurised
+  /// tube along the verge instead of on an open pavement.
+  final bool sealed;
+
   const RoadSnapshot({
     required this.colonyId,
     required this.body,
     required this.points,
     required this.halfWidthM,
     required this.roadClassIndex,
+    this.sealed = false,
   });
 
   Map<String, dynamic> toJson() => {
@@ -1373,6 +1517,7 @@ class RoadSnapshot {
         'pts': points,
         'hw': halfWidthM,
         'cls': roadClassIndex,
+        if (sealed) 'sealed': true,
       };
 
   factory RoadSnapshot.fromJson(Map<String, dynamic> j) => RoadSnapshot(
@@ -1383,6 +1528,7 @@ class RoadSnapshot {
         ],
         halfWidthM: (j['hw'] as num).toDouble(),
         roadClassIndex: (j['cls'] as num?)?.toInt() ?? 0,
+        sealed: j['sealed'] == true,
       );
 }
 
@@ -1519,6 +1665,14 @@ class TerrainEditSnapshot {
     this.depth = 0,
     this.rimHeight = 0,
     this.tick = 0,
+    this.datumRadius = 0,
+    this.datumRadiusEnd = 0,
+    this.falloff = 0,
+    this.benches = 1,
+    this.ex,
+    this.ey,
+    this.ez,
+    this.polygon = const [],
   });
 
   /// Body id — joins to [WorldSnapshot.bodies].
@@ -1538,6 +1692,37 @@ class TerrainEditSnapshot {
   final double rimHeight;
   final int tick;
 
+  // ---- Levelling brushes (pad / steppedPit / cutFill) -------------------
+  //
+  // These arrived after this snapshot did, and it was never widened for them,
+  // so every one of their defining fields was dropped in transit. The physics
+  // reads brushes straight from the edit store and saw them intact; the
+  // RENDERER rebuilds them from here and did not. A pad reached the mesher
+  // with a target radius of zero and a road with no far end at all — which
+  // `cutFill` answers by doing nothing — so the drawn ground kept its raw
+  // relief while everything standing on it was placed at the levelled height.
+  // That is the floating/clipping: two different surfaces, both "correct".
+
+  /// Target surface radius the brush levels to (m from the body centre).
+  final double datumRadius;
+
+  /// Target radius at the FAR end of a graded corridor.
+  final double datumRadiusEnd;
+
+  /// Width of the ring easing the edit back into natural ground (m).
+  final double falloff;
+
+  /// Terrace count for a stepped pit.
+  final int benches;
+
+  /// Body-fixed far end of a corridor brush; null for the radial kinds.
+  final double? ex, ey, ez;
+
+  /// Footprint outline of a polygon pad, flattened x,y,z per vertex. Empty for
+  /// every other kind. A lot is a polygon, so its pad has to be one too, and a
+  /// pad that reaches the mesher without its outline levels nothing.
+  final List<double> polygon;
+
   static TerrainEditSnapshot of(BodyId body, TerrainBrush b) =>
       TerrainEditSnapshot(
         body: body.value,
@@ -1552,9 +1737,20 @@ class TerrainEditSnapshot {
         depth: b.depthM,
         rimHeight: b.rimHeightM,
         tick: b.tick,
+        datumRadius: b.datumRadiusM,
+        datumRadiusEnd: b.datumRadiusEndM,
+        falloff: b.falloffM,
+        benches: b.benches,
+        ex: b.endBF?.x,
+        ey: b.endBF?.y,
+        ez: b.endBF?.z,
+        polygon: [
+          for (final v in b.polygonBF) ...[v.x, v.y, v.z]
+        ],
       );
 
-  /// Rebuild the domain brush. Round-trips [of] exactly.
+  /// Rebuild the domain brush. Round-trips [of] exactly — INCLUDING the
+  /// levelling fields, without which a pad or a graded corridor arrives inert.
   TerrainBrush toBrush() => TerrainBrush(
         kind:
             TerrainBrushKind.values[kind.clamp(0, TerrainBrushKind.values.length - 1)],
@@ -1564,6 +1760,17 @@ class TerrainEditSnapshot {
         depthM: depth,
         rimHeightM: rimHeight,
         tick: tick,
+        datumRadiusM: datumRadius,
+        datumRadiusEndM: datumRadiusEnd,
+        falloffM: falloff,
+        benches: benches,
+        endBF: ex == null || ey == null || ez == null
+            ? null
+            : Vector3(ex!, ey!, ez!),
+        polygonBF: [
+          for (var i = 0; i + 2 < polygon.length; i += 3)
+            Vector3(polygon[i], polygon[i + 1], polygon[i + 2])
+        ],
       );
 
   Map<String, dynamic> toJson() => {
@@ -1575,11 +1782,18 @@ class TerrainEditSnapshot {
         if (depth != 0) 'd': depth,
         if (rimHeight != 0) 'rim': rimHeight,
         'tick': tick,
+        if (datumRadius != 0) 'dr': datumRadius,
+        if (datumRadiusEnd != 0) 'dre': datumRadiusEnd,
+        if (falloff != 0) 'f': falloff,
+        if (benches != 1) 'b': benches,
+        if (ex != null) 'e': [ex, ey, ez],
+        if (polygon.isNotEmpty) 'poly': polygon,
       };
 
   factory TerrainEditSnapshot.fromJson(Map<String, dynamic> j) {
     final c = (j['c'] as List?) ?? const [0, 0, 0];
     final a = (j['a'] as List?) ?? const [0, 0, 1];
+    final e = j['e'] as List?;
     return TerrainEditSnapshot(
       body: j['body'] as String,
       kind: (j['kind'] as num?)?.toInt() ?? 0,
@@ -1593,6 +1807,16 @@ class TerrainEditSnapshot {
       depth: (j['d'] as num?)?.toDouble() ?? 0,
       rimHeight: (j['rim'] as num?)?.toDouble() ?? 0,
       tick: (j['tick'] as num?)?.toInt() ?? 0,
+      datumRadius: (j['dr'] as num?)?.toDouble() ?? 0,
+      datumRadiusEnd: (j['dre'] as num?)?.toDouble() ?? 0,
+      falloff: (j['f'] as num?)?.toDouble() ?? 0,
+      benches: (j['b'] as num?)?.toInt() ?? 1,
+      ex: e == null ? null : (e[0] as num).toDouble(),
+      ey: e == null ? null : (e[1] as num).toDouble(),
+      ez: e == null ? null : (e[2] as num).toDouble(),
+      polygon: [
+        for (final v in (j['poly'] as List?) ?? const []) (v as num).toDouble()
+      ],
     );
   }
 }
@@ -1656,6 +1880,27 @@ class WorldSnapshot {
     this.terrainEdits = const [],
     this.megastructures = const [],
   });
+
+  /// The same frame at a different sim time.
+  ///
+  /// For a viewer that wants a STATIC world to keep moving — the city studio
+  /// holds one captured colony and advances only the clock, so the traffic
+  /// pass (which derives vehicle positions from [epoch]) animates without the
+  /// cost of re-capturing a frame that has not changed. The collections are
+  /// shared, not copied.
+  WorldSnapshot copyWithEpoch(double newEpoch) => WorldSnapshot(
+        tick: tick,
+        vessels: vessels,
+        epoch: newEpoch,
+        bodies: bodies,
+        buildings: buildings,
+        roads: roads,
+        patches: patches,
+        descriptors: descriptors,
+        events: events,
+        terrainEdits: terrainEdits,
+        megastructures: megastructures,
+      );
 
   /// The deformations for [bodyId], rebuilt as a domain store ready to hand to
   /// `CelestialBody.terrainFieldWith`. Null when the body is pristine, which
@@ -1789,6 +2034,7 @@ class WorldSnapshot {
             points: flat,
             halfWidthM: road.halfWidth,
             roadClassIndex: road.roadClass.index,
+            sealed: road.sealed,
           ));
         }
         // Roads, zoned-but-unbuilt lots and support platforms. These are what
@@ -1854,15 +2100,24 @@ class WorldSnapshot {
         // Empty lots, drawn so the subdivision is visible before anything is
         // built on it.
         for (final parcel in city.layout.parcels) {
-          // A BUILT lot renders as its building; drawing the lot under it too
-          // would z-fight the building against its own ground.
-          if (city.parcelBuildings.containsKey(parcel.id) ||
-              city.parcelGrownSpec(parcel.id, parcel.use) != null) {
-            continue;
-          }
+          // A built lot draws its zone as a RING around the building, not as
+          // a quad under it.
+          //
+          // Setback and coverage scale with density, so a building covers only
+          // the middle of its plot and the yard around it was bare terrain
+          // whatever the lot was zoned — no gardens, no forecourts, no works
+          // aprons. A full-lot patch would fix that and z-fight the building
+          // against its own ground, which is what the old guard prevented; a
+          // ring paints exactly the visible part and never goes underneath.
+          final builtSpec = city.parcelBuildings[parcel.id] ??
+              city.parcelGrownSpec(parcel.id, parcel.use);
           final t = _parcelTransform(
               city, parcel, groundFor('lot:${parcel.id}', parcel.centroid));
           final extent = parcel.buildableExtent;
+          if (builtSpec != null) {
+            _emitYardRing(patches, city, parcel, builtSpec, body, t, extent);
+            continue;
+          }
           patches.add(CityPatchSnapshot(
             colonyId: city.id,
             body: body.id.value,

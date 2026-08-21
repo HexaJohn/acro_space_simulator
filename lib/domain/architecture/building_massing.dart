@@ -19,6 +19,7 @@ import 'dart:math' as math;
 
 import '../colony/city/city_building_spec.dart';
 import '../colony/city/parcel.dart';
+import 'architecture_style.dart';
 
 /// A rectangular volume in building-local metres, Z-up, origin at the centre of
 /// the building's footprint on the ground.
@@ -84,13 +85,48 @@ class BuildingMassing {
   /// Where the entrance sits, in local plan metres — on the frontage side.
   final (double x, double y) entrance;
 
+  /// Height of the GROUND storey, which is usually not the height of the
+  /// others: retail wants 4.5 m where the offices above it want 3.5. Carried
+  /// beside [storeyM] rather than replacing it because everything above the
+  /// ground floor really is a uniform stack, and one extra number is cheaper
+  /// than a per-floor table nothing else would read.
+  final double groundStoreyM;
+
+  /// The idiom this was massed in. The geometry pass reads the same one, so a
+  /// building cannot end up sited as a street wall and detailed as an office
+  /// park.
+  final ArchitectureStyle style;
+
+  /// This building holds a corner: its lot touches a second street.
+  final bool corner;
+
+  /// Which band of the facade atlas this building's walls are cut from.
+  ///
+  /// Decided HERE, with the rest of the brief, so it is one number that
+  /// travels with the massing rather than something the geometry pass rolls
+  /// for itself — which would make the same building a different colour every
+  /// time it was regenerated.
+  final int material;
+
   const BuildingMassing({
     required this.volumes,
     required this.storeyM,
     required this.floorArea,
     required this.entrance,
     this.parking,
-  });
+    double? groundStoreyM,
+    this.style = ArchitectureStyle.utilitarian,
+    this.material = FacadeMaterial.precast,
+    this.corner = false,
+  }) : groundStoreyM = groundStoreyM ?? storeyM;
+
+  /// Base height of floor [index] within a volume standing on the ground.
+  double floorBase(int index) =>
+      index <= 0 ? 0 : groundStoreyM + (index - 1) * storeyM;
+
+  /// Height of the bottom [floors] storeys of a ground-standing volume.
+  double stackHeight(int floors) =>
+      floors <= 0 ? 0 : groundStoreyM + (floors - 1) * storeyM;
 
   double get height =>
       volumes.fold(0.0, (h, v) => math.max(h, v.top));
@@ -111,6 +147,7 @@ class BuildingMassing {
 /// Derives massing from function and available land.
 class BuildingMassingRules {
   const BuildingMassingRules({
+    this.style = ArchitectureStyle.utilitarian,
     this.storeyM = 3.6,
     this.industrialStoreyM = 7.5,
     this.areaPerResident = 42,
@@ -119,6 +156,23 @@ class BuildingMassingRules {
     this.maxFloors = 60,
     this.parkingSpaceM2 = 26,
   });
+
+  /// The urban idiom: where the building stands on its lot, how tall its
+  /// ground floor is, when it steps back. See [ArchitectureStyle] — the
+  /// siting numbers in there do more for how a street looks than anything in
+  /// this class.
+  final ArchitectureStyle style;
+
+  BuildingMassingRules withStyle(ArchitectureStyle s) => BuildingMassingRules(
+        style: s,
+        storeyM: storeyM,
+        industrialStoreyM: industrialStoreyM,
+        areaPerResident: areaPerResident,
+        areaPerWorker: areaPerWorker,
+        setbackM: setbackM,
+        maxFloors: maxFloors,
+        parkingSpaceM2: parkingSpaceM2,
+      );
 
   /// Habitable storey height. Industrial sheds get a taller one — a factory
   /// floor with a 3.6 m ceiling reads as an office block with the wrong texture.
@@ -172,12 +226,27 @@ class BuildingMassingRules {
   /// Shape [spec] to fit [parcel].
   BuildingMassing massFor(CityBuildingSpec spec, Parcel parcel, {int seed = 0}) {
     final extent = parcel.buildableExtent;
+    final corner = parcel.isCorner;
     final rnd = math.Random(seed ^ spec.label.hashCode);
     final industrial = _isIndustrial(spec);
-    final storey = industrial ? industrialStoreyM : storeyM;
+    final storey = industrial ? industrialStoreyM : style.upperStoreyM;
+    final ground = industrial ? industrialStoreyM : style.groundStoreyM;
 
     // Land available once the setbacks are taken off, in the parcel's own
-    // frontage-aligned axes: width runs ALONG the street, depth away from it.
+    // frontage-aligned axes: width runs ALONG the street, depth away from it,
+    // and local y = -depth/2 IS the curb line.
+    //
+    // The setbacks come from the style, and they are asymmetric on purpose: a
+    // street-wall building stands hard on the front line and keeps its yard at
+    // the back, where the alley and the parking go. Taking the same margin off
+    // both ends is what centred every building in its lot and left a downtown
+    // block looking like a business park.
+    //
+    // Zero side setback does NOT mean building over the property line: the
+    // parcel handed in here has already been inset by the density rule in the
+    // world snapshot. Zero means "fill what I was given", which is what makes
+    // neighbours meet.
+    //
     // Capped to the spec's real site size — a solar farm dropped on a
     // ten-kilometre manual lot is still a solar farm, not a ten-kilometre one.
     // The cap applies ONLY to specs that declare a site: ordinary street
@@ -186,8 +255,11 @@ class BuildingMassingRules {
     final site = spec.siteMetres();
     final capW = spec.siteWidthM > 0 ? site.width : double.infinity;
     final capD = spec.siteDepthM > 0 ? site.depth : double.infinity;
-    final availW = math.min(math.max(6.0, extent.width - setbackM * 2), capW);
-    final availD = math.min(math.max(6.0, extent.depth - setbackM * 2), capD);
+    final frontEdge = -extent.depth / 2 + style.frontSetbackM;
+    final rearEdge = extent.depth / 2 - style.rearSetbackM;
+    final availW =
+        math.min(math.max(6.0, extent.width - style.sideSetbackM * 2), capW);
+    final availD = math.min(math.max(6.0, rearEdge - frontEdge), capD);
 
     switch (spec.siteKind) {
       case SiteKind.field:
@@ -204,9 +276,14 @@ class BuildingMassingRules {
     final spaces = parkingSpaces(spec);
     final parkArea = spaces * parkingSpaceM2;
 
-    // Parking takes a strip off the FRONT of the lot (between the building and
-    // the street) whenever there is room for it; a building that would then
-    // have nowhere to stand keeps its plot and loses the lot instead.
+    // Parking takes a strip off one END of the buildable depth whenever there
+    // is room for it; a building that would then have nowhere to stand keeps
+    // its plot and loses the lot instead.
+    //
+    // WHICH end is a style decision and it is not cosmetic. A lot out front
+    // pushes the building back off the street and opens a gap in the block —
+    // it is the single change that turns a downtown into a strip. Behind the
+    // building, off the alley, the same cars are invisible from the pavement.
     var parkDepth = 0.0;
     if (parkArea > 0) {
       parkDepth = (parkArea / availW).clamp(0.0, availD * 0.55);
@@ -216,34 +293,104 @@ class BuildingMassingRules {
 
     // Footprint: industrial fills its plot, everything else keeps a slimmer
     // block so a dense street does not become one continuous wall.
-    final coverage = industrial ? 0.92 : 0.7 + rnd.nextDouble() * 0.12;
-    final footW = buildW * coverage;
-    final footD = buildD * coverage;
+    // Coverage stays a property of the MASSING, not of density.
+    //
+    // How much of its plot a building takes by density is decided once, where
+    // the lot is measured (`lotCoverageFor` / `lotSetbackFor` in the world
+    // snapshot), and the parcel handed to this generator is already inset by
+    // it. Applying a density rule here too multiplied the two together and
+    // pushed geometry outside its own lot — caught by the architecture tests,
+    // which is exactly what they are for.
+    // A street wall fills its frontage edge to edge — that IS the street wall.
+    // Everything else keeps a slimmer block.
+    final coverW = style.sideSetbackM <= 0.01
+        ? 1.0
+        : (industrial ? 0.92 : 0.7 + rnd.nextDouble() * 0.12);
+    final coverD = style.isStreetWall
+        ? 0.88 + rnd.nextDouble() * 0.12
+        : (industrial ? 0.92 : 0.7 + rnd.nextDouble() * 0.12);
+    final footW = buildW * coverW;
+    final footD = buildD * coverD;
     final footArea = footW * footD;
 
-    var floors = industrial ? 1 : (needed / footArea).ceil().clamp(1, maxFloors);
+    // Floors are bounded by DENSITY, not just by the global cap. Deriving them
+    // from required area over footprint alone made a low-density home sixteen
+    // storeys tall on a small plot — arithmetically reasonable, and nothing
+    // like the detached house the zoning asked for. Intensity is the density
+    // signal a spec carries; the ceilings are what each tier looks like.
+    final intensity = spec.housing + spec.jobs;
+    final tierCap = intensity >= 90
+        ? maxFloors
+        : (intensity >= 30 ? 8 : 3);
+
+    // What the TENANT needs, which is a minimum and not a design.
+    final byDemand =
+        (needed / footArea).ceil().clamp(1, math.min(maxFloors, tierCap)).toInt();
+
+    // What the LAND wants. See [ArchitectureStyle.zoneFloors]: a downtown lot
+    // is built tall because of where it is, not because of who leases it, and
+    // the demand figure alone put a two-storey box on every plot in the middle
+    // of the city. The zone target overrides the intensity ceiling as well —
+    // that ceiling exists to stop a small tenant becoming a tower by accident,
+    // which is the opposite of a deliberate one.
+    final byZone = industrial ? 0 : style.targetFloors(spec, seed ^ spec.type.hashCode);
+    var floors = industrial
+        ? 1
+        : math.max(byDemand, byZone).clamp(1, maxFloors).toInt();
+
+    // A corner earns a storey. In every one of the reference streets the tall
+    // element of a block is on its corner — it is the part you can see from
+    // two directions, so it is the part worth building up — and a block whose
+    // corners are the same height as its middle reads as a single extruded
+    // shape rather than as a row of buildings.
+    if (!industrial && corner && floors < maxFloors) floors += 1;
+
+    // CORNICE DATUM. Real neighbours line their cornices up, because they were
+    // built to the same storey heights against the same street. Left free,
+    // floor counts come out of a division and every building lands a metre or
+    // two off its neighbour, which gives a row of buildings a ragged top edge
+    // that nothing in the photographs has.
+    //
+    // Quantising the COUNT rather than the height is what makes them actually
+    // coincide: two buildings with the same storey height and the same number
+    // of floors have their cornice at the same height by construction, and
+    // the arithmetic cannot drift.
+    if (!industrial && style.corniceDatumFloors > 1 && floors > 2) {
+      final q = style.corniceDatumFloors;
+      final snapped = ((floors / q).round() * q).clamp(q, maxFloors);
+      floors = snapped.toInt();
+    }
     // A shed that cannot hold its function on one floor grows a mezzanine
     // rather than a tower.
     if (industrial && needed > footArea * 1.4) floors = 2;
 
     final volumes = <MassBox>[];
-    // Building sits at the BACK of the buildable strip, parking in front of it.
-    final buildCentreY = parkDepth / 2;
+    // Where the building sits within its buildable strip, and where the cars
+    // go. Front-parking pushes the building back; rear-parking pulls it
+    // forward onto the street line.
+    final buildCentreY = style.parkingBehind
+        ? frontEdge + buildD / 2
+        : frontEdge + parkDepth + buildD / 2;
+    final parkCentreY = style.parkingBehind
+        ? frontEdge + buildD + parkDepth / 2
+        : frontEdge + parkDepth / 2;
+    // Total height of a stack of [n] floors, with the ground storey taller.
+    double stack(int n) => n <= 0 ? 0 : ground + (n - 1) * storey;
 
-    if (floors <= 4) {
+    if (floors <= style.stepbackAboveFloors) {
       volumes.add(MassBox(
         x: 0,
         y: buildCentreY,
         z: 0,
         width: footW,
         depth: footD,
-        height: floors * storey,
+        height: stack(floors),
         floors: floors,
       ));
     } else {
       // Podium and tower. Real tall buildings step back above their base, and
       // the step is what stops a generated skyline reading as a bar chart.
-      const podiumFloors = 2;
+      final podiumFloors = math.min(style.podiumFloors, floors - 1);
       final towerFloors = floors - podiumFloors;
       final towerW = footW * (0.52 + rnd.nextDouble() * 0.16);
       final towerD = footD * (0.52 + rnd.nextDouble() * 0.16);
@@ -253,7 +400,7 @@ class BuildingMassingRules {
         z: 0,
         width: footW,
         depth: footD,
-        height: podiumFloors * storey,
+        height: stack(podiumFloors),
         floors: podiumFloors,
       ));
       volumes.add(MassBox(
@@ -261,7 +408,7 @@ class BuildingMassingRules {
         // set-back frontage rather than a slab straight off the pavement.
         x: (rnd.nextDouble() - 0.5) * (footW - towerW) * 0.4,
         y: buildCentreY + (footD - towerD) * 0.18,
-        z: podiumFloors * storey,
+        z: stack(podiumFloors),
         width: towerW,
         depth: towerD,
         height: towerFloors * storey,
@@ -271,7 +418,7 @@ class BuildingMassingRules {
       volumes.add(MassBox(
         x: 0,
         y: buildCentreY + (footD - towerD) * 0.18,
-        z: floors * storey,
+        z: stack(floors),
         width: towerW * 0.45,
         depth: towerD * 0.45,
         height: 3.2,
@@ -298,18 +445,29 @@ class BuildingMassingRules {
     return BuildingMassing(
       volumes: volumes,
       storeyM: storey,
+      groundStoreyM: ground,
+      style: style,
+      // Industry gets precast or profiled metal whatever the kit says. A
+      // fabrication shed faced in cream terracotta is not a stylistic choice,
+      // it is a bug you can see from orbit.
+      corner: corner,
+      material: industrial
+          ? (rnd.nextBool()
+              ? FacadeMaterial.precast
+              : FacadeMaterial.metalPanel)
+          : style.materialFor(seed ^ spec.type.hashCode),
       floorArea: area,
       entrance: (0, buildCentreY - footD / 2),
       parking: parkDepth <= 0.5
           ? null
           : ParkingLot(
               x: 0,
-              y: buildCentreY - footD / 2 - parkDepth / 2,
+              y: parkCentreY,
               width: availW,
               depth: parkDepth,
               spaces: spaces,
               lampPosts: _lampGrid(availW, parkDepth,
-                  y0: buildCentreY - footD / 2 - parkDepth),
+                  y0: parkCentreY - parkDepth / 2),
             ),
     );
   }
@@ -352,6 +510,7 @@ class BuildingMassingRules {
       storeyM: storeyM,
       floorArea: 18 * 12,
       entrance: (-w / 2 + 12, -d / 2),
+      style: style,
       parking: _lotFor(spec, w, y0: -d / 2 - 20),
     );
   }
@@ -385,6 +544,7 @@ class BuildingMassingRules {
       storeyM: storey,
       floorArea: volumes.first.floorArea,
       entrance: (-w / 2, -d / 2),
+      style: style,
       parking: _lotFor(spec, math.min(w, 160), y0: -d / 2 - 30),
     );
   }
@@ -418,6 +578,7 @@ class BuildingMassingRules {
       storeyM: storey,
       floorArea: 22 * 22 * 8,
       entrance: (-w / 2 + 30, -d / 2),
+      style: style,
       parking: _lotFor(spec, math.min(w, 240), y0: -d / 2 - 40),
     );
   }

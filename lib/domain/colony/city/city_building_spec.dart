@@ -48,6 +48,22 @@ class CityZoneType {
 /// the 2D map, the 3D facade tint, and the minimap alike), while the icon is
 /// purely a Flutter widget concern and lives in the UI's visuals table.
 class CityBuildingSpec {
+  /// Which density band a ZONE spec belongs to, read off its type.
+  ///
+  /// The band is already encoded there — every zoned spec is `r-low`,
+  /// `c-med`, `i-high` and so on — and `type` is the canonical identity the
+  /// archetype cache and the save format both key on, so it is not going to
+  /// drift out from under this. Duplicating the band into a field of its own
+  /// would just be a second thing to keep in step.
+  ///
+  /// Null for the utility catalogue, which is not zoned.
+  Density? get zoneDensity {
+    if (type.endsWith('-high')) return Density.high;
+    if (type.endsWith('-med')) return Density.medium;
+    if (type.endsWith('-low')) return Density.low;
+    return null;
+  }
+
   final String type;
   final String label;
   final int colorArgb;
@@ -108,6 +124,16 @@ class CityBuildingSpec {
   int get cellCount => footW * footH;
 
   /// Site extent in metres, falling back to the cell footprint.
+  /// Whether this thing brings its own PLOT rather than taking a lot.
+  ///
+  /// A subdivided street lot is about 24x32 m. The installations that declare
+  /// their own extent start at 260 m and run to 3000 m for a quarry — a solar
+  /// farm is thirty times wider than a lot and could never fit one, which is
+  /// why the build ghost and the placed building disagreed so wildly: the
+  /// ghost drew the real site, placement shrank it to the lot. These claim a
+  /// parcel of their own instead.
+  bool get claimsOwnSite => siteWidthM > 0 || siteDepthM > 0;
+
   ({double width, double depth}) siteMetres({double cellM = 24}) => (
         width: siteWidthM > 0 ? siteWidthM : footW * cellM,
         depth: siteDepthM > 0 ? siteDepthM : footH * cellM,

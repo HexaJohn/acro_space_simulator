@@ -428,6 +428,25 @@ class TerrainNodes {
   /// Debug line for the HUD (chunk tri count / state).
   static String debugLine = '';
 
+  /// How many LOD levels a single streaming pass may climb at once.
+  ///
+  /// 0 requests target leaves directly, which is what this replaced. Small
+  /// values sharpen the whole view together at the cost of meshing
+  /// intermediate chunks that are later replaced; large ones approach the old
+  /// leap.
+  static int levelStep = 3;
+
+  /// Per-frame counters, for a profiler that needs to know WHY terrain is
+  /// expensive rather than just that it is.
+  ///
+  /// Forced refinement is the one that bites near a colony. The mechanism was
+  /// built for craters — a handful of small edits, each deserving a deep
+  /// island of quadtree — and a city hands it one brush per building. A
+  /// six-block colony emits 1,719 brushes and asks for 15,471 refinement
+  /// targets down to level 17, which is a great deal of terrain to mesh for
+  /// ground that ends up under a house.
+  static final Map<String, int> counters = {};
+
   /// Which gate suppressed terrain this frame, or '' when it rendered. Every
   /// early return below sets one, so `no terrain on <body>` is answerable from
   /// `ext.acro.terrain` instead of a rebuild-per-guess loop.
@@ -622,23 +641,29 @@ class TerrainNodes {
         _refineEditCount != edits.length ||
         (anchorPoint - _refineAnchor).length > editRefineRangeM * 0.05) {
       final near = <TerrainBrush>[];
-      final targets = <TerrainRefinement>[];
       for (final brush in edits.all) {
         if ((brush.centreBF - anchorPoint).length > editRefineRangeM) continue;
         near.add(brush);
-        // `resolution * editResBoost` makes levelForVoxelSize account for the
-        // boosted meshing the overlapping chunks will actually get, so the
-        // forced level lands log2(boost) levels SHALLOWER — the boost carries
-        // the rest of the way to the target voxel size (see [editResBoost]).
-        targets.addAll(refinementsFor(
-          brush,
-          field.radius,
-          resolution * editResBoost,
-          voxelsAcrossBrush: editVoxelsAcross,
-          maxLevel: _tree!.maxRefineLevel,
-        ));
       }
+      // MERGED, not one island per brush. A city hands this a brush per
+      // building; taken separately they ask for tens of thousands of targets,
+      // nearly all of them either redundant with a neighbour's or refining the
+      // flat middle of a levelled pad, which any level meshes exactly.
+      //
+      // `resolution * editResBoost` makes levelForVoxelSize account for the
+      // boosted meshing the overlapping chunks will actually get, so the
+      // forced level lands log2(boost) levels SHALLOWER — the boost carries
+      // the rest of the way to the target voxel size (see [editResBoost]).
+      final targets = mergedRefinementsFor(
+        near,
+        field.radius,
+        resolution * editResBoost,
+        voxelsAcrossBrush: editVoxelsAcross,
+        maxLevel: _tree!.maxRefineLevel,
+      );
       _refine = targets;
+      counters['refineTargets'] = targets.length;
+      counters['nearBrushes'] = near.length;
       _nearBrushes = near;
       _refineAnchor = anchorPoint;
       _refineEditCount = edits.length;
@@ -983,7 +1008,24 @@ class TerrainNodes {
             !_emptyChunks.contains(a))
           a,
     };
-    for (final k in coverageRoots.followedBy(missing)) {
+    for (final want in coverageRoots.followedBy(missing)) {
+      // --- Step the level, do not leap it -------------------------------
+      //
+      // Coverage roots are level 0 and targets are often level 14+, so the
+      // ladder had two rungs: one enormous face root, then the finished leaf.
+      // Each region went from blocky to perfect in a single jump, and because
+      // the queue is nearest-first that happened to one tile at a time — the
+      // city assembled piece by piece instead of sharpening as a whole.
+      //
+      // Requesting an intermediate ancestor instead brings the visible area up
+      // together, and an interrupted stream leaves uniform medium detail
+      // rather than a few perfect tiles beside a cube face. Coarse chunks are
+      // a handful of triangles, so the extra passes cost little next to the
+      // leaves they stand in for.
+      final k = levelStep <= 0 ? want : _stepToward(want);
+      if (k != want && (_chunks.containsKey(k) || _pending.contains(k))) {
+        continue; // this rung is up; the next frame climbs from it
+      }
       // Cache first: a retired mesh re-enters through the normal arrival
       // path (same generation gating, same atomic swaps) without costing an
       // isolate round-trip or a slot in the in-flight budget.
@@ -1029,6 +1071,9 @@ class TerrainNodes {
           'total ${profSw.elapsedMicroseconds ~/ 1000}ms';
     }
 
+    counters['chunks'] = _chunks.length;
+    counters['brushes'] = _edits?.length ?? 0;
+    counters['gridPatches'] = _gridPatches.length;
     if (_chunks.isEmpty) {
       debugLine = 'terrain: no chunks';
       return;
@@ -1156,6 +1201,30 @@ class TerrainNodes {
   /// Queue one chunk for meshing. The result lands in [_arrived] and becomes
   /// a node inside the next frame's upload budget; a result whose generation
   /// went stale in flight is dropped there.
+  /// The rung to request next on the way to [want].
+  ///
+  /// Walks up from [want] to the deepest ancestor already resident (or the
+  /// root), then comes back down by at most [levelStep]. Returns [want] itself
+  /// once it is within a step.
+  ChunkKey _stepToward(ChunkKey want) {
+    var residentLevel = -1;
+    for (final a in want.ancestors) {
+      if (_chunks.containsKey(a)) {
+        residentLevel = a.level;
+        break;
+      }
+    }
+    final next = residentLevel + levelStep;
+    if (next >= want.level) return want;
+    var k = want;
+    while (k.level > next) {
+      final p = k.parent;
+      if (p == null) break;
+      k = p;
+    }
+    return k;
+  }
+
   void _submit(TerrainField field, ChunkKey key, int chunkResolution) {
     final generation = _generation;
     _pending.add(key);

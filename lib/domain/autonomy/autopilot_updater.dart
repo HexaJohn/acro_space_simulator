@@ -3,7 +3,7 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
-import '../shared/vector3.dart';
+import '../orbits/pnr_basis.dart';
 import '../simulation/domain_event.dart';
 import '../simulation/epoch.dart';
 import '../vessel/vessel.dart';
@@ -64,18 +64,14 @@ class AutopilotUpdater {
       return;
     }
 
-    // Build the PNR basis from the current state.
-    final v = vessel.state.velocity;
-    final r = vessel.state.position;
-    final prograde = v.length < 1e-9 ? Vector3.unitY : v.normalized;
-    final h = r.cross(v);
-    final normal = h.length < 1e-9 ? Vector3.unitZ : h.normalized;
-    final radial = prograde.cross(normal).normalized;
+    // Build the PNR basis from the current state — the SAME construction the
+    // encounter planner previews the burn with, so the two cannot disagree.
+    final basis = pnrBasis(vessel.state.position, vessel.state.velocity);
 
     // deltaV components: x=prograde, y=normal, z=radial.
-    final dvInertial = prograde * node.deltaV.x +
-        normal * node.deltaV.y +
-        radial * node.deltaV.z;
+    final dvInertial = basis.prograde * node.deltaV.x +
+        basis.normal * node.deltaV.y +
+        basis.radial * node.deltaV.z;
 
     vessel.updateState(
       vessel.state.copyWith(velocity: vessel.state.velocity + dvInertial),

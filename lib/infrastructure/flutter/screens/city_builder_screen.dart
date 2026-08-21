@@ -22,6 +22,8 @@ import 'ascent_screen.dart';
 import 'craft_assembly_screen.dart';
 import 'city_map_view.dart';
 import 'city_model.dart';
+import 'city_panels.dart';
+import 'city_site_actions.dart';
 
 /// City builder. You paint RCI **zones** at low/medium/high **density** (buildings
 /// grow there on their own under demand) and place **utilities, factories,
@@ -71,75 +73,25 @@ enum _PaintMode { single, paint, rect }
 // `_LandedCraft(...)` keep working unchanged against the moved definitions.
 typedef _Disaster = Disaster;
 typedef _Govt = Govt;
-typedef _Law = Law;
 typedef _Economy = Economy;
 typedef _ColonyStyle = ColonyStyle;
 typedef _LandedCraft = LandedCraft;
-typedef _DeliverySchedule = DeliverySchedule;
-
-/// Icon per disaster. Lives here, not on the enum, because the enum is domain
-/// data now and [IconData] is a widget type.
-const Map<Disaster, IconData> kDisasterIcons = {
-  Disaster.none: Icons.wb_sunny,
-  Disaster.rain: Icons.water_drop,
-  Disaster.thunderstorm: Icons.thunderstorm,
-  Disaster.snow: Icons.ac_unit,
-  Disaster.dustStorm: Icons.air,
-  Disaster.tornado: Icons.cyclone,
-  Disaster.fire: Icons.local_fire_department,
-  Disaster.meteorShower: Icons.stream,
-  Disaster.plague: Icons.coronavirus,
-  Disaster.famine: Icons.no_meals,
-  Disaster.solarStorm: Icons.flare,
-  Disaster.nuke: Icons.dangerous,
-  Disaster.hurricane: Icons.cyclone,
-  Disaster.blizzard: Icons.severe_cold,
-  Disaster.fog: Icons.foggy,
-  Disaster.acidRain: Icons.invert_colors,
-  Disaster.earthquake: Icons.vibration,
-  Disaster.radiationStorm: Icons.bubble_chart,
-  Disaster.glassRain: Icons.grain,
-  Disaster.ammoniaStorm: Icons.ac_unit,
-  Disaster.cryovolcanism: Icons.ac_unit,
-  Disaster.miasma: Icons.cloud,
-  Disaster.lavaFlow: Icons.local_fire_department,
-  Disaster.sandworm: Icons.waves,
-  Disaster.grayGoo: Icons.blur_on,
-  Disaster.crawlingForest: Icons.forest,
-  Disaster.rollingGlitch: Icons.broken_image,
-  Disaster.auroraBloom: Icons.auto_awesome,
-  Disaster.eclipse: Icons.dark_mode,
-  Disaster.gammaRayBurst: Icons.flare,
-  Disaster.fallingStar: Icons.star,
-  Disaster.skyCrack: Icons.bolt,
-  Disaster.timeDilation: Icons.hourglass_bottom,
-  Disaster.sporeBloom: Icons.grass,
-  Disaster.crystalGrowth: Icons.diamond,
-  Disaster.biolumTide: Icons.water,
-  Disaster.chemicalRain: Icons.science,
-  Disaster.diamondRain: Icons.diamond,
-  Disaster.ironSnow: Icons.ac_unit,
-  Disaster.methaneDownpour: Icons.local_gas_station,
-  Disaster.bloodRain: Icons.water_drop,
-  Disaster.blackRain: Icons.grain,
-  Disaster.commsBlackout: Icons.signal_cellular_off,
-  Disaster.goldRush: Icons.paid,
-  Disaster.refugeeInflux: Icons.groups,
-  Disaster.festival: Icons.celebration,
-  Disaster.cultUprising: Icons.report,
-  Disaster.aiAwakening: Icons.smart_toy,
-  Disaster.marketCrash: Icons.trending_down,
-  Disaster.alienBeacon: Icons.cell_tower,
-  Disaster.rainingFrogs: Icons.pets,
-  Disaster.glitchInMatrix: Icons.replay,
-};
-
-extension _DisasterIcon on Disaster {
-  IconData get icon => kDisasterIcons[this] ?? Icons.warning_amber;
-}
 
 class _CityBuilderScreenState extends State<CityBuilderScreen>
-    with TickerProviderStateMixin {
+    with TickerProviderStateMixin, CityPanels {
+  @override
+  CitySim get sim => _sim;
+
+  @override
+  void panelChanged() => setState(() {});
+
+  /// The flat builder is where a colony is DESIGNED — including, in the
+  /// stand-alone sandbox, which world it stands on. Driving a live colony
+  /// (`driveLocally: false`) means the world already owns it, so re-siting is
+  /// off there too.
+  @override
+  bool get panelCanResite => widget.driveLocally;
+
   /// The colony being viewed. All simulation state lives here.
   late final CitySim _sim;
 
@@ -252,15 +204,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
 
   /// Connected launch sites for the VAB: spaceports (rockets) + airfields
   /// (spaceplanes). Only road-connected ones can dispatch a launch.
-  List<LaunchSite> get _launchSites => [
-        for (final e in _sim.utils.entries)
-          if (_sim.isConnected(e.key) &&
-              (e.value.type == 'spaceport' || e.value.type == 'airfield'))
-            LaunchSite(
-                name: e.value.label,
-                acceptsPlane: e.value.type == 'airfield',
-                pads: e.value.cellCount), // one launch tower per footprint tile
-      ];
+  List<LaunchSite> get _launchSites => cityLaunchSites(_sim);
 
   /// Open the VAB to design a craft, then launch it from one of this colony's
   /// pads/runways (gated by craft type) on THIS world.
@@ -289,11 +233,12 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
           // Touched down on a pad -> drop a small supply payload there.
           if (padIndex == null) return;
           setState(() {
-            final pad = _sim.freePad(anchor);
+            final site = CitySim.siteIdOfCell(anchor);
+            final pad = _sim.freePad(site);
             if (pad != null) {
               _sim.craft.add(_LandedCraft(
-                  anchor: anchor,
-                  padTile: pad,
+                  site: site,
+                  padIndex: pad,
                   isRelief: false,
                   resource: Commodity.fuel,
                   payload: 60));
@@ -363,8 +308,16 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     // Inspect tool: tap a building (or any covered tile) for its context menu.
     if (_tool == _Tool.inspect) {
       final anchor = _sim.anchorOf(k);
-      if (anchor != null && _sim.utils.containsKey(anchor)) {
-        _showBuildingMenu(anchor, _sim.utils[anchor]!);
+      final spec = anchor == null ? null : _sim.utils[anchor];
+      if (anchor != null && spec != null) {
+        showCitySiteMenu(
+          context: context,
+          sim: _sim,
+          site: CitySim.siteIdOfCell(anchor),
+          spec: spec,
+          onChanged: () => setState(() {}),
+          hooks: _siteHooks(anchor),
+        );
       }
       return;
     }
@@ -734,18 +687,21 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
                 flag: _sim.flagPlanted,
                 stormX: _sim.isMovingFront ? _sim.stormX : -1,
                 stormY: _sim.isMovingFront ? _sim.stormY : -1,
-                landerPad: _sim.landerPad,
+                landerPad: CitySim.cellOfSiteId(_sim.landerPad),
                 landedCraft: [
                   for (final c in _sim.craft)
                     // All craft use the simple pad animation now (no free flight),
                     // so they report no altitude/downrange — always on their pad.
-                    (
-                      tile: c.padTile,
-                      phase: c.phase,
-                      relief: c.isRelief,
-                      altM: 0.0,
-                      downrange: 0.0,
-                    )
+                    // A craft visiting a LOT-placed port has no cell to stand
+                    // on, so the flat map simply does not draw it.
+                    if (_sim.padCellOf(c.site, c.padIndex) case final tile?)
+                      (
+                        tile: tile,
+                        phase: c.phase,
+                        relief: c.isRelief,
+                        altM: 0.0,
+                        downrange: 0.0,
+                      )
                 ],
                 beaconCell: _sim.beaconCell,
                 controller: _mapCam,
@@ -1454,10 +1410,10 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
       controller: _tabs,
       children: [
         body(_buildTab()),
-        body(_worldTab()),
-        body(_cityTab()),
-        body(_politicsTab()),
-        body(_stockTab()),
+        body(cityWorldPanel()),
+        body(cityStatusPanel()),
+        body(cityPoliticsPanel()),
+        body(cityStockPanel()),
       ],
     );
     return ColoredBox(
@@ -1507,136 +1463,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
 
   final ScrollController _drawerScroll = ScrollController();
 
-  Widget _diffSlider(
-          String label, double value, String hint, ValueChanged<double> onCh) =>
-      Padding(
-        padding: const EdgeInsets.symmetric(vertical: 4),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            Expanded(child: Text(label, style: AppTheme.body)),
-            Text(
-                value < 0.34 ? 'Low' : (value < 0.67 ? 'Medium' : 'High'),
-                style: AppTheme.mono.copyWith(color: AppTheme.accent)),
-          ]),
-          SliderTheme(
-            data: SliderThemeData(
-                activeTrackColor: AppTheme.accent2,
-                thumbColor: AppTheme.accent2,
-                inactiveTrackColor: AppTheme.panelLight,
-                trackHeight: 3),
-            child: Slider(value: value, onChanged: onCh),
-          ),
-          Text(hint, style: AppTheme.dim.copyWith(fontSize: 11)),
-        ]),
-      );
 
-  /// WORLD tab: time warp, host planet + biome, disasters, environment meters.
-  List<Widget> _worldTab() => [
-        const Text('TIME WARP', style: AppTheme.heading),
-        const SizedBox(height: 6),
-        Row(children: [
-          Text('${_sim.timeWarp.toStringAsFixed(0)}×',
-              style: AppTheme.mono.copyWith(color: AppTheme.accent)),
-          Expanded(
-            child: SliderTheme(
-              data: SliderThemeData(
-                  activeTrackColor: AppTheme.accent,
-                  thumbColor: AppTheme.accent,
-                  inactiveTrackColor: AppTheme.panelLight,
-                  trackHeight: 3),
-              child: Slider(
-                  value: _sim.timeWarp,
-                  min: 1,
-                  max: 20,
-                  onChanged: (v) => setState(() => _sim.timeWarp = v)),
-            ),
-          ),
-        ]),
-        const SizedBox(height: 12),
-        const Text('DIFFICULTY', style: AppTheme.heading),
-        const SizedBox(height: 6),
-        _diffSlider('Complexity', _sim.complexity,
-            'How many systems to manage (waste, oxygen, …)',
-            (v) => setState(() => _sim.complexity = v)),
-        _diffSlider('Hostility', _sim.hostility,
-            'Frequency + severity of random disasters',
-            (v) => setState(() => _sim.hostility = v)),
-        _diffSlider('Forgiveness', _sim.forgiveness,
-            'How much slack before citizens die / leave',
-            (v) => setState(() => _sim.forgiveness = v)),
-        _diffSlider('Bounty', _sim.bounty,
-            'Resource production rate (higher = more abundant)',
-            (v) => setState(() => _sim.bounty = v)),
-        const SizedBox(height: 6),
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          dense: true,
-          value: _sim.infiniteRes,
-          activeThumbColor: AppTheme.accent2,
-          title: const Text('Infinite resources (debug)', style: AppTheme.body),
-          subtitle: Text('Stockpiles never deplete — shows ∞, keeps live rates.',
-              style: AppTheme.dim.copyWith(fontSize: 11)),
-          onChanged: (v) => setState(() => _sim.infiniteRes = v),
-        ),
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          dense: true,
-          value: _sim.infiniteDemand,
-          activeThumbColor: AppTheme.accent2,
-          title: const Text('Infinite demand (debug)', style: AppTheme.body),
-          subtitle: Text('RCI demand pinned to max — zones keep growing.',
-              style: AppTheme.dim.copyWith(fontSize: 11)),
-          onChanged: (v) => setState(() => _sim.infiniteDemand = v),
-        ),
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          dense: true,
-          value: _sim.infiniteRobotics,
-          activeThumbColor: AppTheme.accent2,
-          title: const Text('Infinite Robotics', style: AppTheme.body),
-          subtitle: Text('Automated labour — buildings need no workers (full staffing).',
-              style: AppTheme.dim.copyWith(fontSize: 11)),
-          onChanged: (v) => setState(() => _sim.infiniteRobotics = v),
-        ),
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          dense: true,
-          value: _sim.ignoreUnlocks,
-          activeThumbColor: AppTheme.accent2,
-          title: const Text('Ignore unlocks (debug)', style: AppTheme.body),
-          subtitle: Text('Build anything regardless of the population requirement.',
-              style: AppTheme.dim.copyWith(fontSize: 11)),
-          onChanged: (v) => setState(() => _sim.ignoreUnlocks = v),
-        ),
-        const SizedBox(height: 12),
-        const Text('PLANET & BIOME', style: AppTheme.heading),
-        const SizedBox(height: 6),
-        _planetPanel(),
-        const SizedBox(height: 12),
-        const Text('WEATHER & DISASTERS', style: AppTheme.heading),
-        const SizedBox(height: 6),
-        _disasterControls(),
-        const SizedBox(height: 12),
-        const Text('ENVIRONMENT', style: AppTheme.heading),
-        const SizedBox(height: 6),
-        _pollutionRow(),
-        _radiationRow(),
-        if (_sim.nuclearWinter > 0.02)
-          _meterRow('Nuclear Winter',
-              '${(_sim.nuclearWinter * 100).toStringAsFixed(0)}%', _sim.nuclearWinter,
-              AppTheme.danger,
-              warn: 'Sun blotted out — solar + crops failing.',
-              onExplain: () => _showExplain(
-                  'Nuclear Winter',
-                  'Soot from a nuclear strike blots out the sun, crippling solar '
-                      'power and freezing crops.',
-                  'It clears over time. Build Terraforming Towers to clear it faster, '
-                      'and lean on gas/nuclear power + stored food until it lifts.',
-                  AppTheme.danger)),
-        if (_sim.terraform > 0.01 || _sim.terraformers > 0)
-          _meterRow('Terraforming', '${(_sim.terraform * 100).toStringAsFixed(0)}%',
-              _sim.terraform, AppTheme.accent2),
-      ];
 
   Widget _tabList(List<Widget> children) => ListView(
         // Bottom padding clears the real device safe-area / nav bar (not a magic
@@ -1708,161 +1535,12 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
         ),
       );
 
-  List<Widget> _cityTab() => [
-        const Text('COLONY STATUS', style: AppTheme.heading),
-        const SizedBox(height: 8),
-        _statRow('Population', '${_sim.population.round()}'),
-        _statRow('Housing', '${_sim.housing}'),
-        _statRow('Jobs', '${_sim.jobs}'),
-        _statRow('Homeless', '${_sim.homeless}'),
-        ..._mortalityStats(), // corpses + deaths = vital stats, not politics
-        if (_sim.grown.isNotEmpty) _utilisationRow(),
-        _powerRow(),
-        _computeRow(),
-        _happinessRow(),
-        if (_sim.congestion > 0.02)
-          _meterRow('Traffic congestion',
-              '${(_sim.congestion * 100).toStringAsFixed(0)}%', _sim.congestion,
-              _sim.congestion > 0.6
-                  ? AppTheme.danger
-                  : (_sim.congestion > 0.35 ? AppTheme.warn : AppTheme.accent2),
-              warn: _sim.congestion > 0.5
-                  ? 'Gridlock — workers stuck commuting, staffing down ${((1 - (1 - _sim.congestion * 0.4)) * 100).toStringAsFixed(0)}%.'
-                  : null,
-              onExplain: () => _showExplain(
-                  'Traffic Congestion',
-                  'Every connected building routes its workers to the hub along '
-                      'the road network. The busiest tiles (the arteries near the '
-                      'hub) carry the most trips. Heavy congestion means workers '
-                      'spend longer travelling, so fewer effective worker-hours '
-                      'reach the jobs — up to a 40% staffing penalty at full '
-                      'gridlock.',
-                  'Add more roads so traffic spreads over parallel routes instead '
-                      'of funnelling through one street. Build transit stops to '
-                      'take trips off the roads. Keep workplaces near housing.',
-                  AppTheme.warn)),
-        if (_sim.wasteBacklog > 0.02)
-          _meterRow('Waste backlog', '${(_sim.wasteBacklog * 100).toStringAsFixed(0)}%',
-              _sim.wasteBacklog,
-              _sim.wasteBacklog > 0.5 ? AppTheme.danger : AppTheme.warn,
-              warn: _sim.wasteBacklog > 0.4
-                  ? 'Garbage + sewage piling up — pollution + disease.'
-                  : null,
-              onExplain: () => _showExplain(
-                  'Waste Backlog',
-                  'Your population generates garbage + sewage every tick. When it '
-                      'piles up faster than you process it, it pollutes the air and '
-                      'spreads disease, dragging happiness.',
-                  'Build Landfills (cheap), Recycling Centers (recover ore/steel), '
-                      'and Sewage Treatment plants (recover water). Tap the Garbage / '
-                      'Sewage chips for the exact balance.',
-                  AppTheme.warn)),
-        _pollutionRow(),
-        _radiationRow(),
-        const SizedBox(height: 12),
-        const Text('ECONOMY', style: AppTheme.heading),
-        const SizedBox(height: 6),
-        _economyPicker(),
-        const SizedBox(height: 6),
-        _taxControl(),
-        _statRow('Funds', '§${_sim.funds.toStringAsFixed(0)}'),
-        _statRow('Research', '${_sim.research.toStringAsFixed(0)} pts'),
-        const SizedBox(height: 12),
-        const Text('RCI DEMAND', style: AppTheme.heading),
-        const SizedBox(height: 6),
-        _rciBar('Residential', _sim.resTarget, const Color(0xFF7FE0A0)),
-        _rciBar('Commercial', _sim.comTarget, const Color(0xFF4FC3F7)),
-        _rciBar('Industrial', _sim.indTarget, const Color(0xFFE3A857)),
-      ];
 
-  List<Widget> _politicsTab() => [
-        const Text('GOVERNMENT', style: AppTheme.heading),
-        const SizedBox(height: 6),
-        _govtPicker(),
-        const SizedBox(height: 8),
-        ..._lawRows(),
-        const SizedBox(height: 12),
-        const Text('SOCIETY', style: AppTheme.heading),
-        const SizedBox(height: 6),
-        if (_sim.revoltMsg != null) _revoltBanner(),
-        _socialBar('Crime', _sim.crime, AppTheme.danger),
-        _socialBar('Corruption', _sim.corruption, const Color(0xFFB388FF)),
-        _socialBar('Inequality', _sim.inequality, const Color(0xFFE3A857)),
-        _socialBar('Rebellion', _sim.rebellion, AppTheme.danger),
-        _socialBar('Disease', _sim.disease, const Color(0xFF9CCC65)),
-      ];
 
-  /// Corpses + death-rate readout — a CITY metric (vital stats), not politics.
-  ///
-  /// Rows render whenever the colony is populated (not gated on the live value)
-  /// so the panel doesn't THRASH as the death rate / corpse count crosses a
-  /// threshold frame-to-frame — at zero they just sit dimmed.
-  List<Widget> _mortalityStats() {
-    if (_sim.population < 1) return const [];
-    final corpseAlarm = _sim.corpses > _sim.population * 0.05;
-    final corpseColor =
-        _sim.corpses < 0.5 ? AppTheme.textDim : (corpseAlarm ? AppTheme.danger : AppTheme.warn);
-    return [
-      Padding(
-        padding: const EdgeInsets.symmetric(vertical: 3),
-        child: Row(children: [
-          Icon(Icons.dangerous, size: 14, color: corpseColor),
-          const SizedBox(width: 6),
-          const Expanded(
-              child: Text('Corpses (unprocessed)', style: AppTheme.body)),
-          Text(_sim.corpses.toStringAsFixed(0),
-              style: AppTheme.mono.copyWith(color: corpseColor)),
-        ]),
-      ),
-      _statRow('Deaths', '${_sim.deathRate.toStringAsFixed(2)}/s'),
-      // Disease warning still appears only when the backlog is dangerous, but
-      // it's the last line so toggling it can't shove the rows above it.
-      if (_sim.corpses > _sim.population * 0.03 && _sim.population > 10)
-        Padding(
-          padding: const EdgeInsets.only(top: 4),
-          child: Text(
-              'Corpse backlog spreading disease — build morgues / crematoria.',
-              style: AppTheme.dim.copyWith(color: AppTheme.danger)),
-        ),
-    ];
-  }
 
-  List<Widget> _stockTab() => [
-        const Text('STOCKPILE', style: AppTheme.heading),
-        const SizedBox(height: 2),
-        Text('Rate is throttled output; (…) = full potential if fully staffed/'
-            'powered.', style: AppTheme.dim),
-        const SizedBox(height: 8),
-        ..._stockRows(),
-      ];
 
-  String _biomeName(Biome b) => cityBiomeName(b);
 
-  /// Short buff/debuff summary for the selected biome.
-  String _biomeSummary() {
-    final fx = _sim.biomeFx;
-    final bits = <String>[];
-    void m(String label, double v) {
-      if ((v - 1.0).abs() > 0.05) {
-        bits.add('${v > 1 ? "+" : ""}${((v - 1) * 100).toStringAsFixed(0)}% $label');
-      }
-    }
-    m('food', fx.food);
-    m('water', fx.water);
-    m('ore', fx.ore);
-    m('solar', fx.solar);
-    if (fx.happy.abs() > 0.005) {
-      bits.add('${fx.happy > 0 ? "+" : ""}${(fx.happy * 100).toStringAsFixed(0)}% happy');
-    }
-    if (fx.scrub > 0.5) bits.add('cleans air');
-    if (fx.scrub < -0.5) bits.add('dirties air');
-    return bits.isEmpty ? 'Neutral terrain.' : bits.join(' · ');
-  }
 
-  void _triggerDisaster(_Disaster d) => setState(() {
-        _sim.disaster = d;
-        _sim.disasterTime = d.duration;
-      });
 
   // ---- Building context menus ----
 
@@ -1905,6 +1583,36 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     );
   }
 
+  /// Host actions the flat map contributes to the shared site sheet.
+  ///
+  /// "Pilot a landing" and "Launch in 3D sim" are BRIDGES: they exist to carry
+  /// you from the map out into the world. The in-world editor deliberately
+  /// omits them — from the cockpit you are already flying, so it offers pad
+  /// targeting in their place.
+  CitySiteHooks _siteHooks(int anchor) => CitySiteHooks(
+        onOpenVab: _openVab,
+        extra: (site, spec) => [
+          if (spec.type == 'spaceport') ...[
+            citySiteAction(
+                context,
+                Icons.flight_land,
+                'Pilot a landing',
+                'Fly an in-atmo descent over the colony — touch down on a pad, '
+                    'or smash into the city.',
+                AppTheme.warn,
+                () => _pilotLanding(anchor)),
+            citySiteAction(
+                context,
+                Icons.rocket_launch,
+                'Launch in 3D sim',
+                'Fly a staged ascent in the full 3D sim — real planet sphere, '
+                    'orbit camera, and STAGE/decouple.',
+                AppTheme.accent2,
+                _fly3DAscent),
+          ],
+        ],
+      );
+
   /// Context menu for the landing site (the hub). Plant a flag, or launch the
   /// lander back to orbit if it still has fuel.
   void _showLanderMenu() {
@@ -1934,715 +1642,9 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
   }
 
 
-  /// Delivery MANAGER for [anchor]: list every scheduled delivery, reorder
-  /// (priority), assign each to a pad, add new ones, remove. Lets a starport run
-  /// several deliveries in parallel across its pads.
-  void _showDeliveryConfig(int anchor) {
-    final padCount = _sim.specAt(anchor)?.cellCount ?? 1;
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: AppTheme.panel,
-      isScrollControlled: true,
-      builder: (_) => StatefulBuilder(
-        builder: (ctx, setSheet) {
-          final list = _sim.deliveries[anchor] ?? const <_DeliverySchedule>[];
-          String padLabel(int? p) => p == null ? 'any pad' : 'pad ${p + 1}';
-          return SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(children: [
-                    const Expanded(
-                        child: Text('DELIVERY SCHEDULE', style: AppTheme.heading)),
-                    Text('$padCount pad${padCount == 1 ? "" : "s"}',
-                        style: AppTheme.dim),
-                  ]),
-                  const SizedBox(height: 6),
-                  if (list.isEmpty)
-                    const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 12),
-                      child: Text('No deliveries booked.', style: AppTheme.dim),
-                    ),
-                  // Reorderable list = dispatch priority.
-                  if (list.isNotEmpty)
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(maxHeight: 320),
-                      child: ReorderableListView(
-                        shrinkWrap: true,
-                        buildDefaultDragHandles: true,
-                        onReorder: (a, b) => setSheet(() => setState(() {
-                              if (b > a) b -= 1;
-                              final s = list.removeAt(a);
-                              list.insert(b, s);
-                            })),
-                        children: [
-                          for (var i = 0; i < list.length; i++)
-                            ListTile(
-                              key: ValueKey(list[i]),
-                              dense: true,
-                              contentPadding: EdgeInsets.zero,
-                              leading: Text('${i + 1}',
-                                  style: AppTheme.mono
-                                      .copyWith(color: AppTheme.warn)),
-                              title: Text(
-                                  '${list[i].resource} · ${list[i].amount.toStringAsFixed(0)}${list[i].resource == kDeliveryPeople ? " pax" : "u"}',
-                                  style: AppTheme.body),
-                              subtitle: Text(
-                                  '${list[i].recurring ? "every ${list[i].intervalSec.toStringAsFixed(0)}s" : "one-time"} · ${padLabel(list[i].padIndex)}'
-                                  '${list[i].spareFuel ? " · self-fuel" : " · colony-fuel"}',
-                                  style: AppTheme.dim),
-                              trailing: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    IconButton(
-                                      icon: const Icon(Icons.edit,
-                                          size: 18, color: AppTheme.accent2),
-                                      onPressed: () => _editDelivery(
-                                          anchor, padCount, list[i],
-                                          onDone: () => setSheet(() {})),
-                                    ),
-                                    IconButton(
-                                      icon: const Icon(Icons.delete,
-                                          size: 18, color: AppTheme.danger),
-                                      onPressed: () => setSheet(() => setState(() {
-                                            list.removeAt(i);
-                                            if (list.isEmpty) {
-                                              _sim.deliveries.remove(anchor);
-                                            }
-                                          })),
-                                    ),
-                                  ]),
-                            ),
-                        ],
-                      ),
-                    ),
-                  const SizedBox(height: 8),
-                  ElevatedButton.icon(
-                    icon: const Icon(Icons.add, size: 18),
-                    label: const Text('Add delivery'),
-                    style: ElevatedButton.styleFrom(
-                        backgroundColor: AppTheme.accent2,
-                        foregroundColor: AppTheme.bg),
-                    onPressed: () {
-                      final sched = _DeliverySchedule(
-                        resource: Commodity.food,
-                        intervalSec: 30,
-                        amount: 200,
-                        spareFuel: true,
-                        padIndex: null,
-                        timer: 30,
-                      );
-                      _editDelivery(anchor, padCount, sched, isNew: true,
-                          onDone: () => setSheet(() {}));
-                    },
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
 
-  /// Editor for ONE delivery [sched] (resource / interval / amount-implied /
-  /// spare-fuel / pad). [isNew] appends it to [anchor]'s list on save.
-  void _editDelivery(int anchor, int padCount, _DeliverySchedule sched,
-      {bool isNew = false, required VoidCallback onDone}) {
-    var resource = sched.resource;
-    var interval = sched.intervalSec;
-    var spareFuel = sched.spareFuel;
-    var recurring = sched.recurring;
-    var padIndex = sched.padIndex;
-    final amount = sched.amount;
-    final returnFuel = _sim.returnFuelFor(amount);
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: AppTheme.panel,
-      builder: (_) => StatefulBuilder(
-        builder: (ctx, setSheet) => SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(isNew ? 'NEW DELIVERY' : 'EDIT DELIVERY',
-                    style: AppTheme.heading),
-                const SizedBox(height: 8),
-                const Text('Resource', style: AppTheme.dim),
-                Wrap(spacing: 6, runSpacing: 6, children: [
-                  for (final r in CitySim.deliverable)
-                    ChoiceChip(
-                      label: Text(r, style: const TextStyle(fontSize: 11)),
-                      selected: resource == r,
-                      selectedColor: AppTheme.accent2,
-                      backgroundColor: AppTheme.panelLight,
-                      onSelected: (_) => setSheet(() => resource = r),
-                    ),
-                ]),
-                const SizedBox(height: 10),
-                // Recurring toggle: off (default) = a single one-time run; on =
-                // repeats on the interval below.
-                CheckboxListTile(
-                  contentPadding: EdgeInsets.zero,
-                  dense: true,
-                  controlAffinity: ListTileControlAffinity.leading,
-                  activeColor: AppTheme.accent2,
-                  value: recurring,
-                  onChanged: (v) => setSheet(() => recurring = v ?? false),
-                  title: const Text('Recurring', style: AppTheme.body),
-                  subtitle: Text(
-                      recurring
-                          ? 'Repeats automatically on the interval below.'
-                          : 'One-time delivery — flies once, then clears.',
-                      style: AppTheme.dim),
-                ),
-                if (recurring) ...[
-                  Text('Every ${interval.toStringAsFixed(0)} s',
-                      style: AppTheme.dim),
-                  Slider(
-                    value: interval,
-                    min: 15,
-                    max: 120,
-                    divisions: 7,
-                    onChanged: (v) => setSheet(() => interval = v),
-                  ),
-                ],
-                const Text('Pad', style: AppTheme.dim),
-                Wrap(spacing: 6, runSpacing: 6, children: [
-                  ChoiceChip(
-                    label: const Text('Any', style: TextStyle(fontSize: 11)),
-                    selected: padIndex == null,
-                    selectedColor: AppTheme.accent2,
-                    backgroundColor: AppTheme.panelLight,
-                    onSelected: (_) => setSheet(() => padIndex = null),
-                  ),
-                  for (var p = 0; p < padCount; p++)
-                    ChoiceChip(
-                      label: Text('Pad ${p + 1}',
-                          style: const TextStyle(fontSize: 11)),
-                      selected: padIndex == p,
-                      selectedColor: AppTheme.accent2,
-                      backgroundColor: AppTheme.panelLight,
-                      onSelected: (_) => setSheet(() => padIndex = p),
-                    ),
-                ]),
-                CheckboxListTile(
-                  contentPadding: EdgeInsets.zero,
-                  dense: true,
-                  controlAffinity: ListTileControlAffinity.leading,
-                  activeColor: AppTheme.accent2,
-                  value: spareFuel,
-                  onChanged: (v) => setSheet(() => spareFuel = v ?? true),
-                  title: const Text('Craft carries spare fuel',
-                      style: AppTheme.body),
-                  subtitle: Text(
-                      resource == kDeliveryPeople
-                          ? (spareFuel
-                              ? 'Brings ${amount.toStringAsFixed(0)} settlers; carries its own return fuel.'
-                              : 'Brings ${amount.toStringAsFixed(0)} settlers; colony burns ${returnFuel.toStringAsFixed(0)} fuel+oxidizer for the return.')
-                          : (spareFuel
-                              ? 'Delivers ${(amount - returnFuel).clamp(0, amount).toStringAsFixed(0)}u (return fuel cut from cargo).'
-                              : 'Delivers ${amount.toStringAsFixed(0)}u; colony burns ${returnFuel.toStringAsFixed(0)} fuel+oxidizer.'),
-                      style: AppTheme.dim),
-                ),
-                const SizedBox(height: 6),
-                ElevatedButton.icon(
-                  icon: const Icon(Icons.check, size: 18),
-                  label: Text(isNew ? 'Add' : 'Save'),
-                  style: ElevatedButton.styleFrom(
-                      backgroundColor: AppTheme.accent2,
-                      foregroundColor: AppTheme.bg),
-                  onPressed: () {
-                    setState(() {
-                      sched
-                        ..resource = resource
-                        ..intervalSec = interval
-                        ..spareFuel = spareFuel
-                        ..recurring = recurring
-                        ..padIndex = padIndex;
-                      if (isNew) {
-                        // One-time runs dispatch promptly (short delay so the
-                        // craft animation reads); recurring waits a full cycle.
-                        sched.timer = recurring ? interval : 2.0;
-                        (_sim.deliveries[anchor] ??= []).add(sched);
-                      }
-                    });
-                    Navigator.of(ctx).pop();
-                    onDone();
-                  },
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
 
-  /// Context menu for a functional building. Generic actions (bulldoze) plus a
-  /// few type-specific ones (the reactor's "disable safety" easter egg).
-  void _showBuildingMenu(int anchor, CitySpec spec) {
-    final status = _buildingStatus(anchor, spec);
-    final actions = <Widget>[
-      _ctxAction(Icons.info_outline, 'Details',
-          '${status.label} · ${_sim.isConnected(anchor) ? "connected" : "cut off"}',
-          status.color, () => _showResourceDetailForBuilding(anchor, spec)),
-    ];
-    // Reactor easter egg: SCRAM the safeties for a meltdown.
-    if (spec.type == 'reactor' || spec.type == 'fusion') {
-      actions.add(_ctxAction(
-          Icons.warning_amber,
-          'Disable safety systems',
-          'Override the SCRAM interlocks. What could go wrong?',
-          AppTheme.danger,
-          () => _meltdown(anchor)));
-    }
-    // Spaceports + airfields are launch sites: enter the VAB to design a craft
-    // and launch it (rockets from spaceports, spaceplanes from airfields).
-    if (spec.type == 'spaceport' || spec.type == 'airfield') {
-      final connected = _sim.isConnected(anchor);
-      final plane = spec.type == 'airfield';
-      actions.add(_ctxAction(
-          Icons.precision_manufacturing,
-          'Design & launch craft',
-          connected
-              ? 'Open the VAB; launch a ${plane ? "spaceplane" : "rocket"} from here.'
-              : 'Connect this ${spec.label} to the road network first.',
-          connected ? AppTheme.accent2 : AppTheme.textDim,
-          connected ? _openVab : () {}));
-    }
-    // Spaceports double as landing pads: park the lander here (occupied state).
-    if (spec.type == 'spaceport') {
-      final parked = _sim.landerPad == anchor;
-      actions.add(_ctxAction(
-          parked ? Icons.flight_takeoff : Icons.flight_land,
-          parked ? 'Lander is parked here' : 'Land lander on this pad',
-          parked
-              ? 'Clear the pad for incoming shuttles.'
-              : 'Move the landing site onto this spaceport (marks it occupied).',
-          AppTheme.accent2,
-          () => setState(() => _sim.landerPad = parked ? null : anchor)));
-      // Anti-soft-lock lifeline: call in a relief mission that lands on a free
-      // pad, dwells 30 s + drops supplies + settlers, then leaves. Cooldown +
-      // needs a free pad (a spaceport has one pad per footprint tile).
-      final cd = _sim.reliefCooldown.ceil();
-      final hasPad = _sim.freePad(anchor) != null;
-      final canRelief = _sim.reliefCooldown <= 0 && hasPad;
-      actions.add(_ctxAction(
-          Icons.volunteer_activism,
-          canRelief
-              ? 'Request assistance'
-              : (!hasPad ? 'All pads busy' : 'Assistance on cooldown'),
-          canRelief
-              ? 'A relief craft lands here with food, water, ore, fuel, funds + 8 settlers.'
-              : (!hasPad
-                  ? 'Every pad on this spaceport is occupied — wait for one to clear.'
-                  : 'Recovering — available again in ${cd}s.'),
-          canRelief ? AppTheme.accent2 : AppTheme.textDim,
-          canRelief ? () => _sim.requestRelief(anchor) : () {}));
-      // Recurring resource deliveries (a list — a starport runs several).
-      final list = _sim.deliveries[anchor];
-      final n = list?.length ?? 0;
-      actions.add(_ctxAction(
-          Icons.local_shipping,
-          n == 0 ? 'Schedule deliveries' : 'Deliveries ($n booked)',
-          n == 0
-              ? 'Book recurring resource deliveries to this spaceport.'
-              : 'Manage, reorder + assign deliveries to pads.',
-          AppTheme.accent2,
-          () => _showDeliveryConfig(anchor)));
-      // Fly a manual descent over the colony onto this spaceport's pads.
-      actions.add(_ctxAction(
-          Icons.flight_land,
-          'Pilot a landing',
-          'Fly an in-atmo descent over the colony — touch down on a pad, or smash '
-              'into the city.',
-          AppTheme.warn,
-          () => _pilotLanding(anchor)));
-      // Launch into the real 3D solar-system sim (spherical planet + camera +
-      // staging) from this world's surface.
-      actions.add(_ctxAction(
-          Icons.rocket_launch,
-          'Launch in 3D sim',
-          'Fly a staged ascent in the full 3D sim — real planet sphere, orbit '
-              'camera, and STAGE/decouple.',
-          AppTheme.accent2,
-          _fly3DAscent));
-    }
-    actions.add(_ctxAction(Icons.delete, 'Demolish',
-        'Tear it down (partial ore refund).', AppTheme.danger,
-        () => setState(() {
-              _sim.clearCell(anchor);
-              _sim.recompute();
-            })));
-    _contextMenu(spec.label, spec.icon, spec.color, actions);
-  }
 
-  /// Diagnose this building's worst current problem so the Details readout +
-  /// modal explain WHY it's flagged (matches the on-map status icons) instead
-  /// of always claiming "Operating". Checked worst-first; the first hit wins.
-  ({String label, String why, String fix, Color color}) _buildingStatus(
-      int anchor, CitySpec spec) {
-    final powerRatio =
-        _sim.powerDraw <= 0 ? 1.0 : (_sim.powerOut / _sim.powerDraw).clamp(0.0, 1.0);
-    final needsPower = spec.powerDraw > 0;
-    final needsStaff = spec.jobs > 0;
-
-    if (_sim.abandoned.contains(anchor)) {
-      return (
-        label: 'Abandoned',
-        why: 'Its people walked out after this building lost road or power for '
-            'too long. An abandoned building produces nothing and decays into '
-            'rubble if the failure isn\'t fixed.',
-        fix: 'Reconnect it to the road network and restore power. Once '
-            'infrastructure is back it can be reoccupied.',
-        color: AppTheme.danger,
-      );
-    }
-    if (!_sim.isConnected(anchor)) {
-      return (
-        label: 'Cut off',
-        why: 'This building has no road path back to the colony hub, so no '
-            'workers, goods, or services reach it. It produces nothing while '
-            'disconnected.',
-        fix: 'Lay a road connecting it to the hub network. Watch for gaps, '
-            'water, or demolished tiles breaking the path.',
-        color: AppTheme.danger,
-      );
-    }
-    if (needsPower && powerRatio < 0.95) {
-      return (
-        label: 'Unpowered',
-        why: 'The grid is supplying only ${(powerRatio * 100).toStringAsFixed(0)}% '
-            'of demand (${_sim.powerOut.toStringAsFixed(0)}/${_sim.powerDraw.toStringAsFixed(0)} '
-            'power). Under-powered buildings run throttled and risk abandonment.',
-        fix: 'Build more generators (solar / reactor / fusion) or demolish '
-            'non-essential draws until supply exceeds demand.',
-        color: AppTheme.warn,
-      );
-    }
-    if (needsStaff && _sim.staffing < 0.95) {
-      return (
-        label: 'Understaffed',
-        why: 'The city can only fill ${(_sim.staffing * 100).toStringAsFixed(0)}% of '
-            'its jobs, so this building runs short-handed and below full output. '
-            'Too few workers, or congestion stretching their commute.',
-        fix: 'Grow population (housing + a connected spaceport for immigrants), '
-            'or cut road congestion + excess jobs so workers go round.',
-        color: AppTheme.warn,
-      );
-    }
-    if (_sim.corpses > 1) {
-      return (
-        label: 'Bodies unprocessed',
-        why: 'There are ${_sim.corpses.toStringAsFixed(0)} unprocessed corpses in '
-            'the colony. The backlog breeds disease and litters the streets, '
-            'dragging happiness across every building.',
-        fix: 'Build / connect deathcare (cemetery, crematorium) and keep it '
-            'powered + staffed so bodies are processed faster than they pile up.',
-        color: AppTheme.warn,
-      );
-    }
-    if (_sim.happiness < 0.5) {
-      return (
-        label: 'Unhappy',
-        why: 'Colony happiness is ${(_sim.happiness * 100).toStringAsFixed(0)}%. '
-            'Low happiness slows growth and, if it keeps falling, risks unrest '
-            'and citizens fleeing.',
-        fix: 'Balance R/C/I demand, fund services (health, parks, transit), and '
-            'cut crime, pollution, and inequality. Some laws lift happiness.',
-        color: AppTheme.warn,
-      );
-    }
-    return (
-      label: 'Operating',
-      why: 'Connected, powered, and staffed — running at full output.',
-      fix: 'Keep it road-connected, powered, and the city well-staffed.',
-      color: AppTheme.accent2,
-    );
-  }
-
-  void _showResourceDetailForBuilding(int anchor, CitySpec spec) {
-    final status = _buildingStatus(anchor, spec);
-    final io = <String>[];
-    spec.inputs.forEach((k, v) => io.add('−${v.toStringAsFixed(1)} ${Commodity.name(k)}/s'));
-    spec.outputs.forEach((k, v) => io.add('+${v.toStringAsFixed(1)} ${Commodity.name(k)}/s'));
-    if (spec.powerOutput > 0) io.add('+${spec.powerOutput.toStringAsFixed(0)} power');
-    if (spec.powerDraw > 0) io.add('−${spec.powerDraw.toStringAsFixed(0)} power');
-    if (spec.jobs > 0) io.add('${spec.jobs} jobs');
-    if (spec.housing > 0) io.add('${spec.housing} housing');
-    // Lead the WHY with the status diagnosis, then the IO stats so the modal
-    // explains the flagged problem instead of just listing throughput.
-    final stats = io.isEmpty ? 'A passive structure.' : io.join('\n');
-    _showExplain(
-        '${spec.label} — ${status.label}',
-        '${status.why}\n\n$stats',
-        status.fix,
-        status.color);
-  }
-
-  /// Reactor meltdown easter egg: SCRAM the safeties and watch it go up — fires
-  /// the nuke disaster (radiation + nuclear winter), centred on the city.
-  void _meltdown(int anchor) {
-    _triggerDisaster(_Disaster.nuke);
-    setState(() {
-      _sim.radiation = (_sim.radiation + 0.3).clamp(0.0, 1.0);
-      _sim.clearCell(anchor); // the reactor is gone
-      _sim.recompute();
-    });
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('☢ MELTDOWN — safety interlocks disabled. Oops.'),
-        backgroundColor: Color(0xFF6B1414),
-        duration: Duration(seconds: 4)));
-  }
-
-  Widget _disasterControls() {
-    // Only offer disasters that make physical sense on this planet + biome
-    // (airless worlds get no wind/rain; deserts don't snow; oceans don't burn).
-    final all =
-        _Disaster.values.where((d) => d != _Disaster.none && _sim.disasterPossible(d));
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Row(children: [
-        Icon(_sim.hasWarning ? Icons.sensors : Icons.sensors_off,
-            size: 14,
-            color: _sim.hasWarning ? AppTheme.accent2 : AppTheme.textDim),
-        const SizedBox(width: 6),
-        Expanded(
-          child: Text(
-            _sim.hasWarning
-                ? 'Early-warning online — disasters are forecast, prep your bunkers.'
-                : 'No early-warning station — build one to forecast disasters.'
-                    ' Bunkers + Emergency Services reduce harm.',
-            style: AppTheme.dim.copyWith(
-                color: _sim.hasWarning ? AppTheme.accent2 : AppTheme.textDim),
-          ),
-        ),
-      ]),
-      const SizedBox(height: 6),
-      if (_sim.disaster != _Disaster.none)
-        Padding(
-          padding: const EdgeInsets.only(bottom: 6),
-          child: Row(children: [
-            Icon(_sim.disaster.icon, size: 16, color: AppTheme.warn),
-            const SizedBox(width: 6),
-            Text('${_sim.disaster.label} active (${_sim.disasterTime.toStringAsFixed(0)}s)',
-                style: AppTheme.dim.copyWith(color: AppTheme.warn)),
-          ]),
-        ),
-      Wrap(spacing: 6, runSpacing: 6, children: [
-        for (final d in all)
-          GestureDetector(
-            onTap: () => _triggerDisaster(d),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-              decoration: BoxDecoration(
-                color: _sim.disaster == d
-                    ? AppTheme.warn
-                    : (d == _Disaster.nuke
-                        ? AppTheme.danger.withValues(alpha: 0.2)
-                        : AppTheme.panelLight),
-                borderRadius: BorderRadius.circular(6),
-                border: d == _Disaster.nuke
-                    ? Border.all(color: AppTheme.danger)
-                    : null,
-              ),
-              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                Icon(d.icon,
-                    size: 13,
-                    color: d == _Disaster.nuke
-                        ? AppTheme.danger
-                        : (_sim.disaster == d ? AppTheme.bg : AppTheme.text)),
-                const SizedBox(width: 4),
-                Text(d.label,
-                    style: TextStyle(
-                        fontSize: 11,
-                        color: d == _Disaster.nuke
-                            ? AppTheme.danger
-                            : (_sim.disaster == d ? AppTheme.bg : AppTheme.text))),
-              ]),
-            ),
-          ),
-      ]),
-    ]);
-  }
-
-  Widget _planetPanel() => Container(
-        padding: const EdgeInsets.all(10),
-        decoration: AppTheme.panelBox(),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            const Icon(Icons.public, size: 16, color: AppTheme.accent),
-            const SizedBox(width: 6),
-            const Text('Planet', style: AppTheme.body),
-            const SizedBox(width: 8),
-            Expanded(
-              child: DropdownButton<CelestialBody>(
-                value: _sim.body,
-                isExpanded: true,
-                dropdownColor: AppTheme.panelLight,
-                underline: const SizedBox.shrink(),
-                isDense: true,
-                items: [
-                  for (final b in _sim.bodies)
-                    DropdownMenuItem(
-                        value: b, child: Text(b.name, style: AppTheme.body)),
-                ],
-                onChanged: (b) => setState(() => _sim.body = b!),
-              ),
-            ),
-          ]),
-          const SizedBox(height: 4),
-          Row(children: [
-            const Icon(Icons.terrain, size: 16, color: AppTheme.accent2),
-            const SizedBox(width: 6),
-            const Text('Biome', style: AppTheme.body),
-            const SizedBox(width: 8),
-            Expanded(
-              child: DropdownButton<Biome>(
-                value: _sim.biome,
-                isExpanded: true,
-                dropdownColor: AppTheme.panelLight,
-                underline: const SizedBox.shrink(),
-                isDense: true,
-                items: [
-                  for (final b in Biome.values)
-                    DropdownMenuItem(
-                        value: b, child: Text(_biomeName(b), style: AppTheme.body)),
-                ],
-                onChanged: (b) => setState(() => _sim.biome = b!),
-              ),
-            ),
-          ]),
-          Text(_biomeSummary(), style: AppTheme.dim.copyWith(fontSize: 11)),
-          const SizedBox(height: 4),
-          Wrap(spacing: 14, runSpacing: 4, children: [
-            Row(mainAxisSize: MainAxisSize.min, children: [
-              const Icon(Icons.solar_power, size: 14, color: Color(0xFFFFD23F)),
-              const SizedBox(width: 4),
-              Text('Solar ×${_sim.solarFactor.toStringAsFixed(2)}',
-                  style: AppTheme.mono.copyWith(
-                      color: _sim.solarFactor >= 1 ? AppTheme.accent2 : AppTheme.warn,
-                      fontSize: 12)),
-            ]),
-            Row(mainAxisSize: MainAxisSize.min, children: [
-              const Icon(Icons.wind_power, size: 14, color: Color(0xFFB2DFDB)),
-              const SizedBox(width: 4),
-              Text('Wind ×${_sim.windFactor.toStringAsFixed(2)}',
-                  style: AppTheme.mono.copyWith(
-                      color:
-                          _sim.windFactor >= 0.5 ? AppTheme.accent2 : AppTheme.warn,
-                      fontSize: 12)),
-            ]),
-          ]),
-          if (_sim.windFactor < 0.05)
-            Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: Text('Airless world — wind turbines are useless here.',
-                  style: AppTheme.dim.copyWith(color: AppTheme.warn)),
-            ),
-          const SizedBox(height: 2),
-          Row(children: [
-            Icon(_sim.breathable ? Icons.air : Icons.masks,
-                size: 14,
-                color: _sim.breathable ? AppTheme.accent2 : AppTheme.warn),
-            const SizedBox(width: 4),
-            Expanded(
-              child: Text(
-                _sim.breathable
-                    ? 'Breathable air (O₂ ${(_sim.o2Fraction * 100).toStringAsFixed(0)}%) — oxygen free.'
-                    : _sim.o2Harvestable
-                        ? 'Thin O₂ (${(_sim.o2Fraction * 100).toStringAsFixed(0)}%) — harvest or split water.'
-                        : 'No breathable O₂ — split water (electrolysis) or shuttle in.',
-                style: AppTheme.dim.copyWith(
-                    color: _sim.breathable ? AppTheme.accent2 : AppTheme.warn,
-                    fontSize: 11),
-              ),
-            ),
-          ]),
-          const Divider(height: 14, color: Color(0xFF223247)),
-          _surfaceReadout(),
-        ]),
-      );
-
-  /// Live physical surface-conditions readout (temp / pressure / water /
-  /// habitability) — the scalars that drive flora + colony style.
-  Widget _surfaceReadout() {
-    final s = _sim.surface;
-    final hab = s.habitability;
-    final habCol = hab > 0.6
-        ? AppTheme.accent2
-        : (hab > 0.3 ? AppTheme.warn : AppTheme.danger);
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Row(children: [
-        const Icon(Icons.thermostat, size: 14, color: AppTheme.textDim),
-        const SizedBox(width: 4),
-        Text('SURFACE — ${s.summary}',
-            style: AppTheme.dim.copyWith(
-                color: habCol, fontWeight: FontWeight.bold, fontSize: 11)),
-      ]),
-      const SizedBox(height: 4),
-      Wrap(spacing: 12, runSpacing: 2, children: [
-        _condChip('Temp', '${s.temperatureC.toStringAsFixed(0)}°C'),
-        _condChip('Press', '${(s.pressureAtm).toStringAsFixed(2)} atm'),
-        _condChip('Water', '${(s.waterActivity * 100).toStringAsFixed(0)}%'),
-        _condChip('Aquifer', '${(_sim.waterTable * 100).toStringAsFixed(0)}%'),
-        _condChip('Grav', '${s.gravityG.toStringAsFixed(2)}g'),
-      ]),
-      if (_sim.waterTable < 0.4)
-        Text('Water table low — pumping is drying the surface; plants dying back.',
-            style: AppTheme.dim.copyWith(
-                color: _sim.waterTable < 0.2 ? AppTheme.danger : AppTheme.warn,
-                fontSize: 11)),
-      const SizedBox(height: 4),
-      ClipRRect(
-        borderRadius: BorderRadius.circular(3),
-        child: LinearProgressIndicator(
-            value: hab,
-            minHeight: 6,
-            backgroundColor: AppTheme.panelLight,
-            color: habCol),
-      ),
-      const SizedBox(height: 2),
-      Text('Habitability ${(hab * 100).toStringAsFixed(0)}% — '
-          '${hab > 0.5 ? "plants thrive" : hab > 0.15 ? "sparse life" : "barren; terraform to grow life"}',
-          style: AppTheme.dim.copyWith(fontSize: 11, color: habCol)),
-      const SizedBox(height: 4),
-      Builder(builder: (_) {
-        final l = _sim.liquid;
-        return Row(children: [
-          Container(
-              width: 12,
-              height: 12,
-              decoration: BoxDecoration(
-                  color: Color(l.colorArgb),
-                  borderRadius: BorderRadius.circular(3),
-                  border: Border.all(color: const Color(0x33FFFFFF)))),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text(
-                'Surface liquid: ${l.label}'
-                '${l.isMolten ? " (molten — lethal)" : l.combustible ? " (fuel)" : l.potable ? " (drinkable)" : ""}'
-                '${_sim.oceanPollution > 0.05 ? " · polluted" : ""}',
-                style: AppTheme.dim.copyWith(fontSize: 11)),
-          ),
-        ]);
-      }),
-    ]);
-  }
-
-  Widget _condChip(String label, String value) => Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text('$label ', style: AppTheme.dim.copyWith(fontSize: 11)),
-          Text(value,
-              style: AppTheme.mono.copyWith(fontSize: 11, color: AppTheme.text)),
-        ],
-      );
 
   Widget _blockedBanner() => Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
@@ -2847,8 +1849,8 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
   /// production.
   Widget _stockChips() {
     final cap = _sim.stockCap;
-    final rate = _netRates();
-    final raw = _netRates(throttled: false);
+    final rate = netRates();
+    final raw = netRates(throttled: false);
     final shown = Commodity.ordered.where((c) =>
         _sim.stockOf(c) > 0.05 ||
         (rate[c]?.abs() ?? 0) > 0.05 ||
@@ -2862,7 +1864,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
       child: Wrap(spacing: 6, runSpacing: 6, children: [
         for (final c in shown)
           GestureDetector(
-            onTap: () => _showResourceDetail(c),
+            onTap: () => showResourceDetail(c),
             child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
             decoration: BoxDecoration(
@@ -2882,7 +1884,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
                   : Text(_sim.stockOf(c).toStringAsFixed(0),
                       style: AppTheme.mono.copyWith(fontSize: 11)),
               const SizedBox(width: 4),
-              Text(_fmtRate(rate[c] ?? 0),
+              Text(fmtRate(rate[c] ?? 0),
                   style: AppTheme.mono.copyWith(
                       fontSize: 11,
                       color: (rate[c] ?? 0) >= 0
@@ -2890,7 +1892,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
                           : AppTheme.warn)),
               // Show the unthrottled potential when it differs (production cut).
               if (((raw[c] ?? 0) - (rate[c] ?? 0)).abs() > 0.05)
-                Text(' (${_fmtRate(raw[c] ?? 0)})',
+                Text(' (${fmtRate(raw[c] ?? 0)})',
                     style: AppTheme.mono.copyWith(
                         fontSize: 10, color: AppTheme.textDim)),
             ]),
@@ -2900,189 +1902,16 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     );
   }
 
-  List<Widget> _stockRows() {
-    final cap = _sim.stockCap;
-    final rates = _netRates();
-    final raw = _netRates(throttled: false);
-    bool show(String c) =>
-        _sim.stockOf(c) > 0.05 ||
-        (rates[c]?.abs() ?? 0) > 0.05 ||
-        c == Commodity.ore ||
-        c == Commodity.food ||
-        c == Commodity.water;
-    final out = <Widget>[
-      Padding(
-        padding: const EdgeInsets.only(bottom: 4),
-        child: Row(children: [
-          const Expanded(child: Text('Capacity / resource', style: AppTheme.dim)),
-          Text(cap.toStringAsFixed(0),
-              style: AppTheme.mono.copyWith(color: AppTheme.accent)),
-        ]),
-      ),
-    ];
-    // Group by section: Raw Resources / Components / Finished Goods.
-    for (final section in Commodity.sections) {
-      final inSection = Commodity.ordered
-          .where((c) => Commodity.section(c) == section && show(c))
-          .toList();
-      if (inSection.isEmpty) continue;
-      out.add(Padding(
-        padding: const EdgeInsets.only(top: 8, bottom: 2),
-        child: Text(section,
-            style: AppTheme.dim.copyWith(
-                color: AppTheme.accent,
-                fontSize: 10,
-                fontWeight: FontWeight.bold,
-                letterSpacing: 0.6)),
-      ));
-      for (final c in inSection) {
-        out.add(Padding(
-          padding: const EdgeInsets.symmetric(vertical: 2),
-          child: Row(children: [
-            Expanded(child: Text(Commodity.name(c), style: AppTheme.body)),
-            Text('${_sim.stockOf(c).toStringAsFixed(0)}/${cap.toStringAsFixed(0)}',
-                style: AppTheme.mono.copyWith(
-                    color: _sim.stockOf(c) >= cap - 0.5
-                        ? AppTheme.warn
-                        : _sim.stockOf(c) > 0
-                            ? AppTheme.text
-                            : AppTheme.textDim)),
-            SizedBox(
-              width: 96,
-              child: Text.rich(
-                TextSpan(children: [
-                  TextSpan(
-                      text: _fmtRate(rates[c] ?? 0),
-                      style: AppTheme.mono.copyWith(
-                          fontSize: 11,
-                          color: (rates[c] ?? 0) >= 0
-                              ? AppTheme.accent2
-                              : AppTheme.warn)),
-                  if (((raw[c] ?? 0) - (rates[c] ?? 0)).abs() > 0.05)
-                    TextSpan(
-                        text: ' (${_fmtRate(raw[c] ?? 0)})',
-                        style: AppTheme.mono.copyWith(
-                            fontSize: 10, color: AppTheme.textDim)),
-                ]),
-                textAlign: TextAlign.right,
-              ),
-            ),
-          ]),
-        ));
-      }
-    }
-    return out;
-  }
 
-  /// Net rates. [throttled] true applies the live production throttle (power /
-  /// compute / staffing); false gives the full nameplate potential. Life-support
-  /// consumption is the same in both.
-  Map<String, double> _netRates({bool throttled = true}) {
-    final t = throttled ? _sim.throttle : 1.0;
-    final r = <String, double>{};
-    for (final e in _sim.activeSpecs) {
-      e.value.outputs.forEach((k, v) => r[k] = (r[k] ?? 0) + v * t);
-      e.value.inputs.forEach((k, v) => r[k] = (r[k] ?? 0) - v * t);
-    }
-    r[Commodity.food] = (r[Commodity.food] ?? 0) - _sim.population * CitySim.foodPerPersonPerSec;
-    r[Commodity.water] = (r[Commodity.water] ?? 0) - _sim.population * CitySim.waterPerPersonPerSec;
-    if (!_sim.breathable) {
-      r[Commodity.oxygen] =
-          (r[Commodity.oxygen] ?? 0) - _sim.population * CitySim.waterPerPersonPerSec;
-    }
-    // Population GENERATES waste (positive net = it's piling up).
-    r[Commodity.garbage] =
-        (r[Commodity.garbage] ?? 0) + _sim.population * CitySim.garbagePerPersonPerSec;
-    r[Commodity.sewage] =
-        (r[Commodity.sewage] ?? 0) + _sim.population * CitySim.sewagePerPersonPerSec;
-    return r;
-  }
 
-  String _fmtRate(double r) =>
-      r.abs() < 0.05 ? '±0/s' : '${r >= 0 ? "+" : ""}${r.toStringAsFixed(1)}/s';
 
-  /// Per-building producer/consumer breakdown for a commodity (counts + total
-  /// throttled rate per building type).
-  ({List<({String label, double rate, int count})> producers,
-    List<({String label, double rate, int count})> consumers,
-    double lifeSupport}) _commodityBreakdown(String c) {
-    final prod = <String, ({double rate, int count})>{};
-    final cons = <String, ({double rate, int count})>{};
-    for (final e in _sim.activeSpecs) {
-      final s = e.value;
-      final out = (s.outputs[c] ?? 0) * _sim.biomeMult(c) * _sim.throttle;
-      final inp = (s.inputs[c] ?? 0) * _sim.throttle;
-      if (out > 0) {
-        final cur = prod[s.label];
-        prod[s.label] =
-            (rate: (cur?.rate ?? 0) + out, count: (cur?.count ?? 0) + 1);
-      }
-      if (inp > 0) {
-        final cur = cons[s.label];
-        cons[s.label] =
-            (rate: (cur?.rate ?? 0) + inp, count: (cur?.count ?? 0) + 1);
-      }
-    }
-    var life = 0.0;
-    if (c == Commodity.food) life = _sim.population * CitySim.foodPerPersonPerSec;
-    if (c == Commodity.water) life = _sim.population * CitySim.waterPerPersonPerSec;
-    if (c == Commodity.oxygen && !_sim.breathable) {
-      life = _sim.population * CitySim.waterPerPersonPerSec;
-    }
-    List<({String label, double rate, int count})> rows(
-            Map<String, ({double rate, int count})> m) =>
-        [for (final e in m.entries) (label: e.key, rate: e.value.rate, count: e.value.count)]
-          ..sort((a, b) => b.rate.compareTo(a.rate));
-    return (producers: rows(prod), consumers: rows(cons), lifeSupport: life);
-  }
 
   /// A "why did this happen / how to fix" modal for a warning or status.
-  void _showExplain(String title, String why, String fix, Color color) {
-    showDialog<void>(
-      context: context,
-      builder: (_) => Dialog(
-        backgroundColor: AppTheme.panel,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 420),
-          child: Padding(
-            padding: const EdgeInsets.all(18),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(title,
-                    style: AppTheme.title.copyWith(color: color, fontSize: 18)),
-                const SizedBox(height: 14),
-                Text('WHY',
-                    style: AppTheme.dim.copyWith(
-                        color: AppTheme.warn,
-                        fontSize: 10,
-                        fontWeight: FontWeight.bold)),
-                const SizedBox(height: 4),
-                Text(why, style: AppTheme.body),
-                const SizedBox(height: 14),
-                Text('HOW TO FIX',
-                    style: AppTheme.dim.copyWith(
-                        color: AppTheme.accent2,
-                        fontSize: 10,
-                        fontWeight: FontWeight.bold)),
-                const SizedBox(height: 4),
-                Text(fix, style: AppTheme.body),
-                const SizedBox(height: 14),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: TextButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    child: const Text('GOT IT'),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
+  ///
+  /// A thin wrapper on the shared modal: seventeen call sites read better
+  /// against a method than against a free function taking `context`.
+  void _showExplain(String title, String why, String fix, Color color) =>
+      showExplain(context, title, why, fix, color);
 
   /// Tap handler for a status alert chip — explains that specific situation.
   void _explainAlert(String key) {
@@ -3164,292 +1993,17 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     }
   }
 
-  void _showResourceDetail(String c) {
-    final bd = _commodityBreakdown(c);
-    final net = _netRates()[c] ?? 0;
-    final raw = _netRates(throttled: false)[c] ?? 0;
-    final cap = _sim.stockCap;
-    showDialog<void>(
-      context: context,
-      builder: (_) => Dialog(
-        backgroundColor: AppTheme.panel,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 420),
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(18),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(Commodity.name(c),
-                    style: AppTheme.title.copyWith(
-                        color: AppTheme.accent, fontSize: 18)),
-                const SizedBox(height: 2),
-                Text('Section: ${Commodity.section(c)}', style: AppTheme.dim),
-                const SizedBox(height: 12),
-                _kvLine('In stock', '${_sim.stockOf(c).toStringAsFixed(0)} / ${cap.toStringAsFixed(0)}'),
-                _kvLine('Net rate',
-                    _fmtRate(net) + (((raw - net).abs() > 0.05) ? '  (potential ${_fmtRate(raw)})' : ''),
-                    net >= 0 ? AppTheme.accent2 : AppTheme.warn),
-                if (raw - net > 0.05)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 4),
-                    child: Text(
-                        'Production throttled to ${(_sim.throttle * 100).toStringAsFixed(0)}% — '
-                        '${_bottleneckName()} is the limiter.',
-                        style: AppTheme.dim.copyWith(color: AppTheme.warn)),
-                  ),
-                const SizedBox(height: 14),
-                _detailSection('PRODUCED BY', bd.producers, AppTheme.accent2),
-                _detailSection('CONSUMED BY', bd.consumers, AppTheme.warn),
-                if (bd.lifeSupport > 0.001)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 4),
-                    child: Row(children: [
-                      const Expanded(
-                          child: Text('Population life support', style: AppTheme.body)),
-                      Text('-${bd.lifeSupport.toStringAsFixed(1)}/s',
-                          style: AppTheme.mono.copyWith(color: AppTheme.warn)),
-                    ]),
-                  ),
-                const SizedBox(height: 10),
-                Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                      color: AppTheme.bg,
-                      borderRadius: BorderRadius.circular(6)),
-                  child: Text(_howToGrow(c), style: AppTheme.dim),
-                ),
-                const SizedBox(height: 12),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: TextButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    child: const Text('CLOSE'),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
 
-  Widget _detailSection(
-      String title, List<({String label, double rate, int count})> rows,
-      Color color) {
-    if (rows.isEmpty) return const SizedBox.shrink();
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text(title,
-          style: AppTheme.dim.copyWith(
-              color: color, fontSize: 10, fontWeight: FontWeight.bold)),
-      for (final r in rows)
-        Padding(
-          padding: const EdgeInsets.symmetric(vertical: 2),
-          child: Row(children: [
-            Expanded(child: Text('${r.label} ×${r.count}', style: AppTheme.body)),
-            Text('${r.rate >= 0 ? "+" : ""}${r.rate.toStringAsFixed(1)}/s',
-                style: AppTheme.mono.copyWith(color: color)),
-          ]),
-        ),
-      const SizedBox(height: 8),
-    ]);
-  }
 
-  Widget _kvLine(String k, String v, [Color? c]) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 2),
-        child: Row(children: [
-          Expanded(child: Text(k, style: AppTheme.body)),
-          Text(v, style: AppTheme.mono.copyWith(color: c ?? AppTheme.text)),
-        ]),
-      );
 
-  String _bottleneckName() {
-    final power = _sim.powerDraw <= 0 ? 1.0 : (_sim.powerOut / _sim.powerDraw).clamp(0.0, 1.0);
-    final compute = _sim.computeDemand <= 0 ? 1.0 : (_sim.computeSupply / _sim.computeDemand).clamp(0.0, 1.0);
-    if (_sim.staffing <= power && _sim.staffing <= compute) return 'staffing (not enough workers)';
-    if (power <= compute) return 'power (brownout)';
-    return 'compute (data shortfall)';
-  }
 
-  String _howToGrow(String c) => switch (c) {
-        Commodity.ore => 'Build more Mines. Heavy Industry zones also refine ore→steel.',
-        Commodity.steel => 'Build Steel Mills (need ore) or zone Industrial.',
-        Commodity.water => 'Build Water Plants; biome + rain boost it.',
-        Commodity.food => 'Build Farms (need water). Avoid nuclear winter.',
-        Commodity.oxygen => _sim.breathable
-            ? 'Breathable world — oxygen is free here.'
-            : 'Build Electrolysis Plants (split water) or an O₂ Harvester.',
-        Commodity.electronics => 'Build Electronics Plants (need steel + compute).',
-        Commodity.compute => 'Build Data Centers (need electronics + lots of power).',
-        Commodity.tubes => 'Steel Mills produce tubes as a byproduct.',
-        Commodity.rocketParts => 'Build a Rocket Parts Factory (tubes + electronics).',
-        Commodity.fuel || Commodity.oxidizer => 'Build Refineries (need ore).',
-        Commodity.guns || Commodity.ammo => 'Build an Arms Factory (steel + electronics).',
-        Commodity.missiles => 'Build a Missile Plant (tubes + rocket parts).',
-        Commodity.rations => 'Build a Rations Plant (need food).',
-        Commodity.medicine =>
-          'Build Chemists (small) or a Pharma Plant (big). Hospitals + Clinics '
-              'consume it; without medicine their health coverage drops.',
-        Commodity.garbage =>
-          'This is WASTE — keep it near zero. Build Landfills (cheap) or Recycling '
-              'Centers (recover ore + steel) to consume it faster than the population '
-              'produces it.',
-        Commodity.sewage =>
-          'This is WASTE — build Sewage Treatment plants to process it (they also '
-              'recover clean water). A backlog pollutes + spreads disease.',
-        _ => 'Build the matching factory; ensure power, compute + staffing are met.',
-      };
 
-  Widget _powerRow() {
-    final ratio = _sim.powerDraw <= 0 ? 1.0 : (_sim.powerOut / _sim.powerDraw).clamp(0.0, 1.0);
-    final ok = ratio >= 1.0;
-    return _meterRow('Power', '${_sim.powerOut.toStringAsFixed(0)} / ${_sim.powerDraw.toStringAsFixed(0)}',
-        ratio, ok ? AppTheme.accent2 : AppTheme.danger,
-        warn: ok ? null : 'Brownout — production throttled.',
-        onExplain: () => _showExplain(
-            'Power Grid',
-            ok
-                ? 'Generation (${_sim.powerOut.toStringAsFixed(0)}) meets demand '
-                    '(${_sim.powerDraw.toStringAsFixed(0)}).'
-                : 'Demand (${_sim.powerDraw.toStringAsFixed(0)}) exceeds generation '
-                    '(${_sim.powerOut.toStringAsFixed(0)}). Every building throttles to the '
-                    'grid ratio, cutting all production.',
-            'Build more power: Solar (sun-dependent), Wind (air-dependent), Gas '
-                '(burns fuel), Reactor or Fusion (unlock with population). On dark/'
-                'airless worlds favour gas + nuclear.',
-            ok ? AppTheme.accent2 : AppTheme.danger));
-  }
 
-  /// Average grown-zone utilisation + a count of buildings still under
-  /// construction. Tappable for a breakdown of the small/med/large/max stages.
-  Widget _utilisationRow() {
-    var sum = 0.0, building = 0;
-    final stages = <String, int>{};
-    for (final k in _sim.grown) {
-      if (_sim.zones[k] == null) continue;
-      sum += _sim.utilFactor(k);
-      if (_sim.underConstruction(k)) building++;
-      stages.update(_sim.utilStage(k), (v) => v + 1, ifAbsent: () => 1);
-    }
-    final avg = _sim.grown.isEmpty ? 0.0 : sum / _sim.grown.length;
-    final label = building > 0 ? '$building building' : '${(avg * 100).round()}% avg';
-    return _meterRow('Utilisation', label, avg, AppTheme.accent2,
-        onExplain: () => _showExplain(
-            'Building Utilisation',
-            'Zoned buildings rise through a construction phase, then fill up in '
-                'stages — Small → Medium → Large → Max — as demand sustains them, '
-                'and shrink back when demand fades. A building only contributes '
-                'its housing / jobs / services in proportion to how occupied it '
-                'is.\n\nCurrent mix: '
-                '${stages.entries.map((e) => '${e.value} ${e.key}').join(', ')}.',
-            'Keep demand high (balance R/C/I), power on, and roads connected so '
-                'buildings finish construction and climb to Max occupancy.',
-            AppTheme.accent2));
-  }
 
-  Widget _computeRow() {
-    if (_sim.computeDemand <= 0 && _sim.computeSupply <= 0) return const SizedBox.shrink();
-    final ratio = _sim.computeDemand <= 0 ? 1.0 : (_sim.computeSupply / _sim.computeDemand).clamp(0.0, 1.0);
-    final ok = ratio >= 1.0;
-    return _meterRow('Compute', '${_sim.computeSupply.toStringAsFixed(0)} / ${_sim.computeDemand.toStringAsFixed(0)}',
-        ratio, ok ? AppTheme.accent : AppTheme.danger,
-        warn: ok ? null : 'Compute shortfall — advanced buildings throttled.');
-  }
 
-  Widget _pollutionRow() {
-    final level = (_sim.pollution / 200).clamp(0.0, 1.0);
-    final c = level > 0.6 ? AppTheme.danger : (level > 0.3 ? AppTheme.warn : AppTheme.accent2);
-    return _meterRow('Pollution', _sim.pollution.toStringAsFixed(0), level, c,
-        warn: level > 0.5 ? 'Atmosphere degrading — happiness + health hit.' : null,
-        onExplain: () => _showExplain(
-            'Pollution',
-            'Industry, power plants and dense zones emit pollution into the '
-                'atmosphere. High pollution drags happiness and breeds disease.',
-            'Add Parks and Forest biome (scrub the air), pass the Emissions Cap '
-                'ordinance, build Terraforming Towers (negative pollution), or replace '
-                'dirty industry/gas with clean power (solar/wind/fusion).',
-            c));
-  }
 
-  Widget _radiationRow() {
-    if (_sim.radiation <= 0.02) return const SizedBox.shrink();
-    return _meterRow('Radiation', '${(_sim.radiation * 100).toStringAsFixed(0)}%',
-        _sim.radiation, _sim.radiation > 0.4 ? AppTheme.danger : AppTheme.warn,
-        warn: _sim.radiation > 0.4 ? 'Radiation sickness killing citizens.' : null,
-        onExplain: () => _showExplain(
-            'Radiation',
-            'Comes from thin-atmosphere worlds (less air = more space '
-                'radiation), solar storms, and nuclear fallout. It causes '
-                'radiation sickness (disease + deaths).',
-            'It decays on its own. Thicken the atmosphere (terraforming) for '
-                'less background radiation, and shelter the population in '
-                'Bunkers / Fallout Shelters during events.',
-            AppTheme.danger));
-  }
 
-  Widget _meterRow(String label, String value, double ratio, Color color,
-          {String? warn, VoidCallback? onExplain}) =>
-      GestureDetector(
-        onTap: onExplain,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 4),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(children: [
-              Expanded(child: Text(label, style: AppTheme.body)),
-              if (onExplain != null)
-                Padding(
-                  padding: const EdgeInsets.only(right: 6),
-                  child: Icon(Icons.info_outline,
-                      size: 13, color: color.withValues(alpha: 0.7)),
-                ),
-              Text(value, style: AppTheme.mono.copyWith(color: color)),
-            ]),
-            const SizedBox(height: 4),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(3),
-              child: LinearProgressIndicator(
-                  value: ratio.clamp(0.0, 1.0),
-                  minHeight: 6,
-                  backgroundColor: AppTheme.panelLight,
-                  color: color),
-            ),
-            if (warn != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 3),
-                child: Text(warn, style: AppTheme.dim.copyWith(color: color)),
-              ),
-          ]),
-        ),
-      );
 
-  Widget _happinessRow() {
-    final h = _sim.happiness;
-    final col = h >= 0.66 ? AppTheme.accent2 : (h >= 0.33 ? AppTheme.warn : AppTheme.danger);
-    final face = h >= 0.66
-        ? Icons.sentiment_very_satisfied
-        : (h >= 0.33 ? Icons.sentiment_neutral : Icons.sentiment_very_dissatisfied);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          Icon(face, size: 16, color: col),
-          const SizedBox(width: 6),
-          const Expanded(child: Text('Happiness', style: AppTheme.body)),
-          Text('${(h * 100).toStringAsFixed(0)}%',
-              style: AppTheme.mono.copyWith(color: col)),
-        ]),
-        const SizedBox(height: 4),
-        ClipRRect(
-          borderRadius: BorderRadius.circular(3),
-          child: LinearProgressIndicator(
-              value: h, minHeight: 6,
-              backgroundColor: AppTheme.panelLight, color: col),
-        ),
-      ]),
-    );
-  }
 
   Widget _connectivityPanel() {
     final built = _sim.grown.length + _sim.utils.length;
@@ -3480,198 +2034,19 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     );
   }
 
-  Widget _economyPicker() => Wrap(
-        spacing: 6,
-        runSpacing: 6,
-        children: [
-          for (final e in _Economy.values)
-            _pill(e.label, _sim.economy == e, AppTheme.accent,
-                () => setState(() => _sim.economy = e)),
-        ],
-      );
 
-  Widget _govtPicker() => Wrap(
-        spacing: 6,
-        runSpacing: 6,
-        children: [
-          for (final g in _Govt.values)
-            _pill(g.label, _sim.govt == g, AppTheme.accent2, () => setState(() {
-                  _sim.govt = g;
-                  if (g.lawsAutoVoted) _sim.autoVote();
-                })),
-        ],
-      );
 
-  Widget _pill(String label, bool sel, Color color, VoidCallback onTap) =>
-      GestureDetector(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          decoration: BoxDecoration(
-              color: sel ? color : AppTheme.panelLight,
-              borderRadius: BorderRadius.circular(6)),
-          child: Text(label,
-              style: TextStyle(fontSize: 12, color: sel ? AppTheme.bg : AppTheme.text)),
-        ),
-      );
 
-  Widget _taxControl() {
-    final controllable = _sim.economy.taxControllable;
-    final tax = _sim.effectiveTax();
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          Expanded(
-              child: Text(controllable ? 'Tax rate' : 'State levy (fixed)',
-                  style: AppTheme.body)),
-          Text('${(tax * 100).toStringAsFixed(0)}%',
-              style: AppTheme.mono.copyWith(color: AppTheme.accent)),
-        ]),
-        SliderTheme(
-          data: SliderThemeData(
-              activeTrackColor: controllable ? AppTheme.accent : AppTheme.textDim,
-              thumbColor: controllable ? AppTheme.accent : AppTheme.textDim,
-              inactiveTrackColor: AppTheme.panelLight,
-              trackHeight: 3),
-          child: Slider(
-              value: tax.clamp(0.0, 0.4),
-              max: 0.4,
-              onChanged: controllable ? (v) => setState(() => _sim.taxRate = v) : null),
-        ),
-      ]),
-    );
-  }
 
-  List<Widget> _lawRows() {
-    final auto = _sim.govt.lawsAutoVoted;
-    return [
-      Text(
-          auto
-              ? '${_sim.govt.label}: laws are auto-voted to address the worst problems.'
-              : 'Enact ordinances directly:',
-          style: AppTheme.dim),
-      const SizedBox(height: 4),
-      for (final l in _Law.values)
-        Padding(
-          padding: const EdgeInsets.symmetric(vertical: 1),
-          child: Row(children: [
-            Icon(_sim.laws.contains(l) ? Icons.check_box : Icons.check_box_outline_blank,
-                size: 17,
-                color: _sim.laws.contains(l) ? AppTheme.accent2 : AppTheme.textDim),
-            const SizedBox(width: 6),
-            Expanded(
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(l.label, style: AppTheme.body),
-                Text(l.effect, style: AppTheme.dim),
-              ]),
-            ),
-            if (!auto)
-              Switch(
-                  value: _sim.laws.contains(l),
-                  activeThumbColor: AppTheme.accent2,
-                  onChanged: (v) =>
-                      setState(() => v ? _sim.laws.add(l) : _sim.laws.remove(l))),
-          ]),
-        ),
-    ];
-  }
 
-  Widget _revoltBanner() => Container(
-        margin: const EdgeInsets.only(bottom: 8),
-        padding: const EdgeInsets.all(10),
-        decoration: BoxDecoration(
-            color: AppTheme.danger.withValues(alpha: 0.15),
-            borderRadius: BorderRadius.circular(6),
-            border: Border.all(color: AppTheme.danger)),
-        child: Row(children: [
-          const Icon(Icons.local_fire_department, color: AppTheme.danger, size: 18),
-          const SizedBox(width: 8),
-          Expanded(
-              child: Text(_sim.revoltMsg!,
-                  style: AppTheme.dim.copyWith(color: AppTheme.danger))),
-          GestureDetector(
-            onTap: () => setState(() => _sim.revoltMsg = null),
-            child: const Icon(Icons.close, color: AppTheme.danger, size: 16),
-          ),
-        ]),
-      );
 
-  Widget _socialBar(String label, double value, Color color) {
-    final alarm = value > 0.5;
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 3),
-      child: Row(children: [
-        SizedBox(width: 84, child: Text(label, style: AppTheme.body)),
-        Expanded(
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(3),
-            child: LinearProgressIndicator(
-                value: value, minHeight: 8,
-                backgroundColor: AppTheme.panelLight,
-                color: alarm ? AppTheme.danger : color),
-          ),
-        ),
-        const SizedBox(width: 8),
-        SizedBox(
-          width: 34,
-          child: Text('${(value * 100).toStringAsFixed(0)}%',
-              textAlign: TextAlign.right,
-              style: AppTheme.mono.copyWith(
-                  fontSize: 11, color: alarm ? AppTheme.danger : color)),
-        ),
-      ]),
-    );
-  }
 
-  Widget _rciBar(String label, double value, Color color) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 3),
-        child: Row(children: [
-          SizedBox(width: 84, child: Text(label, style: AppTheme.body)),
-          Expanded(
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(3),
-              child: LinearProgressIndicator(
-                  value: value, minHeight: 9,
-                  backgroundColor: AppTheme.panelLight, color: color),
-            ),
-          ),
-          const SizedBox(width: 8),
-          SizedBox(
-            width: 36,
-            child: Text('${(value * 100).toStringAsFixed(0)}%',
-                textAlign: TextAlign.right,
-                style: AppTheme.mono.copyWith(color: color)),
-          ),
-        ]),
-      );
 
-  Widget _statRow(String k, String v) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 3),
-        child: Row(children: [
-          Expanded(child: Text(k, style: AppTheme.body)),
-          Text(v, style: AppTheme.mono),
-        ]),
-      );
 
   String _cap(String s) => s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
 }
 
 /// Display name for a biome (shared by the builder + the new-city setup screen).
-String cityBiomeName(Biome b) => switch (b) {
-      Biome.ocean => 'Ocean',
-      Biome.iceCap => 'Ice Cap',
-      Biome.tundra => 'Tundra',
-      Biome.desert => 'Desert',
-      Biome.grassland => 'Grassland',
-      Biome.forest => 'Forest',
-      Biome.mountains => 'Mountains',
-      Biome.volcanic => 'Volcanic',
-      Biome.barren => 'Barren',
-      Biome.wetland => 'Wetland',
-      Biome.coastal => 'Coastal',
-      Biome.volcano => 'Volcano (lava)',
-    };
 
 /// New-colony setup screen: pick the world, terrain, politics, economy, map size
 /// and difficulty before founding a city. "Found Colony" launches the builder

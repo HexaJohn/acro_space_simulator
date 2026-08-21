@@ -68,6 +68,31 @@ class ParcelSettings {
 /// change; manual parcels are never touched, and auto parcels that would clash
 /// with them (or with a carriageway) are simply not emitted. That combination
 /// is what lets a street grid and a two-kilometre solar farm share a colony.
+/// An axis-aligned bound in colony-local metres.
+class _Box {
+  const _Box(this.minE, this.minN, this.maxE, this.maxN);
+  final double minE, minN, maxE, maxN;
+
+  static _Box of(List<Vec2> pts) {
+    var lo = double.infinity, ln = double.infinity;
+    var he = -double.infinity, hn = -double.infinity;
+    for (final p in pts) {
+      if (p.e < lo) lo = p.e;
+      if (p.n < ln) ln = p.n;
+      if (p.e > he) he = p.e;
+      if (p.n > hn) hn = p.n;
+    }
+    return _Box(lo, ln, he, hn);
+  }
+
+  /// Could anything in [o] be within [slack] of anything in this?
+  bool within(_Box o, double slack) =>
+      o.minE - slack <= maxE &&
+      o.maxE + slack >= minE &&
+      o.minN - slack <= maxN &&
+      o.maxN + slack >= minN;
+}
+
 class CityLayout {
   CityLayout({ParcelSettings settings = const ParcelSettings()})
       : _settings = settings;
@@ -113,7 +138,14 @@ class CityLayout {
 
   int _commitSeq = 0;
 
-  List<({RoadSpline road, List<Vec2> pts})> _obstacles = const [];
+  /// Every road's coarse samples AND its bounding box.
+  ///
+  /// `RoadSpline.distanceTo` re-samples the entire spline on every call, so
+  /// asking eighty roads how far away a point is meant eighty curve
+  /// evaluations — and the site-placement probe asks that five times per road
+  /// per candidate. Sampling once here and rejecting on the box first turned
+  /// that from the dominant cost into a rounding error.
+  List<({RoadSpline road, List<Vec2> pts, _Box box})> _obstacles = const [];
 
   /// The nearest point on any road within [withinM] of [p], for endpoint
   /// snapping — drawing toward an existing street should join it, not stop a
@@ -156,6 +188,15 @@ class CityLayout {
     required List<Vec2> controls,
     RoadClass roadClass = RoadClass.street,
     double snapM = 15,
+    // Laid in vacuum: pedestrians get a sealed tube, not a pavement. Captured
+    // here because it is a property of when the road was BUILT.
+    bool sealed = false,
+    // Skip the lot re-subdivision. For laying a WHOLE network at once: every
+    // commit otherwise re-cuts every lot in the colony, which is quadratic in
+    // roads and was most of the cost of generating a city. The caller must
+    // call [regenerate] itself afterwards, and gets no rename map — safe only
+    // when nothing is built yet.
+    bool regenerateLots = true,
   }) {
     // Where every keyed thing stood, before the ground moves.
     final before = <String, Vec2>{
@@ -177,10 +218,21 @@ class CityLayout {
     final newCuts = <double>{};
     final existingCuts = <String, Set<double>>{};
     final newCum = _cumulative(pts);
+    // Roads are sampled every 2 m, so a kilometre of street is five hundred
+    // segments and one pair of roads is a quarter of a million segment tests.
+    // Almost every pair in a city never comes near enough to cross, and the
+    // box test rejects those for the price of four comparisons. Without it,
+    // laying a network was the single most expensive thing the colony did.
+    final newBox = _Box.of(pts);
     for (final other in _roads.values.toList()) {
       final opts = other.sample(stepM: 2);
+      if (!_Box.of(opts).within(newBox, 1.0)) continue;
       final ocum = _cumulative(opts);
       for (var i = 1; i < pts.length; i++) {
+        // Skip the whole inner scan when this segment is nowhere near the
+        // other road at all.
+        final segBox = _Box.of([pts[i - 1], pts[i]]);
+        if (!_Box.of(opts).within(segBox, 1.0)) continue;
         for (var j = 1; j < opts.length; j++) {
           final hit =
               segmentSegment(pts[i - 1], pts[i], opts[j - 1], opts[j]);
@@ -207,6 +259,8 @@ class CityLayout {
           id: '${rid}x$i',
           roadClass: road.roadClass,
           controls: _decimate(pieces[i]),
+          // A split keeps what the original was built as.
+          sealed: road.sealed,
         );
       }
     });
@@ -219,7 +273,13 @@ class CityLayout {
         id: pid,
         roadClass: roadClass,
         controls: _decimate(pieces[i]),
+        sealed: sealed,
       );
+    }
+    if (!regenerateLots) {
+      // Batch mode: the caller re-cuts once, when the whole network is in.
+      // No lots were re-cut, so nothing was renamed.
+      return (roadId: id, renamedLots: const <String, String>{});
     }
     regenerate();
 
@@ -315,7 +375,19 @@ class CityLayout {
   /// Add a hand-drawn lot. Returns null (and adds nothing) if it would sit on a
   /// carriageway or overlap an existing manual lot — the caller shows that as a
   /// blocked placement.
-  Parcel? addManualParcel(List<Vec2> polygon, {ParcelUse use = ParcelUse.unzoned}) {
+  /// Whether [polygon] could be added as a manual lot — the accept test of
+  /// [addManualParcel] without the side effect, so a preview can ask.
+  bool canAddManualParcel(List<Vec2> polygon) {
+    final p = Parcel(id: '__probe', polygon: polygon, manual: true);
+    if (_hitsRoad(p)) return false;
+    for (final other in _manual) {
+      if (p.overlaps(other)) return false;
+    }
+    return true;
+  }
+
+  Parcel? addManualParcel(List<Vec2> polygon,
+      {ParcelUse use = ParcelUse.unzoned, bool regenerateLots = true}) {
     final p = Parcel(
       id: 'lot-m${_nextId++}',
       polygon: polygon,
@@ -328,7 +400,12 @@ class CityLayout {
     }
     _manual.add(p);
     if (use != ParcelUse.unzoned) _uses[p.id] = use;
-    regenerate();
+    // Re-cutting the automatic lots is the expensive half — over two seconds
+    // on a thousand-lot colony — so staking a run of plots can defer it and
+    // re-cut once. The caller then owns calling [regenerate], and gets no
+    // chance to carry buildings across renames, which is safe only while
+    // nothing is built.
+    if (regenerateLots) regenerate();
     return p;
   }
 
@@ -405,10 +482,16 @@ class CityLayout {
     // Coarse samples of every road, shared by all the ray casts below. Without
     // the cache each lot's depth probe would re-sample the whole network.
     _obstacles = [
-      for (final r in _roads.values) (road: r, pts: r.sample(stepM: 6)),
+      for (final r in _roads.values)
+        () {
+          final pts = r.sample(stepM: 6);
+          return (road: r, pts: pts, box: _Box.of(pts));
+        }(),
     ];
     final out = <Parcel>[];
     for (final road in _roads.values) {
+      // Alleys and anything on piers serve lots, they do not front them.
+      if (!road.roadClass.platsLots) continue;
       out.addAll(_subdivide(road, out));
     }
     // Re-apply zoning: the fresh lots carry the same deterministic ids their
@@ -483,6 +566,7 @@ class CityLayout {
           polygon: poly,
           roadId: road.id,
           frontage: (frontA, frontB),
+          sideStreet: _sideStreetOf(poly, (frontA, frontB), road),
         );
         if (parcel.area < 30) continue;
         if (!_clashes(parcel, [...soFar, ...out, ..._manual])) {
@@ -491,6 +575,51 @@ class CityLayout {
       }
     }
     return out;
+  }
+
+  /// The OTHER street a lot touches, if it is on a corner.
+  ///
+  /// Found by asking each of the lot's edges — the frontage excepted — whether
+  /// it lies along some other road's setback line. That is what a corner lot
+  /// physically IS after `_clipAgainstRoads` has cut it: an edge parallel to a
+  /// crossing street, at exactly that street's setback. Detecting it here,
+  /// while the plat is being cut, is far cheaper and far more reliable than
+  /// having the renderer re-derive it from a polygon later.
+  (Vec2, Vec2)? _sideStreetOf(
+      List<Vec2> poly, (Vec2, Vec2) frontage, RoadSpline own) {
+    // Generous, and it has to be. A lot's side edge does NOT land exactly on
+    // the crossing street's setback: the plat holds `cornerClearM` back from
+    // the junction, and the clip pass works off a straight-line approximation
+    // of a curved road. Measured on a generated colony, a 2 m tolerance found
+    // 5% of lots — a grid of this shape has nearer a fifth — because it was
+    // testing for an exactness the geometry never had.
+    final tol = _settings.cornerClearM + 4;
+    (Vec2, Vec2)? best;
+    var bestD = double.infinity;
+    for (var i = 0; i < poly.length; i++) {
+      final a = poly[i], b = poly[(i + 1) % poly.length];
+      // Skip the frontage itself.
+      if ((a.distanceTo(frontage.$1) < 0.5 && b.distanceTo(frontage.$2) < 0.5) ||
+          (a.distanceTo(frontage.$2) < 0.5 && b.distanceTo(frontage.$1) < 0.5)) {
+        continue;
+      }
+      final mid = (a + b) * 0.5;
+      if (a.distanceTo(b) < 6) continue; // a chamfer, not a frontage
+      final edgeBox = _Box.of([a, b]);
+      for (final ob in _obstacles) {
+        if (identical(ob.road, own) || ob.road.id == own.id) continue;
+        if (!ob.box.within(edgeBox, tol + 40)) continue;
+        // An alley is a back, not a street, and nothing in the air is either.
+        if (!ob.road.roadClass.platsLots) continue;
+        final margin = ob.road.halfWidth + _settings.sidewalkM;
+        final d = (ob.road.distanceTo(mid) - margin).abs();
+        if (d < tol && d < bestD) {
+          bestD = d;
+          best = (a, b);
+        }
+      }
+    }
+    return best;
   }
 
   /// Outward unit normal of the centreline at arc position [s] (left side;
@@ -511,18 +640,41 @@ class CityLayout {
   /// configured depth.
   double _depthAt(Vec2 front, Vec2 outward, RoadSpline own) {
     final probe = _settings.depthM * 3;
+    // Broad phase against the ray's own box. Without it this walked every
+    // sample of every road in the colony for every lot corner — O(roads x
+    // lots), which is fine at a hundred roads and is most of the build time
+    // once alleys and elevated lines have tripled the network.
+    final tip = front + outward * probe;
+    final rayBox = _Box.of([front, tip]);
     var nearest = double.infinity;
+    var nearestIsAlley = false;
     for (final ob in _obstacles) {
       if (identical(ob.road, own) || ob.road.id == own.id) continue;
+      if (!ob.box.within(rayBox, 1.0)) continue;
+      // A structure on piers casts no shadow on the plat: lots run underneath
+      // an elevated line, which is what the arches and the parking under the
+      // L actually are.
+      if (ob.road.roadClass.isElevated) continue;
       for (var i = 1; i < ob.pts.length; i++) {
         final t = raySegment(front, outward, ob.pts[i - 1], ob.pts[i]);
         if (t == null || t > probe) continue;
-        final gap = t - (ob.road.halfWidth + _settings.sidewalkM);
-        if (gap < nearest) nearest = gap;
+        final gap = t -
+            (ob.road.halfWidth +
+                (ob.road.roadClass.hasPavement ? _settings.sidewalkM : 0.6));
+        if (gap < nearest) {
+          nearest = gap;
+          nearestIsAlley = ob.road.roadClass == RoadClass.alley;
+        }
       }
     }
     if (nearest == double.infinity) return _settings.depthM;
-    return math.min(_settings.depthM, nearest / 2);
+    // Halved because the usual obstacle is the FACING street, and its lots are
+    // coming the other way to meet these at the block midline. An alley is
+    // different: it IS the midline, it is already a road with its own
+    // setback, and nothing is platted off it — so a lot runs all the way to
+    // it. Halving there would leave a strip of dead ground behind every
+    // building, which is exactly the gap the alley exists to remove.
+    return math.min(_settings.depthM, nearestIsAlley ? nearest : nearest / 2);
   }
 
   /// Clip a lot against every foreign carriageway it strays near, so corner
@@ -534,7 +686,10 @@ class CityLayout {
     for (final ob in _obstacles) {
       if (clipped.length < 3) return clipped;
       if (identical(ob.road, own) || ob.road.id == own.id) continue;
-      final margin = ob.road.halfWidth + _settings.sidewalkM;
+      // Nothing clips against a deck in the air — the lot runs on underneath.
+      if (ob.road.roadClass.isElevated) continue;
+      final margin = ob.road.halfWidth +
+          (ob.road.roadClass.hasPavement ? _settings.sidewalkM : 0.6);
       // Broad phase: any vertex near this road?
       var near = false;
       for (final v in clipped) {
@@ -589,24 +744,56 @@ class CityLayout {
   /// Does this parcel sit on any carriageway? Tested against the road centre
   /// lines so a lot can never be cut across the road it fronts.
   bool _hitsRoad(Parcel p, {String? exclude}) {
-    for (final road in _roads.values) {
+    final probes = [...p.polygon, p.centroid];
+    final pBox = _Box.of(p.polygon);
+    for (final ob in _obstacles) {
+      final road = ob.road;
       final clearance = road.halfWidth + _settings.sidewalkM * 0.5;
-      for (final v in p.polygon) {
-        if (road.distanceTo(v) < clearance) {
-          // Its own frontage edge sits exactly at the setback, which is outside
-          // the carriageway — only a genuine incursion counts.
-          if (road.id == exclude &&
-              road.distanceTo(v) >= road.halfWidth + _settings.sidewalkM - 0.5) {
-            continue;
-          }
-          return true;
+      // Nowhere near: no curve evaluation, no point loop.
+      if (!ob.box.within(pBox, clearance)) continue;
+      for (final v in probes) {
+        final d = _distanceToSamples(ob.pts, v);
+        if (d >= clearance) continue;
+        // Its own frontage edge sits exactly at the setback, which is outside
+        // the carriageway — only a genuine incursion counts.
+        if (road.id == exclude &&
+            d >= road.halfWidth + _settings.sidewalkM - 0.5) {
+          continue;
         }
+        return true;
       }
-      // A long thin lot can straddle a road without any corner being close to
-      // it, so also check the centre.
-      if (road.distanceTo(p.centroid) < clearance) return true;
     }
     return false;
+  }
+
+  /// Distance from [v] to the nearest ROAD in the network, minus that road's
+  /// half width — i.e. to the curb. Infinite when there are no roads.
+  ///
+  /// Uses the cached samples, so a placement probe costs a scan rather than a
+  /// re-evaluation of every spline in the colony.
+  double distanceToCurb(Vec2 v) {
+    var best = double.infinity;
+    for (final ob in _obstacles) {
+      final d = _distanceToSamples(ob.pts, v) - ob.road.halfWidth;
+      if (d < best) best = d;
+    }
+    return best;
+  }
+
+  static double _distanceToSamples(List<Vec2> pts, Vec2 v) {
+    var best = double.infinity;
+    for (var i = 1; i < pts.length; i++) {
+      final a = pts[i - 1], b = pts[i];
+      final ex = b.e - a.e, en = b.n - a.n;
+      final len2 = ex * ex + en * en;
+      final t = len2 <= 1e-12
+          ? 0.0
+          : (((v.e - a.e) * ex + (v.n - a.n) * en) / len2).clamp(0.0, 1.0);
+      final dx = v.e - (a.e + ex * t), dn = v.n - (a.n + en * t);
+      final d2 = dx * dx + dn * dn;
+      if (d2 < best) best = d2;
+    }
+    return best == double.infinity ? best : math.sqrt(best);
   }
 
   bool _clashes(Parcel p, List<Parcel> others) {

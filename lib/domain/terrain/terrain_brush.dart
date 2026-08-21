@@ -56,6 +56,28 @@ enum TerrainBrushKind {
   /// interpolates along it, cutting through rises and filling dips so the
   /// carriageway holds a constant grade.
   cutFill,
+
+  /// A levelled building pad shaped like its LOT: an oriented rectangle rather
+  /// than a disc.
+  ///
+  /// [pad] circumscribes the lot, so for a 24x32 m parcel it is a 26 m disc —
+  /// wider than the 24 m spacing between neighbours. Every pad therefore
+  /// re-levelled its neighbours' lots to its own datum, the last one emitted
+  /// won, and each building ended up standing on a patchwork 5-7 m deep: flush
+  /// at its centre, buried at one corner, hanging off another. A rectangle
+  /// tiles the way lots actually tile, so a pad levels its own lot and stops.
+  ///
+  /// APPENDED, not inserted: the kind is serialised by index.
+  padBox,
+
+  /// A levelled building pad cut to the LOT'S OWN POLYGON.
+  ///
+  /// Every parcel a subdivider produces is a polygon, not a rectangle — lots
+  /// taper wherever a road bends, and every road bends somewhere. A rectangle
+  /// approximating one either overhangs its neighbour (and re-levels it) or
+  /// falls short of its own corners; no size does neither. The polygon levels
+  /// exactly the ground the lot owns.
+  padPoly,
 }
 
 /// One analytic edit to a body's density field, in the BODY-FIXED frame.
@@ -88,6 +110,7 @@ class TerrainBrush {
     this.falloffM = 0,
     this.benches = 1,
     this.endBF,
+    this.polygonBF = const [],
   })  : assert(radiusM > 0, 'a zero-radius brush cuts nothing'),
         _axis = axisBF.normalized {
     // Bowl geometry, solved from the cavity mouth radius and the depth. A
@@ -132,6 +155,8 @@ class TerrainBrush {
       // clear the cut/fill itself — a pad sliced into a hillside rewrites
       // density well above and below its own datum.
       TerrainBrushKind.pad => radiusM + falloffM + depthM,
+      TerrainBrushKind.padBox => _boxDiagonalM + falloffM + depthM,
+      TerrainBrushKind.padPoly => _polyReachM + falloffM + depthM,
       TerrainBrushKind.steppedPit => radiusM + falloffM + depthM,
       // centreBF is the corridor MIDPOINT, so half its length is the reach
       // along the axis (see [TerrainBrush.cutFill]).
@@ -155,6 +180,8 @@ class TerrainBrush {
       TerrainBrushKind.sphere => radiusM,
       TerrainBrushKind.crater => math.max(radiusM + _rimWidth, _bowlRadius),
       TerrainBrushKind.pad => radiusM + falloffM,
+      TerrainBrushKind.padBox => _boxDiagonalM + falloffM,
+      TerrainBrushKind.padPoly => _polyReachM + falloffM,
       TerrainBrushKind.steppedPit => radiusM + falloffM,
       // centreBF is the corridor midpoint, so |endBF - centreBF| is already
       // the half-length (same convention as the bounding reach above).
@@ -230,6 +257,67 @@ class TerrainBrush {
         falloffM: falloffM,
         tick: tick,
       );
+
+  /// A levelled building pad shaped like the LOT it serves.
+  ///
+  /// [forwardBF] is the lot's depth axis in body-fixed metres (its frontage
+  /// normal); [halfWidthM] runs across the frontage and [halfDepthM] back from
+  /// it. Stored as a far-end point the way a corridor is, so the brush needs no
+  /// field the snapshot does not already carry.
+  factory TerrainBrush.padBox({
+    required Vector3 centreBF,
+    required Vector3 forwardBF,
+    required double halfWidthM,
+    required double halfDepthM,
+    required double datumRadiusM,
+    double falloffM = 12,
+    double maxCutM = 60,
+    int tick = 0,
+  }) =>
+      TerrainBrush(
+        kind: TerrainBrushKind.padBox,
+        centreBF: centreBF,
+        axisBF: centreBF.lengthSquared > 0 ? centreBF : Vector3.unitZ,
+        radiusM: halfWidthM,
+        depthM: maxCutM,
+        datumRadiusM: datumRadiusM,
+        falloffM: falloffM,
+        endBF: centreBF + forwardBF.normalized * math.max(halfDepthM, 0.01),
+        tick: tick,
+      );
+
+  /// A levelled pad cut to [polygonBF] — the lot's own outline, body-fixed and
+  /// lying on the ground.
+  factory TerrainBrush.padPoly({
+    required Vector3 centreBF,
+    required List<Vector3> polygonBF,
+    required double datumRadiusM,
+    double falloffM = 12,
+    double maxCutM = 60,
+    int tick = 0,
+  }) =>
+      TerrainBrush(
+        kind: TerrainBrushKind.padPoly,
+        centreBF: centreBF,
+        axisBF: centreBF.lengthSquared > 0 ? centreBF : Vector3.unitZ,
+        // A nominal radius keeps the "a zero-radius brush cuts nothing" assert
+        // meaningful; the footprint itself comes from the polygon.
+        radiusM: math.max(1.0, _polyRadiusOf(centreBF, polygonBF)),
+        depthM: maxCutM,
+        datumRadiusM: datumRadiusM,
+        falloffM: falloffM,
+        polygonBF: polygonBF,
+        tick: tick,
+      );
+
+  static double _polyRadiusOf(Vector3 centre, List<Vector3> poly) {
+    var far = 0.0;
+    for (final v in poly) {
+      final d = (v - centre).length;
+      if (d > far) far = d;
+    }
+    return far;
+  }
 
   /// An open-pit mine at [centreBF]: a floor [depthM] below [datumRadiusM],
   /// with [benches] terraces stepping up to the rim at [radiusM].
@@ -326,6 +414,26 @@ class TerrainBrush {
   /// Bench count for [TerrainBrushKind.steppedPit]. 1 is a flat-bottomed hole.
   final int benches;
 
+  /// Footprint of a [TerrainBrushKind.padPoly], body-fixed and on the ground.
+  /// Empty for every other kind.
+  final List<Vector3> polygonBF;
+
+  /// Farthest polygon vertex from the centre, for the bounds.
+  double get _polyReachM {
+    var far = 0.0;
+    for (final v in polygonBF) {
+      final d = (v - centreBF).length;
+      if (d > far) far = d;
+    }
+    return far;
+  }
+
+  /// Half-diagonal of a [TerrainBrushKind.padBox] footprint, for its bounds.
+  double get _boxDiagonalM {
+    final halfDepth = endBF == null ? 0.0 : (endBF! - centreBF).length;
+    return math.sqrt(radiusM * radiusM + halfDepth * halfDepth);
+  }
+
   /// Far end of a [TerrainBrushKind.cutFill] corridor (body-fixed metres).
   final Vector3? endBF;
 
@@ -398,6 +506,8 @@ class TerrainBrush {
           hi: groundHiM + rimHeightM,
         );
       case TerrainBrushKind.pad:
+      case TerrainBrushKind.padBox:
+      case TerrainBrushKind.padPoly:
         return (
           lo: math.min(groundLoM, datumRadiusM),
           hi: math.max(groundHiM, datumRadiusM),
@@ -434,6 +544,8 @@ class TerrainBrush {
     // depth offset. The blend keeps the seam continuous, so no isosurface
     // appears at the pad edge.
     if (kind == TerrainBrushKind.pad ||
+        kind == TerrainBrushKind.padBox ||
+        kind == TerrainBrushKind.padPoly ||
         kind == TerrainBrushKind.steppedPit ||
         kind == TerrainBrushKind.cutFill) {
       final ({double weight, double datum})? level = _levelAt(p, w);
@@ -475,6 +587,38 @@ class TerrainBrush {
         // on the ground rather than being foreshortened by the body's curve.
         final lateral = _lateral(w);
         return (weight: _falloffWeight(lateral, radiusM), datum: datumRadiusM);
+
+      case TerrainBrushKind.padPoly:
+        final poly = _poly2;
+        if (poly.length < 6) return null;
+        final flat = w - _axis * w.dot(_axis);
+        return (
+          weight: _falloffWeight(
+              _distanceOutside(poly, flat.dot(_t1), flat.dot(_t2)), 0),
+          datum: datumRadiusM,
+        );
+
+      case TerrainBrushKind.padBox:
+        // Distance OUTSIDE the oriented rectangle, measured in the tangent
+        // plane: zero anywhere inside it, growing beyond its edges. Feeding
+        // that to the falloff with a zero core gives weight 1 across the whole
+        // lot and an even ease-off past its boundary.
+        final end = endBF;
+        if (end == null) return null;
+        final fwd = end - centreBF;
+        final halfDepth = fwd.length;
+        if (halfDepth <= 1e-9) return null;
+        final up = _axis;
+        // Project into the tangent plane so the rectangle lies on the ground
+        // rather than being foreshortened by the body's curve.
+        final flat = w - up * w.dot(up);
+        final f = (fwd - up * fwd.dot(up)).normalized;
+        final side = up.cross(f);
+        final along = (flat.dot(f)).abs() - halfDepth;
+        final across = (flat.dot(side)).abs() - radiusM;
+        final outside = math.sqrt(math.max(along, 0.0) * math.max(along, 0.0) +
+            math.max(across, 0.0) * math.max(across, 0.0));
+        return (weight: _falloffWeight(outside, 0), datum: datumRadiusM);
 
       case TerrainBrushKind.steppedPit:
         final lateral = _lateral(w);
@@ -519,6 +663,49 @@ class TerrainBrush {
       case TerrainBrushKind.crater:
         return null;
     }
+  }
+
+  /// Tangent basis at the pad centre, and the footprint projected into it.
+  /// Built once — [apply] runs per voxel, and re-projecting the outline on
+  /// every sample would dominate the meshing cost.
+  late final Vector3 _t1 = () {
+    final seed = _axis.x.abs() < 0.9 ? Vector3.unitX : Vector3.unitY;
+    return _axis.cross(seed).normalized;
+  }();
+  late final Vector3 _t2 = _axis.cross(_t1);
+  late final List<double> _poly2 = () {
+    final out = <double>[];
+    for (final v in polygonBF) {
+      final w = v - centreBF;
+      final flat = w - _axis * w.dot(_axis);
+      out..add(flat.dot(_t1))..add(flat.dot(_t2));
+    }
+    return out;
+  }();
+
+  /// Distance from (x, y) to the polygon [p] (coordinate pairs): zero anywhere
+  /// inside it, the distance to the nearest edge outside.
+  static double _distanceOutside(List<double> p, double x, double y) {
+    final n = p.length ~/ 2;
+    var inside = false;
+    var best = double.infinity;
+    for (var i = 0, j = n - 1; i < n; j = i++) {
+      final xi = p[i * 2], yi = p[i * 2 + 1];
+      final xj = p[j * 2], yj = p[j * 2 + 1];
+      if ((yi > y) != (yj > y) &&
+          x < (xj - xi) * (y - yi) / (yj - yi) + xi) {
+        inside = !inside;
+      }
+      final ex = xj - xi, ey = yj - yi;
+      final len2 = ex * ex + ey * ey;
+      final t = len2 <= 1e-12
+          ? 0.0
+          : (((x - xi) * ex + (y - yi) * ey) / len2).clamp(0.0, 1.0);
+      final dx = x - (xi + ex * t), dy = y - (yi + ey * t);
+      final d = math.sqrt(dx * dx + dy * dy);
+      if (d < best) best = d;
+    }
+    return inside ? 0.0 : best;
   }
 
   /// Distance from the brush axis, measured perpendicular to it.

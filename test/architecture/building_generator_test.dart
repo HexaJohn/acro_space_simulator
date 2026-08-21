@@ -167,4 +167,61 @@ void main() {
     // The shed covers far more of its plot than the office does.
     expect(shed.footprint.width, greaterThan(office.footprint.width));
   });
+
+  test('storeys follow density: a house is not a tower', () {
+    // Floors used to come from required area over footprint alone, which made
+    // a LOW-density home sixteen storeys on a small plot — arithmetically
+    // reasonable and nothing like the detached house the zoning asked for.
+    const rules = BuildingMassingRules();
+    Parcel lot(double w, double d) => Parcel(
+          id: 'lot',
+          polygon: [
+            Vec2(-w / 2, 0),
+            Vec2(w / 2, 0),
+            Vec2(w / 2, d),
+            Vec2(-w / 2, d),
+          ],
+          frontage: (Vec2(-w / 2, 0), Vec2(w / 2, 0)),
+        );
+
+    final low = rules.massFor(
+        kZoneSpecs['residential']![Density.low]!, lot(18, 23), seed: 1);
+    final med = rules.massFor(
+        kZoneSpecs['residential']![Density.medium]!, lot(24, 28), seed: 1);
+    final high = rules.massFor(
+        kZoneSpecs['residential']![Density.high]!, lot(27, 34), seed: 1);
+
+    expect(low.floors, lessThanOrEqualTo(3), reason: 'a house is not a tower');
+    expect(med.floors, lessThanOrEqualTo(8));
+    expect(high.floors, greaterThan(med.floors),
+        reason: 'towers must still tower');
+  });
+
+  test('the massing is handed a lot, not an already-inset footprint', () {
+    // CityNodes.parcelOf inflates the frame's footprint by the massing's own
+    // setback, because the massing insets whatever it is given. Applied twice,
+    // the two setbacks ate the small buildings alive: a low-density house
+    // arrives 11.6 m wide, loses 6 m to the second inset and another 30% to
+    // coverage, and rendered about four metres across — all of residential
+    // vanished from the city while the towers looked fine.
+    const rules = BuildingMassingRules();
+    const intendedW = 11.6, intendedD = 16.7;
+    const back = 3.0; // BuildingMassingRules.setbackM
+    final inflated = Parcel(
+      id: 'lot',
+      polygon: [
+        Vec2(-(intendedW + back * 2) / 2, 0),
+        Vec2((intendedW + back * 2) / 2, 0),
+        Vec2((intendedW + back * 2) / 2, intendedD + back * 2),
+        Vec2(-(intendedW + back * 2) / 2, intendedD + back * 2),
+      ],
+      frontage: (Vec2(-(intendedW + back * 2) / 2, 0),
+          Vec2((intendedW + back * 2) / 2, 0)),
+    );
+    final m = rules.massFor(
+        kZoneSpecs['residential']![Density.low]!, inflated, seed: 1);
+    // Within coverage of what was intended, not a quarter of it.
+    expect(m.footprint.width, greaterThan(intendedW * 0.6));
+    expect(m.footprint.depth, greaterThan(intendedD * 0.6));
+  });
 }

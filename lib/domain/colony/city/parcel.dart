@@ -74,11 +74,31 @@ enum RoadClass {
   ///
   /// Appended after the paved tiers because saves persist this enum by INDEX;
   /// inserting it first would turn every saved street into a path.
-  path('Dirt Path', 4.0, 1, 20);
+  path('Dirt Path', 4.0, 1, 20),
+
+  /// The service road down the middle of a block.
+  ///
+  /// The thing that makes a downtown block continuous. Bins, loading, fire
+  /// escapes and back-of-house parking all come off the alley, which is
+  /// precisely why the STREET frontage can be an unbroken run of shopfronts —
+  /// take the alley away and every one of those has to punch a hole through
+  /// the street wall instead. No lots front it, no lamps, no curbs.
+  alley('Alley', 6.0, 1, 15),
+
+  /// A carriageway on piers, carried over whatever is beneath it.
+  elevated('Elevated Highway', 24.0, 3, 5),
+
+  /// Elevated heavy rail on a steel trestle — the L.
+  ///
+  /// A transit line is a ROAD to the network (it is a route between places,
+  /// it splits at junctions, the editor draws it the same way) and nothing
+  /// like one to the renderer or the traffic pass: no cars run on it, no lots
+  /// front it, and what it carries is a train.
+  transit('Elevated Rail', 9.0, 1, 4);
 
   final String label;
 
-  /// Carriageway width in metres (kerb to kerb).
+  /// Carriageway width in metres (curb to curb).
   final double width;
 
   /// Lanes per direction — used for traffic capacity and lamp spacing.
@@ -99,6 +119,47 @@ enum RoadClass {
   bool get paved => this != RoadClass.path;
 
   double get halfWidth => width / 2;
+
+  /// How far the deck stands above the ground, metres. Zero is at grade.
+  ///
+  /// The elevated tiers are deliberately at different heights: a highway has
+  /// to clear a lorry on the street below it, and the rail has to clear the
+  /// highway. Stack them at the same height and they intersect.
+  double get deckHeightM => switch (this) {
+        RoadClass.elevated => 9.5,
+        RoadClass.transit => 7.2,
+        _ => 0,
+      };
+
+  bool get isElevated => deckHeightM > 0;
+
+  /// Whether lots front this road.
+  ///
+  /// An alley serves the BACKS of lots, and nothing at all fronts a structure
+  /// on piers. Platting against either produced lots that faced a service
+  /// road or a column line, which is the surest way to break a street wall
+  /// you have just finished building.
+  bool get platsLots => switch (this) {
+        RoadClass.alley || RoadClass.elevated || RoadClass.transit => false,
+        _ => true,
+      };
+
+  /// Whether road vehicles run on it. False for rail.
+  bool get carriesCars => this != RoadClass.transit;
+
+  /// Whether it gets a pavement, curbs and street furniture. An alley has
+  /// none of it; neither does anything in the air.
+  bool get hasPavement => switch (this) {
+        RoadClass.alley || RoadClass.elevated || RoadClass.transit => false,
+        RoadClass.path => false,
+        _ => true,
+      };
+
+  /// Whether the junction pass gives it signals, stop bars and crossings.
+  bool get signalised => switch (this) {
+        RoadClass.street || RoadClass.avenue || RoadClass.highway => true,
+        _ => false,
+      };
 }
 
 /// A road as a SPLINE rather than a run of tiles.
@@ -116,11 +177,20 @@ class RoadSpline {
   /// A closed loop (ring road) joins its last control point back to its first.
   final bool closed;
 
+  /// Laid where the air is NOT breathable, so pedestrians travel in a sealed
+  /// pressurised tube alongside the carriageway rather than on a pavement.
+  ///
+  /// Captured at BUILD time and preserved, matching the rule the grid's
+  /// `roadSealed` set already follows for cell roads: terraforming a world
+  /// later does not silently unseal everything that was built for vacuum.
+  final bool sealed;
+
   const RoadSpline({
     required this.id,
     required this.controls,
     this.roadClass = RoadClass.street,
     this.closed = false,
+    this.sealed = false,
   });
 
   double get width => roadClass.width;
@@ -286,6 +356,19 @@ class Parcel {
   /// the road is later moved or reclassified.
   final (Vec2, Vec2)? frontage;
 
+  /// A SECOND street edge, for a lot on a corner.
+  ///
+  /// A corner building is a different building. It has two public faces, so
+  /// neither of them can be the blank party wall a mid-block lot puts on its
+  /// sides; its entrance goes on the chamfer between them; and it is the one
+  /// building on the block that gets to be taller, because it is the one you
+  /// can see from two directions. Every one of those needs to know WHICH edge
+  /// is the other street, which is why this is stored on the plat rather than
+  /// guessed from geometry later.
+  final (Vec2, Vec2)? sideStreet;
+
+  bool get isCorner => sideStreet != null;
+
   final ParcelUse use;
 
   /// True when the player drew this lot by hand. Manual parcels are never
@@ -298,9 +381,58 @@ class Parcel {
     required this.polygon,
     this.roadId,
     this.frontage,
+    this.sideStreet,
     this.use = ParcelUse.unzoned,
     this.manual = false,
   });
+
+  /// The largest rectangle CENTRED on the centroid and aligned to the frontage
+  /// that lies wholly INSIDE this lot.
+  ///
+  /// [buildableExtent] is a bounding box, which for a rectangular lot is the
+  /// lot and for a tapered one is bigger than it. Subdivision along a kinked
+  /// road produces plenty of tapered quads, and a pad cut to the bounding box
+  /// there does two wrong things at once: it spills over the narrow end into
+  /// the neighbour and re-levels it, and it still misses its own wide corners.
+  /// A rectangle that fits INSIDE the lot can do neither.
+  ({double width, double depth}) get inscribedExtent {
+    final box = buildableExtent;
+    if (polygon.length < 3 || box.width <= 0 || box.depth <= 0) return box;
+    final f = frontage;
+    final along = f == null ? const Vec2(1, 0) : (f.$2 - f.$1).normalized;
+    final away = along.perp;
+    final c = centroid;
+
+    bool fitsAt(double scale) {
+      for (final sw in const [-1.0, 1.0]) {
+        for (final sd in const [-1.0, 1.0]) {
+          final hw = sw * box.width * scale / 2;
+          final hd = sd * box.depth * scale / 2;
+          if (!contains(Vec2(
+            c.e + along.e * hw + away.e * hd,
+            c.n + along.n * hw + away.n * hd,
+          ))) {
+            return false;
+          }
+        }
+      }
+      return true;
+    }
+
+    // Convex lots make corner containment sufficient, so a bisection on one
+    // uniform scale is enough — and cheap enough to run per lot per edit.
+    if (fitsAt(1.0)) return box;
+    var lo = 0.0, hi = 1.0;
+    for (var i = 0; i < 20; i++) {
+      final mid = (lo + hi) / 2;
+      if (fitsAt(mid)) {
+        lo = mid;
+      } else {
+        hi = mid;
+      }
+    }
+    return (width: box.width * lo, depth: box.depth * lo);
+  }
 
   /// Shoelace area in m². Always positive for a correctly wound polygon.
   double get area {
@@ -458,6 +590,7 @@ class Parcel {
         polygon: polygon,
         roadId: roadId,
         frontage: frontage,
+        sideStreet: sideStreet,
         use: use ?? this.use,
         manual: manual,
       );

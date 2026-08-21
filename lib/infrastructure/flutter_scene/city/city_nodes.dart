@@ -29,9 +29,15 @@ import '../../../domain/scatter/mesh_builder.dart';
 import '../../../domain/scatter/prop_mesh.dart';
 import '../../../domain/shared/quaternion.dart';
 import '../../../domain/shared/vector3.dart';
+import '../../../domain/architecture/architecture_style.dart';
 import '../../../domain/architecture/city_lighting.dart';
 import '../coord_convert.dart';
 import 'city_materials.dart';
+import '../../../domain/architecture/building_massing.dart';
+import 'elevated_structure.dart';
+import 'lot_features.dart';
+import 'street_furniture.dart';
+import 'vehicle_meshes.dart';
 import 'city_textures.dart';
 
 /// One generated archetype, uploaded.
@@ -45,7 +51,7 @@ class _CityMesh {
 /// sampler of it: the patch pass used to divide by 5 against a 6-band texture,
 /// which quietly recoloured commercial lots industrial-tan and support decks
 /// cursor-cyan.
-const int kGroundSwatches = 7;
+const int kGroundSwatches = 9;
 
 class CityNodes {
   CityNodes(this._scene);
@@ -54,6 +60,16 @@ class CityNodes {
 
   /// Off switch for profiling, matching the other node families.
   static bool enabled = true;
+
+  /// Milliseconds spent in each phase of the LAST update, and what each one
+  /// produced. Read by the studio's frame breakdown.
+  ///
+  /// A frame counter alone says the city is slow; it does not say whether that
+  /// is the structural rebuild, the per-frame traffic pass, or simply too many
+  /// draw calls. Timing the phases separately is the difference between
+  /// knowing there is a problem and knowing where it is.
+  static final Map<String, double> phaseMs = {};
+  static final Map<String, int> phaseCount = {};
 
   /// Beyond this the whole colony is skipped — from far enough out a city is
   /// smaller than a pixel and the terrain's own texture carries it.
@@ -78,6 +94,76 @@ class CityNodes {
   static String cursorBodyId = '';
   static double cursorSizeM = 24;
 
+  /// Depth of the ground cursor. Separate from [cursorSizeM] because the sites
+  /// it previews are not square — a starport is 1800 x 2600 m.
+  static double cursorDepthM = 24;
+
+  /// True when what is held cannot be placed where the cursor is.
+  static bool cursorBad = false;
+
+  /// Whether to draw road traffic at all.
+  static bool traffic = true;
+
+  /// Whether to draw lot fences, shop signs, car parks and their cars.
+  static bool lotFeatures = true;
+
+  /// Set when the colony's roads are sealed — an airless world, where parked
+  /// vehicles are rovers rather than cars.
+  static bool sealedWorld = false;
+
+  /// Whether curbside bays are used. OFF makes a colony read as newer, or as
+  /// somewhere parking is not tolerated on the carriageway; ON fills the verge
+  /// the way an older street does. Optional because it is a look, not a rule.
+  static bool onStreetParking = true;
+
+  /// Ceiling on parked cars per colony. They are static geometry, unlike road
+  /// traffic, but a thousand lots each with a full car park is still a lot of
+  /// triangles for something nobody counts.
+  static const int _maxParkedCars = 400;
+
+  /// Scales how many vehicles a road carries. A hook for the colony's own
+  /// congestion once that reaches the frame; 1.0 is an ordinary working day.
+  static double trafficDensity = 1.0;
+
+  /// Hard ceiling on vehicles per frame. The whole set is rebuilt every frame
+  /// and pushed through the transient buffer, which is the same budget the
+  /// asteroid fields already have to respect.
+  static const int _maxVehicles = 220;
+
+  final List<fs.Node> _trafficNodes = [];
+
+  /// One uploaded mesh per vehicle kind, built the first time it is needed.
+  ///
+  /// This is what makes traffic cheap: the geometry goes to the GPU ONCE and
+  /// every car afterwards costs a 4x4 matrix. Re-baking each vehicle into a
+  /// per-frame mesh meant uploading thousands of vertices sixty times a second
+  /// for shapes that never change.
+  final Map<VehicleKind, _CityMesh> _vehicleMeshes = {};
+
+  _CityMesh _vehicleMesh(VehicleKind kind) =>
+      _vehicleMeshes.putIfAbsent(kind, () {
+        final body = MeshBuilder();
+        final glass = MeshBuilder();
+        VehicleMeshes.emitModel(body, glass, kind);
+        return _CityMesh(_geometryOf(body.build()), _geometryOf(glass.build()));
+      });
+
+  // ---- Placement heatmap -------------------------------------------------
+  //
+  // A sprawling installation cannot go just anywhere: it needs a plot clear of
+  // roads and other plots, within reach of a street, on ground it can be cut
+  // into. Refusing the player's click and printing why is a poor way to say
+  // that. These paint the ANSWER on the ground before the click.
+
+  /// Candidate site centres, body-fixed.
+  static List<Vector3> heatBF = const [];
+
+  /// Verdict per centre: 0 placeable, 1 too steep, 2 blocked.
+  static List<int> heatKind = const [];
+
+  /// Edge length of one heatmap cell, metres.
+  static double heatCellM = 0;
+
   /// The road being DRAWN: committed control points plus the hover point, in
   /// body-fixed metres. The editor writes it; the cursor pass draws it as a
   /// ghost ribbon so the player sees the road before paying for it.
@@ -96,7 +182,52 @@ class CityNodes {
   /// the whole point of keeping it separate from them.
   fs.Node? _cursorNode;
 
-  final BuildingLibrary _library = BuildingLibrary();
+  /// Lot-size quantisation and variant count for the building archetypes.
+  ///
+  /// These are the DRAW CALL dial. Every distinct archetype is its own
+  /// uploaded mesh and its own submission, so a colony's cost at the GPU is
+  /// driven by how many different buildings it asks for, not by how many it
+  /// has: 670 buildings drew in 92 calls off 41 archetypes. Coarser buckets
+  /// and fewer variants collapse that; a street of identical houses is the
+  /// price.
+  static double archetypeBucketM = 6;
+  static int archetypeVariants = 4;
+
+  /// The architecture kit the whole colony is built in.
+  ///
+  /// A street wall by default, because that is what a city looks like: the
+  /// buildings stand on their property lines, meet their neighbours, and put
+  /// the parking round the back. The old setback-box idiom is still here as
+  /// [ArchitectureStyle.utilitarian] and is still right for a works or a
+  /// retail shed — it just should not be the whole world.
+  static ArchitectureStyle style = ArchitectureStyle.masonryStreet;
+
+  static BuildingLibrary _newLibrary() => BuildingLibrary(
+        generator: const BuildingGenerator().withStyle(style),
+        bucketM: archetypeBucketM,
+        variants: archetypeVariants,
+      );
+
+  BuildingLibrary _library = _newLibrary();
+  double _libraryBucketM = archetypeBucketM;
+  int _libraryVariants = archetypeVariants;
+  String _libraryStyle = style.id;
+
+  /// Rebuild the archetype library if its knobs moved. Everything already
+  /// uploaded is keyed by the old quantisation, so it all has to go.
+  void _syncLibrary() {
+    if (_libraryBucketM == archetypeBucketM &&
+        _libraryVariants == archetypeVariants &&
+        _libraryStyle == style.id) {
+      return;
+    }
+    _libraryBucketM = archetypeBucketM;
+    _libraryVariants = archetypeVariants;
+    _libraryStyle = style.id;
+    _library = _newLibrary();
+    _uploaded.clear();
+    _builtKey = ''; // forces the structural rebuild on the next frame
+  }
   final Map<BuildingArchetype, _CityMesh> _uploaded = {};
 
   /// Batches, each pinned to a body-fixed anchor. Instance transforms are
@@ -108,6 +239,15 @@ class CityNodes {
 
   /// What the last rebuild was keyed on, so a static colony costs nothing.
   String _builtKey = '';
+
+  /// Force the next frame to rebuild the colony's structural geometry.
+  ///
+  /// The structural pass is keyed on what the COLONY looks like, which is
+  /// right — a static city should not be re-meshed sixty times a second — but
+  /// it means a renderer-side switch (street furniture, say) changes nothing
+  /// until something in the city does. The studio's toggles need this or they
+  /// appear to be dead.
+  void invalidate() => _builtKey = '';
   int _drawCalls = 0;
 
   /// Instances above this in one draw overflow the engine's per-frame transient
@@ -203,14 +343,31 @@ class CityNodes {
     // string compare per frame rather than a scene rebuild.
     final key = '${snap.buildings.length}|${snap.roads.length}|'
         '${snap.patches.length}|${detail.index}|${byBody.keys.join(",")}';
+    _syncLibrary();
+    final sw = Stopwatch()..start();
+    var rebuiltThisFrame = false;
     if (_builtKey != key || _batches.isEmpty) {
       _builtKey = key;
       _rebuild(snap, byBody, detail);
+      rebuiltThisFrame = true;
     }
+    phaseMs['city.rebuild'] = rebuiltThisFrame ? sw.elapsedMicroseconds / 1000 : 0;
+    sw.reset();
     // Every frame: re-place the anchors. A planet spins, so even a completely
     // static colony needs new node matrices — but only the matrices.
     _placeAnchors(snap, origin);
+    phaseMs['city.anchors'] = sw.elapsedMicroseconds / 1000;
+    sw.reset();
+    _syncTraffic(snap, origin);
+    phaseMs['city.traffic'] = sw.elapsedMicroseconds / 1000;
+    sw.reset();
     _syncCursor(snap, origin);
+    phaseMs['city.cursor'] = sw.elapsedMicroseconds / 1000;
+    phaseCount['draws'] = _drawCalls;
+    phaseCount['batches'] = _batches.length;
+    phaseCount['meshes'] = _uploaded.length;
+    phaseCount['buildings'] = snap.buildings.length;
+    phaseCount['trafficNodes'] = _trafficNodes.length;
     debugLine =
         'city: ${snap.buildings.length} bldg, $_drawCalls draws (${detail.name}), '
         'meshes ${_uploaded.length}';
@@ -306,9 +463,15 @@ class CityNodes {
         final spec = specOf(b);
         final parcel = parcelOf(b);
         final seed = b.id.hashCode;
+        // The style is part of the key here for the same reason it is part of
+        // it inside the library: these two maps are looked up with keys built
+        // independently, and a key that forgot the style would upload one
+        // building's mesh and then serve it for a different kit's.
         final key = BuildingArchetype.of(spec, parcel,
             detail: detail, seed: seed, bucketM: _library.bucketM,
-            variants: _library.variants);
+            variants: _library.variants,
+            styleId: style.id,
+            corner: b.corner);
         _uploaded.putIfAbsent(key, () {
           final built = _library.get(spec, parcel, seed: seed, detail: detail);
           return _CityMesh(
@@ -320,8 +483,233 @@ class CityNodes {
       }
       _emit(groups, bodyId: entry.key, anchorBF: anchorBF);
       _emitRoads(snap, bodyId: entry.key, anchorBF: anchorBF);
+      _emitLotFeatures(entry.value, bodyId: entry.key, anchorBF: anchorBF);
       _emitPatches(snap, bodyId: entry.key, anchorBF: anchorBF);
     }
+  }
+
+  /// Vehicles running the colony's roads.
+  ///
+  /// Rebuilt every frame, unlike the buildings: traffic MOVES, and the
+  /// structural rebuild only fires when the colony's shape changes. Derived
+  /// entirely from the frame — road polylines plus [WorldSnapshot.epoch] — the
+  /// way street lamps and junctions already are, so there is no traffic state
+  /// anywhere in the sim, nothing on the wire, and every client watching the
+  /// same tick sees the same cars in the same places.
+  ///
+  /// COSMETIC. Nothing here routes, yields, or knows a signal exists; vehicles
+  /// slide along their road and wrap. It is scenery, and the moment it stops
+  /// being scenery it belongs in the tick instead.
+  void _syncTraffic(WorldSnapshot snap, FloatingOrigin origin) {
+    for (final n in _trafficNodes) {
+      _scene.remove(n);
+    }
+    _trafficNodes.clear();
+    if (!traffic) return;
+
+    final byBody = <String, List<RoadSnapshot>>{};
+    for (final r in snap.roads) {
+      (byBody[r.body] ??= []).add(r);
+    }
+
+    for (final entry in byBody.entries) {
+      final body = snap.bodies[entry.key];
+      if (body == null) continue;
+      // Anchor on the first road point: traffic is rebuilt every frame, so it
+      // cannot use the structural batches' anchors — but it must share their
+      // FRAME, which the body transform below supplies.
+      final first = entry.value.firstWhere((r) => r.points.length >= 3,
+          orElse: () => entry.value.first);
+      if (first.points.length < 3) continue;
+      final anchorBF =
+          Vector3(first.points[0], first.points[1], first.points[2]);
+
+      final byKind = <VehicleKind, List<vm.Matrix4>>{};
+      final trainBody = MeshBuilder();
+      final trainGlass = MeshBuilder();
+      var placed = 0;
+
+      for (final road in entry.value) {
+        if (placed >= _maxVehicles) break;
+        final pts = <Vector3>[];
+        for (var i = 0; i + 2 < road.points.length; i += 3) {
+          pts.add(Vector3(road.points[i] - anchorBF.x,
+              road.points[i + 1] - anchorBF.y, road.points[i + 2] - anchorBF.z));
+        }
+        if (pts.length < 2) continue;
+
+        // Cumulative length, so a vehicle can be placed at a distance rather
+        // than at a vertex — otherwise they would snap between samples.
+        final cum = <double>[0];
+        for (var i = 1; i < pts.length; i++) {
+          cum.add(cum[i - 1] + (pts[i] - pts[i - 1]).length);
+        }
+        final total = cum.last;
+        if (total < 30) continue;
+
+        final cls = RoadClass
+            .values[road.roadClassIndex.clamp(0, RoadClass.values.length - 1)];
+
+        // Rail carries a TRAIN, not cars.
+        if (!cls.carriesCars) {
+          ElevatedStructure.emitTrain(
+            trainBody,
+            trainGlass,
+            pts: pts,
+            anchorBF: anchorBF,
+            lengthM: total,
+            epochS: snap.epoch,
+            seed: road.points.length,
+          );
+          continue;
+        }
+
+        // Metres of road per vehicle, and speed, PER CLASS.
+        //
+        // Both were derived from `cls.index` arithmetic, which happened to
+        // work while there were four classes and broke the moment there were
+        // seven: the spacing divisor `110 - index*22` reached zero at the
+        // elevated tier and went negative at rail. An enum's index is not a
+        // quantity — writing the quantity down is both correct and readable.
+        final (spacingM, speed) = switch (cls) {
+          RoadClass.street => (110.0, 8.0),
+          RoadClass.avenue => (88.0, 13.0),
+          RoadClass.highway => (66.0, 26.0),
+          RoadClass.elevated => (70.0, 24.0),
+          RoadClass.alley => (200.0, 4.0),
+          RoadClass.path => (150.0, 6.0),
+          RoadClass.transit => (0.0, 0.0),
+        };
+        if (spacingM <= 0) continue;
+        final perLane = (total / spacingM * trafficDensity).floor();
+        if (perLane <= 0) continue;
+        final family =
+            road.sealed ? VehicleKind.airless : VehicleKind.road;
+        final seed = road.points.length * 2654435761 + entry.key.hashCode;
+
+        for (var lane = 0; lane < 2; lane++) {
+          final dirSign = lane == 0 ? 1.0 : -1.0;
+          for (var i = 0; i < perLane && placed < _maxVehicles; i++) {
+            final h = _hash(seed + lane * 7919 + i * 104729);
+            final kind = family[h % family.length];
+            // Longer vehicles need more room; spacing them by their own length
+            // keeps a semi from sitting inside the car behind it.
+            final phase = (h >> 8 & 0xFFFF) / 65536.0;
+            var d = (cum.last * (i + phase) / perLane +
+                    dirSign * snap.epoch * speed) %
+                total;
+            if (d < 0) d += total;
+            final at = _alongPolyline(pts, cum, d);
+            if (at == null) continue;
+            final fwd = at.$2 * dirSign;
+            final up = (at.$1 + anchorBF).normalized;
+            final side = fwd.cross(up).normalized;
+            // Keep right of the centreline, like everything else does — and
+            // ride the DECK on an elevated road rather than the ground its
+            // columns stand on.
+            final offset =
+                side * (road.halfWidthM * 0.5) + up * cls.deckHeightM;
+            // Model space is +Y forward, +Z up, so the instance rotation is
+            // the basis (side, forward, up) expressed as a quaternion.
+            final rot = Quaternion.fromBasis(side, fwd, up);
+            (byKind[kind] ??= []).add(vm.Matrix4.compose(
+              vm.Vector3(
+                  lengthToScene((at.$1 + offset).x),
+                  lengthToScene((at.$1 + offset).y),
+                  lengthToScene((at.$1 + offset).z)),
+              quatToScene(rot),
+              // UNIT scale: `VehicleMeshes.emit` already builds its vertices
+              // in scene units, unlike the building library which works in
+              // metres. Applying the metres-to-scene factor again here made
+              // every vehicle a thousand times too small — present, drawn, and
+              // far too little to see.
+              vm.Vector3.all(1.0),
+            ));
+            placed++;
+          }
+        }
+      }
+
+      byKind.forEach((kind, transforms) {
+        final mesh = _vehicleMesh(kind);
+        for (final (geometry, material) in [
+          (mesh.solid, CityMaterials.facade),
+          (mesh.glazing, CityMaterials.glazing),
+        ]) {
+          if (geometry == null) continue;
+          for (var start = 0;
+              start < transforms.length;
+              start += _maxPerDraw) {
+            final end = math.min(start + _maxPerDraw, transforms.length);
+            final instanced =
+                fs.InstancedMesh(geometry: geometry, material: material);
+            for (var i = start; i < end; i++) {
+              instanced.addInstance(transforms[i]);
+            }
+            final node = fs.Node()
+              ..addComponent(fs.InstancedMeshComponent(instanced));
+            final bodyWorld = Vector3(body.px, body.py, body.pz);
+            final bodyQuat = Quaternion(body.qw, body.qx, body.qy, body.qz);
+            node.localTransform = vm.Matrix4.compose(
+              origin.worldToScene(bodyWorld + bodyQuat.rotate(anchorBF)),
+              quatToScene(bodyQuat),
+              vm.Vector3.all(1.0),
+            );
+            _scene.add(node);
+            _trafficNodes.add(node);
+          }
+        }
+      });
+
+      // The train. Built as ordinary geometry rather than instanced: there is
+      // at most one set per line and its cars are already one mesh, so an
+      // instanced draw would cost a buffer upload to save nothing.
+      for (final (builder, material) in [
+        (trainBody, CityMaterials.facade),
+        (trainGlass, CityMaterials.glazing),
+      ]) {
+        final mesh = builder.build();
+        if (mesh.isEmpty) continue;
+        final geometry = _geometryOf(mesh);
+        if (geometry == null) continue;
+        final node = fs.Node(
+          mesh: fs.Mesh.primitives(
+              primitives: [fs.MeshPrimitive(geometry, material)]),
+        );
+        final bodyWorld = Vector3(body.px, body.py, body.pz);
+        final bodyQuat = Quaternion(body.qw, body.qx, body.qy, body.qz);
+        node.localTransform = vm.Matrix4.compose(
+          origin.worldToScene(bodyWorld + bodyQuat.rotate(anchorBF)),
+          quatToScene(bodyQuat),
+          vm.Vector3.all(1.0),
+        );
+        _scene.add(node);
+        _trafficNodes.add(node);
+      }
+    }
+  }
+
+  /// Point and forward direction [d] metres along a polyline.
+  static (Vector3, Vector3)? _alongPolyline(
+      List<Vector3> pts, List<double> cum, double d) {
+    for (var i = 1; i < pts.length; i++) {
+      if (d > cum[i]) continue;
+      final seg = pts[i] - pts[i - 1];
+      final len = seg.length;
+      if (len < 1e-6) continue;
+      final t = ((d - cum[i - 1]) / len).clamp(0.0, 1.0);
+      return (pts[i - 1] + seg * t, seg.normalized);
+    }
+    return null;
+  }
+
+  /// A cheap integer scramble, so two vehicles from adjacent indices do not
+  /// come out the same model at the same offset.
+  static int _hash(int x) {
+    var h = x & 0x7FFFFFFF;
+    h = (h ^ (h >> 15)) * 0x2C1B3C6D & 0x7FFFFFFF;
+    h = (h ^ (h >> 12)) * 0x297A2D39 & 0x7FFFFFFF;
+    return h ^ (h >> 15);
   }
 
   /// Draw (or clear) the editor's ground cursor.
@@ -348,21 +736,50 @@ class CityNodes {
         .normalized;
     final north = up.cross(east);
     final h = cursorSizeM / 2;
+    final hd = cursorDepthM / 2;
     // Above every patch kind, so the cursor always reads on top of whatever it
     // is hovering over.
     final lift = up * 0.3;
 
     final m = MeshBuilder();
     const u = 5.5 / kGroundSwatches; // the cursor swatch
+
+    // Heatmap first, so the cursor and the road ghost draw over it.
+    if (heatBF.length == heatKind.length && heatCellM > 0) {
+      final hc = heatCellM / 2;
+      for (var i = 0; i < heatBF.length; i++) {
+        // A gap between cells: an unbroken sheet reads as one slab of colour
+        // rather than as a sampled field, and hides the ground it describes.
+        final e = east * (hc * 0.86), n2 = north * (hc * 0.86);
+        final o = heatBF[i] - at;
+        final hu = switch (heatKind[i]) {
+              0 => 7.5,
+              1 => 8.5,
+              _ => 6.5,
+            } /
+            kGroundSwatches;
+        final q = [
+          o - e - n2 + lift * 0.5,
+          o + e - n2 + lift * 0.5,
+          o + e + n2 + lift * 0.5,
+          o - e + n2 + lift * 0.5,
+        ];
+        final qi = [for (final c in q) m.vertex(_scenePos(c), up, hu, 0.5)];
+        m.quad(qi[0], qi[1], qi[2], qi[3]);
+      }
+    }
     if (cursorBF != null) {
       final corners = [
-        east * -h + north * -h + lift,
-        east * h + north * -h + lift,
-        east * h + north * h + lift,
-        east * -h + north * h + lift,
+        east * -h + north * -hd + lift,
+        east * h + north * -hd + lift,
+        east * h + north * hd + lift,
+        east * -h + north * hd + lift,
       ];
+      // The blocked swatch is the one the bad road ghost already uses, so
+      // "you cannot put that there" reads the same whatever tool is held.
+      final cu = cursorBad ? 6.5 / kGroundSwatches : u;
       final idx = [
-        for (final c in corners) m.vertex(_scenePos(c), up, u, 0.5)
+        for (final c in corners) m.vertex(_scenePos(c), up, cu, 0.5)
       ];
       m.quad(idx[0], idx[1], idx[2], idx[3]);
     }
@@ -422,7 +839,6 @@ class CityNodes {
     required Vector3 anchorBF,
   }) {
     final m = MeshBuilder();
-    const kinds = 5;
     var any = false;
     for (final p in snap.patches) {
       if (p.body != bodyId) continue;
@@ -444,17 +860,25 @@ class CityNodes {
         centre + east * -hw + north * hd + lift,
       ];
       // A road maps its whole quad ACROSS its swatch, so the tile's markings
-      // and kerbs land on the pavement. Every other kind is a flat colour and
+      // and curbs land on the pavement. Every other kind is a flat colour and
       // samples the swatch CENTRE, where no filtering or mip level can bleed a
       // neighbouring kind's colour in.
       final List<(double, double)> uv;
       if (p.kind == CityPatchSnapshot.kindRoad) {
         // Inset by a texel's worth so the sampler cannot reach the next swatch.
         const e = 0.004;
-        final u0 = p.kind / kinds + e, u1 = (p.kind + 1) / kinds - e;
+        final u0 = p.kind / kGroundSwatches + e,
+            u1 = (p.kind + 1) / kGroundSwatches - e;
         uv = [(u0, 1.0), (u1, 1.0), (u1, 0.0), (u0, 0.0)];
       } else {
-        final u = (p.kind + 0.5) / kinds;
+        // Against kGroundSwatches, NOT the number of patch kinds. The palette
+        // has grown twice — cursor and refusal swatches, then the two the
+        // placement heatmap paints with — and a local divisor of 5 does not
+        // grow with it. Every patch was reading the wrong band: residential
+        // sampled commercial blue, industrial sampled refusal red, support
+        // sampled the heatmap amber. Exactly the drift kGroundSwatches was
+        // introduced to stop, still live at this one call site.
+        final u = (p.kind + 0.5) / kGroundSwatches;
         uv = [(u, 0.5), (u, 0.5), (u, 0.5), (u, 0.5)];
       }
       final idx = [
@@ -476,6 +900,95 @@ class CityNodes {
     _drawCalls++;
   }
 
+  /// Fences and shop signs, one mesh per colony.
+  ///
+  /// What a lot is zoned decides what stands on its boundary: a picket fence
+  /// round a house, chain link round a works, a lit board over a shopfront.
+  /// Derived from the building's own type, which already encodes both kind and
+  /// density, so nothing new crosses the wire.
+  void _emitLotFeatures(
+    List<BuildingSnapshot> buildings, {
+    required String bodyId,
+    required Vector3 anchorBF,
+  }) {
+    if (!lotFeatures) return;
+    final solid = MeshBuilder();
+    final glow = MeshBuilder();
+    final apron = MeshBuilder();
+    final cars = MeshBuilder();
+    var any = false;
+    var carBudget = _maxParkedCars;
+
+    for (final b in buildings) {
+      final edging = LotFeatures.edgingFor(b.type);
+      final sign = LotFeatures.signFor(b.type);
+      final spec = specOf(b);
+      final spaces = const BuildingMassingRules().parkingSpaces(spec);
+      if (edging == LotEdging.none && !sign && spaces <= 0) continue;
+
+      final at = Vector3(b.px, b.py, b.pz) - anchorBF;
+      final up = (at + anchorBF).normalized;
+      // The building's own facing: its orientation carries the surface basis
+      // plus the spin onto its street, so +Y is the way it fronts.
+      final q = Quaternion(b.qw, b.qx, b.qy, b.qz);
+      final along = q.rotate(Vector3.unitY).normalized;
+
+      // Out to the LOT LINE, not the building's own edge: the footprint has
+      // already been inset by its setback and shrunk by its coverage, and a
+      // fence hugging the walls would enclose no garden at all.
+      final back = lotSetbackFor(spec);
+      final cover = lotCoverageFor(spec);
+      final halfW = b.siteWidthM / cover / 2 + back;
+      final halfD = b.siteDepthM / cover / 2 + back;
+
+      if (edging != LotEdging.none) {
+        LotFeatures.emitFence(solid, edging, at, along, up, halfW, halfD);
+        any = true;
+      }
+      if (sign) {
+        LotFeatures.emitSign(solid, glow, at, along, up, halfW, halfD,
+            math.max(1.0, b.siteWidthM / 18));
+        any = true;
+      }
+      if (spaces > 0 && carBudget > 0) {
+        // Occupancy has no field on the wire yet, so it is DERIVED: a
+        // deterministic per-lot fraction, so a district reads as busy or quiet
+        // and two clients agree, without pretending to know the real number.
+        final h = (b.id.hashCode & 0x7FFFFFFF) % 1000 / 1000.0;
+        carBudget -= LotFeatures.emitParking(
+          apron, cars, glow, at, along, up, halfW, halfD,
+          spaces: spaces,
+          occupancy: 0.25 + h * 0.6,
+          airless: sealedWorld,
+          maxCars: math.min(8, carBudget),
+        );
+        any = true;
+      }
+    }
+    if (!any) return;
+
+    for (final (builder, material) in [
+      (solid, CityMaterials.facade),
+      (apron, CityMaterials.road),
+      (cars, CityMaterials.facade),
+      // The sign face rides the glazing material, so it lights at night the
+      // way the windows already do.
+      (glow, CityMaterials.glazing),
+    ]) {
+      final mesh = builder.build();
+      if (mesh.isEmpty) continue;
+      final geometry = _geometryOf(mesh);
+      if (geometry == null) continue;
+      final node = fs.Node(
+        mesh:
+            fs.Mesh.primitives(primitives: [fs.MeshPrimitive(geometry, material)]),
+      );
+      _scene.add(node);
+      _batches.add(_CityBatch(node, bodyId, anchorBF));
+      _drawCalls++;
+    }
+  }
+
   /// Road ribbons and their street lamps.
   ///
   /// Built as one mesh per colony rather than instanced: a road is a unique
@@ -491,6 +1004,27 @@ class CityNodes {
 
     final ribbon = MeshBuilder();
     final dirtRibbon = MeshBuilder();
+    final alleyRibbon = MeshBuilder();
+    // Everything in the air: steel, concrete, and the deck it carries.
+    final airSolid = MeshBuilder();
+    final airDeck = MeshBuilder();
+    final airGlow = MeshBuilder();
+    // Pavement clutter, budgeted across the colony — a city of ten thousand
+    // hydrants is a city nobody can draw.
+    final propSolid = MeshBuilder();
+    final propGlow = MeshBuilder();
+    var propBudget = 2600;
+    // Every road END, with the point just inside it (for the leg direction).
+    // Roads are already SPLIT at their crossings, so an intersection is simply
+    // a place where three or more ends meet — the topology is there, it had
+    // just never been drawn, which is why crossings read as two ribbons laid
+    // over one another.
+    final ends = <(Vector3, Vector3, double, bool, int)>[];
+    final tubeSolid = MeshBuilder();
+    final tubeGlass = MeshBuilder();
+    final curbSolid = MeshBuilder();
+    final curbGlass = MeshBuilder();
+    var curbCars = 240;
     final lampSolid = MeshBuilder();
     final lampGlow = MeshBuilder();
 
@@ -504,22 +1038,98 @@ class CityNodes {
         ));
       }
       if (pts.length < 2) continue;
-      final paved = RoadClass
-          .values[road.roadClassIndex.clamp(0, RoadClass.values.length - 1)]
-          .paved;
-      _ribbonFor(paved ? ribbon : dirtRibbon, pts, road.halfWidthM, anchorBF);
-      // Nobody lights a dirt track.
-      if (paved) _lampsFor(lampSolid, lampGlow, pts, road, anchorBF);
+      final cls = RoadClass
+          .values[road.roadClassIndex.clamp(0, RoadClass.values.length - 1)];
+      final paved = cls.paved;
+
+      if (cls.isElevated) {
+        // No ground ribbon, no curb, no junction furniture: there is nothing
+        // at ground level here but the columns. Drawing the ribbon anyway
+        // painted a road stripe along the floor under the viaduct, which read
+        // as the structure having fallen down.
+        ElevatedStructure.emit(
+          airSolid,
+          airDeck,
+          airGlow,
+          pts: pts,
+          anchorBF: anchorBF,
+          cls: cls,
+          halfWidthM: road.halfWidthM,
+        );
+        continue;
+      }
+
+      _ribbonFor(
+          cls == RoadClass.alley
+              ? alleyRibbon
+              : (paved ? ribbon : dirtRibbon),
+          pts,
+          road.halfWidthM,
+          anchorBF);
+      // Nobody lights a dirt track, and nobody lights an alley either.
+      if (paved && cls.hasPavement) {
+        _lampsFor(lampSolid, lampGlow, pts, road, anchorBF);
+      }
+      if (propBudget > 0) {
+        propBudget -= StreetFurniture.emit(
+          propSolid,
+          propGlow,
+          pts: pts,
+          anchorBF: anchorBF,
+          cls: cls,
+          halfWidthM: road.halfWidthM,
+          pavementM: 3.0,
+          // A RoadSnapshot carries no id — it is pure geometry on the wire —
+          // so the seed comes from the geometry itself. Stable frame to frame
+          // for a road that has not been redrawn, which is what keeps the
+          // furniture from jittering about the pavement.
+          seed: Object.hash(road.points.first, road.points[1],
+              road.points.length, road.roadClassIndex),
+          budget: propBudget,
+        );
+      }
+      // Only signalised classes contribute junction legs. An alley meeting a
+      // street does not get a stop bar and a crossing; it gets a curb cut.
+      if (cls.signalised) {
+        ends.add((pts.first, pts[1], road.halfWidthM, paved,
+            road.roadClassIndex));
+        ends.add((pts.last, pts[pts.length - 2], road.halfWidthM, paved,
+            road.roadClassIndex));
+      }
+      // Vacuum outside: pedestrians travel in a pressurised tube, not on a
+      // pavement. The glazing builder already exists for dome caps.
+      if (paved && cls.hasPavement && onStreetParking && curbCars > 0) {
+        curbCars -= _curbParkingFor(curbSolid, curbGlass, pts, road, anchorBF,
+            budget: curbCars);
+      }
+      if (road.sealed) {
+        sealedWorld = true;
+        _pedTubeFor(tubeSolid, tubeGlass, pts, road.halfWidthM, anchorBF);
+      }
     }
+    // Signal phase comes from sim time: deterministic, stateless, and the
+    // same on every client looking at the same tick.
+    _junctionsFor(ribbon, lampSolid, lampGlow, ends, anchorBF, snap.epoch);
 
     for (final (builder, material) in [
       // The ribbon takes the dedicated road strip — on the facade material it
-      // rendered as a run of blank concrete with no kerbs and no centre line,
+      // rendered as a run of blank concrete with no curbs and no centre line,
       // which from the cockpit read as "roads are missing".
       (ribbon, CityMaterials.road),
       (dirtRibbon, CityMaterials.dirt),
+      (alleyRibbon, CityMaterials.alley),
+      (airDeck, CityMaterials.road),
+      (airSolid, CityMaterials.facade),
+      (airGlow, CityMaterials.glazing),
+      (propSolid, CityMaterials.facade),
+      (propGlow, CityMaterials.glazing),
       (lampSolid, CityMaterials.facade),
       (lampGlow, CityMaterials.glazing),
+      // The pedestrian tube: a concrete curb carrying a glass barrel.
+      (tubeSolid, CityMaterials.facade),
+      (tubeGlass, CityMaterials.glazing),
+      (curbSolid, CityMaterials.facade),
+      (curbGlass, CityMaterials.glazing),
     ]) {
       final mesh = builder.build();
       if (mesh.isEmpty) continue;
@@ -564,6 +1174,234 @@ class CityNodes {
       }
       prevL = l;
       prevR = r;
+    }
+  }
+
+  /// Cars parked at the curb, nose to tail.
+  ///
+  /// Static, unlike the road traffic: these are part of the street's furniture
+  /// rather than something moving through it, so they are built with the road
+  /// mesh and not rebuilt every frame. Spacing leaves a real gap between
+  /// bumpers — a solid line of touching cars reads as a wall.
+  ///
+  /// Returns how many it placed, so the caller can hold a budget.
+  static int _curbParkingFor(
+    MeshBuilder body,
+    MeshBuilder glass,
+    List<Vector3> pts,
+    RoadSnapshot road,
+    Vector3 anchorBF, {
+    required int budget,
+  }) {
+    const spacing = 7.4; // a car plus the room to get out of the bay
+    var travelled = 0.0;
+    var next = spacing;
+    var placed = 0;
+    final family =
+        road.sealed ? VehicleKind.airless : VehicleKind.road;
+    for (var i = 1; i < pts.length && placed < budget; i++) {
+      travelled += (pts[i] - pts[i - 1]).length;
+      if (travelled < next) continue;
+      next += spacing;
+      final p = pts[i];
+      final up = (p + anchorBF).normalized;
+      final along = (pts[i] - pts[i - 1]).normalized;
+      final side = along.cross(up).normalized;
+      // Alternate curbs, so both sides of the street fill.
+      final s = placed.isEven ? 1.0 : -1.0;
+      final h = (i * 2654435761) & 0x7FFFFFFF;
+      final kind = family[h % family.length];
+      // Nothing long parks at a curb bay.
+      if (kind.lengthM > spacing * 0.85) continue;
+      VehicleMeshes.emit(body, glass, kind,
+          p + side * (road.halfWidthM * s * 0.78), along, up,
+          u: (h >> 16 & 0xFF) / 255.0);
+      placed++;
+    }
+    return placed;
+  }
+
+  /// Junction plates and stop bars where roads meet.
+  ///
+  /// A crossing had no visual hallmark at all: two carriageways simply
+  /// overlapped, with the lower one's centre line running through the other.
+  /// A real intersection reads as one piece of shared paving that the lane
+  /// markings stop AT — so that is what this draws: a plate covering the
+  /// meeting, and a bar across each leg where its markings should end.
+  static void _junctionsFor(
+    MeshBuilder m,
+    MeshBuilder poles,
+    MeshBuilder lights,
+    List<(Vector3, Vector3, double, bool, int)> ends,
+    Vector3 anchorBF,
+    double epoch,
+  ) {
+    final used = List<bool>.filled(ends.length, false);
+    for (var i = 0; i < ends.length; i++) {
+      if (used[i]) continue;
+      final at = ends[i].$1;
+      final group = <int>[i];
+      used[i] = true;
+      var radius = ends[i].$3;
+      var anyPaved = ends[i].$4;
+      var topClass = ends[i].$5;
+      for (var j = i + 1; j < ends.length; j++) {
+        if (used[j]) continue;
+        // Ends that split from one crossing sit on the same point; the
+        // tolerance covers the sampling step they were rebuilt from.
+        if ((ends[j].$1 - at).length > 8.0) continue;
+        used[j] = true;
+        group.add(j);
+        if (ends[j].$3 > radius) radius = ends[j].$3;
+        anyPaved = anyPaved || ends[j].$4;
+        if (ends[j].$5 > topClass) topClass = ends[j].$5;
+      }
+      // Two ends meeting is a road carrying on round a corner, not a junction.
+      if (group.length < 3 || !anyPaved) continue;
+
+      final up = (at + anchorBF).normalized;
+      final lift = up * 0.16; // just over the ribbons' own 0.12
+      // An octagonal plate: round enough to serve any number of legs at any
+      // angle, cheap enough to draw one per crossing.
+      final seed = up.cross(Vector3.unitZ).lengthSquared > 1e-9
+          ? up.cross(Vector3.unitZ)
+          : up.cross(Vector3.unitX);
+      final t1 = seed.normalized;
+      final t2 = up.cross(t1);
+      const u = 0.5 / kGroundSwatches; // the road surface swatch
+      final r = radius * 1.45;
+      final centre = m.vertex(_scenePos(at + lift), up, u, 0.5);
+      final rim = <int>[];
+      for (var k = 0; k < 8; k++) {
+        final a = 2 * math.pi * k / 8;
+        rim.add(m.vertex(
+            _scenePos(at + t1 * (math.cos(a) * r) + t2 * (math.sin(a) * r) + lift),
+            up,
+            u,
+            0.5));
+      }
+      for (var k = 0; k < 8; k++) {
+        m.triangle(centre, rim[k], rim[(k + 1) % 8]);
+      }
+
+      // A stop bar across each leg, at the plate's edge: the mark that says a
+      // driver yields here, and the reason the crossing reads as controlled
+      // rather than as an accident of geometry.
+      for (final g in group) {
+        final inward = ends[g].$2 - ends[g].$1;
+        if (inward.length < 1e-6) continue;
+        final dir = inward.normalized;
+        final side = dir.cross(up).normalized;
+        final hw = ends[g].$3 * 0.92;
+        final near = at + dir * (r * 0.92);
+        final far = at + dir * (r * 0.92 + 1.4);
+        const bu = 5.5 / kGroundSwatches; // pale, so it reads as paint
+        final q = [
+          m.vertex(_scenePos(near - side * hw + lift * 1.1), up, bu, 0.5),
+          m.vertex(_scenePos(near + side * hw + lift * 1.1), up, bu, 0.5),
+          m.vertex(_scenePos(far + side * hw + lift * 1.1), up, bu, 0.5),
+          m.vertex(_scenePos(far - side * hw + lift * 1.1), up, bu, 0.5),
+        ];
+        m.quad(q[0], q[1], q[2], q[3]);
+
+        // Zebra crossing OUTSIDE the stop bar: bars run along the direction of
+        // travel, which is what makes a crossing read as a crossing rather
+        // than as a ladder painted across the road.
+        const stripes = 5;
+        for (var k = 0; k < stripes; k++) {
+          final o = (k / (stripes - 1) - 0.5) * 2 * hw * 0.82;
+          final a0 = at + dir * (r * 0.92 + 2.2) + side * o;
+          final a1 = at + dir * (r * 0.92 + 5.0) + side * o;
+          final sw = hw * 0.11;
+          final z = [
+            m.vertex(_scenePos(a0 - side * sw + lift * 1.1), up, bu, 0.5),
+            m.vertex(_scenePos(a0 + side * sw + lift * 1.1), up, bu, 0.5),
+            m.vertex(_scenePos(a1 + side * sw + lift * 1.1), up, bu, 0.5),
+            m.vertex(_scenePos(a1 - side * sw + lift * 1.1), up, bu, 0.5),
+          ];
+          m.quad(z[0], z[1], z[2], z[3]);
+        }
+
+        // Control. An avenue or bigger gets SIGNALS, a plain street crossing
+        // gets a sign — the same rule a traffic engineer would apply, and it
+        // means the two read differently from the cockpit.
+        final corner = at + dir * (r * 0.98) + side * (hw + 1.6);
+        if (topClass > 0) {
+          _column(poles, corner, up, dir, 4.6);
+          // The heads CYCLE. Derived from the epoch rather than stored: it is
+          // deterministic, costs no state, and opposing legs are out of phase
+          // because their inbound directions differ by a quarter turn.
+          final axis = (dir.dot(t1).abs() > dir.dot(t2).abs()) ? 0 : 1;
+          final green = ((epoch / 12.0).floor() + axis).isEven;
+          final head = corner + up * 4.6;
+          _head(lights, head + up * (green ? 0.0 : 0.55), up, dir);
+        } else {
+          // A sign: a small plate on a short post, facing the driver.
+          _column(poles, corner, up, dir, 2.2);
+          final plate = corner + up * 2.2;
+          final ps = 0.42;
+          final pv = [
+            poles.vertex(_scenePos(plate - side * ps - up * ps), dir * -1, 0, 0),
+            poles.vertex(_scenePos(plate + side * ps - up * ps), dir * -1, 1, 0),
+            poles.vertex(_scenePos(plate + side * ps + up * ps), dir * -1, 1, 1),
+            poles.vertex(_scenePos(plate - side * ps + up * ps), dir * -1, 0, 1),
+          ];
+          poles.quad(pv[0], pv[1], pv[2], pv[3]);
+        }
+      }
+    }
+  }
+
+  /// A sealed pedestrian tube running along the verge.
+  ///
+  /// On an airless world people cannot use a pavement, and the colony already
+  /// says so for its grid roads — `roadSealed` renders those as pressurised
+  /// tubes. The spline roads the in-world editor builds never carried the flag,
+  /// so a lunar street was drawn as open asphalt with a curb nobody could
+  /// stand on. This is the same idea, cut as real geometry: a hexagonal glass
+  /// barrel on a low curb, offset clear of the carriageway.
+  static void _pedTubeFor(
+    MeshBuilder solid,
+    MeshBuilder glass,
+    List<Vector3> pts,
+    double halfWidth,
+    Vector3 anchorBF,
+  ) {
+    const radius = 1.7;
+    const sides = 6;
+    List<int>? prev;
+    List<int>? prevCurb;
+    for (var i = 0; i < pts.length; i++) {
+      final p = pts[i];
+      final up = (p + anchorBF).normalized;
+      final ahead = i + 1 < pts.length ? pts[i + 1] - p : p - pts[i - 1];
+      if (ahead.length < 1e-6) continue;
+      final along = ahead.normalized;
+      final side = along.cross(up).normalized;
+      // Outside the curb, clear of the traffic lane.
+      final axis = p + side * (halfWidth + radius + 1.0) + up * 0.2;
+
+      final ring = <int>[];
+      for (var k = 0; k < sides; k++) {
+        final a = 2 * math.pi * k / sides + math.pi / sides;
+        final n = side * math.cos(a) + up * math.sin(a);
+        ring.add(glass.vertex(
+            _scenePos(axis + n * radius + up * radius), n, k / sides, 0.5));
+      }
+      // A curb strip under it, so the barrel does not float on the ground.
+      final curb = [
+        solid.vertex(_scenePos(axis - side * radius), up, 0, 0.5),
+        solid.vertex(_scenePos(axis + side * radius), up, 1, 0.5),
+      ];
+      if (prev != null && prevCurb != null) {
+        for (var k = 0; k < sides; k++) {
+          final n = (k + 1) % sides;
+          glass.quad(prev[k], prev[n], ring[n], ring[k]);
+        }
+        solid.quad(prevCurb[0], prevCurb[1], curb[1], curb[0]);
+      }
+      prev = ring;
+      prevCurb = curb;
     }
   }
 
@@ -722,7 +1560,23 @@ class CityNodes {
 
   /// The lot a building stands on, in its own frontage-aligned frame.
   static Parcel parcelOf(BuildingSnapshot b) {
-    final w = b.siteWidthM, d = b.siteDepthM;
+    // Inflated by the massing's OWN setback, because it will inset whatever it
+    // is handed — and what it is handed here is already the finished footprint,
+    // not a lot.
+    //
+    // Applied twice, the two setbacks ate the small buildings alive: a
+    // low-density house arrives at 11.6 m wide, loses 6 m to the second inset
+    // and another 30% to coverage, and renders about four metres across. All
+    // of residential simply vanished from the city while the towers, which had
+    // metres to spare, looked fine.
+    //
+    // The amount comes from the ACTIVE STYLE, and it must: a street wall insets
+    // by nothing, so inflating by a hard-coded 3 m would hand it a lot 6 m
+    // wider than its site and push every frontage out over the pavement and
+    // into its neighbour. Front and rear are added separately because a street
+    // wall's setbacks are deliberately asymmetric.
+    final w = b.siteWidthM + style.sideSetbackM * 2;
+    final d = b.siteDepthM + style.frontSetbackM + style.rearSetbackM;
     return Parcel(
       id: b.id,
       polygon: [
@@ -732,6 +1586,12 @@ class CityNodes {
         Vec2(-w / 2, d),
       ],
       frontage: (Vec2(-w / 2, 0), Vec2(w / 2, 0)),
+      // Which side the cross street is on is not on the frame — only THAT
+      // there is one. +X by convention, and it does not matter: the generator
+      // mirrors the treatment onto whichever flank the variant picks, and a
+      // corner reads as a corner either way round.
+      sideStreet:
+          b.corner ? (Vec2(w / 2, 0), Vec2(w / 2, d)) : null,
     );
   }
 
@@ -760,6 +1620,10 @@ class CityNodes {
   /// this they came out a thousand times life size, which is a colony wider
   /// than the moon it stands on.
   static Vector3 _scenePos(Vector3 metres) => metres * kRenderScale;
+
+  /// Upload a built mesh, for callers outside this class (the studio's scale
+  /// reference builds its own geometry and needs the same path).
+  static fs.MeshGeometry? geometryOf(PropMesh mesh) => _geometryOf(mesh);
 
   static fs.MeshGeometry? _geometryOf(PropMesh mesh) {
     if (mesh.isEmpty) return null;

@@ -18,7 +18,10 @@ import 'city_texture_bakes.dart';
 class CityTextures {
   CityTextures._();
 
-  static const int facadeSize = 256;
+  /// The facade is an ATLAS now — eight masonries banded along U — so it needs
+  /// the resolution to give each band something to show. 1024 leaves 128 px a
+  /// band, which is about 50 px per metre of wall at the scale a segment maps.
+  static const int facadeSize = 1024;
   static const int glassSize = 256;
 
   static Object? facade;
@@ -26,6 +29,7 @@ class CityTextures {
   static Object? windowEmissive;
   static Object? groundPalette;
   static Object? roadStrip;
+  static Object? alleyStrip;
   static Object? dirtStrip;
 
   static Future<void>? _loading;
@@ -36,6 +40,7 @@ class CityTextures {
       windowEmissive != null &&
       groundPalette != null &&
       roadStrip != null &&
+      alleyStrip != null &&
       dirtStrip != null;
 
   static Future<void> load() => _loading ??= () async {
@@ -51,6 +56,8 @@ class CityTextures {
         groundPalette =
             _upload(CityTextureBakes.groundPalette(glassSize), glassSize);
         roadStrip = _upload(CityTextureBakes.roadStrip(glassSize), glassSize);
+        alleyStrip =
+            _upload(CityTextureBakes.alleyStrip(glassSize), glassSize);
         dirtStrip = _upload(CityTextureBakes.dirtStrip(glassSize), glassSize);
       }();
 

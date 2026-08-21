@@ -3,6 +3,7 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
+import 'pnr_basis.dart';
 import 'dart:math' as math;
 
 import '../autonomy/flight_plan.dart';
@@ -142,15 +143,11 @@ class EncounterPlannerService {
     // Prograde/normal/radial basis at the burn point (the ManeuverNode frame):
     // prograde along the velocity, normal along the orbit's angular momentum,
     // radial completing the right-handed triad (points away from the body).
-    final prograde = sBurn.velocity.normalized;
-    final h = sBurn.position.cross(sBurn.velocity);
-    final normal =
-        h.length > 1e-9 ? h.normalized : _anyPerpendicular(prograde);
-    final radial = prograde.cross(normal).normalized;
+    final basis = pnrBasis(sBurn.position, sBurn.velocity);
     final vNew = sBurn.velocity +
-        prograde * node.deltaV.x +
-        normal * node.deltaV.y +
-        radial * node.deltaV.z;
+        basis.prograde * node.deltaV.x +
+        basis.normal * node.deltaV.y +
+        basis.radial * node.deltaV.z;
 
     final postOrbit = converter.toOrbit(
         position: sBurn.position, velocity: vNew, body: body, epoch: Epoch(tBurn));
@@ -419,12 +416,5 @@ class EncounterPlannerService {
       targetPosition: targetWorld - frameRoot,
       frameBody: frameBody.id,
     );
-  }
-
-  /// Any unit vector perpendicular to [v] (degenerate-h fallback).
-  static Vector3 _anyPerpendicular(Vector3 v) {
-    final ref = v.x.abs() < 0.9 ? Vector3.unitX : Vector3.unitY;
-    final p = v.cross(ref);
-    return p.length > 1e-12 ? p.normalized : Vector3.unitZ;
   }
 }

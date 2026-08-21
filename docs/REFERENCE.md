@@ -127,7 +127,7 @@ Source of truth:
 
 ## Parts
 
-25 craft parts.
+38 craft parts.
 
 ### commandPod
 
@@ -144,6 +144,12 @@ Source of truth:
 | **FL-T400 Fuel Tank** | 250 kg | — | — | 0 | 400 | — |
 | **Wing Fuel Tank (Jet)** | 150 kg | — | — | 0 | 400 | — |
 | **Eagle Descent Stage** | 1374 kg | — | — | 0 | 1640 | — |
+| **SPH-125 Sphere Tank** | 110 kg | — | — | 0 | 176 | — |
+| **SPH-250 Sphere Tank** | 875 kg | — | — | 0 | 1404 | — |
+| **SPH-500 Sphere Tank** | 7000 kg | — | — | 0 | 11230 | — |
+| **PLL-250 Pill Tank** | 275 kg | — | — | 0 | 439 | — |
+| **PLL-375 Pill Tank** | 440 kg | — | — | 0 | 702 | — |
+| **PLL-500 Heavy Pill Tank** | 2200 kg | — | — | 0 | 3510 | — |
 
 ### rocketEngine
 
@@ -223,10 +229,17 @@ Source of truth:
 |---|---|---|---|---|---|---|
 | **Standard Docking Port** | 50 kg | — | — | 0 | — | — |
 | **Eagle RCS Plume Deflector** | 9 kg | — | — | 0 | — | — |
+| **GDR-1 Girder Segment** | 60 kg | — | — | 0 | — | — |
+| **GDR-2 Girder Segment** | 120 kg | — | — | 0 | — | — |
+| **GDR-4 Girder Segment** | 240 kg | — | — | 0 | — | — |
+| **GDR-H Heavy Spine Truss** | 1500 kg | — | — | 0 | — | — |
+| **PLT-1 Hull Plate** | 15 kg | — | — | 0 | — | — |
+| **PLT-2 Hull Plate** | 60 kg | — | — | 0 | — | — |
+| **ARM-2 Armor Plate** | 800 kg | — | — | 0 | — | — |
 
 ## Celestial bodies
 
-35 bodies (Sun + planets + dwarf planets + moons).
+39 bodies (Sun + planets + dwarf planets + moons).
 
 | Body | Type | Radius | Surface g | Rotation | Atmosphere | Parent |
 |---|---|---|---|---|---|---|
@@ -259,6 +272,10 @@ Source of truth:
 | **Ariel** | moon | 579 km | 0.25 m/s² | 27.8 h | none | uranus |
 | **Umbriel** | moon | 585 km | 0.25 m/s² | 27.8 h | none | uranus |
 | **Triton** | moon | 1353 km | 0.78 m/s² | 27.8 h | none | neptune |
+| **Vesta** | moon | 263 km | 0.25 m/s² | 5.3 h | none | sun |
+| **Psyche** | moon | 113 km | 0.12 m/s² | 4.2 h | none | sun |
+| **Eros** | moon | 8 km | 0.01 m/s² | 5.3 h | none | sun |
+| **Ryugu** | moon | 0 km | 0.00 m/s² | 7.6 h | none | sun |
 | **Ceres** | moon | 476 km | 0.28 m/s² | 9.1 h | none | sun |
 | **Pluto** | moon | 1188 km | 0.62 m/s² | 153.3 h | none | sun |
 | **Charon** | moon | 606 km | 0.29 m/s² | 27.8 h | none | pluto |

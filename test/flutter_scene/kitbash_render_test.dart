@@ -461,8 +461,10 @@ void main() {
     /// replaces it is calibrated to the same box, so the Z half-extent is
     /// `size.z / 2` on either. A hand-built part welded onto such a craft has
     /// no declared box, so it falls back to its longest known side. Drawn as
-    /// one model: [VesselNodes.fallbackAftM], the exit plane of its engine
-    /// bell.
+    /// one model: [VesselNodes.silhouetteAftM], which is the exit plane of the
+    /// CSM's engine bell for most craft and the footpad plane for a lander —
+    /// two hulls 3 m apart, and asking per craft is what keeps the LM's plume
+    /// measured against the LM.
     double halfDepthM(String type) =>
         (PartModelLibrary.defFor(type)?.size.z ??
             PartModelLibrary.fallbackSizeM(type)) /
@@ -470,7 +472,7 @@ void main() {
 
     double drawnAftM(VesselSnapshot v) => VesselNodes.isKitbash(v)
         ? v.parts.map((p) => p.oz - halfDepthM(p.type)).reduce(math.min)
-        : VesselNodes.fallbackAftM;
+        : VesselNodes.silhouetteAftM(v.id);
 
     /// THE INVARIANT. The plume vents aft of the craft origin and starts no
     /// further back than one nozzle-exit clearance
@@ -653,11 +655,22 @@ void main() {
       });
       // The band itself, stated once in numbers: the calibrated anchor sits
       // between the tail of the drawn silhouette (less one bell clearance) and
-      // the craft origin.
+      // the craft origin — on BOTH whole-craft silhouettes, since one constant
+      // serves them both. The LM is the binding one: its hull ends 3 m nearer
+      // the origin than the CSM's, so a value that only cleared the CSM would
+      // burn below the lander's footpads.
       expect(
           ExhaustNodes.defaultNozzleZM,
           inInclusiveRange(
               VesselNodes.fallbackAftM - ExhaustNodes.bellStandoffM, 0.0));
+      expect(
+          ExhaustNodes.defaultNozzleZM,
+          inInclusiveRange(
+              VesselNodes.landerAftM - ExhaustNodes.bellStandoffM, 0.0));
+      expect(VesselNodes.silhouetteAftM('moon-lander'), VesselNodes.landerAftM,
+          reason: 'the LM draws the LM silhouette');
+      expect(VesselNodes.silhouetteAftM('csm'), VesselNodes.fallbackAftM,
+          reason: 'everything else draws the CSM silhouette');
     });
 
     test('every catalog part, standing alone, anchors on itself', () {

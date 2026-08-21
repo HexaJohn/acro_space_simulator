@@ -42,7 +42,7 @@ void main() {
         expect(road.distanceTo(v), greaterThanOrEqualTo(road.halfWidth),
             reason: 'no part of a lot may sit in the carriageway');
       }
-      // The frontage edge sits exactly at kerb + sidewalk.
+      // The frontage edge sits exactly at curb + sidewalk.
       expect(road.distanceTo(lot.frontageMidpoint!),
           closeTo(road.halfWidth + 3, 0.5));
     }

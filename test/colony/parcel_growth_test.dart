@@ -120,11 +120,27 @@ void main() {
       cities: InMemoryCityRepository([city]),
     );
     expect(snap.buildings.keys, contains('grow/${lot.id}'));
-    // The built lot no longer draws its zoning patch under the building.
-    final builtPatches = snap.patches.where((p) =>
+    // The built lot draws its zone as a RING around the building — four
+    // strips of yard — never as a quad UNDER it, which would z-fight the
+    // building against its own ground.
+    // Checked on the real invariant — no patch covering the WHOLE lot — not on
+    // width alone: a ring's front and back strips legitimately span the full
+    // width, so width by itself no longer distinguishes the two.
+    final ext = lot.buildableExtent;
+    final wholeLot = snap.patches.where((p) =>
         p.kind == CityPatchSnapshot.kindResidential &&
-        (p.sizeM - lot.buildableExtent.width).abs() < 0.5);
-    expect(builtPatches.length, city.layout.autoParcels.length - 1);
+        (p.sizeM - ext.width).abs() < 0.5 &&
+        (p.depthM - ext.depth).abs() < 0.5);
+    expect(wholeLot.length, city.layout.autoParcels.length - 1,
+        reason: 'the built lot has a quad under its building');
+    // And it does contribute yard: bare ground round a building is exactly
+    // what the ring exists to cover.
+    expect(
+        snap.patches.where((p) =>
+            p.kind == CityPatchSnapshot.kindResidential &&
+            (p.depthM - ext.depth).abs() >= 0.5),
+        isNotEmpty,
+        reason: 'the built lot drew no yard at all');
   });
 
   test('a dense street congests; the same district on a highway does not', () {

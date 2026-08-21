@@ -45,3 +45,13 @@ Upstream: worth filing against flutter/flutter (flutter_gpu). App-side
 mitigations kept regardless: mesh instances hard-capped at 14,000
 (`_maxMeshInstances`) and the billboard batch at 8,000 (`_farCapacity`) so
 single writes stay well under one block.
+
+## Staying applied
+
+The patch lives in the SDK's engine cache, not in this repo, so nothing in a
+checkout carries it and nothing announces when it is gone. It was silently lost
+once already (symptom: the straddle exception again, this time with a large
+in-world colony on screen rather than the rings).
+
+`test/tools/flutter_gpu_patch_test.dart` now fails when the patch is missing,
+so a cache rebuild shows up as a red test rather than as a black viewport.

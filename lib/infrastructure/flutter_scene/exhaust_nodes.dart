@@ -50,10 +50,16 @@ class ExhaustNodes {
   /// Nozzle position on the body Z axis for a craft drawn as ONE whole-craft
   /// model instead of from its part list — every hand-built sample vessel.
   ///
-  /// Calibrated against that model's silhouette, which ends at
-  /// [VesselNodes.fallbackAftM], so the plume ignites well inside the hull. It
-  /// describes NO craft drawn from its parts, which is why [nozzleZM] checks
-  /// the render path before reaching for it.
+  /// Calibrated against those silhouettes' engine bells: it is well inside the
+  /// CSM's hull (which ends at [VesselNodes.fallbackAftM]) and 0.1 m inside the
+  /// mouth of the Lunar Module's descent bell, so ONE number vents both craft
+  /// correctly. It describes NO craft drawn from its parts, which is why
+  /// [nozzleZM] checks the render path before reaching for it.
+  ///
+  /// The two hulls end 3 m apart ([VesselNodes.silhouetteAftM]), so a change
+  /// here has to stay on both. That the LM is the tighter constraint is the
+  /// point: a value calibrated only against the 11 m CSM would hang the LM's
+  /// flame below its footpads.
   static double defaultNozzleZM = -2.75;
 
   /// How far below the engine part's ORIGIN the plume starts, metres. Part
@@ -155,11 +161,11 @@ class ExhaustNodes {
   /// question first ([VesselNodes.partsDrawThemselves]) and measures against
   /// the body that answer selects:
   ///
-  ///  * WHOLE-CRAFT — [defaultNozzleZM], calibrated against the tail of that
+  ///  * WHOLE-CRAFT — [defaultNozzleZM], calibrated against the engine of that
   ///    model. Reading a tail position out of the part list here is what hangs
   ///    the flame in empty space: a hand-built vessel's part offsets were never
   ///    meant to describe the silhouette drawn for it, which ends at
-  ///    [VesselNodes.fallbackAftM] whatever they say.
+  ///    [VesselNodes.silhouetteAftM] whatever they say.
   ///  * PER-PART, with an engine — just aft of the aft-most engine's origin.
   ///    AFT-MOST, not first: a craft can carry several engines and gets one
   ///    plume, and an Eagle mounts its APS high on the ascent stage with the

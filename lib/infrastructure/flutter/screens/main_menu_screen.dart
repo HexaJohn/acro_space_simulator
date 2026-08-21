@@ -16,6 +16,8 @@ import 'ascent_screen.dart';
 import 'craft_assembly_screen.dart';
 import 'city_builder_screen.dart';
 import 'cloudscape_screen.dart';
+import 'building_studio_screen.dart';
+import 'city_studio_screen.dart';
 import 'maneuver_planner_screen.dart';
 import 'megastructure_screen.dart';
 import 'mining_screen.dart';
@@ -77,6 +79,11 @@ class MainMenuScreen extends StatelessWidget {
           Icons.hub, AppTheme.accent, (c) => const MegastructureScreen()),
       _MenuItem('MULTIPLAYER', 'Sessions, players, command authority',
           Icons.groups, AppTheme.accent, (c) => const MultiplayerScreen()),
+      _MenuItem('CITY STUDIO', 'Generate whole colonies to profile + tune',
+          Icons.grid_view, AppTheme.accent2, (c) => const CityStudioScreen()),
+      _MenuItem('BUILDING STUDIO', 'One block face: buildings, lots, frontage',
+          Icons.apartment, AppTheme.accent2,
+          (c) => const BuildingStudioScreen()),
       _MenuItem('SCATTER LAB', 'Preview procedural trees, plants + rocks',
           Icons.park, AppTheme.accent2, (c) => const ScatterLabScreen()),
       _MenuItem('CLOUDSCAPE', 'Tune the volumetric cloud decks per planet',

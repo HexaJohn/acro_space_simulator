@@ -30,6 +30,7 @@ class CityTerrainShaper {
     this.padMarginM = 6,
     this.padFalloffM = 14,
     this.roadFalloffM = 6,
+    this.padEdgeM = 0.6,
   });
 
   /// How far a levelled pad extends beyond the building footprint.
@@ -40,6 +41,10 @@ class CityTerrainShaper {
   final double padFalloffM;
 
   final double roadFalloffM;
+
+  /// How far a LOT pad eases off past its own boundary. Deliberately tiny: see
+  /// the call site — anything wide re-levels the neighbour.
+  final double padEdgeM;
 
   /// Brushes for everything in [city] that is not yet shaped.
   ///
@@ -57,7 +62,9 @@ class CityTerrainShaper {
     final latRad = city.cityLat * math.pi / 180.0;
     final lonRad = city.cityLon * math.pi / 180.0;
 
-    Vector3 toBodyFixed(Vec2 local) => placement
+    /// Direction from the body centre to a local point. Only the DIRECTION is
+    /// taken from this, so the datum radius it is built at does not matter.
+    Vector3 dirOf(Vec2 local) => placement
         .place(
           radius: bodyRadiusM,
           lat: latRad,
@@ -65,11 +72,26 @@ class CityTerrainShaper {
           east: local.e,
           north: local.n,
         )
-        .position;
+        .position
+        .normalized;
 
     /// Ground radius under a local point.
-    double groundUnder(Vec2 local) =>
-        groundRadiusAt(toBodyFixed(local).normalized);
+    double groundUnder(Vec2 local) => groundRadiusAt(dirOf(local));
+
+    /// The point on the REAL GROUND under a local point.
+    ///
+    /// Brushes must be anchored HERE, not on the datum sphere. Every brush
+    /// culls samples outside its own bounding radius — tens of metres for a
+    /// building pad — and a body's ground sits hundreds of metres off its
+    /// datum (885 m below it at a typical lunar site). Anchored on the datum,
+    /// every ground sample fell outside the bound, so `apply` returned the
+    /// density untouched and the brush did NOTHING: pads never levelled their
+    /// lots and road corridors were never graded, which is exactly how it
+    /// looked — buildings sitting on raw relief and roads clipping through it.
+    Vector3 onGround(Vec2 local) {
+      final dir = dirOf(local);
+      return dir * groundRadiusAt(dir);
+    }
 
     // ---- Building pads -------------------------------------------------
     for (final (parcel, spec) in city.buildingParcels()) {
@@ -78,8 +100,8 @@ class CityTerrainShaper {
 
       final centre = parcel.centroid;
       final extent = parcel.buildableExtent;
-      // Circumscribe the lot: a pad has to cover the corners of the footprint,
-      // not just its inscribed circle, or the building sits on a plinth.
+      // A pit still circumscribes: a quarry is round, and nothing tiles
+      // against it.
       final radius =
           math.sqrt(extent.width * extent.width + extent.depth * extent.depth) /
                   2 +
@@ -95,7 +117,7 @@ class CityTerrainShaper {
         key: key,
         brush: _isPit(spec)
             ? TerrainBrush.steppedPit(
-                centreBF: toBodyFixed(centre),
+                centreBF: onGround(centre),
                 radiusM: radius,
                 datumRadiusM: datum,
                 depthM: pitDepthFor(radius),
@@ -103,11 +125,14 @@ class CityTerrainShaper {
                 falloffM: padFalloffM * 3,
                 tick: tick,
               )
-            : TerrainBrush.pad(
-                centreBF: toBodyFixed(centre),
-                radiusM: radius,
+            : TerrainBrush.padPoly(
+                centreBF: onGround(centre),
+                // The lot's own outline, on the ground. Every parcel is a
+                // polygon — lots taper wherever a road bends — so a rectangle
+                // either overhangs the neighbour or misses its own corners.
+                polygonBF: [for (final v in parcel.polygon) onGround(v)],
                 datumRadiusM: datum,
-                falloffM: padFalloffM,
+                falloffM: padEdgeM,
                 // The bound must clear the relief actually being moved.
                 maxCutM: math.max(20, relief * 1.5),
                 tick: tick,
@@ -126,8 +151,8 @@ class CityTerrainShaper {
         out.add((
           key: key,
           brush: TerrainBrush.cutFill(
-            startBF: toBodyFixed(a),
-            endBF: toBodyFixed(b),
+            startBF: onGround(a),
+            endBF: onGround(b),
             radiusM: road.halfWidth,
             datumRadiusM: groundUnder(a),
             datumRadiusEndM: groundUnder(b),

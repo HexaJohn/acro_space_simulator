@@ -17,6 +17,19 @@ class OrbitalElements {
   final double argumentOfPeriapsis; // omega, rad
   final double meanAnomalyAtEpoch; // M0, rad
 
+  /// This conic carries NO angular momentum: the motion is a straight line
+  /// through the body's centre — a craft dropped or thrown radially.
+  ///
+  /// It cannot be expressed by [eccentricity] alone. A rectilinear conic has
+  /// `e == 1` exactly, which the element set may not store (`e` and `a` would
+  /// then disagree about the conic family), so it is held a hair off 1 instead
+  /// — and the perifocal semi-minor axis `a*sqrt(1 - e^2)` that falls out of
+  /// that hair is METRES wide, not zero. Reconstructing position from it gives
+  /// a craft falling dead straight a sideways nudge every tick, in whatever
+  /// arbitrary plane the conversion happened to pick. The flag says "the
+  /// off-axis extent really is zero", so the reconstruction can honour it.
+  final bool rectilinear;
+
   const OrbitalElements({
     required this.semiMajorAxis,
     required this.eccentricity,
@@ -24,6 +37,7 @@ class OrbitalElements {
     required this.longitudeOfAscendingNode,
     required this.argumentOfPeriapsis,
     required this.meanAnomalyAtEpoch,
+    this.rectilinear = false,
   });
 
   bool get isElliptical => eccentricity < 1.0;

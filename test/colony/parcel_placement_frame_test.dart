@@ -61,8 +61,13 @@ void main() {
 
     final b = capture(city).buildings.values.firstWhere((b) => b.id == lot.id);
     final extent = lot.buildableExtent;
-    expect(b.siteWidthM, closeTo(extent.width, 0.01));
-    expect(b.siteDepthM, closeTo(extent.depth, 0.01));
+    // The LOT's size, less the setback that keeps the building inside its own
+    // levelled terrace, times the share of the plot its density takes. This
+    // spec declares no site of its own, so the lot still governs — which is
+    // the whole point: a parcel building is not cut to a grid cell.
+    final back = lotSetbackFor(shop), cover = lotCoverageFor(shop);
+    expect(b.siteWidthM, closeTo((extent.width - 2 * back) * cover, 0.01));
+    expect(b.siteDepthM, closeTo((extent.depth - 2 * back) * cover, 0.01));
     // Not the 24 m cell the grid would have forced on it.
     expect(b.siteDepthM, isNot(closeTo(CitySim.cellM, 0.01)));
   });

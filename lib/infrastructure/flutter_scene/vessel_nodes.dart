@@ -32,9 +32,11 @@ import 'part_primitives_category.dart';
 ///    the player assembles takes this path, and it changes shape when it
 ///    stages.
 ///  * WHOLE-CRAFT — no part came from the catalog, so the craft is drawn as one
-///    baked model chosen from its id ([_assetFor]), with an Apollo CSM
-///    silhouette standing in while that decodes. Every hand-built vessel —
-///    the sample world's fleet, a spawned test mass — takes this path.
+///    baked model chosen from its id ([_assetFor]), with a procedural
+///    silhouette OF THAT MODEL — Apollo CSM or Lunar Module — standing in while
+///    it decodes, or forever on a clone with no assets. Every hand-built
+///    vessel — the sample world's fleet, a spawned test mass — takes this
+///    path.
 ///
 /// The predicate is PROVENANCE, not art. What the player assembled must be what
 /// the player flies, and that has to hold on the very first stock craft, before
@@ -88,9 +90,16 @@ class VesselNodes {
   static const String _landerModel = 'assets/mesh/lander.fsceneb';
   static const String _landerModelWeb = 'assets/mesh/lander-web.fsceneb';
 
+  /// Whether [vesselId] is a Lunar Module rather than a CSM. The ONE test, used
+  /// by both the bake ([_assetFor]) and the silhouette that stands in for it
+  /// ([_rebuildParts]): a craft that loaded the LM model but fell back to a CSM
+  /// hull would change shape the moment the asset landed.
+  static bool _isLander(String vesselId) =>
+      vesselId.toLowerCase().contains('lander');
+
   /// The model asset [vesselId] renders, per platform.
   static String _assetFor(String vesselId) {
-    if (vesselId.toLowerCase().contains('lander')) {
+    if (_isLander(vesselId)) {
       return kIsWeb ? _landerModelWeb : _landerModel;
     }
     return kIsWeb ? _apolloModelWeb : _apolloModel;
@@ -122,19 +131,58 @@ class VesselNodes {
   static const double _axisLenM = 10.0; // axis length + tick count, metres
   final Map<String, fs.Node> _axisNodes = {};
 
-  /// Aft-most surface of the WHOLE-CRAFT silhouette on the body Z axis,
-  /// METRES: the exit plane of the Apollo fallback's SPS bell, and the scale
-  /// the baked models are calibrated to match.
+  /// Aft-most surface of the CSM silhouette on the body Z axis, METRES: the
+  /// exit plane of the Apollo fallback's SPS bell, and the scale the baked
+  /// models are calibrated to match.
   ///
   /// A named constant because it is what anything anchored to the tail is
   /// calibrated AGAINST — [ExhaustNodes.defaultNozzleZM] is the live example —
   /// and a number that exists only as the sum of two literals inside
   /// [_addApolloFallback] cannot be calibrated against at all.
+  ///
+  /// Not every whole-craft vessel ends here — a lander ends at [landerAftM],
+  /// which is 3 m nearer the origin. Ask [silhouetteAftM] rather than reaching
+  /// for this constant unless the CSM is specifically what is meant.
   static const double fallbackAftM = -6.5;
 
   /// Height of that bell, metres. Only [_addApolloFallback] and the constant
   /// above need it.
   static const double _spsBellM = 1.8;
+
+  /// Aft-most surface of the LUNAR MODULE silhouette, METRES: the underside of
+  /// its footpads, i.e. the plane the craft stands on. [fallbackAftM]'s
+  /// counterpart for the other whole-craft body, and shallower than it by the
+  /// whole length of a service module — an LM is a 6.8 m craft that hangs
+  /// barely 3.6 m below its origin.
+  static const double landerAftM = -3.6;
+
+  /// Exit plane of the LM's descent engine bell, METRES. The plume anchor sits
+  /// 0.1 m inside it ([ExhaustNodes.defaultNozzleZM]), which is a flame filling
+  /// the bell rather than one lit inside the descent stage or hanging in the
+  /// gap above the ground.
+  ///
+  /// It has to hang well clear of the stage above it for a second reason: the
+  /// descent stage is 2.1 m in plan and only 1.65 m deep, so a short bell
+  /// disappears behind the octagon's near corner under any wide-angle view
+  /// from the side — which is every view of a craft this size.
+  static const double _dpsExitM = -2.85;
+
+  /// Footpad centre radius and thickness, METRES — a ~9.1 m stance, which is
+  /// the LM's most recognisable dimension and the one a player judging a
+  /// landing site is actually reading. Named because [_addLanderFallback]
+  /// places the pads, the ladder and [landerAftM] against them.
+  static const double _padRadiusM = 4.55;
+  static const double _padThicknessM = 0.16;
+
+  /// Aft-most surface of the silhouette drawn for [vesselId], METRES — the
+  /// craft-specific answer [fallbackAftM] used to be the only one of.
+  ///
+  /// For craft on the WHOLE-CRAFT path only; a kitbash craft's tail is its
+  /// aft-most part and is read off the part list instead. Exposed so anything
+  /// calibrated against the drawn hull ([ExhaustNodes]) can ask which hull that
+  /// is, rather than assuming every hand-built vessel is an 11 m CSM.
+  static double silhouetteAftM(String vesselId) =>
+      _isLander(vesselId) ? landerAftM : fallbackAftM;
 
   /// Per-vessel eclipse of the sun on the craft (dims its materials when it
   /// is in the body's umbra). Applied HERE, not on the scene's global
@@ -383,8 +431,8 @@ class VesselNodes {
   /// Every bake [prewarm] queues, IN QUEUE ORDER: the two whole-craft models.
   ///
   /// The order is the policy. [PartBakeCache] runs these strictly in sequence,
-  /// so whatever is first is warm first, and the Apollo leads because it is the
-  /// silhouette every craft on the whole-craft path falls back to.
+  /// so whatever is first is warm first, and the Apollo leads because it is
+  /// what every craft on the whole-craft path renders EXCEPT a lander.
   ///
   /// Separate from [prewarm] so the policy is assertable without a GPU, a
   /// bundle or a menu.
@@ -655,15 +703,24 @@ class VesselNodes {
     // Leaving the kitbash path (staging dropped the last catalog part):
     // forgetting the slots also tells any in-flight part realize to bail.
     _partSlots.remove(v.id);
-    // The craft is represented by its baked model ([_assetFor]); the
-    // procedural stand-in is an Apollo CSM silhouette, used wherever that model
-    // isn't available (no asset, or the web build before its bake decodes). We
-    // don't render the raw part list here — a hand-built part carries a display
-    // name and nothing the catalog can size or shape it from, so the silhouette
-    // reads as a real ship instead of a cluster of 1 m grey blocks. (The LM
-    // falls back to the CSM silhouette until its bake lands — a rough stand-in,
-    // not an exact shape.)
-    _addApolloFallback(vesselNode);
+    // The craft is represented by its baked model ([_assetFor]); the procedural
+    // stand-in is a silhouette of THAT model, used wherever it isn't available
+    // (no asset — the usual case on a fresh clone, since neither the sources
+    // nor the bakes may be redistributed — or the web build before its bake
+    // decodes). We don't render the raw part list here — a hand-built part
+    // carries a display name and nothing the catalog can size or shape it from,
+    // so the silhouette reads as a real ship instead of a cluster of 1 m grey
+    // blocks.
+    //
+    // ONE silhouette per model, picked by the SAME test that picked the model
+    // ([_isLander]). Standing a lander in as a CSM is not a rough stand-in but
+    // a different vehicle: the shapes share no stage, the tails are 3 m apart
+    // ([silhouetteAftM]), and a descent is flown by reading the legs.
+    if (_isLander(v.id)) {
+      _addLanderFallback(vesselNode);
+    } else {
+      _addApolloFallback(vesselNode);
+    }
   }
 
   /// A rough Apollo Command + Service Module, nose on +Z: a blunt truncated-
@@ -744,6 +801,294 @@ class VesselNodes {
       ),
     );
   }
+
+  /// A rough Apollo Lunar Module, cabin facing +X and nose (docking tunnel) on
+  /// +Z: a foil-wrapped octagonal descent stage on four splayed legs, the DPS
+  /// bell hanging under it, and the ascent stage's blunt cabin, windows, RCS
+  /// quads and docking tunnel above. ~6.8 m tall over a ~9 m footpad span, the
+  /// same scale as `lander.fsceneb` so the two are interchangeable.
+  ///
+  /// Stands in for every craft [_isLander] claims, wherever that bake isn't
+  /// available (no asset — the usual case on a fresh clone — or the web build
+  /// before its bake decodes). Its AFT-MOST surface is [landerAftM].
+  ///
+  /// The LM is the one craft where the CSM silhouette was actively misleading:
+  /// a lander is read by its stance, and a cone-on-a-cylinder gives no hint of
+  /// which way is down or how far the legs reach, which is exactly what a
+  /// player judging a descent is looking at.
+  ///
+  /// Authored in METRES under a single root carrying the lengthToScene(1)
+  /// conversion, so every number below reads as the real vehicle's dimensions
+  /// (same convention as [_buildAxisGizmo]) rather than as scene units.
+  void _addLanderFallback(fs.Node vesselNode) {
+    final root = fs.Node()
+      ..localTransform = vm.Matrix4.compose(
+        vm.Vector3.zero(),
+        vm.Quaternion.identity(),
+        vm.Vector3.all(lengthToScene(1.0)),
+      );
+    vesselNode.add(root);
+
+    // A body of revolution about the craft's Z axis, spanning [bottomZ]..[topZ]
+    // — the octagonal stages (8 segments), the engine bell and the dishes.
+    // [azimuthRad] spins the ring: with 8 segments a corner otherwise lands on
+    // +X, and the LM wears a FLAT there, because that face is where the front
+    // leg's outrigger comes out.
+    void revolve({
+      required double topR,
+      required double bottomR,
+      required double topZ,
+      required double bottomZ,
+      required fs.Material mat,
+      int segments = 8,
+      double azimuthRad = 0,
+    }) {
+      root.add(
+        fs.Node(
+          mesh: fs.Mesh(
+            fs.CylinderGeometry(
+              topRadius: topR,
+              bottomRadius: bottomR,
+              height: topZ - bottomZ,
+              radialSegments: segments,
+            ),
+            mat,
+          ),
+        )..localTransform = vm.Matrix4.compose(
+          vm.Vector3(0, 0, (topZ + bottomZ) / 2),
+          vm.Quaternion.axisAngle(vm.Vector3(0, 0, 1), azimuthRad) * _noseUp(),
+          vm.Vector3.all(1.0),
+        ),
+      );
+    }
+
+    // A tube between two points in the body frame: the landing-gear struts and
+    // the RCS outriggers, which are the only pieces here that aren't aligned to
+    // an axis. Rotating +Y (the cylinder's own axis) onto the segment is what
+    // lets the leg geometry be written as the two ENDS it actually has, rather
+    // than as an angle someone has to re-derive after moving a footpad.
+    void strut(vm.Vector3 a, vm.Vector3 b, double radius, fs.Material mat) {
+      final along = b - a;
+      final len = along.length;
+      if (len <= 1e-6) return;
+      root.add(
+        fs.Node(
+          mesh: fs.Mesh(
+            fs.CylinderGeometry(
+              topRadius: radius,
+              bottomRadius: radius,
+              height: len,
+              radialSegments: 6,
+            ),
+            mat,
+          ),
+        )..localTransform = vm.Matrix4.compose(
+          (a + b) * 0.5,
+          vm.Quaternion.fromTwoVectors(vm.Vector3(0, 1, 0), along / len),
+          vm.Vector3.all(1.0),
+        ),
+      );
+    }
+
+    // A flat plate: windows, hatches and the porch. [pitchRad] tips it about
+    // the body Y axis, which cants the LM's windows down the way the real
+    // bulkhead does.
+    void plate(vm.Vector3 centre, vm.Vector3 size, fs.Material mat,
+        {double pitchRad = 0}) {
+      root.add(
+        fs.Node(mesh: fs.Mesh(fs.CuboidGeometry(size), mat))
+          ..localTransform = vm.Matrix4.compose(
+            centre,
+            vm.Quaternion.axisAngle(vm.Vector3(0, 1, 0), pitchRad),
+            vm.Vector3.all(1.0),
+          ),
+      );
+    }
+
+    vm.Vector3 at(double azimuthRad, double radius, double z) => vm.Vector3(
+        radius * math.cos(azimuthRad), radius * math.sin(azimuthRad), z);
+
+    // Descent stage: the octagon, 4.2 m across corners and 1.65 m deep, hung
+    // below the stage interface (z = 0) so staging the ascent stage away leaves
+    // the craft origin where the ascent stage's own model expects it.
+    const octantRad = math.pi / 8; // half a segment: puts a flat on +X
+    revolve(
+      topR: 2.11,
+      bottomR: 2.11,
+      topZ: 0.0,
+      bottomZ: -1.65,
+      mat: PartPrimitives.foil(),
+      azimuthRad: octantRad,
+    );
+    // Descent engine bell: narrow throat inside the stage, wide exit aft. Its
+    // exit plane is what [ExhaustNodes.defaultNozzleZM] has to sit at or just
+    // inside, or the plume burns in the gap between bell and ground.
+    revolve(
+      topR: 0.26,
+      bottomR: 0.78,
+      topZ: -1.50,
+      bottomZ: _dpsExitM,
+      mat: PartPrimitives.dark(),
+      segments: 16,
+    );
+
+    // Landing gear: one leg on each of +X (the front leg, under the cabin and
+    // carrying the porch and ladder), +Y, -X and -Y. The primary strut hangs
+    // from the TOP of the descent stage and the two secondaries brace out to
+    // its knee from the BOTTOM corners — that A-frame, and not the inverted
+    // one, is what makes the stance read as a lander's rather than a tripod's,
+    // and it is also what puts the strut's top end under the porch.
+    for (var i = 0; i < 4; i++) {
+      final az = i * math.pi / 2;
+      final hip = at(az, 1.85, -0.30);
+      final pad = at(az, _padRadiusM, landerAftM + _padThicknessM / 2);
+      strut(hip, pad, 0.11, PartPrimitives.frame());
+      final knee = hip + (pad - hip) * 0.55;
+      for (final side in const [-0.22, 0.22]) {
+        strut(at(az + side, 1.95, -1.55), knee, 0.07, PartPrimitives.frame());
+      }
+      // Footpad: a shallow foil-covered dish, bottom face on [landerAftM].
+      root.add(
+        fs.Node(
+          mesh: fs.Mesh(
+            fs.CylinderGeometry(
+              topRadius: 0.47,
+              bottomRadius: 0.40,
+              height: _padThicknessM,
+              radialSegments: 12,
+            ),
+            PartPrimitives.foil(),
+          ),
+        )..localTransform = vm.Matrix4.compose(pad, _noseUp(), vm.Vector3.all(1.0)),
+      );
+    }
+    // Porch and ladder on the front leg — the two details that say which face
+    // the crew comes out of, and the only asymmetry in the descent stage. The
+    // porch sits just under the stage interface, a step below the forward
+    // hatch, and the ladder runs from it down the front primary strut, meeting
+    // it at the pad.
+    plate(vm.Vector3(2.30, 0, -0.12), vm.Vector3(0.80, 0.95, 0.08),
+        PartPrimitives.frame());
+    strut(at(0, 2.05, -0.05), at(0, _padRadiusM - 0.30, -3.20), 0.14,
+        PartPrimitives.frame());
+
+    // Ascent stage: a foil skirt off the stage interface, then the midsection,
+    // with the crew cabin bulging forward over the front leg.
+    //
+    // The midsection is kept NARROWER than the cabin on purpose. Sized the
+    // other way the drum vanishes inside it and the whole ascent stage reads as
+    // one smooth barrel — which is the CSM's shape, i.e. exactly the confusion
+    // this silhouette exists to end. Front-heavy is the LM's proportion.
+    revolve(
+      topR: 1.25,
+      bottomR: 1.55,
+      topZ: 0.50,
+      bottomZ: 0.0,
+      mat: PartPrimitives.foil(),
+      azimuthRad: octantRad,
+    );
+    revolve(
+      topR: 1.25,
+      bottomR: 1.25,
+      topZ: 2.30,
+      bottomZ: 0.50,
+      mat: PartPrimitives.hull(),
+      azimuthRad: octantRad,
+    );
+    // Crew cabin: a drum lying along +X, so its round face is the LM's face.
+    root.add(
+      fs.Node(
+        mesh: fs.Mesh(
+          fs.CylinderGeometry(
+            topRadius: 1.15,
+            bottomRadius: 1.15,
+            height: 1.25,
+            radialSegments: 14,
+          ),
+          PartPrimitives.hull(),
+        ),
+      )..localTransform = vm.Matrix4.compose(
+        vm.Vector3(1.05, 0, 1.40),
+        vm.Quaternion.axisAngle(vm.Vector3(0, 0, 1), -math.pi / 2),
+        vm.Vector3.all(1.0),
+      ),
+    );
+    // The two forward windows, canted down the way the real bulkhead is (that
+    // downward cant is what the LM's face reads as), and the forward hatch the
+    // porch leads to.
+    for (final y in const [-0.52, 0.52]) {
+      plate(vm.Vector3(1.68, y, 1.68), vm.Vector3(0.08, 0.50, 0.46),
+          PartPrimitives.dark(), pitchRad: 0.50);
+    }
+    plate(vm.Vector3(1.70, 0, 0.82), vm.Vector3(0.08, 0.72, 0.80),
+        PartPrimitives.dark());
+
+    // RCS quads on their outriggers, at the four corners between the legs.
+    for (var i = 0; i < 4; i++) {
+      final az = math.pi / 4 + i * math.pi / 2;
+      strut(at(az, 1.15, 1.90), at(az, 1.60, 1.90), 0.09,
+          PartPrimitives.frame());
+      root.add(
+        fs.Node(
+          mesh: fs.Mesh(
+            fs.CuboidGeometry(vm.Vector3(0.42, 0.42, 0.42)),
+            PartPrimitives.dark(),
+          ),
+        )..localTransform = vm.Matrix4.compose(
+          at(az, 1.78, 1.90),
+          vm.Quaternion.axisAngle(vm.Vector3(0, 0, 1), az),
+          vm.Vector3.all(1.0),
+        ),
+      );
+    }
+
+    // Docking tunnel on the nose, and the rendezvous radar dish leaning
+    // forward off it — the LM's top-side silhouette from a CSM's window.
+    revolve(
+      topR: 0.42,
+      bottomR: 0.46,
+      topZ: 2.82,
+      bottomZ: 2.30,
+      mat: PartPrimitives.hull(),
+      segments: 14,
+    );
+    root.add(
+      fs.Node(
+        mesh: fs.Mesh(
+          fs.CylinderGeometry(
+            topRadius: 0.46,
+            bottomRadius: 0.06,
+            height: 0.22,
+            radialSegments: 16,
+          ),
+          PartPrimitives.panel(),
+        ),
+      )..localTransform = vm.Matrix4.compose(
+        vm.Vector3(0.62, 0, 2.55),
+        vm.Quaternion.axisAngle(vm.Vector3(0, 1, 0), 0.55) * _noseUp(),
+        vm.Vector3.all(1.0),
+      ),
+    );
+    // S-band steerable antenna, off the starboard side: the LM is not
+    // symmetric, and the one dish that breaks it is worth the node.
+    root.add(
+      fs.Node(
+        mesh: fs.Mesh(
+          fs.CylinderGeometry(
+            topRadius: 0.38,
+            bottomRadius: 0.05,
+            height: 0.18,
+            radialSegments: 14,
+          ),
+          PartPrimitives.panel(),
+        ),
+      )..localTransform = vm.Matrix4.compose(
+        vm.Vector3(-0.10, 1.42, 2.15),
+        vm.Quaternion.axisAngle(vm.Vector3(1, 0, 0), -0.9) * _noseUp(),
+        vm.Vector3.all(1.0),
+      ),
+    );
+  }
 }
 
 /// One part of a kitbash craft on screen.
@@ -807,6 +1152,28 @@ class PartPrimitives {
     ..baseColorFactor = vm.Vector4(0.12, 0.18, 0.45, 1.0)
     ..roughnessFactor = 0.3
     ..metallicFactor = 0.4;
+
+  /// Matte light structure — landing-gear struts, outriggers, a porch.
+  ///
+  /// [hull] would be the obvious finish and is the wrong one: at 0.85 metallic
+  /// its base colour IS its reflectance, so a 0.1 m rod facing anywhere but the
+  /// sun reads as black wire. A member thin enough that a viewer sees only one
+  /// of its faces needs a mostly-dielectric finish to stay a light structure
+  /// under every heading.
+  static fs.Material frame() => fs.PhysicallyBasedMaterial()
+    ..baseColorFactor = vm.Vector4(0.72, 0.72, 0.70, 1.0)
+    ..roughnessFactor = 0.65
+    ..metallicFactor = 0.12;
+
+  /// Amber thermal blanket — the gold kapton a descent stage is wrapped in.
+  /// Not a part finish: nothing in the catalog resolves to it, and it exists so
+  /// [VesselNodes] can tell the LM's two stages apart at a glance from the
+  /// range a lander is normally seen at, where the shapes have merged into one
+  /// blob but the colours have not.
+  static fs.Material foil() => fs.PhysicallyBasedMaterial()
+    ..baseColorFactor = vm.Vector4(0.82, 0.60, 0.20, 1.0)
+    ..roughnessFactor = 0.35
+    ..metallicFactor = 1.0;
 
   /// Cone: apex +Z (nose), unit height, unit base diameter. [flip] points
   /// the apex -Z (engine bell).

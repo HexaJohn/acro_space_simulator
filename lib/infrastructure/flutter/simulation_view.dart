@@ -10,6 +10,7 @@ import 'dart:typed_data' show Uint8List;
 import 'dart:ui' as ui show Image;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/gestures.dart'
@@ -27,6 +28,8 @@ import 'package:flutter/services.dart'
         KeyUpEvent;
 
 import '../../domain/autonomy/pilot_input.dart';
+import '../../domain/autonomy/landing_target.dart';
+import '../../domain/colony/city/city_building_spec.dart';
 import '../../domain/colony/city/city_config.dart';
 import '../../domain/colony/city/city_sim.dart';
 import '../../domain/colony/city/parcel.dart';
@@ -34,6 +37,8 @@ import '../../adapters/presenters/surface_picker.dart';
 import '../flutter_scene/city/city_nodes.dart';
 import 'flight_session.dart';
 import 'screens/city_edit_overlay.dart';
+import 'screens/city_site_actions.dart';
+import 'screens/craft_assembly_screen.dart';
 import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
 
@@ -84,7 +89,6 @@ import '../flutter_scene/scene_render_view.dart';
 import 'sim_view_control.dart';
 import 'debug_layers.dart';
 import 'nav_ball.dart';
-import 'screens/city_builder_screen.dart';
 import 'texture_cache.dart';
 import 'top_down_painter.dart';
 
@@ -135,12 +139,20 @@ class SimulationView extends StatefulWidget {
   /// false so the scene is exactly the injected/traffic craft.
   final bool spawnDemoOrbiter;
 
+  /// A colony to register with the world and open the camera on.
+  ///
+  /// The city studio's way in: it generates a real [CitySim] and hands it
+  /// over, so the studio profiles the same scene, the same shaper and the same
+  /// renderer a played colony uses rather than a lookalike of them.
+  final CitySim? injectedCity;
+
   const SimulationView({
     super.key,
     this.injectedVessel,
     this.trafficVessels = const [],
     this.initialBackend = RenderBackend.software,
     this.spawnDemoOrbiter = true,
+    this.injectedCity,
   });
 
   @override
@@ -257,6 +269,11 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   /// The colony being edited in-world, and the tool held over it.
   CitySim? _editingCity;
   final CityEditController _cityEdit = CityEditController();
+
+  /// Where the placement heatmap was last surveyed, and for which building.
+  /// Held here rather than in the colony extension, which cannot own fields.
+  Vec2? _heatAt;
+  String? _heatSpec;
   bool _controlsExpanded = true; // collapsible FAB stack
 
   /// Radius (m) of the body the camera is locked on, or 0 (vessel / none). Lets
@@ -1342,6 +1359,11 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     super.initState();
     unawaited(_loadBackendPref());
     _registerControl();
+    // The road ghost lives in renderer statics, and the toolbar commits and
+    // cancels the spline without going anywhere near them — so a finished road
+    // left its preview hanging over the world forever. Re-sync whenever the
+    // editor's state changes, which is the one event both paths share.
+    _cityEdit.addListener(_onCityEditChanged);
 
     // The REAL Solar System: Sun + planets + dwarf planets + moons.
     final system = SampleWorld.realSystem();
@@ -1368,6 +1390,13 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     _targetIndex =
         focusId == null ? 0 : _targets.indexWhere((t) => t.v == focusId);
     if (_targetIndex < 0) _targetIndex = 0;
+    // A studio city is the subject: point the camera at its world rather than
+    // at whatever craft happens to exist.
+    final studioCity = widget.injectedCity;
+    if (studioCity != null && injected == null) {
+      final i = _targets.indexWhere((t) => t.b == studioCity.body.id);
+      if (i >= 0) _targetIndex = i;
+    }
     _focusVessel = _targets[_targetIndex].v;
     _focusBody = _targets[_targetIndex].b;
 
@@ -1386,6 +1415,16 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       // Pop a destruction menu when a vessel is lost.
       onEvent: _onDomainEvent,
     );
+    // A colony handed over by the caller (the city studio), registered with
+    // the WORLD so the authoritative tick advances it and the scene draws it
+    // exactly as it would a colony founded in flight.
+    //
+    // AFTER the session exists: `_session` is `late final`, and reaching for
+    // its city repository before this line threw a LateInitializationError
+    // that took the whole app down on open.
+    final city = widget.injectedCity;
+    if (city != null) _session.cities.add(city);
+
     for (final v in _vessels.all()) {
       _vesselNames[v.id.value] = v.name;
     }
@@ -1834,6 +1873,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
 
   @override
   void dispose() {
+    _cityEdit.removeListener(_onCityEditChanged);
     SimViewControl.instance.clear();
     _ticker.dispose();
     unawaited(_bridgeCommands?.cancel());
@@ -2857,23 +2897,33 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                       opaque: false,
                       onHover: (e) => _hoverCityAt(e.localPosition),
                       onExit: (_) => CityNodes.cursorBF = null,
-                      child: GestureDetector(
-                        behavior: _cityEdit.active
-                            ? HitTestBehavior.opaque
-                            : HitTestBehavior.translucent,
-                        onTapUp: _cityEdit.active
-                            ? (d) => _editCityAt(d.localPosition)
-                            : null,
-                        onPanStart: _cityEdit.active ? (_) {} : null,
-                        // Panning PAINTS for the lot tools but does not draw
-                        // roads: the road tool is click-to-place, Skylines
-                        // style — each tap a control point, the toolbar's
-                        // check to build. A freehand scribble is not how
-                        // anyone lays an avenue.
-                        onPanUpdate: _cityEdit.active &&
-                                _cityEdit.tool != CityEditTool.roadSpline
-                            ? (d) => _editCityAt(d.localPosition)
-                            : null,
+                      child: _PickGate(
+                        // A held tool paints anywhere, so the gate stands
+                        // open. On Look it opens only over a BUILDING —
+                        // every other tap belongs to the HUD underneath, and
+                        // a gesture arena cannot tell the two apart on its
+                        // own.
+                        pick: (p) =>
+                            _cityEdit.active || _siteUnder(p) != null,
+                        child: GestureDetector(
+                          behavior: _cityEdit.active
+                              ? HitTestBehavior.opaque
+                              : HitTestBehavior.translucent,
+                          onTapUp: (d) => _cityEdit.active
+                              ? _editCityAt(d.localPosition)
+                              : _inspectCityAt(d.localPosition),
+                          onPanStart: _cityEdit.active ? (_) {} : null,
+                          // Panning PAINTS for the lot tools but does not draw
+                          // roads: the road tool is click-to-place, Skylines
+                          // style — each tap a control point, the toolbar's
+                          // check to build. A freehand scribble is not how
+                          // anyone lays an avenue.
+                          onPanUpdate:
+                              _cityEdit.active &&
+                                  _cityEdit.tool != CityEditTool.roadSpline
+                              ? (d) => _editCityAt(d.localPosition)
+                              : null,
+                        ),
                       ),
                     ),
                   ),
@@ -2886,7 +2936,6 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                       controller: _cityEdit,
                       city: _editingCity!,
                       onClose: () => setState(() => _editingCity = null),
-                      onOpenPanels: () => _openCity(_editingCity!),
                     ),
                   ),
               ],

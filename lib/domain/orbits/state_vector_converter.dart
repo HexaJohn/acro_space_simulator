@@ -27,6 +27,24 @@ class StateVectorOrbitConverter {
   /// sub-micron at planetary scale), large enough to survive double rounding.
   static const double _familyEpsilon = 1e-12;
 
+  /// Angular momentum, as a fraction of this radius's CIRCULAR value, below
+  /// which a trajectory is treated as a straight line through the centre.
+  ///
+  /// Not a precision guard on `h` itself — a guard on the coordinate the
+  /// general path measures phase with. That path carries phase in the TRUE
+  /// anomaly, which on a near-radial trajectory barely moves: the craft is
+  /// falling fast while sweeping almost no angle, so a tick advances the true
+  /// anomaly by less than the error in recovering it, and the round trip stands
+  /// still. Measured on a lunar drop, the general path is frozen solid below
+  /// ~0.01 m/s of cross-track and still hundreds of metres out at 0.02.
+  ///
+  /// The rectilinear path measures phase from the RADIUS instead, which is
+  /// exactly what changes fastest here, so it stays sharp all the way to zero.
+  /// This threshold is where the handover happens: 1e-4 of circular is ~0.16
+  /// m/s at a low lunar orbit, so what is given up is a tenth of a metre per
+  /// second of cross-track on a trajectory already falling straight down.
+  static const double _rectilinearFraction = 1e-4;
+
   /// Cartesian (body-centred inertial) -> Keplerian elements.
   Orbit toOrbit({
     required Vector3 position,
@@ -55,7 +73,7 @@ class StateVectorOrbitConverter {
     // general path below derives position from — encodes nothing. The
     // eccentric anomaly still does, so [_rectilinear] goes at it from there.
     if (rMag < 1e-6) return _zeroRadiusOrbit(body, mu, epoch);
-    if (hMag < 1e-6 * math.sqrt(mu * rMag)) {
+    if (hMag < _rectilinearFraction * math.sqrt(mu * rMag)) {
       return _rectilinear(
           r: r, v: v, rMag: rMag, mu: mu, body: body, epoch: epoch);
     }
@@ -75,16 +93,25 @@ class StateVectorOrbitConverter {
     var a = -mu / (2 * energy);
     if (!a.isFinite || a.abs() > 1e18) a = energy <= 0 ? 1e18 : -1e18;
 
-    // Keep `e` and `a` agreeing about which conic this is. `e` comes out of a
-    // vector difference, and on a very eccentric BOUND orbit it rounds to
-    // exactly 1.0 while `a` stays positive. Everything downstream — the branch
-    // in [toStateVector], [_trueToMean], `OrbitalElements.isElliptical` — picks
-    // the conic family off `e` alone, so an unclamped value sends a bound orbit
-    // through the hyperbolic formulas, which assume `a < 0` and hand back
-    // negative radii. Pinning the family at construction is the one place that
-    // fixes every consumer at once.
-    if (a > 0 && e >= 1.0) e = 1.0 - _familyEpsilon;
-    if (a < 0 && e <= 1.0) e = 1.0 + _familyEpsilon;
+    // A conic too thin for the element set to carry.
+    //
+    // `e` comes out of a vector difference, so on a very eccentric orbit the
+    // interesting quantity is `1 - e` — and once that falls under
+    // [_familyEpsilon] the double simply has no room for it. Pinning `e` at
+    // `1 -/+ _familyEpsilon` used to keep it merely agreeing with `a` about the
+    // conic FAMILY, but the pinned value no longer describes this trajectory:
+    // round-tripping state -> elements -> state then loses a little phase every
+    // tick, and on a near-radial fall it loses ALL of it. The craft stops
+    // descending in mid-air and hangs there.
+    //
+    // [_rectilinear] is the representation built for exactly this — a conic
+    // with no width — and it round-trips exactly. Anything the general element
+    // set cannot hold goes there instead of being pinned into a lie.
+    if ((a > 0 && e >= 1.0 - _familyEpsilon) ||
+        (a < 0 && e <= 1.0 + _familyEpsilon)) {
+      return _rectilinear(
+          r: r, v: v, rMag: rMag, mu: mu, body: body, epoch: epoch);
+    }
 
     final i = math.acos((h.z / hMag).clamp(-1.0, 1.0));
 
@@ -236,6 +263,7 @@ class StateVectorOrbitConverter {
         longitudeOfAscendingNode: raan,
         argumentOfPeriapsis: argP,
         meanAnomalyAtEpoch: m0,
+        rectilinear: true,
       ),
       body: body.id,
       mu: mu,
@@ -285,9 +313,13 @@ class StateVectorOrbitConverter {
       final sinhH = _sinh(hAnom);
       final r = a * (1 - eH * coshH); // > 0 since a < 0
       xP = a * (coshH - eH);
-      yP = -a * math.sqrt(eH * eH - 1) * sinhH;
       vxP = -n * a * a * sinhH / r;
-      vyP = n * a * a * math.sqrt(eH * eH - 1) * coshH / r;
+      // A rectilinear conic has no width. `sqrt(eH^2 - 1)` is a hair off zero
+      // rather than zero, and that hair is metres of off-axis offset.
+      yP = el.rectilinear ? 0.0 : -a * math.sqrt(eH * eH - 1) * sinhH;
+      vyP = el.rectilinear
+          ? 0.0
+          : n * a * a * math.sqrt(eH * eH - 1) * coshH / r;
     } else {
       final eccAnom = _solveKepler(m, e);
 
@@ -296,11 +328,13 @@ class StateVectorOrbitConverter {
       final sinE = math.sin(eccAnom);
 
       xP = a * (cosE - e);
-      yP = a * math.sqrt(1 - e * e) * sinE;
 
       final rDot = (a * n) / (1 - e * cosE);
       vxP = -rDot * sinE;
-      vyP = rDot * math.sqrt(1 - e * e) * cosE;
+      // As above: on a straight-line conic the off-axis terms are exactly zero,
+      // and the `sqrt(1 - e^2)` that stands in for them is not.
+      yP = el.rectilinear ? 0.0 : a * math.sqrt(1 - e * e) * sinE;
+      vyP = el.rectilinear ? 0.0 : rDot * math.sqrt(1 - e * e) * cosE;
     }
 
     // Rotate perifocal -> inertial via (RAAN, inclination, argP).

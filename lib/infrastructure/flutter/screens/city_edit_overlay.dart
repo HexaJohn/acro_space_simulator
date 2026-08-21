@@ -17,10 +17,10 @@ import 'package:flutter/material.dart';
 
 import '../../../domain/colony/city/city_building_spec.dart';
 import '../../../domain/colony/city/city_sim.dart';
-import '../../../domain/colony/city/commodity.dart';
 import '../../../domain/colony/city/parcel.dart';
 import 'app_theme.dart';
 import 'city_model.dart';
+import 'city_panels.dart';
 
 /// What the editor does with a tap on the ground.
 enum CityEditTool {
@@ -170,10 +170,7 @@ class CityEditController extends ChangeNotifier {
         city.layout.setUse(parcelId, _useForKind());
         notifyListeners();
       case CityEditTool.bulldoze:
-        city.parcelBuildings.remove(parcelId);
-        city.grownParcels.remove(parcelId);
-        city.lotFires.remove(parcelId);
-        city.layout.setUse(parcelId, ParcelUse.unzoned);
+        city.clearParcel(parcelId);
         notifyListeners();
       case CityEditTool.inspect:
       case CityEditTool.roadSpline:
@@ -266,25 +263,50 @@ class CityEditController extends ChangeNotifier {
   }
 }
 
+/// Which readout drawer is open under the tool strip.
+enum CityReadout {
+  status('City'),
+  politics('Politics'),
+  stock('Stock'),
+  world('World');
+
+  const CityReadout(this.label);
+  final String label;
+}
+
 /// The toolbar strip. Sits over the 3D view; deliberately narrow so it does
 /// not eat the window the player is flying through.
-class CityEditOverlay extends StatelessWidget {
+class CityEditOverlay extends StatefulWidget {
   const CityEditOverlay({
     super.key,
     required this.controller,
     required this.city,
     required this.onClose,
-    this.onOpenPanels,
   });
 
   final CityEditController controller;
   final CitySim city;
   final VoidCallback onClose;
 
-  /// Opens the full 2D builder. The in-world editor covers PLACEMENT; the
-  /// panels it has no 3D equivalent for — politics, budgets, stockpiles,
-  /// delivery schedules — still live there.
-  final VoidCallback? onOpenPanels;
+  @override
+  State<CityEditOverlay> createState() => _CityEditOverlayState();
+}
+
+class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
+  @override
+  CitySim get sim => widget.city;
+
+  @override
+  void panelChanged() => setState(() {});
+
+  CityEditController get controller => widget.controller;
+  CitySim get city => widget.city;
+  VoidCallback get onClose => widget.onClose;
+
+  /// The readout drawer currently open, or null when the strip is bare. One at
+  /// a time: these are tall, and the point of the in-world editor is that you
+  /// can still see the world you are editing.
+  CityReadout? _readout;
 
   /// Window width, captured on build so the panel widgets can bound
   /// themselves without each plumbing a LayoutBuilder.
@@ -333,13 +355,6 @@ class CityEditOverlay extends StatelessWidget {
                 _stat('Ore', city.stockOf('ore')),
                 _stat('Pop', city.population),
                 const SizedBox(width: 8),
-                if (onOpenPanels != null)
-                  IconButton(
-                    onPressed: onOpenPanels,
-                    icon: const Icon(Icons.dashboard, size: 16),
-                    color: const Color(0xFF9FB4CC),
-                    tooltip: 'City panels',
-                  ),
                 IconButton(
                   onPressed: onClose,
                   icon: const Icon(Icons.close, size: 16),
@@ -351,7 +366,84 @@ class CityEditOverlay extends StatelessWidget {
               if (controller.tool == CityEditTool.zone) _zoneRow(),
               if (controller.tool == CityEditTool.roadSpline) _splineRow(),
               if (controller.tool == CityEditTool.utility) _buildRow(),
+              _readoutRow(),
+              if (_readout != null) _readoutPanel(_readout!),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// The readout tabs. These are the flat builder's side-pane tabs, standing
+  /// under the tools instead of behind a button that left the world.
+  Widget _readoutRow() => Padding(
+        padding: const EdgeInsets.only(top: 5),
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            for (final r in CityReadout.values)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 2),
+                child: InkWell(
+                  onTap: () => setState(
+                      () => _readout = _readout == r ? null : r),
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: _readout == r
+                          ? AppTheme.accent.withValues(alpha: 0.20)
+                          : null,
+                      borderRadius: BorderRadius.circular(5),
+                      border: Border.all(
+                          color: _readout == r
+                              ? AppTheme.accent
+                              : const Color(0xFF2A3948)),
+                    ),
+                    child: Text(r.label,
+                        style: TextStyle(
+                            fontSize: 11,
+                            color: _readout == r
+                                ? AppTheme.accent
+                                : const Color(0xFF9FB4CC))),
+                  ),
+                ),
+              ),
+          ]),
+        ),
+      );
+
+  /// One readout drawer. Height-capped at 45% of the window: a panel that
+  /// covered the view would defeat the point of editing in the world.
+  Widget _readoutPanel(CityReadout r) {
+    final rows = switch (r) {
+      CityReadout.status => cityStatusPanel(),
+      CityReadout.politics => cityPoliticsPanel(),
+      CityReadout.stock => cityStockPanel(),
+      CityReadout.world => cityWorldPanel(),
+    };
+    // A Material, not a decorated box: these panels are full of list tiles and
+    // switches, which paint their background and ink onto the nearest Material
+    // ancestor. Wrapping them in a coloured DecoratedBox instead hides every
+    // one of those effects — Flutter asserts about it in debug.
+    return Container(
+      margin: const EdgeInsets.only(top: 6),
+      width: _maxWidth,
+      constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(context).height * 0.45),
+      child: Material(
+        color: const Color(0xEE0B1017),
+        borderRadius: BorderRadius.circular(6),
+        child: Container(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: const Color(0xFF24313F)),
+          ),
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+            shrinkWrap: true,
+            children: rows,
           ),
         ),
       ),

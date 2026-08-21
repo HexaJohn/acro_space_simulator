@@ -7,6 +7,7 @@ import 'dart:math' as math;
 
 import '../autonomy/docking_approach.dart';
 import '../autonomy/flight_plan.dart';
+import '../autonomy/landing_target.dart';
 import '../dynamics/force.dart';
 import '../dynamics/force_model.dart';
 import '../dynamics/mass_properties.dart';
@@ -78,6 +79,13 @@ class Vessel {
 
   /// Active docking approach, if this vessel is closing on a target port.
   DockingApproach? docking;
+
+  /// Pad this vessel is being flown onto, if the player aimed it at one.
+  ///
+  /// Set by pointing the craft at a spaceport from the world; the tick then
+  /// runs the same landing law the colony's shuttles fly, and clears it on
+  /// touchdown. Null means the player has the controls.
+  LandingTarget? landingTarget;
 
   /// Desired forward (+Z body) axis in the inertial frame. The attitude
   /// controller (reaction wheels) rotates the vessel toward it. Null = hold.
@@ -185,6 +193,21 @@ class Vessel {
     final mf = m0 - propellantMass;
     if (mf <= 0 || m0 <= mf) return 0;
     return engine.ispVacuum * standardGravity * math.log(m0 / mf);
+  }
+
+  /// Full-throttle thrust (N) the active stage can produce at this ambient
+  /// pressure. Guidance needs it to size the braking burn; without it a landing
+  /// law can only guess how hard the vehicle can stop.
+  double maxThrustAt(double pressureFraction) {
+    final stage = activeStage;
+    if (stage == null) return 0;
+    var total = 0.0;
+    for (final p in stage.engines) {
+      final eng = p.engine;
+      if (eng == null) continue;
+      total += eng.thrustAt(pressureFraction, 1.0);
+    }
+    return total;
   }
 
   void setThrottle(double t) => _throttle = t.clamp(0.0, 1.0);

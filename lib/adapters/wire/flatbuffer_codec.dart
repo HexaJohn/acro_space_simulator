@@ -28,8 +28,9 @@ import 'sim_acro.wire_generated.dart' as gen;
 ///     flatc --dart -o lib/adapters/wire wire/sim.fbs
 /// an Unreal client sees pristine terrain while the in-process flutter_scene
 /// renderer — which consumes `WorldSnapshot` directly, no serialisation — sees
-/// the craters. The fingerprint already covers the edits, so a bridged client
-/// running its own prediction would report the desync rather than hide it.
+/// the craters, the levelled building pads and the graded road corridors. The
+/// fingerprint already covers the edits, so a bridged client running its own
+/// prediction would report the desync rather than hide it.
 ///
 /// GAP: per-part ORIENTATION does not cross either direction. [PartSnapshot]
 /// carries a body-frame quaternion per part so one mesh can be mounted at

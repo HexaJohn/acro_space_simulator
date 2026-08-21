@@ -94,8 +94,23 @@ void main() {
   test('dirt paths are a real tier: narrow, unpaved, low capacity', () {
     expect(RoadClass.path.paved, isFalse);
     expect(RoadClass.path.width, lessThan(RoadClass.street.width));
-    // Persisted by index: path must stay APPENDED or saves reclassify.
-    expect(RoadClass.values.last, RoadClass.path);
+    // Persisted by INDEX, so the invariant is that the existing order never
+    // moves — not that any particular tier is last. Pinning "last" instead
+    // meant every genuinely appended tier failed this and tempted a reorder,
+    // which is the one change that would silently reclassify every road in
+    // every save.
+    expect(
+        RoadClass.values.take(8).toList(),
+        [
+          RoadClass.street,
+          RoadClass.avenue,
+          RoadClass.highway,
+          RoadClass.path,
+          RoadClass.alley,
+          RoadClass.elevated,
+          RoadClass.transit,
+        ],
+        reason: 'a saved road is its index: this prefix is frozen');
 
     final city = CitySim.found(
       const CityConfig(bodyId: 'earth', gridSize: 20),

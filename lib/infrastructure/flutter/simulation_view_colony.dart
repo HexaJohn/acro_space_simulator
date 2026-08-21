@@ -3,7 +3,7 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
-// Founding and editing a colony from the cockpit.
+// Founding, editing and RUNNING a colony from the cockpit.
 //
 // Grouped out of the flight view because it is a whole feature that happens to
 // need the camera and the frame: founding, siting, ground picking, and the
@@ -56,8 +56,10 @@ extension SimulationViewColony on _SimulationViewState {
         );
     if (existing == null) _cities.add(colony);
 
-    // Edit it IN THE WORLD. The 2D builder stays one button away for the
-    // panels that have no 3D equivalent — politics, budgets, stockpiles.
+    // Edit it IN THE WORLD — all of it. There is no longer a button out to a
+    // flat map: the readouts that used to live there (status, politics,
+    // stockpile, world) are drawers on the in-world toolbar, and everything you
+    // can do to a building is on the building itself.
     rebuild(() {
       _editingCity = colony;
       _cityEdit.groundAt = (p) => _groundAtLocal(colony, p);
@@ -121,9 +123,22 @@ extension SimulationViewColony on _SimulationViewState {
     }
     CityNodes.cursorBF = hit.bodyFixed;
     CityNodes.cursorBodyId = city.body.id.value;
-    CityNodes.cursorSizeM = _cityEdit.tool == CityEditTool.utility
-        ? _cityEdit.selectedUtil.siteMetres(cellM: CitySim.cellM).width
-        : CitySim.cellM;
+    // The ghost is the site the placement will actually stake out — width AND
+    // depth, because a starport is 1800 x 2600, not a square — and it turns
+    // red where that site cannot go.
+    final held = _cityEdit.selectedUtil;
+    if (_cityEdit.tool == CityEditTool.utility) {
+      final site = held.siteMetres(cellM: CitySim.cellM);
+      CityNodes.cursorSizeM = site.width;
+      CityNodes.cursorDepthM = site.depth;
+      CityNodes.cursorBad = held.claimsOwnSite &&
+          _siteStatusAt(city, held, Vec2(hit.east, hit.north)) != 0;
+    } else {
+      CityNodes.cursorSizeM = CitySim.cellM;
+      CityNodes.cursorDepthM = CitySim.cellM;
+      CityNodes.cursorBad = false;
+    }
+    _syncSiteHeatmap(city, Vec2(hit.east, hit.north));
     // While a road is being drawn, the ghost follows the mouse: the next
     // segment is visible BEFORE it is clicked, which is the whole difference
     // between placing a road and discovering one.
@@ -172,6 +187,99 @@ extension SimulationViewColony on _SimulationViewState {
     return field?.groundRadiusAt(dir.x, dir.y, dir.z) ?? body.radius;
   }
 
+  /// Grade a claimed site may sit on, as relief across its own span.
+  ///
+  /// A pad cuts and fills to level its plot, so what makes ground unsuitable
+  /// is not steepness in the abstract but how much earth the cut would move
+  /// relative to how big the site is. 10% across the short side is a serious
+  /// terrace and about the limit of what reads as built rather than gouged.
+  static const double _siteMaxGradePct = 10.0;
+
+  /// Can [spec] stand centred on [centre]? 0 placeable, 1 too steep, 2 blocked.
+  ///
+  /// Layout validity is the colony's own question and lives in the domain; the
+  /// GRADE is this layer's, because only the view holds the terrain field.
+  int _siteStatusAt(CitySim city, CityBuildingSpec spec, Vec2 centre) {
+    if (city.siteBlockedReason(spec, centre) != null) return 2;
+    final poly = city.siteFootprint(spec, centre);
+    var lo = double.infinity, hi = -double.infinity;
+    for (final v in [...poly, centre]) {
+      final r = _groundAtLocal(city, v);
+      if (r < lo) lo = r;
+      if (r > hi) hi = r;
+    }
+    final site = spec.siteMetres(cellM: CitySim.cellM);
+    final span = math.min(site.width, site.depth);
+    if (span <= 0) return 0;
+    return (hi - lo) / span * 100 > _siteMaxGradePct ? 1 : 0;
+  }
+
+  /// Paint where the held installation could go.
+  ///
+  /// Only for the specs that bring their own plot — an ordinary building takes
+  /// whatever lot you tap, so there is nothing to survey. Recomputed when the
+  /// cursor has moved a cell rather than every frame: each sample runs the
+  /// full placement test, and a hundred of them per mouse-move would be felt.
+  void _syncSiteHeatmap(CitySim city, Vec2 centre) {
+    final spec = _cityEdit.selectedUtil;
+    if (_cityEdit.tool != CityEditTool.utility || !spec.claimsOwnSite) {
+      CityNodes.heatBF = const [];
+      CityNodes.heatKind = const [];
+      CityNodes.heatCellM = 0;
+      _heatAt = null;
+      return;
+    }
+    final site = spec.siteMetres(cellM: CitySim.cellM);
+    final cell = math.max(24.0, math.min(site.width, site.depth) / 2);
+    final last = _heatAt;
+    if (last != null &&
+        _heatSpec == spec.label &&
+        (last - centre).length < cell / 2) {
+      return; // still describing the same ground
+    }
+    _heatAt = centre;
+    _heatSpec = spec.label;
+
+    const half = 4; // 9 x 9 candidates around the cursor
+    final ground = _colonySiteRadius(city);
+    final pts = <Vector3>[];
+    final kinds = <int>[];
+    for (var iy = -half; iy <= half; iy++) {
+      for (var ix = -half; ix <= half; ix++) {
+        final p = Vec2(centre.e + ix * cell, centre.n + iy * cell);
+        kinds.add(_siteStatusAt(city, spec, p));
+        pts.add(city.localToBodyFixed(p, bodyRadiusM: ground));
+      }
+    }
+    CityNodes.heatBF = pts;
+    CityNodes.heatKind = kinds;
+    CityNodes.heatCellM = cell;
+  }
+
+  /// Keep the renderer's editor ghosts in step with the editor's own state.
+  ///
+  /// Committing or discarding a spline empties `pending` but cannot clear the
+  /// ghost itself — the toolbar that does both knows nothing about the scene,
+  /// so a finished road went on haunting the view. Listening for the change is
+  /// the one hook both paths share.
+  void _onCityEditChanged() {
+    final city = _editingCity;
+    // A different tool or a different building means a different survey.
+    _heatAt = null;
+    if (city == null) {
+      CityNodes.heatBF = const [];
+      CityNodes.heatKind = const [];
+      CityNodes.heatCellM = 0;
+    }
+    if (city == null || _cityEdit.pending.isEmpty) {
+      CityNodes.pendingRouteBF = const [];
+      CityNodes.pendingRouteBad = false;
+      _cityEdit.previewGradePct = null;
+      return;
+    }
+    _syncRoutePreview(city);
+  }
+
   /// Push the in-progress road into the renderer: the true SPLINE through the
   /// placed points (plus the hover point as a ghost segment), draped point by
   /// point on the real ground, red when the grade check refuses it.
@@ -202,6 +310,18 @@ extension SimulationViewColony on _SimulationViewState {
       for (final p in samples)
         city.localToBodyFixed(p, bodyRadiusM: _groundAtLocal(city, p)),
     ];
+  }
+
+  /// A pad centre in body-fixed metres, standing on the real ground.
+  Vector3 _padPointBF(CitySim city, Vec2 local) {
+    final body = _universe.current().body(city.body.id);
+    final dir = city
+        .localToBodyFixed(local, bodyRadiusM: body?.radius ?? 0)
+        .normalized;
+    final field = body?.terrainFieldWith(_terrainEdits.forBody(body.id));
+    final ground = field?.groundRadiusAt(dir.x, dir.y, dir.z) ??
+        (body?.radius ?? 0);
+    return dir * ground;
   }
 
   /// Ground radius under [city]'s site, or the body datum if it has no terrain.
@@ -235,6 +355,25 @@ extension SimulationViewColony on _SimulationViewState {
       return;
     }
 
+    // A sprawling installation brings its OWN plot. No subdivided lot could
+    // hold a 780 m solar farm, which is why the ghost and the placed building
+    // used to disagree so wildly — the ghost drew the real site and placement
+    // shrank it to whatever lot it landed on.
+    final held = _cityEdit.selectedUtil;
+    if (_cityEdit.tool == CityEditTool.utility && held.claimsOwnSite) {
+      final centre = Vec2(hit.east, hit.north);
+      rebuild(() {
+        if (!city.unlocked(held)) {
+          _cityEdit.blocked =
+              '${held.label} needs ${held.unlockPop} population.';
+          return;
+        }
+        final claimed = city.claimSite(held, centre);
+        _cityEdit.blocked = claimed == null ? city.blocked : null;
+      });
+      return;
+    }
+
     // Every other tool acts on the LOT under the tap.
     //
     // The in-flight editor is parcel-only. The cell grid is still the legacy
@@ -250,16 +389,129 @@ extension SimulationViewColony on _SimulationViewState {
     rebuild(() => _cityEdit.applyToLot(city, lot.id));
   }
 
-  /// Open the builder as a view onto a live colony.
+  /// The built site under [local], or null over bare ground.
   ///
-  /// `driveLocally: false` matters: the authoritative tick is already
-  /// advancing this colony, and letting the screen advance it too would run
-  /// the city at double speed for as long as it was open.
-  void _openCity(CitySim colony) {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => CityBuilderScreen(sim: colony, driveLocally: false),
-      ),
+  /// Runs on every hit test while the editor is open (see `_PickGate`), so it
+  /// stays a ray pick plus one polygon scan — no allocation, no state.
+  (String, CityBuildingSpec)? _siteUnder(Offset local) {
+    final city = _editingCity;
+    if (city == null) return null;
+    final hit = _pickCityGround(local);
+    if (hit == null) return null;
+    final found = city.siteAt(Vec2(hit.east, hit.north));
+    return found == null ? null : (found.$1, found.$3);
+  }
+
+  /// Open the action sheet for the building under [local].
+  ///
+  /// This is what the Look tool is FOR. It used to do nothing at all: tapping a
+  /// spaceport you were standing in front of had no effect, and everything you
+  /// could actually do with one lived behind a button that left the world.
+  void _inspectCityAt(Offset local) {
+    final city = _editingCity;
+    final found = _siteUnder(local);
+    if (city == null || found == null) return;
+    showCitySiteMenu(
+      context: context,
+      sim: city,
+      site: found.$1,
+      spec: found.$2,
+      onChanged: () => rebuild(() {}),
+      hooks: _worldSiteHooks(city),
     );
   }
+
+  /// The in-world host's contributions to the site sheet.
+  ///
+  /// No "pilot a landing" and no "launch in 3D sim": both exist to carry you
+  /// from the flat map into the world, and you are already here. What replaces
+  /// them is pad targeting — pointing the craft you are flying at this port.
+  CitySiteHooks _worldSiteHooks(CitySim city) {
+    final id = _focusVessel;
+    final vessel = id == null ? null : _vessels.byId(id);
+    final hint = vessel == null
+        ? 'Lock the camera onto a craft first — guidance needs one to fly.'
+        : vessel.dominantBody != city.body.id
+            ? 'Your craft is not at ${city.body.name}.'
+            : vessel.landed
+                ? 'Already on the ground — lift off first.'
+                : null;
+    return CitySiteHooks(
+      onOpenVab: () => Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => CraftAssemblyScreen(
+            bodyId: city.body.id.value,
+            launchSites: cityLaunchSites(city),
+            latitude: city.cityLat,
+            longitude: city.cityLon,
+          ),
+        ),
+      ),
+      onTargetPad: (site) => _targetPad(city, site),
+      targetPadHint: hint,
+    );
+  }
+
+  /// Aim the focused craft's landing guidance at [site]'s pad.
+  ///
+  /// The pad is stored BODY-FIXED, which is the whole reason this works from
+  /// orbit: an inertial point would slide off the spaceport as the planet
+  /// turned under the descent. From here the ordinary tick flies it down with
+  /// the same law the colony's own shuttles use.
+  void _targetPad(CitySim city, String site) {
+    final id = _focusVessel;
+    final vessel = id == null ? null : _vessels.byId(id);
+    final parcel = city.siteParcel(site);
+    if (vessel == null || parcel == null) return;
+    // The pad stands on the GROUND, and the ground is not the datum sphere.
+    // Aiming at the datum under a site 300 m up a hill points the descent
+    // through the hillside: guidance reads several hundred metres of altitude
+    // still in hand while the craft is already in the dirt. Take the radius at
+    // the lot's own direction, not the colony centre's — a spaceport is large
+    // enough to sit across a slope.
+    final padBF = _padPointBF(city, parcel.centroid);
+    rebuild(() {
+      vessel.landingTarget = LandingTarget(
+        bodyId: city.body.id.value,
+        padBF: padBF,
+        colonyId: city.id,
+        site: site,
+      );
+      // Guidance and hand-flying are exclusive: leaving manual on would fight
+      // the descent for the throttle every frame.
+      _manualControl = false;
+    });
+  }
+}
+
+/// A hit-test gate: the pointer passes straight through unless [pick] says
+/// there is something here to hit.
+///
+/// The Look tool must not swallow taps meant for the HUD underneath it, but a
+/// gesture arena picks a winner before anyone knows WHAT was tapped. Deciding
+/// in `hitTest` — where the position is known and the arena has not formed yet
+/// — is the only place the answer can be right.
+class _PickGate extends SingleChildRenderObjectWidget {
+  const _PickGate({required this.pick, required Widget super.child});
+
+  final bool Function(Offset local) pick;
+
+  @override
+  _RenderPickGate createRenderObject(BuildContext context) =>
+      _RenderPickGate(pick);
+
+  @override
+  void updateRenderObject(BuildContext context, _RenderPickGate renderObject) {
+    renderObject.pick = pick;
+  }
+}
+
+class _RenderPickGate extends RenderProxyBox {
+  _RenderPickGate(this.pick);
+
+  bool Function(Offset local) pick;
+
+  @override
+  bool hitTest(BoxHitTestResult result, {required Offset position}) =>
+      pick(position) && super.hitTest(result, position: position);
 }

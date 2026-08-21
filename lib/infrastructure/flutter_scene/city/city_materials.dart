@@ -28,6 +28,7 @@ class CityMaterials {
   static fs.PhysicallyBasedMaterial? _ground;
   static fs.PhysicallyBasedMaterial? _road;
   static fs.PhysicallyBasedMaterial? _dirt;
+  static fs.PhysicallyBasedMaterial? _alley;
 
   static fs.PhysicallyBasedMaterial get facade =>
       _facade ??= _CitySurfaceMaterial()
@@ -55,14 +56,22 @@ class CityMaterials {
         ..roughnessFactor = 1.0
         ..metallicFactor = 0.0;
 
-  /// Spline-road ribbons: kerbs and a dashed centre line, V along the road.
+  /// Spline-road ribbons: curbs and a dashed centre line, V along the road.
   static fs.PhysicallyBasedMaterial get road => _road ??= _CitySurfaceMaterial()
     ..baseColorTexture = CityTextures.roadStrip
     ..baseColorFactor = vm.Vector4(1, 1, 1, 1)
     ..roughnessFactor = 1.0
     ..metallicFactor = 0.0;
 
-  /// Dirt paths: graded earth, ruts, no kerbs.
+  /// Alleys: worn concrete, a centre channel, mismatched patches, no curbs.
+  static fs.PhysicallyBasedMaterial get alley =>
+      _alley ??= _CitySurfaceMaterial()
+        ..baseColorTexture = CityTextures.alleyStrip
+        ..baseColorFactor = vm.Vector4(1, 1, 1, 1)
+        ..roughnessFactor = 1.0
+        ..metallicFactor = 0.0;
+
+  /// Dirt paths: graded earth, ruts, no curbs.
   static fs.PhysicallyBasedMaterial get dirt => _dirt ??= _CitySurfaceMaterial()
     ..baseColorTexture = CityTextures.dirtStrip
     ..baseColorFactor = vm.Vector4(1, 1, 1, 1)
@@ -76,6 +85,7 @@ class CityMaterials {
     _ground = null;
     _road = null;
     _dirt = null;
+    _alley = null;
   }
 }
 

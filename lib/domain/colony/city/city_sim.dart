@@ -38,8 +38,14 @@ import 'commodity.dart';
 /// descends onto a free pad, dwells ~30 s while loading/unloading (the payload
 /// drops once at the start of the dwell), then ascends and departs.
 class LandedCraft {
-  final int anchor; // the spaceport it's serving
-  final int padTile; // which footprint tile (pad) it sits on
+  /// The spaceport it is serving, as a [CitySim] site id. Mutable only because
+  /// buying land renames every grid site at once (see `CitySim.expandLand`);
+  /// nothing else moves a craft between ports mid-visit.
+  String site;
+
+  /// Which pad of that port it sits on, `0..padCount-1`. An ORDINAL, not a
+  /// cell: a lot-placed spaceport has pads but no grid tiles to name them by.
+  final int padIndex;
   final bool isRelief; // relief mission (vs a scheduled resource delivery)
   final String? resource; // delivered commodity (deliveries only)
   final double payload; // actual amount delivered (after any spare-fuel cut)
@@ -47,8 +53,8 @@ class LandedCraft {
   bool granted = false; // one-shot payload guard
 
   LandedCraft({
-    required this.anchor,
-    required this.padTile,
+    required this.site,
+    required this.padIndex,
     required this.isRelief,
     this.resource,
     this.payload = 0,
@@ -411,7 +417,7 @@ class CitySim {
   bool infiniteRobotics = false; // DEBUG/endgame: buildings need no workers (full staffing)
   bool ignoreUnlocks = false; // DEBUG: build anything regardless of population gate
 
-  int? landerPad; // spaceport anchor the lander is parked on (occupied), or null
+  String? landerPad; // spaceport SITE the lander is parked on (occupied), or null
   // Craft currently visiting spaceports — relief missions (request assistance) +
   // scheduled resource deliveries. Each lands on a free pad of its spaceport,
   // dwells ~30 s while it loads/unloads, then leaves. A spaceport supports one
@@ -419,11 +425,11 @@ class CitySim {
   final List<LandedCraft> craft = [];
   double reliefCooldown = 0; // seconds until assistance can be requested again
   int reliefCrew = 0; // settlers the relief missions have added (population floor)
-  // Recurring delivery schedules per spaceport anchor — a LIST so one starport
+  // Recurring delivery schedules per spaceport SITE — a LIST so one starport
   // can run several deliveries (each its own resource/interval/pad). A craft is
   // dispatched whenever a schedule is due and its assigned (or any free) pad is
   // open; the list order is the dispatch priority.
-  final Map<int, List<DeliverySchedule>> deliveries = {};
+  final Map<String, List<DeliverySchedule>> deliveries = {};
 
   // Active disaster + its remaining seconds + an animation phase.
   Disaster disaster = Disaster.none;
@@ -1043,7 +1049,8 @@ class CitySim {
   /// A spaceport exists somewhere but isn't road-connected to the hub.
   bool get spaceportDisconnected =>
       !hasSpaceport &&
-      utils.values.any((s) => s.type == 'spaceport');
+      (utils.values.any((s) => s.type == 'spaceport') ||
+          parcelBuildings.values.any((s) => s.type == 'spaceport'));
 
   /// Why there's no working spaceport, for the status readout.
   /// 0 = never built, 1 = built but disconnected, 2 = demolished (had one, now none).
@@ -2409,7 +2416,7 @@ class CitySim {
     growProgress.remove(k);
     buildStyle.remove(k);
     decompressTimer.remove(k);
-    if (landerPad == k) landerPad = null;
+    if (landerPad == siteIdOfCell(k)) landerPad = null;
     recompute();
   }
 
@@ -2766,7 +2773,7 @@ class CitySim {
       for (final cell in cellsOf(anchor)) {
         if (seen.add(cell)) wasteSites.add(cell);
         for (final nb in neighbours8(cell)) {
-          // Litter spills onto the kerb/yard, but never onto a road lane.
+          // Litter spills onto the curb/yard, but never onto a road lane.
           if (!roads.contains(nb) && nb != hubKey && seen.add(nb)) {
             wasteSites.add(nb);
           }
@@ -3056,9 +3063,10 @@ class CitySim {
     if (!keepSupport) support.remove(k); // bulldozing removes a support tile
     buildStyle.remove(anchor);
     decompressTimer.remove(anchor);
-    deliveries.remove(anchor); // cancel its delivery schedule
-    craft.removeWhere((c) => c.anchor == anchor); // its visiting craft leave
-    if (landerPad == anchor) landerPad = null; // pad gone -> lander unparked
+    final gone = siteIdOfCell(anchor);
+    deliveries.remove(gone); // cancel its delivery schedule
+    craft.removeWhere((c) => c.site == gone); // its visiting craft leave
+    if (landerPad == gone) landerPad = null; // pad gone -> lander unparked
   }
 
   void expandLand() {
@@ -3104,7 +3112,23 @@ class CitySim {
       abandoned..clear()..addAll(ab);
       abandonTimer..clear()..addAll(at);
       hubKey = rekey(hubKey);
-      if (landerPad != null) landerPad = rekey(landerPad!);
+      // A site id embeds its cell, so growing the grid renames every grid site.
+      // The lander's berth, the delivery books and the craft already inbound
+      // all have to come along, or they end up naming whatever now occupies the
+      // old cell.
+      String rekeySite(String s) {
+        final c = cellOfSiteId(s);
+        return c == null ? s : siteIdOfCell(rekey(c));
+      }
+      final parked = landerPad;
+      if (parked != null) landerPad = rekeySite(parked);
+      final books = {
+        for (final e in deliveries.entries) rekeySite(e.key): e.value
+      };
+      deliveries..clear()..addAll(books);
+      for (final c in craft) {
+        c.site = rekeySite(c.site);
+      }
       if (beaconCell != null) beaconCell = rekey(beaconCell!);
       grid = next;
       genElevation(); // re-sculpt terrain for the enlarged grid
@@ -3248,6 +3272,9 @@ class CitySim {
     List<Vec2> controls,
     RoadClass roadClass, {
     double Function(Vec2)? groundAt,
+    /// Skip the lot re-cut; the caller re-cuts once for a whole network. Only
+    /// safe while nothing is built, since no renames are reported.
+    bool regenerateLots = true,
   }) {
     if (groundAt != null && controls.length >= 2) {
       final samples = RoadSpline(
@@ -3258,8 +3285,14 @@ class CitySim {
       final grade = RoadGradeCheck.of(samples, groundAt, roadClass);
       if (!grade.ok) return null;
     }
-    final result =
-        layout.commitRoad(controls: controls, roadClass: roadClass);
+    final result = layout.commitRoad(
+      controls: controls,
+      roadClass: roadClass,
+      // Vacuum, thin air or the wrong gas: people cannot walk beside this
+      // road, so it is built with a pressurised tube for them instead.
+      sealed: !breathable,
+      regenerateLots: regenerateLots,
+    );
     for (final e in result.renamedLots.entries) {
       final placed = parcelBuildings.remove(e.key);
       if (placed != null) parcelBuildings[e.value] = placed;
@@ -3267,6 +3300,15 @@ class CitySim {
       if (grown != null) grownParcels[e.value] = grown;
       final fire = lotFires.remove(e.key);
       if (fire != null) lotFires[e.value] = fire;
+      // A spaceport's BOOKINGS are keyed by the lot too. Drawing a road past a
+      // port that renames its lot used to silently cancel every delivery
+      // booked there, which looked like the schedule had forgotten itself.
+      final booked = deliveries.remove(e.key);
+      if (booked != null) deliveries[e.value] = booked;
+      if (landerPad == e.key) landerPad = e.value;
+      for (final c in craft) {
+        if (c.site == e.key) c.site = e.value;
+      }
     }
     return result.roadId;
   }
@@ -3492,6 +3534,7 @@ class CitySim {
               'id': r.id,
               'class': r.roadClass.index,
               'closed': r.closed,
+              'sealed': r.sealed,
               'pts': [
                 for (final c in r.controls) ...[c.e, c.n]
               ],
@@ -3590,6 +3633,7 @@ class CitySim {
         id: r['id'] as String,
         roadClass: RoadClass.values[(r['class'] as num).toInt()],
         closed: r['closed'] as bool,
+        sealed: r['sealed'] == true,
         controls: [
           for (var i = 0; i + 1 < pts.length; i += 2)
             Vec2(pts[i].toDouble(), pts[i + 1].toDouble()),
@@ -3705,6 +3749,245 @@ class CitySim {
     return m;
   }
 
+  // ---- Sites: one name for a building, whichever model placed it ----------
+  //
+  // The colony carries two placement models. The legacy grid keys buildings by
+  // CELL; the parcel layout keys them by LOT. Everything a player aims at a
+  // building — a delivery booking, a relief mission, the berth the lander is
+  // parked in — has to name one of them, and naming the cell meant a spaceport
+  // built from the cockpit (which is lot-native) could not be addressed at all:
+  // it took no deliveries, hosted no relief craft, and could not be landed on.
+  //
+  // A SITE ID is the shared name. `cell-<key>` for a grid building — the same
+  // id `parcelForCell` already stamps on its synthetic lot, so the two models
+  // agree — and the lot id for a parcel one.
+
+  /// The site id naming the grid building anchored at [anchor].
+  static String siteIdOfCell(int anchor) => 'cell-$anchor';
+
+  /// The grid cell behind [site], or null when it names a lot.
+  static int? cellOfSiteId(String? site) {
+    if (site == null || !site.startsWith('cell-')) return null;
+    return int.tryParse(site.substring(5));
+  }
+
+  /// Re-key everything held against a lot id onto the lot now standing on the
+  /// same ground.
+  ///
+  /// [before] maps old lot id -> the centroid it had. A lot is matched to its
+  /// successor by containment, the same rule `commitRoad` matches by.
+  void _carryLotsAcross(Map<String, Vec2> before) {
+    final moved = <String, String>{};
+    for (final e in before.entries) {
+      if (layout.parcels.any((p) => p.id == e.key)) continue; // survived
+      for (final p in layout.autoParcels) {
+        if (p.contains(e.value)) {
+          moved[e.key] = p.id;
+          break;
+        }
+      }
+    }
+    if (moved.isEmpty) return;
+    for (final e in moved.entries) {
+      final placed = parcelBuildings.remove(e.key);
+      if (placed != null) parcelBuildings[e.value] = placed;
+      final grown = grownParcels.remove(e.key);
+      if (grown != null) grownParcels[e.value] = grown;
+      final fire = lotFires.remove(e.key);
+      if (fire != null) lotFires[e.value] = fire;
+      final booked = deliveries.remove(e.key);
+      if (booked != null) deliveries[e.value] = booked;
+      if (landerPad == e.key) landerPad = e.value;
+      for (final c in craft) {
+        if (c.site == e.key) c.site = e.value;
+      }
+    }
+    // Anything whose ground is simply gone (built over by the new plot) is
+    // dropped rather than left dangling against a lot that no longer exists.
+    parcelBuildings.removeWhere(
+        (id, _) => !layout.parcels.any((p) => p.id == id));
+  }
+
+  /// The lot with this id, or null. Linear because the layout is a list and a
+  /// colony has hundreds of lots, not millions.
+  Parcel? parcelById(String id) {
+    for (final p in layout.parcels) {
+      if (p.id == id) return p;
+    }
+    return null;
+  }
+
+  /// What stands on [site] — hand-placed or demand-grown, grid or lot.
+  CityBuildingSpec? siteSpec(String site) {
+    final cell = cellOfSiteId(site);
+    if (cell != null) return specAt(cell);
+    final placed = parcelBuildings[site];
+    if (placed != null) return placed;
+    final parcel = parcelById(site);
+    return parcel == null ? null : parcelGrownSpec(site, parcel.use);
+  }
+
+  /// Is [site] reachable over the road network? Each model answers with its own
+  /// connectivity pass — the cell BFS for the grid, the lot graph for parcels.
+  bool siteConnected(String site) {
+    final cell = cellOfSiteId(site);
+    if (cell != null) return isConnected(cell);
+    return parcelNetwork().lotServed(site);
+  }
+
+  /// How many craft [site] can host at once: one per footprint tile, which is
+  /// what "a bigger spaceport has more pads" means in both models.
+  int padCountOf(String site) {
+    final cell = cellOfSiteId(site);
+    if (cell != null) return cellsOf(cell).length;
+    return math.max(1, siteSpec(site)?.cellCount ?? 1);
+  }
+
+  /// The grid cell a pad sits on, for the flat map — which draws craft on
+  /// cells. Null for a lot-placed site: the grid has no tile to draw it on.
+  int? padCellOf(String site, int padIndex) {
+    final cell = cellOfSiteId(site);
+    if (cell == null) return null;
+    final tiles = cellsOf(cell).toList();
+    return padIndex >= 0 && padIndex < tiles.length ? tiles[padIndex] : null;
+  }
+
+  /// The built site under [point] (colony-local metres), or null for bare
+  /// ground.
+  ///
+  /// Walks [buildingParcels], so it finds grid- and lot-placed buildings alike:
+  /// the in-world editor has to be able to inspect a colony founded in the flat
+  /// builder as readily as one founded from the cockpit.
+  (String, Parcel, CityBuildingSpec)? siteAt(Vec2 point) {
+    for (final (parcel, spec) in buildingParcels()) {
+      if (parcel.contains(point)) return (parcel.id, parcel, spec);
+    }
+    return null;
+  }
+
+  /// The lot [site] stands on, synthetic lots for grid buildings included.
+  Parcel? siteParcel(String site) {
+    for (final (parcel, _) in buildingParcels()) {
+      if (parcel.id == site) return parcel;
+    }
+    return null;
+  }
+
+  /// Every road-connected LAUNCH site — spaceports and airfields, whichever
+  /// model placed them.
+  ///
+  /// One rule in one place: the flat builder used to walk `utils` itself, so a
+  /// port built from the cockpit (a lot, not a cell) offered no launch site at
+  /// all and the VAB opened with nowhere to launch from.
+  Iterable<(String, CityBuildingSpec)> launchSites() sync* {
+    for (final (parcel, spec) in buildingParcels()) {
+      if (spec.type != 'spaceport' && spec.type != 'airfield') continue;
+      if (!siteConnected(parcel.id)) continue;
+      yield (parcel.id, spec);
+    }
+  }
+
+  /// Reach from a claimed site to the road that serves it, metres.
+  ///
+  /// Matches `ParcelNetwork`'s own manual-lot rule, so a site the editor
+  /// accepts is a site the network then reports as connected. Placing one out
+  /// of reach would build a working installation that reads as cut off, which
+  /// is the confusing half of "it's built but nothing happens".
+  static const double siteAccessReachM = 90;
+
+  /// The footprint a claimed site would occupy, centred on [centre] and
+  /// aligned to the colony's east/north.
+  List<Vec2> siteFootprint(CityBuildingSpec spec, Vec2 centre) {
+    final s = spec.siteMetres(cellM: cellM);
+    final hw = s.width / 2, hd = s.depth / 2;
+    return [
+      Vec2(centre.e - hw, centre.n - hd),
+      Vec2(centre.e + hw, centre.n - hd),
+      Vec2(centre.e + hw, centre.n + hd),
+      Vec2(centre.e - hw, centre.n + hd),
+    ];
+  }
+
+  /// Why [spec] cannot claim a site centred on [centre], or null if it can.
+  ///
+  /// The same predicate the placement uses, exposed so the editor can colour
+  /// the ghost before the player commits rather than refusing afterwards.
+  String? siteBlockedReason(CityBuildingSpec spec, Vec2 centre) {
+    final poly = siteFootprint(spec, centre);
+    if (!layout.canAddManualParcel(poly)) {
+      return 'Blocked — the site crosses a road or another plot.';
+    }
+    if (layout.roads.isEmpty) return 'No road to serve it.';
+    var best = double.infinity;
+    for (final v in [...poly, centre]) {
+      final d = layout.distanceToCurb(v);
+      if (d < best) best = d;
+    }
+    if (best > siteAccessReachM) {
+      return 'Too far from a road — needs one within '
+          '${siteAccessReachM.round()} m.';
+    }
+    return null;
+  }
+
+  /// Stake out a plot for [spec] at [centre] and build on it.
+  ///
+  /// The sprawling installations — quarries, solar farms, reactors, spaceports
+  /// — declare a site hundreds of metres across. No subdivided street lot can
+  /// hold one, so they bring their own: a manual parcel at the spec's true
+  /// extent, which is also the extent the build ghost has been drawing all
+  /// along. Returns the parcel, or null with [blocked] set.
+  Parcel? claimSite(CityBuildingSpec spec, Vec2 centre,
+      {bool regenerateLots = true}) {
+    final why = siteBlockedReason(spec, centre);
+    if (why != null) {
+      blocked = why;
+      return null;
+    }
+    if (stockOf('ore') < spec.buildCost) {
+      blocked = 'Needs ${spec.buildCost.toStringAsFixed(0)} ore.';
+      return null;
+    }
+    // Where every keyed lot stood, before staking the plot moves the ground.
+    //
+    // Adding a manual lot REGENERATES the automatic subdivision around it, and
+    // that renames lots — which orphans every building keyed by an old name.
+    // `commitRoad` has always carried its buildings across its own renames;
+    // this path never did, so dropping a quarry beside a built street quietly
+    // deleted the street. (Measured: 286 building keys against 129 surviving
+    // lots after one generated city placed four installations.)
+    final before = <String, Vec2>{
+      for (final p in layout.autoParcels) p.id: p.centroid,
+    };
+    final parcel = layout.addManualParcel(siteFootprint(spec, centre),
+        regenerateLots: regenerateLots);
+    if (parcel == null) {
+      blocked = 'Blocked — the site crosses a road or another plot.';
+      return null;
+    }
+    if (regenerateLots) _carryLotsAcross(before);
+    parcelBuildings[parcel.id] = spec;
+    stock['ore'] = stockOf('ore') - spec.buildCost;
+    blocked = null;
+    return parcel;
+  }
+
+  /// Tear down whatever stands on the lot [parcelId], cancelling everything
+  /// booked against it.
+  ///
+  /// The lot twin of [clearCell]. The editor used to reach in and delete from
+  /// `parcelBuildings` itself, which left a demolished spaceport's deliveries
+  /// still in the book, dispatching craft at a lot with nothing on it.
+  void clearParcel(String parcelId) {
+    parcelBuildings.remove(parcelId);
+    grownParcels.remove(parcelId);
+    lotFires.remove(parcelId);
+    deliveries.remove(parcelId);
+    craft.removeWhere((c) => c.site == parcelId);
+    if (landerPad == parcelId) landerPad = null;
+    layout.setUse(parcelId, ParcelUse.unzoned);
+  }
+
   // ---- Spaceport traffic: relief missions + scheduled deliveries ----
 
   /// Relief mission cooldown in seconds (between requests).
@@ -3714,30 +3997,28 @@ class CitySim {
   static const double craftDwellSec = 30.0;
   static const double craftTotalSec = craftDwellSec / 0.76;
 
-  /// Footprint pad tiles of a spaceport (one craft per tile).
-  Iterable<int> padTilesOf(int anchor) =>
-      cellsOf(anchor); // every covered cell is a pad
-
-  /// A free pad tile of [anchor] (not occupied by a craft), or null if full.
-  int? freePad(int anchor) {
+  /// A free pad of [site] (not occupied by a craft), or null if every pad is
+  /// taken.
+  int? freePad(String site) {
     final taken = {
       for (final c in craft)
-        if (c.anchor == anchor) c.padTile
+        if (c.site == site) c.padIndex
     };
-    for (final t in padTilesOf(anchor)) {
-      if (!taken.contains(t)) return t;
+    final pads = padCountOf(site);
+    for (var i = 0; i < pads; i++) {
+      if (!taken.contains(i)) return i;
     }
     return null;
   }
 
-  /// "Request assistance": dispatch a relief craft to [anchor] (a spaceport). It
+  /// "Request assistance": dispatch a relief craft to [site] (a spaceport). It
   /// flies in, lands on a free pad, dwells 30 s and drops a care package of
   /// resources + settlers, then leaves — the anti-soft-lock lifeline.
-  void requestRelief(int anchor) {
+  void requestRelief(String site) {
     if (reliefCooldown > 0) return;
-    final pad = freePad(anchor);
+    final pad = freePad(site);
     if (pad == null) return; // all pads busy
-    craft.add(LandedCraft(anchor: anchor, padTile: pad, isRelief: true));
+    craft.add(LandedCraft(site: site, padIndex: pad, isRelief: true));
     reliefCooldown = reliefCooldownMax;
   }
 
@@ -3775,42 +4056,42 @@ class CitySim {
     if (reliefCooldown > 0) reliefCooldown -= dt;
 
     // Dispatch scheduled deliveries that are due, IN LIST ORDER (priority).
-    final spent = <int, List<DeliverySchedule>>{}; // one-time runs to drop
-    deliveries.forEach((anchor, list) {
-      if (utils[anchor]?.type != 'spaceport' || !isConnected(anchor)) return;
+    final spent = <String, List<DeliverySchedule>>{}; // one-time runs to drop
+    deliveries.forEach((site, list) {
+      if (siteSpec(site)?.type != 'spaceport' || !siteConnected(site)) return;
       for (final sched in list) {
         sched.timer -= dt;
         if (sched.timer > 0) continue;
         // Claim its assigned pad (or any free one). If busy, hold the timer at 0
         // so it dispatches the moment a pad opens (no missed cycle).
-        final pad = padForSchedule(anchor, sched.padIndex);
+        final pad = padForSchedule(site, sched.padIndex);
         if (pad == null) {
           sched.timer = 0;
           continue;
         }
-        dispatchDelivery(anchor, pad, sched);
+        dispatchDelivery(site, pad, sched);
         if (sched.recurring) {
           sched.timer = sched.intervalSec;
         } else {
           // One-time: fired — remove it from the schedule after this pass.
-          (spent[anchor] ??= []).add(sched);
+          (spent[site] ??= []).add(sched);
         }
       }
     });
     // Drop spent one-time deliveries (after iterating, so we don't mutate the
-    // list we're walking). Clear the anchor entry when its list empties.
-    spent.forEach((anchor, runs) {
-      final list = deliveries[anchor];
+    // list we're walking). Clear the site's entry when its list empties.
+    spent.forEach((site, runs) {
+      final list = deliveries[site];
       if (list == null) return;
       list.removeWhere(runs.contains);
-      if (list.isEmpty) deliveries.remove(anchor);
+      if (list.isEmpty) deliveries.remove(site);
     });
 
     // Advance each craft; drop its payload once, at the start of the dwell.
     final done = <LandedCraft>[];
     for (final c in craft) {
       // Host spaceport gone -> the craft leaves immediately.
-      if (utils[c.anchor]?.type != 'spaceport') {
+      if (siteSpec(c.site)?.type != 'spaceport') {
         done.add(c);
         continue;
       }
@@ -3838,24 +4119,20 @@ class CitySim {
     craft.removeWhere(done.contains);
   }
 
-  /// The pad tile a schedule should use: its PINNED pad (footprint index) if set
-  /// and currently free, else any free pad. Null if none available.
-  int? padForSchedule(int anchor, int? padIndex) {
+  /// The pad a schedule should use: its PINNED pad if set and currently free,
+  /// else any free pad. Null if none available.
+  int? padForSchedule(String site, int? padIndex) {
+    if (padIndex == null) return freePad(site);
+    if (padIndex < 0 || padIndex >= padCountOf(site)) return freePad(site);
     final taken = {
       for (final c in craft)
-        if (c.anchor == anchor) c.padTile
+        if (c.site == site) c.padIndex
     };
-    if (padIndex != null) {
-      final tiles = padTilesOf(anchor).toList();
-      if (padIndex < 0 || padIndex >= tiles.length) return freePad(anchor);
-      final tile = tiles[padIndex];
-      return taken.contains(tile) ? null : tile;
-    }
-    return freePad(anchor);
+    return taken.contains(padIndex) ? null : padIndex;
   }
 
   /// Send one delivery craft to [pad], applying the schedule's fuel rule.
-  void dispatchDelivery(int anchor, int pad, DeliverySchedule sched) {
+  void dispatchDelivery(String site, int pad, DeliverySchedule sched) {
     // People are passengers, not cargo: their count isn't cut by return fuel.
     // Commodities are: self-fuelling shaves the return propellant off the load.
     final isPeople = sched.resource == kDeliveryPeople;
@@ -3881,8 +4158,8 @@ class CitySim {
     // craft descends onto its pad, dwells while it unloads, then lifts off — no
     // free-flight autopilot (which missed the pad + looked erratic).
     craft.add(LandedCraft(
-        anchor: anchor,
-        padTile: pad,
+        site: site,
+        padIndex: pad,
         isRelief: false,
         resource: sched.resource,
         payload: delivered));

@@ -188,12 +188,25 @@ table EventFrame {
 // hashed into WorldFrame.fingerprint, and the engine must apply the list in
 // the order received (the brushes compose by SDF min/max, which do not
 // commute — a reordered list is a different surface).
-//   kind   = 0 sphere (subtracted ball), 1 crater (bowl + raised rim)
-//   centre = body-fixed contact point, m
+//   kind   = 0 sphere (subtracted ball), 1 crater (bowl + raised rim),
+//            2 pad (levelled building site, a disc), 3 stepped_pit (terraced
+//            quarry), 4 cut_fill (graded road corridor between two points),
+//            5 pad_box (levelled site, oriented rectangle), 6 pad_poly
+//            (levelled site cut to a lot's own polygon)
+//   centre = body-fixed contact point, m (corridor: its MIDPOINT)
 //   axis   = body-fixed surface normal at contact (crater orientation)
-//   radius = rim crest radius / ball radius, m
-//   depth  = bowl floor below the contact plane, m (craters only)
+//   radius = rim crest radius / ball radius / pad radius / corridor half-width, m
+//   depth  = bowl floor below the contact plane, m (craters); max cut (pads);
+//            pit floor below the datum (stepped_pit)
 //   rim    = rim crest above the contact plane, m (craters only)
+//
+// The LEVELLING kinds (pad, stepped_pit, cut_fill) do not carve a shape out of
+// the field, they replace it with the distance to a target SURFACE. That target
+// is `datum` — without it the brush levels to the body's centre, or to nothing
+// at all — and a corridor additionally needs its far end and that end's datum.
+// These fields postdate the original crater-only table; a client decoding an
+// older frame reads the flatbuffers defaults, which describe a brush that does
+// nothing rather than one that does something wrong.
 table TerrainEditFrame {
   body:string;        // joins BodyFrame.id
   kind:ubyte = 0;
@@ -203,6 +216,15 @@ table TerrainEditFrame {
   depth:double;
   rim:double;
   tick:long;          // tick the edit was made on (provenance; order is the list's)
+  datum:double;       // target surface radius from the body centre, m
+  datum_end:double;   // target radius at a corridor's far end, m
+  falloff:double;     // width of the ring easing back into natural ground, m
+  benches:int = 1;    // terrace count (stepped_pit)
+  end:Vec3;           // body-fixed far end of a corridor (cut_fill)
+  // Footprint outline of a pad_poly, body-fixed, on the ground. A lot is a
+  // polygon — lots taper wherever a road bends — so its pad is one too, and
+  // without the outline the brush has nothing to level.
+  polygon:[Vec3];
 }
 
 table WorldFrame {

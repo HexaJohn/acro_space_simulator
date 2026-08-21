@@ -6,7 +6,9 @@
 import 'package:flutter/material.dart';
 
 import '../../../domain/colony/city/city_building_spec.dart';
+import '../../../domain/colony/city/city_sim.dart';
 import '../../../domain/colony/city/commodity.dart';
+import '../../../domain/planetary/planet_surface.dart';
 
 export '../../../domain/colony/city/city_building_spec.dart'
     show Density, kGroupLabels, kUtilCatalog, kZoneSpecs;
@@ -124,4 +126,81 @@ Color commodityColor(String c) => switch (Commodity.section(c)) {
       'COMPONENTS' => const Color(0xFF4FC3F7),
       'WASTE' => const Color(0xFF8D6E63),
       _ => const Color(0xFFE3A857),
+    };
+
+/// Icon per disaster. Lives here, not on the enum, because the enum is domain
+/// data now and [IconData] is a widget type.
+const Map<Disaster, IconData> kDisasterIcons = {
+  Disaster.none: Icons.wb_sunny,
+  Disaster.rain: Icons.water_drop,
+  Disaster.thunderstorm: Icons.thunderstorm,
+  Disaster.snow: Icons.ac_unit,
+  Disaster.dustStorm: Icons.air,
+  Disaster.tornado: Icons.cyclone,
+  Disaster.fire: Icons.local_fire_department,
+  Disaster.meteorShower: Icons.stream,
+  Disaster.plague: Icons.coronavirus,
+  Disaster.famine: Icons.no_meals,
+  Disaster.solarStorm: Icons.flare,
+  Disaster.nuke: Icons.dangerous,
+  Disaster.hurricane: Icons.cyclone,
+  Disaster.blizzard: Icons.severe_cold,
+  Disaster.fog: Icons.foggy,
+  Disaster.acidRain: Icons.invert_colors,
+  Disaster.earthquake: Icons.vibration,
+  Disaster.radiationStorm: Icons.bubble_chart,
+  Disaster.glassRain: Icons.grain,
+  Disaster.ammoniaStorm: Icons.ac_unit,
+  Disaster.cryovolcanism: Icons.ac_unit,
+  Disaster.miasma: Icons.cloud,
+  Disaster.lavaFlow: Icons.local_fire_department,
+  Disaster.sandworm: Icons.waves,
+  Disaster.grayGoo: Icons.blur_on,
+  Disaster.crawlingForest: Icons.forest,
+  Disaster.rollingGlitch: Icons.broken_image,
+  Disaster.auroraBloom: Icons.auto_awesome,
+  Disaster.eclipse: Icons.dark_mode,
+  Disaster.gammaRayBurst: Icons.flare,
+  Disaster.fallingStar: Icons.star,
+  Disaster.skyCrack: Icons.bolt,
+  Disaster.timeDilation: Icons.hourglass_bottom,
+  Disaster.sporeBloom: Icons.grass,
+  Disaster.crystalGrowth: Icons.diamond,
+  Disaster.biolumTide: Icons.water,
+  Disaster.chemicalRain: Icons.science,
+  Disaster.diamondRain: Icons.diamond,
+  Disaster.ironSnow: Icons.ac_unit,
+  Disaster.methaneDownpour: Icons.local_gas_station,
+  Disaster.bloodRain: Icons.water_drop,
+  Disaster.blackRain: Icons.grain,
+  Disaster.commsBlackout: Icons.signal_cellular_off,
+  Disaster.goldRush: Icons.paid,
+  Disaster.refugeeInflux: Icons.groups,
+  Disaster.festival: Icons.celebration,
+  Disaster.cultUprising: Icons.report,
+  Disaster.aiAwakening: Icons.smart_toy,
+  Disaster.marketCrash: Icons.trending_down,
+  Disaster.alienBeacon: Icons.cell_tower,
+  Disaster.rainingFrogs: Icons.pets,
+  Disaster.glitchInMatrix: Icons.replay,
+};
+
+extension DisasterIcon on Disaster {
+  IconData get icon => kDisasterIcons[this] ?? Icons.warning_amber;
+}
+
+/// Human name for a biome, for the panels that let you pick one.
+String cityBiomeName(Biome b) => switch (b) {
+      Biome.ocean => 'Ocean',
+      Biome.iceCap => 'Ice Cap',
+      Biome.tundra => 'Tundra',
+      Biome.desert => 'Desert',
+      Biome.grassland => 'Grassland',
+      Biome.forest => 'Forest',
+      Biome.mountains => 'Mountains',
+      Biome.volcanic => 'Volcanic',
+      Biome.barren => 'Barren',
+      Biome.wetland => 'Wetland',
+      Biome.coastal => 'Coastal',
+      Biome.volcano => 'Volcano (lava)',
     };
