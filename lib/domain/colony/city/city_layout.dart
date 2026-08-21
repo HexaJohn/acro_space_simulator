@@ -478,6 +478,25 @@ class CityLayout {
 
   /// Re-cut every auto parcel from the current roads and settings.
   void regenerate() {
+    // Drains the stepped form. ONE implementation: a second copy of the
+    // subdivision loop that only the progress path used would drift from this
+    // one, and the two would quietly plat different cities.
+    for (final _ in regenerateSteps()) {}
+  }
+
+  /// [regenerate], one road at a time, reporting 0..1 as it goes.
+  ///
+  /// This is the long pole in building a colony — a 435-road network takes
+  /// about seven seconds to plat, and a generated city pays it twice — so it
+  /// is the only place a progress bar can come from. Exposed as a synchronous
+  /// generator rather than as a `Future` so the caller chooses: drain it in a
+  /// loop for the old blocking behaviour, or step it from an async loop that
+  /// yields to the event loop, which is what lets the UI paint while it works.
+  ///
+  /// Nothing is published until the last step: [autoParcels] keeps the
+  /// PREVIOUS plat throughout, so a half-driven regeneration cannot be
+  /// observed as a half-built city.
+  Iterable<double> regenerateSteps() sync* {
     version++;
     // Coarse samples of every road, shared by all the ray casts below. Without
     // the cache each lot's depth probe would re-sample the whole network.
@@ -489,10 +508,12 @@ class CityLayout {
         }(),
     ];
     final out = <Parcel>[];
-    for (final road in _roads.values) {
-      // Alleys and anything on piers serve lots, they do not front them.
-      if (!road.roadClass.platsLots) continue;
-      out.addAll(_subdivide(road, out));
+    // Alleys and anything on piers serve lots, they do not front them.
+    final platting =
+        _roads.values.where((r) => r.roadClass.platsLots).toList();
+    for (var i = 0; i < platting.length; i++) {
+      out.addAll(_subdivide(platting[i], out));
+      yield (i + 1) / platting.length;
     }
     // Re-apply zoning: the fresh lots carry the same deterministic ids their
     // predecessors did, so the district survives its own street being redrawn.
@@ -500,6 +521,7 @@ class CityLayout {
       for (final p in out)
         _uses.containsKey(p.id) ? p.copyWith(use: _uses[p.id]!) : p,
     ];
+    yield 1.0;
   }
 
   /// Lay lots along one road, the way a surveyor actually plats a block.

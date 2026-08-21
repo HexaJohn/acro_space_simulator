@@ -161,6 +161,13 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   }
 
   bool _busy = false;
+
+  /// Where the running build has got to. Null when nothing is building.
+  CityGenProgress? _progress;
+
+  /// Wall clock of the running build, so the readout is a measurement rather
+  /// than the estimate it used to be.
+  final Stopwatch _genClock = Stopwatch();
   String? _lastStats;
   bool _panel = true;
 
@@ -238,9 +245,28 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     await Future<void>.delayed(const Duration(milliseconds: 16));
 
     final sw = Stopwatch()..start();
+    _genClock
+      ..reset()
+      ..start();
     final system = RealSolarSystem.build();
     final bodies = system.all.where((b) => !b.isStar).toList();
-    final sim = const CityGenerator().generate(_spec, bodies: bodies);
+
+    // Step the build rather than blocking on it, yielding to the event loop
+    // between chunks so the bar and the label actually paint. Every 6 steps:
+    // often enough that the longest gap is a fraction of a second, rare enough
+    // that the yields themselves are not the cost — a plat step is a whole
+    // road's worth of lots, so this is a repaint every few dozen parcels.
+    final build = CityBuild(_spec, bodies: bodies);
+    var step = 0;
+    for (final p in build.run()) {
+      if (!mounted) return;
+      if (step++ % 6 == 0 || p.fraction >= 1.0) {
+        setState(() => _progress = p);
+        await Future<void>.delayed(Duration.zero);
+      }
+    }
+    final sim = build.city!;
+    _genClock.stop();
 
     // Shape the ground under it, exactly as the tick would.
     final edits = InMemoryTerrainEditsRepository();
@@ -305,6 +331,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
 
     if (!mounted) return;
     setState(() {
+      _progress = null;
       _fault = null;
       _sim = sim;
       _snap = snap;
@@ -832,6 +859,30 @@ class _CityStudioScreenState extends State<CityStudioScreen>
                   style: AppTheme.mono.copyWith(fontSize: 11)),
             ),
             const SizedBox(height: 10),
+          ],
+          // While it builds, the button becomes the readout: what the
+          // generator is doing, how far through it is, and how long it has
+          // actually taken. The estimate is only shown BEFORE the fact, which
+          // is the only time a guess is worth anything.
+          if (_busy && _progress != null) ...[
+            Text(_progress!.phase, style: AppTheme.body),
+            const SizedBox(height: 4),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(3),
+              child: LinearProgressIndicator(
+                value: _progress!.fraction.clamp(0.0, 1.0),
+                minHeight: 6,
+                backgroundColor: AppTheme.panel,
+                color: AppTheme.accent2,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+                '${(_progress!.fraction * 100).round()}%   '
+                '${(_genClock.elapsedMilliseconds / 1000).toStringAsFixed(1)} s',
+                style: AppTheme.mono
+                    .copyWith(fontSize: 11, color: AppTheme.textDim)),
+            const SizedBox(height: 8),
           ],
           ElevatedButton.icon(
             icon: _busy

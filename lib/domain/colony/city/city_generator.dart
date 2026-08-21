@@ -127,6 +127,99 @@ class CityGenSpec {
       math.max(1, (extentM / math.max(1.0, blockDepthM)).round());
 }
 
+/// Where a build has got to: a phase name for the label, and 0..1 for the bar.
+typedef CityGenProgress = ({String phase, double fraction});
+
+/// One run of the generator, steppable.
+///
+/// A colony takes seconds to build and every bit of it runs on the main
+/// isolate, so the app is frozen for the duration and can neither paint a
+/// progress bar nor answer a click. The studio covered that with an estimate,
+/// which is the wrong shape of answer: it is a guess about a thing that is
+/// already happening.
+///
+/// So the build is a SEQUENCE. Drive it in a plain loop and it behaves exactly
+/// as it always did; drive it from an async loop that yields to the event loop
+/// every few steps and the UI paints between them. The work is identical
+/// either way — there is one implementation, and [CityGenerator.generate] is
+/// the blocking driver for it.
+///
+/// Not an isolate, deliberately: a CitySim reaches a whole celestial system
+/// and its terrain fields, none of which is cheap to send, and the copy back
+/// would cost more than the yields do.
+class CityBuild {
+  CityBuild(this.spec, {required this.bodies});
+
+  final CityGenSpec spec;
+  final List<CelestialBody> bodies;
+
+  /// The finished colony. Null until the run completes.
+  CitySim? city;
+
+  /// The build, as steps. Weighted by MEASURED cost, not by step count: the
+  /// two subdivision passes are about thirteen of the fourteen seconds a
+  /// six-block colony takes, and a bar that gave each phase an equal share
+  /// would sit at 20% for ten seconds and then finish instantly.
+  Iterable<CityGenProgress> run() sync* {
+    yield (phase: 'finding a site', fraction: 0.0);
+    final rnd = math.Random(spec.seed);
+    final site = spec.latitude != null && spec.longitude != null
+        ? (lat: spec.latitude!, lon: spec.longitude!)
+        : CityGenerator.dryLandNear(
+            bodies.firstWhere((b) => b.id.value == spec.bodyId),
+            seed: spec.seed,
+          );
+    final sim = CitySim.found(
+      CityConfig(
+        bodyId: spec.bodyId,
+        gridSize: 20,
+        latitude: site.lat,
+        longitude: site.lon,
+      ),
+      bodies: bodies,
+      id: 'studio-${spec.seed}',
+      name: 'Studio ${spec.seed}',
+    );
+    // The generator is not a game: it must not stall on affordability.
+    sim.stock['ore'] = 1e9;
+    sim.funds = 1e9;
+    sim.layout.settings = sim.layout.settings.copyWith(
+      frontageM: spec.frontageM,
+      depthM: spec.lotDepthM,
+    );
+
+    yield (phase: 'laying streets', fraction: 0.02);
+    const CityGenerator()._layRoads(sim, spec, rnd);
+
+    // One re-cut, for the whole network.
+    for (final f in sim.layout.regenerateSteps()) {
+      yield (phase: 'platting lots', fraction: 0.04 + f * 0.44);
+    }
+
+    // Installations BEFORE the streets are built out — see
+    // [CityGenerator.generate] for why.
+    yield (phase: 'staking installations', fraction: 0.48);
+    const CityGenerator()._placeInstallations(sim, spec, rnd);
+
+    for (final f in sim.layout.regenerateSteps()) {
+      yield (phase: 're-platting round the plots', fraction: 0.5 + f * 0.44);
+    }
+
+    yield (phase: 'zoning and building', fraction: 0.94);
+    const CityGenerator()._zoneAndBuild(sim, spec, rnd);
+
+    yield (phase: 'settling', fraction: 0.99);
+    sim.recompute();
+    // One step, so the colony hands back COHERENT: power, jobs, housing and
+    // services are aggregated in `advance`, not in `recompute`, so a city that
+    // has never ticked reports zero of everything and reads as dead.
+    sim.advance(0.1);
+
+    city = sim;
+    yield (phase: 'done', fraction: 1.0);
+  }
+}
+
 class CityGenerator {
   const CityGenerator();
 
@@ -170,52 +263,14 @@ class CityGenerator {
     return best;
   }
 
-  /// Build the colony described by [spec].
+  /// Build the colony described by [spec], blocking until it is done.
+  ///
+  /// The synchronous driver for [CityBuild]. Anything that wants to show
+  /// progress steps the build itself instead.
   CitySim generate(CityGenSpec spec, {required List<CelestialBody> bodies}) {
-    final rnd = math.Random(spec.seed);
-    final site = spec.latitude != null && spec.longitude != null
-        ? (lat: spec.latitude!, lon: spec.longitude!)
-        : dryLandNear(
-            bodies.firstWhere((b) => b.id.value == spec.bodyId),
-            seed: spec.seed,
-          );
-    final city = CitySim.found(
-      CityConfig(
-        bodyId: spec.bodyId,
-        gridSize: 20,
-        latitude: site.lat,
-        longitude: site.lon,
-      ),
-      bodies: bodies,
-      id: 'studio-${spec.seed}',
-      name: 'Studio ${spec.seed}',
-    );
-    // The generator is not a game: it must not stall on affordability.
-    city.stock['ore'] = 1e9;
-    city.funds = 1e9;
-    city.layout.settings = city.layout.settings.copyWith(
-      frontageM: spec.frontageM,
-      depthM: spec.lotDepthM,
-    );
-
-    _layRoads(city, spec, rnd);
-    city.layout.regenerate(); // one re-cut, for the whole network
-    // Installations BEFORE the streets are built out. Staking a big plot
-    // re-cuts the automatic subdivision around it, and lots that are re-cut
-    // are lots that get renamed — so anything already standing on them has to
-    // be carried across. `CitySim.claimSite` does carry it, but a generator
-    // that avoids the question entirely is both simpler and truer to how a
-    // colony grows: the quarry and the solar farm are sited first, and the
-    // streets fill in around them.
-    _placeInstallations(city, spec, rnd);
-    city.layout.regenerate(); // one re-cut, after the whole ring is staked
-    _zoneAndBuild(city, spec, rnd);
-    city.recompute();
-    // One step, so the colony hands back COHERENT: power, jobs, housing and
-    // services are aggregated in `advance`, not in `recompute`, so a city that
-    // has never ticked reports zero of everything and reads as dead.
-    city.advance(0.1);
-    return city;
+    final build = CityBuild(spec, bodies: bodies);
+    for (final _ in build.run()) {}
+    return build.city!;
   }
 
   /// Arterials one way, streets the other, every one of them bending.
