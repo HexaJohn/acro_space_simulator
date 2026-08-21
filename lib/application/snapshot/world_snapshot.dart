@@ -1092,6 +1092,12 @@ void _emitYardRing(
 /// building inset past the ease-off stands wholly on level ground. Nothing may
 /// be inset less than this or it starts straddling the step to the terrace
 /// next door.
+/// Road-drape ground sampling stride, in units of the 6 m spline samples.
+///
+/// Four steps is 24 m, which is `CityTerrainShaper`'s own corridor grading
+/// spacing — see the drape loop for why matching it exactly is the point.
+const int _roadGroundStride = 4;
+
 const double kLotSetbackM = 1.2;
 
 /// Setback for [spec], metres.
@@ -2022,10 +2028,39 @@ class WorldSnapshot {
           // Each point at ITS OWN ground: a road crossing a slope follows the
           // corridor graded for it, instead of holding the site's height and
           // floating off (or tunnelling into) the hillside.
+          //
+          // The ground is sampled every [_roadGroundStride] points — 24 m,
+          // which is EXACTLY the spacing `CityTerrainShaper` grades a corridor
+          // at — and interpolated between. That is not an approximation: the
+          // shaper lays one cut-fill brush per 24 m and the graded ground
+          // under a road is therefore piecewise-linear at that spacing
+          // already, so sampling it finer resolves nothing that is there.
+          //
+          // It matters a great deal. A ground query on a colony site marches
+          // radially through every brush covering the point, and in a built
+          // city that is 8 ms EACH; the drape was asking for one every 6 m of
+          // every road. On a four-block colony — 435 roads once alleys and
+          // elevated lines are counted — that was 43 s of the 46 s a generate
+          // took, all of it after the progress bar had finished.
+          final radii = List<double>.filled(pts.length, 0);
+          final last = pts.length - 1;
+          for (var i = 0; i <= last; i += _roadGroundStride) {
+            radii[i] = groundFor('road:${road.id}:$i', pts[i]);
+          }
+          if (last % _roadGroundStride != 0) {
+            radii[last] = groundFor('road:${road.id}:$last', pts[last]);
+          }
+          for (var i = 1; i < last; i++) {
+            if (i % _roadGroundStride == 0) continue;
+            final a = (i ~/ _roadGroundStride) * _roadGroundStride;
+            final b = math.min(a + _roadGroundStride, last);
+            radii[i] = b == a
+                ? radii[a]
+                : radii[a] + (radii[b] - radii[a]) * ((i - a) / (b - a));
+          }
           final flat = <double>[];
-          for (var i = 0; i < pts.length; i++) {
-            final bf = city.localToBodyFixed(pts[i],
-                bodyRadiusM: groundFor('road:${road.id}:$i', pts[i]));
+          for (var i = 0; i <= last; i++) {
+            final bf = city.localToBodyFixed(pts[i], bodyRadiusM: radii[i]);
             flat.addAll([bf.x, bf.y, bf.z]);
           }
           roads.add(RoadSnapshot(

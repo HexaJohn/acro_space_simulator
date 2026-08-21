@@ -256,17 +256,30 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     // often enough that the longest gap is a fraction of a second, rare enough
     // that the yields themselves are not the cost — a plat step is a whole
     // road's worth of lots, so this is a repaint every few dozen parcels.
+    // The bar covers the WHOLE operation, not just the generator.
+    //
+    // Laying the colony out is the smaller half. Measured on a four-block
+    // city: 2.6 s to build it, 0.1 s to cut the ground under it, and 17 s to
+    // capture the frame — because capturing drapes every road and lot onto
+    // ground that now carries 1,768 brushes, and each of those queries marches
+    // radially through all of them. Showing a bar that finished at 13% and
+    // then froze for seventeen seconds would be worse than showing none.
+    const buildShare = 0.13;
     final build = CityBuild(_spec, bodies: bodies);
     var step = 0;
     for (final p in build.run()) {
       if (!mounted) return;
       if (step++ % 6 == 0 || p.fraction >= 1.0) {
-        setState(() => _progress = p);
+        setState(() => _progress =
+            (phase: p.phase, fraction: p.fraction * buildShare));
         await Future<void>.delayed(Duration.zero);
       }
     }
     final sim = build.city!;
-    _genClock.stop();
+
+    setState(() =>
+        _progress = (phase: 'cutting the ground', fraction: buildShare));
+    await Future<void>.delayed(Duration.zero);
 
     // Shape the ground under it, exactly as the tick would.
     final edits = InMemoryTerrainEditsRepository();
@@ -283,6 +296,14 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       sim.shapedTerrain.add(p.key);
     }
 
+    // The long one, and it cannot report from inside: `capture` is a core
+    // function used on every tick by everything, and threading a progress
+    // channel through it to serve one screen would be the tail wagging the
+    // dog. Naming it is what the panel can honestly do.
+    setState(() => _progress =
+        (phase: 'draping roads and lots on the ground', fraction: 0.16));
+    await Future<void>.delayed(Duration.zero);
+
     final snap = WorldSnapshot.capture(
       1,
       InMemoryVesselRepository(const []),
@@ -291,6 +312,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       terrainEdits: edits,
     );
     sw.stop();
+    _genClock.stop();
 
     // Calibrate: what this build ACTUALLY cost, per lot squared.
     final lots = sim.layout.parcels.length.toDouble();
