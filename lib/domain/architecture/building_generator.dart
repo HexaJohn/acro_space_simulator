@@ -276,9 +276,23 @@ class BuildingGenerator {
     ];
 
     for (final w in faces) {
+      // A wall narrower than a pier cannot be articulated at all — it is a
+      // return, a sliver, or the flank of something tiny — and it stays solid.
+      //
+      // Not a cosmetic guard. Below this the pier arithmetic INVERTS: the
+      // clamp keeping an end pier inside its own corner runs from
+      // `-span/2 + pier/2` to `+span/2 - pier/2`, and once the span is under
+      // the pier width the lower limit passes the upper one and `clamp`
+      // throws. A quarry's processing shed comes out 0.72 m across on a small
+      // plot, which crashed the whole colony's geometry pass every frame.
+      if (w.spanM < style.pierM * 1.6) continue;
+
       final bays = style.baysAcross(w.spanM);
       final bayW = w.spanM / bays;
-      final openW = math.max(0.6, bayW - style.pierM);
+      // The pier has to FIT, whatever the kit asks for: never more than a
+      // third of a bay, so an opening always survives between two of them.
+      final pierW = math.min(style.pierM, bayW / 3);
+      final openW = math.max(0.35, math.min(bayW * 0.92, bayW - pierW));
 
       for (var f = 0; f < v.floors; f++) {
         final base = v.z + (onGround ? m.floorBase(f) : f * m.storeyM);
@@ -353,13 +367,14 @@ class BuildingGenerator {
           ((onGround && style.storefront) ? m.groundStoreyM : 0.0);
       final pierTop = v.z + v.height;
       if (pierTop - pierZ0 < 0.5) continue;
+      // The end piers sit inside the corner rather than straddling it, so a
+      // corner reads as one solid quoin instead of two half-piers crossing.
+      // `pierW` is bounded above by a third of a bay, so this limit is always
+      // positive and the clamp can never invert.
+      final edge = math.max(0.0, w.spanM / 2 - pierW / 2);
       for (var i = 0; i <= bays; i++) {
-        final c = -w.spanM / 2 + bayW * i;
-        // The end piers sit inside the corner rather than straddling it, so a
-        // corner reads as one solid quoin instead of two half-piers crossing.
-        final cc = c.clamp(-w.spanM / 2 + style.pierM / 2,
-            w.spanM / 2 - style.pierM / 2);
-        _wallBox(b.solid, w, pierZ0, pierTop - pierZ0, cc, style.pierM,
+        final c = (-w.spanM / 2 + bayW * i).clamp(-edge, edge);
+        _wallBox(b.solid, w, pierZ0, pierTop - pierZ0, c, pierW,
             style.reliefM, bu0, bu1);
       }
     }

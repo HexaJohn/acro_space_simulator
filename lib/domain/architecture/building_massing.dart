@@ -357,7 +357,11 @@ class BuildingMassingRules {
     // the arithmetic cannot drift.
     if (!industrial && style.corniceDatumFloors > 1 && floors > 2) {
       final q = style.corniceDatumFloors;
-      final snapped = ((floors / q).round() * q).clamp(q, maxFloors);
+      // Lower bound guarded against a kit configured with fewer maximum
+      // floors than its own cornice datum — `clamp` throws outright when its
+      // limits cross, which is a crash rather than a bad-looking building.
+      final snapped =
+          ((floors / q).round() * q).clamp(math.min(q, maxFloors), maxFloors);
       floors = snapped.toInt();
     }
     // A shed that cannot hold its function on one floor grows a mezzanine
