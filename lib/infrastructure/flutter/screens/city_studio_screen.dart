@@ -41,6 +41,7 @@ import '../../../domain/shared/quaternion.dart';
 import '../../../domain/shared/vector3.dart';
 import '../../../domain/universe/real_solar_system.dart';
 import '../../flutter_scene/city/city_nodes.dart';
+import '../../../domain/architecture/building_generator.dart';
 import '../../flutter_scene/city/city_materials.dart';
 import '../../flutter_scene/city/street_furniture.dart';
 import '../../flutter_scene/city/scale_rig.dart';
@@ -640,6 +641,16 @@ class _CityStudioScreenState extends State<CityStudioScreen>
         row('  loading', '${TerrainNodes.counters['gridPatches'] ?? 0}',
             colour: AppTheme.textDim),
         row('city', '${ms(_cityMs)} ms'),
+        row(
+            '  lod mix',
+            [
+              'full ${CityNodes.lodCounts[BuildingDetail.full] ?? 0}',
+              'ext ${CityNodes.lodCounts[BuildingDetail.exterior] ?? 0}',
+              'blk ${CityNodes.lodCounts[BuildingDetail.block] ?? 0}',
+            ].join('  '),
+            colour: (CityNodes.lodCounts[BuildingDetail.full] ?? 0) > 400
+                ? AppTheme.danger
+                : AppTheme.textDim),
         row('  rebuild', '${ms(phase['city.rebuild'] ?? 0)} ms',
             colour: AppTheme.textDim),
         row('  anchors', '${ms(phase['city.anchors'] ?? 0)} ms',
@@ -858,6 +869,57 @@ class _CityStudioScreenState extends State<CityStudioScreen>
                 style: AppTheme.dim.copyWith(fontSize: 11)),
             onChanged: (v) => setState(() => CityNodes.traffic = v),
           ),
+          const SizedBox(height: 8),
+          const Text('LEVEL OF DETAIL', style: AppTheme.heading),
+          Text('Buildings are generated at one of three tiers. The visualiser '
+              'replaces each with a box its own size, coloured by the tier it '
+              'actually got: red = full (interiors), amber = exterior, '
+              'green = block silhouette.',
+              style: AppTheme.dim.copyWith(fontSize: 11)),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            value: CityNodes.lodDebug,
+            activeThumbColor: AppTheme.accent2,
+            title: const Text('LOD visualiser', style: AppTheme.body),
+            subtitle: Text('A city drawn entirely at full detail looks exactly '
+                'like one drawn sensibly — it just costs ten times as much.',
+                style: AppTheme.dim.copyWith(fontSize: 11)),
+            onChanged: (v) => setState(() {
+              CityNodes.lodDebug = v;
+              _city?.invalidate();
+            }),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            value: CityNodes.perBuildingLod,
+            activeThumbColor: AppTheme.accent2,
+            title: const Text('Per-building LOD', style: AppTheme.body),
+            subtitle: Text('Off picks ONE tier for the whole colony from '
+                'whichever building is nearest — so standing in a city builds '
+                'every tower in it at full detail.',
+                style: AppTheme.dim.copyWith(fontSize: 11)),
+            onChanged: (v) => setState(() {
+              CityNodes.perBuildingLod = v;
+              _city?.invalidate();
+            }),
+          ),
+          _slider('Interior range', CityNodes.interiorRangeM, 50, 2000,
+              'Closer than this a building gets slabs, a core and full '
+                  'facade detail.',
+              (v) => setState(() {
+                    CityNodes.interiorRangeM = v;
+                    _city?.invalidate();
+                  }),
+              unit: 'm'),
+          _slider('Block range', CityNodes.blockRangeM, 300, 8000,
+              'Beyond this a building is one silhouette box.',
+              (v) => setState(() {
+                    CityNodes.blockRangeM = v;
+                    _city?.invalidate();
+                  }),
+              unit: 'm'),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
             dense: true,

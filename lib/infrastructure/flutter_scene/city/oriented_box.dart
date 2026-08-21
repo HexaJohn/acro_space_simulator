@@ -30,6 +30,12 @@ class OrientedBox {
   ///
   /// [u]/[v] set the texture coordinate every vertex carries. A flat lookup is
   /// what the palette-style materials want; pass the middle of a band.
+  ///
+  /// [unitScale] converts the caller's units to scene units. The default suits
+  /// geometry emitted straight into a scene mesh; pass 1.0 for geometry that
+  /// is INSTANCED, because a building's instance transform already carries the
+  /// metres-to-scene factor and applying it twice makes the mesh a thousandth
+  /// of its size — present, drawn, and far too small to see.
   static void emit(
     MeshBuilder m,
     Vector3 c,
@@ -41,6 +47,7 @@ class OrientedBox {
     double hz, {
     double u = 0.5,
     double v = 0.5,
+    double unitScale = kRenderScale,
   }) {
     final p = <Vector3>[
       c - ex * hx - ey * hy - ez * hz,
@@ -68,7 +75,7 @@ class OrientedBox {
     ];
     for (var f = 0; f < faces.length; f++) {
       final q = [
-        for (final i in faces[f]) m.vertex(p[i] * kRenderScale, n[f], u, v)
+        for (final i in faces[f]) m.vertex(p[i] * unitScale, n[f], u, v)
       ];
       m.quad(q[0], q[1], q[2], q[3]);
     }
@@ -85,11 +92,12 @@ class OrientedBox {
     double heightM, {
     double u = 0.5,
     double v = 0.5,
+    double unitScale = kRenderScale,
   }) {
     final side = along.cross(up).normalized;
     emit(m, base + up * (heightM / 2), side, along, up, widthM / 2, depthM / 2,
         heightM / 2,
-        u: u, v: v);
+        u: u, v: v, unitScale: unitScale);
   }
 
   /// A box spanning [a] to [b] — a girder, a rail, a cross member.

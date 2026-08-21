@@ -36,15 +36,20 @@ import 'city_materials.dart';
 import '../../../domain/architecture/building_massing.dart';
 import 'elevated_structure.dart';
 import 'lot_features.dart';
+import 'oriented_box.dart';
 import 'street_furniture.dart';
 import 'vehicle_meshes.dart';
 import 'city_textures.dart';
 
 /// One generated archetype, uploaded.
 class _CityMesh {
-  _CityMesh(this.solid, this.glazing);
+  _CityMesh(this.solid, this.glazing, {this.lod = false});
   final fs.MeshGeometry? solid;
   final fs.MeshGeometry? glazing;
+
+  /// A LOD-debug box rather than a building: drawn on the palette material so
+  /// its colour means something, not on the facade one.
+  final bool lod;
 }
 
 /// Swatch count of the ground palette. ONE constant for the bake and every
@@ -76,6 +81,22 @@ class CityNodes {
   static double maxRangeM = 400000;
 
   /// Distance at which buildings drop to their block silhouette.
+  /// Draw every building as a plain box coloured by the detail tier it was
+  /// actually generated at, instead of as the building.
+  ///
+  /// A LOD problem is invisible in a normal view: a city drawn entirely at
+  /// full detail looks exactly like a city drawn sensibly, it just costs ten
+  /// times as much. Painting the tier is the only way to SEE which buildings
+  /// are expensive — and the first thing it showed was that they all were.
+  static bool lodDebug = false;
+
+  /// Pick each building's tier from ITS OWN distance rather than one tier for
+  /// the whole colony. See [_detailFor].
+  static bool perBuildingLod = true;
+
+  /// Buildings resolved to each tier last frame, for the panel.
+  static final Map<BuildingDetail, int> lodCounts = {};
+
   static double blockRangeM = 3500;
 
   /// Distance inside which interiors are generated.
@@ -332,23 +353,32 @@ class CityNodes {
     }
     CityMaterials.nightFactor = _nightFactorAt(snap, byBody);
 
-    final detail = nearest > blockRangeM
-        ? BuildingDetail.block
-        : (nearest > interiorRangeM
-            ? BuildingDetail.exterior
-            : BuildingDetail.full);
+    // The colony-wide fallback tier, off the NEAREST building. Kept for the
+    // whole-colony path and as the coarse gate; see [_detailFor] for why one
+    // tier for a whole city is not enough once the city is big.
+    final detail = tierForDistance(nearest);
 
     // Rebuild only when something the geometry depends on actually changed.
     // Colonies are static between construction events, so this is normally a
     // string compare per frame rather than a scene rebuild.
+    //
+    // With per-building tiers the camera's own position is part of that: move
+    // and a different set of buildings resolves to a different tier. Quantised
+    // hard — to 64 m — because rebuilding the colony on every centimetre of
+    // camera travel would cost far more than the LOD saves.
+    final camKey = perBuildingLod
+        ? '|${(focusWorld.x / 64).round()},${(focusWorld.y / 64).round()},'
+            '${(focusWorld.z / 64).round()}'
+        : '';
     final key = '${snap.buildings.length}|${snap.roads.length}|'
-        '${snap.patches.length}|${detail.index}|${byBody.keys.join(",")}';
+        '${snap.patches.length}|${detail.index}|${byBody.keys.join(",")}'
+        '|${lodDebug ? 1 : 0}|${perBuildingLod ? 1 : 0}$camKey';
     _syncLibrary();
     final sw = Stopwatch()..start();
     var rebuiltThisFrame = false;
     if (_builtKey != key || _batches.isEmpty) {
       _builtKey = key;
-      _rebuild(snap, byBody, detail);
+      _rebuild(snap, byBody, detail, focusWorld);
       rebuiltThisFrame = true;
     }
     phaseMs['city.rebuild'] = rebuiltThisFrame ? sw.elapsedMicroseconds / 1000 : 0;
@@ -437,8 +467,10 @@ class CityNodes {
     WorldSnapshot snap,
     Map<String, List<BuildingSnapshot>> byBody,
     BuildingDetail detail,
+    Vector3 focusWorld,
   ) {
     _clear();
+    lodCounts.clear();
 
     for (final entry in byBody.entries) {
       if (snap.bodies[entry.key] == null) continue;
@@ -463,17 +495,42 @@ class CityNodes {
         final spec = specOf(b);
         final parcel = parcelOf(b);
         final seed = b.id.hashCode;
+        final tier = _detailFor(b, focusWorld, detail);
+        lodCounts[tier] = (lodCounts[tier] ?? 0) + 1;
         // The style is part of the key here for the same reason it is part of
         // it inside the library: these two maps are looked up with keys built
         // independently, and a key that forgot the style would upload one
         // building's mesh and then serve it for a different kit's.
         final key = BuildingArchetype.of(spec, parcel,
-            detail: detail, seed: seed, bucketM: _library.bucketM,
+            detail: tier, seed: seed, bucketM: _library.bucketM,
             variants: _library.variants,
             styleId: style.id,
             corner: b.corner);
         _uploaded.putIfAbsent(key, () {
-          final built = _library.get(spec, parcel, seed: seed, detail: detail);
+          final built = _library.get(spec, parcel, seed: seed, detail: tier);
+          if (lodDebug) {
+            // The building's own massing, as one box. Same size, same place,
+            // no detail — so what you are looking at is purely which tier each
+            // building resolved to.
+            final m = MeshBuilder();
+            final fp = built.massing.footprint;
+            final u = _lodSwatchU(tier);
+            OrientedBox.emit(
+              m,
+              Vector3(0, 0, built.massing.height / 2),
+              Vector3.unitX,
+              Vector3.unitY,
+              Vector3.unitZ,
+              math.max(1.0, fp.width) / 2,
+              math.max(1.0, fp.depth) / 2,
+              math.max(1.0, built.massing.height) / 2,
+              u: u,
+              v: 0.5,
+              // Metres: the instance transform carries the scene conversion.
+              unitScale: 1.0,
+            );
+            return _CityMesh(_geometryOf(m.build()), null, lod: true);
+          }
           return _CityMesh(
             _geometryOf(built.model.solid),
             _geometryOf(built.model.foliage),
@@ -1492,7 +1549,7 @@ class CityNodes {
       // glazing takes the foliage one, which is the alpha-capable pass and is
       // where the night lighting hooks in.
       for (final (geometry, material) in [
-        (mesh.solid, CityMaterials.facade),
+        (mesh.solid, mesh.lod ? CityMaterials.ground : CityMaterials.facade),
         (mesh.glazing, CityMaterials.glazing),
       ]) {
         if (geometry == null) continue;
@@ -1557,6 +1614,45 @@ class CityNodes {
         'i-low' || 'i-med' || 'i-high' => 'ind',
         _ => 'svc',
       };
+
+  /// Detail tier for a building [d] metres from the camera.
+  static BuildingDetail tierForDistance(double d) => d > blockRangeM
+      ? BuildingDetail.block
+      : (d > interiorRangeM ? BuildingDetail.exterior : BuildingDetail.full);
+
+  /// The tier one building is generated at.
+  ///
+  /// Was chosen ONCE for the whole colony, from the distance to whichever
+  /// building happened to be nearest. Standing in a city therefore built every
+  /// building in it at full detail — interiors, fire escapes, roof plant and
+  /// all — including the ones two kilometres away that cover four pixels. On a
+  /// small colony that is invisible; on an eight-block one it is the whole
+  /// frame budget.
+  ///
+  /// The archetype key has always carried `detail`, so mixing tiers within a
+  /// colony needs no new machinery: buildings at different tiers simply land
+  /// in different batches, exactly as different sizes already do.
+  static BuildingDetail _detailFor(
+      BuildingSnapshot b, Vector3 focusWorld, BuildingDetail colonyTier) {
+    if (!perBuildingLod) return colonyTier;
+    final d = (Vector3(b.px, b.py, b.pz) - focusWorld).length;
+    return tierForDistance(d);
+  }
+
+  /// Palette swatch a tier is painted with in [lodDebug].
+  ///
+  /// A heat ramp on the ground palette, which already exists and is already
+  /// bound: red is the expensive tier, amber the middle, green the cheap one.
+  /// Reusing the placement-heatmap swatches rather than growing the palette —
+  /// its divisor has been got wrong twice, and this is a debug view.
+  static double _lodSwatchU(BuildingDetail d) {
+    final swatch = switch (d) {
+      BuildingDetail.full => 6, // refusal red — the costly one
+      BuildingDetail.exterior => 8, // heatmap amber
+      BuildingDetail.block => 7, // site-ok green
+    };
+    return (swatch + 0.5) / kGroundSwatches;
+  }
 
   /// The lot a building stands on, in its own frontage-aligned frame.
   static Parcel parcelOf(BuildingSnapshot b) {

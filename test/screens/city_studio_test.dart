@@ -32,7 +32,7 @@ void main() {
     // a ListView unbuilds what has scrolled off, so the tiles higher up are
     // gone by the time the last one arrives.
     final seen = <String>{};
-    for (var i = 0; i < 30; i++) {
+    for (var i = 0; i < 38; i++) {
       await t.drag(list.last, const Offset(0, -260));
       await t.pump();
       expect(t.takeException(), isNull,
@@ -50,6 +50,8 @@ void main() {
         containsAll(<String>[
           'Road traffic',
           'Street furniture',
+          'LOD visualiser',
+          'Per-building LOD',
           'Alleys',
           'On-street parking',
           'Fences, signs, car parks',

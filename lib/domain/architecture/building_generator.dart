@@ -158,7 +158,7 @@ class BuildingGenerator {
           case FacadeRhythm.ribbon:
             _glazing(b.foliage, v, massing.storeyM, windows);
           case FacadeRhythm.punched:
-            _punchedFacade(b, v, massing, windows);
+            _punchedFacade(b, v, massing, windows, detail);
         }
       }
 
@@ -179,7 +179,7 @@ class BuildingGenerator {
 
     // Roof plant, on the highest deck only — the one anything looking down at
     // the city actually sees.
-    if (detail != BuildingDetail.block &&
+    if (detail == BuildingDetail.full &&
         roof != null &&
         style.roofClutterPer100M2 > 0) {
       _roofClutter(b.solid, roof, style, rnd, pu0, pu1);
@@ -252,8 +252,18 @@ class BuildingGenerator {
     MassBox v,
     BuildingMassing m,
     List<Vector3> centres,
+    BuildingDetail detail,
   ) {
     final (bu0, bu1) = bandUV(m.material);
+    // ORNAMENT — awnings, bays, fire escapes — is the near tier only.
+    //
+    // Measured, because the middle tier was not earning its place: a tower was
+    // 2,846 triangles at `full` and 2,418 at `exterior`, a 15% saving, against
+    // 88 for the block silhouette. `exterior` only dropped the interior slabs,
+    // which nobody can see anyway and which cost almost nothing; everything
+    // expensive on a masonry facade is the articulation, and it was surviving
+    // into a tier meant to be cheap.
+    final ornament = detail == BuildingDetail.full;
     final style = m.style;
     final onGround = v.z <= 0.01;
     final hw = v.width / 2, hd = v.depth / 2;
@@ -322,7 +332,8 @@ class BuildingGenerator {
           // identical punched holes is correct and lifeless; a bay throws a
           // vertical shadow the whole height of the facade and is most of
           // what gives a masonry street its relief.
-          final isBay = style.bayProjectionM > 0 &&
+          final isBay = ornament &&
+              style.bayProjectionM > 0 &&
               w.normal.y < 0 &&
               bays >= 3 &&
               i == bays ~/ 2;
@@ -345,7 +356,8 @@ class BuildingGenerator {
 
       // Awning over the shopfront. Cloth on a frame, sloping down to the
       // curb — and on the street face only, because that is where the shop is.
-      if (onGround &&
+      if (ornament &&
+          onGround &&
           style.storefront &&
           style.awnings &&
           w.normal.y < 0 &&
@@ -356,7 +368,11 @@ class BuildingGenerator {
       // Fire escape, on the BACK. Landings, a stringer and a drop ladder —
       // the thing that says "American masonry" faster than any brick colour,
       // and it is a handful of thin boxes.
-      if (style.fireEscapes && w.normal.y > 0 && onGround && v.floors > 2) {
+      if (ornament &&
+          style.fireEscapes &&
+          w.normal.y > 0 &&
+          onGround &&
+          v.floors > 2) {
         _fireEscape(b.solid, w, m, v, bu0, bu1);
       }
 
