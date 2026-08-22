@@ -7,6 +7,7 @@ import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/scatter/mesh_builder.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/elevated_structure.dart';
+import 'package:acro_space_simulator/infrastructure/flutter_scene/city/pedestrian_tube.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/street_furniture.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -198,6 +199,42 @@ void main() {
       addTearDown(() => StreetFurniture.enabled = true);
       StreetFurniture.enabled = false;
       expect(furnish(RoadClass.street), 0);
+    });
+  });
+
+  group('the pedestrian tube', () {
+    ({MeshBuilder solid, MeshBuilder glass}) tube() {
+      final solid = MeshBuilder(), glass = MeshBuilder();
+      PedestrianTube.emit(solid, glass,
+          pts: pts, halfWidthM: 4, anchorBF: anchorBF);
+      return (solid: solid, glass: glass);
+    }
+
+    test('the barrel stands clear of the carriageway, on its curb', () {
+      final t = tube();
+      const scale = 1e-3;
+      final glass = t.glass.build();
+      // Up is +X out of the anchor and the alignment runs along +Y, so the
+      // offset across the street is Z, and the whole barrel is on one side of
+      // it — the verge, not straddling the carriageway.
+      for (var i = 0; i + 2 < glass.positions.length; i += 3) {
+        expect(glass.positions[i + 2] / scale, lessThan(-4.0),
+            reason: 'the tube is standing in the road');
+      }
+      expect(t.solid.build().positions, isNotEmpty, reason: 'no curb under it');
+    });
+
+    test('the barrel is not inside out', () {
+      // The one property of a tube that a screenshot cannot settle: reversed,
+      // it still reads as a tube, and you only notice you are looking through
+      // its near wall at the inside of its far one. Both halves are measured
+      // against the deck, which is known to render face up.
+      final want = opposing(build(RoadClass.elevated).deck.build());
+      final t = tube();
+      expect(opposing(t.glass.build()), closeTo(want, 0.001),
+          reason: 'the glass barrel is wound inside out');
+      expect(opposing(t.solid.build()), closeTo(want, 0.001),
+          reason: 'the curb is wound upside down');
     });
   });
 

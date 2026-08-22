@@ -100,6 +100,24 @@ void main() {
     final bodyWorld = Vector3(1.47e11, 3.2e10, 0);
     final spin = Quaternion.axisAngle(Vector3.unitZ, 1.1);
 
+    // Ranges PINNED, not read from the shipped defaults. What these check is
+    // the frame conversion — that a camera 60 m from a building measures
+    // 60 m and not the radius of the planet's orbit. Written against the
+    // live values they were hostage to a tuning change: dropping the shipped
+    // interior range to 50 m made "standing next to it" the exterior tier,
+    // and both failed for a reason that had nothing to do with frames.
+    late double savedInterior, savedBlock;
+    setUp(() {
+      savedInterior = CityNodes.interiorRangeM;
+      savedBlock = CityNodes.blockRangeM;
+      CityNodes.interiorRangeM = 600;
+      CityNodes.blockRangeM = 3500;
+    });
+    tearDown(() {
+      CityNodes.interiorRangeM = savedInterior;
+      CityNodes.blockRangeM = savedBlock;
+    });
+
     BuildingSnapshot at(Vector3 bf) => BuildingSnapshot(
           id: 'b',
           type: 'c-high',
@@ -158,3 +176,23 @@ void main() {
     });
   });
 }
+
+// NOT TESTED HERE: that toggling the visualiser invalidates the uploaded mesh
+// cache. That was the bug behind "amber never shows".
+//
+// `_uploaded` is keyed by `BuildingArchetype`, which carries the detail tier
+// but says nothing about whether an entry is a real building or a debug box.
+// The rebuild key does carry `lodDebug`, so the toggle rebuilds — but the
+// rebuild fills its batches with `putIfAbsent`, which returns whatever was
+// already cached. Only archetypes never meshed before the toggle got a box,
+// and the studio frames a colony at the exterior tier, so those were exactly
+// the ones already cached as real buildings. Red and green appeared on the
+// way in and out because those archetypes were new; the middle tier stayed
+// real geometry. `lodCounts` reported the tiers correctly the whole time,
+// which is what makes it worth writing down: the tiers were never wrong, the
+// PICTURE was stale.
+//
+// Not reachable from a unit test — `CityNodes` needs an `fs.Scene`, and that
+// throws without the Impeller GPU backend. Guarded by review: anything cached
+// under an archetype key has to be invalidated when a flag outside that key
+// changes what gets built.

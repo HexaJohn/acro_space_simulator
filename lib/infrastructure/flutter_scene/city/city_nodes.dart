@@ -37,6 +37,7 @@ import '../../../domain/architecture/building_massing.dart';
 import 'elevated_structure.dart';
 import 'lot_features.dart';
 import 'oriented_box.dart';
+import 'pedestrian_tube.dart';
 import 'street_furniture.dart';
 import 'vehicle_meshes.dart';
 import 'city_textures.dart';
@@ -97,10 +98,11 @@ class CityNodes {
   /// Buildings resolved to each tier last frame, for the panel.
   static final Map<BuildingDetail, int> lodCounts = {};
 
-  static double blockRangeM = 3500;
+  /// Distance past which a building is only its block silhouette.
+  static double blockRangeM = 300;
 
   /// Distance inside which interiors are generated.
-  static double interiorRangeM = 600;
+  static double interiorRangeM = 50;
 
   static String debugLine = '';
 
@@ -251,6 +253,36 @@ class CityNodes {
   }
   final Map<BuildingArchetype, _CityMesh> _uploaded = {};
 
+  /// Which visualiser state the meshes in [_uploaded] were built in.
+  bool? _uploadedLodDebug;
+
+  /// Drop the mesh cache when [lodDebug] is toggled.
+  ///
+  /// [_uploaded] is keyed by [BuildingArchetype] — type, size bucket, detail
+  /// tier, variant, style, corner — and NOTHING in that key says whether the
+  /// entry is a real building or a debug box. The rebuild key does carry
+  /// `lodDebug`, so flipping the toggle rebuilds the scene; but the rebuild
+  /// fills its batches with `putIfAbsent`, which hands back whatever is
+  /// already cached for that archetype. Only archetypes never meshed BEFORE
+  /// the toggle actually got a box.
+  ///
+  /// Which is why the middle tier appeared to be missing. The studio frames a
+  /// colony from `max(600, extent * 1.5)` metres — the exterior tier, so
+  /// exactly the archetypes already cached as real buildings at the moment
+  /// the toggle was flipped. Fly in and `full` is a new archetype, so red
+  /// boxes appear; fly out and `block` is new, so green ones do; the middle
+  /// tier stayed real geometry and amber never showed at all. The tiers were
+  /// right the whole time — `lodCounts` was already reporting them — it was
+  /// the picture that was stale.
+  ///
+  /// It ran the other way too: turning the visualiser OFF left boxes cached
+  /// for whichever tiers had built one, so the city kept rendering them.
+  void _syncLodDebug() {
+    if (_uploadedLodDebug == lodDebug) return;
+    _uploadedLodDebug = lodDebug;
+    _uploaded.clear();
+  }
+
   /// Batches, each pinned to a body-fixed anchor. Instance transforms are
   /// stored RELATIVE to that anchor and never touched again; only the node's
   /// own matrix moves per frame. That is what lets a spinning planet carry a
@@ -380,10 +412,17 @@ class CityNodes {
     // hard — to 64 m — because rebuilding the colony on every centimetre of
     // camera travel would cost far more than the LOD saves.
     final camKey = camKeyParts.isEmpty ? '' : '|${camKeyParts.join(";")}';
+    // The RANGES are part of the key too. They are studio sliders, and
+    // without them dragging one changed nothing on screen until the camera
+    // happened to cross a 64 m quantum and move `camKey` — so the tiers
+    // looked like they were ignoring the sliders, or responding to them
+    // several seconds late.
     final key = '${snap.buildings.length}|${snap.roads.length}|'
         '${snap.patches.length}|${detail.index}|${byBody.keys.join(",")}'
-        '|${lodDebug ? 1 : 0}|${perBuildingLod ? 1 : 0}$camKey';
+        '|${lodDebug ? 1 : 0}|${perBuildingLod ? 1 : 0}'
+        '|${interiorRangeM.round()}|${blockRangeM.round()}$camKey';
     _syncLibrary();
+    _syncLodDebug();
     final sw = Stopwatch()..start();
     var rebuiltThisFrame = false;
     if (_builtKey != key || _batches.isEmpty) {
@@ -1179,7 +1218,8 @@ class CityNodes {
       }
       if (road.sealed) {
         sealedWorld = true;
-        _pedTubeFor(tubeSolid, tubeGlass, pts, road.halfWidthM, anchorBF);
+        PedestrianTube.emit(tubeSolid, tubeGlass,
+            pts: pts, halfWidthM: road.halfWidthM, anchorBF: anchorBF);
       }
     }
     // Signal phase comes from sim time: deterministic, stateless, and the
@@ -1424,59 +1464,6 @@ class CityNodes {
           poles.quad(pv[0], pv[1], pv[2], pv[3]);
         }
       }
-    }
-  }
-
-  /// A sealed pedestrian tube running along the verge.
-  ///
-  /// On an airless world people cannot use a pavement, and the colony already
-  /// says so for its grid roads — `roadSealed` renders those as pressurised
-  /// tubes. The spline roads the in-world editor builds never carried the flag,
-  /// so a lunar street was drawn as open asphalt with a curb nobody could
-  /// stand on. This is the same idea, cut as real geometry: a hexagonal glass
-  /// barrel on a low curb, offset clear of the carriageway.
-  static void _pedTubeFor(
-    MeshBuilder solid,
-    MeshBuilder glass,
-    List<Vector3> pts,
-    double halfWidth,
-    Vector3 anchorBF,
-  ) {
-    const radius = 1.7;
-    const sides = 6;
-    List<int>? prev;
-    List<int>? prevCurb;
-    for (var i = 0; i < pts.length; i++) {
-      final p = pts[i];
-      final up = (p + anchorBF).normalized;
-      final ahead = i + 1 < pts.length ? pts[i + 1] - p : p - pts[i - 1];
-      if (ahead.length < 1e-6) continue;
-      final along = ahead.normalized;
-      final side = along.cross(up).normalized;
-      // Outside the curb, clear of the traffic lane.
-      final axis = p + side * (halfWidth + radius + 1.0) + up * 0.2;
-
-      final ring = <int>[];
-      for (var k = 0; k < sides; k++) {
-        final a = 2 * math.pi * k / sides + math.pi / sides;
-        final n = side * math.cos(a) + up * math.sin(a);
-        ring.add(glass.vertex(
-            _scenePos(axis + n * radius + up * radius), n, k / sides, 0.5));
-      }
-      // A curb strip under it, so the barrel does not float on the ground.
-      final curb = [
-        solid.vertex(_scenePos(axis - side * radius), up, 0, 0.5),
-        solid.vertex(_scenePos(axis + side * radius), up, 1, 0.5),
-      ];
-      if (prev != null && prevCurb != null) {
-        for (var k = 0; k < sides; k++) {
-          final n = (k + 1) % sides;
-          glass.quad(prev[k], prev[n], ring[n], ring[k]);
-        }
-        solid.quad(prevCurb[0], prevCurb[1], curb[1], curb[0]);
-      }
-      prev = ring;
-      prevCurb = curb;
     }
   }
 
