@@ -7,6 +7,9 @@ import 'package:acro_space_simulator/domain/architecture/architecture_style.dart
 import 'package:acro_space_simulator/domain/architecture/building_generator.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
+import 'package:acro_space_simulator/application/snapshot/world_snapshot.dart';
+import 'package:acro_space_simulator/domain/shared/quaternion.dart';
+import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_nodes.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -84,6 +87,74 @@ void main() {
       expect(CityNodes.perBuildingLod, isTrue);
       expect(CityNodes.lodDebug, isFalse,
           reason: 'a debug view must never be what ships');
+    });
+  });
+
+  group('the camera has to be in the building\'s own frame', () {
+    // The bug this exists for: a building's px/py/pz are BODY-FIXED metres, a
+    // few thousand from the planet's centre, while the camera is in world
+    // space — about 1.5e11 m from the origin for anything orbiting the Sun.
+    // Subtracting one from the other is not a distance, it is the radius of
+    // the orbit, so every building in every colony resolved to the coarsest
+    // tier the moment per-building LOD was switched on.
+    final bodyWorld = Vector3(1.47e11, 3.2e10, 0);
+    final spin = Quaternion.axisAngle(Vector3.unitZ, 1.1);
+
+    BuildingSnapshot at(Vector3 bf) => BuildingSnapshot(
+          id: 'b',
+          type: 'c-high',
+          colonyId: 'c',
+          body: 'earth',
+          px: bf.x,
+          py: bf.y,
+          pz: bf.z,
+          qw: 1,
+          qx: 0,
+          qy: 0,
+          qz: 0,
+          lat: 0,
+          lon: 0,
+          siteWidthM: 20,
+          siteDepthM: 20,
+          siteKindIndex: 0,
+          colorArgb: 0,
+        );
+
+    test('a camera standing next to a building reads as NEXT TO it', () {
+      final standing = Vector3(6.371e6, 0, 0);
+      final cameraWorld = bodyWorld + spin.rotate(standing + Vector3(60, 0, 0));
+      final focusBF = CityNodes.focusInBodyFrame(cameraWorld, bodyWorld, spin);
+
+      expect((focusBF - standing).length, closeTo(60, 1e-3),
+          reason: 'the frame conversion is wrong: got ${focusBF - standing}');
+      expect(CityNodes.detailFor(at(standing), focusBF, BuildingDetail.block),
+          BuildingDetail.full);
+    });
+
+    test('and one across the city reads as across the city', () {
+      final standing = Vector3(6.371e6, 0, 0);
+      final cameraWorld = bodyWorld + spin.rotate(standing);
+      final focusBF = CityNodes.focusInBodyFrame(cameraWorld, bodyWorld, spin);
+
+      final near = at(standing + Vector3(0, 100, 0));
+      final mid = at(standing + Vector3(0, CityNodes.interiorRangeM + 200, 0));
+      final far = at(standing + Vector3(0, CityNodes.blockRangeM + 500, 0));
+      expect(CityNodes.detailFor(near, focusBF, BuildingDetail.block),
+          BuildingDetail.full);
+      expect(CityNodes.detailFor(mid, focusBF, BuildingDetail.block),
+          BuildingDetail.exterior);
+      expect(CityNodes.detailFor(far, focusBF, BuildingDetail.full),
+          BuildingDetail.block);
+    });
+
+    test('turning it off falls back to the colony tier, whatever the frame',
+        () {
+      addTearDown(() => CityNodes.perBuildingLod = true);
+      CityNodes.perBuildingLod = false;
+      expect(
+          CityNodes.detailFor(
+              at(Vector3(6.371e6, 0, 0)), Vector3.zero, BuildingDetail.exterior),
+          BuildingDetail.exterior);
     });
   });
 }

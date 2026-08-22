@@ -305,16 +305,29 @@ class CityNodes {
       byBody.putIfAbsent(p.body, () => []);
     }
 
-    // Range gate off the nearest colony, and pick a detail tier from it. The
-    // whole city shares one tier: a per-building tier would pop visibly along
-    // the boundary as the camera drifts, and the saving is small because the
-    // expensive part is the interior, which is all-or-nothing anyway.
+    // Range gate off the nearest colony, and pick the colony-wide fallback
+    // tier from it. Individual buildings then take their own tier from their
+    // own distance — see [detailFor].
     var nearest = double.infinity;
+    // Camera position per body, quantised, for the rebuild key.
+    //
+    // BODY-FIXED, not world. A world position is useless as a change detector
+    // here: Earth carries everything on it round the sun at 30 km/s, so a
+    // camera standing perfectly still on the ground moves half a kilometre of
+    // world space between frames and a 64 m quantisation would rebuild the
+    // whole colony every single frame. In the body's own frame a stationary
+    // observer is stationary.
+    final camKeyParts = <String>[];
     for (final entry in byBody.entries) {
       final body = snap.bodies[entry.key];
       if (body == null) continue;
       final bodyWorld = Vector3(body.px, body.py, body.pz);
       final quat = Quaternion(body.qw, body.qx, body.qy, body.qz);
+      if (perBuildingLod) {
+        final f = focusInBodyFrame(focusWorld, bodyWorld, quat);
+        camKeyParts.add('${(f.x / 64).round()},${(f.y / 64).round()},'
+            '${(f.z / 64).round()}');
+      }
       for (final b in entry.value) {
         final world = bodyWorld + quat.rotate(Vector3(b.px, b.py, b.pz));
         final d = (world - focusWorld).length;
@@ -366,10 +379,7 @@ class CityNodes {
     // and a different set of buildings resolves to a different tier. Quantised
     // hard — to 64 m — because rebuilding the colony on every centimetre of
     // camera travel would cost far more than the LOD saves.
-    final camKey = perBuildingLod
-        ? '|${(focusWorld.x / 64).round()},${(focusWorld.y / 64).round()},'
-            '${(focusWorld.z / 64).round()}'
-        : '';
+    final camKey = camKeyParts.isEmpty ? '' : '|${camKeyParts.join(";")}';
     final key = '${snap.buildings.length}|${snap.roads.length}|'
         '${snap.patches.length}|${detail.index}|${byBody.keys.join(",")}'
         '|${lodDebug ? 1 : 0}|${perBuildingLod ? 1 : 0}$camKey';
@@ -473,7 +483,15 @@ class CityNodes {
     lodCounts.clear();
 
     for (final entry in byBody.entries) {
-      if (snap.bodies[entry.key] == null) continue;
+      final bodySnap = snap.bodies[entry.key];
+      if (bodySnap == null) continue;
+      // The camera in THIS body's rotating frame, so a building's distance is
+      // measured against something in its own coordinates.
+      final focusBF = focusInBodyFrame(
+        focusWorld,
+        Vector3(bodySnap.px, bodySnap.py, bodySnap.pz),
+        Quaternion(bodySnap.qw, bodySnap.qx, bodySnap.qy, bodySnap.qz),
+      );
       // Anchor at the colony's centroid, so instance offsets stay small and
       // keep their precision even on a body millions of metres across.
       var sum = Vector3.zero;
@@ -495,7 +513,7 @@ class CityNodes {
         final spec = specOf(b);
         final parcel = parcelOf(b);
         final seed = b.id.hashCode;
-        final tier = _detailFor(b, focusWorld, detail);
+        final tier = detailFor(b, focusBF, detail);
         lodCounts[tier] = (lodCounts[tier] ?? 0) + 1;
         // The style is part of the key here for the same reason it is part of
         // it inside the library: these two maps are looked up with keys built
@@ -1620,7 +1638,24 @@ class CityNodes {
       ? BuildingDetail.block
       : (d > interiorRangeM ? BuildingDetail.exterior : BuildingDetail.full);
 
-  /// The tier one building is generated at.
+  /// The camera, expressed in a body's own rotating frame.
+  ///
+  /// A building's `px/py/pz` are BODY-FIXED metres — a few thousand from the
+  /// planet's centre — while the camera is in world space, which for Earth is
+  /// about 1.5e11 m from the origin. Subtracting one from the other is not a
+  /// distance, it is the radius of the orbit, and every building in every
+  /// colony duly resolved to the coarsest tier. Converting the camera down
+  /// into the body frame is one inverse rotation per BODY, against one
+  /// rotation per building the other way round.
+  static Vector3 focusInBodyFrame(
+    Vector3 focusWorld,
+    Vector3 bodyWorld,
+    Quaternion bodyRotation,
+  ) =>
+      bodyRotation.conjugate.rotate(focusWorld - bodyWorld);
+
+  /// The tier one building is generated at, from ITS OWN distance to the
+  /// camera. [focusBF] must be in the same body-fixed frame the building is.
   ///
   /// Was chosen ONCE for the whole colony, from the distance to whichever
   /// building happened to be nearest. Standing in a city therefore built every
@@ -1632,11 +1667,10 @@ class CityNodes {
   /// The archetype key has always carried `detail`, so mixing tiers within a
   /// colony needs no new machinery: buildings at different tiers simply land
   /// in different batches, exactly as different sizes already do.
-  static BuildingDetail _detailFor(
-      BuildingSnapshot b, Vector3 focusWorld, BuildingDetail colonyTier) {
+  static BuildingDetail detailFor(
+      BuildingSnapshot b, Vector3 focusBF, BuildingDetail colonyTier) {
     if (!perBuildingLod) return colonyTier;
-    final d = (Vector3(b.px, b.py, b.pz) - focusWorld).length;
-    return tierForDistance(d);
+    return tierForDistance((Vector3(b.px, b.py, b.pz) - focusBF).length);
   }
 
   /// Palette swatch a tier is painted with in [lodDebug].

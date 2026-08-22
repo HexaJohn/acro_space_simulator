@@ -523,8 +523,15 @@ class _CityStudioScreenState extends State<CityStudioScreen>
                   ));
           _terrainMs = sw.elapsedMicroseconds / 1000;
           sw.reset();
-          _phase('city',
-              () => _city!.update(frame, _origin, focusWorld: _anchorWorld));
+          // The CAMERA, not the colony's centre. `_anchorWorld` is where the
+          // city is, which never moves — so per-building LOD measured every
+          // distance from the middle of town and never changed however far
+          // the camera flew. `_cameraEyeM` is already in world axes about the
+          // anchor, so this is the eye in world space.
+          _phase(
+              'city',
+              () => _city!.update(frame, _origin,
+                  focusWorld: _anchorWorld + _cameraEyeM()));
           _cityMs = sw.elapsedMicroseconds / 1000;
           _phase('scale rig', () => _syncRig(scene));
         }
