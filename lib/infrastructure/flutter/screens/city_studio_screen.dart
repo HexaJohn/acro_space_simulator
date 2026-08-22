@@ -26,6 +26,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter_scene/scene.dart' as fs;
 import 'package:vector_math/vector_math.dart' as vm;
@@ -42,6 +43,7 @@ import '../../../domain/shared/vector3.dart';
 import '../../../domain/universe/real_solar_system.dart';
 import '../../flutter_scene/city/city_nodes.dart';
 import '../../../domain/architecture/building_generator.dart';
+import '../../../domain/terrain/terrain_field.dart';
 import '../../flutter_scene/city/city_materials.dart';
 import '../../flutter_scene/city/street_furniture.dart';
 import '../../flutter_scene/city/scale_rig.dart';
@@ -115,6 +117,34 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   /// planet. Orbiting about +Z put the camera under the horizon and stood the
   /// city on its side everywhere else.
   Vector3 _upWorld = Vector3.unitZ;
+
+  // ---- First person -------------------------------------------------------
+  //
+  // Everything about a street is judged from the pavement. An orbit camera
+  // looking down at a block tells you the massing is plausible and nothing
+  // about whether the storefronts are the right height, whether the awnings
+  // clear your head, or whether the L actually passes over the carriageway —
+  // which are the questions the whole masonry kit exists to answer.
+  bool _firstPerson = false;
+
+  /// Where the walker stands, in the colony's tangent plane: metres east and
+  /// north of the anchor. Height is not stored — it is sampled from the ground
+  /// every frame, so the walker follows the terrain the colony was cut into.
+  double _walkE = 0, _walkN = -40;
+  double _walkYaw = math.pi / 2, _walkPitch = 0;
+
+  /// Eye height. The same 1.7 m the scale rig stands a person at, so the two
+  /// agree about what human scale is.
+  static const double _eyeHeightM = 1.7;
+  static const double _walkSpeedMs = 6.0;
+  static const double _runSpeedMs = 22.0;
+
+  final Set<LogicalKeyboardKey> _held = {};
+
+  /// The ground sampler for the generated colony, kept so the walker can
+  /// stand ON the terrain rather than at a fixed radius.
+  TerrainField? _groundField;
+  Vector3 _bodyCentreWorld = Vector3.zero;
 
   double _azimuth = 0.9;
   double _elevation = 0.55;
@@ -231,6 +261,9 @@ class _CityStudioScreenState extends State<CityStudioScreen>
         _frameMs.add(dt);
         if (_frameMs.length > 90) _frameMs.removeAt(0);
       }
+      // Clamped: a dropped frame or a rebuild pause must not teleport the
+      // walker across the colony.
+      _stepWalker((dt / 1000.0).clamp(0.0, 0.1));
     }
     _lastTick = elapsed;
     // Traffic off means a static frame, but the clock still ticks so the
@@ -305,6 +338,11 @@ class _CityStudioScreenState extends State<CityStudioScreen>
         (phase: 'draping roads and lots on the ground', fraction: 0.16));
     await Future<void>.delayed(Duration.zero);
 
+    // Keep the sampler the colony was cut into, so a walker stands on the
+    // graded ground — pads, road corridors, mined holes and all — rather than
+    // on the datum sphere under it.
+    _groundField = body.terrainFieldWith(edits.forBody(body.id));
+
     final snap = WorldSnapshot.capture(
       1,
       InMemoryVesselRepository(const []),
@@ -346,6 +384,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
         ? sim.localToBodyFixed(const Vec2(0, 0), bodyRadiusM: body.radius)
         : sum * (1.0 / count);
     final bodyCentre = Vector3(b.px, b.py, b.pz);
+    _bodyCentreWorld = bodyCentre;
     _anchorWorld =
         bodyCentre + Quaternion(b.qw, b.qx, b.qy, b.qz).rotate(anchorBF);
     _origin.focusWorld = _anchorWorld;
@@ -384,12 +423,68 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   /// Built in the colony's OWN frame: elevation is the angle above its ground,
   /// azimuth a turn about its local up.
   Vector3 _cameraEyeM() {
+    if (_firstPerson) return _walkerEyeM();
     final (east, north) = _tangentFrame();
     final ce = math.cos(_elevation), se = math.sin(_elevation);
     final dir = east * (math.cos(_azimuth) * ce) +
         north * (math.sin(_azimuth) * ce) +
         _upWorld * se;
     return dir * _distanceM;
+  }
+
+  /// The walker's eye, anchor-relative metres.
+  ///
+  /// Placed RADIALLY off the real ground rather than on the anchor's tangent
+  /// plane: a colony is a patch of a sphere, and a walker who kept the
+  /// anchor's height would sink into the ground crossing it and float at the
+  /// far side. Sampling the terrain field is also what makes a mined hole
+  /// something you can walk into.
+  Vector3 _walkerEyeM() {
+    final (east, north) = _tangentFrame();
+    final flat = _anchorWorld + east * _walkE + north * _walkN;
+    final radial = flat - _bodyCentreWorld;
+    if (radial.length < 1) return _upWorld * _eyeHeightM;
+    final dir = radial.normalized;
+    final field = _groundField;
+    final ground = field == null
+        ? radial.length
+        : field.groundRadiusAt(dir.x, dir.y, dir.z);
+    return _bodyCentreWorld + dir * (ground + _eyeHeightM) - _anchorWorld;
+  }
+
+  /// Where the walker is looking, as a unit vector in world axes.
+  Vector3 _walkerLook() {
+    final (east, north) = _tangentFrame();
+    // Up at the WALKER, not at the anchor — same reason the eye is radial.
+    final radial = (_anchorWorld + east * _walkE + north * _walkN) -
+        _bodyCentreWorld;
+    final up = radial.length < 1 ? _upWorld : radial.normalized;
+    final fwd = (north * math.cos(_walkYaw) + east * math.sin(_walkYaw));
+    final flat = (fwd - up * fwd.dot(up));
+    final ahead = flat.length < 1e-9 ? north : flat.normalized;
+    final cp = math.cos(_walkPitch), sp = math.sin(_walkPitch);
+    return (ahead * cp + up * sp).normalized;
+  }
+
+  /// Advance the walker for [dtS] seconds from whatever is held down.
+  void _stepWalker(double dtS) {
+    if (!_firstPerson || _held.isEmpty) return;
+    var fwd = 0.0, side = 0.0;
+    if (_held.contains(LogicalKeyboardKey.keyW)) fwd += 1;
+    if (_held.contains(LogicalKeyboardKey.keyS)) fwd -= 1;
+    if (_held.contains(LogicalKeyboardKey.keyD)) side += 1;
+    if (_held.contains(LogicalKeyboardKey.keyA)) side -= 1;
+    if (fwd == 0 && side == 0) return;
+    final speed = _held.contains(LogicalKeyboardKey.shiftLeft) ||
+            _held.contains(LogicalKeyboardKey.shiftRight)
+        ? _runSpeedMs
+        : _walkSpeedMs;
+    final len = math.sqrt(fwd * fwd + side * side);
+    final step = speed * dtS / len;
+    // Heading in the tangent plane: yaw 0 faces north.
+    final cy = math.cos(_walkYaw), sy = math.sin(_walkYaw);
+    _walkN += (fwd * cy - side * sy) * step;
+    _walkE += (fwd * sy + side * cy) * step;
   }
 
   String? _bodyIdOfFrame(WorldSnapshot frame) =>
@@ -433,6 +528,23 @@ class _CityStudioScreenState extends State<CityStudioScreen>
 
   fs.PerspectiveCamera _camera() {
     final eye = _cameraEyeM();
+    if (_firstPerson) {
+      final look = _walkerLook();
+      final p = vm.Vector3(eye.x, eye.y, eye.z) * kRenderScale;
+      final radial = (_anchorWorld + eye) - _bodyCentreWorld;
+      final up = radial.length < 1 ? _upWorld : radial.normalized;
+      return fs.PerspectiveCamera(
+        fovRadiansY: 0.9,
+        position: p,
+        target: p + vm.Vector3(look.x, look.y, look.z) * kRenderScale * 50,
+        up: vm.Vector3(up.x, up.y, up.z),
+        // Metres from the eye, not a fraction of an orbit range: on foot the
+        // nearest thing is the pavement and the far plane still has to reach
+        // the far side of the colony.
+        fovNear: lengthToScene(0.15),
+        fovFar: lengthToScene(40000),
+      );
+    }
     final target = vm.Vector3.zero();
     // Directions map to scene space by a pure scale, so a unit vector in world
     // metres is a unit vector here.
@@ -455,6 +567,14 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       title: 'CITY STUDIO',
       accentColor: AppTheme.accent2,
       actions: [
+        IconButton(
+          icon: Icon(_firstPerson ? Icons.videocam : Icons.directions_walk,
+              color: _firstPerson ? AppTheme.accent2 : AppTheme.text),
+          tooltip: _firstPerson
+              ? 'Back to the orbit camera  (G)'
+              : 'Walk the streets  (G) — WASD, shift to run, drag to look',
+          onPressed: _sim == null ? null : () => setState(_toggleFirstPerson),
+        ),
         IconButton(
           icon: Icon(_panel ? Icons.chevron_right : Icons.tune,
               color: AppTheme.text),
@@ -538,9 +658,20 @@ class _CityStudioScreenState extends State<CityStudioScreen>
 
         return Stack(children: [
           Positioned.fill(
-            child: GestureDetector(
+            child: Focus(
+              autofocus: true,
+              onKeyEvent: _onKey,
+              child: GestureDetector(
               onScaleStart: (_) => _dragBase = (_azimuth, _elevation),
               onScaleUpdate: (d) => setState(() {
+                if (_firstPerson) {
+                  // Mouse-look. Pitch stops just short of straight up and
+                  // down, where the up vector degenerates.
+                  _walkYaw -= d.focalPointDelta.dx * 0.005;
+                  _walkPitch = (_walkPitch - d.focalPointDelta.dy * 0.004)
+                      .clamp(-1.45, 1.45);
+                  return;
+                }
                 if (d.pointerCount > 1) {
                   _distanceM =
                       (_distanceM / d.scale.clamp(0.2, 5.0)).clamp(40.0, 60000.0);
@@ -552,7 +683,10 @@ class _CityStudioScreenState extends State<CityStudioScreen>
                 }
               }),
               child: Listener(
-                onPointerSignal: (e) {
+                    onPointerSignal: (e) {
+                  // On foot the eye IS the head: zooming would pull it out of
+                  // the walker, so the wheel does nothing.
+                  if (_firstPerson) return;
                   if (e is PointerScrollEvent) {
                     setState(() => _distanceM =
                         (_distanceM * (1 + e.scrollDelta.dy * 0.0016))
@@ -568,14 +702,73 @@ class _CityStudioScreenState extends State<CityStudioScreen>
                 ),
               ),
             ),
+            ),
           ),
           if (_sim == null)
             const Center(
               child: Text('Set the knobs, then GENERATE.',
                   style: AppTheme.dim),
             ),
+          if (_firstPerson)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 16,
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 6),
+                  decoration: AppTheme.panelBox(),
+                  child: Text(
+                      'WASD to walk · shift to run · drag to look · G to fly',
+                      style: AppTheme.mono
+                          .copyWith(fontSize: 11, color: AppTheme.textDim)),
+                ),
+              ),
+            ),
           Positioned(left: 12, top: 12, child: _perfPanel()),
         ]);
+    }
+  }
+
+  /// WASD while on foot. Held keys are tracked rather than acted on directly,
+  /// so movement happens on the TICK — a key-repeat rate is not a frame rate,
+  /// and driving the walker off one makes it stutter.
+  KeyEventResult _onKey(FocusNode node, KeyEvent e) {
+    if (e is KeyDownEvent && e.logicalKey == LogicalKeyboardKey.keyG) {
+      setState(_toggleFirstPerson);
+      return KeyEventResult.handled;
+    }
+    if (!_firstPerson) return KeyEventResult.ignored;
+    final move = {
+      LogicalKeyboardKey.keyW,
+      LogicalKeyboardKey.keyA,
+      LogicalKeyboardKey.keyS,
+      LogicalKeyboardKey.keyD,
+      LogicalKeyboardKey.shiftLeft,
+      LogicalKeyboardKey.shiftRight,
+    };
+    if (!move.contains(e.logicalKey)) return KeyEventResult.ignored;
+    if (e is KeyDownEvent) {
+      _held.add(e.logicalKey);
+    } else if (e is KeyUpEvent) {
+      _held.remove(e.logicalKey);
+    }
+    return KeyEventResult.handled;
+  }
+
+  /// Step on and off the pavement.
+  ///
+  /// Entering, the walker is placed just outside the colony looking in, so the
+  /// first thing on screen is a street rather than the inside of a building.
+  void _toggleFirstPerson() {
+    _firstPerson = !_firstPerson;
+    _held.clear();
+    if (_firstPerson) {
+      _walkE = 0;
+      _walkN = -_spec.blockDepthM * 0.6;
+      _walkYaw = 0; // facing north, into the colony
+      _walkPitch = 0;
     }
   }
 
@@ -647,6 +840,12 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             colour: AppTheme.textDim),
         row('  loading', '${TerrainNodes.counters['gridPatches'] ?? 0}',
             colour: AppTheme.textDim),
+        // Tiles that failed their band check often enough to be given up on.
+        // Any non-zero value here is a hole in the ground that will not fill.
+        row('  retired', '${_terrain?.retiredClipped ?? 0}',
+            colour: (_terrain?.retiredClipped ?? 0) > 0
+                ? AppTheme.danger
+                : AppTheme.textDim),
         row('city', '${ms(_cityMs)} ms'),
         row(
             '  lod mix',

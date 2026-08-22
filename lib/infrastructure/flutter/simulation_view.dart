@@ -1251,12 +1251,19 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     // culled by range, zero buildings in the frame, or drawn but somewhere
     // else. Without it every "nothing shows" report is a guessing game.
     final city = CityNodes.debugLine;
+    // The terrain line carries the streaming state — how many chunks are in
+    // flight, and how many were RETIRED after failing their own band check.
+    // A retired chunk is a tile that has gone and will not come back, which
+    // is exactly what mining produces and exactly what you cannot diagnose
+    // from a hole in the ground.
+    final terrain = TerrainNodes.debugLine;
     return 'near ${eng(nearM)}${nearOv != null ? '*' : ''}  '
         'far ${eng(farM)}${farOv != null ? '*' : ''}  '
         'exp ${SceneSync.lastExposure.toStringAsFixed(2)}  '
         'aa=${SceneSync.effectiveAa}'
         '${rings == null ? '' : '  |  $rings'}'
-        '${city.isEmpty ? '  |  city: none in frame' : '  |  $city'}';
+        '${city.isEmpty ? '  |  city: none in frame' : '  |  $city'}'
+        '${terrain.isEmpty ? '' : '  |  $terrain'}';
   }
 
   /// Zoom by [factor] (>1 = out): adjusts ortho mpp or perspective range.

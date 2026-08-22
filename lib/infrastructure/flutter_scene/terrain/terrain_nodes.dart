@@ -374,6 +374,31 @@ class TerrainNodes {
   /// a bug, and which renders as a permanently missing tile. Surfaced in
   /// [debugLine] so `ext.acro.terrain` answers "why is that tile missing".
   int _clippedEmpty = 0;
+
+  /// How many times each chunk has come back empty AND clipped.
+  ///
+  /// A clipped cell is the mesher reporting its own failure: the radial band
+  /// did not contain the surface, so "no isosurface here" is not a fact about
+  /// the ground, it is a fact about the sample. Retiring the chunk on that —
+  /// which is what happened — means the tile never comes back, because
+  /// `_emptyChunks` is only ever cleared by a LATER edit that touches it.
+  /// Stop mining and nothing ever touches it again.
+  ///
+  /// Mining is exactly the case that produces one: the field is changing under
+  /// the mesher while it works, so a cell sampled mid-edit can easily fail its
+  /// own band check. Retrying it against the settled field is almost always
+  /// enough, and the count is what stops a chunk that really is a sealed void
+  /// from being resubmitted forever.
+  final Map<ChunkKey, int> _clippedRetries = {};
+
+  /// Attempts a clipped chunk gets before it is retired as genuinely empty.
+  static int clippedRetryLimit = 4;
+
+  /// Chunks retired as empty after repeatedly failing their band check — a
+  /// tile that is missing and will stay missing. Surfaced so it is visible
+  /// rather than something you notice as a hole in the ground.
+  int get retiredClipped => _retiredClipped;
+  int _retiredClipped = 0;
   int _generation = 0;
 
   TerrainLodTree? _tree;
@@ -709,6 +734,9 @@ class TerrainNodes {
         _arrived.removeWhere((a) => touches(a.key));
         _staleInFlight.addAll(_pending.where(touches));
         _emptyChunks.removeWhere(touches);
+        // A fresh edit is a fresh chance: whatever made the band miss may
+        // well be gone, so the attempt count starts again.
+        _clippedRetries.removeWhere((k, _) => touches(k));
         _meshCache.removeWhere((k, _) => touches(k));
         for (final k in _chunks.keys.toList()) {
           if (touches(k)) _scene.remove(_chunks.remove(k)!.node);
@@ -1105,7 +1133,8 @@ class TerrainNodes {
         '${_emptyChunks.isNotEmpty ? '  e${_emptyChunks.length}' : ''}'
         '${_meshCache.isNotEmpty ? '  mc${_meshCache.length}' : ''}'
         '${_gridPatches.isNotEmpty ? '  grid${_gridPatches.length}' : ''}'
-        '${_clippedEmpty > 0 ? '  CLIPPED $_clippedEmpty' : ''}';
+        '${_clippedEmpty > 0 ? '  clipped $_clippedEmpty' : ''}'
+        '${_retiredClipped > 0 ? '  RETIRED $_retiredClipped' : ''}';
 
     final sun = starWorld == null
         ? Vector3(-1, -0.2, -0.1).normalized
@@ -1236,13 +1265,26 @@ class TerrainNodes {
       if (generation != _generation) return;
       if (_staleInFlight.remove(key)) return; // sampled a pre-edit field
       if (cell.isEmpty) {
-        // No isosurface in the shell (legitimate, e.g. below a sea floor).
-        // Remember it, or the chunk would be resubmitted every frame. An
-        // empty AND clipped cell is different: the band failed to contain
-        // the surface, i.e. the mesher was wrong — count it for the HUD.
+        // No isosurface in the shell. Legitimately empty (below a sea floor,
+        // inside a sealed void) it must be REMEMBERED, or the chunk is
+        // resubmitted every frame forever.
+        //
+        // Empty AND CLIPPED is not that. It is the mesher saying its band
+        // missed the surface — its own failure — and retiring the chunk on it
+        // is how a tile disappears and never returns: `_emptyChunks` is only
+        // cleared by a later edit that touches the chunk, so the moment you
+        // stop mining, nothing ever will. Give it a few more looks at the
+        // settled field first.
+        if (cell.clipped) {
+          _clippedEmpty++;
+          final tries = (_clippedRetries[key] ?? 0) + 1;
+          _clippedRetries[key] = tries;
+          if (tries < clippedRetryLimit) return; // missing again → resubmitted
+          _retiredClipped++;
+        }
         _emptyChunks.add(key);
-        if (cell.clipped) _clippedEmpty++;
       } else {
+        _clippedRetries.remove(key);
         _arrived.add(_ArrivedMesh(key, cell, generation));
       }
     }).catchError((Object e) {
@@ -1486,6 +1528,8 @@ class TerrainNodes {
     _meshCache.clear();
     _staleInFlight.clear(); // generation check already drops these
     _clippedEmpty = 0;
+    _clippedRetries.clear();
+    _retiredClipped = 0;
   }
 
   void _clear() {

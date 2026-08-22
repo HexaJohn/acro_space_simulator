@@ -32,7 +32,7 @@ void main() {
     // a ListView unbuilds what has scrolled off, so the tiles higher up are
     // gone by the time the last one arrives.
     final seen = <String>{};
-    for (var i = 0; i < 38; i++) {
+    for (var i = 0; i < 40; i++) {
       await t.drag(list.last, const Offset(0, -260));
       await t.pump();
       expect(t.takeException(), isNull,
@@ -71,7 +71,30 @@ void main() {
         reason: 'the button sits below the fold until the list is scrolled');
     expect(t.takeException(), isNull);
   });
+
+  testWidgets('walking the streets is offered, and needs a colony first',
+      (t) async {
+    await t.pumpWidget(const MaterialApp(home: CityStudioScreen()));
+    await t.pump();
+
+    final walk = find.byIcon(Icons.directions_walk);
+    expect(walk, findsOneWidget, reason: 'no way onto the pavement');
+    // Disabled until there is something to walk around in: on foot the eye is
+    // placed off the colony's OWN ground, and there is no ground to sample
+    // before a colony has been generated.
+    final button = t.widget<IconButton>(
+        find.ancestor(of: walk, matching: find.byType(IconButton)).first);
+    expect(button.onPressed, isNull,
+        reason: 'walking an ungenerated colony has nothing to stand on');
+    expect(t.takeException(), isNull);
+  });
 }
+
+// NOT TESTED HERE: what the walker SEES. Placing the eye needs the terrain
+// field the colony was cut into, which needs a generated colony, which needs a
+// GPU — so the height sampling, the mouse-look basis and the WASD stepping are
+// all verified by walking it. What a widget test can hold is that the way in
+// exists and is gated on there being ground to stand on.
 
 // NOT TESTED HERE: that the scene-resource future is created once rather than
 // per build. It is the bug that left the preview spinning forever — a
