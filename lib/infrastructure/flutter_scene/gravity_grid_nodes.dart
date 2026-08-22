@@ -5,6 +5,7 @@
 
 import 'dart:math' as math;
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter_scene/gpu.dart' as gpu;
 import 'package:flutter_scene/scene.dart' as fs;
@@ -17,9 +18,9 @@ import 'coord_convert.dart';
 import 'depth_materials.dart';
 
 /// The "spacetime distortion" grid: a translucent polar graticule floating
-/// under every planet and moon, bowed into a gravity-well funnel whose depth
-/// and opacity key on the body's surface gravity (g = mu/r^2, from the
-/// descriptor's [BodyDescriptorSnapshot.mu]).
+/// under the planet or moon you're at, bowed into a gravity-well funnel
+/// whose depth and opacity key on the body's surface gravity (g = mu/r^2,
+/// from the descriptor's [BodyDescriptorSnapshot.mu]).
 ///
 /// The sheet always reads as a FLOOR: its plane normal follows the camera's
 /// up-ALIGNMENT reference every frame ([SceneCamera.referenceUp] — ecliptic
@@ -36,8 +37,15 @@ import 'depth_materials.dart';
 /// rotation, uniform scale) path costs one small mesh per body and removes
 /// the only structural difference from the known-good translucent draws.
 ///
-/// Stars are skipped — the grid is a navigation aid for the bodies you
-/// orbit, and the sun's funnel would swallow the whole inner system.
+/// It shows only across the apparent-size window where a funnel means
+/// anything: too far out and it's subpixel sparkle, too close in and the
+/// body no longer reads as a body — see [apparentFade].
+///
+/// Exactly ONE sheet is ever in the scene: the body the camera is looking
+/// at (or, when the camera is locked to a craft, the body that craft
+/// orbits). The grid is a navigation aid for where you ARE — a funnel under
+/// every planet at once was clutter, and the sun's would swallow the whole
+/// inner system. Stars never qualify.
 class GravityGridNodes {
   GravityGridNodes(this._scene);
 
@@ -70,6 +78,56 @@ class GravityGridNodes {
 
   static const double _gEarth = 9.80665;
 
+  /// Apparent-size window (px, measured on the grid's RIM radius = the
+  /// body's radius x [extentRadii]).
+  ///
+  /// Zoomed OUT, the sheet is subpixel sparkle among a dozen other bodies,
+  /// so it fades in over 30..90 px of rim.
+  static const double _rimFadeInPx = 30.0;
+  static const double _rimFadeInSpanPx = 60.0;
+
+  /// Zoomed IN, the grid stops meaning anything once the body stops reading
+  /// as a body — in low orbit or on the ground the funnel is an off-screen
+  /// wall, not a well. Measured as the body's disc RADIUS over the frame's
+  /// half-short-side: 1.0 = the disc spans the short side edge to edge, so
+  /// the fade runs from "the body owns half the frame" to "the body IS the
+  /// frame".
+  static const double _discFadeStart = 0.5;
+  static const double _discFadeEnd = 1.0;
+
+  /// Opacity multiplier for a sheet whose rim measures [rimPx] on screen in
+  /// a frame whose SHORT side is [viewportMinPx] px (0 = don't draw at all).
+  /// Pure, so the visibility window is testable without a GPU.
+  static double apparentFade(double rimPx, double viewportMinPx) {
+    final fadeIn =
+        ((rimPx - _rimFadeInPx) / _rimFadeInSpanPx).clamp(0.0, 1.0);
+    if (fadeIn <= 0 || viewportMinPx <= 0) return fadeIn;
+    final disc = (rimPx / extentRadii) / (viewportMinPx / 2);
+    final fadeOut = ((_discFadeEnd - disc) / (_discFadeEnd - _discFadeStart))
+        .clamp(0.0, 1.0);
+    return fadeIn * fadeOut;
+  }
+
+  /// The one body that gets a grid this frame: the body the camera is
+  /// focused on, or — when it's locked to a craft — the body that craft
+  /// orbits (the snapshot's dominant/SOI parent, the same "which body am I
+  /// at" every other subsystem keys on). Null when the focus resolves to
+  /// nothing, or to a star: the sun's funnel would swallow the inner
+  /// system, and it isn't somewhere you orbit.
+  static String? targetBodyId(WorldSnapshot snap,
+      {String? focusVesselId, String? focusBodyId}) {
+    final id = (focusVesselId == null
+            ? null
+            : snap.vessels[focusVesselId]?.body) ??
+        focusBodyId;
+    if (id == null) return null;
+    final b = snap.bodies[id];
+    final d = snap.descriptors[id];
+    if (b == null || d == null) return null;
+    if (d.kind == BodyKind.star || d.mu <= 0 || b.radius <= 0) return null;
+    return id;
+  }
+
   /// The compiled grid fragment shader (same bundle as the rings). Sheets
   /// don't spawn until it's loaded.
   static Object? _shader;
@@ -88,17 +146,25 @@ class GravityGridNodes {
         }
       }();
 
-  void update(WorldSnapshot snap, FloatingOrigin origin,
-      {SceneCamera? camera}) {
+  void update(
+    WorldSnapshot snap,
+    FloatingOrigin origin, {
+    SceneCamera? camera,
+    ui.Size? viewport,
+    String? focusVesselId,
+    String? focusBodyId,
+  }) {
     final shader = _shader;
-    if (!enabled || shader == null || camera == null) {
+    final id = targetBodyId(snap,
+        focusVesselId: focusVesselId, focusBodyId: focusBodyId);
+    if (!enabled || shader == null || camera == null || id == null) {
       _removeAll();
       return;
     }
 
-    // Up-alignment basis for the sheet plane, shared by every body this
-    // frame. The MODE's reference (not the screen-space up basis): the grid
-    // must stay a floor when the camera tilts to look down at it. In-plane
+    // Up-alignment basis for the sheet plane. The MODE's reference (not the
+    // screen-space up basis): the grid must stay a floor when the camera
+    // tilts to look down at it. In-plane
     // spoke direction anchors to the WORLD axes (projected), not the camera
     // basis — otherwise orbiting the camera visibly spins the spokes.
     final up = camera.referenceUp.normalized;
@@ -112,43 +178,44 @@ class GravityGridNodes {
       up.x, up.y, up.z,
     ));
 
-    final seen = <String>{};
-    for (final b in snap.bodies.values) {
-      final d = snap.descriptors[b.id];
-      if (d == null || d.kind == BodyKind.star || d.mu <= 0) continue;
+    final b = snap.bodies[id]!;
+    final d = snap.descriptors[id]!;
 
-      // Apparent-size fade: below ~30 px of grid rim the sheet is subpixel
-      // sparkle at system zoom — fade over 30..90 px and skip when gone.
-      final rel = origin.worldToRel(Vector3(b.px, b.py, b.pz));
-      final rimPx = camera.radiusPx(rel, extentRadii * b.radius);
-      final sizeFade = ((rimPx - 30.0) / 60.0).clamp(0.0, 1.0);
-      if (sizeFade <= 0.0) continue;
-      seen.add(b.id);
-
-      final g = d.mu / (b.radius * b.radius);
-      final sheet = _sheets.putIfAbsent(b.id, () {
-        // Funnel depth baked into this body's own mesh, normalised to the
-        // rim radius so the node scale stays uniform.
-        final s =
-            _GridSheet(shader, zFrac: _depthRadii(g) / extentRadii);
-        _scene.add(s.node);
-        return s;
-      });
-
-      sheet.node.localTransform = vm.Matrix4.compose(
-        origin.worldToScene(
-            Vector3(b.px, b.py, b.pz) - up * (b.radius * _planeOffsetRadii)),
-        rot,
-        vm.Vector3.all(lengthToScene(b.radius * extentRadii)),
-      );
-      sheet.updateUniforms(alpha: _alphaFor(g) * sizeFade, rimPx: rimPx);
+    // Apparent-size window: too small to read at system zoom, too big to
+    // read from low orbit or the ground.
+    final rel = origin.worldToRel(Vector3(b.px, b.py, b.pz));
+    final rimPx = camera.radiusPx(rel, extentRadii * b.radius);
+    final sizeFade = apparentFade(
+        rimPx, viewport == null ? 0.0 : viewport.shortestSide);
+    if (sizeFade <= 0.0) {
+      _removeAll();
+      return;
     }
 
-    _sheets.removeWhere((id, sheet) {
-      if (seen.contains(id)) return false;
+    // Everything but this body's sheet goes — including the previous
+    // focus's, whose funnel depth is baked to ITS gravity.
+    _sheets.removeWhere((sheetId, sheet) {
+      if (sheetId == id) return false;
       _scene.remove(sheet.node);
       return true;
     });
+
+    final g = d.mu / (b.radius * b.radius);
+    final sheet = _sheets.putIfAbsent(id, () {
+      // Funnel depth baked into this body's own mesh, normalised to the
+      // rim radius so the node scale stays uniform.
+      final s = _GridSheet(shader, zFrac: _depthRadii(g) / extentRadii);
+      _scene.add(s.node);
+      return s;
+    });
+
+    sheet.node.localTransform = vm.Matrix4.compose(
+      origin.worldToScene(
+          Vector3(b.px, b.py, b.pz) - up * (b.radius * _planeOffsetRadii)),
+      rot,
+      vm.Vector3.all(lengthToScene(b.radius * extentRadii)),
+    );
+    sheet.updateUniforms(alpha: _alphaFor(g) * sizeFade, rimPx: rimPx);
   }
 
   void _removeAll() {

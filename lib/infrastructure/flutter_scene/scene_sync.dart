@@ -165,7 +165,12 @@ class SceneSync {
     // Megastructures: halo rings under construction (stage visuals + voxel
     // terrain cells near the camera).
     _haloRings.update(snap, origin, cameraEye: camera?.eyeOffset);
-    _gravityGrid.update(snap, origin, camera: camera);
+    // One sheet, under the body you're actually at — see GravityGridNodes.
+    _gravityGrid.update(snap, origin,
+        camera: camera,
+        viewport: viewport,
+        focusVesselId: focusVesselId,
+        focusBodyId: focusBodyId);
     // The walker's own body. View state, not snapshot state — the static
     // fields are written by SimulationView the same frame it moves the anchor.
     _walker.update();
