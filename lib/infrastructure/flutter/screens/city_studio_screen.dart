@@ -940,6 +940,18 @@ class _CityStudioScreenState extends State<CityStudioScreen>
                 : AppTheme.textDim),
         row('  rebuild', '${ms(phase['city.rebuild'] ?? 0)} ms',
             colour: AppTheme.textDim),
+        // The LAST rebuild's split, in ms — these keep their values on the
+        // frames between rebuilds, so they always describe the same event
+        // the headline rebuild figure last reported.
+        row(
+            '   of which',
+            'mesh ${(phase['city.rebuild.mesh'] ?? 0).round()} '
+            'emit ${(phase['city.rebuild.emit'] ?? 0).round()} '
+            'feat ${(phase['city.rebuild.features'] ?? 0).round()} '
+            'pat ${(phase['city.rebuild.patches'] ?? 0).round()}',
+            colour: AppTheme.textDim),
+        row('  roads', '${ms(phase['city.roads'] ?? 0)} ms',
+            colour: AppTheme.textDim),
         row('  anchors', '${ms(phase['city.anchors'] ?? 0)} ms',
             colour: AppTheme.textDim),
         row('  traffic', '${ms(phase['city.traffic'] ?? 0)} ms',

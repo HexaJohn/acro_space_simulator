@@ -290,18 +290,36 @@ class CityNodes {
   /// the scatter batches use, for the same reason.
   final List<_CityBatch> _batches = [];
 
+  /// The road pass's batches — ribbons, junctions, lamps, pavement props,
+  /// tubes, curb parking — kept apart from [_batches] because they age
+  /// differently. Roads are the EXPENSIVE emit and the stable one: while a
+  /// colony is being generated the road network is finished before the first
+  /// building lands, yet every preview frame the studio captured changed the
+  /// building count, moved the rebuild key, and re-tessellated every junction
+  /// and lamp in town to draw one more house — 2.8 s a frame, nearly all of
+  /// it roads that had not changed.
+  final List<_CityBatch> _roadBatches = [];
+
   /// What the last rebuild was keyed on, so a static colony costs nothing.
   String _builtKey = '';
 
+  /// Same, for the road pass alone.
+  String _roadsBuiltKey = '';
+
   /// Force the next frame to rebuild the colony's structural geometry.
   ///
-  /// The structural pass is keyed on what the COLONY looks like, which is
+  /// The structural passes are keyed on what the COLONY looks like, which is
   /// right — a static city should not be re-meshed sixty times a second — but
   /// it means a renderer-side switch (street furniture, say) changes nothing
   /// until something in the city does. The studio's toggles need this or they
   /// appear to be dead.
-  void invalidate() => _builtKey = '';
+  void invalidate() {
+    _builtKey = '';
+    _roadsBuiltKey = '';
+  }
+
   int _drawCalls = 0;
+  int _roadDrawCalls = 0;
 
   /// Instances above this in one draw overflow the engine's per-frame transient
   /// block — the same 1 MiB / 16,384-mat4 ceiling the scatter batches hit.
@@ -424,6 +442,18 @@ class CityNodes {
     _syncLibrary();
     _syncLodDebug();
     final sw = Stopwatch()..start();
+    // The road pass has its own key: roads do not carry the building count,
+    // the camera or the LOD dials, so a growing colony — the studio's slow
+    // mode recapturing a frame per few buildings — re-emits only the
+    // buildings, not every junction and lamp in town. Style and sealed-ness
+    // ride the ordinary [invalidate] path, same as the furniture toggles.
+    final roadsKey = '${snap.roads.length}|${byBody.keys.join(",")}';
+    if (_roadsBuiltKey != roadsKey) {
+      _roadsBuiltKey = roadsKey;
+      _rebuildRoads(snap, byBody);
+    }
+    phaseMs['city.roads'] = sw.elapsedMicroseconds / 1000;
+    sw.reset();
     var rebuiltThisFrame = false;
     if (_builtKey != key || _batches.isEmpty) {
       _builtKey = key;
@@ -442,13 +472,14 @@ class CityNodes {
     sw.reset();
     _syncCursor(snap, origin);
     phaseMs['city.cursor'] = sw.elapsedMicroseconds / 1000;
-    phaseCount['draws'] = _drawCalls;
-    phaseCount['batches'] = _batches.length;
+    phaseCount['draws'] = _drawCalls + _roadDrawCalls;
+    phaseCount['batches'] = _batches.length + _roadBatches.length;
     phaseCount['meshes'] = _uploaded.length;
     phaseCount['buildings'] = snap.buildings.length;
     phaseCount['trafficNodes'] = _trafficNodes.length;
     debugLine =
-        'city: ${snap.buildings.length} bldg, $_drawCalls draws (${detail.name}), '
+        'city: ${snap.buildings.length} bldg, '
+        '${_drawCalls + _roadDrawCalls} draws (${detail.name}), '
         'meshes ${_uploaded.length}';
   }
 
@@ -512,14 +543,52 @@ class CityNodes {
     );
   }
 
+  /// Re-emit the road pass alone.
+  ///
+  /// Anchored on each body's first road point — the same trick the traffic
+  /// pass uses — rather than the colony centroid the building pass anchors
+  /// on. The centroid MOVES as buildings arrive, and an anchor that moved
+  /// would drag this pass into every building rebuild, which is exactly the
+  /// coupling being removed. Batches are independent ([_placeAnchors] carries
+  /// each one's own anchor), so the two passes agreeing on an origin buys
+  /// nothing.
+  void _rebuildRoads(
+    WorldSnapshot snap,
+    Map<String, List<BuildingSnapshot>> byBody,
+  ) {
+    for (final batch in _roadBatches) {
+      _scene.remove(batch.node);
+    }
+    _roadBatches.clear();
+    _roadDrawCalls = 0;
+
+    for (final bodyId in byBody.keys) {
+      if (snap.bodies[bodyId] == null) continue;
+      Vector3? anchorBF;
+      for (final r in snap.roads) {
+        if (r.body != bodyId || r.points.length < 3) continue;
+        anchorBF = Vector3(r.points[0], r.points[1], r.points[2]);
+        break;
+      }
+      if (anchorBF == null) continue;
+      _emitRoads(snap, bodyId: bodyId, anchorBF: anchorBF);
+    }
+  }
+
   void _rebuild(
     WorldSnapshot snap,
     Map<String, List<BuildingSnapshot>> byBody,
     BuildingDetail detail,
     Vector3 focusWorld,
   ) {
-    _clear();
+    _clearDynamic();
     lodCounts.clear();
+    // Where the LAST rebuild's time went, phase by phase. Only written on a
+    // rebuild frame — the panel reads the split alongside a rebuild figure
+    // that is zero on every other frame, so stale numbers describe the same
+    // event the headline does.
+    var meshUs = 0, emitUs = 0, featUs = 0, patchUs = 0;
+    final phaseSw = Stopwatch();
 
     for (final entry in byBody.entries) {
       final bodySnap = snap.bodies[entry.key];
@@ -548,6 +617,9 @@ class CityNodes {
       final anchorBF = sum * (1.0 / count);
 
       final groups = <BuildingArchetype, List<vm.Matrix4>>{};
+      phaseSw
+        ..reset()
+        ..start();
       for (final b in entry.value) {
         final spec = specOf(b);
         final parcel = parcelOf(b);
@@ -595,11 +667,27 @@ class CityNodes {
         });
         groups.putIfAbsent(key, () => []).add(instanceTransform(anchorBF, b));
       }
+      meshUs += phaseSw.elapsedMicroseconds;
+      phaseSw
+        ..reset()
+        ..start();
       _emit(groups, bodyId: entry.key, anchorBF: anchorBF);
-      _emitRoads(snap, bodyId: entry.key, anchorBF: anchorBF);
+      emitUs += phaseSw.elapsedMicroseconds;
+      phaseSw
+        ..reset()
+        ..start();
       _emitLotFeatures(entry.value, bodyId: entry.key, anchorBF: anchorBF);
+      featUs += phaseSw.elapsedMicroseconds;
+      phaseSw
+        ..reset()
+        ..start();
       _emitPatches(snap, bodyId: entry.key, anchorBF: anchorBF);
+      patchUs += phaseSw.elapsedMicroseconds;
     }
+    phaseMs['city.rebuild.mesh'] = meshUs / 1000;
+    phaseMs['city.rebuild.emit'] = emitUs / 1000;
+    phaseMs['city.rebuild.features'] = featUs / 1000;
+    phaseMs['city.rebuild.patches'] = patchUs / 1000;
   }
 
   /// Vehicles running the colony's roads.
@@ -1256,8 +1344,8 @@ class CityNodes {
         ]),
       );
       _scene.add(node);
-      _batches.add(_CityBatch(node, bodyId, anchorBF));
-      _drawCalls++;
+      _roadBatches.add(_CityBatch(node, bodyId, anchorBF));
+      _roadDrawCalls++;
     }
   }
 
@@ -1577,16 +1665,18 @@ class CityNodes {
 
   /// Per-frame: put each batch's anchor where its body currently is.
   void _placeAnchors(WorldSnapshot snap, FloatingOrigin origin) {
-    for (final batch in _batches) {
-      final body = snap.bodies[batch.bodyId];
-      if (body == null) continue;
-      final bodyWorld = Vector3(body.px, body.py, body.pz);
-      final bodyQuat = Quaternion(body.qw, body.qx, body.qy, body.qz);
-      batch.node.localTransform = vm.Matrix4.compose(
-        origin.worldToScene(bodyWorld + bodyQuat.rotate(batch.anchorBF)),
-        quatToScene(bodyQuat),
-        vm.Vector3.all(1.0),
-      );
+    for (final list in [_roadBatches, _batches]) {
+      for (final batch in list) {
+        final body = snap.bodies[batch.bodyId];
+        if (body == null) continue;
+        final bodyWorld = Vector3(body.px, body.py, body.pz);
+        final bodyQuat = Quaternion(body.qw, body.qx, body.qy, body.qz);
+        batch.node.localTransform = vm.Matrix4.compose(
+          origin.worldToScene(bodyWorld + bodyQuat.rotate(batch.anchorBF)),
+          quatToScene(bodyQuat),
+          vm.Vector3.all(1.0),
+        );
+      }
     }
   }
 
@@ -1752,12 +1842,26 @@ class CityNodes {
     );
   }
 
-  void _clear() {
+  /// Drop the building-side batches only; the road pass keeps its own.
+  void _clearDynamic() {
     for (final batch in _batches) {
       _scene.remove(batch.node);
     }
     _batches.clear();
     _drawCalls = 0;
+  }
+
+  /// Drop everything, and the keys with it — an emptied scene with a stale
+  /// key would skip the rebuild that repopulates it.
+  void _clear() {
+    _clearDynamic();
+    for (final batch in _roadBatches) {
+      _scene.remove(batch.node);
+    }
+    _roadBatches.clear();
+    _roadDrawCalls = 0;
+    _builtKey = '';
+    _roadsBuiltKey = '';
   }
 
   void dispose() {
