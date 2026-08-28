@@ -67,6 +67,11 @@ class CityTextures {
 
   static bool mipmapped = false;
 
+  /// Upload raw RGBA bytes as a square texture. For runtime bakes that are
+  /// not part of [load]'s tile set — the city light-density map re-bakes on
+  /// every colony rebuild.
+  static Object uploadRgba(Uint8List rgba, int size) => _upload(rgba, size);
+
   static Object _upload(Uint8List base, int size) {
     final ctx = gpu.gpuContext;
     final wantMips = ctx.doesSupportManuallyMippedTextures;

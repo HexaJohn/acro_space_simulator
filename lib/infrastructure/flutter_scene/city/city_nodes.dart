@@ -17,6 +17,8 @@ library;
 import 'dart:async' show unawaited;
 import 'dart:math' as math;
 
+import 'dart:typed_data';
+
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_scene/scene.dart' as fs;
 import 'package:vector_math/vector_math.dart' as vm;
@@ -209,7 +211,15 @@ class CityNodes {
   /// The skyglow's reference frame, stashed by [_nightFactorAt] — the same
   /// site pick that decides how dark it is decides where "ground" is.
   Vector3? _glowBodyWorld;
+  Quaternion? _glowBodyQuat;
   double _glowGroundRadiusM = 0;
+
+  /// The light-density map's frame, body-fixed, written by [_bakeLightMap]
+  /// each structural rebuild. The map itself lives in [CityMaterials].
+  Vector3 _glowAnchorBF = Vector3.zero;
+  Vector3 _glowEastBF = const Vector3(1, 0, 0);
+  Vector3 _glowNorthBF = const Vector3(0, 1, 0);
+  double _glowHalfExtentM = 1;
 
   /// Cursor node, rebuilt every frame it is visible. One quad — cheap enough
   /// that tracking the mouse never touches the city's cached batches, which is
@@ -474,13 +484,22 @@ class CityNodes {
       invalidate();
     }
     CityMaterials.nightFactor = _nightFactorAt(snap, byBody);
-    // Where the skyglow's height falloff is measured from, in the shader's
-    // own scene space. Per frame: the floating origin moves.
+    // Where the skyglow's height falloff and its density map are measured
+    // from, in the shader's own scene space. Per frame: the floating origin
+    // moves, and the body spins under its light map.
     final glowBody = _glowBodyWorld;
-    if (glowBody != null) {
+    final glowQuat = _glowBodyQuat;
+    if (glowBody != null && glowQuat != null) {
       CityMaterials.glowCentreScene = origin.worldToScene(glowBody);
       CityMaterials.glowGroundRadiusScene = lengthToScene(_glowGroundRadiusM);
       CityMaterials.glowMetresToScene = lengthToScene(1.0);
+      CityMaterials.lightMapAnchorScene =
+          origin.worldToScene(glowBody + glowQuat.rotate(_glowAnchorBF));
+      final e = glowQuat.rotate(_glowEastBF);
+      final n = glowQuat.rotate(_glowNorthBF);
+      CityMaterials.lightMapEast = vm.Vector3(e.x, e.y, e.z);
+      CityMaterials.lightMapNorth = vm.Vector3(n.x, n.y, n.z);
+      CityMaterials.lightMapHalfExtentScene = lengthToScene(_glowHalfExtentM);
     }
 
     // The colony-wide fallback tier, off the NEAREST building. Kept for the
@@ -617,6 +636,7 @@ class CityNodes {
     // how dark the colony is and where its ground shell sits.
     _glowBodyWorld = bodyWorld;
     _glowGroundRadiusM = site.posBF.length;
+    _glowBodyQuat = Quaternion(body.qw, body.qx, body.qy, body.qz);
     final quat = Quaternion(body.qw, body.qx, body.qy, body.qz);
     final siteWorld = bodyWorld + quat.rotate(site.posBF);
     final up = quat.rotate(site.posBF).normalized;
@@ -672,6 +692,7 @@ class CityNodes {
     // event the headline does.
     var meshUs = 0, emitUs = 0, featUs = 0, patchUs = 0;
     final phaseSw = Stopwatch();
+    var bakedLightMap = false;
 
     for (final entry in byBody.entries) {
       final bodySnap = snap.bodies[entry.key];
@@ -698,6 +719,14 @@ class CityNodes {
       }
       if (count == 0) continue;
       final anchorBF = sum * (1.0 / count);
+
+      // The skyglow's density map, from this colony's own layout. First
+      // body with buildings wins — the same single-colony assumption the
+      // night factor already makes.
+      if (entry.value.isNotEmpty && !bakedLightMap) {
+        bakedLightMap = true;
+        _bakeLightMap(entry.value, anchorBF);
+      }
 
       final groups = <BuildingArchetype, List<vm.Matrix4>>{};
       phaseSw
@@ -778,6 +807,82 @@ class CityNodes {
     phaseMs['city.rebuild.emit'] = emitUs / 1000;
     phaseMs['city.rebuild.features'] = featUs / 1000;
     phaseMs['city.rebuild.patches'] = patchUs / 1000;
+  }
+
+  /// Bake how much lit city surrounds each point of the colony, as a small
+  /// texture the surface shader samples per fragment.
+  ///
+  /// Each building splats a soft disc — wider for a bigger site, hotter for
+  /// a denser zone type — onto a 64-cell grid over the colony's extent, and
+  /// the sum saturates as s/(s+1). One tower over open ground peaks around a
+  /// quarter; a core block under the summed splats of all its neighbours
+  /// rides near one. That ratio IS the fake GI's density term: bounced light
+  /// is borrowed from the neighbours, and a lone building has none to
+  /// borrow.
+  void _bakeLightMap(List<BuildingSnapshot> buildings, Vector3 anchorBF) {
+    const size = 64;
+    final up = anchorBF.normalized;
+    final seed = up.z.abs() < 0.9 ? Vector3.unitZ : Vector3.unitX;
+    final east = up.cross(seed).normalized;
+    final north = up.cross(east);
+
+    // Extent from the buildings themselves, plus margin past the biggest
+    // splat radius so the map's border stays dark and the clamp-sample
+    // beyond the edge reads "empty country", not a smeared edge texel.
+    var maxAbs = 60.0;
+    final es = Float32List(buildings.length);
+    final ns = Float32List(buildings.length);
+    for (var i = 0; i < buildings.length; i++) {
+      final b = buildings[i];
+      final rel = Vector3(b.px, b.py, b.pz) - anchorBF;
+      es[i] = rel.dot(east);
+      ns[i] = rel.dot(north);
+      final a = math.max(es[i].abs(), ns[i].abs());
+      if (a > maxAbs) maxAbs = a;
+    }
+    final halfM = maxAbs + 120.0;
+    final cellM = halfM * 2 / size;
+
+    final grid = Float32List(size * size);
+    for (var i = 0; i < buildings.length; i++) {
+      final b = buildings[i];
+      // A denser zone is more window per metre of street.
+      final band = b.type.endsWith('-high')
+          ? 2.4
+          : (b.type.endsWith('-med') ? 1.2 : 0.6);
+      final w = b.siteWidthM * b.siteDepthM / 700.0 * band;
+      final rM = (math.max(b.siteWidthM, b.siteDepthM) * 1.6).clamp(18.0, 80.0);
+      final cx = (es[i] + halfM) / cellM;
+      final cy = (ns[i] + halfM) / cellM;
+      final rC = rM / cellM;
+      final x0 = math.max(0, (cx - rC).floor());
+      final x1 = math.min(size - 1, (cx + rC).ceil());
+      final y0 = math.max(0, (cy - rC).floor());
+      final y1 = math.min(size - 1, (cy + rC).ceil());
+      for (var y = y0; y <= y1; y++) {
+        for (var x = x0; x <= x1; x++) {
+          final dx = x - cx, dy = y - cy;
+          final d2 = (dx * dx + dy * dy) / (rC * rC);
+          if (d2 > 1) continue;
+          grid[y * size + x] += w * (1.0 - d2);
+        }
+      }
+    }
+
+    final rgba = Uint8List(size * size * 4);
+    for (var i = 0; i < grid.length; i++) {
+      final v = grid[i] / (grid[i] + 1.0);
+      final c = (v * 255).round().clamp(0, 255);
+      rgba[i * 4] = c;
+      rgba[i * 4 + 1] = c;
+      rgba[i * 4 + 2] = c;
+      rgba[i * 4 + 3] = 255;
+    }
+    CityMaterials.lightMap = CityTextures.uploadRgba(rgba, size);
+    _glowAnchorBF = anchorBF;
+    _glowEastBF = east;
+    _glowNorthBF = north;
+    _glowHalfExtentM = halfM;
   }
 
   /// Vehicles running the colony's roads.

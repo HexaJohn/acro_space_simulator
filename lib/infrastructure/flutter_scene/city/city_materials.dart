@@ -45,9 +45,20 @@ class CityMaterials {
   /// Peak glow strength at street level, in the emissive scale.
   static double glowIntensity = 0.4;
 
-  /// e-folding height of the glow, metres: half gone ~30 m up, a parapet at
-  /// 120 m keeps five percent. The look dial for how deep the canyons read.
-  static double glowFalloffM = 45.0;
+  /// e-folding height of the glow, metres. Short on purpose: the glow is
+  /// street light, and street light dies within a few storeys — 45 m had
+  /// whole mid-rises washed in it.
+  static double glowFalloffM = 16.0;
+
+  /// The baked light-density map (r channel 0..1) and its frame. Written by
+  /// CityNodes: the texture at rebuild, the frame every frame (the floating
+  /// origin moves). Null until the first bake — the material binds the white
+  /// placeholder, which is "density 1 everywhere", the pre-map behaviour.
+  static Object? lightMap;
+  static vm.Vector3 lightMapAnchorScene = vm.Vector3.zero();
+  static vm.Vector3 lightMapEast = vm.Vector3(1, 0, 0);
+  static vm.Vector3 lightMapNorth = vm.Vector3(0, 1, 0);
+  static double lightMapHalfExtentScene = 1;
 
   /// Warm sodium-and-LED glow colour, linear.
   static vm.Vector3 glowColor = vm.Vector3(1.0, 0.62, 0.36);
@@ -181,7 +192,7 @@ class _CitySurfaceMaterial extends fs.PhysicallyBasedMaterial {
     if (_glow) {
       final s = CityMaterials.glowIntensity *
           CityMaterials.nightFactor.clamp(0.0, 1.0);
-      final data = Float32List(8);
+      final data = Float32List(20);
       data[0] = CityMaterials.glowCentreScene.x;
       data[1] = CityMaterials.glowCentreScene.y;
       data[2] = CityMaterials.glowCentreScene.z;
@@ -190,9 +201,26 @@ class _CitySurfaceMaterial extends fs.PhysicallyBasedMaterial {
       data[5] = CityMaterials.glowColor.y * s;
       data[6] = CityMaterials.glowColor.z * s;
       data[7] = CityMaterials.glowFalloffM * CityMaterials.glowMetresToScene;
+      data[8] = CityMaterials.lightMapAnchorScene.x;
+      data[9] = CityMaterials.lightMapAnchorScene.y;
+      data[10] = CityMaterials.lightMapAnchorScene.z;
+      data[11] = CityMaterials.lightMapHalfExtentScene;
+      data[12] = CityMaterials.lightMapEast.x;
+      data[13] = CityMaterials.lightMapEast.y;
+      data[14] = CityMaterials.lightMapEast.z;
+      data[16] = CityMaterials.lightMapNorth.x;
+      data[17] = CityMaterials.lightMapNorth.y;
+      data[18] = CityMaterials.lightMapNorth.z;
       pass.bindUniform(
         fragmentShader.getUniformSlot('CityGlow'),
         transientsBuffer.emplace(ByteData.sublistView(data)),
+      );
+      // The density map. The white placeholder is "1 everywhere" — the
+      // pre-map behaviour — until the first colony bake lands.
+      pass.bindTexture(
+        fragmentShader.getUniformSlot('city_light_texture'),
+        fs.Material.whitePlaceholder(CityMaterials.lightMap as igpu.Texture?),
+        sampler: _trilinear,
       );
     }
     pass.bindTexture(

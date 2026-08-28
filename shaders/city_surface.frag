@@ -45,8 +45,21 @@ uniform CityGlow {
   // rgb: glow colour * intensity * night factor, linear. Zero by day, so the
   // whole term vanishes without a branch. w: falloff length, scene units.
   vec4 glow;
+  // The light-density map's frame: xyz the colony anchor (scene units), w
+  // the map's half-extent (scene units).
+  vec4 map_anchor;
+  // xyz: the colony's east basis, unit, scene axes. w unused.
+  vec4 map_east;
+  // xyz: the colony's north basis. w unused.
+  vec4 map_north;
 }
 city_glow;
+
+// How much lit city surrounds each point: baked from the building layout at
+// rebuild (r channel, 0..1). A lone tower samples the dark edge of its own
+// splat; a low roofline in the core samples the summed splats of every
+// tower round it — which is exactly the difference in bounced light.
+uniform sampler2D city_light_texture;
 
 // Fills the surface description for the standard glTF metallic-roughness
 // material from the FragInfo parameters and the material textures. The shared
@@ -95,13 +108,31 @@ void Surface(inout MaterialInputs material) {
 
   // The skyglow, as albedo-tinted emissive: riding the emissive slot keeps it
   // inside the stock lighting, tonemap and alpha path rather than pasted over
-  // the finished colour. exp() falloff off the fragment's own height, so the
-  // term is strongest on the carriageway and gone at the parapet.
+  // the finished colour. Three factors, each per fragment:
+  //
+  //  pooled  — exp() falloff off the fragment's own height: strongest on the
+  //            carriageway, gone a few storeys up.
+  //  facing  — the glow arrives from the streets and facades BELOW and
+  //            AROUND, never from the sky, so an up-facing surface catches
+  //            none of it. Rooftops were glowing as brightly as pavements.
+  //  density — the baked light map: how much lit city actually surrounds
+  //            this point. A lone building glows by itself over nothing; a
+  //            low roof ringed by towers sits in everyone else's light.
+  vec3 local_up = normalize(v_position - city_glow.centre_radius.xyz);
   float height =
       length(v_position - city_glow.centre_radius.xyz) -
       city_glow.centre_radius.w;
   float pooled = exp(-max(height, 0.0) / max(city_glow.glow.w, 1e-6));
-  material.emissive += material.base_color.rgb * city_glow.glow.rgb * pooled;
+  float facing = clamp(1.0 - dot(material.normal, local_up), 0.0, 1.0);
+  vec3 map_rel = v_position - city_glow.map_anchor.xyz;
+  vec2 map_uv =
+      vec2(dot(map_rel, city_glow.map_east.xyz),
+           dot(map_rel, city_glow.map_north.xyz)) /
+          max(city_glow.map_anchor.w * 2.0, 1e-6) +
+      0.5;
+  float density = texture(city_light_texture, clamp(map_uv, 0.0, 1.0)).r;
+  material.emissive += material.base_color.rgb * city_glow.glow.rgb *
+                       pooled * facing * density;
 
   PrepareMaterial(material);
 }
