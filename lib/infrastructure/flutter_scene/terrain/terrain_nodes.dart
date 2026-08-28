@@ -1446,8 +1446,14 @@ class TerrainNodes {
   /// A wireframe lattice over [key]'s footprint, vertices on the real ground
   /// (+ a small lift so terrain arriving underneath never z-fights it).
   _GridPatch _buildGridPatch(TerrainField field, ChunkKey key) {
-    const lines = 5; // per direction, incl. borders
-    const segs = 6; // segments per line, following curvature
+    // Lattice density grows as chunks COARSEN. A fixed five lines over a
+    // hundred-kilometre cell puts the nearest line twenty-five kilometres
+    // from a ground-level camera — at shallow angles the grid "disappeared"
+    // not by culling but by sparseness: the viewer stood between the lines.
+    // Deep chunks keep the cheap 5x6; each level below 10 buys more.
+    final coarse = math.max(0, 10 - key.level);
+    final lines = math.min(5 + coarse * 2, 25); // per direction, incl. borders
+    final segs = math.min(6 + coarse * 2, 26); // segments, following curvature
     final anchorDir = key.centreDirection;
     final liftM = key.circumradiusM(field.radius) * 0.01 + 2.0;
     double radiusAt(Vector3 dir) =>

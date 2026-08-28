@@ -203,6 +203,7 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
         if (_frameMs.length > 90) _frameMs.removeAt(0);
       }
       _stepWalker((dt / 1000.0).clamp(0.0, 0.1));
+      _stepOrbit((dt / 1000.0).clamp(0.0, 0.1));
     }
     _lastTick = elapsed;
     _epoch.value = elapsed.inMicroseconds / 1e6;
@@ -818,6 +819,55 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
     _walkE += (fwd * sy + side * cy) * step;
   }
 
+  /// WASD pans the orbit FOCAL POINT across the ground, screen-relative;
+  /// Q/E tilts the camera. The anchor is the render origin, so panning
+  /// re-seats it on the real ground and everything measured against it —
+  /// picking, the sun, the atmosphere, the terrain streamer's focus —
+  /// follows for free. Pan speed scales with zoom: crossing the view takes
+  /// about the same wrist at any range.
+  void _stepOrbit(double dtS) {
+    if (_firstPerson || _snap == null || _held.isEmpty) return;
+    var fwd = 0.0, side = 0.0, tilt = 0.0;
+    if (_held.contains(LogicalKeyboardKey.keyW)) fwd += 1;
+    if (_held.contains(LogicalKeyboardKey.keyS)) fwd -= 1;
+    if (_held.contains(LogicalKeyboardKey.keyD)) side += 1;
+    if (_held.contains(LogicalKeyboardKey.keyA)) side -= 1;
+    if (_held.contains(LogicalKeyboardKey.keyQ)) tilt -= 1;
+    if (_held.contains(LogicalKeyboardKey.keyE)) tilt += 1;
+    if (tilt != 0) {
+      _elevation = (_elevation + tilt * 0.9 * dtS).clamp(0.08, 1.5);
+    }
+    if (fwd == 0 && side == 0) return;
+
+    final (east, north) = _tangentFrame();
+    // W pushes the focus AWAY from the camera; screen-right comes from the
+    // same X-mirrored basis the pick ray corrects for (up cross forward).
+    final ahead =
+        (east * -math.cos(_azimuth) + north * -math.sin(_azimuth));
+    final rightD = _upWorld.cross(ahead);
+    final len = math.sqrt(fwd * fwd + side * side);
+    final move = (ahead * fwd + rightD * side) *
+        (_distanceM * 0.6 * dtS / len);
+
+    // Re-seat the anchor on the real ground under the new spot, the same
+    // body-fixed sampling the walker uses.
+    var next = _anchorWorld + move;
+    final radial = next - _bodyCentreWorld;
+    if (radial.length > 1) {
+      final dir = radial.normalized;
+      final b = _snap?.bodies[_body];
+      final field = _groundField;
+      if (b != null && field != null) {
+        final bf = Quaternion(b.qw, b.qx, b.qy, b.qz).conjugate.rotate(dir);
+        next = _bodyCentreWorld +
+            dir * field.groundRadiusAt(bf.x, bf.y, bf.z);
+      }
+      _anchorWorld = next;
+      _origin.focusWorld = _anchorWorld;
+      _upWorld = dir;
+    }
+  }
+
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
     if (event is KeyDownEvent) {
       if (event.logicalKey == LogicalKeyboardKey.keyG && _snap != null) {
@@ -1115,6 +1165,7 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
           const SizedBox(height: 12),
           const Text('TOOL', style: AppTheme.heading),
           Text(
+              'WASD pans the focus, Q/E tilts, scroll zooms — any tool. '
               'camera: drag orbits. Brushes: hover previews the footprint, '
               'click applies, drag paints a stroke. Road takes two clicks '
               'and ghosts the run.',
