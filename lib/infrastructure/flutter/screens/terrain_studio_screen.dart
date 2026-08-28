@@ -1193,6 +1193,20 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
             dense: true,
+            value: TerrainNodes.gridOnly,
+            activeThumbColor: AppTheme.accent2,
+            title: const Text('Quadtree grid only', style: AppTheme.body),
+            subtitle: Text(
+                'Hide the ground, draw every selected chunk as its wireframe '
+                'patch, coloured by level (coarse blue, deep red). Streaming '
+                'keeps running — what appears and vanishes IS the selection '
+                'deciding.',
+                style: AppTheme.dim.copyWith(fontSize: 11)),
+            onChanged: (v) => setState(() => TerrainNodes.gridOnly = v),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
             value: CityNodes.enabled,
             activeThumbColor: AppTheme.accent2,
             title: const Text('Roads + buildings', style: AppTheme.body),

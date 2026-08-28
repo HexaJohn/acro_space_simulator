@@ -126,6 +126,21 @@ class TerrainNodes {
   /// At most this many grid patches at once (nearest first).
   static int maxPlaceholders = 48;
 
+  /// LOD X-RAY: hide the meshed ground and draw EVERY selected chunk as its
+  /// wireframe patch, coloured by level (coarse blue, deep red). Streaming
+  /// and selection keep running underneath, so what appears and vanishes on
+  /// screen IS the quadtree deciding — which is the only way to see WHY a
+  /// region splits or collapses instead of inferring it from ground detail.
+  static bool gridOnly = false;
+
+  /// Grid-only patch budget. Selection can want a few hundred chunks; the
+  /// loading grid's 48 was sized for a streaming frontier, not a whole view.
+  static int maxGridOnlyPatches = 500;
+
+  /// The [gridOnly] value the current placeholder set was built with, so a
+  /// toggle forces the selection pass that rebuilds it.
+  bool _builtGridOnly = false;
+
   /// How close (m) the focus must be to a terrain edit before its chunks are
   /// force-refined. Deformation needs levels far past what screen-space
   /// selection picks, so refining a crater seen from orbit would carry a deep
@@ -767,7 +782,12 @@ class TerrainNodes {
         math.max(1.0, 0.02 * (eyeBF - anchorPoint).length);
     final probeMoved = _selProbePx < 0 ||
         (probePx - _selProbePx).abs() > math.max(_selProbePx, 1e-6) * 0.02;
+    // The grid-only toggle rebuilds the placeholder set, which only happens
+    // on selection frames — so flipping it forces one.
+    final gridToggled = _builtGridOnly != gridOnly;
+    _builtGridOnly = gridOnly;
     final reselect = _selectForce ||
+        gridToggled ||
         editsChanged ||
         moved ||
         probeMoved ||
@@ -1122,6 +1142,9 @@ class TerrainNodes {
     // jittered. (LOD transitions are atomic — see the upload pump — so
     // coarse and fine never coexist and no depth trickery is needed here.)
     for (final c in _chunks.values) {
+      // Grid-only hides the ground but keeps it RESIDENT: streaming carries
+      // on, and toggling back is instant.
+      c.node.visible = !gridOnly;
       c.node.localTransform = vm.Matrix4.compose(
         origin.worldToScene(bodyWorld + bodyQuat.rotate(c.anchorBF)),
         quatToScene(bodyQuat),
@@ -1339,7 +1362,14 @@ class TerrainNodes {
     _ensureSpinnerTex();
     if (rebuild) {
       final want = <ChunkKey>[];
-      if (loadingGrid) {
+      if (gridOnly) {
+        // The LOD x-ray: a patch over EVERY selected chunk, resident or
+        // not — the grid replaces the ground, it does not just cover gaps.
+        for (final k in sortedCandidates) {
+          want.add(k);
+          if (want.length >= maxGridOnlyPatches) break;
+        }
+      } else if (loadingGrid) {
         for (final k in sortedCandidates) {
           if (stillLoading.contains(k) && !_chunks.containsKey(k)) {
             want.add(k);
@@ -1358,7 +1388,15 @@ class TerrainNodes {
         // frames, and only for patches that do not already exist.
         _gridPatches.putIfAbsent(k, () => _buildGridPatch(field, k));
       }
-      _spinnerKey = want.isEmpty ? null : want.first;
+      // The spinner marks genuine streaming, in either mode: the nearest
+      // wanted patch whose ground has not landed yet.
+      _spinnerKey = null;
+      for (final k in want) {
+        if (stillLoading.contains(k) && !_chunks.containsKey(k)) {
+          _spinnerKey = k;
+          break;
+        }
+      }
     }
     for (final p in _gridPatches.values) {
       p.node.localTransform = vm.Matrix4.compose(
@@ -1456,8 +1494,14 @@ class TerrainNodes {
       indices: indices,
       primitiveType: igpu.PrimitiveType.line,
     );
+    // Colour by LEVEL, coarse blue through deep red, so the quadtree's
+    // structure reads at a glance in grid-only mode — a split shows as a
+    // colour step, not just a density change. The plain loading grid keeps
+    // its single pale blue by landing on the ramp's shallow end.
+    final t = (key.level / 18.0).clamp(0.0, 1.0);
     final mat = DepthSafeUnlitMaterial()
-      ..baseColorFactor = vm.Vector4(0.45, 0.78, 1.0, 0.55);
+      ..baseColorFactor = vm.Vector4(
+          0.3 + 0.7 * t, 0.78 - 0.55 * t, 1.0 - 0.9 * t, 0.7);
     final node = fs.Node(mesh: fs.Mesh(geom, mat));
     _scene.add(node);
     return _GridPatch(node: node, anchorBF: anchorBF);
