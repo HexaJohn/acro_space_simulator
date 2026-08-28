@@ -29,6 +29,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter_scene/scene.dart' as fs;
 import 'package:vector_math/vector_math.dart' as vm;
 
+import '../../../adapters/presenters/camera_view.dart';
 import '../../../adapters/repositories/in_memory_repositories.dart';
 import '../../../adapters/repositories/in_memory_world_repositories.dart';
 import '../../../application/snapshot/world_snapshot.dart';
@@ -42,6 +43,7 @@ import '../../../domain/shared/quaternion.dart';
 import '../../../domain/shared/vector3.dart';
 import '../../../domain/terrain/terrain_brush.dart';
 import '../../../domain/terrain/terrain_field.dart';
+import '../../../domain/scatter/mesh_builder.dart';
 import '../../../domain/universe/real_solar_system.dart';
 import '../../../domain/universe/star_system.dart';
 import '../../flutter_scene/atmosphere_nodes.dart';
@@ -121,6 +123,15 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
   /// whole. The trade is honest — the far field is now finer than the
   /// camera would ever ask for, so chunk counts rise.
   bool _lodFromFocus = false;
+
+  /// Draw the focal-point marker and the per-level LOD transition rings.
+  bool _showLodRings = true;
+
+  /// Viewport height, captured each layout — the LOD probe's pixel budget
+  /// and the ring radii both derive from it.
+  double _viewportH = 600;
+  final List<fs.Node> _ringNodes = [];
+  String _ringsKey = '';
 
   /// The road being drawn: first click arms it, second commits.
   Vec2? _roadStart;
@@ -990,15 +1001,23 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
       final frame = _withSunTurned(snap.copyWithEpoch(epoch));
       final starWorld = _starWorld(frame);
       final sw = Stopwatch()..start();
+      // LOD-from-focus: hand the streamer a zero eye offset, so every
+      // distance it budgets against is measured from the focal point the
+      // WASD keys carry — the camera can then stand back to watch the
+      // subdivision it would otherwise collapse by looking at it.
+      //
+      // The probe CAMERA is what was missing before: with `camera: null`
+      // the screen-space budget returned zero pixels for everything, so
+      // nothing ever split except forced-refinement islands — detail was a
+      // cliff at the edit-refine range and root-coarse beyond it. The probe
+      // gives selection a real projection to budget against, and splitPx
+      // (the slider below) is its whole personality.
+      final probeEye = _lodFromFocus ? Vector3.zero : _cameraEyeM();
       _terrain!.update(
         frame,
         _origin,
-        // LOD-from-focus: hand the streamer a zero eye offset, so every
-        // distance it budgets against is measured from the focal point the
-        // WASD keys carry — the camera can then stand back to watch the
-        // subdivision it would otherwise collapse by looking at it.
-        cameraEye: _lodFromFocus ? Vector3.zero : _cameraEyeM(),
-        camera: null,
+        cameraEye: probeEye,
+        camera: _LodProbeCamera(probeEye, _focalPx),
         focusBodyId: _body,
         starWorld: starWorld,
       );
@@ -1009,6 +1028,7 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
       _syncSun(scene, starWorld);
       _atmo!.update(frame, _origin,
           cameraEye: _cameraEyeM(), starWorld: starWorld);
+      _syncLodRings(scene);
     }
 
     return Stack(children: [
@@ -1018,6 +1038,7 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
           onKeyEvent: _onKey,
           child: LayoutBuilder(builder: (context, constraints) {
             final size = constraints.biggest;
+            _viewportH = math.max(1, size.height);
             return Listener(
               onPointerSignal: (e) {
                 if (e is PointerScrollEvent && !_firstPerson) {
@@ -1071,6 +1092,111 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
       ),
       Positioned(left: 10, top: 10, child: _perfPanel()),
     ]);
+  }
+
+  /// The probe's pixel budget: half the viewport over the tangent of half
+  /// the field of view — a sphere of radius r at distance d projects
+  /// r * this / d pixels tall.
+  double get _focalPx =>
+      _viewportH * 0.5 / math.tan((_firstPerson ? 0.9 : 0.8) / 2);
+
+  /// The focal-point marker and the LOD transition rings, draped on the
+  /// ground around the focus.
+  ///
+  /// Each ring sits where a chunk of one LEVEL projects exactly [splitPx]
+  /// pixels — cross a ring moving inward and that level's chunks split.
+  /// With the ring set on screen, "high detail to nothing" stops being a
+  /// mystery: either the rings are bunched close in (raise the split
+  /// budget, or the level cap is biting) or the ground is refusing to
+  /// follow them (streaming, not selection). Rebuilt only when a knob, the
+  /// viewport, the zoom bucket or the focus moves.
+  void _syncLodRings(fs.Scene scene) {
+    final key = !_showLodRings || _snap == null
+        ? 'off'
+        : '${TerrainNodes.splitPx.round()}|${_viewportH.round()}'
+            '|${_firstPerson ? 1 : 0}'
+            '|${(_anchorWorld.x / 5).round()},${(_anchorWorld.y / 5).round()},'
+            '${(_anchorWorld.z / 5).round()}'
+            '|${(math.log(_distanceM) / math.ln2).round()}';
+    if (key == _ringsKey) return;
+    _ringsKey = key;
+    for (final n in _ringNodes) {
+      scene.remove(n);
+    }
+    _ringNodes.clear();
+    if (key == 'off') return;
+
+    final b = _snap!.bodies[_body];
+    final field = _groundField;
+    if (b == null || field == null) return;
+    final quat = Quaternion(b.qw, b.qx, b.qy, b.qz);
+    final (east, north) = _tangentFrame();
+
+    // Anchor-relative metres, re-seated on the real ground plus a lift.
+    Vector3 drape(Vector3 offset, double liftM) {
+      final p = _anchorWorld + offset;
+      final radial = p - _bodyCentreWorld;
+      final dir = radial.length > 1 ? radial.normalized : _upWorld;
+      final bf = quat.conjugate.rotate(dir);
+      final g = field.groundRadiusAt(bf.x, bf.y, bf.z);
+      return _bodyCentreWorld + dir * (g + liftM) - _anchorWorld;
+    }
+
+    final m = MeshBuilder();
+    const u = 5.5 / kGroundSwatches; // the cursor-cyan swatch
+    void quadBothSides(Vector3 a, Vector3 b2, Vector3 c, Vector3 d) {
+      final i = [
+        for (final p in [a, b2, c, d])
+          m.vertex(p * kRenderScale, _upWorld, u, 0.5)
+      ];
+      m.quad(i[0], i[1], i[2], i[3]);
+      m.quad(i[3], i[2], i[1], i[0]);
+    }
+
+    // The marker: a mast at the focus, sized to the view.
+    final mastH = (_distanceM * 0.05).clamp(3.0, 500.0);
+    final mastW = mastH * 0.02;
+    final base = drape(Vector3.zero, 0);
+    for (final axis in [east, north]) {
+      final w = axis * mastW;
+      quadBothSides(base - w, base + w, base + w + _upWorld * mastH,
+          base - w + _upWorld * mastH);
+    }
+
+    // One ring per level: the distance at which a level-L chunk projects
+    // splitPx pixels. Circumradius approximated as 1.2 R / 2^L — a
+    // diagnostic marker, not a survey.
+    for (var level = 2; level <= 12; level++) {
+      final rL = field.radius * 1.2 / math.pow(2, level);
+      final dL = rL * _focalPx / TerrainNodes.splitPx;
+      if (dL < 10 || dL > 120000) continue;
+      final halfW = math.max(dL * 0.006, 0.5);
+      const segs = 64;
+      for (var s = 0; s < segs; s++) {
+        final a0 = s * 2 * math.pi / segs;
+        final a1 = (s + 1) * 2 * math.pi / segs;
+        Vector3 rim(double a, double d) =>
+            east * (math.cos(a) * d) + north * (math.sin(a) * d);
+        final lift = 2.0 + dL * 0.001;
+        quadBothSides(
+          drape(rim(a0, dL - halfW), lift),
+          drape(rim(a0, dL + halfW), lift),
+          drape(rim(a1, dL + halfW), lift),
+          drape(rim(a1, dL - halfW), lift),
+        );
+      }
+    }
+
+    final mesh = m.build();
+    final geometry = CityNodes.geometryOf(mesh);
+    if (geometry == null) return;
+    final node = fs.Node(
+      mesh: fs.Mesh.primitives(primitives: [
+        fs.MeshPrimitive(geometry, CityMaterials.ground),
+      ]),
+    );
+    scene.add(node);
+    _ringNodes.add(node);
   }
 
   // ---- Panels -------------------------------------------------------------
@@ -1236,6 +1362,25 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
           const Text('TERRAIN DIALS', style: AppTheme.heading),
           Text('The knobs that decide what an edit costs the renderer.',
               style: AppTheme.dim.copyWith(fontSize: 11)),
+          _slider('LOD split budget', TerrainNodes.splitPx, 60, 600,
+              'Split a chunk once it projects wider than this many pixels. '
+                  'Lower = finer ground further out; the rings redraw to '
+                  'match.',
+              (v) => setState(() => TerrainNodes.splitPx = v), unit: 'px'),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            value: _showLodRings,
+            activeThumbColor: AppTheme.accent2,
+            title: const Text('Focus marker + LOD rings', style: AppTheme.body),
+            subtitle: Text(
+                'A mast at the focal point, and one draped ring per level at '
+                'the distance where that level\'s chunks split. Rings '
+                'bunched close in = the split budget is starving detail; '
+                'ground ignoring them = streaming, not selection.',
+                style: AppTheme.dim.copyWith(fontSize: 11)),
+            onChanged: (v) => setState(() => _showLodRings = v),
+          ),
           _slider('LOD level step', TerrainNodes.levelStep.toDouble(), 0, 8,
               'Levels a streaming pass may climb at once.',
               (v) => setState(() => TerrainNodes.levelStep = v.round()),
@@ -1338,4 +1483,35 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
       const SizedBox(height: 6),
     ]);
   }
+}
+
+/// The one lens the terrain LOD looks through in the studio.
+///
+/// Only [radiusPx] is real: it is the single member the terrain streamer
+/// consults (chunk apparent size and the zoom probe), and giving it a
+/// choosable eye is what makes "LOD from focus" a checkbox instead of a
+/// camera rewrite. Every other [SceneCamera] member throws — if the streamer
+/// ever grows a second dependency, the studio should hear about it loudly.
+class _LodProbeCamera implements SceneCamera {
+  _LodProbeCamera(this.eyeRel, this.focalPx);
+
+  /// The eye, relative to the floating origin's focus — the same frame the
+  /// streamer's `rel` arguments arrive in.
+  final Vector3 eyeRel;
+
+  /// Pixels per radian-ish: (viewport height / 2) / tan(fov / 2). Happens
+  /// to be the meaning [SceneCamera.focalPx] already carries, so the field
+  /// doubles as that member's implementation.
+  @override
+  final double focalPx;
+
+  @override
+  double radiusPx(Vector3 rel, double radiusM) {
+    final d = (rel - eyeRel).length;
+    return d < 1 ? 1e9 : radiusM * focalPx / d;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw UnsupportedError('LOD probe camera: only radiusPx is real');
 }
