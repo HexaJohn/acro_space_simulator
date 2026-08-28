@@ -708,9 +708,17 @@ class TerrainNodes {
         // edits): fall back to invalidating everything against every brush.
         _invalidateInFlight();
         for (final k in _chunks.keys.toList()) {
-          final centre = k.centreDirection * field.radius;
           final reach = k.circumradiusM(field.radius);
           for (final brush in edits.all) {
+            // The chunk centre at the BRUSH'S OWN radius, not the datum's.
+            // Brushes anchor on real ground, which sits hundreds of metres
+            // off the datum sphere (885 m below it at a typical lunar site),
+            // and circumradiusM is a purely lateral chord — so measured to a
+            // datum-pinned centre, a fine chunk directly over a brush missed
+            // the overlap by the site's whole elevation and was never
+            // retired. That is how a city kept its pre-grading ground: raw
+            // chunks survived interleaved with re-meshed graded ones.
+            final centre = k.centreDirection * brush.centreBF.length;
             if ((brush.centreBF - centre).length <=
                 reach + brush.lateralReachM) {
               _scene.remove(_chunks.remove(k)!.node);
@@ -720,9 +728,10 @@ class TerrainNodes {
         }
       } else {
         bool touches(ChunkKey k) {
-          final centre = k.centreDirection * field.radius;
           final reach = k.circumradiusM(field.radius);
           for (final brush in addedBrushes) {
+            // Radial-aware for the same reason as the wholesale branch above.
+            final centre = k.centreDirection * brush.centreBF.length;
             if ((brush.centreBF - centre).length <=
                 reach + brush.lateralReachM) {
               return true;

@@ -435,8 +435,12 @@ class CityNodes {
     // happened to cross a 64 m quantum and move `camKey` — so the tiers
     // looked like they were ignoring the sliders, or responding to them
     // several seconds late.
+    // Terrain-edit count for the same reason the road key carries it:
+    // buildings and patches are draped positions too, and a re-grade moves
+    // them without moving any of the counts.
     final key = '${snap.buildings.length}|${snap.roads.length}|'
-        '${snap.patches.length}|${detail.index}|${byBody.keys.join(",")}'
+        '${snap.patches.length}|${snap.terrainEdits.length}|'
+        '${detail.index}|${byBody.keys.join(",")}'
         '|${lodDebug ? 1 : 0}|${perBuildingLod ? 1 : 0}'
         '|${interiorRangeM.round()}|${blockRangeM.round()}$camKey';
     _syncLibrary();
@@ -447,7 +451,15 @@ class CityNodes {
     // mode recapturing a frame per few buildings — re-emits only the
     // buildings, not every junction and lamp in town. Style and sealed-ness
     // ride the ordinary [invalidate] path, same as the furniture toggles.
-    final roadsKey = '${snap.roads.length}|${byBody.keys.join(",")}';
+    //
+    // The EDIT count is in the key because the drape is not: road heights
+    // come from the ground they were captured over, and grading the site
+    // re-drapes every polyline without changing how many there are. Keyed on
+    // count alone, the studio's slow mode kept the whole network at its
+    // pre-grading heights — a road-shaped sheet floating beside the real
+    // terrain. Edits are exactly when the ground under a drape can move.
+    final roadsKey = '${snap.roads.length}|${snap.terrainEdits.length}'
+        '|${byBody.keys.join(",")}';
     if (_roadsBuiltKey != roadsKey) {
       _roadsBuiltKey = roadsKey;
       _rebuildRoads(snap, byBody);

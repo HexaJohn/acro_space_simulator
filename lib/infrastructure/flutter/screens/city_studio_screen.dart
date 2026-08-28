@@ -527,9 +527,18 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     if (radial.length < 1) return _upWorld * _eyeHeightM;
     final dir = radial.normalized;
     final field = _groundField;
-    final ground = field == null
-        ? radial.length
-        : field.groundRadiusAt(dir.x, dir.y, dir.z);
+    // The field samples in the BODY-FIXED frame and `dir` is a world
+    // direction. The snapshot's body orientation carries Earth's axial tilt,
+    // so sampling with the world direction read the ground of a point over
+    // twenty degrees away — the walker stood in the right place on the wrong
+    // location's altitude, tens of metres under (or above) the terrain that
+    // was actually drawn. The same trap the flight walker hit.
+    final b = _snap?.bodies[_sim?.body.id.value];
+    var ground = radial.length;
+    if (field != null && b != null) {
+      final bf = Quaternion(b.qw, b.qx, b.qy, b.qz).conjugate.rotate(dir);
+      ground = field.groundRadiusAt(bf.x, bf.y, bf.z);
+    }
     return _bodyCentreWorld + dir * (ground + _eyeHeightM) - _anchorWorld;
   }
 
