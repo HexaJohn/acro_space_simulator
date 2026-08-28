@@ -41,6 +41,7 @@ import '../../../domain/colony/city/parcel.dart';
 import '../../../domain/shared/quaternion.dart';
 import '../../../domain/shared/vector3.dart';
 import '../../../domain/universe/real_solar_system.dart';
+import '../../../domain/universe/star_system.dart';
 import '../../flutter_scene/city/city_nodes.dart';
 import '../../../domain/architecture/building_generator.dart';
 import '../../../domain/terrain/terrain_field.dart';
@@ -193,6 +194,15 @@ class _CityStudioScreenState extends State<CityStudioScreen>
 
   bool _busy = false;
 
+  /// Watch the colony being built: during zoning the frame is recaptured
+  /// every few buildings and the loop paced, so buildings visibly arrive
+  /// instead of the whole city appearing at once. Costs real wall time —
+  /// that is the point — so the build-time calibration skips these runs.
+  bool _slowBuild = false;
+
+  /// Whether the running slow-mode build has aimed the camera yet.
+  bool _previewAnchored = false;
+
   /// Where the running build has got to. Null when nothing is building.
   CityGenProgress? _progress;
 
@@ -300,13 +310,39 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     // then froze for seventeen seconds would be worse than showing none.
     const buildShare = 0.13;
     final build = CityBuild(_spec, bodies: bodies);
+    _previewAnchored = false;
     var step = 0;
+    var lastPhase = '';
+    // Slow-mode cadence: how many zoning steps between frame recaptures, set
+    // from the lot count at the first one so any city gets ~90 visible
+    // updates. A capture rebuilds the whole city frame, so per-lot would be
+    // quadratic in buildings and a four-block colony would take minutes.
+    var zoned = 0;
+    var previewEvery = 1;
     for (final p in build.run()) {
       if (!mounted) return;
-      if (step++ % 6 == 0 || p.fraction >= 1.0) {
+      // Always repaint on a phase CHANGE, not just every sixth step: the
+      // steps after 0.9 are one per phase, and with only the stride gate the
+      // label sat on "re-platting" while zoning and settling ran — which is
+      // exactly the freeze it existed to name.
+      final phaseChanged = p.phase != lastPhase;
+      lastPhase = p.phase;
+      step++;
+      if (phaseChanged || step % 6 == 0 || p.fraction >= 1.0) {
         setState(() => _progress =
             (phase: p.phase, fraction: p.fraction * buildShare));
         await Future<void>.delayed(Duration.zero);
+      }
+      if (_slowBuild && p.phase == 'zoning and building') {
+        final live = build.partial!;
+        if (zoned == 0) {
+          previewEvery =
+              math.max(1, (live.layout.autoParcels.length / 90).round());
+        }
+        if (zoned++ % previewEvery == 0) {
+          _previewBuild(live, system);
+          await Future<void>.delayed(const Duration(milliseconds: 33));
+        }
       }
     }
     final sim = build.city!;
@@ -353,9 +389,11 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     sw.stop();
     _genClock.stop();
 
-    // Calibrate: what this build ACTUALLY cost, per lot squared.
+    // Calibrate: what this build ACTUALLY cost, per lot squared. Not from a
+    // slow-mode run — those are paced on purpose, and a calibration taken
+    // from one would promise minutes for a build that takes seconds.
     final lots = sim.layout.parcels.length.toDouble();
-    if (lots > 20) {
+    if (lots > 20 && !_slowBuild) {
       _msPerLotSq = sw.elapsedMilliseconds / (lots * lots);
     }
 
@@ -406,6 +444,49 @@ class _CityStudioScreenState extends State<CityStudioScreen>
           '${sim.layout.parcels.length} lots · '
           '${sim.parcelBuildings.length} buildings · '
           '${sim.jobs} jobs · ${sim.housing} hab';
+    });
+  }
+
+  /// Point the scene at the half-built colony and hand it a fresh frame.
+  ///
+  /// Slow mode only, called between zoning steps. The capture is the cheap
+  /// kind — no terrain edits yet, so the drape samples the raw field — and
+  /// the anchor comes from the ground over the city's CENTRE rather than the
+  /// mean of its buildings: the mean walks as buildings arrive, and a camera
+  /// that re-aims every chunk reads as a broken gimbal, not a growing city.
+  /// The finished build recomputes the real anchor over this one.
+  void _previewBuild(CitySim sim, StarSystem system) {
+    final body = system.body(sim.body.id)!;
+    final snap = WorldSnapshot.capture(
+      1,
+      InMemoryVesselRepository(const []),
+      system: system,
+      cities: InMemoryCityRepository([sim]),
+    );
+    if (!_previewAnchored) {
+      _previewAnchored = true;
+      final b = snap.bodies[body.id.value]!;
+      final centreBF =
+          sim.localToBodyFixed(const Vec2(0, 0), bodyRadiusM: body.radius);
+      final dir = centreBF.normalized;
+      final field = body.terrainField;
+      final anchorBF = dir *
+          (field == null
+              ? body.radius
+              : field.groundRadiusAt(dir.x, dir.y, dir.z));
+      final bodyCentre = Vector3(b.px, b.py, b.pz);
+      _bodyCentreWorld = bodyCentre;
+      _anchorWorld =
+          bodyCentre + Quaternion(b.qw, b.qx, b.qy, b.qz).rotate(anchorBF);
+      _origin.focusWorld = _anchorWorld;
+      final radial = _anchorWorld - bodyCentre;
+      _upWorld = radial.length > 1 ? radial.normalized : Vector3.unitZ;
+      _groundField = field;
+      _distanceM = math.max(600, _spec.extentM * 1.5);
+    }
+    setState(() {
+      _sim = sim;
+      _snap = snap;
     });
   }
 
@@ -1150,6 +1231,20 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             ),
             const SizedBox(height: 10),
           ],
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            value: _slowBuild,
+            activeThumbColor: AppTheme.accent2,
+            title: const Text('Watch it build', style: AppTheme.body),
+            subtitle: Text(
+                'Slow mode: during zoning the scene recaptures every few '
+                    'buildings, so you see them arrive one block at a time. '
+                    'Deliberately slower — the estimate below stops applying.',
+                style: AppTheme.dim.copyWith(fontSize: 11)),
+            onChanged: _busy ? null : (v) => setState(() => _slowBuild = v),
+          ),
+          const SizedBox(height: 8),
           // While it builds, the button becomes the readout: what the
           // generator is doing, how far through it is, and how long it has
           // actually taken. The estimate is only shown BEFORE the fact, which

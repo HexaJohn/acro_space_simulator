@@ -156,6 +156,14 @@ class CityBuild {
   /// The finished colony. Null until the run completes.
   CitySim? city;
 
+  /// The colony while the run is still going: live, half-built, and exactly
+  /// the object being mutated between steps. [city] stays null until the run
+  /// completes — that contract holds — but a driver that wants to DRAW the
+  /// build as it happens (the studio's slow mode) has to see the sim before
+  /// then, and this is the peek it uses. Read it between steps only; never
+  /// keep it as the result.
+  CitySim? partial;
+
   /// The build, as steps. Weighted by MEASURED cost, not by step count: the
   /// two subdivision passes are about thirteen of the fourteen seconds a
   /// six-block colony takes, and a bar that gave each phase an equal share
@@ -180,6 +188,7 @@ class CityBuild {
       id: 'studio-${spec.seed}',
       name: 'Studio ${spec.seed}',
     );
+    partial = sim;
     // The generator is not a game: it must not stall on affordability.
     sim.stock['ore'] = 1e9;
     sim.funds = 1e9;
@@ -205,8 +214,15 @@ class CityBuild {
       yield (phase: 're-platting round the plots', fraction: 0.5 + f * 0.44);
     }
 
+    // Stepped per lot rather than one opaque call: this loop is seconds of
+    // work on a big colony, and run between two yields it read as a freeze —
+    // the label painted "zoning and building" and then nothing moved until
+    // "settling". Per-lot steps are also what let a driver draw the buildings
+    // arriving.
     yield (phase: 'zoning and building', fraction: 0.94);
-    const CityGenerator()._zoneAndBuild(sim, spec, rnd);
+    for (final f in const CityGenerator()._zoneAndBuildSteps(sim, spec, rnd)) {
+      yield (phase: 'zoning and building', fraction: 0.94 + f * 0.04);
+    }
 
     yield (phase: 'settling', fraction: 0.99);
     sim.recompute();
@@ -378,8 +394,14 @@ class CityGenerator {
     }
   }
 
-  /// Zone what the roads cut, then build most of it.
-  void _zoneAndBuild(CitySim city, CityGenSpec spec, math.Random rnd) {
+  /// Zone what the roads cut, then build most of it — one lot per step.
+  ///
+  /// Yields progress 0..1 after EVERY lot, taken or skipped. The random draws
+  /// happen in exactly the order the old blocking loop made them — skip draw
+  /// first, band draws only for a taken lot — so the stepped build is the
+  /// same city the blocking one was.
+  Iterable<double> _zoneAndBuildSteps(
+      CitySim city, CityGenSpec spec, math.Random rnd) sync* {
     final edge = spec.extentM * 0.5;
 
     // Where industry takes over, as a fraction of the city's half-extent.
@@ -387,8 +409,16 @@ class CityGenerator {
     // fought the density bands, and now it simply ends the sequence.
     final industryFrom = (spec.industryRing * 1.9).clamp(0.6, 2.0);
 
-    for (final lot in city.layout.autoParcels) {
-      if (rnd.nextDouble() > spec.buildFraction) continue;
+    // Snapshot: `setUse` swaps the auto list copy-on-write under the loop.
+    // The old code iterated the getter and leaned on the same property — the
+    // list it captured never changed — this just says so out loud.
+    final lots = List.of(city.layout.autoParcels);
+    for (var i = 0; i < lots.length; i++) {
+      final lot = lots[i];
+      if (rnd.nextDouble() > spec.buildFraction) {
+        yield (i + 1) / lots.length;
+        continue;
+      }
       final r = lot.centroid.length;
 
       // ONE ordering, centre outward: business district, then apartments,
@@ -442,6 +472,7 @@ class CityGenerator {
         _ => ParcelUse.residential,
       });
       city.placeOnParcel(lot.id, kZoneSpecs[kind]![density]!);
+      yield (i + 1) / lots.length;
     }
   }
 

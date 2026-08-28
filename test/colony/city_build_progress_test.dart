@@ -69,6 +69,36 @@ void main() {
         reason: 'subdivision is most of the wait and must be most of the bar');
   });
 
+  test('zoning is stepped, not one opaque call', () {
+    // The zone-and-build loop is seconds of work on a big colony. Run as one
+    // call between two yields, the studio painted "zoning and building" and
+    // then nothing moved until "settling" — a freeze with a caption.
+    final build = CityBuild(spec, bodies: bodies);
+    var zoningSteps = 0;
+    for (final p in build.run()) {
+      if (p.phase == 'zoning and building') zoningSteps++;
+    }
+    expect(zoningSteps, greaterThan(10),
+        reason: 'one yield per phase is a frozen label, not progress');
+  });
+
+  test('the live sim is peekable mid-zoning while the result stays null', () {
+    // Slow mode draws the build as it happens, and it draws from `partial` —
+    // the buildings have to be on it DURING zoning, while `city` (the
+    // finished-colony contract) is still unpublished.
+    final build = CityBuild(spec, bodies: bodies);
+    var sawBuildingsArrive = false;
+    for (final p in build.run()) {
+      if (p.phase != 'zoning and building') continue;
+      expect(build.city, isNull);
+      final live = build.partial;
+      expect(live, isNotNull);
+      if (live!.parcelBuildings.isNotEmpty) sawBuildingsArrive = true;
+    }
+    expect(sawBuildingsArrive, isTrue,
+        reason: 'nothing to watch: no building ever appeared on the live sim');
+  });
+
   test('the city is only published when the run finishes', () {
     // A half-driven build must not be observable as a half-built city.
     final build = CityBuild(spec, bodies: bodies);
