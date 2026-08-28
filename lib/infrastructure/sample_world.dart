@@ -188,16 +188,19 @@ class SampleWorld {
   /// A halo ring mid-construction in high Earth orbit — the first physical
   /// megastructure. Seeded at the terraform stage so the demo shows the most
   /// layers at once: complete truss + hull, soil visibly poured over half the
-  /// band, bare deck ahead of the pour, lights still off. Orbit clears Earth
-  /// by ~3,600 km at closest approach (ring radius 5,000 km, orbit 15,000 km).
+  /// band, bare deck ahead of the pour, lights still off. Stood VERTICAL
+  /// (spin axis in the orbital plane) so it reads as a Halo against the
+  /// planet, not a washer. Orbit clears Earth by ~6,100 km at closest
+  /// approach (ring radius 2,500 km, orbit 15,000 km).
   static Megastructure buildHaloRing() {
     final ring = Megastructure.haloRing(
       id: 'halo-earth',
-      radius: 5.0e6,
+      radius: 2.5e6,
       site: const MegastructureSite(
         parentBodyId: 'earth',
         orbitRadiusM: 1.5e7,
         orbitPhaseRad: 0.6,
+        tiltRad: math.pi / 2,
       ),
     );
     for (var i = 0; i < ring.phases.length; i++) {

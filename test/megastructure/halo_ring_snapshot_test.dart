@@ -9,6 +9,8 @@ import 'package:acro_space_simulator/adapters/repositories/in_memory_repositorie
 import 'package:acro_space_simulator/adapters/repositories/in_memory_world_repositories.dart';
 import 'package:acro_space_simulator/application/snapshot/world_snapshot.dart';
 import 'package:acro_space_simulator/domain/megastructure/megastructure.dart';
+import 'package:acro_space_simulator/domain/shared/quaternion.dart';
+import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/domain/simulation/epoch.dart';
 import 'package:acro_space_simulator/domain/universe/real_solar_system.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -98,6 +100,29 @@ void main() {
     // Recipe survives intact enough to rebuild the identical field.
     expect(b.toRingSpec().field().heightAt(1.2, 300),
         a.toRingSpec().field().heightAt(1.2, 300));
+  });
+
+  test('a tilted site stands the ring vertically (spin axis off world +Z)',
+      () {
+    final m = Megastructure.haloRing(
+      id: 'halo-earth',
+      radius: 2.5e6,
+      site: const MegastructureSite(
+        parentBodyId: 'earth',
+        orbitRadiusM: 1.5e7,
+        tiltRad: math.pi / 2,
+      ),
+    );
+    final snap = WorldSnapshot.capture(1, vessels,
+        system: system,
+        epoch: const Epoch(123),
+        megastructures: InMemoryMegastructureRepository([m]));
+    final s = snap.megastructures.single;
+    final q = Quaternion(s.qw, s.qx, s.qy, s.qz);
+    final axis = q.rotate(Vector3(0, 0, 1));
+    // Spin axis lies IN the orbital plane — the ring plane contains world +Z.
+    expect(axis.z.abs(), lessThan(1e-9));
+    expect(math.sqrt(axis.x * axis.x + axis.y * axis.y), closeTo(1, 1e-9));
   });
 
   test('spin period rides the override through the wire recipe', () {

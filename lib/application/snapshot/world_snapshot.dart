@@ -601,11 +601,14 @@ class MegastructureSnapshot {
       parentRoot.y + math.sin(theta) * site.orbitRadiusM,
       parentRoot.z,
     );
-    // Spin about +Z from t=0. The skeleton "already rotating" is accepted so
-    // the orientation needs no spin-start bookkeeping; construction in spin
-    // reads fine at these angular rates (~75 min period).
-    final q = Quaternion.axisAngle(
+    // Spin about the structure's +Z from t=0, tilted by the site (tilt*spin,
+    // the CelestialBody convention). The skeleton "already rotating" is
+    // accepted so the orientation needs no spin-start bookkeeping;
+    // construction in spin reads fine at these angular rates (~1 h period).
+    final spin = Quaternion.axisAngle(
         Vector3.unitZ, spec.spinAngularVelocity * epoch.seconds);
+    final tilt = Quaternion.axisAngle(Vector3.unitX, site.tiltRad);
+    final q = (tilt * spin).normalized;
     return MegastructureSnapshot(
       id: m.id,
       type: m.type.index,

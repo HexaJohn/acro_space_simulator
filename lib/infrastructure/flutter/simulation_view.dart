@@ -223,8 +223,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   // these is non-null at a time; the other is cleared when the cycle advances.
   VesselId? _focusVessel; // active vessel lock (null when a body is locked)
   BodyId? _focusBody; // active body lock (null when a vessel is locked)
+  String? _focusMega; // active megastructure lock (both above null then)
   BodyId? _lastFocusBody; // dominant body of the focused vessel, last seen
-  late final List<({String label, VesselId? v, BodyId? b})> _targets;
+  late final List<({String label, VesselId? v, BodyId? b, String? m})>
+      _targets;
   int _targetIndex = 0;
   CameraOrbit _view = CameraOrbit.top;
   // MAP = wide orbit view + lock dropdown. CRAFT = tight chase cam on the focus
@@ -283,8 +285,30 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     // (leaving the locked body's radius in put the eye 58,000 km from the
     // anchor at "range 250 m" over Saturn).
     if (_freecam) return 0;
+    if (_focusMega != null) {
+      // A ring's "surface" is its band: range measures from the ring circle,
+      // so zooming all the way in lands the eye at the structure, not stalled
+      // a ring-radius away from its empty centre.
+      for (final m in _session.megastructures.all()) {
+        if (m.id == _focusMega) return m.ringSpec?.radiusM ?? 0;
+      }
+      return 0;
+    }
     if (_focusBody == null) return 0;
     return _universe.current().body(_focusBody!)?.radius ?? 0;
+  }
+
+  /// World position of the locked megastructure, from the same snapshot the
+  /// scene renders — pose is derived per frame (orbit + spin), so reading the
+  /// snapshot keeps the camera glued to the structure without re-deriving it.
+  Vector3? get _megaFocusWorld {
+    final id = _focusMega;
+    final world = _sceneWorld;
+    if (id == null || world == null) return null;
+    for (final m in world.megastructures) {
+      if (m.id == id) return Vector3(m.px, m.py, m.pz);
+    }
+    return null;
   }
 
   /// The active camera for this frame: ortho or perspective, both driven by the
@@ -1384,11 +1408,21 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     final injected = widget.injectedVessel;
     final fleet = [?demo, ?injected, ...widget.trafficVessels];
 
-    // Camera-target cycle: every vessel first, then the major bodies. The
-    // switch-camera button steps through this list.
+    // A halo ring mid-construction in high Earth orbit. Built here (not
+    // inline in the session ctor) because the target list below needs the
+    // same instances BEFORE `_session` is assigned — reading the late field
+    // that early is a LateInitializationError.
+    final megastructures = [SampleWorld.buildHaloRing()];
+
+    // Camera-target cycle: every vessel first, then the major bodies, then any
+    // sited megastructures. The switch-camera button steps through this list.
     _targets = [
-      for (final v in fleet) (label: v.name, v: v.id, b: null),
-      for (final body in system.all) (label: body.name, v: null, b: body.id),
+      for (final v in fleet) (label: v.name, v: v.id, b: null, m: null),
+      for (final body in system.all)
+        (label: body.name, v: null, b: body.id, m: null),
+      for (final mega in megastructures)
+        if (mega.site != null && mega.ringSpec != null)
+          (label: mega.id, v: null, b: null, m: mega.id),
     ];
     // START LOCKED ON the injected craft if any (fly it immediately); else the
     // demo orbiter so the player can fly it directly from the start (manual
@@ -1406,6 +1440,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     }
     _focusVessel = _targets[_targetIndex].v;
     _focusBody = _targets[_targetIndex].b;
+    _focusMega = _targets[_targetIndex].m;
 
     // Start ready to fly: manual control of the orbiter, infinite fuel, 1x warp.
     _manualControl = true;
@@ -1417,8 +1452,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       fleet: fleet,
       // Minable asteroid lodes — mining them excavates the voxel terrain.
       deposits: SampleWorld.buildAsteroidDeposits(),
-      // A halo ring mid-construction in high Earth orbit.
-      megastructures: [SampleWorld.buildHaloRing()],
+      megastructures: megastructures,
       // Pop a destruction menu when a vessel is lost.
       onEvent: _onDomainEvent,
     );
@@ -1900,6 +1934,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       final t = _targets[i];
       _focusVessel = t.v;
       _focusBody = t.b;
+      _focusMega = t.m;
       // A body can't be piloted, so drop manual mode when locking onto one.
       if (t.v == null) _manualControl = false;
     });
@@ -1933,6 +1968,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           }
           _focusVessel = v.id;
           _focusBody = null;
+          _focusMega = null;
         }
         _mapMpp = _metresPerPixel; // remember map zoom
         _metresPerPixel = 60.0; // close chase zoom (ortho fallback)
@@ -2735,7 +2771,11 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                         snapshot: _sceneWorld,
                         focusVesselId: _focusVessel?.value,
                         focusBodyId: _focusBody?.value,
-                        focusWorldOverride: _freecam ? _freecamWorld : null,
+                        // Freecam wins; else a locked megastructure anchors
+                        // the floating origin (it is neither vessel nor body,
+                        // so the id channels can't carry it).
+                        focusWorldOverride:
+                            _freecam ? _freecamWorld : _megaFocusWorld,
                         planner: _plannerOverlay,
                       );
                     }),
@@ -2745,7 +2785,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                   // Hidden in freecam: the presenter still projects around
                   // the locked target, so its labels would sit off the
                   // freecam-rendered world.
-                  if (snap != null && !_freecam)
+                  // Also hidden on a megastructure lock: the presenter has no
+                  // mega focus channel, so its labels would project around the
+                  // wrong origin.
+                  if (snap != null && !_freecam && _focusMega == null)
                     Positioned.fill(
                       child: IgnorePointer(
                         child: CustomPaint(

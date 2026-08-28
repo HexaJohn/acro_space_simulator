@@ -56,11 +56,17 @@ class MegastructureSite {
     required this.parentBodyId,
     required this.orbitRadiusM,
     this.orbitPhaseRad = 0,
+    this.tiltRad = 0,
   });
 
   final String parentBodyId;
   final double orbitRadiusM;
   final double orbitPhaseRad;
+
+  /// Tilt of the structure's spin axis off world +Z, about +X (same
+  /// convention as CelestialBody.axialTilt). 0 = a ring lying in the orbital
+  /// plane; pi/2 stands it vertically.
+  final double tiltRad;
 }
 
 /// A megastructure under construction (or complete). Aggregate root for the
