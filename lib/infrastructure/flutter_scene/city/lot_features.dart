@@ -57,9 +57,15 @@ class LotFeatures {
 
   /// Fence the rectangle [halfW] x [halfD] about [centre].
   ///
-  /// [along] is the lot's depth axis and [up] its local radial. Posts and rails
-  /// are boxes; at street range the silhouette and the spacing are what read,
-  /// and a modelled picket would be a hundred triangles nobody resolves.
+  /// [along] is the lot's depth axis and [up] its local radial. Posts and
+  /// rails are boxes.
+  ///
+  /// [coarse] swaps the per-picket posts for structural posts only — rails
+  /// and spacing a chain-link fence would have. A picket every 16 cm is
+  /// sixteen vertices each, which is what a fence IS from arm's length and
+  /// several hundred thousand vertices a colony from anywhere else: lots the
+  /// camera resolves as boxes were spending far more mesh on their fences
+  /// than on their buildings, and the fences were sub-pixel.
   static void emitFence(
     MeshBuilder m,
     LotEdging kind,
@@ -67,13 +73,14 @@ class LotFeatures {
     Vector3 along,
     Vector3 up,
     double halfW,
-    double halfD,
-  ) {
+    double halfD, {
+    bool coarse = false,
+  }) {
     if (kind == LotEdging.none) return;
     final side = along.cross(up).normalized;
     final picket = kind == LotEdging.picket;
     final height = picket ? 1.05 : 2.4;
-    final spacing = picket ? 0.16 : 2.6;
+    final spacing = picket && !coarse ? 0.16 : 2.6;
     final postR = picket ? 0.035 : 0.05;
 
     // Walk the four edges. The street edge (front) is left OPEN so the lot has

@@ -676,7 +676,11 @@ class CityNodes {
       phaseSw
         ..reset()
         ..start();
-      _emitLotFeatures(entry.value, bodyId: entry.key, anchorBF: anchorBF);
+      _emitLotFeatures(entry.value,
+          bodyId: entry.key,
+          anchorBF: anchorBF,
+          focusBF: focusBF,
+          colonyTier: detail);
       featUs += phaseSw.elapsedMicroseconds;
       phaseSw
         ..reset()
@@ -1108,10 +1112,19 @@ class CityNodes {
   /// round a house, chain link round a works, a lit board over a shopfront.
   /// Derived from the building's own type, which already encodes both kind and
   /// density, so nothing new crosses the wire.
+  ///
+  /// Tiered by the building's OWN LOD, the same way the building is: a lot the
+  /// camera resolves as a block silhouette gets no furniture at all, an
+  /// exterior-tier lot gets the coarse fence, and only a full-tier lot pays
+  /// for pickets. Fences were being emitted per picket for every lot in the
+  /// colony — 774 ms of a 780 ms rebuild spent on geometry that, from the
+  /// studio's framing distance, was entirely sub-pixel.
   void _emitLotFeatures(
     List<BuildingSnapshot> buildings, {
     required String bodyId,
     required Vector3 anchorBF,
+    required Vector3 focusBF,
+    required BuildingDetail colonyTier,
   }) {
     if (!lotFeatures) return;
     final solid = MeshBuilder();
@@ -1122,6 +1135,8 @@ class CityNodes {
     var carBudget = _maxParkedCars;
 
     for (final b in buildings) {
+      final tier = detailFor(b, focusBF, colonyTier);
+      if (tier == BuildingDetail.block) continue;
       final edging = LotFeatures.edgingFor(b.type);
       final sign = LotFeatures.signFor(b.type);
       final spec = specOf(b);
@@ -1144,7 +1159,8 @@ class CityNodes {
       final halfD = b.siteDepthM / cover / 2 + back;
 
       if (edging != LotEdging.none) {
-        LotFeatures.emitFence(solid, edging, at, along, up, halfW, halfD);
+        LotFeatures.emitFence(solid, edging, at, along, up, halfW, halfD,
+            coarse: tier != BuildingDetail.full);
         any = true;
       }
       if (sign) {
