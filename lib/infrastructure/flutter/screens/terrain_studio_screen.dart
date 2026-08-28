@@ -285,6 +285,7 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
     _upWorld = radial.length > 1 ? radial.normalized : Vector3.unitZ;
     _walkE = 0;
     _walkN = 0;
+    _focusLiftM = 0;
     _sunTurnH = _middayTurnH(snap, sim);
     setState(() {});
   }
@@ -819,25 +820,30 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
     _walkE += (fwd * sy + side * cy) * step;
   }
 
+  /// How far the orbit focus floats above the ground, metres. Q/E drive it;
+  /// zero is the surface.
+  double _focusLiftM = 0;
+
   /// WASD pans the orbit FOCAL POINT across the ground, screen-relative;
-  /// Q/E tilts the camera. The anchor is the render origin, so panning
-  /// re-seats it on the real ground and everything measured against it —
-  /// picking, the sun, the atmosphere, the terrain streamer's focus —
-  /// follows for free. Pan speed scales with zoom: crossing the view takes
-  /// about the same wrist at any range.
+  /// Q/E lower and raise its ALTITUDE over the ground. The anchor is the
+  /// render origin, so moving it drags everything measured against it —
+  /// picking, the sun, the atmosphere, the terrain streamer's focus — along
+  /// for free. Both rates scale with zoom: crossing the view, or doubling
+  /// your height, takes about the same wrist at any range.
   void _stepOrbit(double dtS) {
     if (_firstPerson || _snap == null || _held.isEmpty) return;
-    var fwd = 0.0, side = 0.0, tilt = 0.0;
+    var fwd = 0.0, side = 0.0, lift = 0.0;
     if (_held.contains(LogicalKeyboardKey.keyW)) fwd += 1;
     if (_held.contains(LogicalKeyboardKey.keyS)) fwd -= 1;
     if (_held.contains(LogicalKeyboardKey.keyD)) side += 1;
     if (_held.contains(LogicalKeyboardKey.keyA)) side -= 1;
-    if (_held.contains(LogicalKeyboardKey.keyQ)) tilt -= 1;
-    if (_held.contains(LogicalKeyboardKey.keyE)) tilt += 1;
-    if (tilt != 0) {
-      _elevation = (_elevation + tilt * 0.9 * dtS).clamp(0.08, 1.5);
+    if (_held.contains(LogicalKeyboardKey.keyQ)) lift -= 1;
+    if (_held.contains(LogicalKeyboardKey.keyE)) lift += 1;
+    if (fwd == 0 && side == 0 && lift == 0) return;
+    if (lift != 0) {
+      _focusLiftM =
+          (_focusLiftM + lift * _distanceM * 0.4 * dtS).clamp(0.0, 50000.0);
     }
-    if (fwd == 0 && side == 0) return;
 
     final (east, north) = _tangentFrame();
     // W pushes the focus AWAY from the camera; screen-right comes from the
@@ -845,24 +851,24 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
     final ahead =
         (east * -math.cos(_azimuth) + north * -math.sin(_azimuth));
     final rightD = _upWorld.cross(ahead);
-    final len = math.sqrt(fwd * fwd + side * side);
+    final len = math.max(1.0, math.sqrt(fwd * fwd + side * side));
     final move = (ahead * fwd + rightD * side) *
         (_distanceM * 0.6 * dtS / len);
 
-    // Re-seat the anchor on the real ground under the new spot, the same
-    // body-fixed sampling the walker uses.
-    var next = _anchorWorld + move;
+    // Re-seat over the real ground under the new spot — the walker's own
+    // body-fixed sampling — then float the lift above it.
+    final next = _anchorWorld + move;
     final radial = next - _bodyCentreWorld;
     if (radial.length > 1) {
       final dir = radial.normalized;
       final b = _snap?.bodies[_body];
       final field = _groundField;
+      var ground = radial.length - _focusLiftM;
       if (b != null && field != null) {
         final bf = Quaternion(b.qw, b.qx, b.qy, b.qz).conjugate.rotate(dir);
-        next = _bodyCentreWorld +
-            dir * field.groundRadiusAt(bf.x, bf.y, bf.z);
+        ground = field.groundRadiusAt(bf.x, bf.y, bf.z);
       }
-      _anchorWorld = next;
+      _anchorWorld = _bodyCentreWorld + dir * (ground + _focusLiftM);
       _origin.focusWorld = _anchorWorld;
       _upWorld = dir;
     }
@@ -1165,10 +1171,10 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
           const SizedBox(height: 12),
           const Text('TOOL', style: AppTheme.heading),
           Text(
-              'WASD pans the focus, Q/E tilts, scroll zooms — any tool. '
-              'camera: drag orbits. Brushes: hover previews the footprint, '
-              'click applies, drag paints a stroke. Road takes two clicks '
-              'and ghosts the run.',
+              'WASD pans the focus, Q/E lowers/raises its altitude, scroll '
+              'zooms — any tool. camera: drag orbits. Brushes: hover '
+              'previews the footprint, click applies, drag paints a stroke. '
+              'Road takes two clicks and ghosts the run.',
               style: AppTheme.dim.copyWith(fontSize: 11)),
           const SizedBox(height: 6),
           Wrap(spacing: 6, runSpacing: 6, children: [
