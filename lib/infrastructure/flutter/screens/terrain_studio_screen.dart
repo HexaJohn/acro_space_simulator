@@ -51,8 +51,20 @@ import '../../flutter_scene/coord_convert.dart';
 import '../../flutter_scene/terrain/terrain_nodes.dart';
 import 'app_theme.dart';
 
-/// What a click on the ground does.
-enum TerrainTool { raise, lower, flatten, crater, noise, erode, road, building }
+/// What a click on the ground does. [camera] is the hands-off mode: drags
+/// orbit and clicks do nothing — every other tool CAPTURES the drag for
+/// painting, so sculpting never wrestles the camera for the mouse.
+enum TerrainTool {
+  camera,
+  raise,
+  lower,
+  flatten,
+  crater,
+  noise,
+  erode,
+  road,
+  building,
+}
 
 class TerrainStudioScreen extends StatefulWidget {
   const TerrainStudioScreen({super.key});
@@ -85,9 +97,19 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
   int _tick = 1;
 
   // ---- Tools --------------------------------------------------------------
-  TerrainTool _tool = TerrainTool.raise;
+  TerrainTool _tool = TerrainTool.camera;
   double _radiusM = 40;
   double _strengthM = 12;
+
+  /// Where the last stroke landed, for drag-paint spacing: a drag re-applies
+  /// only after moving most of a radius, so a slow stroke is a line of
+  /// brushes rather than a recapture per pointer event.
+  Vector3? _lastPaintBF;
+
+  /// Hover picking is a ray march through the edited field — against a
+  /// thousand brushes that is real work — so the preview re-picks on a small
+  /// clock, not on every pointer event.
+  final Stopwatch _hoverSw = Stopwatch()..start();
 
   /// Grade the ground under roads and buildings, the way the tick would.
   bool _shapeGround = true;
@@ -161,6 +183,10 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
 
   @override
   void dispose() {
+    // The cursor statics are shared with the flight editor — leave nothing
+    // pointing at this screen's ground.
+    CityNodes.cursorBF = null;
+    CityNodes.pendingRouteBF = const [];
     final cb = _timingsCb;
     if (cb != null) SchedulerBinding.instance.removeTimingsCallback(cb);
     _ticker?.dispose();
@@ -372,11 +398,40 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
 
   // ---- Tools --------------------------------------------------------------
 
+  /// Whether the active tool paints on drag (everything but the modes with
+  /// click semantics of their own).
+  bool get _isBrush =>
+      _tool != TerrainTool.camera &&
+      _tool != TerrainTool.road &&
+      _tool != TerrainTool.building;
+
   void _applyTool(Offset local, Size size) {
+    if (_tool == TerrainTool.camera) return;
     final hitBF = _pickGroundBF(local, size);
     if (hitBF == null) return;
+    _applyAt(hitBF);
+  }
+
+  /// A drag stroke: re-apply once the pointer has travelled most of a brush
+  /// radius along the ground, so a slow stroke lays a LINE of brushes
+  /// instead of a recapture per pointer event.
+  void _dragPaint(Offset local, Size size) {
+    final hitBF = _pickGroundBF(local, size);
+    if (hitBF == null) return;
+    _syncCursor(hitBF);
+    final last = _lastPaintBF;
+    if (last != null && (hitBF - last).length < math.max(_radiusM * 0.7, 6)) {
+      return;
+    }
+    _applyAt(hitBF);
+  }
+
+  void _applyAt(Vector3 hitBF) {
+    _lastPaintBF = hitBF;
     final sw = Stopwatch()..start();
     switch (_tool) {
+      case TerrainTool.camera:
+        return;
       case TerrainTool.raise:
         _pad(hitBF, _radiusM, _strengthM);
       case TerrainTool.lower:
@@ -442,6 +497,56 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
     _applyMs = sw.elapsedMicroseconds / 1000;
     _recapture();
     setState(() {});
+  }
+
+  /// Point the editor cursor — the same ground quad the flight editor draws
+  /// — at [hit], sized to the active brush. Null flags an un-pickable spot.
+  void _syncCursor(Vector3? hit) {
+    CityNodes.cursorBF = hit;
+    CityNodes.cursorBodyId = _body;
+    CityNodes.cursorBad = hit == null;
+    final s = switch (_tool) {
+      TerrainTool.building => 24.0,
+      TerrainTool.road => 8.0,
+      _ => _radiusM * 2,
+    };
+    CityNodes.cursorSizeM = s;
+    CityNodes.cursorDepthM = _tool == TerrainTool.building ? 30.0 : s;
+
+    // The road ghost: armed start to hover, on the real ground.
+    final start = _roadStart;
+    final field = _groundField;
+    final sim = _sim;
+    final system = _system;
+    if (_tool == TerrainTool.road &&
+        start != null &&
+        hit != null &&
+        field != null &&
+        sim != null &&
+        system != null) {
+      final body = system.body(sim.body.id)!;
+      final sDir = sim
+          .localToBodyFixed(start, bodyRadiusM: body.radius)
+          .normalized;
+      CityNodes.pendingRouteBF = [
+        sDir * field.groundRadiusAt(sDir.x, sDir.y, sDir.z),
+        hit,
+      ];
+    } else {
+      CityNodes.pendingRouteBF = const [];
+    }
+  }
+
+  /// Hover: keep the preview under the mouse. Throttled — the pick marches
+  /// the edited field, which is real work against a thousand brushes.
+  void _updateHover(Offset local, Size size) {
+    if (_snap == null || _tool == TerrainTool.camera) {
+      _syncCursor(null);
+      return;
+    }
+    if (_hoverSw.elapsedMilliseconds < 33) return;
+    _hoverSw.reset();
+    _syncCursor(_pickGroundBF(local, size));
   }
 
   /// A point [e]/[n] metres along the local tangent from [atBF], re-seated on
@@ -849,21 +954,35 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
                       .clamp(60.0, 60000.0));
                 }
               },
-              child: GestureDetector(
+              child: MouseRegion(
+                onHover: (e) => _updateHover(e.localPosition, size),
+                onExit: (_) => _syncCursor(null),
+                child: GestureDetector(
                 onTapUp: (d) {
                   if (_snap != null) _applyTool(d.localPosition, size);
                 },
-                onScaleUpdate: (d) => setState(() {
+                onScaleEnd: (_) => _lastPaintBF = null,
+                onScaleUpdate: (d) {
+                  // Walk mode always looks with the mouse; otherwise a drag
+                  // belongs to the camera ONLY in camera mode — the paint
+                  // tools own it, which is what stops a stroke orbiting the
+                  // world out from under the brush.
                   if (_firstPerson) {
-                    _walkYaw += d.focalPointDelta.dx * 0.004;
-                    _walkPitch = (_walkPitch - d.focalPointDelta.dy * 0.004)
-                        .clamp(-1.45, 1.45);
-                  } else {
-                    _azimuth -= d.focalPointDelta.dx * 0.008;
-                    _elevation = (_elevation + d.focalPointDelta.dy * 0.008)
-                        .clamp(0.08, 1.5);
+                    setState(() {
+                      _walkYaw += d.focalPointDelta.dx * 0.004;
+                      _walkPitch = (_walkPitch - d.focalPointDelta.dy * 0.004)
+                          .clamp(-1.45, 1.45);
+                    });
+                  } else if (_tool == TerrainTool.camera) {
+                    setState(() {
+                      _azimuth -= d.focalPointDelta.dx * 0.008;
+                      _elevation = (_elevation + d.focalPointDelta.dy * 0.008)
+                          .clamp(0.08, 1.5);
+                    });
+                  } else if (_isBrush && _snap != null) {
+                    _dragPaint(d.localFocalPoint, size);
                   }
-                }),
+                },
                 child: _snap == null
                     ? Center(
                         child: Text(
@@ -872,6 +991,7 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
                             style: AppTheme.dim,
                             textAlign: TextAlign.center))
                     : fs.SceneView(scene, camera: _camera()),
+                ),
               ),
             );
           }),
@@ -990,7 +1110,10 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
           ),
           const SizedBox(height: 12),
           const Text('TOOL', style: AppTheme.heading),
-          Text('Click the ground to apply. Road takes two clicks.',
+          Text(
+              'camera: drag orbits. Brushes: hover previews the footprint, '
+              'click applies, drag paints a stroke. Road takes two clicks '
+              'and ghosts the run.',
               style: AppTheme.dim.copyWith(fontSize: 11)),
           const SizedBox(height: 6),
           Wrap(spacing: 6, runSpacing: 6, children: [
