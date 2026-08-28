@@ -617,20 +617,32 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     } else {
       light.direction = dir;
     }
-    light.intensity =
-        _sunIntensity * (1.0 - night) + _skyglowIntensity * night;
-    // Sodium-and-LED warm, only as the glow takes over from the white sun.
-    light.color = vm.Vector3(
-        1.0, 1.0 - 0.16 * night, 1.0 - 0.38 * night);
-    // The ambient floor rises with the glow: skylight scatters everywhere,
-    // including the canyon walls a zenith light cannot reach.
-    scene.environmentIntensity = 0.05 + 0.13 * night;
 
     // Altitude above the COLONY's ground shell, not the datum — the anchor
     // stands on the real ground, which can sit hundreds of metres off datum.
     final eyeWorld = _anchorWorld + _cameraEyeM();
     final groundR = (_anchorWorld - _bodyCentreWorld).length;
-    final altM = (eyeWorld - _bodyCentreWorld).length - groundR;
+    final altM =
+        groundR < 1 ? 0.0 : (eyeWorld - _bodyCentreWorld).length - groundR;
+
+    // The glow FALLS OFF WITH HEIGHT. It is the street canyons' own light
+    // thrown back by the air over them, so it lives at street level: climb
+    // out of the canyons and it thins toward a floor — from a couple of
+    // kilometres up a night city is points of light, not lit surfaces, and
+    // an evenly washed one from any altitude was the fake's tell. Half gone
+    // by 500 m, floored at 0.15 so the distant halo never quite dies.
+    final ratio = math.max(0.0, altM) / 500.0;
+    final heightFade = 0.15 + 0.85 / (1.0 + ratio * ratio);
+    final glow = night * heightFade;
+
+    light.intensity =
+        _sunIntensity * (1.0 - night) + _skyglowIntensity * glow;
+    // Sodium-and-LED warm, only as the glow takes over from the white sun.
+    light.color = vm.Vector3(
+        1.0, 1.0 - 0.16 * night, 1.0 - 0.38 * night);
+    // The ambient floor rises with the glow: skylight scatters everywhere,
+    // including the canyon walls a zenith light cannot reach.
+    scene.environmentIntensity = 0.05 + 0.13 * glow;
     // Deep night: the glow comes from everywhere, so a sharp shadow from one
     // direction would be the tell that it is fake. Drop the pass.
     if (groundR < 1 || altM > 8000 || night > 0.6) {
