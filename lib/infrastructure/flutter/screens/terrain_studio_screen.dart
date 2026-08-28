@@ -114,6 +114,14 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
   /// Grade the ground under roads and buildings, the way the tick would.
   bool _shapeGround = true;
 
+  /// Evaluate terrain LOD against the FOCAL POINT instead of the camera.
+  /// Zooming the camera out then stops coarsening the ground: selection
+  /// keeps refining around the spot being worked, which is what lets you
+  /// inspect a fine subdivision island from far enough away to see it
+  /// whole. The trade is honest — the far field is now finer than the
+  /// camera would ever ask for, so chunk counts rise.
+  bool _lodFromFocus = false;
+
   /// The road being drawn: first click arms it, second commits.
   Vec2? _roadStart;
 
@@ -985,7 +993,11 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
       _terrain!.update(
         frame,
         _origin,
-        cameraEye: _cameraEyeM(),
+        // LOD-from-focus: hand the streamer a zero eye offset, so every
+        // distance it budgets against is measured from the focal point the
+        // WASD keys carry — the camera can then stand back to watch the
+        // subdivision it would otherwise collapse by looking at it.
+        cameraEye: _lodFromFocus ? Vector3.zero : _cameraEyeM(),
         camera: null,
         focusBodyId: _body,
         starWorld: starWorld,
@@ -1246,6 +1258,20 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
             activeThumbColor: AppTheme.accent2,
             title: const Text('Terrain', style: AppTheme.body),
             onChanged: (v) => setState(() => TerrainNodes.enabled = v),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            value: _lodFromFocus,
+            activeThumbColor: AppTheme.accent2,
+            title: const Text('LOD from focus', style: AppTheme.body),
+            subtitle: Text(
+                'Evaluate terrain LOD at the focal point instead of the '
+                'camera — zooming out stops coarsening the ground, so a '
+                'refinement island can be inspected from far enough away '
+                'to see it whole.',
+                style: AppTheme.dim.copyWith(fontSize: 11)),
+            onChanged: (v) => setState(() => _lodFromFocus = v),
           ),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,

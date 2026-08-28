@@ -1455,7 +1455,12 @@ class TerrainNodes {
     final lines = math.min(5 + coarse * 2, 25); // per direction, incl. borders
     final segs = math.min(6 + coarse * 2, 26); // segments, following curvature
     final anchorDir = key.centreDirection;
-    final liftM = key.circumradiusM(field.radius) * 0.01 + 2.0;
+    // The anti-z-fight lift, CAPPED: one percent of a root-level chunk's
+    // circumradius is tens of kilometres, and the coarse patches floated a
+    // sky-grid far above the camera while the ground (and the brush cursor
+    // on it) sat far below — two surfaces telling different stories.
+    final liftM =
+        math.min(key.circumradiusM(field.radius) * 0.01, 60.0) + 2.0;
     double radiusAt(Vector3 dir) =>
         field.radius + field.heightInDirection(dir.x, dir.y, dir.z) + liftM;
     final anchorBF = anchorDir * radiusAt(anchorDir);
