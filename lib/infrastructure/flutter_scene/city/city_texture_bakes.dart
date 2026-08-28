@@ -415,6 +415,43 @@ class CityTextureBakes {
     return out;
   }
 
+  /// The sidewalk surface: concrete flags with transverse joints, a faint
+  /// longitudinal joint, and the CURB STONES along the road edge.
+  ///
+  /// U runs ACROSS the walk — 0 at the curb, 1 at the building line — so the
+  /// curb band lives at u < 0.06 and the emitter can wrap the same band down
+  /// the curb's vertical face. V runs along the walk, four flags per tile.
+  static Uint8List sidewalkStrip(int size) {
+    final out = Uint8List(size * size * 4);
+    final rnd = math.Random(0x51DE);
+    for (var y = 0; y < size; y++) {
+      for (var x = 0; x < size; x++) {
+        final i = (y * size + x) * 4;
+        final u = x / size;
+        var v = 146.0 + (rnd.nextDouble() - 0.5) * 16;
+        if (u < 0.06) {
+          // Curb stones: a touch lighter than the flags, jointed shorter.
+          v = 160.0 + (rnd.nextDouble() - 0.5) * 12;
+          if (y % math.max(1, size ~/ 8) <= 1) v *= 0.8;
+        } else {
+          // Flag joints: transverse every quarter tile, one longitudinal.
+          if (y % math.max(1, size ~/ 4) <= 1) v *= 0.8;
+          if ((u - 0.53).abs() < 0.01) v *= 0.85;
+          // Per-flag tone drift — a pavement is poured a flag at a time.
+          final px = ((x - size * 0.06) ~/ math.max(1, size ~/ 2));
+          final py = y ~/ math.max(1, size ~/ 4);
+          if ((px * 3 + py * 5) % 5 == 0) v *= 0.94;
+        }
+        final c = v.clamp(0.0, 255.0).round();
+        out[i] = c;
+        out[i + 1] = c;
+        out[i + 2] = (c * 1.01).clamp(0, 255).round();
+        out[i + 3] = 255;
+      }
+    }
+    return out;
+  }
+
   /// The dirt-path surface: graded earth with wheel ruts, no curbs and no
   /// paint — a path is a road to the network and a track to the eye.
   static Uint8List dirtStrip(int size) {

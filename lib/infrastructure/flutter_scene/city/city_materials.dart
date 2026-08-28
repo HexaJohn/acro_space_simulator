@@ -29,6 +29,7 @@ class CityMaterials {
   static fs.PhysicallyBasedMaterial? _road;
   static fs.PhysicallyBasedMaterial? _dirt;
   static fs.PhysicallyBasedMaterial? _alley;
+  static fs.PhysicallyBasedMaterial? _sidewalk;
 
   static fs.PhysicallyBasedMaterial get facade =>
       _facade ??= _CitySurfaceMaterial()
@@ -78,6 +79,14 @@ class CityMaterials {
     ..roughnessFactor = 1.0
     ..metallicFactor = 0.0;
 
+  /// Sidewalks and their curb faces: concrete flags, curb stones at u < 0.06.
+  static fs.PhysicallyBasedMaterial get sidewalk =>
+      _sidewalk ??= _CitySurfaceMaterial()
+        ..baseColorTexture = CityTextures.sidewalkStrip
+        ..baseColorFactor = vm.Vector4(1, 1, 1, 1)
+        ..roughnessFactor = 1.0
+        ..metallicFactor = 0.0;
+
   /// Drop the cached materials so a texture reload rebinds.
   static void reset() {
     _facade = null;
@@ -86,6 +95,7 @@ class CityMaterials {
     _road = null;
     _dirt = null;
     _alley = null;
+    _sidewalk = null;
   }
 }
 

@@ -31,6 +31,7 @@ class CityTextures {
   static Object? roadStrip;
   static Object? alleyStrip;
   static Object? dirtStrip;
+  static Object? sidewalkStrip;
 
   static Future<void>? _loading;
 
@@ -41,7 +42,8 @@ class CityTextures {
       groundPalette != null &&
       roadStrip != null &&
       alleyStrip != null &&
-      dirtStrip != null;
+      dirtStrip != null &&
+      sidewalkStrip != null;
 
   static Future<void> load() => _loading ??= () async {
         facade = _upload(CityTextureBakes.facade(facadeSize), facadeSize);
@@ -59,6 +61,8 @@ class CityTextures {
         alleyStrip =
             _upload(CityTextureBakes.alleyStrip(glassSize), glassSize);
         dirtStrip = _upload(CityTextureBakes.dirtStrip(glassSize), glassSize);
+        sidewalkStrip =
+            _upload(CityTextureBakes.sidewalkStrip(glassSize), glassSize);
       }();
 
   static bool mipmapped = false;

@@ -125,6 +125,9 @@ class StreetFurniture {
     int budget = 1 << 30,
     List<(Vector3, double)>? treesOut,
     List<(Vector3, double)>? shrubsOut,
+    // Radial lift for every placement — the height of the raised sidewalk
+    // the furniture stands on, zero when the pavement is bare ground.
+    double liftM = 0,
   }) {
     if (!enabled || !cls.hasPavement || pts.length < 2 || budget <= 0) return 0;
     var placed = 0;
@@ -148,7 +151,7 @@ class StreetFurniture {
             final across = dir.cross(up).normalized * side;
             final prop = _bag[rnd.nextInt(_bag.length)];
             final off = halfWidthM + pavementM * prop.curbFraction;
-            final spot = at + across * off;
+            final spot = at + across * off + up * liftM;
             if (prop == StreetProp.streetTree && treesOut != null) {
               treesOut.add((spot, rnd.nextDouble() * math.pi * 2));
             } else {

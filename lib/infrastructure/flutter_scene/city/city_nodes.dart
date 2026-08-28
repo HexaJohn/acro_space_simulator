@@ -328,6 +328,17 @@ class CityNodes {
   /// block — the same 1 MiB / 16,384-mat4 ceiling the scatter batches hit.
   static const int _maxPerDraw = 14000;
 
+  /// Curb reveal: how far the sidewalk stands above the carriageway. 150 mm
+  /// is the real standard, and it is the "subtle elevation difference" that
+  /// makes a street read as built rather than painted.
+  static const double kCurbHeightM = 0.15;
+
+  /// The carriageway ribbon's own lift over the graded ground ([_ribbonFor]).
+  static const double _ribbonLiftM = 0.12;
+
+  /// Where the walk surface sits: the ribbon's lift plus the curb reveal.
+  static const double _walkTopLiftM = _ribbonLiftM + kCurbHeightM;
+
   void update(
     WorldSnapshot snap,
     FloatingOrigin origin, {
@@ -1272,6 +1283,41 @@ class CityNodes {
     var curbCars = 240;
     final lampSolid = MeshBuilder();
     final lampGlow = MeshBuilder();
+    final walkRibbon = MeshBuilder();
+
+    // Widest carriageway meeting each road END, so a sidewalk can stop short
+    // of its crossing instead of bridging the intersecting street. Legs split
+    // from one crossing land on (nearly) the same point — the junction pass
+    // tolerates 8 m of drift — so a coarse quantised key groups them. The
+    // count says whether anything ELSE meets there: a dead end keeps its
+    // pavement all the way to the kerb line.
+    final endHalf = <int, (double, int)>{};
+    int endKey(Vector3 p) => Object.hash(
+        (p.x / 10).round(), (p.y / 10).round(), (p.z / 10).round());
+    for (final road in roads) {
+      final cls = RoadClass
+          .values[road.roadClassIndex.clamp(0, RoadClass.values.length - 1)];
+      if (cls.isElevated || road.points.length < 6) continue;
+      final n = road.points.length;
+      for (final p in [
+        Vector3(road.points[0], road.points[1], road.points[2]) - anchorBF,
+        Vector3(road.points[n - 3], road.points[n - 2], road.points[n - 1]) -
+            anchorBF,
+      ]) {
+        final k = endKey(p);
+        final prev = endHalf[k];
+        endHalf[k] = prev == null
+            ? (road.halfWidthM, 1)
+            : (math.max(prev.$1, road.halfWidthM), prev.$2 + 1);
+      }
+    }
+    // How far a sidewalk stops before this end: past the junction plate
+    // (r = widest * 1.45) and its zebra (5 m past the bar). Zero at an end
+    // nothing else meets.
+    double pullAt(Vector3 endPt) {
+      final e = endHalf[endKey(endPt)];
+      return e == null || e.$2 <= 1 ? 0.0 : e.$1 * 1.45 + 5.5;
+    }
 
     for (final road in roads) {
       final pts = <Vector3>[];
@@ -1311,9 +1357,18 @@ class CityNodes {
           pts,
           road.halfWidthM,
           anchorBF);
+      // Raised pavements with a curb face, on anything that has a pavement
+      // to raise. Not on a sealed world — pedestrians there travel in the
+      // tube, and an open sidewalk in vacuum is set dressing for nobody.
+      final walked = paved && cls.hasPavement && !road.sealed;
+      if (walked) {
+        _sidewalksFor(walkRibbon, pts, road.halfWidthM, 3.0, anchorBF,
+            pullStart: pullAt(pts.first), pullEnd: pullAt(pts.last));
+      }
       // Nobody lights a dirt track, and nobody lights an alley either.
       if (paved && cls.hasPavement) {
-        _lampsFor(lampSolid, lampGlow, pts, road, anchorBF);
+        _lampsFor(lampSolid, lampGlow, pts, road, anchorBF,
+            liftM: walked ? _walkTopLiftM : 0.0);
       }
       if (propBudget > 0) {
         propBudget -= StreetFurniture.emit(
@@ -1324,6 +1379,8 @@ class CityNodes {
           cls: cls,
           halfWidthM: road.halfWidthM,
           pavementM: 3.0,
+          // Furniture stands on the raised walk now, not on the bare drape.
+          liftM: walked ? _walkTopLiftM : 0.0,
           // A RoadSnapshot carries no id — it is pure geometry on the wire —
           // so the seed comes from the geometry itself. Stable frame to frame
           // for a road that has not been redrawn, which is what keeps the
@@ -1366,6 +1423,7 @@ class CityNodes {
       (ribbon, CityMaterials.road),
       (dirtRibbon, CityMaterials.dirt),
       (alleyRibbon, CityMaterials.alley),
+      (walkRibbon, CityMaterials.sidewalk),
       (airDeck, CityMaterials.road),
       (airSolid, CityMaterials.facade),
       (airGlow, CityMaterials.glazing),
@@ -1506,6 +1564,92 @@ class CityNodes {
       }
       prevL = l;
       prevR = r;
+    }
+  }
+
+  /// Raised pavements with a real curb face, one strip each side.
+  ///
+  /// The walk rides [kCurbHeightM] above the carriageway ribbon, a vertical
+  /// curb face closes the step, and both ends pull back so the strip stops
+  /// at its crossing instead of bridging the intersecting street — the gap
+  /// is where the curb cut and the zebra live. U samples the sidewalk tile
+  /// across the walk (curb stones under 0.06, flags above); the curb face
+  /// wraps the same curb band down its vertical.
+  static void _sidewalksFor(
+    MeshBuilder m,
+    List<Vector3> pts,
+    double halfWidth,
+    double pavementM,
+    Vector3 anchorBF, {
+    double pullStart = 0,
+    double pullEnd = 0,
+  }) {
+    var total = 0.0;
+    for (var i = 1; i < pts.length; i++) {
+      total += (pts[i] - pts[i - 1]).length;
+    }
+    // Keep a real run of pavement mid-block or draw none at all.
+    pullStart = math.min(pullStart, total * 0.45);
+    pullEnd = math.min(pullEnd, total * 0.45);
+    if (total - pullStart - pullEnd < 5.0) return;
+
+    // Trim the centreline to the kept span, interpolating the cut points.
+    final kept = <Vector3>[];
+    final endAt = total - pullEnd;
+    if (pullStart <= 0) kept.add(pts.first);
+    var d = 0.0;
+    for (var i = 1; i < pts.length; i++) {
+      final seg = pts[i] - pts[i - 1];
+      final len = seg.length;
+      if (len < 1e-6) continue;
+      final d0 = d;
+      d += len;
+      if (d0 < pullStart && d > pullStart) {
+        kept.add(pts[i - 1] + seg * ((pullStart - d0) / len));
+      }
+      if (d > pullStart && d < endAt) {
+        kept.add(pts[i]);
+      } else if (d0 < endAt && d >= endAt) {
+        kept.add(pts[i - 1] + seg * ((endAt - d0) / len));
+        break;
+      }
+    }
+    if (kept.length < 2) return;
+
+    for (final s in const [-1.0, 1.0]) {
+      int? pIn, pOut, pCurbT, pCurbB;
+      var v = 0.0;
+      for (var i = 0; i < kept.length; i++) {
+        final p = kept[i];
+        final up = (p + anchorBF).normalized;
+        final ahead = i + 1 < kept.length ? kept[i + 1] - p : p - kept[i - 1];
+        final along = ahead.length > 1e-6 ? ahead.normalized : Vector3.unitX;
+        final side = along.cross(up).normalized;
+        if (i > 0) v += (p - kept[i - 1]).length / 9.6; // four flags a tile
+        final inner = p + side * (halfWidth * s);
+        final outer = p + side * ((halfWidth + pavementM) * s);
+        // The face looks at the carriageway.
+        final curbN = side * -s;
+        final iIn = m.vertex(_scenePos(inner + up * _walkTopLiftM), up, 0.03, v);
+        final iOut = m.vertex(_scenePos(outer + up * _walkTopLiftM), up, 0.97, v);
+        final iCt = m.vertex(_scenePos(inner + up * _walkTopLiftM), curbN, 0.03, v);
+        final iCb = m.vertex(_scenePos(inner + up * _ribbonLiftM), curbN, 0.055, v);
+        if (pIn != null) {
+          // Winding follows [_ribbonFor]'s convention; the s < 0 strip runs
+          // its edges the other way round, so the order flips with it.
+          if (s > 0) {
+            m.quad(pIn, pOut!, iOut, iIn);
+            m.quad(pCurbB!, pCurbT!, iCt, iCb);
+          } else {
+            m.quad(pOut!, pIn, iIn, iOut);
+            m.quad(pCurbT!, pCurbB!, iCb, iCt);
+          }
+        }
+        pIn = iIn;
+        pOut = iOut;
+        pCurbT = iCt;
+        pCurbB = iCb;
+      }
     }
   }
 
@@ -1694,8 +1838,9 @@ class CityNodes {
     MeshBuilder glow,
     List<Vector3> pts,
     RoadSnapshot road,
-    Vector3 anchorBF,
-  ) {
+    Vector3 anchorBF, {
+    double liftM = 0,
+  }) {
     final scale = road.halfWidthM / 4.0; // street half-width is 4 m
     final spacing = 34.0 * math.sqrt(math.max(scale, 0.25));
     final height = 9.0 * math.sqrt(math.max(scale, 0.25));
@@ -1714,7 +1859,9 @@ class CityNodes {
       final side = along.cross(up).normalized;
       final offset = road.halfWidthM + 1.2;
       for (final s in both ? const [1.0, -1.0] : [flip]) {
-        final base = p + side * (offset * s) + up * 0.1;
+        // On the raised walk when there is one — a column standing on the
+        // old bare-drape height would float a curb's worth over the flags.
+        final base = p + side * (offset * s) + up * (0.1 + liftM);
         _column(solid, base, up, along, height);
         _head(glow, base + up * height, up, along);
       }
