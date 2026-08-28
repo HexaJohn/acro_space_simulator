@@ -42,6 +42,7 @@ import '../../../domain/shared/quaternion.dart';
 import '../../../domain/shared/vector3.dart';
 import '../../../domain/universe/real_solar_system.dart';
 import '../../../domain/universe/star_system.dart';
+import '../../flutter_scene/atmosphere_nodes.dart';
 import '../../flutter_scene/city/city_nodes.dart';
 import '../../../domain/architecture/building_generator.dart';
 import '../../../domain/terrain/terrain_field.dart';
@@ -88,6 +89,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   final List<fs.Node> _rigNodes = [];
   bool _showRig = true;
   TerrainNodes? _terrain;
+  AtmosphereNodes? _atmo;
 
   /// The terrain shader and its material tiles. Static and shared: the same
   /// two futures the flight renderer awaits, so the studio draws the SAME
@@ -95,6 +97,9 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   static final Future<void> _terrainInit = Future.wait([
     TerrainNodes.loadShader(),
     TerrainNodes.loadTextures(),
+    // The same raymarched sky the flight scene flies through — same shader,
+    // same per-body styles — so the studio's daylight is the game's.
+    AtmosphereNodes.loadShader(),
   ]);
 
   /// Everything the scene needs before it can draw, as ONE future built once.
@@ -109,6 +114,12 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   CitySim? _sim;
   WorldSnapshot? _snap;
   final FloatingOrigin _origin = FloatingOrigin();
+
+  /// Hours the sun is turned about the body's spin axis, relative to the
+  /// moment the site was captured. The generator picks whatever time of day
+  /// the epoch happens to land on — which is night half the time — so each
+  /// generate resets this to local midday and the slider takes it from there.
+  double _sunTurnH = 0;
   Vector3 _anchorWorld = Vector3.zero;
 
   /// LOCAL up at the colony — the radial from the body's centre through it.
@@ -435,6 +446,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       _fault = null;
       _sim = sim;
       _snap = snap;
+      _sunTurnH = _middayTurnH(snap, sim);
       _busy = false;
       _distanceM = math.max(600, _spec.extentM * 1.5);
       _lastStats = '${sim.cityLat.toStringAsFixed(1)}°, '
@@ -488,6 +500,141 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       _sim = sim;
       _snap = snap;
     });
+  }
+
+  // ---- Sun and sky -------------------------------------------------------
+
+  /// The frame's star body id, from its descriptor. Null before the first
+  /// generate or on a frame without descriptors.
+  String? _starId(WorldSnapshot frame) {
+    for (final e in frame.descriptors.entries) {
+      if (e.value.kind == BodyKind.star) return e.key;
+    }
+    return null;
+  }
+
+  Vector3? _starWorld(WorldSnapshot frame) {
+    final star = frame.bodies[_starId(frame)];
+    return star == null ? null : Vector3(star.px, star.py, star.pz);
+  }
+
+  /// The frame with its star swung [_sunTurnH] hours about the body's spin
+  /// axis. Moving the star IN the frame — rather than overriding a light
+  /// direction — is what keeps every consumer honest at once: the terrain
+  /// shader, the atmosphere raymarch, and the city's window night-factor all
+  /// derive their sun from the frame's own star body.
+  WorldSnapshot _withSunTurned(WorldSnapshot frame) {
+    if (_sunTurnH.abs() < 1e-3) return frame;
+    final body = frame.bodies[_sim?.body.id.value];
+    final starId = _starId(frame);
+    final star = starId == null ? null : frame.bodies[starId];
+    if (body == null || star == null) return frame;
+
+    final axis =
+        Quaternion(body.qw, body.qx, body.qy, body.qz).rotate(Vector3.unitZ);
+    final angle = 2 * math.pi * _sunTurnH / 24.0;
+    final centre = Vector3(body.px, body.py, body.pz);
+    final turned = Quaternion.axisAngle(axis, angle)
+            .rotate(Vector3(star.px, star.py, star.pz) - centre) +
+        centre;
+
+    final bodies = Map<String, BodySnapshot>.of(frame.bodies);
+    bodies[starId!] = BodySnapshot(
+      id: star.id,
+      px: turned.x,
+      py: turned.y,
+      pz: turned.z,
+      qw: star.qw,
+      qx: star.qx,
+      qy: star.qy,
+      qz: star.qz,
+      radius: star.radius,
+      orbit: star.orbit,
+    );
+    return WorldSnapshot(
+      tick: frame.tick,
+      vessels: frame.vessels,
+      epoch: frame.epoch,
+      bodies: bodies,
+      buildings: frame.buildings,
+      roads: frame.roads,
+      patches: frame.patches,
+      descriptors: frame.descriptors,
+      events: frame.events,
+      terrainEdits: frame.terrainEdits,
+      megastructures: frame.megastructures,
+    );
+  }
+
+  /// Intensity tuned against the tonemapper — the flight scene's number, for
+  /// the flight scene's reason (see SceneSync._sunIntensity).
+  static const double _sunIntensity = 2.2;
+
+  /// The directional sun, plus shadows when the camera is low enough for
+  /// there to be ground in frame to receive them. A trimmed copy of
+  /// SceneSync's sun: aimed from the frame's star through the colony, light
+  /// travelling AWAY from the star.
+  void _syncSun(fs.Scene scene, WorldSnapshot frame, Vector3? starWorld) {
+    vm.Vector3 dir;
+    if (starWorld == null) {
+      dir = vm.Vector3(-1.0, -0.2, -0.1);
+    } else {
+      final rel = _origin.worldToRel(starWorld);
+      final len = rel.length;
+      dir = len < 1.0
+          ? vm.Vector3(-1.0, -0.2, -0.1)
+          : vm.Vector3(-rel.x / len, -rel.y / len, -rel.z / len);
+    }
+    var light = scene.directionalLight;
+    if (light == null) {
+      light = fs.DirectionalLight(direction: dir, intensity: _sunIntensity);
+      scene.directionalLight = light;
+    } else {
+      light.direction = dir;
+      light.intensity = _sunIntensity;
+    }
+
+    // Altitude above the COLONY's ground shell, not the datum — the anchor
+    // stands on the real ground, which can sit hundreds of metres off datum.
+    final eyeWorld = _anchorWorld + _cameraEyeM();
+    final groundR = (_anchorWorld - _bodyCentreWorld).length;
+    final altM = (eyeWorld - _bodyCentreWorld).length - groundR;
+    if (groundR < 1 || altM > 8000) {
+      light.castsShadow = false;
+      return;
+    }
+    // The flight scene's landing-shadow tuning, verbatim — same renderer,
+    // same texel maths (see SceneSync._tuneShadows for each number's story).
+    light.castsShadow = true;
+    light.shadowCasterFaces = fs.ShadowCasterFaces.back;
+    final rangeM = (altM * 3.0 + 300.0).clamp(300.0, 6000.0);
+    light.shadowMaxDistance = lengthToScene(rangeM);
+    light.shadowFadeRange = lengthToScene(rangeM * 0.12);
+    light.shadowMapResolution = 2048;
+    light.shadowSoftness = lengthToScene(1.5);
+    light.shadowNormalBias = lengthToScene(1.0);
+    light.shadowDepthBias = lengthToScene(1.0);
+  }
+
+  /// Hours that put the sun at local NOON over the colony: the turn that
+  /// swings the star's around-the-axis component onto the site's. Every
+  /// generate lands at whatever time of day the epoch dictates — night, half
+  /// the time — and a studio that opens on a black screen reads as broken,
+  /// not as accurate.
+  double _middayTurnH(WorldSnapshot snap, CitySim sim) {
+    final body = snap.bodies[sim.body.id.value];
+    final star = snap.bodies[_starId(snap)];
+    if (body == null || star == null) return 0;
+    final axis =
+        Quaternion(body.qw, body.qx, body.qy, body.qz).rotate(Vector3.unitZ);
+    final centre = Vector3(body.px, body.py, body.pz);
+    final s = Vector3(star.px, star.py, star.pz) - centre;
+    final sPerp = s - axis * s.dot(axis);
+    final uPerp = _upWorld - axis * _upWorld.dot(axis);
+    if (sPerp.length < 1e-6 || uPerp.length < 1e-6) return 0;
+    final a = sPerp.normalized, b = uPerp.normalized;
+    final theta = math.atan2(axis.dot(a.cross(b)), a.dot(b));
+    return theta * 24.0 / (2 * math.pi);
   }
 
   /// A tangent basis at the colony: east and north on its own ground plane.
@@ -700,9 +847,13 @@ class _CityStudioScreenState extends State<CityStudioScreen>
           return const Center(
               child: CircularProgressIndicator(color: AppTheme.accent2));
         }
-        final scene = _scene ??= fs.Scene();
+        // Ambient IBL down to the flight scene's level: at the default 1.0
+        // everything is washed in white and the directional sun cannot show
+        // a lit side — the same lesson SceneSync already carries.
+        final scene = _scene ??= (fs.Scene()..environmentIntensity = 0.05);
         _city ??= CityNodes(scene);
         _terrain ??= TerrainNodes(scene);
+        _atmo ??= AtmosphereNodes(scene);
 
         return ValueListenableBuilder<double>(
           valueListenable: _epoch,
@@ -718,7 +869,11 @@ class _CityStudioScreenState extends State<CityStudioScreen>
         if (snap != null) {
           // Advance the frame's clock so the traffic pass has something to
           // move against — it derives vehicle positions from the epoch.
-          final frame = snap.copyWithEpoch(epoch);
+          // Then turn the sun: everything downstream — terrain shading, the
+          // atmosphere, the city's night factor — reads the star out of the
+          // FRAME, so moving it in the frame is what keeps them agreeing.
+          final frame = _withSunTurned(snap.copyWithEpoch(epoch));
+          final starWorld = _starWorld(frame);
           // Ground FIRST: the colony is cut into it, and without it the city
           // hangs in space with its levelled pads describing nothing.
           final sw = Stopwatch()..start();
@@ -730,6 +885,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
                     cameraEye: _cameraEyeM(),
                     camera: null,
                     focusBodyId: _bodyIdOfFrame(frame),
+                    starWorld: starWorld,
                   ));
           _terrainMs = sw.elapsedMicroseconds / 1000;
           sw.reset();
@@ -743,6 +899,11 @@ class _CityStudioScreenState extends State<CityStudioScreen>
               () => _city!.update(frame, _origin,
                   focusWorld: _anchorWorld + _cameraEyeM()));
           _cityMs = sw.elapsedMicroseconds / 1000;
+          _phase('sun', () => _syncSun(scene, frame, starWorld));
+          _phase(
+              'atmosphere',
+              () => _atmo!.update(frame, _origin,
+                  cameraEye: _cameraEyeM(), starWorld: starWorld));
           _phase('scale rig', () => _syncRig(scene));
         }
 
@@ -1075,6 +1236,25 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             ),
             Text('$_seed', style: AppTheme.mono),
           ]),
+          const SizedBox(height: 8),
+          const Text('LIGHTING', style: AppTheme.heading),
+          _slider('Sun time', _sunTurnH, -12, 12,
+              'Hours around the captured moment. Each generate resets this '
+                  'to local noon; drag for golden hour, night, and the '
+                  'windows coming on.',
+              (v) => setState(() => _sunTurnH = v), unit: 'h'),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            value: !AtmosphereNodes.hidden,
+            activeThumbColor: AppTheme.accent2,
+            title: const Text('Atmosphere', style: AppTheme.body),
+            subtitle: Text(
+                'The flight scene\'s raymarched sky. Airless worlds keep '
+                    'their black one either way.',
+                style: AppTheme.dim.copyWith(fontSize: 11)),
+            onChanged: (v) => setState(() => AtmosphereNodes.hidden = !v),
+          ),
           const SizedBox(height: 8),
           const Text('TERRAIN COST', style: AppTheme.heading),
           Text('A city hands the terrain one brush per building, and each one '
