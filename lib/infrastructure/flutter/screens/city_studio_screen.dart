@@ -578,10 +578,22 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   /// the flight scene's reason (see SceneSync._sunIntensity).
   static const double _sunIntensity = 2.2;
 
+  /// The nighttime city's own glow, standing in for the sun once it sets.
+  static const double _skyglowIntensity = 0.5;
+
   /// The directional sun, plus shadows when the camera is low enough for
   /// there to be ground in frame to receive them. A trimmed copy of
   /// SceneSync's sun: aimed from the frame's star through the colony, light
   /// travelling AWAY from the star.
+  ///
+  /// At night the same light changes job: a lit city throws its street and
+  /// window light into the air and the air throws it back down, so a real
+  /// night city is shaped by a soft warm wash from ZENITH, not by nothing.
+  /// A true GI pass would bounce every lamp; one dim warm skyglow light and
+  /// a raised ambient floor is the honest forgery, and it is what stops a
+  /// night colony reading as unlit geometry with lit windows painted on.
+  /// Blended on the city's own night factor, so it fades in exactly as the
+  /// windows come on.
   void _syncSun(fs.Scene scene, WorldSnapshot frame, Vector3? starWorld) {
     vm.Vector3 dir;
     if (starWorld == null) {
@@ -593,21 +605,35 @@ class _CityStudioScreenState extends State<CityStudioScreen>
           ? vm.Vector3(-1.0, -0.2, -0.1)
           : vm.Vector3(-rel.x / len, -rel.y / len, -rel.z / len);
     }
+    final night = CityMaterials.nightFactor.clamp(0.0, 1.0);
+    if (night > 0) {
+      final down = vm.Vector3(-_upWorld.x, -_upWorld.y, -_upWorld.z);
+      dir = (dir * (1.0 - night) + down * night).normalized();
+    }
     var light = scene.directionalLight;
     if (light == null) {
       light = fs.DirectionalLight(direction: dir, intensity: _sunIntensity);
       scene.directionalLight = light;
     } else {
       light.direction = dir;
-      light.intensity = _sunIntensity;
     }
+    light.intensity =
+        _sunIntensity * (1.0 - night) + _skyglowIntensity * night;
+    // Sodium-and-LED warm, only as the glow takes over from the white sun.
+    light.color = vm.Vector3(
+        1.0, 1.0 - 0.16 * night, 1.0 - 0.38 * night);
+    // The ambient floor rises with the glow: skylight scatters everywhere,
+    // including the canyon walls a zenith light cannot reach.
+    scene.environmentIntensity = 0.05 + 0.13 * night;
 
     // Altitude above the COLONY's ground shell, not the datum — the anchor
     // stands on the real ground, which can sit hundreds of metres off datum.
     final eyeWorld = _anchorWorld + _cameraEyeM();
     final groundR = (_anchorWorld - _bodyCentreWorld).length;
     final altM = (eyeWorld - _bodyCentreWorld).length - groundR;
-    if (groundR < 1 || altM > 8000) {
+    // Deep night: the glow comes from everywhere, so a sharp shadow from one
+    // direction would be the tell that it is fake. Drop the pass.
+    if (groundR < 1 || altM > 8000 || night > 0.6) {
       light.castsShadow = false;
       return;
     }

@@ -1253,11 +1253,12 @@ class CityNodes {
     final propSolid = MeshBuilder();
     final propGlow = MeshBuilder();
     var propBudget = 2600;
-    // Street-tree pits, collected here and drawn as INSTANCES of the scatter
-    // system's broadleaf — the same prop, materials and atlas the wild ones
-    // use, so a street tree and a forest tree agree about what a tree is.
-    // Airless worlds plant nothing.
+    // Street-tree pits and planter soil lines, collected here and drawn as
+    // INSTANCES of the scatter system's props — the same generators,
+    // materials and atlas the wild ones use, so a street tree and a forest
+    // tree agree about what a tree is. Airless worlds plant nothing.
     final treePits = <(Vector3, double)>[];
+    final shrubPits = <(Vector3, double)>[];
     // Every road END, with the point just inside it (for the leg direction).
     // Roads are already SPLIT at their crossings, so an intersection is simply
     // a place where three or more ends meet — the topology is there, it had
@@ -1331,6 +1332,7 @@ class CityNodes {
               road.points.length, road.roadClassIndex),
           budget: propBudget,
           treesOut: treePits,
+          shrubsOut: shrubPits,
         );
       }
       // Only signalised classes contribute junction legs. An alley meeting a
@@ -1391,40 +1393,48 @@ class CityNodes {
       _roadDrawCalls++;
     }
 
-    _emitStreetTrees(treePits, bodyId: bodyId, anchorBF: anchorBF);
+    _emitStreetFlora(PropKind.broadleafTree, streetTreeHeightM, treePits,
+        bodyId: bodyId, anchorBF: anchorBF);
+    _emitStreetFlora(PropKind.shrub, planterShrubHeightM, shrubPits,
+        bodyId: bodyId, anchorBF: anchorBF);
   }
 
   /// Height a street tree is grown at. Real pollarded street stock runs
   /// 7-10 m; the wild broadleaf default is taller.
   static double streetTreeHeightM = 8.0;
 
-  /// Whether the scatter atlas is still uploading (see [_emitStreetTrees]).
+  /// What grows in a planter: a shrub about knee-to-waist high over the rim.
+  static double planterShrubHeightM = 0.7;
+
+  /// Whether the scatter atlas is still uploading (see [_emitStreetFlora]).
   bool _floraPending = false;
 
-  /// Street trees as INSTANCES of the scatter system's broadleaf prop — the
-  /// same generator, LODs, bark and foliage the wild trees use, so a street
-  /// tree and a forest tree agree about what a tree is. They ride the road
-  /// pass: planted off the road polylines, static while a colony grows.
-  void _emitStreetTrees(
+  /// Street planting as INSTANCES of the scatter system's props — the same
+  /// generators, LODs, bark and foliage atlas the wild ones use, so a street
+  /// tree and a forest tree agree about what a tree is. Rides the road pass:
+  /// planted off the road polylines, static while a colony grows.
+  void _emitStreetFlora(
+    PropKind kind,
+    double sizeM,
     List<(Vector3, double)> pits, {
     required String bodyId,
     required Vector3 anchorBF,
   }) {
-    // A tree stands in vacuum nowhere. The pits are still COLLECTED on a
+    // A plant stands in vacuum nowhere. The pits are still COLLECTED on a
     // sealed world so the furniture draw sequence stays identical either
     // way; they are simply not planted.
     if (pits.isEmpty || sealedWorld) return;
     final lib = ScatterPropLibrary.instance;
     if (!ScatterPropLibrary.texturesReady) {
-      // First colony of a session races the atlas. Skip the trees this build;
-      // update() re-keys the road pass when the upload lands.
+      // First colony of a session races the atlas. Skip the planting this
+      // build; update() re-keys the road pass when the upload lands.
       unawaited(ScatterPropLibrary.loadTextures());
       _floraPending = true;
       return;
     }
 
-    // Group per pre-grown variant, so the whole colony's trees are at most
-    // four bark draws and four canopy draws.
+    // Group per pre-grown variant, so a whole colony's planting is at most
+    // four solid draws and four foliage draws per kind.
     final byVariant = <int, List<vm.Matrix4>>{};
     for (final (at, yaw) in pits) {
       final up = (at + anchorBF).normalized;
@@ -1448,9 +1458,8 @@ class CityNodes {
     }
 
     byVariant.forEach((variant, transforms) {
-      final prop = lib.get(PropKind.broadleafTree,
-          seed: ScatterPropLibrary.variantSeeds[variant],
-          sizeM: streetTreeHeightM);
+      final prop = lib.get(kind,
+          seed: ScatterPropLibrary.variantSeeds[variant], sizeM: sizeM);
       for (final (geometry, material) in [
         (prop.solidFor(PropLod.lod1), lib.barkMaterial),
         (prop.foliageFor(PropLod.lod1), lib.foliageMaterial),

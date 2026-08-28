@@ -108,6 +108,11 @@ class StreetFurniture {
   /// one into this per-colony mesh would cost more than the buildings behind
   /// it. Null falls back to the box stand-in (headless callers and tests).
   /// Each entry is the pit position in anchor-relative metres plus a yaw.
+  ///
+  /// [shrubsOut] is the same deal for what grows in the planters: the box pot
+  /// is still meshed here, and the mounded-box "planting" on its rim becomes
+  /// a placement (at the soil line, inside the pot) for the caller to draw as
+  /// the scatter shrub.
   static int emit(
     MeshBuilder solid,
     MeshBuilder glow, {
@@ -119,6 +124,7 @@ class StreetFurniture {
     required int seed,
     int budget = 1 << 30,
     List<(Vector3, double)>? treesOut,
+    List<(Vector3, double)>? shrubsOut,
   }) {
     if (!enabled || !cls.hasPavement || pts.length < 2 || budget <= 0) return 0;
     var placed = 0;
@@ -142,11 +148,16 @@ class StreetFurniture {
             final across = dir.cross(up).normalized * side;
             final prop = _bag[rnd.nextInt(_bag.length)];
             final off = halfWidthM + pavementM * prop.curbFraction;
+            final spot = at + across * off;
             if (prop == StreetProp.streetTree && treesOut != null) {
-              treesOut.add((at + across * off, rnd.nextDouble() * math.pi * 2));
+              treesOut.add((spot, rnd.nextDouble() * math.pi * 2));
             } else {
-              _place(prop.glazed ? glow : solid, prop, at + across * off, dir,
-                  up, rnd);
+              _place(prop.glazed ? glow : solid, prop, spot, dir, up, rnd,
+                  barePlanter: shrubsOut != null);
+              if (prop == StreetProp.planter && shrubsOut != null) {
+                shrubsOut.add((spot + up * (prop.heightM * 0.85),
+                    rnd.nextDouble() * math.pi * 2));
+              }
             }
             placed++;
           }
@@ -159,7 +170,8 @@ class StreetFurniture {
   }
 
   static void _place(MeshBuilder m, StreetProp prop, Vector3 at, Vector3 along,
-      Vector3 up, math.Random rnd) {
+      Vector3 up, math.Random rnd,
+      {bool barePlanter = false}) {
     switch (prop) {
       case StreetProp.streetTree:
         // Trunk plus two canopy slabs. Not the scatter system's tree: a street
@@ -198,9 +210,12 @@ class StreetFurniture {
       case StreetProp.planter:
         OrientedBox.upright(
             m, at, along, up, prop.widthM, prop.depthM, prop.heightM);
-        // Planting, mounded above the rim.
-        OrientedBox.upright(m, at + up * prop.heightM, along, up,
-            prop.widthM * 0.86, prop.depthM * 0.86, 0.45);
+        // Planting, mounded above the rim — unless the caller is growing a
+        // real shrub in the pot instead (see [emit]'s shrubsOut).
+        if (!barePlanter) {
+          OrientedBox.upright(m, at + up * prop.heightM, along, up,
+              prop.widthM * 0.86, prop.depthM * 0.86, 0.45);
+        }
       case StreetProp.hydrant:
         OrientedBox.upright(m, at, along, up, 0.3, 0.3, 0.6);
         OrientedBox.upright(m, at + up * 0.6, along, up, 0.38, 0.38, 0.16);
