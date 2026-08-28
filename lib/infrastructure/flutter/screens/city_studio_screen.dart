@@ -44,6 +44,7 @@ import '../../../domain/universe/real_solar_system.dart';
 import '../../../domain/universe/star_system.dart';
 import '../../flutter_scene/atmosphere_nodes.dart';
 import '../../flutter_scene/city/city_nodes.dart';
+import '../../flutter_scene/scatter/scatter_prop_library.dart';
 import '../../../domain/architecture/building_generator.dart';
 import '../../../domain/terrain/terrain_field.dart';
 import '../../flutter_scene/city/city_materials.dart';
@@ -100,6 +101,8 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     // The same raymarched sky the flight scene flies through — same shader,
     // same per-body styles — so the studio's daylight is the game's.
     AtmosphereNodes.loadShader(),
+    // Bark and foliage: street trees are the scatter system's broadleaf.
+    ScatterPropLibrary.loadTextures(),
   ]);
 
   /// Everything the scene needs before it can draw, as ONE future built once.
@@ -148,8 +151,13 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   /// Eye height. The same 1.7 m the scale rig stands a person at, so the two
   /// agree about what human scale is.
   static const double _eyeHeightM = 1.7;
-  static const double _walkSpeedMs = 6.0;
-  static const double _runSpeedMs = 22.0;
+
+  /// Brisk-walk and hard-run speeds. Real ones (a stroll is 1.4 m/s), give or
+  /// take a nudge for a tool — the old 6 and 22 crossed a block in four
+  /// seconds, and nothing sells "the blocks are too small" like moving
+  /// through them at forty miles an hour.
+  static const double _walkSpeedMs = 2.0;
+  static const double _runSpeedMs = 8.0;
 
   final Set<LogicalKeyboardKey> _held = {};
 

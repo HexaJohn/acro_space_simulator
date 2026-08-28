@@ -39,7 +39,7 @@ class CityGenSpec {
     this.blocksAcross = 4,
     this.blockM = 220,
     this.blockDepthM = 104,
-    this.frontageM = 24,
+    this.frontageM = 30,
     this.lotDepthM = 46,
     this.bendM = 34,
     this.buildFraction = 0.85,
@@ -73,6 +73,12 @@ class CityGenSpec {
   final double blockDepthM;
 
   /// Lot frontage along the street.
+  ///
+  /// 30 m is deliberately BIG against a real single lot (Chicago plats 7.6 m
+  /// residential): a generated parcel is the merged assemblage a real tall
+  /// building sits on, and the tower fraction is taken off this number. At
+  /// 24 m every high-density shaft came out 12-16 m across — pencil towers,
+  /// forty storeys on a footprint the size of a house.
   final double frontageM;
 
   /// Maximum lot depth. Wants to be a little more than half the block's short

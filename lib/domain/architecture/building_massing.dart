@@ -392,42 +392,118 @@ class BuildingMassingRules {
         floors: floors,
       ));
     } else {
-      // Podium and tower. Real tall buildings step back above their base, and
-      // the step is what stops a generated skyline reading as a bar chart.
+      // Three tall profiles, drawn per building. One profile for every tower
+      // — the podium-and-setback — made a downtown read as a tray of the
+      // same wedding cake at different heights, and the 0.52-0.68 tower
+      // fraction on a street-lot footprint made every one of them a pencil.
+      // Real skylines mix straight-extruded slabs, podium towers, and the
+      // stepped ziggurats the 1916 zoning envelope produced — and their
+      // upper shafts hold more of their base than the old fraction allowed.
+      final profile = rnd.nextDouble();
       final podiumFloors = math.min(style.podiumFloors, floors - 1);
       final towerFloors = floors - podiumFloors;
-      final towerW = footW * (0.52 + rnd.nextDouble() * 0.16);
-      final towerD = footD * (0.52 + rnd.nextDouble() * 0.16);
-      volumes.add(MassBox(
-        x: 0,
-        y: buildCentreY,
-        z: 0,
-        width: footW,
-        depth: footD,
-        height: stack(podiumFloors),
-        floors: podiumFloors,
-      ));
-      volumes.add(MassBox(
-        // Offset the tower toward the back of the podium, so the street gets a
-        // set-back frontage rather than a slab straight off the pavement.
-        x: (rnd.nextDouble() - 0.5) * (footW - towerW) * 0.4,
-        y: buildCentreY + (footD - towerD) * 0.18,
-        z: stack(podiumFloors),
-        width: towerW,
-        depth: towerD,
-        height: towerFloors * storey,
-        floors: towerFloors,
-      ));
-      // Rooftop plant.
-      volumes.add(MassBox(
-        x: 0,
-        y: buildCentreY + (footD - towerD) * 0.18,
-        z: stack(floors),
-        width: towerW * 0.45,
-        depth: towerD * 0.45,
-        height: 3.2,
-        glazed: false,
-      ));
+
+      if (profile < 0.34) {
+        // Straight extrusion: the whole footprint straight to the parapet.
+        // The profile of most real mid-rise and plenty of towers.
+        volumes.add(MassBox(
+          x: 0,
+          y: buildCentreY,
+          z: 0,
+          width: footW,
+          depth: footD,
+          height: stack(floors),
+          floors: floors,
+        ));
+        volumes.add(MassBox(
+          x: 0,
+          y: buildCentreY,
+          z: stack(floors),
+          width: footW * 0.4,
+          depth: footD * 0.4,
+          height: 3.2,
+          glazed: false,
+        ));
+      } else if (profile < 0.72) {
+        // Podium and tower: the base holds the street, the shaft steps back.
+        final towerW = footW * (0.62 + rnd.nextDouble() * 0.22);
+        final towerD = footD * (0.62 + rnd.nextDouble() * 0.22);
+        volumes.add(MassBox(
+          x: 0,
+          y: buildCentreY,
+          z: 0,
+          width: footW,
+          depth: footD,
+          height: stack(podiumFloors),
+          floors: podiumFloors,
+        ));
+        volumes.add(MassBox(
+          // Offset the tower toward the back of the podium, so the street
+          // gets a set-back frontage rather than a slab off the pavement.
+          x: (rnd.nextDouble() - 0.5) * (footW - towerW) * 0.4,
+          y: buildCentreY + (footD - towerD) * 0.18,
+          z: stack(podiumFloors),
+          width: towerW,
+          depth: towerD,
+          height: towerFloors * storey,
+          floors: towerFloors,
+        ));
+        volumes.add(MassBox(
+          x: 0,
+          y: buildCentreY + (footD - towerD) * 0.18,
+          z: stack(floors),
+          width: towerW * 0.45,
+          depth: towerD * 0.45,
+          height: 3.2,
+          glazed: false,
+        ));
+      } else {
+        // Ziggurat: two setbacks on the way up, each tier holding most of
+        // the one below. The wedding-cake profile the zoning envelope built.
+        final t1Floors = math.max(1, ((floors - podiumFloors) * 0.55).round());
+        final t2Floors = math.max(1, floors - podiumFloors - t1Floors);
+        final w1 = footW * (0.78 + rnd.nextDouble() * 0.1);
+        final d1 = footD * (0.78 + rnd.nextDouble() * 0.1);
+        final w2 = w1 * (0.68 + rnd.nextDouble() * 0.12);
+        final d2 = d1 * (0.68 + rnd.nextDouble() * 0.12);
+        final back1 = buildCentreY + (footD - d1) * 0.25;
+        volumes.add(MassBox(
+          x: 0,
+          y: buildCentreY,
+          z: 0,
+          width: footW,
+          depth: footD,
+          height: stack(podiumFloors),
+          floors: podiumFloors,
+        ));
+        volumes.add(MassBox(
+          x: 0,
+          y: back1,
+          z: stack(podiumFloors),
+          width: w1,
+          depth: d1,
+          height: t1Floors * storey,
+          floors: t1Floors,
+        ));
+        volumes.add(MassBox(
+          x: 0,
+          y: back1 + (d1 - d2) * 0.25,
+          z: stack(podiumFloors) + t1Floors * storey,
+          width: w2,
+          depth: d2,
+          height: t2Floors * storey,
+          floors: t2Floors,
+        ));
+        volumes.add(MassBox(
+          x: 0,
+          y: back1 + (d1 - d2) * 0.25,
+          z: stack(podiumFloors) + (t1Floors + t2Floors) * storey,
+          width: w2 * 0.45,
+          depth: d2 * 0.45,
+          height: 3.0,
+          glazed: false,
+        ));
+      }
     }
 
     // Industrial sites get their plant on the roof too, plus a loading canopy.

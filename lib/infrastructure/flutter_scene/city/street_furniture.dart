@@ -102,6 +102,12 @@ class StreetFurniture {
   /// [pts] is the centreline in anchor-relative metres; [pavementM] the width
   /// of the footway outside the curb. Returns how many props it placed, so a
   /// caller can hold a budget across a whole colony.
+  ///
+  /// [treesOut] takes street-tree PLACEMENTS instead of geometry: a real tree
+  /// is the scatter system's prop, drawn instanced by the caller, and baking
+  /// one into this per-colony mesh would cost more than the buildings behind
+  /// it. Null falls back to the box stand-in (headless callers and tests).
+  /// Each entry is the pit position in anchor-relative metres plus a yaw.
   static int emit(
     MeshBuilder solid,
     MeshBuilder glow, {
@@ -112,6 +118,7 @@ class StreetFurniture {
     required double pavementM,
     required int seed,
     int budget = 1 << 30,
+    List<(Vector3, double)>? treesOut,
   }) {
     if (!enabled || !cls.hasPavement || pts.length < 2 || budget <= 0) return 0;
     var placed = 0;
@@ -135,8 +142,12 @@ class StreetFurniture {
             final across = dir.cross(up).normalized * side;
             final prop = _bag[rnd.nextInt(_bag.length)];
             final off = halfWidthM + pavementM * prop.curbFraction;
-            _place(prop.glazed ? glow : solid, prop, at + across * off, dir, up,
-                rnd);
+            if (prop == StreetProp.streetTree && treesOut != null) {
+              treesOut.add((at + across * off, rnd.nextDouble() * math.pi * 2));
+            } else {
+              _place(prop.glazed ? glow : solid, prop, at + across * off, dir,
+                  up, rnd);
+            }
             placed++;
           }
           s += pitchM * (0.55 + rnd.nextDouble() * 0.9);

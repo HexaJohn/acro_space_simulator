@@ -26,7 +26,10 @@ import '../../../domain/architecture/building_generator.dart';
 import '../../../domain/colony/city/city_building_spec.dart';
 import '../../../domain/colony/city/parcel.dart';
 import '../../../domain/scatter/mesh_builder.dart';
+import '../../../domain/scatter/prop_catalog.dart';
 import '../../../domain/scatter/prop_mesh.dart';
+import '../../../domain/scatter/prop_model.dart';
+import '../scatter/scatter_prop_library.dart';
 import '../../../domain/shared/quaternion.dart';
 import '../../../domain/shared/vector3.dart';
 import '../../../domain/architecture/architecture_style.dart';
@@ -413,6 +416,12 @@ class CityNodes {
     } else if (_texturesPending) {
       _texturesPending = false;
       CityMaterials.reset();
+    }
+    // Same race for the scatter atlas: a road pass built before it landed
+    // skipped its street trees, so re-key that pass once the upload lands.
+    if (_floraPending && ScatterPropLibrary.texturesReady) {
+      _floraPending = false;
+      _roadsBuiltKey = '';
     }
     CityMaterials.nightFactor = _nightFactorAt(snap, byBody);
 
@@ -1244,6 +1253,11 @@ class CityNodes {
     final propSolid = MeshBuilder();
     final propGlow = MeshBuilder();
     var propBudget = 2600;
+    // Street-tree pits, collected here and drawn as INSTANCES of the scatter
+    // system's broadleaf — the same prop, materials and atlas the wild ones
+    // use, so a street tree and a forest tree agree about what a tree is.
+    // Airless worlds plant nothing.
+    final treePits = <(Vector3, double)>[];
     // Every road END, with the point just inside it (for the leg direction).
     // Roads are already SPLIT at their crossings, so an intersection is simply
     // a place where three or more ends meet — the topology is there, it had
@@ -1316,6 +1330,7 @@ class CityNodes {
           seed: Object.hash(road.points.first, road.points[1],
               road.points.length, road.roadClassIndex),
           budget: propBudget,
+          treesOut: treePits,
         );
       }
       // Only signalised classes contribute junction legs. An alley meeting a
@@ -1375,6 +1390,83 @@ class CityNodes {
       _roadBatches.add(_CityBatch(node, bodyId, anchorBF));
       _roadDrawCalls++;
     }
+
+    _emitStreetTrees(treePits, bodyId: bodyId, anchorBF: anchorBF);
+  }
+
+  /// Height a street tree is grown at. Real pollarded street stock runs
+  /// 7-10 m; the wild broadleaf default is taller.
+  static double streetTreeHeightM = 8.0;
+
+  /// Whether the scatter atlas is still uploading (see [_emitStreetTrees]).
+  bool _floraPending = false;
+
+  /// Street trees as INSTANCES of the scatter system's broadleaf prop — the
+  /// same generator, LODs, bark and foliage the wild trees use, so a street
+  /// tree and a forest tree agree about what a tree is. They ride the road
+  /// pass: planted off the road polylines, static while a colony grows.
+  void _emitStreetTrees(
+    List<(Vector3, double)> pits, {
+    required String bodyId,
+    required Vector3 anchorBF,
+  }) {
+    // A tree stands in vacuum nowhere. The pits are still COLLECTED on a
+    // sealed world so the furniture draw sequence stays identical either
+    // way; they are simply not planted.
+    if (pits.isEmpty || sealedWorld) return;
+    final lib = ScatterPropLibrary.instance;
+    if (!ScatterPropLibrary.texturesReady) {
+      // First colony of a session races the atlas. Skip the trees this build;
+      // update() re-keys the road pass when the upload lands.
+      unawaited(ScatterPropLibrary.loadTextures());
+      _floraPending = true;
+      return;
+    }
+
+    // Group per pre-grown variant, so the whole colony's trees are at most
+    // four bark draws and four canopy draws.
+    final byVariant = <int, List<vm.Matrix4>>{};
+    for (final (at, yaw) in pits) {
+      final up = (at + anchorBF).normalized;
+      // Local +Z (the axis every prop grows along) onto the surface normal,
+      // then the pit's own spin about it.
+      final axis = Vector3.unitZ.cross(up);
+      final sin = axis.length;
+      final tilt = sin < 1e-9
+          ? (up.z >= 0
+              ? Quaternion.identity
+              : Quaternion.axisAngle(Vector3.unitX, math.pi))
+          : Quaternion.axisAngle(axis, math.atan2(sin, up.z));
+      final spin = Quaternion.axisAngle(Vector3.unitZ, yaw);
+      final variant = (yaw * 1000).round() % ScatterPropLibrary.variantSeeds.length;
+      byVariant.putIfAbsent(variant, () => []).add(vm.Matrix4.compose(
+            vm.Vector3(
+                lengthToScene(at.x), lengthToScene(at.y), lengthToScene(at.z)),
+            quatToScene(tilt * spin),
+            vm.Vector3.all(lengthToScene(1.0)),
+          ));
+    }
+
+    byVariant.forEach((variant, transforms) {
+      final prop = lib.get(PropKind.broadleafTree,
+          seed: ScatterPropLibrary.variantSeeds[variant],
+          sizeM: streetTreeHeightM);
+      for (final (geometry, material) in [
+        (prop.solidFor(PropLod.lod1), lib.barkMaterial),
+        (prop.foliageFor(PropLod.lod1), lib.foliageMaterial),
+      ]) {
+        if (geometry == null) continue;
+        final instanced =
+            fs.InstancedMesh(geometry: geometry, material: material);
+        for (final t in transforms) {
+          instanced.addInstance(t);
+        }
+        final node = fs.Node()..addComponent(fs.InstancedMeshComponent(instanced));
+        _scene.add(node);
+        _roadBatches.add(_CityBatch(node, bodyId, anchorBF));
+        _roadDrawCalls++;
+      }
+    });
   }
 
   /// A flat strip along the centreline, lifted a few centimetres so it wins the
