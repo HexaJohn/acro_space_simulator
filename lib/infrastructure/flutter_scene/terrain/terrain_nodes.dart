@@ -308,7 +308,10 @@ class TerrainNodes {
   /// Dart maps iterate in insertion order, so re-inserting on hit makes this
   /// an LRU; [meshCacheSize] bounds it (~100 KB per entry at resolution 24).
   /// Cleared with the generation — a cached mesh of a stale field is a lie.
-  final Map<ChunkKey, CellMesh> _meshCache = {};
+  /// Each entry carries the RESOLUTION it was meshed at, because the edit
+  /// boost makes resolution contextual and a wrong-variant re-serve is a
+  /// lie of the same kind (a different voxel size is a different altitude).
+  final Map<ChunkKey, (CellMesh, int)> _meshCache = {};
 
   /// Update counter driving the retirement grace window.
   int _frame = 0;
@@ -1017,7 +1020,7 @@ class TerrainNodes {
         held2.add(a); // over budget: hold for next frame
         continue;
       }
-      _addChunk(a.key, a.cell, shader as gpu.Shader);
+      _addChunk(a.key, a.cell, shader as gpu.Shader, a.resolution);
       uploads++;
       // The finest ground shows the moment it exists — and the coarse cover
       // above it is MASKED, not removed: its index buffer is refiltered so
@@ -1102,10 +1105,20 @@ class TerrainNodes {
       // isolate round-trip or a slot in the in-flight budget.
       final cached = _meshCache.remove(k);
       if (cached != null) {
-        // `held` (arrival-queue membership) keeps it out of `missing` next
-        // frame, so it cannot double-submit while it waits for upload.
-        _arrived.add(_ArrivedMesh(k, cached, _generation));
-        continue;
+        // Re-serve only a mesh at the resolution THIS context would mesh:
+        // the edit boost makes resolution contextual, and a variant cached
+        // under the other context re-uploads at a different voxel size — a
+        // visibly different altitude beside its neighbours and the analytic
+        // grid patches. That was the "unload and reload the tile"
+        // staleness: no field had changed, the VARIANT had. A mismatch just
+        // falls through to a fresh mesh.
+        //
+        // `held` (arrival-queue membership) keeps a re-served mesh out of
+        // `missing` next frame, so it cannot double-submit while it waits.
+        if (cached.$2 == _resolutionFor(k, field.radius)) {
+          _arrived.add(_ArrivedMesh(k, cached.$1, _generation, cached.$2));
+          continue;
+        }
       }
       if (_pending.length >= meshBudgetPerFrame) break;
       if (_pending.contains(k)) continue;
@@ -1331,7 +1344,7 @@ class TerrainNodes {
         _emptyChunks.add(key);
       } else {
         _clippedRetries.remove(key);
-        _arrived.add(_ArrivedMesh(key, cell, generation));
+        _arrived.add(_ArrivedMesh(key, cell, generation, chunkResolution));
       }
     }).catchError((Object e) {
       _pending.remove(key);
@@ -1342,7 +1355,8 @@ class TerrainNodes {
 
   /// Turn a finished mesh into a scene node (the GPU upload). The [CellMesh]
   /// is retained on the resident so retirement can drop it into [_meshCache].
-  void _addChunk(ChunkKey key, CellMesh cell, gpu.Shader shader) {
+  void _addChunk(
+      ChunkKey key, CellMesh cell, gpu.Shader shader, int resolution) {
     _material ??= _TerrainMaterial(shader);
     final geom = fs.MeshGeometry.fromArrays(
       positions: cell.mesh.positions,
@@ -1354,6 +1368,7 @@ class TerrainNodes {
     _chunks[key] = _ResidentChunk(
       node: node,
       cell: cell,
+      resolution: resolution,
     )..lastVisibleFrame = _frame;
   }
 
@@ -1583,7 +1598,8 @@ class TerrainNodes {
     if (c == null) return;
     _scene.remove(c.node);
     _meshCache.remove(key); // re-insert -> newest LRU position
-    _meshCache[key] = c.cell; // the FULL mesh — masks are runtime state
+    // The FULL mesh — masks are runtime state — with its meshed resolution.
+    _meshCache[key] = (c.cell, c.resolution);
     while (_meshCache.length > meshCacheSize) {
       _meshCache.remove(_meshCache.keys.first);
     }
@@ -1642,7 +1658,7 @@ class TerrainNodes {
 
 /// A mesh that came back from the scheduler and is waiting for upload budget.
 class _ArrivedMesh {
-  _ArrivedMesh(this.key, this.cell, this.generation);
+  _ArrivedMesh(this.key, this.cell, this.generation, this.resolution);
 
   final ChunkKey key;
   final CellMesh cell;
@@ -1650,6 +1666,11 @@ class _ArrivedMesh {
   /// [TerrainNodes._generation] at submit time; a mismatch at upload time
   /// means the field the mesh sampled is no longer the one on screen.
   final int generation;
+
+  /// The resolution it was meshed at — CONTEXTUAL, because the edit boost
+  /// raises it near brushes. Carried so the cache can refuse to re-serve a
+  /// variant the current context would not have meshed.
+  final int resolution;
 }
 
 /// A chunk currently in the scene. Keeps its [CellMesh] so retirement can
@@ -1658,10 +1679,14 @@ class _ResidentChunk {
   _ResidentChunk({
     required this.node,
     required this.cell,
+    required this.resolution,
   });
 
   final fs.Node node;
   final CellMesh cell;
+
+  /// See [_ArrivedMesh.resolution] — retirement caches it with the mesh.
+  final int resolution;
 
   /// Finer resident chunks whose footprints are filtered OUT of this chunk's
   /// index buffer (the geometric LOD mask). Runtime state — the cached
