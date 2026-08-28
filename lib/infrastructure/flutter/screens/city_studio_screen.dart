@@ -191,6 +191,25 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   double _terrainMs = 0;
   double _cityMs = 0;
 
+  // ---- Engine pipeline timings -------------------------------------------
+  //
+  // REAL per-frame numbers from the engine, not stopwatches around update():
+  // build is the UI-thread frame, raster is the raster thread — encode,
+  // submit, driver, and any blocking the GPU causes. This backend exposes no
+  // GPU timer query, so "raster far above the CPU phase totals" is the
+  // honest in-app GPU-bound signal; per-draw GPU timing needs an external
+  // capture (see wiki/GPU-Profiling.md).
+  final List<double> _uiMs = [];
+  final List<double> _rasterMs = [];
+  TimingsCallback? _timingsCb;
+
+  /// Whole-scene draw census, walked from the scene root every 30 frames:
+  /// what the ENGINE will submit, not just what the city pass reports.
+  int _censusDraws = 0;
+  int _censusInstances = 0;
+  int _censusNodes = 0;
+  int _censusCountdown = 0;
+
   /// The first per-frame failure, kept so the panel can name it.
   ///
   /// A studio that throws from inside its own build loop reports a hundred
@@ -278,13 +297,49 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     // The studio exists to profile, so terrain's own phase timers are on.
     TerrainNodes.profile = true;
     _ticker = createTicker(_onFrame)..start();
+    // The engine's own frame report, per frame. No setState: the values are
+    // read whenever the panel next paints, and the scene repaints every tick.
+    _timingsCb = (timings) {
+      for (final t in timings) {
+        _uiMs.add(t.buildDuration.inMicroseconds / 1000);
+        _rasterMs.add(t.rasterDuration.inMicroseconds / 1000);
+      }
+      while (_uiMs.length > 90) {
+        _uiMs.removeAt(0);
+      }
+      while (_rasterMs.length > 90) {
+        _rasterMs.removeAt(0);
+      }
+    };
+    SchedulerBinding.instance.addTimingsCallback(_timingsCb!);
   }
 
   @override
   void dispose() {
+    final cb = _timingsCb;
+    if (cb != null) SchedulerBinding.instance.removeTimingsCallback(cb);
     _ticker?.dispose();
     _epoch.dispose();
     super.dispose();
+  }
+
+  static double _avgOf(List<double> xs) =>
+      xs.isEmpty ? 0 : xs.reduce((a, b) => a + b) / xs.length;
+
+  /// Count what the engine will actually submit: one draw per mesh
+  /// primitive, one per instanced mesh (however many instances ride it).
+  void _censusWalk(fs.Node n) {
+    _censusNodes++;
+    for (final c in n.getComponents<fs.MeshComponent>()) {
+      _censusDraws += c.mesh.primitives.length;
+    }
+    for (final c in n.getComponents<fs.InstancedMeshComponent>()) {
+      _censusDraws += 1;
+      _censusInstances += c.instancedMesh.instanceCount;
+    }
+    for (final child in n.children) {
+      _censusWalk(child);
+    }
   }
 
   void _onFrame(Duration elapsed) {
@@ -306,6 +361,16 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     // Traffic off means a static frame, but the clock still ticks so the
     // counter keeps reading — a frozen number is worse than a slow one.
     _epoch.value = elapsed.inMicroseconds / 1e6;
+    // The scene-wide draw census, twice a second — a few hundred nodes, so
+    // the walk itself never shows up in the frame it measures.
+    if (++_censusCountdown >= 30) {
+      _censusCountdown = 0;
+      _censusDraws = 0;
+      _censusInstances = 0;
+      _censusNodes = 0;
+      final scene = _scene;
+      if (scene != null) _censusWalk(scene.root);
+    }
   }
 
   /// Build the colony and its frame.
@@ -1107,6 +1172,22 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             '${ms(avg)} ms  ${fps.toStringAsFixed(0)} fps',
             colour: fps < 30 ? AppTheme.danger : AppTheme.accent2),
         row('worst 90', '${ms(worst)} ms', colour: AppTheme.textDim),
+        // The engine's own pipeline report. `raster` is the thread that
+        // encodes and submits the GPU work — when it dwarfs the CPU phase
+        // rows below, the frame is GPU/driver-bound and the per-draw story
+        // needs an external capture (wiki/GPU-Profiling.md).
+        row('ui build', '${ms(_avgOf(_uiMs))} ms', colour: AppTheme.textDim),
+        row('raster', '${ms(_avgOf(_rasterMs))} ms',
+            colour: _avgOf(_rasterMs) > 16 ? AppTheme.warn : AppTheme.textDim),
+        row(
+            'scene draws',
+            '$_censusDraws  ($_censusInstances inst, '
+            '$_censusNodes nodes)',
+            colour: AppTheme.accent),
+        Text(
+            '  whole scene, per colour pass. Shadow cascades re-draw '
+            'casters on top.',
+            style: AppTheme.dim.copyWith(fontSize: 10)),
         const SizedBox(height: 6),
         row('terrain', '${ms(_terrainMs)} ms',
             colour: _terrainMs > 4 ? AppTheme.warn : AppTheme.text),
