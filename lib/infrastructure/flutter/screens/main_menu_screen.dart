@@ -18,6 +18,7 @@ import 'city_builder_screen.dart';
 import 'cloudscape_screen.dart';
 import 'building_studio_screen.dart';
 import 'city_studio_screen.dart';
+import 'terrain_studio_screen.dart';
 import 'maneuver_planner_screen.dart';
 import 'megastructure_screen.dart';
 import 'mining_screen.dart';
@@ -81,6 +82,8 @@ class MainMenuScreen extends StatelessWidget {
           Icons.groups, AppTheme.accent, (c) => const MultiplayerScreen()),
       _MenuItem('CITY STUDIO', 'Generate whole colonies to profile + tune',
           Icons.grid_view, AppTheme.accent2, (c) => const CityStudioScreen()),
+      _MenuItem('TERRAIN STUDIO', 'Sculpt ground by hand + feel what each edit costs',
+          Icons.terrain, AppTheme.accent2, (c) => const TerrainStudioScreen()),
       _MenuItem('BUILDING STUDIO', 'One block face: buildings, lots, frontage',
           Icons.apartment, AppTheme.accent2,
           (c) => const BuildingStudioScreen()),
