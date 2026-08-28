@@ -31,18 +31,25 @@ void main() {
     expect(r.indices.length, greaterThan(full ~/ 2),
         reason: 'one quadrant plus boundary raggedness, not half the mesh');
     expect(r.interiorRemaining, greaterThan(0));
-    // No surviving triangle's centroid may lie inside the masked child.
+    // No surviving triangle may lie FULLY inside the masked child — every
+    // corner in the child's footprint. Survivors with a centroid inside but
+    // a corner outside are the deliberate straddlers: cutting them opened a
+    // strip past the child's edge that its skirt could not cover, and the
+    // seam showed as missing triangles at every split boundary.
     final pos = cell.mesh.positions;
     for (var t = 0; t < r.indices.length; t += 3) {
-      final i0 = r.indices[t] * 3,
-          i1 = r.indices[t + 1] * 3,
-          i2 = r.indices[t + 2] * 3;
-      final dir = Vector3(
-        cell.anchorBF.x + (pos[i0] + pos[i1] + pos[i2]) / 3,
-        cell.anchorBF.y + (pos[i0 + 1] + pos[i1 + 1] + pos[i2 + 1]) / 3,
-        cell.anchorBF.z + (pos[i0 + 2] + pos[i1 + 2] + pos[i2 + 2]) / 3,
-      ).normalized;
-      expect(child.contains(dir), isFalse);
+      var corners = 0;
+      for (final idx in [r.indices[t], r.indices[t + 1], r.indices[t + 2]]) {
+        final i = idx * 3;
+        final dir = Vector3(
+          cell.anchorBF.x + pos[i],
+          cell.anchorBF.y + pos[i + 1],
+          cell.anchorBF.z + pos[i + 2],
+        ).normalized;
+        if (child.contains(dir)) corners++;
+      }
+      expect(corners, lessThan(3),
+          reason: 'a fully covered triangle must be cut');
     }
   });
 

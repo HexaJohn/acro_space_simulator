@@ -411,12 +411,15 @@ CellMesh meshTerrainCell(
 /// in [masked] is dropped. The coarse chunk then renders AROUND its refined
 /// quadrants instead of underneath them — the geometric LOD mask.
 ///
-/// The centroid decides boundary triangles whole, so the cut can be ragged by
-/// up to one coarse cell; the finer chunk's apron (skirt) hangs over exactly
-/// that seam. [interiorRemaining] counts surviving triangles whose centroid
-/// is INSIDE [cell]'s own footprint — when it reaches zero every quadrant is
-/// refined and the caller can drop the chunk outright (the apron ring that
-/// spills outside the footprint never blocks completion).
+/// A triangle is cut when its centroid lies under a refined quadrant and no
+/// in-footprint corner is left unmasked — conservative at the child's edge,
+/// so straddlers survive and overlap the finer chunk slightly
+/// (depth-resolved) rather than leaving an uncovered strip beyond its skirt.
+/// [interiorRemaining] counts surviving triangles whose centroid is INSIDE
+/// [cell]'s own footprint — when it reaches zero every quadrant is refined
+/// and the caller can drop the chunk outright (the apron ring that spills
+/// outside the footprint never pins a triangle, so it cannot block
+/// completion).
 ({Uint32List indices, int interiorRemaining}) maskCellIndices(
   CellMesh cell,
   Set<ChunkKey> masked,
@@ -427,20 +430,40 @@ CellMesh meshTerrainCell(
   final out = Uint32List(src.length);
   var w = 0;
   var interior = 0;
+  bool inMask(Vector3 dir) {
+    for (final m in masked) {
+      if (m.contains(dir)) return true;
+    }
+    return false;
+  }
+
+  // A corner PINS its triangle — keeps it alive — when it lies inside the
+  // parent's own footprint and no refined quadrant covers it. Corners
+  // outside the footprint (the apron ring, and edge vertices an epsilon
+  // over the boundary) never pin: letting them would hold boundary
+  // triangles hostage forever and the parent could never retire.
+  bool pins(int i) {
+    final dir =
+        Vector3(a.x + pos[i], a.y + pos[i + 1], a.z + pos[i + 2]).normalized;
+    return cell.chunk.contains(dir) && !inMask(dir);
+  }
+
   for (var t = 0; t < src.length; t += 3) {
     final i0 = src[t] * 3, i1 = src[t + 1] * 3, i2 = src[t + 2] * 3;
     final cx = a.x + (pos[i0] + pos[i1] + pos[i2]) / 3.0;
     final cy = a.y + (pos[i0 + 1] + pos[i1 + 1] + pos[i2 + 1]) / 3.0;
     final cz = a.z + (pos[i0 + 2] + pos[i1 + 2] + pos[i2 + 2]) / 3.0;
     final dir = Vector3(cx, cy, cz).normalized;
-    var covered = false;
-    for (final m in masked) {
-      if (m.contains(dir)) {
-        covered = true;
-        break;
-      }
-    }
-    if (covered) continue;
+    // Cut when the centroid is under a refined quadrant AND no in-parent
+    // corner is left unmasked. Cutting on the centroid alone removed
+    // triangles that extended up to a whole coarse cell PAST the child's
+    // edge — a strip the child's skirt, hanging at its own perimeter, could
+    // never cover, which showed as missing triangles along every split
+    // boundary. A straddler into an unrefined sibling keeps its unmasked
+    // corner and survives, overlapping the child slightly instead — the
+    // depth test resolves that, and a sliver of overlap beats a hole from
+    // every angle.
+    if (inMask(dir) && !pins(i0) && !pins(i1) && !pins(i2)) continue;
     out[w] = src[t];
     out[w + 1] = src[t + 1];
     out[w + 2] = src[t + 2];

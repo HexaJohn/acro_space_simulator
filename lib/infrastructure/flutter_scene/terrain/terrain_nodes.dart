@@ -721,6 +721,11 @@ class TerrainNodes {
       if (addedBrushes.isEmpty) {
         // Added set unknowable (count shrank / first sight of this body's
         // edits): fall back to invalidating everything against every brush.
+        // The grid patches go wholesale too — they drape the field at build
+        // time, and a patch built over pre-edit ground floats beside the
+        // re-meshed terrain until something rebuilds it (toggling terrain
+        // off and on was the accidental fix; this is the deliberate one).
+        _clearPlaceholders();
         _invalidateInFlight();
         for (final k in _chunks.keys.toList()) {
           final reach = k.circumradiusM(field.radius);
@@ -758,6 +763,15 @@ class TerrainNodes {
         _arrived.removeWhere((a) => touches(a.key));
         _staleInFlight.addAll(_pending.where(touches));
         _emptyChunks.removeWhere(touches);
+        // Grid patches drape the field at BUILD time, so the ones over a
+        // fresh brush hold pre-edit ground and float beside the re-meshed
+        // terrain. Purged here, rebuilt this same frame — editsChanged
+        // forces the selection pass the placeholder rebuild rides on.
+        _gridPatches.removeWhere((k, p) {
+          if (!touches(k)) return false;
+          _scene.remove(p.node);
+          return true;
+        });
         // A fresh edit is a fresh chance: whatever made the band miss may
         // well be gone, so the attempt count starts again.
         _clippedRetries.removeWhere((k, _) => touches(k));
