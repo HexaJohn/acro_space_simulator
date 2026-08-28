@@ -521,7 +521,14 @@ void main() {
 
   // Cast-shadow occlusion (1 lit .. 0 shadowed) from the craft/terrain atlas.
   float shadow = sh.sp1.y > 0.5 ? SampleShadow(v_position, n) : 1.0;
-  float shade = terrain.params.y + (1.0 - terrain.params.y) * lit * shadow;
+  // The ambient floor is SKY light, and the sky is only lit by day: fade it
+  // across the terminator on the sun's local elevation, to ZERO at night.
+  // Held constant it lit the whole night side to mid-grey — brighter than
+  // the moonless dark it is standing in for. dot(up, -sun) is the elevation
+  // sine at this fragment; the band spans roughly civil twilight.
+  float day = smoothstep(-0.08, 0.18, dot(up, -terrain.sun_amp.xyz));
+  float amb = terrain.params.y * day;
+  float shade = amb + (1.0 - amb) * lit * shadow;
   // The lamp is additive and unshadowed: it is mounted on the eye, so nothing
   // the eye can see is ever occluded from it.
   shade += LampShade(v_position, n);
