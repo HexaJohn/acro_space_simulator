@@ -215,6 +215,9 @@ class BuildingMassingRules {
   /// Cars this building attracts. Workers dominate; shops and civic buildings
   /// add visitor demand, which is what makes a mall's lot dwarf its shell.
   int parkingSpaces(CityBuildingSpec spec) {
+    // A megatower parks inside its own podium: eighteen thousand workers on
+    // a surface lot would need more block than the building has.
+    if (spec.type == 'mega') return 0;
     final staff = spec.jobs * 0.55;
     final visitors = (spec.services['leisure'] ?? 0) * 0.04 +
         (spec.services['health'] ?? 0) * 0.03 +
@@ -367,6 +370,17 @@ class BuildingMassingRules {
     // A shed that cannot hold its function on one floor grows a mezzanine
     // rather than a tower.
     if (industrial && needed > footArea * 1.4) floors = 2;
+
+    // MEGATOWER: the one building allowed past the ordinary ceiling. Both
+    // regular caps exist to stop ACCIDENTAL towers — [maxFloors] (60) is the
+    // hard lid, and the kit's zone targets are why every downtown tower tops
+    // out around the same height — but a megatower is nothing but deliberate,
+    // so its height is its own seeded rule: 90 to 150 storeys over a full
+    // block. The profile mix below shapes it like anything else tall.
+    if (spec.type == 'mega') {
+      final h = (seed ^ 0x35C0DE) * 2654435761 & 0x7FFFFFFF;
+      floors = 90 + h % 61;
+    }
 
     final volumes = <MassBox>[];
     // Where the building sits within its buildable strip, and where the cars

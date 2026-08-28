@@ -45,6 +45,7 @@ class CityGenSpec {
     this.buildFraction = 0.85,
     this.industryRing = 0.62,
     this.installations = 4,
+    this.megatowers = 1,
     this.alleys = true,
     this.transitLines = 1,
     this.elevatedHighways = 1,
@@ -100,6 +101,10 @@ class CityGenSpec {
   /// Sprawling installations (solar farms, quarries, ports) placed outside the
   /// street network.
   final int installations;
+
+  /// Megatowers staked over whole block interiors near the centre — the
+  /// buildings allowed past the ordinary height ceiling.
+  final int megatowers;
 
   /// Cut a service alley down the middle of every block.
   ///
@@ -215,6 +220,7 @@ class CityBuild {
     // [CityGenerator.generate] for why.
     yield (phase: 'staking installations', fraction: 0.48);
     const CityGenerator()._placeInstallations(sim, spec, rnd);
+    const CityGenerator()._placeMegatowers(sim, spec, rnd);
 
     for (final f in sim.layout.regenerateSteps()) {
       yield (phase: 're-platting round the plots', fraction: 0.5 + f * 0.44);
@@ -534,4 +540,69 @@ class CityGenerator {
     }
   }
 
+  /// Megatowers, staked over block interiors near the centre.
+  ///
+  /// Placed exactly as the installations are — a claimed own-site plot with
+  /// the re-cut deferred — but INWARD: the candidate centres are the nominal
+  /// grid's block interiors, tried centre-out.
+  ///
+  /// Every alleyed block refuses a block-filling site out of the box: the
+  /// service alley runs down the block's spine, exactly where the plot's
+  /// middle is. That is not an obstacle, it is the assemblage — a real
+  /// megablock buys its alley and vacates it — so a candidate block first
+  /// checks that no REAL street clips the site, then removes the alleys
+  /// under it and stakes. The check runs before any alley is touched, so a
+  /// bent street rejects the block without costing it its alley.
+  void _placeMegatowers(CitySim city, CityGenSpec spec, math.Random rnd) {
+    if (spec.megatowers <= 0) return;
+    final site = kMegatowerSpec.siteMetres();
+    final hw = site.width / 2, hd = site.depth / 2;
+
+    final cells = <Vec2>[];
+    for (var i = 0; i < spec.blocksAcross; i++) {
+      for (var j = 0; j < spec.blocksDeep; j++) {
+        cells.add(Vec2(
+          -spec.extentM / 2 + (i + 0.5) * spec.blockM,
+          -spec.depthExtentM / 2 + (j + 0.5) * spec.blockDepthM,
+        ));
+      }
+    }
+    cells.sort((a, b) => a.length.compareTo(b.length));
+
+    var placed = 0;
+    for (final c in cells) {
+      if (placed >= spec.megatowers) break;
+      // Buy out the alleys under the footprint — the block's spine runs
+      // exactly where the plot's middle is, and [claimSite] would rightly
+      // refuse the incursion. Streets are NOT pre-screened: they bend, and
+      // a screen tight enough to be safe rejected every block, so
+      // [claimSite]'s own probes stay the judge. A block that loses its
+      // alley and is then refused anyway just keeps full-depth lots — a
+      // cheap loss against restoring a road through a re-split network.
+      for (final road in city.layout.roads.toList()) {
+        if (road.roadClass != RoadClass.alley) continue;
+        for (final p in road.sample(stepM: 24)) {
+          if ((p.e - c.e).abs() < hw + 55 && (p.n - c.n).abs() < hd + 12) {
+            city.layout.removeRoad(road.id, regenerateLots: false);
+            break;
+          }
+        }
+      }
+      // A handful of tries per block, jittered mostly ALONG the block: the
+      // interior is over twice the site's width, so sliding sideways is how
+      // a plot dodges the bend that clips it at dead centre — the same
+      // attempts-per-site trick the installations use.
+      for (var t = 0; t < 10; t++) {
+        final at = t == 0
+            ? c
+            : Vec2(c.e + (rnd.nextDouble() - 0.5) * 100,
+                c.n + (rnd.nextDouble() - 0.5) * 16);
+        if (city.claimSite(kMegatowerSpec, at, regenerateLots: false) !=
+            null) {
+          placed++;
+          break;
+        }
+      }
+    }
+  }
 }

@@ -77,6 +77,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   double _viaducts = 1;
   double _build = 0.85;
   double _installations = 4;
+  double _megatowers = 1;
   String _body = 'earth';
 
   /// Worlds worth generating on: one breathable, the rest not, because the
@@ -279,6 +280,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
         elevatedHighways: _viaducts.round(),
         buildFraction: _build,
         installations: _installations.round(),
+        megatowers: _megatowers.round(),
       );
 
   /// Lots the current spec will cut, roughly — the input to the build-time
@@ -1329,6 +1331,11 @@ class _CityStudioScreenState extends State<CityStudioScreen>
               'Sprawling sites — farms, quarries, ports — staked outside the '
                   'streets.',
               (v) => setState(() => _installations = v), divisions: 10),
+          _slider('Megatowers', _megatowers, 0, 4,
+              'Block-filling towers, 90 to 150 storeys, staked over whole '
+                  'block interiors near the centre — the only buildings '
+                  'allowed past the ordinary height ceiling.',
+              (v) => setState(() => _megatowers = v), divisions: 4),
           const SizedBox(height: 8),
           const Text('NETWORK', style: AppTheme.heading),
           Text('The tiers that are not just a wider street.',

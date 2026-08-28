@@ -367,9 +367,13 @@ class CityLayout {
     return out;
   }
 
-  void removeRoad(String id) {
+  /// Remove a road. [regenerateLots] defers the re-cut exactly as
+  /// [addManualParcel] can — the megatower placer vacates a block's alley
+  /// and stakes its plot in one batch, and re-cutting per removal would be
+  /// the quadratic cost the generator's deferral exists to avoid.
+  void removeRoad(String id, {bool regenerateLots = true}) {
     _roads.remove(id);
-    regenerate();
+    if (regenerateLots) regenerate();
   }
 
   /// Add a hand-drawn lot. Returns null (and adds nothing) if it would sit on a

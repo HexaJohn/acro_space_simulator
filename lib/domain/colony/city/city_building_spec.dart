@@ -205,6 +205,32 @@ const Map<String, Map<Density, CityBuildingSpec>> kZoneSpecs = {
   },
 };
 
+/// The block-filler: one tower over a whole city block.
+///
+/// Deliberately NOT in [kUtilCatalog] — the installation placer scatters
+/// own-site specs around the city's EDGE, and a megatower is a statement
+/// about its centre. The generator stakes it inward ([_placeMegatowers]);
+/// a player stakes it like any other own-site building. Its site is a block
+/// interior of the default grid (block 220 x 104 minus the streets), and
+/// its height comes from the massing rules' mega branch — the one building
+/// allowed past the ordinary tower ceiling, because that ceiling exists to
+/// stop ACCIDENTAL towers and a megatower is nothing but deliberate.
+const CityBuildingSpec kMegatowerSpec = CityBuildingSpec(
+  type: 'mega',
+  label: 'Megatower',
+  colorArgb: 0xFF9FB8FF,
+  group: 'com',
+  jobs: 18000,
+  housing: 6000,
+  powerDraw: 900,
+  computeDraw: 40,
+  services: {'leisure': 2000},
+  pollution: 2.0,
+  buildCost: 900,
+  siteWidthM: 96,
+  siteDepthM: 88,
+);
+
 /// All hand-placed utilities/services/factories/military/aerospace, grouped.
 /// `unlockPop` gates the advanced ones behind city growth.
 const List<CityBuildingSpec> kUtilCatalog = [
