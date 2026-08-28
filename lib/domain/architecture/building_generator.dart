@@ -24,7 +24,6 @@ import 'dart:math' as math;
 import '../colony/city/city_building_spec.dart';
 import '../colony/city/parcel.dart';
 import '../scatter/mesh_builder.dart';
-import '../scatter/prop_mesh.dart';
 import '../scatter/prop_model.dart';
 import '../shared/vector3.dart';
 import 'architecture_style.dart';
@@ -124,9 +123,30 @@ class BuildingGenerator {
         u0: bu0,
         u1: bu1,
       );
+      // And its windows: the same per-storey bands the near tiers carry, on
+      // the collapsed silhouette. The mullions and the night emissive live
+      // in the glazing texture, so a distant tower keeps its facade rhythm
+      // by day and lights its windows by night exactly as a near one does —
+      // a skyline of dead grey boxes after dark was the tell that the block
+      // tier was a different kind of thing.
+      _glazing(
+        b.foliage,
+        MassBox(
+          x: 0,
+          y: 0,
+          z: 0,
+          width: fp.width,
+          depth: fp.depth,
+          height: massing.height,
+          floors: math.max(1, massing.height ~/ massing.storeyM),
+        ),
+        massing.storeyM,
+        windows,
+      );
       return GeneratedBuilding(
-        model: PropModel(solid: b.solid.build(), foliage: PropMesh.empty),
+        model: PropModel(solid: b.solid.build(), foliage: b.foliage.build()),
         massing: massing,
+        windowCentres: windows,
       );
     }
 

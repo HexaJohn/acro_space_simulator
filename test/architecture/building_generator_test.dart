@@ -91,12 +91,19 @@ void main() {
     expect(shell.model.solid.triangleCount,
         lessThan(b.model.solid.triangleCount));
 
-    // And the distant tier is a silhouette only.
+    // And the distant tier is a silhouette — but a DRESSED one: it keeps its
+    // window bands, because the glazing texture is where the mullions and
+    // the night emissive live, and a skyline of dead grey boxes after dark
+    // was the tell that the block tier was a different kind of thing.
     final block = gen.generate(zone('commercial', Density.high),
         lot(width: 60, depth: 60), detail: BuildingDetail.block);
     expect(block.model.solid.triangleCount,
         lessThan(shell.model.solid.triangleCount));
-    expect(block.model.foliage.triangleCount, 0);
+    expect(block.model.foliage.triangleCount, greaterThan(0),
+        reason: 'block keeps its window bands so distant towers light up');
+    expect(block.model.foliage.triangleCount,
+        lessThan(shell.model.foliage.triangleCount),
+        reason: 'but far fewer of them than the near tier pays for');
   });
 
   test('geometry stands on the ground and within its lot', () {

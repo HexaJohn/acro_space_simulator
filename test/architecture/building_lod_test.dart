@@ -51,7 +51,12 @@ void main() {
         expect(ext, lessThan(full * 0.8),
             reason: 'exterior saves only ${(100 - ext / full * 100).round()}% '
                 '— not worth a second batch');
-        expect(block, lessThan(ext * 0.25),
+        // 0.3, not 0.25: the block tier now carries per-storey window bands
+        // (two triangles per face per storey) so distant towers light their
+        // windows at night. That is a deliberate spend, and it is bounded —
+        // the silhouette plus its bands must still be a fraction of the
+        // exterior shell.
+        expect(block, lessThan(ext * 0.3),
             reason: 'the far tier must be a silhouette, not a building');
         expect(block, greaterThan(0), reason: 'something must still be drawn');
       });
