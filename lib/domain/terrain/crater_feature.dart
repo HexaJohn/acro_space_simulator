@@ -28,6 +28,7 @@
 library;
 
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import '../shared/vector3.dart';
 import 'terrain_control.dart';
@@ -35,9 +36,10 @@ import 'terrain_feature.dart';
 
 /// Analytic crater field over a body, evaluated per direction.
 ///
-/// Pure and deterministic. Cost is `decades * 27` hash probes per sample, most
-/// rejected on the first test — the density check is the cheapest thing in the
-/// loop for exactly that reason.
+/// Pure and deterministic. Per decade the scan geometrically prunes a 7^3 cell
+/// window down to the ~25 cells the sphere shell actually passes through
+/// within ejecta reach, and only those are hashed — most are then rejected by
+/// the density check. See the window note in `_decade`.
 class CraterFeature implements TerrainFeature {
   const CraterFeature({
     required this.seed,
@@ -157,17 +159,74 @@ class CraterFeature implements TerrainFeature {
     final px = dir.x * scale, py = dir.y * scale, pz = dir.z * scale;
     final cx = px.floor(), cy = py.floor(), cz = pz.floor();
 
-    final depth = depthForRadius(craterR);
-    // Rim height stays a fixed fraction of diameter, so expressing it in units
-    // of depth has to use this crater's ACTUAL depth, not the simple-crater
-    // ratio — otherwise complex craters would get rims scaled for bowls they
-    // are not.
-    final rimOverDepth = depth <= 0 ? 0.0 : (craterR * 2 * rimRatio) / depth;
+    // Rim height tracks DEPTH, not diameter: for a simple crater the two are
+    // proportional and this is exactly `rimRatio * diameter`, but past the
+    // complex transition depth grows only as D^0.3 and the rim must flatten
+    // with it. A rim pinned to diameter gave an 80 km crater a 3.2 km crest on
+    // a 5 km basin (real lunar rims there are ~1 km), and — worse — made big
+    // craters NET-POSITIVE in volume, so a saturated surface built UP on
+    // average. Impacts excavate; the profile integral must stay negative.
+    final rimOverDepth = 2 * rimRatio / depthRatio;
 
     var sum = 0.0;
-    for (var ox = -1; ox <= 1; ox++) {
-      for (var oy = -1; oy <= 1; oy++) {
-        for (var oz = -1; oz <= 1; oz++) {
+    // A crater EXISTS only if the sphere shell actually intersects its cell's
+    // cube. That predicate depends on the cell alone — never on where the
+    // sample sits — and it is what makes the field well-defined. The old scan
+    // ("every cell in a window around the sample's cell") let cells displaced
+    // almost RADIALLY from the sample contribute: a cell buried inside the
+    // sphere still holds a jittered point whose PROJECTION lands right on the
+    // surface, so its whole bowl popped in and out of the sum whenever the
+    // sample slid across a radial-facing cell wall — kilometre-deep cliffs
+    // along wall projections all over the body.
+    //
+    // The window must then cover every shell cell whose crater can reach the
+    // sample. Reach: ejecta runs [ejectaReach] radii of a crater drawn up to
+    // [_sizeMax] the decade radius -> `ejectaReach * _sizeMax / spacing`
+    // (~1.65) pitches laterally; a shell cell's jitter sits within the cube
+    // diagonal (sqrt(3)) of the shell radially. Those are orthogonal, so any
+    // contributor lies within sqrt(reach^2 + 3) (~2.4) pitches of the sample:
+    // +-3 covers it, and the two geometric prunes below reject nearly all of
+    // the 343 cells before their hash is ever taken (the scan does LESS hash
+    // work than the old +-1 window).
+    final reachCells = ejectaReach * _sizeMax / spacing;
+    final pruneSq = reachCells * reachCells + 3.0 + 1e-9;
+    final scaleSq = scale * scale;
+    // Per-axis pieces of (a) the sample-to-cube distance and (b) the cube's
+    // nearest/farthest coordinate from the body centre, hoisted out of the
+    // triple loop.
+    final dp = Float64List(21), nearO = Float64List(21), farO = Float64List(21);
+    for (var a = 0; a < 3; a++) {
+      final p = a == 0 ? px : (a == 1 ? py : pz);
+      final c = a == 0 ? cx : (a == 1 ? cy : cz);
+      for (var o = -3; o <= 3; o++) {
+        final lo = (c + o).toDouble(), hi = lo + 1.0;
+        final i = a * 7 + o + 3;
+        dp[i] = p < lo ? lo - p : (p > hi ? p - hi : 0.0);
+        nearO[i] = lo > 0 ? lo : (hi < 0 ? -hi : 0.0);
+        farO[i] = lo.abs() > hi.abs() ? lo.abs() : hi.abs();
+      }
+    }
+    for (var ox = -3; ox <= 3; ox++) {
+      final ix = ox + 3;
+      for (var oy = -3; oy <= 3; oy++) {
+        final iy = 7 + oy + 3;
+        final dxy = dp[ix] * dp[ix] + dp[iy] * dp[iy];
+        if (dxy > pruneSq) continue;
+        for (var oz = -3; oz <= 3; oz++) {
+          final iz = 14 + oz + 3;
+          // Reach prune: no point of this cell is close enough to the sample
+          // for any crater it could hold to touch it.
+          if (dxy + dp[iz] * dp[iz] > pruneSq) continue;
+          // Shell test: the sphere must pass through the cell's cube, or the
+          // cell spawns nothing — this is the sample-independent existence
+          // predicate above.
+          final nearSq = nearO[ix] * nearO[ix] +
+              nearO[iy] * nearO[iy] +
+              nearO[iz] * nearO[iz];
+          if (nearSq > scaleSq) continue; // wholly outside the sphere
+          final farSq =
+              farO[ix] * farO[ix] + farO[iy] * farO[iy] + farO[iz] * farO[iz];
+          if (farSq < scaleSq) continue; // wholly inside the sphere
           final h = _hash(cx + ox, cy + oy, cz + oz, decade);
           // Cheapest possible rejection, first: most cells are empty.
           if (_unit(h) > density) continue;

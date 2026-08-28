@@ -186,8 +186,12 @@ List<TerrainRefinement> mergedRefinementsFor(
 }) {
   // Keyed by the leaf a target would force, keeping the deepest level asked
   // for it. Two lots either side of a street want the same chunk refined once.
+  String keyOf(ChunkKey c) => '${c.face.index}:${c.level}:${c.u}:${c.v}';
   final byLeaf = <String, TerrainRefinement>{};
-  for (final brush in brushes) {
+  // Newest first: brushes arrive in tick order, and when the cap bites it is
+  // the most recent edits — the fresh impact the player is watching — that
+  // must keep their refinement, not a colony built an hour ago.
+  for (final brush in brushes.toList().reversed) {
     for (final t in refinementsFor(
       brush,
       radiusM,
@@ -197,13 +201,35 @@ List<TerrainRefinement> mergedRefinementsFor(
       ringSamples: ringSamples,
     )) {
       final c = chunkAt(t.direction, t.level);
-      final key = '${c.face.index}:${c.level}:${c.u}:${c.v}';
+      final key = keyOf(c);
       final prior = byLeaf[key];
+      // At the cap, cells already present may still deepen but no new cell
+      // enters. Never abandon the remaining brushes wholesale (the old
+      // `break` did): in tick order the LAST brushes are the newest edits —
+      // the fresh impact the player is watching — and dropping every one of
+      // their targets because a colony elsewhere filled the budget left new
+      // craters meshed at the coarse rate.
+      if (prior == null && byLeaf.length >= cap) continue;
       if (prior == null || t.level > prior.level) byLeaf[key] = t;
     }
-    if (byLeaf.length > cap) break;
   }
-  return byLeaf.values.toList();
+  // Lineage collapse: a target whose cell is an ANCESTOR of another kept
+  // target's cell is subsumed — the split walk toward the deeper cell passes
+  // through the shallower cell, leaving every leaf of that region at least
+  // one level past the shallow demand. The map above cannot express this:
+  // its keys embed the level, so same-spot different-level targets (a small
+  // crater inside a big one) never collide there.
+  final subsumed = <String>{};
+  for (final t in byLeaf.values) {
+    for (final a in chunkAt(t.direction, t.level).ancestors) {
+      final k = keyOf(a);
+      if (byLeaf.containsKey(k)) subsumed.add(k);
+    }
+  }
+  return [
+    for (final e in byLeaf.entries)
+      if (!subsumed.contains(e.key)) e.value
+  ];
 }
 
 List<TerrainRefinement> refinementsFor(
@@ -226,6 +252,49 @@ List<TerrainRefinement> refinementsFor(
       brush.kind == TerrainBrushKind.padPoly ||
       brush.kind == TerrainBrushKind.cutFill;
   final targetVoxelM = brush.radiusM * 2.0 / voxelsAcrossBrush;
+
+  // A cutFill corridor is ELONGATED: its lateralReachM includes the corridor
+  // HALF-LENGTH, so the generic edge ring below would trace a circle around
+  // the midpoint that clears the corridor entirely — every target lands on
+  // untouched ground while the falloff shoulders along the corridor's length,
+  // the only place a levelled cut actually curves, get no refinement at all.
+  // Sample the two shoulder lines and the end caps instead.
+  if (brush.kind == TerrainBrushKind.cutFill && brush.endBF != null) {
+    final end = brush.endBF!;
+    final start = brush.centreBF * 2.0 - end;
+    final axis = end - start;
+    final len = axis.length;
+    final lat = brush.radiusM + brush.falloffM;
+    if (len <= 0 || lat <= 0) return const [];
+    final aDir = axis / len;
+    final targets = <TerrainRefinement>[];
+    void addAt(Vector3 p) {
+      if (p.lengthSquared <= 0) return;
+      final d = p.normalized;
+      targets.add(TerrainRefinement(
+          d,
+          levelForVoxelSize(d, radiusM, resolution, targetVoxelM,
+              maxLevel: maxLevel)));
+    }
+
+    // Shoulder samples spaced about one shoulder-width apart (bounded, so a
+    // very long road stays a bounded list — mergedRefinementsFor dedupes the
+    // overlap against the chunks they land in anyway).
+    final n = (len / math.max(lat, len / 64)).ceil().clamp(1, 64);
+    for (var i = 0; i <= n; i++) {
+      final p = start + aDir * (len * i / n);
+      var side = aDir.cross(p.normalized);
+      final sl = side.length;
+      if (sl < 1e-9) continue;
+      side = side / sl;
+      addAt(p + side * lat);
+      addAt(p - side * lat);
+    }
+    addAt(start - aDir * lat);
+    addAt(end + aDir * lat);
+    return targets;
+  }
+
   final out = <TerrainRefinement>[
     if (!flatTopped)
       TerrainRefinement(
@@ -272,7 +341,8 @@ class TerrainLodTree {
   })  : assert(splitPx > 0),
         assert(mergeRatio > 1, 'merge must be below split or it will thrash'),
         assert(maxRefineLevel >= maxLevel),
-        _leaves = {...ChunkKey.roots};
+        _leaves = {...ChunkKey.roots},
+        _balanced = {...ChunkKey.roots};
 
   /// Split a leaf whose projected radius exceeds this many pixels.
   final double splitPx;
@@ -290,16 +360,30 @@ class TerrainLodTree {
   /// well past anything the impact sizing produces.
   final int maxRefineLevel;
 
+  /// SELECTION state: the post-select, post-refinement set — WITHOUT the 2:1
+  /// balance staircase. The staircase is derived per frame and never stored:
+  /// storing it (the old behaviour) fed the next frame's merge pass a wall of
+  /// zero-px sibling quads that were not pinned, so every quiet frame spent
+  /// several select-loop iterations collapsing the staircase level by level
+  /// only for enforceBalance to rebuild it identically — pure churn the
+  /// pinned() guard was supposed to remove.
   Set<ChunkKey> _leaves;
+
+  /// What callers see: [_leaves] with the balance staircase applied.
+  Set<ChunkKey> _balanced;
 
   /// Pixel threshold below which a parent's four children collapse.
   double get mergePx => splitPx / mergeRatio;
 
-  /// The current leaf set — always a complete tiling of the body.
-  Set<ChunkKey> get leaves => Set.unmodifiable(_leaves);
+  /// The current leaf set — always a complete tiling of the body, 2:1
+  /// balanced.
+  Set<ChunkKey> get leaves => Set.unmodifiable(_balanced);
 
   /// Reset to the six face roots.
-  void reset() => _leaves = {...ChunkKey.roots};
+  void reset() {
+    _leaves = {...ChunkKey.roots};
+    _balanced = {...ChunkKey.roots};
+  }
 
   /// Re-select against this frame's projection and re-balance.
   ///
@@ -369,7 +453,12 @@ class TerrainLodTree {
 
       if (!changed) break;
     }
-    _leaves = enforceBalance(_applyRefinements(leaves, refine));
+    // Refinements become part of the persistent state (pinned() protects them
+    // next frame); the balance staircase is derived, returned, and DISCARDED —
+    // see [_leaves]. On a quiet frame the loop above finds nothing to do and
+    // exits after one iteration, as the pinned() comment promises.
+    _leaves = _applyRefinements(leaves, refine);
+    _balanced = enforceBalance(_leaves);
     return this.leaves;
   }
 

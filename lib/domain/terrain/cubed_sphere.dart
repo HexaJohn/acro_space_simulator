@@ -158,11 +158,25 @@ class ChunkKey {
         directionOf(face, s1, t1),
       ];
 
-  /// Whether [dir] falls inside this cell.
+  /// Whether [dir] falls inside this cell. Inclusive on all four edges, so a
+  /// direction exactly on a shared boundary is reported by both cells.
+  ///
+  /// Deliberately computed with the SAME shifted arithmetic [chunkAt] floors —
+  /// `(s + 1.0) * 0.5 * n` — not by comparing raw `s` against [s0]/[s1]. The
+  /// two differ by rounding: for `s` within half an ulp below a cell boundary
+  /// through the face centre (`s0 == 0`), the `+ 1.0` rounds half-even UP onto
+  /// the boundary, so [chunkAt] assigns the upper cell while a raw compare
+  /// against `s0` rejects it — breaking `chunkAt(d, L).contains(d)`, which
+  /// `pinned()`/`_applyRefinements` in terrain_lod.dart and the mesher's
+  /// interior tests all rely on. Sharing the arithmetic makes the invariant
+  /// hold by construction.
   bool contains(Vector3 dir) {
     if (faceOfDirection(dir) != face) return false;
     final st = faceST(face, dir);
-    return st.s >= s0 && st.s <= s1 && st.t >= t0 && st.t <= t1;
+    final n = cellsPerSide;
+    final qs = (st.s + 1.0) * 0.5 * n;
+    final qt = (st.t + 1.0) * 0.5 * n;
+    return qs >= u && qs <= u + 1 && qt >= v && qt <= v + 1;
   }
 
   /// Half the cell's world extent at sphere radius [radiusM]: the chord from

@@ -29,7 +29,6 @@
 /// gives every point a synchronous answer, forever, on server and client alike.
 library;
 
-import 'dart:math' as math;
 import 'dart:typed_data';
 
 import '../shared/vector3.dart';
@@ -84,10 +83,14 @@ class DemPyramid {
 
   /// Elevation (m) above the datum along a unit direction, bilinearly filtered.
   ///
-  /// [level] selects detail; 0 is finest. Sampling CLAMPS at face edges rather
-  /// than reaching into the neighbouring face. The error is sub-texel and both
-  /// faces were baked from the same source, so the surface stays continuous
-  /// across a seam without any cross-face addressing at runtime.
+  /// [level] selects detail; 0 is finest. Within the outer half-texel of a
+  /// face the bilinear taps fall on the NEIGHBOURING face; those are resolved
+  /// through the same exact seam arithmetic `ChunkKey.neighbour` uses (a texel
+  /// grid IS a level-`log2(size)` chunk grid), so the reconstruction is the
+  /// same set of texels from both sides of a seam and the surface is C0
+  /// there. Clamping instead froze each face at its own edge row, which put a
+  /// `slope * texel`-sized cliff along every cube edge — hundreds of metres
+  /// on a 512-sample Moon face.
   double elevationAt(Vector3 dir, {int level = 0}) {
     final l = level.clamp(0, levelCount - 1);
     final size = sizeAt(l);
@@ -95,19 +98,58 @@ class DemPyramid {
     final st = faceST(face, dir);
 
     // (s,t) in [-1,1] -> texel coordinates, half-texel inset so samples sit at
-    // texel CENTRES and the bilinear weights are right at the edges.
-    final u = ((st.s + 1.0) * 0.5 * size - 0.5).clamp(0.0, size - 1.0);
-    final v = ((st.t + 1.0) * 0.5 * size - 0.5).clamp(0.0, size - 1.0);
+    // texel CENTRES and the bilinear weights are right at the edges. NOT
+    // clamped: x0/y0 may be -1 and x1/y1 may be `size`, which are taps on the
+    // neighbouring face.
+    final u = (st.s + 1.0) * 0.5 * size - 0.5;
+    final v = (st.t + 1.0) * 0.5 * size - 0.5;
     final x0 = u.floor(), y0 = v.floor();
-    final x1 = math.min(x0 + 1, size - 1), y1 = math.min(y0 + 1, size - 1);
-    final fx = u - x0, fy = v - y0;
+    final x1 = x0 + 1, y1 = y0 + 1;
+    final fx = (u - x0).clamp(0.0, 1.0), fy = (v - y0).clamp(0.0, 1.0);
 
-    final grid = levels[l][face.index];
-    final a = _decode(grid[y0 * size + x0]);
-    final b = _decode(grid[y0 * size + x1]);
-    final c = _decode(grid[y1 * size + x0]);
-    final d = _decode(grid[y1 * size + x1]);
+    final a = _tap(l, size, face, x0, y0);
+    final b = _tap(l, size, face, x1, y0);
+    final c = _tap(l, size, face, x0, y1);
+    final d = _tap(l, size, face, x1, y1);
     return (a + (b - a) * fx) * (1 - fy) + (c + (d - c) * fx) * fy;
+  }
+
+  /// One decoded texel of [face] at [level], where `x`/`y` may be exactly one
+  /// step outside `[0, size)` — those resolve to the neighbouring face's texel
+  /// across the crossed edge, exactly, via [ChunkKey.neighbour]. A tap outside
+  /// on BOTH axes has no single owner (three faces meet at a cube corner); it
+  /// takes the mean of its two edge-resolved taps, which keeps the
+  /// reconstruction continuous along both seams meeting there.
+  double _tap(int l, int size, CubeFace face, int x, int y) {
+    final sIn = x >= 0 && x < size;
+    final tIn = y >= 0 && y < size;
+    if (sIn && tIn) {
+      return _decode(levels[l][face.index][y * size + x]);
+    }
+    if (!sIn && !tIn) {
+      return 0.5 *
+          (_tap(l, size, face, x.clamp(0, size - 1), y) +
+              _tap(l, size, face, x, y.clamp(0, size - 1)));
+    }
+    // Power-of-two face sizes let the texel grid reuse the chunk grid's exact
+    // seam transform. Anything else (never baked in practice) falls back to
+    // the old clamp rather than crashing.
+    if (size & (size - 1) != 0) {
+      return _decode(levels[l][face.index]
+          [y.clamp(0, size - 1) * size + x.clamp(0, size - 1)]);
+    }
+    final gridLevel = size.bitLength - 1; // log2(size)
+    final ChunkKey inside;
+    final ChunkEdge edge;
+    if (!sIn) {
+      inside = ChunkKey(face, gridLevel, x < 0 ? 0 : size - 1, y);
+      edge = x < 0 ? ChunkEdge.minusS : ChunkEdge.plusS;
+    } else {
+      inside = ChunkKey(face, gridLevel, x, y < 0 ? 0 : size - 1);
+      edge = y < 0 ? ChunkEdge.minusT : ChunkEdge.plusT;
+    }
+    final n = inside.neighbour(edge);
+    return _decode(levels[l][n.face.index][n.v * size + n.u]);
   }
 
   /// Local relief (m) around a direction, measured as the spread of the
@@ -115,20 +157,39 @@ class DemPyramid {
   ///
   /// This is what makes a DEM able to drive a [TerrainControl]: roughness and
   /// relief are not stored channels, they are STATISTICS of the height field,
-  /// and reading them off the pyramid costs four taps instead of a bake pass.
+  /// and reading them off the pyramid costs a few taps instead of a bake pass.
+  ///
+  /// The 3x3 window is built in a tangent frame of [dir] itself, NOT the face
+  /// frame: a face-local window flips orientation at a cube seam, and a
+  /// min/max spread over two differently-oriented windows disagrees by
+  /// hundreds of metres in cratered ground — which put a wall of detail
+  /// amplitude along every cube edge. A tangent frame cannot be globally
+  /// continuous (hairy ball), so the seed axis is blended near +-X where the
+  /// X seed degenerates; the estimate is continuous everywhere.
   double localReliefAt(Vector3 dir, {int level = 2}) {
     final l = level.clamp(0, levelCount - 1);
-    final size = sizeAt(l);
-    final face = faceOfDirection(dir);
-    final st = faceST(face, dir);
-    final step = 2.0 / size;
+    final step = 2.0 / sizeAt(l);
+    final ax = dir.x.abs();
+    if (ax < 0.85) return _reliefWindow(dir, l, step, _seedX);
+    if (ax > 0.95) return _reliefWindow(dir, l, step, _seedY);
+    final t = (ax - 0.85) / 0.10;
+    final w = t * t * (3.0 - 2.0 * t);
+    return _reliefWindow(dir, l, step, _seedX) * (1.0 - w) +
+        _reliefWindow(dir, l, step, _seedY) * w;
+  }
+
+  static const Vector3 _seedX = Vector3(1, 0, 0);
+  static const Vector3 _seedY = Vector3(0, 1, 0);
+
+  double _reliefWindow(Vector3 dir, int l, double step, Vector3 seed) {
+    final tan = seed.cross(dir).normalized;
+    final bit = dir.cross(tan);
     var lo = double.infinity, hi = double.negativeInfinity;
     for (var dy = -1; dy <= 1; dy++) {
       for (var dx = -1; dx <= 1; dx++) {
-        final e = elevationAt(
-          directionOf(face, st.s + dx * step, st.t + dy * step),
-          level: l,
-        );
+        final p =
+            (dir + tan * (dx * step) + bit * (dy * step)).normalized;
+        final e = elevationAt(p, level: l);
         if (e < lo) lo = e;
         if (e > hi) hi = e;
       }

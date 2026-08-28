@@ -303,6 +303,14 @@ class TerrainNodes {
   /// resubmitted every frame; cleared with the generation.
   final Set<ChunkKey> _emptyChunks = {};
 
+  /// Keys requested as intermediate LOD-ladder rungs ([nextRung]) — they
+  /// are neither `wanted` leaves nor `bareAncestors`, so the upload pump
+  /// needs this set to admit them on arrival. Without it every rung mesh was
+  /// silently dropped at the acceptance gate and immediately resubmitted the
+  /// next frame: streaming deadlocked below the first resident level and the
+  /// mesher ground the same rung forever.
+  final Set<ChunkKey> _ladderRungs = {};
+
   /// Retired chunks' meshes, kept in memory so a revisit re-UPLOADS instead
   /// of re-MESHING — a camera swinging back gets its ground the same frame.
   /// Dart maps iterate in insertion order, so re-inserting on hit makes this
@@ -940,16 +948,20 @@ class TerrainNodes {
         if (visibleSet.contains(e.key)) e.value.lastVisibleFrame = _frame;
       }
       for (final k in _chunks.keys.toList()) {
-        // Two ways out of the scene: fell invisible past the grace window
-        // (horizon churn protection), or REPLACED — still visible but no
-        // longer LOD-selected, with no missing chunk left standing on it,
-        // i.e. its finer (or coarser) successors are all resident. The
-        // replaced case must not wait out the grace: the split's last child
-        // just landed and the parent underneath is pure overdraw now.
+        // The one way out of the scene here: fell invisible past the grace
+        // window (horizon churn protection). Replacement removals happen
+        // elsewhere — a fully split parent leaves when its mask empties, a
+        // merged-away child when its coarse replacement uploads. A `replaced`
+        // clause here (`visibleSet.contains(k) && !wanted.contains(k)`)
+        // looked like it handled those, but a resident that is a CURRENT
+        // visible leaf is never a split parent or merged child (both leave
+        // the leaf set) — the only keys it matched were visible leaves pushed
+        // past the resident cap by nearest-first truncation, which it retired
+        // instantly, with no grace: the exact retire-on-truncation flicker
+        // commit 294a84a removed, snuck back in through the side door.
         final c = _chunks[k]!;
         final invisible = _frame - c.lastVisibleFrame > retireGraceFrames;
-        final replaced = visibleSet.contains(k) && !wanted.contains(k);
-        if ((invisible || replaced) && !standsIn(k)) {
+        if (invisible && !standsIn(k)) {
           _removeResident(k);
         }
       }
@@ -1015,11 +1027,17 @@ class TerrainNodes {
     final held2 = <_ArrivedMesh>[];
     for (final a in _arrived) {
       if (a.generation != _generation || _chunks.containsKey(a.key)) continue;
-      if (!wanted.contains(a.key) && !bareAncestors.contains(a.key)) continue;
+      if (!admitsArrival(a.key,
+          wanted: wanted,
+          bareAncestors: bareAncestors,
+          ladderRungs: _ladderRungs)) {
+        continue;
+      }
       if (uploads >= uploadBudgetPerFrame) {
         held2.add(a); // over budget: hold for next frame
         continue;
       }
+      _ladderRungs.remove(a.key);
       _addChunk(a.key, a.cell, shader as gpu.Shader, a.resolution);
       uploads++;
       // The finest ground shows the moment it exists — and the coarse cover
@@ -1031,11 +1049,25 @@ class TerrainNodes {
       for (final an in a.key.ancestors) {
         if (_chunks.containsKey(an)) _maskResident(an, a.key);
       }
-      // Merge: replace finer residents under the new chunk in the same
-      // frame. (For a split child this loop finds nothing — children have
-      // no finer residents beneath them.)
-      for (final r in _chunks.keys.toList()) {
-        if (r != a.key && r.ancestors.contains(a.key)) _removeResident(r);
+      if (wanted.contains(a.key)) {
+        // Merge: the coarse chunk IS the LOD decision, so the finer residents
+        // under it retire in the same frame. (For a split child this loop
+        // finds nothing — children have no finer residents beneath them.)
+        for (final r in _chunks.keys.toList()) {
+          if (r != a.key && r.ancestors.contains(a.key)) _removeResident(r);
+        }
+      } else {
+        // Coverage or ladder arrival landing UNDER already-resident finer
+        // cover — the tree still wants those fine leaves, so wiping them
+        // (the old behaviour) stepped whole regions back to coarse ground
+        // and forced a re-stream. Mask the ARRIVAL around them instead; if
+        // they cover it completely, the mask pass retires it on the spot.
+        for (final r in _chunks.keys.toList()) {
+          if (r != a.key && r.ancestors.contains(a.key)) {
+            _maskResident(a.key, r);
+            if (!_chunks.containsKey(a.key)) break; // fully covered: gone
+          }
+        }
       }
     }
     _arrived
@@ -1096,10 +1128,14 @@ class TerrainNodes {
       // rather than a few perfect tiles beside a cube face. Coarse chunks are
       // a handful of triangles, so the extra passes cost little next to the
       // leaves they stand in for.
-      final k = levelStep <= 0 ? want : _stepToward(want);
+      final k = nextRung(want,
+          levelStep: levelStep,
+          isResident: _chunks.containsKey,
+          isEmpty: _emptyChunks.contains);
       if (k != want && (_chunks.containsKey(k) || _pending.contains(k))) {
         continue; // this rung is up; the next frame climbs from it
       }
+      if (k != want) _ladderRungs.add(k);
       // Cache first: a retired mesh re-enters through the normal arrival
       // path (same generation gating, same atomic swaps) without costing an
       // isolate round-trip or a slot in the in-flight budget.
@@ -1286,18 +1322,28 @@ class TerrainNodes {
     return resolution * boost;
   }
 
-  /// Queue one chunk for meshing. The result lands in [_arrived] and becomes
-  /// a node inside the next frame's upload budget; a result whose generation
-  /// went stale in flight is dropped there.
-  /// The rung to request next on the way to [want].
+  /// The rung to request next on the way to [want] — the streaming ladder's
+  /// step function. Static and pure (residency and emptiness arrive as
+  /// callbacks) so the ladder policy is testable headless; the streaming path
+  /// around it needs a GPU.
   ///
   /// Walks up from [want] to the deepest ancestor already resident (or the
   /// root), then comes back down by at most [levelStep]. Returns [want] itself
-  /// once it is within a step.
-  ChunkKey _stepToward(ChunkKey want) {
+  /// once it is within a step. A rung that previously meshed EMPTY can never
+  /// become resident, so it steps straight to [want] instead — re-requesting
+  /// it forever was how one clipped-retired rung deadlocked its whole region
+  /// (the rung was remeshed every completion cycle and the wanted leaf was
+  /// never asked for).
+  static ChunkKey nextRung(
+    ChunkKey want, {
+    required int levelStep,
+    required bool Function(ChunkKey) isResident,
+    required bool Function(ChunkKey) isEmpty,
+  }) {
+    if (levelStep <= 0) return want;
     var residentLevel = -1;
     for (final a in want.ancestors) {
-      if (_chunks.containsKey(a)) {
+      if (isResident(a)) {
         residentLevel = a.level;
         break;
       }
@@ -1310,8 +1356,28 @@ class TerrainNodes {
       if (p == null) break;
       k = p;
     }
-    return k;
+    return isEmpty(k) ? want : k;
   }
+
+  /// Whether the upload pump admits an arrived mesh: a wanted leaf, a bare
+  /// coverage ancestor, or a deliberately requested ladder rung. The rung
+  /// clause is load-bearing — without it every intermediate rung was dropped
+  /// on arrival and instantly resubmitted, deadlocking streaming below the
+  /// first resident level. Static for the same headless-testing reason as
+  /// [nextRung].
+  static bool admitsArrival(
+    ChunkKey key, {
+    required Set<ChunkKey> wanted,
+    required Set<ChunkKey> bareAncestors,
+    required Set<ChunkKey> ladderRungs,
+  }) =>
+      wanted.contains(key) ||
+      bareAncestors.contains(key) ||
+      ladderRungs.contains(key);
+
+  /// Queue one chunk for meshing. The result lands in [_arrived] and becomes
+  /// a node inside the next frame's upload budget; a result whose generation
+  /// went stale in flight is dropped there.
 
   void _submit(TerrainField field, ChunkKey key, int chunkResolution) {
     final generation = _generation;
@@ -1342,6 +1408,7 @@ class TerrainNodes {
           _retiredClipped++;
         }
         _emptyChunks.add(key);
+        _ladderRungs.remove(key); // an empty rung will never arrive
       } else {
         _clippedRetries.remove(key);
         _arrived.add(_ArrivedMesh(key, cell, generation, chunkResolution));
@@ -1603,11 +1670,19 @@ class TerrainNodes {
     while (_meshCache.length > meshCacheSize) {
       _meshCache.remove(_meshCache.keys.first);
     }
-    for (final e in _chunks.entries) {
-      if (e.value.maskedBy.remove(key)) {
-        _rebuildMasked(e.key, e.value);
-        break; // only one ancestor can have been masking it
-      }
+    // EVERY resident that was masking this key rebuilds — the pump masks an
+    // arrival out of every resident ancestor (and a coverage arrival out of
+    // its finer residents), so with root + rung both resident a key sits in
+    // several maskedBy sets at once. The old `break` after the first hit left
+    // the others holding a stale mask: coarse ground with a hole cut for a
+    // chunk that no longer exists.
+    final maskers = [
+      for (final e in _chunks.entries)
+        if (e.value.maskedBy.remove(key)) e.key,
+    ];
+    for (final k in maskers) {
+      final c = _chunks[k];
+      if (c != null) _rebuildMasked(k, c);
     }
   }
 
@@ -1619,6 +1694,7 @@ class TerrainNodes {
     _generation++;
     _arrived.clear();
     _emptyChunks.clear();
+    _ladderRungs.clear();
     _meshCache.clear();
     _staleInFlight.clear(); // generation check already drops these
     _clippedEmpty = 0;

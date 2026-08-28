@@ -100,14 +100,98 @@ void main() {
     });
 
     test('is continuous across cube seams', () {
-      // Faces are sampled independently and clamp at their edges, so a seam is
-      // where a bug would show as a visible ridge.
+      // Faces are sampled independently, so a seam is where a bug would show
+      // as a visible ridge.
       for (var a = 0.0; a < 2 * math.pi; a += 0.02) {
         // Walk the +X/+Y seam.
         final d1 = Vector3(1, 0.999, math.sin(a)).normalized;
         final d2 = Vector3(0.999, 1, math.sin(a)).normalized;
         expect((dem.elevationAt(d1) - dem.elevationAt(d2)).abs(),
             lessThan(200));
+      }
+    });
+
+    test('is C0 at every seam: an eps-straddle moves the value by ~eps', () {
+      // REGRESSION: sampling used to CLAMP at the face edge, freezing each
+      // face at its own edge-texel row. The two edge rows sit a texel apart
+      // physically, so the surface jumped by `slope * texel` — a cliff along
+      // every cube edge (hundreds of metres on the real Moon). The fix
+      // resolves outer bilinear taps on the neighbouring face through the
+      // exact `ChunkKey.neighbour` seam arithmetic, so both sides of a seam
+      // reconstruct from the SAME texels and the jump is just the eps step's
+      // worth of slope.
+      final steep =
+          synthetic(f: (d) => 3000.0 * math.sin(25 * d.x) * math.cos(19 * d.y));
+      const eps = 1e-7;
+      final axes = [Vector3.unitX, Vector3.unitY, Vector3.unitZ];
+      var checked = 0;
+      for (var i = 0; i < 3; i++) {
+        for (var j = 0; j < 3; j++) {
+          if (i == j) continue;
+          for (final si in [1.0, -1.0]) {
+            for (final sj in [1.0, -1.0]) {
+              for (var k = 0; k < 40; k++) {
+                // Along-seam coordinate, kept away from cube corners where
+                // three faces meet and a half-texel positioning error is the
+                // accepted cost.
+                final a = -0.85 + 1.7 * k / 39;
+                final third = axes[3 - i - j];
+                final seam =
+                    (axes[i] * si + axes[j] * sj + third * a).normalized;
+                final pA = (seam * (1 - eps) + axes[i] * (si * eps)).normalized;
+                final pB = (seam * (1 - eps) + axes[j] * (sj * eps)).normalized;
+                final jump =
+                    (steep.elevationAt(pA) - steep.elevationAt(pB)).abs();
+                expect(jump, lessThan(1.0),
+                    reason: 'seam ${axes[i] * si}/${axes[j] * sj} at a=$a');
+                checked++;
+              }
+            }
+          }
+        }
+      }
+      expect(checked, 12 * 2 * 40, reason: 'every cube edge, both windings');
+    });
+
+    test('localReliefAt is continuous across a seam', () {
+      // REGRESSION: the 3x3 relief window used to be built in FACE-LOCAL
+      // coordinates, so its orientation flipped at a seam and the min/max
+      // spread disagreed by hundreds of metres in rough ground — which walled
+      // the detail layer's amplitude along every cube edge. The window now
+      // lives in a tangent frame of the direction itself.
+      final rough =
+          synthetic(f: (d) => 3000.0 * math.sin(25 * d.x) * math.cos(19 * d.y));
+      const eps = 1e-7;
+      for (var k = 0; k < 60; k++) {
+        final a = -0.85 + 1.7 * k / 59;
+        final seam = Vector3(1, 1, a).normalized;
+        final pA = (seam * (1 - eps) + Vector3.unitX * eps).normalized;
+        final pB = (seam * (1 - eps) + Vector3.unitY * eps).normalized;
+        final jump =
+            (rough.localReliefAt(pA) - rough.localReliefAt(pB)).abs();
+        expect(jump, lessThan(1.0), reason: 'relief window at a=$a');
+      }
+    });
+
+    test('localReliefAt is continuous through its seed-blend band', () {
+      // The tangent frame cannot be globally continuous (hairy ball); the
+      // seed axis blends from X to Y over |dir.x| in [0.85, 0.95]. The blend
+      // must be seamless at both edges of the band.
+      final rough =
+          synthetic(f: (d) => 3000.0 * math.sin(25 * d.x) * math.cos(19 * d.y));
+      const eps = 1e-7;
+      for (final ax in [0.85, 0.95]) {
+        for (var k = 0; k < 20; k++) {
+          final phi = 2 * math.pi * k / 20;
+          final rest = math.sqrt(1 - ax * ax);
+          final d0 = Vector3(
+              ax - eps, rest * math.cos(phi), rest * math.sin(phi)).normalized;
+          final d1 = Vector3(
+              ax + eps, rest * math.cos(phi), rest * math.sin(phi)).normalized;
+          final jump =
+              (rough.localReliefAt(d0) - rough.localReliefAt(d1)).abs();
+          expect(jump, lessThan(1.0), reason: 'blend edge $ax, phi=$phi');
+        }
       }
     });
 

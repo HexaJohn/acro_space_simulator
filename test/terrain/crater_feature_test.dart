@@ -164,6 +164,56 @@ void main() {
         expect(none.heightAt(d, control), 0);
       }
     });
+
+    test('is continuous: no pop-in at lattice cell walls', () {
+      // REGRESSION: the cell scan used to cover +-1 cells, but a crater can
+      // draw up to _sizeMax (1.45x) its decade radius with ejecta reaching 2.5
+      // radii — an influence of ~1.65 lattice pitches, more than the 1.0 pitch
+      // a +-1 window guarantees. Craters in Chebyshev-distance-2 cells popped
+      // in and out of the sum as the window slid across cell walls, stepping
+      // the ground by a rim-tail's height (hundreds of metres in the coarsest
+      // decade) along walls all over the body.
+      //
+      // Detector: a discontinuity keeps the largest one-step height delta
+      // CONSTANT as the step shrinks, while a continuous field shrinks it
+      // linearly. Walk a great circle crossing many coarsest-decade walls,
+      // find the worst step, then re-measure the same spot with a step 16x
+      // smaller.
+      final tanA = Vector3.unitX;
+      final tanB = Vector3(0, 0.6, 0.8).normalized;
+      double at(double theta) => feature.heightAt(
+          (tanA * math.cos(theta) + tanB * math.sin(theta)).normalized,
+          control);
+
+      const h = 4.0e-5; // ~70 m of ground per step
+      const steps = 8000; // ~0.32 rad: several 40 km-decade pitches
+      var worstTheta = 0.0, worstDelta = -1.0;
+      var prev = at(0);
+      for (var i = 1; i <= steps; i++) {
+        final theta = i * h;
+        final v = at(theta);
+        final delta = (v - prev).abs();
+        if (delta > worstDelta) {
+          worstDelta = delta;
+          worstTheta = theta;
+        }
+        prev = v;
+      }
+      // Refine across the worst step with a 16x finer step; take the largest
+      // sub-step. Continuous ground shrinks ~16x; a pop-in stays put.
+      var refined = -1.0;
+      var p = at(worstTheta - h);
+      for (var i = 1; i <= 16; i++) {
+        final v = at(worstTheta - h + i * h / 16);
+        final d = (v - p).abs();
+        if (d > refined) refined = d;
+        p = v;
+      }
+      expect(refined, lessThan(worstDelta * 0.3),
+          reason: 'worst step ${worstDelta.toStringAsFixed(1)} m at '
+              'theta=$worstTheta does not shrink with the step size — '
+              'a crater is popping in/out of the cell window');
+    });
   });
 
   group('LineaFeature', () {

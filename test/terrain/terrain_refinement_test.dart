@@ -264,6 +264,36 @@ void main() {
       expect(leaves.map((k) => k.level).reduce((a, b) => a > b ? a : b), 9);
     });
 
+    test('a quiet frame quiesces in one select iteration', () {
+      // REGRESSION: the stored leaf set used to INCLUDE the 2:1 balance
+      // staircase around a refined island — complete zero-px sibling quads
+      // that are not pinned. Every quiet frame the merge pass collapsed that
+      // staircase level by level (several full select iterations, each an
+      // apparentPx scan of every leaf) and enforceBalance rebuilt it
+      // identically. The staircase is derived state and must never feed the
+      // next frame's selection.
+      final dir = const Vector3(0.31, -0.22, 1).normalized;
+      final refine = [TerrainRefinement(dir, 10)];
+      final tree = TerrainLodTree();
+      var calls = 0;
+      double px(ChunkKey k) {
+        calls++;
+        return 0;
+      }
+
+      tree.update(px, refine: refine); // establish the island
+      tree.update(px, refine: refine); // settle
+      final before = tree.leaves;
+      calls = 0;
+      tree.update(px, refine: refine); // quiet frame
+      expect(tree.leaves, before, reason: 'quiet frame must not move leaves');
+      // One iteration costs about |leaves| (split scan) + |merge groups|.
+      // The staircase churn measured ~2.3x the leaf count and 4+ iterations.
+      expect(calls, lessThan(before.length * 2),
+          reason: '$calls apparentPx calls for ${before.length} leaves — '
+              'the select loop is re-churning the balance staircase');
+    });
+
     test('several targets in one region do not fight each other', () {
       final dir = const Vector3(0.1, 0.2, 0.97).normalized;
       final tree = TerrainLodTree();

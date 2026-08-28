@@ -100,6 +100,37 @@ void main() {
       }
     });
 
+    test('chunkAt/contains agree in the half-ulp window below a boundary', () {
+      // REGRESSION: contains() used to compare raw st.s against the exact
+      // dyadic cell edge while chunkAt floors (st.s + 1.0) * 0.5 * n. For s
+      // in [-2^-54, 0) — every negative subnormal and small normal, i.e. any
+      // float dust below the face-centre meridian — the + 1.0 rounds
+      // half-even UP onto the boundary: chunkAt assigned the upper cell,
+      // whose raw compare then rejected the direction. Consumers pairing the
+      // two (pinned()/_applyRefinements in terrain_lod.dart, the mesher's
+      // interior tests) saw the invariant chunkAt(d, L).contains(d) break.
+      // contains() now shares chunkAt's shifted arithmetic.
+      final dirs = <Vector3>[
+        const Vector3(1.0, -5.421010862427522e-20, 0.3), // -2^-64
+        const Vector3(1.0, -5e-324, 0.37),
+        const Vector3(1.0, 0.3, -1e-300),
+        for (final f in CubeFace.values)
+          for (final tiny in const [-5e-324, -1e-300, -5.551115123125783e-17])
+            directionOf(f, tiny, 0.37),
+      ];
+      for (final d in dirs) {
+        for (final level in [1, 2, 3, 6, 10]) {
+          final k = chunkAt(d, level);
+          expect(k.contains(d), isTrue,
+              reason: 'level $level dir $d -> $k rejects its own direction');
+          for (final normalized in [d.normalized]) {
+            expect(chunkAt(normalized, level).contains(normalized), isTrue,
+                reason: 'normalized $normalized at level $level');
+          }
+        }
+      }
+    });
+
     test('children tile their parent exactly once', () {
       for (final d in _sampleDirections(300, seed: 99)) {
         final parent = chunkAt(d, 3);

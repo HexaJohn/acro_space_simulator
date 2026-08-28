@@ -119,7 +119,12 @@ void main() {
       final d = (groundWith(c.repo, dirOf(probes[i])) - natural[i]).abs();
       if (d > moved) moved = d;
     }
-    expect(moved, greaterThan(0.5), reason: 'the road corridor was not graded');
+    // A no-op brush leaves `moved` at exactly 0, so the bound only needs to
+    // clear float noise — not pin how hilly this particular site happens to
+    // be. The natural relief here shifts whenever the procedural crater field
+    // is corrected (it did when the crater lattice window and complex-crater
+    // rims were fixed), and a site-hilliness pin broke on exactly that.
+    expect(moved, greaterThan(0.1), reason: 'the road corridor was not graded');
   });
 
   test('a building stands on FLAT ground even with neighbours either side', () {
