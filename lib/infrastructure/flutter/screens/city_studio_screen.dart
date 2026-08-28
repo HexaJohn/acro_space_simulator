@@ -103,6 +103,8 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     AtmosphereNodes.loadShader(),
     // Bark and foliage: street trees are the scatter system's broadleaf.
     ScatterPropLibrary.loadTextures(),
+    // The city's custom surface shader (per-fragment night skyglow).
+    CityMaterials.loadShader(),
   ]);
 
   /// Everything the scene needs before it can draw, as ONE future built once.
@@ -212,6 +214,12 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   }
 
   bool _busy = false;
+
+  /// The cascaded shadow pass, as an isolate switch. Every cascade re-draws
+  /// the whole scene into the shadow map, so it is the biggest GPU-side line
+  /// item the CPU phase timers cannot see — flip it and watch the panel's
+  /// "unaccounted" figure to attribute that cost.
+  bool _shadows = true;
 
   /// Watch the colony being built: during zoning the frame is recaptured
   /// every few buildings and the loop paced, so buildings visibly arrive
@@ -578,22 +586,17 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   /// the flight scene's reason (see SceneSync._sunIntensity).
   static const double _sunIntensity = 2.2;
 
-  /// The nighttime city's own glow, standing in for the sun once it sets.
-  static const double _skyglowIntensity = 0.5;
-
   /// The directional sun, plus shadows when the camera is low enough for
   /// there to be ground in frame to receive them. A trimmed copy of
   /// SceneSync's sun: aimed from the frame's star through the colony, light
   /// travelling AWAY from the star.
   ///
-  /// At night the same light changes job: a lit city throws its street and
-  /// window light into the air and the air throws it back down, so a real
-  /// night city is shaped by a soft warm wash from ZENITH, not by nothing.
-  /// A true GI pass would bounce every lamp; one dim warm skyglow light and
-  /// a raised ambient floor is the honest forgery, and it is what stops a
-  /// night colony reading as unlit geometry with lit windows painted on.
-  /// Blended on the city's own night factor, so it fades in exactly as the
-  /// windows come on.
+  /// The night skyglow does NOT live here any more. A directional light is
+  /// one direction and one strength for the whole scene, and a camera-height
+  /// fade was tried and was wrong the other way round — the glow belongs to
+  /// each SURFACE's height, pavement bright and parapet dark, and that is
+  /// per-fragment work. The city's custom surface shader carries it now
+  /// (CityGlow in city_surface.frag); this light is just the sun again.
   void _syncSun(fs.Scene scene, WorldSnapshot frame, Vector3? starWorld) {
     vm.Vector3 dir;
     if (starWorld == null) {
@@ -606,16 +609,13 @@ class _CityStudioScreenState extends State<CityStudioScreen>
           : vm.Vector3(-rel.x / len, -rel.y / len, -rel.z / len);
     }
     final night = CityMaterials.nightFactor.clamp(0.0, 1.0);
-    if (night > 0) {
-      final down = vm.Vector3(-_upWorld.x, -_upWorld.y, -_upWorld.z);
-      dir = (dir * (1.0 - night) + down * night).normalized();
-    }
     var light = scene.directionalLight;
     if (light == null) {
       light = fs.DirectionalLight(direction: dir, intensity: _sunIntensity);
       scene.directionalLight = light;
     } else {
       light.direction = dir;
+      light.intensity = _sunIntensity;
     }
 
     // Altitude above the COLONY's ground shell, not the datum — the anchor
@@ -624,35 +624,22 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     final groundR = (_anchorWorld - _bodyCentreWorld).length;
     final altM =
         groundR < 1 ? 0.0 : (eyeWorld - _bodyCentreWorld).length - groundR;
-
-    // The glow FALLS OFF WITH HEIGHT. It is the street canyons' own light
-    // thrown back by the air over them, so it lives at street level: climb
-    // out of the canyons and it thins toward a floor — from a couple of
-    // kilometres up a night city is points of light, not lit surfaces, and
-    // an evenly washed one from any altitude was the fake's tell. Half gone
-    // by 500 m, floored at 0.15 so the distant halo never quite dies.
-    final ratio = math.max(0.0, altM) / 500.0;
-    final heightFade = 0.15 + 0.85 / (1.0 + ratio * ratio);
-    final glow = night * heightFade;
-
-    light.intensity =
-        _sunIntensity * (1.0 - night) + _skyglowIntensity * glow;
-    // Sodium-and-LED warm, only as the glow takes over from the white sun.
-    light.color = vm.Vector3(
-        1.0, 1.0 - 0.16 * night, 1.0 - 0.38 * night);
-    // The ambient floor rises with the glow: skylight scatters everywhere,
-    // including the canyon walls a zenith light cannot reach.
-    scene.environmentIntensity = 0.05 + 0.13 * glow;
     // Deep night: the glow comes from everywhere, so a sharp shadow from one
     // direction would be the tell that it is fake. Drop the pass.
-    if (groundR < 1 || altM > 8000 || night > 0.6) {
+    if (!_shadows || groundR < 1 || altM > 8000 || night > 0.6) {
       light.castsShadow = false;
       return;
     }
-    // The flight scene's landing-shadow tuning, verbatim — same renderer,
-    // same texel maths (see SceneSync._tuneShadows for each number's story).
+    // The flight scene's landing-shadow tuning (see SceneSync._tuneShadows
+    // for each number's story) — with one studio divergence below.
     light.castsShadow = true;
     light.shadowCasterFaces = fs.ShadowCasterFaces.back;
+    // TWO cascades, not the engine's four. Every cascade re-draws the whole
+    // scene into 2048^2 — at ~470 draws of city and terrain, four of them
+    // put more draws in the shadow pass than in the frame, and the panel's
+    // "unaccounted" time is where that shows up. The studio frames ONE
+    // colony at short range, which two cascades cover.
+    light.shadowCascadeCount = 2;
     final rangeM = (altM * 3.0 + 300.0).clamp(300.0, 6000.0);
     light.shadowMaxDistance = lengthToScene(rangeM);
     light.shadowFadeRange = lengthToScene(rangeM * 0.12);
@@ -1181,6 +1168,11 @@ class _CityStudioScreenState extends State<CityStudioScreen>
         // amount of CPU tuning here will help.
         row('unaccounted', '${ms((avg - accounted).clamp(0, 1e9))} ms',
             colour: AppTheme.warn),
+        Text(
+            '  GPU + raster: no CPU timer sees it. Attribute by A/B with '
+            'the ISOLATE switches — shadows and atmosphere first, they are '
+            'the usual bulk.',
+            style: AppTheme.dim.copyWith(fontSize: 10)),
         const SizedBox(height: 6),
         row('draws', '${count['draws'] ?? 0}', colour: AppTheme.accent),
         row('batches', '${count['batches'] ?? 0}', colour: AppTheme.accent),
@@ -1372,6 +1364,19 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             activeThumbColor: AppTheme.accent2,
             title: const Text('City (all of it)', style: AppTheme.body),
             onChanged: (v) => setState(() => CityNodes.enabled = v),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            value: _shadows,
+            activeThumbColor: AppTheme.accent2,
+            title: const Text('Shadows', style: AppTheme.body),
+            subtitle: Text(
+                'The cascaded shadow pass re-draws the whole scene per '
+                    'cascade. GPU cost — it shows in "unaccounted", not in '
+                    'the phase timers.',
+                style: AppTheme.dim.copyWith(fontSize: 11)),
+            onChanged: (v) => setState(() => _shadows = v),
           ),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,

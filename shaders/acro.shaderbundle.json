@@ -15,6 +15,10 @@
         "type": "fragment",
         "file": "shaders/terrain.frag"
     },
+    "CitySurfaceFragment": {
+        "type": "fragment",
+        "file": "shaders/city_surface.frag"
+    },
     "CloudFragment": {
         "type": "fragment",
         "file": "shaders/clouds.frag"

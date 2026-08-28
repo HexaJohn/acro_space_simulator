@@ -203,6 +203,14 @@ class CityNodes {
   /// Whether a texture upload is still in flight (see [update]).
   bool _texturesPending = false;
 
+  /// Whether the custom surface shader is still compiling in (see [update]).
+  bool _glowShaderPending = false;
+
+  /// The skyglow's reference frame, stashed by [_nightFactorAt] — the same
+  /// site pick that decides how dark it is decides where "ground" is.
+  Vector3? _glowBodyWorld;
+  double _glowGroundRadiusM = 0;
+
   /// Cursor node, rebuilt every frame it is visible. One quad — cheap enough
   /// that tracking the mouse never touches the city's cached batches, which is
   /// the whole point of keeping it separate from them.
@@ -434,7 +442,27 @@ class CityNodes {
       _floraPending = false;
       _roadsBuiltKey = '';
     }
+    // And for the custom surface shader: batches built before it landed hold
+    // materials on the stock fragment, so drop the materials AND the batches
+    // the frame it arrives — resetting the material cache alone leaves every
+    // existing node bound to the old instances.
+    if (!CityMaterials.shaderReady) {
+      unawaited(CityMaterials.loadShader());
+      _glowShaderPending = true;
+    } else if (_glowShaderPending) {
+      _glowShaderPending = false;
+      CityMaterials.reset();
+      invalidate();
+    }
     CityMaterials.nightFactor = _nightFactorAt(snap, byBody);
+    // Where the skyglow's height falloff is measured from, in the shader's
+    // own scene space. Per frame: the floating origin moves.
+    final glowBody = _glowBodyWorld;
+    if (glowBody != null) {
+      CityMaterials.glowCentreScene = origin.worldToScene(glowBody);
+      CityMaterials.glowGroundRadiusScene = lengthToScene(_glowGroundRadiusM);
+      CityMaterials.glowMetresToScene = lengthToScene(1.0);
+    }
 
     // The colony-wide fallback tier, off the NEAREST building. Kept for the
     // whole-colony path and as the coarse gate; see [_detailFor] for why one
@@ -566,6 +594,10 @@ class CityNodes {
     final body = snap.bodies[site.bodyId];
     if (body == null) return 0;
     final bodyWorld = Vector3(body.px, body.py, body.pz);
+    // The skyglow measures height off this same site: one pick decides both
+    // how dark the colony is and where its ground shell sits.
+    _glowBodyWorld = bodyWorld;
+    _glowGroundRadiusM = site.posBF.length;
     final quat = Quaternion(body.qw, body.qx, body.qy, body.qz);
     final siteWorld = bodyWorld + quat.rotate(site.posBF);
     final up = quat.rotate(site.posBF).normalized;
