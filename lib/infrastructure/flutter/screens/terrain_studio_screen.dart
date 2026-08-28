@@ -1013,11 +1013,15 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
       // gives selection a real projection to budget against, and splitPx
       // (the slider below) is its whole personality.
       final probeEye = _lodFromFocus ? Vector3.zero : _cameraEyeM();
+      final eyeM = _cameraEyeM();
+      final viewFwd = _firstPerson
+          ? _walkerLook()
+          : (eyeM.length > 1 ? eyeM.normalized * -1 : Vector3.unitZ);
       _terrain!.update(
         frame,
         _origin,
         cameraEye: probeEye,
-        camera: _LodProbeCamera(probeEye, _focalPx),
+        camera: _LodProbeCamera(probeEye, _focalPx, viewFwd),
         focusBodyId: _body,
         starWorld: starWorld,
       );
@@ -1493,11 +1497,18 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
 /// camera rewrite. Every other [SceneCamera] member throws — if the streamer
 /// ever grows a second dependency, the studio should hear about it loudly.
 class _LodProbeCamera implements SceneCamera {
-  _LodProbeCamera(this.eyeRel, this.focalPx);
+  _LodProbeCamera(this.eyeRel, this.focalPx, this._forward);
 
   /// The eye, relative to the floating origin's focus — the same frame the
   /// streamer's `rel` arguments arrive in.
   final Vector3 eyeRel;
+
+  /// The view direction — the streamer's second dependency, found the loud
+  /// way: it aims the head-lamp down the view axis.
+  final Vector3 _forward;
+
+  @override
+  Vector3 get forward => _forward;
 
   /// Pixels per radian-ish: (viewport height / 2) / tan(fov / 2). Happens
   /// to be the meaning [SceneCamera.focalPx] already carries, so the field
