@@ -242,12 +242,30 @@ class CityNodes {
         variants: archetypeVariants,
       );
 
+  /// The library the BLOCK tier draws from: buckets twice as coarse, half
+  /// the variants. A block-tier building is a silhouette box hundreds of
+  /// metres away, where a two-metre size quantum and a repeated massing are
+  /// invisible — but every distinct archetype is an uploaded mesh and a
+  /// solid+glazing draw pair, and the block tier is most of any city seen
+  /// from its framing distance. Coarser sharing there is draw calls off the
+  /// dominant tier for a difference nobody can resolve.
+  static BuildingLibrary _newCoarseLibrary() => BuildingLibrary(
+        generator: const BuildingGenerator().withStyle(style),
+        bucketM: archetypeBucketM * 2,
+        variants: math.max(1, archetypeVariants ~/ 2),
+      );
+
   BuildingLibrary _library = _newLibrary();
+  BuildingLibrary _libraryCoarse = _newCoarseLibrary();
   double _libraryBucketM = archetypeBucketM;
   int _libraryVariants = archetypeVariants;
   String _libraryStyle = style.id;
 
-  /// Rebuild the archetype library if its knobs moved. Everything already
+  /// The library serving [tier].
+  BuildingLibrary _libraryFor(BuildingDetail tier) =>
+      tier == BuildingDetail.block ? _libraryCoarse : _library;
+
+  /// Rebuild the archetype libraries if their knobs moved. Everything already
   /// uploaded is keyed by the old quantisation, so it all has to go.
   void _syncLibrary() {
     if (_libraryBucketM == archetypeBucketM &&
@@ -259,6 +277,7 @@ class CityNodes {
     _libraryVariants = archetypeVariants;
     _libraryStyle = style.id;
     _library = _newLibrary();
+    _libraryCoarse = _newCoarseLibrary();
     _uploaded.clear();
     _builtKey = ''; // forces the structural rebuild on the next frame
   }
@@ -694,13 +713,16 @@ class CityNodes {
         // it inside the library: these two maps are looked up with keys built
         // independently, and a key that forgot the style would upload one
         // building's mesh and then serve it for a different kit's.
+        // Block tier keys and meshes against the coarse library, so the
+        // dominant tier shares far fewer archetypes (and draws).
+        final lib = _libraryFor(tier);
         final key = BuildingArchetype.of(spec, parcel,
-            detail: tier, seed: seed, bucketM: _library.bucketM,
-            variants: _library.variants,
+            detail: tier, seed: seed, bucketM: lib.bucketM,
+            variants: lib.variants,
             styleId: style.id,
             corner: b.corner);
         _uploaded.putIfAbsent(key, () {
-          final built = _library.get(spec, parcel, seed: seed, detail: tier);
+          final built = lib.get(spec, parcel, seed: seed, detail: tier);
           if (lodDebug) {
             // The building's own massing, as one box. Same size, same place,
             // no detail — so what you are looking at is purely which tier each
@@ -2176,6 +2198,7 @@ class CityNodes {
     _clear();
     _uploaded.clear();
     _library.clear();
+    _libraryCoarse.clear();
     if (debugLine.isNotEmpty) debugPrint('cityNodes disposed');
   }
 }

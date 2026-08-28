@@ -812,7 +812,12 @@ class _CityStudioScreenState extends State<CityStudioScreen>
         // nearest thing is the pavement and the far plane still has to reach
         // the far side of the colony.
         fovNear: lengthToScene(0.15),
-        fovFar: lengthToScene(40000),
+        // Far enough to rasterize the atmosphere's camera-enclosing inner
+        // shell: a near-horizon sky ray crosses it around sqrt(2*R*lift) ~
+        // 300 km out, and clipping there cut the haze off in a band above
+        // the horizon. Costs no depth precision — D24 error grows with
+        // distance-from-eye and the near plane, not with the far plane.
+        fovFar: lengthToScene(400000),
       );
     }
     final target = vm.Vector3.zero();
@@ -826,7 +831,9 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       // The colony's own up, NOT world +Z.
       up: vm.Vector3(_upWorld.x, _upWorld.y, _upWorld.z),
       fovNear: lengthToScene(math.max(_distanceM * 0.01, 1.0)),
-      fovFar: lengthToScene(_distanceM * 20 + 20000),
+      // The floor exists for the atmosphere's inner shell — see the walk
+      // camera's far plane for the arithmetic.
+      fovFar: lengthToScene(math.max(_distanceM * 20 + 20000, 400000)),
     );
   }
 
