@@ -337,7 +337,11 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
     final upv = right.cross(fwd);
     final tanY = math.tan(fovY / 2);
     final tanX = tanY * size.width / size.height;
-    final ndcX = local.dx / size.width * 2 - 1;
+    // Screen X is NEGATED against the right vector: the engine's camera
+    // basis is X-mirrored (see coord_convert.dart — the same mirror the
+    // mesh builders flip their winding for), so a ray built right-handed
+    // picked the ground on the wrong side of centre.
+    final ndcX = -(local.dx / size.width * 2 - 1);
     final ndcY = 1 - local.dy / size.height * 2;
     final dir =
         (fwd + right * (ndcX * tanX) + upv * (ndcY * tanY)).normalized;
