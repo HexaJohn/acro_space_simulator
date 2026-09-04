@@ -1232,10 +1232,18 @@ class _CityStudioScreenState extends State<CityStudioScreen>
           // distance from the middle of town and never changed however far
           // the camera flew. `_cameraEyeM` is already in world axes about the
           // anchor, so this is the eye in world space.
+          //
+          // And from the SAME LENS as the terrain: once the rig is frozen the
+          // tiers and the view cull are judged from the pinned eye, so the
+          // camera can fly round and see what the pin left coarse.
+          final lensEyeWorld = _rig.frozen
+              ? _rig.frozenEyeWorld(
+                  bodyCentreWorld: _bodyCentreWorld, bodyQuat: bodyQuat)
+              : _anchorWorld + _cameraEyeM();
           _phase(
               'city',
               () => _city!.update(frame, _origin,
-                  focusWorld: _anchorWorld + _cameraEyeM()));
+                  focusWorld: lensEyeWorld, viewCone: cone));
           _cityMs = sw.elapsedMicroseconds / 1000;
           sw.reset();
           _phase('sun', () => _syncSun(scene, frame, starWorld));
@@ -1780,6 +1788,12 @@ class _CityStudioScreenState extends State<CityStudioScreen>
                 : AppTheme.textDim),
         row('city', '${ms(_cityMs)} ms'),
         row(
+            '  out of view',
+            GraphicsQuality.terrainFrustumCull
+                ? '${CityNodes.outOfViewTiles} tiles stepped down'
+                : 'culling off',
+            colour: AppTheme.textDim),
+        row(
             '  lod mix',
             [
               'full ${CityNodes.lodCounts[BuildingDetail.full] ?? 0}',
@@ -2088,10 +2102,11 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             dense: true,
             value: GraphicsQuality.terrainFrustumCull,
             activeThumbColor: AppTheme.accent2,
-            title: const Text('Terrain view culling', style: AppTheme.body),
+            title: const Text('View culling', style: AppTheme.body),
             subtitle: Text(
-                'Chunks outside the lens\'s view cone select coarser (never '
-                'vanish). Same switch as Options > Graphics quality.',
+                'Terrain chunks and city tiles outside the lens\'s view cone '
+                'select coarser (never vanish). Same switch as Options > '
+                'Graphics quality.',
                 style: AppTheme.dim.copyWith(fontSize: 11)),
             onChanged: (v) =>
                 setState(() => GraphicsQuality.terrainFrustumCull = v),

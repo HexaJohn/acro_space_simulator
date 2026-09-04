@@ -287,7 +287,18 @@ class SceneSync {
     // Colonies stand on the same ground the terrain and scatter passes just
     // built, so they belong in the same group — a city placed against last
     // frame's relief would visibly float after a chunk swap.
-    _city.update(snap, origin, focusWorld: origin.focusWorld);
+    // City tiers and their view cull from the same lens as the terrain. Live,
+    // tier distances stay measured from the focus (the craft) as before and
+    // only the cull's apex is the camera eye; pinned, both are the pinned
+    // eye, so the camera can fly round and see what the pin left coarse.
+    final lensEyeWorld = origin.focusWorld + cameraEye;
+    _city.update(
+      snap,
+      origin,
+      focusWorld: lensRig.frozen ? lensEyeWorld : origin.focusWorld,
+      eyeWorld: lensEyeWorld,
+      viewCone: viewCone,
+    );
     mark('city');
     _skybox.update(
         cameraRangeKm:

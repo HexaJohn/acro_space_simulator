@@ -105,6 +105,16 @@ void main() {
     expect(up.x.abs(), closeTo(1.0, 1e-6));
   });
 
+  test('a tile outside the view steps down one tier, never out', () {
+    // View culling must coarsen, not remove: a turn refines from a coarser
+    // city, never from a hole where a block used to be.
+    expect(CityNodes.viewTier(CityTier.near, inView: true), CityTier.near);
+    expect(CityNodes.viewTier(CityTier.far, inView: true), CityTier.far);
+    expect(CityNodes.viewTier(CityTier.near, inView: false), CityTier.mid);
+    expect(CityNodes.viewTier(CityTier.mid, inView: false), CityTier.far);
+    expect(CityNodes.viewTier(CityTier.far, inView: false), CityTier.far);
+  });
+
   test('a distant colony drops to block silhouettes', () {
     // The tiers exist and are ordered; the node family picks between them by
     // range, and a block must be cheaper than a full building.

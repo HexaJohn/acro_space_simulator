@@ -43,6 +43,7 @@ import '../../../domain/scatter/prop_model.dart';
 import '../scatter/scatter_prop_library.dart';
 import '../../../domain/shared/quaternion.dart';
 import '../../../domain/shared/vector3.dart';
+import '../../../domain/terrain/terrain_lod.dart' show ViewCone;
 import '../../../domain/architecture/architecture_style.dart';
 import '../../../domain/architecture/city_lighting.dart';
 import '../coord_convert.dart';
@@ -155,6 +156,30 @@ class CityNodes {
   static double buildBudgetMs = 9;
 
   static String debugLine = '';
+
+  /// View culling (see [ViewCone]): a tile outside the lens's view cone takes
+  /// the tier BELOW the one its distance earns — near to mid, mid to far,
+  /// never gone — so a turn refines from a coarser city rather than from
+  /// nothing. On when the caller hands [update] a cone, which the scenes
+  /// gate on `GraphicsQuality.terrainFrustumCull`, the same switch as the
+  /// terrain. A tile's sphere is its half-diagonal plus [viewCullHeightM],
+  /// the building-height allowance that keeps a tower on a tile just past
+  /// the cone's edge in view.
+  static double viewCullHeightM = 400;
+
+  /// Hysteresis on the cone edge: a tile leaves the view only once it is
+  /// this much further out than it had to be to enter. A tile rebuild is
+  /// the price of a flip, so the edge must not flicker on a slow pan.
+  static double viewCullHysteresisRad = 10 * math.pi / 180;
+
+  /// Tiles stepped down by the view cull on the last [update].
+  static int outOfViewTiles = 0;
+
+  /// The tier a tile gets from its distance tier and whether it is in view.
+  static CityTier viewTier(CityTier byDistance, {required bool inView}) =>
+      inView
+          ? byDistance
+          : (byDistance == CityTier.near ? CityTier.mid : CityTier.far);
 
   /// The editor's ground cursor, in BODY-FIXED metres, or null when nothing is
   /// being pointed at.
@@ -437,6 +462,13 @@ class CityNodes {
     WorldSnapshot snap,
     FloatingOrigin origin, {
     required Vector3 focusWorld,
+    // The lens's eye, for the view cull's apex; defaults to [focusWorld].
+    // The flight view measures tier distances from the focus (the craft)
+    // but culls from where the camera actually is.
+    Vector3? eyeWorld,
+    // The lens's view cone in WORLD axes; tiles outside it step down a tier
+    // (see [viewTier]). Null = no view culling.
+    ViewCone? viewCone,
   }) {
     if (!enabled ||
         (snap.buildings.isEmpty &&
@@ -477,14 +509,29 @@ class CityNodes {
     // Range gate off the nearest tile, and the camera in each body's frame.
     var nearest = double.infinity;
     final focusByBody = <String, Vector3>{};
+    // The view cull's apex and cones per body, in that body's frame. Two
+    // cones: a tile ENTERS the view inside the narrow one and LEAVES only
+    // outside the wide one (see [viewCullHysteresisRad]).
+    final eyeByBody = <String, Vector3>{};
+    final conesByBody = <String, ({ViewCone enter, ViewCone leave})>{};
     for (final t in _tiles.values) {
       final body = snap.bodies[t.bodyId];
       if (body == null) continue;
-      final focusBF = focusByBody[t.bodyId] ??= focusInBodyFrame(
-        focusWorld,
-        Vector3(body.px, body.py, body.pz),
-        Quaternion(body.qw, body.qx, body.qy, body.qz),
-      );
+      final bodyWorld = Vector3(body.px, body.py, body.pz);
+      final bodyQuat = Quaternion(body.qw, body.qx, body.qy, body.qz);
+      final focusBF = focusByBody[t.bodyId] ??=
+          focusInBodyFrame(focusWorld, bodyWorld, bodyQuat);
+      if (viewCone != null) {
+        eyeByBody[t.bodyId] ??=
+            focusInBodyFrame(eyeWorld ?? focusWorld, bodyWorld, bodyQuat);
+        conesByBody[t.bodyId] ??= () {
+          final fwdBF = bodyQuat.conjugate.rotate(viewCone.forward);
+          return (
+            enter: ViewCone(fwdBF, viewCone.halfAngle),
+            leave: ViewCone(fwdBF, viewCone.halfAngle + viewCullHysteresisRad),
+          );
+        }();
+      }
       t.distanceM =
           math.max(0.0, (t.centreBF - focusBF).length - t.halfDiagonalM);
       if (t.distanceM < nearest) nearest = t.distanceM;
@@ -566,13 +613,27 @@ class CityNodes {
     // building takes its own detail from its own distance — the camera,
     // quantised hard to 64 m, because rebuilding on every centimetre of
     // travel would cost far more than the LOD saves.
-    var near = 0, mid = 0, far = 0;
+    var near = 0, mid = 0, far = 0, outOfView = 0;
     for (final t in _tiles.values) {
       final focusBF = focusByBody[t.bodyId];
       if (focusBF == null) continue;
-      final tier = t.distanceM < nearRangeM
+      var tier = t.distanceM < nearRangeM
           ? CityTier.near
           : (t.distanceM < midRangeM ? CityTier.mid : CityTier.far);
+      final cones = conesByBody[t.bodyId];
+      if (cones != null) {
+        final rel = t.centreBF - eyeByBody[t.bodyId]!;
+        final radius = t.halfDiagonalM + viewCullHeightM;
+        t.inView = t.inView
+            ? cones.leave.containsSphere(rel, radius)
+            : cones.enter.containsSphere(rel, radius);
+        if (!t.inView) {
+          outOfView++;
+          tier = viewTier(tier, inView: false);
+        }
+      } else {
+        t.inView = true;
+      }
       switch (tier) {
         case CityTier.near:
           near++;
@@ -598,6 +659,7 @@ class CityNodes {
         }
       }
     }
+    outOfViewTiles = outOfView;
     phaseMs['city.tier'] = sw.elapsedMicroseconds / 1000;
     sw.reset();
 
@@ -2515,6 +2577,10 @@ class _Tile {
   CityTier? wantTier;
   bool queued = false;
   double distanceM = double.infinity;
+
+  /// Inside the lens's view cone as of the last update — with hysteresis,
+  /// so the previous answer is part of the next (see [CityNodes.update]).
+  bool inView = true;
   int skylineTris = 0;
   Map<BuildingDetail, int> lodCounts = const {};
   _TileJob? job;

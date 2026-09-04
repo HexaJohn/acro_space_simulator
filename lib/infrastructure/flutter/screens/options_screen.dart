@@ -74,7 +74,7 @@ class _OptionsScreenState extends State<OptionsScreen> {
           _section('GRAPHICS QUALITY', [
             ..._qualityRows(),
             _toggle(
-                'Terrain view culling (coarser ground behind the camera)',
+                'View culling (terrain and city tiles behind the camera go coarser)',
                 GraphicsQuality.terrainFrustumCull,
                 (v) => _mutateQuality(
                     () => GraphicsQuality.terrainFrustumCull = v)),

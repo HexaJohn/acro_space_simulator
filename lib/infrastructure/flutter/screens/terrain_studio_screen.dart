@@ -1111,7 +1111,14 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
       );
       _terrainMs = sw.elapsedMicroseconds / 1000;
       sw.reset();
-      _city!.update(frame, _origin, focusWorld: _anchorWorld + _cameraEyeM());
+      // City tiers and their view cull from the same lens as the terrain:
+      // the pinned eye once frozen, else the camera.
+      _city!.update(frame, _origin,
+          focusWorld: _rig.frozen
+              ? _rig.frozenEyeWorld(
+                  bodyCentreWorld: _bodyCentreWorld, bodyQuat: bodyQuat)
+              : _anchorWorld + _cameraEyeM(),
+          viewCone: cone);
       _cityMs = sw.elapsedMicroseconds / 1000;
       _syncSun(scene, starWorld);
       _atmo!.update(frame, _origin,
@@ -1584,9 +1591,10 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
             activeThumbColor: AppTheme.accent2,
             title: const Text('View culling', style: AppTheme.body),
             subtitle: Text(
-                'Chunks outside the lens\'s view cone select coarser (never '
-                'vanish). Freeze the lens and orbit behind it to see the '
-                'coarse band. Same switch as Options > Graphics quality.',
+                'Terrain chunks and city tiles outside the lens\'s view cone '
+                'select coarser (never vanish). Freeze the lens and orbit '
+                'behind it to see the coarse band. Same switch as Options > '
+                'Graphics quality.',
                 style: AppTheme.dim.copyWith(fontSize: 11)),
             onChanged: (v) =>
                 setState(() => GraphicsQuality.terrainFrustumCull = v),
