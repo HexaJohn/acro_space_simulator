@@ -331,6 +331,10 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   /// Where the running build has got to. Null when nothing is building.
   CityGenProgress? _progress;
 
+  /// The last build, phase by phase and by cost — what the console printed,
+  /// kept for the perf panel.
+  List<String> _buildLog = const [];
+
   /// Wall clock of the running build, so the readout is a measurement rather
   /// than the estimate it used to be.
   final Stopwatch _genClock = Stopwatch();
@@ -610,19 +614,51 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     // quadratic in buildings and a four-block colony would take minutes.
     var zoned = 0;
     var previewEvery = 1;
+    // What the build is actually doing. The console names each phase as it
+    // starts and every step over a quarter second as it ends; the summary at
+    // the end (also in the perf panel) is what to read when "it hung at
+    // 12%": the bar scales the generator's 0..1 by buildShare, so the whole
+    // zoning band is one percent wide on screen and looks like a stall.
+    final phaseMs = <String, int>{};
+    final phaseSteps = <String, int>{};
+    final phaseMaxMs = <String, int>{};
+    var frames = 0;
+    var prevPhase = 'start';
+    final stepSw = Stopwatch()..start();
+    final sinceYield = Stopwatch()..start();
     for (final p in build.run()) {
       if (!mounted) return;
-      // Always repaint on a phase CHANGE, not just every sixth step: the
-      // steps after 0.9 are one per phase, and with only the stride gate the
-      // label sat on "re-platting" while zoning and settling ran — which is
-      // exactly the freeze it existed to name.
+      // The time since the last item is the PREVIOUS item's phase at work.
+      final ms = stepSw.elapsedMilliseconds;
+      stepSw.reset();
+      phaseMs[prevPhase] = (phaseMs[prevPhase] ?? 0) + ms;
+      phaseSteps[prevPhase] = (phaseSteps[prevPhase] ?? 0) + 1;
+      if (ms > (phaseMaxMs[prevPhase] ?? 0)) phaseMaxMs[prevPhase] = ms;
+      if (ms > 250) {
+        debugPrint('city build: "$prevPhase" step took ${ms}ms');
+      }
       final phaseChanged = p.phase != lastPhase;
+      if (phaseChanged) {
+        debugPrint('city build → ${p.phase}  '
+            '(generator ${(p.fraction * 100).toStringAsFixed(1)}%, '
+            'bar ${(p.fraction * buildShare * 100).round()}%)');
+      }
       lastPhase = p.phase;
+      prevPhase = p.phase;
       step++;
-      if (phaseChanged || step % 6 == 0 || p.fraction >= 1.0) {
+      // Yield to the event loop by TIME, not by step count. Every sixth
+      // step painted a full frame — scene and all — per six lots, and the
+      // zoning phase yields once per lot: a 127,000-lot colony was 21,000
+      // frames, minutes of vsync waits at idle CPU, read as a hang.
+      if (phaseChanged ||
+          sinceYield.elapsedMilliseconds >= 40 ||
+          p.fraction >= 1.0) {
         setState(() => _progress =
             (phase: p.phase, fraction: p.fraction * buildShare));
         await Future<void>.delayed(Duration.zero);
+        sinceYield.reset();
+        stepSw.reset(); // the frame is not the phase's doing
+        frames++;
       }
       if (_slowBuild && p.phase == 'zoning and building') {
         final live = build.partial!;
@@ -637,12 +673,22 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       }
     }
     final sim = build.city!;
+    final byCost = phaseMs.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    _buildLog = [
+      'generator ${sw.elapsedMilliseconds}ms, $step steps, $frames frames',
+      for (final e in byCost)
+        '${e.key}: ${e.value}ms / ${phaseSteps[e.key]} steps, '
+            'max ${phaseMaxMs[e.key]}ms',
+    ];
+    debugPrint('city build summary:\n  ${_buildLog.join('\n  ')}');
 
     setState(() =>
         _progress = (phase: 'cutting the ground', fraction: buildShare));
     await Future<void>.delayed(Duration.zero);
 
     // Shape the ground under it, exactly as the tick would.
+    final groundSw = Stopwatch()..start();
     final edits = InMemoryTerrainEditsRepository();
     final body = system.body(sim.body.id)!;
     for (final p in CityTerrainShaper(voxelM: _cityVoxelM).pending(
@@ -656,6 +702,9 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       edits.record(body.id, p.brush);
       sim.shapedTerrain.add(p.key);
     }
+    _buildLog.add('cutting the ground: ${groundSw.elapsedMilliseconds}ms, '
+        '${edits.forBody(body.id)?.length ?? 0} brushes');
+    debugPrint('city build: ${_buildLog.last}');
 
     // The long one, and it cannot report from inside: `capture` is a core
     // function used on every tick by everything, and threading a progress
@@ -670,6 +719,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     // on the datum sphere under it.
     _groundField = body.terrainFieldWith(edits.forBody(body.id));
 
+    final captureSw = Stopwatch()..start();
     final snap = WorldSnapshot.capture(
       1,
       InMemoryVesselRepository(const []),
@@ -677,6 +727,9 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       cities: InMemoryCityRepository([sim]),
       terrainEdits: edits,
     );
+    _buildLog.add('draping the frame: ${captureSw.elapsedMilliseconds}ms, '
+        '${snap.buildings.length} buildings, ${snap.roads.length} roads');
+    debugPrint('city build: ${_buildLog.last}');
     sw.stop();
     _genClock.stop();
 
@@ -1833,6 +1886,14 @@ class _CityStudioScreenState extends State<CityStudioScreen>
         const SizedBox(height: 4),
         // The gap is the GPU plus Flutter's own frame — if it dominates, no
         // amount of CPU tuning here will help.
+        if (_buildLog.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          row('last build', '', colour: AppTheme.accent),
+          for (final line in _buildLog)
+            Text('  $line',
+                style: AppTheme.mono
+                    .copyWith(fontSize: 10, color: AppTheme.textDim)),
+        ],
         row('unaccounted', '${ms((avg - accounted).clamp(0, 1e9))} ms',
             colour: AppTheme.warn),
         Text(
