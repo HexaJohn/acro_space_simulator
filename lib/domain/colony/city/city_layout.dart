@@ -193,6 +193,14 @@ class CityLayout {
     bool sealed = false,
     // Built as the walled variant: sound barriers along both edges.
     bool soundWalls = false,
+    // How this road plats: its own lot frontage and depth in place of the
+    // colony's settings, whether it fronts lots at all (null: by class),
+    // and whether it is a collector — a subdivision's through street,
+    // which crosses another collector at a roundabout.
+    double? lotFrontageM,
+    double? lotDepthM,
+    bool? frontsLots,
+    bool collector = false,
     // Skip the lot re-subdivision. For laying a WHOLE network at once: every
     // commit otherwise re-cuts every lot in the colony, which is quadratic in
     // roads and was most of the cost of generating a city. The caller must
@@ -255,9 +263,13 @@ class CityLayout {
           // A split keeps what the original was built as.
           sealed: road.sealed,
           soundWalls: road.soundWalls,
+          lotFrontageM: road.lotFrontageM,
+          lotDepthM: road.lotDepthM,
+          frontsLots: road.frontsLots,
+          collector: road.collector,
         );
         _roads[piece.id] = piece;
-        _index.add(piece, samples: pieces[i]);
+        _indexPiece(piece, pieces[i]);
       }
     });
 
@@ -271,9 +283,13 @@ class CityLayout {
         controls: _decimate(pieces[i]),
         sealed: sealed,
         soundWalls: soundWalls && roadClass.canHaveSoundWalls,
+        lotFrontageM: lotFrontageM,
+        lotDepthM: lotDepthM,
+        frontsLots: frontsLots,
+        collector: collector,
       );
       _roads[pid] = piece;
-      _index.add(piece, samples: pieces[i]);
+      _indexPiece(piece, pieces[i]);
     }
     _index.compact();
     if (!regenerateLots) {
@@ -348,23 +364,52 @@ class CityLayout {
     ];
   }
 
-  /// Thin a 2 m-sampled polyline back to control points every ~16 m. The
-  /// spline through them reproduces the original curve to well under a lane
-  /// width, and a road stored as 400 controls would make every regenerate pay
-  /// for the editor's sampling rate forever.
-  static List<Vec2> _decimate(List<Vec2> pts) {
+  /// Thin a 2 m-sampled polyline back to control points: the fewest that
+  /// keep every sample within [toleranceM] of the polyline through them
+  /// (Douglas-Peucker). A straight street comes back as its two ends — so
+  /// the index holds it as one segment and the spline through it is the
+  /// line — and a bend keeps a control wherever it turns. The old rule kept
+  /// a point every 16 m whatever the shape, so a straight kilometre was
+  /// sixty collinear controls that every sample of it paid for forever.
+  static List<Vec2> _decimate(List<Vec2> pts, {double toleranceM = 0.15}) {
     if (pts.length <= 2) return List.of(pts);
-    final out = <Vec2>[pts.first];
-    var since = 0.0;
-    for (var i = 1; i < pts.length - 1; i++) {
-      since += pts[i].distanceTo(pts[i - 1]);
-      if (since >= 16) {
-        out.add(pts[i]);
-        since = 0;
+    final keep = List<bool>.filled(pts.length, false);
+    keep[0] = true;
+    keep[pts.length - 1] = true;
+    final stack = <(int, int)>[(0, pts.length - 1)];
+    while (stack.isNotEmpty) {
+      final (a, b) = stack.removeLast();
+      if (b - a < 2) continue;
+      final pa = pts[a], pb = pts[b];
+      final ab = pb - pa;
+      final len2 = ab.dot(ab);
+      var worst = -1.0;
+      var at = -1;
+      for (var i = a + 1; i < b; i++) {
+        final d = len2 <= 1e-12
+            ? pts[i].distanceTo(pa)
+            : ((pts[i] - pa).cross(ab)).abs() / math.sqrt(len2);
+        if (d > worst) {
+          worst = d;
+          at = i;
+        }
+      }
+      if (worst > toleranceM) {
+        keep[at] = true;
+        stack.add((a, at));
+        stack.add((at, b));
       }
     }
-    out.add(pts.last);
-    return out;
+    return [
+      for (var i = 0; i < pts.length; i++)
+        if (keep[i]) pts[i],
+    ];
+  }
+
+  /// Index a committed piece: a straight one as its two ends, a bent one
+  /// at the crossing test's own samples, which the piece was cut from.
+  void _indexPiece(RoadSpline piece, List<Vec2> samples) {
+    _index.add(piece, samples: piece.controls.length == 2 ? null : samples);
   }
 
   /// Remove a road. [regenerateLots] defers the re-cut exactly as
@@ -511,8 +556,7 @@ class CityLayout {
     }
     final out = <Parcel>[];
     // Alleys and anything on piers serve lots, they do not front them.
-    final platting =
-        _roads.values.where((r) => r.roadClass.platsLots).toList();
+    final platting = _roads.values.where((r) => r.platsLots).toList();
     for (var i = 0; i < platting.length; i++) {
       out.addAll(_subdivide(platting[i], placed));
       yield (i + 1) / platting.length;
@@ -536,13 +580,17 @@ class CityLayout {
   /// setback. The result is what plat maps look like: even fronts, ragged
   /// backs, angled corner lots — and no dead ground between facing streets.
   List<Parcel> _subdivide(RoadSpline road, BoxIndex<Parcel> placed) {
-    final pts = road.sample(stepM: 2.0);
+    // The index already holds the road's samples: one segment for a
+    // straight street, 2 m for a bent one.
+    final pts = _index.byId(road.id)?.samples ?? road.sample(stepM: 2.0);
     if (pts.length < 2) return const [];
     final cum = _cumulative(pts);
     final total = cum.last;
+    final frontageM = road.lotFrontageM ?? _settings.frontageM;
+    final depthM = road.lotDepthM ?? _settings.depthM;
     final start = _settings.cornerClearM;
     final end = total - _settings.cornerClearM;
-    if (end - start < _settings.frontageM * _settings.minFrontageFraction) {
+    if (end - start < frontageM * _settings.minFrontageFraction) {
       return const [];
     }
 
@@ -554,9 +602,9 @@ class CityLayout {
       var s = start;
       var index = 0;
       while (s < end - 1e-6) {
-        var s1 = s + _settings.frontageM;
+        var s1 = s + frontageM;
         if (s1 > end) {
-          if (end - s < _settings.frontageM * _settings.minFrontageFraction) {
+          if (end - s < frontageM * _settings.minFrontageFraction) {
             break;
           }
           s1 = end;
@@ -570,8 +618,8 @@ class CityLayout {
 
         // Depth per corner: to the block midline against whatever the ray
         // hits, or the configured depth where the block is open.
-        final dA = _depthAt(frontA, outA, road);
-        final dB = _depthAt(frontB, outB, road);
+        final dA = _depthAt(frontA, outA, road, depthM);
+        final dB = _depthAt(frontB, outB, road, depthM);
         final lotIndex = index++;
         s = s1;
         if (math.min(dA, dB) < 8) continue; // an alley, not a lot
@@ -669,8 +717,8 @@ class CityLayout {
   /// planning rule that makes facing streets' lots meet at the midline with
   /// no sliver of dead ground between them. An open block runs to the
   /// configured depth.
-  double _depthAt(Vec2 front, Vec2 outward, RoadSpline own) {
-    final probe = _settings.depthM * 3;
+  double _depthAt(Vec2 front, Vec2 outward, RoadSpline own, double depthM) {
+    final probe = depthM * 3;
     // Broad phase against the ray's own box. Without it this walked every
     // sample of every road in the colony for every lot corner — O(roads x
     // lots), which is fine at a hundred roads and is most of the build time
@@ -696,14 +744,14 @@ class CityLayout {
         nearestIsAlley = ob.roadClass == RoadClass.alley;
       }
     });
-    if (nearest == double.infinity) return _settings.depthM;
+    if (nearest == double.infinity) return depthM;
     // Halved because the usual obstacle is the FACING street, and its lots are
     // coming the other way to meet these at the block midline. An alley is
     // different: it IS the midline, it is already a road with its own
     // setback, and nothing is platted off it — so a lot runs all the way to
     // it. Halving there would leave a strip of dead ground behind every
     // building, which is exactly the gap the alley exists to remove.
-    return math.min(_settings.depthM, nearestIsAlley ? nearest : nearest / 2);
+    return math.min(depthM, nearestIsAlley ? nearest : nearest / 2);
   }
 
   /// Clip a lot against every foreign carriageway it strays near, so corner

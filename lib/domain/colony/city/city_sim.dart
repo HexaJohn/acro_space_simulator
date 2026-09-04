@@ -3297,6 +3297,11 @@ class CitySim {
     bool regenerateLots = true,
     /// The walled variant: sound barriers along both edges.
     bool soundWalls = false,
+    /// How the road plats — see [CityLayout.commitRoad].
+    double? lotFrontageM,
+    double? lotDepthM,
+    bool? frontsLots,
+    bool collector = false,
   }) {
     if (groundAt != null && controls.length >= 2) {
       final samples = RoadSpline(
@@ -3314,6 +3319,10 @@ class CitySim {
       // road, so it is built with a pressurised tube for them instead.
       sealed: !breathable,
       soundWalls: soundWalls,
+      lotFrontageM: lotFrontageM,
+      lotDepthM: lotDepthM,
+      frontsLots: frontsLots,
+      collector: collector,
       regenerateLots: regenerateLots,
     );
     for (final e in result.renamedLots.entries) {
@@ -3560,6 +3569,10 @@ class CitySim {
               'closed': r.closed,
               'sealed': r.sealed,
               if (r.soundWalls) 'walls': true,
+              if (r.lotFrontageM != null) 'lotW': r.lotFrontageM,
+              if (r.lotDepthM != null) 'lotD': r.lotDepthM,
+              if (r.frontsLots != null) 'fronts': r.frontsLots,
+              if (r.collector) 'collector': true,
               'pts': [
                 for (final c in r.controls) ...[c.e, c.n]
               ],
@@ -3664,6 +3677,10 @@ class CitySim {
         closed: r['closed'] as bool,
         sealed: r['sealed'] == true,
         soundWalls: r['walls'] == true,
+        lotFrontageM: (r['lotW'] as num?)?.toDouble(),
+        lotDepthM: (r['lotD'] as num?)?.toDouble(),
+        frontsLots: r['fronts'] as bool?,
+        collector: r['collector'] == true,
         controls: [
           for (var i = 0; i + 1 < pts.length; i += 2)
             Vec2(pts[i].toDouble(), pts[i + 1].toDouble()),

@@ -516,6 +516,20 @@ class RoadSpline {
   /// for the next without being three roads.
   final bool soundWalls;
 
+  /// How this road is platted, where the colony's [ParcelSettings] are not
+  /// the right answer. A downtown street cuts thirty-metre assemblages; a
+  /// subdivision's street cuts house lots; a county highway fronts nothing
+  /// however many lanes it has. Null means the settings' or the class's
+  /// default.
+  final double? lotFrontageM;
+  final double? lotDepthM;
+  final bool? frontsLots;
+
+  /// A subdivision's through street: one of the two per axis that run out
+  /// to the arterial. Where two collectors cross, the crossing is a
+  /// roundabout rather than a four-way stop — what a subdivision builds.
+  final bool collector;
+
   const RoadSpline({
     required this.id,
     required this.controls,
@@ -523,10 +537,42 @@ class RoadSpline {
     this.closed = false,
     this.sealed = false,
     this.soundWalls = false,
+    this.lotFrontageM,
+    this.lotDepthM,
+    this.frontsLots,
+    this.collector = false,
   });
 
   double get width => roadClass.width;
   double get halfWidth => roadClass.halfWidth;
+
+  /// Whether lots are cut along this road: its own say, else its class's.
+  bool get platsLots => frontsLots ?? roadClass.platsLots;
+
+  RoadSpline copyWith({
+    String? id,
+    List<Vec2>? controls,
+    RoadClass? roadClass,
+    bool? closed,
+    bool? sealed,
+    bool? soundWalls,
+    double? lotFrontageM,
+    double? lotDepthM,
+    bool? frontsLots,
+    bool? collector,
+  }) =>
+      RoadSpline(
+        id: id ?? this.id,
+        controls: controls ?? this.controls,
+        roadClass: roadClass ?? this.roadClass,
+        closed: closed ?? this.closed,
+        sealed: sealed ?? this.sealed,
+        soundWalls: soundWalls ?? this.soundWalls,
+        lotFrontageM: lotFrontageM ?? this.lotFrontageM,
+        lotDepthM: lotDepthM ?? this.lotDepthM,
+        frontsLots: frontsLots ?? this.frontsLots,
+        collector: collector ?? this.collector,
+      );
 
   /// Points along the curve, spaced at most [stepM] apart.
   ///

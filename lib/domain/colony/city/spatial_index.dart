@@ -230,7 +230,13 @@ class SegmentIndex {
   int add(RoadSpline road, {List<Vec2>? samples}) {
     final old = _slotOf[road.id];
     if (old != null) remove(road.id);
-    final pts = samples ?? road.sample(stepM: sampleM);
+    // A straight road IS its two ends: one segment answers every distance
+    // and crossing question exactly, and a suburb of sixty thousand
+    // straight streets held at 2 m would be a hundred megabytes of points.
+    final pts = samples ??
+        (road.controls.length == 2 && !road.closed
+            ? List.of(road.controls)
+            : road.sample(stepM: sampleM));
     final e = Float64List(pts.length), n = Float64List(pts.length);
     final cum = Float64List(pts.length);
     for (var i = 0; i < pts.length; i++) {
