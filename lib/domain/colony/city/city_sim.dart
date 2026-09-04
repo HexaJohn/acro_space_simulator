@@ -3288,6 +3288,10 @@ class CitySim {
   /// commits nothing. Terrain cut/fill smooths a corridor; it does not repeal
   /// the slope, and a street pinned to a cliff face should be a routing
   /// problem, not a rendering one.
+  /// Where the last committed road met the network: what the generator
+  /// reads to put an interchange at an expressway's crossing.
+  List<RoadCrossing> lastCommitCrossings = const [];
+
   String? commitRoad(
     List<Vec2> controls,
     RoadClass roadClass, {
@@ -3303,6 +3307,12 @@ class CitySim {
     bool? frontsLots,
     bool collector = false,
     bool graded = true,
+    /// Bridges, tapers and end snapping — see [CityLayout.commitRoad].
+    List<(double, double)> bridges = const [],
+    double? startHalfWidthM,
+    double? endHalfWidthM,
+    bool snapStart = true,
+    bool snapEnd = true,
   }) {
     if (groundAt != null && controls.length >= 2) {
       final samples = RoadSpline(
@@ -3325,8 +3335,14 @@ class CitySim {
       frontsLots: frontsLots,
       collector: collector,
       graded: graded,
+      bridges: bridges,
+      startHalfWidthM: startHalfWidthM,
+      endHalfWidthM: endHalfWidthM,
+      snapStart: snapStart,
+      snapEnd: snapEnd,
       regenerateLots: regenerateLots,
     );
+    lastCommitCrossings = result.crossings;
     for (final e in result.renamedLots.entries) {
       final placed = parcelBuildings.remove(e.key);
       if (placed != null) parcelBuildings[e.value] = placed;
@@ -3575,6 +3591,12 @@ class CitySim {
               if (r.frontsLots != null) 'fronts': r.frontsLots,
               if (r.collector) 'collector': true,
               if (!r.graded) 'graded': false,
+              if (r.bridges.isNotEmpty)
+                'bridges': [
+                  for (final (a, b) in r.bridges) ...[a, b]
+                ],
+              if (r.startHalfWidthM != null) 'hw0': r.startHalfWidthM,
+              if (r.endHalfWidthM != null) 'hw1': r.endHalfWidthM,
               'pts': [
                 for (final c in r.controls) ...[c.e, c.n]
               ],
@@ -3687,6 +3709,15 @@ class CitySim {
         frontsLots: r['fronts'] as bool?,
         collector: r['collector'] == true,
         graded: r['graded'] != false,
+        bridges: [
+          for (var i = 0; i + 1 < ((r['bridges'] as List?)?.length ?? 0); i += 2)
+            (
+              ((r['bridges'] as List)[i] as num).toDouble(),
+              ((r['bridges'] as List)[i + 1] as num).toDouble(),
+            ),
+        ],
+        startHalfWidthM: (r['hw0'] as num?)?.toDouble(),
+        endHalfWidthM: (r['hw1'] as num?)?.toDouble(),
         controls: [
           for (var i = 0; i + 1 < pts.length; i += 2)
             Vec2(pts[i].toDouble(), pts[i + 1].toDouble()),

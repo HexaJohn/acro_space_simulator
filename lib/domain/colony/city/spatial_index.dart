@@ -252,6 +252,16 @@ class SegmentIndex {
     return slot;
   }
 
+  /// Swap the road object in [road.id]'s slot, keeping its samples: for a
+  /// change of attributes — a bridge added, walls, a taper — not geometry.
+  bool replace(RoadSpline road) {
+    final slot = _slotOf[road.id];
+    if (slot == null) return false;
+    final old = _roads[slot]!;
+    _roads[slot] = IndexedRoad(road, old.e, old.n, old.cum, old.box);
+    return true;
+  }
+
   void remove(String id) {
     final slot = _slotOf.remove(id);
     if (slot == null) return;

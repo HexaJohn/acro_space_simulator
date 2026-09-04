@@ -1519,6 +1519,13 @@ class RoadSnapshot {
   /// roundabout.
   final bool collector;
 
+  /// Flattened start,end pairs of arc length along the road that ride a
+  /// bridge, and the half width at either end where the road tapers (null:
+  /// its class's own).
+  final List<double> bridges;
+  final double? startHalfWidthM;
+  final double? endHalfWidthM;
+
   const RoadSnapshot({
     required this.colonyId,
     required this.body,
@@ -1528,6 +1535,9 @@ class RoadSnapshot {
     this.sealed = false,
     this.soundWalls = false,
     this.collector = false,
+    this.bridges = const [],
+    this.startHalfWidthM,
+    this.endHalfWidthM,
   });
 
   Map<String, dynamic> toJson() => {
@@ -1539,6 +1549,9 @@ class RoadSnapshot {
         if (sealed) 'sealed': true,
         if (soundWalls) 'walls': true,
         if (collector) 'collector': true,
+        if (bridges.isNotEmpty) 'br': bridges,
+        if (startHalfWidthM != null) 'hw0': startHalfWidthM,
+        if (endHalfWidthM != null) 'hw1': endHalfWidthM,
       };
 
   factory RoadSnapshot.fromJson(Map<String, dynamic> j) => RoadSnapshot(
@@ -1552,6 +1565,11 @@ class RoadSnapshot {
         sealed: j['sealed'] == true,
         soundWalls: j['walls'] == true,
         collector: j['collector'] == true,
+        bridges: [
+          for (final v in (j['br'] as List?) ?? const []) (v as num).toDouble()
+        ],
+        startHalfWidthM: (j['hw0'] as num?)?.toDouble(),
+        endHalfWidthM: (j['hw1'] as num?)?.toDouble(),
       );
 }
 
@@ -2393,6 +2411,11 @@ class WorldSnapshot {
             sealed: road.sealed,
             soundWalls: road.soundWalls,
             collector: road.collector,
+            bridges: [
+              for (final (a, b) in road.bridges) ...[a, b]
+            ],
+            startHalfWidthM: road.startHalfWidthM,
+            endHalfWidthM: road.endHalfWidthM,
           ));
         }
         // Roads, zoned-but-unbuilt lots and support platforms. These are what

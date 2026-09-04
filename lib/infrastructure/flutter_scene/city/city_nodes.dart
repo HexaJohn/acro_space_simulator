@@ -821,7 +821,11 @@ class CityNodes {
       // Parts, run from the end: roads in runs, then the junctions and the
       // terminals over them, then buildings in runs, the ground, the lot
       // furniture, and the planting last, off the pits the roads left.
-      const roadsPerStep = 40;
+      // Small runs: the budget is checked between parts, and a part is
+      // the least the frame can overshoot by. A run of four hundred
+      // buildings against a cold archetype cache was a hundred
+      // milliseconds; a twenty-mile city has a thousand such runs.
+      const roadsPerStep = 16;
       for (var i = 0; i < t.roads.length; i += roadsPerStep) {
         final from = i, to = math.min(i + roadsPerStep, t.roads.length);
         j.steps.add(() {
@@ -831,7 +835,7 @@ class CityNodes {
         });
       }
       j.steps.add(() => _emitJunctions(j, t, epoch, root));
-      const buildingsPerStep = 400;
+      const buildingsPerStep = 100;
       for (var i = 0; i < t.buildings.length; i += buildingsPerStep) {
         final from = i, to = math.min(i + buildingsPerStep, t.buildings.length);
         j.steps.add(() {
@@ -842,7 +846,7 @@ class CityNodes {
       }
       j.steps.add(() => _emitPatches(t.patches, j));
       if (tier == CityTier.near && lotFeatures) {
-        const perStep = 200;
+        const perStep = 60;
         for (var i = 0; i < t.buildings.length; i += perStep) {
           final from = i, to = math.min(i + perStep, t.buildings.length);
           j.steps.add(() => _emitLotFeatures(
@@ -1233,8 +1237,15 @@ class CityNodes {
     for (final t in _tiles.values) {
       if (t.distanceM > trafficRangeM) continue;
       for (final r in t.roads) {
+        // A piece that tapers is driven at its narrower width, so nothing
+        // runs in the lane that is dropped along it.
+        var narrow = r.halfWidthM;
+        for (final w in [r.startHalfWidthM, r.endHalfWidthM]) {
+          if (w != null && w < narrow) narrow = w;
+        }
         (byBody[r.body] ??= []).add(_TrafficRoad(
-            r.points, r.roadClassIndex, r.halfWidthM, r.sealed, const []));
+            r.points, r.roadClassIndex, r.halfWidthM, r.sealed, r.bridges,
+            narrowHalfWidthM: narrow));
       }
     }
     for (final r in snap.sprawlRoads) {
@@ -1973,13 +1984,30 @@ class CityNodes {
       RoadMesher.ribbon(rb.dirtRibbon, pts, anchorBF, road.halfWidthM);
     } else {
       // The carriageway with its lanes painted on — the same pipeline the
-      // whole city draws through, downtown and county line alike.
+      // whole city draws through, downtown and county line alike — lifted
+      // onto its bridges and tapered into what it meets.
+      final ranges = <(double, double)>[
+        for (var i = 0; i + 1 < road.bridges.length; i += 2)
+          (road.bridges[i], road.bridges[i + 1]),
+      ];
+      final liftAt = ranges.isEmpty
+          ? null
+          : (double s) => RoadMesher.bridgeLiftAt(s, ranges);
       RoadMesher.carriageway(rb.ribbon, pts, anchorBF, cls,
           halfWidthM: road.halfWidthM,
+          startHalfWidthM: road.startHalfWidthM,
+          endHalfWidthM: road.endHalfWidthM,
+          liftAt: liftAt,
           paint: paint,
           solid: near ? rb.propSolid : null);
+      if (liftAt != null) {
+        RoadMesher.piers(rb.propSolid, pts, anchorBF, road.halfWidthM, liftAt);
+      }
       if (road.soundWalls && cls.canHaveSoundWalls && paint) {
         RoadMesher.soundWalls(rb.propSolid, pts, anchorBF, road.halfWidthM,
+            startHalfWidthM: road.startHalfWidthM,
+            endHalfWidthM: road.endHalfWidthM,
+            liftAt: liftAt,
             posts: near);
       }
     }

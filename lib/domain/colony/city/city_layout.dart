@@ -75,6 +75,18 @@ class ParcelSettings {
 /// (see `spatial_index.dart`), so the cost of a lot is the roads around
 /// it, not the roads in the city. That is what lets the twenty-mile sprawl
 /// be platted like the downtown instead of described.
+/// Where a committed road met an existing one: [sNew] along the new road,
+/// [sOld] along [otherId] — as they were before either was cut — and
+/// whether one passed over the other rather than meeting it.
+class RoadCrossing {
+  const RoadCrossing(this.otherId, this.sNew, this.sOld, this.at,
+      {this.bridged = false});
+  final String otherId;
+  final double sNew, sOld;
+  final Vec2 at;
+  final bool bridged;
+}
+
 class CityLayout {
   CityLayout({ParcelSettings settings = const ParcelSettings()})
       : _settings = settings;
@@ -208,10 +220,31 @@ class CityLayout {
   /// lot id, matched by centroid containment) is how the caller carries its
   /// buildings across the rename; without it, crossing a road through a built
   /// district would orphan every building on it.
-  ({String roadId, Map<String, String> renamedLots}) commitRoad({
+  /// How far a bridge reaches either side of the crossing it carries an
+  /// expressway over, and how close to an expressway's end there is no
+  /// room to climb to one.
+  static const double bridgeHalfM = 190;
+  static const double bridgeEndClearM = 260;
+
+  ({
+    String roadId,
+    Map<String, String> renamedLots,
+    List<RoadCrossing> crossings,
+  }) commitRoad({
     required List<Vec2> controls,
     RoadClass roadClass = RoadClass.street,
     double snapM = 15,
+    // Whether each end may snap onto a road it is drawn near. A ramp's
+    // merge lands on an expressway's EDGE, a lane out from the centreline,
+    // and must not be pulled onto it.
+    bool snapStart = true,
+    bool snapEnd = true,
+    // Where the road rides a bridge, as arc ranges from its start; and its
+    // width at either end where it tapers into what it meets. See
+    // [RoadSpline.bridges], [RoadSpline.startHalfWidthM].
+    List<(double, double)> bridges = const [],
+    double? startHalfWidthM,
+    double? endHalfWidthM,
     // Laid in vacuum: pedestrians get a sealed tube, not a pavement. Captured
     // here because it is a property of when the road was BUILT.
     bool sealed = false,
@@ -246,7 +279,8 @@ class CityLayout {
             .sample(stepM: 2);
 
     // Endpoint snap: an end drawn near an existing road lands ON it.
-    for (final endIndex in [0, pts.length - 1]) {
+    for (final (endIndex, allowed) in [(0, snapStart), (pts.length - 1, snapEnd)]) {
+      if (!allowed) continue;
       final hit = nearestRoadPoint(pts[endIndex], withinM: snapM);
       if (hit != null) pts[endIndex] = hit.point;
     }
@@ -254,6 +288,9 @@ class CityLayout {
     // Crossings with every existing road, in both parametrisations.
     final newCuts = <double>{};
     final existingCuts = <String, Set<double>>{};
+    final newBridges = List<(double, double)>.of(bridges);
+    final bridgeExisting = <String, List<(double, double)>>{};
+    final crossings = <RoadCrossing>[];
     final newCum = _cumulative(pts);
     // Roads are sampled every 2 m, so a kilometre of street is five hundred
     // segments. The index hands each new segment only the existing segments
@@ -268,13 +305,64 @@ class CityLayout {
         if (hit == null) return;
         final sNew = newCum[i - 1] + (newCum[i] - newCum[i - 1]) * hit.$1;
         final sOld = rec.arcAt(j, hit.$2);
+        final other = rec.road;
+        final at = a + (b - a) * hit.$1;
+        // One already passes over the other: no junction.
+        if (_inRanges(sNew, newBridges) || other.bridgedAt(sOld)) {
+          crossings.add(RoadCrossing(other.id, sNew, sOld, at, bridged: true));
+          return;
+        }
+        // An expressway meets nothing at grade. Where an ordinary road
+        // crosses one, the expressway is carried over it on a bridge and
+        // neither is cut; two expressways, the one already laid goes over.
+        // A ramp is the exception — it is how an expressway meets the rest
+        // of the network — and within an expressway's last stretch there
+        // is no room to climb, so nothing is bridged there.
+        final ramp = roadClass == RoadClass.ramp ||
+            other.roadClass == RoadClass.ramp;
+        final newX = roadClass.isExpressway, oldX = other.roadClass.isExpressway;
+        if (!ramp && (newX || oldX)) {
+          crossings.add(RoadCrossing(other.id, sNew, sOld, at, bridged: true));
+          if (oldX) {
+            if (sOld > bridgeEndClearM && sOld < rec.lengthM - bridgeEndClearM) {
+              (bridgeExisting[other.id] ??= [])
+                  .add((sOld - bridgeHalfM, sOld + bridgeHalfM));
+            }
+          } else if (sNew > bridgeEndClearM &&
+              sNew < newCum.last - bridgeEndClearM) {
+            newBridges.add((sNew - bridgeHalfM, sNew + bridgeHalfM));
+          }
+          return;
+        }
+        crossings.add(RoadCrossing(other.id, sNew, sOld, at));
         // Ends meeting a road are junctions, not cuts of the new road.
         if (sNew > 6 && sNew < newCum.last - 6) newCuts.add(sNew);
         if (sOld > 6 && sOld < rec.lengthM - 6) {
-          existingCuts.putIfAbsent(rec.road.id, () => {}).add(sOld);
+          existingCuts.putIfAbsent(other.id, () => {}).add(sOld);
         }
       });
     }
+    // A crossing found by two sample pairs is one crossing.
+    crossings.sort((p, q) => p.sNew.compareTo(q.sNew));
+    final distinct = <RoadCrossing>[];
+    for (final c in crossings) {
+      if (distinct.isNotEmpty &&
+          distinct.last.otherId == c.otherId &&
+          (distinct.last.sNew - c.sNew).abs() < 2.0) {
+        continue;
+      }
+      distinct.add(c);
+    }
+
+    // The expressways this road passes under get their bridges first, so
+    // the pieces they are cut into carry them.
+    bridgeExisting.forEach((rid, ranges) {
+      final road = _roads[rid]!;
+      final updated =
+          road.copyWith(bridges: mergeRanges([...road.bridges, ...ranges]));
+      _roads[rid] = updated;
+      _index.replace(updated);
+    });
 
     // Split the crossed roads.
     existingCuts.forEach((rid, cuts) {
@@ -283,10 +371,11 @@ class CityLayout {
       _index.remove(rid);
       final pieces = _splitPolyline(samples, cuts.toList());
       for (var i = 0; i < pieces.length; i++) {
+        final (piecePts, s0) = pieces[i];
         final piece = RoadSpline(
           id: '${rid}x$i',
           roadClass: road.roadClass,
-          controls: _decimate(pieces[i]),
+          controls: _decimate(piecePts),
           // A split keeps what the original was built as.
           sealed: road.sealed,
           soundWalls: road.soundWalls,
@@ -295,20 +384,25 @@ class CityLayout {
           frontsLots: road.frontsLots,
           collector: road.collector,
           graded: road.graded,
+          bridges: shiftBridges(road.bridges, s0, _cumulative(piecePts).last),
+          startHalfWidthM: i == 0 ? road.startHalfWidthM : null,
+          endHalfWidthM: i == pieces.length - 1 ? road.endHalfWidthM : null,
         );
         _roads[piece.id] = piece;
-        _indexPiece(piece, pieces[i]);
+        _indexPiece(piece, piecePts);
       }
     });
 
     // And the new one.
     final pieces = _splitPolyline(pts, newCuts.toList());
+    final merged = mergeRanges(newBridges);
     for (var i = 0; i < pieces.length; i++) {
+      final (piecePts, s0) = pieces[i];
       final pid = pieces.length == 1 ? id : '${id}x$i';
       final piece = RoadSpline(
         id: pid,
         roadClass: roadClass,
-        controls: _decimate(pieces[i]),
+        controls: _decimate(piecePts),
         sealed: sealed,
         soundWalls: soundWalls && roadClass.canHaveSoundWalls,
         lotFrontageM: lotFrontageM,
@@ -316,15 +410,22 @@ class CityLayout {
         frontsLots: frontsLots,
         collector: collector,
         graded: graded,
+        bridges: shiftBridges(merged, s0, _cumulative(piecePts).last),
+        startHalfWidthM: i == 0 ? startHalfWidthM : null,
+        endHalfWidthM: i == pieces.length - 1 ? endHalfWidthM : null,
       );
       _roads[pid] = piece;
-      _indexPiece(piece, pieces[i]);
+      _indexPiece(piece, piecePts);
     }
     _index.compact();
     if (!regenerateLots) {
       // Batch mode: the caller re-cuts once, when the whole network is in.
       // No lots were re-cut, so nothing was renamed.
-      return (roadId: id, renamedLots: const <String, String>{});
+      return (
+        roadId: id,
+        renamedLots: const <String, String>{},
+        crossings: distinct
+      );
     }
     regenerate();
 
@@ -345,8 +446,91 @@ class CityLayout {
     }
     if (renamed.isNotEmpty) regenerate(); // re-apply the moved zoning
 
-    return (roadId: id, renamedLots: renamed);
+    return (roadId: id, renamedLots: renamed, crossings: distinct);
   }
+
+  static bool _inRanges(double s, List<(double, double)> ranges) {
+    for (final (a, b) in ranges) {
+      if (s >= a && s <= b) return true;
+    }
+    return false;
+  }
+
+  /// Overlapping ranges joined, in order.
+  static List<(double, double)> mergeRanges(List<(double, double)> ranges) {
+    final sorted = ranges.toList()..sort((p, q) => p.$1.compareTo(q.$1));
+    final out = <(double, double)>[];
+    for (final r in sorted) {
+      if (out.isNotEmpty && r.$1 <= out.last.$2) {
+        out[out.length - 1] = (out.last.$1, math.max(out.last.$2, r.$2));
+      } else {
+        out.add(r);
+      }
+    }
+    return out;
+  }
+
+  /// A road's bridge ranges as a piece of it starting [s0] along sees
+  /// them: shifted, and kept whole — never clipped to the piece — so a
+  /// deck does not ramp down at a split.
+  static List<(double, double)> shiftBridges(
+          List<(double, double)> bridges, double s0, double lengthM) =>
+      [
+        for (final (a, b) in bridges)
+          if (b > s0 && a < s0 + lengthM) (a - s0, b - s0),
+      ];
+
+  /// Cut the road [id] at [sM] metres along it into two pieces, for a
+  /// junction that is not a crossing — a ramp's merge on an expressway's
+  /// edge, a change of class mid-run. Returns the two ids, or null when
+  /// the cut would fall within a car's length of an end. No lots are
+  /// re-cut and no buildings carried: for laying a network, not editing a
+  /// built one.
+  List<String>? splitRoadAt(String id, double sM) {
+    final rec = _index.byId(id);
+    final road = _roads[id];
+    if (rec == null || road == null) return null;
+    if (sM <= 8 || sM >= rec.lengthM - 8) return null;
+    final samples = rec.samples;
+    _roads.remove(id);
+    _index.remove(id);
+    final pieces = _splitPolyline(samples, [sM]);
+    final ids = <String>[];
+    for (var i = 0; i < pieces.length; i++) {
+      final (pts, s0) = pieces[i];
+      final piece = RoadSpline(
+        id: '${id}x$i',
+        roadClass: road.roadClass,
+        controls: _decimate(pts),
+        sealed: road.sealed,
+        soundWalls: road.soundWalls,
+        lotFrontageM: road.lotFrontageM,
+        lotDepthM: road.lotDepthM,
+        frontsLots: road.frontsLots,
+        collector: road.collector,
+        graded: road.graded,
+        bridges: shiftBridges(road.bridges, s0, _cumulative(pts).last),
+        startHalfWidthM: i == 0 ? road.startHalfWidthM : null,
+        endHalfWidthM: i == pieces.length - 1 ? road.endHalfWidthM : null,
+      );
+      _roads[piece.id] = piece;
+      _indexPiece(piece, pts);
+      ids.add(piece.id);
+    }
+    return ids;
+  }
+
+  /// Replace a road's ATTRIBUTES — walls, bridges, a taper, its class —
+  /// keeping its geometry. The controls must be the ones it has; nothing
+  /// is re-cut.
+  bool updateRoad(RoadSpline road) {
+    if (!_roads.containsKey(road.id)) return false;
+    _roads[road.id] = road;
+    _index.replace(road);
+    return true;
+  }
+
+  RoadSpline? roadById(String id) => _roads[id];
 
   static List<double> _cumulative(List<Vec2> pts) {
     final cum = <double>[0];
@@ -356,9 +540,11 @@ class CityLayout {
     return cum;
   }
 
-  /// Cut a polyline at the given arc positions (deduped, sorted).
-  static List<List<Vec2>> _splitPolyline(List<Vec2> pts, List<double> cuts) {
-    if (cuts.isEmpty) return [pts];
+  /// Cut a polyline at the given arc positions (deduped, sorted). Each
+  /// piece comes back with the arc length it starts at on the original.
+  static List<(List<Vec2>, double)> _splitPolyline(
+      List<Vec2> pts, List<double> cuts) {
+    if (cuts.isEmpty) return [(pts, 0.0)];
     final cum = _cumulative(pts);
     // Dedupe near-coincident cuts: a crossing found by two sample pairs is
     // one junction, not two.
@@ -367,8 +553,9 @@ class CityLayout {
     for (final c in sorted) {
       if (unique.isEmpty || c - unique.last > 2.0) unique.add(c);
     }
-    final out = <List<Vec2>>[];
+    final out = <(List<Vec2>, double)>[];
     var piece = <Vec2>[pts.first];
+    var pieceStart = 0.0;
     var next = 0;
     for (var i = 1; i < pts.length; i++) {
       while (next < unique.length &&
@@ -380,16 +567,17 @@ class CityLayout {
             : (unique[next] - cum[i - 1]) / segLen;
         final cut = pts[i - 1] + (pts[i] - pts[i - 1]) * t;
         piece.add(cut);
-        out.add(piece);
+        out.add((piece, pieceStart));
         piece = <Vec2>[cut];
+        pieceStart = unique[next];
         next++;
       }
       piece.add(pts[i]);
     }
-    out.add(piece);
+    out.add((piece, pieceStart));
     return [
       for (final p in out)
-        if (_cumulative(p).last > 8) p // drop slivers shorter than a car
+        if (_cumulative(p.$1).last > 8) p // drop slivers shorter than a car
     ];
   }
 

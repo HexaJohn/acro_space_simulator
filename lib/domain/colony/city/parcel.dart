@@ -537,6 +537,19 @@ class RoadSpline {
   /// the ground for a difference nobody sees from the road.
   final bool graded;
 
+  /// Arc-length ranges, metres from the first control along the road,
+  /// where it is carried on a bridge over whatever it crosses. A piece cut
+  /// from the road keeps them shifted to its own start and never clipped,
+  /// so a deck does not ramp down where the road was split.
+  final List<(double, double)> bridges;
+
+  /// A different half width at either end, for a piece that tapers into
+  /// what it meets: a six-lane radial widening off the viaduct's narrower
+  /// deck, or dropping to four lanes at the outline. Null means the class's
+  /// own width end to end.
+  final double? startHalfWidthM;
+  final double? endHalfWidthM;
+
   const RoadSpline({
     required this.id,
     required this.controls,
@@ -549,7 +562,18 @@ class RoadSpline {
     this.frontsLots,
     this.collector = false,
     this.graded = true,
+    this.bridges = const [],
+    this.startHalfWidthM,
+    this.endHalfWidthM,
   });
+
+  /// Whether [sM] along the road is on a bridge.
+  bool bridgedAt(double sM) {
+    for (final (a, b) in bridges) {
+      if (sM >= a && sM <= b) return true;
+    }
+    return false;
+  }
 
   double get width => roadClass.width;
   double get halfWidth => roadClass.halfWidth;
@@ -569,6 +593,9 @@ class RoadSpline {
     bool? frontsLots,
     bool? collector,
     bool? graded,
+    List<(double, double)>? bridges,
+    double? startHalfWidthM,
+    double? endHalfWidthM,
   }) =>
       RoadSpline(
         id: id ?? this.id,
@@ -582,6 +609,9 @@ class RoadSpline {
         frontsLots: frontsLots ?? this.frontsLots,
         collector: collector ?? this.collector,
         graded: graded ?? this.graded,
+        bridges: bridges ?? this.bridges,
+        startHalfWidthM: startHalfWidthM ?? this.startHalfWidthM,
+        endHalfWidthM: endHalfWidthM ?? this.endHalfWidthM,
       );
 
   /// Points along the curve, spaced at most [stepM] apart.
