@@ -13,11 +13,16 @@
 ///
 /// Pure computation — takes a layout, returns sets. The aggregate caches one
 /// of these per layout version, so the graph walk runs when a road is drawn,
-/// not every tick.
+/// not every tick. Every touch test goes through the layout's road index:
+/// a road probes the segments within reach of its own samples, so the walk
+/// costs the length of the network, not the square of its road count.
 library;
+
+import 'dart:math' as math;
 
 import 'city_layout.dart';
 import 'parcel.dart';
+import 'spatial_index.dart';
 
 class ParcelNetwork {
   ParcelNetwork._(this.rootedRoads, this.servedLots);
@@ -31,19 +36,16 @@ class ParcelNetwork {
   bool roadRooted(String id) => rootedRoads.contains(id);
   bool lotServed(String id) => servedLots.contains(id);
 
-  /// Distance from [r] to the closest point of [p] — its boundary if the road
-  /// is outside it, zero if the road runs through it.
-  static double _reachToLot(RoadSpline r, Parcel p) {
-    var best = r.distanceTo(p.centroid);
-    for (final v in p.polygon) {
-      final d = r.distanceTo(v);
-      if (d < best) best = d;
-    }
-    // Edge midpoints too: a road can pass a long edge without coming near
-    // either of its ends.
-    for (var i = 0; i < p.polygon.length; i++) {
-      final a = p.polygon[i], b = p.polygon[(i + 1) % p.polygon.length];
-      final d = r.distanceTo(Vec2((a.e + b.e) / 2, (a.n + b.n) / 2));
+  static final double _maxHalfWidth =
+      RoadClass.values.fold(0.0, (m, c) => math.max(m, c.halfWidth));
+
+  /// Distance from [p] to the nearest of [segs] on [rec].
+  static double _nearestOf(IndexedRoad rec, List<int> segs, Vec2 p) {
+    var best = double.infinity;
+    for (final s in segs) {
+      final d = s == 0
+          ? p.distanceTo(rec.sampleAt(0))
+          : rec.distanceToSegment(p, s);
       if (d < best) best = d;
     }
     return best;
@@ -56,65 +58,81 @@ class ParcelNetwork {
     double junctionSlackM = 4,
     double manualServeM = 90,
   }) {
-    final roads = layout.roads.toList();
-    if (roads.isEmpty) return ParcelNetwork._(const {}, const {});
+    final idx = layout.roadIndex;
+    if (idx.roadCount == 0) return ParcelNetwork._(const {}, const {});
 
-    // Coarse samples per road. 12 m is well under any lot frontage, so a
-    // junction cannot slip between two samples.
-    final samples = <String, List<Vec2>>{
-      for (final r in roads) r.id: r.sample(stepM: 12),
-    };
-
-    // Roads join where their carriageways touch: closest sample pair within
-    // the two half-widths plus slack. Quadratic in roads and samples, but this
-    // runs on layout CHANGES, not ticks, and a colony has tens of roads.
-    bool touches(RoadSpline a, RoadSpline b) {
-      final limit = a.halfWidth + b.halfWidth + junctionSlackM;
-      final limit2 = limit * limit;
-      for (final p in samples[a.id]!) {
-        for (final q in samples[b.id]!) {
-          final de = p.e - q.e, dn = p.n - q.n;
-          if (de * de + dn * dn <= limit2) return true;
-        }
+    // Roads join where their carriageways touch: a sample of one within the
+    // two half-widths plus slack of a segment of the other. Probed every
+    // 12 m along each road, which is well under any lot frontage, so a
+    // junction cannot slip between two probes.
+    final touching = <int, Set<int>>{};
+    final stride = math.max(1, (12 / idx.sampleM).round());
+    for (final (slotA, a) in idx.indexed) {
+      final mine = touching[slotA] ??= {};
+      final reach = a.road.halfWidth + _maxHalfWidth + junctionSlackM;
+      for (var i = 0; i < a.sampleCount; i += stride) {
+        final p = a.sampleAt(i);
+        idx.visit(Box2.around(p, reach), 0, (slotB, b, seg) {
+          if (slotB == slotA || mine.contains(slotB)) return;
+          final limit = a.road.halfWidth + b.road.halfWidth + junctionSlackM;
+          final d = seg == 0
+              ? p.distanceTo(b.sampleAt(0))
+              : b.distanceToSegment(p, seg);
+          if (d <= limit) {
+            mine.add(slotB);
+            (touching[slotB] ??= {}).add(slotA);
+          }
+        });
       }
-      return false;
+      // The last sample too: a short stub's end is where it meets a road.
+      if (a.sampleCount > 1 && (a.sampleCount - 1) % stride != 0) {
+        final p = a.sampleAt(a.sampleCount - 1);
+        idx.visit(Box2.around(p, reach), 0, (slotB, b, seg) {
+          if (slotB == slotA || mine.contains(slotB)) return;
+          final limit = a.road.halfWidth + b.road.halfWidth + junctionSlackM;
+          final d = seg == 0
+              ? p.distanceTo(b.sampleAt(0))
+              : b.distanceToSegment(p, seg);
+          if (d <= limit) {
+            mine.add(slotB);
+            (touching[slotB] ??= {}).add(slotA);
+          }
+        });
+      }
     }
 
     // Root entries: roads passing the landing site. A colony whose first road
     // was drawn out in a field would otherwise never root ANYTHING, so if none
     // touches the site, the nearest road becomes the trunk — generous, and it
     // can never brick a colony.
-    final entries = <String>{};
-    for (final r in roads) {
-      if (r.distanceTo(root) <= rootReachM + r.halfWidth) entries.add(r.id);
-    }
+    final entries = <int>{};
+    final nearRoot = <int, double>{};
+    idx.visit(Box2.around(root, rootReachM + _maxHalfWidth), 0,
+        (slot, rec, seg) {
+      final d = seg == 0
+          ? root.distanceTo(rec.sampleAt(0))
+          : rec.distanceToSegment(root, seg);
+      final prev = nearRoot[slot];
+      if (prev == null || d < prev) nearRoot[slot] = d;
+    });
+    nearRoot.forEach((slot, d) {
+      if (d <= rootReachM + idx.bySlot(slot)!.road.halfWidth) entries.add(slot);
+    });
     if (entries.isEmpty) {
-      RoadSpline? nearest;
-      var best = double.infinity;
-      for (final r in roads) {
-        final d = r.distanceTo(root);
-        if (d < best) {
-          best = d;
-          nearest = r;
-        }
-      }
-      if (nearest != null) entries.add(nearest.id);
+      final nearest = idx.nearest(root);
+      if (nearest != null) entries.add(nearest.slot);
     }
 
     // BFS the touch graph from the entries.
-    final rooted = <String>{...entries};
+    final rooted = <int>{...entries};
     final queue = [...entries];
     while (queue.isNotEmpty) {
-      final id = queue.removeLast();
-      final a = roads.firstWhere((r) => r.id == id);
-      for (final b in roads) {
-        if (rooted.contains(b.id)) continue;
-        if (touches(a, b)) {
-          rooted.add(b.id);
-          queue.add(b.id);
-        }
+      final slot = queue.removeLast();
+      for (final other in touching[slot] ?? const <int>{}) {
+        if (rooted.add(other)) queue.add(other);
       }
     }
+    final rootedIds = {for (final s in rooted) idx.bySlot(s)!.road.id};
 
     // Serving: an auto lot is served by its own frontage road. A manual lot
     // has no frontage road, so any rooted road passing near enough counts —
@@ -123,22 +141,35 @@ class ParcelNetwork {
     for (final p in layout.parcels) {
       final rid = p.roadId;
       if (rid != null) {
-        if (rooted.contains(rid)) served.add(p.id);
+        if (rootedIds.contains(rid)) served.add(p.id);
         continue;
       }
-      for (final r in roads) {
-        if (!rooted.contains(r.id)) continue;
-        // Reach to the lot's NEAREST POINT, not its centre. A claimed site can
-        // be enormous — a quarry is 3 km across — so a road running along its
-        // edge is still 1.5 km from the centroid, and a centre-only test
-        // reported every big installation as cut off however well connected it
-        // was.
-        if (_reachToLot(r, p) <= manualServeM + r.halfWidth) {
+      // Reach to the lot's NEAREST POINT, not its centre. A claimed site can
+      // be enormous — a quarry is 3 km across — so a road running along its
+      // edge is still 1.5 km from the centroid, and a centre-only test
+      // reported every big installation as cut off however well connected it
+      // was. Edge midpoints too: a road can pass a long edge without coming
+      // near either of its ends.
+      final probes = <Vec2>[p.centroid, ...p.polygon];
+      for (var i = 0; i < p.polygon.length; i++) {
+        final a = p.polygon[i], b = p.polygon[(i + 1) % p.polygon.length];
+        probes.add(Vec2((a.e + b.e) / 2, (a.n + b.n) / 2));
+      }
+      final near =
+          idx.segmentsNear(Box2.of(p.polygon), manualServeM + _maxHalfWidth);
+      for (final entry in near.entries) {
+        if (!rooted.contains(entry.key)) continue;
+        final rec = idx.bySlot(entry.key)!;
+        var reach = double.infinity;
+        for (final v in probes) {
+          reach = math.min(reach, _nearestOf(rec, entry.value, v));
+        }
+        if (reach <= manualServeM + rec.road.halfWidth) {
           served.add(p.id);
           break;
         }
       }
     }
-    return ParcelNetwork._(rooted, served);
+    return ParcelNetwork._(rootedIds, served);
   }
 }
