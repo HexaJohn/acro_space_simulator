@@ -64,6 +64,78 @@ void main() {
         14,
       );
     });
+
+    // The corners and seams are where the cube-to-sphere map is least
+    // uniform, so they go in alongside the random sample.
+    final awkward = [
+      const Vector3(1, 1, 1).normalized,
+      const Vector3(-1, 1, -1).normalized,
+      const Vector3(1, 1, 0).normalized,
+      const Vector3(0, -1, 1).normalized,
+      Vector3.unitX,
+      -Vector3.unitY,
+    ];
+    Vector3 randomDir(math.Random rng) {
+      while (true) {
+        final d = Vector3(rng.nextDouble() * 2 - 1, rng.nextDouble() * 2 - 1,
+            rng.nextDouble() * 2 - 1);
+        if (d.length > 0.1) return d.normalized;
+      }
+    }
+
+    test('cell size never grows with depth along a direction', () {
+      // The property the estimate-and-walk relies on: a child sits inside
+      // its parent, so its circumradius is no larger. Without it a local
+      // walk could settle on a level the full scan would not.
+      final rng = math.Random(11);
+      final dirs = [...awkward, for (var i = 0; i < 300; i++) randomDir(rng)];
+      for (final dir in dirs) {
+        var previous = double.infinity;
+        for (var level = 0; level <= 20; level++) {
+          final r = chunkAt(dir, level).circumradiusM(_radius);
+          expect(r, lessThanOrEqualTo(previous),
+              reason: 'level $level grew along $dir');
+          previous = r;
+        }
+      }
+    });
+
+    test('the walk agrees with an exhaustive scan from level 0', () {
+      // REGRESSION GUARD: levelForVoxelSize used to scan up from level 0 —
+      // ~15 chunk lookups per call, nine calls per brush, a million for a
+      // city. It now starts from a log2 estimate and walks; this pins that
+      // the answer is unchanged everywhere, including where the estimate
+      // is off by a level or two.
+      int scan(Vector3 dir, double target, int maxLevel) {
+        for (var level = 0; level <= maxLevel; level++) {
+          final v =
+              chunkAt(dir, level).circumradiusM(_radius) * 2.0 / _resolution;
+          if (v <= target) return level;
+        }
+        return maxLevel;
+      }
+
+      final rng = math.Random(7);
+      final dirs = [...awkward, for (var i = 0; i < 300; i++) randomDir(rng)];
+      for (final dir in dirs) {
+        // Body-scale down to sub-voxel, log-uniform, plus the level-0 edge.
+        final targets = [
+          math.pow(10, rng.nextDouble() * 8 - 2).toDouble(),
+          math.pow(10, rng.nextDouble() * 8 - 2).toDouble(),
+          _radius * 10,
+        ];
+        for (final target in targets) {
+          for (final maxLevel in const [6, 14, 20]) {
+            expect(
+              levelForVoxelSize(dir, _radius, _resolution, target,
+                  maxLevel: maxLevel),
+              scan(dir, target, maxLevel),
+              reason: 'dir $dir target $target maxLevel $maxLevel',
+            );
+          }
+        }
+      }
+    });
   });
 
   group('refinementsFor', () {

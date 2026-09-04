@@ -211,4 +211,107 @@ void main() {
     expect(deepest, greaterThanOrEqualTo(alone),
         reason: 'a merge must never refine LESS than a brush needed');
   });
+
+  group('RefinementMemo', () {
+    const r = 6371000.0;
+    TerrainBrush crater(Vector3 dir, {double radiusM = 30}) =>
+        TerrainBrush.crater(
+            contactBF: dir.normalized * r,
+            normalBF: dir.normalized,
+            radiusM: radiusM,
+            depthM: radiusM * 0.3,
+            rimHeightM: 2);
+
+    test('a rerun over the same city walks nothing and answers the same', () {
+      // REGRESSION: the renderer merged the whole near set every time its
+      // range gate moved — every frame under a moving camera — and every
+      // brush was walked afresh each time: 5,500 brushes, ~240 ms a frame.
+      final body = system.all.firstWhere((b) => b.id.value == 'earth');
+      final brushes = cityBrushes();
+      final memo = RefinementMemo(radiusM: body.radius, resolution: 128);
+      final first = memo.merged(brushes);
+      expect(memo.hits + memo.misses, brushes.length);
+      expect(memo.misses, greaterThan(0));
+
+      final again = memo.merged(brushes);
+      expect(memo.misses, 0, reason: 'nothing changed; nothing to walk');
+      expect(memo.hits, brushes.length);
+
+      final plain = mergedRefinementsFor(brushes, body.radius, 128);
+      expect(again.length, first.length);
+      expect(again.length, plain.length,
+          reason: 'the memo must merge to exactly what the one-shot does');
+      for (var i = 0; i < plain.length; i++) {
+        expect(again[i].level, plain[i].level);
+        expect((again[i].direction - plain[i].direction).length,
+            lessThan(1e-12));
+      }
+    });
+
+    test('only a brush the memo has never seen is walked', () {
+      final memo = RefinementMemo(radiusM: r, resolution: 128);
+      final a = crater(Vector3(1, 0, 0));
+      final b = crater(Vector3(0, 1, 0));
+      memo.merged([a, b]);
+      expect(memo.misses, 2);
+      final c = crater(Vector3(0, 0, 1));
+      final out = memo.merged([a, b, c]);
+      expect(memo.misses, 1, reason: 'one new brush, one walk');
+      expect(memo.hits, 2);
+      expect(out.length, mergedRefinementsFor([a, b, c], r, 128).length);
+    });
+
+    test('an equal brush rebuilt as a new object still hits', () {
+      // The renderer rebuilds its brush objects from the snapshot whenever
+      // the edit count changes. Identity is not the key; the fields
+      // refinementsFor reads are.
+      final memo = RefinementMemo(radiusM: r, resolution: 128);
+      memo.merged([crater(Vector3(1, 0, 0))]);
+      memo.merged([crater(Vector3(1, 0, 0))]);
+      expect(memo.misses, 0);
+      expect(memo.hits, 1);
+    });
+
+    test('a brush that changed shape is walked again', () {
+      final memo = RefinementMemo(radiusM: r, resolution: 128);
+      memo.merged([crater(Vector3(1, 0, 0), radiusM: 30)]);
+      memo.merged([crater(Vector3(1, 0, 0), radiusM: 60)]);
+      expect(memo.misses, 1);
+    });
+
+    test('entries leave with the brushes that used them', () {
+      // Bounded by the live set: a pit that regrows every quantum, or a
+      // brush drifting in and out of range, must not pile up history.
+      final memo = RefinementMemo(radiusM: r, resolution: 128);
+      final a = crater(Vector3(1, 0, 0));
+      final b = crater(Vector3(0, 1, 0));
+      memo.merged([a, b]);
+      expect(memo.length, 2);
+      memo.merged([a]);
+      expect(memo.length, 1, reason: 'a brush out of range must not linger');
+      memo.merged([a, b]);
+      expect(memo.misses, 1, reason: 'the evicted brush is walked afresh');
+    });
+
+    test('a memo answers only for the knobs it was built with', () {
+      final memo = RefinementMemo(
+          radiusM: r, resolution: 128, voxelsAcrossBrush: 8, maxLevel: 20);
+      expect(
+          memo.matches(
+              radiusM: r, resolution: 128, voxelsAcrossBrush: 8, maxLevel: 20),
+          isTrue);
+      expect(
+          memo.matches(
+              radiusM: r, resolution: 256, voxelsAcrossBrush: 8, maxLevel: 20),
+          isFalse);
+      expect(
+          memo.matches(
+              radiusM: r / 2, resolution: 128, voxelsAcrossBrush: 8, maxLevel: 20),
+          isFalse);
+      expect(
+          memo.matches(
+              radiusM: r, resolution: 128, voxelsAcrossBrush: 8, maxLevel: 17),
+          isFalse);
+    });
+  });
 }

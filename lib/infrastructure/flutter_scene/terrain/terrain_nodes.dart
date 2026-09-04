@@ -687,6 +687,23 @@ class TerrainNodes {
   Vector3 _refineAnchor = Vector3.zero;
   int _refineEditCount = -1;
 
+  /// Per-brush refinement targets, kept between merges. Rebuilt whenever the
+  /// knobs it was built for move (body radius, boosted resolution, voxels
+  /// across a brush, the tree's refine ceiling).
+  RefinementMemo? _refineMemo;
+
+  /// Same brushes, in the same order, by identity. The edit store is
+  /// append-only and the near filter walks it in order, so a positional
+  /// compare is exact; a rebuilt store (edit count changed) yields new
+  /// objects and reports a change, which the memo then makes cheap.
+  static bool _sameBrushes(List<TerrainBrush> a, List<TerrainBrush> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (!identical(a[i], b[i])) return false;
+    }
+    return true;
+  }
+
   /// The focused body's detail layer, rebuilt only when the body changes —
   /// assembling it allocates the control field and every feature.
   TerrainDetail? _detail;
@@ -931,28 +948,51 @@ class TerrainNodes {
         if ((brush.centreBF - anchorPoint).length > editRefineRangeM) continue;
         near.add(brush);
       }
-      // MERGED, not one island per brush. A city hands this a brush per
-      // building; taken separately they ask for tens of thousands of targets,
-      // nearly all of them either redundant with a neighbour's or refining the
-      // flat middle of a levelled pad, which any level meshes exactly.
-      //
-      // `resolution * editResBoost` makes levelForVoxelSize account for the
-      // boosted meshing the overlapping chunks will actually get, so the
-      // forced level lands log2(boost) levels SHALLOWER — the boost carries
-      // the rest of the way to the target voxel size (see [editResBoost]).
-      final targets = mergedRefinementsFor(
-        near,
-        field.radius,
-        resolution * editResBoost,
-        voxelsAcrossBrush: editVoxelsAcross,
-        maxLevel: _tree!.maxRefineLevel,
-      );
-      _refine = targets;
-      counters['refineTargets'] = targets.length;
-      counters['nearBrushes'] = near.length;
-      _nearBrushes = near;
       _refineAnchor = anchorPoint;
       _refineEditCount = edits.length;
+      counters['nearBrushes'] = near.length;
+      // The targets are a function of the NEAR set alone, and the gate above
+      // trips every kilometre the eye's ground track moves — under a camera
+      // in motion, every frame. With a city inside the range wherever the
+      // eye is, every trip found the same brushes and re-walked all of them:
+      // 5,500 brushes, ~240 ms, per frame. Same brushes, same answer.
+      if (!_sameBrushes(near, _nearBrushes)) {
+        // MERGED, not one island per brush. A city hands this a brush per
+        // building; taken separately they ask for tens of thousands of
+        // targets, nearly all of them either redundant with a neighbour's or
+        // refining the flat middle of a levelled pad, which any level meshes
+        // exactly.
+        //
+        // `resolution * editResBoost` makes levelForVoxelSize account for the
+        // boosted meshing the overlapping chunks will actually get, so the
+        // forced level lands log2(boost) levels SHALLOWER — the boost carries
+        // the rest of the way to the target voxel size (see [editResBoost]).
+        //
+        // Memoised per brush: a rebuilt store (one more building placed) or
+        // a brush entering the range walks only what is new to the memo.
+        final boosted = resolution * editResBoost;
+        final maxLevel = _tree!.maxRefineLevel;
+        var memo = _refineMemo;
+        if (memo == null ||
+            !memo.matches(
+                radiusM: field.radius,
+                resolution: boosted,
+                voxelsAcrossBrush: editVoxelsAcross,
+                maxLevel: maxLevel)) {
+          memo = _refineMemo = RefinementMemo(
+            radiusM: field.radius,
+            resolution: boosted,
+            voxelsAcrossBrush: editVoxelsAcross,
+            maxLevel: maxLevel,
+          );
+        }
+        final targets = memo.merged(near);
+        _refine = targets;
+        counters['refineTargets'] = targets.length;
+        counters['refineMemoHits'] = memo.hits;
+        counters['refineMemoMisses'] = memo.misses;
+        _nearBrushes = near;
+      }
     }
     final refine = _refine;
     // A new edit rewrites the density inside its footprint, so everything

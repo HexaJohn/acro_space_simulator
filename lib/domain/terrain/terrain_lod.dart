@@ -142,20 +142,32 @@ int levelForVoxelSize(
   int maxLevel = 20,
 }) {
   if (targetVoxelM <= 0 || radiusM <= 0 || resolution < 1) return maxLevel;
-  for (var level = 0; level <= maxLevel; level++) {
-    final voxelM = chunkAt(dir, level).circumradiusM(radiusM) * 2.0 / resolution;
-    if (voxelM <= targetVoxelM) return level;
+  double voxelAt(int level) =>
+      chunkAt(dir, level).circumradiusM(radiusM) * 2.0 / resolution;
+  // Cells halve (near enough) per level, so log2 of the level-0 ratio lands
+  // within a level or two of the answer, and a short walk from there settles
+  // it against the true cell sizes. Scanning up from level 0 cost ~15 chunk
+  // lookups per call, and a city asks this nine times per brush. The walk
+  // finds the same level the scan did because cell size never grows with
+  // depth along a direction — a child sits inside its parent — which the
+  // refinement tests pin.
+  final v0 = voxelAt(0);
+  if (v0 <= targetVoxelM) return 0;
+  var level =
+      (math.log(v0 / targetVoxelM) / math.ln2).floor().clamp(0, maxLevel);
+  if (voxelAt(level) <= targetVoxelM) {
+    while (level > 0 && voxelAt(level - 1) <= targetVoxelM) {
+      level--;
+    }
+    return level;
+  }
+  while (level < maxLevel) {
+    level++;
+    if (voxelAt(level) <= targetVoxelM) return level;
   }
   return maxLevel;
 }
 
-/// Refinement targets covering [brush]'s footprint on a body of [radiusM].
-///
-/// Returns the centre plus a ring on the footprint's edge rather than a single
-/// point: a crater usually straddles several chunks at the depth it needs, and
-/// refining only the one under its centre would leave the rim meshed at the
-/// coarse rate. [voxelsAcrossBrush] is how many voxels should span the brush's
-/// diameter — 8 is enough for a crater to read as a bowl rather than a dent.
 /// Refinement targets for a whole EDIT SET, merged.
 ///
 /// A crater is one small edit and deserves its own island of deep quadtree.
@@ -175,6 +187,10 @@ int levelForVoxelSize(
 ///
 /// Craters and excavations are untouched: they are curved everywhere, so they
 /// still get the full centre-plus-ring treatment.
+///
+/// One-shot: every brush is walked. A caller that merges the same brushes
+/// again and again — the renderer, every time its range gate moves — should
+/// hold a [RefinementMemo] instead.
 List<TerrainRefinement> mergedRefinementsFor(
   Iterable<TerrainBrush> brushes,
   double radiusM,
@@ -183,26 +199,172 @@ List<TerrainRefinement> mergedRefinementsFor(
   int maxLevel = 20,
   int ringSamples = 8,
   int cap = 4096,
-}) {
-  // Keyed by the leaf a target would force, keeping the deepest level asked
-  // for it. Two lots either side of a street want the same chunk refined once.
-  String keyOf(ChunkKey c) => '${c.face.index}:${c.level}:${c.u}:${c.v}';
-  final byLeaf = <String, TerrainRefinement>{};
-  // Newest first: brushes arrive in tick order, and when the cap bites it is
-  // the most recent edits — the fresh impact the player is watching — that
-  // must keep their refinement, not a colony built an hour ago.
-  for (final brush in brushes.toList().reversed) {
-    for (final t in refinementsFor(
-      brush,
-      radiusM,
-      resolution,
+}) =>
+    RefinementMemo(
+      radiusM: radiusM,
+      resolution: resolution,
       voxelsAcrossBrush: voxelsAcrossBrush,
       maxLevel: maxLevel,
       ringSamples: ringSamples,
-    )) {
-      final c = chunkAt(t.direction, t.level);
-      final key = keyOf(c);
-      final prior = byLeaf[key];
+    ).merged(brushes, cap: cap);
+
+/// The fields of a brush that [refinementsFor] reads — nothing else about the
+/// brush can change its targets, so two brushes agreeing here are the same
+/// brush to the memo, whether or not they are the same object.
+typedef _BrushKey = (
+  TerrainBrushKind kind,
+  double cx,
+  double cy,
+  double cz,
+  double radiusM,
+  double minVoxelM,
+  double falloffM,
+  double lateralReachM,
+  double? ex,
+  double? ey,
+  double? ez,
+);
+
+_BrushKey _keyOf(TerrainBrush b) {
+  final c = b.centreBF;
+  final e = b.endBF;
+  return (
+    b.kind,
+    c.x,
+    c.y,
+    c.z,
+    b.radiusM,
+    b.minVoxelM,
+    b.falloffM,
+    b.lateralReachM,
+    e?.x,
+    e?.y,
+    e?.z,
+  );
+}
+
+/// [mergedRefinementsFor] that remembers each brush's targets between calls.
+///
+/// The merge is a pure function of the brushes and the meshing knobs, and its
+/// cost is almost entirely the per-brush [refinementsFor]: nine level walks
+/// each, so a 5,500-brush city was around a million chunk lookups — 240 ms —
+/// and the renderer reran it every kilometre the eye's ground track moved,
+/// which under a moving camera was every frame. The brushes under its range
+/// gate hardly ever change, so the walks were nearly all repeats.
+///
+/// Targets are keyed by the brush FIELDS [refinementsFor] reads, not by
+/// object identity: the renderer rebuilds its brush objects from the snapshot
+/// whenever the edit count changes, and a rebuilt pad is the same pad. A
+/// brush the memo has seen costs a hash; only new ones are walked.
+///
+/// Every [merged] call drops the entries the brushes it was given did not
+/// use, so the memo is bounded by the live set. A quarry pit that regrows
+/// each quantum leaves no trail here, and a brush that drifts out of range
+/// and back is simply walked again.
+///
+/// The knobs are fixed at construction: entries built for one resolution or
+/// body radius answer a different question at another. Check [matches] and
+/// replace the memo when they move.
+class RefinementMemo {
+  RefinementMemo({
+    required this.radiusM,
+    required this.resolution,
+    this.voxelsAcrossBrush = 8,
+    this.maxLevel = 20,
+    this.ringSamples = 8,
+  });
+
+  final double radiusM;
+  final int resolution;
+  final double voxelsAcrossBrush;
+  final int maxLevel;
+  final int ringSamples;
+
+  Map<_BrushKey, List<_Placed>> _cache = {};
+
+  /// Brushes the last [merged] call answered from memory.
+  int hits = 0;
+
+  /// Brushes the last [merged] call had to walk.
+  int misses = 0;
+
+  /// Entries held: the distinct brushes of the last [merged] call.
+  int get length => _cache.length;
+
+  /// Whether entries built by this memo are valid for these knobs.
+  bool matches({
+    required double radiusM,
+    required int resolution,
+    required double voxelsAcrossBrush,
+    required int maxLevel,
+  }) =>
+      radiusM == this.radiusM &&
+      resolution == this.resolution &&
+      voxelsAcrossBrush == this.voxelsAcrossBrush &&
+      maxLevel == this.maxLevel;
+
+  /// The merged targets for [brushes], walking only the ones not remembered.
+  ///
+  /// [cap] bounds the distinct leaves kept; see the loop below for who loses.
+  List<TerrainRefinement> merged(Iterable<TerrainBrush> brushes,
+      {int cap = 4096}) {
+    hits = 0;
+    misses = 0;
+    final next = <_BrushKey, List<_Placed>>{};
+    final perBrush = <List<_Placed>>[];
+    for (final brush in brushes) {
+      final key = _keyOf(brush);
+      var targets = next[key];
+      if (targets == null) {
+        targets = _cache[key];
+        if (targets == null) {
+          misses++;
+          targets = [
+            for (final t in refinementsFor(
+              brush,
+              radiusM,
+              resolution,
+              voxelsAcrossBrush: voxelsAcrossBrush,
+              maxLevel: maxLevel,
+              ringSamples: ringSamples,
+            ))
+              (cell: chunkAt(t.direction, t.level), target: t),
+          ];
+        } else {
+          hits++;
+        }
+        next[key] = targets;
+      } else {
+        hits++;
+      }
+      perBrush.add(targets);
+    }
+    _cache = next;
+    return _mergeTargets(perBrush, cap: cap);
+  }
+}
+
+/// A target with the leaf it forces, projected once when its brush is walked
+/// so a merge does not re-project the tens of thousands it has seen before.
+typedef _Placed = ({ChunkKey cell, TerrainRefinement target});
+
+/// The merge proper, over each brush's targets in brush order. The lists are
+/// shared with the memo and are read, never written.
+List<TerrainRefinement> _mergeTargets(
+  List<List<_Placed>> perBrush, {
+  required int cap,
+}) {
+  // Keyed by the leaf a target would force, keeping the deepest level asked
+  // for it. Two lots either side of a street want the same chunk refined once.
+  final byLeaf = <ChunkKey, TerrainRefinement>{};
+  // Newest first: brushes arrive in tick order, and when the cap bites it is
+  // the most recent edits — the fresh impact the player is watching — that
+  // must keep their refinement, not a colony built an hour ago.
+  for (var i = perBrush.length - 1; i >= 0; i--) {
+    for (final p in perBrush[i]) {
+      final c = p.cell;
+      final t = p.target;
+      final prior = byLeaf[c];
       // At the cap, cells already present may still deepen but no new cell
       // enters. Never abandon the remaining brushes wholesale (the old
       // `break` did): in tick order the LAST brushes are the newest edits —
@@ -210,7 +372,7 @@ List<TerrainRefinement> mergedRefinementsFor(
       // their targets because a colony elsewhere filled the budget left new
       // craters meshed at the coarse rate.
       if (prior == null && byLeaf.length >= cap) continue;
-      if (prior == null || t.level > prior.level) byLeaf[key] = t;
+      if (prior == null || t.level > prior.level) byLeaf[c] = t;
     }
   }
   // Lineage collapse: a target whose cell is an ANCESTOR of another kept
@@ -219,11 +381,10 @@ List<TerrainRefinement> mergedRefinementsFor(
   // one level past the shallow demand. The map above cannot express this:
   // its keys embed the level, so same-spot different-level targets (a small
   // crater inside a big one) never collide there.
-  final subsumed = <String>{};
-  for (final t in byLeaf.values) {
-    for (final a in chunkAt(t.direction, t.level).ancestors) {
-      final k = keyOf(a);
-      if (byLeaf.containsKey(k)) subsumed.add(k);
+  final subsumed = <ChunkKey>{};
+  for (final c in byLeaf.keys) {
+    for (final a in c.ancestors) {
+      if (byLeaf.containsKey(a)) subsumed.add(a);
     }
   }
   return [
@@ -232,6 +393,17 @@ List<TerrainRefinement> mergedRefinementsFor(
   ];
 }
 
+/// Refinement targets covering [brush]'s footprint on a body of [radiusM].
+///
+/// Returns the centre plus a ring on the footprint's edge rather than a single
+/// point: a crater usually straddles several chunks at the depth it needs, and
+/// refining only the one under its centre would leave the rim meshed at the
+/// coarse rate. [voxelsAcrossBrush] is how many voxels should span the brush's
+/// diameter — 8 is enough for a crater to read as a bowl rather than a dent.
+///
+/// Reads only the brush's kind, centreBF, radiusM, minVoxelM, falloffM,
+/// lateralReachM and endBF. [RefinementMemo] keys on exactly those; a new
+/// dependency here must join its key or the memo serves stale targets.
 List<TerrainRefinement> refinementsFor(
   TerrainBrush brush,
   double radiusM,
