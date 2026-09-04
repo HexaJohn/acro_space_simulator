@@ -484,6 +484,9 @@ Future<void> main() async {
     }
     final ff = num('frustumCullFactor');
     if (ff != null && ff >= 0 && ff <= 1) TerrainNodes.frustumCullFactor = ff;
+    // cityOutOfView=stepDown|far|hidden
+    final oov = CityOutOfView.byName(params['cityOutOfView']);
+    if (oov != null) GraphicsQuality.cityOutOfView = oov;
     // skirtVoxels=0 shows the LOD cracks the apron hides — the 4b A/B.
     final skirt = num('skirtVoxels');
     if (skirt != null && skirt >= 0) TerrainNodes.skirtVoxels = skirt;

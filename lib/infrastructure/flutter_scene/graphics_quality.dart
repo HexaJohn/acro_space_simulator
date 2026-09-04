@@ -292,10 +292,15 @@ class GraphicsQuality {
   /// only while it is true.
   static bool terrainFrustumCull = true;
 
+  /// What a city tile outside the lens's view cone becomes while
+  /// [terrainFrustumCull] is on. Not a quality rung either.
+  static CityOutOfView cityOutOfView = CityOutOfView.stepDown;
+
   /// Restore the shipped default.
   static void reset() {
     master = QualityLevel.high;
     terrainFrustumCull = true;
+    cityOutOfView = CityOutOfView.stepDown;
     resetOverrides();
   }
 
@@ -305,6 +310,7 @@ class GraphicsQuality {
   static const String cloudKey = 'gfxQualityClouds';
   static const String lightingKey = 'gfxQualityLighting';
   static const String terrainFrustumCullKey = 'gfxTerrainFrustumCull';
+  static const String cityOutOfViewKey = 'gfxCityOutOfView';
 
   /// Every key [applyPrefs] reads, for the loader to fetch.
   static const List<String> prefKeys = [
@@ -312,6 +318,7 @@ class GraphicsQuality {
     cloudKey,
     lightingKey,
     terrainFrustumCullKey,
+    cityOutOfViewKey,
   ];
 
   /// Apply a persisted map. Separated from the `SharedPreferences` call so the
@@ -323,6 +330,8 @@ class GraphicsQuality {
     // Absent or unreadable = the shipped default (on); only an explicit
     // 'false' turns it off.
     terrainFrustumCull = stored[terrainFrustumCullKey] != 'false';
+    cityOutOfView = CityOutOfView.byName(stored[cityOutOfViewKey]) ??
+        CityOutOfView.stepDown;
   }
 
   /// The current settings as a persistable map. A null override is stored as
@@ -332,5 +341,34 @@ class GraphicsQuality {
         cloudKey: cloudOverride?.name,
         lightingKey: lightingOverride?.name,
         terrainFrustumCullKey: terrainFrustumCull.toString(),
+        cityOutOfViewKey: cityOutOfView.name,
+      };
+}
+
+/// What a city tile outside the lens's view cone becomes.
+enum CityOutOfView {
+  /// One tier below what its distance earns: near to mid, mid to far. A
+  /// turn refines from a coarser city; nothing pops in from nowhere.
+  stepDown,
+
+  /// Silhouettes, whatever its distance.
+  far,
+
+  /// Not drawn. Built nodes are kept and re-attached the moment the tile
+  /// is back in view; a tile that was never built pops in when the camera
+  /// turns to it, and nothing behind the camera casts a shadow.
+  hidden;
+
+  static CityOutOfView? byName(String? name) {
+    for (final v in values) {
+      if (v.name == name) return v;
+    }
+    return null;
+  }
+
+  String get label => switch (this) {
+        CityOutOfView.stepDown => 'STEP DOWN',
+        CityOutOfView.far => 'FAR',
+        CityOutOfView.hidden => 'HIDDEN',
       };
 }

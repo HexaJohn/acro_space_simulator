@@ -47,6 +47,7 @@ import '../../../domain/terrain/terrain_lod.dart' show ViewCone;
 import '../../../domain/architecture/architecture_style.dart';
 import '../../../domain/architecture/city_lighting.dart';
 import '../coord_convert.dart';
+import '../graphics_quality.dart';
 import 'city_materials.dart';
 import 'elevated_structure.dart';
 import 'lot_features.dart';
@@ -629,10 +630,27 @@ class CityNodes {
             : cones.enter.containsSphere(rel, radius);
         if (!t.inView) {
           outOfView++;
-          tier = viewTier(tier, inView: false);
+          switch (GraphicsQuality.cityOutOfView) {
+            case CityOutOfView.stepDown:
+              tier = viewTier(tier, inView: false);
+            case CityOutOfView.far:
+              tier = CityTier.far;
+            case CityOutOfView.hidden:
+              break; // the tier stands; the nodes leave the scene below
+          }
         }
       } else {
         t.inView = true;
+      }
+      // Hidden: the built nodes come out of the scene and are KEPT, so a
+      // return re-attaches them without a rebuild. The want key is frozen
+      // while hidden — nothing is built behind the camera — so a tier that
+      // moved meanwhile is caught by the compare on the way back in.
+      final hide =
+          !t.inView && GraphicsQuality.cityOutOfView == CityOutOfView.hidden;
+      if (hide != t.hidden) {
+        t.hidden = hide;
+        _setAttached(t, !hide);
       }
       switch (tier) {
         case CityTier.near:
@@ -650,7 +668,7 @@ class CityNodes {
           '|${lodDebug ? 1 : 0}|${perBuildingLod ? 1 : 0}'
           '|${interiorRangeM.round()}|${blockRangeM.round()}'
           '|${colonyTier.index}|$_invalidation';
-      if (t.wantKey != want) {
+      if (!hide && t.wantKey != want) {
         t.wantKey = want;
         t.wantTier = tier;
         if (!t.queued) {
@@ -700,6 +718,7 @@ class CityNodes {
     var draws = 0, skylineTris = 0;
     lodCounts.clear();
     for (final t in _tiles.values) {
+      if (t.hidden) continue;
       draws += t.batches.length;
       skylineTris += t.skylineTris;
       t.lodCounts.forEach((k, v) => lodCounts[k] = (lodCounts[k] ?? 0) + v);
@@ -925,7 +944,9 @@ class CityNodes {
         lengthToScene(offset.z)));
     void add(fs.Node node) {
       node.localTransform = local;
-      root.node.add(node);
+      // A build that lands while the tile is hidden stays off the scene;
+      // _setAttached puts it in when the tile comes back into view.
+      if (!t.hidden) root.node.add(node);
       t.batches.add(node);
     }
 
@@ -1020,15 +1041,31 @@ class CityNodes {
     t.lodCounts = job.lodCounts;
   }
 
-  /// Take a tile's nodes out of the scene.
+  /// Take a tile's nodes out of the scene (a hidden tile's are already out).
   void _dropBatches(_Tile t) {
     final root = _roots[t.bodyId];
-    for (final n in t.batches) {
-      root?.node.remove(n);
+    if (!t.hidden) {
+      for (final n in t.batches) {
+        root?.node.remove(n);
+      }
     }
     t.batches.clear();
     t.skylineTris = 0;
     t.lodCounts = const {};
+  }
+
+  /// Put a tile's built nodes into the scene or take them out, keeping them
+  /// either way — the [CityOutOfView.hidden] path.
+  void _setAttached(_Tile t, bool attached) {
+    final root = _roots[t.bodyId];
+    if (root == null) return;
+    for (final n in t.batches) {
+      if (attached) {
+        root.node.add(n);
+      } else {
+        root.node.remove(n);
+      }
+    }
   }
 
   /// Forget a tile: its nodes, its place in the queue, its build.
@@ -2581,6 +2618,9 @@ class _Tile {
   /// Inside the lens's view cone as of the last update — with hysteresis,
   /// so the previous answer is part of the next (see [CityNodes.update]).
   bool inView = true;
+
+  /// Nodes taken out of the scene but kept ([CityOutOfView.hidden]).
+  bool hidden = false;
   int skylineTris = 0;
   Map<BuildingDetail, int> lodCounts = const {};
   _TileJob? job;

@@ -1599,6 +1599,24 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
             onChanged: (v) =>
                 setState(() => GraphicsQuality.terrainFrustumCull = v),
           ),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Row(children: [
+              const Expanded(
+                  child:
+                      Text('Tiles outside the view', style: AppTheme.body)),
+              Wrap(spacing: 6, children: [
+                for (final v in CityOutOfView.values)
+                  ChoiceChip(
+                    label: Text(v.label,
+                        style: AppTheme.dim.copyWith(fontSize: 11)),
+                    selected: GraphicsQuality.cityOutOfView == v,
+                    onSelected: (_) =>
+                        setState(() => GraphicsQuality.cityOutOfView = v),
+                  ),
+              ]),
+            ]),
+          ),
           _slider(
               'View cull margin',
               TerrainNodes.frustumMarginRad * 180 / math.pi,

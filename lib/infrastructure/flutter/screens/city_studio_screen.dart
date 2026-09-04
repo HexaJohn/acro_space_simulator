@@ -2111,6 +2111,30 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             onChanged: (v) =>
                 setState(() => GraphicsQuality.terrainFrustumCull = v),
           ),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Row(children: [
+              const Expanded(
+                  child:
+                      Text('Tiles outside the view', style: AppTheme.body)),
+              Wrap(spacing: 6, children: [
+                for (final v in CityOutOfView.values)
+                  ChoiceChip(
+                    label: Text(v.label,
+                        style: AppTheme.dim.copyWith(fontSize: 11)),
+                    selected: GraphicsQuality.cityOutOfView == v,
+                    onSelected: (_) =>
+                        setState(() => GraphicsQuality.cityOutOfView = v),
+                  ),
+              ]),
+            ]),
+          ),
+          Text(
+              'Step down: one tier coarser, nothing pops in. Far: '
+              'silhouettes. Hidden: not drawn — built nodes are kept and '
+              'return instantly, unbuilt ones pop in on a turn, and nothing '
+              'behind the camera casts a shadow.',
+              style: AppTheme.dim.copyWith(fontSize: 11)),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
             dense: true,

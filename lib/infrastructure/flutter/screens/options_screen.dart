@@ -78,6 +78,17 @@ class _OptionsScreenState extends State<OptionsScreen> {
                 GraphicsQuality.terrainFrustumCull,
                 (v) => _mutateQuality(
                     () => GraphicsQuality.terrainFrustumCull = v)),
+            if (GraphicsQuality.terrainFrustumCull)
+              _choices<CityOutOfView>(
+                'City tiles behind the camera',
+                CityOutOfView.values,
+                GraphicsQuality.cityOutOfView,
+                (v) => _mutateQuality(() => GraphicsQuality.cityOutOfView = v),
+                labelOf: (v) => v.label,
+                help: 'Step down: one tier coarser, nothing pops in. Far: '
+                    'silhouettes. Hidden: not drawn at all — the cheapest, '
+                    'and a turn shows buildings appearing.',
+              ),
           ]),
           _section('GRAPHICS', [
             _toggle('Skybox (Milky Way)', _skybox, (v) => setState(() => _skybox = v)),
@@ -275,6 +286,45 @@ class _OptionsScreenState extends State<OptionsScreen> {
             Text(title, style: AppTheme.heading),
             const SizedBox(height: 10),
             ...rows,
+          ],
+        ),
+      );
+
+  /// A row of exclusive choices for an enum setting.
+  Widget _choices<T extends Enum>(
+    String label,
+    List<T> values,
+    T current,
+    ValueChanged<T> onChanged, {
+    required String Function(T) labelOf,
+    String? help,
+  }) =>
+      Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(child: Text(label, style: AppTheme.body)),
+                Wrap(
+                  spacing: 6,
+                  children: [
+                    for (final v in values)
+                      ChoiceChip(
+                        label: Text(labelOf(v)),
+                        selected: v == current,
+                        onSelected: (_) => onChanged(v),
+                      ),
+                  ],
+                ),
+              ],
+            ),
+            if (help != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text(help, style: AppTheme.dim),
+              ),
           ],
         ),
       );

@@ -99,7 +99,7 @@ part 'simulation_view_planner.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
-const String kBuildStamp = 'build 0.3.3.273-tilecull';
+const String kBuildStamp = 'build 0.3.3.274-oov';
 
 /// What the camera treats as "up" while orbiting the focus.
 enum CameraUpMode {
