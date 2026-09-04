@@ -283,9 +283,19 @@ class GraphicsQuality {
     lightingOverride = null;
   }
 
+  /// Terrain view culling: chunks outside the camera's view cone select a
+  /// few LOD levels coarser (never vanish), which cuts the resident set, the
+  /// meshing behind the camera and the triangle count near the ground at the
+  /// price of a moment of coarse ground on a fast turn. Not a quality rung —
+  /// it is on at every preset — so it does not count toward [isCustom].
+  /// Read every frame by the scenes, which hand the streamer a view cone
+  /// only while it is true.
+  static bool terrainFrustumCull = true;
+
   /// Restore the shipped default.
   static void reset() {
     master = QualityLevel.high;
+    terrainFrustumCull = true;
     resetOverrides();
   }
 
@@ -294,6 +304,15 @@ class GraphicsQuality {
   static const String masterKey = 'gfxQuality';
   static const String cloudKey = 'gfxQualityClouds';
   static const String lightingKey = 'gfxQualityLighting';
+  static const String terrainFrustumCullKey = 'gfxTerrainFrustumCull';
+
+  /// Every key [applyPrefs] reads, for the loader to fetch.
+  static const List<String> prefKeys = [
+    masterKey,
+    cloudKey,
+    lightingKey,
+    terrainFrustumCullKey,
+  ];
 
   /// Apply a persisted map. Separated from the `SharedPreferences` call so the
   /// decode is testable without a plugin binding.
@@ -301,6 +320,9 @@ class GraphicsQuality {
     master = QualityLevel.byName(stored[masterKey]) ?? QualityLevel.high;
     cloudOverride = QualityLevel.byName(stored[cloudKey]);
     lightingOverride = QualityLevel.byName(stored[lightingKey]);
+    // Absent or unreadable = the shipped default (on); only an explicit
+    // 'false' turns it off.
+    terrainFrustumCull = stored[terrainFrustumCullKey] != 'false';
   }
 
   /// The current settings as a persistable map. A null override is stored as
@@ -309,5 +331,6 @@ class GraphicsQuality {
         masterKey: master.name,
         cloudKey: cloudOverride?.name,
         lightingKey: lightingOverride?.name,
+        terrainFrustumCullKey: terrainFrustumCull.toString(),
       };
 }

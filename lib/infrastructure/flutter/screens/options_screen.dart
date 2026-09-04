@@ -71,7 +71,14 @@ class _OptionsScreenState extends State<OptionsScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          _section('GRAPHICS QUALITY', _qualityRows()),
+          _section('GRAPHICS QUALITY', [
+            ..._qualityRows(),
+            _toggle(
+                'Terrain view culling (coarser ground behind the camera)',
+                GraphicsQuality.terrainFrustumCull,
+                (v) => _mutateQuality(
+                    () => GraphicsQuality.terrainFrustumCull = v)),
+          ]),
           _section('GRAPHICS', [
             _toggle('Skybox (Milky Way)', _skybox, (v) => setState(() => _skybox = v)),
             _toggle('Atmosphere scattering', _atmosphere,

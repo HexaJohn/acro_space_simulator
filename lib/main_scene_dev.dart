@@ -22,6 +22,7 @@ import 'infrastructure/sample_world.dart';
 import 'infrastructure/flutter/simulation_view.dart';
 import 'infrastructure/flutter_scene/atmosphere_nodes.dart';
 import 'infrastructure/flutter_scene/cloud_nodes.dart';
+import 'infrastructure/flutter_scene/graphics_quality.dart';
 import 'infrastructure/flutter_scene/body_nodes.dart';
 import 'infrastructure/flutter_scene/environment_baker.dart';
 import 'infrastructure/flutter_scene/gravity_grid_nodes.dart';
@@ -472,6 +473,17 @@ Future<void> main() async {
     if (rf != null && rf >= 0) TerrainNodes.reselectHeightFraction = rf;
     final rfl = num('reselectFloorM');
     if (rfl != null && rfl >= 0) TerrainNodes.reselectFloorM = rfl;
+    // View culling A/B: frustumCull=false, frustumMarginDeg=15,
+    // frustumCullFactor=0.25.
+    if (params['frustumCull'] != null) {
+      GraphicsQuality.terrainFrustumCull = params['frustumCull'] == 'true';
+    }
+    final fm = num('frustumMarginDeg');
+    if (fm != null && fm >= 0) {
+      TerrainNodes.frustumMarginRad = fm * 0.017453292519943295; // deg->rad
+    }
+    final ff = num('frustumCullFactor');
+    if (ff != null && ff >= 0 && ff <= 1) TerrainNodes.frustumCullFactor = ff;
     // skirtVoxels=0 shows the LOD cracks the apron hides — the 4b A/B.
     final skirt = num('skirtVoxels');
     if (skirt != null && skirt >= 0) TerrainNodes.skirtVoxels = skirt;

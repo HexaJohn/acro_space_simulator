@@ -86,6 +86,24 @@ class TerrainNodes {
   /// chunks on the boundary cannot thrash.
   static double splitPx = 220;
 
+  /// View culling (see [ViewCone]): a chunk outside the lens's view cone has
+  /// its apparent size multiplied by this before selection, so the quadtree
+  /// merges it coarser — two levels at 0.25 — rather than dropping it, and a
+  /// turn refines from coarse cover instead of from a hole. 1 disables the
+  /// attenuation; 0 collapses everything out of view to the face roots.
+  /// Culling is on when the caller hands [update] a cone, which the scenes
+  /// gate on `GraphicsQuality.terrainFrustumCull`.
+  static double frustumCullFactor = 0.25;
+
+  /// How far past the frustum's corners the view cone reaches, radians. The
+  /// margin is the coarse-but-present band a turn refines from.
+  static double frustumMarginRad = 15 * math.pi / 180;
+
+  /// A turn of at least this much reselects (only when culling): the eye
+  /// does not move on a turn, so the distance gate alone would leave the
+  /// view cone stale until the periodic reselect.
+  static double frustumReselectRad = 5 * math.pi / 180;
+
   /// Mesh jobs in flight at once (phase 4c). Meshing runs on background
   /// isolates on native (inline on web), so this caps CPU occupancy, not a
   /// per-frame stall. Nearest-first submission order means the ground under
@@ -533,6 +551,10 @@ class TerrainNodes {
   Set<ChunkKey> _selStillLoading = const {};
   Vector3 _selEyeBF = Vector3.zero;
   double _selProbePx = -1;
+
+  /// The view cone's direction at the last reselect, body-fixed; zero when
+  /// no cone was in play.
+  Vector3 _selForward = Vector3.zero;
   int _selFrame = -1 << 30;
   bool _selectForce = true;
 
@@ -770,6 +792,9 @@ class TerrainNodes {
     FloatingOrigin origin, {
     required Vector3 cameraEye, // focus-relative metres
     SceneCamera? camera, // drives the screen-space LOD budget
+    // The lens's view cone in WORLD axes; chunks outside it select coarser
+    // (see [frustumCullFactor]). Null = no view culling.
+    ViewCone? viewCone,
     String? focusBodyId,
     String? focusVesselId,
     Vector3? starWorld,
@@ -944,6 +969,13 @@ class TerrainNodes {
     // it — can sit kilometres below the datum sphere.
     final horizon =
         HorizonTest(eyeBF, field.radius, reliefM: field.amplitude);
+    // The view cone, turned into the body-fixed frame the chunk vectors are
+    // in. A chunk's sphere is its circumradius plus the body's relief, so a
+    // peak just outside the cone still counts as in view.
+    final coneBF = viewCone == null
+        ? null
+        : ViewCone(invQuat.rotate(viewCone.forward), viewCone.halfAngle);
+    final relief = field.amplitude;
     double apparentPx(ChunkKey k) {
       if (camera == null) return 0;
       final g = geom!.of(k);
@@ -951,7 +983,13 @@ class TerrainNodes {
       // centre has just dipped under from popping while its near edge shows.
       if (horizon.hidden(g)) return 0;
       final centreWorld = bodyWorld + bodyQuat.rotate(g.centreBF);
-      return camera.radiusPx(centreWorld - origin.focusWorld, g.circumradiusM);
+      final px =
+          camera.radiusPx(centreWorld - origin.focusWorld, g.circumradiusM);
+      if (coneBF != null &&
+          !coneBF.containsSphere(g.centreBF - eyeBF, g.circumradiusM + relief)) {
+        return px * frustumCullFactor;
+      }
+      return px;
     }
     // --- Deformation: forced refinement + invalidation ---------------------
     // A crater is orders of magnitude smaller than the cells LOD picks, so its
@@ -1109,6 +1147,11 @@ class TerrainNodes {
     final moved = (eyeBF - _selEyeBF).length > _selThresholdM;
     final probeMoved = _selProbePx < 0 ||
         (probePx - _selProbePx).abs() > math.max(_selProbePx, 1e-6) * 0.02;
+    // A turn moves no eye; with a view cone in play it still changes what
+    // selection would pick. Compared body-fixed, like everything else here.
+    final turned = coneBF != null &&
+        (_selForward == Vector3.zero ||
+            _selForward.dot(coneBF.forward) < math.cos(frustumReselectRad));
     // The grid-only toggle rebuilds the placeholder set, which only happens
     // on selection frames — so flipping it forces one.
     final gridToggled = _builtGridOnly != gridOnly;
@@ -1118,12 +1161,14 @@ class TerrainNodes {
         editsChanged ||
         moved ||
         probeMoved ||
+        turned ||
         _frame - _selFrame >= selectEveryFrames;
 
     if (reselect) {
       _selectForce = false;
       _selEyeBF = eyeBF;
       _selProbePx = probePx;
+      _selForward = coneBF?.forward ?? Vector3.zero;
       _selFrame = _frame;
       // Height over the ground UNDER THE EYE, not over the datum: on a DEM
       // body the maria sit a kilometre below it, where datum height goes
@@ -1147,10 +1192,17 @@ class TerrainNodes {
       // far less than the leaf COUNT suggests. The horizon test is the only
       // spatial cull needed, because a sphere hides its own far side.
       final visible = <ChunkKey>[];
+      var outOfView = 0;
       for (final k in leaves) {
-        if (horizon.hidden(geom.of(k))) continue;
+        final g = geom.of(k);
+        if (horizon.hidden(g)) continue;
         visible.add(k);
+        if (coneBF != null &&
+            !coneBF.containsSphere(g.centreBF - eyeBF, g.circumradiusM + relief)) {
+          outOfView++;
+        }
       }
+      counters['outOfView'] = outOfView;
       // Nearest first: it decides both what gets meshed within this frame's
       // budget and what survives the resident cap. Distances are computed
       // once per chunk, not twice per comparison — a deformation-refined set
@@ -2251,6 +2303,7 @@ class TerrainNodes {
     _selStillLoading = const {};
     _selectForce = true;
     _selThresholdM = 0;
+    _selForward = Vector3.zero;
     _geom = null;
     _composedField = null;
     _composedEditsId = _unset;

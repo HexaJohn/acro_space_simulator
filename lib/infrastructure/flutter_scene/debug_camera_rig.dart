@@ -32,6 +32,7 @@ import 'package:vector_math/vector_math.dart' as vm;
 
 import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
+import '../../domain/terrain/terrain_lod.dart';
 import 'coord_convert.dart';
 import 'depth_materials.dart';
 import 'lod_probe_camera.dart';
@@ -130,6 +131,30 @@ class DebugCameraRig {
     final eyeWorld = bodyCentreWorld + bodyQuat.rotate(p.eyeBF);
     return LodProbeCamera(
         eyeWorld - focusWorld, p.focalPx, bodyQuat.rotate(p.forwardBF));
+  }
+
+  /// The view cone the streamers cull against this frame, in world axes:
+  /// the live lens's, or the frozen one's turned to the body's current pose.
+  ViewCone viewCone({
+    required Vector3 liveForward,
+    required double liveFovRadiansY,
+    required double liveAspect,
+    double marginRad = 0,
+    Quaternion bodyQuat = Quaternion.identity,
+  }) {
+    final p = _pose;
+    if (p == null) {
+      return ViewCone.circumscribing(
+          forward: liveForward,
+          fovRadiansY: liveFovRadiansY,
+          aspect: liveAspect,
+          marginRad: marginRad);
+    }
+    return ViewCone.circumscribing(
+        forward: bodyQuat.rotate(p.forwardBF),
+        fovRadiansY: p.fovRadiansY,
+        aspect: p.aspect,
+        marginRad: marginRad);
   }
 
   /// The four corners of the view rectangle at distance [d] along

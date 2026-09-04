@@ -32,10 +32,7 @@ Future<void> _loadGraphicsQuality() async {
   try {
     final prefs = await SharedPreferences.getInstance();
     GraphicsQuality.applyPrefs({
-      GraphicsQuality.masterKey: prefs.getString(GraphicsQuality.masterKey),
-      GraphicsQuality.cloudKey: prefs.getString(GraphicsQuality.cloudKey),
-      GraphicsQuality.lightingKey:
-          prefs.getString(GraphicsQuality.lightingKey),
+      for (final key in GraphicsQuality.prefKeys) key: prefs.getString(key),
     });
   } catch (_) {
     GraphicsQuality.reset();

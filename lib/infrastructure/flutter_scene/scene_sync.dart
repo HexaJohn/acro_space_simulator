@@ -14,8 +14,10 @@ import '../../adapters/presenters/camera_view.dart';
 import '../../application/snapshot/planner_overlay.dart';
 import '../../application/snapshot/world_snapshot.dart';
 import '../../domain/shared/vector3.dart';
+import '../../domain/terrain/terrain_lod.dart' show ViewCone;
 import '../flutter/texture_cache.dart';
 import 'atmosphere_nodes.dart';
+import 'graphics_quality.dart';
 import 'body_nodes.dart';
 import 'cloud_nodes.dart';
 import 'coord_convert.dart';
@@ -199,11 +201,29 @@ class SceneSync {
     // fields are written by SimulationView the same frame it moves the anchor.
     _walker.update();
     mark('atmo+rings');
+    // View culling (Options > Graphics quality): the camera's view cone,
+    // from its pixel budget and the viewport. Perspective only — an ortho
+    // camera has parallel rays and a placeholder focal length.
+    final viewCone = GraphicsQuality.terrainFrustumCull &&
+            camera != null &&
+            camera.usesDistanceCull &&
+            viewport != null &&
+            viewport.height > 0 &&
+            camera.focalPx > 0
+        ? ViewCone.forViewport(
+            forward: camera.forward,
+            focalPx: camera.focalPx,
+            widthPx: viewport.width,
+            heightPx: viewport.height,
+            marginRad: TerrainNodes.frustumMarginRad,
+          )
+        : null;
     _terrain.update(
       snap,
       origin,
       cameraEye: camera?.eyeOffset ?? Vector3.zero,
       camera: camera,
+      viewCone: viewCone,
       focusBodyId: focusBodyId,
       focusVesselId: focusVesselId,
       starWorld: _bodies.starWorld(snap),

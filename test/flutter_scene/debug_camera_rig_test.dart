@@ -7,6 +7,7 @@ import 'dart:math' as math;
 
 import 'package:acro_space_simulator/domain/shared/quaternion.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
+import 'package:acro_space_simulator/domain/terrain/terrain_lod.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/debug_camera_rig.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -133,6 +134,48 @@ void main() {
     expect(corners[2].z, lessThan(0));
     expect(corners[3].z, lessThan(0));
     expect(corners[0].y, isNot(closeTo(corners[1].y, 1e-9)));
+  });
+
+  test('viewCone: the live lens until frozen, then the pinned one, turned', () {
+    final rig = DebugCameraRig();
+    final live = rig.viewCone(
+        liveForward: Vector3.unitY,
+        liveFovRadiansY: 0.8,
+        liveAspect: 1.5,
+        marginRad: 0.1);
+    close(live.forward, Vector3.unitY);
+    expect(
+        live.halfAngle,
+        closeTo(
+            ViewCone.circumscribing(
+                    forward: Vector3.unitY,
+                    fovRadiansY: 0.8,
+                    aspect: 1.5,
+                    marginRad: 0.1)
+                .halfAngle,
+            1e-12));
+    rig.freeze(
+        eyeWorld: eyeWorld,
+        forwardWorld: fwd,
+        upWorld: up,
+        focalPx: 800,
+        fovRadiansY: 0.9,
+        aspect: 2.0,
+        bodyCentreWorld: centre);
+    final turned = Quaternion.axisAngle(Vector3.unitZ, math.pi / 2);
+    final cone = rig.viewCone(
+        liveForward: Vector3.unitY,
+        liveFovRadiansY: 0.8,
+        liveAspect: 1.5,
+        bodyQuat: turned);
+    close(cone.forward, Vector3(0, -1, 0));
+    expect(
+        cone.halfAngle,
+        closeTo(
+            ViewCone.circumscribing(forward: fwd, fovRadiansY: 0.9, aspect: 2.0)
+                .halfAngle,
+            1e-12),
+        reason: 'the frozen fov and aspect, not the live ones');
   });
 
   test('frustum corners tolerate an up that is not orthogonal to forward', () {

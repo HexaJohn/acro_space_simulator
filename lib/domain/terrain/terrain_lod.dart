@@ -166,6 +166,87 @@ class HorizonTest {
   }
 }
 
+/// The cone circumscribing a view frustum, for a cheap "is any of this chunk
+/// in view" test.
+///
+/// A frustum's four planes are the exact answer; the cone through its corners
+/// is the answer to within the corner slivers, costs one dot product and one
+/// square root per chunk, and needs only the view direction — which every lens
+/// the streamers see already carries. [marginRad] widens it so a turn has
+/// coarse cover to refine from before the frustum edge arrives.
+///
+/// Out-of-view chunks are not DROPPED by the selection pass: the tree must go
+/// on tiling the body or every turn opens holes. Their apparent size is
+/// attenuated instead, so the quadtree merges them a few levels coarser on its
+/// own (hysteresis keeps that from thrashing; the atomic LOD swap keeps it
+/// from showing), and a turn streams detail back in through the ordinary
+/// ladder.
+class ViewCone {
+  ViewCone(Vector3 forward, double halfAngle)
+      : forward = forward.normalized,
+        halfAngle = halfAngle.clamp(0.0, math.pi),
+        _cos = math.cos(halfAngle.clamp(0.0, math.pi)),
+        _sin = math.sin(halfAngle.clamp(0.0, math.pi));
+
+  /// The cone through the corners of a frustum [fovRadiansY] tall at
+  /// [aspect] (width over height), widened by [marginRad].
+  factory ViewCone.circumscribing({
+    required Vector3 forward,
+    required double fovRadiansY,
+    required double aspect,
+    double marginRad = 0,
+  }) {
+    final t = math.tan(fovRadiansY / 2);
+    return ViewCone(
+        forward, math.atan(t * math.sqrt(1 + aspect * aspect)) + marginRad);
+  }
+
+  /// The same cone from a lens's pixel budget: `focalPx` is
+  /// `(heightPx / 2) / tan(fov / 2)`, so the half-height tangent is
+  /// `heightPx / (2 focalPx)`.
+  factory ViewCone.forViewport({
+    required Vector3 forward,
+    required double focalPx,
+    required double widthPx,
+    required double heightPx,
+    double marginRad = 0,
+  }) {
+    final t = heightPx / (2 * focalPx);
+    final aspect = widthPx / heightPx;
+    return ViewCone(
+        forward, math.atan(t * math.sqrt(1 + aspect * aspect)) + marginRad);
+  }
+
+  /// Unit view direction, in whatever frame the caller tests in.
+  final Vector3 forward;
+
+  /// Half-angle of the cone, radians, in `[0, pi]`.
+  final double halfAngle;
+  final double _cos;
+  final double _sin;
+
+  /// Whether a sphere of [radiusM] centred at [centreRel] (relative to the
+  /// eye) overlaps the cone — the eye inside the sphere counts.
+  bool containsSphere(Vector3 centreRel, double radiusM) {
+    final d2 = centreRel.lengthSquared;
+    if (d2 <= radiusM * radiusM) return true;
+    if (halfAngle >= math.pi) return true;
+    final d = math.sqrt(d2);
+    // The sphere's angular radius as seen from the eye, as sine and cosine.
+    final sinA = radiusM / d;
+    final cosA = math.sqrt(math.max(0.0, 1 - sinA * sinA));
+    // In view when the centre is within halfAngle + angularRadius of
+    // forward: acos(dot/d) <= halfAngle + a, i.e. dot/d >= cos(halfAngle + a)
+    // while that sum stays under pi. Past pi everything is in view; only a
+    // cone already wider than a half-space can get there.
+    if (halfAngle >= math.pi / 2 && halfAngle + math.asin(sinA) >= math.pi) {
+      return true;
+    }
+    final cosTotal = _cos * cosA - _sin * sinA;
+    return centreRel.dot(forward) >= cosTotal * d;
+  }
+}
+
 /// What every pass over a chunk needs of its geometry, computed once per key.
 ///
 /// A key's centre direction and circumradius are pure functions of the key

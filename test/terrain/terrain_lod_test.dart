@@ -422,6 +422,148 @@ void main() {
     });
   });
 
+  group('ViewCone', () {
+    test('circumscribes the frustum corners; margin and viewport forms agree',
+        () {
+      const fov = 0.8, aspect = 1.6;
+      final cone = ViewCone.circumscribing(
+          forward: Vector3.unitX, fovRadiansY: fov, aspect: aspect);
+      final t = math.tan(fov / 2);
+      expect(cone.halfAngle,
+          closeTo(math.atan(t * math.sqrt(1 + aspect * aspect)), 1e-12));
+      // A frustum corner direction lies exactly on the cone.
+      final corner = Vector3(1, t * aspect, t).normalized;
+      expect(math.acos(corner.dot(Vector3.unitX)),
+          closeTo(cone.halfAngle, 1e-12));
+      const h = 900.0;
+      final fromViewport = ViewCone.forViewport(
+          forward: Vector3.unitX,
+          focalPx: h / 2 / t,
+          widthPx: h * aspect,
+          heightPx: h);
+      expect(fromViewport.halfAngle, closeTo(cone.halfAngle, 1e-12));
+      final wider = ViewCone.circumscribing(
+          forward: Vector3.unitX,
+          fovRadiansY: fov,
+          aspect: aspect,
+          marginRad: 0.2);
+      expect(wider.halfAngle, closeTo(cone.halfAngle + 0.2, 1e-12));
+    });
+
+    test('a sphere is in view when any of it is', () {
+      final cone = ViewCone(Vector3.unitX, 0.5);
+      expect(cone.containsSphere(Vector3(100, 0, 0), 1), isTrue,
+          reason: 'on axis');
+      expect(cone.containsSphere(Vector3(-100, 0, 0), 1), isFalse,
+          reason: 'behind');
+      // 0.7 rad off axis: a small sphere is out; one whose angular radius
+      // reaches back 0.2 rad to the cone edge is in.
+      final off = Vector3(math.cos(0.7), math.sin(0.7), 0) * 100;
+      final reach = 100 * math.sin(0.2);
+      expect(cone.containsSphere(off, 1), isFalse);
+      expect(cone.containsSphere(off, reach * 1.01), isTrue);
+      expect(cone.containsSphere(off, reach * 0.99), isFalse);
+      expect(cone.containsSphere(Vector3(-1, 0, 0), 5), isTrue,
+          reason: 'the eye inside the sphere');
+      expect(
+          ViewCone(Vector3.unitX, math.pi).containsSphere(Vector3(-100, 0, 0), 1),
+          isTrue,
+          reason: 'a full cone hides nothing');
+    });
+
+    test('agrees with the angular form over random spheres', () {
+      final rng = math.Random(9);
+      var inView = 0, checked = 0;
+      for (var i = 0; i < 4000; i++) {
+        final half = rng.nextDouble() * math.pi;
+        final cone = ViewCone(randomDir(rng), half);
+        final c = randomDir(rng) * (1 + rng.nextDouble() * 1000);
+        final r = rng.nextDouble() * 200;
+        final d = c.length;
+        bool want;
+        if (d <= r) {
+          want = true;
+        } else {
+          final total = half + math.asin(r / d);
+          final ang = math.acos((c.dot(cone.forward) / d).clamp(-1.0, 1.0));
+          if ((total - ang).abs() < 1e-9) continue; // knife edge
+          want = total >= math.pi || ang <= total;
+        }
+        expect(cone.containsSphere(c, r), want,
+            reason: 'half $half centre $c r $r');
+        checked++;
+        if (want) inView++;
+      }
+      expect(checked, greaterThan(3900));
+      expect(inView, greaterThan(500));
+      expect(inView, lessThan(checked - 500));
+    });
+
+    test('attenuating out-of-view chunks coarsens behind the eye, tiling intact',
+        () {
+      // Eye 3 km up looking along the horizon. Ground ahead is inside the
+      // cone, ground behind is not; the tree must still tile the body and
+      // stay balanced, and select coarser behind than ahead at like range.
+      const r = 1.7374e6;
+      final eye = Vector3(0, 0, r + 3000);
+      final fwd = Vector3.unitX;
+      final cone = ViewCone.circumscribing(
+          forward: fwd, fovRadiansY: 0.8, aspect: 1.6, marginRad: 0.26);
+      const focal = 800.0;
+      final horizon = HorizonTest(eye, r);
+      final geom = ChunkGeometryCache(r);
+      double pxFor(ChunkKey k, {required bool cull}) {
+        final g = geom.of(k);
+        if (horizon.hidden(g)) return 0;
+        final rel = g.centreBF - eye;
+        final v = g.circumradiusM * focal / math.max(1.0, rel.length);
+        if (!cull || cone.containsSphere(rel, g.circumradiusM)) return v;
+        return v * 0.25;
+      }
+
+      Set<ChunkKey> settle(bool cull) {
+        final tree = TerrainLodTree(splitPx: 220, maxLevel: 12);
+        var leaves = <ChunkKey>{};
+        for (var i = 0; i < 16; i++) {
+          final next = tree.update((k) => pxFor(k, cull: cull));
+          final same = next.length == leaves.length && next.containsAll(leaves);
+          leaves = next;
+          if (same) break;
+        }
+        return leaves;
+      }
+
+      final culled = settle(true);
+      final plain = settle(false);
+      _expectTiling(culled);
+      expect(isBalanced(culled), isTrue);
+      expect(culled.length, lessThan(plain.length),
+          reason: 'fewer leaves with the ground behind the eye coarsened');
+
+      // Deepest leaf within 3-12 km of the sub-point, ahead vs behind.
+      int deepest(Set<ChunkKey> leaves, double sign) {
+        var m = 0;
+        final sub = Vector3(0, 0, r);
+        for (final k in leaves) {
+          final off = geom.of(k).centreBF - sub;
+          final along = off.dot(fwd) * sign;
+          final dist = off.length;
+          if (dist < 3000 || dist > 12000) continue;
+          if (along / dist < 0.8) continue;
+          if (k.level > m) m = k.level;
+        }
+        return m;
+      }
+
+      expect(deepest(plain, 1), deepest(plain, -1),
+          reason: 'without the cone the selection is symmetric');
+      expect(deepest(culled, 1), greaterThanOrEqualTo(deepest(culled, -1) + 1),
+          reason: 'behind the eye must be coarser than ahead');
+      expect(deepest(culled, 1), deepest(plain, 1),
+          reason: 'ahead is untouched by the cone');
+    });
+  });
+
   group('reselectDistanceM', () {
     test('scales with height over the ground, floored on the ground', () {
       double d(double h) =>

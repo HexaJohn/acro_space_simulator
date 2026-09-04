@@ -216,5 +216,29 @@ void main() {
       expect(GraphicsQuality.master, QualityLevel.high);
       expect(GraphicsQuality.cloudOverride, isNull);
     });
+
+    test('terrain view culling persists, defaults on, never reads as custom',
+        () {
+      GraphicsQuality.reset();
+      expect(GraphicsQuality.terrainFrustumCull, isTrue);
+      GraphicsQuality.terrainFrustumCull = false;
+      expect(GraphicsQuality.isCustom, isFalse,
+          reason: 'not a quality rung; the preset label must not flip');
+      final stored = GraphicsQuality.toPrefs();
+      expect(stored[GraphicsQuality.terrainFrustumCullKey], 'false');
+      expect(GraphicsQuality.prefKeys,
+          contains(GraphicsQuality.terrainFrustumCullKey));
+
+      GraphicsQuality.reset();
+      GraphicsQuality.applyPrefs(stored);
+      expect(GraphicsQuality.terrainFrustumCull, isFalse);
+
+      // Absent or garbage: the shipped default, on.
+      GraphicsQuality.applyPrefs(const {});
+      expect(GraphicsQuality.terrainFrustumCull, isTrue);
+      GraphicsQuality.applyPrefs(
+          const {GraphicsQuality.terrainFrustumCullKey: 'maybe'});
+      expect(GraphicsQuality.terrainFrustumCull, isTrue);
+    });
   });
 }

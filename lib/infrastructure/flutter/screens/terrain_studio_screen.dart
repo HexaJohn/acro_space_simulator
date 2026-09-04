@@ -50,6 +50,7 @@ import '../../flutter_scene/city/city_materials.dart';
 import '../../flutter_scene/city/city_nodes.dart';
 import '../../flutter_scene/coord_convert.dart';
 import '../../flutter_scene/debug_camera_rig.dart';
+import '../../flutter_scene/graphics_quality.dart';
 import '../../flutter_scene/terrain/terrain_nodes.dart';
 import 'app_theme.dart';
 
@@ -1092,11 +1093,23 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
         bodyCentreWorld: _bodyCentreWorld,
         bodyQuat: bodyQuat,
       );
+      // View culling follows the same lens: frozen, the cone is the pinned
+      // one, so the coarse ground behind it can be flown around and seen.
+      final cone = !GraphicsQuality.terrainFrustumCull
+          ? null
+          : _rig.viewCone(
+              liveForward: lens.forward,
+              liveFovRadiansY: _firstPerson ? 0.9 : 0.8,
+              liveAspect: _viewportW / _viewportH,
+              marginRad: TerrainNodes.frustumMarginRad,
+              bodyQuat: bodyQuat,
+            );
       _terrain!.update(
         frame,
         _origin,
         cameraEye: probe.eyeRel,
         camera: probe,
+        viewCone: cone,
         focusBodyId: _body,
         starWorld: starWorld,
       );
@@ -1374,6 +1387,12 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
                 : AppTheme.textDim),
         row('  near brushes', '${TerrainNodes.counters['nearBrushes'] ?? 0}',
             colour: AppTheme.textDim),
+        row(
+            '  out of view',
+            GraphicsQuality.terrainFrustumCull
+                ? '${TerrainNodes.counters['outOfView'] ?? 0} leaves coarsened'
+                : 'culling off',
+            colour: AppTheme.textDim),
         row('city', '${ms(_cityMs)} ms'),
         row('last apply', '${ms(_applyMs)} ms', colour: AppTheme.textDim),
         row('last capture', '${ms(_captureMs)} ms',
@@ -1562,6 +1581,41 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
                 style: AppTheme.dim.copyWith(fontSize: 11)),
             onChanged: (v) => setState(() => _showRig = v),
           ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            value: GraphicsQuality.terrainFrustumCull,
+            activeThumbColor: AppTheme.accent2,
+            title: const Text('View culling', style: AppTheme.body),
+            subtitle: Text(
+                'Chunks outside the lens\'s view cone select coarser (never '
+                'vanish). Freeze the lens and orbit behind it to see the '
+                'coarse band. Same switch as Options > Graphics quality.',
+                style: AppTheme.dim.copyWith(fontSize: 11)),
+            onChanged: (v) =>
+                setState(() => GraphicsQuality.terrainFrustumCull = v),
+          ),
+          _slider(
+              'View cull margin',
+              TerrainNodes.frustumMarginRad * 180 / math.pi,
+              0,
+              45,
+              'How far past the frustum corners the cone reaches — the '
+              'coarse-but-present band a turn refines from.',
+              (v) => setState(
+                  () => TerrainNodes.frustumMarginRad = v * math.pi / 180),
+              unit: '°',
+              divisions: 45),
+          _slider(
+              'Out-of-view detail',
+              TerrainNodes.frustumCullFactor,
+              0,
+              1,
+              'Apparent-size factor for chunks outside the cone: 0.25 is two '
+              'LOD levels coarser, 0 collapses them to the face roots, 1 '
+              'culls nothing.',
+              (v) => setState(() => TerrainNodes.frustumCullFactor = v),
+              divisions: 20),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
             dense: true,
