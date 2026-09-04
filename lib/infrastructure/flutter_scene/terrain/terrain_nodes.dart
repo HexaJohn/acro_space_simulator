@@ -145,10 +145,11 @@ class TerrainNodes {
   static int maxPlaceholders = 48;
 
   /// LOD X-RAY: hide the meshed ground and draw EVERY selected chunk as its
-  /// wireframe patch, coloured by level (coarse blue, deep red). Streaming
-  /// and selection keep running underneath, so what appears and vanishes on
-  /// screen IS the quadtree deciding — which is the only way to see WHY a
-  /// region splits or collapses instead of inferring it from ground detail.
+  /// wireframe patch, coloured by level ([lodRampColor]: coarse blue through
+  /// green to deep red). Streaming and selection keep running underneath, so
+  /// what appears and vanishes on screen IS the quadtree deciding — which is
+  /// the only way to see WHY a region splits or collapses instead of
+  /// inferring it from ground detail.
   static bool gridOnly = false;
 
   /// Grid-only patch budget. Selection can want a few hundred chunks; the
@@ -158,6 +159,66 @@ class TerrainNodes {
   /// The [gridOnly] value the current placeholder set was built with, so a
   /// toggle forces the selection pass that rebuilds it.
   bool _builtGridOnly = false;
+
+  /// LOD HEATMAP: paint the meshed ground by the quadtree level each
+  /// triangle was ACTUALLY built at, on the same ramp as the grid patches.
+  /// Where [gridOnly] shows what selection WANTS (resident or not), this
+  /// shows what is DRAWN — the two differ exactly where streaming lags, and
+  /// a chunk that is coarser than its neighbours reads as a colour step on
+  /// the ground itself. Every terrain upload carries its level in the vertex
+  /// colour (see [levelVertexColors]), so the flip is one uniform: no
+  /// rebuild, no extra GPU memory. Lit by the sun term so relief survives.
+  static bool lodHeatmap = false;
+
+  /// Level span of the LOD ramp: level 0 is the blue end, this level (and
+  /// deeper) the red end. Shared by the heatmap, the grid patches and the
+  /// studio legend so one colour means one level everywhere.
+  static const int lodRampLevels = 20;
+
+  /// The LOD ramp colour for [level] — the Dart twin of `LodRamp` in
+  /// terrain.frag (blue, cyan, green, yellow, red at t = 0, .25, .5, .75,
+  /// 1). Keep the two in step: the heatmap uses the GLSL one, the grid
+  /// patches and the legend use this.
+  static vm.Vector3 lodRampColor(int level) {
+    final t = (level / lodRampLevels).clamp(0.0, 1.0);
+    double step(double a, double b) {
+      final x = ((t - a) / (b - a)).clamp(0.0, 1.0);
+      return x * x * (3 - 2 * x);
+    }
+
+    vm.Vector3 mix(vm.Vector3 a, vm.Vector3 b, double s) =>
+        a + (b - a).scaled(s);
+    var c = vm.Vector3(0.15, 0.30, 1.00);
+    c = mix(c, vm.Vector3(0.00, 0.85, 1.00), step(0.00, 0.25));
+    c = mix(c, vm.Vector3(0.15, 0.90, 0.25), step(0.25, 0.50));
+    c = mix(c, vm.Vector3(1.00, 0.90, 0.10), step(0.50, 0.75));
+    c = mix(c, vm.Vector3(1.00, 0.12, 0.08), step(0.75, 1.00));
+    return c;
+  }
+
+  /// The per-vertex colour stream for a chunk of [key]: r = the quadtree
+  /// level as a RAW float (the attribute is float32, not UNORM, so it need
+  /// not be normalised), g = a sibling checker parity so two adjacent chunks
+  /// at the SAME level still show a boundary, b unused, a = 1.
+  ///
+  /// Written into every terrain geometry upload — solo, batched and masked
+  /// — because the engine's 48-byte vertex carries a colour slot whether or
+  /// not we fill it. The shader only reads it under [lodHeatmap].
+  static Float32List levelVertexColors(ChunkKey key, int vertexCount) {
+    final out = Float32List(vertexCount * 4);
+    final level = key.level.toDouble();
+    final parity = ((key.u + key.v) & 1).toDouble();
+    for (var i = 0; i < out.length; i += 4) {
+      out[i] = level;
+      out[i + 1] = parity;
+      out[i + 3] = 1.0;
+    }
+    return out;
+  }
+
+  /// Resident chunk count per level, the structured form of
+  /// [levelHistogramLine] — the studio legend prints it under the ramp.
+  static Map<int, int> residentLevelHistogram = const {};
 
   /// How close (m) the focus must be to a terrain edit before its chunks are
   /// force-refined. Deformation needs levels far past what screen-space
@@ -420,15 +481,29 @@ class TerrainNodes {
       _dirtyBatches.remove(bk);
       final batch = _batches[bk];
       if (batch == null) continue;
-      final cells = <CellMesh>[
-        for (final k in batch.members)
-          if (_chunks[k] != null) _chunks[k]!.cell,
-      ];
+      final keys = <ChunkKey>[];
+      final cells = <CellMesh>[];
+      for (final k in batch.members) {
+        final rc = _chunks[k];
+        if (rc == null) continue;
+        keys.add(k);
+        cells.add(rc.cell);
+      }
       if (cells.isEmpty) continue;
       final combined = combineCellMeshes(cells, batch.anchorBF);
+      // Level colours in the SAME member order combineCellMeshes appends
+      // vertices: one constant run per member.
+      final colors = Float32List(combined.positions.length ~/ 3 * 4);
+      var at = 0;
+      for (var i = 0; i < cells.length; i++) {
+        final n = cells[i].mesh.positions.length ~/ 3;
+        colors.setRange(at, at + n * 4, levelVertexColors(keys[i], n));
+        at += n * 4;
+      }
       final geom = fs.MeshGeometry.fromArrays(
         positions: combined.positions,
         normals: combined.normals,
+        colors: colors,
         indices: combined.indices,
       );
       final mesh = fs.Mesh(geom, _material!);
@@ -1592,6 +1667,7 @@ class TerrainNodes {
     if (_chunks.isEmpty) {
       debugLine = 'terrain: no chunks';
       levelHistogramLine = '';
+      residentLevelHistogram = const {};
       return;
     }
 
@@ -1647,6 +1723,7 @@ class TerrainNodes {
       for (final lvl in levelHistogram.keys.toList()..sort())
         'L$lvl:${levelHistogram[lvl]}',
     ].join(' ');
+    residentLevelHistogram = levelHistogram;
     debugLine = 'terrain: ${_chunks.length} chunks  $tris tris  '
         'lvl $minLevel-$maxLevel  q${_tree!.leaves.length}'
         '${_pending.isNotEmpty ? '  pend${_pending.length}' : ''}'
@@ -1937,6 +2014,7 @@ class TerrainNodes {
     final geom = fs.MeshGeometry.fromArrays(
       positions: cell.mesh.positions,
       normals: cell.mesh.normals,
+      colors: levelVertexColors(key, cell.mesh.positions.length ~/ 3),
       indices: cell.mesh.indices,
     );
     final node = fs.Node(mesh: fs.Mesh(geom, _material!));
@@ -2106,14 +2184,14 @@ class TerrainNodes {
       indices: indices,
       primitiveType: igpu.PrimitiveType.line,
     );
-    // Colour by LEVEL, coarse blue through deep red, so the quadtree's
-    // structure reads at a glance in grid-only mode — a split shows as a
-    // colour step, not just a density change. The plain loading grid keeps
-    // its single pale blue by landing on the ramp's shallow end.
-    final t = (key.level / 18.0).clamp(0.0, 1.0);
+    // Colour by LEVEL on the shared LOD ramp (coarse blue through green to
+    // deep red — the same colours the heatmap paints the ground with), so
+    // the quadtree's structure reads at a glance in grid-only mode: a split
+    // shows as a colour step, not just a density change. The plain loading
+    // grid keeps a pale blue by landing on the ramp's shallow end.
+    final rgb = lodRampColor(key.level);
     final mat = DepthSafeUnlitMaterial()
-      ..baseColorFactor = vm.Vector4(
-          0.3 + 0.7 * t, 0.78 - 0.55 * t, 1.0 - 0.9 * t, 0.7);
+      ..baseColorFactor = vm.Vector4(rgb.x, rgb.y, rgb.z, 0.7);
     final node = fs.Node(mesh: fs.Mesh(geom, mat));
     _scene.add(node);
     return _GridPatch(node: node, anchorBF: anchorBF);
@@ -2207,6 +2285,7 @@ class TerrainNodes {
     final geom = fs.MeshGeometry.fromArrays(
       positions: c.cell.mesh.positions,
       normals: c.cell.mesh.normals,
+      colors: levelVertexColors(key, c.cell.mesh.positions.length ~/ 3),
       indices: masked.indices,
     );
     final mesh = fs.Mesh(geom, _material!);
@@ -2456,6 +2535,9 @@ class _TerrainMaterial extends fs.ShaderMaterial {
       lampPosScene.x, lampPosScene.y, lampPosScene.z, lampRangeScene,
       lampDirScene.x, lampDirScene.y, lampDirScene.z, lampConeCos,
       lampIntensity, lampEdgeCos, 0.0, 0.0,
+      // debug_params: x = LOD heatmap on, y = the ramp's level span.
+      TerrainNodes.lodHeatmap ? 1.0 : 0.0,
+      TerrainNodes.lodRampLevels.toDouble(), 0.0, 0.0,
     ]);
   }
 

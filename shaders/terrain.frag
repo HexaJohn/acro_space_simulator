@@ -69,6 +69,11 @@ uniform TerrainInfo {
   vec4 lamp_dir_cone;
   // x: intensity. y: cosine width of the soft edge outside the cone. zw spare.
   vec4 lamp_params;
+  // Studio debug switches. x: LOD heatmap (1 = paint the ground by the
+  // quadtree level in v_color.r, see LodRamp / terrain_nodes.dart
+  // levelVertexColors). y: the ramp's level span (level y and deeper = red).
+  // zw spare.
+  vec4 debug_params;
 }
 terrain;
 
@@ -305,6 +310,19 @@ vec3 Hypso(float t) {
   return c;
 }
 
+// LOD ramp for a normalised quadtree level t in [0,1]: blue -> cyan -> green
+// -> yellow -> red. The Dart twin (TerrainNodes.lodRampColor) colours the
+// grid-only patches and the studio legend — keep the stops identical so one
+// colour means one level in every view.
+vec3 LodRamp(float t) {
+  vec3 c = mix(vec3(0.15, 0.30, 1.00), vec3(0.00, 0.85, 1.00),
+      smoothstep(0.00, 0.25, t));
+  c = mix(c, vec3(0.15, 0.90, 0.25), smoothstep(0.25, 0.50, t));
+  c = mix(c, vec3(1.00, 0.90, 0.10), smoothstep(0.50, 0.75, t));
+  c = mix(c, vec3(1.00, 0.12, 0.08), smoothstep(0.75, 1.00, t));
+  return c;
+}
+
 // 1 on an iso-line of `v` at integer multiples of `step`, 0 elsewhere.
 // Fixed fractional width (no derivatives — this profile has none), so line
 // thickness varies with slope; fine for a debug view.
@@ -482,6 +500,19 @@ void main() {
   // Sun Lambert + ambient. Light travels along sun_amp.xyz, so a surface is
   // lit by the component facing back toward the sun (-dir).
   float lit = max(dot(n, -terrain.sun_amp.xyz), 0.0);
+
+  // LOD HEATMAP (debug_params.x, the terrain studio's "Visualize LODs"):
+  // paint the ground by the quadtree level the mesh under this fragment was
+  // ACTUALLY built at. v_color.r carries that level as a raw float and
+  // v_color.g a sibling checker parity (terrain_nodes.dart
+  // levelVertexColors), so two same-level neighbours still show their seam.
+  // Lit by the Lambert term so relief keeps reading under the colour.
+  if (terrain.debug_params.x > 0.5) {
+    float t = clamp(v_color.r / max(terrain.debug_params.y, 1.0), 0.0, 1.0);
+    vec3 c = LodRamp(t) * mix(0.92, 1.08, clamp(v_color.g, 0.0, 1.0));
+    frag_color = vec4(c * (0.55 + 0.45 * lit), 1.0);
+    return;
+  }
 
   // Debug views (detail.w, cycled from the debug panel). Placed before the
   // shadow tap so the map views stay readable on the night side.

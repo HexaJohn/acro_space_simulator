@@ -1646,12 +1646,28 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
             title: const Text('Quadtree grid only', style: AppTheme.body),
             subtitle: Text(
                 'Hide the ground, draw every selected chunk as its wireframe '
-                'patch, coloured by level (coarse blue, deep red). Streaming '
-                'keeps running — what appears and vanishes IS the selection '
-                'deciding.',
+                'patch, coloured by level (coarse blue through green to deep '
+                'red). Streaming keeps running — what appears and vanishes '
+                'IS the selection deciding.',
                 style: AppTheme.dim.copyWith(fontSize: 11)),
             onChanged: (v) => setState(() => TerrainNodes.gridOnly = v),
           ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            value: TerrainNodes.lodHeatmap,
+            activeThumbColor: AppTheme.accent2,
+            title: const Text('Visualize LODs', style: AppTheme.body),
+            subtitle: Text(
+                'Paint the ground by the quadtree level each chunk was '
+                'actually meshed at, on the same ramp as the grid. Siblings '
+                'at one level checker light/dark so every chunk seam shows. '
+                'The grid shows what selection wants; this shows what is '
+                'drawn — they differ where streaming lags.',
+                style: AppTheme.dim.copyWith(fontSize: 11)),
+            onChanged: (v) => setState(() => TerrainNodes.lodHeatmap = v),
+          ),
+          if (TerrainNodes.lodHeatmap) _lodLegend(),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
             dense: true,
@@ -1678,6 +1694,38 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
           ),
         ],
       ),
+    );
+  }
+
+  /// Colour key for the LOD heatmap: one swatch per level across the shared
+  /// ramp, the level under it, and the resident chunk count at that level
+  /// (this frame's histogram) under that — so a colour on the ground maps
+  /// to a level AND to how much of the view sits there.
+  Widget _lodLegend() {
+    final hist = TerrainNodes.residentLevelHistogram;
+    Color swatch(int lvl) {
+      final c = TerrainNodes.lodRampColor(lvl);
+      return Color.fromARGB(255, (c.x * 255).round(), (c.y * 255).round(),
+          (c.z * 255).round());
+    }
+
+    final tiny = AppTheme.mono.copyWith(fontSize: 8, color: AppTheme.textDim);
+    return Padding(
+      padding: const EdgeInsets.only(left: 4, right: 4, bottom: 8),
+      child: Row(children: [
+        for (var lvl = 0; lvl <= TerrainNodes.lodRampLevels; lvl++)
+          Expanded(
+            child: Column(children: [
+              Container(height: 10, color: swatch(lvl)),
+              Text('$lvl', style: tiny),
+              FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(hist[lvl]?.toString() ?? '',
+                    style: tiny.copyWith(color: AppTheme.text)),
+              ),
+            ]),
+          ),
+      ]),
     );
   }
 
