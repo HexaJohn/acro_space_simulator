@@ -9,6 +9,7 @@ import 'package:acro_space_simulator/application/snapshot/world_snapshot.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_generator.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
+import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/domain/universe/celestial_body.dart';
 import 'package:acro_space_simulator/domain/universe/real_solar_system.dart';
@@ -104,6 +105,37 @@ void main() {
       expect(city.parcelById(e.key)?.manual, isTrue,
           reason: 'a claimed site should be its own manual plot');
     }
+  });
+
+  test('one of every installation is staked, and the sprawl keeps off them',
+      () {
+    final city = build(const CityGenSpec(blocksAcross: 4, seed: 5, sprawlMiles: 12));
+    final claimed = <String>{
+      for (final e in city.parcelBuildings.entries)
+        if (e.value.claimsOwnSite) e.value.type,
+    };
+    // Not an arbitrary handful: most of the catalogue, the giants included.
+    expect(claimed.length, greaterThanOrEqualTo(12), reason: '$claimed');
+    expect(claimed, contains('reactor'));
+    expect(claimed, contains('solar'));
+    expect(claimed, contains('aquifer'));
+    // Every staked plot is a clearing on the sprawl spec.
+    final manual = city.parcelBuildings.keys
+        .where((id) => city.parcelById(id)?.manual ?? false)
+        .length;
+    expect(city.sprawlSpec!.clearings.length, manual);
+    // The expressway through the core, with its frontage roads, and the
+    // avenues carried out to the mile grid.
+    final roads = city.layout.roads;
+    // One expressway, in as many pieces as the avenues it crosses cut it.
+    expect(roads.where((r) => r.roadClass == RoadClass.elevated), isNotEmpty);
+    expect(roads.where((r) => r.roadClass == RoadClass.elevated).every(
+        (r) => r.sample(stepM: 50).every((p) => (p.n - city.sprawlSpec!.axisOffsetN).abs() < 1)),
+        isTrue, reason: 'the expressway rides the central avenue');
+    expect(roads.where((r) => r.roadClass == RoadClass.trunk).length,
+        greaterThanOrEqualTo(4));
+    expect(city.sprawlSpec!.expressway, isTrue);
+    expect(city.sprawlSpec!.coreAvenuesE, isNotEmpty);
   });
 
   test('it can be built on an airless world, and seals its roads there', () {

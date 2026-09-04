@@ -43,6 +43,28 @@ import 'city_nodes.dart';
 import 'scale_rig.dart';
 
 /// What the studio wants drawn.
+/// The outline a preview lot is cut to.
+///
+/// The massing reads a lot as its frontage-aligned bounding box and a corner
+/// flag, so what a shape changes is exactly that box — and the outline drawn
+/// beside the building is what shows where the two disagree. That is the
+/// point of offering shapes: a tapered lot is what a bent street plats, and
+/// the generator's answer to it is worth seeing before a colony makes
+/// a thousand of them.
+enum LotShape {
+  rectangle('Rectangle', 'The plat\'s default: a straight street, even cuts.'),
+  tapered('Tapered', 'Narrower at the back: the lot a street bending AWAY leaves.'),
+  flared('Flared', 'Wider at the back: the lot a street bending TOWARD leaves.'),
+  notched('L-shaped', 'A notch taken out of the back corner, as a neighbour\'s '
+      'assemblage would.'),
+  cornerCut('Corner cut', 'A diagonal across the street corner, as a junction '
+      'splay takes it.');
+
+  const LotShape(this.label, this.note);
+  final String label;
+  final String note;
+}
+
 class BuildingPreviewRequest {
   const BuildingPreviewRequest({
     required this.style,
@@ -56,7 +78,18 @@ class BuildingPreviewRequest {
     this.showRig = true,
     this.showLots = true,
     this.corners = true,
+    this.shape = LotShape.rectangle,
+    this.manualPlot = false,
   });
+
+  /// The outline each lot is cut to.
+  final LotShape shape;
+
+  /// Hand the generator what an INSTALLATION gets in the colony: a claimed
+  /// plot with no frontage and no side street, so its axes are the world's
+  /// and its depth is the whole box — not the street lot the row otherwise
+  /// stands on.
+  final bool manualPlot;
 
   final ArchitectureStyle style;
   final CityBuildingSpec spec;
@@ -106,11 +139,14 @@ class BuildingPreviewRequest {
       other.varySeeds == varySeeds &&
       other.showRig == showRig &&
       other.showLots == showLots &&
-      other.corners == corners;
+      other.corners == corners &&
+      other.shape == shape &&
+      other.manualPlot == manualPlot;
 
   @override
   int get hashCode => Object.hash(style.id, spec.type, spec.label, lotWidthM,
-      lotDepthM, lots, seed, detail, varySeeds, showRig, showLots, corners);
+      lotDepthM, lots, seed, detail, varySeeds, showRig, showLots, corners,
+      shape, manualPlot);
 }
 
 /// What the last rebuild produced, for the HUD.
@@ -127,6 +163,9 @@ class BuildingPreviewStats {
     this.frontGapM = 0,
     this.sideGapM = 0,
     this.buildMs = 0,
+    this.lotAreaM2 = 0,
+    this.coverage = 0,
+    this.overhangs = false,
   });
 
   final int triangles;
@@ -137,6 +176,14 @@ class BuildingPreviewStats {
   final double footprintD;
   final double floorAreaM2;
   final int parkingSpaces;
+
+  /// The lot's own area, and how much of it the footprint covers.
+  final double lotAreaM2;
+  final double coverage;
+
+  /// Whether any volume's corner falls OUTSIDE the lot polygon — what a
+  /// bounding-box massing does on a tapered or notched lot.
+  final bool overhangs;
 
   /// Distance from the curb line to the building face. The number the whole
   /// street-wall question comes down to.
@@ -201,14 +248,18 @@ class BuildingPreviewNodes {
     var floors = 0, spaces = 0;
     var height = 0.0, fw = 0.0, fd = 0.0, area = 0.0;
     var frontGap = double.infinity;
+    var lotArea = 0.0, footArea = 0.0;
+    var overhangs = false;
     final faces = <(double lo, double hi)>[];
 
     for (var i = 0; i < r.lots; i++) {
       final x0 = -halfBlock + r.lotWidthM * i;
       final centreX = x0 + r.lotWidthM / 2;
       final parcel = _lot(i, x0, r.lotWidthM, r.lotDepthM,
-          corner: r.corners && (i == 0 || i == r.lots - 1));
-      if (r.showLots) _lotOutline(ground, x0, r.lotWidthM, r.lotDepthM);
+          corner: r.corners && (i == 0 || i == r.lots - 1),
+          shape: r.shape,
+          manual: r.manualPlot);
+      if (r.showLots) _lotOutline(ground, centreX, parcel.polygon);
 
       final built = generator.generate(
         r.spec,
@@ -234,6 +285,20 @@ class BuildingPreviewNodes {
       for (final v in m.volumes.where((v) => v.floors > 0)) {
         frontGap = math.min(frontGap, (v.y - v.depth / 2 + offsetY) - curbY);
         faces.add((centreX + v.x - v.width / 2, centreX + v.x + v.width / 2));
+      }
+      // How the massing sits in the lot it was handed: the generator works
+      // about the lot's centroid, so a volume corner is tested there.
+      lotArea = math.max(lotArea, parcel.area);
+      footArea = math.max(footArea, m.footprint.width * m.footprint.depth);
+      final c = parcel.centroid;
+      for (final v in m.volumes) {
+        for (final sx in const [-0.5, 0.5]) {
+          for (final sy in const [-0.5, 0.5]) {
+            final corner =
+                Vec2(c.e + v.x + v.width * sx, c.n + v.y + v.depth * sy);
+            if (!parcel.contains(corner)) overhangs = true;
+          }
+        }
       }
     }
 
@@ -290,6 +355,9 @@ class BuildingPreviewNodes {
       frontGapM: frontGap.isFinite ? frontGap - pavementM : 0,
       sideGapM: sideGap,
       buildMs: sw.elapsedMicroseconds / 1000,
+      lotAreaM2: lotArea,
+      coverage: lotArea > 0 ? (footArea / lotArea).clamp(0.0, 9.0) : 0,
+      overhangs: overhangs,
     );
   }
 
@@ -299,18 +367,63 @@ class BuildingPreviewNodes {
   /// every lot generates identical archetypes and only the placement differs —
   /// which is exactly what the colony does.
   Parcel _lot(int index, double x0, double w, double d,
-          {bool corner = false}) =>
-      Parcel(
-        id: 'studio-$index',
-        polygon: [
-          Vec2(-w / 2, 0),
-          Vec2(w / 2, 0),
-          Vec2(w / 2, d),
-          Vec2(-w / 2, d),
+      {bool corner = false,
+      LotShape shape = LotShape.rectangle,
+      bool manual = false}) {
+    final polygon = polygonFor(shape, w, d);
+    if (manual) {
+      // A claimed plot: no frontage, no side street, world-aligned — the
+      // parcel an installation is really handed.
+      return Parcel(id: 'studio-$index', polygon: polygon, manual: true);
+    }
+    return Parcel(
+      id: 'studio-$index',
+      polygon: polygon,
+      frontage: (Vec2(-w / 2, 0), Vec2(w / 2, 0)),
+      sideStreet: corner ? (Vec2(w / 2, 0), Vec2(w / 2, d)) : null,
+    );
+  }
+
+  /// A lot outline of [shape], [w] across the frontage (at y = 0) and [d]
+  /// deep, wound counter-clockwise like the plat's own.
+  static List<Vec2> polygonFor(LotShape shape, double w, double d) {
+    final h = w / 2;
+    return switch (shape) {
+      LotShape.rectangle => [
+          Vec2(-h, 0),
+          Vec2(h, 0),
+          Vec2(h, d),
+          Vec2(-h, d),
         ],
-        frontage: (Vec2(-w / 2, 0), Vec2(w / 2, 0)),
-        sideStreet: corner ? (Vec2(w / 2, 0), Vec2(w / 2, d)) : null,
-      );
+      LotShape.tapered => [
+          Vec2(-h, 0),
+          Vec2(h, 0),
+          Vec2(w * 0.32, d),
+          Vec2(-w * 0.32, d),
+        ],
+      LotShape.flared => [
+          Vec2(-h, 0),
+          Vec2(h, 0),
+          Vec2(w * 0.72, d),
+          Vec2(-w * 0.72, d),
+        ],
+      LotShape.notched => [
+          Vec2(-h, 0),
+          Vec2(h, 0),
+          Vec2(h, d * 0.55),
+          Vec2(w * 0.1, d * 0.55),
+          Vec2(w * 0.1, d),
+          Vec2(-h, d),
+        ],
+      LotShape.cornerCut => [
+          Vec2(-h, 0),
+          Vec2(w * 0.2, 0),
+          Vec2(h, d * 0.35),
+          Vec2(h, d),
+          Vec2(-h, d),
+        ],
+    };
+  }
 
   /// Copy a generated mesh into the shared builder, shifted onto its lot.
   ///
@@ -384,27 +497,30 @@ class BuildingPreviewNodes {
     );
   }
 
-  /// The property line, as a thin border inside the lot. Drawn as four strips
-  /// rather than a filled quad so a building standing on its line does not
-  /// z-fight the lot it stands on.
-  void _lotOutline(MeshBuilder m, double x0, double w, double d) {
+  /// The property line: a thin strip along every edge of the lot polygon,
+  /// which is centred on [centreX]. Strips rather than a filled quad so a
+  /// building standing on its line does not z-fight the lot it stands on.
+  void _lotOutline(MeshBuilder m, double centreX, List<Vec2> polygon) {
     const t = 0.35;
     // The placement-heatmap 'site ok' swatch: a bright green, which is
     // exactly what a property line wants to be against grass and tarmac.
     const u = (7 + 0.5) / kGroundSwatches;
-    void strip(double ax, double ay, double bx, double by) => _quad(
-          m,
-          Vector3(ax, ay, 0.06),
-          Vector3(bx, ay, 0.06),
-          Vector3(bx, by, 0.06),
-          Vector3(ax, by, 0.06),
-          const Vector3(0, 0, 1),
-          u: u,
-        );
-    strip(x0, 0, x0 + t, d);
-    strip(x0 + w - t, 0, x0 + w, d);
-    strip(x0, 0, x0 + w, t);
-    strip(x0, d - t, x0 + w, d);
+    for (var i = 0; i < polygon.length; i++) {
+      final a = polygon[i];
+      final b = polygon[(i + 1) % polygon.length];
+      final d = b - a;
+      if (d.length < 1e-6) continue;
+      final n = d.perp.normalized * (t / 2);
+      _quad(
+        m,
+        Vector3(centreX + a.e - n.e, a.n - n.n, 0.06),
+        Vector3(centreX + b.e - n.e, b.n - n.n, 0.06),
+        Vector3(centreX + b.e + n.e, b.n + n.n, 0.06),
+        Vector3(centreX + a.e + n.e, a.n + n.n, 0.06),
+        const Vector3(0, 0, 1),
+        u: u,
+      );
+    }
   }
 
   void _quad(MeshBuilder m, Vector3 a, Vector3 b, Vector3 c, Vector3 d,

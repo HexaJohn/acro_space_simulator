@@ -31,6 +31,7 @@ import 'scene_textures.dart';
 import 'star_bloom_nodes.dart';
 import 'walker_nodes.dart';
 import 'city/city_nodes.dart';
+import 'city/sprawl_nodes.dart';
 import 'scatter/scatter_nodes.dart';
 import 'terrain/terrain_nodes.dart';
 import 'vessel_nodes.dart';
@@ -68,6 +69,7 @@ class SceneSync {
     _terrain = TerrainNodes(scene);
     _scatter = ScatterNodes(scene);
     _city = CityNodes(scene);
+    _sprawl = SprawlNodes(scene);
     _starBloom = StarBloomNodes(scene);
   }
 
@@ -90,9 +92,27 @@ class SceneSync {
   late final TerrainNodes _terrain;
   late final ScatterNodes _scatter;
   late final CityNodes _city;
+  late final SprawlNodes _sprawl;
   late final StarBloomNodes _starBloom;
 
   final FloatingOrigin origin = FloatingOrigin();
+
+  /// This frame's cost per [update] stage (the same boundaries `mark` below
+  /// already named for the >300ms console alert), in ms — readable by a perf
+  /// overlay so a flight-session slowdown is attributable to a subsystem the
+  /// same way the terrain studio's panel already is, without a DevTools
+  /// trace. One instance per app, so static is fine (matches
+  /// [autoExposure]/[lastExposure] and the rest of this class's read-from-
+  /// anywhere statics).
+  static final Map<String, double> stageMs = {};
+
+  /// Scene graph census — draw calls, instances, node count — refreshed
+  /// every [_censusEveryFrames] calls to [update] rather than every one:
+  /// walking the whole graph is cheap but not free, and this is a diagnostic
+  /// reading, not something anything renders against.
+  static int censusDraws = 0, censusInstances = 0, censusNodes = 0;
+  static const int _censusEveryFrames = 30;
+  int _censusCountdown = 0;
 
   /// Reconcile the scene with this frame's snapshot. [focusVesselId] /
   /// [focusBodyId]: exactly one is non-null (the camera lock target); the
@@ -110,15 +130,19 @@ class SceneSync {
     origin.focusWorld =
         focusWorldOverride ?? _focusWorld(snap, focusVesselId, focusBodyId);
 
-    // Stage timing: a stage burning >300ms of the UI thread in one frame is
+    // Stage timing: recorded into [stageMs] every frame for the perf
+    // overlay; a stage burning >300ms of the UI thread in one frame is ALSO
     // named in the console, so a load-time stall is attributable to a
-    // subsystem without a DevTools trace.
+    // subsystem without a DevTools trace even when nobody has the overlay
+    // open.
     final sw = Stopwatch()..start();
-    var last = 0;
+    var lastUs = 0;
     void mark(String stage) {
-      final now = sw.elapsedMilliseconds;
-      if (now - last > 300) debugPrint('sceneSync: $stage ${now - last}ms');
-      last = now;
+      final nowUs = sw.elapsedMicroseconds;
+      final ms = (nowUs - lastUs) / 1000.0;
+      stageMs[stage] = ms;
+      if (ms > 300) debugPrint('sceneSync: $stage ${ms.toStringAsFixed(0)}ms');
+      lastUs = nowUs;
     }
 
     // Terrain's active body is last frame's (terrain syncs below); it only
@@ -201,6 +225,10 @@ class SceneSync {
     // built, so they belong in the same group — a city placed against last
     // frame's relief would visibly float after a chunk swap.
     _city.update(snap, origin, focusWorld: origin.focusWorld);
+    // The sprawl drapes on the base terrain, brushes left out (see
+    // SprawlNodes); without a field to hand it stands flat at each section's
+    // own centre height.
+    _sprawl.update(snap, origin, focusWorld: origin.focusWorld);
     mark('city');
     _skybox.update(
         cameraRangeKm:
@@ -223,6 +251,30 @@ class SceneSync {
     }
     _applyAa();
     mark('tail');
+    _census();
+  }
+
+  void _census() {
+    if (++_censusCountdown < _censusEveryFrames) return;
+    _censusCountdown = 0;
+    censusDraws = 0;
+    censusInstances = 0;
+    censusNodes = 0;
+    _censusWalk(scene.root);
+  }
+
+  void _censusWalk(fs.Node n) {
+    censusNodes++;
+    for (final c in n.getComponents<fs.MeshComponent>()) {
+      censusDraws += c.mesh.primitives.length;
+    }
+    for (final c in n.getComponents<fs.InstancedMeshComponent>()) {
+      censusDraws += 1;
+      censusInstances += c.instancedMesh.instanceCount;
+    }
+    for (final child in n.children) {
+      _censusWalk(child);
+    }
   }
 
   /// Anti-aliasing override (null = the engine's auto: MSAA where the

@@ -89,15 +89,47 @@ class BodyEphemeris {
     final mNow = body.orbitPhase + n * epoch.seconds;
     final eNow = _solveKepler(mNow, e);
 
-    final pts = <Vector3>[];
-    for (var i = 0; i <= samples; i++) {
-      final ecc = eNow + 2 * math.pi * i / samples; // start at the body
-      final m = ecc - e * math.sin(ecc); // Kepler's equation -> mean anomaly
-      pts.add(_toParentFrame(body, parent,
-          converter.toStateVector(orbit, Epoch(m / n)).position));
+    // The ring's GEOMETRY in the parent frame is fixed by the body's orbital
+    // elements — reference data — while [epoch] only decides which point of
+    // it the body currently occupies. Uncached, every call re-solved Kepler
+    // per vertex, and WorldSnapshot.capture calls this for every body every
+    // frame on the flutter_scene backend: ~34 bodies x 257 vertices was ~20%
+    // of the whole UI thread (measured, profile mode, landed on the Moon),
+    // plus the GC bill for the churned lists. So: sample the closed ring
+    // ONCE per body at uniform eccentric anomaly, and per call pay a single
+    // Kepler solve for vertex 0 — kept EXACTLY on the body, the documented
+    // invariant above — then walk the cached grid from the nearest offset.
+    var ring = _ringCache[body];
+    if (ring == null || ring.length != samples) {
+      ring = List<Vector3>.generate(samples, (i) {
+        final ecc = 2 * math.pi * i / samples;
+        final m = ecc - e * math.sin(ecc);
+        return _toParentFrame(body, parent,
+            converter.toStateVector(orbit, Epoch(m / n)).position);
+      }, growable: false);
+      _ringCache[body] = ring;
     }
+
+    final mExact = eNow - e * math.sin(eNow);
+    final exactNow = _toParentFrame(body, parent,
+        converter.toStateVector(orbit, Epoch(mExact / n)).position);
+    final step = 2 * math.pi / samples;
+    // Positive modulo: eNow from a large epoch can be far outside 0..2pi.
+    final k = ((eNow / step).floor() % samples + samples) % samples;
+    final pts = <Vector3>[exactNow];
+    for (var i = 1; i < samples; i++) {
+      pts.add(ring[(k + i) % samples]);
+    }
+    pts.add(exactNow); // close the loop, as the uncached version did
     return pts;
   }
+
+  /// Per-body closed orbit ring at phase 0 (see [orbitPathRelativeToParent]).
+  /// An [Expando] so a body object's cache lives and dies with it — a rebuilt
+  /// system (tests, body switches) never sees another's rings, and nothing
+  /// leaks.
+  static final Expando<List<Vector3>> _ringCache =
+      Expando<List<Vector3>>('orbitRingCache');
 
   /// Solve M = E - e*sinE for the eccentric anomaly (Newton-Raphson).
   double _solveKepler(double m, double e) {

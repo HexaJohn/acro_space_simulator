@@ -34,16 +34,19 @@ import 'package:vector_math/vector_math.dart' as vm;
 import '../../../adapters/repositories/in_memory_repositories.dart';
 import '../../../adapters/repositories/in_memory_world_repositories.dart';
 import '../../../application/snapshot/world_snapshot.dart';
+import '../../../domain/colony/city/city_building_spec.dart';
 import '../../../domain/colony/city/city_generator.dart';
 import '../../../domain/colony/city/city_sim.dart';
 import '../../../domain/colony/city/city_terrain_shaper.dart';
 import '../../../domain/colony/city/parcel.dart';
+import '../../../domain/colony/city/sprawl_plan.dart';
 import '../../../domain/shared/quaternion.dart';
 import '../../../domain/shared/vector3.dart';
 import '../../../domain/universe/real_solar_system.dart';
 import '../../../domain/universe/star_system.dart';
 import '../../flutter_scene/atmosphere_nodes.dart';
 import '../../flutter_scene/city/city_nodes.dart';
+import '../../flutter_scene/city/sprawl_nodes.dart';
 import '../../flutter_scene/scatter/scatter_prop_library.dart';
 import '../../../domain/architecture/building_generator.dart';
 import '../../../domain/terrain/terrain_field.dart';
@@ -52,14 +55,59 @@ import '../../flutter_scene/city/street_furniture.dart';
 import '../../flutter_scene/city/scale_rig.dart';
 import '../../../domain/scatter/mesh_builder.dart';
 import '../../flutter_scene/coord_convert.dart';
+import '../../flutter_scene/lod_probe_camera.dart';
 import '../../flutter_scene/terrain/terrain_nodes.dart';
 import 'app_theme.dart';
+import 'city_model.dart';
+import 'city_site_actions.dart';
 
 class CityStudioScreen extends StatefulWidget {
   const CityStudioScreen({super.key});
 
   @override
   State<CityStudioScreen> createState() => _CityStudioScreenState();
+}
+
+/// Remote-control hooks for the dev harness ([SimViewControl]'s pattern,
+/// scoped to this screen): `main_city_studio_dev.dart` exposes these over the
+/// VM service so a script can GENERATE a city and read the perf panel's
+/// numbers headlessly — the same measure-first loop the flight view got.
+/// Registered by the live State, cleared on dispose; null means no studio is
+/// mounted.
+class CityStudioDevHooks {
+  CityStudioDevHooks._();
+  /// Optional [blocks] overrides the "Blocks across" slider and [voxelM] the
+  /// "City voxel floor" slider before the build, so a script can size the
+  /// colony it measures and A/B the ground resolution under it.
+  static Future<void> Function({int? blocks, double? voxelM, double? sprawlMiles})?
+      generate;
+  static Map<String, Object?> Function()? status;
+
+  /// Flip the panel's ISOLATE switches remotely — the A/B the perf panel's
+  /// own "unaccounted" annotation prescribes (shadows and atmosphere first).
+  static void Function({bool? shadows, bool? atmosphere})? setIsolate;
+
+  /// Hide or show the perf panel and the control column, so a screenshot
+  /// can show the scene they cover.
+  static void Function({bool? perf, bool? controls})? setPanels;
+
+  /// Aim the orbit camera, so a screenshot can frame the outskirts.
+  static void Function({double? distanceM, double? azimuth, double? elevation})?
+      setCamera;
+
+  /// Click at a viewport fraction (0..1 each way) and say what was hit —
+  /// the picker's ray math, checked without a mouse.
+  static String? Function(double fx, double fy)? pick;
+
+  /// Put the walker somewhere (colony-local metres), looking [yaw] radians
+  /// from north and [pitch] up, at [eyeM] above the ground — a hovering eye
+  /// for a screenshot of one thing.
+  static void Function(
+      {required double e,
+      required double n,
+      required double yaw,
+      required double pitch,
+      double? eyeM})? walkTo;
 }
 
 class _CityStudioScreenState extends State<CityStudioScreen>
@@ -78,6 +126,17 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   double _build = 0.85;
   double _installations = 4;
   double _megatowers = 1;
+
+  /// The outskirts: how far the outline departs from the grid, how far the
+  /// trunk roads and the railway run out, how many farms line them, and
+  /// whether there is a railway at all.
+  double _taper = 1.0;
+  double _outreachM = 4000;
+  double _farms = 8;
+  bool _railway = true;
+
+  /// How far across the sprawl runs, miles. Twenty is Chicago.
+  double _sprawlMiles = 20;
   String _body = 'earth';
 
   /// Worlds worth generating on: one breathable, the rest not, because the
@@ -88,6 +147,12 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   // ---- Scene ------------------------------------------------------------
   fs.Scene? _scene;
   CityNodes? _city;
+  SprawlNodes? _sprawl;
+
+  /// The body's BASE terrain, brushes and all left out: what the sprawl
+  /// drapes its houses on. A ground query through a built colony's brushes
+  /// costs milliseconds; the base field is a lookup.
+  TerrainField? _baseField;
   final List<fs.Node> _rigNodes = [];
   bool _showRig = true;
   TerrainNodes? _terrain;
@@ -153,7 +218,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
 
   /// Eye height. The same 1.7 m the scale rig stands a person at, so the two
   /// agree about what human scale is.
-  static const double _eyeHeightM = 1.7;
+  double _eyeHeightM = 1.7;
 
   /// Brisk-walk and hard-run speeds. Real ones (a stroll is 1.4 m/s), give or
   /// take a nudge for a tool — the old 6 and 22 crossed a block in four
@@ -172,6 +237,17 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   double _azimuth = 0.9;
   double _elevation = 0.55;
   double _distanceM = 1400;
+
+  /// Viewport height, recorded where the scene lays out — the LOD probe's
+  /// focal length needs it, same as the terrain studio.
+  double _viewportH = 600;
+  double _viewportW = 800;
+
+  /// The building last clicked on, with where the click landed, or null.
+  ({String site, Parcel parcel, CityBuildingSpec spec, Offset at})? _picked;
+
+  double get _focalPx =>
+      LodProbeCamera.focalPxFor(_viewportH, _firstPerson ? 0.9 : 0.8);
   (double, double) _dragBase = (0, 0);
   /// Scene clock, as a notifier rather than plain state.
   ///
@@ -191,6 +267,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   Duration _lastTick = Duration.zero;
   double _terrainMs = 0;
   double _cityMs = 0;
+  double _sprawlMs = 0;
 
   // ---- Engine pipeline timings -------------------------------------------
   //
@@ -259,6 +336,16 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   String? _lastStats;
   bool _panel = true;
 
+  /// Voxel floor (m) the colony's terrain brushes carry — see
+  /// [CityTerrainShaper.voxelM]. 0 derives it from each brush's radius (the
+  /// pre-floor behaviour: level 15-17 under every street). Applied at the
+  /// next generate, since the brushes are cut then.
+  double _cityVoxelM = 15;
+
+  /// Perf panel collapsed to its FRAME line, so the scene behind it can be
+  /// inspected. Toggled by tapping that line.
+  bool _perfCollapsed = false;
+
   /// Milliseconds per lot squared, learned from the last real build.
   ///
   /// A hard-coded formula was wrong by an order of magnitude — it was fitted
@@ -281,6 +368,11 @@ class _CityStudioScreenState extends State<CityStudioScreen>
         buildFraction: _build,
         installations: _installations.round(),
         megatowers: _megatowers.round(),
+        taper: _taper,
+        outreachM: _outreachM,
+        farms: _farms.round(),
+        railway: _railway,
+        sprawlMiles: _sprawlMiles,
       );
 
   /// Lots the current spec will cut, roughly — the input to the build-time
@@ -314,10 +406,115 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       }
     };
     SchedulerBinding.instance.addTimingsCallback(_timingsCb!);
+    CityStudioDevHooks.generate =
+        ({int? blocks, double? voxelM, double? sprawlMiles}) async {
+      if (_busy) return;
+      if (blocks != null || voxelM != null || sprawlMiles != null) {
+        setState(() {
+          if (blocks != null) _blocks = blocks.toDouble();
+          if (voxelM != null) _cityVoxelM = voxelM;
+          if (sprawlMiles != null) _sprawlMiles = sprawlMiles;
+        });
+      }
+      await _generate();
+    };
+    CityStudioDevHooks.setIsolate = ({bool? shadows, bool? atmosphere}) {
+      if (!mounted) return;
+      setState(() {
+        if (shadows != null) _shadows = shadows;
+        if (atmosphere != null) AtmosphereNodes.hidden = !atmosphere;
+      });
+    };
+    CityStudioDevHooks.setPanels = ({bool? perf, bool? controls}) {
+      if (!mounted) return;
+      setState(() {
+        if (perf != null) _perfCollapsed = !perf;
+        if (controls != null) _panel = controls;
+      });
+    };
+    CityStudioDevHooks.setCamera =
+        ({double? distanceM, double? azimuth, double? elevation}) {
+      if (!mounted) return;
+      setState(() {
+        if (distanceM != null) _distanceM = distanceM.clamp(40.0, 60000.0);
+        if (azimuth != null) _azimuth = azimuth;
+        if (elevation != null) _elevation = elevation.clamp(0.02, 1.55);
+      });
+    };
+    CityStudioDevHooks.walkTo = (
+        {required double e,
+        required double n,
+        required double yaw,
+        required double pitch,
+        double? eyeM}) {
+      final sim = _sim;
+      final snap = _snap;
+      if (!mounted || sim == null || snap == null) return;
+      final b = snap.bodies[sim.body.id.value];
+      if (b == null) return;
+      // The hook speaks the sim's colony-local frame; the walker lives in the
+      // studio's world tangent frame at the anchor, which is turned from it
+      // by the body's spin and tilt. Convert through body-fixed.
+      final bodyWorld = Vector3(b.px, b.py, b.pz);
+      final quat = Quaternion(b.qw, b.qx, b.qy, b.qz);
+      final (east, north) = _tangentFrame();
+      Vector3 worldOf(double le, double ln) =>
+          bodyWorld +
+          quat.rotate(sim.localToBodyFixed(Vec2(le, ln),
+              bodyRadiusM: sim.body.radius));
+      final at = worldOf(e, n) - _anchorWorld;
+      final ahead = worldOf(e + math.sin(yaw) * 100, n + math.cos(yaw) * 100) -
+          _anchorWorld;
+      final look = ahead - at;
+      setState(() {
+        _firstPerson = true;
+        _walkE = at.dot(east);
+        _walkN = at.dot(north);
+        _walkYaw = math.atan2(look.dot(east), look.dot(north));
+        _walkPitch = pitch.clamp(-1.45, 1.45);
+        _eyeHeightM = eyeM ?? 1.7;
+      });
+    };
+    CityStudioDevHooks.pick = (fx, fy) {
+      if (!mounted) return null;
+      _pickAt(Offset(fx * _viewportW, fy * _viewportH));
+      return _picked?.spec.label;
+    };
+    CityStudioDevHooks.status = () => {
+          'busy': _busy,
+          'installations': _installationsStatus(),
+          'interchanges': [
+            for (final SprawlInterchange x
+                in _sim?.sprawl?.interchanges ?? const <SprawlInterchange>[])
+              {'kind': x.kind.name, 'e': x.at.e, 'n': x.at.n},
+          ],
+          'sprawlSections': _sim?.sprawl?.sections.length ?? 0,
+          'sprawlDebug': SprawlNodes.debugLine,
+          'frameMs': _avgOf(_frameMs),
+          'uiMs': _avgOf(_uiMs),
+          'rasterMs': _avgOf(_rasterMs),
+          'terrainMs': _terrainMs,
+          'cityMs': _cityMs,
+          'censusDraws': _censusDraws,
+          'censusInstances': _censusInstances,
+          'censusNodes': _censusNodes,
+          'shadows': _shadows,
+          'stats': _lastStats,
+          'fault': _fault == null
+              ? null
+              : '${_fault!.phase}: ${_fault!.error}',
+        };
   }
 
   @override
   void dispose() {
+    CityStudioDevHooks.generate = null;
+    CityStudioDevHooks.setIsolate = null;
+    CityStudioDevHooks.setPanels = null;
+    CityStudioDevHooks.setCamera = null;
+    CityStudioDevHooks.pick = null;
+    CityStudioDevHooks.walkTo = null;
+    CityStudioDevHooks.status = null;
     final cb = _timingsCb;
     if (cb != null) SchedulerBinding.instance.removeTimingsCallback(cb);
     _ticker?.dispose();
@@ -448,7 +645,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     // Shape the ground under it, exactly as the tick would.
     final edits = InMemoryTerrainEditsRepository();
     final body = system.body(sim.body.id)!;
-    for (final p in const CityTerrainShaper().pending(
+    for (final p in CityTerrainShaper(voxelM: _cityVoxelM).pending(
       sim,
       bodyRadiusM: body.radius,
       groundRadiusAt: (d) {
@@ -472,6 +669,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     // graded ground — pads, road corridors, mined holes and all — rather than
     // on the datum sphere under it.
     _groundField = body.terrainFieldWith(edits.forBody(body.id));
+    _baseField = body.terrainField;
 
     final snap = WorldSnapshot.capture(
       1,
@@ -646,6 +844,10 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       events: frame.events,
       terrainEdits: frame.terrainEdits,
       megastructures: frame.megastructures,
+      sprawlSections: frame.sprawlSections,
+      sprawlRoads: frame.sprawlRoads,
+      sprawlNodes: frame.sprawlNodes,
+      sprawlClearings: frame.sprawlClearings,
     );
   }
 
@@ -701,12 +903,15 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     // for each number's story) — with one studio divergence below.
     light.castsShadow = true;
     light.shadowCasterFaces = fs.ShadowCasterFaces.back;
-    // TWO cascades, not the engine's four. Every cascade re-draws the whole
-    // scene into 2048^2 — at ~470 draws of city and terrain, four of them
-    // put more draws in the shadow pass than in the frame, and the panel's
-    // "unaccounted" time is where that shows up. The studio frames ONE
-    // colony at short range, which two cascades cover.
-    light.shadowCascadeCount = 2;
+    // ONE cascade, not the engine's four. Every cascade re-draws every
+    // caster into its 2048^2 tile, and that encode lands on the UI thread
+    // (the engine records the shadow pass inside the painter, so it shows
+    // in "ui build", not the phase timers): measured on an 8-block colony,
+    // two cascades cost 2.7-3.8 ms of a 10-13 ms UI frame. The studio
+    // frames ONE colony at short range, which a single cascade covers —
+    // softer at the far edge of the range than two would be, and that is
+    // the trade.
+    light.shadowCascadeCount = 1;
     final rangeM = (altM * 3.0 + 300.0).clamp(300.0, 6000.0);
     light.shadowMaxDistance = lengthToScene(rangeM);
     light.shadowFadeRange = lengthToScene(rangeM * 0.12);
@@ -959,6 +1164,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
         // a lit side — the same lesson SceneSync already carries.
         final scene = _scene ??= (fs.Scene()..environmentIntensity = 0.05);
         _city ??= CityNodes(scene);
+        _sprawl ??= SprawlNodes(scene);
         _terrain ??= TerrainNodes(scene);
         _atmo ??= AtmosphereNodes(scene);
 
@@ -984,13 +1190,23 @@ class _CityStudioScreenState extends State<CityStudioScreen>
           // Ground FIRST: the colony is cut into it, and without it the city
           // hangs in space with its levelled pads describing nothing.
           final sw = Stopwatch()..start();
+          // The real LOD lens (shared with the terrain studio). With
+          // `camera: null` the screen-space budget was zero pixels for
+          // everything: nothing split except the city's forced-refinement
+          // island, so the colony sat on a cliff of detail with root-coarse
+          // ground beyond it, and the streamer's zoom probe never saw the
+          // camera move.
+          final eyeM = _cameraEyeM();
+          final viewFwd = _firstPerson
+              ? _walkerLook()
+              : (eyeM.length > 1 ? eyeM.normalized * -1 : Vector3.unitZ);
           _phase(
               'terrain',
               () => _terrain!.update(
                     frame,
                     _origin,
-                    cameraEye: _cameraEyeM(),
-                    camera: null,
+                    cameraEye: eyeM,
+                    camera: LodProbeCamera(eyeM, _focalPx, viewFwd),
                     focusBodyId: _bodyIdOfFrame(frame),
                     starWorld: starWorld,
                   ));
@@ -1006,6 +1222,16 @@ class _CityStudioScreenState extends State<CityStudioScreen>
               () => _city!.update(frame, _origin,
                   focusWorld: _anchorWorld + _cameraEyeM()));
           _cityMs = sw.elapsedMicroseconds / 1000;
+          sw.reset();
+          final base = _baseField;
+          _phase(
+              'sprawl',
+              () => _sprawl!.update(frame, _origin,
+                  focusWorld: _anchorWorld + _cameraEyeM(),
+                  groundRadiusAt: base == null
+                      ? null
+                      : (d) => base.groundRadiusAt(d.x, d.y, d.z)));
+          _sprawlMs = sw.elapsedMicroseconds / 1000;
           _phase('sun', () => _syncSun(scene, frame, starWorld));
           _phase(
               'atmosphere',
@@ -1020,6 +1246,9 @@ class _CityStudioScreenState extends State<CityStudioScreen>
               autofocus: true,
               onKeyEvent: _onKey,
               child: GestureDetector(
+              // A tap and a drag live on ONE detector: a sibling would take
+              // the pan away from the orbit camera.
+              onTapUp: (d) => _pickAt(d.localPosition),
               onScaleStart: (_) => _dragBase = (_azimuth, _elevation),
               onScaleUpdate: (d) => setState(() {
                 if (_firstPerson) {
@@ -1054,10 +1283,14 @@ class _CityStudioScreenState extends State<CityStudioScreen>
                 // CHIRALITY: the app's world-to-scene mapping is a mirror the
                 // renderer corrects by flipping the finished image. The studio
                 // flips too, so what is tuned here is what the sim shows.
-                child: Transform.flip(
-                  flipX: true,
-                  child: fs.SceneView(scene, camera: _camera()),
-                ),
+                child: LayoutBuilder(builder: (context, constraints) {
+                  _viewportH = math.max(1, constraints.maxHeight);
+                  _viewportW = math.max(1, constraints.maxWidth);
+                  return Transform.flip(
+                    flipX: true,
+                    child: fs.SceneView(scene, camera: _camera()),
+                  );
+                }),
               ),
             ),
             ),
@@ -1085,8 +1318,222 @@ class _CityStudioScreenState extends State<CityStudioScreen>
               ),
             ),
           Positioned(left: 12, top: 12, child: _perfPanel()),
+          if (_picked != null)
+            Positioned(right: 12, top: 12, width: 300, child: _pickCard()),
         ]);
     }
+  }
+
+  // ---- Identify: click a building, read what it is ----------------------
+
+  /// Every installation's type, label, colony-local centre and site size,
+  /// for the harness to aim a camera at.
+  List<Map<String, Object?>> _installationsStatus() {
+    final sim = _sim;
+    if (sim == null) return const [];
+    return [
+      for (final e in sim.parcelBuildings.entries)
+        if (e.value.claimsOwnSite)
+          {
+            'type': e.value.type,
+            'label': e.value.label,
+            'e': sim.parcelById(e.key)?.centroid.e ?? 0,
+            'n': sim.parcelById(e.key)?.centroid.n ?? 0,
+            'w': e.value.siteMetres().width,
+            'd': e.value.siteMetres().depth,
+          },
+    ];
+  }
+
+  /// What stands under a click, as a card — the installations especially:
+  /// from the studio's framing distance a refinery and a data centre are
+  /// both a flat grey slab, and the only way to tell which is to ask.
+  void _pickAt(Offset local) {
+    final sim = _sim;
+    if (sim == null) return;
+    final bf = _pickGroundBF(local);
+    if (bf == null) {
+      setState(_clearPick);
+      return;
+    }
+    final hit = sim.siteAt(_bfToLocal(bf));
+    setState(() {
+      if (hit == null) {
+        _clearPick();
+        return;
+      }
+      final (site, parcel, spec) = hit;
+      _picked = (site: site, parcel: parcel, spec: spec, at: local);
+      // Outline the plot on the ground, through the cursor the placement
+      // editor already draws.
+      final extent = parcel.buildableExtent;
+      final dir = sim
+          .localToBodyFixed(parcel.centroid, bodyRadiusM: sim.body.radius)
+          .normalized;
+      final ground = _groundField?.groundRadiusAt(dir.x, dir.y, dir.z) ??
+          sim.body.radius;
+      CityNodes.cursorBF = dir * ground;
+      CityNodes.cursorBodyId = sim.body.id.value;
+      CityNodes.cursorSizeM = math.max(8.0, extent.width);
+      CityNodes.cursorDepthM = math.max(8.0, extent.depth);
+      CityNodes.cursorBad = false;
+    });
+  }
+
+  void _clearPick() {
+    _picked = null;
+    CityNodes.cursorBF = null;
+  }
+
+  /// The ground under a viewport point, body-fixed metres, or null when the
+  /// ray misses the planet.
+  ///
+  /// The same march the terrain studio uses, with ONE difference: this
+  /// studio flips the finished image (see the SceneView above), so screen
+  /// right is the domain's own right and there is no mirror term — the
+  /// terrain studio does not flip and negates its screen x instead.
+  Vector3? _pickGroundBF(Offset local) {
+    final sim = _sim;
+    final snap = _snap;
+    final field = _groundField;
+    if (sim == null || snap == null || field == null) return null;
+    final b = snap.bodies[sim.body.id.value];
+    if (b == null) return null;
+    final quat = Quaternion(b.qw, b.qx, b.qy, b.qz);
+
+    final eyeWorld = _anchorWorld + _cameraEyeM();
+    final Vector3 fwd;
+    final Vector3 upCam;
+    if (_firstPerson) {
+      fwd = _walkerLook();
+      final radial = eyeWorld - _bodyCentreWorld;
+      upCam = radial.length > 1 ? radial.normalized : _upWorld;
+    } else {
+      fwd = (_anchorWorld - eyeWorld).normalized;
+      upCam = _upWorld;
+    }
+    final right = fwd.cross(upCam).normalized;
+    final upv = right.cross(fwd);
+    // One focal length for both axes: the projection has square pixels, and
+    // deriving a second horizontal focal from the aspect is the classic bug
+    // that leaves picking exact on a square viewport and drifting on a wide
+    // one.
+    final sx = local.dx - _viewportW / 2;
+    final sy = _viewportH / 2 - local.dy;
+    final dir = (fwd * _focalPx + right * sx + upv * sy).normalized;
+
+    double altAt(double t) {
+      final rel = eyeWorld + dir * t - _bodyCentreWorld;
+      final bf = quat.conjugate.rotate(rel);
+      final u = bf.normalized;
+      return bf.length - field.groundRadiusAt(u.x, u.y, u.z);
+    }
+
+    var t = 0.0;
+    var prevT = 0.0;
+    var prevAlt = altAt(0);
+    if (prevAlt <= 0) return null;
+    for (var i = 0; i < 400 && t < 60000; i++) {
+      t += math.max(prevAlt * 0.5, 1.5);
+      final alt = altAt(t);
+      if (alt <= 0) {
+        var lo = prevT, hi = t;
+        for (var k = 0; k < 24; k++) {
+          final mid = (lo + hi) / 2;
+          if (altAt(mid) > 0) {
+            lo = mid;
+          } else {
+            hi = mid;
+          }
+        }
+        return quat.conjugate.rotate(eyeWorld + dir * hi - _bodyCentreWorld);
+      }
+      prevT = t;
+      prevAlt = alt;
+    }
+    return null;
+  }
+
+  /// Body-fixed point -> the colony's local east/north metres: a tangent-
+  /// plane projection, exact enough at studio scale.
+  Vec2 _bfToLocal(Vector3 bf) {
+    final sim = _sim!;
+    final lat = sim.cityLat * math.pi / 180.0;
+    final lon = sim.cityLon * math.pi / 180.0;
+    final up = Vector3(math.cos(lat) * math.cos(lon),
+        math.cos(lat) * math.sin(lon), math.sin(lat));
+    final east = Vector3(-math.sin(lon), math.cos(lon), 0);
+    final north = up.cross(east);
+    final rel = bf - up * sim.body.radius;
+    return Vec2(rel.dot(east), rel.dot(north));
+  }
+
+  Widget _pickCard() {
+    final p = _picked!;
+    final sim = _sim!;
+    final spec = p.spec;
+    final status = citySiteStatus(sim, p.site, spec);
+    final site = spec.claimsOwnSite
+        ? spec.siteMetres()
+        : (width: p.parcel.buildableExtent.width,
+            depth: p.parcel.buildableExtent.depth);
+    final kind = switch (spec.siteKind) {
+      SiteKind.building => 'Enclosed building',
+      SiteKind.field => 'Open installation, covering its site',
+      SiteKind.pit => 'Excavation: the site is the hole',
+      SiteKind.pad => 'Paved apron',
+    };
+    final io = <String>[];
+    spec.inputs.forEach(
+        (k, v) => io.add('−${v.toStringAsFixed(1)} ${Commodity.name(k)}/s'));
+    spec.outputs.forEach(
+        (k, v) => io.add('+${v.toStringAsFixed(1)} ${Commodity.name(k)}/s'));
+    if (spec.powerOutput > 0) {
+      io.add('+${spec.powerOutput.toStringAsFixed(0)} power');
+    }
+    if (spec.powerDraw > 0) io.add('−${spec.powerDraw.toStringAsFixed(0)} power');
+    if (spec.jobs > 0) io.add('${spec.jobs} jobs');
+    if (spec.housing > 0) io.add('${spec.housing} housing');
+    if (spec.storageBonus > 0) {
+      io.add('+${spec.storageBonus.toStringAsFixed(0)} storage');
+    }
+    Widget line(String text, {Color? colour}) => Padding(
+          padding: const EdgeInsets.only(top: 3),
+          child: Text(text,
+              style: AppTheme.mono
+                  .copyWith(fontSize: 11, color: colour ?? AppTheme.textDim)),
+        );
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: AppTheme.panelBox(border: AppTheme.accent2),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(spec.icon, size: 18, color: spec.color),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(spec.label,
+                style: AppTheme.body.copyWith(fontWeight: FontWeight.w600)),
+          ),
+          InkWell(
+            onTap: () => setState(_clearPick),
+            child: const Padding(
+              padding: EdgeInsets.all(2),
+              child: Icon(Icons.close, size: 16, color: AppTheme.textDim),
+            ),
+          ),
+        ]),
+        line(kGroupLabels[spec.group] ?? spec.group.toUpperCase(),
+            colour: AppTheme.accent2),
+        line(kind),
+        line('${site.width.round()} × ${site.depth.round()} m'
+            '${p.parcel.manual ? ', its own plot' : ', a street lot'}'),
+        line(status.label, colour: status.color),
+        if (io.isNotEmpty) line(io.join(' · ')),
+        const SizedBox(height: 4),
+        line('Click another building, or Esc.',
+            colour: AppTheme.textDim.withValues(alpha: 0.7)),
+      ]),
+    );
   }
 
   /// WASD while on foot. Held keys are tracked rather than acted on directly,
@@ -1095,6 +1542,12 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   KeyEventResult _onKey(FocusNode node, KeyEvent e) {
     if (e is KeyDownEvent && e.logicalKey == LogicalKeyboardKey.keyG) {
       setState(_toggleFirstPerson);
+      return KeyEventResult.handled;
+    }
+    if (e is KeyDownEvent &&
+        e.logicalKey == LogicalKeyboardKey.escape &&
+        _picked != null) {
+      setState(_clearPick);
       return KeyEventResult.handled;
     }
     if (!_firstPerson) return KeyEventResult.ignored;
@@ -1156,6 +1609,23 @@ class _CityStudioScreenState extends State<CityStudioScreen>
         style: AppTheme.mono
             .copyWith(fontSize: 11, color: colour ?? AppTheme.text));
 
+    // The FRAME row is the collapse toggle: collapsed, the panel is one
+    // line and the scene behind it is inspectable.
+    final header = GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => setState(() => _perfCollapsed = !_perfCollapsed),
+      child: row(
+          '${_perfCollapsed ? '▸' : '▾'} FRAME',
+          '${ms(avg)} ms  ${fps.toStringAsFixed(0)} fps',
+          colour: fps < 30 ? AppTheme.danger : AppTheme.accent2),
+    );
+    if (_perfCollapsed) {
+      return Container(
+        padding: const EdgeInsets.all(10),
+        decoration: AppTheme.panelBox(),
+        child: header,
+      );
+    }
     return Container(
       padding: const EdgeInsets.all(10),
       decoration: AppTheme.panelBox(),
@@ -1170,9 +1640,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
           ),
           const SizedBox(height: 6),
         ],
-        row('FRAME',
-            '${ms(avg)} ms  ${fps.toStringAsFixed(0)} fps',
-            colour: fps < 30 ? AppTheme.danger : AppTheme.accent2),
+        header,
         row('worst 90', '${ms(worst)} ms', colour: AppTheme.textDim),
         // The engine's own pipeline report. `raster` is the thread that
         // encodes and submits the GPU work — when it dwarfs the CPU phase
@@ -1220,6 +1688,18 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             colour: (_terrain?.retiredClipped ?? 0) > 0
                 ? AppTheme.danger
                 : AppTheme.textDim),
+        row('sprawl', '${ms(_sprawlMs)} ms',
+            colour: _sprawlMs > 4 ? AppTheme.warn : AppTheme.text),
+        row(
+            '  groups',
+            'close ${SprawlNodes.counts['close'] ?? 0}  '
+            'near ${SprawlNodes.counts['near'] ?? 0}  '
+            'mid ${SprawlNodes.counts['mid'] ?? 0}  '
+            'far ${SprawlNodes.counts['far'] ?? 0}  '
+            'queued ${SprawlNodes.counts['queued'] ?? 0}',
+            colour: AppTheme.textDim),
+        row('  draws', '${SprawlNodes.counts['draws'] ?? 0}',
+            colour: AppTheme.textDim),
         row('city', '${ms(_cityMs)} ms'),
         row(
             '  lod mix',
@@ -1337,6 +1817,43 @@ class _CityStudioScreenState extends State<CityStudioScreen>
                   'allowed past the ordinary height ceiling.',
               (v) => setState(() => _megatowers = v), divisions: 4),
           const SizedBox(height: 8),
+          const Text('OUTSKIRTS', style: AppTheme.heading),
+          Text('Where the town stops, and what lies past it.',
+              style: AppTheme.dim.copyWith(fontSize: 11)),
+          _slider('Taper', _taper, 0, 1,
+              'How far the edge of town departs from the block grid. 0 is '
+                  'the old square, built to every corner; 1 is a rounded, '
+                  'ragged edge that frays into suburbs.',
+              (v) => setState(() => _taper = v), divisions: 10),
+          _slider('Outreach', _outreachM / 1000, 0, 10,
+              'How far the trunk roads and the railway run on past the last '
+                  'street. Farms line the roads out there.',
+              (v) => setState(() => _outreachM = v * 1000),
+              unit: 'km', divisions: 20),
+          _slider('Farms', _farms, 0, 24,
+              'Farmsteads scattered along the trunk roads: a field, a house '
+                  'and a barn each, or now and then a wind farm.',
+              (v) => setState(() => _farms = v), divisions: 24),
+          _slider('Sprawl', _sprawlMiles, 0, 30,
+              'How far across the SPRAWL runs: mile-square sections of '
+                  'subdivisions, strips, industrial parks and farms past the '
+                  'core, with county highways and interstates. Twenty is '
+                  'Chicago. Zero lays none.',
+              (v) => setState(() => _sprawlMiles = v),
+              unit: 'mi', divisions: 30),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            value: _railway,
+            activeThumbColor: AppTheme.accent2,
+            title: const Text('Railway', style: AppTheme.body),
+            subtitle: Text(
+                'A mainline past one side of town: a station at the edge, a '
+                'freight yard by the works, passenger and freight trains.',
+                style: AppTheme.dim.copyWith(fontSize: 11)),
+            onChanged: (v) => setState(() => _railway = v),
+          ),
+          const SizedBox(height: 8),
           const Text('NETWORK', style: AppTheme.heading),
           Text('The tiers that are not just a wider street.',
               style: AppTheme.dim.copyWith(fontSize: 11)),
@@ -1417,6 +1934,12 @@ class _CityStudioScreenState extends State<CityStudioScreen>
                   'refinement, and far fewer chunks.',
               (v) => setState(() => TerrainNodes.editVoxelsAcross = v),
               divisions: 10),
+          _slider('City voxel floor', _cityVoxelM, 0, 30,
+              'Coarsest voxel the colony\'s pads and road cuts are meshed at. '
+                  '0 derives it from each brush (1 m under a street: level '
+                  '17). Takes effect at the next GENERATE.',
+              (v) => setState(() => _cityVoxelM = v),
+              unit: 'm', divisions: 30),
           const SizedBox(height: 8),
           _slider('Lot bucket', CityNodes.archetypeBucketM, 4, 40,
               'Lot-size quantisation. Coarser buckets reuse more meshes.',

@@ -23,12 +23,13 @@ class CityTextures {
   /// band, which is about 50 px per metre of wall at the scale a segment maps.
   static const int facadeSize = 1024;
   static const int glassSize = 256;
+  static const int roadAtlasSize = 1024;
 
   static Object? facade;
   static Object? glazing;
   static Object? windowEmissive;
   static Object? groundPalette;
-  static Object? roadStrip;
+  static Object? roadAtlas;
   static Object? alleyStrip;
   static Object? dirtStrip;
   static Object? sidewalkStrip;
@@ -40,7 +41,7 @@ class CityTextures {
       glazing != null &&
       windowEmissive != null &&
       groundPalette != null &&
-      roadStrip != null &&
+      roadAtlas != null &&
       alleyStrip != null &&
       dirtStrip != null &&
       sidewalkStrip != null;
@@ -57,7 +58,10 @@ class CityTextures {
             _upload(CityTextureBakes.windowEmissive(glassSize), glassSize);
         groundPalette =
             _upload(CityTextureBakes.groundPalette(glassSize), glassSize);
-        roadStrip = _upload(CityTextureBakes.roadStrip(glassSize), glassSize);
+        // The road atlas at facade resolution: eight bands of 128 px, and
+        // a strip of paint 15 cm wide maps a whole band across itself.
+        roadAtlas =
+            _upload(CityTextureBakes.roadAtlas(roadAtlasSize), roadAtlasSize);
         alleyStrip =
             _upload(CityTextureBakes.alleyStrip(glassSize), glassSize);
         dirtStrip = _upload(CityTextureBakes.dirtStrip(glassSize), glassSize);

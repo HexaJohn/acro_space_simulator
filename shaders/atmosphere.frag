@@ -35,6 +35,13 @@ uniform AtmosphereInfo {
   // the scale height, so a taller glow doesn't thicken the disc haze.
   // w: unused padding.
   vec4 params2;
+  // SCALABILITY (the options-screen quality slider). x: view-march steps.
+  // y: light-march steps per view sample. zw: unused.
+  //
+  // Zero means "use the built-in maxima", so a caller that has not been
+  // taught to pack this block still draws at full quality rather than
+  // marching zero samples and rendering nothing.
+  vec4 quality;
 }
 atmosphere_info;
 
@@ -46,8 +53,12 @@ in vec4 v_color;
 
 out vec4 frag_color;
 
-const int VIEW_SAMPLES = 12;
-const int LIGHT_SAMPLES = 6;
+// The ULTRA preset's numbers, not the default's. GLSL needs a compile-time
+// loop bound, so these are the ceiling the runtime `quality` uniform clamps
+// under; the shipped default (high) asks for 12 and 6, the figures this
+// shader's look was tuned against.
+const int VIEW_SAMPLES = 16;
+const int LIGHT_SAMPLES = 8;
 
 // Ray/sphere: returns (tNear, tFar), tFar < tNear when missed.
 vec2 raySphere(vec3 ro, vec3 rd, vec3 c, float r) {
@@ -110,12 +121,20 @@ void main() {
     return;
   }
 
-  float stepLen = (t1 - t0) / float(VIEW_SAMPLES);
+  // Preset, or the built-in ceiling when the block was never packed.
+  int vSamples = atmosphere_info.quality.x > 0.5
+      ? int(min(atmosphere_info.quality.x, float(VIEW_SAMPLES)))
+      : VIEW_SAMPLES;
+  int lSamples = atmosphere_info.quality.y > 0.5
+      ? int(min(atmosphere_info.quality.y, float(LIGHT_SAMPLES)))
+      : LIGHT_SAMPLES;
+  float stepLen = (t1 - t0) / float(vSamples);
   float densNorm = atmosphere_info.params2.z;
   vec3 inscatter = vec3(0.0);
   float viewDepth = 0.0; // optical depth along the view ray so far
 
   for (int i = 0; i < VIEW_SAMPLES; i++) {
+    if (i >= vSamples) break;
     vec3 p = ro + rd * (t0 + (float(i) + 0.5) * stepLen);
     float h = max(length(p - centre) - planetR, 0.0);
     float density = exp(-h / scaleH) * densNorm * stepLen;
@@ -128,9 +147,10 @@ void main() {
     if (vis <= 0.0) continue;
     vec2 sunShell = raySphere(p, sunDir, centre, atmoR);
     float sunPath = max(sunShell.y, 0.0);
-    float sunStep = sunPath / float(LIGHT_SAMPLES);
+    float sunStep = sunPath / float(lSamples);
     float sunDepth = 0.0;
     for (int j = 0; j < LIGHT_SAMPLES; j++) {
+      if (j >= lSamples) break;
       vec3 q = p + sunDir * ((float(j) + 0.5) * sunStep);
       float hq = max(length(q - centre) - planetR, 0.0);
       sunDepth += exp(-hq / scaleH) * densNorm * sunStep;

@@ -111,7 +111,9 @@ class TerrainBrush {
     this.benches = 1,
     this.endBF,
     this.polygonBF = const [],
+    this.minVoxelM = 0,
   })  : assert(radiusM > 0, 'a zero-radius brush cuts nothing'),
+        assert(minVoxelM >= 0, 'a voxel floor cannot be negative'),
         _axis = axisBF.normalized {
     // Bowl geometry, solved from the cavity mouth radius and the depth. A
     // sphere of radius `rs` whose centre sits `h0` ABOVE the contact plane
@@ -198,6 +200,7 @@ class TerrainBrush {
     required Vector3 centreBF,
     required double radiusM,
     int tick = 0,
+    double minVoxelM = 0,
   }) =>
       TerrainBrush(
         kind: TerrainBrushKind.sphere,
@@ -206,6 +209,7 @@ class TerrainBrush {
         axisBF: centreBF.lengthSquared > 0 ? centreBF : Vector3.unitZ,
         radiusM: radiusM,
         tick: tick,
+        minVoxelM: minVoxelM,
       );
 
   /// An impact crater seated on the surface at [contactBF], opening along
@@ -222,6 +226,7 @@ class TerrainBrush {
     required double depthM,
     double rimHeightM = 0,
     int tick = 0,
+    double minVoxelM = 0,
   }) =>
       TerrainBrush(
         kind: TerrainBrushKind.crater,
@@ -231,6 +236,7 @@ class TerrainBrush {
         depthM: depthM,
         rimHeightM: rimHeightM,
         tick: tick,
+        minVoxelM: minVoxelM,
       );
 
   /// A levelled building pad centred on [centreBF] (a point ON the surface).
@@ -246,6 +252,7 @@ class TerrainBrush {
     double falloffM = 12,
     double maxCutM = 60,
     int tick = 0,
+    double minVoxelM = 0,
   }) =>
       TerrainBrush(
         kind: TerrainBrushKind.pad,
@@ -256,6 +263,7 @@ class TerrainBrush {
         datumRadiusM: datumRadiusM,
         falloffM: falloffM,
         tick: tick,
+        minVoxelM: minVoxelM,
       );
 
   /// A levelled building pad shaped like the LOT it serves.
@@ -273,6 +281,7 @@ class TerrainBrush {
     double falloffM = 12,
     double maxCutM = 60,
     int tick = 0,
+    double minVoxelM = 0,
   }) =>
       TerrainBrush(
         kind: TerrainBrushKind.padBox,
@@ -284,6 +293,7 @@ class TerrainBrush {
         falloffM: falloffM,
         endBF: centreBF + forwardBF.normalized * math.max(halfDepthM, 0.01),
         tick: tick,
+        minVoxelM: minVoxelM,
       );
 
   /// A levelled pad cut to [polygonBF] — the lot's own outline, body-fixed and
@@ -295,6 +305,7 @@ class TerrainBrush {
     double falloffM = 12,
     double maxCutM = 60,
     int tick = 0,
+    double minVoxelM = 0,
   }) =>
       TerrainBrush(
         kind: TerrainBrushKind.padPoly,
@@ -308,6 +319,7 @@ class TerrainBrush {
         falloffM: falloffM,
         polygonBF: polygonBF,
         tick: tick,
+        minVoxelM: minVoxelM,
       );
 
   static double _polyRadiusOf(Vector3 centre, List<Vector3> poly) {
@@ -329,6 +341,7 @@ class TerrainBrush {
     int benches = 6,
     double falloffM = 30,
     int tick = 0,
+    double minVoxelM = 0,
   }) =>
       TerrainBrush(
         kind: TerrainBrushKind.steppedPit,
@@ -340,6 +353,7 @@ class TerrainBrush {
         benches: math.max(1, benches),
         falloffM: falloffM,
         tick: tick,
+        minVoxelM: minVoxelM,
       );
 
   /// A levelled road corridor from [startBF] to [endBF], [radiusM] to either
@@ -353,6 +367,7 @@ class TerrainBrush {
     double falloffM = 8,
     double maxCutM = 40,
     int tick = 0,
+    double minVoxelM = 0,
   }) {
     // Stored centre is the MIDPOINT so the spherical influence bound (and the
     // spatial index built on it) actually encloses the whole corridor.
@@ -368,6 +383,7 @@ class TerrainBrush {
       falloffM: falloffM,
       endBF: endBF,
       tick: tick,
+      minVoxelM: minVoxelM,
     );
   }
 
@@ -417,6 +433,19 @@ class TerrainBrush {
   /// Footprint of a [TerrainBrushKind.padPoly], body-fixed and on the ground.
   /// Empty for every other kind.
   final List<Vector3> polygonBF;
+
+  /// Coarsest voxel (m) this brush is content to be MESHED at, or 0 to derive
+  /// it from [radiusM] the usual way (`radiusM * 2 / editVoxelsAcross`).
+  ///
+  /// Resolution is edge sharpness, and a brush's radius is a poor proxy for
+  /// how sharp its edge needs to be: a 4 m road corridor derives a 1 m voxel
+  /// and drags the quadtree to level 17 for ground that a road ribbon covers
+  /// anyway, while a player's crater genuinely wants its bowl resolved. A
+  /// floor lets the generated, city-scale edits stay coarse without touching
+  /// the deformation the player forces by hand. Render-side only: the
+  /// analytic field (and so the collision surface) is the same at any
+  /// resolution, which is why this stays out of the snapshot fingerprint.
+  final double minVoxelM;
 
   /// Farthest polygon vertex from the centre, for the bounds.
   double get _polyReachM {

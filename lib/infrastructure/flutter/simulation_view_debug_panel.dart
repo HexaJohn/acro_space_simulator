@@ -13,6 +13,9 @@
 // coverage first.
 part of 'simulation_view.dart';
 
+double _avgOfList(List<double> xs) =>
+    xs.isEmpty ? 0 : xs.reduce((a, b) => a + b) / xs.length;
+
 extension SimulationViewDebugPanel on _SimulationViewState {
   /// Modal "vessel lost" menu shown when a craft is destroyed. Fills the screen
   /// with a scrim so the sim is clearly interrupted; a single button dismisses.
@@ -139,6 +142,97 @@ extension SimulationViewDebugPanel on _SimulationViewState {
     );
   }
 
+  /// Real-flight counterpart of the terrain studio's `_perfPanel` — the
+  /// studio's own instrumentation (frame/ui/raster ms, scene census,
+  /// [TerrainNodes]'s section timings and level histogram) ported here
+  /// because a studio-only panel cannot diagnose a slowdown that only shows
+  /// up in an actual flight session (a real body's full LOD demand, real
+  /// vessel/atmo/city load, real camera paths) — see [SceneSync.stageMs]
+  /// and [SceneSync.censusDraws] for where the flight-specific numbers come
+  /// from.
+  Widget _perfPanel() {
+    final n = _frameMs.length;
+    var avg = 0.0, worst = 0.0;
+    for (final f in _frameMs) {
+      avg += f;
+      if (f > worst) worst = f;
+    }
+    if (n > 0) avg /= n;
+    final fps = avg > 0 ? 1000 / avg : 0;
+    String ms(double v) => v.toStringAsFixed(2).padLeft(6);
+    const dim = Color(0xFF7E93A8);
+    const text = Color(0xFFB9C9DC);
+    const accent = Color(0xFF7FE0A0);
+    const accent2 = Color(0xFF7FB0E0);
+    const warn = Color(0xFFE0C060);
+    const danger = Color(0xFFE07070);
+
+    Widget row(String label, String value, {Color? colour}) => Text(
+        '${label.padRight(15)}$value',
+        style: TextStyle(
+            fontFamily: 'monospace', fontSize: 11, color: colour ?? text));
+
+    // The same boundaries SceneSync.update's `mark` calls name — see
+    // scene_sync.dart. `terrain` gets its own highlighted row below since
+    // it's the subsystem with its own deeper diagnostics.
+    const stages = [
+      'bodies',
+      'vessels',
+      'lines',
+      'atmo+rings',
+      'terrain',
+      'scatter',
+      'city',
+      'tail',
+    ];
+    final stage = SceneSync.stageMs;
+    double stageOf(String k) => stage[k] ?? 0;
+    final accounted = stage.values.fold(0.0, (a, b) => a + b);
+
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: const Color(0xE6101820),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0x447FB0E0)),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+        row('FRAME', '${ms(avg)} ms  ${fps.toStringAsFixed(0)} fps',
+            colour: fps < 30 ? danger : accent2),
+        row('worst 90', '${ms(worst)} ms', colour: dim),
+        row('ui build', '${ms(_avgOfList(_uiMs))} ms', colour: dim),
+        row('raster', '${ms(_avgOfList(_rasterMs))} ms',
+            colour: _avgOfList(_rasterMs) > 16 ? warn : dim),
+        row('hud present', '${ms(_presentMs)} ms',
+            colour: _presentMs > 4 ? warn : dim),
+        row('scene draws',
+            '${SceneSync.censusDraws}  (${SceneSync.censusInstances} inst, ${SceneSync.censusNodes} nodes)',
+            colour: accent),
+        const SizedBox(height: 6),
+        for (final k in stages)
+          row(k, '${ms(stageOf(k))} ms',
+              colour: k == 'terrain'
+                  ? (stageOf(k) > 4 ? warn : text)
+                  : (stageOf(k) > 4 ? warn : dim)),
+        if (TerrainNodes.profileLine.isNotEmpty)
+          Text('  ${TerrainNodes.profileLine.replaceFirst('terrain: ', '')}',
+              style: const TextStyle(
+                  fontFamily: 'monospace', fontSize: 10, color: dim)),
+        if (TerrainNodes.debugLine.isNotEmpty)
+          Text('  ${TerrainNodes.debugLine.replaceFirst('terrain: ', '')}',
+              style: const TextStyle(
+                  fontFamily: 'monospace', fontSize: 10, color: dim)),
+        if (TerrainNodes.levelHistogramLine.isNotEmpty)
+          Text('  lvls: ${TerrainNodes.levelHistogramLine}',
+              style: const TextStyle(
+                  fontFamily: 'monospace', fontSize: 10, color: dim)),
+        const SizedBox(height: 6),
+        row('unaccounted', '${ms((avg - accounted).clamp(0, 1e9))} ms',
+            colour: warn),
+      ]),
+    );
+  }
+
   Widget _debugPanel() {
     final rows = <(String, bool, DebugLayers Function(bool))>[
       ('Skybox', _layers.skybox, (v) => _layers.copyWith(skybox: v)),
@@ -161,6 +255,14 @@ extension SimulationViewDebugPanel on _SimulationViewState {
       // and moons. Static flag, so leave _layers untouched.
       ('Gravity grid', GravityGridNodes.enabled, (v) {
         GravityGridNodes.enabled = v;
+        return _layers;
+      }),
+      // 3D backend only: the halo ring in high Earth orbit, and the voxel
+      // cells that stream in around the eye when you get close. Turning it
+      // off DISPOSES those entries rather than merely skipping the draw, so
+      // the memory comes back too. Static flag, so leave _layers untouched.
+      ('Halo ring', HaloRingNodes.enabled, (v) {
+        HaloRingNodes.enabled = v;
         return _layers;
       }),
       ('Atmo overlay', _layers.atmoOverlay, (v) => _layers.copyWith(atmoOverlay: v)),

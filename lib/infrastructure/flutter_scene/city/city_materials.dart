@@ -121,9 +121,10 @@ class CityMaterials {
         ..roughnessFactor = 1.0
         ..metallicFactor = 0.0;
 
-  /// Spline-road ribbons: curbs and a dashed centre line, V along the road.
+  /// Every carriageway, junction plate and painted line: the road atlas,
+  /// banded along U (see CityTextureBakes.roadAtlas), V along the road.
   static fs.PhysicallyBasedMaterial get road => _road ??= _CitySurfaceMaterial()
-    ..baseColorTexture = CityTextures.roadStrip
+    ..baseColorTexture = CityTextures.roadAtlas
     ..baseColorFactor = vm.Vector4(1, 1, 1, 1)
     ..roughnessFactor = 1.0
     ..metallicFactor = 0.0;

@@ -251,7 +251,11 @@ List<TerrainRefinement> refinementsFor(
       brush.kind == TerrainBrushKind.padBox ||
       brush.kind == TerrainBrushKind.padPoly ||
       brush.kind == TerrainBrushKind.cutFill;
-  final targetVoxelM = brush.radiusM * 2.0 / voxelsAcrossBrush;
+  // The brush's own voxel floor wins over the radius-derived target: a
+  // city's brushes ask to be meshed coarse on purpose (see
+  // [TerrainBrush.minVoxelM]); a floor of 0 leaves the derivation alone.
+  final targetVoxelM =
+      math.max(brush.radiusM * 2.0 / voxelsAcrossBrush, brush.minVoxelM);
 
   // A cutFill corridor is ELONGATED: its lateralReachM includes the corridor
   // HALF-LENGTH, so the generic edge ring below would trace a circle around

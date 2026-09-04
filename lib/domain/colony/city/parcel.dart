@@ -94,7 +94,44 @@ enum RoadClass {
   /// it splits at junctions, the editor draws it the same way) and nothing
   /// like one to the renderer or the traffic pass: no cars run on it, no lots
   /// front it, and what it carries is a train.
-  transit('Elevated Rail', 9.0, 1, 4);
+  transit('Elevated Rail', 9.0, 1, 4),
+
+  /// A grade-separated trunk road OUT of the colony — the highway that runs
+  /// on past the last street into the country. No frontage and no lots: a
+  /// motorway has no driveways, and a road that platted lots along its
+  /// whole length once turned a colony into 8,736 lots and a six-minute
+  /// build (see the installation placer's history). Appended, like every
+  /// tier after the first three, because saves persist this enum by index.
+  trunk('Trunk Road', 24.0, 2, 6),
+
+  /// A ground-level railway: ballast, sleepers and a twin-rail track. A road
+  /// to the network — it splits at level crossings and the editor draws it —
+  /// and a railway to everything else: no cars, no lots, no pavement, and
+  /// what runs on it is a train. Rail tolerates a fraction of a road's
+  /// grade, which is what will make it hug the valleys.
+  rail('Railway', 8.0, 1, 2.5),
+
+  /// A limited-access expressway, four lanes: two each way on divided
+  /// carriageways with full shoulders and a barrier median. Nothing fronts
+  /// it and nothing crosses it at grade — it meets the rest of the network
+  /// only through its ramps, which is what "limited access" means. The
+  /// widths are real ones: 3.6 m lanes, 3 m shoulders, a 4 m median.
+  ///
+  /// Three lane counts rather than one class with a lane number because a
+  /// road's class is what the editor picks, what a save persists by index,
+  /// and what the renderer keys its lane markings off — the way a city
+  /// builder's road menu offers a 4-, 6- and 8-lane highway as three roads.
+  expressway4('4-Lane Expressway', 24.4, 2, 5),
+  expressway6('6-Lane Expressway', 31.6, 3, 5),
+  expressway8('8-Lane Expressway', 38.8, 4, 5),
+
+  /// An interchange ramp: one lane, ONE WAY, from the point where it leaves
+  /// one road to the point where it joins the other. Direction is the
+  /// polyline's own — first point to last — which is the one convention the
+  /// traffic pass and the junction pass can both read without a flag on
+  /// every segment. Steeper than a mainline may be, because a ramp's whole
+  /// job is to climb to a bridge or drop from one.
+  ramp('Ramp', 7.5, 1, 7);
 
   final String label;
 
@@ -140,17 +177,144 @@ enum RoadClass {
   /// road or a column line, which is the surest way to break a street wall
   /// you have just finished building.
   bool get platsLots => switch (this) {
-        RoadClass.alley || RoadClass.elevated || RoadClass.transit => false,
+        RoadClass.alley ||
+        RoadClass.elevated ||
+        RoadClass.transit ||
+        RoadClass.trunk ||
+        RoadClass.rail ||
+        RoadClass.expressway4 ||
+        RoadClass.expressway6 ||
+        RoadClass.expressway8 ||
+        RoadClass.ramp =>
+          false,
         _ => true,
       };
 
-  /// Whether road vehicles run on it. False for rail.
-  bool get carriesCars => this != RoadClass.transit;
+  /// The expressway family: divided, limited-access, barrier median.
+  bool get isExpressway =>
+      this == RoadClass.expressway4 ||
+      this == RoadClass.expressway6 ||
+      this == RoadClass.expressway8;
+
+  /// Whether nothing meets this road at grade. Every connection to the rest
+  /// of the network is a ramp, and where another road crosses it there is a
+  /// bridge, not a junction. The elevated highway is limited-access by
+  /// construction — it is in the air.
+  bool get limitedAccess => isExpressway || this == RoadClass.elevated;
+
+  /// Whether traffic runs one way along it, first point to last.
+  bool get oneWay => this == RoadClass.ramp;
+
+  /// Whether an END of this road is a leg of whatever junction it lands on.
+  ///
+  /// The junction pass draws a crossing wherever three or more legs meet, and
+  /// the legs come from road ends — roads are split at their crossings, so a
+  /// junction is a place where ends coincide. An alley meeting a street gets
+  /// a curb cut rather than a stop bar, a dirt track gets nothing, nothing
+  /// in the air meets the ground, and a train is not traffic. Everything
+  /// else — a ramp terminal on an avenue, a trunk road at the mile grid, a
+  /// county highway crossing — is a junction with a control of its own.
+  bool get joinsJunctions =>
+      carriesCars &&
+      !isElevated &&
+      this != RoadClass.alley &&
+      this != RoadClass.path;
+
+  /// How the carriageway is laid out across its width, or null for a road
+  /// with no lanes to mark — a dirt track, an alley, a railway.
+  ///
+  /// This is the ONE description of a road's cross-section. The renderer
+  /// draws its lane lines, edge lines and median from it; the traffic pass
+  /// puts a stream of vehicles in every lane it lists; the width the enum
+  /// carries is [LaneLayout.widthM] of the same layout, and a test pins the
+  /// two together so neither can drift. Real dimensions throughout: 3.5 to
+  /// 3.7 m lanes on anything fast, 4 m on a street that also parks cars.
+  LaneLayout? get lanes => switch (this) {
+        RoadClass.street => const LaneLayout(
+            lanesEachWay: 1,
+            laneWidthM: 4.0,
+            centre: CentreMarking.dashedYellow,
+          ),
+        RoadClass.avenue => const LaneLayout(
+            lanesEachWay: 2,
+            laneWidthM: 4.0,
+            centre: CentreMarking.doubleYellow,
+          ),
+        RoadClass.highway => const LaneLayout(
+            lanesEachWay: 4,
+            laneWidthM: 3.5,
+            shoulderM: 1.5,
+            medianM: 1.0,
+            median: MedianStyle.painted,
+          ),
+        RoadClass.elevated => const LaneLayout(
+            lanesEachWay: 3,
+            laneWidthM: 3.5,
+            shoulderM: 1.0,
+            medianM: 1.0,
+            median: MedianStyle.barrier,
+          ),
+        RoadClass.trunk => const LaneLayout(
+            lanesEachWay: 2,
+            laneWidthM: 3.7,
+            shoulderM: 2.6,
+            medianM: 4.0,
+            median: MedianStyle.painted,
+          ),
+        RoadClass.expressway4 => const LaneLayout(
+            lanesEachWay: 2,
+            laneWidthM: 3.6,
+            shoulderM: 3.0,
+            medianM: 4.0,
+            median: MedianStyle.barrier,
+          ),
+        RoadClass.expressway6 => const LaneLayout(
+            lanesEachWay: 3,
+            laneWidthM: 3.6,
+            shoulderM: 3.0,
+            medianM: 4.0,
+            median: MedianStyle.barrier,
+          ),
+        RoadClass.expressway8 => const LaneLayout(
+            lanesEachWay: 4,
+            laneWidthM: 3.6,
+            shoulderM: 3.0,
+            medianM: 4.0,
+            median: MedianStyle.barrier,
+          ),
+        RoadClass.ramp => const LaneLayout(
+            lanesEachWay: 1,
+            laneWidthM: 4.5,
+            shoulderM: 1.5,
+            oneWay: true,
+          ),
+        RoadClass.path ||
+        RoadClass.alley ||
+        RoadClass.transit ||
+        RoadClass.rail =>
+          null,
+      };
+
+  /// Whether road vehicles run on it. False for rail, in the air or on the
+  /// ground: what runs there is a train.
+  bool get carriesCars => !isRail;
+
+  /// Whether it carries trains — the elevated line or the ground railway.
+  bool get isRail => this == RoadClass.transit || this == RoadClass.rail;
 
   /// Whether it gets a pavement, curbs and street furniture. An alley has
   /// none of it; neither does anything in the air.
   bool get hasPavement => switch (this) {
-        RoadClass.alley || RoadClass.elevated || RoadClass.transit => false,
+        RoadClass.alley ||
+        RoadClass.elevated ||
+        RoadClass.transit ||
+        RoadClass.trunk ||
+        RoadClass.rail ||
+        RoadClass.expressway4 ||
+        RoadClass.expressway6 ||
+        RoadClass.expressway8 ||
+        RoadClass.ramp =>
+          false,
         RoadClass.path => false,
         _ => true,
       };
@@ -160,7 +324,167 @@ enum RoadClass {
         RoadClass.street || RoadClass.avenue || RoadClass.highway => true,
         _ => false,
       };
+
+  /// Whether this is an arterial in the junction-control sense: a road
+  /// whose crossings warrant signals rather than a stop sign. Everything
+  /// with two or more lanes each way that meets other roads at grade.
+  bool get arterial => switch (this) {
+        RoadClass.avenue || RoadClass.highway || RoadClass.trunk => true,
+        _ => false,
+      };
+
+  /// Whether the road can be built with sound barriers: the walled variant
+  /// of a ground-level highway. Expressways and the urban surface highway;
+  /// a viaduct has its parapets and nothing slower needs walling.
+  bool get canHaveSoundWalls => isExpressway || this == RoadClass.highway;
 }
+
+/// What separates the two directions of a road.
+enum CentreMarking {
+  /// Nothing painted down the middle — a one-way road, or a road whose
+  /// directions are separated by a median instead.
+  none,
+
+  /// A single dashed yellow line: a two-lane road you may pass on.
+  dashedYellow,
+
+  /// A double yellow line: no passing, the mark of a multi-lane undivided
+  /// arterial.
+  doubleYellow,
+}
+
+/// What a divided road's median is made of.
+enum MedianStyle {
+  /// No median: the two directions share a centre marking.
+  none,
+
+  /// A painted band — yellow chevron hatching — between the carriageways.
+  painted,
+
+  /// A concrete Jersey barrier down the middle.
+  barrier,
+}
+
+/// A road's cross-section: how many lanes, how wide, and what lies between
+/// and beside them. Lateral positions are measured from the centreline;
+/// the renderer and the traffic pass both take them from [laneOffsets] and
+/// [lineOffsets] so a car sits in the lane the paint says it does.
+class LaneLayout {
+  const LaneLayout({
+    required this.lanesEachWay,
+    required this.laneWidthM,
+    this.shoulderM = 0,
+    this.medianM = 0,
+    this.median = MedianStyle.none,
+    this.centre = CentreMarking.none,
+    this.oneWay = false,
+  });
+
+  /// Lanes in each direction — or, on a one-way road, lanes altogether.
+  final int lanesEachWay;
+  final double laneWidthM;
+
+  /// Paved shoulder outside the outermost lane, each side. Zero on an urban
+  /// street, whose edge is a curb; the edge line is drawn only when there
+  /// is a shoulder for it to separate.
+  final double shoulderM;
+
+  /// Width of the median between the carriageways, zero when undivided.
+  final double medianM;
+  final MedianStyle median;
+  final CentreMarking centre;
+  final bool oneWay;
+
+  /// Width of the running lanes of one direction.
+  double get carriagewayM => lanesEachWay * laneWidthM;
+
+  /// Curb to curb (or shoulder edge to shoulder edge).
+  double get widthM => oneWay
+      ? carriagewayM + 2 * shoulderM
+      : 2 * (carriagewayM + shoulderM) + medianM;
+
+  double get halfWidthM => widthM / 2;
+
+  /// Lanes in total, both directions.
+  int get laneCount => oneWay ? lanesEachWay : 2 * lanesEachWay;
+
+  bool get divided => medianM > 0;
+
+  /// Whether a white edge line separates the lanes from a shoulder.
+  bool get edgeLines => shoulderM > 0;
+
+  /// Lane CENTRES for traffic in the +along direction, as lateral offsets
+  /// from the centreline; positive is the right-hand side of travel. The
+  /// other direction is the mirror. A one-way road's lanes straddle the
+  /// centreline.
+  List<double> get laneOffsets {
+    if (oneWay) {
+      return [
+        for (var k = 0; k < lanesEachWay; k++)
+          (k + 0.5) * laneWidthM - carriagewayM / 2,
+      ];
+    }
+    return [
+      for (var k = 0; k < lanesEachWay; k++)
+        medianM / 2 + (k + 0.5) * laneWidthM,
+    ];
+  }
+
+  /// Every painted line across the road: lateral offset from the centreline
+  /// (positive to the right of +along) and what it is. Symmetric for a
+  /// two-way road, so the caller draws both signs of every offset.
+  List<({double offset, LaneLine line})> get lineOffsets {
+    final out = <({double offset, LaneLine line})>[];
+    if (oneWay) {
+      for (var k = 1; k < lanesEachWay; k++) {
+        out.add((
+          offset: k * laneWidthM - carriagewayM / 2,
+          line: LaneLine.dashedWhite
+        ));
+      }
+      if (edgeLines) {
+        out.add((offset: carriagewayM / 2, line: LaneLine.solidWhite));
+        out.add((offset: -carriagewayM / 2, line: LaneLine.solidWhite));
+      }
+      return out;
+    }
+    final inner = medianM / 2;
+    for (final sign in const [1.0, -1.0]) {
+      // The inner edge: a yellow line against the median, or the centre
+      // marking shared by both directions.
+      if (divided) {
+        out.add((offset: sign * (inner + 0.12), line: LaneLine.solidYellow));
+      }
+      for (var k = 1; k < lanesEachWay; k++) {
+        out.add((
+          offset: sign * (inner + k * laneWidthM),
+          line: LaneLine.dashedWhite
+        ));
+      }
+      if (edgeLines) {
+        out.add((
+          offset: sign * (inner + carriagewayM),
+          line: LaneLine.solidWhite
+        ));
+      }
+    }
+    if (!divided) {
+      switch (centre) {
+        case CentreMarking.none:
+          break;
+        case CentreMarking.dashedYellow:
+          out.add((offset: 0, line: LaneLine.dashedYellow));
+        case CentreMarking.doubleYellow:
+          out.add((offset: 0.14, line: LaneLine.solidYellow));
+          out.add((offset: -0.14, line: LaneLine.solidYellow));
+      }
+    }
+    return out;
+  }
+}
+
+/// A painted line on a carriageway.
+enum LaneLine { dashedWhite, solidWhite, solidYellow, dashedYellow }
 
 /// A road as a SPLINE rather than a run of tiles.
 ///
@@ -185,12 +509,20 @@ class RoadSpline {
   /// later does not silently unseal everything that was built for vacuum.
   final bool sealed;
 
+  /// Built with sound barriers along both edges: the walled variant of a
+  /// highway, the one that runs past housing. Only meaningful on a class
+  /// that [RoadClass.canHaveSoundWalls]; a variant of the road rather than
+  /// a class of its own, so a highway can be walled for a stretch and open
+  /// for the next without being three roads.
+  final bool soundWalls;
+
   const RoadSpline({
     required this.id,
     required this.controls,
     this.roadClass = RoadClass.street,
     this.closed = false,
     this.sealed = false,
+    this.soundWalls = false,
   });
 
   double get width => roadClass.width;

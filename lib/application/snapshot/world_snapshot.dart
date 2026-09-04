@@ -9,6 +9,7 @@ import '../../domain/colony/building.dart';
 import '../../domain/colony/city/city_building_spec.dart';
 import '../../domain/colony/city/city_sim.dart';
 import '../../domain/colony/city/parcel.dart';
+import '../../domain/colony/city/sprawl_plan.dart';
 import '../../domain/colony/colony.dart';
 import '../../domain/colony/surface_placement.dart';
 import '../../domain/comms/comms_service.dart';
@@ -1511,6 +1512,9 @@ class RoadSnapshot {
   /// tube along the verge instead of on an open pavement.
   final bool sealed;
 
+  /// Built with sound barriers along both edges.
+  final bool soundWalls;
+
   const RoadSnapshot({
     required this.colonyId,
     required this.body,
@@ -1518,6 +1522,7 @@ class RoadSnapshot {
     required this.halfWidthM,
     required this.roadClassIndex,
     this.sealed = false,
+    this.soundWalls = false,
   });
 
   Map<String, dynamic> toJson() => {
@@ -1527,6 +1532,7 @@ class RoadSnapshot {
         'hw': halfWidthM,
         'cls': roadClassIndex,
         if (sealed) 'sealed': true,
+        if (soundWalls) 'walls': true,
       };
 
   factory RoadSnapshot.fromJson(Map<String, dynamic> j) => RoadSnapshot(
@@ -1538,6 +1544,7 @@ class RoadSnapshot {
         halfWidthM: (j['hw'] as num).toDouble(),
         roadClassIndex: (j['cls'] as num?)?.toInt() ?? 0,
         sealed: j['sealed'] == true,
+        soundWalls: j['walls'] == true,
       );
 }
 
@@ -1682,6 +1689,7 @@ class TerrainEditSnapshot {
     this.ey,
     this.ez,
     this.polygon = const [],
+    this.minVoxel = 0,
   });
 
   /// Body id — joins to [WorldSnapshot.bodies].
@@ -1732,6 +1740,12 @@ class TerrainEditSnapshot {
   /// pad that reaches the mesher without its outline levels nothing.
   final List<double> polygon;
 
+  /// Coarsest voxel (m) the brush is content to be meshed at; 0 derives it
+  /// from the radius. Render config, not surface state — the analytic field
+  /// is identical at any resolution — so it is deliberately NOT hashed into
+  /// [WorldSnapshot.fingerprint].
+  final double minVoxel;
+
   static TerrainEditSnapshot of(BodyId body, TerrainBrush b) =>
       TerrainEditSnapshot(
         body: body.value,
@@ -1750,6 +1764,7 @@ class TerrainEditSnapshot {
         datumRadiusEnd: b.datumRadiusEndM,
         falloff: b.falloffM,
         benches: b.benches,
+        minVoxel: b.minVoxelM,
         ex: b.endBF?.x,
         ey: b.endBF?.y,
         ez: b.endBF?.z,
@@ -1773,6 +1788,7 @@ class TerrainEditSnapshot {
         datumRadiusEndM: datumRadiusEnd,
         falloffM: falloff,
         benches: benches,
+        minVoxelM: minVoxel,
         endBF: ex == null || ey == null || ez == null
             ? null
             : Vector3(ex!, ey!, ez!),
@@ -1795,6 +1811,7 @@ class TerrainEditSnapshot {
         if (datumRadiusEnd != 0) 'dre': datumRadiusEnd,
         if (falloff != 0) 'f': falloff,
         if (benches != 1) 'b': benches,
+        if (minVoxel != 0) 'mv': minVoxel,
         if (ex != null) 'e': [ex, ey, ez],
         if (polygon.isNotEmpty) 'poly': polygon,
       };
@@ -1820,6 +1837,7 @@ class TerrainEditSnapshot {
       datumRadiusEnd: (j['dre'] as num?)?.toDouble() ?? 0,
       falloff: (j['f'] as num?)?.toDouble() ?? 0,
       benches: (j['b'] as num?)?.toInt() ?? 1,
+      minVoxel: (j['mv'] as num?)?.toDouble() ?? 0,
       ex: e == null ? null : (e[0] as num).toDouble(),
       ey: e == null ? null : (e[1] as num).toDouble(),
       ez: e == null ? null : (e[2] as num).toDouble(),
@@ -1828,6 +1846,439 @@ class TerrainEditSnapshot {
       ],
     );
   }
+}
+
+/// Drape [plan] onto [body]: every section centred on the ground, every road
+/// a polyline resampled to [_sprawlStepM] and lifted a little off it.
+///
+/// The BASE terrain, not the edited field: the sprawl lays no brushes (a
+/// county-highway grid alone is a thousand kilometres of corridor), and a
+/// ground query through a built colony's brushes costs milliseconds each.
+/// The base field is a lookup.
+_SprawlWire _drapeSprawl(
+    CitySim city, CelestialBody body, SprawlPlan plan, SurfacePlacement placement) {
+  final base = body.terrainField;
+  double groundAt(Vec2 local) {
+    final dir = city
+        .localToBodyFixed(local, bodyRadiusM: body.radius, placement: placement)
+        .normalized;
+    return base?.groundRadiusAt(dir.x, dir.y, dir.z) ?? body.radius;
+  }
+
+  final sections = <SprawlSectionSnapshot>[];
+  for (final s in plan.sections) {
+    final t = placement.place(
+      radius: groundAt(s.centre),
+      lat: city.cityLat * math.pi / 180.0,
+      lon: city.cityLon * math.pi / 180.0,
+      east: s.centre.e,
+      north: s.centre.n,
+      elevation: 0,
+    );
+    sections.add(SprawlSectionSnapshot(
+      colonyId: city.id,
+      body: body.id.value,
+      px: t.position.x,
+      py: t.position.y,
+      pz: t.position.z,
+      qw: t.orientation.w,
+      qx: t.orientation.x,
+      qy: t.orientation.y,
+      qz: t.orientation.z,
+      sizeM: s.sizeM,
+      use: s.use.index,
+      density: s.density,
+      seed: s.seed,
+      originE: s.centre.e,
+      originN: s.centre.n,
+      coreRadiusM: plan.spec.coreRadiusM,
+      coreRadii: plan.spec.coreRadii,
+      linesE: s.streetLinesE,
+      linesN: s.streetLinesN,
+      collectorsE: s.continuesCoreGrid ? s.collectorOffsetsE : const [],
+      collectorsN: s.continuesCoreGrid ? s.collectorOffsetsN : const [],
+    ));
+  }
+
+  final roads = <SprawlRoadSnapshot>[];
+  for (final r in plan.roads) {
+    // A ramp is a curve a few hundred metres long; sampled at the grid's
+    // stride it is a handful of chords.
+    final step = r.kind == SprawlRoadKind.ramp ? _sprawlRampStepM : _sprawlStepM;
+    final pts = _resample(r.points, step);
+    final flat = <double>[];
+    for (final p in pts) {
+      final bf = city.localToBodyFixed(p,
+          bodyRadiusM: groundAt(p) + _sprawlLiftM, placement: placement);
+      flat.addAll([bf.x, bf.y, bf.z]);
+    }
+    roads.add(SprawlRoadSnapshot(
+      colonyId: city.id,
+      body: body.id.value,
+      points: flat,
+      kind: r.kind.index,
+      halfWidthM: r.halfWidthM,
+      roadClassIndex: r.roadClass.index,
+      overpasses: [for (final (a, b) in r.overpasses) ...[a, b]],
+      startHalfWidthM: r.startHalfWidthM,
+      endHalfWidthM: r.endHalfWidthM,
+      soundWalls: r.soundWalls,
+    ));
+  }
+  final nodes = <SprawlNodeSnapshot>[];
+  for (final node in plan.nodes) {
+    final radius = groundAt(node.at) + _sprawlLiftM;
+    final at = city.localToBodyFixed(node.at,
+        bodyRadiusM: radius, placement: placement);
+    final legs = <double>[];
+    for (final leg in node.legs) {
+      // A leg's direction on the ground: the chord to a point ten metres
+      // out along it, at the same radius, normalised.
+      final out = city.localToBodyFixed(node.at + leg.dir * 10,
+          bodyRadiusM: radius, placement: placement);
+      final d = (out - at).normalized;
+      legs.addAll([d.x, d.y, d.z, leg.halfWidthM, leg.roadClass.index.toDouble()]);
+    }
+    nodes.add(SprawlNodeSnapshot(
+      colonyId: city.id,
+      body: body.id.value,
+      px: at.x,
+      py: at.y,
+      pz: at.z,
+      control: node.control.index,
+      legs: legs,
+      liftM: node.liftM,
+    ));
+  }
+  // The plat's own rights-of-way the suburbs build around: the trunk
+  // arteries out to the mile grid and the elevated expressway through the
+  // core. The plat draws them; they ride the wire only so the sections
+  // keep their houses off them.
+  for (final r in city.layout.roads) {
+    if (r.roadClass != RoadClass.trunk && r.roadClass != RoadClass.elevated) {
+      continue;
+    }
+    final flat = <double>[];
+    for (final p in r.sample(stepM: _sprawlStepM)) {
+      final bf = city.localToBodyFixed(p,
+          bodyRadiusM: groundAt(p) + _sprawlLiftM, placement: placement);
+      flat.addAll([bf.x, bf.y, bf.z]);
+    }
+    if (flat.length < 6) continue;
+    roads.add(SprawlRoadSnapshot(
+      colonyId: city.id,
+      body: body.id.value,
+      points: flat,
+      kind: SprawlRoadKind.corridor.index,
+      halfWidthM: r.roadClass.halfWidth,
+      roadClassIndex: r.roadClass.index,
+      overpasses: const [],
+    ));
+  }
+  return _SprawlWire(plan, sections, roads, nodes);
+}
+
+/// Sample spacing of a draped sprawl road, metres.
+const double _sprawlStepM = 60;
+
+/// Sample spacing of a draped ramp: a curve, and a short one.
+const double _sprawlRampStepM = 20;
+
+/// How far a sprawl road rides above the base ground: enough to clear the
+/// terrain mesh's own error against the analytic field at the voxel sizes a
+/// colony is meshed at, not so much that it floats.
+const double _sprawlLiftM = 0.8;
+
+List<Vec2> _resample(List<Vec2> pts, double stepM) {
+  if (pts.length < 2) return pts;
+  final out = <Vec2>[pts.first];
+  for (var i = 1; i < pts.length; i++) {
+    final a = pts[i - 1], b = pts[i];
+    final len = a.distanceTo(b);
+    final n = math.max(1, (len / stepM).ceil());
+    for (var k = 1; k <= n; k++) {
+      out.add(a + (b - a) * (k / n));
+    }
+  }
+  return out;
+}
+
+/// One mile-square section of a colony's sprawl, on the wire.
+///
+/// A pose on the body, a size, a use, a density and a seed: the renderer
+/// grows the houses, the local streets and the fields from the seed where the
+/// camera can see them, so a twenty-mile city costs the wire a few hundred
+/// of these rather than two hundred thousand buildings.
+class SprawlSectionSnapshot {
+  const SprawlSectionSnapshot({
+    required this.colonyId,
+    required this.body,
+    required this.px,
+    required this.py,
+    required this.pz,
+    required this.qw,
+    required this.qx,
+    required this.qy,
+    required this.qz,
+    required this.sizeM,
+    required this.use,
+    required this.density,
+    required this.seed,
+    this.originE = 0,
+    this.originN = 0,
+    this.coreRadiusM = 0,
+    this.coreRadii = const [],
+    this.linesE = const [],
+    this.linesN = const [],
+    this.collectorsE = const [],
+    this.collectorsN = const [],
+  });
+
+  /// The core's outline as radii on evenly spaced bearings (see
+  /// SprawlSpec.coreRadii); empty means the circle of [coreRadiusM].
+  final List<double> coreRadii;
+
+  /// Where the section's streets run, as offsets from its centre: the
+  /// north-south streets by easting, the east-west by northing. Empty means
+  /// the section's own grid; set on a section that carries the plat's grid
+  /// on. [collectorsE] and [collectorsN] are the collectors among them.
+  final List<double> linesE, linesN;
+  final List<double> collectorsE, collectorsN;
+
+  /// How far the core reaches on [bearing] from the colony's origin.
+  double coreRadiusAt(double bearing) {
+    if (coreRadii.isEmpty) return coreRadiusM;
+    final n = coreRadii.length;
+    var t = (bearing % (2 * math.pi)) / (2 * math.pi) * n;
+    if (t < 0) t += n;
+    final i = t.floor() % n;
+    final f = t - t.floor();
+    return coreRadii[i] * (1 - f) + coreRadii[(i + 1) % n] * f;
+  }
+
+  final String colonyId;
+  final String body;
+
+  /// Body-fixed centre, on the ground.
+  final double px, py, pz;
+
+  /// The centre in the colony's own east/north frame, and how far out the
+  /// platted core reaches from the colony's origin — so the renderer can keep
+  /// a section's houses off the downtown it overlaps.
+  final double originE, originN, coreRadiusM;
+
+  /// Surface basis: local +X east, +Y north, +Z up.
+  final double qw, qx, qy, qz;
+  final double sizeM;
+
+  /// Index into [SprawlUse.values].
+  final int use;
+  final double density;
+  final int seed;
+
+  Map<String, dynamic> toJson() => {
+        'colony': colonyId,
+        'body': body,
+        'p': [px, py, pz],
+        'q': [qw, qx, qy, qz],
+        's': sizeM,
+        'u': use,
+        'd': density,
+        'seed': seed,
+        'o': [originE, originN],
+        'core': coreRadiusM,
+        if (coreRadii.isNotEmpty) 'cr': coreRadii,
+        if (linesE.isNotEmpty) 'le': linesE,
+        if (linesN.isNotEmpty) 'ln': linesN,
+        if (collectorsE.isNotEmpty) 'ce': collectorsE,
+        if (collectorsN.isNotEmpty) 'cn': collectorsN,
+      };
+
+  factory SprawlSectionSnapshot.fromJson(Map<String, dynamic> j) {
+    final p = (j['p'] as List?) ?? const [0, 0, 0];
+    final q = (j['q'] as List?) ?? const [1, 0, 0, 0];
+    return SprawlSectionSnapshot(
+      colonyId: j['colony'] as String? ?? '',
+      body: j['body'] as String,
+      px: (p[0] as num).toDouble(),
+      py: (p[1] as num).toDouble(),
+      pz: (p[2] as num).toDouble(),
+      qw: (q[0] as num).toDouble(),
+      qx: (q[1] as num).toDouble(),
+      qy: (q[2] as num).toDouble(),
+      qz: (q[3] as num).toDouble(),
+      sizeM: (j['s'] as num?)?.toDouble() ?? kMileM,
+      use: (j['u'] as num?)?.toInt() ?? 0,
+      density: (j['d'] as num?)?.toDouble() ?? 0.5,
+      seed: (j['seed'] as num?)?.toInt() ?? 0,
+      originE: ((j['o'] as List?)?[0] as num?)?.toDouble() ?? 0,
+      originN: ((j['o'] as List?)?[1] as num?)?.toDouble() ?? 0,
+      coreRadiusM: (j['core'] as num?)?.toDouble() ?? 0,
+      coreRadii: [
+        for (final r in (j['cr'] as List?) ?? const []) (r as num).toDouble()
+      ],
+      linesE: [
+        for (final v in (j['le'] as List?) ?? const []) (v as num).toDouble()
+      ],
+      linesN: [
+        for (final v in (j['ln'] as List?) ?? const []) (v as num).toDouble()
+      ],
+      collectorsE: [
+        for (final v in (j['ce'] as List?) ?? const []) (v as num).toDouble()
+      ],
+      collectorsN: [
+        for (final v in (j['cn'] as List?) ?? const []) (v as num).toDouble()
+      ],
+    );
+  }
+}
+
+/// A road of a colony's sprawl plan, on the wire: the body-fixed polyline,
+/// draped, plus the arc-length ranges where it is carried on a bridge.
+class SprawlRoadSnapshot {
+  const SprawlRoadSnapshot({
+    required this.colonyId,
+    required this.body,
+    required this.points,
+    required this.kind,
+    required this.halfWidthM,
+    required this.roadClassIndex,
+    this.overpasses = const [],
+    this.startHalfWidthM,
+    this.endHalfWidthM,
+    this.soundWalls = false,
+  });
+
+  final String colonyId;
+  final String body;
+
+  /// Flattened x,y,z triples, body-fixed metres.
+  final List<double> points;
+
+  /// Index into [SprawlRoadKind.values].
+  final int kind;
+  final double halfWidthM;
+
+  /// Built with sound barriers along both edges.
+  final bool soundWalls;
+
+  /// A different half width at either end, where the road tapers into
+  /// what it meets there. Null: its own width end to end.
+  final double? startHalfWidthM;
+  final double? endHalfWidthM;
+
+  /// Index into RoadClass.values: how many lanes, one way or two — the same
+  /// field the plat's roads carry, so one road pipeline draws both.
+  final int roadClassIndex;
+
+  /// Flattened start,end pairs, metres along [points].
+  final List<double> overpasses;
+
+  Map<String, dynamic> toJson() => {
+        'colony': colonyId,
+        'body': body,
+        'pts': points,
+        'k': kind,
+        'hw': halfWidthM,
+        'cls': roadClassIndex,
+        if (overpasses.isNotEmpty) 'over': overpasses,
+        if (startHalfWidthM != null) 'hw0': startHalfWidthM,
+        if (endHalfWidthM != null) 'hw1': endHalfWidthM,
+        if (soundWalls) 'walls': true,
+      };
+
+  factory SprawlRoadSnapshot.fromJson(Map<String, dynamic> j) {
+    final kind = (j['k'] as num?)?.toInt() ?? 0;
+    return SprawlRoadSnapshot(
+      colonyId: j['colony'] as String? ?? '',
+      body: j['body'] as String,
+      points: [
+        for (final n in (j['pts'] as List?) ?? const []) (n as num).toDouble()
+      ],
+      kind: kind,
+      halfWidthM: (j['hw'] as num?)?.toDouble() ?? 12,
+      roadClassIndex: (j['cls'] as num?)?.toInt() ??
+          SprawlRoadKind
+              .values[kind.clamp(0, SprawlRoadKind.values.length - 1)]
+              .defaultClass
+              .index,
+      overpasses: [
+        for (final n in (j['over'] as List?) ?? const []) (n as num).toDouble()
+      ],
+      startHalfWidthM: (j['hw0'] as num?)?.toDouble(),
+      endHalfWidthM: (j['hw1'] as num?)?.toDouble(),
+      soundWalls: j['walls'] == true,
+    );
+  }
+}
+
+/// A junction of a colony's sprawl plan, on the wire: where it is
+/// (body-fixed, draped), what meets there, and how it is controlled. The
+/// renderer draws the plate, the bars and the signals from this alone.
+class SprawlNodeSnapshot {
+  const SprawlNodeSnapshot({
+    required this.colonyId,
+    required this.body,
+    required this.px,
+    required this.py,
+    required this.pz,
+    required this.control,
+    required this.legs,
+    this.liftM = 0,
+  });
+
+  final String colonyId;
+  final String body;
+
+  /// Body-fixed metres.
+  final double px, py, pz;
+
+  /// Index into JunctionControl.values.
+  final int control;
+
+  /// Flattened legs, five numbers each: a body-fixed unit direction out
+  /// from the node (x, y, z), the leg's half width, and its road class
+  /// index.
+  final List<double> legs;
+
+  /// Radial lift above the ground the node was draped at.
+  final double liftM;
+
+  int get legCount => legs.length ~/ 5;
+
+  Map<String, dynamic> toJson() => {
+        'colony': colonyId,
+        'body': body,
+        'p': [px, py, pz],
+        'c': control,
+        'legs': legs,
+        if (liftM != 0) 'lift': liftM,
+      };
+
+  factory SprawlNodeSnapshot.fromJson(Map<String, dynamic> j) {
+    final p = (j['p'] as List).cast<num>();
+    return SprawlNodeSnapshot(
+      colonyId: j['colony'] as String? ?? '',
+      body: j['body'] as String,
+      px: p[0].toDouble(),
+      py: p[1].toDouble(),
+      pz: p[2].toDouble(),
+      control: (j['c'] as num?)?.toInt() ?? 0,
+      legs: [
+        for (final n in (j['legs'] as List?) ?? const []) (n as num).toDouble()
+      ],
+      liftM: (j['lift'] as num?)?.toDouble() ?? 0,
+    );
+  }
+}
+
+/// The draped sprawl of one colony, cached on the sim between captures.
+class _SprawlWire {
+  const _SprawlWire(this.plan, this.sections, this.roads, this.nodes);
+  final SprawlPlan plan;
+  final List<SprawlSectionSnapshot> sections;
+  final List<SprawlRoadSnapshot> roads;
+  final List<SprawlNodeSnapshot> nodes;
 }
 
 /// Full authoritative world state for one tick: a complete render frame.
@@ -1876,6 +2327,17 @@ class WorldSnapshot {
   /// conversion) or be drawn as a textured sphere.
   final List<MegastructureSnapshot> megastructures;
 
+  /// The colonies' sprawl: sections to grow, and the roads of the plan.
+  final List<SprawlSectionSnapshot> sprawlSections;
+  final List<SprawlRoadSnapshot> sprawlRoads;
+
+  /// The plan's junctions: where its roads meet, and how each is controlled.
+  final List<SprawlNodeSnapshot> sprawlNodes;
+
+  /// Per colony, the plots its suburbs leave empty: flat e/n polygons in
+  /// that colony's local frame. See [SprawlSpec.clearings].
+  final Map<String, List<List<double>>> sprawlClearings;
+
   const WorldSnapshot({
     required this.tick,
     required this.vessels,
@@ -1888,6 +2350,10 @@ class WorldSnapshot {
     this.events = const [],
     this.terrainEdits = const [],
     this.megastructures = const [],
+    this.sprawlSections = const [],
+    this.sprawlRoads = const [],
+    this.sprawlNodes = const [],
+    this.sprawlClearings = const {},
   });
 
   /// The same frame at a different sim time.
@@ -1909,6 +2375,10 @@ class WorldSnapshot {
         events: events,
         terrainEdits: terrainEdits,
         megastructures: megastructures,
+        sprawlSections: sprawlSections,
+        sprawlRoads: sprawlRoads,
+        sprawlNodes: sprawlNodes,
+        sprawlClearings: sprawlClearings,
       );
 
   /// The deformations for [bodyId], rebuilt as a domain store ready to hand to
@@ -1959,6 +2429,10 @@ class WorldSnapshot {
     }
     final roads = <RoadSnapshot>[];
     final patches = <CityPatchSnapshot>[];
+    final sprawlSections = <SprawlSectionSnapshot>[];
+    final sprawlRoads = <SprawlRoadSnapshot>[];
+    final sprawlNodes = <SprawlNodeSnapshot>[];
+    final sprawlClearings = <String, List<List<double>>>{};
     // City-builder colonies. Their cells are placed on the same tangent grid as
     // the legacy colonies, but centred on the colony site rather than running
     // out from it, so the lander (the hub, at the middle cell) sits on the
@@ -1967,6 +2441,23 @@ class WorldSnapshot {
       for (final city in cities.all()) {
         final body = system.body(city.body.id);
         if (body == null) continue;
+        // The sprawl: draped once per plan and kept on the sim. It is tens
+        // of thousands of ground samples, and the frame is captured every
+        // tick; the plan itself only changes with the spec.
+        final plan = city.sprawl;
+        if (plan != null) {
+          var wire = city.sprawlWire;
+          if (wire is! _SprawlWire || !identical(wire.plan, plan)) {
+            wire = _drapeSprawl(city, body, plan, placement);
+            city.sprawlWire = wire;
+          }
+          sprawlSections.addAll(wire.sections);
+          sprawlRoads.addAll(wire.roads);
+          sprawlNodes.addAll(wire.nodes);
+          if (plan.spec.clearings.isNotEmpty) {
+            sprawlClearings[city.id] = plan.spec.clearings;
+          }
+        }
         // Radius of the REAL ground at the colony site, not the datum sphere.
         // On a body with kilometres of relief the datum is underground as
         // often as not, and a colony placed on it disappears into the hill it
@@ -2073,6 +2564,7 @@ class WorldSnapshot {
             halfWidthM: road.halfWidth,
             roadClassIndex: road.roadClass.index,
             sealed: road.sealed,
+            soundWalls: road.soundWalls,
           ));
         }
         // Roads, zoned-but-unbuilt lots and support platforms. These are what
@@ -2211,6 +2703,10 @@ class WorldSnapshot {
       buildings: buildings,
       roads: roads,
       patches: patches,
+      sprawlSections: sprawlSections,
+      sprawlRoads: sprawlRoads,
+      sprawlNodes: sprawlNodes,
+      sprawlClearings: sprawlClearings,
       events: events,
       terrainEdits: terrainEdits == null
           ? const []
@@ -2241,6 +2737,13 @@ class WorldSnapshot {
         'buildings': [for (final b in buildings.values) b.toJson()],
         'roads': [for (final r in roads) r.toJson()],
         'patches': [for (final p in patches) p.toJson()],
+        if (sprawlSections.isNotEmpty)
+          'sprawlSections': [for (final s in sprawlSections) s.toJson()],
+        if (sprawlRoads.isNotEmpty)
+          'sprawlRoads': [for (final r in sprawlRoads) r.toJson()],
+        if (sprawlNodes.isNotEmpty)
+          'sprawlNodes': [for (final n in sprawlNodes) n.toJson()],
+        if (sprawlClearings.isNotEmpty) 'sprawlClearings': sprawlClearings,
         'events': [for (final e in events) e.toJson()],
         if (terrainEdits.isNotEmpty)
           'terrainEdits': [for (final e in terrainEdits) e.toJson()],
@@ -2281,6 +2784,25 @@ class WorldSnapshot {
         for (final p in patchList)
           CityPatchSnapshot.fromJson(p as Map<String, dynamic>),
       ],
+      sprawlSections: [
+        for (final s in (j['sprawlSections'] as List?) ?? const [])
+          SprawlSectionSnapshot.fromJson(s as Map<String, dynamic>),
+      ],
+      sprawlRoads: [
+        for (final r in (j['sprawlRoads'] as List?) ?? const [])
+          SprawlRoadSnapshot.fromJson(r as Map<String, dynamic>),
+      ],
+      sprawlNodes: [
+        for (final n in (j['sprawlNodes'] as List?) ?? const [])
+          SprawlNodeSnapshot.fromJson(n as Map<String, dynamic>),
+      ],
+      sprawlClearings: {
+        for (final e in ((j['sprawlClearings'] as Map?) ?? const {}).entries)
+          e.key as String: [
+            for (final poly in e.value as List)
+              [for (final v in poly as List) (v as num).toDouble()]
+          ],
+      },
       buildings: {
         for (final b in buildingList)
           '${(b as Map<String, dynamic>)['colony']}/${b['id']}':

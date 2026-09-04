@@ -155,7 +155,7 @@ class StreetFurniture {
             if (prop == StreetProp.streetTree && treesOut != null) {
               treesOut.add((spot, rnd.nextDouble() * math.pi * 2));
             } else {
-              _place(prop.glazed ? glow : solid, prop, spot, dir, up, rnd,
+              place(prop.glazed ? glow : solid, prop, spot, dir, up, rnd,
                   barePlanter: shrubsOut != null);
               if (prop == StreetProp.planter && shrubsOut != null) {
                 shrubsOut.add((spot + up * (prop.heightM * 0.85),
@@ -172,7 +172,10 @@ class StreetFurniture {
     return placed;
   }
 
-  static void _place(MeshBuilder m, StreetProp prop, Vector3 at, Vector3 along,
+  /// Stand one [prop] at [at] (anchor-relative metres), facing [along].
+  /// The pavement pass places from its bag; the sprawl places by name — a
+  /// hydrant on a suburban curb, a shelter on a county highway.
+  static void place(MeshBuilder m, StreetProp prop, Vector3 at, Vector3 along,
       Vector3 up, math.Random rnd,
       {bool barePlanter = false}) {
     switch (prop) {

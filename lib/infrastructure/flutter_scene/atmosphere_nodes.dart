@@ -13,6 +13,7 @@ import '../../application/snapshot/world_snapshot.dart';
 import '../../domain/shared/vector3.dart';
 import 'coord_convert.dart';
 import 'depth_materials.dart';
+import 'graphics_quality.dart';
 import 'sphere_geometry_util.dart';
 
 /// Per-body art styling for the raymarched atmosphere.
@@ -355,7 +356,7 @@ class _Shell {
   // style/descriptor tint mixed in the shader.
   static const _betaR = 5.8e-3, _betaG = 1.35e-2, _betaB = 3.31e-2;
 
-  final Float32List _uniforms = Float32List(20); // 5 x vec4, std140
+  final Float32List _uniforms = Float32List(24); // 6 x vec4, std140
 
   void updateUniforms({
     required vm.Vector3 centreScene,
@@ -397,6 +398,13 @@ class _Shell {
     _uniforms[17] = twilightScene;
     _uniforms[18] = densityNorm;
     _uniforms[19] = 0.0;
+    // vec4 quality: the scalability preset. Re-read every frame (a static
+    // read, not a rebuild) so the options slider applies to the next frame.
+    final q = GraphicsQuality.lighting;
+    _uniforms[20] = q.atmoViewSamples.toDouble();
+    _uniforms[21] = q.atmoLightSamples.toDouble();
+    _uniforms[22] = 0.0;
+    _uniforms[23] = 0.0;
     // All windings share the block; only the active set is in the scene.
     _inMaterial.setUniformBlockFromFloats('AtmosphereInfo', _uniforms);
     _outMaterial.setUniformBlockFromFloats('AtmosphereInfo', _uniforms);

@@ -105,6 +105,21 @@ class BuildingGenerator {
     final (bu0, bu1) = bandUV(massing.material);
     final (pu0, pu1) = bandUV(FacadeMaterial.precast);
 
+    if (detail == BuildingDetail.block && spec.claimsOwnSite) {
+      // An installation collapsed to one box is a refinery drawn as a
+      // 900 m slab sixty metres high. Its parts are few — tanks, stacks, a
+      // shed — so the distant tier keeps them, as plain shapes with no
+      // windows or trim.
+      for (final v in massing.volumes) {
+        final (vu0, vu1) = _bandFor(v, bu0, bu1);
+        _shape(b.solid, v, u0: vu0, u1: vu1, plain: true, glass: b.foliage);
+      }
+      return GeneratedBuilding(
+        model: PropModel(solid: b.solid.build(), foliage: b.foliage.build()),
+        massing: massing,
+      );
+    }
+
     if (detail == BuildingDetail.block) {
       // One box covering the whole massing: the distant tier only has to hold
       // the silhouette and the roofline. It still takes the building's own
@@ -155,6 +170,29 @@ class BuildingGenerator {
     final roof = _roofVolume(massing);
 
     for (final v in massing.volumes) {
+      final (vu0, vu1) = _bandFor(v, bu0, bu1);
+      // A tank, a stack, a shed, a rotor: its own shape, and none of the
+      // facade treatment below — a cornice on a cooling tower is wrong.
+      if (v.shape != MassShape.box) {
+        _shape(b.solid, v, u0: vu0, u1: vu1, glass: b.foliage);
+        if (v.shape == MassShape.gable && v.glazed && v.floors > 0) {
+          // A glazed shed (a greenhouse) still gets its window band on the
+          // walls under the roof.
+          _glazing(
+              b.foliage,
+              MassBox(
+                  x: v.x,
+                  y: v.y,
+                  z: v.z,
+                  width: v.width,
+                  depth: v.depth,
+                  height: v.height * _gableEave,
+                  floors: v.floors),
+              massing.storeyM,
+              windows);
+        }
+        continue;
+      }
       // Facade. UVs repeat once per storey vertically and about every 4 m
       // horizontally, so a wall texture keeps a constant real-world scale
       // whatever the building's size — the thing that goes wrong when a mesh
@@ -169,8 +207,8 @@ class BuildingGenerator {
         height: v.height,
         uRepeat: math.max(1, (v.width / 3).round()).toDouble(),
         vRepeat: math.max(1, v.floors).toDouble(),
-        u0: bu0,
-        u1: bu1,
+        u0: vu0,
+        u1: vu1,
       );
 
       if (v.glazed && v.floors > 0) {
@@ -223,6 +261,10 @@ class BuildingGenerator {
     );
   }
 
+  /// The band a volume draws on: its own, or the massing's.
+  static (double, double) _bandFor(MassBox v, double bu0, double bu1) =>
+      v.material == null ? (bu0, bu1) : bandUV(v.material!);
+
   /// U range of one band of the facade atlas.
   ///
   /// Inset by a texel and a half at 1024/8. A mip level averages across the
@@ -230,8 +272,13 @@ class BuildingGenerator {
   /// brick as soon as the building is more than a street away — which reads as
   /// the walls changing colour when you back off.
   static (double, double) bandUV(int material) {
-    const e = 0.0015;
     final m = material.clamp(0, kFacadeMaterials - 1);
+    // The plant palette is flat colour beside flat colour of another hue,
+    // and a coarse mip blends a red ring brown with the blue next to it:
+    // those bands are inset far deeper, which costs them nothing.
+    final e = m >= FacadeMaterial.steel
+        ? 0.02
+        : (m >= FacadeMaterial.photovoltaic ? 0.008 : 0.0015);
     return (m / kFacadeMaterials + e, (m + 1) / kFacadeMaterials - e);
   }
 
@@ -894,6 +941,506 @@ class BuildingGenerator {
       const Vector3(0, 0, 1),
       uRepeat,
       uD,
+    );
+  }
+
+  /// Where a gable's eaves sit, as a fraction of the volume's height.
+  static const double _gableEave = 0.72;
+
+  /// One volume of any [MassShape], on the building's own facade band.
+  ///
+  /// [plain] draws a box's five faces with no per-storey repeat — the
+  /// distant tier's version.
+  ///
+  /// [glass] takes the glazed parts a shape has — a heliostat's plate; the
+  /// solid builder stands in for it when none is given.
+  static void _shape(
+    MeshBuilder m,
+    MassBox v, {
+    required double u0,
+    required double u1,
+    bool plain = false,
+    MeshBuilder? glass,
+  }) {
+    switch (v.shape) {
+      case MassShape.box:
+        // A slab — knee-high or lower, unglazed — is paving, not a low
+        // building: it takes the pavement band whatever the kit's wall is,
+        // or a gravel pad comes out in the profiled metal of the shed on it.
+        final slab = v.height <= 0.6 && !v.glazed && v.material == null;
+        final (su0, su1) = slab ? bandUV(FacadeMaterial.pavement) : (u0, u1);
+        _box(
+          m,
+          cx: v.x,
+          cy: v.y,
+          z0: v.z,
+          width: v.width,
+          depth: v.depth,
+          height: v.height,
+          uRepeat: math.max(1, (v.width / (slab ? 8 : 3)).round()).toDouble(),
+          vRepeat: plain || slab
+              ? math.max(1.0, (v.height / 3).roundToDouble())
+              : math.max(1, v.floors).toDouble(),
+          u0: su0,
+          u1: su1,
+        );
+      case MassShape.cylinder:
+        _prism(m, v, topScale: 1.0, u0: u0, u1: u1);
+      case MassShape.frustum:
+        _prism(m, v, topScale: v.topScale.clamp(0.0, 1.0), u0: u0, u1: u1);
+      case MassShape.gable:
+        _gable(m, v, u0: u0, u1: u1);
+      case MassShape.rotor:
+        _rotor(m, v, u0: u0, u1: u1);
+      case MassShape.mirror:
+        _mirror(m, glass ?? m, v, u0: u0, u1: u1);
+      case MassShape.panel:
+        _panel(m, v);
+      case MassShape.hyperboloid:
+        _lathe(m, v, _hyperboloidProfile(v.topScale),
+            sides: 16, u0: u0, u1: u1, inside: true);
+      case MassShape.dome:
+        _lathe(m, v, _domeProfile, sides: 16, u0: u0, u1: u1);
+      case MassShape.vehicle:
+        _vehicle(m, v, u0: u0, u1: u1);
+    }
+  }
+
+  /// A vehicle: a cab and a body on wheels, [MassBox.width] long along
+  /// [MassBox.yaw]. Taller than a car and it is a truck — a full-height
+  /// cab forward, a lower bed behind; otherwise a car's body and cabin.
+  static void _vehicle(MeshBuilder m, MassBox v,
+      {required double u0, required double u1}) {
+    final (du0, du1) = bandUV(FacadeMaterial.darkBrick);
+    final ca = math.cos(v.yaw), sa = math.sin(v.yaw);
+    void box(double fx, double fy, double z0, double l, double w, double h,
+        double bu0, double bu1) {
+      _yawedBox(m, v.x + ca * fx - sa * fy, v.y + sa * fx + ca * fy, v.z + z0,
+          l, w, h, v.yaw, bu0, bu1);
+    }
+
+    const wheelR = 0.45;
+    final body = v.height - wheelR;
+    if (v.height > 2.2) {
+      final cabL = v.width * 0.3;
+      box(v.width / 2 - cabL / 2, 0, wheelR, cabL, v.depth, body, u0, u1);
+      box(-cabL / 2 - 0.1, 0, wheelR + 0.4, v.width - cabL - 0.2, v.depth,
+          body * 0.62, u0, u1);
+    } else {
+      box(0, 0, wheelR, v.width, v.depth, body * 0.55, u0, u1);
+      box(-v.width * 0.05, 0, wheelR + body * 0.55, v.width * 0.5,
+          v.depth * 0.9, body * 0.45, u0, u1);
+    }
+    final axles = v.height > 2.2
+        ? [v.width * 0.35, -v.width * 0.2, -v.width * 0.35]
+        : [v.width * 0.32, -v.width * 0.32];
+    for (final ax in axles) {
+      for (final side in const [-1.0, 1.0]) {
+        box(ax, side * (v.depth / 2 - 0.2), 0, wheelR * 2, 0.4, wheelR * 2,
+            du0, du1);
+      }
+    }
+  }
+
+  /// A box turned [yaw] about its centre, in the band's flat colour. The
+  /// face order is the oriented box's, which is known to draw right way
+  /// round.
+  static void _yawedBox(MeshBuilder m, double cx, double cy, double z0,
+      double l, double w, double h, double yaw, double u0, double u1) {
+    final ex = Vector3(math.cos(yaw), math.sin(yaw), 0);
+    final ey = Vector3(-math.sin(yaw), math.cos(yaw), 0);
+    const ez = Vector3(0, 0, 1);
+    final c = Vector3(cx, cy, z0 + h / 2);
+    final hx = l / 2, hy = w / 2, hz = h / 2;
+    final p = <Vector3>[
+      c - ex * hx - ey * hy - ez * hz,
+      c + ex * hx - ey * hy - ez * hz,
+      c + ex * hx + ey * hy - ez * hz,
+      c - ex * hx + ey * hy - ez * hz,
+      c - ex * hx - ey * hy + ez * hz,
+      c + ex * hx - ey * hy + ez * hz,
+      c + ex * hx + ey * hy + ez * hz,
+      c - ex * hx + ey * hy + ez * hz,
+    ];
+    final n = [ez, ez * -1, ex, ex * -1, ey, ey * -1];
+    const faces = [
+      [4, 5, 6, 7],
+      [3, 2, 1, 0],
+      [2, 6, 5, 1],
+      [0, 4, 7, 3],
+      [3, 7, 6, 2],
+      [1, 5, 4, 0],
+    ];
+    final u = (u0 + u1) / 2;
+    for (var f = 0; f < 6; f++) {
+      final q = [for (final i in faces[f]) m.vertex(p[i], n[f], u, 0.5)];
+      m.quad(q[0], q[1], q[2], q[3]);
+    }
+  }
+
+  /// A cooling tower's line: waisted at three-quarters height, flaring to
+  /// [top] of the base at the lip.
+  static List<(double, double)> _hyperboloidProfile(double top) => [
+        (0.0, 1.0),
+        (0.14, 0.90),
+        (0.28, 0.80),
+        (0.42, 0.71),
+        (0.56, 0.64),
+        (0.68, 0.595),
+        (0.78, 0.58),
+        (0.88, 0.59),
+        (1.0, top.clamp(0.5, 1.0)),
+      ];
+
+  /// A hemisphere, closing to its apex.
+  static const List<(double, double)> _domeProfile = [
+    (0.0, 1.0),
+    (0.25, 0.968),
+    (0.5, 0.866),
+    (0.7, 0.714),
+    (0.85, 0.527),
+    (0.95, 0.312),
+    (1.0, 0.0),
+  ];
+
+  /// A surface of revolution about the volume's centre: [profile] is
+  /// (height fraction, radius fraction) from the base up, the radius
+  /// against the footprint's half-extents, [sides] round. [inside] draws
+  /// the inner face as well, for a shell that is open at the top.
+  static void _lathe(
+    MeshBuilder m,
+    MassBox v,
+    List<(double, double)> profile, {
+    required int sides,
+    required double u0,
+    required double u1,
+    bool inside = false,
+  }) {
+    final rx = v.width / 2, ry = v.depth / 2;
+    final rings = <List<Vector3>>[];
+    for (final (t, r) in profile) {
+      rings.add([
+        for (var i = 0; i < sides; i++)
+          Vector3(
+            v.x + rx * r * math.cos((i + 0.5) / sides * 2 * math.pi),
+            v.y + ry * r * math.sin((i + 0.5) / sides * 2 * math.pi),
+            v.z + v.height * t,
+          ),
+      ]);
+    }
+    final vStep =
+        math.max(1.0, (v.height / 8).roundToDouble()) / (profile.length - 1);
+    for (var k = 0; k + 1 < profile.length; k++) {
+      final (t0, r0) = profile[k];
+      final (t1, r1) = profile[k + 1];
+      final dz = (t1 - t0) * v.height, dr = (r1 - r0) * math.max(rx, ry);
+      final vv0 = (profile.length - 1 - k) * vStep;
+      final vv1 = (profile.length - 2 - k) * vStep;
+      for (var i = 0; i < sides; i++) {
+        final j = (i + 1) % sides;
+        final a = rings[k][i], b = rings[k][j];
+        final c = rings[k + 1][j], d = rings[k + 1][i];
+        final mid = (a + b) * 0.5;
+        final flat = Vector3((mid.x - v.x) / math.max(rx, 1e-6),
+            (mid.y - v.y) / math.max(ry, 1e-6), 0);
+        // Outward, leaning with the slope: a narrowing wall looks up.
+        var n = flat.normalized * dz - Vector3(0, 0, dr);
+        n = n.length < 1e-9 ? flat.normalized : n.normalized;
+        m.quad(m.vertex(a, n, u0, vv0), m.vertex(b, n, u1, vv0),
+            m.vertex(c, n, u1, vv1), m.vertex(d, n, u0, vv1));
+        if (inside) {
+          final ni = n * -1;
+          m.quad(m.vertex(b, ni, u0, vv0), m.vertex(a, ni, u1, vv0),
+              m.vertex(d, ni, u1, vv1), m.vertex(c, ni, u0, vv1));
+        }
+      }
+    }
+  }
+
+  /// A photovoltaic table: a plate of modules on two posts, faced and
+  /// tilted like a heliostat but drawn on the atlas's photovoltaic band —
+  /// a band's width of modules every four metres across the front, one
+  /// plain quad for the back.
+  static void _panel(MeshBuilder m, MassBox v) {
+    final (u0, u1) = bandUV(FacadeMaterial.photovoltaic);
+    final (pu0, pu1) = bandUV(FacadeMaterial.precast);
+    final postH = v.height * 0.5;
+    final across = Vector3(-math.sin(v.yaw), math.cos(v.yaw), 0);
+    for (final sx in const [-0.28, 0.28]) {
+      _box(
+        m,
+        cx: v.x + across.x * v.width * sx,
+        cy: v.y + across.y * v.width * sx,
+        z0: v.z,
+        width: v.depth,
+        depth: v.depth,
+        height: postH,
+        uRepeat: 1,
+        vRepeat: 1,
+        u0: pu0,
+        u1: pu1,
+      );
+    }
+    final f = Vector3(math.cos(v.yaw), math.sin(v.yaw), 0);
+    final ct = math.cos(v.tilt), st = math.sin(v.tilt);
+    final n = Vector3(f.x * ct, f.y * ct, st);
+    final up = Vector3(-f.x * st, -f.y * st, ct);
+    final c = Vector3(v.x, v.y, v.z + postH);
+    final hw = v.width / 2, hh = v.height * 0.85 / 2;
+    // A tile of the band is eight module rows, two metres each.
+    final vSpan = math.max(0.125, hh * 2 / 16);
+    final segs = math.max(1, (v.width / 4).round());
+    for (var s = 0; s < segs; s++) {
+      final a0 = -hw + v.width * s / segs, a1 = -hw + v.width * (s + 1) / segs;
+      final p0 = c + across * a0 - up * hh;
+      final p1 = c + across * a1 - up * hh;
+      final p2 = c + across * a1 + up * hh;
+      final p3 = c + across * a0 + up * hh;
+      m.quad(m.vertex(p0, n, u0, vSpan), m.vertex(p1, n, u1, vSpan),
+          m.vertex(p2, n, u1, 0), m.vertex(p3, n, u0, 0));
+    }
+    final back = n * -1;
+    final q0 = c - across * hw - up * hh;
+    final q1 = c + across * hw - up * hh;
+    final q2 = c + across * hw + up * hh;
+    final q3 = c - across * hw + up * hh;
+    m.quad(m.vertex(q1, back, pu0, 1), m.vertex(q0, back, pu1, 1),
+        m.vertex(q3, back, pu1, 0), m.vertex(q2, back, pu0, 0));
+  }
+
+  /// A heliostat: a pedestal in the solid, and a plate on the glazing sheet
+  /// turned to [MassBox.yaw] and tipped so its normal sits [MassBox.tilt]
+  /// above the horizon, both faces. The sheet's panes read as the facets a
+  /// real heliostat is built of.
+  static void _mirror(
+    MeshBuilder solid,
+    MeshBuilder glass,
+    MassBox v, {
+    required double u0,
+    required double u1,
+  }) {
+    final pedestalH = v.height * 0.5;
+    _box(
+      solid,
+      cx: v.x,
+      cy: v.y,
+      z0: v.z,
+      width: v.depth * 1.2,
+      depth: v.depth * 1.2,
+      height: pedestalH,
+      uRepeat: 1,
+      vRepeat: 1,
+      u0: u0,
+      u1: u1,
+    );
+    final f = Vector3(math.cos(v.yaw), math.sin(v.yaw), 0);
+    final across = Vector3(-math.sin(v.yaw), math.cos(v.yaw), 0);
+    final ct = math.cos(v.tilt), st = math.sin(v.tilt);
+    final n = Vector3(f.x * ct, f.y * ct, st);
+    final up = Vector3(-f.x * st, -f.y * st, ct);
+    final c = Vector3(v.x, v.y, v.z + pedestalH);
+    final hw = v.width / 2, hh = v.height * 0.85 / 2;
+    final p0 = c - across * hw - up * hh;
+    final p1 = c + across * hw - up * hh;
+    final p2 = c + across * hw + up * hh;
+    final p3 = c - across * hw + up * hh;
+    glass.quad(glass.vertex(p0, n, 0, 1), glass.vertex(p1, n, 1, 1),
+        glass.vertex(p2, n, 1, 0), glass.vertex(p3, n, 0, 0));
+    final back = n * -1;
+    glass.quad(glass.vertex(p1, back, 0, 1), glass.vertex(p0, back, 1, 1),
+        glass.vertex(p3, back, 1, 0), glass.vertex(p2, back, 0, 0));
+  }
+
+  /// An octagonal prism on the volume's footprint, its top [topScale] of its
+  /// base: a tank at 1, a cooling tower or a stack below it, a cone at 0.
+  static void _prism(
+    MeshBuilder m,
+    MassBox v, {
+    required double topScale,
+    required double u0,
+    required double u1,
+  }) {
+    const sides = 8;
+    final rx = v.width / 2, ry = v.depth / 2;
+    final z0 = v.z, z1 = v.z + v.height;
+    final vRepeat = math.max(1.0, (v.height / 4).roundToDouble());
+    final bottom = <Vector3>[];
+    final top = <Vector3>[];
+    for (var i = 0; i < sides; i++) {
+      // Rotated half a step so a flat faces the street.
+      final a = (i + 0.5) / sides * 2 * math.pi;
+      final c = math.cos(a), s = math.sin(a);
+      bottom.add(Vector3(v.x + rx * c, v.y + ry * s, z0));
+      top.add(Vector3(v.x + rx * c * topScale, v.y + ry * s * topScale, z1));
+    }
+    for (var i = 0; i < sides; i++) {
+      final j = (i + 1) % sides;
+      final a = bottom[i], b = bottom[j], c = top[j], d = top[i];
+      // Outward normal of the side, leaning up with the taper.
+      final mid = ((a + b) * 0.5 - Vector3(v.x, v.y, z0));
+      final flat = Vector3(mid.x / math.max(rx, 1e-6),
+          mid.y / math.max(ry, 1e-6), 0);
+      final lean = (1 - topScale) * math.max(rx, ry) / math.max(v.height, 1e-6);
+      final n = (flat.normalized + Vector3(0, 0, lean)).normalized;
+      final i0 = m.vertex(a, n, u0, vRepeat);
+      final i1 = m.vertex(b, n, u1, vRepeat);
+      final i2 = m.vertex(c, n, u1, 0);
+      final i3 = m.vertex(d, n, u0, 0);
+      m.quad(i0, i1, i2, i3);
+    }
+    // The cap, unless it has closed to a point.
+    if (topScale > 0.02) {
+      final centre = m.vertex(
+          Vector3(v.x, v.y, z1), const Vector3(0, 0, 1), (u0 + u1) / 2, 0.5);
+      final ring = [
+        for (final p in top)
+          m.vertex(p, const Vector3(0, 0, 1), (u0 + u1) / 2, 0.5)
+      ];
+      for (var i = 0; i < sides; i++) {
+        m.triangle(centre, ring[i], ring[(i + 1) % sides]);
+      }
+    }
+  }
+
+  /// A box under a pitched roof, ridge along the longer side.
+  static void _gable(
+    MeshBuilder m,
+    MassBox v, {
+    required double u0,
+    required double u1,
+  }) {
+    final eave = v.height * _gableEave;
+    // The walls, to the eaves.
+    _box(
+      m,
+      cx: v.x,
+      cy: v.y,
+      z0: v.z,
+      width: v.width,
+      depth: v.depth,
+      height: eave,
+      uRepeat: math.max(1, (v.width / 3).round()).toDouble(),
+      vRepeat: math.max(1.0, (eave / 4).roundToDouble()),
+      u0: u0,
+      u1: u1,
+    );
+    final hw = v.width / 2, hd = v.depth / 2;
+    final ze = v.z + eave, zr = v.z + v.height;
+    final alongX = v.width >= v.depth;
+    final um = (u0 + u1) / 2;
+    if (alongX) {
+      // Ridge along x at y = v.y; gables at x = +-hw.
+      final ridgeA = Vector3(v.x - hw, v.y, zr);
+      final ridgeB = Vector3(v.x + hw, v.y, zr);
+      for (final sy in const [-1.0, 1.0]) {
+        final a = Vector3(v.x - hw, v.y + sy * hd, ze);
+        final b = Vector3(v.x + hw, v.y + sy * hd, ze);
+        final n = Vector3(0, sy * (v.height - eave), hd).normalized;
+        // Wound with the eave edge first so the slope faces out and up.
+        if (sy < 0) {
+          final i0 = m.vertex(a, n, u0, 1), i1 = m.vertex(b, n, u1, 1);
+          final i2 = m.vertex(ridgeB, n, u1, 0), i3 = m.vertex(ridgeA, n, u0, 0);
+          m.quad(i0, i1, i2, i3);
+        } else {
+          final i0 = m.vertex(b, n, u0, 1), i1 = m.vertex(a, n, u1, 1);
+          final i2 = m.vertex(ridgeA, n, u1, 0), i3 = m.vertex(ridgeB, n, u0, 0);
+          m.quad(i0, i1, i2, i3);
+        }
+      }
+      for (final sx in const [-1.0, 1.0]) {
+        final n = Vector3(sx, 0, 0);
+        final a = Vector3(v.x + sx * hw, v.y - hd, ze);
+        final b = Vector3(v.x + sx * hw, v.y + hd, ze);
+        final t = Vector3(v.x + sx * hw, v.y, zr);
+        if (sx > 0) {
+          m.triangle(m.vertex(a, n, u0, 1), m.vertex(b, n, u1, 1),
+              m.vertex(t, n, um, 0));
+        } else {
+          m.triangle(m.vertex(b, n, u0, 1), m.vertex(a, n, u1, 1),
+              m.vertex(t, n, um, 0));
+        }
+      }
+    } else {
+      // Ridge along y at x = v.x; gables at y = +-hd.
+      final ridgeA = Vector3(v.x, v.y - hd, zr);
+      final ridgeB = Vector3(v.x, v.y + hd, zr);
+      for (final sx in const [-1.0, 1.0]) {
+        final a = Vector3(v.x + sx * hw, v.y - hd, ze);
+        final b = Vector3(v.x + sx * hw, v.y + hd, ze);
+        final n = Vector3(sx * (v.height - eave), 0, hw).normalized;
+        if (sx > 0) {
+          final i0 = m.vertex(a, n, u0, 1), i1 = m.vertex(b, n, u1, 1);
+          final i2 = m.vertex(ridgeB, n, u1, 0), i3 = m.vertex(ridgeA, n, u0, 0);
+          m.quad(i0, i1, i2, i3);
+        } else {
+          final i0 = m.vertex(b, n, u0, 1), i1 = m.vertex(a, n, u1, 1);
+          final i2 = m.vertex(ridgeA, n, u1, 0), i3 = m.vertex(ridgeB, n, u0, 0);
+          m.quad(i0, i1, i2, i3);
+        }
+      }
+      for (final sy in const [-1.0, 1.0]) {
+        final n = Vector3(0, sy, 0);
+        final a = Vector3(v.x - hw, v.y + sy * hd, ze);
+        final b = Vector3(v.x + hw, v.y + sy * hd, ze);
+        final t = Vector3(v.x, v.y + sy * hd, zr);
+        if (sy < 0) {
+          m.triangle(m.vertex(a, n, u0, 1), m.vertex(b, n, u1, 1),
+              m.vertex(t, n, um, 0));
+        } else {
+          m.triangle(m.vertex(b, n, u0, 1), m.vertex(a, n, u1, 1),
+              m.vertex(t, n, um, 0));
+        }
+      }
+    }
+  }
+
+  /// Three blades in the vertical x-z plane about the hub at the volume's
+  /// centre, [MassBox.height] long, [MassBox.width] wide at the root and
+  /// [MassBox.depth] thick. Two faces each, front and back.
+  static void _rotor(
+    MeshBuilder m,
+    MassBox v, {
+    required double u0,
+    required double u1,
+  }) {
+    final hub = Vector3(v.x, v.y, v.z);
+    final half = v.depth / 2;
+    for (var k = 0; k < 3; k++) {
+      final a = math.pi / 2 + k * 2 * math.pi / 3;
+      final dir = Vector3(math.cos(a), 0, math.sin(a));
+      final across = Vector3(-math.sin(a), 0, math.cos(a));
+      final root = hub + dir * (v.width * 0.6);
+      final tip = hub + dir * v.height;
+      final rw = v.width / 2, tw = v.width * 0.12;
+      for (final sy in const [-1.0, 1.0]) {
+        final n = Vector3(0, sy, 0);
+        final y = Vector3(0, sy * half, 0);
+        final p0 = root - across * rw + y;
+        final p1 = root + across * rw + y;
+        final p2 = tip + across * tw + y;
+        final p3 = tip - across * tw + y;
+        if (sy < 0) {
+          m.quad(m.vertex(p0, n, u0, 1), m.vertex(p1, n, u1, 1),
+              m.vertex(p2, n, u1, 0), m.vertex(p3, n, u0, 0));
+        } else {
+          m.quad(m.vertex(p1, n, u0, 1), m.vertex(p0, n, u1, 1),
+              m.vertex(p3, n, u1, 0), m.vertex(p2, n, u0, 0));
+        }
+      }
+    }
+    // The hub itself.
+    _box(
+      m,
+      cx: v.x,
+      cy: v.y,
+      z0: v.z - v.width * 0.5,
+      width: v.width,
+      depth: v.depth * 4,
+      height: v.width,
+      uRepeat: 1,
+      vRepeat: 1,
+      u0: u0,
+      u1: u1,
     );
   }
 }

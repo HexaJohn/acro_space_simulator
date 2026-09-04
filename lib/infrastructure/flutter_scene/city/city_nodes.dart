@@ -27,6 +27,7 @@ import '../../../application/snapshot/world_snapshot.dart';
 import '../../../domain/architecture/building_generator.dart';
 import '../../../domain/colony/city/city_building_spec.dart';
 import '../../../domain/colony/city/parcel.dart';
+import '../../../domain/colony/city/sprawl_plan.dart';
 import '../../../domain/scatter/mesh_builder.dart';
 import '../../../domain/scatter/prop_catalog.dart';
 import '../../../domain/scatter/prop_mesh.dart';
@@ -38,11 +39,14 @@ import '../../../domain/architecture/architecture_style.dart';
 import '../../../domain/architecture/city_lighting.dart';
 import '../coord_convert.dart';
 import 'city_materials.dart';
-import '../../../domain/architecture/building_massing.dart';
 import 'elevated_structure.dart';
 import 'lot_features.dart';
+import 'mesh_merge.dart';
 import 'oriented_box.dart';
 import 'pedestrian_tube.dart';
+import 'rail_vehicles.dart';
+import 'railway.dart';
+import 'road_mesher.dart';
 import 'street_furniture.dart';
 import 'vehicle_meshes.dart';
 import 'city_textures.dart';
@@ -62,7 +66,12 @@ class _CityMesh {
 /// sampler of it: the patch pass used to divide by 5 against a 6-band texture,
 /// which quietly recoloured commercial lots industrial-tan and support decks
 /// cursor-cyan.
-const int kGroundSwatches = 9;
+const int kGroundSwatches = 10;
+
+/// The palette band tree crowns take — the sprawl's yard and park trees are
+/// baked into the ground material for it, since the facade atlas has no
+/// green. Last in the palette, after the placement heatmap's pair.
+const int kLeafSwatch = 9;
 
 class CityNodes {
   CityNodes(this._scene);
@@ -155,10 +164,27 @@ class CityNodes {
 
   /// Hard ceiling on vehicles per frame. The whole set is rebuilt every frame
   /// and pushed through the transient buffer, which is the same budget the
-  /// asteroid fields already have to respect.
-  static const int _maxVehicles = 220;
+  /// asteroid fields already have to respect. Higher than it was now that
+  /// an expressway fills every one of its eight lanes and the suburbs'
+  /// roads carry traffic too — and gated by [trafficRangeM], so the count
+  /// is spent where the camera is.
+  static const int _maxVehicles = 600;
 
-  final List<fs.Node> _trafficNodes = [];
+  /// Roads further than this from the focus carry no vehicles. Traffic is
+  /// a per-frame cost, and a car six kilometres away is under a pixel.
+  static double trafficRangeM = 3500;
+
+  /// Resident traffic draws — one per (body, vehicle kind, material) plus
+  /// the train's — keyed so a frame REUSES last frame's node and moves its
+  /// instances in place. Tearing every one down and re-adding it each frame
+  /// (the old shape) removed and re-added render items, which marks the
+  /// engine's BVH structurally dirty and rebuilt it over the whole scene
+  /// sixty times a second: more per-frame cost than the traffic itself.
+  final Map<String, _TrafficSlot> _trafficSlots = {};
+
+  /// The train's canonical car (body + window band), instanced along the
+  /// line like any other vehicle — it used to be re-meshed every frame.
+  _CityMesh? _trainCar;
 
   /// One uploaded mesh per vehicle kind, built the first time it is needed.
   ///
@@ -173,6 +199,17 @@ class CityNodes {
         final body = MeshBuilder();
         final glass = MeshBuilder();
         VehicleMeshes.emitModel(body, glass, kind);
+        return _CityMesh(_geometryOf(body.build()), _geometryOf(glass.build()));
+      });
+
+  /// Rolling stock, one upload per kind, instanced along the railway.
+  final Map<RailCarKind, _CityMesh> _railCarMeshes = {};
+
+  _CityMesh _railCarMesh(RailCarKind kind) =>
+      _railCarMeshes.putIfAbsent(kind, () {
+        final body = MeshBuilder();
+        final glass = MeshBuilder();
+        RailVehicleMeshes.emitModel(body, glass, kind);
         return _CityMesh(_geometryOf(body.build()), _geometryOf(glass.build()));
       });
 
@@ -225,6 +262,9 @@ class CityNodes {
   /// that tracking the mouse never touches the city's cached batches, which is
   /// the whole point of keeping it separate from them.
   fs.Node? _cursorNode;
+
+  /// What [_cursorNode] was built from, so an unmoved mouse costs nothing.
+  Object? _cursorKey;
 
   /// Lot-size quantisation and variant count for the building archetypes.
   ///
@@ -368,10 +408,10 @@ class CityNodes {
   /// Curb reveal: how far the sidewalk stands above the carriageway. 150 mm
   /// is the real standard, and it is the "subtle elevation difference" that
   /// makes a street read as built rather than painted.
-  static const double kCurbHeightM = 0.15;
+  static const double kCurbHeightM = RoadMesher.curbHeightM;
 
   /// The carriageway ribbon's own lift over the graded ground ([_ribbonFor]).
-  static const double _ribbonLiftM = 0.12;
+  static const double _ribbonLiftM = RoadMesher.ribbonLiftM;
 
   /// Where the walk surface sits: the ribbon's lift plus the curb reveal.
   static const double _walkTopLiftM = _ribbonLiftM + kCurbHeightM;
@@ -391,7 +431,7 @@ class CityNodes {
           'p=${snap.patches.length})';
       // The cursor still draws over bare ground: pointing at an empty site is
       // exactly when the player most needs to see where a building would go.
-      _syncCursor(snap, origin);
+      _syncCursor(snap, origin, _bodyMotion(snap, origin));
       return;
     }
 
@@ -464,6 +504,7 @@ class CityNodes {
     } else if (_texturesPending) {
       _texturesPending = false;
       CityMaterials.reset();
+      _dropResident();
     }
     // Same race for the scatter atlas: a road pass built before it landed
     // skipped its street trees, so re-key that pass once the upload lands.
@@ -482,6 +523,7 @@ class CityNodes {
       _glowShaderPending = false;
       CityMaterials.reset();
       invalidate();
+      _dropResident();
     }
     CityMaterials.nightFactor = _nightFactorAt(snap, byBody);
     // Where the skyglow's height falloff and its density map are measured
@@ -561,24 +603,30 @@ class CityNodes {
     phaseMs['city.rebuild'] = rebuiltThisFrame ? sw.elapsedMicroseconds / 1000 : 0;
     sw.reset();
     // Every frame: re-place the anchors. A planet spins, so even a completely
-    // static colony needs new node matrices — but only the matrices.
-    _placeAnchors(snap, origin);
+    // static colony needs new node matrices — but only the matrices, and
+    // only on bodies that moved against the floating origin since last
+    // frame. Writing a node's transform dirties its bounds and refits the
+    // engine's BVH, so a static studio frame must write none.
+    final moved = _bodyMotion(snap, origin);
+    _placeAnchors(snap, origin, moved);
     phaseMs['city.anchors'] = sw.elapsedMicroseconds / 1000;
     sw.reset();
-    _syncTraffic(snap, origin);
+    _syncTraffic(snap, origin, moved, focusWorld);
     phaseMs['city.traffic'] = sw.elapsedMicroseconds / 1000;
     sw.reset();
-    _syncCursor(snap, origin);
+    _syncCursor(snap, origin, moved);
     phaseMs['city.cursor'] = sw.elapsedMicroseconds / 1000;
     phaseCount['draws'] = _drawCalls + _roadDrawCalls;
     phaseCount['batches'] = _batches.length + _roadBatches.length;
     phaseCount['meshes'] = _uploaded.length;
     phaseCount['buildings'] = snap.buildings.length;
-    phaseCount['trafficNodes'] = _trafficNodes.length;
+    phaseCount['trafficNodes'] =
+        _trafficSlots.values.where((slot) => slot.node.visible).length;
+    phaseCount['skylineTris'] = _skylineTris;
     debugLine =
         'city: ${snap.buildings.length} bldg, '
         '${_drawCalls + _roadDrawCalls} draws (${detail.name}), '
-        'meshes ${_uploaded.length}';
+        'meshes ${_uploaded.length}, skyline $_skylineTris tris';
   }
 
   /// How dark it is over the colony, from the frame's own sun.
@@ -729,6 +777,8 @@ class CityNodes {
       }
 
       final groups = <BuildingArchetype, List<vm.Matrix4>>{};
+      final skylineSolid = MergedMeshSink();
+      final skylineGlazing = MergedMeshSink();
       phaseSw
         ..reset()
         ..start();
@@ -745,6 +795,17 @@ class CityNodes {
         // Block tier keys and meshes against the coarse library, so the
         // dominant tier shares far fewer archetypes (and draws).
         final lib = _libraryFor(tier);
+        // The skyline: block-tier buildings are BAKED into one mesh per
+        // material for the whole colony rather than instanced per archetype
+        // — see [_emitSkyline]. The visualiser keeps the instanced path so
+        // its boxes stay one per archetype.
+        if (tier == BuildingDetail.block && !lodDebug) {
+          final built = lib.get(spec, parcel, seed: seed, detail: tier);
+          final m = instanceTransform(anchorBF, b);
+          skylineSolid.append(built.model.solid, m);
+          skylineGlazing.append(built.model.foliage, m);
+          continue;
+        }
         final key = BuildingArchetype.of(spec, parcel,
             detail: tier, seed: seed, bucketM: lib.bucketM,
             variants: lib.variants,
@@ -787,6 +848,8 @@ class CityNodes {
         ..reset()
         ..start();
       _emit(groups, bodyId: entry.key, anchorBF: anchorBF);
+      _emitSkyline(skylineSolid, skylineGlazing,
+          bodyId: entry.key, anchorBF: anchorBF);
       emitUs += phaseSw.elapsedMicroseconds;
       phaseSw
         ..reset()
@@ -897,37 +960,77 @@ class CityNodes {
   /// COSMETIC. Nothing here routes, yields, or knows a signal exists; vehicles
   /// slide along their road and wrap. It is scenery, and the moment it stops
   /// being scenery it belongs in the tick instead.
-  void _syncTraffic(WorldSnapshot snap, FloatingOrigin origin) {
-    for (final n in _trafficNodes) {
-      _scene.remove(n);
+  void _syncTraffic(WorldSnapshot snap, FloatingOrigin origin,
+      Map<String, bool> moved, Vector3 focusWorld) {
+    if (!traffic) {
+      if (_trafficSlots.isNotEmpty) _dropTraffic();
+      return;
     }
-    _trafficNodes.clear();
-    if (!traffic) return;
+    for (final slot in _trafficSlots.values) {
+      slot.touched = false;
+    }
 
-    final byBody = <String, List<RoadSnapshot>>{};
+    // Every road that carries traffic, the plat's and the plan's alike:
+    // one loop, one rule for what drives where.
+    final byBody = <String, List<_TrafficRoad>>{};
     for (final r in snap.roads) {
-      (byBody[r.body] ??= []).add(r);
+      (byBody[r.body] ??= []).add(_TrafficRoad(
+          r.points, r.roadClassIndex, r.halfWidthM, r.sealed, const []));
+    }
+    for (final r in snap.sprawlRoads) {
+      final kind = SprawlRoadKind
+          .values[r.kind.clamp(0, SprawlRoadKind.values.length - 1)];
+      // The plat draws and drives its own rights-of-way.
+      if (kind == SprawlRoadKind.corridor) continue;
+      // A piece that tapers is driven at its narrower width, so nothing
+      // runs in the lane that is dropped along it.
+      var narrow = r.halfWidthM;
+      for (final w in [r.startHalfWidthM, r.endHalfWidthM]) {
+        if (w != null && w < narrow) narrow = w;
+      }
+      (byBody[r.body] ??= []).add(_TrafficRoad(
+          r.points, r.roadClassIndex, r.halfWidthM, false, r.overpasses,
+          narrowHalfWidthM: narrow));
     }
 
     for (final entry in byBody.entries) {
       final body = snap.bodies[entry.key];
       if (body == null) continue;
-      // Anchor on the first road point: traffic is rebuilt every frame, so it
-      // cannot use the structural batches' anchors — but it must share their
-      // FRAME, which the body transform below supplies.
+      // Anchor on the first road point: traffic cannot use the structural
+      // batches' anchors — but it must share their FRAME, which the body
+      // transform below supplies.
       final first = entry.value.firstWhere((r) => r.points.length >= 3,
           orElse: () => entry.value.first);
       if (first.points.length < 3) continue;
       final anchorBF =
           Vector3(first.points[0], first.points[1], first.points[2]);
+      final bodyWorld = Vector3(body.px, body.py, body.pz);
+      final bodyQuat = Quaternion(body.qw, body.qx, body.qy, body.qz);
+      // The focus in the body's frame, so the range gate is one subtraction
+      // per road rather than a rotation per road.
+      final focusBF = focusInBodyFrame(focusWorld, bodyWorld, bodyQuat);
 
       final byKind = <VehicleKind, List<vm.Matrix4>>{};
-      final trainBody = MeshBuilder();
-      final trainGlass = MeshBuilder();
+      final trainCars = <vm.Matrix4>[];
+      // Ground railway segments, joined into lines and run below.
+      final railSegments = <List<Vector3>>[];
       var placed = 0;
 
       for (final road in entry.value) {
         if (placed >= _maxVehicles) break;
+        if (road.points.length < 6) continue;
+        final cls = RoadClass
+            .values[road.roadClassIndex.clamp(0, RoadClass.values.length - 1)];
+        // Out of range: nothing to see. Rail is kept — a train is a long
+        // thing on a long line, and the chains below want every segment.
+        if (cls != RoadClass.rail) {
+          final n = road.points.length;
+          final a = Vector3(road.points[0], road.points[1], road.points[2]);
+          final b = Vector3(
+              road.points[n - 3], road.points[n - 2], road.points[n - 1]);
+          final near = math.min((a - focusBF).length, (b - focusBF).length);
+          if (near > trafficRangeM) continue;
+        }
         final pts = <Vector3>[];
         for (var i = 0; i + 2 < road.points.length; i += 3) {
           pts.add(Vector3(road.points[i] - anchorBF.x,
@@ -944,24 +1047,32 @@ class CityNodes {
         final total = cum.last;
         if (total < 30) continue;
 
-        final cls = RoadClass
-            .values[road.roadClassIndex.clamp(0, RoadClass.values.length - 1)];
-
-        // Rail carries a TRAIN, not cars.
+        if (cls == RoadClass.rail) {
+          railSegments.add(pts);
+          continue;
+        }
+        // Elevated rail carries the L's train, not cars: one canonical car,
+        // instanced at each pose, on the same convention as the road vehicles
+        // (model +X across, +Y along, +Z up; vertices in scene units).
         if (!cls.carriesCars) {
-          ElevatedStructure.emitTrain(
-            trainBody,
-            trainGlass,
+          for (final car in ElevatedStructure.trainCarPoses(
             pts: pts,
             anchorBF: anchorBF,
             lengthM: total,
             epochS: snap.epoch,
             seed: road.points.length,
-          );
+          )) {
+            trainCars.add(vm.Matrix4.compose(
+              vm.Vector3(lengthToScene(car.centre.x),
+                  lengthToScene(car.centre.y), lengthToScene(car.centre.z)),
+              quatToScene(Quaternion.fromBasis(car.side, car.along, car.up)),
+              vm.Vector3.all(1.0),
+            ));
+          }
           continue;
         }
 
-        // Metres of road per vehicle, and speed, PER CLASS.
+        // Metres of road per vehicle PER LANE, and speed, by class.
         //
         // Both were derived from `cls.index` arithmetic, which happened to
         // work while there were four classes and broke the moment there were
@@ -970,12 +1081,18 @@ class CityNodes {
         // quantity — writing the quantity down is both correct and readable.
         final (spacingM, speed) = switch (cls) {
           RoadClass.street => (110.0, 8.0),
-          RoadClass.avenue => (88.0, 13.0),
-          RoadClass.highway => (66.0, 26.0),
-          RoadClass.elevated => (70.0, 24.0),
+          RoadClass.avenue => (120.0, 13.0),
+          RoadClass.highway => (110.0, 22.0),
+          RoadClass.elevated => (95.0, 24.0),
           RoadClass.alley => (200.0, 4.0),
           RoadClass.path => (150.0, 6.0),
-          RoadClass.transit => (0.0, 0.0),
+          // Out of town: sparse and fast.
+          RoadClass.trunk => (140.0, 30.0),
+          RoadClass.expressway4 => (90.0, 31.0),
+          RoadClass.expressway6 => (95.0, 31.0),
+          RoadClass.expressway8 => (100.0, 31.0),
+          RoadClass.ramp => (160.0, 14.0),
+          RoadClass.transit || RoadClass.rail => (0.0, 0.0),
         };
         if (spacingM <= 0) continue;
         final perLane = (total / spacingM * trafficDensity).floor();
@@ -983,106 +1100,218 @@ class CityNodes {
         final family =
             road.sealed ? VehicleKind.airless : VehicleKind.road;
         final seed = road.points.length * 2654435761 + entry.key.hashCode;
+        // Where the lanes are. A road with no layout — there is none — gets
+        // one stream each way, half way out to the curb.
+        final layout = cls.lanes;
+        final laneScale = layout == null ? 1.0 : road.halfWidthM / layout.halfWidthM;
+        // Only the lanes that run the piece's whole length.
+        final drivable = road.narrowHalfWidthM - (layout?.shoulderM ?? 0) * laneScale;
+        final laneOffsets = [
+          for (final o in layout?.laneOffsets ?? [road.halfWidthM * 0.5])
+            if (o.abs() * laneScale + 1.0 <= drivable) o
+        ];
+        final ranges = <(double, double)>[
+          for (var i = 0; i + 1 < road.overpasses.length; i += 2)
+            (road.overpasses[i], road.overpasses[i + 1]),
+        ];
+        final oneWay = layout?.oneWay ?? false;
 
-        for (var lane = 0; lane < 2; lane++) {
-          final dirSign = lane == 0 ? 1.0 : -1.0;
-          for (var i = 0; i < perLane && placed < _maxVehicles; i++) {
-            final h = _hash(seed + lane * 7919 + i * 104729);
-            final kind = family[h % family.length];
-            // Longer vehicles need more room; spacing them by their own length
-            // keeps a semi from sitting inside the car behind it.
-            final phase = (h >> 8 & 0xFFFF) / 65536.0;
-            var d = (cum.last * (i + phase) / perLane +
-                    dirSign * snap.epoch * speed) %
-                total;
-            if (d < 0) d += total;
-            final at = _alongPolyline(pts, cum, d);
-            if (at == null) continue;
-            final fwd = at.$2 * dirSign;
-            final up = (at.$1 + anchorBF).normalized;
-            final side = fwd.cross(up).normalized;
-            // Keep right of the centreline, like everything else does — and
-            // ride the DECK on an elevated road rather than the ground its
-            // columns stand on.
-            final offset =
-                side * (road.halfWidthM * 0.5) + up * cls.deckHeightM;
-            // Model space is +Y forward, +Z up, so the instance rotation is
-            // the basis (side, forward, up) expressed as a quaternion.
-            final rot = Quaternion.fromBasis(side, fwd, up);
-            (byKind[kind] ??= []).add(vm.Matrix4.compose(
-              vm.Vector3(
-                  lengthToScene((at.$1 + offset).x),
-                  lengthToScene((at.$1 + offset).y),
-                  lengthToScene((at.$1 + offset).z)),
-              quatToScene(rot),
-              // UNIT scale: `VehicleMeshes.emit` already builds its vertices
-              // in scene units, unlike the building library which works in
-              // metres. Applying the metres-to-scene factor again here made
-              // every vehicle a thousand times too small — present, drawn, and
-              // far too little to see.
-              vm.Vector3.all(1.0),
-            ));
-            placed++;
+        var stream = 0;
+        for (var dirIndex = 0; dirIndex < (oneWay ? 1 : 2); dirIndex++) {
+          final dirSign = dirIndex == 0 ? 1.0 : -1.0;
+          for (final laneOffset in laneOffsets) {
+            final lane = stream++;
+            for (var i = 0; i < perLane && placed < _maxVehicles; i++) {
+              final h = _hash(seed + lane * 7919 + i * 104729);
+              final kind = family[h % family.length];
+              // Longer vehicles need more room; spacing them by their own
+              // length keeps a semi from sitting inside the car behind it.
+              final phase = (h >> 8 & 0xFFFF) / 65536.0;
+              var d = (cum.last * (i + phase) / perLane +
+                      dirSign * snap.epoch * speed) %
+                  total;
+              if (d < 0) d += total;
+              final at = _alongPolyline(pts, cum, d);
+              if (at == null) continue;
+              final fwd = at.$2 * dirSign;
+              final up = (at.$1 + anchorBF).normalized;
+              final side = fwd.cross(up).normalized;
+              // In its lane, to the right of the centreline in its own
+              // direction of travel — and on the DECK of an elevated road or
+              // a bridge rather than the ground the columns stand on.
+              final lift = cls.deckHeightM + RoadMesher.bridgeLiftAt(d, ranges);
+              final offset = side * (laneOffset * laneScale) + up * lift;
+              // Model space is +Y forward, +Z up, so the instance rotation is
+              // the basis (side, forward, up) expressed as a quaternion.
+              final rot = Quaternion.fromBasis(side, fwd, up);
+              (byKind[kind] ??= []).add(vm.Matrix4.compose(
+                vm.Vector3(
+                    lengthToScene((at.$1 + offset).x),
+                    lengthToScene((at.$1 + offset).y),
+                    lengthToScene((at.$1 + offset).z)),
+                quatToScene(rot),
+                // UNIT scale: `VehicleMeshes.emit` already builds its
+                // vertices in scene units, unlike the building library which
+                // works in metres. Applying the metres-to-scene factor again
+                // here made every vehicle a thousand times too small.
+                vm.Vector3.all(1.0),
+              ));
+              placed++;
+            }
           }
         }
+      }
+
+      // The railway's trains: a passenger shuttle calling at the stations
+      // and a freight working calling at the yard, on every line long
+      // enough to hold one; a short line with no stops is a siding, and a
+      // freight rake stands on it.
+      final railCars = <RailCarKind, List<vm.Matrix4>>{};
+      if (railSegments.isNotEmpty) {
+        final stops = <(String, Vector3)>[
+          for (final b in snap.buildings.values)
+            if (b.body == entry.key &&
+                (b.type == 'station' || b.type == 'freightyard'))
+              (b.type, Vector3(b.px, b.py, b.pz) - anchorBF),
+        ];
+        var line = 0;
+        for (final chain in Railway.chains(railSegments)) {
+          final cum = RailConsist.cumulative(chain);
+          if (cum.last < 200) continue;
+          final stationsM = <double>[];
+          final yardsM = <double>[];
+          for (final (type, at) in stops) {
+            final n = RailConsist.nearestOn(chain, cum, at);
+            if (n.offM > 160) continue;
+            (type == 'station' ? stationsM : yardsM).add(n.alongM);
+          }
+          final phase = ((line++ * 977 + entry.key.hashCode) % 1000).toDouble();
+          final siding = cum.last < 900 && stationsM.isEmpty && yardsM.isEmpty;
+          final runs = siding
+              ? [(RailConsist.freight, const <double>[], 0.0, false)]
+              : [
+                  (RailConsist.passenger, stationsM, phase, true),
+                  (
+                    RailConsist.freight,
+                    yardsM,
+                    phase + cum.last / RailConsist.freight.speedMs,
+                    true
+                  ),
+                ];
+          for (final (consist, stopsM, phaseS, moving) in runs) {
+            for (final car in consist.posesAt(
+              pts: chain,
+              anchorBF: anchorBF,
+              epochS: snap.epoch,
+              stopsM: stopsM,
+              phaseS: phaseS,
+              moving: moving,
+              parkedAtM: cum.last / 2 + consist.lengthM / 2,
+            )) {
+              (railCars[car.kind] ??= []).add(vm.Matrix4.compose(
+                vm.Vector3(lengthToScene(car.centre.x),
+                    lengthToScene(car.centre.y), lengthToScene(car.centre.z)),
+                quatToScene(Quaternion.fromBasis(car.side, car.along, car.up)),
+                vm.Vector3.all(1.0),
+              ));
+            }
+          }
+        }
+      }
+
+      // The anchor is written only when this body moved or the slot is new.
+      final bodyMoved = moved[entry.key] ?? true;
+      vm.Matrix4? anchor;
+      void place(String key, fs.MeshGeometry? geometry, fs.Material material,
+          List<vm.Matrix4> transforms) {
+        if (geometry == null || transforms.isEmpty) return;
+        // _maxVehicles is far under _maxPerDraw, so one draw per slot.
+        final slot = _trafficSlots.putIfAbsent(key, () {
+          final mesh = fs.InstancedMesh(geometry: geometry, material: material);
+          final node = fs.Node()
+            ..addComponent(fs.InstancedMeshComponent(mesh));
+          _scene.add(node);
+          return _TrafficSlot(node, mesh);
+        });
+        slot.touched = true;
+        _setInstances(slot.mesh, transforms);
+        if (!slot.placed || bodyMoved) {
+          slot.node.localTransform =
+              anchor ??= _anchorTransform(body, anchorBF, origin);
+          slot.placed = true;
+        }
+        slot.node.visible = true;
       }
 
       byKind.forEach((kind, transforms) {
         final mesh = _vehicleMesh(kind);
-        for (final (geometry, material) in [
-          (mesh.solid, CityMaterials.facade),
-          (mesh.glazing, CityMaterials.glazing),
-        ]) {
-          if (geometry == null) continue;
-          for (var start = 0;
-              start < transforms.length;
-              start += _maxPerDraw) {
-            final end = math.min(start + _maxPerDraw, transforms.length);
-            final instanced =
-                fs.InstancedMesh(geometry: geometry, material: material);
-            for (var i = start; i < end; i++) {
-              instanced.addInstance(transforms[i]);
-            }
-            final node = fs.Node()
-              ..addComponent(fs.InstancedMeshComponent(instanced));
-            final bodyWorld = Vector3(body.px, body.py, body.pz);
-            final bodyQuat = Quaternion(body.qw, body.qx, body.qy, body.qz);
-            node.localTransform = vm.Matrix4.compose(
-              origin.worldToScene(bodyWorld + bodyQuat.rotate(anchorBF)),
-              quatToScene(bodyQuat),
-              vm.Vector3.all(1.0),
-            );
-            _scene.add(node);
-            _trafficNodes.add(node);
-          }
-        }
+        place('${entry.key}/${kind.name}/solid', mesh.solid,
+            CityMaterials.facade, transforms);
+        place('${entry.key}/${kind.name}/glazing', mesh.glazing,
+            CityMaterials.glazing, transforms);
       });
-
-      // The train. Built as ordinary geometry rather than instanced: there is
-      // at most one set per line and its cars are already one mesh, so an
-      // instanced draw would cost a buffer upload to save nothing.
-      for (final (builder, material) in [
-        (trainBody, CityMaterials.facade),
-        (trainGlass, CityMaterials.glazing),
-      ]) {
-        final mesh = builder.build();
-        if (mesh.isEmpty) continue;
-        final geometry = _geometryOf(mesh);
-        if (geometry == null) continue;
-        final node = fs.Node(
-          mesh: fs.Mesh.primitives(
-              primitives: [fs.MeshPrimitive(geometry, material)]),
-        );
-        final bodyWorld = Vector3(body.px, body.py, body.pz);
-        final bodyQuat = Quaternion(body.qw, body.qx, body.qy, body.qz);
-        node.localTransform = vm.Matrix4.compose(
-          origin.worldToScene(bodyWorld + bodyQuat.rotate(anchorBF)),
-          quatToScene(bodyQuat),
-          vm.Vector3.all(1.0),
-        );
-        _scene.add(node);
-        _trafficNodes.add(node);
+      railCars.forEach((kind, transforms) {
+        final mesh = _railCarMesh(kind);
+        place('${entry.key}/rail/${kind.name}/solid', mesh.solid,
+            CityMaterials.facade, transforms);
+        place('${entry.key}/rail/${kind.name}/glazing', mesh.glazing,
+            CityMaterials.glazing, transforms);
+      });
+      if (trainCars.isNotEmpty) {
+        final car = _trainCar ??= () {
+          final carBody = MeshBuilder();
+          final carGlass = MeshBuilder();
+          ElevatedStructure.emitTrainCar(carBody, carGlass);
+          return _CityMesh(
+              _geometryOf(carBody.build()), _geometryOf(carGlass.build()));
+        }();
+        place('${entry.key}/train/solid', car.solid, CityMaterials.facade,
+            trainCars);
+        place('${entry.key}/train/glazing', car.glazing,
+            CityMaterials.glazing, trainCars);
       }
+    }
+    // A slot nothing used this frame — a kind that placed no vehicle, a body
+    // out of the frame — hides rather than dies: it will be wanted again.
+    for (final slot in _trafficSlots.values) {
+      if (!slot.touched) slot.node.visible = false;
+    }
+  }
+
+  /// Move [mesh]'s instances to [transforms] in place. A plain move only
+  /// refits the BVH; instances are added or removed only when the count
+  /// changes.
+  static void _setInstances(
+      fs.InstancedMesh mesh, List<vm.Matrix4> transforms) {
+    if (mesh.instanceCount == transforms.length) {
+      for (var i = 0; i < transforms.length; i++) {
+        mesh.setInstanceTransform(i, transforms[i]);
+      }
+      return;
+    }
+    mesh.clearInstances();
+    for (final t in transforms) {
+      mesh.addInstance(t);
+    }
+  }
+
+  void _dropTraffic() {
+    for (final slot in _trafficSlots.values) {
+      _scene.remove(slot.node);
+    }
+    _trafficSlots.clear();
+  }
+
+  /// Drop the nodes that keep MATERIAL instances across frames — traffic and
+  /// the cursor — when the material cache is reset, or they would go on
+  /// drawing with the old ones.
+  void _dropResident() {
+    _dropTraffic();
+    final cursor = _cursorNode;
+    if (cursor != null) {
+      _scene.remove(cursor);
+      _cursorNode = null;
+      _cursorKey = null;
     }
   }
 
@@ -1110,19 +1339,50 @@ class CityNodes {
   }
 
   /// Draw (or clear) the editor's ground cursor.
-  void _syncCursor(WorldSnapshot snap, FloatingOrigin origin) {
-    final existing = _cursorNode;
-    if (existing != null) {
-      _scene.remove(existing);
-      _cursorNode = null;
-    }
+  void _syncCursor(
+      WorldSnapshot snap, FloatingOrigin origin, Map<String, bool> moved) {
     final route = pendingRouteBF;
     // The anchor: the cursor when there is one, else the route's first point —
     // a half-drawn road must stay visible while the mouse is off the map.
     final at = cursorBF ?? (route.length >= 2 ? route.first : null);
-    if (at == null) return;
-    final body = snap.bodies[cursorBodyId];
-    if (body == null) return;
+    final body = at == null ? null : snap.bodies[cursorBodyId];
+    final existing = _cursorNode;
+    if (at == null || body == null) {
+      if (existing != null) {
+        _scene.remove(existing);
+        _cursorNode = null;
+        _cursorKey = null;
+      }
+      return;
+    }
+    // Everything the cursor mesh is built from. Unchanged — the usual frame,
+    // the mouse at rest — the node stays and at most its anchor moves.
+    // Rebuilding it every frame removed and re-added a render item, which
+    // is a whole-scene BVH rebuild for a square that had not moved.
+    final key = (
+      at,
+      cursorBodyId,
+      cursorSizeM,
+      cursorDepthM,
+      cursorBad,
+      identityHashCode(heatBF),
+      identityHashCode(heatKind),
+      heatCellM,
+      identityHashCode(route),
+      pendingRouteBad,
+      pendingWidthM,
+    );
+    if (existing != null && key == _cursorKey) {
+      if (moved[cursorBodyId] ?? true) {
+        existing.localTransform = _anchorTransform(body, at, origin);
+      }
+      return;
+    }
+    if (existing != null) {
+      _scene.remove(existing);
+      _cursorNode = null;
+    }
+    _cursorKey = key;
 
     final up = at.normalized;
     // A stable tangent frame: any vector not parallel to up will do, and the
@@ -1214,13 +1474,7 @@ class CityNodes {
         fs.MeshPrimitive(geometry, CityMaterials.ground),
       ]),
     );
-    final bodyWorld = Vector3(body.px, body.py, body.pz);
-    final bodyQuat = Quaternion(body.qw, body.qx, body.qy, body.qz);
-    node.localTransform = vm.Matrix4.compose(
-      origin.worldToScene(bodyWorld + bodyQuat.rotate(at)),
-      quatToScene(bodyQuat),
-      vm.Vector3.all(1.0),
-    );
+    node.localTransform = _anchorTransform(body, at, origin);
     _scene.add(node);
     _cursorNode = node;
   }
@@ -1331,15 +1585,24 @@ class CityNodes {
       final edging = LotFeatures.edgingFor(b.type);
       final sign = LotFeatures.signFor(b.type);
       final spec = specOf(b);
-      final spaces = const BuildingMassingRules().parkingSpaces(spec);
-      if (edging == LotEdging.none && !sign && spaces <= 0) continue;
+      final parcel = parcelOf(b);
+      // The massing the building was DRAWN from — the library's cached one,
+      // canonical lot and variant and all — so the lot the paint goes on and
+      // the door the path runs to are the ones in the mesh.
+      final built =
+          _libraryFor(tier).get(spec, parcel, seed: b.id.hashCode, detail: tier);
+      final massing = built.massing;
+      final lot = massing.parking;
+      if (edging == LotEdging.none && !sign && lot == null) continue;
 
       final at = Vector3(b.px, b.py, b.pz) - anchorBF;
       final up = (at + anchorBF).normalized;
-      // The building's own facing: its orientation carries the surface basis
-      // plus the spin onto its street, so +Y is the way it fronts.
+      // The building's own frame: its orientation carries the surface basis
+      // plus the spin onto its street, so +X runs along the street and +Y
+      // from the street into the lot.
       final q = Quaternion(b.qw, b.qx, b.qy, b.qz);
       final along = q.rotate(Vector3.unitY).normalized;
+      final sideAxis = q.rotate(Vector3.unitX).normalized;
 
       // Out to the LOT LINE, not the building's own edge: the footprint has
       // already been inset by its setback and shrunk by its coverage, and a
@@ -1359,17 +1622,33 @@ class CityNodes {
             math.max(1.0, b.siteWidthM / 18));
         any = true;
       }
-      if (spaces > 0 && carBudget > 0) {
+      if (lot != null && carBudget > 0) {
         // Occupancy has no field on the wire yet, so it is DERIVED: a
         // deterministic per-lot fraction, so a district reads as busy or quiet
         // and two clients agree, without pretending to know the real number.
         final h = (b.id.hashCode & 0x7FFFFFFF) % 1000 / 1000.0;
-        carBudget -= LotFeatures.emitParking(
-          apron, cars, glow, at, along, up, halfW, halfD,
-          spaces: spaces,
+        // The parcel's REAL lot lines, in the frame the massing was placed
+        // in — its centroid, the street at negative Y. [halfD] is the lot
+        // line the fence stands on: the site plus the coverage and setback
+        // the density rule took off it, which is where the sidewalk begins.
+        final depth = halfD * 2;
+        // The back wall: the rear of the deepest floored volume.
+        var rearWall = double.negativeInfinity;
+        for (final v in massing.volumes) {
+          if (v.floors > 0) rearWall = math.max(rearWall, v.y + v.depth / 2);
+        }
+        carBudget -= LotFeatures.emitLot(
+          apron, cars, glow, at, sideAxis, along, up, lot, massing.entrance,
+          frontLineY: -depth / 2,
+          rearLineY: depth / 2,
+          // Where the lot IS, not where the style says it goes: an
+          // installation's lot is out front whatever the kit.
+          behind: lot.y > massing.entrance.$2,
+          rearDoorY: rearWall.isFinite ? rearWall : lot.y - lot.depth / 2,
           occupancy: 0.25 + h * 0.6,
           airless: sealedWorld,
-          maxCars: math.min(8, carBudget),
+          maxCars: math.min(12, carBudget),
+          detailed: tier == BuildingDetail.full,
         );
         any = true;
       }
@@ -1434,7 +1713,10 @@ class CityNodes {
     // a place where three or more ends meet — the topology is there, it had
     // just never been drawn, which is why crossings read as two ribbons laid
     // over one another.
-    final ends = <(Vector3, Vector3, double, bool, int)>[];
+    final ends = <RoadEnd>[];
+    // Every END of an elevated rail line, with the point just inside it.
+    // An end nothing else meets is a terminal, and gets its station.
+    final transitEnds = <(Vector3, Vector3, double)>[];
     final tubeSolid = MeshBuilder();
     final tubeGlass = MeshBuilder();
     final curbSolid = MeshBuilder();
@@ -1443,6 +1725,10 @@ class CityNodes {
     final lampSolid = MeshBuilder();
     final lampGlow = MeshBuilder();
     final walkRibbon = MeshBuilder();
+    // The railway: ballast, sleepers, rails.
+    final railBallast = MeshBuilder();
+    final railConcrete = MeshBuilder();
+    final railSteel = MeshBuilder();
 
     // Widest carriageway meeting each road END, so a sidewalk can stop short
     // of its crossing instead of bridging the intersecting street. Legs split
@@ -1506,27 +1792,46 @@ class CityNodes {
           cls: cls,
           halfWidthM: road.halfWidthM,
         );
+        if (cls == RoadClass.transit) {
+          transitEnds.add((pts.first, pts[1], road.halfWidthM));
+          transitEnds.add((pts.last, pts[pts.length - 2], road.halfWidthM));
+        }
         continue;
       }
 
-      _ribbonFor(
-          cls == RoadClass.alley
-              ? alleyRibbon
-              : (paved ? ribbon : dirtRibbon),
-          pts,
-          road.halfWidthM,
-          anchorBF);
+      if (cls == RoadClass.rail) {
+        // Track, not tarmac: no ribbon, no pavement, no furniture, no
+        // junction plates — a level crossing is the road's business.
+        Railway.emit(railBallast, railConcrete, railSteel,
+            pts: pts, anchorBF: anchorBF, halfWidthM: road.halfWidthM);
+        continue;
+      }
+
+      if (cls == RoadClass.alley) {
+        RoadMesher.ribbon(alleyRibbon, pts, anchorBF, road.halfWidthM);
+      } else if (!paved) {
+        RoadMesher.ribbon(dirtRibbon, pts, anchorBF, road.halfWidthM);
+      } else {
+        // The carriageway with its lanes painted on — the same pipeline the
+        // suburbs and the expressways draw through.
+        RoadMesher.carriageway(ribbon, pts, anchorBF, cls,
+            halfWidthM: road.halfWidthM, solid: propSolid);
+        if (road.soundWalls && cls.canHaveSoundWalls) {
+          RoadMesher.soundWalls(propSolid, pts, anchorBF, road.halfWidthM,
+              posts: true);
+        }
+      }
       // Raised pavements with a curb face, on anything that has a pavement
       // to raise. Not on a sealed world — pedestrians there travel in the
       // tube, and an open sidewalk in vacuum is set dressing for nobody.
       final walked = paved && cls.hasPavement && !road.sealed;
       if (walked) {
-        _sidewalksFor(walkRibbon, pts, road.halfWidthM, 3.0, anchorBF,
+        RoadMesher.sidewalks(walkRibbon, pts, road.halfWidthM, 3.0, anchorBF,
             pullStart: pullAt(pts.first), pullEnd: pullAt(pts.last));
       }
       // Nobody lights a dirt track, and nobody lights an alley either.
       if (paved && cls.hasPavement) {
-        _lampsFor(lampSolid, lampGlow, pts, road, anchorBF,
+        RoadMesher.lamps(lampSolid, lampGlow, pts, anchorBF, road.halfWidthM, cls,
             liftM: walked ? _walkTopLiftM : 0.0);
       }
       if (propBudget > 0) {
@@ -1551,13 +1856,12 @@ class CityNodes {
           shrubsOut: shrubPits,
         );
       }
-      // Only signalised classes contribute junction legs. An alley meeting a
-      // street does not get a stop bar and a crossing; it gets a curb cut.
-      if (cls.signalised) {
-        ends.add((pts.first, pts[1], road.halfWidthM, paved,
-            road.roadClassIndex));
-        ends.add((pts.last, pts[pts.length - 2], road.halfWidthM, paved,
-            road.roadClassIndex));
+      // An alley meeting a street does not get a stop bar and a crossing;
+      // it gets a curb cut. Everything that joins junctions is a leg.
+      if (cls.joinsJunctions) {
+        ends.add(RoadEnd(pts.first, pts[1], road.halfWidthM, cls, paved: paved));
+        ends.add(RoadEnd(pts.last, pts[pts.length - 2], road.halfWidthM, cls,
+            paved: paved));
       }
       // Vacuum outside: pedestrians travel in a pressurised tube, not on a
       // pavement. The glazing builder already exists for dome caps.
@@ -1573,7 +1877,26 @@ class CityNodes {
     }
     // Signal phase comes from sim time: deterministic, stateless, and the
     // same on every client looking at the same tick.
-    _junctionsFor(ribbon, lampSolid, lampGlow, ends, anchorBF, snap.epoch);
+    RoadMesher.junctions(ribbon, lampSolid, lampGlow,
+        RoadMesher.junctionsFromEnds(ends), anchorBF, snap.epoch);
+    // Terminals at the free ends of the L: the line is split at every
+    // street it crosses, so an end is free only when no other piece of
+    // line ends on it.
+    for (var i = 0; i < transitEnds.length; i++) {
+      final (at, next, hw) = transitEnds[i];
+      var free = true;
+      for (var j = 0; j < transitEnds.length && free; j++) {
+        if (j != i && (transitEnds[j].$1 - at).length < 8.0) free = false;
+      }
+      if (!free) continue;
+      final inward = next - at;
+      if (inward.length < 1e-6) continue;
+      ElevatedStructure.emitTerminal(airSolid, airGlow,
+          at: at,
+          inward: inward.normalized,
+          anchorBF: anchorBF,
+          halfWidthM: hw);
+    }
 
     for (final (builder, material) in [
       // The ribbon takes the dedicated road strip — on the facade material it
@@ -1583,6 +1906,9 @@ class CityNodes {
       (dirtRibbon, CityMaterials.dirt),
       (alleyRibbon, CityMaterials.alley),
       (walkRibbon, CityMaterials.sidewalk),
+      (railBallast, CityMaterials.dirt),
+      (railConcrete, CityMaterials.sidewalk),
+      (railSteel, CityMaterials.alley),
       (airDeck, CityMaterials.road),
       (airSolid, CityMaterials.facade),
       (airGlow, CityMaterials.glazing),
@@ -1695,123 +2021,6 @@ class CityNodes {
     });
   }
 
-  /// A flat strip along the centreline, lifted a few centimetres so it wins the
-  /// depth test against the graded corridor it sits in instead of z-fighting
-  /// the terrain that was levelled for it.
-  static void _ribbonFor(
-    MeshBuilder m,
-    List<Vector3> pts,
-    double halfWidth,
-    Vector3 anchorBF,
-  ) {
-    const lift = 0.12;
-    var v = 0.0;
-    int? prevL, prevR;
-    for (var i = 0; i < pts.length; i++) {
-      final p = pts[i];
-      // Local up is radial at the point itself, not at the anchor: a long road
-      // curves with the body, and a single shared up would bury one end.
-      final up = (p + anchorBF).normalized;
-      final ahead = i + 1 < pts.length ? pts[i + 1] - p : p - pts[i - 1];
-      final along = ahead.length > 1e-6 ? ahead.normalized : Vector3.unitX;
-      final side = along.cross(up).normalized;
-      if (i > 0) v += (p - pts[i - 1]).length / (halfWidth * 2);
-      final l = m.vertex(_scenePos(p + side * -halfWidth + up * lift), up, 0, v);
-      final r = m.vertex(_scenePos(p + side * halfWidth + up * lift), up, 1, v);
-      if (prevL != null && prevR != null) {
-        m.quad(prevL, prevR, r, l);
-      }
-      prevL = l;
-      prevR = r;
-    }
-  }
-
-  /// Raised pavements with a real curb face, one strip each side.
-  ///
-  /// The walk rides [kCurbHeightM] above the carriageway ribbon, a vertical
-  /// curb face closes the step, and both ends pull back so the strip stops
-  /// at its crossing instead of bridging the intersecting street — the gap
-  /// is where the curb cut and the zebra live. U samples the sidewalk tile
-  /// across the walk (curb stones under 0.06, flags above); the curb face
-  /// wraps the same curb band down its vertical.
-  static void _sidewalksFor(
-    MeshBuilder m,
-    List<Vector3> pts,
-    double halfWidth,
-    double pavementM,
-    Vector3 anchorBF, {
-    double pullStart = 0,
-    double pullEnd = 0,
-  }) {
-    var total = 0.0;
-    for (var i = 1; i < pts.length; i++) {
-      total += (pts[i] - pts[i - 1]).length;
-    }
-    // Keep a real run of pavement mid-block or draw none at all.
-    pullStart = math.min(pullStart, total * 0.45);
-    pullEnd = math.min(pullEnd, total * 0.45);
-    if (total - pullStart - pullEnd < 5.0) return;
-
-    // Trim the centreline to the kept span, interpolating the cut points.
-    final kept = <Vector3>[];
-    final endAt = total - pullEnd;
-    if (pullStart <= 0) kept.add(pts.first);
-    var d = 0.0;
-    for (var i = 1; i < pts.length; i++) {
-      final seg = pts[i] - pts[i - 1];
-      final len = seg.length;
-      if (len < 1e-6) continue;
-      final d0 = d;
-      d += len;
-      if (d0 < pullStart && d > pullStart) {
-        kept.add(pts[i - 1] + seg * ((pullStart - d0) / len));
-      }
-      if (d > pullStart && d < endAt) {
-        kept.add(pts[i]);
-      } else if (d0 < endAt && d >= endAt) {
-        kept.add(pts[i - 1] + seg * ((endAt - d0) / len));
-        break;
-      }
-    }
-    if (kept.length < 2) return;
-
-    for (final s in const [-1.0, 1.0]) {
-      int? pIn, pOut, pCurbT, pCurbB;
-      var v = 0.0;
-      for (var i = 0; i < kept.length; i++) {
-        final p = kept[i];
-        final up = (p + anchorBF).normalized;
-        final ahead = i + 1 < kept.length ? kept[i + 1] - p : p - kept[i - 1];
-        final along = ahead.length > 1e-6 ? ahead.normalized : Vector3.unitX;
-        final side = along.cross(up).normalized;
-        if (i > 0) v += (p - kept[i - 1]).length / 9.6; // four flags a tile
-        final inner = p + side * (halfWidth * s);
-        final outer = p + side * ((halfWidth + pavementM) * s);
-        // The face looks at the carriageway.
-        final curbN = side * -s;
-        final iIn = m.vertex(_scenePos(inner + up * _walkTopLiftM), up, 0.03, v);
-        final iOut = m.vertex(_scenePos(outer + up * _walkTopLiftM), up, 0.97, v);
-        final iCt = m.vertex(_scenePos(inner + up * _walkTopLiftM), curbN, 0.03, v);
-        final iCb = m.vertex(_scenePos(inner + up * _ribbonLiftM), curbN, 0.055, v);
-        if (pIn != null) {
-          // Winding follows [_ribbonFor]'s convention; the s < 0 strip runs
-          // its edges the other way round, so the order flips with it.
-          if (s > 0) {
-            m.quad(pIn, pOut!, iOut, iIn);
-            m.quad(pCurbB!, pCurbT!, iCt, iCb);
-          } else {
-            m.quad(pOut!, pIn, iIn, iOut);
-            m.quad(pCurbT!, pCurbB!, iCb, iCt);
-          }
-        }
-        pIn = iIn;
-        pOut = iOut;
-        pCurbT = iCt;
-        pCurbB = iCb;
-      }
-    }
-  }
-
   /// Cars parked at the curb, nose to tail.
   ///
   /// Static, unlike the road traffic: these are part of the street's furniture
@@ -1856,215 +2065,6 @@ class CityNodes {
     return placed;
   }
 
-  /// Junction plates and stop bars where roads meet.
-  ///
-  /// A crossing had no visual hallmark at all: two carriageways simply
-  /// overlapped, with the lower one's centre line running through the other.
-  /// A real intersection reads as one piece of shared paving that the lane
-  /// markings stop AT — so that is what this draws: a plate covering the
-  /// meeting, and a bar across each leg where its markings should end.
-  static void _junctionsFor(
-    MeshBuilder m,
-    MeshBuilder poles,
-    MeshBuilder lights,
-    List<(Vector3, Vector3, double, bool, int)> ends,
-    Vector3 anchorBF,
-    double epoch,
-  ) {
-    final used = List<bool>.filled(ends.length, false);
-    for (var i = 0; i < ends.length; i++) {
-      if (used[i]) continue;
-      final at = ends[i].$1;
-      final group = <int>[i];
-      used[i] = true;
-      var radius = ends[i].$3;
-      var anyPaved = ends[i].$4;
-      var topClass = ends[i].$5;
-      for (var j = i + 1; j < ends.length; j++) {
-        if (used[j]) continue;
-        // Ends that split from one crossing sit on the same point; the
-        // tolerance covers the sampling step they were rebuilt from.
-        if ((ends[j].$1 - at).length > 8.0) continue;
-        used[j] = true;
-        group.add(j);
-        if (ends[j].$3 > radius) radius = ends[j].$3;
-        anyPaved = anyPaved || ends[j].$4;
-        if (ends[j].$5 > topClass) topClass = ends[j].$5;
-      }
-      // Two ends meeting is a road carrying on round a corner, not a junction.
-      if (group.length < 3 || !anyPaved) continue;
-
-      final up = (at + anchorBF).normalized;
-      final lift = up * 0.16; // just over the ribbons' own 0.12
-      // An octagonal plate: round enough to serve any number of legs at any
-      // angle, cheap enough to draw one per crossing.
-      final seed = up.cross(Vector3.unitZ).lengthSquared > 1e-9
-          ? up.cross(Vector3.unitZ)
-          : up.cross(Vector3.unitX);
-      final t1 = seed.normalized;
-      final t2 = up.cross(t1);
-      const u = 0.5 / kGroundSwatches; // the road surface swatch
-      final r = radius * 1.45;
-      final centre = m.vertex(_scenePos(at + lift), up, u, 0.5);
-      final rim = <int>[];
-      for (var k = 0; k < 8; k++) {
-        final a = 2 * math.pi * k / 8;
-        rim.add(m.vertex(
-            _scenePos(at + t1 * (math.cos(a) * r) + t2 * (math.sin(a) * r) + lift),
-            up,
-            u,
-            0.5));
-      }
-      for (var k = 0; k < 8; k++) {
-        m.triangle(centre, rim[k], rim[(k + 1) % 8]);
-      }
-
-      // A stop bar across each leg, at the plate's edge: the mark that says a
-      // driver yields here, and the reason the crossing reads as controlled
-      // rather than as an accident of geometry.
-      for (final g in group) {
-        final inward = ends[g].$2 - ends[g].$1;
-        if (inward.length < 1e-6) continue;
-        final dir = inward.normalized;
-        final side = dir.cross(up).normalized;
-        final hw = ends[g].$3 * 0.92;
-        final near = at + dir * (r * 0.92);
-        final far = at + dir * (r * 0.92 + 1.4);
-        const bu = 5.5 / kGroundSwatches; // pale, so it reads as paint
-        final q = [
-          m.vertex(_scenePos(near - side * hw + lift * 1.1), up, bu, 0.5),
-          m.vertex(_scenePos(near + side * hw + lift * 1.1), up, bu, 0.5),
-          m.vertex(_scenePos(far + side * hw + lift * 1.1), up, bu, 0.5),
-          m.vertex(_scenePos(far - side * hw + lift * 1.1), up, bu, 0.5),
-        ];
-        m.quad(q[0], q[1], q[2], q[3]);
-
-        // Zebra crossing OUTSIDE the stop bar: bars run along the direction of
-        // travel, which is what makes a crossing read as a crossing rather
-        // than as a ladder painted across the road.
-        const stripes = 5;
-        for (var k = 0; k < stripes; k++) {
-          final o = (k / (stripes - 1) - 0.5) * 2 * hw * 0.82;
-          final a0 = at + dir * (r * 0.92 + 2.2) + side * o;
-          final a1 = at + dir * (r * 0.92 + 5.0) + side * o;
-          final sw = hw * 0.11;
-          final z = [
-            m.vertex(_scenePos(a0 - side * sw + lift * 1.1), up, bu, 0.5),
-            m.vertex(_scenePos(a0 + side * sw + lift * 1.1), up, bu, 0.5),
-            m.vertex(_scenePos(a1 + side * sw + lift * 1.1), up, bu, 0.5),
-            m.vertex(_scenePos(a1 - side * sw + lift * 1.1), up, bu, 0.5),
-          ];
-          m.quad(z[0], z[1], z[2], z[3]);
-        }
-
-        // Control. An avenue or bigger gets SIGNALS, a plain street crossing
-        // gets a sign — the same rule a traffic engineer would apply, and it
-        // means the two read differently from the cockpit.
-        final corner = at + dir * (r * 0.98) + side * (hw + 1.6);
-        if (topClass > 0) {
-          _column(poles, corner, up, dir, 4.6);
-          // The heads CYCLE. Derived from the epoch rather than stored: it is
-          // deterministic, costs no state, and opposing legs are out of phase
-          // because their inbound directions differ by a quarter turn.
-          final axis = (dir.dot(t1).abs() > dir.dot(t2).abs()) ? 0 : 1;
-          final green = ((epoch / 12.0).floor() + axis).isEven;
-          final head = corner + up * 4.6;
-          _head(lights, head + up * (green ? 0.0 : 0.55), up, dir);
-        } else {
-          // A sign: a small plate on a short post, facing the driver.
-          _column(poles, corner, up, dir, 2.2);
-          final plate = corner + up * 2.2;
-          final ps = 0.42;
-          final pv = [
-            poles.vertex(_scenePos(plate - side * ps - up * ps), dir * -1, 0, 0),
-            poles.vertex(_scenePos(plate + side * ps - up * ps), dir * -1, 1, 0),
-            poles.vertex(_scenePos(plate + side * ps + up * ps), dir * -1, 1, 1),
-            poles.vertex(_scenePos(plate - side * ps + up * ps), dir * -1, 0, 1),
-          ];
-          poles.quad(pv[0], pv[1], pv[2], pv[3]);
-        }
-      }
-    }
-  }
-
-  /// Lamp columns down the verge, spaced by road class.
-  ///
-  /// Derived on the client from the road itself rather than shipped: the rule
-  /// is deterministic, and a thousand lamp positions per colony is a lot of
-  /// wire for something both ends can compute.
-  static void _lampsFor(
-    MeshBuilder solid,
-    MeshBuilder glow,
-    List<Vector3> pts,
-    RoadSnapshot road,
-    Vector3 anchorBF, {
-    double liftM = 0,
-  }) {
-    final scale = road.halfWidthM / 4.0; // street half-width is 4 m
-    final spacing = 34.0 * math.sqrt(math.max(scale, 0.25));
-    final height = 9.0 * math.sqrt(math.max(scale, 0.25));
-    final both = road.roadClassIndex > 0;
-    var travelled = 0.0;
-    var next = spacing * 0.5;
-    var flip = 1.0;
-
-    for (var i = 1; i < pts.length; i++) {
-      travelled += (pts[i] - pts[i - 1]).length;
-      if (travelled < next) continue;
-      next += spacing;
-      final p = pts[i];
-      final up = (p + anchorBF).normalized;
-      final along = (pts[i] - pts[i - 1]).normalized;
-      final side = along.cross(up).normalized;
-      final offset = road.halfWidthM + 1.2;
-      for (final s in both ? const [1.0, -1.0] : [flip]) {
-        // On the raised walk when there is one — a column standing on the
-        // old bare-drape height would float a curb's worth over the flags.
-        final base = p + side * (offset * s) + up * (0.1 + liftM);
-        _column(solid, base, up, along, height);
-        _head(glow, base + up * height, up, along);
-      }
-      flip = -flip;
-    }
-  }
-
-  static void _column(
-      MeshBuilder m, Vector3 base, Vector3 up, Vector3 along, double h) {
-    final side = along.cross(up).normalized;
-    const r = 0.14;
-    final corners = [
-      base + side * -r + along * -r,
-      base + side * r + along * -r,
-      base + side * r + along * r,
-      base + side * -r + along * r,
-    ];
-    for (var i = 0; i < 4; i++) {
-      final a = corners[i], b = corners[(i + 1) % 4];
-      final n = ((a + b) * 0.5 - base).normalized;
-      final i0 = m.vertex(_scenePos(a), n, 0, 1);
-      final i1 = m.vertex(_scenePos(b), n, 1, 1);
-      final i2 = m.vertex(_scenePos(b + up * h), n, 1, 0);
-      final i3 = m.vertex(_scenePos(a + up * h), n, 0, 0);
-      m.quad(i0, i1, i2, i3);
-    }
-  }
-
-  static void _head(MeshBuilder m, Vector3 at, Vector3 up, Vector3 along) {
-    final side = along.cross(up).normalized;
-    const hw = 0.55, hd = 0.22;
-    final a = at + side * -hw + along * -hd;
-    final b = at + side * hw + along * -hd;
-    final c = at + side * hw + along * hd;
-    final d = at + side * -hw + along * hd;
-    // Downward-facing lens: it is the lit surface, so it points at the road.
-    final n = up * -1;
-    final i0 = m.vertex(_scenePos(a), n, 0, 0);
-    final i1 = m.vertex(_scenePos(b), n, 1, 0);
-    final i2 = m.vertex(_scenePos(c), n, 1, 1);
-    final i3 = m.vertex(_scenePos(d), n, 0, 1);
-    m.quad(i0, i3, i2, i1);
-  }
-
   void _emit(
     Map<BuildingArchetype, List<vm.Matrix4>> groups, {
     required String bodyId,
@@ -2098,19 +2098,99 @@ class CityNodes {
     });
   }
 
-  /// Per-frame: put each batch's anchor where its body currently is.
-  void _placeAnchors(WorldSnapshot snap, FloatingOrigin origin) {
+  /// The colony's block-tier silhouettes, as ONE mesh per material.
+  ///
+  /// Instanced per archetype, the block tier was 244 of a 273-draw colony:
+  /// 122 coarse archetypes times a solid and a glazing draw, each some
+  /// fifteen native binds on the UI thread, repeated for the colour pass and
+  /// every shadow cascade, plus a BVH item and an instance repack per pass.
+  /// Baked, it is two draws and two BVH items. The vertices are in scene
+  /// units relative to the colony anchor — the instance transform already
+  /// carried the metres-to-scene scale, so baking it in leaves the node on
+  /// the same unscaled anchor the patches use. The cost is that a building
+  /// cannot change tier without a rebuild, which the 64 m camera
+  /// quantisation of the rebuild key already imposes.
+  void _emitSkyline(
+    MergedMeshSink solid,
+    MergedMeshSink glazing, {
+    required String bodyId,
+    required Vector3 anchorBF,
+  }) {
+    for (final (sink, material) in [
+      (solid, CityMaterials.facade),
+      (glazing, CityMaterials.glazing),
+    ]) {
+      if (sink.isEmpty) continue;
+      final geometry = _geometryOf(sink.build());
+      if (geometry == null) continue;
+      final node = fs.Node(
+        mesh: fs.Mesh.primitives(primitives: [
+          fs.MeshPrimitive(geometry, material),
+        ]),
+      );
+      _scene.add(node);
+      _batches.add(_CityBatch(node, bodyId, anchorBF));
+      _drawCalls++;
+      _skylineTris += sink.triangleCount;
+    }
+  }
+
+  /// Triangles in the current skyline meshes, for the panel.
+  int _skylineTris = 0;
+
+  /// Which bodies moved against the floating origin since the last frame.
+  ///
+  /// Body pose and origin together are what every anchored node's transform
+  /// is a function of, so a body whose pair is unchanged needs none of its
+  /// nodes written. One answer per frame, shared by the anchor, traffic and
+  /// cursor passes; the pose cache advances here.
+  Map<String, bool> _bodyMotion(WorldSnapshot snap, FloatingOrigin origin) {
+    final moved = <String, bool>{};
+    for (final entry in snap.bodies.entries) {
+      final body = entry.value;
+      final pose = (
+        Vector3(body.px, body.py, body.pz),
+        Quaternion(body.qw, body.qx, body.qy, body.qz),
+        origin.focusWorld,
+      );
+      final last = _placedPose[entry.key];
+      final same = last != null &&
+          last.$1 == pose.$1 &&
+          last.$2 == pose.$2 &&
+          last.$3 == pose.$3;
+      moved[entry.key] = !same;
+      if (!same) _placedPose[entry.key] = pose;
+    }
+    return moved;
+  }
+
+  /// Body pose and floating origin each body's nodes were last placed at.
+  final Map<String, (Vector3, Quaternion, Vector3)> _placedPose = {};
+
+  /// The node transform for [anchorBF] on [body], this frame.
+  static vm.Matrix4 _anchorTransform(
+      BodySnapshot body, Vector3 anchorBF, FloatingOrigin origin) {
+    final bodyWorld = Vector3(body.px, body.py, body.pz);
+    final bodyQuat = Quaternion(body.qw, body.qx, body.qy, body.qz);
+    return vm.Matrix4.compose(
+      origin.worldToScene(bodyWorld + bodyQuat.rotate(anchorBF)),
+      quatToScene(bodyQuat),
+      vm.Vector3.all(1.0),
+    );
+  }
+
+  /// Per-frame: put each batch's anchor where its body currently is — on
+  /// the bodies that moved, plus any batch not yet placed since its build.
+  void _placeAnchors(
+      WorldSnapshot snap, FloatingOrigin origin, Map<String, bool> moved) {
     for (final list in [_roadBatches, _batches]) {
       for (final batch in list) {
+        if (batch.placed && !(moved[batch.bodyId] ?? true)) continue;
         final body = snap.bodies[batch.bodyId];
         if (body == null) continue;
-        final bodyWorld = Vector3(body.px, body.py, body.pz);
-        final bodyQuat = Quaternion(body.qw, body.qx, body.qy, body.qz);
-        batch.node.localTransform = vm.Matrix4.compose(
-          origin.worldToScene(bodyWorld + bodyQuat.rotate(batch.anchorBF)),
-          quatToScene(bodyQuat),
-          vm.Vector3.all(1.0),
-        );
+        batch.node.localTransform =
+            _anchorTransform(body, batch.anchorBF, origin);
+        batch.placed = true;
       }
     }
   }
@@ -2284,6 +2364,7 @@ class CityNodes {
     }
     _batches.clear();
     _drawCalls = 0;
+    _skylineTris = 0;
   }
 
   /// Drop everything, and the keys with it — an emptied scene with a stale
@@ -2297,6 +2378,7 @@ class CityNodes {
     _roadDrawCalls = 0;
     _builtKey = '';
     _roadsBuiltKey = '';
+    _dropResident();
   }
 
   void dispose() {
@@ -2308,10 +2390,44 @@ class CityNodes {
   }
 }
 
-/// One instanced draw, pinned to a body-fixed anchor.
+/// A road as the traffic pass sees it: the plat's and the plan's alike.
+class _TrafficRoad {
+  const _TrafficRoad(this.points, this.roadClassIndex, this.halfWidthM,
+      this.sealed, this.overpasses,
+      {double? narrowHalfWidthM})
+      : narrowHalfWidthM = narrowHalfWidthM ?? halfWidthM;
+  final List<double> points;
+  final int roadClassIndex;
+  final double halfWidthM;
+  final bool sealed;
+
+  /// The narrowest the piece gets — its own width unless it tapers.
+  final double narrowHalfWidthM;
+
+  /// Flattened start,end pairs along the road that ride a bridge.
+  final List<double> overpasses;
+}
+
+/// One draw, pinned to a body-fixed anchor.
 class _CityBatch {
   _CityBatch(this.node, this.bodyId, this.anchorBF);
   final fs.Node node;
   final String bodyId;
   final Vector3 anchorBF;
+
+  /// Whether the node has had its anchor written since it was built.
+  bool placed = false;
+}
+
+/// One resident traffic draw: its node and the instanced mesh it moves.
+class _TrafficSlot {
+  _TrafficSlot(this.node, this.mesh);
+  final fs.Node node;
+  final fs.InstancedMesh mesh;
+
+  /// Used this frame.
+  bool touched = false;
+
+  /// Anchor written at least once.
+  bool placed = false;
 }

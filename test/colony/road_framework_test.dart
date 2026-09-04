@@ -46,7 +46,8 @@ void main() {
 
     test('rail carries no cars; everything else does', () {
       expect(RoadClass.transit.carriesCars, isFalse);
-      for (final c in RoadClass.values.where((c) => c != RoadClass.transit)) {
+      expect(RoadClass.rail.carriesCars, isFalse);
+      for (final c in RoadClass.values.where((c) => !c.isRail)) {
         expect(c.carriesCars, isTrue);
       }
     });

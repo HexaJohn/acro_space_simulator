@@ -31,6 +31,7 @@ class CityTerrainShaper {
     this.padFalloffM = 14,
     this.roadFalloffM = 6,
     this.padEdgeM = 0.6,
+    this.voxelM = 15,
   });
 
   /// How far a levelled pad extends beyond the building footprint.
@@ -45,6 +46,16 @@ class CityTerrainShaper {
   /// How far a LOT pad eases off past its own boundary. Deliberately tiny: see
   /// the call site — anything wide re-levels the neighbour.
   final double padEdgeM;
+
+  /// Voxel size (m) the city's brushes are content to be meshed at — see
+  /// [TerrainBrush.minVoxelM]. Derived from their radii, a lot pad asks for
+  /// ~5 m and a road corridor for 1 m, which forces the quadtree to level
+  /// 15-17 under every street: a six-block colony measured 1,133 resident
+  /// chunks against ~590 for the same ground unbuilt. At 15 m the whole
+  /// colony sits at level 13 (boosted). The trade is edge sharpness: pad
+  /// rims and road shoulders are smoothed at this scale, which the ground
+  /// patches cover inside the colony. First-test value; tune from the studio.
+  final double voxelM;
 
   /// Brushes for everything in [city] that is not yet shaped.
   ///
@@ -124,6 +135,7 @@ class CityTerrainShaper {
                 benches: benchesFor(radius),
                 falloffM: padFalloffM * 3,
                 tick: tick,
+                minVoxelM: voxelM,
               )
             : TerrainBrush.padPoly(
                 centreBF: onGround(centre),
@@ -136,6 +148,7 @@ class CityTerrainShaper {
                 // The bound must clear the relief actually being moved.
                 maxCutM: math.max(20, relief * 1.5),
                 tick: tick,
+                minVoxelM: voxelM,
               ),
       ));
     }
@@ -158,6 +171,7 @@ class CityTerrainShaper {
             datumRadiusEndM: groundUnder(b),
             falloffM: roadFalloffM,
             tick: tick,
+            minVoxelM: voxelM,
           ),
         ));
       }

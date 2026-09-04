@@ -32,6 +32,7 @@ import 'city_layout.dart';
 import 'parcel.dart';
 import 'parcel_network.dart';
 import 'shuttle_run.dart';
+import 'sprawl_plan.dart';
 import 'commodity.dart';
 
 /// A craft visiting a spaceport — a relief mission or a scheduled delivery. It
@@ -3163,6 +3164,25 @@ class CitySim {
   /// on how long the session had been running.
   final Set<String> shapedTerrain = {};
 
+  /// The sprawl past the platted core, or null for a colony with none. Set
+  /// by the generator; the plan is grown from it on demand and cached, and a
+  /// save stores only the spec — the plan is deterministic in it.
+  SprawlSpec? sprawlSpec;
+  SprawlPlan? _sprawlPlan;
+  SprawlPlan? get sprawl {
+    final spec = sprawlSpec;
+    if (spec == null) return null;
+    if (_sprawlPlan == null || _sprawlPlan!.spec != spec) {
+      _sprawlPlan = SprawlPlan.generate(spec);
+    }
+    return _sprawlPlan;
+  }
+
+  /// The wire-side drape of [sprawl], cached by the snapshot capture: it is
+  /// tens of thousands of ground samples, and a frame is captured every
+  /// tick. Owned by the capture; opaque here.
+  Object? sprawlWire;
+
   /// Ground radius (m from the body centre) under each occupied cell.
   ///
   /// Filled by whoever has the terrain field — the snapshot, normally — and
@@ -3275,6 +3295,8 @@ class CitySim {
     /// Skip the lot re-cut; the caller re-cuts once for a whole network. Only
     /// safe while nothing is built, since no renames are reported.
     bool regenerateLots = true,
+    /// The walled variant: sound barriers along both edges.
+    bool soundWalls = false,
   }) {
     if (groundAt != null && controls.length >= 2) {
       final samples = RoadSpline(
@@ -3291,6 +3313,7 @@ class CitySim {
       // Vacuum, thin air or the wrong gas: people cannot walk beside this
       // road, so it is built with a pressurised tube for them instead.
       sealed: !breathable,
+      soundWalls: soundWalls,
       regenerateLots: regenerateLots,
     );
     for (final e in result.renamedLots.entries) {
@@ -3510,6 +3533,7 @@ class CitySim {
         'complexity': complexity,
         'hostility': hostility,
         'forgiveness': forgiveness,
+        if (sprawlSpec != null) 'sprawl': sprawlSpec!.toJson(),
         'bounty': bounty,
         'population': population,
         'happiness': happiness,
@@ -3535,6 +3559,7 @@ class CitySim {
               'class': r.roadClass.index,
               'closed': r.closed,
               'sealed': r.sealed,
+              if (r.soundWalls) 'walls': true,
               'pts': [
                 for (final c in r.controls) ...[c.e, c.n]
               ],
@@ -3599,6 +3624,10 @@ class CitySim {
       id: j['id'] as String,
       name: j['name'] as String? ?? 'Colony',
     );
+    if (j['sprawl'] is Map) {
+      sim.sprawlSpec =
+          SprawlSpec.fromJson((j['sprawl'] as Map).cast<String, dynamic>());
+    }
     sim
       ..population = (j['population'] as num).toDouble()
       ..happiness = (j['happiness'] as num).toDouble()
@@ -3634,6 +3663,7 @@ class CitySim {
         roadClass: RoadClass.values[(r['class'] as num).toInt()],
         closed: r['closed'] as bool,
         sealed: r['sealed'] == true,
+        soundWalls: r['walls'] == true,
         controls: [
           for (var i = 0; i + 1 < pts.length; i += 2)
             Vec2(pts[i].toDouble(), pts[i + 1].toDouble()),
@@ -3937,9 +3967,12 @@ class CitySim {
   /// hold one, so they bring their own: a manual parcel at the spec's true
   /// extent, which is also the extent the build ghost has been drawing all
   /// along. Returns the parcel, or null with [blocked] set.
+  /// [checkAccess] is the player's rule that a site needs a curb within
+  /// reach; the generator turns it off for the plots it stakes out in the
+  /// sprawl, where the county grid is the road and is not on this layout.
   Parcel? claimSite(CityBuildingSpec spec, Vec2 centre,
-      {bool regenerateLots = true}) {
-    final why = siteBlockedReason(spec, centre);
+      {bool regenerateLots = true, bool checkAccess = true}) {
+    final why = checkAccess ? siteBlockedReason(spec, centre) : null;
     if (why != null) {
       blocked = why;
       return null;

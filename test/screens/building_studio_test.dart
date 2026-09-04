@@ -177,4 +177,70 @@ void main() {
         reason: 'the note did not follow the selection');
     expect(t.takeException(), isNull);
   });
+  _shapesAndPlots();
+}
+
+void _shapesAndPlots() {
+  group('lot shapes', () {
+    test('every outline is a simple polygon no wider than its frontage', () {
+      for (final shape in LotShape.values) {
+        final poly = BuildingPreviewNodes.polygonFor(shape, 30, 40);
+        expect(poly.length, greaterThanOrEqualTo(4), reason: shape.name);
+        for (final v in poly) {
+          expect(v.e.abs(), lessThanOrEqualTo(30 * 0.72 + 1e-9),
+              reason: shape.name);
+          expect(v.n, inInclusiveRange(0, 40), reason: shape.name);
+        }
+        // Counter-clockwise, like the plat's own lots.
+        final p = Parcel(id: 't', polygon: poly);
+        expect(p.area, greaterThan(0), reason: shape.name);
+      }
+    });
+
+    test('a shape or a claimed plot is a different request', () {
+      BuildingPreviewRequest req(
+              {LotShape shape = LotShape.rectangle, bool manual = false}) =>
+          BuildingPreviewRequest(
+            style: ArchitectureStyle.masonryStreet,
+            spec: kZoneSpecs['commercial']![Density.medium]!,
+            lotWidthM: 22,
+            lotDepthM: 34,
+            lots: 4,
+            seed: 1,
+            detail: BuildingDetail.full,
+            shape: shape,
+            manualPlot: manual,
+          );
+      expect(req(), equals(req()));
+      expect(req(shape: LotShape.tapered), isNot(equals(req())));
+      expect(req(manual: true), isNot(equals(req())));
+      expect(req(shape: LotShape.notched).hashCode,
+          isNot(equals(req().hashCode)));
+    });
+
+    test('a tapered lot hands the massing a narrower back than its front', () {
+      final poly = BuildingPreviewNodes.polygonFor(LotShape.tapered, 30, 40);
+      final p = Parcel(
+          id: 't',
+          polygon: poly,
+          frontage: (const Vec2(-15, 0), const Vec2(15, 0)));
+      // The bounding box is still the full frontage; the inscribed box is
+      // what fits — the gap between them is what the studio exists to show.
+      expect(p.buildableExtent.width, closeTo(30, 1e-9));
+      expect(p.inscribedExtent.width, lessThan(30));
+    });
+  });
+
+  testWidgets('the parcel shape controls are offered', (t) async {
+    await t.pumpWidget(const MaterialApp(home: BuildingStudioScreen()));
+    await t.pump();
+    final list = find.byType(ListView).first;
+    for (var i = 0; i < 12; i++) {
+      await t.drag(list, const Offset(0, -240));
+      await t.pump();
+      if (find.text('Claimed plot').evaluate().isNotEmpty) break;
+    }
+    expect(find.text('PARCEL SHAPE'), findsOneWidget);
+    expect(find.text('Claimed plot'), findsOneWidget);
+  });
 }

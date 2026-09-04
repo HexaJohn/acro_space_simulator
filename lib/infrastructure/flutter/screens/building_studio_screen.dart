@@ -33,6 +33,46 @@ import 'app_theme.dart';
 /// deliberately the inputs the generator actually takes — the lot, the spec,
 /// the style — so nothing you tune here has to be translated to reach the
 /// colony.
+/// VM-service hooks for `main_building_studio_dev.dart`: pick a catalogue
+/// entry, aim the camera, hide the chrome, and read what is on the stand —
+/// so a script can photograph every installation in the catalogue, one
+/// after another, without a mouse.
+class BuildingStudioDevHooks {
+  BuildingStudioDevHooks._();
+
+  /// Pick a catalogue entry by label; an empty label returns to the zone.
+  static void Function(String label)? pick;
+
+  /// Aim the orbit camera. Any argument left null keeps its value.
+  /// [pivotYM] slides the pivot back from the front line, to look at a
+  /// tower in the middle of a big plot rather than at its gate.
+  static void Function(
+      {double? distanceM,
+      double? azimuth,
+      double? elevation,
+      double? pivotZM,
+      double? pivotYM,
+      double? pivotXM})? setCamera;
+
+  /// Show or hide the control column, the stats HUD, the scale rig and the
+  /// lot outlines.
+  static void Function({bool? controls, bool? hud, bool? rig, bool? lots})?
+      setPanels;
+
+  /// Set the lot's frontage and depth, and how many lots stand in the row.
+  static void Function({double? widthM, double? depthM, int? lots})? setLot;
+
+  /// Pick the parcel shape by [LotShape] name.
+  static void Function(String name)? setShape;
+
+  /// The FRAME and STREET LEVEL buttons.
+  static VoidCallback? frame;
+  static VoidCallback? eyeLevel;
+
+  /// What is on the stand, the catalogue's labels, and the camera.
+  static Map<String, Object?> Function()? status;
+}
+
 class BuildingStudioScreen extends StatefulWidget {
   const BuildingStudioScreen({super.key});
 
@@ -62,17 +102,71 @@ class _BuildingStudioScreenState extends State<BuildingStudioScreen> {
   bool _showLots = true;
   bool _corners = true;
 
+  /// A catalogue entry standing in for the zone spec, or null for the zone.
+  CityBuildingSpec? _catalogue;
+  LotShape _shape = LotShape.rectangle;
+  bool _manualPlot = false;
+  bool _showControls = true;
+  bool _showHud = true;
+
   // ---- Camera ------------------------------------------------------------
   double _azimuth = 1.35;
   double _elevation = 0.22;
   double _distanceM = 120;
   double _pivotZM = 8;
+  double _pivotYM = 0;
+  double _pivotXM = 0;
   double _sunAzimuth = 0.9;
   (double, double) _dragBase = (0, 0);
 
   static const double _fovY = 50 * math.pi / 180;
 
-  CityBuildingSpec get _spec => kZoneSpecs[_zone]![_density]!;
+  CityBuildingSpec get _spec => _catalogue ?? kZoneSpecs[_zone]![_density]!;
+
+  /// The lot sliders' reach: street lots for a zone spec, the site's own
+  /// scale for an installation that brings its plot.
+  double get _lotWidthMax =>
+      _spec.claimsOwnSite ? math.max(400.0, _spec.siteMetres().width * 2) : 70;
+  double get _lotDepthMax =>
+      _spec.claimsOwnSite ? math.max(400.0, _spec.siteMetres().depth * 2) : 90;
+
+  /// Pick a catalogue entry (by label — types repeat) or none.
+  void _pickCatalogue(String label) => setState(() {
+        if (label == _zoneChoice) {
+          _catalogue = null;
+          _lotWidthM = math.min(_lotWidthM, 70);
+          _lotDepthM = math.min(_lotDepthM, 90);
+          _manualPlot = false;
+          return;
+        }
+        final spec = kUtilCatalog.firstWhere((s) => s.label == label);
+        _catalogue = spec;
+        if (spec.claimsOwnSite) {
+          // Open on the plot the colony would actually stake for it.
+          final site = spec.siteMetres();
+          _lotWidthM = site.width;
+          _lotDepthM = site.depth;
+          _lots = 1;
+          _manualPlot = true;
+          _frame();
+        } else {
+          // A street building after a staked site: back to a street lot,
+          // or a clinic is a speck on the fusion plant's two kilometres.
+          _lotWidthM = _lotWidthM.clamp(8.0, 70.0);
+          _lotDepthM = _lotDepthM.clamp(12.0, 90.0);
+          _manualPlot = false;
+          _frame();
+        }
+      });
+
+  static const _zoneChoice = 'The zone above';
+  List<String> get _catalogueChoices =>
+      [_zoneChoice, for (final s in kUtilCatalog) s.label];
+  String _catalogueName(String label) {
+    if (label == _zoneChoice) return label;
+    final spec = kUtilCatalog.firstWhere((s) => s.label == label);
+    return '${kGroupLabels[spec.group] ?? spec.group.toUpperCase()} · $label';
+  }
 
   BuildingPreviewRequest get _request => BuildingPreviewRequest(
         style: _style,
@@ -86,10 +180,91 @@ class _BuildingStudioScreenState extends State<BuildingStudioScreen> {
         showRig: _showRig,
         showLots: _showLots,
         corners: _corners,
+        shape: _shape,
+        manualPlot: _manualPlot,
       );
 
   @override
+  void initState() {
+    super.initState();
+    BuildingStudioDevHooks.pick = (label) {
+      if (!mounted) return;
+      _pickCatalogue(label.isEmpty ? _zoneChoice : label);
+    };
+    BuildingStudioDevHooks.setCamera = (
+        {double? distanceM,
+        double? azimuth,
+        double? elevation,
+        double? pivotZM,
+        double? pivotYM,
+        double? pivotXM}) {
+      if (!mounted) return;
+      setState(() {
+        if (distanceM != null) _distanceM = distanceM.clamp(3.0, 20000.0);
+        if (azimuth != null) _azimuth = azimuth;
+        if (elevation != null) _elevation = elevation.clamp(-0.2, 1.45);
+        if (pivotZM != null) _pivotZM = pivotZM;
+        if (pivotYM != null) _pivotYM = pivotYM;
+        if (pivotXM != null) _pivotXM = pivotXM;
+      });
+    };
+    BuildingStudioDevHooks.setPanels = (
+        {bool? controls, bool? hud, bool? rig, bool? lots}) {
+      if (!mounted) return;
+      setState(() {
+        _showControls = controls ?? _showControls;
+        _showHud = hud ?? _showHud;
+        _showRig = rig ?? _showRig;
+        _showLots = lots ?? _showLots;
+      });
+    };
+    BuildingStudioDevHooks.setLot = ({double? widthM, double? depthM, int? lots}) {
+      if (!mounted) return;
+      setState(() {
+        if (widthM != null) _lotWidthM = widthM.clamp(8.0, _lotWidthMax);
+        if (depthM != null) _lotDepthM = depthM.clamp(12.0, _lotDepthMax);
+        if (lots != null) _lots = lots.clamp(1, 12).toDouble();
+      });
+    };
+    BuildingStudioDevHooks.setShape = (name) {
+      if (!mounted) return;
+      final shape = LotShape.values.where((s) => s.name == name).firstOrNull;
+      if (shape != null) setState(() => _shape = shape);
+    };
+    BuildingStudioDevHooks.frame = () {
+      if (mounted) setState(_frame);
+    };
+    BuildingStudioDevHooks.eyeLevel = () {
+      if (mounted) _eyeLevel();
+    };
+    BuildingStudioDevHooks.status = () => {
+          'label': _catalogue?.label ?? _zoneChoice,
+          'type': _spec.type,
+          'claimsSite': _spec.claimsOwnSite,
+          'lots': _lots.round(),
+          'labels': [for (final s in kUtilCatalog) s.label],
+          'lotW': _lotWidthM,
+          'lotD': _lotDepthM,
+          'heightM': _nodes?.stats.heightM,
+          'radiusM': _nodes?.layoutRadiusM,
+          'ready': CityTextures.ready && _nodes != null,
+          'distance': _distanceM,
+          'azimuth': _azimuth,
+          'elevation': _elevation,
+          'pivot': _pivotZM,
+        };
+  }
+
+  @override
   void dispose() {
+    BuildingStudioDevHooks.pick = null;
+    BuildingStudioDevHooks.setCamera = null;
+    BuildingStudioDevHooks.setPanels = null;
+    BuildingStudioDevHooks.setLot = null;
+    BuildingStudioDevHooks.setShape = null;
+    BuildingStudioDevHooks.frame = null;
+    BuildingStudioDevHooks.eyeLevel = null;
+    BuildingStudioDevHooks.status = null;
     _nodes?.dispose();
     super.dispose();
   }
@@ -136,7 +311,7 @@ class _BuildingStudioScreenState extends State<BuildingStudioScreen> {
       body: Row(
         children: [
           Expanded(child: _viewport()),
-          SizedBox(width: 320, child: _controls()),
+          if (_showControls) SizedBox(width: 320, child: _controls()),
         ],
       ),
     );
@@ -197,7 +372,7 @@ class _BuildingStudioScreenState extends State<BuildingStudioScreen> {
           onScaleUpdate: (d) => setState(() {
             if (d.pointerCount > 1) {
               _distanceM =
-                  (_distanceM / d.scale.clamp(0.2, 5.0)).clamp(3.0, 3000.0);
+                  (_distanceM / d.scale.clamp(0.2, 5.0)).clamp(3.0, 20000.0);
             } else {
               _azimuth = _dragBase.$1 - d.focalPointDelta.dx * 0.008;
               _elevation = (_dragBase.$2 + d.focalPointDelta.dy * 0.006)
@@ -210,7 +385,7 @@ class _BuildingStudioScreenState extends State<BuildingStudioScreen> {
               if (e is PointerScrollEvent) {
                 setState(() => _distanceM =
                     (_distanceM * (1 + e.scrollDelta.dy * 0.0016))
-                        .clamp(3.0, 3000.0));
+                        .clamp(3.0, 20000.0));
               }
             },
             // CHIRALITY: the world-to-scene mapping is a mirror that
@@ -223,7 +398,8 @@ class _BuildingStudioScreenState extends State<BuildingStudioScreen> {
           ),
         ),
       ),
-      Positioned(left: 12, top: 12, child: _statsPanel(nodes.stats)),
+      if (_showHud)
+        Positioned(left: 12, top: 12, child: _statsPanel(nodes.stats)),
     ]);
   }
 
@@ -231,7 +407,8 @@ class _BuildingStudioScreenState extends State<BuildingStudioScreen> {
     final ce = math.cos(_elevation), se = math.sin(_elevation);
     final dir =
         vm.Vector3(math.cos(_azimuth) * ce, math.sin(_azimuth) * ce, se);
-    final target = vm.Vector3(0, 0, lengthToScene(_pivotZM));
+    final target = vm.Vector3(lengthToScene(_pivotXM),
+        lengthToScene(_pivotYM), lengthToScene(_pivotZM));
     return fs.PerspectiveCamera(
       fovRadiansY: _fovY,
       position: target + dir * lengthToScene(_distanceM),
@@ -298,6 +475,15 @@ class _BuildingStudioScreenState extends State<BuildingStudioScreen> {
           Text(row('parking', '${s.parkingSpaces} spaces'), style: mono),
           Text(
             row(
+                'lot',
+                '${s.lotAreaM2.round()} m2 · '
+                    '${(s.coverage * 100).round()}% built · '
+                    '${s.overhangs ? 'OVERHANGS the line' : 'inside the line'}'),
+            style: mono.copyWith(
+                color: s.overhangs ? AppTheme.warn : AppTheme.accent2),
+          ),
+          Text(
+            row(
                 'frontage',
                 '${s.frontGapM.toStringAsFixed(1)} m to curb · '
                     '${s.sideGapM.toStringAsFixed(1)} m between'),
@@ -357,21 +543,53 @@ class _BuildingStudioScreenState extends State<BuildingStudioScreen> {
               (d) => d.name,
               (v) => setState(() => _density = v),
             ),
+            const SizedBox(height: 6),
+            // Or an installation: picking one sizes the lot to its site.
+            _dropdown<String>(
+              'Catalogue',
+              _catalogue?.label ?? _zoneChoice,
+              _catalogueChoices,
+              _catalogueName,
+              _pickCatalogue,
+            ),
             const SizedBox(height: 12),
             const Text('LOT', style: AppTheme.heading),
             Text('The parcel the colony would hand the generator. Frontage is '
                 'the dimension that decides everything else.',
                 style: AppTheme.dim.copyWith(fontSize: 11)),
-            _slider('Frontage', _lotWidthM, 8, 70,
-                'Lot width along the street.',
+            _slider('Frontage', _lotWidthM.clamp(8, _lotWidthMax), 8,
+                _lotWidthMax, 'Lot width along the street.',
                 (v) => setState(() => _lotWidthM = v), unit: 'm'),
-            _slider('Depth', _lotDepthM, 12, 90,
-                'How far the lot runs back from the curb.',
+            _slider('Depth', _lotDepthM.clamp(12, _lotDepthMax), 12,
+                _lotDepthMax, 'How far the lot runs back from the curb.',
                 (v) => setState(() => _lotDepthM = v), unit: 'm'),
             _slider('Lots', _lots, 1, 9,
                 'A row, not a hero shot: whether the frontages line up is the '
                 'whole question.',
                 (v) => setState(() => _lots = v), divisions: 8),
+            const SizedBox(height: 12),
+            const Text('PARCEL SHAPE', style: AppTheme.heading),
+            Text(_shape.note, style: AppTheme.dim.copyWith(fontSize: 11)),
+            const SizedBox(height: 6),
+            _dropdown<LotShape>(
+              'Outline',
+              _shape,
+              LotShape.values,
+              (s) => s.label,
+              (v) => setState(() => _shape = v),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+              value: _manualPlot,
+              activeThumbColor: AppTheme.accent2,
+              title: const Text('Claimed plot', style: AppTheme.body),
+              subtitle: Text('What an installation is really handed: no '
+                  'frontage, no side street, the box world-aligned. Off is '
+                  'a street lot with its frontage on the curb.',
+                  style: AppTheme.dim.copyWith(fontSize: 11)),
+              onChanged: (v) => setState(() => _manualPlot = v),
+            ),
             const SizedBox(height: 12),
             const Text('DETAIL', style: AppTheme.heading),
             _dropdown<BuildingDetail>(

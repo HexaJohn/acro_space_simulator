@@ -61,6 +61,13 @@ void main() {
   testWidgets('groups are labelled, in catalogue order', (t) async {
     await pumpPalette(t, colony());
     expect(find.text('POWER'), findsOneWidget);
+    // The list virtualises: the second header sits below the fold once the
+    // power group has a row's worth of entries, so scroll to it.
+    // The search field is a Scrollable too, so drag the list itself.
+    for (var i = 0; i < 8 && find.text('CITY SERVICES').evaluate().isEmpty; i++) {
+      await t.drag(find.byType(ListView).last, const Offset(0, -200));
+      await t.pump();
+    }
     expect(find.text('CITY SERVICES'), findsOneWidget);
   });
 

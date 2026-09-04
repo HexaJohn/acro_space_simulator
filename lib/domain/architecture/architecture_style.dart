@@ -37,7 +37,7 @@ import '../colony/city/city_building_spec.dart';
 /// Declared HERE rather than beside the bake because the geometry pass has to
 /// know the count to map a band, and the geometry pass is domain code that
 /// cannot see the renderer. The bake reads it back.
-const int kFacadeMaterials = 8;
+const int kFacadeMaterials = 15;
 
 /// Band indices, named. Order is the bake's; changing it recolours every
 /// building in every save.
@@ -51,6 +51,28 @@ class FacadeMaterial {
   static const int darkBrick = 5;
   static const int precast = 6;
   static const int metalPanel = 7;
+
+  /// Photovoltaic modules, framed, with the cell grid: the face of a solar
+  /// table. On the opaque atlas rather than the glazing sheet so it stays
+  /// dark at night where a window would light.
+  static const int photovoltaic = 8;
+
+  /// Paving: gravel and concrete with a faint bay grid. The top of every
+  /// flat slab — a works pad, a hardstanding, an apron — so a yard reads
+  /// as ground and not as the cladding of the building beside it.
+  static const int pavement = 9;
+
+  /// The plant palette: what an installation's pieces are actually made
+  /// of, so a works is not one cladding from fence to fence.
+  ///
+  /// Ordered so a coarse mip, which blends a band with its neighbours,
+  /// blends the big steel surfaces with greys and whites and not with red:
+  /// the strong colours sit together at the end, where only trims use them.
+  static const int steel = 10;
+  static const int whiteMetal = 11;
+  static const int industrialBlue = 12;
+  static const int safetyRed = 13;
+  static const int safetyYellow = 14;
 }
 
 /// How a wall is divided between solid and glass.

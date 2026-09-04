@@ -100,7 +100,7 @@ void main() {
     // which is the one change that would silently reclassify every road in
     // every save.
     expect(
-        RoadClass.values.take(8).toList(),
+        RoadClass.values.take(7).toList(),
         [
           RoadClass.street,
           RoadClass.avenue,

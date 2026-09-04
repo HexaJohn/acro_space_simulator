@@ -73,6 +73,16 @@ uniform CloudInfo {
   // read grey-blue while thin wisps stay white. w: mix strength 0..1 —
   // 0 keeps the single-tint look.
   vec4 tint2_mix;
+  // SCALABILITY (the options-screen quality slider). x: cap on the view
+  // march. y: sample PITCH — samples per shell thickness of chord, the
+  // adaptive part. z: light-march steps per view sample. w: RENDER MODE —
+  // 1 flat textured shell (no march at all), 2 volumetric on the reduced
+  // noise field, 3 volumetric on the full field.
+  //
+  // Zero means "use the built-in maxima" (and w=0 the full field), so a
+  // caller that has not been taught to pack this block still draws at full
+  // quality rather than marching zero samples and rendering nothing.
+  vec4 quality;
 }
 cloud_info;
 
@@ -86,9 +96,14 @@ out vec4 frag_color;
 
 // Hard CAP on the view march — the actual count adapts to the shell chord
 // (see main) so a nadir ray, whose chord is ~1 shell thickness, stops paying
-// the same 40-sample bill as a limb ray whose chord is ~40 thicknesses.
-const int VIEW_SAMPLES = 40;
-const int LIGHT_SAMPLES = 5;
+// the same bill as a limb ray whose chord is ~40 thicknesses.
+//
+// These are the ULTRA preset's numbers, not the default's. GLSL needs a
+// compile-time loop bound, so they are the ceiling the runtime `quality`
+// uniform clamps under; the shipped default (high) asks for 40 and 5, the
+// figures every look below was tuned against.
+const int VIEW_SAMPLES = 56;
+const int LIGHT_SAMPLES = 7;
 const float PI = 3.14159265;
 
 // Ray/sphere: returns (tNear, tFar), tFar < tNear when missed.
@@ -130,6 +145,21 @@ float fbm(vec3 p) {
   float sum = 0.0;
   float amp = 0.5;
   for (int i = 0; i < 5; i++) {
+    sum += amp * vnoise(p);
+    p *= 2.02;
+    amp *= 0.5;
+  }
+  return sum;
+}
+
+// 4-octave FBM — the reduced-field base shape. +0.015625 is the dropped
+// fifth octave's mean, so the field stays CENTRED on fbm and the coverage
+// split (a subtraction against an absolute knob) does not shift when the
+// quality slider swaps fields — the same trick fbm2 documents against fbm3.
+float fbm4(vec3 p) {
+  float sum = 0.015625;
+  float amp = 0.5;
+  for (int i = 0; i < 4; i++) {
     sum += amp * vnoise(p);
     p *= 2.02;
     amp *= 0.5;
@@ -179,10 +209,11 @@ float fbm2(vec3 p) {
 // Ridged turbulence: sum of squared |signed noise|, which builds SHARP
 // filament ridges (the torn wisps of real weather) instead of the round
 // lumps plain value noise gives.
-float ridged(vec3 p) {
+float ridged(vec3 p, int octaves) {
   float sum = 0.0;
   float amp = 0.5;
   for (int i = 0; i < 4; i++) {
+    if (i >= octaves) break;
     float n = 1.0 - abs(2.0 * vnoise(p) - 1.0);
     sum += amp * n * n;
     p *= 2.03;
@@ -273,12 +304,22 @@ float cloudDensity(vec3 p, float tShear) {
   vec3 sw = vec3(time * cloud_info.swirl_global.z,
                  time * cloud_info.swirl_global.z * -0.6, 0.0);
   float sfreq = cloud_info.swirl_global.y;
-  vec3 Q = vec3(fbm3(P * sfreq + 11.5 + sw),
-                fbm3(P * sfreq + 31.7 + sw),
-                fbm3(P * sfreq + 57.1 + sw));
+  // REDUCED field (quality.w == 2): the same weather map from fewer
+  // octaves. The warp drops to fbm2 (arms positioned, outline unwobbled —
+  // the trade cloudDensityLo already made for shadows), the base drops its
+  // finest octave mean-matched, and the veil goes entirely. Every branch is
+  // on a uniform, so the whole draw takes one path — no divergence cost.
+  bool lowFi = cloud_info.quality.w == 2.0;
+  vec3 Q = lowFi
+      ? vec3(fbm2(P * sfreq + 11.5 + sw),
+             fbm2(P * sfreq + 31.7 + sw),
+             fbm2(P * sfreq + 57.1 + sw))
+      : vec3(fbm3(P * sfreq + 11.5 + sw),
+             fbm3(P * sfreq + 31.7 + sw),
+             fbm3(P * sfreq + 57.1 + sw));
   vec3 Pw = P + cloud_info.swirl_global.x * (Q - 0.5);
 
-  float base = fbm(Pw);
+  float base = lowFi ? fbm4(Pw) : fbm(Pw);
 
   // Latitude-banded coverage threshold: `coverage` slides the split, the
   // band profile carves the ITCZ / subtropics / storm-belt structure.
@@ -290,9 +331,13 @@ float cloudDensity(vec3 p, float tShear) {
   float cov = coverage;
   float cvar = cloud_info.cov_info.x;
   if (cvar > 0.0) {
-    float cn = fbm3(P * cloud_info.cov_info.y + 91.3 +
-                    vec3(time * cloud_info.cov_info.z,
-                         time * cloud_info.cov_info.z * -0.5, 0.0));
+    float cn = lowFi
+        ? fbm2(P * cloud_info.cov_info.y + 91.3 +
+               vec3(time * cloud_info.cov_info.z,
+                    time * cloud_info.cov_info.z * -0.5, 0.0))
+        : fbm3(P * cloud_info.cov_info.y + 91.3 +
+               vec3(time * cloud_info.cov_info.z,
+                    time * cloud_info.cov_info.z * -0.5, 0.0));
     cov *= clamp(1.0 + cvar * (cn - 0.4375) * 2.286, 0.0, 2.0);
   }
   cov = clamp(cov * latBands(lat), 0.0, 1.0);
@@ -301,7 +346,11 @@ float cloudDensity(vec3 p, float tShear) {
   d = d / max(cov, 1e-3);
 
   // Erode with ridged turbulence -> torn filament edges (not round blobs).
-  float fine = ridged(Pw * 3.0 - wind * 1.7);
+  // Two octaves at reduced: the coarse tears survive, the fine filigree
+  // goes. The lower octave count slightly UNDERSTATES the erosion mean, so
+  // reduced clouds run a touch denser — the safe direction (more cloud,
+  // never holes that High does not have).
+  float fine = ridged(Pw * 3.0 - wind * 1.7, lowFi ? 2 : 4);
   d -= detail * (1.0 - d) * fine;
 
   // Soft transition instead of a hard pillow edge. Low floor keeps thin
@@ -316,7 +365,7 @@ float cloudDensity(vec3 p, float tShear) {
   // veil accumulates over the whole march column. The veil term can never
   // exceed 0.008, so once d has beaten that the max() is decided and the
   // three noise octaves behind it are pure waste — skip them.
-  if (d < 0.008) {
+  if (!lowFi && d < 0.008) {
     float veil = smoothstep(0.42, 0.82, fbm3(Pw * 0.32 + 7.3));
     d = max(d, veil * 0.008);
   }
@@ -536,13 +585,81 @@ void main() {
   // 40-sample cap. The density field has no structure finer than the shell
   // profile, so the coarser interior pitch resolves everything it did before.
   float chord = t1 - t0;
-  float samplesF =
-      clamp(chord / max(topR - baseR, 1e-4) * 10.0, 10.0, float(VIEW_SAMPLES));
-  int samples = int(samplesF + 0.5);
+
+  // FLAT SHELL (quality.w == 1): the simplified technique for weak GPUs.
+  // No raymarch at all. One full-field sample where the ray crosses the
+  // mid-shell sphere paints the same weather map the march would integrate,
+  // one Lo sample toward the sun stands in for the whole light march, and
+  // Beer's law over the geometric chord sets the opacity. Roughly 35 noise
+  // evaluations per pixel against ~3,500 for a worst-case limb march. What
+  // it gives up is parallax inside the layer and lump-by-lump self-shadow —
+  // from orbit (where a weak GPU pays the whole-disc bill) both are near
+  // invisible.
+  if (cloud_info.quality.w == 1.0) {
+    float midR = mix(baseR, topR, 0.5);
+    vec2 midHit = raySphere(ro, rd, centre, midR);
+    // First mid-sphere crossing inside the clipped segment. A limb ray that
+    // grazes the top half without reaching mid falls back to the chord
+    // midpoint — its greater altitude thins the vertical profile, which is
+    // the fade a real limb has anyway.
+    float ts = 0.5 * (t0 + t1);
+    if (midHit.y >= midHit.x) {
+      if (midHit.x > t0 && midHit.x < t1) {
+        ts = midHit.x;
+      } else if (midHit.y > t0 && midHit.y < t1) {
+        ts = midHit.y;
+      }
+    }
+    vec3 p = ro + rd * ts;
+    float d = cloudDensity(p, tShear);
+    if (d <= 0.0) {
+      frag_color = vec4(0.0);
+      return;
+    }
+    // The sample sits at the vertical profile's peak; the 0.6 is the
+    // profile's mean over the shell, so the column depth matches what the
+    // march would have accumulated through the same chord.
+    float tau = d * densMul * chord * 0.6;
+    float alpha = clamp(1.0 - exp(-tau), 0.0, 1.0);
+    float vis = sunVisibility(p, sunDir, centre, planetR);
+    float storm = cloud_info.tint2_mix.w * smoothstep(0.35, 0.85, d);
+    vec3 ct = mix(tint, cloud_info.tint2_mix.xyz, storm);
+    vec3 sun = vec3(0.0);
+    if (vis > 0.004) {
+      float thick = topR - baseR;
+      float sunTau =
+          cloudDensityLo(p + sunDir * thick * 0.5, tShear) * densMul *
+          thick * 0.75;
+      float powder = 1.0 - exp(-tau * 2.0);
+      sun = sunI * ct * exp(-sunTau) *
+          hgPhase(dot(rd, sunDir), 0.2) * powder * vis;
+    }
+    vec3 sky = ambient * ct * (0.06 + 0.94 * vis);
+    // Premultiplied, exactly like the march's front-to-back form collapsed
+    // to a single step.
+    frag_color = vec4((sun + sky) * alpha, alpha);
+    return;
+  }
+  // Preset, or the built-in ceiling when the block was never packed.
+  float qCap = cloud_info.quality.x > 0.5
+      ? min(cloud_info.quality.x, float(VIEW_SAMPLES))
+      : float(VIEW_SAMPLES);
+  float qPitch = cloud_info.quality.y > 0.01 ? cloud_info.quality.y : 10.0;
+  int qLight = cloud_info.quality.z > 0.5
+      ? int(min(cloud_info.quality.z, float(LIGHT_SAMPLES)))
+      : LIGHT_SAMPLES;
+  // The FLOOR is the pitch, not a constant. A nadir chord is ~1 shell
+  // thickness, so `chord/thickness * pitch` is already ~pitch there — which
+  // is why the old hard floor of 10 matched the old pitch of 10 exactly. Kept
+  // as a constant it would have overridden every preset below high and the
+  // cheap rungs would have marched high's sample count anyway.
+  float samplesF = clamp(chord / max(topR - baseR, 1e-4) * qPitch,
+      min(qPitch, qCap), qCap);
+  int samples = max(int(samplesF + 0.5), 1);
   float stepLen = chord / float(samples);
   float mu = dot(rd, sunDir);
   float phase = hgPhase(mu, 0.2);
-  float sunStep = (topR - baseR) / float(LIGHT_SAMPLES);
+  float sunStep = (topR - baseR) / float(qLight);
 
   // Half-amplitude per-pixel jitter of the march phase: decorrelates the
   // sample lattice between neighbouring pixels so the coarser adaptive pitch
@@ -582,6 +699,7 @@ void main() {
     if (vis > 0.004) {
       float sunTau = 0.0;
       for (int j = 0; j < LIGHT_SAMPLES; j++) {
+        if (j >= qLight) break;
         vec3 q = p + sunDir * ((float(j) + 0.5) * sunStep);
         sunTau += cloudDensityLo(q, tShear) * densMul * sunStep;
         if (sunTau > 6.0) break;

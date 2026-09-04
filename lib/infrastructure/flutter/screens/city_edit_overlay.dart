@@ -59,6 +59,10 @@ class CityEditController extends ChangeNotifier {
   /// Road class the spline tool lays.
   RoadClass roadClass = RoadClass.street;
 
+  /// Lay the walled variant — sound barriers along both edges — where the
+  /// class allows it (see [RoadClass.canHaveSoundWalls]).
+  bool soundWalls = false;
+
   /// Ground height under a colony-local point, injected by the flight view
   /// (the overlay has no terrain access of its own). Null leaves road grades
   /// ungated, which is what headless callers and tests want.
@@ -108,8 +112,9 @@ class CityEditController extends ChangeNotifier {
       frontageM: frontageM,
       depthM: lotDepthM,
     );
-    final id =
-        city.commitRoad(List.of(pending), roadClass, groundAt: groundAt);
+    final id = city.commitRoad(List.of(pending), roadClass,
+        groundAt: groundAt,
+        soundWalls: soundWalls && roadClass.canHaveSoundWalls);
     if (id == null) {
       // Refused on grade. The pending points are KEPT: the player adjusts the
       // route or drops a tier, rather than redrawing from nothing.
@@ -510,6 +515,36 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
                             : const Color(0xFF2A3948)),
                   ),
                   child: Text(c.label,
+                      style: const TextStyle(
+                          fontSize: 10, color: Color(0xFFD6E2EE))),
+                ),
+              ),
+            ),
+          if (controller.roadClass.canHaveSoundWalls)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 6),
+              child: InkWell(
+                onTap: () {
+                  controller.soundWalls = !controller.soundWalls;
+                  controller.changed();
+                },
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(4),
+                    color: controller.soundWalls
+                        ? const Color(0xFF2A3948)
+                        : Colors.transparent,
+                    border: Border.all(
+                        color: controller.soundWalls
+                            ? Colors.white
+                            : const Color(0xFF2A3948)),
+                  ),
+                  child: Text(
+                      controller.soundWalls
+                          ? 'Sound barriers: on'
+                          : 'Sound barriers: off',
                       style: const TextStyle(
                           fontSize: 10, color: Color(0xFFD6E2EE))),
                 ),

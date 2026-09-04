@@ -3,9 +3,13 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
+import 'dart:math' as math;
+
+import 'package:acro_space_simulator/domain/architecture/building_massing.dart';
 import 'package:acro_space_simulator/domain/scatter/mesh_builder.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/lot_features.dart';
+import 'package:acro_space_simulator/infrastructure/flutter_scene/city/road_mesher.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// What stands on a lot besides its building.
@@ -85,35 +89,149 @@ void main() {
     expect(glow.build().positions, isNotEmpty, reason: 'the lit face');
   });
 
-  test('parking draws an apron, a driveway out, and fills by occupancy', () {
-    ({int cars, int groundVerts}) park(double occupancy) {
-      final ground = MeshBuilder();
-      final cars = MeshBuilder();
-      final glass = MeshBuilder();
-      final n = LotFeatures.emitParking(ground, cars, glass, at, along, up, 10, 14,
-          spaces: 12, occupancy: occupancy, airless: false);
-      return (cars: n, groundVerts: ground.build().positions.length);
-    }
-
-    // The apron and the driveway are drawn whether or not anyone is parked —
-    // an empty car park is still a car park.
-    final empty = park(0.0);
-    expect(empty.groundVerts, greaterThan(0));
-    expect(empty.cars, 0);
-
+  test('a lot fills by occupancy, and an airless world parks rovers', () {
+    const lot = ParkingLot(x: 0, y: -19, width: 28, depth: 20, spaces: 12);
+    int park(double occupancy, {bool airless = false}) =>
+        LotFeatures.emitLot(MeshBuilder(), MeshBuilder(), MeshBuilder(),
+            Vector3.zero, Vector3(0, 1, 0), Vector3(0, 0, 1), up, lot, (0, -8),
+            frontLineY: -30,
+            rearLineY: 30,
+            behind: false,
+            rearDoorY: 12,
+            occupancy: occupancy,
+            airless: airless);
+    expect(park(0.0), 0);
     final half = park(0.5);
     final full = park(1.0);
-    expect(half.cars, greaterThan(0));
-    expect(full.cars, greaterThan(half.cars),
-        reason: 'occupancy must show as more cars');
-    expect(full.cars, lessThanOrEqualTo(12), reason: 'never more than bays');
+    expect(half, greaterThan(0));
+    expect(full, greaterThan(half), reason: 'occupancy must show as more cars');
+    expect(full, lessThanOrEqualTo(12), reason: 'never more than bays');
+    final rovers = MeshBuilder();
+    final n = LotFeatures.emitLot(MeshBuilder(), rovers, MeshBuilder(),
+        Vector3.zero, Vector3(0, 1, 0), Vector3(0, 0, 1), up, lot, (0, -8),
+        frontLineY: -30,
+        rearLineY: 30,
+        behind: false,
+        rearDoorY: 12,
+        occupancy: 1.0,
+        airless: true);
+    expect(n, greaterThan(0));
+    expect(rovers.build().positions, isNotEmpty);
   });
 
-  test('an airless world parks rovers, not cars', () {
-    final a = MeshBuilder(), b = MeshBuilder(), c = MeshBuilder();
-    final n = LotFeatures.emitParking(a, b, c, at, along, up, 10, 14,
-        spaces: 6, occupancy: 1.0, airless: true);
-    expect(n, greaterThan(0));
-    expect(b.build().positions, isNotEmpty);
+  group('the car park the massing placed', () {
+    // The building's plan frame at the origin, up +X, street along +Y, into
+    // the lot along +Z: so a vertex's y is its x-across and z its y-along.
+    final side = Vector3(0, 1, 0);
+    final into = Vector3(0, 0, 1);
+    ({double minX, double maxX, double minY, double maxY}) bounds(
+        MeshBuilder m) {
+      final mesh = m.build();
+      var minX = double.infinity, maxX = -double.infinity;
+      var minY = double.infinity, maxY = -double.infinity;
+      for (var v = 0; v < mesh.vertexCount; v++) {
+        final x = mesh.positions[v * 3 + 1] / 0.001;
+        final y = mesh.positions[v * 3 + 2] / 0.001;
+        minX = math.min(minX, x);
+        maxX = math.max(maxX, x);
+        minY = math.min(minY, y);
+        maxY = math.max(maxY, y);
+      }
+      return (minX: minX, maxX: maxX, minY: minY, maxY: maxY);
+    }
+
+    test('a front lot: driveway to the curb across the sidewalk, footpath '
+        'from the door to the lot line, bays inside the lot', () {
+      // A 30 m wide parcel, 60 m deep: lot line at y = -30, a 20 m lot
+      // just inside it, the building behind with its door at y = -8.
+      const lot = ParkingLot(x: 0, y: -19, width: 28, depth: 20, spaces: 20);
+      final paving = MeshBuilder(), cars = MeshBuilder(), glass = MeshBuilder();
+      final placed = LotFeatures.emitLot(
+          paving, cars, glass, Vector3.zero, side, into, up, lot, (0, -8),
+          frontLineY: -30,
+          rearLineY: 30,
+          behind: false,
+          rearDoorY: 12,
+          occupancy: 0.5,
+          airless: false,
+          sidewalkM: 3);
+      final b = bounds(paving);
+      // The driveway reaches the curb, three metres past the lot line...
+      expect(b.minY, lessThan(-30 - 3 + 0.5));
+      // ...and nothing goes further than the curb or wider than the lot.
+      expect(b.minY, greaterThan(-30 - 3 - 1));
+      expect(b.minX, greaterThan(-28 / 2 - 1));
+      expect(b.maxX, lessThan(28 / 2 + 1));
+      // The path goes all the way to the door.
+      expect(b.maxY, greaterThanOrEqualTo(-8));
+      // Half the twenty bays, at most, hold a car; none when empty.
+      expect(placed, inInclusiveRange(1, 10));
+      expect(cars.build().triangleCount, greaterThan(0));
+      final empty = MeshBuilder();
+      expect(
+          LotFeatures.emitLot(empty, MeshBuilder(), MeshBuilder(), Vector3.zero,
+              side, into, up, lot, (0, -8),
+              frontLineY: -30,
+              rearLineY: 30,
+              behind: false,
+              rearDoorY: 12,
+              occupancy: 0,
+              airless: false),
+          0);
+      // Without detail there are no bay lines, so far fewer triangles.
+      final coarse = MeshBuilder();
+      LotFeatures.emitLot(coarse, MeshBuilder(), MeshBuilder(), Vector3.zero,
+          side, into, up, lot, (0, -8),
+          frontLineY: -30,
+          rearLineY: 30,
+          behind: false,
+          rearDoorY: 12,
+          occupancy: 0.5,
+          airless: false,
+          detailed: false);
+      expect(coarse.build().triangleCount, lessThan(paving.build().triangleCount));
+    });
+
+    test('a rear lot: driveway out into the alley, footpath to the back door,'
+        ' and no driveway across the front', () {
+      const lot = ParkingLot(x: 0, y: 20, width: 28, depth: 16, spaces: 16);
+      final paving = MeshBuilder();
+      LotFeatures.emitLot(paving, MeshBuilder(), MeshBuilder(), Vector3.zero,
+          side, into, up, lot, (0, -30),
+          frontLineY: -30,
+          rearLineY: 30,
+          behind: true,
+          rearDoorY: 9,
+          occupancy: 0.5,
+          airless: false);
+      final b = bounds(paving);
+      // Into the alley past the rear line.
+      expect(b.maxY, greaterThan(30));
+      expect(b.maxY, lessThan(32));
+      // The path reaches the back wall; nothing reaches the street — the
+      // door is ON the lot line, a street wall.
+      expect(b.minY, lessThanOrEqualTo(9));
+      expect(b.minY, greaterThan(0));
+    });
+
+    test('paint rides the lot slab, not the ground', () {
+      const lot = ParkingLot(x: 0, y: -19, width: 28, depth: 20, spaces: 20);
+      final paving = MeshBuilder();
+      LotFeatures.emitLot(paving, MeshBuilder(), MeshBuilder(), Vector3.zero,
+          side, into, up, lot, (0, -8),
+          frontLineY: -30,
+          rearLineY: 30,
+          behind: false,
+          rearDoorY: 12,
+          occupancy: 0,
+          airless: false);
+      final mesh = paving.build();
+      var minUp = double.infinity;
+      for (var v = 0; v < mesh.vertexCount; v++) {
+        minUp = math.min(minUp, mesh.positions[v * 3] / 0.001);
+      }
+      expect(minUp, greaterThan(0.08), reason: 'over the 8 cm slab');
+      expect(RoadMesher.paintLiftM, lessThan(0.1));
+    });
   });
 }

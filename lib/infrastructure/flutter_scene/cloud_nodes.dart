@@ -14,6 +14,7 @@ import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
 import 'coord_convert.dart';
 import 'depth_materials.dart';
+import 'graphics_quality.dart';
 import 'sphere_geometry_util.dart';
 
 /// Per-body art styling for the raymarched volumetric cloud layer.
@@ -572,7 +573,7 @@ class _CloudShell {
     }
   }
 
-  final Float32List _uniforms = Float32List(40); // 10 x vec4, std140
+  final Float32List _uniforms = Float32List(44); // 11 x vec4, std140
 
   void updateUniforms({
     required vm.Vector3 centreScene,
@@ -661,6 +662,14 @@ class _CloudShell {
     _uniforms[37] = ((tint2Argb >> 8) & 0xff) / 255.0;
     _uniforms[38] = (tint2Argb & 0xff) / 255.0;
     _uniforms[39] = tintMix;
+    // vec4 quality: the scalability preset. Re-read every frame (it is a
+    // static read, not a rebuild) so moving the options slider applies to the
+    // very next frame instead of the next session.
+    final q = GraphicsQuality.clouds;
+    _uniforms[40] = q.viewSampleCap.toDouble();
+    _uniforms[41] = q.samplePitch;
+    _uniforms[42] = q.lightSamples.toDouble();
+    _uniforms[43] = q.mode.wire.toDouble();
     // All windings share the block; only the active set is in the scene.
     _inMaterial.setUniformBlockFromFloats('CloudInfo', _uniforms);
     _outMaterial.setUniformBlockFromFloats('CloudInfo', _uniforms);

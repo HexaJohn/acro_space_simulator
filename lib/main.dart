@@ -5,9 +5,12 @@
 
 import 'package:flutter/material.dart';
 
+import 'package:shared_preferences/shared_preferences.dart';
+
 import 'infrastructure/baked_terrain_data.dart';
 import 'infrastructure/flutter/screens/main_menu_screen.dart';
 import 'infrastructure/flutter/windows_key_event_workaround.dart';
+import 'infrastructure/flutter_scene/graphics_quality.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -15,7 +18,28 @@ Future<void> main() async {
   // Awaited: collision reads the DEM registry synchronously from the tick, so
   // the pyramids must be resident before any screen can build a sim.
   await loadBakedTerrainData();
+  await _loadGraphicsQuality();
   runApp(const AcroSpaceSimulatorApp());
+}
+
+/// Restore the scalability preset before the first frame.
+///
+/// Awaited rather than fire-and-forget: the render passes read
+/// [GraphicsQuality] every frame, so loading it late would draw the first
+/// seconds at High on the very machines the setting exists for. A failure here
+/// is not worth blocking launch over — the defaults are the shipped look.
+Future<void> _loadGraphicsQuality() async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    GraphicsQuality.applyPrefs({
+      GraphicsQuality.masterKey: prefs.getString(GraphicsQuality.masterKey),
+      GraphicsQuality.cloudKey: prefs.getString(GraphicsQuality.cloudKey),
+      GraphicsQuality.lightingKey:
+          prefs.getString(GraphicsQuality.lightingKey),
+    });
+  } catch (_) {
+    GraphicsQuality.reset();
+  }
 }
 
 /// Composition root. Wires nothing itself beyond the app shell — the

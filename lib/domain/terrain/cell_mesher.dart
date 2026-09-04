@@ -18,6 +18,7 @@
 /// is what keeps voxel count bounded as chunk count grows.
 library;
 
+import 'dart:collection';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
@@ -430,9 +431,44 @@ CellMesh meshTerrainCell(
   final out = Uint32List(src.length);
   var w = 0;
   var interior = 0;
+  // Membership is resolved by CELL ADDRESS, not geometry, and pays exactly
+  // one projection per direction however many levels `masked` spans.
+  // History: the original tested every `masked` entry's `.contains(dir)`
+  // per direction — O(|masked|) geometric tests, catastrophic once a coarse
+  // ancestor collected hundreds of arrived descendants. The first fix
+  // grouped `masked` by level and probed `chunkAt(dir, level)` per DISTINCT
+  // level — fine for the streaming ladder's handful of levels, but a city's
+  // forced refinement spans ~18 of them at x16 the triangles (edit-boosted
+  // resolution), and `chunkAt`'s projection + allocations per level per
+  // corner measured ~30ms PER REBUILD in the studio. Now: project once at
+  // the DEEPEST masked level, then walk the quadtree upward by integer
+  // halving — cell nesting composes exactly (`u >> k` IS the ancestor's
+  // column, the same floor arithmetic `chunkAt` uses) — probing a packed-int
+  // hash set per populated level. Zero allocation, no trig past the first
+  // projection, and [chunkAt]'s documented agreement with
+  // [ChunkKey.contains] still carries the equivalence to the original scan.
+  var deepest = 0;
+  final levelSets = HashMap<int, HashSet<int>>();
+  // face(3 bits) << 52 | u << 26 | v: u,v < 2^26 for every reachable level,
+  // so the packing is exact — one probe answers the membership outright,
+  // with no cross-face collisions to confirm away.
+  for (final m in masked) {
+    if (m.level > deepest) deepest = m.level;
+    (levelSets[m.level] ??= HashSet<int>())
+        .add((m.face.index << 52) | (m.u << 26) | m.v);
+  }
+  final levels = levelSets.keys.toList()..sort();
   bool inMask(Vector3 dir) {
-    for (final m in masked) {
-      if (m.contains(dir)) return true;
+    if (levels.isEmpty) return false;
+    final k = chunkAt(dir, deepest);
+    final facePacked = k.face.index << 52;
+    for (var i = levels.length - 1; i >= 0; i--) {
+      final lvl = levels[i];
+      final shift = deepest - lvl;
+      if (levelSets[lvl]!
+          .contains(facePacked | ((k.u >> shift) << 26) | (k.v >> shift))) {
+        return true;
+      }
     }
     return false;
   }
@@ -442,10 +478,19 @@ CellMesh meshTerrainCell(
   // outside the footprint (the apron ring, and edge vertices an epsilon
   // over the boundary) never pin: letting them would hold boundary
   // triangles hostage forever and the parent could never retire.
+  //
+  // Memoized per VERTEX: each vertex is shared by ~6 triangles, so the
+  // normalize + footprint + mask test would otherwise repeat sixfold.
+  final vertPins = Uint8List(pos.length ~/ 3); // 0 unknown, 1 pins, 2 not
   bool pins(int i) {
+    final vi = i ~/ 3;
+    final cached = vertPins[vi];
+    if (cached != 0) return cached == 1;
     final dir =
         Vector3(a.x + pos[i], a.y + pos[i + 1], a.z + pos[i + 2]).normalized;
-    return cell.chunk.contains(dir) && !inMask(dir);
+    final p = cell.chunk.contains(dir) && !inMask(dir);
+    vertPins[vi] = p ? 1 : 2;
+    return p;
   }
 
   for (var t = 0; t < src.length; t += 3) {
@@ -574,6 +619,52 @@ SurfaceMesh _addSkirt({
     positions: outPos,
     normals: outNrm,
     indices: outIdx,
+    normalMode: NormalMode.gradient,
+  );
+}
+
+/// Concatenate several chunks' meshes into ONE vertex/index buffer, each
+/// member's vertices re-anchored from its own [CellMesh.anchorBF] to
+/// [anchorBF] — the geometry half of terrain draw-call batching. Chunks of
+/// one body share rotation and scale, so re-anchoring is a pure body-frame
+/// translation by the anchor delta: the combined mesh under the GROUP's
+/// node transform is vertex-for-vertex where the members' own nodes put
+/// them (to f32 rounding of the delta — why the batcher keeps very coarse
+/// chunks, whose deltas span tens of km, out of batches).
+///
+/// Pure and headless-testable; the render side only wraps the result in a
+/// geometry upload.
+SurfaceMesh combineCellMeshes(List<CellMesh> cells, Vector3 anchorBF) {
+  var vertFloats = 0, idx = 0;
+  for (final c in cells) {
+    vertFloats += c.mesh.positions.length;
+    idx += c.mesh.indices.length;
+  }
+  final positions = Float32List(vertFloats);
+  final normals = Float32List(vertFloats);
+  final indices = Uint32List(idx);
+  var vf = 0, ii = 0, baseVertex = 0;
+  for (final c in cells) {
+    final dx = c.anchorBF.x - anchorBF.x;
+    final dy = c.anchorBF.y - anchorBF.y;
+    final dz = c.anchorBF.z - anchorBF.z;
+    final p = c.mesh.positions;
+    for (var i = 0; i < p.length; i += 3) {
+      positions[vf + i] = p[i] + dx;
+      positions[vf + i + 1] = p[i + 1] + dy;
+      positions[vf + i + 2] = p[i + 2] + dz;
+    }
+    normals.setRange(vf, vf + p.length, c.mesh.normals);
+    for (final index in c.mesh.indices) {
+      indices[ii++] = index + baseVertex;
+    }
+    vf += p.length;
+    baseVertex += p.length ~/ 3;
+  }
+  return SurfaceMesh(
+    positions: positions,
+    normals: normals,
+    indices: indices,
     normalMode: NormalMode.gradient,
   );
 }

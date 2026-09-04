@@ -282,6 +282,179 @@ class TerrainNodes {
   /// are relative to (see [CellMesh.anchorBF] for why they are not absolute).
   final Map<ChunkKey, _ResidentChunk> _chunks = {};
 
+  /// Reference count, per key, of residents whose ancestor chain passes
+  /// through it — `k` is in this map (with a positive count) exactly when
+  /// `{for (r in _chunks.keys) ...r.ancestors}` would have contained `k`.
+  /// Maintained incrementally by [_bumpAncestorRefs] at every `_chunks`
+  /// add/remove instead of that set being rebuilt from every resident chunk
+  /// on every reselect (O(residentChunks x tree depth), paid on essentially
+  /// every frame while the camera is moving).
+  final Map<ChunkKey, int> _ancestorRefCount = {};
+
+  void _bumpAncestorRefs(ChunkKey key, int delta) {
+    for (final a in key.ancestors) {
+      final n = (_ancestorRefCount[a] ?? 0) + delta;
+      if (n <= 0) {
+        _ancestorRefCount.remove(a);
+      } else {
+        _ancestorRefCount[a] = n;
+      }
+    }
+  }
+
+  // --- Draw-call batching ---------------------------------------------------
+  //
+  // One draw per chunk was the documented cost ceiling on
+  // [maxResidentChunks] ("the real cost here is DRAW CALLS ... which is what
+  // wants batching before this number grows again") — profiled, the
+  // per-draw encode is exactly the diffuse UI-thread cost that scales with
+  // resident count. Chunks of one body share rotation and scale, so a GROUP
+  // of them concatenates into one buffer with members re-anchored by a pure
+  // body-frame translation ([combineCellMeshes]) under a single node.
+  //
+  // Groups are the quadtree's own regions: a chunk batches under its
+  // ancestor [batchGroupLevels] up, so members stay spatially tight and a
+  // group's anchor deltas stay small enough for f32 vertices (why chunks
+  // below [batchMinLevel] — whose deltas would span tens of km — keep their
+  // own nodes). A chunk that grows a MASK is ejected to its own node too:
+  // masks are per-chunk index filters, and rebatching the whole group per
+  // mask touch would put the mask-cascade cost right back.
+
+  /// Coarsest level allowed into a batch; shallower chunks draw solo.
+  static int batchMinLevel = 6;
+
+  /// How many quadtree levels above a chunk its batch group sits.
+  static int batchGroupLevels = 2;
+
+  /// Batch geometry rebuilds per frame — same throttle shape as
+  /// [uploadBudgetPerFrame]; a group whose membership changed re-concats
+  /// its members' buffers and re-uploads once, not per change.
+  static int batchRebuildBudgetPerFrame = 8;
+
+  final Map<(ChunkKey, int), _ChunkBatch> _batches = {};
+  final Set<(ChunkKey, int)> _dirtyBatches = {};
+  int _batchBuildsThisFrame = 0;
+  int _batchUsThisFrame = 0;
+
+  (ChunkKey, int) _batchKeyFor(ChunkKey key, int resolution) {
+    var g = key;
+    for (var i = 0; i < batchGroupLevels; i++) {
+      final p = g.parent;
+      if (p == null) break;
+      g = p;
+    }
+    return (g, resolution);
+  }
+
+  void _joinBatch(ChunkKey key, _ResidentChunk c) {
+    final bk = _batchKeyFor(key, c.resolution);
+    final batch = _batches[bk] ??= _ChunkBatch(c.cell.anchorBF);
+    batch.members.add(key);
+    c.batchKey = bk;
+    _dirtyBatches.add(bk);
+  }
+
+  void _leaveBatch(ChunkKey key, _ResidentChunk c) {
+    final bk = c.batchKey;
+    if (bk == null) return;
+    c.batchKey = null;
+    final batch = _batches[bk];
+    if (batch == null) return;
+    batch.members.remove(key);
+    if (batch.members.isEmpty) {
+      final n = batch.node;
+      if (n != null) _scene.remove(n);
+      _batches.remove(bk);
+      _dirtyBatches.remove(bk);
+    } else {
+      _dirtyBatches.add(bk);
+    }
+  }
+
+  /// Take [c]'s triangles out of the scene, whichever way they were drawn.
+  void _detachVisual(ChunkKey key, _ResidentChunk c) {
+    final n = c.soloNode;
+    if (n != null) {
+      _scene.remove(n);
+      c.soloNode = null;
+    }
+    _leaveBatch(key, c);
+  }
+
+  /// Drop every batch node and the batch maps — the bulk-clear counterpart
+  /// of [_detachVisual], for the paths that wipe `_chunks` wholesale.
+  void _clearBatches() {
+    for (final b in _batches.values) {
+      final n = b.node;
+      if (n != null) _scene.remove(n);
+    }
+    _batches.clear();
+    _dirtyBatches.clear();
+  }
+
+  /// Rebuild dirty batches' combined geometry, oldest first, under
+  /// [batchRebuildBudgetPerFrame]. A member skipped this frame draws next
+  /// frame — the same short lag the mask drain already tolerates.
+  void _drainDirtyBatches() {
+    var budget = batchRebuildBudgetPerFrame;
+    while (budget > 0 && _dirtyBatches.isNotEmpty) {
+      final bk = _dirtyBatches.first;
+      _dirtyBatches.remove(bk);
+      final batch = _batches[bk];
+      if (batch == null) continue;
+      final cells = <CellMesh>[
+        for (final k in batch.members)
+          if (_chunks[k] != null) _chunks[k]!.cell,
+      ];
+      if (cells.isEmpty) continue;
+      final combined = combineCellMeshes(cells, batch.anchorBF);
+      final geom = fs.MeshGeometry.fromArrays(
+        positions: combined.positions,
+        normals: combined.normals,
+        indices: combined.indices,
+      );
+      final mesh = fs.Mesh(geom, _material!);
+      final node = batch.node;
+      if (node == null) {
+        batch.node = fs.Node(mesh: mesh);
+        _scene.add(batch.node!);
+      } else {
+        node.mesh = mesh;
+      }
+      _batchBuildsThisFrame++;
+      budget--;
+    }
+  }
+
+  /// [_rebuildMasked] calls this frame (after the [_dirtyMasks] batching
+  /// below collapses repeats), and the cumulative time inside them
+  /// (maskCellIndices' filter, plus its own GPU re-upload) — measured
+  /// separately from [_addChunk]'s upload because it is a second,
+  /// independent call site doing the same kind of work.
+  int _maskCallsThisFrame = 0;
+  int _maskUsThisFrame = 0;
+
+  /// Ancestors touched by [_maskResident] or unmasked by [_removeResident]'s
+  /// masker scan THIS FRAME, not yet rebuilt. [_maskResident] used to call
+  /// [_rebuildMasked] immediately at every touch — but a single MERGE
+  /// arrival can retire every descendant of a deeply-refined stack in one
+  /// loop (see the merge branch in [update]), and each of those removals
+  /// independently re-triggers every ancestor that had been masking IT.
+  /// With several nested rungs resident above a real refined region, the
+  /// same handful of ancestors got rebuilt once per removed descendant —
+  /// measured: a single frame with a big merge cascade called
+  /// [_rebuildMasked] 309 times, most of them the SAME few chunks rebuilt
+  /// from scratch repeatedly. [_maskResident] and the masker scan now only
+  /// mark a key dirty; [_drainDirtyMasks] rebuilds each dirty key exactly
+  /// once (using its final `maskedBy` state) per [update] call, however many
+  /// times it was touched getting there.
+  final Set<ChunkKey> _dirtyMasks = {};
+
+  /// How many times a key was marked dirty this frame, BEFORE [_dirtyMasks]
+  /// dedupes repeats — set alongside [_maskCallsThisFrame] so the profile
+  /// line shows the redundancy [_drainDirtyMasks] is collapsing.
+  int _maskTouchesThisFrame = 0;
+
   // --- Async meshing state (phase 4c) --------------------------------------
   // In-flight jobs cannot be cancelled (see mesh_scheduler.dart); staleness is
   // handled by tagging every job with [_generation] and dropping results whose
@@ -310,6 +483,26 @@ class TerrainNodes {
   /// next frame: streaming deadlocked below the first resident level and the
   /// mesher ground the same rung forever.
   final Set<ChunkKey> _ladderRungs = {};
+
+  /// Chunks retired on upload because finer residents masked their ENTIRE
+  /// index buffer (`interiorRemaining == 0` in [_rebuildMasked]) — the
+  /// fully-covered cousin of [_emptyChunks], and the same deadlock if the
+  /// ladder is allowed to re-request one. Measured (an impact crater, live):
+  /// the invalidation leaves a few deep wants as a hole SMALLER THAN ONE
+  /// TRIANGLE of their coarse rung — every coarse triangle's centroid falls
+  /// inside some masked finer chunk, so the rung retires as fully covered
+  /// the instant it uploads, the wants' [nextRung] still finds no resident
+  /// ancestor at that level, and the same rung cycles serve → upload →
+  /// full-mask → retire forever while the wants stay ladder-blocked behind
+  /// it ("stuck loading" at the crater, `rej` climbing in [debugLine]).
+  /// Fed into [nextRung]'s `isEmpty` alongside [_emptyChunks], so the ladder
+  /// steps straight to the want instead — which meshes at its own level and
+  /// is admitted as a `wanted` leaf, filling the hole with real ground.
+  ///
+  /// Unmarked when any resident UNDER a marked key retires (its cover
+  /// shrank, so the stand-in may genuinely be needed again) and cleared with
+  /// the generation.
+  final Set<ChunkKey> _fullyCovered = {};
 
   /// Retired chunks' meshes, kept in memory so a revisit re-UPLOADS instead
   /// of re-MESHING — a camera swinging back gets its ground the same frame.
@@ -351,6 +544,11 @@ class TerrainNodes {
   /// readable through `ext.acro.terrain` next to [debugLine].
   static bool profile = false;
   static String profileLine = '';
+
+  /// Resident chunk count per LOD level, e.g. `L0:6 L7:180 L12:512` —
+  /// updated alongside [debugLine] regardless of [profile], since it costs
+  /// nothing extra (piggybacks the loop [debugLine] already runs).
+  static String levelHistogramLine = '';
 
   // --- Loading placeholder ---------------------------------------------------
   /// Wireframe patch per bare (no cover at any LOD) chunk, plus one spinner
@@ -426,6 +624,34 @@ class TerrainNodes {
   int get retiredClipped => _retiredClipped;
   int _retiredClipped = 0;
   int _generation = 0;
+
+  /// Cumulative counts for every SILENT drop in the streaming pipeline —
+  /// paths where a finished mesh (or in-flight job) is discarded without
+  /// becoming a chunk and without any other trace. Surfaced in [debugLine]
+  /// (nonzero only) because a region stuck "loading forever" with e/clipped
+  /// /RETIRED all zero means one of THESE is eating its meshes: a
+  /// submit → mesh → drop → resubmit loop is invisible from every other
+  /// counter.
+  ///
+  /// [_dropRejected]: arrivals [admitsArrival] refused (not wanted, not a
+  /// bare-coverage ancestor, not a requested ladder rung — by ARRIVAL time).
+  /// [_dropStaleGen]: results discarded for a generation bump (edit
+  /// invalidation, body switch) — in the mesh callback or the arrival pump.
+  /// [_dropStaleEdit]: results discarded because a NEW edit landed while
+  /// they were in flight ([_staleInFlight]).
+  /// [_editsChangedCount]: how many times the edit store's count moved —
+  /// climbing steadily means something keeps ADDING edits (say, debris
+  /// resting in a crater re-colliding every tick), re-invalidating the
+  /// region's in-flight meshes forever.
+  int _dropRejected = 0;
+  int _dropStaleGen = 0;
+  int _dropStaleEdit = 0;
+  int _editsChangedCount = 0;
+
+  /// The most recent [admitsArrival] refusal, with the rejected key's
+  /// relation to the sets that refused it — readable over
+  /// `ext.acro.terrain` so a live rejection loop names its own key.
+  static String lastRejectLine = '';
 
   TerrainLodTree? _tree;
   double _treeSplitPx = 0;
@@ -513,7 +739,13 @@ class TerrainNodes {
     Vector3? starWorld,
   }) {
     final profSw = profile ? (Stopwatch()..start()) : null;
-    var profPreUs = 0, profSelUs = 0, profStreamUs = 0;
+    var profPreUs = 0, profSelUs = 0, profArriveUs = 0, profScanUs = 0;
+    var profAddUs = 0;
+    _maskCallsThisFrame = 0;
+    _maskUsThisFrame = 0;
+    _maskTouchesThisFrame = 0;
+    _batchBuildsThisFrame = 0;
+    _batchUsThisFrame = 0;
 
     final shader = _shader;
     // Hold off until the shader AND the material tiles are uploaded — the
@@ -653,9 +885,12 @@ class TerrainNodes {
         _builtResolution != resolution ||
         _builtResBoost != editResBoost) {
       for (final c in _chunks.values) {
-        _scene.remove(c.node);
+        final n = c.soloNode;
+        if (n != null) _scene.remove(n);
       }
+      _clearBatches();
       _chunks.clear();
+      _ancestorRefCount.clear();
       _invalidateInFlight();
       _builtSkirtVoxels = skirtVoxels;
       _builtResolution = resolution;
@@ -728,6 +963,7 @@ class TerrainNodes {
     // the whole mesh cache and every in-flight job, so each placed building
     // re-meshed the entire resident set. The surface can only move within a
     // brush's lateralReachM of its axis, hence that as the overlap radius.
+    if (editsChanged) _editsChangedCount++;
     if (editsChanged && edits != null) {
       if (addedBrushes.isEmpty) {
         // Added set unknowable (count shrank / first sight of this body's
@@ -752,7 +988,8 @@ class TerrainNodes {
             final centre = k.centreDirection * brush.centreBF.length;
             if ((brush.centreBF - centre).length <=
                 reach + brush.lateralReachM) {
-              _scene.remove(_chunks.remove(k)!.node);
+              _detachVisual(k, _chunks.remove(k)!);
+              _bumpAncestorRefs(k, -1);
               break;
             }
           }
@@ -788,7 +1025,10 @@ class TerrainNodes {
         _clippedRetries.removeWhere((k, _) => touches(k));
         _meshCache.removeWhere((k, _) => touches(k));
         for (final k in _chunks.keys.toList()) {
-          if (touches(k)) _scene.remove(_chunks.remove(k)!.node);
+          if (touches(k)) {
+            _detachVisual(k, _chunks.remove(k)!);
+            _bumpAncestorRefs(k, -1);
+          }
         }
       }
     }
@@ -877,11 +1117,10 @@ class TerrainNodes {
       // chunks with NO resident cover at all: the coverage-root path below
       // meshes those, and the upload pump must accept them on arrival even
       // though they are not wanted. Ancestors of every resident:
-      // `coveredBelow.contains(k)` == some finer resident lies under k's
-      // region (the merge-direction cover).
-      final coveredBelow = <ChunkKey>{
-        for (final r in _chunks.keys) ...r.ancestors,
-      };
+      // `_ancestorRefCount.containsKey(k)` == some finer resident lies under
+      // k's region (the merge-direction cover). [_ancestorRefCount] is
+      // maintained incrementally by [_bumpAncestorRefs] rather than rebuilt
+      // from every resident chunk here on every reselect.
       final protected = <ChunkKey>{};
       final bareAncestors = <ChunkKey>{};
       // Missing chunks whose cover is absent or far coarser than wanted — the
@@ -901,7 +1140,7 @@ class TerrainNodes {
           if (m.level - nearest.level >= placeholderLevelGap) {
             stillLoading.add(m);
           }
-        } else if (!coveredBelow.contains(m)) {
+        } else if (!_ancestorRefCount.containsKey(m)) {
           stillLoading.add(m);
           // Coverage roots are for FRESHLY REVEALED regions only. A split in
           // progress — some sibling already resident under the same parent —
@@ -909,7 +1148,7 @@ class TerrainNodes {
           // player is watching refine would flash the whole face back over
           // it.
           final p = m.parent;
-          if (p == null || !coveredBelow.contains(p)) {
+          if (p == null || !_ancestorRefCount.containsKey(p)) {
             bareAncestors.addAll(m.ancestors);
           }
         }
@@ -1026,11 +1265,26 @@ class TerrainNodes {
     var uploads = 0;
     final held2 = <_ArrivedMesh>[];
     for (final a in _arrived) {
-      if (a.generation != _generation || _chunks.containsKey(a.key)) continue;
+      if (a.generation != _generation) {
+        _dropStaleGen++;
+        continue;
+      }
+      if (_chunks.containsKey(a.key)) continue;
       if (!admitsArrival(a.key,
           wanted: wanted,
           bareAncestors: bareAncestors,
           ladderRungs: _ladderRungs)) {
+        _dropRejected++;
+        // The key itself plus where it sits relative to the sets that
+        // refused it — enough to tell a stale rung (live wants BELOW it)
+        // from a stale want (live wants ABOVE it) from a stale coverage
+        // root, without a debugger on the live loop.
+        lastRejectLine = '${a.key} res${a.resolution} '
+            'wantedBelow:${wanted.any((w) => w.ancestors.contains(a.key))} '
+            'wantedAbove:${a.key.ancestors.any(wanted.contains)} '
+            'pendingSelf:${_pending.contains(a.key)} '
+            'rungs:${_ladderRungs.length} bare:${bareAncestors.length} '
+            'wanted:${wanted.length}';
         continue;
       }
       if (uploads >= uploadBudgetPerFrame) {
@@ -1038,7 +1292,13 @@ class TerrainNodes {
         continue;
       }
       _ladderRungs.remove(a.key);
-      _addChunk(a.key, a.cell, shader as gpu.Shader, a.resolution);
+      if (profSw != null) {
+        final t0 = profSw.elapsedMicroseconds;
+        _addChunk(a.key, a.cell, shader as gpu.Shader, a.resolution);
+        profAddUs += profSw.elapsedMicroseconds - t0;
+      } else {
+        _addChunk(a.key, a.cell, shader as gpu.Shader, a.resolution);
+      }
       uploads++;
       // The finest ground shows the moment it exists — and the coarse cover
       // above it is MASKED, not removed: its index buffer is refiltered so
@@ -1061,11 +1321,14 @@ class TerrainNodes {
         // cover — the tree still wants those fine leaves, so wiping them
         // (the old behaviour) stepped whole regions back to coarse ground
         // and forced a re-stream. Mask the ARRIVAL around them instead; if
-        // they cover it completely, the mask pass retires it on the spot.
+        // they cover it completely, the mask pass retires it once
+        // [_drainDirtyMasks] runs below — no early exit here any more:
+        // "fully covered" is now a DEFERRED outcome, so `a.key` stays
+        // resident (just marked dirty) for the rest of this loop regardless
+        // of how many `r` end up masking it.
         for (final r in _chunks.keys.toList()) {
           if (r != a.key && r.ancestors.contains(a.key)) {
             _maskResident(a.key, r);
-            if (!_chunks.containsKey(a.key)) break; // fully covered: gone
           }
         }
       }
@@ -1073,6 +1336,22 @@ class TerrainNodes {
     _arrived
       ..clear()
       ..addAll(held2);
+    // Apply every mask touch collected above (and any carried over from
+    // sel-phase retirements this same frame — sel runs before this loop) in
+    // one deduplicated pass. See [_dirtyMasks]'s doc.
+    _drainDirtyMasks();
+    // Then rebuild the draw batches whose membership those arrivals and
+    // retirements changed (budgeted; see the batching section).
+    if (profSw != null) {
+      final t0 = profSw.elapsedMicroseconds;
+      _drainDirtyBatches();
+      _batchUsThisFrame = profSw.elapsedMicroseconds - t0;
+    } else {
+      _drainDirtyBatches();
+    }
+    if (profSw != null) {
+      profArriveUs = profSw.elapsedMicroseconds - profPreUs - profSelUs;
+    }
 
     // Submit what is missing, up to the in-flight cap. `visible` is already
     // sorted nearest-first, so filtering it preserves that order and the
@@ -1114,55 +1393,27 @@ class TerrainNodes {
             !_emptyChunks.contains(a))
           a,
     };
+    // `missing` is bounded by `wanted` (<= maxResidentChunks), and measured
+    // `scan` cost is consistently ~0ms even at the largest backlogs seen —
+    // this was never the expensive part of streaming (the arrival/mask
+    // bookkeeping was; see [_dirtyMasks]'s doc). A PREVIOUS version windowed
+    // this scan with a cursor to bound it defensively anyway, but that
+    // introduced a real bug: `missing` is rebuilt fresh every frame with
+    // different size and membership as things resolve, so a raw list-index
+    // cursor could park a low-ranked entry — a forced-refinement target
+    // (e.g. a fresh impact crater, which is not necessarily the nearest
+    // thing in view) past the reachable window indefinitely as the list
+    // shrank and reordered around it, resetting the cursor before ever
+    // reaching it. Measured: exactly that — a crater whose ground never
+    // arrived, stuck on the loading placeholder forever. Full scan, every
+    // frame, like [coverageRoots] above it.
     for (final want in coverageRoots.followedBy(missing)) {
-      // --- Step the level, do not leap it -------------------------------
-      //
-      // Coverage roots are level 0 and targets are often level 14+, so the
-      // ladder had two rungs: one enormous face root, then the finished leaf.
-      // Each region went from blocky to perfect in a single jump, and because
-      // the queue is nearest-first that happened to one tile at a time — the
-      // city assembled piece by piece instead of sharpening as a whole.
-      //
-      // Requesting an intermediate ancestor instead brings the visible area up
-      // together, and an interrupted stream leaves uniform medium detail
-      // rather than a few perfect tiles beside a cube face. Coarse chunks are
-      // a handful of triangles, so the extra passes cost little next to the
-      // leaves they stand in for.
-      final k = nextRung(want,
-          levelStep: levelStep,
-          isResident: _chunks.containsKey,
-          isEmpty: _emptyChunks.contains);
-      if (k != want && (_chunks.containsKey(k) || _pending.contains(k))) {
-        continue; // this rung is up; the next frame climbs from it
-      }
-      if (k != want) _ladderRungs.add(k);
-      // Cache first: a retired mesh re-enters through the normal arrival
-      // path (same generation gating, same atomic swaps) without costing an
-      // isolate round-trip or a slot in the in-flight budget.
-      final cached = _meshCache.remove(k);
-      if (cached != null) {
-        // Re-serve only a mesh at the resolution THIS context would mesh:
-        // the edit boost makes resolution contextual, and a variant cached
-        // under the other context re-uploads at a different voxel size — a
-        // visibly different altitude beside its neighbours and the analytic
-        // grid patches. That was the "unload and reload the tile"
-        // staleness: no field had changed, the VARIANT had. A mismatch just
-        // falls through to a fresh mesh.
-        //
-        // `held` (arrival-queue membership) keeps a re-served mesh out of
-        // `missing` next frame, so it cannot double-submit while it waits.
-        if (cached.$2 == _resolutionFor(k, field.radius)) {
-          _arrived.add(_ArrivedMesh(k, cached.$1, _generation, cached.$2));
-          continue;
-        }
-      }
-      if (_pending.length >= meshBudgetPerFrame) break;
-      if (_pending.contains(k)) continue;
-      _submit(field, k, _resolutionFor(k, field.radius));
+      _tryAdvanceMissing(want, field, levelStep);
     }
 
     if (profSw != null) {
-      profStreamUs = profSw.elapsedMicroseconds - profPreUs - profSelUs;
+      profScanUs =
+          profSw.elapsedMicroseconds - profPreUs - profSelUs - profArriveUs;
     }
 
     // "This ground is still streaming": wireframe patches + a spinner over
@@ -1183,10 +1434,29 @@ class TerrainNodes {
       final restUs = profSw.elapsedMicroseconds -
           profPreUs -
           profSelUs -
-          profStreamUs;
+          profArriveUs -
+          profScanUs;
+      // `arr` = turning finished meshes into scene nodes (upload budget,
+      // merge/mask bookkeeping); `add` is the [_addChunk] slice of `arr`
+      // alone — MeshGeometry.fromArrays + GPU buffer creation for a BRAND
+      // NEW chunk, the one part of streaming still synchronous on this
+      // thread by design (plan §4). `mask` is the OTHER call site that does
+      // the same kind of GPU re-upload — [_rebuildMasked], now run once per
+      // DISTINCT dirty key per [_drainDirtyMasks] call rather than once per
+      // touch; `maskN` is that deduplicated rebuild count, `tN` how many
+      // touches it collapsed (a big gap between them is exactly the
+      // redundant-rebuild pattern [_dirtyMasks]'s doc describes — a merge
+      // retiring many descendants of one deep stack, each re-triggering the
+      // same shared ancestors). `scan` = hunting `missing` for cache hits
+      // and fresh submissions (search budget). Split so a stall can be
+      // pinned on one of these instead of one opaque `stream` number.
       profileLine = 'terrain: pre ${profPreUs ~/ 1000}ms '
           'sel ${profSelUs ~/ 1000}ms${reselect ? '*' : ''} '
-          'stream ${profStreamUs ~/ 1000}ms '
+          'arr ${profArriveUs ~/ 1000}ms (add${profAddUs ~/ 1000}ms '
+          'mask${_maskUsThisFrame ~/ 1000}ms/mask$_maskCallsThisFrame'
+          '/t$_maskTouchesThisFrame '
+          'bat${_batchUsThisFrame ~/ 1000}ms/b$_batchBuildsThisFrame) '
+          'scan ${profScanUs ~/ 1000}ms '
           'ph ${restUs ~/ 1000}ms '
           'total ${profSw.elapsedMicroseconds ~/ 1000}ms';
     }
@@ -1194,42 +1464,82 @@ class TerrainNodes {
     counters['chunks'] = _chunks.length;
     counters['brushes'] = _edits?.length ?? 0;
     counters['gridPatches'] = _gridPatches.length;
+    counters['uploads'] = uploads;
     if (_chunks.isEmpty) {
       debugLine = 'terrain: no chunks';
+      levelHistogramLine = '';
       return;
     }
 
-    // Per-frame transform per chunk. Each mesh is LOCAL to its own anchor, so
-    // the node sits at that anchor (near the render origin for a landed craft)
-    // — not at the body centre ~1e6 m away, which cancelled in float32 and
-    // jittered. (LOD transitions are atomic — see the upload pump — so
-    // coarse and fine never coexist and no depth trickery is needed here.)
+    // Per-frame transform per DRAWN NODE — solo chunks and batches. Each
+    // mesh is LOCAL to its own anchor, so the node sits at that anchor (near
+    // the render origin for a landed craft) — not at the body centre ~1e6 m
+    // away, which cancelled in float32 and jittered. (LOD transitions are
+    // atomic — see the upload pump — so coarse and fine never coexist and no
+    // depth trickery is needed here.) Batching also shrinks THIS loop: one
+    // compose per group instead of per chunk.
+    vm.Matrix4 anchorTransform(Vector3 anchorBF) => vm.Matrix4.compose(
+          origin.worldToScene(bodyWorld + bodyQuat.rotate(anchorBF)),
+          quatToScene(bodyQuat),
+          vm.Vector3.all(lengthToScene(1.0)),
+        );
     for (final c in _chunks.values) {
       // Grid-only hides the ground but keeps it RESIDENT: streaming carries
       // on, and toggling back is instant.
-      c.node.visible = !gridOnly;
-      c.node.localTransform = vm.Matrix4.compose(
-        origin.worldToScene(bodyWorld + bodyQuat.rotate(c.anchorBF)),
-        quatToScene(bodyQuat),
-        vm.Vector3.all(lengthToScene(1.0)),
-      );
+      final n = c.soloNode;
+      if (n == null) continue;
+      n.visible = !gridOnly;
+      n.localTransform = anchorTransform(c.anchorBF);
+    }
+    for (final b in _batches.values) {
+      final n = b.node;
+      if (n == null) continue;
+      n.visible = !gridOnly;
+      n.localTransform = anchorTransform(b.anchorBF);
     }
     var tris = 0;
     var minLevel = 99, maxLevel = 0;
+    // Resident count per LOD level — free to build here since this loop
+    // already visits every chunk for tris/minLevel/maxLevel. Answers "what
+    // is actually loading" at a glance: a backlog skewed to one deep level
+    // (an edit island forcing refinement) reads very differently from one
+    // spread evenly across the ladder (a wide view still climbing).
+    final levelHistogram = <int, int>{};
+    // Largest `maskedBy` set on any resident chunk — directly confirms or
+    // rules out "an ancestor is being re-masked against a big and growing
+    // set on every child arrival" (see [_rebuildMasked]'s `mask`/`maskN`
+    // profile numbers).
+    var maxMaskedBy = 0;
     for (final e in _chunks.entries) {
       tris += e.value.triangleCount;
       if (e.key.level < minLevel) minLevel = e.key.level;
       if (e.key.level > maxLevel) maxLevel = e.key.level;
+      levelHistogram.update(e.key.level, (n) => n + 1, ifAbsent: () => 1);
+      if (e.value.maskedBy.length > maxMaskedBy) {
+        maxMaskedBy = e.value.maskedBy.length;
+      }
     }
+    levelHistogramLine = [
+      for (final lvl in levelHistogram.keys.toList()..sort())
+        'L$lvl:${levelHistogram[lvl]}',
+    ].join(' ');
     debugLine = 'terrain: ${_chunks.length} chunks  $tris tris  '
         'lvl $minLevel-$maxLevel  q${_tree!.leaves.length}'
-        '${_pending.isNotEmpty ? '  ~${_pending.length}' : ''}'
-        '${missing.length > _pending.length ? '  +${missing.length - _pending.length}' : ''}'
+        '${_pending.isNotEmpty ? '  pend${_pending.length}' : ''}'
+        '${_arrived.isNotEmpty ? '  arrived${_arrived.length}' : ''}'
+        '${missing.length > _pending.length ? '  missing+${missing.length - _pending.length}' : ''}'
         '${_emptyChunks.isNotEmpty ? '  e${_emptyChunks.length}' : ''}'
+        '${_fullyCovered.isNotEmpty ? '  fc${_fullyCovered.length}' : ''}'
         '${_meshCache.isNotEmpty ? '  mc${_meshCache.length}' : ''}'
         '${_gridPatches.isNotEmpty ? '  grid${_gridPatches.length}' : ''}'
+        '${_batches.isNotEmpty ? '  batches${_batches.length}' : ''}'
+        '${maxMaskedBy > 0 ? '  maxMaskedBy$maxMaskedBy' : ''}'
         '${_clippedEmpty > 0 ? '  clipped $_clippedEmpty' : ''}'
-        '${_retiredClipped > 0 ? '  RETIRED $_retiredClipped' : ''}';
+        '${_retiredClipped > 0 ? '  RETIRED $_retiredClipped' : ''}'
+        '${_dropRejected > 0 ? '  rej$_dropRejected' : ''}'
+        '${_dropStaleGen > 0 ? '  dropGen$_dropStaleGen' : ''}'
+        '${_dropStaleEdit > 0 ? '  dropEdit$_dropStaleEdit' : ''}'
+        '${_editsChangedCount > 0 ? '  editsChg$_editsChangedCount' : ''}';
 
     final sun = starWorld == null
         ? Vector3(-1, -0.2, -0.1).normalized
@@ -1298,6 +1608,60 @@ class TerrainNodes {
     return vm.Vector3(w.x, w.y, w.z);
   }
 
+  /// One `missing`/coverage-root entry: step the LOD ladder, serve it from
+  /// the mesh cache, or submit a fresh mesh job — whichever applies. Shared
+  /// by the coverage-root pass and the `missing` pass, both run in full
+  /// every frame in [update].
+  void _tryAdvanceMissing(ChunkKey want, TerrainField field, int levelStep) {
+    // --- Step the level, do not leap it -----------------------------------
+    //
+    // Coverage roots are level 0 and targets are often level 14+, so the
+    // ladder had two rungs: one enormous face root, then the finished leaf.
+    // Each region went from blocky to perfect in a single jump, and because
+    // the queue is nearest-first that happened to one tile at a time — the
+    // city assembled piece by piece instead of sharpening as a whole.
+    //
+    // Requesting an intermediate ancestor instead brings the visible area up
+    // together, and an interrupted stream leaves uniform medium detail
+    // rather than a few perfect tiles beside a cube face. Coarse chunks are
+    // a handful of triangles, so the extra passes cost little next to the
+    // leaves they stand in for.
+    // A rung that meshed EMPTY can never arrive; one retired FULLY COVERED
+    // can arrive but never stay ([_fullyCovered]). Either way the ladder
+    // must step past it or grind it forever.
+    final k = nextRung(want,
+        levelStep: levelStep,
+        isResident: _chunks.containsKey,
+        isEmpty: (c) => _emptyChunks.contains(c) || _fullyCovered.contains(c));
+    if (k != want && (_chunks.containsKey(k) || _pending.contains(k))) {
+      return; // this rung is up; the next frame climbs from it
+    }
+    if (k != want) _ladderRungs.add(k);
+    // Cache first: a retired mesh re-enters through the normal arrival
+    // path (same generation gating, same atomic swaps) without costing an
+    // isolate round-trip or a slot in the in-flight budget.
+    final cached = _meshCache.remove(k);
+    if (cached != null) {
+      // Re-serve only a mesh at the resolution THIS context would mesh:
+      // the edit boost makes resolution contextual, and a variant cached
+      // under the other context re-uploads at a different voxel size — a
+      // visibly different altitude beside its neighbours and the analytic
+      // grid patches. That was the "unload and reload the tile"
+      // staleness: no field had changed, the VARIANT had. A mismatch just
+      // falls through to a fresh mesh.
+      //
+      // `held` (arrival-queue membership) keeps a re-served mesh out of
+      // `missing` next frame, so it cannot double-submit while it waits.
+      if (cached.$2 == _resolutionFor(k, field.radius)) {
+        _arrived.add(_ArrivedMesh(k, cached.$1, _generation, cached.$2));
+        return;
+      }
+    }
+    if (_pending.length >= meshBudgetPerFrame) return;
+    if (_pending.contains(k)) return;
+    _submit(field, k, _resolutionFor(k, field.radius));
+  }
+
   /// Resolution [k] should mesh at: the global knob, times the smallest
   /// power-of-two boost (capped at [editResBoost]) that resolves the finest
   /// nearby brush's target voxel — the "mesh finer instead of splitting
@@ -1312,7 +1676,10 @@ class TerrainNodes {
     var boost = 1;
     for (final b in _nearBrushes) {
       if ((b.centreBF - centre).length > reach + b.lateralReachM) continue;
-      final targetM = b.radiusM * 2.0 / editVoxelsAcross;
+      // Same target as [refinementsFor], floor included, so the boost a
+      // chunk gets and the level the tree was forced to agree.
+      final targetM =
+          math.max(b.radiusM * 2.0 / editVoxelsAcross, b.minVoxelM);
       if (chunkVoxelM > targetM * editResBoost) continue; // splitting's job
       while (boost < editResBoost && chunkVoxelM > targetM * boost) {
         boost <<= 1;
@@ -1387,8 +1754,14 @@ class TerrainNodes {
             resolution: chunkResolution, skirtVoxels: skirtVoxels)
         .then((cell) {
       _pending.remove(key);
-      if (generation != _generation) return;
-      if (_staleInFlight.remove(key)) return; // sampled a pre-edit field
+      if (generation != _generation) {
+        _dropStaleGen++;
+        return;
+      }
+      if (_staleInFlight.remove(key)) {
+        _dropStaleEdit++; // sampled a pre-edit field
+        return;
+      }
       if (cell.isEmpty) {
         // No isosurface in the shell. Legitimately empty (below a sea floor,
         // inside a sealed void) it must be REMEMBERED, or the chunk is
@@ -1420,11 +1793,21 @@ class TerrainNodes {
     });
   }
 
-  /// Turn a finished mesh into a scene node (the GPU upload). The [CellMesh]
-  /// is retained on the resident so retirement can drop it into [_meshCache].
+  /// Make a finished mesh resident. Deep chunks join their region's batch
+  /// (drawn on the next [_drainDirtyBatches] build); coarse ones get their
+  /// own node immediately. The [CellMesh] is retained on the resident so
+  /// retirement can drop it into [_meshCache].
   void _addChunk(
       ChunkKey key, CellMesh cell, gpu.Shader shader, int resolution) {
     _material ??= _TerrainMaterial(shader);
+    final c = _ResidentChunk(cell: cell, resolution: resolution)
+      ..lastVisibleFrame = _frame;
+    _chunks[key] = c;
+    _bumpAncestorRefs(key, 1);
+    if (key.level >= batchMinLevel) {
+      _joinBatch(key, c);
+      return;
+    }
     final geom = fs.MeshGeometry.fromArrays(
       positions: cell.mesh.positions,
       normals: cell.mesh.normals,
@@ -1432,11 +1815,7 @@ class TerrainNodes {
     );
     final node = fs.Node(mesh: fs.Mesh(geom, _material!));
     _scene.add(node);
-    _chunks[key] = _ResidentChunk(
-      node: node,
-      cell: cell,
-      resolution: resolution,
-    )..lastVisibleFrame = _frame;
+    c.soloNode = node;
   }
 
   /// Maintain the loading placeholders: one wireframe patch per bare missing
@@ -1639,13 +2018,64 @@ class TerrainNodes {
     final c = _chunks[ancestorKey];
     if (c == null) return;
     c.maskedBy.add(coveredBy);
-    _rebuildMasked(ancestorKey, c);
+    _maskTouchesThisFrame++;
+    _dirtyMasks.add(ancestorKey);
+  }
+
+  /// Mask rebuilds allowed per frame — the same shape of throttle as
+  /// [uploadBudgetPerFrame] and [meshBudgetPerFrame], because a rebuild is
+  /// real work of the same kind (an index filter plus a GPU re-upload), and
+  /// a city-scale merge cascade can dirty dozens of BOOSTED-resolution
+  /// ancestors at once (measured: a single 1049ms frame in the city studio,
+  /// nothing but drain). The remainder carries over in [_dirtyMasks]; a
+  /// mask that lags a few frames is the one-level overlap the pipeline
+  /// already tolerates on every split, not a hole.
+  static int maskRebuildBudgetPerFrame = 6;
+
+  /// Rebuild keys [_maskResident] or [_removeResident]'s masker scan marked
+  /// dirty — once each, however many times they were touched. A rebuild can
+  /// itself decide a key should retire ([_rebuildMasked]'s
+  /// `interiorRemaining == 0` branch), which calls [_removeResident], which
+  /// can mark MORE keys dirty (its own maskers) — so this drains in batches
+  /// until a pass adds nothing new, not just once (iterations bounded the
+  /// same defensive way [TerrainLodTree.update] and [enforceBalance] bound
+  /// their convergence loops), and [maskRebuildBudgetPerFrame] caps the
+  /// total per call, carrying the surplus to the next frame.
+  void _drainDirtyMasks({int maxIterations = 64}) {
+    var budget = maskRebuildBudgetPerFrame;
+    for (var i = 0; i < maxIterations && _dirtyMasks.isNotEmpty; i++) {
+      final batch = _dirtyMasks.toList();
+      _dirtyMasks.clear();
+      for (var j = 0; j < batch.length; j++) {
+        if (budget <= 0) {
+          // Over budget: everything not yet rebuilt — including cascades
+          // collected into _dirtyMasks during this pass — waits its turn.
+          _dirtyMasks.addAll(batch.sublist(j));
+          return;
+        }
+        final key = batch[j];
+        final c = _chunks[key];
+        // Gone already — an earlier key in THIS batch retired it (its
+        // interior was masked to nothing) before its own turn came up.
+        if (c == null) continue;
+        _rebuildMasked(key, c);
+        budget--;
+      }
+    }
   }
 
   void _rebuildMasked(ChunkKey key, _ResidentChunk c) {
+    final sw = profile ? (Stopwatch()..start()) : null;
     final masked = maskCellIndices(c.cell, c.maskedBy);
     if (masked.interiorRemaining == 0) {
-      _removeResident(key);
+      if (sw != null) {
+        _maskUsThisFrame += sw.elapsedMicroseconds;
+        _maskCallsThisFrame++;
+      }
+      // The finer residents cover every triangle: remember it, or the
+      // ladder re-requests this exact chunk forever — see [_fullyCovered].
+      _fullyCovered.add(key);
+      _removeResident(key); // stopped first: it may recurse into this method
       return;
     }
     final geom = fs.MeshGeometry.fromArrays(
@@ -1653,7 +2083,22 @@ class TerrainNodes {
       normals: c.cell.mesh.normals,
       indices: masked.indices,
     );
-    c.node.mesh = fs.Mesh(geom, _material!);
+    final mesh = fs.Mesh(geom, _material!);
+    if (c.batchKey != null) {
+      // A mask is a per-chunk index filter — eject to a solo node rather
+      // than re-concat the whole batch on every mask touch. One-way until
+      // retirement: masks only accumulate.
+      _leaveBatch(key, c);
+      final node = fs.Node(mesh: mesh);
+      _scene.add(node);
+      c.soloNode = node;
+    } else if (c.soloNode != null) {
+      c.soloNode!.mesh = mesh;
+    }
+    if (sw != null) {
+      _maskUsThisFrame += sw.elapsedMicroseconds;
+      _maskCallsThisFrame++;
+    }
   }
 
   /// Retire a resident chunk, keeping its mesh in the LRU cache so a revisit
@@ -1663,26 +2108,35 @@ class TerrainNodes {
   void _removeResident(ChunkKey key) {
     final c = _chunks.remove(key);
     if (c == null) return;
-    _scene.remove(c.node);
+    _bumpAncestorRefs(key, -1);
+    // Cover under every ancestor just shrank: a stand-in retired as fully
+    // covered may genuinely be needed there again (see [_fullyCovered]).
+    for (final a in key.ancestors) {
+      _fullyCovered.remove(a);
+    }
+    _detachVisual(key, c);
     _meshCache.remove(key); // re-insert -> newest LRU position
     // The FULL mesh — masks are runtime state — with its meshed resolution.
     _meshCache[key] = (c.cell, c.resolution);
     while (_meshCache.length > meshCacheSize) {
       _meshCache.remove(_meshCache.keys.first);
     }
-    // EVERY resident that was masking this key rebuilds — the pump masks an
-    // arrival out of every resident ancestor (and a coverage arrival out of
-    // its finer residents), so with root + rung both resident a key sits in
-    // several maskedBy sets at once. The old `break` after the first hit left
-    // the others holding a stale mask: coarse ground with a hole cut for a
-    // chunk that no longer exists.
-    final maskers = [
-      for (final e in _chunks.entries)
-        if (e.value.maskedBy.remove(key)) e.key,
-    ];
-    for (final k in maskers) {
-      final c = _chunks[k];
-      if (c != null) _rebuildMasked(k, c);
+    // EVERY resident that was masking this key marks dirty — the pump masks
+    // an arrival out of every resident ancestor (and a coverage arrival out
+    // of its finer residents), so with root + rung both resident a key sits
+    // in several maskedBy sets at once. The old `break` after the first hit
+    // left the others holding a stale mask: coarse ground with a hole cut
+    // for a chunk that no longer exists. Marked dirty rather than rebuilt
+    // inline (contrast the old direct-call version this replaced): a MERGE
+    // can call this once per removed descendant of a deep refined stack,
+    // and those descendants often share the same masking ancestors — see
+    // [_dirtyMasks]'s doc for the frame that made 309 redundant rebuilds of
+    // a handful of chunks measurable.
+    for (final e in _chunks.entries) {
+      if (e.value.maskedBy.remove(key)) {
+        _maskTouchesThisFrame++;
+        _dirtyMasks.add(e.key);
+      }
     }
   }
 
@@ -1694,6 +2148,7 @@ class TerrainNodes {
     _generation++;
     _arrived.clear();
     _emptyChunks.clear();
+    _fullyCovered.clear();
     _ladderRungs.clear();
     _meshCache.clear();
     _staleInFlight.clear(); // generation check already drops these
@@ -1705,9 +2160,12 @@ class TerrainNodes {
   void _clear() {
     if (_chunks.isEmpty && _bodyId == null && _pending.isEmpty) return;
     for (final c in _chunks.values) {
-      _scene.remove(c.node);
+      final n = c.soloNode;
+      if (n != null) _scene.remove(n);
     }
+    _clearBatches();
     _chunks.clear();
+    _ancestorRefCount.clear();
     _clearPlaceholders();
     _invalidateInFlight();
     _tree?.reset();
@@ -1751,14 +2209,36 @@ class _ArrivedMesh {
 
 /// A chunk currently in the scene. Keeps its [CellMesh] so retirement can
 /// hand the mesh to the in-memory cache instead of discarding it.
+/// One draw call carrying a whole quadtree region of chunks — see the
+/// batching section in [TerrainNodes]. The node is created on the first
+/// [TerrainNodes._drainDirtyBatches] build and its mesh replaced whenever
+/// membership changes.
+class _ChunkBatch {
+  _ChunkBatch(this.anchorBF);
+
+  /// Body-fixed anchor the combined vertices are relative to — the first
+  /// member's own anchor, which keeps every delta group-local.
+  final Vector3 anchorBF;
+
+  final Set<ChunkKey> members = {};
+  fs.Node? node;
+}
+
 class _ResidentChunk {
   _ResidentChunk({
-    required this.node,
     required this.cell,
     required this.resolution,
   });
 
-  final fs.Node node;
+  /// The chunk's OWN scene node — only while unbatched: coarse (below
+  /// [TerrainNodes.batchMinLevel]), or ejected from its batch by a mask.
+  /// Null while the chunk rides a [_ChunkBatch]'s combined mesh instead.
+  fs.Node? soloNode;
+
+  /// The [TerrainNodes._batches] entry carrying this chunk's triangles, or
+  /// null when [soloNode] does.
+  (ChunkKey, int)? batchKey;
+
   final CellMesh cell;
 
   /// See [_ArrivedMesh.resolution] — retirement caches it with the mesh.

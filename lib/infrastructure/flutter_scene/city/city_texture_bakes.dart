@@ -53,9 +53,13 @@ class CityTextureBakes {
   /// low-rent corner block gets when someone has had a go at it.
   static Uint8List facade(int size) {
     final out = Uint8List(size * size * 4);
-    final band = size ~/ facadeMaterials;
+    // Band edges at the same fractions [BuildingGenerator.bandUV] samples
+    // at, so a count that does not divide the size leaves no unwritten
+    // column at the right edge and no band a texel off its sampler.
     for (var m = 0; m < facadeMaterials; m++) {
-      _facadeBand(out, size, m * band, band, m);
+      final x0 = m * size ~/ facadeMaterials;
+      final x1 = (m + 1) * size ~/ facadeMaterials;
+      _facadeBand(out, size, x0, x1 - x0, m);
     }
     return out;
   }
@@ -87,6 +91,19 @@ class CityTextureBakes {
       // Precast concrete panel — the pre-atlas wall, kept because it is right
       // for a works and for the utilitarian kit.
       6 => (face: [168, 168, 166], joint: [120, 120, 120], bw: 0, ch: 0, grime: 0.35),
+      // Photovoltaic modules: deep blue cells in an aluminium frame, and
+      // clean — a farm washes its panels.
+      8 => (face: [38, 58, 104], joint: [200, 206, 214], bw: 0, ch: 0, grime: 0.0),
+      // Paving: gravel-grey concrete, bay joints, weathered but not sooted.
+      9 => (face: [134, 132, 126], joint: [108, 106, 100], bw: 0, ch: 0, grime: 0.1),
+      // Bare and galvanised steel: stacks, racks, gantries, masts, fences.
+      10 => (face: [172, 178, 186], joint: [136, 142, 150], bw: 0, ch: 0, grime: 0.1),
+      // Painted sheet metal, white: tanks, sheds, containers.
+      11 => (face: [226, 228, 230], joint: [186, 190, 194], bw: 0, ch: 0, grime: 0.12),
+      // Industrial blue, safety red, plant yellow: trims, signs, machines.
+      12 => (face: [42, 88, 146], joint: [32, 68, 116], bw: 0, ch: 0, grime: 0.15),
+      13 => (face: [178, 46, 40], joint: [140, 36, 32], bw: 0, ch: 0, grime: 0.15),
+      14 => (face: [216, 172, 40], joint: [172, 136, 30], bw: 0, ch: 0, grime: 0.15),
       // Profiled metal cladding: vertical ribs, no courses.
       _ => (face: [150, 154, 158], joint: [116, 120, 124], bw: 0, ch: 0, grime: 0.28),
     };
@@ -145,7 +162,55 @@ class CityTextureBakes {
             g *= 0.86;
             b *= 0.86;
           }
-        } else if (material == facadeMaterials - 1) {
+        } else if (material == FacadeMaterial.photovoltaic) {
+          // Modules two to a band, portrait, framed, with the cell grid
+          // inside: what a solar table is from the air and from the fence.
+          final mw = math.max(8, w ~/ 2);
+          final mh = math.max(8, size ~/ 8);
+          final ix = x % mw, iy = y % mh;
+          if (ix < 2 || iy < 2 || ix >= mw - 2 || iy >= mh - 2) {
+            r = kit.joint[0].toDouble();
+            g = kit.joint[1].toDouble();
+            b = kit.joint[2].toDouble();
+          } else {
+            final cw = math.max(2, (mw - 4) ~/ 6), chh = math.max(2, (mh - 4) ~/ 10);
+            if ((ix - 2) % cw == 0 || (iy - 2) % chh == 0) {
+              r *= 1.6;
+              g *= 1.5;
+              b *= 1.3;
+            }
+          }
+        } else if (material == FacadeMaterial.pavement) {
+          // Paving: a bay joint each way at panel scale, a coarser speckle
+          // than a wall's grain, and no direction to it at all.
+          final bay = math.max(8, w ~/ 2), bayV = math.max(8, size ~/ 8);
+          if (x % bay <= 1 || y % bayV <= 1) {
+            r = kit.joint[0].toDouble();
+            g = kit.joint[1].toDouble();
+            b = kit.joint[2].toDouble();
+          } else {
+            final fleck = ((x * 7 + y * 13) % 23 == 0) ? 0.88 : ((x * 5 + y * 3) % 19 == 0 ? 1.08 : 1.0);
+            r *= fleck;
+            g *= fleck;
+            b *= fleck;
+          }
+        } else if (material >= FacadeMaterial.steel &&
+            material <= FacadeMaterial.safetyYellow) {
+          // Painted and bare metal: a panel seam each way, and on steel a
+          // soft highlight across the band that reads as a brushed sheen.
+          final seamV = math.max(8, size ~/ 6), seamU = math.max(8, w ~/ 2);
+          if (y % seamV <= 1 || x % seamU <= 1) {
+            r = kit.joint[0].toDouble();
+            g = kit.joint[1].toDouble();
+            b = kit.joint[2].toDouble();
+          } else if (material == FacadeMaterial.steel) {
+            final t = (x % w) / w;
+            final lit = 0.82 + 0.3 * math.sin(t * math.pi);
+            r *= lit;
+            g *= lit;
+            b *= lit;
+          }
+        } else if (material == FacadeMaterial.metalPanel) {
           // Profiled metal: a vertical rib every few texels, shaded as if lit
           // from one side so the ribs read as a section, not as stripes.
           final rib = math.max(3, w ~/ 12);
@@ -269,10 +334,12 @@ class CityTextureBakes {
   /// colour would be five draws for what is a single sheet of ground. Every
   /// vertex of a patch samples the CENTRE of its swatch, so no filtering or
   /// mip level can bleed one kind's colour into its neighbour.
-  static Uint8List groundPalette(int size, {int swatches = 9}) {
+  static Uint8List groundPalette(int size, {int swatches = 10}) {
     // road, residential, commercial, industrial, support, CURSOR, REFUSED,
-    // SITE-OK, SITE-STEEP — the last two paint the placement heatmap, which
-    // needs to say "here, but the ground is against you" as well as yes/no.
+    // SITE-OK, SITE-STEEP, LEAF — the heatmap pair paints placement, which
+    // needs to say "here, but the ground is against you" as well as yes/no;
+    // the leaf is the crown of every sprawl tree, its own band so the green
+    // of a suburb can be tuned without recolouring its lawns.
     // Count must match `kGroundSwatches` in city_nodes.dart.
     const colours = [
       [92, 94, 99],
@@ -284,6 +351,7 @@ class CityTextureBakes {
       [235, 84, 64],
       [96, 210, 128],
       [226, 176, 72],
+      [62, 108, 54],
     ];
     final out = Uint8List(size * size * 4);
     final band = math.max(1, size ~/ swatches);
@@ -382,29 +450,95 @@ class CityTextureBakes {
     return out;
   }
 
-  static Uint8List roadStrip(int size) {
+  /// How many bands the road atlas carries along U.
+  static const int roadBands = 8;
+
+  /// The bands of the road atlas, by index. Every carriageway in the world
+  /// — a dirt-free local street, an eight-lane expressway, a viaduct deck —
+  /// is drawn from these: an asphalt ribbon the full width of the road,
+  /// then one thin strip per painted line, each strip mapping one band
+  /// across itself. The paint is geometry, not texture, so a road with any
+  /// number of lanes draws from ONE tile and the lane count is a number the
+  /// road class carries rather than a texture somebody has to bake.
+  ///
+  /// The single two-lane strip this replaced was stretched across every
+  /// road regardless of width, which is why a 36 m interstate had one
+  /// dashed line down the middle of it like a lane in a car park.
+  static const int roadAsphalt = 0;
+  static const int roadConcrete = 1;
+  static const int roadWhite = 2;
+  static const int roadYellow = 3;
+  static const int roadDashedWhite = 4;
+  static const int roadDashedYellow = 5;
+  static const int roadHatch = 6;
+  static const int roadShoulder = 7;
+
+  /// Metres of road one repeat of the atlas covers along V. Twelve, because
+  /// a lane line is a three-metre dash and a nine-metre gap, and a band
+  /// that holds exactly one cycle tiles seamlessly.
+  static const double roadTileM = 12.0;
+
+  /// The road atlas: [roadBands] bands along U, seamless along V.
+  ///
+  /// U runs ACROSS whichever strip maps the band, V along the road. The
+  /// dashed bands are painted for the first quarter of V — three metres of
+  /// [roadTileM] — and asphalt for the rest, so a strip that advances V by
+  /// distance travelled gets a real dash cycle. Callers inset their U a
+  /// texel or two from the band edges, as the facade atlas's callers do,
+  /// because a mip level averages across the boundary.
+  static Uint8List roadAtlas(int size) {
     final out = Uint8List(size * size * 4);
     final rnd = math.Random(0x0AD5);
+    final bandW = size / roadBands;
     for (var y = 0; y < size; y++) {
       for (var x = 0; x < size; x++) {
         final i = (y * size + x) * 4;
-        final u = x / size, v = y / size;
+        final band = math.min(roadBands - 1, x ~/ bandW);
+        final v = y / size;
         var r = 92.0, g = 94.0, b = 99.0;
         // Aggregate speckle: a uniform grey slab reads as a hole, not tarmac.
         final speck = (rnd.nextDouble() - 0.5) * 26;
         r += speck;
         g += speck;
         b += speck;
-        if ((u - 0.5).abs() < 0.022 && (v * 4).floor().isEven) {
-          // Dashed centre line, warm road paint.
-          r = 196;
-          g = 190;
-          b = 150;
-        } else if (u < 0.045 || u > 0.955) {
-          // Curbs, so a run of road shows its edges against dark ground.
-          r += 26;
-          g += 26;
-          b += 26;
+        void paint(int pr, int pg, int pb, {double wear = 12}) {
+          final w = (rnd.nextDouble() - 0.5) * wear;
+          r = pr + w;
+          g = pg + w;
+          b = pb + w;
+        }
+
+        switch (band) {
+          case roadConcrete:
+            paint(168, 168, 164, wear: 14);
+            // A transverse joint every quarter tile, as a poured median has.
+            if (y % math.max(1, size ~/ 4) <= 1) {
+              r *= 0.8;
+              g *= 0.8;
+              b *= 0.8;
+            }
+          case roadWhite:
+            paint(222, 222, 214);
+          case roadYellow:
+            paint(222, 180, 46);
+          case roadDashedWhite:
+            if (v < 0.25) paint(222, 222, 214);
+          case roadDashedYellow:
+            if (v < 0.25) paint(222, 180, 46);
+          case roadHatch:
+            // Yellow chevrons on asphalt: the gore and the painted median.
+            final period = math.max(4, size ~/ 8);
+            if ((x + y) % period < math.max(1, period ~/ 4)) {
+              paint(222, 180, 46);
+            }
+          case roadShoulder:
+            // A touch paler and greyer than the running lanes: a shoulder is
+            // laid to a different spec and reads as one from the air.
+            r += 12;
+            g += 12;
+            b += 10;
+          default:
+            break;
         }
         out[i] = r.clamp(0, 255).round();
         out[i + 1] = g.clamp(0, 255).round();

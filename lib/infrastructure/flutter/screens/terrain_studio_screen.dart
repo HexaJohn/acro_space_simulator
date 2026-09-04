@@ -29,7 +29,6 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter_scene/scene.dart' as fs;
 import 'package:vector_math/vector_math.dart' as vm;
 
-import '../../../adapters/presenters/camera_view.dart';
 import '../../../adapters/repositories/in_memory_repositories.dart';
 import '../../../adapters/repositories/in_memory_world_repositories.dart';
 import '../../../application/snapshot/world_snapshot.dart';
@@ -50,6 +49,7 @@ import '../../flutter_scene/atmosphere_nodes.dart';
 import '../../flutter_scene/city/city_materials.dart';
 import '../../flutter_scene/city/city_nodes.dart';
 import '../../flutter_scene/coord_convert.dart';
+import '../../flutter_scene/lod_probe_camera.dart';
 import '../../flutter_scene/terrain/terrain_nodes.dart';
 import 'app_theme.dart';
 
@@ -714,6 +714,10 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
       events: frame.events,
       terrainEdits: frame.terrainEdits,
       megastructures: frame.megastructures,
+      sprawlSections: frame.sprawlSections,
+      sprawlRoads: frame.sprawlRoads,
+      sprawlNodes: frame.sprawlNodes,
+      sprawlClearings: frame.sprawlClearings,
     );
   }
 
@@ -1021,7 +1025,7 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
         frame,
         _origin,
         cameraEye: probeEye,
-        camera: _LodProbeCamera(probeEye, _focalPx, viewFwd),
+        camera: LodProbeCamera(probeEye, _focalPx, viewFwd),
         focusBodyId: _body,
         starWorld: starWorld,
       );
@@ -1248,6 +1252,14 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
             colour: _terrainMs > 4 ? AppTheme.warn : AppTheme.text),
         if (TerrainNodes.profileLine.isNotEmpty)
           Text('  ${TerrainNodes.profileLine.replaceFirst('terrain: ', '')}',
+              style:
+                  AppTheme.mono.copyWith(fontSize: 10, color: AppTheme.textDim)),
+        if (TerrainNodes.debugLine.isNotEmpty)
+          Text('  ${TerrainNodes.debugLine.replaceFirst('terrain: ', '')}',
+              style:
+                  AppTheme.mono.copyWith(fontSize: 10, color: AppTheme.textDim)),
+        if (TerrainNodes.levelHistogramLine.isNotEmpty)
+          Text('  lvls: ${TerrainNodes.levelHistogramLine}',
               style:
                   AppTheme.mono.copyWith(fontSize: 10, color: AppTheme.textDim)),
         row('  chunks', '${TerrainNodes.counters['chunks'] ?? 0}',
@@ -1489,40 +1501,5 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
   }
 }
 
-/// The one lens the terrain LOD looks through in the studio.
-///
-/// Only [radiusPx] is real: it is the single member the terrain streamer
-/// consults (chunk apparent size and the zoom probe), and giving it a
-/// choosable eye is what makes "LOD from focus" a checkbox instead of a
-/// camera rewrite. Every other [SceneCamera] member throws — if the streamer
-/// ever grows a second dependency, the studio should hear about it loudly.
-class _LodProbeCamera implements SceneCamera {
-  _LodProbeCamera(this.eyeRel, this.focalPx, this._forward);
-
-  /// The eye, relative to the floating origin's focus — the same frame the
-  /// streamer's `rel` arguments arrive in.
-  final Vector3 eyeRel;
-
-  /// The view direction — the streamer's second dependency, found the loud
-  /// way: it aims the head-lamp down the view axis.
-  final Vector3 _forward;
-
-  @override
-  Vector3 get forward => _forward;
-
-  /// Pixels per radian-ish: (viewport height / 2) / tan(fov / 2). Happens
-  /// to be the meaning [SceneCamera.focalPx] already carries, so the field
-  /// doubles as that member's implementation.
-  @override
-  final double focalPx;
-
-  @override
-  double radiusPx(Vector3 rel, double radiusM) {
-    final d = (rel - eyeRel).length;
-    return d < 1 ? 1e9 : radiusM * focalPx / d;
-  }
-
-  @override
-  dynamic noSuchMethod(Invocation invocation) =>
-      throw UnsupportedError('LOD probe camera: only radiusPx is real');
-}
+// The LOD probe camera lives in flutter_scene/lod_probe_camera.dart now,
+// shared with the city studio.

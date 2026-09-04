@@ -37,6 +37,8 @@ void main() {
       expect(back.falloffM, b.falloffM, reason: what);
       expect(back.benches, b.benches, reason: what);
       expect(back.depthM, b.depthM, reason: what);
+      expect(back.minVoxelM, b.minVoxelM,
+          reason: '$what: the voxel floor is how a city stays coarse');
       expect(back.endBF?.x, b.endBF?.x, reason: what);
       expect(back.endBF?.y, b.endBF?.y, reason: what);
       expect(back.endBF?.z, b.endBF?.z, reason: what);
@@ -49,6 +51,27 @@ void main() {
       }
     }
   }
+
+  test('a coarse city pad keeps its voxel floor, and old saves default it', () {
+    expectRoundTrip(
+      TerrainBrush.pad(
+        centreBF: Vector3(1736500, 120, -90),
+        radiusM: 26,
+        datumRadiusM: 1736504.967,
+        minVoxelM: 15,
+      ),
+      what: 'coarse pad',
+    );
+    // A save written before the field existed carries no 'mv' key.
+    final old = TerrainEditSnapshot.fromJson({
+      'body': 'moon',
+      'kind': TerrainBrushKind.pad.index,
+      'c': [1736500, 120, -90],
+      'a': [1, 0, 0],
+      'r': 26,
+    });
+    expect(old.toBrush().minVoxelM, 0);
+  });
 
   test('a building pad survives with its target surface', () {
     expectRoundTrip(

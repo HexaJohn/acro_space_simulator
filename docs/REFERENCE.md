@@ -9,7 +9,7 @@ Source of truth:
 
 ## Buildings
 
-54 placeable structures, grouped by tab.
+57 placeable structures, grouped by tab.
 
 ### Power
 
@@ -21,6 +21,7 @@ Source of truth:
 | **Fission Reactor** | 1×1 | 80 | 12 | +240 | — | — | 1.0 | 120 |
 | **Fusion Plant** | 1×1 | 200 | 30 | +800 | — | — | 0.0 | 600 |
 | **Solar Array** | 2×2 | 140 | 0 | +270 | — | — | 0.0 | 60 |
+| **Solar Thermal Farm** | 2×2 | 160 | 12 | +220 | — | — | 0.0 | 80 |
 
 ### Svc
 
@@ -121,6 +122,8 @@ Source of truth:
 | Building | Size | Cost | Jobs | Power | Inputs | Outputs | Pollution | Unlock pop |
 |---|---|---|---|---|---|---|---|---|
 | **Transit Stop** | 1×1 | 30 | 4 | −5 | — | — | 0.0 | 0 |
+| **Railway Station** | 1×1 | 120 | 16 | −12 | — | — | 0.0 | 0 |
+| **Freight Yard** | 1×1 | 160 | 36 | −18 | — | — | 0.8 | 0 |
 | **Spaceport** | 1×1 | 40 | 40 | −40 | fuel 1.00/s, oxidizer 1.00/s | food 0.30/s, water 0.30/s, oxygen 0.30/s | 0.0 | 0 |
 | **Spaceport Complex (2×4)** | 2×4 | 160 | 110 | −110 | fuel 2.60/s, oxidizer 2.60/s | food 0.90/s, water 0.90/s, oxygen 0.90/s | 0.0 | 200 |
 | **Starport (3×6)** | 3×6 | 360 | 240 | −240 | fuel 6.00/s, oxidizer 6.00/s | food 2.20/s, water 2.20/s, oxygen 2.20/s | 0.0 | 800 |

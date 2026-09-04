@@ -19,9 +19,12 @@ library;
 
 import 'dart:math' as math;
 
+import '../../../domain/architecture/building_massing.dart';
 import '../../../domain/scatter/mesh_builder.dart';
 import '../../../domain/shared/vector3.dart';
 import '../coord_convert.dart';
+import 'city_texture_bakes.dart';
+import 'road_mesher.dart';
 import 'vehicle_meshes.dart';
 
 /// What a lot's boundary is dressed with.
@@ -209,75 +212,185 @@ class LotFeatures {
     m.quad(q[0], q[1], q[2], q[3]);
   }
 
-  /// The apron in front of a building, the driveway joining it to the street,
-  /// and the cars standing on it.
+  /// A parking bay: how wide and how deep.
+  static const double bayW = 2.6;
+  static const double bayD = 5.2;
+
+  /// The aisle between two facing ranks of bays.
+  static const double aisleM = 6.0;
+
+  /// A driveway's width, and a footpath's.
+  static const double drivewayM = 6.0;
+  static const double pathM = 1.5;
+
+  /// The car park the massing put INSIDE the parcel, dressed: the bays
+  /// painted on it and the cars standing in them, the driveway joining it to
+  /// its road — across the sidewalk with a curb cut when the road is out
+  /// front, into the alley when the lot is at the back — and the footpath
+  /// from the lot to the building's entrance.
   ///
-  /// The massing already puts parking between the building and the road — that
-  /// is why lots have a front strip at all — but nothing had ever drawn it, so
-  /// every plot showed bare ground where its car park was and no way in from
-  /// the street. [occupancy] is the share of bays filled, which is what makes
-  /// a working district read differently from an empty one.
+  /// Everything is in the building's own plan frame: [centre] is the
+  /// parcel's centroid, [side] runs along the street, [along] from the
+  /// street into the lot. [lot] and [entrance] are the massing's, so the
+  /// paint lands on the slab the building mesh already carries and the
+  /// path ends at the door the facade actually has. [frontLineY] and
+  /// [rearLineY] are the parcel's lot lines; [sidewalkM] the walk between
+  /// the front line and the curb. With [behind], the lot is at the back and
+  /// the driveway leaves by the rear line; [rearDoorY] is the back wall the
+  /// path then runs to. [occupancy] is the share of bays filled.
   ///
   /// Returns the number of cars placed, so a caller can budget them.
-  static int emitParking(
-    MeshBuilder ground,
+  static int emitLot(
+    MeshBuilder paving,
     MeshBuilder cars,
     MeshBuilder glass,
     Vector3 centre,
+    Vector3 side,
     Vector3 along,
     Vector3 up,
-    double halfW,
-    double halfD, {
-    required int spaces,
+    ParkingLot lot,
+    (double, double) entrance, {
+    required double frontLineY,
+    required double rearLineY,
+    required bool behind,
+    required double rearDoorY,
     required double occupancy,
     required bool airless,
+    double sidewalkM = 3.0,
     int maxCars = 24,
+    bool detailed = true,
   }) {
-    if (spaces <= 0) return 0;
-    final side = along.cross(up).normalized;
-    // The apron: a strip across the FRONT of the lot, between the building and
-    // its street.
-    const bayW = 2.6, bayD = 5.2;
-    final apronD = math.min(halfD * 0.8, bayD * 1.25);
-    final apronMid = centre - along * (halfD - apronD / 2);
-    _slab(ground, apronMid, side, along, up, halfW * 0.94, apronD / 2, 0.05);
+    Vector3 at(double x, double y) => centre + side * x + along * y;
+    final x0 = lot.x - lot.width / 2, x1 = lot.x + lot.width / 2;
+    final y0 = lot.y - lot.depth / 2, y1 = lot.y + lot.depth / 2;
+    // Over the slab the building mesh draws (8 cm) and the zoned-lot patch
+    // under it, under nothing else.
+    const slabTop = 0.10;
+    const paintLift = slabTop + RoadMesher.paintLiftM;
+    final asphalt = CityTextureBakes.roadAsphalt;
+    final concrete = CityTextureBakes.roadConcrete;
+    final white = CityTextureBakes.roadWhite;
 
-    // Driveway: a neck from the apron out through the lot line to the curb, so
-    // the parking is joined to the road rather than marooned behind a fence.
-    final neck = centre - along * (halfD + 1.6);
-    _slab(ground, (apronMid + neck) * 0.5, side, along, up,
-        math.min(3.2, halfW * 0.5), (apronMid - neck).length / 2, 0.06);
+    // The lot's surface: asphalt over the massing's concrete slab, so a car
+    // park reads as tarmac against the pale slab and the lot's green.
+    _quad(paving, at, up, x0, y0, x1, y1, asphalt, slabTop);
 
-    // Cars, filling from one end so a half-full lot reads as half full rather
-    // than as randomly speckled.
-    final across = math.max(1, (halfW * 2 * 0.9 / bayW).floor());
-    final filled = (spaces * occupancy.clamp(0.0, 1.0))
-        .round()
-        .clamp(0, math.min(spaces, maxCars))
-        .toInt();
-    final family = airless ? VehicleKind.airless : VehicleKind.road;
-    for (var i = 0; i < filled; i++) {
-      final col = i % across;
-      final row = i ~/ across;
-      if (row > 0) break; // one rank; deeper lots are a later refinement
-      final x = (col - (across - 1) / 2) * bayW;
-      final at = apronMid + side * x;
-      // Nose in, so a rank of cars faces the building.
-      final kind = family[(i * 7 + col) % family.length];
-      if (kind.lengthM > bayD * 1.6) continue; // a semi does not park here
-      VehicleMeshes.emit(cars, glass, kind, at, along, up, u: 0.5);
+    // ---- The driveway: the lot's road-side edge to the road ---------------
+    //
+    // At the end of the lot away from the entrance, so the drive and the
+    // footpath never cross; six metres wide, two cars passing.
+    final driveX = entrance.$1 <= lot.x
+        ? x1 - drivewayM / 2 - 0.5
+        : x0 + drivewayM / 2 + 0.5;
+    if (behind) {
+      // Out the back into the alley: a metre past the lot line, so the two
+      // surfaces overlap rather than meet at a seam.
+      _quad(paving, at, up, driveX - drivewayM / 2, y1, driveX + drivewayM / 2,
+          rearLineY + 1.0, asphalt, slabTop);
+    } else {
+      // Across the front setback to the lot line...
+      if (frontLineY < y0 - 0.2) {
+        _quad(paving, at, up, driveX - drivewayM / 2, frontLineY,
+            driveX + drivewayM / 2, y0 + 0.3, asphalt, slabTop);
+      }
+      // ...and over the sidewalk to the curb as a concrete apron at the
+      // walk's own height — the dropped curb a driveway crosses the
+      // pavement on. It overlaps the walk rather than cutting it.
+      if (sidewalkM > 0) {
+        _quad(paving, at, up, driveX - drivewayM / 2 - 0.4,
+            frontLineY - sidewalkM, driveX + drivewayM / 2 + 0.4,
+            frontLineY + 0.2, concrete, RoadMesher.walkTopLiftM + 0.02);
+      }
     }
-    return filled;
+
+    // ---- The bays -----------------------------------------------------------
+    //
+    // Ranks of bays perpendicular to the street along the lot's long edges:
+    // one rank against the building side when the lot is shallow, two facing
+    // each other across an aisle when there is room. The driveway's own lane
+    // is kept clear.
+    final twoRanks = lot.depth >= bayD * 2 + aisleM;
+    final buildingSide = behind ? y0 : y1;
+    final streetSide = behind ? y1 : y0;
+    final ranks = <(double edgeY, double nose)>[
+      // (the edge the bay backs onto, which way the car's nose points)
+      (buildingSide, behind ? -1.0 : 1.0),
+      if (twoRanks) (streetSide, behind ? 1.0 : -1.0),
+    ];
+    final family = airless ? VehicleKind.airless : VehicleKind.road;
+    var placed = 0;
+    final filled = (lot.spaces * occupancy.clamp(0.0, 1.0)).round();
+    var bay = 0;
+    for (final (edgeY, nose) in ranks) {
+      final count = ((x1 - x0 - 1.0) / bayW).floor();
+      if (count <= 0) continue;
+      final start = x0 + 0.5 + ((x1 - x0 - 1.0) - count * bayW) / 2;
+      final inner = edgeY - nose * bayD; // the aisle side of the rank
+      for (var i = 0; i <= count; i++) {
+        final x = start + i * bayW;
+        // The line between bays, from the edge into the lot.
+        if (detailed) {
+          _quad(paving, at, up, x - 0.06, math.min(edgeY, inner), x + 0.06,
+              math.max(edgeY, inner), white, paintLift);
+        }
+        if (i == count) break;
+        final cx = x + bayW / 2;
+        if ((cx - driveX).abs() < drivewayM / 2 + bayW / 2) continue;
+        // A car in this bay? Fill from the entrance end, so a half-full lot
+        // reads as half full rather than as randomly speckled.
+        if (placed < filled && placed < maxCars && bay < lot.spaces) {
+          final kind = family[(bay * 7 + i) % family.length];
+          if (kind.lengthM <= bayD * 1.1) {
+            final carAt = at(cx, edgeY - nose * bayD / 2);
+            VehicleMeshes.emit(cars, glass, kind, carAt, along * nose, up,
+                u: 0.5);
+            placed++;
+          }
+        }
+        bay++;
+      }
+    }
+
+    // ---- The footpath -------------------------------------------------------
+    //
+    // From the entrance to the street: across the front setback (and the
+    // front lot if there is one, as a marked walkway over it) to the lot
+    // line, where the sidewalk takes over. And from a rear lot to the back
+    // door, which is what a rear lot is for.
+    final (ex, ey) = entrance;
+    if (ey - frontLineY > 0.6) {
+      _quad(paving, at, up, ex - pathM / 2, frontLineY - 0.2, ex + pathM / 2,
+          ey + 0.1, concrete, paintLift + 0.005);
+    }
+    if (behind && y0 - rearDoorY > 0.3) {
+      _quad(paving, at, up, ex - pathM / 2, rearDoorY - 0.1, ex + pathM / 2,
+          y0 + 0.2, concrete, paintLift + 0.005);
+    }
+    return placed;
   }
 
-  static void _slab(MeshBuilder m, Vector3 centre, Vector3 side, Vector3 along,
-      Vector3 up, double hw, double hd, double lift) {
+  /// A flat quad in plan metres, [x0]..[x1] across and [y0]..[y1] along,
+  /// mapping one band of the road atlas across itself.
+  static void _quad(
+    MeshBuilder m,
+    Vector3 Function(double x, double y) at,
+    Vector3 up,
+    double x0,
+    double y0,
+    double x1,
+    double y1,
+    int band,
+    double lift,
+  ) {
+    if (x1 - x0 < 1e-6 || y1 - y0 < 1e-6) return;
     final o = up * lift;
+    final u0 = RoadMesher.bandU(band, 0), u1 = RoadMesher.bandU(band, 1);
+    final v1 = (y1 - y0) / RoadMesher.tileM;
     final q = [
-      m.vertex((centre - side * hw - along * hd + o) * kRenderScale, up, 0, 1),
-      m.vertex((centre + side * hw - along * hd + o) * kRenderScale, up, 1, 1),
-      m.vertex((centre + side * hw + along * hd + o) * kRenderScale, up, 1, 0),
-      m.vertex((centre - side * hw + along * hd + o) * kRenderScale, up, 0, 0),
+      m.vertex((at(x0, y0) + o) * kRenderScale, up, u0, 0),
+      m.vertex((at(x1, y0) + o) * kRenderScale, up, u1, 0),
+      m.vertex((at(x1, y1) + o) * kRenderScale, up, u1, v1),
+      m.vertex((at(x0, y1) + o) * kRenderScale, up, u0, v1),
     ];
     m.quad(q[0], q[1], q[2], q[3]);
   }

@@ -124,30 +124,39 @@ void main() {
     expect((a - b).abs(), lessThan(14), reason: 'grain only, no structure');
   });
 
-  test('the road strip runs its markings ALONG the tile, not across it', () {
-    const s = 96;
-    final t = CityTextureBakes.roadStrip(s);
+  test('the road atlas: paint bands, dashes ALONG the tile, asphalt between',
+      () {
+    const s = 128;
+    final t = CityTextureBakes.roadAtlas(s);
     ({int r, int g, int b}) at(int x, int y) {
       final i = (y * s + x) * 4;
       return (r: t[i], g: t[i + 1], b: t[i + 2]);
     }
 
-    // Centre line at u=0.5: painted on some v (dash), tarmac on others.
-    final dashOn = at(s ~/ 2, s ~/ 8); // first dash band
-    final dashOff = at(s ~/ 2, (s * 3) ~/ 8); // first gap band
-    expect(dashOn.r, greaterThan(160));
-    expect(dashOn.b, lessThan(dashOn.r), reason: 'road paint is warm');
-    expect(dashOff.r, lessThan(140), reason: 'the line is dashed');
-
-    // Curbs at both edges, lighter than the mid-lane tarmac.
-    final curb = at(1, s ~/ 2);
-    final lane = at(s ~/ 4, s ~/ 2);
-    expect(curb.r, greaterThan(lane.r + 10));
-
-    // And NO transverse stripe: mid-lane tarmac is tarmac at every v.
-    for (var y = 0; y < s; y += 4) {
-      expect(at(s ~/ 4, y).r, lessThan(150),
-          reason: 'a cross-tile stripe would band the carriageway');
+    final band = s ~/ CityTextureBakes.roadBands;
+    int mid(int b) => b * band + band ~/ 2;
+    // Asphalt is dark at every v; the solid paint bands are bright at every
+    // v; white is neutral and yellow is warm.
+    for (var y = 0; y < s; y += 5) {
+      expect(at(mid(CityTextureBakes.roadAsphalt), y).r, lessThan(140));
+      expect(at(mid(CityTextureBakes.roadWhite), y).r, greaterThan(190));
+      final yl = at(mid(CityTextureBakes.roadYellow), y);
+      expect(yl.r, greaterThan(190));
+      expect(yl.b, lessThan(yl.r - 100), reason: 'yellow is warm');
     }
+    // The dashed bands paint the first quarter of V and leave the rest.
+    final dashOn = at(mid(CityTextureBakes.roadDashedWhite), s ~/ 8);
+    final dashOff = at(mid(CityTextureBakes.roadDashedWhite), (s * 5) ~/ 8);
+    expect(dashOn.r, greaterThan(190));
+    expect(dashOff.r, lessThan(140), reason: 'the line is dashed');
+    // Concrete is paler than asphalt; the shoulder sits between the two.
+    final concrete = at(mid(CityTextureBakes.roadConcrete), s ~/ 3);
+    final shoulder = at(mid(CityTextureBakes.roadShoulder), s ~/ 3);
+    final asphalt = at(mid(CityTextureBakes.roadAsphalt), s ~/ 3);
+    expect(concrete.r, greaterThan(asphalt.r + 40));
+    expect(shoulder.r, greaterThan(asphalt.r - 10));
+    expect(shoulder.r, lessThan(concrete.r));
+    // Twelve metres a tile: three of dash, nine of gap.
+    expect(CityTextureBakes.roadTileM, 12.0);
   });
 }

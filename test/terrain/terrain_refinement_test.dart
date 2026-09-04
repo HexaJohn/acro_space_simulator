@@ -14,12 +14,14 @@ import 'package:flutter_test/flutter_test.dart';
 const double _radius = 1.7374e6; // Moon-ish datum
 const int _resolution = 24;
 
-TerrainBrush _crater(Vector3 dir, {double radiusM = 16}) => TerrainBrush.crater(
+TerrainBrush _crater(Vector3 dir, {double radiusM = 16, double minVoxelM = 0}) =>
+    TerrainBrush.crater(
       contactBF: dir.normalized * _radius,
       normalBF: dir.normalized,
       radiusM: radiusM,
       depthM: radiusM * 0.4,
       rimHeightM: radiusM * 0.08,
+      minVoxelM: minVoxelM,
     );
 
 /// Selection that never splits, so anything below is forced refinement alone.
@@ -86,6 +88,22 @@ void main() {
       final small = refinementsFor(_crater(dir, radiusM: 5), _radius, _resolution);
       final big = refinementsFor(_crater(dir, radiusM: 500), _radius, _resolution);
       expect(big.first.level, lessThan(small.first.level));
+    });
+
+    test('a voxel floor caps the depth a small brush can demand', () {
+      final dir = Vector3.unitX;
+      final fine = refinementsFor(_crater(dir), _radius, _resolution);
+      final coarse =
+          refinementsFor(_crater(dir, minVoxelM: 15), _radius, _resolution);
+      expect(coarse.first.level, lessThan(fine.first.level));
+      // The floor IS the target: the level a 15 m voxel needs, no deeper.
+      expect(coarse.first.level,
+          levelForVoxelSize(dir, _radius, _resolution, 15));
+      // A floor finer than the radius already derives changes nothing — the
+      // player's crater keeps the depth its size asks for.
+      final noop =
+          refinementsFor(_crater(dir, minVoxelM: 1), _radius, _resolution);
+      expect(noop.first.level, fine.first.level);
     });
 
     test('a brush at the body centre is not refinable', () {

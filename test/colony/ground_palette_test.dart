@@ -27,7 +27,7 @@ void main() {
   }
 
   test('the bake has exactly kGroundSwatches distinct bands', () {
-    const size = 288; // divisible by 9, so bands are exact
+    const size = 320; // divisible by 10, so bands are exact
     final px = CityTextureBakes.groundPalette(size);
     final seen = <String>{};
     for (var i = 0; i < kGroundSwatches; i++) {
@@ -52,7 +52,8 @@ void main() {
     // ones, so `(kind + 0.5) / kGroundSwatches` is a meaningful thing for the
     // renderer to compute at all.
     expect(kGroundSwatches, greaterThan(CityPatchSnapshot.kindSupport));
-    const size = 288;
+    expect(kLeafSwatch, lessThan(kGroundSwatches));
+    const size = 320;
     for (var kind = 0; kind <= CityPatchSnapshot.kindSupport; kind++) {
       expect(bandAt((kind + 0.5) / kGroundSwatches, size), kind);
     }
@@ -62,7 +63,7 @@ void main() {
     // Residential green, commercial blue, industrial tan. Checked on the BAKE,
     // which is a real output — if a swatch is reordered or recoloured, the
     // colonies change colour and this says so.
-    const size = 288;
+    const size = 320;
     final px = CityTextureBakes.groundPalette(size);
     ({int r, int g, int b}) bandColour(int kind) {
       final x = ((kind + 0.5) * size ~/ kGroundSwatches);
@@ -77,6 +78,13 @@ void main() {
     final com = bandColour(CityPatchSnapshot.kindCommercial);
     expect(com.b, greaterThan(com.r), reason: 'commercial is not blue');
     expect(com.b, greaterThan(com.g), reason: 'commercial is not blue');
+
+    // The leaf is a deeper green than a lawn: a crown over a yard has to
+    // read against it.
+    final leaf = bandColour(kLeafSwatch);
+    expect(leaf.g, greaterThan(leaf.r + 30), reason: 'leaf is not green');
+    expect(leaf.g, greaterThan(leaf.b + 30), reason: 'leaf is not green');
+    expect(leaf.g, lessThan(res.g), reason: 'leaf is not deeper than lawn');
 
     final ind = bandColour(CityPatchSnapshot.kindIndustrial);
     expect(ind.r, greaterThan(ind.b), reason: 'industrial is not tan');

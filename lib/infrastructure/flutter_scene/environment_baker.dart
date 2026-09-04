@@ -12,6 +12,7 @@ import 'package:vector_math/vector_math.dart' as vm;
 
 import '../../application/snapshot/world_snapshot.dart';
 import '../../domain/shared/vector3.dart';
+import 'graphics_quality.dart';
 import 'scene_textures.dart';
 
 /// Bakes the focus body into the scene's image-based-lighting environment so
@@ -72,8 +73,20 @@ class PlanetEnvironmentBaker {
   /// (envTest=white) that the pipeline itself is sound.
   static double bakedIntensity = 1.5;
 
-  static const int _w = 256, _h = 128;
-  static const Duration _minInterval = Duration(seconds: 3);
+  /// Equirect size of the capture CURRENTLY being laid out.
+  ///
+  /// Snapped once at the top of [_bake] rather than read live from the preset:
+  /// the layout maths (`_uv`, `_wrapped`, the disc radii) and the final
+  /// `toImage` all consult these, and a slider moved mid-bake would otherwise
+  /// lay the picture out at one size and rasterise it at another — a stretched
+  /// reflection until something happened to trigger the next bake.
+  int _bakeW = LightingQuality.high.envBakeWidth;
+  int _bakeH = LightingQuality.high.envBakeHeight;
+  int get _w => _bakeW;
+  int get _h => _bakeH;
+
+  /// Re-bake floor. Safe to read live — it only gates the throttle.
+  static Duration get _minInterval => GraphicsQuality.lighting.envBakeInterval;
 
   String? _bakedBody;
   Vector3 _bakedDir = Vector3.zero;
@@ -84,6 +97,11 @@ class PlanetEnvironmentBaker {
   bool _applied = false;
   double _appliedIntensity = -1;
   String _appliedPattern = '';
+
+  /// The preset the resident capture was baked at, so moving the quality
+  /// slider re-bakes at once instead of leaving the old resolution on screen
+  /// for up to a whole throttle interval.
+  QualityLevel? _appliedLighting;
   bool _bakedHadTexture = false;
 
   // Average albedo colour per texture key, computed once by downscaling the
@@ -150,6 +168,7 @@ class PlanetEnvironmentBaker {
         !_applied ||
         bakedIntensity != _appliedIntensity ||
         testPattern != _appliedPattern ||
+        GraphicsQuality.lightingLevel != _appliedLighting ||
         (albedo != null) != _bakedHadTexture;
     final moved =
         knobTurned ||
@@ -228,6 +247,9 @@ class PlanetEnvironmentBaker {
     ui.Image? albedo,
     Vector3? sunFromEye,
   }) async {
+    // One size for the whole capture — see [_bakeW].
+    _bakeW = GraphicsQuality.lighting.envBakeWidth;
+    _bakeH = GraphicsQuality.lighting.envBakeHeight;
     final rec = ui.PictureRecorder();
     final canvas = ui.Canvas(rec);
     final full = ui.Rect.fromLTWH(0, 0, _w.toDouble(), _h.toDouble());
@@ -388,6 +410,7 @@ class PlanetEnvironmentBaker {
     _applied = true;
     _appliedIntensity = bakedIntensity;
     _appliedPattern = testPattern;
+    _appliedLighting = GraphicsQuality.lightingLevel;
     _bakedBody = bodyId;
     _bakedDir = dir;
     _bakedAngular = angular;

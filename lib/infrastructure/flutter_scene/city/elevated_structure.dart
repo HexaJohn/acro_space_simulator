@@ -29,7 +29,9 @@ import 'dart:math' as math;
 import '../../../domain/colony/city/parcel.dart';
 import '../../../domain/scatter/mesh_builder.dart';
 import '../../../domain/shared/vector3.dart';
+import 'city_texture_bakes.dart';
 import 'oriented_box.dart';
+import 'road_mesher.dart';
 
 class ElevatedStructure {
   const ElevatedStructure._();
@@ -80,8 +82,10 @@ class ElevatedStructure {
     double hw,
     double h,
   ) {
-    // Running surface, as a ribbon so it takes the road strip's lane markings.
-    _ribbon(deck, pts, anchorBF, hw, h);
+    // Running surface: the same carriageway every road gets, three lanes
+    // each way with a barrier down the middle, lifted to the deck.
+    RoadMesher.carriageway(deck, pts, anchorBF, RoadClass.elevated,
+        halfWidthM: hw, liftM: h, solid: solid);
 
     // Soffit and edge fascias: what you see from underneath, which for an
     // elevated road is most of what anyone ever sees of it.
@@ -131,7 +135,8 @@ class ElevatedStructure {
     // Track deck between the girders, and the two rails on it. The rails are
     // the thing that says "railway" at any distance the structure is legible
     // at — without them a trestle is a footbridge.
-    _ribbon(deck, pts, anchorBF, hw * 0.72, h + 0.05);
+    RoadMesher.ribbon(deck, pts, anchorBF, hw * 0.72,
+        band: CityTextureBakes.roadConcrete, liftM: h + 0.05);
     for (final off in [-0.72, 0.72]) {
       _edge(solid, pts, anchorBF, off, h + 0.2, 0.16, inset: 0.0, widthM: 0.14);
     }
@@ -162,29 +167,77 @@ class ElevatedStructure {
     }
   }
 
-  // ---- Shared ribbon helpers ---------------------------------------------
+  // ---- Terminals ------------------------------------------------------------
 
-  /// A flat surface [lift] metres above the alignment, [hw] to each side.
-  static void _ribbon(MeshBuilder m, List<Vector3> pts, Vector3 anchorBF,
-      double hw, double lift) {
-    var v = 0.0;
-    int? pl, pr;
-    for (var i = 0; i < pts.length; i++) {
-      final p = pts[i];
-      final up = (p + anchorBF).normalized;
-      final ahead = i + 1 < pts.length ? pts[i + 1] - p : p - pts[i - 1];
-      final along = ahead.length > 1e-6 ? ahead.normalized : Vector3.unitX;
-      final side = along.cross(up).normalized;
-      if (i > 0) v += (p - pts[i - 1]).length / (hw * 2);
-      final c = p + up * lift;
-      final l = m.vertex(_s(c + side * -hw), up, 0, v);
-      final r = m.vertex(_s(c + side * hw), up, 1, v);
-      // Same winding as the ground ribbons, which render face up.
-      if (pl != null && pr != null) m.quad(pl, pr, r, l);
-      pl = l;
-      pr = r;
+  /// How far a terminal's platforms run back from the end of the line.
+  static const double platformLengthM = 60;
+
+  /// A terminal station at a free END of an elevated line: a platform each
+  /// side of the track at deck level, a canopy on posts over each, a
+  /// bumper across the track, and a stair tower down to the street.
+  ///
+  /// An L line that simply stopped in mid-air read as a structure that had
+  /// been left unfinished; every real one ends at a terminal, and the
+  /// terminal is most of what says "railway" about a line seen end-on.
+  /// [at] is the end point (anchor-relative metres), [inward] the unit
+  /// direction from it back along the line.
+  static void emitTerminal(
+    MeshBuilder solid,
+    MeshBuilder glow, {
+    required Vector3 at,
+    required Vector3 inward,
+    required Vector3 anchorBF,
+    required double halfWidthM,
+  }) {
+    final h = RoadClass.transit.deckHeightM;
+    final up = (at + anchorBF).normalized;
+    final along = (inward - up * inward.dot(up)).normalized;
+    final side = along.cross(up).normalized;
+    const platformW = 3.2;
+    const platformH = 0.95; // above rail level
+    const canopyH = 3.4; // above the platform
+    final start = at + along * 4.0;
+    final end = at + along * platformLengthM;
+    for (final sign in const [-1.0, 1.0]) {
+      final off = side * (sign * (halfWidthM + 0.4 + platformW / 2));
+      // The platform slab.
+      OrientedBox.span(solid, start + off + up * (h + platformH - 0.15),
+          end + off + up * (h + platformH - 0.15), up, platformW, 0.3);
+      // Its canopy, and the posts that carry it.
+      OrientedBox.span(solid, start + off + up * (h + platformH + canopyH),
+          end + off + up * (h + platformH + canopyH), up, platformW + 0.6, 0.18);
+      for (var d = 6.0; d < platformLengthM - 2; d += 12) {
+        final foot = at + along * d + off + up * (h + platformH);
+        OrientedBox.upright(solid, foot, along, up, 0.2, 0.2, canopyH);
+      }
+      // A lit sign band along the canopy's outer edge.
+      OrientedBox.span(
+          glow,
+          start + off + side * (sign * (platformW / 2 + 0.2)) + up * (h + platformH + canopyH - 0.35),
+          end + off + side * (sign * (platformW / 2 + 0.2)) + up * (h + platformH + canopyH - 0.35),
+          up,
+          0.08,
+          0.4);
     }
+    // The bumper across the track at the very end.
+    OrientedBox.emit(solid, at + along * 1.2 + up * (h + 0.7), side, along, up,
+        halfWidthM * 0.72, 0.5, 0.7);
+    // The stair tower, outside one platform, ground to platform level.
+    final towerAt = at +
+        along * 16 +
+        side * (halfWidthM + 0.4 + platformW + 1.9);
+    OrientedBox.upright(solid, towerAt, along, up, 3.4, 4.0, h + platformH);
+    // The bridge from the tower onto the platform.
+    OrientedBox.span(
+        solid,
+        towerAt + up * (h + platformH - 0.15) - side * 1.7,
+        towerAt + up * (h + platformH - 0.15) - side * (3.5),
+        up,
+        1.6,
+        0.3);
   }
+
+  // ---- Shared ribbon helpers ---------------------------------------------
 
   /// A continuous beam running the alignment at lateral offset [off], its TOP
   /// at [top], hanging [depth] below it.
@@ -268,28 +321,29 @@ class ElevatedStructure {
   static const double carWidthM = 2.9;
   static const double carHeightM = 3.6;
 
-  /// The train itself, drawn by the TRAFFIC pass rather than with the
-  /// structure: it moves, and the structure is rebuilt only when the colony's
-  /// shape changes.
+  /// The train's cars, where they are right now: centre and (side, along,
+  /// up) basis, in the anchor-relative metres [pts] use.
   ///
   /// Position is derived from [epochS] exactly as road traffic is — no state,
   /// nothing on the wire, and every client watching the same tick sees the
-  /// train in the same place.
-  static void emitTrain(
-    MeshBuilder body,
-    MeshBuilder glass, {
+  /// train in the same place. The traffic pass places an instanced copy of
+  /// [emitTrainCar] at each pose; [emitTrain] bakes the same poses into a
+  /// mesh for callers that want one.
+  static List<({Vector3 centre, Vector3 side, Vector3 along, Vector3 up})>
+      trainCarPoses({
     required List<Vector3> pts,
     required Vector3 anchorBF,
     required double lengthM,
     required double epochS,
     required int seed,
   }) {
-    if (pts.length < 2 || lengthM < carLengthM * trainCars) return;
+    if (pts.length < 2 || lengthM < carLengthM * trainCars) return const [];
     const speedMs = 14.0;
     final period = lengthM / speedMs;
     final phase = ((epochS + seed * 37.0) % period) / period;
     final head = phase * lengthM;
 
+    final out = <({Vector3 centre, Vector3 side, Vector3 along, Vector3 up})>[];
     for (var c = 0; c < trainCars; c++) {
       final s = head - c * (carLengthM + 1.2);
       if (s < 0 || s > lengthM - carLengthM) continue;
@@ -302,15 +356,48 @@ class ElevatedStructure {
       final side = along.cross(up).normalized;
       final centre =
           at + up * (RoadClass.transit.deckHeightM + 0.35 + carHeightM / 2);
-      OrientedBox.emit(body, centre, side, along, up, carWidthM / 2,
-          carLengthM / 2, carHeightM / 2);
-      // Window band, on the glazing material so it lights at night.
+      out.add((centre: centre, side: side, along: along, up: up));
+    }
+    return out;
+  }
+
+  /// One car at the origin — +X across, +Y along, +Z up, scene units — the
+  /// shape the traffic pass instances along the line. The window band goes
+  /// on the glazing material so it lights at night.
+  static void emitTrainCar(MeshBuilder body, MeshBuilder glass) {
+    OrientedBox.emit(body, Vector3.zero, Vector3.unitX, Vector3.unitY,
+        Vector3.unitZ, carWidthM / 2, carLengthM / 2, carHeightM / 2);
+    OrientedBox.emit(glass, const Vector3(0, 0, 0.55), Vector3.unitX,
+        Vector3.unitY, Vector3.unitZ, carWidthM / 2 + 0.03,
+        carLengthM / 2 - 0.9, 0.62);
+  }
+
+  /// The train as one baked mesh: [trainCarPoses] with [emitTrainCar]'s
+  /// boxes emitted at each pose.
+  static void emitTrain(
+    MeshBuilder body,
+    MeshBuilder glass, {
+    required List<Vector3> pts,
+    required Vector3 anchorBF,
+    required double lengthM,
+    required double epochS,
+    required int seed,
+  }) {
+    for (final car in trainCarPoses(
+      pts: pts,
+      anchorBF: anchorBF,
+      lengthM: lengthM,
+      epochS: epochS,
+      seed: seed,
+    )) {
+      OrientedBox.emit(body, car.centre, car.side, car.along, car.up,
+          carWidthM / 2, carLengthM / 2, carHeightM / 2);
       OrientedBox.emit(
           glass,
-          centre + up * 0.55,
-          side,
-          along,
-          up,
+          car.centre + car.up * 0.55,
+          car.side,
+          car.along,
+          car.up,
           carWidthM / 2 + 0.03,
           carLengthM / 2 - 0.9,
           0.62);

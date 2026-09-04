@@ -191,6 +191,8 @@ class CityLayout {
     // Laid in vacuum: pedestrians get a sealed tube, not a pavement. Captured
     // here because it is a property of when the road was BUILT.
     bool sealed = false,
+    // Built as the walled variant: sound barriers along both edges.
+    bool soundWalls = false,
     // Skip the lot re-subdivision. For laying a WHOLE network at once: every
     // commit otherwise re-cuts every lot in the colony, which is quadratic in
     // roads and was most of the cost of generating a city. The caller must
@@ -261,6 +263,7 @@ class CityLayout {
           controls: _decimate(pieces[i]),
           // A split keeps what the original was built as.
           sealed: road.sealed,
+          soundWalls: road.soundWalls,
         );
       }
     });
@@ -274,6 +277,7 @@ class CityLayout {
         roadClass: roadClass,
         controls: _decimate(pieces[i]),
         sealed: sealed,
+        soundWalls: soundWalls && roadClass.canHaveSoundWalls,
       );
     }
     if (!regenerateLots) {
@@ -787,6 +791,14 @@ class CityLayout {
           continue;
         }
         return true;
+      }
+      // The other way round: a road running clean THROUGH a plot. Corner
+      // probes miss it whenever the plot is wide and the road is long — a
+      // 780 m solar farm was staked straddling the railway, its four corners
+      // and its centre all comfortably clear of the track between them.
+      if (road.id == exclude) continue;
+      for (final v in ob.pts) {
+        if (p.contains(v)) return true;
       }
     }
     return false;

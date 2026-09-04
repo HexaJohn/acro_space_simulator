@@ -76,6 +76,7 @@ import '../flutter_scene/atmosphere_nodes.dart';
 import '../flutter_scene/cloud_nodes.dart';
 import '../flutter_scene/environment_baker.dart';
 import '../flutter_scene/gravity_grid_nodes.dart';
+import '../flutter_scene/halo_ring_nodes.dart';
 import '../flutter_scene/line_nodes.dart';
 import '../flutter_scene/render_backend.dart';
 import '../flutter_scene/ring_nodes.dart';
@@ -575,6 +576,14 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           'upMode': _upMode.name,
           'freecam': _freecam,
           'walk': _walkMode,
+          // Frame economics, harness-readable (mirrors the perf panel): mean
+          // ticker frame, Flutter's own build/raster means, and the last
+          // TopDownSnapshotPresenter.present() — the one big per-frame cost
+          // that is NOT inside SceneSync.stageMs.
+          'frameMs': _avgOfList(_frameMs),
+          'uiMs': _avgOfList(_uiMs),
+          'rasterMs': _avgOfList(_rasterMs),
+          'presentMs': _presentMs,
           'walkGrounded': _walkGrounded,
           'lamp': TerrainNodes.lampOn,
           'thirdPerson': _thirdPerson,
@@ -1385,6 +1394,22 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   Duration _last = Duration.zero;
   double _accum = 0; // carried-over real time not yet consumed by a fixed step
 
+  // ---- Perf overlay --------------------------------------------------------
+  // Same instrumentation the terrain studio's perf panel already has (see
+  // TerrainStudioScreen._perfPanel) — ported here so a real-flight slowdown
+  // (as opposed to a studio-only one) is diagnosable the same way, without
+  // reaching for DevTools.
+  final List<double> _frameMs = [];
+  final List<double> _uiMs = [];
+  final List<double> _rasterMs = [];
+  TimingsCallback? _timingsCb;
+
+  /// Last frame's [TopDownSnapshotPresenter.present] cost (ms). Runs inside
+  /// _onFrame's setState EVERY tick — on the flutterScene backend its output
+  /// feeds only the HUD overlay, yet unflagged it still resamples every
+  /// body's orbit rail and ring outline the 3D scene never reads.
+  double _presentMs = 0;
+
   @override
   void initState() {
     super.initState();
@@ -1492,6 +1517,20 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     _bridgeCommands = _bridge.commandFrames.listen(_applyBridgeCommands);
 
     _ticker = createTicker(_onFrame)..start();
+
+    _timingsCb = (timings) {
+      for (final t in timings) {
+        _uiMs.add(t.buildDuration.inMicroseconds / 1000);
+        _rasterMs.add(t.rasterDuration.inMicroseconds / 1000);
+      }
+      while (_uiMs.length > 90) {
+        _uiMs.removeAt(0);
+      }
+      while (_rasterMs.length > 90) {
+        _rasterMs.removeAt(0);
+      }
+    };
+    SchedulerBinding.instance.addTimingsCallback(_timingsCb!);
   }
 
   /// Apply a CommandFrame from a connected renderer (Unreal) to the live repos.
@@ -1583,6 +1622,14 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   void _onFrame(Duration elapsed) {
     final frameDt = (elapsed - _last).inMicroseconds / 1e6;
     _last = elapsed;
+    // Guard as the terrain studio's does: reject the first tick (no prior
+    // _last) and any outlier from a debugger pause or dropped-frame spike,
+    // which would otherwise dominate the rolling average.
+    final frameMsSample = frameDt * 1000;
+    if (frameMsSample > 0 && frameMsSample < 500) {
+      _frameMs.add(frameMsSample);
+      if (_frameMs.length > 90) _frameMs.removeAt(0);
+    }
 
     // Track the focused vessel's dominant body so that if the vessel is removed
     // (a hard impact destroys it â€” common when landing fast on an airless body
@@ -1865,6 +1912,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     final cam = _camera;
     setState(() {
       _activeCamera = cam;
+      final sw = Stopwatch()..start();
       _snapshot = _presenter.present(
         focus: _focusVessel,
         focusBodyId: _focusBody,
@@ -1874,7 +1922,14 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         cullDistant: _layers.cullDistant,
         flownTrail: _trail,
         flownTrailBody: _trailBody,
+        // The 3D backend draws its own rails/rings/trail in-scene
+        // (LineNodes/RingNodes); this snapshot then feeds ONLY the HUD
+        // overlay (labels, markers, patch legs, telemetry text), so skip
+        // projecting the polylines nobody reads — measured, they were the
+        // bulk of a 20ms+ per-frame present() on a full system.
+        hudOnly: _renderBackend == RenderBackend.flutterScene,
       );
+      _presentMs = sw.elapsedMicroseconds / 1000;
     });
   }
 
@@ -1916,6 +1971,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   void dispose() {
     _cityEdit.removeListener(_onCityEditChanged);
     SimViewControl.instance.clear();
+    final timingsCb = _timingsCb;
+    if (timingsCb != null) {
+      SchedulerBinding.instance.removeTimingsCallback(timingsCb);
+    }
     _ticker.dispose();
     unawaited(_bridgeCommands?.cancel());
     unawaited(_bridge.stop());
@@ -2846,7 +2905,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                             right: 0,
                             child: Center(child: NavBall(state: _navState()!, size: 120)),
                           ),
-                        // Debug draw-layer toggle panel (top-right).
+                        // Perf panel (top-left) + debug draw-layer toggle
+                        // panel (top-right) — same toggle, opposite corners
+                        // so neither crowds the other.
+                        if (_showDebugPanel) Positioned(top: 8, left: 8, child: _perfPanel()),
                         if (_showDebugPanel) Positioned(top: 8, right: 8, child: _debugPanel()),
                         // Encounter-planner panel (top-right; slides left of
                         // the debug panel when both are open).

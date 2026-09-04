@@ -245,7 +245,7 @@ const List<CityBuildingSpec> kUtilCatalog = [
   CityBuildingSpec(type: 'gas', label: 'Gas Generator',
       colorArgb: 0xFFFF8A65, group: 'power', powerOutput: 120, jobs: 6,
       inputs: {Commodity.fuel: 0.6}, pollution: 2.5, buildCost: 50,
-      siteWidthM: 260, siteDepthM: 200),
+      siteWidthM: 420, siteDepthM: 300),
   CityBuildingSpec(type: 'reactor', label: 'Fission Reactor',
       colorArgb: 0xFF7FE0A0, group: 'power', powerOutput: 240, jobs: 12,
       unlockPop: 120, buildCost: 80, pollution: 1.0,
@@ -261,7 +261,8 @@ const List<CityBuildingSpec> kUtilCatalog = [
   // handled in the sim tick (type 'aquifer').
   CityBuildingSpec(type: 'aquifer', label: 'Aquifer Pump',
       colorArgb: 0xFF4DD0E1, group: 'svc', jobs: 6, powerDraw: 8,
-      outputs: {Commodity.water: 1.5}, buildCost: 35),
+      outputs: {Commodity.water: 1.5}, buildCost: 35,
+      siteWidthM: 260, siteDepthM: 180),
   CityBuildingSpec(type: 'water', label: 'Water Plant',
       colorArgb: 0xFF26C6DA, group: 'svc', jobs: 8, powerDraw: 12,
       outputs: {Commodity.water: 2.0}, services: {'water': 300}, pollution: 0.5),
@@ -296,6 +297,10 @@ const List<CityBuildingSpec> kUtilCatalog = [
       unlockPop: 60, buildCost: 140, footW: 2, footH: 2,
       siteWidthM: 2000, siteDepthM: 2000, siteKind: SiteKind.field),
   // ---- LIFE SUPPORT: oxygen (only needed off breathable worlds) ----
+  CityBuildingSpec(type: 'solarthermal', label: 'Solar Thermal Farm',
+      colorArgb: 0xFFFFE082, group: 'power', powerOutput: 220, jobs: 12,
+      unlockPop: 80, buildCost: 160, footW: 2, footH: 2,
+      siteWidthM: 2400, siteDepthM: 1600, siteKind: SiteKind.field),
   CityBuildingSpec(type: 'electrolysis', label: 'Electrolysis Plant',
       colorArgb: 0xFF80DEEA, group: 'svc', jobs: 12,
       powerDraw: 20, inputs: {Commodity.water: 1.0},
@@ -466,6 +471,18 @@ const List<CityBuildingSpec> kUtilCatalog = [
   CityBuildingSpec(type: 'transit', label: 'Transit Stop',
       colorArgb: 0xFF7C4DFF, group: 'transport', jobs: 4, powerDraw: 5,
       services: {'leisure': 80}, buildCost: 30),
+  // The railway's two ends. Both claim their own plot beside the line: a
+  // station is a hall and a platform as long as a train, a yard is a transit
+  // shed with hardstanding for the wagons. See BuildingMassingRules for the
+  // dedicated massings.
+  CityBuildingSpec(type: 'station', label: 'Railway Station',
+      colorArgb: 0xFF7C4DFF, group: 'transport', jobs: 16, powerDraw: 12,
+      services: {'leisure': 160}, buildCost: 120,
+      siteWidthM: 180, siteDepthM: 70),
+  CityBuildingSpec(type: 'freightyard', label: 'Freight Yard',
+      colorArgb: 0xFF7C4DFF, group: 'transport', jobs: 36, powerDraw: 18,
+      storageBonus: 800, pollution: 0.8, buildCost: 160,
+      siteWidthM: 340, siteDepthM: 130),
   CityBuildingSpec(type: 'spaceport', label: 'Spaceport',
       colorArgb: 0xFFEC407A, group: 'transport', jobs: 40, powerDraw: 40,
       inputs: {Commodity.fuel: 1, Commodity.oxidizer: 1},

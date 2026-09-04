@@ -25,6 +25,7 @@ import 'infrastructure/flutter_scene/cloud_nodes.dart';
 import 'infrastructure/flutter_scene/body_nodes.dart';
 import 'infrastructure/flutter_scene/environment_baker.dart';
 import 'infrastructure/flutter_scene/gravity_grid_nodes.dart';
+import 'infrastructure/flutter_scene/halo_ring_nodes.dart';
 import 'infrastructure/flutter_scene/part_model_library.dart';
 import 'infrastructure/flutter_scene/render_backend.dart';
 import 'infrastructure/flutter_scene/scene_camera_adapter.dart';
@@ -281,6 +282,10 @@ Future<void> main() async {
     if (params['gravityGrid'] != null) {
       GravityGridNodes.enabled = params['gravityGrid'] == 'true';
     }
+    // Halo-ring toggle (A/B): haloRing=true|false.
+    if (params['haloRing'] != null) {
+      HaloRingNodes.enabled = params['haloRing'] == 'true';
+    }
     // Terrain material tuning: tileM=<metres>, sandW/grassW=0..1, plus the
     // macro texture octave: macroTileM=<metres> (0 disables), macroW=0..1.
     final tileM = deg('tileM');
@@ -480,6 +485,7 @@ Future<void> main() async {
     }
     return developer.ServiceExtensionResponse.result(jsonEncode({
       'debug': TerrainNodes.debugLine,
+      'lastReject': TerrainNodes.lastRejectLine,
       'gate': TerrainNodes.gateReason,
       'enabled': TerrainNodes.enabled,
       'debugView': TerrainNodes.debugView,

@@ -87,6 +87,13 @@ class _SceneRenderViewState extends State<SceneRenderView> {
   @override
   void initState() {
     super.initState();
+    // Section timings + the level histogram: previously only the terrain
+    // studio turned this on. The Stopwatch and the histogram/debug-line
+    // formatting piggyback loops [TerrainNodes.update] already runs, so
+    // leaving it on for every screen (flight included) costs nothing
+    // meaningful and means the same diagnostics are available wherever a
+    // slowdown shows up, not just in the studio.
+    TerrainNodes.profile = true;
     // Custom shader bundle (raymarched atmosphere + ring sheet).
     // Independent of the base bundle; on failure those layers simply never
     // spawn — log, don't brick the whole viewport.

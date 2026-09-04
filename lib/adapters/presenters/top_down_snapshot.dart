@@ -330,6 +330,15 @@ class TopDownSnapshotPresenter {
     // id so we can lift them to world coords. Projected to screen px below.
     List<Vector3> flownTrail = const [],
     BodyId? flownTrailBody,
+    // The flutterScene backend draws orbit rails, rings, and the flown trail
+    // IN-SCENE (LineNodes/RingNodes); this snapshot then feeds only
+    // [SceneHudOverlayPainter], which reads projected positions, labels,
+    // patched-conic continuation legs, and the HUD text lines. hudOnly skips
+    // the polyline projections nothing consumes there — every body's orbit
+    // ellipse resample, every vessel's adaptive path, 2x161 ring samples per
+    // ringed planet, the trail — which together were the bulk of a 20ms+
+    // per-frame present() on a full system.
+    bool hudOnly = false,
   }) {
     final system = universe.current();
 
@@ -423,7 +432,7 @@ class TopDownSnapshotPresenter {
       final parent = system.parentOf(b);
       var orbitPath = const <({double x, double y})>[];
       var orbitBehind = const <bool>[];
-      if (parent != null && !decluttered) {
+      if (parent != null && !decluttered && !hudOnly) {
         final parentWorld = bodyWorld(parent);
         final parentDepth = depthOf(parentWorld);
         final ring =
@@ -451,7 +460,7 @@ class TopDownSnapshotPresenter {
       var ringBehind = const <bool>[];
       var ringShadowInner = const <double>[];
       var ringShadowOuter = const <double>[];
-      final ring = _rings[key];
+      final ring = hudOnly ? null : _rings[key];
       if (ring != null) {
         final bodyDepth = depthOf(bw);
         final sunDir = toSunWorld; // body -> star (unit)
@@ -601,16 +610,21 @@ class TopDownSnapshotPresenter {
           }
         }
 
+        // hudOnly keeps the patched-conic block above (the HUD overlay draws
+        // the continuation legs + handoff markers) but skips the plain rail
+        // below: the 3D scene's LineNodes draws the current conic itself.
         // Adaptive screen-space sampling: dense near the craft + at sharp
         // turning points, sparse on far/straight arcs.
-        final pts = patchZeroPts ??
-            trajectory.predictPathAdaptive(
-              position: v.state.position,
-              velocity: v.state.velocity,
-              body: vBody,
-              epoch: epoch,
-              projectPx: (p) => camera.projectPx(toWorld(p) - camWorld),
-            );
+        final pts = hudOnly
+            ? const <Vector3>[]
+            : patchZeroPts ??
+                trajectory.predictPathAdaptive(
+                  position: v.state.position,
+                  velocity: v.state.velocity,
+                  body: vBody,
+                  epoch: epoch,
+                  projectPx: (p) => camera.projectPx(toWorld(p) - camWorld),
+                );
         final pp = <({double x, double y})>[];
         final beh = <bool>[];
         for (final p in pts) {
@@ -685,7 +699,7 @@ class TopDownSnapshotPresenter {
     // its dominant body, then project through the same camera as everything else
     // (NaN where culled so the painter drops that segment).
     final trailPx = <({double x, double y})>[];
-    if (flownTrail.isNotEmpty) {
+    if (flownTrail.isNotEmpty && !hudOnly) {
       final tb = flownTrailBody == null ? null : system.body(flownTrailBody);
       final tbWorld = tb == null ? Vector3.zero : bodyWorld(tb);
       for (final p in flownTrail) {
