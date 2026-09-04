@@ -225,6 +225,9 @@ class CityLayout {
     double? lotDepthM,
     bool? frontsLots,
     bool collector = false,
+    // Whether the ground is graded for it and its lots; see
+    // [RoadSpline.graded].
+    bool graded = true,
     // Skip the lot re-subdivision. For laying a WHOLE network at once: every
     // commit otherwise re-cuts every lot in the colony, which is quadratic in
     // roads and was most of the cost of generating a city. The caller must
@@ -291,6 +294,7 @@ class CityLayout {
           lotDepthM: road.lotDepthM,
           frontsLots: road.frontsLots,
           collector: road.collector,
+          graded: road.graded,
         );
         _roads[piece.id] = piece;
         _indexPiece(piece, pieces[i]);
@@ -311,6 +315,7 @@ class CityLayout {
         lotDepthM: lotDepthM,
         frontsLots: frontsLots,
         collector: collector,
+        graded: graded,
       );
       _roads[pid] = piece;
       _indexPiece(piece, pieces[i]);
@@ -463,13 +468,15 @@ class CityLayout {
   Parcel? addManualParcel(List<Vec2> polygon,
       {ParcelUse use = ParcelUse.unzoned,
       bool regenerateLots = true,
-      (Vec2, Vec2)? frontage}) {
+      (Vec2, Vec2)? frontage,
+      bool graded = true}) {
     final p = Parcel(
       id: 'lot-m${_nextId++}',
       polygon: polygon,
       use: use,
       manual: true,
       frontage: frontage,
+      graded: graded,
     );
     if (_hitsRoad(p)) return null;
     for (final other in _manual) {
@@ -683,6 +690,7 @@ class CityLayout {
           roadId: road.id,
           frontage: (frontA, frontB),
           sideStreet: _sideStreetOf(poly, (frontA, frontB), road),
+          graded: road.graded,
         );
         if (parcel.area < 30) continue;
         final box = _boxOf(parcel);

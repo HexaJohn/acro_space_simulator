@@ -106,6 +106,8 @@ class CityTerrainShaper {
 
     // ---- Building pads -------------------------------------------------
     for (final (parcel, spec) in city.buildingParcels()) {
+      // A lot that follows the land is draped, not levelled.
+      if (!parcel.graded) continue;
       final key = 'pad:${parcel.id}';
       if (city.shapedTerrain.contains(key)) continue;
 
@@ -155,6 +157,10 @@ class CityTerrainShaper {
 
     // ---- Road corridors ------------------------------------------------
     for (final road in city.layout.roads) {
+      // A road that follows the land is draped, not graded — see
+      // [RoadSpline.graded]; a sprawl of them would be a hundred thousand
+      // permanent edits to the ground.
+      if (!road.graded) continue;
       final pts = road.sample(stepM: 24);
       if (pts.length < 2) continue;
       for (var i = 1; i < pts.length; i++) {

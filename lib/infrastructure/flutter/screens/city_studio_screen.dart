@@ -1709,19 +1709,24 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             colour: (CityNodes.lodCounts[BuildingDetail.full] ?? 0) > 400
                 ? AppTheme.danger
                 : AppTheme.textDim),
-        row('  rebuild', '${ms(phase['city.rebuild'] ?? 0)} ms',
-            colour: AppTheme.textDim),
-        // The LAST rebuild's split, in ms — these keep their values on the
-        // frames between rebuilds, so they always describe the same event
-        // the headline rebuild figure last reported.
+        // The tiles: how many at each tier, how many wait to build, and
+        // how many finished this frame. A queue that never drains is a
+        // camera moving faster than the budget can follow.
         row(
-            '   of which',
-            'mesh ${(phase['city.rebuild.mesh'] ?? 0).round()} '
-            'emit ${(phase['city.rebuild.emit'] ?? 0).round()} '
-            'feat ${(phase['city.rebuild.features'] ?? 0).round()} '
-            'pat ${(phase['city.rebuild.patches'] ?? 0).round()}',
+            '  tiles',
+            'near ${count['near'] ?? 0}  mid ${count['mid'] ?? 0}  '
+            'far ${count['far'] ?? 0}  queued ${count['queued'] ?? 0}  '
+            'built ${count['builtThisFrame'] ?? 0}',
+            colour: (count['queued'] ?? 0) > 40
+                ? AppTheme.warn
+                : AppTheme.textDim),
+        row('  build', '${ms(phase['city.build'] ?? 0)} ms',
             colour: AppTheme.textDim),
-        row('  roads', '${ms(phase['city.roads'] ?? 0)} ms',
+        row('  bucket', '${ms(phase['city.bucket'] ?? 0)} ms',
+            colour: (phase['city.bucket'] ?? 0) > 4
+                ? AppTheme.warn
+                : AppTheme.textDim),
+        row('  tier', '${ms(phase['city.tier'] ?? 0)} ms',
             colour: AppTheme.textDim),
         row('  anchors', '${ms(phase['city.anchors'] ?? 0)} ms',
             colour: AppTheme.textDim),

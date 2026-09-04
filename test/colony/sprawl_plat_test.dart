@@ -10,6 +10,7 @@ library;
 import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_generator.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
+import 'package:acro_space_simulator/domain/colony/city/city_terrain_shaper.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/colony/city/sprawl_plan.dart';
 import 'package:acro_space_simulator/domain/universe/real_solar_system.dart';
@@ -108,6 +109,31 @@ void main() {
     final strip = city.parcelBuildings.entries
         .firstWhere((e) => identical(e.value, kStripMallSpec));
     expect(city.parcelById(strip.key)!.frontage, isNotNull);
+  });
+
+  test('the sprawl is draped, not graded: the shaper lays nothing for it', () {
+    final streets = suburban();
+    expect(streets.every((r) => !r.graded), isTrue);
+    final ids = {for (final r in streets) CityGenerator.baseRoadId(r.id)};
+    final pending = const CityTerrainShaper().pending(city,
+        bodyRadiusM: 6371000, groundRadiusAt: (_) => 6371000);
+    expect(pending, isNotEmpty, reason: 'the downtown is still graded');
+    for (final p in pending) {
+      if (p.key.startsWith('road:')) {
+        final rid = p.key.substring(5, p.key.lastIndexOf(':'));
+        expect(ids.contains(CityGenerator.baseRoadId(rid)), isFalse,
+            reason: '${p.key} grades a suburb street');
+      } else if (p.key.startsWith('pad:')) {
+        final lot = city.parcelById(p.key.substring(4))!;
+        expect(lot.graded, isTrue, reason: '${p.key} levels a draped lot');
+        expect(city.parcelBuildings[lot.id],
+            isNot(same(kStripMallSpec)),
+            reason: 'a strip mall follows the land');
+      }
+    }
+    // A few thousand brushes for the downtown, not tens of thousands for
+    // the sprawl: the terrain streamer refines around every one.
+    expect(pending.length, lessThan(4000), reason: '${pending.length} brushes');
   });
 
   test('the same seed plats the same sprawl', () {

@@ -3302,6 +3302,7 @@ class CitySim {
     double? lotDepthM,
     bool? frontsLots,
     bool collector = false,
+    bool graded = true,
   }) {
     if (groundAt != null && controls.length >= 2) {
       final samples = RoadSpline(
@@ -3323,6 +3324,7 @@ class CitySim {
       lotDepthM: lotDepthM,
       frontsLots: frontsLots,
       collector: collector,
+      graded: graded,
       regenerateLots: regenerateLots,
     );
     for (final e in result.renamedLots.entries) {
@@ -3572,6 +3574,7 @@ class CitySim {
               if (r.lotDepthM != null) 'lotD': r.lotDepthM,
               if (r.frontsLots != null) 'fronts': r.frontsLots,
               if (r.collector) 'collector': true,
+              if (!r.graded) 'graded': false,
               'pts': [
                 for (final c in r.controls) ...[c.e, c.n]
               ],
@@ -3587,6 +3590,7 @@ class CitySim {
               ],
               if (p.frontage case final f?)
                 'front': [f.$1.e, f.$1.n, f.$2.e, f.$2.n],
+              if (!p.graded) 'graded': false,
             },
         ],
         'parcelUse': {
@@ -3682,6 +3686,7 @@ class CitySim {
         lotDepthM: (r['lotD'] as num?)?.toDouble(),
         frontsLots: r['fronts'] as bool?,
         collector: r['collector'] == true,
+        graded: r['graded'] != false,
         controls: [
           for (var i = 0; i + 1 < pts.length; i += 2)
             Vec2(pts[i].toDouble(), pts[i + 1].toDouble()),
@@ -3706,6 +3711,7 @@ class CitySim {
             ),
           _ => null,
         },
+        graded: m['graded'] != false,
       ));
     }
     (j['parcelUse'] as Map).forEach((id, use) {
@@ -3995,7 +4001,9 @@ class CitySim {
       bool checkAccess = true,
       /// Which way the building faces, as a unit vector: the plot's edge
       /// on that side becomes its frontage. Null faces the plot's default.
-      Vec2? facing}) {
+      Vec2? facing,
+      /// Whether the ground is levelled for the plot; see [RoadSpline.graded].
+      bool graded = true}) {
     final why = checkAccess ? siteBlockedReason(spec, centre) : null;
     if (why != null) {
       blocked = why;
@@ -4032,7 +4040,7 @@ class CitySim {
       }
     }
     final parcel = layout.addManualParcel(poly,
-        regenerateLots: regenerateLots, frontage: frontage);
+        regenerateLots: regenerateLots, frontage: frontage, graded: graded);
     if (parcel == null) {
       blocked = 'Blocked — the site crosses a road or another plot.';
       return null;

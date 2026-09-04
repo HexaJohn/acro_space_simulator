@@ -1139,10 +1139,12 @@ class CityGenerator {
           ]) {
             final centre = Vec2(c.e + dx * half / 2, c.n + dy * half / 2);
             if (!plotClear(centre, q.width / 2, q.depth / 2, 45)) continue;
+            // A farm follows the land: nothing levels a quarter section.
             city.claimSite(quarter, centre,
                 regenerateLots: false,
                 checkAccess: false,
-                facing: Vec2(dx, 0));
+                facing: Vec2(dx, 0),
+                graded: false);
           }
           continue;
         case SprawlUse.residential:
@@ -1207,6 +1209,8 @@ class CityGenerator {
 
           final a0 = endAt(-1), a1 = endAt(1);
           void commit(double from, double to) {
+            // Draped, not graded: a suburb's streets and lots follow the
+            // land, the way the section builder's did.
             final id = city.commitRoad(
               [at(axis, t, from), at(axis, t, to)],
               RoadClass.street,
@@ -1214,6 +1218,7 @@ class CityGenerator {
               lotFrontageM: frontage,
               lotDepthM: depth,
               collector: collector,
+              graded: false,
             );
             if (id != null) out[id] = si;
           }
@@ -1258,7 +1263,10 @@ class CityGenerator {
             final p = Vec2(c.e + e, c.n + nn);
             if (!plotClear(p, site.width / 2, site.depth / 2, 45)) continue;
             city.claimSite(kStripMallSpec, p,
-                regenerateLots: false, checkAccess: false, facing: facing);
+                regenerateLots: false,
+                checkAccess: false,
+                facing: facing,
+                graded: false);
           }
         }
       }

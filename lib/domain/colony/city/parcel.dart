@@ -530,6 +530,13 @@ class RoadSpline {
   /// roundabout rather than a four-way stop — what a subdivision builds.
   final bool collector;
 
+  /// Whether the terrain is graded for it: a corridor cut and filled
+  /// through the relief, and its lots levelled. The downtown is; a suburb's
+  /// street follows the land and is draped on it — a twenty-mile sprawl
+  /// graded to the metre would be a hundred thousand permanent edits to
+  /// the ground for a difference nobody sees from the road.
+  final bool graded;
+
   const RoadSpline({
     required this.id,
     required this.controls,
@@ -541,6 +548,7 @@ class RoadSpline {
     this.lotDepthM,
     this.frontsLots,
     this.collector = false,
+    this.graded = true,
   });
 
   double get width => roadClass.width;
@@ -560,6 +568,7 @@ class RoadSpline {
     double? lotDepthM,
     bool? frontsLots,
     bool? collector,
+    bool? graded,
   }) =>
       RoadSpline(
         id: id ?? this.id,
@@ -572,6 +581,7 @@ class RoadSpline {
         lotDepthM: lotDepthM ?? this.lotDepthM,
         frontsLots: frontsLots ?? this.frontsLots,
         collector: collector ?? this.collector,
+        graded: graded ?? this.graded,
       );
 
   /// Points along the curve, spaced at most [stepM] apart.
@@ -754,6 +764,11 @@ class Parcel {
   /// a quarry or a solar farm ignore the street pattern entirely.
   final bool manual;
 
+  /// Whether the ground is levelled for it. A downtown lot is cut into a
+  /// pad; a suburb's lot, a farm's field, follows the land. See
+  /// [RoadSpline.graded], which an auto lot inherits from its street.
+  final bool graded;
+
   const Parcel({
     required this.id,
     required this.polygon,
@@ -762,6 +777,7 @@ class Parcel {
     this.sideStreet,
     this.use = ParcelUse.unzoned,
     this.manual = false,
+    this.graded = true,
   });
 
   /// The largest rectangle CENTRED on the centroid and aligned to the frontage
@@ -971,6 +987,7 @@ class Parcel {
         sideStreet: sideStreet,
         use: use ?? this.use,
         manual: manual,
+        graded: graded,
       );
 }
 

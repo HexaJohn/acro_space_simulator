@@ -104,15 +104,27 @@ void main() {
         lotFrontageM: 21, lotDepthM: 33, frontsLots: true, collector: true);
     sim.commitRoad(const [Vec2(-300, 400), Vec2(300, 400)], RoadClass.avenue,
         frontsLots: false);
+    sim.commitRoad(const [Vec2(-300, 800), Vec2(300, 800)], RoadClass.street,
+        graded: false);
     final back = CitySim.fromJson(sim.toJson(), bodies: bodies);
     final r0 = back.layout.roads.firstWhere((r) => r.id == 'r0');
     final r1 = back.layout.roads.firstWhere((r) => r.id == 'r1');
+    final r2 = back.layout.roads.firstWhere((r) => r.id == 'r2');
     expect(r0.lotFrontageM, 21);
     expect(r0.lotDepthM, 33);
     expect(r0.collector, isTrue);
     expect(r0.platsLots, isTrue);
+    expect(r0.graded, isTrue);
     expect(r1.platsLots, isFalse);
     expect(r1.frontsLots, isFalse);
     expect(back.layout.autoParcels.where((p) => p.roadId == 'r1'), isEmpty);
+    // A draped street stays draped, and so do its lots.
+    expect(r2.graded, isFalse);
+    final draped = back.layout.autoParcels.where((p) => p.roadId == 'r2');
+    expect(draped, isNotEmpty);
+    expect(draped.every((p) => !p.graded), isTrue);
+    expect(back.layout.autoParcels
+        .where((p) => p.roadId == 'r0')
+        .every((p) => p.graded), isTrue);
   });
 }
