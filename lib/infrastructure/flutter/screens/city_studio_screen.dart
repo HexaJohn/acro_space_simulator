@@ -56,6 +56,7 @@ import '../../flutter_scene/coord_convert.dart';
 import '../../flutter_scene/debug_camera_rig.dart';
 import '../../flutter_scene/graphics_quality.dart';
 import '../../flutter_scene/lod_probe_camera.dart';
+import 'city_plat_view.dart';
 import '../../flutter_scene/terrain/terrain_nodes.dart';
 import 'app_theme.dart';
 import 'city_model.dart';
@@ -334,6 +335,14 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   /// The last build, phase by phase and by cost — what the console printed,
   /// kept for the perf panel.
   List<String> _buildLog = const [];
+
+  /// The plat view (M): the colony flat, in its own metres, drawn from the
+  /// layout alone. While it is up the 3D streamers rest, and a build stops
+  /// after the generator — the ground cut and the frame drape, minutes on a
+  /// big colony, wait in [_pendingFrame] until the view goes 3D.
+  bool _view2D = false;
+  final CityPlatCamera _platCam = CityPlatCamera();
+  ({CitySim sim, StarSystem system, Stopwatch sw})? _pendingFrame;
 
   /// Wall clock of the running build, so the readout is a measurement rather
   /// than the estimate it used to be.
@@ -683,6 +692,51 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     ];
     debugPrint('city build summary:\n  ${_buildLog.join('\n  ')}');
 
+    if (_view2D) {
+      // The plat is on screen now. The ground cut and the frame drape wait
+      // until the view goes 3D (see [_toggleView2D]).
+      if (!mounted) return;
+      sw.stop();
+      _genClock.stop();
+      setState(() {
+        _progress = null;
+        _fault = null;
+        _sim = sim;
+        _busy = false;
+        _pendingFrame = (sim: sim, system: system, sw: sw);
+        _platCam.fit(math.max(2000.0, _spec.extentM * 1.6));
+        _lastStats = '${sim.cityLat.toStringAsFixed(1)}°, '
+            '${sim.cityLon.toStringAsFixed(1)}° · '
+            '${sw.elapsedMilliseconds} ms · '
+            '${sim.layout.roads.length} roads · '
+            '${sim.layout.parcels.length} lots · '
+            '${sim.parcelBuildings.length} buildings · '
+            'frame not draped yet (switch to 3D)';
+      });
+      return;
+    }
+    await _finishFrame(sim, system, sw);
+  }
+
+  /// Switch between the plat and the scene. Going 3D with a build that
+  /// stopped after the generator finishes it now: the ground cut and the
+  /// frame drape it skipped.
+  Future<void> _toggleView2D() async {
+    setState(() => _view2D = !_view2D);
+    final pending = _pendingFrame;
+    if (_view2D || pending == null || _busy) return;
+    _pendingFrame = null;
+    setState(() => _busy = true);
+    await Future<void>.delayed(const Duration(milliseconds: 16));
+    if (!mounted) return;
+    await _finishFrame(pending.sim, pending.system, pending.sw);
+  }
+
+  /// The second half of a build: the ground cut into, the frame captured
+  /// (draped onto that ground), the camera anchored on the colony.
+  Future<void> _finishFrame(
+      CitySim sim, StarSystem system, Stopwatch sw) async {
+    const buildShare = 0.13;
     setState(() =>
         _progress = (phase: 'cutting the ground', fraction: buildShare));
     await Future<void>.delayed(Duration.zero);
@@ -736,8 +790,9 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     // Calibrate: what this build ACTUALLY cost, per lot squared. Not from a
     // slow-mode run — those are paced on purpose, and a calibration taken
     // from one would promise minutes for a build that takes seconds.
+    // Nor from a build that waited in the plat view: its clock stopped.
     final lots = sim.layout.parcels.length.toDouble();
-    if (lots > 20 && !_slowBuild) {
+    if (lots > 20 && !_slowBuild && sw.isRunning) {
       _msPerLotSq = sw.elapsedMilliseconds / (lots * lots);
     }
 
@@ -1165,12 +1220,24 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       accentColor: AppTheme.accent2,
       actions: [
         IconButton(
+          icon: Icon(_view2D ? Icons.view_in_ar : Icons.map,
+              color: _view2D ? AppTheme.accent2 : AppTheme.text),
+          tooltip: _view2D
+              ? 'Back to the 3D scene  (M)'
+                  '${_pendingFrame != null ? ' — drapes the frame first' : ''}'
+              : 'The plat, flat  (M) — drag to pan, wheel to zoom. A build '
+                  'made here skips the drape until you come back.',
+          onPressed: _busy ? null : _toggleView2D,
+        ),
+        IconButton(
           icon: Icon(_firstPerson ? Icons.videocam : Icons.directions_walk,
               color: _firstPerson ? AppTheme.accent2 : AppTheme.text),
           tooltip: _firstPerson
               ? 'Back to the orbit camera  (G)'
               : 'Walk the streets  (G) — WASD, shift to run, drag to look',
-          onPressed: _sim == null ? null : () => setState(_toggleFirstPerson),
+          onPressed: _sim == null || _snap == null || _view2D
+              ? null
+              : () => setState(_toggleFirstPerson),
         ),
         IconButton(
           icon: Icon(_panel ? Icons.chevron_right : Icons.tune,
@@ -1227,7 +1294,8 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     {
         final snap = _snap;
         final cam = _camera();
-        if (snap != null) {
+        // In the plat view the streamers rest: nothing 3D is on screen.
+        if (snap != null && !_view2D) {
           // Advance the frame's clock so the traffic pass has something to
           // move against — it derives vehicle positions from the epoch.
           // Then turn the sun: everything downstream — terrain shading, the
@@ -1378,13 +1446,26 @@ class _CityStudioScreenState extends State<CityStudioScreen>
                   _viewportW = math.max(1, constraints.maxWidth);
                   return Transform.flip(
                     flipX: true,
-                    child: fs.SceneView(scene, camera: cam),
+                    child: _view2D
+                        ? const SizedBox.expand()
+                        : fs.SceneView(scene, camera: cam),
                   );
                 }),
               ),
             ),
             ),
           ),
+          // The plat, on top of the scene's pointer surface: an opaque hit
+          // target, so drags and the wheel are its pan and zoom, not the
+          // orbit camera's underneath.
+          if (_view2D)
+            Positioned.fill(
+              child: CityPlatView(
+                sim: _sim,
+                camera: _platCam,
+                extentM: _spec.extentM,
+              ),
+            ),
           if (_sim == null)
             const Center(
               child: Text('Set the knobs, then GENERATE.',
@@ -1685,6 +1766,10 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     }
     if (e is KeyDownEvent && e.logicalKey == LogicalKeyboardKey.keyF) {
       _toggleRigFreeze();
+      return KeyEventResult.handled;
+    }
+    if (e is KeyDownEvent && e.logicalKey == LogicalKeyboardKey.keyM) {
+      _toggleView2D();
       return KeyEventResult.handled;
     }
     if (e is KeyDownEvent &&
@@ -2174,11 +2259,10 @@ class _CityStudioScreenState extends State<CityStudioScreen>
           ),
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 4),
-            child: Row(children: [
-              const Expanded(
-                  child:
-                      Text('Tiles outside the view', style: AppTheme.body)),
-              Wrap(spacing: 6, children: [
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('Tiles outside the view', style: AppTheme.body),
+              const SizedBox(height: 4),
+              Wrap(spacing: 6, runSpacing: 4, children: [
                 for (final v in CityOutOfView.values)
                   ChoiceChip(
                     label: Text(v.label,

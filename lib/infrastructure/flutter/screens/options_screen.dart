@@ -304,11 +304,17 @@ class _OptionsScreenState extends State<OptionsScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
+            // Label and chips wrap as one flow, so a narrow window stacks
+            // them rather than overflowing.
+            Wrap(
+              spacing: 12,
+              runSpacing: 4,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
-                Expanded(child: Text(label, style: AppTheme.body)),
+                Text(label, style: AppTheme.body),
                 Wrap(
                   spacing: 6,
+                  runSpacing: 4,
                   children: [
                     for (final v in values)
                       ChoiceChip(

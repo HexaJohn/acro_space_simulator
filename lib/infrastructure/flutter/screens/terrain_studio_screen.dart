@@ -1601,11 +1601,10 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
           ),
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 4),
-            child: Row(children: [
-              const Expanded(
-                  child:
-                      Text('Tiles outside the view', style: AppTheme.body)),
-              Wrap(spacing: 6, children: [
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('Tiles outside the view', style: AppTheme.body),
+              const SizedBox(height: 4),
+              Wrap(spacing: 6, runSpacing: 4, children: [
                 for (final v in CityOutOfView.values)
                   ChoiceChip(
                     label: Text(v.label,
