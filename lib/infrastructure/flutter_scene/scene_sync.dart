@@ -13,14 +13,15 @@ import 'package:vector_math/vector_math.dart' as vm;
 import '../../adapters/presenters/camera_view.dart';
 import '../../application/snapshot/planner_overlay.dart';
 import '../../application/snapshot/world_snapshot.dart';
+import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
-import '../../domain/terrain/terrain_lod.dart' show ViewCone;
 import '../flutter/texture_cache.dart';
 import 'atmosphere_nodes.dart';
 import 'graphics_quality.dart';
 import 'body_nodes.dart';
 import 'cloud_nodes.dart';
 import 'coord_convert.dart';
+import 'debug_camera_rig.dart';
 import 'environment_baker.dart';
 import 'exhaust_nodes.dart';
 import 'gravity_grid_nodes.dart';
@@ -198,28 +199,73 @@ class SceneSync {
     // fields are written by SimulationView the same frame it moves the anchor.
     _walker.update();
     mark('atmo+rings');
-    // View culling (Options > Graphics quality): the camera's view cone,
-    // from its pixel budget and the viewport. Perspective only — an ortho
-    // camera has parallel rays and a placeholder focal length.
-    final viewCone = GraphicsQuality.terrainFrustumCull &&
-            camera != null &&
-            camera.usesDistanceCull &&
-            viewport != null &&
-            viewport.height > 0 &&
-            camera.focalPx > 0
-        ? ViewCone.forViewport(
-            forward: camera.forward,
-            focalPx: camera.focalPx,
-            widthPx: viewport.width,
-            heightPx: viewport.height,
-            marginRad: TerrainNodes.frustumMarginRad,
-          )
-        : null;
+    // The lens terrain selects and culls through: the camera, or — once the
+    // debug panel has pinned it — [lensRig]'s frozen copy, re-seated on the
+    // terrain body's current pose so the pin stays over the ground. The
+    // view cone (Options > Graphics quality) follows the same lens.
+    // Perspective only for the live numbers: an ortho camera has parallel
+    // rays and a placeholder focal length.
+    final lensBodyId = _terrain.activeBodyId;
+    final lensBody = lensBodyId == null ? null : snap.bodies[lensBodyId];
+    _lensBodyCentre = lensBody == null
+        ? Vector3.zero
+        : Vector3(lensBody.px, lensBody.py, lensBody.pz);
+    _lensBodyQuat = lensBody == null
+        ? Quaternion.identity
+        : Quaternion(lensBody.qw, lensBody.qx, lensBody.qy, lensBody.qz);
+    final perspective = camera != null &&
+        camera.usesDistanceCull &&
+        viewport != null &&
+        viewport.height > 0 &&
+        camera.focalPx > 0;
+    final liveFov = perspective
+        ? 2 * math.atan(viewport.height * 0.5 / camera.focalPx)
+        : 0.8;
+    final liveAspect = perspective ? viewport.width / viewport.height : 1.0;
+    if (lensFreezeRequested) {
+      lensFreezeRequested = false;
+      if (perspective) {
+        lensRig.freeze(
+          eyeWorld: origin.focusWorld + camera.eyeOffset,
+          forwardWorld: camera.forward,
+          upWorld: camera.up,
+          focalPx: camera.focalPx,
+          fovRadiansY: liveFov,
+          aspect: liveAspect,
+          bodyCentreWorld: _lensBodyCentre,
+          bodyQuat: _lensBodyQuat,
+        );
+      }
+    }
+    SceneCamera? lens = camera;
+    var cameraEye = camera?.eyeOffset ?? Vector3.zero;
+    if (lensRig.frozen) {
+      final probe = lensRig.probe(
+        liveEyeRel: cameraEye,
+        liveForward: camera?.forward ?? Vector3.unitX,
+        liveFocalPx: camera?.focalPx ?? 1,
+        focusWorld: origin.focusWorld,
+        bodyCentreWorld: _lensBodyCentre,
+        bodyQuat: _lensBodyQuat,
+      );
+      lens = probe;
+      cameraEye = probe.eyeRel;
+    }
+    final viewCone =
+        GraphicsQuality.terrainFrustumCull && (perspective || lensRig.frozen)
+            ? lensRig.viewCone(
+                liveForward: camera?.forward ?? Vector3.unitX,
+                liveFovRadiansY: liveFov,
+                liveAspect: liveAspect,
+                marginRad: TerrainNodes.frustumMarginRad,
+                bodyQuat: _lensBodyQuat,
+              )
+            : null;
     _terrain.update(
       snap,
       origin,
-      cameraEye: camera?.eyeOffset ?? Vector3.zero,
-      camera: camera,
+      cameraEye: cameraEye,
+      camera: lens,
       viewCone: viewCone,
       focusBodyId: focusBodyId,
       focusVesselId: focusVesselId,
@@ -318,6 +364,24 @@ class SceneSync {
   static bool autoExposure = true;
   static double manualExposure = 1.0;
 
+  /// The LOD-lens debug rig (debug panel: "LOD lens"): pin the lens terrain
+  /// selects and culls through where the camera stands, keep flying, and see
+  /// the pinned lens drawn. Static like [autoExposure] so the panel reaches
+  /// it without a handle on this instance.
+  static final DebugCameraRig lensRig = DebugCameraRig();
+
+  /// Set by the panel; consumed by the next [update], which has the lens.
+  static bool lensFreezeRequested = false;
+
+  /// Draw the frozen lens (frustum, axis, eye cross).
+  static bool showLensRig = true;
+  DebugCameraGizmo? _lensGizmo;
+
+  /// The terrain body's pose at the last [update] — the frame the rig keeps
+  /// its pin in, and what [updateForCamera] re-seats the drawing with.
+  Vector3 _lensBodyCentre = Vector3.zero;
+  Quaternion _lensBodyQuat = Quaternion.identity;
+
   /// Clamp on the AUTO target. Defaults bracket exactly what the heuristic
   /// could already produce (glare floor 1.0*0.55, night ceiling 1.0+2.2), so
   /// stock behaviour is unchanged; tightening them tames the adaptation.
@@ -388,8 +452,28 @@ class SceneSync {
 
   /// Rebuild the camera-facing line strips for this frame's camera + viewport
   /// (copy-on-write; skips when camera, viewport, and content are unchanged).
-  void updateForCamera(fs.PerspectiveCamera camera, ui.Size viewport) =>
-      _lines.updateForCamera(camera, viewport);
+  void updateForCamera(fs.PerspectiveCamera camera, ui.Size viewport) {
+    _lines.updateForCamera(camera, viewport);
+    // The frozen lens, drawn for the render camera. Frustum length reaches
+    // past the focus from wherever the pin is, so it reads from orbit and
+    // from the ground alike.
+    var farM = 2000.0;
+    if (lensRig.frozen) {
+      final eyeW = lensRig.frozenEyeWorld(
+          bodyCentreWorld: _lensBodyCentre, bodyQuat: _lensBodyQuat);
+      farM = ((eyeW - origin.focusWorld).length * 1.2).clamp(300.0, 2.0e5);
+    }
+    (_lensGizmo ??= DebugCameraGizmo(scene)).sync(
+      lensRig,
+      focusWorld: origin.focusWorld,
+      renderCamera: camera,
+      viewport: viewport,
+      visible: showLensRig,
+      bodyCentreWorld: _lensBodyCentre,
+      bodyQuat: _lensBodyQuat,
+      farM: farM,
+    );
+  }
 
   /// Intensity tuned against the tonemapper: 5.0 blows the lit hemisphere
   /// out to white (oceans wash pale); ~2.2 keeps the albedo readable across

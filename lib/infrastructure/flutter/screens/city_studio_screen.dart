@@ -53,6 +53,8 @@ import '../../flutter_scene/city/street_furniture.dart';
 import '../../flutter_scene/city/scale_rig.dart';
 import '../../../domain/scatter/mesh_builder.dart';
 import '../../flutter_scene/coord_convert.dart';
+import '../../flutter_scene/debug_camera_rig.dart';
+import '../../flutter_scene/graphics_quality.dart';
 import '../../flutter_scene/lod_probe_camera.dart';
 import '../../flutter_scene/terrain/terrain_nodes.dart';
 import 'app_theme.dart';
@@ -235,6 +237,13 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   /// focal length needs it, same as the terrain studio.
   double _viewportH = 600;
   double _viewportW = 800;
+
+  /// The debug rig (shared with the terrain studio): F pins the lens the
+  /// streamer selects and culls through, the camera flies on, and the
+  /// pinned lens is drawn as a frustum.
+  final DebugCameraRig _rig = DebugCameraRig();
+  DebugCameraGizmo? _rigGizmo;
+  bool _showLensRig = true;
 
   /// The building last clicked on, with where the click landed, or null.
   ({String site, Parcel parcel, CityBuildingSpec spec, Offset at})? _picked;
@@ -1164,6 +1173,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   Widget _sceneStack(fs.Scene scene, double epoch) {
     {
         final snap = _snap;
+        final cam = _camera();
         if (snap != null) {
           // Advance the frame's clock so the traffic pass has something to
           // move against — it derives vehicle positions from the epoch.
@@ -1181,17 +1191,37 @@ class _CityStudioScreenState extends State<CityStudioScreen>
           // island, so the colony sat on a cliff of detail with root-coarse
           // ground beyond it, and the streamer's zoom probe never saw the
           // camera move.
-          final eyeM = _cameraEyeM();
-          final viewFwd = _firstPerson
-              ? _walkerLook()
-              : (eyeM.length > 1 ? eyeM.normalized * -1 : Vector3.unitZ);
+          //
+          // The rig sits between: frozen (F), it hands back the pinned lens
+          // instead of the live one, and the camera is free to go and look
+          // at what that lens selected and culled.
+          final lens = _liveLens();
+          final bodyQuat = _bodyQuatOf(frame);
+          final probe = _rig.probe(
+            liveEyeRel: lens.eyeRel,
+            liveForward: lens.forward,
+            liveFocalPx: _focalPx,
+            focusWorld: _origin.focusWorld,
+            bodyCentreWorld: _bodyCentreWorld,
+            bodyQuat: bodyQuat,
+          );
+          final cone = !GraphicsQuality.terrainFrustumCull
+              ? null
+              : _rig.viewCone(
+                  liveForward: lens.forward,
+                  liveFovRadiansY: _firstPerson ? 0.9 : 0.8,
+                  liveAspect: _viewportW / _viewportH,
+                  marginRad: TerrainNodes.frustumMarginRad,
+                  bodyQuat: bodyQuat,
+                );
           _phase(
               'terrain',
               () => _terrain!.update(
                     frame,
                     _origin,
-                    cameraEye: eyeM,
-                    camera: LodProbeCamera(eyeM, _focalPx, viewFwd),
+                    cameraEye: probe.eyeRel,
+                    camera: probe,
+                    viewCone: cone,
                     focusBodyId: _bodyIdOfFrame(frame),
                     starWorld: starWorld,
                   ));
@@ -1214,6 +1244,29 @@ class _CityStudioScreenState extends State<CityStudioScreen>
               () => _atmo!.update(frame, _origin,
                   cameraEye: _cameraEyeM(), starWorld: starWorld));
           _phase('scale rig', () => _syncRig(scene));
+          // The frozen lens, drawn for the RENDER camera; frustum length
+          // scales with the frozen eye's height so it reads at any range.
+          if (_rigGizmo?.scene != scene) _rigGizmo = DebugCameraGizmo(scene);
+          var farM = 2000.0;
+          if (_rig.frozen) {
+            final eyeW = _rig.frozenEyeWorld(
+                bodyCentreWorld: _bodyCentreWorld, bodyQuat: bodyQuat);
+            final altM = (eyeW - _bodyCentreWorld).length -
+                (_anchorWorld - _bodyCentreWorld).length;
+            farM = (altM.abs() * 3).clamp(300.0, 40000.0);
+          }
+          _phase(
+              'lens rig',
+              () => _rigGizmo!.sync(
+                    _rig,
+                    focusWorld: _origin.focusWorld,
+                    renderCamera: cam,
+                    viewport: Size(_viewportW, _viewportH),
+                    visible: _showLensRig,
+                    bodyCentreWorld: _bodyCentreWorld,
+                    bodyQuat: bodyQuat,
+                    farM: farM,
+                  ));
         }
 
         return Stack(children: [
@@ -1264,7 +1317,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
                   _viewportW = math.max(1, constraints.maxWidth);
                   return Transform.flip(
                     flipX: true,
-                    child: fs.SceneView(scene, camera: _camera()),
+                    child: fs.SceneView(scene, camera: cam),
                   );
                 }),
               ),
@@ -1515,9 +1568,62 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   /// WASD while on foot. Held keys are tracked rather than acted on directly,
   /// so movement happens on the TICK — a key-repeat rate is not a frame rate,
   /// and driving the walker off one makes it stutter.
+  /// What the streamers look through this frame when the rig is live: the
+  /// probe eye (anchor-relative), the view direction, and screen up — the
+  /// same numbers [_camera] renders with, so a freeze captures the lens in
+  /// use exactly.
+  ({Vector3 eyeRel, Vector3 forward, Vector3 up}) _liveLens() {
+    final eyeM = _cameraEyeM();
+    if (_firstPerson) {
+      final radial = (_anchorWorld + eyeM) - _bodyCentreWorld;
+      return (
+        eyeRel: eyeM,
+        forward: _walkerLook(),
+        up: radial.length < 1 ? _upWorld : radial.normalized,
+      );
+    }
+    return (
+      eyeRel: eyeM,
+      forward: eyeM.length > 1 ? eyeM.normalized * -1 : Vector3.unitZ,
+      up: _upWorld,
+    );
+  }
+
+  Quaternion _bodyQuatOf(WorldSnapshot frame) {
+    final b = frame.bodies[_bodyIdOfFrame(frame)];
+    return b == null
+        ? Quaternion.identity
+        : Quaternion(b.qw, b.qx, b.qy, b.qz);
+  }
+
+  /// F: pin the streamer's lens where it stands, or let it go.
+  void _toggleRigFreeze() {
+    if (_rig.frozen) {
+      setState(_rig.release);
+      return;
+    }
+    final snap = _snap;
+    if (snap == null) return;
+    final lens = _liveLens();
+    setState(() => _rig.freeze(
+          eyeWorld: _anchorWorld + lens.eyeRel,
+          forwardWorld: lens.forward,
+          upWorld: lens.up,
+          focalPx: _focalPx,
+          fovRadiansY: _firstPerson ? 0.9 : 0.8,
+          aspect: _viewportW / _viewportH,
+          bodyCentreWorld: _bodyCentreWorld,
+          bodyQuat: _bodyQuatOf(snap),
+        ));
+  }
+
   KeyEventResult _onKey(FocusNode node, KeyEvent e) {
     if (e is KeyDownEvent && e.logicalKey == LogicalKeyboardKey.keyG) {
       setState(_toggleFirstPerson);
+      return KeyEventResult.handled;
+    }
+    if (e is KeyDownEvent && e.logicalKey == LogicalKeyboardKey.keyF) {
+      _toggleRigFreeze();
       return KeyEventResult.handled;
     }
     if (e is KeyDownEvent &&
@@ -1656,6 +1762,14 @@ class _CityStudioScreenState extends State<CityStudioScreen>
                 : AppTheme.textDim),
         row('  near brushes', '${TerrainNodes.counters['nearBrushes'] ?? 0}',
             colour: AppTheme.textDim),
+        row(
+            '  out of view',
+            GraphicsQuality.terrainFrustumCull
+                ? '${TerrainNodes.counters['outOfView'] ?? 0} leaves coarsened'
+                : 'culling off',
+            colour: AppTheme.textDim),
+        row('  lod camera', _rig.frozen ? 'FROZEN  (F releases)' : 'live',
+            colour: _rig.frozen ? AppTheme.warn : AppTheme.textDim),
         row('  loading', '${TerrainNodes.counters['gridPatches'] ?? 0}',
             colour: AppTheme.textDim),
         // Tiles that failed their band check often enough to be given up on.
@@ -1943,6 +2057,44 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             activeThumbColor: AppTheme.accent2,
             title: const Text('Terrain', style: AppTheme.body),
             onChanged: (v) => setState(() => TerrainNodes.enabled = v),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            value: _rig.frozen,
+            activeThumbColor: AppTheme.warn,
+            title: const Text('Freeze LOD camera  (F)', style: AppTheme.body),
+            subtitle: Text(
+                'Pin the lens the terrain streamer selects and culls through '
+                'where the camera stands now, then fly the camera away to '
+                'watch what it chose from outside.',
+                style: AppTheme.dim.copyWith(fontSize: 11)),
+            onChanged: (_) => _toggleRigFreeze(),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            value: _showLensRig,
+            activeThumbColor: AppTheme.accent2,
+            title: const Text('Draw frozen camera', style: AppTheme.body),
+            subtitle: Text(
+                'Frustum (cyan), view axis (yellow) and eye cross of the '
+                'frozen lens.',
+                style: AppTheme.dim.copyWith(fontSize: 11)),
+            onChanged: (v) => setState(() => _showLensRig = v),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            value: GraphicsQuality.terrainFrustumCull,
+            activeThumbColor: AppTheme.accent2,
+            title: const Text('Terrain view culling', style: AppTheme.body),
+            subtitle: Text(
+                'Chunks outside the lens\'s view cone select coarser (never '
+                'vanish). Same switch as Options > Graphics quality.',
+                style: AppTheme.dim.copyWith(fontSize: 11)),
+            onChanged: (v) =>
+                setState(() => GraphicsQuality.terrainFrustumCull = v),
           ),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,

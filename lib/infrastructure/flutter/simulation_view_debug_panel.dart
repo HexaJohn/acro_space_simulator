@@ -483,6 +483,39 @@ extension SimulationViewDebugPanel on _SimulationViewState {
               }),
             ),
           ),
+          // The LOD-lens debug rig: pin the lens terrain selects and culls
+          // through where the camera stands, fly on, and see it drawn — the
+          // horizon cull, the view cone's coarse band and the resident set,
+          // from outside. Takes effect on the next scene sync.
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
+            child: _atmoButton(
+              'LOD lens: '
+              '${SceneSync.lensRig.frozen ? 'FROZEN (tap to release)' : 'live (tap to freeze)'}'
+              '${_renderBackend == RenderBackend.flutterScene ? '' : ' (3D only)'}',
+              SceneSync.lensRig.frozen
+                  ? const Color(0xFFFFB347)
+                  : const Color(0xFF7FB0E0),
+              () => rebuild(() {
+                if (SceneSync.lensRig.frozen) {
+                  SceneSync.lensRig.release();
+                } else {
+                  SceneSync.lensFreezeRequested = true;
+                }
+              }),
+            ),
+          ),
+          if (SceneSync.lensRig.frozen)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
+              child: _atmoButton(
+                'Frozen lens drawing: '
+                '${SceneSync.showLensRig ? 'shown' : 'hidden'}',
+                const Color(0xFF7FB0E0),
+                () => rebuild(
+                    () => SceneSync.showLensRig = !SceneSync.showLensRig),
+              ),
+            ),
           // Tilted-view cull zoom threshold (tap to cycle).
           InkWell(
             onTap: () => rebuild(() {
