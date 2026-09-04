@@ -1232,31 +1232,12 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
     final field = _groundField;
     if (b == null || field == null) return;
     final quat = Quaternion(b.qw, b.qx, b.qy, b.qz);
-    // Rings sit around the lens that SELECTS: the focus while the rig is
-    // live, the frozen probe's ground sub-point once it is frozen — so a
-    // pinned lens shows its own transition radii next to its frustum.
-    var (east, north) = _tangentFrame();
-    var upAt = _upWorld;
-    var centreOffset = Vector3.zero;
-    var focal = _focalPx;
-    final pose = _rig.pose;
-    if (pose != null) {
-      final eyeW = _rig.frozenEyeWorld(
-          bodyCentreWorld: _bodyCentreWorld, bodyQuat: quat);
-      final radial = eyeW - _bodyCentreWorld;
-      if (radial.length > 1) {
-        upAt = radial.normalized;
-        final seed = upAt.z.abs() < 0.9 ? Vector3.unitZ : Vector3.unitX;
-        east = upAt.cross(seed).normalized;
-        north = upAt.cross(east);
-        // The sub-point at the anchor's ground radius; drape() re-seats it
-        // on the real ground anyway.
-        centreOffset = _bodyCentreWorld +
-            upAt * (_anchorWorld - _bodyCentreWorld).length -
-            _anchorWorld;
-      }
-      focal = pose.focalPx;
-    }
+    final (east, north) = _tangentFrame();
+    // The rings stay on the focal point whatever the rig does — pressing F
+    // must move nothing on the ground. What the pin changes is the pixel
+    // budget the radii are derived from: the frozen lens's, not the live
+    // camera's, so zooming the free camera no longer re-spaces them.
+    final focal = _rig.pose?.focalPx ?? _focalPx;
 
     // Anchor-relative metres, re-seated on the real ground plus a lift.
     Vector3 drape(Vector3 offset, double liftM) {
@@ -1282,11 +1263,11 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
     // The marker: a mast at the focus, sized to the view.
     final mastH = (_distanceM * 0.05).clamp(3.0, 500.0);
     final mastW = mastH * 0.02;
-    final base = drape(centreOffset, 0);
+    final base = drape(Vector3.zero, 0);
     for (final axis in [east, north]) {
       final w = axis * mastW;
-      quadBothSides(base - w, base + w, base + w + upAt * mastH,
-          base - w + upAt * mastH);
+      quadBothSides(base - w, base + w, base + w + _upWorld * mastH,
+          base - w + _upWorld * mastH);
     }
 
     // One ring per level: the distance at which a level-L chunk projects
@@ -1302,9 +1283,7 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
         final a0 = s * 2 * math.pi / segs;
         final a1 = (s + 1) * 2 * math.pi / segs;
         Vector3 rim(double a, double d) =>
-            centreOffset +
-            east * (math.cos(a) * d) +
-            north * (math.sin(a) * d);
+            east * (math.cos(a) * d) + north * (math.sin(a) * d);
         final lift = 2.0 + dL * 0.001;
         quadBothSides(
           drape(rim(a0, dL - halfW), lift),
@@ -1565,9 +1544,9 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
             subtitle: Text(
                 'Pin the lens the streamer selects and culls through where '
                 'the camera stands now, then fly the camera away to watch '
-                'what it chose — the horizon cull, the LOD rings, the '
-                'resident set — from outside. LOD-from-focus is baked into '
-                'the pin.',
+                'what it chose — the horizon cull, the resident set — from '
+                'outside. The focal point and rings stay put; LOD-from-focus '
+                'is baked into the pin.',
                 style: AppTheme.dim.copyWith(fontSize: 11)),
             onChanged: (_) => _toggleRigFreeze(),
           ),
