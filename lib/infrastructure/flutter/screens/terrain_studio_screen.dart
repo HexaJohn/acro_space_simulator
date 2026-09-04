@@ -49,7 +49,7 @@ import '../../flutter_scene/atmosphere_nodes.dart';
 import '../../flutter_scene/city/city_materials.dart';
 import '../../flutter_scene/city/city_nodes.dart';
 import '../../flutter_scene/coord_convert.dart';
-import '../../flutter_scene/lod_probe_camera.dart';
+import '../../flutter_scene/debug_camera_rig.dart';
 import '../../flutter_scene/terrain/terrain_nodes.dart';
 import 'app_theme.dart';
 
@@ -158,6 +158,13 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
   static const double _walkSpeedMs = 2.0;
   static const double _runSpeedMs = 8.0;
   final Set<LogicalKeyboardKey> _held = {};
+
+  /// The debug rig: freeze the lens the streamer selects and culls through
+  /// (F), keep flying the camera, and draw the frozen lens as a frustum.
+  final DebugCameraRig _rig = DebugCameraRig();
+  DebugCameraGizmo? _rigGizmo;
+  bool _showRig = true;
+  double _viewportW = 800;
 
   // ---- Frame + timings ----------------------------------------------------
   final ValueNotifier<double> _epoch = ValueNotifier<double>(0);
@@ -897,10 +904,64 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
     }
   }
 
+  /// What the streamers look through this frame when the rig is live: the
+  /// probe eye (focus-relative; the focal point itself under LOD-from-focus),
+  /// the view direction, and screen up — the same numbers [_camera] renders
+  /// with, so a freeze captures exactly the lens in use.
+  ({Vector3 eyeRel, Vector3 forward, Vector3 up}) _liveLens() {
+    final eyeM = _cameraEyeM();
+    final eyeRel = _lodFromFocus ? Vector3.zero : eyeM;
+    if (_firstPerson) {
+      final radial = (_anchorWorld + eyeM) - _bodyCentreWorld;
+      return (
+        eyeRel: eyeRel,
+        forward: _walkerLook(),
+        up: radial.length < 1 ? _upWorld : radial.normalized,
+      );
+    }
+    return (
+      eyeRel: eyeRel,
+      forward: eyeM.length > 1 ? eyeM.normalized * -1 : Vector3.unitZ,
+      up: _upWorld,
+    );
+  }
+
+  Quaternion _bodyQuat(WorldSnapshot snap) {
+    final b = snap.bodies[_body];
+    return b == null
+        ? Quaternion.identity
+        : Quaternion(b.qw, b.qx, b.qy, b.qz);
+  }
+
+  /// F: pin the streamer's lens where it stands, or let it go.
+  void _toggleRigFreeze() {
+    if (_rig.frozen) {
+      setState(_rig.release);
+      return;
+    }
+    final snap = _snap;
+    if (snap == null) return;
+    final lens = _liveLens();
+    setState(() => _rig.freeze(
+          eyeWorld: _anchorWorld + lens.eyeRel,
+          forwardWorld: lens.forward,
+          upWorld: lens.up,
+          focalPx: _focalPx,
+          fovRadiansY: _firstPerson ? 0.9 : 0.8,
+          aspect: _viewportW / _viewportH,
+          bodyCentreWorld: _bodyCentreWorld,
+          bodyQuat: _bodyQuat(snap),
+        ));
+  }
+
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
     if (event is KeyDownEvent) {
       if (event.logicalKey == LogicalKeyboardKey.keyG && _snap != null) {
         setState(() => _firstPerson = !_firstPerson);
+        return KeyEventResult.handled;
+      }
+      if (event.logicalKey == LogicalKeyboardKey.keyF && _snap != null) {
+        _toggleRigFreeze();
         return KeyEventResult.handled;
       }
       _held.add(event.logicalKey);
@@ -1001,6 +1062,7 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
 
   Widget _sceneStack(fs.Scene scene, double epoch) {
     final snap = _snap;
+    final cam = _camera();
     if (snap != null) {
       final frame = _withSunTurned(snap.copyWithEpoch(epoch));
       final starWorld = _starWorld(frame);
@@ -1016,16 +1078,25 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
       // cliff at the edit-refine range and root-coarse beyond it. The probe
       // gives selection a real projection to budget against, and splitPx
       // (the slider below) is its whole personality.
-      final probeEye = _lodFromFocus ? Vector3.zero : _cameraEyeM();
-      final eyeM = _cameraEyeM();
-      final viewFwd = _firstPerson
-          ? _walkerLook()
-          : (eyeM.length > 1 ? eyeM.normalized * -1 : Vector3.unitZ);
+      //
+      // The rig sits between: frozen, it hands back the lens pinned by F
+      // instead of the live one, and the camera is free to go and look at
+      // what that lens selected.
+      final lens = _liveLens();
+      final bodyQuat = _bodyQuat(frame);
+      final probe = _rig.probe(
+        liveEyeRel: lens.eyeRel,
+        liveForward: lens.forward,
+        liveFocalPx: _focalPx,
+        focusWorld: _origin.focusWorld,
+        bodyCentreWorld: _bodyCentreWorld,
+        bodyQuat: bodyQuat,
+      );
       _terrain!.update(
         frame,
         _origin,
-        cameraEye: probeEye,
-        camera: LodProbeCamera(probeEye, _focalPx, viewFwd),
+        cameraEye: probe.eyeRel,
+        camera: probe,
         focusBodyId: _body,
         starWorld: starWorld,
       );
@@ -1037,6 +1108,27 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
       _atmo!.update(frame, _origin,
           cameraEye: _cameraEyeM(), starWorld: starWorld);
       _syncLodRings(scene);
+      // The frozen lens, drawn for the RENDER camera. Frustum length scales
+      // with the frozen eye's height so it reads at any altitude.
+      if (_rigGizmo?.scene != scene) _rigGizmo = DebugCameraGizmo(scene);
+      var farM = 2000.0;
+      if (_rig.frozen) {
+        final eyeW = _rig.frozenEyeWorld(
+            bodyCentreWorld: _bodyCentreWorld, bodyQuat: bodyQuat);
+        final altM = (eyeW - _bodyCentreWorld).length -
+            (_anchorWorld - _bodyCentreWorld).length;
+        farM = (altM.abs() * 3).clamp(300.0, 40000.0);
+      }
+      _rigGizmo!.sync(
+        _rig,
+        focusWorld: _origin.focusWorld,
+        renderCamera: cam,
+        viewport: Size(_viewportW, _viewportH),
+        visible: _showRig,
+        bodyCentreWorld: _bodyCentreWorld,
+        bodyQuat: bodyQuat,
+        farM: farM,
+      );
     }
 
     return Stack(children: [
@@ -1047,6 +1139,7 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
           child: LayoutBuilder(builder: (context, constraints) {
             final size = constraints.biggest;
             _viewportH = math.max(1, size.height);
+            _viewportW = math.max(1, size.width);
             return Listener(
               onPointerSignal: (e) {
                 if (e is PointerScrollEvent && !_firstPerson) {
@@ -1091,7 +1184,7 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
                             'Click the ground to use the active tool.',
                             style: AppTheme.dim,
                             textAlign: TextAlign.center))
-                    : fs.SceneView(scene, camera: _camera()),
+                    : fs.SceneView(scene, camera: cam),
                 ),
               ),
             );
@@ -1125,7 +1218,8 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
             '|${_firstPerson ? 1 : 0}'
             '|${(_anchorWorld.x / 5).round()},${(_anchorWorld.y / 5).round()},'
             '${(_anchorWorld.z / 5).round()}'
-            '|${(math.log(_distanceM) / math.ln2).round()}';
+            '|${(math.log(_distanceM) / math.ln2).round()}'
+            '|${identityHashCode(_rig.pose)}';
     if (key == _ringsKey) return;
     _ringsKey = key;
     for (final n in _ringNodes) {
@@ -1138,7 +1232,31 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
     final field = _groundField;
     if (b == null || field == null) return;
     final quat = Quaternion(b.qw, b.qx, b.qy, b.qz);
-    final (east, north) = _tangentFrame();
+    // Rings sit around the lens that SELECTS: the focus while the rig is
+    // live, the frozen probe's ground sub-point once it is frozen — so a
+    // pinned lens shows its own transition radii next to its frustum.
+    var (east, north) = _tangentFrame();
+    var upAt = _upWorld;
+    var centreOffset = Vector3.zero;
+    var focal = _focalPx;
+    final pose = _rig.pose;
+    if (pose != null) {
+      final eyeW = _rig.frozenEyeWorld(
+          bodyCentreWorld: _bodyCentreWorld, bodyQuat: quat);
+      final radial = eyeW - _bodyCentreWorld;
+      if (radial.length > 1) {
+        upAt = radial.normalized;
+        final seed = upAt.z.abs() < 0.9 ? Vector3.unitZ : Vector3.unitX;
+        east = upAt.cross(seed).normalized;
+        north = upAt.cross(east);
+        // The sub-point at the anchor's ground radius; drape() re-seats it
+        // on the real ground anyway.
+        centreOffset = _bodyCentreWorld +
+            upAt * (_anchorWorld - _bodyCentreWorld).length -
+            _anchorWorld;
+      }
+      focal = pose.focalPx;
+    }
 
     // Anchor-relative metres, re-seated on the real ground plus a lift.
     Vector3 drape(Vector3 offset, double liftM) {
@@ -1164,11 +1282,11 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
     // The marker: a mast at the focus, sized to the view.
     final mastH = (_distanceM * 0.05).clamp(3.0, 500.0);
     final mastW = mastH * 0.02;
-    final base = drape(Vector3.zero, 0);
+    final base = drape(centreOffset, 0);
     for (final axis in [east, north]) {
       final w = axis * mastW;
-      quadBothSides(base - w, base + w, base + w + _upWorld * mastH,
-          base - w + _upWorld * mastH);
+      quadBothSides(base - w, base + w, base + w + upAt * mastH,
+          base - w + upAt * mastH);
     }
 
     // One ring per level: the distance at which a level-L chunk projects
@@ -1176,7 +1294,7 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
     // diagnostic marker, not a survey.
     for (var level = 2; level <= 12; level++) {
       final rL = field.radius * 1.2 / math.pow(2, level);
-      final dL = rL * _focalPx / TerrainNodes.splitPx;
+      final dL = rL * focal / TerrainNodes.splitPx;
       if (dL < 10 || dL > 120000) continue;
       final halfW = math.max(dL * 0.006, 0.5);
       const segs = 64;
@@ -1184,7 +1302,9 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
         final a0 = s * 2 * math.pi / segs;
         final a1 = (s + 1) * 2 * math.pi / segs;
         Vector3 rim(double a, double d) =>
-            east * (math.cos(a) * d) + north * (math.sin(a) * d);
+            centreOffset +
+            east * (math.cos(a) * d) +
+            north * (math.sin(a) * d);
         final lift = 2.0 + dL * 0.001;
         quadBothSides(
           drape(rim(a0, dL - halfW), lift),
@@ -1247,6 +1367,8 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
         row('scene draws',
             '$_censusDraws  ($_censusInstances inst, $_censusNodes nodes)',
             colour: AppTheme.accent),
+        row('lod camera', _rig.frozen ? 'FROZEN  (F releases)' : 'live',
+            colour: _rig.frozen ? AppTheme.warn : AppTheme.textDim),
         const SizedBox(height: 6),
         row('terrain', '${ms(_terrainMs)} ms',
             colour: _terrainMs > 4 ? AppTheme.warn : AppTheme.text),
@@ -1433,6 +1555,33 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
                 'to see it whole.',
                 style: AppTheme.dim.copyWith(fontSize: 11)),
             onChanged: (v) => setState(() => _lodFromFocus = v),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            value: _rig.frozen,
+            activeThumbColor: AppTheme.warn,
+            title: const Text('Freeze LOD camera  (F)', style: AppTheme.body),
+            subtitle: Text(
+                'Pin the lens the streamer selects and culls through where '
+                'the camera stands now, then fly the camera away to watch '
+                'what it chose — the horizon cull, the LOD rings, the '
+                'resident set — from outside. LOD-from-focus is baked into '
+                'the pin.',
+                style: AppTheme.dim.copyWith(fontSize: 11)),
+            onChanged: (_) => _toggleRigFreeze(),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            value: _showRig,
+            activeThumbColor: AppTheme.accent2,
+            title: const Text('Draw frozen camera', style: AppTheme.body),
+            subtitle: Text(
+                'Frustum (cyan), view axis (yellow) and eye cross of the '
+                'frozen lens.',
+                style: AppTheme.dim.copyWith(fontSize: 11)),
+            onChanged: (v) => setState(() => _showRig = v),
           ),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
