@@ -844,10 +844,8 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       events: frame.events,
       terrainEdits: frame.terrainEdits,
       megastructures: frame.megastructures,
-      sprawlSections: frame.sprawlSections,
       sprawlRoads: frame.sprawlRoads,
       sprawlNodes: frame.sprawlNodes,
-      sprawlClearings: frame.sprawlClearings,
     );
   }
 

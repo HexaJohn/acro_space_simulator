@@ -119,11 +119,19 @@ void main() {
     expect(claimed, contains('reactor'));
     expect(claimed, contains('solar'));
     expect(claimed, contains('aquifer'));
-    // Every staked plot is a clearing on the sprawl spec.
-    final manual = city.parcelBuildings.keys
-        .where((id) => city.parcelById(id)?.manual ?? false)
+    // Every installation's plot is a clearing on the sprawl spec — the
+    // plots the plan's highways break at. The sprawl's own plots (its
+    // farms and strip malls) come after the plan and lie inside their
+    // sections, so they are not.
+    final installations = city.parcelBuildings.entries
+        .where((e) =>
+            (city.parcelById(e.key)?.manual ?? false) &&
+            !identical(e.value, kStripMallSpec) &&
+            !(e.value.type == 'farm' && e.value.siteWidthM >= 700))
         .length;
-    expect(city.sprawlSpec!.clearings.length, manual);
+    expect(city.sprawlSpec!.clearings.length, installations);
+    expect(city.layout.manualParcels.length, greaterThan(installations),
+        reason: 'the sprawl stakes plots of its own');
     // The expressway through the core, with its frontage roads, and the
     // avenues carried out to the mile grid.
     final roads = city.layout.roads;

@@ -30,6 +30,7 @@ import 'city_building_spec.dart';
 import 'city_config.dart';
 import 'city_sim.dart';
 import 'parcel.dart';
+import 'spatial_index.dart';
 import 'sprawl_plan.dart';
 
 /// What to build.
@@ -54,7 +55,7 @@ class CityGenSpec {
     this.outreachM = 4000,
     this.farms = 8,
     this.railway = true,
-    this.sprawlMiles = 20,
+    this.sprawlMiles = 0,
     this.latitude,
     this.longitude,
   });
@@ -145,6 +146,11 @@ class CityGenSpec {
   /// both ways.
   final bool railway;
 
+  /// Zero by default: the sprawl is platted now — every section's streets,
+  /// lots and buildings are real — so twenty miles of it is a real cost,
+  /// and a test or a tool that wants only the town should not pay it. The
+  /// studio asks for twenty, which is Chicago.
+  ///
   /// How far across, in miles, the SPRAWL runs: the mile-square sections of
   /// subdivisions, strips, industrial parks and farms past the platted core,
   /// with their county highways and interstates. Zero lays none. Twenty is
@@ -411,8 +417,21 @@ class CityBuild {
       ]);
     }
 
+    // The sprawl, PLATTED: every section's streets, lots and plots through
+    // the same subdivider as the downtown's, ahead of the one re-cut that
+    // cuts them all. The plan still lays the roads at the mile scale and
+    // zones the sections; the sections' own streets, lots, houses, strips,
+    // sheds and farms are the plat's from here on.
+    yield (phase: 'platting the sprawl', fraction: 0.49);
+    final sectionRoads = <String, int>{};
+    final plan = sim.sprawl;
+    if (plan != null) {
+      sectionRoads.addAll(
+          const CityGenerator()._laySections(sim, spec, outline, plan));
+    }
+
     for (final f in sim.layout.regenerateSteps()) {
-      yield (phase: 're-platting round the plots', fraction: 0.5 + f * 0.44);
+      yield (phase: 're-platting round the plots', fraction: 0.5 + f * 0.40);
     }
 
     // Stepped per lot rather than one opaque call: this loop is seconds of
@@ -420,10 +439,15 @@ class CityBuild {
     // the label painted "zoning and building" and then nothing moved until
     // "settling". Per-lot steps are also what let a driver draw the buildings
     // arriving.
-    yield (phase: 'zoning and building', fraction: 0.94);
-    for (final f
-        in const CityGenerator()._zoneAndBuildSteps(sim, spec, outline, rnd)) {
-      yield (phase: 'zoning and building', fraction: 0.94 + f * 0.04);
+    yield (phase: 'zoning and building', fraction: 0.90);
+    for (final f in const CityGenerator()._zoneAndBuildSteps(
+        sim, spec, outline, rnd,
+        skipRoads: sectionRoads.keys.toSet())) {
+      yield (phase: 'zoning and building', fraction: 0.90 + f * 0.05);
+    }
+    if (plan != null) {
+      yield (phase: 'zoning the sprawl', fraction: 0.95);
+      const CityGenerator()._zoneSections(sim, plan, sectionRoads);
     }
 
     yield (phase: 'settling', fraction: 0.99);
@@ -885,7 +909,8 @@ class CityGenerator {
   /// than ringing the whole town; a ring of industry round a city is what a
   /// rectangular generator produces, not what a town does.
   Iterable<double> _zoneAndBuildSteps(
-      CitySim city, CityGenSpec spec, CityShape shape, math.Random rnd) sync* {
+      CitySim city, CityGenSpec spec, CityShape shape, math.Random rnd,
+      {Set<String> skipRoads = const {}}) sync* {
     // Where industry takes over on its sector, as a fraction of the
     // outline. `industryRing` is the knob; the default puts the works in the
     // last quarter of the town on the railway side.
@@ -896,6 +921,11 @@ class CityGenerator {
     final lots = List.of(city.layout.autoParcels);
     for (var i = 0; i < lots.length; i++) {
       final lot = lots[i];
+      // The sprawl's lots are zoned by their sections, not by the bands.
+      if (lot.roadId case final rid? when skipRoads.contains(baseRoadId(rid))) {
+        yield (i + 1) / lots.length;
+        continue;
+      }
       final c = lot.centroid;
       final bearing = math.atan2(c.n, c.e);
       // Jittered so each boundary is a ragged transition rather than a
@@ -985,6 +1015,336 @@ class CityGenerator {
   static double _angleBetween(double a, double b) {
     final d = (a - b) % (2 * math.pi);
     return d > math.pi ? 2 * math.pi - d : d;
+  }
+
+  /// The road a piece was committed as: `r12x0x1` is a piece of `r12`.
+  static String baseRoadId(String id) {
+    final i = id.indexOf('x');
+    return i < 0 ? id : id.substring(0, i);
+  }
+
+  static double _segDist(Vec2 p, Vec2 a, Vec2 b) {
+    final ab = b - a;
+    final len2 = ab.dot(ab);
+    final t = len2 < 1e-12 ? 0.0 : ((p - a).dot(ab) / len2).clamp(0.0, 1.0);
+    return (a + ab * t).distanceTo(p);
+  }
+
+  // ---- The sprawl, platted ---------------------------------------------------
+
+  /// How far short of its section line a street that goes nowhere stops,
+  /// leaving room for its turning circle.
+  static const double sectionDeadEndInsetM = 45;
+
+  /// Lay every section of [plan] as plat, and say which committed road
+  /// (by base id) belongs to which section.
+  ///
+  /// The section builder used to grow all of this at draw time from the
+  /// section's seed: a street grid with two collectors per axis running out
+  /// to the county highway where the plan put a junction and every other
+  /// street ending in a turning circle short of the line; houses along the
+  /// streets by density; strip malls along the arterial; sheds in the
+  /// blocks of an industrial park; fields and a farmstead. It is the same
+  /// layout, laid as real streets through [CitySim.commitRoad] — so they
+  /// split where they cross, cut real lots by the subdivider with a
+  /// suburb's frontage, and take real buildings — and real plots for the
+  /// strips and the quarter-section farms. Nothing of it is drawn
+  /// differently from the downtown, because none of it is different.
+  ///
+  /// Streets keep off the platted core, off the plan's interstates, ramps
+  /// and railway, and off every staked plot, the way the builder's did.
+  Map<String, int> _laySections(
+      CitySim city, CityGenSpec spec, CityShape shape, SprawlPlan plan) {
+    final out = <String, int>{};
+    final sspec = plan.spec;
+
+    // Where the plan's junctions are, on a 4 m grid: a collector runs out to
+    // the highway only where the plan put a junction for it.
+    final nodeCells = <(int, int)>{
+      for (final n in plan.nodes) ((n.at.e / 4).round(), (n.at.n / 4).round()),
+    };
+    bool hasNodeAt(Vec2 p) {
+      final cx = (p.e / 4).round(), cy = (p.n / 4).round();
+      for (var dx = -2; dx <= 2; dx++) {
+        for (var dy = -2; dy <= 2; dy++) {
+          if (nodeCells.contains((cx + dx, cy + dy))) return true;
+        }
+      }
+      return false;
+    }
+
+    // The corridors the streets keep off: interstates, ramps, the railway.
+    // A county highway is what the collectors run out to, and the plat's
+    // own rights-of-way are real roads that a street may meet.
+    final corridors = BoxIndex<(Vec2, Vec2)>(cellM: 256);
+    for (final r in plan.roads) {
+      if (r.kind == SprawlRoadKind.countyHighway ||
+          r.kind == SprawlRoadKind.corridor) {
+        continue;
+      }
+      for (var i = 1; i < r.points.length; i++) {
+        final a = r.points[i - 1], b = r.points[i];
+        corridors.add((a, b), Box2.of([a, b]));
+      }
+    }
+    bool nearCorridor(Vec2 p, double clearM) {
+      for (final (a, b) in corridors.near(Box2.around(p, clearM))) {
+        if (_segDist(p, a, b) < clearM) return true;
+      }
+      return false;
+    }
+
+    bool inCore(Vec2 p, double marginM) =>
+        p.length < shape.radiusAt(math.atan2(p.n, p.e)) + marginM;
+    bool blocked(Vec2 p, {double corridorM = 40, double clearingM = 12}) =>
+        nearCorridor(p, corridorM) || sspec.inClearing(p, marginM: clearingM);
+
+    /// Whether a plot [hw] by [hd] about [c] is clear of the core, the
+    /// corridors and every staked plot, probed on a five-by-five lattice
+    /// so a corridor cannot slip between its corners.
+    bool plotClear(Vec2 c, double hw, double hd, double corridorM) {
+      for (var i = 0; i < 5; i++) {
+        for (var j = 0; j < 5; j++) {
+          final p = Vec2(c.e - hw + hw * i / 2, c.n - hd + hd * j / 2);
+          if (inCore(p, 60) || blocked(p, corridorM: corridorM)) return false;
+        }
+      }
+      return true;
+    }
+
+    final quarter = kUtilCatalog
+        .firstWhere((s) => s.type == 'farm' && s.siteWidthM >= 700);
+
+    for (var si = 0; si < plan.sections.length; si++) {
+      final s = plan.sections[si];
+      final rnd = math.Random(s.seed ^ 0x5EC7);
+      final half = s.halfM;
+      final c = s.centre;
+      Vec2 at(int axis, double t, double a) =>
+          axis == 0 ? Vec2(c.e + a, c.n + t) : Vec2(c.e + t, c.n + a);
+
+      switch (s.use) {
+        case SprawlUse.parkland:
+          // A forest preserve: the ground as the planet made it.
+          continue;
+        case SprawlUse.farmland:
+          // The four quarter sections of a township's mile square, each a
+          // farm with its rows, its farmhouse and its barn.
+          final q = quarter.siteMetres();
+          for (final (dx, dy) in const [
+            (-1.0, -1.0),
+            (1.0, -1.0),
+            (-1.0, 1.0),
+            (1.0, 1.0)
+          ]) {
+            final centre = Vec2(c.e + dx * half / 2, c.n + dy * half / 2);
+            if (!plotClear(centre, q.width / 2, q.depth / 2, 45)) continue;
+            city.claimSite(quarter, centre,
+                regenerateLots: false,
+                checkAccess: false,
+                facing: Vec2(dx, 0));
+          }
+          continue;
+        case SprawlUse.residential:
+        case SprawlUse.commercial:
+        case SprawlUse.industrial:
+          break;
+      }
+
+      final n = s.streetsAcross;
+      if (n == 0) continue;
+      // The grid: which lines the streets run on per axis (0: east-west
+      // streets by northing, 1: north-south by easting), and which of them
+      // are the collectors. The section's own survey grid, or — next to
+      // the core — the plat's lines carried on.
+      final List<double> lines0, lines1;
+      final Set<int> coll0, coll1;
+      if (s.continuesCoreGrid) {
+        lines0 = s.streetLinesN;
+        lines1 = s.streetLinesE;
+        Set<int> pick(List<double> lines, List<double> chosen) => {
+              for (var i = 0; i < lines.length; i++)
+                if (chosen.any((v) => (v - lines[i]).abs() < 0.5)) i,
+            };
+        coll0 = pick(lines0, s.collectorOffsetsN);
+        coll1 = pick(lines1, s.collectorOffsetsE);
+      } else {
+        final step = s.sizeM / n;
+        lines0 = lines1 = [for (var k = 1; k < n; k++) -half + k * step];
+        coll0 = coll1 = {
+          for (final k in SprawlSection.collectorIndices(n)) k - 1
+        };
+      }
+      // A suburb's lots: house lots at the builder's house pitch, strip
+      // lots along a commercial section's streets, works plots in a park.
+      final (frontage, depth) = switch (s.use) {
+        SprawlUse.residential => (17.0 + (1 - s.density) * 16, 36.0),
+        SprawlUse.commercial => (60.0, 80.0),
+        _ => (90.0, 70.0),
+      };
+      // On the plat's grid a street begins at the outline, on the end of
+      // the downtown street it carries on — the commit snaps the two into
+      // one. On its own grid it keeps the depth of the plat's outer lots
+      // off the outline.
+      final coreMargin = s.continuesCoreGrid ? 0.0 : 60.0;
+
+      for (var axis = 0; axis < 2; axis++) {
+        final lines = axis == 0 ? lines0 : lines1;
+        final colls = axis == 0 ? coll0 : coll1;
+        for (var k = 0; k < lines.length; k++) {
+          final t = lines[k];
+          final collector = colls.contains(k);
+          double endAt(double sign) {
+            if (collector) {
+              final edge = at(axis, t, sign * half);
+              final inward = at(axis, t, sign * (half - 160));
+              if (hasNodeAt(edge) && !nearCorridor(inward, 40)) {
+                return sign * half;
+              }
+            }
+            return sign * (half - sectionDeadEndInsetM);
+          }
+
+          final a0 = endAt(-1), a1 = endAt(1);
+          void commit(double from, double to) {
+            final id = city.commitRoad(
+              [at(axis, t, from), at(axis, t, to)],
+              RoadClass.street,
+              regenerateLots: false,
+              lotFrontageM: frontage,
+              lotDepthM: depth,
+              collector: collector,
+            );
+            if (id != null) out[id] = si;
+          }
+
+          for (final (r0, r1) in _outsideCore(
+              (a) => inCore(at(axis, t, a), coreMargin), a0, a1)) {
+            // Break the run at corridors and plots, walked in short steps.
+            final steps = math.max(2, ((r1 - r0) / 65).round());
+            double? open;
+            var prev = r0;
+            for (var q = 0; q <= steps; q++) {
+              final a = r0 + (r1 - r0) * q / steps;
+              if (blocked(at(axis, t, a))) {
+                if (open != null && prev - open >= 30) commit(open, prev);
+                open = null;
+              } else {
+                open ??= a;
+              }
+              prev = a;
+            }
+            if (open != null && r1 - open >= 30) commit(open, r1);
+          }
+        }
+      }
+
+      // The strip: big boxes along the arterial on every side of a
+      // commercial section, each on its own plot facing the highway with
+      // its car park between.
+      if (s.use == SprawlUse.commercial) {
+        final site = kStripMallSpec.siteMetres();
+        for (var edge = 0; edge < 4; edge++) {
+          for (var a = -half + 120; a < half - 120; a += 115) {
+            if (rnd.nextDouble() > s.density) continue;
+            final along = a + (rnd.nextDouble() - 0.5) * 20;
+            final set = half - 110;
+            final (e, nn, facing) = switch (edge) {
+              0 => (along, -set, const Vec2(0, -1)),
+              1 => (along, set, const Vec2(0, 1)),
+              2 => (-set, along, const Vec2(-1, 0)),
+              _ => (set, along, const Vec2(1, 0)),
+            };
+            final p = Vec2(c.e + e, c.n + nn);
+            if (!plotClear(p, site.width / 2, site.depth / 2, 45)) continue;
+            city.claimSite(kStripMallSpec, p,
+                regenerateLots: false, checkAccess: false, facing: facing);
+          }
+        }
+      }
+    }
+    return out;
+  }
+
+  /// The stretches of [a0]..[a1] where [inside] is false, each edge found
+  /// to the metre by bisection. Runs shorter than 20 m are dropped.
+  static List<(double, double)> _outsideCore(
+      bool Function(double a) inside, double a0, double a1) {
+    double edge(double lo, double hi) {
+      for (var i = 0; i < 12; i++) {
+        final mid = (lo + hi) / 2;
+        if (inside(mid) == inside(lo)) {
+          lo = mid;
+        } else {
+          hi = mid;
+        }
+      }
+      return (lo + hi) / 2;
+    }
+
+    final out = <(double, double)>[];
+    const step = 24.0;
+    double? open;
+    var prev = a0;
+    var prevIn = inside(a0);
+    if (!prevIn) open = a0;
+    for (var a = a0 + step; a < a1 + step; a += step) {
+      final here = math.min(a, a1);
+      final nowIn = inside(here);
+      if (nowIn != prevIn) {
+        final x = edge(prev, here);
+        if (nowIn) {
+          if (open != null) out.add((open, x));
+          open = null;
+        } else {
+          open = x;
+        }
+      }
+      prev = here;
+      prevIn = nowIn;
+      if (here >= a1) break;
+    }
+    if (open != null) out.add((open, a1));
+    return [
+      for (final r in out)
+        if (r.$2 - r.$1 > 20) r,
+    ];
+  }
+
+  /// Zone and build the sections' lots by their sections: houses on a
+  /// subdivision's lots at its density, shops or a mall on a strip's,
+  /// workshops or factories in a park's. What the builder drew from the
+  /// seed, now standing on real lots the sim can count.
+  void _zoneSections(CitySim city, SprawlPlan plan, Map<String, int> roads) {
+    for (final lot in city.layout.autoParcels) {
+      final rid = lot.roadId;
+      if (rid == null) continue;
+      final si = roads[baseRoadId(rid)];
+      if (si == null) continue;
+      final s = plan.sections[si];
+      final dense = s.density >= 0.5;
+      final (use, spec) = switch (s.use) {
+        SprawlUse.residential => (
+            ParcelUse.residential,
+            kZoneSpecs['residential']![Density.low]!
+          ),
+        SprawlUse.commercial => (
+            ParcelUse.commercial,
+            kZoneSpecs['commercial']![dense ? Density.medium : Density.low]!
+          ),
+        _ => (
+            ParcelUse.industrial,
+            kZoneSpecs['industrial']![dense ? Density.medium : Density.low]!
+          ),
+      };
+      city.layout.setUse(lot.id, use);
+      // Built by density, decided per lot from the section's seed and the
+      // lot's own name, so the same city stands however it is walked.
+      var h = s.seed ^ lot.id.hashCode;
+      h = (h ^ (h >> 16)) * 0x45d9f3b & 0xffffffff;
+      h = (h ^ (h >> 16)) & 0xffff;
+      if (h / 0xffff < s.density) city.placeOnParcel(lot.id, spec);
+    }
   }
 
   /// Where a ray from a rectangle's centre leaves it, in the rectangle's own

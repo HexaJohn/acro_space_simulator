@@ -3466,8 +3466,7 @@ class CitySim {
   /// unknown or already built on.
   bool placeOnParcel(String parcelId, CityBuildingSpec spec) {
     if (parcelBuildings.containsKey(parcelId)) return false;
-    final exists = layout.parcels.any((p) => p.id == parcelId);
-    if (!exists) return false;
+    if (layout.parcelById(parcelId) == null) return false;
     parcelBuildings[parcelId] = spec;
     return true;
   }
@@ -3586,6 +3585,8 @@ class CitySim {
               'poly': [
                 for (final v in p.polygon) ...[v.e, v.n]
               ],
+              if (p.frontage case final f?)
+                'front': [f.$1.e, f.$1.n, f.$2.e, f.$2.n],
             },
         ],
         'parcelUse': {
@@ -3698,6 +3699,13 @@ class CitySim {
           for (var i = 0; i + 1 < poly.length; i += 2)
             Vec2(poly[i].toDouble(), poly[i + 1].toDouble()),
         ],
+        frontage: switch (m['front']) {
+          final List f when f.length == 4 => (
+              Vec2((f[0] as num).toDouble(), (f[1] as num).toDouble()),
+              Vec2((f[2] as num).toDouble(), (f[3] as num).toDouble()),
+            ),
+          _ => null,
+        },
       ));
     }
     (j['parcelUse'] as Map).forEach((id, use) {
@@ -3857,12 +3865,7 @@ class CitySim {
 
   /// The lot with this id, or null. Linear because the layout is a list and a
   /// colony has hundreds of lots, not millions.
-  Parcel? parcelById(String id) {
-    for (final p in layout.parcels) {
-      if (p.id == id) return p;
-    }
-    return null;
-  }
+  Parcel? parcelById(String id) => layout.parcelById(id);
 
   /// What stands on [site] — hand-placed or demand-grown, grid or lot.
   CityBuildingSpec? siteSpec(String site) {
@@ -3988,7 +3991,11 @@ class CitySim {
   /// reach; the generator turns it off for the plots it stakes out in the
   /// sprawl, where the county grid is the road and is not on this layout.
   Parcel? claimSite(CityBuildingSpec spec, Vec2 centre,
-      {bool regenerateLots = true, bool checkAccess = true}) {
+      {bool regenerateLots = true,
+      bool checkAccess = true,
+      /// Which way the building faces, as a unit vector: the plot's edge
+      /// on that side becomes its frontage. Null faces the plot's default.
+      Vec2? facing}) {
     final why = checkAccess ? siteBlockedReason(spec, centre) : null;
     if (why != null) {
       blocked = why;
@@ -4009,8 +4016,23 @@ class CitySim {
     final before = <String, Vec2>{
       for (final p in layout.autoParcels) p.id: p.centroid,
     };
-    final parcel = layout.addManualParcel(siteFootprint(spec, centre),
-        regenerateLots: regenerateLots);
+    final poly = siteFootprint(spec, centre);
+    (Vec2, Vec2)? frontage;
+    if (facing != null) {
+      // The edge whose outward normal best matches the facing.
+      var best = -double.infinity;
+      for (var i = 0; i < poly.length; i++) {
+        final a = poly[i], b = poly[(i + 1) % poly.length];
+        final mid = (a + b) * 0.5;
+        final d = (mid - centre).normalized.dot(facing);
+        if (d > best) {
+          best = d;
+          frontage = (a, b);
+        }
+      }
+    }
+    final parcel = layout.addManualParcel(poly,
+        regenerateLots: regenerateLots, frontage: frontage);
     if (parcel == null) {
       blocked = 'Blocked — the site crosses a road or another plot.';
       return null;

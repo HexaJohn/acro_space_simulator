@@ -3,26 +3,22 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
-/// The sprawl, drawn: the roads of the plan, and every mile-square section
-/// grown from its seed at a level of detail set by how far away it is.
+/// The sprawl plan's roads, drawn: the county highways, the interstates and
+/// their ramps, the railway carried on past the plat, and the junctions of
+/// the plan — at a level of detail set by how far away each is.
 ///
-/// Four tiers — close, near, mid, far — described with the section builder
-/// in `sprawl_section.dart`. Far, a section is the silhouettes of its rows
-/// of roofs, the way the plat's block tier is one merged skyline; close, it
-/// is a street with mailboxes and a car in every other driveway.
+/// The sections that used to be grown here are plat now: their streets,
+/// lots and houses ride the frame's own roads and buildings and are drawn
+/// with the downtown's. What is left here is the mile-scale network the
+/// plat does not lay yet, tiered by distance the way it always was: far, an
+/// expressway is an asphalt ribbon; mid, its lanes are painted; near, it
+/// has its barrier, and the county highway beside it has sidewalks, lamps,
+/// and signals where the subdivisions' collectors meet it.
 ///
-/// Sections are grouped two by two and each group is one node per material,
-/// so a twenty-mile city is a hundred-odd draws rather than a thousand; a
-/// group is rebuilt only when its tier changes, a little per frame, nearest
-/// first, so the camera can move without the frame stopping.
-///
-/// The plan's ROADS are tiered with the groups: every road and every
-/// junction of the plan belongs to the group nearest its middle and is
-/// drawn at that group's tier, through the same [RoadMesher] the platted
-/// core draws through. Far, an expressway is an asphalt ribbon; mid, its
-/// lanes are painted; near, it has its barrier, and the county highway
-/// beside it has sidewalks, lamps, and signals where the subdivision's
-/// collectors meet it.
+/// Roads are grouped by where their middles fall on a two-mile grid, and
+/// each group is one node per material, rebuilt only when its tier changes,
+/// a little per frame, nearest first, so the camera can move without the
+/// frame stopping.
 library;
 
 import 'package:flutter_scene/scene.dart' as fs;
@@ -40,7 +36,9 @@ import 'city_materials.dart';
 import 'city_nodes.dart';
 import 'railway.dart';
 import 'road_mesher.dart';
-import 'sprawl_section.dart';
+
+/// How much of a road is drawn, nearest first.
+enum SprawlTier { close, near, mid, far }
 
 class SprawlNodes {
   SprawlNodes(this._scene);
@@ -49,18 +47,19 @@ class SprawlNodes {
 
   static bool enabled = true;
 
-  /// Sections nearer than this get the street's clutter: driveways and
-  /// their cars, mailboxes, fences, pools, hydrants.
-  static double closeRangeM = 700;
-
-  /// Sections nearer than this get houses with roofs and windows, trees,
-  /// poles and wires — and their roads get sidewalks, lamps and junction
+  /// Nearer than this, roads get their sidewalks, lamps and junction
   /// furniture.
   static double nearRangeM = 2800;
 
-  /// Nearer than this, houses as flat blocks and lanes painted on the
-  /// roads; beyond, block slabs and bare ribbons.
+  /// Nearer than this, lanes are painted; beyond, bare ribbons.
   static double midRangeM = 7500;
+
+  /// Kept for the studio's slider: the close tier is the near tier's look
+  /// for a road.
+  static double closeRangeM = 700;
+
+  /// The grid the plan's roads are grouped on, metres.
+  static double groupM = 2 * kMileM;
 
   /// Milliseconds of building the frame will spend before deferring the
   /// rest of the queue.
@@ -73,7 +72,6 @@ class SprawlNodes {
   List<SprawlRoadSnapshot>? _roadsSource;
   List<SprawlNodeSnapshot>? _nodesSource;
   final List<_Batch> _railBatches = [];
-  List<SprawlSectionSnapshot>? _sectionsSource;
   final Map<String, _Group> _groups = {};
   final List<_Group> _queue = [];
   final Map<String, (Vector3, Quaternion, Vector3)> _placedPose = {};
@@ -84,7 +82,7 @@ class SprawlNodes {
     required Vector3 focusWorld,
     double Function(Vector3 dirBF)? groundRadiusAt,
   }) {
-    if (!enabled || snap.sprawlSections.isEmpty) {
+    if (!enabled || snap.sprawlRoads.isEmpty) {
       if (_groups.isNotEmpty || _railBatches.isNotEmpty) _clear();
       debugLine = '';
       return;
@@ -92,23 +90,18 @@ class SprawlNodes {
     final sw = Stopwatch()..start();
     final moved = _bodyMotion(snap, origin);
 
-    final sectionsChanged = !identical(_sectionsSource, snap.sprawlSections);
-    final roadsChanged = !identical(_roadsSource, snap.sprawlRoads) ||
+    final changed = !identical(_roadsSource, snap.sprawlRoads) ||
         !identical(_nodesSource, snap.sprawlNodes);
-    if (sectionsChanged) {
-      _sectionsSource = snap.sprawlSections;
-      _regroup(snap);
-    }
-    if (sectionsChanged || roadsChanged) {
+    if (changed) {
       _roadsSource = snap.sprawlRoads;
       _nodesSource = snap.sprawlNodes;
       _rebuildRails(snap, groundRadiusAt);
-      _assignRoads(snap);
+      _regroup(snap);
     }
     phaseMs['sprawl.roads'] = sw.elapsedMicroseconds / 1000;
     sw.reset();
 
-    // Tiers, from the focus. A group's tier is its nearest section's.
+    // Tiers, from the focus. A group's tier is its nearest road's.
     var close = 0, near = 0, mid = 0, far = 0;
     for (final g in _groups.values) {
       final body = snap.bodies[g.bodyId];
@@ -116,9 +109,9 @@ class SprawlNodes {
       final bodyWorld = Vector3(body.px, body.py, body.pz);
       final quat = Quaternion(body.qw, body.qx, body.qy, body.qz);
       var best = double.infinity;
-      for (final s in g.sections) {
-        final world = bodyWorld + quat.rotate(Vector3(s.px, s.py, s.pz));
-        final d = (world - focusWorld).length - s.sizeM * 0.5;
+      for (final c in g.centres) {
+        final world = bodyWorld + quat.rotate(c);
+        final d = (world - focusWorld).length;
         if (d < best) best = d;
       }
       g.distanceM = best;
@@ -148,13 +141,12 @@ class SprawlNodes {
     phaseMs['sprawl.tier'] = sw.elapsedMicroseconds / 1000;
     sw.reset();
 
-    // Build, nearest first, within the budget: a section at a time, so a
-    // near group of four never takes the whole frame.
+    // Build, nearest first, within the budget: a road at a time.
     if (_queue.isNotEmpty) {
       _queue.sort((a, b) => a.distanceM.compareTo(b.distanceM));
       while (_queue.isNotEmpty && sw.elapsedMilliseconds < buildBudgetMs) {
         final g = _queue.first;
-        if (_stepBuild(g, snap, groundRadiusAt)) {
+        if (_stepBuild(g, snap)) {
           _queue.removeAt(0);
           g.queued = false;
         }
@@ -200,10 +192,8 @@ class SprawlNodes {
       (byBody[r.body] ??= []).add(r);
     }
     byBody.forEach((bodyId, roads) {
-      // Anchor at the first section of this body, so offsets stay small.
-      final first = snap.sprawlSections.firstWhere((s) => s.body == bodyId,
-          orElse: () => snap.sprawlSections.first);
-      final anchorBF = Vector3(first.px, first.py, first.pz);
+      final first = roads.first;
+      final anchorBF = Vector3(first.points[0], first.points[1], first.points[2]);
       final ballast = MeshBuilder();
       final sleepers = MeshBuilder();
       final steel = MeshBuilder();
@@ -223,32 +213,24 @@ class SprawlNodes {
     });
   }
 
-  /// Every road and node of the plan goes to the group nearest its middle,
-  /// and every group is marked to rebuild with what it was given.
-  void _assignRoads(WorldSnapshot snap) {
-    final centres = <(Vector3, _Group)>[];
+  /// Every road and node of the plan goes to the group of the two-mile
+  /// cell its middle falls in, and every group is marked to rebuild.
+  void _regroup(WorldSnapshot snap) {
+    final keep = <String>{};
+    String keyOf(String body, Vector3 p) =>
+        '$body/${(p.x / groupM).round()}/${(p.y / groupM).round()}/'
+        '${(p.z / groupM).round()}';
+    _Group groupFor(String body, Vector3 p) {
+      final key = keyOf(body, p);
+      keep.add(key);
+      return _groups.putIfAbsent(key, () => _Group(key, body));
+    }
+
     for (final g in _groups.values) {
       g.roads.clear();
       g.nodes.clear();
-      for (final s in g.sections) {
-        centres.add((Vector3(s.px, s.py, s.pz), g));
-      }
+      g.centres.clear();
     }
-    if (centres.isEmpty) return;
-    _Group? nearest(String bodyId, Vector3 p) {
-      _Group? best;
-      var bestD = double.infinity;
-      for (final (c, g) in centres) {
-        if (g.bodyId != bodyId) continue;
-        final d = (c - p).lengthSquared;
-        if (d < bestD) {
-          bestD = d;
-          best = g;
-        }
-      }
-      return best;
-    }
-
     for (final r in snap.sprawlRoads) {
       final kind = SprawlRoadKind
           .values[r.kind.clamp(0, SprawlRoadKind.values.length - 1)];
@@ -260,12 +242,18 @@ class SprawlNodes {
       final n = r.points.length ~/ 3;
       if (n < 2) continue;
       final m = (n ~/ 2) * 3;
-      nearest(r.body, Vector3(r.points[m], r.points[m + 1], r.points[m + 2]))
-          ?.roads
-          .add(r);
+      final mid = Vector3(r.points[m], r.points[m + 1], r.points[m + 2]);
+      groupFor(r.body, mid)
+        ..roads.add(r)
+        ..centres.add(mid);
     }
     for (final nd in snap.sprawlNodes) {
-      nearest(nd.body, Vector3(nd.px, nd.py, nd.pz))?.nodes.add(nd);
+      final at = Vector3(nd.px, nd.py, nd.pz);
+      groupFor(nd.body, at).nodes.add(nd);
+    }
+    for (final key in _groups.keys.toList()) {
+      if (keep.contains(key)) continue;
+      _dropGroup(_groups.remove(key)!);
     }
     // Everything rebuilds: the tier loop re-queues a group whose want is
     // unset.
@@ -281,7 +269,7 @@ class SprawlNodes {
               flat[i + 2] - anchorBF.z),
       ];
 
-  /// The build steps for one road of the plan at [tier].
+  /// The build step for one road of the plan at [tier].
   static void _roadStep(_BuildJob job, SprawlRoadSnapshot r) {
     final pts = _relative(r.points, job.anchorBF);
     if (pts.length < 2) return;
@@ -356,27 +344,7 @@ class SprawlNodes {
         furniture: detailed);
   }
 
-  // ---- Sections -------------------------------------------------------------
-
-  void _regroup(WorldSnapshot snap) {
-    final keep = <String>{};
-    for (final s in snap.sprawlSections) {
-      // Group index from the section's centre in its own frame is not on
-      // the wire; the seed carries i and j (seed = base + i*1009 + j*31),
-      // but a spatial key is simpler: body plus a coarse quantised centre.
-      final key = '${s.body}/${(s.px / (s.sizeM * 2)).round()}/'
-          '${(s.py / (s.sizeM * 2)).round()}/${(s.pz / (s.sizeM * 2)).round()}';
-      keep.add(key);
-      final g = _groups.putIfAbsent(
-          key, () => _Group(key, s.body, snap.sprawlSections.first.colonyId));
-      if (!g.sections.contains(s)) g.sections.add(s);
-    }
-    for (final key in _groups.keys.toList()) {
-      if (keep.contains(key)) continue;
-      final g = _groups.remove(key)!;
-      _dropGroup(g);
-    }
-  }
+  // ---- Groups -----------------------------------------------------------------
 
   void _dropGroup(_Group g) {
     for (final b in g.batches) {
@@ -387,60 +355,25 @@ class SprawlNodes {
     g.queued = false;
   }
 
-  /// One step of a group's build: the next section into the group's
-  /// builders, then its roads and junctions, or — when everything is in —
-  /// the upload that swaps the group's nodes. Returns true when the group
-  /// is done.
-  bool _stepBuild(_Group g, WorldSnapshot snap,
-      double Function(Vector3)? groundRadiusAt) {
+  /// One step of a group's build: the next road into the group's builders,
+  /// or — when everything is in — the upload that swaps the group's nodes.
+  /// Returns true when the group is done.
+  bool _stepBuild(_Group g, WorldSnapshot snap) {
     var job = g.job;
     if (job == null || job.tier != (g.wantTier ?? SprawlTier.far)) {
       final tier = g.wantTier ?? SprawlTier.far;
-      if (g.sections.isEmpty) return true;
+      if (g.centres.isEmpty) return true;
       // Anchor at the group's mean centre.
       var sum = Vector3.zero;
-      for (final s in g.sections) {
-        sum = sum + Vector3(s.px, s.py, s.pz);
+      for (final c in g.centres) {
+        sum = sum + c;
       }
-      final anchorBF = sum * (1.0 / g.sections.length);
-      // Interstates and ramps of this body, for the corridor the houses
-      // keep clear of.
-      final corridors = <List<Vector3>>[];
-      for (final r in snap.sprawlRoads) {
-        if (r.body != g.bodyId) continue;
-        final kind = SprawlRoadKind
-            .values[r.kind.clamp(0, SprawlRoadKind.values.length - 1)];
-        if (kind == SprawlRoadKind.countyHighway) continue;
-        corridors.add(_relative(r.points, Vector3.zero));
-      }
-      // Where the plan's junctions are: a section runs its collector out
-      // to the county highway only where the plan put a node for it.
-      final nodePoints = <Vector3>[
-        for (final n in snap.sprawlNodes)
-          if (n.body == g.bodyId) Vector3(n.px, n.py, n.pz),
-      ];
-      job = g.job = _BuildJob(tier, anchorBF, corridors,
-          snap.sprawlClearings[g.colonyId] ?? const [], List.of(g.sections),
-          List.of(g.roads), List.of(g.nodes), nodePoints);
-    }
-    // A section is a list of parts — a street's worth of houses, a row of
-    // slabs — and one call runs one part: a near section alone is a hundred
-    // milliseconds of ground samples, far more than a frame has to spare.
-    if (job.steps.isEmpty && job.pending.isNotEmpty) {
-      final s = job.pending.removeLast();
-      job.steps.addAll(SprawlSectionBuilder(
-              s, job.anchorBF, groundRadiusAt, job.corridors,
-              clearings: job.clearings, nodePoints: job.nodePoints)
-          .steps(job.tier, job.ground, job.road, job.walk, job.solid,
-              job.glass));
-    }
-    // Then the plan's roads, one part each, and its junctions in one.
-    if (job.steps.isEmpty && job.pending.isEmpty && !job.roadsQueued) {
-      job.roadsQueued = true;
+      final anchorBF = sum * (1.0 / g.centres.length);
+      job = g.job = _BuildJob(tier, anchorBF, List.of(g.nodes));
       final j = job;
       final epoch = snap.epoch;
       job.steps.add(() => _nodeStep(j, epoch));
-      for (final r in job.roads) {
+      for (final r in g.roads) {
         job.steps.add(() => _roadStep(j, r));
       }
     }
@@ -448,13 +381,12 @@ class SprawlNodes {
       job.steps.removeLast()();
       return false;
     }
-    // Every section is in: swap the nodes.
+    // Everything is in: swap the nodes.
     for (final b in g.batches) {
       _scene.remove(b.node);
     }
     g.batches.clear();
     for (final (builder, material) in [
-      (job.ground, CityMaterials.ground),
       (job.road, CityMaterials.road),
       (job.walk, CityMaterials.sidewalk),
       (job.solid, CityMaterials.facade),
@@ -524,7 +456,6 @@ class SprawlNodes {
       _dropGroup(g);
     }
     _groups.clear();
-    _sectionsSource = null;
     _queue.clear();
   }
 
@@ -540,16 +471,16 @@ class _Batch {
   bool placed = false;
 }
 
-/// Two-by-two sections that share their nodes, and the plan's roads and
-/// junctions nearest them.
+/// The plan's roads and junctions in one two-mile cell, sharing their nodes.
 class _Group {
-  _Group(this.key, this.bodyId, this.colonyId);
+  _Group(this.key, this.bodyId);
   final String key;
   final String bodyId;
-  final String colonyId;
-  final List<SprawlSectionSnapshot> sections = [];
   final List<SprawlRoadSnapshot> roads = [];
   final List<SprawlNodeSnapshot> nodes = [];
+
+  /// The roads' middles, body-fixed: what the tier is measured from.
+  final List<Vector3> centres = [];
   final List<_Batch> batches = [];
   SprawlTier? builtTier;
   SprawlTier? wantTier;
@@ -558,29 +489,17 @@ class _Group {
   _BuildJob? job;
 }
 
-/// A group build in progress: its builders, and the sections still to go.
+/// A group build in progress: its builders, and the parts still to run.
 class _BuildJob {
-  _BuildJob(this.tier, this.anchorBF, this.corridors, this.clearings,
-      this.pending, this.roads, this.nodes, this.nodePoints);
+  _BuildJob(this.tier, this.anchorBF, this.nodes);
   final SprawlTier tier;
   final Vector3 anchorBF;
-  final List<List<Vector3>> corridors;
 
-  /// The colony's staked plots, flat e/n polygons: nothing is built on them.
-  final List<List<double>> clearings;
-  final List<SprawlSectionSnapshot> pending;
-
-  /// The plan's roads and junctions this group draws.
-  final List<SprawlRoadSnapshot> roads;
+  /// The plan's junctions this group draws.
   final List<SprawlNodeSnapshot> nodes;
 
-  /// Every junction of the plan on this body, body-fixed.
-  final List<Vector3> nodePoints;
-  bool roadsQueued = false;
-
-  /// The parts of the section being built, run one per call.
+  /// The parts of the build, run one per call from the end.
   final List<void Function()> steps = [];
-  final MeshBuilder ground = MeshBuilder();
   final MeshBuilder road = MeshBuilder();
   final MeshBuilder walk = MeshBuilder();
   final MeshBuilder solid = MeshBuilder();

@@ -44,12 +44,15 @@ import 'oriented_box.dart';
 /// along the road (for the leg's direction), and what the road is.
 class RoadEnd {
   const RoadEnd(this.at, this.next, this.halfWidthM, this.roadClass,
-      {this.paved = true});
+      {this.paved = true, this.collector = false});
   final Vector3 at;
   final Vector3 next;
   final double halfWidthM;
   final RoadClass roadClass;
   final bool paved;
+
+  /// A subdivision's collector: two of them crossing warrant a roundabout.
+  final bool collector;
 }
 
 /// One leg of a junction: the direction it leaves the node in, and what it is.
@@ -683,8 +686,12 @@ class RoadMesher {
         legs.add(RoadLeg(inward.normalized, e.halfWidthM, e.roadClass,
             paved: e.paved));
       }
-      final control =
-          junctionControlFor([for (final l in legs) l.roadClass]);
+      // Where two collectors cross — all four legs collectors, or three at
+      // a T — a subdivision builds a roundabout, not a four-way stop.
+      final collectors = group.where((e) => e.collector).length;
+      final control = junctionControlFor(
+          [for (final l in legs) l.roadClass],
+          roundaboutPreferred: collectors >= 3);
       if (control == JunctionControl.none) continue;
       out.add(RoadJunction(at, legs, control));
     }

@@ -42,7 +42,6 @@ void main() {
         1, InMemoryVesselRepository(const []),
         system: system, cities: InMemoryCityRepository([city]));
     final a = capture();
-    expect(a.sprawlSections.length, city.sprawl!.sections.length);
     // The plan's roads, plus the plat's own rights-of-way as corridors.
     expect(a.sprawlRoads.length, greaterThanOrEqualTo(city.sprawl!.roads.length));
     // Every road point sits at a real radius of the body — draped, not on
@@ -70,7 +69,7 @@ void main() {
     expect(identical(a.sprawlRoads.first, b.sprawlRoads.first), isTrue);
   });
 
-  test('the plat\'s rights-of-way and its staked plots ride the wire', () {
+  test('the plat\'s rights-of-way ride the wire as corridors', () {
     final snap = WorldSnapshot.capture(
         1, InMemoryVesselRepository(const []),
         system: system, cities: InMemoryCityRepository([city]));
@@ -78,27 +77,19 @@ void main() {
         .where((r) => r.kind == SprawlRoadKind.corridor.index)
         .toList();
     expect(corridors, isNotEmpty, reason: 'the arteries and the expressway');
-    expect(snap.sprawlClearings[city.id], isNotEmpty);
-    final back = WorldSnapshot.fromJson(
-        jsonDecode(jsonEncode(snap.toJson())) as Map<String, dynamic>);
-    expect(back.sprawlClearings[city.id]!.length,
-        snap.sprawlClearings[city.id]!.length);
-    expect(back.copyWithEpoch(5).sprawlClearings.length, snap.sprawlClearings.length);
   });
 
-  test('sections and roads survive the wire', () {
+  test('the sections are plat: their streets ride the wire as roads', () {
     final snap = WorldSnapshot.capture(
         1, InMemoryVesselRepository(const []),
         system: system, cities: InMemoryCityRepository([city]));
+    final collectors = snap.roads.where((r) => r.collector).toList();
+    expect(collectors, isNotEmpty);
     final back = WorldSnapshot.fromJson(
         jsonDecode(jsonEncode(snap.toJson())) as Map<String, dynamic>);
-    expect(back.sprawlSections.length, snap.sprawlSections.length);
+    expect(back.roads.where((r) => r.collector).length, collectors.length);
     expect(back.sprawlRoads.length, snap.sprawlRoads.length);
-    expect(back.sprawlSections.first.use, snap.sprawlSections.first.use);
     expect(back.sprawlRoads.first.overpasses, snap.sprawlRoads.first.overpasses);
-    // The core's outline rides with every section.
-    expect(snap.sprawlSections.first.coreRadii, isNotEmpty);
-    expect(back.sprawlSections.first.coreRadii, snap.sprawlSections.first.coreRadii);
     expect(back.copyWithEpoch(5).sprawlRoads.length, snap.sprawlRoads.length);
   });
 

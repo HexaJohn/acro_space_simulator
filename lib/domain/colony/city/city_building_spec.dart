@@ -231,6 +231,26 @@ const CityBuildingSpec kMegatowerSpec = CityBuildingSpec(
   siteDepthM: 88,
 );
 
+/// A strip mall: one big box and the car park between it and the arterial
+/// it faces, on a plot of its own along the section line. The suburb's
+/// commerce, which is not a corner shop on a house lot.
+///
+/// Not in [kUtilCatalog]: the installation placer stakes one of everything
+/// there around the city's edge, and a strip belongs on an arterial.
+const CityBuildingSpec kStripMallSpec = CityBuildingSpec(
+  type: 'c-med',
+  label: 'Strip Mall',
+  colorArgb: 0xFF4FC3F7,
+  group: 'com',
+  jobs: 30,
+  powerDraw: 14,
+  services: {'leisure': 220},
+  pollution: 0.6,
+  buildCost: 60,
+  siteWidthM: 96,
+  siteDepthM: 112,
+);
+
 /// All hand-placed utilities/services/factories/military/aerospace, grouped.
 /// `unlockPop` gates the advanced ones behind city growth.
 const List<CityBuildingSpec> kUtilCatalog = [
@@ -270,6 +290,13 @@ const List<CityBuildingSpec> kUtilCatalog = [
       colorArgb: 0xFF8BC34A, group: 'svc', jobs: 10, powerDraw: 4,
       inputs: {Commodity.water: 0.5}, outputs: {Commodity.food: 1.0},
       siteWidthM: 400, siteDepthM: 400, siteKind: SiteKind.field),
+  // A quarter section: the 160-acre farm a township survey cuts, four to
+  // the mile square. What the sprawl's farmland is made of.
+  CityBuildingSpec(type: 'farm', label: 'Quarter-Section Farm',
+      colorArgb: 0xFF8BC34A, group: 'svc', jobs: 18, powerDraw: 6,
+      inputs: {Commodity.water: 1.0}, outputs: {Commodity.food: 2.4},
+      buildCost: 70,
+      siteWidthM: 760, siteDepthM: 760, siteKind: SiteKind.field),
   // Industrial Farm: a 2x2 mega-farm. ~4x the yield of a Farm but only ~3x the
   // build cost + ~2.4x the jobs — economy of scale, at the cost of land + sprawl.
   CityBuildingSpec(type: 'farm-big', label: 'Industrial Farm',

@@ -3,6 +3,7 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
+import 'dart:collection' show UnmodifiableListView;
 import 'dart:math' as math;
 
 import 'parcel.dart';
@@ -101,8 +102,31 @@ class CityLayout {
   /// Every parcel, manual first so an override wins any ambiguous hit test.
   List<Parcel> get parcels => [..._manual, ..._auto];
 
-  List<Parcel> get autoParcels => List.unmodifiable(_auto);
-  List<Parcel> get manualParcels => List.unmodifiable(_manual);
+  /// Views, not copies: a colony of half a million lots cannot afford a
+  /// list allocation per look.
+  List<Parcel> get autoParcels => UnmodifiableListView(_auto);
+  List<Parcel> get manualParcels => UnmodifiableListView(_manual);
+
+  /// Every parcel by id, and every parcel by where it is. Rebuilt with the
+  /// plat; the lookups the sim makes per lot per tick go through these
+  /// rather than a scan of the list.
+  final Map<String, Parcel> _byId = {};
+  BoxIndex<Parcel> _lotIndex = BoxIndex<Parcel>();
+
+  Parcel? parcelById(String id) => _byId[id];
+
+  void _reindex() {
+    _byId.clear();
+    _lotIndex = BoxIndex<Parcel>();
+    for (final p in _manual) {
+      _byId[p.id] = p;
+      _lotIndex.add(p, _boxOf(p));
+    }
+    for (final p in _auto) {
+      _byId[p.id] = p;
+      _lotIndex.add(p, _boxOf(p));
+    }
+  }
 
   /// Raw insert: no splitting, no snapping. The LOAD path — a save stores
   /// roads already split at their junctions, and re-splitting on restore
@@ -437,12 +461,15 @@ class CityLayout {
   }
 
   Parcel? addManualParcel(List<Vec2> polygon,
-      {ParcelUse use = ParcelUse.unzoned, bool regenerateLots = true}) {
+      {ParcelUse use = ParcelUse.unzoned,
+      bool regenerateLots = true,
+      (Vec2, Vec2)? frontage}) {
     final p = Parcel(
       id: 'lot-m${_nextId++}',
       polygon: polygon,
       use: use,
       manual: true,
+      frontage: frontage,
     );
     if (_hitsRoad(p)) return null;
     for (final other in _manual) {
@@ -455,7 +482,15 @@ class CityLayout {
     // re-cut once. The caller then owns calling [regenerate], and gets no
     // chance to carry buildings across renames, which is safe only while
     // nothing is built.
-    if (regenerateLots) regenerate();
+    if (regenerateLots) {
+      regenerate();
+    } else {
+      // Findable by id and by place straight away, plat or no plat: the
+      // generator stakes hundreds of plots between two re-cuts and looks
+      // them up by id as it goes.
+      _byId[p.id] = p;
+      _lotIndex.add(p, _boxOf(p));
+    }
     return p;
   }
 
@@ -478,6 +513,7 @@ class CityLayout {
 
   void removeParcel(String id) {
     _manual.removeWhere((p) => p.id == id);
+    _byId.remove(id);
     regenerate();
   }
 
@@ -492,24 +528,24 @@ class CityLayout {
 
   /// Zone a parcel. Returns false for an unknown id.
   bool setUse(String id, ParcelUse use) {
-    var found = false;
-    for (var i = 0; i < _manual.length; i++) {
-      if (_manual[i].id == id) {
-        _manual[i] = _manual[i].copyWith(use: use);
-        found = true;
+    final p = _byId[id];
+    if (p == null) return false;
+    final updated = p.copyWith(use: use);
+    if (p.manual) {
+      final i = _manual.indexOf(p);
+      if (i < 0) return false;
+      _manual[i] = updated;
+    } else {
+      final i = _autoIndex[id];
+      if (i == null || i >= _auto.length || !identical(_auto[i], p)) {
+        return false;
       }
+      // In place: the element changes, the list does not, so a loop over
+      // [autoParcels] that zones as it goes is not disturbed. Zoning half a
+      // million lots by copying the list per lot was the square of that.
+      _auto[i] = updated;
     }
-    if (!found) {
-      final auto = List.of(_auto);
-      for (var i = 0; i < auto.length; i++) {
-        if (auto[i].id == id) {
-          auto[i] = auto[i].copyWith(use: use);
-          _auto = auto;
-          found = true;
-        }
-      }
-    }
-    if (!found) return false;
+    _byId[id] = updated;
     if (use == ParcelUse.unzoned) {
       _uses.remove(id);
     } else {
@@ -518,9 +554,10 @@ class CityLayout {
     return true;
   }
 
-  /// The parcel under a point, or null. Manual lots win.
+  /// The parcel under a point, or null. Manual lots win: they were indexed
+  /// first, and the index answers in insertion order.
   Parcel? parcelAt(Vec2 p) {
-    for (final parcel in parcels) {
+    for (final parcel in _lotIndex.near(Box2.around(p, 0.01))) {
       if (parcel.contains(p)) return parcel;
     }
     return null;
@@ -567,8 +604,15 @@ class CityLayout {
       for (final p in out)
         _uses.containsKey(p.id) ? p.copyWith(use: _uses[p.id]!) : p,
     ];
+    _autoIndex
+      ..clear()
+      ..addEntries([for (var i = 0; i < _auto.length; i++) MapEntry(_auto[i].id, i)]);
+    _reindex();
     yield 1.0;
   }
+
+  /// Position of each auto lot in [_auto], for in-place zoning.
+  final Map<String, int> _autoIndex = {};
 
   /// Lay lots along one road, the way a surveyor actually plats a block.
   ///
