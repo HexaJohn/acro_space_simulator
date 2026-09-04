@@ -98,17 +98,172 @@ bool isBeyondHorizon(
   double radiusM, {
   double marginM = 0,
   double reliefM = 0,
-}) {
-  final inner = math.max(1e-6, radiusM - reliefM);
-  final eye = eyeBF.length;
-  if (eye <= inner) return false;
-  final peak = radiusM + reliefM;
-  final horizonArc = math.acos((inner / eye).clamp(0.0, 1.0)) +
-      math.acos((inner / peak).clamp(0.0, 1.0)) +
-      math.asin((marginM / radiusM).clamp(0.0, 1.0));
-  final cosA = (chunk.centreDirection.dot(eyeBF) / eye).clamp(-1.0, 1.0);
-  return math.acos(cosA) > horizonArc;
+}) =>
+    HorizonTest(eyeBF, radiusM, reliefM: reliefM)
+        .hiddenAt(chunk.centreDirection, marginM: marginM);
+
+/// [isBeyondHorizon] with the eye's half done once, for a pass over
+/// thousands of chunks.
+///
+/// Everything that depends only on the eye — its horizon arc over the inner
+/// ball, the peak allowance — folds into one arc here, with its cosine and
+/// sine. The per-chunk compare is then done on cosines rather than angles:
+/// `acos(cosA) > arc + marginArc` is `cosA < cos(arc + marginArc)`, and with
+/// both halves' cosines and sines in hand that expands to two multiplies. A
+/// chunk's margin arc is a constant of the chunk ([ChunkGeometry] keeps it),
+/// so a cull is one dot product per chunk and no trig at all. The selection
+/// pass used to run the full test — three inverse-trig calls and a fresh
+/// centre direction — three to four times per leaf per reselect.
+class HorizonTest {
+  factory HorizonTest(Vector3 eyeBF, double radiusM, {double reliefM = 0}) {
+    final inner = math.max(1e-6, radiusM - reliefM);
+    final eye = eyeBF.length;
+    if (eye <= inner) {
+      // At or inside the inner ball there is no horizon over it: culls
+      // nothing (a landed eye in a deep DEM basin sits here).
+      return HorizonTest._(radiusM, Vector3.zero, double.infinity, 1, 0);
+    }
+    final peak = radiusM + reliefM;
+    final arc = math.acos((inner / eye).clamp(0.0, 1.0)) +
+        math.acos((inner / peak).clamp(0.0, 1.0));
+    return HorizonTest._(
+        radiusM, eyeBF / eye, arc, math.cos(arc), math.sin(arc));
+  }
+
+  const HorizonTest._(
+      this.radiusM, this._eyeDir, this._arc, this._cosArc, this._sinArc);
+
+  final double radiusM;
+  final Vector3 _eyeDir;
+
+  /// The eye's horizon arc plus the peak allowance; infinite when the eye
+  /// is inside the inner ball and nothing can be hidden.
+  final double _arc;
+  final double _cosArc;
+  final double _sinArc;
+
+  /// Whether nothing is ever hidden from this eye.
+  bool get cullsNothing => _arc == double.infinity;
+
+  /// The chunk at [g] is over the horizon.
+  bool hidden(ChunkGeometry g) =>
+      _hidden(g.centreDir, g.marginArc, g.cosMarginArc, g.sinMarginArc);
+
+  /// The chunk centred on unit [centreDir] with a [marginM] radius is over
+  /// the horizon — the one-off form; [hidden] is the cached one.
+  bool hiddenAt(Vector3 centreDir, {double marginM = 0}) {
+    final m = math.asin((marginM / radiusM).clamp(0.0, 1.0));
+    return _hidden(centreDir, m, math.cos(m), math.sin(m));
+  }
+
+  bool _hidden(Vector3 centreDir, double marginArc, double cosM, double sinM) {
+    if (cullsNothing) return false;
+    // acos never exceeds pi, so an arc past it hides nothing — and the
+    // cosine compare below would wrap and lie there.
+    if (_arc + marginArc >= math.pi) return false;
+    final cosTotal = _cosArc * cosM - _sinArc * sinM;
+    return centreDir.dot(_eyeDir) < cosTotal;
+  }
 }
+
+/// What every pass over a chunk needs of its geometry, computed once per key.
+///
+/// A key's centre direction and circumradius are pure functions of the key
+/// and the body radius, yet the selection pass derived them three to four
+/// times per leaf per reselect — each circumradius five normalisations and
+/// a corner list — across the tree walk, the horizon cull and the distance
+/// sort. [ChunkGeometryCache] hands the same [ChunkGeometry] to all of them.
+class ChunkGeometry {
+  factory ChunkGeometry(ChunkKey key, double radiusM) {
+    final c = key.centreDirection;
+    var maxChord = 0.0;
+    for (final k in key.cornerDirections) {
+      final d = (k - c).length;
+      if (d > maxChord) maxChord = d;
+    }
+    // Same chord as [ChunkKey.circumradiusM]; the margin arc is what
+    // [isBeyondHorizon] derived from it per call.
+    final circ = maxChord * radiusM;
+    final marginArc = math.asin(maxChord.clamp(0.0, 1.0));
+    return ChunkGeometry._(
+        c, c * radiusM, circ, marginArc, math.cos(marginArc), math.sin(marginArc));
+  }
+
+  const ChunkGeometry._(this.centreDir, this.centreBF, this.circumradiusM,
+      this.marginArc, this.cosMarginArc, this.sinMarginArc);
+
+  /// Unit direction through the cell centre, body-fixed.
+  final Vector3 centreDir;
+
+  /// The centre on the datum sphere, body-fixed metres.
+  final Vector3 centreBF;
+
+  /// [ChunkKey.circumradiusM] at the cache's radius.
+  final double circumradiusM;
+
+  /// The horizon margin the circumradius implies, with its cosine and sine
+  /// for [HorizonTest.hidden].
+  final double marginArc;
+  final double cosMarginArc;
+  final double sinMarginArc;
+}
+
+/// [ChunkGeometry] per key, kept across frames for one body radius.
+///
+/// Entries are constants of the key, so they never go stale — only
+/// unbounded. [sweep] keeps the map to the live leaf set once it has grown
+/// past [sweepAbove]: called every reselect, it costs nothing until it fires,
+/// so a long flight around a body does not accumulate every cell it passed.
+class ChunkGeometryCache {
+  ChunkGeometryCache(this.radiusM, {this.sweepAbove = 8192});
+
+  final double radiusM;
+  final int sweepAbove;
+  final Map<ChunkKey, ChunkGeometry> _byKey = {};
+
+  int get length => _byKey.length;
+
+  ChunkGeometry of(ChunkKey key) =>
+      _byKey[key] ??= ChunkGeometry(key, radiusM);
+
+  /// Drop every entry not in [live] if the cache has outgrown [sweepAbove].
+  void sweep(Iterable<ChunkKey> live) {
+    if (_byKey.length <= sweepAbove) return;
+    final keep = <ChunkKey, ChunkGeometry>{};
+    for (final k in live) {
+      final g = _byKey[k];
+      if (g != null) keep[k] = g;
+    }
+    _byKey
+      ..clear()
+      ..addAll(keep);
+  }
+}
+
+/// How far the eye may move before selection must rerun.
+///
+/// Selection changes only when a chunk's apparent size crosses the split or
+/// merge threshold, and apparent size moves with eye displacement over the
+/// distance to the chunk — the nearest of which sits about [heightM] away,
+/// the eye's height over the ground beneath it. So a [fraction] of the height
+/// is a fraction of every apparent size, and with the split/merge hysteresis
+/// at 2.2x a tenth flips only chunks that were already due.
+///
+/// [floorM] covers the ground: below it nothing near can split anyway (the
+/// finest selectable cells are hundreds of metres across), and what does
+/// change sits kilometres out. Height below the ground (an eye in a hill)
+/// counts as zero.
+///
+/// Speed is not an input. Distance since the last selection integrates it: a
+/// fast craft crosses the threshold in fewer frames, a slow one in more, which
+/// is the whole effect wanted. The periodic reselect stays as the backstop for
+/// what this gate is not about — the horizon's leading edge.
+double reselectDistanceM({
+  required double heightM,
+  required double fraction,
+  required double floorM,
+}) =>
+    math.max(floorM, fraction * math.max(0.0, heightM));
 
 /// A demand for detail that screen-space selection would never produce on its
 /// own: refine whatever leaf covers [direction] down to at least [level].

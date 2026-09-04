@@ -540,6 +540,25 @@ class TerrainNodes {
   /// the safety net, not the mechanism.
   static int selectEveryFrames = 30;
 
+  /// Reselect once the eye has moved this fraction of its height over the
+  /// ground beneath it, never less than [reselectFloorM] — see
+  /// [reselectDistanceM] for why height is the right scale and speed is not
+  /// an input. The old gate was 2% of the eye-to-anchor range, which any
+  /// drag and any moving craft crossed every frame: selection ran at frame
+  /// rate whenever anything moved, 15 ms a time over a city. With the
+  /// periodic reselect as backstop, the worst case is now two runs a second.
+  static double reselectHeightFraction = 0.1;
+  static double reselectFloorM = 100;
+
+  /// The distance the eye may drift before the next reselect, fixed at the
+  /// last one (height is sampled then; a descent crosses it as vertical
+  /// motion, so it self-corrects).
+  double _selThresholdM = 0;
+
+  /// Per-key geometry shared by the tree walk, the horizon cull and the
+  /// distance sort. Rebuilt on a body switch or a radius change.
+  ChunkGeometryCache? _geom;
+
   /// Section timings for the last frame, updated when [profile] is true —
   /// readable through `ext.acro.terrain` next to [debugLine].
   static bool profile = false;
@@ -915,20 +934,24 @@ class TerrainNodes {
       _refineEditCount = -1; // refine targets depend on the boost knob
       _selectForce = true;
     }
+    var geom = _geom;
+    if (geom == null || geom.radiusM != field.radius) {
+      geom = _geom = ChunkGeometryCache(field.radius);
+    }
+    // The eye's half of the horizon test, once per frame; the per-chunk half
+    // is a dot product against the cached margin (see HorizonTest).
+    // reliefM matters: on a DEM body the ground — and the eye standing on
+    // it — can sit kilometres below the datum sphere.
+    final horizon =
+        HorizonTest(eyeBF, field.radius, reliefM: field.amplitude);
     double apparentPx(ChunkKey k) {
       if (camera == null) return 0;
-      final radius = k.circumradiusM(field.radius);
+      final g = geom!.of(k);
       // Over the horizon: not worth detail, and the margin keeps a chunk whose
       // centre has just dipped under from popping while its near edge shows.
-      // reliefM matters: on a DEM body the ground — and the eye standing on
-      // it — can sit kilometres below the datum sphere.
-      if (isBeyondHorizon(k, eyeBF, field.radius,
-          marginM: radius, reliefM: field.amplitude)) {
-        return 0;
-      }
-      final centreWorld =
-          bodyWorld + bodyQuat.rotate(k.centreDirection * field.radius);
-      return camera.radiusPx(centreWorld - origin.focusWorld, radius);
+      if (horizon.hidden(g)) return 0;
+      final centreWorld = bodyWorld + bodyQuat.rotate(g.centreBF);
+      return camera.radiusPx(centreWorld - origin.focusWorld, g.circumradiusM);
     }
     // --- Deformation: forced refinement + invalidation ---------------------
     // A crater is orders of magnitude smaller than the cells LOD picks, so its
@@ -1083,8 +1106,7 @@ class TerrainNodes {
     final probePx = camera == null
         ? 0.0
         : camera.radiusPx(anchorWorld - origin.focusWorld, 1000.0);
-    final moved = (eyeBF - _selEyeBF).length >
-        math.max(1.0, 0.02 * (eyeBF - anchorPoint).length);
+    final moved = (eyeBF - _selEyeBF).length > _selThresholdM;
     final probeMoved = _selProbePx < 0 ||
         (probePx - _selProbePx).abs() > math.max(_selProbePx, 1e-6) * 0.02;
     // The grid-only toggle rebuilds the placeholder set, which only happens
@@ -1103,8 +1125,20 @@ class TerrainNodes {
       _selEyeBF = eyeBF;
       _selProbePx = probePx;
       _selFrame = _frame;
+      // Height over the ground UNDER THE EYE, not over the datum: on a DEM
+      // body the maria sit a kilometre below it, where datum height goes
+      // negative for a walker. One field sample per reselect.
+      final eyeDir =
+          eyeBF.lengthSquared > 0 ? eyeBF.normalized : Vector3.unitZ;
+      final groundR = field.groundRadiusAt(eyeDir.x, eyeDir.y, eyeDir.z);
+      _selThresholdM = reselectDistanceM(
+        heightM: eyeBF.length - groundR,
+        fraction: reselectHeightFraction,
+        floorM: reselectFloorM,
+      );
 
       final leaves = _tree!.update(apparentPx, refine: refine);
+      geom.sweep(leaves);
 
       // --- Visibility: the whole body, not a patch under the craft ----------
       // Every leaf this side of the horizon is meshed. LOD does the work of
@@ -1114,20 +1148,15 @@ class TerrainNodes {
       // spatial cull needed, because a sphere hides its own far side.
       final visible = <ChunkKey>[];
       for (final k in leaves) {
-        final radius = k.circumradiusM(field.radius);
-        if (isBeyondHorizon(k, eyeBF, field.radius,
-            marginM: radius, reliefM: field.amplitude)) {
-          continue;
-        }
+        if (horizon.hidden(geom.of(k))) continue;
         visible.add(k);
       }
       // Nearest first: it decides both what gets meshed within this frame's
       // budget and what survives the resident cap. Distances are computed
-      // once per chunk, not twice per comparison — centreDirection allocates,
-      // and a deformation-refined set sorts hundreds of keys.
+      // once per chunk, not twice per comparison — a deformation-refined set
+      // sorts hundreds of keys.
       final distByKey = <ChunkKey, double>{
-        for (final k in visible)
-          k: (k.centreDirection * field.radius - anchorPoint).length,
+        for (final k in visible) k: (geom.of(k).centreBF - anchorPoint).length,
       };
       visible.sort((x, y) => distByKey[x]!.compareTo(distByKey[y]!));
       final wanted = visible.length > maxResidentChunks
@@ -1169,7 +1198,7 @@ class TerrainNodes {
       final stillLoading = <ChunkKey>{};
       for (final m in missingNow) {
         ChunkKey? nearest;
-        for (final a in m.ancestors) {
+        for (var a = m.parent; a != null; a = a.parent) {
           if (_chunks.containsKey(a)) {
             nearest = a;
             break;
@@ -1197,8 +1226,10 @@ class TerrainNodes {
         if (protected.contains(k)) return true;
         // The fine stand-in for a pending merge: a resident whose own
         // ancestor is the missing chunk. Keep every such descendant — each
-        // covers a distinct part of the missing region.
-        for (final a in k.ancestors) {
+        // covers a distinct part of the missing region. (Walk parents rather
+        // than allocate the ancestor list: this runs per resident per
+        // reselect.)
+        for (var a = k.parent; a != null; a = a.parent) {
           if (missingNow.contains(a)) return true;
         }
         return false;
@@ -1256,7 +1287,7 @@ class TerrainNodes {
         ];
         final evictDist = <ChunkKey, double>{
           for (final k in evictable)
-            k: (k.centreDirection * field.radius - anchorPoint).length,
+            k: (geom.of(k).centreBF - anchorPoint).length,
         };
         evictable.sort(
             (x, y) => evictDist[y]!.compareTo(evictDist[x]!)); // farthest 1st
@@ -1491,7 +1522,8 @@ class TerrainNodes {
       // and fresh submissions (search budget). Split so a stall can be
       // pinned on one of these instead of one opaque `stream` number.
       profileLine = 'terrain: pre ${profPreUs ~/ 1000}ms '
-          'sel ${profSelUs ~/ 1000}ms${reselect ? '*' : ''} '
+          'sel ${profSelUs ~/ 1000}ms${reselect ? '*' : ''}'
+          '/${_selThresholdM.round()}m '
           'arr ${profArriveUs ~/ 1000}ms (add${profAddUs ~/ 1000}ms '
           'mask${_maskUsThisFrame ~/ 1000}ms/mask$_maskCallsThisFrame'
           '/t$_maskTouchesThisFrame '
@@ -1710,8 +1742,10 @@ class TerrainNodes {
   /// refinement is what descends to them.
   int _resolutionFor(ChunkKey k, double radiusM) {
     if (_nearBrushes.isEmpty || editResBoost <= 1) return resolution;
-    final centre = k.centreDirection * radiusM;
-    final reach = k.circumradiusM(radiusM);
+    final geom = _geom;
+    final g = geom != null && geom.radiusM == radiusM ? geom.of(k) : null;
+    final centre = g?.centreBF ?? k.centreDirection * radiusM;
+    final reach = g?.circumradiusM ?? k.circumradiusM(radiusM);
     final chunkVoxelM = reach * 2.0 / resolution;
     var boost = 1;
     for (final b in _nearBrushes) {
@@ -2216,6 +2250,8 @@ class TerrainNodes {
     _selBareAncestors = const {};
     _selStillLoading = const {};
     _selectForce = true;
+    _selThresholdM = 0;
+    _geom = null;
     _composedField = null;
     _composedEditsId = _unset;
     _bodyId = null;

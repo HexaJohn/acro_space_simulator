@@ -301,4 +301,136 @@ void main() {
       expect(isBeyondHorizon(edge, eye, r, marginM: 100000), isFalse);
     });
   });
+
+  Vector3 randomDir(math.Random rng) {
+    while (true) {
+      final d = Vector3(rng.nextDouble() * 2 - 1, rng.nextDouble() * 2 - 1,
+          rng.nextDouble() * 2 - 1);
+      if (d.length > 0.1) return d.normalized;
+    }
+  }
+
+  group('HorizonTest', () {
+    const r = 1.7374e6;
+
+    // The per-chunk form as it stood before the split: three inverse-trig
+    // calls per chunk. The cached compare must be the same predicate.
+    double referenceSlack(Vector3 centreDir, Vector3 eye, double marginM,
+        double reliefM) {
+      final inner = math.max(1e-6, r - reliefM);
+      final eyeLen = eye.length;
+      // Inside the inner ball nothing is hidden — negative slack, always.
+      if (eyeLen <= inner) return double.negativeInfinity;
+      final peak = r + reliefM;
+      final arc = math.acos((inner / eyeLen).clamp(0.0, 1.0)) +
+          math.acos((inner / peak).clamp(0.0, 1.0)) +
+          math.asin((marginM / r).clamp(0.0, 1.0));
+      final cosA = (centreDir.dot(eye) / eyeLen).clamp(-1.0, 1.0);
+      return math.acos(cosA) - arc; // > 0 means hidden
+    }
+
+    test('the cached, trig-free compare agrees with the per-chunk form', () {
+      final rng = math.Random(3);
+      var checked = 0, hiddenCount = 0;
+      for (var i = 0; i < 200; i++) {
+        // Altitudes from below the maria to well out in orbit.
+        final alt = const [-2500.0, 100.0, 5000.0, 100000.0, r * 3][i % 5] *
+            (0.5 + rng.nextDouble());
+        final eye = randomDir(rng) * (r + alt);
+        for (final relief in const [0.0, 9000.0]) {
+          final cache = ChunkGeometryCache(r);
+          final horizon = HorizonTest(eye, r, reliefM: relief);
+          for (var j = 0; j < 40; j++) {
+            final k = chunkAt(randomDir(rng), rng.nextInt(9));
+            final g = cache.of(k);
+            for (final margin in [g.circumradiusM, 0.0]) {
+              final slack =
+                  referenceSlack(k.centreDirection, eye, margin, relief);
+              if (slack.abs() < 1e-9) continue; // on the knife edge
+              final want = slack > 0;
+              final got = margin == 0.0
+                  ? horizon.hiddenAt(k.centreDirection)
+                  : horizon.hidden(g);
+              expect(got, want,
+                  reason: 'eye $eye relief $relief chunk $k margin $margin');
+              expect(
+                  isBeyondHorizon(k, eye, r,
+                      marginM: margin, reliefM: relief),
+                  want,
+                  reason: 'the one-off form must agree too');
+              checked++;
+              if (want) hiddenCount++;
+            }
+          }
+        }
+      }
+      expect(checked, greaterThan(10000));
+      expect(hiddenCount, greaterThan(1000), reason: 'both outcomes seen');
+      expect(hiddenCount, lessThan(checked - 1000));
+    });
+
+    test('an eye inside the inner ball culls nothing', () {
+      final buried = const Vector3(0, 0, 1) * (r - 20000);
+      final horizon = HorizonTest(buried, r, reliefM: 9000);
+      expect(horizon.cullsNothing, isTrue);
+      final cache = ChunkGeometryCache(r);
+      for (final k in ChunkKey.roots) {
+        expect(horizon.hidden(cache.of(k)), isFalse);
+      }
+    });
+  });
+
+  group('ChunkGeometry', () {
+    const r = 1.7374e6;
+
+    test('matches the key\'s own centre and circumradius, computed once', () {
+      final rng = math.Random(5);
+      final cache = ChunkGeometryCache(r);
+      for (var i = 0; i < 200; i++) {
+        final k = chunkAt(randomDir(rng), rng.nextInt(13));
+        final g = cache.of(k);
+        expect((g.centreDir - k.centreDirection).length, lessThan(1e-15));
+        expect(g.circumradiusM, closeTo(k.circumradiusM(r), 1e-6));
+        expect((g.centreBF - k.centreDirection * r).length, lessThan(1e-6));
+        expect(g.marginArc,
+            closeTo(math.asin((g.circumradiusM / r).clamp(0.0, 1.0)), 1e-12));
+        expect(identical(cache.of(k), g), isTrue,
+            reason: 'computed once, handed out again');
+      }
+    });
+
+    test('sweep keeps the live set once the cache outgrows its bound', () {
+      final cache = ChunkGeometryCache(r, sweepAbove: 64);
+      final live = [
+        for (var u = 0; u < 8; u++)
+          for (var v = 0; v < 8; v++) ChunkKey(CubeFace.posZ, 3, u, v),
+      ];
+      final first = cache.of(live[0]);
+      for (final k in live) {
+        cache.of(k);
+      }
+      cache.sweep(live);
+      expect(cache.length, 64, reason: 'at the bound nothing is dropped');
+      for (var u = 0; u < 16; u++) {
+        cache.of(ChunkKey(CubeFace.negZ, 4, u, 0));
+      }
+      expect(cache.length, 80);
+      cache.sweep(live);
+      expect(cache.length, 64, reason: 'the cells passed by are gone');
+      expect(identical(cache.of(live[0]), first), isTrue,
+          reason: 'live entries survive as the same objects');
+    });
+  });
+
+  group('reselectDistanceM', () {
+    test('scales with height over the ground, floored on the ground', () {
+      double d(double h) =>
+          reselectDistanceM(heightM: h, fraction: 0.1, floorM: 100);
+      expect(d(400000), 40000, reason: 'orbit: tens of km between reselects');
+      expect(d(5000), 500);
+      expect(d(1000), 100, reason: 'low flight: a tenth, which is the floor');
+      expect(d(2), 100, reason: 'a car: the floor');
+      expect(d(-900), 100, reason: 'below ground counts as on it');
+    });
+  });
 }

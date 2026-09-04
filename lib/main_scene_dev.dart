@@ -466,6 +466,12 @@ Future<void> main() async {
     if (uploads != null && uploads >= 1) {
       TerrainNodes.uploadBudgetPerFrame = uploads.round();
     }
+    // Selection cadence: reselect once the eye has moved this fraction of
+    // its height over the ground, never less than the floor (metres).
+    final rf = num('reselectHeightFraction');
+    if (rf != null && rf >= 0) TerrainNodes.reselectHeightFraction = rf;
+    final rfl = num('reselectFloorM');
+    if (rfl != null && rfl >= 0) TerrainNodes.reselectFloorM = rfl;
     // skirtVoxels=0 shows the LOD cracks the apron hides — the 4b A/B.
     final skirt = num('skirtVoxels');
     if (skirt != null && skirt >= 0) TerrainNodes.skirtVoxels = skirt;
