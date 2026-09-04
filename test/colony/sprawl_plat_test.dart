@@ -56,26 +56,38 @@ void main() {
 
   test('a collector runs out to the county highway and ends on its junction',
       () {
+    final highways = city.layout.roads
+        .where((r) => r.roadClass == RoadClass.avenue && !r.platsLots)
+        .toList();
+    expect(highways, isNotEmpty);
     var joined = 0;
     for (final r in city.layout.roads.where((r) => r.collector)) {
-      for (final end in [r.controls.first, r.controls.last]) {
-        if (plan.nodes.any((n) => n.at.distanceTo(end) < 6)) joined++;
+      final s = city.layout.roadIndex.byId(r.id)!;
+      for (final end in [s.sampleAt(0), s.sampleAt(s.sampleCount - 1)]) {
+        // A highway piece ends where the collector does: a real junction.
+        if (highways.any((h) {
+          final hs = city.layout.roadIndex.byId(h.id)!;
+          return hs.sampleAt(0).distanceTo(end) < 1.5 ||
+              hs.sampleAt(hs.sampleCount - 1).distanceTo(end) < 1.5;
+        })) {
+          joined++;
+        }
       }
     }
     expect(joined, greaterThan(4));
   });
 
   test('no street runs in an interstate corridor or over a staked plot', () {
-    final corridors = plan.roads
-        .where((r) =>
-            r.kind == SprawlRoadKind.interstate ||
-            r.kind == SprawlRoadKind.ramp)
+    final corridors = city.layout.roads
+        .where((r) => r.roadClass.isExpressway || r.roadClass == RoadClass.ramp)
+        .map((r) => city.layout.roadIndex.byId(r.id)!.samples)
         .toList();
+    expect(corridors, isNotEmpty);
     double toCorridor(Vec2 p) {
       var best = double.infinity;
       for (final c in corridors) {
-        for (var i = 1; i < c.points.length; i++) {
-          final a = c.points[i - 1], b = c.points[i];
+        for (var i = 1; i < c.length; i++) {
+          final a = c[i - 1], b = c[i];
           final ab = b - a;
           final len2 = ab.dot(ab);
           final t = len2 < 1e-12

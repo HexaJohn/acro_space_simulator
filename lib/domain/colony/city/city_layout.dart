@@ -245,6 +245,12 @@ class CityLayout {
     List<(double, double)> bridges = const [],
     double? startHalfWidthM,
     double? endHalfWidthM,
+    // How near each of this road's ends nothing is bridged: an expressway
+    // has no room to climb within [bridgeEndClearM] of where it ends —
+    // but a piece laid to meet another end to end (the seam where its
+    // lanes drop) ends nowhere, and passes zero.
+    double bridgeClearStartM = bridgeEndClearM,
+    double bridgeClearEndM = bridgeEndClearM,
     // Laid in vacuum: pedestrians get a sealed tube, not a pavement. Captured
     // here because it is a property of when the road was BUILT.
     bool sealed = false,
@@ -324,12 +330,17 @@ class CityLayout {
         if (!ramp && (newX || oldX)) {
           crossings.add(RoadCrossing(other.id, sNew, sOld, at, bridged: true));
           if (oldX) {
-            if (sOld > bridgeEndClearM && sOld < rec.lengthM - bridgeEndClearM) {
+            // The existing expressway's ends: only a TRUE end — one no
+            // other road ends on — needs the clearance. A piece cut at a
+            // merge or a lane drop carries on past its own end.
+            final clearA = _isFreeEnd(rec, true) ? bridgeEndClearM : 0.0;
+            final clearB = _isFreeEnd(rec, false) ? bridgeEndClearM : 0.0;
+            if (sOld > clearA && sOld < rec.lengthM - clearB) {
               (bridgeExisting[other.id] ??= [])
                   .add((sOld - bridgeHalfM, sOld + bridgeHalfM));
             }
-          } else if (sNew > bridgeEndClearM &&
-              sNew < newCum.last - bridgeEndClearM) {
+          } else if (sNew > bridgeClearStartM &&
+              sNew < newCum.last - bridgeClearEndM) {
             newBridges.add((sNew - bridgeHalfM, sNew + bridgeHalfM));
           }
           return;
@@ -447,6 +458,22 @@ class CityLayout {
     if (renamed.isNotEmpty) regenerate(); // re-apply the moved zoning
 
     return (roadId: id, renamedLots: renamed, crossings: distinct);
+  }
+
+  /// Whether the [start] or the end of [rec] is a free end: no other road
+  /// ends within a couple of metres of it.
+  bool _isFreeEnd(IndexedRoad rec, bool start) {
+    if (rec.sampleCount == 0) return true;
+    final p = rec.sampleAt(start ? 0 : rec.sampleCount - 1);
+    var free = true;
+    _index.visit(Box2.around(p, 3), 0, (slot, other, seg) {
+      if (!free || identical(other, rec) || other.sampleCount == 0) return;
+      if (other.sampleAt(0).distanceTo(p) < 3 ||
+          other.sampleAt(other.sampleCount - 1).distanceTo(p) < 3) {
+        free = false;
+      }
+    });
+    return free;
   }
 
   static bool _inRanges(double s, List<(double, double)> ranges) {

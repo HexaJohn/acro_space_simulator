@@ -9,6 +9,7 @@ import 'package:acro_space_simulator/adapters/repositories/in_memory_repositorie
 import 'package:acro_space_simulator/adapters/repositories/in_memory_world_repositories.dart';
 import 'package:acro_space_simulator/application/snapshot/world_snapshot.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_config.dart';
+import 'package:acro_space_simulator/domain/colony/city/city_generator.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/colony/city/sprawl_plan.dart';
@@ -34,19 +35,21 @@ void main() {
     }
   });
 
-  test('the flag survives the splits a commit makes, and a street cannot '
+  test('the flag survives the splits a commit makes, and a ramp cannot '
       'take it', () {
     final city = colony();
     city.commitRoad(const [Vec2(-400, 0), Vec2(400, 0)], RoadClass.expressway6,
         soundWalls: true);
-    city.commitRoad(const [Vec2(0, -300), Vec2(0, 300)], RoadClass.street,
+    // A ramp meets an expressway at grade and cuts it (a street would pass
+    // under a bridge and cut nothing).
+    city.commitRoad(const [Vec2(0, -300), Vec2(0, 300)], RoadClass.ramp,
         soundWalls: true);
     final walled = city.layout.roads.where((r) => r.soundWalls).toList();
     expect(walled, isNotEmpty);
     expect(walled.every((r) => r.roadClass == RoadClass.expressway6), isTrue);
     // Both pieces of the expressway either side of the crossing keep it.
     expect(walled.length, greaterThanOrEqualTo(2));
-    expect(city.layout.roads.where((r) => r.roadClass == RoadClass.street)
+    expect(city.layout.roads.where((r) => r.roadClass == RoadClass.ramp)
         .every((r) => !r.soundWalls), isTrue);
   });
 
@@ -68,9 +71,12 @@ void main() {
     expect(wire.roads.where((r) => r.soundWalls).length, 1);
   });
 
-  test('the plan walls an expressway where it runs past housing, and '
+  test('the generator walls an expressway where it runs past housing, and '
       'nowhere else', () {
-    final plan = SprawlPlan.generate(const SprawlSpec(seed: 3, coreRadiusM: 1100));
+    final city = const CityGenerator().generate(
+        const CityGenSpec(blocksAcross: 2, seed: 9, sprawlMiles: 8),
+        bodies: bodies);
+    final plan = city.sprawl!;
     SprawlSection? sectionAt(Vec2 p) {
       for (final s in plan.sections) {
         if ((p.e - s.centre.e).abs() <= s.halfM && (p.n - s.centre.n).abs() <= s.halfM) {
@@ -80,31 +86,17 @@ void main() {
       return null;
     }
 
-    // The middle of a piece BY ARC LENGTH, which is what the plan judges by.
-    Vec2 midpoint(List<Vec2> pts) {
-      var total = 0.0;
-      for (var i = 1; i < pts.length; i++) {
-        total += pts[i].distanceTo(pts[i - 1]);
-      }
-      var acc = 0.0;
-      for (var i = 1; i < pts.length; i++) {
-        final seg = pts[i].distanceTo(pts[i - 1]);
-        if (acc + seg >= total / 2) {
-          final t = seg < 1e-9 ? 0.0 : (total / 2 - acc) / seg;
-          return pts[i - 1] + (pts[i] - pts[i - 1]) * t;
-        }
-        acc += seg;
-      }
-      return pts.last;
-    }
-
     var walled = 0, open = 0;
-    for (final r in plan.roads) {
+    for (final r in city.layout.roads) {
       if (!r.roadClass.canHaveSoundWalls) {
         expect(r.soundWalls, isFalse, reason: r.id);
         continue;
       }
-      final mid = midpoint(r.points);
+      if (!r.roadClass.isExpressway) continue;
+      // The middle of the piece by its samples, which is what the
+      // generator judges by.
+      final rec = city.layout.roadIndex.byId(r.id)!;
+      final mid = rec.sampleAt(rec.sampleCount ~/ 2);
       final s = sectionAt(mid);
       final housing = s != null && s.use == SprawlUse.residential && s.density >= 0.4;
       if (r.soundWalls) {
@@ -116,17 +108,5 @@ void main() {
     }
     expect(walled, greaterThan(0));
     expect(open, greaterThan(0));
-    // On the wire too.
-    expect(SprawlRoadSnapshot.fromJson(
-      SprawlRoadSnapshot(
-        colonyId: 'c',
-        body: 'earth',
-        points: const [0, 0, 0, 1, 1, 1],
-        kind: SprawlRoadKind.interstate.index,
-        halfWidthM: 15.8,
-        roadClassIndex: RoadClass.expressway6.index,
-        soundWalls: true,
-      ).toJson(),
-    ).soundWalls, isTrue);
   });
 }

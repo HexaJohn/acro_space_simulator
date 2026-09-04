@@ -1,6 +1,7 @@
 # Road Network Overhaul
 
-**Status:** phase 1 landed (see §6). **Goal:** one real, interconnected
+**Status:** phase 1 landed (§6); the plat and the sprawl are ONE model
+(§8, 2026-09-04). **Goal:** one real, interconnected
 traffic network across the whole colony — the platted core and the twenty-mile
 sprawl alike — with the road classes, interchanges and junction controls of a
 city builder, drawn by one pipeline so nothing reads as a "high-res asset
@@ -340,3 +341,54 @@ raised medians with planting on avenues, bus bays at collector T's.
   radial drafts and drops cuts that fall on the deck.
 - The sprawl's `_syncTraffic` range gate keys on the road's end points in the
   body frame; a 30 km interstate piece is never "near".
+
+## 8. One plat (2026-09-04)
+
+The two-model split in §0 — `CityLayout` for the core, `SprawlPlan` for the
+sprawl — is gone. Everything past the outline is plat, laid by the generator
+through the same `commitRoad`, cut by the same subdivider, built through the
+same placement, drawn by the same renderer. What made that affordable:
+
+- **The plat scales.** `CityLayout` keeps a `SegmentIndex` of every road's
+  samples (a straight road is one segment) and a `BoxIndex` of the lots cut
+  so far; every "what is near this?" — crossings, depth rays, corner
+  clipping, side streets, curb distance, the connectivity walk — is local.
+  Decimation is Douglas-Peucker, so a straight street is its two ends. A
+  96x96 grid (18.6k roads, 46k lots) lays and plats in 2.4 s.
+- **A road says how it is platted.** `RoadSpline.lotFrontageM/lotDepthM`,
+  `frontsLots`, `collector`, `graded`, `bridges`,
+  `startHalfWidthM/endHalfWidthM`. A suburb's street cuts house lots; a
+  county highway fronts nothing; the sprawl's streets, lots, strips and
+  farms are draped, not graded (the shaper skips them — 24k brushes on a
+  6-mile city, else).
+- **commitRoad knows the expressway's rule.** A road crossing an expressway
+  is bridged over, neither cut; two expressways, the earlier goes over; a
+  ramp is the exception. Each end may decline to snap (a merge on the edge);
+  `splitRoadAt` makes a merge; the commit reports its crossings, which is
+  what the interchanges are placed from.
+- **The generator lays the sprawl.** `_laySprawlRoads`: county grid, the
+  railway on, interstates (six lanes to the outline, four beyond, the deck
+  descent, the beltway ring), cloverleafs then diamonds — spaced from each
+  other and from other highways, ramps built ALONG the expressway so a bend
+  never puts one across the centreline — the core's diamonds, the slip
+  ramps, sound walls by section. `_laySections`: each mile square's streets
+  (collectors to a real highway junction), lots by a suburb's frontage,
+  houses/shops/works by density, strip malls and quarter-section farms as
+  plots. `SprawlPlan` is zoning only: outline and sections; interchange
+  points ride the spec like the plots do.
+- **One tiled renderer.** `CityNodes` buckets the frame into two-mile tiles
+  of the body's frame, tiers them by distance (near/mid/far), builds them
+  nearest-first within a frame budget, hangs them under one root per body,
+  and draws junctions from every road end that falls in the tile.
+  `SprawlNodes` and `SprawlSectionBuilder` are deleted; the wire carries no
+  sprawl lists.
+
+Measured in the studio: a 6-mile, 7.7k-building city draws at 0.5-3.6 ms
+in the city pass; a 20-mile, 110k-building one generates in ~100 s and
+draws once its tiles have built.
+
+Still open, for the next passes: the wire re-samples every road and lot
+per capture (cache per layout version); the sim walks every lot per tick
+(stagger); saves store every road and lot (seed + deltas); house lots take
+`r-low`'s housing count (a detached-house spec); parkland sections are bare
+ground; the studio's "Sprawl" slider could read "Extent".

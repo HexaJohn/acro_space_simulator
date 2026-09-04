@@ -33,7 +33,6 @@ import 'scene_textures.dart';
 import 'star_bloom_nodes.dart';
 import 'walker_nodes.dart';
 import 'city/city_nodes.dart';
-import 'city/sprawl_nodes.dart';
 import 'scatter/scatter_nodes.dart';
 import 'terrain/terrain_nodes.dart';
 import 'vessel_nodes.dart';
@@ -71,7 +70,6 @@ class SceneSync {
     _terrain = TerrainNodes(scene);
     _scatter = ScatterNodes(scene);
     _city = CityNodes(scene);
-    _sprawl = SprawlNodes(scene);
     _starBloom = StarBloomNodes(scene);
   }
 
@@ -94,7 +92,6 @@ class SceneSync {
   late final TerrainNodes _terrain;
   late final ScatterNodes _scatter;
   late final CityNodes _city;
-  late final SprawlNodes _sprawl;
   late final StarBloomNodes _starBloom;
 
   final FloatingOrigin origin = FloatingOrigin();
@@ -245,10 +242,6 @@ class SceneSync {
     // built, so they belong in the same group — a city placed against last
     // frame's relief would visibly float after a chunk swap.
     _city.update(snap, origin, focusWorld: origin.focusWorld);
-    // The sprawl drapes on the base terrain, brushes left out (see
-    // SprawlNodes); without a field to hand it stands flat at each section's
-    // own centre height.
-    _sprawl.update(snap, origin, focusWorld: origin.focusWorld);
     mark('city');
     _skybox.update(
         cameraRangeKm:

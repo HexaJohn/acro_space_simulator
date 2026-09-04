@@ -28,6 +28,7 @@ import '../../shared/vector3.dart';
 import '../../universe/celestial_body.dart';
 import 'city_building_spec.dart';
 import 'city_config.dart';
+import 'city_layout.dart';
 import 'city_sim.dart';
 import 'parcel.dart';
 import 'spatial_index.dart';
@@ -422,10 +423,23 @@ class CityBuild {
     // cuts them all. The plan still lays the roads at the mile scale and
     // zones the sections; the sections' own streets, lots, houses, strips,
     // sheds and farms are the plat's from here on.
+    // The sprawl's mile-scale network first — county highways, the railway
+    // on, the interstates with their bridges and interchanges — so the
+    // sections' collectors have a real highway to end on. Where the
+    // interchanges landed goes on the spec, the way the plots did: the
+    // zoning puts commerce round them.
+    yield (phase: 'laying the county grid', fraction: 0.485);
+    if (sim.sprawlSpec != null) {
+      final interchanges = const CityGenerator()._laySprawlRoads(sim);
+      sim.sprawlSpec = sim.sprawlSpec!.copyWith(interchanges: [
+        for (final p in interchanges) [p.e, p.n],
+      ]);
+    }
     yield (phase: 'platting the sprawl', fraction: 0.49);
     final sectionRoads = <String, int>{};
     final plan = sim.sprawl;
     if (plan != null) {
+      const CityGenerator()._wallExpressways(sim, plan);
       sectionRoads.addAll(
           const CityGenerator()._laySections(sim, spec, outline, plan));
     }
@@ -1023,12 +1037,785 @@ class CityGenerator {
     return i < 0 ? id : id.substring(0, i);
   }
 
-  static double _segDist(Vec2 p, Vec2 a, Vec2 b) {
-    final ab = b - a;
-    final len2 = ab.dot(ab);
-    final t = len2 < 1e-12 ? 0.0 : ((p - a).dot(ab) / len2).clamp(0.0, 1.0);
-    return (a + ab * t).distanceTo(p);
+  // ---- The sprawl's roads ----------------------------------------------------
+
+  /// How far along a county highway from the crossing a diamond's ramps
+  /// land: the ramp terminal, a signalised T on the highway.
+  static const double diamondTerminalM = 110;
+
+  /// How far along the expressway from the crossing a diamond's ramps
+  /// merge with it.
+  static const double diamondMergeM = 420;
+
+  /// A cloverleaf's loop radius, and the radius of its outer connectors.
+  static const double loopRadiusM = 75;
+  static const double connectorRadiusM = 400;
+
+  /// How far past the outline an interstate runs on into the country: far
+  /// enough that its end is never in the same view as the city.
+  static double sprawlOutreachFor(SprawlSpec s) =>
+      math.max(8000.0, s.radiusM * 0.6);
+
+  /// Lay the sprawl's mile-scale network as plat.
+  ///
+  /// The county highways on the section grid, broken at the core and at
+  /// every staked plot; the railway carried on from the plat's line; the
+  /// interstates — the axial radials from the core's central avenues, the
+  /// diagonals from the first grid crossing clear of it, the beltway at
+  /// half the reach — six lanes to the outline and four beyond, tapering
+  /// at the drop; a diamond wherever an interstate crosses a county
+  /// highway and a cloverleaf where it crosses another, a mile or more
+  /// apart; the core's own diamonds on the expressway through it, their
+  /// ramps climbing to the deck; and the slip ramps its frontage roads
+  /// become where the deck comes down.
+  ///
+  /// Every road goes through [CitySim.commitRoad]: it splits where it
+  /// crosses, an expressway bridges whatever crosses it, a ramp's terminal
+  /// cuts the road it lands on into a signalised T, and its merge splits
+  /// the expressway it joins. What was a graph the plan built for itself
+  /// is the plat's own topology. Returns where the interchanges are.
+  List<Vec2> _laySprawlRoads(CitySim city) {
+    final s = city.sprawlSpec;
+    if (s == null) return const [];
+    final layout = city.layout;
+    final outline = SprawlPlan.outlineOf(s);
+    final rnd = math.Random(s.seed * 104729 + 7);
+    final sectionM = s.sectionM;
+    final n = SprawlPlan.gridReach(s);
+    final maxR = outline.maxRadiusM;
+    final outreach = sprawlOutreachFor(s);
+
+    // ---- The county highways: the section-line grid ----------------------
+    //
+    // A section line an axial interstate runs along is the interstate's
+    // corridor, not a county highway's: a grid line laid there sat under
+    // the expressway, crossed it wherever it wandered, and grew a diamond
+    // at every crossing.
+    bool underInterstate(int axis, double t) {
+      final lines = axis == 0
+          ? [if (s.interstates >= 1) s.axisOffsetN]
+          : [if (s.interstates >= 2) s.axisOffsetE];
+      return lines.any((l) => (l - t).abs() < 250);
+    }
+
+    for (var axis = 0; axis < 2; axis++) {
+      for (var i = -n; i <= n; i++) {
+        final t = i * sectionM;
+        if (t.abs() > maxR) continue;
+        if (underInterstate(axis, t)) continue;
+        Vec2 at(double a) => axis == 0 ? Vec2(a, t) : Vec2(t, a);
+        // Walk out from the centre each way until the outline ends: the
+        // edge is ragged, so each line finds its own reach. On past the
+        // outline by a couple of sections: the survey grid does not stop
+        // where the houses do.
+        double reachTo(double sign) {
+          var a = 0.0;
+          while (a < maxR && outline.contains(at(sign * (a + 50)))) {
+            a += 50;
+          }
+          return a + sectionM * 2;
+        }
+
+        if (!outline.contains(at(0))) continue;
+        final reachA = reachTo(-1), reachB = reachTo(1);
+        // The core has its own streets and a staked plot is somebody's
+        // ground: the highway stops at the edge of either and resumes the
+        // far side. Walked in steps, so a line finds every gap it crosses.
+        bool blocked(Vec2 p) =>
+            s.coreContains(p, marginM: 40) || s.inClearing(p, marginM: 30);
+        final spans = <(double, double)>[];
+        double? open;
+        for (var a = -reachA; a <= reachB + 1e-6; a += 20) {
+          final b = blocked(at(a));
+          if (!b && open == null) open = a;
+          if (b && open != null) {
+            spans.add((open, a - 20));
+            open = null;
+          }
+        }
+        if (open != null) spans.add((open, reachB));
+        for (final (a, b) in spans) {
+          if (b - a < sectionM * 0.6) continue;
+          // The county highway is the plat's own four-lane avenue, drawn
+          // the same way; it fronts nothing, and it follows the land.
+          city.commitRoad([at(a), at(b)], RoadClass.avenue,
+              regenerateLots: false, frontsLots: false, graded: false);
+        }
+      }
+    }
+
+    // ---- The railway, on from the plat's line ------------------------------
+    //
+    // Straight off the end of the plat's own track, wandering a little once
+    // it is out in the fields, to well past the outline both ways.
+    if (s.railInnerReachM > 0) {
+      for (final sign in const [1.0, -1.0]) {
+        final bearing = sign > 0 ? 0.0 : math.pi;
+        final end = outline.radiusAt(bearing) + outreach + 3000;
+        final pts = <Vec2>[];
+        const steps = 10;
+        var wander = 0.0;
+        for (var k = 0; k <= steps; k++) {
+          final x = sign *
+              (s.railInnerReachM + (end - s.railInnerReachM) * k / steps);
+          if (k > 0) wander += (rnd.nextDouble() - 0.5) * 60;
+          wander *= 0.8;
+          pts.add(Vec2(x, s.railOffsetN + (k == 0 ? 0 : wander)));
+        }
+        city.commitRoad(pts, RoadClass.rail,
+            regenerateLots: false, frontsLots: false, graded: false);
+      }
+    }
+
+    // ---- The interstates ---------------------------------------------------
+    //
+    // Straight-ish radials on the axes, from the core's central avenues to
+    // the county line, bending gently once out in the sections; the
+    // diagonals likewise; the beltway a ring at 0.48 R. Interstates never
+    // run down a section line — they cut the sections, which is what a real
+    // one does to a grid laid before it.
+    List<Vec2> radial(double bearing, double offset, {double? startM}) {
+      final dir = Vec2(math.cos(bearing), math.sin(bearing));
+      final side = dir.perp;
+      final out = <Vec2>[];
+      const steps = 12;
+      final start = startM ?? s.coreRadiusAt(bearing) * 0.98;
+      final end = outline.radiusAt(bearing) + outreach;
+      var wander = 0.0;
+      for (var k = 0; k <= steps; k++) {
+        final d = start + (end - start) * k / steps;
+        if (k > 1) wander += (rnd.nextDouble() - 0.5) * 140;
+        wander *= 0.85;
+        out.add(dir * d + side * (offset + wander));
+      }
+      return out;
+    }
+
+    final laid = <_Interstate>[];
+    var count = 0;
+    // The axial interstates on the plat's central avenues: east and west
+    // on one line, north and south on the other. The lateral offset is in
+    // each radial's own frame — side is dir.perp — so opposite bearings
+    // take opposite signs to land on the same line. Where the plat carries
+    // the east-west line through the core on its expressway, those two
+    // start at deck height and as wide as it, and come down to grade over
+    // their first hundred and thirty metres; the others carry on as the
+    // plat's central avenue and widen out of its width.
+    for (var a = 0; a < math.min(4, s.interstates); a++) {
+      final bearing = a * math.pi / 2;
+      final lateral = switch (a) {
+        0 => s.axisOffsetN,
+        1 => -s.axisOffsetE,
+        2 => -s.axisOffsetN,
+        _ => s.axisOffsetE,
+      };
+      final deck = s.expressway && a.isEven;
+      laid.add(_layInterstate(city, 'I-${++count}', radial(bearing, lateral),
+          outline,
+          startHalfWidthM:
+              deck ? RoadClass.elevated.halfWidth : RoadClass.avenue.halfWidth,
+          bridges: deck
+              ? const [(-SprawlPlan.bridgeRampM, SprawlPlan.bridgeRampM)]
+              : const [],
+          radial: true));
+    }
+    // A diagonal has no avenue to carry on from: it begins at the first
+    // crossing of the county grid clear of the core — which lies exactly
+    // on its bearing — where it ends at a signal with the two highways.
+    for (var a = 0; a < math.min(4, s.diagonals); a++) {
+      final bearing = math.pi / 4 + a * math.pi / 2;
+      final k = ((s.coreRadiusAt(bearing) * 0.98 + 300) /
+              (sectionM * math.sqrt2))
+          .ceil();
+      laid.add(_layInterstate(
+          city,
+          'I-${++count}',
+          radial(bearing, 0, startM: k * sectionM * math.sqrt2),
+          outline,
+          radial: true));
+    }
+    if (s.beltway) {
+      final pts = <Vec2>[];
+      const steps = 48;
+      for (var k = 0; k <= steps; k++) {
+        final a = k / steps * 2 * math.pi;
+        // Half the outline's reach, averaged over a wedge so the ring bends
+        // gently where the edge is ragged.
+        var rr = 0.0;
+        for (var j = -3; j <= 3; j++) {
+          rr += outline.radiusAt(a + j * 0.12);
+        }
+        rr = rr / 7 * 0.5;
+        pts.add(Vec2(math.cos(a) * rr, math.sin(a) * rr));
+      }
+      laid.add(_layInterstate(city, 'I-${++count}', pts, outline,
+          beltway: true));
+    }
+
+    // ---- Interchanges: where an interstate crosses anything ---------------
+    //
+    // The interstate is carried over on a bridge (commitRoad's own rule);
+    // a diamond of ramps joins it to a county highway, a cloverleaf to
+    // another interstate. Crossings closer than a mile to the last on the
+    // same interstate get the bridge but no ramps — real interchanges are a
+    // mile or more apart.
+    final interchanges = <Vec2>[];
+    var rampCount = 0;
+    for (final road in laid) {
+      road.crossings.sort((a, b) => a.$2.compareTo(b.$2));
+    }
+    // Interchanges keep their distance from one another WHATEVER road
+    // they are on: a diamond's ramps run four hundred metres along the
+    // expressway, and one built beside a cloverleaf ran straight through
+    // its loops. The cloverleafs go first — an expressway meeting an
+    // expressway is the interchange that matters — then the diamonds in
+    // the room that is left.
+    // And clear of every OTHER county highway: a diamond's ramps reach four
+    // hundred metres along the expressway and a cloverleaf's connectors
+    // four hundred out, and either laid beside a grid line ran through it.
+    // The pieces of the line crossed at [at] are its own, not others.
+    bool clearOfHighways(Vec2 at) {
+      var clear = true;
+      layout.roadIndex.visit(Box2.around(at, 480), 0, (slot, rec, seg) {
+        if (!clear) return;
+        final r = rec.road;
+        if (r.roadClass != RoadClass.avenue || r.platsLots) return;
+        if (rec.sampleCount < 2) return;
+        // On the line through [at]: the crossed highway, whatever piece.
+        final a = rec.sampleAt(0), b = rec.sampleAt(rec.sampleCount - 1);
+        final ab = b - a;
+        final len = ab.length;
+        if (len > 1e-6 && ((at - a).cross(ab)).abs() / len < 2) return;
+        final d = seg == 0
+            ? at.distanceTo(rec.sampleAt(0))
+            : rec.distanceToSegment(at, seg);
+        if (d < 480) clear = false;
+      });
+      return clear;
+    }
+
+    bool clearOfInterchanges(Vec2 p) =>
+        interchanges.every((q) => q.distanceTo(p) >= sectionM * 0.6);
+    // A ring has no ends.
+    bool nearEnd(_Interstate road, double sG) =>
+        !road.beltway && (sG < 260 || sG > road.length - 260);
+
+    for (final road in laid) {
+      for (final (c, sG) in road.crossings) {
+        if (!c.bridged || nearEnd(road, sG) || !clearOfInterchanges(c.at)) {
+          continue;
+        }
+        final other = _roadUnder(
+            layout,
+            c.at,
+            (r) =>
+                r.roadClass.isExpressway &&
+                !road.baseIds.contains(baseRoadId(r.id)));
+        if (other == null) continue;
+        final onI = _Along(road.pts, road.cum, sG);
+        final onO = _Along.ofRoad(layout, other, c.at);
+        if (onO == null) continue;
+        // Both are interstates: the pair is built once, from the one laid
+        // later, which passes under. The loops always; the outer
+        // connectors, which reach four hundred metres out, only where no
+        // county highway runs through that.
+        final over = laid.firstWhere(
+            (x) => x.baseIds.contains(baseRoadId(other.id)),
+            orElse: () => road);
+        interchanges.add(c.at);
+        _cloverleaf(city, onI, onO, road.classAt, over.classAt,
+            'R-${++rampCount}',
+            mergeI: (point) => _mergeAt(city, road, point),
+            mergeO: (point) => _mergeAt(city, over, point),
+            connectors: clearOfHighways(c.at));
+      }
+    }
+    for (final road in laid) {
+      final ramped = <double>[];
+      for (final (c, sG) in road.crossings) {
+        if (!c.bridged || nearEnd(road, sG)) continue;
+        // A mile or more apart along the same road, and clear of every
+        // interchange already built and of every other highway.
+        if (ramped.any((r) => (r - sG).abs() < sectionM * 0.9)) continue;
+        if (!clearOfInterchanges(c.at) || !clearOfHighways(c.at)) continue;
+        final highway = _roadUnder(layout, c.at,
+            (r) => r.roadClass == RoadClass.avenue && !r.platsLots);
+        if (highway == null) continue;
+        final onI = _Along(road.pts, road.cum, sG);
+        final onO = _Along.ofRoad(layout, highway, c.at);
+        if (onO == null) continue;
+        ramped.add(sG);
+        interchanges.add(c.at);
+        _diamond(city, onI, onO, road.classAt, 'R-${++rampCount}',
+            merge: (sM, point) => _mergeAt(city, road, point));
+      }
+    }
+
+    // ---- The expressway through the core ----------------------------------
+    //
+    // The plat drew it — an elevated expressway on the central avenue with
+    // frontage roads under it. A diamond wherever it crosses one of the
+    // plat's north-south avenues, well inside the core and well apart, with
+    // the ramps climbing to the deck over their last stretch; and the
+    // frontage roads carrying on as slip ramps where the deck comes down.
+    if (s.expressway) {
+      final y = s.axisOffsetN;
+      final west = -s.coreRadiusAt(math.pi) * 0.98;
+      final east = s.coreRadiusAt(0) * 0.98;
+      final cpts = [
+        for (var k = 0; k <= 10; k++) Vec2(west + (east - west) * k / 10, y),
+      ];
+      // The whole line, west radial to east radial through the corridor,
+      // so a ramp near the core's edge can run on out along the interstate
+      // rather than bunch at the corridor's end.
+      final westward = laid.length > 2 && s.interstates >= 3 ? laid[2] : null;
+      final eastward = laid.isNotEmpty && s.interstates >= 1 ? laid[0] : null;
+      final through = [
+        if (westward != null) ...westward.pts.reversed,
+        ...cpts,
+        if (eastward != null) ...eastward.pts,
+      ];
+      final tcum = _cumOf(through);
+      final origin = westward != null ? tcum[westward.pts.length] : 0.0;
+      final corridorLen = _cumOf(cpts).last;
+      RoadClass classAt(double sT) {
+        if (sT < origin) return westward?.classAt(origin - sT) ?? RoadClass.elevated;
+        if (sT > origin + corridorLen) {
+          return eastward?.classAt(sT - origin - corridorLen) ?? RoadClass.elevated;
+        }
+        return RoadClass.elevated;
+      }
+
+      // How high the line is at [sT]: the deck's height on the corridor,
+      // and the radials' own descent off it either side.
+      double liftAt(double sT) {
+        if (sT < origin) {
+          return westward == null
+              ? 0
+              : SprawlPlan.bridgeLiftAt(origin - sT, westward.startBridges);
+        }
+        if (sT > origin + corridorLen) {
+          return eastward == null
+              ? 0
+              : SprawlPlan.bridgeLiftAt(
+                  sT - origin - corridorLen, eastward.startBridges);
+        }
+        return SprawlPlan.bridgeHeightM;
+      }
+
+      // A merge on the deck is in the air and the plat draws the structure;
+      // one on a radial splits it there.
+      void mergeOn(double sT, Vec2 point) {
+        if (sT < origin) {
+          if (westward != null) _mergeAt(city, westward, point);
+        } else if (sT > origin + corridorLen && eastward != null) {
+          _mergeAt(city, eastward, point);
+        }
+      }
+
+      var last = double.negativeInfinity;
+      final avenues = [...s.coreAvenuesE]..sort();
+      for (final x in avenues) {
+        if ((x - s.axisOffsetE).abs() < 200) continue;
+        final p = Vec2(x, y);
+        if (!s.coreContains(p, marginM: -100)) continue;
+        final sT = origin + (x - west);
+        if ((sT - last).abs() < 700) continue;
+        last = sT;
+        final avenue = [Vec2(x, y - 600), Vec2(x, y + 600)];
+        final onI = _Along(through, tcum, sT);
+        final onO = _Along(avenue, _cumOf(avenue), 600);
+        interchanges.add(p);
+        _diamond(city, onI, onO, classAt, 'R-${++rampCount}',
+            liftAt: liftAt, merge: mergeOn);
+      }
+
+      // The frontage roads under the deck carry on as slip ramps where it
+      // comes down: traffic keeps right, so the south one is eastbound and
+      // the north one westbound; each becomes an on-ramp at the end it
+      // drives toward and receives an off-ramp at the other. Nothing
+      // stops dead at the core's edge, and the plat's frontage road end
+      // and the ramp's start are one point.
+      double arcOf(double x) => origin + (x - west);
+      for (final f in s.frontageRoads) {
+        if (f.length < 3) continue;
+        final t = f[0], a = f[1], b = f[2];
+        final south = t < y;
+        final so = south ? -1.0 : 1.0; // which side of the line it is on
+        // Eastbound uses the south road and runs west to east; westbound
+        // the north road, east to west.
+        final eastBound = south;
+        final onEnd = eastBound ? b : a, offEnd = eastBound ? a : b;
+        final sOn = arcOf(onEnd) + (eastBound ? 350 : -350);
+        final sOff = arcOf(offEnd) - (eastBound ? 350 : -350);
+        for (final (isOn, sMerge, endX) in [
+          (true, sOn, onEnd),
+          (false, sOff, offEnd)
+        ]) {
+          final along = _Along(through, tcum, sMerge);
+          final edge = _edgeOf(classAt(sMerge));
+          // From the frontage road's end onto the line's outer edge — the
+          // road's own side of it, wherever the line has bent to by then —
+          // and along it to the merge.
+          final roadEnd = Vec2(endX, t);
+          final side = along.dir.perp.dot(Vec2(0, so)) >= 0 ? 1.0 : -1.0;
+          var pts = _rampAlong(along, roadEnd, 0, side, edge);
+          if (!isOn) pts = pts.reversed.toList();
+          city.commitRoad(pts, RoadClass.ramp,
+              regenerateLots: false,
+              frontsLots: false,
+              graded: false,
+              snapStart: isOn,
+              snapEnd: !isOn);
+          mergeOn(sMerge, along.at(0));
+        }
+      }
+    }
+    return interchanges;
   }
+
+  /// Lay one interstate: six lanes to the outline and four beyond, as two
+  /// roads meeting end to end with the first tapering to the second's
+  /// width; the beltway eight throughout. Its crossings, as commitRoad
+  /// found them, come back positioned along the whole line.
+  _Interstate _layInterstate(
+    CitySim city,
+    String name,
+    List<Vec2> pts,
+    SprawlOutline outline, {
+    double? startHalfWidthM,
+    List<(double, double)> bridges = const [],
+    bool radial = false,
+    bool beltway = false,
+  }) {
+    final road = _Interstate(name, pts, _cumOf(pts), beltway: beltway)
+      ..startBridges = bridges;
+    void commit(List<Vec2> piece, RoadClass cls, double offset,
+        {double? hw0,
+        double? hw1,
+        List<(double, double)> br = const [],
+        double clearStart = CityLayout.bridgeEndClearM,
+        double clearEnd = CityLayout.bridgeEndClearM}) {
+      final id = city.commitRoad(piece, cls,
+          regenerateLots: false,
+          frontsLots: false,
+          graded: false,
+          startHalfWidthM: hw0,
+          endHalfWidthM: hw1,
+          bridges: br,
+          bridgeClearStartM: clearStart,
+          bridgeClearEndM: clearEnd);
+      if (id != null) road.baseIds.add(id);
+      for (final c in city.lastCommitCrossings) {
+        road.crossings.add((c, offset + c.sNew));
+      }
+    }
+
+    if (beltway) {
+      // A ring: its two ends meet, and neither is an end anything need
+      // keep clear of.
+      commit(pts, RoadClass.expressway8, 0,
+          hw0: startHalfWidthM, br: bridges, clearStart: 0, clearEnd: 0);
+      return road;
+    }
+    // Where the radial leaves the built-up outline: past it the road drops
+    // from six lanes to four. Six inside, because that is what the viaduct
+    // through the core carries and a mainline does not change its lane
+    // count where a deck happens to end.
+    var outS = double.infinity;
+    var outK = -1;
+    for (var k = 0; k < pts.length; k++) {
+      if (outline.fractionOf(pts[k]) > 1.0) {
+        outS = road.cum[k];
+        outK = k;
+        break;
+      }
+    }
+    road.outS = outS;
+    if (outK <= 0 || outK >= pts.length - 1) {
+      commit(pts, outK <= 0 ? RoadClass.expressway4 : RoadClass.expressway6, 0,
+          hw0: startHalfWidthM, br: bridges);
+      return road;
+    }
+    // The seam where the lanes drop is not an end: a crossing beside it is
+    // bridged like any other.
+    final inner = pts.sublist(0, outK + 1);
+    final outer = pts.sublist(outK);
+    commit(inner, RoadClass.expressway6, 0,
+        hw0: startHalfWidthM,
+        hw1: RoadClass.expressway4.halfWidth,
+        br: bridges,
+        clearEnd: 0);
+    commit(outer, RoadClass.expressway4, outS, clearStart: 0);
+    return road;
+  }
+
+  /// A diamond: the expressway passes over the other road at [i]'s point.
+  /// Four ramps, one per quadrant, each a T on the other road
+  /// [diamondTerminalM] from the crossing and a merge on the expressway's
+  /// outer edge [diamondMergeM] along it — ON the expressway, wherever its
+  /// bends have taken it by then.
+  ///
+  /// Two are on-ramps and two off-ramps, by which side of the expressway
+  /// the quadrant is: traffic keeps right, joins after the crossing and
+  /// leaves before it. An on-ramp runs terminal to merge; an off-ramp is
+  /// laid the other way round, because a ramp's direction IS its point
+  /// order. The terminal end snaps onto the other road and cuts it into a
+  /// T; the merge end lands on the edge, unsnapped, and [merge] splits the
+  /// expressway there.
+  void _diamond(
+    CitySim city,
+    _Along i,
+    _Along o,
+    RoadClass Function(double s) classI,
+    String id, {
+    double Function(double s)? liftAt,
+    required void Function(double sM, Vec2 point) merge,
+  }) {
+    final dir = i.dir, odir = o.dir;
+    final right = _rightOf(dir, odir);
+    for (final si in const [-1.0, 1.0]) {
+      for (final so in const [-1.0, 1.0]) {
+        final terminal = o.at(so * diamondTerminalM);
+        final mergeS = i.s + si * diamondMergeM;
+        final edge = _edgeOf(classI(mergeS));
+        final mergePoint = i.at(si * diamondMergeM);
+        // The quadrant's side of the expressway, as a sign on its own
+        // lateral: where the terminal stands.
+        final side = odir.dot(dir.perp) * so >= 0 ? 1.0 : -1.0;
+        // From the terminal onto the expressway's outer edge and along it
+        // to the merge — following the line as it actually runs there,
+        // bends and all. A cubic drawn in the plane cut the chord of a
+        // bend, crossed the centreline, and was cut there as a junction.
+        var pts = _rampAlong(i, terminal, si * diamondMergeM, side, edge);
+        final onRamp = si * so * right > 0;
+        if (!onRamp) pts = pts.reversed.toList();
+        var bridges = const <(double, double)>[];
+        if (liftAt != null && liftAt(mergeS) > SprawlPlan.bridgeHeightM / 2) {
+          // The mainline is on its deck where this ramp meets it: climb to
+          // it over the last stretch, or come down off it over the first.
+          final l = _cumOf(pts).last;
+          bridges = onRamp
+              ? [(l - SprawlPlan.bridgeRampM, l + SprawlPlan.bridgeRampM)]
+              : const [(-SprawlPlan.bridgeRampM, SprawlPlan.bridgeRampM)];
+        }
+        city.commitRoad(pts, RoadClass.ramp,
+            regenerateLots: false,
+            frontsLots: false,
+            graded: false,
+            bridges: bridges,
+            snapStart: onRamp,
+            snapEnd: !onRamp);
+        merge(mergeS, mergePoint);
+      }
+    }
+  }
+
+  /// A cloverleaf where [i] crosses [o]: four loop ramps, one per quadrant,
+  /// each three quarters of a circle tangent to both roads' outer edges,
+  /// plus four outer connectors — quarter circles well outside the loops —
+  /// for the right turns. Each end lands on an edge, unsnapped, and the
+  /// road it lands on is split there.
+  void _cloverleaf(
+    CitySim city,
+    _Along i,
+    _Along o,
+    RoadClass Function(double s) classI,
+    RoadClass Function(double s) classO,
+    String id, {
+    required void Function(Vec2 point) mergeI,
+    required void Function(Vec2 point) mergeO,
+    bool connectors = true,
+  }) {
+    final dir = i.dir, odir = o.dir;
+    final right = _rightOf(dir, odir);
+    final edgeI = _edgeOf(classI(i.s));
+    final edgeO = _edgeOf(classO(o.s));
+    void ramp(List<Vec2> pts) => city.commitRoad(pts, RoadClass.ramp,
+        regenerateLots: false,
+        frontsLots: false,
+        graded: false,
+        snapStart: false,
+        snapEnd: false);
+    for (final si in const [-1.0, 1.0]) {
+      for (final so in const [-1.0, 1.0]) {
+        // The loop's two tangent points, ON each road's edge line where
+        // that road actually runs — a loop radius past the crossing.
+        final lI = si * (loopRadiusM + edgeO), lO = so * (loopRadiusM + edgeI);
+        final loopStart = i.at(lI) + odir * (so * edgeI);
+        final loopEnd = o.at(lO) + dir * (si * edgeO);
+        final centre = loopStart + odir * (so * loopRadiusM);
+        final a0 = -so * math.pi / 2;
+        final sweep = (si * so > 0 ? 1 : -1) * 1.5 * math.pi;
+        const steps = 27;
+        final circleEnd = centre +
+            dir * (loopRadiusM * math.cos(a0 + sweep)) +
+            odir * (loopRadiusM * math.sin(a0 + sweep));
+        // Where the roads bend, the circle's end misses the other road's
+        // edge by a few metres: ease the last stretch onto it.
+        final miss = loopEnd - circleEnd;
+        var pts = <Vec2>[
+          for (var k = 0; k <= steps; k++)
+            () {
+              final t = k / steps;
+              final a = a0 + sweep * t;
+              final ease = t < 0.6 ? 0.0 : ((t - 0.6) / 0.4) * ((t - 0.6) / 0.4);
+              return centre +
+                  dir * (loopRadiusM * math.cos(a)) +
+                  odir * (loopRadiusM * math.sin(a)) +
+                  miss * ease;
+            }(),
+        ];
+        final fromI = si * so * right > 0;
+        if (!fromI) pts = pts.reversed.toList();
+        ramp(pts);
+        mergeI(i.at(lI));
+        mergeO(o.at(lO));
+        if (!connectors) continue;
+
+        // The outer connector of the same quadrant: a quarter turn between
+        // the two roads well outside the loop, tangent to each where it
+        // leaves and where it lands.
+        final cI = si * (connectorRadiusM + edgeO);
+        final cO = so * (connectorRadiusM + edgeI);
+        final connStart = i.at(cI) + odir * (so * edgeI);
+        final connEnd = o.at(cO) + dir * (si * edgeO);
+        final dirStart = i.dirAt(cI), dirEnd = o.dirAt(cO);
+        final pull = 0.5523 * connectorRadiusM;
+        var cpts = _cubic(
+          connStart,
+          connStart - dirStart * (si * pull),
+          connEnd - dirEnd * (so * pull),
+          connEnd,
+          steps: 14,
+        );
+        final cFromI = si * so * right < 0;
+        if (!cFromI) cpts = cpts.reversed.toList();
+        ramp(cpts);
+        mergeI(i.at(cI));
+        mergeO(o.at(cO));
+      }
+    }
+  }
+
+  /// Split the piece of [road] under [point] there: a merge, or a tangent.
+  /// Nothing on a deck — a merge in the air is the structure's business.
+  void _mergeAt(CitySim city, _Interstate road, Vec2 point) {
+    final layout = city.layout;
+    final piece = _roadUnder(layout, point,
+        (r) => r.roadClass.isExpressway && road.baseIds.contains(baseRoadId(r.id)));
+    if (piece == null) return;
+    final rec = layout.roadIndex.byId(piece.id);
+    if (rec == null) return;
+    final hit = layout.roadIndex.nearest(point, startM: 8, maxM: 64);
+    if (hit == null || hit.road.road.id != piece.id) return;
+    final seg = hit.seg;
+    if (seg == 0) return;
+    final a = rec.sampleAt(seg - 1);
+    final len = rec.sampleAt(seg).distanceTo(a);
+    final u = len <= 1e-9 ? 0.0 : (hit.point.distanceTo(a) / len).clamp(0.0, 1.0);
+    layout.splitRoadAt(piece.id, rec.arcAt(seg, u));
+  }
+
+  /// The road passing within a lane of [point] that [where] accepts, the
+  /// nearest first.
+  static RoadSpline? _roadUnder(
+      CityLayout layout, Vec2 point, bool Function(RoadSpline) where) {
+    RoadSpline? best;
+    var bestD = 4.0;
+    layout.roadIndex.visit(Box2.around(point, 4), 0, (slot, rec, seg) {
+      if (!where(rec.road)) return;
+      final d = seg == 0
+          ? point.distanceTo(rec.sampleAt(0))
+          : rec.distanceToSegment(point, seg);
+      if (d < bestD) {
+        bestD = d;
+        best = rec.road;
+      }
+    });
+    return best;
+  }
+
+  /// Sound barriers where an expressway runs past housing: the walled
+  /// variant on every piece whose middle lies in a built-up residential
+  /// section, open everywhere else.
+  void _wallExpressways(CitySim city, SprawlPlan plan) {
+    bool wallsAt(Vec2 p) {
+      for (final sec in plan.sections) {
+        if ((p.e - sec.centre.e).abs() > sec.halfM ||
+            (p.n - sec.centre.n).abs() > sec.halfM) {
+          continue;
+        }
+        return sec.use == SprawlUse.residential && sec.density >= 0.4;
+      }
+      return false;
+    }
+
+    final layout = city.layout;
+    for (final r in layout.roads.toList()) {
+      if (!r.roadClass.canHaveSoundWalls || !r.roadClass.isExpressway) continue;
+      final rec = layout.roadIndex.byId(r.id);
+      if (rec == null || rec.sampleCount == 0) continue;
+      if (wallsAt(rec.sampleAt(rec.sampleCount ~/ 2))) {
+        layout.updateRoad(r.copyWith(soundWalls: true));
+      }
+    }
+  }
+
+  /// Which sign of [odir] lies to the RIGHT of travel along [dir]. Traffic
+  /// keeps right, so this is what decides which quadrant's ramp is an
+  /// on-ramp and which an off-ramp.
+  static double _rightOf(Vec2 dir, Vec2 odir) =>
+      Vec2(dir.n, -dir.e).dot(odir) >= 0 ? 1.0 : -1.0;
+
+  /// The lateral offset of a road's outer edge line — where a ramp merges.
+  static double _edgeOf(RoadClass cls) =>
+      cls.halfWidth - (cls.lanes?.shoulderM ?? 0);
+
+  static List<double> _cumOf(List<Vec2> pts) {
+    final cum = <double>[0];
+    for (var i = 1; i < pts.length; i++) {
+      cum.add(cum[i - 1] + pts[i].distanceTo(pts[i - 1]));
+    }
+    return cum;
+  }
+
+  /// A ramp from [from] onto the outer edge of the road [i] runs along and
+  /// along it to [dTo] metres from [i]'s own point: it eases from where
+  /// [from] stands off the line onto the edge — [edge] metres off the
+  /// centreline on [side] (a sign on the line's lateral) — and then
+  /// follows the line, bend for bend. Built ALONG the road rather than as
+  /// a curve in the plane, so it can neither cut the chord of a bend nor
+  /// cross the centreline at a shallow crossing.
+  static List<Vec2> _rampAlong(
+      _Along i, Vec2 from, double dTo, double side, double edge,
+      {int steps = 20}) {
+    final origin = i.at(0);
+    final d0 = (from - origin).dot(i.dir);
+    final l0 = (from - i.at(d0)).dot(i.dirAt(d0).perp);
+    final pts = <Vec2>[from];
+    for (var k = 1; k <= steps; k++) {
+      final u = k / steps;
+      final d = d0 + (dTo - d0) * u;
+      final ease = u * u * (3 - 2 * u);
+      final l = l0 * (1 - ease) + side * edge * ease;
+      pts.add(i.at(d) + i.dirAt(d).perp * l);
+    }
+    return pts;
+  }
+
+  /// A cubic Bézier from [a] to [b] with controls [c1], [c2], sampled.
+  static List<Vec2> _cubic(Vec2 a, Vec2 c1, Vec2 c2, Vec2 b, {int steps = 16}) => [
+        for (var k = 0; k <= steps; k++)
+          () {
+            final t = k / steps;
+            final u = 1 - t;
+            return a * (u * u * u) +
+                c1 * (3 * u * u * t) +
+                c2 * (3 * u * t * t) +
+                b * (t * t * t);
+          }(),
+      ];
 
   // ---- The sprawl, platted ---------------------------------------------------
 
@@ -1057,41 +1844,35 @@ class CityGenerator {
       CitySim city, CityGenSpec spec, CityShape shape, SprawlPlan plan) {
     final out = <String, int>{};
     final sspec = plan.spec;
+    final layout = city.layout;
 
-    // Where the plan's junctions are, on a 4 m grid: a collector runs out to
-    // the highway only where the plan put a junction for it.
-    final nodeCells = <(int, int)>{
-      for (final n in plan.nodes) ((n.at.e / 4).round(), (n.at.n / 4).round()),
-    };
-    bool hasNodeAt(Vec2 p) {
-      final cx = (p.e / 4).round(), cy = (p.n / 4).round();
-      for (var dx = -2; dx <= 2; dx++) {
-        for (var dy = -2; dy <= 2; dy++) {
-          if (nodeCells.contains((cx + dx, cy + dy))) return true;
-        }
-      }
-      return false;
+    // Where the county highways are: a collector runs out to its section
+    // line only where a highway runs along it there — the highways break
+    // at the core and at every staked plot.
+    bool highwayAt(Vec2 p) {
+      final hit = layout.nearestRoadPoint(p, withinM: 8);
+      if (hit == null) return false;
+      final r = layout.roadById(hit.roadId);
+      return r != null && r.roadClass == RoadClass.avenue && !r.platsLots;
     }
 
-    // The corridors the streets keep off: interstates, ramps, the railway.
-    // A county highway is what the collectors run out to, and the plat's
-    // own rights-of-way are real roads that a street may meet.
-    final corridors = BoxIndex<(Vec2, Vec2)>(cellM: 256);
-    for (final r in plan.roads) {
-      if (r.kind == SprawlRoadKind.countyHighway ||
-          r.kind == SprawlRoadKind.corridor) {
-        continue;
-      }
-      for (var i = 1; i < r.points.length; i++) {
-        final a = r.points[i - 1], b = r.points[i];
-        corridors.add((a, b), Box2.of([a, b]));
-      }
-    }
+    // The corridors the streets keep off: the expressways, their ramps and
+    // the railway, as laid. A county highway is what the collectors run
+    // out to, and everything else is a road a street may meet.
     bool nearCorridor(Vec2 p, double clearM) {
-      for (final (a, b) in corridors.near(Box2.around(p, clearM))) {
-        if (_segDist(p, a, b) < clearM) return true;
-      }
-      return false;
+      var hit = false;
+      layout.roadIndex.visit(Box2.around(p, clearM), 0, (slot, rec, seg) {
+        if (hit) return;
+        final cls = rec.road.roadClass;
+        if (!(cls.isExpressway || cls == RoadClass.ramp || cls == RoadClass.rail)) {
+          return;
+        }
+        final d = seg == 0
+            ? p.distanceTo(rec.sampleAt(0))
+            : rec.distanceToSegment(p, seg);
+        if (d < clearM) hit = true;
+      });
+      return hit;
     }
 
     bool inCore(Vec2 p, double marginM) =>
@@ -1200,7 +1981,7 @@ class CityGenerator {
             if (collector) {
               final edge = at(axis, t, sign * half);
               final inward = at(axis, t, sign * (half - 160));
-              if (hasNodeAt(edge) && !nearCorridor(inward, 40)) {
+              if (highwayAt(edge) && !nearCorridor(inward, 40)) {
                 return sign * half;
               }
             }
@@ -1317,6 +2098,19 @@ class CityGenerator {
       for (final r in out)
         if (r.$2 - r.$1 > 20) r,
     ];
+  }
+
+  /// Point on a polyline reached by arc length.
+  static Vec2 _pointAt(List<Vec2> pts, List<double> cum, double s) {
+    if (s <= 0) return pts.first;
+    for (var i = 1; i < pts.length; i++) {
+      if (cum[i] >= s) {
+        final seg = cum[i] - cum[i - 1];
+        final t = seg < 1e-9 ? 0.0 : (s - cum[i - 1]) / seg;
+        return pts[i - 1] + (pts[i] - pts[i - 1]) * t;
+      }
+    }
+    return pts.last;
   }
 
   /// Zone and build the sections' lots by their sections: houses on a
@@ -1664,4 +2458,76 @@ class CityGenerator {
       }
     }
   }
+}
+
+/// An interstate while the sprawl is being laid: its line, where it leaves
+/// the outline, the roads it was committed as, and every crossing it made.
+class _Interstate {
+  _Interstate(this.name, this.pts, this.cum, {this.beltway = false});
+  final String name;
+  final List<Vec2> pts;
+  final List<double> cum;
+  final bool beltway;
+
+  /// Where it drops from six lanes to four.
+  double outS = double.infinity;
+
+  /// The bridge ranges it started with: the descent off the deck.
+  List<(double, double)> startBridges = const [];
+
+  /// The base ids of the roads it was committed as.
+  final List<String> baseIds = [];
+
+  /// Every crossing commitRoad found, with its position along the whole
+  /// line.
+  final List<(RoadCrossing, double)> crossings = [];
+
+  double get length => cum.last;
+
+  RoadClass classAt(double s) {
+    if (beltway) return RoadClass.expressway8;
+    return s < outS ? RoadClass.expressway6 : RoadClass.expressway4;
+  }
+}
+
+/// A place on a polyline, with the means to step along it: [at] gives the
+/// point [d] metres further along (or back), on the line however it bends.
+class _Along {
+  _Along(this.pts, this.cum, this.s) : dir = _dirAt(pts, cum, s);
+
+  /// On a laid road, at the point of it nearest [near]: its own samples.
+  static _Along? ofRoad(CityLayout layout, RoadSpline road, Vec2 near) {
+    final rec = layout.roadIndex.byId(road.id);
+    if (rec == null || rec.sampleCount < 2) return null;
+    final pts = rec.samples;
+    final cum = [for (var i = 0; i < rec.sampleCount; i++) rec.cum[i]];
+    var bestS = 0.0;
+    var bestD = double.infinity;
+    for (var i = 1; i < pts.length; i++) {
+      final (q, d) = rec.nearestOnSegment(near, i);
+      if (d < bestD) {
+        bestD = d;
+        bestS = cum[i - 1] + q.distanceTo(pts[i - 1]);
+      }
+    }
+    return _Along(pts, cum, bestS);
+  }
+
+  final List<Vec2> pts;
+  final List<double> cum;
+  final double s;
+  final Vec2 dir;
+
+  static Vec2 _dirAt(List<Vec2> pts, List<double> cum, double s) {
+    final a = CityGenerator._pointAt(pts, cum, s - 1);
+    final b = CityGenerator._pointAt(pts, cum, s + 1);
+    return (b - a).normalized;
+  }
+
+  Vec2 at(double d) =>
+      CityGenerator._pointAt(pts, cum, (s + d).clamp(0.0, cum.last));
+
+  /// The line's own direction [d] metres along from here — where its
+  /// bends have taken it, not where a straight line would be.
+  Vec2 dirAt(double d) => _dirAt(pts, cum, (s + d).clamp(1.0, cum.last - 1));
 }

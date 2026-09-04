@@ -39,14 +39,12 @@ import '../../../domain/colony/city/city_generator.dart';
 import '../../../domain/colony/city/city_sim.dart';
 import '../../../domain/colony/city/city_terrain_shaper.dart';
 import '../../../domain/colony/city/parcel.dart';
-import '../../../domain/colony/city/sprawl_plan.dart';
 import '../../../domain/shared/quaternion.dart';
 import '../../../domain/shared/vector3.dart';
 import '../../../domain/universe/real_solar_system.dart';
 import '../../../domain/universe/star_system.dart';
 import '../../flutter_scene/atmosphere_nodes.dart';
 import '../../flutter_scene/city/city_nodes.dart';
-import '../../flutter_scene/city/sprawl_nodes.dart';
 import '../../flutter_scene/scatter/scatter_prop_library.dart';
 import '../../../domain/architecture/building_generator.dart';
 import '../../../domain/terrain/terrain_field.dart';
@@ -147,12 +145,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   // ---- Scene ------------------------------------------------------------
   fs.Scene? _scene;
   CityNodes? _city;
-  SprawlNodes? _sprawl;
 
-  /// The body's BASE terrain, brushes and all left out: what the sprawl
-  /// drapes its houses on. A ground query through a built colony's brushes
-  /// costs milliseconds; the base field is a lookup.
-  TerrainField? _baseField;
   final List<fs.Node> _rigNodes = [];
   bool _showRig = true;
   TerrainNodes? _terrain;
@@ -267,7 +260,6 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   Duration _lastTick = Duration.zero;
   double _terrainMs = 0;
   double _cityMs = 0;
-  double _sprawlMs = 0;
 
   // ---- Engine pipeline timings -------------------------------------------
   //
@@ -484,12 +476,11 @@ class _CityStudioScreenState extends State<CityStudioScreen>
           'busy': _busy,
           'installations': _installationsStatus(),
           'interchanges': [
-            for (final SprawlInterchange x
-                in _sim?.sprawl?.interchanges ?? const <SprawlInterchange>[])
-              {'kind': x.kind.name, 'e': x.at.e, 'n': x.at.n},
+            for (final x in _sim?.sprawlSpec?.interchanges ?? const <List<double>>[])
+              if (x.length >= 2) {'e': x[0], 'n': x[1]},
           ],
           'sprawlSections': _sim?.sprawl?.sections.length ?? 0,
-          'sprawlDebug': SprawlNodes.debugLine,
+          'cityDebug': CityNodes.debugLine,
           'frameMs': _avgOf(_frameMs),
           'uiMs': _avgOf(_uiMs),
           'rasterMs': _avgOf(_rasterMs),
@@ -669,7 +660,6 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     // graded ground — pads, road corridors, mined holes and all — rather than
     // on the datum sphere under it.
     _groundField = body.terrainFieldWith(edits.forBody(body.id));
-    _baseField = body.terrainField;
 
     final snap = WorldSnapshot.capture(
       1,
@@ -844,8 +834,6 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       events: frame.events,
       terrainEdits: frame.terrainEdits,
       megastructures: frame.megastructures,
-      sprawlRoads: frame.sprawlRoads,
-      sprawlNodes: frame.sprawlNodes,
     );
   }
 
@@ -1162,7 +1150,6 @@ class _CityStudioScreenState extends State<CityStudioScreen>
         // a lit side — the same lesson SceneSync already carries.
         final scene = _scene ??= (fs.Scene()..environmentIntensity = 0.05);
         _city ??= CityNodes(scene);
-        _sprawl ??= SprawlNodes(scene);
         _terrain ??= TerrainNodes(scene);
         _atmo ??= AtmosphereNodes(scene);
 
@@ -1221,15 +1208,6 @@ class _CityStudioScreenState extends State<CityStudioScreen>
                   focusWorld: _anchorWorld + _cameraEyeM()));
           _cityMs = sw.elapsedMicroseconds / 1000;
           sw.reset();
-          final base = _baseField;
-          _phase(
-              'sprawl',
-              () => _sprawl!.update(frame, _origin,
-                  focusWorld: _anchorWorld + _cameraEyeM(),
-                  groundRadiusAt: base == null
-                      ? null
-                      : (d) => base.groundRadiusAt(d.x, d.y, d.z)));
-          _sprawlMs = sw.elapsedMicroseconds / 1000;
           _phase('sun', () => _syncSun(scene, frame, starWorld));
           _phase(
               'atmosphere',
@@ -1686,18 +1664,6 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             colour: (_terrain?.retiredClipped ?? 0) > 0
                 ? AppTheme.danger
                 : AppTheme.textDim),
-        row('sprawl', '${ms(_sprawlMs)} ms',
-            colour: _sprawlMs > 4 ? AppTheme.warn : AppTheme.text),
-        row(
-            '  groups',
-            'close ${SprawlNodes.counts['close'] ?? 0}  '
-            'near ${SprawlNodes.counts['near'] ?? 0}  '
-            'mid ${SprawlNodes.counts['mid'] ?? 0}  '
-            'far ${SprawlNodes.counts['far'] ?? 0}  '
-            'queued ${SprawlNodes.counts['queued'] ?? 0}',
-            colour: AppTheme.textDim),
-        row('  draws', '${SprawlNodes.counts['draws'] ?? 0}',
-            colour: AppTheme.textDim),
         row('city', '${ms(_cityMs)} ms'),
         row(
             '  lod mix',

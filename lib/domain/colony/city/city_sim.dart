@@ -3178,11 +3178,6 @@ class CitySim {
     return _sprawlPlan;
   }
 
-  /// The wire-side drape of [sprawl], cached by the snapshot capture: it is
-  /// tens of thousands of ground samples, and a frame is captured every
-  /// tick. Owned by the capture; opaque here.
-  Object? sprawlWire;
-
   /// Ground radius (m from the body centre) under each occupied cell.
   ///
   /// Filled by whoever has the terrain field — the snapshot, normally — and
@@ -3313,6 +3308,8 @@ class CitySim {
     double? endHalfWidthM,
     bool snapStart = true,
     bool snapEnd = true,
+    double bridgeClearStartM = CityLayout.bridgeEndClearM,
+    double bridgeClearEndM = CityLayout.bridgeEndClearM,
   }) {
     if (groundAt != null && controls.length >= 2) {
       final samples = RoadSpline(
@@ -3340,6 +3337,8 @@ class CitySim {
       endHalfWidthM: endHalfWidthM,
       snapStart: snapStart,
       snapEnd: snapEnd,
+      bridgeClearStartM: bridgeClearStartM,
+      bridgeClearEndM: bridgeClearEndM,
       regenerateLots: regenerateLots,
     );
     lastCommitCrossings = result.crossings;

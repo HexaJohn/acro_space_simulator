@@ -676,7 +676,6 @@ class CityNodes {
     _byBody = {};
     for (final r in _roots.values) {
       r.endHalf.clear();
-      r.planNodeKeys.clear();
       r.transitEnds.clear();
     }
     sealedWorld = false;
@@ -758,22 +757,6 @@ class CityNodes {
       if (cls == RoadClass.transit) {
         root.transitEnds.add(first);
         root.transitEnds.add(last);
-      }
-    }
-    // The plan's junctions per body, keyed like the ends and with their
-    // neighbouring cells, so a street ending on one is not a dead end.
-    for (final nd in snap.sprawlNodes) {
-      final root = _roots[nd.body];
-      if (root == null) continue;
-      final p = Vector3(nd.px, nd.py, nd.pz);
-      final cx = (p.x / 10).round(), cy = (p.y / 10).round();
-      final cz = (p.z / 10).round();
-      for (var dx = -1; dx <= 1; dx++) {
-        for (var dy = -1; dy <= 1; dy++) {
-          for (var dz = -1; dz <= 1; dz++) {
-            root.planNodeKeys.add(Object.hash(cx + dx, cy + dy, cz + dz));
-          }
-        }
       }
     }
     // Each tile's identity: what it holds, so a tile whose members did not
@@ -1248,22 +1231,6 @@ class CityNodes {
             narrowHalfWidthM: narrow));
       }
     }
-    for (final r in snap.sprawlRoads) {
-      final kind = SprawlRoadKind
-          .values[r.kind.clamp(0, SprawlRoadKind.values.length - 1)];
-      // The plat draws and drives its own rights-of-way.
-      if (kind == SprawlRoadKind.corridor) continue;
-      // A piece that tapers is driven at its narrower width, so nothing
-      // runs in the lane that is dropped along it.
-      var narrow = r.halfWidthM;
-      for (final w in [r.startHalfWidthM, r.endHalfWidthM]) {
-        if (w != null && w < narrow) narrow = w;
-      }
-      (byBody[r.body] ??= []).add(_TrafficRoad(
-          r.points, r.roadClassIndex, r.halfWidthM, false, r.overpasses,
-          narrowHalfWidthM: narrow));
-    }
-
     for (final entry in byBody.entries) {
       final body = snap.bodies[entry.key];
       if (body == null) continue;
@@ -2012,13 +1979,11 @@ class CityNodes {
       }
     }
     // A street that ends where nothing else does ends in a turning
-    // circle: a subdivision's cul-de-sac, or the edge of town. Not where
-    // it meets the plan's highway — that junction is the plan's to draw.
+    // circle: a subdivision's cul-de-sac, or the edge of town.
     if (paint && cls == RoadClass.street) {
       for (final end in [pts.first, pts.last]) {
         final e = root.endHalf[_endKey(end + anchorBF)];
         if (e != null && e.$2 > 1) continue;
-        if (root.planNodeKeys.contains(_endKey(end + anchorBF))) continue;
         RoadMesher.culDeSac(rb.ribbon, end, anchorBF, 11.0);
       }
     }
@@ -2512,9 +2477,6 @@ class _BodyRoot {
 
   /// Widest half width and count of road ends at each quantised end point.
   final Map<int, (double, int)> endHalf = {};
-
-  /// The plan's junctions, keyed like the ends.
-  final Set<int> planNodeKeys = {};
 
   /// Every end of every piece of elevated rail, body-fixed.
   final List<Vector3> transitEnds = [];

@@ -722,8 +722,6 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
       events: frame.events,
       terrainEdits: frame.terrainEdits,
       megastructures: frame.megastructures,
-      sprawlRoads: frame.sprawlRoads,
-      sprawlNodes: frame.sprawlNodes,
     );
   }
 
