@@ -60,6 +60,7 @@ import 'road_mesher.dart';
 import 'street_furniture.dart';
 import 'vehicle_meshes.dart';
 import 'city_textures.dart';
+import 'city_traffic.dart';
 
 /// One generated archetype, uploaded.
 class _CityMesh {
@@ -485,10 +486,11 @@ class CityNodes {
   /// congestion once that reaches the frame; 1.0 is an ordinary working day.
   static double trafficDensity = 1.0;
 
-  /// Hard ceiling on vehicles per frame. The whole set is rebuilt every frame
-  /// and pushed through the transient buffer, which is the same budget the
+  /// Hard ceiling on ROAD vehicles per frame. Every one is a matrix moved
+  /// through the transient buffer each frame, which is the same budget the
   /// asteroid fields already have to respect. Gated by [trafficRangeM], so
-  /// the count is spent where the camera is.
+  /// the count is spent where the camera is. Trains are not counted against
+  /// it (see [CityTraffic.maxVehicles]).
   static const int _maxVehicles = 600;
 
   /// Roads further than this from the focus carry no vehicles. Traffic is
@@ -502,6 +504,10 @@ class CityNodes {
   /// engine's BVH structurally dirty and rebuilt it over the whole scene
   /// sixty times a second: more per-frame cost than the traffic itself.
   final Map<String, _TrafficSlot> _trafficSlots = {};
+
+  /// The traffic pass's tables and placement (see [CityTraffic]): what the
+  /// slots above draw, worked out from the tiles within range.
+  final CityTraffic _traffic = CityTraffic();
 
   /// The train's canonical car (body + window band), instanced along the
   /// line like any other vehicle — it used to be re-meshed every frame.
@@ -1687,12 +1693,18 @@ class CityNodes {
 
   /// Vehicles running the colony's roads.
   ///
-  /// Rebuilt every frame, unlike the buildings: traffic MOVES, and the
+  /// Placed every frame, unlike the buildings: traffic MOVES, and the
   /// structural rebuild only fires when the colony's shape changes. Derived
   /// entirely from the frame — road polylines plus [WorldSnapshot.epoch] — the
   /// way street lamps and junctions already are, so there is no traffic state
   /// anywhere in the sim, nothing on the wire, and every client watching the
   /// same tick sees the same cars in the same places.
+  ///
+  /// The tables the placement runs on — points, lengths, lanes, the rail
+  /// chains, the station list — live in [_traffic], built once per tile
+  /// structure and per structure change (see [CityTraffic]); this pass
+  /// feeds it the tiles within range, in the frame's tile order, and moves
+  /// the resident draws to what it placed.
   ///
   /// COSMETIC. Nothing here routes, yields, or knows a signal exists; vehicles
   /// slide along their road and wrap. It is scenery, and the moment it stops
@@ -1710,254 +1722,36 @@ class CityNodes {
     // Every road that carries traffic, the plat's and the plan's alike:
     // one loop, one rule for what drives where. The plat's come off the
     // tiles within range, so a twenty-mile city costs the pass only the
-    // roads the camera could see a car on.
-    final byBody = <String, List<_TrafficRoad>>{};
+    // roads the camera could see a car on. Traffic shares the structural
+    // batches' FRAME — the body root's anchor, fixed for the root's life,
+    // which is what lets the tables be built once.
+    _traffic
+      ..density = trafficDensity
+      ..maxVehicles = _maxVehicles
+      ..rangeM = trafficRangeM
+      ..begin(_structureSig);
     for (final t in _tiles.values) {
       if (t.distanceM > trafficRangeM) continue;
-      for (final r in t.roads) {
-        // A piece that tapers is driven at its narrower width, so nothing
-        // runs in the lane that is dropped along it.
-        var narrow = r.halfWidthM;
-        for (final w in [r.startHalfWidthM, r.endHalfWidthM]) {
-          if (w != null && w < narrow) narrow = w;
-        }
-        (byBody[r.body] ??= []).add(_TrafficRoad(
-            r.points, r.roadClassIndex, r.halfWidthM, r.sealed, r.bridges,
-            narrowHalfWidthM: narrow));
-      }
+      final root = _roots[t.bodyId];
+      if (root == null) continue;
+      _traffic.visitTile(t.key, t.structureKey, t.bodyId, t.roads, root.anchorBF);
     }
-    for (final entry in byBody.entries) {
-      final body = snap.bodies[entry.key];
+    for (final bodyId in _traffic.visitedBodies) {
+      final body = snap.bodies[bodyId];
       if (body == null) continue;
-      // Anchor on the first road point: traffic cannot use the structural
-      // batches' anchors — but it must share their FRAME, which the body
-      // transform below supplies.
-      final first = entry.value.firstWhere((r) => r.points.length >= 3,
-          orElse: () => entry.value.first);
-      if (first.points.length < 3) continue;
-      final anchorBF =
-          Vector3(first.points[0], first.points[1], first.points[2]);
       final bodyWorld = Vector3(body.px, body.py, body.pz);
       final bodyQuat = Quaternion(body.qw, body.qx, body.qy, body.qz);
       // The focus in the body's frame, so the range gate is one subtraction
       // per road rather than a rotation per road.
       final focusBF = focusInBodyFrame(focusWorld, bodyWorld, bodyQuat);
-
-      final byKind = <VehicleKind, List<vm.Matrix4>>{};
-      final trainCars = <vm.Matrix4>[];
-      // Ground railway segments, joined into lines and run below.
-      final railSegments = <List<Vector3>>[];
-      var placed = 0;
-
-      for (final road in entry.value) {
-        if (placed >= _maxVehicles) break;
-        if (road.points.length < 6) continue;
-        final cls = RoadClass
-            .values[road.roadClassIndex.clamp(0, RoadClass.values.length - 1)];
-        // Out of range: nothing to see. Rail is kept — a train is a long
-        // thing on a long line, and the chains below want every segment.
-        if (cls != RoadClass.rail) {
-          final n = road.points.length;
-          final a = Vector3(road.points[0], road.points[1], road.points[2]);
-          final b = Vector3(
-              road.points[n - 3], road.points[n - 2], road.points[n - 1]);
-          final near = math.min((a - focusBF).length, (b - focusBF).length);
-          if (near > trafficRangeM) continue;
-        }
-        final pts = <Vector3>[];
-        for (var i = 0; i + 2 < road.points.length; i += 3) {
-          pts.add(Vector3(road.points[i] - anchorBF.x,
-              road.points[i + 1] - anchorBF.y, road.points[i + 2] - anchorBF.z));
-        }
-        if (pts.length < 2) continue;
-
-        // Cumulative length, so a vehicle can be placed at a distance rather
-        // than at a vertex — otherwise they would snap between samples.
-        final cum = <double>[0];
-        for (var i = 1; i < pts.length; i++) {
-          cum.add(cum[i - 1] + (pts[i] - pts[i - 1]).length);
-        }
-        final total = cum.last;
-        if (total < 30) continue;
-
-        if (cls == RoadClass.rail) {
-          railSegments.add(pts);
-          continue;
-        }
-        // Elevated rail carries the L's train, not cars: one canonical car,
-        // instanced at each pose, on the same convention as the road vehicles
-        // (model +X across, +Y along, +Z up; vertices in scene units).
-        if (!cls.carriesCars) {
-          for (final car in ElevatedStructure.trainCarPoses(
-            pts: pts,
-            anchorBF: anchorBF,
-            lengthM: total,
-            epochS: snap.epoch,
-            seed: road.points.length,
-          )) {
-            trainCars.add(vm.Matrix4.compose(
-              vm.Vector3(lengthToScene(car.centre.x),
-                  lengthToScene(car.centre.y), lengthToScene(car.centre.z)),
-              quatToScene(Quaternion.fromBasis(car.side, car.along, car.up)),
-              vm.Vector3.all(1.0),
-            ));
-          }
-          continue;
-        }
-
-        // Metres of road per vehicle PER LANE, and speed, by class.
-        //
-        // Both were derived from `cls.index` arithmetic, which happened to
-        // work while there were four classes and broke the moment there were
-        // seven: the spacing divisor `110 - index*22` reached zero at the
-        // elevated tier and went negative at rail. An enum's index is not a
-        // quantity — writing the quantity down is both correct and readable.
-        final (spacingM, speed) = switch (cls) {
-          RoadClass.street => (110.0, 8.0),
-          RoadClass.avenue => (120.0, 13.0),
-          RoadClass.highway => (110.0, 22.0),
-          RoadClass.elevated => (95.0, 24.0),
-          RoadClass.alley => (200.0, 4.0),
-          RoadClass.path => (150.0, 6.0),
-          // Out of town: sparse and fast.
-          RoadClass.trunk => (140.0, 30.0),
-          RoadClass.expressway4 => (90.0, 31.0),
-          RoadClass.expressway6 => (95.0, 31.0),
-          RoadClass.expressway8 => (100.0, 31.0),
-          RoadClass.ramp => (160.0, 14.0),
-          RoadClass.transit || RoadClass.rail => (0.0, 0.0),
-        };
-        if (spacingM <= 0) continue;
-        final perLane = (total / spacingM * trafficDensity).floor();
-        if (perLane <= 0) continue;
-        final family =
-            road.sealed ? VehicleKind.airless : VehicleKind.road;
-        final seed = road.points.length * 2654435761 + entry.key.hashCode;
-        // Where the lanes are. A road with no layout — there is none — gets
-        // one stream each way, half way out to the curb.
-        final layout = cls.lanes;
-        final laneScale = layout == null ? 1.0 : road.halfWidthM / layout.halfWidthM;
-        // Only the lanes that run the piece's whole length.
-        final drivable = road.narrowHalfWidthM - (layout?.shoulderM ?? 0) * laneScale;
-        final laneOffsets = [
-          for (final o in layout?.laneOffsets ?? [road.halfWidthM * 0.5])
-            if (o.abs() * laneScale + 1.0 <= drivable) o
-        ];
-        final ranges = <(double, double)>[
-          for (var i = 0; i + 1 < road.overpasses.length; i += 2)
-            (road.overpasses[i], road.overpasses[i + 1]),
-        ];
-        final oneWay = layout?.oneWay ?? false;
-
-        var stream = 0;
-        for (var dirIndex = 0; dirIndex < (oneWay ? 1 : 2); dirIndex++) {
-          final dirSign = dirIndex == 0 ? 1.0 : -1.0;
-          for (final laneOffset in laneOffsets) {
-            final lane = stream++;
-            for (var i = 0; i < perLane && placed < _maxVehicles; i++) {
-              final h = _hash(seed + lane * 7919 + i * 104729);
-              final kind = family[h % family.length];
-              // Longer vehicles need more room; spacing them by their own
-              // length keeps a semi from sitting inside the car behind it.
-              final phase = (h >> 8 & 0xFFFF) / 65536.0;
-              var d = (cum.last * (i + phase) / perLane +
-                      dirSign * snap.epoch * speed) %
-                  total;
-              if (d < 0) d += total;
-              final at = _alongPolyline(pts, cum, d);
-              if (at == null) continue;
-              final fwd = at.$2 * dirSign;
-              final up = (at.$1 + anchorBF).normalized;
-              final side = fwd.cross(up).normalized;
-              // In its lane, to the right of the centreline in its own
-              // direction of travel — and on the DECK of an elevated road or
-              // a bridge rather than the ground the columns stand on.
-              final lift = cls.deckHeightM + RoadMesher.bridgeLiftAt(d, ranges);
-              final offset = side * (laneOffset * laneScale) + up * lift;
-              // Model space is +Y forward, +Z up, so the instance rotation is
-              // the basis (side, forward, up) expressed as a quaternion.
-              final rot = Quaternion.fromBasis(side, fwd, up);
-              (byKind[kind] ??= []).add(vm.Matrix4.compose(
-                vm.Vector3(
-                    lengthToScene((at.$1 + offset).x),
-                    lengthToScene((at.$1 + offset).y),
-                    lengthToScene((at.$1 + offset).z)),
-                quatToScene(rot),
-                // UNIT scale: `VehicleMeshes.emit` already builds its
-                // vertices in scene units, unlike the building library which
-                // works in metres. Applying the metres-to-scene factor again
-                // here made every vehicle a thousand times too small.
-                vm.Vector3.all(1.0),
-              ));
-              placed++;
-            }
-          }
-        }
-      }
-
-      // The railway's trains: a passenger shuttle calling at the stations
-      // and a freight working calling at the yard, on every line long
-      // enough to hold one; a short line with no stops is a siding, and a
-      // freight rake stands on it.
-      final railCars = <RailCarKind, List<vm.Matrix4>>{};
-      if (railSegments.isNotEmpty) {
-        final stops = <(String, Vector3)>[
-          for (final b in snap.buildings.values)
-            if (b.body == entry.key &&
-                (b.type == 'station' || b.type == 'freightyard'))
-              (b.type, Vector3(b.px, b.py, b.pz) - anchorBF),
-        ];
-        var line = 0;
-        for (final chain in Railway.chains(railSegments)) {
-          final cum = RailConsist.cumulative(chain);
-          if (cum.last < 200) continue;
-          final stationsM = <double>[];
-          final yardsM = <double>[];
-          for (final (type, at) in stops) {
-            final n = RailConsist.nearestOn(chain, cum, at);
-            if (n.offM > 160) continue;
-            (type == 'station' ? stationsM : yardsM).add(n.alongM);
-          }
-          final phase = ((line++ * 977 + entry.key.hashCode) % 1000).toDouble();
-          final siding = cum.last < 900 && stationsM.isEmpty && yardsM.isEmpty;
-          final runs = siding
-              ? [(RailConsist.freight, const <double>[], 0.0, false)]
-              : [
-                  (RailConsist.passenger, stationsM, phase, true),
-                  (
-                    RailConsist.freight,
-                    yardsM,
-                    phase + cum.last / RailConsist.freight.speedMs,
-                    true
-                  ),
-                ];
-          for (final (consist, stopsM, phaseS, moving) in runs) {
-            for (final car in consist.posesAt(
-              pts: chain,
-              anchorBF: anchorBF,
-              epochS: snap.epoch,
-              stopsM: stopsM,
-              phaseS: phaseS,
-              moving: moving,
-              parkedAtM: cum.last / 2 + consist.lengthM / 2,
-            )) {
-              (railCars[car.kind] ??= []).add(vm.Matrix4.compose(
-                vm.Vector3(lengthToScene(car.centre.x),
-                    lengthToScene(car.centre.y), lengthToScene(car.centre.z)),
-                quatToScene(Quaternion.fromBasis(car.side, car.along, car.up)),
-                vm.Vector3.all(1.0),
-              ));
-            }
-          }
-        }
-      }
+      final sink = _traffic.place(bodyId, snap.epoch, focusBF, snap.buildings);
 
       // The anchor is written only when this body moved or the slot is new.
-      final bodyMoved = moved[entry.key] ?? true;
+      final bodyMoved = moved[bodyId] ?? true;
       vm.Matrix4? anchor;
       void place(String key, fs.MeshGeometry? geometry, fs.Material material,
-          List<vm.Matrix4> transforms) {
-        if (geometry == null || transforms.isEmpty) return;
+          TrafficBuffer poses) {
+        if (geometry == null || poses.count == 0) return;
         // _maxVehicles is far under _maxPerDraw, so one draw per slot.
         final slot = _trafficSlots.putIfAbsent(key, () {
           final mesh = fs.InstancedMesh(geometry: geometry, material: material);
@@ -1974,30 +1768,30 @@ class CityNodes {
           return _TrafficSlot(node, mesh);
         });
         slot.touched = true;
-        _setInstances(slot.mesh, transforms);
+        _setInstances(slot.mesh, poses);
         if (!slot.placed || bodyMoved) {
           slot.node.localTransform =
-              anchor ??= _anchorTransform(body, anchorBF, origin);
+              anchor ??= _anchorTransform(body, sink.anchorBF, origin);
           slot.placed = true;
         }
         slot.node.visible = true;
       }
 
-      byKind.forEach((kind, transforms) {
+      sink.byKind.forEach((kind, poses) {
         final mesh = _vehicleMesh(kind);
-        place('${entry.key}/${kind.name}/solid', mesh.solid,
-            CityMaterials.facade, transforms);
-        place('${entry.key}/${kind.name}/glazing', mesh.glazing,
-            CityMaterials.glazing, transforms);
+        place('$bodyId/${kind.name}/solid', mesh.solid, CityMaterials.facade,
+            poses);
+        place('$bodyId/${kind.name}/glazing', mesh.glazing,
+            CityMaterials.glazing, poses);
       });
-      railCars.forEach((kind, transforms) {
+      sink.railCars.forEach((kind, poses) {
         final mesh = _railCarMesh(kind);
-        place('${entry.key}/rail/${kind.name}/solid', mesh.solid,
-            CityMaterials.facade, transforms);
-        place('${entry.key}/rail/${kind.name}/glazing', mesh.glazing,
-            CityMaterials.glazing, transforms);
+        place('$bodyId/rail/${kind.name}/solid', mesh.solid,
+            CityMaterials.facade, poses);
+        place('$bodyId/rail/${kind.name}/glazing', mesh.glazing,
+            CityMaterials.glazing, poses);
       });
-      if (trainCars.isNotEmpty) {
+      if (sink.trainCars.count > 0) {
         final car = _trainCar ??= () {
           final carBody = MeshBuilder();
           final carGlass = MeshBuilder();
@@ -2005,12 +1799,13 @@ class CityNodes {
           return _CityMesh(
               _geometryOf(carBody.build()), _geometryOf(carGlass.build()));
         }();
-        place('${entry.key}/train/solid', car.solid, CityMaterials.facade,
-            trainCars);
-        place('${entry.key}/train/glazing', car.glazing,
-            CityMaterials.glazing, trainCars);
+        place('$bodyId/train/solid', car.solid, CityMaterials.facade,
+            sink.trainCars);
+        place('$bodyId/train/glazing', car.glazing, CityMaterials.glazing,
+            sink.trainCars);
       }
     }
+    _traffic.end();
     // A slot nothing used this frame — a kind that placed no vehicle, a body
     // out of the frame — hides rather than dies: it will be wanted again.
     for (final slot in _trafficSlots.values) {
@@ -2018,28 +1813,34 @@ class CityNodes {
     }
   }
 
-  /// Move [mesh]'s instances to [transforms] in place. A plain move only
-  /// refits the BVH; instances are added or removed only when the count
-  /// changes.
-  static void _setInstances(
-      fs.InstancedMesh mesh, List<vm.Matrix4> transforms) {
-    if (mesh.instanceCount == transforms.length) {
-      for (var i = 0; i < transforms.length; i++) {
-        mesh.setInstanceTransform(i, transforms[i]);
+  /// Move [mesh]'s instances to the live part of [poses] in place. The
+  /// mesh copies each matrix, so the buffer's own matrices are rewritten
+  /// next frame without touching it again; instances are added or removed
+  /// only when the count changes.
+  static void _setInstances(fs.InstancedMesh mesh, TrafficBuffer poses) {
+    final n = poses.count;
+    final m = poses.matrices;
+    if (mesh.instanceCount == n) {
+      for (var i = 0; i < n; i++) {
+        mesh.setInstanceTransform(i, m[i]);
       }
       return;
     }
     mesh.clearInstances();
-    for (final t in transforms) {
-      mesh.addInstance(t);
+    for (var i = 0; i < n; i++) {
+      mesh.addInstance(m[i]);
     }
   }
 
+  /// Drop the traffic draws, and the tables behind them: the tables are
+  /// cheap to rebuild and this runs on a structure reset, when they are
+  /// stale anyway.
   void _dropTraffic() {
     for (final slot in _trafficSlots.values) {
       _scene.remove(slot.node);
     }
     _trafficSlots.clear();
+    _traffic.drop();
   }
 
   /// Drop the nodes that keep MATERIAL instances across frames — traffic and
@@ -2053,29 +1854,6 @@ class CityNodes {
       _cursorNode = null;
       _cursorKey = null;
     }
-  }
-
-  /// Point and forward direction [d] metres along a polyline.
-  static (Vector3, Vector3)? _alongPolyline(
-      List<Vector3> pts, List<double> cum, double d) {
-    for (var i = 1; i < pts.length; i++) {
-      if (d > cum[i]) continue;
-      final seg = pts[i] - pts[i - 1];
-      final len = seg.length;
-      if (len < 1e-6) continue;
-      final t = ((d - cum[i - 1]) / len).clamp(0.0, 1.0);
-      return (pts[i - 1] + seg * t, seg.normalized);
-    }
-    return null;
-  }
-
-  /// A cheap integer scramble, so two vehicles from adjacent indices do not
-  /// come out the same model at the same offset.
-  static int _hash(int x) {
-    var h = x & 0x7FFFFFFF;
-    h = (h ^ (h >> 15)) * 0x2C1B3C6D & 0x7FFFFFFF;
-    h = (h ^ (h >> 12)) * 0x297A2D39 & 0x7FFFFFFF;
-    return h ^ (h >> 15);
   }
 
   /// Draw (or clear) the editor's ground cursor.
@@ -2952,24 +2730,6 @@ class CityNodes {
     _libraryCoarse.clear();
     if (debugLine.isNotEmpty) debugPrint('cityNodes disposed');
   }
-}
-
-/// A road as the traffic pass sees it: the plat's and the plan's alike.
-class _TrafficRoad {
-  const _TrafficRoad(this.points, this.roadClassIndex, this.halfWidthM,
-      this.sealed, this.overpasses,
-      {double? narrowHalfWidthM})
-      : narrowHalfWidthM = narrowHalfWidthM ?? halfWidthM;
-  final List<double> points;
-  final int roadClassIndex;
-  final double halfWidthM;
-  final bool sealed;
-
-  /// The narrowest the piece gets — its own width unless it tapers.
-  final double narrowHalfWidthM;
-
-  /// Flattened start,end pairs along the road that ride a bridge.
-  final List<double> overpasses;
 }
 
 /// One resident traffic draw: its node and the instanced mesh it moves.
