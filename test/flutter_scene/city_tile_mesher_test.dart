@@ -985,6 +985,41 @@ void main() {
       expectSameGroups(big, again);
     });
 
+    test('the road builders are reused across jobs: same bytes, no growth',
+        () {
+      // The road pass's builders live in the scratch too, reset per job:
+      // the near tile grows them, the far tile and the near tile again fill
+      // the same buffers, and every result matches a fresh build. The
+      // budgets (props, curb cars) and the pit lists must come back per
+      // tile as well, or the second near tile would be a poorer street.
+      final scratch = CityMeshScratch();
+      final libraries = CityBuildingLibraries();
+      final big = CityTileMesher.mesh(request(CityTier.near), libraries,
+              scratch: scratch)
+          .detached();
+      final grown = scratch.roadVertexCapacity;
+      expect(grown, greaterThan(0));
+      final fresh = CityTileMesher.mesh(
+          request(CityTier.near), CityBuildingLibraries());
+      expectSameGroups(fresh, big);
+      expect(big.treePits, fresh.treePits);
+      expect(big.shrubPits, fresh.shrubPits);
+
+      final small = CityTileMesher.mesh(request(CityTier.far), libraries,
+          scratch: scratch);
+      expect(scratch.roadVertexCapacity, grown);
+      expectSameGroups(
+          CityTileMesher.mesh(request(CityTier.far), CityBuildingLibraries()),
+          small);
+
+      final again = CityTileMesher.mesh(request(CityTier.near), libraries,
+          scratch: scratch);
+      expect(scratch.roadVertexCapacity, grown);
+      expectSameGroups(big, again);
+      expect(again.treePits, big.treePits);
+      expect(again.shrubPits, big.shrubPits);
+    });
+
     test('the inline scheduler hands out results that alias nothing', () async {
       final scheduler = SyncCityTileScheduler();
       final first = scheduler.mesh(request(CityTier.near));

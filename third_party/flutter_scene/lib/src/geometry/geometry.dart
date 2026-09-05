@@ -225,9 +225,27 @@ abstract class Geometry {
     ByteData? indices,
     gpu.IndexType indexType,
   ) {
+    _uploadSegments(
+      [for (final stream in streams) UploadSegment.bytes(stream)],
+      vertexCount,
+      indices,
+      indexType,
+    );
+  }
+
+  /// PATCHED (acro_space_simulator): the general form of [_uploadStreams],
+  /// one [UploadSegment] per vertex slot. A segment is the caller's bytes or
+  /// a repeated default, so an absent attribute reaches the buffer without a
+  /// CPU-side stream ever being allocated for it.
+  void _uploadSegments(
+    List<UploadSegment> segments,
+    int vertexCount,
+    ByteData? indices,
+    gpu.IndexType indexType,
+  ) {
     var vertexBytes = 0;
-    for (final stream in streams) {
-      vertexBytes += stream.lengthInBytes;
+    for (final segment in segments) {
+      vertexBytes += segment.lengthInBytes;
     }
 
     final gpu.DeviceBuffer deviceBuffer = gpu.gpuContext.createDeviceBuffer(
@@ -237,16 +255,22 @@ abstract class Geometry {
 
     var offset = 0;
     final views = <gpu.BufferView>[];
-    for (final stream in streams) {
-      deviceBuffer.overwrite(stream, destinationOffsetInBytes: offset);
+    for (final segment in segments) {
+      writeSegmentSlice(
+        deviceBuffer,
+        segment,
+        offsetInSegment: 0,
+        length: segment.lengthInBytes,
+        destinationOffset: offset,
+      );
       views.add(
         gpu.BufferView(
           deviceBuffer,
           offsetInBytes: offset,
-          lengthInBytes: stream.lengthInBytes,
+          lengthInBytes: segment.lengthInBytes,
         ),
       );
-      offset += stream.lengthInBytes;
+      offset += segment.lengthInBytes;
     }
     setVertexStreams(views, vertexCount);
 
@@ -259,6 +283,33 @@ abstract class Geometry {
           lengthInBytes: indices.lengthInBytes,
         ),
         indexType,
+      );
+    }
+  }
+
+  /// PATCHED (acro_space_simulator): copies [length] bytes of [segment],
+  /// from [offsetInSegment], into [buffer] at [destinationOffset] — one
+  /// `overwrite` for a bytes segment, a block-sized run at a time for a
+  /// repeated one. The immediate upload and the staged upload
+  /// (`StagedMeshUpload.step`) both move their bytes through here, so the
+  /// two lay the buffer out identically.
+  ///
+  /// An overwrite's result is ignored as [_uploadStreams] always has: a
+  /// failed copy cannot be retried at this level, and the segment arithmetic
+  /// keeps every run inside the buffer.
+  @internal
+  static void writeSegmentSlice(
+    gpu.DeviceBuffer buffer,
+    UploadSegment segment, {
+    required int offsetInSegment,
+    required int length,
+    required int destinationOffset,
+  }) {
+    for (final piece in segment.pieces(offsetInSegment, length)) {
+      buffer.overwrite(
+        piece.view,
+        destinationOffsetInBytes:
+            destinationOffset + (piece.offsetInSegment - offsetInSegment),
       );
     }
   }
@@ -318,7 +369,17 @@ abstract class Geometry {
   /// floats per vertex), used by the structure-of-arrays upload path.
   @internal
   void scanLocalBoundsFromPositions(Float32List positions, int vertexCount) {
-    if (vertexCount == 0) return;
+    final aabb = boundsOfPositions(positions, vertexCount);
+    if (aabb != null) applyScannedBounds(aabb);
+  }
+
+  /// PATCHED (acro_space_simulator): the box around [vertexCount] tightly
+  /// packed positions, or null for none — the scan of
+  /// [scanLocalBoundsFromPositions] on its own, pure, so a mesh that drops
+  /// its positions after the upload can still be bounded from them first.
+  @internal
+  static vm.Aabb3? boundsOfPositions(Float32List positions, int vertexCount) {
+    if (vertexCount == 0) return null;
     double minX = double.infinity,
         minY = double.infinity,
         minZ = double.infinity;
@@ -336,10 +397,17 @@ abstract class Geometry {
       if (y > maxY) maxY = y;
       if (z > maxZ) maxZ = z;
     }
-    final aabb = vm.Aabb3.minMax(
+    return vm.Aabb3.minMax(
       vm.Vector3(minX, minY, minZ),
       vm.Vector3(maxX, maxY, maxZ),
     );
+  }
+
+  /// PATCHED (acro_space_simulator): takes a scanned box as this geometry's
+  /// bounds the way [scanLocalBoundsFromPositions] does — the sphere stays
+  /// if one was set, and is circumscribed otherwise.
+  @internal
+  void applyScannedBounds(vm.Aabb3 aabb) {
     _localBounds = aabb;
     _localBoundingSphere ??= _circumscribedSphere(aabb);
   }
@@ -579,6 +647,13 @@ class UnskinnedGeometry extends Geometry {
   /// own buffer. Absent attributes get defaults (normal `(0, 0, 1)`, texture
   /// coordinate `(0, 0)`, color opaque white). The position and texture
   /// coordinate streams are retained on the CPU for raycasting.
+  ///
+  /// PATCHED (acro_space_simulator): with [retainCpuData] false nothing is
+  /// copied and nothing is kept — the caller's arrays are uploaded from
+  /// their own bytes, absent attributes as repeated defaults, and the
+  /// geometry keeps no CPU attributes, so it cannot be raycast. The bounds
+  /// are still scanned from [positions] before they are let go. The arrays
+  /// must stay unchanged until this returns.
   @internal
   void uploadUnskinnedAttributes({
     required Float32List positions,
@@ -588,7 +663,26 @@ class UnskinnedGeometry extends Geometry {
     Float32List? colors,
     ByteData? indices,
     gpu.IndexType indexType = gpu.IndexType.int16,
+    bool retainCpuData = true,
   }) {
+    if (!retainCpuData) {
+      uploadUnskinnedSegments(
+        InterleavedLayoutAdapter.unskinnedUploadSegments(
+          positions: positions,
+          vertexCount: vertexCount,
+          normals: normals,
+          texCoords: texCoords,
+          colors: colors,
+        ),
+        vertexCount,
+        indices: indices,
+        indexType: indexType,
+      );
+      if (localBounds == null && vertexCount > 0) {
+        scanLocalBoundsFromPositions(positions, vertexCount);
+      }
+      return;
+    }
     final streams = InterleavedLayoutAdapter.unskinnedAttributeStreams(
       positions: positions,
       vertexCount: vertexCount,
@@ -618,6 +712,29 @@ class UnskinnedGeometry extends Geometry {
         vertexCount,
       );
     }
+  }
+
+  /// PATCHED (acro_space_simulator): uploads the four unskinned attribute
+  /// [segments] (slot order: position, normal, texture coordinate, color)
+  /// and any [indices] into one buffer, binding them, and nothing more: no
+  /// raycast copies, no bounds. The caller — [uploadUnskinnedAttributes]
+  /// without CPU data, or `MeshGeometry` uploading the copies it already
+  /// keeps — decides what to retain.
+  @internal
+  void uploadUnskinnedSegments(
+    List<UploadSegment> segments,
+    int vertexCount, {
+    ByteData? indices,
+    gpu.IndexType indexType = gpu.IndexType.int16,
+  }) {
+    if (segments.length != 4) {
+      throw ArgumentError.value(
+        segments.length,
+        'segments',
+        'an unskinned upload is four attribute segments',
+      );
+    }
+    _uploadSegments(segments, vertexCount, indices, indexType);
   }
 
   /// Uploads already-de-interleaved attribute streams (raw bytes) straight

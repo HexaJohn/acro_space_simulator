@@ -536,9 +536,11 @@ class CityBuildingLibraries {
 class CityMeshScratch {
   final Map<CityMaterialKind, MergedMeshSink> _plain = {};
   final List<MergedMeshSink> _spare = [];
+  final CityRoadBuilders _roads = CityRoadBuilders();
   Object? _owner;
 
-  /// Make [owner]'s the sinks: the first claim by a new owner empties them.
+  /// Make [owner]'s the sinks and the road builders: the first claim by a
+  /// new owner empties them.
   void claim(Object owner) {
     if (identical(_owner, owner)) return;
     _owner = owner;
@@ -548,7 +550,26 @@ class CityMeshScratch {
     for (final sink in _spare) {
       sink.reset();
     }
+    _roads.reset();
   }
+
+  /// The road pass's builders — two dozen [MeshBuilder]s and the pit
+  /// lists — kept here for the same reason the sinks are: made fresh per
+  /// job they were their full size in old-generation garbage every tile,
+  /// and their [MeshBuilder.build] copied the used prefix besides. One set
+  /// per worker, [claim] resets them, and every tile's road pass fills the
+  /// same buffers. Reading them does not claim: a job gathers them at plan
+  /// time, while the job before it may still be running, and claims at its
+  /// first step that emits.
+  CityRoadBuilders get roads => _roads;
+
+  /// Vertex capacity over every sink, for the reuse test.
+  int get vertexCapacity =>
+      _plain.values.fold(0, (n, s) => n + s.vertexCapacity) +
+      _spare.fold(0, (n, s) => n + s.vertexCapacity);
+
+  /// Vertex capacity over the road builders, for the reuse test.
+  int get roadVertexCapacity => _roads.vertexCapacity;
 
   /// The sink for [kind]'s plain group — the one its skyline goes into.
   MergedMeshSink plain(CityMaterialKind kind) =>
@@ -562,11 +583,6 @@ class CityMeshScratch {
     }
     return _spare[i];
   }
-
-  /// Vertex capacity over every sink, for the reuse test.
-  int get vertexCapacity =>
-      _plain.values.fold(0, (n, s) => n + s.vertexCapacity) +
-      _spare.fold(0, (n, s) => n + s.vertexCapacity);
 }
 
 /// The kinds of step a tile's meshing is made of. The inline scheduler
@@ -626,7 +642,13 @@ class CityTileMeshJob {
   /// step may push more onto the end, and they run next.
   final List<CityMeshStep> steps = [];
 
-  final _RoadBuilders _roads = _RoadBuilders();
+  /// The road pass's builders: the scratch's, claimed on first touch like
+  /// the sinks (see [CityMeshScratch.roads]).
+  CityRoadBuilders get _roads {
+    _scratch.claim(this);
+    return _scratch.roads;
+  }
+
   final MeshBuilder _patches = MeshBuilder();
   final MeshBuilder _featureSolid = MeshBuilder();
   final MeshBuilder _featureGlow = MeshBuilder();
@@ -732,7 +754,11 @@ class CityTileMeshJob {
   /// one draw, merged with the skyline of the same material — seven or so
   /// draws for a near tile where a builder each was two dozen.
   void _addMergeSteps() {
-    final r = _roads;
+    // Gathered, not claimed: this runs at plan time, and an inline
+    // scheduler plans a job while the one before it still owns the scratch.
+    // The builders are the same objects whichever job owns them, so the
+    // references are good once the road steps have claimed.
+    final r = _scratch.roads;
     final sources = <(MeshBuilder, CityMaterialKind, bool)>[
       // The ribbon takes the dedicated road strip — on the facade material it
       // rendered as a run of blank concrete with no curbs and no centre line,
@@ -1731,8 +1757,9 @@ class CityTileMesher {
   }
 }
 
-/// The road pass's builders for one tile, and its budgets.
-class _RoadBuilders {
+/// The road pass's builders for one tile, and its budgets. One set lives
+/// per [CityMeshScratch] and is [reset] between tiles.
+class CityRoadBuilders {
   final MeshBuilder ribbon = MeshBuilder();
   final MeshBuilder dirtRibbon = MeshBuilder();
   final MeshBuilder alleyRibbon = MeshBuilder();
@@ -1744,7 +1771,8 @@ class _RoadBuilders {
   // is a city nobody can draw.
   final MeshBuilder propSolid = MeshBuilder();
   final MeshBuilder propGlow = MeshBuilder();
-  int propBudget = 2600;
+  static const int propBudgetPerTile = 2600;
+  int propBudget = propBudgetPerTile;
   // Street-tree pits and planter soil lines, collected here and drawn as
   // INSTANCES of the scatter system's props — the same generators,
   // materials and atlas the wild ones use, so a street tree and a forest
@@ -1755,7 +1783,8 @@ class _RoadBuilders {
   final MeshBuilder tubeGlass = MeshBuilder();
   final MeshBuilder curbSolid = MeshBuilder();
   final MeshBuilder curbGlass = MeshBuilder();
-  int curbCars = 240;
+  static const int curbCarsPerTile = 240;
+  int curbCars = curbCarsPerTile;
   final MeshBuilder lampSolid = MeshBuilder();
   final MeshBuilder lampGlow = MeshBuilder();
   final MeshBuilder walkRibbon = MeshBuilder();
@@ -1763,4 +1792,42 @@ class _RoadBuilders {
   final MeshBuilder railBallast = MeshBuilder();
   final MeshBuilder railConcrete = MeshBuilder();
   final MeshBuilder railSteel = MeshBuilder();
+
+  /// Every builder in the order the merge reads them, for [reset] and the
+  /// capacity count.
+  List<MeshBuilder> get _all => [
+        ribbon,
+        dirtRibbon,
+        alleyRibbon,
+        airSolid,
+        airDeck,
+        airGlow,
+        propSolid,
+        propGlow,
+        tubeSolid,
+        tubeGlass,
+        curbSolid,
+        curbGlass,
+        lampSolid,
+        lampGlow,
+        walkRibbon,
+        railBallast,
+        railConcrete,
+        railSteel,
+      ];
+
+  /// Empty every builder and list, keeping their capacity, and restore the
+  /// per-tile budgets: the state a fresh set had.
+  void reset() {
+    for (final b in _all) {
+      b.reset();
+    }
+    treePits.clear();
+    shrubPits.clear();
+    propBudget = propBudgetPerTile;
+    curbCars = curbCarsPerTile;
+  }
+
+  /// Vertex capacity over every builder.
+  int get vertexCapacity => _all.fold(0, (n, b) => n + b.vertexCapacity);
 }

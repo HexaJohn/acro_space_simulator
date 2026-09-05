@@ -2521,11 +2521,17 @@ class CityNodes {
 
   static fs.MeshGeometry? _geometryOf(PropMesh mesh) {
     if (mesh.isEmpty) return null;
+    // No CPU copy stays behind: the studio's pick is footprint-based (see
+    // the tile footprints in the presenter), and the engine's raycast is
+    // never asked of a city mesh — an archetype, a tree, a car, the cursor.
+    // Retained, every one of them was old-generation typed data the
+    // collector marked on each pass while tiles built.
     return fs.MeshGeometry.fromArrays(
       positions: mesh.positions,
       normals: mesh.normals,
       texCoords: mesh.texCoords,
       indices: mesh.indices,
+      retainCpuData: false,
     );
   }
 
@@ -2716,6 +2722,14 @@ abstract interface class CityStagedUpload {
 /// becomes. The color stream the engine adds (opaque white, sixteen bytes
 /// a vertex) is part of what moves, so [totalBytes] is more than the
 /// group's own [CityMeshGroup.bytes].
+///
+/// The engine keeps no CPU copy of the group: the pick is footprint-based
+/// (the presenter tests tile footprints, not triangles), and the engine's
+/// raycast is never asked of a city mesh. Retained, six hundred groups
+/// were hundreds of megabytes of old-generation typed data that every
+/// old-space mark walked while the next tiles built — the ConcurrentMark
+/// and Sweep stalls of the colony sweep. The group's own arrays are what
+/// the slices are cut from, and a landed result is never written again.
 class _EngineStagedUpload implements CityStagedUpload {
   _EngineStagedUpload(CityMeshGroup g)
       : _staged = MeshGeometry.stageFromArrays(
@@ -2723,6 +2737,7 @@ class _EngineStagedUpload implements CityStagedUpload {
           normals: g.normals,
           texCoords: g.texCoords,
           indices: g.indices,
+          retainCpuData: false,
         );
   final StagedMeshUpload _staged;
 

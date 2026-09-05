@@ -71,6 +71,8 @@ class MeshGeometry extends UnskinnedGeometry {
   /// supplying [indices] makes [rebuild] require indices thereafter, and
   /// omitting them makes it reject them. To start empty, pass a
   /// zero-length [positions] array with [GeometryStorage.updatable].
+  ///
+  /// [retainCpuData] (see the field) may be false only for a fixed mesh.
   MeshGeometry.fromArrays({
     required Float32List positions,
     Float32List? normals,
@@ -79,6 +81,7 @@ class MeshGeometry extends UnskinnedGeometry {
     List<int>? indices,
     gpu.PrimitiveType primitiveType = gpu.PrimitiveType.triangle,
     this.storage = GeometryStorage.fixed,
+    this.retainCpuData = true,
   }) {
     if (positions.length % 3 != 0) {
       throw ArgumentError(
@@ -86,31 +89,39 @@ class MeshGeometry extends UnskinnedGeometry {
         'three (one vec3 per vertex)',
       );
     }
+    if (!retainCpuData && storage != GeometryStorage.fixed) {
+      throw ArgumentError(
+        'an updatable mesh keeps its attributes on the CPU: retainCpuData '
+        'must be true with GeometryStorage.updatable',
+      );
+    }
     final vertexCount = positions.length ~/ 3;
     this.primitiveType = primitiveType;
 
-    // Normals are generated from triangle faces; line and point
-    // geometry has none, so absent normals are left at their default.
-    final resolvedNormals =
-        normals ??
-        (vertexCount > 0 && primitiveType == gpu.PrimitiveType.triangle
-            ? InterleavedLayoutAdapter.generateNormals(
-                positions: positions,
-                vertexCount: vertexCount,
-                indices: indices,
-              )
-            : null);
-
     if (storage == GeometryStorage.fixed) {
       _uploadFixed(
-        positions,
-        vertexCount,
-        resolvedNormals,
-        texCoords,
-        colors,
-        indices,
+        FixedMeshUploadPlan(
+          positions: positions,
+          normals: normals,
+          texCoords: texCoords,
+          colors: colors,
+          indices: indices,
+          primitiveType: primitiveType,
+          retainCpuData: retainCpuData,
+        ),
       );
     } else {
+      // Normals are generated from triangle faces; line and point
+      // geometry has none, so absent normals are left at their default.
+      final resolvedNormals =
+          normals ??
+          (vertexCount > 0 && primitiveType == gpu.PrimitiveType.triangle
+              ? InterleavedLayoutAdapter.generateNormals(
+                  positions: positions,
+                  vertexCount: vertexCount,
+                  indices: indices,
+                )
+              : null);
       _indexed = indices != null;
       _setCpuStreams(
         positions,
@@ -147,6 +158,7 @@ class MeshGeometry extends UnskinnedGeometry {
   factory MeshGeometry.fromMeshData(
     MeshData data, {
     GeometryStorage storage = GeometryStorage.fixed,
+    bool retainCpuData = true,
   }) {
     return MeshGeometry.fromArrays(
       positions: data.positions,
@@ -156,12 +168,13 @@ class MeshGeometry extends UnskinnedGeometry {
       indices: data.indices,
       primitiveType: data.primitiveType,
       storage: storage,
+      retainCpuData: retainCpuData,
     );
   }
 
   // PATCHED (acro_space_simulator): a fixed mesh whose bytes arrive over
   // several frames. Only [StagedMeshUpload] builds one; see [stageFromArrays].
-  MeshGeometry._staged(gpu.PrimitiveType primitiveType)
+  MeshGeometry._staged(gpu.PrimitiveType primitiveType, this.retainCpuData)
     : storage = GeometryStorage.fixed {
     this.primitiveType = primitiveType;
   }
@@ -187,7 +200,11 @@ class MeshGeometry extends UnskinnedGeometry {
   ///
   /// The arguments mean what they mean for [fromArrays]; the storage is
   /// always [GeometryStorage.fixed], since an updatable mesh has its own
-  /// per-attribute rings and no single buffer to stage.
+  /// per-attribute rings and no single buffer to stage. With
+  /// [retainCpuData] false (see the field) the stage copies nothing at all
+  /// on the CPU: the caller's arrays are what the slices are cut from, and
+  /// they must stay unchanged until [StagedMeshUpload.step] has moved every
+  /// byte.
   static StagedMeshUpload stageFromArrays({
     required Float32List positions,
     Float32List? normals,
@@ -195,6 +212,7 @@ class MeshGeometry extends UnskinnedGeometry {
     Float32List? colors,
     List<int>? indices,
     gpu.PrimitiveType primitiveType = gpu.PrimitiveType.triangle,
+    bool retainCpuData = true,
   }) {
     if (positions.length % 3 != 0) {
       throw ArgumentError(
@@ -202,60 +220,24 @@ class MeshGeometry extends UnskinnedGeometry {
         'three (one vec3 per vertex)',
       );
     }
-    final vertexCount = positions.length ~/ 3;
-    final resolvedNormals =
-        normals ??
-        (vertexCount > 0 && primitiveType == gpu.PrimitiveType.triangle
-            ? InterleavedLayoutAdapter.generateNormals(
-                positions: positions,
-                vertexCount: vertexCount,
-                indices: indices,
-              )
-            : null);
-
-    final geometry = MeshGeometry._staged(primitiveType);
-    geometry._liveVertexCount = vertexCount;
-    // The same retained copies [_uploadFixed] keeps: they are what the
-    // geometry raycasts and serializes from, and — filled with the same
-    // defaults [InterleavedLayoutAdapter.unskinnedAttributeStreams] would
-    // fill — they are byte-for-byte the streams [fromArrays] uploads, so
-    // they are uploaded directly rather than copied once more.
-    geometry._setCpuStreams(
-      positions,
-      vertexCount,
-      resolvedNormals,
-      texCoords,
-      colors,
+    final plan = FixedMeshUploadPlan(
+      positions: positions,
+      normals: normals,
+      texCoords: texCoords,
+      colors: colors,
+      indices: indices,
+      primitiveType: primitiveType,
+      retainCpuData: retainCpuData,
     );
-    ByteData? indexBytes;
-    var indexType = gpu.IndexType.int16;
-    if (indices != null) {
-      final packed = InterleavedLayoutAdapter.packIndices(indices);
-      indexBytes = ByteData.sublistView(packed.bytes);
-      indexType = packed.is32Bit ? gpu.IndexType.int32 : gpu.IndexType.int16;
-      geometry._packedIndexBytes = packed.bytes;
-      geometry._packedIndices32Bit = packed.is32Bit;
-    }
-    geometry.setRaycastAttributes(
-      positions: geometry._cpuPositions,
-      texCoords: geometry._cpuTexCoords,
-      indices: indexBytes,
-    );
-    if (vertexCount > 0) {
-      geometry.scanLocalBoundsFromPositions(
-        geometry._cpuPositions,
-        vertexCount,
-      );
-    }
+    final geometry = MeshGeometry._staged(primitiveType, retainCpuData);
+    geometry._adoptPlan(plan);
 
     // The segments in the order [Geometry._uploadStreams] lays them out:
     // the four attribute streams in slot order, then the indices.
-    final segments = <ByteData>[
-      ByteData.sublistView(geometry._cpuPositions),
-      ByteData.sublistView(geometry._cpuNormals),
-      ByteData.sublistView(geometry._cpuTexCoords),
-      ByteData.sublistView(geometry._cpuColors),
-      ?indexBytes,
+    final indexBytes = plan.indexBytes;
+    final segments = <UploadSegment>[
+      ...plan.segments,
+      if (indexBytes != null) UploadSegment.bytes(indexBytes),
     ];
     final layout = StagedUploadLayout([
       for (final s in segments) s.lengthInBytes,
@@ -270,8 +252,36 @@ class MeshGeometry extends UnskinnedGeometry {
       layout,
       buffer,
       indexed: indexBytes != null,
-      indexType: indexType,
+      indexType: plan.indexType,
     );
+  }
+
+  /// Takes what a [FixedMeshUploadPlan] worked out on the CPU: the live
+  /// vertex count, the retained attribute copies and the index bytes (when
+  /// the plan kept them), the raycast attributes that reference them, and
+  /// the bounds. The GPU side — the upload of [FixedMeshUploadPlan.segments]
+  /// — is the caller's, immediate or staged.
+  void _adoptPlan(FixedMeshUploadPlan plan) {
+    _liveVertexCount = plan.vertexCount;
+    final cpu = plan.cpuStreams;
+    if (cpu != null) {
+      _cpuPositions = cpu.positions;
+      _cpuNormals = cpu.normals;
+      _cpuTexCoords = cpu.texCoords;
+      _cpuColors = cpu.colors;
+      _packedIndexBytes = plan.packedIndexBytes;
+      _packedIndices32Bit = plan.packedIndices32Bit;
+      // Raycast off this geometry's own attribute arrays instead of the
+      // transient upload copies, so no extra position/texcoord copy lingers.
+      // Keep the index bytes so an indexed mesh raycasts as indexed.
+      setRaycastAttributes(
+        positions: cpu.positions,
+        texCoords: cpu.texCoords,
+        indices: plan.indexBytes,
+      );
+    }
+    final bounds = plan.bounds;
+    if (bounds != null) applyScannedBounds(bounds);
   }
 
   /// Replaces this updatable geometry's data from a [MeshData] snapshot.
@@ -291,6 +301,22 @@ class MeshGeometry extends UnskinnedGeometry {
 
   /// How this geometry's GPU buffers are managed; see [GeometryStorage].
   final GeometryStorage storage;
+
+  /// PATCHED (acro_space_simulator): whether this geometry keeps its
+  /// attributes on the CPU after the upload.
+  ///
+  /// True by default: the geometry retains a copy of every attribute stream
+  /// and its packed indices, which is what scene raycasts read and what
+  /// [packedData] and [soaData] serialise from. False — allowed for a fixed
+  /// mesh only — uploads the caller's arrays from their own bytes, allocates
+  /// nothing on the CPU for absent attributes, and keeps nothing: the
+  /// geometry then CANNOT be raycast (a scene raycast passes straight
+  /// through it) and CANNOT be re-serialised ([packedData] and [soaData]
+  /// throw). [localBounds] is still scanned from the positions before they
+  /// are let go. A city of hundreds of large meshes that are never picked
+  /// and never saved otherwise keeps hundreds of megabytes of typed data in
+  /// the old generation for the collector to mark on every pass.
+  final bool retainCpuData;
 
   // --- Updatable-storage state. Unused while [storage] is fixed. ---
 
@@ -325,17 +351,21 @@ class MeshGeometry extends UnskinnedGeometry {
   /// emits the de-interleaved [soaData] instead; this stays as a convenience
   /// for callers wanting the interleaved form.
   ({Uint8List vertexBytes, Uint8List? indexBytes, bool indices32Bit})
-  get packedData => (
-    vertexBytes: _packedVertexBytes ??= InterleavedLayoutAdapter.packUnskinned(
-      positions: _cpuPositions,
-      vertexCount: _liveVertexCount,
-      normals: _cpuNormals,
-      texCoords: _cpuTexCoords,
-      colors: _cpuColors,
-    ),
-    indexBytes: _packedIndexBytes,
-    indices32Bit: _packedIndices32Bit,
-  );
+  get packedData {
+    _ensureCpuData('packedData');
+    return (
+      vertexBytes: _packedVertexBytes ??=
+          InterleavedLayoutAdapter.packUnskinned(
+            positions: _cpuPositions,
+            vertexCount: _liveVertexCount,
+            normals: _cpuNormals,
+            texCoords: _cpuTexCoords,
+            colors: _cpuColors,
+          ),
+      indexBytes: _packedIndexBytes,
+      indices32Bit: _packedIndices32Bit,
+    );
+  }
 
   /// The de-interleaved (structure-of-arrays) vertex bytes (the four attribute
   /// streams concatenated) plus the packed index bytes, for re-emitting this
@@ -344,18 +374,30 @@ class MeshGeometry extends UnskinnedGeometry {
   /// the per-attribute CPU streams, no interleave.
   @internal
   ({Uint8List vertexBytes, Uint8List? indexBytes, bool indices32Bit})
-  get soaData => (
-    vertexBytes: InterleavedLayoutAdapter.concatUnskinnedStreams(
-      UnskinnedAttributeStreams(
-        position: _bytesOf(_cpuPositions),
-        normal: _bytesOf(_cpuNormals),
-        texCoord: _bytesOf(_cpuTexCoords),
-        color: _bytesOf(_cpuColors),
+  get soaData {
+    _ensureCpuData('soaData');
+    return (
+      vertexBytes: InterleavedLayoutAdapter.concatUnskinnedStreams(
+        UnskinnedAttributeStreams(
+          position: _bytesOf(_cpuPositions),
+          normal: _bytesOf(_cpuNormals),
+          texCoord: _bytesOf(_cpuTexCoords),
+          color: _bytesOf(_cpuColors),
+        ),
       ),
-    ),
-    indexBytes: _packedIndexBytes,
-    indices32Bit: _packedIndices32Bit,
-  );
+      indexBytes: _packedIndexBytes,
+      indices32Bit: _packedIndices32Bit,
+    );
+  }
+
+  void _ensureCpuData(String what) {
+    if (!retainCpuData) {
+      throw StateError(
+        '$what needs the CPU attributes, and this MeshGeometry was built '
+        'with retainCpuData: false',
+      );
+    }
+  }
 
   Float32List _cpuPositions = Float32List(0);
   Float32List _cpuNormals = Float32List(0);
@@ -507,44 +549,17 @@ class MeshGeometry extends UnskinnedGeometry {
     _recomputeBounds();
   }
 
-  void _uploadFixed(
-    Float32List positions,
-    int vertexCount,
-    Float32List? normals,
-    Float32List? texCoords,
-    Float32List? colors,
-    List<int>? indices,
-  ) {
-    _liveVertexCount = vertexCount;
-    // Retain the structure-of-arrays attributes (defaults filled). These back
-    // both lazy serialization (interleaved on demand) and raycasting, and they
-    // are uploaded straight to per-attribute GPU streams with no interleave.
-    _setCpuStreams(positions, vertexCount, normals, texCoords, colors);
-    ByteData? indexBytes;
-    var indexType = gpu.IndexType.int16;
-    if (indices != null) {
-      final packed = InterleavedLayoutAdapter.packIndices(indices);
-      indexBytes = ByteData.sublistView(packed.bytes);
-      indexType = packed.is32Bit ? gpu.IndexType.int32 : gpu.IndexType.int16;
-      _packedIndexBytes = packed.bytes;
-      _packedIndices32Bit = packed.is32Bit;
-    }
-    uploadUnskinnedAttributes(
-      positions: _cpuPositions,
-      vertexCount: vertexCount,
-      normals: _cpuNormals,
-      texCoords: _cpuTexCoords,
-      colors: _cpuColors,
-      indices: indexBytes,
-      indexType: indexType,
-    );
-    // Raycast off this geometry's own attribute arrays instead of the
-    // transient upload copies, so no extra position/texcoord copy lingers.
-    // Keep the index bytes so an indexed mesh raycasts as indexed.
-    setRaycastAttributes(
-      positions: _cpuPositions,
-      texCoords: _cpuTexCoords,
-      indices: indexBytes,
+  // The fixed path: the plan's CPU side adopted, its segments uploaded at
+  // once. The retained copies (when kept) are the segments themselves, so
+  // they go to the GPU directly — the second de-interleave copy
+  // [Geometry.uploadUnskinnedAttributes] used to make on the way is gone.
+  void _uploadFixed(FixedMeshUploadPlan plan) {
+    _adoptPlan(plan);
+    uploadUnskinnedSegments(
+      plan.segments,
+      plan.vertexCount,
+      indices: plan.indexBytes,
+      indexType: plan.indexType,
     );
   }
 
@@ -661,6 +676,36 @@ class MeshGeometry extends UnskinnedGeometry {
     Float32List? texCoords,
     Float32List? colors,
   ) {
+    final cpu = _cpuStreamsOf(
+      positions,
+      vertexCount,
+      normals,
+      texCoords,
+      colors,
+    );
+    _cpuPositions = cpu.positions;
+    _cpuNormals = cpu.normals;
+    _cpuTexCoords = cpu.texCoords;
+    _cpuColors = cpu.colors;
+  }
+
+  // The retained copies of the four attributes, defaults filled (normal
+  // `(0, 0, 1)`, texture coordinate `(0, 0)`, color opaque white) and each
+  // checked against the vertex count. Shared by the updatable path and
+  // [FixedMeshUploadPlan].
+  static ({
+    Float32List positions,
+    Float32List normals,
+    Float32List texCoords,
+    Float32List colors,
+  })
+  _cpuStreamsOf(
+    Float32List positions,
+    int vertexCount,
+    Float32List? normals,
+    Float32List? texCoords,
+    Float32List? colors,
+  ) {
     if (normals != null && normals.length != vertexCount * 3) {
       throw ArgumentError(
         'normals has ${normals.length} floats; expected ${vertexCount * 3}',
@@ -677,16 +722,18 @@ class MeshGeometry extends UnskinnedGeometry {
         'colors has ${colors.length} floats; expected ${vertexCount * 4}',
       );
     }
-    _cpuPositions = Float32List.fromList(positions);
-    _cpuNormals = normals != null
-        ? Float32List.fromList(normals)
-        : _filledStream(vertexCount, 3, const [0.0, 0.0, 1.0]);
-    _cpuTexCoords = texCoords != null
-        ? Float32List.fromList(texCoords)
-        : Float32List(vertexCount * 2);
-    _cpuColors = colors != null
-        ? Float32List.fromList(colors)
-        : _filledStream(vertexCount, 4, const [1.0, 1.0, 1.0, 1.0]);
+    return (
+      positions: Float32List.fromList(positions),
+      normals: normals != null
+          ? Float32List.fromList(normals)
+          : _filledStream(vertexCount, 3, const [0.0, 0.0, 1.0]),
+      texCoords: texCoords != null
+          ? Float32List.fromList(texCoords)
+          : Float32List(vertexCount * 2),
+      colors: colors != null
+          ? Float32List.fromList(colors)
+          : _filledStream(vertexCount, 4, const [1.0, 1.0, 1.0, 1.0]),
+    );
   }
 
   void _recomputeBounds() {
@@ -751,6 +798,127 @@ class MeshGeometry extends UnskinnedGeometry {
   }
 }
 
+/// PATCHED (acro_space_simulator): the CPU side of building a fixed
+/// [MeshGeometry] from structure-of-arrays attributes, with no GPU in it.
+///
+/// [MeshGeometry.fromArrays] and [MeshGeometry.stageFromArrays] used to do
+/// this work twice over in their own words; both now build a plan and
+/// differ only in how its [segments] reach the buffer — at once, or a slice
+/// a frame. Being pure, the plan is where the two contracts of
+/// [MeshGeometry.retainCpuData] are pinned without a context: with it, the
+/// retained streams (defaults filled, as
+/// [InterleavedLayoutAdapter.unskinnedAttributeStreams] fills them) ARE the
+/// segments; without it, the segments are the caller's own bytes and
+/// repeated defaults, [cpuStreams] is null, and nothing but [bounds] is
+/// kept. Either way the bytes that reach the buffer are the same.
+@internal
+class FixedMeshUploadPlan {
+  FixedMeshUploadPlan({
+    required Float32List positions,
+    Float32List? normals,
+    Float32List? texCoords,
+    Float32List? colors,
+    List<int>? indices,
+    gpu.PrimitiveType primitiveType = gpu.PrimitiveType.triangle,
+    required this.retainCpuData,
+  }) : vertexCount = positions.length ~/ 3 {
+    if (positions.length % 3 != 0) {
+      throw ArgumentError(
+        'positions has ${positions.length} floats; expected a multiple of '
+        'three (one vec3 per vertex)',
+      );
+    }
+    // Normals are generated from triangle faces; line and point
+    // geometry has none, so absent normals are left at their default.
+    final resolvedNormals =
+        normals ??
+        (vertexCount > 0 && primitiveType == gpu.PrimitiveType.triangle
+            ? InterleavedLayoutAdapter.generateNormals(
+                positions: positions,
+                vertexCount: vertexCount,
+                indices: indices,
+              )
+            : null);
+
+    if (indices != null) {
+      final packed = InterleavedLayoutAdapter.packIndices(indices);
+      indexBytes = ByteData.sublistView(packed.bytes);
+      indexType = packed.is32Bit ? gpu.IndexType.int32 : gpu.IndexType.int16;
+      packedIndices32Bit = packed.is32Bit;
+      packedIndexBytes = retainCpuData ? packed.bytes : null;
+    } else {
+      indexBytes = null;
+      indexType = gpu.IndexType.int16;
+      packedIndices32Bit = false;
+      packedIndexBytes = null;
+    }
+
+    if (retainCpuData) {
+      // The retained copies, filled with the same defaults the upload
+      // streams would carry, so they are uploaded as they are rather than
+      // copied once more on the way.
+      final cpu = MeshGeometry._cpuStreamsOf(
+        positions,
+        vertexCount,
+        resolvedNormals,
+        texCoords,
+        colors,
+      );
+      cpuStreams = cpu;
+      segments = [
+        UploadSegment.bytes(ByteData.sublistView(cpu.positions)),
+        UploadSegment.bytes(ByteData.sublistView(cpu.normals)),
+        UploadSegment.bytes(ByteData.sublistView(cpu.texCoords)),
+        UploadSegment.bytes(ByteData.sublistView(cpu.colors)),
+      ];
+    } else {
+      cpuStreams = null;
+      segments = InterleavedLayoutAdapter.unskinnedUploadSegments(
+        positions: positions,
+        vertexCount: vertexCount,
+        normals: resolvedNormals,
+        texCoords: texCoords,
+        colors: colors,
+      );
+    }
+    bounds = Geometry.boundsOfPositions(positions, vertexCount);
+  }
+
+  /// See [MeshGeometry.retainCpuData].
+  final bool retainCpuData;
+
+  /// Vertices in the mesh.
+  final int vertexCount;
+
+  /// The four attribute segments in slot order (position, normal, texture
+  /// coordinate, color), as the upload lays them out.
+  late final List<UploadSegment> segments;
+
+  /// The packed index bytes to upload after the segments, or null for a
+  /// non-indexed mesh; [indexType] is their width.
+  late final ByteData? indexBytes;
+  late final gpu.IndexType indexType;
+
+  /// The retained attribute copies — what the geometry raycasts and
+  /// serialises from — or null when [retainCpuData] is false.
+  late final ({
+    Float32List positions,
+    Float32List normals,
+    Float32List texCoords,
+    Float32List colors,
+  })?
+  cpuStreams;
+
+  /// The packed indices the geometry serialises from, kept only with
+  /// [retainCpuData]; [packedIndices32Bit] is their width either way.
+  late final Uint8List? packedIndexBytes;
+  late final bool packedIndices32Bit;
+
+  /// The box around the positions, scanned before they are let go; null for
+  /// an empty mesh.
+  late final Aabb3? bounds;
+}
+
 /// PATCHED (acro_space_simulator): a fixed mesh whose GPU copy is made a
 /// slice at a time. Created by [MeshGeometry.stageFromArrays].
 ///
@@ -774,7 +942,7 @@ class StagedMeshUpload {
        _indexType = indexType;
 
   final MeshGeometry _geometry;
-  final List<ByteData> _segments;
+  final List<UploadSegment> _segments;
   final gpu.DeviceBuffer _buffer;
   final bool _indexed;
   final gpu.IndexType _indexType;
@@ -804,17 +972,15 @@ class StagedMeshUpload {
     if (isResident) return true;
     if (maxBytes <= 0) return false;
     for (final slice in layout.slicesFrom(_cursor, maxBytes)) {
-      final segment = _segments[slice.segment];
-      // The return value is ignored as [Geometry._uploadStreams] ignores it:
-      // a failed overwrite cannot be retried at this level, and the layout
-      // arithmetic keeps every slice inside the buffer.
-      _buffer.overwrite(
-        ByteData.sublistView(
-          segment,
-          slice.offsetInSegment,
-          slice.offsetInSegment + slice.length,
-        ),
-        destinationOffsetInBytes: slice.destinationOffset,
+      // A slice of a repeated-default segment is several overwrites of a
+      // block each; [Geometry.writeSegmentSlice] is the same writer the
+      // immediate upload uses, so the buffers come out identical.
+      Geometry.writeSegmentSlice(
+        _buffer,
+        _segments[slice.segment],
+        offsetInSegment: slice.offsetInSegment,
+        length: slice.length,
+        destinationOffset: slice.destinationOffset,
       );
       _cursor += slice.length;
     }

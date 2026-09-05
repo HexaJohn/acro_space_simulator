@@ -148,6 +148,54 @@ void main() {
     expect(second.indices, orderedEquals([0, 2, 1, 0, 3, 2]));
   });
 
+  test('reset() empties the builder and keeps what it grew', () {
+    // A reset builder must rebuild the same prop to the byte — from the
+    // identity frame with an empty stack, as a fresh one would — and must
+    // not have shrunk: the whole point of keeping it across tile jobs is
+    // that the buffers the first job grew serve every job after it.
+    final spine = [
+      for (var i = 0; i < 40; i++) Vector3(math.sin(i * 0.1), 0, i * 0.25),
+    ];
+    final radii = [for (var i = 0; i < 40; i++) 0.5 - i * 0.01];
+    void emit(MeshBuilder b) {
+      b
+        ..push()
+        ..move(const Vector3(1, 2, 3))
+        ..yaw(0.4)
+        ..scaleBy(1.5)
+        ..tube(spine, radii, sides: 12, capEnd: true)
+        ..icosphere(radius: 1.0, subdivisions: 3)
+        ..crossCards(width: 2, height: 3);
+      // Left pushed on purpose: reset must drop the stack too.
+    }
+
+    final b = MeshBuilder(vertexCapacity: 4);
+    emit(b);
+    final first = b.build();
+    final vertexCap = b.vertexCapacity, indexCap = b.indexCapacity;
+    expect(first.vertexCount, greaterThan(1000));
+    expect(vertexCap, greaterThanOrEqualTo(first.vertexCount));
+
+    b.reset();
+    expect(b.vertexCount, 0);
+    expect(b.triangleCount, 0);
+    expect(b.position, Vector3.zero);
+    expect(b.scale, 1.0);
+    expect(() => b.pop(), throwsStateError, reason: 'the stack is empty');
+    expect(b.vertexCapacity, vertexCap, reason: 'reset must not shrink');
+    expect(b.indexCapacity, indexCap);
+    expect(b.build().isEmpty, isTrue);
+
+    emit(b);
+    final again = b.build();
+    expectSame(again, first);
+    expect(b.vertexCapacity, vertexCap, reason: 'nothing to grow');
+    expect(b.indexCapacity, indexCap);
+    // The first mesh was a copy: the rebuild did not write over it.
+    expect(first.positions, orderedEquals(again.positions));
+    expect(identical(first.positions, again.positions), isFalse);
+  });
+
   test('an empty builder builds the empty mesh', () {
     final m = MeshBuilder().build();
     expect(m.isEmpty, isTrue);

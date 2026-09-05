@@ -70,6 +70,26 @@ class MeshBuilder {
   int get vertexCount => _vertexCount;
   int get triangleCount => _indexCount ~/ 3;
 
+  /// Vertices the buffers hold before the next doubling. Capacity is kept
+  /// across [reset], which is what the reuse tests watch.
+  int get vertexCapacity => _positions.length ~/ 3;
+
+  /// Indices the index buffer holds before the next doubling.
+  int get indexCapacity => _indices.length;
+
+  /// Empty the builder for the next mesh, KEEPING its buffers: the used
+  /// counts go to zero and the turtle back to the identity frame with an
+  /// empty stack, and the capacity the last mesh grew stays. A builder made
+  /// fresh per tile job was its full size in old-generation garbage every
+  /// tile — the city's road pass has two dozen of them — where one kept per
+  /// worker and reset between jobs fills the same buffers each time. What
+  /// [build] handed out is a copy, so it survives the reset unchanged.
+  void reset() {
+    _vertexCount = 0;
+    _indexCount = 0;
+    resetFrame();
+  }
+
   // ---- Turtle -------------------------------------------------------------
 
   /// Current frame origin in mesh-local space.

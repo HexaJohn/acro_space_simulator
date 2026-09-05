@@ -36,6 +36,80 @@ class UnskinnedAttributeStreams {
   final Uint8List color;
 }
 
+/// PATCHED (acro_space_simulator): one contiguous run of bytes an upload
+/// copies into its device buffer — either bytes that exist on the CPU, or a
+/// default value repeated over the run, served from a shared block so the
+/// run is never materialised. Pure: [pieces] does the arithmetic, and the
+/// geometry layer does the overwrites.
+class UploadSegment {
+  /// A segment whose bytes are [bytes], copied as they are.
+  UploadSegment.bytes(ByteData bytes)
+    : lengthInBytes = bytes.lengthInBytes,
+      _bytes = bytes,
+      _block = null;
+
+  /// A segment of [lengthInBytes] bytes that repeats the pattern [block] is
+  /// filled with. [block] must be a whole number of patterns long, so a view
+  /// of it taken at a multiple of its length is in phase; the segment need
+  /// not be, since a trailing partial pattern is simply cut short.
+  UploadSegment.repeated(this.lengthInBytes, Uint8List block)
+    : _bytes = null,
+      _block = block {
+    if (lengthInBytes < 0) {
+      throw ArgumentError.value(lengthInBytes, 'lengthInBytes', 'negative');
+    }
+    if (block.isEmpty) {
+      throw ArgumentError.value(block, 'block', 'must not be empty');
+    }
+  }
+
+  /// How many bytes the segment occupies in the buffer.
+  final int lengthInBytes;
+
+  final ByteData? _bytes;
+  final Uint8List? _block;
+
+  /// Whether the segment is a repeated default rather than CPU bytes.
+  bool get isRepeated => _bytes == null;
+
+  /// The contiguous views that, copied in order, reproduce the bytes of this
+  /// segment from [offset] for [length] bytes, each paired with its offset
+  /// within the segment. One view for a bytes segment; for a repeated
+  /// segment, as many block-sized (or shorter) runs as it takes.
+  Iterable<({int offsetInSegment, ByteData view})> pieces(
+    int offset,
+    int length,
+  ) sync* {
+    if (offset < 0 || length < 0 || offset + length > lengthInBytes) {
+      throw RangeError(
+        '[$offset, ${offset + length}) is outside the $lengthInBytes-byte '
+        'segment',
+      );
+    }
+    if (length == 0) return;
+    final bytes = _bytes;
+    if (bytes != null) {
+      yield (
+        offsetInSegment: offset,
+        view: ByteData.sublistView(bytes, offset, offset + length),
+      );
+      return;
+    }
+    final block = _block!;
+    var at = offset;
+    final end = offset + length;
+    while (at < end) {
+      final start = at % block.length;
+      final run = math.min(block.length - start, end - at);
+      yield (
+        offsetInSegment: at,
+        view: ByteData.sublistView(block, start, start + run),
+      );
+      at += run;
+    }
+  }
+}
+
 abstract final class InterleavedLayoutAdapter {
   /// Floats per vertex in the interleaved unskinned layout.
   static const int floatsPerVertex = kUnskinnedPerVertexSize ~/ 4;
@@ -261,6 +335,97 @@ abstract final class InterleavedLayoutAdapter {
       texCoord: texCoord.buffer.asUint8List(),
       color: color.buffer.asUint8List(),
     );
+  }
+
+  /// PATCHED (acro_space_simulator): the four per-attribute upload segments
+  /// of a structure-of-arrays source, in slot order (position, normal,
+  /// texture coordinate, color), WITHOUT copying the attributes the caller
+  /// supplied.
+  ///
+  /// [unskinnedAttributeStreams] copies every attribute into a fresh stream
+  /// and fills the absent ones with their defaults; for a mesh that is
+  /// uploaded once and never read back, those copies are three large
+  /// short-lived allocations that go straight to the old generation and are
+  /// swept later. Here a supplied attribute — which the length checks have
+  /// already proven tightly packed — is uploaded from the caller's own bytes,
+  /// and an absent one is a [UploadSegment.repeated] run of its default,
+  /// served in slices from one shared block and never materialised on the
+  /// CPU. The bytes that reach the buffer are the same either way, which is
+  /// what `test/upload_segments_test.dart` pins.
+  ///
+  /// The segments view the caller's arrays: they must stay unchanged until
+  /// the upload has read them.
+  static List<UploadSegment> unskinnedUploadSegments({
+    required Float32List positions,
+    required int vertexCount,
+    Float32List? normals,
+    Float32List? texCoords,
+    Float32List? colors,
+  }) {
+    _checkLength('positions', positions.length, 3 * vertexCount);
+    if (normals != null) {
+      _checkLength('normals', normals.length, 3 * vertexCount);
+    }
+    if (texCoords != null) {
+      _checkLength('texCoords', texCoords.length, 2 * vertexCount);
+    }
+    if (colors != null) {
+      _checkLength('colors', colors.length, 4 * vertexCount);
+    }
+    return [
+      UploadSegment.bytes(ByteData.sublistView(positions)),
+      normals != null
+          ? UploadSegment.bytes(ByteData.sublistView(normals))
+          : UploadSegment.repeated(
+              vertexCount * normalStreamBytes,
+              defaultNormalBlock,
+            ),
+      texCoords != null
+          ? UploadSegment.bytes(ByteData.sublistView(texCoords))
+          : UploadSegment.repeated(
+              vertexCount * texCoordStreamBytes,
+              defaultTexCoordBlock,
+            ),
+      colors != null
+          ? UploadSegment.bytes(ByteData.sublistView(colors))
+          : UploadSegment.repeated(
+              vertexCount * colorStreamBytes,
+              defaultColorBlock,
+            ),
+    ];
+  }
+
+  /// The length of the shared default blocks: a multiple of every stream's
+  /// per-vertex size (12, 8 and 16 bytes), so a view taken at any multiple
+  /// of the block length is in phase with the pattern, and large enough (a
+  /// little under 64 KiB) that a multi-megabyte segment is a few dozen
+  /// overwrites rather than thousands.
+  static const int defaultBlockBytes = 48 * 1365;
+
+  /// The default normal `(0, 0, 1)`, repeated to fill [defaultBlockBytes].
+  static final Uint8List defaultNormalBlock = _repeatedBlock(const [
+    0.0,
+    0.0,
+    1.0,
+  ]);
+
+  /// The default texture coordinate `(0, 0)`: [defaultBlockBytes] of zeros.
+  static final Uint8List defaultTexCoordBlock = Uint8List(defaultBlockBytes);
+
+  /// The default color, opaque white, repeated to fill [defaultBlockBytes].
+  static final Uint8List defaultColorBlock = _repeatedBlock(const [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+  ]);
+
+  static Uint8List _repeatedBlock(List<double> value) {
+    final floats = Float32List(defaultBlockBytes ~/ 4);
+    for (var i = 0; i < floats.length; i++) {
+      floats[i] = value[i % value.length];
+    }
+    return floats.buffer.asUint8List();
   }
 
   /// Packs triangle [indices] into the narrowest index buffer that fits.

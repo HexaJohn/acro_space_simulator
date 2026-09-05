@@ -134,6 +134,26 @@ encoders already relied on that.
   ms/MB on ANGLE/GLES), so a slice a frame is what bounds that thread's
   cost. `StagedUploadLayout` holds the pure slicing arithmetic, pinned
   GPU-free by `test/staged_upload_layout_test.dart`. `fromArrays` unchanged.
+- `lib/src/geometry/mesh_geometry.dart`, `geometry.dart`,
+  `interleaved_layout.dart` — `MeshGeometry.retainCpuData` (default true)
+  on `fromArrays`, `fromMeshData` and `stageFromArrays`: false keeps no CPU
+  attributes or packed indices, so the geometry cannot be raycast (a scene
+  raycast passes through it) or re-serialised (`packedData`/`soaData`
+  throw); bounds are still scanned from the positions first. A city of
+  hundreds of large never-picked meshes otherwise pinned hundreds of
+  megabytes of typed data for every old-space mark. With it comes a
+  no-copy upload: `InterleavedLayoutAdapter.unskinnedUploadSegments`
+  uploads the caller's tightly packed arrays from their own bytes and
+  fills absent attributes as `UploadSegment.repeated` runs of a shared
+  default block (never a CPU-side stream); `Geometry.writeSegmentSlice`
+  is the one writer for the immediate (`_uploadSegments`) and staged
+  (`StagedMeshUpload.step`) paths. `FixedMeshUploadPlan` is the shared
+  pure CPU side of `fromArrays` and `stageFromArrays` (with
+  `retainCpuData` the retained copies are the segments, so the second
+  de-interleave copy `uploadUnskinnedAttributes` made is gone).
+  `Geometry.boundsOfPositions` / `applyScannedBounds` split the bounds
+  scan. Byte equality of both paths, and the retain/drop contract, pinned
+  GPU-free by `test/upload_segments_test.dart`.
 
 ## Patches (scene layer)
 
