@@ -294,6 +294,18 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   /// repaint on a tick, so only the scene listens.
   final ValueNotifier<double> _epoch = ValueNotifier<double>(0);
 
+  /// The perf panel's own clock, bumped every [_perfTickEvery] ticks.
+  ///
+  /// The panel is fifty-odd text rows, and it used to sit inside the epoch
+  /// builder with the scene — so every one of those paragraphs was rebuilt,
+  /// re-laid-out and re-shaped at the frame rate, on the same UI thread the
+  /// engine encodes the scene on. Numbers averaged over 90 frames do not
+  /// change legibly between two frames; four times a second reads the same
+  /// and costs a fifteenth as much.
+  final ValueNotifier<int> _perfTick = ValueNotifier<int>(0);
+  static const int _perfTickEvery = 15;
+  int _perfCountdown = 0;
+
   // ---- Frame timing ------------------------------------------------------
   //
   // A frame counter says the city is slow; it does not say WHY. These split
@@ -348,9 +360,11 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   bool _busy = false;
 
   /// The cascaded shadow pass, as an isolate switch. Every cascade re-draws
-  /// the whole scene into the shadow map, so it is the biggest GPU-side line
-  /// item the CPU phase timers cannot see — flip it and watch the panel's
-  /// "unaccounted" figure to attribute that cost.
+  /// the whole scene into the shadow map, and the engine ENCODES that pass on
+  /// the UI thread, inside SceneView's painter — so it is the biggest line
+  /// item the phase timers cannot see (it lands in "ui build", not in
+  /// "raster"). Flip it and watch the panel's "unaccounted" figure to
+  /// attribute that cost.
   bool _shadows = true;
 
   /// Watch the colony being built: during zoning the frame is recaptured
@@ -576,6 +590,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     if (cb != null) SchedulerBinding.instance.removeTimingsCallback(cb);
     _ticker?.dispose();
     _epoch.dispose();
+    _perfTick.dispose();
     super.dispose();
   }
 
@@ -622,6 +637,13 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     // Traffic off means a static frame, but the clock still ticks so the
     // counter keeps reading — a frozen number is worse than a slow one.
     _epoch.value = elapsed.inMicroseconds / 1e6;
+    // The perf panel, at a quarter of the frame rate: it reads whatever the
+    // timers hold when it next paints, so a slower clock loses nothing but
+    // the relayout of fifty rows of text per frame.
+    if (++_perfCountdown >= _perfTickEvery) {
+      _perfCountdown = 0;
+      _perfTick.value++;
+    }
     // The scene-wide draw census, twice a second — a few hundred nodes, so
     // the walk itself never shows up in the frame it measures.
     if (++_censusCountdown >= 30) {
@@ -1064,7 +1086,23 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     // softer at the far edge of the range than two would be, and that is
     // the trade.
     light.shadowCascadeCount = 1;
-    final rangeM = (altM * 3.0 + 300.0).clamp(300.0, 6000.0);
+    // How far the cascade reaches from the EYE. On foot or driving the eye
+    // is on the ground and the altitude formula sizes the box to what a
+    // head can see. In the orbit view the eye is the distance out, looking
+    // AT the focus: sizing by altitude there made a 4.7 km light box at the
+    // default 1320 m orbit, centred on the colony's anchor, and the shadow
+    // pass encoded every near tile in it — the ones behind the camera
+    // included. Sized to the focus instead: reach the colony and a little
+    // past it, and nothing further. Quantised to 100 m so the cascade
+    // sphere does not resize (and the shadow texels swim) with every
+    // wheel notch and drag frame.
+    final double rangeM;
+    if (_groundView) {
+      rangeM = (altM * 3.0 + 300.0).clamp(300.0, 6000.0);
+    } else {
+      final toFocus = (1.25 * _distanceM).clamp(400.0, 2400.0);
+      rangeM = (toFocus / 100.0).round() * 100.0;
+    }
     light.shadowMaxDistance = lengthToScene(rangeM);
     light.shadowFadeRange = lengthToScene(rangeM * 0.12);
     light.shadowMapResolution = 2048;
@@ -1776,15 +1814,103 @@ class _CityStudioScreenState extends State<CityStudioScreen>
         _terrain ??= TerrainNodes(scene);
         _atmo ??= AtmosphereNodes(scene);
 
-        return ValueListenableBuilder<double>(
-          valueListenable: _epoch,
-          builder: (context, epoch, _) => _sceneStack(scene, epoch),
-        );
+        return _sceneStack(scene);
       },
     );
   }
 
-  Widget _sceneStack(fs.Scene scene, double epoch) {
+  /// The preview: the scene, and everything laid over it.
+  ///
+  /// Only the scene subtree listens to the epoch. The overlays used to sit
+  /// inside the same builder, which meant the perf panel's fifty rows and
+  /// the pick card were rebuilt and re-laid-out on every tick — the card
+  /// even re-ran `citySiteStatus` per frame — on the UI thread the engine
+  /// encodes the scene on. Now the panel rides [_perfTick] (~4 Hz) behind a
+  /// repaint boundary, the card rebuilds only with the screen (a pick is a
+  /// `setState`), and the static hints rebuild with the screen too. The
+  /// one exception is the drive hint, a single line that IS a speedometer;
+  /// it keeps its own listener on the epoch.
+  Widget _sceneStack(fs.Scene scene) {
+    return Stack(children: [
+      Positioned.fill(
+        child: ValueListenableBuilder<double>(
+          valueListenable: _epoch,
+          builder: (context, epoch, _) => _sceneSurface(scene, epoch),
+        ),
+      ),
+      // The plat, on top of the scene's pointer surface: an opaque hit
+      // target, so drags and the wheel are its pan and zoom, not the
+      // orbit camera's underneath.
+      if (_view2D)
+        Positioned.fill(
+          child: CityPlatView(
+            sim: _sim,
+            camera: _platCam,
+            extentM: _spec.extentM,
+          ),
+        ),
+      if (_sim == null)
+        const Center(
+          child: Text('Set the knobs, then GENERATE.', style: AppTheme.dim),
+        ),
+      if (_driving)
+        ValueListenableBuilder<double>(
+          valueListenable: _epoch,
+          builder: (context, epoch, _) => _driveHint(),
+        ),
+      if (_firstPerson)
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 16,
+          child: Center(
+            child: Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: AppTheme.panelBox(),
+              child: Text(
+                  'WASD to walk · shift to run · drag to look · G to fly',
+                  style: AppTheme.mono
+                      .copyWith(fontSize: 11, color: AppTheme.textDim)),
+            ),
+          ),
+        ),
+      Positioned(
+        left: 12,
+        top: 12,
+        child: RepaintBoundary(
+          child: ValueListenableBuilder<int>(
+            valueListenable: _perfTick,
+            builder: (context, tick, _) => _perfPanel(),
+          ),
+        ),
+      ),
+      if (_picked != null)
+        Positioned(right: 12, top: 12, width: 300, child: _pickCard()),
+    ]);
+  }
+
+  /// A camera-pose edit from a pointer handler.
+  ///
+  /// With a colony up, the ticker already repaints the scene every frame and
+  /// reads the pose fields as it goes — a `setState` here would only add a
+  /// rebuild of the app bar and the whole control column for every drag
+  /// event, thirty-odd paragraphs relaid for a mouse move. Nothing outside
+  /// the epoch builder reads the pose at build time (the perf panel's "cam"
+  /// row rides its own 4 Hz clock), so assigning is enough. Before there is
+  /// a scene to tick nothing else would repaint it, and `setState` stays.
+  void _nudgePose(void Function() edit) {
+    if (_scene != null && _sim != null) {
+      edit();
+    } else {
+      setState(edit);
+    }
+  }
+
+  /// The scene itself, and its pointer surface: the one subtree the epoch
+  /// rebuilds. The per-frame phases run here, BEFORE [fs.SceneView] paints,
+  /// so what it encodes is this frame's terrain, city, sun and rig.
+  Widget _sceneSurface(fs.Scene scene, double epoch) {
     {
         final snap = _snap;
         final cam = _camera();
@@ -1893,9 +2019,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
                   ));
         }
 
-        return Stack(children: [
-          Positioned.fill(
-            child: Focus(
+        return Focus(
               autofocus: true,
               onKeyEvent: _onKey,
               child: GestureDetector(
@@ -1903,7 +2027,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
               // the pan away from the orbit camera.
               onTapUp: (d) => _pickAt(d.localPosition),
               onScaleStart: (_) => _dragBase = (_azimuth, _elevation),
-              onScaleUpdate: (d) => setState(() {
+              onScaleUpdate: (d) => _nudgePose(() {
                 if (_driving) {
                   // Swing the chase camera round the buggy; it drifts back
                   // behind the heading once the throttle is on.
@@ -1938,14 +2062,14 @@ class _CityStudioScreenState extends State<CityStudioScreen>
                   if (_driving) {
                     // Behind the buggy the wheel is the chase range.
                     if (e is PointerScrollEvent) {
-                      setState(() => _chaseDistM =
+                      _nudgePose(() => _chaseDistM =
                           (_chaseDistM * (1 + e.scrollDelta.dy * 0.0016))
                               .clamp(4.0, 40.0));
                     }
                     return;
                   }
                   if (e is PointerScrollEvent) {
-                    setState(() => _distanceM =
+                    _nudgePose(() => _distanceM =
                         (_distanceM * (1 + e.scrollDelta.dy * 0.0016))
                             .clamp(40.0, 60000.0));
                   }
@@ -1965,46 +2089,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
                 }),
               ),
             ),
-            ),
-          ),
-          // The plat, on top of the scene's pointer surface: an opaque hit
-          // target, so drags and the wheel are its pan and zoom, not the
-          // orbit camera's underneath.
-          if (_view2D)
-            Positioned.fill(
-              child: CityPlatView(
-                sim: _sim,
-                camera: _platCam,
-                extentM: _spec.extentM,
-              ),
-            ),
-          if (_sim == null)
-            const Center(
-              child: Text('Set the knobs, then GENERATE.',
-                  style: AppTheme.dim),
-            ),
-          if (_driving) _driveHint(),
-          if (_firstPerson)
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 16,
-              child: Center(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 12, vertical: 6),
-                  decoration: AppTheme.panelBox(),
-                  child: Text(
-                      'WASD to walk · shift to run · drag to look · G to fly',
-                      style: AppTheme.mono
-                          .copyWith(fontSize: 11, color: AppTheme.textDim)),
-                ),
-              ),
-            ),
-          Positioned(left: 12, top: 12, child: _perfPanel()),
-          if (_picked != null)
-            Positioned(right: 12, top: 12, width: 300, child: _pickCard()),
-        ]);
+            );
     }
   }
 
@@ -2343,6 +2428,10 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   /// prepare a frame, not what the GPU then spends drawing it. When the totals
   /// here are small but the frame is long, the cost is in the draw — which is
   /// what the draw-call and instance counts are for.
+  ///
+  /// Built off [_perfTick], not the scene's epoch, and behind a
+  /// [RepaintBoundary]: a rebuild here must not be what the scene's frame
+  /// waits on.
   Widget _perfPanel() {
     final n = _frameMs.length;
     var avg = 0.0, worst = 0.0;
@@ -2495,8 +2584,11 @@ class _CityStudioScreenState extends State<CityStudioScreen>
         row('  cursor', '${ms(phase['city.cursor'] ?? 0)} ms',
             colour: AppTheme.textDim),
         const SizedBox(height: 4),
-        // The gap is the GPU plus Flutter's own frame — if it dominates, no
-        // amount of CPU tuning here will help.
+        // The gap is what the phase timers do not wrap: the engine's own
+        // encode of the scene (shadow cascades, the colour pass), which runs
+        // on the UI thread inside SceneView's painter, plus the GPU and
+        // Flutter's own frame. If it dominates, tuning the phases above will
+        // not help — the isolate switches will say which pass it is.
         if (_buildLog.isNotEmpty) ...[
           const SizedBox(height: 6),
           row('last build', '', colour: AppTheme.accent),
@@ -2508,9 +2600,9 @@ class _CityStudioScreenState extends State<CityStudioScreen>
         row('unaccounted', '${ms((avg - accounted).clamp(0, 1e9))} ms',
             colour: AppTheme.warn),
         Text(
-            '  GPU + raster: no CPU timer sees it. Attribute by A/B with '
-            'the ISOLATE switches — shadows and atmosphere first, they are '
-            'the usual bulk.',
+            '  GPU + the engine\'s encode on the UI thread: no phase timer '
+            'sees it. Attribute by A/B with the ISOLATE switches — shadows '
+            'and atmosphere first, they are the usual bulk.',
             style: AppTheme.dim.copyWith(fontSize: 10)),
         const SizedBox(height: 6),
         row('draws', '${count['draws'] ?? 0}', colour: AppTheme.accent),
@@ -2822,8 +2914,9 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             title: const Text('Shadows', style: AppTheme.body),
             subtitle: Text(
                 'The cascaded shadow pass re-draws the whole scene per '
-                    'cascade. GPU cost — it shows in "unaccounted", not in '
-                    'the phase timers.',
+                    'cascade, encoded on the UI thread inside the painter — '
+                    'it shows in "ui build" and "unaccounted", not in the '
+                    'phase timers.',
                 style: AppTheme.dim.copyWith(fontSize: 11)),
             onChanged: (v) => setState(() => _shadows = v),
           ),
