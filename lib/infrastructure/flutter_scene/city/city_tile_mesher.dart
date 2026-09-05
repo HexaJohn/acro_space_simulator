@@ -31,6 +31,7 @@ import 'package:vector_math/vector_math.dart' as vm;
 import '../../../application/snapshot/world_snapshot.dart';
 import '../../../domain/architecture/architecture_style.dart';
 import '../../../domain/architecture/building_generator.dart';
+import '../../../domain/architecture/building_massing.dart';
 import '../../../domain/colony/city/city_building_spec.dart';
 import '../../../domain/colony/city/parcel.dart';
 import '../../../domain/scatter/mesh_builder.dart';
@@ -42,6 +43,7 @@ import 'city_tile_columns.dart';
 import 'elevated_structure.dart';
 import 'lot_features.dart';
 import 'mesh_merge.dart';
+import 'oriented_box.dart';
 import 'pedestrian_tube.dart';
 import 'railway.dart';
 import 'road_mesher.dart';
@@ -481,6 +483,9 @@ class CityBuildingLibraries {
       bucketM: bucketM * 2,
       variants: math.max(1, variants ~/ 2),
     );
+    // Keyed by the old coarse library's objects, which nothing will ask
+    // for again.
+    _massingBoxes.clear();
     return true;
   }
 
@@ -490,12 +495,22 @@ class CityBuildingLibraries {
   BuildingLibrary forTier(BuildingDetail tier) =>
       tier == BuildingDetail.block ? _coarse! : _full!;
 
+  /// The far tier's version of a coarse archetype: its massing as plain
+  /// boxes (see [CityTileMesher.massingBoxes]), built once per cached
+  /// archetype and keyed by the library's own object, so a district of
+  /// one archetype boxes it once whichever tile asks.
+  final Map<GeneratedBuilding, PropMesh> _massingBoxes = {};
+
+  PropMesh massingBoxesOf(GeneratedBuilding built) => _massingBoxes
+      .putIfAbsent(built, () => CityTileMesher.massingBoxes(built.massing));
+
   /// Meshes cached, both libraries.
   int get meshCount => (_full?.meshCount ?? 0) + (_coarse?.meshCount ?? 0);
 
   void clear() {
     _full?.clear();
     _coarse?.clear();
+    _massingBoxes.clear();
   }
 }
 
@@ -844,6 +859,19 @@ class CityTileMeshJob {
     if (tier == BuildingDetail.block && !k.lodDebug) {
       final built = lib.get(spec, parcel, seed: seed, detail: tier);
       final m = CityTileMesher.instanceTransform(r.anchorBF, b);
+      if (r.tier == CityTier.far) {
+        // A far tile's buildings are one or two pixels tall from where the
+        // tile is judged far: its massing as plain boxes, on the building's
+        // own facade band, and no glazing — the skyglow carries the night
+        // look at that range. The coarse model is still a facade — a quad
+        // per three metres of wall and a window band per storey — and at
+        // a hundred thousand triangles a tile, over the hundred-odd far
+        // tiles of a colony, it was most of the skyline's triangles and
+        // most of every far tile's upload, for silhouettes nothing can
+        // resolve (see [CityTileMesher.massingBoxes]).
+        _skylineSolid.append(libraries.massingBoxesOf(built), m);
+        return;
+      }
       _skylineSolid.append(built.model.solid, m);
       _skylineGlazing.append(built.model.foliage, m);
       return;
@@ -1548,6 +1576,73 @@ class CityTileMesher {
       quatToScene(surface),
       vm.Vector3.all(lengthToScene(1.0)),
     );
+  }
+
+  /// A massing as plain boxes: what a far tile draws a building as.
+  ///
+  /// One [OrientedBox] per volume — podium, tower, plant room, a works'
+  /// tanks and sheds, whatever the massing carries — in the building's own
+  /// frame and metres, so it takes exactly the [instanceTransform] the
+  /// coarse model does and stands where that model would. Twelve triangles
+  /// a volume where the coarse box was a quad per three metres of wall plus
+  /// a window band per storey: an eight-kilometre view has the same
+  /// silhouettes at a fortieth of the triangles.
+  ///
+  /// Every vertex samples the middle of the volume's facade band (its own
+  /// or the massing's — see [BuildingGenerator.bandUV]). The facade atlas
+  /// is masonry only, the windows live in the glazing texture, so a flat
+  /// lookup is a plain wall in the building's colour: the flat concrete a
+  /// tower IS from that far, and a district that keeps its hue as it drops
+  /// to boxes. A curved or gabled volume is boxed on its footprint: a
+  /// cooling tower is a stack at that range whichever way it is drawn.
+  ///
+  /// A massing with no volumes at all boxes its footprint by its height,
+  /// the way the LOD visualiser does — nothing generates one today, but a
+  /// far building must never be nothing.
+  static PropMesh massingBoxes(BuildingMassing massing) {
+    final m = MeshBuilder();
+    void box(double x, double y, double z, double width, double depth,
+        double height, int material, double yaw, bool plate) {
+      final (u0, u1) = BuildingGenerator.bandUV(material);
+      // A box (and a vehicle) runs its width along its yaw, from +X; a
+      // plate — a heliostat, a solar table — runs its width ACROSS its
+      // bearing, the way the generator faces one. Both are the conventions
+      // the massing rules site them by (see `BuildingMassingRules`), and a
+      // box turned the other way would stand across the parcel it was
+      // fitted into.
+      final s = math.sin(yaw), c = math.cos(yaw);
+      final ex = plate ? Vector3(-s, c, 0) : Vector3(c, s, 0);
+      final ey = plate ? Vector3(-c, -s, 0) : Vector3(-s, c, 0);
+      final h = math.max(1.0, height);
+      OrientedBox.emit(
+        m,
+        Vector3(x, y, z + h / 2),
+        ex,
+        ey,
+        Vector3.unitZ,
+        math.max(1.0, width) / 2,
+        math.max(1.0, depth) / 2,
+        h / 2,
+        u: (u0 + u1) / 2,
+        v: 0.5,
+        // Metres: the instance transform carries the scene conversion.
+        unitScale: 1.0,
+      );
+    }
+
+    if (massing.volumes.isEmpty) {
+      final fp = massing.footprint;
+      box(0, 0, 0, fp.width, fp.depth, massing.height, massing.material, 0,
+          false);
+      return m.build();
+    }
+    for (final v in massing.volumes) {
+      final plate =
+          v.shape == MassShape.mirror || v.shape == MassShape.panel;
+      box(v.x, v.y, v.z, v.width, v.depth, v.height,
+          v.material ?? massing.material, v.yaw, plate);
+    }
+    return m.build();
   }
 
   /// Metres -> scene units.

@@ -4,10 +4,13 @@
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
 import 'dart:isolate';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:acro_space_simulator/application/snapshot/world_snapshot.dart';
+import 'package:acro_space_simulator/domain/architecture/architecture_style.dart';
 import 'package:acro_space_simulator/domain/architecture/building_generator.dart';
+import 'package:acro_space_simulator/domain/architecture/building_massing.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/scatter/mesh_builder.dart';
 import 'package:acro_space_simulator/domain/scatter/prop_mesh.dart';
@@ -15,6 +18,7 @@ import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_columns.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_mesher.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_scheduler.dart';
+import 'package:acro_space_simulator/infrastructure/flutter_scene/city/mesh_merge.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// The tile meshing is a pure function of its request: the same tile
@@ -203,6 +207,11 @@ void main() {
       expect(result.skylineTris, greaterThan(0));
       expect(result.lodCounts[BuildingDetail.block], buildings.length);
       expect(result.groups.every((g) => !g.castsShadow), isTrue);
+      // The silhouettes are massing boxes, and the count is honest: the
+      // facade group at far is the skyline and nothing else.
+      expect(result.skylineTris,
+          m[(CityMaterialKind.facade, false)]!.triangleCount);
+      expect(m.containsKey((CityMaterialKind.glazing, false)), isFalse);
       // No furniture at far: no pavement, no lamps, no planting.
       expect(m.containsKey((CityMaterialKind.sidewalk, false)), isFalse);
       expect(result.treePits, isEmpty);
@@ -251,6 +260,245 @@ void main() {
       expect(near.instances, isEmpty);
       expect(near.lodCounts[BuildingDetail.block], buildings.length);
       expect(near.skylineTris, greaterThan(0));
+    });
+  });
+
+  group('the far tier draws massing boxes; the nearer tiers the coarse model',
+      () {
+    // The fixture's buildings all carry a site, and a sited building's
+    // coarse model is its volumes as plain shapes with no glazing. Three
+    // parcel-fitted ones (no site on the wire) take the other block path —
+    // one box and a window band per storey — so the tile has glazing to
+    // lose at far and keep at mid.
+    final mixed = <BuildingSnapshot>[
+      ...buildings,
+      bldg('p0', 'r-med', 0, 120, w: 0, d: 0),
+      bldg('p1', 'c-high', 0, 160, w: 0, d: 0),
+      bldg('p2', 'i-low', 0, 200, w: 0, d: 0),
+    ];
+    final mixedColumns = CityTileColumns.fromSnapshots(
+      buildings: mixed,
+      roads: roads,
+      patches: patches,
+      ends: ends,
+      roadEnds: roadEnds,
+      transitEnds: const [],
+    );
+
+    /// The block-tier skyline the way the mesher appended it before the
+    /// far tier had its own: every building's coarse model, solid and
+    /// foliage, through its instance transform, in tile order.
+    (PropMesh, PropMesh) coarseSkyline(CityBuildingLibraries libraries) {
+      libraries.syncKnobs(knobs);
+      final lib = libraries.forTier(BuildingDetail.block);
+      final solid = MergedMeshSink(), glazing = MergedMeshSink();
+      for (final b in mixed) {
+        final built = lib.get(CityTileMesher.specOf(b),
+            CityTileMesher.parcelOf(b, knobs.style),
+            seed: b.id.hashCode, detail: BuildingDetail.block);
+        final m = CityTileMesher.instanceTransform(anchor, b);
+        solid.append(built.model.solid, m);
+        glazing.append(built.model.foliage, m);
+      }
+      return (solid.build(), glazing.build());
+    }
+
+    void expectSameMesh(CityMeshGroup g, PropMesh mesh) {
+      expect(g.positions, mesh.positions);
+      expect(g.normals, mesh.normals);
+      expect(g.texCoords, mesh.texCoords);
+      expect(g.indices, mesh.indices);
+    }
+
+    test('far: a box per volume, on the facade, no glazing, 40 tris a building',
+        () {
+      final libraries = CityBuildingLibraries();
+      final far = CityTileMesher.mesh(
+          request(CityTier.far, members: mixedColumns), libraries);
+      expectWellFormed(far);
+      final m = byMaterial(far);
+      expect(m.containsKey((CityMaterialKind.glazing, false)), isFalse,
+          reason: 'a window band is sub-pixel from where a tile is far');
+      final facade = m[(CityMaterialKind.facade, false)]!;
+      expect(facade.triangleCount, lessThanOrEqualTo(40 * mixed.length));
+      expect(far.skylineTris, facade.triangleCount);
+      expect(far.lodCounts[BuildingDetail.block], mixed.length);
+      // Exactly the massing boxes, twelve triangles a volume, placed by the
+      // same transform the coarse model takes.
+      final lib = libraries.forTier(BuildingDetail.block);
+      final expected = MergedMeshSink();
+      var volumes = 0;
+      for (final b in mixed) {
+        final built = lib.get(CityTileMesher.specOf(b),
+            CityTileMesher.parcelOf(b, knobs.style),
+            seed: b.id.hashCode, detail: BuildingDetail.block);
+        volumes += built.massing.volumes.length;
+        expected.append(CityTileMesher.massingBoxes(built.massing),
+            CityTileMesher.instanceTransform(anchor, b));
+      }
+      expect(facade.triangleCount, 12 * volumes);
+      expectSameMesh(facade, expected.build());
+      // Well under the byte cap: one group, one draw, for the whole tile.
+      expect(far.groups.where((g) => g.material == CityMaterialKind.facade),
+          hasLength(1));
+    });
+
+    test('mid: the same buildings keep the coarse model and its glazing', () {
+      final mid = CityTileMesher.mesh(
+          request(CityTier.mid, members: mixedColumns),
+          CityBuildingLibraries());
+      final far = CityTileMesher.mesh(
+          request(CityTier.far, members: mixedColumns),
+          CityBuildingLibraries());
+      final m = byMaterial(mid);
+      final facade = m[(CityMaterialKind.facade, false)]!;
+      final glazing = m[(CityMaterialKind.glazing, false)];
+      expect(glazing, isNotNull);
+      expect(glazing!.triangleCount, greaterThan(0));
+      expect(facade.triangleCount,
+          greaterThan(byMaterial(far)[(CityMaterialKind.facade, false)]!
+              .triangleCount));
+      // Byte for byte what the skyline was before the far tier had its
+      // own: the mid tier did not move.
+      final (solid, foliage) = coarseSkyline(CityBuildingLibraries());
+      expectSameMesh(facade, solid);
+      expectSameMesh(glazing, foliage);
+      expect(mid.skylineTris, solid.triangleCount + foliage.triangleCount);
+    });
+
+    test('near from afar: the coarse model too', () {
+      // A near tile whose buildings are all beyond block range bakes the
+      // same skyline the mid tier does; only a tile judged FAR boxes.
+      final near = CityTileMesher.mesh(
+          request(CityTier.near,
+              focus: const Vector3(5000, 0, r + 40),
+              canDetail: false,
+              members: mixedColumns),
+          CityBuildingLibraries());
+      expect(near.instances, isEmpty);
+      final m = byMaterial(near);
+      final (solid, foliage) = coarseSkyline(CityBuildingLibraries());
+      // The skyline is appended before the street's builders: the facade
+      // group begins with it.
+      final facade = m[(CityMaterialKind.facade, true)]!;
+      expect(facade.triangleCount, greaterThanOrEqualTo(solid.triangleCount));
+      expect(facade.positions.sublist(0, solid.positions.length),
+          solid.positions);
+      expect(facade.indices.sublist(0, solid.indices.length), solid.indices);
+      final glazing = m[(CityMaterialKind.glazing, false)]!;
+      expect(glazing.positions.sublist(0, foliage.positions.length),
+          foliage.positions);
+      expect(glazing.indices.sublist(0, foliage.indices.length),
+          foliage.indices);
+    });
+
+    test('the boxes are cached per coarse archetype, dropped on rebuild',
+        () {
+      final libraries = CityBuildingLibraries()..syncKnobs(knobs);
+      final b = mixed.first;
+      final built = libraries.forTier(BuildingDetail.block).get(
+          CityTileMesher.specOf(b), CityTileMesher.parcelOf(b, knobs.style),
+          seed: b.id.hashCode, detail: BuildingDetail.block);
+      final boxes = libraries.massingBoxesOf(built);
+      expect(identical(libraries.massingBoxesOf(built), boxes), isTrue);
+      expect(boxes.triangleCount, 12 * built.massing.volumes.length);
+      // Other knobs: a new coarse library, and the boxes keyed by the old
+      // one's objects go with it.
+      expect(libraries.sync(knobs.styleId, knobs.bucketM * 2, knobs.variants),
+          isTrue);
+      expect(identical(libraries.massingBoxesOf(built), boxes), isFalse);
+    });
+  });
+
+  group('massingBoxes', () {
+    const style = ArchitectureStyle.utilitarian;
+
+    BuildingMassing massing(List<MassBox> volumes, {int material = 3}) =>
+        BuildingMassing(
+          volumes: volumes,
+          storeyM: 3.5,
+          floorArea: 100,
+          entrance: (0, 0),
+          style: style,
+          material: material,
+        );
+
+    /// The extent of [mesh] along each axis.
+    (Vector3, Vector3) bounds(PropMesh mesh) {
+      var lo = Vector3(double.infinity, double.infinity, double.infinity);
+      var hi = lo * -1;
+      for (var i = 0; i < mesh.vertexCount; i++) {
+        final p = Vector3(mesh.positions[i * 3], mesh.positions[i * 3 + 1],
+            mesh.positions[i * 3 + 2]);
+        lo = Vector3(math.min(lo.x, p.x), math.min(lo.y, p.y),
+            math.min(lo.z, p.z));
+        hi = Vector3(math.max(hi.x, p.x), math.max(hi.y, p.y),
+            math.max(hi.z, p.z));
+      }
+      return (lo, hi);
+    }
+
+    test('one box per volume, in metres, standing where the volume does', () {
+      final mesh = CityTileMesher.massingBoxes(massing(const [
+        MassBox(x: 0, y: 5, z: 0, width: 30, depth: 20, height: 12, floors: 3),
+        MassBox(x: 2, y: 5, z: 12, width: 16, depth: 10, height: 40, floors: 10),
+      ]));
+      expect(mesh.triangleCount, 24);
+      expect(mesh.vertexCount, 48);
+      final (lo, hi) = bounds(mesh);
+      // Metres, not scene units: the instance transform scales.
+      expect(lo.x, closeTo(-15, 1e-6));
+      expect(hi.x, closeTo(15, 1e-6));
+      expect(lo.y, closeTo(-5, 1e-6));
+      expect(hi.y, closeTo(15, 1e-6));
+      expect(lo.z, closeTo(0, 1e-6));
+      expect(hi.z, closeTo(52, 1e-6));
+    });
+
+    test('every vertex samples the middle of the volume\'s facade band', () {
+      final mesh = CityTileMesher.massingBoxes(massing(const [
+        MassBox(x: 0, y: 0, z: 0, width: 10, depth: 10, height: 10),
+        MassBox(
+            x: 0, y: 0, z: 10, width: 4, depth: 4, height: 3, material: 7),
+      ], material: 3));
+      final (a0, a1) = BuildingGenerator.bandUV(3);
+      final (b0, b1) = BuildingGenerator.bandUV(7);
+      for (var i = 0; i < mesh.vertexCount; i++) {
+        final u = mesh.texCoords[i * 2], v = mesh.texCoords[i * 2 + 1];
+        // The first box's 24 vertices, then the plant room's.
+        expect(u, closeTo(i < 24 ? (a0 + a1) / 2 : (b0 + b1) / 2, 1e-6));
+        expect(v, 0.5);
+      }
+    });
+
+    test('a plate runs its width across its bearing; a box along its yaw',
+        () {
+      // A heliostat facing +X (yaw 0) is a plate whose width runs along +Y
+      // — the way the massing rules fit one to its parcel — where a yawed
+      // box (a vehicle) runs its width along the bearing itself.
+      final plate = CityTileMesher.massingBoxes(massing(const [
+        MassBox(
+            x: 0, y: 0, z: 0, width: 12, depth: 1, height: 2,
+            shape: MassShape.mirror, yaw: 0),
+      ]));
+      final (plo, phi) = bounds(plate);
+      expect(phi.y - plo.y, closeTo(12, 1e-6));
+      expect(phi.x - plo.x, closeTo(1, 1e-6));
+      final truck = CityTileMesher.massingBoxes(massing(const [
+        MassBox(
+            x: 0, y: 0, z: 0, width: 12, depth: 3, height: 3,
+            shape: MassShape.vehicle, yaw: math.pi / 2),
+      ]));
+      final (tlo, thi) = bounds(truck);
+      expect(thi.y - tlo.y, closeTo(12, 1e-6));
+      expect(thi.x - tlo.x, closeTo(3, 1e-6));
+    });
+
+    test('no volumes: the footprint by the height, never nothing', () {
+      final mesh = CityTileMesher.massingBoxes(massing(const []));
+      expect(mesh.triangleCount, 12);
+      final (lo, hi) = bounds(mesh);
+      expect(hi.z - lo.z, closeTo(1, 1e-6));
     });
   });
 
