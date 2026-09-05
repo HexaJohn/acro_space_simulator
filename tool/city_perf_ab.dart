@@ -215,8 +215,6 @@ Future<void> main(List<String> args) async {
         final t = i / 20.0;
         await call('ext.acro.citystudio', pose(t));
         await Future<void>.delayed(const Duration(milliseconds: 50));
-        // Every 2.5 s, well inside the ring buffer's reach.
-        if (window != null && i % 50 == 49) await window.drain();
         if (i % 5 == 4) {
           final s = await call('ext.acro.citystudio');
           acc['n'] = acc['n']! + 1;

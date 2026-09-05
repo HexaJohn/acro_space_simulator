@@ -9,6 +9,7 @@
 /// (a window per camera pattern).
 library;
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:vm_service/vm_service.dart';
@@ -33,39 +34,46 @@ Future<List<Span>> endTimeline(VmService vm, int t0) async {
   return spansOf(timeline.traceEvents ?? const <TimelineEvent>[]);
 }
 
-/// A window longer than the VM's ring buffer, drained as it goes.
+/// A window of any length, taken from the VM's timeline STREAM.
 ///
-/// The timeline recorder is a ring of a few megabytes: at a hundred frames
-/// a second with the GC and embedder streams on it holds about three
-/// seconds, and a twelve-second sweep read at its end kept only its tail
-/// — the stalls at the start of a pattern, where the camera first looks at
-/// unbuilt ground, were never in it. Call [drain] every couple of seconds
-/// and [end] once; the spans of every drain are one list.
+/// The timeline recorder is a ring of a few megabytes, and reading it
+/// (getVMTimeline) pauses the isolate while the VM serialises the whole
+/// ring: draining it every couple of seconds through a sweep put
+/// 0.7-1.4 s gaps into the very frames it was meant to attribute. The
+/// service's Timeline stream delivers events as they are recorded, with
+/// no fetch and no pause; [begin] subscribes, [end] unsubscribes and
+/// returns everything that arrived.
 class TimelineWindow {
-  TimelineWindow._(this.vm, this.t0) : _from = t0;
+  TimelineWindow._(this.vm, this.t0);
   final VmService vm;
   final int t0;
-  final List<Span> _spans = [];
-  int _from;
+  final List<TimelineEvent> _events = [];
+  StreamSubscription<Event>? _sub;
 
   static Future<TimelineWindow> begin(VmService vm) async {
-    final t0 = await beginTimeline(vm);
-    return TimelineWindow._(vm, t0);
+    await vm.setVMTimelineFlags(['Dart', 'GC', 'Embedder']);
+    await vm.clearVMTimeline();
+    final t0 = (await vm.getVMTimelineMicros()).timestamp!;
+    final w = TimelineWindow._(vm, t0);
+    w._sub = vm.onTimelineEvent.listen((e) {
+      final events = e.timelineEvents;
+      if (events != null) w._events.addAll(events);
+    });
+    await vm.streamListen(EventStreams.kTimeline);
+    return w;
   }
 
-  /// Fetch what the buffer holds since the last drain and clear it.
-  Future<void> drain() async {
-    final now = (await vm.getVMTimelineMicros()).timestamp!;
-    final timeline = await vm.getVMTimeline(
-        timeOriginMicros: _from, timeExtentMicros: now - _from);
-    _spans.addAll(spansOf(timeline.traceEvents ?? const <TimelineEvent>[]));
-    await vm.clearVMTimeline();
-    _from = now;
-  }
+  /// Kept for callers that paced themselves by it: a no-op now.
+  Future<void> drain() async {}
 
   Future<List<Span>> end() async {
-    await drain();
-    return _spans;
+    // Let the last chunk arrive: the stream flushes in batches.
+    await Future<void>.delayed(const Duration(milliseconds: 600));
+    try {
+      await vm.streamCancel(EventStreams.kTimeline);
+    } catch (_) {}
+    await _sub?.cancel();
+    return spansOf(_events);
   }
 }
 
