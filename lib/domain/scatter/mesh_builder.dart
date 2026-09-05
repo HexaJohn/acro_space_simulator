@@ -39,16 +39,36 @@ class _Frame {
 /// Pure Dart, no Flutter, no GPU: every generator here is unit-testable and
 /// isolate-safe.
 class MeshBuilder {
-  final List<double> _positions = [];
-  final List<double> _normals = [];
-  final List<double> _texCoords = [];
-  final List<int> _indices = [];
+  /// [vertexCapacity] is the initial vertex reservation; the buffers double
+  /// as they fill, so it is a hint, not a limit. Callers that know roughly how
+  /// big a mesh will be can skip the early doublings, but the default suits
+  /// the grass blade as well as the trunk.
+  MeshBuilder({int vertexCapacity = 128})
+      : _positions = Float32List(math.max(1, vertexCapacity) * 3),
+        _normals = Float32List(math.max(1, vertexCapacity) * 3),
+        _texCoords = Float32List(math.max(1, vertexCapacity) * 2),
+        _indices = Uint32List(math.max(1, vertexCapacity) * 3);
+
+  // Growable TYPED storage, in the same structure-of-arrays layout the result
+  // uses, with a used-prefix counter and capacity doubling. Growable
+  // `List<double>` was the obvious choice and the wrong one: every element is
+  // a boxed double living in old space, and `Float32List.fromList` at the end
+  // is an unboxing loop over all of them — for a near city tile's builders
+  // that was millions of elements and tens of milliseconds in one step, plus
+  // the GC pressure of holding them all. Writing straight into typed arrays
+  // makes [vertex] a handful of unboxed stores and [build] a memcpy.
+  Float32List _positions;
+  Float32List _normals;
+  Float32List _texCoords;
+  Uint32List _indices;
+  int _vertexCount = 0;
+  int _indexCount = 0;
 
   _Frame _frame = _Frame(Vector3.zero, Quaternion.identity, 1.0);
   final List<_Frame> _stack = [];
 
-  int get vertexCount => _positions.length ~/ 3;
-  int get triangleCount => _indices.length ~/ 3;
+  int get vertexCount => _vertexCount;
+  int get triangleCount => _indexCount ~/ 3;
 
   // ---- Turtle -------------------------------------------------------------
 
@@ -123,10 +143,19 @@ class MeshBuilder {
   int vertex(Vector3 local, Vector3 normal, double u, double v) {
     final p = _frame.origin + _frame.rotation.rotate(local * _frame.scale);
     final n = _frame.rotation.rotate(normal);
-    _positions.addAll([p.x, p.y, p.z]);
-    _normals.addAll([n.x, n.y, n.z]);
-    _texCoords.addAll([u, v]);
-    return (_positions.length ~/ 3) - 1;
+    final i = _vertexCount;
+    if ((i + 1) * 3 > _positions.length) _growVertices(i + 1);
+    final o3 = i * 3, o2 = i * 2;
+    _positions[o3] = p.x;
+    _positions[o3 + 1] = p.y;
+    _positions[o3 + 2] = p.z;
+    _normals[o3] = n.x;
+    _normals[o3 + 1] = n.y;
+    _normals[o3 + 2] = n.z;
+    _texCoords[o2] = u;
+    _texCoords[o2 + 1] = v;
+    _vertexCount = i + 1;
+    return i;
   }
 
   /// Emit one triangle. Callers order the vertices by the RIGHT-HAND RULE — so
@@ -140,7 +169,14 @@ class MeshBuilder {
   /// instead means every primitive silently encodes the same reversal, and
   /// getting one wrong renders a hollow shell: you see the inside of the far
   /// surface, which reads as a trunk with no front or a rock with no top.
-  void triangle(int a, int b, int c) => _indices.addAll([a, c, b]);
+  void triangle(int a, int b, int c) {
+    final o = _indexCount;
+    if (o + 3 > _indices.length) _growIndices(o + 3);
+    _indices[o] = a;
+    _indices[o + 1] = c;
+    _indices[o + 2] = b;
+    _indexCount = o + 3;
+  }
 
   /// Emit a quad as two triangles. [a]..[d] run around the face by the
   /// right-hand rule; see [triangle].
@@ -549,12 +585,47 @@ class MeshBuilder {
 
   // ---- Result -------------------------------------------------------------
 
+  /// The accumulated mesh as exact-length COPIES of the used prefix of each
+  /// buffer, so the result neither carries the spare capacity nor aliases a
+  /// builder that may go on emitting. `setRange` between typed lists of the
+  /// same element type is a memcpy, which is the whole point of the typed
+  /// storage: the old boxed lists paid an unboxing loop here.
   PropMesh build() => PropMesh(
-        positions: Float32List.fromList(_positions),
-        normals: Float32List.fromList(_normals),
-        texCoords: Float32List.fromList(_texCoords),
-        indices: Uint32List.fromList(_indices),
+        positions: Float32List(_vertexCount * 3)
+          ..setRange(0, _vertexCount * 3, _positions),
+        normals: Float32List(_vertexCount * 3)
+          ..setRange(0, _vertexCount * 3, _normals),
+        texCoords: Float32List(_vertexCount * 2)
+          ..setRange(0, _vertexCount * 2, _texCoords),
+        indices: Uint32List(_indexCount)..setRange(0, _indexCount, _indices),
       );
+
+  // ---- Growth -------------------------------------------------------------
+
+  /// Double the vertex buffers until they hold [needed] vertices. Copying the
+  /// used prefix on every doubling is amortised O(1) per vertex, and the copy
+  /// itself is a memcpy rather than an element loop.
+  void _growVertices(int needed) {
+    var cap = _positions.length ~/ 3;
+    while (cap < needed) {
+      cap *= 2;
+    }
+    _positions = _grow(_positions, cap * 3, _vertexCount * 3);
+    _normals = _grow(_normals, cap * 3, _vertexCount * 3);
+    _texCoords = _grow(_texCoords, cap * 2, _vertexCount * 2);
+  }
+
+  /// Double the index buffer until it holds [needed] indices.
+  void _growIndices(int needed) {
+    var cap = _indices.length;
+    while (cap < needed) {
+      cap *= 2;
+    }
+    _indices = Uint32List(cap)..setRange(0, _indexCount, _indices);
+  }
+
+  static Float32List _grow(Float32List old, int length, int used) =>
+      Float32List(length)..setRange(0, used, old);
 
   // ---- Icosahedron geodesic ----------------------------------------------
 
