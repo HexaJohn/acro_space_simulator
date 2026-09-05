@@ -130,6 +130,15 @@ Future<void> main(List<String> args) async {
         }
       }
       if (s['fault'] != null) stdout.writeln('  FAULT ${s['fault']}');
+      final counts = (s['counts'] as Map?)?.cast<String, dynamic>();
+      if (counts != null && i == n - 1) {
+        stdout.writeln('    build: queued ${counts['queued']}  '
+            'inFlight ${counts['inFlight']}  revealing ${counts['revealing']}  '
+            'steps ${counts['steps']}  uploadBytes ${counts['uploadBytes']}  '
+            'revealBytes ${counts['revealBytes']}  '
+            'built ${counts['builtThisFrame']}  '
+            'buildings ${counts['buildings']}');
+      }
       await Future<void>.delayed(const Duration(seconds: 2));
     }
     stdout.writeln('[$label] frame ${f(acc['frameMs'])}  ui ${f(acc['uiMs'])}  '

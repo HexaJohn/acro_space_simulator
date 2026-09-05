@@ -743,6 +743,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
               ? 0.0
               : _frameMs.reduce((a, b) => a > b ? a : b),
           'phaseMs': Map<String, double>.of(CityNodes.phaseMs),
+          'counts': Map<String, int>.of(CityNodes.phaseCount),
           'uiMs': _avgOf(_uiMs),
           'rasterMs': _avgOf(_rasterMs),
           'terrainMs': _terrainMs,
