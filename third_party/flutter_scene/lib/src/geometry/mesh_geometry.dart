@@ -159,6 +159,121 @@ class MeshGeometry extends UnskinnedGeometry {
     );
   }
 
+  // PATCHED (acro_space_simulator): a fixed mesh whose bytes arrive over
+  // several frames. Only [StagedMeshUpload] builds one; see [stageFromArrays].
+  MeshGeometry._staged(gpu.PrimitiveType primitiveType)
+    : storage = GeometryStorage.fixed {
+    this.primitiveType = primitiveType;
+  }
+
+  /// PATCHED (acro_space_simulator): prepares a fixed mesh from
+  /// structure-of-arrays attributes without copying its bytes to the GPU
+  /// yet, so the copy can be spread over several frames.
+  ///
+  /// [MeshGeometry.fromArrays] hands the whole mesh to one host-visible
+  /// buffer in one call, and the driver pays for that copy on the raster
+  /// thread inside the frame that flushes it: on ANGLE/GLES a multi-megabyte
+  /// mesh costs tens of milliseconds there, which the calling thread never
+  /// sees. The staged form does every CPU-side part of [fromArrays] here —
+  /// the attribute streams with their defaults, the normals when they are
+  /// generated, the index packing, the raycast copies and the bounds — and
+  /// allocates the one buffer at its full size, but copies nothing. The
+  /// caller then moves the bytes a slice a frame with
+  /// [StagedMeshUpload.step] and takes the finished geometry with
+  /// [StagedMeshUpload.finish]. That geometry is indistinguishable from the
+  /// one [fromArrays] would have built from the same arguments: the same
+  /// stream views into the same buffer layout, the same index view, raycast
+  /// attributes and [localBounds].
+  ///
+  /// The arguments mean what they mean for [fromArrays]; the storage is
+  /// always [GeometryStorage.fixed], since an updatable mesh has its own
+  /// per-attribute rings and no single buffer to stage.
+  static StagedMeshUpload stageFromArrays({
+    required Float32List positions,
+    Float32List? normals,
+    Float32List? texCoords,
+    Float32List? colors,
+    List<int>? indices,
+    gpu.PrimitiveType primitiveType = gpu.PrimitiveType.triangle,
+  }) {
+    if (positions.length % 3 != 0) {
+      throw ArgumentError(
+        'positions has ${positions.length} floats; expected a multiple of '
+        'three (one vec3 per vertex)',
+      );
+    }
+    final vertexCount = positions.length ~/ 3;
+    final resolvedNormals =
+        normals ??
+        (vertexCount > 0 && primitiveType == gpu.PrimitiveType.triangle
+            ? InterleavedLayoutAdapter.generateNormals(
+                positions: positions,
+                vertexCount: vertexCount,
+                indices: indices,
+              )
+            : null);
+
+    final geometry = MeshGeometry._staged(primitiveType);
+    geometry._liveVertexCount = vertexCount;
+    // The same retained copies [_uploadFixed] keeps: they are what the
+    // geometry raycasts and serializes from, and — filled with the same
+    // defaults [InterleavedLayoutAdapter.unskinnedAttributeStreams] would
+    // fill — they are byte-for-byte the streams [fromArrays] uploads, so
+    // they are uploaded directly rather than copied once more.
+    geometry._setCpuStreams(
+      positions,
+      vertexCount,
+      resolvedNormals,
+      texCoords,
+      colors,
+    );
+    ByteData? indexBytes;
+    var indexType = gpu.IndexType.int16;
+    if (indices != null) {
+      final packed = InterleavedLayoutAdapter.packIndices(indices);
+      indexBytes = ByteData.sublistView(packed.bytes);
+      indexType = packed.is32Bit ? gpu.IndexType.int32 : gpu.IndexType.int16;
+      geometry._packedIndexBytes = packed.bytes;
+      geometry._packedIndices32Bit = packed.is32Bit;
+    }
+    geometry.setRaycastAttributes(
+      positions: geometry._cpuPositions,
+      texCoords: geometry._cpuTexCoords,
+      indices: indexBytes,
+    );
+    if (vertexCount > 0) {
+      geometry.scanLocalBoundsFromPositions(
+        geometry._cpuPositions,
+        vertexCount,
+      );
+    }
+
+    // The segments in the order [Geometry._uploadStreams] lays them out:
+    // the four attribute streams in slot order, then the indices.
+    final segments = <ByteData>[
+      ByteData.sublistView(geometry._cpuPositions),
+      ByteData.sublistView(geometry._cpuNormals),
+      ByteData.sublistView(geometry._cpuTexCoords),
+      ByteData.sublistView(geometry._cpuColors),
+      ?indexBytes,
+    ];
+    final layout = StagedUploadLayout([
+      for (final s in segments) s.lengthInBytes,
+    ]);
+    final buffer = gpu.gpuContext.createDeviceBuffer(
+      gpu.StorageMode.hostVisible,
+      layout.totalBytes,
+    );
+    return StagedMeshUpload._(
+      geometry,
+      segments,
+      layout,
+      buffer,
+      indexed: indexBytes != null,
+      indexType: indexType,
+    );
+  }
+
   /// Replaces this updatable geometry's data from a [MeshData] snapshot.
   ///
   /// Equivalent to passing the snapshot's arrays to [rebuild], so the same
@@ -633,6 +748,210 @@ class MeshGeometry extends UnskinnedGeometry {
       }
     }
     return stream;
+  }
+}
+
+/// PATCHED (acro_space_simulator): a fixed mesh whose GPU copy is made a
+/// slice at a time. Created by [MeshGeometry.stageFromArrays].
+///
+/// The CPU work is done and the device buffer allocated when the stage is
+/// created; each [step] copies the next contiguous run of bytes — the
+/// attribute streams in slot order, then the indices, exactly as
+/// [MeshGeometry.fromArrays] lays them out — into the buffer, at most
+/// `maxBytes` per call. A host-visible buffer's `overwrite` is recorded and
+/// executed on the raster thread when the frame flushes, so one slice a frame
+/// is what bounds the raster-side cost of a frame. Once [step] has returned
+/// true, [finish] binds the views and hands over the geometry.
+class StagedMeshUpload {
+  StagedMeshUpload._(
+    this._geometry,
+    this._segments,
+    this.layout,
+    this._buffer, {
+    required bool indexed,
+    required gpu.IndexType indexType,
+  }) : _indexed = indexed,
+       _indexType = indexType;
+
+  final MeshGeometry _geometry;
+  final List<ByteData> _segments;
+  final gpu.DeviceBuffer _buffer;
+  final bool _indexed;
+  final gpu.IndexType _indexType;
+  bool _finished = false;
+  int _cursor = 0;
+
+  /// The buffer's segments and their offsets: the four attribute streams,
+  /// then the indices when the mesh has them.
+  final StagedUploadLayout layout;
+
+  /// Every byte the mesh occupies on the GPU: streams plus indices.
+  int get totalBytes => layout.totalBytes;
+
+  /// Bytes handed to the buffer so far.
+  int get uploadedBytes => _cursor;
+
+  /// Whether every byte has been handed to the buffer, so [finish] may run.
+  bool get isResident => _cursor >= layout.totalBytes;
+
+  /// Copies the next run of bytes, at most [maxBytes] of them, into the
+  /// device buffer, and returns whether the whole mesh is now resident.
+  ///
+  /// A [maxBytes] of zero or less copies nothing; the call still answers
+  /// whether the upload is complete. Once resident, further calls are no-ops
+  /// that return true.
+  bool step(int maxBytes) {
+    if (isResident) return true;
+    if (maxBytes <= 0) return false;
+    for (final slice in layout.slicesFrom(_cursor, maxBytes)) {
+      final segment = _segments[slice.segment];
+      // The return value is ignored as [Geometry._uploadStreams] ignores it:
+      // a failed overwrite cannot be retried at this level, and the layout
+      // arithmetic keeps every slice inside the buffer.
+      _buffer.overwrite(
+        ByteData.sublistView(
+          segment,
+          slice.offsetInSegment,
+          slice.offsetInSegment + slice.length,
+        ),
+        destinationOffsetInBytes: slice.destinationOffset,
+      );
+      _cursor += slice.length;
+    }
+    return isResident;
+  }
+
+  /// The finished geometry: the same views, raycast data and bounds that
+  /// [MeshGeometry.fromArrays] would have produced from the same arguments.
+  ///
+  /// Valid once [step] has returned true, and once only: the geometry is
+  /// bound to its buffer here, and a second binding would be the same object
+  /// again with nothing to add. Throws a [StateError] otherwise.
+  MeshGeometry finish() {
+    if (!isResident) {
+      throw StateError(
+        'finish() before the upload is resident: $_cursor of '
+        '${layout.totalBytes} bytes copied',
+      );
+    }
+    if (_finished) {
+      throw StateError('finish() called twice on one StagedMeshUpload');
+    }
+    _finished = true;
+    final views = <gpu.BufferView>[
+      for (var slot = 0; slot < 4; slot++)
+        gpu.BufferView(
+          _buffer,
+          offsetInBytes: layout.segmentOffsets[slot],
+          lengthInBytes: layout.segmentLengths[slot],
+        ),
+    ];
+    _geometry.setVertexStreams(views, _geometry._liveVertexCount);
+    if (_indexed) {
+      _geometry.setIndices(
+        gpu.BufferView(
+          _buffer,
+          offsetInBytes: layout.segmentOffsets[4],
+          lengthInBytes: layout.segmentLengths[4],
+        ),
+        _indexType,
+      );
+    }
+    return _geometry;
+  }
+}
+
+/// One contiguous copy of a staged upload: [length] bytes of segment
+/// [segment], starting [offsetInSegment] bytes into it, landing at byte
+/// [destinationOffset] of the device buffer.
+typedef StagedUploadSlice = ({
+  int segment,
+  int offsetInSegment,
+  int length,
+  int destinationOffset,
+});
+
+/// PATCHED (acro_space_simulator): the byte layout of a staged upload —
+/// several source segments packed back to back into one buffer — and the
+/// arithmetic that cuts it into bounded slices. Pure, so the slicing can be
+/// checked without a GPU: the slices of successive [slicesFrom] calls tile
+/// the buffer exactly, never cross a segment boundary (each slice is one
+/// `overwrite` from one source), and never exceed the byte cap they were
+/// asked for.
+class StagedUploadLayout {
+  StagedUploadLayout(List<int> segmentLengths)
+    : segmentLengths = List<int>.unmodifiable(segmentLengths),
+      segmentOffsets = List<int>.unmodifiable(_prefixSums(segmentLengths)),
+      totalBytes = segmentLengths.fold(0, (sum, n) => sum + n) {
+    for (final n in segmentLengths) {
+      if (n < 0) {
+        throw ArgumentError.value(
+          segmentLengths,
+          'segmentLengths',
+          'a segment cannot have a negative length',
+        );
+      }
+    }
+  }
+
+  /// The byte length of each segment, in buffer order.
+  final List<int> segmentLengths;
+
+  /// Where each segment starts in the buffer.
+  final List<int> segmentOffsets;
+
+  /// The buffer's size: every segment's bytes.
+  final int totalBytes;
+
+  /// The slices that move the bytes from [cursor] (a buffer offset) up to
+  /// [maxBytes] further, one slice per segment touched, in buffer order.
+  /// Empty when the cursor is at the end or [maxBytes] is not positive.
+  List<StagedUploadSlice> slicesFrom(int cursor, int maxBytes) {
+    if (cursor < 0 || cursor > totalBytes) {
+      throw RangeError.range(cursor, 0, totalBytes, 'cursor');
+    }
+    final slices = <StagedUploadSlice>[];
+    var at = cursor;
+    var left = maxBytes;
+    var segment = _segmentAt(at);
+    while (left > 0 && at < totalBytes) {
+      final segmentEnd = segmentOffsets[segment] + segmentLengths[segment];
+      if (at >= segmentEnd) {
+        // An empty segment, or the cursor sitting on a boundary.
+        segment++;
+        continue;
+      }
+      final length = (segmentEnd - at) < left ? (segmentEnd - at) : left;
+      slices.add((
+        segment: segment,
+        offsetInSegment: at - segmentOffsets[segment],
+        length: length,
+        destinationOffset: at,
+      ));
+      at += length;
+      left -= length;
+    }
+    return slices;
+  }
+
+  // The first segment whose span could hold [offset]; a cursor on a boundary
+  // resolves to the segment that starts there, and [slicesFrom] steps past
+  // any empty ones.
+  int _segmentAt(int offset) {
+    for (var i = 0; i < segmentLengths.length; i++) {
+      if (offset < segmentOffsets[i] + segmentLengths[i]) return i;
+    }
+    return segmentLengths.length;
+  }
+
+  static List<int> _prefixSums(List<int> lengths) {
+    final offsets = <int>[];
+    var sum = 0;
+    for (final n in lengths) {
+      offsets.add(sum);
+      sum += n;
+    }
+    return offsets;
   }
 }
 

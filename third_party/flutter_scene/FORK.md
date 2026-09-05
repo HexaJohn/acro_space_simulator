@@ -123,6 +123,17 @@ encoders already relied on that.
   API; their native finalizers run inside the scavenge at ~60 µs each, and
   a rarely-scavenging scene paid for seventy frames of them at once (9-12 ms,
   ~90% in MournWeakHandles, once a second). Same total work, no spike.
+- `lib/src/geometry/mesh_geometry.dart` — `MeshGeometry.stageFromArrays`
+  returns a `StagedMeshUpload`: the CPU side of `fromArrays` (attribute
+  streams with defaults, generated normals, index packing, raycast copies,
+  bounds) and the one host-visible buffer, with nothing copied yet;
+  `step(maxBytes)` overwrites the next contiguous slice (streams in slot
+  order, then indices — the `_uploadStreams` layout) and `finish()` binds
+  the views and returns a geometry indistinguishable from `fromArrays`'s.
+  A host-visible overwrite is executed on the raster thread at flush (~10
+  ms/MB on ANGLE/GLES), so a slice a frame is what bounds that thread's
+  cost. `StagedUploadLayout` holds the pure slicing arithmetic, pinned
+  GPU-free by `test/staged_upload_layout_test.dart`. `fromArrays` unchanged.
 
 ## Patches (scene layer)
 

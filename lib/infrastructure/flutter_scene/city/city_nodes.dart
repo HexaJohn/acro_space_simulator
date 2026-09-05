@@ -37,6 +37,10 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_scene/scene.dart' as fs;
+// The staged upload is a fork patch the public barrel does not export; the
+// mesh step is its only user.
+import 'package:flutter_scene/src/geometry/mesh_geometry.dart'
+    show MeshGeometry, StagedMeshUpload;
 import 'package:vector_math/vector_math.dart' as vm;
 
 import '../../../application/snapshot/world_snapshot.dart';
@@ -210,18 +214,34 @@ class CityNodes {
   /// without workers the meshing steps too.
   static double buildBudgetMs = 9;
 
-  /// Milliseconds of geometry UPLOAD a frame may start, within
-  /// [buildBudgetMs]. One `MeshGeometry.fromArrays` runs per frame at most,
-  /// and only when its estimated cost — the group's bytes at
-  /// [uploadUsPerMB] — fits what is left of this. A near tile's facade
-  /// group is megabytes, and creating its GPU buffers synchronously was
-  /// the one spike left in a static frame once the meshing moved off.
+  /// Milliseconds of UI-thread geometry UPLOAD a frame may start, within
+  /// [buildBudgetMs]. A mesh step's slice runs only when its estimated
+  /// cost — the bytes it would move at [uploadUsPerMB] — fits what is left
+  /// of this, except the frame's first step, which always runs so a mesh
+  /// dearer than the whole budget still makes progress. A near tile's
+  /// facade group is megabytes, and creating its GPU buffers synchronously
+  /// was the one spike left in a static frame once the meshing moved off.
   static double uploadBudgetMs = 2;
 
-  /// Measured cost of `MeshGeometry.fromArrays`, microseconds per megabyte
-  /// of vertex and index data: a running average over the uploads so far,
-  /// seeded with a guess a first upload can plan against.
+  /// Measured UI-thread cost of a mesh step, microseconds per megabyte of
+  /// vertex and index data handed to the device buffer: a running average
+  /// over the uploads so far, seeded with a guess a first upload can plan
+  /// against. This is the Dart-side copy only; the raster thread's share
+  /// is bounded by [uploadBytesPerFrame] instead.
   static double uploadUsPerMB = 3000;
+
+  /// Bytes of geometry a frame may hand the GPU, across every tile's mesh
+  /// steps together.
+  ///
+  /// The time gates above see only the UI thread. The bytes a host-visible
+  /// buffer is overwritten with are copied to the driver on the RASTER
+  /// thread when the frame flushes — one `glBufferSubData` per slice inside
+  /// the reactor — and on ANGLE/GLES that costs ~10 ms per megabyte. A
+  /// downtown tile's facade group uploaded whole held the raster thread
+  /// 50-75 ms and throttled the UI thread behind it, though the UI thread's
+  /// own work was 10 ms. Each mesh step is resumable and moves at most what
+  /// is left of this, so a build frame's raster-side cost stays under ~8 ms.
+  static int uploadBytesPerFrame = 768 * 1024;
 
   /// Tile builds on workers at once. Two workers, two jobs each queued
   /// behind: enough to keep both busy across a frame's dispatch, few
@@ -992,11 +1012,14 @@ class CityNodes {
     // time, so a near tile never takes the whole frame. The budget is
     // checked in microseconds — whole milliseconds between steps overshot
     // it by most of one — and against what a step of that KIND cost last
-    // time, so a step that would not fit waits for the next frame; a
-    // geometry upload is checked against its bytes at the measured rate
-    // instead (see [uploadBudgetMs]). One step always runs, or a step
-    // dearer than the whole budget would never run at all.
+    // time, so a step that would not fit waits for the next frame; a mesh
+    // step is resumable and checked against the bytes it would move at the
+    // measured rate instead (see [uploadBudgetMs]), and every mesh step of
+    // the frame together moves at most [uploadBytesPerFrame], the cap on
+    // what the raster thread will pay for them. One step always runs, or a
+    // step dearer than the whole budget would never run at all.
     var builtThisFrame = 0, stepsThisFrame = 0;
+    final uploadBytes = CityUploadByteBudget(uploadBytesPerFrame);
     if (_queue.isNotEmpty) {
       _queue.sort((a, b) => a.distanceM.compareTo(b.distanceM));
       final budgetUs = (buildBudgetMs * 1000).round();
@@ -1009,38 +1032,63 @@ class CityNodes {
           math.max(0, budgetUs - uploadBudgetUs - sw.elapsedMicroseconds),
           onStep: (kind, costUs) => stepCostUs[kind.name] = costUs);
       final uploadStartUs = sw.elapsedMicroseconds;
-      var uploadSteps = 0, geometries = 0;
+      var uploadSteps = 0;
       while (sw.elapsedMicroseconds < budgetUs) {
         final t = _nextUploadable();
         if (t == null) break;
         final job = t.job!;
         final next = job.steps.last;
-        if (uploadSteps > 0) {
-          if (next.bytes > 0) {
-            // A geometry: one a frame, and only one whose bytes fit what
-            // is left of the upload budget at the rate measured so far.
-            final estimateUs = next.bytes / (1024 * 1024) * uploadUsPerMB;
+        final mesh = next.mesh;
+        if (mesh != null) {
+          // A geometry: a slice of what is left of the frame's bytes, and
+          // only when the UI-thread cost of that slice at the rate
+          // measured so far fits what is left of the upload budget. The
+          // frame's first step runs regardless, so the step advances by
+          // at least one slice a frame however slow the copy has been.
+          if (uploadBytes.remaining <= 0) break;
+          if (uploadSteps > 0) {
+            final wouldMove =
+                math.min(uploadBytes.remaining, mesh.remainingBytes);
+            final estimateUs = wouldMove / (1024 * 1024) * uploadUsPerMB;
             final spentUs = sw.elapsedMicroseconds - uploadStartUs;
-            if (geometries > 0 ||
-                spentUs + estimateUs > uploadBudgetUs ||
+            if (spentUs + estimateUs > uploadBudgetUs ||
                 sw.elapsedMicroseconds + estimateUs > budgetUs) {
               break;
             }
-          } else {
+          }
+          final startUs = sw.elapsedMicroseconds;
+          final moved = uploadBytes.take(mesh);
+          final costUs = sw.elapsedMicroseconds - startUs;
+          _bookUpload(moved, costUs);
+          _stepCostUs[next.kind] = costUs;
+          stepCostUs[next.kind.name] = costUs;
+          stepsThisFrame++;
+          uploadSteps++;
+          // Not resident yet: the step stays at the head of its job, and
+          // the bytes it took were the frame's last, so the next pass
+          // through the loop ends here until the next frame. A step that
+          // moved nothing with bytes still on offer would spin until the
+          // time budget ran out, so it ends the loop outright.
+          if (!mesh.done) {
+            if (moved == 0) break;
+            continue;
+          }
+          job.steps.removeLast();
+        } else {
+          if (uploadSteps > 0) {
             final lastUs = _stepCostUs[next.kind];
             if (lastUs != null && sw.elapsedMicroseconds + lastUs > budgetUs) {
               break;
             }
           }
+          final startUs = sw.elapsedMicroseconds;
+          job.steps.removeLast().run!();
+          final costUs = sw.elapsedMicroseconds - startUs;
+          _stepCostUs[next.kind] = costUs;
+          stepCostUs[next.kind.name] = costUs;
+          stepsThisFrame++;
+          uploadSteps++;
         }
-        final startUs = sw.elapsedMicroseconds;
-        job.steps.removeLast().run();
-        final costUs = sw.elapsedMicroseconds - startUs;
-        _stepCostUs[next.kind] = costUs;
-        stepCostUs[next.kind.name] = costUs;
-        stepsThisFrame++;
-        uploadSteps++;
-        if (next.bytes > 0) geometries++;
         if (job.steps.isEmpty) {
           // The swap was the last step: the tile shows this job now. A job
           // is never abandoned for a newer key — a tile one camera cell
@@ -1061,6 +1109,7 @@ class CityNodes {
       }
     }
     phaseCount['steps'] = stepsThisFrame;
+    phaseCount['uploadBytes'] = uploadBytes.spent;
     phaseCount['inFlight'] = _scheduler.inFlight;
     phaseMs['city.build'] = sw.elapsedMicroseconds / 1000;
     phaseMs['city.rebuild'] = phaseMs['city.build']!;
@@ -1465,22 +1514,23 @@ class CityNodes {
       _Tile t, _TileJob j, _BodyRoot root, CityTileResult result) {
     // One step per merged group — each (material, casts-a-shadow) group is
     // ONE geometry and one draw — so the budget loop can stop between
-    // them: a downtown tile's facade group is most of its triangles.
+    // them: a downtown tile's facade group is most of its triangles. Each
+    // is resumable besides: its bytes reach the GPU a slice a frame (see
+    // [uploadBytesPerFrame]), and the node is staged only once the last
+    // slice has gone. The staging itself — the engine's CPU-side copies
+    // and the buffer — happens on the step's first slice, inside the
+    // budget, not here when the result lands.
     for (final g in result.groups) {
-      j.steps.add(_BuildStep(_StepKind.mesh, () {
-        final sw = Stopwatch()..start();
-        final geometry = fs.MeshGeometry.fromArrays(
-          positions: g.positions,
-          normals: g.normals,
-          texCoords: g.texCoords,
-          indices: g.indices,
-        );
-        _bookUpload(g.bytes, sw.elapsedMicroseconds);
-        j.stage(fs.Node(
-          mesh: fs.Mesh.primitives(
-              primitives: [fs.MeshPrimitive(geometry, _materialOf(g.material))]),
-        )..castsShadow = g.castsShadow);
-      }, bytes: g.bytes));
+      _EngineStagedUpload? staged;
+      j.steps.add(_BuildStep.mesh(CityMeshUploadStep(
+        g.bytes,
+        () => staged = _EngineStagedUpload(g),
+        () => j.stage(fs.Node(
+              mesh: fs.Mesh.primitives(primitives: [
+                fs.MeshPrimitive(staged!.finish(), _materialOf(g.material))
+              ]),
+            )..castsShadow = g.castsShadow),
+      )));
     }
     // The instanced buildings, per archetype, in runs.
     final groups = result.instances;
@@ -2498,10 +2548,11 @@ class _Tile {
 /// The kinds of UI-thread step a tile build is made of — the upload. The
 /// build loop books the last cost of each kind and will not start one
 /// that would not fit the frame's remaining budget (see [CityNodes.update]);
-/// a [mesh] step is judged by its bytes instead. The meshing's own steps
-/// are the scheduler's (see [CityMeshStepKind]).
+/// a [mesh] step is judged by the bytes it would move instead, and is the
+/// one kind that can span frames. The meshing's own steps are the
+/// scheduler's (see [CityMeshStepKind]).
 enum _StepKind {
-  // One merged group into geometry.
+  // One merged group into geometry, a slice a frame.
   mesh,
   // A run of archetype groups.
   instances,
@@ -2511,13 +2562,129 @@ enum _StepKind {
   swap,
 }
 
-/// One part of a tile's upload. [bytes] is what a [_StepKind.mesh] step
-/// moves to the GPU, for the byte-rate gate; zero for the rest.
+/// One part of a tile's upload: either a [run] that completes in one call,
+/// or a resumable [mesh] step the loop advances a slice a frame and pops
+/// only once it is [CityMeshUploadStep.done].
 class _BuildStep {
-  const _BuildStep(this.kind, this.run, {this.bytes = 0});
+  const _BuildStep(this.kind, void Function() this.run) : mesh = null;
+  _BuildStep.mesh(CityMeshUploadStep this.mesh)
+      : kind = _StepKind.mesh,
+        run = null;
   final _StepKind kind;
-  final void Function() run;
-  final int bytes;
+  final void Function()? run;
+  final CityMeshUploadStep? mesh;
+}
+
+/// A mesh whose bytes reach the GPU a slice at a time: what a mesh step
+/// advances. The engine's `StagedMeshUpload` is one (see
+/// [_EngineStagedUpload]); a test's fake is another, so the pacing —
+/// which is [CityNodes]'s, not the engine's — can be pinned without a GPU.
+abstract interface class CityStagedUpload {
+  /// Every byte the mesh occupies on the GPU.
+  int get totalBytes;
+
+  /// Bytes handed to the GPU so far.
+  int get uploadedBytes;
+
+  /// Hands over at most [maxBytes] more; true once every byte has gone.
+  bool step(int maxBytes);
+}
+
+/// The engine's staged upload of one merged group, and the geometry it
+/// becomes. The color stream the engine adds (opaque white, sixteen bytes
+/// a vertex) is part of what moves, so [totalBytes] is more than the
+/// group's own [CityMeshGroup.bytes].
+class _EngineStagedUpload implements CityStagedUpload {
+  _EngineStagedUpload(CityMeshGroup g)
+      : _staged = MeshGeometry.stageFromArrays(
+          positions: g.positions,
+          normals: g.normals,
+          texCoords: g.texCoords,
+          indices: g.indices,
+        );
+  final StagedMeshUpload _staged;
+
+  @override
+  int get totalBytes => _staged.totalBytes;
+  @override
+  int get uploadedBytes => _staged.uploadedBytes;
+  @override
+  bool step(int maxBytes) => _staged.step(maxBytes);
+
+  /// The geometry, once resident: valid after [step] has returned true.
+  fs.MeshGeometry finish() => _staged.finish();
+}
+
+/// One merged group's upload as a step the build loop can resume: each
+/// [advance] moves at most the bytes it is given and the step is [done]
+/// once the mesh is resident, at which point [onResident] has staged its
+/// node.
+///
+/// The upload is created on the first [advance], not at construction: its
+/// CPU side — the engine's attribute copies and the device buffer — is
+/// megabytes of work for a downtown group, and it belongs inside the
+/// frame's build budget, where the step runs, rather than in the callback
+/// that received the result. Until then [totalBytes] is the group's own
+/// [estimatedBytes], which the loop only uses to size the first slice.
+class CityMeshUploadStep {
+  CityMeshUploadStep(this.estimatedBytes, this._stage, this._onResident);
+
+  /// The group's bytes as the mesher counts them, for planning before the
+  /// upload exists.
+  final int estimatedBytes;
+  final CityStagedUpload Function() _stage;
+  final void Function() _onResident;
+  CityStagedUpload? _upload;
+
+  /// Whether the mesh is resident and its node staged.
+  bool get done => _done;
+  bool _done = false;
+
+  /// The upload's true size once it exists, the estimate before.
+  int get totalBytes => _upload?.totalBytes ?? estimatedBytes;
+
+  /// Bytes moved so far.
+  int get uploadedBytes => _upload?.uploadedBytes ?? 0;
+
+  /// Bytes still to move, or zero once done.
+  int get remainingBytes => _done ? 0 : totalBytes - uploadedBytes;
+
+  /// Moves at most [maxBytes] more of the mesh; returns how many moved.
+  /// Nothing moves once done, or for a cap of zero or less — the caller
+  /// with no bytes left this frame gets the same step back next frame.
+  int advance(int maxBytes) {
+    if (_done || maxBytes <= 0) return 0;
+    final upload = _upload ??= _stage();
+    final before = upload.uploadedBytes;
+    if (upload.step(maxBytes)) {
+      _done = true;
+      _onResident();
+    }
+    return upload.uploadedBytes - before;
+  }
+}
+
+/// One frame's share of GPU upload bytes, spent across every mesh step the
+/// frame advances (see [CityNodes.uploadBytesPerFrame]).
+class CityUploadByteBudget {
+  CityUploadByteBudget(this.cap);
+
+  /// Bytes the frame may hand the GPU in all.
+  final int cap;
+
+  /// Bytes handed over so far this frame.
+  int get spent => _spent;
+  int _spent = 0;
+
+  /// Bytes the frame has left.
+  int get remaining => cap - _spent;
+
+  /// Advances [step] by what is left and books what it moved.
+  int take(CityMeshUploadStep step) {
+    final moved = step.advance(remaining);
+    _spent += moved;
+    return moved;
+  }
 }
 
 /// A tile build in progress: the key it answers, the result once the
