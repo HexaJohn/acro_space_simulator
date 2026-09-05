@@ -230,17 +230,21 @@ class CityNodes {
   /// is bounded by [uploadBytesPerFrame] instead.
   static double uploadUsPerMB = 3000;
 
-  /// Bytes of geometry a frame may hand the GPU, across every tile's mesh
-  /// steps together.
+  /// Bytes of geometry a frame may put in front of the GPU: the chunks it
+  /// REVEALS, and after those, the slices its mesh steps stage.
   ///
-  /// The time gates above see only the UI thread. The bytes a host-visible
-  /// buffer is overwritten with are copied to the driver on the RASTER
-  /// thread when the frame flushes — one `glBufferSubData` per slice inside
-  /// the reactor — and on ANGLE/GLES that costs ~10 ms per megabyte. A
-  /// downtown tile's facade group uploaded whole held the raster thread
-  /// 50-75 ms and throttled the UI thread behind it, though the UI thread's
-  /// own work was 10 ms. Each mesh step is resumable and moves at most what
-  /// is left of this, so a build frame's raster-side cost stays under ~8 ms.
+  /// The time gates above see only the UI thread. On ANGLE/GLES the driver
+  /// gets a buffer's whole backing store at the geometry's FIRST DRAW —
+  /// not as `overwrite` writes it, which is what the slices were paced
+  /// against — at ~10 ms per megabyte on the raster thread. A downtown
+  /// tile's facade group, staged a slice a frame and then drawn, still
+  /// held the raster thread 80 ms in the reactor on the frame it first
+  /// drew and throttled the UI thread behind it. So the groups arrive cut
+  /// to [CityTileMesher.maxGroupBytes], a tile's new nodes attach hidden,
+  /// and a frame reveals chunks up to this many bytes (the first one
+  /// regardless, or a chunk over the cap would never show) before its
+  /// staging spends what is left; a build frame's raster-side cost stays
+  /// under ~8 ms, one chunk more at most.
   static int uploadBytesPerFrame = 768 * 1024;
 
   /// Tile builds on workers at once. Two workers, two jobs each queued
@@ -669,6 +673,9 @@ class CityNodes {
   /// Tiles waiting to build, nearest first.
   final List<_Tile> _queue = [];
 
+  /// Tiles whose incoming set is still being revealed (see [_swap]).
+  final List<_Tile> _revealing = [];
+
   /// One root node per body: the colony's anchor on the body, placed each
   /// frame the body moves. Every tile's batches hang under it at a fixed
   /// offset, so a spinning planet costs one transform write per body rather
@@ -1020,6 +1027,28 @@ class CityNodes {
     // step dearer than the whole budget would never run at all.
     var builtThisFrame = 0, stepsThisFrame = 0;
     final uploadBytes = CityUploadByteBudget(uploadBytesPerFrame);
+    // The reveals first, nearest first: they are tiles already built and
+    // swapped, whose GPU cost lands at the draw, and they take the frame's
+    // bytes before any staging does — staged slices are Dart-side copies
+    // now, cheap to defer, and a tile whose chunks waited on the staging
+    // behind it would never finish showing. Not the queue's business: a
+    // swapped tile is off the queue, and this touches neither it nor the
+    // job. A hidden tile's reveal waits — nothing it shows is drawn, so
+    // nothing would upload — and resumes when it is attached again.
+    var revealChunks = 0;
+    if (_revealing.isNotEmpty) {
+      final revealing = _revealing.toList()
+        ..sort((a, b) => a.distanceM.compareTo(b.distanceM));
+      for (final t in revealing) {
+        final reveal = t.reveal;
+        if (reveal == null || t.hidden) continue;
+        revealChunks +=
+            reveal.advance(uploadBytes, first: revealChunks == 0);
+      }
+    }
+    // The frame's bytes so far are the reveals': the staging below adds its
+    // own on top.
+    final revealBytes = uploadBytes.spent;
     if (_queue.isNotEmpty) {
       _queue.sort((a, b) => a.distanceM.compareTo(b.distanceM));
       final budgetUs = (buildBudgetMs * 1000).round();
@@ -1110,6 +1139,9 @@ class CityNodes {
     }
     phaseCount['steps'] = stepsThisFrame;
     phaseCount['uploadBytes'] = uploadBytes.spent;
+    phaseCount['revealChunks'] = revealChunks;
+    phaseCount['revealBytes'] = revealBytes;
+    phaseCount['revealing'] = _revealing.length;
     phaseCount['inFlight'] = _scheduler.inFlight;
     phaseMs['city.build'] = sw.elapsedMicroseconds / 1000;
     phaseMs['city.rebuild'] = phaseMs['city.build']!;
@@ -1135,6 +1167,10 @@ class CityNodes {
     for (final t in _tiles.values) {
       if (t.hidden) continue;
       for (final n in t.batches) {
+        if (n.visible) draws++;
+      }
+      // A tile mid-reveal draws its old set and the chunks shown so far.
+      for (final n in t.incoming) {
         if (n.visible) draws++;
       }
       skylineTris += t.skylineTris;
@@ -1497,39 +1533,41 @@ class CityNodes {
 
   /// The upload, as steps: each of the result's geometries onto the job's
   /// staging list — no scene mutation — the archetype groups in runs, the
-  /// planting, then ONE swap that drops the tile's old nodes and attaches
-  /// every staged one in the same frame.
+  /// planting, then ONE swap that attaches every staged node in the same
+  /// frame, the geometry chunks hidden, to be revealed a frame's worth at
+  /// a time (see [_swap], [uploadBytesPerFrame]).
   ///
   /// The upload was one indivisible step, and the largest: a downtown
   /// tile's two dozen builders, its skyline, its archetype groups and its
   /// planting in one go, however much of the budget was left. Staged a
   /// geometry at a time it fits between frames; swapped all at once the
-  /// engine sees one structural change and rebuilds its BVH once, and no
-  /// frame ever shows a tile half old and half new.
+  /// engine sees one structural change and rebuilds its BVH once.
   ///
   /// The material handles are resolved when a step RUNS, not here (see
   /// [_materialOf]): they are lazy, and the texture and shader loads
   /// reset them.
   void _addUploadSteps(
       _Tile t, _TileJob j, _BodyRoot root, CityTileResult result) {
-    // One step per merged group — each (material, casts-a-shadow) group is
-    // ONE geometry and one draw — so the budget loop can stop between
-    // them: a downtown tile's facade group is most of its triangles. Each
-    // is resumable besides: its bytes reach the GPU a slice a frame (see
-    // [uploadBytesPerFrame]), and the node is staged only once the last
-    // slice has gone. The staging itself — the engine's CPU-side copies
-    // and the buffer — happens on the step's first slice, inside the
-    // budget, not here when the result lands.
+    // One step per group — each is one geometry and one draw, a chunk of
+    // at most [CityTileMesher.maxGroupBytes] — so the budget loop can stop
+    // between them. Each is resumable besides: its bytes reach the buffer
+    // a slice a frame, and the node is staged only once the last slice
+    // has gone — hidden, with the size the driver will take at its first
+    // draw, for the reveal. The staging itself — the engine's CPU-side
+    // copies and the buffer — happens on the step's first slice, inside
+    // the budget, not here when the result lands.
     for (final g in result.groups) {
       _EngineStagedUpload? staged;
       j.steps.add(_BuildStep.mesh(CityMeshUploadStep(
         g.bytes,
         () => staged = _EngineStagedUpload(g),
-        () => j.stage(fs.Node(
+        () => j.stageChunk(
+            fs.Node(
               mesh: fs.Mesh.primitives(primitives: [
                 fs.MeshPrimitive(staged!.finish(), _materialOf(g.material))
               ]),
-            )..castsShadow = g.castsShadow),
+            )..castsShadow = g.castsShadow,
+            staged!.totalBytes),
       )));
     }
     // The instanced buildings, per archetype, in runs.
@@ -1652,29 +1690,81 @@ class CityNodes {
     );
   }
 
-  /// Swap a tile's nodes for the job's staged ones, all in one frame.
+  /// Attach the job's staged nodes, all in one frame, as the tile's
+  /// INCOMING set: its geometry chunks hidden, shown a frame's worth of
+  /// bytes at a time by the reveal pass (see [uploadBytesPerFrame]), and
+  /// the old set dropped when the last chunk shows (see [_finishReveal]).
+  /// Until then both sets are in the scene — a few frames of double
+  /// geometry beats a half-drawn tile, and beats the 80 ms the driver took
+  /// for a whole tile's first draw.
+  ///
+  /// The tile stays on the queue: the build loop pops it after this step
+  /// — dropping it here left the loop's removeAt(0) taking the NEXT tile,
+  /// or throwing on an empty queue.
   void _swap(_Tile t, _TileJob job, _BodyRoot root) {
-    // The old nodes only: the tile stays queued until the build loop pops
-    // it — dropping it from the queue here left the loop's removeAt(0)
-    // taking the NEXT tile, or throwing on an empty queue.
-    _dropBatches(t);
+    // A reveal still running from the last swap never showed all of its
+    // set, and a tile half one key and half another is the thing the
+    // reveal exists to avoid: that set goes, the shown one stays as the
+    // fallback until this one is through.
+    _dropIncoming(t);
     for (final node in job.staged) {
       // A build that lands while the tile is hidden stays off the scene;
       // _setAttached puts it in when the tile comes back into view.
       if (!t.hidden) root.node.add(node);
-      t.batches.add(node);
+      t.incoming.add(node);
     }
     job.staged.clear();
+    // The planting is the new set's: shown or hidden by the tile's
+    // distance from THIS frame — a new node is visible by default, and a
+    // far tile must not flash its trees for the frame between its swap and
+    // the next visibility pass. The old set's trees stand a few frames
+    // more without a visibility pass of their own, which nobody sees.
     t.flora
       ..clear()
       ..addAll(job.flora);
     job.flora.clear();
-    // The planting shown or hidden by the tile's distance from THIS frame:
-    // a new node is visible by default, and a far tile must not flash its
-    // trees for the frame between its swap and the next visibility pass.
     _syncFlora(t, apply: true);
     t.skylineTris = job.skylineTris;
     t.lodCounts = job.lodCounts;
+    if (job.reveal.isEmpty) {
+      _finishReveal(t);
+    } else {
+      t.reveal = CityTileReveal(job.reveal, onDone: () => _finishReveal(t));
+      job.reveal.clear();
+      _revealing.add(t);
+    }
+  }
+
+  /// The incoming set is all shown: the old set leaves the scene and the
+  /// incoming one is the tile's from here.
+  void _finishReveal(_Tile t) {
+    final root = _roots[t.bodyId];
+    if (!t.hidden) {
+      for (final n in t.batches) {
+        root?.node.remove(n);
+      }
+    }
+    t.batches
+      ..clear()
+      ..addAll(t.incoming);
+    t.incoming.clear();
+    t.reveal = null;
+    _revealing.remove(t);
+  }
+
+  /// Take a tile's incoming set out of the scene and forget its reveal,
+  /// leaving the shown set alone.
+  void _dropIncoming(_Tile t) {
+    if (t.incoming.isEmpty && t.reveal == null) return;
+    final root = _roots[t.bodyId];
+    if (!t.hidden) {
+      for (final n in t.incoming) {
+        root?.node.remove(n);
+      }
+    }
+    t.incoming.clear();
+    t.reveal = null;
+    _revealing.remove(t);
   }
 
   /// Show or hide a tile's planting by its distance (see [floraVisibleAt]),
@@ -1697,8 +1787,10 @@ class CityNodes {
     }
   }
 
-  /// Take a tile's nodes out of the scene (a hidden tile's are already out).
+  /// Take a tile's nodes out of the scene (a hidden tile's are already
+  /// out): the shown set and, mid-reveal, the incoming one.
   void _dropBatches(_Tile t) {
+    _dropIncoming(t);
     final root = _roots[t.bodyId];
     if (!t.hidden) {
       for (final n in t.batches) {
@@ -1712,11 +1804,14 @@ class CityNodes {
   }
 
   /// Put a tile's built nodes into the scene or take them out, keeping them
-  /// either way — the [CityOutOfView.hidden] path.
+  /// either way — the [CityOutOfView.hidden] path. Both sets: a tile
+  /// hidden mid-reveal keeps its incoming nodes and its place in the
+  /// reveal, which pauses while it is out (the pass skips hidden tiles)
+  /// and finishes once it is back, the chunks' visibility as they were.
   void _setAttached(_Tile t, bool attached) {
     final root = _roots[t.bodyId];
     if (root == null) return;
-    for (final n in t.batches) {
+    for (final n in t.batches.followedBy(t.incoming)) {
       if (attached) {
         root.node.add(n);
       } else {
@@ -2543,6 +2638,12 @@ class _Tile {
   int skylineTris = 0;
   Map<BuildingDetail, int> lodCounts = const {};
   _TileJob? job;
+
+  /// The last swap's nodes, attached alongside [batches] and shown a chunk
+  /// at a time by [reveal]; they become [batches] when the reveal is done
+  /// (see [CityNodes._swap]).
+  final List<fs.Node> incoming = [];
+  CityTileReveal? reveal;
 }
 
 /// The kinds of UI-thread step a tile build is made of — the upload. The
@@ -2685,6 +2786,71 @@ class CityUploadByteBudget {
     _spent += moved;
     return moved;
   }
+
+  /// Books [bytes] the frame put in front of the GPU some other way — a
+  /// revealed chunk, whose upload the driver does at its first draw. May
+  /// take the frame past its cap: the reveal that always runs is allowed
+  /// to, and [remaining] then reads negative so nothing else runs.
+  void spend(int bytes) => _spent += bytes;
+}
+
+/// One chunk of a tile's new geometry, attached hidden: the bytes the
+/// driver moves at its first draw, and the call that lets it draw.
+class CityRevealChunk {
+  const CityRevealChunk(this.bytes, this.show);
+  final int bytes;
+  final void Function() show;
+}
+
+/// A tile's staged chunks being shown a frame's bytes at a time, in order,
+/// and the call that drops the tile's old set once the last one shows.
+///
+/// The pacing is [CityNodes]'s, not the scene's, and it is pinned without
+/// one: [advance] is what a frame does, and the caller not calling it is
+/// what a hidden tile does — the cursor keeps, and the next call carries
+/// on from it.
+class CityTileReveal {
+  CityTileReveal(List<CityRevealChunk> chunks, {required this.onDone})
+      : _chunks = List.of(chunks);
+
+  final List<CityRevealChunk> _chunks;
+
+  /// Runs once, when the last chunk has been shown.
+  final void Function() onDone;
+  int _next = 0;
+  bool _done = false;
+
+  bool get done => _done;
+  int get remainingChunks => _chunks.length - _next;
+  int get remainingBytes {
+    var n = 0;
+    for (var i = _next; i < _chunks.length; i++) {
+      n += _chunks[i].bytes;
+    }
+    return n;
+  }
+
+  /// Show the chunks in order while [budget] has the bytes for the next —
+  /// or the first chunk regardless when this is the frame's [first]
+  /// reveal, since a chunk bigger than the cap would otherwise never show
+  /// — booking each; returns how many showed. Calls [onDone] when the last
+  /// one has.
+  int advance(CityUploadByteBudget budget, {bool first = false}) {
+    var shown = 0;
+    while (_next < _chunks.length) {
+      final c = _chunks[_next];
+      if (!(first && shown == 0) && c.bytes > budget.remaining) break;
+      budget.spend(c.bytes);
+      c.show();
+      _next++;
+      shown++;
+    }
+    if (_next == _chunks.length && !_done) {
+      _done = true;
+      onDone();
+    }
+    return shown;
+  }
 }
 
 /// A tile build in progress: the key it answers, the result once the
@@ -2713,12 +2879,24 @@ class _TileJob {
   /// Nodes built and placed but not yet in the scene: the swap step adds
   /// them all in one frame.
   final List<fs.Node> staged = [];
+
+  /// The geometry chunks among [staged], with the bytes the driver takes
+  /// at each one's first draw: staged hidden, revealed in this order under
+  /// the frame's byte budget once the swap has attached them.
+  final List<CityRevealChunk> reveal = [];
   int skylineTris = 0;
   Map<BuildingDetail, int> lodCounts = const {};
 
   void stage(fs.Node node) {
     node.localTransform = local;
     staged.add(node);
+  }
+
+  /// Stage a geometry chunk of [bytes], hidden until its reveal.
+  void stageChunk(fs.Node node, int bytes) {
+    node.visible = false;
+    stage(node);
+    reveal.add(CityRevealChunk(bytes, () => node.visible = true));
   }
 
   /// The planting, staged like any node and remembered with its kind, so

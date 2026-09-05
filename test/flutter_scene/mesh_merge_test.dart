@@ -103,4 +103,33 @@ void main() {
     expect(sink.isEmpty, isTrue);
     expect(sink.build().vertexCount, 0);
   });
+
+  test('reset empties the sink and keeps its capacity', () {
+    final quad = _quad();
+    final sink = MergedMeshSink(vertexCapacity: 2);
+    for (var i = 0; i < 5; i++) {
+      sink.appendMesh(quad);
+    }
+    expect(sink.vertexCount, 20);
+    final vertexCap = sink.vertexCapacity, indexCap = sink.indexCapacity;
+    expect(vertexCap, greaterThanOrEqualTo(20));
+
+    sink.reset();
+    expect(sink.isEmpty, isTrue);
+    expect(sink.vertexCount, 0);
+    expect(sink.triangleCount, 0);
+    expect(sink.vertexCapacity, vertexCap, reason: 'reset must not shrink');
+    expect(sink.indexCapacity, indexCap);
+
+    // The next mesh is built from zero: the same bytes a fresh sink gives,
+    // and no growth for a mesh the buffers already hold.
+    sink.appendMesh(quad);
+    final fresh = MergedMeshSink()..appendMesh(quad);
+    final again = sink.build(), reference = fresh.build();
+    expect(again.positions, reference.positions);
+    expect(again.normals, reference.normals);
+    expect(again.texCoords, reference.texCoords);
+    expect(again.indices, reference.indices);
+    expect(sink.vertexCapacity, vertexCap);
+  });
 }

@@ -168,4 +168,122 @@ void main() {
     expect(CityNodes.uploadBytesPerFrame, 768 * kib);
     expect(CityNodes.uploadBytesPerFrame / (1024 * 1024) * 10, lessThan(8));
   });
+
+  group('the reveal shows a swapped tile a chunk at a time', () {
+    /// A reveal over chunks of [bytes] each, with what each showed and
+    /// how many times the old set was dropped.
+    (CityTileReveal, List<bool>, List<int>) reveal(List<int> bytes) {
+      final shown = List.filled(bytes.length, false);
+      final dropped = <int>[];
+      final chunks = [
+        for (var i = 0; i < bytes.length; i++)
+          CityRevealChunk(bytes[i], () => shown[i] = true),
+      ];
+      final r = CityTileReveal(chunks,
+          onDone: () => dropped.add(shown.where((s) => s).length));
+      return (r, shown, dropped);
+    }
+
+    test('two chunks under the cap together go on consecutive frames', () {
+      final cap = 768 * kib;
+      final (r, shown, dropped) = reveal([700 * kib, 700 * kib]);
+      expect(r.remainingChunks, 2);
+      expect(r.remainingBytes, 1400 * kib);
+
+      final frame1 = CityUploadByteBudget(cap);
+      expect(r.advance(frame1, first: true), 1);
+      expect(shown, [true, false]);
+      expect(frame1.spent, 700 * kib);
+      expect(r.done, isFalse);
+      expect(dropped, isEmpty, reason: 'the old set stays until the last');
+      // Nothing more this frame: the second would take the frame over.
+      expect(r.advance(frame1), 0);
+
+      final frame2 = CityUploadByteBudget(cap);
+      expect(r.advance(frame2, first: true), 1);
+      expect(shown, [true, true]);
+      expect(r.done, isTrue);
+      expect(dropped, [2], reason: 'dropped once, with every chunk shown');
+      expect(r.remainingChunks, 0);
+
+      // Done is done.
+      expect(r.advance(CityUploadByteBudget(cap), first: true), 0);
+      expect(dropped, [2]);
+    });
+
+    test('small chunks fill a frame; a big one waits for its own', () {
+      final cap = 768 * kib;
+      final (r, shown, _) = reveal([200 * kib, 200 * kib, 600 * kib]);
+      final frame = CityUploadByteBudget(cap);
+      expect(r.advance(frame, first: true), 2);
+      expect(shown, [true, true, false]);
+      expect(frame.remaining, 368 * kib);
+      expect(r.advance(CityUploadByteBudget(cap), first: true), 1);
+      expect(r.done, isTrue);
+    });
+
+    test("the frame's first reveal runs whatever the chunk costs", () {
+      // A chunk over the cap — the chunk cap is a megabyte, the frame's
+      // is less — would otherwise never show at all.
+      final cap = 768 * kib;
+      final (r, shown, _) = reveal([1024 * kib, 100 * kib]);
+      final frame = CityUploadByteBudget(cap);
+      expect(r.advance(frame, first: true), 1);
+      expect(shown, [true, false]);
+      expect(frame.remaining, lessThan(0));
+      // And nothing else moves this frame: a mesh step offered what is
+      // left gets nothing.
+      final (step, upload, _) = _step(100 * kib);
+      expect(frame.take(step), 0);
+      expect(upload.caps, isEmpty);
+    });
+
+    test('a reveal that is not the frame\'s first waits for the bytes', () {
+      final cap = 768 * kib;
+      final (r, shown, _) = reveal([500 * kib]);
+      final frame = CityUploadByteBudget(cap)..spend(400 * kib);
+      expect(r.advance(frame), 0);
+      expect(shown, [false]);
+      expect(r.advance(CityUploadByteBudget(cap)), 1);
+    });
+
+    test('the staging takes what the reveals left', () {
+      final cap = 768 * kib;
+      final (r, _, _) = reveal([500 * kib]);
+      final frame = CityUploadByteBudget(cap);
+      r.advance(frame, first: true);
+      final (step, upload, _) = _step(600 * kib);
+      expect(frame.take(step), 268 * kib);
+      expect(upload.caps, [268 * kib]);
+      expect(frame.spent, cap);
+    });
+
+    test('a tile hidden mid-reveal finishes on re-attach', () {
+      // Hidden, the tile is skipped by the pass: no advance. Its cursor
+      // keeps, and the frames after it is attached again carry on from
+      // the chunk it stopped at, dropping the old set only at the end.
+      final cap = 768 * kib;
+      final (r, shown, dropped) = reveal([700 * kib, 700 * kib, 700 * kib]);
+      r.advance(CityUploadByteBudget(cap), first: true);
+      expect(shown, [true, false, false]);
+      // Two frames hidden: nothing happens to it.
+      expect(shown, [true, false, false]);
+      expect(dropped, isEmpty);
+      expect(r.done, isFalse);
+      // Back in view.
+      r.advance(CityUploadByteBudget(cap), first: true);
+      expect(shown, [true, true, false]);
+      expect(dropped, isEmpty);
+      r.advance(CityUploadByteBudget(cap), first: true);
+      expect(shown, [true, true, true]);
+      expect(dropped, [3]);
+    });
+
+    test('no chunks: done at once, the old set dropped', () {
+      final (r, _, dropped) = reveal([]);
+      expect(r.advance(CityUploadByteBudget(1), first: true), 0);
+      expect(r.done, isTrue);
+      expect(dropped, [0]);
+    });
+  });
 }

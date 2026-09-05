@@ -69,6 +69,11 @@ class SyncCityTileScheduler implements CityTileScheduler {
       : _libraries = libraries ?? CityBuildingLibraries();
 
   final CityBuildingLibraries _libraries;
+
+  /// The merge sinks every job of this scheduler builds into, one set for
+  /// the lot: the queue runs a job to its end before the next touches them
+  /// (see [CityMeshScratch]).
+  final CityMeshScratch _scratch = CityMeshScratch();
   final List<_InlineJob> _queue = [];
 
   /// Microseconds the last step of each kind took: the budget loop will not
@@ -82,7 +87,8 @@ class SyncCityTileScheduler implements CityTileScheduler {
   @override
   Future<CityTileResult> mesh(CityTileRequest request) {
     if (_disposed) throw StateError('scheduler disposed');
-    final job = _InlineJob(CityTileMeshJob(request, _libraries));
+    final job =
+        _InlineJob(CityTileMeshJob(request, _libraries, scratch: _scratch));
     _queue.add(job);
     return job.done.future;
   }
@@ -121,7 +127,9 @@ class SyncCityTileScheduler implements CityTileScheduler {
       steps++;
       if (job.mesh.done) {
         _queue.removeAt(0);
-        job.done.complete(job.mesh.result);
+        // Detached from the shared sinks, which the next job overwrites
+        // while the caller is still uploading this one a slice a frame.
+        job.done.complete(job.mesh.result.detached());
       }
     }
     return steps;

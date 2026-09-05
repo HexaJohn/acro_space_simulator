@@ -9,9 +9,12 @@ import 'dart:typed_data';
 import 'package:acro_space_simulator/application/snapshot/world_snapshot.dart';
 import 'package:acro_space_simulator/domain/architecture/building_generator.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
+import 'package:acro_space_simulator/domain/scatter/mesh_builder.dart';
+import 'package:acro_space_simulator/domain/scatter/prop_mesh.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_columns.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_mesher.dart';
+import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_scheduler.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// The tile meshing is a pure function of its request: the same tile
@@ -437,5 +440,192 @@ void main() {
       expect(stepped.groups[i].positions, whole.groups[i].positions);
       expect(stepped.groups[i].indices, whole.groups[i].indices);
     }
+  });
+
+  group('a merged mesh over the cap is cut into chunks', () {
+    /// [n] quads in a row, each its four vertices then its two triangles,
+    /// the way every builder emits: 4 * 48 + 6 * 4 = 216 bytes a quad.
+    PropMesh quads(int n) {
+      final m = MeshBuilder();
+      for (var i = 0; i < n; i++) {
+        final x = i * 2.0;
+        final a = m.vertex(Vector3(x, 0, 0), Vector3.unitZ, 0, 0);
+        final b = m.vertex(Vector3(x + 1, 0, 0), Vector3.unitZ, 1, 0);
+        final c = m.vertex(Vector3(x + 1, 1, 0), Vector3.unitZ, 1, 1);
+        final d = m.vertex(Vector3(x, 1, 0), Vector3.unitZ, 0, 1);
+        m.quad(a, b, c, d);
+      }
+      return m.build();
+    }
+
+    /// Every triangle of [mesh] as its three vertices' positions, in order.
+    List<List<double>> triangles(PropMesh mesh, [Uint32List? indices]) {
+      final idx = indices ?? mesh.indices;
+      return [
+        for (var t = 0; t + 2 < idx.length; t += 3)
+          [
+            for (final i in [idx[t], idx[t + 1], idx[t + 2]])
+              ...mesh.positions.sublist(i * 3, i * 3 + 3),
+          ],
+      ];
+    }
+
+    test('the engine size counts the colour stream', () {
+      final g = CityTileMesher.chunk(quads(10),
+          material: CityMaterialKind.facade, castsShadow: true);
+      expect(g, hasLength(1));
+      expect(CityTileMesher.bytesPerVertex, 48,
+          reason: 'position 12 + normal 12 + uv 8 + colour 16');
+      expect(g.single.bytes, 40 * 48 + 60 * 4);
+    });
+
+    test('under the cap: one group, the mesh itself, untouched', () {
+      final mesh = quads(10);
+      final before = Uint32List.fromList(mesh.indices);
+      final g = CityTileMesher.chunk(mesh,
+          material: CityMaterialKind.road, castsShadow: false, maxBytes: 4096);
+      expect(g, hasLength(1));
+      expect(g.single.material, CityMaterialKind.road);
+      expect(g.single.castsShadow, isFalse);
+      expect(g.single.vertexCount, 40);
+      expect(g.single.indices, before);
+      // A view, not a copy: a write through the mesh shows in the group.
+      mesh.positions[0] = 42;
+      expect(g.single.positions[0], 42);
+    });
+
+    test('over the cap: chunks under it, re-based, the same triangles', () {
+      final mesh = quads(100);
+      final original = triangles(mesh);
+      const cap = 2000; // nine quads
+      final chunks = CityTileMesher.chunk(mesh,
+          material: CityMaterialKind.facade, castsShadow: true, maxBytes: cap);
+      expect(chunks.length, greaterThan(5));
+      final seen = <List<double>>[];
+      for (final c in chunks) {
+        expect(c.material, CityMaterialKind.facade);
+        expect(c.castsShadow, isTrue);
+        expect(c.bytes, lessThanOrEqualTo(cap));
+        expect(c.indices.length % 3, 0, reason: 'no triangle straddles');
+        expect(c.indices.isNotEmpty, isTrue);
+        expect(c.normals.length, c.positions.length);
+        expect(c.texCoords.length, c.vertexCount * 2);
+        for (final i in c.indices) {
+          expect(i, lessThan(c.vertexCount), reason: 're-based to the chunk');
+        }
+        expect(c.indices.contains(0), isTrue,
+            reason: 'the range starts at a vertex the chunk uses');
+        seen.addAll(triangles(
+            PropMesh(
+                positions: c.positions,
+                normals: c.normals,
+                texCoords: c.texCoords,
+                indices: c.indices),
+            c.indices));
+      }
+      // The union, in order, is the mesh: every triangle once.
+      expect(seen, original);
+      // And the chunks are views: their vertex bytes are the mesh's.
+      expect(chunks.fold(0, (n, c) => n + c.vertexCount),
+          greaterThanOrEqualTo(mesh.vertexCount));
+      mesh.positions[mesh.positions.length - 1] = 42;
+      expect(chunks.last.positions.last, 42);
+    });
+
+    test('an empty mesh makes no chunk', () {
+      expect(
+          CityTileMesher.chunk(PropMesh.empty,
+              material: CityMaterialKind.ground, castsShadow: false),
+          isEmpty);
+    });
+
+    test('a near tile arrives in groups no bigger than the cap', () {
+      final near = CityTileMesher.mesh(request(CityTier.near), CityBuildingLibraries());
+      expectWellFormed(near);
+      for (final g in near.groups) {
+        expect(g.bytes, lessThanOrEqualTo(CityTileMesher.maxGroupBytes));
+      }
+      // Forced small, the same tile is the same triangles in more groups.
+      final was = CityTileMesher.maxGroupBytes;
+      CityTileMesher.maxGroupBytes = 64 * 1024;
+      try {
+        final cut = CityTileMesher.mesh(
+            request(CityTier.near), CityBuildingLibraries());
+        expectWellFormed(cut);
+        expect(cut.groups.length, greaterThan(near.groups.length));
+        for (final g in cut.groups) {
+          expect(g.bytes, lessThanOrEqualTo(64 * 1024));
+        }
+        int tris(CityTileResult r) =>
+            r.groups.fold(0, (n, g) => n + g.triangleCount);
+        expect(tris(cut), tris(near));
+        // Per material and shadow answer too.
+        for (final key in byMaterial(near).keys) {
+          expect(
+              cut.groups
+                  .where((g) => (g.material, g.castsShadow) == key)
+                  .fold(0, (n, g) => n + g.triangleCount),
+              byMaterial(near)[key]!.triangleCount);
+        }
+      } finally {
+        CityTileMesher.maxGroupBytes = was;
+      }
+    });
+  });
+
+  group('the merge sinks are reused across jobs', () {
+    void expectSameGroups(CityTileResult a, CityTileResult b) {
+      expect(b.groups.length, a.groups.length);
+      for (var i = 0; i < a.groups.length; i++) {
+        expect(b.groups[i].material, a.groups[i].material);
+        expect(b.groups[i].positions, a.groups[i].positions);
+        expect(b.groups[i].normals, a.groups[i].normals);
+        expect(b.groups[i].texCoords, a.groups[i].texCoords);
+        expect(b.groups[i].indices, a.groups[i].indices);
+      }
+    }
+
+    test('a smaller job after a larger one: same bytes, no growth', () {
+      final scratch = CityMeshScratch();
+      final libraries = CityBuildingLibraries();
+      final big = CityTileMesher.mesh(request(CityTier.near), libraries,
+              scratch: scratch)
+          .detached();
+      expect(big.groups, isNotEmpty);
+      final grown = scratch.vertexCapacity;
+      expect(grown, greaterThan(0));
+
+      final small = CityTileMesher.mesh(request(CityTier.far), libraries,
+          scratch: scratch);
+      expect(scratch.vertexCapacity, grown,
+          reason: 'the far tile fits what the near one grew');
+      expectSameGroups(
+          CityTileMesher.mesh(request(CityTier.far), CityBuildingLibraries()),
+          small);
+
+      // And the near tile again, from the same sinks.
+      final again = CityTileMesher.mesh(request(CityTier.near), libraries,
+          scratch: scratch);
+      expect(scratch.vertexCapacity, grown);
+      expectSameGroups(big, again);
+    });
+
+    test('the inline scheduler hands out results that alias nothing', () async {
+      final scheduler = SyncCityTileScheduler();
+      final first = scheduler.mesh(request(CityTier.near));
+      final second = scheduler.mesh(request(CityTier.far));
+      scheduler.pumpAll();
+      final a = await first, b = await second;
+      // The far tile was built into the sinks the near one's result was
+      // views over; the result the caller holds is a copy, and still the
+      // near tile.
+      expectSameGroups(
+          CityTileMesher.mesh(request(CityTier.near), CityBuildingLibraries()),
+          a);
+      expectSameGroups(
+          CityTileMesher.mesh(request(CityTier.far), CityBuildingLibraries()),
+          b);
+      scheduler.dispose();
+    });
   });
 }

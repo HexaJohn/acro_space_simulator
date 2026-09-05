@@ -34,6 +34,7 @@ import '../../../domain/architecture/building_generator.dart';
 import '../../../domain/colony/city/city_building_spec.dart';
 import '../../../domain/colony/city/parcel.dart';
 import '../../../domain/scatter/mesh_builder.dart';
+import '../../../domain/scatter/prop_mesh.dart';
 import '../../../domain/shared/quaternion.dart';
 import '../../../domain/shared/vector3.dart';
 import '../coord_convert.dart';
@@ -201,7 +202,9 @@ class CityTileRequest {
   final CityMeshKnobs knobs;
 }
 
-/// One material's merged geometry for a tile: one draw.
+/// One material's merged geometry for a tile, or one chunk of it: one
+/// draw, and one GPU buffer of at most [CityTileMesher.maxGroupBytes]
+/// (see [CityTileMesher.chunk]).
 class CityMeshGroup {
   const CityMeshGroup({
     required this.material,
@@ -221,13 +224,15 @@ class CityMeshGroup {
   int get vertexCount => positions.length ~/ 3;
   int get triangleCount => indices.length ~/ 3;
 
-  /// What the upload moves: every stream's bytes. The upload's byte-rate
-  /// estimate (see `CityNodes.uploadUsPerMB`) is measured against this.
+  /// What the group occupies on the GPU: every vertex at the engine's
+  /// [CityTileMesher.bytesPerVertex] — the colour stream it adds included,
+  /// which the four streams here do not carry — plus the indices. The
+  /// chunk cap is judged against this, and so is the reveal budget (see
+  /// `CityNodes.uploadBytesPerFrame`), so the two agree about what a
+  /// frame's worth of geometry is.
   int get bytes =>
-      positions.lengthInBytes +
-      normals.lengthInBytes +
-      texCoords.lengthInBytes +
-      indices.lengthInBytes;
+      vertexCount * CityTileMesher.bytesPerVertex +
+      indices.length * CityTileMesher.bytesPerIndex;
 }
 
 /// One archetype's instances in a tile: the key, a building that has it —
@@ -351,6 +356,15 @@ class CityTileResult {
       ),
       blob,
     );
+  }
+
+  /// A copy that aliases nothing: [pack]ed and [unpack]ed. A job's own
+  /// result is views over its scratch sinks (see [CityMeshScratch]), which
+  /// the next job on the same scheduler overwrites; the worker path detaches
+  /// by sending the blob, and the inline scheduler by this.
+  CityTileResult detached() {
+    final (layout, blob) = pack();
+    return unpack(layout, blob.buffer);
   }
 
   /// The inverse of [pack]: the result as views over [blob], no copies.
@@ -485,6 +499,61 @@ class CityBuildingLibraries {
   }
 }
 
+/// The merge sinks one side's tile builds share, job after job.
+///
+/// A tile build merges every builder of a material into one sink, and a
+/// near tile's are megabytes each. Allocated per job they went straight to
+/// the old generation (large typed lists never see the nursery), so a
+/// worker meshing a few tiles ran an old-space collection whose
+/// stop-the-world phases — the mark, the weak-handle sweep — paused every
+/// isolate of the group, the UI isolate included. Held here, one set per
+/// worker (or per inline scheduler), the sinks are grown to the largest
+/// tile once and [MergedMeshSink.reset] between jobs, and the per-tile
+/// garbage is the small stuff.
+///
+/// The price is that a job's result is VIEWS over these buffers, valid
+/// only until the next job claims them: every path that hands a result
+/// on copies it first ([CityTileResult.pack] on the worker,
+/// [CityTileResult.detached] inline). A [claim] by a new owner resets
+/// every sink, so a job that appended after another claimed would corrupt
+/// both; the schedulers run their jobs one at a time, which is the
+/// contract.
+class CityMeshScratch {
+  final Map<CityMaterialKind, MergedMeshSink> _plain = {};
+  final List<MergedMeshSink> _spare = [];
+  Object? _owner;
+
+  /// Make [owner]'s the sinks: the first claim by a new owner empties them.
+  void claim(Object owner) {
+    if (identical(_owner, owner)) return;
+    _owner = owner;
+    for (final sink in _plain.values) {
+      sink.reset();
+    }
+    for (final sink in _spare) {
+      sink.reset();
+    }
+  }
+
+  /// The sink for [kind]'s plain group — the one its skyline goes into.
+  MergedMeshSink plain(CityMaterialKind kind) =>
+      _plain.putIfAbsent(kind, () => MergedMeshSink());
+
+  /// The [i]th odd group's sink: a material whose shadow answer differs
+  /// from its plain group's (the elevated deck on a near tile).
+  MergedMeshSink spare(int i) {
+    while (_spare.length <= i) {
+      _spare.add(MergedMeshSink());
+    }
+    return _spare[i];
+  }
+
+  /// Vertex capacity over every sink, for the reuse test.
+  int get vertexCapacity =>
+      _plain.values.fold(0, (n, s) => n + s.vertexCapacity) +
+      _spare.fold(0, (n, s) => n + s.vertexCapacity);
+}
+
 /// The kinds of step a tile's meshing is made of. The inline scheduler
 /// books the last cost of each kind and will not start one that would not
 /// fit the frame's remaining budget.
@@ -518,13 +587,20 @@ class CityMeshStep {
 /// archetype cache was a hundred milliseconds; a twenty-mile city has a
 /// thousand such runs.
 class CityTileMeshJob {
-  CityTileMeshJob(this.request, this.libraries) {
+  CityTileMeshJob(this.request, this.libraries, {CityMeshScratch? scratch})
+      : _scratch = scratch ?? CityMeshScratch() {
     libraries.syncKnobs(request.knobs);
     _plan();
   }
 
   final CityTileRequest request;
   final CityBuildingLibraries libraries;
+
+  /// The merge sinks, shared with every other job on this side and claimed
+  /// on first touch — at the first step that appends, not at construction,
+  /// since an inline scheduler constructs a job while the one before it is
+  /// still running. The result aliases them (see [CityMeshScratch]).
+  final CityMeshScratch _scratch;
 
   /// The tile's members, rebuilt from the request's columns here — once
   /// per job, on whichever side meshes — so the emitters read the snapshot
@@ -544,12 +620,17 @@ class CityTileMeshJob {
   late int _carBudget = request.knobs.maxParkedCars;
 
   /// One merged sink per material: the skyline's block-tier buildings and
-  /// every builder of that material, one geometry and one draw each (see
-  /// [CityTileMesher.uploadGroups]).
-  final Map<CityMaterialKind, MergedMeshSink> _sinks = {};
+  /// every builder of that material, one geometry per chunk and one draw
+  /// each (see [CityTileMesher.uploadGroups], [CityTileMesher.chunk]).
+  MergedMeshSink _sinkFor(CityMaterialKind kind) {
+    _scratch.claim(this);
+    return _scratch.plain(kind);
+  }
 
-  MergedMeshSink _sinkFor(CityMaterialKind kind) =>
-      _sinks.putIfAbsent(kind, () => MergedMeshSink());
+  MergedMeshSink _spareSink(int i) {
+    _scratch.claim(this);
+    return _scratch.spare(i);
+  }
 
   /// The skyline: block-tier buildings baked straight into the facade and
   /// glazing sinks rather than instanced per archetype — see
@@ -672,16 +753,19 @@ class CityTileMeshJob {
     final tier = request.tier;
     // One step per group, so the inline scheduler can stop between them: a
     // downtown tile's facade group is most of its triangles.
+    var spares = 0;
     for (final entry in CityTileMesher.uploadGroups(sources, tier).entries) {
       final (kind, casts) = entry.key;
       final builders = entry.value;
       // A group with the material's own shadow answer merges into the
       // job's sink for it — where the block-tier skyline already is, on
       // facade and glazing. The odd group out (the elevated deck on a
-      // near tile) takes a sink of its own.
+      // near tile) takes a spare sink of its own, numbered at plan time
+      // so the same tile claims the same spare on every side.
       final plain = casts == CityTileMesher.castsShadowFor(tier, kind);
+      final spare = plain ? -1 : spares++;
       steps.add(CityMeshStep(CityMeshStepKind.merge, () {
-        final sink = plain ? _sinkFor(kind) : MergedMeshSink();
+        final sink = plain ? _sinkFor(kind) : _spareSink(spare);
         // The skyline's share of the sink, counted before the street's
         // builders join it: the panel's "skyline tris" means buildings.
         if (plain &&
@@ -691,15 +775,11 @@ class CityTileMeshJob {
         }
         CityTileMesher.mergeBuilders(builders, into: sink);
         if (sink.isEmpty) return;
-        final mesh = sink.build();
-        _merged.add(CityMeshGroup(
-          material: kind,
-          castsShadow: casts,
-          positions: mesh.positions,
-          normals: mesh.normals,
-          texCoords: mesh.texCoords,
-          indices: mesh.indices,
-        ));
+        // Cut to the chunk cap here, on the worker, so what the UI thread
+        // receives is already the buffers it will make, each small
+        // enough to reveal in a frame.
+        _merged.addAll(CityTileMesher.chunk(sink.build(),
+            material: kind, castsShadow: casts));
       }));
     }
   }
@@ -1164,10 +1244,110 @@ const int kLeafSwatch = 9;
 class CityTileMesher {
   CityTileMesher._();
 
-  /// Mesh one tile to completion, against [libraries].
+  /// Mesh one tile to completion, against [libraries] and, when given, the
+  /// caller's reusable [scratch] — in which case the result is views over
+  /// it, good until the next job claims it (see [CityMeshScratch]).
   static CityTileResult mesh(
-          CityTileRequest request, CityBuildingLibraries libraries) =>
-      CityTileMeshJob(request, libraries).runAll();
+          CityTileRequest request, CityBuildingLibraries libraries,
+          {CityMeshScratch? scratch}) =>
+      CityTileMeshJob(request, libraries, scratch: scratch).runAll();
+
+  /// What one vertex costs on the GPU: the engine's interleaved layout is
+  /// position (12 bytes), normal (12), texture coordinate (8) and a colour
+  /// it adds itself (four floats, 16) — 48 bytes — whether or not the mesh
+  /// brings a colour stream. The group's four arrays alone say 32, and
+  /// planning against that undercounted every chunk by a third.
+  static const int bytesPerVertex = 48;
+
+  /// An index as the mesher emits it. The engine packs a chunk's indices to
+  /// 16 bits where they fit, which they do under the cap, so this is the
+  /// upper bound.
+  static const int bytesPerIndex = 4;
+
+  /// Ceiling on one uploaded group's GPU bytes (see [chunk]).
+  ///
+  /// The GLES backend hands a buffer's WHOLE backing store to the driver at
+  /// the geometry's first draw, not as it is written: staging a
+  /// several-megabyte facade group a slice a frame spread the Dart-side
+  /// copies but left the raster thread 80 ms in the reactor on the frame
+  /// the group first drew, with the UI thread throttled behind it. A
+  /// megabyte is ~10 ms of that upload, one frame's worth under the reveal
+  /// budget, and a far tile stays one group per material.
+  static int maxGroupBytes = 1024 * 1024;
+
+  /// [mesh] as groups of at most [maxBytes] each — one where it fits, else
+  /// consecutive runs of its triangles, each with the vertex range those
+  /// triangles reach and its indices rebased to it. A triangle never
+  /// straddles two chunks; the chunks' triangles, in order, are the mesh's.
+  ///
+  /// A chunk's vertices are the contiguous range from the lowest index its
+  /// triangles use to the highest, not a remap: the builders emit each
+  /// primitive's vertices and then its triangles, and the skyline appends a
+  /// building's at a time, so the range is tight — and a range is three
+  /// views and a subtraction where a remap is a table and four copies.
+  /// Ranges of neighbouring chunks may overlap by a primitive's vertices,
+  /// which the cap accounts for. Only a single triangle whose own vertex
+  /// span is over the cap can make a chunk over it.
+  ///
+  /// The mesh's index stream is consumed: rebased IN PLACE, so every chunk
+  /// is views over the merged buffers and a worker allocates nothing per
+  /// tile beyond the packed blob it sends (see [CityMeshScratch]).
+  static List<CityMeshGroup> chunk(
+    PropMesh mesh, {
+    required CityMaterialKind material,
+    required bool castsShadow,
+    int? maxBytes,
+  }) {
+    final cap = maxBytes ?? maxGroupBytes;
+    final idx = mesh.indices;
+    final triangles = idx.length ~/ 3;
+    if (triangles == 0) return const [];
+    final out = <CityMeshGroup>[];
+    void emit(int fromTri, int toTri, int lo, int hi) {
+      final i0 = fromTri * 3, i1 = toTri * 3;
+      if (lo != 0) {
+        for (var i = i0; i < i1; i++) {
+          idx[i] -= lo;
+        }
+      }
+      final v1 = hi + 1;
+      out.add(CityMeshGroup(
+        material: material,
+        castsShadow: castsShadow,
+        positions: Float32List.sublistView(mesh.positions, lo * 3, v1 * 3),
+        normals: Float32List.sublistView(mesh.normals, lo * 3, v1 * 3),
+        texCoords: Float32List.sublistView(mesh.texCoords, lo * 2, v1 * 2),
+        indices: Uint32List.sublistView(idx, i0, i1),
+      ));
+    }
+
+    var start = 0, lo = 0, hi = 0;
+    for (var t = 0; t < triangles; t++) {
+      final a = idx[t * 3], b = idx[t * 3 + 1], c = idx[t * 3 + 2];
+      final tLo = math.min(a, math.min(b, c));
+      final tHi = math.max(a, math.max(b, c));
+      if (t == start) {
+        // A chunk's first triangle always joins it, whatever it costs.
+        lo = tLo;
+        hi = tHi;
+        continue;
+      }
+      final nLo = math.min(lo, tLo), nHi = math.max(hi, tHi);
+      final bytes = (nHi - nLo + 1) * bytesPerVertex +
+          (t + 1 - start) * 3 * bytesPerIndex;
+      if (bytes > cap) {
+        emit(start, t, lo, hi);
+        start = t;
+        lo = tLo;
+        hi = tHi;
+      } else {
+        lo = nLo;
+        hi = nHi;
+      }
+    }
+    emit(start, triangles, lo, hi);
+    return out;
+  }
 
   /// Curb reveal: how far the sidewalk stands above the carriageway. 150 mm
   /// is the real standard, and it is the "subtle elevation difference" that

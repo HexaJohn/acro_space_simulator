@@ -177,11 +177,18 @@ void _workerMain(SendPort ready) {
   // for the rest — the job re-syncs them against each request's knobs, so
   // a style switch on the UI thread rebuilds them here too.
   final libraries = CityBuildingLibraries();
+  // And its merge sinks, grown to the largest tile it has built and kept:
+  // a fresh set per job was megabytes promoted straight to old space every
+  // tile, and the old-generation collections that followed paused the UI
+  // isolate too (see [CityMeshScratch]). The result is views over them;
+  // the pack below is the one copy, and it is the blob that travels.
+  final scratch = CityMeshScratch();
 
   commands.listen((Object? msg) {
     if (msg is _MeshJob) {
       try {
-        final result = CityTileMesher.mesh(msg.request, libraries);
+        final result =
+            CityTileMesher.mesh(msg.request, libraries, scratch: scratch);
         final (layout, blob) = result.pack();
         ready.send(_MeshDone(
             msg.id, layout, TransferableTypedData.fromList([blob])));

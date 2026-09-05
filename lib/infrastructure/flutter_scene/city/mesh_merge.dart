@@ -37,6 +37,29 @@ class MergedMeshSink {
   int get triangleCount => _ind ~/ 3;
   bool get isEmpty => _ind == 0;
 
+  /// How many vertices and indices the buffers hold before they next grow.
+  /// A sink kept across tile builds settles at the largest tile it has
+  /// seen; the reuse test pins that a smaller job leaves these alone.
+  int get vertexCapacity => _pos.length ~/ 3;
+  int get indexCapacity => _idx.length;
+
+  /// Empty the sink for the next mesh WITHOUT shrinking it.
+  ///
+  /// A worker builds a tile into fresh sinks and a near tile's are
+  /// megabytes: typed lists that size allocate straight into the old
+  /// generation, so every few tiles the isolate group ran an old-space
+  /// collection whose stop-the-world phases paused the UI isolate too,
+  /// which shares the heap. Kept and reset, a sink's buffers are allocated
+  /// once per worker and grown to the largest tile; the per-tile garbage
+  /// is then the small objects the young generation clears for free.
+  /// Anything [build] handed out before this aliases the buffers and is
+  /// overwritten by the next append — copy it first (see
+  /// `CityTileResult.pack`).
+  void reset() {
+    _vtx = 0;
+    _ind = 0;
+  }
+
   /// Append [mesh] with every vertex taken through [transform]: positions by
   /// the full matrix, normals by its rotation and re-normalised, so a
   /// uniformly scaled transform (the metres-to-scene instance matrix) is
@@ -136,7 +159,8 @@ class MergedMeshSink {
       Float32List(length)..setRange(0, old.length, old);
 
   /// The merged mesh, as views over the sink's buffers: build once, at the
-  /// end, and do not append afterwards.
+  /// end, and do not append afterwards — nor [reset], which makes the views
+  /// the next mesh's scratch.
   PropMesh build() => PropMesh(
         positions: Float32List.sublistView(_pos, 0, _vtx * 3),
         normals: Float32List.sublistView(_nrm, 0, _vtx * 3),
