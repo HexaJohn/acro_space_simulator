@@ -127,8 +127,9 @@ void reportSpikes(List<Span> spans, int t0,
             s.name != 'Frame' &&
             s.ts < g.ts + g.dur &&
             s.ts + s.dur > g.ts &&
-            s.dur >= 500 &&
-            !s.cat.contains('Embedder'))
+            // Every thread, the raster thread included: a gap with no Dart
+            // span in it is the frame pipeline waiting on the GPU side.
+            s.dur >= 500)
         .toList()
       ..sort((a, b) => b.dur.compareTo(a.dur));
     final seen = <String>{};
