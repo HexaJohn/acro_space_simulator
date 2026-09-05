@@ -1,0 +1,145 @@
+import 'dart:math';
+import 'dart:typed_data';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter_scene/src/node.dart';
+import 'package:vector_math/vector_math.dart';
+import 'package:flutter_scene/src/gpu/gpu.dart' as gpu;
+
+int _getNextPowerOfTwoSize(int x) {
+  if (x == 0) {
+    return 1;
+  }
+
+  --x;
+
+  x |= x >> 1;
+  x |= x >> 2;
+  x |= x >> 4;
+  x |= x >> 8;
+  x |= x >> 16;
+
+  return x + 1;
+}
+
+/// A skeletal binding used by skinned meshes for animation.
+///
+/// A `Skin` pairs an ordered list of [joints] (scene-graph [Node]s acting as
+/// bones) with the [inverseBindMatrices] that transform a mesh from model
+/// space into each joint's rest-pose local space. The vertex shader
+/// combines these with the joints' current transforms to deform the mesh.
+///
+/// `Skin` instances are usually populated by an importer rather than
+/// constructed directly. They are attached to the mesh-bearing [Node] via
+/// [Node.skin].
+/// {@category Geometry}
+base class Skin {
+  /// The bone nodes referenced by this skin, in shader-binding order.
+  ///
+  /// Entries may be `null` when [Node.clone] is unable to relocate a joint
+  /// in the cloned subtree; the renderer treats null joints as identity
+  /// transforms.
+  final List<Node?> joints = [];
+
+  /// The inverse bind matrix for each joint, transforming a vertex from
+  /// model space into the joint's rest-pose local space.
+  ///
+  /// Parallel to [joints]: `inverseBindMatrices[i]` corresponds to
+  /// `joints[i]`.
+  final List<Matrix4> inverseBindMatrices = [];
+
+  /// Ring of joints textures reused across frames by [getJointsTexture].
+  ///
+  /// Each frame writes the next slot so the GPU is never handed a texture
+  /// it may still be sampling from a recent frame. The ring is allocated
+  /// lazily and dropped if the joint count (and therefore the texture
+  /// size) ever changes.
+  static const int _jointsTextureRingSize = 3;
+  final List<gpu.Texture?> _jointsTextureRing = List<gpu.Texture?>.filled(
+    _jointsTextureRingSize,
+    null,
+  );
+  int _jointsTextureRingCursor = 0;
+  int _jointsTextureDimension = 0;
+
+  /// Computes the joint matrices for the current frame and uploads them as
+  /// a square `RGBA32F` GPU texture.
+  ///
+  /// Each joint occupies four texels (one matrix). The texture's edge
+  /// length is rounded up to the next power of two to satisfy GPU sampling
+  /// requirements; unused slots are initialized to identity.
+  ///
+  /// The companion [getTextureWidth] returns the same edge length so the
+  /// vertex shader can index into the texture.
+  gpu.Texture getJointsTexture() {
+    // Each joint has a matrix. 1 matrix = 16 floats. 1 pixel = 4 floats.
+    // Therefore, each joint needs 4 pixels.
+    int requiredPixels = joints.length * 4;
+    int dimensionSize = max(
+      2,
+      _getNextPowerOfTwoSize(sqrt(requiredPixels).ceil()),
+    );
+
+    // Drop the ring if the texture size changed (joint count is fixed
+    // after construction, so this normally never triggers).
+    if (dimensionSize != _jointsTextureDimension) {
+      _jointsTextureRing.fillRange(0, _jointsTextureRing.length, null);
+      _jointsTextureDimension = dimensionSize;
+    }
+
+    // Advance to the next ring slot, allocating it on first use.
+    _jointsTextureRingCursor =
+        (_jointsTextureRingCursor + 1) % _jointsTextureRingSize;
+    final gpu.Texture texture = _jointsTextureRing[_jointsTextureRingCursor] ??=
+        gpu.gpuContext.createTexture(
+          gpu.StorageMode.hostVisible,
+          dimensionSize,
+          dimensionSize,
+          format: gpu.PixelFormat.r32g32b32a32Float,
+        );
+    // 64 bytes per matrix. 4 bytes per pixel.
+    Float32List jointMatrixFloats = Float32List(
+      dimensionSize * dimensionSize * 4,
+    );
+    // Initialize with identity matrices.
+    for (int i = 0; i < jointMatrixFloats.length; i += 16) {
+      jointMatrixFloats[i] = 1.0;
+      jointMatrixFloats[i + 5] = 1.0;
+      jointMatrixFloats[i + 10] = 1.0;
+      jointMatrixFloats[i + 15] = 1.0;
+    }
+
+    for (int jointIndex = 0; jointIndex < joints.length; jointIndex++) {
+      final Node? joint = joints[jointIndex];
+      // A null joint (Node.clone couldn't relocate it) keeps the
+      // pre-initialized identity slot.
+      if (joint == null) continue;
+
+      // glTF skinning: the joint matrix is the joint's full global
+      // transform times its inverse bind matrix. globalTransform walks
+      // every ancestor, so transforms on non-joint nodes between the
+      // joints and the scene root (e.g. a skeleton root carrying the
+      // model's Z-up-to-Y-up correction) are included, as is the
+      // scene-root flip. The inverse bind matrix takes a vertex from
+      // model space into the joint's rest-pose space; the global
+      // transform then places it by the joint's current pose.
+      //
+      // The shader applies this matrix directly, so the mesh node's own
+      // transform must not be applied again -- SkinnedGeometry.bind
+      // passes an identity model transform.
+      final Matrix4 matrix =
+          joint.globalTransform * inverseBindMatrices[jointIndex];
+      final floatOffset = jointIndex * 16;
+      jointMatrixFloats.setRange(floatOffset, floatOffset + 16, matrix.storage);
+    }
+
+    texture.overwrite(jointMatrixFloats.buffer.asByteData());
+    return texture;
+  }
+
+  /// The edge length, in texels, of the joints texture produced by
+  /// [getJointsTexture].
+  int getTextureWidth() {
+    return _getNextPowerOfTwoSize(sqrt(joints.length * 4).ceil());
+  }
+}

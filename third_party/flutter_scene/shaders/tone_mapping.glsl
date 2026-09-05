@@ -1,0 +1,64 @@
+// Tone mapping operators. Each maps a non-negative linear HDR color to a
+// display-referred [0, 1] color (still in linear Rec. 709; display encoding
+// is applied separately by the caller where needed).
+
+// ACES filmic approximation (Stephen Hill fit).
+// source:
+// https://github.com/selfshadow/ltc_code/blob/master/webgl/shaders/ltc/ltc_blit.fs
+vec3 RRTAndODTFit(vec3 v) {
+  vec3 a = v * (v + 0.0245786) - 0.000090537;
+  vec3 b = v * (0.983729 * v + 0.4329510) + 0.238081;
+  return a / b;
+}
+
+// source:
+// https://github.com/mrdoob/three.js/blob/364f90e7b0207564ab4e163daa968ce06af8ff99/src/renderers/shaders/ShaderChunk/tonemapping_pars_fragment.glsl.js#L34-L74
+vec3 ACESFilmicToneMapping(vec3 color, float exposure) {
+  // sRGB => XYZ => D65_2_D60 => AP1 => RRT_SAT
+  const mat3 ACESInputMat =
+      mat3(vec3(0.59719, 0.07600, 0.02840), // transposed from source
+           vec3(0.35458, 0.90834, 0.13383), //
+           vec3(0.04823, 0.01566, 0.83777));
+
+  // ODT_SAT => XYZ => D60_2_D65 => sRGB
+  const mat3 ACESOutputMat =
+      mat3(vec3(1.60475, -0.10208, -0.00327), // transposed from source
+           vec3(-0.53108, 1.10813, -0.07276), //
+           vec3(-0.07367, -0.00605, 1.07602));
+
+  // The 1/0.6 brings the ACES "reference white" up to sane display levels.
+  color *= exposure / 0.6;
+  color = ACESInputMat * color;
+  color = RRTAndODTFit(color);
+  color = ACESOutputMat * color;
+  return clamp(color, 0.0, 1.0);
+}
+
+// Khronos PBR Neutral tone mapper. Designed for product/e-commerce
+// rendering: preserves base-color hue and saturation, only rolling off
+// the highlights, so albedo colors stay true under bright light.
+// source:
+// https://github.com/KhronosGroup/ToneMapping/blob/main/PBR_Neutral/pbrNeutral.glsl
+vec3 PBRNeutralToneMapping(vec3 color) {
+  const float kStartCompression = 0.8 - 0.04;
+  const float kDesaturation = 0.15;
+
+  float x = min(color.r, min(color.g, color.b));
+  float offset = x < 0.08 ? x - 6.25 * x * x : 0.04;
+  color -= offset;
+
+  float peak = max(color.r, max(color.g, color.b));
+  if (peak < kStartCompression) {
+    return color;
+  }
+
+  const float d = 1.0 - kStartCompression;
+  float new_peak = 1.0 - d * d / (peak + d - kStartCompression);
+  color *= new_peak / peak;
+
+  float g = 1.0 - 1.0 / (kDesaturation * (peak - new_peak) + 1.0);
+  return mix(color, new_peak * vec3(1.0), g);
+}
+
+// Reinhard tone mapping: c / (1 + c). Cheap, desaturates highlights.
+vec3 ReinhardToneMapping(vec3 color) { return color / (1.0 + color); }

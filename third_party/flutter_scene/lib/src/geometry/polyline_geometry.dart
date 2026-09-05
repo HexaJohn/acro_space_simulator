@@ -1,0 +1,642 @@
+import 'dart:math' as math;
+import 'dart:typed_data';
+import 'dart:ui' as ui;
+
+import 'package:vector_math/vector_math.dart';
+
+import 'package:flutter_scene/src/camera.dart';
+import 'package:flutter_scene/src/geometry/mesh_geometry.dart';
+
+/// How a [PolylineGeometry]'s width is measured.
+/// {@category Geometry}
+enum PolylineWidthMode {
+  /// The width is a constant number of screen pixels at every distance,
+  /// so a route line keeps the same on-screen thickness as the camera
+  /// zooms.
+  screenPixels,
+
+  /// The width is a fixed distance in scene units, so the line looks
+  /// thinner the further it is from the camera.
+  worldUnits,
+}
+
+/// How a [PolylineGeometry] finishes its two end points.
+/// {@category Geometry}
+enum PolylineCap {
+  /// The strip ends flat at the end point.
+  butt,
+
+  /// A half-disk rounds the end off to the line's half-width.
+  round,
+}
+
+/// A repeating dash-and-gap pattern for a [PolylineGeometry], measured
+/// in scene units along the line's arc length.
+/// {@category Geometry}
+class DashPattern {
+  /// Creates a dash pattern; both lengths must be positive.
+  const DashPattern({
+    required this.dashLength,
+    required this.gapLength,
+    this.cap = PolylineCap.butt,
+  }) : assert(dashLength > 0, 'dashLength must be positive'),
+       assert(gapLength > 0, 'gapLength must be positive');
+
+  /// The drawn length of each dash.
+  final double dashLength;
+
+  /// The undrawn length between dashes.
+  final double gapLength;
+
+  /// How each dash's two ends are finished. [PolylineCap.round] caps
+  /// every dash with a camera-facing disk; the default is flat ends.
+  final PolylineCap cap;
+}
+
+// Triangle-fan segments in a round cap disk.
+const int _diskSegments = 16;
+
+/// A thick, camera-facing line through a list of points.
+///
+/// `PolylineGeometry` builds a triangle strip that always faces the
+/// camera, which suits navigation routes and other overlay lines. The
+/// strip is regenerated for the current view by [updateForCamera], which
+/// should be called every frame before rendering.
+///
+/// The result is an ordinary triangle mesh: pair it with any material,
+/// and use [perVertexColor] for gradient or distance-fade effects.
+///
+/// [PolylineCap.round] adds a camera-facing disk at each end point,
+/// [drawStart]/[drawEnd] trim the line or animate it drawing on, and a
+/// [DashPattern] breaks it into dashes, which its own cap can round.
+/// Corners use an averaged
+/// direction, which stays smooth on a finely sampled curve but can
+/// pinch on a very sharp turn. Rounded corner joins and a GPU
+/// vertex-shader expansion that avoids the per-frame rebuild are
+/// planned follow-ups.
+/// {@category Geometry}
+class PolylineGeometry extends MeshGeometry {
+  /// Creates a polyline through [points] (at least two).
+  ///
+  /// [width] is measured per [widthMode]. [perVertexWidth] overrides it
+  /// per point for tapering, and [perVertexColor] sets a color per
+  /// point for gradients. [cap] selects rounded or flat ends, and
+  /// [dash] breaks the line into dashes. The strip is a placeholder
+  /// until the first [updateForCamera] call.
+  factory PolylineGeometry(
+    List<Vector3> points, {
+    double width = 8.0,
+    PolylineWidthMode widthMode = PolylineWidthMode.screenPixels,
+    PolylineCap cap = PolylineCap.butt,
+    DashPattern? dash,
+    List<double>? perVertexWidth,
+    List<Vector4>? perVertexColor,
+  }) {
+    if (points.length < 2) {
+      throw ArgumentError('A polyline needs at least two points');
+    }
+    final inputCount = points.length;
+    if (perVertexWidth != null && perVertexWidth.length != inputCount) {
+      throw ArgumentError('perVertexWidth must have one entry per point');
+    }
+    if (perVertexColor != null && perVertexColor.length != inputCount) {
+      throw ArgumentError('perVertexColor must have one entry per point');
+    }
+    var working = <Vector3>[for (final p in points) p.clone()];
+    var workingWidths = perVertexWidth != null
+        ? List<double>.of(perVertexWidth)
+        : List<double>.filled(inputCount, width);
+    var workingColors = <Vector4>[
+      for (var i = 0; i < inputCount; i++)
+        perVertexColor?[i] ?? Vector4(1.0, 1.0, 1.0, 1.0),
+    ];
+
+    // Dashes resample the line into dash segments joined by zero-width
+    // gap points, so the gap regions draw nothing.
+    var dashCapIndices = const <int>[];
+    if (dash != null) {
+      final dashed = resampleDashed(
+        working,
+        workingWidths,
+        workingColors,
+        dash,
+      );
+      working = dashed.points;
+      workingWidths = dashed.widths;
+      workingColors = dashed.colors;
+      dashCapIndices = dashed.dashCapIndices;
+    }
+
+    final copied = working;
+    final widths = workingWidths;
+    final count = copied.length;
+
+    // Cumulative arc length at each point, for the texture v coordinate.
+    final distances = List<double>.filled(count, 0.0);
+    for (var i = 1; i < count; i++) {
+      distances[i] = distances[i - 1] + copied[i].distanceTo(copied[i - 1]);
+    }
+    Vector4 colorOf(int i) => workingColors[i];
+
+    // Texture coordinates and colors do not depend on the camera, so
+    // they are set once here. The placeholder positions collapse the
+    // strip onto the points until updateForCamera runs.
+    //
+    // Round dash caps put a disk at every dash boundary; otherwise the
+    // disks are just the line's two round ends.
+    final diskPoints = (dash != null && dash.cap == PolylineCap.round)
+        ? dashCapIndices
+        : diskPointIndices(count, cap);
+    final stripVertexCount = count * 2;
+    final vertexCount =
+        stripVertexCount + diskPoints.length * (_diskSegments + 1);
+    final positions = Float32List(vertexCount * 3);
+    final normals = Float32List(vertexCount * 3);
+    final texCoords = Float32List(vertexCount * 2);
+    final colors = Float32List(vertexCount * 4);
+
+    void writeVertex(int v, Vector3 at, double u, double texV, Vector4 color) {
+      positions[v * 3] = at.x;
+      positions[v * 3 + 1] = at.y;
+      positions[v * 3 + 2] = at.z;
+      normals[v * 3 + 2] = 1.0;
+      texCoords[v * 2] = u;
+      texCoords[v * 2 + 1] = texV;
+      colors[v * 4] = color.x;
+      colors[v * 4 + 1] = color.y;
+      colors[v * 4 + 2] = color.z;
+      colors[v * 4 + 3] = color.w;
+    }
+
+    final indices = <int>[];
+
+    // The strip: two vertices per point.
+    for (var i = 0; i < count; i++) {
+      final color = colorOf(i);
+      writeVertex(i * 2, copied[i], 0.0, distances[i], color);
+      writeVertex(i * 2 + 1, copied[i], 1.0, distances[i], color);
+    }
+    for (var i = 0; i < count - 1; i++) {
+      final a = i * 2;
+      indices
+        ..addAll([a, a + 2, a + 1])
+        ..addAll([a + 1, a + 2, a + 3]);
+    }
+
+    // A triangle-fan disk for each round cap.
+    for (var ord = 0; ord < diskPoints.length; ord++) {
+      final point = diskPoints[ord];
+      final base = stripVertexCount + ord * (_diskSegments + 1);
+      final color = colorOf(point);
+      for (var k = 0; k <= _diskSegments; k++) {
+        writeVertex(base + k, copied[point], 0.5, distances[point], color);
+      }
+      for (var k = 0; k < _diskSegments; k++) {
+        final next = (k + 1) % _diskSegments;
+        indices.addAll([base, base + 1 + next, base + 1 + k]);
+      }
+    }
+
+    return PolylineGeometry._(
+      copied,
+      widths,
+      widthMode,
+      diskPoints,
+      positions: positions,
+      normals: normals,
+      texCoords: texCoords,
+      colors: colors,
+      indices: indices,
+    );
+  }
+
+  PolylineGeometry._(
+    this._points,
+    this._widths,
+    this._widthMode,
+    this._diskPoints, {
+    required super.positions,
+    required super.normals,
+    required super.texCoords,
+    required super.colors,
+    required super.indices,
+  }) : super.fromArrays(storage: GeometryStorage.updatable);
+
+  final List<Vector3> _points;
+  final List<double> _widths;
+  final PolylineWidthMode _widthMode;
+  // The point indices that receive a round cap disk: the line's round
+  // ends, or every dash boundary when the dash pattern is round-capped.
+  final List<int> _diskPoints;
+
+  /// The fraction of the line, by arc length, where the visible range
+  /// begins. With [drawEnd] this trims the line or animates it drawing
+  /// on. Clamped to `0..1`; the default is `0`.
+  double drawStart = 0.0;
+
+  /// The fraction of the line, by arc length, where the visible range
+  /// ends. See [drawStart]. The default is `1`.
+  double drawEnd = 1.0;
+
+  /// Rebuilds the camera-facing strip for [camera] and [viewportSize].
+  ///
+  /// Call once per frame before rendering. Reuses the GPU buffers.
+  void updateForCamera(Camera camera, ui.Size viewportSize) {
+    final expanded = expandPolyline(
+      _points,
+      widths: _widths,
+      widthMode: _widthMode,
+      diskPoints: _diskPoints,
+      drawStart: drawStart,
+      drawEnd: drawEnd,
+      viewProjection: camera.getViewTransform(viewportSize),
+      cameraPosition: camera.position,
+      viewportSize: viewportSize,
+    );
+    updatePositions(expanded.positions);
+    updateNormals(expanded.normals);
+  }
+}
+
+/// The polyline point indices that receive a round cap disk: the two
+/// end points when [cap] is [PolylineCap.round], otherwise none.
+List<int> diskPointIndices(int count, PolylineCap cap) {
+  if (cap == PolylineCap.round) {
+    return <int>[0, count - 1];
+  }
+  return const <int>[];
+}
+
+/// Expands [points] into a camera-facing triangle strip's vertex
+/// positions and normals, including round cap disks.
+///
+/// [drawStart] and [drawEnd] (fractions `0..1` of the arc length) trim
+/// the visible range: points outside it collapse onto the range
+/// boundary with zero width.
+///
+/// [diskPoints] lists the point indices that receive a round cap disk.
+///
+/// Pure: it takes the view-projection matrix rather than touching the
+/// GPU, so it can be exercised without a render context. The strip is
+/// two vertices per point; each round cap adds a disk of `1 + 16`
+/// vertices.
+({Float32List positions, Float32List normals}) expandPolyline(
+  List<Vector3> points, {
+  required List<double> widths,
+  required PolylineWidthMode widthMode,
+  required List<int> diskPoints,
+  required double drawStart,
+  required double drawEnd,
+  required Matrix4 viewProjection,
+  required Vector3 cameraPosition,
+  required ui.Size viewportSize,
+}) {
+  final count = points.length;
+  final (drawnPoints, drawnWidths) = _applyDrawRange(
+    points,
+    widths,
+    drawStart,
+    drawEnd,
+  );
+  final tangents = _pointTangents(drawnPoints);
+  final viewDirections = <Vector3>[
+    for (final p in drawnPoints) _towardCamera(cameraPosition, p),
+  ];
+
+  // Strip edge vertices, computed per point.
+  final left = List<Vector3>.filled(count, Vector3.zero());
+  final right = List<Vector3>.filled(count, Vector3.zero());
+
+  if (widthMode == PolylineWidthMode.worldUnits) {
+    for (var i = 0; i < count; i++) {
+      var across = tangents[i].cross(viewDirections[i]);
+      if (across.length2 < 1e-12) across = _anyPerpendicular(tangents[i]);
+      across = across.normalized() * (drawnWidths[i] / 2.0);
+      left[i] = drawnPoints[i] - across;
+      right[i] = drawnPoints[i] + across;
+    }
+  } else {
+    final inverse = Matrix4.inverted(viewProjection);
+    final clip = <Vector4>[
+      for (final p in drawnPoints)
+        viewProjection.transformed(Vector4(p.x, p.y, p.z, 1.0)),
+    ];
+    final width = viewportSize.width;
+    final height = viewportSize.height;
+    for (var i = 0; i < count; i++) {
+      final here = clip[i];
+      final w = here.w.abs() < 1e-6 ? 1e-6 : here.w;
+      final previous = clip[i == 0 ? 0 : i - 1];
+      final next = clip[i == count - 1 ? count - 1 : i + 1];
+      // Screen-space direction between the neighbors.
+      var screenX = (_ndcX(next) - _ndcX(previous)) * width;
+      var screenY = -(_ndcY(next) - _ndcY(previous)) * height;
+      var length = math.sqrt(screenX * screenX + screenY * screenY);
+      if (length < 1e-9) {
+        screenX = 1.0;
+        screenY = 0.0;
+        length = 1.0;
+      }
+      screenX /= length;
+      screenY /= length;
+      // Perpendicular, offset by half the pixel width, expressed in NDC.
+      final half = drawnWidths[i] / 2.0;
+      final ndcOffsetX = -screenY * half * 2.0 / width;
+      final ndcOffsetY = -screenX * half * 2.0 / height;
+      left[i] = _unproject(
+        inverse,
+        here.x + ndcOffsetX * w,
+        here.y + ndcOffsetY * w,
+        here.z,
+        w,
+      );
+      right[i] = _unproject(
+        inverse,
+        here.x - ndcOffsetX * w,
+        here.y - ndcOffsetY * w,
+        here.z,
+        w,
+      );
+    }
+  }
+
+  final vertexCount = count * 2 + diskPoints.length * (_diskSegments + 1);
+  final positions = Float32List(vertexCount * 3);
+  final normals = Float32List(vertexCount * 3);
+
+  for (var i = 0; i < count; i++) {
+    _writePair(positions, normals, i, left[i], right[i], viewDirections[i]);
+  }
+
+  var base = count * 2;
+  for (final point in diskPoints) {
+    // The strip half-width at the point, recovered from its two edges,
+    // works for both world and screen modes. It is zero for a point
+    // collapsed by the draw range, hiding that cap.
+    final radius = (left[point] - right[point]).length / 2.0;
+    base = _emitDisk(
+      positions,
+      normals,
+      base,
+      drawnPoints[point],
+      viewDirections[point],
+      radius,
+    );
+  }
+  return (positions: positions, normals: normals);
+}
+
+double _clamp01(double v) => v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v);
+
+// Trims the polyline to the [drawStart, drawEnd] arc-length range.
+// Points outside the range collapse onto the boundary position with
+// zero width, so the strip there is degenerate and draws nothing.
+(List<Vector3>, List<double>) _applyDrawRange(
+  List<Vector3> points,
+  List<double> widths,
+  double drawStart,
+  double drawEnd,
+) {
+  final start = _clamp01(drawStart);
+  final end = _clamp01(drawEnd);
+  if (start <= 0.0 && end >= 1.0) return (points, widths);
+
+  final count = points.length;
+  final arc = List<double>.filled(count, 0.0);
+  for (var i = 1; i < count; i++) {
+    arc[i] = arc[i - 1] + points[i].distanceTo(points[i - 1]);
+  }
+  final total = arc[count - 1];
+  if (total <= 0.0) return (points, widths);
+
+  final startPosition = _pointAtArc(points, arc, start * total);
+  final endPosition = _pointAtArc(points, arc, end * total);
+  final drawnPoints = <Vector3>[];
+  final drawnWidths = <double>[];
+  for (var i = 0; i < count; i++) {
+    final fraction = arc[i] / total;
+    if (fraction < start) {
+      drawnPoints.add(startPosition);
+      drawnWidths.add(0.0);
+    } else if (fraction > end) {
+      drawnPoints.add(endPosition);
+      drawnWidths.add(0.0);
+    } else {
+      drawnPoints.add(points[i]);
+      drawnWidths.add(widths[i]);
+    }
+  }
+  return (drawnPoints, drawnWidths);
+}
+
+// The point at arc-length distance [target] along the polyline.
+Vector3 _pointAtArc(List<Vector3> points, List<double> arc, double target) {
+  final clamped = target < 0.0 ? 0.0 : (target > arc.last ? arc.last : target);
+  var hi = 1;
+  while (hi < arc.length - 1 && arc[hi] < clamped) {
+    hi++;
+  }
+  final lo = hi - 1;
+  final span = arc[hi] - arc[lo];
+  final local = span > 1e-12 ? (clamped - arc[lo]) / span : 0.0;
+  return points[lo] + (points[hi] - points[lo]) * local;
+}
+
+/// Resamples a polyline into dash segments per [dash].
+///
+/// Each dash starts and ends with a full-width point at the exact dash
+/// boundary; consecutive dashes are joined by zero-width gap points so
+/// the gap draws nothing. The overall line keeps its two end points, so
+/// round caps still apply to them. `dashCapIndices` lists the resampled
+/// indices of every dash boundary, for per-dash round caps.
+({
+  List<Vector3> points,
+  List<double> widths,
+  List<Vector4> colors,
+  List<int> dashCapIndices,
+})
+resampleDashed(
+  List<Vector3> points,
+  List<double> widths,
+  List<Vector4> colors,
+  DashPattern dash,
+) {
+  final count = points.length;
+  final arc = List<double>.filled(count, 0.0);
+  for (var i = 1; i < count; i++) {
+    arc[i] = arc[i - 1] + points[i].distanceTo(points[i - 1]);
+  }
+  final total = arc[count - 1];
+  if (total <= 0.0) {
+    return (
+      points: points,
+      widths: widths,
+      colors: colors,
+      dashCapIndices: const <int>[],
+    );
+  }
+
+  // Position, width, and color at an arc-length distance.
+  (Vector3, double, Vector4) sampleAt(double distance) {
+    final target = distance < 0.0 ? 0.0 : (distance > total ? total : distance);
+    var hi = 1;
+    while (hi < count - 1 && arc[hi] < target) {
+      hi++;
+    }
+    final lo = hi - 1;
+    final span = arc[hi] - arc[lo];
+    final local = span > 1e-12 ? (target - arc[lo]) / span : 0.0;
+    return (
+      points[lo] + (points[hi] - points[lo]) * local,
+      widths[lo] + (widths[hi] - widths[lo]) * local,
+      colors[lo] + (colors[hi] - colors[lo]) * local,
+    );
+  }
+
+  final period = dash.dashLength + dash.gapLength;
+  final dashes = <(double, double)>[];
+  for (var k = 0; k * period < total; k++) {
+    final a = k * period;
+    dashes.add((a, math.min(a + dash.dashLength, total)));
+  }
+
+  final outPoints = <Vector3>[];
+  final outWidths = <double>[];
+  final outColors = <Vector4>[];
+  final dashCapIndices = <int>[];
+  void emit(Vector3 p, double w, Vector4 c) {
+    outPoints.add(p);
+    outWidths.add(w);
+    outColors.add(c);
+  }
+
+  for (var k = 0; k < dashes.length; k++) {
+    final (a, b) = dashes[k];
+    final (startPos, startWidth, startColor) = sampleAt(a);
+    final (endPos, endWidth, endColor) = sampleAt(b);
+    // A zero-width gap connector before every dash but the first.
+    if (k > 0) emit(startPos, 0.0, startColor);
+    emit(startPos, startWidth, startColor);
+    dashCapIndices.add(outPoints.length - 1);
+    for (var i = 0; i < count; i++) {
+      if (arc[i] > a && arc[i] < b) emit(points[i], widths[i], colors[i]);
+    }
+    emit(endPos, endWidth, endColor);
+    dashCapIndices.add(outPoints.length - 1);
+    // A zero-width gap connector after every dash but the last.
+    if (k < dashes.length - 1) emit(endPos, 0.0, endColor);
+  }
+
+  if (outPoints.length < 2) {
+    return (
+      points: points,
+      widths: widths,
+      colors: colors,
+      dashCapIndices: const <int>[],
+    );
+  }
+  return (
+    points: outPoints,
+    widths: outWidths,
+    colors: outColors,
+    dashCapIndices: dashCapIndices,
+  );
+}
+
+List<Vector3> _pointTangents(List<Vector3> points) {
+  final count = points.length;
+  return <Vector3>[
+    for (var i = 0; i < count; i++)
+      () {
+        final Vector3 delta;
+        if (i == 0) {
+          delta = points[1] - points[0];
+        } else if (i == count - 1) {
+          delta = points[count - 1] - points[count - 2];
+        } else {
+          delta = points[i + 1] - points[i - 1];
+        }
+        return delta.length2 < 1e-12
+            ? Vector3(1.0, 0.0, 0.0)
+            : delta.normalized();
+      }(),
+  ];
+}
+
+// Emits a camera-facing disk: a center vertex and a ring, fanned into
+// triangles. The disk is nudged slightly toward the camera so it draws
+// over the strip rather than z-fighting with it.
+int _emitDisk(
+  Float32List positions,
+  Float32List normals,
+  int base,
+  Vector3 center,
+  Vector3 viewDirection,
+  double radius,
+) {
+  final faceCenter = center + viewDirection * (radius * 0.1);
+  final u = _anyPerpendicular(viewDirection);
+  final v = viewDirection.cross(u);
+  _writeVertex(positions, normals, base, faceCenter, viewDirection);
+  for (var k = 0; k < _diskSegments; k++) {
+    final angle = 2.0 * math.pi * k / _diskSegments;
+    final rim =
+        faceCenter +
+        u * (radius * math.cos(angle)) +
+        v * (radius * math.sin(angle));
+    _writeVertex(positions, normals, base + 1 + k, rim, viewDirection);
+  }
+  return base + 1 + _diskSegments;
+}
+
+double _ndcX(Vector4 clip) => clip.x / (clip.w.abs() < 1e-6 ? 1e-6 : clip.w);
+
+double _ndcY(Vector4 clip) => clip.y / (clip.w.abs() < 1e-6 ? 1e-6 : clip.w);
+
+Vector3 _unproject(Matrix4 inverse, double x, double y, double z, double w) {
+  final world = inverse.transformed(Vector4(x, y, z, w));
+  final iw = world.w.abs() < 1e-9 ? 1e-9 : world.w;
+  return Vector3(world.x / iw, world.y / iw, world.z / iw);
+}
+
+Vector3 _towardCamera(Vector3 cameraPosition, Vector3 point) {
+  final direction = cameraPosition - point;
+  return direction.length2 < 1e-12
+      ? Vector3(0.0, 0.0, 1.0)
+      : direction.normalized();
+}
+
+Vector3 _anyPerpendicular(Vector3 direction) {
+  final reference = direction.x.abs() < 0.9
+      ? Vector3(1.0, 0.0, 0.0)
+      : Vector3(0.0, 1.0, 0.0);
+  return direction.cross(reference).normalized();
+}
+
+void _writeVertex(
+  Float32List positions,
+  Float32List normals,
+  int vertex,
+  Vector3 position,
+  Vector3 normal,
+) {
+  final base = vertex * 3;
+  positions[base] = position.x;
+  positions[base + 1] = position.y;
+  positions[base + 2] = position.z;
+  normals[base] = normal.x;
+  normals[base + 1] = normal.y;
+  normals[base + 2] = normal.z;
+}
+
+void _writePair(
+  Float32List positions,
+  Float32List normals,
+  int point,
+  Vector3 left,
+  Vector3 right,
+  Vector3 normal,
+) {
+  _writeVertex(positions, normals, point * 2, left, normal);
+  _writeVertex(positions, normals, point * 2 + 1, right, normal);
+}

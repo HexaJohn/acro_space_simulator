@@ -1,0 +1,65 @@
+name: flutter_scene
+description: A flexible realtime 3D engine for Flutter games and apps, with glTF models, physics, skeletal animation, and PBR lighting.
+version: 0.18.1
+repository: https://github.com/bdero/flutter_scene
+homepage: https://github.com/bdero/flutter_scene
+topics:
+  - graphics
+  - gltf
+  - game
+  - physics
+  - animation
+platforms:
+  macos:
+  ios:
+  android:
+  windows:
+  linux:
+  web:
+
+environment:
+  sdk: ^3.10.0
+  # Pinned to the latest stable so pub.dev (which analyzes on stable) can
+  # resolve and score the package. The real requirement is newer, a Flutter
+  # master build from 2026-06-09 or later (render-to-mip-level GPU support,
+  # flutter/flutter#187685). See the README and the version-pinning note.
+  flutter: ">=3.44.0"
+
+dependencies:
+  # Offline glTF -> .model import (build hook + CLI): arg parsing and image
+  # decoding. Build/offline-time only; tree-shaken from runtime builds.
+  args: ^2.5.0
+  collection: ^1.19.0
+  data_assets: ^0.20.0
+  # Reader for the bundled GPU shim's shader-bundle flatbuffer.
+  flat_buffers: ^25.9.23
+  flutter:
+    sdk: flutter
+  # Native-only: the bundled GPU shim re-exports flutter_gpu on native and
+  # falls back to a WebGL2 backend on web.
+  flutter_gpu:
+    sdk: flutter
+  # 0.4.5 includes the DataAssets shader-bundle mode used by the new
+  # zero-manifest .fmat workflow.
+  flutter_gpu_shaders: ^0.5.1
+  hooks: ^2.0.0
+  image: ^4.5.0
+  logging: ^1.2.0
+  vector_math: ^2.1.4
+  # WebGL2 bindings for the web GPU backend.
+  web: ^1.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  test: ^1.25.15
+
+flutter:
+  assets:
+    - build/shaderbundles/base.shaderbundle
+    # Split-sum DFG lookup for specular IBL.
+    - assets/ibl_brdf_lut.png
+    # A bundled sample environment, loadable via EnvironmentMap.fromAssets.
+    # (The zero-config default is the procedural EnvironmentMap.studio().)
+    - assets/royal_esplanade.png

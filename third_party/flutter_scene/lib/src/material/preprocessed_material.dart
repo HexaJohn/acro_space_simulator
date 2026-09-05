@@ -1,0 +1,126 @@
+import 'dart:typed_data';
+
+import 'package:flutter_scene/src/fmat/fmat_ast.dart';
+import 'package:flutter_scene/src/gpu/gpu.dart' as gpu;
+import 'package:flutter_scene/src/hot_reload/hot_reloadable_fmat.dart';
+import 'package:flutter_scene/src/light.dart';
+import 'package:flutter_scene/src/material/engine_lighting.dart';
+import 'package:flutter_scene/src/material/environment.dart';
+import 'package:flutter_scene/src/material/material.dart';
+import 'package:flutter_scene/src/material/material_parameters.dart';
+
+/// A material driven by a `.fmat` custom-material shader and its sidecar
+/// metadata (produced at build time by `buildMaterials`).
+///
+/// Construct one from a shader bundle entry and its metadata, then set
+/// parameters by name through [parameters]:
+///
+/// ```dart
+/// final library = (await gpu.loadShaderLibraryAsync('build/shaderbundles/materials.shaderbundle'))!;
+/// final metadata = jsonDecode(await rootBundle.loadString(
+///     'build/shaderbundles/materials.fmat.json')) as Map<String, Object?>;
+/// final toon = PreprocessedMaterial(
+///   fragmentShader: library['Toon']!,
+///   metadata: (metadata['Toon'] as Map).cast<String, Object?>(),
+/// )..parameters.setColor('base_color', const Color(0xff8844ff));
+/// ```
+///
+/// A `lit` material is lit by the engine's physically based pipeline (the
+/// shader's `Surface()` fills the surface description); an `unlit` material
+/// outputs its `base_color` directly. The render state (blending, culling)
+/// comes from the material's metadata.
+/// {@category Materials}
+class PreprocessedMaterial extends Material implements HotReloadableFmat {
+  PreprocessedMaterial({
+    required gpu.Shader fragmentShader,
+    required Map<String, Object?> metadata,
+  }) : _shadingModel = _parseShadingModel(metadata['shading_model']),
+       _blending = _parseBlending(metadata['blending']),
+       _culling = _parseCulling(metadata['culling']),
+       parameters = MaterialParameters.fromMetadata(fragmentShader, metadata) {
+    setFragmentShader(fragmentShader);
+  }
+
+  /// The material's parameters, set by name. See [MaterialParameters].
+  final MaterialParameters parameters;
+
+  /// Whether the engine runs its lighting ([FmatShadingModel.lit]) or the
+  /// shader's color is output directly ([FmatShadingModel.unlit]).
+  FmatShadingModel get shadingModel => _shadingModel;
+
+  FmatShadingModel _shadingModel;
+  FmatBlending _blending;
+  FmatCulling _culling;
+
+  /// Re-reads the render state and parameters from a regenerated [fragmentShader]
+  /// and sidecar [metadata] (a hot-reloaded `.fmat`), in place.
+  ///
+  /// Updates culling, blending, shading model, and the parameter layout without
+  /// replacing the material instance, so every primitive already using it picks
+  /// up the change. Explicitly-set parameter values are preserved; see
+  /// [MaterialParameters.updateFromMetadata].
+  @override
+  void updateFromMetadata(
+    gpu.Shader fragmentShader,
+    Map<String, Object?> metadata,
+  ) {
+    _shadingModel = _parseShadingModel(metadata['shading_model']);
+    _blending = _parseBlending(metadata['blending']);
+    _culling = _parseCulling(metadata['culling']);
+    setFragmentShader(fragmentShader);
+    parameters.updateFromMetadata(fragmentShader, metadata);
+  }
+
+  /// Per-material image-based-lighting environment, overriding the scene-wide
+  /// environment when set. Only used for [FmatShadingModel.lit] materials.
+  EnvironmentMap? environment;
+
+  @override
+  void bind(
+    gpu.RenderPass pass,
+    gpu.HostBuffer transientsBuffer,
+    Lighting lighting,
+  ) {
+    pass.setCullMode(_cullMode(_culling));
+    pass.setWindingOrder(gpu.WindingOrder.counterClockwise);
+
+    if (shadingModel == FmatShadingModel.lit) {
+      final env = environment ?? lighting.environmentMap;
+      final fragInfo = Float32List(EngineLightingUniforms.fragInfoFloatCount);
+      EngineLightingUniforms.packInto(fragInfo, lighting, env);
+      pass.bindUniform(
+        fragmentShader.getUniformSlot('FragInfo'),
+        transientsBuffer.emplace(ByteData.sublistView(fragInfo)),
+      );
+      EngineLightingUniforms.bindEngineTextures(
+        pass,
+        fragmentShader,
+        lighting,
+        env,
+      );
+    }
+
+    parameters.bind(pass, fragmentShader, transientsBuffer);
+  }
+
+  @override
+  bool isOpaque() => _blending == FmatBlending.opaque;
+}
+
+gpu.CullMode _cullMode(FmatCulling culling) => switch (culling) {
+  FmatCulling.back => gpu.CullMode.backFace,
+  FmatCulling.front => gpu.CullMode.frontFace,
+  FmatCulling.none => gpu.CullMode.none,
+};
+
+FmatShadingModel _parseShadingModel(Object? value) =>
+    value == 'unlit' ? FmatShadingModel.unlit : FmatShadingModel.lit;
+
+FmatBlending _parseBlending(Object? value) =>
+    value == 'alpha' ? FmatBlending.alpha : FmatBlending.opaque;
+
+FmatCulling _parseCulling(Object? value) => switch (value) {
+  'front' => FmatCulling.front,
+  'none' => FmatCulling.none,
+  _ => FmatCulling.back,
+};

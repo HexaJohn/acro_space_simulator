@@ -166,11 +166,9 @@ packages:
   flutter_scene:
     dependency: "direct main"
     description:
-      path: "packages/flutter_scene"
-      ref: d3ebfb6a589b475e08b3acce43a71ce8c5f0b72f
-      resolved-ref: d3ebfb6a589b475e08b3acce43a71ce8c5f0b72f
-      url: "https://github.com/bdero/flutter_scene.git"
-    source: git
+      path: "third_party/flutter_scene"
+      relative: true
+    source: path
     version: "0.18.1"
   flutter_test:
     dependency: "direct dev"
