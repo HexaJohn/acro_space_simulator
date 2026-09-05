@@ -11,11 +11,23 @@
 ///
 ///   dart run tool/city_perf_ab.dart <vm-service-uri> [--no-generate]
 ///       [--sprawl=20] [--distance=1320] [--elevation=0.55] [--samples=8]
-///       [--shot=path.png]
+///       [--shot=path.png] [--sweep] [--no-flips]
+///       [--assert=static:12,sweep:16,worst:33]
+///
+/// `--sweep` drives the camera the way a hand does: a cold orbit over
+/// tiles never built, a warm one over the same ground, an elevation nod
+/// and a zoom in and out, reporting each pattern's average frame, worst
+/// frame, deepest build queue and governor level. Pans and orbits are
+/// where the frame has dropped before (tile churn on the camera term,
+/// tier flips on the view cone, the isolate send), and a static sample
+/// never sees it. `--assert` makes the run a gate: the process exits 1
+/// when the static average, the warm-orbit average or the sweep's worst
+/// frame exceeds its threshold in milliseconds.
 library;
 
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:vm_service/vm_service_io.dart';
 
@@ -31,6 +43,13 @@ Future<void> main(List<String> args) async {
   }
 
   final generate = !args.contains('--no-generate');
+  final sweep = args.contains('--sweep');
+  final flips = !args.contains('--no-flips');
+  final asserts = <String, double>{};
+  for (final part in opt('assert', '').split(',')) {
+    final kv = part.split(':');
+    if (kv.length == 2) asserts[kv[0]] = double.parse(kv[1]);
+  }
   final sprawl = opt('sprawl', '20');
   final distance = opt('distance', '1320');
   final elevation = opt('elevation', '0.55');
@@ -136,22 +155,132 @@ Future<void> main(List<String> args) async {
     await Future<void>.delayed(const Duration(seconds: 3));
   }
 
-  await flip('shadows', 'shadows', 'false', 'true');
-  await flip('atmosphere', 'atmosphere', 'false', 'true');
-  await flip('perfPanel', 'perf', 'false', 'true');
-  final again = await sample('baseline again', 5);
-  out['baselineAgain'] = again;
+  if (flips) {
+    await flip('shadows', 'shadows', 'false', 'true');
+    await flip('atmosphere', 'atmosphere', 'false', 'true');
+    await flip('perfPanel', 'perf', 'false', 'true');
+    final again = await sample('baseline again', 5);
+    out['baselineAgain'] = again;
 
-  stdout.writeln('== deltas vs baseline (ui ms):');
-  for (final e in out.entries) {
-    if (e.key == 'baseline') continue;
-    stdout.writeln('  ${e.key}: ${f(base['uiMs']! - e.value['uiMs']!)} ms ui, '
-        '${f(base['frameMs']! - e.value['frameMs']!)} ms frame');
+    stdout.writeln('== deltas vs baseline (ui ms):');
+    for (final e in out.entries) {
+      if (e.key == 'baseline') continue;
+      stdout.writeln(
+          '  ${e.key}: ${f(base['uiMs']! - e.value['uiMs']!)} ms ui, '
+          '${f(base['frameMs']! - e.value['frameMs']!)} ms frame');
+    }
+  }
+
+  // ---- The moving camera --------------------------------------------------
+  //
+  // Each pattern steps the pose at 20 Hz for its duration and reads the
+  // status every quarter second: the panel's 90-frame average, the worst
+  // frame in that window, the build queue and the governor's level. The
+  // worst frame is what a hand feels.
+  final sweeps = <String, Map<String, double>>{};
+  if (sweep) {
+    final az0 = double.parse(opt('azimuth', '0'));
+    final d0 = double.parse(distance);
+    Future<Map<String, double>> pattern(String label, double seconds,
+        Map<String, String> Function(double t) pose) async {
+      final acc = <String, double>{
+        'frameMs': 0,
+        'uiMs': 0,
+        'worstMs': 0,
+        'queued': 0,
+        'governor': 0,
+        'submitMs': 0,
+        'n': 0,
+      };
+      final steps = (seconds * 20).round();
+      for (var i = 0; i < steps; i++) {
+        final t = i / 20.0;
+        await call('ext.acro.citystudio', pose(t));
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        if (i % 5 == 4) {
+          final s = await call('ext.acro.citystudio');
+          acc['n'] = acc['n']! + 1;
+          acc['frameMs'] =
+              acc['frameMs']! + ((s['frameMs'] as num?)?.toDouble() ?? 0);
+          acc['uiMs'] = acc['uiMs']! + ((s['uiMs'] as num?)?.toDouble() ?? 0);
+          final worst = (s['worstMs'] as num?)?.toDouble() ?? 0;
+          if (worst > acc['worstMs']!) acc['worstMs'] = worst;
+          final m = RegExp(r'(\d+) queued').firstMatch('${s['cityDebug']}');
+          final queued = m == null ? 0.0 : double.parse(m.group(1)!);
+          if (queued > acc['queued']!) acc['queued'] = queued;
+          final gov =
+              ((s['governor'] as Map?)?['level'] as num?)?.toDouble() ?? 0;
+          if (gov > acc['governor']!) acc['governor'] = gov;
+          final sub =
+              ((s['phaseMs'] as Map?)?['city.submit'] as num?)?.toDouble() ??
+                  0;
+          if (sub > acc['submitMs']!) acc['submitMs'] = sub;
+        }
+      }
+      final n = acc['n']!.clamp(1, 1e9);
+      final r = {
+        'frameMs': acc['frameMs']! / n,
+        'uiMs': acc['uiMs']! / n,
+        'worstMs': acc['worstMs']!,
+        'queued': acc['queued']!,
+        'governor': acc['governor']!,
+        'submitMs': acc['submitMs']!,
+      };
+      stdout.writeln('[sweep $label] frame ${f(r['frameMs'])}  '
+          'ui ${f(r['uiMs'])}  worst ${f(r['worstMs'])}  '
+          'queued max ${r['queued']!.round()}  '
+          'submit max ${f(r['submitMs'])}  '
+          'governor max ${r['governor']!.round()}');
+      sweeps[label] = r;
+      return r;
+    }
+
+    String fmt(double v) => v.toStringAsFixed(4);
+    // A full turn at the sampling pose: the first over ground the hidden
+    // policy left unbuilt, the second over what the first built.
+    await pattern(
+        'orbit cold', 12, (t) => {'azimuth': fmt(az0 + t / 12 * 6.2832)});
+    await pattern(
+        'orbit warm', 12, (t) => {'azimuth': fmt(az0 + t / 12 * 6.2832)});
+    await pattern('nod', 6, (t) => {
+          'elevation':
+              fmt(0.3 + 0.9 * (0.5 - 0.5 * math.cos(t / 6 * 6.2832))),
+        });
+    await call('ext.acro.citystudio', {'elevation': elevation});
+    await pattern('zoom', 8, (t) {
+      // In to a third, out to three times, back: log-spaced, so each
+      // second covers the same ratio.
+      final k = math.pow(3.0, math.sin(t / 8 * 6.2832)).toDouble();
+      return {'distance': fmt(d0 * k)};
+    });
+    await call(
+        'ext.acro.citystudio', {'distance': distance, 'elevation': elevation});
+    await Future<void>.delayed(const Duration(seconds: 3));
+    out['settled'] = await sample('settled after sweep', 4);
   }
   if (shot.isNotEmpty) {
     final saved = await call('ext.acro.screenshot', {'path': shot});
     stdout.writeln('== screenshot: $saved');
   }
-  stdout.writeln(jsonEncode(out));
+  stdout.writeln(jsonEncode({...out, 'sweeps': sweeps}));
   await vm.dispose();
+
+  // The gate: each threshold names the figure it bounds.
+  var failed = false;
+  void check(String name, double? value, double? limit) {
+    if (limit == null || value == null) return;
+    final ok = value <= limit;
+    stdout.writeln(
+        '${ok ? 'PASS' : 'FAIL'} $name ${f(value)} ms <= ${f(limit)} ms');
+    if (!ok) failed = true;
+  }
+
+  check('static frame', base['frameMs'], asserts['static']);
+  check('warm orbit frame', sweeps['orbit warm']?['frameMs'], asserts['sweep']);
+  final worstSweep = sweeps.values
+      .map((r) => r['worstMs'] ?? 0)
+      .fold<double>(0, (a, b) => a > b ? a : b);
+  check('sweep worst frame', sweeps.isEmpty ? null : worstSweep,
+      asserts['worst']);
+  if (failed) exit(1);
 }

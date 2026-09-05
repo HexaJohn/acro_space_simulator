@@ -73,3 +73,31 @@ its occupancy/counter views; RenderDoc is the easier first stop.
   less overdraw, not fewer draws.
 - **CPU-bound** (`raster` small, our phase rows big): the panel's existing
   sub-rows already name the culprit; RenderDoc will not help.
+
+## Scripted measurement (the regression gate)
+
+Three tools drive a running `main_city_studio_dev` over the VM service
+(`fvm flutter run -d windows --profile -t lib/main_city_studio_dev.dart
+--enable-impeller --enable-flutter-gpu` prints the URI):
+
+- `dart run tool/city_perf_ab.dart <uri> --sweep --assert=static:12,sweep:16,worst:33`
+  generates the colony, waits for the tile queue to drain (sampling straight
+  after the generator returns measures the streaming, not the frame), parks
+  the camera, samples the panel and the engine's encoded-draw stats, flips
+  shadows / atmosphere / the panel one at a time for their deltas, then
+  drives the camera: a cold orbit, a warm orbit, an elevation nod and a
+  zoom, each reporting average frame, worst frame, deepest build queue and
+  governor level. `--assert` exits 1 past a threshold, so the run gates a
+  change. Pans and orbits are where regressions have hidden before — a
+  static sample never sees a rebuild the camera causes.
+- `dart run tool/profile_ui_thread.dart <uri> 6` samples the UI isolate's
+  CPU profile and prints the hottest leaves.
+- `dart run tool/frame_spikes.dart <uri> 10 14` records the VM timeline and
+  names every frame over the threshold with what ran inside it (build,
+  paint, collections, engine spans), the scavenge count and cost, the
+  window's allocations by class, and the live counts of native-backed
+  classes. `--shadows=false`, `--perf=false`, `--distance=` and the other
+  dev-hook parameters apply before recording.
+
+Numbers on 2026-09-05 for the 127k-building colony at 1320 m: static 9.3 ms
+(107 fps), warm orbit 9-11 ms, from 56 ms / 18 fps at the start of the work.

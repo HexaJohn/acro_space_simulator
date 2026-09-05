@@ -643,7 +643,9 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     CityStudioDevHooks.setCamera =
         ({double? distanceM, double? azimuth, double? elevation}) {
       if (!mounted) return;
-      setState(() {
+      // The drag path, not a whole-screen setState: a driven sweep must
+      // cost what a hand costs, or it measures the rebuild it caused.
+      _nudgePose(() {
         if (distanceM != null) _distanceM = distanceM.clamp(40.0, 60000.0);
         if (azimuth != null) _azimuth = azimuth;
         if (elevation != null) _elevation = elevation.clamp(0.02, 1.55);
@@ -720,6 +722,12 @@ class _CityStudioScreenState extends State<CityStudioScreen>
           'sprawlSections': _sim?.sprawl?.sections.length ?? 0,
           'cityDebug': CityNodes.debugLine,
           'frameMs': _avgOf(_frameMs),
+          // The worst of the same ninety frames: a sweep's average hides
+          // the one frame a hand feels.
+          'worstMs': _frameMs.isEmpty
+              ? 0.0
+              : _frameMs.reduce((a, b) => a > b ? a : b),
+          'phaseMs': Map<String, double>.of(CityNodes.phaseMs),
           'uiMs': _avgOf(_uiMs),
           'rasterMs': _avgOf(_rasterMs),
           'terrainMs': _terrainMs,
