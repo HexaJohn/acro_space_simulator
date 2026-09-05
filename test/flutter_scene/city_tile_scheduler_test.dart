@@ -9,6 +9,7 @@ import 'package:acro_space_simulator/application/snapshot/world_snapshot.dart';
 import 'package:acro_space_simulator/domain/architecture/building_generator.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
+import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_columns.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_mesher.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_scheduler.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_scheduler_isolate.dart';
@@ -73,17 +74,19 @@ void main() {
         tier: tier,
         canDetail: tier == CityTier.near,
         anchorBF: anchor,
-        buildings: [
-          bldg('a', 'r-med', x - 40, 40),
-          bldg('b', 'c-high', x + 40, -40, w: 36, d: 30),
-        ],
-        roads: [
-          road([(x - 100, 0), (x + 100, 0)]),
-        ],
-        patches: const [],
-        ends: const [],
-        roadEnds: const [null, null],
-        transitEnds: const [],
+        columns: CityTileColumns.fromSnapshots(
+          buildings: [
+            bldg('a', 'r-med', x - 40, 40),
+            bldg('b', 'c-high', x + 40, -40, w: 36, d: 30),
+          ],
+          roads: [
+            road([(x - 100, 0), (x + 100, 0)]),
+          ],
+          patches: const [],
+          ends: const [],
+          roadEnds: const [null, null],
+          transitEnds: const [],
+        ),
         focusBF: Vector3(x, 0, r + 30),
         colonyTier: BuildingDetail.full,
         epoch: 10,

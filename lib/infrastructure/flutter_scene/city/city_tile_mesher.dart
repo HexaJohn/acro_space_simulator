@@ -37,6 +37,7 @@ import '../../../domain/scatter/mesh_builder.dart';
 import '../../../domain/shared/quaternion.dart';
 import '../../../domain/shared/vector3.dart';
 import '../coord_convert.dart';
+import 'city_tile_columns.dart';
 import 'elevated_structure.dart';
 import 'lot_features.dart';
 import 'mesh_merge.dart';
@@ -45,6 +46,8 @@ import 'railway.dart';
 import 'road_mesher.dart';
 import 'street_furniture.dart';
 import 'vehicle_meshes.dart';
+
+export 'city_tile_columns.dart' show CityTileEnd, CityTileMembers;
 
 /// How much of a tile is drawn, by its distance from the camera.
 enum CityTier {
@@ -73,17 +76,6 @@ enum CityTier {
 /// shader loads reset (see `CityMaterials.reset`) and which is therefore
 /// resolved only when the upload step runs.
 enum CityMaterialKind { facade, glazing, ground, road, dirt, alley, sidewalk }
-
-/// A road end that falls in a tile: where, the point just inside it, and
-/// what the road is. Body-fixed; the junction pass anchors it.
-class CityTileEnd {
-  const CityTileEnd(this.at, this.next, this.halfWidthM, this.roadClass,
-      this.paved, this.collector);
-  final Vector3 at, next;
-  final double halfWidthM;
-  final RoadClass roadClass;
-  final bool paved, collector;
-}
 
 /// The renderer-side switches the emitters read, captured as values.
 ///
@@ -151,9 +143,17 @@ class CityMeshKnobs {
 /// Self-contained on purpose. The body root's end table and transit-end
 /// list are colony-wide — tens of thousands of entries on a big city — so
 /// a request carries only the entries the tile's own roads touch, worked
-/// out on the UI thread where the root lives (see [roadEnds],
-/// [transitEnds]). Copying the whole table into a worker per job would
-/// cost more than the meshing it enables.
+/// out on the UI thread where the root lives (see
+/// [CityTileMembers.roadEnds], [CityTileMembers.transitEnds]). Copying the
+/// whole table into a worker per job would cost more than the meshing it
+/// enables.
+///
+/// The members travel as [columns], not as snapshot objects: an isolate
+/// send copies a typed list as one block and an object graph one object
+/// at a time, and a near tile's roads are tens of thousands of objects
+/// (see `city_tile_columns.dart`). The side that meshes rebuilds the
+/// snapshots from the columns once, in [CityTileMeshJob.members] — the
+/// worker's time, not the UI thread's.
 class CityTileRequest {
   const CityTileRequest({
     required this.tileKey,
@@ -161,12 +161,7 @@ class CityTileRequest {
     required this.tier,
     required this.canDetail,
     required this.anchorBF,
-    required this.buildings,
-    required this.roads,
-    required this.patches,
-    required this.ends,
-    required this.roadEnds,
-    required this.transitEnds,
+    required this.columns,
     required this.focusBF,
     required this.colonyTier,
     required this.epoch,
@@ -188,22 +183,10 @@ class CityTileRequest {
   /// The tile's anchor, body-fixed metres: every vertex is emitted relative
   /// to it.
   final Vector3 anchorBF;
-  final List<BuildingSnapshot> buildings;
-  final List<RoadSnapshot> roads;
-  final List<CityPatchSnapshot> patches;
-  final List<CityTileEnd> ends;
 
-  /// Per road, in [roads] order: what the body's end table says of its two
-  /// ends — the widest carriageway meeting the end and how many ends meet
-  /// there — at `[2 * i]` for the road's first point and `[2 * i + 1]` for
-  /// its last, or null where the table has no entry (elevated roads are
-  /// not tabled).
-  final List<(double, int)?> roadEnds;
-
-  /// Every end of elevated rail on the body within reach of an end of one
-  /// of this tile's transit roads, body-fixed: what decides whether an end
-  /// is free and takes a terminal.
-  final List<Vector3> transitEnds;
+  /// The tile's buildings, roads, patches, ends, road-end facts and
+  /// transit ends, packed (see [CityTileColumns]).
+  final CityTileColumns columns;
 
   /// The camera in the body's frame; per-building detail is measured from
   /// it.
@@ -543,6 +526,11 @@ class CityTileMeshJob {
   final CityTileRequest request;
   final CityBuildingLibraries libraries;
 
+  /// The tile's members, rebuilt from the request's columns here — once
+  /// per job, on whichever side meshes — so the emitters read the snapshot
+  /// objects they always did (see `city_tile_columns.dart`).
+  late final CityTileMembers members = request.columns.toSnapshots();
+
   /// The parts of the build, run one per call from the end. A running
   /// step may push more onto the end, and they run next.
   final List<CityMeshStep> steps = [];
@@ -604,9 +592,10 @@ class CityTileMeshJob {
 
   void _plan() {
     final r = request;
+    final m = members;
     const roadsPerStep = 16;
-    for (var i = 0; i < r.roads.length; i += roadsPerStep) {
-      final from = i, to = math.min(i + roadsPerStep, r.roads.length);
+    for (var i = 0; i < m.roads.length; i += roadsPerStep) {
+      final from = i, to = math.min(i + roadsPerStep, m.roads.length);
       steps.add(CityMeshStep(CityMeshStepKind.roads, () {
         for (var k = from; k < to; k++) {
           _emitRoad(k);
@@ -615,11 +604,11 @@ class CityTileMeshJob {
     }
     steps.add(CityMeshStep(CityMeshStepKind.junctions, _emitJunctions));
     const buildingsPerStep = 100;
-    for (var i = 0; i < r.buildings.length; i += buildingsPerStep) {
-      final from = i, to = math.min(i + buildingsPerStep, r.buildings.length);
+    for (var i = 0; i < m.buildings.length; i += buildingsPerStep) {
+      final from = i, to = math.min(i + buildingsPerStep, m.buildings.length);
       steps.add(CityMeshStep(CityMeshStepKind.buildings, () {
         for (var k = from; k < to; k++) {
-          _emitBuilding(r.buildings[k]);
+          _emitBuilding(m.buildings[k]);
         }
       }));
     }
@@ -629,10 +618,10 @@ class CityTileMeshJob {
     // its steps to emit nothing (see `CityNodes.tileCanDetail`).
     if (r.canDetail) {
       const perStep = 60;
-      for (var i = 0; i < r.buildings.length; i += perStep) {
-        final from = i, to = math.min(i + perStep, r.buildings.length);
+      for (var i = 0; i < m.buildings.length; i += perStep) {
+        final from = i, to = math.min(i + perStep, m.buildings.length);
         steps.add(CityMeshStep(CityMeshStepKind.lots,
-            () => _emitLotFeatures(r.buildings.sublist(from, to))));
+            () => _emitLotFeatures(m.buildings.sublist(from, to))));
       }
     }
     _addMergeSteps();
@@ -805,7 +794,7 @@ class CityTileMeshJob {
   void _emitPatches() {
     final m = _patches;
     final anchorBF = request.anchorBF;
-    for (final p in request.patches) {
+    for (final p in members.patches) {
       final centre = Vector3(p.px, p.py, p.pz) - anchorBF;
       final up = (centre + anchorBF).normalized;
       final basis = Quaternion(p.qw, p.qx, p.qy, p.qz);
@@ -957,7 +946,7 @@ class CityTileMeshJob {
   void _emitRoad(int index) {
     final r = request;
     final rb = _roads;
-    final road = r.roads[index];
+    final road = members.roads[index];
     final tier = r.tier;
     final anchorBF = r.anchorBF;
     final pts = <Vector3>[];
@@ -1001,7 +990,7 @@ class CityTileMeshJob {
         ]) {
           final atBF = at + anchorBF;
           var meeting = 0;
-          for (final other in r.transitEnds) {
+          for (final other in members.transitEnds) {
             if ((other - atBF).length < 8.0) meeting++;
           }
           if (meeting > 1) continue;
@@ -1059,9 +1048,9 @@ class CityTileMeshJob {
       }
     }
     // What the body's end table says of this road's two ends (see
-    // [CityTileRequest.roadEnds]).
-    final startEnd = r.roadEnds[2 * index];
-    final lastEnd = r.roadEnds[2 * index + 1];
+    // [CityTileMembers.roadEnds]).
+    final startEnd = members.roadEnds[2 * index];
+    final lastEnd = members.roadEnds[2 * index + 1];
     // A street that ends where nothing else does ends in a turning
     // circle: a subdivision's cul-de-sac, or the edge of town.
     if (paint && cls == RoadClass.street) {
@@ -1136,9 +1125,9 @@ class CityTileMeshJob {
   /// most a frame could overshoot by.
   void _emitJunctions() {
     final r = request;
-    if (r.tier == CityTier.far || r.ends.isEmpty) return;
+    if (r.tier == CityTier.far || members.ends.isEmpty) return;
     final ends = <RoadEnd>[
-      for (final e in r.ends)
+      for (final e in members.ends)
         RoadEnd(e.at - r.anchorBF, e.next - r.anchorBF, e.halfWidthM,
             e.roadClass,
             paved: e.paved, collector: e.collector),

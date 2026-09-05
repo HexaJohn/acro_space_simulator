@@ -10,6 +10,7 @@ import 'package:acro_space_simulator/application/snapshot/world_snapshot.dart';
 import 'package:acro_space_simulator/domain/architecture/building_generator.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
+import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_columns.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_mesher.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -127,22 +128,30 @@ void main() {
     maxParkedCars: 400,
   );
 
+  // The members packed the way `CityNodes` packs them, once; and packed a
+  // second time through a round trip, the way a worker sees them, for the
+  // test that the two mesh the same.
+  final columns = CityTileColumns.fromSnapshots(
+    buildings: buildings,
+    roads: roads,
+    patches: patches,
+    ends: ends,
+    roadEnds: roadEnds,
+    transitEnds: const [],
+  );
+
   CityTileRequest request(CityTier tier,
           {Vector3 focus = const Vector3(0, 0, r + 40),
           bool canDetail = true,
-          CityMeshKnobs k = knobs}) =>
+          CityMeshKnobs k = knobs,
+          CityTileColumns? members}) =>
       CityTileRequest(
         tileKey: '$body/0/0',
         key: 'k-${tier.name}',
         tier: tier,
         canDetail: canDetail && tier == CityTier.near,
         anchorBF: anchor,
-        buildings: buildings,
-        roads: roads,
-        patches: patches,
-        ends: ends,
-        roadEnds: roadEnds,
-        transitEnds: const [],
+        columns: members ?? columns,
         focusBF: focus,
         colonyTier: BuildingDetail.full,
         epoch: 1234.5,
@@ -288,6 +297,54 @@ void main() {
     }
     expect(a.treePits, b.treePits);
     expect(a.shrubPits, b.shrubPits);
+  });
+
+  test('the columns mesh to the bytes the snapshots do', () {
+    // The UI thread packs the tile's snapshots into columns; the worker
+    // rebuilds snapshots from them. Whatever the rebuilt roads are made of
+    // (a Float64List view where the frame had a growable list), the
+    // emitters must produce the same geometry, the same archetype keys and
+    // the same road seeds — or a tile meshed on a worker would differ from
+    // the one the UI thread would have made.
+    final rebuilt = columns.toSnapshots();
+    expect(rebuilt.roads.length, roads.length);
+    for (var i = 0; i < roads.length; i++) {
+      expect(CityTileMesher.roadSeed(rebuilt.roads[i]),
+          CityTileMesher.roadSeed(roads[i]));
+    }
+    final again = CityTileColumns.fromSnapshots(
+      buildings: rebuilt.buildings,
+      roads: rebuilt.roads,
+      patches: rebuilt.patches,
+      ends: rebuilt.ends,
+      roadEnds: rebuilt.roadEnds,
+      transitEnds: rebuilt.transitEnds,
+    );
+    for (final tier in CityTier.values) {
+      final a = CityTileMesher.mesh(request(tier), CityBuildingLibraries());
+      final b = CityTileMesher.mesh(
+          request(tier, members: again), CityBuildingLibraries());
+      expect(b.groups.length, a.groups.length, reason: tier.name);
+      for (var i = 0; i < a.groups.length; i++) {
+        expect(b.groups[i].material, a.groups[i].material);
+        expect(b.groups[i].castsShadow, a.groups[i].castsShadow);
+        expect(b.groups[i].positions, a.groups[i].positions);
+        expect(b.groups[i].normals, a.groups[i].normals);
+        expect(b.groups[i].texCoords, a.groups[i].texCoords);
+        expect(b.groups[i].indices, a.groups[i].indices);
+      }
+      expect(b.instances.map((g) => g.archetype).toList(),
+          a.instances.map((g) => g.archetype).toList());
+      for (var i = 0; i < a.instances.length; i++) {
+        expect(b.instances[i].transforms, a.instances[i].transforms);
+        expect(b.instances[i].representative.id,
+            a.instances[i].representative.id);
+      }
+      expect(b.treePits, a.treePits);
+      expect(b.shrubPits, a.shrubPits);
+      expect(b.lodCounts, a.lodCounts);
+      expect(b.skylineTris, a.skylineTris);
+    }
   });
 
   test('the road seed does not depend on the isolate', () async {

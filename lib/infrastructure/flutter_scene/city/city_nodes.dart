@@ -57,6 +57,7 @@ import '../../../domain/architecture/city_lighting.dart';
 import '../coord_convert.dart';
 import '../graphics_quality.dart';
 import 'city_materials.dart';
+import 'city_tile_columns.dart';
 import 'city_tile_mesher.dart';
 import 'city_tile_scheduler.dart';
 import 'elevated_structure.dart';
@@ -1277,10 +1278,13 @@ class CityNodes {
     if (open >= maxInFlight) return;
     final knobs = _knobsNow();
     var i = 0;
-    // One tile a frame: the request is the tile's own snapshot objects,
-    // and an isolate send deep-copies them on THIS thread — thirteen tiles
-    // in one frame measured 214 ms. One near tile is a few ms; the budget
-    // loop cannot slice a send, so the cap is the slice.
+    // One tile a frame: an isolate send copies the request on THIS thread,
+    // and the budget loop cannot slice a send, so the cap is the slice.
+    // The request's members go as typed columns, copied as blocks — a
+    // near tile is a fraction of a millisecond where its snapshot objects,
+    // walked one by one, were up to twenty-five (thirteen tiles in one
+    // frame once measured 214 ms) — but the cap stays: it is what keeps a
+    // frame's whole queue from landing on the worker at once.
     var submitted = 0;
     final sendClock = Stopwatch()..start();
     while (i < _queue.length && open < maxInFlight && submitted < 1) {
@@ -1322,6 +1326,13 @@ class CityNodes {
   /// Everything the meshing reads, cut from the tile and the body's root
   /// (see [CityTileRequest]). The root's end table and transit-end list
   /// are colony-wide; only the entries this tile's own roads touch go.
+  ///
+  /// The members go as columns, packed ONCE per tile per structure key
+  /// and kept on the tile: a tier change or a camera re-key sends the
+  /// same columns again, and the send copies them as blocks rather than
+  /// walking the snapshot objects (see `city_tile_columns.dart`). The
+  /// root's facts are packed with them — the root is cut with the tiles,
+  /// under the same structure, so they are as stable as the key.
   CityTileRequest _requestFor(
     _Tile t,
     WorldSnapshot snap,
@@ -1332,6 +1343,30 @@ class CityNodes {
     BuildingDetail colonyTier,
     CityMeshKnobs knobs,
   ) {
+    var columns = t.columns;
+    if (columns == null || t.columnsKey != t.structureKey) {
+      columns = t.columns = _columnsFor(t, root);
+      t.columnsKey = t.structureKey;
+    }
+    return CityTileRequest(
+      tileKey: t.key,
+      key: key,
+      tier: tier,
+      // Only where some building can resolve past a box: the furniture
+      // pass skips every block-tier lot, so a tile that cannot detail
+      // would run its steps to emit nothing (see [tileCanDetail]).
+      canDetail: lotFeatures && t.wantCanDetail,
+      anchorBF: t.centreBF,
+      columns: columns,
+      focusBF: focusBF,
+      colonyTier: colonyTier,
+      epoch: snap.epoch,
+      knobs: knobs,
+    );
+  }
+
+  /// The tile's members and the root's facts about its roads, packed.
+  static CityTileColumns _columnsFor(_Tile t, _BodyRoot root) {
     final roadEnds = <(double, int)?>[];
     final transitFrom = <Vector3>[];
     for (final r in t.roads) {
@@ -1362,25 +1397,13 @@ class CityNodes {
         }
       }
     }
-    return CityTileRequest(
-      tileKey: t.key,
-      key: key,
-      tier: tier,
-      // Only where some building can resolve past a box: the furniture
-      // pass skips every block-tier lot, so a tile that cannot detail
-      // would run its steps to emit nothing (see [tileCanDetail]).
-      canDetail: lotFeatures && t.wantCanDetail,
-      anchorBF: t.centreBF,
+    return CityTileColumns.fromSnapshots(
       buildings: t.buildings,
       roads: t.roads,
       patches: t.patches,
       ends: t.ends,
       roadEnds: roadEnds,
       transitEnds: transitEnds,
-      focusBF: focusBF,
-      colonyTier: colonyTier,
-      epoch: snap.epoch,
-      knobs: knobs,
     );
   }
 
@@ -2437,6 +2460,12 @@ class _Tile {
   /// kept across rebuilds so a rebuilt tile does not blink its trees.
   final Map<PropKind, bool> floraShown = {};
   String structureKey = '';
+
+  /// The members packed for the worker, and the structure key they were
+  /// packed under: built on the first submit, sent again on every re-key
+  /// while the structure holds (see [CityNodes._requestFor]).
+  CityTileColumns? columns;
+  String columnsKey = '';
   String builtKey = '';
   String wantKey = '';
   CityTier? wantTier;

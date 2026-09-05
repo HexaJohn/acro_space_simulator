@@ -14,11 +14,14 @@
 /// coarse [CityBuildingLibraries], rebuilt only when the request's knobs
 /// move.
 ///
-/// What crosses the boundary: the request's snapshot objects going out (a
-/// tile's buildings and roads, kilobytes), and the result coming back as
-/// one packed blob in a [TransferableTypedData] — one copy on the worker,
-/// none on the receiver, which matters because a near tile's merged
-/// geometry is megabytes and the receiver is the render thread.
+/// What crosses the boundary: the request going out with the tile's
+/// members as typed columns (see `city_tile_columns.dart`) — plain typed
+/// lists, copied as blocks on the sending thread and kept by the tile for
+/// its next send, which a transferable would not survive — and the result
+/// coming back as one packed blob in a [TransferableTypedData]: one copy
+/// on the worker, none on the receiver, which matters because a near
+/// tile's merged geometry is megabytes and the receiver is the render
+/// thread.
 library;
 
 import 'dart:async';
