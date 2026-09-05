@@ -182,6 +182,69 @@ class CityNodes {
           ? byDistance
           : (byDistance == CityTier.near ? CityTier.mid : CityTier.far);
 
+  /// Hysteresis on the tier ranges: a tile enters a tier below its range
+  /// and leaves it only this much further out. A tier flip is a whole tile
+  /// rebuilt, so a camera settling on the boundary must not flip it twice
+  /// a second.
+  static double tierHysteresis = 1.15;
+
+  /// The tier a tile earns from its distance, given the tier it had.
+  ///
+  /// Inside [nearRangeM] a tile is near, inside [midRangeM] mid, else far —
+  /// except that a tile already at a tier keeps it until it is
+  /// [tierHysteresis] times further out than the range that let it in. A
+  /// tile never tiered ([previous] null) takes the plain answer.
+  static CityTier tierAtDistance(double distanceM, {CityTier? previous}) {
+    final h = tierHysteresis;
+    if (distanceM < nearRangeM ||
+        (previous == CityTier.near && distanceM < nearRangeM * h)) {
+      return CityTier.near;
+    }
+    // A tile at near or mid is inside mid's leave band either way: leaving
+    // near lands in mid, and mid is not left for far until its own edge.
+    final inMid = previous == CityTier.near || previous == CityTier.mid;
+    if (distanceM < midRangeM || (inMid && distanceM < midRangeM * h)) {
+      return CityTier.mid;
+    }
+    return CityTier.far;
+  }
+
+  /// Whether ANY building in a tile can resolve past its block silhouette.
+  ///
+  /// [tileDistanceM] is the least distance from the focus to any point of
+  /// the tile (see [_Tile.distanceM]), so with per-building LOD a tile past
+  /// [blockRangeM] gets [BuildingDetail.block] from [detailFor] for every
+  /// building in it — and its build then does not depend on where the
+  /// camera is. The near tier's build key used to carry the camera
+  /// regardless, so at orbit altitude every near tile was re-keyed on every
+  /// frame of a drag and built towards an output identical to the one it
+  /// had: twelve milliseconds a frame of work that never landed. Without
+  /// per-building LOD the colony tier answers, and it is already in the
+  /// key. The lot furniture is gated by the same answer: it skips every
+  /// block-tier building, so a tile that cannot detail has none.
+  ///
+  /// Compared with `<=`, not `<`: [tierForDistance] keeps a building at
+  /// exactly [blockRangeM] out of the block tier, and the least distance
+  /// to the tile is a lower bound on every building's.
+  static bool tileCanDetail(
+    CityTier tier,
+    double tileDistanceM, {
+    required BuildingDetail colonyTier,
+    bool? perBuildingLod,
+    double? blockRangeM,
+  }) {
+    if (tier != CityTier.near) return false;
+    return (perBuildingLod ?? CityNodes.perBuildingLod)
+        ? tileDistanceM <= (blockRangeM ?? CityNodes.blockRangeM)
+        : colonyTier != BuildingDetail.block;
+  }
+
+  /// Microseconds the last step of each kind took, by kind name. The build
+  /// loop keeps it to decide whether the next step fits the frame; the
+  /// panel may read it to see which kind is the expensive one.
+  static final Map<String, int> stepCostUs = {};
+  final Map<_StepKind, int> _stepCostUs = {};
+
   /// The editor's ground cursor, in BODY-FIXED metres, or null when nothing is
   /// being pointed at.
   ///
@@ -609,18 +672,19 @@ class CityNodes {
     // is not enough once the city is big.
     final colonyTier = tierForDistance(nearest);
 
-    // Each tile's tier from its distance, and the key its build depends
-    // on: what is in it, the tier, and — inside the near tier, where every
-    // building takes its own detail from its own distance — the camera,
-    // quantised hard to 64 m, because rebuilding on every centimetre of
-    // travel would cost far more than the LOD saves.
+    // Each tile's tier from its distance (with hysteresis, see
+    // [tierAtDistance]), and the key its build depends on: what is in it,
+    // the tier, and — inside the near tier, where every building takes its
+    // own detail from its own distance AND some building is close enough
+    // to take more than a box (see [tileCanDetail]) — the camera, quantised
+    // hard to 64 m, because rebuilding on every centimetre of travel would
+    // cost far more than the LOD saves.
     var near = 0, mid = 0, far = 0, outOfView = 0;
     for (final t in _tiles.values) {
       final focusBF = focusByBody[t.bodyId];
       if (focusBF == null) continue;
-      var tier = t.distanceM < nearRangeM
-          ? CityTier.near
-          : (t.distanceM < midRangeM ? CityTier.mid : CityTier.far);
+      var tier = tierAtDistance(t.distanceM, previous: t.distanceTier);
+      t.distanceTier = tier;
       final cones = conesByBody[t.bodyId];
       if (cones != null) {
         final rel = t.centreBF - eyeByBody[t.bodyId]!;
@@ -660,7 +724,9 @@ class CityNodes {
         case CityTier.far:
           far++;
       }
-      final cam = tier == CityTier.near && perBuildingLod
+      final canDetail =
+          tileCanDetail(tier, t.distanceM, colonyTier: colonyTier);
+      final cam = perBuildingLod && canDetail
           ? '${(focusBF.x / 64).round()},${(focusBF.y / 64).round()},'
               '${(focusBF.z / 64).round()}'
           : '';
@@ -671,6 +737,7 @@ class CityNodes {
       if (!hide && t.wantKey != want) {
         t.wantKey = want;
         t.wantTier = tier;
+        t.wantCanDetail = canDetail;
         if (!t.queued) {
           t.queued = true;
           _queue.add(t);
@@ -682,20 +749,60 @@ class CityNodes {
     sw.reset();
 
     // Build, nearest first, within the budget: a part of a tile at a time,
-    // so a near tile never takes the whole frame.
-    var builtThisFrame = 0;
+    // so a near tile never takes the whole frame. The budget is checked in
+    // microseconds — whole milliseconds between steps overshot it by most
+    // of one — and against what a step of that KIND cost last time, so a
+    // step that would not fit waits for the next frame. One step always
+    // runs, or a step dearer than the whole budget would never run at all.
+    var builtThisFrame = 0, stepsThisFrame = 0;
     if (_queue.isNotEmpty) {
       _queue.sort((a, b) => a.distanceM.compareTo(b.distanceM));
-      while (_queue.isNotEmpty && sw.elapsedMilliseconds < buildBudgetMs) {
+      final budgetUs = (buildBudgetMs * 1000).round();
+      while (_queue.isNotEmpty && sw.elapsedMicroseconds < budgetUs) {
         final t = _queue.first;
         final focusBF = focusByBody[t.bodyId];
-        if (focusBF == null || _stepBuild(t, snap, focusBF, colonyTier)) {
+        final job =
+            focusBF == null ? null : _jobFor(t, snap, focusBF, colonyTier);
+        if (job == null) {
+          // No body in the frame, or no root on it: nothing to build
+          // against. Off the queue; a key that moves re-queues it.
+          _queue.removeAt(0);
+          t.queued = false;
+          continue;
+        }
+        final next = job.steps.last;
+        final lastUs = _stepCostUs[next.kind];
+        if (stepsThisFrame > 0 &&
+            lastUs != null &&
+            sw.elapsedMicroseconds + lastUs > budgetUs) {
+          break;
+        }
+        final startUs = sw.elapsedMicroseconds;
+        job.steps.removeLast().run();
+        final costUs = sw.elapsedMicroseconds - startUs;
+        _stepCostUs[next.kind] = costUs;
+        stepCostUs[next.kind.name] = costUs;
+        stepsThisFrame++;
+        if (job.steps.isEmpty) {
+          // The swap was the last step: the tile shows this job now. A job
+          // is never abandoned for a newer key — a tile one camera cell
+          // stale is invisible, a tile that never finishes is not — so a
+          // key that moved while it ran queues the tile again, behind the
+          // rest. Hidden or not: the want key is frozen while hidden, so
+          // this is the only compare that would catch it.
+          t.builtKey = job.key;
+          t.job = null;
           _queue.removeAt(0);
           t.queued = false;
           builtThisFrame++;
+          if (t.builtKey != t.wantKey) {
+            t.queued = true;
+            _queue.add(t);
+          }
         }
       }
     }
+    phaseCount['steps'] = stepsThisFrame;
     phaseMs['city.build'] = sw.elapsedMicroseconds / 1000;
     phaseMs['city.rebuild'] = phaseMs['city.build']!;
     sw.reset();
@@ -869,175 +976,210 @@ class CityNodes {
   static int _endKey(Vector3 p) => Object.hash(
       (p.x / 10).round(), (p.y / 10).round(), (p.z / 10).round());
 
-  /// One step of a tile's build: the next part into its builders, or — when
-  /// everything is in — the upload that swaps the tile's nodes. Returns true
-  /// when the tile is done.
-  bool _stepBuild(
+  /// The tile's build in progress, started from its want key if there is
+  /// none. Null when the tile has no root to hang from.
+  ///
+  /// A job runs to its end once started, on its OWN key, tier and anchor:
+  /// the build loop never trades it for the tile's newer want key. It used
+  /// to — and a near tile under a dragged camera, re-keyed every frame,
+  /// was thrown away every frame a few steps in, so the frame paid for a
+  /// build that never once landed ("queued 31, built 0").
+  _TileJob? _jobFor(
       _Tile t, WorldSnapshot snap, Vector3 focusBF, BuildingDetail colonyTier) {
-    var job = t.job;
-    if (job == null || job.key != t.wantKey) {
-      final tier = t.wantTier ?? CityTier.far;
-      final root = _roots[t.bodyId];
-      if (root == null) return true;
-      job = t.job = _TileJob(t.wantKey, tier, t.centreBF);
-      final j = job;
-      final epoch = snap.epoch;
-      // Parts, run from the end: roads in runs, then the junctions and the
-      // terminals over them, then buildings in runs, the ground, the lot
-      // furniture, and the planting last, off the pits the roads left.
-      // Small runs: the budget is checked between parts, and a part is
-      // the least the frame can overshoot by. A run of four hundred
-      // buildings against a cold archetype cache was a hundred
-      // milliseconds; a twenty-mile city has a thousand such runs.
-      const roadsPerStep = 16;
-      for (var i = 0; i < t.roads.length; i += roadsPerStep) {
-        final from = i, to = math.min(i + roadsPerStep, t.roads.length);
-        j.steps.add(() {
-          for (var k = from; k < to; k++) {
-            _emitRoad(j.roads, t.roads[k], tier, j.anchorBF, root);
-          }
-        });
-      }
-      j.steps.add(() => _emitJunctions(j, t, epoch, root));
-      const buildingsPerStep = 100;
-      for (var i = 0; i < t.buildings.length; i += buildingsPerStep) {
-        final from = i, to = math.min(i + buildingsPerStep, t.buildings.length);
-        j.steps.add(() {
-          for (var k = from; k < to; k++) {
-            _emitBuilding(j, t.buildings[k], focusBF, colonyTier);
-          }
-        });
-      }
-      j.steps.add(() => _emitPatches(t.patches, j));
-      if (tier == CityTier.near && lotFeatures) {
-        const perStep = 60;
-        for (var i = 0; i < t.buildings.length; i += perStep) {
-          final from = i, to = math.min(i + perStep, t.buildings.length);
-          j.steps.add(() => _emitLotFeatures(
-              t.buildings.sublist(from, to), j, focusBF, colonyTier));
+    final existing = t.job;
+    if (existing != null) return existing;
+    final root = _roots[t.bodyId];
+    if (root == null) return null;
+    final tier = t.wantTier ?? CityTier.far;
+    final j = t.job = _TileJob(t.wantKey, tier, t.centreBF, root.anchorBF);
+    final epoch = snap.epoch;
+    // Parts, run from the end: roads in runs, then the junctions and the
+    // terminals over them, then buildings in runs, the ground, the lot
+    // furniture, then the upload — every builder into geometry, the
+    // planting off the pits the roads left — and last the swap that puts
+    // it all in the scene at once. Small runs: the budget is checked
+    // between parts, and a part is the least the frame can overshoot by.
+    // A run of four hundred buildings against a cold archetype cache was
+    // a hundred milliseconds; a twenty-mile city has a thousand such runs.
+    const roadsPerStep = 16;
+    for (var i = 0; i < t.roads.length; i += roadsPerStep) {
+      final from = i, to = math.min(i + roadsPerStep, t.roads.length);
+      j.steps.add(_BuildStep(_StepKind.roads, () {
+        for (var k = from; k < to; k++) {
+          _emitRoad(j.roads, t.roads[k], tier, j.anchorBF, root);
         }
+      }));
+    }
+    j.steps.add(_BuildStep(
+        _StepKind.junctions, () => _emitJunctions(j, t, epoch, root)));
+    const buildingsPerStep = 100;
+    for (var i = 0; i < t.buildings.length; i += buildingsPerStep) {
+      final from = i, to = math.min(i + buildingsPerStep, t.buildings.length);
+      j.steps.add(_BuildStep(_StepKind.buildings, () {
+        for (var k = from; k < to; k++) {
+          _emitBuilding(j, t.buildings[k], focusBF, colonyTier);
+        }
+      }));
+    }
+    j.steps.add(
+        _BuildStep(_StepKind.patches, () => _emitPatches(t.patches, j)));
+    // Only where some building can resolve past a box: the furniture pass
+    // skips every block-tier lot, so a tile that cannot detail would run
+    // its steps to emit nothing (see [tileCanDetail]).
+    if (lotFeatures && t.wantCanDetail) {
+      const perStep = 60;
+      for (var i = 0; i < t.buildings.length; i += perStep) {
+        final from = i, to = math.min(i + perStep, t.buildings.length);
+        j.steps.add(_BuildStep(
+            _StepKind.lots,
+            () => _emitLotFeatures(
+                t.buildings.sublist(from, to), j, focusBF, colonyTier)));
       }
-      // The caller pops from the end.
-      j.steps.setAll(0, j.steps.reversed.toList());
     }
-    if (job.steps.isNotEmpty) {
-      job.steps.removeLast()();
-      return false;
-    }
-    _upload(t, job);
-    t.builtKey = job.key;
-    t.job = null;
-    return true;
+    _addUploadSteps(t, j, root);
+    // The caller pops from the end.
+    j.steps.setAll(0, j.steps.reversed.toList());
+    return j;
   }
 
-  /// Swap a tile's nodes for the job's finished builders.
-  void _upload(_Tile t, _TileJob job) {
-    final root = _roots[t.bodyId];
-    if (root == null) return;
+  /// The upload, as steps: each builder into geometry on the job's staging
+  /// list — no scene mutation — then ONE swap that drops the tile's old
+  /// nodes and attaches every staged one in the same frame.
+  ///
+  /// The upload was one indivisible step, and the largest: a downtown
+  /// tile's two dozen builders, its skyline, its archetype groups and its
+  /// planting in one go, however much of the budget was left. Staged a
+  /// builder at a time it fits between frames; swapped all at once the
+  /// engine sees one structural change and rebuilds its BVH once, and no
+  /// frame ever shows a tile half old and half new.
+  void _addUploadSteps(_Tile t, _TileJob j, _BodyRoot root) {
+    final r = j.roads;
+    // The materials are resolved when the step RUNS, not here: they are
+    // lazy handles the texture and shader loads reset, and a step queued
+    // before a reset must not upload against the handle it replaced.
+    for (final (builder, material) in <(MeshBuilder, fs.Material Function())>[
+      // The ribbon takes the dedicated road strip — on the facade material it
+      // rendered as a run of blank concrete with no curbs and no centre line,
+      // which from the cockpit read as "roads are missing".
+      (r.ribbon, () => CityMaterials.road),
+      (r.dirtRibbon, () => CityMaterials.dirt),
+      (r.alleyRibbon, () => CityMaterials.alley),
+      (r.walkRibbon, () => CityMaterials.sidewalk),
+      (r.railBallast, () => CityMaterials.dirt),
+      (r.railConcrete, () => CityMaterials.sidewalk),
+      (r.railSteel, () => CityMaterials.alley),
+      (r.airDeck, () => CityMaterials.road),
+      (r.airSolid, () => CityMaterials.facade),
+      (r.airGlow, () => CityMaterials.glazing),
+      (r.propSolid, () => CityMaterials.facade),
+      (r.propGlow, () => CityMaterials.glazing),
+      (r.lampSolid, () => CityMaterials.facade),
+      (r.lampGlow, () => CityMaterials.glazing),
+      // The pedestrian tube: a concrete curb carrying a glass barrel.
+      (r.tubeSolid, () => CityMaterials.facade),
+      (r.tubeGlass, () => CityMaterials.glazing),
+      (r.curbSolid, () => CityMaterials.facade),
+      (r.curbGlass, () => CityMaterials.glazing),
+      // The lot furniture: fences, aprons, parked cars, lit signs.
+      (j.featureSolid, () => CityMaterials.facade),
+      (j.featureApron, () => CityMaterials.road),
+      (j.featureCars, () => CityMaterials.facade),
+      (j.featureGlow, () => CityMaterials.glazing),
+      (j.patches, () => CityMaterials.ground),
+    ]) {
+      j.steps.add(_BuildStep(_StepKind.mesh, () {
+        final built = builder.build();
+        if (built.isEmpty) return;
+        final geometry = _geometryOf(built);
+        if (geometry == null) return;
+        j.stage(fs.Node(
+          mesh: fs.Mesh.primitives(
+              primitives: [fs.MeshPrimitive(geometry, material())]),
+        ));
+      }));
+    }
+    // The skyline: block-tier buildings as one mesh per material.
+    for (final (sink, material) in <(MergedMeshSink, fs.Material Function())>[
+      (j.skylineSolid, () => CityMaterials.facade),
+      (j.skylineGlazing, () => CityMaterials.glazing),
+    ]) {
+      j.steps.add(_BuildStep(_StepKind.skyline, () {
+        if (sink.isEmpty) return;
+        final geometry = _geometryOf(sink.build());
+        if (geometry == null) return;
+        j.stage(fs.Node(
+          mesh: fs.Mesh.primitives(
+              primitives: [fs.MeshPrimitive(geometry, material())]),
+        ));
+        j.skylineTris += sink.triangleCount;
+      }));
+    }
+    // The instanced buildings, per archetype. Which archetypes is known
+    // only once the building steps have run, so this step plans the runs
+    // and pushes them to run next (the steps pop from the end), in order.
+    j.steps.add(_BuildStep(_StepKind.instances, () {
+      final groups = j.groups.entries.toList();
+      const perStep = 24;
+      for (var end = groups.length; end > 0; end -= perStep) {
+        final from = math.max(0, end - perStep), to = end;
+        j.steps.add(_BuildStep(_StepKind.instances, () {
+          for (var k = from; k < to; k++) {
+            _stageGroup(j, groups[k].key, groups[k].value);
+          }
+        }));
+      }
+    }));
+    // Street planting, instanced off the scatter props.
+    j.steps.add(_BuildStep(
+        _StepKind.flora,
+        () => _emitStreetFlora(PropKind.broadleafTree, streetTreeHeightM,
+            j.roads.treePits, j.anchorBF, j.stage)));
+    j.steps.add(_BuildStep(
+        _StepKind.flora,
+        () => _emitStreetFlora(PropKind.shrub, planterShrubHeightM,
+            j.roads.shrubPits, j.anchorBF, j.stage)));
+    j.steps.add(_BuildStep(_StepKind.swap, () => _swap(t, j, root)));
+  }
+
+  /// One archetype's instances onto the job's staging list.
+  void _stageGroup(
+      _TileJob j, BuildingArchetype key, List<vm.Matrix4> transforms) {
+    final m = _uploaded[key];
+    if (m == null) return;
+    // Walls take the stone material (concrete is closer to rock than
+    // bark); glazing takes the foliage one, which is the alpha-capable
+    // pass and is where the night lighting hooks in.
+    for (final (geometry, material) in [
+      (m.solid, m.lod ? CityMaterials.ground : CityMaterials.facade),
+      (m.glazing, CityMaterials.glazing),
+    ]) {
+      if (geometry == null) continue;
+      for (var start = 0; start < transforms.length; start += _maxPerDraw) {
+        final end = math.min(start + _maxPerDraw, transforms.length);
+        final instanced =
+            fs.InstancedMesh(geometry: geometry, material: material);
+        for (var i = start; i < end; i++) {
+          instanced.addInstance(transforms[i]);
+        }
+        j.stage(fs.Node()..addComponent(fs.InstancedMeshComponent(instanced)));
+      }
+    }
+  }
+
+  /// Swap a tile's nodes for the job's staged ones, all in one frame.
+  void _swap(_Tile t, _TileJob job, _BodyRoot root) {
     // The old nodes only: the tile stays queued until the build loop pops
     // it — dropping it from the queue here left the loop's removeAt(0)
     // taking the NEXT tile, or throwing on an empty queue.
     _dropBatches(t);
-    final offset = t.centreBF - root.anchorBF;
-    final local = vm.Matrix4.translation(vm.Vector3(
-        lengthToScene(offset.x), lengthToScene(offset.y),
-        lengthToScene(offset.z)));
-    void add(fs.Node node) {
-      node.localTransform = local;
+    for (final node in job.staged) {
       // A build that lands while the tile is hidden stays off the scene;
       // _setAttached puts it in when the tile comes back into view.
       if (!t.hidden) root.node.add(node);
       t.batches.add(node);
     }
-
-    void mesh(MeshBuilder builder, fs.Material material) {
-      final built = builder.build();
-      if (built.isEmpty) return;
-      final geometry = _geometryOf(built);
-      if (geometry == null) return;
-      add(fs.Node(
-        mesh: fs.Mesh.primitives(
-            primitives: [fs.MeshPrimitive(geometry, material)]),
-      ));
-    }
-
-    final r = job.roads;
-    for (final (builder, material) in [
-      // The ribbon takes the dedicated road strip — on the facade material it
-      // rendered as a run of blank concrete with no curbs and no centre line,
-      // which from the cockpit read as "roads are missing".
-      (r.ribbon, CityMaterials.road),
-      (r.dirtRibbon, CityMaterials.dirt),
-      (r.alleyRibbon, CityMaterials.alley),
-      (r.walkRibbon, CityMaterials.sidewalk),
-      (r.railBallast, CityMaterials.dirt),
-      (r.railConcrete, CityMaterials.sidewalk),
-      (r.railSteel, CityMaterials.alley),
-      (r.airDeck, CityMaterials.road),
-      (r.airSolid, CityMaterials.facade),
-      (r.airGlow, CityMaterials.glazing),
-      (r.propSolid, CityMaterials.facade),
-      (r.propGlow, CityMaterials.glazing),
-      (r.lampSolid, CityMaterials.facade),
-      (r.lampGlow, CityMaterials.glazing),
-      // The pedestrian tube: a concrete curb carrying a glass barrel.
-      (r.tubeSolid, CityMaterials.facade),
-      (r.tubeGlass, CityMaterials.glazing),
-      (r.curbSolid, CityMaterials.facade),
-      (r.curbGlass, CityMaterials.glazing),
-      // The lot furniture: fences, aprons, parked cars, lit signs.
-      (job.featureSolid, CityMaterials.facade),
-      (job.featureApron, CityMaterials.road),
-      (job.featureCars, CityMaterials.facade),
-      (job.featureGlow, CityMaterials.glazing),
-      (job.patches, CityMaterials.ground),
-    ]) {
-      mesh(builder, material);
-    }
-    // The skyline: block-tier buildings as one mesh per material.
-    var tris = 0;
-    for (final (sink, material) in [
-      (job.skylineSolid, CityMaterials.facade),
-      (job.skylineGlazing, CityMaterials.glazing),
-    ]) {
-      if (sink.isEmpty) continue;
-      final geometry = _geometryOf(sink.build());
-      if (geometry == null) continue;
-      add(fs.Node(
-        mesh: fs.Mesh.primitives(
-            primitives: [fs.MeshPrimitive(geometry, material)]),
-      ));
-      tris += sink.triangleCount;
-    }
-    t.skylineTris = tris;
-    // The instanced buildings, per archetype.
-    job.groups.forEach((key, transforms) {
-      final m = _uploaded[key];
-      if (m == null) return;
-      // Walls take the stone material (concrete is closer to rock than
-      // bark); glazing takes the foliage one, which is the alpha-capable
-      // pass and is where the night lighting hooks in.
-      for (final (geometry, material) in [
-        (m.solid, m.lod ? CityMaterials.ground : CityMaterials.facade),
-        (m.glazing, CityMaterials.glazing),
-      ]) {
-        if (geometry == null) continue;
-        for (var start = 0; start < transforms.length; start += _maxPerDraw) {
-          final end = math.min(start + _maxPerDraw, transforms.length);
-          final instanced =
-              fs.InstancedMesh(geometry: geometry, material: material);
-          for (var i = start; i < end; i++) {
-            instanced.addInstance(transforms[i]);
-          }
-          add(fs.Node()..addComponent(fs.InstancedMeshComponent(instanced)));
-        }
-      }
-    });
-    // Street planting, instanced off the scatter props.
-    _emitStreetFlora(PropKind.broadleafTree, streetTreeHeightM,
-        job.roads.treePits, job.anchorBF, add);
-    _emitStreetFlora(PropKind.shrub, planterShrubHeightM, job.roads.shrubPits,
-        job.anchorBF, add);
+    job.staged.clear();
+    t.skylineTris = job.skylineTris;
     t.lodCounts = job.lodCounts;
   }
 
@@ -1565,8 +1707,15 @@ class CityNodes {
         // _maxVehicles is far under _maxPerDraw, so one draw per slot.
         final slot = _trafficSlots.putIfAbsent(key, () {
           final mesh = fs.InstancedMesh(geometry: geometry, material: material);
+          // Never frustum culled. These are a couple of dozen draws the
+          // frame wants anyway — the range gate has already kept them to
+          // the roads round the camera — and a culled node's bound is
+          // refitted through the engine's BVH every time an instance
+          // moves, which every one of these does, every frame. Off the
+          // cull, moving the cars is a buffer write and nothing else.
           final node = fs.Node()
-            ..addComponent(fs.InstancedMeshComponent(mesh));
+            ..addComponent(fs.InstancedMeshComponent(mesh))
+            ..frustumCulled = false;
           _scene.add(node);
           return _TrafficSlot(node, mesh);
         });
@@ -2147,6 +2296,11 @@ class CityNodes {
 
   /// The junctions whose crossings lie in the tile, from every road end
   /// that falls there — whichever tile the road itself belongs to.
+  ///
+  /// This step finds them; the meshing goes in runs, as steps pushed to
+  /// run next (the steps pop from the end). A downtown tile's crossings
+  /// with all their masts and zebras were one indivisible step, and the
+  /// most a frame could overshoot by.
   void _emitJunctions(_TileJob job, _Tile t, double epoch, _BodyRoot root) {
     if (job.tier == CityTier.far || t.ends.isEmpty) return;
     final ends = <RoadEnd>[
@@ -2155,12 +2309,20 @@ class CityNodes {
             e.roadClass,
             paved: e.paved, collector: e.collector),
     ];
-    // Signal phase comes from sim time: deterministic, stateless, and the
-    // same on every client looking at the same tick.
-    RoadMesher.junctions(job.roads.ribbon, job.roads.lampSolid,
-        job.roads.lampGlow, RoadMesher.junctionsFromEnds(ends), job.anchorBF,
-        epoch,
-        furniture: job.tier == CityTier.near);
+    final junctions = RoadMesher.junctionsFromEnds(ends);
+    final furniture = job.tier == CityTier.near;
+    const perStep = 40;
+    for (var end = junctions.length; end > 0; end -= perStep) {
+      final from = math.max(0, end - perStep), to = end;
+      job.steps.add(_BuildStep(_StepKind.junctions, () {
+        // Signal phase comes from sim time: deterministic, stateless, and
+        // the same on every client looking at the same tick.
+        RoadMesher.junctions(job.roads.ribbon, job.roads.lampSolid,
+            job.roads.lampGlow, junctions.sublist(from, to), job.anchorBF,
+            epoch,
+            furniture: furniture);
+      }));
+    }
   }
 
   /// Height a street tree is grown at. Real pollarded street stock runs
@@ -2612,7 +2774,19 @@ class _Tile {
   String builtKey = '';
   String wantKey = '';
   CityTier? wantTier;
+
+  /// Whether the wanted build can resolve any building past a box (see
+  /// [CityNodes.tileCanDetail]); decided with [wantKey], so the job that
+  /// builds it gates its lot furniture on the same answer the key carries.
+  bool wantCanDetail = false;
+
+  /// The tier the tile's distance earned it last update, before the view
+  /// cull — the hysteresis in [CityNodes.tierAtDistance] needs it.
+  CityTier? distanceTier;
   bool queued = false;
+
+  /// The least distance from the focus to any point of the tile's bounding
+  /// sphere: |centre − focus| less the half diagonal, floored at zero.
   double distanceM = double.infinity;
 
   /// Inside the lens's view cone as of the last update — with hysteresis,
@@ -2660,15 +2834,59 @@ class _RoadBuilders {
   final MeshBuilder railSteel = MeshBuilder();
 }
 
+/// The kinds of step a tile build is made of. The build loop books the
+/// last cost of each kind and will not start one that would not fit the
+/// frame's remaining budget (see [CityNodes.update]).
+enum _StepKind {
+  roads,
+  junctions,
+  buildings,
+  patches,
+  lots,
+  // The upload: a builder into geometry, a skyline sink, a run of
+  // archetype groups, the planting, and the one swap into the scene.
+  mesh,
+  skyline,
+  instances,
+  flora,
+  swap,
+}
+
+/// One part of a tile build.
+class _BuildStep {
+  const _BuildStep(this.kind, this.run);
+  final _StepKind kind;
+  final void Function() run;
+}
+
 /// A tile build in progress: its builders, and the parts still to run.
 class _TileJob {
-  _TileJob(this.key, this.tier, this.anchorBF);
+  _TileJob(this.key, this.tier, this.anchorBF, Vector3 rootAnchorBF)
+      : local = vm.Matrix4.translation(vm.Vector3(
+            lengthToScene(anchorBF.x - rootAnchorBF.x),
+            lengthToScene(anchorBF.y - rootAnchorBF.y),
+            lengthToScene(anchorBF.z - rootAnchorBF.z)));
   final String key;
   final CityTier tier;
   final Vector3 anchorBF;
 
-  /// The parts of the build, run one per call from the end.
-  final List<void Function()> steps = [];
+  /// The tile's place under its body's root, fixed for the job's life.
+  final vm.Matrix4 local;
+
+  /// The parts of the build, run one per call from the end. A running
+  /// step may push more onto the end, and they run next.
+  final List<_BuildStep> steps = [];
+
+  /// Nodes built and placed but not yet in the scene: the swap step adds
+  /// them all in one frame.
+  final List<fs.Node> staged = [];
+  int skylineTris = 0;
+
+  void stage(fs.Node node) {
+    node.localTransform = local;
+    staged.add(node);
+  }
+
   final _RoadBuilders roads = _RoadBuilders();
   final MeshBuilder patches = MeshBuilder();
   final MeshBuilder featureSolid = MeshBuilder();

@@ -127,4 +127,106 @@ void main() {
             .triangleCount;
     expect(block, lessThan(full));
   });
+
+  group('a tile tracks the camera only where a building can take detail', () {
+    // At orbit altitude every building resolves to its block silhouette,
+    // so a near tile's build does not depend on where the camera is — and
+    // must not carry it in its key, or every drag re-keys every near tile
+    // into a build that lands nothing.
+    final block = CityNodes.blockRangeM;
+
+    test('not outside the near tier', () {
+      for (final tier in [CityTier.mid, CityTier.far]) {
+        expect(
+            CityNodes.tileCanDetail(tier, 0,
+                colonyTier: BuildingDetail.full, perBuildingLod: true),
+            isFalse);
+      }
+    });
+
+    test('per-building LOD: only a tile within the block range', () {
+      expect(
+          CityNodes.tileCanDetail(CityTier.near, block - 1,
+              colonyTier: BuildingDetail.block, perBuildingLod: true),
+          isTrue);
+      // Exactly at the range a building is still exterior tier, and the
+      // tile's distance is a lower bound on every building's.
+      expect(
+          CityNodes.tileCanDetail(CityTier.near, block,
+              colonyTier: BuildingDetail.block, perBuildingLod: true),
+          isTrue);
+      expect(
+          CityNodes.tileCanDetail(CityTier.near, block + 1,
+              colonyTier: BuildingDetail.full, perBuildingLod: true),
+          isFalse);
+    });
+
+    test('one tier for the colony: the colony tier answers', () {
+      // The distance is irrelevant here — and the colony tier is already
+      // part of the build key, so the camera never needs to be.
+      expect(
+          CityNodes.tileCanDetail(CityTier.near, block * 10,
+              colonyTier: BuildingDetail.exterior, perBuildingLod: false),
+          isTrue);
+      expect(
+          CityNodes.tileCanDetail(CityTier.near, 0,
+              colonyTier: BuildingDetail.block, perBuildingLod: false),
+          isFalse);
+    });
+  });
+
+  group('tier hysteresis', () {
+    final nearM = CityNodes.nearRangeM;
+    final midM = CityNodes.midRangeM;
+    final h = CityNodes.tierHysteresis;
+
+    test('a tile with no history takes the plain ranges', () {
+      expect(CityNodes.tierAtDistance(nearM - 1), CityTier.near);
+      expect(CityNodes.tierAtDistance(nearM), CityTier.mid);
+      expect(CityNodes.tierAtDistance(midM - 1), CityTier.mid);
+      expect(CityNodes.tierAtDistance(midM), CityTier.far);
+    });
+
+    test('a near tile leaves near only past the widened range', () {
+      // A tier flip is a tile rebuilt: a camera settling on the boundary
+      // must not flip it back and forth.
+      expect(CityNodes.tierAtDistance(nearM + 1, previous: CityTier.near),
+          CityTier.near);
+      expect(
+          CityNodes.tierAtDistance(nearM * h - 1, previous: CityTier.near),
+          CityTier.near);
+      expect(CityNodes.tierAtDistance(nearM * h, previous: CityTier.near),
+          CityTier.mid);
+    });
+
+    test('a mid tile leaves mid only past the widened range', () {
+      expect(CityNodes.tierAtDistance(midM + 1, previous: CityTier.mid),
+          CityTier.mid);
+      expect(CityNodes.tierAtDistance(midM * h, previous: CityTier.mid),
+          CityTier.far);
+      // Coming back in is at the plain range, not the widened one.
+      expect(CityNodes.tierAtDistance(nearM + 1, previous: CityTier.mid),
+          CityTier.mid);
+      expect(CityNodes.tierAtDistance(nearM - 1, previous: CityTier.mid),
+          CityTier.near);
+    });
+
+    test('a far tile enters at the plain ranges', () {
+      expect(CityNodes.tierAtDistance(midM + 1, previous: CityTier.far),
+          CityTier.far);
+      expect(CityNodes.tierAtDistance(midM - 1, previous: CityTier.far),
+          CityTier.mid);
+      expect(CityNodes.tierAtDistance(nearM - 1, previous: CityTier.far),
+          CityTier.near);
+    });
+
+    test('a near tile thrown past mid lands where its distance says', () {
+      // Leaving near lands in mid; leaving mid needs mid's own widened
+      // edge; beyond that the tile is far whatever it was.
+      expect(CityNodes.tierAtDistance(midM + 1, previous: CityTier.near),
+          CityTier.mid);
+      expect(CityNodes.tierAtDistance(midM * h + 1, previous: CityTier.near),
+          CityTier.far);
+    });
+  });
 }
