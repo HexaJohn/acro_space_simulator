@@ -186,7 +186,12 @@ Future<void> main() async {
   });
 
   runApp(
-    MaterialApp(
+    // ExcludeSemantics above MaterialApp, as main_scene_dev does: the
+    // Windows accessibility bridge corrupts on semantics mutation, and the
+    // perf panel's fifty rows re-generate the tree on every panel tick —
+    // a 15 ms SEMANTICS span in the frame timeline for a readout nobody
+    // reads through a screen reader.
+    ExcludeSemantics(child: MaterialApp(
       title: 'Acro — city studio dev',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark(useMaterial3: true),
@@ -194,6 +199,6 @@ Future<void> main() async {
         key: _shotKey,
         child: const CityStudioScreen(),
       ),
-    ),
+    )),
   );
 }
