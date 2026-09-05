@@ -147,6 +147,9 @@ Future<void> main() async {
       return developer.ServiceExtensionResponse.result(
           jsonEncode({'picked': label}));
     }
+    if (params['resetFrames'] == 'true') {
+      CityStudioDevHooks.resetFrames?.call();
+    }
     if (params['perf'] != null || params['controls'] != null) {
       final set = CityStudioDevHooks.setPanels;
       if (set == null) {

@@ -198,6 +198,9 @@ Future<void> main(List<String> args) async {
         'n': 0,
       };
       final steps = (seconds * 20).round();
+      // The panel's windows hold the last ninety frames; a pattern's worst
+      // frame must not be the flip or the pattern before it.
+      await call('ext.acro.citystudio', {'resetFrames': 'true'});
       final t0 = spikes ? await beginTimeline(vm) : 0;
       for (var i = 0; i < steps; i++) {
         final t = i / 20.0;

@@ -95,6 +95,11 @@ class CityStudioDevHooks {
   /// can show the scene they cover.
   static void Function({bool? perf, bool? controls})? setPanels;
 
+  /// Empty the frame-time windows the panel and the status report, so a
+  /// driven camera pattern's worst frame is its own and not the tail of
+  /// whatever ran before it.
+  static void Function()? resetFrames;
+
   /// Aim the orbit camera, so a screenshot can frame the outskirts.
   static void Function({double? distanceM, double? azimuth, double? elevation})?
       setCamera;
@@ -633,6 +638,11 @@ class _CityStudioScreenState extends State<CityStudioScreen>
         if (atmosphere != null) AtmosphereNodes.hidden = !atmosphere;
       });
     };
+    CityStudioDevHooks.resetFrames = () {
+      _frameMs.clear();
+      _uiMs.clear();
+      _rasterMs.clear();
+    };
     CityStudioDevHooks.setPanels = ({bool? perf, bool? controls}) {
       if (!mounted) return;
       setState(() {
@@ -774,6 +784,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     CityStudioDevHooks.generate = null;
     CityStudioDevHooks.setIsolate = null;
     CityStudioDevHooks.setPanels = null;
+    CityStudioDevHooks.resetFrames = null;
     CityStudioDevHooks.setCamera = null;
     CityStudioDevHooks.pick = null;
     CityStudioDevHooks.walkTo = null;
