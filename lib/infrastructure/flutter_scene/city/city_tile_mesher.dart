@@ -859,21 +859,27 @@ class CityTileMeshJob {
     if (tier == BuildingDetail.block && !k.lodDebug) {
       final built = lib.get(spec, parcel, seed: seed, detail: tier);
       final m = CityTileMesher.instanceTransform(r.anchorBF, b);
-      if (r.tier == CityTier.far) {
-        // A far tile's buildings are one or two pixels tall from where the
-        // tile is judged far: its massing as plain boxes, on the building's
-        // own facade band, and no glazing — the skyglow carries the night
-        // look at that range. The coarse model is still a facade — a quad
-        // per three metres of wall and a window band per storey — and at
-        // a hundred thousand triangles a tile, over the hundred-odd far
-        // tiles of a colony, it was most of the skyline's triangles and
-        // most of every far tile's upload, for silhouettes nothing can
-        // resolve (see [CityTileMesher.massingBoxes]).
-        _skylineSolid.append(libraries.massingBoxesOf(built), m);
-        return;
+      // A block-tier building is its massing as plain boxes at EVERY tier,
+      // on the building's own facade band (see
+      // [CityTileMesher.massingBoxes]). The coarse model is still a facade
+      // — a quad per three metres of wall and a window band per storey,
+      // some two hundred triangles a building against a dozen a volume —
+      // and block tier is every building beyond the block range, which
+      // from a camera high enough to see a district is all of them. The
+      // far tiles were boxed first, for silhouettes one or two pixels
+      // tall; the mid and near tiles kept the coarse model, and from
+      // orbit a mid tile's facade was five megabytes cut into five draws
+      // and a near tile's ten, which doubled the colony's colour draws
+      // and put five milliseconds on a static frame, for walls nothing
+      // that far resolves past a box either. What the boxes lack is
+      // windows. Beyond the far range the skyglow carries the night look;
+      // a mid or near tile keeps the coarse model's glazing — the window
+      // bands alone, which a sited building's coarse model has none of —
+      // so its towers still light up at night.
+      _skylineSolid.append(libraries.massingBoxesOf(built), m);
+      if (r.tier != CityTier.far) {
+        _skylineGlazing.append(built.model.foliage, m);
       }
-      _skylineSolid.append(built.model.solid, m);
-      _skylineGlazing.append(built.model.foliage, m);
       return;
     }
     // The style is part of the key here for the same reason it is part of
@@ -1298,10 +1304,21 @@ class CityTileMesher {
   /// the geometry's first draw, not as it is written: staging a
   /// several-megabyte facade group a slice a frame spread the Dart-side
   /// copies but left the raster thread 80 ms in the reactor on the frame
-  /// the group first drew, with the UI thread throttled behind it. A
-  /// megabyte is ~10 ms of that upload, one frame's worth under the reveal
-  /// budget, and a far tile stays one group per material.
-  static int maxGroupBytes = 1024 * 1024;
+  /// the group first drew, with the UI thread throttled behind it. That
+  /// upload runs ~10 ms a megabyte, so two megabytes is ~20 ms: one hitch,
+  /// on the frame the chunk first draws, and a tile makes one at most.
+  ///
+  /// The cap was a megabyte while the mid and near skylines were the
+  /// coarse model, five and ten megabytes a tile; a chunk that size
+  /// showed on its own frame under the reveal budget. It is two now that
+  /// the block tier is boxes at every tier (see [massingBoxes]) and a
+  /// tile's biggest group is the near tile's street furniture: every
+  /// chunk is a draw of its own for the rest of the tile's life, and at a
+  /// megabyte the furniture was two or three of them and the skylines
+  /// five and ten, which doubled the colony's colour draws. Two
+  /// megabytes makes the furniture one chunk — one hitch as it arrives,
+  /// one draw after — and every skyline well under it.
+  static int maxGroupBytes = 2 * 1024 * 1024;
 
   /// [mesh] as groups of at most [maxBytes] each — one where it fits, else
   /// consecutive runs of its triangles, each with the vertex range those

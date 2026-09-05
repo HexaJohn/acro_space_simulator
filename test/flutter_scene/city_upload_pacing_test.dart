@@ -223,7 +223,7 @@ void main() {
     });
 
     test("the frame's first reveal runs whatever the chunk costs", () {
-      // A chunk over the cap — the chunk cap is a megabyte, the frame's
+      // A chunk over the cap — the chunk cap is two megabytes, the frame's
       // is less — would otherwise never show at all.
       final cap = 768 * kib;
       final (r, shown, _) = reveal([1024 * kib, 100 * kib]);
@@ -284,6 +284,75 @@ void main() {
       expect(r.advance(CityUploadByteBudget(1), first: true), 0);
       expect(r.done, isTrue);
       expect(dropped, [0]);
+    });
+
+    group('the reveals leave the staging half the frame', () {
+      // The build loop's frame: a tile mid-reveal and a tile in the queue
+      // with a geometry to stage. The reveals ran first and took the whole
+      // cap, and while a zoom's tiles revealed nothing behind them was
+      // staged; now they may take half of it when anything is stageable.
+      final cap = 768 * kib;
+      final share = CityNodes.revealBytesPerFrameWhileStaging;
+
+      test('the share is half the frame', () {
+        expect(share, 384 * kib);
+        expect(CityUploadByteBudget(cap, revealCap: share).revealCap, share);
+        // Alone, the reveals have the cap; a share over it is the cap.
+        expect(CityUploadByteBudget(cap).revealCap, cap);
+        expect(CityUploadByteBudget(cap, revealCap: 2 * cap).revealCap, cap);
+      });
+
+      test('a revealing tile and a stageable tile share a frame', () {
+        final (r, shown, _) = reveal([300 * kib, 300 * kib, 300 * kib]);
+        final frame = CityUploadByteBudget(cap, revealCap: share);
+        // One chunk: the second would take the reveals over their share.
+        expect(r.advance(frame, first: true), 1);
+        expect(shown, [true, false, false]);
+        expect(frame.revealRemaining, 84 * kib);
+        expect(frame.remaining, 468 * kib);
+        // The staging gets the rest — at least half the frame.
+        final (step, upload, _) = _step(600 * kib);
+        expect(frame.take(step), 468 * kib);
+        expect(upload.caps, [468 * kib]);
+        expect(frame.spent, cap);
+        // Next frame the reveal carries on, from the chunk it stopped at.
+        expect(r.advance(CityUploadByteBudget(cap, revealCap: share),
+            first: true), 1);
+        expect(shown, [true, true, false]);
+      });
+
+      test("the frame's first chunk shows over the share", () {
+        // A chunk over the share still shows, as one over the cap does:
+        // what is left is the staging's, however little.
+        final (r, shown, _) = reveal([500 * kib, 100 * kib]);
+        final frame = CityUploadByteBudget(cap, revealCap: share);
+        expect(r.advance(frame, first: true), 1);
+        expect(shown, [true, false]);
+        expect(frame.revealRemaining, lessThan(0));
+        expect(frame.remaining, 268 * kib);
+        final (step, _, _) = _step(600 * kib);
+        expect(frame.take(step), 268 * kib);
+      });
+
+      test('a second tile\'s reveal waits on the share too', () {
+        final (a, shownA, _) = reveal([300 * kib]);
+        final (b, shownB, _) = reveal([100 * kib]);
+        final frame = CityUploadByteBudget(cap, revealCap: share);
+        expect(a.advance(frame, first: true), 1);
+        expect(b.advance(frame), 0, reason: '84 KiB of the share is left');
+        expect(shownA, [true]);
+        expect(shownB, [false]);
+        expect(frame.remaining, 468 * kib);
+      });
+
+      test('nothing stageable: the reveals take the whole cap', () {
+        final (r, shown, _) = reveal([300 * kib, 300 * kib, 300 * kib]);
+        final frame = CityUploadByteBudget(cap);
+        expect(r.advance(frame, first: true), 2);
+        expect(shown, [true, true, false]);
+        expect(frame.revealRemaining, 168 * kib);
+        expect(frame.remaining, 168 * kib);
+      });
     });
   });
 }

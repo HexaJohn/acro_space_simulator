@@ -247,6 +247,17 @@ class CityNodes {
   /// under ~8 ms, one chunk more at most.
   static int uploadBytesPerFrame = 768 * 1024;
 
+  /// The reveals' share of [uploadBytesPerFrame] on a frame that has
+  /// staging to do: half, so the tiles still in the queue keep arriving
+  /// while the tiles already built finish showing. With nothing to stage
+  /// the reveals take the whole cap. The reveals ran first and took what
+  /// they liked, and while the tiles of a zoom revealed — a few chunks a
+  /// frame, tile after tile — nothing behind them was staged at all: a
+  /// queue of seventy tiles took over a minute to drain. The frame's
+  /// first reveal chunk runs over this share as it runs over the cap (see
+  /// [CityTileReveal.advance]).
+  static int get revealBytesPerFrameWhileStaging => uploadBytesPerFrame ~/ 2;
+
   /// Tile builds on workers at once. Two workers, two jobs each queued
   /// behind: enough to keep both busy across a frame's dispatch, few
   /// enough that a camera that moves on leaves little stale work behind.
@@ -1026,15 +1037,25 @@ class CityNodes {
     // what the raster thread will pay for them. One step always runs, or a
     // step dearer than the whole budget would never run at all.
     var builtThisFrame = 0, stepsThisFrame = 0;
-    final uploadBytes = CityUploadByteBudget(uploadBytesPerFrame);
+    // Whether any queued tile has upload steps to run this frame: judged
+    // before the reveals, since it decides how much of the frame they may
+    // have. (The submissions below add nothing stageable — a tile just
+    // submitted has no result yet.)
+    final stageable = _nextUploadable() != null;
+    final uploadBytes = CityUploadByteBudget(uploadBytesPerFrame,
+        revealCap: stageable ? revealBytesPerFrameWhileStaging : null);
     // The reveals first, nearest first: they are tiles already built and
     // swapped, whose GPU cost lands at the draw, and they take the frame's
     // bytes before any staging does — staged slices are Dart-side copies
     // now, cheap to defer, and a tile whose chunks waited on the staging
-    // behind it would never finish showing. Not the queue's business: a
-    // swapped tile is off the queue, and this touches neither it nor the
-    // job. A hidden tile's reveal waits — nothing it shows is drawn, so
-    // nothing would upload — and resumes when it is attached again.
+    // behind it would never finish showing. But not ALL of the frame's
+    // bytes while there is staging to do: the reveals of a zoom, tile
+    // after tile, left the staging nothing frame after frame, and the
+    // queue behind them stood still (see [revealBytesPerFrameWhileStaging]).
+    // Not the queue's business: a swapped tile is off the queue, and this
+    // touches neither it nor the job. A hidden tile's reveal waits —
+    // nothing it shows is drawn, so nothing would upload — and resumes
+    // when it is attached again.
     var revealChunks = 0;
     if (_revealing.isNotEmpty) {
       final revealing = _revealing.toList()
@@ -2768,10 +2789,17 @@ class CityMeshUploadStep {
 /// One frame's share of GPU upload bytes, spent across every mesh step the
 /// frame advances (see [CityNodes.uploadBytesPerFrame]).
 class CityUploadByteBudget {
-  CityUploadByteBudget(this.cap);
+  CityUploadByteBudget(this.cap, {int? revealCap})
+      : revealCap = math.min(cap, revealCap ?? cap);
 
   /// Bytes the frame may hand the GPU in all.
   final int cap;
+
+  /// Bytes the reveals — which run before any staging — may spend between
+  /// them: the whole [cap], or the share of it the frame keeps back for
+  /// its staging (see [CityNodes.revealBytesPerFrameWhileStaging]). Never
+  /// more than the cap.
+  final int revealCap;
 
   /// Bytes handed over so far this frame.
   int get spent => _spent;
@@ -2779,6 +2807,10 @@ class CityUploadByteBudget {
 
   /// Bytes the frame has left.
   int get remaining => cap - _spent;
+
+  /// Bytes the reveals have left: their own cap less what the frame has
+  /// spent, which is theirs alone while they run.
+  int get revealRemaining => revealCap - _spent;
 
   /// Advances [step] by what is left and books what it moved.
   int take(CityMeshUploadStep step) {
@@ -2830,16 +2862,16 @@ class CityTileReveal {
     return n;
   }
 
-  /// Show the chunks in order while [budget] has the bytes for the next —
-  /// or the first chunk regardless when this is the frame's [first]
-  /// reveal, since a chunk bigger than the cap would otherwise never show
-  /// — booking each; returns how many showed. Calls [onDone] when the last
-  /// one has.
+  /// Show the chunks in order while [budget] has the reveals' bytes for
+  /// the next (see [CityUploadByteBudget.revealRemaining]) — or the first
+  /// chunk regardless when this is the frame's [first] reveal, since a
+  /// chunk bigger than the cap would otherwise never show — booking each;
+  /// returns how many showed. Calls [onDone] when the last one has.
   int advance(CityUploadByteBudget budget, {bool first = false}) {
     var shown = 0;
     while (_next < _chunks.length) {
       final c = _chunks[_next];
-      if (!(first && shown == 0) && c.bytes > budget.remaining) break;
+      if (!(first && shown == 0) && c.bytes > budget.revealRemaining) break;
       budget.spend(c.bytes);
       c.show();
       _next++;
