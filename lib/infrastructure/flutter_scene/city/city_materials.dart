@@ -177,7 +177,17 @@ class _CitySurfaceMaterial extends fs.PhysicallyBasedMaterial {
     final shader = CityMaterials._surfaceShader;
     if (shader != null) setFragmentShader(shader);
     _glow = shader != null;
+    // The fork's material binds the albedo through this sampler, so the
+    // trilinear choice no longer costs a second base_color_texture bind per
+    // draw (it did: the stock bind and then ours, one native call in ~35).
+    baseColorSampler = _trilinear;
   }
+
+  /// The CityGlow block, one list for the material's lifetime and refilled
+  /// per bind: emplace copies the bytes out immediately, and a fresh
+  /// Float32List per draw was one of the ~44 allocations the encoder paid
+  /// per draw before material-run binding landed.
+  static final Float32List _glowData = Float32List(20);
 
   /// Whether this material binds the CityGlow block (custom shader only —
   /// the stock fragment has no such slot to fill).
@@ -193,7 +203,7 @@ class _CitySurfaceMaterial extends fs.PhysicallyBasedMaterial {
     if (_glow) {
       final s = CityMaterials.glowIntensity *
           CityMaterials.nightFactor.clamp(0.0, 1.0);
-      final data = Float32List(20);
+      final data = _glowData;
       data[0] = CityMaterials.glowCentreScene.x;
       data[1] = CityMaterials.glowCentreScene.y;
       data[2] = CityMaterials.glowCentreScene.z;
@@ -213,22 +223,17 @@ class _CitySurfaceMaterial extends fs.PhysicallyBasedMaterial {
       data[17] = CityMaterials.lightMapNorth.y;
       data[18] = CityMaterials.lightMapNorth.z;
       pass.bindUniform(
-        fragmentShader.getUniformSlot('CityGlow'),
+        uniformSlot('CityGlow'),
         transientsBuffer.emplace(ByteData.sublistView(data)),
       );
       // The density map. The white placeholder is "1 everywhere" — the
       // pre-map behaviour — until the first colony bake lands.
       pass.bindTexture(
-        fragmentShader.getUniformSlot('city_light_texture'),
+        uniformSlot('city_light_texture'),
         fs.Material.whitePlaceholder(CityMaterials.lightMap as igpu.Texture?),
         sampler: _trilinear,
       );
     }
-    pass.bindTexture(
-      fragmentShader.getUniformSlot('base_color_texture'),
-      fs.Material.whitePlaceholder(baseColorTexture),
-      sampler: _trilinear,
-    );
   }
 
   static final _trilinear = igpu.SamplerOptions(

@@ -94,6 +94,16 @@ Future<void> main(List<String> args) async {
       }
       acc['draws'] = ((s['censusDraws'] as num?)?.toDouble() ?? 0);
       acc['inst'] = ((s['censusInstances'] as num?)?.toDouble() ?? 0);
+      final eng = (s['engine'] as Map?)?.cast<String, dynamic>();
+      if (eng != null) {
+        for (final k in [
+          'colourDraws', 'shadowDraws', 'packedInstances', 'materialBinds',
+          'prePassMs', 'bvhMs', 'shadowMs', 'colourMs', 'bvhRebuilds',
+        ]) {
+          acc['e.$k'] =
+              (acc['e.$k'] ?? 0) + ((eng[k] as num?)?.toDouble() ?? 0) / n;
+        }
+      }
       if (s['fault'] != null) stdout.writeln('  FAULT ${s['fault']}');
       await Future<void>.delayed(const Duration(seconds: 2));
     }
@@ -101,6 +111,16 @@ Future<void> main(List<String> args) async {
         'raster ${f(acc['rasterMs'])}  terrain ${f(acc['terrainMs'])}  '
         'city ${f(acc['cityMs'])}  draws ${acc['draws']!.round()} '
         '(${acc['inst']!.round()} inst)');
+    if (acc.containsKey('e.colourDraws')) {
+      stdout.writeln('    engine: encoded colour '
+          '${acc['e.colourDraws']!.round()} '
+          'shadow ${acc['e.shadowDraws']!.round()}  '
+          'binds ${acc['e.materialBinds']!.round()}  '
+          'packed ${acc['e.packedInstances']!.round()}  '
+          'ms pre ${f(acc['e.prePassMs'])} bvh ${f(acc['e.bvhMs'])} '
+          'shadow ${f(acc['e.shadowMs'])} colour ${f(acc['e.colourMs'])}  '
+          'rebuilds/frame ${f(acc['e.bvhRebuilds'])}');
+    }
     return acc;
   }
 

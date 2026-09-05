@@ -859,9 +859,11 @@ base class Scene implements SceneGraph {
     renderScene.rebuildIfDirty();
     SceneFrameStats.accumulating.bvhMs +=
         bvhStopwatch.elapsedMicroseconds / 1000.0;
-    // TODO(perf-stats): count a full rebuild (not a refit) into
-    // SceneFrameStats.bvhRebuilds from `RenderScene.lastRebuildWasFull` once
-    // the culling-structure owner adds that flag.
+    // A full rebuild is the spike the deferred policy exists to avoid; a
+    // refit is not counted.
+    if (renderScene.lastRebuildWasFull) {
+      SceneFrameStats.accumulating.bvhRebuilds++;
+    }
 
     // The renderer shades a single directional light: the first one
     // registered in the graph (the [directionalLight] convenience, or a

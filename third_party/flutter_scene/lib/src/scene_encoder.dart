@@ -38,8 +38,6 @@ class SceneFrameStats {
   int materialBinds = 0;
 
   /// Full spatial-structure rebuilds this frame (a refit does not count).
-  // TODO(perf-stats): counted from `RenderScene.lastRebuildWasFull`, a flag
-  // the culling-structure owner is adding; until it exists this stays 0.
   int bvhRebuilds = 0;
 
   double prePassMs = 0;

@@ -567,6 +567,17 @@ class _CityStudioScreenState extends State<CityStudioScreen>
           'censusDraws': _censusDraws,
           'censusInstances': _censusInstances,
           'censusNodes': _censusNodes,
+          'engine': {
+            'colourDraws': fs.Scene.lastFrameStats.colourDraws,
+            'shadowDraws': fs.Scene.lastFrameStats.shadowDraws,
+            'materialBinds': fs.Scene.lastFrameStats.materialBinds,
+            'packedInstances': fs.Scene.lastFrameStats.packedInstances,
+            'bvhRebuilds': fs.Scene.lastFrameStats.bvhRebuilds,
+            'prePassMs': fs.Scene.lastFrameStats.prePassMs,
+            'bvhMs': fs.Scene.lastFrameStats.bvhMs,
+            'shadowMs': fs.Scene.lastFrameStats.shadowMs,
+            'colourMs': fs.Scene.lastFrameStats.colourMs,
+          },
           'shadows': _shadows,
           'rover': _roverStatus(),
           'stats': _lastStats,
@@ -2501,6 +2512,25 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             '  whole scene, per colour pass. Shadow cascades re-draw '
             'casters on top.',
             style: AppTheme.dim.copyWith(fontSize: 10)),
+        // What the engine actually ENCODED last frame (post-cull), against
+        // the census above (pre-cull), and where its UI-thread time went.
+        row(
+            '  encoded',
+            'colour ${fs.Scene.lastFrameStats.colourDraws}  '
+            'shadow ${fs.Scene.lastFrameStats.shadowDraws}  '
+            'binds ${fs.Scene.lastFrameStats.materialBinds}  '
+            'packed ${fs.Scene.lastFrameStats.packedInstances}',
+            colour: AppTheme.textDim),
+        row(
+            '  engine ms',
+            'pre ${ms(fs.Scene.lastFrameStats.prePassMs)}  '
+            'bvh ${ms(fs.Scene.lastFrameStats.bvhMs)}  '
+            'shadow ${ms(fs.Scene.lastFrameStats.shadowMs)}  '
+            'colour ${ms(fs.Scene.lastFrameStats.colourMs)}  '
+            'rebuilds ${fs.Scene.lastFrameStats.bvhRebuilds}',
+            colour: fs.Scene.lastFrameStats.bvhRebuilds > 0
+                ? AppTheme.warn
+                : AppTheme.textDim),
         const SizedBox(height: 6),
         row('terrain', '${ms(_terrainMs)} ms',
             colour: _terrainMs > 4 ? AppTheme.warn : AppTheme.text),

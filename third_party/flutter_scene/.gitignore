@@ -1,0 +1,9 @@
+# Artifacts of running the package's own tests/analyze in place. The
+# shader bundle itself (build/shaderbundles/base.shaderbundle) stays tracked:
+# the build hook regenerates it, and a checkout should render without a hook run.
+build/native_assets/
+build/test_cache/
+build/unit_test_assets/
+build/shaderbundles/*.engine_stamp.json
+pubspec.lock
+.dart_tool/
