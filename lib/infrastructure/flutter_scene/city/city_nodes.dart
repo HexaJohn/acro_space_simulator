@@ -306,17 +306,35 @@ class CityNodes {
   /// Compared with `<=`, not `<`: [tierForDistance] keeps a building at
   /// exactly [blockRangeM] out of the block tier, and the least distance
   /// to the tile is a lower bound on every building's.
+  ///
+  /// The tile's bounding sphere is a loose bound from above: a two-mile
+  /// cell's sphere reaches 2.8 km up, so an orbit camera 700 m over the
+  /// colony sits INSIDE the sphere of the tile beneath it and the least
+  /// distance reads zero — and that tile kept its camera term, re-keying on
+  /// every turn of a drag. [focusRadiusM] and [tileMaxRadiusM] add the bound
+  /// from below: every building's centre lies within [tileMaxRadiusM] of
+  /// the body centre, so no building is nearer the eye than the eye's
+  /// height over that shell (|eye − b| ≥ |eye| − |b|). Both bounds must
+  /// allow a refinement for the camera to enter the key.
   static bool tileCanDetail(
     CityTier tier,
     double tileDistanceM, {
     required BuildingDetail colonyTier,
     bool? perBuildingLod,
     double? blockRangeM,
+    double? focusRadiusM,
+    double? tileMaxRadiusM,
   }) {
     if (tier != CityTier.near) return false;
-    return (perBuildingLod ?? CityNodes.perBuildingLod)
-        ? tileDistanceM <= (blockRangeM ?? CityNodes.blockRangeM)
-        : colonyTier != BuildingDetail.block;
+    if (!(perBuildingLod ?? CityNodes.perBuildingLod)) {
+      return colonyTier != BuildingDetail.block;
+    }
+    final range = blockRangeM ?? CityNodes.blockRangeM;
+    if (tileDistanceM > range) return false;
+    if (focusRadiusM != null && tileMaxRadiusM != null) {
+      return focusRadiusM - tileMaxRadiusM <= range;
+    }
+    return true;
   }
 
   /// Tiles nearer than this show their planter shrubs. Beyond it a shrub
@@ -932,7 +950,10 @@ class CityNodes {
           far++;
       }
       final canDetail =
-          tileCanDetail(tier, t.distanceM, colonyTier: colonyTier);
+          tileCanDetail(tier, t.distanceM,
+              colonyTier: colonyTier,
+              focusRadiusM: focusBF.length,
+              tileMaxRadiusM: t.maxRadiusM);
       final cam = perBuildingLod && canDetail
           ? '${(focusBF.x / 64).round()},${(focusBF.y / 64).round()},'
               '${(focusBF.z / 64).round()}'
@@ -1106,7 +1127,13 @@ class CityNodes {
       final p = Vector3(b.px, b.py, b.pz);
       rootFor(b.body, p);
       (_byBody[b.body] ??= []).add(b);
-      tileFor(b.body, p).buildings.add(b);
+      final t = tileFor(b.body, p);
+      t.buildings.add(b);
+      // The outermost building centre, for the altitude bound in
+      // [tileCanDetail]. A centre, not a roof: the bound is on the distance
+      // to the point [detailFor] measures, which is the centre.
+      final r = p.length;
+      if (r > t.maxRadiusM) t.maxRadiusM = r;
     }
     for (final p in snap.patches) {
       final at = Vector3(p.px, p.py, p.pz);
@@ -2793,6 +2820,11 @@ class _Tile {
   final List<RoadSnapshot> roads = [];
   final List<CityPatchSnapshot> patches = [];
   final List<_TileEnd> ends = [];
+
+  /// Body-centre distance of the outermost building centre in the tile
+  /// (0 with no buildings): the shell the camera's altitude is measured
+  /// over in [CityNodes.tileCanDetail].
+  double maxRadiusM = 0;
 
   /// The tile's nodes, children of the body's root.
   final List<fs.Node> batches = [];

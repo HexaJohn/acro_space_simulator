@@ -241,23 +241,23 @@ void main() {
       expect(GraphicsQuality.terrainFrustumCull, isTrue);
     });
 
-    test('city out-of-view mode persists and falls back to step down', () {
+    test('city out-of-view mode persists and falls back to hidden', () {
       GraphicsQuality.reset();
-      expect(GraphicsQuality.cityOutOfView, CityOutOfView.stepDown);
-      GraphicsQuality.cityOutOfView = CityOutOfView.hidden;
+      expect(GraphicsQuality.cityOutOfView, CityOutOfView.hidden);
+      GraphicsQuality.cityOutOfView = CityOutOfView.stepDown;
       expect(GraphicsQuality.isCustom, isFalse);
       final stored = GraphicsQuality.toPrefs();
-      expect(stored[GraphicsQuality.cityOutOfViewKey], 'hidden');
+      expect(stored[GraphicsQuality.cityOutOfViewKey], 'stepDown');
       expect(GraphicsQuality.prefKeys,
           contains(GraphicsQuality.cityOutOfViewKey));
 
       GraphicsQuality.reset();
       GraphicsQuality.applyPrefs(stored);
-      expect(GraphicsQuality.cityOutOfView, CityOutOfView.hidden);
+      expect(GraphicsQuality.cityOutOfView, CityOutOfView.stepDown);
 
       GraphicsQuality.applyPrefs(
           const {GraphicsQuality.cityOutOfViewKey: 'gone'});
-      expect(GraphicsQuality.cityOutOfView, CityOutOfView.stepDown);
+      expect(GraphicsQuality.cityOutOfView, CityOutOfView.hidden);
       expect(CityOutOfView.byName('far'), CityOutOfView.far);
       expect(CityOutOfView.byName(null), isNull);
     });

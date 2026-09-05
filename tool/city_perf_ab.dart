@@ -97,7 +97,8 @@ Future<void> main(List<String> args) async {
       final eng = (s['engine'] as Map?)?.cast<String, dynamic>();
       if (eng != null) {
         for (final k in [
-          'colourDraws', 'shadowDraws', 'packedInstances', 'materialBinds',
+          'colourDraws', 'shadowDraws', 'packedInstances', 'instancesEmplaced',
+          'materialBinds',
           'prePassMs', 'bvhMs', 'shadowMs', 'colourMs', 'bvhRebuilds',
         ]) {
           acc['e.$k'] =
@@ -116,7 +117,8 @@ Future<void> main(List<String> args) async {
           '${acc['e.colourDraws']!.round()} '
           'shadow ${acc['e.shadowDraws']!.round()}  '
           'binds ${acc['e.materialBinds']!.round()}  '
-          'packed ${acc['e.packedInstances']!.round()}  '
+          'packed ${acc['e.packedInstances']!.round()}'
+          '/${(acc['e.instancesEmplaced'] ?? 0).round()}  '
           'ms pre ${f(acc['e.prePassMs'])} bvh ${f(acc['e.bvhMs'])} '
           'shadow ${f(acc['e.shadowMs'])} colour ${f(acc['e.colourMs'])}  '
           'rebuilds/frame ${f(acc['e.bvhRebuilds'])}');

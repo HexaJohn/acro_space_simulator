@@ -294,13 +294,19 @@ class GraphicsQuality {
 
   /// What a city tile outside the lens's view cone becomes while
   /// [terrainFrustumCull] is on. Not a quality rung either.
-  static CityOutOfView cityOutOfView = CityOutOfView.stepDown;
+  // `hidden`, not `stepDown`: stepping a tile down a tier puts the new
+  // tier in its build key, so turning the camera rebuilt every tile that
+  // crossed the view cone's edge — a drag sweep measured 43 ms a frame
+  // with eighteen tiles queued, against 18 ms held still. Hidden tiles keep
+  // their nodes and come back with a re-attach; the engine's own frustum
+  // cull already skips what is behind the camera in the colour pass.
+  static CityOutOfView cityOutOfView = CityOutOfView.hidden;
 
   /// Restore the shipped default.
   static void reset() {
     master = QualityLevel.high;
     terrainFrustumCull = true;
-    cityOutOfView = CityOutOfView.stepDown;
+    cityOutOfView = CityOutOfView.hidden;
     resetOverrides();
   }
 
@@ -331,7 +337,7 @@ class GraphicsQuality {
     // 'false' turns it off.
     terrainFrustumCull = stored[terrainFrustumCullKey] != 'false';
     cityOutOfView = CityOutOfView.byName(stored[cityOutOfViewKey]) ??
-        CityOutOfView.stepDown;
+        CityOutOfView.hidden;
   }
 
   /// The current settings as a persistable map. A null override is stored as

@@ -572,6 +572,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             'shadowDraws': fs.Scene.lastFrameStats.shadowDraws,
             'materialBinds': fs.Scene.lastFrameStats.materialBinds,
             'packedInstances': fs.Scene.lastFrameStats.packedInstances,
+            'instancesEmplaced': fs.Scene.lastFrameStats.instancesEmplaced,
             'bvhRebuilds': fs.Scene.lastFrameStats.bvhRebuilds,
             'prePassMs': fs.Scene.lastFrameStats.prePassMs,
             'bvhMs': fs.Scene.lastFrameStats.bvhMs,
@@ -2519,7 +2520,8 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             'colour ${fs.Scene.lastFrameStats.colourDraws}  '
             'shadow ${fs.Scene.lastFrameStats.shadowDraws}  '
             'binds ${fs.Scene.lastFrameStats.materialBinds}  '
-            'packed ${fs.Scene.lastFrameStats.packedInstances}',
+            'packed ${fs.Scene.lastFrameStats.packedInstances}'
+            '/${fs.Scene.lastFrameStats.instancesEmplaced}',
             colour: AppTheme.textDim),
         row(
             '  engine ms',
