@@ -116,6 +116,13 @@ encoders already relied on that.
   takes `layerMask` (default `kRenderLayerAll`), which `Scene` plumbs from
   `view.layerMask` the way `DepthPrepass` and `ScenePass` already do, and
   hands to each cascade's encoder.
+- `lib/src/scene.dart` — `Scene.collectorPacerBytesPerFrame` (1 MiB, 0 to
+  disable): a Uint8List allocated and dropped at the end of every frame so
+  the collector's minor collections run every few frames instead of every
+  seventy. The per-frame command buffers and render passes have no dispose
+  API; their native finalizers run inside the scavenge at ~60 µs each, and
+  a rarely-scavenging scene paid for seventy frames of them at once (9-12 ms,
+  ~90% in MournWeakHandles, once a second). Same total work, no spike.
 
 ## Patches (scene layer)
 

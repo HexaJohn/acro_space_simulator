@@ -43,7 +43,7 @@ for ($i = 0; $i -lt 600; $i++) {
 if (-not $uri) { Write-Output "NO VM URI"; Get-Content $log -Tail 30; exit 1 }
 Write-Output "== VM $uri"
 $shot = Join-Path (Resolve-Path $OutDir) "shot_$Tag.png"
-cmd /c "fvm dart run tool/city_perf_ab.dart $uri --sprawl=$Sprawl --distance=1320 --elevation=0.55 --samples=8 --sweep --assert=static:$Static,sweep:$Sweep,worst:$Worst --shot=$shot 2>&1" | Where-Object { $_ -notmatch "Running build hooks" }
+cmd /c "fvm dart run tool/city_perf_ab.dart $uri --sprawl=$Sprawl --distance=1320 --elevation=0.55 --samples=8 --sweep --spikes --assert=static:$Static,sweep:$Sweep,worst:$Worst --shot=$shot 2>&1" | Where-Object { $_ -notmatch "Running build hooks" }
 $gate = $LASTEXITCODE
 Write-Output "==== GATE exit $gate"
 Write-Output "==== PROFILE"

@@ -932,6 +932,48 @@ base class Scene implements SceneGraph {
     // the rebuild near the environment resolution above).
     _hasPresentedFrame = true;
     _publishFrameStats();
+    _paceCollector();
+  }
+
+  /// New-space bytes turned over per frame to keep the collector's minor
+  /// collections frequent and small. Zero disables the pacer.
+  ///
+  /// PATCHED (acro_space_simulator). Every frame's command buffers and
+  /// render passes are native objects with no dispose API; they are freed
+  /// by their finalizers, which run inside the next scavenge, and each one
+  /// costs the collector about 60 µs (a render pass holds every recorded
+  /// command with its bindings). A scene that allocates little scavenges
+  /// only every seventy frames or so — and that scavenge then finalises
+  /// seventy frames of passes at once: measured 9-12 ms, ~90% of it in
+  /// MournWeakHandles, one long frame a second on an otherwise 9 ms
+  /// frame. Retaining the passes so they could not die dropped the same
+  /// scavenges to 1.6 ms. Turning over a megabyte a frame makes new space
+  /// fill every few frames instead, so each scavenge finalises a few
+  /// frames of passes and costs about a millisecond — the same total
+  /// work, spread thin enough that no frame sees it. The list is replaced,
+  /// never kept, so nothing survives: a scavenge of pure garbage is a
+  /// memset's worth of work.
+  static int collectorPacerBytesPerFrame = 2 << 20;
+
+  /// Each pacer allocation is this big. Small on purpose: a typed list past
+  /// the VM's new-space limit is allocated straight into old space and
+  /// fills nothing, which is what a single megabyte did (measured: no
+  /// change in the scavenge cadence).
+  static const int _pacerChunkBytes = 16 << 10;
+  static List<Uint8List>? _pacer;
+
+  /// How many chunks the last frame's pacer allocated (0 when off): the
+  /// read that keeps the store observable, and a number for a status line.
+  static int get collectorPacerChunks => _pacer?.length ?? 0;
+  static void _paceCollector() {
+    final bytes = collectorPacerBytesPerFrame;
+    if (bytes <= 0) {
+      _pacer = null;
+      return;
+    }
+    final chunks = (bytes + _pacerChunkBytes - 1) ~/ _pacerChunkBytes;
+    _pacer = List<Uint8List>.generate(
+        chunks, (_) => Uint8List(_pacerChunkBytes), growable: false);
   }
 
   // Whether at least one frame has been rendered and presented, so the web

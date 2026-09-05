@@ -11,7 +11,7 @@
 ///
 ///   dart run tool/city_perf_ab.dart <vm-service-uri> [--no-generate]
 ///       [--sprawl=20] [--distance=1320] [--elevation=0.55] [--samples=8]
-///       [--shot=path.png] [--sweep] [--no-flips]
+///       [--shot=path.png] [--sweep] [--spikes] [--no-flips]
 ///       [--assert=static:12,sweep:16,worst:33]
 ///
 /// `--sweep` drives the camera the way a hand does: a cold orbit over
@@ -20,7 +20,9 @@
 /// frame, deepest build queue and governor level. Pans and orbits are
 /// where the frame has dropped before (tile churn on the camera term,
 /// tier flips on the view cone, the isolate send), and a static sample
-/// never sees it. `--assert` makes the run a gate: the process exits 1
+/// never sees it. `--spikes` records the VM timeline through each pattern
+/// and names its longest frames — the send, the upload, an archetype
+/// generated cold, or a collection. `--assert` makes the run a gate: the process exits 1
 /// when the static average, the warm-orbit average or the sweep's worst
 /// frame exceeds its threshold in milliseconds.
 library;
@@ -30,6 +32,8 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:vm_service/vm_service_io.dart';
+
+import 'timeline_spans.dart';
 
 Future<void> main(List<String> args) async {
   final ws = args[0]
@@ -44,6 +48,7 @@ Future<void> main(List<String> args) async {
 
   final generate = !args.contains('--no-generate');
   final sweep = args.contains('--sweep');
+  final spikes = args.contains('--spikes');
   final flips = !args.contains('--no-flips');
   final asserts = <String, double>{};
   for (final part in opt('assert', '').split(',')) {
@@ -193,6 +198,7 @@ Future<void> main(List<String> args) async {
         'n': 0,
       };
       final steps = (seconds * 20).round();
+      final t0 = spikes ? await beginTimeline(vm) : 0;
       for (var i = 0; i < steps; i++) {
         final t = i / 20.0;
         await call('ext.acro.citystudio', pose(t));
@@ -232,6 +238,10 @@ Future<void> main(List<String> args) async {
           'submit max ${f(r['submitMs'])}  '
           'governor max ${r['governor']!.round()}');
       sweeps[label] = r;
+      if (spikes) {
+        reportSpikes(await endTimeline(vm, t0), t0,
+            thresholdMs: 16, count: 4, indent: '    ');
+      }
       return r;
     }
 

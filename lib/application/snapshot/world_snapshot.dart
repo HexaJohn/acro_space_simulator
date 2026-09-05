@@ -3,6 +3,7 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
+import 'dart:typed_data';
 import 'dart:math' as math;
 
 import '../../domain/colony/building.dart';
@@ -1556,17 +1557,17 @@ class RoadSnapshot {
   factory RoadSnapshot.fromJson(Map<String, dynamic> j) => RoadSnapshot(
         colonyId: j['colony'] as String,
         body: j['body'] as String,
-        points: [
+        points: Float64List.fromList([
           for (final n in (j['pts'] as List?) ?? const []) (n as num).toDouble()
-        ],
+        ]),
         halfWidthM: (j['hw'] as num).toDouble(),
         roadClassIndex: (j['cls'] as num?)?.toInt() ?? 0,
         sealed: j['sealed'] == true,
         soundWalls: j['walls'] == true,
         collector: j['collector'] == true,
-        bridges: [
+        bridges: Float64List.fromList([
           for (final v in (j['br'] as List?) ?? const []) (v as num).toDouble()
-        ],
+        ]),
         startHalfWidthM: (j['hw0'] as num?)?.toDouble(),
         endHalfWidthM: (j['hw1'] as num?)?.toDouble(),
       );
@@ -2109,18 +2110,23 @@ class WorldSnapshot {
             final bf = city.localToBodyFixed(pts[i], bodyRadiusM: radii[i]);
             flat.addAll([bf.x, bf.y, bf.z]);
           }
+          // Typed, not a growable list of boxed doubles: fifty thousand
+          // roads' points were 5.8 million heap objects for the collector
+          // to mark on every old-generation pass, and the pauses that
+          // marking finished with landed in the frame. A Float64List IS a
+          // List<double> to every reader.
           roads.add(RoadSnapshot(
             colonyId: city.id,
             body: body.id.value,
-            points: flat,
+            points: Float64List.fromList(flat),
             halfWidthM: road.halfWidth,
             roadClassIndex: road.roadClass.index,
             sealed: road.sealed,
             soundWalls: road.soundWalls,
             collector: road.collector,
-            bridges: [
+            bridges: Float64List.fromList([
               for (final (a, b) in road.bridges) ...[a, b]
-            ],
+            ]),
             startHalfWidthM: road.startHalfWidthM,
             endHalfWidthM: road.endHalfWidthM,
           ));
