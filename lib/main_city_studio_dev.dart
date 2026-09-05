@@ -19,6 +19,8 @@
 ///   ext.acro.citystudio?distance=9000&elevation=1.2  aim the orbit camera
 ///   ext.acro.citystudio?pick=0.5,0.5      click at a viewport fraction
 ///   ext.acro.citystudio?walk=e,n,yaw,pitch[,eyeM]   hover the walker's eye
+///   ext.acro.citystudio?drive=e,n,yaw[,throttle,steer,seconds]
+///                                      put the buggy down, hold the pedals
 ///   ext.acro.citystudio?action=generate[&blocks=N][&voxelM=V]
 ///                                      press GENERATE remotely
 library;
@@ -111,6 +113,25 @@ Future<void> main() async {
         yaw: double.parse(parts[2]),
         pitch: double.parse(parts[3]),
         eyeM: parts.length > 4 ? double.tryParse(parts[4]) : null,
+      );
+      return developer.ServiceExtensionResponse.result(
+          jsonEncode({'ok': true}));
+    }
+    if (params['drive'] != null) {
+      final drive = CityStudioDevHooks.drive;
+      final parts = params['drive']!.split(',');
+      if (drive == null || parts.length < 3) {
+        return developer.ServiceExtensionResponse.result(jsonEncode({
+          'error': 'no drive hook or bad drive=e,n,yaw[,throttle,steer,seconds]'
+        }));
+      }
+      drive(
+        e: double.parse(parts[0]),
+        n: double.parse(parts[1]),
+        yaw: double.parse(parts[2]),
+        throttle: parts.length > 3 ? double.tryParse(parts[3]) ?? 0 : 0,
+        steer: parts.length > 4 ? double.tryParse(parts[4]) ?? 0 : 0,
+        seconds: parts.length > 5 ? double.tryParse(parts[5]) ?? 0 : 0,
       );
       return developer.ServiceExtensionResponse.result(
           jsonEncode({'ok': true}));

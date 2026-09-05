@@ -31,6 +31,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter_scene/scene.dart' as fs;
 import 'package:vector_math/vector_math.dart' as vm;
 
+import '../../../adapters/presenters/rover_buggy.dart';
 import '../../../adapters/repositories/in_memory_repositories.dart';
 import '../../../adapters/repositories/in_memory_world_repositories.dart';
 import '../../../application/snapshot/world_snapshot.dart';
@@ -56,6 +57,7 @@ import '../../flutter_scene/coord_convert.dart';
 import '../../flutter_scene/debug_camera_rig.dart';
 import '../../flutter_scene/graphics_quality.dart';
 import '../../flutter_scene/lod_probe_camera.dart';
+import '../../flutter_scene/rover_nodes.dart';
 import 'city_plat_view.dart';
 import '../../flutter_scene/terrain/terrain_nodes.dart';
 import 'app_theme.dart';
@@ -109,6 +111,18 @@ class CityStudioDevHooks {
       required double yaw,
       required double pitch,
       double? eyeM})? walkTo;
+
+  /// Put the dune buggy somewhere (colony-local metres) heading [yaw]
+  /// radians from north, and hold [throttle] / [steer] for [seconds] — a
+  /// drive with no keyboard, for a screenshot of the suspension and the
+  /// dust at work. The status reports the buggy under 'rover'.
+  static void Function(
+      {required double e,
+      required double n,
+      required double yaw,
+      double throttle,
+      double steer,
+      double seconds})? drive;
 }
 
 class _CityStudioScreenState extends State<CityStudioScreen>
@@ -225,6 +239,24 @@ class _CityStudioScreenState extends State<CityStudioScreen>
 
   final Set<LogicalKeyboardKey> _held = {};
 
+  /// The dune buggy (R): drive the streets instead of walking them. `_rover`
+  /// is the live physics state; the chase camera hangs behind `_chaseYaw`,
+  /// which eases toward the heading, plus a drag-around offset that relaxes
+  /// while the throttle is held. No collision with buildings yet — it is a
+  /// way to cover ground and feel the grading, not a traffic sim.
+  bool _driving = false;
+  RoverState? _rover;
+  RoverNodes? _roverNodes;
+  double _chaseYaw = 0;
+  double _chaseOrbit = 0;
+  double _chasePitch = 0.30;
+  double _chaseDistM = 9;
+
+  /// On the ground, one way or the other: the camera is a head (or a chase
+  /// eye) with a radial up and the walk lens, not the orbit lens.
+  bool get _groundView => _firstPerson || _driving;
+  double get _fovY => _groundView ? 0.9 : 0.8;
+
   /// The ground sampler for the generated colony, kept so the walker can
   /// stand ON the terrain rather than at a fixed radius.
   TerrainField? _groundField;
@@ -250,7 +282,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   ({String site, Parcel parcel, CityBuildingSpec spec, Offset at})? _picked;
 
   double get _focalPx =>
-      LodProbeCamera.focalPxFor(_viewportH, _firstPerson ? 0.9 : 0.8);
+      LodProbeCamera.focalPxFor(_viewportH, _fovY);
   (double, double) _dragBase = (0, 0);
   /// Scene clock, as a notifier rather than plain state.
   ///
@@ -461,32 +493,41 @@ class _CityStudioScreenState extends State<CityStudioScreen>
         required double yaw,
         required double pitch,
         double? eyeM}) {
-      final sim = _sim;
-      final snap = _snap;
-      if (!mounted || sim == null || snap == null) return;
-      final b = snap.bodies[sim.body.id.value];
-      if (b == null) return;
-      // The hook speaks the sim's colony-local frame; the walker lives in the
-      // studio's world tangent frame at the anchor, which is turned from it
-      // by the body's spin and tilt. Convert through body-fixed.
-      final bodyWorld = Vector3(b.px, b.py, b.pz);
-      final quat = Quaternion(b.qw, b.qx, b.qy, b.qz);
-      final (east, north) = _tangentFrame();
-      Vector3 worldOf(double le, double ln) =>
-          bodyWorld +
-          quat.rotate(sim.localToBodyFixed(Vec2(le, ln),
-              bodyRadiusM: sim.body.radius));
-      final at = worldOf(e, n) - _anchorWorld;
-      final ahead = worldOf(e + math.sin(yaw) * 100, n + math.cos(yaw) * 100) -
-          _anchorWorld;
-      final look = ahead - at;
+      if (!mounted) return;
+      final spot = _walkerFrameOf(e, n, yaw);
+      if (spot == null) return;
       setState(() {
+        if (_driving) _toggleDriving();
         _firstPerson = true;
-        _walkE = at.dot(east);
-        _walkN = at.dot(north);
-        _walkYaw = math.atan2(look.dot(east), look.dot(north));
+        _walkE = spot.e;
+        _walkN = spot.n;
+        _walkYaw = spot.yaw;
         _walkPitch = pitch.clamp(-1.45, 1.45);
         _eyeHeightM = eyeM ?? 1.7;
+      });
+    };
+    CityStudioDevHooks.drive = (
+        {required double e,
+        required double n,
+        required double yaw,
+        double throttle = 0,
+        double steer = 0,
+        double seconds = 0}) {
+      if (!mounted) return;
+      final spot = _walkerFrameOf(e, n, yaw);
+      if (spot == null) return;
+      setState(() {
+        // Park any buggy already out, stand the walker on the spot, and let
+        // the ordinary toggle put the buggy where the walker stands.
+        if (_driving) _toggleDriving();
+        _firstPerson = true;
+        _walkE = spot.e;
+        _walkN = spot.n;
+        _walkYaw = spot.yaw;
+        _walkPitch = 0;
+        _toggleDriving();
+        _autoInput = RoverInput(throttle: throttle, steer: steer);
+        _autoUntilS = _epoch.value + seconds;
       });
     };
     CityStudioDevHooks.pick = (fx, fy) {
@@ -512,6 +553,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
           'censusInstances': _censusInstances,
           'censusNodes': _censusNodes,
           'shadows': _shadows,
+          'rover': _roverStatus(),
           'stats': _lastStats,
           'fault': _fault == null
               ? null
@@ -527,6 +569,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     CityStudioDevHooks.setCamera = null;
     CityStudioDevHooks.pick = null;
     CityStudioDevHooks.walkTo = null;
+    CityStudioDevHooks.drive = null;
     CityStudioDevHooks.status = null;
     final cb = _timingsCb;
     if (cb != null) SchedulerBinding.instance.removeTimingsCallback(cb);
@@ -568,6 +611,11 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       // Clamped: a dropped frame or a rebuild pause must not teleport the
       // walker across the colony.
       _stepWalker((dt / 1000.0).clamp(0.0, 0.1));
+      _lastGroundMs = _groundMs;
+      _lastGroundSamples = _groundSamples;
+      _groundMs = 0;
+      _groundSamples = 0;
+      _stepRover((dt / 1000.0).clamp(0.0, 0.1));
     }
     _lastTick = elapsed;
     // Traffic off means a static frame, but the clock still ticks so the
@@ -1059,6 +1107,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   /// Built in the colony's OWN frame: elevation is the angle above its ground,
   /// azimuth a turn about its local up.
   Vector3 _cameraEyeM() {
+    if (_driving) return _chaseEyeM();
     if (_firstPerson) return _walkerEyeM();
     final (east, north) = _tangentFrame();
     final ce = math.cos(_elevation), se = math.sin(_elevation);
@@ -1132,6 +1181,305 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     _walkE += (fwd * sy + side * cy) * step;
   }
 
+  /// The hooks speak the sim's colony-local frame; the walker lives in the
+  /// studio's world tangent frame at the anchor, which is turned from it by
+  /// the body's spin and tilt. Convert through body-fixed.
+  ({double e, double n, double yaw})? _walkerFrameOf(
+      double e, double n, double yaw) {
+    final sim = _sim;
+    final snap = _snap;
+    if (sim == null || snap == null) return null;
+    final b = snap.bodies[sim.body.id.value];
+    if (b == null) return null;
+    final bodyWorld = Vector3(b.px, b.py, b.pz);
+    final quat = Quaternion(b.qw, b.qx, b.qy, b.qz);
+    final (east, north) = _tangentFrame();
+    Vector3 worldOf(double le, double ln) =>
+        bodyWorld +
+        quat.rotate(sim.localToBodyFixed(Vec2(le, ln),
+            bodyRadiusM: sim.body.radius));
+    final at = worldOf(e, n) - _anchorWorld;
+    final ahead = worldOf(e + math.sin(yaw) * 100, n + math.cos(yaw) * 100) -
+        _anchorWorld;
+    final look = ahead - at;
+    return (
+      e: at.dot(east),
+      n: at.dot(north),
+      yaw: math.atan2(look.dot(east), look.dot(north)),
+    );
+  }
+
+  // ---- Rover ----------------------------------------------------------------
+
+  /// A scripted drive (the dev hook): held in place of the keys until
+  /// `_autoUntilS` on the studio clock.
+  RoverInput? _autoInput;
+  double _autoUntilS = -1;
+
+  Map<String, Object?>? _roverStatus() {
+    final r = _rover;
+    if (!_driving || r == null) return null;
+    return {
+      'e': r.e,
+      'n': r.n,
+      'yaw': r.yaw,
+      'speed': r.speed,
+      'height': r.height,
+      'pitch': r.pitch,
+      'roll': r.roll,
+      'wheelsDown': r.wheelsDown,
+      'compression': r.compression,
+      'dust': r.dust,
+      'chaseDistM': _chaseDistM,
+      'groundMs': _lastGroundMs,
+      'groundSamples': _lastGroundSamples,
+    };
+  }
+
+  double _lastGroundMs = 0;
+  int _lastGroundSamples = 0;
+
+  /// R: into and out of the dune buggy. It takes over where the walker
+  /// stands (or the walker's entry spot, just outside the colony looking
+  /// in) with its springs settled, and leaves the walker where it parked.
+  void _toggleDriving() {
+    _driving = !_driving;
+    _held.clear();
+    _chaseEyeCache = null;
+    if (_driving) {
+      if (!_firstPerson) {
+        _walkE = 0;
+        _walkN = -_spec.blockDepthM * 0.6;
+        _walkYaw = 0;
+        _walkPitch = 0;
+      }
+      _firstPerson = false;
+      _rover = RoverState.resting(
+        e: _walkE,
+        n: _walkN,
+        yaw: _walkYaw,
+        groundHeight: _groundRadiusAtEN(_walkE, _walkN),
+        gravity: _surfaceGravity(),
+      );
+      _chaseYaw = _walkYaw;
+      _chaseOrbit = 0;
+      _chasePitch = 0.30;
+    } else {
+      final r = _rover;
+      if (r != null) {
+        _walkE = r.e;
+        _walkN = r.n;
+        _walkYaw = r.yaw;
+      }
+      _rover = null;
+    }
+  }
+
+  /// Ground RADIUS under a tangent-plane point — the buggy's height datum,
+  /// sampled under every wheel. In the BODY-FIXED frame, like the walker's
+  /// eye: the world direction reads the wrong location's altitude.
+  double _groundRadiusAtEN(double e, double n) {
+    final (east, north) = _tangentFrame();
+    final flat = _anchorWorld + east * e + north * n;
+    final radial = flat - _bodyCentreWorld;
+    if (radial.length < 1) return (_anchorWorld - _bodyCentreWorld).length;
+    final dir = radial.normalized;
+    final field = _groundField;
+    final b = _snap?.bodies[_sim?.body.id.value];
+    if (field == null || b == null) return radial.length;
+    final bf = Quaternion(b.qw, b.qx, b.qy, b.qz).conjugate.rotate(dir);
+    final sw = Stopwatch()..start();
+    // The FAST surface query: the full one marches every brush on the ray
+    // at ~16 ms a sample in a graded town, and five a frame was the frame.
+    final r = field.surfaceRadiusAt(bf.x, bf.y, bf.z);
+    _groundMs += sw.elapsedMicroseconds / 1000;
+    _groundSamples++;
+    return r;
+  }
+
+  /// What the buggy's ground sampling cost this frame (ms, count) — the
+  /// perf hook reports it, because it is the one per-frame cost driving
+  /// adds that scales with the town's brush count.
+  double _groundMs = 0;
+  int _groundSamples = 0;
+
+  /// Surface gravity at the colony from the body's mu, m/s².
+  double _surfaceGravity() {
+    final sim = _sim;
+    final r = (_anchorWorld - _bodyCentreWorld).length;
+    if (sim == null || r < 1) return 9.81;
+    return sim.body.mu / (r * r);
+  }
+
+  /// The buggy's mount-plane centre, anchor-relative metres: radially off
+  /// the body through its tangent-plane spot, at its own height.
+  Vector3 _roverPosRel(RoverState r) {
+    final (east, north) = _tangentFrame();
+    final flat = _anchorWorld + east * r.e + north * r.n;
+    final radial = flat - _bodyCentreWorld;
+    final dir = radial.length < 1 ? _upWorld : radial.normalized;
+    return _bodyCentreWorld + dir * r.height - _anchorWorld;
+  }
+
+  /// The chase eye is asked for several times a frame (camera, lens, look,
+  /// atmosphere) and each answer samples the ground once — in a town cut by
+  /// a thousand grading brushes, THE expensive part. One computation per
+  /// tick; a drag lands on the next tick.
+  Vector3? _chaseEyeCache;
+  double _chaseEyeEpoch = double.nan;
+
+  Vector3 _chaseEyeM() {
+    final cached = _chaseEyeCache;
+    if (cached != null && _chaseEyeEpoch == _epoch.value) return cached;
+    final eye = _computeChaseEyeM();
+    _chaseEyeCache = eye;
+    _chaseEyeEpoch = _epoch.value;
+    return eye;
+  }
+
+  /// The chase eye, anchor-relative metres: behind the eased heading (plus
+  /// the drag-around offset), up by the pitch, and never under the ground.
+  Vector3 _computeChaseEyeM() {
+    final r = _rover;
+    if (r == null) return _walkerEyeM();
+    final (east, north) = _tangentFrame();
+    final pos = _roverPosRel(r);
+    final radial = _anchorWorld + pos - _bodyCentreWorld;
+    final up = radial.length < 1 ? _upWorld : radial.normalized;
+    final yaw = _chaseYaw + _chaseOrbit;
+    var heading = north * math.cos(yaw) + east * math.sin(yaw);
+    heading = heading - up * heading.dot(up);
+    heading = heading.length < 1e-9 ? north : heading.normalized;
+    final cp = math.cos(_chasePitch), sp = math.sin(_chasePitch);
+    var eye =
+        pos - heading * (_chaseDistM * cp) + up * (_chaseDistM * sp + 1.0);
+    final ground = _groundRadiusAtEN(eye.dot(east), eye.dot(north));
+    final eyeRadial = _anchorWorld + eye - _bodyCentreWorld;
+    if (eyeRadial.length < ground + 1.2) {
+      eye = _bodyCentreWorld +
+          eyeRadial.normalized * (ground + 1.2) -
+          _anchorWorld;
+    }
+    return eye;
+  }
+
+  /// Where the chase camera looks: at the buggy, a little above its floor.
+  Vector3 _roverLook() {
+    final r = _rover;
+    if (r == null) return _walkerLook();
+    final pos = _roverPosRel(r);
+    final radial = _anchorWorld + pos - _bodyCentreWorld;
+    final up = radial.length < 1 ? _upWorld : radial.normalized;
+    final look = (pos + up * 1.2) - _chaseEyeM();
+    return look.length < 1e-9 ? up * -1 : look.normalized;
+  }
+
+  Vector3 _groundLook() => _driving ? _roverLook() : _walkerLook();
+
+  /// Drive the buggy from whatever is held: W/S throttle, A/D steer, space
+  /// brakes. Then ease the chase camera in behind the heading; a look
+  /// around (drag) relaxes while the throttle is held, so it ends on its
+  /// own.
+  void _stepRover(double dtS) {
+    final r = _rover;
+    if (!_driving || r == null) return;
+    var throttle = 0.0, steer = 0.0;
+    if (_held.contains(LogicalKeyboardKey.keyW)) throttle += 1;
+    if (_held.contains(LogicalKeyboardKey.keyS)) throttle -= 1;
+    if (_held.contains(LogicalKeyboardKey.keyD)) steer += 1;
+    if (_held.contains(LogicalKeyboardKey.keyA)) steer -= 1;
+    final brake = _held.contains(LogicalKeyboardKey.space);
+    var input = RoverInput(throttle: throttle, steer: steer, brake: brake);
+    final auto = _autoInput;
+    if (auto != null) {
+      if (_epoch.value < _autoUntilS) {
+        input = auto;
+        throttle = auto.throttle;
+      } else {
+        _autoInput = null;
+      }
+    }
+    stepRover(
+      r,
+      input,
+      dt: dtS,
+      gravity: _surfaceGravity(),
+      heightAt: _groundRadiusAtEN,
+    );
+    final k = 1 - math.exp(-dtS / 0.35);
+    _chaseYaw += wrapAngle(r.yaw - _chaseYaw) * k;
+    if (throttle != 0) _chaseOrbit *= math.exp(-dtS / 1.5);
+  }
+
+  /// Place the buggy in the scene — heading, then pitch and roll — or take
+  /// it out. The dust is tinted from the ground under it.
+  void _syncRover(fs.Scene scene, WorldSnapshot frame, Quaternion bodyQuat) {
+    var nodes = _roverNodes;
+    if (nodes == null || nodes.scene != scene) {
+      nodes = _roverNodes = RoverNodes(scene);
+    }
+    final r = _rover;
+    final bodyId = _sim?.body.id.value;
+    if (!_driving || r == null || bodyId == null) {
+      nodes.hide();
+      return;
+    }
+    final (east, north) = _tangentFrame();
+    final pos = _roverPosRel(r);
+    final radial = _anchorWorld + pos - _bodyCentreWorld;
+    final up = radial.length < 1 ? _upWorld : radial.normalized;
+    var f0 = north * math.cos(r.yaw) + east * math.sin(r.yaw);
+    f0 = f0 - up * f0.dot(up);
+    f0 = f0.length < 1e-9 ? north : f0.normalized;
+    final r0 = f0.cross(up).normalized;
+    // Pitch about the right axis (nose up = forward tilts toward up), then
+    // roll about the new forward (right side down = right tilts away from
+    // up) — the presenter's own sign conventions.
+    final cp = math.cos(r.pitch), sp = math.sin(r.pitch);
+    final f1 = f0 * cp + up * sp;
+    final u1 = up * cp - f0 * sp;
+    final cr = math.cos(r.roll), sr = math.sin(r.roll);
+    final r2 = r0 * cr - u1 * sr;
+    final u2 = u1 * cr + r0 * sr;
+    var sand = 0.0;
+    for (final d in frame.descriptors.values) {
+      if (d.id == bodyId) sand = d.terrainSandAmount;
+    }
+    nodes.update(
+      state: r,
+      originRel: pos,
+      right: r2,
+      forward: f1,
+      up: u2,
+      timeS: _epoch.value,
+      tint: RoverNodes.groundTint(
+          bodyId: bodyId, dirBF: bodyQuat.conjugate.rotate(up), sand: sand),
+      gravity: _surfaceGravity(),
+    );
+  }
+
+  /// The driving hint bar, with the speedo.
+  Widget _driveHint() {
+    final r = _rover;
+    final kmh = r == null ? 0 : (r.speed * 3.6).abs().round();
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 16,
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: AppTheme.panelBox(),
+          child: Text(
+              '$kmh km/h · W/S drive · A/D steer · space brake · '
+              'drag to swing · wheel to zoom · R to fly',
+              style: AppTheme.mono
+                  .copyWith(fontSize: 11, color: AppTheme.textDim)),
+        ),
+      ),
+    );
+  }
+
   String? _bodyIdOfFrame(WorldSnapshot frame) =>
       frame.bodies.isEmpty ? null : _sim?.body.id.value;
 
@@ -1173,8 +1521,8 @@ class _CityStudioScreenState extends State<CityStudioScreen>
 
   fs.PerspectiveCamera _camera() {
     final eye = _cameraEyeM();
-    if (_firstPerson) {
-      final look = _walkerLook();
+    if (_groundView) {
+      final look = _groundLook();
       final p = vm.Vector3(eye.x, eye.y, eye.z) * kRenderScale;
       final radial = (_anchorWorld + eye) - _bodyCentreWorld;
       final up = radial.length < 1 ? _upWorld : radial.normalized;
@@ -1186,7 +1534,9 @@ class _CityStudioScreenState extends State<CityStudioScreen>
         // Metres from the eye, not a fraction of an orbit range: on foot the
         // nearest thing is the pavement and the far plane still has to reach
         // the far side of the colony.
-        fovNear: lengthToScene(0.15),
+        // (The chase eye stands metres off the buggy, so it can afford the
+        // depth precision a farther near plane buys.)
+        fovNear: lengthToScene(_driving ? 0.3 : 0.15),
         // Far enough to rasterize the atmosphere's camera-enclosing inner
         // shell: a near-horizon sky ray crosses it around sqrt(2*R*lift) ~
         // 300 km out, and clipping there cut the haze off in a band above
@@ -1238,6 +1588,16 @@ class _CityStudioScreenState extends State<CityStudioScreen>
           onPressed: _sim == null || _snap == null || _view2D
               ? null
               : () => setState(_toggleFirstPerson),
+        ),
+        IconButton(
+          icon: Icon(_driving ? Icons.videocam : Icons.directions_car,
+              color: _driving ? AppTheme.accent2 : AppTheme.text),
+          tooltip: _driving
+              ? 'Park the buggy, back to the orbit camera  (R)'
+              : 'Drive the streets  (R) — W/S drive, A/D steer, space brakes',
+          onPressed: _sim == null || _snap == null || _view2D
+              ? null
+              : () => setState(_toggleDriving),
         ),
         IconButton(
           icon: Icon(_panel ? Icons.chevron_right : Icons.tune,
@@ -1330,7 +1690,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
               ? null
               : _rig.viewCone(
                   liveForward: lens.forward,
-                  liveFovRadiansY: _firstPerson ? 0.9 : 0.8,
+                  liveFovRadiansY: _fovY,
                   liveAspect: _viewportW / _viewportH,
                   marginRad: TerrainNodes.frustumMarginRad,
                   bodyQuat: bodyQuat,
@@ -1373,6 +1733,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
               () => _atmo!.update(frame, _origin,
                   cameraEye: _cameraEyeM(), starWorld: starWorld));
           _phase('scale rig', () => _syncRig(scene));
+          _phase('rover', () => _syncRover(scene, frame, bodyQuat));
           // The frozen lens, drawn for the RENDER camera; frustum length
           // scales with the frozen eye's height so it reads at any range.
           if (_rigGizmo?.scene != scene) _rigGizmo = DebugCameraGizmo(scene);
@@ -1409,6 +1770,14 @@ class _CityStudioScreenState extends State<CityStudioScreen>
               onTapUp: (d) => _pickAt(d.localPosition),
               onScaleStart: (_) => _dragBase = (_azimuth, _elevation),
               onScaleUpdate: (d) => setState(() {
+                if (_driving) {
+                  // Swing the chase camera round the buggy; it drifts back
+                  // behind the heading once the throttle is on.
+                  _chaseOrbit -= d.focalPointDelta.dx * 0.005;
+                  _chasePitch = (_chasePitch + d.focalPointDelta.dy * 0.004)
+                      .clamp(0.05, 1.2);
+                  return;
+                }
                 if (_firstPerson) {
                   // Mouse-look. Pitch stops just short of straight up and
                   // down, where the up vector degenerates.
@@ -1432,6 +1801,15 @@ class _CityStudioScreenState extends State<CityStudioScreen>
                   // On foot the eye IS the head: zooming would pull it out of
                   // the walker, so the wheel does nothing.
                   if (_firstPerson) return;
+                  if (_driving) {
+                    // Behind the buggy the wheel is the chase range.
+                    if (e is PointerScrollEvent) {
+                      setState(() => _chaseDistM =
+                          (_chaseDistM * (1 + e.scrollDelta.dy * 0.0016))
+                              .clamp(4.0, 40.0));
+                    }
+                    return;
+                  }
                   if (e is PointerScrollEvent) {
                     setState(() => _distanceM =
                         (_distanceM * (1 + e.scrollDelta.dy * 0.0016))
@@ -1471,6 +1849,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
               child: Text('Set the knobs, then GENERATE.',
                   style: AppTheme.dim),
             ),
+          if (_driving) _driveHint(),
           if (_firstPerson)
             Positioned(
               left: 0,
@@ -1575,8 +1954,8 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     final eyeWorld = _anchorWorld + _cameraEyeM();
     final Vector3 fwd;
     final Vector3 upCam;
-    if (_firstPerson) {
-      fwd = _walkerLook();
+    if (_groundView) {
+      fwd = _groundLook();
       final radial = eyeWorld - _bodyCentreWorld;
       upCam = radial.length > 1 ? radial.normalized : _upWorld;
     } else {
@@ -1716,11 +2095,11 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   /// use exactly.
   ({Vector3 eyeRel, Vector3 forward, Vector3 up}) _liveLens() {
     final eyeM = _cameraEyeM();
-    if (_firstPerson) {
+    if (_groundView) {
       final radial = (_anchorWorld + eyeM) - _bodyCentreWorld;
       return (
         eyeRel: eyeM,
-        forward: _walkerLook(),
+        forward: _groundLook(),
         up: radial.length < 1 ? _upWorld : radial.normalized,
       );
     }
@@ -1752,7 +2131,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
           forwardWorld: lens.forward,
           upWorld: lens.up,
           focalPx: _focalPx,
-          fovRadiansY: _firstPerson ? 0.9 : 0.8,
+          fovRadiansY: _fovY,
           aspect: _viewportW / _viewportH,
           bodyCentreWorld: _bodyCentreWorld,
           bodyQuat: _bodyQuatOf(snap),
@@ -1773,12 +2152,20 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       return KeyEventResult.handled;
     }
     if (e is KeyDownEvent &&
+        e.logicalKey == LogicalKeyboardKey.keyR &&
+        _sim != null &&
+        _snap != null &&
+        !_view2D) {
+      setState(_toggleDriving);
+      return KeyEventResult.handled;
+    }
+    if (e is KeyDownEvent &&
         e.logicalKey == LogicalKeyboardKey.escape &&
         _picked != null) {
       setState(_clearPick);
       return KeyEventResult.handled;
     }
-    if (!_firstPerson) return KeyEventResult.ignored;
+    if (!_groundView) return KeyEventResult.ignored;
     final move = {
       LogicalKeyboardKey.keyW,
       LogicalKeyboardKey.keyA,
@@ -1786,6 +2173,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       LogicalKeyboardKey.keyD,
       LogicalKeyboardKey.shiftLeft,
       LogicalKeyboardKey.shiftRight,
+      LogicalKeyboardKey.space,
     };
     if (!move.contains(e.logicalKey)) return KeyEventResult.ignored;
     if (e is KeyDownEvent) {
@@ -1801,9 +2189,13 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   /// Entering, the walker is placed just outside the colony looking in, so the
   /// first thing on screen is a street rather than the inside of a building.
   void _toggleFirstPerson() {
+    // Out of the buggy first: it hands its spot to the walker, who then
+    // steps out where it was parked rather than back at the entry.
+    final fromRover = _driving;
+    if (fromRover) _toggleDriving();
     _firstPerson = !_firstPerson;
     _held.clear();
-    if (_firstPerson) {
+    if (_firstPerson && !fromRover) {
       _walkE = 0;
       _walkN = -_spec.blockDepthM * 0.6;
       _walkYaw = 0; // facing north, into the colony

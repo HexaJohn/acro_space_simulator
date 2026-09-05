@@ -207,6 +207,81 @@ class TerrainField {
     return len < 1e-9 ? dir : n / len;
   }
 
+  /// The surface radius along a direction (m) for ground with ONE crossing —
+  /// no overhangs — at a small fraction of [groundRadiusAt]'s cost.
+  ///
+  /// [groundRadiusAt] marches the composed field across the union of every
+  /// covering brush's reach in steps sized to the shallowest feature, and
+  /// re-resolves the candidate list at every step: in a town cut by a
+  /// thousand grading brushes that is ~500 evaluations, ~16 ms, PER SAMPLE.
+  /// A vehicle or a walker samples the ground several times a frame and only
+  /// ever stands on graded pads, roads and open relief, where the radial
+  /// crosses the surface exactly once. This resolves the candidate list ONCE,
+  /// brackets the crossing between the deepest cut and the highest fill those
+  /// brushes can reach, and bisects — ~25 evaluations.
+  ///
+  /// Never wrong, only sometimes slow: when the bracket's ends are not
+  /// provably air-above / solid-below (a brush set this does not understand)
+  /// it falls back to [groundRadiusAt]. Under an overhang it returns A
+  /// crossing, not the outermost — the same caveat as everything else here.
+  double surfaceRadiusAt(double dx, double dy, double dz) {
+    final len = math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (len < 1e-9) return radius;
+    final inv = 1.0 / len;
+    final dir = Vector3(dx * inv, dy * inv, dz * inv);
+    final base = radius + heightInDirection(dir.x, dir.y, dir.z);
+
+    final e = edits;
+    if (e == null || e.isEmpty) return base;
+    final candidates = e.at(dir);
+    if (candidates.isEmpty) return base;
+
+    // How far along the radial the covering brushes can move the surface: a
+    // cut down to its depth, a fill up to its rim, a levelling datum plus
+    // its cut budget either side, a ball its radius. Generous is fine — a
+    // wider bracket costs a bisection step or two, a narrow one a fallback.
+    var lo = base, hi = base;
+    var any = false;
+    for (final b in candidates) {
+      final proj = b.centreBF.dot(dir);
+      final perp2 = b.centreBF.lengthSquared - proj * proj;
+      if (perp2 >= b.boundingRadiusM * b.boundingRadiusM) continue;
+      any = true;
+      final reach = b.radiusM + b.depthM + b.rimHeightM;
+      if (base - reach < lo) lo = base - reach;
+      if (base + reach > hi) hi = base + reach;
+      if (b.datumRadiusM > 0) {
+        if (b.datumRadiusM - b.depthM < lo) lo = b.datumRadiusM - b.depthM;
+        if (b.datumRadiusM + b.depthM > hi) hi = b.datumRadiusM + b.depthM;
+      }
+    }
+    if (!any) return base; // every candidate's sphere missed the ray
+
+    final margin = math.max((hi - lo) * 0.01, 0.5);
+    var air = hi + margin;
+    var solid = lo - margin;
+    double d(double r) {
+      final p = Vector3(dir.x * r, dir.y * r, dir.z * r);
+      var v = baseDensity(p.x, p.y, p.z);
+      for (final b in candidates) {
+        v = b.apply(v, p);
+      }
+      return v;
+    }
+
+    if (d(air) <= 0 || d(solid) > 0) return groundRadiusAt(dx, dy, dz);
+    for (var i = 0; i < 40; i++) {
+      final mid = (air + solid) * 0.5;
+      if (d(mid) <= 0) {
+        solid = mid;
+      } else {
+        air = mid;
+      }
+      if (air - solid < 1e-3) break;
+    }
+    return (air + solid) * 0.5;
+  }
+
   /// The outermost solid-surface radius along a direction (m) — what a lander
   /// rests on.
   ///
@@ -215,7 +290,8 @@ class TerrainField {
   /// found by marching the composed field and bisecting the bracket. That is
   /// the right answer for a craft descending onto deformed ground, and the
   /// wrong one for a craft already inside a tunnel or under an overhang — that
-  /// case wants the crossing nearest the craft and is not handled yet.
+  /// case wants the crossing nearest the craft and is not handled yet. See
+  /// [surfaceRadiusAt] for the cheap per-frame query.
   double groundRadiusAt(double dx, double dy, double dz) {
     final len = math.sqrt(dx * dx + dy * dy + dz * dz);
     if (len < 1e-9) return radius;

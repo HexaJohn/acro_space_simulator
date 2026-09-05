@@ -88,6 +88,22 @@ void main() {
         reason: 'walking an ungenerated colony has nothing to stand on');
     expect(t.takeException(), isNull);
   });
+
+  testWidgets('driving the streets is offered, and needs a colony first',
+      (t) async {
+    await t.pumpWidget(const MaterialApp(home: CityStudioScreen()));
+    await t.pump();
+
+    final drive = find.byIcon(Icons.directions_car);
+    expect(drive, findsOneWidget, reason: 'no way into the buggy');
+    // Same gate as the walker: the buggy rests on the colony's OWN ground,
+    // and there is none to sample before a colony has been generated.
+    final button = t.widget<IconButton>(
+        find.ancestor(of: drive, matching: find.byType(IconButton)).first);
+    expect(button.onPressed, isNull,
+        reason: 'driving an ungenerated colony has nothing to drive on');
+    expect(t.takeException(), isNull);
+  });
 }
 
 // NOT TESTED HERE: what the walker SEES. Placing the eye needs the terrain
