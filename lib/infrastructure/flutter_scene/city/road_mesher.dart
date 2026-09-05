@@ -664,18 +664,96 @@ class RoadMesher {
   /// place where three or more ends meet — the topology is there; this
   /// finds it. Legs split from one crossing land on (nearly) the same
   /// point; the tolerance covers the sampling step they were rebuilt from.
+  ///
+  /// Grouping is star-shaped and greedy: the lowest unused end seeds a
+  /// node, every later unused end within the tolerance OF THE SEED joins
+  /// it in index order, and each end joins exactly once. A dense tile has
+  /// thousands of ends, so the ends are bucketed by cell first and a seed
+  /// only measures the 27 cells around its own — the same groups, in the
+  /// same order, without the all-pairs scan that made this the one
+  /// indivisible build step to blow a frame.
   static List<RoadJunction> junctionsFromEnds(List<RoadEnd> ends,
       {double toleranceM = 8.0}) {
+    // The cell is a shade wider than the tolerance so that two ends within
+    // it can never land more than one cell apart, even where the division
+    // rounds the wrong way on an exact-tolerance pair. A non-positive
+    // tolerance still needs a real cell to bucket by; the distance test
+    // below is what decides, so any cell at least as wide as the tolerance
+    // gives the same answer.
+    final cell = toleranceM > 0 ? toleranceM * 1.0625 : 1.0;
+    final n = ends.length;
+    final cx = List<int>.filled(n, 0),
+        cy = List<int>.filled(n, 0),
+        cz = List<int>.filled(n, 0);
+    var minX = 0, minY = 0, minZ = 0, maxX = 0, maxY = 0, maxZ = 0;
+    for (var i = 0; i < n; i++) {
+      final p = ends[i].at;
+      final x = (p.x / cell).floor(),
+          y = (p.y / cell).floor(),
+          z = (p.z / cell).floor();
+      cx[i] = x;
+      cy[i] = y;
+      cz[i] = z;
+      if (i == 0) {
+        minX = maxX = x;
+        minY = maxY = y;
+        minZ = maxZ = z;
+      } else {
+        minX = math.min(minX, x);
+        maxX = math.max(maxX, x);
+        minY = math.min(minY, y);
+        maxY = math.max(maxY, y);
+        minZ = math.min(minZ, z);
+        maxZ = math.max(maxZ, z);
+      }
+    }
+    // One int per cell — cheaper to hash than a record, and exact: cells
+    // are offset by the lowest one and strided by the extents, with a
+    // cell of padding each side so a neighbour lookup off the edge of the
+    // occupied box still gets its own key rather than wrapping onto a row
+    // above. Keys wrap only where the ends span millions of cells an axis;
+    // even then a shared bucket is only extra candidates for the distance
+    // test, and the dedupe below keeps a candidate from joining twice.
+    final nx = maxX - minX + 3, ny = maxY - minY + 3;
+    int key(int x, int y, int z) =>
+        (x - minX + 1) + nx * ((y - minY + 1) + ny * (z - minZ + 1));
+    final cells = <int, List<int>>{};
+    for (var i = 0; i < n; i++) {
+      (cells[key(cx[i], cy[i], cz[i])] ??= <int>[]).add(i);
+    }
     final out = <RoadJunction>[];
-    final used = List<bool>.filled(ends.length, false);
-    for (var i = 0; i < ends.length; i++) {
+    final used = List<bool>.filled(n, false);
+    final near = <int>[];
+    for (var i = 0; i < n; i++) {
       if (used[i]) continue;
       final at = ends[i].at;
       final group = <RoadEnd>[ends[i]];
       used[i] = true;
-      for (var j = i + 1; j < ends.length; j++) {
-        if (used[j]) continue;
-        if ((ends[j].at - at).length > toleranceM) continue;
+      near.clear();
+      for (var dx = -1; dx <= 1; dx++) {
+        for (var dy = -1; dy <= 1; dy++) {
+          for (var dz = -1; dz <= 1; dz++) {
+            final bucket = cells[key(cx[i] + dx, cy[i] + dy, cz[i] + dz)];
+            if (bucket == null) continue;
+            for (final j in bucket) {
+              if (j <= i || used[j]) continue;
+              final q = ends[j].at;
+              // Spelled out the way Vector3's subtraction and length compute
+              // it, operand for operand, so a pair right on the tolerance
+              // falls the same side it always did — minus the allocation.
+              final ex = q.x - at.x, ey = q.y - at.y, ez = q.z - at.z;
+              if (math.sqrt(ex * ex + ey * ey + ez * ez) > toleranceM) continue;
+              near.add(j);
+            }
+          }
+        }
+      }
+      // Members in index order, as the linear scan found them.
+      near.sort();
+      var last = -1;
+      for (final j in near) {
+        if (j == last) continue;
+        last = j;
         used[j] = true;
         group.add(ends[j]);
       }

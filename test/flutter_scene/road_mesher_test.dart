@@ -3,6 +3,8 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
+import 'dart:math' as math;
+
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_junction.dart';
 import 'package:acro_space_simulator/domain/scatter/mesh_builder.dart';
@@ -245,4 +247,228 @@ void main() {
         pullStart: 10, pullEnd: 10);
     expect(tris(short), 0, reason: 'nothing left mid-block');
   });
+
+  group('junctionsFromEnds against the pair scan it replaced', () {
+    // Every ends layout below is fed to both the reference scan and the
+    // bucketed mesher; the outputs must match junction for junction, leg
+    // for leg. The comparison checks identity of the seed point (the node
+    // sits ON the seed end, not near it) and value equality of everything
+    // else.
+    void expectSame(List<RoadJunction> got, List<RoadJunction> want,
+        {String? reason}) {
+      expect(got, hasLength(want.length), reason: reason);
+      for (var k = 0; k < want.length; k++) {
+        final g = got[k], w = want[k];
+        expect(identical(g.at, w.at), isTrue,
+            reason: '${reason ?? ''} junction $k sits on a different end');
+        expect(g.control, w.control, reason: reason);
+        expect(g.liftM, w.liftM, reason: reason);
+        expect(g.legs, hasLength(w.legs.length),
+            reason: '${reason ?? ''} junction $k has other legs');
+        for (var l = 0; l < w.legs.length; l++) {
+          expect(g.legs[l].dir, w.legs[l].dir, reason: reason);
+          expect(g.legs[l].halfWidthM, w.legs[l].halfWidthM, reason: reason);
+          expect(g.legs[l].roadClass, w.legs[l].roadClass, reason: reason);
+          expect(g.legs[l].paved, w.legs[l].paved, reason: reason);
+        }
+      }
+    }
+
+    // A random end: any class, sometimes a collector, sometimes unpaved,
+    // and now and then a degenerate direction (next on the end itself) so
+    // the leg-skipping path is exercised too.
+    RoadEnd randomEnd(math.Random rng, Vector3 at) {
+      final cls = RoadClass.values[rng.nextInt(RoadClass.values.length)];
+      final len = rng.nextInt(12) == 0 ? 0.0 : 5 + rng.nextDouble() * 40;
+      final dir = Vector3(rng.nextDouble() - 0.5, rng.nextDouble() - 0.5,
+              (rng.nextDouble() - 0.5) * 0.1)
+          .normalized;
+      return RoadEnd(at, at + dir * len,
+          rng.nextBool() ? cls.halfWidth : 2 + rng.nextDouble() * 20, cls,
+          paved: rng.nextInt(5) != 0, collector: rng.nextInt(3) == 0);
+    }
+
+    // Ends in clusters sized around the tolerance — tight knots that all
+    // group, loose knots whose outliers just miss, chains of ends each a
+    // shade under the tolerance apart (so the star-shaped grouping, not a
+    // transitive one, is what is being matched), and some singletons —
+    // then shuffled, so the greedy seeding order runs across clusters.
+    List<RoadEnd> layout(int n, math.Random rng,
+        {double tol = 8.0, double spanM = 3000}) {
+      final ends = <RoadEnd>[];
+      while (ends.length < n) {
+        final c = Vector3(rng.nextDouble() * spanM, rng.nextDouble() * spanM,
+            (rng.nextDouble() - 0.5) * 40);
+        switch (rng.nextInt(4)) {
+          case 0:
+            // A knot: three to six ends within the tolerance of each other.
+            final k = 3 + rng.nextInt(4);
+            for (var i = 0; i < k; i++) {
+              final r = rng.nextDouble() * tol * 0.45;
+              final a = rng.nextDouble() * 2 * math.pi;
+              ends.add(randomEnd(rng,
+                  c + Vector3(math.cos(a) * r, math.sin(a) * r, 0)));
+            }
+          case 1:
+            // A loose knot: radii straddle the tolerance, so some ends fall
+            // inside the seed's reach and some just outside.
+            final k = 2 + rng.nextInt(5);
+            for (var i = 0; i < k; i++) {
+              final r = rng.nextDouble() * tol * 1.6;
+              final a = rng.nextDouble() * 2 * math.pi;
+              final dz = (rng.nextDouble() - 0.5) * tol * 0.5;
+              ends.add(randomEnd(rng,
+                  c + Vector3(math.cos(a) * r, math.sin(a) * r, dz)));
+            }
+          case 2:
+            // A chain: each link under the tolerance from the last, the
+            // ends two links apart beyond it.
+            final k = 3 + rng.nextInt(4);
+            final a = rng.nextDouble() * 2 * math.pi;
+            final step = Vector3(math.cos(a), math.sin(a), 0) * (tol * 0.8);
+            for (var i = 0; i < k; i++) {
+              ends.add(randomEnd(rng, c + step * i.toDouble()));
+            }
+          default:
+            ends.add(randomEnd(rng, c));
+        }
+      }
+      ends.shuffle(rng);
+      return ends;
+    }
+
+    test('several thousand clustered ends group identically', () {
+      for (final seed in [1, 2, 3, 7, 42]) {
+        final rng = math.Random(seed);
+        final ends = layout(4000, rng);
+        expectSame(RoadMesher.junctionsFromEnds(ends),
+            referenceJunctionsFromEnds(ends),
+            reason: 'seed $seed');
+        // A wider and a narrower tolerance re-bucket everything.
+        for (final tol in [3.0, 12.5]) {
+          expectSame(RoadMesher.junctionsFromEnds(ends, toleranceM: tol),
+              referenceJunctionsFromEnds(ends, toleranceM: tol),
+              reason: 'seed $seed tol $tol');
+        }
+      }
+    });
+
+    test('ends on a planet-sized offset group identically', () {
+      // Body-fixed coordinates: the tile sits thousands of kilometres from
+      // the origin, where the cell division has the least precision.
+      final rng = math.Random(11);
+      final local = layout(3000, rng);
+      final far = Vector3(6371000, -2400000, 1800000);
+      final ends = [
+        for (final e in local)
+          RoadEnd(e.at + far, e.next + far, e.halfWidthM, e.roadClass,
+              paved: e.paved, collector: e.collector),
+      ];
+      expectSame(RoadMesher.junctionsFromEnds(ends),
+          referenceJunctionsFromEnds(ends));
+    });
+
+    test('edge cases: exact tolerance, coincident, lone, none, negative', () {
+      final n = Vector3(0, 0, 1), e = Vector3(0, 1, 0);
+      RoadEnd end(Vector3 at, Vector3 towards, [RoadClass cls = RoadClass.street]) =>
+          RoadEnd(at, at + towards, cls.halfWidth, cls);
+      // Exactly the tolerance apart is IN (the test is "farther than"),
+      // one ulp past it is out; both sit right on a cell boundary.
+      final exact = [
+        end(Vector3.zero, n),
+        end(Vector3(8, 0, 0), e),
+        end(Vector3(0, 8, 0), n * -1),
+        end(Vector3(0, 0, 8), e * -1),
+        end(Vector3(8.000000000001, 0, 0), n),
+        end(Vector3(-8, 0, 0), e),
+      ];
+      final exactGot = RoadMesher.junctionsFromEnds(exact);
+      expectSame(exactGot, referenceJunctionsFromEnds(exact));
+      expect(exactGot.single.legs, hasLength(5));
+      // Ends that lie on one point, plus lone ends far from anything.
+      final coincident = [
+        for (var i = 0; i < 6; i++) end(Vector3(100, 100, 5), i.isEven ? n : e),
+        end(Vector3(500, 500, 0), n),
+        end(Vector3(-500, 500, 0), e),
+      ];
+      expectSame(RoadMesher.junctionsFromEnds(coincident),
+          referenceJunctionsFromEnds(coincident));
+      // One end, and none.
+      expectSame(RoadMesher.junctionsFromEnds([end(Vector3.zero, n)]),
+          referenceJunctionsFromEnds([end(Vector3.zero, n)]));
+      expectSame(RoadMesher.junctionsFromEnds([]), referenceJunctionsFromEnds([]));
+      // A zero tolerance still groups the coincident; a negative one
+      // groups nothing at all.
+      for (final tol in [0.0, -1.0]) {
+        expectSame(RoadMesher.junctionsFromEnds(coincident, toleranceM: tol),
+            referenceJunctionsFromEnds(coincident, toleranceM: tol),
+            reason: 'tol $tol');
+      }
+      // A ramp meeting an expressway end-on: two legs, still a merge.
+      final merge = [
+        end(Vector3.zero, n, RoadClass.ramp),
+        end(Vector3(3, 3, 0), e, RoadClass.expressway4),
+      ];
+      expectSame(RoadMesher.junctionsFromEnds(merge),
+          referenceJunctionsFromEnds(merge));
+      expect(RoadMesher.junctionsFromEnds(merge).single.control,
+          JunctionControl.merge);
+    });
+
+    test('COARSE TIMING SANITY: 20k ends stay well under a budget the pair '
+        'scan could never meet', () {
+      // Not a benchmark — a tripwire. The pair scan is O(N²) and takes
+      // seconds here; the bucketed grouping is O(N) in the ends and should
+      // be a few tens of milliseconds. The bound is loose enough for a
+      // loaded CI box, tight enough that a return to quadratic fails.
+      final rng = math.Random(99);
+      final ends = layout(20000, rng, spanM: 6000);
+      // A warm-up so JIT compilation is not what gets timed.
+      RoadMesher.junctionsFromEnds(layout(500, math.Random(5)));
+      final sw = Stopwatch()..start();
+      final js = RoadMesher.junctionsFromEnds(ends);
+      sw.stop();
+      expect(js, isNotEmpty);
+      expect(sw.elapsedMilliseconds, lessThan(200),
+          reason: '20k ends took ${sw.elapsedMilliseconds} ms');
+    });
+  });
+}
+
+/// The pair scan [RoadMesher.junctionsFromEnds] replaced, copied verbatim as
+/// the reference the bucketed version must match exactly: for each lowest
+/// unused end, every later unused end within the tolerance joins its group
+/// in index order.
+List<RoadJunction> referenceJunctionsFromEnds(List<RoadEnd> ends,
+    {double toleranceM = 8.0}) {
+  final out = <RoadJunction>[];
+  final used = List<bool>.filled(ends.length, false);
+  for (var i = 0; i < ends.length; i++) {
+    if (used[i]) continue;
+    final at = ends[i].at;
+    final group = <RoadEnd>[ends[i]];
+    used[i] = true;
+    for (var j = i + 1; j < ends.length; j++) {
+      if (used[j]) continue;
+      if ((ends[j].at - at).length > toleranceM) continue;
+      used[j] = true;
+      group.add(ends[j]);
+    }
+    final legs = <RoadLeg>[];
+    for (final e in group) {
+      final inward = e.next - e.at;
+      if (inward.length < 1e-6) continue;
+      legs.add(RoadLeg(inward.normalized, e.halfWidthM, e.roadClass,
+          paved: e.paved));
+    }
+    // Where two collectors cross — all four legs collectors, or three at
+    // a T — a subdivision builds a roundabout, not a four-way stop.
+    final collectors = group.where((e) => e.collector).length;
+    final control = junctionControlFor(
+        [for (final l in legs) l.roadClass],
+        roundaboutPreferred: collectors >= 3);
+    if (control == JunctionControl.none) continue;
+    out.add(RoadJunction(at, legs, control));
+  }
+  return out;
 }
