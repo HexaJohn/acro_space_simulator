@@ -211,6 +211,11 @@ Future<void> main(List<String> args) async {
       // frame must not be the flip or the pattern before it.
       await call('ext.acro.citystudio', {'resetFrames': 'true'});
       final window = spikes ? await TimelineWindow.begin(vm) : null;
+      // What the pattern allocated, by class: the old-generation
+      // collections that pause a frame are triggered by churn, and the
+      // churn has a name.
+      final allocBefore =
+          spikes ? await vm.getAllocationProfile(isolateId) : null;
       for (var i = 0; i < steps; i++) {
         final t = i / 20.0;
         await call('ext.acro.citystudio', pose(t));
@@ -253,6 +258,23 @@ Future<void> main(List<String> args) async {
       if (window != null) {
         reportSpikes(await window.end(), window.t0,
             thresholdMs: 16, count: 4, indent: '    ');
+        final allocAfter = await vm.getAllocationProfile(isolateId);
+        final before = <String, int>{
+          for (final m in allocBefore!.members ?? const [])
+            '${m.classRef?.id}': m.accumulatedSize ?? 0,
+        };
+        final deltas = <(String, int, int)>[];
+        for (final m in allocAfter.members ?? const []) {
+          final bytes = (m.accumulatedSize ?? 0) - (before['${m.classRef?.id}'] ?? 0);
+          if (bytes > 0) deltas.add(('${m.classRef?.name}', bytes, m.instancesCurrent ?? 0));
+        }
+        deltas.sort((a, b) => b.$2.compareTo(a.$2));
+        final total = deltas.fold<int>(0, (a, d) => a + d.$2);
+        stdout.writeln('    allocated ${(total / 1048576).toStringAsFixed(0)} MB:');
+        for (final d in deltas.take(10)) {
+          stdout.writeln('      ${(d.$2 / 1048576).toStringAsFixed(1).padLeft(7)} MB  '
+              '${d.$1}  (live ${d.$3})');
+        }
       }
       return r;
     }

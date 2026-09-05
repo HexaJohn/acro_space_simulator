@@ -99,5 +99,23 @@ Three tools drive a running `main_city_studio_dev` over the VM service
   classes. `--shadows=false`, `--perf=false`, `--distance=` and the other
   dev-hook parameters apply before recording.
 
-Numbers on 2026-09-05 for the 127k-building colony at 1320 m: static 9.3 ms
-(107 fps), warm orbit 9-11 ms, from 56 ms / 18 fps at the start of the work.
+Numbers on 2026-09-05 for the 127k-building colony at 1320 m, from 56 ms /
+18 fps at the start of the work: static 11.8 ms (encoded colour 312, shadow
+128, 642 draws in the graph), warm orbit 15.0 ms, elevation nod 11-12 ms, zoom
+14.6 ms, cold orbit over unbuilt ground 16.5 ms. The worst frames left are
+108-112 ms, an old-generation collection while tiles land: its stop-the-world
+part is mostly ProcessWeakHandles, the finalizers of the replaced tiles' GPU
+buffers (and of the promoted per-frame render passes), roughly 100 µs per
+native object inside the engine binary. Static and steady-orbit frames sit
+under 16.7 ms; the hitches are the build's.
+
+Two collector facts worth knowing before touching this again. Every frame's
+command buffers and render passes are native objects with no dispose API, and
+their finalizers run inside the scavenge; a scene that allocates little
+scavenged every seventy frames and paid 9-12 ms for all of them at once, so
+the fork's `Scene.collectorPacerBytesPerFrame` turns over two megabytes of
+small chunks a frame to keep scavenges every dozen frames and ~4 ms. And the
+GLES backend uploads a buffer's whole backing store at the geometry's first
+draw, not as it is written, which is why tile geometry is chunked
+(`CityTileMesher.maxGroupBytes`) and revealed a chunk a frame
+(`CityNodes.uploadBytesPerFrame`) instead of staged in slices.
