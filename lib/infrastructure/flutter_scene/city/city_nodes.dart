@@ -97,6 +97,85 @@ enum CityTier {
   far,
 }
 
+/// The colony's distinct surface materials — the merge key of the upload.
+///
+/// A tile's builders are split by WHAT they draw (ribbons, lamps, props,
+/// curbs, tubes, lot fences, cars, rail) so the passes that fill them can
+/// stay simple; the GPU cares only which material a triangle takes, and
+/// there are seven. Uploading one mesh per builder cost a near tile fifteen
+/// to twenty-five draws — about ten microseconds of engine time each in
+/// the colour pass, and again in the shadow pass — where seven would do.
+/// So the upload merges every builder of one material into one geometry,
+/// keyed by THIS rather than by the material handle, which the texture and
+/// shader loads reset (see [CityMaterials.reset]) and which is therefore
+/// resolved only when the upload step runs.
+enum CityMaterialKind { facade, glazing, ground, road, dirt, alley, sidewalk }
+
+/// The colony's tangent frame on its body: up through the root's anchor,
+/// east and north across it, and the radius the anchor sits at.
+///
+/// One frame serves two things that must agree: the grid the colony is cut
+/// into tiles by, and the light map's axes (see `_bakeLightMap`).
+///
+/// The tiles used to be cells of a cube grid in body-fixed metres. On a
+/// curved surface that is the wrong shape: a colony's footprint drifts
+/// across the grid's slabs — over forty kilometres the surface sags
+/// 40²/(8·6371) ≈ 31 m, and the grid's axes are nowhere near the ground's
+/// — so a third of the tiles were slivers holding a few buildings each,
+/// and every sliver paid the tile's fixed draws. Two arc coordinates
+/// across the tangent plane give one tile per footprint, and a point's
+/// height above the ground plays no part in which.
+class ColonyTangentBasis {
+  ColonyTangentBasis.at(Vector3 anchorBF)
+      : radiusM = anchorBF.length,
+        up = anchorBF.normalized {
+    // Any seed off the pole. The light map has always derived east this
+    // way, and the tiles must use the same frame.
+    final seed = up.z.abs() < 0.9 ? Vector3.unitZ : Vector3.unitX;
+    east = up.cross(seed).normalized;
+    north = up.cross(east);
+  }
+
+  /// The anchor's distance from the body's centre: the surface radius the
+  /// arcs are measured on.
+  final double radiusM;
+  final Vector3 up;
+  late final Vector3 east, north;
+
+  /// Arc coordinates of [p] from the anchor, in metres of surface: east
+  /// and north along the great circles through it.
+  ///
+  /// Measured on the DIRECTION of [p], not its position, so a rooftop and
+  /// the street below it read the same — and as arc, not tangent-plane
+  /// distance, so a cell [CityNodes.tileM] wide holds exactly that much
+  /// ground along each axis rather than the little more the gnomonic
+  /// projection's foreshortening would let in.
+  (double, double) arcOf(Vector3 p) {
+    final u = p.normalized;
+    return (
+      radiusM * math.asin(u.dot(east).clamp(-1.0, 1.0)),
+      radiusM * math.asin(u.dot(north).clamp(-1.0, 1.0)),
+    );
+  }
+
+  /// The grid cell [p] falls in, cells [tileM] of arc on a side.
+  (int, int) cellOf(Vector3 p, double tileM) {
+    final (e, n) = arcOf(p);
+    return ((e / tileM).floor(), (n / tileM).floor());
+  }
+
+  /// The centre of cell ([ie], [iN]), on the surface at the anchor's
+  /// radius. Exact along either axis and within a metre off it at any
+  /// colony's size; the centre only anchors the tile and measures its
+  /// distance, and the half diagonal covers the rest.
+  Vector3 cellCentre(int ie, int iN, double tileM) {
+    final ae = (ie + 0.5) * tileM / radiusM;
+    final an = (iN + 0.5) * tileM / radiusM;
+    final v = up + east * math.tan(ae) + north * math.tan(an);
+    return v.normalized * radiusM;
+  }
+}
+
 class CityNodes {
   CityNodes(this._scene);
 
@@ -237,6 +316,125 @@ class CityNodes {
     return (perBuildingLod ?? CityNodes.perBuildingLod)
         ? tileDistanceM <= (blockRangeM ?? CityNodes.blockRangeM)
         : colonyTier != BuildingDetail.block;
+  }
+
+  /// Tiles nearer than this show their planter shrubs. Beyond it a shrub
+  /// seventy centimetres high is under a pixel, and its instances are pure
+  /// cost — repacked every pass, colour and shadow. A hidden node costs
+  /// nothing per frame (the pre-pass hides its render item), so the
+  /// planting is toggled on the tile's nodes rather than rebuilt.
+  static double floraShrubRangeM = 400;
+
+  /// Tiles nearer than this show their street trees; an eight-metre tree
+  /// is a few pixels at a kilometre and a half.
+  static double floraTreeRangeM = 1500;
+
+  /// Hysteresis on the planting ranges: shown planting stays shown until
+  /// it is this much further out, so a camera resting on the edge does not
+  /// blink a whole tile's trees.
+  static double floraHysteresis = 1.15;
+
+  /// Whether a tile's planting of [kind] is shown at [distanceM] — the
+  /// tile's least distance from the focus — given whether it is [shown]
+  /// now. Anything but a shrub takes the tree range: only the two are
+  /// planted (see [_emitStreetFlora]).
+  static bool floraVisibleAt(PropKind kind, double distanceM,
+      {required bool shown}) {
+    final range = kind == PropKind.shrub ? floraShrubRangeM : floraTreeRangeM;
+    return distanceM < (shown ? range * floraHysteresis : range);
+  }
+
+  /// Whether a tile's mesh on [material] at [tier] goes into the shadow
+  /// map.
+  ///
+  /// The shadow pass encoded everything — five milliseconds a frame,
+  /// measured — and most of it could cast nothing anyone sees. Glazing is
+  /// bands on a wall whose solid already casts the wall. The ground, the
+  /// carriageways, the pavements, the dirt and alley ribbons LIE ON the
+  /// ground: receivers, never casters. And a mid or far tile is
+  /// kilometres off, where its whole shadow is under a pixel of the
+  /// cascade. What is left — a near tile's facades, props, lamps, curbs,
+  /// lot furniture, parked cars and the solids of its skyline — is what
+  /// throws the shadows a street actually shows. [elevated] is the one
+  /// exception on a flat material: a deck in the air throws a shadow the
+  /// street below it plainly shows.
+  static bool castsShadowFor(CityTier tier, CityMaterialKind material,
+      {bool elevated = false}) {
+    if (tier != CityTier.near) return false;
+    switch (material) {
+      case CityMaterialKind.facade:
+        return true;
+      case CityMaterialKind.glazing:
+        return false;
+      case CityMaterialKind.ground:
+      case CityMaterialKind.road:
+      case CityMaterialKind.dirt:
+      case CityMaterialKind.alley:
+      case CityMaterialKind.sidewalk:
+        return elevated;
+    }
+  }
+
+  /// Whether a tile's planting of [kind] casts: trees on near tiles only.
+  /// A shrub's shadow is a smudge smaller than the shrub, which is itself
+  /// only drawn inside [floraShrubRangeM].
+  static bool floraCastsShadow(CityTier tier, PropKind kind) =>
+      tier == CityTier.near && kind != PropKind.shrub;
+
+  /// The upload's groups: every builder by the material it takes and
+  /// whether it casts a shadow at [tier] (see [castsShadowFor]), each
+  /// group one geometry and one draw. [sources] carry the builder, its
+  /// material and whether it stands off the ground.
+  static Map<(CityMaterialKind, bool), List<MeshBuilder>> uploadGroups(
+    Iterable<(MeshBuilder, CityMaterialKind, bool)> sources,
+    CityTier tier,
+  ) {
+    final groups = <(CityMaterialKind, bool), List<MeshBuilder>>{};
+    // Every material's plain group first, even if no builder lands in it:
+    // the facade and glazing sinks also carry the skyline, which has to
+    // be flushed whether or not the street contributed anything.
+    for (final kind in CityMaterialKind.values) {
+      groups[(kind, castsShadowFor(tier, kind))] = [];
+    }
+    for (final (builder, kind, elevated) in sources) {
+      final casts = castsShadowFor(tier, kind, elevated: elevated);
+      (groups[(kind, casts)] ??= []).add(builder);
+    }
+    return groups;
+  }
+
+  /// Every builder's mesh appended into [into] (a fresh sink by default),
+  /// as it is: the builders emit in the tile's own space already.
+  static MergedMeshSink mergeBuilders(Iterable<MeshBuilder> builders,
+      {MergedMeshSink? into}) {
+    final sink = into ?? MergedMeshSink();
+    for (final b in builders) {
+      if (b.triangleCount == 0) continue;
+      sink.appendMesh(b.build());
+    }
+    return sink;
+  }
+
+  /// The material handle for [kind], resolved NOW: the handles are lazy
+  /// and the texture and shader loads reset them, so a step queued before
+  /// a reset must not upload against the handle it replaced.
+  static fs.Material _materialOf(CityMaterialKind kind) {
+    switch (kind) {
+      case CityMaterialKind.facade:
+        return CityMaterials.facade;
+      case CityMaterialKind.glazing:
+        return CityMaterials.glazing;
+      case CityMaterialKind.ground:
+        return CityMaterials.ground;
+      case CityMaterialKind.road:
+        return CityMaterials.road;
+      case CityMaterialKind.dirt:
+        return CityMaterials.dirt;
+      case CityMaterialKind.alley:
+        return CityMaterials.alley;
+      case CityMaterialKind.sidewalk:
+        return CityMaterials.sidewalk;
+    }
   }
 
   /// Microseconds the last step of each kind took, by kind name. The build
@@ -685,6 +883,9 @@ class CityNodes {
       if (focusBF == null) continue;
       var tier = tierAtDistance(t.distanceM, previous: t.distanceTier);
       t.distanceTier = tier;
+      // The tile's planting shown or hidden by the same distance, on the
+      // nodes it already has: no key, no rebuild (see [floraVisibleAt]).
+      _syncFlora(t);
       final cones = conesByBody[t.bodyId];
       if (cones != null) {
         final rel = t.centreBF - eyeByBody[t.bodyId]!;
@@ -826,7 +1027,9 @@ class CityNodes {
     lodCounts.clear();
     for (final t in _tiles.values) {
       if (t.hidden) continue;
-      draws += t.batches.length;
+      for (final n in t.batches) {
+        if (n.visible) draws++;
+      }
       skylineTris += t.skylineTris;
       t.lodCounts.forEach((k, v) => lodCounts[k] = (lodCounts[k] ?? 0) + v);
     }
@@ -868,16 +1071,22 @@ class CityNodes {
     }
     sealedWorld = false;
 
+    // The cell in the body root's tangent grid (see [ColonyTangentBasis]):
+    // two arc coordinates across the colony, each cell [tileM] of ground
+    // on a side. The root always exists by the time a tile is asked for —
+    // every loop below makes it first.
     _Tile tileFor(String bodyId, Vector3 p) {
-      final ix = (p.x / tileM).floor(),
-          iy = (p.y / tileM).floor(),
-          iz = (p.z / tileM).floor();
-      final key = '$bodyId/$ix/$iy/$iz';
-      return _tiles.putIfAbsent(key, () {
-        final centre = Vector3((ix + 0.5) * tileM, (iy + 0.5) * tileM,
-            (iz + 0.5) * tileM);
-        return _Tile(key, bodyId, centre, tileM * math.sqrt(3) / 2);
-      });
+      final basis = _roots[bodyId]!.basis;
+      final (ie, iN) = basis.cellOf(p, tileM);
+      final key = '$bodyId/$ie/$iN';
+      // The half diagonal stays the cube cell's, not the square's: it is
+      // a LOWER bound on the distance to anything in the tile, it leaves
+      // headroom for relief and towers standing off the cell's surface,
+      // and the tier ranges were tuned against it.
+      return _tiles.putIfAbsent(
+          key,
+          () => _Tile(key, bodyId, basis.cellCentre(ie, iN, tileM),
+              tileM * math.sqrt(3) / 2));
     }
 
     _BodyRoot rootFor(String bodyId, Vector3 anchorBF) =>
@@ -1054,64 +1263,73 @@ class CityNodes {
   /// frame ever shows a tile half old and half new.
   void _addUploadSteps(_Tile t, _TileJob j, _BodyRoot root) {
     final r = j.roads;
-    // The materials are resolved when the step RUNS, not here: they are
-    // lazy handles the texture and shader loads reset, and a step queued
-    // before a reset must not upload against the handle it replaced.
-    for (final (builder, material) in <(MeshBuilder, fs.Material Function())>[
+    // Every builder by the material it takes, and whether it stands off
+    // the ground. The builders stay split by what they draw; the upload
+    // does not: each (material, casts-a-shadow) group is ONE geometry and
+    // one draw, merged with the skyline of the same material — seven or so
+    // draws for a near tile where a builder each was two dozen. The
+    // material handles are resolved when the step RUNS, not here (see
+    // [_materialOf]): they are lazy, and the texture and shader loads
+    // reset them.
+    final sources = <(MeshBuilder, CityMaterialKind, bool)>[
       // The ribbon takes the dedicated road strip — on the facade material it
       // rendered as a run of blank concrete with no curbs and no centre line,
       // which from the cockpit read as "roads are missing".
-      (r.ribbon, () => CityMaterials.road),
-      (r.dirtRibbon, () => CityMaterials.dirt),
-      (r.alleyRibbon, () => CityMaterials.alley),
-      (r.walkRibbon, () => CityMaterials.sidewalk),
-      (r.railBallast, () => CityMaterials.dirt),
-      (r.railConcrete, () => CityMaterials.sidewalk),
-      (r.railSteel, () => CityMaterials.alley),
-      (r.airDeck, () => CityMaterials.road),
-      (r.airSolid, () => CityMaterials.facade),
-      (r.airGlow, () => CityMaterials.glazing),
-      (r.propSolid, () => CityMaterials.facade),
-      (r.propGlow, () => CityMaterials.glazing),
-      (r.lampSolid, () => CityMaterials.facade),
-      (r.lampGlow, () => CityMaterials.glazing),
+      (r.ribbon, CityMaterialKind.road, false),
+      (r.dirtRibbon, CityMaterialKind.dirt, false),
+      (r.alleyRibbon, CityMaterialKind.alley, false),
+      (r.walkRibbon, CityMaterialKind.sidewalk, false),
+      (r.railBallast, CityMaterialKind.dirt, false),
+      (r.railConcrete, CityMaterialKind.sidewalk, false),
+      (r.railSteel, CityMaterialKind.alley, false),
+      // The elevated deck is the one flat surface that casts: the street
+      // under an overpass is in its shadow.
+      (r.airDeck, CityMaterialKind.road, true),
+      (r.airSolid, CityMaterialKind.facade, false),
+      (r.airGlow, CityMaterialKind.glazing, false),
+      (r.propSolid, CityMaterialKind.facade, false),
+      (r.propGlow, CityMaterialKind.glazing, false),
+      (r.lampSolid, CityMaterialKind.facade, false),
+      (r.lampGlow, CityMaterialKind.glazing, false),
       // The pedestrian tube: a concrete curb carrying a glass barrel.
-      (r.tubeSolid, () => CityMaterials.facade),
-      (r.tubeGlass, () => CityMaterials.glazing),
-      (r.curbSolid, () => CityMaterials.facade),
-      (r.curbGlass, () => CityMaterials.glazing),
+      (r.tubeSolid, CityMaterialKind.facade, false),
+      (r.tubeGlass, CityMaterialKind.glazing, false),
+      (r.curbSolid, CityMaterialKind.facade, false),
+      (r.curbGlass, CityMaterialKind.glazing, false),
       // The lot furniture: fences, aprons, parked cars, lit signs.
-      (j.featureSolid, () => CityMaterials.facade),
-      (j.featureApron, () => CityMaterials.road),
-      (j.featureCars, () => CityMaterials.facade),
-      (j.featureGlow, () => CityMaterials.glazing),
-      (j.patches, () => CityMaterials.ground),
-    ]) {
+      (j.featureSolid, CityMaterialKind.facade, false),
+      (j.featureApron, CityMaterialKind.road, false),
+      (j.featureCars, CityMaterialKind.facade, false),
+      (j.featureGlow, CityMaterialKind.glazing, false),
+      (j.patches, CityMaterialKind.ground, false),
+    ];
+    // One step per group, so the budget loop can stop between them: a
+    // downtown tile's facade group is most of its triangles.
+    for (final entry in uploadGroups(sources, j.tier).entries) {
+      final (kind, casts) = entry.key;
+      final builders = entry.value;
+      // A group with the material's own shadow answer merges into the
+      // job's sink for it — where the block-tier skyline already is, on
+      // facade and glazing. The odd group out (the elevated deck on a
+      // near tile) takes a sink of its own.
+      final plain = casts == castsShadowFor(j.tier, kind);
       j.steps.add(_BuildStep(_StepKind.mesh, () {
-        final built = builder.build();
-        if (built.isEmpty) return;
-        final geometry = _geometryOf(built);
-        if (geometry == null) return;
-        j.stage(fs.Node(
-          mesh: fs.Mesh.primitives(
-              primitives: [fs.MeshPrimitive(geometry, material())]),
-        ));
-      }));
-    }
-    // The skyline: block-tier buildings as one mesh per material.
-    for (final (sink, material) in <(MergedMeshSink, fs.Material Function())>[
-      (j.skylineSolid, () => CityMaterials.facade),
-      (j.skylineGlazing, () => CityMaterials.glazing),
-    ]) {
-      j.steps.add(_BuildStep(_StepKind.skyline, () {
+        final sink = plain ? j.sinkFor(kind) : MergedMeshSink();
+        // The skyline's share of the sink, counted before the street's
+        // builders join it: the panel's "skyline tris" means buildings.
+        if (plain &&
+            (kind == CityMaterialKind.facade ||
+                kind == CityMaterialKind.glazing)) {
+          j.skylineTris += sink.triangleCount;
+        }
+        mergeBuilders(builders, into: sink);
         if (sink.isEmpty) return;
         final geometry = _geometryOf(sink.build());
         if (geometry == null) return;
         j.stage(fs.Node(
           mesh: fs.Mesh.primitives(
-              primitives: [fs.MeshPrimitive(geometry, material())]),
-        ));
-        j.skylineTris += sink.triangleCount;
+              primitives: [fs.MeshPrimitive(geometry, _materialOf(kind))]),
+        )..castsShadow = casts);
       }));
     }
     // The instanced buildings, per archetype. Which archetypes is known
@@ -1132,12 +1350,12 @@ class CityNodes {
     // Street planting, instanced off the scatter props.
     j.steps.add(_BuildStep(
         _StepKind.flora,
-        () => _emitStreetFlora(PropKind.broadleafTree, streetTreeHeightM,
-            j.roads.treePits, j.anchorBF, j.stage)));
+        () => _emitStreetFlora(
+            PropKind.broadleafTree, streetTreeHeightM, j.roads.treePits, j)));
     j.steps.add(_BuildStep(
         _StepKind.flora,
-        () => _emitStreetFlora(PropKind.shrub, planterShrubHeightM,
-            j.roads.shrubPits, j.anchorBF, j.stage)));
+        () => _emitStreetFlora(
+            PropKind.shrub, planterShrubHeightM, j.roads.shrubPits, j)));
     j.steps.add(_BuildStep(_StepKind.swap, () => _swap(t, j, root)));
   }
 
@@ -1148,10 +1366,16 @@ class CityNodes {
     if (m == null) return;
     // Walls take the stone material (concrete is closer to rock than
     // bark); glazing takes the foliage one, which is the alpha-capable
-    // pass and is where the night lighting hooks in.
-    for (final (geometry, material) in [
-      (m.solid, m.lod ? CityMaterials.ground : CityMaterials.facade),
-      (m.glazing, CityMaterials.glazing),
+    // pass and is where the night lighting hooks in. The solid casts as a
+    // facade does — a debug box stands in for the building it colours —
+    // and the glazing never (see [castsShadowFor]).
+    for (final (geometry, material, casts) in [
+      (
+        m.solid,
+        m.lod ? CityMaterials.ground : CityMaterials.facade,
+        castsShadowFor(j.tier, CityMaterialKind.facade),
+      ),
+      (m.glazing, CityMaterials.glazing, false),
     ]) {
       if (geometry == null) continue;
       for (var start = 0; start < transforms.length; start += _maxPerDraw) {
@@ -1161,7 +1385,9 @@ class CityNodes {
         for (var i = start; i < end; i++) {
           instanced.addInstance(transforms[i]);
         }
-        j.stage(fs.Node()..addComponent(fs.InstancedMeshComponent(instanced)));
+        j.stage(fs.Node()
+          ..addComponent(fs.InstancedMeshComponent(instanced))
+          ..castsShadow = casts);
       }
     }
   }
@@ -1179,8 +1405,36 @@ class CityNodes {
       t.batches.add(node);
     }
     job.staged.clear();
+    t.flora
+      ..clear()
+      ..addAll(job.flora);
+    job.flora.clear();
+    // The planting shown or hidden by the tile's distance from THIS frame:
+    // a new node is visible by default, and a far tile must not flash its
+    // trees for the frame between its swap and the next visibility pass.
+    _syncFlora(t, apply: true);
     t.skylineTris = job.skylineTris;
     t.lodCounts = job.lodCounts;
+  }
+
+  /// Show or hide a tile's planting by its distance (see [floraVisibleAt]),
+  /// touching the nodes only when an answer changes — or all of them when
+  /// [apply] is set, for nodes that have never been told.
+  void _syncFlora(_Tile t, {bool apply = false}) {
+    if (t.flora.isEmpty) return;
+    var changed = apply;
+    for (final kind in const [PropKind.broadleafTree, PropKind.shrub]) {
+      final was = t.floraShown[kind] ?? false;
+      final now = floraVisibleAt(kind, t.distanceM, shown: was);
+      if (now != was) {
+        t.floraShown[kind] = now;
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    for (final (node, kind) in t.flora) {
+      node.visible = t.floraShown[kind] ?? false;
+    }
   }
 
   /// Take a tile's nodes out of the scene (a hidden tile's are already out).
@@ -1192,6 +1446,7 @@ class CityNodes {
       }
     }
     t.batches.clear();
+    t.flora.clear();
     t.skylineTris = 0;
     t.lodCounts = const {};
   }
@@ -1367,10 +1622,9 @@ class CityNodes {
   /// borrow.
   void _bakeLightMap(List<BuildingSnapshot> buildings, Vector3 anchorBF) {
     const size = 64;
-    final up = anchorBF.normalized;
-    final seed = up.z.abs() < 0.9 ? Vector3.unitZ : Vector3.unitX;
-    final east = up.cross(seed).normalized;
-    final north = up.cross(east);
+    // The same frame the tiles are cut in (see [ColonyTangentBasis]).
+    final basis = ColonyTangentBasis.at(anchorBF);
+    final east = basis.east, north = basis.north;
 
     // Extent from the buildings themselves, plus margin past the biggest
     // splat radius so the map's border stays dark and the clamp-sample
@@ -2343,9 +2597,9 @@ class CityNodes {
     PropKind kind,
     double sizeM,
     List<(Vector3, double)> pits,
-    Vector3 anchorBF,
-    void Function(fs.Node) add,
+    _TileJob job,
   ) {
+    final anchorBF = job.anchorBF;
     // A plant stands in vacuum nowhere. The pits are still COLLECTED on a
     // sealed world so the furniture draw sequence stays identical either
     // way; they are simply not planted.
@@ -2360,7 +2614,11 @@ class CityNodes {
     }
 
     // Group per pre-grown variant, so a whole tile's planting is at most
-    // four solid draws and four foliage draws per kind.
+    // four solid draws and four foliage draws per kind. Staged as planting
+    // so the tile can show and hide it by distance without a rebuild (see
+    // [floraVisibleAt]); trees on a near tile cast, shrubs never (see
+    // [floraCastsShadow]).
+    final casts = floraCastsShadow(job.tier, kind);
     final byVariant = <int, List<vm.Matrix4>>{};
     for (final (at, yaw) in pits) {
       // The pit is relative to the tile's anchor; the surface normal is
@@ -2398,7 +2656,11 @@ class CityNodes {
         for (final t in transforms) {
           instanced.addInstance(t);
         }
-        add(fs.Node()..addComponent(fs.InstancedMeshComponent(instanced)));
+        job.stageFlora(
+            fs.Node()
+              ..addComponent(fs.InstancedMeshComponent(instanced))
+              ..castsShadow = casts,
+            kind);
       }
     });
   }
@@ -2727,13 +2989,17 @@ class _TrafficSlot {
 /// road pass needs to know body-wide — which ends meet which, where the
 /// plan's junctions are, where the L's pieces end.
 class _BodyRoot {
-  _BodyRoot(this.node, this.bodyId, this.anchorBF);
+  _BodyRoot(this.node, this.bodyId, this.anchorBF)
+      : basis = ColonyTangentBasis.at(anchorBF);
   final fs.Node node;
   final String bodyId;
 
   /// Where the root stands, body-fixed. Fixed for the root's life: every
   /// tile's offset is measured from it.
   final Vector3 anchorBF;
+
+  /// The tangent frame at the anchor the colony's tiles are cut in.
+  final ColonyTangentBasis basis;
   bool placed = false;
 
   /// Widest half width and count of road ends at each quantised end point.
@@ -2770,6 +3036,14 @@ class _Tile {
 
   /// The tile's nodes, children of the body's root.
   final List<fs.Node> batches = [];
+
+  /// The planting among [batches], by kind: shown or hidden by distance
+  /// each update (see [CityNodes.floraVisibleAt]) without a rebuild.
+  final List<(fs.Node, PropKind)> flora = [];
+
+  /// Whether each kind of planting is shown now — the hysteresis state,
+  /// kept across rebuilds so a rebuilt tile does not blink its trees.
+  final Map<PropKind, bool> floraShown = {};
   String structureKey = '';
   String builtKey = '';
   String wantKey = '';
@@ -2843,10 +3117,9 @@ enum _StepKind {
   buildings,
   patches,
   lots,
-  // The upload: a builder into geometry, a skyline sink, a run of
-  // archetype groups, the planting, and the one swap into the scene.
+  // The upload: one material's builders and skyline into geometry, a run
+  // of archetype groups, the planting, and the one swap into the scene.
   mesh,
-  skyline,
   instances,
   flora,
   swap,
@@ -2887,6 +3160,15 @@ class _TileJob {
     staged.add(node);
   }
 
+  /// The planting, staged like any node and remembered with its kind, so
+  /// the tile can show and hide it by distance (see [_Tile.flora]).
+  final List<(fs.Node, PropKind)> flora = [];
+
+  void stageFlora(fs.Node node, PropKind kind) {
+    stage(node);
+    flora.add((node, kind));
+  }
+
   final _RoadBuilders roads = _RoadBuilders();
   final MeshBuilder patches = MeshBuilder();
   final MeshBuilder featureSolid = MeshBuilder();
@@ -2894,8 +3176,18 @@ class _TileJob {
   final MeshBuilder featureApron = MeshBuilder();
   final MeshBuilder featureCars = MeshBuilder();
   int carBudget = CityNodes._maxParkedCars;
-  final MergedMeshSink skylineSolid = MergedMeshSink();
-  final MergedMeshSink skylineGlazing = MergedMeshSink();
+  /// One merged sink per material: the skyline's block-tier buildings and
+  /// every builder of that material, one geometry and one draw each (see
+  /// [CityNodes.uploadGroups]).
+  final Map<CityMaterialKind, MergedMeshSink> _sinks = {};
+
+  MergedMeshSink sinkFor(CityMaterialKind kind) =>
+      _sinks.putIfAbsent(kind, () => MergedMeshSink());
+
+  /// The skyline: block-tier buildings baked straight into the facade and
+  /// glazing sinks rather than instanced per archetype — see [_emitBuilding].
+  MergedMeshSink get skylineSolid => sinkFor(CityMaterialKind.facade);
+  MergedMeshSink get skylineGlazing => sinkFor(CityMaterialKind.glazing);
   final Map<BuildingArchetype, List<vm.Matrix4>> groups = {};
   final Map<BuildingDetail, int> lodCounts = {};
 }

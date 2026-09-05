@@ -70,6 +70,33 @@ void main() {
     expect(out.texCoords.sublist(8, 12), [0, 0, 1, 0]);
   });
 
+  test('appendMesh copies a mesh as it is, re-indexed past the rest', () {
+    // The material-merge path: a tile's builders already emit in the
+    // tile's own space, so the sink takes them without a transform.
+    final quad = _quad();
+    final sink = MergedMeshSink(vertexCapacity: 2);
+    sink.append(
+      quad,
+      vm.Matrix4.translation(vm.Vector3(5, 0, 0)),
+    );
+    sink.appendMesh(quad);
+    final out = sink.build();
+    expect(out.vertexCount, 8);
+    expect(out.triangleCount, 4);
+    // The second copy sits where the builder put it.
+    expect(out.positions.sublist(12, 15), [0, 0, 0]);
+    expect(out.positions.sublist(15, 18), [1, 0, 0]);
+    expect(out.normals.sublist(12, 15), [0, 0, 1]);
+    expect(out.texCoords.sublist(8, 12), [0, 0, 1, 0]);
+    // And its triangles index its own vertices.
+    for (var i = 6; i < 12; i++) {
+      expect(out.indices[i], inInclusiveRange(4, 7));
+    }
+    // An empty mesh adds nothing.
+    sink.appendMesh(PropMesh.empty);
+    expect(sink.vertexCount, 8);
+  });
+
   test('an empty mesh appends nothing', () {
     final sink = MergedMeshSink();
     sink.append(PropMesh.empty, vm.Matrix4.identity());

@@ -84,6 +84,33 @@ class MergedMeshSink {
     _vtx += n;
   }
 
+  /// Append [mesh] as it is: no transform, a straight copy of every stream
+  /// with the indices offset past the vertices already held.
+  ///
+  /// This is the material-merge path. A tile's road, lamp, prop, curb and
+  /// lot builders all emit in the tile's own scene space already, so
+  /// gathering them into one geometry per material needs no matrix at all
+  /// — and a near tile has a few hundred thousand such vertices, which
+  /// [append]'s per-vertex matrix multiply and normal re-normalise would
+  /// spend for nothing. Three `setRange`s and one index offset loop instead.
+  void appendMesh(PropMesh mesh) {
+    if (mesh.isEmpty) return;
+    final n = mesh.vertexCount;
+    _reserve(n, mesh.indices.length);
+    final base = _vtx;
+    _pos.setRange(base * 3, base * 3 + n * 3, mesh.positions);
+    _nrm.setRange(base * 3, base * 3 + n * 3, mesh.normals);
+    final t = mesh.texCoords;
+    final uvCount = math.min(t.length, n * 2);
+    _uv.setRange(base * 2, base * 2 + uvCount, t);
+    final idx = mesh.indices;
+    for (var j = 0; j < idx.length; j++) {
+      _idx[_ind + j] = base + idx[j];
+    }
+    _ind += idx.length;
+    _vtx += n;
+  }
+
   void _reserve(int vertices, int indices) {
     final needV = _vtx + vertices;
     if (needV * 3 > _pos.length) {
