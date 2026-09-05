@@ -1046,6 +1046,9 @@ base class Scene implements SceneGraph {
           cascades: cascades,
           tileResolution: light!.shadowMapResolution,
           casterFaces: light.shadowCasterFaces,
+          // The view's layer mask, as the depth prepass and scene pass get
+          // it: a layer the view does not render must not shadow it either.
+          layerMask: view.layerMask,
         ),
       );
     }

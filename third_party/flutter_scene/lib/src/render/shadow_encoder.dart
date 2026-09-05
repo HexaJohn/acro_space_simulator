@@ -3,6 +3,7 @@ import 'package:flutter_scene/src/geometry/geometry.dart'
 import 'package:flutter_scene/src/gpu/gpu.dart' as gpu;
 import 'package:flutter_scene/src/light.dart' show ShadowCasterFaces;
 import 'package:flutter_scene/src/render/instance_packing.dart';
+import 'package:flutter_scene/src/render/render_layers.dart';
 import 'package:vector_math/vector_math.dart';
 
 import 'package:flutter_scene/src/render/render_scene.dart';
@@ -16,14 +17,17 @@ import 'package:flutter_scene/src/shaders.dart';
 /// Reuses the engine's standard vertex shaders (so unskinned and skinned
 /// geometry both cast shadows) paired with the `DepthOnlyFragment`
 /// shader, supplying the light-space view-projection matrix in place of
-/// the camera transform. Translucent materials don't cast shadows.
+/// the camera transform. Translucent materials don't cast shadows, nor do
+/// items whose node opted out with `castsShadow = false` or whose layers
+/// fall outside the view's [layerMask].
 class ShadowEncoder {
   ShadowEncoder(
     this._renderPass,
     this._transientsBuffer,
     this._lightSpaceMatrix,
-    ShadowCasterFaces casterFaces,
-  ) {
+    ShadowCasterFaces casterFaces, {
+    int layerMask = kRenderLayerAll,
+  }) : _layerMask = layerMask {
     frustum = Frustum.matrix(_lightSpaceMatrix);
     // The light-space block is constant for the cascade: emplace it once and
     // rebind the view only when the bindings were cleared.
@@ -51,6 +55,10 @@ class ShadowEncoder {
   final gpu.RenderPass _renderPass;
   final gpu.HostBuffer _transientsBuffer;
   final Matrix4 _lightSpaceMatrix;
+  // The view's render-layer mask. An item whose layers do not intersect it
+  // is invisible to the view, so it must not shadow the view either (a
+  // hidden-layer helper would otherwise cast onto the visible world).
+  final int _layerMask;
   late final UnskinnedFrameInfo _frameInfo;
 
   static final gpu.Shader _depthShader =
@@ -97,11 +105,27 @@ class ShadowEncoder {
     _boundPrimitive = type;
   }
 
-  /// Records [item]'s depth, unless it is hidden, translucent (no shadow),
-  /// or culled by the light frustum.
+  /// Whether [item] is a candidate shadow caster for a view whose render
+  /// layers are [layerMask]: visible, opted in through `castsShadow`, on a
+  /// layer the view renders, and opaque (translucent materials write no
+  /// depth and cast no shadow).
+  ///
+  /// This is the whole per-item filter short of the light-frustum cull, kept
+  /// as a pure predicate so it can be pinned without a GPU. It runs before
+  /// any pipeline resolution or binding, so a non-caster costs nothing but
+  /// the field reads.
+  static bool isCaster(RenderItem item, int layerMask) {
+    if (!item.visible) return false;
+    if (!item.castsShadow) return false;
+    if ((item.layers & layerMask) == 0) return false;
+    if (!item.material.isOpaque()) return false;
+    return true;
+  }
+
+  /// Records [item]'s depth, unless it is hidden, a non-caster (see
+  /// [isCaster]), or culled by the light frustum.
   void submit(RenderItem item) {
-    if (!item.visible) return;
-    if (!item.material.isOpaque()) return;
+    if (!isCaster(item, _layerMask)) return;
     if (item.frustumCulled) {
       final bounds = item.cullBounds;
       if (bounds != null) {
@@ -171,12 +195,16 @@ class ShadowEncoder {
         return;
       }
       bindDraw(item.worldTransform);
-      final packed = packInstanceTransforms(
-        item.worldTransform,
-        instances,
-        nodeWindingFlipped: item.windingFlipped,
-      );
-      stats.packedInstances += instances.length;
+      // The pack is cached on the item (keyed by the InstancedMesh version,
+      // the node world transform and its winding parity), so a static
+      // instanced mesh is multiplied out once and only emplaced here per
+      // cascade; only a repack counts as packing in the frame stats.
+      final previous = item.packedCache;
+      final packed = packedInstancesFor(item, instances);
+      if (!identical(packed, previous)) {
+        stats.packedInstances += instances.length;
+      }
+      stats.instancesEmplaced += instances.length;
       if (packed.ccwCount > 0) {
         bindInstanceTransforms(_renderPass, packed.ccw);
         _setWinding(false);

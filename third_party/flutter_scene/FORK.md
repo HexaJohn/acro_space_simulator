@@ -95,6 +95,27 @@ encoders already relied on that.
   twice per draw (the app's `_CitySurfaceMaterial` switches to it separately).
 - `lib/src/material/unlit_material.dart` — one FragInfo list per material,
   static repeat sampler, cached slots.
+- `lib/src/scene_encoder.dart`, `lib/src/render/shadow_encoder.dart` — both
+  encoders draw instanced items from `packedInstancesFor(item, instances)`
+  (`render/instance_packing.dart`) instead of `packInstanceTransforms`, so a
+  static instanced mesh is multiplied out once and its cached `Float32List`s
+  are only emplaced per pass (colour + every cascade); a mesh whose
+  instances move (traffic, via `setInstanceTransform` → version bump →
+  pre-pass restamp) repacks as before. `_encodeInstanced` takes the
+  `RenderItem` rather than its transform and parity so it can reach the
+  cache. `SceneFrameStats.packedInstances` now counts only real repacks;
+  the new `instancesEmplaced` counts every emplace, so packed/emplaced is
+  the cache hit rate.
+- `lib/src/render/shadow_encoder.dart` — `submit` filters through the static
+  `ShadowEncoder.isCaster(item, layerMask)` (visible, `castsShadow`, layers
+  intersect the view mask, opaque) before resolving a pipeline or binding
+  anything, so `RenderItem.castsShadow` is honoured and a layer the view
+  hides cannot shadow it. `shadowDraws` counts only draws that were issued.
+  Pinned GPU-free by `test/shadow_caster_filter_test.dart`.
+- `lib/src/render/shadow_pass.dart`, `lib/src/scene.dart` — `ShadowPass`
+  takes `layerMask` (default `kRenderLayerAll`), which `Scene` plumbs from
+  `view.layerMask` the way `DepthPrepass` and `ScenePass` already do, and
+  hands to each cascade's encoder.
 
 ## Patches (scene layer)
 
@@ -124,9 +145,8 @@ encoders already relied on that.
   per-instance allocation.
 - `render/instance_packing.dart`: `packedInstancesFor(item, instances)`
   returns the item's cached pack while the mesh version, world transform and
-  winding parity are unchanged. The encoders still call
-  `packInstanceTransforms` directly; switching them (and honouring
-  `RenderItem.castsShadow` in the shadow encoder) is a follow-up patch in the
-  encoder layer. The cached `Float32List` is still emplaced per pass into the
+  winding parity are unchanged. Both encoders now draw from it (see the
+  encoder-layer patch above); `packInstanceTransforms` remains the uncached
+  primitive. The cached `Float32List` is still emplaced per pass into the
   frame's host buffer, so the GLES race (flutter/flutter#187931) exposure is
   unchanged.

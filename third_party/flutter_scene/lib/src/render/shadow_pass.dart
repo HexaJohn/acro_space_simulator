@@ -3,6 +3,7 @@ import 'package:vector_math/vector_math.dart';
 
 import 'package:flutter_scene/src/light.dart';
 import 'package:flutter_scene/src/render/render_graph.dart';
+import 'package:flutter_scene/src/render/render_layers.dart';
 import 'package:flutter_scene/src/render/render_scene.dart';
 import 'package:flutter_scene/src/render/shadow_encoder.dart';
 import 'package:flutter_scene/src/scene_encoder.dart' show SceneFrameStats;
@@ -20,21 +21,29 @@ const String kShadowMapBlackboardKey = 'directional_shadow_map';
 /// goes in the red channel (a transient depth attachment backs the
 /// depth test). It is cleared to 1.0 so texels no caster covers read as
 /// "lit". Each cascade renders into its own tile through a viewport.
+///
+/// [layerMask] is the view's render-layer mask, plumbed the same way the
+/// scene pass and depth prepass receive it: only items on a layer the view
+/// renders cast into its shadow map, so a layer hidden from the view does
+/// not shadow it. Defaults to every layer.
 class ShadowPass extends RenderGraphPass {
   ShadowPass({
     required RenderScene renderScene,
     required List<ShadowCascade> cascades,
     required int tileResolution,
     required ShadowCasterFaces casterFaces,
+    int layerMask = kRenderLayerAll,
   }) : _renderScene = renderScene,
        _cascades = cascades,
        _tileResolution = tileResolution,
-       _casterFaces = casterFaces;
+       _casterFaces = casterFaces,
+       _layerMask = layerMask;
 
   final RenderScene _renderScene;
   final List<ShadowCascade> _cascades;
   final int _tileResolution;
   final ShadowCasterFaces _casterFaces;
+  final int _layerMask;
 
   @override
   String get name => 'ShadowPass';
@@ -105,6 +114,7 @@ class ShadowPass extends RenderGraphPass {
         context.transientsBuffer,
         _cascades[c].lightSpaceMatrix,
         _casterFaces,
+        layerMask: _layerMask,
       );
       _renderScene.cull(encoder.frustum, encoder.submit);
     }

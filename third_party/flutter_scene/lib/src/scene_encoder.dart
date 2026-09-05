@@ -23,10 +23,17 @@ import 'package:flutter_scene/src/render/render_scene.dart';
 /// `Scene.lastFrameStats`, which stays stable until the next frame ends.
 ///
 /// The draw counts are draw calls as the GPU sees them (an instanced group is
-/// one draw); [packedInstances] is the number of instance transforms packed
-/// into instance-rate buffers across the colour and shadow passes;
-/// [materialBinds] is how many times the colour pass ran a material's full
-/// `bind` (the material-run batching makes this smaller than [colourDraws]).
+/// one draw; [shadowDraws] counts only casters that were actually drawn, not
+/// items the shadow encoder filtered or culled); [packedInstances] is the
+/// number of instance transforms multiplied out into instance-rate buffers
+/// across the colour and shadow passes, which with the per-item pack cache
+/// happens only when a mesh, its node transform or its winding parity moved;
+/// [instancesEmplaced] is the number of instance transforms emplaced into the
+/// frame's instance buffer whether freshly packed or reused, so the ratio of
+/// the two is the cache's hit rate (a fully static scene emplaces every pass
+/// and packs nothing); [materialBinds] is how many times the colour pass ran
+/// a material's full `bind` (the material-run batching makes this smaller
+/// than [colourDraws]).
 /// The millisecond fields are wall-clock UI-thread time for the pre-pass
 /// (component tick and scene-graph walk), the spatial-structure rebuild or
 /// refit, the shadow pass (all cascades), and the colour pass (cull, encode,
@@ -35,6 +42,7 @@ class SceneFrameStats {
   int colourDraws = 0;
   int shadowDraws = 0;
   int packedInstances = 0;
+  int instancesEmplaced = 0;
   int materialBinds = 0;
 
   /// Full spatial-structure rebuilds this frame (a refit does not count).
@@ -50,6 +58,7 @@ class SceneFrameStats {
     colourDraws = 0;
     shadowDraws = 0;
     packedInstances = 0;
+    instancesEmplaced = 0;
     materialBinds = 0;
     bvhRebuilds = 0;
     prePassMs = 0;
@@ -67,7 +76,8 @@ class SceneFrameStats {
   @override
   String toString() =>
       'SceneFrameStats(colourDraws: $colourDraws, shadowDraws: $shadowDraws, '
-      'packedInstances: $packedInstances, materialBinds: $materialBinds, '
+      'packedInstances: $packedInstances, '
+      'instancesEmplaced: $instancesEmplaced, materialBinds: $materialBinds, '
       'bvhRebuilds: $bvhRebuilds, prePassMs: ${prePassMs.toStringAsFixed(2)}, '
       'bvhMs: ${bvhMs.toStringAsFixed(2)}, '
       'shadowMs: ${shadowMs.toStringAsFixed(2)}, '
@@ -528,13 +538,17 @@ base class SceneEncoder {
   /// per-instance loop through the per-draw uniform path.
   void _encodeInstanced(
     gpu.RenderPipeline pipeline,
-    Matrix4 nodeTransform,
+    RenderItem item,
     Geometry geometry,
     Material material,
     List<Matrix4> instances,
-    bool windingFlipped,
     double fade,
   ) {
+    // The item (not just its transform) is needed because the instance pack
+    // is cached on it; [instances] is its own instance list, which the
+    // cache is keyed against through the pre-pass's stamped version.
+    final nodeTransform = item.worldTransform;
+    final windingFlipped = item.windingFlipped;
     _bindMaterial(pipeline, geometry, material, fade, allowRun: true);
     _setPrimitiveType(geometry.primitiveType);
     final stats = SceneFrameStats.accumulating;
@@ -567,12 +581,17 @@ base class SceneEncoder {
         _camera.position,
       );
     }
-    final packed = packInstanceTransforms(
-      nodeTransform,
-      instances,
-      nodeWindingFlipped: windingFlipped,
-    );
-    stats.packedInstances += instances.length;
+    // The pack is cached on the item (keyed by the InstancedMesh version, the
+    // node world transform and its winding parity), so a static instanced
+    // mesh is multiplied out once and only emplaced here per pass; a mesh
+    // whose instances move every frame (traffic) bumps its version and
+    // repacks as before. Only a repack counts as packing in the frame stats.
+    final previous = item.packedCache;
+    final packed = packedInstancesFor(item, instances);
+    if (!identical(packed, previous)) {
+      stats.packedInstances += instances.length;
+    }
+    stats.instancesEmplaced += instances.length;
     final instanceSlot = geometry.vertexStreamCount;
     if (packed.ccwCount > 0) {
       bindInstanceTransforms(_renderPass, packed.ccw, slot: instanceSlot);
@@ -611,11 +630,10 @@ base class SceneEncoder {
       if (instances != null) {
         _encodeInstanced(
           record.pipeline,
-          item.worldTransform,
+          item,
           record.geometry,
           record.material,
           instances,
-          item.windingFlipped,
           record.fade,
         );
       } else {
