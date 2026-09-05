@@ -1,16 +1,25 @@
 import 'package:flutter_scene/src/gpu/gpu.dart' as gpu;
 
+// PATCHED (acro_space_simulator): these helpers used to reach the render pass
+// through `(pass as dynamic)` inside try/catch, probing for older flutter_gpu
+// signatures (`bindVertexBuffer(view, vertexCount)`, `draw()` with no count).
+// A dynamic invocation is a runtime member lookup plus argument boxing on
+// every call, and the colour pass makes several per draw. The pinned
+// flutter_gpu (render_pass.dart: `bindVertexBuffer(BufferView, {int slot})`,
+// `bindIndexBuffer(BufferView, IndexType)`, `draw(int, {int instanceCount})`,
+// `drawIndexed(int, {int instanceCount})`) and the vendored web and stub
+// backends all share these exact signatures, so the calls are made directly.
+// The helper names and parameters are unchanged so callers need no edits; the
+// count parameters that only the legacy signatures consumed are kept for that
+// reason and are otherwise unused.
+
 void bindVertexBufferCompat(
   gpu.RenderPass pass,
   gpu.BufferView bufferView,
   int vertexCount, {
   int slot = 0,
 }) {
-  try {
-    (pass as dynamic).bindVertexBuffer(bufferView, slot: slot);
-  } on NoSuchMethodError {
-    (pass as dynamic).bindVertexBuffer(bufferView, vertexCount);
-  }
+  pass.bindVertexBuffer(bufferView, slot: slot);
 }
 
 void bindIndexBufferCompat(
@@ -19,23 +28,11 @@ void bindIndexBufferCompat(
   gpu.IndexType indexType,
   int indexCount,
 ) {
-  try {
-    (pass as dynamic).bindIndexBuffer(bufferView, indexType);
-  } on NoSuchMethodError {
-    (pass as dynamic).bindIndexBuffer(bufferView, indexType, indexCount);
-  }
+  pass.bindIndexBuffer(bufferView, indexType);
 }
 
 void drawCompat(gpu.RenderPass pass, int vertexCount, {int instanceCount = 1}) {
-  if (instanceCount != 1) {
-    (pass as dynamic).draw(vertexCount, instanceCount: instanceCount);
-    return;
-  }
-  try {
-    (pass as dynamic).draw(vertexCount);
-  } on NoSuchMethodError {
-    (pass as dynamic).draw();
-  }
+  pass.draw(vertexCount, instanceCount: instanceCount);
 }
 
 void drawIndexedCompat(
@@ -43,13 +40,5 @@ void drawIndexedCompat(
   int indexCount, {
   int instanceCount = 1,
 }) {
-  if (instanceCount != 1) {
-    (pass as dynamic).drawIndexed(indexCount, instanceCount: instanceCount);
-    return;
-  }
-  try {
-    (pass as dynamic).drawIndexed(indexCount);
-  } on NoSuchMethodError {
-    (pass as dynamic).draw();
-  }
+  pass.drawIndexed(indexCount, instanceCount: instanceCount);
 }

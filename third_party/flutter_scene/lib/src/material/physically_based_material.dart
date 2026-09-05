@@ -173,6 +173,24 @@ class PhysicallyBasedMaterial extends Material {
   /// fragments whose alpha falls below this are discarded.
   double alphaCutoff = 0.5;
 
+  /// The sampler for [baseColorTexture] when it is a static texture, or null
+  /// for the material's repeat default (nearest filtering, repeat wrap).
+  ///
+  /// PATCHED (acro_space_simulator): lets a subclass pick trilinear (or
+  /// anisotropic) filtering for the albedo without binding the slot a second
+  /// time in its own `bind`. A `RenderTexture` source still brings its own
+  /// sampler and ignores this.
+  gpu.SamplerOptions? baseColorSampler;
+
+  // PATCHED (acro_space_simulator): one FragInfo list per material instance,
+  // zeroed and refilled in place per bind. emplace copies the bytes into the
+  // transients buffer immediately, so the list is free to reuse; the zeroing
+  // keeps the block identical to the fresh allocation it replaces (packInto
+  // writes only the cascades and light that exist this frame).
+  final Float32List _fragInfo = Float32List(
+    EngineLightingUniforms.fragInfoFloatCount,
+  );
+
   @override
   void bind(
     gpu.RenderPass pass,
@@ -197,7 +215,8 @@ class PhysicallyBasedMaterial extends Material {
     //   [125]     float occlusion_strength
     //   [132]     float alpha_mode (0 opaque, 1 mask, 2 blend)
     //   [133]     float alpha_cutoff
-    final fragInfo = Float32List(EngineLightingUniforms.fragInfoFloatCount);
+    final fragInfo = _fragInfo;
+    fragInfo.fillRange(0, fragInfo.length, 0.0);
     EngineLightingUniforms.packInto(fragInfo, lighting, env);
     fragInfo[0] = baseColorFactor.r;
     fragInfo[1] = baseColorFactor.g;
@@ -217,11 +236,16 @@ class PhysicallyBasedMaterial extends Material {
     fragInfo[133] = alphaCutoff;
     fragInfo[EngineLightingUniforms.fadeIndex] = lodFade;
     pass.bindUniform(
-      fragmentShader.getUniformSlot("FragInfo"),
+      uniformSlot("FragInfo"),
       transientsBuffer.emplace(ByteData.sublistView(fragInfo)),
     );
 
-    _bindSlot(pass, 'base_color_texture', _baseColorSource);
+    _bindSlot(
+      pass,
+      'base_color_texture',
+      _baseColorSource,
+      sampler: baseColorSampler,
+    );
     _bindSlot(pass, 'emissive_texture', _emissiveSource);
     _bindSlot(pass, 'metallic_roughness_texture', _metallicRoughnessSource);
     _bindSlot(pass, 'normal_texture', _normalSource, normal: true);
@@ -245,21 +269,22 @@ class PhysicallyBasedMaterial extends Material {
 
   // Binds one texture slot, substituting the neutral placeholder when the
   // slot is empty (or its render texture has no completed frame yet). A
-  // RenderTexture source brings its own sampler; static textures use the
-  // material's repeat default.
+  // RenderTexture source brings its own sampler; static textures use
+  // [sampler] when given, else the material's repeat default.
   void _bindSlot(
     gpu.RenderPass pass,
     String name,
     Object? source, {
     bool normal = false,
+    gpu.SamplerOptions? sampler,
   }) {
     final resolved = resolveTextureSource(source);
     pass.bindTexture(
-      fragmentShader.getUniformSlot(name),
+      uniformSlot(name),
       normal
           ? Material.normalPlaceholder(resolved)
           : Material.whitePlaceholder(resolved),
-      sampler: textureSourceSampler(source) ?? _repeatSampler,
+      sampler: textureSourceSampler(source) ?? sampler ?? _repeatSampler,
     );
   }
 

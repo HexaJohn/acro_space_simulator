@@ -28,6 +28,7 @@ import 'render/post_effect_pass.dart';
 import 'render/render_graph.dart';
 import 'render/render_scene.dart';
 import 'render/instance_packing.dart';
+import 'scene_encoder.dart' show SceneFrameStats;
 import 'render/scene_pass.dart';
 import 'render/selection_outline_pass.dart';
 import 'render/shadow_pass.dart';
@@ -611,8 +612,35 @@ base class Scene implements SceneGraph {
 
   void _tick(double deltaSeconds) {
     _lastTickMillis = DateTime.now().millisecondsSinceEpoch;
+    // Timed whether the tick runs from [update] or implicitly from
+    // [renderViews]: the frame record is swapped at the end of a render, so
+    // an explicit update between renders lands in the frame it precedes.
+    final stopwatch = Stopwatch()..start();
     _stepPhysics(deltaSeconds);
     root.scenePrePass(deltaSeconds);
+    SceneFrameStats.accumulating.prePassMs +=
+        stopwatch.elapsedMicroseconds / 1000.0;
+  }
+
+  // PATCHED (acro_space_simulator): per-frame renderer statistics. The
+  // encoders accumulate into [SceneFrameStats.accumulating] (a process-wide
+  // record, since they have no scene handle); [renderViews] publishes it here
+  // when the frame's views are all submitted and starts a fresh one, so this
+  // getter is stable for a whole frame.
+  static SceneFrameStats _lastFrameStats = SceneFrameStats();
+
+  /// Counters and timings of the previous completed frame (every view
+  /// rendered by the last [renderViews] call, summed). Static because the
+  /// renderer's per-draw state is process-wide; with several scenes rendering
+  /// in one frame the record covers whichever finished last.
+  static SceneFrameStats get lastFrameStats => _lastFrameStats;
+
+  // Publishes the frame just rendered and resets the accumulator for the
+  // next one.
+  static void _publishFrameStats() {
+    final completed = SceneFrameStats.accumulating;
+    SceneFrameStats.accumulating = _lastFrameStats..reset();
+    _lastFrameStats = completed;
   }
 
   // Advances the active [PhysicsWorld] (if any) on a fixed timestep.
@@ -827,7 +855,13 @@ base class Scene implements SceneGraph {
 
     // Rebuild the spatial culling structure once if the pre-pass changed the
     // scene, before the views' render passes query it.
+    final bvhStopwatch = Stopwatch()..start();
     renderScene.rebuildIfDirty();
+    SceneFrameStats.accumulating.bvhMs +=
+        bvhStopwatch.elapsedMicroseconds / 1000.0;
+    // TODO(perf-stats): count a full rebuild (not a refit) into
+    // SceneFrameStats.bvhRebuilds from `RenderScene.lastRebuildWasFull` once
+    // the culling-structure owner adds that flag.
 
     // The renderer shades a single directional light: the first one
     // registered in the graph (the [directionalLight] convenience, or a
@@ -895,6 +929,7 @@ base class Scene implements SceneGraph {
     // A frame has now been submitted; the next one runs on a warm context (see
     // the rebuild near the environment resolution above).
     _hasPresentedFrame = true;
+    _publishFrameStats();
   }
 
   // Whether at least one frame has been rendered and presented, so the web

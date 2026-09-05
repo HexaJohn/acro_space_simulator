@@ -145,6 +145,29 @@ abstract class Geometry {
   @internal
   int get vertexStreamCount => _vertexStreams.length;
 
+  /// Whether [draw] issues an indexed draw (an index buffer is set).
+  ///
+  /// PATCHED (acro_space_simulator): the encoders bind consecutive same-
+  /// material draws without clearing the pass bindings in between, so a
+  /// non-indexed geometry following an indexed one would draw with the
+  /// previous index buffer still bound. Harmless for a plain draw on every
+  /// backend we know, but the encoders break the run at that boundary rather
+  /// than rely on it.
+  @internal
+  bool get isIndexed => _indices != null;
+
+  /// Whether [bind] is exactly [bindGeometryBuffers] followed by the 19-float
+  /// unskinned `FrameInfo` block (camera transform plus camera position),
+  /// with the model transform delivered through the instance-rate slot.
+  ///
+  /// PATCHED (acro_space_simulator): the colour encoder binds that block once
+  /// per pass and rebinds the same buffer view per draw instead of calling
+  /// [bind]; only geometry that answers true here takes that path. Anything
+  /// with a custom [bind] (skinned joints, billboards) keeps the per-draw
+  /// [bind].
+  @internal
+  bool get bindsUnskinnedFrameInfo => false;
+
   /// Binds an already-uploaded index buffer view, with element width
   /// determined by [indexType].
   ///
@@ -652,6 +675,12 @@ class UnskinnedGeometry extends Geometry {
         : kUnskinnedPositionOnlyLayout,
   );
 
+  // The colour encoder splits this geometry's bind into its two halves:
+  // [bindGeometryBuffers] for the vertex streams and index buffer (per draw)
+  // and [UnskinnedFrameInfo] for the camera block (once per pass).
+  @override
+  bool get bindsUnskinnedFrameInfo => true;
+
   @override
   void bind(
     gpu.RenderPass pass,
@@ -969,30 +998,82 @@ void bindUnskinnedFrameInfo(
   vm.Matrix4 cameraTransform,
   vm.Vector3 cameraPosition,
 ) {
-  final frameInfoSlot = shader.getUniformSlot('FrameInfo');
-  final frameInfoFloats = Float32List.fromList([
-    cameraTransform.storage[0],
-    cameraTransform.storage[1],
-    cameraTransform.storage[2],
-    cameraTransform.storage[3],
-    cameraTransform.storage[4],
-    cameraTransform.storage[5],
-    cameraTransform.storage[6],
-    cameraTransform.storage[7],
-    cameraTransform.storage[8],
-    cameraTransform.storage[9],
-    cameraTransform.storage[10],
-    cameraTransform.storage[11],
-    cameraTransform.storage[12],
-    cameraTransform.storage[13],
-    cameraTransform.storage[14],
-    cameraTransform.storage[15],
-    cameraPosition.x,
-    cameraPosition.y,
-    cameraPosition.z,
-  ]);
   pass.bindUniform(
-    frameInfoSlot,
-    transientsBuffer.emplace(frameInfoFloats.buffer.asByteData()),
+    shader.getUniformSlot('FrameInfo'),
+    emplaceUnskinnedFrameInfo(transientsBuffer, cameraTransform, cameraPosition),
   );
+}
+
+/// The float count of the unskinned `FrameInfo` block: a mat4 camera
+/// transform followed by the vec3 camera position (19 floats; the trailing
+/// std140 padding is supplied by the uniform's declared size, as before).
+const int _kUnskinnedFrameInfoFloats = 19;
+
+/// Emplaces one unskinned `FrameInfo` block (camera transform plus camera
+/// position) into [transientsBuffer] and returns its view, without binding
+/// it.
+///
+/// PATCHED (acro_space_simulator): the block is constant for a whole pass,
+/// so the encoders emplace it once and rebind the view per draw (see
+/// [UnskinnedFrameInfo]) rather than emplacing a fresh list per draw.
+@internal
+gpu.BufferView emplaceUnskinnedFrameInfo(
+  gpu.HostBuffer transientsBuffer,
+  vm.Matrix4 cameraTransform,
+  vm.Vector3 cameraPosition,
+) {
+  final frameInfoFloats = Float32List(_kUnskinnedFrameInfoFloats);
+  frameInfoFloats.setRange(0, 16, cameraTransform.storage);
+  frameInfoFloats[16] = cameraPosition.x;
+  frameInfoFloats[17] = cameraPosition.y;
+  frameInfoFloats[18] = cameraPosition.z;
+  return transientsBuffer.emplace(frameInfoFloats.buffer.asByteData());
+}
+
+/// One pass's unskinned `FrameInfo` block, emplaced once and rebound per
+/// draw.
+///
+/// PATCHED (acro_space_simulator): the camera (or light) transform does not
+/// change within a pass, so the colour and shadow encoders build one of these
+/// per pass and call [bind] wherever the old per-draw
+/// [bindUnskinnedFrameInfo] ran. A rebind is a single native call, needed
+/// only after `clearBindings` (a uniform binding otherwise persists across
+/// draws); the emplace and the 19-float list happen once. The uniform slot is
+/// resolved once per shader, since one pass can drive several vertex shaders
+/// that share the block (the colour and depth-only unskinned shaders).
+@internal
+class UnskinnedFrameInfo {
+  UnskinnedFrameInfo(
+    gpu.HostBuffer transientsBuffer,
+    vm.Matrix4 cameraTransform,
+    vm.Vector3 cameraPosition,
+  ) : view = emplaceUnskinnedFrameInfo(
+        transientsBuffer,
+        cameraTransform,
+        cameraPosition,
+      );
+
+  /// The emplaced block, valid for the frame the transients buffer serves.
+  final gpu.BufferView view;
+
+  // Per-shader slot cache. A pass touches one or two vertex shaders, so a
+  // linear scan over parallel lists beats hashing a native handle.
+  final List<gpu.Shader> _shaders = [];
+  final List<gpu.UniformSlot> _slots = [];
+
+  /// Resolves (and caches) the `FrameInfo` slot on [shader].
+  gpu.UniformSlot slotFor(gpu.Shader shader) {
+    for (var i = 0; i < _shaders.length; i++) {
+      if (identical(_shaders[i], shader)) return _slots[i];
+    }
+    final slot = shader.getUniformSlot('FrameInfo');
+    _shaders.add(shader);
+    _slots.add(slot);
+    return slot;
+  }
+
+  /// Binds the block on [pass] for [shader].
+  void bind(gpu.RenderPass pass, gpu.Shader shader) {
+    pass.bindUniform(slotFor(shader), view);
+  }
 }

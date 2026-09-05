@@ -64,6 +64,16 @@ class UnlitMaterial extends Material {
   /// applies it.
   double vertexColorWeight = 1.0;
 
+  // PATCHED (acro_space_simulator): one FragInfo list per material, refilled
+  // in place (emplace copies the bytes out), and one shared repeat sampler,
+  // so a bind allocates nothing.
+  final Float32List _fragInfo = Float32List(6);
+
+  static final gpu.SamplerOptions _repeatSampler = gpu.SamplerOptions(
+    widthAddressMode: gpu.SamplerAddressMode.repeat,
+    heightAddressMode: gpu.SamplerAddressMode.repeat,
+  );
+
   @override
   void bind(
     gpu.RenderPass pass,
@@ -72,25 +82,21 @@ class UnlitMaterial extends Material {
   ) {
     super.bind(pass, transientsBuffer, lighting);
 
-    var fragInfo = Float32List.fromList([
-      baseColorFactor.r, baseColorFactor.g,
-      baseColorFactor.b, baseColorFactor.a, // color
-      vertexColorWeight, // vertex_color_weight
-      lodFade, // fade
-    ]);
+    final fragInfo = _fragInfo;
+    fragInfo[0] = baseColorFactor.r; // color
+    fragInfo[1] = baseColorFactor.g;
+    fragInfo[2] = baseColorFactor.b;
+    fragInfo[3] = baseColorFactor.a;
+    fragInfo[4] = vertexColorWeight; // vertex_color_weight
+    fragInfo[5] = lodFade; // fade
     pass.bindUniform(
-      fragmentShader.getUniformSlot("FragInfo"),
+      uniformSlot("FragInfo"),
       transientsBuffer.emplace(ByteData.sublistView(fragInfo)),
     );
     pass.bindTexture(
-      fragmentShader.getUniformSlot('base_color_texture'),
+      uniformSlot('base_color_texture'),
       baseColorTexture,
-      sampler:
-          textureSourceSampler(_baseColorSource) ??
-          gpu.SamplerOptions(
-            widthAddressMode: gpu.SamplerAddressMode.repeat,
-            heightAddressMode: gpu.SamplerAddressMode.repeat,
-          ),
+      sampler: textureSourceSampler(_baseColorSource) ?? _repeatSampler,
     );
   }
 }

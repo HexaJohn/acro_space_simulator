@@ -215,6 +215,30 @@ abstract class Material {
     return resolved;
   }
 
+  // PATCHED (acro_space_simulator): uniform slots cached per name for the
+  // current fragment shader. `getUniformSlot` allocates a slot per call and
+  // the lit material resolves a dozen per draw, so they are kept here and
+  // dropped when the shader changes (a hot reload keeps the shader's Dart
+  // identity, and a slot is only the shader plus a name, so cached slots stay
+  // valid across one).
+  gpu.Shader? _slotShader;
+  final Map<String, gpu.UniformSlot> _slots = {};
+
+  /// The uniform slot named [name] on [fragmentShader], resolved once per
+  /// shader and cached.
+  ///
+  /// Subclasses binding their own uniforms and textures in [bind] should use
+  /// this instead of `fragmentShader.getUniformSlot(name)` so a per-draw
+  /// bind allocates nothing for slot lookup.
+  gpu.UniformSlot uniformSlot(String name) {
+    final shader = fragmentShader;
+    if (!identical(shader, _slotShader)) {
+      _slotShader = shader;
+      _slots.clear();
+    }
+    return _slots[name] ??= shader.getUniformSlot(name);
+  }
+
   /// Assigns the fragment [shader] used when this material is drawn.
   void setFragmentShader(gpu.Shader shader) {
     _fragmentShader = shader;

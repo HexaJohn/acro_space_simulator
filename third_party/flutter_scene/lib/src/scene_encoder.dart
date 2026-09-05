@@ -1,5 +1,6 @@
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart' show internal;
 import 'package:flutter_scene/src/gpu/gpu.dart' as gpu;
 import 'package:vector_math/vector_math.dart';
 
@@ -12,6 +13,69 @@ import 'package:flutter_scene/src/render/instance_packing.dart';
 import 'package:flutter_scene/src/render/lod.dart';
 import 'package:flutter_scene/src/render/render_scene.dart';
 
+/// Counters and timings for one rendered frame.
+///
+/// PATCHED (acro_space_simulator): the renderer's UI-thread cost is dominated
+/// by per-draw encoding, and a frame budget cannot be held without seeing
+/// where the milliseconds go. The engine accumulates into
+/// [SceneFrameStats.accumulating] as the frame is encoded (every view of the
+/// frame sums into the same record) and publishes the completed frame as
+/// `Scene.lastFrameStats`, which stays stable until the next frame ends.
+///
+/// The draw counts are draw calls as the GPU sees them (an instanced group is
+/// one draw); [packedInstances] is the number of instance transforms packed
+/// into instance-rate buffers across the colour and shadow passes;
+/// [materialBinds] is how many times the colour pass ran a material's full
+/// `bind` (the material-run batching makes this smaller than [colourDraws]).
+/// The millisecond fields are wall-clock UI-thread time for the pre-pass
+/// (component tick and scene-graph walk), the spatial-structure rebuild or
+/// refit, the shadow pass (all cascades), and the colour pass (cull, encode,
+/// flush and submit).
+class SceneFrameStats {
+  int colourDraws = 0;
+  int shadowDraws = 0;
+  int packedInstances = 0;
+  int materialBinds = 0;
+
+  /// Full spatial-structure rebuilds this frame (a refit does not count).
+  // TODO(perf-stats): counted from `RenderScene.lastRebuildWasFull`, a flag
+  // the culling-structure owner is adding; until it exists this stays 0.
+  int bvhRebuilds = 0;
+
+  double prePassMs = 0;
+  double bvhMs = 0;
+  double shadowMs = 0;
+  double colourMs = 0;
+
+  /// Zeroes every field, ready to record a new frame.
+  void reset() {
+    colourDraws = 0;
+    shadowDraws = 0;
+    packedInstances = 0;
+    materialBinds = 0;
+    bvhRebuilds = 0;
+    prePassMs = 0;
+    bvhMs = 0;
+    shadowMs = 0;
+    colourMs = 0;
+  }
+
+  /// The record the frame in progress accumulates into. Process-wide, like
+  /// the pipeline cache: the encoders have no scene handle. `Scene` swaps it
+  /// with the published record when a frame completes.
+  @internal
+  static SceneFrameStats accumulating = SceneFrameStats();
+
+  @override
+  String toString() =>
+      'SceneFrameStats(colourDraws: $colourDraws, shadowDraws: $shadowDraws, '
+      'packedInstances: $packedInstances, materialBinds: $materialBinds, '
+      'bvhRebuilds: $bvhRebuilds, prePassMs: ${prePassMs.toStringAsFixed(2)}, '
+      'bvhMs: ${bvhMs.toStringAsFixed(2)}, '
+      'shadowMs: ${shadowMs.toStringAsFixed(2)}, '
+      'colourMs: ${colourMs.toStringAsFixed(2)})';
+}
+
 /// A deferred opaque draw. Holds the [RenderItem] (instanced or not), its
 /// resolved pipeline, a per-pipeline grouping key, and the camera
 /// distance, all captured when [SceneEncoder.submit] is called.
@@ -23,6 +87,7 @@ base class _OpaqueRecord {
     this.fade,
     this.pipeline,
     this.pipelineKey,
+    this.materialKey,
     this.depth,
   );
   final RenderItem item;
@@ -35,6 +100,9 @@ base class _OpaqueRecord {
   final double fade;
   final gpu.RenderPipeline pipeline;
   final int pipelineKey;
+  // Groups draws of one material within a pipeline so consecutive draws can
+  // share its bindings (see [SceneEncoder.flush]).
+  final int materialKey;
   final double depth;
 }
 
@@ -118,8 +186,9 @@ void evictPipelinesForShaders(Set<gpu.Shader> shaders) {
 /// The encoder splits draws into two phases within the one render pass:
 ///
 /// 1. **Opaque**, with depth writes enabled and color blending disabled,
-///    sorted by pipeline (to reduce state changes) and then front-to-back
-///    (so the depth test can reject occluded fragments early).
+///    sorted by pipeline, then material (to reduce state changes and share
+///    material bindings across a run of draws), and then front-to-back (so
+///    the depth test can reject occluded fragments early).
 /// 2. **Translucent**, depth-sorted back to front from the camera, drawn
 ///    with premultiplied source-over blending.
 ///
@@ -150,6 +219,13 @@ base class SceneEncoder {
     // projection LOD nodes draw their highest-detail level.
     final camera = _camera;
     _lodFovRadiansY = camera is PerspectiveCamera ? camera.fovRadiansY : null;
+    // The unskinned camera block is constant for the pass: emplace it once
+    // here and rebind the view per draw (see [UnskinnedFrameInfo]).
+    _frameInfo = UnskinnedFrameInfo(
+      _transientsBuffer,
+      _cameraTransform,
+      _camera.position,
+    );
 
     // Begin the opaque phase.
     _renderPass.setDepthWriteEnable(true);
@@ -163,6 +239,7 @@ base class SceneEncoder {
   final gpu.RenderPass _renderPass;
   final gpu.HostBuffer _transientsBuffer;
   late final Matrix4 _cameraTransform;
+  late final UnskinnedFrameInfo _frameInfo;
   // The camera's vertical field of view in radians, or null for a
   // non-perspective camera (which disables screen-size LOD).
   late final double? _lodFovRadiansY;
@@ -183,6 +260,26 @@ base class SceneEncoder {
   // that reuses it can skip the rebind. Opaque draws are pipeline-sorted,
   // so reuse runs are common.
   gpu.RenderPipeline? _boundPipeline;
+
+  // PATCHED (acro_space_simulator): the material run. The pass keeps every
+  // binding (vertex, index, uniform, texture) until `clearBindings`, so a
+  // draw that follows one with the same pipeline, material and fade can
+  // reuse the material's uniforms and textures and the camera block, and
+  // needs to bind only its own vertex streams, index buffer and instance
+  // transform. Opaque draws are sorted to make such runs long. A run only
+  // spans geometry whose bind is separable ([Geometry.bindsUnskinnedFrameInfo])
+  // and does not straddle an indexed/non-indexed boundary, so no draw relies
+  // on a stale binding it did not make. Null between runs.
+  Material? _runMaterial;
+  double _runFade = 1.0;
+  bool _runIndexed = false;
+
+  // Pass state that persists across draws regardless of bindings, tracked
+  // so a draw only sets what changed. The winding is relative to the
+  // counter-clockwise base every material's bind establishes: true when the
+  // pass is currently flipped to clockwise for a mirrored transform.
+  bool _windingFlipped = false;
+  gpu.PrimitiveType? _boundPrimitive;
 
   /// Queues a draw call for [item], unless it is hidden or frustum
   /// culled.
@@ -246,6 +343,7 @@ base class SceneEncoder {
           fade,
           pipeline,
           identityHashCode(pipeline),
+          identityHashCode(material),
           _depthOf(item.worldTransform),
         ),
       );
@@ -321,27 +419,92 @@ base class SceneEncoder {
     _boundPipeline = pipeline;
   }
 
+  // Establishes the pass bindings for a draw of [geometry] with [material] at
+  // cross-fade [fade]. Continues the current material run when this draw can
+  // share the previous draw's bindings (and [allowRun] permits it), returning
+  // true; otherwise clears the bindings, binds the pipeline and material (and,
+  // for separable geometry, the camera block), starts a new run, and returns
+  // false. Either way the caller then binds the geometry's own streams and
+  // instance data and draws.
+  bool _bindMaterial(
+    gpu.RenderPipeline pipeline,
+    Geometry geometry,
+    Material material,
+    double fade, {
+    required bool allowRun,
+  }) {
+    final separable = geometry.bindsUnskinnedFrameInfo;
+    final indexed = geometry.isIndexed;
+    if (allowRun &&
+        separable &&
+        identical(pipeline, _boundPipeline) &&
+        identical(material, _runMaterial) &&
+        fade == _runFade &&
+        indexed == _runIndexed) {
+      return true;
+    }
+    _renderPass.clearBindings();
+    _bindPipeline(pipeline);
+    // The material reads its cross-fade coverage from this transient field as
+    // it binds; reset for every bind so a shared material does not leak a
+    // previous draw's fade.
+    material.lodFade = fade;
+    material.bind(_renderPass, _transientsBuffer, _lighting);
+    SceneFrameStats.accumulating.materialBinds++;
+    // Material.bind set the default counter-clockwise winding.
+    _windingFlipped = false;
+    if (separable) {
+      _frameInfo.bind(_renderPass, geometry.vertexShader);
+    }
+    // Only separable geometry can be followed by a run; a custom bind
+    // (skinned joints, billboard attributes) rebinds per draw anyway.
+    _runMaterial = separable ? material : null;
+    _runFade = fade;
+    _runIndexed = indexed;
+    return false;
+  }
+
+  // Sets the winding order when it differs from the pass's current state.
+  // [flipped] is true for a mirrored (negative-determinant) transform, whose
+  // reversed triangle winding needs the clockwise order so front faces are
+  // not culled.
+  void _setWinding(bool flipped) {
+    if (flipped == _windingFlipped) return;
+    _renderPass.setWindingOrder(
+      flipped ? gpu.WindingOrder.clockwise : gpu.WindingOrder.counterClockwise,
+    );
+    _windingFlipped = flipped;
+  }
+
+  void _setPrimitiveType(gpu.PrimitiveType type) {
+    if (type == _boundPrimitive) return;
+    _renderPass.setPrimitiveType(type);
+    _boundPrimitive = type;
+  }
+
   void _encode(
     gpu.RenderPipeline pipeline,
     Matrix4 worldTransform,
     Geometry geometry,
     Material material,
     bool windingFlipped,
-    double fade,
-  ) {
-    _renderPass.clearBindings();
-    _bindPipeline(pipeline);
-    // The material reads its cross-fade coverage from this transient field as
-    // it binds; reset for every draw so a shared material does not leak a
-    // previous draw's fade.
-    material.lodFade = fade;
-    geometry.bind(
-      _renderPass,
-      _transientsBuffer,
-      worldTransform,
-      _cameraTransform,
-      _camera.position,
-    );
+    double fade, {
+    required bool allowRun,
+  }) {
+    _bindMaterial(pipeline, geometry, material, fade, allowRun: allowRun);
+    if (geometry.bindsUnskinnedFrameInfo) {
+      // The camera block is already bound (per run); only the streams and
+      // index buffer are this draw's own.
+      geometry.bindGeometryBuffers(_renderPass);
+    } else {
+      geometry.bind(
+        _renderPass,
+        _transientsBuffer,
+        worldTransform,
+        _cameraTransform,
+        _camera.position,
+      );
+    }
     if (geometry.bindsModelTransformInstance) {
       // The model matrix arrives through the instance-rate vertex buffer,
       // bound to the slot after the geometry's vertex streams.
@@ -351,15 +514,10 @@ base class SceneEncoder {
         slot: geometry.vertexStreamCount,
       );
     }
-    material.bind(_renderPass, _transientsBuffer, _lighting);
-    if (windingFlipped) {
-      // A mirrored (negative-determinant) transform reverses triangle
-      // winding; flip the cull order so front faces aren't culled. Material
-      // .bind set the default counter-clockwise winding.
-      _renderPass.setWindingOrder(gpu.WindingOrder.clockwise);
-    }
-    _renderPass.setPrimitiveType(geometry.primitiveType);
+    _setWinding(windingFlipped);
+    _setPrimitiveType(geometry.primitiveType);
     geometry.draw(_renderPass);
+    SceneFrameStats.accumulating.colourDraws++;
   }
 
   /// Draws an opaque instanced item with hardware instancing: the instance
@@ -379,11 +537,9 @@ base class SceneEncoder {
     bool windingFlipped,
     double fade,
   ) {
-    _renderPass.clearBindings();
-    _bindPipeline(pipeline);
-    material.lodFade = fade;
-    material.bind(_renderPass, _transientsBuffer, _lighting);
-    _renderPass.setPrimitiveType(geometry.primitiveType);
+    _bindMaterial(pipeline, geometry, material, fade, allowRun: true);
+    _setPrimitiveType(geometry.primitiveType);
+    final stats = SceneFrameStats.accumulating;
 
     if (geometry.instancedVertexLayout == null) {
       for (final instanceTransform in instances) {
@@ -395,52 +551,60 @@ base class SceneEncoder {
           _camera.position,
         );
         // Each instance can itself mirror; combine with the node's parity.
-        final flip = windingFlipped != (instanceTransform.determinant() < 0);
-        _renderPass.setWindingOrder(
-          flip ? gpu.WindingOrder.clockwise : gpu.WindingOrder.counterClockwise,
-        );
+        _setWinding(windingFlipped != (instanceTransform.determinant() < 0));
         geometry.draw(_renderPass);
+        stats.colourDraws++;
       }
       return;
     }
 
-    geometry.bind(
-      _renderPass,
-      _transientsBuffer,
-      nodeTransform,
-      _cameraTransform,
-      _camera.position,
-    );
+    if (geometry.bindsUnskinnedFrameInfo) {
+      geometry.bindGeometryBuffers(_renderPass);
+    } else {
+      geometry.bind(
+        _renderPass,
+        _transientsBuffer,
+        nodeTransform,
+        _cameraTransform,
+        _camera.position,
+      );
+    }
     final packed = packInstanceTransforms(
       nodeTransform,
       instances,
       nodeWindingFlipped: windingFlipped,
     );
+    stats.packedInstances += instances.length;
     final instanceSlot = geometry.vertexStreamCount;
     if (packed.ccwCount > 0) {
       bindInstanceTransforms(_renderPass, packed.ccw, slot: instanceSlot);
-      _renderPass.setWindingOrder(gpu.WindingOrder.counterClockwise);
+      _setWinding(false);
       geometry.draw(_renderPass, instanceCount: packed.ccwCount);
+      stats.colourDraws++;
     }
     if (packed.cwCount > 0) {
       bindInstanceTransforms(_renderPass, packed.cw, slot: instanceSlot);
-      _renderPass.setWindingOrder(gpu.WindingOrder.clockwise);
+      _setWinding(true);
       geometry.draw(_renderPass, instanceCount: packed.cwCount);
+      stats.colourDraws++;
     }
   }
 
   /// Sorts and emits every deferred draw, then finishes recording.
   ///
-  /// Opaque draws are sorted by pipeline (state-change grouping) and then
-  /// front-to-back (early-Z), and drawn first. Translucent draws are then
-  /// sorted back-to-front and drawn with premultiplied source-over
-  /// blending and depth writes disabled. After this returns the encoder
-  /// has finished recording into its render pass; the caller submits the
-  /// owning command buffer.
+  /// Opaque draws are sorted by pipeline, then material (so a run of draws
+  /// shares one material bind), and then front-to-back (early-Z), and drawn
+  /// first. Translucent draws are then sorted back-to-front and drawn with
+  /// premultiplied source-over blending and depth writes disabled, each
+  /// with its own full bind (their materials interleave by depth). After
+  /// this returns the encoder has finished recording into its render pass;
+  /// the caller submits the owning command buffer.
   void flush() {
     _opaqueRecords.sort((a, b) {
       final byPipeline = a.pipelineKey.compareTo(b.pipelineKey);
       if (byPipeline != 0) return byPipeline;
+      final byMaterial = a.materialKey.compareTo(b.materialKey);
+      if (byMaterial != 0) return byMaterial;
       return a.depth.compareTo(b.depth);
     });
     for (final record in _opaqueRecords) {
@@ -464,10 +628,12 @@ base class SceneEncoder {
           record.material,
           item.windingFlipped,
           record.fade,
+          allowRun: true,
         );
       }
     }
     _opaqueRecords.clear();
+    _runMaterial = null;
 
     _translucentRecords.sort((a, b) => b.depth.compareTo(a.depth));
     _renderPass.setDepthWriteEnable(false);
@@ -492,6 +658,7 @@ base class SceneEncoder {
         record.material,
         record.windingFlipped,
         record.fade,
+        allowRun: false,
       );
     }
     _translucentRecords.clear();

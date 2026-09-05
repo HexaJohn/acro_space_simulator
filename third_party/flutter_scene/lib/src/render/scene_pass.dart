@@ -171,6 +171,10 @@ class ScenePass extends RenderGraphPass {
       );
     }
 
+    // Wall-clock UI-thread time for the colour draws (cull, encode, flush and
+    // submit; the skybox above is excluded), published through
+    // Scene.lastFrameStats.
+    final stopwatch = Stopwatch()..start();
     final encoder = SceneEncoder(
       renderPass,
       context.transientsBuffer,
@@ -182,6 +186,8 @@ class ScenePass extends RenderGraphPass {
     _renderScene.cull(encoder.frustum, encoder.submit);
     encoder.flush();
     commandBuffer.submit();
+    SceneFrameStats.accumulating.colourMs +=
+        stopwatch.elapsedMicroseconds / 1000.0;
 
     context.blackboard.set(kSceneColorBlackboardKey, hdrColor);
   }

@@ -5,6 +5,7 @@ import 'package:flutter_scene/src/light.dart';
 import 'package:flutter_scene/src/render/render_graph.dart';
 import 'package:flutter_scene/src/render/render_scene.dart';
 import 'package:flutter_scene/src/render/shadow_encoder.dart';
+import 'package:flutter_scene/src/scene_encoder.dart' show SceneFrameStats;
 
 /// Render-graph blackboard key under which [ShadowPass] publishes the
 /// directional shadow map atlas (a depth-in-`.r` fp32 texture). The
@@ -40,6 +41,15 @@ class ShadowPass extends RenderGraphPass {
 
   @override
   void execute(RenderGraphContext context) {
+    // Wall-clock UI-thread time for the whole pass (every cascade's cull and
+    // encode plus the submit), published through Scene.lastFrameStats.
+    final stopwatch = Stopwatch()..start();
+    _execute(context);
+    SceneFrameStats.accumulating.shadowMs +=
+        stopwatch.elapsedMicroseconds / 1000.0;
+  }
+
+  void _execute(RenderGraphContext context) {
     final atlasWidth = _tileResolution * _cascades.length;
     // fp32 (not fp16): the far cascade's orthographic depth range spans
     // hundreds of world units, and fp16's ~11-bit mantissa quantizes

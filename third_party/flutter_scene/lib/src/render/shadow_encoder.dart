@@ -1,12 +1,13 @@
 import 'package:flutter_scene/src/geometry/geometry.dart'
-    show bindUnskinnedFrameInfo;
+    show UnskinnedFrameInfo;
 import 'package:flutter_scene/src/gpu/gpu.dart' as gpu;
 import 'package:flutter_scene/src/light.dart' show ShadowCasterFaces;
 import 'package:flutter_scene/src/render/instance_packing.dart';
 import 'package:vector_math/vector_math.dart';
 
 import 'package:flutter_scene/src/render/render_scene.dart';
-import 'package:flutter_scene/src/scene_encoder.dart' show resolvePipeline;
+import 'package:flutter_scene/src/scene_encoder.dart'
+    show SceneFrameStats, resolvePipeline;
 import 'package:flutter_scene/src/shaders.dart';
 
 /// Records each opaque shadow caster's depth into a shadow-map render
@@ -24,6 +25,13 @@ class ShadowEncoder {
     ShadowCasterFaces casterFaces,
   ) {
     frustum = Frustum.matrix(_lightSpaceMatrix);
+    // The light-space block is constant for the cascade: emplace it once and
+    // rebind the view only when the bindings were cleared.
+    _frameInfo = UnskinnedFrameInfo(
+      _transientsBuffer,
+      _lightSpaceMatrix,
+      _cameraPositionPlaceholder,
+    );
     _renderPass.setDepthWriteEnable(true);
     _renderPass.setColorBlendEnable(false);
     _renderPass.setDepthCompareOperation(gpu.CompareFunction.lessEqual);
@@ -43,6 +51,7 @@ class ShadowEncoder {
   final gpu.RenderPass _renderPass;
   final gpu.HostBuffer _transientsBuffer;
   final Matrix4 _lightSpaceMatrix;
+  late final UnskinnedFrameInfo _frameInfo;
 
   static final gpu.Shader _depthShader =
       baseShaderLibrary['DepthOnlyFragment']!;
@@ -60,6 +69,34 @@ class ShadowEncoder {
   /// consecutive casters that share one only bind it once.
   gpu.RenderPipeline? _boundPipeline;
 
+  // PATCHED (acro_space_simulator): bindings persist across draws until
+  // `clearBindings`, so a position-only caster that follows one with the same
+  // pipeline keeps the light-space block bound and rebinds only its position
+  // stream, index buffer and instance transform. The bindings are cleared
+  // when the pipeline changes, at an indexed/non-indexed boundary, and for
+  // skinned casters (whose full bind sets joints and its own block per draw).
+  bool _frameInfoBound = false;
+  bool _runIndexed = false;
+  // Pass state tracked so a caster only sets what changed. The winding is
+  // relative to the counter-clockwise base set in the constructor: true when
+  // flipped to clockwise for a mirrored caster.
+  bool _windingFlipped = false;
+  gpu.PrimitiveType? _boundPrimitive;
+
+  void _setWinding(bool flipped) {
+    if (flipped == _windingFlipped) return;
+    _renderPass.setWindingOrder(
+      flipped ? gpu.WindingOrder.clockwise : gpu.WindingOrder.counterClockwise,
+    );
+    _windingFlipped = flipped;
+  }
+
+  void _setPrimitiveType(gpu.PrimitiveType type) {
+    if (type == _boundPrimitive) return;
+    _renderPass.setPrimitiveType(type);
+    _boundPrimitive = type;
+  }
+
   /// Records [item]'s depth, unless it is hidden, translucent (no shadow),
   /// or culled by the light frustum.
   void submit(RenderItem item) {
@@ -74,7 +111,6 @@ class ShadowEncoder {
         if (!frustum.intersectsWithAabb3(cullScratchAabb)) return;
       }
     }
-    _renderPass.clearBindings();
     final geometry = item.geometry;
     // Unskinned casters draw depth through a position-only shader and layout;
     // skinned geometry falls back to its full vertex shader and bind.
@@ -84,11 +120,20 @@ class ShadowEncoder {
       _depthShader,
       vertexLayout: depthVertex?.layout ?? geometry.instancedVertexLayout,
     );
+    final indexed = geometry.isIndexed;
+    if (depthVertex == null ||
+        !identical(_boundPipeline, pipeline) ||
+        indexed != _runIndexed) {
+      _renderPass.clearBindings();
+      _frameInfoBound = false;
+      _runIndexed = indexed;
+    }
     if (!identical(_boundPipeline, pipeline)) {
       _renderPass.bindPipeline(pipeline);
       _boundPipeline = pipeline;
     }
-    _renderPass.setPrimitiveType(geometry.primitiveType);
+    _setPrimitiveType(geometry.primitiveType);
+    final stats = SceneFrameStats.accumulating;
 
     // Binds the vertex/index buffers and the per-frame uniform for one draw.
     // The light-space matrix takes the place of the camera transform; the
@@ -96,13 +141,10 @@ class ShadowEncoder {
     void bindDraw(Matrix4 worldTransform) {
       if (depthVertex != null) {
         geometry.bindPositionStream(_renderPass);
-        bindUnskinnedFrameInfo(
-          _renderPass,
-          _transientsBuffer,
-          depthVertex.shader,
-          _lightSpaceMatrix,
-          _cameraPositionPlaceholder,
-        );
+        if (!_frameInfoBound) {
+          _frameInfo.bind(_renderPass, depthVertex.shader);
+          _frameInfoBound = true;
+        }
       } else {
         geometry.bind(
           _renderPass,
@@ -120,14 +162,11 @@ class ShadowEncoder {
         // Skinned geometry has no instance-attribute path; loop.
         for (final instanceTransform in instances) {
           bindDraw(item.worldTransform * instanceTransform);
-          final flip =
-              item.windingFlipped != (instanceTransform.determinant() < 0);
-          _renderPass.setWindingOrder(
-            flip
-                ? gpu.WindingOrder.clockwise
-                : gpu.WindingOrder.counterClockwise,
+          _setWinding(
+            item.windingFlipped != (instanceTransform.determinant() < 0),
           );
           geometry.draw(_renderPass);
+          stats.shadowDraws++;
         }
         return;
       }
@@ -137,15 +176,18 @@ class ShadowEncoder {
         instances,
         nodeWindingFlipped: item.windingFlipped,
       );
+      stats.packedInstances += instances.length;
       if (packed.ccwCount > 0) {
         bindInstanceTransforms(_renderPass, packed.ccw);
-        _renderPass.setWindingOrder(gpu.WindingOrder.counterClockwise);
+        _setWinding(false);
         geometry.draw(_renderPass, instanceCount: packed.ccwCount);
+        stats.shadowDraws++;
       }
       if (packed.cwCount > 0) {
         bindInstanceTransforms(_renderPass, packed.cw);
-        _renderPass.setWindingOrder(gpu.WindingOrder.clockwise);
+        _setWinding(true);
         geometry.draw(_renderPass, instanceCount: packed.cwCount);
+        stats.shadowDraws++;
       }
       return;
     }
@@ -159,11 +201,8 @@ class ShadowEncoder {
     }
     // Mirrored casters reverse winding; flip the cull order so the same faces
     // that are visible also cast shadows.
-    _renderPass.setWindingOrder(
-      item.windingFlipped
-          ? gpu.WindingOrder.clockwise
-          : gpu.WindingOrder.counterClockwise,
-    );
+    _setWinding(item.windingFlipped);
     geometry.draw(_renderPass);
+    stats.shadowDraws++;
   }
 }
