@@ -71,6 +71,42 @@ enum TerrainTool {
   building,
 }
 
+/// Remote-control hooks for the dev harness (the city studio's pattern):
+/// `main_terrain_studio_dev.dart` exposes these over the VM service so a
+/// script can open a site, put the walker or the buggy somewhere, pick the
+/// ground at a viewport fraction, and read the perf and rover numbers.
+/// Registered by the live State, cleared on dispose; null means no studio.
+class TerrainStudioDevHooks {
+  /// Press OPEN SITE on the current world.
+  static void Function()? openSite;
+
+  /// Stand the walker at (e, n) metres from the site anchor, looking [yaw]
+  /// from north and [pitch] up.
+  static void Function(
+      {required double e,
+      required double n,
+      required double yaw,
+      required double pitch})? walkTo;
+
+  /// Put the buggy down at (e, n) heading [yaw], holding [throttle] /
+  /// [steer] for [seconds].
+  static void Function(
+      {required double e,
+      required double n,
+      required double yaw,
+      double throttle,
+      double steer,
+      double seconds})? drive;
+
+  /// The ground under a viewport fraction, as metres east / north / up of
+  /// the site anchor — the picker's own ray, so it reports what the SCREEN
+  /// shows at that spot. Null when the ray misses the ground.
+  static Map<String, double>? Function(double fx, double fy)? pick;
+
+  static void Function({bool? perf, bool? controls})? setPanels;
+  static Map<String, Object?> Function()? status;
+}
+
 class TerrainStudioScreen extends StatefulWidget {
   const TerrainStudioScreen({super.key});
 
@@ -212,6 +248,7 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
     super.initState();
     TerrainNodes.profile = true;
     _ticker = createTicker(_onFrame)..start();
+    _registerDevHooks();
     _timingsCb = (timings) {
       for (final t in timings) {
         _uiMs.add(t.buildDuration.inMicroseconds / 1000);
@@ -233,6 +270,12 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
     // pointing at this screen's ground.
     CityNodes.cursorBF = null;
     CityNodes.pendingRouteBF = const [];
+    TerrainStudioDevHooks.openSite = null;
+    TerrainStudioDevHooks.walkTo = null;
+    TerrainStudioDevHooks.drive = null;
+    TerrainStudioDevHooks.pick = null;
+    TerrainStudioDevHooks.setPanels = null;
+    TerrainStudioDevHooks.status = null;
     final cb = _timingsCb;
     if (cb != null) SchedulerBinding.instance.removeTimingsCallback(cb);
     _ticker?.dispose();
@@ -388,11 +431,11 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
     final upv = right.cross(fwd);
     final tanY = math.tan(fovY / 2);
     final tanX = tanY * size.width / size.height;
-    // Screen X is NEGATED against the right vector: the engine's camera
-    // basis is X-mirrored (see coord_convert.dart — the same mirror the
-    // mesh builders flip their winding for), so a ray built right-handed
-    // picked the ground on the wrong side of centre.
-    final ndcX = -(local.dx / size.width * 2 - 1);
+    // The image is flipped horizontally at the SceneView (see the CHIRALITY
+    // note there), which undoes the engine camera's X mirror: screen right
+    // is the domain's own right and there is no mirror term — the same ray
+    // the city studio builds.
+    final ndcX = local.dx / size.width * 2 - 1;
     final ndcY = 1 - local.dy / size.height * 2;
     final dir =
         (fwd + right * (ndcX * tanX) + upv * (ndcY * tanY)).normalized;
@@ -800,8 +843,12 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
     light.shadowFadeRange = lengthToScene(rangeM * 0.12);
     light.shadowMapResolution = 2048;
     light.shadowSoftness = lengthToScene(1.5);
-    light.shadowNormalBias = lengthToScene(1.0);
-    light.shadowDepthBias = lengthToScene(1.0);
+    // The lander tuning's metre of bias (back-face casting hides the offset
+    // inside a solid craft) means nothing under a metre tall can shadow the
+    // ground — a buggy then reads as floating, whatever its wheels touch.
+    // Driving, the biases come down to what a 1.6 m vehicle needs.
+    light.shadowNormalBias = lengthToScene(_driving ? 0.15 : 1.0);
+    light.shadowDepthBias = lengthToScene(_driving ? 0.15 : 1.0);
   }
 
   // ---- Camera (the city studio's, verbatim where possible) ----------------
@@ -925,7 +972,137 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
     final b = _snap?.bodies[_body];
     if (field == null || b == null) return radial.length;
     final bf = Quaternion(b.qw, b.qx, b.qy, b.qz).conjugate.rotate(dir);
-    return field.surfaceRadiusAt(bf.x, bf.y, bf.z);
+    // The ground AS DRAWN wherever a chunk is resident — the wheels sit on
+    // the triangles on screen, not on a field the mesh only approximates —
+    // and the field's cheap surface query until the streamer catches up.
+    return _terrain?.drawnGroundRadiusAt(bf) ??
+        field.surfaceRadiusAt(bf.x, bf.y, bf.z);
+  }
+
+  /// A scripted drive (the dev hook): held in place of the keys until
+  /// `_autoUntilS` on the studio clock.
+  RoverInput? _autoInput;
+  double _autoUntilS = -1;
+  bool _showPerf = true;
+
+  /// The buggy for the dev harness, with the ground under its centre read
+  /// both ways — the drawn mesh and the analytic field — so a headless run
+  /// can see the gap the wheels would otherwise sit in.
+  Map<String, Object?>? _roverStatus() {
+    final r = _rover;
+    if (!_driving || r == null) return null;
+    final (east, north) = _tangentFrame();
+    final flat = _anchorWorld + east * r.e + north * r.n;
+    final radial = flat - _bodyCentreWorld;
+    double? meshR, fieldR;
+    final b = _snap?.bodies[_body];
+    final field = _groundField;
+    if (radial.length > 1 && b != null && field != null) {
+      final bf = Quaternion(b.qw, b.qx, b.qy, b.qz)
+          .conjugate
+          .rotate(radial.normalized);
+      meshR = _terrain?.drawnGroundRadiusAt(bf);
+      fieldR = field.surfaceRadiusAt(bf.x, bf.y, bf.z);
+    }
+    return {
+      'e': r.e,
+      'n': r.n,
+      'yaw': r.yaw,
+      'speed': r.speed,
+      'height': r.height,
+      'pitch': r.pitch,
+      'roll': r.roll,
+      'wheelsDown': r.wheelsDown,
+      'compression': r.compression,
+      'dust': r.dust,
+      'chaseDistM': _chaseDistM,
+      'groundMeshM': meshR,
+      'groundFieldM': fieldR,
+      'meshMinusFieldM':
+          meshR == null || fieldR == null ? null : meshR - fieldR,
+    };
+  }
+
+  void _registerDevHooks() {
+    TerrainStudioDevHooks.openSite = () {
+      if (mounted) _openSite();
+    };
+    TerrainStudioDevHooks.walkTo = (
+        {required double e,
+        required double n,
+        required double yaw,
+        required double pitch}) {
+      if (!mounted || _snap == null) return;
+      setState(() {
+        if (_driving) _toggleDriving();
+        _firstPerson = true;
+        _walkE = e;
+        _walkN = n;
+        _walkYaw = yaw;
+        _walkPitch = pitch.clamp(-1.45, 1.45);
+      });
+    };
+    TerrainStudioDevHooks.drive = (
+        {required double e,
+        required double n,
+        required double yaw,
+        double throttle = 0,
+        double steer = 0,
+        double seconds = 0}) {
+      if (!mounted || _snap == null) return;
+      setState(() {
+        // Park any buggy already out, stand the walker on the spot, and let
+        // the ordinary toggle put the buggy where the walker stands.
+        if (_driving) _toggleDriving();
+        _firstPerson = true;
+        _walkE = e;
+        _walkN = n;
+        _walkYaw = yaw;
+        _walkPitch = 0;
+        _toggleDriving();
+        _autoInput = RoverInput(throttle: throttle, steer: steer);
+        _autoUntilS = _epoch.value + seconds;
+      });
+    };
+    TerrainStudioDevHooks.pick = (fx, fy) {
+      if (!mounted) return null;
+      final size = Size(_viewportW, _viewportH);
+      final bf = _pickGroundBF(Offset(fx * size.width, fy * size.height), size);
+      final b = _snap?.bodies[_body];
+      if (bf == null || b == null) return null;
+      final world = Vector3(b.px, b.py, b.pz) +
+          Quaternion(b.qw, b.qx, b.qy, b.qz).rotate(bf);
+      final rel = world - _anchorWorld;
+      final (east, north) = _tangentFrame();
+      return {
+        'e': rel.dot(east),
+        'n': rel.dot(north),
+        'up': rel.dot(_upWorld),
+      };
+    };
+    TerrainStudioDevHooks.setPanels = ({bool? perf, bool? controls}) {
+      if (!mounted) return;
+      setState(() {
+        if (perf != null) _showPerf = perf;
+        if (controls != null) _panel = controls;
+      });
+    };
+    TerrainStudioDevHooks.status = () => {
+          'site': _snap != null,
+          'body': _body,
+          'firstPerson': _firstPerson,
+          'driving': _driving,
+          'walk': {'e': _walkE, 'n': _walkN, 'yaw': _walkYaw},
+          'frameMs': _avgOf(_frameMs),
+          'uiMs': _avgOf(_uiMs),
+          'rasterMs': _avgOf(_rasterMs),
+          'terrainMs': _terrainMs,
+          'cityMs': _cityMs,
+          'censusDraws': _censusDraws,
+          'terrainDebug': TerrainNodes.debugLine,
+          'terrainCounters': TerrainNodes.counters,
+          'rover': _roverStatus(),
+        };
   }
 
   /// Surface gravity at the site from the body's mu, m/s² — the Moon's
@@ -1017,9 +1194,19 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
     if (_held.contains(LogicalKeyboardKey.keyD)) steer += 1;
     if (_held.contains(LogicalKeyboardKey.keyA)) steer -= 1;
     final brake = _held.contains(LogicalKeyboardKey.space);
+    var input = RoverInput(throttle: throttle, steer: steer, brake: brake);
+    final auto = _autoInput;
+    if (auto != null) {
+      if (_epoch.value < _autoUntilS) {
+        input = auto;
+        throttle = auto.throttle;
+      } else {
+        _autoInput = null;
+      }
+    }
     stepRover(
       r,
-      RoverInput(throttle: throttle, steer: steer, brake: brake),
+      input,
       dt: dtS,
       gravity: _surfaceGravity(),
       heightAt: _groundRadiusAtEN,
@@ -1123,11 +1310,11 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
     }
 
     final (east, north) = _tangentFrame();
-    // W pushes the focus AWAY from the camera; screen-right comes from the
-    // same X-mirrored basis the pick ray corrects for (up cross forward).
+    // W pushes the focus AWAY from the camera; screen-right is the domain's
+    // own right (forward cross up) now that the image is flipped straight.
     final ahead =
         (east * -math.cos(_azimuth) + north * -math.sin(_azimuth));
-    final rightD = _upWorld.cross(ahead);
+    final rightD = ahead.cross(_upWorld);
     final len = math.max(1.0, math.sqrt(fwd * fwd + side * side));
     final move = (ahead * fwd + rightD * side) *
         (_distanceM * 0.6 * dtS / len);
@@ -1449,13 +1636,13 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
                     // Swing the chase camera round the buggy; it drifts
                     // back behind the heading once the throttle is on.
                     setState(() {
-                      _chaseOrbit += d.focalPointDelta.dx * 0.005;
+                      _chaseOrbit -= d.focalPointDelta.dx * 0.005;
                       _chasePitch = (_chasePitch + d.focalPointDelta.dy * 0.004)
                           .clamp(0.05, 1.2);
                     });
                   } else if (_firstPerson) {
                     setState(() {
-                      _walkYaw += d.focalPointDelta.dx * 0.004;
+                      _walkYaw -= d.focalPointDelta.dx * 0.004;
                       _walkPitch = (_walkPitch - d.focalPointDelta.dy * 0.004)
                           .clamp(-1.45, 1.45);
                     });
@@ -1476,14 +1663,25 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
                             'Click the ground to use the active tool.',
                             style: AppTheme.dim,
                             textAlign: TextAlign.center))
-                    : fs.SceneView(scene, camera: cam),
+                    // CHIRALITY: the app's world-to-scene mapping is a
+                    // mirror the renderer corrects by flipping the finished
+                    // image (see coord_convert.dart). This studio used to
+                    // show the raw mirror and negate screen X in its pick
+                    // ray instead — which put east on the LEFT when facing
+                    // north, so a buggy steering right turned left on
+                    // screen. Flipped like the city studio and the sim,
+                    // every screen-space sign below is the city's.
+                    : Transform.flip(
+                        flipX: true,
+                        child: fs.SceneView(scene, camera: cam),
+                      ),
                 ),
               ),
             );
           }),
         ),
       ),
-      Positioned(left: 10, top: 10, child: _perfPanel()),
+      if (_showPerf) Positioned(left: 10, top: 10, child: _perfPanel()),
       if (_driving) _driveHint(),
     ]);
   }

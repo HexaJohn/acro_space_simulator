@@ -19,6 +19,7 @@ import '../../../domain/shared/quaternion.dart';
 import '../../../domain/shared/vector3.dart';
 import '../../../domain/terrain/cell_mesher.dart';
 import '../../../domain/terrain/cubed_sphere.dart';
+import '../../../domain/terrain/mesh_ground_query.dart';
 import '../../../domain/terrain/mesh_scheduler.dart';
 import '../../../domain/terrain/terrain_brush.dart';
 import '../../../domain/terrain/terrain_edits.dart';
@@ -2395,6 +2396,32 @@ class TerrainNodes {
     _builtEditCount = -1;
     _edits = null;
     debugLine = '';
+  }
+
+  // ---- The ground as drawn ---------------------------------------------------
+
+  /// The radius at which the radial through body-fixed unit [dir] meets the
+  /// RESIDENT terrain mesh — the ground as it is drawn this frame, at
+  /// whatever level the streamer has under that point — or null when no
+  /// resident chunk covers it (before the first chunks land, or off the
+  /// streamed body).
+  ///
+  /// This is what a wheel should rest on. The analytic field is exact, but
+  /// the mesh is a voxel surface of it at the chunk's level: a coarse chunk
+  /// under a fast vehicle (or anywhere the split budget stops short) sits
+  /// metres from the field, and a body placed on the field then floats over
+  /// or sinks into the ground it is visibly standing on. Finest containing
+  /// chunk first — coarser residents are masked wherever a finer one draws.
+  /// A few dozen map lookups and one chunk's triangles per call.
+  double? drawnGroundRadiusAt(Vector3 dir) {
+    if (_chunks.isEmpty) return null;
+    for (var level = 24; level >= 0; level--) {
+      final c = _chunks[chunkAt(dir, level)];
+      if (c == null) continue;
+      final r = radialHitOnCell(c.cell, dir);
+      if (r != null) return r;
+    }
+    return null;
   }
 }
 

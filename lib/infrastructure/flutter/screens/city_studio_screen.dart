@@ -50,6 +50,7 @@ import '../../flutter_scene/scatter/scatter_prop_library.dart';
 import '../../../domain/architecture/building_generator.dart';
 import '../../../domain/terrain/terrain_field.dart';
 import '../../flutter_scene/city/city_materials.dart';
+import '../../flutter_scene/city/road_mesher.dart';
 import '../../flutter_scene/city/street_furniture.dart';
 import '../../flutter_scene/city/scale_rig.dart';
 import '../../../domain/scatter/mesh_builder.dart';
@@ -1068,8 +1069,12 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     light.shadowFadeRange = lengthToScene(rangeM * 0.12);
     light.shadowMapResolution = 2048;
     light.shadowSoftness = lengthToScene(1.5);
-    light.shadowNormalBias = lengthToScene(1.0);
-    light.shadowDepthBias = lengthToScene(1.0);
+    // The lander tuning's metre of bias (back-face casting hides the offset
+    // inside a solid craft) means nothing under a metre tall can shadow the
+    // ground — a buggy then reads as floating, whatever its wheels touch.
+    // Driving, the biases come down to what a 1.6 m vehicle needs.
+    light.shadowNormalBias = lengthToScene(_driving ? 0.15 : 1.0);
+    light.shadowDepthBias = lengthToScene(_driving ? 0.15 : 1.0);
   }
 
   /// Hours that put the sun at local NOON over the colony: the turn that
@@ -1219,7 +1224,51 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   Map<String, Object?>? _roverStatus() {
     final r = _rover;
     if (!_driving || r == null) return null;
+    // The ground under the centre read both ways — drawn mesh and analytic
+    // field — so a headless run can see the gap the wheels would sit in.
+    final (east, north) = _tangentFrame();
+    final flat = _anchorWorld + east * r.e + north * r.n;
+    final radial = flat - _bodyCentreWorld;
+    double? meshR, fieldR;
+    final b = _snap?.bodies[_sim?.body.id.value];
+    final field = _groundField;
+    final quat = b == null ? null : Quaternion(b.qw, b.qx, b.qy, b.qz);
+    Vector3? bf;
+    if (radial.length > 1 && quat != null && field != null) {
+      bf = quat.conjugate.rotate(radial.normalized);
+      meshR = _terrain?.drawnGroundRadiusAt(bf);
+      fieldR = field.surfaceRadiusAt(bf.x, bf.y, bf.z);
+    }
+    final probe = <String, Object?>{};
+    double? liftM;
+    List<double>? wheelLifts;
+    if (bf != null && fieldR != null && quat != null) {
+      final fr = fieldR;
+      liftM = _citySurface(_bfToLocal(bf * fr), debug: probe).liftM;
+      // Each wheel's own surface, the way _groundRadiusAtEN sees it.
+      const spec = RoverSpec();
+      final sy = math.sin(r.yaw), cy = math.cos(r.yaw);
+      wheelLifts = [
+        for (var i = 0; i < RoverSpec.wheelCount; i++)
+          () {
+            final (x, y) = spec.wheelOffset(i);
+            final wf = _anchorWorld +
+                east * (r.e + cy * x + sy * y) +
+                north * (r.n - sy * x + cy * y);
+            final wd = (wf - _bodyCentreWorld).normalized;
+            final wbf = quat.conjugate.rotate(wd);
+            return _citySurface(_bfToLocal(wbf * fr)).liftM;
+          }(),
+      ];
+    }
     return {
+      'cityLiftM': liftM,
+      'wheelLiftM': wheelLifts,
+      'roadProbe': probe,
+      'groundMeshM': meshR,
+      'groundFieldM': fieldR,
+      'meshMinusFieldM':
+          meshR == null || fieldR == null ? null : meshR - fieldR,
       'e': r.e,
       'n': r.n,
       'yaw': r.yaw,
@@ -1289,12 +1338,97 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     if (field == null || b == null) return radial.length;
     final bf = Quaternion(b.qw, b.qx, b.qy, b.qz).conjugate.rotate(dir);
     final sw = Stopwatch()..start();
-    // The FAST surface query: the full one marches every brush on the ray
-    // at ~16 ms a sample in a graded town, and five a frame was the frame.
-    final r = field.surfaceRadiusAt(bf.x, bf.y, bf.z);
+    // The ground AS DRAWN wherever a chunk is resident — the wheels sit on
+    // the triangles on screen, not on a field the mesh only approximates —
+    // else the field's FAST surface query (the full one marches every brush
+    // on the ray at ~16 ms a sample in a graded town; five a frame was the
+    // frame).
+    var r = _terrain?.drawnGroundRadiusAt(bf) ??
+        field.surfaceRadiusAt(bf.x, bf.y, bf.z);
+    // Then whatever the city laid on top: a carriageway and its pavements
+    // are built off the road's CENTRELINE ground, flat across, so on them
+    // the wheel stands on that ground plus the lift — not on whatever the
+    // terrain does under the kerb.
+    final sim = _sim;
+    if (sim != null) {
+      final s = _citySurface(_bfToLocal(bf * r));
+      if (s.liftM > 0) {
+        final cbf = sim
+            .localToBodyFixed(s.centre, bodyRadiusM: sim.body.radius)
+            .normalized;
+        final cr = _terrain?.drawnGroundRadiusAt(cbf) ??
+            field.surfaceRadiusAt(cbf.x, cbf.y, cbf.z);
+        r = cr + s.liftM;
+      }
+    }
     _groundMs += sw.elapsedMicroseconds / 1000;
     _groundSamples++;
     return r;
+  }
+
+  /// What the city laid over the ground under a colony-local point: a
+  /// carriageway rides [RoadMesher.ribbonLiftM] over the drape, a raised
+  /// pavement a curb higher, open ground nothing — the road mesher's own
+  /// numbers — and the centreline point it was built from. [debug] carries
+  /// the probe's reasoning for the dev status.
+  ({double liftM, Vec2 centre}) _citySurface(Vec2 local,
+      {Map<String, Object?>? debug}) {
+    final sim = _sim;
+    const none = (liftM: 0.0, centre: Vec2(0, 0));
+    if (sim == null) return none;
+    final hit = sim.layout.roadIndex.nearest(local, startM: 16, maxM: 64);
+    debug?['roads'] = sim.layout.roads.length;
+    debug?['local'] = [local.e, local.n];
+    if (hit == null) {
+      debug?['found'] = false;
+      return none;
+    }
+    final road = hit.road.road;
+    final cls = road.roadClass;
+    // The class's curb-to-curb half width, overridden per road end and
+    // tapered between them along the arc (a plat that widened a road).
+    final base = road.halfWidth;
+    final rec = hit.road;
+    final t = rec.lengthM <= 0 || hit.seg <= 0
+        ? 0.0
+        : (rec.cum[hit.seg - 1] / rec.lengthM).clamp(0.0, 1.0);
+    final h0 = road.startHalfWidthM ?? base;
+    final h1 = road.endHalfWidthM ?? base;
+    final half = h0 + (h1 - h0) * t;
+    final walked = cls.paved && cls.hasPavement && !road.sealed;
+    debug?['found'] = true;
+    debug?['distance'] = hit.distance;
+    debug?['half'] = half;
+    debug?['cls'] = cls.name;
+    debug?['walked'] = walked;
+    // A tyre does not step up a kerb, it rolls up it: the contact climbs
+    // over about sqrt(2·r·h) of travel, so a kerb is a short ramp rather
+    // than a wall the springs slam into at speed. The tarmac's own 12 cm
+    // is a render lift (the ribbon floats clear of the drape), not a real
+    // edge, so off the carriageway it eases out over a shoulder's width.
+    const kerbM = 0.35;
+    const shoulderM = 1.5;
+    double ramp(double from, double to, double x, double x0, double w) =>
+        from + (to - from) * ((x - x0) / w).clamp(0.0, 1.0);
+    final d = hit.distance;
+    const ribbon = RoadMesher.ribbonLiftM;
+    const walk = RoadMesher.walkTopLiftM;
+    double lift;
+    if (d <= half) {
+      lift = ribbon;
+    } else if (walked) {
+      final outer = half + 3.0;
+      if (d <= half + kerbM) {
+        lift = ramp(ribbon, walk, d, half, kerbM);
+      } else if (d <= outer) {
+        lift = walk;
+      } else {
+        lift = ramp(walk, 0.0, d, outer, shoulderM);
+      }
+    } else {
+      lift = ramp(ribbon, 0.0, d, half, shoulderM);
+    }
+    return lift <= 0 ? none : (liftM: lift, centre: hit.point);
   }
 
   /// What the buggy's ground sampling cost this frame (ms, count) — the

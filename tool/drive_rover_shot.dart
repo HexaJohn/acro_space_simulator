@@ -75,10 +75,23 @@ Future<void> main(List<String> args) async {
   await Future<void>.delayed(const Duration(seconds: 3));
   await shot('rover_parked');
 
-  // Flat out toward town for six seconds; shoot mid-run.
-  await call('ext.acro.citystudio', {'drive': '0,-220,0,1,0,6'});
-  await Future<void>.delayed(const Duration(seconds: 4));
-  await shot('rover_driving');
+  // Flat out toward town for six seconds; sample the surface under the
+  // buggy on the way (tarmac 0.12, a pavement 0.27, open ground 0) and
+  // shoot mid-run.
+  await call('ext.acro.citystudio', {'drive': '0,-200,0,1,0,7'});
+  for (var i = 0; i < 12; i++) {
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+    final r = (await call('ext.acro.citystudio'))['rover'];
+    if (r is Map) {
+      final probe = r['roadProbe'];
+      final local = probe is Map ? probe['local'] : null;
+      stdout.writeln('   t=${(i + 1) * 0.5}s  local=$local  '
+          'v=${(r['speed'] as num).toStringAsFixed(1)}  '
+          'lift=${r['cityLiftM']}  wheels=${r['wheelLiftM']}  '
+          'down=${r['wheelsDown']}  pitch=${(r['pitch'] as num).toStringAsFixed(3)}');
+    }
+    if (i == 7) await shot('rover_driving');
+  }
 
   // A hard right under power: lean, steer, and the rear wheels' dust.
   await call('ext.acro.citystudio', {'drive': '0,-220,0,1,0.9,6'});
