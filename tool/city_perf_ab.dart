@@ -210,11 +210,13 @@ Future<void> main(List<String> args) async {
       // The panel's windows hold the last ninety frames; a pattern's worst
       // frame must not be the flip or the pattern before it.
       await call('ext.acro.citystudio', {'resetFrames': 'true'});
-      final t0 = spikes ? await beginTimeline(vm) : 0;
+      final window = spikes ? await TimelineWindow.begin(vm) : null;
       for (var i = 0; i < steps; i++) {
         final t = i / 20.0;
         await call('ext.acro.citystudio', pose(t));
         await Future<void>.delayed(const Duration(milliseconds: 50));
+        // Every 2.5 s, well inside the ring buffer's reach.
+        if (window != null && i % 50 == 49) await window.drain();
         if (i % 5 == 4) {
           final s = await call('ext.acro.citystudio');
           acc['n'] = acc['n']! + 1;
@@ -250,8 +252,8 @@ Future<void> main(List<String> args) async {
           'submit max ${f(r['submitMs'])}  '
           'governor max ${r['governor']!.round()}');
       sweeps[label] = r;
-      if (spikes) {
-        reportSpikes(await endTimeline(vm, t0), t0,
+      if (window != null) {
+        reportSpikes(await window.end(), window.t0,
             thresholdMs: 16, count: 4, indent: '    ');
       }
       return r;

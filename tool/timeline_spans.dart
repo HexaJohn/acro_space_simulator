@@ -33,6 +33,42 @@ Future<List<Span>> endTimeline(VmService vm, int t0) async {
   return spansOf(timeline.traceEvents ?? const <TimelineEvent>[]);
 }
 
+/// A window longer than the VM's ring buffer, drained as it goes.
+///
+/// The timeline recorder is a ring of a few megabytes: at a hundred frames
+/// a second with the GC and embedder streams on it holds about three
+/// seconds, and a twelve-second sweep read at its end kept only its tail
+/// — the stalls at the start of a pattern, where the camera first looks at
+/// unbuilt ground, were never in it. Call [drain] every couple of seconds
+/// and [end] once; the spans of every drain are one list.
+class TimelineWindow {
+  TimelineWindow._(this.vm, this.t0) : _from = t0;
+  final VmService vm;
+  final int t0;
+  final List<Span> _spans = [];
+  int _from;
+
+  static Future<TimelineWindow> begin(VmService vm) async {
+    final t0 = await beginTimeline(vm);
+    return TimelineWindow._(vm, t0);
+  }
+
+  /// Fetch what the buffer holds since the last drain and clear it.
+  Future<void> drain() async {
+    final now = (await vm.getVMTimelineMicros()).timestamp!;
+    final timeline = await vm.getVMTimeline(
+        timeOriginMicros: _from, timeExtentMicros: now - _from);
+    _spans.addAll(spansOf(timeline.traceEvents ?? const <TimelineEvent>[]));
+    await vm.clearVMTimeline();
+    _from = now;
+  }
+
+  Future<List<Span>> end() async {
+    await drain();
+    return _spans;
+  }
+}
+
 List<Span> spansOf(List<TimelineEvent> events) {
   final spans = <Span>[];
   final open = <String, List<Map<String, dynamic>>>{};
