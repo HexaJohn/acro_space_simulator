@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_scene/src/gpu/gpu.dart' as gpu;
+import 'package:flutter_scene/src/render/render_scene.dart';
 import 'package:vector_math/vector_math.dart';
 
 /// Per-instance world transforms packed for the instance-rate vertex buffer
@@ -56,6 +57,47 @@ PackedInstanceTransforms packInstanceTransforms(
     }
   }
   return PackedInstanceTransforms(ccw, cw);
+}
+
+/// The packed instance transforms for [item], reusing the pack cached on
+/// the item while nothing it depends on has changed.
+///
+/// [instances] must be the item's own instance list
+/// ([RenderItem.instanceTransforms]); the cache is keyed by the
+/// `InstancedMesh` version the pre-pass stamped into
+/// [RenderItem.instanceVersion], the item's world transform, and its
+/// winding parity, and is rebuilt with [packInstanceTransforms] when any of
+/// them moved. A static instanced mesh is therefore packed once rather than
+/// once per pass per frame; a mesh whose instances move every frame repacks
+/// exactly as before.
+///
+/// The cached `Float32List` is still emplaced into the frame's host buffer
+/// on every pass ([bindInstanceTransforms]), so the GLES upload race
+/// (flutter/flutter#187931) is neither widened nor narrowed by the cache:
+/// the bytes the GPU reads come from the same per-frame transient buffer
+/// as before, only the CPU-side multiply is skipped.
+PackedInstanceTransforms packedInstancesFor(
+  RenderItem item,
+  List<Matrix4> instances,
+) {
+  final cached = item.packedCache;
+  if (cached != null &&
+      item.packedVersion == item.instanceVersion &&
+      item.packedWindingFlipped == item.windingFlipped &&
+      item.packedWorld == item.worldTransform) {
+    return cached;
+  }
+  final packed = packInstanceTransforms(
+    item.worldTransform,
+    instances,
+    nodeWindingFlipped: item.windingFlipped,
+  );
+  item
+    ..packedCache = packed
+    ..packedVersion = item.instanceVersion
+    ..packedWindingFlipped = item.windingFlipped
+    ..packedWorld.setFrom(item.worldTransform);
+  return packed;
 }
 
 /// Uploads a single world transform as a one-element instance buffer and

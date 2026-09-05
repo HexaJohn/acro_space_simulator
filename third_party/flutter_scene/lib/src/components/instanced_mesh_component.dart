@@ -43,6 +43,11 @@ class InstancedMeshComponent extends Component {
   /// Refreshes this component's render item from the owning node's
   /// transform and cull state and the current instance list. Called once
   /// per frame by the scene pre-pass while the node is visible.
+  ///
+  /// The world matrix copy, the aggregate bounds fetch, and the AABB
+  /// transform run only when the node's [Node.transformVersion] or the
+  /// [InstancedMesh.version] moved since the item last saw them; the
+  /// cheap flags are refreshed every frame regardless.
   @internal
   void refreshRenderItem() {
     final item = _renderItem;
@@ -52,21 +57,36 @@ class InstancedMeshComponent extends Component {
     final frustumCulledChanged = item.frustumCulled != frustumCulled;
     item.frustumCulled = frustumCulled;
     item.layers = node.layers;
-    item.worldTransform.setFrom(node.globalTransform);
+    item.castsShadow = node.castsShadow;
+    // Reading globalTransform refreshes the node's cache, and with it the
+    // version the item is compared against.
+    final worldTransform = node.globalTransform;
+    final transformVersion = node.transformVersion;
     item.windingFlipped = node.windingFlipped;
-    item.instanceTransforms = instancedMesh.instances;
-    item.instanceBounds = instancedMesh.aggregateBounds;
 
-    final wasBounded = item.worldBounds != null;
-    final boundsChanged = item.refreshWorldBounds();
-    final isBounded = item.worldBounds != null;
+    final instanceVersion = instancedMesh.version;
+    final stale =
+        item.transformVersion != transformVersion ||
+        item.instanceVersion != instanceVersion;
+    bool membershipChanged = frustumCulledChanged;
+    bool boundsChanged = false;
+    if (stale) {
+      item.worldTransform.setFrom(worldTransform);
+      item.transformVersion = transformVersion;
+      item.instanceTransforms = instancedMesh.instances;
+      item.instanceBounds = instancedMesh.aggregateBounds;
+      item.instanceVersion = instanceVersion;
+      final wasBounded = item.worldBounds != null;
+      boundsChanged = item.refreshWorldBounds();
+      final isBounded = item.worldBounds != null;
+      membershipChanged = membershipChanged || wasBounded != isBounded;
+    }
 
     // A toggled cull flag or a bounded/unbounded transition changes the
-    // BVH membership and needs a rebuild; a plain move only needs a
-    // refit.
+    // BVH membership; a plain move only needs a refit.
     final renderScene = node.internalRenderScene;
-    if (frustumCulledChanged || wasBounded != isBounded) {
-      renderScene?.markBvhStructureDirty();
+    if (membershipChanged) {
+      renderScene?.markBvhMembershipChanged(item);
     } else if (boundsChanged && item.frustumCulled) {
       renderScene?.markBvhBoundsDirty();
     }

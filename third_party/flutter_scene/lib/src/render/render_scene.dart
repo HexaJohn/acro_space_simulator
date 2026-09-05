@@ -8,6 +8,7 @@ import 'package:flutter_scene/src/components/environment_volume_component.dart';
 import 'package:flutter_scene/src/geometry/geometry.dart';
 import 'package:flutter_scene/src/material/material.dart';
 import 'package:flutter_scene/src/render/bvh.dart';
+import 'package:flutter_scene/src/render/instance_packing.dart';
 import 'package:flutter_scene/src/render/lod.dart';
 import 'package:flutter_scene/src/render/render_layers.dart';
 
@@ -59,8 +60,59 @@ class RenderItem {
   /// set so mirrored nodes don't render inside-out.
   bool windingFlipped = false;
 
-  /// World-space transform, refreshed each frame from the owning node.
+  /// Mirrors the owning node's `castsShadow`, refreshed each frame. The
+  /// shadow encoder skips an item with this cleared when it draws the
+  /// light's depth pass.
+  bool castsShadow = true;
+
+  /// World-space transform, refreshed from the owning node whenever the
+  /// node's transform version moves (see [transformVersion]).
   final Matrix4 worldTransform = Matrix4.identity();
+
+  /// The owning node's transform version that [worldTransform] and
+  /// [worldBounds] were last refreshed from, or `-1` before the first
+  /// refresh. The pre-pass skips the matrix copy and the AABB transform
+  /// while the node still reports the same version, which is the common
+  /// case: a thousand static nodes under a moving camera.
+  int transformVersion = -1;
+
+  /// The `InstancedMesh` version the instance list and [instanceBounds]
+  /// were last refreshed from, or `-1` before the first refresh. Unused for
+  /// a non-instanced item.
+  int instanceVersion = -1;
+
+  /// The [Geometry.localBounds] object and [Geometry.localBoundsVersion]
+  /// that [worldBounds] was last derived from. A caller-managed geometry
+  /// can replace or re-set its bounds after the item is registered, and
+  /// the pre-pass must still notice that when the transform is unchanged.
+  Aabb3? seenLocalBounds;
+  int seenLocalBoundsVersion = -1;
+
+  /// Cached per-parity instance transform pack (see [packedInstancesFor]),
+  /// valid while [packedVersion] matches the `InstancedMesh` version and
+  /// [packedWorld] matches [worldTransform]. `null` until first packed.
+  PackedInstanceTransforms? packedCache;
+
+  /// The `InstancedMesh` version [packedCache] was built from.
+  int packedVersion = -1;
+
+  /// The node world transform [packedCache] was built from.
+  final Matrix4 packedWorld = Matrix4.zero();
+
+  /// The node winding parity [packedCache] was split by. It normally
+  /// follows [packedWorld], but a node can be excluded from winding parity
+  /// without its matrix changing.
+  bool packedWindingFlipped = false;
+
+  /// Whether this item is a leaf of the [RenderScene]'s current BVH.
+  /// Owned by [RenderScene]; set on a full rebuild.
+  bool bvhLeaf = false;
+
+  /// Whether this item is a BVH leaf that was removed from the scene, or
+  /// changed its BVH membership, after the tree was built. The query skips
+  /// such leaves until the next full rebuild drops them. Owned by
+  /// [RenderScene].
+  bool bvhDead = false;
 
   /// The owning node's highlight color (linear RGBA), or null when the node
   /// is not highlighted. Refreshed each frame; the selection-outline pass
@@ -220,30 +272,105 @@ class RenderScene {
       cameraOverride ?? (cameras.isEmpty ? null : cameras.first.toCamera());
 
   Bvh _bvh = Bvh.build([]);
+
+  // Items that are neither BVH leaves nor pending: unbounded, or opted
+  // out of frustum culling. Visited on every cull.
   final List<RenderItem> _alwaysVisible = [];
 
-  // The BVH needs a full rebuild: an item was added or removed, or an
-  // item's BVH membership changed.
-  bool _structureDirty = true;
+  // Items registered (or whose BVH membership changed) since the last full
+  // rebuild. Visited on every cull, like [_alwaysVisible], until a rebuild
+  // sorts them into the tree, so nothing that would have drawn is ever
+  // culled while the rebuild is deferred.
+  final List<RenderItem> _pending = [];
+
+  // BVH leaves removed (or whose membership changed) since the last full
+  // rebuild. Flagged [RenderItem.bvhDead] so the query skips them; kept
+  // here so the rebuild can clear the flags on items it no longer sees.
+  final List<RenderItem> _dead = [];
+
+  // An explicit full-rebuild request ([markBvhStructureDirty]), or the
+  // very first frame.
+  bool _fullRebuildRequested = true;
 
   // A bounded item moved; the BVH can refit instead of rebuilding.
   bool _boundsDirty = false;
 
+  // Frames [rebuildIfDirty] has run with pending or dead items and chosen
+  // to defer. Caps how long a landed city tile is culled the slow way.
+  int _deferredFrames = 0;
+
+  /// Whether the most recent [rebuildIfDirty] rebuilt the whole BVH (as
+  /// opposed to deferring, refitting, or doing nothing). For frame stats.
+  bool lastRebuildWasFull = false;
+
+  /// Items waiting for the next full rebuild to enter the BVH. Each is
+  /// visited on every cull until then. For frame stats.
+  int get pendingItems => _pending.length;
+
+  /// BVH leaves flagged dead since the last full rebuild. For frame stats.
+  int get deadItems => _dead.length;
+
+  /// How many pending plus dead items a deferred rebuild tolerates before
+  /// it runs: 32, or a tenth of the scene, whichever is larger. A single
+  /// tile landing (a few dozen nodes) stays under it; a burst of them,
+  /// or the initial load, does not.
+  int get _rebuildThreshold {
+    final tenth = items.length ~/ 10;
+    return tenth > 32 ? tenth : 32;
+  }
+
+  /// Frames a deferred rebuild waits at most before running anyway.
+  static const int _maxDeferredFrames = 120;
+
   void add(RenderItem item) {
     items.add(item);
-    _structureDirty = true;
+    // An item re-registered while its old leaf is still in the tree keeps
+    // that leaf dead (its bounds or membership may have changed in the
+    // meantime) and is visited through the pending list until the next
+    // rebuild, like any other newcomer.
+    _pending.add(item);
   }
 
   void remove(RenderItem item) {
     items.remove(item);
-    _structureDirty = true;
+    if (item.bvhLeaf) {
+      if (!item.bvhDead) {
+        item.bvhDead = true;
+        _dead.add(item);
+      }
+      // A leaf whose membership changed is also queued as pending.
+      _pending.remove(item);
+      return;
+    }
+    if (!_pending.remove(item)) {
+      _alwaysVisible.remove(item);
+    }
   }
 
-  /// Flags the BVH for a full rebuild. Called when an item's BVH
-  /// membership changed (its `frustumCulled` flag toggled, or it became
-  /// bounded or unbounded).
+  /// Flags the BVH for a full rebuild on the next [rebuildIfDirty],
+  /// bypassing the deferral. Kept for callers that changed something the
+  /// item-level [markBvhMembershipChanged] does not describe; the engine
+  /// components use the item-level call.
   void markBvhStructureDirty() {
-    _structureDirty = true;
+    _fullRebuildRequested = true;
+  }
+
+  /// Notes that [item]'s BVH membership changed: its `frustumCulled` flag
+  /// toggled, or it became bounded or unbounded. A leaf is retired to the
+  /// dead list and re-queued as pending so it stays visible either way; an
+  /// always-visible item moves to pending so the next rebuild reconsiders
+  /// it. Called by the owning component during the pre-pass.
+  void markBvhMembershipChanged(RenderItem item) {
+    if (item.bvhLeaf) {
+      if (item.bvhDead) return;
+      item.bvhDead = true;
+      _dead.add(item);
+      _pending.add(item);
+      return;
+    }
+    if (_alwaysVisible.remove(item)) {
+      _pending.add(item);
+    }
   }
 
   /// Flags the BVH for a refit. Called when a bounded item moved but the
@@ -254,34 +381,71 @@ class RenderScene {
 
   /// Brings the spatial structure up to date with the current items.
   /// Call once per frame, after the pre-pass and before the render
-  /// passes. Rebuilds on a structural change, otherwise refits when an
-  /// item moved, otherwise does nothing.
+  /// passes.
+  ///
+  /// A full rebuild is deferred: added items sit in a pending list that
+  /// every cull visits, removed leaves are skipped by the query, and the
+  /// tree is only rebuilt when the pending and dead counts pass
+  /// [_rebuildThreshold], when [_maxDeferredFrames] frames have gone by
+  /// with the rebuild outstanding, or when one was requested outright.
+  /// Otherwise a moved item refits the tree in place, and a quiet frame
+  /// does nothing. Visibility is the same either way: a pending item is
+  /// always visited and the encoder does its own per-item frustum test.
   void rebuildIfDirty() {
-    if (_structureDirty) {
-      _structureDirty = false;
-      _boundsDirty = false;
-      _alwaysVisible.clear();
-      final bounded = <RenderItem>[];
-      for (final item in items) {
-        if (item.frustumCulled && item.worldBounds != null) {
-          bounded.add(item);
-        } else {
-          _alwaysVisible.add(item);
-        }
-      }
-      _bvh = Bvh.build(bounded);
+    lastRebuildWasFull = false;
+    final structureChanged = _pending.isNotEmpty || _dead.isNotEmpty;
+    if (structureChanged) _deferredFrames++;
+    final rebuild =
+        _fullRebuildRequested ||
+        (structureChanged &&
+            (_pending.length + _dead.length > _rebuildThreshold ||
+                _deferredFrames >= _maxDeferredFrames));
+    if (rebuild) {
+      _rebuild();
     } else if (_boundsDirty) {
       _boundsDirty = false;
       _bvh.refit();
     }
   }
 
+  void _rebuild() {
+    _fullRebuildRequested = false;
+    _boundsDirty = false;
+    _deferredFrames = 0;
+    lastRebuildWasFull = true;
+    // Items that left the scene keep no stale leaf flags, or a later
+    // re-add would revive a leaf the new tree does not have.
+    for (final item in _dead) {
+      item
+        ..bvhLeaf = false
+        ..bvhDead = false;
+    }
+    _dead.clear();
+    _pending.clear();
+    _alwaysVisible.clear();
+    final bounded = <RenderItem>[];
+    for (final item in items) {
+      item.bvhDead = false;
+      if (item.frustumCulled && item.worldBounds != null) {
+        item.bvhLeaf = true;
+        bounded.add(item);
+      } else {
+        item.bvhLeaf = false;
+        _alwaysVisible.add(item);
+      }
+    }
+    _bvh = Bvh.build(bounded, reuse: _bvh);
+  }
+
   /// Visits every item potentially visible to [frustum]: the bounded
   /// items whose world AABB intersects it, plus every always-visible
-  /// item.
+  /// item, plus every item still pending a BVH rebuild.
   void cull(Frustum frustum, void Function(RenderItem) visit) {
     _bvh.query(frustum, visit);
     for (final item in _alwaysVisible) {
+      visit(item);
+    }
+    for (final item in _pending) {
       visit(item);
     }
   }

@@ -61,6 +61,14 @@ base class Node implements SceneGraph {
   /// this flag.
   bool frustumCulled = true;
 
+  /// Whether this node's meshes are drawn into the directional light's
+  /// shadow map. Defaults to `true`. Clear it for geometry whose shadow
+  /// is never seen or never wanted (a ground plane that only receives, a
+  /// sky dome, distant city fill) so the shadow pass skips the draw.
+  /// Mirrored to each render item as `RenderItem.castsShadow` by the
+  /// pre-pass; not inherited by children.
+  bool castsShadow = true;
+
   /// The render layers this node occupies, a 32-bit bitmask. A
   /// [RenderView] renders this node's mesh only when its
   /// [RenderView.layerMask] intersects these layers
@@ -96,6 +104,26 @@ base class Node implements SceneGraph {
   // false. Recomputed lazily by globalTransform and by the render walk.
   final Matrix4 _worldTransform = Matrix4.identity();
   bool _worldTransformDirty = true;
+
+  // Where a dirty world transform is recomputed before it is compared
+  // with the cached one. Shared: the getter is not re-entrant on the same
+  // node, and the parent's recursive refresh finishes (and copies out)
+  // before this node writes here.
+  static final Matrix4 _worldTransformScratch = Matrix4.zero();
+
+  int _transformVersion = 0;
+
+  /// A counter that moves each time [globalTransform] is recomputed to a
+  /// different matrix.
+  ///
+  /// Assigning [localTransform], re-parenting, or [markTransformDirty]
+  /// only mark the cache stale; the version moves when the refreshed
+  /// world matrix actually differs, so a node re-assigned the same pose
+  /// every frame keeps its version. The pre-pass compares it with the
+  /// version each render item last saw to skip the per-item matrix copy
+  /// and AABB transform for nodes that did not move.
+  @internal
+  int get transformVersion => _transformVersion;
 
   // Whether this node's accumulated transform reverses triangle winding (an
   // odd number of negative-determinant transforms up the chain). Cached
@@ -143,16 +171,23 @@ base class Node implements SceneGraph {
     final parent = _parent;
     final selfFlip =
         !excludeFromWindingParity && _localTransform.determinant() < 0;
+    final next = _worldTransformScratch;
     if (parent == null) {
-      _worldTransform.setFrom(_localTransform);
+      next.setFrom(_localTransform);
       _windingFlipped = selfFlip;
     } else {
-      _worldTransform
+      next
         ..setFrom(parent.globalTransform)
         ..multiply(_localTransform);
       // parent.globalTransform above refreshed the parent's cache, so
       // parent._windingFlipped is current.
       _windingFlipped = selfFlip != parent._windingFlipped;
+    }
+    // Only a matrix that actually changed moves the version; a subtree
+    // marked dirty by an identical re-assignment stays cheap downstream.
+    if (next != _worldTransform) {
+      _worldTransform.setFrom(next);
+      _transformVersion++;
     }
     _worldTransformDirty = false;
     return _worldTransform;

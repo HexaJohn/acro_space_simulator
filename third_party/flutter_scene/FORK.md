@@ -95,3 +95,38 @@ encoders already relied on that.
   twice per draw (the app's `_CitySurfaceMaterial` switches to it separately).
 - `lib/src/material/unlit_material.dart` — one FragInfo list per material,
   static repeat sampler, cached slots.
+
+## Patches (scene layer)
+
+- `render/bvh.dart`: O(n log n) build over an index array with an in-place
+  median selection on a flat centroid array (no closure sort, no per-level
+  sublists); nodes are recycled across rebuilds via `Bvh.build(reuse:)`.
+  The query skips leaves flagged `RenderItem.bvhDead`.
+- `render/render_scene.dart`: deferred BVH rebuild. Added items sit in a
+  pending list that `cull()` always visits; removed leaves are flagged dead;
+  the full rebuild runs only when pending+dead exceed max(32, 10% of items)
+  or after 120 deferred frames (or on `markBvhStructureDirty()`).
+  `lastRebuildWasFull` / `pendingItems` / `deadItems` feed frame stats.
+  `markBvhMembershipChanged(item)` is the item-level signal the components
+  now use. `RenderItem` gained `castsShadow`, `transformVersion`,
+  `instanceVersion`, `seenLocalBounds(+Version)`, the `packed*` cache slots,
+  and the `bvhLeaf` / `bvhDead` flags.
+- `node.dart`: `Node.castsShadow` (default true) and an internal
+  `transformVersion` that moves only when the cached world matrix is
+  recomputed to a different value.
+- `components/mesh_component.dart`, `components/instanced_mesh_component.dart`:
+  the pre-pass skips the world-matrix copy and the AABB transform while the
+  item already carries the node's transform version (and, for instanced, the
+  mesh version; for meshes, the geometry bounds version); flags, winding,
+  highlight and `castsShadow` still refresh every frame.
+- `instanced_mesh.dart`: `version` bumped by every instance mutation;
+  `aggregateBounds` hulls the transformed base box inline with no
+  per-instance allocation.
+- `render/instance_packing.dart`: `packedInstancesFor(item, instances)`
+  returns the item's cached pack while the mesh version, world transform and
+  winding parity are unchanged. The encoders still call
+  `packInstanceTransforms` directly; switching them (and honouring
+  `RenderItem.castsShadow` in the shadow encoder) is a follow-up patch in the
+  encoder layer. The cached `Float32List` is still emplaced per pass into the
+  frame's host buffer, so the GLES race (flutter/flutter#187931) exposure is
+  unchanged.
