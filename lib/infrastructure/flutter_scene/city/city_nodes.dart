@@ -674,6 +674,71 @@ class CityNodes {
   /// appear to be dead.
   void invalidate() => _invalidation++;
 
+  /// The building whose footprint [bf] (body-fixed metres) lies on, or
+  /// within [withinM] of — or null over bare ground.
+  ///
+  /// A picker's question, answered from the TILES rather than the sim: the
+  /// sim's `siteAt` walks every parcel in the colony testing polygon
+  /// containment, which on a 127k-building colony is most of a tenth of a
+  /// second per click. The tiles already bucket every building by the cell
+  /// its centre falls in, so the point's own cell and the ring around it
+  /// (a footprint on a cell edge is bucketed by ONE of the cells it
+  /// straddles) hold every candidate — a few hundred buildings, not a
+  /// hundred thousand. Read-only: nothing here touches the build pipeline.
+  BuildingSnapshot? buildingNearBF(String bodyId, Vector3 bf,
+      {double withinM = 4}) {
+    final root = _roots[bodyId];
+    if (root == null) return null;
+    final (ie, iN) = root.basis.cellOf(bf, tileM);
+    Iterable<BuildingSnapshot> candidates() sync* {
+      for (var de = -1; de <= 1; de++) {
+        for (var dn = -1; dn <= 1; dn++) {
+          final t = _tiles['$bodyId/${ie + de}/${iN + dn}'];
+          if (t != null) yield* t.buildings;
+        }
+      }
+    }
+
+    return nearestFootprint(candidates(), bf, withinM: withinM);
+  }
+
+  /// Of [buildings], the one whose footprint [bf] is on or nearest to,
+  /// within [withinM]; null when none is that close.
+  ///
+  /// The footprint is the snapshot's site rectangle centred on its position
+  /// and turned by its orientation (local +X along the frontage, +Y into
+  /// the lot, +Z up — the frame [instanceTransform] stands the building up
+  /// in), so the test is a point-to-box distance in the building's own
+  /// plane. Nearest FOOTPRINT wins, not nearest centre: a click on the
+  /// corner of a warehouse is nearer the house next door's centre than the
+  /// warehouse's, and it is the warehouse that was clicked. A coarse
+  /// centre-distance bound skips most candidates before the rotation.
+  static BuildingSnapshot? nearestFootprint(
+      Iterable<BuildingSnapshot> buildings, Vector3 bf,
+      {double withinM = 4}) {
+    BuildingSnapshot? best;
+    var bestDist = double.infinity;
+    var bestCentre = double.infinity;
+    for (final b in buildings) {
+      final rel = bf - Vector3(b.px, b.py, b.pz);
+      final centre = rel.length;
+      // (w + d) / 2 bounds the half diagonal, so nothing this far from the
+      // centre can be within reach of the rectangle.
+      if (centre > (b.siteWidthM + b.siteDepthM) * 0.5 + withinM) continue;
+      final local = Quaternion(b.qw, b.qx, b.qy, b.qz).conjugate.rotate(rel);
+      final dx = math.max(0.0, local.x.abs() - b.siteWidthM * 0.5);
+      final dy = math.max(0.0, local.y.abs() - b.siteDepthM * 0.5);
+      final dist = math.sqrt(dx * dx + dy * dy);
+      if (dist > withinM) continue;
+      if (dist < bestDist || (dist == bestDist && centre < bestCentre)) {
+        best = b;
+        bestDist = dist;
+        bestCentre = centre;
+      }
+    }
+    return best;
+  }
+
   /// Instances above this in one draw overflow the engine's per-frame transient
   /// block — the same 1 MiB / 16,384-mat4 ceiling the scatter batches hit.
   static const int _maxPerDraw = 14000;

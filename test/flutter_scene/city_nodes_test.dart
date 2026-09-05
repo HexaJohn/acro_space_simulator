@@ -459,4 +459,64 @@ void main() {
           CityNodes.floraCastsShadow(CityTier.near, PropKind.shrub), isFalse);
     });
   });
+
+  group('the pick resolves a building from the tiles, by footprint', () {
+    // [CityNodes.buildingNearBF] gathers the candidates from the cell under
+    // the point and the ring around it, then hands them to
+    // [CityNodes.nearestFootprint]. The cell arithmetic is pinned above,
+    // and a CityNodes instance needs the GPU scene a unit test does not
+    // have, so the footprint test is exercised on its own here.
+    //
+    // The standard orientation is a quarter turn about +Y: local +Z (up)
+    // maps to body +X, the radial through the centre; local +X (the
+    // frontage, the site WIDTH) maps to body -Z; local +Y (into the lot,
+    // the site DEPTH) maps to body +Y. So a building's depth spans body Y
+    // about its centre, and the points below step along body Y.
+    final centre = Vector3(600000, 0, 0);
+    // The house: 10 m deep, so its footprint spans y = -5..5.
+    final house = bldg(id: 'house', w: 12, d: 10, pos: centre);
+    // The warehouse, 40 m along +Y: 40 m deep, so it spans y = 20..60.
+    final warehouse = bldg(
+        id: 'warehouse', w: 60, d: 40, pos: centre + Vector3(0, 40, 0));
+    final both = [house, warehouse];
+
+    test('a point inside a footprint finds it; one far off finds none', () {
+      // At the house's centre, and on its edge.
+      expect(CityNodes.nearestFootprint(both, centre)?.id, 'house');
+      expect(
+          CityNodes.nearestFootprint(both, centre + Vector3(0, 5, 0))?.id,
+          'house');
+      // 3 m off the house's edge: within a 4 m reach.
+      expect(
+          CityNodes.nearestFootprint(both, centre + Vector3(0, -8, 0),
+                  withinM: 4)
+              ?.id,
+          'house');
+      // Bare ground between them: 25 m from the house, 50 m from the
+      // warehouse — nothing within reach.
+      expect(
+          CityNodes.nearestFootprint(both, centre + Vector3(0, -30, 0),
+              withinM: 4),
+          isNull);
+      // And far off along the other axis.
+      expect(
+          CityNodes.nearestFootprint(both, centre + Vector3(0, 0, 200),
+              withinM: 4),
+          isNull);
+      expect(CityNodes.nearestFootprint(const [], centre), isNull);
+    });
+
+    test('the nearest FOOTPRINT wins, not the nearest centre', () {
+      // y = 18: 2 m off the warehouse's edge at 20 but 13 m off the
+      // house's at 5 — while it is 18 m from the house's centre against
+      // 22 m from the warehouse's. A click there is on the warehouse's
+      // doorstep, and a nearest-centre rule would have named the house.
+      final at = centre + Vector3(0, 18, 0);
+      expect(CityNodes.nearestFootprint(both, at, withinM: 100)?.id,
+          'warehouse');
+      // With the pick's own reach the house is out of range altogether.
+      expect(CityNodes.nearestFootprint(both, at, withinM: 4)?.id,
+          'warehouse');
+    });
+  });
 }

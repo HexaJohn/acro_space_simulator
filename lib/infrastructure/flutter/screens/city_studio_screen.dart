@@ -124,12 +124,145 @@ class CityStudioDevHooks {
       double throttle,
       double steer,
       double seconds})? drive;
+
+  /// Steer the frame governor: switch it, or pin its shed level (a negative
+  /// [forceLevel] releases the pin) — so a script can see each level's
+  /// effect without waiting for a slow frame to earn it. The status reports
+  /// it under 'governor'.
+  static void Function({bool? enabled, int? forceLevel})? setGovernor;
+}
+
+/// Sheds rendering work when the UI-thread frame runs long, and hands it
+/// back when the frame recovers.
+///
+/// A pure state machine: fed the rolling p95 of the engine's build duration
+/// and a clock, it answers with a shed LEVEL, and the screen applies the
+/// level. Nothing in here touches the scene, so the shed/restore sequence
+/// and its hysteresis are tested without a frame.
+///
+/// Why the p95 and not the mean: the spikes this exists to tame — a near
+/// tile's build steps landing, a click's ground march — are a few long
+/// frames among many short ones, and a mean over ninety frames barely
+/// moves for them. Why timed rather than instant: ONE long frame is a tile
+/// arriving and should change nothing, a second of them is a camera the
+/// build budget cannot keep up with. The steps are ordered least visible
+/// first (a shorter shadow reach is barely noticed; no shadows at all is
+/// the last resort), taken one at a time, and given back one at a time
+/// after a longer quiet than it took to shed — a level that flapped around
+/// the threshold would be worse than either steady state.
+class CityFrameGovernor {
+  /// The p95 UI build above which work is shed, after [shedAfterS].
+  static const double shedAboveMs = 14;
+
+  /// The p95 below which a step is restored, after [restoreAfterS].
+  ///
+  /// Well under [shedAboveMs]: restoring a step costs frame time, so the
+  /// frame must have room for it, or the restore earns the next shed.
+  static const double restoreBelowMs = 9;
+  static const double shedAfterS = 1;
+  static const double restoreAfterS = 2;
+
+  /// The steps, in the order taken. Level n means the first n apply.
+  static const List<String> steps = [
+    'shadow range ×0.6',
+    'traffic ×0.5',
+    'trees ×0.5',
+    'shadows off',
+  ];
+  static int get maxLevel => steps.length;
+
+  /// Off: the level reads zero and nothing is shed, whatever the frame.
+  bool enabled = true;
+
+  /// A pinned level for the dev hooks; null lets the frame decide.
+  int? forcedLevel;
+
+  int _level = 0;
+  double? _hotSinceS, _coolSinceS;
+
+  /// The last reading fed, for the panel.
+  double lastP95Ms = 0;
+
+  /// The shed level in force, 0..[maxLevel].
+  int get level =>
+      forcedLevel?.clamp(0, maxLevel) ?? (enabled ? _level : 0);
+
+  /// One p95 reading (ms) at [nowS] on any monotonic clock. True when the
+  /// level in force changed, so the caller can apply it once rather than
+  /// every frame.
+  bool feed(double p95Ms, double nowS) {
+    lastP95Ms = p95Ms;
+    final before = level;
+    if (!enabled || forcedLevel != null) {
+      // Not steering. The clocks and the earned level are dropped, so
+      // switching back on starts from nothing shed and a fresh second —
+      // whatever the frame did while pinned is not evidence.
+      _level = 0;
+      _hotSinceS = null;
+      _coolSinceS = null;
+      return level != before;
+    }
+    if (p95Ms > shedAboveMs) {
+      _coolSinceS = null;
+      _hotSinceS ??= nowS;
+      if (nowS - _hotSinceS! >= shedAfterS && _level < maxLevel) {
+        _level++;
+        // The next step needs its own second over the line: the window
+        // still holds the frames that earned this one.
+        _hotSinceS = nowS;
+      }
+    } else if (p95Ms < restoreBelowMs) {
+      _hotSinceS = null;
+      _coolSinceS ??= nowS;
+      if (nowS - _coolSinceS! >= restoreAfterS && _level > 0) {
+        _level--;
+        _coolSinceS = nowS;
+      }
+    } else {
+      // In the band between: hold the level, and neither clock runs — a
+      // frame that is merely busy is not on its way anywhere.
+      _hotSinceS = null;
+      _coolSinceS = null;
+    }
+    return level != before;
+  }
+
+  double get shadowRangeScale => level >= 1 ? 0.6 : 1.0;
+  double get trafficScale => level >= 2 ? 0.5 : 1.0;
+  double get floraTreeScale => level >= 3 ? 0.5 : 1.0;
+  bool get shadowsOff => level >= 4;
+
+  /// What is shed, for the panel: 'clear', or the steps in force.
+  String get label =>
+      level == 0 ? 'clear' : steps.take(level).join(', ');
 }
 
 class _CityStudioScreenState extends State<CityStudioScreen>
     with SingleTickerProviderStateMixin {
   /// Shared flutter_scene resources; geometry CONSTRUCTION throws without it.
   static final Future<void> _staticInit = fs.Scene.initializeStaticResources();
+
+  /// The frame governor and its clock, and the CityNodes knobs' values
+  /// before it scales them — the statics are shared with the flight view,
+  /// so the scale is applied to a remembered base and the base handed back
+  /// on dispose, never compounded.
+  final CityFrameGovernor _governor = CityFrameGovernor();
+  final Stopwatch _govClock = Stopwatch()..start();
+  final double _trafficBase = CityNodes.trafficDensity;
+  final double _floraTreeBase = CityNodes.floraTreeRangeM;
+
+  /// Push the governor's level onto the knobs it scales. Shadows read the
+  /// governor directly in [_syncSun], every frame; these two are statics
+  /// the city pass reads, written once per level change.
+  void _applyGovernor() {
+    CityNodes.trafficDensity = _trafficBase * _governor.trafficScale;
+    CityNodes.floraTreeRangeM = _floraTreeBase * _governor.floraTreeScale;
+  }
+
+  /// The last click's cost: wall time and how many ground samples the ray
+  /// march spent, for the pick card and the status.
+  double _pickMs = 0;
+  int _pickSamples = 0;
 
   int _seed = 1;
   double _blocks = 4;
@@ -465,6 +598,16 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       while (_rasterMs.length > 90) {
         _rasterMs.removeAt(0);
       }
+      // The governor's signal: the p95 of those ninety build frames — the
+      // spikes, not the mean. Ninety doubles sorted once per report is
+      // nothing next to the frame it measures.
+      if (_uiMs.isNotEmpty) {
+        final sorted = List<double>.of(_uiMs)..sort();
+        final p95 = sorted[((sorted.length - 1) * 0.95).round()];
+        if (_governor.feed(p95, _govClock.elapsedMicroseconds / 1e6)) {
+          _applyGovernor();
+        }
+      }
     };
     SchedulerBinding.instance.addTimingsCallback(_timingsCb!);
     CityStudioDevHooks.generate =
@@ -519,6 +662,19 @@ class _CityStudioScreenState extends State<CityStudioScreen>
         _walkYaw = spot.yaw;
         _walkPitch = pitch.clamp(-1.45, 1.45);
         _eyeHeightM = eyeM ?? 1.7;
+        // Moved off-tick: the per-tick eye cache would place the camera at
+        // the old spot for a frame.
+        _walkerEyeCache = null;
+      });
+    };
+    CityStudioDevHooks.setGovernor = ({bool? enabled, int? forceLevel}) {
+      if (!mounted) return;
+      setState(() {
+        if (enabled != null) _governor.enabled = enabled;
+        if (forceLevel != null) {
+          _governor.forcedLevel = forceLevel < 0 ? null : forceLevel;
+        }
+        _applyGovernor();
       });
     };
     CityStudioDevHooks.drive = (
@@ -580,6 +736,19 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             'colourMs': fs.Scene.lastFrameStats.colourMs,
           },
           'shadows': _shadows,
+          'pickMs': _pickMs,
+          'pickSamples': _pickSamples,
+          // The ground sampling this frame, whichever mode spent it — the
+          // walker's eye and the buggy's wheels share the stopwatch.
+          'groundMs': _lastGroundMs,
+          'groundSamples': _lastGroundSamples,
+          'governor': {
+            'enabled': _governor.enabled,
+            'level': _governor.level,
+            'label': _governor.label,
+            'p95UiMs': _governor.lastP95Ms,
+            'forced': _governor.forcedLevel,
+          },
           'rover': _roverStatus(),
           'stats': _lastStats,
           'fault': _fault == null
@@ -598,6 +767,11 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     CityStudioDevHooks.walkTo = null;
     CityStudioDevHooks.drive = null;
     CityStudioDevHooks.status = null;
+    CityStudioDevHooks.setGovernor = null;
+    // The knobs the governor scaled go back to what they were: the flight
+    // view reads the same statics and never asked for them halved.
+    CityNodes.trafficDensity = _trafficBase;
+    CityNodes.floraTreeRangeM = _floraTreeBase;
     final cb = _timingsCb;
     if (cb != null) SchedulerBinding.instance.removeTimingsCallback(cb);
     _ticker?.dispose();
@@ -1081,7 +1255,12 @@ class _CityStudioScreenState extends State<CityStudioScreen>
         groundR < 1 ? 0.0 : (eyeWorld - _bodyCentreWorld).length - groundR;
     // Deep night: the glow comes from everywhere, so a sharp shadow from one
     // direction would be the tell that it is fake. Drop the pass.
-    if (!_shadows || groundR < 1 || altM > 8000 || night > 0.6) {
+    // The governor's last resort is the whole pass.
+    if (!_shadows ||
+        _governor.shadowsOff ||
+        groundR < 1 ||
+        altM > 8000 ||
+        night > 0.6) {
       light.castsShadow = false;
       return;
     }
@@ -1108,11 +1287,16 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     // past it, and nothing further. Quantised to 100 m so the cascade
     // sphere does not resize (and the shadow texels swim) with every
     // wheel notch and drag frame.
+    //
+    // The governor's first step shortens the reach: fewer tiles inside the
+    // light box, fewer casters encoded. Scaled BEFORE the quantising so the
+    // box still holds still between frames.
+    final scale = _governor.shadowRangeScale;
     final double rangeM;
     if (_groundView) {
-      rangeM = (altM * 3.0 + 300.0).clamp(300.0, 6000.0);
+      rangeM = (altM * 3.0 + 300.0).clamp(300.0, 6000.0) * scale;
     } else {
-      final toFocus = (1.25 * _distanceM).clamp(400.0, 2400.0);
+      final toFocus = (1.25 * _distanceM).clamp(400.0, 2400.0) * scale;
       rangeM = (toFocus / 100.0).round() * 100.0;
     }
     light.shadowMaxDistance = lengthToScene(rangeM);
@@ -1179,25 +1363,39 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   /// anchor's height would sink into the ground crossing it and float at the
   /// far side. Sampling the terrain field is also what makes a mined hole
   /// something you can walk into.
+  ///
+  /// Asked for several times a frame like the chase eye (the camera, the
+  /// lens, the sun, the atmosphere, the rig), and each answer used to
+  /// march the FULL field — five ~16 ms samples a frame in a graded town,
+  /// which was the walk mode's whole frame. One computation per tick now,
+  /// and the toggles and the remote placement clear it, since they move
+  /// the walker between ticks.
+  Vector3? _walkerEyeCache;
+  double _walkerEyeEpoch = double.nan;
+
   Vector3 _walkerEyeM() {
+    final cached = _walkerEyeCache;
+    if (cached != null && _walkerEyeEpoch == _epoch.value) return cached;
+    final eye = _computeWalkerEyeM();
+    _walkerEyeCache = eye;
+    _walkerEyeEpoch = _epoch.value;
+    return eye;
+  }
+
+  Vector3 _computeWalkerEyeM() {
     final (east, north) = _tangentFrame();
     final flat = _anchorWorld + east * _walkE + north * _walkN;
     final radial = flat - _bodyCentreWorld;
     if (radial.length < 1) return _upWorld * _eyeHeightM;
     final dir = radial.normalized;
-    final field = _groundField;
-    // The field samples in the BODY-FIXED frame and `dir` is a world
-    // direction. The snapshot's body orientation carries Earth's axial tilt,
-    // so sampling with the world direction read the ground of a point over
-    // twenty degrees away — the walker stood in the right place on the wrong
-    // location's altitude, tens of metres under (or above) the terrain that
-    // was actually drawn. The same trap the flight walker hit.
-    final b = _snap?.bodies[_sim?.body.id.value];
-    var ground = radial.length;
-    if (field != null && b != null) {
-      final bf = Quaternion(b.qw, b.qx, b.qy, b.qz).conjugate.rotate(dir);
-      ground = field.groundRadiusAt(bf.x, bf.y, bf.z);
-    }
+    // Through the buggy's ground query: it samples in the BODY-FIXED frame
+    // (`dir` is a world direction, and the body carries Earth's axial tilt,
+    // so sampling with it read a point twenty degrees away — the flight
+    // walker's trap), reads the ground AS DRAWN or the field's cheap
+    // bracketed surface rather than the brush march, stands on the city's
+    // own surface where the walker is on a carriageway, and charges the
+    // sample to the ground stopwatch the status reports.
+    final ground = _groundRadiusAtEN(_walkE, _walkN);
     return _bodyCentreWorld + dir * (ground + _eyeHeightM) - _anchorWorld;
   }
 
@@ -1345,6 +1543,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     _driving = !_driving;
     _held.clear();
     _chaseEyeCache = null;
+    _walkerEyeCache = null;
     if (_driving) {
       if (!_firstPerson) {
         _walkE = 0;
@@ -2129,15 +2328,35 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   /// What stands under a click, as a card — the installations especially:
   /// from the studio's framing distance a refinery and a data centre are
   /// both a flat grey slab, and the only way to tell which is to ask.
+  ///
+  /// Timed end to end, because a click used to cost most of a second: the
+  /// ray march through the full brush field, then the sim walking every
+  /// parcel in the colony. Both halves are answered from what is DRAWN
+  /// now — the resident ground mesh and the renderer's own tiles.
   void _pickAt(Offset local) {
     final sim = _sim;
     if (sim == null) return;
+    final sw = Stopwatch()..start();
+    _pickSamples = 0;
     final bf = _pickGroundBF(local);
     if (bf == null) {
+      _pickMs = sw.elapsedMicroseconds / 1000;
       setState(_clearPick);
       return;
     }
-    final hit = sim.siteAt(_bfToLocal(bf));
+    // The tiles first: the cell under the hit point holds every building
+    // whose centre falls in it, a few hundred candidates against a few
+    // hundred thousand parcels. Only when no footprint is within reach is
+    // the sim asked — and it walks all of them to answer, which is why it
+    // is the fallback and not the rule. It stays because the tiles bucket
+    // by CENTRE and describe the frame the renderer was handed: a site the
+    // sim knows that the last captured frame does not (placed since), or
+    // whose declared extent the snapshot trims, is still pickable at the
+    // old cost rather than silently not.
+    final near = _city?.buildingNearBF(sim.body.id.value, bf, withinM: 4);
+    final hit = (near == null ? null : _siteOfSnapshot(sim, near)) ??
+        sim.siteAt(_bfToLocal(bf));
+    _pickMs = sw.elapsedMicroseconds / 1000;
     setState(() {
       if (hit == null) {
         _clearPick();
@@ -2146,12 +2365,14 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       final (site, parcel, spec) = hit;
       _picked = (site: site, parcel: parcel, spec: spec, at: local);
       // Outline the plot on the ground, through the cursor the placement
-      // editor already draws.
+      // editor already draws — on the ground as drawn, which is where the
+      // click landed; the brush march would cost 16 ms for a worse answer.
       final extent = parcel.buildableExtent;
       final dir = sim
           .localToBodyFixed(parcel.centroid, bodyRadiusM: sim.body.radius)
           .normalized;
-      final ground = _groundField?.groundRadiusAt(dir.x, dir.y, dir.z) ??
+      final ground = _terrain?.drawnGroundRadiusAt(dir) ??
+          _groundField?.surfaceRadiusAt(dir.x, dir.y, dir.z) ??
           sim.body.radius;
       CityNodes.cursorBF = dir * ground;
       CityNodes.cursorBodyId = sim.body.id.value;
@@ -2159,6 +2380,34 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       CityNodes.cursorDepthM = math.max(8.0, extent.depth);
       CityNodes.cursorBad = false;
     });
+  }
+
+  /// The sim's (site, lot, spec) for a building the renderer picked.
+  ///
+  /// By ID, which the frame carries: a lot building's is its parcel's and a
+  /// grid building's is its cell number (see [BuildingSnapshot.ofParcel]
+  /// and [BuildingSnapshot.ofCityCell]), so both resolve through map
+  /// lookups where `siteAt` was a walk. The cell's lot is synthesised the
+  /// way `buildingParcels` synthesises it, so the card and the cursor read
+  /// the same whichever path found the building. Null when the frame's
+  /// building has no sim counterpart any more.
+  (String, Parcel, CityBuildingSpec)? _siteOfSnapshot(
+      CitySim sim, BuildingSnapshot b) {
+    final parcel = sim.parcelById(b.id);
+    if (parcel != null) {
+      final spec =
+          sim.parcelBuildings[b.id] ?? sim.parcelGrownSpec(b.id, parcel.use);
+      if (spec != null) return (parcel.id, parcel, spec);
+    }
+    final cell = int.tryParse(b.id);
+    if (cell != null) {
+      final spec = sim.specAt(cell);
+      if (spec != null) {
+        final lot = sim.parcelForCell(cell, spec);
+        return (lot.id, lot, spec);
+      }
+    }
+    return null;
   }
 
   void _clearPick() {
@@ -2169,10 +2418,24 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   /// The ground under a viewport point, body-fixed metres, or null when the
   /// ray misses the planet.
   ///
-  /// The same march the terrain studio uses, with ONE difference: this
-  /// studio flips the finished image (see the SceneView above), so screen
-  /// right is the domain's own right and there is no mirror term — the
-  /// terrain studio does not flip and negates its screen x instead.
+  /// Marched against the ground AS DRAWN — the resident terrain mesh, else
+  /// the field's bracketed surface query — and never `groundRadiusAt`: that
+  /// one marches every grading brush on the radial at ~16 ms a sample in a
+  /// graded town, and the old 400-step march with 24 bisections through it
+  /// was most of a second per click. The drawn mesh is a few map lookups a
+  /// sample, and it is what the click visibly landed on. Two things hold
+  /// the count near forty samples: the ray is first cut to a shell that
+  /// bounds the colony's relief, analytically, so the march starts near
+  /// the ground rather than at the eye; and each step is the altitude over
+  /// the ray's DESCENT rate, so a grazing view converges as fast as a
+  /// plunging one — with the old march's half-step safety against relief
+  /// rising ahead, and the descent rate floored so a near-horizontal ray
+  /// cannot leap a hill.
+  ///
+  /// The same ray as the terrain studio's, with ONE difference: this studio
+  /// flips the finished image (see the SceneView above), so screen right is
+  /// the domain's own right and there is no mirror term — the terrain
+  /// studio does not flip and negates its screen x instead.
   Vector3? _pickGroundBF(Offset local) {
     final sim = _sim;
     final snap = _snap;
@@ -2202,35 +2465,67 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     final sx = local.dx - _viewportW / 2;
     final sy = _viewportH / 2 - local.dy;
     final dir = (fwd * _focalPx + right * sx + upv * sy).normalized;
+    final centre = _bodyCentreWorld;
 
-    double altAt(double t) {
-      final rel = eyeWorld + dir * t - _bodyCentreWorld;
+    double groundAt(Vector3 u) =>
+        _terrain?.drawnGroundRadiusAt(u) ??
+        field.surfaceRadiusAt(u.x, u.y, u.z);
+
+    // The ray point's altitude over the drawn ground under it, and how
+    // steeply the ray descends there (the step sizing).
+    (double, double) probe(double t) {
+      _pickSamples++;
+      final rel = eyeWorld + dir * t - centre;
       final bf = quat.conjugate.rotate(rel);
       final u = bf.normalized;
-      return bf.length - field.groundRadiusAt(u.x, u.y, u.z);
+      return (bf.length - groundAt(u), -dir.dot(rel.normalized));
     }
 
+    // Cut the ray to the shell bounding the colony's ground: the anchor's
+    // radius plus more headroom than any relief a colony's site carries.
+    // Buildings are not in this query — it finds the ground the click fell
+    // through to, and the tile lookup names what stands there. From orbit
+    // this skips a kilometre of empty samples; on the ground the eye is
+    // already inside the shell and the march starts at the eye.
+    final groundR = (_anchorWorld - centre).length;
+    final shellR = groundR + 1500.0;
+    final o = eyeWorld - centre;
     var t = 0.0;
-    var prevT = 0.0;
-    var prevAlt = altAt(0);
-    if (prevAlt <= 0) return null;
-    for (var i = 0; i < 400 && t < 60000; i++) {
-      t += math.max(prevAlt * 0.5, 1.5);
-      final alt = altAt(t);
-      if (alt <= 0) {
+    final c = o.dot(o) - shellR * shellR;
+    if (c > 0) {
+      final bq = o.dot(dir);
+      final disc = bq * bq - c;
+      if (disc < 0) return null; // the ray never reaches the shell
+      final entry = -bq - math.sqrt(disc);
+      if (entry < 0) return null; // the shell is behind the eye
+      t = entry;
+    }
+
+    var (alt, sink) = probe(t);
+    if (alt <= 0) return null;
+    var prevT = t;
+    for (var i = 0; i < 28 && t < 60000; i++) {
+      t += math.max(alt * 0.5 / math.max(sink, 0.2), 1.5);
+      final (a, s) = probe(t);
+      if (a <= 0) {
+        // Bracketed in the last step — a few times the altitude the step
+        // before, so a handful of metres by the time the ground is close.
+        // Twelve halvings put the hit within centimetres, finer than the
+        // footprint test that follows needs.
         var lo = prevT, hi = t;
-        for (var k = 0; k < 24; k++) {
+        for (var k = 0; k < 12; k++) {
           final mid = (lo + hi) / 2;
-          if (altAt(mid) > 0) {
+          if (probe(mid).$1 > 0) {
             lo = mid;
           } else {
             hi = mid;
           }
         }
-        return quat.conjugate.rotate(eyeWorld + dir * hi - _bodyCentreWorld);
+        return quat.conjugate.rotate(eyeWorld + dir * hi - centre);
       }
       prevT = t;
-      prevAlt = alt;
+      alt = a;
+      sink = s;
     }
     return null;
   }
@@ -2310,6 +2605,8 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             '${p.parcel.manual ? ', its own plot' : ', a street lot'}'),
         line(status.label, colour: status.color),
         if (io.isNotEmpty) line(io.join(' · ')),
+        line('picked in ${_pickMs.toStringAsFixed(1)} ms, '
+            '$_pickSamples ground samples'),
         const SizedBox(height: 4),
         line('Click another building, or Esc.',
             colour: AppTheme.textDim.withValues(alpha: 0.7)),
@@ -2426,6 +2723,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     if (fromRover) _toggleDriving();
     _firstPerson = !_firstPerson;
     _held.clear();
+    _walkerEyeCache = null;
     if (_firstPerson && !fromRover) {
       _walkE = 0;
       _walkN = -_spec.blockDepthM * 0.6;
@@ -2615,6 +2913,25 @@ class _CityStudioScreenState extends State<CityStudioScreen>
                 : AppTheme.textDim),
         row('  cursor', '${ms(phase['city.cursor'] ?? 0)} ms',
             colour: AppTheme.textDim),
+        // The screen's own ground sampling (walker eye, buggy wheels) and
+        // the last click's ray march — the two spikes that used to run
+        // through the full brush march.
+        row('  ground', '${ms(_lastGroundMs)} ms  ($_lastGroundSamples samples)',
+            colour: _lastGroundMs > 2 ? AppTheme.warn : AppTheme.textDim),
+        row('  pick', '${ms(_pickMs)} ms  ($_pickSamples samples)',
+            colour: _pickMs > 50 ? AppTheme.warn : AppTheme.textDim),
+        row(
+            'governor',
+            _governor.enabled
+                ? 'L${_governor.level} ${_governor.label}  '
+                    'p95 ${ms(_governor.lastP95Ms)} ms'
+                : 'off  p95 ${ms(_governor.lastP95Ms)} ms',
+            colour: _governor.level > 0 ? AppTheme.warn : AppTheme.textDim),
+        Text(
+            '  sheds shadow range, traffic, trees, then shadows while the '
+            'p95 ui build sits over ${CityFrameGovernor.shedAboveMs.round()} '
+            'ms; restores under ${CityFrameGovernor.restoreBelowMs.round()}.',
+            style: AppTheme.dim.copyWith(fontSize: 10)),
         const SizedBox(height: 4),
         // The gap is what the phase timers do not wrap: the engine's own
         // encode of the scene (shadow cascades, the colour pass), which runs
@@ -2951,6 +3268,25 @@ class _CityStudioScreenState extends State<CityStudioScreen>
                     'phase timers.',
                 style: AppTheme.dim.copyWith(fontSize: 11)),
             onChanged: (v) => setState(() => _shadows = v),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            value: _governor.enabled,
+            activeThumbColor: AppTheme.accent2,
+            title: const Text('Frame governor', style: AppTheme.body),
+            subtitle: Text(
+                'Sheds work while the p95 UI frame sits over '
+                '${CityFrameGovernor.shedAboveMs.round()} ms for a second — '
+                'shadow range, then traffic, then trees, then shadows — and '
+                'gives it back a step at a time after two seconds under '
+                '${CityFrameGovernor.restoreBelowMs.round()} ms. The perf '
+                'panel shows the level. Off for an A/B that must not move.',
+                style: AppTheme.dim.copyWith(fontSize: 11)),
+            onChanged: (v) => setState(() {
+              _governor.enabled = v;
+              _applyGovernor();
+            }),
           ),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
