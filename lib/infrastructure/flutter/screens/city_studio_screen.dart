@@ -135,12 +135,12 @@ class CityStudioDevHooks {
 /// Sheds rendering work when the UI-thread frame runs long, and hands it
 /// back when the frame recovers.
 ///
-/// A pure state machine: fed the rolling p95 of the engine's build duration
+/// A pure state machine: fed the rolling p75 of the engine's build duration
 /// and a clock, it answers with a shed LEVEL, and the screen applies the
 /// level. Nothing in here touches the scene, so the shed/restore sequence
 /// and its hysteresis are tested without a frame.
 ///
-/// Why the p95 and not the mean: the spikes this exists to tame — a near
+/// Why a percentile and not the mean: the spikes this exists to tame — a near
 /// tile's build steps landing, a click's ground march — are a few long
 /// frames among many short ones, and a mean over ninety frames barely
 /// moves for them. Why timed rather than instant: ONE long frame is a tile
@@ -151,10 +151,10 @@ class CityStudioDevHooks {
 /// after a longer quiet than it took to shed — a level that flapped around
 /// the threshold would be worse than either steady state.
 class CityFrameGovernor {
-  /// The p95 UI build above which work is shed, after [shedAfterS].
+  /// The p75 UI build above which work is shed, after [shedAfterS].
   static const double shedAboveMs = 14;
 
-  /// The p95 below which a step is restored, after [restoreAfterS].
+  /// The p75 below which a step is restored, after [restoreAfterS].
   ///
   /// Well under [shedAboveMs]: restoring a step costs frame time, so the
   /// frame must have room for it, or the restore earns the next shed.
@@ -187,7 +187,7 @@ class CityFrameGovernor {
   int get level =>
       forcedLevel?.clamp(0, maxLevel) ?? (enabled ? _level : 0);
 
-  /// One p95 reading (ms) at [nowS] on any monotonic clock. True when the
+  /// One p75 reading (ms) at [nowS] on any monotonic clock. True when the
   /// level in force changed, so the caller can apply it once rather than
   /// every frame.
   bool feed(double p95Ms, double nowS) {
@@ -603,8 +603,12 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       // nothing next to the frame it measures.
       if (_uiMs.isNotEmpty) {
         final sorted = List<double>.of(_uiMs)..sort();
-        final p95 = sorted[((sorted.length - 1) * 0.95).round()];
-        if (_governor.feed(p95, _govClock.elapsedMicroseconds / 1e6)) {
+        // The p75, not the p95: the collector's idle scavenges land one
+        // 10 ms frame in every seventy or so, and a ninety-frame p95 reads
+        // that as load — it shed everything down to the shadows off on a
+        // 9 ms frame. Three frames in four over the line is load.
+        final p75 = sorted[((sorted.length - 1) * 0.75).round()];
+        if (_governor.feed(p75, _govClock.elapsedMicroseconds / 1e6)) {
           _applyGovernor();
         }
       }
@@ -746,7 +750,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             'enabled': _governor.enabled,
             'level': _governor.level,
             'label': _governor.label,
-            'p95UiMs': _governor.lastP95Ms,
+            'p75UiMs': _governor.lastP95Ms,
             'forced': _governor.forcedLevel,
           },
           'rover': _roverStatus(),
@@ -2893,12 +2897,20 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             '  tiles',
             'near ${count['near'] ?? 0}  mid ${count['mid'] ?? 0}  '
             'far ${count['far'] ?? 0}  queued ${count['queued'] ?? 0}  '
+            'in flight ${count['inFlight'] ?? 0}  '
             'built ${count['builtThisFrame'] ?? 0}',
             colour: (count['queued'] ?? 0) > 40
                 ? AppTheme.warn
                 : AppTheme.textDim),
         row('  build', '${ms(phase['city.build'] ?? 0)} ms',
             colour: AppTheme.textDim),
+        // What handing a tile to a worker cost this frame: the request is
+        // the tile's own snapshots, copied across the isolate boundary on
+        // THIS thread.
+        row('  submit', '${ms(phase['city.submit'] ?? 0)} ms',
+            colour: (phase['city.submit'] ?? 0) > 2
+                ? AppTheme.warn
+                : AppTheme.textDim),
         row('  bucket', '${ms(phase['city.bucket'] ?? 0)} ms',
             colour: (phase['city.bucket'] ?? 0) > 4
                 ? AppTheme.warn
@@ -2924,12 +2936,12 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             'governor',
             _governor.enabled
                 ? 'L${_governor.level} ${_governor.label}  '
-                    'p95 ${ms(_governor.lastP95Ms)} ms'
-                : 'off  p95 ${ms(_governor.lastP95Ms)} ms',
+                    'p75 ${ms(_governor.lastP95Ms)} ms'
+                : 'off  p75 ${ms(_governor.lastP95Ms)} ms',
             colour: _governor.level > 0 ? AppTheme.warn : AppTheme.textDim),
         Text(
             '  sheds shadow range, traffic, trees, then shadows while the '
-            'p95 ui build sits over ${CityFrameGovernor.shedAboveMs.round()} '
+            'p75 ui build sits over ${CityFrameGovernor.shedAboveMs.round()} '
             'ms; restores under ${CityFrameGovernor.restoreBelowMs.round()}.',
             style: AppTheme.dim.copyWith(fontSize: 10)),
         const SizedBox(height: 4),
@@ -3276,7 +3288,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             activeThumbColor: AppTheme.accent2,
             title: const Text('Frame governor', style: AppTheme.body),
             subtitle: Text(
-                'Sheds work while the p95 UI frame sits over '
+                'Sheds work while the p75 UI frame sits over '
                 '${CityFrameGovernor.shedAboveMs.round()} ms for a second — '
                 'shadow range, then traffic, then trees, then shadows — and '
                 'gives it back a step at a time after two seconds under '

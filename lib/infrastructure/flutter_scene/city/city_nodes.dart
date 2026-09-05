@@ -1273,10 +1273,17 @@ class CityNodes {
     for (final t in _queue) {
       if (t.job != null && t.job!.result != null) open++;
     }
+    phaseMs['city.submit'] = 0;
     if (open >= maxInFlight) return;
     final knobs = _knobsNow();
     var i = 0;
-    while (i < _queue.length && open < maxInFlight) {
+    // One tile a frame: the request is the tile's own snapshot objects,
+    // and an isolate send deep-copies them on THIS thread — thirteen tiles
+    // in one frame measured 214 ms. One near tile is a few ms; the budget
+    // loop cannot slice a send, so the cap is the slice.
+    var submitted = 0;
+    final sendClock = Stopwatch()..start();
+    while (i < _queue.length && open < maxInFlight && submitted < 1) {
       final t = _queue[i];
       if (t.job != null) {
         i++;
@@ -1293,8 +1300,10 @@ class CityNodes {
       }
       _submit(t, snap, root, focusBF, colonyTier, knobs);
       open++;
+      submitted++;
       i++;
     }
+    phaseMs['city.submit'] = sendClock.elapsedMicroseconds / 1000;
   }
 
   /// Start a tile's build from its want key.
