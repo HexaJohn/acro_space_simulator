@@ -163,7 +163,12 @@ class CityFrameGovernor {
   ///
   /// Well under [shedAboveMs]: restoring a step costs frame time, so the
   /// frame must have room for it, or the restore earns the next shed.
-  static const double restoreBelowMs = 9;
+  //
+  // Eleven, not nine: the steady frame on the reference colony sits at
+  // 9-10 ms, and a restore line under it pinned the governor at whatever
+  // level a build had earned — shadows off for the rest of the session on
+  // a frame with six milliseconds to spare.
+  static const double restoreBelowMs = 11;
   static const double shedAfterS = 1;
   static const double restoreAfterS = 2;
 
