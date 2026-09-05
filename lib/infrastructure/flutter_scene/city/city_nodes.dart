@@ -20,6 +20,14 @@
 /// first. A twenty-mile city is a hundred-odd tiles; the downtown and the
 /// farthest subdivision are drawn by the same code at different tiers, and
 /// nothing is grown at draw time from anything but the frame.
+///
+/// The MESHING of a tile — its roads, junctions, buildings, patches and
+/// lot furniture into geometry — is not done here. It is a pure function
+/// of the frame (see `city_tile_mesher.dart`) and runs through a
+/// [CityTileScheduler]: on worker isolates where there are any, inline in
+/// budgeted steps where there are not. What stays on this thread is what
+/// must: cutting the frame into tiles, deciding what each wants, uploading
+/// what comes back, and swapping it into the scene.
 library;
 
 import 'dart:async' show unawaited;
@@ -49,18 +57,21 @@ import '../../../domain/architecture/city_lighting.dart';
 import '../coord_convert.dart';
 import '../graphics_quality.dart';
 import 'city_materials.dart';
+import 'city_tile_mesher.dart';
+import 'city_tile_scheduler.dart';
 import 'elevated_structure.dart';
-import 'lot_features.dart';
 import 'mesh_merge.dart';
 import 'oriented_box.dart';
-import 'pedestrian_tube.dart';
 import 'rail_vehicles.dart';
-import 'railway.dart';
 import 'road_mesher.dart';
-import 'street_furniture.dart';
 import 'vehicle_meshes.dart';
 import 'city_textures.dart';
 import 'city_traffic.dart';
+
+// The tile vocabulary moved to the mesher with the meshing; everything
+// that spoke it through this file still does.
+export 'city_tile_mesher.dart'
+    show CityTier, CityMaterialKind, kGroundSwatches, kLeafSwatch;
 
 /// One generated archetype, uploaded.
 class _CityMesh {
@@ -72,45 +83,6 @@ class _CityMesh {
   /// its colour means something, not on the facade one.
   final bool lod;
 }
-
-/// Swatch count of the ground palette. ONE constant for the bake and every
-/// sampler of it: the patch pass used to divide by 5 against a 6-band texture,
-/// which quietly recoloured commercial lots industrial-tan and support decks
-/// cursor-cyan.
-const int kGroundSwatches = 10;
-
-/// The palette band tree crowns take — the yard and park trees are baked
-/// into the ground material for it, since the facade atlas has no green.
-/// Last in the palette, after the placement heatmap's pair.
-const int kLeafSwatch = 9;
-
-/// How much of a tile is drawn, by its distance from the camera.
-enum CityTier {
-  /// Everything: sidewalks, lamps, furniture, junction signals, lot fences
-  /// and car parks, street trees; buildings at their own tier.
-  near,
-
-  /// Lanes painted, junction plates, turning circles; buildings as their
-  /// block silhouettes.
-  mid,
-
-  /// Asphalt ribbons and silhouettes.
-  far,
-}
-
-/// The colony's distinct surface materials — the merge key of the upload.
-///
-/// A tile's builders are split by WHAT they draw (ribbons, lamps, props,
-/// curbs, tubes, lot fences, cars, rail) so the passes that fill them can
-/// stay simple; the GPU cares only which material a triangle takes, and
-/// there are seven. Uploading one mesh per builder cost a near tile fifteen
-/// to twenty-five draws — about ten microseconds of engine time each in
-/// the colour pass, and again in the shadow pass — where seven would do.
-/// So the upload merges every builder of one material into one geometry,
-/// keyed by THIS rather than by the material handle, which the texture and
-/// shader loads reset (see [CityMaterials.reset]) and which is therefore
-/// resolved only when the upload step runs.
-enum CityMaterialKind { facade, glazing, ground, road, dirt, alley, sidewalk }
 
 /// The colony's tangent frame on its body: up through the root's anchor,
 /// east and north across it, and the radius the anchor sits at.
@@ -232,9 +204,28 @@ class CityNodes {
   /// The tile: one cell of the body's frame this size on a side.
   static double tileM = 2 * kMileM;
 
-  /// Milliseconds of building the frame will spend before deferring the
-  /// rest of the queue.
+  /// Milliseconds of UI-thread building the frame will spend before
+  /// deferring the rest of the queue: the uploads, and on a platform
+  /// without workers the meshing steps too.
   static double buildBudgetMs = 9;
+
+  /// Milliseconds of geometry UPLOAD a frame may start, within
+  /// [buildBudgetMs]. One `MeshGeometry.fromArrays` runs per frame at most,
+  /// and only when its estimated cost — the group's bytes at
+  /// [uploadUsPerMB] — fits what is left of this. A near tile's facade
+  /// group is megabytes, and creating its GPU buffers synchronously was
+  /// the one spike left in a static frame once the meshing moved off.
+  static double uploadBudgetMs = 2;
+
+  /// Measured cost of `MeshGeometry.fromArrays`, microseconds per megabyte
+  /// of vertex and index data: a running average over the uploads so far,
+  /// seeded with a guess a first upload can plan against.
+  static double uploadUsPerMB = 3000;
+
+  /// Tile builds on workers at once. Two workers, two jobs each queued
+  /// behind: enough to keep both busy across a frame's dispatch, few
+  /// enough that a camera that moves on leaves little stale work behind.
+  static int maxInFlight = 4;
 
   static String debugLine = '';
 
@@ -364,35 +355,12 @@ class CityNodes {
   }
 
   /// Whether a tile's mesh on [material] at [tier] goes into the shadow
-  /// map.
-  ///
-  /// The shadow pass encoded everything — five milliseconds a frame,
-  /// measured — and most of it could cast nothing anyone sees. Glazing is
-  /// bands on a wall whose solid already casts the wall. The ground, the
-  /// carriageways, the pavements, the dirt and alley ribbons LIE ON the
-  /// ground: receivers, never casters. And a mid or far tile is
-  /// kilometres off, where its whole shadow is under a pixel of the
-  /// cascade. What is left — a near tile's facades, props, lamps, curbs,
-  /// lot furniture, parked cars and the solids of its skyline — is what
-  /// throws the shadows a street actually shows. [elevated] is the one
-  /// exception on a flat material: a deck in the air throws a shadow the
-  /// street below it plainly shows.
+  /// map. The rule lives with the meshing ([CityTileMesher.castsShadowFor]),
+  /// which groups a tile's geometry by it; this is the same answer for the
+  /// instanced archetypes, which are grouped here.
   static bool castsShadowFor(CityTier tier, CityMaterialKind material,
-      {bool elevated = false}) {
-    if (tier != CityTier.near) return false;
-    switch (material) {
-      case CityMaterialKind.facade:
-        return true;
-      case CityMaterialKind.glazing:
-        return false;
-      case CityMaterialKind.ground:
-      case CityMaterialKind.road:
-      case CityMaterialKind.dirt:
-      case CityMaterialKind.alley:
-      case CityMaterialKind.sidewalk:
-        return elevated;
-    }
-  }
+          {bool elevated = false}) =>
+      CityTileMesher.castsShadowFor(tier, material, elevated: elevated);
 
   /// Whether a tile's planting of [kind] casts: trees on near tiles only.
   /// A shrub's shadow is a smudge smaller than the shrub, which is itself
@@ -400,39 +368,18 @@ class CityNodes {
   static bool floraCastsShadow(CityTier tier, PropKind kind) =>
       tier == CityTier.near && kind != PropKind.shrub;
 
-  /// The upload's groups: every builder by the material it takes and
-  /// whether it casts a shadow at [tier] (see [castsShadowFor]), each
-  /// group one geometry and one draw. [sources] carry the builder, its
-  /// material and whether it stands off the ground.
+  /// The upload's groups (see [CityTileMesher.uploadGroups]).
   static Map<(CityMaterialKind, bool), List<MeshBuilder>> uploadGroups(
     Iterable<(MeshBuilder, CityMaterialKind, bool)> sources,
     CityTier tier,
-  ) {
-    final groups = <(CityMaterialKind, bool), List<MeshBuilder>>{};
-    // Every material's plain group first, even if no builder lands in it:
-    // the facade and glazing sinks also carry the skyline, which has to
-    // be flushed whether or not the street contributed anything.
-    for (final kind in CityMaterialKind.values) {
-      groups[(kind, castsShadowFor(tier, kind))] = [];
-    }
-    for (final (builder, kind, elevated) in sources) {
-      final casts = castsShadowFor(tier, kind, elevated: elevated);
-      (groups[(kind, casts)] ??= []).add(builder);
-    }
-    return groups;
-  }
+  ) =>
+      CityTileMesher.uploadGroups(sources, tier);
 
-  /// Every builder's mesh appended into [into] (a fresh sink by default),
-  /// as it is: the builders emit in the tile's own space already.
+  /// Every builder's mesh appended into [into] (see
+  /// [CityTileMesher.mergeBuilders]).
   static MergedMeshSink mergeBuilders(Iterable<MeshBuilder> builders,
-      {MergedMeshSink? into}) {
-    final sink = into ?? MergedMeshSink();
-    for (final b in builders) {
-      if (b.triangleCount == 0) continue;
-      sink.appendMesh(b.build());
-    }
-    return sink;
-  }
+          {MergedMeshSink? into}) =>
+      CityTileMesher.mergeBuilders(builders, into: into);
 
   /// The material handle for [kind], resolved NOW: the handles are lazy
   /// and the texture and shader loads reset them, so a step queued before
@@ -631,51 +578,49 @@ class CityNodes {
   /// retail shed — it just should not be the whole world.
   static ArchitectureStyle style = ArchitectureStyle.masonryStreet;
 
-  static BuildingLibrary _newLibrary() => BuildingLibrary(
-        generator: const BuildingGenerator().withStyle(style),
+  /// The archetype libraries THIS thread generates from — full and coarse
+  /// (see [CityBuildingLibraries]) — for the instanced buildings' meshes,
+  /// which are uploaded here and cached in [_uploaded]. The workers hold
+  /// their own, for the skyline they bake and the lot massing they read,
+  /// built from the same knobs: a key a worker groups instances by is a
+  /// key this library computes for the same building, or the instanced
+  /// groups would come back under keys nothing here can mesh.
+  final CityBuildingLibraries _libraries = CityBuildingLibraries();
+
+  /// The knobs as the meshing reads them, as values: a worker isolate has
+  /// its own copy of every static here, at its default, so a request
+  /// carries what the build depends on instead (see [CityMeshKnobs]).
+  static CityMeshKnobs _knobsNow() => CityMeshKnobs(
+        styleId: style.id,
         bucketM: archetypeBucketM,
         variants: archetypeVariants,
+        perBuildingLod: perBuildingLod,
+        blockRangeM: blockRangeM,
+        interiorRangeM: interiorRangeM,
+        lodDebug: lodDebug,
+        onStreetParking: onStreetParking,
+        sealedWorld: sealedWorld,
+        maxParkedCars: _maxParkedCars,
       );
-
-  /// The library the BLOCK tier draws from: buckets twice as coarse, half
-  /// the variants. A block-tier building is a silhouette box hundreds of
-  /// metres away, where a two-metre size quantum and a repeated massing are
-  /// invisible — but every distinct archetype is an uploaded mesh and a
-  /// solid+glazing draw pair, and the block tier is most of any city seen
-  /// from its framing distance. Coarser sharing there is draw calls off the
-  /// dominant tier for a difference nobody can resolve.
-  static BuildingLibrary _newCoarseLibrary() => BuildingLibrary(
-        generator: const BuildingGenerator().withStyle(style),
-        bucketM: archetypeBucketM * 2,
-        variants: math.max(1, archetypeVariants ~/ 2),
-      );
-
-  BuildingLibrary _library = _newLibrary();
-  BuildingLibrary _libraryCoarse = _newCoarseLibrary();
-  double _libraryBucketM = archetypeBucketM;
-  int _libraryVariants = archetypeVariants;
-  String _libraryStyle = style.id;
-
-  /// The library serving [tier].
-  BuildingLibrary _libraryFor(BuildingDetail tier) =>
-      tier == BuildingDetail.block ? _libraryCoarse : _library;
 
   /// Rebuild the archetype libraries if their knobs moved. Everything already
   /// uploaded is keyed by the old quantisation, so it all has to go.
   void _syncLibrary() {
-    if (_libraryBucketM == archetypeBucketM &&
-        _libraryVariants == archetypeVariants &&
-        _libraryStyle == style.id) {
+    if (!_libraries.sync(style.id, archetypeBucketM, archetypeVariants)) {
       return;
     }
-    _libraryBucketM = archetypeBucketM;
-    _libraryVariants = archetypeVariants;
-    _libraryStyle = style.id;
-    _library = _newLibrary();
-    _libraryCoarse = _newCoarseLibrary();
     _uploaded.clear();
     invalidate();
   }
+
+  /// Where the meshing runs (see [CityTileScheduler]): worker isolates
+  /// where the platform has them, inline steps under the build budget
+  /// where it does not.
+  final CityTileScheduler _scheduler = CityTileScheduler.platform();
+
+  /// Which build each tile is waiting on, so a result for a build the tile
+  /// has since abandoned is dropped (see [PendingTileJobs]).
+  final PendingTileJobs _pending = PendingTileJobs();
 
   final Map<BuildingArchetype, _CityMesh> _uploaded = {};
 
@@ -737,12 +682,6 @@ class CityNodes {
   /// is the real standard, and it is the "subtle elevation difference" that
   /// makes a street read as built rather than painted.
   static const double kCurbHeightM = RoadMesher.curbHeightM;
-
-  /// The carriageway ribbon's own lift over the graded ground.
-  static const double _ribbonLiftM = RoadMesher.ribbonLiftM;
-
-  /// Where the walk surface sits: the ribbon's lift plus the curb reveal.
-  static const double _walkTopLiftM = _ribbonLiftM + kCurbHeightM;
 
   void update(
     WorldSnapshot snap,
@@ -976,34 +915,57 @@ class CityNodes {
     phaseMs['city.tier'] = sw.elapsedMicroseconds / 1000;
     sw.reset();
 
-    // Build, nearest first, within the budget: a part of a tile at a time,
-    // so a near tile never takes the whole frame. The budget is checked in
-    // microseconds — whole milliseconds between steps overshot it by most
-    // of one — and against what a step of that KIND cost last time, so a
-    // step that would not fit waits for the next frame. One step always
-    // runs, or a step dearer than the whole budget would never run at all.
+    // Build, nearest first, within the budget. Three parts, all on this
+    // thread and all of them what the panel's "build" means: the tiles at
+    // the head of the queue are SUBMITTED to the scheduler — their requests
+    // cut from the frame, at most [maxInFlight] between submission and
+    // swap; the scheduler is PUMPED, which on a platform without workers
+    // is where the meshing steps run; and the tiles whose results have
+    // landed run their UPLOAD steps — a geometry, a run of archetype
+    // groups, the planting, the one swap into the scene — a part at a
+    // time, so a near tile never takes the whole frame. The budget is
+    // checked in microseconds — whole milliseconds between steps overshot
+    // it by most of one — and against what a step of that KIND cost last
+    // time, so a step that would not fit waits for the next frame; a
+    // geometry upload is checked against its bytes at the measured rate
+    // instead (see [uploadBudgetMs]). One step always runs, or a step
+    // dearer than the whole budget would never run at all.
     var builtThisFrame = 0, stepsThisFrame = 0;
     if (_queue.isNotEmpty) {
       _queue.sort((a, b) => a.distanceM.compareTo(b.distanceM));
       final budgetUs = (buildBudgetMs * 1000).round();
-      while (_queue.isNotEmpty && sw.elapsedMicroseconds < budgetUs) {
-        final t = _queue.first;
-        final focusBF = focusByBody[t.bodyId];
-        final job =
-            focusBF == null ? null : _jobFor(t, snap, focusBF, colonyTier);
-        if (job == null) {
-          // No body in the frame, or no root on it: nothing to build
-          // against. Off the queue; a key that moves re-queues it.
-          _queue.removeAt(0);
-          t.queued = false;
-          continue;
-        }
+      final uploadBudgetUs = math.min(budgetUs, (uploadBudgetMs * 1000).round());
+      _submitQueued(snap, focusByBody, colonyTier);
+      // The inline scheduler gets the budget less the upload's share, or
+      // a platform without workers would mesh every frame and upload on
+      // none: the meshing is always queued while a colony streams in.
+      stepsThisFrame += _scheduler.pump(
+          math.max(0, budgetUs - uploadBudgetUs - sw.elapsedMicroseconds),
+          onStep: (kind, costUs) => stepCostUs[kind.name] = costUs);
+      final uploadStartUs = sw.elapsedMicroseconds;
+      var uploadSteps = 0, geometries = 0;
+      while (sw.elapsedMicroseconds < budgetUs) {
+        final t = _nextUploadable();
+        if (t == null) break;
+        final job = t.job!;
         final next = job.steps.last;
-        final lastUs = _stepCostUs[next.kind];
-        if (stepsThisFrame > 0 &&
-            lastUs != null &&
-            sw.elapsedMicroseconds + lastUs > budgetUs) {
-          break;
+        if (uploadSteps > 0) {
+          if (next.bytes > 0) {
+            // A geometry: one a frame, and only one whose bytes fit what
+            // is left of the upload budget at the rate measured so far.
+            final estimateUs = next.bytes / (1024 * 1024) * uploadUsPerMB;
+            final spentUs = sw.elapsedMicroseconds - uploadStartUs;
+            if (geometries > 0 ||
+                spentUs + estimateUs > uploadBudgetUs ||
+                sw.elapsedMicroseconds + estimateUs > budgetUs) {
+              break;
+            }
+          } else {
+            final lastUs = _stepCostUs[next.kind];
+            if (lastUs != null && sw.elapsedMicroseconds + lastUs > budgetUs) {
+              break;
+            }
+          }
         }
         final startUs = sw.elapsedMicroseconds;
         job.steps.removeLast().run();
@@ -1011,6 +973,8 @@ class CityNodes {
         _stepCostUs[next.kind] = costUs;
         stepCostUs[next.kind.name] = costUs;
         stepsThisFrame++;
+        uploadSteps++;
+        if (next.bytes > 0) geometries++;
         if (job.steps.isEmpty) {
           // The swap was the last step: the tile shows this job now. A job
           // is never abandoned for a newer key — a tile one camera cell
@@ -1020,7 +984,7 @@ class CityNodes {
           // this is the only compare that would catch it.
           t.builtKey = job.key;
           t.job = null;
-          _queue.removeAt(0);
+          _queue.remove(t);
           t.queued = false;
           builtThisFrame++;
           if (t.builtKey != t.wantKey) {
@@ -1031,6 +995,7 @@ class CityNodes {
       }
     }
     phaseCount['steps'] = stepsThisFrame;
+    phaseCount['inFlight'] = _scheduler.inFlight;
     phaseMs['city.build'] = sw.elapsedMicroseconds / 1000;
     phaseMs['city.rebuild'] = phaseMs['city.build']!;
     sw.reset();
@@ -1179,9 +1144,9 @@ class CityNodes {
         final second = Vector3(r.points[3], r.points[4], r.points[5]);
         final penult = Vector3(r.points[3 * n - 6], r.points[3 * n - 5],
             r.points[3 * n - 4]);
-        tileFor(r.body, first).ends.add(_TileEnd(
+        tileFor(r.body, first).ends.add(CityTileEnd(
             first, second, r.halfWidthM, cls, cls.paved, r.collector));
-        tileFor(r.body, last).ends.add(_TileEnd(
+        tileFor(r.body, last).ends.add(CityTileEnd(
             last, penult, r.halfWidthM, cls, cls.paved, r.collector));
       }
       if (cls == RoadClass.transit) {
@@ -1218,185 +1183,260 @@ class CityNodes {
   static int _endKey(Vector3 p) => Object.hash(
       (p.x / 10).round(), (p.y / 10).round(), (p.z / 10).round());
 
-  /// The tile's build in progress, started from its want key if there is
-  /// none. Null when the tile has no root to hang from.
+  // ---- The build pipeline ---------------------------------------------------
+  //
+  // A tile's build is a JOB: submitted to the scheduler from its want key,
+  // answered with a [CityTileResult] some frames later, uploaded a step at
+  // a time, swapped in at once. A job runs to its end once started, on its
+  // OWN key, tier and anchor: the build loop never trades it for the
+  // tile's newer want key. It used to — and a near tile under a dragged
+  // camera, re-keyed every frame, was thrown away every frame a few steps
+  // in, so the frame paid for a build that never once landed ("queued 31,
+  // built 0").
+
+  /// Submit the queued tiles that have no job yet, nearest first, until
+  /// [maxInFlight] are between submission and swap.
   ///
-  /// A job runs to its end once started, on its OWN key, tier and anchor:
-  /// the build loop never trades it for the tile's newer want key. It used
-  /// to — and a near tile under a dragged camera, re-keyed every frame,
-  /// was thrown away every frame a few steps in, so the frame paid for a
-  /// build that never once landed ("queued 31, built 0").
-  _TileJob? _jobFor(
-      _Tile t, WorldSnapshot snap, Vector3 focusBF, BuildingDetail colonyTier) {
-    final existing = t.job;
-    if (existing != null) return existing;
-    final root = _roots[t.bodyId];
-    if (root == null) return null;
-    final tier = t.wantTier ?? CityTier.far;
-    final j = t.job = _TileJob(t.wantKey, tier, t.centreBF, root.anchorBF);
-    final epoch = snap.epoch;
-    // Parts, run from the end: roads in runs, then the junctions and the
-    // terminals over them, then buildings in runs, the ground, the lot
-    // furniture, then the upload — every builder into geometry, the
-    // planting off the pits the roads left — and last the swap that puts
-    // it all in the scene at once. Small runs: the budget is checked
-    // between parts, and a part is the least the frame can overshoot by.
-    // A run of four hundred buildings against a cold archetype cache was
-    // a hundred milliseconds; a twenty-mile city has a thousand such runs.
-    const roadsPerStep = 16;
-    for (var i = 0; i < t.roads.length; i += roadsPerStep) {
-      final from = i, to = math.min(i + roadsPerStep, t.roads.length);
-      j.steps.add(_BuildStep(_StepKind.roads, () {
-        for (var k = from; k < to; k++) {
-          _emitRoad(j.roads, t.roads[k], tier, j.anchorBF, root);
-        }
-      }));
+  /// Counted to the SWAP, not to the worker's answer: a result waiting on
+  /// its upload holds megabytes, and the uploads go one geometry a frame
+  /// (see [uploadBudgetMs]), so workers answering faster than the frame
+  /// can upload would otherwise pile results up behind the queue — and a
+  /// camera that moved on would find every one of them stale.
+  void _submitQueued(WorldSnapshot snap, Map<String, Vector3> focusByBody,
+      BuildingDetail colonyTier) {
+    var open = _scheduler.inFlight;
+    for (final t in _queue) {
+      if (t.job != null && t.job!.result != null) open++;
     }
-    j.steps.add(_BuildStep(
-        _StepKind.junctions, () => _emitJunctions(j, t, epoch, root)));
-    const buildingsPerStep = 100;
-    for (var i = 0; i < t.buildings.length; i += buildingsPerStep) {
-      final from = i, to = math.min(i + buildingsPerStep, t.buildings.length);
-      j.steps.add(_BuildStep(_StepKind.buildings, () {
-        for (var k = from; k < to; k++) {
-          _emitBuilding(j, t.buildings[k], focusBF, colonyTier);
-        }
-      }));
-    }
-    j.steps.add(
-        _BuildStep(_StepKind.patches, () => _emitPatches(t.patches, j)));
-    // Only where some building can resolve past a box: the furniture pass
-    // skips every block-tier lot, so a tile that cannot detail would run
-    // its steps to emit nothing (see [tileCanDetail]).
-    if (lotFeatures && t.wantCanDetail) {
-      const perStep = 60;
-      for (var i = 0; i < t.buildings.length; i += perStep) {
-        final from = i, to = math.min(i + perStep, t.buildings.length);
-        j.steps.add(_BuildStep(
-            _StepKind.lots,
-            () => _emitLotFeatures(
-                t.buildings.sublist(from, to), j, focusBF, colonyTier)));
+    if (open >= maxInFlight) return;
+    final knobs = _knobsNow();
+    var i = 0;
+    while (i < _queue.length && open < maxInFlight) {
+      final t = _queue[i];
+      if (t.job != null) {
+        i++;
+        continue;
       }
+      final focusBF = focusByBody[t.bodyId];
+      final root = _roots[t.bodyId];
+      if (focusBF == null || root == null) {
+        // No body in the frame, or no root on it: nothing to build
+        // against. Off the queue; a key that moves re-queues it.
+        _queue.removeAt(i);
+        t.queued = false;
+        continue;
+      }
+      _submit(t, snap, root, focusBF, colonyTier, knobs);
+      open++;
+      i++;
     }
-    _addUploadSteps(t, j, root);
-    // The caller pops from the end.
-    j.steps.setAll(0, j.steps.reversed.toList());
-    return j;
   }
 
-  /// The upload, as steps: each builder into geometry on the job's staging
-  /// list — no scene mutation — then ONE swap that drops the tile's old
-  /// nodes and attaches every staged one in the same frame.
+  /// Start a tile's build from its want key.
+  void _submit(_Tile t, WorldSnapshot snap, _BodyRoot root, Vector3 focusBF,
+      BuildingDetail colonyTier, CityMeshKnobs knobs) {
+    final tier = t.wantTier ?? CityTier.far;
+    final key = t.wantKey;
+    final job = t.job = _TileJob(key, tier, t.centreBF, root.anchorBF);
+    final request = _requestFor(t, snap, root, tier, key, focusBF,
+        colonyTier, knobs);
+    _pending.start(t.key, key);
+    _scheduler.mesh(request).then(_onResult,
+        onError: (Object e, StackTrace st) => _onFailure(t, job, e));
+  }
+
+  /// Everything the meshing reads, cut from the tile and the body's root
+  /// (see [CityTileRequest]). The root's end table and transit-end list
+  /// are colony-wide; only the entries this tile's own roads touch go.
+  CityTileRequest _requestFor(
+    _Tile t,
+    WorldSnapshot snap,
+    _BodyRoot root,
+    CityTier tier,
+    String key,
+    Vector3 focusBF,
+    BuildingDetail colonyTier,
+    CityMeshKnobs knobs,
+  ) {
+    final roadEnds = <(double, int)?>[];
+    final transitFrom = <Vector3>[];
+    for (final r in t.roads) {
+      final n = r.points.length ~/ 3;
+      final first = Vector3(r.points[0], r.points[1], r.points[2]);
+      final last = Vector3(
+          r.points[3 * n - 3], r.points[3 * n - 2], r.points[3 * n - 1]);
+      roadEnds.add(root.endHalf[_endKey(first)]);
+      roadEnds.add(root.endHalf[_endKey(last)]);
+      final cls = RoadClass
+          .values[r.roadClassIndex.clamp(0, RoadClass.values.length - 1)];
+      if (cls == RoadClass.transit) {
+        transitFrom.add(first);
+        transitFrom.add(last);
+      }
+    }
+    // Every transit end on the body within the terminal test's reach (8 m)
+    // of an end of one of this tile's transit roads — each entry ONCE,
+    // whichever ends it is near, since the test counts entries.
+    final transitEnds = <Vector3>[];
+    if (transitFrom.isNotEmpty) {
+      for (final other in root.transitEnds) {
+        for (final at in transitFrom) {
+          if ((other - at).length < 8.0) {
+            transitEnds.add(other);
+            break;
+          }
+        }
+      }
+    }
+    return CityTileRequest(
+      tileKey: t.key,
+      key: key,
+      tier: tier,
+      // Only where some building can resolve past a box: the furniture
+      // pass skips every block-tier lot, so a tile that cannot detail
+      // would run its steps to emit nothing (see [tileCanDetail]).
+      canDetail: lotFeatures && t.wantCanDetail,
+      anchorBF: t.centreBF,
+      buildings: t.buildings,
+      roads: t.roads,
+      patches: t.patches,
+      ends: t.ends,
+      roadEnds: roadEnds,
+      transitEnds: transitEnds,
+      focusBF: focusBF,
+      colonyTier: colonyTier,
+      epoch: snap.epoch,
+      knobs: knobs,
+    );
+  }
+
+  /// A result back from the scheduler: onto its tile's job as upload
+  /// steps, or dropped if the tile has moved on (see [PendingTileJobs]).
+  void _onResult(CityTileResult result) {
+    final t = _tiles[result.tileKey];
+    if (!_pending.accept(result) || t == null) return;
+    final job = t.job;
+    if (job == null || job.key != result.key || job.result != null) return;
+    final root = _roots[t.bodyId];
+    if (root == null) {
+      // The root went while the job ran; the tile is still queued and
+      // resubmits against whatever root the next frame has.
+      t.job = null;
+      return;
+    }
+    job.result = result;
+    _addUploadSteps(t, job, root, result);
+  }
+
+  /// A build that threw. Off the queue rather than resubmitted, or a
+  /// deterministic failure would loop forever; a key that moves re-queues
+  /// the tile.
+  void _onFailure(_Tile t, _TileJob job, Object error) {
+    if (t.job != job) return;
+    debugPrint('city: tile ${t.key} failed to mesh: $error');
+    t.job = null;
+    _pending.forget(t.key);
+    _queue.remove(t);
+    t.queued = false;
+  }
+
+  /// The nearest queued tile with upload steps to run, or null.
+  _Tile? _nextUploadable() {
+    for (final t in _queue) {
+      final job = t.job;
+      if (job != null && job.steps.isNotEmpty) return t;
+    }
+    return null;
+  }
+
+  /// The upload, as steps: each of the result's geometries onto the job's
+  /// staging list — no scene mutation — the archetype groups in runs, the
+  /// planting, then ONE swap that drops the tile's old nodes and attaches
+  /// every staged one in the same frame.
   ///
   /// The upload was one indivisible step, and the largest: a downtown
   /// tile's two dozen builders, its skyline, its archetype groups and its
   /// planting in one go, however much of the budget was left. Staged a
-  /// builder at a time it fits between frames; swapped all at once the
+  /// geometry at a time it fits between frames; swapped all at once the
   /// engine sees one structural change and rebuilds its BVH once, and no
   /// frame ever shows a tile half old and half new.
-  void _addUploadSteps(_Tile t, _TileJob j, _BodyRoot root) {
-    final r = j.roads;
-    // Every builder by the material it takes, and whether it stands off
-    // the ground. The builders stay split by what they draw; the upload
-    // does not: each (material, casts-a-shadow) group is ONE geometry and
-    // one draw, merged with the skyline of the same material — seven or so
-    // draws for a near tile where a builder each was two dozen. The
-    // material handles are resolved when the step RUNS, not here (see
-    // [_materialOf]): they are lazy, and the texture and shader loads
-    // reset them.
-    final sources = <(MeshBuilder, CityMaterialKind, bool)>[
-      // The ribbon takes the dedicated road strip — on the facade material it
-      // rendered as a run of blank concrete with no curbs and no centre line,
-      // which from the cockpit read as "roads are missing".
-      (r.ribbon, CityMaterialKind.road, false),
-      (r.dirtRibbon, CityMaterialKind.dirt, false),
-      (r.alleyRibbon, CityMaterialKind.alley, false),
-      (r.walkRibbon, CityMaterialKind.sidewalk, false),
-      (r.railBallast, CityMaterialKind.dirt, false),
-      (r.railConcrete, CityMaterialKind.sidewalk, false),
-      (r.railSteel, CityMaterialKind.alley, false),
-      // The elevated deck is the one flat surface that casts: the street
-      // under an overpass is in its shadow.
-      (r.airDeck, CityMaterialKind.road, true),
-      (r.airSolid, CityMaterialKind.facade, false),
-      (r.airGlow, CityMaterialKind.glazing, false),
-      (r.propSolid, CityMaterialKind.facade, false),
-      (r.propGlow, CityMaterialKind.glazing, false),
-      (r.lampSolid, CityMaterialKind.facade, false),
-      (r.lampGlow, CityMaterialKind.glazing, false),
-      // The pedestrian tube: a concrete curb carrying a glass barrel.
-      (r.tubeSolid, CityMaterialKind.facade, false),
-      (r.tubeGlass, CityMaterialKind.glazing, false),
-      (r.curbSolid, CityMaterialKind.facade, false),
-      (r.curbGlass, CityMaterialKind.glazing, false),
-      // The lot furniture: fences, aprons, parked cars, lit signs.
-      (j.featureSolid, CityMaterialKind.facade, false),
-      (j.featureApron, CityMaterialKind.road, false),
-      (j.featureCars, CityMaterialKind.facade, false),
-      (j.featureGlow, CityMaterialKind.glazing, false),
-      (j.patches, CityMaterialKind.ground, false),
-    ];
-    // One step per group, so the budget loop can stop between them: a
-    // downtown tile's facade group is most of its triangles.
-    for (final entry in uploadGroups(sources, j.tier).entries) {
-      final (kind, casts) = entry.key;
-      final builders = entry.value;
-      // A group with the material's own shadow answer merges into the
-      // job's sink for it — where the block-tier skyline already is, on
-      // facade and glazing. The odd group out (the elevated deck on a
-      // near tile) takes a sink of its own.
-      final plain = casts == castsShadowFor(j.tier, kind);
+  ///
+  /// The material handles are resolved when a step RUNS, not here (see
+  /// [_materialOf]): they are lazy, and the texture and shader loads
+  /// reset them.
+  void _addUploadSteps(
+      _Tile t, _TileJob j, _BodyRoot root, CityTileResult result) {
+    // One step per merged group — each (material, casts-a-shadow) group is
+    // ONE geometry and one draw — so the budget loop can stop between
+    // them: a downtown tile's facade group is most of its triangles.
+    for (final g in result.groups) {
       j.steps.add(_BuildStep(_StepKind.mesh, () {
-        final sink = plain ? j.sinkFor(kind) : MergedMeshSink();
-        // The skyline's share of the sink, counted before the street's
-        // builders join it: the panel's "skyline tris" means buildings.
-        if (plain &&
-            (kind == CityMaterialKind.facade ||
-                kind == CityMaterialKind.glazing)) {
-          j.skylineTris += sink.triangleCount;
-        }
-        mergeBuilders(builders, into: sink);
-        if (sink.isEmpty) return;
-        final geometry = _geometryOf(sink.build());
-        if (geometry == null) return;
+        final sw = Stopwatch()..start();
+        final geometry = fs.MeshGeometry.fromArrays(
+          positions: g.positions,
+          normals: g.normals,
+          texCoords: g.texCoords,
+          indices: g.indices,
+        );
+        _bookUpload(g.bytes, sw.elapsedMicroseconds);
         j.stage(fs.Node(
           mesh: fs.Mesh.primitives(
-              primitives: [fs.MeshPrimitive(geometry, _materialOf(kind))]),
-        )..castsShadow = casts);
+              primitives: [fs.MeshPrimitive(geometry, _materialOf(g.material))]),
+        )..castsShadow = g.castsShadow);
+      }, bytes: g.bytes));
+    }
+    // The instanced buildings, per archetype, in runs.
+    final groups = result.instances;
+    const perStep = 24;
+    for (var i = 0; i < groups.length; i += perStep) {
+      final from = i, to = math.min(i + perStep, groups.length);
+      j.steps.add(_BuildStep(_StepKind.instances, () {
+        for (var k = from; k < to; k++) {
+          _stageGroup(j, groups[k]);
+        }
       }));
     }
-    // The instanced buildings, per archetype. Which archetypes is known
-    // only once the building steps have run, so this step plans the runs
-    // and pushes them to run next (the steps pop from the end), in order.
-    j.steps.add(_BuildStep(_StepKind.instances, () {
-      final groups = j.groups.entries.toList();
-      const perStep = 24;
-      for (var end = groups.length; end > 0; end -= perStep) {
-        final from = math.max(0, end - perStep), to = end;
-        j.steps.add(_BuildStep(_StepKind.instances, () {
-          for (var k = from; k < to; k++) {
-            _stageGroup(j, groups[k].key, groups[k].value);
-          }
-        }));
-      }
-    }));
     // Street planting, instanced off the scatter props.
     j.steps.add(_BuildStep(
         _StepKind.flora,
         () => _emitStreetFlora(
-            PropKind.broadleafTree, streetTreeHeightM, j.roads.treePits, j)));
+            PropKind.broadleafTree, streetTreeHeightM, result.treePits, j)));
     j.steps.add(_BuildStep(
         _StepKind.flora,
         () => _emitStreetFlora(
-            PropKind.shrub, planterShrubHeightM, j.roads.shrubPits, j)));
+            PropKind.shrub, planterShrubHeightM, result.shrubPits, j)));
     j.steps.add(_BuildStep(_StepKind.swap, () => _swap(t, j, root)));
+    j.skylineTris = result.skylineTris;
+    j.lodCounts = result.lodCounts;
+    // The caller pops from the end.
+    j.steps.setAll(0, j.steps.reversed.toList());
+  }
+
+  /// Bytes and microseconds of every geometry upload so far, for
+  /// [uploadUsPerMB]: a byte-weighted average, so a run of tiny uploads
+  /// with their fixed cost does not read as a slow rate and stall the
+  /// big one behind them. Halved past a window so the rate follows the
+  /// machine's current state rather than its history.
+  static double _uploadBytes = 0, _uploadUs = 0;
+
+  static void _bookUpload(int bytes, int us) {
+    if (bytes <= 0) return;
+    _uploadBytes += bytes;
+    _uploadUs += us;
+    const window = 64.0 * 1024 * 1024;
+    if (_uploadBytes > window) {
+      _uploadBytes /= 2;
+      _uploadUs /= 2;
+    }
+    uploadUsPerMB = _uploadUs / (_uploadBytes / (1024 * 1024));
   }
 
   /// One archetype's instances onto the job's staging list.
-  void _stageGroup(
-      _TileJob j, BuildingArchetype key, List<vm.Matrix4> transforms) {
-    final m = _uploaded[key];
-    if (m == null) return;
+  void _stageGroup(_TileJob j, CityInstanceGroup group) {
+    final m = _uploaded.putIfAbsent(
+        group.archetype, () => _meshArchetype(group.archetype, group.representative));
+    final transforms = group.transforms;
+    final count = group.count;
     // Walls take the stone material (concrete is closer to rock than
     // bark); glazing takes the foliage one, which is the alpha-capable
     // pass and is where the night lighting hooks in. The solid casts as a
@@ -1411,18 +1451,58 @@ class CityNodes {
       (m.glazing, CityMaterials.glazing, false),
     ]) {
       if (geometry == null) continue;
-      for (var start = 0; start < transforms.length; start += _maxPerDraw) {
-        final end = math.min(start + _maxPerDraw, transforms.length);
+      for (var start = 0; start < count; start += _maxPerDraw) {
+        final end = math.min(start + _maxPerDraw, count);
         final instanced =
             fs.InstancedMesh(geometry: geometry, material: material);
         for (var i = start; i < end; i++) {
-          instanced.addInstance(transforms[i]);
+          // A view over the packed transforms; the mesh copies the matrix.
+          instanced.addInstance(vm.Matrix4.fromFloat32List(
+              Float32List.sublistView(transforms, i * 16, i * 16 + 16)));
         }
         j.stage(fs.Node()
           ..addComponent(fs.InstancedMeshComponent(instanced))
           ..castsShadow = casts);
       }
     }
+  }
+
+  /// The mesh of an archetype this thread has not uploaded yet, generated
+  /// from a building that keys to it. The library computes the key again
+  /// from the same inputs the worker did (see [CityTileMesher.archetypeOf]),
+  /// so the mesh it caches is the one every instance in the group shares.
+  _CityMesh _meshArchetype(BuildingArchetype key, BuildingSnapshot b) {
+    final tier = key.detail;
+    final lib = _libraries.forTier(tier);
+    final built =
+        lib.get(specOf(b), parcelOf(b), seed: b.id.hashCode, detail: tier);
+    if (lodDebug) {
+      // The building's own massing, as one box. Same size, same place,
+      // no detail — so what you are looking at is purely which tier each
+      // building resolved to.
+      final m = MeshBuilder();
+      final fp = built.massing.footprint;
+      final u = _lodSwatchU(tier);
+      OrientedBox.emit(
+        m,
+        Vector3(0, 0, built.massing.height / 2),
+        Vector3.unitX,
+        Vector3.unitY,
+        Vector3.unitZ,
+        math.max(1.0, fp.width) / 2,
+        math.max(1.0, fp.depth) / 2,
+        math.max(1.0, built.massing.height) / 2,
+        u: u,
+        v: 0.5,
+        // Metres: the instance transform carries the scene conversion.
+        unitScale: 1.0,
+      );
+      return _CityMesh(_geometryOf(m.build()), null, lod: true);
+    }
+    return _CityMesh(
+      _geometryOf(built.model.solid),
+      _geometryOf(built.model.foliage),
+    );
   }
 
   /// Swap a tile's nodes for the job's staged ones, all in one frame.
@@ -1505,77 +1585,8 @@ class CityNodes {
     t.queued = false;
     t.job = null;
     t.builtKey = '';
-  }
-
-  /// One building into a tile's job: an instance of its archetype at its
-  /// own tier, or a box in the tile's skyline.
-  void _emitBuilding(
-      _TileJob job, BuildingSnapshot b, Vector3 focusBF, BuildingDetail colonyTier) {
-    final spec = specOf(b);
-    final parcel = parcelOf(b);
-    final seed = b.id.hashCode;
-    // A tile beyond the near range is silhouettes whatever the building's
-    // own distance says: nothing in it resolves past a box.
-    final tier = job.tier == CityTier.near
-        ? detailFor(b, focusBF, colonyTier)
-        : BuildingDetail.block;
-    job.lodCounts[tier] = (job.lodCounts[tier] ?? 0) + 1;
-    // Block tier keys and meshes against the coarse library, so the
-    // dominant tier shares far fewer archetypes (and draws).
-    final lib = _libraryFor(tier);
-    // The skyline: block-tier buildings are BAKED into one mesh per
-    // material for the whole tile rather than instanced per archetype —
-    // see [_upload]. The visualiser keeps the instanced path so its boxes
-    // stay one per archetype.
-    if (tier == BuildingDetail.block && !lodDebug) {
-      final built = lib.get(spec, parcel, seed: seed, detail: tier);
-      final m = instanceTransform(job.anchorBF, b);
-      job.skylineSolid.append(built.model.solid, m);
-      job.skylineGlazing.append(built.model.foliage, m);
-      return;
-    }
-    // The style is part of the key here for the same reason it is part of
-    // it inside the library: these two maps are looked up with keys built
-    // independently, and a key that forgot the style would upload one
-    // building's mesh and then serve it for a different kit's.
-    final key = BuildingArchetype.of(spec, parcel,
-        detail: tier,
-        seed: seed,
-        bucketM: lib.bucketM,
-        variants: lib.variants,
-        styleId: style.id,
-        corner: b.corner);
-    _uploaded.putIfAbsent(key, () {
-      final built = lib.get(spec, parcel, seed: seed, detail: tier);
-      if (lodDebug) {
-        // The building's own massing, as one box. Same size, same place,
-        // no detail — so what you are looking at is purely which tier each
-        // building resolved to.
-        final m = MeshBuilder();
-        final fp = built.massing.footprint;
-        final u = _lodSwatchU(tier);
-        OrientedBox.emit(
-          m,
-          Vector3(0, 0, built.massing.height / 2),
-          Vector3.unitX,
-          Vector3.unitY,
-          Vector3.unitZ,
-          math.max(1.0, fp.width) / 2,
-          math.max(1.0, fp.depth) / 2,
-          math.max(1.0, built.massing.height) / 2,
-          u: u,
-          v: 0.5,
-          // Metres: the instance transform carries the scene conversion.
-          unitScale: 1.0,
-        );
-        return _CityMesh(_geometryOf(m.build()), null, lod: true);
-      }
-      return _CityMesh(
-        _geometryOf(built.model.solid),
-        _geometryOf(built.model.foliage),
-      );
-    });
-    job.groups.putIfAbsent(key, () => []).add(instanceTransform(job.anchorBF, b));
+    // A build still on a worker answers into the void.
+    _pending.forget(t.key);
   }
 
   /// How dark it is over the colony, from the frame's own sun.
@@ -2024,366 +2035,6 @@ class CityNodes {
     _cursorNode = node;
   }
 
-  /// Flat ground patches: roads, zoned lots, support decks.
-  ///
-  /// One mesh for all of them, coloured by a UV into the ground palette. The
-  /// mesh format has no vertex-colour channel, and a material per colour would
-  /// be five draws for what is a single sheet of ground.
-  void _emitPatches(List<CityPatchSnapshot> patches, _TileJob job) {
-    final m = job.patches;
-    final anchorBF = job.anchorBF;
-    for (final p in patches) {
-      final centre = Vector3(p.px, p.py, p.pz) - anchorBF;
-      final up = (centre + anchorBF).normalized;
-      final basis = Quaternion(p.qw, p.qx, p.qy, p.qz);
-      final east = basis.rotate(Vector3.unitX);
-      final north = basis.rotate(Vector3.unitY);
-      final hw = p.sizeM / 2;
-      final hd = p.depthM / 2;
-      // Lifted clear of the levelled pad, and each kind by a different amount,
-      // so a road drawn over a zoned lot does not z-fight it.
-      final lift = up * (0.05 + p.kind * 0.01);
-      final c = [
-        centre + east * -hw + north * -hd + lift,
-        centre + east * hw + north * -hd + lift,
-        centre + east * hw + north * hd + lift,
-        centre + east * -hw + north * hd + lift,
-      ];
-      // A road maps its whole quad ACROSS its swatch, so the tile's markings
-      // and curbs land on the pavement. Every other kind is a flat colour and
-      // samples the swatch CENTRE, where no filtering or mip level can bleed a
-      // neighbouring kind's colour in.
-      final List<(double, double)> uv;
-      if (p.kind == CityPatchSnapshot.kindRoad) {
-        // Inset by a texel's worth so the sampler cannot reach the next swatch.
-        const e = 0.004;
-        final u0 = p.kind / kGroundSwatches + e,
-            u1 = (p.kind + 1) / kGroundSwatches - e;
-        uv = [(u0, 1.0), (u1, 1.0), (u1, 0.0), (u0, 0.0)];
-      } else {
-        // Against kGroundSwatches, NOT the number of patch kinds. The palette
-        // has grown twice — cursor and refusal swatches, then the two the
-        // placement heatmap paints with — and a local divisor of 5 does not
-        // grow with it. Every patch was reading the wrong band: residential
-        // sampled commercial blue, industrial sampled refusal red, support
-        // sampled the heatmap amber. Exactly the drift kGroundSwatches was
-        // introduced to stop, still live at this one call site.
-        final u = (p.kind + 0.5) / kGroundSwatches;
-        uv = [(u, 0.5), (u, 0.5), (u, 0.5), (u, 0.5)];
-      }
-      final idx = [
-        for (var k = 0; k < 4; k++)
-          m.vertex(_scenePos(c[k]), up, uv[k].$1, uv[k].$2)
-      ];
-      m.quad(idx[0], idx[1], idx[2], idx[3]);
-    }
-  }
-
-  /// Fences and shop signs, car parks and their cars, into a tile's job.
-  ///
-  /// What a lot is zoned decides what stands on its boundary: a picket fence
-  /// round a house, chain link round a works, a lit board over a shopfront.
-  /// Derived from the building's own type, which already encodes both kind and
-  /// density, so nothing new crosses the wire.
-  ///
-  /// Tiered by the building's OWN LOD, the same way the building is: a lot the
-  /// camera resolves as a block silhouette gets no furniture at all, an
-  /// exterior-tier lot gets the coarse fence, and only a full-tier lot pays
-  /// for pickets. Fences were being emitted per picket for every lot in the
-  /// colony — 774 ms of a 780 ms rebuild spent on geometry that, from the
-  /// studio's framing distance, was entirely sub-pixel.
-  void _emitLotFeatures(List<BuildingSnapshot> buildings, _TileJob job,
-      Vector3 focusBF, BuildingDetail colonyTier) {
-    final solid = job.featureSolid;
-    final glow = job.featureGlow;
-    final apron = job.featureApron;
-    final cars = job.featureCars;
-    final anchorBF = job.anchorBF;
-
-    for (final b in buildings) {
-      final tier = detailFor(b, focusBF, colonyTier);
-      if (tier == BuildingDetail.block) continue;
-      final edging = LotFeatures.edgingFor(b.type);
-      final sign = LotFeatures.signFor(b.type);
-      final spec = specOf(b);
-      final parcel = parcelOf(b);
-      // The massing the building was DRAWN from — the library's cached one,
-      // canonical lot and variant and all — so the lot the paint goes on and
-      // the door the path runs to are the ones in the mesh.
-      final built =
-          _libraryFor(tier).get(spec, parcel, seed: b.id.hashCode, detail: tier);
-      final massing = built.massing;
-      final lot = massing.parking;
-      if (edging == LotEdging.none && !sign && lot == null) continue;
-
-      final at = Vector3(b.px, b.py, b.pz) - anchorBF;
-      final up = (at + anchorBF).normalized;
-      // The building's own frame: its orientation carries the surface basis
-      // plus the spin onto its street, so +X runs along the street and +Y
-      // from the street into the lot.
-      final q = Quaternion(b.qw, b.qx, b.qy, b.qz);
-      final along = q.rotate(Vector3.unitY).normalized;
-      final sideAxis = q.rotate(Vector3.unitX).normalized;
-
-      // Out to the LOT LINE, not the building's own edge: the footprint has
-      // already been inset by its setback and shrunk by its coverage, and a
-      // fence hugging the walls would enclose no garden at all.
-      final back = lotSetbackFor(spec);
-      final cover = lotCoverageFor(spec);
-      final halfW = b.siteWidthM / cover / 2 + back;
-      final halfD = b.siteDepthM / cover / 2 + back;
-
-      if (edging != LotEdging.none) {
-        LotFeatures.emitFence(solid, edging, at, along, up, halfW, halfD,
-            coarse: tier != BuildingDetail.full);
-      }
-      if (sign) {
-        LotFeatures.emitSign(solid, glow, at, along, up, halfW, halfD,
-            math.max(1.0, b.siteWidthM / 18));
-      }
-      if (lot != null && job.carBudget > 0) {
-        // Occupancy has no field on the wire yet, so it is DERIVED: a
-        // deterministic per-lot fraction, so a district reads as busy or quiet
-        // and two clients agree, without pretending to know the real number.
-        final h = (b.id.hashCode & 0x7FFFFFFF) % 1000 / 1000.0;
-        // The parcel's REAL lot lines, in the frame the massing was placed
-        // in — its centroid, the street at negative Y. [halfD] is the lot
-        // line the fence stands on: the site plus the coverage and setback
-        // the density rule took off it, which is where the sidewalk begins.
-        final depth = halfD * 2;
-        // The back wall: the rear of the deepest floored volume.
-        var rearWall = double.negativeInfinity;
-        for (final v in massing.volumes) {
-          if (v.floors > 0) rearWall = math.max(rearWall, v.y + v.depth / 2);
-        }
-        job.carBudget -= LotFeatures.emitLot(
-          apron, cars, glow, at, sideAxis, along, up, lot, massing.entrance,
-          frontLineY: -depth / 2,
-          rearLineY: depth / 2,
-          // Where the lot IS, not where the style says it goes: an
-          // installation's lot is out front whatever the kit.
-          behind: lot.y > massing.entrance.$2,
-          rearDoorY: rearWall.isFinite ? rearWall : lot.y - lot.depth / 2,
-          occupancy: 0.25 + h * 0.6,
-          airless: sealedWorld,
-          maxCars: math.min(12, job.carBudget),
-          detailed: tier == BuildingDetail.full,
-        );
-      }
-    }
-  }
-
-  /// One road into a tile's builders, at the tile's tier.
-  ///
-  /// Far: the carriageway as a bare ribbon, the railway as track, the
-  /// viaduct as structure. Mid: lanes painted, turning circles. Near: the
-  /// pavements with their curbs, the lamps, the furniture, the tube on a
-  /// sealed world, the cars at the curb.
-  void _emitRoad(_RoadBuilders rb, RoadSnapshot road, CityTier tier,
-      Vector3 anchorBF, _BodyRoot root) {
-    final pts = <Vector3>[];
-    for (var i = 0; i + 2 < road.points.length; i += 3) {
-      pts.add(Vector3(
-        road.points[i] - anchorBF.x,
-        road.points[i + 1] - anchorBF.y,
-        road.points[i + 2] - anchorBF.z,
-      ));
-    }
-    if (pts.length < 2) return;
-    final cls = RoadClass
-        .values[road.roadClassIndex.clamp(0, RoadClass.values.length - 1)];
-    final paved = cls.paved;
-    final near = tier == CityTier.near;
-    final paint = tier != CityTier.far;
-
-    if (cls.isElevated) {
-      // No ground ribbon, no curb, no junction furniture: there is nothing
-      // at ground level here but the columns. Drawing the ribbon anyway
-      // painted a road stripe along the floor under the viaduct, which read
-      // as the structure having fallen down.
-      ElevatedStructure.emit(
-        rb.airSolid,
-        rb.airDeck,
-        rb.airGlow,
-        pts: pts,
-        anchorBF: anchorBF,
-        cls: cls,
-        halfWidthM: road.halfWidthM,
-      );
-      if (cls == RoadClass.transit) {
-        // Terminals at the free ends of the L: the line is split at every
-        // street it crosses, so an end is free only when no other piece of
-        // line ends on it — anywhere on the body, not just in this tile.
-        for (final (at, next) in [(pts.first, pts[1]), (pts.last, pts[pts.length - 2])]) {
-          final atBF = at + anchorBF;
-          var free = true;
-          for (final other in root.transitEnds) {
-            if (!identical(other, atBF) && (other - atBF).length < 8.0 &&
-                (other - atBF).length > 1e-6) {
-              free = false;
-              break;
-            }
-          }
-          // The end's own entry is in the list too; a second entry within
-          // 8 m that is not it means another piece ends here.
-          var self = 0;
-          for (final other in root.transitEnds) {
-            if ((other - atBF).length < 8.0) self++;
-          }
-          if (self > 1) free = false;
-          if (!free) continue;
-          final inward = next - at;
-          if (inward.length < 1e-6) continue;
-          ElevatedStructure.emitTerminal(rb.airSolid, rb.airGlow,
-              at: at,
-              inward: inward.normalized,
-              anchorBF: anchorBF,
-              halfWidthM: road.halfWidthM);
-        }
-      }
-      return;
-    }
-
-    if (cls == RoadClass.rail) {
-      // Track, not tarmac: no ribbon, no pavement, no furniture, no
-      // junction plates — a level crossing is the road's business.
-      Railway.emit(rb.railBallast, rb.railConcrete, rb.railSteel,
-          pts: pts, anchorBF: anchorBF, halfWidthM: road.halfWidthM);
-      return;
-    }
-
-    if (cls == RoadClass.alley) {
-      RoadMesher.ribbon(rb.alleyRibbon, pts, anchorBF, road.halfWidthM);
-    } else if (!paved) {
-      RoadMesher.ribbon(rb.dirtRibbon, pts, anchorBF, road.halfWidthM);
-    } else {
-      // The carriageway with its lanes painted on — the same pipeline the
-      // whole city draws through, downtown and county line alike — lifted
-      // onto its bridges and tapered into what it meets.
-      final ranges = <(double, double)>[
-        for (var i = 0; i + 1 < road.bridges.length; i += 2)
-          (road.bridges[i], road.bridges[i + 1]),
-      ];
-      final liftAt = ranges.isEmpty
-          ? null
-          : (double s) => RoadMesher.bridgeLiftAt(s, ranges);
-      RoadMesher.carriageway(rb.ribbon, pts, anchorBF, cls,
-          halfWidthM: road.halfWidthM,
-          startHalfWidthM: road.startHalfWidthM,
-          endHalfWidthM: road.endHalfWidthM,
-          liftAt: liftAt,
-          paint: paint,
-          solid: near ? rb.propSolid : null);
-      if (liftAt != null) {
-        RoadMesher.piers(rb.propSolid, pts, anchorBF, road.halfWidthM, liftAt);
-      }
-      if (road.soundWalls && cls.canHaveSoundWalls && paint) {
-        RoadMesher.soundWalls(rb.propSolid, pts, anchorBF, road.halfWidthM,
-            startHalfWidthM: road.startHalfWidthM,
-            endHalfWidthM: road.endHalfWidthM,
-            liftAt: liftAt,
-            posts: near);
-      }
-    }
-    // A street that ends where nothing else does ends in a turning
-    // circle: a subdivision's cul-de-sac, or the edge of town.
-    if (paint && cls == RoadClass.street) {
-      for (final end in [pts.first, pts.last]) {
-        final e = root.endHalf[_endKey(end + anchorBF)];
-        if (e != null && e.$2 > 1) continue;
-        RoadMesher.culDeSac(rb.ribbon, end, anchorBF, 11.0);
-      }
-    }
-    if (!near) return;
-
-    // How far a sidewalk stops before an end: past the junction plate
-    // (r = widest * 1.45) and its zebra (5 m past the bar). Zero at an end
-    // nothing else meets.
-    double pullAt(Vector3 endPt) {
-      final e = root.endHalf[_endKey(endPt + anchorBF)];
-      return e == null || e.$2 <= 1 ? 0.0 : e.$1 * 1.45 + 5.5;
-    }
-
-    // Raised pavements with a curb face, on anything that has a pavement
-    // to raise. Not on a sealed world — pedestrians there travel in the
-    // tube, and an open sidewalk in vacuum is set dressing for nobody.
-    final walked = paved && cls.hasPavement && !road.sealed;
-    if (walked) {
-      RoadMesher.sidewalks(rb.walkRibbon, pts, road.halfWidthM, 3.0, anchorBF,
-          pullStart: pullAt(pts.first), pullEnd: pullAt(pts.last));
-    }
-    // Nobody lights a dirt track, and nobody lights an alley either.
-    if (paved && cls.hasPavement) {
-      RoadMesher.lamps(rb.lampSolid, rb.lampGlow, pts, anchorBF,
-          road.halfWidthM, cls,
-          liftM: walked ? _walkTopLiftM : 0.0);
-    }
-    if (rb.propBudget > 0) {
-      rb.propBudget -= StreetFurniture.emit(
-        rb.propSolid,
-        rb.propGlow,
-        pts: pts,
-        anchorBF: anchorBF,
-        cls: cls,
-        halfWidthM: road.halfWidthM,
-        pavementM: 3.0,
-        // Furniture stands on the raised walk now, not on the bare drape.
-        liftM: walked ? _walkTopLiftM : 0.0,
-        // A RoadSnapshot carries no id — it is pure geometry on the wire —
-        // so the seed comes from the geometry itself. Stable frame to frame
-        // for a road that has not been redrawn, which is what keeps the
-        // furniture from jittering about the pavement.
-        seed: Object.hash(road.points.first, road.points[1],
-            road.points.length, road.roadClassIndex),
-        budget: rb.propBudget,
-        treesOut: rb.treePits,
-        shrubsOut: rb.shrubPits,
-      );
-    }
-    // Vacuum outside: pedestrians travel in a pressurised tube, not on a
-    // pavement. The glazing builder already exists for dome caps.
-    if (paved && cls.hasPavement && onStreetParking && rb.curbCars > 0) {
-      rb.curbCars -= _curbParkingFor(rb.curbSolid, rb.curbGlass, pts, road,
-          anchorBF,
-          budget: rb.curbCars);
-    }
-    if (road.sealed) {
-      PedestrianTube.emit(rb.tubeSolid, rb.tubeGlass,
-          pts: pts, halfWidthM: road.halfWidthM, anchorBF: anchorBF);
-    }
-  }
-
-  /// The junctions whose crossings lie in the tile, from every road end
-  /// that falls there — whichever tile the road itself belongs to.
-  ///
-  /// This step finds them; the meshing goes in runs, as steps pushed to
-  /// run next (the steps pop from the end). A downtown tile's crossings
-  /// with all their masts and zebras were one indivisible step, and the
-  /// most a frame could overshoot by.
-  void _emitJunctions(_TileJob job, _Tile t, double epoch, _BodyRoot root) {
-    if (job.tier == CityTier.far || t.ends.isEmpty) return;
-    final ends = <RoadEnd>[
-      for (final e in t.ends)
-        RoadEnd(e.at - job.anchorBF, e.next - job.anchorBF, e.halfWidthM,
-            e.roadClass,
-            paved: e.paved, collector: e.collector),
-    ];
-    final junctions = RoadMesher.junctionsFromEnds(ends);
-    final furniture = job.tier == CityTier.near;
-    const perStep = 40;
-    for (var end = junctions.length; end > 0; end -= perStep) {
-      final from = math.max(0, end - perStep), to = end;
-      job.steps.add(_BuildStep(_StepKind.junctions, () {
-        // Signal phase comes from sim time: deterministic, stateless, and
-        // the same on every client looking at the same tick.
-        RoadMesher.junctions(job.roads.ribbon, job.roads.lampSolid,
-            job.roads.lampGlow, junctions.sublist(from, to), job.anchorBF,
-            epoch,
-            furniture: furniture);
-      }));
-    }
-  }
-
   /// Height a street tree is grown at. Real pollarded street stock runs
   /// 7-10 m; the wild broadleaf default is taller.
   static double streetTreeHeightM = 8.0;
@@ -2397,11 +2048,13 @@ class CityNodes {
   /// Street planting as INSTANCES of the scatter system's props — the same
   /// generators, LODs, bark and foliage atlas the wild ones use, so a street
   /// tree and a forest tree agree about what a tree is. Planted off the road
-  /// polylines, static while a colony grows.
+  /// polylines, static while a colony grows. [pits] are the mesher's packed
+  /// pits (see [CityTileResult.treePits]): four doubles each, the pit
+  /// relative to the tile's anchor and its yaw.
   void _emitStreetFlora(
     PropKind kind,
     double sizeM,
-    List<(Vector3, double)> pits,
+    Float64List pits,
     _TileJob job,
   ) {
     final anchorBF = job.anchorBF;
@@ -2425,7 +2078,9 @@ class CityNodes {
     // [floraCastsShadow]).
     final casts = floraCastsShadow(job.tier, kind);
     final byVariant = <int, List<vm.Matrix4>>{};
-    for (final (at, yaw) in pits) {
+    for (var i = 0; i + 3 < pits.length; i += 4) {
+      final at = Vector3(pits[i], pits[i + 1], pits[i + 2]);
+      final yaw = pits[i + 3];
       // The pit is relative to the tile's anchor; the surface normal is
       // through the body-fixed point.
       final up = (at + anchorBF).normalized;
@@ -2468,50 +2123,6 @@ class CityNodes {
             kind);
       }
     });
-  }
-
-  /// Cars parked at the curb, nose to tail.
-  ///
-  /// Static, unlike the road traffic: these are part of the street's furniture
-  /// rather than something moving through it, so they are built with the road
-  /// mesh and not rebuilt every frame. Spacing leaves a real gap between
-  /// bumpers — a solid line of touching cars reads as a wall.
-  ///
-  /// Returns how many it placed, so the caller can hold a budget.
-  static int _curbParkingFor(
-    MeshBuilder body,
-    MeshBuilder glass,
-    List<Vector3> pts,
-    RoadSnapshot road,
-    Vector3 anchorBF, {
-    required int budget,
-  }) {
-    const spacing = 7.4; // a car plus the room to get out of the bay
-    var travelled = 0.0;
-    var next = spacing;
-    var placed = 0;
-    final family =
-        road.sealed ? VehicleKind.airless : VehicleKind.road;
-    for (var i = 1; i < pts.length && placed < budget; i++) {
-      travelled += (pts[i] - pts[i - 1]).length;
-      if (travelled < next) continue;
-      next += spacing;
-      final p = pts[i];
-      final up = (p + anchorBF).normalized;
-      final along = (pts[i] - pts[i - 1]).normalized;
-      final side = along.cross(up).normalized;
-      // Alternate curbs, so both sides of the street fill.
-      final s = placed.isEven ? 1.0 : -1.0;
-      final h = (i * 2654435761) & 0x7FFFFFFF;
-      final kind = family[h % family.length];
-      // Nothing long parks at a curb bay.
-      if (kind.lengthM > spacing * 0.85) continue;
-      VehicleMeshes.emit(body, glass, kind,
-          p + side * (road.halfWidthM * s * 0.78), along, up,
-          u: (h >> 16 & 0xFF) / 255.0);
-      placed++;
-    }
-    return placed;
   }
 
   /// Which bodies moved against the floating origin since the last frame.
@@ -2568,40 +2179,14 @@ class CityNodes {
     }
   }
 
-  /// Reconstruct enough of a spec for the massing rules from the wire fields.
-  ///
-  /// Only the geometry-relevant parts are needed — the economy never runs on
-  /// the client — so this is deliberately a shell rather than a catalogue
-  /// lookup, which would break the moment a server ran a modded catalogue.
-  /// Static and snapshot-explicit so the wire-to-geometry mapping is testable
-  /// without a live scene — the same arrangement `ScatterNodes` uses for its
-  /// frame maths.
-  static CityBuildingSpec specOf(BuildingSnapshot b) => CityBuildingSpec(
-        type: b.type,
-        label: b.type,
-        colorArgb: b.colorArgb,
-        group: _groupFor(b),
-        siteWidthM: b.siteWidthM,
-        siteDepthM: b.siteDepthM,
-        siteKind: SiteKind.values[
-            b.siteKindIndex.clamp(0, SiteKind.values.length - 1)],
-        // Massing needs SOMETHING to size floor area from. Site area is the
-        // honest proxy available on the wire: a big site implies a big
-        // programme, which is what the rules would have derived anyway.
-        jobs: (b.siteWidthM * b.siteDepthM / 90).round().clamp(0, 4000),
-      );
-
-  static String _groupFor(BuildingSnapshot b) => switch (b.type) {
-        'r-low' || 'r-med' || 'r-high' => 'res',
-        'c-low' || 'c-med' || 'c-high' => 'com',
-        'i-low' || 'i-med' || 'i-high' => 'ind',
-        _ => 'svc',
-      };
+  /// Reconstruct enough of a spec for the massing rules from the wire fields
+  /// (see [CityTileMesher.specOf], where the mapping lives with the meshing
+  /// that reads it).
+  static CityBuildingSpec specOf(BuildingSnapshot b) => CityTileMesher.specOf(b);
 
   /// Detail tier for a building [d] metres from the camera.
-  static BuildingDetail tierForDistance(double d) => d > blockRangeM
-      ? BuildingDetail.block
-      : (d > interiorRangeM ? BuildingDetail.exterior : BuildingDetail.full);
+  static BuildingDetail tierForDistance(double d) => CityTileMesher
+      .tierForDistance(d, blockRangeM: blockRangeM, interiorRangeM: interiorRangeM);
 
   /// The camera, expressed in a body's own rotating frame.
   ///
@@ -2653,68 +2238,19 @@ class CityNodes {
     return (swatch + 0.5) / kGroundSwatches;
   }
 
-  /// The lot a building stands on, in its own frontage-aligned frame.
-  static Parcel parcelOf(BuildingSnapshot b) {
-    // Inflated by the massing's OWN setback, because it will inset whatever it
-    // is handed — and what it is handed here is already the finished footprint,
-    // not a lot.
-    //
-    // Applied twice, the two setbacks ate the small buildings alive: a
-    // low-density house arrives at 11.6 m wide, loses 6 m to the second inset
-    // and another 30% to coverage, and renders about four metres across. All
-    // of residential simply vanished from the city while the towers, which had
-    // metres to spare, looked fine.
-    //
-    // The amount comes from the ACTIVE STYLE, and it must: a street wall insets
-    // by nothing, so inflating by a hard-coded 3 m would hand it a lot 6 m
-    // wider than its site and push every frontage out over the pavement and
-    // into its neighbour. Front and rear are added separately because a street
-    // wall's setbacks are deliberately asymmetric.
-    final w = b.siteWidthM + style.sideSetbackM * 2;
-    final d = b.siteDepthM + style.frontSetbackM + style.rearSetbackM;
-    return Parcel(
-      id: b.id,
-      polygon: [
-        Vec2(-w / 2, 0),
-        Vec2(w / 2, 0),
-        Vec2(w / 2, d),
-        Vec2(-w / 2, d),
-      ],
-      frontage: (Vec2(-w / 2, 0), Vec2(w / 2, 0)),
-      // Which side the cross street is on is not on the frame — only THAT
-      // there is one. +X by convention, and it does not matter: the generator
-      // mirrors the treatment onto whichever flank the variant picks, and a
-      // corner reads as a corner either way round.
-      sideStreet:
-          b.corner ? (Vec2(w / 2, 0), Vec2(w / 2, d)) : null,
-    );
-  }
+  /// The lot a building stands on, in its own frontage-aligned frame, under
+  /// the active [style] (see [CityTileMesher.parcelOf]).
+  static Parcel parcelOf(BuildingSnapshot b) =>
+      CityTileMesher.parcelOf(b, style);
 
-  /// Model transform for one building.
-  ///
-  /// The snapshot's orientation already carries the surface basis (local +X
-  /// east, +Y north, +Z radial up), and generated buildings are authored Z-up
-  /// with their origin at the base — so the two compose directly, and a
-  /// building lands standing on its pad rather than buried or lying down.
-  static vm.Matrix4 instanceTransform(Vector3 anchorBF, BuildingSnapshot b) {
-    final offset = Vector3(b.px, b.py, b.pz) - anchorBF;
-    final surface = Quaternion(b.qw, b.qx, b.qy, b.qz);
-    return vm.Matrix4.compose(
-      vm.Vector3(lengthToScene(offset.x), lengthToScene(offset.y),
-          lengthToScene(offset.z)),
-      quatToScene(surface),
-      vm.Vector3.all(lengthToScene(1.0)),
-    );
-  }
+  /// Model transform for one building (see
+  /// [CityTileMesher.instanceTransform]).
+  static vm.Matrix4 instanceTransform(Vector3 anchorBF, BuildingSnapshot b) =>
+      CityTileMesher.instanceTransform(anchorBF, b);
 
-  /// Metres -> scene units.
-  ///
-  /// The scene renders in kilometres. Building INSTANCES get this through
-  /// their transform's scale, but the patch, road, lamp and cursor meshes bake
-  /// their vertices directly and carry an unscaled node transform — so without
-  /// this they came out a thousand times life size, which is a colony wider
-  /// than the moon it stands on.
-  static Vector3 _scenePos(Vector3 metres) => metres * kRenderScale;
+  /// Metres -> scene units (see [CityTileMesher.scenePos]); the cursor
+  /// bakes its vertices directly, as the tile meshes do.
+  static Vector3 _scenePos(Vector3 metres) => CityTileMesher.scenePos(metres);
 
   /// Upload a built mesh, for callers outside this class (the studio's scale
   /// reference builds its own geometry and needs the same path).
@@ -2753,8 +2289,9 @@ class CityNodes {
   void dispose() {
     _clear();
     _uploaded.clear();
-    _library.clear();
-    _libraryCoarse.clear();
+    _libraries.clear();
+    _scheduler.dispose();
+    _pending.clear();
     if (debugLine.isNotEmpty) debugPrint('cityNodes disposed');
   }
 }
@@ -2796,17 +2333,6 @@ class _BodyRoot {
   final List<Vector3> transitEnds = [];
 }
 
-/// A road end that falls in a tile: where, the point just inside it, and
-/// what the road is. Body-fixed; the junction pass anchors it.
-class _TileEnd {
-  const _TileEnd(this.at, this.next, this.halfWidthM, this.roadClass,
-      this.paved, this.collector);
-  final Vector3 at, next;
-  final double halfWidthM;
-  final RoadClass roadClass;
-  final bool paved, collector;
-}
-
 /// Everything of one colony within one cell of the body's frame.
 class _Tile {
   _Tile(this.key, this.bodyId, this.centreBF, this.halfDiagonalM);
@@ -2819,7 +2345,7 @@ class _Tile {
   final List<BuildingSnapshot> buildings = [];
   final List<RoadSnapshot> roads = [];
   final List<CityPatchSnapshot> patches = [];
-  final List<_TileEnd> ends = [];
+  final List<CityTileEnd> ends = [];
 
   /// Body-centre distance of the outermost building centre in the tile
   /// (0 with no buildings): the shell the camera's altitude is measured
@@ -2866,65 +2392,33 @@ class _Tile {
   _TileJob? job;
 }
 
-/// The road pass's builders for one tile, and its budgets.
-class _RoadBuilders {
-  final MeshBuilder ribbon = MeshBuilder();
-  final MeshBuilder dirtRibbon = MeshBuilder();
-  final MeshBuilder alleyRibbon = MeshBuilder();
-  // Everything in the air: steel, concrete, and the deck it carries.
-  final MeshBuilder airSolid = MeshBuilder();
-  final MeshBuilder airDeck = MeshBuilder();
-  final MeshBuilder airGlow = MeshBuilder();
-  // Pavement clutter, budgeted per tile — a city of ten thousand hydrants
-  // is a city nobody can draw.
-  final MeshBuilder propSolid = MeshBuilder();
-  final MeshBuilder propGlow = MeshBuilder();
-  int propBudget = 2600;
-  // Street-tree pits and planter soil lines, collected here and drawn as
-  // INSTANCES of the scatter system's props — the same generators,
-  // materials and atlas the wild ones use, so a street tree and a forest
-  // tree agree about what a tree is. Airless worlds plant nothing.
-  final List<(Vector3, double)> treePits = [];
-  final List<(Vector3, double)> shrubPits = [];
-  final MeshBuilder tubeSolid = MeshBuilder();
-  final MeshBuilder tubeGlass = MeshBuilder();
-  final MeshBuilder curbSolid = MeshBuilder();
-  final MeshBuilder curbGlass = MeshBuilder();
-  int curbCars = 240;
-  final MeshBuilder lampSolid = MeshBuilder();
-  final MeshBuilder lampGlow = MeshBuilder();
-  final MeshBuilder walkRibbon = MeshBuilder();
-  // The railway: ballast, sleepers, rails.
-  final MeshBuilder railBallast = MeshBuilder();
-  final MeshBuilder railConcrete = MeshBuilder();
-  final MeshBuilder railSteel = MeshBuilder();
-}
-
-/// The kinds of step a tile build is made of. The build loop books the
-/// last cost of each kind and will not start one that would not fit the
-/// frame's remaining budget (see [CityNodes.update]).
+/// The kinds of UI-thread step a tile build is made of — the upload. The
+/// build loop books the last cost of each kind and will not start one
+/// that would not fit the frame's remaining budget (see [CityNodes.update]);
+/// a [mesh] step is judged by its bytes instead. The meshing's own steps
+/// are the scheduler's (see [CityMeshStepKind]).
 enum _StepKind {
-  roads,
-  junctions,
-  buildings,
-  patches,
-  lots,
-  // The upload: one material's builders and skyline into geometry, a run
-  // of archetype groups, the planting, and the one swap into the scene.
+  // One merged group into geometry.
   mesh,
+  // A run of archetype groups.
   instances,
+  // The planting.
   flora,
+  // The one swap into the scene.
   swap,
 }
 
-/// One part of a tile build.
+/// One part of a tile's upload. [bytes] is what a [_StepKind.mesh] step
+/// moves to the GPU, for the byte-rate gate; zero for the rest.
 class _BuildStep {
-  const _BuildStep(this.kind, this.run);
+  const _BuildStep(this.kind, this.run, {this.bytes = 0});
   final _StepKind kind;
   final void Function() run;
+  final int bytes;
 }
 
-/// A tile build in progress: its builders, and the parts still to run.
+/// A tile build in progress: the key it answers, the result once the
+/// scheduler has one, and the upload steps still to run.
 class _TileJob {
   _TileJob(this.key, this.tier, this.anchorBF, Vector3 rootAnchorBF)
       : local = vm.Matrix4.translation(vm.Vector3(
@@ -2938,14 +2432,19 @@ class _TileJob {
   /// The tile's place under its body's root, fixed for the job's life.
   final vm.Matrix4 local;
 
-  /// The parts of the build, run one per call from the end. A running
-  /// step may push more onto the end, and they run next.
+  /// The meshing's answer, once it has landed; null while the job is on
+  /// the scheduler. Set once.
+  CityTileResult? result;
+
+  /// The upload's parts, run one per call from the end, planned when
+  /// [result] lands (see [CityNodes._addUploadSteps]).
   final List<_BuildStep> steps = [];
 
   /// Nodes built and placed but not yet in the scene: the swap step adds
   /// them all in one frame.
   final List<fs.Node> staged = [];
   int skylineTris = 0;
+  Map<BuildingDetail, int> lodCounts = const {};
 
   void stage(fs.Node node) {
     node.localTransform = local;
@@ -2960,26 +2459,5 @@ class _TileJob {
     stage(node);
     flora.add((node, kind));
   }
-
-  final _RoadBuilders roads = _RoadBuilders();
-  final MeshBuilder patches = MeshBuilder();
-  final MeshBuilder featureSolid = MeshBuilder();
-  final MeshBuilder featureGlow = MeshBuilder();
-  final MeshBuilder featureApron = MeshBuilder();
-  final MeshBuilder featureCars = MeshBuilder();
-  int carBudget = CityNodes._maxParkedCars;
-  /// One merged sink per material: the skyline's block-tier buildings and
-  /// every builder of that material, one geometry and one draw each (see
-  /// [CityNodes.uploadGroups]).
-  final Map<CityMaterialKind, MergedMeshSink> _sinks = {};
-
-  MergedMeshSink sinkFor(CityMaterialKind kind) =>
-      _sinks.putIfAbsent(kind, () => MergedMeshSink());
-
-  /// The skyline: block-tier buildings baked straight into the facade and
-  /// glazing sinks rather than instanced per archetype — see [_emitBuilding].
-  MergedMeshSink get skylineSolid => sinkFor(CityMaterialKind.facade);
-  MergedMeshSink get skylineGlazing => sinkFor(CityMaterialKind.glazing);
-  final Map<BuildingArchetype, List<vm.Matrix4>> groups = {};
-  final Map<BuildingDetail, int> lodCounts = {};
 }
+
