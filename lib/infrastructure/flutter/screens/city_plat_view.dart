@@ -257,6 +257,10 @@ class _PlatBlock {
   /// The block's square in the drawing plane, metres.
   final Rect bounds;
   final PlatTriangles boxes = PlatTriangles();
+
+  /// The district-scale road classes (avenues, arterials, collectors)
+  /// cut to this block, a path per class.
+  final Map<RoadClass, Path> roads = {};
   ui.Vertices? _v;
 
   /// The image's side in pixels: 7.8 m a texel on a 2 km block, under a
@@ -334,9 +338,13 @@ class _PlatCache {
     imagesReady.dispose();
   }
 
-  /// The road classes that show at district scale and above, as one path
-  /// each for the whole colony: a few thousand roads at most, and on
-  /// screen nearly whole whenever they show at all.
+  /// The road classes that show at county scale — highways, expressways,
+  /// rail — as one path each for the whole colony: a few dozen roads, and
+  /// on screen nearly whole whenever the county is. Every other class is
+  /// cut to the blocks and the cells: the first cut kept avenues,
+  /// arterials and collectors whole too, and stroking those few thousand
+  /// roads every frame was an eleven-millisecond floor under every plat
+  /// scale, whatever else was turned off.
   final Map<RoadClass, Path> majorRoads = {};
 
   /// Hand-placed plots (installations, stations, farms): arbitrary
@@ -348,12 +356,36 @@ class _PlatCache {
 
   Box2 bounds = const Box2(-2000, -2000, 2000, 2000);
 
-  /// Whether a class is drawn from [majorRoads] (whole) or the cells.
-  static bool _major(RoadClass cls) => switch (cls.name) {
+  /// Whether a class is drawn whole from [majorRoads] (the county's).
+  static bool _county(RoadClass cls) => switch (cls.name) {
         'highway' || 'rail' || 'expressway' => true,
+        _ => false,
+      };
+
+  /// Whether a class shows at district scale, and so is cut to the
+  /// blocks as well as the cells.
+  static bool _district(RoadClass cls) => switch (cls.name) {
         'avenue' || 'arterial' || 'collector' => true,
         _ => false,
       };
+
+  static void _polyline(Path path, List<Vec2> run) {
+    path.moveTo(run[0].e, run[0].n);
+    for (var i = 1; i < run.length; i++) {
+      path.lineTo(run[i].e, run[i].n);
+    }
+  }
+
+  /// The block for a grid key, made on first touch with the square the
+  /// key names. By key, not by a point: a road run's first point is the
+  /// crossing point that belongs to the cell before it.
+  _PlatBlock _blockForKey(int key) => blockMap.putIfAbsent(key, () {
+        final (ie, iy) = PlatGrid.indices(key);
+        return _PlatBlock(
+            Rect.fromLTWH(ie * blockM, iy * blockM, blockM, blockM));
+      });
+
+  _PlatBlock _blockAt(double e, double y) => _blockForKey(blocks.keyOf(e, y));
 
   static _PlatCache of(CitySim sim) {
     final c = _PlatCache._(sim);
@@ -373,26 +405,22 @@ class _PlatCache {
       for (final p in pts) {
         grow(p.e, p.n);
       }
-      if (_major(r.roadClass)) {
-        final path = c.majorRoads.putIfAbsent(r.roadClass, Path.new);
-        path.moveTo(pts[0].e, -pts[0].n);
-        for (var i = 1; i < pts.length; i++) {
-          path.lineTo(pts[i].e, -pts[i].n);
-        }
-        if (r.closed) path.close();
-        continue;
-      }
-      // Local streets, cut per cell in the drawing plane (y = -north); a
-      // closed loop is closed by hand so the cut sees its last edge.
+      // In the drawing plane (y = -north); a closed loop is closed by
+      // hand so the cuts see its last edge.
       final plane = [for (final p in pts) Vec2(p.e, -p.n)];
       if (r.closed) plane.add(plane.first);
+      if (_county(r.roadClass)) {
+        _polyline(c.majorRoads.putIfAbsent(r.roadClass, Path.new), plane);
+      } else if (_district(r.roadClass)) {
+        for (final (key, run) in blocks.splitPolyline(plane)) {
+          final block = c._blockForKey(key);
+          _polyline(block.roads.putIfAbsent(r.roadClass, Path.new), run);
+        }
+      }
+      // Every class at street scale, cut per cell.
       for (final (key, run) in grid.splitPolyline(plane)) {
         final cell = c.cells.putIfAbsent(key, _PlatCell.new);
-        final path = cell.streets.putIfAbsent(r.roadClass, Path.new);
-        path.moveTo(run[0].e, run[0].n);
-        for (var i = 1; i < run.length; i++) {
-          path.lineTo(run[i].e, run[i].n);
-        }
+        _polyline(cell.streets.putIfAbsent(r.roadClass, Path.new), run);
       }
     }
     for (final lot in sim.layout.parcels) {
@@ -427,10 +455,7 @@ class _PlatCache {
       outline.close();
       // District scale: one box per lot in its 2 km block; far cheaper
       // than the polygon and it reads the same at a few pixels.
-      final block = c.blockMap.putIfAbsent(blocks.keyOf(cE, cY), () {
-        final ie = blocks.indexOf(cE), iy = blocks.indexOf(cY);
-        return _PlatBlock(Rect.fromLTWH(ie * blockM, iy * blockM, blockM, blockM));
-      });
+      final block = c._blockAt(cE, cY);
       block.boxes.addRect(b.minE, -b.maxN, b.maxE, -b.minN,
           colour.withValues(alpha: 0.55).toARGB32());
     }
@@ -504,6 +529,9 @@ class _PlatPainter extends CustomPainter {
   /// one and the blend takes the vertices' colour alone.
   static final Paint _vertexPaint = Paint();
 
+  /// Block images started per frame at district scale.
+  static const int imagesPerFrame = 4;
+
   @override
   void paint(Canvas canvas, Size size) {
     canvas.drawRect(Offset.zero & size, Paint()..color = _bg);
@@ -545,6 +573,13 @@ class _PlatPainter extends CustomPainter {
       // the ring around it (a lot sits in the cell of its centre).
       if (lod == PlatLod.district) {
         final imagePaint = Paint()..filterQuality = FilterQuality.low;
+        final roadPaints = <RoadClass, Paint>{};
+        // Images are started a few a frame: the first district frame
+        // over a whole colony asked for eighty at once, and the burst of
+        // rasterising them read as a 200 ms frame. A block whose image is
+        // not ready draws nothing yet — its section tint is already
+        // under it — and pops in over the next few frames, as a map does.
+        var started = 0;
         for (final key in _PlatCache.blocks
             .keysIn(view.left, view.top, view.right, view.bottom)) {
           final block = c.blockMap[key];
@@ -558,12 +593,20 @@ class _PlatPainter extends CustomPainter {
                       _PlatBlock.imagePx.toDouble()),
                   block.bounds,
                   imagePaint);
-              continue;
+            } else if (started < imagesPerFrame) {
+              started++;
+              block.render((c.imagesReady as _Notifier).fire);
             }
-            block.render((c.imagesReady as _Notifier).fire);
+          } else {
+            final v = block.vertices();
+            if (v != null) {
+              canvas.drawVertices(v, BlendMode.dst, _vertexPaint);
+            }
           }
-          final v = block.vertices();
-          if (v != null) canvas.drawVertices(v, BlendMode.dst, _vertexPaint);
+          for (final e in block.roads.entries) {
+            canvas.drawPath(e.value,
+                roadPaints.putIfAbsent(e.key, () => _roadPaint(e.key, mpp)));
+          }
         }
       } else if (lod == PlatLod.street) {
         final outlines = mpp <= outlineMetresPerPx;
@@ -594,7 +637,6 @@ class _PlatPainter extends CustomPainter {
           if (!PlatLayers.streets) continue;
           for (final e in cell.streets.entries) {
             final cls = e.key;
-            if (!_roadVisible(cls, lod)) continue;
             canvas.drawPath(
                 e.value,
                 streetPaints.putIfAbsent(cls, () => _roadPaint(cls, mpp)));
@@ -611,10 +653,12 @@ class _PlatPainter extends CustomPainter {
             ..strokeWidth = 1.5 * mpp
             ..color = const Color(0xFFC79BF0));
 
-      // The major roads, whole, by class.
-      for (final e in c.majorRoads.entries) {
-        if (!_roadVisible(e.key, lod)) continue;
-        canvas.drawPath(e.value, _roadPaint(e.key, mpp));
+      // The county's roads, whole, at county and district scale; at
+      // street scale the cells carry them.
+      if (lod != PlatLod.street) {
+        for (final e in c.majorRoads.entries) {
+          canvas.drawPath(e.value, _roadPaint(e.key, mpp));
+        }
       }
     }
 
@@ -641,12 +685,6 @@ class _PlatPainter extends CustomPainter {
     ..strokeJoin = StrokeJoin.bevel
     ..strokeWidth = math.max(cls.width, _minRoadPx(cls) * mpp)
     ..color = _roadColour(cls);
-
-  static bool _roadVisible(RoadClass cls, PlatLod lod) => switch (cls.name) {
-        'highway' || 'rail' || 'expressway' => true,
-        'avenue' || 'arterial' || 'collector' => lod != PlatLod.county,
-        _ => lod == PlatLod.street,
-      };
 
   static double _minRoadPx(RoadClass cls) => switch (cls.name) {
         'highway' || 'expressway' => 2.5,

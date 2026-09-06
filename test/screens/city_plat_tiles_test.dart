@@ -22,6 +22,8 @@ void main() {
       expect(grid.keyOf(-0.1, 0), isNot(grid.keyOf(0, 0)));
       expect(grid.keyOf(-0.1, 0), grid.keyOf(-500, 0));
       expect(grid.keyOf(-1, -1), isNot(grid.keyOf(1, -1)));
+      expect(PlatGrid.indices(grid.keyOf(-1, 1200)), (-1, 2));
+      expect(PlatGrid.indices(PlatGrid.key(7, -3)), (7, -3));
     });
 
     test('a box finds every cell it overlaps, plus the margin ring', () {

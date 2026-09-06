@@ -39,6 +39,9 @@ class PlatGrid {
 
   int keyOf(double e, double y) => key(indexOf(e), indexOf(y));
 
+  /// The cell indices a key names, the inverse of [key].
+  static (int, int) indices(int k) => ((k >> 16) - _half, (k & 0xFFFF) - _half);
+
   /// Every cell key a box overlaps, plus [margin] cells around it: a lot
   /// is bucketed by its centre and may straddle a cell edge, so the ring
   /// beyond the viewport is drawn too.
