@@ -493,10 +493,21 @@ Future<void> main(List<String> args) async {
       // 600 m east over the pattern at one metre a pixel.
       return {'plat': '${fmt(t / 8 * 600)},0,1'};
     });
+    // The plat as drawn, at street and district scale, beside the run's
+    // numbers: a painter change that is faster and wrong is not a win.
+    Future<void> platShot(String suffix) async {
+      if (shot.isEmpty) return;
+      final path = shot.replaceFirst(RegExp(r'\.png$'), '_$suffix.png');
+      stdout.writeln('== plat screenshot: '
+          '${await call('ext.acro.screenshot', {'path': path})}');
+    }
+
+    await platShot('plat_street');
     await pattern('plat district pan', 8, (t) {
       // 8 km east at twelve metres a pixel: the same screens a second.
       return {'plat': '${fmt(t / 8 * 8000)},0,12'};
     });
+    await platShot('plat_district');
     await pattern('plat zoom', 8, (t) {
       // County to street, 60 down to 0.6 m/px, log-spaced so each second
       // covers the same ratio and the LOD flips land where a wheel puts
