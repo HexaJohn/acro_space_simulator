@@ -106,6 +106,51 @@ void main() {
     expect(t.takeException(), isNull);
   });
 
+  testWidgets('the dev hooks put the plat up, place its camera, and report it',
+      (t) async {
+    await t.pumpWidget(const MaterialApp(home: CityStudioScreen()));
+    await t.pump();
+
+    // The sweep's way onto the plat: 'plat' flips 2D on, and a second call
+    // must not flip it back (the studio's own toggle is a flip).
+    Map<String, Object?> plat() =>
+        (CityStudioDevHooks.status!()['plat'] as Map).cast<String, Object?>();
+    expect(plat()['view2D'], isFalse);
+    CityStudioDevHooks.setView!('plat');
+    await t.pump();
+    expect(plat()['view2D'], isTrue);
+    CityStudioDevHooks.setView!('plat');
+    await t.pump();
+    expect(plat()['view2D'], isTrue, reason: 'plat twice must stay on the plat');
+    expect(t.takeException(), isNull);
+
+    // The camera lands where it is put, each field on its own, and the
+    // status names the LOD that scale earns — the figure the sweep reads
+    // its raster average against.
+    CityStudioDevHooks.setPlatCamera!(e: 120, n: -40, metresPerPx: 1);
+    await t.pump();
+    expect(plat()['e'], 120.0);
+    expect(plat()['n'], -40.0);
+    expect(plat()['metresPerPx'], 1.0);
+    expect(plat()['lod'], 'street');
+    CityStudioDevHooks.setPlatCamera!(metresPerPx: 12);
+    await t.pump();
+    expect(plat()['e'], 120.0, reason: 'a zoom keeps the centre');
+    expect(plat()['lod'], 'district');
+    CityStudioDevHooks.setPlatCamera!(e: 600);
+    await t.pump();
+    expect(plat()['metresPerPx'], 12.0, reason: 'a pan keeps the scale');
+    expect(plat()['n'], -40.0);
+    expect(t.takeException(), isNull);
+
+    // The scene modes leave the plat first: the sweep goes back to orbit
+    // by name and expects the 3D view it started from.
+    CityStudioDevHooks.setView!('orbit');
+    await t.pump();
+    expect(plat()['view2D'], isFalse);
+    expect(t.takeException(), isNull);
+  });
+
   testWidgets('the PERF section shows one row per knob in the table',
       (t) async {
     // The rows are generated FROM PerfKnobs.all, so a knob added to the

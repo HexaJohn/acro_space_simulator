@@ -21,6 +21,9 @@
 ///   ext.acro.citystudio?walk=e,n,yaw,pitch[,eyeM]   hover the walker's eye
 ///   ext.acro.citystudio?drive=e,n,yaw[,throttle,steer,seconds]
 ///                                      put the buggy down, hold the pedals
+///   ext.acro.citystudio?view=orbit|walk|plat   the camera mode, or the 2D plat
+///   ext.acro.citystudio?plat=E,N,mpp   place the plat camera (metres, and
+///                                      metres per pixel; empty keeps a field)
 ///   ext.acro.citystudio?action=generate[&blocks=N][&voxelM=V]
 ///                                      press GENERATE remotely
 library;
@@ -137,6 +140,22 @@ Future<void> main() async {
     }
     if (params['view'] != null) {
       CityStudioDevHooks.setView?.call(params['view']!);
+      return developer.ServiceExtensionResponse.result(jsonEncode({'ok': true}));
+    }
+    if (params['plat'] != null) {
+      // plat=E,N,mpp — any of the three left empty keeps the plat camera's
+      // value, so a pan holds its scale and a zoom holds its centre.
+      final set = CityStudioDevHooks.setPlatCamera;
+      final parts = params['plat']!.split(',');
+      if (set == null || parts.length < 3) {
+        return developer.ServiceExtensionResponse.result(
+            jsonEncode({'error': 'no plat hook or bad plat=E,N,mpp'}));
+      }
+      set(
+        e: double.tryParse(parts[0]),
+        n: double.tryParse(parts[1]),
+        metresPerPx: double.tryParse(parts[2]),
+      );
       return developer.ServiceExtensionResponse.result(jsonEncode({'ok': true}));
     }
     if (params['drive'] != null) {

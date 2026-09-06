@@ -9,13 +9,16 @@
 # app. One command for "did this change cost frame time":
 #
 #   powershell -File tool/measure_city_studio.ps1 [-Tag name] [-Sprawl 20]
-#       [-Static 12] [-Sweep 16] [-Worst 33] [-OutDir build/perf]
+#       [-Static 12] [-Sweep 16] [-Worst 33] [-Plat 12] [-OutDir build/perf]
 #
 # Thresholds are milliseconds: the static UI-thread build average, the
-# warm-orbit UI build average, and the worst frame of any sweep. The UI
-# thread and not the frame, because a display pacing presentation at 60 Hz
-# reads 16.7 ms whatever the work cost. The script's exit code is the gate's.
-# See wiki/GPU-Profiling.md for what each tool reports.
+# warm-orbit UI build average, the worst frame of any sweep, and the raster
+# average of the slowest 2D plat pattern (panned at street and district
+# scale, zoomed from the county in). The UI thread and not the frame,
+# because a display pacing presentation at 60 Hz reads 16.7 ms whatever the
+# work cost; the plat's is the raster thread, because that is where a
+# canvas is painted and the UI figure never sees it. The script's exit code
+# is the gate's. See wiki/GPU-Profiling.md for what each tool reports.
 #
 # The defaults sit just over today's floor on the reference colony (static
 # ui 8.4, warm orbit ui 11.6, worst 33-67 ms past the cold orbit), so the
@@ -30,6 +33,9 @@ param(
   [double]$Static = 10,
   [double]$Sweep = 13,
   [double]$Worst = 80,
+  # The plat has read ~200 ms at street scale; 12 is the target a repainted
+  # plat is measured against, not today's floor.
+  [double]$Plat = 12,
   [string]$OutDir = "build/perf",
   # name=value[,name=value]: perf knobs set by name before the colony is
   # generated (see PerfKnobs), for an A/B without a rebuild.
@@ -58,7 +64,7 @@ Write-Output "== VM $uri"
 $shot = Join-Path (Resolve-Path $OutDir) "shot_$Tag.png"
 $knobArg = ""
 if ($Knob) { $knobArg = " --knob=$Knob" }
-cmd /c "fvm dart run tool/city_perf_ab.dart $uri --sprawl=$Sprawl --distance=1320 --elevation=0.55 --samples=8 --sweep --spikes --assert=static:$Static,sweep:$Sweep,worst:$Worst --shot=$shot$knobArg 2>&1" | Where-Object { $_ -notmatch "Running build hooks" }
+cmd /c "fvm dart run tool/city_perf_ab.dart $uri --sprawl=$Sprawl --distance=1320 --elevation=0.55 --samples=8 --sweep --spikes --assert=static:$Static,sweep:$Sweep,worst:$Worst,plat:$Plat --shot=$shot$knobArg 2>&1" | Where-Object { $_ -notmatch "Running build hooks" }
 $gate = $LASTEXITCODE
 Write-Output "==== GATE exit $gate"
 Write-Output "==== PROFILE"

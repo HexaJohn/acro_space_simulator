@@ -143,9 +143,20 @@ class CityStudioDevHooks {
       double yawRate,
       double seconds})? walkDrive;
 
-  /// Back to the orbit camera ('orbit'), or into the walker ('walk') where
-  /// it last stood — the sweep leaves the street the way it came.
+  /// Back to the orbit camera ('orbit'), into the walker ('walk') where it
+  /// last stood, or onto the 2D plat ('plat') — the sweep leaves the street
+  /// the way it came. 'orbit' and 'walk' leave the plat first if it is up,
+  /// which may finish a build the plat left pending (the ground drape).
   static void Function(String view)? setView;
+
+  /// Place the plat's camera: the centre in colony-local metres and the
+  /// scale in metres per screen pixel (which also picks the plat's LOD, see
+  /// PlatLod.forScale). Each field left null keeps its value, so a script
+  /// can pan at a fixed scale or zoom about a fixed centre. The plat is
+  /// painted on the raster thread, where the panel's ui figure cannot see
+  /// it; the status reports the camera under 'plat' next to rasterMs.
+  static void Function({double? e, double? n, double? metresPerPx})?
+      setPlatCamera;
 
   /// Steer the frame governor: switch it, or pin its shed level (a negative
   /// [forceLevel] releases the pin) — so a script can see each level's
@@ -740,6 +751,24 @@ class _CityStudioScreenState extends State<CityStudioScreen>
           _walkerEyeCache = null;
         }
       });
+      // The plat is a separate switch from the camera modes: going 3D
+      // through the ordinary toggle so a build the plat left half done
+      // (the ground cut and the drape) is finished the way the button
+      // finishes it, and going 2D only when not already there, since the
+      // toggle is a flip and a second call would put the scene back.
+      if (view == 'plat') {
+        if (!_view2D) _toggleView2D();
+      } else if (_view2D) {
+        _toggleView2D();
+      }
+    };
+    CityStudioDevHooks.setPlatCamera = ({double? e, double? n, double? metresPerPx}) {
+      if (!mounted) return;
+      setState(() {
+        if (e != null) _platCam.centreE = e;
+        if (n != null) _platCam.centreN = n;
+        if (metresPerPx != null) _platCam.metresPerPx = metresPerPx;
+      });
     };
     CityStudioDevHooks.setGovernor = ({bool? enabled, int? forceLevel}) {
       if (!mounted) return;
@@ -833,6 +862,16 @@ class _CityStudioScreenState extends State<CityStudioScreen>
           'frameBudget': _frameBudgetStatus(),
           'knobs': PerfKnobs.snapshot(),
           'rover': _roverStatus(),
+          // The plat's camera as painted, and the LOD that scale earns:
+          // the sweep pans and zooms it through the levels and reads the
+          // raster figure against these.
+          'plat': {
+            'view2D': _view2D,
+            'e': _platCam.centreE,
+            'n': _platCam.centreN,
+            'metresPerPx': _platCam.metresPerPx,
+            'lod': PlatLod.forScale(_platCam.metresPerPx).name,
+          },
           'stats': _lastStats,
           'fault': _fault == null
               ? null
@@ -852,6 +891,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     CityStudioDevHooks.drive = null;
     CityStudioDevHooks.walkDrive = null;
     CityStudioDevHooks.setView = null;
+    CityStudioDevHooks.setPlatCamera = null;
     CityStudioDevHooks.status = null;
     CityStudioDevHooks.setGovernor = null;
     // The knobs the governor scaled go back to what they were: the flight

@@ -12,19 +12,23 @@
 ///   dart run tool/city_perf_ab.dart <vm-service-uri> [--no-generate]
 ///       [--sprawl=20] [--distance=1320] [--elevation=0.55] [--samples=8]
 ///       [--shot=path.png] [--sweep] [--spikes] [--no-flips]
-///       [--assert=static:12,sweep:16,worst:33]
+///       [--assert=static:12,sweep:16,worst:33,plat:12]
 ///
 /// `--sweep` drives the camera the way a hand does: a cold orbit over
 /// tiles never built, a warm one over the same ground, an elevation nod
-/// and a zoom in and out, reporting each pattern's average frame, worst
-/// frame, deepest build queue and governor level. Pans and orbits are
-/// where the frame has dropped before (tile churn on the camera term,
-/// tier flips on the view cone, the isolate send), and a static sample
-/// never sees it. `--spikes` records the VM timeline through each pattern
-/// and names its longest frames — the send, the upload, an archetype
-/// generated cold, or a collection. `--assert` makes the run a gate: the process exits 1
-/// when the static average, the warm-orbit average or the sweep's worst
-/// frame exceeds its threshold in milliseconds.
+/// and a zoom in and out, then a walk, a run and a drive down a street,
+/// then the 2D plat panned at street and district scale and zoomed from
+/// the county in — reporting each pattern's average frame, UI and raster
+/// thread, worst frame, deepest build queue and governor level. Pans and
+/// orbits are where the frame has dropped before (tile churn on the camera
+/// term, tier flips on the view cone, the isolate send), and a static
+/// sample never sees it; the plat is painted on the raster thread, which
+/// the UI figure never sees. `--spikes` records the VM timeline through
+/// each pattern and names its longest frames — the send, the upload, an
+/// archetype generated cold, or a collection. `--assert` makes the run a
+/// gate: the process exits 1 when the static average, the warm-orbit
+/// average, the sweep's worst frame or the plat's raster average exceeds
+/// its threshold in milliseconds.
 library;
 
 import 'dart:convert';
@@ -251,6 +255,10 @@ Future<void> main(List<String> args) async {
       final acc = <String, double>{
         'frameMs': 0,
         'uiMs': 0,
+        // The raster thread alongside the UI thread: the plat is a canvas
+        // painted there, and its ~200 ms at street scale never shows in
+        // uiMs. The scene's patterns carry it too, for the encode.
+        'rasterMs': 0,
         'worstMs': 0,
         'queued': 0,
         'governor': 0,
@@ -299,6 +307,8 @@ Future<void> main(List<String> args) async {
           acc['frameMs'] =
               acc['frameMs']! + ((s['frameMs'] as num?)?.toDouble() ?? 0);
           acc['uiMs'] = acc['uiMs']! + ((s['uiMs'] as num?)?.toDouble() ?? 0);
+          acc['rasterMs'] =
+              acc['rasterMs']! + ((s['rasterMs'] as num?)?.toDouble() ?? 0);
           final worst = (s['worstMs'] as num?)?.toDouble() ?? 0;
           if (worst > acc['worstMs']!) acc['worstMs'] = worst;
           final m = RegExp(r'(\d+) queued').firstMatch('${s['cityDebug']}');
@@ -340,6 +350,7 @@ Future<void> main(List<String> args) async {
       final r = {
         'frameMs': acc['frameMs']! / n,
         'uiMs': acc['uiMs']! / n,
+        'rasterMs': acc['rasterMs']! / n,
         'worstMs': acc['worstMs']!,
         'queued': acc['queued']!,
         'governor': acc['governor']!,
@@ -348,7 +359,8 @@ Future<void> main(List<String> args) async {
         'sliceAvg': acc['sliceSum']! / n,
       };
       stdout.writeln('[sweep $label] frame ${f(r['frameMs'])}  '
-          'ui ${f(r['uiMs'])}  worst ${f(r['worstMs'])}  '
+          'ui ${f(r['uiMs'])}  raster ${f(r['rasterMs'])}  '
+          'worst ${f(r['worstMs'])}  '
           'queued max ${r['queued']!.round()}  '
           'submit max ${f(r['submitMs'])}  '
           'governor max ${r['governor']!.round()}  '
@@ -457,6 +469,38 @@ Future<void> main(List<String> args) async {
         'ext.acro.citystudio', {'distance': distance, 'elevation': elevation});
     await Future<void>.delayed(const Duration(seconds: 3));
     out['settledAfterWalk'] = await sample('settled after walk', 3);
+
+    // ---- The plat ---------------------------------------------------------
+    //
+    // The 2D view is a canvas painted on the raster thread, and at street
+    // scale it has cost ~200 ms a frame there while the UI thread read
+    // idle — a cost no scene pattern sees. Each pattern drives the plat's
+    // camera through the hook the way a hand does at one LOD: a pan at
+    // street scale (every lot outlined), a pan at district scale (avenues
+    // and block tints), and a zoom from the county down into the streets
+    // about the colony's centre, crossing every level on the way. The
+    // figure that matters is the pattern's raster average, gated by
+    // `plat:`. The scene comes back after, and settles before the shot.
+    await call('ext.acro.citystudio', {'view': 'plat'});
+    await Future<void>.delayed(const Duration(milliseconds: 1500));
+    await pattern('plat street pan', 8, (t) {
+      // 600 m east over the pattern at one metre a pixel.
+      return {'plat': '${fmt(t / 8 * 600)},0,1'};
+    });
+    await pattern('plat district pan', 8, (t) {
+      // 8 km east at twelve metres a pixel: the same screens a second.
+      return {'plat': '${fmt(t / 8 * 8000)},0,12'};
+    });
+    await pattern('plat zoom', 8, (t) {
+      // County to street, 60 down to 0.6 m/px, log-spaced so each second
+      // covers the same ratio and the LOD flips land where a wheel puts
+      // them.
+      final mpp = 60 * math.pow(0.01, t / 8).toDouble();
+      return {'plat': '0,0,${fmt(mpp)}'};
+    });
+    await call('ext.acro.citystudio', {'view': 'orbit'});
+    await Future<void>.delayed(const Duration(seconds: 2));
+    out['settledAfterPlat'] = await sample('settled after plat', 3);
   }
   if (shot.isNotEmpty) {
     final saved = await call('ext.acro.screenshot', {'path': shot});
@@ -503,5 +547,17 @@ Future<void> main(List<String> args) async {
       .fold<double>(0, (a, b) => a > b ? a : b);
   check('sweep worst frame (past the cold orbit)',
       sweeps.length < 2 ? null : worstSweep, asserts['worst']);
+  // The plat on the raster thread: the worst of its three patterns'
+  // averages, since one LOD alone painting slow is the regression.
+  final platPatterns = sweeps.entries
+      .where((e) => e.key.startsWith('plat '))
+      .map((e) => e.value['rasterMs'] ?? 0)
+      .toList();
+  check(
+      'plat raster',
+      platPatterns.isEmpty
+          ? null
+          : platPatterns.fold<double>(0, (a, b) => a > b ? a : b),
+      asserts['plat']);
   if (failed) exit(1);
 }
