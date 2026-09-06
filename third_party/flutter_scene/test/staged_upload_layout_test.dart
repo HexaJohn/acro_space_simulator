@@ -144,4 +144,24 @@ void main() {
     );
     expect(() => StagedUploadLayout([4, -1]), throwsArgumentError);
   });
+
+  // A pooled buffer is larger than the chunk it receives: the layout is
+  // the chunk's own whatever the buffer's capacity — the same offsets, the
+  // same slices, packed from byte zero — so the views cut at finish() and
+  // the bytes step() moves are those of an exact-sized buffer, and the
+  // capacity check is the only thing that reads the buffer's size.
+  test('a larger buffer fits and leaves the layout untouched', () {
+    final exact = StagedUploadLayout([12, 12, 8, 16, 6]);
+    final pooled = StagedUploadLayout([12, 12, 8, 16, 6]);
+    expect(exact.fitsIn(exact.totalBytes), isTrue);
+    expect(pooled.fitsIn(exact.totalBytes * 2), isTrue);
+    expect(pooled.fitsIn(1 << 20), isTrue);
+    expect(pooled.fitsIn(exact.totalBytes - 1), isFalse);
+    expect(pooled.fitsIn(0), isFalse);
+    expect(pooled.segmentOffsets, exact.segmentOffsets);
+    expect(pooled.segmentLengths, exact.segmentLengths);
+    expect(pooled.totalBytes, exact.totalBytes);
+    expect(_walk(pooled, 7), _walk(exact, 7));
+    _expectTiles(pooled, _walk(pooled, 7));
+  });
 }

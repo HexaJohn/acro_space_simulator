@@ -154,6 +154,19 @@ encoders already relied on that.
   `Geometry.boundsOfPositions` / `applyScannedBounds` split the bounds
   scan. Byte equality of both paths, and the retain/drop contract, pinned
   GPU-free by `test/upload_segments_test.dart`.
+- `lib/src/geometry/mesh_geometry.dart` — `stageFromArrays(allocate:)`
+  takes the device buffer from the caller (called once with the layout's
+  byte count; the buffer may be larger, the layout is packed from byte
+  zero regardless, and a smaller one is an `ArgumentError`), so an app can
+  pool buffers by size class instead of dropping one per replaced chunk —
+  each dropped `DeviceBuffer`'s native finalizer runs inside the next
+  old-space collection at ~100 µs, and a zoom that replaces forty tiles
+  queued hundreds. `StagedMeshUpload.buffer`, `MeshGeometry.stagedBuffer`
+  and `MeshGeometry.takeBuffer()` (returns the buffer once and unbinds the
+  geometry's streams, so a stray draw throws instead of reading a reused
+  buffer) let the caller reclaim it; `StagedUploadLayout.fitsIn` is the
+  pure capacity check. Without `allocate` the buffer is allocated at the
+  layout's exact size as before, and `fromArrays` is untouched.
 
 ## Patches (scene layer)
 

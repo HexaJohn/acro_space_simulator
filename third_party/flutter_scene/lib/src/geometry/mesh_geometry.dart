@@ -205,6 +205,17 @@ class MeshGeometry extends UnskinnedGeometry {
   /// on the CPU: the caller's arrays are what the slices are cut from, and
   /// they must stay unchanged until [StagedMeshUpload.step] has moved every
   /// byte.
+  ///
+  /// [allocate], when given, supplies the device buffer instead of the
+  /// context allocating one: it is called once with the byte count the
+  /// layout needs and must return a host-visible buffer at least that
+  /// large. The layout is the chunk's own regardless of the buffer's size —
+  /// the streams and indices are packed from byte zero and every view is
+  /// cut to the chunk — so a caller that pools buffers by size class can
+  /// hand over a larger one and the bytes past the layout are simply never
+  /// read. A buffer that is too small is an [ArgumentError]: nothing about
+  /// the mesh can shrink to fit it. With no [allocate] the buffer is
+  /// allocated at exactly the layout's size, as before.
   static StagedMeshUpload stageFromArrays({
     required Float32List positions,
     Float32List? normals,
@@ -213,6 +224,7 @@ class MeshGeometry extends UnskinnedGeometry {
     List<int>? indices,
     gpu.PrimitiveType primitiveType = gpu.PrimitiveType.triangle,
     bool retainCpuData = true,
+    gpu.DeviceBuffer Function(int totalBytes)? allocate,
   }) {
     if (positions.length % 3 != 0) {
       throw ArgumentError(
@@ -242,10 +254,21 @@ class MeshGeometry extends UnskinnedGeometry {
     final layout = StagedUploadLayout([
       for (final s in segments) s.lengthInBytes,
     ]);
-    final buffer = gpu.gpuContext.createDeviceBuffer(
-      gpu.StorageMode.hostVisible,
-      layout.totalBytes,
-    );
+    final gpu.DeviceBuffer buffer;
+    if (allocate == null) {
+      buffer = gpu.gpuContext.createDeviceBuffer(
+        gpu.StorageMode.hostVisible,
+        layout.totalBytes,
+      );
+    } else {
+      buffer = allocate(layout.totalBytes);
+      if (!layout.fitsIn(buffer.sizeInBytes)) {
+        throw ArgumentError(
+          'the supplied buffer holds ${buffer.sizeInBytes} bytes; the mesh '
+          'needs ${layout.totalBytes}',
+        );
+      }
+    }
     return StagedMeshUpload._(
       geometry,
       segments,
@@ -317,6 +340,39 @@ class MeshGeometry extends UnskinnedGeometry {
   /// and never saved otherwise keeps hundreds of megabytes of typed data in
   /// the old generation for the collector to mark on every pass.
   final bool retainCpuData;
+
+  // PATCHED (acro_space_simulator): the one buffer a staged mesh's views
+  // are cut from, kept so the caller can take it back; see [takeBuffer].
+  gpu.DeviceBuffer? _stagedBuffer;
+
+  /// PATCHED (acro_space_simulator): the one host-visible buffer this
+  /// geometry's streams and indices are views into, when it was built by
+  /// [stageFromArrays] and still owns that buffer; null for every other
+  /// geometry ([fromArrays] keeps no handle to its buffer, and an updatable
+  /// mesh has a ring per attribute), and null again once [takeBuffer] has
+  /// been called.
+  gpu.DeviceBuffer? get stagedBuffer => _stagedBuffer;
+
+  /// PATCHED (acro_space_simulator): takes this geometry's buffer back, for
+  /// a caller that reuses device buffers instead of letting each one's
+  /// native finalizer run inside a later collection.
+  ///
+  /// The geometry is unbound as it goes — its vertex streams are cleared,
+  /// so a draw of it afterwards throws at bind rather than reading whatever
+  /// the buffer holds by then — and this returns null on any later call
+  /// and on a geometry that never had a single buffer ([stagedBuffer]).
+  /// Only a geometry that has left every scene for good should give its
+  /// buffer up: a frame still in flight reads the buffer the geometry was
+  /// drawn from, and overwriting it before that frame has finished tears
+  /// on the GLES backend, so the caller must also let the buffer cool for
+  /// the frames that could still be reading it before writing it again.
+  gpu.DeviceBuffer? takeBuffer() {
+    final buffer = _stagedBuffer;
+    if (buffer == null) return null;
+    _stagedBuffer = null;
+    setVertexStreams(const [], 0);
+    return buffer;
+  }
 
   // --- Updatable-storage state. Unused while [storage] is fixed. ---
 
@@ -956,6 +1012,14 @@ class StagedMeshUpload {
   /// Every byte the mesh occupies on the GPU: streams plus indices.
   int get totalBytes => layout.totalBytes;
 
+  /// The device buffer the bytes land in — the one
+  /// [MeshGeometry.stageFromArrays] was handed by `allocate`, or the one it
+  /// made. It may be larger than [totalBytes]; the layout occupies its
+  /// first [totalBytes] bytes. A caller that abandons a stage before
+  /// [finish] can take it back from here; after [finish] it is the
+  /// geometry's ([MeshGeometry.stagedBuffer]).
+  gpu.DeviceBuffer get buffer => _buffer;
+
   /// Bytes handed to the buffer so far.
   int get uploadedBytes => _cursor;
 
@@ -1004,6 +1068,7 @@ class StagedMeshUpload {
       throw StateError('finish() called twice on one StagedMeshUpload');
     }
     _finished = true;
+    _geometry._stagedBuffer = _buffer;
     final views = <gpu.BufferView>[
       for (var slot = 0; slot < 4; slot++)
         gpu.BufferView(
@@ -1068,6 +1133,12 @@ class StagedUploadLayout {
 
   /// The buffer's size: every segment's bytes.
   final int totalBytes;
+
+  /// Whether a buffer of [capacityBytes] can hold this layout. The layout
+  /// never adapts to the buffer — its segments are packed from byte zero
+  /// whatever the capacity — so a pooled buffer larger than [totalBytes]
+  /// fits, and anything smaller cannot.
+  bool fitsIn(int capacityBytes) => capacityBytes >= totalBytes;
 
   /// The slices that move the bytes from [cursor] (a buffer offset) up to
   /// [maxBytes] further, one slice per segment touched, in buffer order.

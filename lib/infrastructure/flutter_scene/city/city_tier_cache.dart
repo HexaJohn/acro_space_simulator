@@ -138,6 +138,13 @@ class CityTierCache<T> {
     _bytes = 0;
   }
 
+  /// Every set, and the cache emptied: the caller owns what leaves.
+  List<T> drain() {
+    final all = [for (final e in _entries.values) e.set];
+    clear();
+    return all;
+  }
+
   _CachedSet<T>? _remove(String id) {
     final e = _entries.remove(id);
     if (e == null) return null;

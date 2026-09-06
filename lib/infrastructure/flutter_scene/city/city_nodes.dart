@@ -73,6 +73,7 @@ import 'road_mesher.dart';
 import 'vehicle_meshes.dart';
 import 'city_textures.dart';
 import 'city_traffic.dart';
+import 'device_buffer_pool.dart';
 
 // The tile vocabulary moved to the mesher with the meshing; everything
 // that spoke it through this file still does.
@@ -800,6 +801,7 @@ class CityNodes {
     // (see [viewTier]). Null = no view culling.
     ViewCone? viewCone,
   }) {
+    _tickFrame();
     if (!enabled ||
         (snap.buildings.isEmpty &&
             snap.roads.isEmpty &&
@@ -1591,7 +1593,7 @@ class CityNodes {
       _EngineStagedUpload? staged;
       j.steps.add(_BuildStep.mesh(CityMeshUploadStep(
         g.bytes,
-        () => staged = _EngineStagedUpload(g),
+        () => staged = _EngineStagedUpload(g, _bufferPool, frameIndex),
         () => j.stageChunk(
             fs.Node(
               mesh: fs.Mesh.primitives(primitives: [
@@ -1808,6 +1810,8 @@ class CityNodes {
     }
     final old = t.outgoing;
     t.outgoing = null;
+    // Parked in the tier cache when it can be wanted again; otherwise its
+    // buffers go back to the pool (see [_tierCachePark]).
     if (old != null) _tierCachePark(t, old);
     t.batches
       ..clear()
@@ -1835,6 +1839,7 @@ class CityNodes {
         root?.node.remove(n);
       }
     }
+    _reclaimBuffers(t.incoming);
     t.incoming.clear();
     t.incomingKey = '';
     t.incomingBytes = 0;
@@ -1876,7 +1881,7 @@ class CityNodes {
   /// parked — this is the tile going (see [_dropTile]).
   void _dropBatches(_Tile t) {
     _dropIncoming(t);
-    _takeShown(t);
+    _reclaimBuffers(_takeShown(t).nodes);
   }
 
   /// Put a tile's built nodes into the scene or take them out, keeping them
@@ -1900,7 +1905,9 @@ class CityNodes {
   /// its build.
   void _dropTile(_Tile t) {
     _dropBatches(t);
-    _tierCache.dropTile(t.key);
+    for (final gone in _tierCache.dropTile(t.key)) {
+      _reclaimBuffers(gone.nodes);
+    }
     _tierCacheStats();
     _queue.remove(t);
     t.queued = false;
@@ -2602,7 +2609,9 @@ class CityNodes {
     }
     _tiles.clear();
     _queue.clear();
-    _tierCache.clear();
+    for (final gone in _tierCache.drain()) {
+      _reclaimBuffers(gone.nodes);
+    }
     _tierCacheStats();
     for (final root in _roots.values) {
       _scene.remove(root.node);
@@ -2678,7 +2687,9 @@ class CityNodes {
       // Off: the switch flipped at run time empties the cache too, so
       // the bytes go with the behaviour.
       if (_tierCache.sets > 0) {
-        _tierCache.clear();
+        for (final gone in _tierCache.drain()) {
+          _reclaimBuffers(gone.nodes);
+        }
         _tierCacheStats();
       }
       return false;
@@ -2723,11 +2734,15 @@ class CityNodes {
   void _tierCacheSync(_Tile t) {
     if (_tierCacheInvalidation != _invalidation) {
       _tierCacheInvalidation = _invalidation;
-      _tierCache.clear();
+      for (final gone in _tierCache.drain()) {
+        _reclaimBuffers(gone.nodes);
+      }
     }
     if (t.cachedStructure != t.structureKey) {
       t.cachedStructure = t.structureKey;
-      _tierCache.dropTile(t.key);
+      for (final gone in _tierCache.dropTile(t.key)) {
+        _reclaimBuffers(gone.nodes);
+      }
     }
   }
 
@@ -2741,11 +2756,17 @@ class CityNodes {
     if (tierCacheBytes <= 0 ||
         !tierKeyCurrent(set.key,
             structureKey: t.structureKey, invalidation: _invalidation)) {
+      _reclaimBuffers(set.nodes);
       return;
     }
     _tierCacheSync(t);
-    _tierCache.put(t.key, set.key, set, set.bytes,
-        budgetBytes: tierCacheBytes, perTile: tierCacheSetsPerTile);
+    // What the budget pushes out (or refuses) is gone for good: its
+    // buffers to the pool, where the next chunk takes them instead of the
+    // collector's finalizers.
+    for (final gone in _tierCache.put(t.key, set.key, set, set.bytes,
+        budgetBytes: tierCacheBytes, perTile: tierCacheSetsPerTile)) {
+      _reclaimBuffers(gone.nodes);
+    }
     _tierCacheStats();
   }
 
@@ -2773,6 +2794,51 @@ class CityNodes {
     phaseCount['tierCacheHits'] = _tierCacheHits;
     phaseCount['tierCacheSets'] = _tierCache.sets;
     phaseCount['tierCacheBytes'] = _tierCache.bytes;
+
+  /// Bytes of dropped chunk buffers kept for the next chunks, instead of
+  /// let go for their native finalizers to run inside a later old-space
+  /// collection (~100 µs each, in its stop-the-world part; the 26-34 ms of
+  /// ProcessWeakHandles in the colony sweep's worst frame). Chunks are at
+  /// most [CityTileMesher.maxGroupBytes] plus the engine's color stream,
+  /// so the pool's classes are 256 KiB to 4 MiB; 256 MiB holds a zoom's
+  /// worth of replaced tiles. 0 disables the pool — the A/B knob: every
+  /// chunk allocates its own exact-sized buffer, as before.
+  static int bufferPoolBytes = 256 << 20;
+
+  /// Frames a reclaimed buffer waits before a chunk may write it. The
+  /// raster thread runs a frame or two behind this thread, and on GLES an
+  /// overwrite of a buffer a frame still reads tears; three frames is past
+  /// the deepest pipeline the engine's own rings assume.
+  static int bufferPoolCoolFrames = 3;
+
+  /// Updates so far: the clock the pool cools by (see [_tickFrame]).
+  int frameIndex = 0;
+
+  /// The chunk buffers a dropped tile gives back and a staged chunk takes
+  /// (see [_EngineStagedUpload], [_reclaimBuffers]).
+  final _bufferPool = GpuDeviceBufferPool(budgetBytes: bufferPoolBytes);
+
+  /// Advances the frame clock and publishes the pool's counters, with the
+  /// knobs read afresh so they can be changed while the city runs.
+  void _tickFrame() {
+    frameIndex++;
+    _bufferPool
+      ..budgetBytes = bufferPoolBytes
+      ..coolingFrames = bufferPoolCoolFrames;
+    phaseCount['poolHits'] = _bufferPool.hits;
+    phaseCount['poolMisses'] = _bufferPool.misses;
+    phaseCount['poolEvicted'] = _bufferPool.evicted;
+    phaseCount['poolBytes'] = _bufferPool.freeBytes;
+    phaseCount['poolFree'] = _bufferPool.freeCount;
+  }
+
+  /// The buffers of chunk [nodes] that have left the scene for good, back
+  /// to the pool as of this frame. Called at the one point each drop path
+  /// lets its nodes go; a node kept — hidden, or held for a later tier —
+  /// must not pass through here, since its geometry is unbound as its
+  /// buffer goes.
+  void _reclaimBuffers(Iterable<fs.Node> nodes) {
+    _bufferPool.reclaimNodes(nodes, frameIndex);
   }
 }
 
@@ -2984,14 +3050,20 @@ abstract interface class CityStagedUpload {
 /// old-space mark walked while the next tiles built — the ConcurrentMark
 /// and Sweep stalls of the colony sweep. The group's own arrays are what
 /// the slices are cut from, and a landed result is never written again.
+///
+/// The buffer comes from [pool] as of [frame]: a dropped chunk's, cooled,
+/// when one of the right class is free, else a fresh one (see
+/// [GpuDeviceBufferPool.allocate]). The layout is the group's own either
+/// way; a pooled buffer is at most twice its size.
 class _EngineStagedUpload implements CityStagedUpload {
-  _EngineStagedUpload(CityMeshGroup g)
+  _EngineStagedUpload(CityMeshGroup g, GpuDeviceBufferPool pool, int frame)
       : _staged = MeshGeometry.stageFromArrays(
           positions: g.positions,
           normals: g.normals,
           texCoords: g.texCoords,
           indices: g.indices,
           retainCpuData: false,
+          allocate: (bytes) => pool.allocate(bytes, frame),
         );
   final StagedMeshUpload _staged;
 
