@@ -56,6 +56,7 @@ import '../../flutter_scene/city/scale_rig.dart';
 import '../../../domain/scatter/mesh_builder.dart';
 import '../../flutter_scene/coord_convert.dart';
 import '../../flutter_scene/debug_camera_rig.dart';
+import '../../flutter_scene/frame_budget.dart';
 import '../../flutter_scene/graphics_quality.dart';
 import '../../flutter_scene/lod_probe_camera.dart';
 import '../../flutter_scene/rover_nodes.dart';
@@ -273,6 +274,14 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   /// on dispose, never compounded.
   final CityFrameGovernor _governor = CityFrameGovernor();
   final Stopwatch _govClock = Stopwatch()..start();
+
+  /// The frame budget: fed the engine's measured UI build from the timing
+  /// callback, asked for the streamers' slice at the top of every scene
+  /// sync (see [_sceneSurface]). The governor above sheds QUALITY over
+  /// seconds; this sheds deferrable WORK within the frame, and the two do
+  /// not fight — a frame the budget holds under the target never earns
+  /// the governor's shed.
+  final FrameBudget _frameBudget = FrameBudget();
   final double _trafficBase = CityNodes.trafficDensity;
   final double _floraTreeBase = CityNodes.floraTreeRangeM;
 
@@ -616,6 +625,9 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       for (final t in timings) {
         _uiMs.add(t.buildDuration.inMicroseconds / 1000);
         _rasterMs.add(t.rasterDuration.inMicroseconds / 1000);
+        // The budget's signal: the measured build, frame by frame — the
+        // last one delivered is the one the next sync judges.
+        _frameBudget.feed(t.buildDuration.inMicroseconds / 1000);
       }
       while (_uiMs.length > 90) {
         _uiMs.removeAt(0);
@@ -817,6 +829,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             'p75UiMs': _governor.lastP95Ms,
             'forced': _governor.forcedLevel,
           },
+          'frameBudget': _frameBudgetStatus(),
           'rover': _roverStatus(),
           'stats': _lastStats,
           'fault': _fault == null
@@ -843,6 +856,11 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     // view reads the same statics and never asked for them halved.
     CityNodes.trafficDensity = _trafficBase;
     CityNodes.floraTreeRangeM = _floraTreeBase;
+    // And the slice: the flight view writes its own each frame, but a
+    // screen with no budget must find the statics null, not this one's
+    // last frame.
+    CityNodes.frameSliceMs = null;
+    TerrainNodes.frameSliceMs = null;
     final cb = _timingsCb;
     if (cb != null) SchedulerBinding.instance.removeTimingsCallback(cb);
     _ticker?.dispose();
@@ -853,6 +871,37 @@ class _CityStudioScreenState extends State<CityStudioScreen>
 
   static double _avgOf(List<double> xs) =>
       xs.isEmpty ? 0 : xs.reduce((a, b) => a + b) / xs.length;
+
+  /// The budget as the status map and the panel read it: the slice and
+  /// the parts it was cut from, the overrun count, and the knobs the
+  /// streamers derived from it this frame.
+  Map<String, Object?> _frameBudgetStatus() {
+    final b = _frameBudget;
+    final city = CityNodes.budgetsFor(b.sliceForConsumers);
+    final terrain = TerrainNodes.budgetsFor(b.sliceForConsumers);
+    return {
+      'enabled': FrameBudget.enabled,
+      'targetMs': FrameBudget.targetMs,
+      'sliceMs': b.sliceMs,
+      'fixedMs': b.fixedMs,
+      'engineMs': b.engineMs,
+      'overheadMs': b.overheadMs,
+      'ceilingMs': b.ceilingMs,
+      'lastBuildMs': b.lastBuildMs,
+      'overruns': b.overruns,
+      'frames': b.frames,
+      'city': {
+        'buildMs': city.buildMs,
+        'uploadMs': city.uploadMs,
+        'uploadBytes': city.uploadBytes,
+      },
+      'terrain': {
+        'uploadsPerFrame': terrain.uploadsPerFrame,
+        'meshJobsInFlight': terrain.meshJobsInFlight,
+        'batchRebuildsPerFrame': terrain.batchRebuildsPerFrame,
+      },
+    };
+  }
 
   /// Count what the engine will actually submit: one draw per mesh
   /// primitive, one per instanced mesh (however many instances ride it).
@@ -2233,6 +2282,18 @@ class _CityStudioScreenState extends State<CityStudioScreen>
           // FRAME, so moving it in the frame is what keeps them agreeing.
           final frame = _withSunTurned(snap.copyWithEpoch(epoch));
           final starWorld = _starWorld(frame);
+          // The frame's slice for the two streamers, before either runs:
+          // from the engine's fixed cost of encoding LAST frame (this
+          // frame's is not known until it is drawn, and the scene changes
+          // little between two) and what the two passes spent last frame.
+          // Null when the budget is off, and they keep their fixed knobs.
+          final engine = fs.Scene.lastFrameStats;
+          _frameBudget.beginFrame(
+            engineMs: engine.prePassMs + engine.shadowMs + engine.colourMs,
+            spentMs: _terrainMs + _cityMs,
+          );
+          TerrainNodes.frameSliceMs = _frameBudget.sliceForConsumers;
+          CityNodes.frameSliceMs = _frameBudget.sliceForConsumers;
           // Ground FIRST: the colony is cut into it, and without it the city
           // hangs in space with its levelled pads describing nothing.
           final sw = Stopwatch()..start();
@@ -3039,6 +3100,22 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             'p75 ui build sits over ${CityFrameGovernor.shedAboveMs.round()} '
             'ms; restores under ${CityFrameGovernor.restoreBelowMs.round()}.',
             style: AppTheme.dim.copyWith(fontSize: 10)),
+        // The frame budget: the streamers' slice this frame, the fixed
+        // cost it was cut around, and how many frames measured over the
+        // target since the screen opened. A slice pinned at its floor with
+        // the overruns climbing is a frame the fixed parts alone overrun.
+        row(
+            'budget',
+            FrameBudget.enabled
+                ? 'slice ${ms(_frameBudget.sliceMs)} ms  '
+                    'fixed ${ms(_frameBudget.fixedMs)} ms  '
+                    'over ${_frameBudget.overruns}'
+                : 'off  fixed ${ms(_frameBudget.fixedMs)} ms  '
+                    'over ${_frameBudget.overruns}',
+            colour: FrameBudget.enabled &&
+                    _frameBudget.sliceMs < FrameBudget.referenceSliceMs / 2
+                ? AppTheme.warn
+                : AppTheme.textDim),
         const SizedBox(height: 4),
         // The gap is what the phase timers do not wrap: the engine's own
         // encode of the scene (shadow cascades, the colour pass), which runs

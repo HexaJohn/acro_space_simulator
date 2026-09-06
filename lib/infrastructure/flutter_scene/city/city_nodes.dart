@@ -59,6 +59,7 @@ import '../../../domain/terrain/terrain_lod.dart' show ViewCone;
 import '../../../domain/architecture/architecture_style.dart';
 import '../../../domain/architecture/city_lighting.dart';
 import '../coord_convert.dart';
+import '../frame_budget.dart';
 import '../graphics_quality.dart';
 import 'city_detail_layer.dart';
 import 'city_materials.dart';
@@ -1060,8 +1061,13 @@ class CityNodes {
     // have. (The submissions below add nothing stageable — a tile just
     // submitted has no result yet.)
     final stageable = _nextUploadable() != null;
-    final uploadBytes = CityUploadByteBudget(uploadBytesPerFrame,
-        revealCap: stageable ? revealBytesPerFrameWhileStaging : null);
+    // The frame's knobs: the fixed statics above, or — under the frame
+    // budget — the three derived from this frame's slice (see
+    // [frameSliceMs]). The reveals' share is half of whichever cap the
+    // frame has, as [revealBytesPerFrameWhileStaging] is half the fixed one.
+    final budgets = budgetsFor(frameSliceMs);
+    final uploadBytes = CityUploadByteBudget(budgets.uploadBytes,
+        revealCap: stageable ? revealShareOf(budgets.uploadBytes) : null);
     // The reveals first, nearest first: they are tiles already built and
     // swapped, whose GPU cost lands at the draw, and they take the frame's
     // bytes before any staging does — staged slices are Dart-side copies
@@ -1090,8 +1096,9 @@ class CityNodes {
     final revealBytes = uploadBytes.spent;
     if (_queue.isNotEmpty) {
       _queue.sort((a, b) => a.distanceM.compareTo(b.distanceM));
-      final budgetUs = (buildBudgetMs * 1000).round();
-      final uploadBudgetUs = math.min(budgetUs, (uploadBudgetMs * 1000).round());
+      final budgetUs = (budgets.buildMs * 1000).round();
+      final uploadBudgetUs =
+          math.min(budgetUs, (budgets.uploadMs * 1000).round());
       _submitQueued(snap, focusByBody, colonyTier);
       // The inline scheduler gets the budget less the upload's share, or
       // a platform without workers would mesh every frame and upload on
@@ -2978,6 +2985,40 @@ class CityNodes {
     phaseCount['detailJobs'] = layer.jobs;
     phaseCount['detailMisses'] = layer.misses;
   }
+
+  // --- The frame budget -----------------------------------------------------
+
+  /// This frame's slice of deferrable work, milliseconds, written by the
+  /// screen before [update] runs (see [FrameBudget]); null — the budget
+  /// off, or a screen that has none — and the build loop runs under the
+  /// fixed [buildBudgetMs], [uploadBudgetMs] and [uploadBytesPerFrame]
+  /// exactly as it did before. The fixed knobs were tuned against a
+  /// static frame; walking at street level, with the engine's encode and
+  /// the walker's ground samples in the same frame, the same nine
+  /// milliseconds of building made a 32-36 ms frame. Under the budget the
+  /// build loop takes [CityFrameBudgets.buildShare] of the slice, its
+  /// uploads [CityFrameBudgets.uploadShare] of it (never over the fixed
+  /// cap), and the byte cap scales with the slice against
+  /// [FrameBudget.referenceSliceMs] — the old [buildBudgetMs] — so at that
+  /// slice nothing changes.
+  static double? frameSliceMs;
+
+  /// The build loop's knobs for [sliceMs]: the fixed statics when null,
+  /// else the derivation in [CityFrameBudgets.forSlice] from them. Pure,
+  /// and read once per update so a slice written mid-frame is the next
+  /// frame's.
+  static CityFrameBudgets budgetsFor(double? sliceMs) =>
+      CityFrameBudgets.forSlice(
+        sliceMs,
+        buildMs: buildBudgetMs,
+        uploadMs: uploadBudgetMs,
+        baseUploadBytes: uploadBytesPerFrame,
+      );
+
+  /// The reveals' share of a frame's byte cap while there is staging to
+  /// do: half of it, the rule [revealBytesPerFrameWhileStaging] states
+  /// for the fixed cap, applied to whatever cap the frame has.
+  static int revealShareOf(int uploadCap) => uploadCap ~/ 2;
 }
 
 /// One resident traffic draw: its node and the instanced mesh it moves.

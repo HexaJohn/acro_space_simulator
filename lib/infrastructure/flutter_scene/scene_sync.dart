@@ -24,6 +24,7 @@ import 'coord_convert.dart';
 import 'debug_camera_rig.dart';
 import 'environment_baker.dart';
 import 'exhaust_nodes.dart';
+import 'frame_budget.dart';
 import 'gravity_grid_nodes.dart';
 import 'halo_ring_nodes.dart';
 import 'impact_fx_nodes.dart';
@@ -105,6 +106,17 @@ class SceneSync {
   /// [autoExposure]/[lastExposure] and the rest of this class's read-from-
   /// anywhere statics).
   static final Map<String, double> stageMs = {};
+
+  /// The flight view's frame budget for the streamers (see [FrameBudget]):
+  /// the slice the terrain and city passes may spend this frame, written to
+  /// their statics before they run. Static like [stageMs], one per app, so
+  /// the view's timing callback can feed it without a handle on the sync.
+  /// Fed here with this sync's own measured cost plus the engine's when
+  /// nothing else feeds it — a floor on the real frame, since the widget
+  /// tree above the scene is not in it; the view may feed
+  /// `FrameTiming.buildDuration` instead and the last feed before an
+  /// update wins.
+  static final FrameBudget frameBudget = FrameBudget();
 
   /// Scene graph census — draw calls, instances, node count — refreshed
   /// every [_censusEveryFrames] calls to [update] rather than every one:
@@ -261,6 +273,18 @@ class SceneSync {
                 bodyQuat: _lensBodyQuat,
               )
             : null;
+    // The frame's slice for the two streamers, from the engine's fixed
+    // cost of encoding LAST frame (this frame's is not known until it is
+    // drawn, and the scene changes little between two) and what the two
+    // passes spent last frame. Written before either runs; null when the
+    // budget is off, and they keep their fixed knobs.
+    final engine = fs.Scene.lastFrameStats;
+    frameBudget.beginFrame(
+      engineMs: engine.prePassMs + engine.shadowMs + engine.colourMs,
+      spentMs: (stageMs['terrain'] ?? 0) + (stageMs['city'] ?? 0),
+    );
+    TerrainNodes.frameSliceMs = frameBudget.sliceForConsumers;
+    CityNodes.frameSliceMs = frameBudget.sliceForConsumers;
     _terrain.update(
       snap,
       origin,
@@ -321,6 +345,10 @@ class SceneSync {
     }
     _applyAa();
     mark('tail');
+    // This sync's whole cost plus the engine's encode: the floor on what
+    // the frame's UI build will measure, fed for the next update to judge.
+    frameBudget.feed(
+        sw.elapsedMicroseconds / 1000.0 + frameBudget.engineMs);
     _census();
   }
 

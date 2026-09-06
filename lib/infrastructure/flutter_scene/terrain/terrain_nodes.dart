@@ -29,6 +29,7 @@ import '../../../domain/terrain/terrain_lod.dart';
 import '../body_nodes.dart';
 import '../coord_convert.dart';
 import '../depth_materials.dart';
+import '../frame_budget.dart';
 import 'terrain_textures.dart';
 
 /// Renders a voxel-terrain patch on the focused body's surface.
@@ -476,7 +477,7 @@ class TerrainNodes {
   /// [batchRebuildBudgetPerFrame]. A member skipped this frame draws next
   /// frame — the same short lag the mask drain already tolerates.
   void _drainDirtyBatches() {
-    var budget = batchRebuildBudgetPerFrame;
+    var budget = frameBudgets.batchRebuildsPerFrame;
     while (budget > 0 && _dirtyBatches.isNotEmpty) {
       final bk = _dirtyBatches.first;
       _dirtyBatches.remove(bk);
@@ -1486,7 +1487,7 @@ class TerrainNodes {
             'wanted:${wanted.length}';
         continue;
       }
-      if (uploads >= uploadBudgetPerFrame) {
+      if (uploads >= frameBudgets.uploadsPerFrame) {
         held2.add(a); // over budget: hold for next frame
         continue;
       }
@@ -1859,7 +1860,7 @@ class TerrainNodes {
         return;
       }
     }
-    if (_pending.length >= meshBudgetPerFrame) return;
+    if (_pending.length >= frameBudgets.meshJobsInFlight) return;
     if (_pending.contains(k)) return;
     _submit(field, k, _resolutionFor(k, field.radius));
   }
@@ -2423,6 +2424,36 @@ class TerrainNodes {
     }
     return null;
   }
+
+  // --- The frame budget -----------------------------------------------------
+
+  /// This frame's slice of deferrable work, milliseconds, written by the
+  /// screen before [update] runs (see [FrameBudget]); null — the budget
+  /// off, or a screen that has none — and the streaming runs under the
+  /// fixed [uploadBudgetPerFrame], [meshBudgetPerFrame] and
+  /// [batchRebuildBudgetPerFrame] as before. The ground's share of the
+  /// slice is what the colony's build loop leaves (see
+  /// [CityFrameBudgets.buildShare]), and its knobs are counts, so they
+  /// scale by the slice's ratio to [FrameBudget.referenceSliceMs], never
+  /// below one a frame. The selection cadence ([selectEveryFrames], the
+  /// eye-motion gate) is not scaled: a slower reselect leaves the WRONG
+  /// chunks resident, not fewer.
+  static double? frameSliceMs;
+
+  /// The streaming knobs for [sliceMs]: the fixed statics when null, else
+  /// [TerrainFrameBudgets.forSlice] from them.
+  static TerrainFrameBudgets budgetsFor(double? sliceMs) =>
+      TerrainFrameBudgets.forSlice(
+        sliceMs,
+        uploadsPerFrame: uploadBudgetPerFrame,
+        meshJobsInFlight: meshBudgetPerFrame,
+        batchRebuildsPerFrame: batchRebuildBudgetPerFrame,
+      );
+
+  /// The knobs in force this frame. Read at each gate rather than once per
+  /// update, so the dev ext's knob writes and the screen's slice both land
+  /// on the next gate that runs; three lookups a frame is nothing.
+  static TerrainFrameBudgets get frameBudgets => budgetsFor(frameSliceMs);
 }
 
 /// A mesh that came back from the scheduler and is waiting for upload budget.
