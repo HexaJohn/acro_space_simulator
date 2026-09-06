@@ -21,6 +21,7 @@ library;
 
 import 'package:flutter_scene/scene.dart' as fs;
 
+import '../flutter/screens/city_plat_view.dart' show PlatLayers;
 import 'city/city_nodes.dart';
 import 'city/city_tile_mesher.dart';
 import 'frame_budget.dart';
@@ -185,6 +186,38 @@ class PerfKnobs {
           'ground streamer gets the rest.',
       () => CityFrameBudgets.buildShare,
       (v) => CityFrameBudgets.buildShare = v.toDouble(),
+    ),
+    PerfKnob(
+      'platFills',
+      'The plat\'s lot fills at street scale (retained triangle batches).',
+      () => PlatLayers.fills ? 1 : 0,
+      (v) => PlatLayers.fills = v != 0,
+      isFlag: true,
+    ),
+    PerfKnob(
+      'platOutlines',
+      'The plat\'s lot outlines at street scale (a stroked path per cell '
+          'and use); the dearest thing it does per lot.',
+      () => PlatLayers.outlines ? 1 : 0,
+      (v) => PlatLayers.outlines = v != 0,
+      isFlag: true,
+    ),
+    PerfKnob(
+      'platStreets',
+      'The plat\'s local streets at street scale (a stroked path per cell '
+          'and class).',
+      () => PlatLayers.streets ? 1 : 0,
+      (v) => PlatLayers.streets = v != 0,
+      isFlag: true,
+    ),
+    PerfKnob(
+      'platBlockImages',
+      'District-scale lot boxes as one image per 2 km block instead of a '
+          'triangle batch re-uploaded every frame; costs up to 64 MiB of '
+          'textures on a 32 km colony.',
+      () => PlatLayers.blockImages ? 1 : 0,
+      (v) => PlatLayers.blockImages = v != 0,
+      isFlag: true,
     ),
     PerfKnob(
       'maxInFlight',

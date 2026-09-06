@@ -106,6 +106,29 @@ enum PlatLod {
   }
 }
 
+/// What the plat draws, as switches for the perf sweep's A/B (see
+/// `PerfKnobs`): each layer costs the raster thread something, and the
+/// only honest way to know how much is to turn it off and measure.
+class PlatLayers {
+  PlatLayers._();
+
+  /// Lot fills at street scale (retained triangle batches per cell).
+  static bool fills = true;
+
+  /// Lot outlines at street scale (a stroked path per cell and use).
+  static bool outlines = true;
+
+  /// Local streets at street scale (a stroked path per cell and class).
+  static bool streets = true;
+
+  /// District-scale lot boxes as one image per 2 km block, rendered once
+  /// and drawn as a texture, instead of a triangle batch re-uploaded
+  /// every frame: 214k boxes were 1.3M vertices and 15 MB a frame, and
+  /// a district pan cost the raster thread 17.8 ms. Off, the batches
+  /// draw as they did.
+  static bool blockImages = true;
+}
+
 class CityPlatView extends StatefulWidget {
   const CityPlatView({
     super.key,
@@ -133,11 +156,19 @@ class _CityPlatViewState extends State<CityPlatView> {
   Offset? _lastFocal;
 
   @override
+  void dispose() {
+    _cache?.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final sim = widget.sim;
     if (sim != null && !identical(_cache?.sim, sim)) {
+      _cache?.dispose();
       _cache = _PlatCache.of(sim);
     } else if (sim == null) {
+      _cache?.dispose();
       _cache = null;
     }
     return LayoutBuilder(builder: (context, constraints) {
@@ -185,6 +216,7 @@ class _CityPlatViewState extends State<CityPlatView> {
             child: CustomPaint(
               size: size,
               painter: _PlatPainter(
+                repaint: _cache?.imagesReady,
                 cache: _cache,
                 centreE: cam.centreE,
                 centreN: cam.centreN,
@@ -216,15 +248,62 @@ class _PlatCell {
   }
 }
 
-/// One 2 km block at district scale: a box per lot, as a triangle batch.
+/// One 2 km block at district scale: a box per lot, as a triangle batch,
+/// and — once it has been asked for — the same boxes as an image the
+/// block draws as a texture instead (see [PlatLayers.blockImages]).
 class _PlatBlock {
+  _PlatBlock(this.bounds);
+
+  /// The block's square in the drawing plane, metres.
+  final Rect bounds;
   final PlatTriangles boxes = PlatTriangles();
   ui.Vertices? _v;
+
+  /// The image's side in pixels: 7.8 m a texel on a 2 km block, under a
+  /// screen pixel at every district scale (7 to 24 m/px), and 256 KiB
+  /// a block — a 32 km colony's 256 blocks are 64 MiB at most.
+  static const int imagePx = 256;
+  ui.Image? image;
+  bool _rendering = false;
 
   ui.Vertices? vertices() {
     if (boxes.isEmpty) return null;
     return _v ??= ui.Vertices.raw(ui.VertexMode.triangles, boxes.positions,
         colors: boxes.colors);
+  }
+
+  /// Starts the block's image if it has none: the boxes recorded once
+  /// into a picture and rasterised off this frame; [onReady] fires when
+  /// the image can be drawn, and the batch draws until then.
+  void render(void Function() onReady) {
+    if (image != null || _rendering) return;
+    final v = vertices();
+    if (v == null) return;
+    _rendering = true;
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    final scale = imagePx / bounds.width;
+    canvas.scale(scale);
+    canvas.translate(-bounds.left, -bounds.top);
+    canvas.drawVertices(v, BlendMode.dst, Paint());
+    final picture = recorder.endRecording();
+    picture.toImage(imagePx, imagePx).then((img) {
+      picture.dispose();
+      if (_disposed) {
+        img.dispose();
+        return;
+      }
+      image = img;
+      _rendering = false;
+      onReady();
+    });
+  }
+
+  bool _disposed = false;
+  void dispose() {
+    _disposed = true;
+    image?.dispose();
+    image = null;
   }
 }
 
@@ -243,6 +322,17 @@ class _PlatCache {
   /// Street-scale cells and district-scale blocks, by grid key.
   final Map<int, _PlatCell> cells = {};
   final Map<int, _PlatBlock> blockMap = {};
+
+  /// Fires when a block's image has been rasterised: the painter listens
+  /// and repaints, drawing the image where it drew the batch.
+  final ChangeNotifier imagesReady = _Notifier();
+
+  void dispose() {
+    for (final b in blockMap.values) {
+      b.dispose();
+    }
+    imagesReady.dispose();
+  }
 
   /// The road classes that show at district scale and above, as one path
   /// each for the whole colony: a few thousand roads at most, and on
@@ -337,8 +427,10 @@ class _PlatCache {
       outline.close();
       // District scale: one box per lot in its 2 km block; far cheaper
       // than the polygon and it reads the same at a few pixels.
-      final block =
-          c.blockMap.putIfAbsent(blocks.keyOf(cE, cY), _PlatBlock.new);
+      final block = c.blockMap.putIfAbsent(blocks.keyOf(cE, cY), () {
+        final ie = blocks.indexOf(cE), iy = blocks.indexOf(cY);
+        return _PlatBlock(Rect.fromLTWH(ie * blockM, iy * blockM, blockM, blockM));
+      });
       block.boxes.addRect(b.minE, -b.maxN, b.maxE, -b.minN,
           colour.withValues(alpha: 0.55).toARGB32());
     }
@@ -369,6 +461,12 @@ class _PlatCache {
   }
 }
 
+/// A notifier the cache can fire itself: [ChangeNotifier.notifyListeners]
+/// is protected.
+class _Notifier extends ChangeNotifier {
+  void fire() => notifyListeners();
+}
+
 Color _useColour(ParcelUse use) => switch (use) {
       ParcelUse.residential => const Color(0xFF3F8F4F),
       ParcelUse.commercial => const Color(0xFF3A7BD5),
@@ -380,6 +478,7 @@ Color _useColour(ParcelUse use) => switch (use) {
 
 class _PlatPainter extends CustomPainter {
   _PlatPainter({
+    super.repaint,
     required this.cache,
     required this.centreE,
     required this.centreN,
@@ -445,9 +544,25 @@ class _PlatPainter extends CustomPainter {
       // enough, and the local streets, from the cells under the view and
       // the ring around it (a lot sits in the cell of its centre).
       if (lod == PlatLod.district) {
+        final imagePaint = Paint()..filterQuality = FilterQuality.low;
         for (final key in _PlatCache.blocks
             .keysIn(view.left, view.top, view.right, view.bottom)) {
-          final v = c.blockMap[key]?.vertices();
+          final block = c.blockMap[key];
+          if (block == null) continue;
+          if (PlatLayers.blockImages) {
+            final img = block.image;
+            if (img != null) {
+              canvas.drawImageRect(
+                  img,
+                  Rect.fromLTWH(0, 0, _PlatBlock.imagePx.toDouble(),
+                      _PlatBlock.imagePx.toDouble()),
+                  block.bounds,
+                  imagePaint);
+              continue;
+            }
+            block.render((c.imagesReady as _Notifier).fire);
+          }
+          final v = block.vertices();
           if (v != null) canvas.drawVertices(v, BlendMode.dst, _vertexPaint);
         }
       } else if (lod == PlatLod.street) {
@@ -458,11 +573,11 @@ class _PlatPainter extends CustomPainter {
             .keysIn(view.left, view.top, view.right, view.bottom, margin: 1)) {
           final cell = c.cells[key];
           if (cell == null) continue;
-          final fill = cell.fill();
+          final fill = PlatLayers.fills ? cell.fill() : null;
           if (fill != null) {
             canvas.drawVertices(fill, BlendMode.dst, _vertexPaint);
           }
-          if (outlines) {
+          if (outlines && PlatLayers.outlines) {
             for (final e in cell.outlines.entries) {
               final (use, built) = e.key;
               final paint = outlinePaints.putIfAbsent(
@@ -476,6 +591,7 @@ class _PlatPainter extends CustomPainter {
               canvas.drawPath(e.value, paint);
             }
           }
+          if (!PlatLayers.streets) continue;
           for (final e in cell.streets.entries) {
             final cls = e.key;
             if (!_roadVisible(cls, lod)) continue;

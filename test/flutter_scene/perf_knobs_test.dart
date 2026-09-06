@@ -5,6 +5,8 @@
 
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_nodes.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_mesher.dart';
+import 'package:acro_space_simulator/infrastructure/flutter/screens/city_plat_view.dart'
+    show PlatLayers;
 import 'package:acro_space_simulator/infrastructure/flutter_scene/frame_budget.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/perf_knobs.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -71,6 +73,10 @@ void main() {
     expect(CityFrameBudgets.scaleBytes, isTrue);
     expect(PerfKnobs.set('pacerFollowsSlice', 'off'), isTrue);
     expect(FrameBudget.pacerFollowsSlice, isFalse);
+    expect(PerfKnobs.set('platOutlines', '0'), isTrue);
+    expect(PlatLayers.outlines, isFalse);
+    expect(PerfKnobs.set('platBlockImages', 'false'), isTrue);
+    expect(PlatLayers.blockImages, isFalse);
   });
 
   test('an unknown name or a bad value sets nothing', () {
