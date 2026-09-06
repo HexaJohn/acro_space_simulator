@@ -64,6 +64,7 @@ import 'city_materials.dart';
 import 'city_tile_columns.dart';
 import 'city_tile_mesher.dart';
 import 'city_tile_scheduler.dart';
+import 'city_tier_cache.dart';
 import 'elevated_structure.dart';
 import 'mesh_merge.dart';
 import 'oriented_box.dart';
@@ -1005,11 +1006,20 @@ class CityNodes {
           '|${lodDebug ? 1 : 0}|${perBuildingLod ? 1 : 0}'
           '|${interiorRangeM.round()}|${blockRangeM.round()}'
           '|${colonyTier.index}|$_invalidation';
-      if (!hide && t.wantKey != want) {
+      // Compared afresh besides when the last swap wrote a job's key over
+      // the want key to keep an answered tile off the queue (see [_swap]).
+      if (!hide && (t.wantKey != want || t.wantKeyStale)) {
         t.wantKey = want;
+        t.wantKeyStale = false;
         t.wantTier = tier;
         t.wantCanDetail = canDetail;
-        if (!t.queued) {
+        // A build the tile already holds — the set it shows, or one
+        // parked when a tier or camera cell moved it on — is re-attached
+        // instead of queued (see [tierCacheBytes]); only a key it has
+        // never built goes to the workers.
+        if (_tierCacheAnswer(t, want)) {
+          // Nothing to build.
+        } else if (!t.queued) {
           t.queued = true;
           _queue.add(t);
         }
@@ -1728,6 +1738,36 @@ class CityNodes {
     // reveal exists to avoid: that set goes, the shown one stays as the
     // fallback until this one is through.
     _dropIncoming(t);
+    if (tierCacheBytes > 0 &&
+        job.key != t.wantKey &&
+        t.shownKey == t.wantKey) {
+      // The tile was answered while this job ran — its want key came back
+      // to the set it shows, or to a parked one (see [_tierCacheAnswer])
+      // — and a job is never abandoned, so it lands here with a set
+      // nobody wants. It goes: never shown, so never parked. The job's
+      // key is written over the want key so the loop's compare below
+      // does not requeue a tile that is already answered, and the tile
+      // is marked to be compared afresh next update, which puts the real
+      // want key back and answers it again (see [update]).
+      job.staged.clear();
+      job.flora.clear();
+      job.reveal.clear();
+      t.wantKey = job.key;
+      t.wantKeyStale = true;
+      return;
+    }
+    // The shown set stays as the fallback until the reveal is through and
+    // is parked then (see [_finishReveal]); its planting and its counts,
+    // which the swap hands over to the incoming set's below, are kept
+    // aside with it so a dropped reveal can give them back.
+    t.outgoing = _TileSet(t.shownKey, List.of(t.batches), List.of(t.flora),
+        t.skylineTris, t.lodCounts, t.shownBytes);
+    var incomingBytes = 0;
+    for (final c in job.reveal) {
+      incomingBytes += c.bytes;
+    }
+    t.incomingKey = job.key;
+    t.incomingBytes = incomingBytes;
     for (final node in job.staged) {
       // A build that lands while the tile is hidden stays off the scene;
       // _setAttached puts it in when the tile comes back into view.
@@ -1756,8 +1796,9 @@ class CityNodes {
     }
   }
 
-  /// The incoming set is all shown: the old set leaves the scene and the
-  /// incoming one is the tile's from here.
+  /// The incoming set is all shown: the old set leaves the scene — parked
+  /// for the tile to come back to (see [tierCacheBytes]), or dropped —
+  /// and the incoming one is the tile's from here.
   void _finishReveal(_Tile t) {
     final root = _roots[t.bodyId];
     if (!t.hidden) {
@@ -1765,18 +1806,29 @@ class CityNodes {
         root?.node.remove(n);
       }
     }
+    final old = t.outgoing;
+    t.outgoing = null;
+    if (old != null) _tierCachePark(t, old);
     t.batches
       ..clear()
       ..addAll(t.incoming);
     t.incoming.clear();
+    t.shownKey = t.incomingKey;
+    t.shownBytes = t.incomingBytes;
+    t.incomingKey = '';
+    t.incomingBytes = 0;
     t.reveal = null;
     _revealing.remove(t);
   }
 
   /// Take a tile's incoming set out of the scene and forget its reveal,
-  /// leaving the shown set alone.
+  /// leaving the shown set alone — and giving it back the planting and
+  /// the counts the swap set aside (see [_Tile.outgoing]), so the trees
+  /// it still stands in the scene are the ones the distance pass shows
+  /// and hides, and the set it parks later is whole. Never parked
+  /// itself: a set that was not fully shown is not one the tile had.
   void _dropIncoming(_Tile t) {
-    if (t.incoming.isEmpty && t.reveal == null) return;
+    if (t.incoming.isEmpty && t.reveal == null && t.outgoing == null) return;
     final root = _roots[t.bodyId];
     if (!t.hidden) {
       for (final n in t.incoming) {
@@ -1784,8 +1836,19 @@ class CityNodes {
       }
     }
     t.incoming.clear();
+    t.incomingKey = '';
+    t.incomingBytes = 0;
     t.reveal = null;
     _revealing.remove(t);
+    final old = t.outgoing;
+    if (old != null) {
+      t.outgoing = null;
+      t.flora
+        ..clear()
+        ..addAll(old.flora);
+      t.skylineTris = old.skylineTris;
+      t.lodCounts = old.lodCounts;
+    }
   }
 
   /// Show or hide a tile's planting by its distance (see [floraVisibleAt]),
@@ -1809,19 +1872,11 @@ class CityNodes {
   }
 
   /// Take a tile's nodes out of the scene (a hidden tile's are already
-  /// out): the shown set and, mid-reveal, the incoming one.
+  /// out): the shown set and, mid-reveal, the incoming one. Neither is
+  /// parked — this is the tile going (see [_dropTile]).
   void _dropBatches(_Tile t) {
     _dropIncoming(t);
-    final root = _roots[t.bodyId];
-    if (!t.hidden) {
-      for (final n in t.batches) {
-        root?.node.remove(n);
-      }
-    }
-    t.batches.clear();
-    t.flora.clear();
-    t.skylineTris = 0;
-    t.lodCounts = const {};
+    _takeShown(t);
   }
 
   /// Put a tile's built nodes into the scene or take them out, keeping them
@@ -1841,11 +1896,15 @@ class CityNodes {
     }
   }
 
-  /// Forget a tile: its nodes, its place in the queue, its build.
+  /// Forget a tile: its nodes, its parked sets, its place in the queue,
+  /// its build.
   void _dropTile(_Tile t) {
     _dropBatches(t);
+    _tierCache.dropTile(t.key);
+    _tierCacheStats();
     _queue.remove(t);
     t.queued = false;
+    t.wantKeyStale = false;
     t.job = null;
     t.builtKey = '';
     // A build still on a worker answers into the void.
@@ -2543,6 +2602,8 @@ class CityNodes {
     }
     _tiles.clear();
     _queue.clear();
+    _tierCache.clear();
+    _tierCacheStats();
     for (final root in _roots.values) {
       _scene.remove(root.node);
     }
@@ -2562,6 +2623,156 @@ class CityNodes {
     _scheduler.dispose();
     _pending.clear();
     if (debugLine.isNotEmpty) debugPrint('cityNodes disposed');
+  }
+
+  // ---- The tier cache -------------------------------------------------------
+
+  /// Bytes of built sets kept across tier and camera changes, colony-wide
+  /// (see [CityTierCache]). A replaced set is parked — out of the scene,
+  /// its buffers still resident — and a tile whose want key returns to
+  /// one it holds re-attaches that set the same frame: no meshing, no
+  /// upload, no reveal, and none of the finalizer work the replaced
+  /// set's GPU buffers cost the collector, which was the stop-the-world
+  /// part of the worst frames while tiles landed. A zoom out and back
+  /// rebuilt seventy-odd tiles twice; with this they are built once.
+  /// Zero disables it, the A/B switch: every replaced set is dropped as
+  /// before.
+  static int tierCacheBytes = 256 << 20;
+
+  /// Sets one tile may keep at once (0 for no cap). A near tile inside
+  /// the block range re-keys every 64 m of camera travel, and a slow pass
+  /// over downtown would otherwise fill the budget with one tile's
+  /// history and push every other tile's out; the camera cells a tile
+  /// is asked for again are the last few.
+  static int tierCacheSetsPerTile = 6;
+
+  /// Whether a want key was made under the tile's current structure and
+  /// the current invalidation: the two parts of the key that, once moved,
+  /// never come back, so a set keyed under an old one can never be a hit
+  /// and should not hold its bytes. The structure key is the key's first
+  /// five fields and the invalidation its last (see [update]).
+  static bool tierKeyCurrent(String key,
+          {required String structureKey, required int invalidation}) =>
+      key.startsWith('$structureKey|') && key.endsWith('|$invalidation');
+
+  final CityTierCache<_TileSet> _tierCache = CityTierCache();
+
+  /// The invalidation the parked sets were keyed under: a bump drops
+  /// them all (see [invalidate], [_tierCacheSync]).
+  int _tierCacheInvalidation = 0;
+
+  /// Hits so far, for the panel.
+  int _tierCacheHits = 0;
+
+  /// Answer a tile's new want key from what it already has: true when
+  /// the set it shows is that build, or the cache held it and it is in
+  /// the scene now, so nothing is to be queued. A set mid-reveal is
+  /// dropped either way — it was never fully shown, and would replace
+  /// the answer when it finished. The tile comes off the queue when it
+  /// has no job to wait for; a job in flight runs to its end on its own
+  /// key and finds the tile answered at its swap (see [_swap]). Only
+  /// called for a tile in view: a hidden tile's want key is frozen, and
+  /// nothing is attached behind the camera.
+  bool _tierCacheAnswer(_Tile t, String want) {
+    if (tierCacheBytes <= 0) {
+      // Off: the switch flipped at run time empties the cache too, so
+      // the bytes go with the behaviour.
+      if (_tierCache.sets > 0) {
+        _tierCache.clear();
+        _tierCacheStats();
+      }
+      return false;
+    }
+    _tierCacheSync(t);
+    if (t.shownKey == want) {
+      _dropIncoming(t);
+      t.builtKey = want;
+    } else {
+      final set = _tierCache.take(t.key, want);
+      if (set == null) return false;
+      _dropIncoming(t);
+      _tierCachePark(t, _takeShown(t));
+      final root = _roots[t.bodyId];
+      for (final node in set.nodes) {
+        // Every chunk had shown before the set was parked, so the whole
+        // set shows at once — its bytes are resident, there is nothing
+        // for the driver to take at the first draw; the planting is
+        // told by the tile's distance from this frame below.
+        node.visible = true;
+        if (!t.hidden) root?.node.add(node);
+      }
+      t.batches.addAll(set.nodes);
+      t.flora.addAll(set.flora);
+      _syncFlora(t, apply: true);
+      t.skylineTris = set.skylineTris;
+      t.lodCounts = set.lodCounts;
+      t.shownBytes = set.bytes;
+      t.shownKey = t.builtKey = want;
+    }
+    _tierCacheHits++;
+    if (t.queued && t.job == null) {
+      _queue.remove(t);
+      t.queued = false;
+    }
+    _tierCacheStats();
+    return true;
+  }
+
+  /// Drop what can never hit again: every set on an invalidation bump,
+  /// the tile's own once its structure key moved (see [tierKeyCurrent]).
+  void _tierCacheSync(_Tile t) {
+    if (_tierCacheInvalidation != _invalidation) {
+      _tierCacheInvalidation = _invalidation;
+      _tierCache.clear();
+    }
+    if (t.cachedStructure != t.structureKey) {
+      t.cachedStructure = t.structureKey;
+      _tierCache.dropTile(t.key);
+    }
+  }
+
+  /// Park a replaced set of the tile — or let it go: when the cache is
+  /// off, or the set's key was made under a structure or invalidation
+  /// that has since moved and so can never be wanted again. A set the
+  /// budget cannot hold, or that pushes an older one out, is simply
+  /// forgotten; the engine's finalizers take its buffers as they always
+  /// did.
+  void _tierCachePark(_Tile t, _TileSet set) {
+    if (tierCacheBytes <= 0 ||
+        !tierKeyCurrent(set.key,
+            structureKey: t.structureKey, invalidation: _invalidation)) {
+      return;
+    }
+    _tierCacheSync(t);
+    _tierCache.put(t.key, set.key, set, set.bytes,
+        budgetBytes: tierCacheBytes, perTile: tierCacheSetsPerTile);
+    _tierCacheStats();
+  }
+
+  /// The shown set, taken out of the scene (a hidden tile's is already
+  /// out) and off the tile, for parking or dropping.
+  _TileSet _takeShown(_Tile t) {
+    final root = _roots[t.bodyId];
+    if (!t.hidden) {
+      for (final n in t.batches) {
+        root?.node.remove(n);
+      }
+    }
+    final set = _TileSet(t.shownKey, List.of(t.batches), List.of(t.flora),
+        t.skylineTris, t.lodCounts, t.shownBytes);
+    t.batches.clear();
+    t.flora.clear();
+    t.skylineTris = 0;
+    t.lodCounts = const {};
+    t.shownKey = '';
+    t.shownBytes = 0;
+    return set;
+  }
+
+  void _tierCacheStats() {
+    phaseCount['tierCacheHits'] = _tierCacheHits;
+    phaseCount['tierCacheSets'] = _tierCache.sets;
+    phaseCount['tierCacheBytes'] = _tierCache.bytes;
   }
 }
 
@@ -2671,6 +2882,49 @@ class _Tile {
   /// (see [CityNodes._swap]).
   final List<fs.Node> incoming = [];
   CityTileReveal? reveal;
+
+  /// The key of the set in [batches] ('' with none) and the bytes it
+  /// holds on the GPU (see [_TileSet.bytes]). [builtKey] says what the
+  /// last JOB answered, which after a cache hit is not the same set.
+  String shownKey = '';
+  int shownBytes = 0;
+
+  /// The same for [incoming].
+  String incomingKey = '';
+  int incomingBytes = 0;
+
+  /// The shown set as it was at the last swap — its planting and its
+  /// counts, which the swap hands to the incoming set's — parked when
+  /// the reveal is through, or given back if the reveal is dropped (see
+  /// [CityNodes._finishReveal], [CityNodes._dropIncoming]).
+  _TileSet? outgoing;
+
+  /// The structure key the tile's parked sets were made under (see
+  /// [CityNodes._tierCacheSync]).
+  String cachedStructure = '';
+
+  /// Set when the last swap wrote a job's key over [wantKey] to keep an
+  /// answered tile off the queue (see [CityNodes._swap]): the next update
+  /// compares the want key afresh whether or not it moved.
+  bool wantKeyStale = false;
+}
+
+/// One built set of a tile: what a swap replaces and the tier cache keeps
+/// (see [CityNodes.tierCacheBytes]) — the nodes, the planting among them
+/// by kind so the distance pass can show and hide it once the set is
+/// attached again, the counts the panel sums, and the bytes the set holds
+/// on the GPU, which is what the cache budgets: the sum of its chunks'
+/// [CityRevealChunk.bytes], the size the driver took at each one's first
+/// draw.
+class _TileSet {
+  _TileSet(this.key, this.nodes, this.flora, this.skylineTris,
+      this.lodCounts, this.bytes);
+  final String key;
+  final List<fs.Node> nodes;
+  final List<(fs.Node, PropKind)> flora;
+  final int skylineTris;
+  final Map<BuildingDetail, int> lodCounts;
+  final int bytes;
 }
 
 /// The kinds of UI-thread step a tile build is made of — the upload. The

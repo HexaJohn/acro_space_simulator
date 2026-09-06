@@ -519,4 +519,57 @@ void main() {
           'warehouse');
     });
   });
+
+  group('the tier cache keeps only sets a tile can want again', () {
+    // A want key as update() writes it: the five-field structure key,
+    // then tier, camera cell, flags, ranges, colony tier, invalidation.
+    const structure = '12|4|9|0|3405691582';
+    const key = '$structure|0|3,-2,7|0|1|50|300|1|5';
+
+    test('a key under the current structure and invalidation is current',
+        () {
+      expect(
+          CityNodes.tierKeyCurrent(key,
+              structureKey: structure, invalidation: 5),
+          isTrue);
+    });
+
+    test('a moved structure key or invalidation retires it', () {
+      expect(
+          CityNodes.tierKeyCurrent(key,
+              structureKey: '12|4|9|0|3405691583', invalidation: 5),
+          isFalse);
+      expect(
+          CityNodes.tierKeyCurrent(key,
+              structureKey: structure, invalidation: 6),
+          isFalse);
+      // A structure key that is a prefix of the real one does not pass
+      // on the prefix alone, nor does an invalidation that ends in the
+      // same digit.
+      expect(
+          CityNodes.tierKeyCurrent(key,
+              structureKey: '12|4|9|0|340569158', invalidation: 5),
+          isFalse);
+      expect(
+          CityNodes.tierKeyCurrent(key,
+              structureKey: structure, invalidation: 15),
+          isFalse);
+      expect(
+          CityNodes.tierKeyCurrent('$structure|0||0|1|50|300|1|15',
+              structureKey: structure, invalidation: 5),
+          isFalse);
+    });
+
+    test('a tile that never built has no current key', () {
+      expect(
+          CityNodes.tierKeyCurrent('',
+              structureKey: structure, invalidation: 0),
+          isFalse);
+    });
+
+    test('the cache knobs default on, with a colony-wide byte budget', () {
+      expect(CityNodes.tierCacheBytes, 256 << 20);
+      expect(CityNodes.tierCacheSetsPerTile, greaterThan(0));
+    });
+  });
 }
