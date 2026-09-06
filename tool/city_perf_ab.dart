@@ -301,6 +301,31 @@ Future<void> main(List<String> args) async {
         'ext.acro.citystudio', {'distance': distance, 'elevation': elevation});
     await Future<void>.delayed(const Duration(seconds: 3));
     out['settled'] = await sample('settled after sweep', 4);
+
+    // ---- On foot, and at the wheel ---------------------------------------
+    //
+    // At eye height every sixty-four metres of travel re-keys the tile for
+    // per-building detail, and full-detail archetypes are generated cold on
+    // the UI thread: a walk is its own spike class. The walker starts where
+    // the studio's G key puts it (colony-local 0, -40, facing north), walks
+    // a street for ten seconds turning slowly, then runs; the buggy drives
+    // the same street. The pattern's pose call is a no-op ping — the
+    // motion is the studio's own, held by the walkDrive hook.
+    await call('ext.acro.citystudio',
+        {'walk': '0,-40,0,0'});
+    await Future<void>.delayed(const Duration(seconds: 3));
+    await call('ext.acro.citystudio', {'walkDrive': '1,0,0,0.12,10.5'});
+    await pattern('walk', 10, (t) => const {'ping': '1'});
+    await call('ext.acro.citystudio', {'walkDrive': '1,0,1,0.05,8.5'});
+    await pattern('run', 8, (t) => const {'ping': '1'});
+    await call('ext.acro.citystudio', {'drive': '0,-40,0,1,0.1,8.5'});
+    await Future<void>.delayed(const Duration(seconds: 1));
+    await pattern('drive', 8, (t) => const {'ping': '1'});
+    await call('ext.acro.citystudio', {'view': 'orbit'});
+    await call(
+        'ext.acro.citystudio', {'distance': distance, 'elevation': elevation});
+    await Future<void>.delayed(const Duration(seconds: 3));
+    out['settledAfterWalk'] = await sample('settled after walk', 3);
   }
   if (shot.isNotEmpty) {
     final saved = await call('ext.acro.screenshot', {'path': shot});

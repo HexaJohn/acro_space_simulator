@@ -130,6 +130,21 @@ class CityStudioDevHooks {
       double steer,
       double seconds})? drive;
 
+  /// Hold the walker's keys for [seconds]: [forward] and [strafe] in
+  /// -1..1 as the WASD axes, [run] for shift, [yawRate] radians a second of
+  /// turn — a walk down a street with no keyboard, for the perf sweep.
+  /// Call [walkTo] first to place the walker.
+  static void Function(
+      {double forward,
+      double strafe,
+      bool run,
+      double yawRate,
+      double seconds})? walkDrive;
+
+  /// Back to the orbit camera ('orbit'), or into the walker ('walk') where
+  /// it last stood — the sweep leaves the street the way it came.
+  static void Function(String view)? setView;
+
   /// Steer the frame governor: switch it, or pin its shed level (a negative
   /// [forceLevel] releases the pin) — so a script can see each level's
   /// effect without waiting for a slow frame to earn it. The status reports
@@ -688,6 +703,31 @@ class _CityStudioScreenState extends State<CityStudioScreen>
         _walkerEyeCache = null;
       });
     };
+    CityStudioDevHooks.walkDrive = (
+        {double forward = 1,
+        double strafe = 0,
+        bool run = false,
+        double yawRate = 0,
+        double seconds = 5}) {
+      if (!mounted) return;
+      _autoWalk = (forward: forward, strafe: strafe, run: run, yawRate: yawRate);
+      _autoWalkUntilS = _epoch.value + seconds;
+    };
+    CityStudioDevHooks.setView = (view) {
+      if (!mounted) return;
+      setState(() {
+        if (view == 'orbit') {
+          if (_driving) _toggleDriving();
+          _firstPerson = false;
+          _autoWalkUntilS = 0;
+          _held.clear();
+        } else if (view == 'walk') {
+          if (_driving) _toggleDriving();
+          _firstPerson = true;
+          _walkerEyeCache = null;
+        }
+      });
+    };
     CityStudioDevHooks.setGovernor = ({bool? enabled, int? forceLevel}) {
       if (!mounted) return;
       setState(() {
@@ -795,6 +835,8 @@ class _CityStudioScreenState extends State<CityStudioScreen>
     CityStudioDevHooks.pick = null;
     CityStudioDevHooks.walkTo = null;
     CityStudioDevHooks.drive = null;
+    CityStudioDevHooks.walkDrive = null;
+    CityStudioDevHooks.setView = null;
     CityStudioDevHooks.status = null;
     CityStudioDevHooks.setGovernor = null;
     // The knobs the governor scaled go back to what they were: the flight
@@ -1443,7 +1485,32 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   }
 
   /// Advance the walker for [dtS] seconds from whatever is held down.
+  /// The sweep's hand on the keys (see [CityStudioDevHooks.walkDrive]):
+  /// held until [_autoWalkUntilS] on the studio clock, then let go.
+  ({double forward, double strafe, bool run, double yawRate})? _autoWalk;
+  double _autoWalkUntilS = 0;
+
   void _stepWalker(double dtS) {
+    final auto = _autoWalk;
+    if (auto != null) {
+      if (_epoch.value < _autoWalkUntilS && _firstPerson) {
+        _held
+          ..remove(LogicalKeyboardKey.keyW)
+          ..remove(LogicalKeyboardKey.keyS)
+          ..remove(LogicalKeyboardKey.keyA)
+          ..remove(LogicalKeyboardKey.keyD)
+          ..remove(LogicalKeyboardKey.shiftLeft);
+        if (auto.forward > 0) _held.add(LogicalKeyboardKey.keyW);
+        if (auto.forward < 0) _held.add(LogicalKeyboardKey.keyS);
+        if (auto.strafe > 0) _held.add(LogicalKeyboardKey.keyD);
+        if (auto.strafe < 0) _held.add(LogicalKeyboardKey.keyA);
+        if (auto.run) _held.add(LogicalKeyboardKey.shiftLeft);
+        _walkYaw += auto.yawRate * dtS;
+      } else {
+        _autoWalk = null;
+        _held.clear();
+      }
+    }
     if (!_firstPerson || _held.isEmpty) return;
     var fwd = 0.0, side = 0.0;
     if (_held.contains(LogicalKeyboardKey.keyW)) fwd += 1;

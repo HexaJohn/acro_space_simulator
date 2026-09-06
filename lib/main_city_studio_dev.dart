@@ -117,6 +117,27 @@ Future<void> main() async {
       return developer.ServiceExtensionResponse.result(
           jsonEncode({'ok': true}));
     }
+    if (params['walkDrive'] != null) {
+      // walkDrive=forward,strafe,run,yawRate,seconds
+      final wd = CityStudioDevHooks.walkDrive;
+      final parts = params['walkDrive']!.split(',');
+      if (wd == null || parts.length < 5) {
+        return developer.ServiceExtensionResponse.result(jsonEncode(
+            {'error': 'no walkDrive hook or bad walkDrive=fwd,strafe,run,yawRate,seconds'}));
+      }
+      wd(
+        forward: double.parse(parts[0]),
+        strafe: double.parse(parts[1]),
+        run: parts[2] == '1' || parts[2] == 'true',
+        yawRate: double.parse(parts[3]),
+        seconds: double.parse(parts[4]),
+      );
+      return developer.ServiceExtensionResponse.result(jsonEncode({'ok': true}));
+    }
+    if (params['view'] != null) {
+      CityStudioDevHooks.setView?.call(params['view']!);
+      return developer.ServiceExtensionResponse.result(jsonEncode({'ok': true}));
+    }
     if (params['drive'] != null) {
       final drive = CityStudioDevHooks.drive;
       final parts = params['drive']!.split(',');
