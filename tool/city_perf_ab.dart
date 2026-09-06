@@ -129,6 +129,20 @@ Future<void> main(List<String> args) async {
   await call('ext.acro.citystudio',
       {'distance': distance, 'elevation': elevation});
   await Future<void>.delayed(const Duration(seconds: 6));
+  // The camera move re-selects the ground; one static sample was taken
+  // with the terrain pass at 5.8 ms and read 12.5 where every other run
+  // read 8.4. Wait for it too, and for the panel's window to be all
+  // settled frames.
+  for (var i = 0, calm = 0; i < 60 && calm < 3; i++) {
+    final s = await call('ext.acro.citystudio');
+    final terrain = (s['terrainMs'] as num?)?.toDouble() ?? 0;
+    final m = RegExp(r'(\d+) queued').firstMatch('${s['cityDebug']}');
+    final queued = m == null ? 0 : int.parse(m.group(1)!);
+    calm = terrain < 1.5 && queued == 0 ? calm + 1 : 0;
+    await Future<void>.delayed(const Duration(seconds: 1));
+  }
+  await call('ext.acro.citystudio', {'resetFrames': 'true'});
+  await Future<void>.delayed(const Duration(seconds: 2));
 
   String f(dynamic v) => (v is num) ? v.toStringAsFixed(2) : '$v';
   Future<Map<String, double>> sample(String label, int n) async {
@@ -138,6 +152,11 @@ Future<void> main(List<String> args) async {
       for (final k in ['frameMs', 'uiMs', 'rasterMs', 'terrainMs', 'cityMs']) {
         acc[k] = (acc[k] ?? 0) + ((s[k] as num?)?.toDouble() ?? 0) / n;
       }
+      // The worst frame of the panel's window: for a static sample it is
+      // the scavenge that finalises the frames' passes, the number the
+      // pacer trades against.
+      final worst = (s['worstMs'] as num?)?.toDouble() ?? 0;
+      if (worst > (acc['worstMs'] ?? 0)) acc['worstMs'] = worst;
       acc['draws'] = ((s['censusDraws'] as num?)?.toDouble() ?? 0);
       acc['inst'] = ((s['censusInstances'] as num?)?.toDouble() ?? 0);
       final eng = (s['engine'] as Map?)?.cast<String, dynamic>();
@@ -173,7 +192,8 @@ Future<void> main(List<String> args) async {
       await Future<void>.delayed(const Duration(seconds: 2));
     }
     stdout.writeln('[$label] frame ${f(acc['frameMs'])}  ui ${f(acc['uiMs'])}  '
-        'raster ${f(acc['rasterMs'])}  terrain ${f(acc['terrainMs'])}  '
+        'raster ${f(acc['rasterMs'])}  worst ${f(acc['worstMs'])}  '
+        'terrain ${f(acc['terrainMs'])}  '
         'city ${f(acc['cityMs'])}  draws ${acc['draws']!.round()} '
         '(${acc['inst']!.round()} inst)');
     if (acc.containsKey('e.colourDraws')) {

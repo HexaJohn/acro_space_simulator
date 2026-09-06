@@ -953,7 +953,18 @@ base class Scene implements SceneGraph {
   /// work, spread thin enough that no frame sees it. The list is replaced,
   /// never kept, so nothing survives: a scavenge of pure garbage is a
   /// memset's worth of work.
-  static int collectorPacerBytesPerFrame = 2 << 20;
+  ///
+  /// One megabyte, not two: the turnover is not free even when nothing
+  /// survives it. The collector's concurrent marker takes assists from
+  /// the mutator in proportion to what it allocates
+  /// (IncrementalMarkWithSizeBudget at each scavenge), so two megabytes a
+  /// frame doubled the old-generation work on the UI thread during a
+  /// colony's tile landings and cost an orbit three milliseconds a frame
+  /// against no pacer at all. At one, a static frame scavenges every two
+  /// dozen frames — a few milliseconds of finalizers each, under the
+  /// frame — and pays half the tax. See [collectorPacerScale] for the
+  /// per-frame factor the app writes on top.
+  static int collectorPacerBytesPerFrame = 1 << 20;
 
   /// A factor on [collectorPacerBytesPerFrame] for THIS frame, 0..1,
   /// written by whoever knows how loaded the frame is (the app's frame
