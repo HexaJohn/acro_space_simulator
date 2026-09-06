@@ -18,17 +18,18 @@
 # See wiki/GPU-Profiling.md for what each tool reports.
 #
 # The defaults sit just over today's floor on the reference colony (static
-# ui 8.3, warm orbit ui 12, worst 108-112 ms), so the gate catches a regression
-# rather than failing every run. The worst frame is an old-generation
-# collection while tiles land — its stop-the-world part finalises the
-# replaced tiles' GPU buffers, a native cost per object the engine binary
-# owns — and 33 ms remains the target once that is beaten.
+# ui 8.4, warm orbit ui 11.6, worst 33-67 ms past the cold orbit), so the
+# gate catches a regression rather than failing every run. The worst frame
+# is an old-generation sweep while tiles land; 33 ms remains the target
+# once that is beaten. The cold orbit's own worst — one ~500 ms stall at
+# the first camera move after generation, an open item — is printed, not
+# gated.
 param(
   [string]$Tag = "run",
   [int]$Sprawl = 20,
   [double]$Static = 10,
   [double]$Sweep = 13,
-  [double]$Worst = 120,
+  [double]$Worst = 80,
   [string]$OutDir = "build/perf",
   # name=value[,name=value]: perf knobs set by name before the colony is
   # generated (see PerfKnobs), for an A/B without a rebuild.
