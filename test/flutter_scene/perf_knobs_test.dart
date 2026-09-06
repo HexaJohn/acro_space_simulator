@@ -69,6 +69,8 @@ void main() {
     expect(FrameBudget.enabled, isTrue);
     expect(PerfKnobs.set('scaleUploadBytes', 'true'), isTrue);
     expect(CityFrameBudgets.scaleBytes, isTrue);
+    expect(PerfKnobs.set('pacerFollowsSlice', 'off'), isTrue);
+    expect(FrameBudget.pacerFollowsSlice, isFalse);
   });
 
   test('an unknown name or a bad value sets nothing', () {

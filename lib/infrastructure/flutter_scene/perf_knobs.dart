@@ -107,6 +107,14 @@ class PerfKnobs {
       unit: 'MiB',
     ),
     PerfKnob(
+      'pacerFollowsSlice',
+      'The pacer runs at the frame budget\'s slice: full in a frame with '
+          'room, none in a loaded one. Off, it runs at its knob every frame.',
+      () => FrameBudget.pacerFollowsSlice ? 1 : 0,
+      (v) => FrameBudget.pacerFollowsSlice = v != 0,
+      isFlag: true,
+    ),
+    PerfKnob(
       'detailLayer',
       'Per-building detail from a job round the eye; off, walking re-keys '
           'the tiles it crosses.',

@@ -123,6 +123,11 @@ encoders already relied on that.
   API; their native finalizers run inside the scavenge at ~60 µs each, and
   a rarely-scavenging scene paid for seventy frames of them at once (9-12 ms,
   ~90% in MournWeakHandles, once a second). Same total work, no spike.
+  `Scene.collectorPacerScale` (0..1, default 1) is a per-frame factor on it
+  for the app's frame budget to write: the pacer's turnover is a tax a
+  loaded frame cannot afford (three milliseconds an orbit frame, twice the
+  old-generation spans), while a static frame still wants the small
+  scavenges.
 - `lib/src/geometry/mesh_geometry.dart` — `MeshGeometry.stageFromArrays`
   returns a `StagedMeshUpload`: the CPU side of `fromArrays` (attribute
   streams with defaults, generated normals, index packing, raycast copies,

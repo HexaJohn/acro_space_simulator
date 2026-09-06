@@ -69,6 +69,29 @@ class FrameBudget {
   static bool judgeBySpend = true;
   static double spendToleranceMs = 1.0;
 
+  /// Whether the engine's collector pacer follows the slice (see
+  /// [pacerScale]). The pacer turns over megabytes a frame so scavenges
+  /// come small and often; that turnover is a tax — the allocation, the
+  /// scavenges it hastens, the old-generation cycles it triggers — and a
+  /// loaded frame cannot afford it. Measured on the reference colony with
+  /// the pacer at its full two megabytes against none: warm orbit 13.4 vs
+  /// 10.5 ms of UI build, cold orbit 14.5 vs 12.5, and twice the
+  /// old-generation spans; static 8.4 vs 7.7. But a static frame without
+  /// it pays 9-12 ms every seventy frames (the passes' finalizers at
+  /// once), so the pacer stays on where there is room: scaled by the
+  /// slice's ratio to the reference, full at a slice of nine and gone at
+  /// the floor. Off, the pacer runs at its knob whatever the frame.
+  static bool pacerFollowsSlice = true;
+
+  /// The factor the engine's pacer should run at this frame, 0..1: the
+  /// slice against the reference when [pacerFollowsSlice] and the budget
+  /// is on, else one.
+  double get pacerScale {
+    if (!enabled || !pacerFollowsSlice) return 1.0;
+    final s = sliceMs / referenceSliceMs;
+    return s < 0 ? 0.0 : (s > 1 ? 1.0 : s);
+  }
+
   /// The slice the streamers' knobs were tuned at: the old fixed
   /// `CityNodes.buildBudgetMs`. The derived knobs scale against it, so at
   /// this slice the budgeted streamers behave exactly as they did before.

@@ -2294,10 +2294,13 @@ class _CityStudioScreenState extends State<CityStudioScreen>
           final engine = fs.Scene.lastFrameStats;
           _frameBudget.beginFrame(
             engineMs: engine.prePassMs + engine.shadowMs + engine.colourMs,
-            spentMs: _terrainMs + _cityMs,
+            spentMs: _terrainMs + CityNodes.sliceableSpend(_cityMs),
           );
           TerrainNodes.frameSliceMs = _frameBudget.sliceForConsumers;
           CityNodes.frameSliceMs = _frameBudget.sliceForConsumers;
+          // And the collector pacer, at what this frame can afford (see
+          // [FrameBudget.pacerFollowsSlice]).
+          fs.Scene.collectorPacerScale = _frameBudget.pacerScale;
           // Ground FIRST: the colony is cut into it, and without it the city
           // hangs in space with its levelled pads describing nothing.
           final sw = Stopwatch()..start();

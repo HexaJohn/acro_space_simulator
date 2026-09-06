@@ -281,10 +281,14 @@ class SceneSync {
     final engine = fs.Scene.lastFrameStats;
     frameBudget.beginFrame(
       engineMs: engine.prePassMs + engine.shadowMs + engine.colourMs,
-      spentMs: (stageMs['terrain'] ?? 0) + (stageMs['city'] ?? 0),
+      spentMs: (stageMs['terrain'] ?? 0) +
+          CityNodes.sliceableSpend(stageMs['city'] ?? 0),
     );
     TerrainNodes.frameSliceMs = frameBudget.sliceForConsumers;
     CityNodes.frameSliceMs = frameBudget.sliceForConsumers;
+    // And the collector pacer, at what this frame can afford (see
+    // [FrameBudget.pacerFollowsSlice]).
+    fs.Scene.collectorPacerScale = frameBudget.pacerScale;
     _terrain.update(
       snap,
       origin,

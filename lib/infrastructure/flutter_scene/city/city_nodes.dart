@@ -1471,7 +1471,17 @@ class CityNodes {
       i++;
     }
     phaseMs['city.submit'] = sendClock.elapsedMicroseconds / 1000;
+    lastSubmitMs = phaseMs['city.submit']!;
   }
+
+  /// What the last update's tile submission cost, milliseconds — a send
+  /// the frame budget's owner subtracts from the streamers' spend before
+  /// judging it. A submission is one per frame and cannot be sliced (an
+  /// isolate send copies the request whole), so a cold near tile's four to
+  /// six milliseconds is a fixed cost of that frame, not a step that ran
+  /// past its slice; judged as the latter it halved the slice on every
+  /// submitting frame and the queue never drained (see [FrameBudget]).
+  static double lastSubmitMs = 0;
 
   /// Start a tile's build from its want key.
   void _submit(_Tile t, WorldSnapshot snap, _BodyRoot root, Vector3 focusBF,
@@ -3045,6 +3055,13 @@ class CityNodes {
   /// [FrameBudget.referenceSliceMs] — the old [buildBudgetMs] — so at that
   /// slice nothing changes.
   static double? frameSliceMs;
+
+  /// The city's sliceable spend of the last update for the budget: the
+  /// pass less its submission (see [lastSubmitMs]).
+  static double sliceableSpend(double cityMs) {
+    final v = cityMs - lastSubmitMs;
+    return v < 0 ? 0 : v;
+  }
 
   /// The build loop's knobs for [sliceMs]: the fixed statics when null,
   /// else the derivation in [CityFrameBudgets.forSlice] from them. Pure,

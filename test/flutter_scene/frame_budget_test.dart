@@ -25,6 +25,7 @@ void main() {
     FrameBudget.targetMs = 15.0;
     FrameBudget.stallMs = 6.0;
     FrameBudget.judgeBySpend = true;
+    FrameBudget.pacerFollowsSlice = true;
     CityFrameBudgets.scaleBytes = false;
     CityNodes.frameSliceMs = null;
     TerrainNodes.frameSliceMs = null;
@@ -218,6 +219,25 @@ void main() {
       expect(FrameBudget.scaleOf(12), 1, reason: 'never above the tuning');
       expect(FrameBudget.scaleOf(4.5), 0.5);
       expect(FrameBudget.scaleOf(0.5), 0.25);
+    });
+  });
+
+  group('the collector pacer follows the slice', () {
+    test('full at the reference, gone at the floor, one when not following',
+        () {
+      final b = FrameBudget();
+      b.beginFrame(engineMs: 5.5); // room 9, the reference
+      expect(b.pacerScale, closeTo(1.0, 1e-9));
+      b.beginFrame(engineMs: 10); // room 4.5
+      expect(b.pacerScale, closeTo(0.5, 1e-9));
+      b.beginFrame(engineMs: 20); // the floor
+      expect(b.pacerScale, closeTo(0.5 / 9, 1e-9));
+      FrameBudget.pacerFollowsSlice = false;
+      expect(b.pacerScale, 1.0);
+      FrameBudget.pacerFollowsSlice = true;
+      FrameBudget.enabled = false;
+      b.beginFrame(engineMs: 20);
+      expect(b.pacerScale, 1.0, reason: 'the budget off leaves the pacer');
     });
   });
 

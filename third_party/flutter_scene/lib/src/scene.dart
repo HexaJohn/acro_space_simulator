@@ -955,6 +955,18 @@ base class Scene implements SceneGraph {
   /// memset's worth of work.
   static int collectorPacerBytesPerFrame = 2 << 20;
 
+  /// A factor on [collectorPacerBytesPerFrame] for THIS frame, 0..1,
+  /// written by whoever knows how loaded the frame is (the app's frame
+  /// budget). The pacer's turnover is a tax the frame pays for small
+  /// scavenges — the allocation, the scavenges it hastens, and the
+  /// old-generation cycles its 120 MB/s of allocation triggers — and a
+  /// frame already at its limit cannot afford it: measured with the app's
+  /// streamers busy, the full pacer cost an orbit three milliseconds a
+  /// frame and doubled its old-generation spans. A static frame, with
+  /// room to spare, still wants the small scavenges. The app scales it
+  /// by its slice; left alone it is one, the pacer as tuned.
+  static double collectorPacerScale = 1.0;
+
   /// Each pacer allocation is this big. Small on purpose: a typed list past
   /// the VM's new-space limit is allocated straight into old space and
   /// fills nothing, which is what a single megabyte did (measured: no
@@ -966,7 +978,8 @@ base class Scene implements SceneGraph {
   /// read that keeps the store observable, and a number for a status line.
   static int get collectorPacerChunks => _pacer?.length ?? 0;
   static void _paceCollector() {
-    final bytes = collectorPacerBytesPerFrame;
+    final scale = collectorPacerScale.clamp(0.0, 1.0);
+    final bytes = (collectorPacerBytesPerFrame * scale).round();
     if (bytes <= 0) {
       _pacer = null;
       return;
