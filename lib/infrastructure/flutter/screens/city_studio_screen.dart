@@ -3113,13 +3113,50 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             FrameBudget.enabled
                 ? 'slice ${ms(_frameBudget.sliceMs)} ms  '
                     'fixed ${ms(_frameBudget.fixedMs)} ms  '
-                    'over ${_frameBudget.overruns}'
+                    'over ${_frameBudget.overruns}  '
+                    'stalls ${_frameBudget.stalls}'
                 : 'off  fixed ${ms(_frameBudget.fixedMs)} ms  '
-                    'over ${_frameBudget.overruns}',
+                    'over ${_frameBudget.overruns}  '
+                    'stalls ${_frameBudget.stalls}',
             colour: FrameBudget.enabled &&
                     _frameBudget.sliceMs < FrameBudget.referenceSliceMs / 2
                 ? AppTheme.warn
                 : AppTheme.textDim),
+        // The PERF knobs' own counters, so an A/B reads its effect off the
+        // panel: the tier cache (a hit is a rebuild not done), the buffer
+        // pool (a hit is a native buffer the collector will not finalise),
+        // the detail layer's job, and why tiles went to the queue at all.
+        row(
+            'tier cache',
+            CityNodes.tierCacheBytes > 0
+                ? 'hits ${count['tierCacheHits'] ?? 0}  '
+                    'sets ${count['tierCacheSets'] ?? 0}  '
+                    '${((count['tierCacheBytes'] ?? 0) / (1 << 20)).round()} MiB'
+                : 'off',
+            colour: AppTheme.textDim),
+        row(
+            'pool',
+            CityNodes.bufferPoolBytes > 0
+                ? 'hits ${count['poolHits'] ?? 0}  '
+                    'misses ${count['poolMisses'] ?? 0}  '
+                    'free ${count['poolFree'] ?? 0}  '
+                    'evicted ${count['poolEvicted'] ?? 0}  '
+                    '${((count['poolBytes'] ?? 0) / (1 << 20)).round()} MiB'
+                : 'off',
+            colour: AppTheme.textDim),
+        row(
+            'detail layer',
+            CityNodes.detailLayer
+                ? '${ms(phase['city.detail'] ?? 0)} ms  '
+                    'bldg ${count['detailBuildings'] ?? 0}  '
+                    'arch ${count['detailArchetypes'] ?? 0}  '
+                    'jobs ${count['detailJobs'] ?? 0}  '
+                    'miss ${count['detailMisses'] ?? 0}'
+                : 'off',
+            colour: (phase['city.detail'] ?? 0) > 4
+                ? AppTheme.warn
+                : AppTheme.textDim),
+        row('  queued why', _queueReasons(count), colour: AppTheme.textDim),
         const SizedBox(height: 4),
         // The gap is what the phase timers do not wrap: the engine's own
         // encode of the scene (shadow cascades, the colour pass), which runs
@@ -3152,6 +3189,21 @@ class _CityStudioScreenState extends State<CityStudioScreen>
         row('cam', '${_distanceM.round()} m', colour: AppTheme.textDim),
       ]),
     );
+  }
+
+  /// The non-zero `queued.<why>` counters on one line — which term of a
+  /// tile's key moved to send it back to the workers (see
+  /// [CityNodes.phaseCount]), and how many were answered from the cache
+  /// instead. The names are the streamer's own; the panel does not list
+  /// them, so a reason added there shows here without a change.
+  static String _queueReasons(Map<String, int> count) {
+    const prefix = 'queued.';
+    final parts = <String>[
+      for (final e in count.entries)
+        if (e.key.startsWith(prefix) && e.value != 0)
+          '${e.key.substring(prefix.length)} ${e.value}',
+    ]..sort();
+    return parts.isEmpty ? '-' : parts.join('  ');
   }
 
   Widget _controls() {
@@ -3507,6 +3559,25 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             onChanged: (v) => setState(() => CityNodes.traffic = v),
           ),
           const SizedBox(height: 8),
+          const Text('PERF', style: AppTheme.heading),
+          Text(
+              'The streamers\' trade-offs, one row per knob in '
+              'PerfKnobs.all. Each takes effect on the next frame; the perf '
+              'panel\'s cache, pool, detail and budget rows say what it did. '
+              'The dev hook sets the same table by name.',
+              style: AppTheme.dim.copyWith(fontSize: 11)),
+          // The rows ride the perf panel's clock, not the screen's build:
+          // the dev hook sets a knob between frames with no setState, and
+          // a row that only rebuilt with the screen would show the old
+          // value until the next click. A dozen-odd rows at ~4 Hz is nothing.
+          ValueListenableBuilder<int>(
+            valueListenable: _perfTick,
+            builder: (context, tick, _) => Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [for (final k in PerfKnobs.all) _perfRow(k)],
+            ),
+          ),
+          const SizedBox(height: 8),
           const Text('LEVEL OF DETAIL', style: AppTheme.heading),
           Text('Buildings are generated at one of three tiers. The visualiser '
               'replaces each with a box its own size, coloured by the tier it '
@@ -3672,4 +3743,125 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       ]),
     );
   }
+
+  /// The range a PERF row offers for a knob, by the knob's name. A slider
+  /// covers the wide ranges; a list of steps makes a -/+ stepper for the
+  /// few-valued ones (the chunk cap's powers of two, the small integer
+  /// counts) where a slider would be all dead travel. A knob not listed
+  /// here still gets a row, on a slider from zero to twice its value, so
+  /// a knob added to the table is never missing from the column.
+  static const Map<String, _PerfRange> _perfRanges = {
+    'tierCacheMiB': _PerfRange(0, 512, divisions: 32),
+    'tierCacheSetsPerTile': _PerfRange.steps([0, 1, 2, 3, 4, 6, 8, 12]),
+    'bufferPoolMiB': _PerfRange(0, 512, divisions: 32),
+    'bufferPoolCoolFrames': _PerfRange.steps([0, 1, 2, 3, 4, 6, 8]),
+    'chunkMiB': _PerfRange.steps([1, 2, 4]),
+    'uploadKiBPerFrame': _PerfRange(256, 4096, divisions: 60),
+    'pacerMiBPerFrame': _PerfRange(0, 4, divisions: 16),
+    'detailBudgetMs': _PerfRange(0, 8, divisions: 16),
+    'buildBudgetMs': _PerfRange(0, 16, divisions: 32),
+    'frameTargetMs': _PerfRange(10, 16.7, divisions: 67),
+    'stallMs': _PerfRange(0, 12, divisions: 24),
+    'buildShare': _PerfRange(0, 1, divisions: 20),
+    'maxInFlight': _PerfRange.steps([1, 2, 3, 4, 6, 8]),
+  };
+
+  /// One PERF row for [k]: a switch for a flag, a stepper or a slider
+  /// for a number. The value is read from the knob's getter on every
+  /// build rather than held here, so a value the dev hook set between
+  /// frames is what the row shows.
+  Widget _perfRow(PerfKnob k) {
+    final key = ValueKey('perf.${k.name}');
+    if (k.isFlag) {
+      return SwitchListTile(
+        key: key,
+        contentPadding: EdgeInsets.zero,
+        dense: true,
+        value: k.get() != 0,
+        activeThumbColor: AppTheme.accent2,
+        title: Text(k.name, style: AppTheme.body),
+        subtitle: Text(k.trades, style: AppTheme.dim.copyWith(fontSize: 11)),
+        onChanged: (v) => setState(() => k.set(v ? 1 : 0)),
+      );
+    }
+    final value = k.get();
+    final range = _perfRanges[k.name] ??
+        _PerfRange(0, value <= 0 ? 1 : value.toDouble() * 2);
+    final shown = Text(_fmtKnob(value, k.unit),
+        style: AppTheme.mono.copyWith(color: AppTheme.accent));
+    final Widget control;
+    final steps = range.steps;
+    if (steps != null) {
+      // The nearest step to the value, so a value the hook set between
+      // the steps still has a place to step from.
+      var at = 0;
+      for (var i = 1; i < steps.length; i++) {
+        if ((steps[i] - value).abs() < (steps[at] - value).abs()) at = i;
+      }
+      control = Row(children: [
+        IconButton(
+          icon: const Icon(Icons.remove, size: 16),
+          visualDensity: VisualDensity.compact,
+          onPressed:
+              at > 0 ? () => setState(() => k.set(steps[at - 1])) : null,
+        ),
+        shown,
+        IconButton(
+          icon: const Icon(Icons.add, size: 16),
+          visualDensity: VisualDensity.compact,
+          onPressed: at < steps.length - 1
+              ? () => setState(() => k.set(steps[at + 1]))
+              : null,
+        ),
+      ]);
+    } else {
+      control = Slider(
+        value: value.toDouble().clamp(range.lo, range.hi),
+        min: range.lo,
+        max: range.hi,
+        divisions: range.divisions,
+        activeColor: AppTheme.accent2,
+        onChanged: (v) => setState(() => k.set(v)),
+      );
+    }
+    return Padding(
+      key: key,
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Expanded(child: Text(k.name, style: AppTheme.body)),
+          if (steps == null) shown,
+        ]),
+        control,
+        Text(k.trades, style: AppTheme.dim.copyWith(fontSize: 11)),
+      ]),
+    );
+  }
+
+  /// A knob's value for its row: whole numbers plain, a fraction to the
+  /// tenth for a millisecond, to the hundredth otherwise (the shares).
+  static String _fmtKnob(num v, String unit) {
+    final text = v == v.roundToDouble()
+        ? '${v.round()}'
+        : unit == 'ms'
+            ? v.toStringAsFixed(1)
+            : v.toStringAsFixed(2);
+    return unit.isEmpty ? text : '$text $unit';
+  }
+}
+
+/// The travel of a PERF row: a slider from [lo] to [hi], or the [steps]
+/// a stepper walks.
+class _PerfRange {
+  const _PerfRange(this.lo, this.hi, {this.divisions}) : steps = null;
+
+  const _PerfRange.steps(this.steps)
+      : lo = 0,
+        hi = 0,
+        divisions = null;
+
+  final double lo;
+  final double hi;
+  final int? divisions;
+  final List<num>? steps;
 }

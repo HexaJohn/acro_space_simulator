@@ -46,6 +46,15 @@ void main() {
     expect(FrameBudget.stallMs, 0);
     expect(PerfKnobs.set('maxInFlight', '2'), isTrue);
     expect(CityNodes.maxInFlight, 2);
+    expect(PerfKnobs.set('tierCacheSetsPerTile', '3'), isTrue);
+    expect(CityNodes.tierCacheSetsPerTile, 3);
+    expect(PerfKnobs.set('detailBudgetMs', '1.5'), isTrue);
+    expect(CityNodes.detailBudgetMs, 1.5);
+    expect(PerfKnobs.set('buildBudgetMs', '12'), isTrue);
+    expect(CityNodes.buildBudgetMs, 12);
+    expect(PerfKnobs.set('buildShare', '0.4'), isTrue);
+    expect(CityFrameBudgets.buildShare, 0.4);
+    expect(PerfKnobs.snapshot()['buildShare'], 0.4);
   });
 
   test('a flag takes true/false, on/off or 0/1', () {

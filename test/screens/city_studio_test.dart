@@ -4,6 +4,7 @@
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
 import 'package:acro_space_simulator/infrastructure/flutter/screens/city_studio_screen.dart';
+import 'package:acro_space_simulator/infrastructure/flutter_scene/perf_knobs.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -103,6 +104,66 @@ void main() {
     expect(button.onPressed, isNull,
         reason: 'driving an ungenerated colony has nothing to drive on');
     expect(t.takeException(), isNull);
+  });
+
+  testWidgets('the PERF section shows one row per knob in the table',
+      (t) async {
+    // The rows are generated FROM PerfKnobs.all, so a knob added to the
+    // table is on the column without a change here — and a knob missing
+    // from the column is a row the generator dropped. Scrolled and
+    // collected the same way as the switches above: the list unbuilds
+    // what has scrolled off, so the keys are gathered on the way down.
+    final before = PerfKnobs.snapshot();
+    addTearDown(() {
+      for (final k in PerfKnobs.all) {
+        k.set(before[k.name]!);
+      }
+    });
+    await t.pumpWidget(const MaterialApp(home: CityStudioScreen()));
+    await t.pump();
+
+    final list = find.byType(ListView);
+    final seen = <String>{};
+    var perfHeading = false;
+    for (var i = 0; i < 60; i++) {
+      await t.drag(list.last, const Offset(0, -200));
+      await t.pump();
+      expect(t.takeException(), isNull);
+      if (find.text('PERF').evaluate().isNotEmpty) perfHeading = true;
+      for (final e in t.allWidgets) {
+        final key = e.key;
+        if (key is ValueKey<String> && key.value.startsWith('perf.')) {
+          seen.add(key.value.substring('perf.'.length));
+        }
+      }
+    }
+    expect(perfHeading, isTrue, reason: 'no PERF heading in the column');
+    expect(seen, equals(PerfKnobs.all.map((k) => k.name).toSet()));
+
+    // The rows read the knob's getter each build, not a copy: a flag row
+    // shows what the table holds after the dev hook set it, however it
+    // was set. The screen is taken down and opened afresh (pumping the
+    // same const widget again would keep the scrolled-out state) so the
+    // row is found by dragging down from the top of the column.
+    final flag = PerfKnobs.all.firstWhere((k) => k.isFlag);
+    flag.set(0);
+    await t.pumpWidget(const SizedBox());
+    await t.pumpWidget(const MaterialApp(home: CityStudioScreen()));
+    await t.pump();
+    final tile = find.byKey(ValueKey('perf.${flag.name}'));
+    await t.dragUntilVisible(
+        tile, find.byType(ListView).last, const Offset(0, -200));
+    await t.pump();
+    expect(t.widget<SwitchListTile>(tile).value, isFalse);
+    // Set behind the screen's back, as the hook does — no setState of the
+    // row's own. In the studio the rows ride the perf panel's clock, which
+    // ticks only once a scene exists; here the rebuild is the panel hook's,
+    // the other thing a script drives between knob sets.
+    flag.set(1);
+    CityStudioDevHooks.setPanels!(perf: true);
+    await t.pump();
+    expect(t.widget<SwitchListTile>(tile).value, isTrue,
+        reason: 'the row must read the knob, not remember its own value');
   });
 }
 

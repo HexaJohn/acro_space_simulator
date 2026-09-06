@@ -61,6 +61,14 @@ class PerfKnobs {
       unit: 'MiB',
     ),
     PerfKnob(
+      'tierCacheSetsPerTile',
+      'Builds one tile may keep in the tier cache; a slow pass over '
+          'downtown would otherwise fill it with one tile\'s history. 0 is '
+          'no cap.',
+      () => CityNodes.tierCacheSetsPerTile,
+      (v) => CityNodes.tierCacheSetsPerTile = v.round(),
+    ),
+    PerfKnob(
       'bufferPoolMiB',
       'Reuses dropped chunk buffers so the collector finalises fewer native '
           'objects; costs GPU memory. 0 is off.',
@@ -107,6 +115,23 @@ class PerfKnobs {
       isFlag: true,
     ),
     PerfKnob(
+      'detailBudgetMs',
+      'The floor of UI-thread upload the detail layer gets a frame; it '
+          'also takes what the tile build leaves. More lands detail faster '
+          'behind a fast camera and takes it from the frame.',
+      () => CityNodes.detailBudgetMs,
+      (v) => CityNodes.detailBudgetMs = v.toDouble(),
+      unit: 'ms',
+    ),
+    PerfKnob(
+      'buildBudgetMs',
+      'UI-thread building a frame spends before the rest of the queue '
+          'waits; the fixed budget the frame budget scales.',
+      () => CityNodes.buildBudgetMs,
+      (v) => CityNodes.buildBudgetMs = v.toDouble(),
+      unit: 'ms',
+    ),
+    PerfKnob(
       'frameBudget',
       'A per-frame limit on the streamers; off, they take their fixed '
           'budgets whatever the frame costs.',
@@ -145,6 +170,13 @@ class PerfKnobs {
       () => CityFrameBudgets.scaleBytes ? 1 : 0,
       (v) => CityFrameBudgets.scaleBytes = v != 0,
       isFlag: true,
+    ),
+    PerfKnob(
+      'buildShare',
+      'The colony build loop\'s share of the frame budget\'s slice; the '
+          'ground streamer gets the rest.',
+      () => CityFrameBudgets.buildShare,
+      (v) => CityFrameBudgets.buildShare = v.toDouble(),
     ),
     PerfKnob(
       'maxInFlight',
