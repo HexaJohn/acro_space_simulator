@@ -34,6 +34,7 @@
 /// mesher's byte-identical output depends on.
 library;
 
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import '../../../application/snapshot/world_snapshot.dart';
@@ -197,6 +198,23 @@ class CityTileColumns {
   int get roadCount => roadPointStarts.length - 1;
   int get patchCount => patches.length;
   int get endCount => endI.length ~/ 2;
+  int get transitEndCount => transitEnds.length ~/ 3;
+
+  /// How many of [transitEnds] lie within [radiusM] of the body-fixed
+  /// point ([x], [y], [z]) — the terminal test, read straight off the
+  /// column. The distance is the one `(other - at).length` computes,
+  /// term for term, so the answer is the answer the vectors gave; what is
+  /// gone is the vector per pair, on a test the mesher runs for every end
+  /// of every transit road against every transit end in reach.
+  int transitEndsNear(double x, double y, double z, double radiusM) {
+    final t = transitEnds;
+    var n = 0;
+    for (var i = 0; i + 2 < t.length; i += 3) {
+      final dx = t[i] - x, dy = t[i + 1] - y, dz = t[i + 2] - z;
+      if (math.sqrt(dx * dx + dy * dy + dz * dz) < radiusM) n++;
+    }
+    return n;
+  }
 
   /// Bytes the send copies as blocks: every typed column. The strings are
   /// on top of this, one object each.

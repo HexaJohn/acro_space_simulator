@@ -558,6 +558,30 @@ void main() {
         expect(tris(whole, key), tris(cut, key), reason: '$key');
       }
     });
+
+    test('mid and far: the tile to the byte', () {
+      expect(digest(CityTileMesher.mesh(request(CityTier.mid), CityBuildingLibraries())),
+          0x91972418);
+      expect(digest(CityTileMesher.mesh(request(CityTier.far), CityBuildingLibraries())),
+          0xbcff3134);
+    });
+
+    test('through one scratch, job after job, every tier to the byte', () {
+      // The ground and lot builders live in the scratch beside the road
+      // builders, and the road pass fills one point list for every road:
+      // a tile meshed into buffers another tile grew must be the tile a
+      // fresh set makes, at every tier, in whatever order the tiles come.
+      final scratch = CityMeshScratch();
+      final libraries = CityBuildingLibraries();
+      int at(CityTier tier) => digest(
+          CityTileMesher.mesh(request(tier), libraries, scratch: scratch)
+              .detached());
+      expect(at(CityTier.near), 0x77a67f3b);
+      expect(at(CityTier.far), 0xbcff3134);
+      expect(at(CityTier.mid), 0x91972418);
+      expect(at(CityTier.near), 0x77a67f3b);
+      expect(at(CityTier.far), 0xbcff3134);
+    });
   });
 
   group('massingBoxes', () {
@@ -746,6 +770,44 @@ void main() {
       expect(b.lodCounts, a.lodCounts);
       expect(b.skylineTris, a.skylineTris);
     }
+  });
+
+  test('a transit line takes a terminal only at an end nothing else meets',
+      () {
+    // The terminal test counts the body's transit ends within 8 m of the
+    // end, off the column (see `CityTileColumns.transitEndsNear`): the
+    // end's own entry and nothing else means free, and a free end takes
+    // a terminal — so the more ends are met, the less of the viaduct's
+    // solid there is.
+    final line = road(RoadClass.transit, [(-100, 300), (100, 300)]);
+    CityTileColumns withEnds(List<Vector3> transit) =>
+        CityTileColumns.fromSnapshots(
+          buildings: const [],
+          roads: [line],
+          patches: CityPatchColumns.empty,
+          ends: const [],
+          roadEnds: const [null, null],
+          transitEnds: transit,
+        );
+    int solidTris(CityTileColumns c) => CityTileMesher.mesh(
+            request(CityTier.near, members: c), CityBuildingLibraries())
+        .groups
+        .where((g) => g.material == CityMaterialKind.facade)
+        .fold(0, (n, g) => n + g.triangleCount);
+    final own = [const Vector3(-100, 300, r), const Vector3(100, 300, r)];
+    final both = solidTris(withEnds(own));
+    final east = solidTris(withEnds([...own, const Vector3(103, 302, r)]));
+    final none = solidTris(withEnds([
+      ...own,
+      const Vector3(103, 302, r),
+      const Vector3(-104, 297, r),
+    ]));
+    expect(both, greaterThan(east));
+    expect(east, greaterThan(none));
+    // Nothing listed at all: nothing meets either end.
+    expect(solidTris(withEnds(const [])), both);
+    // Nine metres off is out of reach.
+    expect(solidTris(withEnds([...own, const Vector3(109, 300, r)])), both);
   });
 
   test('the road seed does not depend on the isolate', () async {
@@ -1022,6 +1084,10 @@ void main() {
           .detached();
       final grown = scratch.roadVertexCapacity;
       expect(grown, greaterThan(0));
+      // The ground sheet and the lot furniture build into the scratch as
+      // well; the near tile grows those too and nothing after it does.
+      final grownTile = scratch.tileVertexCapacity;
+      expect(grownTile, greaterThan(0));
       final fresh = CityTileMesher.mesh(
           request(CityTier.near), CityBuildingLibraries());
       expectSameGroups(fresh, big);
@@ -1031,6 +1097,7 @@ void main() {
       final small = CityTileMesher.mesh(request(CityTier.far), libraries,
           scratch: scratch);
       expect(scratch.roadVertexCapacity, grown);
+      expect(scratch.tileVertexCapacity, grownTile);
       expectSameGroups(
           CityTileMesher.mesh(request(CityTier.far), CityBuildingLibraries()),
           small);
@@ -1038,6 +1105,7 @@ void main() {
       final again = CityTileMesher.mesh(request(CityTier.near), libraries,
           scratch: scratch);
       expect(scratch.roadVertexCapacity, grown);
+      expect(scratch.tileVertexCapacity, grownTile);
       expectSameGroups(big, again);
       expect(again.treePits, big.treePits);
       expect(again.shrubPits, big.shrubPits);

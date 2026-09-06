@@ -248,6 +248,29 @@ void main() {
         orderedEquals(before.roads[1].points));
   });
 
+  test('the transit-end count off the column is the count the vectors give',
+      () {
+    final transit = [
+      for (var i = 0; i < 40; i++) Vector3(d(20), d(20), r + d(5)),
+    ];
+    final columns = CityTileColumns.fromSnapshots(
+      buildings: const [],
+      roads: const [],
+      patches: CityPatchColumns.empty,
+      ends: const [],
+      roadEnds: const [],
+      transitEnds: transit,
+    );
+    expect(columns.transitEndCount, transit.length);
+    for (var k = 0; k < 40; k++) {
+      final at = Vector3(d(20), d(20), r + d(5));
+      final want = transit.where((o) => (o - at).length < 8.0).length;
+      expect(columns.transitEndsNear(at.x, at.y, at.z, 8.0), want);
+    }
+    expect(columns.transitEndsNear(0, 0, r, double.infinity), transit.length);
+    expect(columns.transitEndsNear(0, 0, r, 0), 0);
+  });
+
   test('MICRO-BENCHMARK: a near tile sends in well under 5 ms as columns',
       () async {
     // The number this whole shape exists for. A near tile of the sweep —

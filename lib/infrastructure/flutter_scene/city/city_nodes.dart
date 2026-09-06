@@ -1402,8 +1402,15 @@ class CityNodes {
     }
   }
 
-  static int _endKey(Vector3 p) => Object.hash(
-      (p.x / 10).round(), (p.y / 10).round(), (p.z / 10).round());
+  static int _endKey(Vector3 p) => _endKeyOf(p.x, p.y, p.z);
+
+  /// The same key from bare coordinates — a road's end read straight
+  /// off its points, with no vector made to read it through.
+  static int _endKeyAt(List<double> points, int i) =>
+      _endKeyOf(points[i], points[i + 1], points[i + 2]);
+
+  static int _endKeyOf(double x, double y, double z) =>
+      Object.hash((x / 10).round(), (y / 10).round(), (z / 10).round());
 
   // ---- The build pipeline ---------------------------------------------------
   //
@@ -1523,32 +1530,57 @@ class CityNodes {
     );
   }
 
+  /// The ends of the tile's own transit roads while [_columnsFor] packs,
+  /// three doubles each: a scratch kept across packs, grown to the most
+  /// any tile needed, so the pack makes no vector per end.
+  static Float64List _transitFrom = Float64List(48);
+
   /// The tile's members and the root's facts about its roads, packed.
+  ///
+  /// Per road end, the key into the root's end table is computed off the
+  /// road's points in place, and the transit-end match is a distance off
+  /// the same doubles: the two vectors per road and one per matched pair
+  /// this used to make were, over a cold orbit's first pack of every
+  /// tile, most of the request side's transient allocation.
   static CityTileColumns _columnsFor(_Tile t, _BodyRoot root) {
-    final roadEnds = <(double, int)?>[];
-    final transitFrom = <Vector3>[];
-    for (final r in t.roads) {
-      final n = r.points.length ~/ 3;
-      final first = Vector3(r.points[0], r.points[1], r.points[2]);
-      final last = Vector3(
-          r.points[3 * n - 3], r.points[3 * n - 2], r.points[3 * n - 1]);
-      roadEnds.add(root.endHalf[_endKey(first)]);
-      roadEnds.add(root.endHalf[_endKey(last)]);
+    final roads = t.roads;
+    final nr = roads.length;
+    final roadEnds = List<(double, int)?>.filled(2 * nr, null);
+    var transitFrom = _transitFrom;
+    var nt = 0;
+    for (var i = 0; i < nr; i++) {
+      final r = roads[i];
+      final p = r.points;
+      final last = 3 * (p.length ~/ 3) - 3;
+      roadEnds[2 * i] = root.endHalf[_endKeyAt(p, 0)];
+      roadEnds[2 * i + 1] = root.endHalf[_endKeyAt(p, last)];
       final cls = RoadClass
           .values[r.roadClassIndex.clamp(0, RoadClass.values.length - 1)];
       if (cls == RoadClass.transit) {
-        transitFrom.add(first);
-        transitFrom.add(last);
+        if (nt + 6 > transitFrom.length) {
+          _transitFrom = transitFrom = Float64List(transitFrom.length * 2)
+            ..setRange(0, nt, transitFrom);
+        }
+        transitFrom[nt++] = p[0];
+        transitFrom[nt++] = p[1];
+        transitFrom[nt++] = p[2];
+        transitFrom[nt++] = p[last];
+        transitFrom[nt++] = p[last + 1];
+        transitFrom[nt++] = p[last + 2];
       }
     }
     // Every transit end on the body within the terminal test's reach (8 m)
     // of an end of one of this tile's transit roads — each entry ONCE,
-    // whichever ends it is near, since the test counts entries.
+    // whichever ends it is near, since the test counts entries. The
+    // entries are the root's own vectors; nothing is made to list them.
     final transitEnds = <Vector3>[];
-    if (transitFrom.isNotEmpty) {
+    if (nt > 0) {
       for (final other in root.transitEnds) {
-        for (final at in transitFrom) {
-          if ((other - at).length < 8.0) {
+        for (var k = 0; k < nt; k += 3) {
+          final dx = other.x - transitFrom[k],
+              dy = other.y - transitFrom[k + 1],
+              dz = other.z - transitFrom[k + 2];
+          if (math.sqrt(dx * dx + dy * dy + dz * dz) < 8.0) {
             transitEnds.add(other);
             break;
           }

@@ -669,10 +669,11 @@ class CityMeshScratch {
   final Map<CityMaterialKind, MergedMeshSink> _plain = {};
   final List<MergedMeshSink> _spare = [];
   final CityRoadBuilders _roads = CityRoadBuilders();
+  final CityTileBuilders _tile = CityTileBuilders();
   Object? _owner;
 
-  /// Make [owner]'s the sinks and the road builders: the first claim by a
-  /// new owner empties them.
+  /// Make [owner]'s the sinks, the road builders and the tile builders:
+  /// the first claim by a new owner empties them.
   void claim(Object owner) {
     if (identical(_owner, owner)) return;
     _owner = owner;
@@ -683,6 +684,7 @@ class CityMeshScratch {
       sink.reset();
     }
     _roads.reset();
+    _tile.reset();
   }
 
   /// The road pass's builders — two dozen [MeshBuilder]s and the pit
@@ -695,6 +697,14 @@ class CityMeshScratch {
   /// first step that emits.
   CityRoadBuilders get roads => _roads;
 
+  /// The ground sheet's builder and the lot furniture's four, kept and
+  /// claimed the same way as [roads]: they were still made fresh per job
+  /// after the road builders moved in here, and a near tile's ground
+  /// sheet is thousands of quads and its furniture a builder's worth of
+  /// pickets and parked cars — old-generation garbage per tile, and a
+  /// copy at [MeshBuilder.build] besides.
+  CityTileBuilders get tile => _tile;
+
   /// Vertex capacity over every sink, for the reuse test.
   int get vertexCapacity =>
       _plain.values.fold(0, (n, s) => n + s.vertexCapacity) +
@@ -702,6 +712,9 @@ class CityMeshScratch {
 
   /// Vertex capacity over the road builders, for the reuse test.
   int get roadVertexCapacity => _roads.vertexCapacity;
+
+  /// Vertex capacity over the ground and lot builders, for the reuse test.
+  int get tileVertexCapacity => _tile.vertexCapacity;
 
   /// The sink for [kind]'s plain group — the one its skyline goes into.
   MergedMeshSink plain(CityMaterialKind kind) =>
@@ -783,11 +796,13 @@ class CityTileMeshJob {
     return _scratch.roads;
   }
 
-  final MeshBuilder _patches = MeshBuilder();
-  final MeshBuilder _featureSolid = MeshBuilder();
-  final MeshBuilder _featureGlow = MeshBuilder();
-  final MeshBuilder _featureApron = MeshBuilder();
-  final MeshBuilder _featureCars = MeshBuilder();
+  /// The ground and lot builders: the scratch's, claimed on first touch
+  /// like the road builders (see [CityMeshScratch.tile]).
+  CityTileBuilders get _tile {
+    _scratch.claim(this);
+    return _scratch.tile;
+  }
+
   late int _carBudget = request.knobs.maxParkedCars;
 
   /// One merged sink per material: the skyline's block-tier buildings and
@@ -1007,13 +1022,17 @@ class CityTileMeshJob {
     }
   }
 
-  /// A detail job's builders: the lot furniture only.
-  List<(MeshBuilder, CityMaterialKind, bool)> _detailMergeSources() => [
-        (_featureSolid, CityMaterialKind.facade, false),
-        (_featureApron, CityMaterialKind.road, false),
-        (_featureCars, CityMaterialKind.facade, false),
-        (_featureGlow, CityMaterialKind.glazing, false),
-      ];
+  /// A detail job's builders: the lot furniture only. Gathered, not
+  /// claimed, for the reason [_tileMergeSources] gives.
+  List<(MeshBuilder, CityMaterialKind, bool)> _detailMergeSources() {
+    final t = _scratch.tile;
+    return [
+      (t.featureSolid, CityMaterialKind.facade, false),
+      (t.featureApron, CityMaterialKind.road, false),
+      (t.featureCars, CityMaterialKind.facade, false),
+      (t.featureGlow, CityMaterialKind.glazing, false),
+    ];
+  }
 
   /// A tile's builders, every one.
   List<(MeshBuilder, CityMaterialKind, bool)> _tileMergeSources() {
@@ -1022,6 +1041,7 @@ class CityTileMeshJob {
     // The builders are the same objects whichever job owns them, so the
     // references are good once the road steps have claimed.
     final r = _scratch.roads;
+    final t = _scratch.tile;
     return <(MeshBuilder, CityMaterialKind, bool)>[
       // The ribbon takes the dedicated road strip — on the facade material it
       // rendered as a run of blank concrete with no curbs and no centre line,
@@ -1048,11 +1068,11 @@ class CityTileMeshJob {
       (r.curbSolid, CityMaterialKind.facade, false),
       (r.curbGlass, CityMaterialKind.glazing, false),
       // The lot furniture: fences, aprons, parked cars, lit signs.
-      (_featureSolid, CityMaterialKind.facade, false),
-      (_featureApron, CityMaterialKind.road, false),
-      (_featureCars, CityMaterialKind.facade, false),
-      (_featureGlow, CityMaterialKind.glazing, false),
-      (_patches, CityMaterialKind.ground, false),
+      (t.featureSolid, CityMaterialKind.facade, false),
+      (t.featureApron, CityMaterialKind.road, false),
+      (t.featureCars, CityMaterialKind.facade, false),
+      (t.featureGlow, CityMaterialKind.glazing, false),
+      (t.patches, CityMaterialKind.ground, false),
     ];
   }
 
@@ -1187,7 +1207,7 @@ class CityTileMeshJob {
   /// mesh format has no vertex-colour channel, and a material per colour would
   /// be five draws for what is a single sheet of ground.
   void _emitPatches() {
-    final m = _patches;
+    final m = _tile.patches;
     final anchorBF = request.anchorBF;
     // Read straight off the columns: a near tile has thousands of patches,
     // and a snapshot object per patch per build was allocation the worker
@@ -1257,10 +1277,11 @@ class CityTileMeshJob {
   void _emitLotFeatures(List<BuildingSnapshot> buildings) {
     final r = request;
     final k = r.knobs;
-    final solid = _featureSolid;
-    final glow = _featureGlow;
-    final apron = _featureApron;
-    final cars = _featureCars;
+    final tb = _tile;
+    final solid = tb.featureSolid;
+    final glow = tb.featureGlow;
+    final apron = tb.featureApron;
+    final cars = tb.featureCars;
     final anchorBF = r.anchorBF;
 
     for (final b in buildings) {
@@ -1349,7 +1370,11 @@ class CityTileMeshJob {
     final road = members.roads[index];
     final tier = r.tier;
     final anchorBF = r.anchorBF;
-    final pts = <Vector3>[];
+    // The road's points anchor-relative, as the emitters take them, into
+    // the one list the road builders keep: no emitter holds the list past
+    // its call (the pits keep points, which are values), so a list per
+    // road was a growable buffer thrown away per road.
+    final pts = rb.points..clear();
     for (var i = 0; i + 2 < road.points.length; i += 3) {
       pts.add(Vector3(
         road.points[i] - anchorBF.x,
@@ -1388,11 +1413,11 @@ class CityTileMeshJob {
           (pts.first, pts[1]),
           (pts.last, pts[pts.length - 2])
         ]) {
-          final atBF = at + anchorBF;
-          var meeting = 0;
-          for (final other in members.transitEnds) {
-            if ((other - atBF).length < 8.0) meeting++;
-          }
+          // Counted off the column, not the unpacked list: every transit
+          // end against every end of every transit road was a vector per
+          // pair, for a test that only needs the distance.
+          final meeting = r.columns.transitEndsNear(
+              at.x + anchorBF.x, at.y + anchorBF.y, at.z + anchorBF.z, 8.0);
           if (meeting > 1) continue;
           final inward = next - at;
           if (inward.length < 1e-6) continue;
@@ -1835,7 +1860,11 @@ class CityTileMesher {
   static BuildingDetail detailFor(BuildingSnapshot b, Vector3 focusBF,
       BuildingDetail colonyTier, CityMeshKnobs k) {
     if (!k.perBuildingLod) return colonyTier;
-    return tierForDistance((Vector3(b.px, b.py, b.pz) - focusBF).length,
+    // The distance as the subtraction and the norm would compute it, term
+    // for term, without the two vectors: this runs per building, twice on
+    // a lot-featured tile, and they were the job's steadiest garbage.
+    final dx = b.px - focusBF.x, dy = b.py - focusBF.y, dz = b.pz - focusBF.z;
+    return tierForDistance(math.sqrt(dx * dx + dy * dy + dz * dz),
         blockRangeM: k.blockRangeM, interiorRangeM: k.interiorRangeM);
   }
 
@@ -2109,6 +2138,11 @@ class CityRoadBuilders {
   final MeshBuilder railConcrete = MeshBuilder();
   final MeshBuilder railSteel = MeshBuilder();
 
+  /// The road being emitted, as the anchor-relative points every emitter
+  /// takes: filled per road and read within the same call, one list for
+  /// the whole pass (see `CityTileMeshJob._emitRoad`).
+  final List<Vector3> points = [];
+
   /// Every builder in the order the merge reads them, for [reset] and the
   /// capacity count.
   List<MeshBuilder> get _all => [
@@ -2140,8 +2174,38 @@ class CityRoadBuilders {
     }
     treePits.clear();
     shrubPits.clear();
+    points.clear();
     propBudget = propBudgetPerTile;
     curbCars = curbCarsPerTile;
+  }
+
+  /// Vertex capacity over every builder.
+  int get vertexCapacity => _all.fold(0, (n, b) => n + b.vertexCapacity);
+}
+
+/// The builders of a tile's other passes — the ground sheet, and the lot
+/// furniture in its four materials — for one tile. One set lives per
+/// [CityMeshScratch] beside the road builders and is [reset] between
+/// tiles, so a tile's ground and gardens fill the buffers the last tile's
+/// grew rather than a fresh set each (see [CityMeshScratch.tile]).
+class CityTileBuilders {
+  /// The ground sheet: every flat patch, coloured through the palette.
+  final MeshBuilder patches = MeshBuilder();
+  // The lot furniture: fences and signs, the lit faces, the parking
+  // aprons, and the cars on them.
+  final MeshBuilder featureSolid = MeshBuilder();
+  final MeshBuilder featureGlow = MeshBuilder();
+  final MeshBuilder featureApron = MeshBuilder();
+  final MeshBuilder featureCars = MeshBuilder();
+
+  List<MeshBuilder> get _all =>
+      [patches, featureSolid, featureGlow, featureApron, featureCars];
+
+  /// Empty every builder, keeping its capacity.
+  void reset() {
+    for (final b in _all) {
+      b.reset();
+    }
   }
 
   /// Vertex capacity over every builder.
