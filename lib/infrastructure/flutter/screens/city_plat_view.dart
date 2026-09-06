@@ -11,13 +11,21 @@
 /// has been captured on a big colony. It is also where the debug overlays
 /// are easiest to read: everything is a flat shape.
 ///
-/// Scale: a colony can carry a hundred thousand lots, and stroking every one
-/// every frame is not on. Two things keep it cheap. Zoom LOD: lots only draw
-/// once a lot is a few pixels across, local streets once they are a pixel
-/// wide, and the sections (a few hundred) always. And a cache per colony —
-/// roads sampled once, parcel outlines batched into one path per use and
-/// built state, section rectangles — so a frame is a transform and a handful
-/// of path draws, not a walk of the plat.
+/// Scale: a colony can carry two hundred thousand lots, and tessellating
+/// every one every frame is not on. Three things keep it cheap. Zoom LOD:
+/// lots only draw once a lot is a few pixels across, their outlines once
+/// they are a dozen, local streets once they are a pixel wide, and the
+/// sections (a few hundred) always. A cache per colony, bucketed by cell
+/// (see `city_plat_tiles.dart`): roads sampled once and cut into 500 m
+/// cells, lot fills as one retained triangle batch per cell with a colour
+/// per vertex, lot outlines as a path per cell and use, district boxes as
+/// a batch per 2 km block, the few major road classes as whole paths — so
+/// a frame draws the cells under the viewport and nothing else. The first
+/// plat drew the whole colony as colony-wide paths, and the renderer
+/// tessellated all of it whatever the clip: 206 ms of raster thread a
+/// frame at street scale for the nine percent on screen. And a repaint
+/// boundary, so a plat that has not moved is not painted again because the
+/// panel beside it ticked.
 library;
 
 import 'dart:math' as math;
@@ -31,6 +39,7 @@ import '../../../domain/colony/city/parcel.dart';
 import '../../../domain/colony/city/spatial_index.dart';
 import '../../../domain/colony/city/sprawl_plan.dart';
 import 'app_theme.dart';
+import 'city_plat_tiles.dart';
 
 /// Where the plat view looks: the colony-local point under the middle of the
 /// viewport and the scale. Held OUTSIDE the view so toggling 2D/3D keeps it.
@@ -169,14 +178,19 @@ class _CityPlatViewState extends State<CityPlatView> {
             widget.onCameraChanged?.call();
           },
           onScaleEnd: (_) => _lastFocal = null,
-          child: CustomPaint(
-            size: size,
-            painter: _PlatPainter(
-              cache: _cache,
-              centreE: cam.centreE,
-              centreN: cam.centreN,
-              metresPerPx: cam.metresPerPx,
-              extentM: widget.extentM,
+          // Its own layer: the studio's panels repaint several times a
+          // second, and without the boundary every one of those repainted
+          // the plat with them.
+          child: RepaintBoundary(
+            child: CustomPaint(
+              size: size,
+              painter: _PlatPainter(
+                cache: _cache,
+                centreE: cam.centreE,
+                centreN: cam.centreN,
+                metresPerPx: cam.metresPerPx,
+                extentM: widget.extentM,
+              ),
             ),
           ),
         ),
@@ -185,31 +199,71 @@ class _CityPlatViewState extends State<CityPlatView> {
   }
 }
 
-/// Everything the painter needs of a colony, derived once per colony.
+/// One 500 m cell of the plat at street scale: its local streets, its lot
+/// fills as a triangle batch, its lot outlines by use and built state.
+class _PlatCell {
+  final Map<RoadClass, Path> streets = {};
+  final PlatTriangles lotFill = PlatTriangles();
+  final Map<(ParcelUse, bool), Path> outlines = {};
+  ui.Vertices? _fill;
+
+  /// The fills as the engine's retained vertex object, built on first
+  /// draw and kept: the batch never changes once the colony is cached.
+  ui.Vertices? fill() {
+    if (lotFill.isEmpty) return null;
+    return _fill ??= ui.Vertices.raw(ui.VertexMode.triangles, lotFill.positions,
+        colors: lotFill.colors);
+  }
+}
+
+/// One 2 km block at district scale: a box per lot, as a triangle batch.
+class _PlatBlock {
+  final PlatTriangles boxes = PlatTriangles();
+  ui.Vertices? _v;
+
+  ui.Vertices? vertices() {
+    if (boxes.isEmpty) return null;
+    return _v ??= ui.Vertices.raw(ui.VertexMode.triangles, boxes.positions,
+        colors: boxes.colors);
+  }
+}
+
+/// Everything the painter needs of a colony, derived once per colony and
+/// bucketed so a frame touches only what the viewport overlaps.
 class _PlatCache {
   _PlatCache._(this.sim);
 
   final CitySim sim;
 
-  /// Road centrelines by class, as one path each, in colony metres with north
-  /// up (y = -n; the painter flips the canvas).
-  final Map<RoadClass, Path> roads = {};
+  static const double cellM = 500;
+  static const double blockM = 2000;
+  static const PlatGrid grid = PlatGrid(cellM);
+  static const PlatGrid blocks = PlatGrid(blockM);
 
-  /// Lot outlines batched by use and by whether something stands on them.
-  final Map<(ParcelUse, bool), Path> lots = {};
+  /// Street-scale cells and district-scale blocks, by grid key.
+  final Map<int, _PlatCell> cells = {};
+  final Map<int, _PlatBlock> blockMap = {};
 
-  /// Hand-placed plots (installations, stations, farms).
+  /// The road classes that show at district scale and above, as one path
+  /// each for the whole colony: a few thousand roads at most, and on
+  /// screen nearly whole whenever they show at all.
+  final Map<RoadClass, Path> majorRoads = {};
+
+  /// Hand-placed plots (installations, stations, farms): arbitrary
+  /// polygons, few, outlined at every scale.
   final Path plots = Path();
 
   /// The sprawl's sections as squares, with their tint.
   final List<(Rect, Color)> sections = [];
 
-  /// Lot bounding boxes, for the block tint at district scale: one filled
-  /// rectangle per lot is far cheaper than its polygon and reads the same
-  /// at a few pixels.
-  final Map<ParcelUse, List<Rect>> lotBoxes = {};
-
   Box2 bounds = const Box2(-2000, -2000, 2000, 2000);
+
+  /// Whether a class is drawn from [majorRoads] (whole) or the cells.
+  static bool _major(RoadClass cls) => switch (cls.name) {
+        'highway' || 'rail' || 'expressway' => true,
+        'avenue' || 'arterial' || 'collector' => true,
+        _ => false,
+      };
 
   static _PlatCache of(CitySim sim) {
     final c = _PlatCache._(sim);
@@ -226,36 +280,67 @@ class _PlatCache {
       // A road's own sampler, at a coarse step: a plat line, not a kerb.
       final pts = r.sample(stepM: 12);
       if (pts.length < 2) continue;
-      final path = c.roads.putIfAbsent(r.roadClass, Path.new);
-      path.moveTo(pts[0].e, -pts[0].n);
-      for (var i = 1; i < pts.length; i++) {
-        path.lineTo(pts[i].e, -pts[i].n);
-      }
-      if (r.closed) path.close();
       for (final p in pts) {
         grow(p.e, p.n);
+      }
+      if (_major(r.roadClass)) {
+        final path = c.majorRoads.putIfAbsent(r.roadClass, Path.new);
+        path.moveTo(pts[0].e, -pts[0].n);
+        for (var i = 1; i < pts.length; i++) {
+          path.lineTo(pts[i].e, -pts[i].n);
+        }
+        if (r.closed) path.close();
+        continue;
+      }
+      // Local streets, cut per cell in the drawing plane (y = -north); a
+      // closed loop is closed by hand so the cut sees its last edge.
+      final plane = [for (final p in pts) Vec2(p.e, -p.n)];
+      if (r.closed) plane.add(plane.first);
+      for (final (key, run) in grid.splitPolyline(plane)) {
+        final cell = c.cells.putIfAbsent(key, _PlatCell.new);
+        final path = cell.streets.putIfAbsent(r.roadClass, Path.new);
+        path.moveTo(run[0].e, run[0].n);
+        for (var i = 1; i < run.length; i++) {
+          path.lineTo(run[i].e, run[i].n);
+        }
       }
     }
     for (final lot in sim.layout.parcels) {
       final poly = lot.polygon;
       if (poly.length < 3) continue;
-      final built = sim.parcelBuildings.containsKey(lot.id);
-      final path = lot.manual
-          ? c.plots
-          : c.lots.putIfAbsent((lot.use, built), Path.new);
-      path.moveTo(poly[0].e, -poly[0].n);
-      for (var i = 1; i < poly.length; i++) {
-        path.lineTo(poly[i].e, -poly[i].n);
-      }
-      path.close();
-      if (!lot.manual) {
-        final b = Box2.of(poly);
-        (c.lotBoxes[lot.use] ??= []).add(
-            Rect.fromLTRB(b.minE, -b.maxN, b.maxE, -b.minN));
-      }
       for (final p in poly) {
         grow(p.e, p.n);
       }
+      if (lot.manual) {
+        c.plots.moveTo(poly[0].e, -poly[0].n);
+        for (var i = 1; i < poly.length; i++) {
+          c.plots.lineTo(poly[i].e, -poly[i].n);
+        }
+        c.plots.close();
+        continue;
+      }
+      final built = sim.parcelBuildings.containsKey(lot.id);
+      final b = Box2.of(poly);
+      final cE = (b.minE + b.maxE) / 2, cY = -(b.minN + b.maxN) / 2;
+      final colour = _useColour(lot.use);
+      // Street scale: the fill as triangles (a subdivided lot is a convex
+      // quad, so a fan is exact) and the outline as a path by use.
+      final cell = c.cells.putIfAbsent(grid.keyOf(cE, cY), _PlatCell.new);
+      cell.lotFill.addFan(
+          poly, colour.withValues(alpha: built ? 0.55 : 0.18).toARGB32());
+      final outline =
+          cell.outlines.putIfAbsent((lot.use, built), Path.new);
+      outline.moveTo(poly[0].e, -poly[0].n);
+      for (var i = 1; i < poly.length; i++) {
+        outline.lineTo(poly[i].e, -poly[i].n);
+      }
+      outline.close();
+      // District scale: one box per lot in its 2 km block; far cheaper
+      // than the polygon and it reads the same at a few pixels.
+      final block =
+          c.blockMap.putIfAbsent(blocks.keyOf(cE, cY), _PlatBlock.new);
+      block.boxes.addRect(b.minE, -b.maxN, b.maxE, -b.minN,
+          colour.withValues(alpha: 0.55).toARGB32());
     }
     final plan = sim.sprawl;
     if (plan != null) {
@@ -309,6 +394,15 @@ class _PlatPainter extends CustomPainter {
   static const _grid = Color(0xFF1E252D);
   static const _text = Color(0xFFB8C0C8);
 
+  /// Lot outlines are stroked only once a lot is a dozen pixels across:
+  /// under that the fill says everything the outline would, and a stroke
+  /// is the dearest thing the renderer does per lot.
+  static const double outlineMetresPerPx = 2.5;
+
+  /// The vertex batches carry their own colours; the paint is a default
+  /// one and the blend takes the vertices' colour alone.
+  static final Paint _vertexPaint = Paint();
+
   @override
   void paint(Canvas canvas, Size size) {
     canvas.drawRect(Offset.zero & size, Paint()..color = _bg);
@@ -344,28 +438,48 @@ class _PlatPainter extends CustomPainter {
               ..color = tint.withValues(alpha: 0.6));
       }
 
-      // Lots. At district scale a filled box per lot; at street scale the
-      // outline and the fill, built lots solid and empty ones faint.
+      // Lots. At district scale a box per lot from the blocks under the
+      // view; at street scale the fills, the outlines once they are big
+      // enough, and the local streets, from the cells under the view and
+      // the ring around it (a lot sits in the cell of its centre).
       if (lod == PlatLod.district) {
-        for (final e in c.lotBoxes.entries) {
-          final paint = Paint()..color = _useColour(e.key).withValues(alpha: 0.55);
-          for (final r in e.value) {
-            if (r.overlaps(view)) canvas.drawRect(r, paint);
-          }
+        for (final key in _PlatCache.blocks
+            .keysIn(view.left, view.top, view.right, view.bottom)) {
+          final v = c.blockMap[key]?.vertices();
+          if (v != null) canvas.drawVertices(v, BlendMode.dst, _vertexPaint);
         }
       } else if (lod == PlatLod.street) {
-        for (final e in c.lots.entries) {
-          final (use, built) = e.key;
-          final colour = _useColour(use);
-          canvas.drawPath(
-              e.value,
-              Paint()..color = colour.withValues(alpha: built ? 0.55 : 0.18));
-          canvas.drawPath(
-              e.value,
-              Paint()
-                ..style = PaintingStyle.stroke
-                ..strokeWidth = 0.6 * mpp
-                ..color = colour.withValues(alpha: built ? 0.9 : 0.45));
+        final outlines = mpp <= outlineMetresPerPx;
+        final outlinePaints = <(ParcelUse, bool), Paint>{};
+        final streetPaints = <RoadClass, Paint>{};
+        for (final key in _PlatCache.grid
+            .keysIn(view.left, view.top, view.right, view.bottom, margin: 1)) {
+          final cell = c.cells[key];
+          if (cell == null) continue;
+          final fill = cell.fill();
+          if (fill != null) {
+            canvas.drawVertices(fill, BlendMode.dst, _vertexPaint);
+          }
+          if (outlines) {
+            for (final e in cell.outlines.entries) {
+              final (use, built) = e.key;
+              final paint = outlinePaints.putIfAbsent(
+                  e.key,
+                  () => Paint()
+                    ..style = PaintingStyle.stroke
+                    ..strokeWidth = 0.6 * mpp
+                    ..color = _useColour(use)
+                        .withValues(alpha: built ? 0.9 : 0.45));
+              canvas.drawPath(e.value, paint);
+            }
+          }
+          for (final e in cell.streets.entries) {
+            final cls = e.key;
+            if (!_roadVisible(cls, lod)) continue;
+            canvas.drawPath(
+                e.value,
+                streetPaints.putIfAbsent(cls, () => _roadPaint(cls, mpp)));
+          }
         }
       }
       // Hand-placed plots: outlined in purple at every scale.
@@ -378,20 +492,10 @@ class _PlatPainter extends CustomPainter {
             ..strokeWidth = 1.5 * mpp
             ..color = const Color(0xFFC79BF0));
 
-      // Roads, by class: widths are the real carriageway, floored to a
-      // pixel so a street never vanishes at the scale it is drawn at.
-      for (final e in c.roads.entries) {
-        final cls = e.key;
-        if (!_roadVisible(cls, lod)) continue;
-        final width = math.max(cls.width, _minRoadPx(cls) * mpp);
-        canvas.drawPath(
-            e.value,
-            Paint()
-              ..style = PaintingStyle.stroke
-              ..strokeCap = StrokeCap.round
-              ..strokeJoin = StrokeJoin.round
-              ..strokeWidth = width
-              ..color = _roadColour(cls));
+      // The major roads, whole, by class.
+      for (final e in c.majorRoads.entries) {
+        if (!_roadVisible(e.key, lod)) continue;
+        canvas.drawPath(e.value, _roadPaint(e.key, mpp));
       }
     }
 
@@ -406,6 +510,15 @@ class _PlatPainter extends CustomPainter {
 
     _paintScaleBar(canvas, size, mpp, lod, c);
   }
+
+  /// A road's stroke: widths are the real carriageway, floored to a pixel
+  /// so a street never vanishes at the scale it is drawn at.
+  static Paint _roadPaint(RoadClass cls, double mpp) => Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeCap = StrokeCap.round
+    ..strokeJoin = StrokeJoin.round
+    ..strokeWidth = math.max(cls.width, _minRoadPx(cls) * mpp)
+    ..color = _roadColour(cls);
 
   static bool _roadVisible(RoadClass cls, PlatLod lod) => switch (cls.name) {
         'highway' || 'rail' || 'expressway' => true,
