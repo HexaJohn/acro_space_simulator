@@ -216,3 +216,33 @@ its small scavenges (one dropped frame in twelve seconds against four
 without), and a loaded frame — where the slice falls toward the floor —
 runs the pacer at nothing, which is where its three milliseconds an
 orbit frame went.
+
+### The plat (2D map) on the raster thread
+
+The plat is a `CustomPainter`, so its cost lands on the raster thread and
+never shows in the panel's UI build: at street scale on the reference
+colony it read 206 ms a frame (5 fps) with the UI thread at 5.7 ms. The
+first painter drew the whole colony as a handful of colony-wide paths
+(every lot of a use in one, every street of a class in another, filled
+and stroked), and Impeller tessellates all of a path every frame whatever
+the clip. The sweep now drives the plat through `view=plat` and
+`plat=E,N,mpp` (three patterns: a street-scale pan, a district-scale pan,
+a zoom from county to street), prints each pattern's raster average,
+gates the worst of them with `plat:` (default 8 ms), and shoots the plat
+at both scales beside the numbers. `--plat-only` runs just those.
+
+| painter | street pan | district pan | zoom |
+|---|---|---|---|
+| colony-wide paths (before) | 206 | | |
+| 500 m cells, fills as vertex batches, repaint boundary | 12.6 | 18.2 | 14.2 |
+| butt caps, bevel joins, outlines from 1.2 m/px | 12.2 | 17.8 | 13.5 |
+| district boxes as one image per 2 km block | 11.9 | 13.5 | 11.7 |
+| every road class cut to cells and blocks | **4.0** | **5.5** | **5.7** |
+
+Raster milliseconds a frame. The layer A/B (`platFills`, `platOutlines`,
+`platStreets`, `platBlockImages` in the knob table) is what found the last
+one: fills, outlines and streets each cost under a millisecond, and the
+eleven-millisecond floor under every scale was the avenues, arterials and
+collectors still drawn whole. Only highways, expressways and rail (a few
+dozen roads) stay colony-wide, for the county view. Block images start
+four a frame and pop in, since eighty at once read as a 200 ms frame.
