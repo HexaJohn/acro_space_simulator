@@ -112,13 +112,18 @@ Future<void> main(List<String> args) async {
   // stream in for a while after, and a sample taken then measures the
   // streaming, not the frame. Wait for the city's own queue to read empty
   // three polls running.
+  // The ground too: under the frame budget its chunk uploads slow to one
+  // a frame while the city builds, and a static sample taken with the
+  // ground still meshing read the terrain pass at 6 ms.
   var drained = 0;
   for (var i = 0; i < 300 && drained < 3; i++) {
     await Future<void>.delayed(const Duration(seconds: 2));
     final s = await call('ext.acro.citystudio');
     final m = RegExp(r'(\d+) queued').firstMatch('${s['cityDebug']}');
     final queued = m == null ? 0 : int.parse(m.group(1)!);
-    drained = queued == 0 && s['busy'] != true ? drained + 1 : 0;
+    final terrain = (s['terrainMs'] as num?)?.toDouble() ?? 0;
+    drained =
+        queued == 0 && s['busy'] != true && terrain < 1.5 ? drained + 1 : 0;
   }
   stdout.writeln('== queue drained');
   await call('ext.acro.citystudio',
@@ -235,15 +240,35 @@ Future<void> main(List<String> args) async {
         'n': 0,
       };
       final steps = (seconds * 20).round();
-      // The panel's windows hold the last ninety frames; a pattern's worst
-      // frame must not be the flip or the pattern before it.
-      await call('ext.acro.citystudio', {'resetFrames': 'true'});
+      // The timeline first, and a moment for its start to pass: opening
+      // the stream flushes the recorder's ring, a stall of up to half a
+      // second that read as the pattern's worst frame when the panel's
+      // window was reset after it. Then the panel's windows: they hold
+      // the last ninety frames, and a pattern's worst frame must not be
+      // the flip or the pattern before it.
       final window = spikes ? await TimelineWindow.begin(vm) : null;
       // What the pattern allocated, by class: the old-generation
       // collections that pause a frame are triggered by churn, and the
       // churn has a name.
       final allocBefore =
           spikes ? await vm.getAllocationProfile(isolateId) : null;
+      final phaseSum = <String, double>{};
+      var phaseN = 0;
+      final budget0 = await call('ext.acro.citystudio');
+      final overruns0 =
+          ((budget0['frameBudget'] as Map?)?['overruns'] as num?) ?? 0;
+      final stalls0 =
+          ((budget0['frameBudget'] as Map?)?['stalls'] as num?) ?? 0;
+      final fixed0 =
+          ((budget0['frameBudget'] as Map?)?['fixedOverruns'] as num?) ?? 0;
+      var overheadSum = 0.0, engineSum = 0.0;
+      // Every service call above stalls the isolate — the allocation
+      // profile walks the heap, the stream's opening flushes the ring —
+      // for up to half a second; the panel's windows are reset only
+      // after they have all passed, so the pattern's worst frame is the
+      // pattern's.
+      await Future<void>.delayed(const Duration(milliseconds: 2500));
+      await call('ext.acro.citystudio', {'resetFrames': 'true'});
       for (var i = 0; i < steps; i++) {
         final t = i / 20.0;
         await call('ext.acro.citystudio', pose(t));
@@ -273,6 +298,22 @@ Future<void> main(List<String> args) async {
                   9;
           if (slice < acc['sliceMin']!) acc['sliceMin'] = slice;
           acc['sliceSum'] = acc['sliceSum']! + slice;
+          overheadSum +=
+              ((s['frameBudget'] as Map?)?['overheadMs'] as num?)?.toDouble() ??
+                  0;
+          engineSum +=
+              ((s['frameBudget'] as Map?)?['engineMs'] as num?)?.toDouble() ??
+                  0;
+          // Where the frame goes: every phase the studio times, averaged
+          // over the pattern's polls (each poll is itself the panel's
+          // 90-frame average).
+          final phases = s['phaseMs'] as Map?;
+          if (phases != null) {
+            phaseN++;
+            phases.forEach((k, v) {
+              phaseSum['$k'] = (phaseSum['$k'] ?? 0) + ((v as num?)?.toDouble() ?? 0);
+            });
+          }
         }
       }
       final n = acc['n']!.clamp(1, 1e9);
@@ -292,9 +333,41 @@ Future<void> main(List<String> args) async {
           'submit max ${f(r['submitMs'])}  '
           'governor max ${r['governor']!.round()}  '
           'slice avg ${f(r['sliceAvg'])} min ${f(r['sliceMin'])}');
+      final budget1 = await call('ext.acro.citystudio');
+      final overruns1 =
+          ((budget1['frameBudget'] as Map?)?['overruns'] as num?) ?? 0;
+      final stalls1 =
+          ((budget1['frameBudget'] as Map?)?['stalls'] as num?) ?? 0;
+      final fixed1 =
+          ((budget1['frameBudget'] as Map?)?['fixedOverruns'] as num?) ?? 0;
+      stdout.writeln('    budget: overruns ${overruns1 - overruns0}  '
+          'fixed overruns ${fixed1 - fixed0}  '
+          'stalls ${stalls1 - stalls0}  '
+          'overhead avg ${f(overheadSum / n)}  engine avg ${f(engineSum / n)}');
+      if (phaseN > 0) {
+        final top = phaseSum.entries
+            .map((e) => MapEntry(e.key, e.value / phaseN))
+            .where((e) => e.value >= 0.05)
+            .toList()
+          ..sort((a, b) => b.value.compareTo(a.value));
+        stdout.writeln('    phases: ${top.take(10).map((e) => '${e.key} ${f(e.value)}').join('  ')}');
+      }
       sweeps[label] = r;
       if (window != null) {
-        reportSpikes(await window.end(), window.t0,
+        final spans = await window.end();
+        // The worst frame by the timeline's own clock, past the stream's
+        // opening stall: the panel's worst has no timestamp to exclude
+        // it by.
+        final frames = framesOf(spans)
+            .where((fr) => fr.ts - window.t0 > 3000000)
+            .toList()
+          ..sort((a, b) => b.dur.compareTo(a.dur));
+        if (frames.isNotEmpty) {
+          stdout.writeln('    timeline worst (after 3 s): '
+              '${f(frames.first.dur / 1000)} ms @'
+              '${((frames.first.ts - window.t0) / 1e6).toStringAsFixed(2)}s');
+        }
+        reportSpikes(spans, window.t0,
             thresholdMs: 16, count: 4, indent: '    ');
         final allocAfter = await vm.getAllocationProfile(isolateId);
         final before = <String, int>{

@@ -54,6 +54,21 @@ class FrameBudget {
   /// [stalls], not [overruns]. Zero halves on every overrun.
   static double stallMs = 6.0;
 
+  /// Whether an overrun is judged by what the streamers SPENT — theirs
+  /// only when they spent past their slice by more than
+  /// [spendToleranceMs] — or by the measured frame alone. The first cut
+  /// judged by the frame, and halved the slice on every frame the engine,
+  /// the widgets and a scavenge pushed past the target while the
+  /// streamers sat at the floor: an orbit's slice averaged 1.8 ms with
+  /// forty overruns a pattern and the streamers explaining none of them.
+  /// Under the spend rule such a frame still tells — its overhead sample
+  /// lifts the fixed cost and the room shrinks with it, in proportion,
+  /// not by halves — and the halving is kept for the case it fits: a
+  /// step that ran past the slice its cost memory said it would fit.
+  /// Off is the A/B's other arm.
+  static bool judgeBySpend = true;
+  static double spendToleranceMs = 1.0;
+
   /// The slice the streamers' knobs were tuned at: the old fixed
   /// `CityNodes.buildBudgetMs`. The derived knobs scale against it, so at
   /// this slice the budgeted streamers behave exactly as they did before.
@@ -109,8 +124,12 @@ class FrameBudget {
   double sliceMs = referenceSliceMs;
 
   /// Frames that measured over [targetMs] since construction and were
-  /// the streamers' to answer (see [stallMs]).
+  /// the streamers' to answer (see [stallMs], [judgeBySpend]).
   int overruns = 0;
+
+  /// Frames over the target that were neither a stall nor the streamers'
+  /// spend: the fixed part grew, and the overhead answered it.
+  int fixedOverruns = 0;
 
   /// Frames over the target that the frame's parts did not explain: not
   /// halved for (see [stallMs]).
@@ -169,8 +188,17 @@ class FrameBudget {
         overheadMs +=
             overheadAlpha * ((sample < 0 ? 0 : sample) - overheadMs);
         if (measured > targetMs) {
-          overruns++;
-          _ceilingMs = _clamp(_ceilingMs / 2);
+          // Last frame's spend against last frame's slice: [sliceMs] is
+          // not recomputed until below.
+          final theirs = !judgeBySpend ||
+              spentMs == null ||
+              spentMs > sliceMs + spendToleranceMs;
+          if (theirs) {
+            overruns++;
+            _ceilingMs = _clamp(_ceilingMs / 2);
+          } else {
+            fixedOverruns++;
+          }
         } else {
           _ceilingMs = _clamp(_ceilingMs + recoverMsPerFrame);
         }

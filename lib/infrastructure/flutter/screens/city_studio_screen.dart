@@ -891,6 +891,8 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       'ceilingMs': b.ceilingMs,
       'lastBuildMs': b.lastBuildMs,
       'overruns': b.overruns,
+      'fixedOverruns': b.fixedOverruns,
+      'stalls': b.stalls,
       'frames': b.frames,
       'city': {
         'buildMs': city.buildMs,

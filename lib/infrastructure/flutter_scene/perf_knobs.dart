@@ -131,6 +131,14 @@ class PerfKnobs {
       unit: 'ms',
     ),
     PerfKnob(
+      'judgeBySpend',
+      'An overrun halves the slice only when the streamers spent past it; '
+          'off, any frame over the target halves it.',
+      () => FrameBudget.judgeBySpend ? 1 : 0,
+      (v) => FrameBudget.judgeBySpend = v != 0,
+      isFlag: true,
+    ),
+    PerfKnob(
       'scaleUploadBytes',
       'Scale the upload byte cap by the slice; on, a busy frame starves '
           'the reveals and tiles land seconds late.',

@@ -24,6 +24,7 @@ void main() {
     FrameBudget.enabled = true;
     FrameBudget.targetMs = 15.0;
     FrameBudget.stallMs = 6.0;
+    FrameBudget.judgeBySpend = true;
     CityFrameBudgets.scaleBytes = false;
     CityNodes.frameSliceMs = null;
     TerrainNodes.frameSliceMs = null;
@@ -106,22 +107,48 @@ void main() {
       expect(b.overruns, 0);
       expect(b.overheadMs, 0);
       expect(b.ceilingMs, 12);
-      // Twenty with the streamers at nine: six unexplained, on the line
-      // — theirs.
+      // Twenty with the streamers at twelve against a slice of 9.5:
+      // three unexplained, and they spent past their slice — theirs.
       b.feed(20);
-      expect(b.beginFrame(engineMs: 5, spentMs: 9), 6);
+      expect(b.beginFrame(engineMs: 5, spentMs: 12), 6);
       expect(b.overruns, 1);
       expect(b.stalls, 1);
     });
 
-    test('stallMs zero halves on every overrun', () {
+    test('stallMs zero, judged by the frame, halves on every overrun', () {
       FrameBudget.stallMs = 0;
+      FrameBudget.judgeBySpend = false;
       final b = FrameBudget();
       b.beginFrame(engineMs: 5);
       b.feed(40);
       expect(b.beginFrame(engineMs: 5, spentMs: 3), lessThan(9.5));
       expect(b.overruns, 1);
       expect(b.stalls, 0);
+    });
+
+    test('an overrun the streamers did not spend shrinks the room, not the '
+        'ceiling', () {
+      final b = FrameBudget();
+      b.beginFrame(engineMs: 5);
+      expect(b.sliceMs, closeTo(9.5, 1e-9));
+      // Sixteen with the engine at five and the streamers at five of
+      // their 9.5: six unexplained — on the stall line, not past it — and
+      // not their spend. The overhead takes the six (a tenth of it) and
+      // the room shrinks by that; the ceiling stands.
+      b.feed(16);
+      expect(b.beginFrame(engineMs: 5, spentMs: 5), closeTo(8.9, 1e-9));
+      expect(b.overruns, 0);
+      expect(b.fixedOverruns, 1);
+      expect(b.stalls, 0);
+      expect(b.ceilingMs, 12);
+      expect(b.overheadMs, closeTo(0.6, 1e-9));
+      // Judged by the frame instead, the same frame halves.
+      FrameBudget.judgeBySpend = false;
+      final c = FrameBudget();
+      c.beginFrame(engineMs: 5);
+      c.feed(16);
+      expect(c.beginFrame(engineMs: 5, spentMs: 5), 6);
+      expect(c.overruns, 1);
     });
 
     test('the slice is the lesser of the ceiling and the room', () {
