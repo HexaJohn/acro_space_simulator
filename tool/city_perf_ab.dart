@@ -138,6 +138,12 @@ Future<void> main(List<String> args) async {
             'revealBytes ${counts['revealBytes']}  '
             'built ${counts['builtThisFrame']}  '
             'buildings ${counts['buildings']}');
+        stdout.writeln('    caches: tier hits ${counts['tierCacheHits']} '
+            'sets ${counts['tierCacheSets']} '
+            'MB ${((counts['tierCacheBytes'] ?? 0) / 1048576).toStringAsFixed(0)}  '
+            'pool hits ${counts['poolHits']} misses ${counts['poolMisses']} '
+            'evicted ${counts['poolEvicted']} free ${counts['poolFree']} '
+            'MB ${((counts['poolBytes'] ?? 0) / 1048576).toStringAsFixed(0)}');
       }
       await Future<void>.delayed(const Duration(seconds: 2));
     }
@@ -344,8 +350,17 @@ Future<void> main(List<String> args) async {
     if (!ok) failed = true;
   }
 
-  check('static frame', base['frameMs'], asserts['static']);
-  check('warm orbit frame', sweeps['orbit warm']?['frameMs'], asserts['sweep']);
+  // The UI thread's build time, not the frame: once the display paces
+  // presentation at 60 Hz the frame reads 16.7 ms whatever the work cost,
+  // and overnight the monitor's sleep flips that pacing. The worst frame
+  // stays a frame — a stall is a stall however it is paced.
+  if ((base['frameMs'] ?? 0) > 15.5 && (base['uiMs'] ?? 0) < 12) {
+    stdout.writeln('note: presentation is vsync-paced (frame '
+        '${f(base['frameMs'])} ms, ui ${f(base['uiMs'])} ms); the gate '
+        'reads the UI thread');
+  }
+  check('static ui build', base['uiMs'], asserts['static']);
+  check('warm orbit ui build', sweeps['orbit warm']?['uiMs'], asserts['sweep']);
   final worstSweep = sweeps.values
       .map((r) => r['worstMs'] ?? 0)
       .fold<double>(0, (a, b) => a > b ? a : b);

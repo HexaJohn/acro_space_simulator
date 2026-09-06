@@ -2800,6 +2800,7 @@ class CityNodes {
     phaseCount['tierCacheHits'] = _tierCacheHits;
     phaseCount['tierCacheSets'] = _tierCache.sets;
     phaseCount['tierCacheBytes'] = _tierCache.bytes;
+  }
 
   /// Bytes of dropped chunk buffers kept for the next chunks, instead of
   /// let go for their native finalizers to run inside a later old-space

@@ -11,12 +11,14 @@
 #   powershell -File tool/measure_city_studio.ps1 [-Tag name] [-Sprawl 20]
 #       [-Static 12] [-Sweep 16] [-Worst 33] [-OutDir build/perf]
 #
-# Thresholds are milliseconds: the static average, the warm-orbit average,
-# and the worst frame of any sweep. The script's exit code is the gate's.
+# Thresholds are milliseconds: the static UI-thread build average, the
+# warm-orbit UI build average, and the worst frame of any sweep. The UI
+# thread and not the frame, because a display pacing presentation at 60 Hz
+# reads 16.7 ms whatever the work cost. The script's exit code is the gate's.
 # See wiki/GPU-Profiling.md for what each tool reports.
 #
 # The defaults sit just over today's floor on the reference colony (static
-# 11.8, warm orbit 15.0, worst 108-112 ms), so the gate catches a regression
+# ui 8.3, warm orbit ui 12, worst 108-112 ms), so the gate catches a regression
 # rather than failing every run. The worst frame is an old-generation
 # collection while tiles land — its stop-the-world part finalises the
 # replaced tiles' GPU buffers, a native cost per object the engine binary
@@ -24,8 +26,8 @@
 param(
   [string]$Tag = "run",
   [int]$Sprawl = 20,
-  [double]$Static = 13,
-  [double]$Sweep = 16,
+  [double]$Static = 10,
+  [double]$Sweep = 13,
   [double]$Worst = 120,
   [string]$OutDir = "build/perf"
 )
