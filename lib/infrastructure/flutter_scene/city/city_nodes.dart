@@ -1284,11 +1284,17 @@ class CityNodes {
       final r = p.length;
       if (r > t.maxRadiusM) t.maxRadiusM = r;
     }
-    for (final p in snap.patches) {
-      final at = Vector3(p.px, p.py, p.pz);
-      rootFor(p.body, at);
-      _byBody.putIfAbsent(p.body, () => []);
-      tileFor(p.body, at).patches.add(p);
+    // By index, off the frame's columns: a tile records WHICH patches are
+    // its own and gathers them when it packs (see [CityTilePatchRefs]), so
+    // bucketing six hundred thousand patches allocates no snapshot for any
+    // of them.
+    final ps = snap.patches;
+    for (var i = 0; i < ps.length; i++) {
+      final at = Vector3(ps.px[i], ps.py[i], ps.pz[i]);
+      final body = ps.bodyAt(i);
+      rootFor(body, at);
+      _byBody.putIfAbsent(body, () => []);
+      tileFor(body, at).patches.add(ps, i);
     }
     for (final r in snap.roads) {
       final n = r.points.length ~/ 3;
@@ -1518,7 +1524,7 @@ class CityNodes {
     return CityTileColumns.fromSnapshots(
       buildings: t.buildings,
       roads: t.roads,
-      patches: t.patches,
+      patches: t.patches.gather(),
       ends: t.ends,
       roadEnds: roadEnds,
       transitEnds: transitEnds,
@@ -2890,7 +2896,9 @@ class _Tile {
   final double halfDiagonalM;
   final List<BuildingSnapshot> buildings = [];
   final List<RoadSnapshot> roads = [];
-  final List<CityPatchSnapshot> patches = [];
+
+  /// The tile's patches, as indices into the frame's columns.
+  final CityTilePatchRefs patches = CityTilePatchRefs();
   final List<CityTileEnd> ends = [];
 
   /// Body-centre distance of the outermost building centre in the tile

@@ -97,7 +97,7 @@ void main() {
     final columns = CityTileColumns.fromSnapshots(
       buildings: buildings,
       roads: roads,
-      patches: patches,
+      patches: CityPatchColumns.of(patches),
       ends: ends,
       roadEnds: roadEnds,
       transitEnds: transitEnds,
@@ -150,15 +150,23 @@ void main() {
     expect(back.roads.any((x) => x.bridges.isEmpty), isTrue);
     expect(back.roads.any((x) => x.bridges.isNotEmpty), isTrue);
 
+    // The patches went in as columns and come back as the same columns,
+    // row for row against a fresh packing of the objects — the packing is
+    // where a rotation's double becomes the float the columns keep, so the
+    // objects themselves are matched to float precision.
     expect(back.patches.length, patches.length);
+    expect(back.patches.contentEquals(CityPatchColumns.of(patches)), isTrue);
     for (var i = 0; i < patches.length; i++) {
-      final a = patches[i], b = back.patches[i];
+      final a = patches[i], b = back.patches.at(i);
       expect(b.colonyId, a.colonyId);
       expect(b.body, a.body);
       expect([b.px, b.py, b.pz], [a.px, a.py, a.pz]);
-      expect([b.qw, b.qx, b.qy, b.qz], [a.qw, a.qx, a.qy, a.qz]);
-      expect(b.sizeM, a.sizeM);
-      expect(b.depthM, a.depthM);
+      expect(b.qw, closeTo(a.qw, 1e-6));
+      expect(b.qx, closeTo(a.qx, 1e-6));
+      expect(b.qy, closeTo(a.qy, 1e-6));
+      expect(b.qz, closeTo(a.qz, 1e-6));
+      expect(b.sizeM, closeTo(a.sizeM, 1e-4));
+      expect(b.depthM, closeTo(a.depthM, 1e-4));
       expect(b.kind, a.kind);
     }
     expect(back.patches.map((p) => p.kind).toSet(), {0, 1, 2, 3, 4});
@@ -190,7 +198,7 @@ void main() {
     final columns = CityTileColumns.fromSnapshots(
       buildings: const [],
       roads: const [],
-      patches: const [],
+      patches: CityPatchColumns.empty,
       ends: const [],
       roadEnds: const [],
       transitEnds: const [],
@@ -209,7 +217,7 @@ void main() {
         () => CityTileColumns.fromSnapshots(
               buildings: const [],
               roads: [road(0)],
-              patches: const [],
+              patches: CityPatchColumns.empty,
               ends: const [],
               roadEnds: const [null],
               transitEnds: const [],
@@ -223,7 +231,7 @@ void main() {
     final columns = CityTileColumns.fromSnapshots(
       buildings: [for (var i = 0; i < 5; i++) building(i)],
       roads: [for (var i = 0; i < 3; i++) road(i)],
-      patches: [patch(0)],
+      patches: CityPatchColumns.of([patch(0)]),
       ends: [end(0)],
       roadEnds: const [null, null, null, null, null, null],
       transitEnds: const [],
@@ -262,7 +270,7 @@ void main() {
     final columns = CityTileColumns.fromSnapshots(
       buildings: buildings,
       roads: roads,
-      patches: patches,
+      patches: CityPatchColumns.of(patches),
       ends: ends,
       roadEnds: roadEnds,
       transitEnds: transitEnds,

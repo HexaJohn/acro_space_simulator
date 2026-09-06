@@ -28,6 +28,12 @@ import '../../domain/terrain/dem_registry.dart';
 import '../../domain/terrain/terrain_brush.dart';
 import '../../domain/terrain/terrain_edits.dart';
 import '../../domain/terrain/terrain_feature.dart';
+import 'city_patch_columns.dart';
+
+// The patch classes live in their own file (the columns are a fair amount of
+// code) but are part of the frame's vocabulary, so they come with it.
+export 'city_patch_columns.dart'
+    show CityPatchSnapshot, CityPatchColumns, CityPatchColumnsBuilder;
 import '../../domain/terrain/terrain_field.dart';
 import '../../domain/terrain/terrain_profile.dart';
 import '../../domain/universe/celestial_body.dart';
@@ -1016,16 +1022,19 @@ class BodyDescriptorSnapshot {
 
 /// The four strips of zoned ground left visible around a building.
 ///
-/// A [CityPatchSnapshot] is one quad, so a ring is four of them: two spanning
-/// the full width front and back, two filling the sides between. Strips of
-/// zero extent are skipped, which is what happens when a building genuinely
-/// does fill its plot.
+/// A patch is one quad, so a ring is four of them: two spanning the full
+/// width front and back, two filling the sides between. Strips of zero
+/// extent are skipped, which is what happens when a building genuinely does
+/// fill its plot.
+///
+/// [colony] and [bodyIx] are the colony's and body's names already interned
+/// in [out]'s string table (see [CityPatchColumnsBuilder.internString]).
 void _emitYardRing(
-  List<CityPatchSnapshot> out,
-  CitySim city,
+  CityPatchColumnsBuilder out,
+  int colony,
+  int bodyIx,
   Parcel parcel,
   CityBuildingSpec spec,
-  CelestialBody body,
   ({Vector3 position, Quaternion orientation}) t,
   ({double width, double depth}) extent,
 ) {
@@ -1054,9 +1063,9 @@ void _emitYardRing(
     // Offset in the lot's frame, then back out to body-fixed.
     final off = t.orientation.rotate(Vector3(s.e, s.n, 0));
     final p = t.position + off;
-    out.add(CityPatchSnapshot(
-      colonyId: city.id,
-      body: body.id.value,
+    out.addInterned(
+      colony: colony,
+      body: bodyIx,
       px: p.x,
       py: p.y,
       pz: p.z,
@@ -1067,7 +1076,7 @@ void _emitYardRing(
       sizeM: s.w,
       depthM: s.d,
       kind: kind,
-    ));
+    );
   }
 }
 
@@ -1415,78 +1424,6 @@ class BuildingSnapshot {
   // the spin about up is the NEGATIVE of that heading.
   final spin = Quaternion.axisAngle(Vector3.unitZ, -parcel.heading);
   return (position: base.position, orientation: base.orientation * spin);
-}
-
-/// A flat patch of colony ground: a road tile, a zoned-but-not-yet-built lot,
-/// or a support platform.
-///
-/// Without these a freshly zoned colony renders as empty ground — the frame
-/// only ever carried BUILDINGS, and a zone holds nothing until it grows. From
-/// the cockpit that reads as the editor being broken rather than as a city
-/// waiting to be built.
-class CityPatchSnapshot {
-  /// What the patch is. Index into the renderer's ground palette, so a client
-  /// needs no spec table to colour it.
-  static const int kindRoad = 0;
-  static const int kindResidential = 1;
-  static const int kindCommercial = 2;
-  static const int kindIndustrial = 3;
-  static const int kindSupport = 4;
-
-  final String colonyId;
-  final String body;
-  final double px, py, pz;
-  final double qw, qx, qy, qz;
-
-  /// Extent in metres, along the patch's own east (width) and north (depth)
-  /// axes. Grid cells are square; parcels are not.
-  final double sizeM;
-  final double depthM;
-  final int kind;
-
-  const CityPatchSnapshot({
-    required this.colonyId,
-    required this.body,
-    required this.px,
-    required this.py,
-    required this.pz,
-    required this.qw,
-    required this.qx,
-    required this.qy,
-    required this.qz,
-    required this.sizeM,
-    required this.kind,
-    double? depthM,
-  }) : depthM = depthM ?? sizeM;
-
-  Map<String, dynamic> toJson() => {
-        'colony': colonyId,
-        'body': body,
-        'p': [px, py, pz],
-        'q': [qw, qx, qy, qz],
-        's': sizeM,
-        'd': depthM,
-        'k': kind,
-      };
-
-  factory CityPatchSnapshot.fromJson(Map<String, dynamic> j) {
-    final p = (j['p'] as List).cast<num>();
-    final q = (j['q'] as List).cast<num>();
-    return CityPatchSnapshot(
-      colonyId: j['colony'] as String,
-      body: j['body'] as String,
-      px: p[0].toDouble(),
-      py: p[1].toDouble(),
-      pz: p[2].toDouble(),
-      qw: q[0].toDouble(),
-      qx: q[1].toDouble(),
-      qy: q[2].toDouble(),
-      qz: q[3].toDouble(),
-      sizeM: (j['s'] as num).toDouble(),
-      depthM: (j['d'] as num?)?.toDouble(),
-      kind: (j['k'] as num).toInt(),
-    );
-  }
 }
 
 /// A colony road, flattened for the wire.
@@ -1891,8 +1828,13 @@ class WorldSnapshot {
   /// are drawn from these without any building being involved.
   final List<RoadSnapshot> roads;
 
-  /// Ground patches: roads, zoned lots, support platforms.
-  final List<CityPatchSnapshot> patches;
+  /// Ground patches: roads, zoned lots, support platforms. Columns, not a
+  /// list of objects: on a big colony they outnumber everything else in the
+  /// frame put together, and as objects they were the bulk of what every
+  /// old-generation collection had to walk (see `city_patch_columns.dart`).
+  /// Iterable, so a reader that wants patches as objects still gets them —
+  /// transiently.
+  final CityPatchColumns patches;
 
   /// STATIC per-body render config (texture/heightmap/atmosphere mapping), keyed
   /// by body id — joins to [bodies]. Render-only; excluded from [fingerprint].
@@ -1920,19 +1862,21 @@ class WorldSnapshot {
   final List<MegastructureSnapshot> megastructures;
 
 
-  const WorldSnapshot({
+  // Not const: the empty patch columns are typed lists, which have no const
+  // form, and nothing constructs a frame as a constant.
+  WorldSnapshot({
     required this.tick,
     required this.vessels,
     this.epoch = 0,
     this.bodies = const {},
     this.buildings = const {},
     this.roads = const [],
-    this.patches = const [],
+    CityPatchColumns? patches,
     this.descriptors = const {},
     this.events = const [],
     this.terrainEdits = const [],
     this.megastructures = const [],
-  });
+  }) : patches = patches ?? CityPatchColumns.empty;
 
   /// The same frame at a different sim time.
   ///
@@ -2002,7 +1946,7 @@ class WorldSnapshot {
       }
     }
     final roads = <RoadSnapshot>[];
-    final patches = <CityPatchSnapshot>[];
+    final patches = CityPatchColumnsBuilder();
     // City-builder colonies. Their cells are placed on the same tangent grid as
     // the legacy colonies, but centred on the colony site rather than running
     // out from it, so the lander (the hub, at the middle cell) sits on the
@@ -2134,6 +2078,21 @@ class WorldSnapshot {
         // Roads, zoned-but-unbuilt lots and support platforms. These are what
         // the player has actually placed a moment after founding, so leaving
         // them out is what made a new colony look like nothing happened.
+        //
+        // Straight into the columns, with the two names this colony's
+        // patches all share interned once. The parcel list is materialised
+        // here too — `layout.parcels` builds a fresh list per call — and
+        // together with the cell sets gives the columns an upper bound to
+        // size themselves by (a built lot yields at most four strips), so
+        // on a colony this size they grow once rather than doubling twenty
+        // times over.
+        final parcels = city.layout.parcels;
+        final colonyIx = patches.internString(city.id);
+        final bodyIx = patches.internString(body.id.value);
+        patches.reserve(city.roads.length +
+            city.support.length +
+            city.zones.length +
+            parcels.length * 4);
         void patch(int cell, int kind) {
           final half = city.grid / 2.0;
           final t = placement.building(
@@ -2144,9 +2103,9 @@ class WorldSnapshot {
             gridY: ((cell ~/ city.grid) - half).round(),
             cell: CitySim.cellM,
           );
-          patches.add(CityPatchSnapshot(
-            colonyId: city.id,
-            body: body.id.value,
+          patches.addInterned(
+            colony: colonyIx,
+            body: bodyIx,
             px: t.position.x,
             py: t.position.y,
             pz: t.position.z,
@@ -2155,8 +2114,9 @@ class WorldSnapshot {
             qy: t.orientation.y,
             qz: t.orientation.z,
             sizeM: CitySim.cellM,
+            depthM: CitySim.cellM,
             kind: kind,
-          ));
+          );
         }
 
         for (final cell in city.roads) {
@@ -2193,7 +2153,7 @@ class WorldSnapshot {
         }
         // Empty lots, drawn so the subdivision is visible before anything is
         // built on it.
-        for (final parcel in city.layout.parcels) {
+        for (final parcel in parcels) {
           // A built lot draws its zone as a RING around the building, not as
           // a quad under it.
           //
@@ -2209,12 +2169,13 @@ class WorldSnapshot {
               city, parcel, groundFor('lot:${parcel.id}', parcel.centroid));
           final extent = parcel.buildableExtent;
           if (builtSpec != null) {
-            _emitYardRing(patches, city, parcel, builtSpec, body, t, extent);
+            _emitYardRing(
+                patches, colonyIx, bodyIx, parcel, builtSpec, t, extent);
             continue;
           }
-          patches.add(CityPatchSnapshot(
-            colonyId: city.id,
-            body: body.id.value,
+          patches.addInterned(
+            colony: colonyIx,
+            body: bodyIx,
             px: t.position.x,
             py: t.position.y,
             pz: t.position.z,
@@ -2230,7 +2191,7 @@ class WorldSnapshot {
               ParcelUse.residential => CityPatchSnapshot.kindResidential,
               _ => CityPatchSnapshot.kindSupport,
             },
-          ));
+          );
         }
         for (final e in city.occupiedCells()) {
           buildings['${city.id}/${e.key}'] = BuildingSnapshot.ofCityCell(
@@ -2266,7 +2227,7 @@ class WorldSnapshot {
       },
       buildings: buildings,
       roads: roads,
-      patches: patches,
+      patches: patches.build(),
       events: events,
       terrainEdits: terrainEdits == null
           ? const []
@@ -2296,7 +2257,7 @@ class WorldSnapshot {
         'vessels': [for (final v in vessels.values) v.toJson()],
         'buildings': [for (final b in buildings.values) b.toJson()],
         'roads': [for (final r in roads) r.toJson()],
-        'patches': [for (final p in patches) p.toJson()],
+        'patches': patches.toJsonList(),
         'events': [for (final e in events) e.toJson()],
         if (terrainEdits.isNotEmpty)
           'terrainEdits': [for (final e in terrainEdits) e.toJson()],
@@ -2333,10 +2294,7 @@ class WorldSnapshot {
         for (final r in roadList)
           RoadSnapshot.fromJson(r as Map<String, dynamic>),
       ],
-      patches: [
-        for (final p in patchList)
-          CityPatchSnapshot.fromJson(p as Map<String, dynamic>),
-      ],
+      patches: CityPatchColumns.fromJsonList(patchList),
       buildings: {
         for (final b in buildingList)
           '${(b as Map<String, dynamic>)['colony']}/${b['id']}':

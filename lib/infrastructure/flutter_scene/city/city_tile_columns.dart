@@ -65,7 +65,10 @@ class CityTileMembers {
 
   final List<BuildingSnapshot> buildings;
   final List<RoadSnapshot> roads;
-  final List<CityPatchSnapshot> patches;
+
+  /// The tile's patches, as the columns they already were in the frame:
+  /// the mesher reads them by index (see `city_patch_columns.dart`).
+  final CityPatchColumns patches;
   final List<CityTileEnd> ends;
 
   /// Per road, in [roads] order: what the body's end table says of its two
@@ -107,9 +110,7 @@ class CityTileColumns {
     required this.roadBridgeStarts,
     required this.roadF,
     required this.roadI,
-    required this.patchStrings,
-    required this.patchF,
-    required this.patchKinds,
+    required this.patches,
     required this.endF,
     required this.endI,
     required this.roadEndHalf,
@@ -158,14 +159,11 @@ class CityTileColumns {
   /// [collectorFlag], [hasStartHalfFlag], [hasEndHalfFlag]).
   final Int32List roadI;
 
-  /// Per patch: colonyId, body as [strings] indices.
-  final Int32List patchStrings;
-
-  /// Per patch: px, py, pz, qw, qx, qy, qz, sizeM, depthM.
-  final Float64List patchF;
-
-  /// Per patch: kind.
-  final Int32List patchKinds;
+  /// The tile's patches. Not packed here: the frame already holds its
+  /// patches as columns (see `city_patch_columns.dart`), and a tile's share
+  /// is gathered from them — typed lists and a string table of its own, so
+  /// it crosses to a worker as blocks like everything else in here.
+  final CityPatchColumns patches;
 
   /// Per end: at (3), next (3), halfWidthM.
   final Float64List endF;
@@ -193,12 +191,11 @@ class CityTileColumns {
   static const int noEntry = -1;
 
   static const int _buildingF = 11;
-  static const int _patchF = 9;
   static const int _endF = 7;
 
   int get buildingCount => buildingIds.length;
   int get roadCount => roadPointStarts.length - 1;
-  int get patchCount => patchKinds.length;
+  int get patchCount => patches.length;
   int get endCount => endI.length ~/ 2;
 
   /// Bytes the send copies as blocks: every typed column. The strings are
@@ -215,9 +212,7 @@ class CityTileColumns {
       roadBridgeStarts.lengthInBytes +
       roadF.lengthInBytes +
       roadI.lengthInBytes +
-      patchStrings.lengthInBytes +
-      patchF.lengthInBytes +
-      patchKinds.lengthInBytes +
+      patches.typedBytes +
       endF.lengthInBytes +
       endI.lengthInBytes +
       roadEndHalf.lengthInBytes +
@@ -225,11 +220,12 @@ class CityTileColumns {
       transitEnds.lengthInBytes;
 
   /// Pack a tile's members. [roadEnds] has two entries per road, in
-  /// [roads] order (see [CityTileMembers.roadEnds]).
+  /// [roads] order (see [CityTileMembers.roadEnds]); [patches] are the
+  /// tile's own already-gathered columns (see [CityTilePatchRefs.gather]).
   factory CityTileColumns.fromSnapshots({
     required List<BuildingSnapshot> buildings,
     required List<RoadSnapshot> roads,
-    required List<CityPatchSnapshot> patches,
+    required CityPatchColumns patches,
     required List<CityTileEnd> ends,
     required List<(double, int)?> roadEnds,
     required List<Vector3> transitEnds,
@@ -318,27 +314,6 @@ class CityTileColumns {
     roadPointStarts[nr] = pAt;
     roadBridgeStarts[nr] = bAt;
 
-    final np = patches.length;
-    final patchStrings = Int32List(np * 2);
-    final patchF = Float64List(np * _patchF);
-    final patchKinds = Int32List(np);
-    for (var i = 0; i < np; i++) {
-      final p = patches[i];
-      patchStrings[i * 2] = intern(p.colonyId);
-      patchStrings[i * 2 + 1] = intern(p.body);
-      final f = i * _patchF;
-      patchF[f] = p.px;
-      patchF[f + 1] = p.py;
-      patchF[f + 2] = p.pz;
-      patchF[f + 3] = p.qw;
-      patchF[f + 4] = p.qx;
-      patchF[f + 5] = p.qy;
-      patchF[f + 6] = p.qz;
-      patchF[f + 7] = p.sizeM;
-      patchF[f + 8] = p.depthM;
-      patchKinds[i] = p.kind;
-    }
-
     final ne = ends.length;
     final endF = Float64List(ne * _endF);
     final endI = Int32List(ne * 2);
@@ -378,9 +353,7 @@ class CityTileColumns {
       roadBridgeStarts: roadBridgeStarts,
       roadF: roadF,
       roadI: roadI,
-      patchStrings: patchStrings,
-      patchF: patchF,
-      patchKinds: patchKinds,
+      patches: patches,
       endF: endF,
       endI: endI,
       roadEndHalf: roadEndHalf,
@@ -445,24 +418,6 @@ class CityTileColumns {
       return n == noEntry ? null : (roadEndHalf[i], n);
     }, growable: false);
 
-    final patches = List<CityPatchSnapshot>.generate(patchCount, (i) {
-      final f = i * _patchF;
-      return CityPatchSnapshot(
-        colonyId: strings[patchStrings[i * 2]],
-        body: strings[patchStrings[i * 2 + 1]],
-        px: patchF[f],
-        py: patchF[f + 1],
-        pz: patchF[f + 2],
-        qw: patchF[f + 3],
-        qx: patchF[f + 4],
-        qy: patchF[f + 5],
-        qz: patchF[f + 6],
-        sizeM: patchF[f + 7],
-        depthM: patchF[f + 8],
-        kind: patchKinds[i],
-      );
-    }, growable: false);
-
     final ends = List<CityTileEnd>.generate(endCount, (i) {
       final f = i * _endF;
       final flags = endI[i * 2 + 1];
@@ -485,10 +440,47 @@ class CityTileColumns {
     return CityTileMembers(
       buildings: buildings,
       roads: roads,
+      // Already columns; the mesher reads them as such.
       patches: patches,
       ends: ends,
       roadEnds: roadEnds,
       transitEnds: transit,
     );
   }
+}
+
+/// A tile's share of the frame's patches: indices into the frame's
+/// [CityPatchColumns], collected as the frame is bucketed and gathered into
+/// columns of the tile's own when the tile is packed for a worker.
+///
+/// Indices rather than objects because there are no objects: the frame
+/// keeps its patches as columns, and a list of six hundred thousand
+/// snapshots spread across the tiles would put back exactly the heap the
+/// columns took out of the old-generation marker's walk.
+class CityTilePatchRefs {
+  CityPatchColumns? _source;
+  Int32List _indices = Int32List(32);
+  int _n = 0;
+
+  int get length => _n;
+
+  /// Row [i] of [source] belongs to this tile. Every row of a tile comes
+  /// from the one frame it was bucketed from.
+  void add(CityPatchColumns source, int i) {
+    assert(_source == null || identical(_source, source),
+        'a tile refers into the one frame it was bucketed from');
+    _source ??= source;
+    if (_n == _indices.length) {
+      _indices = Int32List(_n * 2)..setRange(0, _n, _indices);
+    }
+    _indices[_n++] = i;
+  }
+
+  /// The rows, as a view over the buffer: valid until the next [add].
+  Int32List get indices => Int32List.sublistView(_indices, 0, _n);
+
+  /// The tile's patches as columns of their own (see
+  /// [CityPatchColumns.gather]).
+  CityPatchColumns gather() =>
+      _source?.gather(indices) ?? CityPatchColumns.empty;
 }

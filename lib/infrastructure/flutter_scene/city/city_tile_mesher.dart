@@ -934,17 +934,22 @@ class CityTileMeshJob {
   void _emitPatches() {
     final m = _patches;
     final anchorBF = request.anchorBF;
-    for (final p in members.patches) {
-      final centre = Vector3(p.px, p.py, p.pz) - anchorBF;
+    // Read straight off the columns: a near tile has thousands of patches,
+    // and a snapshot object per patch per build was allocation the worker
+    // did not need (see `city_patch_columns.dart`).
+    final ps = members.patches;
+    for (var i = 0; i < ps.length; i++) {
+      final centre = Vector3(ps.px[i], ps.py[i], ps.pz[i]) - anchorBF;
       final up = (centre + anchorBF).normalized;
-      final basis = Quaternion(p.qw, p.qx, p.qy, p.qz);
+      final basis = Quaternion(ps.qw[i], ps.qx[i], ps.qy[i], ps.qz[i]);
       final east = basis.rotate(Vector3.unitX);
       final north = basis.rotate(Vector3.unitY);
-      final hw = p.sizeM / 2;
-      final hd = p.depthM / 2;
+      final hw = ps.sizeM[i] / 2;
+      final hd = ps.depthM[i] / 2;
+      final kind = ps.kind[i];
       // Lifted clear of the levelled pad, and each kind by a different amount,
       // so a road drawn over a zoned lot does not z-fight it.
-      final lift = up * (0.05 + p.kind * 0.01);
+      final lift = up * (0.05 + kind * 0.01);
       final c = [
         centre + east * -hw + north * -hd + lift,
         centre + east * hw + north * -hd + lift,
@@ -956,11 +961,11 @@ class CityTileMeshJob {
       // samples the swatch CENTRE, where no filtering or mip level can bleed a
       // neighbouring kind's colour in.
       final List<(double, double)> uv;
-      if (p.kind == CityPatchSnapshot.kindRoad) {
+      if (kind == CityPatchSnapshot.kindRoad) {
         // Inset by a texel's worth so the sampler cannot reach the next swatch.
         const e = 0.004;
-        final u0 = p.kind / kGroundSwatches + e,
-            u1 = (p.kind + 1) / kGroundSwatches - e;
+        final u0 = kind / kGroundSwatches + e,
+            u1 = (kind + 1) / kGroundSwatches - e;
         uv = [(u0, 1.0), (u1, 1.0), (u1, 0.0), (u0, 0.0)];
       } else {
         // Against kGroundSwatches, NOT the number of patch kinds. The palette
@@ -970,7 +975,7 @@ class CityTileMeshJob {
         // sampled commercial blue, industrial sampled refusal red, support
         // sampled the heatmap amber. Exactly the drift kGroundSwatches was
         // introduced to stop, still live at this one call site.
-        final u = (p.kind + 0.5) / kGroundSwatches;
+        final u = (kind + 0.5) / kGroundSwatches;
         uv = [(u, 0.5), (u, 0.5), (u, 0.5), (u, 0.5)];
       }
       final idx = [

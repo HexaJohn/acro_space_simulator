@@ -1140,9 +1140,12 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       sum = sum + Vector3(bs.px, bs.py, bs.pz);
       count++;
     }
-    for (final p in snap.patches) {
-      if (p.body != body.id.value) continue;
-      sum = sum + Vector3(p.px, p.py, p.pz);
+    // Off the columns, not through transient snapshots: this is every patch
+    // in the colony.
+    final ps = snap.patches;
+    for (var i = 0; i < ps.length; i++) {
+      if (ps.bodyAt(i) != body.id.value) continue;
+      sum = sum + Vector3(ps.px[i], ps.py[i], ps.pz[i]);
       count++;
     }
     final anchorBF = count == 0

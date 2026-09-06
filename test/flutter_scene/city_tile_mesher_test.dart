@@ -85,7 +85,7 @@ void main() {
     // A dead end: the cul-de-sac pass.
     road(RoadClass.street, [(0, 0), (0, -150)]),
   ];
-  final patches = <CityPatchSnapshot>[
+  final patches = CityPatchColumns.of([
     const CityPatchSnapshot(
       colonyId: 'c',
       body: body,
@@ -100,7 +100,7 @@ void main() {
       kind: CityPatchSnapshot.kindResidential,
       depthM: 60,
     ),
-  ];
+  ]);
   // The three crossings and the dead end, as the UI thread cuts them.
   CityTileEnd end(double x, double y, double nx, double ny) => CityTileEnd(
       Vector3(x, y, r), Vector3(nx, ny, r), RoadClass.street.width / 2,

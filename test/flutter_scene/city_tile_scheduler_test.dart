@@ -82,7 +82,7 @@ void main() {
           roads: [
             road([(x - 100, 0), (x + 100, 0)]),
           ],
-          patches: const [],
+          patches: CityPatchColumns.empty,
           ends: const [],
           roadEnds: const [null, null],
           transitEnds: const [],

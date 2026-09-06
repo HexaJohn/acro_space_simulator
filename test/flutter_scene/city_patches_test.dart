@@ -142,6 +142,38 @@ void main() {
     expect(back.patches.first.kind, snap.patches.first.kind);
     expect(back.patches.first.sizeM, snap.patches.first.sizeM);
   });
+
+  test('the wire carries the columns exactly: capture, out, in, equal', () {
+    // The frame holds its patches as columns and the wire still speaks in
+    // per-patch maps with the same keys it always had. What the columns
+    // store — doubles for position, floats for rotation and extent — is
+    // what the wire carries, so a frame decoded from its own JSON is the
+    // frame, row for row, with nothing lost to a second rounding.
+    final city = colony()
+      ..addRoad(0)
+      ..addRoad(1);
+    city.zones[city.hubKey + 1] =
+        const CityZoneType('residential', Density.low);
+    city.zones[city.hubKey + 2] =
+        const CityZoneType('industrial', Density.high);
+    final snap = capture(city);
+    expect(snap.patches, isNotEmpty);
+
+    final json = snap.toJson();
+    final maps = json['patches'] as List;
+    expect(maps.length, snap.patches.length);
+    // The same keys, per patch, that CityPatchSnapshot.toJson has always
+    // written — the engine bridge decodes by them.
+    expect((maps.first as Map).keys.toSet(),
+        {'colony', 'body', 'p', 'q', 's', 'd', 'k'});
+    expect((maps.first as Map)['p'], hasLength(3));
+    expect((maps.first as Map)['q'], hasLength(4));
+
+    final back = WorldSnapshot.fromJson(json);
+    expect(back.patches.contentEquals(snap.patches), isTrue);
+    // And a frame's own toJson is the same bytes twice.
+    expect(WorldSnapshot.fromJson(json).toJson()['patches'], maps);
+  });
 }
 
 /// Great-circle distance from the colony site to a body-fixed point.
