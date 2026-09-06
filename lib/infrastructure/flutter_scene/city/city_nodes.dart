@@ -60,6 +60,7 @@ import '../../../domain/architecture/architecture_style.dart';
 import '../../../domain/architecture/city_lighting.dart';
 import '../coord_convert.dart';
 import '../graphics_quality.dart';
+import 'city_detail_layer.dart';
 import 'city_materials.dart';
 import 'city_tile_columns.dart';
 import 'city_tile_mesher.dart';
@@ -995,7 +996,11 @@ class CityNodes {
         case CityTier.far:
           far++;
       }
-      final canDetail =
+      // Under the detail layer no base tile can detail: the buildings
+      // round the eye are the layer's, and a base tile that read the
+      // camera — this term, or the colony tier, which follows the nearest
+      // tile — would be rebuilt by a walk (see [detailLayer]).
+      final canDetail = !detailLayer &&
           tileCanDetail(tier, t.distanceM,
               colonyTier: colonyTier,
               focusRadiusM: focusBF.length,
@@ -1004,10 +1009,11 @@ class CityNodes {
           ? '${(focusBF.x / 64).round()},${(focusBF.y / 64).round()},'
               '${(focusBF.z / 64).round()}'
           : '';
+      final colonyTerm = detailLayer ? '' : '${colonyTier.index}';
       final want = '${t.structureKey}|${tier.index}|$cam'
           '|${lodDebug ? 1 : 0}|${perBuildingLod ? 1 : 0}'
           '|${interiorRangeM.round()}|${blockRangeM.round()}'
-          '|${colonyTier.index}|$_invalidation';
+          '|$colonyTerm|${detailLayer ? 1 : 0}|$_invalidation';
       // Compared afresh besides when the last swap wrote a job's key over
       // the want key to keep an answered tile off the queue (see [_swap]).
       if (!hide && (t.wantKey != want || t.wantKeyStale)) {
@@ -1226,6 +1232,14 @@ class CityNodes {
         '($near near, $mid mid, $far far), $draws draws, '
         '${_queue.length} queued, meshes ${_uploaded.length}, '
         'skyline $skylineTris tris';
+
+    // The detail layer: the buildings round the eye at their own tier,
+    // drawn over the base tiles, which under it never read the camera
+    // (see [detailLayer]). After the tiles, with what they left of the
+    // frame's bytes.
+    sw.reset();
+    _syncDetailLayer(snap, focusByBody, colonyTier, uploadBytes);
+    phaseMs['city.detail'] = sw.elapsedMicroseconds / 1000;
   }
 
   // ---- Tiles ----------------------------------------------------------------
@@ -1478,14 +1492,16 @@ class CityNodes {
       tier: tier,
       // Only where some building can resolve past a box: the furniture
       // pass skips every block-tier lot, so a tile that cannot detail
-      // would run its steps to emit nothing (see [tileCanDetail]).
-      canDetail: lotFeatures && t.wantCanDetail,
+      // would run its steps to emit nothing (see [tileCanDetail]). Never
+      // under the detail layer, whose want key already says so.
+      canDetail: lotFeatures && t.wantCanDetail && !detailLayer,
       anchorBF: t.centreBF,
       columns: columns,
       focusBF: focusBF,
       colonyTier: colonyTier,
       epoch: snap.epoch,
       knobs: knobs,
+      detailLayer: detailLayer,
     );
   }
 
@@ -2846,6 +2862,121 @@ class CityNodes {
   /// buffer goes.
   void _reclaimBuffers(Iterable<fs.Node> nodes) {
     _bufferPool.reclaimNodes(nodes, frameIndex);
+  }
+
+  // ---- The detail layer -----------------------------------------------------
+
+  /// Whether the per-building detail round the eye is drawn by the
+  /// [CityDetailLayer] rather than by the tiles — the A/B switch.
+  ///
+  /// ON: a base tile's want key carries no camera term and no colony
+  /// tier, so a tile is rebuilt only when its structure, its tier, the
+  /// knobs or the invalidation move; every building in it is its massing
+  /// boxes, a near tile's inset by [CityTileMesher.nearBoxInset] for the
+  /// layer's models to cover; and the lot furniture is the layer's. The
+  /// layer submits one job per 64 m cell of eye travel (see
+  /// [CityDetailLayer.cellM]) for the buildings within [blockRangeM],
+  /// with the archetype meshes the UI thread lacks generated on the
+  /// worker.
+  ///
+  /// OFF: the tiles as they were — the near tier's key carries the eye
+  /// quantised to 64 m wherever a building could resolve past a block
+  /// (see [tileCanDetail]), each building in a near tile takes its tier
+  /// from its own distance, the furniture is baked with the tile, and
+  /// cold full-detail archetypes are generated on this thread. Measured
+  /// before the layer: walking at street level kept ~50 tiles queued at
+  /// 32-36 ms of build a frame.
+  static bool detailLayer = true;
+
+  /// Milliseconds of UI thread the detail layer's upload steps may take a
+  /// frame, at least: the layer also gets whatever the tile build left of
+  /// [buildBudgetMs], so an idle queue — the walking case the layer
+  /// exists for — hands it the whole build budget. Its steps are small
+  /// (an archetype is tens of kilobytes) and a set lands over a few
+  /// frames either way; this is the floor that keeps it landing while
+  /// tiles stream in behind a fast camera.
+  static double detailBudgetMs = 3;
+
+  final CityDetailLayer _detailLayer = CityDetailLayer();
+
+  /// The buildings of the tiles round [focusBF]'s cell on [bodyId] — its
+  /// own and the ring of eight — which is every building within the
+  /// block range of the eye: a tile is two miles, the range three
+  /// hundred metres (see [buildingNearBF], which reads the same ring).
+  Iterable<BuildingSnapshot> _detailCandidates(
+      String bodyId, Vector3 focusBF) sync* {
+    final root = _roots[bodyId];
+    if (root == null) return;
+    final (ie, iN) = root.basis.cellOf(focusBF, tileM);
+    for (var de = -1; de <= 1; de++) {
+      for (var dn = -1; dn <= 1; dn++) {
+        final t = _tiles['$bodyId/${ie + de}/${iN + dn}'];
+        if (t != null) yield* t.buildings;
+      }
+    }
+  }
+
+  /// One frame of the detail layer (see [detailLayer]): keyed off the eye
+  /// over the nearest tile's body, uploaded with what the tiles left of
+  /// the frame's bytes, and its counts onto the panel's — the buildings
+  /// it draws come off the block count, where the base tiles put them.
+  void _syncDetailLayer(WorldSnapshot snap, Map<String, Vector3> focusByBody,
+      BuildingDetail colonyTier, CityUploadByteBudget uploadBytes) {
+    final layer = _detailLayer;
+    if (!detailLayer) {
+      layer.drop(_reclaimBuffers);
+      phaseCount['detailBuildings'] = 0;
+      phaseCount['detailArchetypes'] = 0;
+      phaseCount['detailJobs'] = layer.jobs;
+      return;
+    }
+    _Tile? nearest;
+    for (final t in _tiles.values) {
+      if (nearest == null || t.distanceM < nearest.distanceM) nearest = t;
+    }
+    final bodyId = nearest?.bodyId;
+    final focusBF = bodyId == null ? null : focusByBody[bodyId];
+    final root = bodyId == null ? null : _roots[bodyId];
+    if (bodyId != null && focusBF != null && root != null) {
+      final buildUs = ((phaseMs['city.build'] ?? 0) * 1000).round();
+      final budgetUs = math.max((detailBudgetMs * 1000).round(),
+          (buildBudgetMs * 1000).round() - buildUs);
+      layer.sync(
+        CityDetailFrame(
+          scheduler: _scheduler,
+          root: root.node,
+          rootAnchorBF: root.anchorBF,
+          pool: _bufferPool,
+          frameIndex: frameIndex,
+          reclaim: _reclaimBuffers,
+          bytes: uploadBytes,
+          budgetUs: budgetUs,
+        ),
+        CityDetailWant(
+          bodyId: bodyId,
+          focusBF: focusBF,
+          structureSig: _structureSig,
+          invalidation: _invalidation,
+          colonyTier: colonyTier,
+          lotFeatures: lotFeatures,
+          epoch: snap.epoch,
+          knobs: _knobsNow(),
+          candidates: () => _detailCandidates(bodyId, focusBF),
+        ),
+      );
+    }
+    final shown = layer.shownBuildings;
+    layer.shownLodCounts.forEach((k, v) {
+      lodCounts[k] = (lodCounts[k] ?? 0) + v;
+    });
+    final block = lodCounts[BuildingDetail.block];
+    if (block != null) {
+      lodCounts[BuildingDetail.block] = math.max(0, block - shown);
+    }
+    phaseCount['detailBuildings'] = shown;
+    phaseCount['detailArchetypes'] = layer.archetypeCount;
+    phaseCount['detailJobs'] = layer.jobs;
+    phaseCount['detailMisses'] = layer.misses;
   }
 }
 

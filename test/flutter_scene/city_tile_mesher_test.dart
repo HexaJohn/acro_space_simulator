@@ -499,6 +499,29 @@ void main() {
       expect(digest(near), 0x77a67f3b);
     });
 
+    test('with the detail layer off the tile is the same to the byte', () {
+      // The layer's switch is a request field; off, nothing of the
+      // layer's reaches the tile (see `CityTileRequest.detailLayer`).
+      final r = request(CityTier.near);
+      final off = CityTileMesher.mesh(
+          CityTileRequest(
+            tileKey: r.tileKey,
+            key: r.key,
+            tier: r.tier,
+            canDetail: r.canDetail,
+            anchorBF: r.anchorBF,
+            columns: r.columns,
+            focusBF: r.focusBF,
+            colonyTier: r.colonyTier,
+            epoch: r.epoch,
+            knobs: r.knobs,
+            detailLayer: false,
+          ),
+          CityBuildingLibraries());
+      expect(digest(off), 0x77a67f3b);
+      expect(off.archetypeMeshes, isEmpty);
+    });
+
     test('full: the camera in the street, the tile to the byte', () {
       // One of this tile's groups is over a megabyte: at the cap of the
       // day the digest was taken it arrived in two chunks, at today's cap

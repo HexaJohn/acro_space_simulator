@@ -138,6 +138,13 @@ class CityMeshKnobs {
       styleId == other.styleId &&
       bucketM == other.bucketM &&
       variants == other.variants;
+
+  /// Every knob as one string, for a build key: two requests whose terms
+  /// differ may mesh differently, and two whose terms agree mesh the same.
+  /// The ranges go rounded to the metre, as the tile keys carry them.
+  String get keyTerms => '$styleId|$bucketM|$variants|${perBuildingLod ? 1 : 0}'
+      '|${blockRangeM.round()}|${interiorRangeM.round()}|${lodDebug ? 1 : 0}'
+      '|${onStreetParking ? 1 : 0}|${sealedWorld ? 1 : 0}|$maxParkedCars';
 }
 
 /// Everything one tile build reads: the tile's members, the few facts of
@@ -169,6 +176,8 @@ class CityTileRequest {
     required this.colonyTier,
     required this.epoch,
     required this.knobs,
+    this.detailLayer = false,
+    this.detail,
   });
 
   /// The tile's identity, by body and cell.
@@ -202,6 +211,69 @@ class CityTileRequest {
   /// Sim time, for the junction signals' phase.
   final double epoch;
   final CityMeshKnobs knobs;
+
+  /// Whether the per-building detail is drawn by the detail layer (see
+  /// `city_detail_layer.dart`) rather than by the tiles. With it a BASE
+  /// tile reads nothing off the camera: every building is its block
+  /// silhouette, the near tier's boxes inset by
+  /// [CityTileMesher.nearBoxInset] for the layer's models to cover, and
+  /// the lot furniture is the layer's to draw. False is the tile as it
+  /// always was — the near tier resolving each building from [focusBF],
+  /// and the furniture with it — so the two paths can be measured against
+  /// each other (see `CityNodes.detailLayer`).
+  final bool detailLayer;
+
+  /// Non-null for a DETAIL job: not a tile but the buildings round the eye,
+  /// meshed at their own tier with their lot furniture, and the archetype
+  /// meshes the UI thread lacks generated here (see [CityDetailSpec]). The
+  /// tile fields keep their meaning — [anchorBF] is what the vertices are
+  /// relative to, [tier] is near — and [columns] carries buildings only.
+  final CityDetailSpec? detail;
+
+  /// Whether this is a detail job rather than a tile build.
+  bool get isDetail => detail != null;
+}
+
+/// What a detail job knows beyond a tile's request: the archetype keys the
+/// UI thread already holds geometry for.
+///
+/// A worker groups the instances it emits by archetype and generates the
+/// MESH of every archetype not in this list — the UI thread would
+/// otherwise generate it cold, a quarter to two milliseconds each, on the
+/// frame the group lands. The list is the keys the UI side computed for
+/// these very buildings from the same request (see
+/// `CityDetailLayer.knownArchetypes`), so it is short; a key in it that
+/// the worker does not meet costs nothing, and a key it meets that is not
+/// in it comes back with its mesh.
+class CityDetailSpec {
+  const CityDetailSpec({required this.knownArchetypes});
+
+  final List<BuildingArchetype> knownArchetypes;
+}
+
+/// One archetype's geometry, generated on the worker for a UI thread that
+/// had none: the solid and the glazing as the generator makes them, or —
+/// under the LOD visualiser — a box in the tier's colour as the solid
+/// and no glazing, with [lod] set so the UI side draws it on the palette
+/// material rather than the facade.
+class CityArchetypeMesh {
+  const CityArchetypeMesh({
+    required this.archetype,
+    required this.solid,
+    required this.glazing,
+    this.lod = false,
+  });
+  final BuildingArchetype archetype;
+  final PropMesh solid;
+  final PropMesh glazing;
+  final bool lod;
+
+  /// What the two meshes occupy on the GPU, counted as a group's are (see
+  /// [CityMeshGroup.bytes]).
+  int get bytes =>
+      (solid.vertexCount + glazing.vertexCount) * CityTileMesher.bytesPerVertex +
+      (solid.indices.length + glazing.indices.length) *
+          CityTileMesher.bytesPerIndex;
 }
 
 /// One material's merged geometry for a tile, or one chunk of it: one
@@ -266,12 +338,17 @@ class CityTileResult {
     required this.shrubPits,
     required this.lodCounts,
     required this.skylineTris,
+    this.archetypeMeshes = const [],
   });
   final String tileKey;
   final String key;
   final CityTier tier;
   final List<CityMeshGroup> groups;
   final List<CityInstanceGroup> instances;
+
+  /// The archetype meshes a detail job generated for the UI thread (see
+  /// [CityDetailSpec]); empty for a tile build.
+  final List<CityArchetypeMesh> archetypeMeshes;
 
   /// Street-tree pits and planter soil lines, four doubles each — the pit
   /// relative to the tile's anchor, metres, then its yaw — planted by the
@@ -324,6 +401,24 @@ class CityTileResult {
     ];
     final treeSpan = [reserve(treePits), treePits.length];
     final shrubSpan = [reserve(shrubPits), shrubPits.length];
+    // Per archetype mesh: the solid's four streams then the glazing's,
+    // offset and count each, and the LOD flag last.
+    final archetypeSpans = <List<int>>[
+      for (final a in archetypeMeshes)
+        [
+          for (final m in [a.solid, a.glazing]) ...[
+            reserve(m.positions),
+            m.positions.length,
+            reserve(m.normals),
+            m.normals.length,
+            reserve(m.texCoords),
+            m.texCoords.length,
+            reserve(m.indices),
+            m.indices.length,
+          ],
+          a.lod ? 1 : 0,
+        ],
+    ];
     final blob = Uint8List(offset);
     var i = 0;
     void put(TypedData d) {
@@ -342,6 +437,14 @@ class CityTileResult {
     }
     put(treePits);
     put(shrubPits);
+    for (final a in archetypeMeshes) {
+      for (final m in [a.solid, a.glazing]) {
+        put(m.positions);
+        put(m.normals);
+        put(m.texCoords);
+        put(m.indices);
+      }
+    }
     return (
       CityTilePackedLayout(
         tileKey: tileKey,
@@ -355,6 +458,8 @@ class CityTileResult {
         shrubSpan: shrubSpan,
         lodCounts: {for (final e in lodCounts.entries) e.key.index: e.value},
         skylineTris: skylineTris,
+        archetypeMeshKeys: [for (final a in archetypeMeshes) a.archetype],
+        archetypeMeshSpans: archetypeSpans,
       ),
       blob,
     );
@@ -405,6 +510,24 @@ class CityTileResult {
           BuildingDetail.values[e.key]: e.value
       },
       skylineTris: layout.skylineTris,
+      archetypeMeshes: [
+        for (var i = 0; i < layout.archetypeMeshKeys.length; i++)
+          () {
+            final s = layout.archetypeMeshSpans[i];
+            PropMesh mesh(int at) => PropMesh(
+                  positions: f32(s[at], s[at + 1]),
+                  normals: f32(s[at + 2], s[at + 3]),
+                  texCoords: f32(s[at + 4], s[at + 5]),
+                  indices: Uint32List.view(blob, s[at + 6], s[at + 7]),
+                );
+            return CityArchetypeMesh(
+              archetype: layout.archetypeMeshKeys[i],
+              solid: mesh(0),
+              glazing: mesh(8),
+              lod: s[16] != 0,
+            );
+          }(),
+      ],
     );
   }
 }
@@ -424,6 +547,8 @@ class CityTilePackedLayout {
     required this.shrubSpan,
     required this.lodCounts,
     required this.skylineTris,
+    this.archetypeMeshKeys = const [],
+    this.archetypeMeshSpans = const [],
   });
   final String tileKey;
   final String key;
@@ -440,6 +565,13 @@ class CityTilePackedLayout {
   final List<int> treeSpan, shrubSpan;
   final Map<int, int> lodCounts;
   final int skylineTris;
+
+  /// A detail job's generated archetypes (see [CityArchetypeMesh]): the
+  /// keys, and per key the byte offset and element count of the solid's
+  /// positions, normals, texCoords and indices, then the glazing's, then
+  /// the LOD flag — seventeen ints.
+  final List<BuildingArchetype> archetypeMeshKeys;
+  final List<List<int>> archetypeMeshSpans;
 }
 
 /// The archetype libraries a mesher generates from, full and coarse, keyed
@@ -594,6 +726,8 @@ enum CityMeshStepKind {
   buildings,
   patches,
   lots,
+  // A detail job's archetype meshes the UI thread lacks, generated.
+  archetypes,
   // Every builder of one material and the skyline into one geometry.
   merge,
   // The instance groups and pits into their typed arrays.
@@ -709,6 +843,10 @@ class CityTileMeshJob {
   }
 
   void _plan() {
+    if (request.isDetail) {
+      _planDetail();
+      return;
+    }
     final r = request;
     final m = members;
     const roadsPerStep = 16;
@@ -733,64 +871,108 @@ class CityTileMeshJob {
     steps.add(CityMeshStep(CityMeshStepKind.patches, _emitPatches));
     // Only where some building can resolve past a box: the furniture pass
     // skips every block-tier lot, so a tile that cannot detail would run
-    // its steps to emit nothing (see `CityNodes.tileCanDetail`).
-    if (r.canDetail) {
-      const perStep = 60;
-      for (var i = 0; i < m.buildings.length; i += perStep) {
-        final from = i, to = math.min(i + perStep, m.buildings.length);
-        steps.add(CityMeshStep(CityMeshStepKind.lots,
-            () => _emitLotFeatures(m.buildings.sublist(from, to))));
-      }
+    // its steps to emit nothing (see `CityNodes.tileCanDetail`). Under the
+    // detail layer no base tile has furniture at all — the layer draws it
+    // round the eye — whatever the caller's answer.
+    if (r.canDetail && !r.detailLayer) {
+      _addLotSteps(m.buildings);
     }
-    _addMergeSteps();
+    _addMergeSteps(_tileMergeSources());
     steps.add(CityMeshStep(CityMeshStepKind.pack, _pack));
     // The caller pops from the end.
     steps.setAll(0, steps.reversed.toList());
   }
+
+  /// A detail job's parts: the buildings in runs, each at its own tier and
+  /// none at block; then the archetypes the UI thread lacks, generated in
+  /// runs planned once the groups are known; the lot furniture, if wanted;
+  /// the furniture builders merged; the pack. No roads, junctions, patches
+  /// or planting — the base tiles under the layer draw those.
+  void _planDetail() {
+    final r = request;
+    final m = members;
+    const buildingsPerStep = 100;
+    for (var i = 0; i < m.buildings.length; i += buildingsPerStep) {
+      final from = i, to = math.min(i + buildingsPerStep, m.buildings.length);
+      steps.add(CityMeshStep(CityMeshStepKind.buildings, () {
+        for (var k = from; k < to; k++) {
+          _emitBuilding(m.buildings[k]);
+        }
+      }));
+    }
+    steps.add(CityMeshStep(CityMeshStepKind.archetypes, _planArchetypes));
+    if (r.canDetail) _addLotSteps(m.buildings);
+    _addMergeSteps(_detailMergeSources());
+    steps.add(CityMeshStep(CityMeshStepKind.pack, _pack));
+    steps.setAll(0, steps.reversed.toList());
+  }
+
+  /// The lot furniture, in runs.
+  void _addLotSteps(List<BuildingSnapshot> buildings) {
+    const perStep = 60;
+    for (var i = 0; i < buildings.length; i += perStep) {
+      final from = i, to = math.min(i + perStep, buildings.length);
+      steps.add(CityMeshStep(CityMeshStepKind.lots,
+          () => _emitLotFeatures(buildings.sublist(from, to))));
+    }
+  }
+
+  /// The archetypes this job's instances key to that the UI thread did
+  /// not list, as generation steps pushed to run next — a few keys a
+  /// step, since a full archetype is up to two milliseconds and the
+  /// inline scheduler stops between steps. Runs after the buildings, when
+  /// the groups are complete.
+  void _planArchetypes() {
+    final known = request.detail!.knownArchetypes.toSet();
+    final missing = [
+      for (final e in _groups.entries)
+        if (!known.contains(e.key)) (e.key, e.value.$1),
+    ];
+    const perStep = 4;
+    for (var end = missing.length; end > 0; end -= perStep) {
+      final from = math.max(0, end - perStep), to = end;
+      steps.add(CityMeshStep(CityMeshStepKind.archetypes, () {
+        for (var i = from; i < to; i++) {
+          final (key, rep) = missing[i];
+          _archetypeMeshes.add(_generateArchetype(key, rep));
+        }
+      }));
+    }
+  }
+
+  /// [key]'s mesh, from a building that keys to it, through this side's
+  /// library — the same key the UI thread's library would compute from
+  /// the same building, so the mesh that comes back is the one every
+  /// instance in the group shares (see [CityTileMesher.archetypeOf]).
+  CityArchetypeMesh _generateArchetype(BuildingArchetype key, BuildingSnapshot b) {
+    final k = request.knobs;
+    final tier = key.detail;
+    final built = libraries.forTier(tier).get(
+        CityTileMesher.specOf(b), CityTileMesher.parcelOf(b, k.style),
+        seed: b.id.hashCode, detail: tier);
+    if (k.lodDebug) {
+      return CityArchetypeMesh(
+        archetype: key,
+        solid: CityTileMesher.lodDebugBox(built.massing, tier),
+        glazing: PropMesh.empty,
+        lod: true,
+      );
+    }
+    return CityArchetypeMesh(
+      archetype: key,
+      solid: built.model.solid,
+      glazing: built.model.foliage,
+    );
+  }
+
+  final List<CityArchetypeMesh> _archetypeMeshes = [];
 
   /// Every builder by the material it takes, and whether it stands off
   /// the ground. The builders stay split by what they draw; the upload
   /// does not: each (material, casts-a-shadow) group is ONE geometry and
   /// one draw, merged with the skyline of the same material — seven or so
   /// draws for a near tile where a builder each was two dozen.
-  void _addMergeSteps() {
-    // Gathered, not claimed: this runs at plan time, and an inline
-    // scheduler plans a job while the one before it still owns the scratch.
-    // The builders are the same objects whichever job owns them, so the
-    // references are good once the road steps have claimed.
-    final r = _scratch.roads;
-    final sources = <(MeshBuilder, CityMaterialKind, bool)>[
-      // The ribbon takes the dedicated road strip — on the facade material it
-      // rendered as a run of blank concrete with no curbs and no centre line,
-      // which from the cockpit read as "roads are missing".
-      (r.ribbon, CityMaterialKind.road, false),
-      (r.dirtRibbon, CityMaterialKind.dirt, false),
-      (r.alleyRibbon, CityMaterialKind.alley, false),
-      (r.walkRibbon, CityMaterialKind.sidewalk, false),
-      (r.railBallast, CityMaterialKind.dirt, false),
-      (r.railConcrete, CityMaterialKind.sidewalk, false),
-      (r.railSteel, CityMaterialKind.alley, false),
-      // The elevated deck is the one flat surface that casts: the street
-      // under an overpass is in its shadow.
-      (r.airDeck, CityMaterialKind.road, true),
-      (r.airSolid, CityMaterialKind.facade, false),
-      (r.airGlow, CityMaterialKind.glazing, false),
-      (r.propSolid, CityMaterialKind.facade, false),
-      (r.propGlow, CityMaterialKind.glazing, false),
-      (r.lampSolid, CityMaterialKind.facade, false),
-      (r.lampGlow, CityMaterialKind.glazing, false),
-      // The pedestrian tube: a concrete curb carrying a glass barrel.
-      (r.tubeSolid, CityMaterialKind.facade, false),
-      (r.tubeGlass, CityMaterialKind.glazing, false),
-      (r.curbSolid, CityMaterialKind.facade, false),
-      (r.curbGlass, CityMaterialKind.glazing, false),
-      // The lot furniture: fences, aprons, parked cars, lit signs.
-      (_featureSolid, CityMaterialKind.facade, false),
-      (_featureApron, CityMaterialKind.road, false),
-      (_featureCars, CityMaterialKind.facade, false),
-      (_featureGlow, CityMaterialKind.glazing, false),
-      (_patches, CityMaterialKind.ground, false),
-    ];
+  void _addMergeSteps(List<(MeshBuilder, CityMaterialKind, bool)> sources) {
     final tier = request.tier;
     // One step per group, so the inline scheduler can stop between them: a
     // downtown tile's facade group is most of its triangles.
@@ -825,6 +1007,55 @@ class CityTileMeshJob {
     }
   }
 
+  /// A detail job's builders: the lot furniture only.
+  List<(MeshBuilder, CityMaterialKind, bool)> _detailMergeSources() => [
+        (_featureSolid, CityMaterialKind.facade, false),
+        (_featureApron, CityMaterialKind.road, false),
+        (_featureCars, CityMaterialKind.facade, false),
+        (_featureGlow, CityMaterialKind.glazing, false),
+      ];
+
+  /// A tile's builders, every one.
+  List<(MeshBuilder, CityMaterialKind, bool)> _tileMergeSources() {
+    // Gathered, not claimed: this runs at plan time, and an inline
+    // scheduler plans a job while the one before it still owns the scratch.
+    // The builders are the same objects whichever job owns them, so the
+    // references are good once the road steps have claimed.
+    final r = _scratch.roads;
+    return <(MeshBuilder, CityMaterialKind, bool)>[
+      // The ribbon takes the dedicated road strip — on the facade material it
+      // rendered as a run of blank concrete with no curbs and no centre line,
+      // which from the cockpit read as "roads are missing".
+      (r.ribbon, CityMaterialKind.road, false),
+      (r.dirtRibbon, CityMaterialKind.dirt, false),
+      (r.alleyRibbon, CityMaterialKind.alley, false),
+      (r.walkRibbon, CityMaterialKind.sidewalk, false),
+      (r.railBallast, CityMaterialKind.dirt, false),
+      (r.railConcrete, CityMaterialKind.sidewalk, false),
+      (r.railSteel, CityMaterialKind.alley, false),
+      // The elevated deck is the one flat surface that casts: the street
+      // under an overpass is in its shadow.
+      (r.airDeck, CityMaterialKind.road, true),
+      (r.airSolid, CityMaterialKind.facade, false),
+      (r.airGlow, CityMaterialKind.glazing, false),
+      (r.propSolid, CityMaterialKind.facade, false),
+      (r.propGlow, CityMaterialKind.glazing, false),
+      (r.lampSolid, CityMaterialKind.facade, false),
+      (r.lampGlow, CityMaterialKind.glazing, false),
+      // The pedestrian tube: a concrete curb carrying a glass barrel.
+      (r.tubeSolid, CityMaterialKind.facade, false),
+      (r.tubeGlass, CityMaterialKind.glazing, false),
+      (r.curbSolid, CityMaterialKind.facade, false),
+      (r.curbGlass, CityMaterialKind.glazing, false),
+      // The lot furniture: fences, aprons, parked cars, lit signs.
+      (_featureSolid, CityMaterialKind.facade, false),
+      (_featureApron, CityMaterialKind.road, false),
+      (_featureCars, CityMaterialKind.facade, false),
+      (_featureGlow, CityMaterialKind.glazing, false),
+      (_patches, CityMaterialKind.ground, false),
+    ];
+  }
+
   void _pack() {
     final instances = <CityInstanceGroup>[];
     _groups.forEach((key, entry) {
@@ -836,16 +1067,19 @@ class CityTileMeshJob {
       instances.add(CityInstanceGroup(
           archetype: key, representative: rep, transforms: out));
     });
+    // A detail job plants nothing, and has not claimed the road builders.
+    final detail = request.isDetail;
     _result = CityTileResult(
       tileKey: request.tileKey,
       key: request.key,
       tier: request.tier,
       groups: _merged,
       instances: instances,
-      treePits: _packPits(_roads.treePits),
-      shrubPits: _packPits(_roads.shrubPits),
+      treePits: detail ? Float64List(0) : _packPits(_roads.treePits),
+      shrubPits: detail ? Float64List(0) : _packPits(_roads.shrubPits),
       lodCounts: _lodCounts,
       skylineTris: _skylineTris,
+      archetypeMeshes: _archetypeMeshes,
     );
   }
 
@@ -870,10 +1104,22 @@ class CityTileMeshJob {
     final parcel = CityTileMesher.parcelOf(b, k.style);
     final seed = b.id.hashCode;
     // A tile beyond the near range is silhouettes whatever the building's
-    // own distance says: nothing in it resolves past a box.
-    final tier = r.tier == CityTier.near
-        ? CityTileMesher.detailFor(b, r.focusBF, r.colonyTier, k)
-        : BuildingDetail.block;
+    // own distance says: nothing in it resolves past a box. A BASE tile
+    // under the detail layer is silhouettes at every range: the layer
+    // resolves the buildings round the eye, and a base tile that read the
+    // camera would be re-keyed by it. A DETAIL job is the other half:
+    // each building at its own tier, and the ones at block — beyond the
+    // block range, inside the gather's margin — are the base tile's and
+    // are left out here.
+    final BuildingDetail tier;
+    if (r.isDetail) {
+      tier = CityTileMesher.detailFor(b, r.focusBF, r.colonyTier, k);
+      if (tier == BuildingDetail.block) return;
+    } else if (r.detailLayer || r.tier != CityTier.near) {
+      tier = BuildingDetail.block;
+    } else {
+      tier = CityTileMesher.detailFor(b, r.focusBF, r.colonyTier, k);
+    }
     _lodCounts[tier] = (_lodCounts[tier] ?? 0) + 1;
     // Block tier keys and meshes against the coarse library, so the
     // dominant tier shares far fewer archetypes (and draws).
@@ -885,6 +1131,15 @@ class CityTileMeshJob {
     if (tier == BuildingDetail.block && !k.lodDebug) {
       final built = lib.get(spec, parcel, seed: seed, detail: tier);
       final m = CityTileMesher.instanceTransform(r.anchorBF, b);
+      // Under the detail layer a NEAR tile's boxes are drawn a little
+      // inside the building, so the layer's model over one hides it (see
+      // [CityTileMesher.nearBoxInset]). The glazing bands take the same
+      // scale: left at full size they would stand off the shrunken wall
+      // and lie in the plane of the detailed facade drawn over them.
+      if (r.detailLayer && r.tier == CityTier.near) {
+        final s = CityTileMesher.nearBoxInset;
+        m.multiply(vm.Matrix4.diagonal3Values(s, s, s));
+      }
       // A block-tier building is its massing as plain boxes at EVERY tier,
       // on the building's own facade band (see
       // [CityTileMesher.massingBoxes]). The coarse model is still a facade
@@ -1350,6 +1605,62 @@ class CityTileMesher {
   /// megabytes makes the furniture one chunk — one hitch as it arrives,
   /// one draw after — and every skyline well under it.
   static int maxGroupBytes = 2 * 1024 * 1024;
+
+  /// How much smaller than the building a NEAR base tile draws its block
+  /// boxes under the detail layer (see [CityTileRequest.detailLayer]):
+  /// the box is scaled by this about the building's centre and base, in
+  /// all three axes.
+  ///
+  /// The layer draws a building's exterior or full model over its box,
+  /// and a model drawn over a box the same size z-fights it wall for
+  /// wall. Three per cent is the least that keeps the walls apart at
+  /// every distance the layer draws at: a ten-metre house's walls sit
+  /// fifteen centimetres inside the model's, a two-hundred-metre tower's
+  /// three metres — both far more than the depth buffer's resolution at
+  /// three hundred metres — and the model hides the box entirely. The
+  /// price is paid by every OTHER building in the tile, the ones beyond
+  /// the block range that no model covers: three per cent smaller, which
+  /// at three hundred metres and beyond is under a pixel. One is no
+  /// inset at all, for measuring against; a value under about 0.9 shows
+  /// as buildings standing off their lots.
+  static double nearBoxInset = 0.97;
+
+  /// Palette swatch a tier is painted with under the LOD visualiser: a
+  /// heat ramp on the ground palette, which already exists and is
+  /// already bound — red the expensive tier, amber the middle, green the
+  /// cheap one. The same mapping `CityNodes` paints its own boxes with.
+  static double lodSwatchU(BuildingDetail d) {
+    final swatch = switch (d) {
+      BuildingDetail.full => 6, // refusal red — the costly one
+      BuildingDetail.exterior => 8, // heatmap amber
+      BuildingDetail.block => 7, // site-ok green
+    };
+    return (swatch + 0.5) / kGroundSwatches;
+  }
+
+  /// A building's own massing as one box in its tier's colour: what the
+  /// LOD visualiser draws instead of the building. Same size, same place,
+  /// no detail, so what is seen is purely which tier each resolved to.
+  /// Metres, in the building's frame; the instance transform carries the
+  /// scene conversion.
+  static PropMesh lodDebugBox(BuildingMassing massing, BuildingDetail tier) {
+    final m = MeshBuilder();
+    final fp = massing.footprint;
+    OrientedBox.emit(
+      m,
+      Vector3(0, 0, massing.height / 2),
+      Vector3.unitX,
+      Vector3.unitY,
+      Vector3.unitZ,
+      math.max(1.0, fp.width) / 2,
+      math.max(1.0, fp.depth) / 2,
+      math.max(1.0, massing.height) / 2,
+      u: lodSwatchU(tier),
+      v: 0.5,
+      unitScale: 1.0,
+    );
+    return m.build();
+  }
 
   /// [mesh] as groups of at most [maxBytes] each — one where it fits, else
   /// consecutive runs of its triangles, each with the vertex range those
