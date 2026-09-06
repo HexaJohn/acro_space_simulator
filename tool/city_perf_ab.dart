@@ -54,6 +54,9 @@ Future<void> main(List<String> args) async {
   final sweep = args.contains('--sweep');
   final spikes = args.contains('--spikes');
   final flips = !args.contains('--no-flips');
+  // --plat-only: the sweep runs the plat's patterns alone — a painter
+  // change is measured in a couple of minutes instead of a quarter hour.
+  final platOnly = args.contains('--plat-only');
   final asserts = <String, double>{};
   for (final part in opt('assert', '').split(',')) {
     final kv = part.split(':');
@@ -423,6 +426,7 @@ Future<void> main(List<String> args) async {
     }
 
     String fmt(double v) => v.toStringAsFixed(4);
+    if (!platOnly) {
     // A full turn at the sampling pose: the first over ground the hidden
     // policy left unbuilt, the second over what the first built.
     await pattern(
@@ -469,6 +473,8 @@ Future<void> main(List<String> args) async {
         'ext.acro.citystudio', {'distance': distance, 'elevation': elevation});
     await Future<void>.delayed(const Duration(seconds: 3));
     out['settledAfterWalk'] = await sample('settled after walk', 3);
+
+    }
 
     // ---- The plat ---------------------------------------------------------
     //

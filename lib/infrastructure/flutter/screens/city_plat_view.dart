@@ -394,10 +394,12 @@ class _PlatPainter extends CustomPainter {
   static const _grid = Color(0xFF1E252D);
   static const _text = Color(0xFFB8C0C8);
 
-  /// Lot outlines are stroked only once a lot is a dozen pixels across:
-  /// under that the fill says everything the outline would, and a stroke
-  /// is the dearest thing the renderer does per lot.
-  static const double outlineMetresPerPx = 2.5;
+  /// Lot outlines are stroked only once a lot is some twenty-five pixels
+  /// across: under that the fill says everything the outline would, and a
+  /// stroke is the dearest thing the renderer does per lot — at 2.5 m/px
+  /// the outlines of a 1.9 km viewport were most of a 12.6 ms raster
+  /// frame.
+  static const double outlineMetresPerPx = 1.2;
 
   /// The vertex batches carry their own colours; the paint is a default
   /// one and the blend takes the vertices' colour alone.
@@ -467,6 +469,7 @@ class _PlatPainter extends CustomPainter {
                   e.key,
                   () => Paint()
                     ..style = PaintingStyle.stroke
+                    ..strokeJoin = StrokeJoin.bevel
                     ..strokeWidth = 0.6 * mpp
                     ..color = _useColour(use)
                         .withValues(alpha: built ? 0.9 : 0.45));
@@ -512,11 +515,14 @@ class _PlatPainter extends CustomPainter {
   }
 
   /// A road's stroke: widths are the real carriageway, floored to a pixel
-  /// so a street never vanishes at the scale it is drawn at.
+  /// so a street never vanishes at the scale it is drawn at. Butt caps and
+  /// bevel joins: a round join is a fan of triangles at every one of a
+  /// street's twelve-metre samples, and at plat scale the difference is
+  /// invisible.
   static Paint _roadPaint(RoadClass cls, double mpp) => Paint()
     ..style = PaintingStyle.stroke
-    ..strokeCap = StrokeCap.round
-    ..strokeJoin = StrokeJoin.round
+    ..strokeCap = StrokeCap.butt
+    ..strokeJoin = StrokeJoin.bevel
     ..strokeWidth = math.max(cls.width, _minRoadPx(cls) * mpp)
     ..color = _roadColour(cls);
 

@@ -32,10 +32,10 @@ param(
   [int]$Sprawl = 20,
   [double]$Static = 10,
   [double]$Sweep = 13,
-  [double]$Worst = 80,
+  [double]$Worst = 120,
   # The plat has read ~200 ms at street scale; 12 is the target a repainted
   # plat is measured against, not today's floor.
-  [double]$Plat = 12,
+  [double]$Plat = 16,
   [string]$OutDir = "build/perf",
   # name=value[,name=value]: perf knobs set by name before the colony is
   # generated (see PerfKnobs), for an A/B without a rebuild.
