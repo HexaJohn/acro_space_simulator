@@ -1018,6 +1018,15 @@ class CityNodes {
       // Compared afresh besides when the last swap wrote a job's key over
       // the want key to keep an answered tile off the queue (see [_swap]).
       if (!hide && (t.wantKey != want || t.wantKeyStale)) {
+        // Why a tile is asked again, for the panel: the first term of the
+        // key that moved against the last one wanted, or 'first' for a
+        // tile never keyed, or 'stale' for one brought back only for the
+        // compare (see [_swap]).
+        final why = t.wantTier == null
+            ? 'first'
+            : t.wantKey == want
+                ? 'stale'
+                : _keyTermMoved(t.wantKey, want);
         t.wantKey = want;
         t.wantKeyStale = false;
         t.wantTier = tier;
@@ -1027,14 +1036,16 @@ class CityNodes {
         // instead of queued (see [tierCacheBytes]); only a key it has
         // never built goes to the workers.
         if (_tierCacheAnswer(t, want)) {
-          // Nothing to build.
+          _queueWhy['answered'] = (_queueWhy['answered'] ?? 0) + 1;
         } else if (!t.queued) {
           t.queued = true;
           _queue.add(t);
+          _queueWhy[why] = (_queueWhy[why] ?? 0) + 1;
         }
       }
     }
     outOfViewTiles = outOfView;
+    _queueWhy.forEach((k, v) => phaseCount['queued.$k'] = v);
     phaseMs['city.tier'] = sw.elapsedMicroseconds / 1000;
     sw.reset();
 
@@ -3019,6 +3030,36 @@ class CityNodes {
   /// do: half of it, the rule [revealBytesPerFrameWhileStaging] states
   /// for the fixed cap, applied to whatever cap the frame has.
   static int revealShareOf(int uploadCap) => uploadCap ~/ 2;
+
+  /// Running counts of why tiles were queued (or answered from what they
+  /// hold), by reason, published as phaseCount['queued.<why>'].
+  final Map<String, int> _queueWhy = {};
+
+  /// The terms of a want key, in the order [update] writes them.
+  static const List<String> _keyTerms = [
+    'structure',
+    'tier',
+    'cam',
+    'lodDebug',
+    'perBuildingLod',
+    'interior',
+    'block',
+    'colony',
+    'detailLayer',
+    'invalidation',
+  ];
+
+  /// The name of the first term of [now] that differs from [was].
+  static String _keyTermMoved(String was, String now) {
+    final a = was.split('|'), b = now.split('|');
+    for (var i = 0; i < b.length; i++) {
+      if (i >= a.length || a[i] != b[i]) {
+        return i < _keyTerms.length ? _keyTerms[i] : 'term$i';
+      }
+    }
+    return 'same';
+  }
+
 }
 
 /// One resident traffic draw: its node and the instanced mesh it moves.

@@ -57,6 +57,7 @@ import '../../../domain/scatter/mesh_builder.dart';
 import '../../flutter_scene/coord_convert.dart';
 import '../../flutter_scene/debug_camera_rig.dart';
 import '../../flutter_scene/frame_budget.dart';
+import '../../flutter_scene/perf_knobs.dart';
 import '../../flutter_scene/graphics_quality.dart';
 import '../../flutter_scene/lod_probe_camera.dart';
 import '../../flutter_scene/rover_nodes.dart';
@@ -830,6 +831,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
             'forced': _governor.forcedLevel,
           },
           'frameBudget': _frameBudgetStatus(),
+          'knobs': PerfKnobs.snapshot(),
           'rover': _roverStatus(),
           'stats': _lastStats,
           'fault': _fault == null

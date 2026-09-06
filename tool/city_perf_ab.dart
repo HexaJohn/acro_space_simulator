@@ -60,6 +60,12 @@ Future<void> main(List<String> args) async {
   final elevation = opt('elevation', '0.55');
   final samples = int.parse(opt('samples', '8'));
   final shot = opt('shot', '');
+  // --knob=name=value[,name=value]: perf trade-offs set by name before
+  // the colony is generated (see PerfKnobs), so one build A/Bs them all.
+  final knobs = <String, String>{
+    for (final part in opt('knob', '').split(','))
+      if (part.contains('=')) part.split('=')[0]: part.split('=')[1],
+  };
 
   final vm = await vmServiceConnectUri(ws);
   final isolateId = (await vm.getVM()).isolates!.first.id!;
@@ -78,6 +84,17 @@ Future<void> main(List<String> args) async {
       exit(1);
     }
     await Future<void>.delayed(const Duration(seconds: 1));
+  }
+  for (final e in knobs.entries) {
+    final r = await call('ext.acro.citystudio', {'knob': e.key, 'value': e.value});
+    if (r['error'] != null) {
+      stderr.writeln('knob ${e.key}: ${r['error']}');
+      exit(2);
+    }
+  }
+  if (knobs.isNotEmpty) {
+    final r = await call('ext.acro.citystudio');
+    stdout.writeln('== knobs: ${r['knobs']}');
   }
   if (generate) {
     stdout.writeln('== generating sprawl=$sprawl');
@@ -138,6 +155,9 @@ Future<void> main(List<String> args) async {
             'revealBytes ${counts['revealBytes']}  '
             'built ${counts['builtThisFrame']}  '
             'buildings ${counts['buildings']}');
+        stdout.writeln('    queued why: tier ${counts['queued.tier']} '
+            'structure ${counts['queued.structure']} knobs ${counts['queued.knobs']} '
+            'stale ${counts['queued.stale']} answered ${counts['queued.answered']}');
         stdout.writeln('    caches: tier hits ${counts['tierCacheHits']} '
             'sets ${counts['tierCacheSets']} '
             'MB ${((counts['tierCacheBytes'] ?? 0) / 1048576).toStringAsFixed(0)}  '
@@ -210,6 +230,8 @@ Future<void> main(List<String> args) async {
         'queued': 0,
         'governor': 0,
         'submitMs': 0,
+        'sliceMin': 99,
+        'sliceSum': 0,
         'n': 0,
       };
       final steps = (seconds * 20).round();
@@ -244,6 +266,13 @@ Future<void> main(List<String> args) async {
               ((s['phaseMs'] as Map?)?['city.submit'] as num?)?.toDouble() ??
                   0;
           if (sub > acc['submitMs']!) acc['submitMs'] = sub;
+          // The frame budget's slice: how much of each frame the streamers
+          // were allowed, and so how fast a queue could drain.
+          final slice =
+              ((s['frameBudget'] as Map?)?['sliceMs'] as num?)?.toDouble() ??
+                  9;
+          if (slice < acc['sliceMin']!) acc['sliceMin'] = slice;
+          acc['sliceSum'] = acc['sliceSum']! + slice;
         }
       }
       final n = acc['n']!.clamp(1, 1e9);
@@ -254,12 +283,15 @@ Future<void> main(List<String> args) async {
         'queued': acc['queued']!,
         'governor': acc['governor']!,
         'submitMs': acc['submitMs']!,
+        'sliceMin': acc['sliceMin']!,
+        'sliceAvg': acc['sliceSum']! / n,
       };
       stdout.writeln('[sweep $label] frame ${f(r['frameMs'])}  '
           'ui ${f(r['uiMs'])}  worst ${f(r['worstMs'])}  '
           'queued max ${r['queued']!.round()}  '
           'submit max ${f(r['submitMs'])}  '
-          'governor max ${r['governor']!.round()}');
+          'governor max ${r['governor']!.round()}  '
+          'slice avg ${f(r['sliceAvg'])} min ${f(r['sliceMin'])}');
       sweeps[label] = r;
       if (window != null) {
         reportSpikes(await window.end(), window.t0,

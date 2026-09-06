@@ -36,6 +36,7 @@ import 'package:flutter/rendering.dart';
 
 import 'infrastructure/baked_terrain_data.dart';
 import 'infrastructure/flutter/screens/city_studio_screen.dart';
+import 'infrastructure/flutter_scene/perf_knobs.dart';
 import 'infrastructure/flutter_scene/terrain/terrain_nodes.dart';
 
 final GlobalKey _shotKey = GlobalKey();
@@ -170,6 +171,15 @@ Future<void> main() async {
     }
     if (params['resetFrames'] == 'true') {
       CityStudioDevHooks.resetFrames?.call();
+    }
+    if (params['knob'] != null) {
+      // knob=<name>&value=<v>: any perf trade-off by name, live (see
+      // PerfKnobs); the reply is every knob's value after the set.
+      final ok = PerfKnobs.set(params['knob']!, params['value'] ?? '');
+      return developer.ServiceExtensionResponse.result(jsonEncode({
+        if (!ok) 'error': 'unknown knob or bad value: ${params['knob']}',
+        'knobs': PerfKnobs.snapshot(),
+      }));
     }
     if (params['perf'] != null || params['controls'] != null) {
       final set = CityStudioDevHooks.setPanels;

@@ -23,6 +23,8 @@ void main() {
   tearDown(() {
     FrameBudget.enabled = true;
     FrameBudget.targetMs = 15.0;
+    FrameBudget.stallMs = 6.0;
+    CityFrameBudgets.scaleBytes = false;
     CityNodes.frameSliceMs = null;
     TerrainNodes.frameSliceMs = null;
   });
@@ -67,24 +69,59 @@ void main() {
       final b = FrameBudget();
       b.beginFrame(engineMs: 1);
       expect(b.sliceMs, 12, reason: 'the ceiling, the room being 13.5');
+      // The streamers spent eighteen of the twenty: the overrun is theirs
+      // (a frame they could not explain would be a stall, below).
       b.feed(20);
-      expect(b.beginFrame(engineMs: 1), 6);
+      expect(b.beginFrame(engineMs: 1, spentMs: 18), 6);
       expect(b.overruns, 1);
       // The same measured frame is not judged twice: with nothing new
       // fed, the next frame keeps the slice.
-      expect(b.beginFrame(engineMs: 1), 6);
+      expect(b.beginFrame(engineMs: 1, spentMs: 18), 6);
       expect(b.overruns, 1);
       b.feed(20);
-      expect(b.beginFrame(engineMs: 1), 3);
+      expect(b.beginFrame(engineMs: 1, spentMs: 18), 3);
       b.feed(20);
-      expect(b.beginFrame(engineMs: 1), 1.5);
+      expect(b.beginFrame(engineMs: 1, spentMs: 18), 1.5);
       b.feed(20);
-      expect(b.beginFrame(engineMs: 1), 0.75);
+      expect(b.beginFrame(engineMs: 1, spentMs: 18), 0.75);
       b.feed(20);
-      expect(b.beginFrame(engineMs: 1), 0.5, reason: 'the floor');
+      expect(b.beginFrame(engineMs: 1, spentMs: 18), 0.5,
+          reason: 'the floor');
       b.feed(20);
-      expect(b.beginFrame(engineMs: 1), 0.5);
+      expect(b.beginFrame(engineMs: 1, spentMs: 18), 0.5);
       expect(b.overruns, 6);
+      expect(b.stalls, 0);
+    });
+
+    test("an overrun the frame's parts do not explain is a stall", () {
+      final b = FrameBudget();
+      b.beginFrame(engineMs: 5);
+      expect(b.sliceMs, closeTo(9.5, 1e-9));
+      // Forty milliseconds with the engine at five and the streamers at
+      // three: a collector pause, not theirs. The ceiling stands and the
+      // overhead learns nothing from it.
+      b.feed(40);
+      expect(b.beginFrame(engineMs: 5, spentMs: 3), closeTo(9.5, 1e-9));
+      expect(b.stalls, 1);
+      expect(b.overruns, 0);
+      expect(b.overheadMs, 0);
+      expect(b.ceilingMs, 12);
+      // Twenty with the streamers at nine: six unexplained, on the line
+      // — theirs.
+      b.feed(20);
+      expect(b.beginFrame(engineMs: 5, spentMs: 9), 6);
+      expect(b.overruns, 1);
+      expect(b.stalls, 1);
+    });
+
+    test('stallMs zero halves on every overrun', () {
+      FrameBudget.stallMs = 0;
+      final b = FrameBudget();
+      b.beginFrame(engineMs: 5);
+      b.feed(40);
+      expect(b.beginFrame(engineMs: 5, spentMs: 3), lessThan(9.5));
+      expect(b.overruns, 1);
+      expect(b.stalls, 0);
     });
 
     test('the slice is the lesser of the ceiling and the room', () {
@@ -103,7 +140,7 @@ void main() {
     test('recovery, to the room and no further', () {
       final b = FrameBudget();
       b.feed(20);
-      b.beginFrame(engineMs: 1); // 6
+      b.beginFrame(engineMs: 1, spentMs: 19); // 6
       final seen = <double>[];
       for (var i = 0; i < 14; i++) {
         b.feed(10);
@@ -119,7 +156,7 @@ void main() {
       final b = FrameBudget();
       b.beginFrame(engineMs: 1);
       b.feed(20);
-      final low = b.beginFrame(engineMs: 1);
+      final low = b.beginFrame(engineMs: 1, spentMs: 19);
       var frames = 0;
       while (b.sliceMs < 12) {
         b.feed(10);
@@ -189,7 +226,18 @@ void main() {
       expect(b.uploadBytes, 768 * kib);
     });
 
+    test('by default the bytes do not scale with the slice', () {
+      expect(CityFrameBudgets.scaleBytes, isFalse);
+      final b = CityFrameBudgets.forSlice(0.5,
+          buildMs: 9, uploadMs: 2, baseUploadBytes: 768 * kib);
+      expect(b.buildMs, closeTo(0.3, 1e-9));
+      expect(b.uploadBytes, 768 * kib,
+          reason: "the cap is the raster thread's tolerance, not this "
+              "thread's time");
+    });
+
     test('a short slice cuts all three, the bytes to a quarter at least', () {
+      CityFrameBudgets.scaleBytes = true;
       final b = CityFrameBudgets.forSlice(4,
           buildMs: 9, uploadMs: 2, baseUploadBytes: 768 * kib);
       expect(b.buildMs, closeTo(2.4, 1e-9));

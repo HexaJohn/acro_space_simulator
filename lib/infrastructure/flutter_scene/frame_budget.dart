@@ -42,6 +42,18 @@ class FrameBudget {
   /// (the raster thread's own handoff, the vsync jitter).
   static double targetMs = 15.0;
 
+  /// An overrun is the streamers' to answer only when the frame's parts
+  /// explain it: the engine, what they reported spending, the learned
+  /// overhead. A frame that ran this many milliseconds past all of them
+  /// stalled on something else — the collector's old-generation pause
+  /// under a landing, a safepoint waited on a worker — and halving the
+  /// slice for it would answer a spike the streamers did not make and
+  /// could not have avoided. Measured before this rule: an orbit with one
+  /// collector frame in five kept the slice near its floor (avg 1.8 ms,
+  /// min 0.5) and the queue never drained. Such a frame counts in
+  /// [stalls], not [overruns]. Zero halves on every overrun.
+  static double stallMs = 6.0;
+
   /// The slice the streamers' knobs were tuned at: the old fixed
   /// `CityNodes.buildBudgetMs`. The derived knobs scale against it, so at
   /// this slice the budgeted streamers behave exactly as they did before.
@@ -96,8 +108,13 @@ class FrameBudget {
   double fixedMs = 0;
   double sliceMs = referenceSliceMs;
 
-  /// Frames that measured over [targetMs] since construction.
+  /// Frames that measured over [targetMs] since construction and were
+  /// the streamers' to answer (see [stallMs]).
   int overruns = 0;
+
+  /// Frames over the target that the frame's parts did not explain: not
+  /// halved for (see [stallMs]).
+  int stalls = 0;
 
   /// Frames budgeted since construction.
   int frames = 0;
@@ -138,12 +155,25 @@ class FrameBudget {
       // evidence of negative overhead.
       final budgeted = engineMs + (spentMs ?? sliceMs);
       final sample = measured - budgeted;
-      overheadMs += overheadAlpha * ((sample < 0 ? 0 : sample) - overheadMs);
-      if (measured > targetMs) {
-        overruns++;
-        _ceilingMs = _clamp(_ceilingMs / 2);
+      // A stall (see [stallMs]) is judged against the overhead as it
+      // stands, before this frame could teach it: the frame is neither
+      // the streamers' overrun nor evidence about the steady overhead —
+      // folded into the EMA, one collector pause would have cut the room
+      // for the next ten frames as surely as a halving.
+      final stalled = measured > targetMs &&
+          stallMs > 0 &&
+          measured - (budgeted + overheadMs) > stallMs;
+      if (stalled) {
+        stalls++;
       } else {
-        _ceilingMs = _clamp(_ceilingMs + recoverMsPerFrame);
+        overheadMs +=
+            overheadAlpha * ((sample < 0 ? 0 : sample) - overheadMs);
+        if (measured > targetMs) {
+          overruns++;
+          _ceilingMs = _clamp(_ceilingMs / 2);
+        } else {
+          _ceilingMs = _clamp(_ceilingMs + recoverMsPerFrame);
+        }
       }
     }
     fixedMs = engineMs + overheadMs;
@@ -192,6 +222,16 @@ class CityFrameBudgets {
   static double uploadShare = 0.3;
   static double uploadCapMs = 2.0;
 
+  /// Whether the byte cap scales with the slice. Off by default: the cap
+  /// is the RASTER thread's tolerance for first-draw uploads, not this
+  /// thread's time, and the UI cost of moving the bytes is already under
+  /// [uploadShare]. Scaled, a busy frame (a slice near the floor for a
+  /// run of frames) cut the cap to a quarter and the reveals, which take
+  /// the frame's bytes first, to an eighth: fifty-five tiles stood
+  /// "revealing" seconds after a zoom settled, their old sets drawn
+  /// beside their new chunks. The A/B's other arm keeps the scaling.
+  static bool scaleBytes = false;
+
   final double buildMs;
   final double uploadMs;
   final int uploadBytes;
@@ -220,7 +260,9 @@ class CityFrameBudgets {
     return CityFrameBudgets(
       buildMs: sliceMs * buildShare,
       uploadMs: upload < uploadCapMs ? upload : uploadCapMs,
-      uploadBytes: (baseUploadBytes * FrameBudget.scaleOf(sliceMs)).round(),
+      uploadBytes: scaleBytes
+          ? (baseUploadBytes * FrameBudget.scaleOf(sliceMs)).round()
+          : baseUploadBytes,
     );
   }
 
