@@ -276,6 +276,11 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   /// Where the placement heatmap was last surveyed, and for which building.
   /// Held here rather than in the colony extension, which cannot own fields.
   Vec2? _heatAt;
+  /// The colony site's ground radius, cached against the colony and its
+  /// terrain edit count (see `_colonySiteRadius`).
+  String? _siteRadiusCity;
+  int _siteRadiusEdits = -1;
+  double _siteRadiusM = 0;
   String? _heatSpec;
   bool _controlsExpanded = true; // collapsible FAB stack
 

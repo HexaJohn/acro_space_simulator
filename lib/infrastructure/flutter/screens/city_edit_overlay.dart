@@ -72,6 +72,19 @@ class CityEditController extends ChangeNotifier {
   /// player steers by. Null until two points exist.
   double? previewGradePct;
 
+  /// Free build: the ground is neither a gate nor a cost.
+  ///
+  /// On, a road is never refused for its grade and a site never for its
+  /// slope, and what is laid is DRAPED on the land rather than graded into
+  /// it — no pad, no corridor, no terrain brush, so the ground is not
+  /// re-meshed under a placement. Off, every rule and every cut is back.
+  /// On by default for now: the editing itself is what is being judged,
+  /// and the grade checks were most of the cost of holding a large site —
+  /// five terrain samples per candidate, eighty-one candidates for the
+  /// suitability heatmap, each sample composing every brush in a graded
+  /// town at ~16 ms — a stall of seconds on every cell the cursor crossed.
+  bool ignoreTerrain = true;
+
   /// Frontage/depth the blocks are cut at. These are the "user settings" the
   /// parcels are drawn from — change them and the same street re-subdivides.
   double frontageM = 24;
@@ -113,7 +126,8 @@ class CityEditController extends ChangeNotifier {
       depthM: lotDepthM,
     );
     final id = city.commitRoad(List.of(pending), roadClass,
-        groundAt: groundAt,
+        groundAt: ignoreTerrain ? null : groundAt,
+        graded: !ignoreTerrain,
         soundWalls: soundWalls && roadClass.canHaveSoundWalls);
     if (id == null) {
       // Refused on grade. The pending points are KEPT: the player adjusts the
@@ -355,6 +369,7 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
                 _tool(CityEditTool.roadSpline, Icons.timeline, 'Road'),
                 _tool(CityEditTool.utility, Icons.factory, 'Build'),
                 _tool(CityEditTool.bulldoze, Icons.clear, 'Clear'),
+                _terrainChip(),
                 const SizedBox(width: 8),
                 _stat('§', city.funds),
                 _stat('Ore', city.stockOf('ore')),
@@ -491,6 +506,44 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
       );
 
   /// Road class and the frontage/depth the blocks get cut at.
+  /// The free-build switch (see [CityEditController.ignoreTerrain]), on
+  /// the strip itself: it changes what every tool does to the ground.
+  Widget _terrainChip() => Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6),
+        child: Tooltip(
+          message: controller.ignoreTerrain
+              ? 'Terrain ignored: no grade limits, nothing cut — roads and '
+                  'plots are draped on the land.'
+              : 'Terrain respected: grade limits apply, pads and corridors '
+                  'are cut into the ground.',
+          child: InkWell(
+            onTap: () {
+              controller.ignoreTerrain = !controller.ignoreTerrain;
+              controller.changed();
+            },
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(4),
+                color: controller.ignoreTerrain
+                    ? const Color(0xFF2A3948)
+                    : Colors.transparent,
+                border: Border.all(
+                    color: controller.ignoreTerrain
+                        ? Colors.white
+                        : const Color(0xFF2A3948)),
+              ),
+              child: Text(
+                  controller.ignoreTerrain
+                      ? 'Terrain: ignored'
+                      : 'Terrain: respected',
+                  style: const TextStyle(
+                      fontSize: 10, color: Color(0xFFD6E2EE))),
+            ),
+          ),
+        ),
+      );
+
   Widget _splineRow() => Padding(
         padding: const EdgeInsets.only(top: 5),
         child: SingleChildScrollView(

@@ -201,6 +201,10 @@ extension SimulationViewColony on _SimulationViewState {
   /// GRADE is this layer's, because only the view holds the terrain field.
   int _siteStatusAt(CitySim city, CityBuildingSpec spec, Vec2 centre) {
     if (city.siteBlockedReason(spec, centre) != null) return 2;
+    // Free build: the slope is not asked, and neither is the field — the
+    // five samples below were the cost of every candidate (see
+    // [CityEditController.ignoreTerrain]).
+    if (_cityEdit.ignoreTerrain) return 0;
     final poly = city.siteFootprint(spec, centre);
     var lo = double.infinity, hi = -double.infinity;
     for (final v in [...poly, centre]) {
@@ -301,6 +305,19 @@ extension SimulationViewColony on _SimulationViewState {
       controls: controls,
       roadClass: _cityEdit.roadClass,
     ).sample(stepM: 8);
+    if (_cityEdit.ignoreTerrain) {
+      // Free build: no grade to read, and the ghost rides the site's datum
+      // rather than the field — one ground sample per preview instead of
+      // one per eight metres of route, each composing every brush in town.
+      _cityEdit.previewGradePct = null;
+      CityNodes.pendingRouteBad = false;
+      CityNodes.pendingWidthM = _cityEdit.roadClass.width;
+      final datum = _colonySiteRadius(city);
+      CityNodes.pendingRouteBF = [
+        for (final p in samples) city.localToBodyFixed(p, bodyRadiusM: datum),
+      ];
+      return;
+    }
     final grade = RoadGradeCheck.of(
         samples, (p) => _groundAtLocal(city, p), _cityEdit.roadClass);
     _cityEdit.previewGradePct = grade.maxPct;
@@ -325,15 +342,29 @@ extension SimulationViewColony on _SimulationViewState {
   }
 
   /// Ground radius under [city]'s site, or the body datum if it has no terrain.
+  ///
+  /// Cached against the colony and its edit count: the picker asks on every
+  /// mouse move, and a sample of a graded town's field — every brush in it
+  /// composed — is ~16 ms, which was a stall on every hover before anything
+  /// else ran. The ground under the site moves only when an edit lands.
   double _colonySiteRadius(CitySim city) {
     final body = _universe.current().body(city.body.id);
     if (body == null) return 0;
+    final edits = _terrainEdits.forBody(body.id);
+    final editCount = edits?.length ?? 0;
+    if (_siteRadiusCity == city.id && _siteRadiusEdits == editCount) {
+      return _siteRadiusM;
+    }
     final lat = city.cityLat * math.pi / 180.0;
     final lon = city.cityLon * math.pi / 180.0;
     final dir = Vector3(math.cos(lat) * math.cos(lon),
         math.cos(lat) * math.sin(lon), math.sin(lat));
-    final field = body.terrainFieldWith(_terrainEdits.forBody(body.id));
-    return field?.groundRadiusAt(dir.x, dir.y, dir.z) ?? body.radius;
+    final field = body.terrainFieldWith(edits);
+    final r = field?.groundRadiusAt(dir.x, dir.y, dir.z) ?? body.radius;
+    _siteRadiusCity = city.id;
+    _siteRadiusEdits = editCount;
+    _siteRadiusM = r;
+    return r;
   }
 
   void _editCityAt(Offset local) {
@@ -368,7 +399,8 @@ extension SimulationViewColony on _SimulationViewState {
               '${held.label} needs ${held.unlockPop} population.';
           return;
         }
-        final claimed = city.claimSite(held, centre);
+        final claimed = city.claimSite(held, centre,
+            graded: !_cityEdit.ignoreTerrain);
         _cityEdit.blocked = claimed == null ? city.blocked : null;
       });
       return;

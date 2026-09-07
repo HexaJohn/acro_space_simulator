@@ -176,4 +176,49 @@ void main() {
     expect(city.roads.length, before,
         reason: 'roads are splines now, not tiles');
   });
+
+  test('free build: a steep route commits, draped on the land', () {
+    final city = colony();
+    final c = CityEditController()..set(CityEditTool.roadSpline);
+    // A 50% grade: every tier refuses it when the ground is respected.
+    c.groundAt = (p) => p.n * 0.5;
+    expect(c.ignoreTerrain, isTrue, reason: 'on by default for now');
+    for (final p in const [Vec2(0, -150), Vec2(0, 0), Vec2(0, 150)]) {
+      c.addSplinePoint(p);
+    }
+    c.commitSpline(city);
+    expect(city.layout.roads, hasLength(1));
+    expect(c.blocked, isNull);
+    expect(city.layout.roads.single.graded, isFalse,
+        reason: 'draped, not graded: nothing is cut for it');
+  });
+
+  test('terrain respected: the same route is refused for its grade', () {
+    final city = colony();
+    final c = CityEditController()
+      ..set(CityEditTool.roadSpline)
+      ..ignoreTerrain = false;
+    c.groundAt = (p) => p.n * 0.5;
+    for (final p in const [Vec2(0, -150), Vec2(0, 0), Vec2(0, 150)]) {
+      c.addSplinePoint(p);
+    }
+    c.commitSpline(city);
+    expect(city.layout.roads, isEmpty);
+    expect(c.blocked, contains('Too steep'));
+    expect(c.pending, hasLength(3), reason: 'kept, to be re-routed');
+  });
+
+  test('terrain respected: a gentle route is graded into the ground', () {
+    final city = colony();
+    final c = CityEditController()
+      ..set(CityEditTool.roadSpline)
+      ..ignoreTerrain = false;
+    c.groundAt = (p) => 0;
+    for (final p in const [Vec2(0, -150), Vec2(0, 0), Vec2(0, 150)]) {
+      c.addSplinePoint(p);
+    }
+    c.commitSpline(city);
+    expect(city.layout.roads.single.graded, isTrue);
+  });
+
 }

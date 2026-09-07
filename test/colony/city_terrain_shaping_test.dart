@@ -184,4 +184,30 @@ void main() {
       }
     }
   });
+
+  test('a draped road and a draped plot ask nothing of the ground', () {
+    // Free build in the flight editor lays roads and sites with graded
+    // false: no corridor, no pad, no brush — and so no re-mesh under the
+    // placement. The shaper must leave them alone entirely.
+    final city = CitySim.found(
+      const CityConfig(
+          bodyId: 'moon', gridSize: 20, latitude: 12.5, longitude: 41.3),
+      bodies: system.all.where((b) => !b.isStar).toList(),
+      id: 'draped',
+    );
+    city.commitRoad(const [Vec2(-200, 0), Vec2(200, 0)], RoadClass.street,
+        graded: false);
+    city.stock['ore'] = 1e9;
+    final big = kUtilCatalog.firstWhere((s) => s.claimsOwnSite);
+    final plot = city.claimSite(big, const Vec2(0, 900),
+        checkAccess: false, graded: false);
+    expect(plot, isNotNull, reason: city.blocked);
+    expect(plot!.graded, isFalse);
+    const shaper = CityTerrainShaper();
+    final pending = shaper.pending(city,
+        bodyRadiusM: moon.radius, groundRadiusAt: (_) => moon.radius);
+    expect(pending, isEmpty,
+        reason: 'draped work is left on the land: no pad, no corridor');
+  });
+
 }
