@@ -637,6 +637,74 @@ class SampleWorld {
     );
   }
 
+  /// The Lunar Module LANDED on the Moon, at rest on the real ground at the
+  /// subsolar point — the sunlit side, so the first frame shows a lit craft
+  /// on lit regolith — with its nose (+Z) straight up. What FLIGHT opens on.
+  ///
+  /// The site is the daylight point [buildLunarOrbiter] orbits over, so a
+  /// CSM built with that at the same epoch starts directly overhead. The
+  /// position stands on the terrain, not the datum sphere: the ground at a
+  /// lunar site sits hundreds of metres off the datum, and a craft seated
+  /// on the datum would be buried in, or hung above, the hill it is on.
+  /// Velocity is zero as it is for [buildSurfaceCraft] — the landed lock
+  /// co-rotates the craft with the body from there.
+  static Vessel buildLunarLander({
+    required String id,
+    required String name,
+    String ownerId = 'player-1',
+  }) {
+    final system = realSystem();
+    final body = system.require(moon);
+    const ephemeris = BodyEphemeris();
+    final moonRoot = ephemeris.positionRelativeToRoot(body, system, Epoch.zero);
+    final outward = (-moonRoot).normalized;
+    final ground =
+        body.terrainGroundRadius(outward * body.radius, Epoch.zero);
+    final tank = ResourceContainer(
+        type: ResourceType.liquidFuel, capacity: 400, amount: 400, unitMass: 5);
+    return Vessel(
+      id: VesselId(id),
+      name: name,
+      ownerId: ownerId,
+      state: StateVector(
+        position: outward * ground,
+        velocity: Vector3.zero,
+        attitude: _alignZTo(outward),
+      ),
+      dominantBody: moon,
+      landed: true,
+      stages: [
+        Stage(index: 0, parts: [
+          Part(
+            id: PartId('$id-core'),
+            name: 'Core',
+            dryMass: 1500,
+            inertiaContribution: Vector3(2000, 2000, 1000),
+            engine: const Engine(
+              name: 'orbiter',
+              maxThrustVacuum: 2.3e6,
+              maxThrustSeaLevel: 1.8e6,
+              ispVacuum: 350,
+              ispSeaLevel: 330,
+              gimbalRange: 0.12,
+            ),
+            resources: [tank],
+            crossSectionArea: 1.5,
+          ),
+        ]),
+      ],
+      thermal: [
+        PartThermalState(
+          part: PartId('$id-core'),
+          temperature: 290,
+          heatCapacity: 8000,
+          maxTemperature: 2200,
+          surfaceArea: 6,
+        ),
+      ],
+    );
+  }
+
   /// Quaternion rotating the body nose (+Z) onto the unit [target] direction.
   static Quaternion _alignZTo(Vector3 target) {
     final z = Vector3.unitZ;
