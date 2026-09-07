@@ -177,7 +177,7 @@ void main() {
         reason: 'roads are splines now, not tiles');
   });
 
-  test('free build: a steep route commits, draped on the land', () {
+  test('free build: a steep route commits, and is still graded', () {
     final city = colony();
     final c = CityEditController()..set(CityEditTool.roadSpline);
     // A 50% grade: every tier refuses it when the ground is respected.
@@ -189,8 +189,9 @@ void main() {
     c.commitSpline(city);
     expect(city.layout.roads, hasLength(1));
     expect(c.blocked, isNull);
-    expect(city.layout.roads.single.graded, isFalse,
-        reason: 'draped, not graded: nothing is cut for it');
+    expect(city.layout.roads.single.graded, isTrue,
+        reason: 'the gate is off, the corridor is not: its lots are '
+            'levelled by it, and a building on one must not float');
   });
 
   test('terrain respected: the same route is refused for its grade', () {

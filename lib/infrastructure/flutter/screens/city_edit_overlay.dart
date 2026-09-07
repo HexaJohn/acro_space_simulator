@@ -72,15 +72,17 @@ class CityEditController extends ChangeNotifier {
   /// player steers by. Null until two points exist.
   double? previewGradePct;
 
-  /// Free build: the ground is neither a gate nor a cost.
+  /// Free build: the ground is not a gate.
   ///
   /// On, a road is never refused for its grade and a site never for its
-  /// slope, and what is laid is DRAPED on the land rather than graded into
-  /// it — no pad, no corridor, no terrain brush, so the ground is not
-  /// re-meshed under a placement. Off, every rule and every cut is back.
-  /// On by default for now: the editing itself is what is being judged,
-  /// and the grade checks were most of the cost of holding a large site —
-  /// five terrain samples per candidate, eighty-one candidates for the
+  /// slope, and the previews ride the site's datum instead of the field.
+  /// What is laid is still graded into the land — the pad under a
+  /// building, the corridor under a road — so nothing floats or clips;
+  /// the road's grading is what levels the lots it cuts, which is why a
+  /// player's road keeps it too. Off, the grade limits are back. On by
+  /// default for now: the editing itself is what is being judged, and the
+  /// grade checks were most of the cost of holding a large site — five
+  /// terrain samples per candidate, eighty-one candidates for the
   /// suitability heatmap, each sample composing every brush in a graded
   /// town at ~16 ms — a stall of seconds on every cell the cursor crossed.
   bool ignoreTerrain = true;
@@ -127,7 +129,6 @@ class CityEditController extends ChangeNotifier {
     );
     final id = city.commitRoad(List.of(pending), roadClass,
         groundAt: ignoreTerrain ? null : groundAt,
-        graded: !ignoreTerrain,
         soundWalls: soundWalls && roadClass.canHaveSoundWalls);
     if (id == null) {
       // Refused on grade. The pending points are KEPT: the player adjusts the
@@ -512,10 +513,9 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
         padding: const EdgeInsets.symmetric(horizontal: 6),
         child: Tooltip(
           message: controller.ignoreTerrain
-              ? 'Terrain ignored: no grade limits, nothing cut — roads and '
-                  'plots are draped on the land.'
-              : 'Terrain respected: grade limits apply, pads and corridors '
-                  'are cut into the ground.',
+              ? 'Terrain ignored: no grade limits. Pads and corridors are '
+                  'still cut into the ground.'
+              : 'Terrain respected: grade limits apply to roads and sites.',
           child: InkWell(
             onTap: () {
               controller.ignoreTerrain = !controller.ignoreTerrain;

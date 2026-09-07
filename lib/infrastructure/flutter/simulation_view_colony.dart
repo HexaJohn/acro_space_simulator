@@ -402,8 +402,9 @@ extension SimulationViewColony on _SimulationViewState {
               '${held.label} needs ${held.unlockPop} population.';
           return;
         }
-        final claimed = city.claimSite(held, centre,
-            graded: !_cityEdit.ignoreTerrain);
+        // Graded either way: free build drops the slope gate, not the pad
+        // (see [CityEditController.ignoreTerrain]).
+        final claimed = city.claimSite(held, centre);
         _cityEdit.blocked = claimed == null ? city.blocked : null;
       });
       return;
