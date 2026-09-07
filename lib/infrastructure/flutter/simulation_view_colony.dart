@@ -352,7 +352,10 @@ extension SimulationViewColony on _SimulationViewState {
     if (body == null) return 0;
     final edits = _terrainEdits.forBody(body.id);
     final editCount = edits?.length ?? 0;
-    if (_siteRadiusCity == city.id && _siteRadiusEdits == editCount) {
+    // The site, not just the colony: ids are reused when a colony is
+    // removed and another founded, and the new one may stand elsewhere.
+    final site = '${city.id}@${city.cityLat},${city.cityLon}';
+    if (_siteRadiusCity == site && _siteRadiusEdits == editCount) {
       return _siteRadiusM;
     }
     final lat = city.cityLat * math.pi / 180.0;
@@ -361,7 +364,7 @@ extension SimulationViewColony on _SimulationViewState {
         math.cos(lat) * math.sin(lon), math.sin(lat));
     final field = body.terrainFieldWith(edits);
     final r = field?.groundRadiusAt(dir.x, dir.y, dir.z) ?? body.radius;
-    _siteRadiusCity = city.id;
+    _siteRadiusCity = site;
     _siteRadiusEdits = editCount;
     _siteRadiusM = r;
     return r;
