@@ -8,10 +8,12 @@ import 'dart:math' as math;
 import 'package:acro_space_simulator/domain/planetary/planet_surface.dart';
 import 'package:acro_space_simulator/domain/scatter/scatter_instance.dart';
 import 'package:acro_space_simulator/domain/scatter/scatter_layer.dart';
+import 'package:acro_space_simulator/domain/scatter/scatter_mask.dart';
 import 'package:acro_space_simulator/domain/scatter/scatter_placement.dart';
 import 'package:acro_space_simulator/domain/terrain/cubed_sphere.dart';
 import 'package:acro_space_simulator/domain/terrain/terrain_brush.dart';
 import 'package:acro_space_simulator/domain/terrain/terrain_edits.dart';
+import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/domain/terrain/terrain_field.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -32,12 +34,14 @@ const _surface = PlanetSurface(
   solarFlux: 1361,
 );
 
-ScatterPlacement _placement({TerrainEdits? edits, double vegetation = 1.0}) =>
+ScatterPlacement _placement(
+        {TerrainEdits? edits, double vegetation = 1.0, ScatterMask? mask}) =>
     ScatterPlacement(
       field: _field(edits: edits),
       surface: _surface,
       bodySeed: 99,
       vegetationCap: vegetation,
+      mask: mask,
     );
 
 /// Cells at [layer]'s generation level, walked across one face.
@@ -355,4 +359,84 @@ void main() {
       expect(levels, contains(layer.levelFor(300000)));
     }
   });
+
+  group('colony mask', () {
+    // The gate that keeps props out of a built colony. Two things have to be
+    // true at once: the footprint is cleared, and NOTHING ELSE MOVES — the
+    // mask draws no randomness, so a town cannot reshuffle the forest beside
+    // it.
+    /// A cell of this world that actually grows something — walking the face
+    /// rather than assuming, since biome decides and most cells are bare.
+    (ChunkKey, List<ScatterInstance>) populated(ScatterLayer layer) {
+      for (final c in _cells(layer, 300000, 24)) {
+        final got = _placement().instancesFor(c, layer);
+        if (got.length > 20) return (c, got);
+      }
+      fail('no populated cell on this world');
+    }
+
+    ScatterMask maskOver(List<ScatterInstance> props, double radiusM) {
+      final centre = props.first.positionBF;
+      final b = ScatterMaskBuilder(
+          originBF: centre, groundRadiusM: centre.length)
+        ..addDisc(centre, radiusM);
+      return b.build(1);
+    }
+
+    test('props inside the footprint go, props outside stay put', () {
+      const layer = ScatterLayers.rocks;
+      final (cell, before) = populated(layer);
+
+      const clearM = 400.0;
+      final mask = maskOver(before, clearM);
+      final after = _placement(mask: mask).instancesFor(cell, layer);
+
+      expect(after.length, lessThan(before.length), reason: 'nothing cleared');
+      final centre = before.first.positionBF;
+      for (final p in after) {
+        final d = _tangentialDistance(centre, p.positionBF);
+        expect(d, greaterThan(clearM - 1e-3),
+            reason: 'a prop survived inside the footprint');
+      }
+    });
+
+    test('the survivors are byte-identical to their unmasked selves', () {
+      const layer = ScatterLayers.rocks;
+      final (cell, before) = populated(layer);
+      final mask = maskOver(before, 400);
+      final after = _placement(mask: mask).instancesFor(cell, layer);
+
+      final byPos = {
+        for (final p in before) p.positionBF.toString(): p,
+      };
+      for (final p in after) {
+        final twin = byPos[p.positionBF.toString()];
+        expect(twin, isNotNull,
+            reason: 'the mask moved a prop instead of removing it');
+        expect(p.seed, twin!.seed);
+        expect(p.kind, twin.kind);
+        expect(p.yaw, twin.yaw);
+        expect(p.scale, twin.scale);
+      }
+    });
+
+    test('an empty mask changes nothing at all', () {
+      const layer = ScatterLayers.rocks;
+      final (cell, before) = populated(layer);
+      final empty = ScatterMaskBuilder(
+              originBF: before.first.positionBF,
+              groundRadiusM: before.first.positionBF.length)
+          .build(1);
+      final after = _placement(mask: empty).instancesFor(cell, layer);
+      expect(after.length, before.length);
+    });
+  });
+}
+
+/// Distance between two body-fixed points measured ACROSS the surface, with
+/// the radial difference dropped — the same question the mask asks.
+double _tangentialDistance(Vector3 a, Vector3 b) {
+  final up = a.normalized;
+  final d = b - a;
+  return (d - up * d.dot(up)).length;
 }

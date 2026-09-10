@@ -22,6 +22,7 @@ import '../terrain/terrain_edits.dart';
 import '../terrain/terrain_field.dart';
 import 'scatter_instance.dart';
 import 'scatter_layer.dart';
+import 'scatter_mask.dart';
 import 'scatter_placement.dart';
 import 'scatter_scheduler.dart';
 
@@ -86,6 +87,7 @@ class _Worker {
   double _sentVegetationCap = double.nan;
   Object? _sentEditsIdentity;
   int _sentEditsVersion = -1;
+  int _sentMaskVersion = -1;
 
   int get inFlight => _jobs.length;
 
@@ -137,6 +139,7 @@ class _Worker {
       _sentVegetationCap = placement.vegetationCap;
       _sentEditsIdentity = null;
       _sentEditsVersion = -1;
+      _sentMaskVersion = -1;
     }
     final edits = placement.field.edits;
     if (edits == null || edits.isEmpty) {
@@ -150,6 +153,15 @@ class _Worker {
       commands.send(_SetEdits(edits.all));
       _sentEditsIdentity = edits;
       _sentEditsVersion = edits.version;
+    }
+
+    // The colony footprint, shipped on the same terms as the brushes: once,
+    // and again only when the layout it was built from changes. Version -1 is
+    // "no mask", which is what an unsettled body sends.
+    final maskVersion = placement.mask?.version ?? -1;
+    if (maskVersion != _sentMaskVersion) {
+      commands.send(_SetMask(placement.mask));
+      _sentMaskVersion = maskVersion;
     }
 
     final completer = Completer<List<ScatterInstance>>();
@@ -184,6 +196,11 @@ class _SetEdits {
   final List<TerrainBrush> brushes;
 }
 
+class _SetMask {
+  const _SetMask(this.mask);
+  final ScatterMask? mask;
+}
+
 class _GenJob {
   const _GenJob(this.id, this.cell, this.layerIndex);
   final int id;
@@ -213,6 +230,7 @@ void _workerMain(SendPort ready) {
 
   _SetContext? context;
   TerrainEdits? edits;
+  ScatterMask? mask;
   ScatterPlacement? placement;
 
   commands.listen((Object? msg) {
@@ -222,6 +240,9 @@ void _workerMain(SendPort ready) {
     } else if (msg is _SetEdits) {
       edits = msg.brushes.isEmpty ? null : TerrainEdits.of(msg.brushes);
       placement = null;
+    } else if (msg is _SetMask) {
+      mask = msg.mask;
+      placement = null;
     } else if (msg is _GenJob) {
       try {
         final ctx = context!;
@@ -230,6 +251,7 @@ void _workerMain(SendPort ready) {
           surface: ctx.surface,
           bodySeed: ctx.bodySeed,
           vegetationCap: ctx.vegetationCap,
+          mask: mask,
         );
         ready.send(_GenDone(
           msg.id,

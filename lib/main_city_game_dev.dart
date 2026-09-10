@@ -84,8 +84,25 @@ Future<void> main() async {
     }
   });
 
-  developer.registerExtension('ext.acro.citygame', (method, params) async =>
-      developer.ServiceExtensionResponse.result(jsonEncode(_status(colony))));
+  developer.registerExtension('ext.acro.citygame', (method, params) async {
+    final view = SimViewControl.instance.status?.call() ?? const {};
+    return developer.ServiceExtensionResponse.result(jsonEncode({
+      ..._status(colony),
+      // The camera's own geometry, so a framing complaint can be answered with
+      // a number instead of a screenshot.
+      'camera': {
+        for (final k in const [
+          'cityPivotAltM',
+          'cityPivotOffsetM',
+          'cityRangeM',
+          'cityElevationRad',
+          'freecam',
+          'upMode',
+        ])
+          k: view[k],
+      },
+    }));
+  });
 
   // Framing knob. The opening camera pose is a judgement call about how much
   // of the colony should be in frame, and re-launching to try a number is a

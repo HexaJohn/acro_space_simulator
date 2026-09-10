@@ -14,6 +14,7 @@ import '../../../domain/scatter/prop_catalog.dart';
 import '../../../domain/scatter/prop_model.dart';
 import '../../../domain/scatter/scatter_instance.dart';
 import '../../../domain/scatter/scatter_layer.dart';
+import '../../../domain/scatter/scatter_mask.dart';
 import '../../../domain/scatter/scatter_placement.dart';
 import '../../../domain/scatter/scatter_scheduler.dart';
 import '../../../domain/shared/quaternion.dart';
@@ -73,9 +74,32 @@ class ScatterNodes {
   /// Kill switch: false forces inline generation for A/B from the dev ext.
   static bool asyncGeneration = true;
 
+  /// Isolates in the generation pool. Two suits a flight; a static camera over
+  /// a colony has cores to spare and a wider region to fill.
+  static int workerCount = 2;
+
   /// Highest eye altitude (m) at which props draw at all. Above it the biggest
   /// tree is well under a pixel.
   static double maxAltitudeM = 4000;
+
+  /// Multiplier on every layer's view distance.
+  ///
+  /// The shipped distances are tuned for a camera ON the ground — a walker
+  /// sees 900 m of forest and that is generous. A city-builder camera sits a
+  /// kilometre back and looks across the whole colony, where the same number
+  /// draws a small island of trees around the pivot and bare ground beyond it.
+  /// Cost grows with the AREA, so this is a knob and not a new default.
+  static double viewDistanceScale = 1.0;
+  double _builtViewScale = 1.0;
+
+  /// Anchor the scatter on the camera's FOCUS rather than its eye.
+  ///
+  /// The eye is the right anchor when it is the thing moving through the world
+  /// (a walk, a flight). Under an orbit camera it is not: the eye swings on a
+  /// boom while the player's attention stays on the point it circles, so
+  /// anchoring there streams cells in and out on every drag and centres the
+  /// loaded region a boom-length away from what is being looked at.
+  static bool anchorAtFocus = false;
 
   /// How far the anchor may drift before instance offsets are rebased (m).
   /// Instances are stored relative to it so their transforms stay small enough
@@ -84,6 +108,21 @@ class ScatterNodes {
   static double anchorGridM = 256;
 
   static String debugLine = '';
+
+  /// Built ground on the focus body, rebuilt from the FRAME when the colony
+  /// changes shape. See [ScatterMask].
+  ScatterMask? _mask;
+  int _maskSig = 0;
+
+  /// Ceiling on masked features. A colony of a hundred thousand buildings
+  /// would otherwise rebuild a multi-megabyte capsule list every time one more
+  /// grew; past this the mask keeps the roads (which is what the props
+  /// actually stand in the middle of) and stops adding lots.
+  static const int _maxMaskFeatures = 20000;
+
+  /// Extra clearance around a road corridor, metres — a verge, so a trunk does
+  /// not overhang the kerb it was placed beside.
+  static const double _roadMarginM = 3.0;
 
   /// Which gate suppressed scatter this frame, or '' when it drew.
   static String gateReason = '';
@@ -95,6 +134,7 @@ class ScatterNodes {
   // --- Async generation state (mirrors TerrainNodes' meshing state) --------
   ScatterGenScheduler? _scheduler;
   bool _schedulerAsync = true;
+  int _schedulerWorkers = 2;
   final Set<_CellId> _pendingCells = {};
 
   /// In-flight cells a new edit overlaps — their placement sampled the
@@ -270,7 +310,9 @@ class ScatterNodes {
     // at, and scattering around the camera instead pops props in and out as the
     // view swings.
     final fv = focusVesselId == null ? null : snap.vessels[focusVesselId];
-    var anchorWorld = eyeWorld;
+    // An orbit camera's subject is the point it circles, not the eye on the
+    // boom — see [anchorAtFocus].
+    var anchorWorld = anchorAtFocus ? origin.focusWorld : eyeWorld;
     if (fv != null) {
       final vb = snap.bodies[fv.body];
       if (vb != null) {
@@ -295,11 +337,22 @@ class ScatterNodes {
       _clear();
       return;
     }
+    // Built ground. Rebuilt only when the colony's shape changes — every
+    // resident cell over it is stale when that happens, exactly as for a
+    // terrain edit.
+    if (_refreshMask(snap, bodyId, invQuat)) {
+      _cells.clear();
+      _stalePending.addAll(_pendingCells);
+      _wantedCache.clear();
+      _dirty = true;
+    }
+
     final placement = ScatterPlacement(
       field: field,
       surface: surface,
       bodySeed: d.terrainSeed,
       vegetationCap: d.terrainGrassAmount,
+      mask: _mask,
     );
 
     // --- Cell residency ----------------------------------------------------
@@ -307,21 +360,29 @@ class ScatterNodes {
     // the anchor falls in at that layer's level — it cannot change without
     // the anchor crossing a cell boundary, and computing it fresh was ~700
     // chunkAt probes per layer per frame.
+    // The wanted set is cached against the cell the anchor sits in, which
+    // cannot notice the RANGE changing under it — a knob turned at runtime
+    // (the city rig sets one on entry) has to drop the cache itself.
+    if (_builtViewScale != viewDistanceScale) {
+      _wantedCache.clear();
+      _builtViewScale = viewDistanceScale;
+    }
+
     final wanted = <_CellId>{};
     for (var li = 0; li < ScatterLayers.all.length; li++) {
       final layer = ScatterLayers.all[li];
       if (densityScale <= 0) break;
       final level = layer.levelFor(field.radius);
+      final reachM = layer.viewDistanceM * viewDistanceScale;
       final anchorCell = chunkAt(anchorDir, level);
       var cached = _wantedCache[li];
       if (cached == null || cached.$1 != anchorCell) {
         final cells = <ChunkKey>{};
-        for (final cell in _cellsWithin(
-            anchorDir, layer.viewDistanceM / field.radius, level)) {
+        for (final cell
+            in _cellsWithin(anchorDir, reachM / field.radius, level)) {
           // Cells are picked by their own reach, so a cell whose centre is
           // past the view distance still joins when its near edge is inside.
-          if (!cellInReach(
-              cell, anchorDir, field.radius, layer.viewDistanceM)) {
+          if (!cellInReach(cell, anchorDir, field.radius, reachM)) {
             continue;
           }
           cells.add(cell);
@@ -348,12 +409,15 @@ class ScatterNodes {
     // scatter_scheduler.dart), which is what keeps a walk into fresh ground
     // from hitching: a cell is 5-30 ms of field sampling, and this loop used
     // to run several of them inline every frame.
-    if (_scheduler == null || _schedulerAsync != asyncGeneration) {
+    if (_scheduler == null ||
+        _schedulerAsync != asyncGeneration ||
+        _schedulerWorkers != workerCount) {
       _scheduler?.dispose();
       _scheduler = asyncGeneration
-          ? ScatterGenScheduler.platform()
+          ? ScatterGenScheduler.platform(workers: workerCount)
           : SyncScatterScheduler();
       _schedulerAsync = asyncGeneration;
+      _schedulerWorkers = workerCount;
     }
     final missing = [
       for (final id in wanted)
@@ -727,6 +791,122 @@ class ScatterNodes {
       }
     }
   }
+
+  /// Rebuild the colony footprint from the frame if it has changed.
+  ///
+  /// Returns true when the mask was replaced, which makes every resident cell
+  /// over the colony stale.
+  ///
+  /// Reads the SNAPSHOT, never `CitySim`: roads arrive as sampled body-fixed
+  /// polylines and buildings as body-fixed sites, which is all a renderer is
+  /// given and all a networked client will ever have.
+  bool _refreshMask(WorldSnapshot snap, String bodyId, Quaternion invQuat) {
+    // A cheap signature rather than a deep compare: the shape of a colony
+    // changes by GAINING things — a road drawn, a lot grown — so counts catch
+    // it, and a per-frame hash over a hundred thousand buildings would cost
+    // more than the rebuild it is trying to avoid.
+    var roads = 0, points = 0, builds = 0;
+    for (final r in snap.roads) {
+      if (r.body != bodyId) continue;
+      roads++;
+      points += r.points.length;
+    }
+    for (final b in snap.buildings.values) {
+      if (b.body == bodyId) builds++;
+    }
+    final sig = Object.hash(bodyId, roads, points, builds);
+    if (sig == _maskSig) return false;
+    _maskSig = sig;
+    if (roads == 0 && builds == 0) {
+      final had = _mask != null;
+      _mask = null;
+      return had;
+    }
+
+    // Origin: the mean of the colony's own geometry, so feature coordinates
+    // stay small enough for float32 and the whole-colony reject is tight.
+    var cx = 0.0, cy = 0.0, cz = 0.0;
+    var n = 0;
+    for (final r in snap.roads) {
+      if (r.body != bodyId || r.points.length < 3) continue;
+      cx += r.points[0];
+      cy += r.points[1];
+      cz += r.points[2];
+      n++;
+    }
+    for (final b in snap.buildings.values) {
+      if (b.body != bodyId) continue;
+      cx += b.px;
+      cy += b.py;
+      cz += b.pz;
+      n++;
+    }
+    if (n == 0) {
+      final had = _mask != null;
+      _mask = null;
+      return had;
+    }
+    final originBF = Vector3(cx / n, cy / n, cz / n);
+    final builder = ScatterMaskBuilder(
+      originBF: originBF,
+      groundRadiusM: originBF.length,
+    );
+
+    // Roads first: they are what props most visibly stand in the middle of,
+    // and they are the features worth keeping if the cap bites.
+    var features = 0;
+    for (final r in snap.roads) {
+      if (r.body != bodyId || r.points.length < 6) continue;
+      final radius = r.halfWidthM + _roadMarginM;
+      var ax = r.points[0], ay = r.points[1], az = r.points[2];
+      var run = 0.0;
+      for (var i = 3; i + 2 < r.points.length; i += 3) {
+        final bx = r.points[i], by = r.points[i + 1], bz = r.points[i + 2];
+        final dx = bx - ax, dy = by - ay, dz = bz - az;
+        run = math.sqrt(dx * dx + dy * dy + dz * dz);
+        // Merge the sampled polyline into corridor-length capsules. The
+        // samples are metres apart; one capsule each would be tens of
+        // thousands of features for a town's worth of streets, and the chord
+        // error over 40 m of a street's curvature is under the verge margin.
+        final last = i + 5 >= r.points.length;
+        if (run < _maskSegmentM && !last) continue;
+        builder.addCapsule(
+            Vector3(ax, ay, az), Vector3(bx, by, bz), radius);
+        features++;
+        ax = bx;
+        ay = by;
+        az = bz;
+      }
+    }
+
+    // Then the sites. A rectangle is masked as the capsule inscribed along its
+    // long axis: a disc of the half-diagonal would clear the trees for tens of
+    // metres past a long shed, and one of the half-width would leave them
+    // standing through its ends.
+    for (final b in snap.buildings.values) {
+      if (b.body != bodyId) continue;
+      if (features >= _maxMaskFeatures) break;
+      final w = b.siteWidthM, dpt = b.siteDepthM;
+      if (w <= 0 || dpt <= 0) continue;
+      final centre = Vector3(b.px, b.py, b.pz);
+      final q = Quaternion(b.qw, b.qx, b.qy, b.qz);
+      final radius = math.min(w, dpt) * 0.5;
+      final half = (math.max(w, dpt) - math.min(w, dpt)) * 0.5;
+      if (half < 0.5) {
+        builder.addDisc(centre, radius);
+      } else {
+        final axis = q.rotate(w >= dpt ? Vector3.unitX : Vector3.unitY);
+        builder.addCapsule(centre - axis * half, centre + axis * half, radius);
+      }
+      features++;
+    }
+
+    _mask = builder.isEmpty ? null : builder.build(sig);
+    return true;
+  }
+
+  /// Corridor length a road's samples are merged into, metres.
+  static const double _maskSegmentM = 40;
 
   /// Whether [cell] is within [viewDistanceM] of the surface point under
   /// [anchorDir], measured ALONG THE GROUND (great-circle arc), with the

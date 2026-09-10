@@ -30,7 +30,14 @@ import 'scatter_scheduler_sync.dart'
 abstract interface class ScatterGenScheduler {
   /// The best implementation for this platform: isolate-backed where isolates
   /// exist, inline where they do not (web).
-  factory ScatterGenScheduler.platform() = platform.PlatformScatterScheduler;
+  ///
+  /// [workers] sizes the isolate pool. Two is right for a flight, where the
+  /// main isolate is busy with physics and the scatter is a passenger; a
+  /// camera parked over a static colony has cores to spare and a much larger
+  /// region to fill, so the renderer raises it there. Ignored on web, which
+  /// has no isolates to pool.
+  factory ScatterGenScheduler.platform({int workers}) =
+      platform.PlatformScatterScheduler;
 
   /// Generate [layer]'s instances for [cell]. The future completes on the
   /// caller's event loop; the work may have happened elsewhere. Deterministic:

@@ -189,12 +189,80 @@ extension SimulationViewColony on _SimulationViewState {
 
   /// Camera tilt above the horizon, radians.
   ///
-  /// Shallower than a plan view on purpose: at 49 degrees the frame is all
-  /// ground and the colony has nothing to be measured against, while at 30 the
-  /// skyline and the rising ground behind the town are both in shot — which is
-  /// where the sense of scale comes from. Still steep enough to read the
-  /// street layout, and only a starting pose.
-  static const double cityCameraElevation = 0.52;
+  /// 55 degrees, and the number is set by the GROUND rather than by taste. A
+  /// shallower rig frames more skyline, which is what gives a colony a sense
+  /// of scale — but the pivot sits ON the terrain, and on any site with relief
+  /// worth looking at, the ridge between the eye and the pivot rises into the
+  /// line of sight: at 30 degrees the opening shot of the default site is a
+  /// hillside with the town hidden behind it. This clears the near ground on
+  /// rolling terrain and still reads as a city view rather than a map. Only a
+  /// starting pose — the middle mouse button orbits from here.
+  static const double cityCameraElevation = 0.96;
+
+  /// How far the camera may tilt, radians above the local horizon.
+  ///
+  /// The floor keeps the eye out of the hill it is orbiting (the pivot sits ON
+  /// the ground, so a boom swung below the horizon ends up underneath it); the
+  /// ceiling stops short of straight down, where azimuth degenerates into a
+  /// spin about nothing and the drag direction becomes unreadable.
+  static const double cityCameraMinElevation = 0.12;
+  static const double cityCameraMaxElevation = 1.45;
+
+  /// Metres per second of pan, per metre of camera range.
+  ///
+  /// Proportional so the ground moves at a constant rate ON SCREEN: a fixed
+  /// speed crawls when zoomed out to the whole colony and rockets when zoomed
+  /// into one lot.
+  static const double cityPanRate = 0.9;
+
+  /// Slide the camera's pivot across the ground.
+  ///
+  /// The pivot stays ON the terrain — re-sampled at the point panned to — so
+  /// the view rides up over a ridge instead of burrowing into it, and a zoom
+  /// always converges on ground rather than on a point in the air above (or
+  /// below) it.
+  ///
+  /// Directions come from the CAMERA, projected onto the local tangent plane,
+  /// so W is "away from the viewer across the ground" and D is "right on
+  /// screen" at any azimuth. Looking almost straight down there is no forward
+  /// left to project, and screen-up stands in for it.
+  void _panCityCamera(double fwd, double strafe, double frameDt) {
+    final city = _editingCity;
+    if (city == null || _freecamRelLocal.length < 1e-3) return;
+    final up = _freecamRelLocal.normalized;
+    final bodyFrame = _refBodyQuat().conjugate;
+    final cam = _camera;
+
+    Vector3 flatten(Vector3 v) {
+      final t = v - up * v.dot(up);
+      return t.length < 1e-6 ? Vector3.zero : t.normalized;
+    }
+
+    var ahead = flatten(bodyFrame.rotate(cam.forward));
+    if (ahead == Vector3.zero) ahead = flatten(bodyFrame.rotate(cam.up));
+    final right = flatten(bodyFrame.rotate(cam.right));
+    if (ahead == Vector3.zero && right == Vector3.zero) return;
+
+    final boost = _keysDown.contains(LogicalKeyboardKey.shiftLeft) ? 4.0 : 1.0;
+    final speed = math.max(_range, 20.0) * cityPanRate * boost;
+    final dt = frameDt.clamp(0.0, 0.1);
+    final moved =
+        _freecamRelLocal + (ahead * fwd + right * strafe) * (speed * dt);
+
+    // Back onto the ground under wherever that landed. No setState: this runs
+    // inside the frame, which repaints on its own once the tick is done.
+    final dir = moved.normalized;
+    _freecamRelLocal = dir * _cityGroundRadius(city, dir);
+  }
+
+  /// Ground radius (m from the body's centre) along a body-fixed direction,
+  /// terrain edits included — the same ground the roads are graded into.
+  double _cityGroundRadius(CitySim city, Vector3 dirBF) {
+    final body = _universe.current().body(city.body.id);
+    if (body == null) return _freecamRelLocal.length;
+    final field = body.terrainFieldWith(_terrainEdits.forBody(body.id));
+    return field?.groundRadiusAt(dirBF.x, dirBF.y, dirBF.z) ?? body.radius;
+  }
 
   /// Park the camera over [city]'s crossroads, looking down at it.
   ///
@@ -203,6 +271,21 @@ extension SimulationViewColony on _SimulationViewState {
   /// the freecam's WASD flight is exactly the pan a city builder wants. The
   /// anchor sits ON the ground (the eye is pushed out by the camera range),
   /// which also makes it the local vertical the gimbal reads.
+  /// How much further than a walker's world the city camera sees props.
+  ///
+  /// The camera sits a kilometre and a half back and looks across the whole
+  /// colony; at 1.0 the forest is an island around the pivot with bare ground
+  /// past it. Cost grows with the AREA covered, so this is as far as it goes
+  /// without a measurement to back it.
+  static const double cityScatterRangeScale = 2.5;
+
+  /// Prop cut-off altitude for the city rig, metres.
+  ///
+  /// The shipped 4 km is an eye height a walker or a lander reaches only on
+  /// the way somewhere. A city camera zoomed out to see a district is already
+  /// past it, and props vanishing wholesale at a zoom step reads as a bug.
+  static const double cityScatterMaxAltitudeM = 9000;
+
   void _openCityCamera(CitySim city) {
     _freecamRef = city.body.id;
     _freecamRelLocal = city.localToBodyFixed(
@@ -224,6 +307,53 @@ extension SimulationViewColony on _SimulationViewState {
   /// mid-morning, which lights one face of everything and lays the shadows
   /// across the streets.
   static const double cityOpenSunAngle = -math.pi / 6;
+
+  /// Diagnostics for the city turntable, or null when it is not the camera.
+  ///
+  /// `pivotAltM` is the height of the pivot above the ground UNDER IT: zero is
+  /// correct, negative is buried, positive is floating. `pivotOffsetM` is how
+  /// far it has been panned from the colony's own site.
+  Map<String, Object?>? _cityCameraStatus() {
+    final city = _editingCity;
+    if (!widget.cityMode || city == null) return null;
+    if (_freecamRelLocal.length < 1e-3) return null;
+    final dir = _freecamRelLocal.normalized;
+    final ground = _cityGroundRadius(city, dir);
+    final site = city.localToBodyFixed(const Vec2(0, 0),
+        bodyRadiusM: _freecamRelLocal.length);
+    final d = _freecamRelLocal - site;
+    final up = dir;
+    return {
+      'cityPivotAltM': _freecamRelLocal.length - ground,
+      'cityPivotOffsetM': (d - up * d.dot(up)).length,
+      'cityRangeM': _range,
+      'cityElevationRad': _view.elevation,
+    };
+  }
+
+  /// Everything the city camera can only settle once the world has a frame.
+  ///
+  /// Two jobs, both one-shot, both needing state that does not exist at
+  /// `initState`:
+  ///
+  /// * **Seat the pivot on the real ground.** The opening pose is built from
+  ///   `_colonySiteRadius`, and until the terrain field for the body is
+  ///   resident that answers with the DATUM. A pivot at sea level under a town
+  ///   at 480 m (or the 1,600 m plateau the default used to sit on) is buried,
+  ///   and a turntable aimed at a buried point misses: looking steeply down it
+  ///   still frames the town, but at a playable tilt the aim lands short by
+  ///   roughly the burial depth over the tangent — which is how a colony ends
+  ///   up just off the edge of its own opening shot.
+  /// * **Turn the world into daylight.**
+  void _settleCityOpen() {
+    final city = _editingCity;
+    if (city == null) return;
+    if (_freecamRelLocal.length > 1e-3) {
+      final dir = _freecamRelLocal.normalized;
+      _freecamRelLocal = dir * _cityGroundRadius(city, dir);
+    }
+    _alignCityDaylight();
+  }
 
   /// Turn the world forward until the colony's mid-morning.
   ///

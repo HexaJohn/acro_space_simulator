@@ -9,5 +9,8 @@ library;
 
 import 'scatter_scheduler.dart';
 
-/// On this platform the sync scheduler IS the platform scheduler.
-class PlatformScatterScheduler extends SyncScatterScheduler {}
+/// On this platform the sync scheduler IS the platform scheduler. The pool
+/// size is accepted and ignored: there is nothing to pool.
+class PlatformScatterScheduler extends SyncScatterScheduler {
+  PlatformScatterScheduler({int workers = 1});
+}

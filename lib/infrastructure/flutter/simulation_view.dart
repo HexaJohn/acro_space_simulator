@@ -81,6 +81,7 @@ import '../flutter_scene/halo_ring_nodes.dart';
 import '../flutter_scene/line_nodes.dart';
 import '../flutter_scene/render_backend.dart';
 import '../flutter_scene/ring_nodes.dart';
+import '../flutter_scene/scatter/scatter_nodes.dart';
 import '../flutter_scene/scene_camera_adapter.dart';
 import '../flutter_scene/scene_sync.dart';
 import '../flutter_scene/scene_hud_overlay.dart';
@@ -606,6 +607,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           'presentMs': _presentMs,
           'walkGrounded': _walkGrounded,
           'lamp': TerrainNodes.lampOn,
+          // City rig: where the turntable's pivot actually is. A pivot that
+          // has drifted off the ground aims the camera at a point inside the
+          // hill (or above it), and the symptom — a colony sliding off the
+          // top of its own opening shot — looks like a framing problem rather
+          // than the geometry one it is.
+          ...?_cityCameraStatus(),
           'thirdPerson': _thirdPerson,
           'evaPack': _evaPack,
           'evaSpeedMs': _evaVel.length,
@@ -1520,6 +1527,20 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       _manualControl = false; // no craft to fly; the stick would fight the pan
       _layers = _layers.copyWith(navBall: false);
       _openCityCamera(city);
+      // Scatter follows the PIVOT here, not the eye: under a turntable camera
+      // the eye is a boom-length away from what the player is looking at, and
+      // anchoring there streams cells in and out on every drag. Range and
+      // altitude are opened up to match a camera that stands back.
+      ScatterNodes.anchorAtFocus = true;
+      ScatterNodes.viewDistanceScale =
+          SimulationViewColony.cityScatterRangeScale;
+      ScatterNodes.maxAltitudeM = SimulationViewColony.cityScatterMaxAltitudeM;
+      // A wider region is more cells to fill, and this mode has the cores to
+      // fill them with: nothing is flying, so the main isolate is not
+      // competing with physics for them. Both are in-flight caps, not
+      // per-frame work — the cost is CPU occupancy, not frame time.
+      ScatterNodes.workerCount = 4;
+      ScatterNodes.cellBudgetPerFrame = 16;
     }
 
     for (final v in _vessels.all()) {
@@ -1721,6 +1742,18 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         }
         _stepDrill(frameDt);
         _syncWalkerBody();
+      } else if (_cityCamera) {
+        // The city rig DRAGS THE GROUND rather than flying: W/S and A/D slide
+        // the pivot across the terrain, Q/E dolly the boom. Flying the eye
+        // down its own view axis (what the branch below does) drives straight
+        // into the dirt the moment the camera is tilted down, which is most
+        // of the time in a city.
+        if (fwd != 0 || strafe != 0) {
+          _panCityCamera(fwd, strafe, frameDt);
+        }
+        if (lift != 0) {
+          setState(() => _zoom(lift > 0 ? 1 / 1.06 : 1.06));
+        }
       } else if (fwd != 0 || strafe != 0 || lift != 0) {
         final cam = _camera;
         final boost =
@@ -1835,10 +1868,11 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       _sceneWorld = null;
     }
 
-    // CITY BUILDER opens in the morning, not in whatever half of the day the
-    // epoch happens to land on. Needs a snapshot (body + star positions), so
-    // it runs here rather than at founding, and only once.
-    if (widget.cityMode && !_cityDayAligned) _alignCityDaylight();
+    // CITY BUILDER's opening pose: the pivot seated on the real ground, and
+    // the world turned into daylight. Both need a live frame (a terrain field,
+    // body and star positions), so they run here rather than at founding, and
+    // only once.
+    if (widget.cityMode && !_cityDayAligned) _settleCityOpen();
 
     // Encounter planner: refresh the trial plan + its render overlay
     // (throttled inside; cheap no-op when the planner is closed).
@@ -2012,6 +2046,16 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   @override
   void dispose() {
     _cityEdit.removeListener(_onCityEditChanged);
+    if (widget.cityMode) {
+      // The scatter knobs are process-wide. Leaving the city rig's settings
+      // behind would hand the next flight a 2.5x prop range and an anchor
+      // pinned to a focus that is no longer a town.
+      ScatterNodes.anchorAtFocus = false;
+      ScatterNodes.viewDistanceScale = 1.0;
+      ScatterNodes.maxAltitudeM = 4000;
+      ScatterNodes.workerCount = 2;
+      ScatterNodes.cellBudgetPerFrame = 6;
+    }
     SimViewControl.instance.clear();
     final timingsCb = _timingsCb;
     if (timingsCb != null) {
@@ -2142,7 +2186,20 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     final az = dAz * ca - dEl * sa;
     final el = dAz * sa + dEl * ca;
     setState(() {
-      if (_freecam) {
+      if (_cityCamera) {
+        // CITY rig: the pivot is a fixed point on the ground and the EYE
+        // swings around it — a turntable, which is what "orbit the town"
+        // means and the exact opposite of the freecam's look below. The
+        // elevation is fenced short of the horizon and of straight down:
+        // under the first the camera ends up inside the hill it is orbiting,
+        // past the second the azimuth becomes a spin about nothing.
+        _view = _view.copyWith(
+          azimuth: _view.azimuth + az,
+          elevation: (_view.elevation + el).clamp(
+              SimulationViewColony.cityCameraMinElevation,
+              SimulationViewColony.cityCameraMaxElevation),
+        );
+      } else if (_freecam) {
         // FPS-style look: the EYE stays put and the view direction pans —
         // the anchor swings around the eye instead of the eye orbiting
         // the anchor (which read as "panning around a point massively far
@@ -2794,7 +2851,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           // while flying, and the range still zooms via [ ] keys.
           onPointerSignal: (signal) {
             if (signal is PointerScrollEvent) {
-              if (_freecam) {
+              // The city rig has no flight speed to set — the wheel is the
+              // zoom, as it is in every city builder ever made.
+              if (_freecam && !_cityCamera) {
                 final factor = signal.scrollDelta.dy > 0 ? 1 / 1.3 : 1.3;
                 setState(() => _freecamSpeedMul =
                     (_freecamSpeedMul * factor).clamp(0.01, 100000.0));

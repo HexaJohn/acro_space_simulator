@@ -12,6 +12,7 @@ import '../terrain/terrain_field.dart';
 import 'prop_random.dart';
 import 'scatter_instance.dart';
 import 'scatter_layer.dart';
+import 'scatter_mask.dart';
 
 /// Places props on a body's surface, one cubed-sphere cell at a time.
 ///
@@ -41,6 +42,7 @@ class ScatterPlacement {
     required this.surface,
     required this.bodySeed,
     required this.vegetationCap,
+    this.mask,
   });
 
   /// The body's terrain field, edits and all.
@@ -55,6 +57,10 @@ class ScatterPlacement {
   /// The body's vegetation cover cap (`TerrainConfig.grassAmount`), 0 on
   /// airless worlds. Gates every layer that requires vegetation.
   final double vegetationCap;
+
+  /// Built ground to leave alone — roads, pads, lots. Null on a world nobody
+  /// has settled, which is the common case and costs nothing.
+  final ScatterMask? mask;
 
   /// Every prop [layer] puts in [cell].
   ///
@@ -127,6 +133,15 @@ class ScatterPlacement {
     final habitat =
         layer.habitatWeight(biome: biome, vegetationCap: vegetationCap);
     if (habitat <= 0.0) return null;
+
+    // Built ground. Sits with the free gates rather than after the field
+    // samples, and for the same reason they are ordered at all: a colony is
+    // exactly where the edit-aware samples are most expensive (a graded town
+    // raymarches through every brush), so the candidates a town rejects are
+    // the ones worth rejecting early. One hash-grid probe, no randomness
+    // consumed — the composed RNG stream is identical with a mask and
+    // without, so masking a colony cannot reshuffle the forest beside it.
+    if (mask != null && mask!.blocks(dir)) return null;
 
     final groundR = field.baseGroundRadiusAt(dir.x, dir.y, dir.z);
     if (groundR - field.radius > layer.maxAltitudeM) return null;
