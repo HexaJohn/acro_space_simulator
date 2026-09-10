@@ -282,6 +282,13 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   bool _plannerDirty = true;
   int _plannerComputedMs = 0;
 
+  /// The zoning view, pinned up by the player (Z, or the HUD button).
+  ///
+  /// Separate from what the renderer shows: holding the Zone tool raises the
+  /// view on its own (see `_syncZoneView`), and letting go must drop it again
+  /// without undoing a pin the player set deliberately.
+  bool _zoneViewPinned = false;
+
   /// Whether the city-builder's opening turn-to-daylight has been applied.
   /// One-shot: see `_alignCityDaylight`.
   bool _cityDayAligned = false;
@@ -728,6 +735,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   bool _thirdPerson = false;
   static const double _walkBoomM = 3.5;
   double _rangeBeforeWalk = 100.0; // orbit range restored when walk ends
+  // The city turntable's tilt and heading, restored when a walk ends. A
+  // walker looks level; handing that pose back to a camera fenced above the
+  // horizon would open on a view of the grass.
+  CameraOrbit? _viewBeforeWalk;
   CameraUpMode _upModeBeforeWalk = CameraUpMode.free;
 
   /// The body being walked on — the freecam's reference body, resolved in the
@@ -767,7 +778,14 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         // buried the walker at the core of the planet. The EYE is already
         // outside, above the ground it is looking down at.
         final eyeWorld = _currentFocusWorld() + _camera.eyeOffset;
+        // ...except under the CITY turntable, whose focus is a pivot ON the
+        // ground — the point the player has been looking at and steering by.
+        // That is where "walk the streets" means: step out onto the spot the
+        // camera circles, not onto the patch of field a kilometre back under
+        // the boom.
+        final cityPivotBF = _cityCamera ? _freecamRelLocal : null;
         _rangeBeforeWalk = _range;
+        _viewBeforeWalk = _view;
         // A walker's horizon has to be level, which means the camera gimbal
         // has to be the local vertical — see the walk branch in the frame
         // block. FREE mode skips that block entirely, so walking owns the
@@ -783,7 +801,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         _walkGrounded = false;
         final body = _walkBody;
         if (body != null) {
-          var dir = _refBodyQuat().conjugate.rotate(eyeWorld - _refBodyWorld());
+          var dir = cityPivotBF ??
+              _refBodyQuat().conjugate.rotate(eyeWorld - _refBodyWorld());
           // Eye exactly on the axis of a body (or no snapshot yet to place one)
           // leaves no radial to stand on — start at the north pole rather than
           // divide by zero.
@@ -800,6 +819,23 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         _evaPack = false;
         _evaVel = Vector3.zero;
         WalkerNodes.visible = false;
+        // Back to the turntable, pivoting on the ground WHERE THE WALK ENDED:
+        // the walker's anchor is its head, eye-height up, and the rig wants
+        // its pivot on the ground — re-seated here, at the new spot, so the
+        // camera picks up where the player walked to. Tilt and heading come
+        // back from before the walk.
+        final city = _editingCity;
+        if (widget.cityMode && city != null && _freecamRelLocal.length > 1e-3) {
+          final dir = _freecamRelLocal.normalized;
+          _freecamRelLocal = dir * _cityGroundRadius(city, dir);
+          final before = _viewBeforeWalk;
+          if (before != null) {
+            _view = _view.copyWith(
+                azimuth: before.azimuth,
+                elevation: before.elevation,
+                roll: 0);
+          }
+        }
       }
     });
   }
@@ -985,15 +1021,17 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     return b == null ? Vector3.zero : Vector3(b.px, b.py, b.pz);
   }
 
-  /// Raise or drop the zoning view.
+  /// Pin or unpin the zoning view.
   ///
   /// Flipping it is a MESH term (see [CityMeshKnobs]), so the tiles it changes
   /// are rebuilt — the ground is one sheet and one draw, and that is the price
   /// of it. Instant on a town, a moment's churn on a city. Lives here rather
   /// than in the colony extension because it has to `setState`, which an
   /// extension cannot.
-  void _toggleZoneOverlay() =>
-      setState(() => CityNodes.zoneOverlay = !CityNodes.zoneOverlay);
+  void _toggleZoneOverlay() => setState(() {
+        _zoneViewPinned = !_zoneViewPinned;
+        _syncZoneView();
+      });
 
   void _toggleFreecam() => setState(_toggleFreecamInner);
 
@@ -2074,6 +2112,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       ScatterNodes.workerCount = 2;
       ScatterNodes.cellBudgetPerFrame = 6;
     }
+    // Held by whatever editor last drove it; a flight opened next must not
+    // inherit a colony's zoning view.
+    CityNodes.zoneOverlay = false;
     SimViewControl.instance.clear();
     final timingsCb = _timingsCb;
     if (timingsCb != null) {
@@ -3218,7 +3259,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                       child: CityGameHud(
                         city: _editingCity!,
                         onExit: () => Navigator.of(context).maybePop(),
-                        zonesOn: CityNodes.zoneOverlay,
+                        zonesOn: _zoneViewPinned,
                         onToggleZones: _toggleZoneOverlay,
                       ),
                     ),

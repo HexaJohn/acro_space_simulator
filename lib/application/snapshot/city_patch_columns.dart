@@ -72,8 +72,31 @@ class CityPatchSnapshot {
   /// gather and sublist in this file to say one bit.
   static const int builtFlag = 0x100;
 
+  /// Bit set on [kind] for a lot NOBODY HAS ZONED.
+  ///
+  /// Not the same fact as "support-coloured": the grid city draws its real
+  /// support decks in the same band, and those are structure, not an empty
+  /// plot. An unzoned lot is the plat's blank page — every street is lined
+  /// with them — and the renderer hides them unless zoning is under way.
+  static const int unzonedFlag = 0x200;
+
+  /// Bit set on [kind] for every PLAT LOT — as opposed to a road cell or a
+  /// support deck, which share the palette but are structure.
+  ///
+  /// Lots are drawn by their own node, rebuilt the frame they change, not by
+  /// the city tiles: zoning is interactive, and the tiles re-mesh on a worker
+  /// pool in the background — seconds of lag between a zone stroke and its
+  /// colour. This bit is how the tile mesher knows which patches are not its.
+  static const int lotFlag = 0x400;
+
   /// The palette band alone.
   int get zoneKind => kind & 0xFF;
+
+  /// Whether this patch is a plat lot (see [lotFlag]).
+  bool get isLot => (kind & lotFlag) != 0;
+
+  /// Whether this is a lot nobody has zoned yet.
+  bool get unzoned => (kind & unzonedFlag) != 0;
 
   /// Whether something already stands here.
   ///
@@ -99,9 +122,14 @@ class CityPatchSnapshot {
     double? depthM,
   }) : depthM = depthM ?? sizeM;
 
-  /// The kind band with [builtFlag] applied — what an emitter packs.
-  static int packKind(int kind, {required bool built}) =>
-      built ? (kind | builtFlag) : kind;
+  /// The kind band with [builtFlag] and [unzonedFlag] applied — what an
+  /// emitter packs.
+  static int packKind(int kind,
+          {required bool built, bool unzoned = false, bool lot = false}) =>
+      kind |
+      (built ? builtFlag : 0) |
+      (unzoned ? unzonedFlag : 0) |
+      (lot ? lotFlag : 0);
 
   Map<String, dynamic> toJson() => {
         'colony': colonyId,

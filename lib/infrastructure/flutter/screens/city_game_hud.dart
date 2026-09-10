@@ -159,7 +159,9 @@ class _CityGameHudState extends State<CityGameHud> {
           const SizedBox(width: 6),
           if (widget.onToggleZones != null)
             _toggle(Icons.layers, 'Zones', widget.zonesOn,
-                widget.onToggleZones!, 'Zoning view (Z)'),
+                widget.onToggleZones!,
+                'Pin the zoning view (Z) — it also shows while the Zone tool '
+                'is held'),
           _panelButton(CityGamePanel.milestones, Icons.emoji_events, 'Goals'),
           _panelButton(CityGamePanel.budget, Icons.account_balance, 'Budget'),
           if (widget.onExit != null)

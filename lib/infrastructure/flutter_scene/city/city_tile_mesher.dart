@@ -99,7 +99,6 @@ class CityMeshKnobs {
     required this.onStreetParking,
     required this.sealedWorld,
     required this.maxParkedCars,
-    required this.zoneOverlay,
   });
 
   /// The architecture kit the colony is built in (see
@@ -132,16 +131,6 @@ class CityMeshKnobs {
   /// Ceiling on parked cars per tile.
   final int maxParkedCars;
 
-  /// The ZONING view: every lot painted its zone colour at full strength,
-  /// built or not. Off, only the empty lots are painted, and palely — the
-  /// plat as an annotation rather than as a coat of paint over the world.
-  ///
-  /// A build term, so flipping it re-meshes the tiles it changes. That is the
-  /// honest cost of drawing the overlay into the same sheet of ground as the
-  /// roads: one draw call for all of it, at the price of a re-mesh when the
-  /// view changes. Cheap on a town, seconds of churn on a metropolis.
-  final bool zoneOverlay;
-
   ArchitectureStyle get style => ArchitectureStyle.byId(styleId);
 
   /// Whether the archetype libraries built for [other] serve this too.
@@ -155,8 +144,7 @@ class CityMeshKnobs {
   /// The ranges go rounded to the metre, as the tile keys carry them.
   String get keyTerms => '$styleId|$bucketM|$variants|${perBuildingLod ? 1 : 0}'
       '|${blockRangeM.round()}|${interiorRangeM.round()}|${lodDebug ? 1 : 0}'
-      '|${onStreetParking ? 1 : 0}|${sealedWorld ? 1 : 0}|$maxParkedCars'
-      '|${zoneOverlay ? 1 : 0}';
+      '|${onStreetParking ? 1 : 0}|${sealedWorld ? 1 : 0}|$maxParkedCars';
 }
 
 /// Everything one tile build reads: the tile's members, the few facts of
@@ -1234,12 +1222,11 @@ class CityTileMeshJob {
       final hw = ps.sizeM[i] / 2;
       final hd = ps.depthM[i] / 2;
       final packed = ps.kind[i];
+      // Plat lots are drawn by `CityNodes`' zoning node, rebuilt the frame
+      // they change; a tile re-meshes on a worker in the background, and
+      // zoning paint that arrives seconds after the stroke is not paint.
+      if ((packed & CityPatchSnapshot.lotFlag) != 0) continue;
       final kind = packed & 0xFF;
-      final built = (packed & CityPatchSnapshot.builtFlag) != 0;
-      // A lot with something on it is not painted at all unless the zoning
-      // view is up: the building says what the ground is for, and a slab
-      // under it says it worse and hides the ground it stands on.
-      if (built && !request.knobs.zoneOverlay) continue;
       // Lifted clear of the levelled pad, and each kind by a different amount,
       // so a road drawn over a zoned lot does not z-fight it.
       final lift = up * (0.05 + kind * 0.01);
@@ -1268,14 +1255,7 @@ class CityTileMeshJob {
         // sampled commercial blue, industrial sampled refusal red, support
         // sampled the heatmap amber. Exactly the drift kGroundSwatches was
         // introduced to stop, still live at this one call site.
-        // Pale band unless the overlay is up. Zone kinds are 1-4 and their
-        // pale twins 10-13, in the same order; anything else (the support
-        // decks the grid city draws) has no pale twin and paints as itself.
-        final pale = !request.knobs.zoneOverlay &&
-            kind >= CityPatchSnapshot.kindResidential &&
-            kind <= CityPatchSnapshot.kindSupport;
-        final band = pale ? kind + kPaleZoneOffset : kind;
-        final u = (band + 0.5) / kGroundSwatches;
+        final u = (kind + 0.5) / kGroundSwatches;
         uv = [(u, 0.5), (u, 0.5), (u, 0.5), (u, 0.5)];
       }
       final idx = [
@@ -1608,6 +1588,30 @@ const int kGroundSwatches = 14;
 /// into the ground material for it, since the facade atlas has no green.
 /// Last in the palette, after the placement heatmap's pair.
 const int kLeafSwatch = 9;
+
+/// The palette band a PLAT LOT is painted in, or null when it is not painted.
+///
+/// The whole of the zoning view's policy, kept pure so it can be tested without
+/// a scene graph:
+///
+/// * Not a lot (a road cell, a support deck): never — the tiles draw those.
+/// * [zoning] (the Zone tool held, or the view pinned): every lot, in its zone
+///   colour at full strength — built, empty or unzoned. Zoning is when the
+///   whole plat is the point.
+/// * Otherwise: only a lot that is zoned AND empty, in its PALE band. That is
+///   the one state worth reading at a glance, because it is the one about to
+///   change. A built lot's building already says what the ground is for, and
+///   an unzoned lot says nothing — every street is lined with them, and
+///   painted they were endless rows of grey plots.
+int? zoningBandFor(int packedKind, {required bool zoning}) {
+  if ((packedKind & CityPatchSnapshot.lotFlag) == 0) return null;
+  final kind = packedKind & 0xFF;
+  if (zoning) return kind;
+  final built = (packedKind & CityPatchSnapshot.builtFlag) != 0;
+  final unzoned = (packedKind & CityPatchSnapshot.unzonedFlag) != 0;
+  if (built || unzoned) return null;
+  return kind + kPaleZoneOffset;
+}
 
 /// Distance from a zone band to its PALE twin in the ground palette.
 ///

@@ -308,6 +308,19 @@ extension SimulationViewColony on _SimulationViewState {
   /// across the streets.
   static const double cityOpenSunAngle = -math.pi / 6;
 
+  /// What the renderer shows: the zoning view is up while the Zone tool is
+  /// held, or while the player has pinned it.
+  ///
+  /// The tool is what "zoning" means to a player — pick up the zone brush and
+  /// the plat appears, put it down and the town goes back to being a town.
+  /// No setState: this runs from the editor's listener and from inside
+  /// setState calls, and the renderer reads the static when it builds the
+  /// next frame's tile keys.
+  void _syncZoneView() {
+    CityNodes.zoneOverlay = _zoneViewPinned ||
+        (_editingCity != null && _cityEdit.tool == CityEditTool.zone);
+  }
+
   /// Diagnostics for the city turntable, or null when it is not the camera.
   ///
   /// `pivotAltM` is the height of the pivot above the ground UNDER IT: zero is
@@ -508,6 +521,7 @@ extension SimulationViewColony on _SimulationViewState {
   /// the one hook both paths share.
   void _onCityEditChanged() {
     final city = _editingCity;
+    _syncZoneView();
     // A different tool or a different building means a different survey.
     _heatAt = null;
     if (city == null) {

@@ -193,12 +193,10 @@ class CityNodes {
   /// times as much. Painting the tier is the only way to SEE which buildings
   /// are expensive — and the first thing it showed was that they all were.
   /// The ZONING view: paint every lot its zone colour at full strength,
-  /// built or not.
+  /// built, empty or unzoned — see [zoningBandFor] for the whole policy.
   ///
-  /// Off (the default), only lots with nothing on them are painted, and in the
-  /// palette's pale bands — the plat as an annotation on the ground rather
-  /// than a coat of paint over it. A build term (see [CityMeshKnobs]), so
-  /// flipping it re-meshes; that is the price of the ground being one draw.
+  /// Read by the zoning node, which is rebuilt the frame this flips; the tiles
+  /// do not depend on it, so turning it on and off re-meshes nothing.
   static bool zoneOverlay = false;
 
   static bool lodDebug = false;
@@ -609,6 +607,14 @@ class CityNodes {
   /// the whole point of keeping it separate from them.
   fs.Node? _cursorNode;
 
+  /// The plat, one node per body, drawn apart from the tiles so a zone stroke
+  /// shows the frame it lands (see [_syncZoning]).
+  final Map<String, fs.Node> _zoningNodes = {};
+
+  /// What each body's zoning node was built from, and where it is anchored.
+  final Map<String, (int, int)> _zoningKeys = {};
+  final Map<String, Vector3> _zoningAnchors = {};
+
   /// What [_cursorNode] was built from, so an unmoved mouse costs nothing.
   Object? _cursorKey;
 
@@ -655,7 +661,6 @@ class CityNodes {
         onStreetParking: onStreetParking,
         sealedWorld: sealedWorld,
         maxParkedCars: _maxParkedCars,
-        zoneOverlay: zoneOverlay,
       );
 
   /// Rebuild the archetype libraries if their knobs moved. Everything already
@@ -829,7 +834,9 @@ class CityNodes {
           'p=${snap.patches.length})';
       // The cursor still draws over bare ground: pointing at an empty site is
       // exactly when the player most needs to see where a building would go.
-      _syncCursor(snap, origin, _bodyMotion(snap, origin));
+      final motion = _bodyMotion(snap, origin);
+      _syncCursor(snap, origin, motion);
+      _syncZoning(snap, origin, motion);
       return;
     }
     final sw = Stopwatch()..start();
@@ -1029,8 +1036,7 @@ class CityNodes {
       final want = '${t.structureKey}|${tier.index}|$cam'
           '|${lodDebug ? 1 : 0}|${perBuildingLod ? 1 : 0}'
           '|${interiorRangeM.round()}|${blockRangeM.round()}'
-          '|$colonyTerm|${detailLayer ? 1 : 0}|${zoneOverlay ? 1 : 0}'
-          '|$_invalidation';
+          '|$colonyTerm|${detailLayer ? 1 : 0}|$_invalidation';
       // Compared afresh besides when the last swap wrote a job's key over
       // the want key to keep an answered tile off the queue (see [_swap]).
       if (!hide && (t.wantKey != want || t.wantKeyStale)) {
@@ -1233,6 +1239,7 @@ class CityNodes {
     phaseMs['city.traffic'] = sw.elapsedMicroseconds / 1000;
     sw.reset();
     _syncCursor(snap, origin, moved);
+    _syncZoning(snap, origin, moved);
     phaseMs['city.cursor'] = sw.elapsedMicroseconds / 1000;
 
     var draws = 0, skylineTris = 0;
@@ -2313,6 +2320,8 @@ class CityNodes {
   /// drawing with the old ones.
   void _dropResident() {
     _dropTraffic();
+    // The zoning nodes hold material instances too.
+    _dropZoning();
     final cursor = _cursorNode;
     if (cursor != null) {
       _scene.remove(cursor);
@@ -2460,6 +2469,121 @@ class CityNodes {
     node.localTransform = _anchorTransform(body, at, origin);
     _scene.add(node);
     _cursorNode = node;
+  }
+
+  /// Draw the plat — the zone paint on lots — as its own node per body.
+  ///
+  /// Kept OUT of the tiles on purpose. A tile re-meshes on a worker pool in the
+  /// background, nearest first and a few per frame, so paint carried in the
+  /// tiles arrived seconds after the zone stroke that caused it, and picking
+  /// up the Zone tool re-meshed the whole colony before the plat appeared.
+  /// Here the policy ([zoningBandFor]) runs over the frame's patch columns on
+  /// the UI thread and the node is replaced the same frame anything changes:
+  /// a lot zoned, a lot finished, the view raised.
+  ///
+  /// Cheap when nothing moved: one pass over the kind column for a signature,
+  /// and the node stays. A frame is captured every tick with new lists, so
+  /// identity cannot be the change detector.
+  void _syncZoning(
+      WorldSnapshot snap, FloatingOrigin origin, Map<String, bool> moved) {
+    final ps = snap.patches;
+    final zoning = zoneOverlay;
+    // Per body: a signature over exactly what the node is built from. A lot
+    // re-cut by a new road can keep its kind and move, so a coarse position
+    // term rides with it.
+    final sigs = <String, (int, int)>{};
+    for (var i = 0; i < ps.length; i++) {
+      final k = ps.kind[i];
+      if ((k & CityPatchSnapshot.lotFlag) == 0) continue;
+      if (zoningBandFor(k, zoning: zoning) == null) continue;
+      final bodyId = ps.bodyAt(i);
+      final prev = sigs[bodyId] ?? (zoning ? 0x51ed27 : 0x2f6a9d, 0);
+      var h = (prev.$1 * 31 + k) & 0x3fffffff;
+      h = (h * 31 + (ps.px[i] * 2).round()) & 0x3fffffff;
+      h = (h * 31 + (ps.py[i] * 2).round()) & 0x3fffffff;
+      sigs[bodyId] = (h, prev.$2 + 1);
+    }
+
+    // Bodies whose plat is gone entirely.
+    for (final bodyId in _zoningNodes.keys.toList()) {
+      if (!sigs.containsKey(bodyId)) _dropZoningFor(bodyId);
+    }
+
+    for (final e in sigs.entries) {
+      final bodyId = e.key;
+      final body = snap.bodies[bodyId];
+      if (body == null) continue;
+      final existing = _zoningNodes[bodyId];
+      if (existing != null && _zoningKeys[bodyId] == e.value) {
+        // Unchanged plat: at most the body has turned under the camera.
+        if (moved[bodyId] ?? true) {
+          existing.localTransform =
+              _anchorTransform(body, _zoningAnchors[bodyId]!, origin);
+        }
+        continue;
+      }
+      _dropZoningFor(bodyId);
+
+      // Anchored on the first painted lot: every offset is colony-scale, so
+      // float32 holds it to the millimetre.
+      Vector3? at;
+      final m = MeshBuilder();
+      for (var i = 0; i < ps.length; i++) {
+        final k = ps.kind[i];
+        if ((k & CityPatchSnapshot.lotFlag) == 0) continue;
+        if (ps.bodyAt(i) != bodyId) continue;
+        final band = zoningBandFor(k, zoning: zoning);
+        if (band == null) continue;
+        final centreBF = Vector3(ps.px[i], ps.py[i], ps.pz[i]);
+        at ??= centreBF;
+        final centre = centreBF - at;
+        final up = centreBF.normalized;
+        final basis = Quaternion(ps.qw[i], ps.qx[i], ps.qy[i], ps.qz[i]);
+        final east = basis.rotate(Vector3.unitX);
+        final north = basis.rotate(Vector3.unitY);
+        final hw = ps.sizeM[i] / 2, hd = ps.depthM[i] / 2;
+        // Clear of the levelled pad, and under the cursor and road ghost.
+        final lift = up * (0.06 + (k & 0xFF) * 0.01);
+        final u = (band + 0.5) / kGroundSwatches;
+        final corners = [
+          centre + east * -hw + north * -hd + lift,
+          centre + east * hw + north * -hd + lift,
+          centre + east * hw + north * hd + lift,
+          centre + east * -hw + north * hd + lift,
+        ];
+        final idx = [
+          for (final c in corners) m.vertex(_scenePos(c), up, u, 0.5)
+        ];
+        m.quad(idx[0], idx[1], idx[2], idx[3]);
+      }
+      final anchor = at;
+      if (anchor == null) continue;
+      final geometry = _geometryOf(m.build());
+      if (geometry == null) continue;
+      final node = fs.Node(
+        mesh: fs.Mesh.primitives(primitives: [
+          fs.MeshPrimitive(geometry, CityMaterials.ground),
+        ]),
+      );
+      node.localTransform = _anchorTransform(body, anchor, origin);
+      _scene.add(node);
+      _zoningNodes[bodyId] = node;
+      _zoningKeys[bodyId] = e.value;
+      _zoningAnchors[bodyId] = anchor;
+    }
+  }
+
+  void _dropZoningFor(String bodyId) {
+    final node = _zoningNodes.remove(bodyId);
+    if (node != null) _scene.remove(node);
+    _zoningKeys.remove(bodyId);
+    _zoningAnchors.remove(bodyId);
+  }
+
+  void _dropZoning() {
+    for (final bodyId in _zoningNodes.keys.toList()) {
+      _dropZoningFor(bodyId);
+    }
   }
 
   /// Height a street tree is grown at. Real pollarded street stock runs
@@ -2702,6 +2826,7 @@ class CityNodes {
   /// Drop everything, and the keys with it — an emptied scene with a stale
   /// key would skip the bucketing that repopulates it.
   void _clear() {
+    _dropZoning();
     for (final t in _tiles.values) {
       _dropTile(t);
     }
@@ -3111,7 +3236,6 @@ class CityNodes {
     'block',
     'colony',
     'detailLayer',
-    'zoneOverlay',
     'invalidation',
   ];
 

@@ -16,8 +16,10 @@ import 'package:acro_space_simulator/domain/colony/city/city_starter_kit.dart';
 import 'package:acro_space_simulator/domain/universe/real_solar_system.dart';
 import 'package:acro_space_simulator/infrastructure/flutter/sim_view_control.dart';
 import 'package:acro_space_simulator/infrastructure/flutter/simulation_view.dart';
+import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_nodes.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -93,6 +95,33 @@ void main() {
     expect(after['elevation'], before['elevation']);
     expect(find.text('BUDGET'), findsOneWidget,
         reason: 'the drawer should have opened');
+  });
+
+  testWidgets('holding the Zone tool raises the zoning view; putting it down '
+      'drops it', (t) async {
+    // "Zoning mode" is the Zone tool: pick up the brush and the plat appears,
+    // put it down and the town goes back to being a town.
+    await pumpCity(t);
+    expect(CityNodes.zoneOverlay, isFalse);
+    await jitteryClick(t, t.getCenter(find.text('Zone')));
+    await t.pump();
+    expect(CityNodes.zoneOverlay, isTrue, reason: 'the Zone tool is held');
+    await jitteryClick(t, t.getCenter(find.text('Look')));
+    await t.pump();
+    expect(CityNodes.zoneOverlay, isFalse, reason: 'the Zone tool is down');
+  });
+
+  testWidgets('G steps out onto the camera pivot, not under the boom',
+      (t) async {
+    await pumpCity(t);
+    // At open the pivot IS the colony site; the eye hangs a kilometre and a
+    // half away on the boom. Walking must start at the pivot.
+    await t.sendKeyEvent(LogicalKeyboardKey.keyG);
+    await t.pump();
+    final s = status();
+    expect(s['walk'], isTrue);
+    expect(s['cityPivotOffsetM'] as double, lessThan(1.0),
+        reason: 'the walker landed under the eye, not at the focus point');
   });
 
   testWidgets('a drag on open ground still orbits', (t) async {

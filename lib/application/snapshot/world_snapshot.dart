@@ -2133,6 +2133,8 @@ class WorldSnapshot {
                 _ => CityPatchSnapshot.kindSupport,
               },
               built: builtSpec != null,
+              unzoned: parcel.use == ParcelUse.unzoned,
+              lot: true,
             ),
           );
         }
