@@ -16,6 +16,8 @@
 ///   ext.acro.screenshot?path=PNG   capture the RepaintBoundary
 ///   ext.acro.citygame              the colony's live numbers (pop, funds,
 ///                                  ore, tier, RCI, roads, lots)
+///   ext.acro.citygame?zones=on|off      raise/drop the zoning view
+///   ext.acro.citygame?zone=residential  zone every street lot at once
 ///   ext.acro.camera?elevationDeg=&azimuthDeg=&rangeM=
 ///                                  aim the camera, for framing the shot
 library;
@@ -33,11 +35,13 @@ import 'domain/colony/city/city_config.dart';
 import 'domain/colony/city/city_progression.dart';
 import 'domain/colony/city/city_sim.dart';
 import 'domain/colony/city/city_starter_kit.dart';
+import 'domain/colony/city/parcel.dart';
 import 'domain/planetary/planet_surface.dart';
 import 'domain/universe/real_solar_system.dart';
 import 'infrastructure/baked_terrain_data.dart';
 import 'infrastructure/flutter/sim_view_control.dart';
 import 'infrastructure/flutter/simulation_view.dart';
+import 'infrastructure/flutter_scene/city/city_nodes.dart';
 import 'infrastructure/flutter/windows_key_event_workaround.dart';
 import 'infrastructure/flutter_scene/render_backend.dart';
 
@@ -85,6 +89,24 @@ Future<void> main() async {
   });
 
   developer.registerExtension('ext.acro.citygame', (method, params) async {
+    // The zoning view, for captures. Flipping it re-meshes the tiles, so a
+    // driver should settle before it shoots.
+    if (params['zones'] != null) {
+      CityNodes.zoneOverlay = params['zones'] == 'on';
+    }
+    // Zone every street lot at once. The only way to drive zoning without a
+    // mouse, which is what a capture of the zoning view needs.
+    if (params['zone'] != null) {
+      final use = switch (params['zone']) {
+        'residential' => ParcelUse.residential,
+        'commercial' => ParcelUse.commercial,
+        'industrial' => ParcelUse.industrial,
+        _ => ParcelUse.unzoned,
+      };
+      for (final lot in colony.layout.autoParcels) {
+        colony.layout.setUse(lot.id, use);
+      }
+    }
     final view = SimViewControl.instance.status?.call() ?? const {};
     return developer.ServiceExtensionResponse.result(jsonEncode({
       ..._status(colony),

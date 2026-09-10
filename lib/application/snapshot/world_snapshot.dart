@@ -1020,66 +1020,6 @@ class BodyDescriptorSnapshot {
   }
 }
 
-/// The four strips of zoned ground left visible around a building.
-///
-/// A patch is one quad, so a ring is four of them: two spanning the full
-/// width front and back, two filling the sides between. Strips of zero
-/// extent are skipped, which is what happens when a building genuinely does
-/// fill its plot.
-///
-/// [colony] and [bodyIx] are the colony's and body's names already interned
-/// in [out]'s string table (see [CityPatchColumnsBuilder.internString]).
-void _emitYardRing(
-  CityPatchColumnsBuilder out,
-  int colony,
-  int bodyIx,
-  Parcel parcel,
-  CityBuildingSpec spec,
-  ({Vector3 position, Quaternion orientation}) t,
-  ({double width, double depth}) extent,
-) {
-  final foot = buildingFootprint(parcel, spec);
-  final kind = switch (parcel.use) {
-    ParcelUse.commercial => CityPatchSnapshot.kindCommercial,
-    ParcelUse.industrial => CityPatchSnapshot.kindIndustrial,
-    ParcelUse.residential => CityPatchSnapshot.kindResidential,
-    _ => CityPatchSnapshot.kindSupport,
-  };
-  final hw = extent.width / 2, hd = extent.depth / 2;
-  final fw = foot.width / 2, fd = foot.depth / 2;
-  final sideW = hw - fw, endD = hd - fd;
-  if (sideW <= 0.05 && endD <= 0.05) return;
-
-  // Local offsets from the lot centre, in the lot's own east/north axes; the
-  // parcel transform already carries the spin onto its street.
-  final strips = <({double e, double n, double w, double d})>[
-    if (endD > 0.05) (e: 0, n: -(fd + endD / 2), w: extent.width, d: endD),
-    if (endD > 0.05) (e: 0, n: fd + endD / 2, w: extent.width, d: endD),
-    if (sideW > 0.05)
-      (e: -(fw + sideW / 2), n: 0, w: sideW, d: foot.depth),
-    if (sideW > 0.05) (e: fw + sideW / 2, n: 0, w: sideW, d: foot.depth),
-  ];
-  for (final s in strips) {
-    // Offset in the lot's frame, then back out to body-fixed.
-    final off = t.orientation.rotate(Vector3(s.e, s.n, 0));
-    final p = t.position + off;
-    out.addInterned(
-      colony: colony,
-      body: bodyIx,
-      px: p.x,
-      py: p.y,
-      pz: p.z,
-      qw: t.orientation.w,
-      qx: t.orientation.x,
-      qy: t.orientation.y,
-      qz: t.orientation.z,
-      sizeM: s.w,
-      depthM: s.d,
-      kind: kind,
-    );
-  }
-}
-
 /// The footprint a building takes on [parcel], metres.
 ///
 /// One rule, because two things need the same answer: the building itself, and
@@ -2092,7 +2032,7 @@ class WorldSnapshot {
         patches.reserve(city.roads.length +
             city.support.length +
             city.zones.length +
-            parcels.length * 4);
+            parcels.length);
         void patch(int cell, int kind) {
           final half = city.grid / 2.0;
           final t = placement.building(
@@ -2154,25 +2094,25 @@ class WorldSnapshot {
         // Empty lots, drawn so the subdivision is visible before anything is
         // built on it.
         for (final parcel in parcels) {
-          // A built lot draws its zone as a RING around the building, not as
-          // a quad under it.
+          // ONE patch per lot, whole-lot, flagged with whether anything
+          // stands on it. What that patch is FOR is a view decision, taken by
+          // the renderer: a plat is worth seeing while the ground is empty and
+          // worth seeing on demand once it is not, and the frame's job is to
+          // carry the plat rather than to decide when it is painted.
           //
-          // Setback and coverage scale with density, so a building covers only
-          // the middle of its plot and the yard around it was bare terrain
-          // whatever the lot was zoned — no gardens, no forecourts, no works
-          // aprons. A full-lot patch would fix that and z-fight the building
-          // against its own ground, which is what the old guard prevented; a
-          // ring paints exactly the visible part and never goes underneath.
+          // This replaced a ring of four strips drawn around each building in
+          // the lot's zone colour. It was drawn that way to avoid painting
+          // ground under a building and z-fighting it — but setback and
+          // coverage leave a low-density lot only ~72% covered, so what the
+          // ring actually painted was a wide opaque skirt around everything:
+          // a green apron around a house, and a grey one 60 m deep around a
+          // 900 m spaceport pad. A built lot is now not painted at all unless
+          // the overlay asks for it, which is both the fix and the feature.
           final builtSpec = city.parcelBuildings[parcel.id] ??
               city.parcelGrownSpec(parcel.id, parcel.use);
           final t = _parcelTransform(
               city, parcel, groundFor('lot:${parcel.id}', parcel.centroid));
           final extent = parcel.buildableExtent;
-          if (builtSpec != null) {
-            _emitYardRing(
-                patches, colonyIx, bodyIx, parcel, builtSpec, t, extent);
-            continue;
-          }
           patches.addInterned(
             colony: colonyIx,
             body: bodyIx,
@@ -2185,12 +2125,15 @@ class WorldSnapshot {
             qz: t.orientation.z,
             sizeM: extent.width,
             depthM: extent.depth,
-            kind: switch (parcel.use) {
-              ParcelUse.commercial => CityPatchSnapshot.kindCommercial,
-              ParcelUse.industrial => CityPatchSnapshot.kindIndustrial,
-              ParcelUse.residential => CityPatchSnapshot.kindResidential,
-              _ => CityPatchSnapshot.kindSupport,
-            },
+            kind: CityPatchSnapshot.packKind(
+              switch (parcel.use) {
+                ParcelUse.commercial => CityPatchSnapshot.kindCommercial,
+                ParcelUse.industrial => CityPatchSnapshot.kindIndustrial,
+                ParcelUse.residential => CityPatchSnapshot.kindResidential,
+                _ => CityPatchSnapshot.kindSupport,
+              },
+              built: builtSpec != null,
+            ),
           );
         }
         for (final e in city.occupiedCells()) {

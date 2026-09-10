@@ -59,6 +59,7 @@ void main() {
     onStreetParking: true,
     sealedWorld: false,
     maxParkedCars: 400,
+    zoneOverlay: false,
   );
 
   // Within the interior range, within the block range, and beyond it.
@@ -174,6 +175,7 @@ void main() {
             onStreetParking: true,
             sealedWorld: false,
             maxParkedCars: 400,
+            zoneOverlay: false,
           )),
           isNot(base));
     });
@@ -353,6 +355,7 @@ void main() {
               onStreetParking: true,
               sealedWorld: false,
               maxParkedCars: 400,
+              zoneOverlay: false,
             ),
             known: const [],
           ),

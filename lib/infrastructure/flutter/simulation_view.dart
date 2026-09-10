@@ -984,6 +984,16 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     return b == null ? Vector3.zero : Vector3(b.px, b.py, b.pz);
   }
 
+  /// Raise or drop the zoning view.
+  ///
+  /// Flipping it is a MESH term (see [CityMeshKnobs]), so the tiles it changes
+  /// are rebuilt — the ground is one sheet and one draw, and that is the price
+  /// of it. Instant on a town, a moment's churn on a city. Lives here rather
+  /// than in the colony extension because it has to `setState`, which an
+  /// extension cannot.
+  void _toggleZoneOverlay() =>
+      setState(() => CityNodes.zoneOverlay = !CityNodes.zoneOverlay);
+
   void _toggleFreecam() => setState(_toggleFreecamInner);
 
   /// The freecam toggle itself, outside `setState` so walk mode — which turns
@@ -1123,6 +1133,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     LogicalKeyboardKey.keyT,
     LogicalKeyboardKey.keyJ,
     LogicalKeyboardKey.keyC,
+    LogicalKeyboardKey.keyZ,
     LogicalKeyboardKey.space,
     LogicalKeyboardKey.shiftLeft,
     LogicalKeyboardKey.shiftRight,
@@ -1160,6 +1171,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       // Toggle manual control with M.
       if (e.logicalKey == LogicalKeyboardKey.keyM) {
         setState(() => _manualControl = !_manualControl);
+        return KeyEventResult.handled;
+      }
+      // Z raises the zoning view over a colony — the info view every city
+      // builder has, on the key it has it on.
+      if (e.logicalKey == LogicalKeyboardKey.keyZ && _editingCity != null) {
+        _toggleZoneOverlay();
         return KeyEventResult.handled;
       }
       // G gets out and walks (and back in again).
@@ -3174,6 +3191,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                       child: CityGameHud(
                         city: _editingCity!,
                         onExit: () => Navigator.of(context).maybePop(),
+                        zonesOn: CityNodes.zoneOverlay,
+                        onToggleZones: _toggleZoneOverlay,
                       ),
                     ),
                   ),

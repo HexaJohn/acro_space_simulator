@@ -334,13 +334,26 @@ class CityTextureBakes {
   /// colour would be five draws for what is a single sheet of ground. Every
   /// vertex of a patch samples the CENTRE of its swatch, so no filtering or
   /// mip level can bleed one kind's colour into its neighbour.
-  static Uint8List groundPalette(int size, {int swatches = 10}) {
+  static Uint8List groundPalette(int size, {int swatches = 14}) {
     // road, residential, commercial, industrial, support, CURSOR, REFUSED,
     // SITE-OK, SITE-STEEP, LEAF — the heatmap pair paints placement, which
     // needs to say "here, but the ground is against you" as well as yes/no;
     // the leaf is the crown of every sprawl tree, its own band so the green
     // of a suburb can be tuned without recolouring its lawns.
-    // Count must match `kGroundSwatches` in city_nodes.dart.
+    //
+    // Then the four PALE zone bands, 10-13, in the same order as 1-4. Zoning
+    // is a note to yourself about ground nothing has been built on yet, and at
+    // full strength it reads as a painted slab covering the landscape rather
+    // than as an annotation on it. These are the same hues LIGHTENED, not
+    // desaturated — the first pass washed the colour out toward the ground
+    // and a zoned lot came out reading as grey, which is the one thing the
+    // band has to say it is not. Value up, hue kept, so a lot marked for
+    // housing is unmistakably green against grass without being a slab;
+    // the strong bands stay for the zoning OVERLAY, which is exactly the
+    // moment a slab is what you want. Held as their own bands rather than
+    // blended at draw time because the ground material is opaque, and giving
+    // a decal sheet transparency costs a sorted pass to save a texture row.
+    // Count must match `kGroundSwatches` in city_tile_mesher.dart.
     const colours = [
       [92, 94, 99],
       [86, 128, 96],
@@ -352,6 +365,10 @@ class CityTextureBakes {
       [96, 210, 128],
       [226, 176, 72],
       [62, 108, 54],
+      [122, 194, 132],
+      [110, 176, 216],
+      [206, 166, 94],
+      [146, 154, 164],
     ];
     final out = Uint8List(size * size * 4);
     final band = math.max(1, size ~/ swatches);

@@ -120,27 +120,24 @@ void main() {
       cities: InMemoryCityRepository([city]),
     );
     expect(snap.buildings.keys, contains('grow/${lot.id}'));
-    // The built lot draws its zone as a RING around the building — four
-    // strips of yard — never as a quad UNDER it, which would z-fight the
-    // building against its own ground.
-    // Checked on the real invariant — no patch covering the WHOLE lot — not on
-    // width alone: a ring's front and back strips legitimately span the full
-    // width, so width by itself no longer distinguishes the two.
+    // Every lot contributes ONE whole-lot patch, flagged with whether
+    // anything stands on it. The renderer decides what to do with that: a
+    // built lot is painted only when the zoning view is up, so the plat
+    // reaches the frame either way and the ground under a building is not
+    // permanently coated in its zone colour.
     final ext = lot.buildableExtent;
-    final wholeLot = snap.patches.where((p) =>
-        p.kind == CityPatchSnapshot.kindResidential &&
-        (p.sizeM - ext.width).abs() < 0.5 &&
-        (p.depthM - ext.depth).abs() < 0.5);
-    expect(wholeLot.length, city.layout.autoParcels.length - 1,
-        reason: 'the built lot has a quad under its building');
-    // And it does contribute yard: bare ground round a building is exactly
-    // what the ring exists to cover.
-    expect(
-        snap.patches.where((p) =>
-            p.kind == CityPatchSnapshot.kindResidential &&
-            (p.depthM - ext.depth).abs() >= 0.5),
-        isNotEmpty,
-        reason: 'the built lot drew no yard at all');
+    final zoned = snap.patches
+        .where((p) => p.zoneKind == CityPatchSnapshot.kindResidential)
+        .toList();
+    expect(zoned, hasLength(city.layout.autoParcels.length));
+    for (final p in zoned) {
+      expect((p.sizeM - ext.width).abs() < 0.5, isTrue);
+      expect((p.depthM - ext.depth).abs() < 0.5, isTrue);
+    }
+    expect(zoned.where((p) => p.built), hasLength(1),
+        reason: 'exactly the grown lot is flagged built');
+    expect(zoned.where((p) => !p.built),
+        hasLength(city.layout.autoParcels.length - 1));
   });
 
   test('a dense street congests; the same district on a highway does not', () {

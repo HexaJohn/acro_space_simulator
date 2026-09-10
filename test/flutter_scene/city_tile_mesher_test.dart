@@ -133,6 +133,7 @@ void main() {
     onStreetParking: true,
     sealedWorld: false,
     maxParkedCars: 400,
+    zoneOverlay: false,
   );
 
   // The members packed the way `CityNodes` packs them, once; and packed a
@@ -496,7 +497,7 @@ void main() {
       expect(near.lodCounts, {BuildingDetail.exterior: buildings.length});
       expect(near.groups, hasLength(5));
       expect(near.instances, hasLength(9));
-      expect(digest(near), 0x77a67f3b);
+      expect(digest(near), 0x0a43a79b);
     });
 
     test('with the detail layer off the tile is the same to the byte', () {
@@ -518,7 +519,7 @@ void main() {
             detailLayer: false,
           ),
           CityBuildingLibraries());
-      expect(digest(off), 0x77a67f3b);
+      expect(digest(off), 0x0a43a79b);
       expect(off.archetypeMeshes, isEmpty);
     });
 
@@ -542,7 +543,7 @@ void main() {
       expect(cut.lodCounts, {BuildingDetail.full: 3, BuildingDetail.exterior: 8});
       expect(cut.groups, hasLength(7));
       expect(cut.instances, hasLength(11));
-      expect(digest(cut), 0x2069f9b4);
+      expect(digest(cut), 0xdbbf1554);
 
       final whole = mesh();
       expect(whole.groups, hasLength(6));
@@ -561,9 +562,9 @@ void main() {
 
     test('mid and far: the tile to the byte', () {
       expect(digest(CityTileMesher.mesh(request(CityTier.mid), CityBuildingLibraries())),
-          0x91972418);
+          0x96ba5118);
       expect(digest(CityTileMesher.mesh(request(CityTier.far), CityBuildingLibraries())),
-          0xbcff3134);
+          0xa7802034);
     });
 
     test('through one scratch, job after job, every tier to the byte', () {
@@ -576,11 +577,11 @@ void main() {
       int at(CityTier tier) => digest(
           CityTileMesher.mesh(request(tier), libraries, scratch: scratch)
               .detached());
-      expect(at(CityTier.near), 0x77a67f3b);
-      expect(at(CityTier.far), 0xbcff3134);
-      expect(at(CityTier.mid), 0x91972418);
-      expect(at(CityTier.near), 0x77a67f3b);
-      expect(at(CityTier.far), 0xbcff3134);
+      expect(at(CityTier.near), 0x0a43a79b);
+      expect(at(CityTier.far), 0xa7802034);
+      expect(at(CityTier.mid), 0x96ba5118);
+      expect(at(CityTier.near), 0x0a43a79b);
+      expect(at(CityTier.far), 0xa7802034);
     });
   });
 

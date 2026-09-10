@@ -99,6 +99,7 @@ class CityMeshKnobs {
     required this.onStreetParking,
     required this.sealedWorld,
     required this.maxParkedCars,
+    required this.zoneOverlay,
   });
 
   /// The architecture kit the colony is built in (see
@@ -131,6 +132,16 @@ class CityMeshKnobs {
   /// Ceiling on parked cars per tile.
   final int maxParkedCars;
 
+  /// The ZONING view: every lot painted its zone colour at full strength,
+  /// built or not. Off, only the empty lots are painted, and palely — the
+  /// plat as an annotation rather than as a coat of paint over the world.
+  ///
+  /// A build term, so flipping it re-meshes the tiles it changes. That is the
+  /// honest cost of drawing the overlay into the same sheet of ground as the
+  /// roads: one draw call for all of it, at the price of a re-mesh when the
+  /// view changes. Cheap on a town, seconds of churn on a metropolis.
+  final bool zoneOverlay;
+
   ArchitectureStyle get style => ArchitectureStyle.byId(styleId);
 
   /// Whether the archetype libraries built for [other] serve this too.
@@ -144,7 +155,8 @@ class CityMeshKnobs {
   /// The ranges go rounded to the metre, as the tile keys carry them.
   String get keyTerms => '$styleId|$bucketM|$variants|${perBuildingLod ? 1 : 0}'
       '|${blockRangeM.round()}|${interiorRangeM.round()}|${lodDebug ? 1 : 0}'
-      '|${onStreetParking ? 1 : 0}|${sealedWorld ? 1 : 0}|$maxParkedCars';
+      '|${onStreetParking ? 1 : 0}|${sealedWorld ? 1 : 0}|$maxParkedCars'
+      '|${zoneOverlay ? 1 : 0}';
 }
 
 /// Everything one tile build reads: the tile's members, the few facts of
@@ -1221,7 +1233,13 @@ class CityTileMeshJob {
       final north = basis.rotate(Vector3.unitY);
       final hw = ps.sizeM[i] / 2;
       final hd = ps.depthM[i] / 2;
-      final kind = ps.kind[i];
+      final packed = ps.kind[i];
+      final kind = packed & 0xFF;
+      final built = (packed & CityPatchSnapshot.builtFlag) != 0;
+      // A lot with something on it is not painted at all unless the zoning
+      // view is up: the building says what the ground is for, and a slab
+      // under it says it worse and hides the ground it stands on.
+      if (built && !request.knobs.zoneOverlay) continue;
       // Lifted clear of the levelled pad, and each kind by a different amount,
       // so a road drawn over a zoned lot does not z-fight it.
       final lift = up * (0.05 + kind * 0.01);
@@ -1250,7 +1268,14 @@ class CityTileMeshJob {
         // sampled commercial blue, industrial sampled refusal red, support
         // sampled the heatmap amber. Exactly the drift kGroundSwatches was
         // introduced to stop, still live at this one call site.
-        final u = (kind + 0.5) / kGroundSwatches;
+        // Pale band unless the overlay is up. Zone kinds are 1-4 and their
+        // pale twins 10-13, in the same order; anything else (the support
+        // decks the grid city draws) has no pale twin and paints as itself.
+        final pale = !request.knobs.zoneOverlay &&
+            kind >= CityPatchSnapshot.kindResidential &&
+            kind <= CityPatchSnapshot.kindSupport;
+        final band = pale ? kind + kPaleZoneOffset : kind;
+        final u = (band + 0.5) / kGroundSwatches;
         uv = [(u, 0.5), (u, 0.5), (u, 0.5), (u, 0.5)];
       }
       final idx = [
@@ -1577,12 +1602,19 @@ class CityTileMeshJob {
 /// sampler of it: the patch pass used to divide by 5 against a 6-band texture,
 /// which quietly recoloured commercial lots industrial-tan and support decks
 /// cursor-cyan.
-const int kGroundSwatches = 10;
+const int kGroundSwatches = 14;
 
 /// The palette band tree crowns take — the yard and park trees are baked
 /// into the ground material for it, since the facade atlas has no green.
 /// Last in the palette, after the placement heatmap's pair.
 const int kLeafSwatch = 9;
+
+/// Distance from a zone band to its PALE twin in the ground palette.
+///
+/// Bands 1-4 are the zone colours at full strength (what the zoning overlay
+/// paints with); 10-13 are the same hues lifted toward the ground under them,
+/// which is what an un-built lot is painted with by default.
+const int kPaleZoneOffset = 9;
 
 /// The pure functions of the tile build: the frame-to-geometry mapping and
 /// the rules the UI thread and the workers must agree on.

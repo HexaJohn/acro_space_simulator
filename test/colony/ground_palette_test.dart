@@ -3,6 +3,8 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
+import 'dart:math' as math;
+
 import 'package:acro_space_simulator/application/snapshot/world_snapshot.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_nodes.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_texture_bakes.dart';
@@ -88,6 +90,53 @@ void main() {
 
     final ind = bandColour(CityPatchSnapshot.kindIndustrial);
     expect(ind.r, greaterThan(ind.b), reason: 'industrial is not tan');
+  });
+
+  test('a pale band is its zone LIGHTENED, never washed out to grey', () {
+    // The pale bands paint a lot that is zoned and not yet built on. The
+    // first cut of them was desaturated toward the ground, and the result
+    // read as grey — which is the one thing a zone colour must not do, since
+    // grey is what an UNZONED lot is painted. Lighter, hue kept.
+    const size = 320;
+    final px = CityTextureBakes.groundPalette(size);
+    ({int r, int g, int b}) bandColour(int band) {
+      final x = ((band + 0.5) * size ~/ kGroundSwatches);
+      final o = (4 * size + x) * 4;
+      return (r: px[o], g: px[o + 1], b: px[o + 2]);
+    }
+
+    int chroma(({int r, int g, int b}) c) =>
+        [c.r, c.g, c.b].reduce(math.max) - [c.r, c.g, c.b].reduce(math.min);
+    int value(({int r, int g, int b}) c) => c.r + c.g + c.b;
+
+    for (final kind in [
+      CityPatchSnapshot.kindResidential,
+      CityPatchSnapshot.kindCommercial,
+      CityPatchSnapshot.kindIndustrial,
+    ]) {
+      final strong = bandColour(kind);
+      final pale = bandColour(kind + kPaleZoneOffset);
+      expect(value(pale), greaterThan(value(strong)),
+          reason: 'the pale band is not lighter than its zone');
+      expect(chroma(pale), greaterThanOrEqualTo(chroma(strong) - 4),
+          reason: 'the pale band lost its hue — it will read as grey');
+    }
+
+    // Residential keeps its green, commercial its blue, industrial its tan.
+    final res = bandColour(
+        CityPatchSnapshot.kindResidential + kPaleZoneOffset);
+    expect(res.g, greaterThan(res.r + 12));
+    expect(res.g, greaterThan(res.b + 12));
+    final com =
+        bandColour(CityPatchSnapshot.kindCommercial + kPaleZoneOffset);
+    expect(com.b, greaterThan(com.r + 12));
+    final ind =
+        bandColour(CityPatchSnapshot.kindIndustrial + kPaleZoneOffset);
+    expect(ind.r, greaterThan(ind.b + 12));
+
+    // And the unzoned band stays grey, because unzoned IS grey.
+    final none = bandColour(CityPatchSnapshot.kindSupport + kPaleZoneOffset);
+    expect(chroma(none), lessThan(30), reason: 'unzoned should read neutral');
   });
 }
 

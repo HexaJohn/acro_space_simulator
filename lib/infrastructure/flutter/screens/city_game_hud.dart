@@ -30,12 +30,22 @@ class CityGameHud extends StatefulWidget {
     super.key,
     required this.city,
     this.onExit,
+    this.zonesOn = false,
+    this.onToggleZones,
   });
 
   final CitySim city;
 
   /// Leave the mode (back to the menu). Null hides the button.
   final VoidCallback? onExit;
+
+  /// Whether the zoning view is up, and how to flip it.
+  ///
+  /// Passed in rather than read from the renderer: the HUD is a screen, and a
+  /// screen that reaches into the scene graph for a boolean is a screen that
+  /// cannot be built in a test without one.
+  final bool zonesOn;
+  final VoidCallback? onToggleZones;
 
   @override
   State<CityGameHud> createState() => _CityGameHudState();
@@ -147,6 +157,9 @@ class _CityGameHudState extends State<CityGameHud> {
           const SizedBox(width: 6),
           _rciCluster(),
           const SizedBox(width: 6),
+          if (widget.onToggleZones != null)
+            _toggle(Icons.layers, 'Zones', widget.zonesOn,
+                widget.onToggleZones!, 'Zoning view (Z)'),
           _panelButton(CityGamePanel.milestones, Icons.emoji_events, 'Goals'),
           _panelButton(CityGamePanel.budget, Icons.account_balance, 'Budget'),
           if (widget.onExit != null)
@@ -301,6 +314,37 @@ class _CityGameHudState extends State<CityGameHud> {
           ),
           Text(label, style: AppTheme.dim.copyWith(fontSize: 9, color: color)),
         ]),
+      );
+
+  /// A plain on/off chip, styled like the panel buttons beside it.
+  Widget _toggle(IconData icon, String label, bool on, VoidCallback onTap,
+          String tooltip) =>
+      Tooltip(
+        message: tooltip,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 2),
+          child: InkWell(
+            onTap: onTap,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+              decoration: BoxDecoration(
+                color: on ? AppTheme.accent2.withValues(alpha: 0.18) : null,
+                borderRadius: BorderRadius.circular(5),
+                border: Border.all(
+                    color: on ? AppTheme.accent2 : const Color(0xFF2A3948)),
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(icon,
+                    size: 14, color: on ? AppTheme.accent2 : AppTheme.textDim),
+                const SizedBox(width: 5),
+                Text(label,
+                    style: TextStyle(
+                        fontSize: 11,
+                        color: on ? AppTheme.accent2 : AppTheme.textDim)),
+              ]),
+            ),
+          ),
+        ),
       );
 
   Widget _panelButton(CityGamePanel panel, IconData icon, String label) {

@@ -80,7 +80,12 @@ import 'device_buffer_pool.dart';
 // The tile vocabulary moved to the mesher with the meshing; everything
 // that spoke it through this file still does.
 export 'city_tile_mesher.dart'
-    show CityTier, CityMaterialKind, kGroundSwatches, kLeafSwatch;
+    show
+        CityTier,
+        CityMaterialKind,
+        kGroundSwatches,
+        kLeafSwatch,
+        kPaleZoneOffset;
 
 /// One generated archetype, uploaded.
 class _CityMesh {
@@ -187,6 +192,15 @@ class CityNodes {
   /// full detail looks exactly like a city drawn sensibly, it just costs ten
   /// times as much. Painting the tier is the only way to SEE which buildings
   /// are expensive — and the first thing it showed was that they all were.
+  /// The ZONING view: paint every lot its zone colour at full strength,
+  /// built or not.
+  ///
+  /// Off (the default), only lots with nothing on them are painted, and in the
+  /// palette's pale bands — the plat as an annotation on the ground rather
+  /// than a coat of paint over it. A build term (see [CityMeshKnobs]), so
+  /// flipping it re-meshes; that is the price of the ground being one draw.
+  static bool zoneOverlay = false;
+
   static bool lodDebug = false;
 
   /// Pick each building's tier from ITS OWN distance rather than one tier for
@@ -641,6 +655,7 @@ class CityNodes {
         onStreetParking: onStreetParking,
         sealedWorld: sealedWorld,
         maxParkedCars: _maxParkedCars,
+        zoneOverlay: zoneOverlay,
       );
 
   /// Rebuild the archetype libraries if their knobs moved. Everything already
@@ -1014,7 +1029,8 @@ class CityNodes {
       final want = '${t.structureKey}|${tier.index}|$cam'
           '|${lodDebug ? 1 : 0}|${perBuildingLod ? 1 : 0}'
           '|${interiorRangeM.round()}|${blockRangeM.round()}'
-          '|$colonyTerm|${detailLayer ? 1 : 0}|$_invalidation';
+          '|$colonyTerm|${detailLayer ? 1 : 0}|${zoneOverlay ? 1 : 0}'
+          '|$_invalidation';
       // Compared afresh besides when the last swap wrote a job's key over
       // the want key to keep an answered tile off the queue (see [_swap]).
       if (!hide && (t.wantKey != want || t.wantKeyStale)) {
@@ -3095,6 +3111,7 @@ class CityNodes {
     'block',
     'colony',
     'detailLayer',
+    'zoneOverlay',
     'invalidation',
   ];
 

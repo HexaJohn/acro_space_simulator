@@ -64,6 +64,7 @@ void main() {
     onStreetParking: true,
     sealedWorld: false,
     maxParkedCars: 400,
+    zoneOverlay: false,
   );
 
   CityTileRequest request(String tileKey, String key,

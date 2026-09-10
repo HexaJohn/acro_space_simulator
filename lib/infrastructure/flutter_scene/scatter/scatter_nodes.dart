@@ -113,6 +113,12 @@ class ScatterNodes {
   /// changes shape. See [ScatterMask].
   ScatterMask? _mask;
   int _maskSig = 0;
+  int _maskRoads = 0;
+  int _maskRoadPoints = 0;
+
+  /// Building sites the live mask was built from, by id. Kept for ONE reason:
+  /// to work out what changed when it is rebuilt (see [_maskSitesMoved]).
+  final Map<String, (Vector3, double)> _maskSites = {};
 
   /// Ceiling on masked features. A colony of a hundred thousand buildings
   /// would otherwise rebuild a multi-megabyte capsule list every time one more
@@ -337,14 +343,14 @@ class ScatterNodes {
       _clear();
       return;
     }
-    // Built ground. Rebuilt only when the colony's shape changes — every
-    // resident cell over it is stale when that happens, exactly as for a
-    // terrain edit.
-    if (_refreshMask(snap, bodyId, invQuat)) {
-      _cells.clear();
-      _stalePending.addAll(_pendingCells);
-      _wantedCache.clear();
-      _dirty = true;
+    // Built ground. Rebuilt when the colony's shape changes, and the cells
+    // dropped are only the ones NEAR what changed — a growing city gains a
+    // building every few seconds, and clearing the whole field each time
+    // regenerated every cell on the body over and over (the forest vanished
+    // for a minute every time a house went up).
+    final movedSites = _refreshMask(snap, bodyId);
+    if (movedSites.isNotEmpty) {
+      _invalidateNear(movedSites);
     }
 
     final placement = ScatterPlacement(
@@ -792,15 +798,42 @@ class ScatterNodes {
     }
   }
 
+  /// Drop the resident cells within reach of [sites], and mark the in-flight
+  /// ones stale.
+  ///
+  /// The mask's own version of [_invalidateAround]: a lot that has just been
+  /// built on has to re-generate the props standing where it now stands, and
+  /// nothing else does.
+  void _invalidateNear(List<(Vector3, double)> sites) {
+    if (sites.isEmpty) return;
+    _dirty = true;
+    final radius = _baseField?.radius ?? 1.0;
+    bool near(ChunkKey cell) {
+      final centre = cell.centreDirection * radius;
+      final reach = cell.circumradiusM(radius);
+      for (final (p, r) in sites) {
+        if ((p - centre).length <= reach + r) return true;
+      }
+      return false;
+    }
+
+    for (final id in _cells.keys.toList()) {
+      if (near(id.cell)) _cells.remove(id);
+    }
+    for (final id in _pendingCells) {
+      if (near(id.cell)) _stalePending.add(id);
+    }
+  }
+
   /// Rebuild the colony footprint from the frame if it has changed.
   ///
-  /// Returns true when the mask was replaced, which makes every resident cell
-  /// over the colony stale.
+  /// Returns the sites whose ground CHANGED — each a body-fixed centre and a
+  /// radius — for the caller to invalidate around. Empty when nothing moved.
   ///
   /// Reads the SNAPSHOT, never `CitySim`: roads arrive as sampled body-fixed
   /// polylines and buildings as body-fixed sites, which is all a renderer is
   /// given and all a networked client will ever have.
-  bool _refreshMask(WorldSnapshot snap, String bodyId, Quaternion invQuat) {
+  List<(Vector3, double)> _refreshMask(WorldSnapshot snap, String bodyId) {
     // A cheap signature rather than a deep compare: the shape of a colony
     // changes by GAINING things — a road drawn, a lot grown — so counts catch
     // it, and a per-frame hash over a hundred thousand buildings would cost
@@ -815,12 +848,15 @@ class ScatterNodes {
       if (b.body == bodyId) builds++;
     }
     final sig = Object.hash(bodyId, roads, points, builds);
-    if (sig == _maskSig) return false;
+    if (sig == _maskSig) return const [];
+    final roadsMoved = roads != _maskRoads || points != _maskRoadPoints;
     _maskSig = sig;
+    _maskRoads = roads;
+    _maskRoadPoints = points;
     if (roads == 0 && builds == 0) {
-      final had = _mask != null;
+      final moved = _maskSitesMoved(const {});
       _mask = null;
-      return had;
+      return moved;
     }
 
     // Origin: the mean of the colony's own geometry, so feature coordinates
@@ -842,9 +878,9 @@ class ScatterNodes {
       n++;
     }
     if (n == 0) {
-      final had = _mask != null;
+      final moved = _maskSitesMoved(const {});
       _mask = null;
-      return had;
+      return moved;
     }
     final originBF = Vector3(cx / n, cy / n, cz / n);
     final builder = ScatterMaskBuilder(
@@ -883,6 +919,7 @@ class ScatterNodes {
     // long axis: a disc of the half-diagonal would clear the trees for tens of
     // metres past a long shed, and one of the half-width would leave them
     // standing through its ends.
+    final sites = <String, (Vector3, double)>{};
     for (final b in snap.buildings.values) {
       if (b.body != bodyId) continue;
       if (features >= _maxMaskFeatures) break;
@@ -898,11 +935,47 @@ class ScatterNodes {
         final axis = q.rotate(w >= dpt ? Vector3.unitX : Vector3.unitY);
         builder.addCapsule(centre - axis * half, centre + axis * half, radius);
       }
+      // The site as ONE disc, for working out what changed. Its long axis is
+      // irrelevant here: this is the neighbourhood to re-scatter, not the
+      // footprint to mask.
+      sites[b.id] = (centre, math.max(w, dpt) * 0.5);
       features++;
     }
 
     _mask = builder.isEmpty ? null : builder.build(sig);
-    return true;
+    final moved = _maskSitesMoved(sites);
+    // A road drawn or removed changes ground the length of the street, which
+    // is not a site and has no id to diff. Rare (a player draws roads by
+    // hand), so it re-scatters the whole colony rather than earning a
+    // corridor diff of its own.
+    if (roadsMoved && _mask != null) {
+      moved.add((_mask!.originBF, _mask!.extentM));
+    }
+    return moved;
+  }
+
+  /// Sites that appeared, vanished or moved since the last mask, as the
+  /// neighbourhoods whose scatter is now wrong.
+  ///
+  /// Diffed by BUILDING ID rather than by count: a colony gains a building
+  /// every few seconds while it grows, and what is stale is the lot it went
+  /// up on, not the county around it.
+  List<(Vector3, double)> _maskSitesMoved(
+      Map<String, (Vector3, double)> now) {
+    final moved = <(Vector3, double)>[];
+    for (final e in now.entries) {
+      final was = _maskSites[e.key];
+      if (was == null || (was.$1 - e.value.$1).length > 1.0) {
+        moved.add(e.value);
+      }
+    }
+    for (final e in _maskSites.entries) {
+      if (!now.containsKey(e.key)) moved.add(e.value); // bulldozed
+    }
+    _maskSites
+      ..clear()
+      ..addAll(now);
+    return moved;
   }
 
   /// Corridor length a road's samples are merged into, metres.
@@ -985,6 +1058,14 @@ class ScatterNodes {
     _stalePending.clear();
     _wantedCache.clear();
     _wantedNow = const {};
+    // The mask belongs to the body that was being drawn. Left behind, its
+    // sites would diff against the NEXT body's and invalidate cells around
+    // coordinates that mean something else there.
+    _mask = null;
+    _maskSig = 0;
+    _maskRoads = 0;
+    _maskRoadPoints = 0;
+    _maskSites.clear();
     _composedField = null;
     _composedEditsId = _unset;
     _groundEyeBF = const Vector3(double.infinity, 0, 0);

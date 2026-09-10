@@ -59,7 +59,30 @@ class CityPatchSnapshot {
   /// axes. Grid cells are square; parcels are not.
   final double sizeM;
   final double depthM;
+
+  /// The palette band, with [builtFlag] possibly set. Read [zoneKind] for the
+  /// band alone and [built] for the flag.
   final int kind;
+
+  /// Bit set on [kind] when something already STANDS on this lot.
+  ///
+  /// Packed into the kind rather than carried as a column of its own: it IS
+  /// part of what the patch is, the columns already ship kind as an Int32, and
+  /// a parallel byte column would have to be threaded through every grow,
+  /// gather and sublist in this file to say one bit.
+  static const int builtFlag = 0x100;
+
+  /// The palette band alone.
+  int get zoneKind => kind & 0xFF;
+
+  /// Whether something already stands here.
+  ///
+  /// The zone colour is an authoring affordance — it says what a piece of
+  /// ground is FOR — and once a building is on it, the building says that
+  /// better than a coloured slab underneath. The renderer paints a built lot
+  /// only when the zoning overlay is up; every lot is emitted either way,
+  /// because the overlay wants the whole plat and not just its empty half.
+  bool get built => (kind & builtFlag) != 0;
 
   const CityPatchSnapshot({
     required this.colonyId,
@@ -75,6 +98,10 @@ class CityPatchSnapshot {
     required this.kind,
     double? depthM,
   }) : depthM = depthM ?? sizeM;
+
+  /// The kind band with [builtFlag] applied — what an emitter packs.
+  static int packKind(int kind, {required bool built}) =>
+      built ? (kind | builtFlag) : kind;
 
   Map<String, dynamic> toJson() => {
         'colony': colonyId,
