@@ -15,6 +15,7 @@ import 'app_theme.dart';
 import 'ascent_screen.dart';
 import 'craft_assembly_screen.dart';
 import 'city_builder_screen.dart';
+import 'city_game_screen.dart';
 import 'cloudscape_screen.dart';
 import 'building_studio_screen.dart';
 import 'city_studio_screen.dart';
@@ -76,8 +77,11 @@ class MainMenuScreen extends StatelessWidget {
                   name: 'Ascent Vehicle'))),
       _MenuItem('MINING', 'Survey deposits + run extraction', Icons.diamond,
           AppTheme.accent, (c) => const MiningScreen()),
-      _MenuItem('CITY BUILDER', 'Found a colony: pick world, politics + difficulty',
-          Icons.location_city, AppTheme.accent2, (c) => const NewCityScreen()),
+      _MenuItem('CITY BUILDER', 'Grow a colony in the live world: zone, build, hit milestones',
+          Icons.location_city, AppTheme.accent2,
+          (c) => const CityGameSetupScreen()),
+      _MenuItem('CITY BUILDER (FLAT)', 'The original 2D map game: cells, politics + difficulty',
+          Icons.grid_on, AppTheme.textDim, (c) => const NewCityScreen()),
       _MenuItem('MEGASTRUCTURES', 'Direct planet-to-stellar-scale construction',
           Icons.hub, AppTheme.accent, (c) => const MegastructureScreen()),
       _MenuItem('MULTIPLAYER', 'Sessions, players, command authority',

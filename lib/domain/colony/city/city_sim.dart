@@ -29,6 +29,7 @@ import '../city_network.dart';
 import 'city_building_spec.dart';
 import 'city_config.dart';
 import 'city_layout.dart';
+import 'city_progression.dart';
 import 'parcel.dart';
 import 'parcel_network.dart';
 import 'shuttle_run.dart';
@@ -385,6 +386,26 @@ class CitySim {
   double foodSecurity = 1.0;
   double funds = 0;
   double research = 0;
+
+  /// Treasury income this tick, §/s, from taxing the working population.
+  double taxIncomeRate = 0;
+
+  /// Net §/s the standing laws add (positive) or cost (negative).
+  double lawUpkeepRate = 0;
+
+  /// What the treasury is actually gaining or losing per second.
+  double get netFundsRate => taxIncomeRate + lawUpkeepRate;
+
+  /// Milestone tiers already awarded, by [CityMilestone.tier].
+  ///
+  /// The record of what has been PAID, not of what the colony has grown into —
+  /// the ladder itself is derived from population (see [CityProgression]), so
+  /// this set exists only to keep a grant one-off.
+  final Set<int> milestonesReached = {};
+
+  /// Milestones collected since a host last drained this — the city-builder
+  /// HUD's banner queue. Never read by the sim itself.
+  final List<CityMilestoneAward> milestoneToasts = [];
   double pollution = 0; // accumulated atmospheric pollution 0..~
 
   /// Emissions this tick, in the city's own pollution units per second. Read by
@@ -1462,7 +1483,12 @@ class CitySim {
         taxPerWorkerPerSec *
         economy.fundsMult *
         (1 - corruption * 0.6);
-    funds += (taxIncome + lawFundsRate()) * dt;
+    // Split, and kept, so a budget readout can say WHERE the money comes from
+    // instead of watching a total tick over. Display only: the tick writes
+    // these, nothing reads them back.
+    taxIncomeRate = taxIncome;
+    lawUpkeepRate = lawFundsRate();
+    funds += (taxIncomeRate + lawUpkeepRate) * dt;
     research += population *
         happiness *
         researchPerPopPerSec *
@@ -1617,6 +1643,43 @@ class CitySim {
       for (final c in Commodity.ordered) {
         if (c == Commodity.garbage || c == Commodity.sewage) continue;
         stock[c] = sc;
+      }
+    }
+
+    // 7. Milestones. Last, so a tier is awarded against the population this
+    // tick actually produced. Lives in the TICK rather than in the city-builder
+    // screen because any host that advances a colony — the world tick, a
+    // headless driver, a test — should see the same ladder climbed.
+    claimMilestones();
+  }
+
+  /// Award every milestone the colony has grown into since the last check.
+  ///
+  /// Grants are one-off and idempotent: [milestonesReached] is the record, so
+  /// a colony that dips back below a threshold and climbs it again is not paid
+  /// twice. Newly reached tiers queue in [milestoneToasts] for the HUD to drain
+  /// — the sim never holds a reference to the UI, and a headless run simply
+  /// never empties the queue.
+  void claimMilestones() {
+    final due = CityProgression.claimable(population, milestonesReached);
+    for (final m in due) {
+      milestonesReached.add(m.tier);
+      funds += m.fundsGrant;
+      // Ore is freight, not credit: it lands in the stockpile and the
+      // stockpile has a cap. Deliver what fits and report what was delivered —
+      // the tick's own cap sweep would otherwise pour the rest on the floor
+      // between one frame and the next, with the banner still claiming the
+      // full figure.
+      var ore = 0.0;
+      if (m.oreGrant > 0) {
+        final room = math.max(0.0, stockCap - stockOf(Commodity.ore));
+        ore = math.min(m.oreGrant, room);
+        if (ore > 0) stock[Commodity.ore] = stockOf(Commodity.ore) + ore;
+      }
+      // Tier 0 is the founding state, not an achievement: it is recorded so it
+      // cannot pay out later, but it raises no banner.
+      if (m.tier > 0) {
+        milestoneToasts.add(CityMilestoneAward(m, m.fundsGrant, ore));
       }
     }
   }
@@ -3563,6 +3626,7 @@ class CitySim {
         'population': population,
         'happiness': happiness,
         'funds': funds,
+        'milestones': milestonesReached.toList(),
         'research': research,
         'pollution': pollution,
         'terraform': terraform,
@@ -3684,6 +3748,18 @@ class CitySim {
         for (final e in (j['stock'] as Map).entries)
           e.key as String: (e.value as num).toDouble(),
       });
+
+    // Milestones. A save written before the ladder existed carries no list, and
+    // an empty set on a grown city would pay out every tier at once on the
+    // first tick — so an old save is treated as having already collected
+    // everything its population has passed.
+    final saved = j['milestones'];
+    sim.milestonesReached
+      ..clear()
+      ..addAll(saved is List
+          ? saved.map((e) => (e as num).toInt())
+          : CityProgression.claimable(sim.population, const {})
+              .map((m) => m.tier));
 
     final st = j['settings'] as Map;
     sim.layout.settings = ParcelSettings(

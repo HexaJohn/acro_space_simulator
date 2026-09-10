@@ -37,6 +37,7 @@ import '../../adapters/presenters/surface_picker.dart';
 import '../flutter_scene/city/city_nodes.dart';
 import 'flight_session.dart';
 import 'screens/city_edit_overlay.dart';
+import 'screens/city_game_hud.dart';
 import 'screens/city_site_actions.dart';
 import 'screens/craft_assembly_screen.dart';
 import '../../domain/shared/quaternion.dart';
@@ -147,6 +148,15 @@ class SimulationView extends StatefulWidget {
   /// renderer a played colony uses rather than a lookalike of them.
   final CitySim? injectedCity;
 
+  /// Run as the CITY BUILDER mode rather than as a flight.
+  ///
+  /// The world underneath is identical — same tick, same terrain, same
+  /// renderer — but the subject is the colony: the editor opens on it, the
+  /// camera hangs over its crossroads, and the flight chrome (nav-ball, manual
+  /// stick, body labels) gets out of the way of the HUD that replaces it.
+  /// Requires [injectedCity]; without one there is nothing to play.
+  final bool cityMode;
+
   const SimulationView({
     super.key,
     this.injectedVessel,
@@ -154,6 +164,7 @@ class SimulationView extends StatefulWidget {
     this.initialBackend = RenderBackend.software,
     this.spawnDemoOrbiter = true,
     this.injectedCity,
+    this.cityMode = false,
   });
 
   @override
@@ -268,6 +279,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   PlannerOverlay? _plannerOverlay;
   bool _plannerDirty = true;
   int _plannerComputedMs = 0;
+
+  /// Whether the city-builder's opening turn-to-daylight has been applied.
+  /// One-shot: see `_alignCityDaylight`.
+  bool _cityDayAligned = false;
 
   /// The colony being edited in-world, and the tool held over it.
   CitySim? _editingCity;
@@ -1496,6 +1511,17 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     final city = widget.injectedCity;
     if (city != null) _session.cities.add(city);
 
+    // CITY BUILDER: the colony is the subject. Open the editor on it and hang
+    // the camera over its crossroads, so the mode starts looking at the thing
+    // it is about instead of at a planet from orbit with a town somewhere on
+    // it. Everything else about the world is unchanged.
+    if (widget.cityMode && city != null) {
+      _editingCity = city;
+      _manualControl = false; // no craft to fly; the stick would fight the pan
+      _layers = _layers.copyWith(navBall: false);
+      _openCityCamera(city);
+    }
+
     for (final v in _vessels.all()) {
       _vesselNames[v.id.value] = v.name;
     }
@@ -1809,6 +1835,11 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       _sceneWorld = null;
     }
 
+    // CITY BUILDER opens in the morning, not in whatever half of the day the
+    // epoch happens to land on. Needs a snapshot (body + star positions), so
+    // it runs here rather than at founding, and only once.
+    if (widget.cityMode && !_cityDayAligned) _alignCityDaylight();
+
     // Encounter planner: refresh the trial plan + its render overlay
     // (throttled inside; cheap no-op when the planner is closed).
     _updatePlannerPlan();
@@ -1830,7 +1861,13 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       // so "elevation" tilted toward the pole instead of toward the ground:
       // looking down was impossible, the horizon sat askew, and anything that
       // aims by looking — the drill, the lamp — pointed at the sky.
-      final walkRadial = _walkMode && _freecamRelLocal.length > 1e-3
+      // The CITY camera hangs over the colony on the same freecam anchor, and
+      // the argument is the walker's exactly: the anchor's radial IS the local
+      // vertical there. Without it the gimbal falls back to the body's equator
+      // and a mid-latitude town sits on a tilted horizon that no drag can
+      // straighten.
+      final walkRadial = (_walkMode || _cityCamera) &&
+              _freecamRelLocal.length > 1e-3
           ? _refBodyQuat().rotate(_freecamRelLocal).normalized
           : null;
       if (walkRadial != null) {
@@ -2852,7 +2889,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                   // Also hidden on a megastructure lock: the presenter has no
                   // mega focus channel, so its labels would project around the
                   // wrong origin.
-                  if (snap != null && !_freecam && _focusMega == null)
+                  // Also hidden in city mode: the city HUD is the readout
+                  // there, and orbital telemetry over a street plan is noise.
+                  if (snap != null &&
+                      !_freecam &&
+                      !widget.cityMode &&
+                      _focusMega == null)
                     Positioned.fill(
                       child: IgnorePointer(
                         child: CustomPaint(
@@ -2927,11 +2969,19 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                           left: 8,
                           bottom: 8,
                           child: Text(
-                            _manualControl
-                                ? 'MANUAL  keys: W/S A/D Q/E Shift  |  touch: joystick + throttle  |  M auto  |  pinch/wheel/[ ]/-= zoom'
-                                : 'AUTO  (M or tap for manual flight)  |  pinch/scroll/[ ]/-= zoom',
+                            widget.cityMode
+                                ? 'CITY  W/A/S/D flies the camera, Shift boosts  |  '
+                                    'drag or [ ] to zoom  |  G walks the streets  |  '
+                                    'pick a tool below, warp with , and .'
+                                : _manualControl
+                                    ? 'MANUAL  keys: W/S A/D Q/E Shift  |  touch: joystick + throttle  |  M auto  |  pinch/wheel/[ ]/-= zoom'
+                                    : 'AUTO  (M or tap for manual flight)  |  pinch/scroll/[ ]/-= zoom',
                             style: TextStyle(
-                              color: _manualControl ? const Color(0xFFFF8C66) : const Color(0xFF6E8299),
+                              color: widget.cityMode
+                                  ? const Color(0xFF7FE0A0)
+                                  : (_manualControl
+                                      ? const Color(0xFFFF8C66)
+                                      : const Color(0xFF6E8299)),
                               fontSize: 11,
                             ),
                           ),
@@ -3053,6 +3103,19 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                       controller: _cityEdit,
                       city: _editingCity!,
                       onClose: () => setState(() => _editingCity = null),
+                    ),
+                  ),
+                // City-builder HUD. TOPMOST: the ground-pick gate above spans
+                // the whole window while a tool is held, and a readout you
+                // cannot click is worse than no readout. Top-docked, so it
+                // never fights the bottom-docked toolbar for space.
+                if (widget.cityMode && _editingCity != null)
+                  Positioned.fill(
+                    child: SafeArea(
+                      child: CityGameHud(
+                        city: _editingCity!,
+                        onExit: () => Navigator.of(context).maybePop(),
+                      ),
                     ),
                   ),
               ],

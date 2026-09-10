@@ -174,6 +174,116 @@ extension SimulationViewColony on _SimulationViewState {
     );
   }
 
+  /// Whether the camera is the city-builder's own: the freecam anchor parked
+  /// over a colony, rather than a walker's eye or a free flight.
+  bool get _cityCamera => widget.cityMode && _freecam && !_walkMode;
+
+  /// Eye distance from the colony's centre point, metres.
+  ///
+  /// Sized to the STARTER KIT, not to the streets: the crossroads is 600 m
+  /// across but the pad and the solar field push the opening position out to
+  /// about a kilometre and a half corner to corner, and at 900 m both of them
+  /// hung off the edge of the frame. Only a starting pose — the wheel zooms
+  /// and WASD flies from here.
+  static const double cityCameraRangeM = 1800;
+
+  /// Camera tilt above the horizon, radians.
+  ///
+  /// Shallower than a plan view on purpose: at 49 degrees the frame is all
+  /// ground and the colony has nothing to be measured against, while at 30 the
+  /// skyline and the rising ground behind the town are both in shot — which is
+  /// where the sense of scale comes from. Still steep enough to read the
+  /// street layout, and only a starting pose.
+  static const double cityCameraElevation = 0.52;
+
+  /// Park the camera over [city]'s crossroads, looking down at it.
+  ///
+  /// Uses the FREECAM anchor rather than a body or vessel lock: the anchor is
+  /// body-fixed, so the town stays under the camera as the planet turns, and
+  /// the freecam's WASD flight is exactly the pan a city builder wants. The
+  /// anchor sits ON the ground (the eye is pushed out by the camera range),
+  /// which also makes it the local vertical the gimbal reads.
+  void _openCityCamera(CitySim city) {
+    _freecamRef = city.body.id;
+    _freecamRelLocal = city.localToBodyFixed(
+      const Vec2(0, 0),
+      bodyRadiusM: _colonySiteRadius(city),
+    );
+    _freecam = true;
+    _craftCam = false;
+    _walkMode = false;
+    _upMode = CameraUpMode.gravity;
+    _view = _view.copyWith(azimuth: 0, elevation: cityCameraElevation, roll: 0);
+    _range = cityCameraRangeM;
+  }
+
+  /// Local time the mode opens at, as an angle before the site's local noon.
+  ///
+  /// Not noon itself: an overhead sun flattens a city — no shadows to read the
+  /// massing by, and every facade the same brightness. Thirty degrees back is
+  /// mid-morning, which lights one face of everything and lays the shadows
+  /// across the streets.
+  static const double cityOpenSunAngle = -math.pi / 6;
+
+  /// Turn the world forward until the colony's mid-morning.
+  ///
+  /// A colony founded at epoch zero opens at whatever local time its longitude
+  /// happens to give — night, half the time, which is a black screen and a
+  /// solar farm producing nothing. Rather than fake the sun (the city studio
+  /// rotates the star in its own snapshot, which is a DISPLAY trick), this
+  /// advances the CLOCK: the planet really has turned, so daylight, solar
+  /// output and shadows all agree.
+  ///
+  /// Only ever forward, and only once, at open — before anything is in flight.
+  /// A jump this size would move a craft along its orbit, which is exactly why
+  /// it does not run in a flight.
+  void _alignCityDaylight() {
+    final city = _editingCity;
+    final snap = _sceneWorld;
+    if (city == null || snap == null) return;
+    final body = _universe.current().body(city.body.id);
+    final b = snap.bodies[city.body.id.value];
+    final star = snap.bodies[_universe.current().rootStar.value];
+    // Nothing to wait for on a body that does not turn (or a frame that has
+    // not resolved yet): claim the alignment so it stops being retried.
+    if (body == null || b == null || star == null ||
+        body.angularVelocity.abs() < 1e-12) {
+      _cityDayAligned = true;
+      return;
+    }
+    final axis = body.spinAxisInertial;
+    final toStar =
+        Vector3(star.px, star.py, star.pz) - Vector3(b.px, b.py, b.pz);
+    // Both directions projected onto the equatorial plane: only the component
+    // the spin can change is worth solving for.
+    final sunP = toStar - axis * toStar.dot(axis);
+    final siteWorld = _refBodyQuat().rotate(_freecamRelLocal);
+    final siteP = siteWorld - axis * siteWorld.dot(axis);
+    if (sunP.length < 1e-6 || siteP.length < 1e-6) {
+      _cityDayAligned = true; // a pole site, or the star overhead: no meridian
+      return;
+    }
+    final a = sunP.normalized, c = siteP.normalized;
+    // Signed angle from the sun's meridian to the site's, about the spin axis.
+    // Zero is local noon; the site advances through it as the body turns.
+    final theta = math.atan2(axis.dot(a.cross(c)), a.dot(c));
+    var turn = cityOpenSunAngle - theta;
+    // Wrap into the direction the body actually spins, so the answer is always
+    // a WAIT and never a rewind.
+    final w = body.angularVelocity;
+    if (w > 0) {
+      while (turn < 0) {
+        turn += 2 * math.pi;
+      }
+    } else {
+      while (turn > 0) {
+        turn -= 2 * math.pi;
+      }
+    }
+    _clock.epoch = _clock.epoch + turn / w;
+    _cityDayAligned = true;
+  }
+
   /// Ground radius under a colony-local point, terrain edits included — so
   /// the preview and the grade check both read the same ground a committed
   /// road would be graded against.
