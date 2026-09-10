@@ -15,6 +15,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/gestures.dart'
     show
+        GestureBinding,
         PointerScrollEvent,
         ScaleGestureRecognizer,
         kMiddleMouseButton,
@@ -2866,64 +2867,31 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           // (perspective). In FREECAM the wheel sets the flight-speed
           // multiplier instead — speed control matters more than zoom
           // while flying, and the range still zooms via [ ] keys.
+          //
+          // Through the pointer-signal RESOLVER, not acted on directly: this
+          // Listener wraps everything, so a raw handler zoomed the camera
+          // while the wheel was scrolling a HUD drawer. The resolver hands the
+          // event to ONE registrant, and the scrollable under the pointer
+          // registers first — so a list scrolls, and the world zooms only
+          // when nothing nearer the pointer wanted the wheel.
           onPointerSignal: (signal) {
-            if (signal is PointerScrollEvent) {
+            if (signal is! PointerScrollEvent) return;
+            GestureBinding.instance.pointerSignalResolver.register(signal,
+                (event) {
+              final scroll = event as PointerScrollEvent;
               // The city rig has no flight speed to set — the wheel is the
               // zoom, as it is in every city builder ever made.
               if (_freecam && !_cityCamera) {
-                final factor = signal.scrollDelta.dy > 0 ? 1 / 1.3 : 1.3;
+                final factor = scroll.scrollDelta.dy > 0 ? 1 / 1.3 : 1.3;
                 setState(() => _freecamSpeedMul =
                     (_freecamSpeedMul * factor).clamp(0.01, 100000.0));
               } else {
-                final factor = signal.scrollDelta.dy > 0 ? 1.15 : 1 / 1.15;
+                final factor = scroll.scrollDelta.dy > 0 ? 1.15 : 1 / 1.15;
                 setState(() => _zoom(factor));
               }
-            }
+            });
           },
-          // RawGestureDetector, NOT GestureDetector: the stock scale gesture
-          // accepts EVERY mouse button, so a middle-drag orbited twice (once
-          // here, once in the Listener above) and a right-press orbited on the
-          // few pixels of jitter every physical click carries — the "camera
-          // jumps on a bare MMB/RMB press" bug. The scale gesture is for touch
-          // (pinch + one-finger orbit) and the primary button only; MMB stays
-          // the Listener's, RMB stays nobody's. Guarded by
-          // camera_mouse_button_test.dart.
-          child: RawGestureDetector(
-            gestures: {
-              ScaleGestureRecognizer:
-                  GestureRecognizerFactoryWithHandlers<ScaleGestureRecognizer>(
-                () => ScaleGestureRecognizer(
-                    allowedButtonsFilter: (int buttons) =>
-                        buttons == kPrimaryButton),
-                (r) => r
-                  // Pinch zoom + single-finger drag orbit. d.scale is
-                  // cumulative from the gesture START, so anchor it to the
-                  // value captured at start.
-                  ..onStart = (_) {
-                    _pinchBaseMpp = _metresPerPixel;
-                    _pinchBaseRange = _range;
-                  }
-                  ..onUpdate = (d) {
-                    if (d.pointerCount >= 2 && d.scale != 1.0) {
-                      // Two-finger pinch -> zoom.
-                      setState(() {
-                        if (_perspectiveMode) {
-                          _range =
-                              (_pinchBaseRange / d.scale).clamp(1.0, 1e13);
-                        } else {
-                          _metresPerPixel =
-                              (_pinchBaseMpp / d.scale).clamp(0.5, 2e10);
-                        }
-                      });
-                    } else {
-                      // Single-finger drag -> orbit (pitch inverted).
-                      final dd = d.focalPointDelta;
-                      _orbitCamera(dd.dx * 0.005, dd.dy * 0.005);
-                    }
-                  },
-              ),
-            },
-            child: Stack(
+          child: Stack(
               children: [
                 // Renderer fills edge-to-edge (into the notch / safe area).
                 // The backend toggle swaps ONLY this subtree — camera state,
@@ -3015,6 +2983,65 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                             },
                           ),
                   ),
+                // Camera drag + pinch: a LAYER above the world and below
+                // every piece of UI, not an ancestor of the whole stack.
+                //
+                // As an ancestor it entered the gesture arena for EVERY
+                // pointer, UI included, and on a mouse the scale recognizer's
+                // slop is ~2 px against a tap's 18 — so a click on a toolbar
+                // button that carried a pixel of jitter was claimed by the
+                // camera before the button could win: the tap was lost and the
+                // view orbited. As a sibling, a pointer that lands on UI never
+                // reaches it at all, and one that lands on the world does.
+                //
+                // RawGestureDetector, NOT GestureDetector: the stock scale
+                // gesture accepts EVERY mouse button, so a middle-drag orbited
+                // twice (once here, once in the Listener) and a right-press
+                // orbited on the few pixels of jitter every physical click
+                // carries. The scale gesture is for touch (pinch + one-finger
+                // orbit) and the primary button only; MMB stays the Listener's,
+                // RMB stays nobody's. Guarded by camera_mouse_button_test.dart.
+                Positioned.fill(
+                  child: RawGestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    gestures: {
+                      ScaleGestureRecognizer:
+                          GestureRecognizerFactoryWithHandlers<
+                              ScaleGestureRecognizer>(
+                        () => ScaleGestureRecognizer(
+                            allowedButtonsFilter: (int buttons) =>
+                                buttons == kPrimaryButton),
+                        (r) => r
+                          // Pinch zoom + single-finger drag orbit. d.scale is
+                          // cumulative from the gesture START, so anchor it to
+                          // the value captured at start.
+                          ..onStart = (_) {
+                            _pinchBaseMpp = _metresPerPixel;
+                            _pinchBaseRange = _range;
+                          }
+                          ..onUpdate = (d) {
+                            if (d.pointerCount >= 2 && d.scale != 1.0) {
+                              // Two-finger pinch -> zoom.
+                              setState(() {
+                                if (_perspectiveMode) {
+                                  _range = (_pinchBaseRange / d.scale)
+                                      .clamp(1.0, 1e13);
+                                } else {
+                                  _metresPerPixel = (_pinchBaseMpp / d.scale)
+                                      .clamp(0.5, 2e10);
+                                }
+                              });
+                            } else {
+                              // Single-finger drag -> orbit (pitch inverted).
+                              final dd = d.focalPointDelta;
+                              _orbitCamera(dd.dx * 0.005, dd.dy * 0.005);
+                            }
+                          },
+                      ),
+                    },
+                    child: const SizedBox.expand(),
+                  ),
+                ),
                 // All UI overlays stay INSIDE the safe area.
                 Positioned.fill(
                   child: SafeArea(
@@ -3198,7 +3225,6 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                   ),
               ],
             ),
-          ),
         ),
       ),
     );
