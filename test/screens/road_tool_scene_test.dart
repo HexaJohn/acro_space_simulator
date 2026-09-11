@@ -263,6 +263,39 @@ void main() {
         reason: 'the end moved, down at the street');
   });
 
+  test("Adjust: a reversed one-way road's ghost runs the way its traffic "
+      'does, on its deck', () {
+    final city = colony();
+    // Down from 12 m to the ground at (0, 200); then turned round, so its
+    // traffic climbs from (0, 200) to (0, 0).
+    final id = city
+        .buildRoad(RoadBuildRequest(
+          controls: const [Vec2(0, 0), Vec2(0, 200)],
+          type: RoadType.byId('one-way')!,
+          startElevationM: 12,
+        ))
+        .roadId!;
+    expect(city.reverseRoad(id), isTrue);
+    final s = scene();
+    final c = CityEditController()
+      ..set(CityEditTool.traffic)
+      ..setTrafficView(TrafficInfoView.adjust)
+      ..selectRoad(id);
+    s.drag = (roadId: id, atStart: false);
+    s.dragTo = const Vec2(0, 260);
+    c.previewMoveEnd(city, atStart: false, to: const Vec2(0, 260));
+    s.showTraffic(city, c);
+    expect(o.ghostOneWay, isTrue);
+    expect(o.ghostBF.first.distanceTo(Vector3(0, 260, 1000)), lessThan(1e-6),
+        reason: 'traffic starts at the moved end, its last control');
+    expect(o.ghostBF.last.distanceTo(Vector3(0, 0, 1000)), lessThan(1e-6));
+    expect(o.ghostLiftsM, hasLength(o.ghostBF.length));
+    expect(o.ghostLiftsM.first, closeTo(0, 1e-6),
+        reason: 'the moved end, on the ground');
+    expect(o.ghostLiftsM.last, closeTo(12, 1e-6),
+        reason: 'the end left alone, on its deck');
+  });
+
   test('the info views publish only what changed: a hover over them costs '
       'the renderer nothing', () {
     final city = colony();

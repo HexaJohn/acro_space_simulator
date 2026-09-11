@@ -970,11 +970,14 @@ mixin RoadToolEditing on ChangeNotifier {
   ///   there ([joinLevelAt]). A raised road's end dropped on a street comes
   ///   down to meet it, where it used to hang over it at its old offset,
   ///   passed over as grade-separated. A road on the ground dropped on one
-  ///   stays on the ground.
+  ///   stays on the ground — and never lands on a tunnel, which the view
+  ///   does not show and only an end underground can meet ([_dropSnap]).
   /// * From there the line, the deck and the price are
-  ///   `CitySim.moveRoadEnd`'s: the end left alone keeps its height, the
-  ///   moved one stands at the level it met or as high above the ground as
-  ///   it stood; charged the road as re-laid less the road it replaces,
+  ///   `CitySim.planMoveRoadEnd`'s — the very plan `CitySim.moveRoadEnd`
+  ///   lays and charges, so the preview is the bill by construction: the
+  ///   end left alone keeps its height, the moved one stands at the level
+  ///   it met or as high above the ground as it stood, a road on the ground
+  ///   stays on it; charged the road as re-laid less the road it replaces,
   ///   both surveyed over [ground] (null: flat at the datum).
   RoadMovePreview? planMoveEnd(
     CitySim city,
@@ -987,7 +990,8 @@ mixin RoadToolEditing on ChangeNotifier {
     if (road == null || road.controls.length < 2) return null;
     final g = ground ?? _flatGround;
     final deck = road.deck;
-    final hit = _dropSnap(city, to, roadId);
+    final hit = _dropSnap(city, to, roadId,
+        underground: _endUnderground(deck, atStart: atStart));
     double? toHeightM;
     if (hit != null) {
       final join = joinLevelAt(city, hit, ground: g);
@@ -997,54 +1001,26 @@ mixin RoadToolEditing on ChangeNotifier {
       toHeightM = join?.heightM ?? (deck == null ? null : g(hit.point));
     }
     final end = hit?.point ?? to;
-
-    // CitySim.moveRoadEnd's own rules, from here to the bill.
-    final type = RoadType.of(road);
-    final raised = deck != null || toHeightM != null;
-    final offset =
-        deck == null ? 0.0 : (atStart ? deck.startOffsetM : deck.endOffsetM);
-    final controls =
-        controlsWithMovedEnd(road.controls, atStart: atStart, to: end);
-    double? fixedH, movedH;
-    if (raised) {
-      final fixedEnd = atStart ? controls.last : controls.first;
-      fixedH =
-          deck == null ? g(fixedEnd) : (atStart ? deck.endM : deck.startM);
-      movedH = toHeightM ?? g(end) + offset;
-    }
-    final full = quoteRoadBuild(
-      RoadBuildRequest(
-        controls: controls,
-        type: type,
-        startHeightM: atStart ? movedH : fixedH,
-        endHeightM: atStart ? fixedH : movedH,
-      ),
-      groundAt: ground,
-    );
-    final old = quoteRoadBuild(
-      RoadBuildRequest(
-        controls: road.controls,
-        type: type,
-        startHeightM: deck?.startM,
-        endHeightM: deck?.endM,
-      ),
-      groundAt: ground,
-    );
-    final added = math.max(0.0, full.cost - old.cost);
-    var q = full.copyWith(cost: added);
-    if (q.ok && added > city.funds + 1e-9) {
-      q = q.copyWith(refusal: RoadRefusal.funds);
-    }
+    final plan = city.planMoveRoadEnd(roadId,
+        atStart: atStart, to: end, toHeightM: toHeightM, groundAt: ground);
+    if (plan == null) return null;
     return RoadMovePreview(
       roadId: roadId,
       atStart: atStart,
       end: end,
       toHeightM: toHeightM,
       joinRoadId: hit?.roadId,
-      controls: controls,
-      quote: q,
+      controls: plan.controls,
+      quote: plan.quote,
     );
   }
+
+  /// Whether a road with [deck] has its end [atStart] below the ground it
+  /// was laid on — a sunk road, which may meet another in its tunnel.
+  static bool _endUnderground(RoadDeck? deck, {required bool atStart}) =>
+      deck != null &&
+      (atStart ? deck.startOffsetM : deck.endOffsetM) <
+          -RoadElevation.nodeMatchM;
 
   /// The Adjust drag's hover: [planMoveEnd] for the selected road, kept in
   /// [movePreview] for the ghost and the toolbar. Notifies nobody — it
@@ -1098,9 +1074,35 @@ mixin RoadToolEditing on ChangeNotifier {
   /// [RoadSnapper.endSnapM], else the nearest point along one within
   /// [CitySim.roadSnapM] — never [excludeId], the road being re-laid.
   /// Blind to level, as the road tool's snapper is: the end then takes the
-  /// level of what it landed on ([joinLevelAt]).
-  static RoadSnap? _dropSnap(CitySim city, Vec2 p, String excludeId) {
+  /// level of what it landed on ([joinLevelAt]) — with one exception. A
+  /// road's TUNNEL is out of sight in this view and is met only from
+  /// underground: unless the end is itself below the ground ([underground])
+  /// it never lands on a stretch in a tunnel, and passes over it on the
+  /// ground. It used to land on one all the same, a street's end dropped
+  /// over a tunnel it could not see diving 12 m to meet it — re-laid as a
+  /// ramp, cut into the ground in slabs over the rises it had followed.
+  static RoadSnap? _dropSnap(CitySim city, Vec2 p, String excludeId,
+      {bool underground = false}) {
     final index = city.layout.roadIndex;
+    // Whether [road]'s stretch at arc [s] is in a tunnel this end cannot
+    // meet. The survey's ranges end on its own measure of the road, which
+    // the index's can pass by a hair, so they are read half a metre wide;
+    // an END is in its tunnel when it was laid deeper than the tunnel
+    // cover below its ground, as the renderer judges a node.
+    bool hidden(RoadSpline road, double s, {bool? start}) {
+      final deck = road.deck;
+      if (underground || deck == null) return false;
+      if (start != null &&
+          (start ? deck.startOffsetM : deck.endOffsetM) <
+              -RoadElevation.tunnelCoverM) {
+        return true;
+      }
+      for (final (a, b) in deck.tunnels) {
+        if (s >= a - 0.5 && s <= b + 0.5) return true;
+      }
+      return false;
+    }
+
     RoadSnap? best;
     var bestD = RoadSnapper.endSnapM;
     final seen = <int>{};
@@ -1111,6 +1113,7 @@ mixin RoadToolEditing on ChangeNotifier {
         return;
       }
       for (final first in const [true, false]) {
+        if (hidden(rec.road, first ? 0 : rec.lengthM, start: first)) continue;
         final q = rec.sampleAt(first ? 0 : rec.sampleCount - 1);
         final d = p.distanceTo(q);
         if (d < bestD) {
@@ -1125,10 +1128,11 @@ mixin RoadToolEditing on ChangeNotifier {
     index.visit(Box2.around(p, bestD), 0, (slot, rec, seg) {
       if (seg == 0 || rec.road.id == excludeId) return;
       final (q, d) = rec.nearestOnSegment(p, seg);
-      if (d < bestD) {
-        bestD = d;
-        best = RoadSnap(q, RoadSnapKind.roadPoint, roadId: rec.road.id);
-      }
+      if (d >= bestD) return;
+      final s = rec.cum[seg - 1] + rec.sampleAt(seg - 1).distanceTo(q);
+      if (hidden(rec.road, s)) return;
+      bestD = d;
+      best = RoadSnap(q, RoadSnapKind.roadPoint, roadId: rec.road.id);
     });
     return best;
   }

@@ -378,8 +378,14 @@ class RoadToolScene {
       final line =
           RoadSpline(id: 'adjust', controls: m.controls).sample(stepM: 4);
       final deck = m.quote.deck;
-      _writeGhost(line, deck, RoadType.of(road),
-          m.quote.ok ? RoadGhostState.selected : RoadGhostState.refused);
+      // First point to last is the direction of travel, as Upgrade draws
+      // it: a reversed one-way road runs back along its controls. Drawn in
+      // control order, a reversed road's ghost pointed its arrows against
+      // the traffic the re-lay keeps.
+      _writeGhost(road.reversed ? line.reversed.toList() : line, deck,
+          RoadType.of(road),
+          m.quote.ok ? RoadGhostState.selected : RoadGhostState.refused,
+          reversed: road.reversed);
       final first = m.controls.first, last = m.controls.last;
       return (
         const [],

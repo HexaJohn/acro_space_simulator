@@ -589,6 +589,73 @@ void main() {
           city.roadGraph.nodeNear(const Vec2(1, 400), withinM: 3)!.isJunction,
           isTrue);
     });
+
+    test('Adjust: a road on the ground dropped over a tunnel it cannot see '
+        'stays on the ground, and the drag priced what letting go charges',
+        () {
+      // Rolling ground, which a street follows and a deck would be cut,
+      // piered and tunnelled through.
+      double rolling(Vec2 p) =>
+          3 * math.sin(p.n / 40) + 2 * math.sin(p.e / 35);
+      final city = colony();
+      // A tunnel 12 m down, ending under the field at (100, 300).
+      final tunnel = city
+          .buildRoad(
+              RoadBuildRequest(
+                controls: const [Vec2(100, -100), Vec2(100, 300)],
+                type: RoadType.byId('two-lane')!,
+                startElevationM: -12,
+                endElevationM: -12,
+              ),
+              groundAt: rolling)
+          .roadId!;
+      expect(road(city, tunnel).deck!.inTunnelAt(0), isTrue);
+      final id = city
+          .buildRoad(
+              RoadBuildRequest(
+                controls: const [Vec2(0, 0), Vec2(0, 200)],
+                type: RoadType.byId('one-way')!,
+              ),
+              groundAt: rolling)
+          .roadId!;
+      expect(road(city, id).deck, isNull);
+      expect(city.reverseRoad(id), isTrue);
+      final c = CityEditController()
+        ..set(CityEditTool.traffic)
+        ..setTrafficView(TrafficInfoView.adjust)
+        ..selectRoad(id);
+
+      // Let go 9 m from the tunnel's end, over it.
+      const to = Vec2(94, 293);
+      final plan =
+          c.previewMoveEnd(city, atStart: false, to: to, ground: rolling)!;
+      expect(plan.joinRoadId, isNull,
+          reason: 'the tunnel is not there to meet from the ground');
+      expect(plan.end, to);
+      expect(plan.quote.ok, isTrue, reason: plan.quote.reason);
+      expect(plan.quote.deck, isNull,
+          reason: 'no lifts: drawn on the ground, not a ramp into the tunnel');
+      expect(plan.quote.structureM + plan.quote.tunnelM, 0);
+      expect(
+          plan.quote.cost,
+          city
+              .quoteMoveRoadEnd(id, atStart: false, to: to, groundAt: rolling)
+              .cost,
+          reason: 'the preview is the domain\'s own quote');
+
+      final before = city.funds;
+      final r =
+          c.moveSelectedEnd(city, atStart: false, to: to, ground: rolling)!;
+      expect(r.roadId, isNotNull, reason: r.quote.reason);
+      expect(r.quote.cost, plan.quote.cost, reason: 'the bill is the preview');
+      expect(city.funds, closeTo(before - plan.quote.cost, 1e-6));
+      final laid = road(city, c.selectedRoadId!);
+      expect(laid.deck, isNull, reason: 're-laid on the ground');
+      expect(laid.reversed, isTrue, reason: 'still one way, the same way');
+      expect(laid.controls.last.distanceTo(to), lessThan(1e-6));
+      expect(road(city, tunnel).deck!.tunnels, isNotEmpty,
+          reason: 'the tunnel is left as it was');
+    });
   });
 
   test('the dev hook applies its settings through the same calls', () {

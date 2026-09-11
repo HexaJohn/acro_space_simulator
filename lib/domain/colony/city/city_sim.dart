@@ -253,6 +253,31 @@ enum Economy {
       this.researchMult, this.happinessFloor, this.taxControllable);
 }
 
+/// Adjust Roads' re-lay of one road end, planned and priced but not laid
+/// ([CitySim.planMoveRoadEnd]): what [CitySim.moveRoadEnd] lays and
+/// charges, and what the Adjust preview draws and prices.
+class RoadEndMove {
+  const RoadEndMove({
+    required this.end,
+    required this.controls,
+    required this.bridges,
+    required this.quote,
+  });
+
+  /// Where the moved end lands: on the road it joins there, else where it
+  /// was dropped.
+  final Vec2 end;
+
+  /// The re-laid road's controls, first to last.
+  final List<Vec2> controls;
+
+  /// Its bridge ranges, arcs from its first control.
+  final List<(double, double)> bridges;
+
+  /// The road as re-laid — its deck, whether it can be — at the price of
+  /// what it adds ([RoadQuote.cost]).
+  final RoadQuote quote;
+}
 
 /// Aggregate root for one colony: its land, buildings, stockpile, population,
 /// politics, environment and disasters, plus the tick that advances them.
@@ -3861,9 +3886,19 @@ class CitySim {
   /// The end left where it was keeps its deck height exactly; the moved end
   /// stands [toHeightM] above the datum when given (it was dropped on a
   /// raised road — `deckHeightAt`), else as high above the ground at [to]
-  /// as it stood above the ground it left. A road on the ground stays on
-  /// the ground. [atStart] names the road's FIRST CONTROL, whichever way
-  /// its traffic runs.
+  /// as it stood above the ground it left. [atStart] names the road's
+  /// FIRST CONTROL, whichever way its traffic runs.
+  ///
+  /// A road on the ground is re-laid on the ground — draped, no deck —
+  /// unless its moved end joins a road clear of the ground there: then it
+  /// takes only what the deck rules ask, a straight grade from the end
+  /// left alone, at grade, up (or down) to the level it joins, as the road
+  /// tool lays a road drawn from the ground to a viaduct. A [toHeightM]
+  /// within [RoadElevation.nodeMatchM] of the ground at [to] is the ground
+  /// — the foot of a ramp, say — and asks for no deck: handed one, a
+  /// street was re-laid as a straight grade line between its end heights,
+  /// surveyed into cuttings, piers and tunnels over every rise and dip it
+  /// had followed.
   ///
   /// Re-laid through [CityLayout.commitRoad] with every attribute it had —
   /// class, dressing, walls, direction, name, how it plats, collector,
@@ -3877,9 +3912,10 @@ class CitySim {
   /// Charged the road as re-laid less the road it replaces, both priced by
   /// the same survey over the same ground — the added length at its own
   /// price on piers, as bridge or underground — and never refunded for a
-  /// shorter one. Returns the id it was re-laid under (its pieces are
-  /// `<id>x<i>` where a junction cut it), or null with the quote saying
-  /// why not.
+  /// shorter one: exactly [quoteMoveRoadEnd], which is the same plan
+  /// ([planMoveRoadEnd]). Returns the id it was re-laid under (its pieces
+  /// are `<id>x<i>` where a junction cut it), or null with the quote
+  /// saying why not.
   ({String? roadId, RoadQuote quote}) moveRoadEnd(
     String roadId, {
     required bool atStart,
@@ -3887,22 +3923,107 @@ class CitySim {
     double? toHeightM,
     double Function(Vec2)? groundAt,
   }) {
-    final road = layout.roadById(roadId);
-    if (road == null || road.controls.length < 2) {
-      final q = RoadQuote.refused(
-          road == null ? RoadType.forClass(RoadClass.street) : RoadType.of(road),
-          RoadRefusal.notFound);
+    final plan = planMoveRoadEnd(roadId,
+        atStart: atStart, to: to, toHeightM: toHeightM, groundAt: groundAt);
+    if (plan == null) {
+      final q = _moveRefusedNotFound(roadId);
       blocked = q.reason;
       return (roadId: null, quote: q);
     }
+    final q = plan.quote;
+    if (!q.ok) {
+      blocked = q.reason;
+      return (roadId: null, quote: q);
+    }
+
+    final road = layout.roadById(roadId)!;
+    final newId = layout.childIdFor(roadId);
+    layout.removeRoad(roadId, regenerateLots: false);
+    final result = layout.commitRoad(
+      controls: plan.controls,
+      roadClass: road.roadClass,
+      // Snapped by the plan: the deck was surveyed on exactly this line.
+      snapStart: false,
+      snapEnd: false,
+      bridges: plan.bridges,
+      startHalfWidthM: road.startHalfWidthM,
+      endHalfWidthM: road.endHalfWidthM,
+      sealed: road.sealed,
+      soundWalls: road.soundWalls,
+      lotFrontageM: road.lotFrontageM,
+      lotDepthM: road.lotDepthM,
+      frontsLots: road.frontsLots,
+      collector: road.collector,
+      graded: road.graded,
+      decoration: road.decoration,
+      deck: q.deck,
+      reversed: road.reversed,
+      name: road.name,
+      groundAt: groundAt,
+      id: newId,
+    );
+    lastCommitCrossings = result.crossings;
+    _carryRenamedLots(result.renamedLots);
+    funds -= q.cost;
+    _roadsRevision++;
+    return (roadId: result.roadId, quote: q);
+  }
+
+  /// What [moveRoadEnd] would charge for the same drag, and whether it
+  /// would lay it — the Adjust preview's figure. Pure: the same plan
+  /// ([planMoveRoadEnd]) the move lays, so the preview is the bill by
+  /// construction, not by two copies of the rules kept in step.
+  RoadQuote quoteMoveRoadEnd(
+    String roadId, {
+    required bool atStart,
+    required Vec2 to,
+    double? toHeightM,
+    double Function(Vec2)? groundAt,
+  }) =>
+      planMoveRoadEnd(roadId,
+              atStart: atStart,
+              to: to,
+              toHeightM: toHeightM,
+              groundAt: groundAt)
+          ?.quote ??
+      _moveRefusedNotFound(roadId);
+
+  RoadQuote _moveRefusedNotFound(String roadId) {
+    final road = layout.roadById(roadId);
+    return RoadQuote.refused(
+        road == null ? RoadType.forClass(RoadClass.street) : RoadType.of(road),
+        RoadRefusal.notFound);
+  }
+
+  /// Adjust Roads' re-lay of [roadId] with its end [atStart] dropped at
+  /// [to], planned and priced but not laid: the line, its bridges and the
+  /// quote — [RoadQuote.cost] what it adds — that [moveRoadEnd] lays and
+  /// charges, and [quoteMoveRoadEnd] reads. Null for a road that is gone.
+  /// Pure. See [moveRoadEnd] for the rules.
+  RoadEndMove? planMoveRoadEnd(
+    String roadId, {
+    required bool atStart,
+    required Vec2 to,
+    double? toHeightM,
+    double Function(Vec2)? groundAt,
+  }) {
+    final road = layout.roadById(roadId);
+    if (road == null || road.controls.length < 2) return null;
     final type = RoadType.of(road);
     final deck = road.deck;
     final ground = groundAt ?? (Vec2 _) => 0.0;
-    // A road on the ground stays on it unless it is dropped on a deck.
-    final raised = deck != null || toHeightM != null;
+    // A road on the ground stays on it unless its end joins a road clear of
+    // the ground — and a height that is the ground there joins nothing.
+    var joinH = toHeightM;
+    if (deck == null &&
+        joinH != null &&
+        (joinH - ground(to)).abs() < RoadElevation.nodeMatchM) {
+      joinH = null;
+    }
+    final raised = deck != null || joinH != null;
     final offset =
         deck == null ? 0.0 : (atStart ? deck.startOffsetM : deck.endOffsetM);
-    double movedHeightAt(Vec2 p) => toHeightM ?? ground(p) + offset;
+    double movedHeightAt(Vec2 p) => joinH ?? ground(p) + offset;
 
     // Snap the moved end first, so the deck is surveyed on the line that
     // is laid; the end left alone stays exactly where it was.
@@ -3925,6 +4046,9 @@ class CitySim {
 
     double? fixedH, movedH;
     if (raised) {
+      // A road off the ground keeps the end left alone at its deck height;
+      // one on the ground that joins a deck climbs to it from its end left
+      // alone AT GRADE, as the road tool lays a road from the ground.
       fixedH = deck == null
           ? ground(fixedEnd)
           : (atStart ? deck.endM : deck.startM);
@@ -3958,10 +4082,6 @@ class CitySim {
     if (q.ok && added > funds + 1e-9) {
       q = q.copyWith(refusal: RoadRefusal.funds);
     }
-    if (!q.ok) {
-      blocked = q.reason;
-      return (roadId: null, quote: q);
-    }
 
     // Bridge ranges run from the first control: moving the start moves
     // them along by however much longer the road now is.
@@ -3970,37 +4090,7 @@ class CitySim {
       for (final (a, b) in road.bridges)
         if (b + shift > 0 && a + shift < full.lengthM) (a + shift, b + shift),
     ];
-
-    final newId = layout.childIdFor(roadId);
-    layout.removeRoad(roadId, regenerateLots: false);
-    final result = layout.commitRoad(
-      controls: controls,
-      roadClass: road.roadClass,
-      // Snapped above: the deck was surveyed on exactly this line.
-      snapStart: false,
-      snapEnd: false,
-      bridges: bridges,
-      startHalfWidthM: road.startHalfWidthM,
-      endHalfWidthM: road.endHalfWidthM,
-      sealed: road.sealed,
-      soundWalls: road.soundWalls,
-      lotFrontageM: road.lotFrontageM,
-      lotDepthM: road.lotDepthM,
-      frontsLots: road.frontsLots,
-      collector: road.collector,
-      graded: road.graded,
-      decoration: road.decoration,
-      deck: q.deck,
-      reversed: road.reversed,
-      name: road.name,
-      groundAt: groundAt,
-      id: newId,
-    );
-    lastCommitCrossings = result.crossings;
-    _carryRenamedLots(result.renamedLots);
-    funds -= q.cost;
-    _roadsRevision++;
-    return (roadId: result.roadId, quote: q);
+    return RoadEndMove(end: end, controls: controls, bridges: bridges, quote: q);
   }
 
   /// The deck height of the road [roadId] at its nearest point to [p],
