@@ -143,14 +143,18 @@ class AgentTuning {
 
   /// Agent sub-steps a frame-budgeted colony runs per UI frame, give or
   /// take a tick: what a frame leaves unspent carries to the next, and a
-  /// backlog adds its share (`CityAgents.endFrame`). Further ticks queue
-  /// whole and replay on later frames.
+  /// backlog adds its share, never more than one tick's worth together
+  /// (`CityAgents.endFrame`). Further ticks queue whole and replay on later
+  /// frames.
   static int maxAgentSubStepsPerFrame = 4;
 
   /// Colony seconds the frame hold may queue: a frame runs whatever is held
   /// past it — a hitch, never a dropped tick — so a held colony is never
-  /// further behind the world than this.
-  static double maxHeldCityS = 10;
+  /// further behind the world than this. Above the 12.5 s the host's
+  /// catch-up frame owes at 25× (25 ticks of 0.5 s) and the tick or two a
+  /// slower host keeps waiting, so that frame is spread over the frames
+  /// after it by the budget rather than run on the spot.
+  static double maxHeldCityS = 15;
 
   /// Restores every default. Tests that turn a knob call it in `tearDown`,
   /// since statics outlive the test that set them.
@@ -187,7 +191,7 @@ class AgentTuning {
     freightRail = false;
     graphBuildInlineMaxRoads = 3000;
     maxAgentSubStepsPerFrame = 4;
-    maxHeldCityS = 10;
+    maxHeldCityS = 15;
   }
 
   /// Every tunable by name, as it stands: what two runs compare to prove they

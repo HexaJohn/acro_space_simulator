@@ -276,4 +276,19 @@ class LaneStateSearch {
     if (_goalAt.length < nE) _goalAt = Int32List(nE);
     if (_route.length < nL + 2) _route = Int32List(nL + 2);
   }
+
+  /// Its scratch, by name into [into], for the allocation test (§15.2):
+  /// sized by the graph it is bound to, and reset by generation stamp, so
+  /// none of it is replaced while that graph runs.
+  void collectBuffers(Map<String, Object> into, String name) {
+    into['$name.g'] = _g;
+    into['$name.parent'] = _parent;
+    into['$name.stamp'] = _stamp;
+    into['$name.origin'] = _origin;
+    into['$name.goalAt'] = _goalAt;
+    into['$name.goalPt'] = _goalPt;
+    into['$name.route'] = _route;
+    _heap.collectBuffers(into, '$name.heap');
+    _ends.collectBuffers(into, '$name.ends');
+  }
 }

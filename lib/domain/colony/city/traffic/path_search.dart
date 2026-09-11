@@ -279,6 +279,21 @@ class SearchContext {
     }
     if (_path.length < nE + 2) _path = Int32List(nE + 2);
   }
+
+  /// Its scratch, by name into [into], for the allocation test (§15.2):
+  /// sized by the graph it is bound to, and reset by generation stamp, so
+  /// none of it is replaced while that graph runs.
+  void collectBuffers(Map<String, Object> into, String name) {
+    into['$name.g'] = _g;
+    into['$name.parent'] = _parent;
+    into['$name.stamp'] = _stamp;
+    into['$name.origin'] = _origin;
+    into['$name.goalAt'] = _goalAt;
+    into['$name.goalPt'] = _goalPt;
+    into['$name.path'] = _path;
+    _heap.collectBuffers(into, '$name.heap');
+    _ends.collectBuffers(into, '$name.ends');
+  }
 }
 
 /// The priority lanes of the [PathQueue] (§4.8), served in this order, and
@@ -500,6 +515,25 @@ class PathQueue {
   }
 
   bool get idle => length == 0 && searching == 0;
+
+  /// Every buffer the queue keeps from one sub-step to the next — its
+  /// rings, its lane pass, the route it hands out, and each search context
+  /// with its ends — by name into [into], for the allocation test (§15.2):
+  /// once warm, none is ever replaced. A context not yet made is not
+  /// listed, so one first made in steady state shows as a buffer new since.
+  void collectBuffers(Map<String, Object> into, String name) {
+    for (var p = 0; p < _rings.length; p++) {
+      _rings[p].collectBuffers(into, '$name.ring$p');
+    }
+    _planner.collectBuffers(into, '$name.lanes');
+    into['$name.route'] = _route.elems;
+    for (var i = 0; i < _slots.length; i++) {
+      final s = _slots[i];
+      s.ends.collectBuffers(into, '$name.slot$i.ends');
+      s.edge?.collectBuffers(into, '$name.slot$i.edge');
+      s.state?.collectBuffers(into, '$name.slot$i.state');
+    }
+  }
 
   /// [hash] with every request folded in — each queued one, per priority
   /// in queue order, and each being searched, with how far its search has
@@ -794,6 +828,18 @@ class _Ring {
       }
     }
     return n;
+  }
+
+  void collectBuffers(Map<String, Object> into, String name) {
+    into['$name.requester'] = requester;
+    into['$name.origin'] = origin;
+    into['$name.dest'] = dest;
+    into['$name.tag'] = tag;
+    into['$name.kind'] = kind;
+    into['$name.flags'] = flags;
+    into['$name.originS'] = originS;
+    into['$name.destS'] = destS;
+    into['$name.seq'] = seq;
   }
 
   /// [hash] with every live request folded in, in queue order.

@@ -15,25 +15,36 @@ import 'traffic_fixture.dart';
 /// planned routes splits the roads it crosses, and every route carried
 /// across passes STRAIGHT THROUGH the junction it made, in the lane it was
 /// in — nobody re-plans, nobody is taken off, everybody arrives — while a
-/// trip planned after the road is drawn takes it.
+/// trip planned after the road is drawn takes it. The lots the split re-cuts
+/// and renames are carried by E12, so no trip to one loses its destination.
+///
+/// The agents are the colony's own ([_colonyAgents]), so the road commits
+/// reach them through E12 exactly as they reach the play surface's; the
+/// test advances them itself, so the economy stands still.
 void main() {
   setUp(() => AgentTuning.commuteRatePerResident = 0);
   tearDown(AgentTuning.reset);
 
   test('trips planned the long way drive straight through a shortcut drawn '
-      'across their route; a trip planned after it takes it', () {
+      'across their route, to lots its re-cut renamed among them; a trip '
+      'planned after it takes it', () {
     final city = _uTown();
-    final a = agentsOn(city);
+    final a = _colonyAgents(city);
     final dests = [
       lotNearest(city, const Vec2(600, 185)).id,
       lotNearest(city, const Vec2(650, 215)).id,
+      // On E between S and D: the shortcut cuts E, and every lot along
+      // the piece it cuts is re-cut and renamed.
+      lotNearest(city, const Vec2(420, 100)).id,
+      lotNearest(city, const Vec2(380, 60)).id,
     ];
     final origins = [
       for (final x in const [-500.0, -560.0, -620.0, -680.0])
         lotNearest(city, Vec2(x, 185)).id,
     ];
     final trips = [
-      for (var i = 0; i < 20; i++) forceTrip(a, origins[i % 4], dests[i % 2]),
+      for (var i = 0; i < 20; i++)
+        forceTrip(a, origins[i % 4], dests[(i ~/ 4) % 4]),
     ];
     for (var i = 0; i < 240; i++) {
       if (trips.every((tr) => vehicleOfTrip(a, tr) >= 0)) break;
@@ -42,6 +53,15 @@ void main() {
     final cars = [for (final tr in trips) vehicleOfTrip(a, tr)];
     expect(cars.every((h) => h >= 0), isTrue, reason: 'all 20 pulled out');
     final lanes = {for (final h in cars) h: routeOf(a, h)};
+    final b = a.buildings!;
+    final building = {
+      for (final site in dests.sublist(2)) site: b.handleOfSite(site)!,
+    };
+    final toRenamed = [
+      for (final h in cars)
+        if (building.containsKey(a.describe(h)!['to'])) h,
+    ];
+    expect(toRenamed, hasLength(8));
 
     final shortcut =
         commit(city, const FixtureRoad([Vec2(-400, 0), Vec2(400, 0)]));
@@ -49,6 +69,23 @@ void main() {
     expect(a.graphRev, 2, reason: 'the road rebuilt the lane graph');
     expect(a.stats.replans, 0, reason: 'no route was made impossible');
     expect(a.stats.despawnEdit, 0);
+
+    // Their lots re-cut and renamed, and each carried (E12): the same
+    // building, the same handle, under the new name — the one the trips
+    // driving there now name.
+    for (final e in building.entries) {
+      expect(city.layout.autoParcels.any((p) => p.id == e.key), isFalse,
+          reason: '${e.key} was re-cut');
+      final now = b.siteOf(e.value);
+      expect(now, allOf(isNotNull, isNot(e.key)),
+          reason: 'its building carried to the lot that replaced it');
+      expect(city.parcelBuildings.containsKey(now), isTrue);
+      expect(b.handleOfSite(now!), e.value);
+    }
+    for (final h in toRenamed) {
+      expect(building.values.map(b.siteOf), contains(a.describe(h)!['to']),
+          reason: 'it drives to the renamed site');
+    }
 
     final lg = a.laneGraph!;
     final tee = lg.graph.nodeNear(const Vec2(-400, 0))!.id;
@@ -58,7 +95,7 @@ void main() {
       final words = routeOf(a, h);
       expect(words.any((w) => w.startsWith(shortcut)), isFalse,
           reason: 'planned before the road: never onto it ($words)');
-      expect(_sameLanes(lanes[h]!, words), isTrue,
+      expect(routeDescends(lanes[h]!, words), isTrue,
           reason: 'each piece in the lane its road was planned in: '
               '${lanes[h]} → $words');
       if (_crosses(a, h, tee)) through++;
@@ -83,6 +120,8 @@ void main() {
     }
     expect(a.stats.arrived - arrived, greaterThanOrEqualTo(1));
     expect(a.stats.arrived, 21);
+    expect(a.stats.arrivedGone, 0,
+        reason: 'every trip found its building where it arrived');
     expect(a.stats.despawnStuck + a.stats.despawnWedge, 0);
     expect(a.stats.replans, 0);
   });
@@ -91,7 +130,7 @@ void main() {
       'drawn keep the long way they were planned: waiting is no licence to '
       'plan again', () {
     final city = _uTown();
-    final a = agentsOn(city);
+    final a = _colonyAgents(city);
     final (origins, dests) = _ends(city);
     final trips = [
       for (var i = 0; i < 20; i++) forceTrip(a, origins[i % 4], dests[i % 2]),
@@ -131,7 +170,7 @@ void main() {
   test('a waiting route the edit makes impossible is planned again from its '
       'origin, and counted', () {
     final city = _uTown();
-    final a = agentsOn(city);
+    final a = _colonyAgents(city);
     final (origins, dests) = _ends(city);
     final trips = [
       for (var i = 0; i < 8; i++) forceTrip(a, origins[i % 4], dests[i % 2]),
@@ -164,6 +203,11 @@ void main() {
   });
 }
 
+/// [city]'s own agents, switched on — so every lot-rename and clear hook
+/// the colony fires (E12–E14) reaches them — but ticked by the test, not by
+/// the colony.
+CityAgents _colonyAgents(CitySim city) => city.agents..enabled = true;
+
 /// The four home lots on O the scenario's trips leave from, and the two on
 /// D they drive to.
 (List<String>, List<String>) _ends(CitySim city) => (
@@ -191,25 +235,6 @@ CitySim _uTown() {
   zoneAll(city, const [ParcelUse.residential]);
   buildAll(city);
   return city;
-}
-
-/// Whether every step of route [now] (in [routeOf]'s words) runs in the
-/// lane, and the direction, that route [was] used on the road it descends
-/// from — itself, or the road a split cut it from (`<id>x<i>`). A split adds
-/// a step to a route, so the two are matched by road, not by position.
-bool _sameLanes(List<String> was, List<String> now) {
-  for (final w in now) {
-    final road = w.substring(0, w.length - 2);
-    var matched = false;
-    for (final v in was) {
-      final old = v.substring(0, v.length - 2);
-      if (road != old && !road.startsWith('${old}x')) continue;
-      if (v.substring(v.length - 2) != w.substring(w.length - 2)) return false;
-      matched = true;
-    }
-    if (!matched) return false;
-  }
-  return true;
 }
 
 /// Whether the rest of [h]'s route runs through node [node].

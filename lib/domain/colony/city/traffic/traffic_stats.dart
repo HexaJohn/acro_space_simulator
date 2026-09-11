@@ -160,6 +160,24 @@ class TrafficStats {
   /// The worst road's congestion in the last picture, and the network's.
   double peakCongestion = 0, averageCongestion = 0;
 
+  /// Every buffer the statistics keep from one sub-step to the next, by
+  /// name into [into], for the allocation test (§15.2): the per-edge books
+  /// are sized by the graph they are bound to, the picture's by its road
+  /// graph, and none is replaced while those run. The window's books and
+  /// the last window's change places at every window's end, so the two
+  /// names swap buffers: the same pair, never a new one.
+  void collectBuffers(Map<String, Object> into, String name) {
+    into['$name.doneIn'] = _doneIn;
+    into['$name.failedIn'] = _failedIn;
+    into['$name.winD'] = _winD;
+    into['$name.winL'] = _winL;
+    into['$name.lastD'] = _lastD;
+    into['$name.lastL'] = _lastL;
+    into['$name.exits'] = _exits;
+    into['$name.roadCong'] = _roadCong;
+    into['$name.roadVol'] = _roadVol;
+  }
+
   /// Puts the per-edge books on [lg]. A graph sharing [lg]'s structure keeps
   /// them; any other starts them afresh — edge ids mean nothing across two
   /// builds — and the network index carries on.

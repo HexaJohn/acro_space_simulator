@@ -388,6 +388,16 @@ class PathEnds {
       Int32List(a.length * 2)..setRange(0, a.length, a);
   static Float64List _grownD(Float64List a) =>
       Float64List(a.length * 2)..setRange(0, a.length, a);
+
+  /// Its columns, by name into [into], for the allocation test (§15.2).
+  void collectBuffers(Map<String, Object> into, String name) {
+    into['$name.originEdge'] = originEdge;
+    into['$name.originLane'] = originLane;
+    into['$name.originT'] = originT;
+    into['$name.goalEdge'] = goalEdge;
+    into['$name.goalMask'] = goalMask;
+    into['$name.goalT'] = goalT;
+  }
 }
 
 /// Where a search stands.
@@ -482,5 +492,12 @@ class SearchHeap {
     _id = Int32List(cap)..setRange(0, _n, _id);
     _f = Float64List(cap)..setRange(0, _n, _f);
     _g = Float64List(cap)..setRange(0, _n, _g);
+  }
+
+  /// Its columns, by name into [into], for the allocation test (§15.2).
+  void collectBuffers(Map<String, Object> into, String name) {
+    into['$name.id'] = _id;
+    into['$name.f'] = _f;
+    into['$name.g'] = _g;
   }
 }

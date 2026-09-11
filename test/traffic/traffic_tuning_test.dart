@@ -31,7 +31,7 @@ void main() {
     expect(AgentTuning.connectionsAllowMigration, isFalse);
     expect(AgentTuning.freightRail, isFalse);
     expect(AgentTuning.maxAgentSubStepsPerFrame, 4);
-    expect(AgentTuning.maxHeldCityS, 10);
+    expect(AgentTuning.maxHeldCityS, 15);
     expect(AgentTuning.congestionEpochS, 2.0);
     expect(AgentTuning.buildingSyncS, 2.0);
     expect(AgentTuning.warmupS, 10);

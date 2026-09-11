@@ -242,6 +242,18 @@ class VehicleMover {
     }
   }
 
+  /// Every buffer the mover keeps from one sub-step to the next — the
+  /// edges' books and its scratch — by name into [into], for the
+  /// allocation test (§15.2): none is replaced while one graph runs.
+  void collectBuffers(Map<String, Object> into, String name) {
+    into['$name.edgeDrivenM'] = edgeDrivenM;
+    into['$name.edgeLimitM'] = edgeLimitM;
+    into['$name.edgeExits'] = edgeExits;
+    into['$name.edgeStuck'] = edgeStuck;
+    into['$name.hand'] = _hand;
+    into['$name.victims'] = _victims;
+  }
+
   /// Zeroes the edges' books.
   void clearBooks() {
     edgeDrivenM.fillRange(0, edgeDrivenM.length, 0);

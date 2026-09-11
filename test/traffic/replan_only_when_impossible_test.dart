@@ -16,7 +16,14 @@ import 'traffic_fixture.dart';
 /// once, from where the vehicle is. A road added elsewhere re-plans
 /// nothing; a road removed ahead re-plans the vehicles that needed it, and
 /// they still arrive; the road under a vehicle removed takes the vehicle
-/// off; a one-way turned round ahead re-plans.
+/// off; a one-way turned round ahead re-plans; and an end dragged in Adjust
+/// Roads (`CitySim.moveRoadEnd`) re-lays a road, so the routes over it
+/// re-plan — those still waiting to pull out among them — and nothing else
+/// does.
+///
+/// The drag's cases run on the colony's own agents, so the lot hooks its
+/// re-cut fires (E12–E14) reach them in the same poll as the rebuild, as
+/// they reach the play surface's.
 void main() {
   setUp(() => AgentTuning.commuteRatePerResident = 0);
   tearDown(AgentTuning.reset);
@@ -93,6 +100,140 @@ void main() {
     expect(a.stats.arrived - arrived,
         greaterThanOrEqualTo(onSpur.length + split.past.length));
   });
+
+  test('(e) an end dragged re-lays a road on the route: the cars that needed '
+      'it re-plan once and arrive, those on the stretch left in place '
+      'staying on the road; the cars past it keep their routes', () {
+    final town = _dragRing();
+    final a = town.city.agents..enabled = true;
+    // Three waves from O to D, 45 s apart: when the last is short of N the
+    // one before it is on N and the first is past it.
+    final cars = [
+      ..._launch(a, town, 4),
+      ...() {
+        runAgents(a, 45);
+        return _launch(a, town, 4);
+      }(),
+      ...() {
+        runAgents(a, 45);
+        return _launch(a, town, 4);
+      }(),
+    ];
+    final split = _splitAtN(a, town, cars, withPast: true);
+    final routes = {for (final h in split.past) h: routeOf(a, h)};
+
+    // N's east end, dragged from its corner down E to y = 250: N is laid
+    // again under a new id, the 600 m from W on the line it had, the rest
+    // on a new line; the moved end cuts E and joins it there.
+    final moved = town.city
+        .moveRoadEnd(town.n, atStart: false, to: const Vec2(400, 250));
+    expect(moved.roadId, isNotNull, reason: 'the drag was laid');
+    final relaid = moved.roadId!;
+    final arrived = a.stats.arrived;
+    a.advance(0.2);
+    expect(a.graphRev, greaterThanOrEqualTo(2));
+    final t = a.vehicles!;
+    final stayed = [
+      for (final h in split.on)
+        if (t.isLive(h)) h,
+    ];
+    final past = [
+      for (final h in split.past)
+        if (t.isLive(h)) h,
+    ];
+    expect(stayed, isNotEmpty,
+        reason: 'a car on the stretch left in place stays on the road');
+    expect(past, isNotEmpty);
+    expect(a.stats.despawnEdit, split.on.length - stayed.length,
+        reason: 'only a car on the moved stretch is taken off');
+    expect(a.stats.replans, split.before.length + stayed.length,
+        reason: 'exactly one re-plan for each car that needed N, and none '
+            'for any other');
+    for (final h in stayed) {
+      expect(roadOf(a, h), startsWith(relaid),
+          reason: 'on the road re-laid under it');
+    }
+    for (final h in past) {
+      expect(routeDescends(routes[h]!, routeOf(a, h)), isTrue,
+          reason: 'past N: the route it was planned, through E cut '
+              '(${routes[h]} → ${routeOf(a, h)})');
+    }
+
+    runAgents(a, 500);
+    for (final h in [...split.before, ...stayed, ...past]) {
+      expect(t.isLive(h), isFalse, reason: 'arrived');
+    }
+    expect(a.stats.arrived - arrived,
+        split.before.length + stayed.length + past.length);
+    expect(a.stats.replans, split.before.length + stayed.length,
+        reason: 're-planned once');
+    expect(a.stats.despawnStuck + a.stats.despawnWedge, 0);
+    expect(a.stats.arrivedGone, 0);
+  });
+
+  test('(e) a route still waiting to pull out when a drag re-lays a road on '
+      'it is planned again from its origin, once, and driven by the road '
+      're-laid', () {
+    final town = _dragRing();
+    final a = town.city.agents..enabled = true;
+    final (origins, dests) = _ends(town.city);
+    final trips = [
+      for (var i = 0; i < 6; i++) forceTrip(a, origins[i % 4], dests[i % 2]),
+    ];
+    // Inside the spawn ramp's first half second no car pulls out: every
+    // trip is planned by N, and waits at its origin.
+    a.advance(0.5);
+    expect(a.liveVehicles, 0);
+    expect(a.planner!.waiting, 6);
+
+    final relaid = town.city
+        .moveRoadEnd(town.n, atStart: false, to: const Vec2(400, 250))
+        .roadId!;
+    a.advance(0.5);
+    expect(a.stats.replans, 6, reason: 'each waiting route, once');
+
+    for (var i = 0; i < 240; i++) {
+      if (trips.every((tr) => vehicleOfTrip(a, tr) >= 0)) break;
+      a.advance(0.5);
+    }
+    for (final tr in trips) {
+      final h = vehicleOfTrip(a, tr);
+      expect(h, greaterThanOrEqualTo(0), reason: 'it pulled out');
+      expect(routeOf(a, h).any((w) => w.startsWith(relaid)), isTrue,
+          reason: 'planned again on the network the drag made');
+    }
+    runAgents(a, 400);
+    expect(a.liveVehicles, 0);
+    expect(a.stats.arrived, 6);
+    expect(a.stats.replans, 6);
+    expect(a.stats.despawnEdit + a.stats.despawnStuck, 0);
+  });
+}
+
+/// [_ring] for Adjust Roads: N laid with a jog — straight from W for
+/// 300 m, then up 40 m and on to meet E at (400, 340) — so the layout keeps
+/// its interior controls, and a drag of its east end re-lays the line past
+/// the jog and leaves the 600 m from W where it was. Funded, so a drag is
+/// never refused for its price.
+({CitySim city, String n, String o}) _dragRing() {
+  final city = foundFlat();
+  commit(city, const FixtureRoad([Vec2(-400, -300), Vec2(-400, 300)]));
+  commit(city, const FixtureRoad([Vec2(-400, -300), Vec2(400, -300)]));
+  commit(city, const FixtureRoad([Vec2(400, -300), Vec2(400, 340)]));
+  final n = commit(
+      city,
+      const FixtureRoad([
+        Vec2(-400, 300),
+        Vec2(-100, 300),
+        Vec2(100, 340),
+        Vec2(400, 340),
+      ]));
+  final o = commit(city, const FixtureRoad([Vec2(-400, 200), Vec2(-700, 200)]));
+  commit(city, const FixtureRoad([Vec2(400, 200), Vec2(700, 200)]));
+  zoneAll(city, const [ParcelUse.residential]);
+  buildAll(city);
+  city.funds = 1e9;
+  return (city: city, n: n, o: o);
 }
 
 /// A ring town: streets W (x = −400), S (y = −300), E (x = 400) and N
@@ -114,18 +255,23 @@ void main() {
   return (city: city, n: n, o: o);
 }
 
+/// The home lots on O the trips leave from, and the two on D they drive
+/// to.
+(List<String>, List<String>) _ends(CitySim city) => (
+      [
+        for (final x in const [-500.0, -560.0, -620.0, -680.0, -540.0])
+          lotNearest(city, Vec2(x, x == -540.0 ? 215 : 185)).id,
+      ],
+      [
+        lotNearest(city, const Vec2(600, 185)).id,
+        lotNearest(city, const Vec2(650, 215)).id,
+      ],
+    );
+
 /// [count] trips from homes on O to homes on D, pulled out; their vehicles.
 List<int> _launch(
     CityAgents a, ({CitySim city, String n, String o}) town, int count) {
-  final city = town.city;
-  final dests = [
-    lotNearest(city, const Vec2(600, 185)).id,
-    lotNearest(city, const Vec2(650, 215)).id,
-  ];
-  final origins = [
-    for (final x in const [-500.0, -560.0, -620.0, -680.0, -540.0])
-      lotNearest(city, Vec2(x, x == -540.0 ? 215 : 185)).id,
-  ];
+  final (origins, dests) = _ends(town.city);
   final trips = [
     for (var i = 0; i < count; i++)
       forceTrip(a, origins[i % origins.length], dests[i % 2]),
@@ -143,16 +289,23 @@ List<int> _launch(
   return cars;
 }
 
-/// Runs until some of [cars] are on N and some still have it ahead; then
-/// which are on it, which have it ahead, and which are past it.
+/// Runs until some of [cars] are on N and some still have it ahead — and,
+/// [withPast], some are past it and still driving; then which are on it,
+/// which have it ahead, and which are past it.
 ({List<int> on, List<int> before, List<int> past}) _splitAtN(
-    CityAgents a, ({CitySim city, String n, String o}) town, List<int> cars) {
+    CityAgents a, ({CitySim city, String n, String o}) town, List<int> cars,
+    {bool withPast = false}) {
   for (var i = 0; i < 400; i++) {
     final s = _split(a, town.n, cars);
-    if (s.on.isNotEmpty && s.before.isNotEmpty) return s;
+    if (s.on.isNotEmpty &&
+        s.before.isNotEmpty &&
+        (!withPast || s.past.isNotEmpty)) {
+      return s;
+    }
     a.advance(0.2);
   }
-  fail('never had cars both on N and short of it');
+  fail('never had cars both on N and short of it'
+      '${withPast ? ', and past it' : ''}');
 }
 
 ({List<int> on, List<int> before, List<int> past}) _split(

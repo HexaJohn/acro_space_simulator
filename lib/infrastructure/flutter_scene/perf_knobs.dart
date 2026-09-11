@@ -299,8 +299,8 @@ class PerfKnobs {
     ),
     PerfKnob(
       'maxHeldCityS',
-      'Colony seconds the hold may fall behind before one frame drains it '
-          'all: a hitch, never a dropped tick.',
+      'Colony seconds the hold may fall behind; a frame runs whatever is '
+          'past it: a hitch, never a dropped tick.',
       () => AgentTuning.maxHeldCityS,
       (v) => AgentTuning.maxHeldCityS = v.toDouble(),
       unit: 's',

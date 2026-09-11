@@ -18,10 +18,18 @@ import 'traffic_fixture.dart';
 /// each sub-step hands the renderer (§13.2).
 ///
 /// The weighing needs the VM service, which `flutter test` starts only when
-/// asked (`--enable-vmservice`, heap_probe.dart); without it that test
-/// skips. The structural half of the rule needs nothing and always runs: in
-/// steady state no column, arena or frame set is ever reallocated. Every
-/// table keeps the very buffers it warmed up with.
+/// asked (`--enable-vmservice`, heap_probe.dart). The merge gate asks
+/// (§18), with the run marked as one that must weigh:
+///
+///     fvm flutter test --enable-vmservice --dart-define=ACRO_ALLOC=true test/traffic/traffic_alloc_test.dart
+///
+/// Marked so, a run without the service FAILS rather than skips, so the
+/// gate is never read as met because it was not weighed. Any other run
+/// skips the weighing and says why, and says where the gate stands: §15.2
+/// records it as not met (below). The structural half of the rule needs
+/// nothing and always runs: in steady state no column, arena, queue,
+/// search context or frame set is ever reallocated. Every table keeps the
+/// very buffers it warmed up with.
 ///
 /// The weighing is done in the debug JIT `flutter test` runs, and it counts
 /// what that compiler allocates as well as what the code does. The JIT
@@ -29,7 +37,10 @@ import 'traffic_fixture.dart';
 /// compressed-pointer build like the tester's, it also boxes every int past
 /// 2³⁰ passed that way, which the agent clock's microseconds are after
 /// 1,074 s. So the report says where the bytes go: the planner's pull-out
-/// queue and the mover, weighed one call at a time, beside the rest.
+/// queue and the mover, weighed one call at a time, beside the rest. Today
+/// that is about 64 B a sub-step for every route waiting to pull out and
+/// about 95 B for every vehicle stepped — 33.7 MB beyond the frames over
+/// the window — and so the gate is not met.
 void main() {
   // The whole town's commutes at ten times the design rate: cars pulling
   // out, queuing at the crossroads, turning and arriving on every sub-step
@@ -38,13 +49,17 @@ void main() {
   tearDown(AgentTuning.reset);
 
   test('in steady state nothing is reallocated: every column, the route '
-      'arena, the frame sets', () {
+      'arena, the pull-out queue, the path queue and its searches, the '
+      'junction books, the frame sets', () {
     final a = agentsOn(town());
     runAgents(a, 600);
     final before = _buffers(a);
     final arena = a.vehicles!.arena;
     final growths = arena.growths, capacity = arena.capacity;
     final spawned = a.stats.spawned, arrived = a.stats.arrived;
+    expect(a.planner!.waiting, greaterThan(64),
+        reason: 'the pull-out queue is past its first size, so a column '
+            'that grew with it has grown');
     final frames = <AgentFrame>[];
     for (var i = 0; i < 1000; i++) {
       a.advance(kStepS);
@@ -54,8 +69,13 @@ void main() {
         reason: 'the window did work');
     expect(a.stats.arrived - arrived, greaterThan(20));
     final after = _buffers(a);
-    for (final name in before.keys) {
-      expect(identical(after[name], before[name]), isTrue,
+    expect(after.keys.toList(), before.keys.toList(),
+        reason: 'no buffer, nor search context, made in steady state');
+    // Matched by identity as a set: a twin swapped (the statistics'
+    // window books change places at every window's end) is no allocation.
+    final warm = Set<Object>.identity()..addAll(before.values);
+    for (final name in after.keys) {
+      expect(warm.contains(after[name]), isTrue,
           reason: '$name was reallocated');
     }
     // A compaction swaps the arena's two buffers; growth replaces them.
@@ -80,7 +100,13 @@ void main() {
       () async {
     final probe = await HeapProbe.connect();
     if (probe == null) {
-      markTestSkipped(HeapProbe.howToRun);
+      if (_mustWeigh) {
+        fail('§15.2 must be weighed on this run (ACRO_ALLOC), and the tester '
+            'has no VM service: ${HeapProbe.howToRun}');
+      }
+      markTestSkipped('§15.2 not weighed on this run, and recorded as not '
+          'met (docs/plans/agent-traffic.md §15.2). The merge gate weighs '
+          'it: $_mergeGate');
       return;
     }
     addTearDown(probe.close);
@@ -92,27 +118,22 @@ void main() {
     for (var i = 0; i < _warmSteps; i++) {
       a.advance(kStepS);
     }
-    // One frame wrapper, made as `AgentFrameBuilder.publish` makes one.
-    final cols = a.frame;
-    var k = 0;
-    final wrapper = await probe.bytesEach(250, () {
-      _sink = AgentFrame.fromColumns(
-        count: cols.count,
-        timeUs: (a.timeUs + ++k * kStepUs).toDouble(),
-        worldEpochS: a.worldEpochS,
-        graphRev: cols.graphRev,
-        handle: cols.handle,
-        elem: cols.elem,
-        next: cols.next,
-        s: cols.s,
-        v: cols.v,
-        a: cols.a,
-        lat: cols.lat,
-        kind: cols.kind,
-        variant: cols.variant,
-        flags: cols.flags,
-      );
-    });
+    // One frame wrapper, weighed on the path that makes one —
+    // `AgentFrameBuilder.publish`, from a builder of its own over the same
+    // table — and from a caller warmed past the optimisation threshold, as
+    // the sub-step's own call is: an unoptimised caller boxes what it
+    // passes, and its boxes would be forgiven as frames. The columns are
+    // written in place and allocate nothing, so what is left is the wrapper
+    // and whatever the optimised publish boxes for it.
+    final cal = AgentFrameBuilder();
+    final table = a.vehicles!;
+    final timeUs = a.timeUs, epochS = a.worldEpochS, rev = a.graphRev;
+    void publish() => _sink =
+        cal.publish(table, timeUs: timeUs, worldEpochS: epochS, graphRev: rev);
+    for (var i = 0; i < _warmSteps; i++) {
+      publish();
+    }
+    final wrapper = await probe.bytesEach(250, publish);
     expect(_sink, isA<AgentFrame>());
     final spawned = a.stats.spawned, arrived = a.stats.arrived;
     final waiting = a.planner!.waiting;
@@ -129,7 +150,8 @@ void main() {
         '${a.stats.arrived - arrived} arrived, $waiting routes waiting to '
         'pull out: ${grew ~/ 1024} KB in new space, of which frames '
         '${(1000 * wrapper) ~/ 1024} KB (${wrapper.toStringAsFixed(0)} B '
-        'each); ${(beyond / 1024).toStringAsFixed(1)} KB beyond them. $where';
+        'each, weighed on publish); ${(beyond / 1024).toStringAsFixed(1)} KB '
+        'beyond them. $where';
     // ignore: avoid_print
     print(report);
     expect(a.stats.spawned - spawned, greaterThan(20),
@@ -138,8 +160,17 @@ void main() {
   }, timeout: const Timeout(Duration(minutes: 5)));
 }
 
-/// Sub-steps of warm-up before weighing: past the JIT's optimisation
-/// threshold (thirty thousand calls) for a function called once a sub-step.
+/// Whether this run must weigh: set by the merge gate's command, where a
+/// tester without the VM service is a failure, not a skip.
+const bool _mustWeigh = bool.fromEnvironment('ACRO_ALLOC');
+
+/// The merge gate's command (§18).
+const String _mergeGate = 'fvm flutter test --enable-vmservice '
+    '--dart-define=ACRO_ALLOC=true test/traffic/traffic_alloc_test.dart';
+
+/// Sub-steps of warm-up before weighing, and calls of the frame
+/// calibration: past the JIT's optimisation threshold (thirty thousand
+/// calls) for a function called once a sub-step.
 const int _warmSteps = 40000;
 
 /// Where the calibration's frames go, so none is optimised away.
@@ -160,10 +191,12 @@ Future<String> _where(HeapProbe probe, CityAgents a) async {
       'vehicles.';
 }
 
-/// Every buffer the agents keep from one sub-step to the next, by name.
+/// Every buffer the agents keep from one sub-step to the next, by name: the
+/// tables' columns, and what the planner, the path queue and its search
+/// contexts, the mover, the junction rules and the statistics hold.
 Map<String, Object> _buffers(CityAgents a) {
-  final t = a.vehicles!, m = a.mover!, b = a.buildings!, c = a.commutes!;
-  return {
+  final t = a.vehicles!, b = a.buildings!, c = a.commutes!, m = a.mover!;
+  final out = <String, Object>{
     'kind': t.kind,
     'variant': t.variant,
     'state': t.state,
@@ -197,11 +230,6 @@ Map<String, Object> _buffers(CityAgents a) {
     'elemHead': t.elemHead,
     'elemTail': t.elemTail,
     'elemCount': t.elemCount,
-    'originT': a.planner!.originT,
-    'edgeDrivenM': m.edgeDrivenM,
-    'edgeLimitM': m.edgeLimitM,
-    'edgeExits': m.edgeExits,
-    'edgeStuck': m.edgeStuck,
     'housing': b.housing,
     'jobs': b.jobs,
     'accFwd': b.accFwd,
@@ -213,4 +241,10 @@ Map<String, Object> _buffers(CityAgents a) {
     'stage': c.stage,
     'wakeUs': c.wakeUs,
   };
+  a.planner!.collectBuffers(out, 'planner');
+  a.pathQueue!.collectBuffers(out, 'paths');
+  m.collectBuffers(out, 'mover');
+  m.arbiter.collectBuffers(out, 'arbiter');
+  a.stats.collectBuffers(out, 'stats');
+  return out;
 }

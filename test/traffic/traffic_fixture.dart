@@ -15,7 +15,7 @@
 /// that have nothing to do with traffic.
 ///
 /// The agents' own helpers — [agentsOn], [forceTrip], [routeOf], [laneOn],
-/// [stall] — sit at the end. `freezeDelays` and `setDelay` arrive with the
+/// [stall], [unstall], [routeDescends] — sit at the end. `freezeDelays` and `setDelay` arrive with the
 /// delay table (slice 2). [starterKit] and [town] found a colony that runs
 /// its OWN agents when asked (`agentTraffic`, E17), ticked by its advance.
 library;
@@ -29,6 +29,7 @@ import 'package:acro_space_simulator/domain/colony/city/traffic/agent_kind.dart'
 import 'package:acro_space_simulator/domain/colony/city/traffic/city_agents.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/slot_pool.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/traffic_rng.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/vehicle_table.dart';
 import 'package:acro_space_simulator/domain/universe/celestial_body.dart';
 import 'package:acro_space_simulator/domain/universe/real_solar_system.dart';
 
@@ -285,6 +286,34 @@ int laneOn(CityAgents agents, int handle, String roadId) {
 
 /// §17's `stall`: [handle] stops where it is, for good.
 void stall(CityAgents agents, int handle) => agents.debugStall(handle);
+
+/// Sets [handle], [stall]ed, driving on from where it stands: a jam a test
+/// made, cleared.
+void unstall(CityAgents agents, int handle) {
+  final t = agents.vehicles!;
+  if (!t.isLive(handle)) return;
+  t.state[SlotPool.slotOf(handle)] = VehicleState.driving.index;
+}
+
+/// Whether every step of route [now] (in [routeOf]'s words) runs in the
+/// lane, and the direction, that route [was] used on the road it descends
+/// from — itself, or a road a split cut from it (`<id>x<i>`). A split adds
+/// a step to a route, so the two are matched by road, not by position: a
+/// route carried across an edit as it was planned.
+bool routeDescends(List<String> was, List<String> now) {
+  for (final w in now) {
+    final road = w.substring(0, w.length - 2);
+    var matched = false;
+    for (final v in was) {
+      final old = v.substring(0, v.length - 2);
+      if (road != old && !road.startsWith('${old}x')) continue;
+      if (v.substring(v.length - 2) != w.substring(w.length - 2)) return false;
+      matched = true;
+    }
+    if (!matched) return false;
+  }
+  return true;
+}
 
 /// A hash of [handle]'s locked route — its connectors, in order — wherever
 /// in the arena its block now sits.

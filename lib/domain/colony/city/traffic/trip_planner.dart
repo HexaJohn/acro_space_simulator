@@ -133,6 +133,25 @@ class TripPlanner {
   /// Routes planned and waiting to pull out.
   int get waiting => _waiting;
 
+  /// Every buffer the planner keeps from one sub-step to the next — the
+  /// spawn columns, and the waiting routes' columns, arena and scratch —
+  /// by name into [into], for the allocation test (§15.2): once warm, none
+  /// is ever replaced. The waiting columns grow by doubling while the
+  /// queue is new, and must not once it is warm.
+  void collectBuffers(Map<String, Object> into, String name) {
+    into['$name.originT'] = originT;
+    into['$name.arena'] = _arena.data;
+    into['$name.scratch'] = _scratch;
+    into['$name.owner'] = _owner;
+    into['$name.off'] = _off;
+    into['$name.len'] = _len;
+    into['$name.kind'] = _kind;
+    into['$name.purpose'] = _purpose;
+    into['$name.left'] = _left;
+    into['$name.fromT'] = _fromT;
+    into['$name.toT'] = _toT;
+  }
+
   /// Car trips may have this many vehicles on the road; the rest of
   /// `maxVehicles` is held back for service, transit and freight (§4.8).
   static int get carCap =>

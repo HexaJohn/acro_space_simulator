@@ -130,8 +130,14 @@ void main() {
         final queued = a.heldCityS;
         a.endFrame();
         final steps = (a.timeUs - before) ~/ kStepUs;
-        expect(steps, lessThanOrEqualTo(_frameCap(4, queued)),
-            reason: 'frame $frame at $fps fps ran $steps sub-steps');
+        // The design's bound itself (D35, §5.7): under the overflow, a
+        // frame runs its budget and one tick past it at most.
+        expect(queued, lessThanOrEqualTo(AgentTuning.maxHeldCityS),
+            reason: 'frame $frame at $fps fps: under the overflow');
+        expect(steps,
+            lessThanOrEqualTo(AgentTuning.maxAgentSubStepsPerFrame + _tickSteps),
+            reason: 'frame $frame at $fps fps ran $steps sub-steps with '
+                '${queued.toStringAsFixed(2)} s held');
         if (steps > maxSteps) maxSteps = steps;
         if (a.heldCityS > worst) worst = a.heldCityS;
       }
@@ -143,7 +149,7 @@ void main() {
         'tick or two behind, and never reaches maxHeldCityS', () {
       final r = paced(40, 20);
       expect(r.worstS, lessThan(1.5));
-      expect(r.maxSteps, lessThanOrEqualTo(2 * 4 + 1));
+      expect(r.maxSteps, lessThanOrEqualTo(4 + _tickSteps));
     });
 
     test('at 60 fps it keeps up inside the budget', () {
@@ -159,16 +165,24 @@ void main() {
     });
 
     test('a 25-tick hitch at 60 fps is spread over the frames after it — '
-        'not run in one, and worked off in the frames that follow', () {
+        'no frame, the hitch frame included, past the budget and one tick — '
+        'and worked off in the frames that follow', () {
       final r = paced(60, 4, hitchAt: 60);
       expect(r.worstS, greaterThan(5),
           reason: 'the hitch was queued, not run at once');
-      expect(r.maxSteps, lessThan(25 * 5 ~/ 2),
-          reason: 'no frame ran the whole hitch');
+      expect(r.worstS, lessThan(AgentTuning.maxHeldCityS),
+          reason: 'under the overflow: the budget spreads it, not the '
+              'overflow rule');
+      expect(r.maxSteps, lessThanOrEqualTo(4 + _tickSteps),
+          reason: 'D35: four sub-steps a frame, and a tick past them at most');
       expect(r.endS, lessThanOrEqualTo(0.5), reason: 'and worked off');
     });
   });
 }
+
+/// The most sub-steps one tick of 0.5 s runs, from any leftover on the
+/// agent clock: what a frame of the hold may run past its budget (D35).
+const int _tickSteps = 3;
 
 /// Agents of the test's own on [city] held to a frame budget, replaying a
 /// tick as `CitySim.advance` would once E3a and E3b are in: clamped, and
@@ -180,11 +194,13 @@ CityAgents _held(CitySim city) {
   return a;
 }
 
-/// The most sub-steps a frame of the hold may run with [queuedS] colony
-/// seconds held (city_agents.dart, `endFrame`): its budget, at most one more
-/// carried from the frame before, its share of the backlog, whatever is
-/// past `maxHeldCityS` — and one tick (three sub-steps at most) past all
-/// that, since a frame always runs its oldest tick.
+/// A safety bound on the sub-steps a frame of the hold may run with
+/// [queuedS] colony seconds held, for the invariance test's frames at
+/// random boundaries, which may pass `maxHeldCityS`: its budget, at most
+/// one more carried from the frame before, its share of the backlog,
+/// whatever is past `maxHeldCityS` — and one tick (three sub-steps at most)
+/// past all that, since a frame always runs its oldest tick. Looser than
+/// the design's bound, which [paced] holds each frame to.
 int _frameCap(int budget, double queuedS) {
   final pendingSteps = queuedS / kStepS + 1;
   final over = math.max(0.0, (queuedS - AgentTuning.maxHeldCityS) / kStepS);

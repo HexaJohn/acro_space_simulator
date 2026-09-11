@@ -339,4 +339,15 @@ class LanePlanner {
   void _ensureRoute(int count) {
     if (route.length < count) route = Int32List(count * 2);
   }
+
+  /// Its scratch and its result, by name into [into], for the allocation
+  /// test (§15.2): grown to the longest route seen while warming up, then
+  /// kept.
+  void collectBuffers(Map<String, Object> into, String name) {
+    into['$name.route'] = route;
+    into['$name.cost'] = _cost;
+    into['$name.back'] = _back;
+    into['$name.lane'] = _lane;
+    into['$name.con'] = _con;
+  }
 }

@@ -744,6 +744,26 @@ class JunctionArbiter {
     t.flags[slot] &= ~(kHalted | kInFifo);
   }
 
+  /// Every buffer the arbiter keeps from one sub-step to the next, by name
+  /// into [into], for the allocation test (§15.2): each is sized by the
+  /// graph it is bound to, and none is replaced while that graph runs.
+  void collectBuffers(Map<String, Object> into, String name) {
+    into['$name.claims'] = _claims;
+    into['$name.leaver'] = _leaver;
+    into['$name.leaverOdo'] = _leaverOdo;
+    into['$name.arrE'] = _arrE;
+    into['$name.arrN'] = _arrN;
+    into['$name.awOf'] = _awOf;
+    into['$name.fifoH'] = _fifoH;
+    into['$name.fifoC'] = _fifoC;
+    into['$name.fifoUs'] = _fifoUs;
+    into['$name.fifoLen'] = _fifoLen;
+    into['$name.wStamp'] = _wStamp;
+    into['$name.wCount'] = _wCount;
+    into['$name.wBest'] = _wBest;
+    into['$name.touched'] = _touched;
+  }
+
   // ---- Access points (§5.5) ---------------------------------------------------
 
   /// Whether a vehicle of [kind], [len] metres long, may pull out of an

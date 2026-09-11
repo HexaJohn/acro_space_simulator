@@ -87,6 +87,13 @@ const int _buildItemsPerAdvance = 4096;
 /// the colony a bounded way behind instead of an ever longer one.
 const double _holdDrainFrames = 32;
 
+/// The most sub-steps one held tick runs: `CitySim.advance` clamps a tick
+/// to 0.5 s, which from any leftover on the agent clock is two 0.2 s
+/// sub-steps or three. A frame of the hold runs its budget and never more
+/// than one such tick past it (§5.7, D35), whatever it carried and however
+/// long the backlog.
+const int _maxTickSteps = 3;
+
 /// A vehicle's own path requests — a re-plan, an appended leg — carry it as
 /// `-(handle + 1)`: negative, so never a commuter's handle, and the same
 /// number after a trip through the queue's `Int32List` on the web, where
@@ -263,10 +270,14 @@ class CityAgents {
   /// a tick a frame. On top of it, a share of the backlog
   /// ([_holdDrainFrames]), so a queue that outgrows the budget — a host
   /// below the frame rate the budget was sized for — is worked off rather
-  /// than left to grow; and whatever the queue holds past `maxHeldCityS`,
-  /// so the colony is never further behind than that: a hitch, never a
-  /// lost tick. At least one tick runs, so a tick dearer than the whole
-  /// credit is never starved.
+  /// than left to grow. The carry and the share together never take a
+  /// frame past its budget by more than one whole tick ([_maxTickSteps]):
+  /// that, and not the backlog, is what bounds a catch-up frame, so a
+  /// 25-tick hitch at 60 Hz is spread over the frames after it at no more
+  /// than seven sub-steps a frame. On top of all that, whatever the queue
+  /// holds past `maxHeldCityS`, so the colony is never further behind than
+  /// that: a hitch, never a lost tick. At least one tick runs, so a tick
+  /// dearer than the whole credit is never starved.
   void endFrame() {
     final q = _held;
     if (q == null || _heldLen == 0) {
@@ -275,9 +286,11 @@ class CityAgents {
     }
     final budget = AgentTuning.maxAgentSubStepsPerFrame.toDouble();
     final pendingUs = _heldCityUs + (_core?.clock.accumUs ?? 0);
-    var credit = math.min(_credit, budget) +
-        budget +
-        pendingUs / (kStepUs * _holdDrainFrames);
+    var credit = math.min(
+        math.min(_credit, budget) +
+            budget +
+            pendingUs / (kStepUs * _holdDrainFrames),
+        budget + _maxTickSteps);
     final overUs = _heldCityUs - usOf(AgentTuning.maxHeldCityS);
     if (overUs > 0) credit += overUs / kStepUs;
     var ran = 0;
