@@ -9,6 +9,7 @@ import 'dart:math' as math;
 import '../../domain/colony/building.dart';
 import '../../domain/colony/city/city_building_spec.dart';
 import '../../domain/colony/city/city_sim.dart';
+import '../../domain/colony/city/city_terrain_shaper.dart';
 import '../../domain/colony/city/parcel.dart';
 import '../../domain/colony/colony.dart';
 import '../../domain/colony/surface_placement.dart';
@@ -1045,11 +1046,18 @@ class BodyDescriptorSnapshot {
 /// building inset past the ease-off stands wholly on level ground. Nothing may
 /// be inset less than this or it starts straddling the step to the terrace
 /// next door.
-/// Road-drape ground sampling stride, in units of the 6 m spline samples.
-///
-/// Four steps is 24 m, which is `CityTerrainShaper`'s own corridor grading
-/// spacing — see the drape loop for why matching it exactly is the point.
+/// Road-drape ground sampling stride, in units of the 6 m spline samples,
+/// for a road that is not a plain graded corridor: one that follows the
+/// land, or the ground under a deck. Not the corridor's knots — `sample`
+/// rounds each span up to whole steps, so the two spacings drift apart —
+/// which is why a graded road is draped from its knots instead
+/// ([CityTerrainShaper.corridorGround]).
 const int _roadGroundStride = 4;
+
+/// The corridor a graded road was cut to, read back for its drape. The
+/// shaper the world tick grades with (`AdvanceSimulationTick.cityShaper`),
+/// at its defaults.
+const CityTerrainShaper _roadCorridor = CityTerrainShaper();
 
 const double kLotSetbackM = 1.2;
 
@@ -2022,15 +2030,23 @@ class WorldSnapshot {
           return Vector3(math.cos(lat) * math.cos(lon),
               math.cos(lat) * math.sin(lon), math.sin(lat));
         }();
-        final field = body.terrainFieldWith(terrainEdits?.forBody(body.id));
+        final edits = terrainEdits?.forBody(body.id);
+        final field = body.terrainFieldWith(edits);
         final siteRadius = field == null
             ? body.radius
             : field.groundRadiusAt(siteDirBF.x, siteDirBF.y, siteDirBF.z);
 
-        // The shaper just changed the ground? Every cached height is stale.
-        if (city.groundCacheStamp != city.shapedTerrain.length) {
+        // The ground changed? Every cached height is stale. Stamped with the
+        // body's edit store as well as with what the shaper has done: a
+        // crater or a quarry's pit lands on the body without the shaper, and
+        // a store rebuilt can come back to the same count of shaped
+        // features — either left every road near it drawn over the ground
+        // that was there before.
+        final groundStamp = Object.hash(city.shapedTerrain.length,
+            edits == null ? 0 : identityHashCode(edits), edits?.length ?? 0);
+        if (city.groundCacheStamp != groundStamp) {
           city.groundCache.clear();
-          city.groundCacheStamp = city.shapedTerrain.length;
+          city.groundCacheStamp = groundStamp;
         }
 
         /// Ground radius under a parcel-city feature, cached by key. Sampled
@@ -2075,34 +2091,49 @@ class WorldSnapshot {
           // corridor graded for it, instead of holding the site's height and
           // floating off (or tunnelling into) the hillside.
           //
-          // The ground is sampled every [_roadGroundStride] points — 24 m,
-          // which is EXACTLY the spacing `CityTerrainShaper` grades a corridor
-          // at — and interpolated between. That is not an approximation: the
-          // shaper lays one cut-fill brush per 24 m and the graded ground
-          // under a road is therefore piecewise-linear at that spacing
-          // already, so sampling it finer resolves nothing that is there.
-          //
-          // It matters a great deal. A ground query on a colony site marches
+          // Never a ground query per point. A query on a colony site marches
           // radially through every brush covering the point, and in a built
-          // city that is 8 ms EACH; the drape was asking for one every 6 m of
-          // every road. On a four-block colony — 435 roads once alleys and
-          // elevated lines are counted — that was 43 s of the 46 s a generate
-          // took, all of it after the progress bar had finished.
+          // city that was 8 ms EACH; the drape asking for one every 6 m of
+          // every road was 43 s of the 46 s a four-block colony (435 roads
+          // once alleys and elevated lines are counted) took to generate,
+          // all of it after the progress bar had finished.
           final radii = List<double>.filled(pts.length, 0);
           final last = pts.length - 1;
-          for (var i = 0; i <= last; i += _roadGroundStride) {
-            radii[i] = groundFor('road:${road.id}:$i', pts[i]);
-          }
-          if (last % _roadGroundStride != 0) {
-            radii[last] = groundFor('road:${road.id}:$last', pts[last]);
-          }
-          for (var i = 1; i < last; i++) {
-            if (i % _roadGroundStride == 0) continue;
-            final a = (i ~/ _roadGroundStride) * _roadGroundStride;
-            final b = math.min(a + _roadGroundStride, last);
-            radii[i] = b == a
-                ? radii[a]
-                : radii[a] + (radii[b] - radii[a]) * ((i - a) / (b - a));
+          if (road.graded && road.deck == null) {
+            // A plain graded corridor. The ground under it IS the corridor
+            // the shaper cut — straight segments between its knots — so it
+            // is asked at the knots and read back between them by the
+            // corridor's own rules. The knots are not every fourth 6 m
+            // point: `sample` rounds each span up to whole steps, so a
+            // 64.5 m road is graded every 21.5 m and drawn every 5.9 m, and
+            // interpolating every fourth point drew a re-laid street metres
+            // in and out of the hill it was graded through.
+            final knots = road.sample(stepM: CityTerrainShaper.corridorStepM);
+            final knotRadii = [
+              for (var j = 0; j < knots.length; j++)
+                groundFor('road:${road.id}:k$j', knots[j]),
+            ];
+            _roadCorridor.corridorGround(
+                pts, knots, knotRadii, road.halfWidth, radii);
+          } else {
+            // Natural ground (a road that follows the land), or the ground
+            // under a raised or sunk road, which is drawn at its deck by the
+            // lifts over this drape: sampled every [_roadGroundStride]
+            // points and interpolated between.
+            for (var i = 0; i <= last; i += _roadGroundStride) {
+              radii[i] = groundFor('road:${road.id}:$i', pts[i]);
+            }
+            if (last % _roadGroundStride != 0) {
+              radii[last] = groundFor('road:${road.id}:$last', pts[last]);
+            }
+            for (var i = 1; i < last; i++) {
+              if (i % _roadGroundStride == 0) continue;
+              final a = (i ~/ _roadGroundStride) * _roadGroundStride;
+              final b = math.min(a + _roadGroundStride, last);
+              radii[i] = b == a
+                  ? radii[a]
+                  : radii[a] + (radii[b] - radii[a]) * ((i - a) / (b - a));
+            }
           }
           // Arc along the capture's OWN samples, in plan, for the roads that
           // need one: a raised or sunk road's deck is read against it, and a

@@ -743,10 +743,17 @@ class TerrainBrush {
     return (w - _axis * along).length;
   }
 
+  double _falloffWeight(double lateral, double core) =>
+      falloffWeight(lateral, core, falloffM);
+
   /// 1 inside [core], easing to 0 at `core + falloffM`. Smoothstep so the
   /// levelled ground meets the natural ground with a matching slope — a linear
   /// ramp would leave a visible crease at both ends of the blend.
-  double _falloffWeight(double lateral, double core) {
+  ///
+  /// Public so what has to know where a levelling brush leaves the ground
+  /// without marching the field for it — a colony road's drape reading back
+  /// the corridor it was graded to — eases with this curve, not a copy.
+  static double falloffWeight(double lateral, double core, double falloffM) {
     if (lateral <= core) return 1;
     if (falloffM <= 0) return 0;
     final t = ((lateral - core) / falloffM).clamp(0.0, 1.0);

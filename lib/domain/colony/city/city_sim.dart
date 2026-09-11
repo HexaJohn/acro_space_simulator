@@ -3325,9 +3325,9 @@ class CitySim {
   /// Ground radius under parcel-city geometry (lots, road samples), keyed by
   /// feature. Filled by the snapshot from the terrain field WITH edits, so a
   /// road reads the corridor that was graded for it and a building reads its
-  /// own levelled pad. Cleared whenever the shaper records new brushes —
-  /// [groundCacheStamp] tracks [shapedTerrain]'s size — because that is
-  /// exactly when the ground under the colony changes.
+  /// own levelled pad. Cleared whenever the ground under the colony changes:
+  /// [groundCacheStamp] is the snapshot's stamp of [shapedTerrain]'s size
+  /// and the body's edit store (which a crater or a pit also adds to).
   final Map<String, double> groundCache = {};
   int groundCacheStamp = -1;
 

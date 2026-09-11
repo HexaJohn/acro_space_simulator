@@ -50,11 +50,13 @@ void main() {
     List<(double, double)> bridges = const [],
     double? hw0,
     double? hw1,
+    bool graded = true,
   }) =>
       RoadSpline(
         id: 'main',
         roadClass: cls,
         controls: controls,
+        graded: graded,
         deck: deck,
         reversed: reversed,
         decoration: decoration,
@@ -95,8 +97,12 @@ void main() {
   });
 
   test('a raised road carries its deck above the drape, point by point', () {
-    // The drape first, to put the deck a known height over its start.
-    final draped = capture(colony(spline())).roads.single;
+    // The drape first, to put the deck a known height over its start: the
+    // ground itself, as a road that follows the land is drawn on it. (A
+    // graded street on the ground is drawn on the corridor it is cut to —
+    // straight between its knots, `CityTerrainShaper.corridorGround` — and
+    // a deck is graded to its deck, not to that corridor.)
+    final draped = capture(colony(spline(graded: false))).roads.single;
     final groundM = lengthOf(draped.points, 0) - earthRadius;
     final deck = RoadDeck(startM: groundM + 12, endM: groundM + 24);
     final raised = capture(colony(spline(deck: deck))).roads.single;

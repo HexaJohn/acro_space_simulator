@@ -192,7 +192,7 @@ class CityTerrainShaper {
       // floating over the hillside, too low for piers and never filled.
       final deck = road.deck;
       if (!road.graded && deck == null) continue;
-      final pts = road.sample(stepM: 24);
+      final pts = road.sample(stepM: corridorStepM);
       if (pts.length < 2) continue;
       // Keyed by WIDTH as well as by place. The key is the record that a
       // corridor was cut, and an upgrade keeps a road's id: keyed by place
@@ -227,6 +227,123 @@ class CityTerrainShaper {
       }
     }
     return out;
+  }
+
+  /// Spacing (m) of a road corridor's knots: a road is graded as straight
+  /// segments between its `sample(stepM: corridorStepM)` points, one brush
+  /// each ([pending]). Not the road's own spacing: `sample` rounds each
+  /// span UP to whole steps, so a 64.5 m road has knots every 21.5 m and a
+  /// 48.00000000000001 m one every 16 m — see [corridorGround].
+  static const double corridorStepM = 24;
+
+  /// The ground a plain corridor — a graded road with no deck, as [pending]
+  /// cuts it — leaves under [pts], the road's own points in order, as radii
+  /// from the body centre written into [out].
+  ///
+  /// [knots] are the corridor's knots (`road.sample(stepM: corridorStepM)`),
+  /// [knotRadii] the ground radius at each and [halfWidthM] the road's half
+  /// width. Read back from the brushes' own rules rather than asked of the
+  /// field at every point, which in a built colony is a march through every
+  /// brush there: segment j is cut or filled to the straight line between
+  /// its knots' ground, at full weight within [halfWidthM] of its chord;
+  /// the segment after it, recorded after it, holds the last metres before
+  /// its own first knot at that knot's height and eases out over
+  /// [roadFalloffM] ([TerrainBrush.falloffWeight]).
+  ///
+  /// A knot's ground is what its segment levelled it to — that brush is
+  /// the last word there — so the profile is the same from the ground at
+  /// the knots before the corridor is cut as after: the road is drawn on
+  /// the ground it is graded to, the frame it is laid and every frame
+  /// after. Interpolating every fourth 6 m point instead missed the graded
+  /// ground by metres wherever the knots fell elsewhere and the grade
+  /// changed — a re-laid street crossing a levelled lot's edge was drawn
+  /// as slabs in and out of the hill.
+  ///
+  /// Measured in the colony's plane (metres east and north) plus the rise
+  /// between knots: over a corridor segment the body's curve is
+  /// millimetres. A brush reads a point's place along its chord in three
+  /// dimensions — the chord rising from one knot's ground to the next — so
+  /// a point the next segment's cap pulls below a steep chord reads a
+  /// little further along it, and the ground is the height that agrees
+  /// with itself: found by iterating, a few passes, as the rise over a
+  /// segment is small against its length.
+  void corridorGround(
+    List<Vec2> pts,
+    List<Vec2> knots,
+    List<double> knotRadii,
+    double halfWidthM,
+    List<double> out,
+  ) {
+    assert(knots.length == knotRadii.length);
+    assert(out.length >= pts.length);
+    if (knots.isEmpty) return;
+    final m = knots.length - 1;
+    if (m < 1) {
+      for (var i = 0; i < pts.length; i++) {
+        out[i] = knotRadii.first;
+      }
+      return;
+    }
+    // Where [p] lies along segment [j] in plan, 0 at its first knot and 1
+    // at its last: which segment a point runs along. A segment of no
+    // length is always passed (its brush levels nothing — `cutFill`).
+    double plan(Vec2 p, int j) {
+      final a = knots[j], d = knots[j + 1] - a;
+      final len2 = d.e * d.e + d.n * d.n;
+      if (len2 <= 1e-9) return 1;
+      final w = p - a;
+      return (w.e * d.e + w.n * d.n) / len2;
+    }
+
+    // Where [p], at radius [r], projects along segment [j]'s chord as its
+    // brush projects it: in three dimensions, the chord rising from one
+    // knot's ground to the next.
+    double along(Vec2 p, double r, int j) {
+      final a = knots[j], d = knots[j + 1] - a;
+      final rise = knotRadii[j + 1] - knotRadii[j];
+      final len2 = d.e * d.e + d.n * d.n + rise * rise;
+      final w = p - a;
+      return (w.e * d.e + w.n * d.n + (r - knotRadii[j]) * rise) / len2;
+    }
+
+    final reach = halfWidthM + roadFalloffM;
+    var own = 0;
+    for (var i = 0; i < pts.length; i++) {
+      final p = pts[i];
+      // The segment the point runs along: the first whose far knot it has
+      // not passed. The points are in order, so this only moves on.
+      while (own < m - 1 && plan(p, own) >= 1) {
+        own++;
+      }
+      final t0 = plan(p, own).clamp(0.0, 1.0);
+      // The ground before this corridor, as far as it matters: wherever
+      // the point's own segment levels it outright, not at all.
+      final before =
+          knotRadii[own] + (knotRadii[own + 1] - knotRadii[own]) * t0;
+      final first = math.max(0, own - 1);
+      var r = before;
+      for (var pass = 0; pass < 8; pass++) {
+        var v = before;
+        // The segments in the order they were recorded: the one before (its
+        // end cap, overruled by the point's own segment), its own, and
+        // those after it whose first knot's cap reaches back to the point.
+        for (var j = first; j < m; j++) {
+          if (j > own + 1 && p.distanceTo(knots[j]) > reach) break;
+          final a = knots[j], d = knots[j + 1] - a;
+          if (d.e * d.e + d.n * d.n <= 1e-9) continue;
+          final t = along(p, r, j).clamp(0.0, 1.0);
+          final w = TerrainBrush.falloffWeight(
+              p.distanceTo(a + d * t), halfWidthM, roadFalloffM);
+          if (w <= 0) continue;
+          final datum = knotRadii[j] + (knotRadii[j + 1] - knotRadii[j]) * t;
+          v = v * (1 - w) + datum * w;
+        }
+        final moved = (v - r).abs();
+        r = v;
+        if (moved < 1e-5) break;
+      }
+      out[i] = r;
+    }
   }
 
   /// How far past the deepest cut or tallest fill a deck corridor's bound
