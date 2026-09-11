@@ -300,17 +300,29 @@ class CityLayout {
   /// [deck]'s level at [s] along a road [lengthM] long, for
   /// [levelsSeparated]; null for a road on the ground (no deck).
   ///
-  /// Whether it stands clear is read no nearer its end than [_endProbeM]:
-  /// the deck's stretches are measured along the road its survey walked,
+  /// The deck's stretches are measured along the road its survey walked,
   /// and [lengthM] is the road as indexed now — a save's decimated
   /// controls re-sampled on load come out millimetres either side of it.
   /// Read at the end itself, a deck on its piers to its very end fell off
-  /// them there and met the street beneath it. The survey puts every
-  /// boundary half way between two samples, half a step (at least half a
-  /// metre, or half a road shorter than one step) from the end, so the
-  /// probe never crosses one. The height is read where it was asked.
+  /// them there and met the street beneath it. A deck that knows the length
+  /// its stretches were measured along ([RoadDeck.rangeLengthM]) is read
+  /// at [s]'s place along them ([RoadDeck.rangeArc]): exact at any drift,
+  /// and a piece a crossing cut ends exactly where its ranges were clipped.
+  ///
+  /// One saved before it knew ([RoadDeck.rangeLengthM] null) is read no
+  /// nearer its end than [_endProbeM]. The survey puts every boundary half
+  /// way between two samples, half a step (at least half a metre, or half
+  /// a road shorter than one step) from the end, so the probe crosses none
+  /// of the survey's own, and takes up to that much drift either way. The
+  /// height is read where it was asked.
   static RoadLevel? levelOf(RoadDeck? deck, double s, double lengthM) {
     if (deck == null) return null;
+    if (deck.rangeLengthM != null) {
+      return (
+        heightM: deck.heightAt(s, lengthM),
+        offGround: deck.offGroundAt(s, lengthM),
+      );
+    }
     final sp = math.min(
         s, math.max(0.0, lengthM - math.min(_endProbeM, lengthM / 4)));
     return (
@@ -319,7 +331,8 @@ class CityLayout {
     );
   }
 
-  /// How far back from a road's end [levelOf] reads its stretches.
+  /// How far back from its end [levelOf] reads the stretches of a deck
+  /// that does not know the length they were measured along.
   static const double _endProbeM = 0.25;
 
   /// Whether two roads at levels [a] and [b] pass one over the other where
@@ -1245,7 +1258,9 @@ class CityLayout {
         // (A road that plats lots has a bridge only once it is upgraded
         // from one that did not — a generated road with a bridge fronts
         // nothing — so a generated plat never meets this.)
-        if ((deck != null && _offGroundAlong(deck, s, s1)) ||
+        if ((deck != null &&
+                _offGroundAlong(
+                    deck, deck.rangeArc(s, total), deck.rangeArc(s1, total))) ||
             (road.bridges.isNotEmpty && _overlaps(road.bridges, s, s1))) {
           index++;
           s = s1;
@@ -1337,7 +1352,7 @@ class CityLayout {
         final od = ob.deck;
         if (od != null) {
           final s = _nearestArcOf(rec, entry.value, mid);
-          if (od.onStructureAt(s) || od.inTunnelAt(s)) continue;
+          if (od.offGroundAt(s, rec.lengthM)) continue;
         }
         final margin = ob.halfWidth + _settings.sidewalkM;
         final d = (_nearestOf(rec, entry.value, mid) - margin).abs();
@@ -1391,7 +1406,7 @@ class CityLayout {
       if (od != null) {
         final hit = front + outward * t;
         final s = rec.cum[i - 1] + rec.sampleAt(i - 1).distanceTo(hit);
-        if (od.onStructureAt(s) || od.inTunnelAt(s)) return;
+        if (od.offGroundAt(s, rec.lengthM)) return;
       }
       final gap = t -
           (ob.halfWidth +
@@ -1474,7 +1489,7 @@ class CityLayout {
       if (od != null) {
         final (q, _) = rec.nearestOnSegment(c, bi);
         final s = rec.cum[bi - 1] + rec.sampleAt(bi - 1).distanceTo(q);
-        if (od.onStructureAt(s) || od.inTunnelAt(s)) continue;
+        if (od.offGroundAt(s, rec.lengthM)) continue;
       }
       final p = rec.sampleAt(bi - 1);
       final along = rec.sampleAt(bi) - p;

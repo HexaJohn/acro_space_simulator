@@ -176,6 +176,47 @@ void main() {
       expect(CityLayout.levelOf(ramp(0, 10), 50, 50)!.heightM, 10);
     });
 
+    test("a deck that knows its survey's length reads it exactly, at any "
+        'drift', () {
+      // Past the quarter metre an unmeasured deck's end is read back by.
+      const piers = RoadDeck(
+          startM: 12,
+          endM: 12,
+          startOffsetM: 12,
+          endOffsetM: 12,
+          structures: [(0, 57.3)],
+          rangeLengthM: 57.3);
+      for (final now in [56.8, 57.3, 57.302, 57.8, 60.0]) {
+        expect(CityLayout.levelOf(piers, now, now)!.offGround, isTrue,
+            reason: 're-measured $now m');
+      }
+      const tail = RoadDeck(
+          startM: 12,
+          endM: 0.5,
+          startOffsetM: 12,
+          endOffsetM: 0.5,
+          structures: [(0, 56.8)],
+          rangeLengthM: 57.3);
+      for (final now in [56.8, 57.3, 57.8, 60.0]) {
+        expect(CityLayout.levelOf(tail, now, now)!.offGround, isFalse,
+            reason: 're-measured $now m');
+        expect(CityLayout.levelOf(tail, 0, now)!.offGround, isTrue);
+      }
+      // A piece a crossing cut 5 cm past its piers ends at the cut: no
+      // pull-back reads it onto them.
+      const cut = RoadDeck(
+          startM: 12,
+          endM: 2.6,
+          startOffsetM: 12,
+          endOffsetM: 2.6,
+          structures: [(0, 156)],
+          rangeLengthM: 156.05);
+      expect(CityLayout.levelOf(cut, 156.05, 156.05)!.offGround, isFalse);
+      expect(CityLayout.levelOf(cut, 155.9, 156.05)!.offGround, isTrue);
+      // The height is read along the road as it is now.
+      expect(CityLayout.levelOf(tail, 60, 60)!.heightM, closeTo(0.5, 1e-9));
+    });
+
     test('two decks meet at one height and pass at two', () {
       final l = CityLayout();
       l.commitRoad(controls: ns, deck: ramp(12, 12), regenerateLots: false);

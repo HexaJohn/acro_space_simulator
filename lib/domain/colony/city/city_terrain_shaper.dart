@@ -249,14 +249,17 @@ class CityTerrainShaper {
     required double Function(Vec2) groundUnder,
     required int tick,
   }) {
-    // Arc along the 24 m samples, scaled to the road's own length — the
-    // length its deck's ranges were measured on (the 2 m samples it was
-    // cut from; a curve's 24 m chords run a little short of it).
+    // Arc along the 24 m samples, scaled to the length its deck's ranges
+    // were measured on ([RoadDeck.rangeLengthM]; a curve's 24 m chords run
+    // a little short of it) — or, for a deck saved before it knew that, to
+    // the road's own length as indexed (the 2 m samples it was cut from).
     final cum = <double>[0];
     for (var i = 1; i < pts.length; i++) {
       cum.add(cum[i - 1] + pts[i].distanceTo(pts[i - 1]));
     }
-    final lengthM = city.layout.roadIndex.byId(road.id)?.lengthM ?? cum.last;
+    final lengthM = deck.rangeLengthM ??
+        city.layout.roadIndex.byId(road.id)?.lengthM ??
+        cum.last;
     final scale = cum.last <= 1e-9 ? 1.0 : lengthM / cum.last;
     for (var i = 1; i < pts.length; i++) {
       final key = 'road:${road.id}:$hw:$i';

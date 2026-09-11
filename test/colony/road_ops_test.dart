@@ -12,6 +12,7 @@ import 'dart:math' as math;
 
 import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_config.dart';
+import 'package:acro_space_simulator/domain/colony/city/city_layout.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_build.dart';
@@ -712,6 +713,46 @@ void main() {
       expect(o.lights, isFalse);
       expect(o.stopHeadings, [0.5, 2.0]);
       expect(back.roadsRevision, greaterThan(0));
+    });
+
+    test("a laid deck keeps its survey's length; an old save's deck has none",
+        () {
+      final sim = colony();
+      final built = sim.buildRoad(RoadBuildRequest(
+          controls: const [
+            Vec2(0, 0),
+            Vec2(72, 0),
+            Vec2(85.5, 3.2),
+            Vec2(76.5, 6.4),
+          ],
+          type: type('two-lane'),
+          startElevationM: 12,
+          endElevationM: 12));
+      expect(built.roadId, isNotNull, reason: built.quote.reason);
+      final deck = sim.layout.roadById(built.roadId!)!.deck!;
+      expect(deck.rangeLengthM, closeTo(built.quote.lengthM, 1e-9));
+      final json = sim.toJson();
+      final saved = ((json['roads'] as List).single as Map)['deck'] as Map;
+      expect(saved['l'], deck.rangeLengthM);
+      final back = CitySim.fromJson(json, bodies: bodies);
+      final r = back.layout.roadById(built.roadId!)!;
+      expect(r.deck, deck);
+      // Re-sampled from the save's decimated controls, the road comes out
+      // a little another length; its end still stands on its piers.
+      final rec = back.layout.roadIndex.byId(r.id)!;
+      expect(
+          CityLayout.levelOf(r.deck, rec.lengthM, rec.lengthM)!.offGround,
+          isTrue);
+      // A save from before the length was kept loads the deck as it was.
+      saved.remove('l');
+      final old = CitySim.fromJson(json, bodies: bodies)
+          .layout
+          .roadById(built.roadId!)!
+          .deck!;
+      expect(old.rangeLengthM, isNull);
+      expect(old.structures, deck.structures);
+      expect(old.startM, deck.startM);
+      expect(old.endM, deck.endM);
     });
 
     test('a road that never used the tool saves as it always has', () {

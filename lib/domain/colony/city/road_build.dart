@@ -274,6 +274,10 @@ RoadQuote quoteRoadBuild(
       endOffsetM: endM - g1,
       structures: survey.structures,
       tunnels: survey.tunnels,
+      // The length the ranges were measured along, so the road re-measured
+      // — re-sampled from a save, or cut into pieces — still reads them
+      // where the survey put them.
+      rangeLengthM: survey.lengthM,
     );
     gradePct = deck.gradePct(lengthM);
     refusal = switch (checkDeck(

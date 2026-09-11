@@ -661,8 +661,8 @@ enum LaneLine { dashedWhite, solidWhite, solidYellow, dashedYellow }
 /// height measured from it would move. [structures] and [tunnels] say
 /// which stretches stand on piers and which run underground, surveyed
 /// against the ground when the road was laid. They are arc lengths from
-/// the road's FIRST CONTROL, like [RoadSpline.bridges], and a split slices
-/// them with the road.
+/// the road's FIRST CONTROL, like [RoadSpline.bridges], measured along a
+/// road [rangeLengthM] long, and a split slices them with the road.
 ///
 /// A road with no deck (null) is DRAPED: it follows the ground, as every
 /// road did before the tool could lift one.
@@ -674,6 +674,7 @@ class RoadDeck {
     this.endOffsetM = 0,
     this.structures = const [],
     this.tunnels = const [],
+    this.rangeLengthM,
   });
 
   /// Deck height above the body datum at the first and last control.
@@ -687,6 +688,34 @@ class RoadDeck {
   /// Arc ranges carried on piers, and underground.
   final List<(double, double)> structures;
   final List<(double, double)> tunnels;
+
+  /// The length of road [structures] and [tunnels] were measured along:
+  /// the survey's own, for a deck the road tool laid, and each piece's
+  /// share of it for a piece a split cut. The road as it is indexed now can
+  /// come out a little either side of it: a save keeps a curved road's
+  /// controls decimated, and the load re-samples them. [rangeArc] reads a
+  /// point of the road now at its place along the ranges, whatever the
+  /// drift. Null for a deck saved before it was recorded (read as though
+  /// the road had never moved), and for one built by hand.
+  final double? rangeLengthM;
+
+  /// Arc [s] along the road as it is measured now — [lengthM] long — as
+  /// an arc along [structures] and [tunnels]: scaled to [rangeLengthM] and
+  /// held within it; [s] itself where the deck does not know its length.
+  double rangeArc(double s, double lengthM) {
+    final l = rangeLengthM;
+    // Unmoved — a road read at the length it was laid at — is [s] to the
+    // bit, not s * l / l.
+    if (l == null || l <= 1e-9 || lengthM <= 1e-9 || l == lengthM) return s;
+    return (s * l / lengthM).clamp(0.0, l);
+  }
+
+  /// Whether the road stands on its piers or runs in its tunnel at [s]
+  /// along it, [lengthM] long as it is measured now (see [rangeArc]).
+  bool offGroundAt(double s, double lengthM) {
+    final r = rangeArc(s, lengthM);
+    return onStructureAt(r) || inTunnelAt(r);
+  }
 
   /// Height above the datum at [s] along a road [lengthM] long.
   double heightAt(double s, double lengthM) => lengthM <= 1e-9
@@ -720,19 +749,36 @@ class RoadDeck {
   /// ground there when the caller could sample it ([groundStartM],
   /// [groundEndM], above the datum), else interpolated; ranges clipped to
   /// the piece and shifted to its start.
+  ///
+  /// [s0] and [s1] are arcs along the road as it is measured now, and the
+  /// ranges are clipped where they fall along the ranges' own length
+  /// ([rangeArc]), so the piece keeps the ranges' measure and its own
+  /// share of [rangeLengthM]. A piece ending at a cut — short of the road's
+  /// end — records that share even where this deck knows no length of its
+  /// own: its ranges were clipped at the cut, so its end is exactly where
+  /// the crossing rule read the road to meet what cut it there. Only a
+  /// piece running on to such a deck's own end is left without one.
   RoadDeck slice(double s0, double s1, double lengthM,
       {double? groundStartM, double? groundEndM}) {
     final h0 = heightAt(s0, lengthM), h1 = heightAt(s1, lengthM);
+    final r0 = rangeArc(s0, lengthM), r1 = rangeArc(s1, lengthM);
+    final atCut = s1 < lengthM - _cutClearM;
     return RoadDeck(
       startM: h0,
       endM: h1,
       startOffsetM:
           groundStartM == null ? offsetAt(s0, lengthM) : h0 - groundStartM,
       endOffsetM: groundEndM == null ? offsetAt(s1, lengthM) : h1 - groundEndM,
-      structures: _clip(structures, s0, s1),
-      tunnels: _clip(tunnels, s0, s1),
+      structures: _clip(structures, r0, r1),
+      tunnels: _clip(tunnels, r0, r1),
+      rangeLengthM: rangeLengthM != null || atCut ? r1 - r0 : null,
     );
   }
+
+  /// How far short of a road's end a slice must stop to end at a cut: a
+  /// millimetre, far past the ulps a piece's summed length is off by, and
+  /// far short of the layout's shortest piece.
+  static const double _cutClearM = 1e-3;
 
   Map<String, dynamic> toJson() => {
         'h': [startM, endM],
@@ -745,6 +791,7 @@ class RoadDeck {
           'tu': [
             for (final (a, b) in tunnels) ...[a, b]
           ],
+        if (rangeLengthM != null) 'l': rangeLengthM,
       };
 
   /// Null for a missing or malformed entry: a road without a deck.
@@ -768,6 +815,12 @@ class RoadDeck {
       endOffsetM: o == null || o.length < 2 ? 0 : o[1].toDouble(),
       structures: ranges(j['st']),
       tunnels: ranges(j['tu']),
+      // Absent from a save made before it was recorded: that deck reads as
+      // it always did. Anything but a positive length is no length.
+      rangeLengthM: switch (j['l']) {
+        final num l when l.isFinite && l > 0 => l.toDouble(),
+        _ => null,
+      },
     );
   }
 
@@ -804,12 +857,13 @@ class RoadDeck {
       other.endM == endM &&
       other.startOffsetM == startOffsetM &&
       other.endOffsetM == endOffsetM &&
+      other.rangeLengthM == rangeLengthM &&
       _sameRanges(other.structures, structures) &&
       _sameRanges(other.tunnels, tunnels);
 
   @override
   int get hashCode => Object.hash(startM, endM, startOffsetM, endOffsetM,
-      structures.length, tunnels.length);
+      rangeLengthM, structures.length, tunnels.length);
 
   static bool _sameRanges(List<(double, double)> a, List<(double, double)> b) {
     if (a.length != b.length) return false;

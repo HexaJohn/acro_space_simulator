@@ -387,6 +387,70 @@ void main() {
     expect(g.nodeNear(end)!.legs, hasLength(1));
   });
 
+  test('a deck cut just off its piers meets the street that cut it', () {
+    // A viaduct coming down 12 m to the ground leaves its piers at a survey
+    // boundary. A street crossing it just past that boundary crosses its
+    // graded side: the layout cuts both roads there. The deck's piece ending
+    // at the cut must read its end at the cut — graded, as the crossing
+    // rule read it — and not a quarter metre back on its piers, or the
+    // graph parts into two 2-leg nodes the junction the layout cut.
+    final type = RoadType.byId('two-lane')!;
+    const controls = [Vec2(0, 0), Vec2(200, 0)];
+    final deck = quoteRoadBuild(RoadBuildRequest(
+      controls: controls,
+      type: type,
+      startElevationM: 12,
+      endElevationM: 0,
+    )).deck!;
+    final b = deck.structures.last.$2;
+    expect(b, closeTo(156, 1), reason: 'the survey puts its piers first');
+    // Every road re-added raw, as `CitySim.fromJson` restores them.
+    CityLayout reloaded(CityLayout saved) {
+      final l = CityLayout();
+      for (final r in saved.roads.toList()) {
+        l.addRoad(r);
+      }
+      return l;
+    }
+
+    final missed = <String>[];
+    for (final off in const [0.05, 0.1, 0.2, 0.24]) {
+      final x = b + off;
+      final at = Vec2(x, 0);
+      final street = [Vec2(x, -100), Vec2(x, 100)];
+      for (final deckFirst in const [true, false]) {
+        final layout = CityLayout();
+        if (deckFirst) {
+          layout.commitRoad(controls: controls, deck: deck);
+          layout.commitRoad(controls: street);
+        } else {
+          layout.commitRoad(controls: street);
+          layout.commitRoad(controls: controls, deck: deck);
+        }
+        final order = deckFirst ? 'deck first' : 'street first';
+        expect(layout.roads, hasLength(4), reason: 'off $off, $order: cut');
+        for (final (label, l) in [
+          ('laid', layout),
+          ('reloaded', reloaded(layout)),
+        ]) {
+          final g = RoadGraph.of(l);
+          final here = [
+            for (final n in g.nodes)
+              if (n.at.distanceTo(at) < 8) n
+          ];
+          if (here.length != 1 ||
+              here.single.legs.length != 4 ||
+              !here.single.atGrade) {
+            missed.add('off $off, $order, $label: ${here.length} nodes, '
+                'legs ${[for (final n in here) n.legs.length]}, '
+                'atGrade ${[for (final n in here) n.atGrade]}');
+          }
+        }
+      }
+    }
+    expect(missed, isEmpty);
+  });
+
   test('an alley meeting a street is a curb cut: no stop, as the tiles '
       'draw it', () {
     final layout = CityLayout();
