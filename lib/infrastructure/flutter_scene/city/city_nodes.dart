@@ -63,15 +63,19 @@ import '../frame_budget.dart';
 import '../graphics_quality.dart';
 import 'city_detail_layer.dart';
 import 'city_materials.dart';
+import 'city_tile_bucketing.dart';
 import 'city_tile_columns.dart';
 import 'city_tile_mesher.dart';
 import 'city_tile_scheduler.dart';
 import 'city_tier_cache.dart';
 import 'elevated_structure.dart';
+import 'instant_road_nodes.dart';
 import 'mesh_merge.dart';
 import 'oriented_box.dart';
 import 'rail_vehicles.dart';
 import 'road_mesher.dart';
+import 'road_overlay_nodes.dart';
+import 'road_overlay_state.dart';
 import 'vehicle_meshes.dart';
 import 'city_textures.dart';
 import 'city_traffic.dart';
@@ -87,6 +91,9 @@ export 'city_tile_mesher.dart'
         kLeafSwatch,
         kPaleZoneOffset;
 
+// And the tangent grid moved to the cut, which is pure now.
+export 'city_tile_bucketing.dart' show ColonyTangentBasis;
+
 /// One generated archetype, uploaded.
 class _CityMesh {
   _CityMesh(this.solid, this.glazing, {this.lod = false});
@@ -96,71 +103,6 @@ class _CityMesh {
   /// A LOD-debug box rather than a building: drawn on the palette material so
   /// its colour means something, not on the facade one.
   final bool lod;
-}
-
-/// The colony's tangent frame on its body: up through the root's anchor,
-/// east and north across it, and the radius the anchor sits at.
-///
-/// One frame serves two things that must agree: the grid the colony is cut
-/// into tiles by, and the light map's axes (see `_bakeLightMap`).
-///
-/// The tiles used to be cells of a cube grid in body-fixed metres. On a
-/// curved surface that is the wrong shape: a colony's footprint drifts
-/// across the grid's slabs — over forty kilometres the surface sags
-/// 40²/(8·6371) ≈ 31 m, and the grid's axes are nowhere near the ground's
-/// — so a third of the tiles were slivers holding a few buildings each,
-/// and every sliver paid the tile's fixed draws. Two arc coordinates
-/// across the tangent plane give one tile per footprint, and a point's
-/// height above the ground plays no part in which.
-class ColonyTangentBasis {
-  ColonyTangentBasis.at(Vector3 anchorBF)
-      : radiusM = anchorBF.length,
-        up = anchorBF.normalized {
-    // Any seed off the pole. The light map has always derived east this
-    // way, and the tiles must use the same frame.
-    final seed = up.z.abs() < 0.9 ? Vector3.unitZ : Vector3.unitX;
-    east = up.cross(seed).normalized;
-    north = up.cross(east);
-  }
-
-  /// The anchor's distance from the body's centre: the surface radius the
-  /// arcs are measured on.
-  final double radiusM;
-  final Vector3 up;
-  late final Vector3 east, north;
-
-  /// Arc coordinates of [p] from the anchor, in metres of surface: east
-  /// and north along the great circles through it.
-  ///
-  /// Measured on the DIRECTION of [p], not its position, so a rooftop and
-  /// the street below it read the same — and as arc, not tangent-plane
-  /// distance, so a cell [CityNodes.tileM] wide holds exactly that much
-  /// ground along each axis rather than the little more the gnomonic
-  /// projection's foreshortening would let in.
-  (double, double) arcOf(Vector3 p) {
-    final u = p.normalized;
-    return (
-      radiusM * math.asin(u.dot(east).clamp(-1.0, 1.0)),
-      radiusM * math.asin(u.dot(north).clamp(-1.0, 1.0)),
-    );
-  }
-
-  /// The grid cell [p] falls in, cells [tileM] of arc on a side.
-  (int, int) cellOf(Vector3 p, double tileM) {
-    final (e, n) = arcOf(p);
-    return ((e / tileM).floor(), (n / tileM).floor());
-  }
-
-  /// The centre of cell ([ie], [iN]), on the surface at the anchor's
-  /// radius. Exact along either axis and within a metre off it at any
-  /// colony's size; the centre only anchors the tile and measures its
-  /// distance, and the half diagonal covers the rest.
-  Vector3 cellCentre(int ie, int iN, double tileM) {
-    final ae = (ie + 0.5) * tileM / radiusM;
-    final an = (iN + 0.5) * tileM / radiusM;
-    final v = up + east * math.tan(ae) + north * math.tan(an);
-    return v.normalized * radiusM;
-  }
 }
 
 class CityNodes {
@@ -615,6 +557,23 @@ class CityNodes {
   final Map<String, (int, int)> _zoningKeys = {};
   final Map<String, Vector3> _zoningAnchors = {};
 
+  /// The roads edited since their tiles last built, drawn at once (see
+  /// `instant_road_nodes.dart`): which they are, one node per body, and the
+  /// tracker revision each body's node was built at.
+  final InstantRoadTracker _instant = InstantRoadTracker();
+  final Map<String, fs.Node> _instantNodes = {};
+  final Map<String, int> _instantBuilt = {};
+
+  /// The road tool's overlay (see [RoadOverlayState]): one node — the state
+  /// names one body at a time — rebuilt only when the state's revision or
+  /// the node's anchor moves (see [RoadOverlayGate]).
+  fs.Node? _overlayNode;
+  final RoadOverlayGate _overlayGate = RoadOverlayGate();
+
+  /// The overlay's translucent material: unlit, colour and alpha from the
+  /// vertices, in the depth-sorted blended pass.
+  fs.UnlitMaterial? _overlayMaterial;
+
   /// What [_cursorNode] was built from, so an unmoved mouse costs nothing.
   Object? _cursorKey;
 
@@ -837,6 +796,9 @@ class CityNodes {
       final motion = _bodyMotion(snap, origin);
       _syncCursor(snap, origin, motion);
       _syncZoning(snap, origin, motion);
+      // And the road tool's ghost: a new colony's first road is drawn over
+      // a site with nothing on it.
+      _syncRoadOverlay(snap, origin, motion);
       return;
     }
     final sw = Stopwatch()..start();
@@ -846,9 +808,12 @@ class CityNodes {
     // carries new lists with the same contents, so identity alone would
     // re-bucket two hundred thousand buildings sixty times a second, and
     // the counts are the change detector — the same one the old rebuild
-    // key used.
+    // key used — with the road network's own revision and junction
+    // overrides beside them: an upgrade, a reversal or a light switched off
+    // changes no count, and a cut keyed on counts alone never saw one.
     final sig = '${snap.buildings.length}|${snap.roads.length}|'
-        '${snap.patches.length}|${snap.terrainEdits.length}';
+        '${snap.patches.length}|${snap.terrainEdits.length}|'
+        '${CityTileBucketer.roadsSignature(snap)}';
     final sameLists = identical(snap.buildings, _lastBuildings) &&
         identical(snap.roads, _lastRoads) &&
         identical(snap.patches, _lastPatches);
@@ -1240,6 +1205,8 @@ class CityNodes {
     sw.reset();
     _syncCursor(snap, origin, moved);
     _syncZoning(snap, origin, moved);
+    _syncInstantRoads(snap, origin, moved);
+    _syncRoadOverlay(snap, origin, moved);
     phaseMs['city.cursor'] = sw.elapsedMicroseconds / 1000;
 
     var draws = 0, skylineTris = 0;
@@ -1285,135 +1252,61 @@ class CityNodes {
 
   // ---- Tiles ----------------------------------------------------------------
 
-  /// Cut the frame into tiles: every building, road and patch to the cell
-  /// its position (a road's middle) falls in, every road END to the cell IT
-  /// falls in — so a junction where roads of two tiles meet is drawn once,
-  /// by the tile that holds the crossing, from all of its legs.
+  /// Cut the frame into tiles (see `city_tile_bucketing.dart`), keeping
+  /// every tile the cut did not change.
+  ///
+  /// Every building, road and patch goes to the cell its position (a road's
+  /// middle) falls in, every road END to the cell IT falls in — so a
+  /// junction where roads of two tiles meet is drawn once, by the tile that
+  /// holds the crossing, from all of its legs.
+  ///
+  /// The cut is incremental. It used to drop every tile and build the
+  /// colony again from nothing, which for one road drawn was the whole city
+  /// leaving the scene and streaming back. Now a tile whose structure key
+  /// held keeps everything — its nodes, its parked tiers, its packed
+  /// columns — and takes the new frame's members (the same content, so
+  /// nothing it built goes stale, and no old frame's columns are kept alive
+  /// by it); a tile whose key moved goes on SHOWING what it has while its
+  /// want key, which leads with the structure key, queues the rebuild; only
+  /// a tile gone from the frame is dropped.
   void _bucket(WorldSnapshot snap) {
-    for (final t in _tiles.values) {
-      _dropTile(t);
+    final plan = CityTileBucketer.bucket(snap,
+        anchors: {for (final r in _roots.values) r.bodyId: r.anchorBF},
+        tileM: tileM);
+    plan.anchors.forEach((bodyId, anchorBF) {
+      _roots.putIfAbsent(bodyId, () {
+        final node = fs.Node();
+        _scene.add(node);
+        return _BodyRoot(node, bodyId, anchorBF);
+      });
+    });
+    for (final root in _roots.values) {
+      root.endHalf
+        ..clear()
+        ..addAll(plan.endHalf[root.bodyId] ?? const {});
+      root.transitEnds
+        ..clear()
+        ..addAll(plan.transitEnds[root.bodyId] ?? const []);
     }
-    _tiles.clear();
-    _queue.clear();
-    _byBody = {};
-    for (final r in _roots.values) {
-      r.endHalf.clear();
-      r.transitEnds.clear();
+    _byBody = plan.byBody;
+    sealedWorld = plan.sealedWorld;
+    final diff = CityTileBucketer.diff(
+        {for (final t in _tiles.values) t.key: t.structureKey}, plan);
+    for (final key in diff.removed) {
+      final t = _tiles.remove(key);
+      if (t != null) _dropTile(t);
     }
-    sealedWorld = false;
-
-    // The cell in the body root's tangent grid (see [ColonyTangentBasis]):
-    // two arc coordinates across the colony, each cell [tileM] of ground
-    // on a side. The root always exists by the time a tile is asked for —
-    // every loop below makes it first.
-    _Tile tileFor(String bodyId, Vector3 p) {
-      final basis = _roots[bodyId]!.basis;
-      final (ie, iN) = basis.cellOf(p, tileM);
-      final key = '$bodyId/$ie/$iN';
-      // The half diagonal stays the cube cell's, not the square's: it is
-      // a LOWER bound on the distance to anything in the tile, it leaves
-      // headroom for relief and towers standing off the cell's surface,
-      // and the tier ranges were tuned against it.
-      return _tiles.putIfAbsent(
-          key,
-          () => _Tile(key, bodyId, basis.cellCentre(ie, iN, tileM),
-              tileM * math.sqrt(3) / 2));
+    for (final b in plan.tiles.values) {
+      (_tiles[b.key] ??= _Tile(b.key, b.bodyId, b.centreBF, b.halfDiagonalM))
+          .adopt(b);
     }
-
-    _BodyRoot rootFor(String bodyId, Vector3 anchorBF) =>
-        _roots.putIfAbsent(bodyId, () {
-          final node = fs.Node();
-          _scene.add(node);
-          return _BodyRoot(node, bodyId, anchorBF);
-        });
-
-    for (final b in snap.buildings.values) {
-      final p = Vector3(b.px, b.py, b.pz);
-      rootFor(b.body, p);
-      (_byBody[b.body] ??= []).add(b);
-      final t = tileFor(b.body, p);
-      t.buildings.add(b);
-      // The outermost building centre, for the altitude bound in
-      // [tileCanDetail]. A centre, not a roof: the bound is on the distance
-      // to the point [detailFor] measures, which is the centre.
-      final r = p.length;
-      if (r > t.maxRadiusM) t.maxRadiusM = r;
-    }
-    // By index, off the frame's columns: a tile records WHICH patches are
-    // its own and gathers them when it packs (see [CityTilePatchRefs]), so
-    // bucketing six hundred thousand patches allocates no snapshot for any
-    // of them.
-    final ps = snap.patches;
-    for (var i = 0; i < ps.length; i++) {
-      final at = Vector3(ps.px[i], ps.py[i], ps.pz[i]);
-      final body = ps.bodyAt(i);
-      rootFor(body, at);
-      _byBody.putIfAbsent(body, () => []);
-      tileFor(body, at).patches.add(ps, i);
-    }
-    for (final r in snap.roads) {
-      final n = r.points.length ~/ 3;
-      if (n < 2) continue;
-      final m = (n ~/ 2) * 3;
-      final mid = Vector3(r.points[m], r.points[m + 1], r.points[m + 2]);
-      rootFor(r.body, mid);
-      _byBody.putIfAbsent(r.body, () => []);
-      tileFor(r.body, mid).roads.add(r);
-      if (r.sealed) sealedWorld = true;
-      final cls = RoadClass
-          .values[r.roadClassIndex.clamp(0, RoadClass.values.length - 1)];
-      final first = Vector3(r.points[0], r.points[1], r.points[2]);
-      final last = Vector3(r.points[3 * n - 3], r.points[3 * n - 2],
-          r.points[3 * n - 1]);
-      final root = _roots[r.body]!;
-      // Widest carriageway meeting each road END, so a sidewalk can stop
-      // short of its crossing instead of bridging the intersecting street.
-      // Legs split from one crossing land on (nearly) the same point — the
-      // junction pass tolerates 8 m of drift — so a coarse quantised key
-      // groups them. The count says whether anything ELSE meets there: a
-      // dead end keeps its pavement all the way to the kerb line.
-      if (!cls.isElevated) {
-        for (final p in [first, last]) {
-          final k = _endKey(p);
-          final prev = root.endHalf[k];
-          root.endHalf[k] = prev == null
-              ? (r.halfWidthM, 1)
-              : (math.max(prev.$1, r.halfWidthM), prev.$2 + 1);
-        }
-      }
-      // Every road END, with the point just inside it (for the leg
-      // direction), to the tile the end lies in. Roads are already SPLIT at
-      // their crossings, so an intersection is simply a place where three
-      // or more ends meet.
-      if (cls.joinsJunctions) {
-        final second = Vector3(r.points[3], r.points[4], r.points[5]);
-        final penult = Vector3(r.points[3 * n - 6], r.points[3 * n - 5],
-            r.points[3 * n - 4]);
-        tileFor(r.body, first).ends.add(CityTileEnd(
-            first, second, r.halfWidthM, cls, cls.paved, r.collector));
-        tileFor(r.body, last).ends.add(CityTileEnd(
-            last, penult, r.halfWidthM, cls, cls.paved, r.collector));
-      }
-      if (cls == RoadClass.transit) {
-        root.transitEnds.add(first);
-        root.transitEnds.add(last);
-      }
-    }
-    // Each tile's identity: what it holds, so a tile whose members did not
-    // change keeps its build across a frame that changed another's.
-    for (final t in _tiles.values) {
-      var h = t.buildings.length * 0x9E3779B1 + t.roads.length * 0x85EBCA6B +
-          t.patches.length * 0xC2B2AE35;
-      for (final b in t.buildings) {
-        h = (h ^ b.id.hashCode) * 0x27D4EB2F & 0xFFFFFFFF;
-      }
-      for (final r in t.roads) {
-        h = (h ^ r.points.length ^ r.points[0].round()) * 0x165667B1 &
-            0xFFFFFFFF;
-      }
-      t.structureKey = '${t.buildings.length}|${t.roads.length}|'
-          '${t.patches.length}|${snap.terrainEdits.length}|$h';
-    }
+    phaseCount['bucket.kept'] = diff.kept.length;
+    phaseCount['bucket.rekeyed'] = diff.rekeyed.length;
+    phaseCount['bucket.added'] = diff.added.length;
+    phaseCount['bucket.removed'] = diff.removed.length;
+    // The roads whose content is new since the last cut, for the instant
+    // path to draw until their tiles catch up.
+    _instant.noteCut(plan.tiles.values);
     // The skyglow's density map, from the first body with buildings — the
     // same single-colony assumption the night factor makes.
     for (final entry in _byBody.entries) {
@@ -1424,16 +1317,6 @@ class CityNodes {
       break;
     }
   }
-
-  static int _endKey(Vector3 p) => _endKeyOf(p.x, p.y, p.z);
-
-  /// The same key from bare coordinates — a road's end read straight
-  /// off its points, with no vector made to read it through.
-  static int _endKeyAt(List<double> points, int i) =>
-      _endKeyOf(points[i], points[i + 1], points[i + 2]);
-
-  static int _endKeyOf(double x, double y, double z) =>
-      Object.hash((x / 10).round(), (y / 10).round(), (z / 10).round());
 
   // ---- The build pipeline ---------------------------------------------------
   //
@@ -1585,8 +1468,13 @@ class CityNodes {
       final r = roads[i];
       final p = r.points;
       final last = 3 * (p.length ~/ 3) - 3;
-      roadEnds[2 * i] = root.endHalf[_endKeyAt(p, 0)];
-      roadEnds[2 * i + 1] = root.endHalf[_endKeyAt(p, last)];
+      // Keyed with each end's deck lift, as the cut tabled it: an
+      // overpass's end reads its own entry, not the crossing's under it.
+      final lifts = r.lifts;
+      roadEnds[2 * i] = root.endHalf[CityTileBucketer.endKeyAt(
+          p, 0, lifts.isEmpty ? 0.0 : lifts.first)];
+      roadEnds[2 * i + 1] = root.endHalf[CityTileBucketer.endKeyAt(
+          p, last, lifts.isEmpty ? 0.0 : lifts.last)];
       final cls = RoadClass
           .values[r.roadClassIndex.clamp(0, RoadClass.values.length - 1)];
       if (cls == RoadClass.transit) {
@@ -1627,6 +1515,7 @@ class CityNodes {
       ends: t.ends,
       roadEnds: roadEnds,
       transitEnds: transitEnds,
+      junctions: t.junctions,
     );
   }
 
@@ -2322,6 +2211,11 @@ class CityNodes {
     _dropTraffic();
     // The zoning nodes hold material instances too.
     _dropZoning();
+    // So do the road tool's. Both come back on their next sync from what
+    // they were drawing: the tracker keeps its pending roads, and the
+    // overlay's gate forgets it was built.
+    _dropInstantNodes();
+    _dropRoadOverlay();
     final cursor = _cursorNode;
     if (cursor != null) {
       _scene.remove(cursor);
@@ -2586,6 +2480,152 @@ class CityNodes {
     }
   }
 
+  // ---- The road tool ----------------------------------------------------------
+
+  /// Draw the roads edited since their tiles last built (see
+  /// `instant_road_nodes.dart`) — one node per body, anchored at the body's
+  /// root — and retire each road the frame its tile shows a build of its
+  /// current structure. With nothing edited this is an empty check; with
+  /// roads waiting, a walk over those few.
+  void _syncInstantRoads(
+      WorldSnapshot snap, FloatingOrigin origin, Map<String, bool> moved) {
+    // A tile shows its current structure once the set it shows was built
+    // under its structure key: a build landed, or the tier cache answered
+    // with one (a set parked under an older structure is never kept).
+    _instant.retire((tileKey) {
+      final t = _tiles[tileKey];
+      return t == null || t.shownKey.startsWith('${t.structureKey}|');
+    });
+    for (final bodyId in _instantNodes.keys.toList()) {
+      if (!_instant.hasPendingOn(bodyId)) _dropInstantFor(bodyId);
+    }
+    for (final bodyId in _instant.bodies) {
+      final root = _roots[bodyId];
+      final body = snap.bodies[bodyId];
+      if (root == null || body == null) continue;
+      final revision = _instant.revisionOf(bodyId);
+      if (_instantBuilt[bodyId] == revision) {
+        final existing = _instantNodes[bodyId];
+        if (existing != null && (moved[bodyId] ?? true)) {
+          existing.localTransform =
+              _anchorTransform(body, root.anchorBF, origin);
+        }
+        continue;
+      }
+      _dropInstantFor(bodyId);
+      _instantBuilt[bodyId] = revision;
+      final g = InstantRoadGeometry();
+      for (final e in _instant.pendingOn(bodyId)) {
+        InstantRoadMesher.emit(g, e.road, root.anchorBF);
+      }
+      final primitives = <fs.MeshPrimitive>[
+        for (final (m, kind) in g.parts)
+          if (_geometryOf(m.build()) case final geometry?)
+            fs.MeshPrimitive(geometry, _materialOf(kind)),
+      ];
+      if (primitives.isEmpty) continue;
+      // No shadow of its own: the tile's build of the road casts, and this
+      // is gone by then.
+      final node = fs.Node(mesh: fs.Mesh.primitives(primitives: primitives))
+        ..castsShadow = false;
+      node.localTransform = _anchorTransform(body, root.anchorBF, origin);
+      _scene.add(node);
+      _instantNodes[bodyId] = node;
+    }
+  }
+
+  void _dropInstantFor(String bodyId) {
+    final node = _instantNodes.remove(bodyId);
+    if (node != null) _scene.remove(node);
+    _instantBuilt.remove(bodyId);
+  }
+
+  /// Drop the instant nodes. The tracker keeps its roads, so the next sync
+  /// builds them again — on fresh material handles, after a reset.
+  void _dropInstantNodes() {
+    for (final bodyId in _instantNodes.keys.toList()) {
+      _dropInstantFor(bodyId);
+    }
+    _instantBuilt.clear();
+  }
+
+  /// Draw the road tool's overlay (see [RoadOverlayState]) — the road being
+  /// laid, the lines, the markers — as one node, rebuilt only when the
+  /// state's revision or the node's anchor moves: a frame with the mouse at
+  /// rest costs an integer compare, and at most the anchor's transform
+  /// when the body has turned.
+  void _syncRoadOverlay(
+      WorldSnapshot snap, FloatingOrigin origin, Map<String, bool> moved) {
+    final s = RoadOverlayState.instance;
+    final body = snap.bodies[s.bodyId];
+    final first = RoadOverlayMesher.anchorOf(s);
+    if (body == null || first == null) {
+      _dropRoadOverlay();
+      return;
+    }
+    // At the body's root where there is one — fixed for the root's life,
+    // so a ghost following the mouse rebuilds at the same place — else at
+    // the overlay's own first point, over a site with nothing on it yet.
+    final anchor = _roots[s.bodyId]?.anchorBF ?? first;
+    if (!_overlayGate.wants(s.revision, s.bodyId, anchor)) {
+      final node = _overlayNode;
+      if (node != null && (moved[s.bodyId] ?? true)) {
+        node.localTransform = _anchorTransform(body, anchor, origin);
+      }
+      return;
+    }
+    _removeOverlayNode();
+    final g = RoadOverlayMesher.build(s, anchor);
+    final primitives = <fs.MeshPrimitive>[
+      for (final MapEntry(key: kind, value: m) in g.opaque.entries)
+        if (_geometryOf(m.build()) case final geometry?)
+          fs.MeshPrimitive(geometry, _materialOf(kind)),
+    ];
+    final t = g.translucent;
+    if (!t.isEmpty) {
+      primitives.add(fs.MeshPrimitive(
+        fs.MeshGeometry.fromArrays(
+          positions: t.positions,
+          normals: t.normals,
+          texCoords: t.texCoords,
+          colors: t.colors,
+          indices: t.indices,
+          retainCpuData: false,
+        ),
+        _overlayMaterial ??= _newOverlayMaterial(),
+      ));
+    }
+    if (primitives.isEmpty) return;
+    // A preview casts nothing: the ground under a raised ghost is where
+    // the player is looking.
+    final node = fs.Node(mesh: fs.Mesh.primitives(primitives: primitives))
+      ..castsShadow = false;
+    node.localTransform = _anchorTransform(body, anchor, origin);
+    _scene.add(node);
+    _overlayNode = node;
+  }
+
+  /// Unlit, its colour and alpha from the vertices, in the engine's
+  /// depth-sorted blended pass.
+  static fs.UnlitMaterial _newOverlayMaterial() => fs.UnlitMaterial()
+    ..alphaMode = fs.AlphaMode.blend
+    ..vertexColorWeight = 1.0;
+
+  void _removeOverlayNode() {
+    final node = _overlayNode;
+    if (node == null) return;
+    _scene.remove(node);
+    _overlayNode = null;
+  }
+
+  /// Drop the overlay's node, and what it was built from, so the next sync
+  /// builds it again — on fresh material handles, after a reset.
+  void _dropRoadOverlay() {
+    _removeOverlayNode();
+    _overlayGate.reset();
+    _overlayMaterial = null;
+  }
+
   /// Height a street tree is grown at. Real pollarded street stock runs
   /// 7-10 m; the wild broadleaf default is taller.
   static double streetTreeHeightM = 8.0;
@@ -2840,6 +2880,8 @@ class CityNodes {
       _scene.remove(root.node);
     }
     _roots.clear();
+    // The tiles went with the roots: the next cut is every body's first.
+    _instant.reset();
     _byBody = {};
     _structureSig = '';
     _lastBuildings = null;
@@ -3298,17 +3340,36 @@ class _Tile {
   /// The cell's centre, body-fixed: the tile's anchor.
   final Vector3 centreBF;
   final double halfDiagonalM;
-  final List<BuildingSnapshot> buildings = [];
-  final List<RoadSnapshot> roads = [];
+
+  /// The tile's members, as the last cut made them (see [adopt]).
+  List<BuildingSnapshot> buildings = const [];
+  List<RoadSnapshot> roads = const [];
 
   /// The tile's patches, as indices into the frame's columns.
-  final CityTilePatchRefs patches = CityTilePatchRefs();
-  final List<CityTileEnd> ends = [];
+  CityTilePatchRefs patches = CityTilePatchRefs();
+  List<CityTileEnd> ends = const [];
+
+  /// The player's junction overrides the tile's junction pass may need.
+  List<CityTileJunction> junctions = const [];
 
   /// Body-centre distance of the outermost building centre in the tile
   /// (0 with no buildings): the shell the camera's altitude is measured
   /// over in [CityNodes.tileCanDetail].
   double maxRadiusM = 0;
+
+  /// Take a cut's members and its structure key. Where the key held they
+  /// are the same content in the new frame's objects, so nothing built
+  /// from the old ones — the packed columns, the traffic table — is stale,
+  /// and no old frame is kept alive through them.
+  void adopt(CityTileBucket b) {
+    buildings = b.buildings;
+    roads = b.roads;
+    patches = b.patches;
+    ends = b.ends;
+    junctions = b.junctions;
+    maxRadiusM = b.maxRadiusM;
+    structureKey = b.structureKey;
+  }
 
   /// The tile's nodes, children of the body's root.
   final List<fs.Node> batches = [];

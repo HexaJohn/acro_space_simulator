@@ -1475,6 +1475,79 @@ class RoadSnapshot {
       );
 }
 
+/// A player's override of one junction, flattened for the wire: the
+/// junction's place on the ground, body-fixed, and what the player said.
+///
+/// Keyed by PLACE, as the domain's `JunctionOverride` is — road ids change
+/// every time a road is split, a junction's place does not — so a renderer
+/// matches it to the junction its road ends make within
+/// `JunctionOverride.matchM` of [px], [py], [pz]. A stop leg is named by a
+/// point [stopReachM] out along it rather than by the domain's heading: a
+/// heading is measured in the colony's local frame, which the frame does
+/// not carry, and a point on the leg is what a renderer holding road ends
+/// can compare with.
+class JunctionSnapshot {
+  const JunctionSnapshot({
+    required this.colonyId,
+    required this.body,
+    required this.px,
+    required this.py,
+    required this.pz,
+    this.lights = -1,
+    this.stopPoints = const [],
+    this.stopsSet = false,
+  });
+
+  final String colonyId;
+  final String body;
+
+  /// The junction on the ground, body-fixed metres.
+  final double px, py, pz;
+
+  /// Lights forced on (1), forced off (0), or left to the warrant (-1).
+  final int lights;
+
+  /// Flattened x,y,z triples, body-fixed: a point [stopReachM] out along
+  /// each leg the player made stop, at the junction's own ground height.
+  final List<double> stopPoints;
+
+  /// Whether the player chose the stop legs at all. Clear, the junction
+  /// keeps the warrant's default stop legs; set with no [stopPoints], no
+  /// leg stops — which an empty list alone could not say.
+  final bool stopsSet;
+
+  /// How far out along a leg its stop point is: past the junction's own
+  /// spread (its ends meet within a few metres), well inside the block.
+  static const double stopReachM = 12.0;
+
+  Map<String, dynamic> toJson() => {
+        'colony': colonyId,
+        'body': body,
+        'p': [px, py, pz],
+        if (lights != -1) 'lights': lights,
+        // Present — even empty — exactly when the player chose the stops.
+        if (stopsSet) 'stops': stopPoints,
+      };
+
+  factory JunctionSnapshot.fromJson(Map<String, dynamic> j) {
+    final p = (j['p'] as List?) ?? const [];
+    double at(int i) => i < p.length ? (p[i] as num).toDouble() : 0.0;
+    final stops = j['stops'] as List?;
+    return JunctionSnapshot(
+      colonyId: j['colony'] as String? ?? '',
+      body: j['body'] as String? ?? '',
+      px: at(0),
+      py: at(1),
+      pz: at(2),
+      lights: (j['lights'] as num?)?.toInt() ?? -1,
+      stopPoints: Float64List.fromList([
+        for (final v in stops ?? const []) (v as num).toDouble()
+      ]),
+      stopsSet: stops != null,
+    );
+  }
+}
+
 /// A discrete sim event that fired this tick, flattened for the wire. The
 /// renderer switches on [kind] and looks up [subject] in the frame for FX.
 ///   subject   = primary asset id (usually the vessel)
@@ -1826,6 +1899,17 @@ class WorldSnapshot {
   /// conversion) or be drawn as a textured sphere.
   final List<MegastructureSnapshot> megastructures;
 
+  /// Per colony id, how often its road network's CONTENT has changed (see
+  /// `CitySim.roadsRevision`): a road laid, split, upgraded, reversed,
+  /// renamed or re-routed, a junction overridden. What a renderer keys its
+  /// road work on — an in-place edit keeps every count the frame has, and a
+  /// renderer that re-cut its tiles only when a count moved went on drawing
+  /// an upgraded road as what it had been.
+  final Map<String, int> roadsRevision;
+
+  /// The players' junction overrides, every colony's (see
+  /// [JunctionSnapshot]).
+  final List<JunctionSnapshot> junctions;
 
   // Not const: the empty patch columns are typed lists, which have no const
   // form, and nothing constructs a frame as a constant.
@@ -1841,6 +1925,8 @@ class WorldSnapshot {
     this.events = const [],
     this.terrainEdits = const [],
     this.megastructures = const [],
+    this.roadsRevision = const {},
+    this.junctions = const [],
   }) : patches = patches ?? CityPatchColumns.empty;
 
   /// The same frame at a different sim time.
@@ -1862,6 +1948,8 @@ class WorldSnapshot {
         events: events,
         terrainEdits: terrainEdits,
         megastructures: megastructures,
+        roadsRevision: roadsRevision,
+        junctions: junctions,
       );
 
   /// The deformations for [bodyId], rebuilt as a domain store ready to hand to
@@ -1911,6 +1999,8 @@ class WorldSnapshot {
       }
     }
     final roads = <RoadSnapshot>[];
+    final junctions = <JunctionSnapshot>[];
+    final roadsRevision = <String, int>{};
     final patches = CityPatchColumnsBuilder();
     // City-builder colonies. Their cells are placed on the same tangent grid as
     // the legacy colonies, but centred on the colony site rather than running
@@ -2014,32 +2104,119 @@ class WorldSnapshot {
                 ? radii[a]
                 : radii[a] + (radii[b] - radii[a]) * ((i - a) / (b - a));
           }
-          final flat = <double>[];
-          for (var i = 0; i <= last; i++) {
-            final bf = city.localToBodyFixed(pts[i], bodyRadiusM: radii[i]);
-            flat.addAll([bf.x, bf.y, bf.z]);
+          // Arc along the capture's OWN samples, in plan, for the roads that
+          // need one: a raised or sunk road's deck is read against it, and a
+          // reversed road's bridges are mirrored across it.
+          final deck = road.deck;
+          final reversed = road.reversed;
+          Float64List? arc;
+          if (deck != null || reversed) {
+            arc = Float64List(pts.length);
+            for (var i = 1; i <= last; i++) {
+              arc[i] = arc[i - 1] + pts[i].distanceTo(pts[i - 1]);
+            }
           }
+          final lengthM = arc == null ? 0.0 : arc[last];
+          // The deck above the drape, per point: arithmetic over the drape
+          // radii just sampled, never a ground query of its own — the
+          // capture runs every frame, and a ground query in a built city is
+          // milliseconds. A deck's heights are above the body DATUM and the
+          // drape's radii are from the body's centre, so the datum goes back
+          // in.
+          Float64List? lifts;
+          if (deck != null) {
+            lifts = Float64List(pts.length);
+            for (var i = 0; i <= last; i++) {
+              lifts[i] =
+                  body.radius + deck.heightAt(arc![i], lengthM) - radii[i];
+            }
+          }
+          // A reversed one-way road goes out FLIPPED — points and lifts last
+          // to first, its bridges mirrored, its tapers swapped — so the
+          // renderer's one rule, that traffic runs first point to last,
+          // holds without it ever learning that a road can be reversed.
+          //
           // Typed, not a growable list of boxed doubles: fifty thousand
           // roads' points were 5.8 million heap objects for the collector
           // to mark on every old-generation pass, and the pauses that
           // marking finished with landed in the frame. A Float64List IS a
           // List<double> to every reader.
+          final flat = Float64List(3 * pts.length);
+          for (var k = 0; k <= last; k++) {
+            final i = reversed ? last - k : k;
+            final bf = city.localToBodyFixed(pts[i], bodyRadiusM: radii[i]);
+            flat[3 * k] = bf.x;
+            flat[3 * k + 1] = bf.y;
+            flat[3 * k + 2] = bf.z;
+          }
+          if (reversed && lifts != null) {
+            for (var a = 0, b = last; a < b; a++, b--) {
+              final t = lifts[a];
+              lifts[a] = lifts[b];
+              lifts[b] = t;
+            }
+          }
           roads.add(RoadSnapshot(
             colonyId: city.id,
             body: body.id.value,
-            points: Float64List.fromList(flat),
+            points: flat,
             halfWidthM: road.halfWidth,
             roadClassIndex: road.roadClass.index,
             sealed: road.sealed,
             soundWalls: road.soundWalls,
             collector: road.collector,
-            bridges: Float64List.fromList([
-              for (final (a, b) in road.bridges) ...[a, b]
-            ]),
-            startHalfWidthM: road.startHalfWidthM,
-            endHalfWidthM: road.endHalfWidthM,
+            bridges: Float64List.fromList(reversed
+                ? [
+                    for (final (a, b) in road.bridges.reversed)
+                      ...[lengthM - b, lengthM - a]
+                  ]
+                : [
+                    for (final (a, b) in road.bridges) ...[a, b]
+                  ]),
+            startHalfWidthM:
+                reversed ? road.endHalfWidthM : road.startHalfWidthM,
+            endHalfWidthM: reversed ? road.startHalfWidthM : road.endHalfWidthM,
+            id: road.id,
+            decoration: road.decoration.index,
+            lifts: lifts ?? const <double>[],
           ));
         }
+        // The players' junction overrides, each on the ground at its own
+        // point — one cached sample per override, keyed like the rest — and
+        // each stop leg as a point out along it at that same height, so a
+        // renderer can match both against the road ends it holds.
+        for (final o in city.junctionOverrides.values) {
+          if (o.isEmpty) continue;
+          final radius = groundFor('junction:${o.key}', o.at);
+          final at = city.localToBodyFixed(o.at, bodyRadiusM: radius);
+          final headings = o.stopHeadings;
+          final stops = Float64List(3 * (headings?.length ?? 0));
+          if (headings != null) {
+            for (var k = 0; k < headings.length; k++) {
+              // Headings run from north toward east (see Vec2.heading).
+              final h = headings[k];
+              final p = city.localToBodyFixed(
+                  o.at +
+                      Vec2(math.sin(h), math.cos(h)) *
+                          JunctionSnapshot.stopReachM,
+                  bodyRadiusM: radius);
+              stops[3 * k] = p.x;
+              stops[3 * k + 1] = p.y;
+              stops[3 * k + 2] = p.z;
+            }
+          }
+          junctions.add(JunctionSnapshot(
+            colonyId: city.id,
+            body: body.id.value,
+            px: at.x,
+            py: at.y,
+            pz: at.z,
+            lights: switch (o.lights) { null => -1, true => 1, false => 0 },
+            stopPoints: stops,
+            stopsSet: headings != null,
+          ));
+        }
+        roadsRevision[city.id] = city.roadsRevision;
         // Roads, zoned-but-unbuilt lots and support platforms. These are what
         // the player has actually placed a moment after founding, so leaving
         // them out is what made a new colony look like nothing happened.
@@ -2197,6 +2374,8 @@ class WorldSnapshot {
       },
       buildings: buildings,
       roads: roads,
+      roadsRevision: roadsRevision,
+      junctions: junctions,
       patches: patches.build(),
       events: events,
       terrainEdits: terrainEdits == null
@@ -2227,6 +2406,9 @@ class WorldSnapshot {
         'vessels': [for (final v in vessels.values) v.toJson()],
         'buildings': [for (final b in buildings.values) b.toJson()],
         'roads': [for (final r in roads) r.toJson()],
+        if (roadsRevision.isNotEmpty) 'roadsRev': roadsRevision,
+        if (junctions.isNotEmpty)
+          'junctions': [for (final x in junctions) x.toJson()],
         'patches': patches.toJsonList(),
         'events': [for (final e in events) e.toJson()],
         if (terrainEdits.isNotEmpty)
@@ -2263,6 +2445,17 @@ class WorldSnapshot {
       roads: [
         for (final r in roadList)
           RoadSnapshot.fromJson(r as Map<String, dynamic>),
+      ],
+      // Both optional, and both skip what they cannot read: a frame from
+      // before the road tool had neither.
+      roadsRevision: {
+        for (final e
+            in ((j['roadsRev'] as Map?) ?? const <String, dynamic>{}).entries)
+          if (e.value is num) '${e.key}': (e.value as num).toInt(),
+      },
+      junctions: [
+        for (final x in (j['junctions'] as List?) ?? const [])
+          if (x is Map) JunctionSnapshot.fromJson(x.cast<String, dynamic>()),
       ],
       patches: CityPatchColumns.fromJsonList(patchList),
       buildings: {

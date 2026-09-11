@@ -56,6 +56,20 @@ void main() {
         bridges: i % 3 == 0 ? const [] : [for (var k = 0; k < 4; k++) d(100)],
         startHalfWidthM: i % 4 == 1 ? null : d(8),
         endHalfWidthM: i % 4 == 2 ? null : d(8),
+        id: 'r$i',
+        decoration: i % RoadDecoration.values.length,
+        // One road in four raised or sunk, a lift per point; the rest on
+        // the ground, carrying none.
+        lifts: i % 4 == 3 ? [for (var k = 0; k < points; k++) d(40)] : const [],
+      );
+
+  CityTileJunction junction(int i) => CityTileJunction(
+        Vector3(d(), d(), r),
+        i % 3 - 1,
+        i % 2 == 0 ? const [] : [for (var k = 0; k < 3 * (1 + i % 3); k++) d()],
+        // Unsaid (then it follows the list), said with points, said with
+        // none — every stop taken off — and said clear over points.
+        stopsSet: switch (i % 4) { 0 => null, 1 || 2 => true, _ => false },
       );
 
   CityPatchSnapshot patch(int i) => CityPatchSnapshot(
@@ -81,6 +95,8 @@ void main() {
         RoadClass.values[i % RoadClass.values.length],
         i % 2 == 0,
         i % 3 == 0,
+        isStart: i % 4 < 2,
+        liftM: i % 5 == 0 ? 0 : d(30),
       );
 
   test('the members round-trip field for field', () {
@@ -93,6 +109,7 @@ void main() {
         i % 3 == 0 ? null : (d(8), 1 + rng.nextInt(4)),
     ];
     final transitEnds = [for (var i = 0; i < 6; i++) Vector3(d(), d(), r)];
+    final junctions = [for (var i = 0; i < 9; i++) junction(i)];
 
     final columns = CityTileColumns.fromSnapshots(
       buildings: buildings,
@@ -101,8 +118,10 @@ void main() {
       ends: ends,
       roadEnds: roadEnds,
       transitEnds: transitEnds,
+      junctions: junctions,
     );
     expect(columns.buildingCount, buildings.length);
+    expect(columns.junctionCount, junctions.length);
     expect(columns.roadCount, roads.length);
     expect(columns.patchCount, patches.length);
     expect(columns.endCount, ends.length);
@@ -142,7 +161,19 @@ void main() {
       expect(b.bridges, orderedEquals(a.bridges));
       expect(b.startHalfWidthM, a.startHalfWidthM);
       expect(b.endHalfWidthM, a.endHalfWidthM);
+      expect(b.decoration, a.decoration);
+      expect(b.lifts, orderedEquals(a.lifts));
+      // The id stays on the frame: the meshing never reads it (see the
+      // library docs of city_tile_columns.dart).
+      expect(b.id, isNull);
     }
+    expect(back.roads.map((x) => x.decoration).toSet(),
+        {for (final v in RoadDecoration.values) v.index});
+    expect(back.roads.any((x) => x.lifts.isEmpty), isTrue);
+    expect(back.roads.any((x) => x.lifts.isNotEmpty), isTrue);
+    // A road on the ground carries no lift bytes: only the raised ones'.
+    expect(columns.roadLifts.length,
+        roads.fold<int>(0, (n, x) => n + x.lifts.length));
     // Both flavours of null went round: one road with neither end
     // tapered, one with only the start.
     expect(back.roads.any((x) => x.startHalfWidthM == null), isTrue);
@@ -180,7 +211,11 @@ void main() {
       expect(b.roadClass, a.roadClass);
       expect(b.paved, a.paved);
       expect(b.collector, a.collector);
+      expect(b.isStart, a.isStart);
+      expect(b.liftM, a.liftM);
     }
+    expect(back.ends.any((e) => e.isStart), isTrue);
+    expect(back.ends.any((e) => !e.isStart), isTrue);
 
     expect(back.roadEnds.length, roadEnds.length);
     for (var i = 0; i < roadEnds.length; i++) {
@@ -192,6 +227,38 @@ void main() {
           back.transitEnds[i].z],
           [transitEnds[i].x, transitEnds[i].y, transitEnds[i].z]);
     }
+
+    expect(back.junctions.length, junctions.length);
+    for (var i = 0; i < junctions.length; i++) {
+      final a = junctions[i], b = back.junctions[i];
+      expect([b.at.x, b.at.y, b.at.z], [a.at.x, a.at.y, a.at.z]);
+      expect(b.lights, a.lights);
+      expect(b.stopPoints, orderedEquals(a.stopPoints));
+      expect(b.stopsSet, a.stopsSet);
+    }
+    // Every flavour went round: lights on, off and the warrant's; stops
+    // chosen with points, chosen with none, and left to the default.
+    expect(back.junctions.map((j) => j.lights).toSet(), {-1, 0, 1});
+    expect(back.junctions.any((j) => j.stopsSet && j.stopPoints.isNotEmpty),
+        isTrue);
+    expect(back.junctions.any((j) => j.stopsSet && j.stopPoints.isEmpty),
+        isTrue);
+    expect(back.junctions.any((j) => !j.stopsSet && j.stopPoints.isEmpty),
+        isTrue);
+  });
+
+  test('an end of a class this build does not know decodes clamped', () {
+    // RoadClass only grows; a newer publisher's class must not throw here.
+    final columns = CityTileColumns.fromSnapshots(
+      buildings: const [],
+      roads: const [],
+      patches: CityPatchColumns.empty,
+      ends: [end(0)],
+      roadEnds: const [],
+      transitEnds: const [],
+    );
+    columns.endI[0] = RoadClass.values.length + 5;
+    expect(columns.toSnapshots().ends.single.roadClass, RoadClass.values.last);
   });
 
   test('an empty tile round-trips', () {
