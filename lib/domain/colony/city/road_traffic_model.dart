@@ -50,32 +50,9 @@ import 'city_sim.dart';
 import 'parcel.dart';
 import 'road_graph.dart';
 import 'road_noise.dart';
+import 'traffic_readout.dart';
 
-/// Why a vehicle is on the road. The Traffic Routes view filters by it.
-enum TripKind { commuter, shopper, goods, service }
-
-/// One routed trip, as the Traffic Routes view draws it.
-class TripRoute {
-  const TripRoute({
-    required this.kind,
-    required this.weight,
-    required this.roadIds,
-    required this.polyline,
-  });
-
-  final TripKind kind;
-
-  /// Vehicles per peak on it: its origin stretch's trips of [kind] to its
-  /// destination stretch — never scaled.
-  final double weight;
-
-  /// The roads it uses, in order, each once per visit.
-  final List<String> roadIds;
-
-  /// Its path, colony-local metres, from where it leaves its origin's road
-  /// to where it stops on its destination's.
-  final List<Vec2> polyline;
-}
+export 'traffic_readout.dart' show CityTrafficReadout, TripKind, TripRoute;
 
 /// What stands on a lot, as the model counts it.
 class TrafficLot {
@@ -1596,7 +1573,7 @@ class CityTrafficModel {
 /// and grown buildings, the grid, the junction overrides, the roads
 /// revision — so the sim holds one of these and calls [advance] from its
 /// own tick, and nothing here reaches back into how the sim works.
-class CityRoadTraffic {
+class CityRoadTraffic implements CityTrafficReadout {
   CityRoadTraffic(this.sim, {this.tuning = const TrafficTuning()});
 
   final CitySim sim;
@@ -1630,6 +1607,7 @@ class CityRoadTraffic {
 
   /// Whether a window has been published — until then the sim should keep
   /// its own frontage-local congestion.
+  @override
   bool get hasRun => _model?.hasRun ?? false;
 
   /// The colony day, colony seconds: the tick's own day length (an Earth
@@ -1793,17 +1771,28 @@ class CityRoadTraffic {
     return out;
   }
 
+  @override
   double get peakCongestion => model.peakCongestion;
+  @override
+  double get averageCongestion => model.averageCongestion;
+  @override
   double congestionOf(String roadId) => model.congestionOf(roadId);
+  @override
   double volumeOf(String roadId) => model.volumeOf(roadId);
+  @override
   List<TripRoute> routesThrough(String roadId,
           {Set<TripKind>? kinds, int limit = 64}) =>
       model.routesThrough(roadId, kinds: kinds, limit: limit);
+  @override
   bool serviceReach(String lotId) => model.serviceReach(lotId);
+  @override
   bool deliveryReach(String lotId) => model.deliveryReach(lotId);
+  @override
   double noiseOf(String lotId) => model.noiseOf(lotId);
+  @override
   double landValueOf(String lotId) =>
       model.landValueOf(lotId, pollution: sim.pollution);
+  @override
   double get averageLandValue =>
       model.averageLandValue(pollution: sim.pollution);
 
@@ -1819,6 +1808,7 @@ class CityRoadTraffic {
   /// and counting it here as well cut a quiet starter town's tax by an
   /// eighth for smoke it was already paying for. [landValueOf] still shows
   /// the air, for the player reading a lot.
+  @override
   double get taxLandValueFactor => model.taxFactor();
 }
 

@@ -1527,7 +1527,7 @@ class CitySim {
         (1 - corruption * 0.6) *
         // Land value: quiet, leafy streets pay more (exactly 1 until the
         // traffic model has valued a built lot).
-        roadTraffic.taxLandValueFactor;
+        trafficReadout.taxLandValueFactor;
     // Split, and kept, so a budget readout can say WHERE the money comes from
     // instead of watching a total tick over. Display only: the tick writes
     // these, nothing reads them back.
@@ -3344,6 +3344,13 @@ class CitySim {
   RoadGraph get roadGraph => roadTraffic.graph;
   CityTrafficModel get trafficModel => roadTraffic.model;
 
+  /// What the traffic tells the rest of the sim and the views — congestion,
+  /// reach, noise, land value, the routes through a road. Everything that
+  /// READS the traffic reads it here, never [roadTraffic]: the routed model
+  /// answers today, and an agent simulation can answer tomorrow without
+  /// one consumer changing.
+  CityTrafficReadout get trafficReadout => roadTraffic;
+
   ParcelNetwork? _parcelNet;
   int _parcelNetVersion = -1;
 
@@ -4079,7 +4086,7 @@ class CitySim {
       // Shops and works need their goods delivered: a lot no lorry can
       // reach the right way round does not grow, and what stands declines.
       final delivered =
-          kind == 'residential' || roadTraffic.deliveryReach(parcel.id);
+          kind == 'residential' || trafficReadout.deliveryReach(parcel.id);
       if (!net.lotServed(parcel.id) || !delivered || demand < growThreshold) {
         final next = cur - dt * 0.02;
         if (next <= 0) {
@@ -4091,7 +4098,7 @@ class CitySim {
       }
       // Homes come up slower beside a loud road.
       final quiet = kind == 'residential'
-          ? 1 - 0.5 * roadTraffic.noiseOf(parcel.id)
+          ? 1 - 0.5 * trafficReadout.noiseOf(parcel.id)
           : 1.0;
       grownParcels[parcel.id] =
           math.min(3.2, cur + dt * 0.03 * demand * quiet);
@@ -4109,8 +4116,8 @@ class CitySim {
     // half what the typical trip meets: a routed peak sits on the trunk
     // road every trip funnels onto, and read alone it throttles a whole
     // colony for one busy junction.
-    if (roadTraffic.hasRun) {
-      final m = roadTraffic.model;
+    final m = trafficReadout;
+    if (m.hasRun) {
       parcelCongestion =
           (0.5 * (m.peakCongestion + m.averageCongestion)).clamp(0.0, 1.0);
       return;
@@ -4168,7 +4175,7 @@ class CitySim {
     lotFires.forEach((id, intensity) {
       // The engine has to be able to GET there: a lot no station reaches
       // along the one-way streets burns with a fraction of the cover.
-      final reach = roadTraffic.serviceReach(id) ? 1.0 : 0.3;
+      final reach = trafficReadout.serviceReach(id) ? 1.0 : 0.3;
       final next = intensity + (0.25 - suppression * reach * 0.45) * dt;
       if (next <= 0) {
         done.add(id); // put out before it took the building
