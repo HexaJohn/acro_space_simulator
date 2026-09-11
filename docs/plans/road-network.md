@@ -504,7 +504,13 @@ grass verges and planted medians, and plans junctions by legs.
 used to detach every chunk a new brush touched before its re-mesh existed —
 a black hole with the loading wireframe over the town on every road built.
 Touched chunks now stand in until their replacement lands (`_editStale`);
-scatter keeps stale cells drawn, less the props the new road covers.
+scatter keeps stale cells drawn, less the props the new road covers. The
+tick after an edit used to stall for up to a second in the shaper: every
+ground sample is a `groundRadiusAt` march through the brushes already laid
+there, re-reading the relief and the edit index at each of its ~300 steps,
+and one `pending()` asked the same place up to four times. The march now
+memoises per ray direction (bit-identical answers) and `pending()` asks each
+direction once.
 
 **The editor.** `road_tool_controller.dart` (a `RoadToolEditing` mixin on
 `CityEditController`) is the tool's state: the mode — Straight, Curved
