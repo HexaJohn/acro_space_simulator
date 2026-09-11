@@ -71,8 +71,7 @@ class RoadEnd {
 
   /// The road's deck above the drape at this end: 0 on the ground. Ends at
   /// different heights are not one junction — an overpass's end is not a
-  /// leg of the crossing under it (see
-  /// [RoadMesher.junctionLiftToleranceM]).
+  /// leg of the crossing under it (see [RoadMesher.liftsSeparated]).
   final double liftM;
 }
 
@@ -92,7 +91,7 @@ class RoadLeg {
   final bool startsHere;
 
   /// The leg's deck above the drape where it meets the node ([RoadEnd.liftM]):
-  /// within [RoadMesher.junctionLiftToleranceM] of every other leg's.
+  /// at the level of the node's first leg ([RoadMesher.liftsSeparated]).
   final double liftM;
 
   bool get oneWay => roadClass.oneWay;
@@ -992,13 +991,37 @@ class RoadMesher {
 
   // ---- Junctions -----------------------------------------------------------------------------
 
-  /// How near in height two ends must be to meet: a junction is one level.
-  /// The tool's smallest elevation step, three metres, is well outside
-  /// it; the drape's own disagreement at a shared end is well inside.
-  static const double junctionLiftToleranceM = 1.5;
+  /// Whether two road ends at one plan point, their decks [liftA] and
+  /// [liftB] above the drape there, pass one over the other rather than
+  /// meet: the layout's grade-separation rule (`CityLayout.levelsSeparated`)
+  /// read in lifts, so the tiles draw the junctions the layout cut and the
+  /// sim's road graph routes through.
+  ///
+  /// At one point the drape is shared, so a difference of lifts is the
+  /// difference of the decks' heights; and a deck stands clear of the
+  /// ground — on piers or in its tunnel — where its lift is past
+  /// [RoadElevation.structureClearM] or below `-tunnelCoverM`, the survey's
+  /// own line. No lift at all is a road on the ground (the snapshot carries
+  /// lifts only for a deck), which has no level of its own. So: two roads
+  /// on the ground meet; two decks pass [RoadElevation.gradeSeparationM]
+  /// apart or more; a deck and a road on the ground pass where the deck is
+  /// clear of the ground. (A 1.5 m tolerance of its own left two decks four
+  /// metres apart, or a road sunk three metres into a cutting, cut into a
+  /// junction nobody saw.) The generator's roads carry no lifts, so every
+  /// end it lays meets every other exactly as it always has.
+  static bool liftsSeparated(double liftA, double liftB) {
+    final onA = liftA == 0, onB = liftB == 0;
+    if (onA && onB) return false;
+    if (!onA && !onB) {
+      return (liftA - liftB).abs() >= RoadElevation.gradeSeparationM;
+    }
+    final deck = onA ? liftB : liftA;
+    return deck > RoadElevation.structureClearM ||
+        deck < -RoadElevation.tunnelCoverM;
+  }
 
   /// Junctions from road ENDS: ends within [toleranceM] of each other —
-  /// and within [junctionLiftToleranceM] of each other's height — are one
+  /// and at one level ([liftsSeparated] says they meet) — are one
   /// node, and the node's control and the legs that stop come from the
   /// legs meeting there ([junctionPlan]): the class-only warrant for the
   /// generator's roads, and where the road tool had a hand, their sizes
@@ -1103,10 +1126,7 @@ class RoadMesher {
               if (math.sqrt(ex * ex + ey * ey + ez * ez) > toleranceM) continue;
               // Not the seed's level: a road passing over the node or
               // under it, which is no leg of it.
-              if ((ends[j].liftM - ends[i].liftM).abs() >
-                  junctionLiftToleranceM) {
-                continue;
-              }
+              if (liftsSeparated(ends[j].liftM, ends[i].liftM)) continue;
               near.add(j);
             }
           }

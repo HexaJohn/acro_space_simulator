@@ -279,6 +279,12 @@ bool trafficLightsByRule(List<JunctionLeg> legs) {
 /// The legs that stop at a junction without lights: every inbound leg
 /// when they are all the same size of road (an all-way stop), else the
 /// inbound legs smaller than the biggest road there (they give way to it).
+///
+/// "All the same size" is every car leg, the ones leaving included. Asked
+/// of the inbound legs alone, a ramp or a one-way street LEAVING a highway
+/// or a four-lane road left only the through road arriving — all of it
+/// the top size — so the through road was stopped at its own exit, where
+/// nothing crosses it.
 Set<int> defaultStopLegs(List<JunctionLeg> legs) {
   int rank(JunctionLeg l) => l.roadClass.tier.rank;
   var top = -1;
@@ -289,7 +295,9 @@ Set<int> defaultStopLegs(List<JunctionLeg> legs) {
     for (var i = 0; i < legs.length; i++)
       if (legs[i].inbound && legs[i].roadClass.carriesCars) i
   ];
-  if (inbound.every((i) => rank(legs[i]) == top)) return inbound.toSet();
+  if (legs.every((l) => !l.roadClass.carriesCars || rank(l) == top)) {
+    return inbound.toSet();
+  }
   return {
     for (final i in inbound)
       if (rank(legs[i]) < top) i

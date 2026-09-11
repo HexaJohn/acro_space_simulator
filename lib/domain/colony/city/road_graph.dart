@@ -29,7 +29,6 @@ import 'dart:typed_data';
 import 'city_layout.dart';
 import 'parcel.dart';
 import 'road_catalog.dart';
-import 'road_elevation.dart';
 import 'road_junction.dart';
 import 'road_noise.dart';
 import 'spatial_index.dart';
@@ -52,7 +51,8 @@ class RoadNode {
   /// Three collector legs or more: the warrant prefers a roundabout — the
   /// renderer's rule, so the sim times the junction the tiles draw. Kept so
   /// a re-plan under a new override ([RoadGraph.withOverrides]) asks the
-  /// warrant the question the build asked.
+  /// warrant the question the build asked. Counted, like [_lifted], over
+  /// the legs the plan is read over ([RoadGraph._planOf]).
   final bool _roundaboutPreferred;
 
   /// A leg on a deck: the road tool's junction, planned by the leg-aware
@@ -78,7 +78,9 @@ class RoadNode {
   /// Where it is, colony-local metres: the mean of the ends that meet.
   final Vec2 at;
 
-  /// One leg per road end here, as the traffic-light warrant sees it.
+  /// One leg per road end here, as the traffic-light warrant sees it —
+  /// every one a way in and out, though the [plan] is read over only the
+  /// ones the tiles draw a junction of (`RoadClass.joinsJunctions`).
   final List<JunctionLeg> legs;
 
   /// The road each of [legs] belongs to.
@@ -88,8 +90,9 @@ class RoadNode {
   /// override where one sits within [JunctionOverride.matchM].
   final JunctionPlan plan;
 
-  /// Whether it is on the ground. False for a node in the air or under it,
-  /// which only other ends at its [heightM] can join.
+  /// Whether it is on the ground. False for a node on piers or in a
+  /// tunnel, which only other decks near its [heightM] can join (the
+  /// layout's rule, [CityLayout.levelsSeparated]).
   final bool atGrade;
 
   /// Deck height above the body datum, or null for a node of draped roads.
@@ -192,7 +195,8 @@ class RoadGraph {
   })  : _roadNo = roadNo,
         _lotNo = lotNo;
 
-  /// Two road ends this close in plan (and at one level) are one node — the
+  /// Two road ends this close in plan (and at one level:
+  /// [CityLayout.levelsSeparated] says they meet) are one node — the
   /// renderer's junction tolerance, wide enough to cover the layout's rule
   /// that a road is not cut within 6 m of an end.
   static const double nodeMatchPlanM = 8.0;
@@ -509,7 +513,7 @@ class RoadGraph {
     for (var n = 0; n < nN; n++) {
       if (replan[n] == 0) continue;
       final node = nodes[n];
-      newNodes[n] = node._withPlan(junctionPlanForNetwork(
+      newNodes[n] = node._withPlan(_planOf(
         node.legs,
         lifted: node._lifted,
         roundaboutPreferred: node._roundaboutPreferred,
@@ -630,6 +634,38 @@ class RoadGraph {
       }
     }
     return best;
+  }
+
+  /// The plan of a node of [legs]: `junctionPlanForNetwork` over the legs
+  /// the tiles draw a junction of ([RoadClass.joinsJunctions]), its stop
+  /// legs numbered back into [legs].
+  ///
+  /// Every leg is still a way in and out for routing; only the plan skips
+  /// some. An alley meeting a street is a curb cut, a dirt track meets it
+  /// with nothing at all — the tiles give neither a leg — and read as legs
+  /// they made an all-way stop the town never drew: six seconds lost on
+  /// both approaches of the street at every alley the generator runs down
+  /// a block.
+  static JunctionPlan _planOf(
+    List<JunctionLeg> legs, {
+    required bool lifted,
+    required bool roundaboutPreferred,
+    JunctionOverride? override,
+  }) {
+    final drawn = [
+      for (var k = 0; k < legs.length; k++)
+        if (legs[k].roadClass.joinsJunctions) k
+    ];
+    final all = drawn.length == legs.length;
+    final plan = junctionPlanForNetwork(
+      all ? legs : [for (final k in drawn) legs[k]],
+      lifted: lifted,
+      roundaboutPreferred: roundaboutPreferred,
+      override: override,
+    );
+    if (all || plan.stopLegs.isEmpty) return plan;
+    return JunctionPlan(
+        plan.control, {for (final i in plan.stopLegs) drawn[i]});
   }
 
   /// Whether two records of one road route alike: the same in everything
@@ -760,13 +796,19 @@ class RoadGraph {
       keys[r] = stableKey(baseRoadId(road.id));
     }
 
-    // ---- Ends: 2r is road r's first sample, 2r + 1 its last. A draped
-    // end is on the ground; a deck end is on the ground when the tool laid
-    // it at grade, else in the air (or under the ground) at its height.
+    // ---- Ends: 2r is road r's first sample, 2r + 1 its last, each at its
+    // level as the layout reads it ([CityLayout.levelOf]): none for a
+    // draped end, else its deck's height and whether the deck stands clear
+    // of the ground there. Which ends meet is then the layout's own rule
+    // ([CityLayout.levelsSeparated]) — the one that cut these roads into
+    // junctions and snapped their ends. (A rule of its own — decks within
+    // two metres, a deck end on the ground only within two metres of it —
+    // left decks four metres apart, and a road sunk into a cutting, cut
+    // into junctions the graph then refused to join: islands no car could
+    // reach, on roads the connectivity walk called connected.)
     final nE = 2 * nR;
     final endE = Float64List(nE), endN = Float64List(nE);
-    final endH = Float64List(nE);
-    final endGrade = Uint8List(nE);
+    final endLevel = List<RoadLevel?>.filled(nE, null);
     for (var r = 0; r < nR; r++) {
       final rec = recs[r];
       final last = rec.sampleCount - 1;
@@ -775,14 +817,10 @@ class RoadGraph {
       endE[2 * r + 1] = rec.e[last];
       endN[2 * r + 1] = rec.n[last];
       final deck = roads[r].deck;
-      if (deck == null) {
-        endGrade[2 * r] = endGrade[2 * r + 1] = 1;
-        endH[2 * r] = endH[2 * r + 1] = double.nan;
-      } else {
-        endGrade[2 * r] = deck.startAtGrade ? 1 : 0;
-        endGrade[2 * r + 1] = deck.endAtGrade ? 1 : 0;
-        endH[2 * r] = deck.startM;
-        endH[2 * r + 1] = deck.endM;
+      if (deck != null) {
+        endLevel[2 * r] = CityLayout.levelOf(deck, 0, rec.lengthM);
+        endLevel[2 * r + 1] =
+            CityLayout.levelOf(deck, rec.lengthM, rec.lengthM);
       }
     }
 
@@ -814,8 +852,7 @@ class RoadGraph {
             if (j <= i || cluster[j] >= 0) continue;
             final ex = endE[j] - endE[i], en = endN[j] - endN[i];
             if (math.sqrt(ex * ex + en * en) > tol) continue;
-            if (!_sameLevel(endGrade[i] == 1, endH[i], endGrade[j] == 1,
-                endH[j])) {
+            if (CityLayout.levelsSeparated(endLevel[i], endLevel[j])) {
               continue;
             }
             cluster[j] = c;
@@ -862,8 +899,7 @@ class RoadGraph {
       final r = i >> 1;
       final own = roads[r];
       final pe = endE[i], pn = endN[i];
-      final grade = endGrade[i] == 1;
-      final h = endH[i];
+      final level = endLevel[i];
       final reach = own.halfWidth + maxHalfWidth + attachSlackM;
       var bestD = double.infinity;
       var bestR = -1;
@@ -887,22 +923,12 @@ class RoadGraph {
             own.roadClass != RoadClass.ramp) {
           return;
         }
-        final deck = other.deck;
-        final bool oGrade;
-        final double oH;
-        if (deck == null) {
-          oGrade = true;
-          oH = double.nan;
-        } else {
-          // On the ground there: off its piers, out of its tunnel, and
-          // laid within a node's height of the ground — the rule an end is
-          // judged by (RoadDeck.startAtGrade).
-          oGrade = !deck.onStructureAt(s) &&
-              !deck.inTunnelAt(s) &&
-              deck.offsetAt(s, len).abs() < RoadElevation.nodeMatchM;
-          oH = deck.heightAt(s, len);
+        // At its level there, by the rule the ends were clustered by: a
+        // road the snap would have landed this end on is one it joins.
+        if (CityLayout.levelsSeparated(
+            level, CityLayout.levelOf(other.deck, s, len))) {
+          return;
         }
-        if (!_sameLevel(grade, h, oGrade, oH)) return;
         bestD = d;
         bestR = ro;
         bestS = s;
@@ -946,8 +972,10 @@ class RoadGraph {
       sumE[n] += endE[i];
       sumN[n] += endN[i];
       count[n]++;
-      if (endGrade[i] == 0) nodeGrade[n] = 0;
-      if (!endH[i].isNaN && nodeH[n].isNaN) nodeH[n] = endH[i];
+      final level = endLevel[i];
+      if (level == null) continue;
+      if (level.offGround) nodeGrade[n] = 0;
+      if (nodeH[n].isNaN) nodeH[n] = level.heightM;
     }
 
     // ---- Stations along each road — its two ends and any dead end joined
@@ -1033,12 +1061,17 @@ class RoadGraph {
               startsHere: d.startsHere, heading: d.heading)
       ];
       // The tiles' rules, so a light the player sees is a light the traffic
-      // waits at: three collector legs make a roundabout, and a junction
-      // the tool had a hand in (a deck, a class only the tool lays) takes
-      // the leg-aware warrant — see `junctionPlanForNetwork`.
-      final roundabout = drafts.where((d) => d.road.collector).length >= 3;
-      final lifted = drafts.any((d) => d.road.deck != null);
-      final plan = junctionPlanForNetwork(
+      // waits at: read over the legs the tiles draw ([_planOf]), three
+      // collector legs make a roundabout, and a junction the tool had a
+      // hand in (a deck, a class only the tool lays) takes the leg-aware
+      // warrant — see `junctionPlanForNetwork`.
+      final drawn = [
+        for (final d in drafts)
+          if (d.road.roadClass.joinsJunctions) d
+      ];
+      final roundabout = drawn.where((d) => d.road.collector).length >= 3;
+      final lifted = drawn.any((d) => d.road.deck != null);
+      final plan = _planOf(
         legs,
         lifted: lifted,
         roundaboutPreferred: roundabout,
@@ -1249,17 +1282,6 @@ class RoadGraph {
       overrides: List.unmodifiable(overrideList),
       overridesSignature: overridesSignatureOf(overrideList),
     );
-  }
-
-  /// Whether two ends (on the ground or not, at a height or not — NaN for
-  /// a draped end, which has none) are at one level: both on the ground;
-  /// or both decks within [RoadElevation.nodeMatchM]. A draped end never
-  /// meets an end in the air: it has no height to compare, and the ground
-  /// under a deck is what the deck is clear of.
-  static bool _sameLevel(bool gA, double hA, bool gB, double hB) {
-    if (gA && gB) return true;
-    if (hA.isNaN || hB.isNaN) return false;
-    return (hA - hB).abs() <= RoadElevation.nodeMatchM;
   }
 
   /// Parameter along segment [seg] (samples seg-1 .. seg) of [rec] nearest

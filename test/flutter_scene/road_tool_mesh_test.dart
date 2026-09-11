@@ -628,7 +628,8 @@ void main() {
           js.first.legs.map((l) => l.roadClass).toSet(), {RoadClass.street});
       expect(
           js.last.legs.map((l) => l.roadClass).toSet(), {RoadClass.avenue});
-      // A metre apart is one level; a three-metre step is not.
+      // A metre off the ground is one level; a three-metre step onto piers
+      // is not.
       expect(
           RoadMesher.junctionsFromEnds([
             end(10, 0, RoadClass.street),
@@ -643,6 +644,43 @@ void main() {
             end(0, 10, RoadClass.street, lift: 3),
           ]),
           isEmpty);
+    });
+
+    test("ends meet by the layout's grade-separation rule", () {
+      // Two decks on their piers crossing four metres apart: under the
+      // grade separation, so the layout cut both and the graph routes a
+      // four-leg junction there — the tiles draw it.
+      List<RoadJunction> decks(double a, double b) =>
+          RoadMesher.junctionsFromEnds([
+            end(10, 0, RoadClass.street, lift: a),
+            end(-10, 0, RoadClass.street, lift: a),
+            end(0, 10, RoadClass.street, lift: b),
+            end(0, -10, RoadClass.street, lift: b),
+          ], anchorBF: anchor);
+      final x = decks(20, 24).single;
+      expect(x.legs, hasLength(4));
+      expect(x.control, JunctionControl.stop);
+      // At the grade separation they pass: two roads carrying on.
+      expect(decks(20, 20 + RoadElevation.gradeSeparationM), isEmpty);
+      // A road sunk one three-metre step into a cutting, ending on a
+      // street: graded into the ground, it meets the street — deeper, in
+      // its tunnel, it passes under.
+      List<RoadJunction> sunk(double lift) => RoadMesher.junctionsFromEnds([
+            end(10, 0, RoadClass.street),
+            end(-10, 0, RoadClass.street),
+            end(0, 10, RoadClass.street, lift: lift),
+          ], anchorBF: anchor);
+      expect(sunk(-3).single.legs, hasLength(3));
+      expect(sunk(-9), isEmpty);
+      // The rule, both ways round, in lifts: none is the ground.
+      expect(RoadMesher.liftsSeparated(0, 0), isFalse);
+      expect(RoadMesher.liftsSeparated(-3, 0), isFalse);
+      expect(RoadMesher.liftsSeparated(0, 2.4), isFalse);
+      expect(RoadMesher.liftsSeparated(0, 2.6), isTrue);
+      expect(RoadMesher.liftsSeparated(-5.1, 0), isTrue);
+      expect(RoadMesher.liftsSeparated(24, 20), isFalse);
+      expect(RoadMesher.liftsSeparated(-6, -10), isFalse);
+      expect(RoadMesher.liftsSeparated(12, 17), isTrue);
     });
 
     test('an outgoing one-way leg has no bar, no mast and no signal', () {

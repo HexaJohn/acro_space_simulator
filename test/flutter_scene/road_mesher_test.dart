@@ -454,8 +454,8 @@ void main() {
 
 /// The pair scan [RoadMesher.junctionsFromEnds] replaced, as the reference
 /// the bucketed version must match exactly: for each lowest unused end,
-/// every later unused end within the tolerance — and within
-/// [RoadMesher.junctionLiftToleranceM] of its height — joins its group in
+/// every later unused end within the tolerance — and at its level
+/// ([RoadMesher.liftsSeparated] says they meet) — joins its group in
 /// index order. Copied verbatim once; since the road tool it mirrors the
 /// new semantics as well: a node in a tunnel is dropped, a leg carries
 /// whether its road starts there, and the control, the stop legs and the
@@ -473,10 +473,7 @@ List<RoadJunction> referenceJunctionsFromEnds(List<RoadEnd> ends,
     for (var j = i + 1; j < ends.length; j++) {
       if (used[j]) continue;
       if ((ends[j].at - at).length > toleranceM) continue;
-      if ((ends[j].liftM - ends[i].liftM).abs() >
-          RoadMesher.junctionLiftToleranceM) {
-        continue;
-      }
+      if (RoadMesher.liftsSeparated(ends[j].liftM, ends[i].liftM)) continue;
       used[j] = true;
       group.add(ends[j]);
     }
