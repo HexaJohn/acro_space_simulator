@@ -1632,6 +1632,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     // that took the whole app down on open.
     final city = widget.injectedCity;
     if (city != null) _session.cities.add(city);
+    // Its agents' ticks are held for the replay after each frame's tick
+    // loop (_onFrame); a colony without agents never holds one.
+    city?.agents.frameBudgeted = true;
 
     // CITY BUILDER: the colony is the subject. Open the editor on it and hang
     // the camera over its crossroads, so the mode starts looking at the thing
@@ -1940,6 +1943,18 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     // steps absorbs a half-second hiccup; a longer stall (asset loads, GC)
     // skips time rather than replaying it at ~10-30ms a step.
     if (steps >= 25) _accum = 0;
+    // An agent colony holds its ticks, and they replay here a few agent
+    // sub-steps a frame, so a catch-up frame stays bounded
+    // (docs/plans/agent-traffic.md §5.7). The frame budget is fed what the
+    // loop cost while one ticks; the agents' render clock, the warp.
+    var agentColony = false;
+    for (final c in _cities.all()) {
+      c.agents.endFrame();
+      if (c.agents.enabled) agentColony = true;
+    }
+    SceneSync.tickCostMs =
+        agentColony ? swSteps.elapsedMicroseconds / 1000.0 : 0;
+    SceneSync.simWarp = _clock.warpFactor;
     if (swSteps.elapsedMilliseconds > 500) {
       debugPrint('simSteps: $steps steps in ${swSteps.elapsedMilliseconds}ms');
     }
@@ -2187,6 +2202,18 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     // Held by whatever editor last drove it; a flight opened next must not
     // inherit a colony's zoning view.
     CityNodes.zoneOverlay = false;
+    // The frame hold and the budget's statics are this view's. A colony
+    // that outlives it (the studio's) plays out what it held and holds no
+    // more, since no later host replays it.
+    final agents = widget.injectedCity?.agents;
+    if (agents != null) {
+      while (agents.heldTicks > 0) {
+        agents.endFrame();
+      }
+      agents.frameBudgeted = false;
+    }
+    SceneSync.tickCostMs = 0;
+    SceneSync.simWarp = 1;
     SimViewControl.instance.clear();
     final timingsCb = _timingsCb;
     if (timingsCb != null) {
@@ -2643,6 +2670,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       bodies:
           _universe.current().all.where((b) => !b.isStar).toList(),
     );
+    // The restored colonies are this view's to replay, as its own was.
+    for (final c in _cities.all()) {
+      c.agents.frameBudgeted = true;
+    }
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text('Loaded tick ${_clock.tick}'), duration: const Duration(seconds: 1)));

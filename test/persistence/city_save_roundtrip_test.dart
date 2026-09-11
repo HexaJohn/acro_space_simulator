@@ -11,6 +11,7 @@ import 'package:acro_space_simulator/application/persistence/game_state_codec.da
 import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_config.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
+import 'package:acro_space_simulator/domain/colony/city/city_starter_kit.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/simulation/simulation_clock.dart';
 import 'package:acro_space_simulator/domain/universe/real_solar_system.dart';
@@ -139,6 +140,51 @@ void main() {
         reason: 'half-merging a save into a live world is how a city ends up '
             'with old roads and new buildings');
     expect(live.byId('redtown'), isNotNull);
+  });
+
+  test('a colony with agents keeps them across a save and a load', () {
+    // Slice 1 saves only the flag (docs/plans/agent-traffic.md §14.1):
+    // vehicles in flight re-derive, but a City Builder game must not come
+    // back from a load with its traffic switched off.
+    const codec = GameStateCodec();
+    final agentville = CityStarterKit.found(
+      bodies: bodies().cast(),
+      config: const CityConfig(bodyId: 'earth', gridSize: 20),
+      id: 'agentville',
+      agentTraffic: true,
+    )..advance(0.5);
+    final saved = jsonDecode(jsonEncode(codec.encode(
+      vessels: InMemoryVesselRepository(const []),
+      colonies: InMemoryColonyRepository(),
+      deposits: InMemoryDepositRepository(),
+      clock: SimulationClock(warpFactor: 1, fixedStep: 0.02),
+      cities: InMemoryCityRepository([agentville, buildCity()]),
+    ))) as Map<String, dynamic>;
+    Map<String, dynamic> cityJson(String id) => (saved['cities'] as List)
+        .cast<Map<String, dynamic>>()
+        .firstWhere((c) => c['id'] == id);
+    expect(cityJson('agentville')['agents'], {'v': 1, 'enabled': true});
+    expect(cityJson('redtown').containsKey('agents'), isFalse,
+        reason: 'a colony without agents saves exactly as it always has');
+
+    final restored = InMemoryCityRepository();
+    codec.decode(
+      saved,
+      vessels: InMemoryVesselRepository(const []),
+      colonies: InMemoryColonyRepository(),
+      deposits: InMemoryDepositRepository(),
+      clock: SimulationClock(warpFactor: 1, fixedStep: 0.02),
+      cities: restored,
+      bodies: bodies().cast(),
+    );
+    final back = restored.byId('agentville')!;
+    expect(back.agents.enabled, isTrue);
+    expect(identical(back.trafficReadout, back.agents.readout), isTrue);
+    expect(back.agents.laneGraph, isNull,
+        reason: 'the agents re-derive on their first advance, not at load');
+    back.advance(0.5);
+    expect(back.agents.laneGraph, isNotNull);
+    expect(restored.byId('redtown')!.agents.enabled, isFalse);
   });
 
   test('an old save with no cities key loads without complaint', () {

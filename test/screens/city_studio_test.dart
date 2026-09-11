@@ -31,9 +31,10 @@ void main() {
     // Drag the controls to the end, building every tile on the way, and note
     // which switches were seen. Counting them at the BOTTOM would not work:
     // a ListView unbuilds what has scrolled off, so the tiles higher up are
-    // gone by the time the last one arrives.
+    // gone by the time the last one arrives. The PERF rows come from the
+    // knob table and grow with it, so the drags reach well past the end.
     final seen = <String>{};
-    for (var i = 0; i < 40; i++) {
+    for (var i = 0; i < 60; i++) {
       await t.drag(list.last, const Offset(0, -260));
       await t.pump();
       expect(t.takeException(), isNull,

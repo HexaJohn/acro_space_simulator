@@ -84,6 +84,7 @@ class _CityGameSetupScreenState extends State<CityGameSetupScreen> {
       start: _start,
       id: 'city-${DateTime.now().millisecondsSinceEpoch}',
       name: _name.text.trim().isEmpty ? 'New Colony' : _name.text.trim(),
+      agentTraffic: true,
     );
     Navigator.of(context).pushReplacement(MaterialPageRoute(
       builder: (_) => SimulationView(

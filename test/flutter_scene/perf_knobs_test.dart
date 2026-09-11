@@ -3,6 +3,8 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
+import 'package:acro_space_simulator/domain/colony/city/traffic/traffic_tuning.dart';
+import 'package:acro_space_simulator/infrastructure/flutter_scene/city/agent_traffic_pass.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_nodes.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_mesher.dart';
 import 'package:acro_space_simulator/infrastructure/flutter/screens/city_plat_view.dart'
@@ -77,6 +79,22 @@ void main() {
     expect(PlatLayers.outlines, isFalse);
     expect(PerfKnobs.set('platBlockImages', 'false'), isTrue);
     expect(PlatLayers.blockImages, isFalse);
+  });
+
+  test('the agent traffic\'s knobs front AgentTuning and the pass', () {
+    expect(PerfKnobs.set('maxAgentSubStepsPerFrame', '2'), isTrue);
+    expect(AgentTuning.maxAgentSubStepsPerFrame, 2);
+    expect(PerfKnobs.set('stuckDespawnS', '90'), isTrue);
+    expect(AgentTuning.stuckDespawnS, 90);
+    expect(PerfKnobs.set('agentsOn', 'off'), isTrue);
+    expect(AgentTuning.agentsOn, isFalse);
+    expect(PerfKnobs.set('dontBlockBox', '0'), isTrue);
+    expect(AgentTuning.dontBlockBox, isFalse);
+    expect(PerfKnobs.set('agentsDrawn', 'false'), isTrue);
+    expect(AgentTrafficPass.drawn, isFalse);
+    expect(PerfKnobs.set('agentRenderCap', '500'), isTrue);
+    expect(AgentTrafficPass.renderCap, 500);
+    expect(PerfKnobs.snapshot()['agentRenderCap'], 500);
   });
 
   test('an unknown name or a bad value sets nothing', () {

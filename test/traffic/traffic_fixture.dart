@@ -16,8 +16,8 @@
 ///
 /// The agents' own helpers — [agentsOn], [forceTrip], [routeOf], [laneOn],
 /// [stall] — sit at the end. `freezeDelays` and `setDelay` arrive with the
-/// delay table (slice 2), and [starterKit]'s `agentTraffic` switch with the
-/// colony hook that owns the agents (E2, E17).
+/// delay table (slice 2). [starterKit] and [town] found a colony that runs
+/// its OWN agents when asked (`agentTraffic`, E17), ticked by its advance.
 library;
 
 import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart';
@@ -121,13 +121,18 @@ CitySim signalised({double halfLengthM = 300}) => foundFlat(
     );
 
 /// The City Builder founding (`CityStarterKit.found`), quiet: the crossroads,
-/// the spaceport, the utilities and the warehouse, on the [start] treasury.
+/// the spaceport, the utilities and the warehouse, on the [start] treasury;
+/// with [agentTraffic], the colony's own agents on, as the play surface
+/// founds it.
 CitySim starterKit(
-        {CityStart start = CityStart.relaxed, String body = 'earth'}) =>
+        {CityStart start = CityStart.relaxed,
+        String body = 'earth',
+        bool agentTraffic = false}) =>
     quiet(CityStarterKit.found(
       bodies: fixtureBodies,
       config: CityConfig(bodyId: body, gridSize: 20),
       start: start,
+      agentTraffic: agentTraffic,
     ));
 
 /// The mix [zoneAll] deals round the free lots: two homes to each shop and
@@ -181,9 +186,10 @@ bool place(CitySim city, String site, CityBuildingSpec spec) =>
 
 /// A headless City Builder town: the starter kit, every free street lot
 /// zoned in [townMix], and every one of them built — placed and stable, or
-/// [grown] under demand the way a player's town is.
-CitySim town({bool grown = false}) {
-  final city = starterKit();
+/// [grown] under demand the way a player's town is. [agentTraffic] as for
+/// [starterKit].
+CitySim town({bool grown = false, bool agentTraffic = false}) {
+  final city = starterKit(agentTraffic: agentTraffic);
   zoneAll(city);
   if (grown) {
     growAll(city);
@@ -220,10 +226,10 @@ Parcel lotNearest(CitySim city, Vec2 p) {
 
 // ---- The agents -------------------------------------------------------------
 
-/// [city]'s agents, switched on. Until the colony owns them (E2) a test
-/// holds its own: they read the colony and nothing in the colony reads them,
-/// so the economy stands still while they run — exactly the scope §17.4's
-/// partition test asks for.
+/// Agents of the test's own on [city], switched on, beside the colony's
+/// (which stay off): they read the colony and nothing in the colony reads
+/// them, so the economy stands still while they run — exactly the scope
+/// §17.4's partition test asks for.
 CityAgents agentsOn(CitySim city) => CityAgents(city)..enabled = true;
 
 /// Advances [agents] by [seconds] of agent time in ticks of [dt], calling

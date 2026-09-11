@@ -1175,6 +1175,9 @@ class CitySim {
   /// window resuming) cannot jump the economy forward by minutes in one
   /// integration.
   void advance(double simDt) {
+    // A frame-budgeted host queues the tick whole, to replay it after its
+    // tick loop (agents.endFrame; docs/plans/agent-traffic.md §5.7).
+    if (agents.holdTick(simDt)) return;
     // eventSimWarp (set by a time-dilation event last tick) speeds/slows time.
     final dt = (simDt * eventSimWarp).clamp(0.0, 0.5);
     if (dt <= 0) return;
@@ -1241,8 +1244,11 @@ class CitySim {
     // staffing ratio = filled jobs / required jobs.
     // Commute efficiency: heavy road congestion means workers spend longer
     // travelling, so fewer effective worker-hours reach the jobs. Up to a 40%
-    // staffing penalty at full gridlock.
-    final commuteEff = 1 - math.max(congestion, parcelCongestion) * 0.4;
+    // staffing penalty at full gridlock. With agents, the commutes they
+    // measured: last tick's trip time against free flow, and trips lost.
+    final commuteEff = agents.enabled
+        ? agents.stats.commuteEff
+        : 1 - math.max(congestion, parcelCongestion) * 0.4;
     // Infinite Robotics: automated labour fills every job — buildings run at full
     // staffing with no workers (demo aid + foreshadows the endgame where robotics
     // + compute progressively replace human labour).
@@ -1674,6 +1680,7 @@ class CitySim {
     // 5.9 Parcel-city dynamics: zoned lots grow under demand, roads load
     // up, fires burn along blocks.
     roadTraffic.advance(dt);
+    if (agents.enabled) agents.advance(dt);
     advanceParcelGrowth(dt);
     advanceParcelTraffic();
     advanceParcelFires(dt);
@@ -3354,8 +3361,9 @@ class CitySim {
   /// reach, noise, land value, the routes through a road. Everything that
   /// READS the traffic reads it here, never [roadTraffic]: the routed model
   /// answers today, and an agent simulation can answer tomorrow without
-  /// one consumer changing.
-  CityTrafficReadout get trafficReadout => roadTraffic;
+  /// one consumer changing. In a colony with [agents], they answer.
+  CityTrafficReadout get trafficReadout =>
+      agents.enabled ? agents.readout : roadTraffic;
 
   ParcelNetwork? _parcelNet;
   int _parcelNetVersion = -1;
@@ -3516,6 +3524,7 @@ class CitySim {
   /// carry for every road edit, so a road built, upgraded or re-laid keeps
   /// the district along it exactly as a road committed always has.
   void _carryRenamedLots(Map<String, String> renamed) {
+    agents.onLotsRenamed(renamed);
     for (final e in renamed.entries) {
       final placed = parcelBuildings.remove(e.key);
       if (placed != null) parcelBuildings[e.value] = placed;
@@ -4385,6 +4394,7 @@ class CitySim {
           for (final e in growProgress.entries) '${e.key}': e.value,
         },
         'support': support.toList(),
+        if (agents.hasState) 'agents': agents.toJson(),
       };
 
   factory CitySim.fromJson(
@@ -4558,6 +4568,7 @@ class CitySim {
     });
     sim.support.addAll((j['support'] as List).cast<int>());
     sim.recompute();
+    sim.agents.restore(j['agents']);
     return sim;
   }
 
@@ -4676,6 +4687,7 @@ class CitySim {
         if (c.site == e.key) c.site = e.value;
       }
     }
+    agents.onLotsRenamed(moved);
     // Anything whose ground is simply gone (built over by the new plot) is
     // dropped rather than left dangling against a lot that no longer exists.
     parcelBuildings.removeWhere(
@@ -4879,6 +4891,7 @@ class CitySim {
     craft.removeWhere((c) => c.site == parcelId);
     if (landerPad == parcelId) landerPad = null;
     layout.setUse(parcelId, ParcelUse.unzoned);
+    agents.onLotCleared(parcelId);
   }
 
   // ---- Spaceport traffic: relief missions + scheduled deliveries ----

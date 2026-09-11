@@ -21,7 +21,9 @@ library;
 
 import 'package:flutter_scene/scene.dart' as fs;
 
+import '../../domain/colony/city/traffic/traffic_tuning.dart';
 import '../flutter/screens/city_plat_view.dart' show PlatLayers;
+import 'city/agent_traffic_pass.dart';
 import 'city/city_nodes.dart';
 import 'city/city_tile_mesher.dart';
 import 'frame_budget.dart';
@@ -225,6 +227,111 @@ class PerfKnobs {
           'holds more results in memory.',
       () => CityNodes.maxInFlight,
       (v) => CityNodes.maxInFlight = v.round(),
+    ),
+    // ---- Agent traffic (docs/plans/agent-traffic.md §15.4). The first
+    // eight change what the agents do, so runs compared for determinism
+    // must share them; the next two only when their ticks run; the rest
+    // only what is drawn.
+    PerfKnob(
+      'agentsOn',
+      'Agent traffic in the colonies that run it; off, their vehicles stand '
+          'where they are and the routed model answers the traffic again.',
+      () => AgentTuning.agentsOn ? 1 : 0,
+      (v) => AgentTuning.agentsOn = v != 0,
+      isFlag: true,
+    ),
+    PerfKnob(
+      'pathExpansionsPerStep',
+      'Route-search steps per agent sub-step; fewer is cheaper a sub-step '
+          'and leaves trips waiting longer for a route.',
+      () => AgentTuning.pathExpansionsPerStep,
+      (v) => AgentTuning.pathExpansionsPerStep = v.round(),
+    ),
+    PerfKnob(
+      'maxVehicles',
+      'Vehicles on the road at once; past it, trips wait at their origin. '
+          'The table is sized when a colony\'s agents start.',
+      () => AgentTuning.maxVehicles,
+      (v) => AgentTuning.maxVehicles = v.round(),
+    ),
+    PerfKnob(
+      'maxQueuedPaths',
+      'Car trips waiting for a route at once; past it, trips are deferred.',
+      () => AgentTuning.maxQueuedPaths,
+      (v) => AgentTuning.maxQueuedPaths = v.round(),
+    ),
+    PerfKnob(
+      'maxSpawnsPerStep',
+      'Vehicles pulled out per agent sub-step; the rest wait their turn.',
+      () => AgentTuning.maxSpawnsPerStep,
+      (v) => AgentTuning.maxSpawnsPerStep = v.round(),
+    ),
+    PerfKnob(
+      'stuckDespawnS',
+      'Agent seconds a vehicle may make no progress before it is taken off '
+          'the road; lower hides a jam sooner.',
+      () => AgentTuning.stuckDespawnS,
+      (v) => AgentTuning.stuckDespawnS = v.toDouble(),
+      unit: 's',
+    ),
+    PerfKnob(
+      'impatientGrantS',
+      'Seconds at a line before a vehicle stops waiting for a gap; a clear '
+          'crossing is still required.',
+      () => AgentTuning.impatientGrantS,
+      (v) => AgentTuning.impatientGrantS = v.toDouble(),
+      unit: 's',
+    ),
+    PerfKnob(
+      'dontBlockBox',
+      'A junction is entered only with room to leave it; off, queues spill '
+          'across it and can lock a grid.',
+      () => AgentTuning.dontBlockBox ? 1 : 0,
+      (v) => AgentTuning.dontBlockBox = v != 0,
+      isFlag: true,
+    ),
+    PerfKnob(
+      'maxAgentSubStepsPerFrame',
+      'Agent sub-steps a held colony runs in one frame; more catches up '
+          'faster after a hitch and costs that frame more.',
+      () => AgentTuning.maxAgentSubStepsPerFrame,
+      (v) => AgentTuning.maxAgentSubStepsPerFrame = v.round(),
+    ),
+    PerfKnob(
+      'maxHeldCityS',
+      'Colony seconds the hold may fall behind before one frame drains it '
+          'all: a hitch, never a dropped tick.',
+      () => AgentTuning.maxHeldCityS,
+      (v) => AgentTuning.maxHeldCityS = v.toDouble(),
+      unit: 's',
+    ),
+    PerfKnob(
+      'agentsDrawn',
+      'Draw the agents\' vehicles; off, they still drive.',
+      () => AgentTrafficPass.drawn ? 1 : 0,
+      (v) => AgentTrafficPass.drawn = v != 0,
+      isFlag: true,
+    ),
+    PerfKnob(
+      'agentRenderCap',
+      'Agent vehicles drawn per colony, nearest first.',
+      () => AgentTrafficPass.renderCap,
+      (v) => AgentTrafficPass.renderCap = v.round(),
+    ),
+    PerfKnob(
+      'agentRangeM',
+      'Agent vehicles further than this from the focus are not drawn.',
+      () => AgentTrafficPass.rangeM,
+      (v) => AgentTrafficPass.rangeM = v.toDouble(),
+      unit: 'm',
+    ),
+    PerfKnob(
+      'agentShadowRangeM',
+      'Agent vehicles nearer than this cast shadows; each costs the shadow '
+          'pass a packing.',
+      () => AgentTrafficPass.shadowRangeM,
+      (v) => AgentTrafficPass.shadowRangeM = v.toDouble(),
+      unit: 'm',
     ),
   ];
 

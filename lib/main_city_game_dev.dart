@@ -20,6 +20,17 @@
 ///   ext.acro.citygame?zone=residential  zone every street lot at once
 ///   ext.acro.camera?elevationDeg=&azimuthDeg=&rangeM=
 ///                                  aim the camera, for framing the shot
+///
+/// The colony runs agent traffic unless `--dart-define=AGENTS=false`, and
+/// `ext.acro.citygame` drives it (docs/plans/agent-traffic.md §16.4), each
+/// parameter reporting what it did under `did`:
+///
+///   agents=on|off                  switch the colony's agents
+///   road=add&pts=e,n;e,n&class=I   commit a road (RoadClass index I)
+///   traffic=spawn&n=K[&from=&to=]  force K car trips, homes to jobs
+///   step=S                         run the colony S seconds headless
+///   vehicle=H                      one vehicle, its route lane by lane
+///   traffic=stats | graph=audit    the agents' numbers; their lane graph
 library;
 
 import 'dart:convert';
@@ -36,6 +47,10 @@ import 'domain/colony/city/city_progression.dart';
 import 'domain/colony/city/city_sim.dart';
 import 'domain/colony/city/city_starter_kit.dart';
 import 'domain/colony/city/parcel.dart';
+import 'domain/colony/city/traffic/agent_kind.dart';
+import 'domain/colony/city/traffic/building_table.dart';
+import 'domain/colony/city/traffic/city_agents.dart';
+import 'domain/colony/city/traffic/slot_pool.dart';
 import 'domain/planetary/planet_surface.dart';
 import 'domain/universe/real_solar_system.dart';
 import 'infrastructure/baked_terrain_data.dart';
@@ -64,6 +79,7 @@ Future<void> main() async {
     start: start,
     id: 'city-dev',
     name: 'Dev Colony',
+    agentTraffic: const bool.fromEnvironment('AGENTS', defaultValue: true),
   );
 
   developer.registerExtension('ext.acro.screenshot', (method, params) async {
@@ -112,9 +128,11 @@ Future<void> main() async {
         colony.layout.setUse(lot.id, use);
       }
     }
+    final did = _agentHooks(colony, params);
     final view = SimViewControl.instance.status?.call() ?? const {};
     return developer.ServiceExtensionResponse.result(jsonEncode({
       ..._status(colony),
+      if (did.isNotEmpty) 'did': did,
       // The camera's own geometry, so a framing complaint can be answered with
       // a number instead of a screenshot.
       'camera': {
@@ -193,4 +211,237 @@ Map<String, dynamic> _status(CitySim c) => {
       'zoned': c.layout.parcels.where((p) => p.use.name != 'unzoned').length,
       'grown': c.grownParcels.length,
       'trend': c.popTrend,
+      'agents': _agentsStatus(c.agents),
     };
+
+/// The status's `agents` block (docs/plans/agent-traffic.md §16.4): slice
+/// 1's share of it, with no citizens, pedestrians, parking, services or
+/// stubs yet.
+Map<String, Object?> _agentsStatus(CityAgents a) {
+  final s = a.stats;
+  return {
+    'enabled': a.enabled,
+    'vehicles': a.liveVehicles,
+    'pathQueue': a.pathQueue?.length ?? 0,
+    'deferred': s.deferred,
+    'flow': 1 - s.congestionIndex,
+    'avgTripS': s.avgTripS,
+    'despawn': {
+      'stuck': s.despawnStuck,
+      'wedge': s.despawnWedge,
+      'edit': s.despawnEdit,
+    },
+    'held': {'ticks': a.heldTicks, 'cityS': a.heldCityS},
+    'graph': _graphCounts(a),
+    'tickMs': a.metrics.avgTickMs,
+  };
+}
+
+/// The agent traffic's dev hooks (§16.4, E25), in the order they run:
+/// `agents=on|off`; `road=add&pts=e,n;e,n&class=<index>`, a road committed
+/// the generator's way, to exercise a remap live (`ext.acro.roadtool` lays
+/// one the player's way); `traffic=spawn&n=<k>[&from=<site>&to=<site>]`,
+/// car trips between random homes and workplaces unless told;
+/// `step=<cityS>`; `vehicle=<handle>`; `traffic=stats`; `graph=audit`.
+/// What each did, by name.
+Map<String, Object?> _agentHooks(CitySim c, Map<String, String> p) {
+  final a = c.agents;
+  final did = <String, Object?>{};
+  final on = p['agents'];
+  if (on != null) {
+    a.enabled = on == 'on';
+    did['agents'] = a.enabled;
+  }
+  if (p['road'] == 'add') {
+    final pts = _points(p['pts']);
+    final i = int.tryParse(p['class'] ?? '') ?? RoadClass.street.index;
+    final cls = RoadClass.values[i.clamp(0, RoadClass.values.length - 1)];
+    did['road'] = pts.length < 2 ? null : c.commitRoad(pts, cls);
+  }
+  if (p['traffic'] == 'spawn') {
+    final n = (int.tryParse(p['n'] ?? '') ?? 1).clamp(0, 4096);
+    did['spawn'] = _spawn(c, n, p['from'], p['to']);
+  }
+  final step = double.tryParse(p['step'] ?? '');
+  if (step != null && step > 0) did['step'] = _step(c, step);
+  final h = int.tryParse(p['vehicle'] ?? '');
+  if (h != null) did['vehicle'] = a.describe(h);
+  if (p['traffic'] == 'stats') did['traffic'] = _trafficStats(c);
+  if (p['graph'] == 'audit') did['graph'] = _graphAudit(a);
+  return did;
+}
+
+/// `e,n;e,n;…` as colony-local points; a malformed pair is skipped.
+List<Vec2> _points(String? s) {
+  final out = <Vec2>[];
+  for (final pair in (s ?? '').split(';')) {
+    final xy = pair.split(',');
+    if (xy.length != 2) continue;
+    final e = double.tryParse(xy[0]), n = double.tryParse(xy[1]);
+    if (e != null && n != null) out.add(Vec2(e, n));
+  }
+  return out;
+}
+
+/// [n] car trips from [from] to [to], or between random built homes and
+/// workplaces: the trips' handles, and how many were refused (agents off,
+/// no building there, or a cap).
+Map<String, Object?> _spawn(CitySim c, int n, String? from, String? to) {
+  final homes = <String>[], works = <String>[];
+  for (final (lot, s) in c.parcelBuiltLots()) {
+    if (s.housing > 0) homes.add(lot.id);
+    if (s.jobs > 0) works.add(lot.id);
+  }
+  final rnd = math.Random();
+  String? pick(List<String> of) =>
+      of.isEmpty ? null : of[rnd.nextInt(of.length)];
+  final trips = <int>[];
+  var refused = 0;
+  for (var i = 0; i < n; i++) {
+    final f = from ?? pick(homes), t = to ?? pick(works);
+    final trip =
+        f == null || t == null ? SlotPool.none : c.agents.forceTrip(f, t);
+    if (trip == SlotPool.none) {
+      refused++;
+    } else {
+      trips.add(trip);
+    }
+  }
+  return {'trips': trips, 'refused': refused};
+}
+
+/// Runs [c] [cityS] seconds headless, now, in half-second ticks: the frame
+/// hold first plays out what it had queued, and holds nothing meanwhile, so
+/// the reply comes once the colony has advanced.
+Map<String, Object?> _step(CitySim c, double cityS) {
+  final a = c.agents;
+  final held = a.frameBudgeted;
+  while (a.heldTicks > 0) {
+    a.endFrame();
+  }
+  a.frameBudgeted = false;
+  final t0 = a.timeUs;
+  try {
+    for (var i = 0; i < (cityS / 0.5).round(); i++) {
+      c.advance(0.5);
+    }
+  } finally {
+    a.frameBudgeted = held;
+  }
+  return {'cityS': cityS, 'agentS': (a.timeUs - t0) / 1e6};
+}
+
+/// The agents' numbers in full, for `traffic=stats`.
+Map<String, Object?> _trafficStats(CitySim c) {
+  final a = c.agents, s = a.stats, m = a.metrics, t = a.vehicles;
+  // For `vehicle=`: the first few on the road, in slot order.
+  final handles = <int>[];
+  if (t != null) {
+    for (var sl = 0; sl < t.highWater && handles.length < 16; sl++) {
+      if (t.isSlotLive(sl)) handles.add(t.handleOf(sl));
+    }
+  }
+  return {
+    'spawned': s.spawned,
+    'arrived': s.arrived,
+    'arrivedGone': s.arrivedGone,
+    'replans': s.replans,
+    'appendedLegs': s.appendedLegs,
+    'lanesRepaired': s.lanesRepaired,
+    'deferred': s.deferred,
+    'noRoute': s.noRoute,
+    'commutes': {
+      'done': s.tripsDone,
+      'tripRatio': s.tripRatio,
+      'avgTripS': s.avgTripS,
+      'failedShare': s.failedShare,
+      'commuteEff': s.commuteEff,
+      'staffing': c.staffing,
+    },
+    'congestion': {
+      'index': s.congestionIndex,
+      'peak': s.peakCongestion,
+      'average': s.averageCongestion,
+      'pictures': a.pictures,
+      'parcel': c.parcelCongestion,
+    },
+    'pathQueue': {
+      'queued': a.pathQueue?.length ?? 0,
+      'fallbacks': a.pathQueue?.fallbacks ?? 0,
+      'waitingToPullOut': a.planner?.waiting ?? 0,
+    },
+    'moves': {
+      'handOvers': a.mover?.handOvers ?? 0,
+      'lineStops': a.mover?.lineStops ?? 0,
+    },
+    'tickMs': {'last': m.lastTickMs, 'avg': m.avgTickMs, 'max': m.maxTickMs},
+    'handles': handles,
+  };
+}
+
+/// The lane graph's size and where cars turn round or run out of road: the
+/// status's `agents.graph`.
+Map<String, Object?> _graphCounts(CityAgents a) {
+  final lg = a.laneGraph;
+  var deadEnds = 0, decks = 0;
+  if (lg != null) {
+    for (var n = 0; n < lg.nodeCount; n++) {
+      final k = lg.kindOf(n);
+      if (k == NodeControlKind.deadEnd) deadEnds++;
+      if (k == NodeControlKind.danglingDeck) decks++;
+    }
+  }
+  return {
+    'rev': a.graphRev,
+    'nodes': lg?.nodeCount ?? 0,
+    'edges': lg?.edgeCount ?? 0,
+    'lanes': lg?.laneCount ?? 0,
+    'connectors': lg?.connectorCount ?? 0,
+    'deadEnds': deadEnds,
+    'danglingDecks': decks,
+  };
+}
+
+/// The lane graph audited, for `graph=audit` (C6): node kinds, edges
+/// outside the network's main strongly connected part, lots with no road,
+/// and buildings trips cannot reach (no serving edge) or cannot leave and
+/// return to (isolated).
+Map<String, Object?> _graphAudit(CityAgents a) {
+  final lg = a.laneGraph;
+  if (lg == null) return {'built': false};
+  final kinds = <String, int>{};
+  for (var n = 0; n < lg.nodeCount; n++) {
+    final k = lg.kindOf(n).name;
+    kinds[k] = (kinds[k] ?? 0) + 1;
+  }
+  var stranded = 0;
+  for (var e = 0; e < lg.edgeCount; e++) {
+    if (lg.edgeInMainScc[e] == 0) stranded++;
+  }
+  final g = lg.graph;
+  var lotsWithout = 0;
+  for (var i = 0; i < g.lotCount; i++) {
+    if (g.lotPiece[i] < 0) lotsWithout++;
+  }
+  var noAccess = 0, isolated = 0;
+  final b = a.buildings;
+  if (b != null) {
+    for (var sl = 0; sl < b.highWater; sl++) {
+      if (!b.isSlotLive(sl)) continue;
+      if (b.accFwd[sl] < 0 && b.accBwd[sl] < 0) {
+        noAccess++;
+      } else if ((b.accessFlags[sl] & kAccessIsolated) != 0) {
+        isolated++;
+      }
+    }
+  }
+  return {
+    ..._graphCounts(a),
+    'kinds': kinds,
+    'strandedEdges': stranded,
+    'lotsWithoutRoad': lotsWithout,
+    'buildings': b?.liveCount ?? 0,
+    'buildingsWithoutAccess': noAccess,
+    'buildingsIsolated': isolated,
+  };
+}

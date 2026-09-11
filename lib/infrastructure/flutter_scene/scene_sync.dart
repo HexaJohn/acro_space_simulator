@@ -34,6 +34,7 @@ import 'ring_nodes.dart';
 import 'scene_textures.dart';
 import 'star_bloom_nodes.dart';
 import 'walker_nodes.dart';
+import 'city/agent_traffic_pass.dart';
 import 'city/city_nodes.dart';
 import 'scatter/scatter_nodes.dart';
 import 'terrain/terrain_nodes.dart';
@@ -117,6 +118,16 @@ class SceneSync {
   /// `FrameTiming.buildDuration` instead and the last feed before an
   /// update wins.
   static final FrameBudget frameBudget = FrameBudget();
+
+  /// The host's tick loop this frame, ms, while an agent colony ticks, else
+  /// 0 (docs/plans/agent-traffic.md, D31): fed with this sync's own cost,
+  /// so the streamers' slice gives way to the agents' work inline.
+  static double tickCostMs = 0;
+
+  /// The host's warp. The agents' render clock stands still at 0 (D18), so
+  /// it is theirs, read here by name.
+  static double get simWarp => AgentTrafficPass.simWarp;
+  static set simWarp(double v) => AgentTrafficPass.simWarp = v;
 
   /// Scene graph census — draw calls, instances, node count — refreshed
   /// every [_censusEveryFrames] calls to [update] rather than every one:
@@ -352,7 +363,7 @@ class SceneSync {
     // This sync's whole cost plus the engine's encode: the floor on what
     // the frame's UI build will measure, fed for the next update to judge.
     frameBudget.feed(
-        sw.elapsedMicroseconds / 1000.0 + frameBudget.engineMs);
+        sw.elapsedMicroseconds / 1000.0 + frameBudget.engineMs + tickCostMs);
     _census();
   }
 

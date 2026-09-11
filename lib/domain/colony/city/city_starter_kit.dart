@@ -149,13 +149,16 @@ class CityStarterKit {
   /// Found a colony with a crossroads, a working spaceport and a treasury.
   ///
   /// [config] carries the site the player chose; [start] carries the odds and
-  /// the opening balance.
+  /// the opening balance. [agentTraffic] founds it with real vehicles on its
+  /// roads (docs/plans/agent-traffic.md, D24): the play surface asks for
+  /// them, and every other caller keeps the colony as it always was.
   static CitySim found({
     required List<CelestialBody> bodies,
     CityConfig config = const CityConfig(),
     CityStart start = CityStart.standard,
     String id = 'colony-1',
     String name = 'Colony',
+    bool agentTraffic = false,
   }) {
     final sim = CitySim.found(
       start.configure(config),
@@ -251,6 +254,9 @@ class CityStarterKit {
     sim.stock[Commodity.ore] = start.ore;
     sim.stock[Commodity.food] = start.supplies;
     sim.stock[Commodity.water] = start.supplies;
+
+    // The agents build nothing until the colony first advances.
+    if (agentTraffic) sim.agents.enabled = true;
 
     // Milestone tier 0 is the founding state. Recorded up front so the ladder
     // starts where the colony does and the first banner the player sees is a
