@@ -34,6 +34,7 @@ import 'parcel.dart';
 import 'parcel_network.dart';
 import 'road_build.dart';
 import 'road_catalog.dart';
+import 'road_elevation.dart';
 import 'road_junction.dart';
 import 'road_names.dart';
 import 'shuttle_run.dart';
@@ -3415,15 +3416,19 @@ class CitySim {
     double bridgeClearStartM = CityLayout.bridgeEndClearM,
     double bridgeClearEndM = CityLayout.bridgeEndClearM,
     /// Dressing, deck, direction and a player's name — see
-    /// [CityLayout.commitRoad]. Wherever a deck is involved — this road's
-    /// or one it crosses — [groundAt] is also the height of the ground a
-    /// draped road stands on at the crossing, so it must return metres
-    /// above the body datum (`groundRadius - body.radius`); the grade gate
-    /// only compares heights, so that form serves it too.
+    /// [CityLayout.commitRoad].
     RoadDecoration decoration = RoadDecoration.none,
     RoadDeck? deck,
     bool reversed = false,
     String? name,
+    /// The natural ground in metres above the body DATUM
+    /// (`groundRadius - body.radius`), for the layout's deck slicing: each
+    /// piece of a deck — this road's, or one it cuts — takes its offset at
+    /// the cut from it. Kept apart from [groundAt], which only grade-checks
+    /// the route and so may be in any datum: the editor passes a ground
+    /// RADIUS there, and read as a height that put every cut six thousand
+    /// kilometres under its deck. Null: the offsets are interpolated.
+    double Function(Vec2)? groundHeightAt,
   }) {
     if (groundAt != null && controls.length >= 2) {
       final samples = RoadSpline(
@@ -3468,7 +3473,7 @@ class CitySim {
       deck: deck,
       reversed: reversed,
       name: name,
-      groundAt: groundAt,
+      groundAt: groundHeightAt,
     );
     lastCommitCrossings = result.crossings;
     _carryRenamedLots(result.renamedLots);
@@ -3514,8 +3519,70 @@ class CitySim {
   bool roadTypeUnlocked(RoadType t) =>
       ignoreUnlocks || population >= t.unlockPop;
 
+  /// How near a road an end drawn toward it lands on it — the layout's own
+  /// reach (`snapM` of [CityLayout.commitRoad]).
+  static const double roadSnapM = 15;
+
+  /// [r] with each end it may snap moved onto the road it joins there
+  /// ([CityLayout.snapPoint]) — the line [quoteRoad] prices and
+  /// [buildRoad] lays, snapped BEFORE it is priced, so the tool can draw
+  /// its ghost on it. Its snap flags come back off: it is snapped.
+  ///
+  /// The layout snaps a road's ends as it lays it, but a deck's pier and
+  /// tunnel stretches are arcs from its first point: surveyed on the line
+  /// as drawn and laid on the line as snapped, a bridge whose start snapped
+  /// 12 m back onto a street had every stretch 12 m short of the valley it
+  /// was surveyed over — the ground embanked on the far rim, the near
+  /// abutment left bare. Snapped first, the survey, the price and the road
+  /// laid are one line. [groundAt] as for [quoteRoad].
+  RoadBuildRequest snapRoadRequest(
+    RoadBuildRequest r, {
+    double Function(Vec2)? groundAt,
+  }) {
+    if (r.controls.length < 2 || !(r.snapStart || r.snapEnd)) return r;
+    final ground = groundAt ?? (Vec2 _) => 0.0;
+    // Each end's level as the grade-separation rule reads it — where the
+    // survey will put it: clear of the ground or graded into it.
+    RoadLevel? levelAt(Vec2 p, double elevationM, double? heightM) {
+      if (r.atGrade) return null;
+      final g = ground(p);
+      final h = heightM ?? g + elevationM;
+      return (
+        heightM: h,
+        offGround: RoadElevation.stretchFor(h - g) != RoadStretch.graded,
+      );
+    }
+
+    final controls = List<Vec2>.of(r.controls);
+    if (r.snapStart) {
+      final p = controls.first;
+      final hit = layout.snapPoint(p,
+          withinM: roadSnapM,
+          level: levelAt(p, r.startElevationM, r.startHeightM));
+      if (hit != null) controls[0] = hit.point;
+    }
+    if (r.snapEnd) {
+      final p = controls.last;
+      final hit = layout.snapPoint(p,
+          withinM: roadSnapM, level: levelAt(p, r.endElevationM, r.endHeightM));
+      if (hit != null) controls[controls.length - 1] = hit.point;
+    }
+    return RoadBuildRequest(
+      controls: controls,
+      type: r.type,
+      startElevationM: r.startElevationM,
+      endElevationM: r.endElevationM,
+      startHeightM: r.startHeightM,
+      endHeightM: r.endHeightM,
+      snapStart: false,
+      snapEnd: false,
+    );
+  }
+
   /// What building [r] would cost, and whether it can be. Pure — safe to
-  /// call on every mouse move; see [quoteRoadBuild] for the rules.
+  /// call on every mouse move; see [quoteRoadBuild] for the rules. Its
+  /// ends are snapped first, exactly as [buildRoad] snaps them, so the
+  /// price is the price of the road that would be laid.
   /// [groundAt] is the natural ground in metres above the body datum
   /// (`groundRadius - body.radius`); [gradeGate] grade-checks a road on
   /// the ground against its type's limit.
@@ -3524,39 +3591,41 @@ class CitySim {
     double Function(Vec2)? groundAt,
     bool gradeGate = false,
   }) =>
-      quoteRoadBuild(r,
+      quoteRoadBuild(snapRoadRequest(r, groundAt: groundAt),
           groundAt: groundAt,
           gradeGate: gradeGate,
           funds: funds,
           unlocked: roadTypeUnlocked(r.type));
 
-  /// Build [r] if it can be built: quote it, lay it (junctions split, lots
-  /// re-cut, the district along every renamed lot carried across — exactly
-  /// as [commitRoad] lays a road), and charge the treasury the quote.
-  /// Returns the road's id — its BASE id; the pieces a junction cut it into
-  /// are `<id>x<i>` — or null with the quote saying why not (and [blocked]
-  /// saying it to the player).
+  /// Build [r] if it can be built: snap its ends, quote it, lay it
+  /// (junctions split, lots re-cut, the district along every renamed lot
+  /// carried across — exactly as [commitRoad] lays a road), and charge the
+  /// treasury the quote. Returns the road's id — its BASE id; the pieces a
+  /// junction cut it into are `<id>x<i>` — or null with the quote saying
+  /// why not (and [blocked] saying it to the player).
   ({String? roadId, RoadQuote quote}) buildRoad(
     RoadBuildRequest r, {
     double Function(Vec2)? groundAt,
     bool gradeGate = false,
   }) {
-    final q = quoteRoad(r, groundAt: groundAt, gradeGate: gradeGate);
+    final snapped = snapRoadRequest(r, groundAt: groundAt);
+    final q = quoteRoad(snapped, groundAt: groundAt, gradeGate: gradeGate);
     if (!q.ok) {
       blocked = q.reason;
       return (roadId: null, quote: q);
     }
     final t = r.type;
     final result = layout.commitRoad(
-      controls: r.controls,
+      controls: snapped.controls,
       roadClass: t.roadClass,
       sealed: !breathable,
       soundWalls: t.soundWalls,
       decoration: t.decoration,
       deck: q.deck,
       groundAt: groundAt,
-      snapStart: r.snapStart,
-      snapEnd: r.snapEnd,
+      // Snapped above: the deck was surveyed on exactly this line.
+      snapStart: false,
+      snapEnd: false,
     );
     lastCommitCrossings = result.crossings;
     _carryRenamedLots(result.renamedLots);
@@ -3575,7 +3644,18 @@ class CitySim {
   /// theirs; a downgrade is free, not a refund. Refused where [to] cannot
   /// be what the road is — a gravel road in a tunnel, a deck too steep for
   /// the new type's limit — or is not yet open, or the treasury is short.
-  RoadQuote quoteUpgrade(String roadId, RoadType to) {
+  ///
+  /// [groundAt] (the natural ground, metres above the body datum) measures
+  /// how much of the pier stretches is tall enough to be bridge
+  /// ([measureBridgeM]) — the survey's own measure, so a bridge upgrades at
+  /// the bridge price. Without it that share is estimated from the heights
+  /// the ends were laid at ([estimateBridgeM]), which cannot see a valley
+  /// between two ends at grade.
+  RoadQuote quoteUpgrade(
+    String roadId,
+    RoadType to, {
+    double Function(Vec2)? groundAt,
+  }) {
     final road = layout.roadById(roadId);
     if (road == null) return RoadQuote.refused(to, RoadRefusal.notFound);
     final cls = to.roadClass;
@@ -3583,7 +3663,15 @@ class CitySim {
     final deck = road.deck;
     final structureM = deck?.structureM ?? 0.0;
     final tunnelM = deck?.tunnelM ?? 0.0;
-    final bridgeM = deck == null ? 0.0 : estimateBridgeM(deck, lengthM);
+    final bridgeM = deck == null
+        ? 0.0
+        : groundAt != null
+            ? measureBridgeM(
+                deck,
+                layout.roadIndex.byId(road.id)?.samples ??
+                    road.sample(stepM: 2),
+                groundAt)
+            : estimateBridgeM(deck, lengthM);
     final gradePct = deck?.gradePct(lengthM) ?? 0.0;
     RoadRefusal? refusal;
     if (deck != null) {
@@ -3625,8 +3713,13 @@ class CitySim {
   /// [quoteUpgrade] allows it: same id, same geometry and deck, the lots
   /// re-cut for its new width and the district carried across, the quote
   /// charged. Upgrading a road to what it already is changes nothing.
-  RoadQuote upgradeRoad(String roadId, RoadType to) {
-    final q = quoteUpgrade(roadId, to);
+  /// [groundAt] as for [quoteUpgrade].
+  RoadQuote upgradeRoad(
+    String roadId,
+    RoadType to, {
+    double Function(Vec2)? groundAt,
+  }) {
+    final q = quoteUpgrade(roadId, to, groundAt: groundAt);
     if (!q.ok) {
       blocked = q.reason;
       return q;
@@ -3728,12 +3821,18 @@ class CitySim {
   /// Re-laid through [CityLayout.commitRoad] with every attribute it had —
   /// class, dressing, walls, direction, name, how it plats, collector,
   /// graded, sealed — under a new id that keeps its base road (and so its
-  /// name): the moved end joins whatever it is dropped on, and every lot
-  /// it re-cuts is carried by containment. Charged the road as re-laid less
-  /// the road it replaces — the added length, at its own price on piers or
-  /// underground — never refunded for a shorter one. Returns the id it was
-  /// re-laid under (its pieces are `<id>x<i>` where a junction cut it), or
-  /// null with the quote saying why not.
+  /// name): the moved end joins whatever it is dropped on (snapped first,
+  /// as [buildRoad] snaps, onto a road it can meet there and never onto
+  /// itself), and every lot it re-cuts is carried by containment. An end
+  /// dragged back along the road gives up the stretch behind it
+  /// ([controlsWithMovedEnd]) rather than folding back over it.
+  ///
+  /// Charged the road as re-laid less the road it replaces, both priced by
+  /// the same survey over the same ground — the added length at its own
+  /// price on piers, as bridge or underground — and never refunded for a
+  /// shorter one. Returns the id it was re-laid under (its pieces are
+  /// `<id>x<i>` where a junction cut it), or null with the quote saying
+  /// why not.
   ({String? roadId, RoadQuote quote}) moveRoadEnd(
     String roadId, {
     required bool atStart,
@@ -3750,21 +3849,39 @@ class CitySim {
       return (roadId: null, quote: q);
     }
     final type = RoadType.of(road);
-    final controls = List<Vec2>.of(road.controls);
-    final fixedEnd = atStart ? controls.last : controls.first;
-    controls[atStart ? 0 : controls.length - 1] = to;
-
     final deck = road.deck;
+    final ground = groundAt ?? (Vec2 _) => 0.0;
+    // A road on the ground stays on it unless it is dropped on a deck.
+    final raised = deck != null || toHeightM != null;
+    final offset =
+        deck == null ? 0.0 : (atStart ? deck.startOffsetM : deck.endOffsetM);
+    double movedHeightAt(Vec2 p) => toHeightM ?? ground(p) + offset;
+
+    // Snap the moved end first, so the deck is surveyed on the line that
+    // is laid; the end left alone stays exactly where it was.
+    var end = to;
+    RoadLevel? level;
+    if (raised) {
+      final h = movedHeightAt(to);
+      level = (
+        heightM: h,
+        offGround:
+            RoadElevation.stretchFor(h - ground(to)) != RoadStretch.graded,
+      );
+    }
+    final hit = layout.snapPoint(to,
+        withinM: roadSnapM, excludeId: roadId, level: level);
+    if (hit != null) end = hit.point;
+    final controls =
+        controlsWithMovedEnd(road.controls, atStart: atStart, to: end);
+    final fixedEnd = atStart ? controls.last : controls.first;
+
     double? fixedH, movedH;
-    if (deck != null || toHeightM != null) {
-      final ground = groundAt ?? (Vec2 _) => 0.0;
+    if (raised) {
       fixedH = deck == null
           ? ground(fixedEnd)
           : (atStart ? deck.endM : deck.startM);
-      final offset = deck == null
-          ? 0.0
-          : (atStart ? deck.startOffsetM : deck.endOffsetM);
-      movedH = toHeightM ?? ground(to) + offset;
+      movedH = movedHeightAt(end);
     }
     final full = quoteRoadBuild(
       RoadBuildRequest(
@@ -3772,18 +3889,24 @@ class CitySim {
         type: type,
         startHeightM: atStart ? movedH : fixedH,
         endHeightM: atStart ? fixedH : movedH,
-        snapStart: atStart,
-        snapEnd: !atStart,
       ),
       groundAt: groundAt,
     );
-    final oldLen = _roadLengthM(road);
-    final oldCost = RoadCosts.construction(type,
-        lengthM: oldLen,
-        structureM: deck?.structureM ?? 0,
-        bridgeM: deck == null ? 0 : estimateBridgeM(deck, oldLen),
-        tunnelM: deck?.tunnelM ?? 0);
-    final added = math.max(0.0, full.cost - oldCost);
+    // The road it replaces, priced the SAME way: its own line surveyed
+    // over the same ground. Its stored ranges and end offsets are not the
+    // same measure — the offsets say nothing of a valley between two ends
+    // at grade, so a bridge over one priced as mere piers, and a metre
+    // added to it was charged the whole bridge's premium.
+    final old = quoteRoadBuild(
+      RoadBuildRequest(
+        controls: road.controls,
+        type: type,
+        startHeightM: deck?.startM,
+        endHeightM: deck?.endM,
+      ),
+      groundAt: groundAt,
+    );
+    final added = math.max(0.0, full.cost - old.cost);
     var q = full.copyWith(cost: added);
     if (q.ok && added > funds + 1e-9) {
       q = q.copyWith(refusal: RoadRefusal.funds);
@@ -3795,7 +3918,7 @@ class CitySim {
 
     // Bridge ranges run from the first control: moving the start moves
     // them along by however much longer the road now is.
-    final shift = atStart ? full.lengthM - oldLen : 0.0;
+    final shift = atStart ? full.lengthM - old.lengthM : 0.0;
     final bridges = [
       for (final (a, b) in road.bridges)
         if (b + shift > 0 && a + shift < full.lengthM) (a + shift, b + shift),
@@ -3806,10 +3929,9 @@ class CitySim {
     final result = layout.commitRoad(
       controls: controls,
       roadClass: road.roadClass,
-      // The end left alone stays exactly where it was; the moved one joins
-      // whatever it was dropped on.
-      snapStart: atStart,
-      snapEnd: !atStart,
+      // Snapped above: the deck was surveyed on exactly this line.
+      snapStart: false,
+      snapEnd: false,
       bridges: bridges,
       startHalfWidthM: road.startHalfWidthM,
       endHalfWidthM: road.endHalfWidthM,

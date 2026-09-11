@@ -8,6 +8,8 @@
 /// junction overrides — and the save that has to remember all of it.
 library;
 
+import 'dart:math' as math;
+
 import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_config.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
@@ -32,6 +34,14 @@ void main() {
   final clinic = kUtilCatalog.firstWhere((s) => s.label == 'Clinic');
   const vertical = [Vec2(0, -300), Vec2(0, 300)];
   const horizontal = [Vec2(-300, 0), Vec2(300, 0)];
+  // Level ground at the datum, with a valley 20 m deep from 100 m to 300 m
+  // east: a road across it with both ends at grade is a bridge between.
+  double valley(Vec2 p) => p.e > 100 && p.e < 300 ? -20.0 : 0.0;
+  RoadBuildRequest acrossTheValley({double toE = 400}) => RoadBuildRequest(
+      controls: [const Vec2(0, 0), Vec2(toE, 0)],
+      type: type('two-lane'),
+      startHeightM: 0,
+      endHeightM: 0);
 
   group('upgrade', () {
     test('re-cuts the lots, carries the buildings, charges the difference',
@@ -93,6 +103,38 @@ void main() {
           RoadRefusal.noTunnel);
       expect(sim.upgradeRoad('r1', type('gravel')).ok, isFalse);
       expect(sim.layout.roadById('r1')!.roadClass, RoadClass.street);
+    });
+
+    test('a county highway upgraded to six lanes is zoned at last', () {
+      final sim = colony()..ignoreUnlocks = true;
+      // What the generator lays: an avenue told to front nothing.
+      sim.commitRoad(vertical, RoadClass.avenue, frontsLots: false);
+      expect(sim.layout.autoParcels.where((p) => p.roadId == 'r0'), isEmpty);
+      final q = sim.upgradeRoad('r0', type('six-lane'));
+      expect(q.ok, isTrue, reason: q.reason);
+      expect(sim.layout.roadById('r0')!.roadClass, RoadClass.boulevard);
+      expect(sim.layout.autoParcels.where((p) => p.roadId == 'r0'),
+          isNotEmpty);
+    });
+
+    test('with the ground to see, a bridge upgrades at the bridge price', () {
+      final sim = colony();
+      final b = sim.buildRoad(acrossTheValley(), groundAt: valley);
+      expect(b.quote.bridgeM, closeTo(200, 1e-6));
+      final seen = sim.quoteUpgrade('r0', type('four-lane'), groundAt: valley);
+      expect(seen.bridgeM, closeTo(200, 1e-6));
+      expect(seen.cost,
+          closeTo((25 + 25 * RoadCosts.bridgeBuildMult) * (60 - 40), 1e-6));
+      // Blind, the ends at grade say nothing of the valley between them:
+      // the span prices as mere piers.
+      final blind = sim.quoteUpgrade('r0', type('four-lane'));
+      expect(blind.bridgeM, 0);
+      expect(blind.cost,
+          closeTo((25 + 25 * RoadCosts.structureBuildMult) * (60 - 40), 1e-6));
+      final funds = sim.funds;
+      expect(sim.upgradeRoad('r0', type('four-lane'), groundAt: valley).ok,
+          isTrue);
+      expect(sim.funds, closeTo(funds - seen.cost, 1e-6));
     });
   });
 
@@ -259,6 +301,160 @@ void main() {
       expect(r.roadId, isNull);
       expect(r.quote.refusal, RoadRefusal.notFound);
     });
+
+    test('a bridge a cell longer is charged the cell, not its premium', () {
+      final sim = colony();
+      final b = sim.buildRoad(acrossTheValley(), groundAt: valley);
+      expect(b.quote.ok, isTrue, reason: b.quote.reason);
+      // 200 m on the ground and 200 m of bridge over the valley.
+      expect(b.quote.cost,
+          closeTo(25 * 40 + 25 * 40 * RoadCosts.bridgeBuildMult, 1e-6));
+      final longer = sim.moveRoadEnd('r0',
+          atStart: false, to: const Vec2(408, 0), groundAt: valley);
+      expect(longer.quote.ok, isTrue, reason: longer.quote.reason);
+      expect(longer.quote.cost, closeTo(40, 1e-6), reason: 'one cell at grade');
+      final funds = sim.funds;
+      final shorter = sim.moveRoadEnd(longer.roadId!,
+          atStart: false, to: const Vec2(392, 0), groundAt: valley);
+      expect(shorter.quote.ok, isTrue, reason: shorter.quote.reason);
+      expect(shorter.quote.cost, 0, reason: 'a shorter road is free');
+      expect(sim.funds, funds);
+      final deck = sim.layout.roadById(shorter.roadId!)!.deck!;
+      expect(deck.structures.single.$1, closeTo(100, 1e-6));
+      expect(deck.structures.single.$2, closeTo(300, 1e-6));
+    });
+
+    test('an end dragged back along a curve gives up the stretch behind it',
+        () {
+      final sim = colony();
+      // A quarter circle of 100 m radius, as the layout keeps a curve: its
+      // 2 m samples thinned to a control every ten metres or so.
+      final arc = [
+        for (var d = 0; d <= 90; d += 3)
+          Vec2(100 * math.cos(d * math.pi / 180),
+              100 * math.sin(d * math.pi / 180)),
+      ];
+      sim.commitRoad(arc, RoadClass.street);
+      expect(sim.layout.roadById('r0')!.controls.length, greaterThan(8));
+      final oldLen = sim.layout.roadIndex.byId('r0')!.lengthM;
+      // The start circle dragged 25 m along the road.
+      const a = 25 / 100;
+      final r = sim.moveRoadEnd('r0',
+          atStart: true, to: Vec2(100 * math.cos(a), 100 * math.sin(a)));
+      expect(r.quote.ok, isTrue, reason: r.quote.reason);
+      expect(r.quote.cost, 0, reason: 'shortened, not lengthened by a fold');
+      final rec = sim.layout.roadIndex.byId(r.roadId!)!;
+      expect(rec.lengthM, closeTo(oldLen - 25, 0.5));
+      // One way round the curve, never back over itself.
+      var prev = -1.0;
+      for (final p in rec.samples) {
+        final angle = math.atan2(p.n, p.e);
+        expect(angle, greaterThanOrEqualTo(prev - 1e-9));
+        prev = angle;
+      }
+      expect(math.atan2(rec.samples.first.n, rec.samples.first.e),
+          closeTo(a, 1e-9));
+    });
+
+    test('the controls behind a dragged end go, at either end', () {
+      final line = [for (var x = 0; x <= 100; x += 10) Vec2(x.toDouble(), 0)];
+      List<double> east(List<Vec2> cs) => [for (final c in cs) c.e];
+      // Back along it from the end: the controls it passed, and those
+      // within a cell beyond, are dropped.
+      expect(
+          east(controlsWithMovedEnd(line,
+              atStart: false, to: const Vec2(55, 0))),
+          [0, 10, 20, 30, 40, 55]);
+      expect(
+          east(controlsWithMovedEnd(line,
+              atStart: true, to: const Vec2(45, 0))),
+          [45, 60, 70, 80, 90, 100]);
+      // Off the end — longer — only the end moves.
+      expect(
+          east(controlsWithMovedEnd(line,
+              atStart: false, to: const Vec2(120, 0))),
+          [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 120]);
+      expect(
+          east(controlsWithMovedEnd(line,
+              atStart: true, to: const Vec2(-20, 0))),
+          [-20, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
+    });
+
+    test('a bridge drawn short of a street is surveyed on the line laid', () {
+      final sim = colony();
+      sim.commitRoad(vertical, RoadClass.street);
+      final req = RoadBuildRequest(
+          controls: const [Vec2(12, 0), Vec2(400, 0)],
+          type: type('two-lane'),
+          startHeightM: 0,
+          endHeightM: 0);
+      final quoted = sim.quoteRoad(req, groundAt: valley);
+      final r = sim.buildRoad(req, groundAt: valley);
+      expect(r.quote.ok, isTrue, reason: r.quote.reason);
+      final road = sim.layout.roadById(r.roadId!)!;
+      expect(road.controls.first.e, closeTo(0, 1e-9),
+          reason: 'its start snapped back onto the street');
+      expect(r.quote.lengthM, closeTo(400, 1e-6), reason: 'priced as laid');
+      expect(quoted.cost, closeTo(r.quote.cost, 1e-9),
+          reason: 'the preview is the bill');
+      // The valley is 100 m to 300 m from the street, and so is the span.
+      final span = road.deck!.structures.single;
+      expect(span.$1, closeTo(100, 1e-6));
+      expect(span.$2, closeTo(300, 1e-6));
+      expect(sim.layout.roads.length, 3, reason: 'a T that cuts the street');
+    });
+
+    test('a raised end is built where it was drawn, not on the street below',
+        () {
+      final sim = colony();
+      sim.commitRoad(horizontal, RoadClass.street);
+      final up = sim.buildRoad(RoadBuildRequest(
+          controls: const [Vec2(0, 300), Vec2(0, 10)],
+          type: type('two-lane'),
+          endElevationM: 12));
+      expect(up.quote.ok, isTrue, reason: up.quote.reason);
+      expect(sim.layout.roadById(up.roadId!)!.controls.last.n,
+          closeTo(10, 1e-9));
+      expect(sim.layout.roads.length, 2, reason: 'nothing joined, nothing cut');
+      // At grade it lands on the street, and cuts it for the T.
+      final down = sim.buildRoad(RoadBuildRequest(
+          controls: const [Vec2(100, 300), Vec2(100, 10)],
+          type: type('two-lane')));
+      expect(sim.layout.roadById(down.roadId!)!.controls.last.n,
+          closeTo(0, 1e-9));
+      expect(sim.layout.roads.length, 4);
+    });
+  });
+
+  test("the editor's ground radius grade-checks a road, and nothing else",
+      () {
+    // The editor hands commitRoad the ground as a RADIUS — six thousand
+    // kilometres from the body's centre — which its grade check reads as
+    // well as a height, since it compares only differences.
+    final sim = colony();
+    sim.commitRoad(horizontal, RoadClass.street,
+        deck: const RoadDeck(startM: 0, endM: 0));
+    final radius = sim.body.radius;
+    expect(
+        sim.commitRoad(vertical, RoadClass.street, groundAt: (_) => radius),
+        isNotNull);
+    expect(sim.layout.roads.length, 4,
+        reason: 'the deck at grade meets the street: a junction');
+    final pieces = sim.layout.roads.where((r) => r.deck != null).toList();
+    expect(pieces, hasLength(2));
+    for (final p in pieces) {
+      expect(p.deck!.startOffsetM.abs(), lessThan(1e-6), reason: p.id);
+      expect(p.deck!.endOffsetM.abs(), lessThan(1e-6), reason: p.id);
+    }
+    // The ground as a HEIGHT above the datum is what slices a deck.
+    final other = colony();
+    other.commitRoad(horizontal, RoadClass.street,
+        deck: const RoadDeck(startM: 0, endM: 0));
+    other.commitRoad(vertical, RoadClass.street, groundHeightAt: (_) => -1);
+    expect(other.layout.roadById('r0x0')!.deck!.endOffsetM,
+        closeTo(1, 1e-9));
+    expect(other.layout.roadById('r0x1')!.deck!.startOffsetM,
+        closeTo(1, 1e-9));
   });
 
   test("a deck's height is read at the nearest point of its road", () {

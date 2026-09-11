@@ -22,7 +22,6 @@ import 'dart:math' as math;
 
 import 'city_layout.dart';
 import 'parcel.dart';
-import 'road_elevation.dart';
 import 'spatial_index.dart';
 
 class ParcelNetwork {
@@ -63,27 +62,17 @@ class ParcelNetwork {
   /// rather than meet — a viaduct does not serve the street it crosses,
   /// and a tunnel does not join the road above it.
   ///
-  /// Only a road with a DECK (`RoadSpline.deck`) can be separated: two
-  /// draped roads touch where their carriageways do, as they always have.
-  /// Two decks are separated when their heights there differ by
-  /// [RoadElevation.gradeSeparationM] or more — two raised roads meeting at
-  /// one height are one junction in the air. A deck and a draped road,
-  /// which has no height here but the ground's, are separated where the
-  /// deck is on its piers or in its tunnel, or stands that far off the
-  /// ground it was laid on.
+  /// The layout's own rule ([CityLayout.levelsSeparated]), which cut (or
+  /// did not cut) the two roads where they cross: the network joins
+  /// exactly the roads the layout gave a junction. Only a road with a DECK
+  /// (`RoadSpline.deck`) can be separated: two draped roads touch where
+  /// their carriageways do, as they always have. Two decks pass when their
+  /// heights differ by the separation; a deck and a draped road where the
+  /// deck is on its piers or in its tunnel.
   static bool gradeSeparated(
-      IndexedRoad a, double sA, IndexedRoad b, double sB) {
-    final da = a.road.deck, db = b.road.deck;
-    if (da == null && db == null) return false;
-    if (da != null && db != null) {
-      return (da.heightAt(sA, a.lengthM) - db.heightAt(sB, b.lengthM)).abs() >=
-          RoadElevation.gradeSeparationM;
-    }
-    final (deck, s, lengthM) =
-        da != null ? (da, sA, a.lengthM) : (db!, sB, b.lengthM);
-    if (deck.onStructureAt(s) || deck.inTunnelAt(s)) return true;
-    return deck.offsetAt(s, lengthM).abs() >= RoadElevation.gradeSeparationM;
-  }
+          IndexedRoad a, double sA, IndexedRoad b, double sB) =>
+      CityLayout.gradeSeparatedAt(
+          a.road.deck, sA, a.lengthM, b.road.deck, sB, b.lengthM);
 
   factory ParcelNetwork.of(
     CityLayout layout, {

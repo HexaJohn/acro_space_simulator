@@ -10,6 +10,13 @@ import 'parcel.dart';
 import 'road_elevation.dart';
 import 'spatial_index.dart';
 
+/// A road's level at one point along it, as the grade-separation rule
+/// ([CityLayout.levelsSeparated]) reads it: its deck's height there, metres
+/// above the body datum, and whether the deck stands clear of the ground
+/// there — on its piers or in its tunnel. A road laid on the ground has no
+/// level of its own (null): it is wherever the ground is.
+typedef RoadLevel = ({double heightM, bool offGround});
+
 /// Player-facing knobs for how land is cut up.
 ///
 /// These are the settings the parcels are "dynamically drawn" from: change the
@@ -249,6 +256,92 @@ class CityLayout {
     return bestId == null ? null : (roadId: bestId!, point: bestPt!);
   }
 
+  /// Where a road END drawn at [p] joins the network: the nearest point
+  /// within [withinM] on a road it can MEET there — [nearestRoadPoint],
+  /// less every road it would pass over or under ([levelsSeparated]), and
+  /// less [excludeId] (a road being re-laid, which must not snap to
+  /// itself). [level] is the end's own: null for a road on the ground.
+  ///
+  /// In plan alone, an end drawn near a viaduct was pulled onto its
+  /// centreline and then, the crossing being separated, joined to nothing
+  /// — a street stopping in a stub under the deck; a raised end drawn near
+  /// a street hung above it the same way. Such a road is passed over for
+  /// the next nearest, or for no snap at all. Two roads on the ground never
+  /// ask the rule, so a draped network snaps exactly as it always has.
+  ({String roadId, Vec2 point})? snapPoint(
+    Vec2 p, {
+    double withinM = 15,
+    RoadLevel? level,
+    String? excludeId,
+  }) {
+    String? bestId;
+    Vec2? bestPt;
+    var best = withinM;
+    _index.visit(Box2.around(p, withinM), 0, (_, rec, seg) {
+      if (excludeId != null && rec.road.id == excludeId) return;
+      final (q, d) = seg == 0
+          ? (rec.sampleAt(0), p.distanceTo(rec.sampleAt(0)))
+          : rec.nearestOnSegment(p, seg);
+      if (d >= best) return;
+      final deck = rec.road.deck;
+      if (level != null || deck != null) {
+        final s = seg == 0
+            ? 0.0
+            : rec.cum[seg - 1] + rec.sampleAt(seg - 1).distanceTo(q);
+        if (levelsSeparated(level, levelOf(deck, s, rec.lengthM))) return;
+      }
+      best = d;
+      bestId = rec.road.id;
+      bestPt = q;
+    });
+    return bestId == null ? null : (roadId: bestId!, point: bestPt!);
+  }
+
+  /// [deck]'s level at [s] along a road [lengthM] long, for
+  /// [levelsSeparated]; null for a road on the ground (no deck).
+  static RoadLevel? levelOf(RoadDeck? deck, double s, double lengthM) =>
+      deck == null
+          ? null
+          : (
+              heightM: deck.heightAt(s, lengthM),
+              offGround: deck.onStructureAt(s) || deck.inTunnelAt(s),
+            );
+
+  /// Whether two roads at levels [a] and [b] pass one over the other where
+  /// they cross rather than meet. THE grade-separation rule: the crossing
+  /// rule of [commitRoad], the end snap ([snapPoint]) and the network's
+  /// joins (`ParcelNetwork`) all ask it, so the junction a road is cut
+  /// into, the road an end lands on and the roads traffic can turn between
+  /// are one answer, not three.
+  ///
+  /// Two roads on the ground always meet. Two decks pass when their heights
+  /// differ by [RoadElevation.gradeSeparationM] or more — two raised roads
+  /// meeting at one height are one junction in the air. A deck and a road
+  /// on the ground pass where the deck stands clear of the ground, on its
+  /// piers or in its tunnel, and meet where it is graded into it: there the
+  /// ground is cut or filled to the deck, and the road laid on that ground
+  /// with it. Which stretch is which is the deck's own survey, stored with
+  /// it — so the answer needs no ground sample, and the network, which has
+  /// no ground to ask, reaches the same one the commit did. (Measured
+  /// against the ground instead, a deck on low piers was cut into a
+  /// junction the network then refused to join, and a deck in a deep
+  /// cutting passed over a street the network joined it to.)
+  static bool levelsSeparated(RoadLevel? a, RoadLevel? b) {
+    if (a == null && b == null) return false;
+    if (a != null && b != null) {
+      return (a.heightM - b.heightM).abs() >= RoadElevation.gradeSeparationM;
+    }
+    return (a ?? b)!.offGround;
+  }
+
+  /// [levelsSeparated] for a road with [a] at [sA] along its [lengthA] and
+  /// one with [b] at [sB] along its [lengthB]. Two draped roads (both null)
+  /// are never separated, and are answered without a look at either.
+  static bool gradeSeparatedAt(RoadDeck? a, double sA, double lengthA,
+          RoadDeck? b, double sB, double lengthB) =>
+      (a != null || b != null) &&
+      levelsSeparated(levelOf(a, sA, lengthA), levelOf(b, sB, lengthB));
+
   /// Add a road THE EDITOR way: split it and everything it crosses at the
   /// junctions, so intersections are real topology rather than two ribbons
   /// overlapping.
@@ -323,10 +416,10 @@ class CityLayout {
     // as every road was laid before the tool could lift one.
     RoadDeck? deck,
     // The natural ground under a local point, metres above the body datum
-    // (null: flat ground at the datum). Asked only where a deck is
-    // involved — a draped road's height where a deck crosses it, and the
-    // ground at each cut a deck is sliced at — so a draped network never
-    // pays for a ground sample here.
+    // (null: interpolate). Asked only at each cut a deck is sliced at, for
+    // the piece's offset there — so a draped network never pays for a
+    // ground sample here. The crossing rule needs none: see
+    // [levelsSeparated].
     double Function(Vec2)? groundAt,
     // The id to lay it under; null mints the next `r<N>`. For re-laying a
     // piece in place of another (Adjust Roads, see [childIdFor]) under an
@@ -344,10 +437,15 @@ class CityLayout {
         RoadSpline(id: newId, controls: controls, roadClass: roadClass)
             .sample(stepM: 2);
 
-    // Endpoint snap: an end drawn near an existing road lands ON it.
+    // Endpoint snap: an end drawn near an existing road lands ON it — on a
+    // road it can meet there ([snapPoint]): a raised end is not pulled
+    // onto the street beneath it, nor a street's end onto a viaduct.
+    final drawnM = newDeck == null ? 0.0 : _cumulative(pts).last;
     for (final (endIndex, allowed) in [(0, snapStart), (pts.length - 1, snapEnd)]) {
       if (!allowed) continue;
-      final hit = nearestRoadPoint(pts[endIndex], withinM: snapM);
+      final hit = snapPoint(pts[endIndex],
+          withinM: snapM,
+          level: levelOf(newDeck, endIndex == 0 ? 0.0 : drawnM, drawnM));
       if (hit != null) pts[endIndex] = hit.point;
     }
 
@@ -379,22 +477,13 @@ class CityLayout {
           return;
         }
         // A raised or sunk road passing over or under the other: no
-        // junction, and neither is cut. Asked only where a deck is
-        // involved — two roads on the ground keep the rules below exactly
-        // — with a draped road standing on the ground at the crossing.
-        final otherDeck = other.deck;
-        if (newDeck != null || otherDeck != null) {
-          final hNew = newDeck != null
-              ? newDeck.heightAt(sNew, newCum.last)
-              : (groundAt?.call(at) ?? 0.0);
-          final hOld = otherDeck != null
-              ? otherDeck.heightAt(sOld, rec.lengthM)
-              : (groundAt?.call(at) ?? 0.0);
-          if ((hNew - hOld).abs() >= RoadElevation.gradeSeparationM) {
-            crossings
-                .add(RoadCrossing(other.id, sNew, sOld, at, bridged: true));
-            return;
-          }
+        // junction, and neither is cut — by the one rule the network's
+        // joins read too ([levelsSeparated]). Two roads on the ground are
+        // never separated and keep the rules below exactly.
+        if (gradeSeparatedAt(
+            newDeck, sNew, newCum.last, other.deck, sOld, rec.lengthM)) {
+          crossings.add(RoadCrossing(other.id, sNew, sOld, at, bridged: true));
+          return;
         }
         // An expressway meets nothing at grade. Where an ordinary road
         // crosses one, the expressway is carried over it on a bridge and
@@ -599,11 +688,12 @@ class CityLayout {
 
   /// Whether any of [s0]..[s1] along a road with [deck] stands on its
   /// piers or runs in its tunnel.
-  static bool _offGroundAlong(RoadDeck deck, double s0, double s1) {
-    for (final (a, b) in deck.structures) {
-      if (a < s1 && b > s0) return true;
-    }
-    for (final (a, b) in deck.tunnels) {
+  static bool _offGroundAlong(RoadDeck deck, double s0, double s1) =>
+      _overlaps(deck.structures, s0, s1) || _overlaps(deck.tunnels, s0, s1);
+
+  /// Whether any of [ranges] overlaps [s0]..[s1].
+  static bool _overlaps(List<(double, double)> ranges, double s0, double s1) {
+    for (final (a, b) in ranges) {
       if (a < s1 && b > s0) return true;
     }
     return false;
@@ -708,6 +798,22 @@ class CityLayout {
   /// survive the re-cut is matched to the lot standing on its ground, as
   /// [commitRoad] matches them. Returns that rename map (zoning already
   /// carried), or null for an unknown road.
+  ///
+  /// A new class makes it a road OF that class: what the generator told the
+  /// old one about its class goes with it. Whether it fronts lots is the
+  /// new class's say ([RoadSpline.frontsLots] back to null) — a county
+  /// highway told to front nothing, upgraded to a six-lane road, was
+  /// otherwise never zoned; and its end tapers, absolute widths from the
+  /// old class to what it met, go too — a downgraded interstate kept a
+  /// viaduct's mouths on a two-lane street. What stays is what the road
+  /// IS in its place: the line, the deck, its [RoadSpline.bridges] (the
+  /// roads it passed over were never cut for it, and a ramp's climb meets
+  /// a deck still in the air — no lot is cut along them, see
+  /// [_subdivide]), how the district along it is cut
+  /// ([RoadSpline.lotFrontageM], [RoadSpline.lotDepthM] — re-cut at the
+  /// colony's settings, two old lots could land in one new one and a
+  /// building be lost), collector, graded, sealed, direction and name.
+  /// The same class re-dressed keeps everything.
   Map<String, String>? upgradeRoad(
     String id, {
     RoadClass? roadClass,
@@ -717,13 +823,28 @@ class CityLayout {
     final road = _roads[id];
     if (road == null) return null;
     final cls = roadClass ?? road.roadClass;
-    final updated = road.copyWith(
+    final reclassed = cls != road.roadClass;
+    final updated = RoadSpline(
+      id: road.id,
+      controls: road.controls,
       roadClass: cls,
+      closed: road.closed,
+      sealed: road.sealed,
+      soundWalls: (soundWalls ?? road.soundWalls) && cls.canHaveSoundWalls,
+      lotFrontageM: road.lotFrontageM,
+      lotDepthM: road.lotDepthM,
+      frontsLots: reclassed ? null : road.frontsLots,
+      collector: road.collector,
+      graded: road.graded,
+      bridges: road.bridges,
+      startHalfWidthM: reclassed ? null : road.startHalfWidthM,
+      endHalfWidthM: reclassed ? null : road.endHalfWidthM,
       decoration: cls.supportsDecoration
           ? (decoration ?? road.decoration)
           : RoadDecoration.none,
-      soundWalls: (soundWalls ?? road.soundWalls) && cls.canHaveSoundWalls,
+      deck: road.deck,
       reversed: road.reversed && cls.oneWay,
+      name: road.name,
     );
     final before = <String, Vec2>{
       for (final p in autoParcels) p.id: p.centroid,
@@ -1103,10 +1224,14 @@ class CityLayout {
           }
           s1 = end;
         }
-        // No frontage along a raised road's piers or its tunnel: there is
-        // no kerb there to build on. The lot's number is still spent, so
-        // the lots either side keep their names.
-        if (deck != null && _offGroundAlong(deck, s, s1)) {
+        // No frontage along a raised road's piers or its tunnel, nor along
+        // one of its bridges: there is no kerb there to build on. The lot's
+        // number is still spent, so the lots either side keep their names.
+        // (A road that plats lots has a bridge only once it is upgraded
+        // from one that did not — a generated road with a bridge fronts
+        // nothing — so a generated plat never meets this.)
+        if ((deck != null && _offGroundAlong(deck, s, s1)) ||
+            (road.bridges.isNotEmpty && _overlaps(road.bridges, s, s1))) {
           index++;
           s = s1;
           continue;

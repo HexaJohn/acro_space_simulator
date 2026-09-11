@@ -175,6 +175,22 @@ void main() {
       expect(poor.reason, 'Not enough money: §2,000 needed');
     });
 
+    test('the ground shows a bridge the end heights cannot', () {
+      // Level at the datum over 400 m with both ends at grade, over a
+      // valley 20 m deep between 100 m and 300 m.
+      const deck = RoadDeck(startM: 0, endM: 0, structures: [(100, 300)]);
+      expect(estimateBridgeM(deck, 400), 0);
+      expect(
+          measureBridgeM(deck, const [Vec2(0, 0), Vec2(400, 0)],
+              (p) => p.e > 100 && p.e < 300 ? -20.0 : 0.0),
+          closeTo(200, 1e-6));
+      // Ten metres down is piers, not bridge.
+      expect(
+          measureBridgeM(deck, const [Vec2(0, 0), Vec2(400, 0)],
+              (p) => p.e > 100 && p.e < 300 ? -10.0 : 0.0),
+          0);
+    });
+
     test('money is printed as the HUD prints it', () {
       expect(formatMoney(1239.2), '§1,240');
       expect(formatMoney(999), '§999');
@@ -193,6 +209,27 @@ void main() {
       expect(sim.funds, 5000);
       expect(sim.layout.roads, isEmpty);
       expect(sim.roadsRevision, before);
+    });
+
+    test('the quote is the price of the road as it will be laid', () {
+      final sim = colony();
+      sim.commitRoad(const [Vec2(0, -300), Vec2(0, 300)], RoadClass.street);
+      final q = sim.quoteRoad(RoadBuildRequest(
+          controls: const [Vec2(12, 0), Vec2(400, 0)], type: type('two-lane')));
+      expect(q.lengthM, closeTo(400, 1e-6),
+          reason: 'its start snaps back onto the street');
+      final unsnapped = sim.quoteRoad(RoadBuildRequest(
+          controls: const [Vec2(12, 0), Vec2(400, 0)],
+          type: type('two-lane'),
+          snapStart: false));
+      expect(unsnapped.lengthM, closeTo(388, 1e-6));
+      // The line it priced, for the tool's ghost.
+      final line = sim.snapRoadRequest(RoadBuildRequest(
+          controls: const [Vec2(12, 0), Vec2(400, 0)], type: type('two-lane')));
+      expect(line.controls.first.e, closeTo(0, 1e-9));
+      expect(line.controls.last.e, closeTo(400, 1e-9));
+      expect(line.snapStart || line.snapEnd, isFalse, reason: 'snapped');
+      expect(sim.layout.roads, hasLength(1), reason: 'quoting laid nothing');
     });
 
     test('a road built is laid, dressed and paid for', () {

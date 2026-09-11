@@ -329,9 +329,45 @@ RoadQuote quoteRoadBuild(
 
 /// Metres of [deck]'s pier stretches standing taller than a bridge on a
 /// road [lengthM] long, with no ground to ask: estimated from the height it
-/// was laid at each end ([RoadDeck.offsetAt]) — what an upgrade or a
-/// re-laid end knows of the ground it was surveyed on.
-double estimateBridgeM(RoadDeck deck, double lengthM) {
+/// was laid at each end ([RoadDeck.offsetAt]). A last resort — the ends say
+/// nothing of a valley between them, so a bridge over one whose ends are
+/// at grade estimates as no bridge at all; with the ground, see
+/// [measureBridgeM].
+double estimateBridgeM(RoadDeck deck, double lengthM) =>
+    _tallM(deck, (s) => deck.offsetAt(s, lengthM));
+
+/// Metres of [deck]'s pier stretches standing taller than a bridge over
+/// [groundAt] (metres above the body datum), the road running along
+/// [polyline] (colony-local, first point to last, the line the deck's
+/// ranges are measured on). What the survey that priced the road counted
+/// as bridge, measured again over the stretches the deck stands on — so an
+/// upgrade prices a bridge as a bridge.
+double measureBridgeM(
+    RoadDeck deck, List<Vec2> polyline, double Function(Vec2) groundAt) {
+  if (polyline.length < 2) return 0;
+  final cum = <double>[0];
+  for (var i = 1; i < polyline.length; i++) {
+    cum.add(cum[i - 1] + polyline[i].distanceTo(polyline[i - 1]));
+  }
+  final lengthM = cum.last;
+  Vec2 pointAt(double s) {
+    for (var i = 1; i < polyline.length; i++) {
+      if (cum[i] >= s) {
+        final seg = cum[i] - cum[i - 1];
+        final t = seg <= 1e-12 ? 0.0 : (s - cum[i - 1]) / seg;
+        return polyline[i - 1] + (polyline[i] - polyline[i - 1]) * t;
+      }
+    }
+    return polyline.last;
+  }
+
+  return _tallM(
+      deck, (s) => deck.heightAt(s, lengthM) - groundAt(pointAt(s)));
+}
+
+/// Metres of [deck]'s structures where [clearanceAt] (deck above the
+/// ground at an arc) passes the bridge height, sampled every 4 m.
+double _tallM(RoadDeck deck, double Function(double s) clearanceAt) {
   var total = 0.0;
   for (final (a, b) in deck.structures) {
     final span = b - a;
@@ -340,11 +376,85 @@ double estimateBridgeM(RoadDeck deck, double lengthM) {
     var tall = 0;
     for (var k = 0; k < n; k++) {
       final s = a + span * (k + 0.5) / n;
-      if (deck.offsetAt(s, lengthM) > RoadElevation.bridgeHeightM) tall++;
+      if (clearanceAt(s) > RoadElevation.bridgeHeightM) tall++;
     }
     total += span * tall / n;
   }
   return total;
+}
+
+/// How far past the point an end is dragged back to a road's own interior
+/// control is dropped with the stretch it stood on ([controlsWithMovedEnd]):
+/// a cell, which is also the shortest piece the layout keeps. A control
+/// kept closer would turn the new end through a kink over a metre or two.
+const double kRelayClearM = RoadCosts.cellM;
+
+/// [controls] with the end [atStart] (the FIRST control, else the last)
+/// moved to [to] — Adjust Roads' re-laid line.
+///
+/// Where [to] lies back ALONG the road — it projects onto the road's own
+/// line inside it — the stretch between the old end and that point is
+/// given up: every interior control on it (and within [kRelayClearM]
+/// beyond it) is dropped, and the road runs from [to] on through the
+/// controls past it. Only swapping the end control, a curved road's end
+/// dragged back 25 m ran from [to] BACK through the controls it passed
+/// and on again — a Z folded over itself, platted on both folds and
+/// priced as added length. Where [to] projects off the end (the road is
+/// dragged longer) only the end control moves, as it always did.
+///
+/// The controls are a centripetal Catmull-Rom spline's or a dense
+/// polyline's, as the layout keeps them; the other end is never moved.
+List<Vec2> controlsWithMovedEnd(
+  List<Vec2> controls, {
+  required bool atStart,
+  required Vec2 to,
+}) {
+  if (controls.length < 2) return [to];
+  // Work from the moved end: the spline through the controls reversed is
+  // the same line walked the other way.
+  final cs = atStart ? controls : controls.reversed.toList();
+  List<Vec2> finish(List<Vec2> out) => atStart ? out : out.reversed.toList();
+  final swapped = [to, ...cs.skip(1)];
+  if (cs.length == 2) return finish(swapped);
+
+  // The line as the layout samples it, and where each control lies on it:
+  // `RoadSpline.sample` lays max(1, ceil(chord / step)) points per span,
+  // the first of them ON the span's first control.
+  const stepM = 2.0;
+  final pts = RoadSpline(id: 'relay', controls: cs).sample(stepM: stepM);
+  final at = <int>[0];
+  for (var i = 0; i + 1 < cs.length; i++) {
+    at.add(at.last + math.max(1, (cs[i].distanceTo(cs[i + 1]) / stepM).ceil()));
+  }
+  if (at.last != pts.length - 1) return finish(swapped); // not the layout's
+  final cum = <double>[0];
+  for (var i = 1; i < pts.length; i++) {
+    cum.add(cum[i - 1] + pts[i].distanceTo(pts[i - 1]));
+  }
+
+  // Where [to] projects onto the line.
+  var best = double.infinity;
+  var sTo = 0.0;
+  for (var i = 1; i < pts.length; i++) {
+    final a = pts[i - 1], ab = pts[i] - a;
+    final len2 = ab.dot(ab);
+    final t = len2 <= 1e-12
+        ? 0.0
+        : ((to - a).dot(ab) / len2).clamp(0.0, 1.0).toDouble();
+    final d = to.distanceTo(a + ab * t);
+    if (d < best) {
+      best = d;
+      sTo = cum[i - 1] + (cum[i] - cum[i - 1]) * t;
+    }
+  }
+  if (sTo <= 1e-6) return finish(swapped); // dragged off the end: longer
+
+  return finish([
+    to,
+    for (var i = 1; i < cs.length - 1; i++)
+      if (cum[at[i]] > sTo + kRelayClearM) cs[i],
+    cs.last,
+  ]);
 }
 
 /// § as the HUD prints it: rounded up to the whole coin — a bill of

@@ -33,11 +33,11 @@ void main() {
     test('a deck is sliced onto the pieces a crossing cuts it into', () {
       final l = CityLayout();
       l.commitRoad(controls: ns, regenerateLots: false);
-      // 0 m to 8 m over 800 m: 4 m up where it crosses — inside the
-      // separation, so a junction, and the deck is cut there.
+      // 0 m to 8 m over 800 m, on piers from 500 m: graded into the ground
+      // where it crosses at 400 m, so a junction, and the deck is cut there.
       final r = l.commitRoad(
           controls: ew,
-          deck: ramp(0, 8, structures: const [(250, 800)]),
+          deck: ramp(0, 8, structures: const [(500, 800)]),
           regenerateLots: false);
       expect(r.crossings.single.bridged, isFalse);
       final a = l.roadById('r1x0')!.deck!, b = l.roadById('r1x1')!.deck!;
@@ -48,10 +48,10 @@ void main() {
       // No ground to ask: the offsets at the cut are interpolated.
       expect(a.endOffsetM, closeTo(4, 1e-6));
       expect(b.startOffsetM, closeTo(4, 1e-6));
-      // The pier stretch is clipped to each piece and shifted to its start.
-      expect(a.structures.single.$1, closeTo(250, 1e-6));
-      expect(a.structures.single.$2, closeTo(400, 1e-6));
-      expect(b.structures.single.$1, closeTo(0, 1e-6));
+      // The pier stretch is clipped to the piece it is on and shifted to
+      // its start; the piece short of it has none.
+      expect(a.structures, isEmpty);
+      expect(b.structures.single.$1, closeTo(100, 1e-6));
       expect(b.structures.single.$2, closeTo(400, 1e-6));
       // The street it crossed has no deck to slice.
       expect(l.roadById('r0x0')!.deck, isNull);
@@ -110,17 +110,47 @@ void main() {
       expect(l.roads.length, 4);
     });
 
-    test('a draped road stands on the ground the caller measures', () {
-      // A deck 12 m above the datum over ground 10 m above it clears the
-      // street by two metres: a junction, not a bridge.
-      final l = CityLayout();
-      l.commitRoad(controls: ns, regenerateLots: false);
-      l.commitRoad(
+    test("a deck meets a street by its own survey, not the ground's height",
+        () {
+      // On its piers, however low: passed over, neither cut.
+      final low = CityLayout();
+      low.commitRoad(controls: ns, regenerateLots: false);
+      final over = low.commitRoad(
           controls: ew,
-          deck: ramp(12, 12),
-          groundAt: (_) => 10,
+          deck: ramp(3, 3, structures: const [(0, 800)]),
           regenerateLots: false);
-      expect(l.roads.length, 4);
+      expect(over.crossings.single.bridged, isTrue);
+      expect(low.roads.length, 2);
+      // Graded into the ground — here a cutting 4.6 m below the street's
+      // ground, which the survey found shallow enough to dig rather than
+      // tunnel — it meets it: the ground is cut to the deck, and the
+      // street on that ground with it. Whatever the ground is said to be.
+      final cut = CityLayout();
+      cut.commitRoad(controls: ns, regenerateLots: false);
+      final meet = cut.commitRoad(
+          controls: ew,
+          deck: const RoadDeck(startM: -4.6, endM: -4.6),
+          groundAt: (_) => 0,
+          regenerateLots: false);
+      expect(meet.crossings.single.bridged, isFalse);
+      expect(cut.roads.length, 4);
+    });
+
+    test('the rule is one rule, and every caller asks it', () {
+      const onGround = null;
+      const piers3 = (heightM: 3.0, offGround: true);
+      const graded6 = (heightM: 6.0, offGround: false);
+      const deck12 = (heightM: 12.0, offGround: true);
+      const deck14 = (heightM: 14.0, offGround: true);
+      expect(CityLayout.levelsSeparated(onGround, onGround), isFalse);
+      expect(CityLayout.levelsSeparated(piers3, onGround), isTrue);
+      expect(CityLayout.levelsSeparated(onGround, piers3), isTrue);
+      expect(CityLayout.levelsSeparated(graded6, onGround), isFalse);
+      expect(CityLayout.levelsSeparated(deck12, deck14), isFalse,
+          reason: 'two decks within the separation are one junction');
+      expect(CityLayout.levelsSeparated(deck12, graded6), isTrue);
+      expect(CityLayout.levelsSeparated(piers3, graded6), isFalse,
+          reason: 'two decks are judged by their heights alone');
     });
 
     test('two decks meet at one height and pass at two', () {
@@ -143,6 +173,71 @@ void main() {
       expect(r.crossings.single.bridged, isFalse);
       expect(l.roads.length, 4);
       expect(l.roads.every((x) => x.deck == null), isTrue);
+    });
+  });
+
+  group('the end snap', () {
+    final viaduct = ramp(12, 12, structures: const [(0, 800)]);
+
+    test("a street's end is not pulled onto a viaduct it would pass under",
+        () {
+      final l = CityLayout();
+      l.commitRoad(controls: ew, deck: viaduct, regenerateLots: false);
+      l.commitRoad(
+          controls: const [Vec2(400, 300), Vec2(400, 10)],
+          regenerateLots: false);
+      expect(l.roadById('r1')!.controls.last.n, closeTo(10, 1e-9),
+          reason: 'left where it was drawn, not a stub under the deck');
+      expect(l.roads.length, 2, reason: 'the viaduct is not cut');
+    });
+
+    test('it lands on the next road it can meet', () {
+      final l = CityLayout();
+      l.commitRoad(controls: ew, deck: viaduct, regenerateLots: false);
+      // A street 12 m off, passing under the viaduct: further than the
+      // viaduct's 10 m, but a road the end can join.
+      l.commitRoad(
+          controls: const [Vec2(412, -300), Vec2(412, 100)],
+          regenerateLots: false);
+      expect(l.roads.length, 2, reason: 'it passed under the viaduct');
+      l.commitRoad(
+          controls: const [Vec2(400, 300), Vec2(400, 10)],
+          regenerateLots: false);
+      final end = l.roadById('r2')!.controls.last;
+      expect(end.e, closeTo(412, 1e-9));
+      expect(end.n, closeTo(10, 1e-9));
+      expect(l.roads.length, 4, reason: 'a T that cuts the street');
+    });
+
+    test('a raised end is not pulled onto the street beneath it', () {
+      final l = CityLayout();
+      l.commitRoad(controls: ew, regenerateLots: false);
+      l.commitRoad(
+          controls: const [Vec2(400, 300), Vec2(400, 10)],
+          deck: ramp(0, 12, structures: const [(100, 290)]),
+          regenerateLots: false);
+      expect(l.roadById('r1')!.controls.last.n, closeTo(10, 1e-9));
+      expect(l.roads.length, 2);
+    });
+
+    test('a raised end meets a deck at its own height', () {
+      final l = CityLayout();
+      l.commitRoad(controls: ew, deck: viaduct, regenerateLots: false);
+      l.commitRoad(
+          controls: const [Vec2(400, 300), Vec2(400, 10)],
+          deck: ramp(12, 12, structures: const [(0, 290)]),
+          regenerateLots: false);
+      expect(l.roadById('r1')!.controls.last.n, closeTo(0, 1e-9));
+      expect(l.roads.length, 3, reason: 'a junction in the air');
+    });
+
+    test('ends and roads on the ground snap as they always have', () {
+      final l = CityLayout();
+      l.commitRoad(controls: ew, regenerateLots: false);
+      expect(l.snapPoint(const Vec2(400, 10)), isNotNull);
+      expect(l.snapPoint(const Vec2(400, 10))!.point.n,
+          l.nearestRoadPoint(const Vec2(400, 10))!.point.n);
+      expect(l.snapPoint(const Vec2(400, 10), excludeId: 'r0'), isNull);
     });
   });
 
@@ -274,6 +369,60 @@ void main() {
       expect(setback(again), closeTo(8 + 3, 1e-6));
       expect(again.use, ParcelUse.residential, reason: 'zoning rides along');
       expect(l.upgradeRoad('ghost', roadClass: RoadClass.avenue), isNull);
+    });
+
+    test('a new class fronts lots by its own say, not the old road\'s', () {
+      // The generator's county highway: an avenue told to front nothing.
+      final l = CityLayout();
+      l.commitRoad(
+          controls: const [Vec2(0, -300), Vec2(0, 300)],
+          roadClass: RoadClass.avenue,
+          frontsLots: false);
+      expect(l.autoParcels.where((p) => p.roadId == 'r0'), isEmpty);
+      // Re-dressed, it is the same road: still fronting nothing.
+      l.upgradeRoad('r0', decoration: RoadDecoration.trees);
+      expect(l.roadById('r0')!.frontsLots, isFalse);
+      expect(l.autoParcels.where((p) => p.roadId == 'r0'), isEmpty);
+      // A six-lane road is zoned.
+      l.upgradeRoad('r0', roadClass: RoadClass.boulevard);
+      expect(l.roadById('r0')!.frontsLots, isNull);
+      expect(l.autoParcels.where((p) => p.roadId == 'r0'), isNotEmpty);
+    });
+
+    test('a downgraded interstate sheds its tapers, keeps its bridges', () {
+      final l = CityLayout();
+      // 800 m of six-lane expressway: widening from a viaduct's deck at
+      // one end, narrowing to four lanes at the other, carried over
+      // whatever crosses it between 200 m and 400 m.
+      l.commitRoad(
+          controls: ew,
+          roadClass: RoadClass.expressway6,
+          frontsLots: false,
+          startHalfWidthM: RoadClass.elevated.halfWidth,
+          endHalfWidthM: RoadClass.expressway4.halfWidth,
+          bridges: const [(200, 400)],
+          lotFrontageM: 20);
+      l.upgradeRoad('r0', roadClass: RoadClass.street);
+      final street = l.roadById('r0')!;
+      expect(street.startHalfWidthM, isNull,
+          reason: "a viaduct's mouth on a two-lane street");
+      expect(street.endHalfWidthM, isNull);
+      expect(street.frontsLots, isNull);
+      expect(street.bridges, [(200.0, 400.0)],
+          reason: 'what it passed over was never cut for it');
+      expect(street.lotFrontageM, 20, reason: 'how its district is cut');
+      final lots = l.autoParcels.where((p) => p.roadId == 'r0').toList();
+      expect(lots, isNotEmpty, reason: 'a street is zoned');
+      for (final p in lots) {
+        final (a, b) = p.frontage!;
+        final s0 = math.min(a.e, b.e), s1 = math.max(a.e, b.e);
+        expect(s1 <= 200 + 1e-6 || s0 >= 400 - 1e-6, isTrue,
+            reason: '${p.id} fronts the bridge ($s0..$s1)');
+      }
+      // And back: an expressway fronts nothing, by its class.
+      l.upgradeRoad('r0', roadClass: RoadClass.expressway6);
+      expect(l.roadById('r0')!.bridges, [(200.0, 400.0)]);
+      expect(l.autoParcels.where((p) => p.roadId == 'r0'), isEmpty);
     });
 
     test('an upgrade to a road that fronts nothing takes its lots away', () {

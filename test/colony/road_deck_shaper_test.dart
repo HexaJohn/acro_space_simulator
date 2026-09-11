@@ -105,4 +105,25 @@ void main() {
     expect(city.shapedTerrain.where((k) => k.startsWith('road:r0:')),
         hasLength(16));
   });
+
+  test("a suburb's draped street raised onto a deck is graded to it", () {
+    final city = colony();
+    // Adjust Roads keeps `graded`: a generated street, draped on the land,
+    // dragged up onto a deck.
+    city.commitRoad(const [Vec2(0, 0), Vec2(480, 0)], RoadClass.street,
+        graded: false,
+        deck: const RoadDeck(
+            startM: 0, endM: 12, endOffsetM: 12, structures: [(100, 480)]));
+    expect(roadBrushes(city).map((p) => p.key), [
+      'road:r0:4.00:1',
+      'road:r0:4.00:2',
+      'road:r0:4.00:3',
+      'road:r0:4.00:4',
+    ]);
+    // A draped street on the ground is still left to follow the land.
+    city.commitRoad(const [Vec2(0, 300), Vec2(480, 300)], RoadClass.street,
+        graded: false);
+    expect(roadBrushes(city).where((p) => p.key.startsWith('road:r1:')),
+        isEmpty);
+  });
 }

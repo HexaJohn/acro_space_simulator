@@ -165,8 +165,13 @@ class CityTerrainShaper {
     for (final road in city.layout.roads) {
       // A road that follows the land is draped, not graded — see
       // [RoadSpline.graded]; a sprawl of them would be a hundred thousand
-      // permanent edits to the ground.
-      if (!road.graded) continue;
+      // permanent edits to the ground. A raised or sunk road does NOT
+      // follow the land, whatever it was first laid as: a suburb's street
+      // dragged up onto a deck (Adjust Roads keeps `graded`) is shaped to
+      // its deck like any other, or its first stretch would be a slab
+      // floating over the hillside, too low for piers and never filled.
+      final deck = road.deck;
+      if (!road.graded && deck == null) continue;
       final pts = road.sample(stepM: 24);
       if (pts.length < 2) continue;
       // Keyed by WIDTH as well as by place. The key is the record that a
@@ -174,7 +179,6 @@ class CityTerrainShaper {
       // alone, a street widened to an avenue kept its street's corridor
       // for ever, the avenue's edges riding the unshaped hillside.
       final hw = road.halfWidth.toStringAsFixed(2);
-      final deck = road.deck;
       if (deck != null) {
         _deckCorridor(city, road, deck, pts, hw, out,
             bodyRadiusM: bodyRadiusM,
