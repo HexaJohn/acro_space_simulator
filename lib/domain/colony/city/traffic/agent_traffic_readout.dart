@@ -23,6 +23,11 @@
 /// congestion, no routes; the forwarded answers keep the routed model's own
 /// "every lot reached, no noise, a tax factor of exactly 1" until it has a
 /// picture of its own.
+///
+/// Once a colony's agents have taken a picture, the colony answers through
+/// this readout for good (E37). Switched off, it forwards every answer to
+/// the routed model and keeps only [passes] its own, so neither switch —
+/// to the agents, or back — can take a view's key back.
 library;
 
 import '../parcel.dart';
@@ -48,39 +53,50 @@ class AgentTrafficReadout implements CityTrafficReadout {
   final Map<String, List<TripRoute>> _routes = {};
   int _routesPictures = -1;
 
-  @override
-  bool get hasRun => agents.stats.hasRun;
+  /// Whether the agents answer the measured questions: they are switched
+  /// on. Switched off, every answer is the routed model's.
+  bool get _live => agents.enabled;
 
-  /// Pictures published: ours, and the routed model's that the forwarded
-  /// answers come from — 0 before our first, then moving whenever either
-  /// takes one, so a view keyed on it redraws whenever any answer may have
-  /// changed (D47).
-  ///
-  /// Never going back: both counts only grow, and ours is the colony's
-  /// ever ([CityAgents.pictures]). Gated on that rather than on [hasRun],
-  /// which falls back to false when the agents are switched off and on
-  /// again and their tables start afresh: gated on it, the count would drop
-  /// to 0 across the restart.
   @override
-  int get passes {
-    final own = agents.pictures;
-    return own == 0 ? 0 : own + routed.passes;
+  bool get hasRun => _live ? agents.stats.hasRun : routed.hasRun;
+
+  /// Pictures published: ours, ever, and the routed model's that the
+  /// forwarded answers come from, so a view keyed on it redraws whenever
+  /// any answer may have changed (D47).
+  ///
+  /// Never going back. Both counts only grow — ours is the colony's ever
+  /// ([CityAgents.pictures]), carried across a switch off and on — and the
+  /// sum is never below the routed model's own count, which is what the
+  /// colony answered with before the agents took over. So the switch to
+  /// the agents cannot take the count back; and since the colony keeps
+  /// answering through this once the agents have published (E37), neither
+  /// can the switch back.
+  @override
+  int get passes => agents.pictures + routed.passes;
+
+  @override
+  double get peakCongestion {
+    if (!_live) return routed.peakCongestion;
+    return hasRun ? agents.stats.peakCongestion : 0.0;
   }
 
   @override
-  double get peakCongestion => hasRun ? agents.stats.peakCongestion : 0.0;
+  double get averageCongestion {
+    if (!_live) return routed.averageCongestion;
+    return hasRun ? agents.stats.averageCongestion : 0.0;
+  }
 
   @override
-  double get averageCongestion =>
-      hasRun ? agents.stats.averageCongestion : 0.0;
+  double congestionOf(String roadId) {
+    if (!_live) return routed.congestionOf(roadId);
+    return hasRun ? agents.stats.congestionOf(roadId) : 0.0;
+  }
 
   @override
-  double congestionOf(String roadId) =>
-      hasRun ? agents.stats.congestionOf(roadId) : 0.0;
-
-  @override
-  double volumeOf(String roadId) =>
-      hasRun ? agents.stats.volumeOf(roadId) : 0.0;
+  double volumeOf(String roadId) {
+    if (!_live) return routed.volumeOf(roadId);
+    return hasRun ? agents.stats.volumeOf(roadId) : 0.0;
+  }
 
   /// The vehicles on the road now whose locked route uses [roadId]: one
   /// [TripRoute] each, of weight 1, its kind from the trip's purpose, its
@@ -90,6 +106,7 @@ class AgentTrafficReadout implements CityTrafficReadout {
   @override
   List<TripRoute> routesThrough(String roadId,
       {Set<TripKind>? kinds, int limit = 64}) {
+    if (!_live) return routed.routesThrough(roadId, kinds: kinds, limit: limit);
     if (!hasRun || limit <= 0) return const [];
     final pictures = agents.pictures;
     if (pictures != _routesPictures) {

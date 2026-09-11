@@ -26,6 +26,12 @@ import 'bench_support.dart';
 /// microseconds a frame, at 60 Hz against a sample every 0.2 s of agent
 /// time, so most frames interpolate and one in twelve takes a new sample.
 ///
+/// The rows are laid the way a running town lays them: most on lanes, each
+/// heading for the connector out of its lane, and a quarter on connectors,
+/// heading for the lane each leads to. Between samples the pass rolls a row
+/// past its element's end into the next — so the connector poses and the
+/// roll-on, not only the lane poses, are what is weighed.
+///
 /// The design point adds 800 pedestrians; slice 1 has none, so there are
 /// none here. §15.1 holds the pass to 1 ms a frame: under ACRO_PERF, the
 /// 95th percentile frame.
@@ -43,28 +49,48 @@ void main() {
     final pts = g.pts;
     final r = math.sqrt(pts[0] * pts[0] + pts[1] * pts[1] + pts[2] * pts[2]);
     final anchor = city.localToBodyFixed(const Vec2(0, 0), bodyRadiusM: r);
+    final lanes = g.laneCount, cons = g.connectorCount;
+    expect(cons, greaterThan(0), reason: 'the grid has junctions to cross');
+
+    // The first connector out of each lane, for the lane rows to roll on to.
+    final outCon = Int32List(lanes)..fillRange(0, lanes, -1);
+    for (var c = 0; c < cons; c++) {
+      final from = g.conFromLane[c];
+      if (outCon[from] < 0) outCon[from] = c;
+    }
 
     const n = 1500;
-    final lane = Int32List(n), speed = Float32List(n), s0 = Float32List(n);
+    final elem = Int32List(n), next = Int32List(n);
+    final len = Float32List(n), speed = Float32List(n), s0 = Float32List(n);
+    var onConnectors = 0;
     for (var i = 0; i < n; i++) {
-      final l = (i * 7) % g.laneCount;
-      lane[i] = l;
+      if (i % 4 == 3) {
+        final c = (i * 11) % cons;
+        elem[i] = lanes + c;
+        next[i] = g.conToLane[c];
+        len[i] = g.conLen[c];
+        onConnectors++;
+      } else {
+        final l = (i * 7) % lanes;
+        elem[i] = l;
+        next[i] = outCon[l] < 0 ? -1 : lanes + outCon[l];
+        len[i] = g.laneLen[l];
+      }
       speed[i] = 8.0 + i % 5;
-      s0[i] = 3 + ((i * 37) % 997) / 997 * math.max(0.0, g.laneLen[l] - 6);
+      s0[i] = ((i * 37) % 997) / 997 * math.max(0.0, len[i] - 0.5);
     }
     AgentFrame sample(int k) {
       final s = Float32List(n);
       for (var i = 0; i < n; i++) {
-        final len = g.laneLen[lane[i]];
-        s[i] = len <= 0 ? 0 : (s0[i] + speed[i] * kStepS * k) % len;
+        s[i] = len[i] <= 0 ? 0 : (s0[i] + speed[i] * kStepS * k) % len[i];
       }
       return AgentFrame.fromColumns(
         count: n,
         timeUs: (k * kStepUs).toDouble(),
         graphRev: g.graphRev,
         handle: Int32List.fromList([for (var i = 0; i < n; i++) i + 1]),
-        elem: lane,
-        next: Int32List(n)..fillRange(0, n, -1),
+        elem: elem,
+        next: next,
         s: s,
         v: speed,
         a: Float32List(n),
@@ -92,11 +118,11 @@ void main() {
       final t = sw.elapsedMicroseconds.toDouble();
       if (i >= 120) us.add(t);
     }
-    report('agent pass, $n vehicles on ${g.laneCount} lanes (no '
-        'pedestrians in slice 1): $placed placed; a frame median '
-        '${f(percentile(us, 0.5), 0)} us, p95 ${f(percentile(us, 0.95), 0)} '
-        'us, p99 ${f(percentile(us, 0.99), 0)} us, worst '
-        '${f(percentile(us, 1), 0)} us');
+    report('agent pass, $n vehicles ($onConnectors on connectors) over '
+        '$lanes lanes and $cons connectors (no pedestrians in slice 1): '
+        '$placed placed; a frame median ${f(percentile(us, 0.5), 0)} us, p95 '
+        '${f(percentile(us, 0.95), 0)} us, p99 ${f(percentile(us, 0.99), 0)} '
+        'us, worst ${f(percentile(us, 1), 0)} us');
     expect(placed, n, reason: 'every vehicle in range and under the cap');
     if (kPerf) {
       expect(percentile(us, 0.95), lessThanOrEqualTo(1000),

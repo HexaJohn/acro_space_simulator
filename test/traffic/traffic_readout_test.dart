@@ -15,9 +15,10 @@ import 'traffic_fixture.dart';
 /// The traffic readout's contract, slice 1's half (docs/plans/
 /// agent-traffic.md §12.3, D46, D47; §17.1 traffic_readout_test): before a
 /// picture it punishes nothing; pictures come every congestion epoch and
-/// never go back; the routes through a road are the locked routes of the
-/// vehicles driving it; and reach, noise, land value and the tax factor
-/// are the routed model's, answer for answer.
+/// never go back, not even across the colony's switch to the agents and
+/// back; the routes through a road are the locked routes of the vehicles
+/// driving it; and reach, noise, land value and the tax factor are the
+/// routed model's, answer for answer.
 void main() {
   setUp(() => AgentTuning.commuteRatePerResident = 0.004);
   tearDown(AgentTuning.reset);
@@ -27,7 +28,9 @@ void main() {
     final a = agentsOn(city)..advance(0.02);
     final r = a.readout;
     expect(r.hasRun, isFalse);
-    expect(r.passes, 0);
+    expect(r.passes, city.roadTraffic.passes,
+        reason: 'no picture of ours yet: the routed count the colony '
+            'answered with, never less');
     expect(r.peakCongestion, 0);
     expect(r.averageCongestion, 0);
     for (final road in city.layout.roads) {
@@ -144,8 +147,9 @@ void main() {
     expect(r.fireReach(lot), isFalse,
         reason: 'an ambulance reaching a lot is no fire cover there');
 
-    expect(r.passes, 0,
-        reason: 'no picture of ours yet, whatever the routed model has');
+    expect(r.passes, 5,
+        reason: 'no picture of ours yet: the routed count, so the switch to '
+            'the agents takes no view\'s key back');
     runAgents(a, 60);
     final own = a.pictures;
     expect(own, greaterThan(0));
@@ -159,6 +163,40 @@ void main() {
     a.enabled = true;
     expect(r.hasRun, isFalse);
     expect(r.passes, own + 6);
+  });
+
+  test('the colony\'s count never goes back across the switch to the agents '
+      'and back again (D47, E37)', () {
+    final city = town();
+    for (var i = 0; i < 40; i++) {
+      city.roadTraffic.advance(0.5);
+    }
+    expect(identical(city.trafficReadout, city.roadTraffic), isTrue,
+        reason: 'no agents yet: the routed model answers');
+    final before = city.trafficReadout.passes;
+
+    city.agents.enabled = true;
+    expect(identical(city.trafficReadout, city.agents.readout), isTrue);
+    expect(city.trafficReadout.passes, greaterThanOrEqualTo(before),
+        reason: 'the switch to the agents takes no view\'s key back');
+    runAgents(city.agents, 60);
+    final on = city.trafficReadout.passes;
+    expect(on, greaterThan(before));
+
+    city.agents.enabled = false;
+    expect(identical(city.trafficReadout, city.agents.readout), isTrue,
+        reason: 'once they have published, the colony answers through them');
+    expect(city.trafficReadout.passes, greaterThanOrEqualTo(on),
+        reason: 'nor does the switch back');
+    final r = city.trafficReadout, m = city.roadTraffic;
+    expect(r.hasRun, m.hasRun,
+        reason: 'switched off, every answer is the routed model\'s');
+    expect(r.peakCongestion, m.peakCongestion);
+    expect(r.averageCongestion, m.averageCongestion);
+    for (final road in city.layout.roads) {
+      expect(r.congestionOf(road.id), m.congestionOf(road.id));
+      expect(r.volumeOf(road.id), m.volumeOf(road.id));
+    }
   });
 }
 

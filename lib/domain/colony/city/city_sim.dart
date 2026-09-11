@@ -3447,9 +3447,13 @@ class CitySim {
   /// reach, noise, land value, the routes through a road. Everything that
   /// READS the traffic reads it here, never [roadTraffic]: the routed model
   /// answers today, and an agent simulation can answer tomorrow without
-  /// one consumer changing. In a colony with [agents], they answer.
+  /// one consumer changing. In a colony with [agents], they answer — and
+  /// once they have published a picture, the colony answers through their
+  /// readout for good, which forwards everything to the routed model while
+  /// the agents are off. So the pass count views key on never goes back,
+  /// switching either way (D47).
   CityTrafficReadout get trafficReadout =>
-      agents.enabled ? agents.readout : roadTraffic;
+      agents.enabled || agents.pictures > 0 ? agents.readout : roadTraffic;
 
   ParcelNetwork? _parcelNet;
   int _parcelNetVersion = -1;

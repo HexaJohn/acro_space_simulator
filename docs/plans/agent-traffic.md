@@ -2214,6 +2214,10 @@ These fit the 2–4 ms of in-motion headroom under the 15 ms target (perf-thread
 - The building sync iterates `autoParcels` and `manualParcels` (views, city_layout.dart:141-142). It never uses `layout.parcels`, which allocates (137), and never `parcelBuiltLots()`.
 - The one small allocation per sub-step is the frame wrapper (§13.2). The frame hold's tick queue is a preallocated `Float64List` ring.
 - **Gate.** `traffic_alloc_test` runs 1,000 sub-steps after warm-up under `developer`-service heap sampling. The bar is new-space growth under 64 KB, excluding the wrappers.
+- **Status after slice 1: the weighed gate is NOT met; the structural half is.**
+  - Structural (always runs): no column, arena, queue, search context or frame set is reallocated in steady state (`collectBuffers` on every table).
+  - Weighed (`fvm flutter test --enable-vmservice --dart-define=ACRO_ALLOC=true test/traffic/traffic_alloc_test.dart`, debug JIT): 33.8 MB over 1,000 sub-steps beyond the frames, at ten times the design commute rate with 511 routes waiting to pull out. The pull-out queue (`TripPlanner.spawnReady`) boxes about 64 B per waiting route per sub-step; the mover about 120 B per vehicle. The agent clock's microseconds pass 2³⁰ after 1,074 s, and every one passed across a non-inlined call is then a boxed int on a compressed-pointer build.
+  - Impact: short-lived new-space garbage, about 4 MB/s at 25× in that saturated case, well under the renderer pacer's deliberate 1 MiB a frame. Not a slice-1 blocker; owed by slice 11.
 
 ### 15.3 Inline or worker isolate
 
@@ -2868,6 +2872,7 @@ Drawing a new road never teleports a car: routes remap through the split, lots r
 **Scope:**
 - `agent_scheduler*`: the isolate binding with `cityClockHeldS` and graph shipping.
 - A resumable graph derivation above 3,000 roads.
+- **Meeting the §15.2 allocation gate**, weighed as well as structural: the pull-out queue's and the mover's per-item boxing (§15.2 status), for instance the agent clock in sub-steps rather than microseconds past 2³⁰, and the hot helpers inlined.
 - **Enabling agents for every ticking colony:**
   - generated colonies are enabled after generation, and E31 adds their interstate stubs;
   - older saves auto-enable on load, with citizens reconciled from `population` through the external budget;
