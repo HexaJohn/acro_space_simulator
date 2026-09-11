@@ -96,14 +96,19 @@ void main() {
           continue;
         }
         final tileLegs = [for (final l in j.legs) l.roadClass.index]..sort();
-        final graphLegs = [for (final l in node.legs) l.roadClass.index]
-          ..sort();
+        // The tiles leave alleys, paths and elevated roads out of a
+        // junction, and the graph reads its plan over the same drawn legs
+        // (`RoadClass.joinsJunctions`) while keeping every car leg to route.
+        final graphLegs = [
+          for (final l in node.legs)
+            if (l.roadClass.joinsJunctions) l.roadClass.index
+        ]..sort();
         final sameLegs = tileLegs.length == graphLegs.length &&
             [for (var i = 0; i < tileLegs.length; i++) tileLegs[i] == graphLegs[i]]
                 .every((b) => b);
         if (!sameLegs) {
-          // The tiles leave alleys, paths and decks out of a junction; the
-          // graph keeps every car leg. Theirs to reconcile (C1).
+          // The two clustered the ends differently. Theirs to reconcile
+          // (C1).
           if (node.control != j.control) {
             report.add('legs differ at ${node.at}: graph ${node.control}, '
                 'tiles ${j.control}');
@@ -119,6 +124,34 @@ void main() {
             '${report.join('\n')}');
       }
       expect(agree, greaterThan(10));
+    });
+
+    test('no alley or path leg is ever in a plan\'s stop legs, even where '
+        'the player names every leg', () {
+      void check(RoadGraph graph, String how) {
+        for (final node in graph.nodes) {
+          for (final k in node.plan.stopLegs) {
+            expect(node.legs[k].roadClass.joinsJunctions, isTrue,
+                reason: '$how: leg $k (${node.legs[k].roadClass.name}) of '
+                    'the node at ${node.at}');
+          }
+        }
+      }
+
+      check(g, 'the warrant');
+      // Every junction an alley or a path meets, its stop signs chosen by
+      // the player on every leg, the alley's own included.
+      final named = [
+        for (final node in g.nodes)
+          if (node.legs.length >= 3 &&
+              node.legs.any((l) => !l.roadClass.joinsJunctions))
+            JunctionOverride(
+                at: node.at,
+                lights: false,
+                stopHeadings: [for (final l in node.legs) l.heading]),
+      ];
+      expect(named, isNotEmpty, reason: 'the town runs alleys off its streets');
+      check(g.withOverrides(named), 'the player');
     });
   });
 
@@ -265,19 +298,14 @@ void main() {
     test('a four-way street stop with an alley as a fifth leg stays an '
         'all-way stop over its drawn legs: the streets take turns by '
         'arrival, and the alley halts and takes a gap', () {
-      final layout = withAlley();
-      final at = RoadGraph.of(layout).nodeNear(const Vec2(0, 0))!;
-      expect(at.legs, hasLength(5));
-      // The plan as the graph reads it over its drawn legs (dev c672eb3):
-      // the four streets stop, and the alley is in no stop list.
-      final streets = [
-        for (final l in at.legs)
-          if (l.roadClass == RoadClass.street) l.heading,
-      ];
-      final lg = lanesOf(layout,
-          overrides: [JunctionOverride(at: at.at, stopHeadings: streets)]);
+      final lg = lanesOf(withAlley());
       final n = lg.graph.nodeNear(const Vec2(0, 0))!;
+      expect(n.legs, hasLength(5));
+      // The graph's own plan, read over its drawn legs: the four streets
+      // stop, and the alley is in no stop list.
       final alley = alleyLeg(n);
+      expect(n.plan.control, JunctionControl.stop);
+      expect(n.plan.stopLegs, hasLength(4));
       expect(n.plan.stopLegs, isNot(contains(alley)));
       expect(lg.kindOf(n.id), NodeControlKind.allWayStop);
       final ctl = lg.controls;
@@ -348,6 +376,70 @@ void main() {
             reason: 'at rest, at ${us / kUsPerSecond} s');
         expect(GrantReason.values[d.table.grant[sl]], GrantReason.gap);
       }
+    });
+
+    test('a street seam with an alley T is uncontrolled: the street runs on '
+        'through it, and the alley halts and gives way', () {
+      // Two street pieces meeting end to end, as a road the player split
+      // does, and an alley run off the seam to the south.
+      final lg = lanesOf(CityLayout()
+        ..addRoad(const RoadSpline(
+            id: 'w', controls: [Vec2(-200, 0), Vec2(0, 0)]))
+        ..addRoad(const RoadSpline(
+            id: 'e', controls: [Vec2(0, 0), Vec2(200, 0)]))
+        ..addRoad(const RoadSpline(
+            id: 'alley',
+            controls: [Vec2(0, 0), Vec2(0, -160)],
+            roadClass: RoadClass.alley)));
+      final n = lg.graph.nodeNear(const Vec2(0, 0))!;
+      expect(n.legs, hasLength(3));
+      // Read over the two streets alone it is a seam: no control, and no
+      // leg stops — read over all three it was an all-way stop the tiles
+      // never drew.
+      expect(n.plan.control, JunctionControl.none);
+      expect(n.plan.stopLegs, isEmpty);
+      expect(lg.kindOf(n.id), NodeControlKind.uncontrolled);
+      final alley = alleyLeg(n);
+      final ctl = lg.controls;
+      var seen = 0;
+      for (var i = lg.inStart[n.id]; i < lg.inStart[n.id + 1]; i++) {
+        final e = lg.inEdges[i];
+        final outside = lg.graph.edgeLeg[e] == alley;
+        expect(ctl.edgeOutside[e], outside ? 1 : 0);
+        expect(ctl.edgeStops[e], outside ? 1 : 0);
+        expect(ctl.edgeYields[e], outside ? 1 : 0);
+        expect(ctl.edgePhase[e], -1);
+        seen++;
+      }
+      expect(seen, 3);
+      expect(ctl.stopBack[n.id], 0, reason: 'no bar is drawn across a seam');
+
+      // The alley first, with nothing on the street: it halts, then goes.
+      final d = Drive(lg);
+      final (sa, ca) = atLine(
+          d,
+          edgeNear(lg, const Vec2(0, -80), const Vec2(0, 1)),
+          edgeNear(lg, const Vec2(100, 0), const Vec2(1, 0)));
+      d.table.v[sa] = 6;
+      expect(d.arbiter.decide(sa, ca, 12, 0, commit: false), isFalse,
+          reason: 'still rolling: it comes to rest at its line first');
+      d.table.v[sa] = 0;
+      expect(d.arbiter.decide(sa, ca, 1, 0, commit: false), isTrue);
+      expect(GrantReason.values[d.table.grant[sa]], GrantReason.gap);
+
+      // A car on the street, coming up to the seam: it goes on without
+      // stopping, and now the alley waits for it to pass.
+      final (ss, cs) = atLine(
+          d,
+          edgeNear(lg, const Vec2(-100, 0), const Vec2(1, 0)),
+          edgeNear(lg, const Vec2(100, 0), const Vec2(1, 0)));
+      d.table.v[ss] = 6;
+      expect(d.arbiter.decide(ss, cs, 12, 0, commit: false), isTrue,
+          reason: 'the street goes on without stopping');
+      expect(GrantReason.values[d.table.grant[ss]], GrantReason.clear);
+      d.arbiter.release(sa);
+      expect(d.arbiter.decide(sa, ca, 1, 0, commit: false), isFalse,
+          reason: 'the alley gives way to the street');
     });
   });
 }

@@ -58,9 +58,10 @@ NodeControlKind controlKindOf(RoadNode node, {bool stub = false}) {
       return NodeControlKind.continuation;
     case JunctionControl.stop:
       // An all-way stop when every inbound leg the plan was read over
-      // stops. A leg outside the plan — an alley, a path — is in
-      // `stopLegs` or not as the warrant happened to read it, and never
-      // decides the control: it halts at its line whatever it is (D48).
+      // stops. A leg outside the plan — an alley, a path — is never in
+      // `stopLegs` (the graph reads the plan over the drawn legs alone,
+      // `RoadGraph._planOf`) and never decides the control: it halts at its
+      // line whatever it is (D48).
       for (var i = 0; i < legs.length; i++) {
         final l = legs[i];
         if (l.inbound &&
@@ -79,10 +80,11 @@ NodeControlKind controlKindOf(RoadNode node, {bool stub = false}) {
 }
 
 /// Whether leg [k] of [node] is one its plan was read over (§3.7, D48): a
-/// leg the tiles draw a junction of (`RoadClass.joinsJunctions`). An alley,
-/// a path or a road in the air is not — it gives way to every leg that is —
-/// unless none of the node's legs is drawn, and the plan was read over them
-/// all.
+/// leg the tiles draw a junction of (`RoadClass.joinsJunctions`), the legs
+/// `RoadGraph` reads the plan over. An alley, a path or a road in the air
+/// is not — it gives way to every leg that is — unless none of the node's
+/// legs is drawn: then the plan was read over none of them and says
+/// nothing, and they all meet by the uncontrolled rules.
 bool legInPlan(RoadNode node, int k) {
   final legs = node.legs;
   if (legs[k].roadClass.joinsJunctions) return true;

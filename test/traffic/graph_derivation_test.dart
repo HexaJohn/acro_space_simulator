@@ -82,11 +82,18 @@ void main() {
         id: 'r',
         controls: [Vec2(-150, -1045), Vec2(0, -1012.8)],
         roadClass: RoadClass.ramp));
-    // A deck that stops in mid air.
+    // A deck that stops in mid air: on piers its whole length, since a
+    // deck's end off its piers meets the ground by the layout's level rule
+    // (`CityLayout.levelsSeparated`), however high it stands.
     layout.addRoad(const RoadSpline(
         id: 'deck',
         controls: [Vec2(2000, 0), Vec2(2300, 0)],
-        deck: RoadDeck(startM: 12, endM: 12, startOffsetM: 12, endOffsetM: 12)));
+        deck: RoadDeck(
+            startM: 12,
+            endM: 12,
+            startOffsetM: 12,
+            endOffsetM: 12,
+            structures: [(0.0, 300.0)])));
     // A partial stop: the player told one leg of a crossing to stop.
     layout.commitRoad(
         controls: const [Vec2(3000, -200), Vec2(3000, 200)],
