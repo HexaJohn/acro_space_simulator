@@ -426,7 +426,12 @@ more than 2.5 m up it stands on piers (a bridge past 15 m), more than 5 m
 down it is a tunnel. Structure and tunnel ranges ride the road and are
 sliced at splits. Two roads whose levels differ by 4.5 m at a crossing pass
 over each other — one rule (`CityLayout.levelsSeparated`) shared by the
-crossing test, the end snap and the connectivity walk.
+crossing test, the end snap, the connectivity walk, the routing graph's
+nodes and the tiles' junctions (`RoadMesher.liftsSeparated`, the same rule
+in lifts). A deck records the length its ranges were surveyed along
+(`rangeLengthM`, saved as `l`), and its ranges are read at `rangeArc`: a save
+re-samples a curved road by millimetres, and read blind at its very end a
+viaduct stepped off its own piers and joined the street beneath it.
 
 **Money.** Roads are paid from the treasury (buildings stay in ore):
 `CitySim.buildRoad` quotes and charges; `quoteRoad` is the preview, over the
@@ -439,6 +444,9 @@ generator and the starter kit.
 lots carried; the difference is charged), `reverseRoad` (a one-way road's
 `reversed` flag — never its controls, which would rename every lot on it),
 `renameRoad` (every piece of the base road), `moveRoadEnd` (Adjust Roads).
+Every edit re-plats through one carry: a building whose lot survives goes
+with it, and what stood on a lot the road gave up is torn down as the Clear
+tool would — never left under a dead lot id, counted and saved.
 `roadsRevision` moves with every road or override change; the renderer, the
 upkeep cache and the traffic model key on it — an in-place edit keeps the
 road COUNT, and a count-keyed cache never saw it.
@@ -449,7 +457,10 @@ deck, or a class only the tool lays) follows the city-builder rules
 roads do, except for one-way roads leaving them (and two-lane roads drawn
 away), overriding every other no-lights rule; six-lane roads everywhere but
 one-ways leaving; highways only where they meet a two-way road; roundabouts
-never. The generator's junctions keep their class-only warrant — read by the
+never. A road only leaving the biggest one (an off-ramp, a one-way street
+off an avenue) stops nothing on it, and a junction is planned over the legs
+the tiles draw — an alley or a path meeting a street is a kerb cut, never a
+stop. The generator's junctions keep their class-only warrant — read by the
 leg-aware rules, their randomly drawn streets would get lights at one corner
 and a stop at the next. `junctionPlanForNetwork` is the one question the
 tiles draw by and the sim's graph times by. Players override lights and stop
