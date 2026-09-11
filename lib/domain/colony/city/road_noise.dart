@@ -60,14 +60,20 @@ class RoadNoise {
 
   /// What the road a lot fronts adds to it: grass or trees along the kerb,
   /// or the parking an undecorated street keeps.
-  static double frontageBonus(RoadSpline road) {
-    final t = RoadType.of(road);
-    final deco = switch (road.decoration) {
+  static double frontageBonus(RoadSpline road) =>
+      frontageBonusOf(RoadType.of(road), road.decoration);
+
+  /// [frontageBonus] for a road of menu entry [type] dressed with
+  /// [decoration] — for a caller that has already looked the type up
+  /// (`RoadType.of` is a scan of the menu, and the road graph looks every
+  /// road up once for its speed anyway).
+  static double frontageBonusOf(RoadType type, RoadDecoration decoration) {
+    final deco = switch (decoration) {
       RoadDecoration.none => 0.0,
       RoadDecoration.grass => 0.05,
       RoadDecoration.trees => 0.1,
     };
-    return deco + (t.hasParking ? 0.03 : 0.0);
+    return deco + (type.hasParking ? 0.03 : 0.0);
   }
 
   /// What the colony's air takes off every lot's value.
@@ -116,8 +122,12 @@ class RoadNoiseSampler {
   final List<int> _touched = [];
   int _epoch = 0;
 
-  /// Road segments looked at so far — the unit the traffic model budgets
-  /// its noise pass in.
+  /// Work so far, in the unit the traffic model budgets its noise pass in:
+  /// an index cell looked in (a map probe whether or not a road is there),
+  /// a road segment measured, a nearby road weighed. Counting the segments
+  /// alone made a noise step several times slower than a routing step of
+  /// the same budget: a lot's probe looks in thirty-odd cells to measure a
+  /// couple of dozen segments.
   int work = 0;
 
   /// Noise at [p], 0..1: every road within [RoadNoise.reachM] of its kerb,
@@ -132,7 +142,11 @@ class RoadNoiseSampler {
     }
     _touched.clear();
     final reach = RoadNoise.reachM + RoadGraph.maxHalfWidth;
-    g.index.visit(Box2.around(p, reach), 0, (slot, rec, seg) {
+    final box = Box2.around(p, reach);
+    final cellM = g.index.cellM;
+    work += ((box.maxE / cellM).floor() - (box.minE / cellM).floor() + 1) *
+        ((box.maxN / cellM).floor() - (box.minN / cellM).floor() + 1);
+    g.index.visit(box, 0, (slot, rec, seg) {
       work++;
       if (seg == 0 || slot >= g.slotToRoad.length) return;
       final r = g.slotToRoad[slot];
@@ -160,6 +174,7 @@ class RoadNoiseSampler {
       }
     });
     var total = 0.0;
+    work += 4 * _touched.length;
     for (final slot in _touched) {
       final r = g.slotToRoad[slot];
       final road = g.roads[r];

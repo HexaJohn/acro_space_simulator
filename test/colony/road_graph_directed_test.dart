@@ -263,4 +263,73 @@ void main() {
     // Sixteen crossings of four legs, and every inner arm both ways.
     expect(a.nodes.where((n) => n.legs.length == 4), hasLength(16));
   });
+
+  test('a rename or an override patches the graph; a new class rebuilds it',
+      () {
+    final layout = CityLayout();
+    layout.commitRoad(
+        controls: const [Vec2(0, -200), Vec2(0, 200)],
+        roadClass: RoadClass.avenue);
+    layout.commitRoad(
+        controls: const [Vec2(-200, 0), Vec2(200, 0)],
+        roadClass: RoadClass.avenue);
+    final g = RoadGraph.of(layout);
+    expect(g.refreshedFor(layout), same(g), reason: 'nothing changed');
+
+    // Renamed: routing never reads a name.
+    final id = layout.roads.first.id;
+    layout.updateRoad(layout.roadById(id)!.copyWith(name: 'High Street'));
+    final renamed = g.refreshedFor(layout)!;
+    expect(renamed.sharesStructureWith(g), isTrue);
+    expect(renamed.roads[renamed.roadNoOf(id)!].name, 'High Street');
+    expect(renamed.edgeTime, same(g.edgeTime));
+
+    // The lights taken off: the crossing re-planned exactly as a rebuild
+    // plans it, nothing else touched.
+    const off = [JunctionOverride(at: Vec2(2, -1), lights: false)];
+    final patched = renamed.refreshedFor(layout, overrides: off)!;
+    final rebuilt = RoadGraph.of(layout, overrides: off);
+    expect(patched.sharesStructureWith(g), isTrue);
+    expect(patched.nodeNear(const Vec2(0, 0))!.control, JunctionControl.stop);
+    expect(patched.edgeTime, rebuilt.edgeTime);
+    for (var n = 0; n < rebuilt.nodeCount; n++) {
+      expect(patched.nodes[n].control, rebuilt.nodes[n].control);
+      expect(patched.nodes[n].plan.stopLegs, rebuilt.nodes[n].plan.stopLegs);
+    }
+    // And back on.
+    final back = patched.withOverrides(const []);
+    expect(back.nodeNear(const Vec2(0, 0))!.control, JunctionControl.signals);
+    expect(back.edgeTime, g.edgeTime);
+
+    // A different class is a different graph.
+    layout.updateRoad(
+        layout.roadById(id)!.copyWith(roadClass: RoadClass.street));
+    expect(patched.refreshedFor(layout, overrides: off), isNull);
+  });
+
+  test('a building off the plat hangs on the nearest road within reach', () {
+    final layout = CityLayout();
+    final id =
+        layout.commitRoad(controls: const [Vec2(0, 0), Vec2(600, 0)]).roadId;
+    final g = RoadGraph.of(layout);
+    final near = g.attachFootprint(const [
+      Vec2(290, -70),
+      Vec2(310, -70),
+      Vec2(310, -50),
+      Vec2(290, -50),
+    ]);
+    expect(near, isNotNull);
+    expect(g.roads[g.pieceRoad[near!.piece]].id, id);
+    expect(near.sM, closeTo(300, 12));
+    expect(near.dirs, RoadGraph.forwardBit | RoadGraph.backwardBit);
+    expect(
+        g.attachFootprint(const [
+          Vec2(290, -300),
+          Vec2(310, -300),
+          Vec2(310, -280),
+          Vec2(290, -280),
+        ]),
+        isNull,
+        reason: '280 m off is out of reach');
+  });
 }

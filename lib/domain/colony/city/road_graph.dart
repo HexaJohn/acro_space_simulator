@@ -31,6 +31,7 @@ import 'parcel.dart';
 import 'road_catalog.dart';
 import 'road_elevation.dart';
 import 'road_junction.dart';
+import 'road_noise.dart';
 import 'spatial_index.dart';
 
 /// One junction (or a bend, or a dead end): where road ends meet.
@@ -43,7 +44,25 @@ class RoadNode {
     required this.plan,
     required this.atGrade,
     required this.heightM,
-  });
+    required bool roundaboutPreferred,
+  }) : _roundaboutPreferred = roundaboutPreferred;
+
+  /// Every leg a collector: the warrant prefers a roundabout. Kept so a
+  /// re-plan under a new override ([RoadGraph.withOverrides]) asks the
+  /// warrant the question the build asked.
+  final bool _roundaboutPreferred;
+
+  /// This node under a different [plan] — everything else as it is.
+  RoadNode _withPlan(JunctionPlan plan) => RoadNode._(
+        id: id,
+        at: at,
+        legs: legs,
+        legRoadIds: legRoadIds,
+        plan: plan,
+        atGrade: atGrade,
+        heightM: heightM,
+        roundaboutPreferred: _roundaboutPreferred,
+      );
 
   /// Index in [RoadGraph.nodes].
   final int id;
@@ -106,6 +125,18 @@ class LotAccess {
   final bool forward, backward;
 }
 
+/// Where something off the plat — a building the colony's grid placed — is
+/// entered from, in the graph's own terms: the piece, the arc along its
+/// road, and the access mask ([RoadGraph.forwardBit] /
+/// [RoadGraph.backwardBit]).
+class PieceAccess {
+  const PieceAccess(this.piece, this.sM, this.dirs);
+
+  final int piece;
+  final double sM;
+  final int dirs;
+}
+
 /// The directed road graph. See the library comment.
 class RoadGraph {
   RoadGraph._({
@@ -115,6 +146,11 @@ class RoadGraph {
     required Map<String, int> roadNo,
     required this.slotToRoad,
     required this.roadSpeedMps,
+    required this.roadEmission,
+    required this.roadBonus,
+    required this.roadLanes,
+    required this.roadPaved,
+    required this.roadKey,
     required this.roadFirstPiece,
     required this.nodes,
     required this.pieceRoad,
@@ -130,6 +166,7 @@ class RoadGraph {
     required this.edgeForward,
     required this.edgeLength,
     required this.edgeTime,
+    required this.edgeLeg,
     required this.outStart,
     required this.outEdges,
     required this.lotIds,
@@ -142,6 +179,8 @@ class RoadGraph {
     required this.rootPiece,
     required this.rootS,
     required this.rootDirs,
+    required this.overrides,
+    required this.overridesSignature,
   })  : _roadNo = roadNo,
         _lotNo = lotNo;
 
@@ -188,6 +227,20 @@ class RoadGraph {
   /// Speed limit of each road, metres per second (see [RoadType.speedKmh]).
   final Float64List roadSpeedMps;
 
+  /// What the traffic model reads of each road's menu entry, looked up once
+  /// here rather than per pass: the noise it throws at its kerb
+  /// ([RoadType.noiseEmission]), what its frontage adds to land value
+  /// ([RoadNoise.frontageBonus]), its lanes in total (both ways) and
+  /// whether it is paved — a lane's capacity.
+  final Float64List roadEmission, roadBonus;
+  final Int32List roadLanes;
+  final Uint8List roadPaved;
+
+  /// A hash of each road's [baseRoadId], the same on every build: every
+  /// piece of one drawn road shares it, and a split's pieces keep their
+  /// parent's. The traffic model partitions its passes by it.
+  final Int32List roadKey;
+
   /// Pieces of road r are `roadFirstPiece[r] .. roadFirstPiece[r + 1] - 1`,
   /// in arc order.
   final Int32List roadFirstPiece;
@@ -211,6 +264,10 @@ class RoadGraph {
   final Uint8List edgeForward;
   final Float64List edgeLength, edgeTime;
 
+  /// The leg (an index into [RoadNode.legs] of the node at [edgeTo]) each
+  /// edge arrives by: what the arrival delay is read for.
+  final Int32List edgeLeg;
+
   /// Out-edges of node n: `outEdges[outStart[n] .. outStart[n + 1] - 1]`.
   final Int32List outStart, outEdges;
 
@@ -231,6 +288,11 @@ class RoadGraph {
   final int rootPiece;
   final double rootS;
   final int rootDirs;
+
+  /// The player's junction overrides the plans were made with (the ones
+  /// that say something), and [overridesSignatureOf] them.
+  final List<JunctionOverride> overrides;
+  final String overridesSignature;
 
   int get roadCount => roads.length;
   int get nodeCount => nodes.length;
@@ -303,6 +365,339 @@ class RoadGraph {
     return best;
   }
 
+  /// Whether [other] is this graph with nothing changed but junction plans
+  /// or road names ([withOverrides], [refreshedFor]): the same nodes,
+  /// pieces, edges and lots, numbered alike, so whatever is indexed by one
+  /// is good for the other.
+  bool sharesStructureWith(RoadGraph other) =>
+      identical(pieceRoad, other.pieceRoad);
+
+  /// The piece of road [road] (graph number) nearest [p]: a walk of the
+  /// road's samples.
+  int pieceNear(int road, Vec2 p) {
+    final rec = roadRecs[road];
+    var best = double.infinity;
+    var bestS = 0.0;
+    for (var seg = 1; seg < rec.sampleCount; seg++) {
+      final (u, d) = _project(rec, seg, p.e, p.n);
+      if (d < best) {
+        best = d;
+        bestS = rec.arcAt(seg, u);
+      }
+    }
+    return pieceAt(road, bestS);
+  }
+
+  /// Where a building with footprint [polygon] that is not one of the
+  /// layout's lots — one the colony's grid placed — is entered from, by the
+  /// hand-drawn lot's rule: the nearest road within [manualReachM] of any
+  /// part of it. Null when no road is that near.
+  PieceAccess? attachFootprint(List<Vec2> polygon, {Vec2? centroid}) {
+    if (polygon.isEmpty) return null;
+    var c = centroid;
+    if (c == null) {
+      var e = 0.0, n = 0.0;
+      for (final v in polygon) {
+        e += v.e;
+        n += v.n;
+      }
+      c = Vec2(e / polygon.length, n / polygon.length);
+    }
+    final hit = _nearestRoadTo(index, slotToRoad, roadRecs, roads, polygon, c);
+    if (hit == null) return null;
+    final rec = roadRecs[hit.road];
+    final s = rec.arcAt(hit.seg, hit.u);
+    return PieceAccess(pieceAt(hit.road, s), s,
+        _dirsFor(roads[hit.road], _rightOf(rec, hit.seg, hit.u, hit.probe)));
+  }
+
+  /// This graph brought up to date with [layout]'s roads and the player's
+  /// [overrides] without a rebuild, where none is needed:
+  ///
+  /// - itself, when nothing it was built from has changed;
+  /// - a copy sharing every structural array ([sharesStructureWith]) when
+  ///   the only changes are ones routing never reads — a road's name — or
+  ///   the overrides, whose junctions it re-plans ([withOverrides]);
+  /// - null when a road was laid, removed, split, re-routed, reversed,
+  ///   re-classed, re-dressed or raised: only [RoadGraph.of] will do.
+  ///
+  /// One walk of the roads comparing records. A light toggled in the
+  /// Junctions view or a road renamed is a single click, and a rebuild of
+  /// a twenty-mile city for it would be seconds — and would throw away the
+  /// traffic pass in flight. The LOTS are the caller's to watch
+  /// ([CityLayout.version]); this does not look at them.
+  RoadGraph? refreshedFor(CityLayout layout,
+      {Iterable<JunctionOverride> overrides = const []}) {
+    var r = 0;
+    List<RoadSpline>? newRoads;
+    List<IndexedRoad>? newRecs;
+    for (final (slot, rec) in layout.roadIndex.indexed) {
+      // The build's choice of roads, in the build's order.
+      if (rec.road.roadClass.isRail) continue;
+      if (rec.sampleCount < 2 || rec.lengthM <= 1e-6) continue;
+      if (r >= roads.length ||
+          slot >= slotToRoad.length ||
+          slotToRoad[slot] != r) {
+        return null;
+      }
+      final old = roadRecs[r];
+      if (!identical(rec, old)) {
+        // An attribute swap keeps the samples; anything it swapped must
+        // route as it did.
+        if (!identical(rec.e, old.e) || !identical(rec.n, old.n)) return null;
+        if (!identical(rec.road, old.road) &&
+            !_routesAlike(rec.road, old.road)) {
+          return null;
+        }
+        (newRoads ??= List.of(roads))[r] = rec.road;
+        (newRecs ??= List.of(roadRecs))[r] = rec;
+      }
+      r++;
+    }
+    if (r != roads.length) return null;
+    var g = this;
+    if (newRoads != null) {
+      g = _copy(
+          roads: List.unmodifiable(newRoads),
+          roadRecs: List.unmodifiable(newRecs!));
+    }
+    return g.withOverrides(overrides);
+  }
+
+  /// This graph under the player's junction [overrides] as they now stand:
+  /// itself when they say what they said; else a copy that shares every
+  /// structural array and differs only in the plans of the junctions within
+  /// [JunctionOverride.matchM] of an override that came, went or changed,
+  /// and in the times of the edges arriving at those — each worked out the
+  /// way the build works it out, so the copy is exactly what
+  /// [RoadGraph.of] would give.
+  RoadGraph withOverrides(Iterable<JunctionOverride> overrides) {
+    final list = [
+      for (final o in overrides)
+        if (!o.isEmpty) o
+    ];
+    final sig = overridesSignatureOf(list);
+    if (sig == overridesSignature) return this;
+    final before = {for (final o in this.overrides) _overrideSig(o)};
+    final after = {for (final o in list) _overrideSig(o)};
+    final changed = <Vec2>[
+      for (final o in this.overrides)
+        if (!after.contains(_overrideSig(o))) o.at,
+      for (final o in list)
+        if (!before.contains(_overrideSig(o))) o.at,
+    ];
+    final nN = nodes.length;
+    final replan = Uint8List(nN);
+    for (var n = 0; n < nN; n++) {
+      final at = nodes[n].at;
+      for (final p in changed) {
+        if (p.distanceTo(at) <= JunctionOverride.matchM) {
+          replan[n] = 1;
+          break;
+        }
+      }
+    }
+    final newNodes = List<RoadNode>.of(nodes);
+    for (var n = 0; n < nN; n++) {
+      if (replan[n] == 0) continue;
+      final node = nodes[n];
+      newNodes[n] = node._withPlan(junctionPlanFor(
+        node.legs,
+        roundaboutPreferred: node._roundaboutPreferred,
+        override: _nearestOverride(list, node.at),
+      ));
+    }
+    final time = Float64List.fromList(edgeTime);
+    for (var e = 0; e < time.length; e++) {
+      final n = edgeTo[e];
+      if (replan[n] == 0) continue;
+      final drive = edgeLength[e] / roadSpeedMps[pieceRoad[edgePiece[e]]];
+      time[e] = drive + newNodes[n].delayFor(edgeLeg[e]);
+    }
+    return _copy(
+      nodes: List.unmodifiable(newNodes),
+      edgeTime: time,
+      overrides: List.unmodifiable(list),
+      overridesSignature: sig,
+    );
+  }
+
+  RoadGraph _copy({
+    List<RoadSpline>? roads,
+    List<IndexedRoad>? roadRecs,
+    List<RoadNode>? nodes,
+    Float64List? edgeTime,
+    List<JunctionOverride>? overrides,
+    String? overridesSignature,
+  }) =>
+      RoadGraph._(
+        index: index,
+        roads: roads ?? this.roads,
+        roadRecs: roadRecs ?? this.roadRecs,
+        roadNo: _roadNo,
+        slotToRoad: slotToRoad,
+        roadSpeedMps: roadSpeedMps,
+        roadEmission: roadEmission,
+        roadBonus: roadBonus,
+        roadLanes: roadLanes,
+        roadPaved: roadPaved,
+        roadKey: roadKey,
+        roadFirstPiece: roadFirstPiece,
+        nodes: nodes ?? this.nodes,
+        pieceRoad: pieceRoad,
+        pieceS0: pieceS0,
+        pieceS1: pieceS1,
+        pieceFrom: pieceFrom,
+        pieceTo: pieceTo,
+        pieceFwdEdge: pieceFwdEdge,
+        pieceBwdEdge: pieceBwdEdge,
+        edgeFrom: edgeFrom,
+        edgeTo: edgeTo,
+        edgePiece: edgePiece,
+        edgeForward: edgeForward,
+        edgeLength: edgeLength,
+        edgeTime: edgeTime ?? this.edgeTime,
+        edgeLeg: edgeLeg,
+        outStart: outStart,
+        outEdges: outEdges,
+        lotIds: lotIds,
+        lotNo: _lotNo,
+        lotPiece: lotPiece,
+        lotS: lotS,
+        lotDirs: lotDirs,
+        lotE: lotE,
+        lotN: lotN,
+        rootPiece: rootPiece,
+        rootS: rootS,
+        rootDirs: rootDirs,
+        overrides: overrides ?? this.overrides,
+        overridesSignature: overridesSignature ?? this.overridesSignature,
+      );
+
+  /// The id a road was LAID under, before any junction split it: the id up
+  /// to its first `x` (`r12x0x3` -> `r12`) — the layout's naming rule, so
+  /// every piece of one drawn road shares it.
+  static String baseRoadId(String id) {
+    final i = id.indexOf('x');
+    return i < 0 ? id : id.substring(0, i);
+  }
+
+  /// A hash of [s] that is the same on every run and every platform: a
+  /// polynomial over its code units, kept to 30 bits so a web build's
+  /// doubles hold every step exactly. Never [String.hashCode], which Dart
+  /// does not promise to keep.
+  static int stableKey(String s) {
+    var h = 0;
+    for (var i = 0; i < s.length; i++) {
+      h = (h * 31 + s.codeUnitAt(i)) & 0x3fffffff;
+    }
+    return h;
+  }
+
+  /// One string for what a collection of overrides SAYS, whatever their
+  /// order: two collections with one signature plan every junction alike.
+  static String overridesSignatureOf(Iterable<JunctionOverride> overrides) {
+    final parts = [
+      for (final o in overrides)
+        if (!o.isEmpty) _overrideSig(o)
+    ]..sort();
+    return parts.join(';');
+  }
+
+  static String _overrideSig(JunctionOverride o) =>
+      '${o.at.e},${o.at.n},${o.lights},${o.stopHeadings?.join(' ')}';
+
+  /// The override the build gives a node at [at]: the nearest within
+  /// [JunctionOverride.matchM] — of two as near, the later.
+  static JunctionOverride? _nearestOverride(
+      List<JunctionOverride> list, Vec2 at) {
+    JunctionOverride? best;
+    var bestD = JunctionOverride.matchM;
+    for (final o in list) {
+      final d = o.at.distanceTo(at);
+      if (d <= bestD) {
+        bestD = d;
+        best = o;
+      }
+    }
+    return best;
+  }
+
+  /// Whether two records of one road route alike: the same in everything
+  /// the build reads of a road — all of it but the name.
+  static bool _routesAlike(RoadSpline a, RoadSpline b) =>
+      a.id == b.id &&
+      a.roadClass == b.roadClass &&
+      a.reversed == b.reversed &&
+      a.decoration == b.decoration &&
+      a.soundWalls == b.soundWalls &&
+      a.collector == b.collector &&
+      a.deck == b.deck;
+
+  /// The directions of travel along [road] a lot beside it is reached (and
+  /// left) by, the lot being on the right of its first-to-last direction or
+  /// not.
+  static int _dirsFor(RoadSpline road, bool rightOfForward) {
+    if (road.oneWay) return road.reversed ? backwardBit : forwardBit;
+    // A road of two or more lanes each way — the four-lane road's median,
+    // the six-lane's — forbids the left turn across it mid-block: a lot
+    // is reached, and left, only by the traffic on its own side.
+    if (road.roadClass.lanesEachWay >= 2) {
+      return rightOfForward ? forwardBit : backwardBit;
+    }
+    return forwardBit | backwardBit;
+  }
+
+  /// A hand-drawn lot's road: the nearest segment of any graph road to the
+  /// footprint [polygon] — reaching to its nearest point, not its centre
+  /// [c]: a quarry's site is kilometres across and a road along its edge is
+  /// still its road — within [manualReachM] of that road's edge.
+  static ({int road, int seg, double u, Vec2 probe})? _nearestRoadTo(
+    SegmentIndex idx,
+    Int32List slotToRoad,
+    List<IndexedRoad> recs,
+    List<RoadSpline> roads,
+    List<Vec2> polygon,
+    Vec2 c,
+  ) {
+    final probes = <Vec2>[c, ...polygon];
+    for (var k = 0; k < polygon.length; k++) {
+      final a = polygon[k], b = polygon[(k + 1) % polygon.length];
+      probes.add((a + b) * 0.5);
+    }
+    final near =
+        idx.segmentsNear(Box2.of(polygon), manualReachM + maxHalfWidth);
+    var best = double.infinity;
+    var bestR = -1, bestSeg = 0;
+    var bestU = 0.0;
+    Vec2? bestProbe;
+    for (final entry in near.entries) {
+      if (entry.key >= slotToRoad.length) continue;
+      final r = slotToRoad[entry.key];
+      if (r < 0) continue;
+      final rec = recs[r];
+      // The index is the layout's own, and live: never project onto
+      // samples that are not the graph's.
+      if (!identical(idx.bySlot(entry.key)?.e, rec.e)) continue;
+      final limit = manualReachM + roads[r].halfWidth;
+      for (final seg in entry.value) {
+        if (seg == 0) continue;
+        for (final v in probes) {
+          final (u, d) = _project(rec, seg, v.e, v.n);
+          if (d <= limit && d < best) {
+            best = d;
+            bestR = r;
+            bestSeg = seg;
+            bestU = u;
+            bestProbe = v;
+          }
+        }
+      }
+    }
+    if (bestR < 0) return null;
+    return (road: bestR, seg: bestSeg, u: bestU, probe: bestProbe!);
+  }
+
   /// Build the graph of [layout]'s roads, with the player's junction
   /// [overrides] applied to the plans of the junctions they sit on.
   factory RoadGraph.of(
@@ -332,11 +727,28 @@ class RoadGraph {
       slotToRoad[slots[r]] = r;
       roadNo[roads[r].id] = r;
     }
+    // Each road's menu entry, looked up once per KIND of road (the look-up
+    // is a scan of the menu, and a sprawl has tens of thousands of roads of
+    // a dozen kinds), and what the traffic model reads of it kept per road,
+    // so no pass looks anything up.
     final speed = Float64List(nR);
-    final speedByType = <RoadType, double>{};
+    final emission = Float64List(nR), bonus = Float64List(nR);
+    final lanes = Int32List(nR);
+    final paved = Uint8List(nR);
+    final keys = Int32List(nR);
+    final typeOf = <int, RoadType>{};
+    final nDeco = RoadDecoration.values.length;
     for (var r = 0; r < nR; r++) {
-      final t = RoadType.of(roads[r]);
-      speed[r] = speedByType[t] ??= math.max(1.0, t.speedKmh / 3.6);
+      final road = roads[r];
+      final kind = (road.roadClass.index * nDeco + road.decoration.index) * 2 +
+          (road.soundWalls ? 1 : 0);
+      final t = typeOf[kind] ??= RoadType.of(road);
+      speed[r] = math.max(1.0, t.speedKmh / 3.6);
+      emission[r] = t.noiseEmission;
+      bonus[r] = RoadNoise.frontageBonusOf(t, road.decoration);
+      lanes[r] = road.lanes?.laneCount ?? (road.oneWay ? 1 : 2);
+      paved[r] = road.roadClass.paved ? 1 : 0;
+      keys[r] = stableKey(baseRoadId(road.id));
     }
 
     // ---- Ends: 2r is road r's first sample, 2r + 1 its last. A draped
@@ -611,20 +1023,12 @@ class RoadGraph {
           JunctionLeg(d.road.roadClass,
               startsHere: d.startsHere, heading: d.heading)
       ];
-      JunctionOverride? override;
-      var bestD = JunctionOverride.matchM;
-      for (final o in overrideList) {
-        final d = o.at.distanceTo(at);
-        if (d <= bestD) {
-          bestD = d;
-          override = o;
-        }
-      }
+      final roundabout =
+          drafts.isNotEmpty && drafts.every((d) => d.road.collector);
       final plan = junctionPlanFor(
         legs,
-        roundaboutPreferred:
-            drafts.isNotEmpty && drafts.every((d) => d.road.collector),
-        override: override,
+        roundaboutPreferred: roundabout,
+        override: _nearestOverride(overrideList, at),
       );
       nodes.add(RoadNode._(
         id: n,
@@ -634,6 +1038,7 @@ class RoadGraph {
         plan: plan,
         atGrade: nodeGrade[n] == 1,
         heightM: nodeH[n].isNaN ? null : nodeH[n],
+        roundaboutPreferred: roundabout,
       ));
     }
 
@@ -646,6 +1051,7 @@ class RoadGraph {
     final eFrom = <int>[], eTo = <int>[], ePiece = <int>[];
     final eFwd = <int>[];
     final eLen = <double>[], eTime = <double>[];
+    final eLeg = <int>[];
     for (var p = 0; p < nP; p++) {
       final r = pieceRoad[p];
       final road = roads[r];
@@ -661,6 +1067,7 @@ class RoadGraph {
         eFwd.add(1);
         eLen.add(len);
         eTime.add(drive + nodes[pieceTo[p]].delayFor(pieceLegB[p]));
+        eLeg.add(pieceLegB[p]);
       }
       if (bwdOk) {
         pieceBwd[p] = eFrom.length;
@@ -670,6 +1077,7 @@ class RoadGraph {
         eFwd.add(0);
         eLen.add(len);
         eTime.add(drive + nodes[pieceFrom[p]].delayFor(pieceLegA[p]));
+        eLeg.add(pieceLegA[p]);
       }
     }
     final nEd = eFrom.length;
@@ -703,17 +1111,6 @@ class RoadGraph {
       return lo;
     }
 
-    int dirsFor(RoadSpline road, bool rightOfForward) {
-      if (road.oneWay) return road.reversed ? backwardBit : forwardBit;
-      // A road of two or more lanes each way — the four-lane road's median,
-      // the six-lane's — forbids the left turn across it mid-block: a lot
-      // is reached, and left, only by the traffic on its own side.
-      if (road.roadClass.lanesEachWay >= 2) {
-        return rightOfForward ? forwardBit : backwardBit;
-      }
-      return forwardBit | backwardBit;
-    }
-
     // ---- Lots: an auto lot on its own frontage road at its frontage
     // midpoint; a hand-drawn one on the nearest road within reach.
     final parcels = layout.parcels;
@@ -743,49 +1140,18 @@ class RoadGraph {
         final s = rec.arcAt(hit.seg, hit.u);
         lotPiece[i] = pieceAtRoad(r, s);
         lotS[i] = s;
-        lotDirs[i] = dirsFor(roads[r], hit.rightOfForward);
+        lotDirs[i] = _dirsFor(roads[r], hit.rightOfForward);
         continue;
       }
-      // A hand-drawn lot: reach to its nearest point, not its centre — a
-      // quarry's site is kilometres across and a road along its edge is
-      // still its road.
-      final probes = <Vec2>[c, ...p.polygon];
-      for (var k = 0; k < p.polygon.length; k++) {
-        final a = p.polygon[k], b = p.polygon[(k + 1) % p.polygon.length];
-        probes.add((a + b) * 0.5);
-      }
-      final near = idx.segmentsNear(Box2.of(p.polygon), manualReachM + maxHalfWidth);
-      var best = double.infinity;
-      var bestR = -1, bestSeg = 0;
-      var bestU = 0.0;
-      Vec2? bestProbe;
-      for (final entry in near.entries) {
-        if (entry.key >= slotToRoad.length) continue;
-        final r = slotToRoad[entry.key];
-        if (r < 0) continue;
-        final rec = recs[r];
-        final limit = manualReachM + roads[r].halfWidth;
-        for (final seg in entry.value) {
-          if (seg == 0) continue;
-          for (final v in probes) {
-            final (u, d) = _project(rec, seg, v.e, v.n);
-            if (d <= limit && d < best) {
-              best = d;
-              bestR = r;
-              bestSeg = seg;
-              bestU = u;
-              bestProbe = v;
-            }
-          }
-        }
-      }
-      if (bestR < 0) continue;
-      final rec = recs[bestR];
-      final s = rec.arcAt(bestSeg, bestU);
-      lotPiece[i] = pieceAtRoad(bestR, s);
+      // A hand-drawn lot: the nearest road within reach of any part of it.
+      final hit = _nearestRoadTo(idx, slotToRoad, recs, roads, p.polygon, c);
+      if (hit == null) continue;
+      final rec = recs[hit.road];
+      final s = rec.arcAt(hit.seg, hit.u);
+      lotPiece[i] = pieceAtRoad(hit.road, s);
       lotS[i] = s;
       lotDirs[i] =
-          dirsFor(roads[bestR], _rightOf(rec, bestSeg, bestU, bestProbe!));
+          _dirsFor(roads[hit.road], _rightOf(rec, hit.seg, hit.u, hit.probe));
     }
 
     // ---- The root: the nearest road point to the colony origin.
@@ -832,6 +1198,11 @@ class RoadGraph {
       roadNo: roadNo,
       slotToRoad: slotToRoad,
       roadSpeedMps: speed,
+      roadEmission: emission,
+      roadBonus: bonus,
+      roadLanes: lanes,
+      roadPaved: paved,
+      roadKey: keys,
       roadFirstPiece: roadFirstPiece,
       nodes: List.unmodifiable(nodes),
       pieceRoad: pRoad,
@@ -847,6 +1218,7 @@ class RoadGraph {
       edgeForward: Uint8List.fromList(eFwd),
       edgeLength: Float64List.fromList(eLen),
       edgeTime: Float64List.fromList(eTime),
+      edgeLeg: Int32List.fromList(eLeg),
       outStart: outStart,
       outEdges: outEdges,
       lotIds: List.unmodifiable(lotIds),
@@ -859,6 +1231,8 @@ class RoadGraph {
       rootPiece: rootPiece,
       rootS: rootS,
       rootDirs: rootDirs,
+      overrides: List.unmodifiable(overrideList),
+      overridesSignature: overridesSignatureOf(overrideList),
     );
   }
 

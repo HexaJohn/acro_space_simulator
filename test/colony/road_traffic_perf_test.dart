@@ -79,19 +79,24 @@ void main() {
     final g = traffic.graph;
     final graphMs = sw.elapsedMilliseconds;
 
-    // Warm up: a whole pass, so the JIT has seen every phase.
+    // Warm up: a whole window — every share of the origins routed once,
+    // and the first publication — so the JIT has seen every phase.
     sw.reset();
     var warmCalls = 0;
-    while (traffic.model.passes < 1 && warmCalls < 200000) {
+    while (!traffic.hasRun && warmCalls < 200000) {
       traffic.advance(0.02);
       warmCalls++;
     }
     final passMs = sw.elapsedMilliseconds;
     expect(traffic.hasRun, isTrue);
     expect(traffic.peakCongestion, greaterThan(0));
+    final shares = traffic.model.shares;
+    expect(shares, greaterThan(1), reason: 'a city this size is split');
 
-    // Measure.
-    const measured = 1500;
+    // Measure, passes back to back: the sweeps that open and close every
+    // pass — the stretch loads, the reach fields, the tables reset — fall
+    // inside the measured ticks.
+    const measured = 3000;
     var maxWork = 0;
     var worstUs = 0;
     final total = Stopwatch()..start();
@@ -109,13 +114,18 @@ void main() {
     // ignore: avoid_print
     print('traffic perf: ${c.layout.roads.length} roads, ${lots.length} lots, '
         '${g.nodeCount} nodes, ${g.edgeCount} edges; plat $platMs ms, '
-        'graph $graphMs ms; first pass $warmCalls ticks / $passMs ms; '
-        'tick avg ${avgMs.toStringAsFixed(3)} ms, worst '
+        'graph $graphMs ms; $shares shares; first window $warmCalls ticks / '
+        '$passMs ms; tick avg ${avgMs.toStringAsFixed(3)} ms, worst '
         '${(worstUs / 1000).toStringAsFixed(2)} ms, max work $maxWork; '
         'passes ${traffic.model.passes}');
 
     // ~2 ms a tick, with room for a slow CI machine running a debug VM.
     expect(avgMs, lessThan(4.0));
+    // And the WORST tick, not only the average: no stage boundary sweeps
+    // the network in one go (the tick that builds the graph, before the
+    // warm-up, is not measured). Room again for a debug VM and a
+    // collection landing in a tick.
+    expect(worstUs / 1000, lessThan(6.0));
     // A step stops at its budget: every stage resumes where the last step
     // stopped, and the most one overruns by is the routes it keeps as a
     // kind of trip finishes.
@@ -125,8 +135,21 @@ void main() {
         lessThanOrEqualTo(tuning.workPerStep +
             tuning.routesPerOrigin * tuning.maxSettled +
             1000));
-    // And a whole pass is minutes of play, not hours: at one tick a frame
+    // And a whole window is minutes of play, not hours: at one tick a frame
     // it lands well inside a colony day.
     expect(warmCalls, lessThan(6000));
+
+    // The window is the whole city's traffic, not a sample scaled up: the
+    // same loads, road by road, as one pass that routes every origin.
+    final whole = CityRoadTraffic(c,
+        tuning: const TrafficTuning(
+            workPerStep: 1 << 30, maxOriginsPerPass: 1 << 30));
+    whole.advance(0.02);
+    expect(whole.model.shares, 1);
+    expect(traffic.peakCongestion, closeTo(whole.peakCongestion, 1e-9));
+    for (final road in c.layout.roads) {
+      final w = whole.volumeOf(road.id);
+      expect(traffic.volumeOf(road.id), closeTo(w, 1e-9 * (1 + w)));
+    }
   }, timeout: const Timeout(Duration(minutes: 10)));
 }
