@@ -315,7 +315,7 @@ RoadQuote quoteRoadBuild(
   // whatever the treasury says — then whether the colony may and can pay.
   refusal ??= !unlocked
       ? RoadRefusal.locked
-      : (cost > funds + 1e-9 ? RoadRefusal.funds : null);
+      : (cost > funds + kMoneyEpsilon ? RoadRefusal.funds : null);
   return RoadQuote(
     type: type,
     lengthM: lengthM,
@@ -506,17 +506,24 @@ List<Vec2> controlsWithMovedEnd(
   return finish([to, ...cs.skip(k)]);
 }
 
+/// How far a price may sit over the treasury and still be paid: float
+/// noise, not money. The affordability check and [formatMoney] share it, so
+/// a price the bank refuses never prints as what the bank holds.
+const double kMoneyEpsilon = 1e-9;
+
 /// § as the HUD prints it: rounded up to the whole coin — a bill of
 /// §1,239.20 needs §1,240 in the bank — with thousands separated.
 ///
-/// Up from the nearest CENT, not from the raw double: a length times a
-/// price per metre lands a hair over the whole number (§1,080.0000000000007
-/// for a §1,080 road), and rounding that up printed a coin nobody owes.
+/// Up from [kMoneyEpsilon] under the amount, not from the raw double: a
+/// length times a price per metre lands a hair over the whole number
+/// (§1,080.0000000000007 for a §1,080 road), and rounding that up printed a
+/// coin nobody owes. No wider than that, though — §1,080.004 is refused
+/// against §1,080 of funds, so it must read §1,081.
 String formatMoney(double amount) {
-  final cents = amount.isFinite ? (amount * 100).roundToDouble() : 0.0;
-  final whole = (cents / 100).ceil().abs();
+  final whole =
+      amount.isFinite ? math.max(0, (amount.abs() - kMoneyEpsilon).ceil()) : 0;
   final digits = whole.toString();
-  final out = StringBuffer(cents < 0 && whole > 0 ? '-§' : '§');
+  final out = StringBuffer(amount < 0 && whole > 0 ? '-§' : '§');
   for (var i = 0; i < digits.length; i++) {
     if (i > 0 && (digits.length - i) % 3 == 0) out.write(',');
     out.write(digits[i]);

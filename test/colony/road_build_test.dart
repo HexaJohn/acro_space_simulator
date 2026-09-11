@@ -213,6 +213,19 @@ void main() {
       expect(formatMoney(-1080.0000000000007), '-§1,080');
       // A real part of a coin still needs the whole coin in the bank.
       expect(formatMoney(1080.01), '§1,081');
+      // Even under a cent: the affordability check refuses anything past
+      // kMoneyEpsilon over the funds, so the price it names is the coin up.
+      expect(formatMoney(1080.004), '§1,081');
+    });
+
+    test('a price refused for want of funds reads more than the funds', () {
+      // A 108.0004 m road at §10/m against §1,080: past the check's
+      // tolerance, so refused — and 'Not enough money: §1,080 needed' with
+      // §1,080 in the bank would contradict itself.
+      const funds = 1080.0;
+      const cost = 1080.004;
+      expect(cost > funds + kMoneyEpsilon, isTrue, reason: 'refused');
+      expect(formatMoney(cost), isNot(formatMoney(funds)));
     });
   });
 
