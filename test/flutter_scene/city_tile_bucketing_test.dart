@@ -584,6 +584,36 @@ void main() {
       expect(unkeyed.endBends, isEmpty);
     });
 
+    test('the turn is read off whichever end meets the deck by the rule',
+        () {
+      // A deck end has an end-table entry of its own, keyed by its lift, so
+      // the other leg of its corner shares no key with it unless it stands
+      // at that very lift. The one end that meets it is found by the rule
+      // the table counted it by: a deck two metres off its lift, or the
+      // street it is graded into.
+      Set<int> bendsIn(List<RoadSnapshot> roads) =>
+          cut(frame(roads)).endBends['moon'] ?? const <int>{};
+      final higher = road(turnedPts, lifts: List.filled(3, 14.0));
+      final offLift = bendsIn([leg, higher]);
+      expect(CityTileBucketer.bendsOf(leg, offLift), (false, true));
+      expect(CityTileBucketer.bendsOf(higher, offLift), (true, false));
+      // Graded into the ground at the corner, it meets the street there.
+      final low = road(legPts, lifts: const [12.0, 6.0, 1.0]);
+      final street = road(turnedPts);
+      expect(CityTileBucketer.bendsOf(low, bendsIn([low, street])),
+          (false, true));
+      // Grade-separated, nothing meets it there, and nothing turns.
+      final apart = road(turnedPts, lifts: List.filled(3, 20.0));
+      expect(CityTileBucketer.bendsOf(leg, bendsIn([leg, apart])),
+          (false, false));
+      expect(CityTileBucketer.bendsOf(leg, bendsIn([leg, street])),
+          (false, false));
+      // Going on straight off a deck two metres up is no turn.
+      final onHigher = road(onPts, lifts: List.filled(3, 14.0));
+      expect(CityTileBucketer.bendsOf(leg, bendsIn([leg, onHigher])),
+          (false, false));
+    });
+
     test("the other leg turned re-keys the deck's tile", () {
       final before = keys(cut(frame([leg, on, c])));
       final d = CityTileBucketer.diff(before, cut(frame([leg, turned, c])));
