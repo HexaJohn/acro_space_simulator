@@ -392,3 +392,101 @@ per capture (cache per layout version); the sim walks every lot per tick
 (stagger); saves store every road and lot (seed + deltas); house lots take
 `r-low`'s housing count (a detached-house spec); parkland sections are bare
 ground; the studio's "Sprawl" slider could read "Extent".
+
+## 9. The road tool (2026-09-10/11)
+
+The player's road placement, rebuilt on a city builder's road tool (the
+brief was Cities: Skylines' own): a road MENU instead of a list of classes,
+four drawing modes, elevation in steps, a snapping menu, costs and upkeep,
+one-way roads with a direction, decorations, the traffic-light rules, and
+three traffic info views. The generator's cities are byte-identical — every
+new path is gated on something the generator never sets.
+
+**The menu is data over the classes.** `road_catalog.dart`: a `RoadType` is
+a class plus the variant a road menu sells as a separate road — decorative
+grass or trees, sound barriers — with Cities: Skylines' base-game price per
+8 m cell, upkeep per week per cell, speed, noise, parking and the milestone
+it opens at (all on ladder rungs: highways at Township, decorated roads at
+Small Town). A type is never saved: `RoadType.of(road)` recovers it from the
+class, `decoration` and `soundWalls`, so old saves and generated roads price
+themselves. Three classes were appended (index-persisted): `streetOneWay`,
+`boulevard` (the six-lane road, still zoned) and `motorway` (the player's
+Highway: one way, three lanes, no frontage, NOT limited-access — the tool's
+own elevation is how it goes over things). The eight-lane surface highway
+is labelled "Urban Highway".
+
+**Decks: raised and sunk roads.** `road_elevation.dart` + `RoadDeck`. PAGE
+UP/DOWN moves the tool's elevation in 3/6/12 m steps (60 m up, 36 m down,
+gravel never underground). A road that leaves grade gets a deck: a straight
+grade line between its end heights, in metres above the BODY DATUM (never
+above ground — the ground under a road is re-cut by the road and re-graded
+from pristine terrain on every load). `surveyDeck` walks it against the
+ground: near the ground it is graded (the shaper cuts/fills to the deck),
+more than 2.5 m up it stands on piers (a bridge past 15 m), more than 5 m
+down it is a tunnel. Structure and tunnel ranges ride the road and are
+sliced at splits. Two roads whose levels differ by 4.5 m at a crossing pass
+over each other — one rule (`CityLayout.levelsSeparated`) shared by the
+crossing test, the end snap and the connectivity walk.
+
+**Money.** Roads are paid from the treasury (buildings stay in ore):
+`CitySim.buildRoad` quotes and charges; `quoteRoad` is the preview, over the
+SAME snapped line, so the preview is the bill. Upkeep is per colony week
+(7 × the body-scaled day) and subtracts from the net rate; elevated ×2.17,
+tunnel ×5.33 (the highway rows' own ratios). `commitRoad` stays free for the
+generator and the starter kit.
+
+**Editing a built road.** `upgradeRoad` (a type change in place, re-plat,
+lots carried; the difference is charged), `reverseRoad` (a one-way road's
+`reversed` flag — never its controls, which would rename every lot on it),
+`renameRoad` (every piece of the base road), `moveRoadEnd` (Adjust Roads).
+`roadsRevision` moves with every road or override change; the renderer, the
+upkeep cache and the traffic model key on it — an in-place edit keeps the
+road COUNT, and a count-keyed cache never saw it.
+
+**The warrant.** Junction control for a junction the tool had a hand in (a
+deck, or a class only the tool lays) follows the city-builder rules
+(`junctionControlForLegs`): two-lane roads never make lights; four-lane
+roads do, except for one-way roads leaving them (and two-lane roads drawn
+away), overriding every other no-lights rule; six-lane roads everywhere but
+one-ways leaving; highways only where they meet a two-way road; roundabouts
+never. The generator's junctions keep their class-only warrant — read by the
+leg-aware rules, their randomly drawn streets would get lights at one corner
+and a stop at the next. `junctionPlanForNetwork` is the one question the
+tiles draw by and the sim's graph times by. Players override lights and stop
+legs per junction (`JunctionOverride`, position-keyed, saved).
+
+**Routed traffic.** `road_graph.dart` builds a directed graph (one-way and
+`reversed` honoured, levels matched at nodes, lot access from the kerb side
+on divided roads); `road_traffic_model.dart` assigns commuter, shopper,
+goods and service trips on quickest-time paths (junction delays by plan) in
+budgeted steps, publishes per-road volumes and `routesThrough(road)` for the
+Traffic Routes view, and per-lot service and delivery reach over DIRECTED
+edges — a fire engine cannot go against a one-way street; a shop no lorry
+reaches does not grow. `road_noise.dart`: noise from traffic × type
+(decorations and walls quieter, tunnels silent) and land value, feeding home
+growth and tax.
+
+**The renderer.** The wire carries each road's id, decoration and a lift per
+point (deck minus drape; points stay on the drape so piers know the
+ground); a reversed road is flipped on the wire so first-to-last is still
+travel. `CityNodes` cuts incrementally: a tile whose content key did not
+change is kept, so an upgrade re-meshes its own tiles, and an added road no
+longer blinks the colony. Edited roads draw at once in an instant node
+until their tiles land; the tool's ghost, guidelines, handles and route
+lines are an overlay node over `RoadOverlayState`. The mesher raises every
+emitter by the lifts, stands piers (clear of the roads beneath) and girders,
+skips tunnel runs and builds portals at their mouths, paints one-way arrows,
+grass verges and planted medians, and plans junctions by legs.
+
+**The ground.** A road build adds terrain brushes, and the terrain renderer
+used to detach every chunk a new brush touched before its re-mesh existed —
+a black hole with the loading wireframe over the town on every road built.
+Touched chunks now stand in until their replacement lands (`_editStale`);
+scatter keeps stale cells drawn, less the props the new road covers.
+
+**Verification.** `lib/main_road_showcase_dev.dart` lays a showcase round
+the city camera's pivot (overpass, ramp-down tunnel — refused on a slope
+too steep, as it should be — one-way pair, decorated four-/six-lane
+junction with its lights overridden, highway pair) through the player's
+`buildRoad`; `tool/drive_road_showcase.dart` shoots poses and scripted edit
+steps (`ext.acro.showcase?build=|upgrade=|reverse=|lights=`).
