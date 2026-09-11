@@ -3,6 +3,7 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:acro_space_simulator/adapters/repositories/in_memory_repositories.dart';
@@ -102,6 +103,22 @@ void main() {
   String fmt(List<double> xs) => xs.map((x) => x.toStringAsFixed(2)).join(', ');
 
   const tolM = 0.05;
+
+  /// Every point of every graded road on the ground (no deck) in [city]
+  /// that the frame draws more than [tolM] off the ground: 'id#point: m'.
+  List<String> misses(CitySim city, InMemoryTerrainEditsRepository e) {
+    final snap = WorldSnapshot.capture(1, InMemoryVesselRepository(const []),
+        system: system,
+        cities: InMemoryCityRepository([city]),
+        terrainEdits: e);
+    return [
+      for (final r in snap.roads)
+        if (city.layout.roadById(r.id ?? '') case final road?
+            when road.graded && road.deck == null)
+          for (final (k, d) in offGround(r, e).indexed)
+            if (d.abs() >= tolM) '${r.id}#$k: ${d.toStringAsFixed(3)}',
+    ];
+  }
 
   test('a one-way re-laid in Adjust is drawn on the ground it was graded to, '
       'at every point — the frame it is laid and after its corridor is cut',
@@ -384,6 +401,149 @@ void main() {
     final near = work(() => drawn(c.city, c.edits, 'r0x0'));
     expect(near.queries, greaterThan(0),
         reason: 'a crater under a road left its ground as it was');
-    expect(near.drapes, c.city.layout.roads.length);
+    expect(near.drapes, inInclusiveRange(1, c.city.layout.roads.length - 1),
+        reason: 'the crater is under one street\'s far end, not the town');
+  });
+
+  test('a hand drill\'s quantum asks again only what it can move: at the '
+      'crossroads, the streets that meet there; under a lot, that lot', () {
+    final c = devColony();
+    shape(c.city, c.edits);
+    drawn(c.city, c.edits, 'r0x0');
+    final held = c.city.groundCache.length;
+
+    ({int queries, int drapes}) work(void Function() frame) {
+      final q = WorldSnapshot.groundQueries;
+      final d = WorldSnapshot.roadDrapesComputed;
+      frame();
+      return (
+        queries: WorldSnapshot.groundQueries - q,
+        drapes: WorldSnapshot.roadDrapesComputed - d,
+      );
+    }
+
+    Vector3 onGround(Vec2 p) {
+      final dir =
+          c.city.localToBodyFixed(p, bodyRadiusM: earth.radius).normalized;
+      return dir * groundRadius(c.edits, dir);
+    }
+
+    // One quantum (`HandDrill`: a 0.25 m ball) on the crossroads, where
+    // the four starter streets meet. It cleared everything the colony
+    // held — in a generated colony, 1,578 ground queries and two seconds.
+    const node = Vec2(0, 0);
+    final meeting = c.city.layout.roads
+        .where((r) =>
+            r.controls.first.distanceTo(node) < 1 ||
+            r.controls.last.distanceTo(node) < 1)
+        .length;
+    expect(meeting, 4);
+    c.edits.record(earth.id,
+        TerrainBrush.sphere(centreBF: onGround(node), radiusM: 0.25));
+    final drill = work(() => drawn(c.city, c.edits, 'r0x0'));
+    expect(drill.drapes, meeting,
+        reason: 'only the streets that meet under it are draped again');
+    expect(drill.queries, inInclusiveRange(1, meeting + 2),
+        reason: 'the ground is asked again only where the ball can move it');
+    expect(c.city.groundCache.length, greaterThanOrEqualTo(held - 1));
+    final off = misses(c.city, c.edits);
+    expect(off, isEmpty,
+        reason: 'drawn off the drilled ground at [${off.join(', ')}] m');
+
+    // One under a lot, well away from any road: that lot's ground alone.
+    final lot = c.city.layout.parcels.reduce((a, b) =>
+        a.centroid.distanceTo(node) > b.centroid.distanceTo(node) ? a : b);
+    c.edits.record(earth.id,
+        TerrainBrush.sphere(centreBF: onGround(lot.centroid), radiusM: 0.25));
+    final underLot = work(() => drawn(c.city, c.edits, 'r0x0'));
+    expect(underLot, (queries: 1, drapes: 0));
+
+    // And a quiet frame after them both still asks nothing.
+    expect(work(() => drawn(c.city, c.edits, 'r0x0')), (queries: 0, drapes: 0));
+  });
+
+  /// How far the ground at a cut road's END knots lies off the datums its
+  /// own corridor was cut to there, over every graded road in [city]: what
+  /// the corridors of the roads meeting it, recorded after it, moved it by.
+  double endPull(CitySim city, InMemoryTerrainEditsRepository e) {
+    var worst = 0.0;
+    for (final road in city.layout.roads) {
+      if (!road.graded || road.deck != null) continue;
+      final knots = road.sample(stepM: CityTerrainShaper.corridorStepM);
+      final m = knots.length - 1;
+      final hw = road.halfWidth.toStringAsFixed(2);
+      final first = city.corridorDatums['road:${road.id}:$hw:1'];
+      final last = city.corridorDatums['road:${road.id}:$hw:$m'];
+      if (first == null || last == null) continue;
+      for (final (k, datum) in [(0, first.$1), (m, last.$2)]) {
+        final dir = city
+            .localToBodyFixed(knots[k], bodyRadiusM: earth.radius)
+            .normalized;
+        worst = math.max(worst, (groundRadius(e, dir) - datum).abs());
+      }
+    }
+    return worst;
+  }
+
+  test('where roads meet — the crossroads, a curve across a street, a T, a '
+      'curved T — every point is drawn on the ground it was graded to; '
+      'saved, loaded and graded again, still', () {
+    final c = devColony();
+    shape(c.city, c.edits);
+    final starter = misses(c.city, c.edits);
+    expect(starter, isEmpty,
+        reason: 'the starter crossroads, drawn off the ground at '
+            '[${starter.join(', ')}] m');
+
+    double ground(Vec2 p) =>
+        groundRadius(
+            c.edits,
+            c.city
+                .localToBodyFixed(p, bodyRadiusM: earth.radius)
+                .normalized) -
+        earth.radius;
+    final twoLane = RoadType.byId('two-lane')!;
+    final lay = <String, RoadBuildRequest>{
+      'a six-lane curve across a street': RoadBuildRequest(
+          controls: RoadCurves.tangentArc(
+              const Vec2(40, -40), const Vec2(1, 0), const Vec2(120, 40)),
+          type: RoadType.byId('six-lane')!),
+      'a street run into the side of another': RoadBuildRequest(
+          controls: const [Vec2(-25, -70), Vec2(-25, 0)], type: twoLane),
+      'a curved street run into the side of another': RoadBuildRequest(
+          controls: RoadCurves.quadratic(
+              const Vec2(45, 15), const Vec2(30, 35), const Vec2(0, 35)),
+          type: twoLane),
+    };
+    for (final MapEntry(key: name, value: request) in lay.entries) {
+      final roadsBefore = c.city.layout.roads.length;
+      final built = c.city.buildRoad(request, groundAt: ground);
+      expect(built.quote.ok, isTrue, reason: '$name: ${built.quote.reason}');
+      expect(built.quote.deck, isNull, reason: name);
+      expect(c.city.layout.roads.length, greaterThan(roadsBefore + 1),
+          reason: '$name: it must split the road it meets');
+      shape(c.city, c.edits);
+      final off = misses(c.city, c.edits);
+      expect(off, isEmpty,
+          reason: '$name: drawn off the ground at [${off.join(', ')}] m');
+    }
+    // What makes it a test: where they meet, the corridors recorded later
+    // have moved roads' ends well off the lines those roads were cut to.
+    expect(endPull(c.city, c.edits), greaterThan(0.2),
+        reason: 'no road\'s end moved by another\'s corridor — the case is '
+            'gone');
+
+    // Saved and loaded: the brushes are not saved, and the colony is
+    // graded again from pristine ground — in its loaded order, not the
+    // order it was built in.
+    final loaded = CitySim.fromJson(
+        jsonDecode(jsonEncode(c.city.toJson())) as Map<String, dynamic>,
+        bodies: system.all.where((b) => !b.isStar).toList());
+    final fresh = InMemoryTerrainEditsRepository();
+    shape(loaded, fresh);
+    final offLoaded = misses(loaded, fresh);
+    expect(offLoaded, isEmpty,
+        reason: 'loaded: drawn off the ground at [${offLoaded.join(', ')}] m');
+    expect(endPull(loaded, fresh), greaterThan(0.2));
   });
 }

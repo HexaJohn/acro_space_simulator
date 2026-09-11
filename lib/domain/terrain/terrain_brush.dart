@@ -503,6 +503,57 @@ class TerrainBrush {
   bool affects(Vector3 p) =>
       (p - centreBF).lengthSquared <= boundingRadiusM * boundingRadiusM;
 
+  /// Whether this brush can move the GROUND anywhere along the ray from the
+  /// body centre through unit direction [dir] — conservatively: false means
+  /// the ground along that ray is what it would be without this brush.
+  ///
+  /// Tighter than the index's footprint ([lateralReachM], a disc about the
+  /// brush's centre) for the kinds that level to a shape: a road corridor
+  /// reaches only its half width and easing either side of its run, and a
+  /// lot's pad only its easing past its own outline — so a street's
+  /// centreline is not "under" the lots along it, nor a crossing street's
+  /// corridor more than its own reach from the junction. [marginM] is slack
+  /// for a ray that meets the ground a little off the brush's own height.
+  bool canMoveGroundAlong(Vector3 dir, {double marginM = 0.5}) {
+    final c = centreBF;
+    if (c.lengthSquared <= 1e-18) return true;
+    final along = c.dot(dir);
+    // The ray runs away from the brush (and a brush is never half a body
+    // across).
+    if (along <= 0) return false;
+    final reach = lateralReachM + marginM;
+    if (c.lengthSquared - along * along > reach * reach) return false;
+    switch (kind) {
+      case TerrainBrushKind.cutFill:
+        final end = endBF;
+        if (end == null) return false;
+        // A corridor levels by HORIZONTAL distance from its run, measured
+        // across the point's own vertical — which is the ray. Both ends
+        // projected across the ray, the run's nearest approach to it.
+        final start = c * 2 - end;
+        final s = start - dir * start.dot(dir);
+        final d = (end - dir * end.dot(dir)) - s;
+        final len2 = d.lengthSquared;
+        final t = len2 <= 1e-12 ? 0.0 : (-s.dot(d) / len2).clamp(0.0, 1.0);
+        final core = radiusM + falloffM + marginM;
+        return (s + d * t).lengthSquared <= core * core;
+      case TerrainBrushKind.padPoly:
+        final poly = _poly2;
+        if (poly.length < 6) return false;
+        final w = dir * along - c;
+        final flat = w - _axis * w.dot(_axis);
+        return _distanceOutside(poly, flat.dot(_t1), flat.dot(_t2)) <=
+            falloffM + marginM;
+      case TerrainBrushKind.pad:
+      case TerrainBrushKind.steppedPit:
+        return _lateral(dir * along - c) <= radiusM + falloffM + marginM;
+      case TerrainBrushKind.padBox:
+      case TerrainBrushKind.sphere:
+      case TerrainBrushKind.crater:
+        return true;
+    }
+  }
+
   /// The absolute radial interval (m from the body centre) the composed
   /// SURFACE can occupy under this brush, given that the base ground spans
   /// `[groundLoM, groundHiM]` over the region being meshed.

@@ -3339,13 +3339,20 @@ class CitySim {
   /// Ground radius under parcel-city geometry (lots, road samples), keyed by
   /// feature. Filled by the snapshot from the terrain field WITH edits, so a
   /// road reads the corridor that was graded for it and a building reads its
-  /// own levelled pad. Cleared whenever the ground under the colony may have
-  /// changed: the shaper settled something ([groundCacheShaped], the size of
-  /// [shapedTerrain] it was filled at), the body's edit store was replaced
-  /// or shrank ([groundCacheEditStore]), or a brush added to it since
-  /// ([groundCacheEditCount]) reaches the colony. A crater on the far side
-  /// of the body, a drill quantum or a quarry's pit elsewhere leaves it be.
-  final Map<String, double> groundCache = {};
+  /// own levelled pad. Each entry keeps the direction it was asked along
+  /// ([dir], unit, body-fixed) as well as the radius found there.
+  ///
+  /// Cleared whenever the ground under the colony may have changed
+  /// everywhere: the shaper settled something ([groundCacheShaped], the
+  /// size of [shapedTerrain] it was filled at), or the body's edit store
+  /// was replaced or shrank ([groundCacheEditStore]). A brush added to the
+  /// store since ([groundCacheEditCount]) forgets only what it can move —
+  /// the entries along whose [dir] it can move the ground, and the drapes
+  /// ([drapeCache]) of the roads it passes under: one quantum of a hand
+  /// drill on a street is that street's few metres, not the colony's
+  /// thousands of queries. A crater on the far side of the body or a
+  /// quarry's pit elsewhere forgets nothing.
+  final Map<String, ({double radius, Vector3 dir})> groundCache = {};
   int groundCacheShaped = -1;
   Object? groundCacheEditStore;
   int groundCacheEditCount = 0;
@@ -3355,8 +3362,19 @@ class CitySim {
   /// worked out for. Cleared with [groundCache] and whenever
   /// [roadsRevision] moves ([drapeCacheRevision]), so a frame in which
   /// nothing changed asks nothing of the ground and models no corridor.
-  final Map<String, ({RoadSpline road, List<Vec2> pts, Float64List radii})>
-      drapeCache = {};
+  ///
+  /// [dirs] (the unit body-fixed direction of each point, 3 per point) is
+  /// kept for a drape that depends on which brushes can reach its points —
+  /// a corridor already cut — and a brush laid within reach of one of them
+  /// forgets it. Null for a drape that depends only on its ground keys.
+  final Map<
+      String,
+      ({
+        RoadSpline road,
+        List<Vec2> pts,
+        Float64List? dirs,
+        Float64List radii
+      })> drapeCache = {};
   int drapeCacheRevision = -1;
 
   // ---- Parcel city: growth, connectivity, traffic, fire ----

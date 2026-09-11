@@ -276,9 +276,10 @@ class CityTerrainShaper {
   /// knots, which is exactly what [pending] will measure: the road is drawn
   /// on the ground it is about to be graded to.
   ///
-  /// [knotResidual], when given, is added at each knot and interpolated
-  /// between: what else has moved the ground under a corridor already cut
-  /// — a crater, a later road over its end — as measured at its knots.
+  /// Only this corridor's own brushes: whatever was laid over it since — a
+  /// crossing road's corridor recorded after it, reaching over its end, or
+  /// a crater — is not modelled. The frame asks the ground itself at the
+  /// points such a brush can reach (`_drapeRoad` in the world snapshot).
   ///
   /// Measured in the colony's plane (metres east and north) plus the rise
   /// between knots: over a corridor segment the body's curve is
@@ -298,13 +299,11 @@ class CityTerrainShaper {
     List<double> datumStart,
     List<double> datumEnd,
     double halfWidthM,
-    List<double> out, {
-    List<double>? knotResidual,
-  }) {
+    List<double> out,
+  ) {
     final m = knots.length - 1;
     assert(m >= 1, 'a corridor has at least one segment');
     assert(datumStart.length >= m && datumEnd.length >= m);
-    assert(knotResidual == null || knotResidual.length >= knots.length);
     assert(out.length >= pts.length);
     if (m < 1) return;
     // Each segment's chord: its first knot, its run in plan, its rise.
@@ -328,15 +327,27 @@ class CityTerrainShaper {
     double plan(double pe, double pn, int j) => plan2[j] <= 1e-9
         ? 1
         : ((pe - ke[j]) * de[j] + (pn - kn[j]) * dn[j]) / plan2[j];
+    // How far (squared, in plan) (pe, pn) lies from segment [j]'s chord.
+    double near2(double pe, double pn, int j) {
+      var t = plan2[j] <= 1e-9 ? 0.0 : plan(pe, pn, j);
+      t = t < 0 ? 0.0 : (t > 1 ? 1.0 : t);
+      final ce = ke[j] + de[j] * t - pe, cn = kn[j] + dn[j] * t - pn;
+      return ce * ce + cn * cn;
+    }
 
     final reach = halfWidthM + roadFalloffM;
     final reach2 = reach * reach;
     var own = 0;
     for (var i = 0; i < pts.length; i++) {
       final pe = pts[i].e, pn = pts[i].n;
-      // The segment the point runs along: the first whose far knot it has
-      // not passed. The points are in order, so this only moves on.
-      while (own < m - 1 && plan(pe, pn, own) >= 1) {
+      // The segment the point runs along: the nearest to it, searched on
+      // from the last point's — the points are in order, so it only moves
+      // on. Not the first whose far knot the point has not passed: a road
+      // whose first metre doubles back (a generated street's hook off the
+      // node it leaves) has a first segment every later point lies BEHIND,
+      // and a whole street was drawn at its first datum, 0.6 m in the
+      // ground 100 m on.
+      while (own < m - 1 && near2(pe, pn, own + 1) <= near2(pe, pn, own)) {
         own++;
       }
       var t0 = plan(pe, pn, own);
@@ -373,10 +384,6 @@ class CityTerrainShaper {
         final moved = (v - r).abs();
         r = v;
         if (moved < 1e-5) break;
-      }
-      if (knotResidual != null) {
-        r += knotResidual[own] +
-            (knotResidual[own + 1] - knotResidual[own]) * t0;
       }
       out[i] = r;
     }

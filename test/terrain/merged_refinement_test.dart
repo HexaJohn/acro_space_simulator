@@ -41,7 +41,7 @@ void main() {
       },
     )) {
       edits.record(body.id, p.brush);
-      sim.shapedTerrain.add(p.key);
+      CityTerrainShaper.markShaped(sim, p.key, p.brush);
     }
     return edits.forBody(body.id)!.all.toList();
   }

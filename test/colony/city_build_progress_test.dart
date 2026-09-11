@@ -152,8 +152,9 @@ void main() {
     //
     // A graded road with no deck is draped from its corridor: the datums its
     // segments were cut to, read back by the corridor's own rules
-    // (`CityTerrainShaper.corridorGround`), with a ground query only at its
-    // knots. Only a road that follows the land, or the ground under a deck,
+    // (`CityTerrainShaper.corridorGround`), with a ground query only at the
+    // points something was laid over since — where another road meets it.
+    // Only a road that follows the land, or the ground under a deck,
     // keeps the sample every 24 m and the straight line between — an
     // approximation, which misses whatever the ground does in between.
     final sim = const CityGenerator()
@@ -168,7 +169,7 @@ void main() {
           return f == null ? body.radius : f.groundRadiusAt(d.x, d.y, d.z);
         })) {
       edits.record(body.id, p.brush);
-      sim.shapedTerrain.add(p.key);
+      CityTerrainShaper.markShaped(sim, p.key, p.brush);
     }
 
     final snap = WorldSnapshot.capture(1, InMemoryVesselRepository(const []),

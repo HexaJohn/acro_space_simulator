@@ -51,7 +51,7 @@ void main() {
     expect(first, hasLength(10), reason: '240 m in 24 m segments');
     expect(first.every((p) => p.key.startsWith('road:r0:4.00:')), isTrue);
     for (final p in first) {
-      city.shapedTerrain.add(p.key);
+      CityTerrainShaper.markShaped(city, p.key, p.brush);
     }
     expect(roadBrushes(city), isEmpty, reason: 'each segment once');
     city.upgradeRoad('r0', RoadType.byId('four-lane')!);
@@ -159,7 +159,7 @@ void main() {
 
     // Recorded as the callers record them, nothing is graded twice.
     for (final p in roadBrushes(city)) {
-      city.shapedTerrain.add(p.key);
+      CityTerrainShaper.markShaped(city, p.key, p.brush);
     }
     expect(roadBrushes(city), isEmpty);
     expect(city.shapedTerrain, contains('road:r1:4.00:5'));
