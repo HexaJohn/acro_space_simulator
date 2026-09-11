@@ -3303,24 +3303,23 @@ class CitySim {
 
   /// The datum radii (m from the body centre, at its start and at its end)
   /// each plain road corridor segment was cut to, by its [shapedTerrain]
-  /// key, and the voxel (m) it asked the ground to be meshed at
-  /// (`TerrainBrush.minVoxelM`) — kept as the brush is recorded
+  /// key — kept as the brush is recorded
   /// (`CityTerrainShaper.markShaped`).
   ///
   /// A road is drawn on the corridor it was graded to, and that corridor is
   /// these datums: the ground read back at a knot afterwards is not, where
   /// the next segment's easing has pulled it (a curve's knots are metres
-  /// apart, inside that easing). The voxel says how closely the drawn road
-  /// must follow it: ground meshed finer than the colony's shows the
-  /// corridor's bends. Transient, like the brushes it describes: not saved,
-  /// and rebuilt as the shaper re-grades a loaded colony from its pristine
-  /// ground.
-  final Map<String, (double, double, {double voxelM})> corridorDatums = {};
+  /// apart, inside that easing). Transient, like the brushes it describes:
+  /// not saved, and rebuilt as the shaper re-grades a loaded colony from
+  /// its pristine ground.
+  final Map<String, (double, double)> corridorDatums = {};
 
   /// The plain road corridor segments, by their [shapedTerrain] keys, cut
   /// to be meshed finer than the colony's ground: the ground they were laid
   /// over stood off their grade by more than the colony's voxel carries
-  /// (`CityTerrainShaper.corridorReliefTolM`).
+  /// (`CityTerrainShaper.corridorReliefTolM`). What the snapshot draws such
+  /// a road by: it follows its corridor's bends, and its segments start
+  /// square (`TerrainBrush.squareStart`).
   ///
   /// Saved, unlike the brushes. A load re-grades the colony from its
   /// pristine ground in one call, where a road run through a lot's

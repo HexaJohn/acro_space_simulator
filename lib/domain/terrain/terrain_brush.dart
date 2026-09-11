@@ -112,6 +112,7 @@ class TerrainBrush {
     this.endBF,
     this.polygonBF = const [],
     this.minVoxelM = 0,
+    this.squareStart = false,
   })  : assert(radiusM > 0, 'a zero-radius brush cuts nothing'),
         assert(minVoxelM >= 0, 'a voxel floor cannot be negative'),
         _axis = axisBF.normalized {
@@ -358,6 +359,7 @@ class TerrainBrush {
 
   /// A levelled road corridor from [startBF] to [endBF], [radiusM] to either
   /// side of the centreline, grading from [datumRadiusM] to [datumRadiusEndM].
+  /// See [squareStart] for how it ends behind its start.
   factory TerrainBrush.cutFill({
     required Vector3 startBF,
     required Vector3 endBF,
@@ -368,6 +370,7 @@ class TerrainBrush {
     double maxCutM = 40,
     int tick = 0,
     double minVoxelM = 0,
+    bool squareStart = false,
   }) {
     // Stored centre is the MIDPOINT so the spherical influence bound (and the
     // spatial index built on it) actually encloses the whole corridor.
@@ -384,6 +387,7 @@ class TerrainBrush {
       endBF: endBF,
       tick: tick,
       minVoxelM: minVoxelM,
+      squareStart: squareStart,
     );
   }
 
@@ -446,6 +450,29 @@ class TerrainBrush {
   /// analytic field (and so the collision surface) is the same at any
   /// resolution, which is why this stays out of the snapshot fingerprint.
   final double minVoxelM;
+
+  /// Whether a [TerrainBrushKind.cutFill] corridor ends SQUARE behind its
+  /// start: levelled to its start's datum at full weight only up to the
+  /// line across its start, eased out behind it by the distance behind that
+  /// line and outside its edges — rather than round, over a disc of
+  /// [radiusM] about its start and a ring round that.
+  ///
+  /// A road is graded as straight segments laid one after another, each
+  /// over the end of the one before, and the carriageway is drawn flat
+  /// across. Round, the next segment's start holds a disc at its knot's
+  /// datum over the last metres of a segment still climbing or falling into
+  /// it, and eases out by distance from the knot — further at the kerbs
+  /// than at the centreline — so the ground across the carriageway rises
+  /// to its edges there: a re-laid one-way falling 51% into a knot stood
+  /// 0.85 m of grass over its own ribbon at nine tenths of its half width,
+  /// a V across the road, where its centreline sat on the ground. Square,
+  /// the easing is the same all the way across.
+  ///
+  /// Within the round shape's own reach ([lateralReachM], every bound), so
+  /// the indexes and bounds hold either way. False (round) for everything
+  /// but a road corridor cut to be meshed finely enough to show it
+  /// (`CityTerrainShaper`): what a coarse mesh draws is unchanged.
+  final bool squareStart;
 
   /// Farthest polygon vertex from the centre, for the bounds.
   double get _polyReachM {
@@ -723,7 +750,22 @@ class TerrainBrush {
         final axis = end - start;
         final len2 = axis.lengthSquared;
         if (len2 <= 1e-9) return null;
-        final t = ((p - start).dot(axis) / len2).clamp(0.0, 1.0);
+        final along = (p - start).dot(axis) / len2;
+        final t = along.clamp(0.0, 1.0);
+        final up = p.normalized;
+        if (squareStart && along < 0) {
+          // Behind a square start: the carriageway's edge carried straight
+          // back, eased out by how far behind the start and how far outside
+          // that edge the point lies — the same at every point across it.
+          final v = p - (start + axis * along);
+          final across = (v - up * v.dot(up)).length;
+          final behind = -along * math.sqrt(len2);
+          final out = math.max(across - radiusM, 0.0);
+          return (
+            weight: _falloffWeight(math.sqrt(behind * behind + out * out), 0),
+            datum: datumRadiusM,
+          );
+        }
         final onAxis = start + axis * t;
         // Horizontal offset only. A 3D distance would make the corridor a
         // capsule, so a sample well above or below the carriageway would fall
@@ -732,7 +774,6 @@ class TerrainBrush {
         // Stripping the LOCAL radial component makes it a radially extruded
         // prism instead, which is what a road cutting actually is.
         final v = p - onAxis;
-        final up = p.normalized;
         final lateral = (v - up * v.dot(up)).length;
         return (
           weight: _falloffWeight(lateral, radiusM),

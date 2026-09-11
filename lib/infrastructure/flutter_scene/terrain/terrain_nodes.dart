@@ -15,6 +15,7 @@ import 'package:vector_math/vector_math.dart' as vm;
 
 import '../../../adapters/presenters/camera_view.dart';
 import '../../../application/snapshot/world_snapshot.dart';
+import '../../../domain/colony/city/city_terrain_shaper.dart';
 import '../../../domain/shared/quaternion.dart';
 import '../../../domain/shared/vector3.dart';
 import '../../../domain/terrain/cell_mesher.dart';
@@ -1913,12 +1914,14 @@ class TerrainNodes {
     if (_nearBrushes.isEmpty || editResBoost <= 1) return resolution;
     final geom = _geom;
     final g = geom != null && geom.radiusM == radiusM ? geom.of(k) : null;
-    // Radial-aware (the brush's own radius, not the datum): see
-    // [editResolutionFor].
+    // Radial-aware (the brush's own radius, not the datum) for a brush
+    // finer than a colony's voxel; a colony's coarse brushes as they always
+    // were: see [editResolutionFor].
     return editResolutionFor(k, radiusM, resolution, _nearBrushes,
         maxBoost: editResBoost,
         voxelsAcrossBrush: editVoxelsAcross,
-        circumradiusM: g?.circumradiusM);
+        circumradiusM: g?.circumradiusM,
+        datumTestFromVoxelM: CityTerrainShaper.colonyVoxelM);
   }
 
   /// The rung to request next on the way to [want] — the streaming ladder's

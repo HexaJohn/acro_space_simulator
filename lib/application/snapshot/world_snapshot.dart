@@ -1125,9 +1125,14 @@ const int _drapeBisections = 3;
     final datumStart = Float64List(m), datumEnd = Float64List(m);
     var cut = true;
     // Whether any segment was cut to be meshed finer than the colony's
-    // ground: that ground shows the corridor's bends, and the road must
-    // follow them ([_followCorridor]).
+    // ground, by the shaper's own judgement ([CitySim.fineCorridors]): that
+    // ground shows the corridor's bends, and the road must follow them
+    // ([_followCorridor]). Those segments were cut with a square start
+    // (`TerrainBrush.squareStart`). Not by the voxel they asked for: a
+    // shaper whose colony voxel is set finer (the city studio's slider)
+    // cuts every street at it, and those streets are not fine.
     var fine = false;
+    final square = List<bool>.filled(m, false);
     for (var j = 0; j < m; j++) {
       // The shaper's own key for the segment (`CityTerrainShaper.pending`).
       final key = 'road:${road.id}:$hw:${j + 1}';
@@ -1135,7 +1140,7 @@ const int _drapeBisections = 3;
       if (datums != null) {
         datumStart[j] = datums.$1;
         datumEnd[j] = datums.$2;
-        if (datums.voxelM < _roadCorridor.voxelM) fine = true;
+        if (city.fineCorridors.contains(key)) square[j] = fine = true;
       } else {
         assert(
             !city.shapedTerrain.contains(key),
@@ -1150,13 +1155,36 @@ const int _drapeBisections = 3;
         datumEnd[j] = groundFor('road:${road.id}:k${j + 1}', knots[j + 1]);
       }
     }
+    if (!cut && city.shapedTerrain.isNotEmpty) {
+      // Nor whether the shaper will cut it fine — which it judges on the
+      // ground as it stands, so the same judgement here draws the road on
+      // the corridor it is about to be cut to: a fine one starts each
+      // segment square, and drawn round the frame it was laid a re-laid
+      // one-way stood 1.55 m off the ground it was cut to the frame after.
+      // Asked of the ground only for a road laid into a colony already
+      // graded: one founded in one call is judged on pristine ground, where
+      // its streets are never fine, and a town of them is not asked five
+      // points a segment before its first grading.
+      for (final i in _roadCorridor.fineSegmentsAhead(
+          city,
+          road,
+          (p) => groundFor(
+              'road:${road.id}:f${p.e.toStringAsFixed(3)},'
+              '${p.n.toStringAsFixed(3)}',
+              p * corridorScale))) {
+        square[i - 1] = fine = true;
+      }
+    }
+    final fineSegs = fine ? square : null;
     final pts = fine
-        ? _followCorridor(samples, knots, datumStart, datumEnd, road.halfWidth)
+        ? _followCorridor(
+            samples, knots, datumStart, datumEnd, road.halfWidth, square)
         : samples;
     final last = pts.length - 1;
     final radii = Float64List(pts.length);
     _roadCorridor.corridorGround(
-        pts, knots, datumStart, datumEnd, road.halfWidth, radii);
+        pts, knots, datumStart, datumEnd, road.halfWidth, radii,
+        fine: fineSegs);
     if (!cut || edits == null) return (pts: pts, radii: radii, dirs: null);
     // Once cut, the corridor is exact where nothing has been laid over it
     // since, and the ground is asked, point by point, only where something
@@ -1172,8 +1200,8 @@ const int _drapeBisections = 3;
       dirs[3 * i + 2] = d.z;
       return d;
     });
-    final over = _laidOver(
-        road, knots.map(dirOf).toList(), datumStart, datumEnd, at, edits);
+    final over = _laidOver(road, knots.map(dirOf).toList(), datumStart,
+        datumEnd, fineSegs, at, edits);
     if (over.isEmpty) return (pts: pts, radii: radii, dirs: dirs);
     final asked = List<bool>.filled(pts.length, false);
     for (final b in over) {
@@ -1226,9 +1254,15 @@ const int _drapeBisections = 3;
 /// (`CityTerrainShaper.corridorReliefTolM`): at the colony's voxel the
 /// ground cannot show a ledge a few metres long — the starter streets cut
 /// 0.26 m under theirs every 6 m and read clean — and every other street
-/// keeps its 6 m points, and so the tiles it is drawn in.
-List<Vec2> _followCorridor(List<Vec2> pts, List<Vec2> knots,
-    Float64List datumStart, Float64List datumEnd, double halfWidthM) {
+/// keeps its 6 m points, and so the tiles it is drawn in. [fine]: which of
+/// its segments were cut fine (`CityTerrainShaper.corridorGround`).
+List<Vec2> _followCorridor(
+    List<Vec2> pts,
+    List<Vec2> knots,
+    Float64List datumStart,
+    Float64List datumEnd,
+    double halfWidthM,
+    List<bool> fine) {
   var cur = pts;
   // Whether the span from cur[i] to cur[i + 1] is still to be tested.
   var open = List<bool>.filled(math.max(0, pts.length - 1), true);
@@ -1246,7 +1280,8 @@ List<Vec2> _followCorridor(List<Vec2> pts, List<Vec2> knots,
     if (q.length == cur.length) break;
     final r = Float64List(q.length);
     _roadCorridor.corridorGround(
-        q, knots, datumStart, datumEnd, halfWidthM, r);
+        q, knots, datumStart, datumEnd, halfWidthM, r,
+        fine: fine);
     final next = <Vec2>[];
     final nextOpen = <bool>[];
     for (var k = 0; k < q.length; k++) {
@@ -1275,27 +1310,33 @@ List<Vec2> _followCorridor(List<Vec2> pts, List<Vec2> knots,
 /// unit directions) and that stands, in the order the brushes compose, after
 /// the first of the corridor's own.
 ///
-/// Its own are its segments' cut-and-fills, known by their width, the
-/// datums the shaper cut them to ([datumStart], [datumEnd], segment j from
-/// knot j to knot j + 1) and where they end ([knotDirs]). What came before
-/// them does not show on the road: its own segment levels the ground under
-/// its centreline outright. Where none of its own is found — its brushes
-/// are not in this store — every brush found is taken as laid over it.
+/// Its own are its segments' cut-and-fills, known by their width (a
+/// segment cut fine — [fine] — is levelled wider:
+/// `CityTerrainShaper.fineCoreM`), the datums the shaper cut them to
+/// ([datumStart], [datumEnd], segment j from knot j to knot j + 1) and where
+/// they end ([knotDirs]). What came before them does not show on the road:
+/// its own segment levels the ground under its centreline outright. Where
+/// none of its own is found — its brushes are not in this store — every
+/// brush found is taken as laid over it.
 List<TerrainBrush> _laidOver(
     RoadSpline road,
     List<Vector3> knotDirs,
     Float64List datumStart,
     Float64List datumEnd,
+    List<bool>? fine,
     List<Vector3> at,
     TerrainEdits edits) {
+  final fineCore = _roadCorridor.fineCoreM(road.halfWidth);
   bool own(TerrainBrush b) {
-    if (b.kind != TerrainBrushKind.cutFill || b.radiusM != road.halfWidth) {
-      return false;
-    }
+    if (b.kind != TerrainBrushKind.cutFill) return false;
     final end = b.endBF;
     if (end == null) return false;
     for (var j = 0; j < datumStart.length; j++) {
       if (b.datumRadiusM != datumStart[j] || b.datumRadiusEndM != datumEnd[j]) {
+        continue;
+      }
+      if (b.radiusM !=
+          (fine != null && fine[j] ? fineCore : road.halfWidth)) {
         continue;
       }
       // The same datums on another road (two levelled to one pad) are told
@@ -2040,6 +2081,7 @@ class TerrainEditSnapshot {
     this.ez,
     this.polygon = const [],
     this.minVoxel = 0,
+    this.squareStart = false,
   });
 
   /// Body id — joins to [WorldSnapshot.bodies].
@@ -2096,6 +2138,12 @@ class TerrainEditSnapshot {
   /// [WorldSnapshot.fingerprint].
   final double minVoxel;
 
+  /// Whether a corridor brush ends square behind its start
+  /// ([TerrainBrush.squareStart]) — the shape of the ground, so carried like
+  /// the datums, or the renderer meshes a different corridor from the one
+  /// the road is draped on.
+  final bool squareStart;
+
   static TerrainEditSnapshot of(BodyId body, TerrainBrush b) =>
       TerrainEditSnapshot(
         body: body.value,
@@ -2115,6 +2163,7 @@ class TerrainEditSnapshot {
         falloff: b.falloffM,
         benches: b.benches,
         minVoxel: b.minVoxelM,
+        squareStart: b.squareStart,
         ex: b.endBF?.x,
         ey: b.endBF?.y,
         ez: b.endBF?.z,
@@ -2139,6 +2188,7 @@ class TerrainEditSnapshot {
         falloffM: falloff,
         benches: benches,
         minVoxelM: minVoxel,
+        squareStart: squareStart,
         endBF: ex == null || ey == null || ez == null
             ? null
             : Vector3(ex!, ey!, ez!),
@@ -2162,6 +2212,7 @@ class TerrainEditSnapshot {
         if (falloff != 0) 'f': falloff,
         if (benches != 1) 'b': benches,
         if (minVoxel != 0) 'mv': minVoxel,
+        if (squareStart) 'sq': true,
         if (ex != null) 'e': [ex, ey, ez],
         if (polygon.isNotEmpty) 'poly': polygon,
       };
@@ -2188,6 +2239,7 @@ class TerrainEditSnapshot {
       falloff: (j['f'] as num?)?.toDouble() ?? 0,
       benches: (j['b'] as num?)?.toInt() ?? 1,
       minVoxel: (j['mv'] as num?)?.toDouble() ?? 0,
+      squareStart: j['sq'] == true,
       ex: e == null ? null : (e[0] as num).toDouble(),
       ey: e == null ? null : (e[1] as num).toDouble(),
       ez: e == null ? null : (e[2] as num).toDouble(),

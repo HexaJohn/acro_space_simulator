@@ -122,14 +122,19 @@ void main() {
     return (field: field, leaves: leaves, near: near, targets: targets);
   }
 
-  /// How far the meshed ground stands over road [id]'s drawn centreline at
-  /// its worst, sampled every half metre; the share of those samples where
-  /// it stands over the ribbon ([ribbonLiftM]) — where grass shows through
-  /// the carriageway — and the level and resolution its worst leaf was
-  /// meshed at. The mesh is read on the leaf under each point and the
-  /// leaves across its edges: their aprons and skirts overlap it.
-  ({double over, double shows, int level, int res}) meshOverRoad(
+  /// How far the meshed ground stands over road [id]'s drawn ribbon at its
+  /// worst, sampled every half metre along it on its centreline and at
+  /// `offsets` of its half width either side: the worst over the centreline;
+  /// the share of the samples at each offset where the ground stands over
+  /// the ribbon ([ribbonLiftM]) — where grass shows through the carriageway
+  /// — and the level and resolution the centreline's worst leaf was meshed
+  /// at. The ribbon is flat across (`RoadMesher.ribbon`: the centreline's
+  /// point carried sideways), so an offset is compared with the centreline's
+  /// height. The mesh is read on the leaf under each point and the leaves
+  /// across its edges: their aprons and skirts overlap it.
+  ({double over, Map<double, double> shows, int level, int res}) meshOverRoad(
       CitySim city, InMemoryTerrainEditsRepository e, String id) {
+    const offsets = [0.0, -0.5, 0.5, -0.9, 0.9];
     final g = rendered(city, e, 108);
     final cells = <ChunkKey, CellMesh>{};
     int resOf(ChunkKey k) =>
@@ -161,31 +166,62 @@ void main() {
       for (var k = 0; k + 2 < road.points.length; k += 3)
         Vector3(road.points[k], road.points[k + 1], road.points[k + 2]),
     ];
+    final hw = city.layout.roadById(id)!.halfWidth;
     var over = double.negativeInfinity;
     var at = pts.first.normalized;
-    var samples = 0, showing = 0;
+    final samples = {for (final o in offsets) o: 0};
+    final showing = {for (final o in offsets) o: 0};
     for (var k = 0; k + 1 < pts.length; k++) {
       final a = pts[k], b = pts[k + 1];
       final steps = math.max(1, ((b - a).length / 0.5).ceil());
       for (var j = 0; j < steps; j++) {
         final p = a + (b - a) * (j / steps);
-        final m = meshR(p.normalized);
-        if (m == null) continue;
-        samples++;
-        if (m - p.length > ribbonLiftM) showing++;
-        if (m - p.length > over) {
-          over = m - p.length;
-          at = p.normalized;
+        final side = (b - a).cross(p.normalized).normalized;
+        for (final o in offsets) {
+          final q = p + side * (o * hw);
+          final m = meshR(q.normalized);
+          if (m == null) continue;
+          samples[o] = samples[o]! + 1;
+          // Against the ribbon there: the centreline's height carried across.
+          final above = m - q.normalized.dot(p);
+          if (above > ribbonLiftM) showing[o] = showing[o]! + 1;
+          if (o == 0 && above > over) {
+            over = above;
+            at = p.normalized;
+          }
         }
       }
     }
     final leaf = leafCovering(g.leaves, chunkAt(at, 22))!;
     return (
       over: over,
-      shows: samples == 0 ? 1.0 : showing / samples,
+      shows: {
+        for (final o in offsets)
+          o: samples[o] == 0 ? 1.0 : showing[o]! / samples[o]!,
+      },
       level: leaf.level,
       res: resOf(leaf),
     );
+  }
+
+  /// TerrainNodes' chunk resolution as it was before a brush was judged on
+  /// the ground (df47936): every brush against the chunk's centre on the
+  /// datum sphere. Verbatim.
+  int datumResolution(ChunkKey k, double radiusM, List<TerrainBrush> near) {
+    final centre = k.centreDirection * radiusM;
+    final reach = k.circumradiusM(radiusM);
+    final chunkVoxelM = reach * 2.0 / resolution;
+    var b0 = 1;
+    for (final b in near) {
+      if ((b.centreBF - centre).length > reach + b.lateralReachM) continue;
+      final targetM = math.max(b.radiusM * 2.0 / 8, b.minVoxelM);
+      if (chunkVoxelM > targetM * boost) continue;
+      while (b0 < boost && chunkVoxelM > targetM * b0) {
+        b0 <<= 1;
+      }
+      if (b0 >= boost) break;
+    }
+    return resolution * b0;
   }
 
   double groundAt(CitySim city, InMemoryTerrainEditsRepository e, Vec2 p) =>
@@ -224,21 +260,34 @@ void main() {
     final city = devColony();
     final e = InMemoryTerrainEditsRepository();
     shape(city, e);
-    ({double over, double shows, int level, int res})? asBuilt;
+    ({double over, Map<double, double> shows, int level, int res})? asBuilt;
     final (_, relaid) = liveRoad(city, e, const CityTerrainShaper(),
         built: (id) => asBuilt = meshOverRoad(city, e, id));
     final after = meshOverRoad(city, e, relaid);
-    // Measured: 0.06 m as built and 0.12 m re-laid at their worst, both in
-    // level-16 leaves at resolution 96 (1.9 m voxels), and no half metre of
-    // either with ground over the ribbon; before, 4.6 m in a level-13 leaf.
+    // Measured: 0.01 m over the centreline as built and 0.07 m re-laid, both
+    // in level-16 leaves at resolution 96 (1.9 m voxels), and nowhere across
+    // either carriageway with ground over the ribbon. Before, 4.6 m over the
+    // centreline in a level-13 leaf; and with round segment starts the
+    // re-laid road had grass over its ribbon along 11% of it at half its
+    // half width and 16% at nine tenths — a V across it at a knot — and,
+    // levelled only to its kerbs, along 2.8% at nine tenths.
     for (final (name, m) in [('as built', asBuilt!), ('re-laid', after)]) {
+      // ignore: avoid_print
+      print('$name: centreline ${m.over.toStringAsFixed(3)} m over, grass '
+          'over the ribbon by offset ${{
+        for (final o in m.shows.keys)
+          o: '${(m.shows[o]! * 100).toStringAsFixed(1)}%'
+      }} (level ${m.level}, resolution ${m.res})');
       expect(m.over, lessThan(0.15),
           reason: '$name: the ground is meshed ${m.over.toStringAsFixed(2)} '
               'm over the road\'s centreline (level ${m.level}, resolution '
               '${m.res})');
-      expect(m.shows, lessThanOrEqualTo(0.01),
-          reason: '$name: grass over the ribbon along '
-              '${(m.shows * 100).toStringAsFixed(1)}% of the road');
+      for (final o in m.shows.keys) {
+        expect(m.shows[o], lessThanOrEqualTo(0.01),
+            reason: '$name: grass over the ribbon along '
+                '${(m.shows[o]! * 100).toStringAsFixed(1)}% of the road at '
+                '$o of its half width');
+      }
     }
 
     // Its corridor asked for it: finer than the colony's 15 m where it cuts.
@@ -359,8 +408,91 @@ void main() {
       final a = rendered(city, e, 108), b = rendered(twin, plain, 108);
       expect(a.targets.length, b.targets.length, reason: name);
       expect(a.leaves.length, b.leaves.length, reason: name);
+
+      // And each leaf is meshed at the resolution it always was: a
+      // colony's brushes at its own voxel are still judged on the datum
+      // (`editResolutionFor`'s datumTestFromVoxelM, as TerrainNodes calls
+      // it). Judged on the ground, the generated towns' leaves were boosted
+      // — 38 and 47 of them — and their triangles in view doubled.
+      final r = a.field.radius;
+      var boosted = 0;
+      for (final k in a.leaves) {
+        final res = editResolutionFor(k, r, resolution, a.near,
+            maxBoost: boost,
+            datumTestFromVoxelM: CityTerrainShaper.colonyVoxelM);
+        expect(res, datumResolution(k, r, a.near),
+            reason: '$name: leaf $k meshed at a new resolution');
+        if (res > resolution) boosted++;
+      }
+      // ignore: avoid_print
+      print('$name: ${a.targets.length} targets, ${a.leaves.length} leaves, '
+          '$boosted boosted');
     }
   }, timeout: const Timeout(Duration(minutes: 5)));
+
+  test('a colony graded at a finer voxel than the world tick\'s — the city '
+      'studio\'s slider — draws its streets on their 6 m points: fine is the '
+      'shaper\'s judgement, not the voxel its brushes ask for', () {
+    const studio = CityTerrainShaper(voxelM: 5);
+    final city = devColony();
+    final e = InMemoryTerrainEditsRepository();
+    shape(city, e, studio);
+    final corridors = [
+      for (final b in e.forBody(earth.id)!.all)
+        if (b.kind == TerrainBrushKind.cutFill) b,
+    ];
+    expect(corridors, isNotEmpty);
+    expect(corridors.every((b) => b.minVoxelM == 5 && !b.squareStart), isTrue);
+    expect(city.fineCorridors, isEmpty);
+    final snap = WorldSnapshot.capture(1, InMemoryVesselRepository(const []),
+        system: system,
+        cities: InMemoryCityRepository([city]),
+        terrainEdits: e);
+    expect(snap.roads, isNotEmpty);
+    for (final r in snap.roads) {
+      expect(r.points.length ~/ 3,
+          city.layout.roadById(r.id!)!.sample(stepM: 6).length,
+          reason: '${r.id} drawn as a fine corridor');
+    }
+  }, timeout: const Timeout(Duration(minutes: 5)));
+
+  test('behind a square start the ground is eased the same all the way '
+      'across the carriageway; behind a round one it rises to the kerbs', () {
+    final r = earth.radius;
+    final dir = const Vector3(0.31, 0.42, -0.85).normalized;
+    final seed = dir.x.abs() < 0.9 ? Vector3.unitX : Vector3.unitY;
+    final along = seed.cross(dir).normalized;
+    final across = dir.cross(along);
+    final up = r + 479;
+    TerrainBrush corridor({required bool square}) => TerrainBrush.cutFill(
+          startBF: dir * up,
+          endBF: (dir * r + along * 24).normalized * up,
+          radiusM: 6,
+          datumRadiusM: up,
+          datumRadiusEndM: up + 2,
+          falloffM: 6,
+          minVoxelM: 2,
+          squareStart: square,
+        );
+    // The ground 8 m behind the start, 2 m under its datum (a segment
+    // climbing into it), on the centreline and 0.9 of the core out: in the
+    // easing, where a round start's weight falls with distance from its
+    // start and a square one's with distance behind it.
+    double ground(TerrainBrush b, double side) {
+      final p = (dir * r + along * -8 + across * side).normalized * (up - 2);
+      // A density of 0 at the point: the ground runs through it.
+      return b.apply(0, p);
+    }
+
+    final square = corridor(square: true), round = corridor(square: false);
+    expect(ground(square, 5.4), closeTo(ground(square, 0), 1e-6));
+    expect(ground(square, -5.4), closeTo(ground(square, 0), 1e-6));
+    expect((ground(round, 5.4) - ground(round, 0)).abs(), greaterThan(0.05),
+        reason: 'the case is gone: a round start is flat across too');
+    // Ahead of its start the two are the same corridor.
+    final p = (dir * r + along * 10 + across * 3).normalized * (up - 1);
+    expect(square.apply(0, p), round.apply(0, p));
+  });
 
   test('the tool roads\' refinement is bounded: a handful of targets and '
       'leaves over the town without them', () {
