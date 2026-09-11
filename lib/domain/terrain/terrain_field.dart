@@ -4,10 +4,12 @@
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import '../shared/vector3.dart';
 import 'dem_pyramid.dart';
 import 'noise3.dart';
+import 'terrain_brush.dart';
 import 'terrain_edits.dart';
 import 'terrain_feature.dart';
 
@@ -339,16 +341,19 @@ class TerrainField {
     // Step fine enough to resolve the shallowest carved feature, but bounded so
     // a pathological brush cannot turn one collision query into a long loop.
     final step = math.max(minFeature / 6.0, (rStart - rEnd) / 512.0);
+    // Every sample below lies on this one ray: its relief and its brushes
+    // are looked up once per direction, not once per step ([_RayMemo]).
+    final ray = _RayMemo(this);
     var rOuter = rStart;
-    if (density(dir.x * rStart, dir.y * rStart, dir.z * rStart) <= 0) {
+    if (ray.density(dir.x * rStart, dir.y * rStart, dir.z * rStart) <= 0) {
       return rStart; // outer end already solid: the bracket construction failed
     }
     var r = rStart;
     while (r > rEnd) {
       r = math.max(r - step, rEnd);
-      if (density(dir.x * r, dir.y * r, dir.z * r) <= 0) {
+      if (ray.density(dir.x * r, dir.y * r, dir.z * r) <= 0) {
         // Outermost air->solid transition; bisect the bracket [r, rOuter].
-        return _bisect(dir, r, rOuter);
+        return _bisect(ray, dir, r, rOuter);
       }
       rOuter = r;
     }
@@ -359,11 +364,11 @@ class TerrainField {
   }
 
   /// Refine an air(outer)/solid(inner) bracket to the isosurface.
-  double _bisect(Vector3 dir, double solid, double air) {
+  double _bisect(_RayMemo ray, Vector3 dir, double solid, double air) {
     var lo = solid, hi = air;
     for (var i = 0; i < 32; i++) {
       final mid = (lo + hi) * 0.5;
-      if (density(dir.x * mid, dir.y * mid, dir.z * mid) <= 0) {
+      if (ray.density(dir.x * mid, dir.y * mid, dir.z * mid) <= 0) {
         lo = mid;
       } else {
         hi = mid;
@@ -374,4 +379,86 @@ class TerrainField {
   }
 
   double get seaRadius => radius + seaLevel;
+}
+
+/// The direction-only terms of [TerrainField.density] along ONE query's
+/// ray, each worked out once per distinct unit direction.
+///
+/// A ground query samples the composed field hundreds of times along one
+/// radial, and every sample paid for the base relief — a DEM read plus the
+/// eroded detail stack — and for the edit index's merged candidate list.
+/// Both depend on the sample's unit DIRECTION alone, and normalised back
+/// from `dir * r` every sample of a ray lands on one of a handful of unit
+/// vectors (~20 over a 400-step march). Under a settled starter town that
+/// was ~300 relief reads and index merges a query, ~4 ms; the city shaper
+/// asks dozens after every road edit, inside one tick.
+///
+/// EXACT, not approximate: an entry is keyed on the unit vector's bits as
+/// [TerrainField.baseDensity] and [TerrainEdits.apply] compute them (the
+/// same `x * (1 / sqrt(x*x + y*y + z*z))` in both), so a hit hands back
+/// what the un-memoised call computes from the same inputs, and the march
+/// reads every sign it read before. A direction with a zero component —
+/// whose sign a relief sampler may read and whose key cannot tell it — the
+/// planet's centre, and a ray past [_cap] directions fall through to
+/// [TerrainField.density] itself.
+class _RayMemo {
+  _RayMemo(this._field);
+
+  final TerrainField _field;
+
+  /// Distinct directions kept. A march normalises to a few dozen at most;
+  /// past this the rest are simply not memoised.
+  static const int _cap = 64;
+
+  final Float64List _ux = Float64List(_cap);
+  final Float64List _uy = Float64List(_cap);
+  final Float64List _uz = Float64List(_cap);
+  final Float64List _height = Float64List(_cap);
+  final List<List<TerrainBrush>?> _brushes =
+      List<List<TerrainBrush>?>.filled(_cap, null);
+  int _count = 0;
+
+  /// The entry for the unit direction ([ux], [uy], [uz]), made on first
+  /// sight — or -1 where it must not be memoised.
+  int _entry(double ux, double uy, double uz) {
+    if (ux == 0 || uy == 0 || uz == 0) return -1;
+    // Newest first: consecutive steps mostly share a direction.
+    for (var i = _count - 1; i >= 0; i--) {
+      if (_ux[i] == ux && _uy[i] == uy && _uz[i] == uz) return i;
+    }
+    if (_count == _cap) return -1;
+    final i = _count++;
+    _ux[i] = ux;
+    _uy[i] = uy;
+    _uz[i] = uz;
+    _height[i] = _field.heightInDirection(ux, uy, uz);
+    return i;
+  }
+
+  /// [TerrainField.baseDensity], exactly.
+  double baseDensity(double x, double y, double z) {
+    final r = math.sqrt(x * x + y * y + z * z);
+    if (r < 1e-6) return _field.baseDensity(x, y, z);
+    final inv = 1.0 / r;
+    final i = _entry(x * inv, y * inv, z * inv);
+    if (i < 0) return _field.baseDensity(x, y, z);
+    return r - (_field.radius + _height[i]);
+  }
+
+  /// [TerrainField.density], exactly.
+  double density(double x, double y, double z) {
+    final e = _field.edits;
+    if (e == null || e.isEmpty) return baseDensity(x, y, z);
+    final r = math.sqrt(x * x + y * y + z * z);
+    if (r < 1e-6) return _field.density(x, y, z);
+    final inv = 1.0 / r;
+    final i = _entry(x * inv, y * inv, z * inv);
+    if (i < 0) return _field.density(x, y, z);
+    var d = r - (_field.radius + _height[i]);
+    final p = Vector3(x, y, z);
+    for (final b in _brushes[i] ??= e.at(Vector3(_ux[i], _uy[i], _uz[i]))) {
+      d = b.apply(d, p);
+    }
+    return d;
+  }
 }

@@ -81,6 +81,24 @@ class CityTerrainShaper {
     final latRad = city.cityLat * math.pi / 180.0;
     final lonRad = city.cityLon * math.pi / 180.0;
 
+    // Every direction asked of the ground in this call, answered once. A
+    // pad asks its centre twice (datum, anchor) and each corner twice
+    // (relief, outline), a corridor asks each sample as the end of one
+    // segment and the start of the next, anchor and datum both, and a
+    // lot's corners are its neighbours' corners: a road edit's re-plat
+    // asked 52 samples for 14 places. Each is a march of the composed
+    // field through every brush the town has laid there — milliseconds on
+    // real ground — and the whole batch runs inside one tick, so the
+    // repeats were a frozen frame. Exact: the ground does not change
+    // during a call (its brushes are recorded after it returns), so an
+    // answer is the answer. A direction with a zero component, whose sign
+    // a relief sampler may read and whose key cannot tell it, is asked.
+    final asked = <Vector3, double>{};
+    double ground(Vector3 dir) {
+      if (dir.x == 0 || dir.y == 0 || dir.z == 0) return groundRadiusAt(dir);
+      return asked[dir] ??= groundRadiusAt(dir);
+    }
+
     /// Direction from the body centre to a local point. Only the DIRECTION is
     /// taken from this, so the datum radius it is built at does not matter.
     Vector3 dirOf(Vec2 local) => placement
@@ -95,7 +113,7 @@ class CityTerrainShaper {
         .normalized;
 
     /// Ground radius under a local point.
-    double groundUnder(Vec2 local) => groundRadiusAt(dirOf(local));
+    double groundUnder(Vec2 local) => ground(dirOf(local));
 
     /// The point on the REAL GROUND under a local point.
     ///
@@ -109,7 +127,7 @@ class CityTerrainShaper {
     /// looked — buildings sitting on raw relief and roads clipping through it.
     Vector3 onGround(Vec2 local) {
       final dir = dirOf(local);
-      return dir * groundRadiusAt(dir);
+      return dir * ground(dir);
     }
 
     // ---- Building pads -------------------------------------------------
