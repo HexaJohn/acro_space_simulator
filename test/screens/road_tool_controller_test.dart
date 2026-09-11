@@ -656,6 +656,46 @@ void main() {
       expect(road(city, tunnel).deck!.tunnels, isNotEmpty,
           reason: 'the tunnel is left as it was');
     });
+
+    test('Draw: an end on the ground passes over a tunnel it cannot see; '
+        'one laid below the ground lands on it', () {
+      double rolling(Vec2 p) =>
+          3 * math.sin(p.n / 40) + 2 * math.sin(p.e / 35);
+      final city = colony();
+      // A tunnel 12 m down from end to end, which the road view shows only
+      // with the tool below the ground.
+      final tunnel = city
+          .buildRoad(
+              RoadBuildRequest(
+                controls: const [Vec2(100, -100), Vec2(100, 300)],
+                type: RoadType.byId('two-lane')!,
+                startElevationM: -12,
+                endElevationM: -12,
+              ),
+              groundAt: rolling)
+          .roadId!;
+      expect(road(city, tunnel).deck!.inTunnelAt(0), isTrue);
+      final street = city.commitRoad(
+          const [Vec2(-200, 0), Vec2(-100, 0)], RoadClass.street)!;
+      final c = CityEditController();
+      // 6 m from its end, and 4 m off its middle: both within reach.
+      const nearEnd = Vec2(96, 296), overIt = Vec2(104, 100);
+
+      expect(c.elevationM, 0);
+      for (final at in const [nearEnd, overIt]) {
+        final s = c.snapCursor(city, at);
+        expect(s.roadId, isNull,
+            reason: 'at ground level $at landed on ${s.roadId} (${s.kind})');
+      }
+      expect(c.snapCursor(city, const Vec2(-150, 4)).roadId, street,
+          reason: 'a road on the ground is still landed on');
+
+      c.elevationM = -12;
+      expect(c.snapCursor(city, nearEnd).kind, RoadSnapKind.roadEnd);
+      expect(c.snapCursor(city, nearEnd).roadId, tunnel);
+      expect(c.snapCursor(city, overIt).roadId, tunnel,
+          reason: 'from below the ground the tunnel is there to meet');
+    });
   });
 
   test('the dev hook applies its settings through the same calls', () {

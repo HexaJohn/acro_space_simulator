@@ -407,7 +407,39 @@ mixin RoadToolEditing on ChangeNotifier {
       sidewalkM: plat.sidewalkM,
       newHalfWidthM: _type.roadClass.halfWidth,
       scale: scale,
+      // An end laid on the ground or above it can neither see a tunnel nor
+      // meet one: it passes over, as Adjust's drop does ([_dropSnap]).
+      passesOver: elevationM < -RoadElevation.nodeMatchM
+          ? null
+          : (road, s, lengthM, atStart) =>
+              inHiddenTunnel(road, s, lengthM, atStart: atStart),
     );
+  }
+
+  /// Whether [road] at arc [s] of its [lengthM] (as indexed) is in its
+  /// tunnel: out of sight from the ground, and met only by an end below it.
+  /// [atStart] names an END (true: its first), which is in its tunnel when
+  /// it was laid deeper than the tunnel cover below its ground, as the
+  /// renderer judges a node. A stretch is read on the deck's own measure
+  /// ([RoadDeck.rangeArc]) and half a metre wide: the survey's ranges can
+  /// end a hair short of the length the index measures.
+  ///
+  /// The one rule both of the tool's snaps pass over a tunnel by — the
+  /// drawing snap ([snapperFor]) and Adjust's drop ([_dropSnap]).
+  static bool inHiddenTunnel(RoadSpline road, double s, double lengthM,
+      {bool? atStart}) {
+    final deck = road.deck;
+    if (deck == null) return false;
+    if (atStart != null &&
+        (atStart ? deck.startOffsetM : deck.endOffsetM) <
+            -RoadElevation.tunnelCoverM) {
+      return true;
+    }
+    final r = deck.rangeArc(s, lengthM);
+    for (final (a, b) in deck.tunnels) {
+      if (r >= a - 0.5 && r <= b + 0.5) return true;
+    }
+    return false;
   }
 
   /// Where [cursor] lands. The angle and grid snaps measure from the
@@ -1085,23 +1117,9 @@ mixin RoadToolEditing on ChangeNotifier {
       {bool underground = false}) {
     final index = city.layout.roadIndex;
     // Whether [road]'s stretch at arc [s] is in a tunnel this end cannot
-    // meet. The survey's ranges end on its own measure of the road, which
-    // the index's can pass by a hair, so they are read half a metre wide;
-    // an END is in its tunnel when it was laid deeper than the tunnel
-    // cover below its ground, as the renderer judges a node.
-    bool hidden(RoadSpline road, double s, {bool? start}) {
-      final deck = road.deck;
-      if (underground || deck == null) return false;
-      if (start != null &&
-          (start ? deck.startOffsetM : deck.endOffsetM) <
-              -RoadElevation.tunnelCoverM) {
-        return true;
-      }
-      for (final (a, b) in deck.tunnels) {
-        if (s >= a - 0.5 && s <= b + 0.5) return true;
-      }
-      return false;
-    }
+    // meet ([inHiddenTunnel]).
+    bool hidden(RoadSpline road, double s, double lengthM, {bool? start}) =>
+        !underground && inHiddenTunnel(road, s, lengthM, atStart: start);
 
     RoadSnap? best;
     var bestD = RoadSnapper.endSnapM;
@@ -1113,7 +1131,10 @@ mixin RoadToolEditing on ChangeNotifier {
         return;
       }
       for (final first in const [true, false]) {
-        if (hidden(rec.road, first ? 0 : rec.lengthM, start: first)) continue;
+        if (hidden(rec.road, first ? 0 : rec.lengthM, rec.lengthM,
+            start: first)) {
+          continue;
+        }
         final q = rec.sampleAt(first ? 0 : rec.sampleCount - 1);
         final d = p.distanceTo(q);
         if (d < bestD) {
@@ -1130,7 +1151,7 @@ mixin RoadToolEditing on ChangeNotifier {
       final (q, d) = rec.nearestOnSegment(p, seg);
       if (d >= bestD) return;
       final s = rec.cum[seg - 1] + rec.sampleAt(seg - 1).distanceTo(q);
-      if (hidden(rec.road, s)) return;
+      if (hidden(rec.road, s, rec.lengthM)) return;
       bestD = d;
       best = RoadSnap(q, RoadSnapKind.roadPoint, roadId: rec.road.id);
     });
