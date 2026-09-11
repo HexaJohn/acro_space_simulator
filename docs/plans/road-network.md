@@ -464,7 +464,15 @@ Traffic Routes view, and per-lot service and delivery reach over DIRECTED
 edges — a fire engine cannot go against a one-way street; a shop no lorry
 reaches does not grow. `road_noise.dart`: noise from traffic × type
 (decorations and walls quieter, tunnels silent) and land value, feeding home
-growth and tax.
+growth and tax. The tax factor reads the land the ROADS make — noise,
+decoration, parking — not the air: the sim already charges pollution through
+happiness and health, and counting it twice cut a quiet starter town's take
+by an eighth. Everything that reads traffic — the tick's growth, fire and tax
+lines, the views — reads it through `CitySim.trafficReadout`
+(`CityTrafficReadout`, `traffic_readout.dart`), never the model behind it,
+so a per-vehicle simulation can answer in its place; before the first
+picture every answer punishes nothing. `road_traffic_economy_test.dart` pins
+that an ordinary town still grows all three ways under the gates.
 
 **The renderer.** The wire carries each road's id, decoration and a lift per
 point (deck minus drape; points stay on the drape so piers know the
