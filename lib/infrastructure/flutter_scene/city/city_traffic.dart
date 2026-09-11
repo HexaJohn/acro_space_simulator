@@ -154,6 +154,9 @@ class TrafficRoad {
         RoadClass.expressway6 => (95.0, 31.0),
         RoadClass.expressway8 => (100.0, 31.0),
         RoadClass.ramp => (160.0, 14.0),
+        RoadClass.streetOneWay => (110.0, 8.0),
+        RoadClass.boulevard => (130.0, 16.0),
+        RoadClass.motorway => (90.0, 31.0),
         RoadClass.transit || RoadClass.rail => (0.0, 0.0),
       };
 

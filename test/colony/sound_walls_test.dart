@@ -29,8 +29,11 @@ void main() {
 
   test('only a highway can be walled', () {
     for (final c in RoadClass.values) {
-      expect(c.canHaveSoundWalls,
-          c.isExpressway || c == RoadClass.highway,
+      expect(
+          c.canHaveSoundWalls,
+          c.isExpressway ||
+              c == RoadClass.highway ||
+              c == RoadClass.motorway,
           reason: c.name);
     }
   });

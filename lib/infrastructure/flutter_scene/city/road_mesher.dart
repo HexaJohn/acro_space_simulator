@@ -397,6 +397,11 @@ class RoadMesher {
           _strip(m, st, -mh, mh, CityTextureBakes.roadConcrete, liftM + 0.02,
               liftAt: liftAt);
           if (solid != null) _barrier(solid, st, liftM, liftAt);
+        case MedianStyle.planted:
+          // A kerbed strip down the middle; its grass and trees are laid
+          // over it by the decoration pass.
+          _strip(m, st, -mh, mh, CityTextureBakes.roadConcrete, liftM + 0.02,
+              liftAt: liftAt);
       }
     }
   }

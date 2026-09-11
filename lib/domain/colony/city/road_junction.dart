@@ -81,3 +81,252 @@ JunctionControl junctionControlFor(
   if (arterials >= 2) return JunctionControl.signals;
   return JunctionControl.stop;
 }
+
+// ---- The player's warrant: legs, directions, overrides ---------------------
+
+/// One road END at a junction, as the warrant needs to see it.
+///
+/// Junctions are where road ends meet, and the city-builder rules for
+/// traffic lights turn on more than the classes meeting: a one-way road
+/// LEAVING a four-lane road does not get a light, and neither — in some
+/// cases — does a two-lane road drawn away from it. So a leg carries which
+/// end of its road this is: [startsHere] is true when the road's FIRST
+/// point (in the direction of travel, for a one-way road) is at the
+/// junction.
+class JunctionLeg {
+  const JunctionLeg(this.roadClass, {this.startsHere = false, this.heading = 0});
+
+  final RoadClass roadClass;
+
+  /// The road's first point — its start, and the start of travel on a
+  /// one-way road — is at this junction.
+  final bool startsHere;
+
+  /// Direction of the leg AWAY from the junction, radians, north toward
+  /// east ([Vec2.heading]'s convention). What a stop-sign override names a
+  /// leg by, since road ids change every time a road is split.
+  final double heading;
+
+  bool get oneWay => roadClass.oneWay;
+
+  /// Traffic on this leg only ever leaves the junction.
+  bool get outgoing => oneWay && startsHere;
+
+  /// Traffic arrives at the junction along this leg.
+  bool get inbound => !outgoing;
+}
+
+/// A junction's control and which of its legs stop.
+class JunctionPlan {
+  const JunctionPlan(this.control, [this.stopLegs = const {}]);
+
+  final JunctionControl control;
+
+  /// Indices into the legs that carry a STOP sign — meaningful only when
+  /// [control] is [JunctionControl.stop] (no lights). An outgoing one-way
+  /// leg never stops: nothing arrives along it.
+  final Set<int> stopLegs;
+
+  bool get lights => control == JunctionControl.signals;
+}
+
+/// A player's say over one junction, from the Junctions view: lights on or
+/// off, and which legs stop. Keyed by WHERE the junction is — road ids
+/// change whenever a road is split, a junction's place does not.
+class JunctionOverride {
+  const JunctionOverride({required this.at, this.lights, this.stopHeadings});
+
+  /// The junction, colony-local metres.
+  final Vec2 at;
+
+  /// Lights forced on (true) or off (false); null leaves the warrant's.
+  final bool? lights;
+
+  /// Headings ([JunctionLeg.heading]) of the legs that stop; null leaves
+  /// the default stop legs.
+  final List<double>? stopHeadings;
+
+  /// How near a junction must be to [at] to be this one. Wider than a
+  /// junction's own spread (its ends meet within a few metres), narrower
+  /// than the gap between two junctions a block apart.
+  static const double matchM = 6.0;
+
+  /// How near a leg's heading must be to a stored one to be that leg.
+  static const double headingMatchRad = 25 * 3.141592653589793 / 180;
+
+  /// A map key for [at]: whole metres.
+  static String keyFor(Vec2 at) => '${at.e.round()},${at.n.round()}';
+  String get key => keyFor(at);
+
+  bool get isEmpty => lights == null && stopHeadings == null;
+
+  bool matches(Vec2 p) => p.distanceTo(at) <= matchM;
+
+  JunctionOverride copyWith({
+    bool? lights,
+    bool clearLights = false,
+    List<double>? stopHeadings,
+    bool clearStops = false,
+  }) =>
+      JunctionOverride(
+        at: at,
+        lights: clearLights ? null : (lights ?? this.lights),
+        stopHeadings: clearStops ? null : (stopHeadings ?? this.stopHeadings),
+      );
+
+  Map<String, dynamic> toJson() => {
+        'at': [at.e, at.n],
+        if (lights != null) 'lights': lights,
+        if (stopHeadings != null) 'stops': stopHeadings,
+      };
+
+  factory JunctionOverride.fromJson(Map<String, dynamic> j) {
+    final at = (j['at'] as List).cast<num>();
+    return JunctionOverride(
+      at: Vec2(at[0].toDouble(), at[1].toDouble()),
+      lights: j['lights'] as bool?,
+      stopHeadings: (j['stops'] as List?)
+          ?.map((e) => (e as num).toDouble())
+          .toList(),
+    );
+  }
+}
+
+/// The control a junction of [legs] gets by the city-builder's rules.
+///
+/// - A road meeting only two-lane roads (one way or two) gets no lights.
+/// - A FOUR-LANE road gets lights at its crossings, except where the other
+///   roads are one-way roads leaving it or two-lane two-way roads drawn
+///   away from it — and this rule overrides every other road's no-lights
+///   rule, so a four-lane road meeting a highway does get lights.
+/// - A SIX-LANE road gets lights at every crossing except one-way roads
+///   leaving it.
+/// - A HIGHWAY gets no lights where everything it meets is one way, and
+///   lights where it is not.
+/// - A two-lane roundabout (the planner's collectors) never has lights.
+///
+/// Limited-access roads — the generator's expressways and viaducts — keep
+/// the merge warrant of [junctionControlFor]; nothing the player builds is
+/// limited-access.
+JunctionControl junctionControlForLegs(
+  List<JunctionLeg> legs, {
+  bool roundaboutPreferred = false,
+}) {
+  final cars = [
+    for (final l in legs)
+      if (l.roadClass.carriesCars) l
+  ];
+  if (cars.length < 3) {
+    if (cars.length == 2 && cars.any((l) => l.roadClass.limitedAccess)) {
+      return JunctionControl.merge;
+    }
+    return JunctionControl.none;
+  }
+  if (cars.any((l) => l.roadClass.limitedAccess)) {
+    return junctionControlFor([for (final l in cars) l.roadClass],
+        roundaboutPreferred: roundaboutPreferred);
+  }
+  if (roundaboutPreferred &&
+      cars.every((l) =>
+          l.roadClass.tier == RoadTier.minor ||
+          l.roadClass == RoadClass.avenue)) {
+    return JunctionControl.roundabout;
+  }
+  return trafficLightsByRule(cars)
+      ? JunctionControl.signals
+      : JunctionControl.stop;
+}
+
+/// Whether the city-builder's rules put traffic lights on a junction of
+/// [legs] (all of them car roads, three or more). See
+/// [junctionControlForLegs].
+bool trafficLightsByRule(List<JunctionLeg> legs) {
+  bool tierOf(JunctionLeg l, RoadTier t) => l.roadClass.tier == t;
+
+  // Four-lane roads: lights, unless every other leg is a one-way road
+  // leaving (a highway is a highway, never an exception) or a two-lane
+  // two-way road drawn away from the four-lane. Overrides every no-lights
+  // rule below.
+  final medium = legs.where((l) => tierOf(l, RoadTier.medium)).length;
+  if (medium > 0) {
+    if (medium >= 3) return true;
+    for (final l in legs) {
+      if (tierOf(l, RoadTier.medium)) continue;
+      final leavingOneWay = l.outgoing && !tierOf(l, RoadTier.highway);
+      final drawnAway = !l.oneWay && l.startsHere && tierOf(l, RoadTier.minor);
+      if (!leavingOneWay && !drawnAway) return true;
+    }
+    return false;
+  }
+
+  // Six-lane roads: lights, unless every other leg is a one-way road
+  // leaving.
+  final large = legs.where((l) => tierOf(l, RoadTier.large)).length;
+  if (large > 0) {
+    if (large >= 3) return true;
+    return legs.any((l) => !tierOf(l, RoadTier.large) && !l.outgoing);
+  }
+
+  // Highways: no lights where everything else is one way.
+  if (legs.any((l) => tierOf(l, RoadTier.highway))) {
+    return legs.any((l) => !tierOf(l, RoadTier.highway) && !l.oneWay);
+  }
+
+  // Two-lane roads never make lights.
+  return false;
+}
+
+/// The legs that stop at a junction without lights: every inbound leg
+/// when they are all the same size of road (an all-way stop), else the
+/// inbound legs smaller than the biggest road there (they give way to it).
+Set<int> defaultStopLegs(List<JunctionLeg> legs) {
+  int rank(JunctionLeg l) => l.roadClass.tier.rank;
+  var top = -1;
+  for (final l in legs) {
+    if (l.roadClass.carriesCars && rank(l) > top) top = rank(l);
+  }
+  final inbound = [
+    for (var i = 0; i < legs.length; i++)
+      if (legs[i].inbound && legs[i].roadClass.carriesCars) i
+  ];
+  if (inbound.every((i) => rank(legs[i]) == top)) return inbound.toSet();
+  return {
+    for (final i in inbound)
+      if (rank(legs[i]) < top) i
+  };
+}
+
+/// Everything a junction of [legs] is: the control (the warrant, or the
+/// player's [override]) and the legs that stop.
+JunctionPlan junctionPlanFor(
+  List<JunctionLeg> legs, {
+  bool roundaboutPreferred = false,
+  JunctionOverride? override,
+}) {
+  var control =
+      junctionControlForLegs(legs, roundaboutPreferred: roundaboutPreferred);
+  if (override != null &&
+      (control == JunctionControl.stop || control == JunctionControl.signals)) {
+    if (override.lights == true) control = JunctionControl.signals;
+    if (override.lights == false) control = JunctionControl.stop;
+  }
+  if (control != JunctionControl.stop) return JunctionPlan(control);
+  final headings = override?.stopHeadings;
+  if (headings == null) return JunctionPlan(control, defaultStopLegs(legs));
+  return JunctionPlan(control, {
+    for (var i = 0; i < legs.length; i++)
+      if (legs[i].inbound &&
+          legs[i].roadClass.carriesCars &&
+          headings.any((h) =>
+              _angleBetween(h, legs[i].heading) <=
+              JunctionOverride.headingMatchRad))
+        i
+  });
+}
+
+double _angleBetween(double a, double b) {
+  const tau = 2 * 3.141592653589793;
+  var d = (a - b) % tau;
+  if (d < 0) d += tau;
+  return d > tau / 2 ? tau - d : d;
+}

@@ -68,7 +68,10 @@ enum RoadClass {
   avenue('Avenue', 16.0, 2, 8),
 
   /// Grade-separated link between districts and out to the industrial sites.
-  highway('Highway', 32.0, 4, 5),
+  ///
+  /// Labelled "Urban Highway" since the player's road menu gained the
+  /// one-way [motorway], which is what a city builder calls a Highway.
+  highway('Urban Highway', 32.0, 4, 5),
 
   /// A graded dirt track — the first road a colony has. Cheap, slow, unlit.
   ///
@@ -131,7 +134,28 @@ enum RoadClass {
   /// traffic pass and the junction pass can both read without a flag on
   /// every segment. Steeper than a mainline may be, because a ramp's whole
   /// job is to climb to a bridge or drop from one.
-  ramp('Ramp', 7.5, 1, 7);
+  ramp('Ramp', 7.5, 1, 7),
+
+  /// A two-lane ONE-WAY street: the width of a [street], both lanes running
+  /// the same way, first point to last (or last to first on a reversed
+  /// road — see [RoadSpline.reversed]). A class rather than a flag on a
+  /// street for the same reason the ramp is one: the class is what the
+  /// menu picks, what a save persists and what the lane paint and the
+  /// junction warrant key off. Appended: saves persist this enum by index.
+  streetOneWay('Two-Lane One-Way Road', 8.0, 2, 12),
+
+  /// A six-lane urban road: three lanes each way either side of a raised
+  /// median, with pavements, so it still fronts lots — the big road a
+  /// district can grow along, where an [expressway6] cannot.
+  boulevard('Six-Lane Road', 23.0, 3, 8),
+
+  /// The player's HIGHWAY: three lanes, ONE WAY, hard shoulders, no
+  /// frontage. Unlike the generator's expressways it meets other roads at
+  /// grade — the road tool's own elevation is how a player takes it over
+  /// or under something — so its junctions follow the traffic-light
+  /// warrant rather than the limited-access merge rule. Built as two
+  /// carriageways, one each way, the way a city builder's highway is.
+  motorway('Highway', 15.8, 3, 5);
 
   final String label;
 
@@ -185,7 +209,8 @@ enum RoadClass {
         RoadClass.expressway4 ||
         RoadClass.expressway6 ||
         RoadClass.expressway8 ||
-        RoadClass.ramp =>
+        RoadClass.ramp ||
+        RoadClass.motorway =>
           false,
         _ => true,
       };
@@ -202,8 +227,12 @@ enum RoadClass {
   /// construction — it is in the air.
   bool get limitedAccess => isExpressway || this == RoadClass.elevated;
 
-  /// Whether traffic runs one way along it, first point to last.
-  bool get oneWay => this == RoadClass.ramp;
+  /// Whether traffic runs one way along it, first point to last (last to
+  /// first on a reversed road — see [RoadSpline.reversed]).
+  bool get oneWay =>
+      this == RoadClass.ramp ||
+      this == RoadClass.streetOneWay ||
+      this == RoadClass.motorway;
 
   /// Whether an END of this road is a leg of whatever junction it lands on.
   ///
@@ -288,6 +317,27 @@ enum RoadClass {
             shoulderM: 1.5,
             oneWay: true,
           ),
+        // A street's width, both lanes the one way: a dashed white between
+        // them and nothing down the middle.
+        RoadClass.streetOneWay => const LaneLayout(
+            lanesEachWay: 2,
+            laneWidthM: 4.0,
+            oneWay: true,
+          ),
+        // Three each way either side of a raised median, kerbs at the edge.
+        RoadClass.boulevard => const LaneLayout(
+            lanesEachWay: 3,
+            laneWidthM: 3.5,
+            medianM: 2.0,
+            median: MedianStyle.barrier,
+          ),
+        // Three lanes one way between hard shoulders.
+        RoadClass.motorway => const LaneLayout(
+            lanesEachWay: 3,
+            laneWidthM: 3.6,
+            shoulderM: 2.5,
+            oneWay: true,
+          ),
         RoadClass.path ||
         RoadClass.alley ||
         RoadClass.transit ||
@@ -313,7 +363,8 @@ enum RoadClass {
         RoadClass.expressway4 ||
         RoadClass.expressway6 ||
         RoadClass.expressway8 ||
-        RoadClass.ramp =>
+        RoadClass.ramp ||
+        RoadClass.motorway =>
           false,
         RoadClass.path => false,
         _ => true,
@@ -321,7 +372,12 @@ enum RoadClass {
 
   /// Whether the junction pass gives it signals, stop bars and crossings.
   bool get signalised => switch (this) {
-        RoadClass.street || RoadClass.avenue || RoadClass.highway => true,
+        RoadClass.street ||
+        RoadClass.streetOneWay ||
+        RoadClass.avenue ||
+        RoadClass.boulevard ||
+        RoadClass.highway =>
+          true,
         _ => false,
       };
 
@@ -329,14 +385,120 @@ enum RoadClass {
   /// whose crossings warrant signals rather than a stop sign. Everything
   /// with two or more lanes each way that meets other roads at grade.
   bool get arterial => switch (this) {
-        RoadClass.avenue || RoadClass.highway || RoadClass.trunk => true,
+        RoadClass.avenue ||
+        RoadClass.boulevard ||
+        RoadClass.highway ||
+        RoadClass.trunk ||
+        RoadClass.motorway =>
+          true,
         _ => false,
       };
 
   /// Whether the road can be built with sound barriers: the walled variant
   /// of a ground-level highway. Expressways and the urban surface highway;
   /// a viaduct has its parapets and nothing slower needs walling.
-  bool get canHaveSoundWalls => isExpressway || this == RoadClass.highway;
+  bool get canHaveSoundWalls =>
+      isExpressway || this == RoadClass.highway || this == RoadClass.motorway;
+
+  /// The size of road, as the traffic-light warrant counts it: two-lane
+  /// roads, four-lane roads, six-lane roads, highways, ramps — the tiers a
+  /// city builder's junction rules are written in (see
+  /// `junctionControlForLegs`). Exhaustive on purpose: a new class must say
+  /// which it is.
+  RoadTier get tier => switch (this) {
+        RoadClass.street ||
+        RoadClass.streetOneWay ||
+        RoadClass.path ||
+        RoadClass.alley =>
+          RoadTier.minor,
+        RoadClass.avenue || RoadClass.trunk => RoadTier.medium,
+        RoadClass.boulevard || RoadClass.highway => RoadTier.large,
+        RoadClass.motorway ||
+        RoadClass.expressway4 ||
+        RoadClass.expressway6 ||
+        RoadClass.expressway8 ||
+        RoadClass.elevated =>
+          RoadTier.highway,
+        RoadClass.ramp => RoadTier.ramp,
+        RoadClass.transit || RoadClass.rail => RoadTier.rail,
+      };
+
+  /// Whether the road menu offers it with decorative grass or trees.
+  bool get supportsDecoration => switch (this) {
+        RoadClass.street ||
+        RoadClass.streetOneWay ||
+        RoadClass.avenue ||
+        RoadClass.boulevard =>
+          true,
+        _ => false,
+      };
+
+  /// The cross-section dressed with [decoration]: the SAME width as [lanes]
+  /// (a road's width is its class's), with the lanes narrowed to a
+  /// planted median on the four- and six-lane roads. A decorated two-lane
+  /// road keeps its lanes; its grass or trees are on the verges.
+  LaneLayout? lanesFor(RoadDecoration decoration) {
+    final base = lanes;
+    if (base == null || decoration == RoadDecoration.none) return base;
+    return switch (this) {
+      RoadClass.avenue => const LaneLayout(
+          lanesEachWay: 2,
+          laneWidthM: 3.5,
+          medianM: 2.0,
+          median: MedianStyle.planted,
+        ),
+      RoadClass.boulevard => const LaneLayout(
+          lanesEachWay: 3,
+          laneWidthM: 3.5,
+          medianM: 2.0,
+          median: MedianStyle.planted,
+        ),
+      _ => base,
+    };
+  }
+
+  /// Whether the road tool may sink it into a tunnel: everything but a
+  /// gravel track, and nothing whose deck height its class fixes.
+  bool get canTunnel => this != RoadClass.path && !isElevated;
+
+  /// Whether the road tool may raise it: anything its class does not
+  /// already hold in the air.
+  bool get canElevate => !isElevated;
+}
+
+/// Sizes of road, smallest first — see [RoadClass.tier]. [rank] orders them
+/// for who gives way to whom; rail is not traffic.
+enum RoadTier {
+  minor(0),
+  ramp(1),
+  medium(2),
+  large(3),
+  highway(4),
+  rail(-1);
+
+  const RoadTier(this.rank);
+  final int rank;
+}
+
+/// How a road is dressed. Persisted BY INDEX: append only.
+///
+/// Decorations take noise off the lots beside the road and raise their
+/// land value — trees more than grass, for more money — and take the kerb
+/// the parked cars would have used (a four-lane road keeps its parking).
+enum RoadDecoration {
+  none('Plain'),
+  grass('Decorative Grass'),
+  trees('Decorative Trees');
+
+  const RoadDecoration(this.label);
+  final String label;
+
+  /// Multiplier on the noise the road throws at its neighbours.
+  double get noiseFactor => switch (this) {
+        RoadDecoration.none => 1.0,
+        RoadDecoration.grass => 0.8,
+        RoadDecoration.trees => 0.6,
+      };
 }
 
 /// What separates the two directions of a road.
@@ -363,6 +525,10 @@ enum MedianStyle {
 
   /// A concrete Jersey barrier down the middle.
   barrier,
+
+  /// A kerbed strip of grass (or grass and trees) down the middle — the
+  /// decorated four- and six-lane roads.
+  planted,
 }
 
 /// A road's cross-section: how many lanes, how wide, and what lies between
@@ -486,6 +652,165 @@ class LaneLayout {
 /// A painted line on a carriageway.
 enum LaneLine { dashedWhite, solidWhite, solidYellow, dashedYellow }
 
+/// A road's DECK: where it runs when it is not simply laid on the ground.
+///
+/// A road the tool raised or sank (see `road_elevation.dart`) runs on a
+/// straight grade line from [startM] to [endM] — metres above the BODY
+/// DATUM, never above the ground: the ground under a road is re-cut by the
+/// road itself, and re-graded from pristine terrain on every load, so a
+/// height measured from it would move. [structures] and [tunnels] say
+/// which stretches stand on piers and which run underground, surveyed
+/// against the ground when the road was laid. They are arc lengths from
+/// the road's FIRST CONTROL, like [RoadSpline.bridges], and a split slices
+/// them with the road.
+///
+/// A road with no deck (null) is DRAPED: it follows the ground, as every
+/// road did before the tool could lift one.
+class RoadDeck {
+  const RoadDeck({
+    required this.startM,
+    required this.endM,
+    this.startOffsetM = 0,
+    this.endOffsetM = 0,
+    this.structures = const [],
+    this.tunnels = const [],
+  });
+
+  /// Deck height above the body datum at the first and last control.
+  final double startM, endM;
+
+  /// How far each end stood above the ground under it when it was laid —
+  /// the tool's elevation there. An end within two metres of zero is AT
+  /// GRADE: it meets the ground roads there.
+  final double startOffsetM, endOffsetM;
+
+  /// Arc ranges carried on piers, and underground.
+  final List<(double, double)> structures;
+  final List<(double, double)> tunnels;
+
+  /// Height above the datum at [s] along a road [lengthM] long.
+  double heightAt(double s, double lengthM) => lengthM <= 1e-9
+      ? startM
+      : startM + (endM - startM) * (s / lengthM).clamp(0.0, 1.0);
+
+  /// The elevation above the laid ground at [s], interpolated between the
+  /// ends — what a split knows when it cannot sample the ground.
+  double offsetAt(double s, double lengthM) => lengthM <= 1e-9
+      ? startOffsetM
+      : startOffsetM +
+          (endOffsetM - startOffsetM) * (s / lengthM).clamp(0.0, 1.0);
+
+  /// Grade of the deck, percent — the whole of it, since it is straight.
+  double gradePct(double lengthM) =>
+      lengthM <= 1e-9 ? 0 : (endM - startM).abs() / lengthM * 100;
+
+  bool onStructureAt(double s) => _within(s, structures);
+  bool inTunnelAt(double s) => _within(s, tunnels);
+
+  double get structureM => _total(structures);
+  double get tunnelM => _total(tunnels);
+
+  /// Within two metres of the ground where it was laid: the ground roads
+  /// there meet it. (`RoadElevation.nodeMatchM`.)
+  bool get startAtGrade => startOffsetM.abs() < 2.0;
+  bool get endAtGrade => endOffsetM.abs() < 2.0;
+
+  /// The piece of this deck from [s0] to [s1] along a road [lengthM] long:
+  /// heights interpolated at the cuts; each cut's offset taken from the
+  /// ground there when the caller could sample it ([groundStartM],
+  /// [groundEndM], above the datum), else interpolated; ranges clipped to
+  /// the piece and shifted to its start.
+  RoadDeck slice(double s0, double s1, double lengthM,
+      {double? groundStartM, double? groundEndM}) {
+    final h0 = heightAt(s0, lengthM), h1 = heightAt(s1, lengthM);
+    return RoadDeck(
+      startM: h0,
+      endM: h1,
+      startOffsetM:
+          groundStartM == null ? offsetAt(s0, lengthM) : h0 - groundStartM,
+      endOffsetM: groundEndM == null ? offsetAt(s1, lengthM) : h1 - groundEndM,
+      structures: _clip(structures, s0, s1),
+      tunnels: _clip(tunnels, s0, s1),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'h': [startM, endM],
+        'o': [startOffsetM, endOffsetM],
+        if (structures.isNotEmpty)
+          'st': [
+            for (final (a, b) in structures) ...[a, b]
+          ],
+        if (tunnels.isNotEmpty)
+          'tu': [
+            for (final (a, b) in tunnels) ...[a, b]
+          ],
+      };
+
+  /// Null for a missing or malformed entry: a road without a deck.
+  static RoadDeck? fromJson(Object? j) {
+    if (j is! Map) return null;
+    final h = (j['h'] as List?)?.cast<num>();
+    if (h == null || h.length < 2) return null;
+    final o = (j['o'] as List?)?.cast<num>();
+    List<(double, double)> ranges(Object? v) {
+      final l = (v as List?)?.cast<num>() ?? const <num>[];
+      return [
+        for (var i = 0; i + 1 < l.length; i += 2)
+          (l[i].toDouble(), l[i + 1].toDouble())
+      ];
+    }
+
+    return RoadDeck(
+      startM: h[0].toDouble(),
+      endM: h[1].toDouble(),
+      startOffsetM: o == null || o.isEmpty ? 0 : o[0].toDouble(),
+      endOffsetM: o == null || o.length < 2 ? 0 : o[1].toDouble(),
+      structures: ranges(j['st']),
+      tunnels: ranges(j['tu']),
+    );
+  }
+
+  static bool _within(double s, List<(double, double)> ranges) {
+    for (final (a, b) in ranges) {
+      if (s >= a && s <= b) return true;
+    }
+    return false;
+  }
+
+  static double _total(List<(double, double)> r) =>
+      r.fold(0.0, (t, x) => t + (x.$2 - x.$1));
+
+  static List<(double, double)> _clip(
+          List<(double, double)> ranges, double s0, double s1) =>
+      [
+        for (final (a, b) in ranges)
+          if (b > s0 && a < s1) (math.max(a, s0) - s0, math.min(b, s1) - s0),
+      ];
+
+  @override
+  bool operator ==(Object other) =>
+      other is RoadDeck &&
+      other.startM == startM &&
+      other.endM == endM &&
+      other.startOffsetM == startOffsetM &&
+      other.endOffsetM == endOffsetM &&
+      _sameRanges(other.structures, structures) &&
+      _sameRanges(other.tunnels, tunnels);
+
+  @override
+  int get hashCode => Object.hash(startM, endM, startOffsetM, endOffsetM,
+      structures.length, tunnels.length);
+
+  static bool _sameRanges(List<(double, double)> a, List<(double, double)> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+}
+
 /// A road as a SPLINE rather than a run of tiles.
 ///
 /// Control points are what the player places; [sample] walks a centripetal
@@ -550,6 +875,27 @@ class RoadSpline {
   final double? startHalfWidthM;
   final double? endHalfWidthM;
 
+  /// How it is dressed — decorative grass or trees (see [RoadDecoration]).
+  /// Only meaningful on a class that [RoadClass.supportsDecoration].
+  final RoadDecoration decoration;
+
+  /// Where it runs when the road tool raised or sank it; null for a road
+  /// laid on the ground. See [RoadDeck].
+  final RoadDeck? deck;
+
+  /// A one-way road whose traffic runs LAST point to first.
+  ///
+  /// Direction is otherwise the polyline's own, first to last — the rule
+  /// every consumer reads. Reversing a road's controls instead would move
+  /// every lot on it (lots are cut, and named, by side and index from the
+  /// first point), mirror its bridges and its terrain keys; a flag changes
+  /// nothing but the direction, and the wire flips the points for the
+  /// renderer so the renderer's first-to-last rule still holds.
+  final bool reversed;
+
+  /// The name the player gave it; null for the generated one.
+  final String? name;
+
   const RoadSpline({
     required this.id,
     required this.controls,
@@ -565,6 +911,10 @@ class RoadSpline {
     this.bridges = const [],
     this.startHalfWidthM,
     this.endHalfWidthM,
+    this.decoration = RoadDecoration.none,
+    this.deck,
+    this.reversed = false,
+    this.name,
   });
 
   /// Whether [sM] along the road is on a bridge.
@@ -581,6 +931,16 @@ class RoadSpline {
   /// Whether lots are cut along this road: its own say, else its class's.
   bool get platsLots => frontsLots ?? roadClass.platsLots;
 
+  /// Whether traffic runs one way along it — see [reversed] for which way.
+  bool get oneWay => roadClass.oneWay;
+
+  /// Its cross-section, dressed as it is.
+  LaneLayout? get lanes => roadClass.lanesFor(decoration);
+
+  /// Where traffic enters and leaves a one-way road.
+  Vec2 get travelStart => reversed ? controls.last : controls.first;
+  Vec2 get travelEnd => reversed ? controls.first : controls.last;
+
   RoadSpline copyWith({
     String? id,
     List<Vec2>? controls,
@@ -596,6 +956,12 @@ class RoadSpline {
     List<(double, double)>? bridges,
     double? startHalfWidthM,
     double? endHalfWidthM,
+    RoadDecoration? decoration,
+    RoadDeck? deck,
+    bool clearDeck = false,
+    bool? reversed,
+    String? name,
+    bool clearName = false,
   }) =>
       RoadSpline(
         id: id ?? this.id,
@@ -612,6 +978,10 @@ class RoadSpline {
         bridges: bridges ?? this.bridges,
         startHalfWidthM: startHalfWidthM ?? this.startHalfWidthM,
         endHalfWidthM: endHalfWidthM ?? this.endHalfWidthM,
+        decoration: decoration ?? this.decoration,
+        deck: clearDeck ? null : (deck ?? this.deck),
+        reversed: reversed ?? this.reversed,
+        name: clearName ? null : (name ?? this.name),
       );
 
   /// Points along the curve, spaced at most [stepM] apart.
@@ -1064,4 +1434,11 @@ class RoadGradeCheck {
     }
     return RoadGradeCheck(maxPct: worst, limitPct: roadClass.maxGradePct);
   }
+
+  /// The grade of a raised or sunk road: its deck's, which is straight, so
+  /// one subtraction — no ground samples.
+  static RoadGradeCheck ofDeck(
+          RoadDeck deck, double lengthM, RoadClass roadClass) =>
+      RoadGradeCheck(
+          maxPct: deck.gradePct(lengthM), limitPct: roadClass.maxGradePct);
 }

@@ -32,6 +32,7 @@ import 'city_layout.dart';
 import 'city_progression.dart';
 import 'parcel.dart';
 import 'parcel_network.dart';
+import 'road_junction.dart';
 import 'shuttle_run.dart';
 import 'sprawl_plan.dart';
 import 'commodity.dart';
@@ -402,6 +403,17 @@ class CitySim {
   /// the ladder itself is derived from population (see [CityProgression]), so
   /// this set exists only to keep a grant one-off.
   final Set<int> milestonesReached = {};
+
+  /// Moves on every change to the road network's CONTENT — a road laid,
+  /// split, upgraded, reversed, renamed or re-routed — and on every junction
+  /// override. What the snapshot and the renderer key road work on: an
+  /// in-place edit keeps the road COUNT, and a cache keyed on counts never
+  /// sees it (an upgraded road went on being drawn as what it was).
+  int roadsRevision = 0;
+
+  /// The player's say over junctions — lights on or off, which legs stop —
+  /// from the Junctions view, by [JunctionOverride.key].
+  final Map<String, JunctionOverride> junctionOverrides = {};
 
   /// Milestones collected since a host last drained this — the city-builder
   /// HUD's banner queue. Never read by the sim itself.
