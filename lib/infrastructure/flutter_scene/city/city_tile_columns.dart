@@ -110,6 +110,7 @@ class CityTileMembers {
     required this.transitEnds,
     this.junctions = const [],
     this.corridors = const [],
+    this.roadEndBent = const [],
   });
 
   /// The player's junction overrides that fall in the tile.
@@ -134,6 +135,13 @@ class CityTileMembers {
   /// its last, or null where the table has no entry (elevated roads are
   /// not tabled).
   final List<(double, int)?> roadEnds;
+
+  /// Per road end, as [roadEnds]: whether it and the one other end that
+  /// meets it turn off one another — only ever a deck's end, and worked
+  /// out on the UI thread off the whole body's roads, since the other leg
+  /// can be any tile's (see `CityBucketPlan.endBends`). Past its length —
+  /// a tile whose members were handed over without it — false.
+  final List<bool> roadEndBent;
 
   /// Every end of elevated rail on the body within reach of an end of one
   /// of the tile's transit roads, body-fixed: what decides whether an end
@@ -174,6 +182,7 @@ class CityTileColumns {
     required this.endI,
     required this.roadEndHalf,
     required this.roadEndCount,
+    required this.bentRoadEnds,
     required this.transitEnds,
     required this.junctionF,
     required this.junctionI,
@@ -252,6 +261,11 @@ class CityTileColumns {
   /// table has none, in which case the half width is zero and unread.
   final Float64List roadEndHalf;
   final Int32List roadEndCount;
+
+  /// The road ends, as indices into [roadEndCount], where the two ends that
+  /// meet turn off one another ([CityTileMembers.roadEndBent]). Empty but
+  /// in a tile with a deck bent at a joint.
+  final Int32List bentRoadEnds;
 
   /// Transit ends, three doubles each.
   final Float64List transitEnds;
@@ -342,6 +356,7 @@ class CityTileColumns {
       endI.lengthInBytes +
       roadEndHalf.lengthInBytes +
       roadEndCount.lengthInBytes +
+      bentRoadEnds.lengthInBytes +
       transitEnds.lengthInBytes +
       junctionF.lengthInBytes +
       junctionI.lengthInBytes +
@@ -355,7 +370,9 @@ class CityTileColumns {
   /// [roads] order (see [CityTileMembers.roadEnds]); [patches] are the
   /// tile's own already-gathered columns (see [CityTilePatchRefs.gather]);
   /// [junctions] are the player's overrides the tile's junction pass may
-  /// need; [corridors] the other tiles' roads its decks' piers keep out of.
+  /// need; [corridors] the other tiles' roads its decks' piers keep out of;
+  /// [roadEndBent] as [roadEnds], or empty where no end of the tile's is
+  /// bent (see [CityTileMembers.roadEndBent]).
   factory CityTileColumns.fromSnapshots({
     required List<BuildingSnapshot> buildings,
     required List<RoadSnapshot> roads,
@@ -365,10 +382,15 @@ class CityTileColumns {
     required List<Vector3> transitEnds,
     List<CityTileJunction> junctions = const [],
     List<CityTileCorridor> corridors = const [],
+    List<bool> roadEndBent = const [],
   }) {
     if (roadEnds.length != 2 * roads.length) {
       throw ArgumentError(
           'roadEnds has ${roadEnds.length} entries for ${roads.length} roads');
+    }
+    if (roadEndBent.isNotEmpty && roadEndBent.length != roadEnds.length) {
+      throw ArgumentError('roadEndBent has ${roadEndBent.length} entries '
+          'for ${roadEnds.length} road ends');
     }
     final table = <String>[];
     final index = <String, int>{};
@@ -458,6 +480,14 @@ class CityTileColumns {
     roadPointStarts[nr] = pAt;
     roadBridgeStarts[nr] = bAt;
     roadLiftStarts[nr] = lAt;
+    var bentCount = 0;
+    for (final b in roadEndBent) {
+      if (b) bentCount++;
+    }
+    final bentRoadEnds = Int32List(bentCount);
+    for (var i = 0, k = 0; i < roadEndBent.length; i++) {
+      if (roadEndBent[i]) bentRoadEnds[k++] = i;
+    }
 
     final ne = ends.length;
     final endF = Float64List(ne * _endF);
@@ -548,6 +578,7 @@ class CityTileColumns {
       endI: endI,
       roadEndHalf: roadEndHalf,
       roadEndCount: roadEndCount,
+      bentRoadEnds: bentRoadEnds,
       transitEnds: transit,
       junctionF: junctionF,
       junctionI: junctionI,
@@ -621,6 +652,10 @@ class CityTileColumns {
       final n = roadEndCount[i];
       return n == noEntry ? null : (roadEndHalf[i], n);
     }, growable: false);
+    final roadEndBent = List<bool>.filled(nr * 2, false);
+    for (final i in bentRoadEnds) {
+      roadEndBent[i] = true;
+    }
 
     final ends = List<CityTileEnd>.generate(endCount, (i) {
       final f = i * _endF;
@@ -674,6 +709,7 @@ class CityTileColumns {
       transitEnds: transit,
       junctions: junctions,
       corridors: corridors,
+      roadEndBent: roadEndBent,
     );
   }
 }

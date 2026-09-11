@@ -440,6 +440,106 @@ void main() {
       expect(d.rekeyed.toSet(), {deckTile, hookTile});
       expect(d.kept, [tileC]);
     });
+
+    test('a road near two of a tile\'s decks is taken once', () {
+      // A second deck well west: the short hook comes near the first deck
+      // only, the long one near both.
+      final west = road(
+          [for (var k = 0; k <= 12; k++) (edge - 600, 1000 + k * 100.0)],
+          lifts: List.filled(13, 12.0));
+      expect(tileOf(edge - 600, 1600), deckTile);
+      for (final (reach, hooked) in [(edge - 150, hook()), (edge - 700, null)]) {
+        final beneath = hooked ?? hook(west: reach);
+        final t = cut(frame([deck, west, beneath])).tiles[deckTile]!;
+        expect(t.corridors, hasLength(1), reason: '$reach');
+        expect(t.corridors.single.pointsBF, orderedEquals(beneath.points));
+      }
+    });
+
+    test('an unkeyed cut gathers none until it is keyed', () {
+      // A cut the renderer culls for range goes no further than finding
+      // its tiles: holding every road to every deck is no part of that.
+      final s = frame([deck, hook(), c]);
+      final plan = CityTileBucketer.bucket(s,
+          anchors: {'moon': anchor}, tileM: tileM, keyed: false);
+      expect(plan.tiles.values.expand((t) => t.corridors), isEmpty);
+      CityTileBucketer.keyTiles(plan);
+      expect(plan.tiles[deckTile]!.corridors, hasLength(1));
+      // Keyed again, nothing is gathered twice.
+      CityTileBucketer.keyTiles(plan);
+      expect(plan.tiles[deckTile]!.corridors, hasLength(1));
+      expect(keys(plan), keys(cut(s)));
+    });
+  });
+
+  group('a deck turning at a joint, whichever tile the other leg is', () {
+    // A street raised 12 m runs east across the first tile's east edge
+    // (3218.688 m) to a corner just past it: its middle is the first
+    // tile's, and its corner — and whatever meets it there — the next's.
+    const legPts = [(2400.0, 1600.0), (2800.0, 1600.0), (3300.0, 1600.0)];
+    const turnedPts = [(3300.0, 1600.0), (3300.0, 2000.0), (3300.0, 2400.0)];
+    const onPts = [(3300.0, 1600.0), (3700.0, 1600.0), (4100.0, 1600.0)];
+    final up = List.filled(3, 12.0);
+    final leg = road(legPts, lifts: up);
+    final turned = road(turnedPts, lifts: up);
+    final on = road(onPts, lifts: up);
+    final legTile = tileOf(2800, 1600);
+    final cornerTile = tileOf(3300, 1600);
+
+    test('the cut reads the turn off the whole body', () {
+      expect(legTile, isNot(cornerTile));
+      expect(tileOf(3300, 2000), cornerTile);
+      expect(tileOf(3700, 1600), cornerTile);
+      final plan = cut(frame([leg, turned]));
+      final bends = plan.endBends['moon']!;
+      expect(CityTileBucketer.bendsOf(leg, bends), (false, true));
+      expect(CityTileBucketer.bendsOf(turned, bends), (true, false));
+      // Nothing of the corner is in the deck's own tile.
+      expect(plan.tiles[legTile]!.roads, [leg]);
+      expect(plan.tiles[legTile]!.ends.map((e) => e.at), [at(2400, 1600)]);
+      // Going on straight is no turn.
+      final straight = cut(frame([leg, on])).endBends['moon'] ?? const <int>{};
+      expect(CityTileBucketer.bendsOf(leg, straight), (false, false));
+      // Nor is an unkeyed cut's: it has not looked.
+      final unkeyed = CityTileBucketer.bucket(frame([leg, turned]),
+          anchors: {'moon': anchor}, tileM: tileM, keyed: false);
+      expect(unkeyed.endBends, isEmpty);
+    });
+
+    test("the other leg turned re-keys the deck's tile", () {
+      final before = keys(cut(frame([leg, on, c])));
+      final d = CityTileBucketer.diff(before, cut(frame([leg, turned, c])));
+      expect(d.rekeyed.toSet(), {legTile, cornerTile});
+      expect(d.kept, [tileC]);
+    });
+
+    test("the turn is in the deck's tile's key, as its build reads it", () {
+      // The deck's piers take the other leg as a corridor as well, but the
+      // parapets read the turn itself: the key holds what the build reads.
+      final plan = cut(frame([leg, turned, c]));
+      final table = plan.endHalf['moon']!;
+      final bends = plan.endBends['moon']!;
+      final deckTile = plan.tiles[legTile]!;
+      expect(
+          CityTileBucketer.structureKeyOf(deckTile,
+              endHalf: table, endBends: bends),
+          isNot(CityTileBucketer.structureKeyOf(deckTile, endHalf: table)));
+      // A tile of roads on the ground keys the same whatever turns.
+      final ground = plan.tiles[tileC]!;
+      expect(
+          CityTileBucketer.structureKeyOf(ground,
+              endHalf: table, endBends: bends),
+          CityTileBucketer.structureKeyOf(ground, endHalf: table));
+    });
+
+    test("on the ground a turn holds no parapet back, and moves no key", () {
+      final plan = cut(frame([road(legPts), road(turnedPts), c]));
+      expect(plan.endBends, isEmpty);
+      final d = CityTileBucketer.diff(
+          keys(cut(frame([road(legPts), road(onPts), c]))), plan);
+      expect(d.kept.toSet(), {legTile, tileC});
+      expect(d.rekeyed, [cornerTile]);
+    });
   });
 
   test('the roads signature moves with a revision or an override only', () {

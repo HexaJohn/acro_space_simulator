@@ -41,7 +41,6 @@ import '../../../domain/scatter/prop_mesh.dart';
 import '../../../domain/shared/quaternion.dart';
 import '../../../domain/shared/vector3.dart';
 import '../coord_convert.dart';
-import 'city_tile_bucketing.dart' show CityTileBucketer;
 import 'city_tile_columns.dart';
 import 'elevated_structure.dart';
 import 'lot_features.dart';
@@ -1415,71 +1414,6 @@ class CityTileMeshJob {
   /// viaduct as structure. Mid: lanes painted, turning circles. Near: the
   /// pavements with their curbs, the lamps, the furniture, the tube on a
   /// sealed world, the cars at the curb.
-  /// Whether the one other end that meets road [index]'s [first] (else
-  /// last) end turns off it rather than going on: their inward headings
-  /// more than 20° off straight on.
-  ///
-  /// The other end is the one the body's end table counted with this one,
-  /// found by the same key ([CityTileBucketer.endKeyOf], lift and all):
-  /// among the tile's own roads — those the table counts, so not the
-  /// elevated ones — and then its junction ends, which hold the ends of the
-  /// next tile's roads that meet here. Both are in the tile's structure key,
-  /// so a joint redrawn re-cuts the tile. An end found in neither — the
-  /// joint and the road meeting it both the next tile's — reads as going
-  /// on, and its parapet with it.
-  bool _bendsAt(int index, bool first) {
-    // cos 20°: a road bent less than that at a joint is still one road.
-    const straightOn = 0.94;
-    final own = _endOf(members.roads[index], first);
-    if (own == null) return false;
-    final (at, next, lift) = own;
-    final key = CityTileBucketer.endKeyOf(at.x, at.y, at.z, lift);
-    bool bends(Vector3 a, Vector3 b) {
-      final u = next - at, v = b - a;
-      if (u.length < 1e-6 || v.length < 1e-6) return false;
-      return u.normalized.dot(v.normalized) > -straightOn;
-    }
-
-    final roads = members.roads;
-    for (var j = 0; j < roads.length; j++) {
-      final cls = RoadClass
-          .values[roads[j].roadClassIndex.clamp(0, RoadClass.values.length - 1)];
-      if (cls.isElevated) continue;
-      for (final f in const [true, false]) {
-        if (j == index && f == first) continue;
-        final e = _endOf(roads[j], f);
-        if (e == null) continue;
-        final (a, b, l) = e;
-        if (CityTileBucketer.endKeyOf(a.x, a.y, a.z, l) == key) {
-          return bends(a, b);
-        }
-      }
-    }
-    for (final e in members.ends) {
-      // This end's own entry, where it lies in the tile.
-      if (e.at == at && e.next == next) continue;
-      if (CityTileBucketer.endKeyOf(e.at.x, e.at.y, e.at.z, e.liftM) == key) {
-        return bends(e.at, e.next);
-      }
-    }
-    return false;
-  }
-
-  /// Road [r]'s [first] (else last) end as the end table keys it: the
-  /// point, body-fixed, the point just inside it, and the deck's lift
-  /// there. Null for a road of fewer than two points.
-  static (Vector3, Vector3, double)? _endOf(RoadSnapshot r, bool first) {
-    final p = r.points;
-    final n = p.length ~/ 3;
-    if (n < 2) return null;
-    final i = first ? 0 : 3 * n - 3, k = first ? 3 : 3 * n - 6;
-    return (
-      Vector3(p[i], p[i + 1], p[i + 2]),
-      Vector3(p[k], p[k + 1], p[k + 2]),
-      r.lifts.isEmpty ? 0.0 : (first ? r.lifts.first : r.lifts.last),
-    );
-  }
-
   void _emitRoad(int index) {
     final r = request;
     final rb = _roads;
@@ -1588,11 +1522,15 @@ class CityTileMeshJob {
     // an L's inside parapet stands across the other leg's lanes as surely
     // as a T's does. Two meeting straight on are one road going on, and its
     // parapet goes on with it. The table keys an end by its lift, so a deck
-    // passing over a crossing is no leg of it and keeps its parapets.
-    double trimAt((double, int)? e, {required bool first}) =>
-        e == null || e.$2 < 2 || (e.$2 == 2 && !_bendsAt(index, first))
-            ? 0.0
-            : e.$1 * 1.45;
+    // passing over a crossing is no leg of it and keeps its parapets. Which
+    // two meeting turn is the cut's to say, off the whole body's roads
+    // ([CityTileMembers.roadEndBent]): the other leg can be any tile's.
+    final bent = members.roadEndBent;
+    double trimAt((double, int)? e, int end) => e == null ||
+            e.$2 < 2 ||
+            (e.$2 == 2 && !(end < bent.length && bent[end]))
+        ? 0.0
+        : e.$1 * 1.45;
 
     for (var k = 0; k < runs.length; k++) {
       final run = runs[k];
@@ -1650,8 +1588,8 @@ class CityTileMeshJob {
       RoadDeckMesher.structure(
           rb.propSolid, rp, anchorBF, road.halfWidthM, liftAt!,
           blocked: _pierBlocked(index),
-          trimStartM: run.fromStart ? trimAt(startEnd, first: true) : 0.0,
-          trimEndM: run.toEnd ? trimAt(lastEnd, first: false) : 0.0);
+          trimStartM: run.fromStart ? trimAt(startEnd, 2 * index) : 0.0,
+          trimEndM: run.toEnd ? trimAt(lastEnd, 2 * index + 1) : 0.0);
       if (!run.fromStart) {
         RoadDeckMesher.portal(
             rb.propSolid, rp.first, rp.first - rp[1], anchorBF, road.halfWidthM);

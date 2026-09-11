@@ -115,6 +115,9 @@ void main() {
         CityTileCorridor(
             [for (var k = 0; k < 3 * (2 + i); k++) d()], 2 + d(6).abs()),
     ];
+    final roadEndBent = [
+      for (var i = 0; i < roads.length * 2; i++) i % 7 == 3,
+    ];
 
     final columns = CityTileColumns.fromSnapshots(
       buildings: buildings,
@@ -125,6 +128,7 @@ void main() {
       transitEnds: transitEnds,
       junctions: junctions,
       corridors: corridors,
+      roadEndBent: roadEndBent,
     );
     expect(columns.buildingCount, buildings.length);
     expect(columns.junctionCount, junctions.length);
@@ -227,6 +231,21 @@ void main() {
     for (var i = 0; i < roadEnds.length; i++) {
       expect(back.roadEnds[i], roadEnds[i]);
     }
+    // Which road ends turn: carried as the few that do, back end for end.
+    expect(back.roadEndBent, orderedEquals(roadEndBent));
+    expect(columns.bentRoadEnds.length, roadEndBent.where((b) => b).length);
+    // Packed without, every end reads as going on — and carries no bytes.
+    final plain = CityTileColumns.fromSnapshots(
+      buildings: const [],
+      roads: roads,
+      patches: CityPatchColumns.empty,
+      ends: const [],
+      roadEnds: roadEnds,
+      transitEnds: const [],
+    );
+    expect(plain.bentRoadEnds, isEmpty);
+    expect(plain.toSnapshots().roadEndBent,
+        orderedEquals(List.filled(roadEnds.length, false)));
     expect(back.transitEnds.length, transitEnds.length);
     for (var i = 0; i < transitEnds.length; i++) {
       expect([back.transitEnds[i].x, back.transitEnds[i].y,

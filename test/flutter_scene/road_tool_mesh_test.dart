@@ -13,6 +13,7 @@ import 'package:acro_space_simulator/domain/colony/city/road_elevation.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_junction.dart';
 import 'package:acro_space_simulator/domain/scatter/mesh_builder.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
+import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_bucketing.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_columns.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_mesher.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_traffic.dart';
@@ -144,6 +145,7 @@ void main() {
           List<CityTileEnd> ends = const [],
           List<CityTileJunction> junctions = const [],
           List<CityTileCorridor> corridors = const [],
+          List<bool> roadEndBent = const [],
           CityMeshKnobs k = knobs}) =>
       CityTileMeshJob(request(noColumns, tier, k: k), CityBuildingLibraries(),
               members: CityTileMembers(
@@ -155,6 +157,7 @@ void main() {
                 transitEnds: const [],
                 junctions: junctions,
                 corridors: corridors,
+                roadEndBent: roadEndBent,
               ))
           .runAll();
 
@@ -1249,22 +1252,50 @@ void main() {
         hw, RoadClass.street, true, false,
         isStart: true, liftM: up);
 
+    /// What the cut of a frame of [all] hands the tile holding [inTile] of
+    /// them: the body's end-table entry for each end of its roads, and
+    /// whether each turns off the other end meeting it — worked out off
+    /// every road on the body, whichever tile holds it.
+    (List<(double, int)?>, List<bool>) fromCut(
+        List<RoadSnapshot> all, List<RoadSnapshot> inTile) {
+      final plan = CityTileBucketer.bucket(
+          WorldSnapshot(tick: 0, vessels: const {}, roads: all),
+          anchors: const {body: anchor},
+          tileM: 3218.688);
+      final table = plan.endHalf[body] ?? const {};
+      final bends = plan.endBends[body] ?? const <int>{};
+      final ends = <(double, int)?>[], bent = <bool>[];
+      for (final r in inTile) {
+        final p = r.points, l = r.lifts;
+        ends
+          ..add(table[CityTileBucketer.endKeyAt(p, 0, l.first)])
+          ..add(table[CityTileBucketer.endKeyAt(p, p.length - 3, l.last)]);
+        final (b0, b1) = CityTileBucketer.bendsOf(r, bends);
+        bent
+          ..add(b0)
+          ..add(b1);
+      }
+      return (ends, bent);
+    }
+
     test("an L's parapets stand clear of the other leg's lanes", () {
       // Two raised streets joined end to end at a corner — the second
       // snapped onto the first's free end. Only two ends meet and no plate
       // is drawn, but each leg's inside parapet ran on across the other's
-      // lanes. The other end is found among the tile's roads, among its
-      // junction ends, and — the other leg the next tile's — there alone.
-      final cases = <(String, List<RoadSnapshot>, List<CityTileEnd>)>[
-        ('both legs in the tile', [east, north], const []),
-        ('and their ends', [east, north], [endOf(east), endOf(north)]),
-        ('north the next tile\'s', [east], [endOf(east), endOf(north)]),
-        ('east the next tile\'s', [north], [endOf(east), endOf(north)]),
+      // lanes. The cut reads the turn off the whole body's roads, so a leg
+      // whose corner and other leg are both the next tile's — nothing of
+      // either in its own tile — holds back as surely.
+      final cases = <(String, List<RoadSnapshot>)>[
+        ('both legs in the tile', [east, north]),
+        ('north the next tile\'s', [east]),
+        ('east the next tile\'s', [north]),
       ];
-      for (final (label, roads, ends) in cases) {
+      for (final (label, roads) in cases) {
+        final (ends, bent) = fromCut([east, north], roads);
+        expect(ends.first, (hw, 2), reason: label);
+        expect(bent.first, isTrue, reason: label);
         final walls = aboveDeck(meshWith(roads, CityTier.mid,
-            roadEnds: [for (final _ in roads) ...[(hw, 2), null]],
-            ends: ends));
+            roadEnds: ends, roadEndBent: bent));
         expect(walls, isNotEmpty, reason: label);
         for (final p in walls) {
           final inEast = p.y.abs() < hw - 0.01 && p.x > 0;
@@ -1281,6 +1312,22 @@ void main() {
       }
     });
 
+    test("a joint's turn is the cut's word: the tile searches out none", () {
+      // Every end of a deck where two ends meet used to look for the other
+      // among all the tile's roads and junction ends — for a tile of a few
+      // hundred decks, most of its meshing. The cut says once which turn;
+      // told none does, the tile holds nothing back, however its own roads
+      // lie.
+      final walls = aboveDeck(meshWith([east, north], CityTier.mid,
+          roadEnds: [(hw, 2), null, (hw, 2), null],
+          ends: [endOf(east), endOf(north)]));
+      expect(
+          walls.any((p) =>
+              (p.y.abs() < hw - 0.01 && p.x > 0) ||
+              (p.x.abs() < hw - 0.01 && p.y > 0)),
+          isTrue);
+    });
+
     test('a deck bending gently through a joint keeps its parapets', () {
       // Ten degrees off straight on is still one road going on.
       final a = 10 * math.pi / 180;
@@ -1288,14 +1335,13 @@ void main() {
         for (var i = 0; i < 11; i++)
           (i * 20.0 * math.cos(a), i * 20.0 * math.sin(a)),
       ]);
-      for (final ends in [
-        const <CityTileEnd>[],
-        [endOf(west), endOf(on)],
-      ]) {
-        final res = meshWith([west, on], CityTier.mid,
-            roadEnds: [(hw, 2), null, (hw, 2), null], ends: ends);
-        expect(aboveDeck(res).any((p) => p.x.abs() < 1), isTrue);
-      }
+      final (ends, bent) = fromCut([west, on], [west, on]);
+      // Two meet at the joint; the far ends are dead ends.
+      expect(ends, [(hw, 2), (hw, 1), (hw, 2), (hw, 1)]);
+      expect(bent, everyElement(isFalse));
+      final res = meshWith([west, on], CityTier.mid,
+          roadEnds: ends, roadEndBent: bent, ends: [endOf(west), endOf(on)]);
+      expect(aboveDeck(res).any((p) => p.x.abs() < 1), isTrue);
     });
   });
 

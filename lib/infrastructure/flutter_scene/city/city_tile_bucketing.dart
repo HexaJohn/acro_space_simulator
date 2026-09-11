@@ -39,6 +39,14 @@
 /// so moving one re-cuts the deck's tile; a tile with no deck takes none,
 /// and keys and builds exactly as it always did.
 ///
+/// So too a deck's end where just one other end meets it: whether the two
+/// turn off one another there — an L, whose inside parapets stand in each
+/// other's lanes — or one road goes on through ([CityBucketPlan.endBends]).
+/// Only the whole body's roads can say, since the other leg can be any
+/// tile's; it is in the key of the deck's tile, so turning the other leg
+/// re-cuts it. Both are the keyed cut's work ([CityTileBucketer.keyTiles]):
+/// a cut culled for range never looks for either.
+///
 /// Lots are the one member left out. The tiles do not draw them — the zoning
 /// node paints the plat on the UI thread (see `CityNodes`) — so a lot zoned
 /// or built moves no tile's key, and a zone stroke re-meshes nothing.
@@ -154,7 +162,8 @@ class CityTileBucket {
 
   /// The ground roads of other tiles that pass within a pier's reach of
   /// one of this tile's decks, as their carriageways (see the library
-  /// docs). Empty for a tile with no deck on piers.
+  /// docs). Empty for a tile with no deck on piers, and until the cut is
+  /// keyed ([CityTileBucketer.keyTiles]).
   final List<CityTileCorridor> corridors = [];
 
   /// Body-centre distance of the outermost building centre in the tile
@@ -192,10 +201,27 @@ class CityBucketPlan {
   /// or roads.
   final Map<String, List<BuildingSnapshot>> byBody = {};
 
+  /// Per body: the end-table keys ([CityTileBucketer.endKeyOf]) where a
+  /// deck's end and the one other end meeting it turn off one another —
+  /// their inward headings more than 20° off straight on — as a deck's
+  /// parapets read them ([CityTileBucketer.bendsOf]). Empty until the cut
+  /// is keyed ([CityTileBucketer.keyTiles]), and on a body nobody raised a
+  /// road on.
+  final Map<String, Set<int>> endBends = {};
+
   /// Whether any road on any body is sealed.
   bool sealedWorld = false;
 
   final Map<String, ColonyTangentBasis> _bases = {};
+
+  /// The frame's roads, in its order, and the cell size they were cut at:
+  /// what the keyed cut's passes read ([CityTileBucketer.keyTiles]).
+  List<RoadSnapshot> _roads = const [];
+  double _tileM = 0;
+
+  /// Whether the keyed cut's passes have run: they add to the tiles, so
+  /// once.
+  bool _passed = false;
 }
 
 /// How a new cut stands against the tiles a renderer holds, by tile key.
@@ -230,16 +256,19 @@ class CityTileBucketer {
   /// bodies' [anchors] (any body without one is anchored by the cut).
   ///
   /// [keyed] false leaves every tile's [CityTileBucket.structureKey] empty,
-  /// for [keyTiles] to write once the caller knows it wants them: hashing a
-  /// big colony's content is a large part of a cut, and a cut the renderer
-  /// is about to cull for range shows none of it (see [CityCutGate]).
+  /// and its corridors and the bodies' bends ungathered, for [keyTiles] to
+  /// do once the caller knows it wants them: hashing a big colony's content
+  /// is a large part of a cut, and a cut the renderer is about to cull for
+  /// range shows none of it (see [CityCutGate]).
   static CityBucketPlan bucket(
     WorldSnapshot snap, {
     required Map<String, Vector3> anchors,
     required double tileM,
     bool keyed = true,
   }) {
-    final plan = CityBucketPlan._(Map.of(anchors));
+    final plan = CityBucketPlan._(Map.of(anchors))
+      .._roads = snap.roads
+      .._tileM = tileM;
     ColonyTangentBasis basisOf(String bodyId) => plan._bases.putIfAbsent(
         bodyId, () => ColonyTangentBasis.at(plan.anchors[bodyId]!));
     // The half diagonal stays the cube cell's, not the square's: it is a
@@ -357,7 +386,6 @@ class CityTileBucketer {
         plan.tiles['${j.body}/$ie/$iN']?.junctions.add(tj);
       }
     }
-    _gatherCorridors(snap, plan, tileFor);
     if (keyed) keyTiles(plan);
     return plan;
   }
@@ -372,46 +400,169 @@ class CityTileBucketer {
   /// The reach is measured on bounds, points against points, grown by
   /// [RoadCorridors.reachM] — past which [RoadCorridors.blocks] turns a
   /// pier away from nothing — so the test can let in a road that will not
-  /// matter, and never leaves out one that would.
-  static void _gatherCorridors(WorldSnapshot snap, CityBucketPlan plan,
-      CityTileBucket Function(String bodyId, Vector3 p) tileFor) {
-    // Every deck on piers, with its tile and its points' bounds: grouped by
-    // tile, in the cut's order.
-    final decks = <(CityTileBucket, RoadSnapshot, Float64List)>[];
+  /// matter, and never leaves out one that would. A road is held first to
+  /// the bounds of all of a tile's decks together, grown for the widest of
+  /// them, and only then to each deck: most roads of a big city come near
+  /// no deck at all, and every road against every deck was, in a player's
+  /// city with a few hundred decks, most of what a cut cost.
+  static void _gatherCorridors(CityBucketPlan plan) {
+    // Every deck on piers with its points' bounds, grouped by tile in the
+    // cut's order: each tile's decks, the bounds of them all, and the
+    // widest deck's half width.
+    final groups = <(
+      CityTileBucket,
+      List<(RoadSnapshot, Float64List)>,
+      Float64List,
+      double,
+    )>[];
     for (final t in plan.tiles.values) {
+      List<(RoadSnapshot, Float64List)>? decks;
+      Float64List? all;
+      var widest = 0.0;
       for (final r in t.roads) {
-        if (_onPiers(r)) decks.add((t, r, _boundsOf(r.points)));
+        if (!_onPiers(r)) continue;
+        final d = _boundsOf(r.points);
+        (decks ??= []).add((r, d));
+        if (all == null) {
+          all = Float64List.fromList(d);
+        } else {
+          for (var k = 0; k < 3; k++) {
+            all[k] = math.min(all[k], d[k]);
+            all[k + 3] = math.max(all[k + 3], d[k + 3]);
+          }
+        }
+        widest = math.max(widest, r.halfWidthM);
       }
+      if (decks != null) groups.add((t, decks, all!, widest));
     }
-    if (decks.isEmpty) return;
-    for (final r in snap.roads) {
+    if (groups.isEmpty) return;
+    for (final r in plan._roads) {
       final pts = r.points;
       final n = pts.length ~/ 3;
       // The roads a tile's own corridors take (see `CityTileMeshJob`).
       if (n < 2 || _classOf(r).isElevated) continue;
       Float64List? box;
-      CityTileBucket? owner, last;
-      for (final (t, deck, d) in decks) {
-        // Once to a tile, however many of its decks the road comes near.
-        if (t.bodyId != r.body || identical(t, last)) continue;
+      String? owner;
+      for (final (t, decks, all, widest) in groups) {
+        if (t.bodyId != r.body) continue;
         final b = box ??= _boundsOf(pts);
-        final pad = RoadCorridors.reachM(deck.halfWidthM, r.halfWidthM) + 1.0;
-        if (b[0] - pad > d[3] ||
-            b[1] - pad > d[4] ||
-            b[2] - pad > d[5] ||
-            b[3] + pad < d[0] ||
-            b[4] + pad < d[1] ||
-            b[5] + pad < d[2]) {
+        if (!_within(
+            b, all, RoadCorridors.reachM(widest, r.halfWidthM) + 1.0)) {
           continue;
         }
-        // A road of the deck's own tile is one of its corridors already.
-        final m = (n ~/ 2) * 3;
-        owner ??= tileFor(r.body, Vector3(pts[m], pts[m + 1], pts[m + 2]));
-        if (identical(owner, t)) continue;
-        t.corridors.add(CityTileCorridor(pts, r.halfWidthM));
-        last = t;
+        for (final (deck, d) in decks) {
+          if (!_within(
+              b, d, RoadCorridors.reachM(deck.halfWidthM, r.halfWidthM) + 1.0)) {
+            continue;
+          }
+          // A road of the deck's own tile is one of its corridors already.
+          owner ??= _ownerOf(plan, r);
+          if (owner != t.key) {
+            t.corridors.add(CityTileCorridor(pts, r.halfWidthM));
+          }
+          // Once to a tile, however many of its decks the road comes near.
+          break;
+        }
       }
     }
+  }
+
+  /// Whether the boxes [a] and [b] (as [_boundsOf] makes them) come within
+  /// [pad] of one another along every axis.
+  static bool _within(Float64List a, Float64List b, double pad) =>
+      a[0] - pad <= b[3] &&
+      a[1] - pad <= b[4] &&
+      a[2] - pad <= b[5] &&
+      a[3] + pad >= b[0] &&
+      a[4] + pad >= b[1] &&
+      a[5] + pad >= b[2];
+
+  /// The key of the tile [r] belongs to: the cell its middle point lies
+  /// in, as [bucket] put it there.
+  static String _ownerOf(CityBucketPlan plan, RoadSnapshot r) {
+    final pts = r.points;
+    final m = (pts.length ~/ 3 ~/ 2) * 3;
+    final (ie, iN) = plan._bases[r.body]!
+        .cellOf(Vector3(pts[m], pts[m + 1], pts[m + 2]), plan._tileM);
+    return '${r.body}/$ie/$iN';
+  }
+
+  /// cos 20°: two ends meeting less than that off straight on are one road
+  /// going on, and a deck's parapet goes on with it.
+  static const double straightOnCos = 0.94;
+
+  /// Fill [CityBucketPlan.endBends]: at every end of a deck where the
+  /// body's end table counts just two ends, whether the two turn off one
+  /// another.
+  ///
+  /// Two passes over the frame's roads, the second only on a body that has
+  /// such an end. First the joints wanted: a road on the ground has no
+  /// parapet to hold back, so a body nobody raised a road on is done with
+  /// at one look at each road's lifts. Then every end the table counted —
+  /// the roads that are not elevated, keyed with the lift it keyed them
+  /// with — at a joint wanted: the first of the two to arrive leaves its
+  /// inward heading there, and the second is held to it.
+  static void _findBends(CityBucketPlan plan) {
+    Map<String, Map<int, Vector3?>>? wanted;
+    for (final r in plan._roads) {
+      final l = r.lifts;
+      if (l.isEmpty || _classOf(r).isElevated) continue;
+      final p = r.points;
+      final n = p.length ~/ 3;
+      final table = plan.endHalf[r.body];
+      if (n < 2 || table == null) continue;
+      for (final k in [
+        endKeyAt(p, 0, l.first),
+        endKeyAt(p, 3 * n - 3, l.last),
+      ]) {
+        if (table[k]?.$2 == 2) ((wanted ??= {})[r.body] ??= {})[k] = null;
+      }
+    }
+    if (wanted == null) return;
+    for (final r in plan._roads) {
+      final joints = wanted[r.body];
+      if (joints == null || _classOf(r).isElevated) continue;
+      final p = r.points;
+      final n = p.length ~/ 3;
+      if (n < 2) continue;
+      final l = r.lifts;
+      for (final first in const [true, false]) {
+        final i = first ? 0 : 3 * n - 3, j = first ? 3 : 3 * n - 6;
+        final k =
+            endKeyAt(p, i, l.isEmpty ? 0.0 : (first ? l.first : l.last));
+        if (!joints.containsKey(k)) continue;
+        final inward =
+            Vector3(p[j] - p[i], p[j + 1] - p[i + 1], p[j + 2] - p[i + 2]);
+        final other = joints[k];
+        if (other == null) {
+          joints[k] = inward;
+        } else if (_turns(other, inward)) {
+          (plan.endBends[r.body] ??= {}).add(k);
+        }
+      }
+    }
+  }
+
+  /// Whether two ends leaving one joint along [u] and [v] turn off one
+  /// another rather than going on (see [straightOnCos]). A degenerate end
+  /// has no heading, and reads as going on.
+  static bool _turns(Vector3 u, Vector3 v) {
+    if (u.length < 1e-6 || v.length < 1e-6) return false;
+    return u.normalized.dot(v.normalized) > -straightOnCos;
+  }
+
+  /// Whether [r]'s first and its last end turn off the one other end that
+  /// meets each, as a body's [bends] ([CityBucketPlan.endBends]) have them:
+  /// where a deck's parapets hold back (see `CityTileMeshJob`). Never for a
+  /// road on the ground, which has no parapet — every road the generator
+  /// lays.
+  static (bool, bool) bendsOf(RoadSnapshot r, Set<int> bends) {
+    final l = r.lifts, p = r.points;
+    if (l.isEmpty || bends.isEmpty || p.length < 6) return (false, false);
+    return (
+      bends.contains(endKeyAt(p, 0, l.first)),
+      bends.contains(endKeyAt(p, 3 * (p.length ~/ 3) - 3, l.last)),
+    );
   }
 
   /// Whether [r] stands on piers anywhere: a deck the tool raised clear of
@@ -450,13 +601,24 @@ class CityTileBucketer {
   /// Write every tile's structure key in [plan] — what [bucket] does itself
   /// unless told not to. Only once the cut is whole: a tile's key reads the
   /// body's end table and the tile's ends, which every road can add to.
+  ///
+  /// First, once for the plan, what only a cut that is kept needs and a
+  /// key reads: the corridors its decks' piers keep out of
+  /// ([CityTileBucket.corridors]), and the bends their parapets hold back
+  /// at ([CityBucketPlan.endBends]).
   static void keyTiles(CityBucketPlan plan) {
+    if (!plan._passed) {
+      plan._passed = true;
+      _gatherCorridors(plan);
+      _findBends(plan);
+    }
     final transitHash = <String, int>{
       for (final e in plan.transitEnds.entries) e.key: _hashPoints(e.value),
     };
     for (final t in plan.tiles.values) {
       t.structureKey = structureKeyOf(t,
           endHalf: plan.endHalf[t.bodyId] ?? const {},
+          endBends: plan.endBends[t.bodyId] ?? const {},
           transitHash: transitHash[t.bodyId] ?? 0);
     }
   }
@@ -557,12 +719,13 @@ class CityTileBucketer {
     return h;
   }
 
-  /// The structure key of [t], with the body's [endHalf] table and the hash
-  /// of its transit ends (see the library docs for what goes in and why).
-  /// Also writes [CityTileBucket.roadHashes].
+  /// The structure key of [t], with the body's [endHalf] table, its
+  /// [endBends] and the hash of its transit ends (see the library docs for
+  /// what goes in and why). Also writes [CityTileBucket.roadHashes].
   static String structureKeyOf(
     CityTileBucket t, {
     required Map<int, (double, int)> endHalf,
+    Set<int> endBends = const {},
     int transitHash = 0,
   }) {
     var h = 0x2545F491;
@@ -602,6 +765,13 @@ class CityTileBucketer {
           endHalf[endKeyAt(p, 0, r.lifts.isEmpty ? 0.0 : r.lifts.first)]);
       h = _mixEnd(h,
           endHalf[endKeyAt(p, last, r.lifts.isEmpty ? 0.0 : r.lifts.last)]);
+      // And of a deck's ends, whether each turns off the other end meeting
+      // it, whichever tile that is. Not of a road on the ground's, which
+      // has no parapet to hold back: the generator's keys are as they were.
+      if (r.lifts.isNotEmpty) {
+        final (b0, b1) = bendsOf(r, endBends);
+        h = _mix(h, (b0 ? 1 : 0) | (b1 ? 2 : 0));
+      }
       if (_classOf(r) == RoadClass.transit) transit = true;
     }
     // A transit road's terminals read every transit end on the body.
