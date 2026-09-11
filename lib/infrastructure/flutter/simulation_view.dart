@@ -3340,11 +3340,20 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                 // is full width and up to 45% of the window, and grown up
                 // from the bottom it covered Save, Load, warp and debug at the
                 // default window size. There the drawer takes what is left
-                // and scrolls.
+                // and scrolls. On a window too short for that the editor
+                // keeps [_cityEditorMinHeight] and takes back what of the
+                // controls' band it needs, rather than overflowing and
+                // pushing its readout tabs off the bottom.
                 if (_editingCity != null)
                   Positioned.fill(
                     top: widget.cityMode
-                        ? MediaQuery.paddingOf(context).top + _cityEditorTop
+                        ? math.max(
+                            0.0,
+                            math.min(
+                                MediaQuery.paddingOf(context).top +
+                                    _cityEditorTop,
+                                MediaQuery.sizeOf(context).height -
+                                    _cityEditorMinHeight))
                         : 0,
                     child: CityEditOverlay(
                       controller: _cityEdit,
@@ -3404,6 +3413,13 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   /// target; 40 on the desktop), and the gap between them. The editor's own
   /// margin is the gap under them.
   static const double _cityEditorTop = _cityControlsTop + 48 + 8 + 48;
+
+  /// The least height the city editor keeps in city mode: Build's palette,
+  /// the tool and readout rows, and a few rows of an open readout drawer.
+  /// At 681 px (the default window) and taller the editor still starts at
+  /// [_cityEditorTop]; on a shorter window it starts higher, over the
+  /// controls' band, rather than overflowing.
+  static const double _cityEditorMinHeight = 400;
 
   /// City mode's controls: what of the flight stack the city game uses —
   /// Save and Load, time warp (also , and .), the debug panel. Leaving is

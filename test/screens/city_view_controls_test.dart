@@ -29,8 +29,8 @@ void main() {
   /// The desktop window's default size, where the live run saw it.
   const window = Size(1084, 681);
 
-  Future<void> pumpCity(WidgetTester t) async {
-    t.view.physicalSize = window;
+  Future<void> pumpCity(WidgetTester t, {Size size = window}) async {
+    t.view.physicalSize = size;
     t.view.devicePixelRatio = 1.0;
     addTearDown(t.view.reset);
     final colony = CityStarterKit.found(
@@ -38,50 +38,59 @@ void main() {
       config: const CityConfig(bodyId: 'earth', latitude: 12, longitude: 20),
       id: 'controls',
     );
-    await t.pumpWidget(MaterialApp(
-      home: SimulationView(
-        injectedCity: colony,
-        cityMode: true,
-        spawnDemoOrbiter: false,
+    await t.pumpWidget(
+      MaterialApp(
+        home: SimulationView(
+          injectedCity: colony,
+          cityMode: true,
+          spawnDemoOrbiter: false,
+        ),
       ),
-    ));
+    );
     await t.pump(const Duration(milliseconds: 16));
   }
 
   Finder fab(String tag) => find.byWidgetPredicate(
-      (w) => w is FloatingActionButton && w.heroTag == tag);
+    (w) => w is FloatingActionButton && w.heroTag == tag,
+  );
 
   /// A pointer across [f]'s middle — near each end and at the centre of
   /// what of it is on screen — lands on [f] itself, not on something drawn
   /// over it.
   void expectUncovered(WidgetTester t, Finder f, String what) {
     final box = t.renderObject(f) as RenderBox;
-    final r = (box.localToGlobal(Offset.zero) & box.size)
-        .intersect(Offset.zero & window);
+    final r = (box.localToGlobal(Offset.zero) & box.size).intersect(
+      Offset.zero & window,
+    );
     expect(r.width > 8 && r.height > 8, isTrue, reason: '$what is on screen');
     for (final fx in const [0.15, 0.5, 0.85]) {
       final p = Offset(r.left + r.width * fx, r.center.dy);
       final hit = t.hitTestOnBinding(p);
-      expect(hit.path.any((e) => e.target == box), isTrue,
-          reason: '$what is covered at $p');
+      expect(
+        hit.path.any((e) => e.target == box),
+        isTrue,
+        reason: '$what is covered at $p',
+      );
     }
   }
 
-  testWidgets('at the default window size nothing covers the road menu',
-      (t) async {
+  testWidgets('at the default window size nothing covers the road menu', (
+    t,
+  ) async {
     await pumpCity(t);
     await t.tap(find.text('Road'));
     await t.pump();
     final small = [
       for (final type in kRoadCatalog)
-        if (type.group == RoadGroup.small) type
+        if (type.group == RoadGroup.small) type,
     ];
     expect(small.length, greaterThanOrEqualTo(7));
     for (final type in small) {
       final cell = find
           .ancestor(
-              of: find.text(roadTypeShortLabel(type)),
-              matching: find.byType(InkWell))
+            of: find.text(roadTypeShortLabel(type)),
+            matching: find.byType(InkWell),
+          )
           .first;
       // The row scrolls sideways when the window is narrower than the
       // menu; what is scrolled away is not covered, just not shown yet.
@@ -103,16 +112,18 @@ void main() {
     await t.pump();
   }
 
-  testWidgets('at the default window size nothing covers the Budget drawer',
-      (t) async {
+  testWidgets('at the default window size nothing covers the Budget drawer', (
+    t,
+  ) async {
     await pumpCity(t);
     await tapShown(t, find.text('Budget'));
     expect(find.text('Tax rate'), findsOneWidget);
     expectUncovered(t, find.byType(Slider), 'the tax slider');
   });
 
-  testWidgets('city mode keeps Save and Load, and drops the flight controls',
-      (t) async {
+  testWidgets('city mode keeps Save and Load, and drops the flight controls', (
+    t,
+  ) async {
     await pumpCity(t);
     // Open what reaches furthest into the corners, and the city's own
     // controls must still be clear of it.
@@ -140,49 +151,74 @@ void main() {
     }
   });
 
-  testWidgets('with any tool held, every city control stays clickable',
-      (t) async {
+  // A readout tab, not a word of the same spelling in its drawer: the
+  // tabs come first in the toolbar's column.
+  Finder tab(CityReadout r) => find
+      .descendant(
+        of: find.byType(CityEditOverlay),
+        matching: find.text(r.label),
+      )
+      .first;
+
+  // The open readout drawer: the only shrink-wrapped list in the editor.
+  Finder drawer() => find.descendant(
+    of: find.byType(CityEditOverlay),
+    matching: find.byWidgetPredicate((w) => w is ListView && w.shrinkWrap),
+  );
+
+  ScrollPosition drawerScroll(WidgetTester t) => t
+      .state<ScrollableState>(
+        find.descendant(of: drawer(), matching: find.byType(Scrollable)),
+      )
+      .position;
+
+  // The open readout drawer is on a [height]-tall window, shows something,
+  // and can be scrolled to its end: squeezed under the controls it scrolls,
+  // and nothing of it is out of reach.
+  Future<void> expectDrawerReachable(
+    WidgetTester t,
+    String when, {
+    double height = 681,
+  }) async {
+    final list = drawer();
+    expect(list, findsOneWidget, reason: 'the drawer is open $when');
+    final box = t.renderObject(list) as RenderBox;
+    final r = box.localToGlobal(Offset.zero) & box.size;
+    expect(
+      r.top >= 0 && r.bottom <= height,
+      isTrue,
+      reason: 'the drawer is on screen $when: $r',
+    );
+    expect(r.height, greaterThan(48), reason: 'the drawer shows rows $when');
+    expect(
+      list.hitTestable(),
+      findsOneWidget,
+      reason: 'the drawer takes a drag $when',
+    );
+    final pos = drawerScroll(t);
+    // Drag after drag, as a player would: each loses its start to the
+    // touch slop, and a half-height drag keeps the pointer on the list. A
+    // short window's short drawer takes more of them.
+    for (var i = 0; i < 100 && pos.pixels < pos.maxScrollExtent - 0.5; i++) {
+      await t.drag(list, Offset(0, -r.height / 2));
+      await t.pump();
+    }
+    expect(
+      pos.pixels,
+      closeTo(pos.maxScrollExtent, 0.5),
+      reason: 'drags reach the end of the drawer $when',
+    );
+  }
+
+  testWidgets('with any tool held, every city control stays clickable', (
+    t,
+  ) async {
     await pumpCity(t);
     void expectControls(String when) {
       for (final tag in ['save', 'load', 'warpdown', 'warpup', 'debug']) {
         expect(fab(tag).hitTestable(), findsOneWidget, reason: '$tag $when');
       }
     }
-
-    // A readout tab, not a word of the same spelling in its drawer: the
-    // tabs come first in the toolbar's column.
-    Finder tab(CityReadout r) => find
-        .descendant(
-            of: find.byType(CityEditOverlay), matching: find.text(r.label))
-        .first;
-
-    // The open readout drawer is on screen, shows something, and can be
-    // scrolled to its end: squeezed under the controls it scrolls, and
-    // nothing of it is out of reach.
-    Future<void> expectDrawerReachable(String when) async {
-      final list = find.descendant(
-          of: find.byType(CityEditOverlay),
-          matching: find.byWidgetPredicate((w) => w is ListView && w.shrinkWrap));
-      expect(list, findsOneWidget, reason: 'the drawer is open $when');
-      final box = t.renderObject(list) as RenderBox;
-      final r = box.localToGlobal(Offset.zero) & box.size;
-      expect(r.top >= 0 && r.bottom <= window.height, isTrue,
-          reason: 'the drawer is on screen $when: $r');
-      expect(r.height, greaterThan(48), reason: 'the drawer shows rows $when');
-      expect(list.hitTestable(), findsOneWidget,
-          reason: 'the drawer takes a drag $when');
-      final pos = t
-          .state<ScrollableState>(
-              find.descendant(of: list, matching: find.byType(Scrollable)))
-          .position;
-      // Drag after drag, as a player would: each loses its start to the
-      // touch slop, and a half-height drag keeps the pointer on the list.
-      for (var i = 0; i < 20 && pos.pixels < pos.maxScrollExtent - 0.5; i++) {
-        await t.drag(list, Offset(0, -r.height / 2));
-        await t.pump();
-      }
-      expect(pos.pixels, closeTo(pos.maxScrollExtent, 0.5),
-          reason: 'drags reach the end of the drawer $when');    }
 
     // Build's row of buildings is the toolbar's tallest; it once covered
     // the debug toggle at the foot of a ~320 px column. A readout drawer
@@ -194,23 +230,64 @@ void main() {
       if (tool != 'Road' && tool != 'Build') continue;
       for (final r in CityReadout.values) {
         await tapShown(t, tab(r));
-        // The drawers share one list, and the last one's scroll carries
-        // over and springs back into the new one's range: let it settle.
-        for (var i = 0; i < 10; i++) {
-          await t.pump(const Duration(milliseconds: 50));
-        }
+        // Each drawer opens at its top: the last one was left scrolled to
+        // its end, and a list shared between them carried that offset over.
+        expect(
+          drawerScroll(t).pixels,
+          0,
+          reason: 'the ${r.label} drawer opens at its top',
+        );
         expectControls('with $tool held and the ${r.label} drawer open');
-        await expectDrawerReachable('with $tool held, ${r.label}');
+        await expectDrawerReachable(t, 'with $tool held, ${r.label}');
       }
       // The open tab again: the drawer shuts.
       await tapShown(t, tab(CityReadout.values.last));
-      expect(
-          find.descendant(
-              of: find.byType(CityEditOverlay),
-              matching:
-                  find.byWidgetPredicate((w) => w is ListView && w.shrinkWrap)),
-          findsNothing);
+      expect(drawer(), findsNothing);
     }
+  });
+
+  testWidgets('at 681 px or taller the editor starts below the controls', (
+    t,
+  ) async {
+    await pumpCity(t);
+    // Two rows of the controls' 48 px tap targets and the gap, under their
+    // 72 px start.
+    expect(t.getTopLeft(find.byType(CityEditOverlay)).dy, 176);
+    t.view.physicalSize = const Size(1084, 900);
+    await t.pump();
+    expect(t.getTopLeft(find.byType(CityEditOverlay)).dy, 176);
+  });
+
+  testWidgets('on a short window the editor fits, and its readouts open', (
+    t,
+  ) async {
+    // Kept below the controls whatever the window, the editor was left too
+    // little height for Build's palette: it overflowed, and pushed the
+    // readout tabs off the bottom, where no drawer could be opened.
+    await pumpCity(t, size: const Size(1084, 480));
+    await tapShown(t, find.text('Build').first);
+    for (final h in const [480.0, 440.0]) {
+      t.view.physicalSize = Size(1084, h);
+      await t.pump();
+      expect(t.takeException(), isNull, reason: 'nothing overflows at $h');
+      expect(
+        tab(CityReadout.status).hitTestable(),
+        findsOneWidget,
+        reason: 'the City tab is clickable at $h',
+      );
+      await tapShown(t, tab(CityReadout.status));
+      expect(t.takeException(), isNull, reason: 'nothing overflows at $h');
+      await expectDrawerReachable(t, 'with Build held at $h', height: h);
+      // Shut it again for the next window.
+      await tapShown(t, tab(CityReadout.status));
+      expect(drawer(), findsNothing);
+    }
+    // A little taller, the drawer was left 7 px: a list in principle.
+    t.view.physicalSize = const Size(1084, 520);
+    await t.pump();
+    await tapShown(t, tab(CityReadout.status));
+    expect(t.takeException(), isNull);
+    await expectDrawerReachable(t, 'with Build held at 520', height: 520);
   });
 
   /// The city game as the app opens it: pushed over a page, so that
@@ -224,24 +301,28 @@ void main() {
       config: const CityConfig(bodyId: 'earth', latitude: 12, longitude: 20),
       id: 'controls',
     );
-    await t.pumpWidget(MaterialApp(
-      home: Builder(
-        builder: (context) => Scaffold(
-          body: Center(
-            child: TextButton(
-              onPressed: () => Navigator.of(context).push(MaterialPageRoute<void>(
-                builder: (_) => SimulationView(
-                  injectedCity: withColony ? colony : null,
-                  cityMode: true,
-                  spawnDemoOrbiter: false,
+    await t.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: Center(
+              child: TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => SimulationView(
+                      injectedCity: withColony ? colony : null,
+                      cityMode: true,
+                      spawnDemoOrbiter: false,
+                    ),
+                  ),
                 ),
-              )),
-              child: const Text('open the colony'),
+                child: const Text('open the colony'),
+              ),
             ),
           ),
         ),
       ),
-    ));
+    );
     await t.tap(find.text('open the colony'));
     // The route's transition; the view's ticker never lets it settle.
     for (var i = 0; i < 30; i++) {
@@ -253,8 +334,9 @@ void main() {
 
   Finder leaveButton() => find.byTooltip('Leave the colony');
 
-  testWidgets('the city game offers no Close editor to strand the player on',
-      (t) async {
+  testWidgets('the city game offers no Close editor to strand the player on', (
+    t,
+  ) async {
     await pushCity(t);
     // Closing the editor took the HUD — and its exit — with it, and left a
     // bare planet with nothing to reopen it by.
@@ -262,8 +344,9 @@ void main() {
     expect(leaveButton().hitTestable(), findsOneWidget);
   });
 
-  testWidgets('Load puts the player back in the editor, exit and all',
-      (t) async {
+  testWidgets('Load puts the player back in the editor, exit and all', (
+    t,
+  ) async {
     final injected = await pushCity(t);
     await tapShown(t, fab('save'));
     await tapShown(t, fab('load'));
@@ -279,8 +362,11 @@ void main() {
     expect(overlay, findsOneWidget);
     final city = t.widget<CityEditOverlay>(overlay).city;
     expect(city.id, 'controls');
-    expect(identical(city, injected), isFalse,
-        reason: 'the editor must follow the loaded colony');
+    expect(
+      identical(city, injected),
+      isFalse,
+      reason: 'the editor must follow the loaded colony',
+    );
     expect(t.widget<CityGameHud>(find.byType(CityGameHud)).city, same(city));
     expect(leaveButton().hitTestable(), findsOneWidget);
     expect(fab('save').hitTestable(), findsOneWidget);

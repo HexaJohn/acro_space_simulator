@@ -451,7 +451,10 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
             borderRadius: BorderRadius.circular(6),
             border: Border.all(color: const Color(0xFF24313F)),
           ),
+          // Keyed by the readout: each drawer is its own list and opens at
+          // its top, rather than inheriting the last drawer's scroll.
           child: ListView(
+            key: ValueKey(r),
             padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
             shrinkWrap: true,
             children: rows,
