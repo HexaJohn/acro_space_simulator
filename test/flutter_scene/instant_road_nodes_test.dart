@@ -160,6 +160,24 @@ void main() {
       expect(t.revisionOf('moon'), isNot(r1));
     });
 
+    test('content keys fit the web\'s exact ints and tell hash and id apart',
+        () {
+      const h = 0x12345678;
+      final k = InstantRoadTracker.contentKey(h, 'a');
+      expect(k, inInclusiveRange(0, (1 << 53) - 1));
+      expect(InstantRoadTracker.contentKey(h, 'a'), k);
+      expect(InstantRoadTracker.contentKey(h, 'b'), isNot(k));
+      expect(InstantRoadTracker.contentKey(h + 1, 'a'), isNot(k));
+      expect(InstantRoadTracker.contentKey(h, null), isNot(k));
+      // Wider than one 32-bit lane: a big colony's roads do not meet.
+      final keys = {
+        for (var i = 0; i < 50000; i++)
+          InstantRoadTracker.contentKey(i * 2654435761 & 0xFFFFFFFF, 'r$i'),
+      };
+      expect(keys, hasLength(50000));
+      expect(keys, everyElement(inInclusiveRange(0, (1 << 53) - 1)));
+    });
+
     test('a reset makes the next cut a first', () {
       final t = InstantRoadTracker()..noteCut(cut([a, b]));
       t.retire((_) => true);

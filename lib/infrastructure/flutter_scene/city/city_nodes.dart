@@ -680,9 +680,12 @@ class CityNodes {
   /// light map read it.
   Map<String, List<BuildingSnapshot>> _byBody = {};
 
+  /// When the frame is cut again: its structure signature, and where the
+  /// tiles of a colony culled for range were (see [CityCutGate]).
+  final CityCutGate _cutGate = CityCutGate();
+
   /// What the tiles were bucketed from.
-  String _structureSig = '';
-  Object? _lastBuildings, _lastRoads, _lastPatches;
+  String get _structureSig => _cutGate.signature;
 
   /// Bumped by [invalidate]; part of every tile's key.
   int _invalidation = 0;
@@ -810,20 +813,17 @@ class CityNodes {
     // the counts are the change detector — the same one the old rebuild
     // key used — with the road network's own revision and junction
     // overrides beside them: an upgrade, a reversal or a light switched off
-    // changes no count, and a cut keyed on counts alone never saw one.
+    // changes no count, and a cut keyed on counts alone never saw one. A
+    // colony culled for range is cut again only when that moves or the
+    // camera comes back within range (see [CityCutGate]).
     final sig = '${snap.buildings.length}|${snap.roads.length}|'
         '${snap.patches.length}|${snap.terrainEdits.length}|'
         '${CityTileBucketer.roadsSignature(snap)}';
-    final sameLists = identical(snap.buildings, _lastBuildings) &&
-        identical(snap.roads, _lastRoads) &&
-        identical(snap.patches, _lastPatches);
-    if (!sameLists && sig != _structureSig) {
-      _bucket(snap);
-      _structureSig = sig;
+    final focusOf = _focusOfBodies(snap, focusWorld);
+    if (_cutGate.wantsCut(snap, sig, rangeM: maxRangeM, focusBF: focusOf)) {
+      _cutGate.cut(sig);
+      _bucket(snap, focusOf);
     }
-    _lastBuildings = snap.buildings;
-    _lastRoads = snap.roads;
-    _lastPatches = snap.patches;
     phaseMs['city.bucket'] = sw.elapsedMicroseconds / 1000;
     sw.reset();
 
@@ -858,9 +858,14 @@ class CityNodes {
       if (t.distanceM < nearest) nearest = t.distanceM;
     }
     if (nearest > maxRangeM) {
-      if (_tiles.isNotEmpty) _clear();
+      // Out of range: drop what the colony shows and keep where its tiles
+      // were, so the frames that follow are not cut to learn it again.
+      if (_tiles.isNotEmpty) _cull(_boundsOfTiles());
+      final culled = _cutGate.culled;
+      final shownM =
+          nearest.isFinite || culled == null ? nearest : culled.lastNearestM;
       debugLine = 'city: culled, nearest '
-          '${(nearest / 1000).toStringAsFixed(1)}km > '
+          '${(shownM / 1000).toStringAsFixed(1)}km > '
           '${(maxRangeM / 1000).toStringAsFixed(0)}km';
       return;
     }
@@ -1269,10 +1274,23 @@ class CityNodes {
   /// by it); a tile whose key moved goes on SHOWING what it has while its
   /// want key, which leads with the structure key, queues the rebuild; only
   /// a tile gone from the frame is dropped.
-  void _bucket(WorldSnapshot snap) {
+  ///
+  /// A cut whose tiles are all out of range goes no further than finding
+  /// that out ([focusBF] gives the camera in each body's frame): nothing
+  /// hashed, no roads noted for the instant path, no roots made for the
+  /// scene — the colony is culled, and [_cutGate] keeps where its tiles are
+  /// so it is not cut again until the camera comes back or it changes.
+  void _bucket(WorldSnapshot snap, Vector3? Function(String bodyId) focusBF) {
     final plan = CityTileBucketer.bucket(snap,
         anchors: {for (final r in _roots.values) r.bodyId: r.anchorBF},
-        tileM: tileM);
+        tileM: tileM,
+        keyed: false);
+    final bounds = CityCullBounds.ofPlan(plan);
+    if (bounds.nearestM(focusBF) > maxRangeM) {
+      _cull(bounds);
+      return;
+    }
+    CityTileBucketer.keyTiles(plan);
     plan.anchors.forEach((bodyId, anchorBF) {
       _roots.putIfAbsent(bodyId, () {
         final node = fs.Node();
@@ -2795,6 +2813,23 @@ class CityNodes {
   ) =>
       bodyRotation.conjugate.rotate(focusWorld - bodyWorld);
 
+  /// [focusWorld] in each body's frame ([focusInBodyFrame]), rotated once
+  /// per body however often it is asked; null for a body [snap] does not
+  /// carry.
+  static Vector3? Function(String bodyId) _focusOfBodies(
+      WorldSnapshot snap, Vector3 focusWorld) {
+    final memo = <String, Vector3?>{};
+    return (bodyId) => memo.putIfAbsent(bodyId, () {
+          final body = snap.bodies[bodyId];
+          return body == null
+              ? null
+              : focusInBodyFrame(
+                  focusWorld,
+                  Vector3(body.px, body.py, body.pz),
+                  Quaternion(body.qw, body.qx, body.qy, body.qz));
+        });
+  }
+
   /// The tier one building is generated at, from ITS OWN distance to the
   /// camera. [focusBF] must be in the same body-fixed frame the building is.
   ///
@@ -2866,6 +2901,29 @@ class CityNodes {
   /// Drop everything, and the keys with it — an emptied scene with a stale
   /// key would skip the bucketing that repopulates it.
   void _clear() {
+    _dropAll();
+    _cutGate.reset();
+  }
+
+  /// Drop everything for range, keeping the key and where the tiles were:
+  /// the frames that follow ask [_cutGate] whether the camera is back rather
+  /// than cutting the colony to find out (see [CityCutGate]).
+  void _cull(CityCullBounds bounds) {
+    _dropAll();
+    _cutGate.cull(bounds);
+  }
+
+  /// Where the tiles held are.
+  CityCullBounds _boundsOfTiles() {
+    final bounds = CityCullBounds();
+    for (final t in _tiles.values) {
+      bounds.add(t.bodyId, t.centreBF, t.halfDiagonalM);
+    }
+    return bounds;
+  }
+
+  /// Every tile, root and resident node, gone; the cut gate is the caller's.
+  void _dropAll() {
     _dropZoning();
     for (final t in _tiles.values) {
       _dropTile(t);
@@ -2883,10 +2941,6 @@ class CityNodes {
     // The tiles went with the roots: the next cut is every body's first.
     _instant.reset();
     _byBody = {};
-    _structureSig = '';
-    _lastBuildings = null;
-    _lastRoads = null;
-    _lastPatches = null;
     _dropResident();
   }
 

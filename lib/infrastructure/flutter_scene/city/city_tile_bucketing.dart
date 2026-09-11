@@ -214,10 +214,16 @@ class CityTileBucketer {
 
   /// Cut [snap] into tiles [tileM] on a side, on the tangent grids of the
   /// bodies' [anchors] (any body without one is anchored by the cut).
+  ///
+  /// [keyed] false leaves every tile's [CityTileBucket.structureKey] empty,
+  /// for [keyTiles] to write once the caller knows it wants them: hashing a
+  /// big colony's content is a large part of a cut, and a cut the renderer
+  /// is about to cull for range shows none of it (see [CityCutGate]).
   static CityBucketPlan bucket(
     WorldSnapshot snap, {
     required Map<String, Vector3> anchors,
     required double tileM,
+    bool keyed = true,
   }) {
     final plan = CityBucketPlan._(Map.of(anchors));
     ColonyTangentBasis basisOf(String bodyId) => plan._bases.putIfAbsent(
@@ -337,8 +343,14 @@ class CityTileBucketer {
         plan.tiles['${j.body}/$ie/$iN']?.junctions.add(tj);
       }
     }
-    // Each tile's identity, once every road has met every other: the end
-    // tables and the tiles' ends are only whole now.
+    if (keyed) keyTiles(plan);
+    return plan;
+  }
+
+  /// Write every tile's structure key in [plan] — what [bucket] does itself
+  /// unless told not to. Only once the cut is whole: a tile's key reads the
+  /// body's end table and the tile's ends, which every road can add to.
+  static void keyTiles(CityBucketPlan plan) {
     final transitHash = <String, int>{
       for (final e in plan.transitEnds.entries) e.key: _hashPoints(e.value),
     };
@@ -347,7 +359,6 @@ class CityTileBucketer {
           endHalf: plan.endHalf[t.bodyId] ?? const {},
           transitHash: transitHash[t.bodyId] ?? 0);
     }
-    return plan;
   }
 
   /// How [plan] stands against the tiles [held] — tile key to the
@@ -401,7 +412,7 @@ class CityTileBucketer {
   /// order. Not its id: a road re-split into the very same geometry
   /// builds the very same tile.
   static int roadHash(RoadSnapshot r) {
-    var h = 0x14057B7EF767814F;
+    var h = 0x9E3779B9;
     h = _mix(h, r.colonyId.hashCode);
     h = _mix(h, r.body.hashCode);
     h = _mix(h, r.roadClassIndex);
@@ -427,7 +438,7 @@ class CityTileBucketer {
   /// renderer asks it, to learn that an edit which kept every count (an
   /// upgrade, a reversal, a light switched off) has happened.
   static int roadsSignature(WorldSnapshot snap) {
-    var h = 0x3C6EF372FE94F82B;
+    var h = 0x7F4A7C15;
     for (final e in snap.roadsRevision.entries) {
       h = _mix(h, e.key.hashCode);
       h = _mix(h, e.value);
@@ -452,7 +463,7 @@ class CityTileBucketer {
     required Map<int, (double, int)> endHalf,
     int transitHash = 0,
   }) {
-    var h = 0x2545F4914F6CDD1D;
+    var h = 0x2545F491;
     for (final b in t.buildings) {
       h = _mix(h, b.id.hashCode);
       h = _mix(h, b.type.hashCode);
@@ -545,20 +556,202 @@ class CityTileBucketer {
   }
 }
 
-/// One step of the content hash: a 64-bit multiply-xorshift over the running
-/// value. For EQUALITY only — two cuts' keys for a tile are compared, never
+/// Where the tiles of a colony culled for range were: enough to tell, frame
+/// by frame, when the camera is back within range, without cutting the
+/// frame to find out (see [CityCutGate]).
+class CityCullBounds {
+  CityCullBounds();
+
+  /// The bounds of every tile of [plan].
+  factory CityCullBounds.ofPlan(CityBucketPlan plan) {
+    final b = CityCullBounds();
+    for (final t in plan.tiles.values) {
+      b.add(t.bodyId, t.centreBF, t.halfDiagonalM);
+    }
+    return b;
+  }
+
+  final List<String> _bodies = [];
+  final List<Vector3> _centres = [];
+  final List<double> _halfDiagonals = [];
+
+  /// A tile on [bodyId], centred at [centreBF], [halfDiagonalM] from its
+  /// centre to its corners.
+  void add(String bodyId, Vector3 centreBF, double halfDiagonalM) {
+    _bodies.add(bodyId);
+    _centres.add(centreBF);
+    _halfDiagonals.add(halfDiagonalM);
+  }
+
+  /// Tiles held.
+  int get length => _bodies.length;
+
+  /// What the last [nearestM] measured; infinity until one has.
+  double lastNearestM = double.infinity;
+
+  /// The least distance from the focus to any of the tiles, measured the
+  /// way the renderer measures a tile — its centre's distance less its half
+  /// diagonal, floored at zero — with [focusBF] the focus in each body's
+  /// frame. A body it gives none for (one the frame does not carry) is
+  /// passed over, as the renderer passes over its tiles; with nothing left,
+  /// infinity.
+  double nearestM(Vector3? Function(String bodyId) focusBF) {
+    final focus = <String, Vector3?>{};
+    var nearest = double.infinity;
+    for (var i = 0; i < _bodies.length; i++) {
+      final body = _bodies[i];
+      final f = focus.putIfAbsent(body, () => focusBF(body));
+      if (f == null) continue;
+      final d = math.max(0.0, (_centres[i] - f).length - _halfDiagonals[i]);
+      if (d < nearest) nearest = d;
+    }
+    return lastNearestM = nearest;
+  }
+}
+
+/// When the renderer cuts the frame again.
+///
+/// A frame captured every tick carries new lists with the same contents,
+/// so identity alone would re-cut two hundred thousand buildings sixty
+/// times a second. The frame's structure signature is the change detector:
+/// its counts, which the old rebuild key used, with the road network's
+/// revision and overrides beside them ([CityTileBucketer.roadsSignature]).
+///
+/// And a colony out of range is not cut at all. The renderer used to forget
+/// the signature with the tiles when the camera left range, so the next
+/// frame cut the colony again only to find it out of range and drop it
+/// again — a whole cut, hashing and all, on every frame for as long as the
+/// colony stayed out of range, which from the flight view is most of an
+/// orbit. A [cull] keeps the signature and the dropped tiles' bounds: the
+/// colony is cut again when its structure changes, or when the camera comes
+/// back within range of where its tiles were, and on no other frame.
+class CityCutGate {
+  String _signature = '';
+  Object? _buildings, _roads, _patches;
+  CityCullBounds? _culled;
+
+  /// The signature of the last cut: '' before the first, and after a
+  /// [reset].
+  String get signature => _signature;
+
+  /// The dropped tiles' bounds while the colony is culled for range, else
+  /// null.
+  CityCullBounds? get culled => _culled;
+
+  /// Whether [snap], of structure [signature], wants cutting: its lists
+  /// are new and the signature moved, or its colony is culled and back
+  /// within [rangeM] of the camera ([focusBF] as for
+  /// [CityCullBounds.nearestM]). Notes the frame's lists either way.
+  bool wantsCut(
+    WorldSnapshot snap,
+    String signature, {
+    required double rangeM,
+    required Vector3? Function(String bodyId) focusBF,
+  }) {
+    final sameLists = identical(snap.buildings, _buildings) &&
+        identical(snap.roads, _roads) &&
+        identical(snap.patches, _patches);
+    _buildings = snap.buildings;
+    _roads = snap.roads;
+    _patches = snap.patches;
+    if (!sameLists && signature != _signature) return true;
+    final culled = _culled;
+    return culled != null && culled.nearestM(focusBF) <= rangeM;
+  }
+
+  /// A frame of structure [signature] was cut.
+  void cut(String signature) {
+    _signature = signature;
+    _culled = null;
+  }
+
+  /// The colony was culled for range, its tiles within [bounds]. The
+  /// signature stands, so a frame of the same structure is not cut again
+  /// until the camera is back within range of [bounds].
+  void cull(CityCullBounds bounds) => _culled = bounds;
+
+  /// Forget every cut: the next frame with anything in it is cut.
+  void reset() {
+    _signature = '';
+    _buildings = _roads = _patches = null;
+    _culled = null;
+  }
+}
+
+/// The content hash's arithmetic, for the hashes built on it elsewhere (the
+/// instant path's road keys) and for the test that holds the web's product
+/// to the VM's.
+class CityHash32 {
+  const CityHash32._();
+
+  /// One step of the hash: [h] — a seed or a step's result, below 2³² — and
+  /// the low 32 bits of [v], to a value below 2³² (see [_mix]).
+  static int mix(int h, int v) => _mix(h, v);
+
+  /// One step over two 32-bit words at once (see [_mixPair]).
+  static int mixPair(int h, int lo, int hi) => _mixPair(h, lo, hi);
+
+  /// [a] × [b] modulo 2³², computed the way the web computes it (see
+  /// [_mul32]).
+  static int mulSplit(int a, int b) => _mul32Split(a, b);
+}
+
+/// One step of the content hash: the running value and one 32-bit word,
+/// through a multiply and an xorshift.
+///
+/// For EQUALITY only — two cuts' keys for a tile are compared, never
 /// bucketed — and only ever on the UI thread, so it need be stable within a
-/// run and nothing more (as the strings' own hash codes are).
+/// run and nothing more (as the strings' own hash codes are). Both halves
+/// of the step can be undone, so for a given word it maps running values
+/// one to one: two contents differing in a single word never meet, and
+/// ones differing in more meet by chance, one time in 2³².
+///
+/// Thirty-two bits because the web build compiles this too, and on the web
+/// an int is a double: a 64-bit multiplier cannot even be written there
+/// (dart2js refuses the literal, and the release's web job fails with it),
+/// and a product past 2⁵³ loses its low bits. In 32 bits, with the product
+/// split where it would pass that (see [_mul32]), the VM and the web
+/// compute the same keys.
 int _mix(int h, int v) {
-  final x = (h ^ v) * 0x5851F42D4C957F2D;
-  return x ^ (x >>> 29);
+  final x = _mul32((h ^ v) & 0xFFFFFFFF, 0x85EBCA6B);
+  return x ^ (x >>> 13);
+}
+
+/// [a] × [b] modulo 2³², both below 2³². The VM's 64-bit product is exact
+/// as it stands; the web's is not past 2⁵³, so there the multiply is split
+/// at 16 bits of [a] and no partial product passes 2⁴⁸.
+int _mul32(int a, int b) => _web ? _mul32Split(a, b) : (a * b) & 0xFFFFFFFF;
+
+int _mul32Split(int a, int b) =>
+    ((a & 0xFFFF) * b + ((((a >>> 16) * b) & 0xFFFF) << 16)) & 0xFFFFFFFF;
+
+/// One step over a double's two 32-bit halves at once, [lo] and [hi], each
+/// through its own odd multiplier: a change to either half alone always
+/// moves the result, as a change of the one word does in [_mix], and a
+/// change to both meets another by chance, one time in 2³². Half the steps
+/// of taking the halves one at a time — and the doubles are most of what a
+/// big colony's hash costs, so with this the 32-bit cut costs about what
+/// the 64-bit one did.
+int _mixPair(int h, int lo, int hi) {
+  final a = (h ^ lo) & 0xFFFFFFFF, b = hi & 0xFFFFFFFF;
+  // The VM's sum can pass 2⁶³ and wrap; modulo 2³² it is still exact.
+  final x = _web
+      ? (_mul32Split(a, 0x85EBCA6B) + _mul32Split(b, 0xC2B2AE35)) & 0xFFFFFFFF
+      : (a * 0x85EBCA6B + b * 0xC2B2AE35) & 0xFFFFFFFF;
+  return x ^ (x >>> 13);
 }
 
 /// A double into the hash, to the micrometre: any real change of anything
 /// a tile draws is bigger, and the same capture of the same ground gives
-/// the same doubles.
-int _mixD(int h, double d) =>
-    _mix(h, d.isFinite && d.abs() < 9e12 ? (d * 1e6).round() : d.hashCode);
+/// the same doubles. Both 32-bit halves of the micrometres go in, as a
+/// body-fixed coordinate is some 2⁴¹ of them.
+int _mixD(int h, double d) {
+  if (!d.isFinite || d.abs() >= 9e12) return _mix(h, d.hashCode);
+  final q = (d * 1e6).round();
+  // The high half: a shift on the VM; on the web, where shifts see only 32
+  // bits, the same floor division, exact below 2⁵³.
+  return _mixPair(h, q, _web ? (q / 4294967296).floor() : q >> 32);
+}
 
 int _mixV(int h, Vector3 v) => _mixD(_mixD(_mixD(h, v.x), v.y), v.z);
 
@@ -566,17 +759,18 @@ int _mixV(int h, Vector3 v) => _mixD(_mixD(_mixD(h, v.x), v.y), v.z);
 /// is part of the hash.
 ///
 /// A typed list of doubles — every road's points, as the capture and the
-/// wire both make them — is read as its 64-bit words: the same doubles are
-/// the same bits, and reading them is half the work of quantising each one,
-/// over the millions of points a big colony's roads hold (the cut runs on
-/// the UI thread, on every road edit). Anything else, or a platform without
-/// 64-bit typed words, is quantised double by double.
+/// wire both make them — is read as its 32-bit words, a double's two halves
+/// to a step ([_mixPair]): the same doubles are the same bits, and reading
+/// them is less work than quantising each one, over the millions of points
+/// a big colony's roads hold (the cut runs on the UI thread, on every road
+/// edit). A 32-bit view is there on the web as well, where a 64-bit one is
+/// not. Anything else is quantised double by double.
 int _mixList(int h, List<double> v) {
   h = _mix(h, v.length);
-  if (!_web && v is Float64List) {
-    final bits = Int64List.view(v.buffer, v.offsetInBytes, v.length);
-    for (var i = 0; i < bits.length; i++) {
-      h = _mix(h, bits[i]);
+  if (v is Float64List) {
+    final words = Uint32List.view(v.buffer, v.offsetInBytes, v.length * 2);
+    for (var i = 0; i + 1 < words.length; i += 2) {
+      h = _mixPair(h, words[i], words[i + 1]);
     }
     return h;
   }
@@ -586,8 +780,7 @@ int _mixList(int h, List<double> v) {
   return h;
 }
 
-/// Whether this is the web, where an int is a double and there is no
-/// `Int64List`.
+/// Whether this is the web, where an int is a double.
 const bool _web = identical(0, 0.0);
 
 /// An end-table entry (or its absence) into the hash.

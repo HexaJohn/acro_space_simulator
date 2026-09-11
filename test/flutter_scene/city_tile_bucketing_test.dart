@@ -399,6 +399,197 @@ void main() {
     expect(cut(frame([a, b])).anchors['moon'], anchor);
   });
 
+  test('an unkeyed cut keys the same once keyed', () {
+    final s = frame([a, b, c], junctions: [junction(2600, 1600, lights: 1)]);
+    final plan = CityTileBucketer.bucket(s,
+        anchors: {'moon': anchor}, tileM: tileM, keyed: false);
+    expect(plan.tiles.values.map((t) => t.structureKey), everyElement(''));
+    expect(plan.tiles.values.expand((t) => t.roadHashes), isEmpty);
+    CityTileBucketer.keyTiles(plan);
+    expect(keys(plan), keys(cut(s)));
+  });
+
+  group('the hash is 32-bit arithmetic, the same on the web', () {
+    test('the web\'s split product is the product modulo 2^32', () {
+      final rnd = math.Random(7);
+      final mod = BigInt.one << 32;
+      final samples = <int>[
+        0, 1, 0xFFFF, 0x10000, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, //
+        for (var i = 0; i < 2000; i++) rnd.nextInt(1 << 32),
+      ];
+      for (final x in samples) {
+        for (final y in [0x85EBCA6B, 0xC2B2AE35, 0xFFFFFFFF, 5, x]) {
+          final want = ((BigInt.from(x) * BigInt.from(y)) % mod).toInt();
+          expect(CityHash32.mulSplit(x, y), want, reason: '$x * $y');
+        }
+      }
+    });
+
+    test('a step stays below 2^32 and is one to one in the running value',
+        () {
+      for (final v in [0, 1, -1, 0xFFFFFFFF, 1 << 40, -(1 << 45)]) {
+        final seen = <int>{};
+        for (var h = 0; h < 5000; h++) {
+          final x = CityHash32.mix(h * 858993, v);
+          expect(x, inInclusiveRange(0, 0xFFFFFFFF));
+          seen.add(x);
+        }
+        expect(seen, hasLength(5000), reason: 'word $v');
+      }
+    });
+
+    test('a paired step moves with either half of a double alone', () {
+      final rnd = math.Random(11);
+      for (var i = 0; i < 2000; i++) {
+        final h = rnd.nextInt(1 << 32);
+        final lo = rnd.nextInt(1 << 32);
+        final hi = rnd.nextInt(1 << 32);
+        final x = CityHash32.mixPair(h, lo, hi);
+        expect(x, inInclusiveRange(0, 0xFFFFFFFF));
+        // Any other value of the one half.
+        final lo2 = (lo + 1 + rnd.nextInt(0xFFFFFFFE)) & 0xFFFFFFFF;
+        final hi2 = (hi + 1 + rnd.nextInt(0xFFFFFFFE)) & 0xFFFFFFFF;
+        expect(CityHash32.mixPair(h, lo2, hi), isNot(x));
+        expect(CityHash32.mixPair(h, lo, hi2), isNot(x));
+      }
+    });
+
+    test('keys and road hashes stay within what the web holds exactly', () {
+      final plan = cut(frame([a, b, c], junctions: [junction(2600, 1600)]));
+      for (final t in plan.tiles.values) {
+        expect(int.parse(t.structureKey.split('|').last, radix: 16),
+            inInclusiveRange(0, 0xFFFFFFFF));
+        expect(t.roadHashes, everyElement(inInclusiveRange(0, 0xFFFFFFFF)));
+      }
+      expect(
+          CityTileBucketer.roadsSignature(
+              frame([a], roadsRevision: {'c': 3}, junctions: [junction(0, 0)])),
+          inInclusiveRange(0, 0xFFFFFFFF));
+    });
+
+    test('points are read off their own buffer, from their own offset', () {
+      RoadSnapshot withPoints(List<double> pts) => RoadSnapshot(
+            colonyId: 'c',
+            body: 'moon',
+            points: pts,
+            halfWidthM: 4,
+            roadClassIndex: RoadClass.street.index,
+            id: 'a',
+          );
+      final n = a.points.length;
+      final copy = Float64List.fromList(a.points);
+      final buffer = Float64List(n + 5)..setRange(3, 3 + n, a.points);
+      final view = Float64List.sublistView(buffer, 3, 3 + n);
+      final h = CityTileBucketer.roadHash(withPoints(copy));
+      expect(CityTileBucketer.roadHash(withPoints(view)), h);
+      // A whole metre moves it: the low word of a round coordinate is the
+      // same either side, so both words of every double must go in.
+      for (var i = 0; i < n; i++) {
+        final moved = Float64List.fromList(a.points)..[i] += 1;
+        expect(CityTileBucketer.roadHash(withPoints(moved)), isNot(h),
+            reason: 'point value $i');
+      }
+    });
+  });
+
+  group('the cut gate', () {
+    const rangeM = 400e3;
+    final plan = cut(frame([a, b, c]));
+    // Over the colony, and a thousand kilometres up from it.
+    final near = at(1600, 1600);
+    final far = basis.up * (radius + 1000e3);
+    Vector3? focusNear(String _) => near;
+    Vector3? focusFar(String _) => far;
+
+    test('the bounds measure a tile the way the renderer does', () {
+      final bounds = CityCullBounds.ofPlan(plan);
+      expect(bounds.length, 3);
+      final focus = at(5000, 1600) + basis.up * 2000;
+      var want = double.infinity;
+      for (final t in plan.tiles.values) {
+        want = math.min(want,
+            math.max(0.0, (t.centreBF - focus).length - t.halfDiagonalM));
+      }
+      expect(bounds.nearestM((_) => focus), want);
+      expect(bounds.lastNearestM, want);
+      // A body the frame does not carry has no tiles to measure.
+      expect(bounds.nearestM((_) => null), double.infinity);
+    });
+
+    test('cuts a new structure, never the same one in new lists', () {
+      final g = CityCutGate();
+      expect(g.wantsCut(frame([a]), 'S1', rangeM: rangeM, focusBF: focusNear),
+          isTrue);
+      g.cut('S1');
+      expect(g.signature, 'S1');
+      // What the flight view hands over every frame: fresh lists, the
+      // same content.
+      expect(g.wantsCut(frame([a]), 'S1', rangeM: rangeM, focusBF: focusNear),
+          isFalse);
+      expect(
+          g.wantsCut(frame([a, b]), 'S2', rangeM: rangeM, focusBF: focusNear),
+          isTrue);
+    });
+
+    test('a colony culled for range is not cut again while it stays out', () {
+      final g = CityCutGate();
+      expect(
+          g.wantsCut(frame([a, b, c]), 'S', rangeM: rangeM, focusBF: focusFar),
+          isTrue);
+      g
+        ..cut('S')
+        ..cull(CityCullBounds.ofPlan(plan));
+      // The renderer used to forget the signature with the tiles, and cut
+      // the colony again on every one of these frames.
+      for (var i = 0; i < 3; i++) {
+        expect(
+            g.wantsCut(frame([a, b, c]), 'S',
+                rangeM: rangeM, focusBF: focusFar),
+            isFalse);
+      }
+      expect(g.culled!.lastNearestM, greaterThan(rangeM));
+      expect(g.signature, 'S');
+      // The camera comes back within range: cut again.
+      expect(
+          g.wantsCut(frame([a, b, c]), 'S', rangeM: rangeM, focusBF: focusNear),
+          isTrue);
+      g.cut('S');
+      expect(g.culled, isNull);
+    });
+
+    test('a culled colony is cut again when its structure changes', () {
+      final g = CityCutGate()
+        ..cut('S')
+        ..cull(CityCullBounds.ofPlan(plan));
+      // A colony founded somewhere else would be missed by the old bounds.
+      expect(
+          g.wantsCut(frame([a, b, c]), 'S2',
+              rangeM: rangeM, focusBF: focusFar),
+          isTrue);
+    });
+
+    test('with no body to measure against, the colony stays culled', () {
+      final g = CityCutGate()
+        ..cut('S')
+        ..cull(CityCullBounds.ofPlan(plan));
+      expect(
+          g.wantsCut(frame([a, b, c]), 'S', rangeM: rangeM, focusBF: (_) => null),
+          isFalse);
+    });
+
+    test('a reset cuts the next frame, even the very same lists', () {
+      final g = CityCutGate();
+      final s = frame([a]);
+      g.wantsCut(s, 'S', rangeM: rangeM, focusBF: focusNear);
+      g.cut('S');
+      expect(g.wantsCut(s, 'S', rangeM: rangeM, focusBF: focusNear), isFalse);
+      g.reset();
+      expect(g.signature, '');
+      expect(g.culled, isNull);
+      expect(g.wantsCut(s, 'S', rangeM: rangeM, focusBF: focusNear), isTrue);
+    });
+  });
+
   test('a cut of a big colony costs a bounded time (printed for the record)',
       () {
     // Five thousand roads of forty points and ten thousand buildings: a

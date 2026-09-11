@@ -135,9 +135,17 @@ class InstantRoadTracker {
 
   /// A road's identity for the tracker: its content hash
   /// ([CityTileBucketer.roadHash]) and its id.
+  ///
+  /// Two 32-bit lanes over both, packed into 53 bits: the most an int holds
+  /// exactly on the web, where it is a double (and where the 64-bit
+  /// multiply this used to be would not even compile). One lane would not
+  /// do — a big colony's tens of thousands of roads would share keys by
+  /// the birthday bound, and a new road on a key already seen is not drawn.
   static int contentKey(int roadHash, String? id) {
-    final x = (roadHash ^ (id?.hashCode ?? 0x5bd1e995)) * 0x5851F42D4C957F2D;
-    return x ^ (x >>> 31);
+    final idHash = id?.hashCode ?? 0x5BD1E995;
+    final lo = CityHash32.mix(CityHash32.mix(0x68E31DA4, roadHash), idHash);
+    final hi = CityHash32.mix(CityHash32.mix(0xB5297A4D, idHash), roadHash);
+    return (hi & 0x1FFFFF) * 0x100000000 + lo;
   }
 
   /// Note a new cut: its roads whose content is new join the pending set,
