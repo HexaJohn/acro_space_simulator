@@ -1813,7 +1813,13 @@ class CityRoadTraffic {
   /// take it as it is: a grid colony's take (and every test's funds) stays
   /// what it was. Gating it on [hasRun] instead would not: a small
   /// colony's first window is published on its first tick.
-  double get taxLandValueFactor => model.taxFactor(pollution: sim.pollution);
+  ///
+  /// The land the ROADS make: noise, decoration, parking. Not the colony's
+  /// air — pollution already costs the colony through happiness and health,
+  /// and counting it here as well cut a quiet starter town's tax by an
+  /// eighth for smoke it was already paying for. [landValueOf] still shows
+  /// the air, for the player reading a lot.
+  double get taxLandValueFactor => model.taxFactor();
 }
 
 // ---- Internals ---------------------------------------------------------------------

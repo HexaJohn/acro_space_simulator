@@ -267,7 +267,9 @@ void main() {
       expect(t.averageLandValue, lessThan(RoadNoise.baseLandValue),
           reason: 'the air is what it is');
 
-      // Homes in that air: the air costs them value, and the take.
+      // Homes in that air: the air costs them value — but not the take,
+      // which the sim already docks for the smoke through happiness and
+      // health. The take reads the land the roads make.
       final main =
           c.commitRoad(const [Vec2(0, -150), Vec2(0, 150)], RoadClass.street)!;
       for (final lot in lotsOf(c.layout, main)) {
@@ -275,7 +277,11 @@ void main() {
       }
       t.advance(1);
       expect(t.model.builtLots, greaterThan(0));
-      expect(t.taxLandValueFactor, lessThan(1.0));
+      expect(t.averageLandValue,
+          lessThan(t.model.averageLandValue(pollution: 0)));
+      expect(t.taxLandValueFactor, t.model.taxFactor());
+      expect(t.model.taxFactor(pollution: 30), lessThan(t.taxLandValueFactor),
+          reason: 'the air would have cut it');
     });
   });
 
