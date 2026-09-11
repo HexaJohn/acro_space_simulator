@@ -14,10 +14,10 @@
 /// sparks) would otherwise make two runs of one scenario disagree for reasons
 /// that have nothing to do with traffic.
 ///
-/// The helpers that reach into the agents themselves — `forceTrip`,
-/// `routeOf`, `laneOn`, `stall`, `freezeDelays`, `setDelay`, and
-/// [starterKit]'s `agentTraffic` switch — arrive with the code they reach
-/// into.
+/// The agents' own helpers — [agentsOn], [forceTrip], [routeOf], [laneOn],
+/// [stall] — sit at the end. `freezeDelays` and `setDelay` arrive with the
+/// delay table (slice 2), and [starterKit]'s `agentTraffic` switch with the
+/// colony hook that owns the agents (E2, E17).
 library;
 
 import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart';
@@ -25,6 +25,10 @@ import 'package:acro_space_simulator/domain/colony/city/city_config.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_starter_kit.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/agent_kind.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/city_agents.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/slot_pool.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/traffic_rng.dart';
 import 'package:acro_space_simulator/domain/universe/celestial_body.dart';
 import 'package:acro_space_simulator/domain/universe/real_solar_system.dart';
 
@@ -212,4 +216,78 @@ Parcel lotNearest(CitySim city, Vec2 p) {
   }
   if (best == null) throw StateError('the colony has no street lots');
   return best;
+}
+
+// ---- The agents -------------------------------------------------------------
+
+/// [city]'s agents, switched on. Until the colony owns them (E2) a test
+/// holds its own: they read the colony and nothing in the colony reads them,
+/// so the economy stands still while they run — exactly the scope §17.4's
+/// partition test asks for.
+CityAgents agentsOn(CitySim city) => CityAgents(city)..enabled = true;
+
+/// Advances [agents] by [seconds] of agent time in ticks of [dt], calling
+/// [each] after every tick.
+void runAgents(CityAgents agents, double seconds,
+    {double dt = 0.5, void Function()? each}) {
+  final ticks = (seconds / dt).round();
+  for (var i = 0; i < ticks; i++) {
+    agents.advance(dt);
+    each?.call();
+  }
+}
+
+/// A trip between the buildings on two sites (§17's `forceTrip`): its trip
+/// handle, or `SlotPool.none`.
+int forceTrip(CityAgents agents, String fromSite, String toSite,
+        {AgentKind kind = AgentKind.car}) =>
+    agents.forceTrip(fromSite, toSite, kind: kind);
+
+/// The vehicle [trip] is driving, or −1 while it is still planned or waiting
+/// to pull out, or done.
+int vehicleOfTrip(CityAgents agents, int trip) =>
+    agents.commutes?.vehicleOf(trip) ?? -1;
+
+/// [handle]'s remaining route as words that mean the same across two builds
+/// of the network: each edge's road id, `+` along the road's line or `-`
+/// against it, and the lane index.
+List<String> routeOf(CityAgents agents, int handle) {
+  final d = agents.describe(handle);
+  if (d == null) return const [];
+  return [
+    for (final e in d['route'] as List<Map<String, Object?>>)
+      '${e['road']}${e['forward'] == true ? '+' : '-'}${e['lane']}',
+  ];
+}
+
+/// The road [handle] is on, or heading onto from a connector.
+String roadOf(CityAgents agents, int handle) {
+  final d = agents.describe(handle)!;
+  return (d['route'] as List<Map<String, Object?>>).first['road']! as String;
+}
+
+/// The lane index [handle] drives road [roadId] in, or −1 when the rest of
+/// its route does not use it.
+int laneOn(CityAgents agents, int handle, String roadId) {
+  final d = agents.describe(handle);
+  if (d == null) return -1;
+  for (final e in d['route'] as List<Map<String, Object?>>) {
+    if (e['road'] == roadId) return e['lane']! as int;
+  }
+  return -1;
+}
+
+/// §17's `stall`: [handle] stops where it is, for good.
+void stall(CityAgents agents, int handle) => agents.debugStall(handle);
+
+/// A hash of [handle]'s locked route — its connectors, in order — wherever
+/// in the arena its block now sits.
+int routeHash(CityAgents agents, int handle) {
+  final t = agents.vehicles!;
+  final sl = SlotPool.slotOf(handle);
+  var h = fnv1aU32(kFnvOffset32, t.routeLen[sl]);
+  for (var i = 0; i < t.routeLen[sl]; i++) {
+    h = fnv1aU32(h, t.arena.data[t.routeOff[sl] + i]);
+  }
+  return h;
 }
