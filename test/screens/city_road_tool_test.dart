@@ -17,6 +17,7 @@ import 'package:acro_space_simulator/domain/universe/real_solar_system.dart';
 import 'package:acro_space_simulator/infrastructure/flutter/sim_view_control.dart';
 import 'package:acro_space_simulator/infrastructure/flutter/simulation_view.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_nodes.dart';
+import 'package:acro_space_simulator/infrastructure/flutter_scene/city/road_overlay_state.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/render_backend.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -262,5 +263,55 @@ void main() {
     road({'tool': 'look'});
     expect((road()['overlay']! as Map)['ghostPoints'], 0,
         reason: 'putting the tool down takes its ghost with it');
+  });
+
+  testWidgets("Enter in a road's name hands the keys back to the world",
+      (t) async {
+    // The field's own Enter left focus on the route's scope, an ancestor
+    // of the view's key node: every key after it went nowhere until the
+    // world was clicked.
+    final colony = await pumpCity(t);
+    await jitteryClick(t, t.getCenter(find.text('Traffic')));
+    await jitteryClick(t, t.getCenter(find.text('Adjust')));
+    final g = await t.createGesture(
+        kind: PointerDeviceKind.mouse, buttons: kPrimaryButton);
+    await g.down(const Offset(800, 500));
+    await t.pump();
+    await g.up();
+    await t.pump();
+    final id = road()['selectedRoadId'] as String?;
+    expect(id, isNotNull, reason: 'a click on a road picks it in Adjust');
+    await t.tap(find.byType(TextField));
+    await t.pump();
+    await t.enterText(find.byType(TextField), 'Harbour Road');
+    await t.testTextInput.receiveAction(TextInputAction.done);
+    await t.pump();
+    expect(colony.roadNameOf(id!), 'Harbour Road');
+    await t.sendKeyEvent(LogicalKeyboardKey.escape);
+    await t.pump();
+    expect(road()['selectedRoadId'], isNull,
+        reason: 'Esc reached the view and dropped the selection');
+  });
+
+  testWidgets('loading a save puts the road tool down with the editor',
+      (t) async {
+    await pumpCity(t);
+    road({'tool': 'road', 'snap': ''});
+    road({'click': '0.44,0.38'});
+    road({'hover': '0.56,0.38'});
+    final o = RoadOverlayState.instance;
+    expect(o.ghostBF, isNotEmpty);
+    expect(o.markers, isNotEmpty, reason: 'the anchor ring');
+    Finder fab(String tag) => find.byWidgetPredicate(
+        (w) => w is FloatingActionButton && w.heroTag == tag);
+    await t.tap(fab('save'));
+    await t.pump();
+    await t.tap(fab('load'));
+    await t.pump();
+    expect(o.ghostBF, isEmpty, reason: 'the ghost went with the editor');
+    expect(o.markers, isEmpty);
+    expect(o.lines, isEmpty);
+    // Let the save and load notices run out.
+    await t.pump(const Duration(seconds: 3));
   });
 }

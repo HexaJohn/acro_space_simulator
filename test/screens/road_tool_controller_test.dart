@@ -8,6 +8,7 @@ import 'dart:math' as math;
 import 'package:acro_space_simulator/domain/colony/city/city_config.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
+import 'package:acro_space_simulator/domain/colony/city/road_build.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_catalog.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_junction.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_snapper.dart';
@@ -400,6 +401,193 @@ void main() {
       final c = roadTool()..clickAt(city, const Vec2(0, 0));
       c.set(CityEditTool.zone);
       expect(c.anchor, isNull);
+    });
+  });
+
+  group('where a road meets another, it meets it at its level', () {
+    /// A dip 5 m deep between n = 400 and n = 700 — gentle enough for a
+    /// street to follow — and flat ground everywhere else.
+    double dip(Vec2 p) => p.n > 400 && p.n < 700
+        ? -5 * math.sin(math.pi * (p.n - 400) / 300)
+        : 0;
+
+    RoadBuildRequest raised(List<Vec2> controls,
+            {double start = 12, double end = 12}) =>
+        RoadBuildRequest(
+          controls: controls,
+          type: RoadType.byId('two-lane')!,
+          startElevationM: start,
+          endElevationM: end,
+        );
+
+    test('a ramp brought back to the ground ends the deck: the next stretch '
+        'follows the ground, dip and all', () {
+      final city = colony();
+      final c = roadTool()..stepElevation(1);
+      c.clickAt(city, const Vec2(0, 0), ground: dip);
+      c.clickAt(city, const Vec2(0, 200), ground: dip);
+      c.stepElevation(-1);
+      expect(c.elevationM, 0, reason: 'the bar reads Ground');
+      c.clickAt(city, const Vec2(0, 400), ground: dip);
+      expect(road(city, c.lastRoadId!).deck!.endAtGrade, isTrue);
+      expect(c.anchor!.heightM, isNull,
+          reason: 'nothing raised to carry on from the foot of a ramp');
+      c.clickAt(city, const Vec2(0, 700), ground: dip);
+      expect(c.lastQuote!.ok, isTrue, reason: c.lastQuote!.reason);
+      expect(road(city, c.lastRoadId!).deck, isNull,
+          reason: 'laid on the ground, not a deck on piers over the dip');
+      expect(c.lastQuote!.structureM, 0);
+    });
+
+    test('a road started on the ground end of a ramp is laid on the ground',
+        () {
+      final city = colony();
+      final ramp = city
+          .buildRoad(raised(const [Vec2(0, 200), Vec2(0, 400)], end: 0),
+              groundAt: dip)
+          .roadId!;
+      expect(road(city, ramp).deck!.endAtGrade, isTrue);
+      final c = roadTool(snap: roadsOnly);
+      c.clickAt(city, const Vec2(3, 402), ground: dip);
+      expect(c.anchor!.roadId, ramp);
+      expect(c.anchor!.heightM, isNull);
+      c.clickAt(city, const Vec2(0, 700), ground: dip);
+      expect(road(city, c.lastRoadId!).deck, isNull);
+    });
+
+    test('an end snapped onto a street comes down to it, and joins it', () {
+      final city = colony();
+      city.commitRoad(
+          const [Vec2(-200, 300), Vec2(200, 300)], RoadClass.street);
+      final c = roadTool(snap: roadsOnly)..stepElevation(1);
+      c.clickAt(city, const Vec2(0, 0));
+      c.clickAt(city, const Vec2(2, 301));
+      expect(c.lastQuote!.ok, isTrue, reason: c.lastQuote!.reason);
+      final deck = road(city, c.lastRoadId!).deck!;
+      expect(deck.startM, closeTo(12, 1e-6), reason: 'raised where it began');
+      expect(deck.endM, closeTo(0, 1e-6), reason: 'at the street it joins');
+      final node = city.roadGraph.nodeNear(const Vec2(2, 300), withinM: 3)!;
+      expect(node.isJunction, isTrue,
+          reason: 'the street cut, three legs meeting — not a stub in the '
+              'air over it');
+      expect(c.anchor!.heightM, isNull);
+    });
+
+    test('a road started on a street leaves it from the street', () {
+      final city = colony();
+      city.commitRoad(const [Vec2(-200, 0), Vec2(200, 0)], RoadClass.street);
+      final c = roadTool(snap: roadsOnly)..stepElevation(1);
+      c.clickAt(city, const Vec2(1, 2));
+      expect(c.anchor!.elevationM, 0);
+      expect(c.anchor!.heightM, isNull);
+      c.clickAt(city, const Vec2(0, 300));
+      expect(c.lastQuote!.ok, isTrue, reason: c.lastQuote!.reason);
+      final deck = road(city, c.lastRoadId!).deck!;
+      expect(deck.startAtGrade, isTrue);
+      expect(deck.endM, closeTo(12, 1e-6));
+      expect(
+          city.roadGraph.nodeNear(const Vec2(1, 0), withinM: 3)!.isJunction,
+          isTrue);
+    });
+
+    test('an end snapped onto a viaduct meets its deck', () {
+      final city = colony();
+      city.buildRoad(raised(const [Vec2(-200, 300), Vec2(200, 300)]));
+      final c = roadTool(snap: roadsOnly);
+      c.clickAt(city, const Vec2(0, 0));
+      c.clickAt(city, const Vec2(2, 301));
+      expect(c.lastQuote!.ok, isTrue, reason: c.lastQuote!.reason);
+      expect(road(city, c.lastRoadId!).deck!.endM, closeTo(12, 1e-6));
+    });
+  });
+
+  group('the info views read what they draw', () {
+    test('Junctions: from a district zoom a click on a stop sign switches '
+        'the stop; only a click on the disc switches the lights', () {
+      final city = colony();
+      city.commitRoad(const [Vec2(-200, 0), Vec2(200, 0)], RoadClass.street);
+      city.commitRoad(const [Vec2(0, -200), Vec2(0, 200)], RoadClass.street);
+      final c = CityEditController()..set(CityEditTool.traffic);
+      const pxM = 3.0;
+      final out = JunctionMarks.stopOutM(pxM);
+      expect(out - JunctionMarks.stopRadiusM(pxM),
+          greaterThanOrEqualTo(JunctionMarks.ringRadiusM(pxM)),
+          reason: 'the stop sign stands clear of the junction disc');
+      expect(c.toggleJunctionAt(city, Vec2(0, out), pxM: pxM), isTrue);
+      var plan = city.roadGraph.nodeNear(const Vec2(0, 0))!.plan;
+      expect(plan.lights, isFalse, reason: 'the lights were not touched');
+      expect(plan.stopLegs, hasLength(3),
+          reason: 'the north leg stops no more');
+      expect(
+          c.toggleJunctionAt(
+              city, Vec2(0, JunctionMarks.ringRadiusM(pxM) * 0.8),
+              pxM: pxM),
+          isTrue);
+      plan = city.roadGraph.nodeNear(const Vec2(0, 0))!.plan;
+      expect(plan.lights, isTrue, reason: 'on the disc, the lights');
+    });
+
+    test('Adjust: dropped beside a street the end lands on it, and the drag '
+        'priced exactly what letting go charges', () {
+      final city = colony(funds: 5000);
+      final id =
+          city.commitRoad(const [Vec2(0, 0), Vec2(0, 200)], RoadClass.street)!;
+      city.commitRoad(
+          const [Vec2(-200, 300), Vec2(200, 300)], RoadClass.street);
+      final c = CityEditController()
+        ..set(CityEditTool.traffic)
+        ..setTrafficView(TrafficInfoView.adjust)
+        ..selectRoad(id);
+      final plan =
+          c.previewMoveEnd(city, atStart: false, to: const Vec2(0, 288))!;
+      expect(c.movePreview, same(plan));
+      expect(plan.end.distanceTo(const Vec2(0, 300)), lessThan(1e-6),
+          reason: 'on the street 12 m on, not 12 m short of it');
+      expect(plan.controls.last.distanceTo(const Vec2(0, 300)), lessThan(1e-6));
+      expect(plan.quote.ok, isTrue, reason: plan.quote.reason);
+      final before = city.funds;
+      final r =
+          c.moveSelectedEnd(city, atStart: false, to: const Vec2(0, 288))!;
+      expect(r.roadId, isNotNull, reason: r.quote.reason);
+      expect(r.quote.cost, closeTo(plan.quote.cost, 1e-9),
+          reason: 'the bill is the preview');
+      expect(city.funds, closeTo(before - plan.quote.cost, 1e-6));
+      expect(c.movePreview, isNull, reason: 'let go: nothing is dragged');
+      expect(
+          city.roadGraph.nodeNear(const Vec2(0, 300), withinM: 3)!.isJunction,
+          isTrue);
+    });
+
+    test("Adjust: a raised road's end dropped on a street comes down to "
+        'meet it', () {
+      final city = colony();
+      final id = city
+          .buildRoad(RoadBuildRequest(
+            controls: const [Vec2(0, 0), Vec2(0, 200)],
+            type: RoadType.byId('two-lane')!,
+            startElevationM: 12,
+            endElevationM: 12,
+          ))
+          .roadId!;
+      city.commitRoad(
+          const [Vec2(-200, 400), Vec2(200, 400)], RoadClass.street);
+      final c = CityEditController()
+        ..set(CityEditTool.traffic)
+        ..setTrafficView(TrafficInfoView.adjust)
+        ..selectRoad(id);
+      final plan =
+          c.previewMoveEnd(city, atStart: false, to: const Vec2(1, 401))!;
+      expect(plan.quote.deck!.startM, closeTo(12, 1e-6),
+          reason: 'the end left alone keeps its height');
+      expect(plan.quote.deck!.endM, closeTo(0, 1e-6),
+          reason: 'the moved end at the street');
+      final r =
+          c.moveSelectedEnd(city, atStart: false, to: const Vec2(1, 401))!;
+      expect(r.roadId, isNotNull, reason: r.quote.reason);
+      expect(road(city, c.selectedRoadId!).deck!.endAtGrade, isTrue);
+      expect(
+          city.roadGraph.nodeNear(const Vec2(1, 400), withinM: 3)!.isJunction,
+          isTrue);
     });
   });
 

@@ -2640,7 +2640,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       _vessels.remove(v.id);
     }
     // The load replaces the city list, so a view open on a pre-load colony
-    // would be editing a ghost. Closing the editor is the honest move.
+    // would be editing a ghost. Closing the editor is the honest move — tool
+    // first, as the Close button does, or the road tool's ghost and anchor
+    // outlive the editor.
+    _cityEdit.set(CityEditTool.inspect);
     _editingCity = null;
     _codec.decode(
       jsonDecode(save) as Map<String, dynamic>,

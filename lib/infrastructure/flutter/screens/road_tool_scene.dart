@@ -27,8 +27,8 @@ import 'dart:ui' show Offset;
 import '../../../domain/colony/city/city_sim.dart';
 import '../../../domain/colony/city/colony_ground.dart';
 import '../../../domain/colony/city/parcel.dart';
-import '../../../domain/colony/city/road_build.dart';
 import '../../../domain/colony/city/road_catalog.dart';
+import '../../../domain/colony/city/road_graph.dart' show RoadGraph, RoadNode;
 import '../../../domain/colony/city/road_junction.dart';
 import '../../../domain/colony/city/road_traffic_model.dart';
 import '../../../domain/colony/city/spatial_index.dart';
@@ -62,9 +62,6 @@ class RoadToolScene {
   static const int lightsArgb = 0xF2FFFFFF;
   static const int noLightsArgb = 0xD99FB4CC;
   static const int stopArgb = 0xF2E53935;
-
-  /// How far out along a leg its stop sign stands.
-  static const double stopOutM = 12;
 
   // ---- Ground ----------------------------------------------------------------
 
@@ -104,8 +101,11 @@ class RoadToolScene {
     }
     final ground = _ground!;
     final f = _field;
+    // The edits are one object, re-composed in place as brushes land: its
+    // identity says which list, its version what is on it.
+    final version = edits?.version ?? 0;
     if (f != null) {
-      ground.bind((identityHashCode(f), edits?.version ?? 0),
+      ground.bind((identityHashCode(f), version),
           surfaceRadiusAt: f.surfaceRadiusAt,
           baseRadiusAt: f.baseGroundRadiusAt);
     }
@@ -115,6 +115,10 @@ class RoadToolScene {
       toBodyFixed: (p, h) => city.localToBodyFixed(p, bodyRadiusM: radius + h),
       height: ground.heightAt,
       exactHeight: ground.exactHeightAt,
+      // No field, no raster to warm: the ground is the datum, and nothing
+      // drawn on it is waiting for a better answer.
+      warmAt: f == null ? null : ground.warmAt,
+      groundKey: (_siteKey, _fieldKey, version),
     );
   }
 
@@ -122,17 +126,29 @@ class RoadToolScene {
   /// height above the datum to body-fixed metres), over [height] (the
   /// hover's ground) and [exactHeight] (a commit's). What [bindGround]
   /// does for a real body; tests hand it a flat world.
+  ///
+  /// [warmAt] says whether [height] answers from ground it has cached, not
+  /// from its pristine fallback (see [ColonyGroundSampler.warmAt]); null:
+  /// always. [groundKey] names the ground: a drawing kept across refreshes
+  /// is laid again when it changes — a brush landed, the town was graded.
   void bindCustom({
     required String bodyId,
     required Vector3 Function(Vec2 p, double heightM) toBodyFixed,
     required double Function(Vec2) height,
     double Function(Vec2)? exactHeight,
+    bool Function(Vec2)? warmAt,
+    Object? groundKey,
   }) {
     _bodyId = bodyId;
     _toBF = toBodyFixed;
     _height = height;
     _exact = exactHeight ?? height;
+    _warmAt = warmAt;
+    _groundKey = groundKey;
   }
+
+  bool Function(Vec2)? _warmAt;
+  Object? _groundKey;
 
   /// Start a frame's fill budget on the raster (once per refresh).
   void beginFrame() => _ground?.beginFrame();
@@ -251,9 +267,14 @@ class RoadToolScene {
     }
     final s = c.cursorSnap;
     if (s != null && s.onRoad) {
-      // The road the cursor would join, marked where it would join it.
+      // The road the cursor would join, marked where it would join it — at
+      // that road's level, which is the level the end is laid at
+      // ([RoadToolEditing.joinLevelAt]): on a viaduct, up on its deck.
+      final join = c.joinLevelAt(city, s, ground: _height);
       markers.add(OverlayMarker(
-          atBF: drape(s.point), argb: joinArgb, radiusM: r * 0.6));
+          atBF: _toBF(s.point, join?.heightM ?? _height(s.point)),
+          argb: joinArgb,
+          radiusM: r * 0.6));
     }
     o.lines = lines;
     o.markers = markers;
@@ -287,22 +308,40 @@ class RoadToolScene {
 
   // ---- The info views --------------------------------------------------------
 
-  /// The Traffic tool's frame, by view.
+  /// The Traffic tool's frame, by view — published only when it changed.
+  ///
+  /// The renderer rebuilds the whole overlay on every revision, and none of
+  /// these views follows the cursor the way the road tool's ghost does: a
+  /// Routes view moused over re-meshed its sixty-odd route lines thirty
+  /// times a second for nothing. Each view hands back the lists it drew
+  /// last time while nothing they were drawn from has moved, and a refresh
+  /// that finds them already up says nothing.
   void showTraffic(CitySim city, RoadToolEditing c, {double pxM = 1}) {
     final o = overlay;
-    o.bodyId = _bodyId;
-    _clearGhost();
-    o.showUnderground = false;
+    List<OverlayLine> lines = const [];
+    List<OverlayMarker> markers = const [];
+    var ghost = false;
     switch (c.trafficView) {
       case TrafficInfoView.junctions:
-        o.lines = const [];
-        o.markers = _junctionMarkers(city, pxM);
+        markers = _junctionMarkers(city, pxM);
       case TrafficInfoView.routes:
-        o.lines = _routeLines(city, c, pxM);
-        o.markers = const [];
+        lines = _routeLines(city, c, pxM);
       case TrafficInfoView.adjust:
-        _writeAdjust(city, c, pxM);
+        (lines, markers, ghost) = _adjustFrame(city, c, pxM);
     }
+    if (!ghost &&
+        o.ghostBF.isEmpty &&
+        !o.showUnderground &&
+        o.bodyId == _bodyId &&
+        identical(o.lines, lines) &&
+        identical(o.markers, markers)) {
+      return;
+    }
+    o.bodyId = _bodyId;
+    if (!ghost) _clearGhost();
+    o.showUnderground = false;
+    o.lines = lines;
+    o.markers = markers;
     o.changed();
   }
 
@@ -318,70 +357,97 @@ class RoadToolScene {
     return (roadId: roadId, atStart: ds <= de);
   }
 
-  void _writeAdjust(CitySim city, RoadToolEditing c, double pxM) {
-    final o = overlay;
+  /// The Adjust view's frame: the road picked, outlined, with a circle at
+  /// each end — or, while one end is dragged, the road as letting go would
+  /// re-lay it ([RoadToolEditing.movePreview], priced by the rules the
+  /// release lays by): its end on whatever it was dropped on, standing on
+  /// its deck, red where it cannot be. The lines and markers to draw, and
+  /// whether a ghost was laid.
+  (List<OverlayLine>, List<OverlayMarker>, bool) _adjustFrame(
+      CitySim city, RoadToolEditing c, double pxM) {
     final id = c.selectedRoadId;
     final road = id == null ? null : city.layout.roadById(id);
     final rec = id == null ? null : city.layout.roadIndex.byId(id);
-    if (road == null || rec == null) {
-      o.lines = const [];
-      o.markers = const [];
-      return;
-    }
-    final r = _markerRadius(pxM) * 1.2;
     final d = drag;
-    final to = dragTo;
-    if (d != null && to != null && d.roadId == id) {
-      // The road as it would be re-laid, following the drag.
-      final moved = controlsWithMovedEnd(road.controls,
-          atStart: d.atStart, to: to);
-      final line = RoadSpline(id: 'adjust', controls: moved).sample(stepM: 4);
-      _writeGhost(line, null, RoadType.of(road), RoadGhostState.selected);
-      o.lines = const [];
-      o.markers = [
-        OverlayMarker(
-            atBF: drape(to),
-            argb: handleArgb,
-            radiusM: r,
-            kind: OverlayMarkerKind.ring),
-        OverlayMarker(
-            atBF: drape(d.atStart ? moved.last : moved.first),
-            argb: handleArgb,
-            radiusM: r,
-            kind: OverlayMarkerKind.ring),
-      ];
-      return;
+    // A drag let go of, or dropped: nothing is priced any more.
+    if (d == null) c.movePreview = null;
+    if (road == null || rec == null) return (const [], const [], false);
+    final r = _markerRadius(pxM) * 1.2;
+    final m = c.movePreview;
+    if (d != null && m != null && m.roadId == id && m.atStart == d.atStart) {
+      final line =
+          RoadSpline(id: 'adjust', controls: m.controls).sample(stepM: 4);
+      final deck = m.quote.deck;
+      _writeGhost(line, deck, RoadType.of(road),
+          m.quote.ok ? RoadGhostState.selected : RoadGhostState.refused);
+      final first = m.controls.first, last = m.controls.last;
+      return (
+        const [],
+        [
+          for (final (p, h) in [(first, deck?.startM), (last, deck?.endM)])
+            OverlayMarker(
+                atBF: _toBF(p, h ?? _height(p)),
+                argb: handleArgb,
+                radiusM: r,
+                kind: OverlayMarkerKind.ring),
+        ],
+        true,
+      );
     }
-    o.lines = [_highlight(road, rec, pxM)];
-    o.markers = [
-      for (final end in [road.controls.first, road.controls.last])
-        OverlayMarker(
-            atBF: drape(end),
-            argb: handleArgb,
-            radiusM: r,
-            kind: OverlayMarkerKind.ring),
-    ];
+    // The outline, kept per road and zoom: the view is redrawn per hover,
+    // and nothing here follows the cursor.
+    final key = (id, city.roadsRevision, _notch(pxM), _bodyId, _groundKey);
+    final kept = _keptFor(_adjust, key);
+    if (kept != null) return (kept.$1, kept.$2, false);
+    final laid = <Vec2>[];
+    final deck = road.deck;
+    final drawn = (
+      [_highlight(road, rec, pxM, laid)],
+      [
+        for (final (p, h) in [
+          (road.controls.first, deck?.startM),
+          (road.controls.last, deck?.endM),
+        ])
+          OverlayMarker(
+              atBF: _toBF(p, h ?? _height(p)),
+              argb: handleArgb,
+              radiusM: r,
+              kind: OverlayMarkerKind.ring),
+      ],
+    );
+    final out = _keep(_adjust, key, drawn, laid);
+    return (out.$1, out.$2, false);
   }
 
   // ---- Caches ----------------------------------------------------------------
+  //
+  // Every drawing that walks the network is kept against what it was drawn
+  // from — the roads, the traffic pass, the zoom notch, and the GROUND
+  // ([_groundKey], the edits' version with it: a town graded after the
+  // drawing was laid gets it laid again). And a drawing laid partly on the
+  // raster's pristine fallback is kept only while its points warm ([_Kept]).
 
-  Object? _tunnelKey;
-  List<OverlayLine> _tunnels = const [];
+  final _Kept<List<OverlayLine>> _tunnels = _Kept();
 
   /// Every tunnel already built, as translucent bands over where it runs —
   /// walked once per change to the network, not per mouse move.
   List<OverlayLine> _tunnelLines(CitySim city) {
-    final key = (city.roadsRevision, _bodyId, _siteKey, _fieldKey);
-    if (key == _tunnelKey) return _tunnels;
+    final key = (city.roadsRevision, _bodyId, _groundKey);
+    final kept = _keptFor(_tunnels, key);
+    if (kept != null) return kept;
     final out = <OverlayLine>[];
+    final laid = <Vec2>[];
     for (final road in city.layout.roads) {
       final deck = road.deck;
       if (deck == null || deck.tunnels.isEmpty) continue;
       final rec = city.layout.roadIndex.byId(road.id);
       if (rec == null || rec.sampleCount < 2) continue;
       for (final (a, b) in deck.tunnels) {
-        final pts = _roadLine(rec, a, b, stepM: 6);
+        // Densified: a straight road is two points in the index, and the
+        // band must lie on the ground over the tunnel, not on a chord.
+        final pts = _densify(_roadLine(rec, a, b, stepM: 6), 6);
         if (pts.length < 2) continue;
+        laid.addAll(pts);
         out.add(OverlayLine(
           pointsBF: [for (final p in pts) drape(p)],
           argb: tunnelArgb,
@@ -390,60 +456,101 @@ class RoadToolScene {
         ));
       }
     }
-    _tunnelKey = key;
-    return _tunnels = out;
+    return _keep(_tunnels, key, out, laid);
   }
 
-  Object? _junctionKey;
-  List<OverlayMarker> _junctions = const [];
+  final _Kept<List<OverlayMarker>> _junctions = _Kept();
 
   /// How far from the cursor junctions are marked: a district, not a
   /// sprawl's every crossroads.
   static const double junctionReachM = 1600;
 
+  /// The junctions of one graph, bucketed on a coarse grid, so the markers
+  /// around the cursor are found without a walk of every node in a sprawl.
+  RoadGraph? _gridGraph;
+  Map<(int, int), List<RoadNode>> _grid = const {};
+  static const double _gridCellM = 400;
+
+  Map<(int, int), List<RoadNode>> _junctionGrid(RoadGraph g) {
+    if (identical(g, _gridGraph)) return _grid;
+    final grid = <(int, int), List<RoadNode>>{};
+    for (final n in g.nodes) {
+      if (!n.isJunction) continue;
+      grid
+          .putIfAbsent(((n.at.e / _gridCellM).floor(),
+              (n.at.n / _gridCellM).floor()), () => [])
+          .add(n);
+    }
+    _gridGraph = g;
+    return _grid = grid;
+  }
+
   /// A marker on every junction near the cursor — lights, or none — and a
-  /// stop sign out along each leg that stops. The plans are the road
-  /// graph's, the rule the tiles draw by and the traffic waits by.
+  /// stop sign out along each leg that stops, laid out by [JunctionMarks]
+  /// (the layout a click is read by). The plans are the road graph's, the
+  /// rule the tiles draw by and the traffic waits by.
   List<OverlayMarker> _junctionMarkers(CitySim city, double pxM) {
     final graph = city.roadGraph;
-    final focus = hover ?? const Vec2(0, 0);
-    // Rebuilt when the graph is replaced (a road, an override) or the
-    // cursor has wandered a block, or the zoom has moved a notch.
+    final cursor = hover ?? const Vec2(0, 0);
+    // Rebuilt when the graph is replaced (a road, an override), the zoom
+    // moves a notch, or the cursor leaves its cell — a cell about fifty
+    // pixels across, so a sweep over a zoomed-out view rebuilds every few
+    // dozen pixels rather than on every refresh.
+    final cell =
+        (50 * pxM).clamp(200.0, junctionReachM / 2).toDouble();
+    final cx = (cursor.e / cell).floor(), cy = (cursor.n / cell).floor();
     final key = (
       identityHashCode(graph),
       city.roadsRevision,
-      (focus.e / 200).round(),
-      (focus.n / 200).round(),
-      (math.log(math.max(pxM, 0.05)) / math.log(1.5)).round(),
+      cx,
+      cy,
+      _notch(pxM),
       _bodyId,
+      _groundKey,
     );
-    if (key == _junctionKey) return _junctions;
-    final r = _markerRadius(pxM) * 1.3;
+    final kept = _keptFor(_junctions, key);
+    if (kept != null) return kept;
+    final focus = Vec2((cx + 0.5) * cell, (cy + 0.5) * cell);
+    final ring = JunctionMarks.ringRadiusM(pxM);
+    final stopR = JunctionMarks.stopRadiusM(pxM);
+    final stopOut = JunctionMarks.stopOutM(pxM);
+    final grid = _junctionGrid(graph);
+    const reach = junctionReachM;
+    final x0 = ((focus.e - reach) / _gridCellM).floor();
+    final x1 = ((focus.e + reach) / _gridCellM).floor();
+    final y0 = ((focus.n - reach) / _gridCellM).floor();
+    final y1 = ((focus.n + reach) / _gridCellM).floor();
     final out = <OverlayMarker>[];
-    for (final node in graph.nodes) {
-      if (!node.isJunction) continue;
-      if (node.at.distanceTo(focus) > junctionReachM) continue;
-      final lights = node.plan.control == JunctionControl.signals;
-      out.add(OverlayMarker(
-        atBF: drape(node.at, _nodeLift(node.heightM, node.at)),
-        argb: lights ? lightsArgb : noLightsArgb,
-        radiusM: r,
-        kind: lights ? OverlayMarkerKind.lights : OverlayMarkerKind.noLights,
-      ));
-      if (node.plan.control != JunctionControl.stop) continue;
-      for (final i in node.plan.stopLegs) {
-        final h = node.legs[i].heading;
-        final at = node.at + Vec2(math.sin(h), math.cos(h)) * stopOutM;
-        out.add(OverlayMarker(
-          atBF: drape(at, _nodeLift(node.heightM, at)),
-          argb: stopArgb,
-          radiusM: r * 0.55,
-          kind: OverlayMarkerKind.stop,
-        ));
+    final laid = <Vec2>[];
+    for (var x = x0; x <= x1; x++) {
+      for (var y = y0; y <= y1; y++) {
+        for (final node in grid[(x, y)] ?? const <RoadNode>[]) {
+          if (node.at.distanceTo(focus) > reach) continue;
+          final lights = node.plan.control == JunctionControl.signals;
+          laid.add(node.at);
+          out.add(OverlayMarker(
+            atBF: drape(node.at, _nodeLift(node.heightM, node.at)),
+            argb: lights ? lightsArgb : noLightsArgb,
+            radiusM: ring,
+            kind:
+                lights ? OverlayMarkerKind.lights : OverlayMarkerKind.noLights,
+          ));
+          if (node.plan.control != JunctionControl.stop) continue;
+          for (final i in node.plan.stopLegs) {
+            final h = node.legs[i].heading;
+            final at = node.at + Vec2(math.sin(h), math.cos(h)) * stopOut;
+            laid.add(at);
+            out.add(OverlayMarker(
+              atBF: drape(at, _nodeLift(node.heightM, at)),
+              argb: stopArgb,
+              radiusM: stopR,
+              kind: OverlayMarkerKind.stop,
+            ));
+          }
+        }
       }
     }
-    _junctionKey = key;
-    return _junctions = out;
+    return _keep(_junctions, key, out, laid);
   }
 
   /// A raised node's height over the ground at [p]; 0 for one on the
@@ -451,12 +558,12 @@ class RoadToolScene {
   double _nodeLift(double? heightM, Vec2 p) =>
       heightM == null ? 0 : math.max(0.0, heightM - _height(p));
 
-  Object? _routesKey;
-  List<OverlayLine> _routes = const [];
+  final _Kept<List<OverlayLine>> _routes = _Kept();
+  int? _routesCount;
 
   /// The selected road, and the trips that use it, each drawn in its kind's
-  /// colour. Asked of the traffic model once per selection, filter or
-  /// change to the roads — never per mouse move.
+  /// colour. Asked of the traffic model once per selection, filter, change
+  /// to the roads or pass of the traffic — never per mouse move.
   List<OverlayLine> _routeLines(CitySim city, RoadToolEditing c, double pxM) {
     final id = c.selectedRoadId;
     if (id == null) {
@@ -464,25 +571,40 @@ class RoadToolScene {
       return const [];
     }
     final kinds = [for (final k in TripKind.values) c.routeKinds.contains(k)];
+    // Keyed on the pass that published the routes, not just on there
+    // having been one: a growing town's traffic is re-routed as its lots
+    // fill, and a road kept selected showed its first pass's commuters
+    // for good.
+    final model = city.trafficModel;
     final key = (
       id,
       kinds.join(),
       city.roadsRevision,
-      city.roadTraffic.hasRun,
+      identityHashCode(model),
+      model.passes,
       _bodyId,
-      (math.log(math.max(pxM, 0.05)) / math.log(1.5)).round(),
+      _notch(pxM),
+      _groundKey,
     );
-    if (key == _routesKey) return _routes;
+    final kept = _keptFor(_routes, key);
+    if (kept != null) {
+      // The count goes with the lines: picking the road again (which
+      // clears it) must not read "0 routes" over the routes drawn.
+      c.routeCount = _routesCount;
+      return kept;
+    }
     final road = city.layout.roadById(id);
     final rec = city.layout.roadIndex.byId(id);
     final out = <OverlayLine>[];
-    if (road != null && rec != null) out.add(_highlight(road, rec, pxM));
+    final laid = <Vec2>[];
+    if (road != null && rec != null) out.add(_highlight(road, rec, pxM, laid));
     final routes = c.routeKinds.isEmpty
         ? const <TripRoute>[]
         : city.roadTraffic.routesThrough(id, kinds: c.routeKinds);
     for (final t in routes) {
       final pts = _densify(t.polyline, 12);
       if (pts.length < 2) continue;
+      laid.addAll(pts);
       out.add(OverlayLine(
         pointsBF: [for (final p in pts) drape(p)],
         argb: tripKindArgb(t.kind),
@@ -490,21 +612,92 @@ class RoadToolScene {
         liftM: 0.9,
       ));
     }
-    c.routeCount = routes.length;
-    _routesKey = key;
-    return _routes = out;
+    c.routeCount = _routesCount = routes.length;
+    return _keep(_routes, key, out, laid);
   }
+
+  final _Kept<(List<OverlayLine>, List<OverlayMarker>)> _adjust = _Kept();
+
+  /// [k]'s drawing, if it is still good for [key] — or null, to be drawn
+  /// again.
+  ///
+  /// The hover raster fills a budget of cells a refresh, and a corner past
+  /// it answers with the ground BEFORE any grading, uncached. A drawing
+  /// that long — a route across town, every tunnel in the network — is
+  /// mostly laid on that pristine ground the first time, and kept, it
+  /// floated over the cuts and sank under the fills the town was graded
+  /// into for as long as the roads stood. So one laid partly on the
+  /// fallback is kept only while its points are warmed into the raster (a
+  /// budget a refresh; see [warming]), and laid again once they all are.
+  T? _keptFor<T>(_Kept<T> k, Object key) {
+    if (k.key != key) return null;
+    if (k.warming) {
+      k.coldAt = _warmFrom(k.cold, k.coldAt);
+      if (!k.warming) return null;
+    }
+    return k.value;
+  }
+
+  /// Keep [value], drawn for [key] over the points [laid].
+  T _keep<T>(_Kept<T> k, Object key, T value, List<Vec2> laid) {
+    k.key = key;
+    k.value = value;
+    final first = _firstCold(laid, 0);
+    k.cold = first < laid.length ? laid : const [];
+    k.coldAt = first;
+    return value;
+  }
+
+  /// The first of [pts] from [from] on the raster did not answer from its
+  /// cache, or their length when it answered for all (or there is none).
+  int _firstCold(List<Vec2> pts, int from) {
+    final warm = _warmAt;
+    if (warm == null) return pts.length;
+    for (var i = from; i < pts.length; i++) {
+      if (!warm(pts[i])) return i;
+    }
+    return pts.length;
+  }
+
+  /// Warm [pts] into the raster from [from] on, as far as this refresh's
+  /// fill budget goes; the first still cold after, or their length.
+  int _warmFrom(List<Vec2> pts, int from) {
+    final warm = _warmAt;
+    if (warm == null) return pts.length;
+    for (var i = from; i < pts.length; i++) {
+      if (warm(pts[i])) continue;
+      _height(pts[i]);
+      if (!warm(pts[i])) return i;
+    }
+    return pts.length;
+  }
+
+  /// Whether something drawn still stands partly on ground the raster has
+  /// not filled: the host refreshes again, mouse or no mouse, until not.
+  bool get warming =>
+      _ghostCold ||
+      _tunnels.warming ||
+      _junctions.warming ||
+      _routes.warming ||
+      _adjust.warming;
 
   /// Forget every cached drawing — the ground under them moved, or a test
   /// wants a fresh start.
   void invalidate() {
-    _tunnelKey = null;
-    _junctionKey = null;
-    _routesKey = null;
+    _tunnels.forget();
+    _junctions.forget();
+    _routes.forget();
+    _adjust.forget();
   }
 
+  static int _notch(double pxM) =>
+      (math.log(math.max(pxM, 0.05)) / math.log(1.5)).round();
+
   /// Drop everything the tool drew.
-  void clear() => overlay.clear();
+  void clear() {
+    _ghostCold = false;
+    overlay.clear();
+  }
 
   /// What the overlay holds, for the dev hook: a driver can tell a ghost
   /// that was drawn from one that was not without a screenshot.
@@ -527,9 +720,15 @@ class RoadToolScene {
   static double _markerRadius(double pxM) => math.max(3.0, 7 * pxM);
 
   /// [road]'s highlight: a translucent band a little wider than it, over
-  /// its deck where it has one.
-  OverlayLine _highlight(RoadSpline road, IndexedRoad rec, double pxM) {
-    final pts = _roadLine(rec, 0, rec.lengthM);
+  /// its deck where it has one. The points it was laid on go to [laid].
+  ///
+  /// Densified like the ghost: the index holds a straight road as its two
+  /// ends, and a band drawn between two points cuts through the hill
+  /// between them, whatever ground the ends were laid on.
+  OverlayLine _highlight(RoadSpline road, IndexedRoad rec, double pxM,
+      [List<Vec2>? laid]) {
+    final pts = _densify(_roadLine(rec, 0, rec.lengthM), 4);
+    laid?.addAll(pts);
     final deck = road.deck;
     final len = _length(pts);
     var s = 0.0;
@@ -581,13 +780,22 @@ class RoadToolScene {
     o.ghostHalfWidthM = type.roadClass.halfWidth;
     o.ghostState = state;
     o.ghostOneWay = type.oneWay;
+    // Laid partly on the raster's pristine fallback: the host draws it
+    // again once more of the ground is in ([warming]), so a ghost the mouse
+    // rests on ends up standing on the graded town, not the hill before it.
+    _ghostCold = _firstCold(pts, 0) < pts.length;
   }
+
+  /// Whether the ghost last laid stood partly on ground the raster had not
+  /// filled.
+  bool _ghostCold = false;
 
   void _clearGhost() {
     overlay.ghostBF = const [];
     overlay.ghostLiftsM = const [];
     overlay.ghostState = RoadGhostState.ok;
     overlay.ghostOneWay = false;
+    _ghostCold = false;
   }
 
   /// [rec]'s centreline between arcs [a] and [b], a point every [stepM] or
@@ -652,4 +860,24 @@ class RoadToolScene {
   /// A last look before the flight view goes: nothing of the tool may hang
   /// over the next world opened.
   static void clearOverlay() => RoadOverlayState.instance.clear();
+}
+
+/// A drawing kept across refreshes: what it was drawn for ([key]) and — if
+/// the ground raster did not yet hold every point it was laid on — those
+/// points ([cold], still cold from [coldAt] on), so it can be laid again
+/// once they are warm (see `RoadToolScene._keptFor`).
+class _Kept<T> {
+  Object? key;
+  T? value;
+  List<Vec2> cold = const [];
+  int coldAt = 0;
+
+  bool get warming => coldAt < cold.length;
+
+  void forget() {
+    key = null;
+    value = null;
+    cold = const [];
+    coldAt = 0;
+  }
 }

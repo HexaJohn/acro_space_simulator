@@ -554,6 +554,7 @@ class TrafficToolPanel extends StatelessWidget {
         _hint('Click a road to adjust it'),
       ]);
     }
+    final move = c.movePreview;
     return _row([
       _RoadNameField(
         key: ValueKey(id),
@@ -561,8 +562,28 @@ class TrafficToolPanel extends StatelessWidget {
         onSubmitted: (v) => c.renameSelected(city, v),
       ),
       const SizedBox(width: 8),
-      _hint('Drag an end circle to redraw the road · Enter renames it'),
+      if (move != null && move.roadId == id)
+        ..._moveReadouts(move.quote)
+      else
+        _hint('Drag an end circle to redraw the road · Enter renames it'),
     ]);
+  }
+
+  /// What the end being dragged would cost if it were let go here: the
+  /// road's new length, what the re-lay adds (red when the treasury cannot
+  /// pay it; nothing for a road made shorter — it is not a refund), its
+  /// upkeep, and — amber — why it cannot be.
+  List<Widget> _moveReadouts(RoadQuote q) {
+    final short = q.refusal == RoadRefusal.funds || q.cost > city.funds;
+    return [
+      _value('${q.lengthM.round()} m', _text),
+      _value(q.cost > 0.5 ? 'Re-lay ${formatMoney(q.cost)}' : 'Re-lay free',
+          short ? _bad : _good),
+      _value('${_perWeek(q.upkeepPerWeek)} upkeep', _dim),
+      if (q.bridgeM > 0.5) _value('Bridge ${q.bridgeM.round()} m', AppTheme.accent),
+      if (q.tunnelM > 0.5) _value('Tunnel ${q.tunnelM.round()} m', _under),
+      if (!q.ok) _value(q.reason, _warn),
+    ];
   }
 }
 
@@ -582,11 +603,26 @@ class _RoadNameField extends StatefulWidget {
 class _RoadNameFieldState extends State<_RoadNameField> {
   late final TextEditingController _name =
       TextEditingController(text: widget.initial);
+  final FocusNode _focus = FocusNode(debugLabel: 'road name');
 
   @override
   void dispose() {
+    _focus.dispose();
     _name.dispose();
     super.dispose();
+  }
+
+  /// Enter: the name is done, and the keyboard goes back to the world.
+  ///
+  /// A field's own Enter hands focus to its ROUTE's scope, which is an
+  /// ancestor of the flight view's key node rather than the node — and
+  /// keys only bubble up from focus, never down, so from then on PAGE UP,
+  /// Esc, WASD, G and Z reached nothing (and beeped, on a Mac) until the
+  /// world was clicked. Handed back to the scope's previous focus instead,
+  /// they reach the view the moment the name is in.
+  void _done() {
+    _name.clearComposing();
+    _focus.unfocus(disposition: UnfocusDisposition.previouslyFocusedChild);
   }
 
   @override
@@ -595,6 +631,8 @@ class _RoadNameFieldState extends State<_RoadNameField> {
         height: 28,
         child: TextField(
           controller: _name,
+          focusNode: _focus,
+          onEditingComplete: _done,
           style: const TextStyle(fontSize: 11, color: _text),
           decoration: const InputDecoration(
             isDense: true,

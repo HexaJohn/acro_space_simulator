@@ -6,6 +6,7 @@
 import 'package:acro_space_simulator/domain/colony/city/city_config.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
+import 'package:acro_space_simulator/domain/colony/city/road_build.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_catalog.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_snapper.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
@@ -171,7 +172,7 @@ void main() {
     expect(stops, hasLength(4));
     for (final m in stops) {
       expect(Vec2(m.atBF.x, m.atBF.y).distanceTo(const Vec2(0, 0)),
-          closeTo(RoadToolScene.stopOutM, 0.5),
+          closeTo(JunctionMarks.stopOutM(1), 0.5),
           reason: 'out along its leg');
     }
 
@@ -215,9 +216,249 @@ void main() {
     expect(s.handleAt(city, id, const Vec2(0, 100), 10), isNull);
     s.drag = (roadId: id, atStart: false);
     s.dragTo = const Vec2(50, 250);
+    c.previewMoveEnd(city, atStart: false, to: const Vec2(50, 250));
     s.showTraffic(city, c);
     expect(o.ghostBF.last.distanceTo(Vector3(50, 250, 1000)), lessThan(1e-6));
     expect(o.ghostState, RoadGhostState.selected);
+  });
+
+  test('Adjust: the dragged road is drawn as letting go lays it — on its '
+      'deck, its end on the street it is dropped beside', () {
+    final city = colony();
+    final id = city
+        .buildRoad(RoadBuildRequest(
+          controls: const [Vec2(0, 0), Vec2(0, 200)],
+          type: RoadType.byId('two-lane')!,
+          startElevationM: 12,
+          endElevationM: 12,
+        ))
+        .roadId!;
+    city.commitRoad(const [Vec2(-200, 400), Vec2(200, 400)], RoadClass.street);
+    final s = scene();
+    final c = CityEditController()
+      ..set(CityEditTool.traffic)
+      ..setTrafficView(TrafficInfoView.adjust)
+      ..selectRoad(id);
+    s.drag = (roadId: id, atStart: false);
+    s.dragTo = const Vec2(50, 250);
+    c.previewMoveEnd(city, atStart: false, to: const Vec2(50, 250));
+    s.showTraffic(city, c);
+    expect(o.ghostLiftsM, hasLength(o.ghostBF.length),
+        reason: 'on its deck, not flat on the ground');
+    expect(o.ghostLiftsM.first, closeTo(12, 1e-6));
+    expect(o.ghostLiftsM.last, closeTo(12, 1e-6));
+
+    // Let go 9 m short of the street: it lands on it, and comes down to it.
+    s.dragTo = const Vec2(0, 391);
+    c.previewMoveEnd(city, atStart: false, to: const Vec2(0, 391));
+    s.showTraffic(city, c);
+    expect(o.ghostBF.last.distanceTo(Vector3(0, 400, 1000)), lessThan(1e-6));
+    expect(o.ghostLiftsM.last, closeTo(0, 1e-6));
+    final rings =
+        o.markers.where((m) => m.kind == OverlayMarkerKind.ring).toList();
+    expect(rings, hasLength(2));
+    expect(rings.first.atBF.z, closeTo(1012, 1e-6),
+        reason: 'the end left alone, on its deck');
+    expect(rings.last.atBF.z, closeTo(1000, 1e-6),
+        reason: 'the end moved, down at the street');
+  });
+
+  test('the info views publish only what changed: a hover over them costs '
+      'the renderer nothing', () {
+    final city = colony();
+    city.commitRoad(const [Vec2(-200, 0), Vec2(200, 0)], RoadClass.street);
+    city.commitRoad(const [Vec2(0, -200), Vec2(0, 200)], RoadClass.street);
+    final s = scene();
+    final c = CityEditController()..set(CityEditTool.traffic);
+    final picked = city.layout.roads.first.id;
+    for (final v in TrafficInfoView.values) {
+      c.setTrafficView(v);
+      c.selectRoad(picked);
+      s.hover = const Vec2(5, 5);
+      s.showTraffic(city, c);
+      final rev = o.revision;
+      for (var i = 1; i <= 10; i++) {
+        s.hover = Vec2(5.0 + i, 5);
+        s.showTraffic(city, c);
+      }
+      expect(o.revision, rev, reason: '${v.name}: only the mouse moved');
+    }
+    // A real change is still drawn: lights at the crossroads.
+    c.setTrafficView(TrafficInfoView.junctions);
+    s.showTraffic(city, c);
+    final rev = o.revision;
+    c.toggleJunctionAt(city, const Vec2(0, 0));
+    s.showTraffic(city, c);
+    expect(o.revision, greaterThan(rev));
+    expect(o.markers.where((m) => m.kind == OverlayMarkerKind.lights),
+        hasLength(1));
+  });
+
+  test('Routes: a road picked again reads its routes again', () {
+    final city = colony();
+    final id =
+        city.commitRoad(const [Vec2(0, 0), Vec2(0, 200)], RoadClass.street)!;
+    final s = scene();
+    final c = CityEditController()
+      ..set(CityEditTool.traffic)
+      ..selectRoad(id);
+    s.showTraffic(city, c);
+    expect(c.routeCount, 0);
+    c.selectRoad(null);
+    s.showTraffic(city, c);
+    expect(c.routeCount, isNull);
+    c.selectRoad(id);
+    s.showTraffic(city, c);
+    expect(c.routeCount, 0,
+        reason: 'drawn from the cache, and counted with it — not "0 routes" '
+            'by accident of a null');
+  });
+
+  test('Routes: a new pass of the traffic draws the routes again', () {
+    final city = colony();
+    final id =
+        city.commitRoad(const [Vec2(0, 0), Vec2(0, 200)], RoadClass.street)!;
+    final s = scene();
+    final c = CityEditController()
+      ..set(CityEditTool.traffic)
+      ..selectRoad(id);
+    s.showTraffic(city, c);
+    final drawn = o.lines;
+    final rev = o.revision;
+    s.showTraffic(city, c);
+    expect(o.revision, rev, reason: 'the same pass: nothing to draw again');
+    final passes = city.trafficModel.passes;
+    for (var i = 0; i < 5000 && city.trafficModel.passes == passes; i++) {
+      city.roadTraffic.advance(1);
+    }
+    expect(city.trafficModel.passes, greaterThan(passes),
+        reason: 'the traffic ran a pass');
+    s.showTraffic(city, c);
+    expect(identical(o.lines, drawn), isFalse,
+        reason: 'the routes were asked of the new pass');
+    expect(o.revision, greaterThan(rev));
+  });
+
+  test("Junctions: from a district zoom the stop signs stand clear of the "
+      "junction's disc", () {
+    final city = colony();
+    city.commitRoad(const [Vec2(-200, 0), Vec2(200, 0)], RoadClass.street);
+    city.commitRoad(const [Vec2(0, -200), Vec2(0, 200)], RoadClass.street);
+    final s = scene();
+    final c = CityEditController()
+      ..set(CityEditTool.traffic)
+      ..setTrafficView(TrafficInfoView.junctions);
+    s.showTraffic(city, c, pxM: 3);
+    final disc =
+        o.markers.singleWhere((m) => m.kind == OverlayMarkerKind.noLights);
+    expect(disc.radiusM, closeTo(JunctionMarks.ringRadiusM(3), 1e-9));
+    final stops =
+        o.markers.where((m) => m.kind == OverlayMarkerKind.stop).toList();
+    expect(stops, hasLength(4));
+    for (final m in stops) {
+      final d = Vec2(m.atBF.x, m.atBF.y).distanceTo(const Vec2(0, 0));
+      expect(d, closeTo(JunctionMarks.stopOutM(3), 1e-3));
+      expect(d - m.radiusM, greaterThanOrEqualTo(disc.radiusM - 1e-9),
+          reason: 'off the disc a click on would switch the lights');
+    }
+  });
+
+  test('a drawing laid on ground the raster had not filled is laid again, '
+      'once, when it has', () {
+    final city = colony();
+    final id =
+        city.commitRoad(const [Vec2(0, 0), Vec2(0, 200)], RoadClass.street)!;
+    // A raster that fills [budget] cells a refresh and answers the ground
+    // before the grading (0) for the rest; the graded ground is 3 m down.
+    final warm = <(int, int)>{};
+    var budget = 0;
+    (int, int) cellOf(Vec2 p) => ((p.e / 8).floor(), (p.n / 8).floor());
+    double height(Vec2 p) {
+      final k = cellOf(p);
+      if (warm.contains(k)) return -3;
+      if (budget > 0) {
+        budget--;
+        warm.add(k);
+        return -3;
+      }
+      return 0;
+    }
+
+    final s = RoadToolScene()
+      ..bindCustom(
+        bodyId: 'earth',
+        toBodyFixed: (p, h) => Vector3(p.e, p.n, 1000 + h),
+        height: height,
+        warmAt: (p) => warm.contains(cellOf(p)),
+      );
+    final c = CityEditController()
+      ..set(CityEditTool.traffic)
+      ..selectRoad(id);
+    budget = 4;
+    s.showTraffic(city, c);
+    expect(s.warming, isTrue);
+    expect(o.lines.single.pointsBF.any((p) => (p.z - 1000).abs() < 1e-9),
+        isTrue,
+        reason: 'laid partly on the ground before the grading');
+    final rev = o.revision;
+    var refreshes = 0;
+    while (s.warming && refreshes++ < 100) {
+      budget = 4;
+      s.showTraffic(city, c);
+      if (s.warming) {
+        expect(o.revision, rev, reason: 'nothing re-published while it warms');
+      }
+    }
+    expect(s.warming, isFalse);
+    expect(o.revision, rev + 1, reason: 'laid again, once');
+    for (final p in o.lines.single.pointsBF) {
+      expect(p.z, closeTo(997, 1e-9), reason: 'on the graded ground');
+    }
+  });
+
+  test('a drawing kept is laid again when the ground under it changes', () {
+    final city = colony();
+    final id =
+        city.commitRoad(const [Vec2(0, 0), Vec2(0, 200)], RoadClass.street)!;
+    var ground = 0.0;
+    final s = RoadToolScene();
+    void bind(Object key) => s.bindCustom(
+          bodyId: 'earth',
+          toBodyFixed: (p, h) => Vector3(p.e, p.n, 1000 + h),
+          height: (_) => ground,
+          groundKey: key,
+        );
+    final c = CityEditController()
+      ..set(CityEditTool.traffic)
+      ..selectRoad(id);
+    bind(1);
+    s.showTraffic(city, c);
+    expect(o.lines.single.pointsBF.first.z, closeTo(1000, 1e-9));
+    // A brush lands: the edits' version moves, and the drawing follows.
+    ground = -2;
+    bind(2);
+    s.showTraffic(city, c);
+    expect(o.lines.single.pointsBF.first.z, closeTo(998, 1e-9));
+  });
+
+  test("the join marker stands where the end joins: up on a viaduct's deck",
+      () {
+    final city = colony();
+    city.buildRoad(RoadBuildRequest(
+      controls: const [Vec2(-200, 300), Vec2(200, 300)],
+      type: RoadType.byId('two-lane')!,
+      startElevationM: 12,
+      endElevationM: 12,
+    ));
+    final s = scene();
+    final c = roadTool()
+      ..snap = const RoadSnapOptions(
+          roads: true, angles: false, zoningGrid: false, guidelines: false);
+    c.clickAt(city, const Vec2(0, 0));
+    c.previewTo(city, const Vec2(2, 301));
+    s.showRoadTool(city, c);
+    final dot = o.markers.singleWhere((m) => m.argb == RoadToolScene.joinArgb);
+    expect(dot.atBF.z, closeTo(1012, 1e-6));
   });
 
   test('another tool, and everything is dropped', () {

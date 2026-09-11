@@ -34,9 +34,11 @@ import '../../../domain/colony/city/road_build.dart';
 import '../../../domain/colony/city/road_catalog.dart';
 import '../../../domain/colony/city/road_curves.dart';
 import '../../../domain/colony/city/road_elevation.dart';
+import '../../../domain/colony/city/road_graph.dart' show RoadGraph, RoadNode;
 import '../../../domain/colony/city/road_junction.dart';
 import '../../../domain/colony/city/road_snapper.dart';
 import '../../../domain/colony/city/road_traffic_model.dart' show TripKind;
+import '../../../domain/colony/city/spatial_index.dart' show Box2;
 
 /// How the road tool lays a stretch.
 enum RoadToolMode {
@@ -135,6 +137,75 @@ class RoadPreview {
   List<Vec2> get line => request.controls;
 }
 
+/// An Adjust Roads drag, priced: where the dragged end lands and the road
+/// as it would be re-laid there — by the rules `CitySim.moveRoadEnd` lays
+/// and charges by, so the ghost the player drags is the road the release
+/// lays, and the figure beside it is the bill.
+class RoadMovePreview {
+  const RoadMovePreview({
+    required this.roadId,
+    required this.atStart,
+    required this.end,
+    required this.controls,
+    required this.quote,
+    this.toHeightM,
+    this.joinRoadId,
+  });
+
+  /// The road being re-laid, and which of its ends moves ([atStart]: its
+  /// first control).
+  final String roadId;
+  final bool atStart;
+
+  /// Where the moved end lands: on the road it was dropped on, else where
+  /// it was dropped.
+  final Vec2 end;
+
+  /// That end's height above the body datum where it meets another road's
+  /// level; null keeps it as high above the ground as it stood.
+  final double? toHeightM;
+
+  /// The road it lands on, if any.
+  final String? joinRoadId;
+
+  /// The re-laid road's controls, first to last.
+  final List<Vec2> controls;
+
+  /// The road as re-laid — its deck, whether it can be — at the price of
+  /// what it adds ([RoadQuote.cost]).
+  final RoadQuote quote;
+}
+
+/// Where the Junctions view draws a junction and its stop signs, sized to
+/// the screen — ONE layout, read by the drawing and by the click, so a
+/// click lands on what it was drawn over.
+///
+/// A junction's disc is a handful of pixels across at any zoom, so it
+/// grows as the camera pulls back. The stop signs used to stand a fixed
+/// 12 m out along their legs: from a district's zoom that is inside the
+/// disc, and a click on one switched the junction's lights instead. They
+/// stand past its rim now, and a click is the junction's only on its disc.
+abstract final class JunctionMarks {
+  /// The junction's disc, metres, at [pxM] metres a pixel.
+  static double ringRadiusM(double pxM) => _base(pxM) * 1.3;
+
+  /// A stop sign's disc.
+  static double stopRadiusM(double pxM) => _base(pxM) * 0.55;
+
+  /// How far out along its leg a stop sign stands: clear of the junction's
+  /// disc, and never nearer than 12 m, where the stop bar is.
+  static double stopOutM(double pxM) =>
+      math.max(12.0, ringRadiusM(pxM) + stopRadiusM(pxM));
+
+  /// How far from a junction a click may still be on one of its stop
+  /// signs.
+  static double reachM(double pxM) =>
+      math.max(20.0, stopOutM(pxM) + stopRadiusM(pxM));
+
+  /// About seven pixels across, never smaller than a lane.
+  static double _base(double pxM) => math.max(3.0, 7 * pxM);
+}
+
 /// The road tool's state and its click semantics, mixed into the editor's
 /// controller.
 ///
@@ -227,6 +298,10 @@ mixin RoadToolEditing on ChangeNotifier {
   /// How many routes the Routes view drew for [selectedRoadId] — written by
   /// the view, which is where they are counted, and read by the toolbar.
   int? routeCount;
+
+  /// The Adjust drag in progress, priced ([previewMoveEnd]); null when no
+  /// end is being dragged.
+  RoadMovePreview? movePreview;
 
   // ---- Type and elevation ---------------------------------------------------
 
@@ -380,21 +455,67 @@ mixin RoadToolEditing on ChangeNotifier {
     }
   }
 
-  /// The request for [controls] from the anchor to [end]: each end at the
-  /// tool's elevation when it was placed, or at the deck it joins.
-  RoadBuildRequest requestTo(CitySim city, List<Vec2> controls, RoadSnap end) {
+  /// The request for [controls] from the anchor to [end]: the start where
+  /// the anchor put it; the end at the tool's elevation — or, landed on a
+  /// road, at that road's level there ([joinLevelAt], judged over
+  /// [ground]: the hover's raster, or a click's exact field; null is flat
+  /// ground at the datum).
+  RoadBuildRequest requestTo(CitySim city, List<Vec2> controls, RoadSnap end,
+      {double Function(Vec2)? ground}) {
     final a = anchor!;
-    final endRoad = end.onRoad ? end.roadId : null;
+    final join = joinLevelAt(city, end, ground: ground);
     return RoadBuildRequest(
       controls: controls,
       type: _type,
       startElevationM: a.elevationM,
-      endElevationM: elevationM,
+      endElevationM: join?.elevationM ?? elevationM,
       startHeightM: a.heightM,
-      endHeightM: endRoad == null ? null : city.deckHeightAt(endRoad, end.point),
+      endHeightM: join?.heightM,
       snapStart: snap.roads,
       snapEnd: snap.roads,
     );
+  }
+
+  /// The level an end placed at [s] takes where [s] landed on a road —
+  /// that road's own level there, as in every city builder — or null off
+  /// any road, where the end stands at the tool's elevation.
+  ///
+  /// On a road laid on the ground, or a deck graded into the ground there,
+  /// the end is laid on the ground too: elevation 0, no height. Held at the
+  /// tool's +12 m instead, it stood in the air over the street it had
+  /// snapped to — the layout passed it over as grade-separated, the snap
+  /// refused it, and the join marker promised a junction that was never
+  /// built. On a deck clear of the ground, the end meets the deck at its
+  /// height.
+  ///
+  /// A road's END is judged as the road graph joins ends: a deck end within
+  /// two metres of the ground it was laid on is at grade
+  /// ([RoadDeck.endAtGrade]) — so the ground end of a ramp hands on no
+  /// height, which would have had the next stretch surveyed as a deck from
+  /// end to end: piers over every dip, a tunnel under every rise. A point
+  /// ALONG a deck is judged over [ground] by the same two metres
+  /// ([RoadElevation.nodeMatchM]), the offset the layout gives the ends of
+  /// the pieces it cuts the deck into there.
+  ({double elevationM, double? heightM})? joinLevelAt(CitySim city, RoadSnap s,
+      {double Function(Vec2)? ground}) {
+    final id = s.onRoad ? s.roadId : null;
+    if (id == null) return null;
+    const ({double elevationM, double? heightM}) onGround =
+        (elevationM: 0.0, heightM: null);
+    final deck = city.layout.roadById(id)?.deck;
+    if (deck == null) return onGround;
+    if (s.kind == RoadSnapKind.roadEnd) {
+      final first = s.roadEndIsStart ?? false;
+      if (first ? deck.startAtGrade : deck.endAtGrade) return onGround;
+      return first
+          ? (elevationM: deck.startOffsetM, heightM: deck.startM)
+          : (elevationM: deck.endOffsetM, heightM: deck.endM);
+    }
+    final h = city.deckHeightAt(id, s.point);
+    if (h == null) return onGround;
+    final offset = h - (ground?.call(s.point) ?? 0);
+    if (offset.abs() < RoadElevation.nodeMatchM) return onGround;
+    return (elevationM: offset, heightM: h);
   }
 
   // ---- Hover ----------------------------------------------------------------
@@ -419,8 +540,9 @@ mixin RoadToolEditing on ChangeNotifier {
     final shape = shapeTo(s.point)!;
     // The cursor on the anchor itself: nothing to show yet.
     if (RoadCurves.length(shape) < 1) return _noPreview();
-    final snapped =
-        city.snapRoadRequest(requestTo(city, shape, s), groundAt: ground);
+    final snapped = city.snapRoadRequest(
+        requestTo(city, shape, s, ground: ground),
+        groundAt: ground);
     final q =
         city.quoteRoad(snapped, groundAt: ground, gradeGate: !ignoreTerrain);
     previewGradePct = q.deck != null || !ignoreTerrain ? q.gradePct : null;
@@ -471,7 +593,7 @@ mixin RoadToolEditing on ChangeNotifier {
     final s = snapCursor(city, cursor, scale: scale);
     final a = anchor;
     if (a == null) {
-      anchor = _anchorOn(city, s);
+      anchor = _anchorOn(city, s, ground: ground);
       preview = null;
       changed();
       return;
@@ -486,9 +608,11 @@ mixin RoadToolEditing on ChangeNotifier {
     _build(city, shapeTo(s.point)!, s, ground: ground);
   }
 
-  /// An anchor where [s] landed: on the deck of the road it joined, and
-  /// carrying that road on where it landed on its end.
-  RoadAnchor _anchorOn(CitySim city, RoadSnap s) {
+  /// An anchor where [s] landed: at the level of the road it landed on
+  /// ([joinLevelAt]) — else at the tool's elevation — and carrying that
+  /// road on where it landed on its end.
+  RoadAnchor _anchorOn(CitySim city, RoadSnap s,
+      {double Function(Vec2)? ground}) {
     final id = s.onRoad ? s.roadId : null;
     Vec2? tangent;
     final t = s.roadTangent;
@@ -497,10 +621,11 @@ mixin RoadToolEditing on ChangeNotifier {
       // forwards.
       tangent = s.roadEndIsStart == true ? t * -1.0 : t;
     }
+    final join = joinLevelAt(city, s, ground: ground);
     return RoadAnchor(
       s.point,
-      elevationM: elevationM,
-      heightM: id == null ? null : city.deckHeightAt(id, s.point),
+      elevationM: join?.elevationM ?? elevationM,
+      heightM: join?.heightM,
       tangent: tangent,
       roadId: id,
     );
@@ -512,8 +637,9 @@ mixin RoadToolEditing on ChangeNotifier {
   bool _build(CitySim city, List<Vec2> shape, RoadSnap end,
       {double Function(Vec2)? ground}) {
     _applyLotSettings(city);
-    final snapped =
-        city.snapRoadRequest(requestTo(city, shape, end), groundAt: ground);
+    final snapped = city.snapRoadRequest(
+        requestTo(city, shape, end, ground: ground),
+        groundAt: ground);
     final r =
         city.buildRoad(snapped, groundAt: ground, gradeGate: !ignoreTerrain);
     lastQuote = r.quote;
@@ -525,11 +651,18 @@ mixin RoadToolEditing on ChangeNotifier {
     }
     lastRoadId = r.roadId;
     final line = snapped.controls;
+    // The chain carries the deck on only where its end is off the ground.
+    // A ramp brought back down ends AT GRADE, and the next stretch is laid
+    // on the ground from there: handed the ramp's end height instead, it
+    // was surveyed as a deck from end to end — and so was every stretch
+    // after it — piers over every dip, a tunnel under every rise, the
+    // structure price for all of it.
     final deck = r.quote.deck;
+    final raised = deck != null && !deck.endAtGrade ? deck : null;
     anchor = RoadAnchor(
       line.last,
-      elevationM: deck?.endOffsetM ?? 0,
-      heightM: deck?.endM,
+      elevationM: raised?.endOffsetM ?? 0,
+      heightM: raised?.endM,
       tangent: RoadCurves.endTangent(line),
       roadId: r.roadId,
     );
@@ -596,6 +729,7 @@ mixin RoadToolEditing on ChangeNotifier {
     previewGradePct = null;
     selectedRoadId = null;
     routeCount = null;
+    movePreview = null;
   }
 
   // ---- Upgrade --------------------------------------------------------------
@@ -703,6 +837,7 @@ mixin RoadToolEditing on ChangeNotifier {
     trafficView = v;
     selectedRoadId = null;
     routeCount = null;
+    movePreview = null;
     blocked = null;
     changed();
   }
@@ -716,6 +851,7 @@ mixin RoadToolEditing on ChangeNotifier {
     if (id == selectedRoadId) return;
     selectedRoadId = id;
     routeCount = null;
+    movePreview = null;
     blocked = null;
     changed();
   }
@@ -727,15 +863,15 @@ mixin RoadToolEditing on ChangeNotifier {
     return true;
   }
 
-  /// The Junctions view's click at [p]: on a junction (within
-  /// [JunctionOverride.matchM] of it) its lights go on or off; out along
-  /// one of its legs, that leg's stop sign comes or goes. What the plan was
-  /// comes from the road graph — the plan the tiles draw and the traffic
-  /// waits at. Whether anything changed.
-  bool toggleJunctionAt(CitySim city, Vec2 p, {double scale = 1}) {
-    final node =
-        city.roadGraph.nodeNear(p, withinM: math.max(20.0, 14 * scale));
-    if (node == null || !node.isJunction) {
+  /// The Junctions view's click at [p], the view at [pxM] metres a pixel:
+  /// on a junction's disc its lights go on or off; out along one of its
+  /// legs — where its stop sign is drawn — that leg's stop sign comes or
+  /// goes. Both are read by [JunctionMarks], the layout the markers are
+  /// drawn by. What the plan was comes from the road graph — the plan the
+  /// tiles draw and the traffic waits at. Whether anything changed.
+  bool toggleJunctionAt(CitySim city, Vec2 p, {double pxM = 1}) {
+    final node = _junctionNear(city.roadGraph, p, JunctionMarks.reachM(pxM));
+    if (node == null) {
       blocked = 'Click a junction — a place where three roads or more meet';
       changed();
       return false;
@@ -746,7 +882,7 @@ mixin RoadToolEditing on ChangeNotifier {
     final current = city.junctionOverrideNear(node.at) ??
         JunctionOverride(at: node.at);
     final d = p - node.at;
-    if (d.length <= math.max(JunctionOverride.matchM, 4 * scale)) {
+    if (d.length <= JunctionMarks.ringRadiusM(pxM)) {
       if (!signalled) {
         blocked = plan.control == JunctionControl.roundabout
             ? 'A roundabout runs without lights'
@@ -801,10 +937,134 @@ mixin RoadToolEditing on ChangeNotifier {
     return d > math.pi ? tau - d : d;
   }
 
+  /// The junction nearest [p] within [withinM]. Only junctions: the reach
+  /// is wide enough to take a click on a stop sign far out along a leg,
+  /// and a bend or a dead end nearer the click must not win it.
+  static RoadNode? _junctionNear(RoadGraph g, Vec2 p, double withinM) {
+    RoadNode? best;
+    var bestD = withinM;
+    for (final n in g.nodes) {
+      if (!n.isJunction) continue;
+      final d = n.at.distanceTo(p);
+      if (d <= bestD) {
+        bestD = d;
+        best = n;
+      }
+    }
+    return best;
+  }
+
+  // ---- Adjust Roads ---------------------------------------------------------
+
+  static double _flatGround(Vec2 _) => 0;
+
+  /// Where Adjust Roads would re-lay [roadId] with its end [atStart] (its
+  /// first control) dropped at [to], and what that would cost — null for a
+  /// road that is gone. The drag's preview ([previewMoveEnd]) and the
+  /// release ([moveSelectedEnd]) both come through here, so the road drawn
+  /// under the pointer is the road laid when it lets go:
+  ///
+  /// * Dropped near another road, the end lands ON it — its nearest end
+  ///   within [RoadSnapper.endSnapM], else its nearest point within
+  ///   [CitySim.roadSnapM], as the road tool snaps — and takes its level
+  ///   there ([joinLevelAt]). A raised road's end dropped on a street comes
+  ///   down to meet it, where it used to hang over it at its old offset,
+  ///   passed over as grade-separated. A road on the ground dropped on one
+  ///   stays on the ground.
+  /// * From there the line, the deck and the price are
+  ///   `CitySim.moveRoadEnd`'s: the end left alone keeps its height, the
+  ///   moved one stands at the level it met or as high above the ground as
+  ///   it stood; charged the road as re-laid less the road it replaces,
+  ///   both surveyed over [ground] (null: flat at the datum).
+  RoadMovePreview? planMoveEnd(
+    CitySim city,
+    String roadId, {
+    required bool atStart,
+    required Vec2 to,
+    double Function(Vec2)? ground,
+  }) {
+    final road = city.layout.roadById(roadId);
+    if (road == null || road.controls.length < 2) return null;
+    final g = ground ?? _flatGround;
+    final deck = road.deck;
+    final hit = _dropSnap(city, to, roadId);
+    double? toHeightM;
+    if (hit != null) {
+      final join = joinLevelAt(city, hit, ground: g);
+      // At grade there: a raised or sunk road comes to the ground; one on
+      // the ground needs no height (an absolute one would make it a deck
+      // from end to end, standing on piers over the first dip).
+      toHeightM = join?.heightM ?? (deck == null ? null : g(hit.point));
+    }
+    final end = hit?.point ?? to;
+
+    // CitySim.moveRoadEnd's own rules, from here to the bill.
+    final type = RoadType.of(road);
+    final raised = deck != null || toHeightM != null;
+    final offset =
+        deck == null ? 0.0 : (atStart ? deck.startOffsetM : deck.endOffsetM);
+    final controls =
+        controlsWithMovedEnd(road.controls, atStart: atStart, to: end);
+    double? fixedH, movedH;
+    if (raised) {
+      final fixedEnd = atStart ? controls.last : controls.first;
+      fixedH =
+          deck == null ? g(fixedEnd) : (atStart ? deck.endM : deck.startM);
+      movedH = toHeightM ?? g(end) + offset;
+    }
+    final full = quoteRoadBuild(
+      RoadBuildRequest(
+        controls: controls,
+        type: type,
+        startHeightM: atStart ? movedH : fixedH,
+        endHeightM: atStart ? fixedH : movedH,
+      ),
+      groundAt: ground,
+    );
+    final old = quoteRoadBuild(
+      RoadBuildRequest(
+        controls: road.controls,
+        type: type,
+        startHeightM: deck?.startM,
+        endHeightM: deck?.endM,
+      ),
+      groundAt: ground,
+    );
+    final added = math.max(0.0, full.cost - old.cost);
+    var q = full.copyWith(cost: added);
+    if (q.ok && added > city.funds + 1e-9) {
+      q = q.copyWith(refusal: RoadRefusal.funds);
+    }
+    return RoadMovePreview(
+      roadId: roadId,
+      atStart: atStart,
+      end: end,
+      toHeightM: toHeightM,
+      joinRoadId: hit?.roadId,
+      controls: controls,
+      quote: q,
+    );
+  }
+
+  /// The Adjust drag's hover: [planMoveEnd] for the selected road, kept in
+  /// [movePreview] for the ghost and the toolbar. Notifies nobody — it
+  /// runs on every move of the drag.
+  RoadMovePreview? previewMoveEnd(
+    CitySim city, {
+    required bool atStart,
+    required Vec2 to,
+    double Function(Vec2)? ground,
+  }) {
+    final id = selectedRoadId;
+    return movePreview = id == null
+        ? null
+        : planMoveEnd(city, id, atStart: atStart, to: to, ground: ground);
+  }
+
   /// Adjust Roads: drag an end of the selected road ([atStart]: its first
-  /// control) to [to] and re-lay it. Dropped on a raised or sunk road, the
-  /// end meets its deck. [ground] as for [clickAt]. The selection follows
-  /// the road to its new id.
+  /// control) to [to] and re-lay it — where [planMoveEnd] says, at the
+  /// level it says: dropped on a road, the end meets it. [ground] as for
+  /// [clickAt]. The selection follows the road to its new id.
   ({String? roadId, RoadQuote quote})? moveSelectedEnd(
     CitySim city, {
     required bool atStart,
@@ -813,12 +1073,14 @@ mixin RoadToolEditing on ChangeNotifier {
   }) {
     final id = selectedRoadId;
     if (id == null) return null;
-    final hit = city.layout.nearestRoadPoint(to, withinM: CitySim.roadSnapM);
-    final toHeightM = hit == null || hit.roadId == id
-        ? null
-        : city.deckHeightAt(hit.roadId, hit.point);
+    movePreview = null;
+    final plan = planMoveEnd(city, id, atStart: atStart, to: to, ground: ground);
+    final end = plan?.end ?? to;
     final r = city.moveRoadEnd(id,
-        atStart: atStart, to: to, toHeightM: toHeightM, groundAt: ground);
+        atStart: atStart,
+        to: end,
+        toHeightM: plan?.toHeightM,
+        groundAt: ground);
     lastQuote = r.quote;
     final newId = r.roadId;
     if (newId == null) {
@@ -826,10 +1088,49 @@ mixin RoadToolEditing on ChangeNotifier {
     } else {
       blocked = null;
       lastRoadId = newId;
-      selectedRoadId = _pieceNear(city, newId, to) ?? selectedRoadId;
+      selectedRoadId = _pieceNear(city, newId, end) ?? selectedRoadId;
     }
     changed();
     return r;
+  }
+
+  /// The road an end dropped at [p] lands on: another road's end within
+  /// [RoadSnapper.endSnapM], else the nearest point along one within
+  /// [CitySim.roadSnapM] — never [excludeId], the road being re-laid.
+  /// Blind to level, as the road tool's snapper is: the end then takes the
+  /// level of what it landed on ([joinLevelAt]).
+  static RoadSnap? _dropSnap(CitySim city, Vec2 p, String excludeId) {
+    final index = city.layout.roadIndex;
+    RoadSnap? best;
+    var bestD = RoadSnapper.endSnapM;
+    final seen = <int>{};
+    index.visit(Box2.around(p, bestD), 0, (slot, rec, _) {
+      if (rec.road.id == excludeId ||
+          rec.sampleCount == 0 ||
+          !seen.add(slot)) {
+        return;
+      }
+      for (final first in const [true, false]) {
+        final q = rec.sampleAt(first ? 0 : rec.sampleCount - 1);
+        final d = p.distanceTo(q);
+        if (d < bestD) {
+          bestD = d;
+          best = RoadSnap(q, RoadSnapKind.roadEnd,
+              roadId: rec.road.id, roadEndIsStart: first);
+        }
+      }
+    });
+    if (best != null) return best;
+    bestD = CitySim.roadSnapM;
+    index.visit(Box2.around(p, bestD), 0, (slot, rec, seg) {
+      if (seg == 0 || rec.road.id == excludeId) return;
+      final (q, d) = rec.nearestOnSegment(p, seg);
+      if (d < bestD) {
+        bestD = d;
+        best = RoadSnap(q, RoadSnapKind.roadPoint, roadId: rec.road.id);
+      }
+    });
+    return best;
   }
 
   /// The piece of the road [baseId] (itself, or `<baseId>x<i>` where a

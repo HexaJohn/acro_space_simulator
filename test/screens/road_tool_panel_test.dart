@@ -187,6 +187,64 @@ void main() {
       expect(city.roadNameOf(id), 'Harbour Road');
     });
 
+    testWidgets('Enter names the road and hands the keyboard back to what '
+        'had it', (t) async {
+      // The field's own Enter unfocused to the route's scope — an ancestor
+      // of the world's key node — and keys bubble up from focus, never
+      // down: nothing reached the world until it was clicked.
+      t.view.physicalSize = const Size(1600, 1000);
+      t.view.devicePixelRatio = 1.0;
+      addTearDown(t.view.reset);
+      final city = colony();
+      final id =
+          city.commitRoad(const [Vec2(0, 0), Vec2(0, 200)], RoadClass.street)!;
+      final world = FocusNode(debugLabel: 'world');
+      addTearDown(world.dispose);
+      final c = CityEditController()
+        ..set(CityEditTool.traffic)
+        ..setTrafficView(TrafficInfoView.adjust)
+        ..selectRoad(id);
+      await t.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: Focus(
+            focusNode: world,
+            autofocus: true,
+            child: CityEditOverlay(controller: c, city: city, onClose: () {}),
+          ),
+        ),
+      ));
+      await t.pump();
+      expect(world.hasPrimaryFocus, isTrue);
+      await t.tap(find.byType(TextField));
+      await t.pump();
+      expect(world.hasPrimaryFocus, isFalse, reason: 'typing');
+      await t.enterText(find.byType(TextField), 'Harbour Road');
+      await t.testTextInput.receiveAction(TextInputAction.done);
+      await t.pump();
+      expect(city.roadNameOf(id), 'Harbour Road');
+      expect(world.hasPrimaryFocus, isTrue,
+          reason: 'the keys go back to the world the moment the name is in');
+    });
+
+    testWidgets('Adjust: while an end is dragged, the row prices letting go',
+        (t) async {
+      final city = colony(funds: 5000);
+      final id =
+          city.commitRoad(const [Vec2(0, 0), Vec2(0, 200)], RoadClass.street)!;
+      final c = await pumpTool(t, city, tool: CityEditTool.traffic);
+      c.setTrafficView(TrafficInfoView.adjust);
+      c.selectRoad(id);
+      await t.pump();
+      expect(find.textContaining('Drag an end circle'), findsOneWidget);
+      final m = c.previewMoveEnd(city, atStart: false, to: const Vec2(0, 260))!;
+      expect(m.quote.cost, greaterThan(0));
+      c.changed();
+      await t.pump();
+      expect(find.text('Re-lay ${formatMoney(m.quote.cost)}'), findsOneWidget);
+      expect(find.text('260 m'), findsOneWidget);
+      expect(find.textContaining('Drag an end circle'), findsNothing);
+    });
+
     testWidgets('Routes filters by why a trip travels', (t) async {
       final c = await pumpTool(t, colony(), tool: CityEditTool.traffic);
       expect(find.text('Goods'), findsOneWidget);

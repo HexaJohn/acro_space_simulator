@@ -836,6 +836,10 @@ extension SimulationViewColony on _SimulationViewState {
       default:
         s.clear();
     }
+    // Something drawn stands partly on ground the raster has not filled yet
+    // (it fills a budget of cells a refresh): draw again next interval,
+    // mouse or no mouse, until it all stands on the real ground.
+    if (s.warming) _scheduleRoadRefresh(city);
   }
 
   /// A click with the Road tool at [hit]: priced and laid on the EXACT
@@ -862,7 +866,9 @@ extension SimulationViewColony on _SimulationViewState {
     rebuild(() {
       switch (c.trafficView) {
         case TrafficInfoView.junctions:
-          c.toggleJunctionAt(city, p, scale: scale);
+          // At the view's own metres a pixel: the markers are drawn at it,
+          // and a click has to land on what it was drawn over.
+          c.toggleJunctionAt(city, p, pxM: s.hoverPxM);
         case TrafficInfoView.routes:
           c.selectRoad(c.roadAt(city, p, scale: scale));
         case TrafficInfoView.adjust:
@@ -1074,7 +1080,8 @@ extension SimulationViewColony on _SimulationViewState {
   void _adjustMove(Offset local, Offset delta) {
     final s = _roadScene;
     s.dragTravelPx += delta.distance;
-    if (s.drag == null) {
+    final drag = s.drag;
+    if (drag == null) {
       // Not a handle: the camera's own drag — once it is one. Inside the
       // click threshold it is a click's jitter, and a click must not nudge
       // the view (see [_adjustEnd]).
@@ -1086,11 +1093,16 @@ extension SimulationViewColony on _SimulationViewState {
     final city = _editingCity;
     final hit = _pickCityGround(local);
     if (city == null || hit == null) return;
-    s.dragTo = Vec2(hit.east, hit.north);
+    final to = Vec2(hit.east, hit.north);
+    s.dragTo = to;
     if (!_bindRoadGround(city)) return;
     s.beginFrame();
-    // With a button held the mouse's hover is silent: the drag draws its
-    // own ghost.
+    // The road as the release would lay it — its end on whatever it is
+    // dropped on, at that road's level, on its deck — and what that would
+    // cost. With a button held the mouse's hover is silent: the drag draws
+    // its own ghost.
+    _cityEdit.previewMoveEnd(city,
+        atStart: drag.atStart, to: to, ground: s.heightAt);
     s.showTraffic(city, _cityEdit, pxM: s.hoverPxM);
   }
 
