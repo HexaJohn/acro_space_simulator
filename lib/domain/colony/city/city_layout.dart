@@ -299,13 +299,28 @@ class CityLayout {
 
   /// [deck]'s level at [s] along a road [lengthM] long, for
   /// [levelsSeparated]; null for a road on the ground (no deck).
-  static RoadLevel? levelOf(RoadDeck? deck, double s, double lengthM) =>
-      deck == null
-          ? null
-          : (
-              heightM: deck.heightAt(s, lengthM),
-              offGround: deck.onStructureAt(s) || deck.inTunnelAt(s),
-            );
+  ///
+  /// Whether it stands clear is read no nearer its end than [_endProbeM]:
+  /// the deck's stretches are measured along the road its survey walked,
+  /// and [lengthM] is the road as indexed now — a save's decimated
+  /// controls re-sampled on load come out millimetres either side of it.
+  /// Read at the end itself, a deck on its piers to its very end fell off
+  /// them there and met the street beneath it. The survey puts every
+  /// boundary half way between two samples, half a step (at least half a
+  /// metre, or half a road shorter than one step) from the end, so the
+  /// probe never crosses one. The height is read where it was asked.
+  static RoadLevel? levelOf(RoadDeck? deck, double s, double lengthM) {
+    if (deck == null) return null;
+    final sp = math.min(
+        s, math.max(0.0, lengthM - math.min(_endProbeM, lengthM / 4)));
+    return (
+      heightM: deck.heightAt(s, lengthM),
+      offGround: deck.onStructureAt(sp) || deck.inTunnelAt(sp),
+    );
+  }
+
+  /// How far back from a road's end [levelOf] reads its stretches.
+  static const double _endProbeM = 0.25;
 
   /// Whether two roads at levels [a] and [b] pass one over the other where
   /// they cross rather than meet. THE grade-separation rule: the crossing

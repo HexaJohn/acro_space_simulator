@@ -153,6 +153,29 @@ void main() {
           reason: 'two decks are judged by their heights alone');
     });
 
+    test("a road's end reads its survey's end, however it was re-measured",
+        () {
+      // Surveyed over 57.3 m, on its piers all the way; re-sampled from a
+      // save, 57.302 m long. Its end still stands on its piers.
+      final piers = ramp(12, 12, structures: const [(0, 57.3)]);
+      expect(CityLayout.levelOf(piers, 57.302, 57.302)!.offGround, isTrue);
+      expect(CityLayout.levelOf(piers, 57.3, 57.3)!.offGround, isTrue);
+      // Re-measured a little short, the same.
+      expect(CityLayout.levelOf(piers, 57.29, 57.29)!.offGround, isTrue);
+      // A graded tail is at least half a survey step long, and reads graded.
+      final tail = ramp(12, 0.5, structures: const [(0, 56.8)]);
+      expect(CityLayout.levelOf(tail, 57.3, 57.3)!.offGround, isFalse);
+      expect(CityLayout.levelOf(tail, 57.302, 57.302)!.offGround, isFalse);
+      expect(CityLayout.levelOf(tail, 0, 57.3)!.offGround, isTrue);
+      // A road shorter than one step has its one boundary half way along.
+      final stub = ramp(3, 3, structures: const [(0.2, 0.4)]);
+      expect(CityLayout.levelOf(stub, 0.4, 0.4)!.offGround, isTrue);
+      final stubTail = ramp(3, 3, structures: const [(0, 0.2)]);
+      expect(CityLayout.levelOf(stubTail, 0.4, 0.4)!.offGround, isFalse);
+      // The height is still read where it was asked.
+      expect(CityLayout.levelOf(ramp(0, 10), 50, 50)!.heightM, 10);
+    });
+
     test('two decks meet at one height and pass at two', () {
       final l = CityLayout();
       l.commitRoad(controls: ns, deck: ramp(12, 12), regenerateLots: false);

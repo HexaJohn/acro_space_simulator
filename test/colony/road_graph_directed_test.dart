@@ -337,6 +337,56 @@ void main() {
     expect(joined, 0, reason: 'joined at ${missed.join('; ')}');
   });
 
+  test('a deck loaded from a save stays on its piers to its very end', () {
+    // A save keeps a curved road's controls decimated, and the load
+    // re-samples them: the road's index length comes out millimetres past
+    // the survey's last range, not ulps. Read there, the last end fell off
+    // its piers — onto the street twelve metres below, and onto a street
+    // passing under it, part way along.
+    final type = RoadType.byId('two-lane')!;
+    const controls = [
+      Vec2(0, 0),
+      Vec2(72, 0),
+      Vec2(85.5, 3.2),
+      Vec2(76.5, 6.4),
+    ];
+    const end = Vec2(76.5, 6.4);
+    final deck = quoteRoadBuild(RoadBuildRequest(
+      controls: controls,
+      type: type,
+      startElevationM: 12,
+      endElevationM: 12,
+    )).deck!;
+    // Every road re-added raw, as `CitySim.fromJson` restores them.
+    CityLayout reloaded(CityLayout saved) {
+      final l = CityLayout();
+      for (final r in saved.roads.toList()) {
+        l.addRoad(r);
+      }
+      return l;
+    }
+
+    // A street starting under its end.
+    final layout = CityLayout();
+    layout.commitRoad(controls: const [end, Vec2(76.5, 156.4)]);
+    layout.commitRoad(controls: controls, deck: deck);
+    for (final l in [layout, reloaded(layout)]) {
+      final g = RoadGraph.of(l);
+      expect(g.nodeCount, 4);
+      expect(g.nodeNear(end)!.legs, hasLength(1));
+    }
+
+    // A street passing under its end.
+    final alone = CityLayout();
+    alone.commitRoad(controls: controls, deck: deck);
+    final under = reloaded(alone)
+      ..addRoad(const RoadSpline(
+          id: 'under', controls: [Vec2(76.5, -143.6), Vec2(76.5, 156.4)]));
+    final g = RoadGraph.of(under);
+    expect(g.nodeCount, 4);
+    expect(g.nodeNear(end)!.legs, hasLength(1));
+  });
+
   test('an alley meeting a street is a curb cut: no stop, as the tiles '
       'draw it', () {
     final layout = CityLayout();
