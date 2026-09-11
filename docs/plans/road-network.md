@@ -471,7 +471,10 @@ by an eighth. Everything that reads traffic — the tick's growth, fire and tax
 lines, the views — reads it through `CitySim.trafficReadout`
 (`CityTrafficReadout`, `traffic_readout.dart`), never the model behind it,
 so a per-vehicle simulation can answer in its place; before the first
-picture every answer punishes nothing. `road_traffic_economy_test.dart` pins
+picture every answer punishes nothing. Fire cover asks `fireReach` — a
+station with safety cover, never a clinic's ambulance — and a lot's own
+lorries are never its delivery. `passes` counts the pictures published, for
+views that cache what they drew from one. `road_traffic_economy_test.dart` pins
 that an ordinary town still grows all three ways under the gates.
 
 **The renderer.** The wire carries each road's id, decoration and a lift per
