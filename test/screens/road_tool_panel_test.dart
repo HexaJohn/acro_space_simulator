@@ -301,7 +301,7 @@ void main() {
       expect(find.text('−${city.roadUpkeepRate.toStringAsFixed(2)} §/s'),
           findsOneWidget);
       expect(
-          find.text('${formatMoney(city.roadUpkeepPerWeek)} a week for 1 roads'),
+          find.text('${formatMoney(city.roadUpkeepPerWeek)} a week for 1 road'),
           findsOneWidget);
       expect(city.roadUpkeepPerWeek, greaterThan(0));
       expect(find.textContaining('BUILDINGS are paid in ore'), findsOneWidget);

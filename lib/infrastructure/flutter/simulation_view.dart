@@ -2643,6 +2643,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     // would be editing a ghost. Closing the editor is the honest move — tool
     // first, as the Close button does, or the road tool's ghost and anchor
     // outlive the editor.
+    final wasEditing = _editingCity?.id ?? widget.injectedCity?.id;
     _cityEdit.set(CityEditTool.inspect);
     _editingCity = null;
     _codec.decode(
@@ -2655,6 +2656,26 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       bodies:
           _universe.current().all.where((b) => !b.isStar).toList(),
     );
+    // ...and in the city game, open it again on the colony the load brought
+    // back. There the editor IS the game — its toolbar, the HUD and the
+    // HUD's exit all hang off it — so a load that left it shut stranded the
+    // player on a bare planet. On the Look tool: nothing half-drawn from
+    // before the load carries over.
+    if (widget.cityMode) {
+      final cities = _cities.all();
+      CitySim? back;
+      for (final c in cities) {
+        if (c.id == wasEditing) back = c;
+      }
+      back ??= cities.isEmpty ? null : cities.first;
+      if (back != null) {
+        _editingCity = back;
+        // Re-armed on the loaded colony, as every road action does: the
+        // one ground the tool prices on, above the body datum.
+        _bindRoadGround(back);
+      }
+    }
+    setState(() {});
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text('Loaded tick ${_clock.tick}'), duration: const Duration(seconds: 1)));
@@ -3321,7 +3342,13 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                     child: CityEditOverlay(
                       controller: _cityEdit,
                       city: _editingCity!,
-                      onClose: () => setState(() => _editingCity = null),
+                      // In the city game there is nothing under the editor
+                      // to go back to: closing it left a bare planet with
+                      // no toolbar, no HUD and so no way out. Leaving is
+                      // the HUD's exit there.
+                      onClose: widget.cityMode
+                          ? null
+                          : () => setState(() => _editingCity = null),
                     ),
                   ),
                 // City-builder HUD. TOPMOST: the ground-pick gate above spans
@@ -3367,13 +3394,20 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   /// the HUD's exit; the camera, flight and render toggles would only fight
   /// the city camera, so they are not offered.
   ///
+  /// Whenever the HUD is NOT up (no colony to play), its exit is not
+  /// either, so a home button leads the row: city mode never leaves the
+  /// player with no way out. There is no system back on the desktop.
+  ///
   /// Top LEFT, just under the HUD's one-row bar. The HUD's drawers hang
   /// from the bar's RIGHT end and grow down it — a busy bar reaches the
   /// window edge and takes the Budget drawer with it — and the toolbar grows
   /// up from the bottom, so this corner is the one neither reaches at the
-  /// default window size. Where a narrow window makes them meet, these sit
-  /// beneath both in the stack.
+  /// default window size. Two short rows, not a column, so it ends well
+  /// above the toolbar's tallest row (Build's buildings). Where a narrow
+  /// window makes them meet, these sit beneath both in the stack.
   Widget _cityViewControls() {
+    final canLeave =
+        _editingCity == null && Navigator.of(context).canPop();
     return Positioned.fill(
       child: SafeArea(
         child: Align(
@@ -3382,60 +3416,82 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
             padding: const EdgeInsets.only(left: 8, top: 72),
             child: Column(
               mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                FloatingActionButton.small(
-                  heroTag: 'save',
-                  tooltip: 'Save',
-                  onPressed: _save,
-                  child: const Icon(Icons.save),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (canLeave) ...[
+                      FloatingActionButton.small(
+                        heroTag: 'menu',
+                        tooltip: 'Leave the colony',
+                        onPressed: () => Navigator.of(context).maybePop(),
+                        child: const Icon(Icons.home),
+                      ),
+                      const SizedBox(width: 8),
+                    ],
+                    FloatingActionButton.small(
+                      heroTag: 'save',
+                      tooltip: 'Save',
+                      onPressed: _save,
+                      child: const Icon(Icons.save),
+                    ),
+                    const SizedBox(width: 8),
+                    FloatingActionButton.small(
+                      heroTag: 'load',
+                      tooltip: 'Load',
+                      onPressed: _savedGame == null ? null : _load,
+                      backgroundColor:
+                          _savedGame == null ? Colors.grey : null,
+                      child: const Icon(Icons.folder_open),
+                    ),
+                    const SizedBox(width: 8),
+                    FloatingActionButton.small(
+                      heroTag: 'debug',
+                      tooltip: 'Debug panel',
+                      backgroundColor: _showDebugPanel
+                          ? const Color(0xFF7FB0E0)
+                          : const Color(0xFF2A3A4A),
+                      onPressed: () =>
+                          setState(() => _showDebugPanel = !_showDebugPanel),
+                      child: const Icon(Icons.bug_report),
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 8),
-                FloatingActionButton.small(
-                  heroTag: 'load',
-                  tooltip: 'Load',
-                  onPressed: _savedGame == null ? null : _load,
-                  backgroundColor: _savedGame == null ? Colors.grey : null,
-                  child: const Icon(Icons.folder_open),
-                ),
-                const SizedBox(height: 16),
-                FloatingActionButton.small(
-                  heroTag: 'warpup',
-                  tooltip: 'Faster (.)',
-                  onPressed: () => _stepWarp(1),
-                  child: const Icon(Icons.fast_forward),
-                ),
-                const SizedBox(height: 6),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                  decoration: BoxDecoration(
-                      color: const Color(0xFF2A3A4A),
-                      borderRadius: BorderRadius.circular(16)),
-                  child: Text(
-                    _warpReadout(),
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold),
-                  ),
-                ),
-                const SizedBox(height: 6),
-                FloatingActionButton.small(
-                  heroTag: 'warpdown',
-                  tooltip: 'Slower (,)',
-                  onPressed: () => _stepWarp(-1),
-                  child: const Icon(Icons.fast_rewind),
-                ),
-                const SizedBox(height: 16),
-                FloatingActionButton.small(
-                  heroTag: 'debug',
-                  tooltip: 'Debug panel',
-                  backgroundColor: _showDebugPanel
-                      ? const Color(0xFF7FB0E0)
-                      : const Color(0xFF2A3A4A),
-                  onPressed: () =>
-                      setState(() => _showDebugPanel = !_showDebugPanel),
-                  child: const Icon(Icons.bug_report),
+                // Minus / readout / plus, as the flight stack lays it out.
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    FloatingActionButton.small(
+                      heroTag: 'warpdown',
+                      tooltip: 'Slower (,)',
+                      onPressed: () => _stepWarp(-1),
+                      child: const Icon(Icons.fast_rewind),
+                    ),
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 6),
+                      decoration: BoxDecoration(
+                          color: const Color(0xFF2A3A4A),
+                          borderRadius: BorderRadius.circular(16)),
+                      child: Text(
+                        _warpReadout(),
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    FloatingActionButton.small(
+                      heroTag: 'warpup',
+                      tooltip: 'Faster (.)',
+                      onPressed: () => _stepWarp(1),
+                      child: const Icon(Icons.fast_forward),
+                    ),
+                  ],
                 ),
               ],
             ),

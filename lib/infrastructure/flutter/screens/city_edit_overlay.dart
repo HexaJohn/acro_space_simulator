@@ -276,7 +276,11 @@ class CityEditOverlay extends StatefulWidget {
 
   final CityEditController controller;
   final CitySim city;
-  final VoidCallback onClose;
+
+  /// Put the editor away; null where there is nothing to put it away TO
+  /// (the city game, whose whole view is the editor), and then the toolbar
+  /// offers no Close button.
+  final VoidCallback? onClose;
 
   @override
   State<CityEditOverlay> createState() => _CityEditOverlayState();
@@ -291,7 +295,7 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
 
   CityEditController get controller => widget.controller;
   CitySim get city => widget.city;
-  VoidCallback get onClose => widget.onClose;
+  VoidCallback? get onClose => widget.onClose;
 
   /// The readout drawer currently open, or null when the strip is bare. One at
   /// a time: these are tall, and the point of the in-world editor is that you
@@ -347,6 +351,7 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
                 _stat('Ore', city.stockOf('ore')),
                 _stat('Pop', city.population),
                 const SizedBox(width: 8),
+                if (onClose != null)
                 IconButton(
                   // Down tools first: the listener that keeps the world's
                   // overlays in step with the editor takes the road tool's
@@ -354,7 +359,7 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
                   // hanging over the view.
                   onPressed: () {
                     controller.set(CityEditTool.inspect);
-                    onClose();
+                    onClose!();
                   },
                   icon: const Icon(Icons.close, size: 16),
                   color: const Color(0xFF9FB4CC),

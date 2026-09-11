@@ -137,7 +137,9 @@ class _CityGameHudState extends State<CityGameHud> {
         borderRadius: BorderRadius.circular(8),
         border: Border.all(color: const Color(0xFF24313F)),
       ),
-      child: SingleChildScrollView(
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Flexible(
+            child: SingleChildScrollView(
         scrollDirection: Axis.horizontal,
         child: Row(mainAxisSize: MainAxisSize.min, children: [
           _tierChip(tier, next),
@@ -166,15 +168,20 @@ class _CityGameHudState extends State<CityGameHud> {
                 'is held'),
           _panelButton(CityGamePanel.milestones, Icons.emoji_events, 'Goals'),
           _panelButton(CityGamePanel.budget, Icons.account_balance, 'Budget'),
-          if (widget.onExit != null)
-            IconButton(
-              onPressed: widget.onExit,
-              icon: const Icon(Icons.logout, size: 16),
-              color: AppTheme.textDim,
-              tooltip: 'Leave the colony',
-            ),
         ]),
-      ),
+        )),
+        // OUTSIDE the scroll, at the bar's end: on a window too narrow for
+        // the bar the readouts scroll, but a mouse cannot drag a row
+        // sideways on the desktop, and an exit scrolled out of reach is no
+        // exit at all.
+        if (widget.onExit != null)
+          IconButton(
+            onPressed: widget.onExit,
+            icon: const Icon(Icons.logout, size: 16),
+            color: AppTheme.textDim,
+            tooltip: 'Leave the colony',
+          ),
+      ]),
     );
   }
 
@@ -539,7 +546,8 @@ class _CityGameHudState extends State<CityGameHud> {
         padding: const EdgeInsets.only(bottom: 2),
         child: Text(
             '${formatMoney(city.roadUpkeepPerWeek)} a week for '
-            '${city.layout.roads.length} roads',
+            '${city.layout.roads.length} '
+            '${city.layout.roads.length == 1 ? 'road' : 'roads'}',
             style: AppTheme.dim.copyWith(fontSize: 10)),
       ),
       const Divider(height: 14, color: Color(0xFF1E2A38)),

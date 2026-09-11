@@ -12,10 +12,12 @@
 // topmost the toolbar and the HUD were inside the body. City mode keeps only
 // what the city uses, beneath the toolbar and the HUD.
 import 'package:acro_space_simulator/domain/colony/city/city_config.dart';
+import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_starter_kit.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_catalog.dart';
 import 'package:acro_space_simulator/domain/universe/real_solar_system.dart';
-import 'package:acro_space_simulator/infrastructure/flutter/screens/road_tool_controller.dart';
+import 'package:acro_space_simulator/infrastructure/flutter/screens/city_edit_overlay.dart';
+import 'package:acro_space_simulator/infrastructure/flutter/screens/city_game_hud.dart';
 import 'package:acro_space_simulator/infrastructure/flutter/simulation_view.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -89,11 +91,22 @@ void main() {
     }
   });
 
+  /// Tap [f] where it is shown: scrolled into view first — the toolbar and
+  /// the HUD's bar scroll sideways where the (test) font runs wide — and
+  /// then really hittable, so a tap that would miss fails here rather than
+  /// leaving the check after it vacuous.
+  Future<void> tapShown(WidgetTester t, Finder f) async {
+    await t.ensureVisible(f);
+    await t.pump();
+    expect(f.hitTestable(), findsOneWidget, reason: '$f is clickable');
+    await t.tap(f);
+    await t.pump();
+  }
+
   testWidgets('at the default window size nothing covers the Budget drawer',
       (t) async {
     await pumpCity(t);
-    await t.tap(find.text('Budget'));
-    await t.pump();
+    await tapShown(t, find.text('Budget'));
     expect(find.text('Tax rate'), findsOneWidget);
     expectUncovered(t, find.byType(Slider), 'the tax slider');
   });
@@ -103,10 +116,9 @@ void main() {
     await pumpCity(t);
     // Open what reaches furthest into the corners, and the city's own
     // controls must still be clear of it.
-    await t.tap(find.text('Road'));
-    await t.pump();
-    await t.tap(find.text('Budget'));
-    await t.pump();
+    await tapShown(t, find.text('Road'));
+    await tapShown(t, find.text('Budget'));
+    expect(find.text('Tax rate'), findsOneWidget);
     for (final tag in ['save', 'load']) {
       expect(fab(tag).hitTestable(), findsOneWidget, reason: tag);
     }
@@ -126,5 +138,103 @@ void main() {
     ]) {
       expect(fab(tag), findsNothing, reason: '$tag is a flight control');
     }
+  });
+
+  testWidgets('with any tool held, every city control stays clickable',
+      (t) async {
+    await pumpCity(t);
+    // Build's row of buildings is the toolbar's tallest; it once covered
+    // the debug toggle at the foot of a ~320 px column.
+    for (final tool in ['Zone', 'Road', 'Traffic', 'Build', 'Clear']) {
+      await tapShown(t, find.text(tool).first);
+      for (final tag in ['save', 'load', 'warpdown', 'warpup', 'debug']) {
+        expect(fab(tag).hitTestable(), findsOneWidget,
+            reason: '$tag with the $tool tool held');
+      }
+    }
+  });
+
+  /// The city game as the app opens it: pushed over a page, so that
+  /// leaving has somewhere to go back to.
+  Future<CitySim> pushCity(WidgetTester t, {bool withColony = true}) async {
+    t.view.physicalSize = window;
+    t.view.devicePixelRatio = 1.0;
+    addTearDown(t.view.reset);
+    final colony = CityStarterKit.found(
+      bodies: RealSolarSystem.build().all.where((b) => !b.isStar).toList(),
+      config: const CityConfig(bodyId: 'earth', latitude: 12, longitude: 20),
+      id: 'controls',
+    );
+    await t.pumpWidget(MaterialApp(
+      home: Builder(
+        builder: (context) => Scaffold(
+          body: Center(
+            child: TextButton(
+              onPressed: () => Navigator.of(context).push(MaterialPageRoute<void>(
+                builder: (_) => SimulationView(
+                  injectedCity: withColony ? colony : null,
+                  cityMode: true,
+                  spawnDemoOrbiter: false,
+                ),
+              )),
+              child: const Text('open the colony'),
+            ),
+          ),
+        ),
+      ),
+    ));
+    await t.tap(find.text('open the colony'));
+    // The route's transition; the view's ticker never lets it settle.
+    for (var i = 0; i < 30; i++) {
+      await t.pump(const Duration(milliseconds: 20));
+    }
+    expect(find.byType(SimulationView), findsOneWidget);
+    return colony;
+  }
+
+  Finder leaveButton() => find.byTooltip('Leave the colony');
+
+  testWidgets('the city game offers no Close editor to strand the player on',
+      (t) async {
+    await pushCity(t);
+    // Closing the editor took the HUD — and its exit — with it, and left a
+    // bare planet with nothing to reopen it by.
+    expect(find.byTooltip('Close editor'), findsNothing);
+    expect(leaveButton().hitTestable(), findsOneWidget);
+  });
+
+  testWidgets('Load puts the player back in the editor, exit and all',
+      (t) async {
+    final injected = await pushCity(t);
+    await tapShown(t, fab('save'));
+    await tapShown(t, fab('load'));
+    for (var i = 0; i < 5; i++) {
+      await t.pump(const Duration(milliseconds: 20));
+    }
+    // The editor is open again on the colony the load brought back: a new
+    // object with the same id, not the ghost the load replaced. That is
+    // also the proof the load ran — a Load that did nothing would leave the
+    // editor on the injected colony. (Its snackbar is no proof here: it
+    // queues behind Save's.)
+    final overlay = find.byType(CityEditOverlay);
+    expect(overlay, findsOneWidget);
+    final city = t.widget<CityEditOverlay>(overlay).city;
+    expect(city.id, 'controls');
+    expect(identical(city, injected), isFalse,
+        reason: 'the editor must follow the loaded colony');
+    expect(t.widget<CityGameHud>(find.byType(CityGameHud)).city, same(city));
+    expect(leaveButton().hitTestable(), findsOneWidget);
+    expect(fab('save').hitTestable(), findsOneWidget);
+  });
+
+  testWidgets('with no colony up, city mode still has a way home', (t) async {
+    await pushCity(t, withColony: false);
+    expect(find.byType(CityGameHud), findsNothing);
+    await tapShown(t, fab('menu'));
+    for (var i = 0; i < 30; i++) {
+      await t.pump(const Duration(milliseconds: 20));
+    }
+    expect(find.byType(SimulationView), findsNothing);
+    expect(find.text('open the colony'), findsOneWidget);
   });
 }
