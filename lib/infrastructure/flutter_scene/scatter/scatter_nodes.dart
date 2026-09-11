@@ -992,39 +992,37 @@ class ScatterNodes {
   /// Corridor length a road's samples are merged into, metres.
   static const double _maskSegmentM = 40;
 
-  /// The roads on [bodyId], and a hash of everything about them the mask
-  /// reads: each road's id, half width, sample count, and the DIRECTIONS of
-  /// its two ends.
+  /// The roads on [bodyId], and a hash of each one's id, half width (to the
+  /// centimetre) and sample count.
   ///
   /// Counts alone were the old signature, and the road tool edits in place:
   /// an Upgrade keeps a road's id and controls, so its samples and the
-  /// colony's road count stay put while its width doubles, and an Adjust
-  /// drag re-lays a road as one road for one, with the same sample count
-  /// whenever its length moves by less than a sample. Neither rebuilt the
-  /// mask, and the trees stood on in the new lanes. The ends are hashed as
-  /// directions (to about six centimetres on an Earth-sized body) because
-  /// that is all the mask takes from a point: a road whose ground is
-  /// re-graded under it moves radially, which is the terrain's own
-  /// invalidation to answer, not a road that moved.
+  /// colony's road count stay put while its width doubles, and the trees
+  /// stood on in the new lanes. The width catches that. A road that MOVES
+  /// always gets a new id — an Adjust drag re-lays it, one road for one and
+  /// often with the same sample count, under `layout.childIdFor`
+  /// (`CitySim.moveRoadEnd`) — so the id catches that, as it does a Draw or
+  /// a Bulldoze; a Reverse keeps the geometry and needs no catching.
+  ///
+  /// Nothing positional is hashed. A snapshot point is the drape radius
+  /// plus a tangent offset in METRES, so ground re-graded under a road
+  /// turns its points' directions too — five metres of fill two kilometres
+  /// out on the Moon is a few parts in a billion — and hashing its ends
+  /// re-scattered the whole colony whenever a pad or a cut reached one.
+  /// That is the terrain's own invalidation to answer, not a road that
+  /// moved.
   ///
   /// It runs every frame over every road, so it is folded by hand rather
-  /// than through `Object.hash`: over fifty thousand roads, in a debug test
-  /// run, that measured 13 ms against this 8 and the old counts' 3.
+  /// than through `Object.hash`.
   static ({int roads, int hash}) roadMaskSignature(
       Iterable<RoadSnapshot> roads, String bodyId) {
     var count = 0, h = 0;
     for (final r in roads) {
       if (r.body != bodyId) continue;
       count++;
-      final p = r.points;
-      final n = p.length ~/ 3;
       h = _fold(h, r.id.hashCode);
       h = _fold(h, (r.halfWidthM * 100).round());
-      h = _fold(h, n);
-      if (n == 0) continue;
-      h = _foldEnd(h, p[0], p[1], p[2]);
-      final last = 3 * (n - 1);
-      h = _foldEnd(h, p[last], p[last + 1], p[last + 2]);
+      h = _fold(h, r.points.length ~/ 3);
     }
     return (roads: count, hash: h);
   }
@@ -1032,17 +1030,6 @@ class ScatterNodes {
   /// One value into a running hash, kept to 30 bits so the arithmetic is
   /// exact on the web too.
   static int _fold(int h, int v) => (h * 31 + (v & 0x3fffffff)) & 0x3fffffff;
-
-  /// A road end's unit direction from the body centre, each component
-  /// quantised to 1e-8.
-  static int _foldEnd(int h, double x, double y, double z) {
-    final len = math.sqrt(x * x + y * y + z * z);
-    if (len <= 0) return _fold(h, 0);
-    final q = 1e8 / len;
-    h = _fold(h, (x * q).round());
-    h = _fold(h, (y * q).round());
-    return _fold(h, (z * q).round());
-  }
 
   /// Adds [r]'s corridor to [builder], [_roadMarginM] wider than its
   /// carriageway, and returns how many capsules that took.

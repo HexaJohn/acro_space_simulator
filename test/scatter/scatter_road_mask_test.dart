@@ -9,6 +9,7 @@
 library;
 
 import 'package:acro_space_simulator/application/snapshot/world_snapshot.dart';
+import 'package:acro_space_simulator/domain/colony/surface_placement.dart';
 import 'package:acro_space_simulator/domain/scatter/scatter_mask.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/scatter/scatter_nodes.dart';
@@ -22,15 +23,14 @@ void main() {
       Vector3(groundR, east, north).normalized;
 
   /// A road sampled every 6 m, as the snapshot samples one, from
-  /// ([eastStart], -300) to ([eastEnd], 300), [up] metres over the ground,
-  /// with a deck [liftAt] each sample's north when given.
+  /// ([eastStart], -300) to ([eastEnd], 300) on the ground, with a deck
+  /// [liftAt] each sample's north when given.
   RoadSnapshot road({
     String id = 'r0',
     String body = 'earth',
     double halfWidthM = 4,
     double eastStart = 0,
     double eastEnd = 0,
-    double up = 0,
     double Function(double north)? liftAt,
   }) {
     const n = 101;
@@ -39,8 +39,8 @@ void main() {
     for (var k = 0; k < n; k++) {
       final t = k / (n - 1);
       final north = -300 + 600 * t;
-      final p = dirAt(eastStart + (eastEnd - eastStart) * t, north) *
-          (groundR + up);
+      final p =
+          dirAt(eastStart + (eastEnd - eastStart) * t, north) * groundR;
       pts.addAll([p.x, p.y, p.z]);
       if (liftAt != null) lifts.add(liftAt(north));
     }
@@ -122,13 +122,45 @@ void main() {
       expect(dragged.points.length, road().points.length,
           reason: 'too small a move to change the sample count');
       expect(sig([dragged]), isNot(base));
-      expect(sig([road(eastStart: 4)]), isNot(base),
-          reason: 'either end, even keeping the id');
     });
 
     test('ground re-graded under a road is not a road that moved', () {
-      expect(sig([road(up: 2)]), base);
-      expect(sig([road()]), base);
+      // Placed as the snapshot places a road (city.localToBodyFixed): the
+      // tangent offset is in metres, so the ground's radius leaks into a
+      // point's DIRECTION. Two kilometres out on the Moon, five metres of
+      // fill turns the road's ends by a few parts in a billion.
+      const moonR = 1737400.0, ground = 120.0;
+      RoadSnapshot moonRoad(double groundM) {
+        final pts = <double>[];
+        for (var k = 0; k <= 10; k++) {
+          final p = const SurfacePlacement()
+              .place(
+                radius: moonR + groundM,
+                lat: 0.3,
+                lon: 0.5,
+                east: 2000,
+                north: -30 + 6.0 * k,
+              )
+              .position;
+          pts.addAll([p.x, p.y, p.z]);
+        }
+        return RoadSnapshot(
+          colonyId: 'c',
+          body: 'moon',
+          points: pts,
+          halfWidthM: 4,
+          roadClassIndex: 0,
+          id: 'r0',
+        );
+      }
+
+      Vector3 start(RoadSnapshot r) =>
+          Vector3(r.points[0], r.points[1], r.points[2]).normalized;
+      final before = moonRoad(ground), after = moonRoad(ground + 5);
+      expect((start(after) - start(before)).length, greaterThan(1e-9),
+          reason: 'the regrade does turn the end');
+      expect(ScatterNodes.roadMaskSignature([after], 'moon').hash,
+          ScatterNodes.roadMaskSignature([before], 'moon').hash);
     });
 
     test('only the body being drawn counts', () {
