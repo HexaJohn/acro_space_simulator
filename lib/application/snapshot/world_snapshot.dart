@@ -1064,8 +1064,24 @@ const CityTerrainShaper _roadCorridor = CityTerrainShaper();
 /// ([_followCorridor]) — well inside the ribbon's lift over the ground.
 const double _drapeChordTolM = 0.03;
 
-/// How many times [_followCorridor] may halve a 6 m span: down to 0.75 m.
-const int _drapeBisections = 3;
+/// Where along a span [_followCorridor] asks the corridor whether the
+/// straight line between its ends holds: a quarter, half and three quarters
+/// along. The middle alone missed a ledge off it — a two-lane's ground
+/// 0.16 m over the line a quarter of the way along a span whose middle
+/// was on it.
+const List<double> _drapeProbeFractions = [0.25, 0.5, 0.75];
+
+/// How many times [_followCorridor] may halve a span: a 6 m span down to
+/// 0.19 m. A ledge's bend grows with the grade into it (about half the
+/// grade per metre, per metre), and a street climbing off a levelled lot's
+/// step at 100% or more needs spans of a few tenths of a metre to stay
+/// within [_drapeChordTolM] of it.
+const int _drapeBisections = 5;
+
+/// Points [_followCorridor] may add to a road, per 6 m point it was given,
+/// its knots aside: what a road cut through relief may cost to draw. The
+/// worst spans are split first.
+const int _drapePointsPerSample = 4;
 
 /// A road's drape: its points — [samples], its 6 m points, and for a plain
 /// graded corridor as many between them as the corridor's bends need
@@ -1176,15 +1192,40 @@ const int _drapeBisections = 3;
       }
     }
     final fineSegs = fine ? square : null;
+    // The vertical curve each segment cut fine meets the one before it with
+    // (`TerrainBrush.curveHalfM`): as its brush was cut, or as the shaper
+    // will cut it.
+    List<(double, double)?>? curves;
+    if (fine) {
+      curves = List<(double, double)?>.filled(m, null);
+      for (var j = 1; j < m; j++) {
+        if (!square[j]) continue;
+        final key = 'road:${road.id}:$hw:${j + 1}';
+        if (city.corridorDatums.containsKey(key)) {
+          curves[j] = city.corridorCurves[key];
+          continue;
+        }
+        final c = _roadCorridor.corridorCurve(
+            knots[j - 1],
+            knots[j],
+            knots[j + 1],
+            datumStart[j - 1],
+            datumEnd[j - 1],
+            datumStart[j],
+            datumEnd[j],
+            road.halfWidth);
+        if (c != null) curves[j] = (c.inGrade, c.halfM);
+      }
+    }
     final pts = fine
-        ? _followCorridor(
-            samples, knots, datumStart, datumEnd, road.halfWidth, square)
+        ? _followCorridor(samples, knots, datumStart, datumEnd,
+            road.halfWidth, square, curves)
         : samples;
     final last = pts.length - 1;
     final radii = Float64List(pts.length);
     _roadCorridor.corridorGround(
         pts, knots, datumStart, datumEnd, road.halfWidth, radii,
-        fine: fineSegs);
+        fine: fineSegs, curves: curves);
     if (!cut || edits == null) return (pts: pts, radii: radii, dirs: null);
     // Once cut, the corridor is exact where nothing has been laid over it
     // since, and the ground is asked, point by point, only where something
@@ -1237,10 +1278,20 @@ const int _drapeBisections = 3;
   return (pts: pts, radii: radii, dirs: null);
 }
 
-/// [pts], a graded road's 6 m points in order, with a point added halfway
-/// along each span whose middle the corridor leaves the straight line
-/// between its ends by more than [_drapeChordTolM] — and again in each half
-/// so split, [_drapeBisections] times at most.
+/// [pts], a graded road's 6 m points in order, with the knots either side
+/// of each segment cut fine among them ([_withKnots]), and a point added
+/// halfway along each span where the corridor leaves the straight line
+/// between its ends by more than [_drapeChordTolM] at any of
+/// [_drapeProbeFractions] — and again in each half so split,
+/// [_drapeBisections] times at most, worst first, within
+/// [_drapePointsPerSample] added per point given.
+///
+/// The knots because the grade turns there: where a segment cut fine starts
+/// level (`TerrainBrush.squareStart` with no vertical curve — where the road
+/// bends), the one before it meets the knot level and the ground leaves it
+/// at the next grade, a corner no line between points either side of it
+/// follows — a curved one-way was drawn 1.37 m in its own ground across
+/// one. Where it starts in a vertical curve the knot is the curve's middle.
 ///
 /// The road is drawn as straight lines between its points, and its
 /// corridor is not straight between them: where a road climbs into a knot
@@ -1262,47 +1313,126 @@ List<Vec2> _followCorridor(
     Float64List datumStart,
     Float64List datumEnd,
     double halfWidthM,
-    List<bool> fine) {
-  var cur = pts;
-  // Whether the span from cur[i] to cur[i + 1] is still to be tested.
-  var open = List<bool>.filled(math.max(0, pts.length - 1), true);
-  for (var round = 0; round < _drapeBisections; round++) {
+    List<bool> fine,
+    List<(double, double)?>? curves) {
+  var cur = _withKnots(pts, knots, fine);
+  final budget = cur.length + _drapePointsPerSample * pts.length;
+  const probes = _drapeProbeFractions;
+  // Whether the span from cur[i] to cur[i + 1] is still to be tested, and
+  // how many times it has been halved.
+  var open = List<bool>.filled(math.max(0, cur.length - 1), true);
+  var depth = List<int>.filled(open.length, 0);
+  while (true) {
+    // Every point, in order — the corridor finds each point's segment by
+    // searching on from the last one's — each followed by the probes of
+    // its span if that is still to be tested.
     final q = <Vec2>[];
-    final isMid = <bool>[];
+    final at = List<int>.filled(cur.length, 0);
     for (var i = 0; i < cur.length; i++) {
+      at[i] = q.length;
       q.add(cur[i]);
-      isMid.add(false);
       if (i < open.length && open[i]) {
-        q.add((cur[i] + cur[i + 1]) * 0.5);
-        isMid.add(true);
+        final a = cur[i], run = cur[i + 1] - cur[i];
+        for (final f in probes) {
+          q.add(a + run * f);
+        }
       }
     }
     if (q.length == cur.length) break;
     final r = Float64List(q.length);
     _roadCorridor.corridorGround(
         q, knots, datumStart, datumEnd, halfWidthM, r,
-        fine: fine);
+        fine: fine, curves: curves);
+    // The spans whose corridor leaves their line, by how far.
+    final off = <(int, double)>[];
+    for (var i = 0; i < open.length; i++) {
+      if (!open[i] || depth[i] >= _drapeBisections) continue;
+      final ra = r[at[i]], rb = r[at[i + 1]];
+      var worst = 0.0;
+      for (var k = 0; k < probes.length; k++) {
+        worst = math.max(
+            worst, (r[at[i] + 1 + k] - (ra + (rb - ra) * probes[k])).abs());
+      }
+      if (worst > _drapeChordTolM) off.add((i, worst));
+    }
+    if (off.isEmpty || cur.length >= budget) break;
+    off.sort((x, y) => y.$2.compareTo(x.$2));
+    final split = {
+      for (final (i, _) in off.take(budget - cur.length)) i,
+    };
     final next = <Vec2>[];
     final nextOpen = <bool>[];
-    for (var k = 0; k < q.length; k++) {
-      if (!isMid[k]) {
-        next.add(q[k]);
+    final nextDepth = <int>[];
+    for (var i = 0; i < cur.length; i++) {
+      next.add(cur[i]);
+      if (i == cur.length - 1) break;
+      if (split.contains(i)) {
+        // Halved: both halves are tested again.
+        next.add((cur[i] + cur[i + 1]) * 0.5);
+        nextOpen
+          ..add(true)
+          ..add(true);
+        nextDepth
+          ..add(depth[i] + 1)
+          ..add(depth[i] + 1);
+      } else {
         nextOpen.add(false);
-        continue;
+        nextDepth.add(depth[i]);
       }
-      if ((r[k] - (r[k - 1] + r[k + 1]) / 2).abs() <= _drapeChordTolM) {
-        continue;
-      }
-      // Kept: both halves of its span are tested again.
-      nextOpen[nextOpen.length - 1] = true;
-      next.add(q[k]);
-      nextOpen.add(true);
     }
-    if (next.length == cur.length) break;
     cur = next;
-    open = nextOpen.sublist(0, next.length - 1);
+    open = nextOpen;
+    depth = nextDepth;
   }
   return cur;
+}
+
+/// [pts], a road's points in order, with each interior knot of [knots]
+/// either side of which a segment was cut fine ([fine]) put in among them
+/// where it falls along the road: after the point whose span to the next
+/// it lies along (the nearest, searched on from the last knot's — the
+/// knots are in order too). A knot within 5 cm of a point is left out: that
+/// point is it, near enough.
+///
+/// The knots lie on the road's own line — `road.sample` at the corridor's
+/// step — carried into the frame's plane ([_drapeRoad]'s corridorScale),
+/// millimetres off it for a road the player lays near the site.
+List<Vec2> _withKnots(List<Vec2> pts, List<Vec2> knots, List<bool> fine) {
+  final m = knots.length - 1;
+  if (pts.length < 2 || m < 2) return pts;
+  // Squared distance from [p] to span [s], and where along it.
+  (double, double) along(Vec2 p, int s) {
+    final a = pts[s], run = pts[s + 1] - pts[s];
+    final len2 = run.e * run.e + run.n * run.n;
+    var t = len2 <= 1e-12
+        ? 0.0
+        : ((p.e - a.e) * run.e + (p.n - a.n) * run.n) / len2;
+    t = t < 0 ? 0.0 : (t > 1 ? 1.0 : t);
+    final ce = a.e + run.e * t - p.e, cn = a.n + run.n * t - p.n;
+    return (ce * ce + cn * cn, t);
+  }
+
+  // The knots to put in, by the span they fall along.
+  final bySpan = <int, List<Vec2>>{};
+  var s = 0;
+  for (var k = 1; k < m; k++) {
+    if (!fine[k - 1] && !fine[k]) continue;
+    final p = knots[k];
+    while (s < pts.length - 2 && along(p, s + 1).$1 <= along(p, s).$1) {
+      s++;
+    }
+    final (_, t) = along(p, s);
+    final len = pts[s].distanceTo(pts[s + 1]);
+    if (t * len < 0.05 || (1 - t) * len < 0.05) continue;
+    (bySpan[s] ??= []).add(p);
+  }
+  if (bySpan.isEmpty) return pts;
+  return [
+    for (var i = 0; i < pts.length; i++) ...[
+      pts[i],
+      ...?bySpan[i],
+    ],
+  ];
 }
 
 /// The brushes laid over a road's cut corridor since it was cut: each brush
@@ -2082,6 +2212,8 @@ class TerrainEditSnapshot {
     this.polygon = const [],
     this.minVoxel = 0,
     this.squareStart = false,
+    this.curveInGrade = 0,
+    this.curveHalf = 0,
   });
 
   /// Body id — joins to [WorldSnapshot.bodies].
@@ -2144,6 +2276,12 @@ class TerrainEditSnapshot {
   /// the road is draped on.
   final bool squareStart;
 
+  /// The vertical curve a square-started corridor meets the grade before it
+  /// with ([TerrainBrush.curveInGrade], [TerrainBrush.curveHalfM]; a half
+  /// length of 0 is none) — the shape of the ground, carried like
+  /// [squareStart].
+  final double curveInGrade, curveHalf;
+
   static TerrainEditSnapshot of(BodyId body, TerrainBrush b) =>
       TerrainEditSnapshot(
         body: body.value,
@@ -2164,6 +2302,8 @@ class TerrainEditSnapshot {
         benches: b.benches,
         minVoxel: b.minVoxelM,
         squareStart: b.squareStart,
+        curveInGrade: b.curveInGrade,
+        curveHalf: b.curveHalfM,
         ex: b.endBF?.x,
         ey: b.endBF?.y,
         ez: b.endBF?.z,
@@ -2189,6 +2329,8 @@ class TerrainEditSnapshot {
         benches: benches,
         minVoxelM: minVoxel,
         squareStart: squareStart,
+        curveInGrade: curveInGrade,
+        curveHalfM: curveHalf,
         endBF: ex == null || ey == null || ez == null
             ? null
             : Vector3(ex!, ey!, ez!),
@@ -2213,6 +2355,7 @@ class TerrainEditSnapshot {
         if (benches != 1) 'b': benches,
         if (minVoxel != 0) 'mv': minVoxel,
         if (squareStart) 'sq': true,
+        if (curveHalf != 0) 'vc': [curveInGrade, curveHalf],
         if (ex != null) 'e': [ex, ey, ez],
         if (polygon.isNotEmpty) 'poly': polygon,
       };
@@ -2221,6 +2364,7 @@ class TerrainEditSnapshot {
     final c = (j['c'] as List?) ?? const [0, 0, 0];
     final a = (j['a'] as List?) ?? const [0, 0, 1];
     final e = j['e'] as List?;
+    final vc = j['vc'] as List?;
     return TerrainEditSnapshot(
       body: j['body'] as String,
       kind: (j['kind'] as num?)?.toInt() ?? 0,
@@ -2240,6 +2384,8 @@ class TerrainEditSnapshot {
       benches: (j['b'] as num?)?.toInt() ?? 1,
       minVoxel: (j['mv'] as num?)?.toDouble() ?? 0,
       squareStart: j['sq'] == true,
+      curveInGrade: vc == null ? 0 : (vc[0] as num).toDouble(),
+      curveHalf: vc == null ? 0 : (vc[1] as num).toDouble(),
       ex: e == null ? null : (e[0] as num).toDouble(),
       ey: e == null ? null : (e[1] as num).toDouble(),
       ez: e == null ? null : (e[2] as num).toDouble(),

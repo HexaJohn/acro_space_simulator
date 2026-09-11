@@ -3314,6 +3314,14 @@ class CitySim {
   /// its pristine ground.
   final Map<String, (double, double)> corridorDatums = {};
 
+  /// The vertical curve (the grade before it, and the curve's half length
+  /// in metres) each plain road corridor segment cut fine starts with, by
+  /// its [shapedTerrain] key — kept as the brush is recorded
+  /// (`CityTerrainShaper.markShaped`, `TerrainBrush.curveHalfM`), for the
+  /// road to be drawn on the ground its brush cut. A segment with none is
+  /// not here. Transient, like [corridorDatums].
+  final Map<String, (double, double)> corridorCurves = {};
+
   /// The plain road corridor segments, by their [shapedTerrain] keys, cut
   /// to be meshed finer than the colony's ground: the ground they were laid
   /// over stood off their grade by more than the colony's voxel carries

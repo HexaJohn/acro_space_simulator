@@ -7,11 +7,39 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import '../../shared/vector3.dart';
+import '../../terrain/cubed_sphere.dart';
 import '../../terrain/terrain_brush.dart';
+import '../../terrain/terrain_lod.dart';
 import '../surface_placement.dart';
 import 'city_building_spec.dart';
 import 'city_sim.dart';
 import 'parcel.dart';
+
+/// The lateral resolution the renderer meshes chunk [k] of a body of
+/// [radiusM] at among the edit [brushes] near it: [editResolutionFor], a
+/// colony's own brushes — content with [CityTerrainShaper.colonyVoxelM] or
+/// coarser — judged on the datum as they always were, and anything finer (a
+/// road cut through relief, a crater) on the ground it lies on.
+///
+/// `TerrainNodes` meshes every leaf at this and nothing else: the one place
+/// the renderer's choice is made, pure, so a test holds the choice the
+/// renderer makes. Judged on the ground, a generated town's leaves were
+/// boosted — 38 and 47 of them in view of a two- and a four-block town —
+/// and its terrain's triangles doubled.
+int colonyEditResolutionFor(
+  ChunkKey k,
+  double radiusM,
+  int resolution,
+  Iterable<TerrainBrush> brushes, {
+  int maxBoost = 4,
+  double voxelsAcrossBrush = 8,
+  double? circumradiusM,
+}) =>
+    editResolutionFor(k, radiusM, resolution, brushes,
+        maxBoost: maxBoost,
+        voxelsAcrossBrush: voxelsAcrossBrush,
+        circumradiusM: circumradiusM,
+        datumTestFromVoxelM: CityTerrainShaper.colonyVoxelM);
 
 /// Turns a colony's layout into terrain deformation.
 ///
@@ -36,7 +64,10 @@ class CityTerrainShaper {
     this.corridorReliefTolM = 0.5,
     this.corridorCrossFallTolM = 1.0,
     this.corridorVoxelsAcross = 4,
+    this.corridorVoxelsAcrossFalloff = 3,
     this.minCorridorVoxelM = 1,
+    this.corridorCurveHalfM = 5,
+    this.corridorCurveCrossFallTolM = 0.03,
   });
 
   /// How far a levelled pad extends beyond the building footprint.
@@ -100,9 +131,31 @@ class CityTerrainShaper {
   /// under the road IS the road's grade (a one-way: 2 m, within 0.1 m of it).
   final double corridorVoxelsAcross;
 
+  /// Voxels across a corridor's easing ([roadFalloffM]) when it cuts or
+  /// fills past [corridorReliefTolM]: the finer voxel is no coarser than
+  /// that, however wide the road. [corridorVoxelsAcross] alone asked a
+  /// four-lane for 4 m, and its leaves were meshed a level coarser than a
+  /// one-way's: a 6 m ease meshed in a voxel and a half, the square start
+  /// behind each segment smoothed into a hump 0.8 m over the carriageway
+  /// along 14% of it.
+  final double corridorVoxelsAcrossFalloff;
+
   /// Floor (m) under that finer voxel, so a narrow path cannot drag the
   /// quadtree past the levels a road needs.
   final double minCorridorVoxelM;
+
+  /// Half the length (m) of the vertical curve a segment cut fine meets
+  /// the grade before it with ([corridorCurve], `TerrainBrush.curveHalfM`),
+  /// where the segments either side are long enough. Ten metres of curve
+  /// turn a grade of 1.86 at 0.19 per metre, which the fine voxel meshes
+  /// within 0.08 m; the six-metre ease of a square start alone was 1.05.
+  final double corridorCurveHalfM;
+
+  /// How far (m) a vertical curve may tilt the carriageway across where a
+  /// road bends at the knot ([corridorCurve]): measured along the next
+  /// segment, the curve runs square to it, and the carriageway through a
+  /// bend is not.
+  final double corridorCurveCrossFallTolM;
 
   /// Brushes for everything in [city] that is not yet shaped.
   ///
@@ -267,6 +320,20 @@ class CityTerrainShaper {
         final key = 'road:${road.id}:$hw:$i';
         final a = pts[i - 1], b = pts[i];
         if (fine.contains(i)) city.fineCorridors.add(key);
+        // A segment cut fine meets the grade before it in a vertical curve
+        // ([corridorCurve]) — that segment's datums as it was cut, or as it
+        // is about to be.
+        ({double inGrade, double halfM})? curve;
+        if (fine.contains(i) && i >= 2) {
+          final prev = city.corridorDatums['road:${road.id}:$hw:${i - 1}'] ??
+              (todo.contains(i - 1)
+                  ? (groundUnder(pts[i - 2]), groundUnder(a))
+                  : null);
+          if (prev != null) {
+            curve = corridorCurve(pts[i - 2], a, b, prev.$1, prev.$2,
+                groundUnder(a), groundUnder(b), road.halfWidth);
+          }
+        }
         out.add((
           key: key,
           brush: TerrainBrush.cutFill(
@@ -285,6 +352,8 @@ class CityTerrainShaper {
             // ([TerrainBrush.squareStart]), and is levelled a voxel past its
             // kerbs ([fineCoreM]). A coarse one is cut as it always was.
             squareStart: fine.contains(i),
+            curveInGrade: curve?.inGrade ?? 0,
+            curveHalfM: curve?.halfM ?? 0,
           ),
         ));
       }
@@ -292,12 +361,68 @@ class CityTerrainShaper {
     return out;
   }
 
+  /// The vertical curve a segment cut fine, from [knot] to [after], meets
+  /// the segment before it (from [before] to [knot]) with
+  /// (`TerrainBrush.curveHalfM`): the grade before it and the curve's half
+  /// length — or null for none, and it starts square and level
+  /// (`TerrainBrush.squareStart`). [beforeDatum] and [knotDatumIn] are the
+  /// datums the segment before it was cut to, [knotDatum] and [afterDatum]
+  /// this one's; [halfWidthM] is the road's.
+  ///
+  /// [corridorCurveHalfM], but no more than a quarter of either segment —
+  /// a curve at each end of a segment, and the grade carried on behind
+  /// each, never meet — nor reaching further behind the knot (twice its
+  /// half length) than a round start's easing does ([fineCoreM] and
+  /// [roadFalloffM]), and none shorter than half a metre. None where the two
+  /// segments do not meet at
+  /// one datum (the one before cut to ground since moved), and none where
+  /// the road bends at [knot] so far that the curve, square to this
+  /// segment, would tilt the carriageway across by more than
+  /// [corridorCurveCrossFallTolM]: there a level start is flat across.
+  ///
+  /// Public for the frame a road is laid in, before its corridor is cut:
+  /// it is drawn on the curve it is about to be cut with.
+  ({double inGrade, double halfM})? corridorCurve(
+      Vec2 before,
+      Vec2 knot,
+      Vec2 after,
+      double beforeDatum,
+      double knotDatumIn,
+      double knotDatum,
+      double afterDatum,
+      double halfWidthM) {
+    if ((knotDatumIn - knotDatum).abs() > 1e-6) return null;
+    final l0 = before.distanceTo(knot), l1 = knot.distanceTo(after);
+    if (l0 <= 1e-6 || l1 <= 1e-6) return null;
+    final h = math.min(
+        math.min(corridorCurveHalfM,
+            (fineCoreM(halfWidthM) + roadFalloffM) / 2),
+        math.min(l0, l1) / 4);
+    if (h < 0.5) return null;
+    final g0 = (knotDatumIn - beforeDatum) / l0;
+    final g1 = (afterDatum - knotDatum) / l1;
+    final ae = (knot.e - before.e) / l0, an = (knot.n - before.n) / l0;
+    final be = (after.e - knot.e) / l1, bn = (after.n - knot.n) / l1;
+    if (ae * be + an * bn <= 0) return null;
+    final bend = (ae * bn - an * be).abs();
+    if (math.max(g0.abs(), g1.abs()) * halfWidthM * bend >
+        corridorCurveCrossFallTolM) {
+      return null;
+    }
+    return (inGrade: g0, halfM: h);
+  }
+
   /// The voxel (m) a plain graded road's corridor, [halfWidthM] either side
   /// of its centreline, asks to be meshed at where the colony's voxel cannot
   /// carry it ([_fineSegments]): [corridorVoxelsAcross] across its
-  /// carriageway, no finer than [minCorridorVoxelM].
-  double _fineVoxelM(double halfWidthM) =>
-      math.max(minCorridorVoxelM, halfWidthM * 2 / corridorVoxelsAcross);
+  /// carriageway and [corridorVoxelsAcrossFalloff] across its easing,
+  /// whichever is finer, no finer than [minCorridorVoxelM]. A one-way or a
+  /// two-lane: 2 m either way; a four-lane or wider: 2 m, not a quarter of
+  /// its width.
+  double _fineVoxelM(double halfWidthM) => math.max(
+      minCorridorVoxelM,
+      math.min(halfWidthM * 2 / corridorVoxelsAcross,
+          roadFalloffM / corridorVoxelsAcrossFalloff));
 
   /// How far (m) from its centreline a corridor cut fine ([_fineSegments])
   /// is levelled flat: one of its voxels ([_fineVoxelM]) past the edge of a
@@ -418,6 +543,13 @@ class CityTerrainShaper {
     city.shapedTerrain.add(key);
     if (brush.kind == TerrainBrushKind.cutFill) {
       city.corridorDatums[key] = (brush.datumRadiusM, brush.datumRadiusEndM);
+      // And the vertical curve it meets the segment before it with, if any
+      // ([CitySim.corridorCurves]).
+      if (brush.curveHalfM > 0) {
+        city.corridorCurves[key] = (brush.curveInGrade, brush.curveHalfM);
+      } else {
+        city.corridorCurves.remove(key);
+      }
     }
   }
 
@@ -468,6 +600,12 @@ class CityTerrainShaper {
   /// ([CitySim.fineCorridors]): levelled [fineCoreM] either side, not
   /// [halfWidthM], and square at their start (`TerrainBrush.squareStart`).
   /// Null is every segment cut at the colony's voxel, as it always was.
+  ///
+  /// [curves], where given, holds for each segment the vertical curve it
+  /// meets the one before it with — its grade in and its half length
+  /// ([CitySim.corridorCurves], [corridorCurve]) — or null for none. Such a
+  /// segment is read in plan, as its brush reads it
+  /// (`TerrainBrush.curveHalfM`).
   void corridorGround(
     List<Vec2> pts,
     List<Vec2> knots,
@@ -476,6 +614,7 @@ class CityTerrainShaper {
     double halfWidthM,
     List<double> out, {
     List<bool>? fine,
+    List<(double, double)?>? curves,
   }) {
     final m = knots.length - 1;
     assert(m >= 1, 'a corridor has at least one segment');
@@ -557,6 +696,45 @@ class CityTerrainShaper {
             if (ex * ex + en * en > reach2) break;
           }
           if (plan2[j] <= 1e-9) continue;
+          final curve = curves == null ? null : curves[j];
+          if (curve != null) {
+            // A vertical curve at its start (`TerrainBrush.curveHalfM`):
+            // read in plan, whatever the point's height.
+            final (g0, h) = curve;
+            final planLen = math.sqrt(plan2[j]);
+            final u = plan(pe, pn, j);
+            final x = u * planLen;
+            final g1 = rise[j] / planLen;
+            final double target;
+            if (x < -h) {
+              target = datumStart[j] + g0 * x;
+            } else if (x <= h) {
+              target = datumStart[j] +
+                  g0 * x +
+                  (g1 - g0) * (x + h) * (x + h) / (4 * h);
+            } else if (u < 1) {
+              target = datumStart[j] + g1 * x;
+            } else {
+              target = datumEnd[j];
+            }
+            final double w;
+            if (u > 1) {
+              final ce = ke[j + 1] - pe, cn = kn[j + 1] - pn;
+              w = TerrainBrush.falloffWeight(
+                  math.sqrt(ce * ce + cn * cn), core[j], roadFalloffM);
+            } else {
+              final ce = ke[j] + de[j] * u - pe, cn = kn[j] + dn[j] * u - pn;
+              final lateral = math.sqrt(ce * ce + cn * cn);
+              w = u >= 0
+                  ? TerrainBrush.falloffWeight(lateral, core[j], roadFalloffM)
+                  : TerrainBrush.falloffWeight(math.max(-x - h, 0.0), 0, h) *
+                      TerrainBrush.falloffWeight(
+                          math.max(lateral - core[j], 0.0), 0, roadFalloffM);
+            }
+            if (w <= 0) continue;
+            v = v * (1 - w) + target * w;
+            continue;
+          }
           // Where the point, at radius r, projects along the segment's
           // chord as its brush projects it: in three dimensions.
           var t = ((pe - ke[j]) * de[j] +

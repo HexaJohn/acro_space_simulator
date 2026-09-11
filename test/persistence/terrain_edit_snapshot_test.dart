@@ -42,6 +42,11 @@ void main() {
       expect(back.squareStart, b.squareStart,
           reason: '$what: the shape of a fine corridor where it meets the '
               'segment before it');
+      expect(back.curveInGrade, b.curveInGrade,
+          reason: '$what: the grade a fine corridor\'s vertical curve turns '
+              'from');
+      expect(back.curveHalfM, b.curveHalfM,
+          reason: '$what: the length of a fine corridor\'s vertical curve');
       expect(back.endBF?.x, b.endBF?.x, reason: what);
       expect(back.endBF?.y, b.endBF?.y, reason: what);
       expect(back.endBF?.z, b.endBF?.z, reason: what);
@@ -123,6 +128,31 @@ void main() {
     final round = corridor(square: false);
     expectRoundTrip(round, what: 'round cutFill');
     expect(TerrainEditSnapshot.of(body, round).toJson().containsKey('sq'),
+        isFalse);
+  });
+
+  test('a corridor cut fine keeps the vertical curve it meets the segment '
+      'before it with; one without writes no curve', () {
+    TerrainBrush corridor({required double halfM}) => TerrainBrush.cutFill(
+          startBF: Vector3(1736500, 0, 0),
+          endBF: Vector3(1736498, 24, 3),
+          radiusM: 6,
+          datumRadiusM: 1736500.5,
+          datumRadiusEndM: 1736498.25,
+          falloffM: 6,
+          minVoxelM: 2,
+          squareStart: true,
+          curveInGrade: halfM == 0 ? 0 : 0.37,
+          curveHalfM: halfM,
+        );
+    // Dropped here, the renderer would mesh a square start held level while
+    // the road is draped over the curve.
+    final curved = corridor(halfM: 5);
+    expectRoundTrip(curved, what: 'curved cutFill');
+    expect(TerrainEditSnapshot.of(body, curved).toJson()['vc'], [0.37, 5.0]);
+    final plain = corridor(halfM: 0);
+    expectRoundTrip(plain, what: 'square cutFill with no curve');
+    expect(TerrainEditSnapshot.of(body, plain).toJson().containsKey('vc'),
         isFalse);
   });
 

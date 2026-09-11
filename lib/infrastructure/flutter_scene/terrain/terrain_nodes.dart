@@ -1916,12 +1916,12 @@ class TerrainNodes {
     final g = geom != null && geom.radiusM == radiusM ? geom.of(k) : null;
     // Radial-aware (the brush's own radius, not the datum) for a brush
     // finer than a colony's voxel; a colony's coarse brushes as they always
-    // were: see [editResolutionFor].
-    return editResolutionFor(k, radiusM, resolution, _nearBrushes,
+    // were. The one choice, shared with the tests that hold it: see
+    // [colonyEditResolutionFor].
+    return colonyEditResolutionFor(k, radiusM, resolution, _nearBrushes,
         maxBoost: editResBoost,
         voxelsAcrossBrush: editVoxelsAcross,
-        circumradiusM: g?.circumradiusM,
-        datumTestFromVoxelM: CityTerrainShaper.colonyVoxelM);
+        circumradiusM: g?.circumradiusM);
   }
 
   /// The rung to request next on the way to [want] — the streaming ladder's
