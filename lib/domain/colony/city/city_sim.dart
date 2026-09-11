@@ -16,6 +16,7 @@
 library;
 
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import '../../planetary/atmospheric_composition.dart';
 import '../../planetary/liquid_mix.dart';
@@ -254,6 +255,31 @@ enum Economy {
       this.researchMult, this.happinessFloor, this.taxControllable);
 }
 
+/// Adjust Roads' re-lay of one road end, planned and priced but not laid
+/// ([CitySim.planMoveRoadEnd]): what [CitySim.moveRoadEnd] lays and
+/// charges, and what the Adjust preview draws and prices.
+class RoadEndMove {
+  const RoadEndMove({
+    required this.end,
+    required this.controls,
+    required this.bridges,
+    required this.quote,
+  });
+
+  /// Where the moved end lands: on the road it joins there, else where it
+  /// was dropped.
+  final Vec2 end;
+
+  /// The re-laid road's controls, first to last.
+  final List<Vec2> controls;
+
+  /// Its bridge ranges, arcs from its first control.
+  final List<(double, double)> bridges;
+
+  /// The road as re-laid — its deck, whether it can be — at the price of
+  /// what it adds ([RoadQuote.cost]).
+  final RoadQuote quote;
+}
 
 /// Aggregate root for one colony: its land, buildings, stockpile, population,
 /// politics, environment and disasters, plus the tick that advances them.
@@ -3283,6 +3309,34 @@ class CitySim {
   /// on how long the session had been running.
   final Set<String> shapedTerrain = {};
 
+  /// The datum radii (m from the body centre, at its start and at its end)
+  /// each plain road corridor segment was cut to, by its [shapedTerrain]
+  /// key, and the voxel (m) it asked the ground to be meshed at
+  /// (`TerrainBrush.minVoxelM`) — kept as the brush is recorded
+  /// (`CityTerrainShaper.markShaped`).
+  ///
+  /// A road is drawn on the corridor it was graded to, and that corridor is
+  /// these datums: the ground read back at a knot afterwards is not, where
+  /// the next segment's easing has pulled it (a curve's knots are metres
+  /// apart, inside that easing). The voxel says how closely the drawn road
+  /// must follow it: ground meshed finer than the colony's shows the
+  /// corridor's bends. Transient, like the brushes it describes: not saved,
+  /// and rebuilt as the shaper re-grades a loaded colony from its pristine
+  /// ground.
+  final Map<String, (double, double, {double voxelM})> corridorDatums = {};
+
+  /// The plain road corridor segments, by their [shapedTerrain] keys, cut
+  /// to be meshed finer than the colony's ground: the ground they were laid
+  /// over stood off their grade by more than the colony's voxel carries
+  /// (`CityTerrainShaper.corridorReliefTolM`).
+  ///
+  /// Saved, unlike the brushes. A load re-grades the colony from its
+  /// pristine ground in one call, where a road run through a lot's
+  /// levelled field cannot see the field — the lot is levelled in that same
+  /// call — and would be meshed coarse, and drawn in pieces again. The
+  /// judgement made on the ground the road was laid over is kept instead.
+  final Set<String> fineCorridors = {};
+
   /// The sprawl past the platted core, or null for a colony with none. Set
   /// by the generator; the plan is grown from it on demand and cached, and a
   /// save stores only the spec — the plan is deterministic in it.
@@ -3308,11 +3362,43 @@ class CitySim {
   /// Ground radius under parcel-city geometry (lots, road samples), keyed by
   /// feature. Filled by the snapshot from the terrain field WITH edits, so a
   /// road reads the corridor that was graded for it and a building reads its
-  /// own levelled pad. Cleared whenever the shaper records new brushes —
-  /// [groundCacheStamp] tracks [shapedTerrain]'s size — because that is
-  /// exactly when the ground under the colony changes.
-  final Map<String, double> groundCache = {};
-  int groundCacheStamp = -1;
+  /// own levelled pad. Each entry keeps the direction it was asked along
+  /// ([dir], unit, body-fixed) as well as the radius found there.
+  ///
+  /// Cleared whenever the ground under the colony may have changed
+  /// everywhere: the shaper settled something ([groundCacheShaped], the
+  /// size of [shapedTerrain] it was filled at), or the body's edit store
+  /// was replaced or shrank ([groundCacheEditStore]). A brush added to the
+  /// store since ([groundCacheEditCount]) forgets only what it can move —
+  /// the entries along whose [dir] it can move the ground, and the drapes
+  /// ([drapeCache]) of the roads it passes under: one quantum of a hand
+  /// drill on a street is that street's few metres, not the colony's
+  /// thousands of queries. A crater on the far side of the body or a
+  /// quarry's pit elsewhere forgets nothing.
+  final Map<String, ({double radius, Vector3 dir})> groundCache = {};
+  int groundCacheShaped = -1;
+  Object? groundCacheEditStore;
+  int groundCacheEditCount = 0;
+
+  /// Each road's drape as the snapshot last worked it out — its 6 m points
+  /// and the ground radius under each — by road id, with the road it was
+  /// worked out for. Cleared with [groundCache] and whenever
+  /// [roadsRevision] moves ([drapeCacheRevision]), so a frame in which
+  /// nothing changed asks nothing of the ground and models no corridor.
+  ///
+  /// [dirs] (the unit body-fixed direction of each point, 3 per point) is
+  /// kept for a drape that depends on which brushes can reach its points —
+  /// a corridor already cut — and a brush laid within reach of one of them
+  /// forgets it. Null for a drape that depends only on its ground keys.
+  final Map<
+      String,
+      ({
+        RoadSpline road,
+        List<Vec2> pts,
+        Float64List? dirs,
+        Float64List radii
+      })> drapeCache = {};
+  int drapeCacheRevision = -1;
 
   // ---- Parcel city: growth, connectivity, traffic, fire ----
 
@@ -3513,7 +3599,8 @@ class CitySim {
       groundAt: groundHeightAt,
     );
     lastCommitCrossings = result.crossings;
-    _carryRenamedLots(result.renamedLots);
+    // Batch mode re-cut nothing, so no lot is renamed or gone yet.
+    if (regenerateLots) _carryRenamedLots(result.renamedLots);
     _roadsRevision++;
     return result.roadId;
   }
@@ -3522,7 +3609,9 @@ class CitySim {
   /// replaced it: [renamed] is old lot id -> new lot id, as a re-plat
   /// reports it ([CityLayout.commitRoad], [CityLayout.upgradeRoad]). One
   /// carry for every road edit, so a road built, upgraded or re-laid keeps
-  /// the district along it exactly as a road committed always has.
+  /// the district along it exactly as a road committed always has — and
+  /// what stood on a lot the re-plat did not carry is torn down with it
+  /// ([_dropLostLots]).
   void _carryRenamedLots(Map<String, String> renamed) {
     agents.onLotsRenamed(renamed);
     for (final e in renamed.entries) {
@@ -3542,6 +3631,27 @@ class CitySim {
         if (c.site == e.key) c.site = e.value;
       }
     }
+    _dropLostLots();
+  }
+
+  /// Tear down whatever the colony holds against a lot that no longer
+  /// exists — exactly what [clearParcel] tears down, and as it does, for
+  /// nothing back. A road edit's re-plat carries a lot only where a new
+  /// one stands on its ground: a road shortened, re-laid or re-cut wider
+  /// leaves the lots it gave up with none, and their buildings used to
+  /// stay keyed by the dead ids — counted in the colony's totals, saved,
+  /// and a spaceport among them still taking bookings. Grid sites
+  /// (`cell-N`) are not lots and are left alone.
+  void _dropLostLots() {
+    final live = {for (final p in layout.parcels) p.id};
+    bool lost(String site) => cellOfSiteId(site) == null && !live.contains(site);
+    parcelBuildings.removeWhere((id, _) => lost(id));
+    grownParcels.removeWhere((id, _) => lost(id));
+    lotFires.removeWhere((id, _) => lost(id));
+    deliveries.removeWhere((id, _) => lost(id));
+    craft.removeWhere((c) => lost(c.site));
+    final pad = landerPad;
+    if (pad != null && lost(pad)) landerPad = null;
   }
 
   // ---- The road tool: building, upgrading and adjusting roads -----------
@@ -3852,9 +3962,19 @@ class CitySim {
   /// The end left where it was keeps its deck height exactly; the moved end
   /// stands [toHeightM] above the datum when given (it was dropped on a
   /// raised road — `deckHeightAt`), else as high above the ground at [to]
-  /// as it stood above the ground it left. A road on the ground stays on
-  /// the ground. [atStart] names the road's FIRST CONTROL, whichever way
-  /// its traffic runs.
+  /// as it stood above the ground it left. [atStart] names the road's
+  /// FIRST CONTROL, whichever way its traffic runs.
+  ///
+  /// A road on the ground is re-laid on the ground — draped, no deck —
+  /// unless its moved end joins a road clear of the ground there: then it
+  /// takes only what the deck rules ask, a straight grade from the end
+  /// left alone, at grade, up (or down) to the level it joins, as the road
+  /// tool lays a road drawn from the ground to a viaduct. A [toHeightM]
+  /// within [RoadElevation.nodeMatchM] of the ground at [to] is the ground
+  /// — the foot of a ramp, say — and asks for no deck: handed one, a
+  /// street was re-laid as a straight grade line between its end heights,
+  /// surveyed into cuttings, piers and tunnels over every rise and dip it
+  /// had followed.
   ///
   /// Re-laid through [CityLayout.commitRoad] with every attribute it had —
   /// class, dressing, walls, direction, name, how it plats, collector,
@@ -3868,9 +3988,10 @@ class CitySim {
   /// Charged the road as re-laid less the road it replaces, both priced by
   /// the same survey over the same ground — the added length at its own
   /// price on piers, as bridge or underground — and never refunded for a
-  /// shorter one. Returns the id it was re-laid under (its pieces are
-  /// `<id>x<i>` where a junction cut it), or null with the quote saying
-  /// why not.
+  /// shorter one: exactly [quoteMoveRoadEnd], which is the same plan
+  /// ([planMoveRoadEnd]). Returns the id it was re-laid under (its pieces
+  /// are `<id>x<i>` where a junction cut it), or null with the quote
+  /// saying why not.
   ({String? roadId, RoadQuote quote}) moveRoadEnd(
     String roadId, {
     required bool atStart,
@@ -3878,22 +3999,107 @@ class CitySim {
     double? toHeightM,
     double Function(Vec2)? groundAt,
   }) {
-    final road = layout.roadById(roadId);
-    if (road == null || road.controls.length < 2) {
-      final q = RoadQuote.refused(
-          road == null ? RoadType.forClass(RoadClass.street) : RoadType.of(road),
-          RoadRefusal.notFound);
+    final plan = planMoveRoadEnd(roadId,
+        atStart: atStart, to: to, toHeightM: toHeightM, groundAt: groundAt);
+    if (plan == null) {
+      final q = _moveRefusedNotFound(roadId);
       blocked = q.reason;
       return (roadId: null, quote: q);
     }
+    final q = plan.quote;
+    if (!q.ok) {
+      blocked = q.reason;
+      return (roadId: null, quote: q);
+    }
+
+    final road = layout.roadById(roadId)!;
+    final newId = layout.childIdFor(roadId);
+    layout.removeRoad(roadId, regenerateLots: false);
+    final result = layout.commitRoad(
+      controls: plan.controls,
+      roadClass: road.roadClass,
+      // Snapped by the plan: the deck was surveyed on exactly this line.
+      snapStart: false,
+      snapEnd: false,
+      bridges: plan.bridges,
+      startHalfWidthM: road.startHalfWidthM,
+      endHalfWidthM: road.endHalfWidthM,
+      sealed: road.sealed,
+      soundWalls: road.soundWalls,
+      lotFrontageM: road.lotFrontageM,
+      lotDepthM: road.lotDepthM,
+      frontsLots: road.frontsLots,
+      collector: road.collector,
+      graded: road.graded,
+      decoration: road.decoration,
+      deck: q.deck,
+      reversed: road.reversed,
+      name: road.name,
+      groundAt: groundAt,
+      id: newId,
+    );
+    lastCommitCrossings = result.crossings;
+    _carryRenamedLots(result.renamedLots);
+    funds -= q.cost;
+    _roadsRevision++;
+    return (roadId: result.roadId, quote: q);
+  }
+
+  /// What [moveRoadEnd] would charge for the same drag, and whether it
+  /// would lay it — the Adjust preview's figure. Pure: the same plan
+  /// ([planMoveRoadEnd]) the move lays, so the preview is the bill by
+  /// construction, not by two copies of the rules kept in step.
+  RoadQuote quoteMoveRoadEnd(
+    String roadId, {
+    required bool atStart,
+    required Vec2 to,
+    double? toHeightM,
+    double Function(Vec2)? groundAt,
+  }) =>
+      planMoveRoadEnd(roadId,
+              atStart: atStart,
+              to: to,
+              toHeightM: toHeightM,
+              groundAt: groundAt)
+          ?.quote ??
+      _moveRefusedNotFound(roadId);
+
+  RoadQuote _moveRefusedNotFound(String roadId) {
+    final road = layout.roadById(roadId);
+    return RoadQuote.refused(
+        road == null ? RoadType.forClass(RoadClass.street) : RoadType.of(road),
+        RoadRefusal.notFound);
+  }
+
+  /// Adjust Roads' re-lay of [roadId] with its end [atStart] dropped at
+  /// [to], planned and priced but not laid: the line, its bridges and the
+  /// quote — [RoadQuote.cost] what it adds — that [moveRoadEnd] lays and
+  /// charges, and [quoteMoveRoadEnd] reads. Null for a road that is gone.
+  /// Pure. See [moveRoadEnd] for the rules.
+  RoadEndMove? planMoveRoadEnd(
+    String roadId, {
+    required bool atStart,
+    required Vec2 to,
+    double? toHeightM,
+    double Function(Vec2)? groundAt,
+  }) {
+    final road = layout.roadById(roadId);
+    if (road == null || road.controls.length < 2) return null;
     final type = RoadType.of(road);
     final deck = road.deck;
     final ground = groundAt ?? (Vec2 _) => 0.0;
-    // A road on the ground stays on it unless it is dropped on a deck.
-    final raised = deck != null || toHeightM != null;
+    // A road on the ground stays on it unless its end joins a road clear of
+    // the ground — and a height that is the ground there joins nothing.
+    var joinH = toHeightM;
+    if (deck == null &&
+        joinH != null &&
+        (joinH - ground(to)).abs() < RoadElevation.nodeMatchM) {
+      joinH = null;
+    }
+    final raised = deck != null || joinH != null;
     final offset =
         deck == null ? 0.0 : (atStart ? deck.startOffsetM : deck.endOffsetM);
-    double movedHeightAt(Vec2 p) => toHeightM ?? ground(p) + offset;
+    double movedHeightAt(Vec2 p) => joinH ?? ground(p) + offset;
 
     // Snap the moved end first, so the deck is surveyed on the line that
     // is laid; the end left alone stays exactly where it was.
@@ -3916,6 +4122,9 @@ class CitySim {
 
     double? fixedH, movedH;
     if (raised) {
+      // A road off the ground keeps the end left alone at its deck height;
+      // one on the ground that joins a deck climbs to it from its end left
+      // alone AT GRADE, as the road tool lays a road from the ground.
       fixedH = deck == null
           ? ground(fixedEnd)
           : (atStart ? deck.endM : deck.startM);
@@ -3949,10 +4158,6 @@ class CitySim {
     if (q.ok && added > funds + 1e-9) {
       q = q.copyWith(refusal: RoadRefusal.funds);
     }
-    if (!q.ok) {
-      blocked = q.reason;
-      return (roadId: null, quote: q);
-    }
 
     // Bridge ranges run from the first control: moving the start moves
     // them along by however much longer the road now is.
@@ -3961,37 +4166,7 @@ class CitySim {
       for (final (a, b) in road.bridges)
         if (b + shift > 0 && a + shift < full.lengthM) (a + shift, b + shift),
     ];
-
-    final newId = layout.childIdFor(roadId);
-    layout.removeRoad(roadId, regenerateLots: false);
-    final result = layout.commitRoad(
-      controls: controls,
-      roadClass: road.roadClass,
-      // Snapped above: the deck was surveyed on exactly this line.
-      snapStart: false,
-      snapEnd: false,
-      bridges: bridges,
-      startHalfWidthM: road.startHalfWidthM,
-      endHalfWidthM: road.endHalfWidthM,
-      sealed: road.sealed,
-      soundWalls: road.soundWalls,
-      lotFrontageM: road.lotFrontageM,
-      lotDepthM: road.lotDepthM,
-      frontsLots: road.frontsLots,
-      collector: road.collector,
-      graded: road.graded,
-      decoration: road.decoration,
-      deck: q.deck,
-      reversed: road.reversed,
-      name: road.name,
-      groundAt: groundAt,
-      id: newId,
-    );
-    lastCommitCrossings = result.crossings;
-    _carryRenamedLots(result.renamedLots);
-    funds -= q.cost;
-    _roadsRevision++;
-    return (roadId: result.roadId, quote: q);
+    return RoadEndMove(end: end, controls: controls, bridges: bridges, quote: q);
   }
 
   /// The deck height of the road [roadId] at its nearest point to [p],
@@ -4188,9 +4363,11 @@ class CitySim {
     final spread = <String>[];
     final done = <String>[];
     lotFires.forEach((id, intensity) {
-      // The engine has to be able to GET there: a lot no station reaches
-      // along the one-way streets burns with a fraction of the cover.
-      final reach = trafficReadout.serviceReach(id) ? 1.0 : 0.3;
+      // The engine has to be able to GET there: a lot no station with
+      // safety cover reaches along the one-way streets burns with a
+      // fraction of the cover. A clinic's ambulance reaching it puts
+      // nothing out.
+      final reach = trafficReadout.fireReach(id) ? 1.0 : 0.3;
       final next = intensity + (0.25 - suppression * reach * 0.45) * dt;
       if (next <= 0) {
         done.add(id); // put out before it took the building
@@ -4357,6 +4534,10 @@ class CitySim {
           'junctions': [
             for (final o in junctionOverrides.values) o.toJson(),
           ],
+        // Omitted when empty, so a colony with no road cut through relief
+        // saves as it always has.
+        if (_savedFineCorridors.isNotEmpty)
+          'fineCorridors': _savedFineCorridors,
         'manualLots': [
           for (final p in layout.manualParcels)
             {
@@ -4396,6 +4577,12 @@ class CitySim {
         'support': support.toList(),
         if (agents.hasState) 'agents': agents.toJson(),
       };
+
+  /// [fineCorridors] as saved: those of roads still in the layout.
+  List<String> get _savedFineCorridors => [
+        for (final k in fineCorridors)
+          if (layout.roadById(k.split(':')[1]) != null) k,
+      ];
 
   factory CitySim.fromJson(
     Map<String, dynamic> j, {
@@ -4515,6 +4702,8 @@ class CitySim {
         if (!o.isEmpty) sim.junctionOverrides[o.key] = o;
       } catch (_) {}
     }
+    final fine = j['fineCorridors'];
+    if (fine is List) sim.fineCorridors.addAll(fine.whereType<String>());
     sim._roadsRevision++;
     for (final mj in (j['manualLots'] as List)) {
       final m = mj as Map;
@@ -4689,9 +4878,9 @@ class CitySim {
     }
     agents.onLotsRenamed(moved);
     // Anything whose ground is simply gone (built over by the new plot) is
-    // dropped rather than left dangling against a lot that no longer exists.
-    parcelBuildings.removeWhere(
-        (id, _) => !layout.parcels.any((p) => p.id == id));
+    // dropped rather than left dangling against a lot that no longer exists
+    // — by the same rule a road edit drops it.
+    _dropLostLots();
   }
 
   /// The lot with this id, or null. Linear because the layout is a list and a

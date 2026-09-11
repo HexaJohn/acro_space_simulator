@@ -127,6 +127,22 @@ void main() {
           reason: 'the one-way leg only leaves; the four-lane runs through');
     });
 
+    test('a road leaving the biggest one stops nothing on it', () {
+      // A highway's exit: the ramp only leaves, the mainline runs on.
+      final exit = junctionPlanFor([hwyIn, hwyOut, rampOut]);
+      expect(exit.control, JunctionControl.stop);
+      expect(exit.stopLegs, isEmpty);
+      // A one-way street leaving a four- or six-lane road: nothing
+      // crosses the big road, so nothing on it stops.
+      expect(junctionPlanFor([fourA, fourB, oneWayOut]).stopLegs, isEmpty);
+      expect(junctionPlanFor([sixA, sixB, oneWayOut]).stopLegs, isEmpty);
+      // Joining it, the smaller road gives way: an on-ramp stops, the
+      // mainline does not.
+      expect(junctionPlanFor([hwyIn, hwyOut, rampIn]).stopLegs, {2});
+      // And roads all one size still stop all round, a leg leaving or not.
+      expect(junctionPlanFor([oneWayIn, oneWayOut, twoIn]).stopLegs, {0, 2});
+    });
+
     test('nothing stops at lights', () {
       expect(junctionPlanFor([fourA, fourB, twoIn]).stopLegs, isEmpty);
     });

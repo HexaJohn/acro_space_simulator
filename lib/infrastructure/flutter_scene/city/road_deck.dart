@@ -73,6 +73,17 @@ class RoadCorridors {
   /// a verge's worth.
   static const double clearM = 1.5;
 
+  /// The farthest, along any axis, a pier of a deck [deckHalfWidthM] wide
+  /// can stand from the points of a road [roadHalfWidthM] wide and still be
+  /// kept off it by [blocks]: the road's half width and [clearM], and the
+  /// widest pier's half footprint — a bridge's, [deckHalfWidthM] × 1.6
+  /// across and 3.2 m along (see [RoadDeckMesher.structure]). A road
+  /// further than this from every point of a deck has no say in its piers,
+  /// which is what lets a tile take only the neighbours' roads that come
+  /// near its decks (see `CityTileBucketer`).
+  static double reachM(double deckHalfWidthM, double roadHalfWidthM) =>
+      roadHalfWidthM + clearM + deckHalfWidthM * 1.6 / 2 + 3.2 / 2;
+
   final List<int> _ids = [];
   final List<List<double>> _points = [];
   final List<double> _halfWidths = [];
@@ -406,6 +417,12 @@ class RoadDeckMesher {
   /// carriageway of a road beneath moves on along the deck to the first
   /// point clear of it — at most a span on; a road running the length of
   /// the deck beneath it has no clear point, and there the pier stands.
+  ///
+  /// [trimStartM] and [trimEndM] hold the parapets back from the first and
+  /// last point by that much arc. Where a junction stands on the deck its
+  /// plate is the other legs' lanes as much as this one's, and a parapet
+  /// run on to the node stood across them. The girders run on beneath the
+  /// plate — their tops are the deck, under it — and so do the piers.
   static void structure(
     MeshBuilder solid,
     List<Vector3> pts,
@@ -413,6 +430,8 @@ class RoadDeckMesher {
     double halfWidthM,
     double Function(double s) liftAt, {
     PierBlocked? blocked,
+    double trimStartM = 0,
+    double trimEndM = 0,
   }) {
     final n = pts.length;
     if (n < 2) return;
@@ -424,7 +443,8 @@ class RoadDeckMesher {
 
     // Girders and parapets, a segment at a time, where the segment's middle
     // stands clear: a deck climbing off the fill is carried from the first
-    // segment that leaves it.
+    // segment that leaves it. The parapets only between the trims.
+    final keepFrom = trimStartM, keepTo = cum[n - 1] - trimEndM;
     for (var i = 1; i < n; i++) {
       final la = lift[i - 1], lb = lift[i];
       if ((la + lb) / 2 <= clear) continue;
@@ -437,15 +457,29 @@ class RoadDeckMesher {
       final depth =
           math.max(la, lb) > bridge ? bridgeGirderDepthM : girderDepthM;
       final da = a + ua * (deckLift + la), db = b + ub * (deckLift + lb);
+      // The parapet's share of the segment: all of it, unless a trim cuts
+      // into it — then from where the trim ends, on the deck there.
+      final s0 = cum[i - 1], s1 = cum[i];
+      final from = math.max(s0, keepFrom), to = math.min(s1, keepTo);
+      var pa = da, pb = db, pua = ua, pub = ub;
+      if (to > from && (from > s0 || to < s1)) {
+        final t0 = (from - s0) / (s1 - s0), t1 = (to - s0) / (s1 - s0);
+        final qa = a + seg * t0, qb = a + seg * t1;
+        pua = (qa + anchorBF).normalized;
+        pub = (qb + anchorBF).normalized;
+        pa = qa + pua * (deckLift + la + (lb - la) * t0);
+        pb = qb + pub * (deckLift + la + (lb - la) * t1);
+      }
       for (final sign in const [-1.0, 1.0]) {
         // The girder's face just outside the carriageway's edge.
         final g = side * (sign * (halfWidthM + 0.25));
         OrientedBox.span(solid, da + g - ua * (depth / 2),
             db + g - ub * (depth / 2), up, 0.5, depth,
             u: _concreteU);
+        if (to <= from) continue;
         final p = side * (sign * (halfWidthM + 0.15));
-        OrientedBox.span(solid, da + p + ua * (parapetHeightM / 2),
-            db + p + ub * (parapetHeightM / 2), up, 0.3, parapetHeightM,
+        OrientedBox.span(solid, pa + p + pua * (parapetHeightM / 2),
+            pb + p + pub * (parapetHeightM / 2), up, 0.3, parapetHeightM,
             u: _concreteU);
       }
     }

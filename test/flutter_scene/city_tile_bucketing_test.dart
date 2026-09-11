@@ -12,6 +12,7 @@ import 'package:acro_space_simulator/domain/colony/city/sprawl_plan.dart'
     show kMileM;
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_bucketing.dart';
+import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_columns.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// The cut is incremental: a tile whose structure key held is kept as
@@ -292,28 +293,20 @@ void main() {
   group('an overpass end is tabled apart from the crossing under it', () {
     final p = at(1600, 1600);
 
-    test('the lift term: zero at grade, otherwise never zero', () {
-      expect(CityTileBucketer.liftTermOf(0), 0);
-      expect(CityTileBucketer.liftTermOf(1.9), 0);
-      expect(CityTileBucketer.liftTermOf(-1.9), 0);
-      expect(CityTileBucketer.liftTermOf(2.1), isNot(0));
-      expect(CityTileBucketer.liftTermOf(-2.1), isNot(0));
-      expect(CityTileBucketer.liftTermOf(6), 3);
-      expect(CityTileBucketer.liftTermOf(-6), -3);
-    });
+    int key([double? deck]) => CityTileBucketer.endKeyOf(p.x, p.y, p.z, deck);
+    (double, int)? entry(CityBucketPlan plan, [double? deck]) =>
+        plan.endHalf['moon']![key(deck)];
 
-    test('keys fuse at grade and at one deck height, not across heights',
+    test('the roads on the ground share a key; each deck end has its own',
         () {
-      int key(double lift) => CityTileBucketer.endKeyOf(p.x, p.y, p.z, lift);
-      // A deck end at grade meets the ground roads there.
-      expect(key(1.5), key(0));
-      // Two decks at the same height meet each other.
-      expect(key(6.4), key(6));
+      // A deck laid flush is still a deck.
+      expect(key(0), isNot(key()));
       // The tool's steps — 3, 6, 12 m — never fall on the ground's key.
       for (final lift in [3.0, 6.0, 12.0, -6.0, -12.0]) {
-        expect(key(lift), isNot(key(0)), reason: '$lift m');
+        expect(key(lift), isNot(key()), reason: '$lift m');
       }
       expect(key(12), isNot(key(6)));
+      expect(key(12), key(12));
     });
 
     test('a raised road ending over a street is its own end entry', () {
@@ -321,12 +314,56 @@ void main() {
       final raised = road([(1600, 1600), (1900, 1600), (2200, 1600)],
           lifts: const [12, 12, 12]);
       final flatOne = road([(1600, 1600), (1900, 1600), (2200, 1600)]);
-      final table = cut(frame([street, raised])).endHalf['moon']!;
-      expect(table[CityTileBucketer.endKeyOf(p.x, p.y, p.z, 0)], (4.0, 1));
-      expect(table[CityTileBucketer.endKeyOf(p.x, p.y, p.z, 12)], (4.0, 1));
+      final table = cut(frame([street, raised]));
+      expect(entry(table), (4.0, 1));
+      expect(entry(table, 12), (4.0, 1));
       // On the ground the two ends are one meeting of two.
-      final fused = cut(frame([street, flatOne])).endHalf['moon']!;
-      expect(fused[CityTileBucketer.endKeyOf(p.x, p.y, p.z, 0)], (4.0, 2));
+      expect(entry(cut(frame([street, flatOne]))), (4.0, 2));
+    });
+
+    test('ends meet by the grade-separation rule, pair by pair', () {
+      RoadSnapshot west([List<double> lifts = const []]) =>
+          road([(1000, 1600), (1300, 1600), (1600, 1600)], lifts: lifts);
+      RoadSnapshot east([List<double> lifts = const []]) =>
+          road([(1600, 1600), (1900, 1600), (2200, 1600)], lifts: lifts);
+      RoadSnapshot south([List<double> lifts = const []]) =>
+          road([(1600, 1000), (1600, 1300), (1600, 1600)], lifts: lifts);
+      RoadSnapshot north([List<double> lifts = const []]) =>
+          road([(1600, 1600), (1600, 1900), (1600, 2200)], lifts: lifts);
+      List<double> deck(double lift) => [lift, lift, lift];
+
+      // Two decks crossing on their piers four metres apart: one junction
+      // in the air, as the layout cut it — every leg pulls back from it.
+      final decks = cut(frame(
+          [west(deck(20)), east(deck(20)), south(deck(24)), north(deck(24))]));
+      expect(entry(decks, 20), (4.0, 4));
+      expect(entry(decks, 24), (4.0, 4));
+      // At the grade separation they pass: two roads carrying on.
+      final passing = cut(frame([
+        west(deck(20)),
+        east(deck(20)),
+        south(deck(24.5)),
+        north(deck(24.5)),
+      ]));
+      expect(entry(passing, 20), (4.0, 2));
+      expect(entry(passing, 24.5), (4.0, 2));
+
+      // A road sunk three metres into a cutting, ending on a street: graded
+      // into the ground, it meets both the street's pieces and they it.
+      final cutting = cut(frame([west(), east(), north(deck(-3))]));
+      expect(entry(cutting), (4.0, 3));
+      expect(entry(cutting, -3), (4.0, 3));
+      // In its tunnel it passes under.
+      final tunnel = cut(frame([west(), east(), north(deck(-9))]));
+      expect(entry(tunnel), (4.0, 2));
+      expect(entry(tunnel, -9), (4.0, 1));
+
+      // A deck laid flush meets the street, and a deck three metres up;
+      // the street does not meet the one on its piers.
+      final flush = cut(frame([west(), east(deck(0)), north(deck(3))]));
+      expect(entry(flush), (4.0, 2));
+      expect(entry(flush, 0), (4.0, 3));
+      expect(entry(flush, 3), (4.0, 2));
     });
 
     test('ends carry which is the start of travel, and their deck lift', () {
@@ -340,6 +377,47 @@ void main() {
       expect(last.liftM, 12);
       expect(first.at, at(1600, 1600));
       expect(last.at, at(2200, 1600));
+    });
+
+    test('ends carry whether their road has a deck, through the columns',
+        () {
+      final flush = road([(1600, 1600), (1900, 1600), (2200, 1600)],
+          lifts: const [0, 0, 0]);
+      final ground = road([(1000, 1600), (1300, 1600), (1600, 1600)]);
+      final ends = cut(frame([flush, ground])).tiles[tileA]!.ends;
+      expect(ends, hasLength(4));
+      // A deck laid flush is a deck, at a lift of 0.
+      final decked = ends.where((e) => e.onDeck).toList();
+      expect(decked, hasLength(2));
+      expect(decked.map((e) => e.liftM), [0, 0]);
+      final back = CityTileColumns.fromSnapshots(
+        buildings: const [],
+        roads: const [],
+        patches: CityPatchColumns.empty,
+        ends: ends,
+        roadEnds: const [],
+        transitEnds: const [],
+      ).toSnapshots().ends;
+      expect([for (final e in back) e.onDeck], [for (final e in ends) e.onDeck]);
+      expect([for (final e in back) e.liftM], [for (final e in ends) e.liftM]);
+    });
+
+    test('a deck laid flush re-keys the tiles it meets', () {
+      // The same line on the ground and as a flush deck: the same points,
+      // the same lift of 0 — only the deck tells them apart.
+      final street = road([(1000, 1600), (1300, 1600), (1600, 1600)]);
+      final before = keys(cut(frame([
+        street,
+        road([(1600, 1600), (1900, 1600), (2200, 1600)]),
+      ])));
+      final d = CityTileBucketer.diff(
+          before,
+          cut(frame([
+            street,
+            road([(1600, 1600), (1900, 1600), (2200, 1600)],
+                lifts: const [0, 0, 0]),
+          ])));
+      expect(d.rekeyed, [tileA]);
     });
   });
 
@@ -373,6 +451,202 @@ void main() {
           ])));
       expect(d.rekeyed, [westTile]);
       expect(d.kept, [eastTile]);
+    });
+  });
+
+  group('a deck keeps its piers out of the roads of the tiles round it', () {
+    // The first tile ends at `tileM` eastward. A street raised 12 m runs
+    // north 70 m inside that edge; an avenue belonging to the next tile
+    // east — its middle and both its ends are there — hooks back west
+    // under the deck and out again.
+    const edge = tileM;
+    final deckPts = [for (var k = 0; k <= 12; k++) (edge - 70, 1000 + k * 100.0)];
+    final deck = road(deckPts, lifts: List.filled(13, 12.0));
+    RoadSnapshot hook({double west = edge - 150}) => road([
+          (edge + 300, 1400),
+          (west, 1550),
+          (edge + 50, 1650),
+          (edge + 300, 1800),
+        ], cls: RoadClass.avenue);
+    final deckTile = tileOf(edge - 70, 1600);
+    final hookTile = tileOf(edge + 50, 1650);
+
+    test("the deck's tile takes the neighbour's road beneath it", () {
+      expect(deckTile, isNot(hookTile));
+      final beneath = hook();
+      final plan = cut(frame([deck, beneath]));
+      final t = plan.tiles[deckTile]!;
+      expect(t.roads, [deck]);
+      expect(t.ends, hasLength(2), reason: "none of the avenue's ends");
+      expect(t.corridors, hasLength(1));
+      expect(t.corridors.single.pointsBF, orderedEquals(beneath.points));
+      expect(t.corridors.single.halfWidthM, beneath.halfWidthM);
+      // The avenue's own tile has no deck, and takes nothing.
+      expect(plan.tiles[hookTile]!.corridors, isEmpty);
+    });
+
+    test('only a deck on piers takes any, and only of roads in its reach',
+        () {
+      // Within a structure's clearance of the ground: no pier to keep out.
+      final atGrade = road(deckPts, lifts: List.filled(13, 2.0));
+      expect(cut(frame([atGrade, hook()])).tiles[deckTile]!.corridors,
+          isEmpty);
+      // A road of the next tile that stays well clear of the deck.
+      final clear = road([
+        (edge + 200, 2600),
+        (edge + 600, 2600),
+        (edge + 1000, 2600),
+      ]);
+      expect(cut(frame([deck, clear])).tiles[deckTile]!.corridors, isEmpty);
+    });
+
+    test('a colony nobody raised a road in: no tile takes any', () {
+      const pts = [(7000.0, 1600.0), (7600.0, 1600.0), (8200.0, 1600.0)];
+      final plan = cut(frame(
+          [a, b, c, hook(), road(pts, bridges: const [100, 300])]));
+      for (final t in plan.tiles.values) {
+        expect(t.corridors, isEmpty, reason: t.key);
+      }
+    });
+
+    test("the road beneath moved re-keys the deck's tile", () {
+      final before = keys(cut(frame([deck, hook(), c])));
+      // Only its bend under the deck moves: every end, and so every end
+      // entry, stays where it was.
+      final d = CityTileBucketer.diff(
+          before, cut(frame([deck, hook(west: edge - 140), c])));
+      expect(d.rekeyed.toSet(), {deckTile, hookTile});
+      expect(d.kept, [tileC]);
+    });
+
+    test('a road near two of a tile\'s decks is taken once', () {
+      // A second deck well west: the short hook comes near the first deck
+      // only, the long one near both.
+      final west = road(
+          [for (var k = 0; k <= 12; k++) (edge - 600, 1000 + k * 100.0)],
+          lifts: List.filled(13, 12.0));
+      expect(tileOf(edge - 600, 1600), deckTile);
+      for (final (reach, hooked) in [(edge - 150, hook()), (edge - 700, null)]) {
+        final beneath = hooked ?? hook(west: reach);
+        final t = cut(frame([deck, west, beneath])).tiles[deckTile]!;
+        expect(t.corridors, hasLength(1), reason: '$reach');
+        expect(t.corridors.single.pointsBF, orderedEquals(beneath.points));
+      }
+    });
+
+    test('an unkeyed cut gathers none until it is keyed', () {
+      // A cut the renderer culls for range goes no further than finding
+      // its tiles: holding every road to every deck is no part of that.
+      final s = frame([deck, hook(), c]);
+      final plan = CityTileBucketer.bucket(s,
+          anchors: {'moon': anchor}, tileM: tileM, keyed: false);
+      expect(plan.tiles.values.expand((t) => t.corridors), isEmpty);
+      CityTileBucketer.keyTiles(plan);
+      expect(plan.tiles[deckTile]!.corridors, hasLength(1));
+      // Keyed again, nothing is gathered twice.
+      CityTileBucketer.keyTiles(plan);
+      expect(plan.tiles[deckTile]!.corridors, hasLength(1));
+      expect(keys(plan), keys(cut(s)));
+    });
+  });
+
+  group('a deck turning at a joint, whichever tile the other leg is', () {
+    // A street raised 12 m runs east across the first tile's east edge
+    // (3218.688 m) to a corner just past it: its middle is the first
+    // tile's, and its corner — and whatever meets it there — the next's.
+    const legPts = [(2400.0, 1600.0), (2800.0, 1600.0), (3300.0, 1600.0)];
+    const turnedPts = [(3300.0, 1600.0), (3300.0, 2000.0), (3300.0, 2400.0)];
+    const onPts = [(3300.0, 1600.0), (3700.0, 1600.0), (4100.0, 1600.0)];
+    final up = List.filled(3, 12.0);
+    final leg = road(legPts, lifts: up);
+    final turned = road(turnedPts, lifts: up);
+    final on = road(onPts, lifts: up);
+    final legTile = tileOf(2800, 1600);
+    final cornerTile = tileOf(3300, 1600);
+
+    test('the cut reads the turn off the whole body', () {
+      expect(legTile, isNot(cornerTile));
+      expect(tileOf(3300, 2000), cornerTile);
+      expect(tileOf(3700, 1600), cornerTile);
+      final plan = cut(frame([leg, turned]));
+      final bends = plan.endBends['moon']!;
+      expect(CityTileBucketer.bendsOf(leg, bends), (false, true));
+      expect(CityTileBucketer.bendsOf(turned, bends), (true, false));
+      // Nothing of the corner is in the deck's own tile.
+      expect(plan.tiles[legTile]!.roads, [leg]);
+      expect(plan.tiles[legTile]!.ends.map((e) => e.at), [at(2400, 1600)]);
+      // Going on straight is no turn.
+      final straight = cut(frame([leg, on])).endBends['moon'] ?? const <int>{};
+      expect(CityTileBucketer.bendsOf(leg, straight), (false, false));
+      // Nor is an unkeyed cut's: it has not looked.
+      final unkeyed = CityTileBucketer.bucket(frame([leg, turned]),
+          anchors: {'moon': anchor}, tileM: tileM, keyed: false);
+      expect(unkeyed.endBends, isEmpty);
+    });
+
+    test('the turn is read off whichever end meets the deck by the rule',
+        () {
+      // A deck end has an end-table entry of its own, keyed by its lift, so
+      // the other leg of its corner shares no key with it unless it stands
+      // at that very lift. The one end that meets it is found by the rule
+      // the table counted it by: a deck two metres off its lift, or the
+      // street it is graded into.
+      Set<int> bendsIn(List<RoadSnapshot> roads) =>
+          cut(frame(roads)).endBends['moon'] ?? const <int>{};
+      final higher = road(turnedPts, lifts: List.filled(3, 14.0));
+      final offLift = bendsIn([leg, higher]);
+      expect(CityTileBucketer.bendsOf(leg, offLift), (false, true));
+      expect(CityTileBucketer.bendsOf(higher, offLift), (true, false));
+      // Graded into the ground at the corner, it meets the street there.
+      final low = road(legPts, lifts: const [12.0, 6.0, 1.0]);
+      final street = road(turnedPts);
+      expect(CityTileBucketer.bendsOf(low, bendsIn([low, street])),
+          (false, true));
+      // Grade-separated, nothing meets it there, and nothing turns.
+      final apart = road(turnedPts, lifts: List.filled(3, 20.0));
+      expect(CityTileBucketer.bendsOf(leg, bendsIn([leg, apart])),
+          (false, false));
+      expect(CityTileBucketer.bendsOf(leg, bendsIn([leg, street])),
+          (false, false));
+      // Going on straight off a deck two metres up is no turn.
+      final onHigher = road(onPts, lifts: List.filled(3, 14.0));
+      expect(CityTileBucketer.bendsOf(leg, bendsIn([leg, onHigher])),
+          (false, false));
+    });
+
+    test("the other leg turned re-keys the deck's tile", () {
+      final before = keys(cut(frame([leg, on, c])));
+      final d = CityTileBucketer.diff(before, cut(frame([leg, turned, c])));
+      expect(d.rekeyed.toSet(), {legTile, cornerTile});
+      expect(d.kept, [tileC]);
+    });
+
+    test("the turn is in the deck's tile's key, as its build reads it", () {
+      // The deck's piers take the other leg as a corridor as well, but the
+      // parapets read the turn itself: the key holds what the build reads.
+      final plan = cut(frame([leg, turned, c]));
+      final table = plan.endHalf['moon']!;
+      final bends = plan.endBends['moon']!;
+      final deckTile = plan.tiles[legTile]!;
+      expect(
+          CityTileBucketer.structureKeyOf(deckTile,
+              endHalf: table, endBends: bends),
+          isNot(CityTileBucketer.structureKeyOf(deckTile, endHalf: table)));
+      // A tile of roads on the ground keys the same whatever turns.
+      final ground = plan.tiles[tileC]!;
+      expect(
+          CityTileBucketer.structureKeyOf(ground,
+              endHalf: table, endBends: bends),
+          CityTileBucketer.structureKeyOf(ground, endHalf: table));
+    });
+
+    test("on the ground a turn holds no parapet back, and moves no key", () {
+      final plan = cut(frame([road(legPts), road(turnedPts), c]));
+      expect(plan.endBends, isEmpty);
+      final d = CityTileBucketer.diff(
+          keys(cut(frame([road(legPts), road(onPts), c]))), plan);
+      expect(d.kept.toSet(), {legTile, tileC});
+      expect(d.rekeyed, [cornerTile]);
     });
   });
 

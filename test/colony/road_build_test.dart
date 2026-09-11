@@ -197,6 +197,36 @@ void main() {
       expect(formatMoney(1234567), '§1,234,567');
       expect(formatMoney(0), '§0');
     });
+
+    test('float noise in a price does not round it up a coin', () {
+      // Quotes a live run printed a coin high: a length times a price per
+      // metre lands a hair over the whole number, and rounding that up
+      // charged the eye for a coin nobody owes.
+      const noisy = [1080.0000000000007, 2700.0000000000005, 2400.0000000000005];
+      for (final v in noisy) {
+        expect(v > v.roundToDouble(), isTrue, reason: '$v carries its noise');
+      }
+      expect(formatMoney(noisy[0]), '§1,080');
+      expect(formatMoney(noisy[1]), '§2,700');
+      expect(formatMoney(noisy[2]), '§2,400');
+      expect(formatMoney(2700), '§2,700');
+      expect(formatMoney(-1080.0000000000007), '-§1,080');
+      // A real part of a coin still needs the whole coin in the bank.
+      expect(formatMoney(1080.01), '§1,081');
+      // Even under a cent: the affordability check refuses anything past
+      // kMoneyEpsilon over the funds, so the price it names is the coin up.
+      expect(formatMoney(1080.004), '§1,081');
+    });
+
+    test('a price refused for want of funds reads more than the funds', () {
+      // A 108.0004 m road at §10/m against §1,080: past the check's
+      // tolerance, so refused — and 'Not enough money: §1,080 needed' with
+      // §1,080 in the bank would contradict itself.
+      const funds = 1080.0;
+      const cost = 1080.004;
+      expect(cost > funds + kMoneyEpsilon, isTrue, reason: 'refused');
+      expect(formatMoney(cost), isNot(formatMoney(funds)));
+    });
   });
 
   group('building', () {

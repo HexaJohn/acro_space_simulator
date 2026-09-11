@@ -15,6 +15,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/gestures.dart'
     show
+        DragStartBehavior,
         GestureBinding,
         PointerScrollEvent,
         ScaleGestureRecognizer,
@@ -41,6 +42,7 @@ import 'pointer_lock.dart';
 import 'screens/city_edit_overlay.dart';
 import 'screens/city_game_hud.dart';
 import 'screens/city_site_actions.dart';
+import 'screens/road_tool_scene.dart';
 import 'screens/craft_assembly_screen.dart';
 import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
@@ -695,6 +697,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           'expUp': SceneSync.adaptUpS,
           'expDown': SceneSync.adaptDownS,
         };
+    _registerRoadToolControl(c);
   }
   // Latest world snapshot for the flutter_scene backend (null when the
   // software backend is active — capture cost is zero when unused).
@@ -1233,6 +1236,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     LogicalKeyboardKey.arrowRight,
     LogicalKeyboardKey.arrowUp,
     LogicalKeyboardKey.arrowDown,
+    // The road tool's elevation (macOS Fn+Up/Down arrive as these).
+    LogicalKeyboardKey.pageUp,
+    LogicalKeyboardKey.pageDown,
   };
 
   KeyEventResult _keyResult(KeyEvent e) => _simKeys.contains(e.logicalKey)
@@ -1253,6 +1259,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         HardwareKeyboard.instance.isAltPressed) {
       return KeyEventResult.ignored;
     }
+    final cityKey = _onCityEditKey(e);
+    if (cityKey != null) return cityKey;
     if (e is KeyDownEvent) {
       // Toggle manual control with M.
       if (e.logicalKey == LogicalKeyboardKey.keyM) {
@@ -2216,6 +2224,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     }
     SceneSync.tickCostMs = 0;
     SceneSync.simWarp = 1;
+    _disposeCityRoadTool();
     SimViewControl.instance.clear();
     final timingsCb = _timingsCb;
     if (timingsCb != null) {
@@ -2666,7 +2675,11 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       _vessels.remove(v.id);
     }
     // The load replaces the city list, so a view open on a pre-load colony
-    // would be editing a ghost. Closing the editor is the honest move.
+    // would be editing a ghost. Closing the editor is the honest move — tool
+    // first, as the Close button does, or the road tool's ghost and anchor
+    // outlive the editor.
+    final wasEditing = _editingCity?.id ?? widget.injectedCity?.id;
+    _cityEdit.set(CityEditTool.inspect);
     _editingCity = null;
     _codec.decode(
       jsonDecode(save) as Map<String, dynamic>,
@@ -2682,6 +2695,24 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     for (final c in _cities.all()) {
       c.agents.frameBudgeted = true;
     }
+    // ...and in the city game, open it again on the colony the load brought
+    // back. There the editor IS the game — its toolbar, the HUD and the
+    // HUD's exit all hang off it — so a load that left it shut stranded the
+    // player on a bare planet. On the Look tool: nothing half-drawn from
+    // before the load carries over.
+    if (widget.cityMode) {
+      final cities = _cities.all();
+      CitySim? back;
+      for (final c in cities) {
+        if (c.id == wasEditing) back = c;
+      }
+      back ??= cities.isEmpty ? null : cities.first;
+      // Nothing to re-arm for the road tool here: every road action binds
+      // its ground to the colony it acts on before it prices anything (see
+      // `_bindRoadGround`), and nothing reads that ground in between.
+      if (back != null) _editingCity = back;
+    }
+    setState(() {});
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text('Loaded tick ${_clock.tick}'), duration: const Duration(seconds: 1)));
@@ -2695,7 +2726,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     return Scaffold(
       backgroundColor: const Color(0xFF000000),
       // Keep the FAB stack clear of the notch/home indicator.
-      floatingActionButton: SafeArea(
+      //
+      // Not in city mode: a Scaffold draws its floating button OVER its
+      // body, so this flight stack covered the city toolbar and HUD however
+      // topmost they sat in the body. The city's few controls live in the
+      // body instead, under both (see [_cityViewControls]).
+      floatingActionButton: widget.cityMode ? null : SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -2804,11 +2840,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                     decoration: BoxDecoration(color: const Color(0xFF2A3A4A), borderRadius: BorderRadius.circular(20)),
                     child: Text(
-                      _warpTarget != null
-                          ? '→$_warpTargetLabel ${_fmtCountdown(_warpTarget!.seconds - _clock.epoch.seconds)}'
-                          : _warpLevels[_warpIndex] == 0
-                              ? '⏸'
-                              : '${_warpLevels[_warpIndex].toStringAsFixed(0)}x',
+                      _warpReadout(),
                       style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold),
                     ),
                   ),
@@ -3330,57 +3362,48 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                     ),
                   ),
                 ), // end overlay SafeArea Positioned.fill
-                // Ground picking. LAST but one, so it wins the gesture arena
-                // against the camera's own drag handler wrapping this stack —
-                // as a lower sibling it lost every pan, which is why painting
-                // did nothing. Opaque only while a tool is held; on Inspect it
-                // still tracks hover but lets the flight controls have the
-                // gesture.
-                if (_editingCity != null)
-                  Positioned.fill(
-                    child: MouseRegion(
-                      opaque: false,
-                      onHover: (e) => _hoverCityAt(e.localPosition),
-                      onExit: (_) => CityNodes.cursorBF = null,
-                      child: _PickGate(
-                        // A held tool paints anywhere, so the gate stands
-                        // open. On Look it opens only over a BUILDING —
-                        // every other tap belongs to the HUD underneath, and
-                        // a gesture arena cannot tell the two apart on its
-                        // own.
-                        pick: (p) =>
-                            _cityEdit.active || _siteUnder(p) != null,
-                        child: GestureDetector(
-                          behavior: _cityEdit.active
-                              ? HitTestBehavior.opaque
-                              : HitTestBehavior.translucent,
-                          onTapUp: (d) => _cityEdit.active
-                              ? _editCityAt(d.localPosition)
-                              : _inspectCityAt(d.localPosition),
-                          onPanStart: _cityEdit.active ? (_) {} : null,
-                          // Panning PAINTS for the lot tools but does not draw
-                          // roads: the road tool is click-to-place, Skylines
-                          // style — each tap a control point, the toolbar's
-                          // check to build. A freehand scribble is not how
-                          // anyone lays an avenue.
-                          onPanUpdate:
-                              _cityEdit.active &&
-                                  _cityEdit.tool != CityEditTool.roadSpline
-                              ? (d) => _editCityAt(d.localPosition)
-                              : null,
-                        ),
-                      ),
-                    ),
-                  ),
+                // Ground picking: over the camera layer, under the toolbar and
+                // the HUD. Built by the colony part (`_cityPickLayer`), which
+                // owns its gate and which gestures each tool declares.
+                if (_editingCity != null) _cityPickLayer(),
+                // City mode's own few controls, in place of the flight
+                // stack: over the pick layer, so a held tool cannot swallow
+                // a click on Save, and UNDER the toolbar and the HUD, so a
+                // wide toolbar is never covered by them.
+                if (widget.cityMode) _cityViewControls(),
                 // City editor toolbar. LAST in the stack so it sits over the
                 // HUD rather than under it — a toolbar you cannot click is
                 // worse than no toolbar.
+                //
+                // In city mode it starts BELOW the controls: a readout drawer
+                // is full width and up to 45% of the window, and grown up
+                // from the bottom it covered Save, Load, warp and debug at the
+                // default window size. There the drawer takes what is left
+                // and scrolls. On a window too short for that the editor
+                // keeps [_cityEditorMinHeight] and takes back what of the
+                // controls' band it needs, rather than overflowing and
+                // pushing its readout tabs off the bottom.
                 if (_editingCity != null)
                   Positioned.fill(
+                    top: widget.cityMode
+                        ? math.max(
+                            MediaQuery.paddingOf(context).top + _cityHudClear,
+                            math.min(
+                                MediaQuery.paddingOf(context).top +
+                                    _cityEditorTop,
+                                MediaQuery.sizeOf(context).height -
+                                    _cityEditorMinHeight))
+                        : 0,
                     child: CityEditOverlay(
                       controller: _cityEdit,
                       city: _editingCity!,
-                      onClose: () => setState(() => _editingCity = null),
+                      // In the city game there is nothing under the editor
+                      // to go back to: closing it left a bare planet with
+                      // no toolbar, no HUD and so no way out. Leaving is
+                      // the HUD's exit there.
+                      onClose: widget.cityMode
+                          ? null
+                          : () => setState(() => _editingCity = null),
                     ),
                   ),
                 // City-builder HUD. TOPMOST: the ground-pick gate above spans
@@ -3408,6 +3431,149 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                   ),
               ],
             ),
+        ),
+      ),
+    );
+  }
+
+  /// The time-warp readout: the level, paused, or the countdown to a warp
+  /// target.
+  String _warpReadout() => _warpTarget != null
+      ? '→$_warpTargetLabel ${_fmtCountdown(_warpTarget!.seconds - _clock.epoch.seconds)}'
+      : _warpLevels[_warpIndex] == 0
+          ? '⏸'
+          : '${_warpLevels[_warpIndex].toStringAsFixed(0)}x';
+
+  /// Where city mode's own controls start: just under the HUD's one-row bar.
+  static const double _cityControlsTop = 72;
+
+  /// Where the city editor's area starts in city mode: below those
+  /// controls — two rows of small buttons, each at most 48 px (a padded tap
+  /// target; 40 on the desktop), and the gap between them. The editor's own
+  /// margin is the gap under them.
+  static const double _cityEditorTop = _cityControlsTop + 48 + 8 + 48;
+
+  /// The least height the city editor keeps in city mode: Build's palette,
+  /// the tool and readout rows, and a few rows of an open readout drawer.
+  /// At 681 px (the default window) and taller the editor still starts at
+  /// [_cityEditorTop]; on a shorter window it starts higher, over the
+  /// controls' band, rather than overflowing.
+  static const double _cityEditorMinHeight = 400;
+
+  /// How high the city editor may ever start: clear of the HUD's bar. Its
+  /// tool row sits 14 px inside it, so at this top the row starts under the
+  /// bar, not behind it — [_cityEditorMinHeight] alone lifted it there on a
+  /// 440 px window, and with a drawer open no tool could be picked.
+  static const double _cityHudClear = _cityControlsTop - 16;
+
+  /// City mode's controls: what of the flight stack the city game uses —
+  /// Save and Load, time warp (also , and .), the debug panel. Leaving is
+  /// the HUD's exit; the camera, flight and render toggles would only fight
+  /// the city camera, so they are not offered.
+  ///
+  /// Whenever the HUD is NOT up (no colony to play), its exit is not
+  /// either, so a home button leads the row: city mode never leaves the
+  /// player with no way out. There is no system back on the desktop.
+  ///
+  /// Top LEFT, just under the HUD's one-row bar. The HUD's drawers hang
+  /// from the bar's RIGHT end and grow down it — a busy bar reaches the
+  /// window edge and takes the Budget drawer with it — and the toolbar grows
+  /// up from the bottom, so this corner is the one neither reaches at the
+  /// default window size. Two short rows, not a column, so it ends well
+  /// above the toolbar's tallest row (Build's buildings). The toolbar's
+  /// area starts at [_cityEditorTop], below them, so neither it nor an open
+  /// readout drawer can reach up over them.
+  Widget _cityViewControls() {
+    final canLeave =
+        _editingCity == null && Navigator.of(context).canPop();
+    return Positioned.fill(
+      child: SafeArea(
+        child: Align(
+          alignment: Alignment.topLeft,
+          child: Padding(
+            padding: const EdgeInsets.only(left: 8, top: _cityControlsTop),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (canLeave) ...[
+                      FloatingActionButton.small(
+                        heroTag: 'menu',
+                        tooltip: 'Leave the colony',
+                        onPressed: () => Navigator.of(context).maybePop(),
+                        child: const Icon(Icons.home),
+                      ),
+                      const SizedBox(width: 8),
+                    ],
+                    FloatingActionButton.small(
+                      heroTag: 'save',
+                      tooltip: 'Save',
+                      onPressed: _save,
+                      child: const Icon(Icons.save),
+                    ),
+                    const SizedBox(width: 8),
+                    FloatingActionButton.small(
+                      heroTag: 'load',
+                      tooltip: 'Load',
+                      onPressed: _savedGame == null ? null : _load,
+                      backgroundColor:
+                          _savedGame == null ? Colors.grey : null,
+                      child: const Icon(Icons.folder_open),
+                    ),
+                    const SizedBox(width: 8),
+                    FloatingActionButton.small(
+                      heroTag: 'debug',
+                      tooltip: 'Debug panel',
+                      backgroundColor: _showDebugPanel
+                          ? const Color(0xFF7FB0E0)
+                          : const Color(0xFF2A3A4A),
+                      onPressed: () =>
+                          setState(() => _showDebugPanel = !_showDebugPanel),
+                      child: const Icon(Icons.bug_report),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                // Minus / readout / plus, as the flight stack lays it out.
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    FloatingActionButton.small(
+                      heroTag: 'warpdown',
+                      tooltip: 'Slower (,)',
+                      onPressed: () => _stepWarp(-1),
+                      child: const Icon(Icons.fast_rewind),
+                    ),
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 6),
+                      decoration: BoxDecoration(
+                          color: const Color(0xFF2A3A4A),
+                          borderRadius: BorderRadius.circular(16)),
+                      child: Text(
+                        _warpReadout(),
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    FloatingActionButton.small(
+                      heroTag: 'warpup',
+                      tooltip: 'Faster (.)',
+                      onPressed: () => _stepWarp(1),
+                      child: const Icon(Icons.fast_forward),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );

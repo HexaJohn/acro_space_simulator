@@ -1175,7 +1175,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       },
     )) {
       edits.record(body.id, p.brush);
-      sim.shapedTerrain.add(p.key);
+      CityTerrainShaper.markShaped(sim, p.key, p.brush);
     }
     _buildLog.add('cutting the ground: ${groundSw.elapsedMilliseconds}ms, '
         '${edits.forBody(body.id)?.length ?? 0} brushes');

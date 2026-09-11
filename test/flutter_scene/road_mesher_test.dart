@@ -454,8 +454,8 @@ void main() {
 
 /// The pair scan [RoadMesher.junctionsFromEnds] replaced, as the reference
 /// the bucketed version must match exactly: for each lowest unused end,
-/// every later unused end within the tolerance — and within
-/// [RoadMesher.junctionLiftToleranceM] of its height — joins its group in
+/// every later unused end within the tolerance — and at its level
+/// ([RoadMesher.liftsSeparated] says they meet) — joins its group in
 /// index order. Copied verbatim once; since the road tool it mirrors the
 /// new semantics as well: a node in a tunnel is dropped, a leg carries
 /// whether its road starts there, and the control, the stop legs and the
@@ -473,8 +473,8 @@ List<RoadJunction> referenceJunctionsFromEnds(List<RoadEnd> ends,
     for (var j = i + 1; j < ends.length; j++) {
       if (used[j]) continue;
       if ((ends[j].at - at).length > toleranceM) continue;
-      if ((ends[j].liftM - ends[i].liftM).abs() >
-          RoadMesher.junctionLiftToleranceM) {
+      if (RoadMesher.liftsSeparated(
+          ends[j].liftM, ends[j].onDeck, ends[i].liftM, ends[i].onDeck)) {
         continue;
       }
       used[j] = true;
@@ -482,11 +482,13 @@ List<RoadJunction> referenceJunctionsFromEnds(List<RoadEnd> ends,
     }
     if (ends[i].liftM < -RoadElevation.tunnelCoverM) continue;
     final legs = <RoadLeg>[];
+    var lifted = false;
     for (final e in group) {
       final inward = e.next - e.at;
       if (inward.length < 1e-6) continue;
       legs.add(RoadLeg(inward.normalized, e.halfWidthM, e.roadClass,
           paved: e.paved, startsHere: e.isStart, liftM: e.liftM));
+      lifted = lifted || e.onDeck;
     }
     // Where two collectors cross — all four legs collectors, or three at
     // a T — a subdivision builds a roundabout, not a four-way stop.
@@ -494,7 +496,6 @@ List<RoadJunction> referenceJunctionsFromEnds(List<RoadEnd> ends,
     final jlegs = [
       for (final l in legs) JunctionLeg(l.roadClass, startsHere: l.startsHere)
     ];
-    final lifted = legs.any((l) => l.liftM != 0);
     final plan = RoadMesher.junctionPlan(jlegs,
         lifted: lifted, roundaboutPreferred: collectors >= 3);
     if (plan.control == JunctionControl.none) continue;

@@ -393,7 +393,7 @@ class TrafficTrainPiece {
 /// them: cars, the L, the railway. Built once per tile structure key.
 class TrafficTile {
   TrafficTile._(this.structureKey, this.bodyId, this.anchorBF, this.density,
-      this.roads, this.trains, this.rail);
+      this.roads, this.trains, this.rail, this.railLifts);
 
   final String structureKey;
   final String bodyId;
@@ -413,6 +413,12 @@ class TrafficTile {
   /// Ground railway pieces, anchor-relative; chained per body.
   final List<List<Vector3>> rail;
 
+  /// Per [rail] piece, the lift its track is laid at above the drape at
+  /// each point — the deck of a railway the tool raised or sank, with the
+  /// plan's bridges on top as the track composes them — or null for a
+  /// piece that follows the ground, as every generated railway does.
+  final List<List<double>?> railLifts;
+
   /// Whether this frame visited the tile (see [CityTraffic.end]).
   bool touched = false;
 
@@ -428,6 +434,7 @@ class TrafficTile {
     final cars = <TrafficRoad>[];
     final trains = <TrafficTrainPiece>[];
     final rail = <List<Vector3>>[];
+    final railLifts = <List<double>?>[];
     for (final r in roads) {
       if (r.points.length < 6) continue;
       final cls = RoadClass
@@ -473,6 +480,22 @@ class TrafficTile {
           for (var i = 0; i < n; i++)
             Vector3(pts[i * 3], pts[i * 3 + 1], pts[i * 3 + 2]),
         ]);
+        // A railway the tool raised or sank has its track laid on its deck
+        // (`RoadDeckMesher.raise`, point by point, the plan's bridges on
+        // top) and dropped where it goes under — so its trains read the
+        // same lift, or they run along the ground under a viaduct and over
+        // the hill a tunnel goes through. One on the ground carries none,
+        // and its trains stay exactly where they always were.
+        final ranges = <(double, double)>[
+          for (var i = 0; i + 1 < r.bridges.length; i += 2)
+            (r.bridges[i], r.bridges[i + 1]),
+        ];
+        railLifts.add(r.lifts.length == n
+            ? [
+                for (var i = 0; i < n; i++)
+                  r.lifts[i] + SprawlPlan.bridgeLiftAt(cum[i], ranges),
+              ]
+            : null);
         continue;
       }
       // Elevated rail carries the L's train, not cars: one canonical car,
@@ -539,8 +562,8 @@ class TrafficTile {
         ax: ax, ay: ay, az: az, bx: bx, by: by, bz: bz,
       ));
     }
-    return TrafficTile._(
-        structureKey, bodyId, anchorBF, density, cars, trains, rail);
+    return TrafficTile._(structureKey, bodyId, anchorBF, density, cars,
+        trains, rail, railLifts);
   }
 }
 
@@ -557,10 +580,14 @@ class _RailRun {
 
 /// A chained railway line with its timetable worked out.
 class _RailLine {
-  const _RailLine(this.pts, this.cum, this.runs);
+  const _RailLine(this.pts, this.cum, this.runs, this.lifts);
   final List<Vector3> pts;
   final List<double> cum;
   final List<_RailRun> runs;
+
+  /// The track's lift above the drape at each of [pts], for a line the
+  /// tool raised or sank; null for one on the ground.
+  final List<double>? lifts;
 }
 
 /// Where one body's vehicles go this frame: the pose buffers the resident
@@ -805,12 +832,19 @@ class CityTraffic {
             (b.type, Vector3(b.px, b.py, b.pz) - sink.anchorBF),
       ];
     }
+    // The lifts ride the tile tables, which are rebuilt only on a new cut —
+    // and a new cut is a new structure signature, which dropped this cache
+    // in [begin]; so the tile keys stay the whole key.
     final segments = <List<Vector3>>[
       for (final tile in sink._railTiles) ...tile.rail,
     ];
+    final lifts = <List<double>?>[
+      for (final tile in sink._railTiles) ...tile.railLifts,
+    ];
     final out = <_RailLine>[];
     var line = 0;
-    for (final chain in Railway.chains(segments)) {
+    for (final (pts: chain, lifts: chainLifts)
+        in Railway.liftedChains(segments, lifts: lifts)) {
       final cum = RailConsist.cumulative(chain);
       if (cum.last < 200) continue;
       final stationsM = <double>[];
@@ -835,7 +869,7 @@ class CityTraffic {
                   true,
                   parkedAtM),
             ];
-      out.add(_RailLine(chain, cum, runs));
+      out.add(_RailLine(chain, cum, runs, chainLifts));
     }
     return out;
   }
@@ -846,9 +880,14 @@ class CityTraffic {
   /// cars that would hang off the start of the line before the train has
   /// fully entered are simply not drawn. Same arithmetic, so the poses
   /// equal what `posesAt` returns — the tests hold it to that.
+  ///
+  /// On a line the tool raised or sank each car stands on the track's
+  /// deck, [_RailLine.lifts] read at its own centre, and one in a tunnel
+  /// is under the ground with its track and not drawn — as a road's
+  /// vehicles are in [TrafficRoad.place].
   void _placeConsist(
       TrafficSink sink, _RailLine line, _RailRun run, double epochS) {
-    final pts = line.pts, cum = line.cum;
+    final pts = line.pts, cum = line.cum, lifts = line.lifts;
     if (pts.length < 2) return;
     final consist = run.consist;
     final lineM = cum.last;
@@ -870,6 +909,8 @@ class CityTraffic {
       final s = head - dir * (offset + kind.lengthM / 2);
       offset += kind.lengthM + RailConsist.couplingM;
       if (s < 0 || s > lineM) continue;
+      final lift = lifts == null ? 0.0 : RailConsist.liftAt(cum, lifts, s);
+      if (lift < -RoadElevation.tunnelCoverM) continue;
       final at = RailConsist.pointAt(pts, cum, s);
       final ahead = RailConsist.pointAt(pts, cum, (s + 2.0).clamp(0.0, lineM));
       final behind = RailConsist.pointAt(pts, cum, (s - 2.0).clamp(0.0, lineM));
@@ -880,7 +921,10 @@ class CityTraffic {
       final side = along.cross(up).normalized;
       TrafficRoad.writeCarPose(
           (sink.railCars[kind] ??= TrafficBuffer()).next(),
-          at + up * RailVehicleMeshes.railHeadM,
+          // A line on the ground takes the sum it always took, to the bit.
+          lifts == null
+              ? at + up * RailVehicleMeshes.railHeadM
+              : at + up * (RailVehicleMeshes.railHeadM + lift),
           side,
           along,
           up);

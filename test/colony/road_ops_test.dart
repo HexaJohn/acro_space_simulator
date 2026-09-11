@@ -12,6 +12,7 @@ import 'dart:math' as math;
 
 import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_config.dart';
+import 'package:acro_space_simulator/domain/colony/city/city_layout.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_build.dart';
@@ -295,6 +296,125 @@ void main() {
       expect(sim.layout.roads.length, 3);
     });
 
+    // Rolling ground, which a street laid on it follows: laid as a deck, a
+    // straight grade line between its ends, it would be cut, piered and
+    // tunnelled through every rise and dip.
+    double rolling(Vec2 p) =>
+        8 * math.sin(p.n / 30) + 4 * math.sin(p.e / 25);
+
+    test('a road on the ground is re-laid on the ground — draped, no deck, '
+        'its direction and its lots kept', () {
+      final sim = colony(funds: 10000);
+      final b = sim.buildRoad(
+          RoadBuildRequest(
+              controls: const [Vec2(0, 0), Vec2(0, 200)],
+              type: type('one-way')),
+          groundAt: rolling);
+      expect(b.quote.ok, isTrue, reason: b.quote.reason);
+      final id = b.roadId!;
+      expect(sim.layout.roadById(id)!.deck, isNull);
+      expect(sim.reverseRoad(id), isTrue);
+      final lot = sim.layout.autoParcels.firstWhere((p) => p.centroid.n < 50);
+      sim.parcelBuildings[lot.id] = clinic;
+
+      final r = sim.moveRoadEnd(id,
+          atStart: false, to: const Vec2(20, 260), groundAt: rolling);
+      expect(r.quote.ok, isTrue, reason: r.quote.reason);
+      expect(r.quote.deck, isNull);
+      expect(r.quote.structureM + r.quote.tunnelM, 0);
+      final road = sim.layout.roadById(r.roadId!)!;
+      expect(road.deck, isNull, reason: 'draped on the ground, as it was');
+      expect(road.graded, isTrue, reason: 'its corridor graded, not a deck');
+      expect(road.reversed, isTrue, reason: 'still one way, the same way');
+      expect(road.travelStart.distanceTo(const Vec2(20, 260)), lessThan(1e-6));
+      final ids = {for (final p in sim.layout.parcels) p.id};
+      expect(sim.parcelBuildings.keys.single, isIn(ids),
+          reason: 'the building stands on the lot now where its lot stood');
+    });
+
+    test('a height that is the ground asks for no deck: a street brought to '
+        'the foot of a ramp stays on the ground', () {
+      final sim = colony();
+      // Down from 12 m to the ground at (0, 200).
+      final ramp = sim
+          .buildRoad(
+              RoadBuildRequest(
+                  controls: const [Vec2(0, 0), Vec2(0, 200)],
+                  type: type('two-lane'),
+                  startElevationM: 12),
+              groundAt: rolling)
+          .roadId!;
+      final foot = sim.layout.roadById(ramp)!.deck!;
+      expect(foot.endAtGrade, isTrue);
+      final street = sim.commitRoad(
+          const [Vec2(200, 260), Vec2(40, 260)], RoadClass.street)!;
+      // What a caller reads there: the ramp's deck, at the ground.
+      final h = sim.deckHeightAt(ramp, const Vec2(0, 200))!;
+      expect(h, closeTo(rolling(const Vec2(0, 200)), 1e-6));
+
+      final quoted = sim.quoteMoveRoadEnd(street,
+          atStart: false, to: const Vec2(0, 200), toHeightM: h,
+          groundAt: rolling);
+      expect(quoted.deck, isNull,
+          reason: 'not a straight grade line between its end heights');
+      final r = sim.moveRoadEnd(street,
+          atStart: false, to: const Vec2(0, 200), toHeightM: h,
+          groundAt: rolling);
+      expect(r.quote.ok, isTrue, reason: r.quote.reason);
+      final laid = sim.layout.roadById(r.roadId!)!;
+      expect(laid.deck, isNull, reason: 'on the ground, where it was');
+      expect(laid.controls.last.distanceTo(const Vec2(0, 200)), lessThan(1e-6));
+      expect(
+          sim.roadGraph
+              .nodeNear(const Vec2(0, 200), withinM: 3)!
+              .legRoadIds,
+          containsAll([ramp, r.roadId!]),
+          reason: 'it meets the ramp at its foot');
+    });
+
+    test('quoteMoveRoadEnd is what moveRoadEnd charges, and changes nothing',
+        () {
+      final sim = colony();
+      final bridge =
+          sim.buildRoad(acrossTheValley(), groundAt: valley).roadId!;
+      final raised = sim
+          .buildRoad(RoadBuildRequest(
+              controls: const [Vec2(0, 300), Vec2(0, 700)],
+              type: type('two-lane'),
+              startElevationM: 12,
+              endElevationM: 12))
+          .roadId!;
+      final street = sim.commitRoad(
+          const [Vec2(-300, -300), Vec2(-300, 0)], RoadClass.street)!;
+      for (final (id, atStart, to) in [
+        (bridge, false, const Vec2(460, 0)),
+        (raised, true, const Vec2(0, 250)),
+        (street, false, const Vec2(-260, 60)),
+      ]) {
+        final rev = sim.roadsRevision;
+        final funds = sim.funds;
+        final roads = sim.layout.roads.length;
+        final q = sim.quoteMoveRoadEnd(id,
+            atStart: atStart, to: to, groundAt: valley);
+        expect(sim.roadsRevision, rev, reason: 'a quote lays nothing');
+        expect(sim.funds, funds);
+        expect(sim.layout.roads.length, roads);
+        final r =
+            sim.moveRoadEnd(id, atStart: atStart, to: to, groundAt: valley);
+        expect(r.quote.ok, isTrue, reason: r.quote.reason);
+        expect(q.cost, greaterThan(0));
+        expect(r.quote.cost, q.cost, reason: 'the quote is the bill');
+        expect(sim.funds, closeTo(funds - q.cost, 1e-6));
+        expect(r.quote.deck?.startM, q.deck?.startM);
+        expect(r.quote.deck?.endM, q.deck?.endM);
+      }
+      expect(
+          sim
+              .quoteMoveRoadEnd('ghost', atStart: true, to: const Vec2(0, 0))
+              .refusal,
+          RoadRefusal.notFound);
+    });
+
     test('a road that is gone cannot be adjusted', () {
       final sim = colony();
       final r = sim.moveRoadEnd('ghost', atStart: true, to: const Vec2(0, 0));
@@ -378,6 +498,197 @@ void main() {
           east(controlsWithMovedEnd(line,
               atStart: true, to: const Vec2(-20, 0))),
           [-20, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
+      // Back along it and a little aside is still back along it: the
+      // stretch behind goes rather than the road folding over it.
+      expect(
+          east(controlsWithMovedEnd(line,
+              atStart: true, to: const Vec2(45, 6))),
+          [45, 60, 70, 80, 90, 100]);
+    });
+
+    // A U, 40 m between its arms: the start nudged 30 m sideways lands
+    // 10 m from the FAR arm, 250 m on round the road.
+    const uBend = [
+      Vec2(0, 0), Vec2(50, 0), Vec2(100, 0), Vec2(120, 20), //
+      Vec2(100, 40), Vec2(50, 40), Vec2(0, 40),
+    ];
+
+    test('an end nudged near the far arm of a U only moves the end', () {
+      List<(double, double)> pts(List<Vec2> cs) => [for (final c in cs) (c.e, c.n)];
+      expect(
+          pts(controlsWithMovedEnd(uBend,
+              atStart: true, to: const Vec2(0, 30))),
+          pts([const Vec2(0, 30), ...uBend.skip(1)]),
+          reason: 'not the far arm\'s stub (0,30)-(0,40)');
+      expect(
+          pts(controlsWithMovedEnd(uBend,
+              atStart: false, to: const Vec2(0, 10))),
+          pts([...uBend.take(uBend.length - 1), const Vec2(0, 10)]));
+    });
+
+    test('a U adjusted near its own far arm keeps its length and its lots',
+        () {
+      final sim = colony();
+      sim.commitRoad(uBend, RoadClass.street);
+      final oldLen = sim.layout.roadIndex.byId('r0')!.lengthM;
+      final lots = sim.layout.autoParcels.length;
+      expect(lots, greaterThan(8));
+      // Buildings along the far arm, 150 m and more round from the start.
+      final far = [
+        for (final p in sim.layout.autoParcels)
+          if (p.centroid.n > 40) p,
+      ];
+      expect(far.length, greaterThanOrEqualTo(3));
+      for (final lot in far) {
+        sim.parcelBuildings[lot.id] = clinic;
+      }
+      final r = sim.moveRoadEnd('r0', atStart: true, to: const Vec2(0, 30));
+      expect(r.quote.ok, isTrue, reason: r.quote.reason);
+      final rec = sim.layout.roadIndex.byId(r.roadId!)!;
+      expect(rec.lengthM, closeTo(oldLen, 40),
+          reason: 'the end moved, not a 10 m stub left of the U');
+      expect(rec.samples.first.n, closeTo(30, 1e-6));
+      expect(sim.layout.autoParcels.length, greaterThanOrEqualTo(lots - 4));
+      // The re-plat runs from the moved start, so a lot or two may fall
+      // off the far end; the rest of the far arm's buildings are carried.
+      final ids = {for (final p in sim.layout.parcels) p.id};
+      final standing = [
+        for (final id in sim.parcelBuildings.keys)
+          if (ids.contains(id)) id,
+      ];
+      expect(standing.length, greaterThanOrEqualTo(far.length - 2),
+          reason: 'the far arm\'s buildings keep their lots');
+    });
+
+    test('an end dragged back round a bend it doubles on gives up the bend',
+        () {
+      List<(double, double)> pts(List<Vec2> cs) =>
+          [for (final c in cs) (c.e, c.n)];
+      // The U's end back round the bend to its other arm: 180 m round the
+      // road, past the arc an 89 m drag could span. The line is followed
+      // on to it, not cut where the search's bound fell on the bend.
+      expect(
+          pts(controlsWithMovedEnd(uBend,
+              atStart: false, to: const Vec2(80, 0))),
+          pts(const [Vec2(0, 0), Vec2(50, 0), Vec2(80, 0)]),
+          reason: 'not out to (100,0) and back');
+      // 20 m off that arm: the nearest the road comes, not the bend.
+      expect(
+          pts(controlsWithMovedEnd(uBend,
+              atStart: false, to: const Vec2(80, -20))),
+          pts(const [Vec2(0, 0), Vec2(50, 0), Vec2(80, -20)]));
+      // Three quarters of a circle, its end dragged back to the 30° point.
+      final arc = [
+        for (var d = 0; d <= 270; d += 15)
+          Vec2(40 * math.cos(d * math.pi / 180),
+              40 * math.sin(d * math.pi / 180)),
+      ];
+      final to = Vec2(40 * math.cos(math.pi / 6), 40 * math.sin(math.pi / 6));
+      expect(pts(controlsWithMovedEnd(arc, atStart: false, to: to)),
+          pts([arc[0], arc[1], to]));
+    });
+
+    test('a U re-laid back round its bend is trimmed, not folded', () {
+      final sim = colony();
+      sim.commitRoad(uBend, RoadClass.street);
+      final r = sim.moveRoadEnd('r0', atStart: false, to: const Vec2(80, 0));
+      expect(r.quote.ok, isTrue, reason: r.quote.reason);
+      final rec = sim.layout.roadIndex.byId(r.roadId!)!;
+      expect(rec.lengthM, closeTo(80, 1));
+      for (final p in rec.samples) {
+        expect(p.e, lessThanOrEqualTo(80 + 1e-6),
+            reason: 'nothing runs out past its new end and back');
+      }
+    });
+
+    // Every site the colony keys by lot names a lot that stands.
+    void expectNoLostLots(CitySim sim) {
+      final ids = {for (final p in sim.layout.parcels) p.id};
+      for (final site in [
+        ...sim.parcelBuildings.keys,
+        ...sim.grownParcels.keys,
+        ...sim.lotFires.keys,
+        for (final s in sim.deliveries.keys)
+          if (CitySim.cellOfSiteId(s) == null) s,
+        for (final c in sim.craft) c.site,
+        if (sim.landerPad != null) sim.landerPad!,
+      ]) {
+        expect(ids, contains(site));
+      }
+    }
+
+    test('a road cut shorter tears down what stood on the lots it gave up',
+        () {
+      final sim = colony();
+      sim.commitRoad(const [Vec2(0, 0), Vec2(0, 300)], RoadClass.street);
+      final near = sim.layout.autoParcels.firstWhere((p) => p.centroid.n < 50);
+      final far = [
+        for (final p in sim.layout.autoParcels)
+          if (p.centroid.n > 200) p,
+      ];
+      expect(far.length, greaterThanOrEqualTo(4));
+      sim.parcelBuildings[near.id] = clinic;
+      sim.parcelBuildings[far[0].id] = clinic;
+      sim.grownParcels[far[1].id] = 1.5;
+      sim.lotFires[far[2].id] = 0.4;
+      final port = far[3].id;
+      sim.deliveries[port] = [
+        DeliverySchedule(resource: 'ore', intervalSec: 60, amount: 10),
+      ];
+      sim.craft.add(LandedCraft(site: port, padIndex: 0, isRelief: true));
+      sim.landerPad = port;
+      // A grid site is not a lot: nothing a road does touches it.
+      final cell = CitySim.siteIdOfCell(5);
+      sim.deliveries[cell] = [
+        DeliverySchedule(resource: 'ore', intervalSec: 60, amount: 10),
+      ];
+      final r = sim.moveRoadEnd('r0', atStart: false, to: const Vec2(0, 100));
+      expect(r.quote.ok, isTrue, reason: r.quote.reason);
+      expectNoLostLots(sim);
+      expect(sim.parcelBuildings, hasLength(1),
+          reason: 'the near lot\'s building is carried, the far one torn down');
+      expect(sim.grownParcels, isEmpty);
+      expect(sim.lotFires, isEmpty);
+      expect(sim.deliveries.keys, [cell]);
+      expect(sim.craft, isEmpty);
+      expect(sim.landerPad, isNull);
+    });
+
+    test('a road built over a lot tears down what stood on it', () {
+      final sim = colony();
+      sim.commitRoad(vertical, RoadClass.street);
+      final lot = sim.layout.autoParcels.firstWhere(
+          (p) => p.centroid.e > 0 && p.centroid.n.abs() < 150);
+      final other = sim.layout.autoParcels.firstWhere(
+          (p) => p.centroid.e < 0 && p.centroid.n < -200);
+      sim.parcelBuildings[lot.id] = clinic;
+      sim.parcelBuildings[other.id] = clinic;
+      // Across the street and straight over the lot's middle.
+      final c = lot.centroid;
+      final r = sim.buildRoad(RoadBuildRequest(
+          controls: [Vec2(-100, c.n), Vec2(100, c.n)],
+          type: type('two-lane')));
+      expect(r.quote.ok, isTrue, reason: r.quote.reason);
+      expect(sim.layout.parcelAt(c), isNull, reason: 'its ground is road now');
+      expectNoLostLots(sim);
+      expect(sim.parcelBuildings, hasLength(1),
+          reason: 'only the building on the lot the road took goes');
+    });
+
+    test('a street upgraded to a road that plats nothing loses its lots', () {
+      final sim = colony()..ignoreUnlocks = true;
+      sim.commitRoad(vertical, RoadClass.street);
+      final lots = sim.layout.autoParcels.take(3).toList();
+      sim.parcelBuildings[lots[0].id] = clinic;
+      sim.grownParcels[lots[1].id] = 2.0;
+      sim.lotFires[lots[2].id] = 0.3;
+      final q = sim.upgradeRoad('r0', type('highway'));
+      expect(q.ok, isTrue, reason: q.reason);
+      expect(sim.layout.autoParcels, isEmpty, reason: 'an expressway plats none');
+      expectNoLostLots(sim);
+      expect(sim.parcelBuildings, isEmpty);
+      expect(sim.grownParcels, isEmpty);
+      expect(sim.lotFires, isEmpty);
     });
 
     test('a bridge drawn short of a street is surveyed on the line laid', () {
@@ -521,6 +832,46 @@ void main() {
       expect(o.lights, isFalse);
       expect(o.stopHeadings, [0.5, 2.0]);
       expect(back.roadsRevision, greaterThan(0));
+    });
+
+    test("a laid deck keeps its survey's length; an old save's deck has none",
+        () {
+      final sim = colony();
+      final built = sim.buildRoad(RoadBuildRequest(
+          controls: const [
+            Vec2(0, 0),
+            Vec2(72, 0),
+            Vec2(85.5, 3.2),
+            Vec2(76.5, 6.4),
+          ],
+          type: type('two-lane'),
+          startElevationM: 12,
+          endElevationM: 12));
+      expect(built.roadId, isNotNull, reason: built.quote.reason);
+      final deck = sim.layout.roadById(built.roadId!)!.deck!;
+      expect(deck.rangeLengthM, closeTo(built.quote.lengthM, 1e-9));
+      final json = sim.toJson();
+      final saved = ((json['roads'] as List).single as Map)['deck'] as Map;
+      expect(saved['l'], deck.rangeLengthM);
+      final back = CitySim.fromJson(json, bodies: bodies);
+      final r = back.layout.roadById(built.roadId!)!;
+      expect(r.deck, deck);
+      // Re-sampled from the save's decimated controls, the road comes out
+      // a little another length; its end still stands on its piers.
+      final rec = back.layout.roadIndex.byId(r.id)!;
+      expect(
+          CityLayout.levelOf(r.deck, rec.lengthM, rec.lengthM)!.offGround,
+          isTrue);
+      // A save from before the length was kept loads the deck as it was.
+      saved.remove('l');
+      final old = CitySim.fromJson(json, bodies: bodies)
+          .layout
+          .roadById(built.roadId!)!
+          .deck!;
+      expect(old.rangeLengthM, isNull);
+      expect(old.structures, deck.structures);
+      expect(old.startM, deck.startM);
+      expect(old.endM, deck.endM);
     });
 
     test('a road that never used the tool saves as it always has', () {

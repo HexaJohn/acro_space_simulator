@@ -274,6 +274,10 @@ RoadQuote quoteRoadBuild(
       endOffsetM: endM - g1,
       structures: survey.structures,
       tunnels: survey.tunnels,
+      // The length the ranges were measured along, so the road re-measured
+      // — re-sampled from a save, or cut into pieces — still reads them
+      // where the survey put them.
+      rangeLengthM: survey.lengthM,
     );
     gradePct = deck.gradePct(lengthM);
     refusal = switch (checkDeck(
@@ -311,7 +315,7 @@ RoadQuote quoteRoadBuild(
   // whatever the treasury says — then whether the colony may and can pay.
   refusal ??= !unlocked
       ? RoadRefusal.locked
-      : (cost > funds + 1e-9 ? RoadRefusal.funds : null);
+      : (cost > funds + kMoneyEpsilon ? RoadRefusal.funds : null);
   return RoadQuote(
     type: type,
     lengthM: lengthM,
@@ -400,7 +404,12 @@ const double kRelayClearM = RoadCosts.cellM;
 /// dragged back 25 m ran from [to] BACK through the controls it passed
 /// and on again — a Z folded over itself, platted on both folds and
 /// priced as added length. Where [to] projects off the end (the road is
-/// dragged longer) only the end control moves, as it always did.
+/// dragged longer) only the end control moves, as it always did — and so
+/// it does where [to] is nearer another arm of the road than the stretch
+/// by the end: the projection is looked for only as far round the road
+/// as a drag that long could have come back along it, and on past that
+/// only while the road keeps nearing [to] — round a bend it doubles back
+/// on, a U's end dragged back to its other arm.
 ///
 /// The controls are a centripetal Catmull-Rom spline's or a dense
 /// polyline's, as the layout keeps them; the other end is never moved.
@@ -432,37 +441,89 @@ List<Vec2> controlsWithMovedEnd(
     cum.add(cum[i - 1] + pts[i].distanceTo(pts[i - 1]));
   }
 
-  // Where [to] projects onto the line.
-  var best = double.infinity;
-  var sTo = 0.0;
-  for (var i = 1; i < pts.length; i++) {
+  // Where [to] projects onto the line NEAR the moved end. An end dragged
+  // [drag] metres back along the road can have passed at most the arc of a
+  // semicircle on that chord; the line further on is another arm of the
+  // road, not the stretch it was dragged back over. Searched to the far
+  // end, the start of a U nudged 30 m aside toward its own far arm
+  // projected 250 m round the road, dropped every control before it and
+  // re-laid the road as a 10 m stub — every lot along it gone, for free.
+  final drag = to.distanceTo(cs.first);
+  final reach = drag * math.pi / 2 + kRelayClearM;
+  // [to]'s distance from the line's i-th segment, and the arc there.
+  (double, double) projected(int i) {
     final a = pts[i - 1], ab = pts[i] - a;
     final len2 = ab.dot(ab);
     final t = len2 <= 1e-12
         ? 0.0
         : ((to - a).dot(ab) / len2).clamp(0.0, 1.0).toDouble();
-    final d = to.distanceTo(a + ab * t);
+    return (to.distanceTo(a + ab * t), cum[i - 1] + (cum[i] - cum[i - 1]) * t);
+  }
+
+  var best = double.infinity;
+  var sTo = 0.0;
+  var nearest = 0; // the segment it was found on
+  var i = 1;
+  for (; i < pts.length && cum[i - 1] <= reach; i++) {
+    final (d, s) = projected(i);
     if (d < best) {
       best = d;
-      sTo = cum[i - 1] + (cum[i] - cum[i - 1]) * t;
+      sTo = s;
+      nearest = i;
+    }
+  }
+  // Still nearing [to] where the search stopped: the road bends back round
+  // toward it, and the end was dragged back over more than a semicircle of
+  // it. Followed on for as long as it keeps nearing — stopped at the bound,
+  // a U's end dragged back round its bend to its other arm projected onto
+  // the bend, kept the arm's far control and ran out to it and back.
+  if (nearest > 0 && nearest == i - 1) {
+    for (var prev = best; i < pts.length; i++) {
+      final (d, s) = projected(i);
+      if (d > prev + 1e-6) break;
+      prev = d;
+      if (d < best) {
+        best = d;
+        sTo = s;
+      }
     }
   }
   if (sTo <= 1e-6) return finish(swapped); // dragged off the end: longer
 
-  return finish([
-    to,
-    for (var i = 1; i < cs.length - 1; i++)
-      if (cum[at[i]] > sTo + kRelayClearM) cs[i],
-    cs.last,
-  ]);
+  var k = 1; // the first control kept past the stretch given up
+  while (k < cs.length - 1 && cum[at[k]] <= sTo + kRelayClearM) {
+    k++;
+  }
+  // The net under the search's bound: the road runs from [to] straight to
+  // the first control kept, so it is that much shorter than it was. A
+  // drag can give up no more than the arc it could have passed — or, where
+  // the line was followed on past that, the stretch it was followed over;
+  // a road cut far shorter than that is not what the player dragged, and
+  // only the end moves.
+  final shortened = cum[at[k]] - to.distanceTo(cs[k]);
+  if (shortened > math.max(reach, sTo) + kRelayClearM) return finish(swapped);
+
+  return finish([to, ...cs.skip(k)]);
 }
+
+/// How far a price may sit over the treasury and still be paid: float
+/// noise, not money. The affordability check and [formatMoney] share it, so
+/// a price the bank refuses never prints as what the bank holds.
+const double kMoneyEpsilon = 1e-9;
 
 /// § as the HUD prints it: rounded up to the whole coin — a bill of
 /// §1,239.20 needs §1,240 in the bank — with thousands separated.
+///
+/// Up from [kMoneyEpsilon] under the amount, not from the raw double: a
+/// length times a price per metre lands a hair over the whole number
+/// (§1,080.0000000000007 for a §1,080 road), and rounding that up printed a
+/// coin nobody owes. No wider than that, though — §1,080.004 is refused
+/// against §1,080 of funds, so it must read §1,081.
 String formatMoney(double amount) {
-  final whole = amount.isFinite ? amount.ceil().abs() : 0;
+  final whole =
+      amount.isFinite ? math.max(0, (amount.abs() - kMoneyEpsilon).ceil()) : 0;
   final digits = whole.toString();
-  final out = StringBuffer(amount < 0 ? '-§' : '§');
+  final out = StringBuffer(amount < 0 && whole > 0 ? '-§' : '§');
   for (var i = 0; i < digits.length; i++) {
     if (i > 0 && (digits.length - i) % 3 == 0) out.write(',');
     out.write(digits[i]);

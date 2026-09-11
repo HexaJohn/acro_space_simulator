@@ -1913,23 +1913,12 @@ class TerrainNodes {
     if (_nearBrushes.isEmpty || editResBoost <= 1) return resolution;
     final geom = _geom;
     final g = geom != null && geom.radiusM == radiusM ? geom.of(k) : null;
-    final centre = g?.centreBF ?? k.centreDirection * radiusM;
-    final reach = g?.circumradiusM ?? k.circumradiusM(radiusM);
-    final chunkVoxelM = reach * 2.0 / resolution;
-    var boost = 1;
-    for (final b in _nearBrushes) {
-      if ((b.centreBF - centre).length > reach + b.lateralReachM) continue;
-      // Same target as [refinementsFor], floor included, so the boost a
-      // chunk gets and the level the tree was forced to agree.
-      final targetM =
-          math.max(b.radiusM * 2.0 / editVoxelsAcross, b.minVoxelM);
-      if (chunkVoxelM > targetM * editResBoost) continue; // splitting's job
-      while (boost < editResBoost && chunkVoxelM > targetM * boost) {
-        boost <<= 1;
-      }
-      if (boost >= editResBoost) break;
-    }
-    return resolution * boost;
+    // Radial-aware (the brush's own radius, not the datum): see
+    // [editResolutionFor].
+    return editResolutionFor(k, radiusM, resolution, _nearBrushes,
+        maxBoost: editResBoost,
+        voxelsAcrossBrush: editVoxelsAcross,
+        circumradiusM: g?.circumradiusM);
   }
 
   /// The rung to request next on the way to [want] — the streaming ladder's

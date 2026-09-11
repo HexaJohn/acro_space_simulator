@@ -150,10 +150,13 @@ void main() {
     // the shaper has laid ~1,800 of them — so a four-block city spent 43 s of
     // a 46 s generate here, all of it after the progress bar had finished.
     //
-    // 24 m is not a coarser approximation: `CityTerrainShaper` lays one
-    // cut-fill brush per 24 m of corridor, so the graded ground under a road
-    // IS piecewise-linear at that spacing and nothing lives between the
-    // samples to be missed.
+    // A graded road with no deck is draped from its corridor: the datums its
+    // segments were cut to, read back by the corridor's own rules
+    // (`CityTerrainShaper.corridorGround`), with a ground query only at the
+    // points something was laid over since — where another road meets it.
+    // Only a road that follows the land, or the ground under a deck,
+    // keeps the sample every 24 m and the straight line between — an
+    // approximation, which misses whatever the ground does in between.
     final sim = const CityGenerator()
         .generate(const CityGenSpec(seed: 2, blocksAcross: 2), bodies: bodies);
     final system = RealSolarSystem.build();
@@ -166,7 +169,7 @@ void main() {
           return f == null ? body.radius : f.groundRadiusAt(d.x, d.y, d.z);
         })) {
       edits.record(body.id, p.brush);
-      sim.shapedTerrain.add(p.key);
+      CityTerrainShaper.markShaped(sim, p.key, p.brush);
     }
 
     final snap = WorldSnapshot.capture(1, InMemoryVesselRepository(const []),

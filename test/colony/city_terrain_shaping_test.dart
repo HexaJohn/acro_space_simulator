@@ -54,7 +54,7 @@ void main() {
         bodyRadiusM: moon.radius,
         groundRadiusAt: (d) => groundWith(repo, d))) {
       repo.record(moon.id, p.brush);
-      city.shapedTerrain.add(p.key);
+      CityTerrainShaper.markShaped(city, p.key, p.brush);
     }
   }
 

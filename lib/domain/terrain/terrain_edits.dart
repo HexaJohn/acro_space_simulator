@@ -67,6 +67,11 @@ class TerrainEdits {
 
   int get length => _all.length;
 
+  /// The edit at ordinal [index], in application order — without the copy
+  /// [all] makes, for a reader that only wants what was added since it last
+  /// looked.
+  TerrainBrush brushAt(int index) => _all[index];
+
   bool get isEmpty => _all.isEmpty;
 
   bool get isNotEmpty => _all.isNotEmpty;
@@ -129,6 +134,27 @@ class TerrainEdits {
     }
     if (single == null) return const [];
     return [for (final i in single) _all[i]];
+  }
+
+  /// The ordinals of the edits whose footprint covers any of [dirs] (unit
+  /// directions), ascending — application order. [at] for a run of
+  /// directions at once: what reads a whole road's ground asks the index
+  /// once for the road rather than once per point, and gets back where each
+  /// brush stands in the order, which is what decides whether it was laid
+  /// over another. Candidates only, as [at]'s are.
+  List<int> ordinalsAt(Iterable<Vector3> dirs) {
+    if (_all.isEmpty) return const [];
+    final out = <int>{};
+    for (final entry in _buckets.entries) {
+      final seen = <ChunkKey>{};
+      for (final dir in dirs) {
+        final cell = chunkAt(dir, entry.key);
+        if (!seen.add(cell)) continue;
+        final hits = entry.value[cell];
+        if (hits != null) out.addAll(hits);
+      }
+    }
+    return out.toList()..sort();
   }
 
   /// Compose every edit covering [p] onto [density]. [p] is body-fixed metres.

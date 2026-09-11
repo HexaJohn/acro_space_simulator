@@ -13,9 +13,11 @@ import 'package:acro_space_simulator/domain/colony/city/road_elevation.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_junction.dart';
 import 'package:acro_space_simulator/domain/scatter/mesh_builder.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
+import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_bucketing.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_columns.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_mesher.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_traffic.dart';
+import 'package:acro_space_simulator/infrastructure/flutter_scene/city/rail_vehicles.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/road_deck.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/road_mesher.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/coord_convert.dart';
@@ -142,6 +144,8 @@ void main() {
           {List<(double, int)?>? roadEnds,
           List<CityTileEnd> ends = const [],
           List<CityTileJunction> junctions = const [],
+          List<CityTileCorridor> corridors = const [],
+          List<bool> roadEndBent = const [],
           CityMeshKnobs k = knobs}) =>
       CityTileMeshJob(request(noColumns, tier, k: k), CityBuildingLibraries(),
               members: CityTileMembers(
@@ -152,6 +156,8 @@ void main() {
                 roadEnds: roadEnds ?? [for (final _ in roads) ...[null, null]],
                 transitEnds: const [],
                 junctions: junctions,
+                corridors: corridors,
+                roadEndBent: roadEndBent,
               ))
           .runAll();
 
@@ -602,9 +608,9 @@ void main() {
     // At the pole, so the node's tangent frame is the town's own: east +X,
     // north +Y.
     RoadEnd end(double dx, double dy, RoadClass cls,
-            {bool isStart = false, double lift = 0}) =>
+            {bool isStart = false, double lift = 0, bool? onDeck}) =>
         RoadEnd(Vector3.zero, Vector3(dx, dy, 0), cls.halfWidth, cls,
-            isStart: isStart, liftM: lift);
+            isStart: isStart, liftM: lift, onDeck: onDeck);
 
     test('ends meet only at one level', () {
       final js = RoadMesher.junctionsFromEnds([
@@ -622,7 +628,8 @@ void main() {
           js.first.legs.map((l) => l.roadClass).toSet(), {RoadClass.street});
       expect(
           js.last.legs.map((l) => l.roadClass).toSet(), {RoadClass.avenue});
-      // A metre apart is one level; a three-metre step is not.
+      // A metre off the ground is one level; a three-metre step onto piers
+      // is not.
       expect(
           RoadMesher.junctionsFromEnds([
             end(10, 0, RoadClass.street),
@@ -637,6 +644,64 @@ void main() {
             end(0, 10, RoadClass.street, lift: 3),
           ]),
           isEmpty);
+    });
+
+    test("ends meet by the layout's grade-separation rule", () {
+      // Two decks on their piers crossing four metres apart: under the
+      // grade separation, so the layout cut both and the graph routes a
+      // four-leg junction there — the tiles draw it.
+      List<RoadJunction> decks(double a, double b) =>
+          RoadMesher.junctionsFromEnds([
+            end(10, 0, RoadClass.street, lift: a),
+            end(-10, 0, RoadClass.street, lift: a),
+            end(0, 10, RoadClass.street, lift: b),
+            end(0, -10, RoadClass.street, lift: b),
+          ], anchorBF: anchor);
+      final x = decks(20, 24).single;
+      expect(x.legs, hasLength(4));
+      expect(x.control, JunctionControl.stop);
+      // At the grade separation they pass: two roads carrying on.
+      expect(decks(20, 20 + RoadElevation.gradeSeparationM), isEmpty);
+      // A road sunk one three-metre step into a cutting, ending on a
+      // street: graded into the ground, it meets the street — deeper, in
+      // its tunnel, it passes under.
+      List<RoadJunction> sunk(double lift) => RoadMesher.junctionsFromEnds([
+            end(10, 0, RoadClass.street),
+            end(-10, 0, RoadClass.street),
+            end(0, 10, RoadClass.street, lift: lift),
+          ], anchorBF: anchor);
+      expect(sunk(-3).single.legs, hasLength(3));
+      expect(sunk(-9), isEmpty);
+      // The rule, both ways round, in lifts: an end on no deck is the
+      // ground.
+      expect(RoadMesher.liftsSeparated(0, false, 0, false), isFalse);
+      expect(RoadMesher.liftsSeparated(-3, true, 0, false), isFalse);
+      expect(RoadMesher.liftsSeparated(0, false, 2.4, true), isFalse);
+      expect(RoadMesher.liftsSeparated(0, false, 2.6, true), isTrue);
+      expect(RoadMesher.liftsSeparated(-5.1, true, 0, false), isTrue);
+      expect(RoadMesher.liftsSeparated(24, true, 20, true), isFalse);
+      expect(RoadMesher.liftsSeparated(-6, true, -10, true), isFalse);
+      expect(RoadMesher.liftsSeparated(12, true, 17, true), isTrue);
+    });
+
+    test('a deck laid flush is a deck, not the ground', () {
+      // A deck at a lift of exactly 0 where two deck ends stand three
+      // metres up on their piers: two decks short of the grade separation,
+      // one junction — as the layout cut it and the graph routes it. A
+      // road on the ground there passes under the pair.
+      List<RoadJunction> over({required bool onDeck}) =>
+          RoadMesher.junctionsFromEnds([
+            end(10, 0, RoadClass.street, lift: 0, onDeck: onDeck),
+            end(-10, 0, RoadClass.street, lift: 3),
+            end(0, 10, RoadClass.street, lift: 3),
+          ], anchorBF: anchor);
+      expect(over(onDeck: true).single.legs, hasLength(3));
+      expect(over(onDeck: false), isEmpty);
+      expect(RoadMesher.liftsSeparated(0, true, 3, true), isFalse);
+      expect(RoadMesher.liftsSeparated(0, false, 3, true), isTrue);
+      // Unsaid, a lift says a deck: the only way a hand-built end is one.
+      expect(end(1, 0, RoadClass.street, lift: 3).onDeck, isTrue);
+      expect(end(1, 0, RoadClass.street).onDeck, isFalse);
     });
 
     test('an outgoing one-way leg has no bar, no mast and no signal', () {
@@ -779,10 +844,10 @@ void main() {
       // The crossing as a tile holds it: body-fixed ends, flags and all,
       // and the player's overrides, through the whole mesher at near.
       CityTileEnd tileEnd(double dx, double dy, RoadClass cls,
-              {bool isStart = false, double lift = 0}) =>
+              {bool isStart = false, double lift = 0, bool? onDeck}) =>
           CityTileEnd(anchor, anchor + Vector3(dx, dy, 0), cls.halfWidth, cls,
               true, false,
-              isStart: isStart, liftM: lift);
+              isStart: isStart, liftM: lift, onDeck: onDeck);
       final ends = [
         tileEnd(10, 0, RoadClass.boulevard),
         tileEnd(-10, 0, RoadClass.boulevard),
@@ -825,6 +890,22 @@ void main() {
               liftM: -9),
       ]);
       expect(sunk.groups, isEmpty);
+      // A deck laid flush over the node, with two decks three metres up on
+      // their piers: one junction where the flush end is a deck, none where
+      // it is a road on the ground — the tile carries which it is.
+      List<CityTileEnd> overDecks({required bool onDeck}) => [
+            tileEnd(10, 0, RoadClass.street, lift: 0, onDeck: onDeck),
+            tileEnd(-10, 0, RoadClass.street, lift: 3),
+            tileEnd(0, 10, RoadClass.street, lift: 3),
+          ];
+      expect(
+          meshWith(const [], CityTier.near, ends: overDecks(onDeck: true))
+              .groups,
+          isNotEmpty);
+      expect(
+          meshWith(const [], CityTier.near, ends: overDecks(onDeck: false))
+              .groups,
+          isEmpty);
     });
 
     test("the generator's junctions keep the class warrant, whichever way "
@@ -1169,6 +1250,174 @@ void main() {
             reason: 'a pier foot at $p');
       }
     });
+
+    test("in a tile: a raised street over the next tile's avenue", () {
+      // The avenue belongs to the tile its middle lies in, next door, and
+      // reaches this one only as a corridor (see `CityTileBucketer`).
+      final deck = road(RoadClass.street, line(0, -200, 200, 21),
+          lifts: List.filled(21, 8.0));
+      final avenue = road(RoadClass.avenue, [(40, -100), (40, 0), (40, 100)]);
+      List<Vector3> piersOf(CityTileResult res) => [
+            for (final p in verts(res, CityMaterialKind.facade))
+              if (p.z < -0.5) p
+          ];
+      // Without it, a pier stands in its lanes.
+      expect(
+          piersOf(meshWith([deck], CityTier.mid))
+              .any((p) => (p.x - 40).abs() < 8.0),
+          isTrue);
+      final piers = piersOf(meshWith([deck], CityTier.mid, corridors: [
+        CityTileCorridor(avenue.points, avenue.halfWidthM),
+      ]));
+      expect(piers, isNotEmpty);
+      for (final p in piers) {
+        expect((p.x - 40).abs(), greaterThanOrEqualTo(8.0 + 1.5),
+            reason: 'a pier foot at $p');
+      }
+    });
+  });
+
+  group('a junction up on a deck', () {
+    final hw = RoadClass.street.width / 2;
+    const up = 12.0;
+    // Three streets raised 12 m, meeting at the origin: west and east the
+    // through road, north the stem of the T.
+    RoadSnapshot leg(List<(double, double)> xy) =>
+        road(RoadClass.street, xy, lifts: List.filled(xy.length, up));
+    final west = leg(line(0, 0, -200, 11));
+    final east = leg(line(0, 0, 200, 11));
+    final north = leg([for (var i = 0; i < 11; i++) (0.0, i * 20.0)]);
+
+    /// Concrete standing above the deck: the parapets. The girders' tops
+    /// are the deck's, and the piers stand under it.
+    List<Vector3> aboveDeck(CityTileResult res) => [
+          for (final p in verts(res, CityMaterialKind.facade))
+            if (p.z > up + RoadMesher.ribbonLiftM + 0.2) p
+        ];
+
+    test("its parapets stand clear of the other legs' lanes", () {
+      final res = meshWith([west, east, north], CityTier.mid, roadEnds: [
+        for (var i = 0; i < 3; i++) ...[(hw, 3), null],
+      ]);
+      final walls = aboveDeck(res);
+      expect(walls, isNotEmpty);
+      for (final p in walls) {
+        final inThrough = p.y.abs() < hw - 0.01;
+        final inStem = p.x.abs() < hw - 0.01 && p.y > 0;
+        expect(inThrough || inStem, isFalse, reason: 'a parapet at $p');
+      }
+      // Held back at the plate, and running on past it down every leg.
+      expect(walls.any((p) => p.x < -20), isTrue);
+      expect(walls.any((p) => p.x > 20), isTrue);
+      expect(walls.any((p) => p.y > 20), isTrue);
+    });
+
+    test('a deck going on through a joint keeps its parapets', () {
+      // Two ends meeting are one road going on: nothing to stop short of.
+      final res = meshWith([west, east], CityTier.mid,
+          roadEnds: [(hw, 2), null, (hw, 2), null]);
+      expect(aboveDeck(res).any((p) => p.x.abs() < 1), isTrue);
+    });
+
+    /// The junction pass's entry for [leg]'s first end, the one at the
+    /// origin, as the cut hands it to the tile the end lies in.
+    CityTileEnd endOf(RoadSnapshot leg) => CityTileEnd(
+        Vector3(leg.points[0], leg.points[1], leg.points[2]),
+        Vector3(leg.points[3], leg.points[4], leg.points[5]),
+        hw, RoadClass.street, true, false,
+        isStart: true, liftM: up);
+
+    /// What the cut of a frame of [all] hands the tile holding [inTile] of
+    /// them: the body's end-table entry for each end of its roads, and
+    /// whether each turns off the other end meeting it — worked out off
+    /// every road on the body, whichever tile holds it.
+    (List<(double, int)?>, List<bool>) fromCut(
+        List<RoadSnapshot> all, List<RoadSnapshot> inTile) {
+      final plan = CityTileBucketer.bucket(
+          WorldSnapshot(tick: 0, vessels: const {}, roads: all),
+          anchors: const {body: anchor},
+          tileM: 3218.688);
+      final table = plan.endHalf[body] ?? const {};
+      final bends = plan.endBends[body] ?? const <int>{};
+      final ends = <(double, int)?>[], bent = <bool>[];
+      for (final r in inTile) {
+        final p = r.points, l = r.lifts;
+        ends
+          ..add(table[CityTileBucketer.endKeyAt(p, 0, l.first)])
+          ..add(table[CityTileBucketer.endKeyAt(p, p.length - 3, l.last)]);
+        final (b0, b1) = CityTileBucketer.bendsOf(r, bends);
+        bent
+          ..add(b0)
+          ..add(b1);
+      }
+      return (ends, bent);
+    }
+
+    test("an L's parapets stand clear of the other leg's lanes", () {
+      // Two raised streets joined end to end at a corner — the second
+      // snapped onto the first's free end. Only two ends meet and no plate
+      // is drawn, but each leg's inside parapet ran on across the other's
+      // lanes. The cut reads the turn off the whole body's roads, so a leg
+      // whose corner and other leg are both the next tile's — nothing of
+      // either in its own tile — holds back as surely.
+      final cases = <(String, List<RoadSnapshot>)>[
+        ('both legs in the tile', [east, north]),
+        ('north the next tile\'s', [east]),
+        ('east the next tile\'s', [north]),
+      ];
+      for (final (label, roads) in cases) {
+        final (ends, bent) = fromCut([east, north], roads);
+        expect(ends.first, (hw, 2), reason: label);
+        expect(bent.first, isTrue, reason: label);
+        final walls = aboveDeck(meshWith(roads, CityTier.mid,
+            roadEnds: ends, roadEndBent: bent));
+        expect(walls, isNotEmpty, reason: label);
+        for (final p in walls) {
+          final inEast = p.y.abs() < hw - 0.01 && p.x > 0;
+          final inNorth = p.x.abs() < hw - 0.01 && p.y > 0;
+          expect(inEast || inNorth, isFalse, reason: '$label: a parapet at $p');
+        }
+        // Held back at the corner, and running on past it down both legs.
+        if (roads.contains(east)) {
+          expect(walls.any((p) => p.x > 20), isTrue, reason: label);
+        }
+        if (roads.contains(north)) {
+          expect(walls.any((p) => p.y > 20), isTrue, reason: label);
+        }
+      }
+    });
+
+    test("a joint's turn is the cut's word: the tile searches out none", () {
+      // Every end of a deck where two ends meet used to look for the other
+      // among all the tile's roads and junction ends — for a tile of a few
+      // hundred decks, most of its meshing. The cut says once which turn;
+      // told none does, the tile holds nothing back, however its own roads
+      // lie.
+      final walls = aboveDeck(meshWith([east, north], CityTier.mid,
+          roadEnds: [(hw, 2), null, (hw, 2), null],
+          ends: [endOf(east), endOf(north)]));
+      expect(
+          walls.any((p) =>
+              (p.y.abs() < hw - 0.01 && p.x > 0) ||
+              (p.x.abs() < hw - 0.01 && p.y > 0)),
+          isTrue);
+    });
+
+    test('a deck bending gently through a joint keeps its parapets', () {
+      // Ten degrees off straight on is still one road going on.
+      final a = 10 * math.pi / 180;
+      final on = leg([
+        for (var i = 0; i < 11; i++)
+          (i * 20.0 * math.cos(a), i * 20.0 * math.sin(a)),
+      ]);
+      final (ends, bent) = fromCut([west, on], [west, on]);
+      // Two meet at the joint; the far ends are dead ends.
+      expect(ends, [(hw, 2), (hw, 1), (hw, 2), (hw, 1)]);
+      expect(bent, everyElement(isFalse));
+      final res = meshWith([west, on], CityTier.mid,
+          roadEnds: ends, roadEndBent: bent, ends: [endOf(west), endOf(on)]);
+      expect(aboveDeck(res).any((p) => p.x.abs() < 1), isTrue);
+    });
   });
 
   group('one-way arrows', () {
@@ -1391,6 +1640,95 @@ void main() {
           RoadClass.avenue.lanesFor(RoadDecoration.trees)!.laneOffsets;
       expect(tile.roads.single.laneOffsetsM, dressed);
       expect(dressed, isNot(RoadClass.avenue.lanes!.laneOffsets));
+    });
+
+    // The railway's trains, which ran the drape whatever the track did: a
+    // passenger working and a freight on a 1.2 km line, split in two at a
+    // crossing with the second piece reversed, so the lifts are chained.
+    final railXy = line(0, -600, 600, 61);
+    List<RoadSnapshot> railway([List<double> lifts = const []]) {
+      final a = railXy.sublist(0, 31), b = railXy.sublist(30).reversed;
+      final la = lifts.isEmpty ? const <double>[] : lifts.sublist(0, 31);
+      final lb = lifts.isEmpty
+          ? const <double>[]
+          : lifts.sublist(30).reversed.toList();
+      return [
+        road(RoadClass.rail, a, lifts: la),
+        road(RoadClass.rail, b.toList(), lifts: lb),
+      ];
+    }
+
+    List<Vector3> trainCars(List<RoadSnapshot> roads, double epoch) {
+      final traffic = CityTraffic();
+      traffic.begin('sig');
+      traffic.visitTile('$body/0/0/0', 'k', body, roads, anchor);
+      final sink = traffic.place(body, epoch, focus, const {});
+      traffic.end();
+      final scene = lengthToScene(1.0);
+      return [
+        for (final b in sink.railCars.values)
+          for (var i = 0; i < b.count; i++)
+            Vector3(b.matrices[i].storage[12], b.matrices[i].storage[13],
+                    b.matrices[i].storage[14]) *
+                (1 / scene),
+      ];
+    }
+
+    const epochs = [0.0, 20.0, 45.0, 321.0];
+
+    test('trains ride a raised railway on its deck', () {
+      for (final epoch in epochs) {
+        final on = trainCars(railway(List.filled(61, 12)), epoch);
+        expect(on, isNotEmpty, reason: '@$epoch');
+        for (final p in on) {
+          expect(p.z, closeTo(12 + RailVehicleMeshes.railHeadM, 0.05),
+              reason: '$p @$epoch');
+        }
+      }
+    });
+
+    test('and none runs over the hill its tunnel goes through', () {
+      // Wholly underground: the track is dropped, and so is every train.
+      for (final epoch in epochs) {
+        expect(trainCars(railway(), epoch), isNotEmpty, reason: '@$epoch');
+        expect(trainCars(railway(List.filled(61, -20)), epoch), isEmpty,
+            reason: '@$epoch');
+      }
+      // Under the middle: 20 m down within 400 m of it, out by 500, so the
+      // mouths — where the deck is at the cover depth — stand at 475 m.
+      final lifts = [
+        for (final (x, _) in railXy)
+          x.abs() >= 500
+              ? 0.0
+              : (x.abs() <= 400 ? -20.0 : -20 + (x.abs() - 400) / 5)
+      ];
+      var seen = 0;
+      for (var epoch = 0.0; epoch < 120; epoch += 5) {
+        for (final p in trainCars(railway(lifts), epoch)) {
+          seen++;
+          expect(p.x.abs(), greaterThan(474.9), reason: '$p @$epoch');
+          expect(p.z, greaterThan(-RoadElevation.tunnelCoverM), reason: '$p');
+        }
+      }
+      expect(seen, greaterThan(0));
+    });
+
+    test('a railway on the ground runs exactly where it always ran', () {
+      for (final epoch in epochs) {
+        final ground = trainCars(railway(), epoch);
+        expect(ground, isNotEmpty);
+        for (final p in ground) {
+          expect(p.z, closeTo(RailVehicleMeshes.railHeadM, 0.05), reason: '$p');
+        }
+        // A deck that never leaves the drape is the same train, to the bit.
+        final level = trainCars(railway(List.filled(61, 0)), epoch);
+        expect(level.length, ground.length);
+        for (var i = 0; i < ground.length; i++) {
+          expect(level[i].x, ground[i].x);
+          expect(level[i].y, ground[i].y);
+          expect(level[i].z, ground[i].z);
+        }
+      }
     });
   });
 }

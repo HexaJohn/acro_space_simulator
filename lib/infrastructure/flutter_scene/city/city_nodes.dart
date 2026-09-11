@@ -1308,6 +1308,9 @@ class CityNodes {
       root.endHalf
         ..clear()
         ..addAll(plan.endHalf[root.bodyId] ?? const {});
+      root.endBends
+        ..clear()
+        ..addAll(plan.endBends[root.bodyId] ?? const {});
       root.transitEnds
         ..clear()
         ..addAll(plan.transitEnds[root.bodyId] ?? const []);
@@ -1486,19 +1489,32 @@ class CityNodes {
     final roads = t.roads;
     final nr = roads.length;
     final roadEnds = List<(double, int)?>.filled(2 * nr, null);
+    // Made only for a tile with a deck bent at a joint.
+    List<bool>? bent;
     var transitFrom = _transitFrom;
     var nt = 0;
     for (var i = 0; i < nr; i++) {
       final r = roads[i];
       final p = r.points;
       final last = 3 * (p.length ~/ 3) - 3;
-      // Keyed with each end's deck lift, as the cut tabled it: an
-      // overpass's end reads its own entry, not the crossing's under it.
+      // Keyed as the cut tabled it — a deck end by its lift, a road on the
+      // ground by its point alone: an overpass's end reads its own entry,
+      // not the crossing's under it.
       final lifts = r.lifts;
       roadEnds[2 * i] = root.endHalf[CityTileBucketer.endKeyAt(
-          p, 0, lifts.isEmpty ? 0.0 : lifts.first)];
+          p, 0, lifts.isEmpty ? null : lifts.first)];
       roadEnds[2 * i + 1] = root.endHalf[CityTileBucketer.endKeyAt(
-          p, last, lifts.isEmpty ? 0.0 : lifts.last)];
+          p, last, lifts.isEmpty ? null : lifts.last)];
+      // Whether a deck's ends turn off the one other end meeting each, as
+      // the cut found them off the whole body's roads.
+      if (lifts.isNotEmpty) {
+        final (b0, b1) = CityTileBucketer.bendsOf(r, root.endBends);
+        if (b0 || b1) {
+          final b = bent ??= List<bool>.filled(2 * nr, false);
+          b[2 * i] = b0;
+          b[2 * i + 1] = b1;
+        }
+      }
       final cls = RoadClass
           .values[r.roadClassIndex.clamp(0, RoadClass.values.length - 1)];
       if (cls == RoadClass.transit) {
@@ -1540,6 +1556,8 @@ class CityNodes {
       roadEnds: roadEnds,
       transitEnds: transitEnds,
       junctions: t.junctions,
+      corridors: t.corridors,
+      roadEndBent: bent ?? const [],
     );
   }
 
@@ -3387,6 +3405,10 @@ class _BodyRoot {
   /// Widest half width and count of road ends at each quantised end point.
   final Map<int, (double, int)> endHalf = {};
 
+  /// The end points where a deck's end and the one other end meeting it
+  /// turn off one another (see [CityBucketPlan.endBends]).
+  final Set<int> endBends = {};
+
   /// Every end of every piece of elevated rail, body-fixed.
   final List<Vector3> transitEnds = [];
 }
@@ -3412,6 +3434,10 @@ class _Tile {
   /// The player's junction overrides the tile's junction pass may need.
   List<CityTileJunction> junctions = const [];
 
+  /// The ground roads of other tiles that the tile's decks keep their piers
+  /// out of (see [CityTileBucket.corridors]).
+  List<CityTileCorridor> corridors = const [];
+
   /// Body-centre distance of the outermost building centre in the tile
   /// (0 with no buildings): the shell the camera's altitude is measured
   /// over in [CityNodes.tileCanDetail].
@@ -3427,6 +3453,7 @@ class _Tile {
     patches = b.patches;
     ends = b.ends;
     junctions = b.junctions;
+    corridors = b.corridors;
     maxRadiusM = b.maxRadiusM;
     structureKey = b.structureKey;
   }

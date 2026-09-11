@@ -20,6 +20,15 @@
 ///   ext.acro.citygame?zone=residential  zone every street lot at once
 ///   ext.acro.camera?elevationDeg=&azimuthDeg=&rangeM=
 ///                                  aim the camera, for framing the shot
+///   ext.acro.roadtool              the road tool, driven by name through
+///                                  the paths a player's input takes:
+///       tool=road|traffic|look  mode=straight|curved|freeform|upgrade
+///       type=(a RoadType.id)  elev=(metres)|up|down  step=3|6|12
+///       snap=roads,angles,grid,guides (the set ON)  view=routes|junctions|adjust
+///       hover=fx,fy  click=fx,fy  rclick=fx,fy  drag=fx0,fy0,fx1,fy1
+///       key=pageUp|pageDown|escape            (fx,fy: screen fractions)
+///     returns mode, type, elevation, anchor, the last quote, blocked,
+///     roads, funds and road upkeep.
 ///
 /// The colony runs agent traffic unless `--dart-define=AGENTS=false`, and
 /// `ext.acro.citygame` drives it (docs/plans/agent-traffic.md §16.4), each
@@ -151,6 +160,25 @@ Future<void> main() async {
           k: view[k],
       },
     }));
+  });
+
+  // The road tool, driven through the view (SimViewControl.roadTool) so a
+  // scripted click is picked, snapped, priced and drawn exactly as a real
+  // one — the only way to see the tool's ghost and its bill without a hand
+  // on the mouse.
+  developer.registerExtension('ext.acro.roadtool', (method, params) async {
+    final drive = SimViewControl.instance.roadTool;
+    if (drive == null) {
+      return developer.ServiceExtensionResponse.error(
+          developer.ServiceExtensionResponse.extensionError, 'no view yet');
+    }
+    try {
+      return developer.ServiceExtensionResponse.result(
+          jsonEncode(drive(params)));
+    } catch (e) {
+      return developer.ServiceExtensionResponse.error(
+          developer.ServiceExtensionResponse.extensionError, '$e');
+    }
   });
 
   // Framing knob. The opening camera pose is a judgement call about how much

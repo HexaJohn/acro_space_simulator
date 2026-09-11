@@ -8,10 +8,16 @@
 /// they are entered from.
 library;
 
+import 'dart:math' as math;
+
 import 'package:acro_space_simulator/domain/colony/city/city_layout.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
+import 'package:acro_space_simulator/domain/colony/city/road_build.dart';
+import 'package:acro_space_simulator/domain/colony/city/road_catalog.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_graph.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_junction.dart';
+import 'package:acro_space_simulator/domain/shared/vector3.dart';
+import 'package:acro_space_simulator/infrastructure/flutter_scene/city/road_mesher.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// The auto lot on [roadId] nearest [p] (by centroid), on the side of the
@@ -32,6 +38,41 @@ List<int> edgesOut(RoadGraph g, Vec2 p) {
     for (var k = g.outStart[n.id]; k < g.outStart[n.id + 1]; k++)
       g.outEdges[k]
   ];
+}
+
+/// Seconds edge [e] loses at the node it arrives at: its time less its
+/// driving time.
+double delayOf(RoadGraph g, int e) =>
+    g.edgeTime[e] - g.edgeLength[e] / g.roadSpeedMps[g.pieceRoad[g.edgePiece[e]]];
+
+/// The delay of every edge arriving at [node].
+List<double> arrivalDelays(RoadGraph g, RoadNode node) => [
+      for (var e = 0; e < g.edgeCount; e++)
+        if (g.edgeTo[e] == node.id) delayOf(g, e)
+    ];
+
+/// The junction the tiles draw nearest [p], or null for none: [layout]'s
+/// road ends as the tile bucketing hands them to the mesher — only the
+/// classes that join junctions, each end with the point in along its road
+/// — through [RoadMesher.junctionsFromEnds], in a flat local frame.
+RoadJunction? tilesPlanNear(CityLayout layout, Vec2 p) {
+  final ends = <RoadEnd>[];
+  for (final (_, rec) in layout.roadIndex.indexed) {
+    final road = rec.road;
+    if (!road.roadClass.joinsJunctions || rec.sampleCount < 2) continue;
+    Vector3 at(int i) => Vector3(rec.e[i], rec.n[i], 0);
+    final last = rec.sampleCount - 1;
+    ends
+      ..add(RoadEnd(at(0), at(1), road.halfWidth, road.roadClass,
+          collector: road.collector, isStart: true))
+      ..add(RoadEnd(at(last), at(last - 1), road.halfWidth, road.roadClass,
+          collector: road.collector));
+  }
+  RoadJunction? best;
+  for (final j in RoadMesher.junctionsFromEnds(ends)) {
+    if (Vec2(j.at.x, j.at.y).distanceTo(p) <= 12) best = j;
+  }
+  return best;
 }
 
 void main() {
@@ -176,21 +217,329 @@ void main() {
     }
 
     // A draped street's end and a raised deck's end in the same place: the
-    // deck is twelve metres up — no junction.
+    // deck is twelve metres up on its piers — no junction.
     const raised = RoadDeck(
-        startM: 12, endM: 12, startOffsetM: 12, endOffsetM: 12);
+        startM: 12,
+        endM: 12,
+        startOffsetM: 12,
+        endOffsetM: 12,
+        structures: [(0.0, 200.0)]);
     expect(graphOf(raised).nodeCount, 4);
-    // Laid at grade at that end: it meets the street.
-    const ramped =
-        RoadDeck(startM: 0, endM: 12, startOffsetM: 0, endOffsetM: 12);
+    // Graded into the ground at that end: it meets the street.
+    const ramped = RoadDeck(
+        startM: 0,
+        endM: 12,
+        startOffsetM: 0,
+        endOffsetM: 12,
+        structures: [(40.0, 200.0)]);
     expect(graphOf(ramped).nodeCount, 3);
-    // Two decks at one height meet; four metres apart they do not.
-    const high = RoadDeck(
-        startM: 20, endM: 20, startOffsetM: 20, endOffsetM: 20);
-    const higher = RoadDeck(
-        startM: 24, endM: 24, startOffsetM: 24, endOffsetM: 24);
-    expect(graphOf(high, other: high).nodeCount, 3);
-    expect(graphOf(higher, other: high).nodeCount, 4);
+    // Two decks meet short of the grade separation — four metres apart is
+    // one junction in the air, as the layout cuts it; five is not.
+    RoadDeck onPiers(double h) => RoadDeck(
+        startM: h,
+        endM: h,
+        startOffsetM: h,
+        endOffsetM: h,
+        structures: const [(0.0, 200.0)]);
+    expect(graphOf(onPiers(20), other: onPiers(20)).nodeCount, 3);
+    expect(graphOf(onPiers(24), other: onPiers(20)).nodeCount, 3);
+    expect(graphOf(onPiers(25), other: onPiers(20)).nodeCount, 4);
+  });
+
+  test("the layout's junctions are the graph's: one grade-separation rule",
+      () {
+    // Two raised streets crossing on their piers, four metres apart: under
+    // the grade separation, so the layout cuts both into a junction — and
+    // traffic can turn there.
+    RoadDeck onPiers(double h) => RoadDeck(
+        startM: h,
+        endM: h,
+        startOffsetM: h,
+        endOffsetM: h,
+        structures: const [(0.0, 400.0)]);
+    final decks = CityLayout();
+    decks.commitRoad(
+        controls: const [Vec2(0, -200), Vec2(0, 200)], deck: onPiers(20));
+    decks.commitRoad(
+        controls: const [Vec2(-200, 0), Vec2(200, 0)], deck: onPiers(24));
+    final g = RoadGraph.of(decks);
+    expect(g.roadCount, 4, reason: 'the layout cut both');
+    final x = g.nodeNear(const Vec2(0, 0))!;
+    expect(x.legs, hasLength(4));
+    expect(x.atGrade, isFalse);
+    expect(edgesOut(g, const Vec2(0, 0)), hasLength(4));
+
+    // A road sunk one 3 m step into a cutting (3 m of cover is short of a
+    // tunnel), ending on a street: the snap lands it on the street and the
+    // layout cuts the street at the T.
+    const cutting =
+        RoadDeck(startM: -3, endM: -3, startOffsetM: -3, endOffsetM: -3);
+    final t = CityLayout();
+    t.commitRoad(controls: const [Vec2(-200, 0), Vec2(200, 0)]);
+    t.commitRoad(controls: const [Vec2(0, 150), Vec2(0, 0)], deck: cutting);
+    final tg = RoadGraph.of(t);
+    expect(tg.roadCount, 3, reason: 'the layout cut the street');
+    final tj = tg.nodeNear(const Vec2(0, 0))!;
+    expect(tj.legs, hasLength(3), reason: 'the sunk road is no island');
+    expect(tj.atGrade, isTrue);
+
+    // Lying against the street with nothing cut, it joins part way along;
+    // in its tunnel it passes under.
+    RoadGraph stub(RoadDeck deck) {
+      final layout = CityLayout();
+      layout.addRoad(const RoadSpline(
+          id: 'main', controls: [Vec2(-200, 0), Vec2(200, 0)]));
+      layout.addRoad(RoadSpline(
+          id: 'sunk', controls: const [Vec2(0, 5), Vec2(0, 150)], deck: deck));
+      return RoadGraph.of(layout);
+    }
+
+    expect(stub(cutting).nodeNear(const Vec2(0, 2))!.legs, hasLength(3));
+    const tunnel = RoadDeck(
+        startM: -12,
+        endM: -12,
+        startOffsetM: -12,
+        endOffsetM: -12,
+        tunnels: [(0.0, 145.0)]);
+    expect(stub(tunnel).nodeCount, 4);
+  });
+
+  test('a deck on its piers to its very end never meets the street under it',
+      () {
+    // The survey closes the deck's last range at its own sum of two-metre
+    // samples; the road's index length can come out a few ulps past it.
+    // Read exactly, the last end fell off its piers — onto the street
+    // twelve metres below, which the layout never snapped it to.
+    final type = RoadType.byId('two-lane')!;
+    var joined = 0;
+    final missed = <String>[];
+    for (var k = 0; k < 20; k++) {
+      final len = 57.3 + k * 13.7;
+      for (final a in const [0.0, 0.37, 0.74]) {
+        final end = Vec2(len * math.cos(a), len * math.sin(a));
+        final out = Vec2(-math.sin(a), math.cos(a));
+        final layout = CityLayout();
+        layout.commitRoad(controls: [end, end + out * 150]);
+        final deck = quoteRoadBuild(RoadBuildRequest(
+          controls: [const Vec2(0, 0), end],
+          type: type,
+          startElevationM: 12,
+          endElevationM: 12,
+        )).deck!;
+        layout.commitRoad(controls: [const Vec2(0, 0), end], deck: deck);
+        final g = RoadGraph.of(layout);
+        if (g.nodeCount != 4 || g.nodeNear(end)!.legs.length != 1) {
+          joined++;
+          missed.add('len $len, angle $a');
+        }
+      }
+    }
+    expect(joined, 0, reason: 'joined at ${missed.join('; ')}');
+  });
+
+  test('a deck loaded from a save stays on its piers to its very end', () {
+    // A save keeps a curved road's controls decimated, and the load
+    // re-samples them: the road's index length comes out millimetres past
+    // the survey's last range, not ulps. Read there, the last end fell off
+    // its piers — onto the street twelve metres below, and onto a street
+    // passing under it, part way along.
+    final type = RoadType.byId('two-lane')!;
+    const controls = [
+      Vec2(0, 0),
+      Vec2(72, 0),
+      Vec2(85.5, 3.2),
+      Vec2(76.5, 6.4),
+    ];
+    const end = Vec2(76.5, 6.4);
+    final deck = quoteRoadBuild(RoadBuildRequest(
+      controls: controls,
+      type: type,
+      startElevationM: 12,
+      endElevationM: 12,
+    )).deck!;
+    // Every road re-added raw, as `CitySim.fromJson` restores them.
+    CityLayout reloaded(CityLayout saved) {
+      final l = CityLayout();
+      for (final r in saved.roads.toList()) {
+        l.addRoad(r);
+      }
+      return l;
+    }
+
+    // A street starting under its end.
+    final layout = CityLayout();
+    layout.commitRoad(controls: const [end, Vec2(76.5, 156.4)]);
+    layout.commitRoad(controls: controls, deck: deck);
+    for (final l in [layout, reloaded(layout)]) {
+      final g = RoadGraph.of(l);
+      expect(g.nodeCount, 4);
+      expect(g.nodeNear(end)!.legs, hasLength(1));
+    }
+
+    // A street passing under its end.
+    final alone = CityLayout();
+    alone.commitRoad(controls: controls, deck: deck);
+    final under = reloaded(alone)
+      ..addRoad(const RoadSpline(
+          id: 'under', controls: [Vec2(76.5, -143.6), Vec2(76.5, 156.4)]));
+    final g = RoadGraph.of(under);
+    expect(g.nodeCount, 4);
+    expect(g.nodeNear(end)!.legs, hasLength(1));
+  });
+
+  test('a deck cut just off its piers meets the street that cut it', () {
+    // A viaduct coming down 12 m to the ground leaves its piers at a survey
+    // boundary. A street crossing it just past that boundary crosses its
+    // graded side: the layout cuts both roads there. The deck's piece ending
+    // at the cut must read its end at the cut — graded, as the crossing
+    // rule read it — and not a quarter metre back on its piers, or the
+    // graph parts into two 2-leg nodes the junction the layout cut.
+    final type = RoadType.byId('two-lane')!;
+    const controls = [Vec2(0, 0), Vec2(200, 0)];
+    final deck = quoteRoadBuild(RoadBuildRequest(
+      controls: controls,
+      type: type,
+      startElevationM: 12,
+      endElevationM: 0,
+    )).deck!;
+    final b = deck.structures.last.$2;
+    expect(b, closeTo(156, 1), reason: 'the survey puts its piers first');
+    // Every road re-added raw, as `CitySim.fromJson` restores them.
+    CityLayout reloaded(CityLayout saved) {
+      final l = CityLayout();
+      for (final r in saved.roads.toList()) {
+        l.addRoad(r);
+      }
+      return l;
+    }
+
+    final missed = <String>[];
+    for (final off in const [0.05, 0.1, 0.2, 0.24]) {
+      final x = b + off;
+      final at = Vec2(x, 0);
+      final street = [Vec2(x, -100), Vec2(x, 100)];
+      for (final deckFirst in const [true, false]) {
+        final layout = CityLayout();
+        if (deckFirst) {
+          layout.commitRoad(controls: controls, deck: deck);
+          layout.commitRoad(controls: street);
+        } else {
+          layout.commitRoad(controls: street);
+          layout.commitRoad(controls: controls, deck: deck);
+        }
+        final order = deckFirst ? 'deck first' : 'street first';
+        expect(layout.roads, hasLength(4), reason: 'off $off, $order: cut');
+        for (final (label, l) in [
+          ('laid', layout),
+          ('reloaded', reloaded(layout)),
+        ]) {
+          final g = RoadGraph.of(l);
+          final here = [
+            for (final n in g.nodes)
+              if (n.at.distanceTo(at) < 8) n
+          ];
+          if (here.length != 1 ||
+              here.single.legs.length != 4 ||
+              !here.single.atGrade) {
+            missed.add('off $off, $order, $label: ${here.length} nodes, '
+                'legs ${[for (final n in here) n.legs.length]}, '
+                'atGrade ${[for (final n in here) n.atGrade]}');
+          }
+        }
+      }
+    }
+    expect(missed, isEmpty);
+  });
+
+  test('an alley meeting a street is a curb cut: no stop, as the tiles '
+      'draw it', () {
+    final layout = CityLayout();
+    layout.commitRoad(controls: const [Vec2(-200, 0), Vec2(200, 0)]);
+    layout.commitRoad(
+        controls: const [Vec2(0, 0), Vec2(0, 150)],
+        roadClass: RoadClass.alley);
+    final g = RoadGraph.of(layout);
+    final t = g.nodeNear(const Vec2(0, 0))!;
+    // Still a way in and out for routing...
+    expect(t.legs, hasLength(3));
+    expect(edgesOut(g, const Vec2(0, 0)), hasLength(3));
+    // ...but no junction: the street runs on past it, nobody waits.
+    expect(t.control, JunctionControl.none);
+    expect(arrivalDelays(g, t), everyElement(0.0));
+    expect(tilesPlanNear(layout, const Vec2(0, 0)), isNull,
+        reason: 'the tiles draw nothing there either');
+  });
+
+  test('an alley at a crossing never stops, and never takes a stop sign',
+      () {
+    // Raw inserts, the alley first, so its leg is the node's first and the
+    // stop legs have to be numbered past it.
+    final layout = CityLayout();
+    layout.addRoad(const RoadSpline(
+        id: 'alley',
+        controls: [Vec2(0, 0), Vec2(-100, -100)],
+        roadClass: RoadClass.alley));
+    for (final (id, to) in const [
+      ('n', Vec2(0, 200)),
+      ('s', Vec2(0, -200)),
+      ('e', Vec2(200, 0)),
+      ('w', Vec2(-200, 0)),
+    ]) {
+      layout.addRoad(RoadSpline(id: id, controls: [const Vec2(0, 0), to]));
+    }
+    final g = RoadGraph.of(layout);
+    final x = g.nodeNear(const Vec2(0, 0))!;
+    expect(x.legRoadIds.first, 'alley');
+    expect(x.control, JunctionControl.stop);
+    expect(x.plan.stopLegs, {1, 2, 3, 4}, reason: 'the four streets');
+    final tiles = tilesPlanNear(layout, const Vec2(0, 0))!;
+    expect(tiles.control, x.control);
+    expect(tiles.stopLegs, hasLength(x.plan.stopLegs.length));
+    for (var e = 0; e < g.edgeCount; e++) {
+      if (g.edgeTo[e] != x.id) continue;
+      final alley = x.legRoadIds[g.edgeLeg[e]] == 'alley';
+      expect(delayOf(g, e), alley ? 0.0 : RoadGraph.stopDelaySec);
+    }
+    // The player names every leg a stop, the alley's too: it is no leg of
+    // the drawn junction, so it takes no sign — on a re-plan as on a build.
+    final every = JunctionOverride(
+        at: const Vec2(0, 0), stopHeadings: [for (final l in x.legs) l.heading]);
+    final patched = g.withOverrides([every]).nodeNear(const Vec2(0, 0))!;
+    expect(patched.plan.stopLegs, {1, 2, 3, 4});
+    expect(
+        RoadGraph.of(layout, overrides: [every])
+            .nodeNear(const Vec2(0, 0))!
+            .plan
+            .stopLegs,
+        patched.plan.stopLegs);
+  });
+
+  test('a road leaving the through road stops nothing on it', () {
+    // A highway's exit ramp: the mainline runs on past it.
+    final exit = CityLayout();
+    exit.commitRoad(
+        controls: const [Vec2(-400, 0), Vec2(400, 0)],
+        roadClass: RoadClass.motorway);
+    exit.commitRoad(
+        controls: const [Vec2(0, 0), Vec2(0, 150)], roadClass: RoadClass.ramp);
+    final g = RoadGraph.of(exit);
+    final x = g.nodeNear(const Vec2(0, 0))!;
+    expect(x.legs, hasLength(3));
+    expect(x.plan.stopLegs, isEmpty);
+    expect(arrivalDelays(g, x), everyElement(0.0));
+    // A one-way street leaving an avenue: nothing crosses the avenue.
+    final side = CityLayout();
+    side.commitRoad(
+        controls: const [Vec2(-200, 0), Vec2(200, 0)],
+        roadClass: RoadClass.avenue);
+    side.commitRoad(
+        controls: const [Vec2(0, 0), Vec2(0, 150)],
+        roadClass: RoadClass.streetOneWay);
+    final sg = RoadGraph.of(side);
+    final sx = sg.nodeNear(const Vec2(0, 0))!;
+    expect(sx.legs, hasLength(3));
+    expect(sx.plan.stopLegs, isEmpty);
+    expect(arrivalDelays(sg, sx), everyElement(0.0));
   });
 
   test('a dead end lying against a road joins it part way along', () {

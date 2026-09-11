@@ -426,7 +426,12 @@ more than 2.5 m up it stands on piers (a bridge past 15 m), more than 5 m
 down it is a tunnel. Structure and tunnel ranges ride the road and are
 sliced at splits. Two roads whose levels differ by 4.5 m at a crossing pass
 over each other — one rule (`CityLayout.levelsSeparated`) shared by the
-crossing test, the end snap and the connectivity walk.
+crossing test, the end snap, the connectivity walk, the routing graph's
+nodes and the tiles' junctions (`RoadMesher.liftsSeparated`, the same rule
+in lifts). A deck records the length its ranges were surveyed along
+(`rangeLengthM`, saved as `l`), and its ranges are read at `rangeArc`: a save
+re-samples a curved road by millimetres, and read blind at its very end a
+viaduct stepped off its own piers and joined the street beneath it.
 
 **Money.** Roads are paid from the treasury (buildings stay in ore):
 `CitySim.buildRoad` quotes and charges; `quoteRoad` is the preview, over the
@@ -439,6 +444,14 @@ generator and the starter kit.
 lots carried; the difference is charged), `reverseRoad` (a one-way road's
 `reversed` flag — never its controls, which would rename every lot on it),
 `renameRoad` (every piece of the base road), `moveRoadEnd` (Adjust Roads).
+Every edit re-plats through one carry: a building whose lot survives goes
+with it, and what stood on a lot the road gave up is torn down as the Clear
+tool would — never left under a dead lot id, counted and saved. An Adjust
+move is planned once (`CitySim.planMoveRoadEnd`): `moveRoadEnd` lays it,
+`quoteMoveRoadEnd` prices it and the tool's drag preview draws it. A road on
+the ground is re-laid on the ground unless its end joins a road clear of the
+ground, and neither the drop snap nor the drawing snap lands a ground-level
+end on a tunnel it cannot see.
 `roadsRevision` moves with every road or override change; the renderer, the
 upkeep cache and the traffic model key on it — an in-place edit keeps the
 road COUNT, and a count-keyed cache never saw it.
@@ -449,7 +462,10 @@ deck, or a class only the tool lays) follows the city-builder rules
 roads do, except for one-way roads leaving them (and two-lane roads drawn
 away), overriding every other no-lights rule; six-lane roads everywhere but
 one-ways leaving; highways only where they meet a two-way road; roundabouts
-never. The generator's junctions keep their class-only warrant — read by the
+never. A road only leaving the biggest one (an off-ramp, a one-way street
+off an avenue) stops nothing on it, and a junction is planned over the legs
+the tiles draw — an alley or a path meeting a street is a kerb cut, never a
+stop. The generator's junctions keep their class-only warrant — read by the
 leg-aware rules, their randomly drawn streets would get lights at one corner
 and a stop at the next. `junctionPlanForNetwork` is the one question the
 tiles draw by and the sim's graph times by. Players override lights and stop
@@ -471,7 +487,10 @@ by an eighth. Everything that reads traffic — the tick's growth, fire and tax
 lines, the views — reads it through `CitySim.trafficReadout`
 (`CityTrafficReadout`, `traffic_readout.dart`), never the model behind it,
 so a per-vehicle simulation can answer in its place; before the first
-picture every answer punishes nothing. `road_traffic_economy_test.dart` pins
+picture every answer punishes nothing. Fire cover asks `fireReach` — a
+station with safety cover, never a clinic's ambulance — and a lot's own
+lorries are never its delivery. `passes` counts the pictures published, for
+views that cache what they drew from one. `road_traffic_economy_test.dart` pins
 that an ordinary town still grows all three ways under the gates.
 
 **The renderer.** The wire carries each road's id, decoration and a lift per
@@ -484,13 +503,60 @@ until their tiles land; the tool's ghost, guidelines, handles and route
 lines are an overlay node over `RoadOverlayState`. The mesher raises every
 emitter by the lifts, stands piers (clear of the roads beneath) and girders,
 skips tunnel runs and builds portals at their mouths, paints one-way arrows,
-grass verges and planted medians, and plans junctions by legs.
+grass verges and planted medians, and plans junctions by legs. A graded
+road on the ground is draped from the corridor the shaper actually cut: each
+segment's datums are kept on the city as they are recorded
+(`CityTerrainShaper.markShaped` → `CitySim.corridorDatums`, rebuilt as a
+loaded colony re-grades), the frame models the brush's own cut and easing to
+its fixed point, and wherever a later brush was laid over the road it asks
+the ground itself. Sampling every fourth 6 m point and drawing straight
+lines between them had drawn a road re-laid to 64.5 m as tilted slabs, half
+buried in its own cutting. Each road's drape is cached, and a new brush
+forgets only the ground and the drapes it can reach: a hand-drill quantum
+costs a few queries, not a cold frame.
 
 **The ground.** A road build adds terrain brushes, and the terrain renderer
 used to detach every chunk a new brush touched before its re-mesh existed —
 a black hole with the loading wireframe over the town on every road built.
 Touched chunks now stand in until their replacement lands (`_editStale`);
-scatter keeps stale cells drawn, less the props the new road covers.
+scatter keeps stale cells drawn, less the props the new road covers. The
+tick after an edit used to stall for up to a second in the shaper: every
+ground sample is a `groundRadiusAt` march through the brushes already laid
+there, re-reading the relief and the edit index at each of its ~300 steps,
+and one `pending()` asked the same place up to four times. The march now
+memoises per ray direction (bit-identical answers) and `pending()` asks each
+direction once.
+
+**The editor.** `road_tool_controller.dart` (a `RoadToolEditing` mixin on
+`CityEditController`) is the tool's state: the mode — Straight, Curved
+(start, the point the curve bends toward, end), Freeform (each stretch
+leaves on the last one's heading), Upgrade — the road type, the elevation
+and its step, the snap options, and the chain's ANCHOR, which carries the
+built end's heading and, only where that end is off the ground, its deck
+height. An end snapped onto a road takes that road's level: a street's
+ground, a viaduct's deck. Every click goes `snapRoadRequest` → `buildRoad`,
+and the ghost is drawn on the same snapped line, so what the player sees is
+what is laid and what is charged. Right-click drops the curve point, then
+ends the chain; in Upgrade it reverses a one-way road. `road_tool_panel.dart`
+is the toolbar — mode chips, the snapping popup, the menu by group with
+locked types greyed (never hidden), the vertical elevation bar with its
+3/6/12 m step, the quote's readouts — and the Traffic tool's three views:
+Routes (lines per trip kind through the clicked road), Junctions (lights
+toggled inside the marker's ring, a stop sign per leg outside it) and Adjust
+(drag an end circle; the drag preview and the release share one plan, so the
+previewed price is the charge; rename). `road_tool_scene.dart` is the view
+side: a `ColonyGroundSampler` over the edited terrain, the hover at 30 Hz
+with no `setState`, and the overlay published only when what it draws has
+changed. Input lives in `simulation_view_colony.dart`: click tools declare no
+pan, and a `_PickClaim` keeps a held tool's pointer from the camera — a
+non-opaque hover region had let the camera's scale recognizer into the
+arena, and a click with a pixel of jitter orbited instead of placing a point.
+PAGE UP/DOWN and Esc come through one key hook that stands aside while
+walking and while a text field has focus. The Budget drawer carries road
+upkeep; each milestone lists the roads it opens. In city mode the flight
+view's buttons give way to a small column of what the city game uses (Save,
+Load, time warp, debug), under the HUD and above the editor; the colony can
+always be left, and Load returns to the editor.
 
 **Verification.** `lib/main_road_showcase_dev.dart` lays a showcase round
 the city camera's pivot (overpass, ramp-down tunnel — refused on a slope

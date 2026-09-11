@@ -153,10 +153,19 @@ class RoadSnapper {
     this.sidewalkM = 3,
     this.newHalfWidthM = 4,
     this.scale = 1,
+    this.passesOver,
   });
 
   final CityLayout layout;
   final RoadSnapOptions options;
+
+  /// The stretches of road the point being placed passes over rather than
+  /// lands on: [road] at arc [s] of its [lengthM], an END of it when
+  /// [atStart] is set (true for its first). A road's tunnel, say, to an end
+  /// on the ground, which can neither see it nor meet it. Null: lands on
+  /// any road.
+  final bool Function(RoadSpline road, double s, double lengthM, bool? atStart)?
+      passesOver;
 
   /// The plat the zoning grid lines up with: lot frontage, the clearance
   /// kept at each end of a road, lot depth, pavement.
@@ -243,6 +252,11 @@ class RoadSnapper {
     layout.roadIndex.visit(Box2.around(p, withinM), 0, (slot, rec, _) {
       if (!seen.add(slot) || rec.sampleCount == 0) return;
       for (final start in const [true, false]) {
+        if (passesOver?.call(
+                rec.road, start ? 0 : rec.lengthM, rec.lengthM, start) ??
+            false) {
+          continue;
+        }
         final i = start ? 0 : rec.sampleCount - 1;
         final q = rec.sampleAt(i);
         final d = p.distanceTo(q);
@@ -266,14 +280,14 @@ class RoadSnapper {
       if (seg == 0) return;
       final (q, d) = rec.nearestOnSegment(p, seg);
       if (d < bestD) {
-        bestD = d;
         final a = rec.sampleAt(seg - 1), b = rec.sampleAt(seg);
         final segLen = a.distanceTo(b);
         final u = segLen <= 1e-9 ? 0.0 : a.distanceTo(q) / segLen;
+        final s = rec.arcAt(seg, u);
+        if (passesOver?.call(rec.road, s, rec.lengthM, null) ?? false) return;
+        bestD = d;
         best = RoadSnap(q, RoadSnapKind.roadPoint,
-            roadId: rec.road.id,
-            roadS: rec.arcAt(seg, u),
-            roadTangent: (b - a).normalized);
+            roadId: rec.road.id, roadS: s, roadTangent: (b - a).normalized);
       }
     });
     return best;

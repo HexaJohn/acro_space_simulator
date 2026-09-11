@@ -527,7 +527,7 @@ class AdvanceSimulationTick {
     );
     for (final p in pending) {
       terrainEdits.record(body.id, p.brush);
-      city.shapedTerrain.add(p.key);
+      CityTerrainShaper.markShaped(city, p.key, p.brush);
     }
   }
 

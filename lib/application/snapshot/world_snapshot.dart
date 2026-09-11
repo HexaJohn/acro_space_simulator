@@ -9,6 +9,7 @@ import 'dart:math' as math;
 import '../../domain/colony/building.dart';
 import '../../domain/colony/city/city_building_spec.dart';
 import '../../domain/colony/city/city_sim.dart';
+import '../../domain/colony/city/city_terrain_shaper.dart';
 import '../../domain/colony/city/parcel.dart';
 import '../../domain/colony/colony.dart';
 import '../../domain/colony/surface_placement.dart';
@@ -1047,11 +1048,360 @@ class BodyDescriptorSnapshot {
 /// building inset past the ease-off stands wholly on level ground. Nothing may
 /// be inset less than this or it starts straddling the step to the terrace
 /// next door.
-/// Road-drape ground sampling stride, in units of the 6 m spline samples.
-///
-/// Four steps is 24 m, which is `CityTerrainShaper`'s own corridor grading
-/// spacing — see the drape loop for why matching it exactly is the point.
+/// Road-drape ground sampling stride, in units of the 6 m spline samples,
+/// for a road that is not a plain graded corridor: one that follows the
+/// land, or the ground under a deck. Not the corridor's knots — `sample`
+/// rounds each span up to whole steps, so the two spacings drift apart —
+/// which is why a graded road is draped from its corridor instead
+/// ([_drapeRoad], [CityTerrainShaper.corridorGround]).
 const int _roadGroundStride = 4;
+
+/// The corridor a graded road was cut to, read back for its drape. The
+/// shaper the world tick grades with (`AdvanceSimulationTick.cityShaper`),
+/// at its defaults.
+const CityTerrainShaper _roadCorridor = CityTerrainShaper();
+
+/// How far (m) a graded road's drawn line may leave its corridor between
+/// two of its points before a point is drawn between them
+/// ([_followCorridor]) — well inside the ribbon's lift over the ground.
+const double _drapeChordTolM = 0.03;
+
+/// How many times [_followCorridor] may halve a 6 m span: down to 0.75 m.
+const int _drapeBisections = 3;
+
+/// A road's drape: its points — [samples], its 6 m points, and for a plain
+/// graded corridor as many between them as the corridor's bends need
+/// ([_followCorridor]) — and the ground radius under each, asked of the
+/// ground through [groundFor] (held by key) as few times as it can be.
+/// [dirOf] is the unit body-fixed direction [groundFor] asks along; [edits]
+/// the body's edit store.
+///
+/// Never a ground query per point. A query on a colony site marches
+/// radially through every brush covering the point, and in a built city
+/// that was 8 ms EACH; the drape asking for one every 6 m of every road was
+/// 43 s of the 46 s a four-block colony (435 roads once alleys and elevated
+/// lines are counted) took to generate, all of it after the progress bar
+/// had finished.
+///
+/// Its `dirs` are the directions of the points, 3 per point, for a road
+/// whose drape depends on which brushes can reach them (a corridor already
+/// cut: see below) — what a brush laid later is checked against to know
+/// whether this drape still holds — or null for one that depends only on
+/// its keys.
+({List<Vec2> pts, Float64List radii, Float64List? dirs}) _drapeRoad(
+    CitySim city,
+    RoadSpline road,
+    List<Vec2> samples,
+    TerrainEdits? edits,
+    double corridorScale,
+    Vector3 Function(Vec2 local) dirOf,
+    double Function(String key, Vec2 local) groundFor) {
+  WorldSnapshot.roadDrapesComputed++;
+  final laid = road.graded && road.deck == null
+      ? road.sample(stepM: CityTerrainShaper.corridorStepM)
+      : const <Vec2>[];
+  // The corridor's knots where the shaper laid them, in this frame's
+  // plane. The shaper places a local point on the tangent plane at the
+  // body's DATUM radius (the `bodyRadiusM` its callers hand it) and this
+  // frame on the plane at the site's ground: the same metres east and north
+  // are two directions, and on a site kilometres above its datum they are
+  // metres apart a few kilometres out — a trunk road's corridor 1.9 m
+  // further out than the frame took it, 4 km from the site. Carried across
+  // by [corridorScale], the ratio of the two planes' radii.
+  final knots = corridorScale == 1.0
+      ? laid
+      : [for (final k in laid) k * corridorScale];
+  if (knots.length >= 2) {
+    // A plain graded corridor. The ground under it IS the corridor the
+    // shaper cut — a straight grade per segment between its knots, eased
+    // into the next — so it is read back by the corridor's own rules, from
+    // the datums each segment was cut to ([CitySim.corridorDatums]).
+    // Not from the ground at the knots once cut: on a curve the next
+    // segment's easing reaches back over a knot and pulls it off its own
+    // segment's line. Nor from every fourth 6 m point: `sample` rounds each
+    // span up to whole steps, so a 64.5 m road is graded every 21.5 m and
+    // drawn every 5.9 m, and that drew a re-laid street metres in and out
+    // of the hill it was graded through.
+    final m = knots.length - 1;
+    final hw = road.halfWidth.toStringAsFixed(2);
+    final datumStart = Float64List(m), datumEnd = Float64List(m);
+    var cut = true;
+    // Whether any segment was cut to be meshed finer than the colony's
+    // ground: that ground shows the corridor's bends, and the road must
+    // follow them ([_followCorridor]).
+    var fine = false;
+    for (var j = 0; j < m; j++) {
+      // The shaper's own key for the segment (`CityTerrainShaper.pending`).
+      final key = 'road:${road.id}:$hw:${j + 1}';
+      final datums = city.corridorDatums[key];
+      if (datums != null) {
+        datumStart[j] = datums.$1;
+        datumEnd[j] = datums.$2;
+        if (datums.voxelM < _roadCorridor.voxelM) fine = true;
+      } else {
+        assert(
+            !city.shapedTerrain.contains(key),
+            '$key is recorded as shaped but not the datums it was cut to: '
+            'record what CityTerrainShaper.pending returns with '
+            'CityTerrainShaper.markShaped, not shapedTerrain.add');
+        // Not cut yet: the ground at its knots, which is what the shaper
+        // will measure when it cuts it — the road is drawn where its
+        // corridor is about to be.
+        cut = false;
+        datumStart[j] = groundFor('road:${road.id}:k$j', knots[j]);
+        datumEnd[j] = groundFor('road:${road.id}:k${j + 1}', knots[j + 1]);
+      }
+    }
+    final pts = fine
+        ? _followCorridor(samples, knots, datumStart, datumEnd, road.halfWidth)
+        : samples;
+    final last = pts.length - 1;
+    final radii = Float64List(pts.length);
+    _roadCorridor.corridorGround(
+        pts, knots, datumStart, datumEnd, road.halfWidth, radii);
+    if (!cut || edits == null) return (pts: pts, radii: radii, dirs: null);
+    // Once cut, the corridor is exact where nothing has been laid over it
+    // since, and the ground is asked, point by point, only where something
+    // has: a crossing or joining road's corridor recorded after this one
+    // — every road is split where another meets it, so theirs eases over
+    // the end of this one, a local step of up to a metre that no line
+    // between knots follows — a crater, a drill's quantum, a lot's pad.
+    final dirs = Float64List(3 * pts.length);
+    final at = List<Vector3>.generate(pts.length, (i) {
+      final d = dirOf(pts[i]);
+      dirs[3 * i] = d.x;
+      dirs[3 * i + 1] = d.y;
+      dirs[3 * i + 2] = d.z;
+      return d;
+    });
+    final over = _laidOver(
+        road, knots.map(dirOf).toList(), datumStart, datumEnd, at, edits);
+    if (over.isEmpty) return (pts: pts, radii: radii, dirs: dirs);
+    final asked = List<bool>.filled(pts.length, false);
+    for (final b in over) {
+      for (var i = 0; i <= last; i++) {
+        if (asked[i] || !b.canMoveGroundAlong(at[i])) continue;
+        asked[i] = true;
+        radii[i] = groundFor('road:${road.id}:p$i', pts[i]);
+      }
+    }
+    return (pts: pts, radii: radii, dirs: dirs);
+  }
+  // Natural ground (a road that follows the land), or the ground under a
+  // raised or sunk road, which is drawn at its deck by the lifts over this
+  // drape: sampled every [_roadGroundStride] points and interpolated
+  // between.
+  final pts = samples;
+  final last = pts.length - 1;
+  final radii = Float64List(pts.length);
+  for (var i = 0; i <= last; i += _roadGroundStride) {
+    radii[i] = groundFor('road:${road.id}:$i', pts[i]);
+  }
+  if (last % _roadGroundStride != 0) {
+    radii[last] = groundFor('road:${road.id}:$last', pts[last]);
+  }
+  for (var i = 1; i < last; i++) {
+    if (i % _roadGroundStride == 0) continue;
+    final a = (i ~/ _roadGroundStride) * _roadGroundStride;
+    final b = math.min(a + _roadGroundStride, last);
+    radii[i] = b == a
+        ? radii[a]
+        : radii[a] + (radii[b] - radii[a]) * ((i - a) / (b - a));
+  }
+  return (pts: pts, radii: radii, dirs: null);
+}
+
+/// [pts], a graded road's 6 m points in order, with a point added halfway
+/// along each span whose middle the corridor leaves the straight line
+/// between its ends by more than [_drapeChordTolM] — and again in each half
+/// so split, [_drapeBisections] times at most.
+///
+/// The road is drawn as straight lines between its points, and its
+/// corridor is not straight between them: where a road climbs into a knot
+/// the next segment's end cap holds the knot's datum flat for its half
+/// width before it and eases in over the falloff, a ledge the grade runs
+/// into. Drawn every 6 m the line cut under it — a re-laid one-way rising
+/// 23% was drawn 0.95 m in its own ground, grass across it for five metres
+/// though every point sat on the ground within centimetres.
+///
+/// Only for a corridor cut to be meshed finer than the colony's ground
+/// (`CityTerrainShaper.corridorReliefTolM`): at the colony's voxel the
+/// ground cannot show a ledge a few metres long — the starter streets cut
+/// 0.26 m under theirs every 6 m and read clean — and every other street
+/// keeps its 6 m points, and so the tiles it is drawn in.
+List<Vec2> _followCorridor(List<Vec2> pts, List<Vec2> knots,
+    Float64List datumStart, Float64List datumEnd, double halfWidthM) {
+  var cur = pts;
+  // Whether the span from cur[i] to cur[i + 1] is still to be tested.
+  var open = List<bool>.filled(math.max(0, pts.length - 1), true);
+  for (var round = 0; round < _drapeBisections; round++) {
+    final q = <Vec2>[];
+    final isMid = <bool>[];
+    for (var i = 0; i < cur.length; i++) {
+      q.add(cur[i]);
+      isMid.add(false);
+      if (i < open.length && open[i]) {
+        q.add((cur[i] + cur[i + 1]) * 0.5);
+        isMid.add(true);
+      }
+    }
+    if (q.length == cur.length) break;
+    final r = Float64List(q.length);
+    _roadCorridor.corridorGround(
+        q, knots, datumStart, datumEnd, halfWidthM, r);
+    final next = <Vec2>[];
+    final nextOpen = <bool>[];
+    for (var k = 0; k < q.length; k++) {
+      if (!isMid[k]) {
+        next.add(q[k]);
+        nextOpen.add(false);
+        continue;
+      }
+      if ((r[k] - (r[k - 1] + r[k + 1]) / 2).abs() <= _drapeChordTolM) {
+        continue;
+      }
+      // Kept: both halves of its span are tested again.
+      nextOpen[nextOpen.length - 1] = true;
+      next.add(q[k]);
+      nextOpen.add(true);
+    }
+    if (next.length == cur.length) break;
+    cur = next;
+    open = nextOpen.sublist(0, next.length - 1);
+  }
+  return cur;
+}
+
+/// The brushes laid over a road's cut corridor since it was cut: each brush
+/// in [edits] that the index finds along one of the road's points ([at],
+/// unit directions) and that stands, in the order the brushes compose, after
+/// the first of the corridor's own.
+///
+/// Its own are its segments' cut-and-fills, known by their width, the
+/// datums the shaper cut them to ([datumStart], [datumEnd], segment j from
+/// knot j to knot j + 1) and where they end ([knotDirs]). What came before
+/// them does not show on the road: its own segment levels the ground under
+/// its centreline outright. Where none of its own is found — its brushes
+/// are not in this store — every brush found is taken as laid over it.
+List<TerrainBrush> _laidOver(
+    RoadSpline road,
+    List<Vector3> knotDirs,
+    Float64List datumStart,
+    Float64List datumEnd,
+    List<Vector3> at,
+    TerrainEdits edits) {
+  bool own(TerrainBrush b) {
+    if (b.kind != TerrainBrushKind.cutFill || b.radiusM != road.halfWidth) {
+      return false;
+    }
+    final end = b.endBF;
+    if (end == null) return false;
+    for (var j = 0; j < datumStart.length; j++) {
+      if (b.datumRadiusM != datumStart[j] || b.datumRadiusEndM != datumEnd[j]) {
+        continue;
+      }
+      // The same datums on another road (two levelled to one pad) are told
+      // apart by where the brush ends: at this segment's far knot.
+      final off = end - knotDirs[j + 1] * end.dot(knotDirs[j + 1]);
+      if (off.lengthSquared < 1.0) return true;
+    }
+    return false;
+  }
+
+  final ords = edits.ordinalsAt(at);
+  var firstOwn = -1;
+  final others = <int>[];
+  for (final o in ords) {
+    if (own(edits.brushAt(o))) {
+      if (firstOwn < 0) firstOwn = o;
+    } else {
+      others.add(o);
+    }
+  }
+  return [
+    for (final o in others)
+      if (o > firstOwn) edits.brushAt(o),
+  ];
+}
+
+/// How far from its site, in metres across the ground, a colony keeps
+/// anything the snapshot holds the ground under — a road, a lot, a
+/// junction — with [_colonyReachMarginM] for a road's width, its
+/// corridor's easing and a spline's swing past its controls.
+double _colonyReachM(CitySim city) {
+  var r2 = 0.0;
+  void see(Vec2 p) {
+    final d = p.e * p.e + p.n * p.n;
+    if (d > r2) r2 = d;
+  }
+
+  for (final road in city.layout.roads) {
+    for (final c in road.controls) {
+      see(c);
+    }
+  }
+  for (final parcel in city.layout.parcels) {
+    for (final v in parcel.polygon) {
+      see(v);
+    }
+  }
+  for (final o in city.junctionOverrides.values) {
+    see(o.at);
+  }
+  return math.sqrt(r2) + _colonyReachMarginM;
+}
+
+const double _colonyReachMarginM = 100;
+
+/// Whether [brush] can move the ground anywhere within [reachRad] (radians,
+/// seen from the body's centre) of a colony's site direction [siteDirBF].
+///
+/// A ground query marches out along a ray from the body's centre, and a
+/// brush changes nothing outside its bounding sphere: a sphere centred at
+/// `c` meets a ray at angle θ from `c` only where `|c|·sin θ` is within its
+/// radius (and never past a right angle — the ray runs away from it).
+bool _brushReachesColony(
+    TerrainBrush brush, Vector3 siteDirBF, double reachRad) {
+  final c = brush.centreBF;
+  final cLen = c.length;
+  if (cLen <= 1e-9) return true;
+  final cosA = (c.dot(siteDirBF) / cLen).clamp(-1.0, 1.0);
+  final off = math.acos(cosA) - reachRad;
+  if (off <= 0) return true;
+  if (off >= math.pi / 2) return false;
+  return cLen * math.sin(off) <= brush.boundingRadiusM + 1;
+}
+
+/// Forget what [brush], newly laid within a colony's reach, can move: each
+/// ground height [city] holds along a ray the brush can move the ground on
+/// ([TerrainBrush.canMoveGroundAlong]), the drape of any road that height
+/// was asked for, and the drape of any road whose points it can reach —
+/// a corridor already cut asks the ground only at the points something
+/// was laid over, and the brush is now one. Everything else holds.
+void _forgetGroundUnder(CitySim city, TerrainBrush brush) {
+  final lost = <String>[
+    for (final e in city.groundCache.entries)
+      if (brush.canMoveGroundAlong(e.value.dir)) e.key,
+  ];
+  for (final key in lost) {
+    city.groundCache.remove(key);
+    // 'road:<id>:…' — road ids hold no colon.
+    if (key.startsWith('road:')) {
+      final end = key.indexOf(':', 5);
+      city.drapeCache.remove(end < 0 ? key.substring(5) : key.substring(5, end));
+    }
+  }
+  city.drapeCache.removeWhere((_, drape) {
+    final dirs = drape.dirs;
+    if (dirs == null) return false;
+    for (var k = 0; k + 2 < dirs.length; k += 3) {
+      if (brush.canMoveGroundAlong(Vector3(dirs[k], dirs[k + 1], dirs[k + 2]))) {
+        return true;
+      }
+    }
+    return false;
+  });
+}
 
 const double kLotSetbackM = 1.2;
 
@@ -1857,6 +2207,13 @@ class TerrainEditSnapshot {
 /// [epoch] is sim time in seconds. [bodies] is empty when captured without a
 /// [StarSystem] (vessel-only sync, e.g. legacy determinism checks).
 class WorldSnapshot {
+  /// Work [WorldSnapshot.capture] does for a colony's ground, counted for
+  /// tests and profiling: ground queries made — each a march through every
+  /// brush at the point, milliseconds in a built colony — and road drapes
+  /// worked out. A frame in which nothing changed adds to neither.
+  static int groundQueries = 0;
+  static int roadDrapesComputed = 0;
+
   final int tick;
   final double epoch;
   final Map<String, BodySnapshot> bodies;
@@ -2034,16 +2391,63 @@ class WorldSnapshot {
           return Vector3(math.cos(lat) * math.cos(lon),
               math.cos(lat) * math.sin(lon), math.sin(lat));
         }();
-        final field = body.terrainFieldWith(terrainEdits?.forBody(body.id));
+        final edits = terrainEdits?.forBody(body.id);
+        final field = body.terrainFieldWith(edits);
+
+        // The ground under the colony changed? The shaper settling
+        // something may have moved it anywhere, and so may a store replaced
+        // or cut back (a load, a replicated rebuild): every cached height is
+        // stale. Otherwise a brush laid on the body since forgets only what
+        // it can move. Any brush anywhere — a crater on the far side of the
+        // body, a quarry's pit elsewhere — cleared the whole cache, and so
+        // did one that did reach the colony: a hand drill's quantum on a
+        // street, 0.25 m of ground, cost a generated colony's next frame
+        // 1,578 ground queries and two seconds.
+        final editCount = edits?.length ?? 0;
+        final groundStale =
+            city.groundCacheShaped != city.shapedTerrain.length ||
+                !identical(city.groundCacheEditStore, edits) ||
+                editCount < city.groundCacheEditCount;
+        if (groundStale) {
+          city.groundCache.clear();
+          city.drapeCache.clear();
+        } else if (edits != null && editCount > city.groundCacheEditCount) {
+          final reachRad = _colonyReachM(city) / body.radius;
+          for (var i = city.groundCacheEditCount; i < editCount; i++) {
+            final brush = edits.brushAt(i);
+            if (_brushReachesColony(brush, siteDirBF, reachRad)) {
+              _forgetGroundUnder(city, brush);
+            }
+          }
+        }
+        city.groundCacheShaped = city.shapedTerrain.length;
+        city.groundCacheEditStore = edits;
+        city.groundCacheEditCount = editCount;
+        // A road laid, split, upgraded or re-laid: its drape is worked out
+        // again, and a road that is gone forgets its own.
+        if (city.drapeCacheRevision != city.roadsRevision) {
+          city.drapeCache.clear();
+          city.drapeCacheRevision = city.roadsRevision;
+        }
+
+        // Held with the rest of the colony's ground: asked every frame it was
+        // a march through every brush at the site, 3-4 ms of a built
+        // colony's frame.
         final siteRadius = field == null
             ? body.radius
-            : field.groundRadiusAt(siteDirBF.x, siteDirBF.y, siteDirBF.z);
+            : city.groundCache.putIfAbsent('site', () {
+                groundQueries++;
+                return (
+                  radius: field.groundRadiusAt(
+                      siteDirBF.x, siteDirBF.y, siteDirBF.z),
+                  dir: siteDirBF,
+                );
+              }).radius;
 
-        // The shaper just changed the ground? Every cached height is stale.
-        if (city.groundCacheStamp != city.shapedTerrain.length) {
-          city.groundCache.clear();
-          city.groundCacheStamp = city.shapedTerrain.length;
-        }
+        /// The unit body-fixed direction under a local point — what the
+        /// ground is asked along there.
+        Vector3 dirOf(Vec2 local) =>
+            city.localToBodyFixed(local, bodyRadiusM: siteRadius).normalized;
 
         /// Ground radius under a parcel-city feature, cached by key. Sampled
         /// WITH the terrain edits, so geometry reads the pad that was levelled
@@ -2052,11 +2456,13 @@ class WorldSnapshot {
         double groundFor(String key, Vec2 local) {
           if (field == null) return siteRadius;
           return city.groundCache.putIfAbsent(key, () {
-            final dir = city
-                .localToBodyFixed(local, bodyRadiusM: siteRadius)
-                .normalized;
-            return field.groundRadiusAt(dir.x, dir.y, dir.z);
-          });
+            groundQueries++;
+            final dir = dirOf(local);
+            return (
+              radius: field.groundRadiusAt(dir.x, dir.y, dir.z),
+              dir: dir,
+            );
+          }).radius;
         }
 
         /// Ground radius under one CELL, so the colony drapes over the
@@ -2081,41 +2487,29 @@ class WorldSnapshot {
           });
         }
         for (final road in city.layout.roads) {
-          final pts = road.sample(stepM: 6);
+          // Worked out once per change to the road or to the ground under
+          // the colony, and held ([CitySim.drapeCache]): the capture runs
+          // every frame, and re-sampling and re-modelling every graded
+          // road's corridor every frame was a quarter of a colony's frame
+          // budget.
+          var drape = city.drapeCache[road.id];
+          if (drape == null || !identical(drape.road, road)) {
+            final samples = road.sample(stepM: 6);
+            final d = samples.length < 2
+                ? (
+                    pts: samples,
+                    radii: Float64List(samples.length),
+                    dirs: null
+                  )
+                : _drapeRoad(city, road, samples, edits,
+                    siteRadius / body.radius, dirOf, groundFor);
+            drape = (road: road, pts: d.pts, dirs: d.dirs, radii: d.radii);
+            city.drapeCache[road.id] = drape;
+          }
+          final pts = drape.pts;
           if (pts.length < 2) continue;
-          // Each point at ITS OWN ground: a road crossing a slope follows the
-          // corridor graded for it, instead of holding the site's height and
-          // floating off (or tunnelling into) the hillside.
-          //
-          // The ground is sampled every [_roadGroundStride] points — 24 m,
-          // which is EXACTLY the spacing `CityTerrainShaper` grades a corridor
-          // at — and interpolated between. That is not an approximation: the
-          // shaper lays one cut-fill brush per 24 m and the graded ground
-          // under a road is therefore piecewise-linear at that spacing
-          // already, so sampling it finer resolves nothing that is there.
-          //
-          // It matters a great deal. A ground query on a colony site marches
-          // radially through every brush covering the point, and in a built
-          // city that is 8 ms EACH; the drape was asking for one every 6 m of
-          // every road. On a four-block colony — 435 roads once alleys and
-          // elevated lines are counted — that was 43 s of the 46 s a generate
-          // took, all of it after the progress bar had finished.
-          final radii = List<double>.filled(pts.length, 0);
+          final radii = drape.radii;
           final last = pts.length - 1;
-          for (var i = 0; i <= last; i += _roadGroundStride) {
-            radii[i] = groundFor('road:${road.id}:$i', pts[i]);
-          }
-          if (last % _roadGroundStride != 0) {
-            radii[last] = groundFor('road:${road.id}:$last', pts[last]);
-          }
-          for (var i = 1; i < last; i++) {
-            if (i % _roadGroundStride == 0) continue;
-            final a = (i ~/ _roadGroundStride) * _roadGroundStride;
-            final b = math.min(a + _roadGroundStride, last);
-            radii[i] = b == a
-                ? radii[a]
-                : radii[a] + (radii[b] - radii[a]) * ((i - a) / (b - a));
-          }
           // Arc along the capture's OWN samples, in plan, for the roads that
           // need one: a raised or sunk road's deck is read against it, and a
           // reversed road's bridges are mirrored across it.
