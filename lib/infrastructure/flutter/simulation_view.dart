@@ -37,6 +37,7 @@ import '../../domain/colony/city/parcel.dart';
 import '../../adapters/presenters/surface_picker.dart';
 import '../flutter_scene/city/city_nodes.dart';
 import 'flight_session.dart';
+import 'pointer_lock.dart';
 import 'screens/city_edit_overlay.dart';
 import 'screens/city_game_hud.dart';
 import 'screens/city_site_actions.dart';
@@ -158,6 +159,11 @@ class SimulationView extends StatefulWidget {
   /// stick, body labels) gets out of the way of the HUD that replaces it.
   /// Requires [injectedCity]; without one there is nothing to play.
   final bool cityMode;
+
+  /// First-person mouse look, radians of turn per physical pixel of mouse
+  /// travel. A 1,400-pixel sweep is about a half turn — brisk enough to look
+  /// round a street corner, fine enough to aim the drill.
+  static const double mouseLookRadPerPx = 0.0022;
 
   const SimulationView({
     super.key,
@@ -288,6 +294,15 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   /// view on its own (see `_syncZoneView`), and letting go must drop it again
   /// without undoing a pin the player set deliberately.
   bool _zoneViewPinned = false;
+
+  /// Captures the mouse for first-person look while walking (see
+  /// [PointerLock]); unsupported platforms keep click-and-drag.
+  late final PointerLock _pointerLock;
+
+  /// Releases the mouse when the window stops being the one in front — a
+  /// captured cursor would otherwise stay pinned inside a window the player
+  /// has alt-tabbed away from.
+  AppLifecycleListener? _lifecycle;
 
   /// Whether the city-builder's opening turn-to-daylight has been applied.
   /// One-shot: see `_alignCityDaylight`.
@@ -605,6 +620,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           'upMode': _upMode.name,
           'freecam': _freecam,
           'walk': _walkMode,
+          // First-person mouse look: whether this platform can capture at
+          // all (false = click-and-drag), and whether it has right now.
+          'pointerLockSupported': _pointerLock.supported,
+          'pointerLockCaptured': _pointerLock.captured,
           // Frame economics, harness-readable (mirrors the perf panel): mean
           // ticker frame, Flutter's own build/raster means, and the last
           // TopDownSnapshotPresenter.present() — the one big per-frame cost
@@ -823,7 +842,11 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           _freecamRelLocal = dir * (_walkGroundRadius(body, dir) + walkEyeHeight);
           _walkGrounded = true;
         }
+        // On foot, the mouse IS the head: captured, so looking round is just
+        // moving it, as in every first-person game — not click-and-drag.
+        _captureMouseLook();
       } else {
+        _releaseMouseLook();
         _range = _rangeBeforeWalk;
         _upMode = _upModeBeforeWalk;
         _gravFrame = null;
@@ -1045,6 +1068,17 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         _syncZoneView();
       });
 
+  /// Pin the mouse for first-person look. No setState: callers are already
+  /// inside one, or the frame loop that repaints anyway.
+  void _captureMouseLook() {
+    if (!_walkMode || !_pointerLock.supported) return;
+    _pointerLock.capture();
+    // Anything moved before the pin is not a look.
+    _pointerLock.takeDelta();
+  }
+
+  void _releaseMouseLook() => _pointerLock.release();
+
   void _toggleFreecam() => setState(_toggleFreecamInner);
 
   /// The freecam toggle itself, outside `setState` so walk mode — which turns
@@ -1185,6 +1219,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     LogicalKeyboardKey.keyJ,
     LogicalKeyboardKey.keyC,
     LogicalKeyboardKey.keyZ,
+    LogicalKeyboardKey.escape,
     LogicalKeyboardKey.space,
     LogicalKeyboardKey.shiftLeft,
     LogicalKeyboardKey.shiftRight,
@@ -1228,6 +1263,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       // builder has, on the key it has it on.
       if (e.logicalKey == LogicalKeyboardKey.keyZ && _editingCity != null) {
         _toggleZoneOverlay();
+        return KeyEventResult.handled;
+      }
+      // Esc frees a captured mouse — to reach the toolbar, or another
+      // window — and the walk goes on. A click on the world takes it back.
+      if (e.logicalKey == LogicalKeyboardKey.escape && _pointerLock.captured) {
+        setState(_releaseMouseLook);
         return KeyEventResult.handled;
       }
       // G gets out and walks (and back in again).
@@ -1515,6 +1556,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     // left its preview hanging over the world forever. Re-sync whenever the
     // editor's state changes, which is the one event both paths share.
     _cityEdit.addListener(_onCityEditChanged);
+    _pointerLock = PointerLock.create();
+    _lifecycle = AppLifecycleListener(onStateChange: (state) {
+      if (state != AppLifecycleState.resumed && _pointerLock.captured) {
+        setState(_releaseMouseLook);
+      }
+    });
 
     // The REAL Solar System: Sun + planets + dwarf planets + moons.
     final system = SampleWorld.realSystem();
@@ -1803,6 +1850,16 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       final strafe = axis(LogicalKeyboardKey.keyA, LogicalKeyboardKey.keyD);
       final lift = axis(LogicalKeyboardKey.keyQ, LogicalKeyboardKey.keyE);
       if (_walkMode) {
+        // Mouse look: whatever the captured mouse moved since last frame, as
+        // a turn of the head. Before the step, so this frame walks the way
+        // the player is now facing.
+        if (_pointerLock.captured) {
+          final (dx, dy) = _pointerLock.takeDelta();
+          if (dx != 0 || dy != 0) {
+            _orbitCamera(dx * SimulationView.mouseLookRadPerPx,
+                dy * SimulationView.mouseLookRadPerPx);
+          }
+        }
         if (_evaPack) {
           _stepEva(fwd, strafe, frameDt);
         } else {
@@ -2114,6 +2171,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   @override
   void dispose() {
     _cityEdit.removeListener(_onCityEditChanged);
+    _lifecycle?.dispose();
+    _pointerLock.release();
+    _pointerLock.dispose();
     if (widget.cityMode) {
       // The scatter knobs are process-wide. Leaving the city rig's settings
       // behind would hand the next flight a 2.5x prop range and an anchor
@@ -2897,6 +2957,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           },
           onPointerMove: (e) {
             if (!_mmbDragging) return;
+            if (_pointerLock.captured) return; // looking is the mouse itself
             // A missed pointer-up (MMB released off-window, focus stolen)
             // leaves the drag armed; the next unrelated drag then applies
             // the delta from the STALE anchor and the camera leaps to a
@@ -3073,6 +3134,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                             _pinchBaseRange = _range;
                           }
                           ..onUpdate = (d) {
+                            // A captured mouse already looks by moving; the
+                            // warp back to its pin would read here as a drag
+                            // the other way, and the head would shake.
+                            if (_pointerLock.captured) return;
                             if (d.pointerCount >= 2 && d.scale != 1.0) {
                               // Two-finger pinch -> zoom.
                               setState(() {
@@ -3092,7 +3157,21 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                           },
                       ),
                     },
-                    child: const SizedBox.expand(),
+                    // A click on the WORLD while walking with a freed
+                    // cursor takes it back. On this layer, which is under
+                    // the UI, so a click that lands on the toolbar — the
+                    // reason the cursor was freed — does not snatch it.
+                    child: Listener(
+                      behavior: HitTestBehavior.opaque,
+                      onPointerDown: (e) {
+                        if (_walkMode &&
+                            !_pointerLock.captured &&
+                            e.buttons == kPrimaryButton) {
+                          setState(_captureMouseLook);
+                        }
+                      },
+                      child: const SizedBox.expand(),
+                    ),
                   ),
                 ),
                 // All UI overlays stay INSIDE the safe area.
@@ -3126,9 +3205,13 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                           bottom: 8,
                           child: Text(
                             widget.cityMode
-                                ? 'CITY  W/A/S/D flies the camera, Shift boosts  |  '
-                                    'drag or [ ] to zoom  |  G walks the streets  |  '
-                                    'pick a tool below, warp with , and .'
+                                ? (_walkMode
+                                    ? 'WALK  ${_pointerLock.captured ? 'mouse looks' : 'click the world to look'}'
+                                        ', W/A/S/D moves, Shift runs, Space jumps  |  '
+                                        'Esc frees the cursor  |  G stops walking'
+                                    : 'CITY  W/A/S/D pans, middle-drag orbits, wheel zooms  |  '
+                                        'G walks the streets  |  pick a tool below, '
+                                        'warp with , and .')
                                 : _manualControl
                                     ? 'MANUAL  keys: W/S A/D Q/E Shift  |  touch: joystick + throttle  |  M auto  |  pinch/wheel/[ ]/-= zoom'
                                     : 'AUTO  (M or tap for manual flight)  |  pinch/scroll/[ ]/-= zoom',
@@ -3275,6 +3358,14 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                         onToggleZones: _toggleZoneOverlay,
                       ),
                     ),
+                  ),
+                // A captured mouse has no cursor. Topmost, so whatever the pin
+                // happens to sit over — the toolbar included — cannot put an
+                // arrow back; and opaque, because while the mouse is the head
+                // a click on a button would be an accident. Esc frees it.
+                if (_pointerLock.captured)
+                  const Positioned.fill(
+                    child: MouseRegion(cursor: SystemMouseCursors.none),
                   ),
               ],
             ),

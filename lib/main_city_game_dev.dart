@@ -94,6 +94,11 @@ Future<void> main() async {
     if (params['zones'] != null) {
       CityNodes.zoneOverlay = params['zones'] == 'on';
     }
+    // Step out onto the streets (G), or back. Through the view's own toggle,
+    // so a driver gets the mouse capture a player would.
+    if (params['walk'] != null) {
+      SimViewControl.instance.setWalk?.call(params['walk'] == 'on');
+    }
     // Zone every street lot at once. The only way to drive zoning without a
     // mouse, which is what a capture of the zoning view needs.
     if (params['zone'] != null) {
@@ -120,6 +125,10 @@ Future<void> main() async {
           'cityElevationRad',
           'freecam',
           'upMode',
+          'walk',
+          'azimuth',
+          'pointerLockSupported',
+          'pointerLockCaptured',
         ])
           k: view[k],
       },

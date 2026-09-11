@@ -52,6 +52,7 @@ dependencies:
   # into build/shaderbundles/acro.shaderbundle for the atmosphere shader).
   flutter_gpu_shaders: ^0.5.1
   hooks: ^2.0.0
+  ffi: ^2.2.0 # user32 cursor warp: first-person mouse look in walk mode (Windows)
 
 dev_dependencies:
   flutter_test:

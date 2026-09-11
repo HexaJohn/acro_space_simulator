@@ -41,6 +41,13 @@ Future<void> main(List<String> args) async {
   stdout.writeln('== settling for ${wait}s');
   await Future<void>.delayed(Duration(seconds: wait));
 
+  // `walk` as a fourth argument steps out onto the streets first, so the
+  // report shows the walker's camera and whether the mouse was captured.
+  if (args.length > 3 && args[3] == 'walk') {
+    await call('ext.acro.citygame', {'walk': 'on'});
+    await Future<void>.delayed(const Duration(seconds: 2));
+  }
+
   final s = await call('ext.acro.citygame');
   stdout.writeln('== colony');
   for (final e in s.entries) {
