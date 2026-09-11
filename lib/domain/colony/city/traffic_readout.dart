@@ -51,6 +51,11 @@ abstract interface class CityTrafficReadout {
   /// keeps its own frontage-local congestion.
   bool get hasRun;
 
+  /// How many pictures have been published: it moves whenever the answers
+  /// may have changed, and never goes back, so a view can key what it drew
+  /// from them on it (the Traffic Routes view's lines). 0 before the first.
+  int get passes;
+
   /// The worst road's load against its lanes, 0..1. 0 before a picture.
   double get peakCongestion;
 

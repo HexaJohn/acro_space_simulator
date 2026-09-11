@@ -507,7 +507,7 @@ class TrafficToolPanel extends StatelessWidget {
     return _row([
       for (final k in TripKind.values) _kindChip(k),
       const SizedBox(width: 8),
-      if (!city.roadTraffic.hasRun)
+      if (!city.trafficReadout.hasRun)
         _hint('Traffic is still being counted — let the colony run a moment')
       else if (id == null)
         _hint('Click a road to see the trips that use it')

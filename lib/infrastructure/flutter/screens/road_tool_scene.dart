@@ -575,13 +575,13 @@ class RoadToolScene {
     // having been one: a growing town's traffic is re-routed as its lots
     // fill, and a road kept selected showed its first pass's commuters
     // for good.
-    final model = city.trafficModel;
+    final traffic = city.trafficReadout;
     final key = (
       id,
       kinds.join(),
       city.roadsRevision,
-      identityHashCode(model),
-      model.passes,
+      identityHashCode(traffic),
+      traffic.passes,
       _bodyId,
       _notch(pxM),
       _groundKey,
@@ -600,7 +600,7 @@ class RoadToolScene {
     if (road != null && rec != null) out.add(_highlight(road, rec, pxM, laid));
     final routes = c.routeKinds.isEmpty
         ? const <TripRoute>[]
-        : city.roadTraffic.routesThrough(id, kinds: c.routeKinds);
+        : traffic.routesThrough(id, kinds: c.routeKinds);
     for (final t in routes) {
       final pts = _densify(t.polyline, 12);
       if (pts.length < 2) continue;

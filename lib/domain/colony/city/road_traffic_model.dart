@@ -1709,6 +1709,11 @@ class CityRoadTraffic implements CityTrafficReadout {
   @override
   bool get hasRun => _model?.hasRun ?? false;
 
+  /// The model's own count: one model serves the sim for its life (a new
+  /// graph is handed to it, never a new model), so it never goes back.
+  @override
+  int get passes => _model?.passes ?? 0;
+
   /// The colony day, colony seconds: the tick's own day length (an Earth
   /// day is 120 s of play, scaled by the body's rotation, 20..1200 s).
   static double colonyDaySec(CitySim sim) => sim.dayLengthSec;
