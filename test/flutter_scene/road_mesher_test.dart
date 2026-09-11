@@ -265,6 +265,7 @@ void main() {
         expect(g.control, w.control, reason: reason);
         expect(g.liftM, w.liftM, reason: reason);
         expect(g.stopLegs, w.stopLegs, reason: reason);
+        expect(g.wholeBars, w.wholeBars, reason: reason);
         expect(g.legs, hasLength(w.legs.length),
             reason: '${reason ?? ''} junction $k has other legs');
         for (var l = 0; l < w.legs.length; l++) {
@@ -457,8 +458,9 @@ void main() {
 /// [RoadMesher.junctionLiftToleranceM] of its height — joins its group in
 /// index order. Copied verbatim once; since the road tool it mirrors the
 /// new semantics as well: a node in a tunnel is dropped, a leg carries
-/// whether its road starts there, and the control and the stop legs are
-/// the leg-aware plan's ([junctionPlanFor]).
+/// whether its road starts there, and the control, the stop legs and the
+/// bars are the tiles' plan's ([RoadMesher.junctionPlan]) — the class-only
+/// warrant for the generator's roads, the leg-aware one for the tool's.
 List<RoadJunction> referenceJunctionsFromEnds(List<RoadEnd> ends,
     {double toleranceM = 8.0}) {
   final out = <RoadJunction>[];
@@ -489,14 +491,17 @@ List<RoadJunction> referenceJunctionsFromEnds(List<RoadEnd> ends,
     // Where two collectors cross — all four legs collectors, or three at
     // a T — a subdivision builds a roundabout, not a four-way stop.
     final collectors = group.where((e) => e.collector).length;
-    final plan = junctionPlanFor([
+    final jlegs = [
       for (final l in legs) JunctionLeg(l.roadClass, startsHere: l.startsHere)
-    ], roundaboutPreferred: collectors >= 3);
+    ];
+    final lifted = legs.any((l) => l.liftM != 0);
+    final plan = RoadMesher.junctionPlan(jlegs,
+        lifted: lifted, roundaboutPreferred: collectors >= 3);
     if (plan.control == JunctionControl.none) continue;
     out.add(RoadJunction(at, legs, plan.control,
         liftM: ends[i].liftM,
-        stopLegs:
-            plan.control == JunctionControl.stop ? plan.stopLegs : null));
+        stopLegs: plan.control == JunctionControl.stop ? plan.stopLegs : null,
+        wholeBars: RoadMesher.byClass(jlegs, lifted: lifted)));
   }
   return out;
 }

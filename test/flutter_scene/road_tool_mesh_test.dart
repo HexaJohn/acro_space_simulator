@@ -22,10 +22,12 @@ import 'package:acro_space_simulator/infrastructure/flutter_scene/coord_convert.
 import 'package:flutter_test/flutter_test.dart';
 
 /// The road tool's roads as the tiles draw them: raised onto decks and
-/// carried on structures, sunk into tunnels behind portals, dressed with
-/// grass and trees, one-way with arrows, meeting at junctions only where
-/// they meet at the same level and controlled by the leg-aware warrant —
-/// and every road the generator lays drawn exactly as it always was.
+/// carried on structures whose piers keep out of the roads beneath, sunk
+/// into tunnels behind portals, dressed with grass and trees, one-way with
+/// arrows, meeting at junctions only where they meet at the same level and
+/// controlled by the leg-aware warrant where the tool had a hand in them —
+/// and every road and junction the generator lays drawn exactly as it
+/// always was.
 ///
 /// The tile tests hand the mesher its members directly (see
 /// [CityTileMeshJob]'s `members`): a road's deck, dressing and end flags
@@ -181,8 +183,9 @@ void main() {
   group('a road on the ground meshes as it always did', () {
     // Digests taken on the tree before the road tool's meshing landed:
     // every class the generator lays, bridges, walls, tapers, collectors
-    // and a sealed street, with no junction ends — the junctions are the
-    // one thing drawn differently (bars across the inbound half).
+    // and a sealed street, with no junction ends — the mesher fixture's
+    // own digests (`city_tile_mesher_test`) hold a junction of the
+    // generator's streets to the byte as well.
     final zoo = <RoadSnapshot>[
       road(RoadClass.street, line(0, -200, 200, 9)),
       road(RoadClass.avenue, line(100, -300, 300, 13), bridges: [100, 300]),
@@ -822,6 +825,349 @@ void main() {
               liftM: -9),
       ]);
       expect(sunk.groups, isEmpty);
+    });
+
+    test("the generator's junctions keep the class warrant, whichever way "
+        'their streets were drawn', () {
+      // An avenue ENDING on two streets has always been a stop. Read by
+      // the leg-aware warrant it would take lights unless both streets
+      // happened to start at it — and the generator draws its streets
+      // either way.
+      for (final (a, b) in const [
+        (false, false),
+        (true, false),
+        (false, true),
+        (true, true)
+      ]) {
+        final j = RoadMesher.junctionsFromEnds([
+          end(10, 0, RoadClass.avenue),
+          end(-10, 0, RoadClass.street, isStart: a),
+          end(0, 10, RoadClass.street, isStart: b),
+        ], anchorBF: anchor).single;
+        expect(j.control, JunctionControl.stop, reason: '$a $b');
+        expect(j.stopLegs, {0, 1, 2}, reason: '$a $b');
+        expect(j.wholeBars, isTrue);
+      }
+      // An avenue running past a street's end: signals, whether the
+      // street was drawn from the avenue or to it.
+      for (final away in [false, true]) {
+        final t = RoadMesher.junctionsFromEnds([
+          end(10, 0, RoadClass.avenue),
+          end(-10, 0, RoadClass.avenue, isStart: true),
+          end(0, 10, RoadClass.street, isStart: away),
+        ], anchorBF: anchor).single;
+        expect(t.control, JunctionControl.signals, reason: 'away: $away');
+      }
+      // A ramp leaving an avenue keeps the terminal's signals, and — one
+      // way, leaving — no mast.
+      final onRamp = RoadMesher.junctionsFromEnds([
+        end(10, 0, RoadClass.avenue),
+        end(-10, 0, RoadClass.avenue),
+        end(0, 10, RoadClass.ramp, isStart: true),
+      ], anchorBF: anchor).single;
+      expect(onRamp.control, JunctionControl.signals);
+      expect(onRamp.controls(2), isFalse);
+      // Any of the generator's classes, drawn any way round: the class
+      // warrant exactly, every leg that arrives stopping at a stop.
+      final generated = [
+        for (final c in RoadClass.values)
+          if (!RoadMesher.toolOnly(c)) c
+      ];
+      final rng = math.Random(3);
+      for (var n = 0; n < 400; n++) {
+        final k = 3 + rng.nextInt(3);
+        final classes = [
+          for (var i = 0; i < k; i++) generated[rng.nextInt(generated.length)]
+        ];
+        final js = RoadMesher.junctionsFromEnds([
+          for (var i = 0; i < k; i++)
+            end(math.cos(i * 2 * math.pi / k) * 10,
+                math.sin(i * 2 * math.pi / k) * 10, classes[i],
+                isStart: rng.nextBool()),
+        ], anchorBF: anchor);
+        final want = junctionControlFor(classes);
+        if (want == JunctionControl.none) {
+          expect(js, isEmpty, reason: '$classes');
+          continue;
+        }
+        final j = js.single;
+        expect(j.control, want, reason: '$classes');
+        expect(j.wholeBars, isTrue, reason: '$classes');
+        if (want == JunctionControl.stop) {
+          expect(j.stopLegs, {
+            for (var i = 0; i < k; i++)
+              if (j.legs[i].inbound) i
+          });
+        }
+      }
+    });
+
+    test("the tool's classes and its decks take the leg-aware plan", () {
+      // That avenue T raised onto a deck with its street drawn away from
+      // it: the tool drew the street, so which way counts — no lights, and
+      // the street gives way to the avenue. Drawn to it: lights.
+      List<RoadJunction> raisedT({required bool away}) =>
+          RoadMesher.junctionsFromEnds([
+            end(10, 0, RoadClass.avenue, lift: 6),
+            end(-10, 0, RoadClass.avenue, lift: 6),
+            end(0, 10, RoadClass.street, isStart: away, lift: 6),
+          ], anchorBF: anchor);
+      final away = raisedT(away: true).single;
+      expect(away.control, JunctionControl.stop);
+      expect(away.stopLegs, {2});
+      expect(away.wholeBars, isFalse);
+      expect(raisedT(away: false).single.control, JunctionControl.signals);
+      // On the ground, a leg of a class only the tool lays does the same:
+      // a one-way street arriving at an avenue's end makes it a four-lane
+      // crossing with lights; leaving it, with the other street drawn
+      // away, a stop where the street gives way.
+      final arriving = RoadMesher.junctionsFromEnds([
+        end(10, 0, RoadClass.avenue),
+        end(-10, 0, RoadClass.street),
+        end(0, 10, RoadClass.streetOneWay),
+      ], anchorBF: anchor).single;
+      expect(arriving.control, JunctionControl.signals);
+      expect(arriving.wholeBars, isFalse);
+      final leaving = RoadMesher.junctionsFromEnds([
+        end(10, 0, RoadClass.avenue),
+        end(-10, 0, RoadClass.street, isStart: true),
+        end(0, 10, RoadClass.streetOneWay, isStart: true),
+      ], anchorBF: anchor).single;
+      expect(leaving.control, JunctionControl.stop);
+      expect(leaving.stopLegs, {1});
+    });
+
+    test('an override applies over the warrant the legs chose', () {
+      // The generator's avenue T, its street drawn away: signals by class.
+      final t = [
+        end(10, 0, RoadClass.avenue),
+        end(-10, 0, RoadClass.avenue),
+        end(0, 10, RoadClass.street, isStart: true),
+      ];
+      RoadJunction at(RoadOverride o) =>
+          RoadMesher.junctionsFromEnds(t, anchorBF: anchor, overrides: [o])
+              .single;
+      // Naming stop legs does not swap it onto the leg-aware warrant, which
+      // would have made it a stop.
+      final named =
+          at(const RoadOverride(Vector3.zero, stopPoints: [Vector3(0, 12, 0)]));
+      expect(named.control, JunctionControl.signals);
+      expect(named.wholeBars, isTrue);
+      // Lights off: a stop, every leg that arrives stopping — or only the
+      // ones the player names.
+      final off = at(const RoadOverride(Vector3.zero, lights: false));
+      expect(off.control, JunctionControl.stop);
+      expect(off.stopLegs, {0, 1, 2});
+      expect(
+          at(const RoadOverride(Vector3.zero,
+                  lights: false, stopPoints: [Vector3(0, 12, 0)]))
+              .stopLegs,
+          {2});
+    });
+
+    test("stop points are read from the override's own point", () {
+      // The override lies 5.5 m east of the node, inside the match, its
+      // stop points 12 m north and south of it; the north leg runs three
+      // degrees west of north. Seen from the node the north point is 24.6
+      // degrees east of north — past the 25 degree match with the leg's
+      // lean the other way.
+      const lean = 3 * math.pi / 180;
+      final j = RoadMesher.junctionsFromEnds([
+        end(-10 * math.sin(lean), 10 * math.cos(lean), RoadClass.street),
+        end(0, -10, RoadClass.street),
+        end(10, 0, RoadClass.street),
+        end(-10, 0, RoadClass.street),
+      ], anchorBF: anchor, overrides: const [
+        RoadOverride(Vector3(5.5, 0, 0),
+            stopPoints: [Vector3(5.5, 12, 0), Vector3(5.5, -12, 0)]),
+      ]).single;
+      expect(j.control, JunctionControl.stop);
+      expect(j.stopLegs, {0, 1});
+    });
+
+    test('an override that stops no leg draws no bar and no sign', () {
+      List<RoadEnd> crossing(RoadClass cls) => [
+            end(10, 0, cls),
+            end(-10, 0, cls),
+            end(0, 10, cls),
+            end(0, -10, cls),
+          ];
+      // The player took every stop sign away: the domain's empty stop
+      // headings, not "leave them to the warrant".
+      for (final cls in [RoadClass.street, RoadClass.streetOneWay]) {
+        final none = RoadMesher.junctionsFromEnds(crossing(cls),
+            anchorBF: anchor,
+            overrides: const [
+              RoadOverride(Vector3.zero, stopPoints: [])
+            ]).single;
+        expect(none.control, JunctionControl.stop, reason: cls.name);
+        expect(none.stopLegs, isEmpty, reason: cls.name);
+        final m = [MeshBuilder(), MeshBuilder(), MeshBuilder()];
+        RoadMesher.junctions(m[0], m[1], m[2], [none], anchor, 0);
+        expect(m[0].triangleCount, 8, reason: 'the plate alone');
+        expect(m[1].triangleCount, 0, reason: 'no sign');
+      }
+      // Stop points unsaid leave the warrant's stop legs: every leg.
+      expect(
+          RoadMesher.junctionsFromEnds(crossing(RoadClass.street),
+              anchorBF: anchor,
+              overrides: const [RoadOverride(Vector3.zero)]).single.stopLegs,
+          {0, 1, 2, 3});
+      // A tile's override can say it chose the stop legs only by carrying
+      // points, so one with none still leaves them to the warrant: three
+      // signs on posts at the street T.
+      CityTileEnd tileEnd(double dx, double dy) => CityTileEnd(
+          anchor,
+          anchor + Vector3(dx, dy, 0),
+          RoadClass.street.halfWidth,
+          RoadClass.street,
+          true,
+          false);
+      final poles = tris(
+          meshWith(const [], CityTier.near, ends: [
+            tileEnd(10, 0),
+            tileEnd(-10, 0),
+            tileEnd(0, 10),
+          ], junctions: [
+            CityTileJunction(anchor, -1, const [])
+          ]),
+          CityMaterialKind.facade);
+      expect(poles, 3 * (8 + 2));
+    });
+
+    test("a junction of the generator's roads bars each leg right across",
+        () {
+      final j = RoadMesher.junctionsFromEnds([
+        end(10, 0, RoadClass.street),
+        end(-10, 0, RoadClass.street),
+        end(0, 10, RoadClass.street),
+      ], anchorBF: anchor).single;
+      expect(j.wholeBars, isTrue);
+      final m = MeshBuilder();
+      RoadMesher.junctions(m, MeshBuilder(), MeshBuilder(), [j], anchor, 0);
+      final mesh = m.build();
+      expect(mesh.vertexCount, 9 + 3 * 4);
+      final up = anchor.normalized;
+      for (var k = 0; k < 3; k++) {
+        final side = j.legs[k].dir.cross(up).normalized;
+        final lateral = [
+          for (var v = 9 + 4 * k; v < 13 + 4 * k; v++)
+            Vector3(mesh.positions[v * 3], mesh.positions[v * 3 + 1],
+                        mesh.positions[v * 3 + 2])
+                    .dot(side) /
+                kRenderScale,
+        ];
+        final hw = j.legs[k].halfWidthM * 0.92;
+        expect(lateral.reduce(math.min), closeTo(-hw, 1e-5));
+        expect(lateral.reduce(math.max), closeTo(hw, 1e-5));
+      }
+    });
+  });
+
+  group('piers keep out of the roads beneath', () {
+    // On the equator of a 6371 km world: local up is +x, the deck runs +z
+    // from 0 to 300 m, a point every 10 m.
+    final eq = Vector3(6371000, 0, 0);
+    final pts = [for (var i = 0; i < 31; i++) Vector3(0, 0, i * 10.0)];
+    // An avenue across it at 40 m, on the ground: body-fixed points.
+    const avenueHw = 8.0;
+    List<double> across(double z) => [
+          for (final y in const [-100.0, 0.0, 100.0]) ...[eq.x, y, z],
+        ];
+    RoadCorridors corridors(List<double> pointsBF) =>
+        RoadCorridors(eq)..add(1, pointsBF, avenueHw);
+    PierBlocked blockedBy(RoadCorridors c) =>
+        (foot, along, up, a, b) => c.blocks(foot, along, up, a, b, except: 0);
+
+    /// The z of every vertex a pier stands on — a metre under the drape.
+    List<double> feet(MeshBuilder m) {
+      final mesh = m.build();
+      return [
+        for (var v = 0; v < mesh.vertexCount; v++)
+          if (mesh.positions[v * 3] / kRenderScale < -0.5)
+            mesh.positions[v * 3 + 2] / kRenderScale,
+      ];
+    }
+
+    test('the distance from a pier to a road, in plan', () {
+      // Across the pier's axis between its ends: touching.
+      expect(RoadCorridors.axisDistance(0, -5, 0, 5, 3), 0);
+      // Parallel to it, off to one side.
+      expect(RoadCorridors.axisDistance(-10, 4, 10, 4, 3), closeTo(4, 1e-12));
+      // Along its line: overlapping, and past its end.
+      expect(RoadCorridors.axisDistance(-1, 0, 20, 0, 3), 0);
+      expect(RoadCorridors.axisDistance(5, 0, 20, 0, 3), closeTo(2, 1e-12));
+      // Crossing the line beyond the axis's end: to that end.
+      expect(RoadCorridors.axisDistance(6, -1, 6, 1, 3), closeTo(3, 1e-12));
+    });
+
+    test('a structure moves its pier out of the avenue it crosses', () {
+      final liftAt = RoadDeckMesher.liftAt(pts, List.filled(31, 10.0));
+      final open = MeshBuilder();
+      RoadDeckMesher.structure(open, pts, eq, 4, liftAt);
+      // Left to itself a pier lands at 40 m, in the avenue's lanes.
+      expect(feet(open).any((z) => (z - 40).abs() < avenueHw), isTrue);
+      final kept = MeshBuilder();
+      RoadDeckMesher.structure(kept, pts, eq, 4, liftAt,
+          blocked: blockedBy(corridors(across(40))));
+      final z = feet(kept);
+      for (final f in z) {
+        expect((f - 40).abs(), greaterThanOrEqualTo(avenueHw + 1.5),
+            reason: 'a pier foot at $f m');
+      }
+      // Moved to the first point clear — 60 m — and the spans go on from
+      // there: as many piers as before.
+      expect(z.any((f) => (f - 60).abs() <= 1.2), isTrue);
+      expect(kept.triangleCount, open.triangleCount);
+      // Nothing else in the tile: the same structure to the byte.
+      final alone = MeshBuilder();
+      RoadDeckMesher.structure(alone, pts, eq, 4, liftAt,
+          blocked: blockedBy(RoadCorridors(eq)));
+      expect(alone.build().positions, open.build().positions);
+    });
+
+    test('a road the length of the deck beneath it still gets its piers', () {
+      // No point along the deck is clear, so each pier stands a span past
+      // where it fell due rather than never: 40, 120, 200 and 280 m.
+      final under = [
+        for (final z in const [-50.0, 150.0, 350.0]) ...[eq.x, 0.0, z],
+      ];
+      final m = MeshBuilder();
+      RoadDeckMesher.structure(m, pts, eq, 4,
+          RoadDeckMesher.liftAt(pts, List.filled(31, 10.0)),
+          blocked: blockedBy(corridors(under)));
+      expect(m.triangleCount ~/ 12, 120 + 4);
+    });
+
+    test("a generated bridge's piers keep out too", () {
+      double lift(double s) => 12.0;
+      final open = MeshBuilder();
+      RoadMesher.piers(open, pts, eq, 6, lift);
+      expect(feet(open).any((z) => (z - 40).abs() < avenueHw), isTrue);
+      final kept = MeshBuilder();
+      RoadMesher.piers(kept, pts, eq, 6, lift,
+          blocked: blockedBy(corridors(across(40))));
+      for (final f in feet(kept)) {
+        expect((f - 40).abs(), greaterThanOrEqualTo(avenueHw + 1.5));
+      }
+      expect(kept.triangleCount, open.triangleCount);
+    });
+
+    test('in a tile: a raised street over an avenue', () {
+      final res = meshWith([
+        road(RoadClass.street, line(0, -200, 200, 21),
+            lifts: List.filled(21, 8.0)),
+        road(RoadClass.avenue, [(40, -100), (40, 0), (40, 100)]),
+      ], CityTier.mid);
+      final piers = [
+        for (final p in verts(res, CityMaterialKind.facade))
+          if (p.z < -0.5) p
+      ];
+      expect(piers, isNotEmpty);
+      for (final p in piers) {
+        expect((p.x - 40).abs(), greaterThanOrEqualTo(8.0 + 1.5),
+            reason: 'a pier foot at $p');
+      }
     });
   });
 

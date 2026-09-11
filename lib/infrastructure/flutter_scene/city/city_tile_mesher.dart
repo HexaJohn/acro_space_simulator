@@ -814,6 +814,29 @@ class CityTileMeshJob {
 
   late int _carBudget = request.knobs.maxParkedCars;
 
+  /// The tile's roads as the carriageways a pier keeps out of, gathered
+  /// the first time a deck or a bridge asks — a tile whose roads all lie
+  /// on the ground never does. The viaduct and the L stand on columns of
+  /// their own up in the air; every other road has lanes a pier must not
+  /// stand in.
+  late final RoadCorridors _corridors = () {
+    final c = RoadCorridors(request.anchorBF);
+    final roads = members.roads;
+    for (var i = 0; i < roads.length; i++) {
+      final road = roads[i];
+      final cls = RoadClass
+          .values[road.roadClassIndex.clamp(0, RoadClass.values.length - 1)];
+      if (cls.isElevated) continue;
+      c.add(i, road.points, road.halfWidthM);
+    }
+    return c;
+  }();
+
+  /// [_corridors] as road [index]'s piers ask it: every road but its own.
+  PierBlocked _pierBlocked(int index) =>
+      (foot, along, up, halfAcrossM, halfAlongM) => _corridors
+          .blocks(foot, along, up, halfAcrossM, halfAlongM, except: index);
+
   /// One merged sink per material: the skyline's block-tier buildings and
   /// every builder of that material, one geometry per chunk and one draw
   /// each (see [CityTileMesher.uploadGroups], [CityTileMesher.chunk]).
@@ -1516,7 +1539,8 @@ class CityTileMeshJob {
             planting: road.sealed ? null : rb.verge,
             plantingU: CityTileMesher.grassU);
         if (!raised && liftAt != null) {
-          RoadMesher.piers(rb.propSolid, rp, anchorBF, road.halfWidthM, liftAt);
+          RoadMesher.piers(rb.propSolid, rp, anchorBF, road.halfWidthM, liftAt,
+              blocked: _pierBlocked(index));
         }
         if (road.soundWalls && cls.canHaveSoundWalls && paint) {
           RoadMesher.soundWalls(rb.propSolid, rp, anchorBF, road.halfWidthM,
@@ -1532,7 +1556,8 @@ class CityTileMeshJob {
       // What a raised deck stands on, and a portal at each end of the run
       // that is a tunnel's mouth, facing out of the hill.
       RoadDeckMesher.structure(
-          rb.propSolid, rp, anchorBF, road.halfWidthM, liftAt!);
+          rb.propSolid, rp, anchorBF, road.halfWidthM, liftAt!,
+          blocked: _pierBlocked(index));
       if (!run.fromStart) {
         RoadDeckMesher.portal(
             rb.propSolid, rp.first, rp.first - rp[1], anchorBF, road.halfWidthM);
@@ -1731,18 +1756,22 @@ class CityTileMeshJob {
     ];
     // The player's say over the tile's junctions (the Junctions view):
     // lights 1 on, 0 off, -1 the warrant's; and a point out along each
-    // leg that stops.
+    // leg that stops. A tile's override says it chose the stop legs only
+    // by carrying points, so one with none leaves them to the warrant —
+    // "no leg stops" needs the wire's own flag to say (`stopsSet`).
     final overrides = <RoadOverride>[
       for (final o in members.junctions)
         RoadOverride(
           o.at - r.anchorBF,
           lights: o.lights == 1 ? true : (o.lights == 0 ? false : null),
-          stopPoints: [
-            for (var i = 0; i + 2 < o.stopPoints.length; i += 3)
-              Vector3(o.stopPoints[i], o.stopPoints[i + 1],
-                      o.stopPoints[i + 2]) -
-                  r.anchorBF,
-          ],
+          stopPoints: o.stopPoints.isEmpty
+              ? null
+              : [
+                  for (var i = 0; i + 2 < o.stopPoints.length; i += 3)
+                    Vector3(o.stopPoints[i], o.stopPoints[i + 1],
+                            o.stopPoints[i + 2]) -
+                        r.anchorBF,
+                ],
         ),
     ];
     final junctions = RoadMesher.junctionsFromEnds(ends,

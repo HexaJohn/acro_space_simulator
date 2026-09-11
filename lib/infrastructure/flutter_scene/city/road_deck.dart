@@ -43,6 +43,141 @@ import '../../../domain/shared/vector3.dart';
 import 'oriented_box.dart';
 import 'road_mesher.dart';
 
+/// A pier's footprint put to the roads around it: whether a pier standing
+/// on the drape at [foot] — [halfAcrossM] either side of its deck's
+/// centreline and [halfAlongM] along the deck ([along]), [up] radial —
+/// would stand in another road's carriageway. See [RoadCorridors].
+typedef PierBlocked = bool Function(Vector3 foot, Vector3 along, Vector3 up,
+    double halfAcrossM, double halfAlongM);
+
+/// The carriageways a pier keeps out of: a tile's roads as corridors in
+/// plan — a centreline and a half width — which a deck's piers move along
+/// the deck to clear ([RoadDeckMesher.structure], [RoadMesher.piers]).
+///
+/// A raised road crosses what is under it without either being cut —
+/// that is what the tool raised it for — so nothing on the deck says
+/// where the road beneath runs, and a pier stood wherever its span fell:
+/// as often as not in the lanes it was built to clear.
+///
+/// The roads stay the tile's body-fixed point lists; each keeps only its
+/// bounds, anchor-relative, so a pier measures just the roads that come
+/// near it, and a tile whose roads all lie on the ground never builds one
+/// (see `CityTileMeshJob`). Plain arithmetic on the request's own values,
+/// for the tile workers.
+class RoadCorridors {
+  RoadCorridors(this.anchorBF);
+
+  final Vector3 anchorBF;
+
+  /// How far clear of a carriageway's edge a pier's face keeps: a kerb and
+  /// a verge's worth.
+  static const double clearM = 1.5;
+
+  final List<int> _ids = [];
+  final List<List<double>> _points = [];
+  final List<double> _halfWidths = [];
+
+  /// Six per road, anchor-relative: the least x, y, z, then the greatest.
+  final List<double> _bounds = [];
+
+  int get length => _ids.length;
+
+  /// Road [id]'s carriageway: [halfWidthM] either side of [pointsBF]
+  /// (body-fixed xyz triplets, two points or more).
+  void add(int id, List<double> pointsBF, double halfWidthM) {
+    if (pointsBF.length < 6) return;
+    var x0 = double.infinity, y0 = double.infinity, z0 = double.infinity;
+    var x1 = -double.infinity, y1 = -double.infinity, z1 = -double.infinity;
+    for (var i = 0; i + 2 < pointsBF.length; i += 3) {
+      final x = pointsBF[i] - anchorBF.x;
+      final y = pointsBF[i + 1] - anchorBF.y;
+      final z = pointsBF[i + 2] - anchorBF.z;
+      x0 = math.min(x0, x);
+      y0 = math.min(y0, y);
+      z0 = math.min(z0, z);
+      x1 = math.max(x1, x);
+      y1 = math.max(y1, y);
+      z1 = math.max(z1, z);
+    }
+    _ids.add(id);
+    _points.add(pointsBF);
+    _halfWidths.add(halfWidthM);
+    _bounds.addAll([x0, y0, z0, x1, y1, z1]);
+  }
+
+  /// Whether a pier at [foot] (anchor-relative, on the drape) standing
+  /// [halfAcrossM] either side of its deck and [halfAlongM] along it would
+  /// come within [clearM] of any carriageway but road [except]'s. The pier
+  /// is a slab across its deck, so it is measured as its long axis in the
+  /// ground plane, with the corridor widened by its half thickness.
+  bool blocks(Vector3 foot, Vector3 along, Vector3 up, double halfAcrossM,
+      double halfAlongM,
+      {int? except}) {
+    final flat = along - up * along.dot(up);
+    if (flat.length < 1e-6) return false;
+    final e2 = flat.normalized;
+    final e1 = e2.cross(up).normalized;
+    final ax = anchorBF.x + foot.x, ay = anchorBF.y + foot.y;
+    final az = anchorBF.z + foot.z;
+    for (var k = 0; k < _ids.length; k++) {
+      if (_ids[k] == except) continue;
+      final keep = _halfWidths[k] + clearM + halfAlongM;
+      final reach = keep + halfAcrossM;
+      final b = 6 * k;
+      if (foot.x < _bounds[b] - reach ||
+          foot.y < _bounds[b + 1] - reach ||
+          foot.z < _bounds[b + 2] - reach ||
+          foot.x > _bounds[b + 3] + reach ||
+          foot.y > _bounds[b + 4] + reach ||
+          foot.z > _bounds[b + 5] + reach) {
+        continue;
+      }
+      final pts = _points[k];
+      var pu = 0.0, pv = 0.0;
+      for (var i = 0; i + 2 < pts.length; i += 3) {
+        final dx = pts[i] - ax, dy = pts[i + 1] - ay, dz = pts[i + 2] - az;
+        final u = dx * e1.x + dy * e1.y + dz * e1.z;
+        final v = dx * e2.x + dy * e2.y + dz * e2.z;
+        if (i > 0 && axisDistance(pu, pv, u, v, halfAcrossM) < keep) {
+          return true;
+        }
+        pu = u;
+        pv = v;
+      }
+    }
+    return false;
+  }
+
+  /// Distance in the plane from the segment (pu, pv)-(qu, qv) to the
+  /// segment from (-a, 0) to (a, 0).
+  static double axisDistance(
+      double pu, double pv, double qu, double qv, double a) {
+    // Across the axis line between the axis's ends: they touch.
+    if (pv != qv && (pv <= 0) != (qv < 0)) {
+      final u = pu + (qu - pu) * (pv / (pv - qv));
+      if (u.abs() <= a) return 0;
+    }
+    // Otherwise the nearest pair has an end of one of the two in it.
+    double toAxis(double u, double v) {
+      final du = math.max(u.abs() - a, 0.0);
+      return math.sqrt(du * du + v * v);
+    }
+
+    double toSegment(double u, double v) {
+      final du = qu - pu, dv = qv - pv;
+      final len2 = du * du + dv * dv;
+      final t = len2 < 1e-12
+          ? 0.0
+          : (((u - pu) * du + (v - pv) * dv) / len2).clamp(0.0, 1.0);
+      final eu = pu + du * t - u, ev = pv + dv * t - v;
+      return math.sqrt(eu * eu + ev * ev);
+    }
+
+    return math.min(math.min(toAxis(pu, pv), toAxis(qu, qv)),
+        math.min(toSegment(-a, 0), toSegment(a, 0)));
+  }
+}
+
 /// One stretch of a road above ground: its drape points, the deck's lift
 /// at each, and where it lies on its road.
 class RoadRun {
@@ -266,13 +401,19 @@ class RoadDeckMesher {
   /// [pierSpacingM], or every [bridgePierSpacingM] under deeper girders
   /// where the deck is higher than [RoadElevation.bridgeHeightM]. Into
   /// [solid], in precast concrete.
+  ///
+  /// Given [blocked] (see [RoadCorridors]), a pier that falls due in the
+  /// carriageway of a road beneath moves on along the deck to the first
+  /// point clear of it — at most a span on; a road running the length of
+  /// the deck beneath it has no clear point, and there the pier stands.
   static void structure(
     MeshBuilder solid,
     List<Vector3> pts,
     Vector3 anchorBF,
     double halfWidthM,
-    double Function(double s) liftAt,
-  ) {
+    double Function(double s) liftAt, {
+    PierBlocked? blocked,
+  }) {
     final n = pts.length;
     if (n < 2) return;
     final cum = cumulative(pts);
@@ -310,21 +451,35 @@ class RoadDeckMesher {
     }
 
     // Piers, on the points: the first where the deck leaves the fill, then
-    // one a span on.
+    // one a span on — moved on past a road beneath.
     var since = double.infinity;
+    // Where the pier being moved on fell due.
+    double? dueAt;
     for (var k = 0; k < n; k++) {
       if (k > 0) since += cum[k] - cum[k - 1];
       final l = lift[k];
       if (l <= clear) {
         since = double.infinity;
+        dueAt = null;
         continue;
       }
       final isBridge = l > bridge;
-      if (since < (isBridge ? bridgePierSpacingM : pierSpacingM)) continue;
-      since = 0;
+      final span = isBridge ? bridgePierSpacingM : pierSpacingM;
+      if (since < span) continue;
       final p = pts[k];
       final up = (p + anchorBF).normalized;
       final ahead = k + 1 < n ? pts[k + 1] - p : p - pts[k - 1];
+      if (blocked != null && ahead.length >= 1e-6) {
+        final due = dueAt ??= cum[k];
+        if (cum[k] - due < span &&
+            blocked(p, ahead.normalized, up,
+                halfWidthM * (isBridge ? 1.6 : 1.4) / 2,
+                (isBridge ? 3.2 : 2.4) / 2)) {
+          continue;
+        }
+        dueAt = null;
+      }
+      since = 0;
       if (ahead.length < 1e-6) continue;
       final depth = isBridge ? bridgeGirderDepthM : girderDepthM;
       final h = l + deckLift - depth + 1.0;

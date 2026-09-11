@@ -19,9 +19,10 @@
 /// section and group builders for the suburbs, the viaduct for its deck —
 /// draws through it. A road is a road: its class (and its dressing) says
 /// how many lanes it has, its lanes say where the paint goes, and a
-/// junction is decided by [junctionPlanFor] from the legs meeting there —
-/// their sizes, and which of them are one-way roads leaving — wherever it
-/// is. A road the tool lifted rides its deck ([RoadEnd.liftM], and the
+/// junction is decided from the legs meeting there
+/// ([RoadMesher.junctionPlan]) — their classes, and where the road tool
+/// had a hand, which of them are one-way roads leaving — wherever it is.
+/// A road the tool lifted rides its deck ([RoadEnd.liftM], and the
 /// carriageway's `liftAt`); `road_deck.dart` builds what the deck stands on.
 ///
 /// Geometry, not texture, carries the markings. The carriageway is an
@@ -43,6 +44,7 @@ import '../../../domain/shared/vector3.dart';
 import '../coord_convert.dart';
 import 'city_texture_bakes.dart';
 import 'oriented_box.dart';
+import 'road_deck.dart';
 
 /// One road END, for deriving junctions: where it is, the next point in
 /// along the road (for the leg's direction), and what the road is.
@@ -108,7 +110,7 @@ class RoadLeg {
 /// controlled.
 class RoadJunction {
   const RoadJunction(this.at, this.legs, this.control,
-      {this.liftM = 0, this.stopLegs});
+      {this.liftM = 0, this.stopLegs, this.wholeBars = false});
   final Vector3 at;
   final List<RoadLeg> legs;
   final JunctionControl control;
@@ -122,6 +124,14 @@ class RoadJunction {
   /// minor road where it meets a bigger one, or whichever the player chose.
   /// Null stops every inbound leg.
   final Set<int>? stopLegs;
+
+  /// Bars across the WHOLE width of each two-way leg that stops, rather
+  /// than across the lanes arriving: how the generator's junctions have
+  /// always been drawn, kept for the junctions its warrant still decides
+  /// (see [RoadMesher.byClass]) so a town the road tool has not touched
+  /// draws to the byte as it did. A one-way leg arriving is barred right
+  /// across either way.
+  final bool wholeBars;
 
   double get maxHalfWidthM =>
       legs.fold(0.0, (m, l) => math.max(m, l.halfWidthM));
@@ -139,14 +149,18 @@ class RoadJunction {
 /// A player's override of one junction (the Junctions view), as the
 /// junction pass takes it: anchor-relative like the ends, the lights
 /// forced on (true), off (false) or left to the warrant (null), and a point
-/// out along each leg that stops — empty leaves the default stop legs (see
+/// out along each leg that stops, laid out from [at] (see
 /// [JunctionOverride], which names a leg by its heading; these points are
 /// that heading, carried in the frame's body-fixed metres).
 class RoadOverride {
-  const RoadOverride(this.at, {this.lights, this.stopPoints = const []});
+  const RoadOverride(this.at, {this.lights, this.stopPoints});
   final Vector3 at;
   final bool? lights;
-  final List<Vector3> stopPoints;
+
+  /// Null leaves the warrant's default stop legs; empty is the player's
+  /// choice that NO leg stops — [JunctionOverride.stopHeadings] as `[]`,
+  /// which is not the same thing as leaving it alone.
+  final List<Vector3>? stopPoints;
 }
 
 /// A point on a polyline with its local frame.
@@ -623,6 +637,11 @@ class RoadMesher {
 
   /// Piers under the lifted stretches of [pts]: a column the deck's width
   /// every [spacingM], ground to soffit.
+  ///
+  /// Given [blocked] (see `RoadCorridors`), a pier that falls due in
+  /// another road's carriageway moves on along the deck to the first
+  /// station clear of it — at most a span on; a road running the length of
+  /// the deck beneath it has no clear station, and there the pier stands.
   static void piers(
     MeshBuilder solid,
     List<Vector3> pts,
@@ -630,22 +649,34 @@ class RoadMesher {
     double halfWidth,
     double Function(double s) liftAt, {
     double spacingM = 38,
+    PierBlocked? blocked,
   }) {
     var sincePier = spacingM;
     var prevS = 0.0;
+    // Where the pier being moved on fell due.
+    double? dueAt;
+    const hd = 1.2;
     for (final k in _stations(pts, anchorBF)) {
       final lift = liftAt(k.s);
       sincePier += k.s - prevS;
       prevS = k.s;
       if (lift <= 0.3) {
         sincePier = spacingM;
+        dueAt = null;
         continue;
       }
       // Stations are the polyline's own samples; a pier every few of them.
       if (sincePier < spacingM) continue;
+      if (blocked != null) {
+        final due = dueAt ??= k.s;
+        if (k.s - due < spacingM &&
+            blocked(k.p, k.along, k.up, halfWidth * 0.7, hd)) {
+          continue;
+        }
+        dueAt = null;
+      }
       sincePier = 0;
       final hw = halfWidth * 0.7;
-      const hd = 1.2;
       final base = k.p - k.up * 1.0;
       final top = k.p + k.up * (lift - 1.2);
       final c = [
@@ -969,8 +1000,9 @@ class RoadMesher {
   /// Junctions from road ENDS: ends within [toleranceM] of each other —
   /// and within [junctionLiftToleranceM] of each other's height — are one
   /// node, and the node's control and the legs that stop come from the
-  /// legs meeting there ([junctionPlanFor]): their sizes, and which of
-  /// them are one-way roads leaving.
+  /// legs meeting there ([junctionPlan]): the class-only warrant for the
+  /// generator's roads, and where the road tool had a hand, their sizes
+  /// and which of them are one-way roads leaving.
   ///
   /// Roads are split at their crossings, so an intersection is simply a
   /// place where three or more ends meet — the topology is there; this
@@ -1106,18 +1138,116 @@ class RoadMesher {
           ? null
           : _overrideFor(at, legs, overrides, anchorBF);
       final headings = override?.$2;
-      final plan = junctionPlanFor([
+      final jlegs = [
         for (var k = 0; k < legs.length; k++)
           JunctionLeg(legs[k].roadClass,
               startsHere: legs[k].startsHere, heading: headings?[k] ?? 0),
-      ], roundaboutPreferred: collectors >= 3, override: override?.$1);
+      ];
+      // Any lift at all is a deck the tool laid (see [byClass]).
+      final lifted = legs.any((l) => l.liftM != 0);
+      final plan = junctionPlan(jlegs,
+          lifted: lifted,
+          roundaboutPreferred: collectors >= 3,
+          override: override?.$1);
       if (plan.control == JunctionControl.none) continue;
       out.add(RoadJunction(at, legs, plan.control,
           liftM: lift,
           stopLegs:
-              plan.control == JunctionControl.stop ? plan.stopLegs : null));
+              plan.control == JunctionControl.stop ? plan.stopLegs : null,
+          wholeBars: byClass(jlegs, lifted: lifted)));
     }
     return out;
+  }
+
+  /// Whether [cls] is a road only the road tool lays — one the generator
+  /// never has — so that a junction with a leg of it is the tool's to
+  /// decide (see [byClass]). Exhaustive on purpose: a class appended to
+  /// the menu must say whether the generator lays it too.
+  static bool toolOnly(RoadClass cls) => switch (cls) {
+        RoadClass.streetOneWay || RoadClass.boulevard || RoadClass.motorway =>
+          true,
+        RoadClass.street ||
+        RoadClass.avenue ||
+        RoadClass.highway ||
+        RoadClass.path ||
+        RoadClass.alley ||
+        RoadClass.elevated ||
+        RoadClass.transit ||
+        RoadClass.trunk ||
+        RoadClass.rail ||
+        RoadClass.expressway4 ||
+        RoadClass.expressway6 ||
+        RoadClass.expressway8 ||
+        RoadClass.ramp =>
+          false,
+      };
+
+  /// Whether a junction of [legs] keeps the class-only warrant the
+  /// generator's towns have always had ([junctionControlFor]): true unless
+  /// the road tool had a hand in it — a leg of a class only the tool lays
+  /// ([toolOnly]), or a leg on a deck ([lifted]; the generator's roads lie
+  /// on the drape and carry no lift at all, so any lift is the tool's).
+  ///
+  /// The leg-aware warrant ([junctionPlanFor]) reads which way each road
+  /// was DRAWN — a two-lane road drawn away from a four-lane one makes no
+  /// lights — and that is the player's say: the tool draws a road the way
+  /// its traffic runs. The generator draws its two-way streets in no
+  /// particular direction, so read by that warrant its avenue T's would
+  /// get lights at one corner and a stop sign at the next, at random, and
+  /// an avenue ending on two streets would gain signals it never had.
+  static bool byClass(List<JunctionLeg> legs, {bool lifted = false}) =>
+      !lifted && !legs.any((l) => toolOnly(l.roadClass));
+
+  /// The plan the tiles draw a junction of [legs] by: the class-only
+  /// warrant with every arriving leg stopping where [byClass] keeps it,
+  /// the leg-aware plan ([junctionPlanFor]) where the tool had a hand.
+  ///
+  /// A player's [override] applies over whichever warrant the legs chose —
+  /// lights forced on or off where there is a stop or a signal, and at a
+  /// stop the legs whose headings its [JunctionOverride.stopHeadings] name
+  /// — so choosing the stop signs at a junction never swaps its warrant
+  /// for the other one under the player's feet.
+  ///
+  /// Domain types only, so that it can move beside [junctionPlanFor] and
+  /// the road graph ask the same question the tiles do.
+  static JunctionPlan junctionPlan(
+    List<JunctionLeg> legs, {
+    bool lifted = false,
+    bool roundaboutPreferred = false,
+    JunctionOverride? override,
+  }) {
+    if (!byClass(legs, lifted: lifted)) {
+      return junctionPlanFor(legs,
+          roundaboutPreferred: roundaboutPreferred, override: override);
+    }
+    var control = junctionControlFor([for (final l in legs) l.roadClass],
+        roundaboutPreferred: roundaboutPreferred);
+    if (override != null &&
+        (control == JunctionControl.stop ||
+            control == JunctionControl.signals)) {
+      if (override.lights == true) control = JunctionControl.signals;
+      if (override.lights == false) control = JunctionControl.stop;
+    }
+    if (control != JunctionControl.stop) return JunctionPlan(control);
+    final headings = override?.stopHeadings;
+    return JunctionPlan(control, {
+      for (var i = 0; i < legs.length; i++)
+        if (legs[i].inbound &&
+            (headings == null ||
+                (legs[i].roadClass.carriesCars &&
+                    headings.any((h) =>
+                        _angleBetween(h, legs[i].heading) <=
+                        JunctionOverride.headingMatchRad))))
+          i
+    });
+  }
+
+  /// The angle between headings [a] and [b], radians, 0 to pi.
+  static double _angleBetween(double a, double b) {
+    const tau = 2 * math.pi;
+    var d = (a - b) % tau;
+    if (d < 0) d += tau;
+    return d > math.pi ? tau - d : d;
   }
 
   /// The player's override of the node at [at] with [legs] — the nearest
@@ -1136,16 +1266,26 @@ class RoadMesher {
       }
     }
     if (best == null) return null;
+    // The stop points were laid out from the override's own point, which
+    // may lie anywhere within the match of the node: read from the node, a
+    // point 12 m out from an override 6 m off would swing by atan(6/12),
+    // past the heading match on its own. Read in the NODE's frame all the
+    // same, the one the legs' headings are read in — the frame turns with
+    // the ground beneath it, and near a pole a few metres turn it round.
+    final points = best.stopPoints;
+    final from = best.at;
     final up = (at + anchorBF).normalized;
-    final stops = best.stopPoints.isEmpty
+    final stops = points == null
         ? null
-        : [for (final p in best.stopPoints) headingOf(p - at, up)];
+        : [for (final p in points) headingOf(p - from, up)];
     return (
       // Where it is has been matched here, in the tile's own metres; the
       // plan reads only what it says.
       JunctionOverride(
           at: const Vec2(0, 0), lights: best.lights, stopHeadings: stops),
-      stops == null ? null : [for (final l in legs) headingOf(l.dir, up)],
+      stops == null || stops.isEmpty
+          ? null
+          : [for (final l in legs) headingOf(l.dir, up)],
     );
   }
 
@@ -1242,11 +1382,13 @@ class RoadMesher {
   /// Traffic keeps right, so the traffic leaving along the leg is on its
   /// +[side] (to the right of the leg's direction, as a station's side
   /// is) and the traffic arriving on its -side; a bar across all of it
-  /// would stop the drivers pulling away.
+  /// would stop the drivers pulling away. With [whole], right across
+  /// either way: a junction drawn as the generator's always were (see
+  /// [RoadJunction.wholeBars]).
   static void _inboundBar(MeshBuilder m, Vector3 at, Vector3 up, RoadLeg leg,
       Vector3 side, double from, double to, double hw, int band,
-      {double vScale = 0}) {
-    if (leg.oneWay) {
+      {double vScale = 0, bool whole = false}) {
+    if (whole || leg.oneWay) {
       _bar(m, at, up, leg.dir, side, from, to, hw, band, vScale: vScale);
     } else {
       _bar(m, at, up, leg.dir, side, from, to, hw / 2, band,
@@ -1283,7 +1425,8 @@ class RoadMesher {
       // rather than as an accident of geometry.
       if (stops) {
         _inboundBar(m, at, up, leg, side, r * 0.92, r * 0.92 + 0.5, hw,
-            CityTextureBakes.roadWhite);
+            CityTextureBakes.roadWhite,
+            whole: j.wholeBars);
       }
 
       if (signals) {
@@ -1383,7 +1526,7 @@ class RoadMesher {
       final side = dir.cross(up).normalized;
       _inboundBar(m, at, up, leg, side, r * 0.96, r * 0.96 + 0.45,
           leg.halfWidthM * 0.92, CityTextureBakes.roadDashedWhite,
-          vScale: 1 / 1.2);
+          vScale: 1 / 1.2, whole: j.wholeBars);
       // A keep-right sign on the splitter side of each approach.
       final post = at + dir * (r + 1.2) + side * (leg.halfWidthM + 1.2);
       column(poles, post, up, dir, 1.6);
