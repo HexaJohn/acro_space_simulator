@@ -527,6 +527,22 @@ and one `pending()` asked the same place up to four times. The march now
 memoises per ray direction (bit-identical answers) and `pending()` asks each
 direction once.
 
+A graded road the tool cuts through relief (across a levelled lot's edge,
+say) rendered in pieces with grass across it: the drape was exact, the
+terrain MESH was not. Colony brushes floor at 15 m voxels, far too coarse to
+carve an 8 m cut. The shaper now marks such segments fine, probing the ground
+as it was recorded, so a town graded in one call (the starter kit, the
+generator) never trips it; the decision is saved as `fineCorridors`, because
+a load re-grades from pristine ground and cannot see the lot the road went
+through. A fine segment is cut at up to 2 m voxels, flat across (a square
+start and a core past the kerb), and meets the grade before it in a vertical
+curve on a straight run; the frame drapes it from the same model. The
+renderer meshes every leaf through `colonyEditResolutionFor`, whose
+on-the-ground overlap test applies only to brushes finer than the colony
+voxel, so generated towns mesh exactly as before. Free build does not
+grade-gate a graded road, so one run down a cliff far steeper than any road
+(a 10 m pad edge at -356%) still buries in places.
+
 **The editor.** `road_tool_controller.dart` (a `RoadToolEditing` mixin on
 `CityEditController`) is the tool's state: the mode — Straight, Curved
 (start, the point the curve bends toward, end), Freeform (each stretch
