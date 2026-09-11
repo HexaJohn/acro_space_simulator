@@ -732,6 +732,7 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
     _edits = InMemoryTerrainEditsRepository();
     _sim?.shapedTerrain.clear();
     _sim?.corridorDatums.clear();
+    _sim?.corridorCurves.clear();
     _recapture();
     setState(() {});
   }

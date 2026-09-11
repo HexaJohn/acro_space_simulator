@@ -645,6 +645,17 @@ List<TerrainRefinement> _mergeTargets(
 /// it, so the leaf refined to carry a road cut was meshed four times too
 /// coarse. Scoped invalidation in the renderer learned the same lesson.
 ///
+/// Except a brush content to be meshed at [datumTestFromVoxelM] or coarser
+/// (`TerrainBrush.minVoxelM` — a colony's pads and streets at its coarse
+/// voxel), which is still judged on the datum, as it always was. That test
+/// under-boosts them on a site well off its datum — a generated town over
+/// a kilometre up had no boosted leaf at all, where its brushes ask for
+/// 15 m — but it is how every such colony has been drawn, and judged on
+/// the ground they would double its terrain's triangles (a two-block town:
+/// ~0.6 M to ~1.2 M in view). Whether to pay that is its own decision; a
+/// road cut through relief, meshed finer than that voxel, needs its leaf
+/// meshed as asked and gets it.
+///
 /// Pure, so the renderer's choice is testable headless.
 int editResolutionFor(
   ChunkKey k,
@@ -654,14 +665,18 @@ int editResolutionFor(
   int maxBoost = 4,
   double voxelsAcrossBrush = 8,
   double? circumradiusM,
+  double datumTestFromVoxelM = double.infinity,
 }) {
   if (maxBoost <= 1) return resolution;
   final reach = circumradiusM ?? k.circumradiusM(radiusM);
   final dir = k.centreDirection;
+  final onDatum = dir * radiusM;
   final chunkVoxelM = reach * 2.0 / resolution;
   var boost = 1;
   for (final b in brushes) {
-    final centre = dir * b.centreBF.length;
+    final centre = b.minVoxelM >= datumTestFromVoxelM
+        ? onDatum
+        : dir * b.centreBF.length;
     if ((b.centreBF - centre).length > reach + b.lateralReachM) continue;
     // Same target as [refinementsFor], floor included, so the boost a chunk
     // gets and the level the tree was forced to agree.
@@ -723,19 +738,8 @@ List<TerrainRefinement> refinementsFor(
     final start = brush.centreBF * 2.0 - end;
     final axis = end - start;
     final len = axis.length;
-    final shoulder = brush.radiusM + brush.falloffM;
-    // A corridor meshed with four voxels or more across its carriageway is
-    // one that asked to show its cut (a road laid through relief). The ring
-    // the 2:1 balance puts round its island is a level coarser and
-    // unboosted — eight times its voxel at the default boost — and a mesh
-    // overlaps a voxel past its own edge: the island reaches that far past
-    // the shoulders, or the ring is drawn over the carriageway wherever the
-    // island ends beside it (a grass wedge across a re-laid one-way where
-    // its island's edge crossed it). A corridor at a colony's coarse voxel
-    // shows no cut to cover, and keeps its targets where they were.
-    final resolved = targetVoxelM * 4 <= brush.radiusM * 2;
-    final lat = shoulder + (resolved ? 8 * targetVoxelM : 0);
-    if (len <= 0 || shoulder <= 0) return const [];
+    final lat = brush.radiusM + brush.falloffM;
+    if (len <= 0 || lat <= 0) return const [];
     final aDir = axis / len;
     final targets = <TerrainRefinement>[];
     void addAt(Vector3 p) {
@@ -750,7 +754,7 @@ List<TerrainRefinement> refinementsFor(
     // Shoulder samples spaced about one shoulder-width apart (bounded, so a
     // very long road stays a bounded list — mergedRefinementsFor dedupes the
     // overlap against the chunks they land in anyway).
-    final n = (len / math.max(shoulder, len / 64)).ceil().clamp(1, 64);
+    final n = (len / math.max(lat, len / 64)).ceil().clamp(1, 64);
     for (var i = 0; i <= n; i++) {
       final p = start + aDir * (len * i / n);
       var side = aDir.cross(p.normalized);
@@ -759,14 +763,6 @@ List<TerrainRefinement> refinementsFor(
       side = side / sl;
       addAt(p + side * lat);
       addAt(p - side * lat);
-      if (resolved) {
-        // Every cell the carriageway crosses, not only those its shoulders
-        // reach: a cell the road clips at a corner holds no shoulder
-        // sample, stayed a level coarser, and its seam crossed the road.
-        addAt(p);
-        addAt(p + side * brush.radiusM);
-        addAt(p - side * brush.radiusM);
-      }
     }
     addAt(start - aDir * lat);
     addAt(end + aDir * lat);

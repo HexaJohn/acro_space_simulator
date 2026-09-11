@@ -66,8 +66,9 @@ void main() {
 
   /// What the world tick does after the colony advances
   /// (`AdvanceSimulationTick._shapeCityTerrain`).
-  void shape(CitySim city, InMemoryTerrainEditsRepository edits) {
-    for (final p in shaper.pending(city,
+  void shape(CitySim city, InMemoryTerrainEditsRepository edits,
+      [CityTerrainShaper cutter = shaper]) {
+    for (final p in cutter.pending(city,
         bodyRadiusM: earth.radius,
         groundRadiusAt: (d) => groundRadius(edits, d))) {
       edits.record(earth.id, p.brush);
@@ -271,50 +272,75 @@ void main() {
       'the tool\'s Freeform mode':
           RoadCurves.tangentArc(from, const Vec2(-1, 0), to),
     };
-    for (final MapEntry(key: name, value: controls) in cases.entries) {
-      final c = devColony();
-      shape(c.city, c.edits);
-      final built = c.city.buildRoad(
-          RoadBuildRequest(
-              controls: controls, type: RoadType.byId('two-lane')!),
-          groundAt: (p) => ground(c.city, c.edits, p));
-      expect(built.quote.ok, isTrue, reason: '$name: ${built.quote.reason}');
-      expect(built.quote.deck, isNull, reason: name);
-      final id = built.roadId!;
-      shape(c.city, c.edits);
-      final off = offGround(drawn(c.city, c.edits, id), c.edits);
-      expect(off.every((d) => d.abs() < tolM), isTrue,
-          reason: '$name: drawn off the ground it was cut to by '
-              '[${fmt(off)}] m');
-      // What makes it a test: the easing really has pulled a knot's ground
-      // metres off its own segment's datum.
-      expect(knotPull(c.city, c.edits, id), greaterThan(1.0),
-          reason: '$name: no knot pulled off its datum — the case is gone');
+    // Each cut two ways. As the tick cuts them: through the field's step
+    // they are cut fine, each segment starting square
+    // (`TerrainBrush.squareStart`), which pulls a knot far less. And at the
+    // colony's voxel, every segment round, as a road the shaper does not
+    // cut fine is: there the next segment's easing pulls a knot metres off
+    // its datum, the case this test was written for.
+    const coarse = CityTerrainShaper(
+        corridorReliefTolM: double.infinity,
+        corridorCrossFallTolM: double.infinity);
+    for (final (how, cutter) in [('cut fine', shaper), ('coarse', coarse)]) {
+      for (final MapEntry(key: what, value: controls) in cases.entries) {
+        final name = '$what ($how)';
+        final c = devColony();
+        shape(c.city, c.edits, cutter);
+        final built = c.city.buildRoad(
+            RoadBuildRequest(
+                controls: controls, type: RoadType.byId('two-lane')!),
+            groundAt: (p) => ground(c.city, c.edits, p));
+        expect(built.quote.ok, isTrue,
+            reason: '$name: ${built.quote.reason}');
+        expect(built.quote.deck, isNull, reason: name);
+        final id = built.roadId!;
+        shape(c.city, c.edits, cutter);
+        final off = offGround(drawn(c.city, c.edits, id), c.edits);
+        expect(off.every((d) => d.abs() < tolM), isTrue,
+            reason: '$name: drawn off the ground it was cut to by '
+                '[${fmt(off)}] m');
+        if (identical(cutter, coarse)) {
+          // What makes it a test: the easing really has pulled a knot's
+          // ground metres off its own segment's datum.
+          expect(knotPull(c.city, c.edits, id), greaterThan(1.0),
+              reason: '$name: no knot pulled off its datum — the case is '
+                  'gone');
+        } else {
+          expect(
+              c.city.fineCorridors.where((k) => k.startsWith('road:$id:')),
+              isNotEmpty,
+              reason: '$name: not cut fine — the case is gone');
+        }
 
-      // Its end dragged on, out past the field (Adjust Roads): drawn where
-      // its corridor will be the frame it is laid, and on it once cut.
-      final moved = c.city.moveRoadEnd(id,
-          atStart: false,
-          to: const Vec2(-130, 140),
-          groundAt: (p) => ground(c.city, c.edits, p));
-      expect(moved.quote.ok, isTrue, reason: '$name: ${moved.quote.reason}');
-      expect(moved.quote.deck, isNull, reason: name);
-      final relaid = moved.roadId!;
-      final before = pointsOf(drawn(c.city, c.edits, relaid));
-      shape(c.city, c.edits);
-      final after = drawn(c.city, c.edits, relaid);
-      final offAfter = offGround(after, c.edits);
-      expect(offAfter.every((d) => d.abs() < tolM), isTrue,
-          reason: '$name, re-laid: drawn off the ground it was cut to by '
-              '[${fmt(offAfter)}] m');
-      // By place, not by index (see the one-way above).
-      final ahead = [
-        for (final p in before)
-          p.length - groundRadius(c.edits, p.normalized),
-      ];
-      expect(ahead.every((d) => d.abs() < tolM), isTrue,
-          reason: '$name, re-laid: before its corridor was cut it was drawn '
-              '[${fmt(ahead)}] m off the ground it was then cut to');
+        // Its end dragged on, out past the field (Adjust Roads): drawn where
+        // its corridor will be the frame it is laid, and on it once cut.
+        final moved = c.city.moveRoadEnd(id,
+            atStart: false,
+            to: const Vec2(-130, 140),
+            groundAt: (p) => ground(c.city, c.edits, p));
+        expect(moved.quote.ok, isTrue,
+            reason: '$name: ${moved.quote.reason}');
+        expect(moved.quote.deck, isNull, reason: name);
+        final relaid = moved.roadId!;
+        final before = pointsOf(drawn(c.city, c.edits, relaid));
+        shape(c.city, c.edits, cutter);
+        final after = drawn(c.city, c.edits, relaid);
+        final offAfter = offGround(after, c.edits);
+        expect(offAfter.every((d) => d.abs() < tolM), isTrue,
+            reason: '$name, re-laid: drawn off the ground it was cut to by '
+                '[${fmt(offAfter)}] m');
+        // The frame it is laid it is drawn on the corridor the world tick's
+        // shaper will cut — fine, here — so only against that shaper's cut.
+        if (identical(cutter, coarse)) continue;
+        // By place, not by index (see the one-way above).
+        final ahead = [
+          for (final p in before)
+            p.length - groundRadius(c.edits, p.normalized),
+        ];
+        expect(ahead.every((d) => d.abs() < tolM), isTrue,
+            reason: '$name, re-laid: before its corridor was cut it was '
+                'drawn [${fmt(ahead)}] m off the ground it was then cut to');
+      }
     }
   });
 

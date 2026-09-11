@@ -112,8 +112,14 @@ class TerrainBrush {
     this.endBF,
     this.polygonBF = const [],
     this.minVoxelM = 0,
+    this.squareStart = false,
+    this.curveInGrade = 0,
+    this.curveHalfM = 0,
   })  : assert(radiusM > 0, 'a zero-radius brush cuts nothing'),
         assert(minVoxelM >= 0, 'a voxel floor cannot be negative'),
+        assert(curveHalfM >= 0, 'a vertical curve has a length'),
+        assert(curveHalfM == 0 || squareStart,
+            'a vertical curve is how a square start meets the grade before it'),
         _axis = axisBF.normalized {
     // Bowl geometry, solved from the cavity mouth radius and the depth. A
     // sphere of radius `rs` whose centre sits `h0` ABOVE the contact plane
@@ -358,6 +364,7 @@ class TerrainBrush {
 
   /// A levelled road corridor from [startBF] to [endBF], [radiusM] to either
   /// side of the centreline, grading from [datumRadiusM] to [datumRadiusEndM].
+  /// See [squareStart] for how it ends behind its start.
   factory TerrainBrush.cutFill({
     required Vector3 startBF,
     required Vector3 endBF,
@@ -368,6 +375,9 @@ class TerrainBrush {
     double maxCutM = 40,
     int tick = 0,
     double minVoxelM = 0,
+    bool squareStart = false,
+    double curveInGrade = 0,
+    double curveHalfM = 0,
   }) {
     // Stored centre is the MIDPOINT so the spherical influence bound (and the
     // spatial index built on it) actually encloses the whole corridor.
@@ -384,6 +394,9 @@ class TerrainBrush {
       endBF: endBF,
       tick: tick,
       minVoxelM: minVoxelM,
+      squareStart: squareStart,
+      curveInGrade: curveInGrade,
+      curveHalfM: curveHalfM,
     );
   }
 
@@ -446,6 +459,59 @@ class TerrainBrush {
   /// analytic field (and so the collision surface) is the same at any
   /// resolution, which is why this stays out of the snapshot fingerprint.
   final double minVoxelM;
+
+  /// Whether a [TerrainBrushKind.cutFill] corridor ends SQUARE behind its
+  /// start: levelled to its start's datum at full weight only up to the
+  /// line across its start, eased out behind it by the distance behind that
+  /// line and outside its edges — rather than round, over a disc of
+  /// [radiusM] about its start and a ring round that.
+  ///
+  /// A road is graded as straight segments laid one after another, each
+  /// over the end of the one before, and the carriageway is drawn flat
+  /// across. Round, the next segment's start holds a disc at its knot's
+  /// datum over the last metres of a segment still climbing or falling into
+  /// it, and eases out by distance from the knot — further at the kerbs
+  /// than at the centreline — so the ground across the carriageway rises
+  /// to its edges there: a re-laid one-way falling 51% into a knot stood
+  /// 0.85 m of grass over its own ribbon at nine tenths of its half width,
+  /// a V across the road, where its centreline sat on the ground. Square,
+  /// the easing is the same all the way across.
+  ///
+  /// Within the round shape's own reach ([lateralReachM], every bound), so
+  /// the indexes and bounds hold either way. False (round) for everything
+  /// but a road corridor cut to be meshed finely enough to show it
+  /// (`CityTerrainShaper`): what a coarse mesh draws is unchanged.
+  final bool squareStart;
+
+  /// The grade (radial metres per metre along, in plan) of the segment
+  /// before a square-started corridor ([squareStart]) that meets it in a
+  /// vertical curve [curveHalfM] either side of its start. Read only with
+  /// [curveHalfM] set.
+  final double curveInGrade;
+
+  /// Half the length (m, in plan) of the vertical curve a square-started
+  /// corridor ([squareStart]) meets the grade before it with, or 0 for none:
+  /// held at its start's datum behind it, as [squareStart] says.
+  ///
+  /// A road graded as straight segments turns its grade at every knot, and
+  /// a mesh cannot turn a corner inside a voxel: a two-lane climbing 186%
+  /// off level ground onto a levelled lot stood 0.34 m of mesh over its
+  /// ribbon at the foot, where the grade turned, and 0.44 m at the top,
+  /// where the next segment's start held the lot's level behind it and
+  /// eased into the climb over six metres. With a curve, within
+  /// [curveHalfM] of its start the ground follows the parabola from
+  /// [curveInGrade] to its own grade — the grade turns at a steady rate
+  /// over the whole curve, all the way across the carriageway — and further
+  /// behind, the grade before it carried on, eased out over [curveHalfM]:
+  /// the ground the segment before it was cut to, so it changes nothing
+  /// there. Measured along the corridor in plan, not along its rising
+  /// chord, so the curve is the parabola however steep.
+  ///
+  /// It reaches at most twice [curveHalfM] behind its start, which the
+  /// shaper keeps within [radiusM] and [falloffM] — as far as a round
+  /// start's easing reaches — so inside the round shape's reach
+  /// ([lateralReachM], every bound).
+  final double curveHalfM;
 
   /// Farthest polygon vertex from the centre, for the bounds.
   double get _polyReachM {
@@ -598,8 +664,17 @@ class TerrainBrush {
           hi: math.max(groundHiM, datumRadiusM),
         );
       case TerrainBrushKind.cutFill:
-        final dLo = math.min(datumRadiusM, datumRadiusEndM);
-        final dHi = math.max(datumRadiusM, datumRadiusEndM);
+        // A vertical curve leaves the chord between the datums, and behind
+        // its start carries the grade before it on (see [curveHalfM]).
+        final curve = curveHalfM <= 0
+            ? 0.0
+            : 2 * curveHalfM * curveInGrade.abs() +
+                curveHalfM *
+                    ((datumRadiusEndM - datumRadiusM).abs() /
+                            math.max(_planLengthM, 1e-6) +
+                        curveInGrade.abs());
+        final dLo = math.min(datumRadiusM, datumRadiusEndM) - curve;
+        final dHi = math.max(datumRadiusM, datumRadiusEndM) + curve;
         return (
           lo: math.min(groundLoM, dLo),
           hi: math.max(groundHiM, dHi),
@@ -723,7 +798,23 @@ class TerrainBrush {
         final axis = end - start;
         final len2 = axis.lengthSquared;
         if (len2 <= 1e-9) return null;
-        final t = ((p - start).dot(axis) / len2).clamp(0.0, 1.0);
+        if (curveHalfM > 0) return _curvedLevel(p, start, axis);
+        final along = (p - start).dot(axis) / len2;
+        final t = along.clamp(0.0, 1.0);
+        final up = p.normalized;
+        if (squareStart && along < 0) {
+          // Behind a square start: the carriageway's edge carried straight
+          // back, eased out by how far behind the start and how far outside
+          // that edge the point lies — the same at every point across it.
+          final v = p - (start + axis * along);
+          final across = (v - up * v.dot(up)).length;
+          final behind = -along * math.sqrt(len2);
+          final out = math.max(across - radiusM, 0.0);
+          return (
+            weight: _falloffWeight(math.sqrt(behind * behind + out * out), 0),
+            datum: datumRadiusM,
+          );
+        }
         final onAxis = start + axis * t;
         // Horizontal offset only. A 3D distance would make the corridor a
         // capsule, so a sample well above or below the carriageway would fall
@@ -732,7 +823,6 @@ class TerrainBrush {
         // Stripping the LOCAL radial component makes it a radially extruded
         // prism instead, which is what a road cutting actually is.
         final v = p - onAxis;
-        final up = p.normalized;
         final lateral = (v - up * v.dot(up)).length;
         return (
           weight: _falloffWeight(lateral, radiusM),
@@ -744,6 +834,63 @@ class TerrainBrush {
         return null;
     }
   }
+
+  /// [_levelAt] for a corridor that meets the grade before it in a vertical
+  /// curve ([curveHalfM]), its run from [start] along [axis]. Everything in
+  /// plan — across the point's own vertical — so the curve is a parabola in
+  /// distance along the ground however steep the run (`CityTerrainShaper
+  /// .corridorGround` reads the same ground back):
+  ///
+  ///  * along its run, the parabola from [curveInGrade] to its own grade
+  ///    within [curveHalfM] of its start, its own grade past that, its end's
+  ///    datum past its end (a round end cap, as every corridor has);
+  ///  * behind its start, the grade before it carried on, at full weight
+  ///    within [curveHalfM] of the start and eased out over [curveHalfM]
+  ///    past that, and out over [falloffM] past its edges carried back.
+  ({double weight, double datum})? _curvedLevel(
+      Vector3 p, Vector3 start, Vector3 axis) {
+    final up = p.normalized;
+    final run = axis - up * axis.dot(up);
+    final plan2 = run.lengthSquared;
+    if (plan2 <= 1e-9) return null;
+    final v = p - start;
+    final flat = v - up * v.dot(up);
+    final planLen = math.sqrt(plan2);
+    final u = flat.dot(run) / plan2;
+    final x = u * planLen;
+    final h = curveHalfM, g0 = curveInGrade;
+    final g1 = (datumRadiusEndM - datumRadiusM) / planLen;
+    final double datum;
+    if (x < -h) {
+      datum = datumRadiusM + g0 * x;
+    } else if (x <= h) {
+      datum = datumRadiusM + g0 * x + (g1 - g0) * (x + h) * (x + h) / (4 * h);
+    } else if (u < 1) {
+      datum = datumRadiusM + g1 * x;
+    } else {
+      datum = datumRadiusEndM;
+    }
+    if (u > 1) {
+      return (weight: _falloffWeight((flat - run).length, radiusM), datum: datum);
+    }
+    final lateral = (flat - run * u).length;
+    if (u >= 0) return (weight: _falloffWeight(lateral, radiusM), datum: datum);
+    final behind = math.max(-x - h, 0.0);
+    final out = math.max(lateral - radiusM, 0.0);
+    return (
+      weight: falloffWeight(behind, 0, h) * falloffWeight(out, 0, falloffM),
+      datum: datum,
+    );
+  }
+
+  /// A corridor's run in plan (m): the chord from its start to its end
+  /// across its middle's vertical.
+  late final double _planLengthM = () {
+    final end = endBF;
+    if (end == null) return 0.0;
+    final axis = (end - centreBF) * 2;
+    return (axis - _axis * axis.dot(_axis)).length;
+  }();
 
   /// Tangent basis at the pad centre, and the footprint projected into it.
   /// Built once — [apply] runs per voxel, and re-projecting the outline on
