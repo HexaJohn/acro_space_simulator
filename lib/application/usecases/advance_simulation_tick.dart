@@ -367,12 +367,21 @@ class AdvanceSimulationTick {
     // ---- City-builder phase: every registered colony advances with the world,
     // mounted or not. dt is the same simulation step the vessels just took, so
     // a colony and a craft in orbit above it share one clock.
+    //
+    // A colony held to a frame budget (docs/plans/agent-traffic.md §5.7) is
+    // held WHOLE: its own advance and everything this phase writes into it —
+    // a shuttle's cargo, its shuttle runs, its terrain, its air — queue
+    // together and replay together after the host's tick loop, through
+    // [advanceCity]. Held apart, the writes would land before the colony's
+    // own tick instead of after it, in an order that turned on how ticks fell
+    // into frames; held together, the colony sees what it would inline, only
+    // later.
+    _lastClock = clock;
     for (final city in cities.all()) {
-      city.advance(dt);
-      _shapeCityTerrain(city, system, clock);
-      _polluteAtmosphere(city, dt);
-      _unloadShuttles(city, system, clock);
-      _runColonyShuttles(city, system, clock, dt);
+      final agents = city.agents;
+      if (agents.frameBudgeted) agents.replayTick = _replayCity;
+      if (agents.holdTick(dt)) continue;
+      _cityPhase(city, dt, system, clock);
     }
 
     // ---- Colony / city phase ----
@@ -456,6 +465,40 @@ class AdvanceSimulationTick {
         terrainEdits.record(body.id, b);
       }
     }
+  }
+
+  /// The clock the last [execute] ran on: what a held colony's replayed
+  /// share of the tick reads the world's time from.
+  SimulationClock? _lastClock;
+
+  /// [advanceCity], torn off once: every frame-budgeted colony's
+  /// `CityAgents.replayTick`.
+  late final void Function(CitySim city, double dt) _replayCity = advanceCity;
+
+  /// One colony's share of a tick, replayed after the host's tick loop by a
+  /// frame-budgeted colony (`CityAgents.endFrame`): its advance, then all
+  /// this phase writes into it, in the order [execute] runs them, against
+  /// the world as it stands now — the lag §5.7 allows what reads a held
+  /// colony.
+  void advanceCity(CitySim city, double dt) {
+    final clock = _lastClock;
+    if (clock == null) {
+      // Held before this tick ever ran: nothing of the world's to replay.
+      city.advance(dt);
+      return;
+    }
+    _cityPhase(city, dt, universe.current(), clock);
+  }
+
+  /// One colony's share of a tick, in order: its own advance, then what the
+  /// world writes into it.
+  void _cityPhase(
+      CitySim city, double dt, StarSystem system, SimulationClock clock) {
+    city.advance(dt);
+    _shapeCityTerrain(city, system, clock);
+    _polluteAtmosphere(city, dt);
+    _unloadShuttles(city, system, clock);
+    _runColonyShuttles(city, system, clock, dt);
   }
 
   /// Record the terrain edits a colony's new construction implies: levelled

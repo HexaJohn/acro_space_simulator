@@ -157,7 +157,7 @@ class LaneStateSearch {
           _g[l] = g0;
           _parent[l] = -1;
           _origin[l] = k;
-          _heap.push(l, g0 + _h(cost, lg.edgeTo[e]), g0);
+          _heap.push(l, g0 + _h(cost, e), g0);
         }
       }
     }
@@ -216,7 +216,7 @@ class LaneStateSearch {
         _stamp[l2] = _gen;
         _g[l2] = gn;
         _parent[l2] = c;
-        _heap.push(l2, gn + _h(cost, lg.edgeTo[o]), gn);
+        _heap.push(l2, gn + _h(cost, o), gn);
       }
     }
   }
@@ -251,8 +251,9 @@ class LaneStateSearch {
     _routeLength = n + 1;
   }
 
-  double _h(RouteCost cost, int node) =>
-      _useH ? cost.heuristic(node, _goalPt, _ends.goalCount) : 0.0;
+  /// The heuristic of a state: from the end of its lane's [edge].
+  double _h(RouteCost cost, int edge) =>
+      _useH ? cost.heuristic(edge, _goalPt, _ends.goalCount) : 0.0;
 
   static double _clampT(RouteCost cost, int edge, double t) {
     final len = cost.lg.edgeLen[edge];

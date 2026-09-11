@@ -130,11 +130,11 @@ bool paysMinorSurcharge(AgentKind kind) =>
 /// `LaneGraph` object and gets a new [RouteCost]: J follows the controls.
 class RouteCost {
   RouteCost._(this.lg, this.edgePerM, this.edgeTime, this.moveCost,
-      this.conCost, this.nodeE, this.nodeN, this.nodeSlack, this.hPerM);
+      this.conCost, this.edgeEndE, this.edgeEndN, this.hPerM);
 
   /// The prices of [lg].
   factory RouteCost(LaneGraph lg) {
-    final nE = lg.edgeCount, nN = lg.nodeCount, nC = lg.connectorCount;
+    final nE = lg.edgeCount, nC = lg.connectorCount;
     final perM = Float64List(nE), time = Float64List(nE);
     var hPerM = double.infinity;
     for (var e = 0; e < nE; e++) {
@@ -146,7 +146,39 @@ class RouteCost {
     }
     if (hPerM.isInfinite) hPerM = 0;
 
-    // J + T of every movement, read off the controls the graph carries.
+    // Where each edge starts and ends. A node is the mean of the road ends
+    // that meet there (and of any dead end attached part way along a road),
+    // so the edge a route leaves may end metres from where the next begins.
+    final startE = Float64List(nE), startN = Float64List(nE);
+    final endE = Float64List(nE), endN = Float64List(nE);
+    final pt = Float64List(2);
+    for (var e = 0; e < nE; e++) {
+      if (e < lg.roadEdgeCount) {
+        pointOn(lg, e, 0.0, pt, 0);
+        startE[e] = pt[0];
+        startN[e] = pt[1];
+        pointOn(lg, e, lg.edgeLen[e], pt, 0);
+        endE[e] = pt[0];
+        endN[e] = pt[1];
+      } else {
+        // An outside connection's sink edge (slice 8) is no road: its ends
+        // are its nodes.
+        final a = lg.graph.nodes[lg.edgeFrom[e]].at;
+        final b = lg.graph.nodes[lg.edgeTo[e]].at;
+        startE[e] = a.e;
+        startN[e] = a.n;
+        endE[e] = b.e;
+        endN[e] = b.n;
+      }
+    }
+
+    // J + T of every movement, read off the controls the graph carries —
+    // and never less than the straight-line time of the gap the route jumps
+    // across the node, from the end of one edge to the start of the next.
+    // The heuristic is measured from each edge's own end, and it is a lower
+    // bound only while every such gap is paid for: where the ends of a
+    // continuation lie metres apart and J + T is 0, that gap would be
+    // ground a route covers for nothing, and A* would stop short (§4.3).
     final ctl = lg.controls;
     final moves = Float64List(lg.moveOut.length);
     for (var e = 0; e < nE; e++) {
@@ -156,7 +188,11 @@ class RouteCost {
           stops: road && ctl.edgeStops[e] == 1,
           yields: road && ctl.edgeYields[e] == 1);
       for (var i = lg.moveStart[e]; i < lg.moveStart[e + 1]; i++) {
-        moves[i] = j + turnPenaltyS(TurnClass.values[lg.moveTurn[i]], kind);
+        final o = lg.moveOut[i];
+        final de = startE[o] - endE[e], dn = startN[o] - endN[e];
+        final gap = math.sqrt(de * de + dn * dn) * hPerM;
+        final m = j + turnPenaltyS(TurnClass.values[lg.moveTurn[i]], kind);
+        moves[i] = m > gap ? m : gap;
       }
     }
     // A connector costs its movement plus the lane planner's charge for
@@ -174,29 +210,7 @@ class RouteCost {
       cons[c] = m + lg.conPen[c];
     }
 
-    // Where each node is, and how far from it the road ends it joins lie:
-    // a node is the mean of its ends (and of any dead end attached part
-    // way along a road), so a route can set off from a point metres from
-    // it. The heuristic gives that distance back, and stays a lower bound.
-    final nodeE = Float64List(nN), nodeN = Float64List(nN);
-    final slack = Float64List(nN);
-    for (var n = 0; n < nN; n++) {
-      final at = lg.graph.nodes[n].at;
-      nodeE[n] = at.e;
-      nodeN[n] = at.n;
-    }
-    final pt = Float64List(2);
-    for (var e = 0; e < nE && e < lg.roadEdgeCount; e++) {
-      for (var end = 0; end < 2; end++) {
-        final n = end == 0 ? lg.edgeFrom[e] : lg.edgeTo[e];
-        pointOn(lg, e, end == 0 ? 0.0 : lg.edgeLen[e], pt, 0);
-        final de = pt[0] - nodeE[n], dn = pt[1] - nodeN[n];
-        final d = math.sqrt(de * de + dn * dn);
-        if (d > slack[n]) slack[n] = d;
-      }
-    }
-    return RouteCost._(
-        lg, perM, time, moves, cons, nodeE, nodeN, slack, hPerM);
+    return RouteCost._(lg, perM, time, moves, cons, endE, endN, hPerM);
   }
 
   final LaneGraph lg;
@@ -213,8 +227,8 @@ class RouteCost {
   /// J + T of each connector's movement, plus its lane charge (§4.5).
   final Float64List conCost;
 
-  /// Each node's position, and the farthest its edges' ends lie from it.
-  final Float64List nodeE, nodeN, nodeSlack;
+  /// Where each edge ends, colony metres: what the heuristic measures from.
+  final Float64List edgeEndE, edgeEndN;
 
   /// The least any metre of this network costs: the heuristic's rate. Read
   /// off the graph rather than fixed at the design's 1/29.9 s/m (100 km/h
@@ -248,12 +262,14 @@ class RouteCost {
     return c;
   }
 
-  /// A lower bound on the seconds from [node] to the nearest of [count]
-  /// goals (east, north pairs in [goals]): the straight line, less what the
-  /// node's road ends may lie off it, at the network's cheapest rate. No
-  /// penalty enters it, and it never overestimates (§4.3).
-  double heuristic(int node, Float64List goals, int count) {
-    final e = nodeE[node], n = nodeN[node];
+  /// A lower bound on the seconds from the END of [edge] to the nearest of
+  /// [count] goals (east, north pairs in [goals]): the straight line at the
+  /// network's cheapest rate. No penalty enters it, and it never
+  /// overestimates (§4.3): every edge costs at least its chord at that rate,
+  /// and every movement at least the gap it jumps across its node
+  /// ([moveCost]) — so it is consistent, too.
+  double heuristic(int edge, Float64List goals, int count) {
+    final e = edgeEndE[edge], n = edgeEndN[edge];
     var best = double.infinity;
     for (var k = 0; k < count; k++) {
       final de = goals[2 * k] - e, dn = goals[2 * k + 1] - n;
@@ -261,8 +277,7 @@ class RouteCost {
       if (d2 < best) best = d2;
     }
     if (best == double.infinity) return 0;
-    final d = math.sqrt(best) - nodeSlack[node];
-    return d > 0 ? d * hPerM : 0;
+    return math.sqrt(best) * hPerM;
   }
 
   /// Where travel arc [t] along [edge] lies: east into `out[at]`, north

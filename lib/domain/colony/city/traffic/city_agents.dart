@@ -12,7 +12,10 @@
 /// and [onLotCleared] from its rename and clear seams (E12–E14), [toJson]
 /// and [restore] from its save (E15, E16); and everything that reads the
 /// traffic reads [readout] through `CitySim.trafficReadout` (E37). Nothing
-/// else in the colony changes.
+/// else in the colony changes. A world host asks [holdTick] too, before its
+/// whole share of the tick for the colony, and [endFrame] replays that
+/// share through [replayTick], so what the world writes into a held colony
+/// keeps its place after the colony's own tick.
 ///
 /// One [advance] (§12.2, slice 1):
 ///
@@ -78,6 +81,19 @@ const int _spawnSalt = 0x5350574E; // 'SPWN'
 /// graph keeps running (§3.8).
 const int _buildItemsPerAdvance = 4096;
 
+/// The frame hold works its backlog off at this many frames' pace, on top
+/// of its budget (§5.7): slow enough that a catch-up frame stays near the
+/// budget, and a host below the frame rate the budget was sized for holds
+/// the colony a bounded way behind instead of an ever longer one.
+const double _holdDrainFrames = 32;
+
+/// A vehicle's own path requests — a re-plan, an appended leg — carry it as
+/// `-(handle + 1)`: negative, so never a commuter's handle, and the same
+/// number after a trip through the queue's `Int32List` on the web, where
+/// `~handle` is not (dart2js reads it unsigned).
+int _vehicleRequester(int handle) => -(handle + 1);
+int _requesterVehicle(int requester) => -(requester + 1);
+
 /// A colony's agents. See the library comment.
 class CityAgents {
   CityAgents(this.city);
@@ -120,9 +136,13 @@ class CityAgents {
   /// The world epoch the host is ticking at, stamped on every frame.
   double worldEpochS = 0;
 
-  /// What [endFrame] replays a held tick through: the colony's own
-  /// advance, unless a test stands in for it.
-  void Function(double simDt)? replayTick;
+  /// What [endFrame] replays a held tick of [city] through: the host's
+  /// whole share of the tick for the colony when the world ticks it —
+  /// `AdvanceSimulationTick.advanceCity`, which runs what the world writes
+  /// into the colony (a shuttle's cargo, its terrain, its air) after its
+  /// advance, as inline — else the colony's own advance; or a test's
+  /// stand-in.
+  void Function(CitySim city, double simDt)? replayTick;
 
   /// The colony's traffic readout (D46): what `CitySim.trafficReadout`
   /// returns when agents are enabled (E37).
@@ -184,67 +204,129 @@ class CityAgents {
 
   // ---- The frame hold (§5.7, D35) ---------------------------------------------
 
+  /// Each held tick: the simDt the host fed, which is what it is replayed
+  /// with, and the colony µs it will run — `CitySim.advance`'s clamp, at
+  /// the warp of the moment it was queued — which is what the hold budgets.
   Float64List? _held;
+  Int32List? _heldRunUs;
   int _heldHead = 0, _heldLen = 0;
-  double _heldS = 0;
+  int _heldCityUs = 0;
+
+  /// Sub-steps of credit the last frame left unspent, while ticks wait.
+  double _credit = 0;
   bool _replaying = false;
 
-  /// Ticks held, and the colony seconds they carry.
+  /// Ticks held, and the colony seconds they will run.
   int get heldTicks => _heldLen;
-  double get heldCityS => _heldS;
+  double get heldCityS => secondsOf(_heldCityUs);
 
-  /// First thing in `CitySim.advance` (E3b): true when the tick is queued
-  /// whole for [endFrame] instead of run now. False — run it — unless the
-  /// host set [frameBudgeted], or while [endFrame] itself replays it.
+  /// Before the host runs its share of a tick for the colony
+  /// (`AdvanceSimulationTick`), and first thing in `CitySim.advance` (E3b):
+  /// true when the tick is queued whole for [endFrame] instead of run now.
+  /// False — run it — unless the host set [frameBudgeted], or while
+  /// [endFrame] itself replays it.
   bool holdTick(double simDt) {
     if (!frameBudgeted || _replaying || !enabled) return false;
     var q = _held ??= Float64List(64);
+    var run = _heldRunUs ??= Int32List(64);
     if (_heldLen == q.length) {
-      final grown = Float64List(q.length * 2);
+      final n = q.length * 2;
+      final gq = Float64List(n), gr = Int32List(n);
       for (var i = 0; i < _heldLen; i++) {
-        grown[i] = q[(_heldHead + i) % q.length];
+        final k = (_heldHead + i) % q.length;
+        gq[i] = q[k];
+        gr[i] = run[k];
       }
-      _held = q = grown;
+      _held = q = gq;
+      _heldRunUs = run = gr;
       _heldHead = 0;
     }
-    q[(_heldHead + _heldLen) % q.length] = simDt;
+    final i = (_heldHead + _heldLen) % q.length;
+    final dt = (simDt * city.eventSimWarp).clamp(0.0, 0.5);
+    final us = dt > 0 && dt.isFinite ? usOf(dt) : 0;
+    q[i] = simDt;
+    run[i] = us;
     _heldLen++;
-    _heldS += simDt;
+    _heldCityUs += us;
     return true;
   }
 
-  /// After the host's tick loop (E26): replays the held ticks, oldest
-  /// first, while the frame's `maxAgentSubStepsPerFrame` sub-steps last —
-  /// each tick priced exactly, from the agent clock's leftover, before it
-  /// runs. At least one tick runs, so a tick dearer than the whole budget
-  /// is never starved; and a queue past `maxHeldCityS` is drained whole,
-  /// a hitch but never a lost tick.
+  /// After the host's tick loop (E26): replays held ticks, oldest first,
+  /// each priced exactly in sub-steps, from the agent clock's leftover,
+  /// before it runs, while the frame's credit lasts.
+  ///
+  /// The credit is `maxAgentSubStepsPerFrame` a frame plus what the last
+  /// frame left of it (one budget at most) while ticks wait. Ticks are
+  /// whole, so a budget spent a tick at a time must carry its remainder:
+  /// kept per frame, two ticks that do not fit together would never run in
+  /// one frame, and the hold would fall behind any host feeding more than
+  /// a tick a frame. On top of it, a share of the backlog
+  /// ([_holdDrainFrames]), so a queue that outgrows the budget — a host
+  /// below the frame rate the budget was sized for — is worked off rather
+  /// than left to grow; and whatever the queue holds past `maxHeldCityS`,
+  /// so the colony is never further behind than that: a hitch, never a
+  /// lost tick. At least one tick runs, so a tick dearer than the whole
+  /// credit is never starved.
   void endFrame() {
     final q = _held;
-    if (q == null || _heldLen == 0) return;
-    var budget = AgentTuning.maxAgentSubStepsPerFrame;
-    final drainAll = _heldS > AgentTuning.maxHeldCityS;
+    if (q == null || _heldLen == 0) {
+      _credit = 0;
+      return;
+    }
+    final budget = AgentTuning.maxAgentSubStepsPerFrame.toDouble();
+    final pendingUs = _heldCityUs + (_core?.clock.accumUs ?? 0);
+    var credit = math.min(_credit, budget) +
+        budget +
+        pendingUs / (kStepUs * _holdDrainFrames);
+    final overUs = _heldCityUs - usOf(AgentTuning.maxHeldCityS);
+    if (overUs > 0) credit += overUs / kStepUs;
     var ran = 0;
     _replaying = true;
     try {
       while (_heldLen > 0) {
-        final simDt = q[_heldHead];
-        final steps = _stepsFor(simDt);
-        if (!drainAll && ran > 0 && steps > budget) break;
-        _heldHead = (_heldHead + 1) % q.length;
-        _heldLen--;
-        _heldS = _heldLen == 0 ? 0 : _heldS - simDt;
-        budget -= steps;
+        final steps = _stepsFor(q[_heldHead]);
+        if (ran > 0 && steps > credit) break;
+        credit -= steps;
         ran++;
-        final replay = replayTick;
-        if (replay != null) {
-          replay(simDt);
-        } else {
-          city.advance(simDt);
-        }
+        _replayHead();
       }
     } finally {
       _replaying = false;
+    }
+    // What is left carries to the next frame while ticks wait; a first
+    // tick that overran the credit leaves no debt behind it.
+    _credit = _heldLen == 0 || credit < 0 ? 0 : credit;
+  }
+
+  /// Replays every held tick now, whatever the budget: before a save — the
+  /// save is the colony as of the clock it records, and a load replays
+  /// nothing — or when the host that held the ticks lets the colony go.
+  void flushHeld() {
+    if (_heldLen == 0) return;
+    _replaying = true;
+    try {
+      while (_heldLen > 0) {
+        _replayHead();
+      }
+    } finally {
+      _replaying = false;
+    }
+    _credit = 0;
+  }
+
+  /// Takes the oldest held tick off the queue and runs it, as the host
+  /// would have (see [replayTick]).
+  void _replayHead() {
+    final q = _held!;
+    final simDt = q[_heldHead];
+    _heldCityUs -= _heldRunUs![_heldHead];
+    _heldHead = (_heldHead + 1) % q.length;
+    _heldLen--;
+    final replay = replayTick;
+    if (replay != null) {
+      replay(city, simDt);
+    } else {
+      city.advance(simDt);
     }
   }
 
@@ -304,8 +386,10 @@ class CityAgents {
   /// lane. Null for a handle no longer on the road.
   Map<String, Object?>? describe(int handle) => _core?.describe(handle);
 
-  /// A hash of every column the agents' history lives in (§17.4): two
-  /// colonies fed the same ticks agree on it to the bit.
+  /// A hash of every column the agents' history lives in (§17.4) — the
+  /// vehicles', the commuters', the buildings', the routes waiting to pull
+  /// out, the junction rules' passes and queues, the path queue's requests:
+  /// two colonies fed the same ticks agree on it to the bit.
   int digest() => _core?.digest() ?? kFnvOffset32;
 }
 
@@ -454,12 +538,19 @@ class _Core implements PathResolver, PathSink, VehicleSink {
     _swap(LaneGraphBuilder.build(g), rebuild: true);
   }
 
-  /// Puts everything on [next]: a rebuilt graph carries every live route
-  /// across by lineage first; a refreshed one keeps every id.
+  /// Puts everything on [next]. A rebuilt graph carries every route across
+  /// by lineage first — those on the road, and those planned and still
+  /// waiting to pull out, alike (§3.9, §4.6) — and publishes a frame on
+  /// the new ids at once; a refreshed one keeps every id.
   void _swap(LaneGraph next, {required bool rebuild}) {
     final old = lg;
-    if (rebuild && old != null && table.liveCount > 0) {
-      _remapAll(old, next);
+    final rm = rebuild &&
+            old != null &&
+            (table.liveCount > 0 || planner.waiting > 0)
+        ? RouteRemapper(EdgeLineage(old, next))
+        : null;
+    if (rm != null && table.liveCount > 0) {
+      _remapAll(rm, next);
     } else {
       mover.bind(next);
     }
@@ -467,16 +558,25 @@ class _Core implements PathResolver, PathSink, VehicleSink {
     final c = cost = RouteCost(next);
     queue.bind(c);
     stats.bind(next);
+    if (rm != null && planner.waiting > 0) planner.remapWaiting(rm, commutes);
     if (rebuild) {
-      if (old != null) planner.replanWaiting(commutes);
       graphRev++;
+      // The renderer's geometry follows the new graph at once, and it draws
+      // a frame only over the graph that frame was published on: publish
+      // one on the new ids now, rather than draw no car until the next
+      // sub-step — most host ticks run none.
+      frames.publish(table,
+          timeUs: clock.timeUs,
+          worldEpochS: agents.worldEpochS,
+          graphRev: graphRev);
     }
     controlsRev++;
   }
 
-  /// §3.9 for every vehicle: remapped while the table still holds the old
-  /// graph, then placed on the new one and relinked.
-  void _remapAll(LaneGraph old, LaneGraph next) {
+  /// §3.9 for every vehicle, by [rm]: remapped while the table still holds
+  /// the old graph, then placed on [next] and relinked.
+  void _remapAll(RouteRemapper rm, LaneGraph next) {
+    final old = rm.lineage.from;
     final t = table;
     final hw = t.highWater;
     if (_rmOp.length < t.capacity) {
@@ -484,7 +584,6 @@ class _Core implements PathResolver, PathSink, VehicleSink {
       _rmElem = Int32List(t.capacity);
       _rmS = Float64List(t.capacity);
     }
-    final rm = RouteRemapper(EdgeLineage(old, next));
     final nOld = old.laneCount, nNew = next.laneCount;
     for (var sl = 0; sl < hw; sl++) {
       _rmOp[sl] = _opNone;
@@ -592,7 +691,7 @@ class _Core implements PathResolver, PathSink, VehicleSink {
       return;
     }
     queue.enqueue(PathPriority.replan,
-        requester: ~h,
+        requester: _vehicleRequester(h),
         kind: AgentKind.values[table.kind[sl]],
         fixedStart: true,
         dest: dest,
@@ -631,7 +730,7 @@ class _Core implements PathResolver, PathSink, VehicleSink {
       // A vehicle on the road: from the lane it is in, where it is now —
       // read at the moment the search starts, so a search restarted after
       // another edit starts from the vehicle's place on that network.
-      final h = ~request.requester;
+      final h = _requesterVehicle(request.requester);
       if (!table.isLive(h)) return false;
       final sl = SlotPool.slotOf(h);
       final el = table.elem[sl];
@@ -648,7 +747,7 @@ class _Core implements PathResolver, PathSink, VehicleSink {
       commutes.onPath(request, outcome, route, clock.timeUs);
       return;
     }
-    final h = ~request.requester;
+    final h = _requesterVehicle(request.requester);
     if (!table.isLive(h)) return;
     final sl = SlotPool.slotOf(h);
     final found = outcome == PathOutcome.found && route.length >= 1;
@@ -708,7 +807,7 @@ class _Core implements PathResolver, PathSink, VehicleSink {
       case DespawnReason.edit:
         stats.despawnEdit++;
     }
-    queue.cancel(~handle);
+    queue.cancel(_vehicleRequester(handle));
     commutes.despawned(handle, clock.timeUs);
   }
 
@@ -761,7 +860,7 @@ class _Core implements PathResolver, PathSink, VehicleSink {
       if (!t.isSlotLive(sl)) continue;
       h = fnv1aU32(h, t.handleOf(sl));
       h = fnv1aU32(h, t.kind[sl] | t.state[sl] << 8 | t.purpose[sl] << 16);
-      h = fnv1aU32(h, t.variant[sl]);
+      h = fnv1aU32(h, t.variant[sl] | t.flags[sl] << 8 | t.grant[sl] << 16);
       h = fnv1aU32(h, t.elem[sl]);
       h = fnv1aU32(h, t.routeCur[sl]);
       h = fnv1aU32(h, t.routeLen[sl]);
@@ -769,15 +868,31 @@ class _Core implements PathResolver, PathSink, VehicleSink {
       for (var i = 0; i < t.routeLen[sl]; i++) {
         h = fnv1aU32(h, data[off + i]);
       }
-      h = fnv1aU32(h, (t.s[sl] * 1000).round());
-      h = fnv1aU32(h, (t.v[sl] * 1000).round());
-      h = fnv1aU32(h, (t.destS[sl] * 1000).round());
+      h = fnv1aU32(h, t.pass[sl]);
+      h = fnv1aU32(h, t.owner[sl]);
       h = fnv1aU32(h, t.stuckUs[sl]);
       h = fnv1aU32(h, t.waitUs[sl]);
-      h = fnv1aU32(h, t.owner[sl]);
+      // Places to the millimetre and speeds to the millimetre a second
+      // (§17.4), every other real to its thousandth; the speed factor, a
+      // draw, to its millionth.
+      h = _milli(h, t.s[sl]);
+      h = _milli(h, t.v[sl]);
+      h = _milli(h, t.a[sl]);
+      h = _milli(h, t.v0[sl]);
+      h = fnv1aU32(h, (t.f[sl] * 1e6).round());
+      h = _milli(h, t.destS[sl]);
+      h = _milli(h, t.movedM[sl]);
+      h = _milli(h, t.freeFlowS[sl]);
+      h = _milli(h, t.odo[sl]);
+      h = _wide(h, t.edgeEnterUs[sl].toInt());
+      h = _wide(h, t.tripT0Us[sl].toInt());
+      h = _milli(h, planner.originT[sl]);
     }
     h = commutes.digest(h);
     h = buildings.digest(h);
+    h = planner.digest(h);
+    h = arbiter.digest(h);
+    h = queue.digest(h);
     final spawn = planner.rng.toJson();
     for (var i = 0; i < spawn.length; i++) {
       h = fnv1aU32(h, spawn[i]);
@@ -793,10 +908,17 @@ class _Core implements PathResolver, PathSink, VehicleSink {
     h = fnv1aU32(h, stats.deferred);
     h = fnv1aU32(h, stats.noRoute);
     h = fnv1aU32(h, stats.pictures);
+    h = fnv1aU32(h, stats.lanesRepaired);
     h = fnv1aU32(h, (stats.congestionIndex * 1e6).round());
     h = fnv1aU32(h, (stats.tripRatio * 1e6).round());
-    h = fnv1aU32(h, queue.length);
-    h = fnv1aU32(h, planner.waiting);
     return h;
   }
+
+  /// [hash] with [x] folded in to the thousandth.
+  static int _milli(int hash, double x) => fnv1aU32(hash, (x * 1000).round());
+
+  /// [hash] with [x] folded in whole, both halves of it: agent microseconds
+  /// pass 2³² after an hour and a quarter.
+  static int _wide(int hash, int x) =>
+      fnv1aU32(fnv1aU32(hash, x & 0xFFFFFFFF), x ~/ 0x100000000);
 }

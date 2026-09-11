@@ -291,9 +291,15 @@ class AgentPoseTables {
       // sampled on its own polyline, and the lanes here are the capture's,
       // decimetres apart. Blended end to end, so the ends meet the lanes
       // exactly and the middle keeps the domain's curve.
+      //
+      // Read off the lanes whether or not a tunnel hides them: a connector
+      // between two lanes underground — a junction or a turning place sunk
+      // with its roads — takes their lifts, and its own pose hides it
+      // there, rather than keep no lift and draw its cars on the ground
+      // above the tunnel.
       final from = g.conFromLane[c], to = g.conToLane[c];
-      final hasEnd = _lanePose(from, g.laneLen[from], 0, end, null, -1);
-      final hasStart = _lanePose(to, 0, 0, start, null, -1);
+      final hasEnd = _lanePose(from, g.laneLen[from], 0, end, null, -1, false);
+      final hasStart = _lanePose(to, 0, 0, start, null, -1, false);
       final o0 = 3 * base, o1 = 3 * (base + _k - 1);
       // (On the drape: the lift is the pose's, added along the same
       // direction on either side of the join.)
@@ -445,14 +451,16 @@ class AgentPoseTables {
       [Int32List? hints, int row = -1]) {
     if (elem < 0) return false;
     final nL = geometry.laneCount;
-    if (elem < nL) return _lanePose(elem, s, lat, out, hints, row);
+    if (elem < nL) return _lanePose(elem, s, lat, out, hints, row, true);
     final c = elem - nL;
     if (c >= geometry.connectorCount) return false;
     return _connectorPose(c, s, lat, out);
   }
 
-  bool _lanePose(
-      int l, double s, double lat, AgentPose out, Int32List? hints, int row) {
+  /// [hideTunnel] false poses a lane under the ground too: the tables read
+  /// a connector's ends, and their lifts, off lanes a tunnel hides.
+  bool _lanePose(int l, double s, double lat, AgentPose out, Int32List? hints,
+      int row, bool hideTunnel) {
     final g = geometry;
     final e = g.laneEdge[l];
     final a = g.edgePtStart[e], b = g.edgePtStart[e + 1];
@@ -487,7 +495,7 @@ class AgentPoseTables {
     final uc = u < 0 ? 0.0 : (u > 1 ? 1.0 : u);
     final roadLift = g.lift[k] + (g.lift[k + 1] - g.lift[k]) * uc;
     // In a tunnel the road is under the ground, and so is the car.
-    if (roadLift < -RoadElevation.tunnelCoverM) return false;
+    if (hideTunnel && roadLift < -RoadElevation.tunnelCoverM) return false;
     final room = g.room[k] + (g.room[k + 1] - g.room[k]) * uc;
     var off = g.laneOff[l] * g.edgeOffScale[e];
     // Where a taper narrows the road, a lane outside the narrowed edge

@@ -9,12 +9,18 @@ import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_graph.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_junction.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/agent_kind.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/junction_arbiter.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/lane_graph_builder.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/node_control.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/slot_pool.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/traffic_time.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/vehicle_table.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/road_mesher.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'movement_fixture.dart';
+import 'routing_fixture.dart';
 import 'traffic_fixture.dart';
 
 /// Node control (docs/plans/agent-traffic.md §3.2, §3.7): the network's own
@@ -221,5 +227,127 @@ void main() {
       expect(ctl.edgeYields[e], ramp ? 1 : 0);
       expect(ctl.edgeStops[e], 0);
     }
+  });
+
+  group('legs outside the plan (D48, §5.4)', () {
+    /// Two streets — or an avenue across a street — crossing at the origin,
+    /// and an alley running off the crossing to the south-west: a fifth leg
+    /// the tiles never draw a junction of.
+    CityLayout withAlley({RoadClass across = RoadClass.street}) => CityLayout()
+      ..commitRoad(
+          controls: const [Vec2(0, -200), Vec2(0, 200)], regenerateLots: false)
+      ..commitRoad(
+          controls: const [Vec2(-200, 0), Vec2(200, 0)],
+          roadClass: across,
+          regenerateLots: false)
+      ..addRoad(const RoadSpline(
+          id: 'alley',
+          controls: [Vec2(0, 0), Vec2(-120, -160)],
+          roadClass: RoadClass.alley));
+
+    int alleyLeg(RoadNode node) => [
+          for (var k = 0; k < node.legs.length; k++)
+            if (node.legs[k].roadClass == RoadClass.alley) k,
+        ].single;
+
+    /// A car planned from 1 m short of the end of [from]'s lanes on to
+    /// [to], standing there: its slot and the connector ahead of it.
+    (int, int) atLine(Drive d, int from, int to) {
+      final lg = d.lg;
+      final h =
+          d.trip(from, lg.edgeLaneS1[from] - 1.0, to, lg.edgeLaneS0[to] + 30);
+      expect(h, isNot(SlotPool.none));
+      final sl = d.slot(h);
+      d.table.v[sl] = 0;
+      return (sl, d.table.connectorOfRouteEdge(sl, 1));
+    }
+
+    test('a four-way street stop with an alley as a fifth leg stays an '
+        'all-way stop over its drawn legs: the streets take turns by '
+        'arrival, and the alley halts and takes a gap', () {
+      final layout = withAlley();
+      final at = RoadGraph.of(layout).nodeNear(const Vec2(0, 0))!;
+      expect(at.legs, hasLength(5));
+      // The plan as the graph reads it over its drawn legs (dev c672eb3):
+      // the four streets stop, and the alley is in no stop list.
+      final streets = [
+        for (final l in at.legs)
+          if (l.roadClass == RoadClass.street) l.heading,
+      ];
+      final lg = lanesOf(layout,
+          overrides: [JunctionOverride(at: at.at, stopHeadings: streets)]);
+      final n = lg.graph.nodeNear(const Vec2(0, 0))!;
+      final alley = alleyLeg(n);
+      expect(n.plan.stopLegs, isNot(contains(alley)));
+      expect(lg.kindOf(n.id), NodeControlKind.allWayStop);
+      final ctl = lg.controls;
+      var seen = 0;
+      for (var i = lg.inStart[n.id]; i < lg.inStart[n.id + 1]; i++) {
+        final e = lg.inEdges[i];
+        final outside = lg.graph.edgeLeg[e] == alley;
+        expect(ctl.edgeStops[e], 1, reason: 'every leg halts at its line');
+        expect(ctl.edgeOutside[e], outside ? 1 : 0);
+        expect(ctl.edgePhase[e], -1);
+        seen++;
+      }
+      expect(seen, 5);
+
+      final d = Drive(lg);
+      final north = edgeNear(lg, const Vec2(0, 100), const Vec2(0, 1));
+      final (sa, ca) = atLine(
+          d, edgeNear(lg, const Vec2(-60, -80), const Vec2(0.6, 0.8)), north);
+      d.table.v[sa] = 6;
+      expect(d.arbiter.decide(sa, ca, 12, 0, commit: false), isFalse,
+          reason: 'still rolling: it comes to rest at its line first');
+      d.table.v[sa] = 0;
+      expect(d.arbiter.decide(sa, ca, 1, 0, commit: false), isTrue);
+      expect(GrantReason.values[d.table.grant[sa]], GrantReason.gap);
+      expect(d.table.flags[sa] & kInFifo, 0,
+          reason: 'no place in the arrival queue');
+
+      final (ss, cs) = atLine(
+          d,
+          edgeNear(lg, const Vec2(-100, 0), const Vec2(1, 0)),
+          edgeNear(lg, const Vec2(100, 0), const Vec2(1, 0)));
+      expect(d.arbiter.decide(ss, cs, 1, 0, commit: false), isTrue);
+      expect(GrantReason.values[d.table.grant[ss]], GrantReason.allWayTurn);
+      expect(d.table.flags[ss] & kInFifo, isNot(0));
+    });
+
+    test('at lights an alley waits on no phase and shapes none: halted at '
+        'its line it takes a gap whatever the lights show, and rolling it '
+        'never goes', () {
+      final lg = lanesOf(withAlley(across: RoadClass.avenue));
+      final n = lg.graph.nodeNear(const Vec2(0, 0))!;
+      expect(lg.kindOf(n.id), NodeControlKind.signals);
+      final plan = lg.controls.planOf(n.id)!;
+      final alley = alleyLeg(n);
+      expect(plan.legPhase[alley], -1);
+      expect(plan.phaseCount, 2, reason: 'the two axes of the drawn legs');
+      final ctl = lg.controls;
+      for (var i = lg.inStart[n.id]; i < lg.inStart[n.id + 1]; i++) {
+        final e = lg.inEdges[i];
+        final outside = lg.graph.edgeLeg[e] == alley;
+        expect(ctl.edgeOutside[e], outside ? 1 : 0);
+        expect(ctl.edgeStops[e], outside ? 1 : 0);
+        expect(ctl.edgePhase[e] >= 0, !outside);
+      }
+
+      final d = Drive(lg);
+      final (sl, c) = atLine(
+          d,
+          edgeNear(lg, const Vec2(-60, -80), const Vec2(0.6, 0.8)),
+          edgeNear(lg, const Vec2(0, 100), const Vec2(0, 1)));
+      for (var us = 0; us < plan.cycleUs; us += kUsPerSecond) {
+        d.arbiter.release(sl);
+        d.table.v[sl] = 6;
+        expect(d.arbiter.decide(sl, c, 12, us, commit: false), isFalse,
+            reason: 'rolling, at ${us / kUsPerSecond} s');
+        d.table.v[sl] = 0;
+        expect(d.arbiter.decide(sl, c, 1, us, commit: false), isTrue,
+            reason: 'at rest, at ${us / kUsPerSecond} s');
+        expect(GrantReason.values[d.table.grant[sl]], GrantReason.gap);
+      }
+    });
   });
 }

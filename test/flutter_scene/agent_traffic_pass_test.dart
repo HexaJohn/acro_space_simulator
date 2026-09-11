@@ -340,6 +340,64 @@ void main() {
       expect(pass.hidden, 1);
     });
 
+    test('a turning place in a tunnel hides its cars too: a connector '
+        'joining two lanes underground is never drawn on the ground above '
+        'them', () {
+      final g = f.geometry;
+      final nL = g.laneCount;
+      final p = AgentPose();
+      bool inTunnel(int lane) =>
+          lg.graph.roads[lg.edgeRoad[g.laneEdge[lane]]].id == 'tunnel';
+      final under = [
+        for (var c = 0; c < g.connectorCount; c++)
+          if (inTunnel(g.conFromLane[c]) && inTunnel(g.conToLane[c])) c,
+      ];
+      expect(under, isNotEmpty, reason: 'the tunnel\'s ends turn cars round');
+      for (final c in under) {
+        final len = g.conLen[c].toDouble();
+        for (final s in [0.0, len / 2, len]) {
+          expect(t.poseAt(nL + c, s, 0, p), isFalse,
+              reason: 'connector $c at $s m');
+        }
+      }
+      final c = under.first;
+      final pass = AgentTrafficPass();
+      final placed = pass.place(
+          CityTrafficFrame(
+              colonyId: city.id,
+              bodyId: 'earth',
+              agents: frameOf([parked(nL + c, g.conLen[c] / 2)], g.graphRev),
+              geometry: g,
+              net: f.net),
+          anchor,
+          anchor,
+          wallNowS: 0);
+      expect(placed, 0);
+      expect(pass.hidden, 1);
+    });
+
+    test('a road laid shows every car at once: a frame is published on the '
+        'new graph before any sub-step runs, and most host ticks run none', () {
+      final town0 = live(town());
+      town0.agents.advance(60);
+      final r0 = captured(town0).geometry;
+      final r = math.sqrt(r0.pts[0] * r0.pts[0] +
+          r0.pts[1] * r0.pts[1] +
+          r0.pts[2] * r0.pts[2]);
+      final at = town0.localToBodyFixed(const Vec2(0, 0), bodyRadiusM: r);
+      final pass = AgentTrafficPass();
+      expect(pass.place(captured(town0), at, at, wallNowS: 0), greaterThan(0));
+
+      final rev = town0.agents.graphRev;
+      commit(town0, const FixtureRoad([Vec2(-300, 150), Vec2(300, 150)]));
+      // One world tick at 1×: 0.02 s, a tenth of a sub-step.
+      town0.agents.advance(0.02);
+      final after = captured(town0);
+      expect(after.geometry.graphRev, rev + 1);
+      expect(after.agents.graphRev, rev + 1);
+      expect(pass.place(after, at, at, wallNowS: 0.02), greaterThan(0));
+    });
+
     test('a vehicle rolls on into its next element, never past a stop', () {
       final g = f.geometry;
       final pass = AgentTrafficPass();

@@ -1945,11 +1945,13 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     if (steps >= 25) _accum = 0;
     // An agent colony holds its ticks, and they replay here a few agent
     // sub-steps a frame, so a catch-up frame stays bounded
-    // (docs/plans/agent-traffic.md §5.7). The frame budget is fed what the
+    // (docs/plans/agent-traffic.md §5.7). Paused, nothing replays either:
+    // what was held waits with the world. The frame budget is fed what the
     // loop cost while one ticks; the agents' render clock, the warp.
     var agentColony = false;
+    final paused = _clock.warpFactor <= 0;
     for (final c in _cities.all()) {
-      c.agents.endFrame();
+      if (!paused) c.agents.endFrame();
       if (c.agents.enabled) agentColony = true;
     }
     SceneSync.tickCostMs =
@@ -2207,10 +2209,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     // more, since no later host replays it.
     final agents = widget.injectedCity?.agents;
     if (agents != null) {
-      while (agents.heldTicks > 0) {
-        agents.endFrame();
-      }
-      agents.frameBudgeted = false;
+      agents
+        ..flushHeld()
+        ..frameBudgeted = false
+        ..replayTick = null;
     }
     SceneSync.tickCostMs = 0;
     SceneSync.simWarp = 1;
@@ -2638,6 +2640,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
 
   /// Serialize the whole world into the in-memory save slot.
   void _save() {
+    // Every colony's held ticks first (docs/plans/agent-traffic.md §5.7):
+    // the save is each colony as of the clock it records, and a load
+    // replays nothing it did not save.
+    for (final c in _cities.all()) {
+      c.agents.flushHeld();
+    }
     _savedGame = jsonEncode(_codec.encode(
         vessels: _vessels,
         colonies: _colonies,

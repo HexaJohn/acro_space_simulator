@@ -288,6 +288,12 @@ class RouteRemapper {
   /// The stop on the new route's last edge, travel metres.
   double stopS = 0;
 
+  /// Where the vehicle was placed on the new network: the travel arc along
+  /// [lane]'s edge, not clamped to the lane as [laneS] is. A route still
+  /// waiting to pull out keeps its origin here (`TripPlanner.remapWaiting`),
+  /// as a fresh plan from its access point would have it.
+  double get placeT => _placeT;
+
   /// Whether a connector the old route relied on was gone, and lanes were
   /// re-chosen over its span.
   bool lanesRepaired = false;

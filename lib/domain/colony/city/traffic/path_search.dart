@@ -33,6 +33,7 @@ import 'agent_kind.dart';
 import 'lane_planner.dart';
 import 'lane_state_search.dart';
 import 'route_cost.dart';
+import 'traffic_rng.dart';
 import 'traffic_tuning.dart';
 
 /// The edge A* (§4.3). A state is a directed edge, its cost the cost of
@@ -157,7 +158,7 @@ class SearchContext {
         _g[e] = g0;
         _parent[e] = -1;
         _origin[e] = k;
-        _heap.push(e, g0 + _h(cost, lg.edgeTo[e]), g0);
+        _heap.push(e, g0 + _h(cost, e), g0);
       }
     }
     _status = SearchStatus.running;
@@ -168,9 +169,10 @@ class SearchContext {
   ///
   /// Done means no open state can beat the best route found: the heuristic
   /// never overestimates, so the cheapest open state bounds every route not
-  /// yet seen. A state met again more cheaply is opened again — node
-  /// positions are the mean of their road ends, so the heuristic is
-  /// admissible but not always consistent.
+  /// yet seen. A state met again more cheaply is opened again. On the price
+  /// list alone the heuristic is consistent (`RouteCost.heuristic`) and that
+  /// never happens; allowing it costs nothing, and keeps the search exact
+  /// should a measured delay ever price an edge below its chord.
   SearchStatus step(int budget) {
     lastStepExpansions = 0;
     if (_status != SearchStatus.running) return _status;
@@ -219,7 +221,7 @@ class SearchContext {
         _stamp[o] = _gen;
         _g[o] = gn;
         _parent[o] = e;
-        _heap.push(o, gn + _h(cost, lg.edgeTo[o]), gn);
+        _heap.push(o, gn + _h(cost, o), gn);
       }
     }
   }
@@ -252,8 +254,9 @@ class SearchContext {
     _bestOrigin = _origin[root];
   }
 
-  double _h(RouteCost cost, int node) =>
-      _useH ? cost.heuristic(node, _goalPt, _ends.goalCount) : 0.0;
+  /// The heuristic of a state: from the end of its [edge].
+  double _h(RouteCost cost, int edge) =>
+      _useH ? cost.heuristic(edge, _goalPt, _ends.goalCount) : 0.0;
 
   static double _clampT(RouteCost cost, int edge, double t) {
     final len = cost.lg.edgeLen[edge];
@@ -497,6 +500,33 @@ class PathQueue {
   }
 
   bool get idle => length == 0 && searching == 0;
+
+  /// [hash] with every request folded in — each queued one, per priority
+  /// in queue order, and each being searched, with how far its search has
+  /// got — for `CityAgents.digest`. Two queues that agree on it will serve
+  /// the same requests in the same order.
+  int digest(int hash) {
+    var h = hash;
+    for (var p = 0; p < _rings.length; p++) {
+      h = _rings[p].digest(h);
+    }
+    for (var i = 0; i < _slots.length; i++) {
+      final s = _slots[i];
+      if (!s.busy) {
+        h = fnv1aU32(h, 0);
+        continue;
+      }
+      final r = s.request;
+      h = fnv1aU32(h, 1 | (s.restart ? 2 : 0) | (s.byState ? 4 : 0));
+      h = fnv1aU32(h, r.requester);
+      h = fnv1aU32(h, r.priority.index | r.kind << 8 | r.tag << 16);
+      h = fnv1aU32(h, r.origin);
+      h = fnv1aU32(h, r.dest);
+      h = fnv1aU32(h, r.seq.toInt());
+      h = fnv1aU32(h, s.byState ? s.state!.expansions : s.edge!.expansions);
+    }
+    return fnv1aU32(h, fallbacks);
+  }
 
   /// Withdraws every request of [requester], queued or searching; none of
   /// them is delivered. Returns how many there were.
@@ -764,6 +794,21 @@ class _Ring {
       }
     }
     return n;
+  }
+
+  /// [hash] with every live request folded in, in queue order.
+  int digest(int hash) {
+    var h = fnv1aU32(hash, live);
+    for (var k = 0; k < size; k++) {
+      final i = (head + k) % capacity;
+      if (flags[i] & cancelled != 0) continue;
+      h = fnv1aU32(h, requester[i]);
+      h = fnv1aU32(h, kind[i] | flags[i] << 8 | tag[i] << 16);
+      h = fnv1aU32(h, origin[i]);
+      h = fnv1aU32(h, dest[i]);
+      h = fnv1aU32(h, seq[i].toInt());
+    }
+    return h;
   }
 
   void _grow() {

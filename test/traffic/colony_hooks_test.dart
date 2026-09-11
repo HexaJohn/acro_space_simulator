@@ -10,10 +10,14 @@ import 'package:acro_space_simulator/adapters/repositories/in_memory_repositorie
 import 'package:acro_space_simulator/adapters/repositories/in_memory_world_repositories.dart';
 import 'package:acro_space_simulator/application/ports/compute_port.dart';
 import 'package:acro_space_simulator/application/usecases/advance_simulation_tick.dart';
+import 'package:acro_space_simulator/domain/colony/city/commodity.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/traffic_tuning.dart';
+import 'package:acro_space_simulator/domain/dynamics/state_vector.dart';
 import 'package:acro_space_simulator/domain/orbits/soi_transition_service.dart';
+import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/domain/simulation/simulation_clock.dart';
+import 'package:acro_space_simulator/domain/vessel/resource_container.dart';
 import 'package:acro_space_simulator/infrastructure/sample_world.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -165,5 +169,75 @@ void main() {
     expect(held.staffing, inline.staffing);
     expect(held.housing, inline.housing);
     expect(held.jobs, inline.jobs);
+  });
+
+  test('held on the world tick, the colony keeps its place among what the '
+      'world writes into it: a shuttle on its pad unloads as it does inline, '
+      'at any frame rate (E3b, §5.7)', () {
+    AgentTuning.commuteRatePerResident = 0.004;
+    final system = SampleWorld.realSystem();
+
+    /// Two minutes of colony time on the world's clock at 25×, a loaded
+    /// craft standing on the colony's pad and the store all but full, so
+    /// what the craft hands over each tick is what the colony has eaten
+    /// since. [fps] null: the colony ticks inline; else it is held, and
+    /// replayed at the ends of frames that many a second.
+    ({Map<String, double> stock, double aboard, int digest}) run(
+        {double? fps}) {
+      final city = town(agentTraffic: true)
+        // No supply run of its own: its dispatch reads the world's epoch.
+        ..nextShuttleEpoch = double.infinity;
+      final body = system.body(city.body.id)!;
+      final clock = SimulationClock(warpFactor: 25, fixedStep: 0.02);
+      final padBF = city.localToBodyFixed(city.landingPads().first.$1.centroid,
+          bodyRadiusM: body.radius);
+      final food = ResourceContainer(
+          type: ResourceType.food, capacity: 1e6, amount: 1e6, unitMass: 1);
+      final craft = SampleWorld.buildVessel(altitude: 0)
+        ..landed = true
+        ..updateState(StateVector(
+            position: body.orientationAt(clock.epoch).rotate(padBF),
+            velocity: Vector3.zero));
+      craft.allParts.first.resources.add(food);
+      city.stock[Commodity.food] = city.stockCap - 1;
+      final tick = AdvanceSimulationTick(
+        vessels: InMemoryVesselRepository([craft]),
+        universe: StaticUniverseRepository(system),
+        compute: DartCompute(),
+        soi: const SoiTransitionService(),
+        events: InMemoryEventBus(),
+        colonies: InMemoryColonyRepository(),
+        deposits: InMemoryDepositRepository(),
+        weather: const NullWeatherRepository(),
+        cities: InMemoryCityRepository([city]),
+      );
+      city.agents.frameBudgeted = fps != null;
+      var frames = 0.0;
+      for (var i = 0; i < 240; i++) {
+        tick.execute(clock);
+        if (fps == null) continue;
+        frames += fps / 50;
+        while (frames >= 1) {
+          city.agents.endFrame();
+          frames -= 1;
+        }
+      }
+      city.agents.flushHeld();
+      return (
+        stock: Map.of(city.stock),
+        aboard: food.amount,
+        digest: city.agents.digest(),
+      );
+    }
+
+    final inline = run();
+    expect(inline.aboard, lessThan(1e6), reason: 'the craft unloaded');
+    expect(run().aboard, inline.aboard, reason: 'the inline run repeats');
+    for (final fps in [60.0, 40.0]) {
+      final held = run(fps: fps);
+      expect(held.aboard, inline.aboard, reason: 'food handed over, $fps fps');
+      expect(held.stock, inline.stock, reason: 'the stores, $fps fps');
+      expect(held.digest, inline.digest, reason: 'the agents, $fps fps');
+    }
   });
 }

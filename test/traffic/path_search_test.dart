@@ -186,26 +186,113 @@ void main() {
           final tg = rng.nextUnit() * lg.edgeLen[g];
           ends
             ..clear()
-            ..addOrigin(o, 0)
+            ..addOrigin(o, lg.edgeLen[o])
             ..addGoal(g, tg);
           search.begin(cost, ends, heuristic: false);
           if (search.step(1 << 30) != SearchStatus.found) continue;
-          // From the start of edge o, the route costs search.cost: the
-          // heuristic at o's start node may not claim more.
+          // From the very end of edge o, the route costs search.cost: the
+          // heuristic of edge o may not claim more.
           cost.pointAt(g, tg, goal);
-          final h = cost.heuristic(lg.edgeFrom[o], goal, 1);
+          final h = cost.heuristic(o, goal, 1);
           expect(h, lessThanOrEqualTo(search.cost + 1e-9),
               reason: 'from edge $o to $g');
           checked++;
         }
       }
       expect(checked, greaterThan(150));
-      // An attach node lies metres off the ramp end it joins: the slack is
-      // what keeps the heuristic below the truth there.
+      // An attach node lies metres off the ramp end it joins: the gap a
+      // route jumps there is paid, at the cheapest rate at least, which is
+      // what keeps the heuristic below the truth beyond it.
       final lg = lanesOf(_interchange());
       final cost = RouteCost(lg);
       final ramp = edgeOf(lg, 'on');
-      expect(cost.nodeSlack[lg.edgeTo[ramp]], greaterThan(5));
+      var jumps = 0;
+      for (var i = lg.moveStart[ramp]; i < lg.moveStart[ramp + 1]; i++) {
+        final gap = _gapM(lg, ramp, lg.moveOut[i]);
+        expect(cost.moveCost[i],
+            greaterThanOrEqualTo(gap * cost.hPerM - 1e-12));
+        if (gap > 5) jumps++;
+      }
+      expect(jumps, greaterThan(0));
+    });
+
+    test('A* stays exact where road ends meet metres apart: the gap a '
+        'continuation jumps is paid, so the heuristic beyond it never '
+        'overestimates, and the cheapest route is the one returned', () {
+      // From P, two ways to Q. The first runs off to a corner C and back
+      // along the axis, a2 then a3, whose ends lie 7.9 m apart — one node,
+      // a continuation, no penalty. The second, b, runs straight. Were the
+      // 7.9 m across that node free, the first would be the cheaper by a
+      // tenth of a second while the straight line from C to the goal, the
+      // heuristic's, ran longer than the road: A* stopped on b. Paid, the
+      // gap makes b the cheaper, and A* agrees with Dijkstra either way.
+      final layout = CityLayout()
+        ..addRoad(const RoadSpline(
+            id: 'in', controls: [Vec2(-200, 60), Vec2(0, 60)]))
+        ..addRoad(const RoadSpline(
+            id: 'a1', controls: [Vec2(0, 60), Vec2(200, 0)]))
+        ..addRoad(const RoadSpline(
+            id: 'a2', controls: [Vec2(200, 0), Vec2(600, 0)]))
+        ..addRoad(const RoadSpline(
+            id: 'a3', controls: [Vec2(607.9, 0), Vec2(900, 0)]))
+        ..addRoad(const RoadSpline(
+            id: 'b', controls: [Vec2(0, 60), Vec2(900, 0)]))
+        ..addRoad(const RoadSpline(
+            id: 'z', controls: [Vec2(900, 0), Vec2(1100, 0)]))
+        ..addRoad(const RoadSpline(
+            id: 'n', controls: [Vec2(900, 0), Vec2(900, 200)]));
+      // Only the north leg stops at Q: both ways arrive with priority.
+      final lg = lanesOf(layout, overrides: const [
+        JunctionOverride(at: Vec2(900, 0), stopHeadings: [0]),
+      ]);
+      final cost = RouteCost(lg);
+      final a2 = edgeOf(lg, 'a2'), a3 = edgeOf(lg, 'a3');
+      expect(lg.edgeTo[a2], lg.edgeFrom[a3],
+          reason: 'the ends cluster into one node');
+      expect(lg.kindOf(lg.edgeTo[a2]), NodeControlKind.continuation);
+      expect(_gapM(lg, a2, a3), closeTo(7.9, 0.01));
+      var i = lg.moveStart[a2];
+      while (lg.moveOut[i] != a3) {
+        i++;
+      }
+      expect(cost.moveCost[i], closeTo(7.9 * cost.hPerM, 1e-3),
+          reason: 'the gap, paid at the cheapest rate');
+
+      final from = edgeOf(lg, 'in'), to = edgeOf(lg, 'z');
+      final ends = PathEnds()
+        ..addOrigin(from, 100)
+        ..addGoal(to, 100);
+      final aStar = SearchContext()
+        ..begin(cost, ends)
+        ..step(1 << 30);
+      final dijkstra = SearchContext()
+        ..begin(cost, ends, heuristic: false)
+        ..step(1 << 30);
+      expect(aStar.status, SearchStatus.found);
+      expect(aStar.cost, closeTo(dijkstra.cost, 1e-9));
+      expect(aStar.path.sublist(0, aStar.pathLength),
+          dijkstra.path.sublist(0, dijkstra.pathLength));
+      expect(aStar.cost,
+          closeTo(_referenceCost(lg, from, 100, to, 100), 1e-9));
+
+      // Every edge's heuristic is below what the rest of the trip costs
+      // from its end.
+      final goal = Float64List(2);
+      cost.pointAt(to, 100, goal);
+      for (var e = 0; e < lg.edgeCount; e++) {
+        final rest = SearchContext()
+          ..begin(
+              cost,
+              PathEnds()
+                ..addOrigin(e, lg.edgeLen[e])
+                ..addGoal(to, 100),
+              heuristic: false)
+          ..step(1 << 30);
+        if (rest.status != SearchStatus.found) continue;
+        expect(cost.heuristic(e, goal, 1),
+            lessThanOrEqualTo(rest.cost + 1e-9),
+            reason: 'edge $e');
+      }
     });
 
     test('a metre of each road costs §4.1\'s seconds: a 1,000 m street '
@@ -674,9 +761,36 @@ CityLayout _interchange() => CityLayout()
 
 double _perM(LaneGraph lg, int e) => lg.edgeWType[e] / lg.edgeLimit[e];
 
+/// The least any metre of [lg] costs: the heuristic's rate.
+double _hPerM(LaneGraph lg) {
+  var best = double.infinity;
+  for (var e = 0; e < lg.edgeCount; e++) {
+    final limit = lg.edgeLimit[e];
+    final p = limit > 0 ? lg.edgeWType[e] / limit : 0.0;
+    if (p < best) best = p;
+  }
+  return best.isInfinite ? 0 : best;
+}
+
+/// Metres between the end of edge [e] and the start of edge [o]: the gap a
+/// route jumps across the node between them.
+double _gapM(LaneGraph lg, int e, int o) {
+  final p = Float64List(4);
+  RouteCost.pointOn(lg, e, lg.edgeLen[e], p, 0);
+  RouteCost.pointOn(lg, o, 0, p, 2);
+  final de = p[2] - p[0], dn = p[3] - p[1];
+  return math.sqrt(de * de + dn * dn);
+}
+
 /// §4.1's J and T for movement [i] out of edge [e], from the design's
-/// tables, written out again.
-double _movePenalty(LaneGraph lg, int e, int i) {
+/// tables, written out again — and never less than the straight-line time,
+/// at the cheapest rate, of the gap the route jumps across the node
+/// (route_cost.dart).
+double _movePenalty(LaneGraph lg, int e, int i) =>
+    math.max(_tablePenalty(lg, e, i), _gapM(lg, e, lg.moveOut[i]) * _hPerM(lg));
+
+/// §4.1's J and T alone.
+double _tablePenalty(LaneGraph lg, int e, int i) {
   final kind = lg.kindOf(lg.edgeTo[e]);
   final stops = lg.controls.edgeStops[e] == 1;
   final yields = lg.controls.edgeYields[e] == 1;

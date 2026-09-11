@@ -57,9 +57,16 @@ NodeControlKind controlKindOf(RoadNode node, {bool stub = false}) {
       }
       return NodeControlKind.continuation;
     case JunctionControl.stop:
+      // An all-way stop when every inbound leg the plan was read over
+      // stops. A leg outside the plan — an alley, a path — is in
+      // `stopLegs` or not as the warrant happened to read it, and never
+      // decides the control: it halts at its line whatever it is (D48).
       for (var i = 0; i < legs.length; i++) {
         final l = legs[i];
-        if (l.inbound && l.roadClass.carriesCars && !plan.stopLegs.contains(i)) {
+        if (l.inbound &&
+            l.roadClass.carriesCars &&
+            legInPlan(node, i) &&
+            !plan.stopLegs.contains(i)) {
           return NodeControlKind.stop;
         }
       }
@@ -69,6 +76,20 @@ NodeControlKind controlKindOf(RoadNode node, {bool stub = false}) {
     case JunctionControl.roundabout:
       return NodeControlKind.roundabout;
   }
+}
+
+/// Whether leg [k] of [node] is one its plan was read over (§3.7, D48): a
+/// leg the tiles draw a junction of (`RoadClass.joinsJunctions`). An alley,
+/// a path or a road in the air is not — it gives way to every leg that is —
+/// unless none of the node's legs is drawn, and the plan was read over them
+/// all.
+bool legInPlan(RoadNode node, int k) {
+  final legs = node.legs;
+  if (legs[k].roadClass.joinsJunctions) return true;
+  for (final l in legs) {
+    if (l.roadClass.joinsJunctions) return false;
+  }
+  return true;
 }
 
 /// A junction proper: three legs or more under a control a driver obeys.
@@ -179,12 +200,16 @@ class SignalPlan {
   int get cycleUs => phaseCount * phaseUs;
 
   /// The plan of [node], whose control is signals.
+  ///
+  /// Only the legs the plan was read over get a phase, and only they shape
+  /// the grouping: an alley meeting the crossing has no head drawn for it
+  /// and waits on no light — it halts at its line and takes a gap (D48).
   factory SignalPlan.of(RoadNode node) {
     final legs = node.legs;
     final order = headingOrder(node);
     final inbound = <int>[
       for (final k in order)
-        if (legs[k].inbound) k,
+        if (legs[k].inbound && legInPlan(node, k)) k,
     ];
     final phase = Int8List(legs.length)..fillRange(0, legs.length, -1);
     var count = 1;
@@ -280,6 +305,7 @@ class NodeControls {
     required this.edgeStops,
     required this.edgeYields,
     required this.edgePhase,
+    required this.edgeOutside,
   });
 
   /// [NodeControlKind.index] per node.
@@ -296,8 +322,9 @@ class NodeControls {
 
   /// Node n's legs in heading order are
   /// `legOrder[legStart[n] .. legStart[n + 1] − 1]`, each with a stop flag
-  /// in [legStops] (1: the leg stops — a stop plan's stop leg, or every
-  /// inbound leg of an all-way stop).
+  /// in [legStops] (1: a vehicle arriving along it halts at its line — a
+  /// stop plan's stop leg, every inbound leg of an all-way stop, and every
+  /// inbound leg outside a real junction's plan).
   final Int32List legStart, legOrder;
   final Uint8List legStops;
 
@@ -312,6 +339,12 @@ class NodeControls {
 
   /// The signal phase the edge's arriving leg waits on, or −1.
   final Int8List edgePhase;
+
+  /// 1 when the edge arrives at a real junction by a leg outside its plan
+  /// ([legInPlan], D48): an alley, a path. Under every control it halts at
+  /// its line, waits on no light, joins no all-way queue, and then takes a
+  /// gap from every leg that is in the plan (§5.4).
+  final Uint8List edgeOutside;
 
   NodeControlKind kindOf(int node) => NodeControlKind.values[kind[node]];
 
@@ -337,8 +370,9 @@ class NodeControls {
     }
     final legOrder = Int32List(nLegs);
     final legStops = Uint8List(nLegs);
-    // The highest rank arriving at each uncontrolled node, where rank is who
-    // gives way to whom.
+    // The highest rank arriving at each uncontrolled node by a leg in its
+    // plan, where rank is who gives way to whom. A leg outside the plan
+    // gives way to all of them whatever its rank, so it sets nobody's.
     final topRank = Int32List(nN)..fillRange(0, nN, -1);
     var at = 0;
     for (var n = 0; n < nN; n++) {
@@ -356,11 +390,9 @@ class NodeControls {
       for (final leg in headingOrder(node)) {
         legOrder[at] = leg;
         final l = legs[leg];
-        final stops = l.inbound &&
-            (k == NodeControlKind.allWayStop ||
-                (k == NodeControlKind.stop && node.plan.stopLegs.contains(leg)));
-        legStops[at] = stops ? 1 : 0;
-        if (l.inbound && l.roadClass.tier.rank > topRank[n]) {
+        final inPlan = legInPlan(node, leg);
+        legStops[at] = l.inbound && _halts(k, node, leg, inPlan) ? 1 : 0;
+        if (l.inbound && inPlan && l.roadClass.tier.rank > topRank[n]) {
           topRank[n] = l.roadClass.tier.rank;
         }
         at++;
@@ -371,6 +403,7 @@ class NodeControls {
     final edgeStops = Uint8List(nE);
     final edgeYields = Uint8List(nE);
     final edgePhase = Int8List(nE)..fillRange(0, nE, -1);
+    final edgeOutside = Uint8List(nE);
     for (var e = 0; e < nE; e++) {
       final n = g.edgeTo[e];
       final leg = g.edgeLeg[e];
@@ -378,8 +411,9 @@ class NodeControls {
       final node = g.nodes[n];
       final l = node.legs[leg];
       final k = NodeControlKind.values[kind[n]];
-      final stops = k == NodeControlKind.allWayStop ||
-          (k == NodeControlKind.stop && node.plan.stopLegs.contains(leg));
+      final inPlan = legInPlan(node, leg);
+      edgeOutside[e] = !inPlan && isRealJunction(k) ? 1 : 0;
+      final stops = _halts(k, node, leg, inPlan);
       edgeStops[e] = stops ? 1 : 0;
       final yields = stops ||
           k == NodeControlKind.roundabout ||
@@ -387,6 +421,8 @@ class NodeControls {
           (k == NodeControlKind.uncontrolled &&
               l.roadClass.tier.rank < topRank[n]);
       edgeYields[e] = yields ? 1 : 0;
+      // Only a leg in the plan has a phase (SignalPlan.of): one outside it
+      // keeps −1, and its stop, whatever the light.
       final plan = signalOf[n] < 0 ? null : plans[signalOf[n]];
       if (plan != null) edgePhase[e] = plan.legPhase[leg];
     }
@@ -402,6 +438,17 @@ class NodeControls {
       edgeStops: edgeStops,
       edgeYields: edgeYields,
       edgePhase: edgePhase,
+      edgeOutside: edgeOutside,
     );
   }
+
+  /// Whether a vehicle arriving at [node], of [kind], along its leg [leg]
+  /// ([inPlan] or not) must come to rest at the line: a stop plan's stop
+  /// leg, every leg of an all-way stop — and at any real junction, a leg
+  /// outside the plan, which halts before it takes its gap (§5.4, D48).
+  static bool _halts(
+          NodeControlKind kind, RoadNode node, int leg, bool inPlan) =>
+      kind == NodeControlKind.allWayStop ||
+      (kind == NodeControlKind.stop && node.plan.stopLegs.contains(leg)) ||
+      (!inPlan && isRealJunction(kind));
 }

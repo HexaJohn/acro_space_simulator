@@ -316,10 +316,9 @@ Map<String, Object?> _spawn(CitySim c, int n, String? from, String? to) {
 Map<String, Object?> _step(CitySim c, double cityS) {
   final a = c.agents;
   final held = a.frameBudgeted;
-  while (a.heldTicks > 0) {
-    a.endFrame();
-  }
-  a.frameBudgeted = false;
+  a
+    ..flushHeld()
+    ..frameBudgeted = false;
   final t0 = a.timeUs;
   try {
     for (var i = 0; i < (cityS / 0.5).round(); i++) {

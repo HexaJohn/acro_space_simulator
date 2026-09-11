@@ -44,6 +44,7 @@ import 'lane_graph.dart';
 import 'node_control.dart';
 import 'route_cost.dart';
 import 'slot_pool.dart';
+import 'traffic_rng.dart';
 import 'traffic_time.dart';
 import 'traffic_tuning.dart';
 import 'vehicle_table.dart';
@@ -145,11 +146,8 @@ class JunctionArbiter {
   Int32List _leaver = Int32List(0);
   Float64List _leaverOdo = Float64List(0);
 
-  /// Per edge: the travel direction where its lanes end, and whether its
-  /// road is a leg the junction plan was drawn over (an alley or a path is
-  /// not: it gives way to every leg that is).
+  /// Per edge: the travel direction where its lanes end.
   Float32List _arrE = Float32List(0), _arrN = Float32List(0);
-  Uint8List _drawn = Uint8List(0);
 
   /// All-way stops: per node its queue number or −1, and per queue its
   /// entries (handle, arrival µs, connector wanted), [_fifoCap] each, oldest
@@ -205,15 +203,8 @@ class JunctionArbiter {
       _leaverOdo = Float64List(nC);
       _arrE = Float32List(nE);
       _arrN = Float32List(nE);
-      _drawn = Uint8List(nE);
       final pt = Float64List(4);
-      for (var e = 0; e < nE; e++) {
-        if (e >= lg.roadEdgeCount) {
-          _drawn[e] = 1;
-          continue;
-        }
-        _drawn[e] =
-            lg.graph.roads[lg.edgeRoad[e]].roadClass.joinsJunctions ? 1 : 0;
+      for (var e = 0; e < nE && e < lg.roadEdgeCount; e++) {
         final t1 = lg.edgeLaneS1[e].toDouble();
         final t0 = math.max(0.0, t1 - 3.0);
         RouteCost.pointOn(lg, e, t0, pt, 0);
@@ -338,6 +329,10 @@ class JunctionArbiter {
     final kind = ctl.kind[node];
     final from = lg.laneEdge[lg.conFromLane[c]];
     final road = from < lg.roadEdgeCount;
+    // A leg outside the junction's plan — an alley, a path — waits on no
+    // light (it has no phase) and joins no all-way queue: under every
+    // control it halts at its line and takes a gap (§5.4, D48).
+    final outside = road && ctl.edgeOutside[from] == 1;
     var ok = road && ctl.edgeYields[from] == 1
         ? GrantReason.gap
         : GrantReason.clear;
@@ -366,10 +361,11 @@ class JunctionArbiter {
       }
     }
 
-    // A stop sign: come to rest at the line first. At an all-way stop, that
-    // also takes a place in the arrival queue.
-    final allWay = kind == _allWay;
-    if (allWay || (kind == _stop && road && ctl.edgeStops[from] == 1)) {
+    // A stop sign, or a leg outside the plan: come to rest at the line
+    // first. At an all-way stop a leg in the plan also takes a place in the
+    // arrival queue; one outside it then takes a gap, as a stop leg does.
+    final allWay = kind == _allWay && !outside;
+    if (allWay || (road && ctl.edgeStops[from] == 1)) {
       if (t.flags[slot] & kHalted == 0) {
         if (dist > kAtLineM || v >= kRestMps) return GrantReason.none;
         t.flags[slot] |= kHalted;
@@ -400,7 +396,7 @@ class JunctionArbiter {
       if (!forced) return GrantReason.none;
       waived = true;
     }
-    if (_mustYield(c, kind, from)) {
+    if (_mustYield(c, kind, from, nowUs)) {
       if (!forced) return GrantReason.none;
       waived = true;
     }
@@ -459,16 +455,40 @@ class JunctionArbiter {
         (turn == _sharp && lg.conTheta[c] > 0);
   }
 
-  /// Whether a vehicle about to take [c] must wait for a vehicle
-  /// approaching some crossing connector with priority over it.
-  bool _mustYield(int c, int kind, int from) {
+  /// Whether a vehicle about to take [c] at agent time [nowUs] must wait
+  /// for a vehicle approaching some crossing connector with priority over
+  /// it.
+  bool _mustYield(int c, int kind, int from, int nowUs) {
     final lg = graph;
     for (var i = lg.conConflictStart[c]; i < lg.conConflictStart[c + 1]; i++) {
       final d = lg.conflictWith[i];
       final gap = _yieldGap(c, d, kind, from);
-      if (gap > 0 && _approaching(d, gap)) return true;
+      if (gap <= 0) continue;
+      // Traffic its own red light holds is nobody to give way to: it cannot
+      // come. (Amber can, by the dilemma rule.)
+      if (kind == _signals && _heldByRed(d, nowUs)) continue;
+      if (_approaching(d, gap)) return true;
     }
     return false;
+  }
+
+  /// Whether the leg connector [d] leaves shows red or all-red at [nowUs].
+  bool _heldByRed(int d, int nowUs) {
+    final lg = graph;
+    final e = lg.laneEdge[lg.conFromLane[d]];
+    if (e >= lg.roadEdgeCount) return false;
+    final ctl = lg.controls;
+    final phase = ctl.edgePhase[e];
+    final plan = ctl.planOf(lg.conNode[d]);
+    if (phase < 0 || plan == null) return false;
+    final st = plan.stateAt(phase, nowUs);
+    return st == SignalState.red || st == SignalState.allRed;
+  }
+
+  /// Whether edge [e] arrives at its junction by a leg outside the plan.
+  bool _outside(int e) {
+    final lg = graph;
+    return e < lg.roadEdgeCount && lg.controls.edgeOutside[e] == 1;
   }
 
   /// The gap, seconds, a vehicle taking [c] (arriving along [from]) needs
@@ -480,9 +500,11 @@ class JunctionArbiter {
     final other = lg.laneEdge[lg.conFromLane[d]];
     if (other == from) return 0;
     // A leg outside the junction's plan — an alley, a path — gives way to
-    // every leg the plan was drawn over, whatever the control (§3.7).
-    final drawnC = _drawn[from] == 1, drawnD = _drawn[other] == 1;
-    if (drawnC != drawnD) return drawnC ? 0 : kOpposingGapS;
+    // every leg the plan was read over, whatever the control; among
+    // themselves such legs follow the uncontrolled rules (§5.4, D48).
+    final outC = _outside(from), outD = _outside(other);
+    if (outC != outD) return outC ? kOpposingGapS : 0;
+    if (outC) return _uncontrolledGap(c, d, from, other);
     final road = from < lg.roadEdgeCount && other < lg.roadEdgeCount;
     if (kind == _signals) {
       // The permissive left: it waits for the oncoming green.
@@ -500,13 +522,7 @@ class JunctionArbiter {
       if (!sc && !sd && _isLeft(c) && !_isLeft(d)) return kOpposingGapS;
       return 0;
     }
-    if (kind == _uncontrolled) {
-      final rc = lg.edgeTier[from], rd = lg.edgeTier[other];
-      if (rc != rd) return rc < rd ? kOpposingGapS : 0;
-      if (_fromRight(from, other)) return kOpposingGapS;
-      if (_isLeft(c) && !_isLeft(d)) return kOpposingGapS;
-      return 0;
-    }
+    if (kind == _uncontrolled) return _uncontrolledGap(c, d, from, other);
     if (kind == _rampMerge) {
       return lg.conRole[c] == _mergeYield && lg.conRole[d] != _mergeYield
           ? kMergeGapS
@@ -519,6 +535,19 @@ class JunctionArbiter {
     }
     // All-way stops go by arrival, roundabouts by occupancy, turning places
     // by occupancy: none of them by gap.
+    return 0;
+  }
+
+  /// The uncontrolled rules (§5.4), for a vehicle taking [c] from [from]
+  /// against traffic taking [d] from [other]: a lower rank gives way to a
+  /// higher one; between equals, to traffic from the right; and a left
+  /// takes the opposing gap.
+  double _uncontrolledGap(int c, int d, int from, int other) {
+    final lg = graph;
+    final rc = lg.edgeTier[from], rd = lg.edgeTier[other];
+    if (rc != rd) return rc < rd ? kOpposingGapS : 0;
+    if (_fromRight(from, other)) return kOpposingGapS;
+    if (_isLeft(c) && !_isLeft(d)) return kOpposingGapS;
     return 0;
   }
 
@@ -814,5 +843,38 @@ class JunctionArbiter {
       }
     }
     return n;
+  }
+
+  // ---- Determinism ------------------------------------------------------------
+
+  /// [hash] with everything the rules carry from one sub-step to the next
+  /// folded in — each connector's passes and its last leaver, each all-way
+  /// queue in arrival order, and the counts — for `CityAgents.digest`
+  /// (§17.4). Two runs whose queues or claims came out in another order
+  /// disagree on it, even with every vehicle standing at the same line.
+  int digest(int hash) {
+    var h = fnv1aU32(hash, _claims.length);
+    for (var c = 0; c < _claims.length; c++) {
+      if (_claims[c] == 0 && _leaver[c] < 0) continue;
+      h = fnv1aU32(h, c);
+      h = fnv1aU32(h, _claims[c]);
+      h = fnv1aU32(h, _leaver[c]);
+      h = fnv1aU32(h, (_leaverOdo[c] * 1000).round());
+    }
+    h = fnv1aU32(h, _fifoLen.length);
+    for (var k = 0; k < _fifoLen.length; k++) {
+      final base = k * _fifoCap;
+      h = fnv1aU32(h, _fifoLen[k]);
+      for (var i = 0; i < _fifoLen[k]; i++) {
+        final us = _fifoUs[base + i].toInt();
+        h = fnv1aU32(h, _fifoH[base + i]);
+        h = fnv1aU32(h, _fifoC[base + i]);
+        h = fnv1aU32(h, us & 0xFFFFFFFF);
+        h = fnv1aU32(h, us ~/ 0x100000000);
+      }
+    }
+    h = fnv1aU32(h, commits);
+    h = fnv1aU32(h, revokes);
+    return fnv1aU32(h, forcedGrants);
   }
 }

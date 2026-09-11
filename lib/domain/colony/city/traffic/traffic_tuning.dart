@@ -141,12 +141,15 @@ class AgentTuning {
 
   // ---- Scheduling: when ticks run, never what they compute (§5.7) ---------
 
-  /// Agent sub-steps a frame-budgeted colony runs per UI frame. Further
-  /// ticks queue whole and replay on later frames.
+  /// Agent sub-steps a frame-budgeted colony runs per UI frame, give or
+  /// take a tick: what a frame leaves unspent carries to the next, and a
+  /// backlog adds its share (`CityAgents.endFrame`). Further ticks queue
+  /// whole and replay on later frames.
   static int maxAgentSubStepsPerFrame = 4;
 
-  /// City seconds the frame hold may queue before a frame drains all of it:
-  /// a hitch, never a dropped tick.
+  /// Colony seconds the frame hold may queue: a frame runs whatever is held
+  /// past it — a hitch, never a dropped tick — so a held colony is never
+  /// further behind the world than this.
   static double maxHeldCityS = 10;
 
   /// Restores every default. Tests that turn a knob call it in `tearDown`,

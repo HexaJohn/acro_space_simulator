@@ -5,6 +5,7 @@
 
 import 'dart:math' as math;
 
+import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/city_agents.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/traffic_rng.dart';
@@ -81,11 +82,7 @@ void main() {
     }
     for (final budget in [1, 4, 12]) {
       AgentTuning.maxAgentSubStepsPerFrame = budget;
-      final held = agentsOn(town())..frameBudgeted = true;
-      // What CitySim.advance does with a replayed tick once E3a and E3b are
-      // in: clamp it, and advance the agents with it.
-      held.replayTick = (simDt) =>
-          held.advance((simDt * held.city.eventSimWarp).clamp(0.0, 0.5));
+      final held = _held(town());
       final frames = TrafficRng(budget);
       var i = 0;
       var frameCount = 0;
@@ -100,18 +97,98 @@ void main() {
         held.endFrame();
         frameCount++;
         final steps = (held.timeUs - before) ~/ kStepUs;
-        if (queued <= AgentTuning.maxHeldCityS) {
-          expect(steps, lessThanOrEqualTo(math.max(budget, 3)),
-              reason: 'frame $frameCount ran $steps sub-steps');
-        }
+        expect(steps, lessThanOrEqualTo(_frameCap(budget, queued)),
+            reason: 'frame $frameCount ran $steps sub-steps');
       }
-      while (held.heldTicks > 0) {
-        held.endFrame();
-      }
+      held.flushHeld();
       expect(held.timeUs, inline.timeUs, reason: 'budget $budget');
       expect(held.digest(), inline.digest(), reason: 'budget $budget');
     }
   });
+
+  group('the frame hold keeps pace', () {
+    /// Frames at [fps] against the host's 50 ticks a second, every tick
+    /// 0.5 s — 25× warp — for [wallS] seconds: the colony seconds still
+    /// held after the worst frame and after the last, and the most
+    /// sub-steps any frame ran.
+    ({double worstS, double endS, int maxSteps}) paced(double fps, double wallS,
+        {int hitchAt = -1}) {
+      final a = _held(town());
+      var worst = 0.0;
+      var maxSteps = 0;
+      var owed = 0.0;
+      final frames = (fps * wallS).round();
+      for (var frame = 0; frame < frames; frame++) {
+        owed += 50 / fps;
+        // A hitch: the host catches up 25 ticks at once, its cap.
+        final ticks = frame == hitchAt ? 25 : owed.floor();
+        owed -= owed.floor();
+        for (var k = 0; k < ticks; k++) {
+          if (!a.holdTick(0.5)) a.advance(0.5);
+        }
+        final before = a.timeUs;
+        final queued = a.heldCityS;
+        a.endFrame();
+        final steps = (a.timeUs - before) ~/ kStepUs;
+        expect(steps, lessThanOrEqualTo(_frameCap(4, queued)),
+            reason: 'frame $frame at $fps fps ran $steps sub-steps');
+        if (steps > maxSteps) maxSteps = steps;
+        if (a.heldCityS > worst) worst = a.heldCityS;
+      }
+      return (worstS: worst, endS: a.heldCityS, maxSteps: maxSteps);
+    }
+
+    test('at 40 fps — five ticks of 0.5 s every four frames, two ticks '
+        'dearer together than one frame\'s budget — the colony stays a '
+        'tick or two behind, and never reaches maxHeldCityS', () {
+      final r = paced(40, 20);
+      expect(r.worstS, lessThan(1.5));
+      expect(r.maxSteps, lessThanOrEqualTo(2 * 4 + 1));
+    });
+
+    test('at 60 fps it keeps up inside the budget', () {
+      final r = paced(60, 10);
+      expect(r.worstS, lessThanOrEqualTo(0.5));
+      expect(r.maxSteps, lessThanOrEqualTo(4));
+    });
+
+    test('at 30 fps, more than the budget a frame, it falls a bounded way '
+        'behind and works that off, never spilling', () {
+      final r = paced(30, 20);
+      expect(r.worstS, lessThan(AgentTuning.maxHeldCityS / 2));
+    });
+
+    test('a 25-tick hitch at 60 fps is spread over the frames after it — '
+        'not run in one, and worked off in the frames that follow', () {
+      final r = paced(60, 4, hitchAt: 60);
+      expect(r.worstS, greaterThan(5),
+          reason: 'the hitch was queued, not run at once');
+      expect(r.maxSteps, lessThan(25 * 5 ~/ 2),
+          reason: 'no frame ran the whole hitch');
+      expect(r.endS, lessThanOrEqualTo(0.5), reason: 'and worked off');
+    });
+  });
+}
+
+/// Agents of the test's own on [city] held to a frame budget, replaying a
+/// tick as `CitySim.advance` would once E3a and E3b are in: clamped, and
+/// the agents advanced by it.
+CityAgents _held(CitySim city) {
+  final a = agentsOn(city)..frameBudgeted = true;
+  a.replayTick = (_, simDt) =>
+      a.advance((simDt * a.city.eventSimWarp).clamp(0.0, 0.5));
+  return a;
+}
+
+/// The most sub-steps a frame of the hold may run with [queuedS] colony
+/// seconds held (city_agents.dart, `endFrame`): its budget, at most one more
+/// carried from the frame before, its share of the backlog, whatever is
+/// past `maxHeldCityS` — and one tick (three sub-steps at most) past all
+/// that, since a frame always runs its oldest tick.
+int _frameCap(int budget, double queuedS) {
+  final pendingSteps = queuedS / kStepS + 1;
+  final over = math.max(0.0, (queuedS - AgentTuning.maxHeldCityS) / kStepS);
+  return (2 * budget + pendingSteps / 32 + over).floor() + 3;
 }
 
 /// A tick sequence of about [seconds]: mostly the 0.5 s of the warp clamp,

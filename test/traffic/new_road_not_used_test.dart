@@ -86,7 +86,96 @@ void main() {
     expect(a.stats.despawnStuck + a.stats.despawnWedge, 0);
     expect(a.stats.replans, 0);
   });
+
+  test('trips planned but still waiting to pull out when the shortcut is '
+      'drawn keep the long way they were planned: waiting is no licence to '
+      'plan again', () {
+    final city = _uTown();
+    final a = agentsOn(city);
+    final (origins, dests) = _ends(city);
+    final trips = [
+      for (var i = 0; i < 20; i++) forceTrip(a, origins[i % 4], dests[i % 2]),
+    ];
+    // Inside the spawn ramp's first half second no car pulls out: every
+    // trip is planned, and waits at its origin.
+    a.advance(0.5);
+    expect(a.liveVehicles, 0);
+    expect(a.planner!.waiting, 20);
+
+    final shortcut =
+        commit(city, const FixtureRoad([Vec2(-400, 0), Vec2(400, 0)]));
+    a.advance(0.5);
+    expect(a.graphRev, 2);
+    expect(a.stats.replans, 0, reason: 'no waiting route was made impossible');
+
+    for (var i = 0; i < 240; i++) {
+      if (trips.every((tr) => vehicleOfTrip(a, tr) >= 0)) break;
+      a.advance(0.5);
+    }
+    final cars = [for (final tr in trips) vehicleOfTrip(a, tr)];
+    expect(cars.every((h) => h >= 0), isTrue, reason: 'all 20 pulled out');
+    final lg = a.laneGraph!;
+    final tee = lg.graph.nodeNear(const Vec2(-400, 0))!.id;
+    var through = 0;
+    for (final h in cars) {
+      final words = routeOf(a, h);
+      expect(words.any((w) => w.startsWith(shortcut)), isFalse,
+          reason: 'planned before the road: never onto it ($words)');
+      if (_crosses(a, h, tee)) through++;
+    }
+    expect(through, greaterThan(0),
+        reason: 'straight on through the new junction on W');
+    expect(a.stats.replans, 0);
+  });
+
+  test('a waiting route the edit makes impossible is planned again from its '
+      'origin, and counted', () {
+    final city = _uTown();
+    final a = agentsOn(city);
+    final (origins, dests) = _ends(city);
+    final trips = [
+      for (var i = 0; i < 8; i++) forceTrip(a, origins[i % 4], dests[i % 2]),
+    ];
+    a.advance(0.5);
+    expect(a.liveVehicles, 0);
+    expect(a.planner!.waiting, 8);
+
+    // One edit: the shortcut drawn, and S — which every waiting route
+    // drives — taken up.
+    final shortcut =
+        commit(city, const FixtureRoad([Vec2(-400, 0), Vec2(400, 0)]));
+    final south = city.layout.roads
+        .firstWhere((r) => r.controls.every((p) => (p.n + 300).abs() < 1))
+        .id;
+    city.layout.removeRoad(south, regenerateLots: false);
+    a.advance(0.5);
+    expect(a.stats.replans, 8);
+
+    for (var i = 0; i < 240; i++) {
+      if (trips.every((tr) => vehicleOfTrip(a, tr) >= 0)) break;
+      a.advance(0.5);
+    }
+    for (final tr in trips) {
+      final h = vehicleOfTrip(a, tr);
+      expect(h, greaterThanOrEqualTo(0));
+      expect(routeOf(a, h).any((w) => w.startsWith(shortcut)), isTrue,
+          reason: 'planned again on the new network: across the shortcut');
+    }
+  });
 }
+
+/// The four home lots on O the scenario's trips leave from, and the two on
+/// D they drive to.
+(List<String>, List<String>) _ends(CitySim city) => (
+      [
+        for (final x in const [-500.0, -560.0, -620.0, -680.0])
+          lotNearest(city, Vec2(x, 185)).id,
+      ],
+      [
+        lotNearest(city, const Vec2(600, 185)).id,
+        lotNearest(city, const Vec2(650, 215)).id,
+      ],
+    );
 
 /// Streets W (x = −400), S (y = −300) and E (x = 400) in a U, and spurs O
 /// west off W and D east off E at y = 200: from O the only way to D is down

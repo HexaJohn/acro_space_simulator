@@ -31,6 +31,7 @@ import 'dart:typed_data';
 
 import 'agent_kind.dart';
 import 'building_table.dart';
+import 'graph_lineage.dart';
 import 'junction_arbiter.dart';
 import 'lane_graph.dart';
 import 'node_control.dart';
@@ -62,9 +63,9 @@ abstract interface class SpawnSink {
   /// [owner]'s vehicle is on the road now, as [handle].
   void spawned(int owner, int handle);
 
-  /// [owner]'s route was planned on a network an edit has since replaced,
-  /// before it could pull out: plan it again. Routing happens at spawn
-  /// (§4.6), so a trip still at its origin simply asks afresh.
+  /// [owner]'s route, planned and still waiting to pull out, was made
+  /// impossible by a network edit (§3.9, [TripPlanner.remapWaiting]): plan
+  /// it again, from its origin, on the new network.
   void replanWaiting(int owner);
 }
 
@@ -209,15 +210,63 @@ class TripPlanner {
     _waiting = w;
   }
 
-  /// Every waiting route was planned on the network an edit just replaced:
-  /// each goes back to be planned again, in the order it was waiting.
-  void replanWaiting(SpawnSink sink) {
+  /// Carries every waiting route onto the network an edit just built
+  /// (§3.9), as the routes on the road are carried: by lineage, from the
+  /// place it will pull out at, straight through any junction the edit made
+  /// and in the lanes it was planned in. A trip already planned never takes
+  /// a new road (§4.6). Only a route the edit made impossible goes back to
+  /// be planned again — counted in `stats.replans`, in the order it was
+  /// waiting. Returns how many did.
+  int remapWaiting(RouteRemapper rm, SpawnSink sink) {
+    final from = rm.lineage.from;
+    final data = _arena.data;
     final n = _waiting;
-    _waiting = 0;
-    _arena.clear();
+    var w = 0, replanned = 0;
     for (var i = 0; i < n; i++) {
-      sink.replanWaiting(_owner[i]);
+      final off = _off[i], len = _len[i];
+      final e0 = from.laneEdge[data[off]];
+      final st = rm.remap(data, off, len,
+          s: _fromT[i] - from.edgeLaneS0[e0], destS: _toT[i]);
+      _arena.free(off, len);
+      if (st != RemapStatus.kept) {
+        // Still at its origin: it asks again, from there, on the new
+        // network (its building resolves afresh).
+        stats.replans++;
+        replanned++;
+        sink.replanWaiting(_owner[i]);
+        continue;
+      }
+      if (rm.lanesRepaired) stats.lanesRepaired++;
+      final m = rm.routeLength;
+      final at = _arena.alloc(m);
+      _arena.data.setRange(at, at + m, rm.route);
+      if (w != i) _move(i, w);
+      _off[w] = at;
+      _len[w] = m;
+      _fromT[w] = rm.placeT;
+      _toT[w] = rm.stopS;
+      w++;
     }
+    _waiting = w;
+    return replanned;
+  }
+
+  /// [hash] with every waiting route folded in, in queue order: for
+  /// `CityAgents.digest`.
+  int digest(int hash) {
+    var h = fnv1aU32(hash, _waiting);
+    final data = _arena.data;
+    for (var i = 0; i < _waiting; i++) {
+      h = fnv1aU32(h, _owner[i]);
+      h = fnv1aU32(h, _kind[i] | _purpose[i] << 8 | _left[i] << 16);
+      h = fnv1aU32(h, _len[i]);
+      for (var k = 0; k < _len[i]; k++) {
+        h = fnv1aU32(h, data[_off[i] + k]);
+      }
+      h = fnv1aU32(h, (_fromT[i] * 1000).round());
+      h = fnv1aU32(h, (_toT[i] * 1000).round());
+    }
+    return fnv1aU32(h, _spawnsLeft);
   }
 
   int _spawn(int owner, int kind, int purpose, bool left, Int32List route,
