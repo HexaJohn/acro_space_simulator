@@ -627,7 +627,9 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
       // Bounded by the window: the palette is a panel, not a reason for the
       // whole toolbar to overflow off-screen.
       width: math.min(560.0, _maxWidth),
-      height: 240,
+      // Gives a little on a very short window, so a readout drawer under it
+      // keeps a few rows (240 px at 480 px and taller).
+      height: math.min(240.0, MediaQuery.sizeOf(context).height * 0.5),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [

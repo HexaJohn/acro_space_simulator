@@ -3348,7 +3348,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                   Positioned.fill(
                     top: widget.cityMode
                         ? math.max(
-                            0.0,
+                            MediaQuery.paddingOf(context).top + _cityHudClear,
                             math.min(
                                 MediaQuery.paddingOf(context).top +
                                     _cityEditorTop,
@@ -3420,6 +3420,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   /// [_cityEditorTop]; on a shorter window it starts higher, over the
   /// controls' band, rather than overflowing.
   static const double _cityEditorMinHeight = 400;
+
+  /// How high the city editor may ever start: clear of the HUD's bar. Its
+  /// tool row sits 14 px inside it, so at this top the row starts under the
+  /// bar, not behind it — [_cityEditorMinHeight] alone lifted it there on a
+  /// 440 px window, and with a drawer open no tool could be picked.
+  static const double _cityHudClear = _cityControlsTop - 16;
 
   /// City mode's controls: what of the flight stack the city game uses —
   /// Save and Load, time warp (also , and .), the debug panel. Leaving is

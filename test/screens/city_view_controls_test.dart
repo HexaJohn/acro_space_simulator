@@ -288,6 +288,29 @@ void main() {
     await tapShown(t, tab(CityReadout.status));
     expect(t.takeException(), isNull);
     await expectDrawerReachable(t, 'with Build held at 520', height: 520);
+
+    // Shorter still, the height floor alone lifted the editor's tool row
+    // behind the HUD's bar: with a drawer open no tool could be picked.
+    t.view.physicalSize = const Size(1084, 440);
+    await t.pump();
+    await tapShown(t, find.text('Road').first);
+    if (drawer().evaluate().isEmpty) {
+      await tapShown(t, tab(CityReadout.status));
+    }
+    expect(t.takeException(), isNull);
+    expect(drawer(), findsOneWidget);
+    for (final tool in ['Look', 'Road', 'Build']) {
+      expect(
+        find
+            .descendant(
+              of: find.byType(CityEditOverlay),
+              matching: find.text(tool),
+            )
+            .hitTestable(),
+        findsWidgets,
+        reason: 'the $tool tool can be picked at 440 with a drawer open',
+      );
+    }
   });
 
   /// The city game as the app opens it: pushed over a page, so that
