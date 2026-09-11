@@ -27,6 +27,11 @@ typedef RailCarPose = ({
   Vector3 up,
 });
 
+/// One chained line: its points, and — for a line the player raised or
+/// sank — the deck's lift above the drape at each of them (see
+/// [Railway.liftedChains]); null for a line on the ground.
+typedef RailChain = ({List<Vector3> pts, List<double>? lifts});
+
 /// A train as a list of vehicles, with how it runs.
 class RailConsist {
   const RailConsist(this.cars, {required this.speedMs, required this.dwellS});
@@ -192,6 +197,21 @@ class RailConsist {
     return pts.last;
   }
 
+  /// The lift [s] metres along a line whose points carry [lifts], found on
+  /// the same segment and at the same fraction [pointAt] finds the point
+  /// at, so a car's height and its place along the line agree.
+  static double liftAt(List<double> cum, List<double> lifts, double s) {
+    if (s <= 0) return lifts.first;
+    for (var i = 1; i < cum.length; i++) {
+      if (cum[i] >= s) {
+        final seg = cum[i] - cum[i - 1];
+        final t = seg < 1e-9 ? 0.0 : (s - cum[i - 1]) / seg;
+        return lifts[i - 1] + (lifts[i] - lifts[i - 1]) * t;
+      }
+    }
+    return lifts.last;
+  }
+
   /// Arc length of the point on [pts] nearest [p], and how far off it is.
   static ({double alongM, double offM}) nearestOn(
       List<Vector3> pts, List<double> cum, Vector3 p) {
@@ -227,27 +247,58 @@ class Railway {
   /// run the whole line, so pieces whose ends coincide are chained, either
   /// way round, greedily — a few segments, so nothing cleverer is needed.
   static List<List<Vector3>> chains(List<List<Vector3>> segments,
-      {double joinM = 3.0}) {
-    final pool = [
-      for (final s in segments)
-        if (s.length >= 2) List<Vector3>.of(s)
+          {double joinM = 3.0}) =>
+      [for (final c in liftedChains(segments, joinM: joinM)) c.pts];
+
+  /// [chains], with each piece's deck riding along: [lifts] holds, per
+  /// segment, the lift above the drape at each of its points (see
+  /// `RoadSnapshot.lifts`), or null for a piece on the ground.
+  ///
+  /// The lifts go wherever their points go — reversed with a piece that is
+  /// chained backwards, the joining point dropped with the point it
+  /// duplicates — so a train on a line the player raised or sank reads its
+  /// deck at the same arc the track was laid at. A piece with no lifts on a
+  /// line that has some rides at the drape, which is where its track is.
+  /// Where no piece has any the chains come back with null lifts and are
+  /// exactly [chains]' — the same greedy walk, point for point.
+  static List<RailChain> liftedChains(List<List<Vector3>> segments,
+      {List<List<double>?> lifts = const [], double joinM = 3.0}) {
+    final lifted = lifts.any((l) => l != null);
+    final pool = <RailChain>[
+      for (var k = 0; k < segments.length; k++)
+        if (segments[k].length >= 2)
+          (
+            pts: List<Vector3>.of(segments[k]),
+            lifts: !lifted
+                ? null
+                : k < lifts.length &&
+                        lifts[k] != null &&
+                        lifts[k]!.length == segments[k].length
+                    ? List<double>.of(lifts[k]!)
+                    : List<double>.filled(segments[k].length, 0),
+          ),
     ];
-    final out = <List<Vector3>>[];
+    final out = <RailChain>[];
     while (pool.isNotEmpty) {
-      final chain = pool.removeLast();
+      final (pts: chain, lifts: chainLifts) = pool.removeLast();
       var grew = true;
       while (grew) {
         grew = false;
         for (var i = 0; i < pool.length; i++) {
-          final seg = pool[i];
+          final (pts: seg, lifts: segLifts) = pool[i];
           if ((seg.first - chain.last).length <= joinM) {
             chain.addAll(seg.skip(1));
+            chainLifts?.addAll(segLifts!.skip(1));
           } else if ((seg.last - chain.last).length <= joinM) {
             chain.addAll(seg.reversed.skip(1));
+            chainLifts?.addAll(segLifts!.reversed.skip(1));
           } else if ((seg.last - chain.first).length <= joinM) {
             chain.insertAll(0, seg.take(seg.length - 1));
+            chainLifts?.insertAll(0, segLifts!.take(segLifts.length - 1));
           } else if ((seg.first - chain.first).length <= joinM) {
             chain.insertAll(0, seg.reversed.take(seg.length - 1));
+            chainLifts?.insertAll(
+                0, segLifts!.reversed.take(segLifts.length - 1));
           } else {
             continue;
           }
@@ -256,7 +307,7 @@ class Railway {
           break;
         }
       }
-      out.add(chain);
+      out.add((pts: chain, lifts: chainLifts));
     }
     return out;
   }

@@ -16,6 +16,7 @@ import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_columns.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_mesher.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_traffic.dart';
+import 'package:acro_space_simulator/infrastructure/flutter_scene/city/rail_vehicles.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/road_deck.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/road_mesher.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/coord_convert.dart';
@@ -1391,6 +1392,95 @@ void main() {
           RoadClass.avenue.lanesFor(RoadDecoration.trees)!.laneOffsets;
       expect(tile.roads.single.laneOffsetsM, dressed);
       expect(dressed, isNot(RoadClass.avenue.lanes!.laneOffsets));
+    });
+
+    // The railway's trains, which ran the drape whatever the track did: a
+    // passenger working and a freight on a 1.2 km line, split in two at a
+    // crossing with the second piece reversed, so the lifts are chained.
+    final railXy = line(0, -600, 600, 61);
+    List<RoadSnapshot> railway([List<double> lifts = const []]) {
+      final a = railXy.sublist(0, 31), b = railXy.sublist(30).reversed;
+      final la = lifts.isEmpty ? const <double>[] : lifts.sublist(0, 31);
+      final lb = lifts.isEmpty
+          ? const <double>[]
+          : lifts.sublist(30).reversed.toList();
+      return [
+        road(RoadClass.rail, a, lifts: la),
+        road(RoadClass.rail, b.toList(), lifts: lb),
+      ];
+    }
+
+    List<Vector3> trainCars(List<RoadSnapshot> roads, double epoch) {
+      final traffic = CityTraffic();
+      traffic.begin('sig');
+      traffic.visitTile('$body/0/0/0', 'k', body, roads, anchor);
+      final sink = traffic.place(body, epoch, focus, const {});
+      traffic.end();
+      final scene = lengthToScene(1.0);
+      return [
+        for (final b in sink.railCars.values)
+          for (var i = 0; i < b.count; i++)
+            Vector3(b.matrices[i].storage[12], b.matrices[i].storage[13],
+                    b.matrices[i].storage[14]) *
+                (1 / scene),
+      ];
+    }
+
+    const epochs = [0.0, 20.0, 45.0, 321.0];
+
+    test('trains ride a raised railway on its deck', () {
+      for (final epoch in epochs) {
+        final on = trainCars(railway(List.filled(61, 12)), epoch);
+        expect(on, isNotEmpty, reason: '@$epoch');
+        for (final p in on) {
+          expect(p.z, closeTo(12 + RailVehicleMeshes.railHeadM, 0.05),
+              reason: '$p @$epoch');
+        }
+      }
+    });
+
+    test('and none runs over the hill its tunnel goes through', () {
+      // Wholly underground: the track is dropped, and so is every train.
+      for (final epoch in epochs) {
+        expect(trainCars(railway(), epoch), isNotEmpty, reason: '@$epoch');
+        expect(trainCars(railway(List.filled(61, -20)), epoch), isEmpty,
+            reason: '@$epoch');
+      }
+      // Under the middle: 20 m down within 400 m of it, out by 500, so the
+      // mouths — where the deck is at the cover depth — stand at 475 m.
+      final lifts = [
+        for (final (x, _) in railXy)
+          x.abs() >= 500
+              ? 0.0
+              : (x.abs() <= 400 ? -20.0 : -20 + (x.abs() - 400) / 5)
+      ];
+      var seen = 0;
+      for (var epoch = 0.0; epoch < 120; epoch += 5) {
+        for (final p in trainCars(railway(lifts), epoch)) {
+          seen++;
+          expect(p.x.abs(), greaterThan(474.9), reason: '$p @$epoch');
+          expect(p.z, greaterThan(-RoadElevation.tunnelCoverM), reason: '$p');
+        }
+      }
+      expect(seen, greaterThan(0));
+    });
+
+    test('a railway on the ground runs exactly where it always ran', () {
+      for (final epoch in epochs) {
+        final ground = trainCars(railway(), epoch);
+        expect(ground, isNotEmpty);
+        for (final p in ground) {
+          expect(p.z, closeTo(RailVehicleMeshes.railHeadM, 0.05), reason: '$p');
+        }
+        // A deck that never leaves the drape is the same train, to the bit.
+        final level = trainCars(railway(List.filled(61, 0)), epoch);
+        expect(level.length, ground.length);
+        for (var i = 0; i < ground.length; i++) {
+          expect(level[i].x, ground[i].x);
+          expect(level[i].y, ground[i].y);
+          expect(level[i].z, ground[i].z);
+        }
+      }
     });
   });
 }

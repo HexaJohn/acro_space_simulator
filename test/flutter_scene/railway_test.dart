@@ -32,6 +32,30 @@ void main() {
       final siding = [const Vector3(100, 14, 0), const Vector3(400, 14, 0)];
       expect(Railway.chains([main, siding]), hasLength(2));
     });
+
+    test('a raised line\'s lifts ride its points, reversed with them', () {
+      final a = [const Vector3(0, 0, 0), const Vector3(100, 0, 0)];
+      final b = [const Vector3(200, 0, 0), const Vector3(100, 0, 0)];
+      final c = [const Vector3(200, 0, 0), const Vector3(300, 0, 0)];
+      // [c] is on the ground: it rides at the drape, as its track does.
+      final chains = Railway.liftedChains([c, a, b], lifts: [
+        null,
+        [1, 2],
+        [3, 2],
+      ]);
+      expect(chains, hasLength(1));
+      expect([for (final p in chains.single.pts) p.x],
+          orderedEquals([300, 200, 100, 0]));
+      expect(chains.single.lifts, orderedEquals([0, 3, 2, 1]));
+    });
+
+    test('with no lifts anywhere the chains are the plain ones', () {
+      final a = [const Vector3(0, 0, 0), const Vector3(100, 0, 0)];
+      final b = [const Vector3(200, 0, 0), const Vector3(100, 0, 0)];
+      final lifted = Railway.liftedChains([a, b], lifts: [null, null]);
+      expect(lifted.single.lifts, isNull);
+      expect(lifted.single.pts, orderedEquals(Railway.chains([a, b]).single));
+    });
   });
 
   group('timetable', () {
