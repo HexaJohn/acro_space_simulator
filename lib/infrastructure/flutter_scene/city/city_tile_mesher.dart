@@ -819,6 +819,12 @@ class CityTileMeshJob {
   /// on the ground never does. The viaduct and the L stand on columns of
   /// their own up in the air; every other road has lanes a pier must not
   /// stand in.
+  ///
+  /// And the other tiles' roads that pass near the tile's decks
+  /// ([CityTileMembers.corridors]): a road belongs to the tile its middle
+  /// lies in, and the one under a deck near a tile's edge is as often as
+  /// not the neighbour's. Numbered below zero, which no member's index is,
+  /// so no road's piers ever pass one over as their own.
   late final RoadCorridors _corridors = () {
     final c = RoadCorridors(request.anchorBF);
     final roads = members.roads;
@@ -828,6 +834,10 @@ class CityTileMeshJob {
           .values[road.roadClassIndex.clamp(0, RoadClass.values.length - 1)];
       if (cls.isElevated) continue;
       c.add(i, road.points, road.halfWidthM);
+    }
+    final more = members.corridors;
+    for (var k = 0; k < more.length; k++) {
+      c.add(-1 - k, more[k].pointsBF, more[k].halfWidthM);
     }
     return c;
   }();
@@ -1502,6 +1512,18 @@ class CityTileMeshJob {
     // gives lane width to a planted median, at the class's own width.
     final lanes = cls.lanesFor(deco);
 
+    // What the body's end table says of this road's two ends (see
+    // [CityTileMembers.roadEnds]).
+    final startEnd = members.roadEnds[2 * index];
+    final lastEnd = members.roadEnds[2 * index + 1];
+    // How far a deck's parapets stop before an end: the junction plate
+    // (r = widest * 1.45), which is the other legs' lanes as much as this
+    // one's — where three ends or more meet. Two are one road going on, and
+    // its parapet goes on with it. The table keys an end by its lift, so a
+    // deck passing over a crossing is no leg of it and keeps its parapets.
+    double trimAt((double, int)? e) =>
+        e == null || e.$2 <= 2 ? 0.0 : e.$1 * 1.45;
+
     for (var k = 0; k < runs.length; k++) {
       final run = runs[k];
       final rp = run.pts;
@@ -1557,7 +1579,9 @@ class CityTileMeshJob {
       // that is a tunnel's mouth, facing out of the hill.
       RoadDeckMesher.structure(
           rb.propSolid, rp, anchorBF, road.halfWidthM, liftAt!,
-          blocked: _pierBlocked(index));
+          blocked: _pierBlocked(index),
+          trimStartM: run.fromStart ? trimAt(startEnd) : 0.0,
+          trimEndM: run.toEnd ? trimAt(lastEnd) : 0.0);
       if (!run.fromStart) {
         RoadDeckMesher.portal(
             rb.propSolid, rp.first, rp.first - rp[1], anchorBF, road.halfWidthM);
@@ -1569,10 +1593,6 @@ class CityTileMeshJob {
     }
     if (cls == RoadClass.rail) return;
 
-    // What the body's end table says of this road's two ends (see
-    // [CityTileMembers.roadEnds]).
-    final startEnd = members.roadEnds[2 * index];
-    final lastEnd = members.roadEnds[2 * index + 1];
     // A street that ends where nothing else does ends in a turning
     // circle: a subdivision's cul-de-sac, or the edge of town — on its
     // deck where the tool raised it a little, and not at all where it

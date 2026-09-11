@@ -376,6 +376,72 @@ void main() {
     });
   });
 
+  group('a deck keeps its piers out of the roads of the tiles round it', () {
+    // The first tile ends at `tileM` eastward. A street raised 12 m runs
+    // north 70 m inside that edge; an avenue belonging to the next tile
+    // east — its middle and both its ends are there — hooks back west
+    // under the deck and out again.
+    const edge = tileM;
+    final deckPts = [for (var k = 0; k <= 12; k++) (edge - 70, 1000 + k * 100.0)];
+    final deck = road(deckPts, lifts: List.filled(13, 12.0));
+    RoadSnapshot hook({double west = edge - 150}) => road([
+          (edge + 300, 1400),
+          (west, 1550),
+          (edge + 50, 1650),
+          (edge + 300, 1800),
+        ], cls: RoadClass.avenue);
+    final deckTile = tileOf(edge - 70, 1600);
+    final hookTile = tileOf(edge + 50, 1650);
+
+    test("the deck's tile takes the neighbour's road beneath it", () {
+      expect(deckTile, isNot(hookTile));
+      final beneath = hook();
+      final plan = cut(frame([deck, beneath]));
+      final t = plan.tiles[deckTile]!;
+      expect(t.roads, [deck]);
+      expect(t.ends, hasLength(2), reason: "none of the avenue's ends");
+      expect(t.corridors, hasLength(1));
+      expect(t.corridors.single.pointsBF, orderedEquals(beneath.points));
+      expect(t.corridors.single.halfWidthM, beneath.halfWidthM);
+      // The avenue's own tile has no deck, and takes nothing.
+      expect(plan.tiles[hookTile]!.corridors, isEmpty);
+    });
+
+    test('only a deck on piers takes any, and only of roads in its reach',
+        () {
+      // Within a structure's clearance of the ground: no pier to keep out.
+      final atGrade = road(deckPts, lifts: List.filled(13, 2.0));
+      expect(cut(frame([atGrade, hook()])).tiles[deckTile]!.corridors,
+          isEmpty);
+      // A road of the next tile that stays well clear of the deck.
+      final clear = road([
+        (edge + 200, 2600),
+        (edge + 600, 2600),
+        (edge + 1000, 2600),
+      ]);
+      expect(cut(frame([deck, clear])).tiles[deckTile]!.corridors, isEmpty);
+    });
+
+    test('a colony nobody raised a road in: no tile takes any', () {
+      const pts = [(7000.0, 1600.0), (7600.0, 1600.0), (8200.0, 1600.0)];
+      final plan = cut(frame(
+          [a, b, c, hook(), road(pts, bridges: const [100, 300])]));
+      for (final t in plan.tiles.values) {
+        expect(t.corridors, isEmpty, reason: t.key);
+      }
+    });
+
+    test("the road beneath moved re-keys the deck's tile", () {
+      final before = keys(cut(frame([deck, hook(), c])));
+      // Only its bend under the deck moves: every end, and so every end
+      // entry, stays where it was.
+      final d = CityTileBucketer.diff(
+          before, cut(frame([deck, hook(west: edge - 140), c])));
+      expect(d.rekeyed.toSet(), {deckTile, hookTile});
+      expect(d.kept, [tileC]);
+    });
+  });
+
   test('the roads signature moves with a revision or an override only', () {
     int sig(WorldSnapshot s) => CityTileBucketer.roadsSignature(s);
     final base = frame([a], roadsRevision: {'c': 3});

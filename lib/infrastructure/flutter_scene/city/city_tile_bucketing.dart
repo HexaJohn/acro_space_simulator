@@ -31,6 +31,14 @@
 /// re-keys the tile it belongs to, every tile one of its ends lies in, and
 /// the tile of every road meeting it end to end, and nothing else.
 ///
+/// And a tile with a deck on piers takes, beside its own roads, the ground
+/// roads of the tiles round it that pass within a pier's reach of that deck
+/// ([CityTileBucket.corridors]). A road belongs to the tile its middle lies
+/// in, and the road under a deck near a tile's edge is as often as not the
+/// neighbour's, which the deck's piers would stand in. They are in the key,
+/// so moving one re-cuts the deck's tile; a tile with no deck takes none,
+/// and keys and builds exactly as it always did.
+///
 /// Lots are the one member left out. The tiles do not draw them — the zoning
 /// node paints the plat on the UI thread (see `CityNodes`) — so a lot zoned
 /// or built moves no tile's key, and a zone stroke re-meshes nothing.
@@ -45,6 +53,7 @@ import '../../../domain/colony/city/road_elevation.dart';
 import '../../../domain/colony/city/road_junction.dart' show JunctionOverride;
 import '../../../domain/shared/vector3.dart';
 import 'city_tile_columns.dart';
+import 'road_deck.dart' show RoadCorridors;
 
 /// The colony's tangent frame on its body: up through the root's anchor,
 /// east and north across it, and the radius the anchor sits at.
@@ -142,6 +151,11 @@ class CityTileBucket {
   /// The junction overrides the tile's junction pass may need: those within
   /// [CityTileBucketer.junctionReachM] of it.
   final List<CityTileJunction> junctions = [];
+
+  /// The ground roads of other tiles that pass within a pier's reach of
+  /// one of this tile's decks, as their carriageways (see the library
+  /// docs). Empty for a tile with no deck on piers.
+  final List<CityTileCorridor> corridors = [];
 
   /// Body-centre distance of the outermost building centre in the tile
   /// (0 with no buildings): the shell the camera's altitude is measured
@@ -343,8 +357,94 @@ class CityTileBucketer {
         plan.tiles['${j.body}/$ie/$iN']?.junctions.add(tj);
       }
     }
+    _gatherCorridors(snap, plan, tileFor);
     if (keyed) keyTiles(plan);
     return plan;
+  }
+
+  /// Give every tile with a deck on piers the ground roads of other tiles
+  /// that come within a pier's reach of one of its decks
+  /// ([CityTileBucket.corridors]), in the frame's road order. Only such
+  /// tiles: a tile with no deck has no pier to keep out of anything, so
+  /// every other tile — every tile of a colony nobody raised a road in —
+  /// takes none, and costs the cut one look at each road's lifts.
+  ///
+  /// The reach is measured on bounds, points against points, grown by
+  /// [RoadCorridors.reachM] — past which [RoadCorridors.blocks] turns a
+  /// pier away from nothing — so the test can let in a road that will not
+  /// matter, and never leaves out one that would.
+  static void _gatherCorridors(WorldSnapshot snap, CityBucketPlan plan,
+      CityTileBucket Function(String bodyId, Vector3 p) tileFor) {
+    // Every deck on piers, with its tile and its points' bounds: grouped by
+    // tile, in the cut's order.
+    final decks = <(CityTileBucket, RoadSnapshot, Float64List)>[];
+    for (final t in plan.tiles.values) {
+      for (final r in t.roads) {
+        if (_onPiers(r)) decks.add((t, r, _boundsOf(r.points)));
+      }
+    }
+    if (decks.isEmpty) return;
+    for (final r in snap.roads) {
+      final pts = r.points;
+      final n = pts.length ~/ 3;
+      // The roads a tile's own corridors take (see `CityTileMeshJob`).
+      if (n < 2 || _classOf(r).isElevated) continue;
+      Float64List? box;
+      CityTileBucket? owner, last;
+      for (final (t, deck, d) in decks) {
+        // Once to a tile, however many of its decks the road comes near.
+        if (t.bodyId != r.body || identical(t, last)) continue;
+        final b = box ??= _boundsOf(pts);
+        final pad = RoadCorridors.reachM(deck.halfWidthM, r.halfWidthM) + 1.0;
+        if (b[0] - pad > d[3] ||
+            b[1] - pad > d[4] ||
+            b[2] - pad > d[5] ||
+            b[3] + pad < d[0] ||
+            b[4] + pad < d[1] ||
+            b[5] + pad < d[2]) {
+          continue;
+        }
+        // A road of the deck's own tile is one of its corridors already.
+        final m = (n ~/ 2) * 3;
+        owner ??= tileFor(r.body, Vector3(pts[m], pts[m + 1], pts[m + 2]));
+        if (identical(owner, t)) continue;
+        t.corridors.add(CityTileCorridor(pts, r.halfWidthM));
+        last = t;
+      }
+    }
+  }
+
+  /// Whether [r] stands on piers anywhere: a deck the tool raised clear of
+  /// the ground at some point, or one carrying a plan's bridge, whose lift
+  /// stands on the deck's. No road the generator lays has a deck.
+  static bool _onPiers(RoadSnapshot r) {
+    final l = r.lifts;
+    if (l.isEmpty || l.length != r.points.length ~/ 3) return false;
+    if (_classOf(r).isElevated) return false;
+    if (r.bridges.isNotEmpty) return true;
+    for (final v in l) {
+      if (v > RoadElevation.structureClearM) return true;
+    }
+    return false;
+  }
+
+  /// The least x, y, z of [points] (xyz triplets), then the greatest.
+  static Float64List _boundsOf(List<double> points) {
+    final b = Float64List(6)
+      ..[0] = double.infinity
+      ..[1] = double.infinity
+      ..[2] = double.infinity
+      ..[3] = -double.infinity
+      ..[4] = -double.infinity
+      ..[5] = -double.infinity;
+    for (var i = 0; i + 2 < points.length; i += 3) {
+      for (var k = 0; k < 3; k++) {
+        final v = points[i + k];
+        if (v < b[k]) b[k] = v;
+        if (v > b[k + 3]) b[k + 3] = v;
+      }
+    }
+    return b;
   }
 
   /// Write every tile's structure key in [plan] — what [bucket] does itself
@@ -539,6 +639,12 @@ class CityTileBucketer {
       h = _mix(h, j.lights);
       h = _mix(h, j.stopsSet ? 1 : 0);
       h = _mixList(h, j.stopPoints);
+    }
+    // The other tiles' roads the tile's decks keep their piers out of:
+    // none in a tile with no deck, whose key is what it always was.
+    for (final c in t.corridors) {
+      h = _mixD(h, c.halfWidthM);
+      h = _mixList(h, c.pointsBF);
     }
     return '${t.buildings.length}|${t.roads.length}|$roadCells|'
         '${t.ends.length}|${h.toRadixString(16)}';

@@ -110,6 +110,11 @@ void main() {
     ];
     final transitEnds = [for (var i = 0; i < 6; i++) Vector3(d(), d(), r)];
     final junctions = [for (var i = 0; i < 9; i++) junction(i)];
+    final corridors = [
+      for (var i = 0; i < 4; i++)
+        CityTileCorridor(
+            [for (var k = 0; k < 3 * (2 + i); k++) d()], 2 + d(6).abs()),
+    ];
 
     final columns = CityTileColumns.fromSnapshots(
       buildings: buildings,
@@ -119,6 +124,7 @@ void main() {
       roadEnds: roadEnds,
       transitEnds: transitEnds,
       junctions: junctions,
+      corridors: corridors,
     );
     expect(columns.buildingCount, buildings.length);
     expect(columns.junctionCount, junctions.length);
@@ -245,6 +251,15 @@ void main() {
         isTrue);
     expect(back.junctions.any((j) => !j.stopsSet && j.stopPoints.isEmpty),
         isTrue);
+
+    // The other tiles' roads a deck's piers keep out of: points and width.
+    expect(columns.corridorCount, corridors.length);
+    expect(back.corridors.length, corridors.length);
+    for (var i = 0; i < corridors.length; i++) {
+      final a = corridors[i], b = back.corridors[i];
+      expect(b.pointsBF, orderedEquals(a.pointsBF));
+      expect(b.halfWidthM, a.halfWidthM);
+    }
   });
 
   test('an end of a class this build does not know decodes clamped', () {

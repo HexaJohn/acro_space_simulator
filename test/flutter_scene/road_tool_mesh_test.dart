@@ -143,6 +143,7 @@ void main() {
           {List<(double, int)?>? roadEnds,
           List<CityTileEnd> ends = const [],
           List<CityTileJunction> junctions = const [],
+          List<CityTileCorridor> corridors = const [],
           CityMeshKnobs k = knobs}) =>
       CityTileMeshJob(request(noColumns, tier, k: k), CityBuildingLibraries(),
               members: CityTileMembers(
@@ -153,6 +154,7 @@ void main() {
                 roadEnds: roadEnds ?? [for (final _ in roads) ...[null, null]],
                 transitEnds: const [],
                 junctions: junctions,
+                corridors: corridors,
               ))
           .runAll();
 
@@ -1169,6 +1171,74 @@ void main() {
         expect((p.x - 40).abs(), greaterThanOrEqualTo(8.0 + 1.5),
             reason: 'a pier foot at $p');
       }
+    });
+
+    test("in a tile: a raised street over the next tile's avenue", () {
+      // The avenue belongs to the tile its middle lies in, next door, and
+      // reaches this one only as a corridor (see `CityTileBucketer`).
+      final deck = road(RoadClass.street, line(0, -200, 200, 21),
+          lifts: List.filled(21, 8.0));
+      final avenue = road(RoadClass.avenue, [(40, -100), (40, 0), (40, 100)]);
+      List<Vector3> piersOf(CityTileResult res) => [
+            for (final p in verts(res, CityMaterialKind.facade))
+              if (p.z < -0.5) p
+          ];
+      // Without it, a pier stands in its lanes.
+      expect(
+          piersOf(meshWith([deck], CityTier.mid))
+              .any((p) => (p.x - 40).abs() < 8.0),
+          isTrue);
+      final piers = piersOf(meshWith([deck], CityTier.mid, corridors: [
+        CityTileCorridor(avenue.points, avenue.halfWidthM),
+      ]));
+      expect(piers, isNotEmpty);
+      for (final p in piers) {
+        expect((p.x - 40).abs(), greaterThanOrEqualTo(8.0 + 1.5),
+            reason: 'a pier foot at $p');
+      }
+    });
+  });
+
+  group('a junction up on a deck', () {
+    final hw = RoadClass.street.width / 2;
+    const up = 12.0;
+    // Three streets raised 12 m, meeting at the origin: west and east the
+    // through road, north the stem of the T.
+    RoadSnapshot leg(List<(double, double)> xy) =>
+        road(RoadClass.street, xy, lifts: List.filled(xy.length, up));
+    final west = leg(line(0, 0, -200, 11));
+    final east = leg(line(0, 0, 200, 11));
+    final north = leg([for (var i = 0; i < 11; i++) (0.0, i * 20.0)]);
+
+    /// Concrete standing above the deck: the parapets. The girders' tops
+    /// are the deck's, and the piers stand under it.
+    List<Vector3> aboveDeck(CityTileResult res) => [
+          for (final p in verts(res, CityMaterialKind.facade))
+            if (p.z > up + RoadMesher.ribbonLiftM + 0.2) p
+        ];
+
+    test("its parapets stand clear of the other legs' lanes", () {
+      final res = meshWith([west, east, north], CityTier.mid, roadEnds: [
+        for (var i = 0; i < 3; i++) ...[(hw, 3), null],
+      ]);
+      final walls = aboveDeck(res);
+      expect(walls, isNotEmpty);
+      for (final p in walls) {
+        final inThrough = p.y.abs() < hw - 0.01;
+        final inStem = p.x.abs() < hw - 0.01 && p.y > 0;
+        expect(inThrough || inStem, isFalse, reason: 'a parapet at $p');
+      }
+      // Held back at the plate, and running on past it down every leg.
+      expect(walls.any((p) => p.x < -20), isTrue);
+      expect(walls.any((p) => p.x > 20), isTrue);
+      expect(walls.any((p) => p.y > 20), isTrue);
+    });
+
+    test('a deck going on through a joint keeps its parapets', () {
+      // Two ends meeting are one road going on: nothing to stop short of.
+      final res = meshWith([west, east], CityTier.mid,
+          roadEnds: [(hw, 2), null, (hw, 2), null]);
+      expect(aboveDeck(res).any((p) => p.x.abs() < 1), isTrue);
     });
   });
 

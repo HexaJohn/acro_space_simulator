@@ -1534,6 +1534,7 @@ class CityNodes {
       roadEnds: roadEnds,
       transitEnds: transitEnds,
       junctions: t.junctions,
+      corridors: t.corridors,
     );
   }
 
@@ -3406,6 +3407,10 @@ class _Tile {
   /// The player's junction overrides the tile's junction pass may need.
   List<CityTileJunction> junctions = const [];
 
+  /// The ground roads of other tiles that the tile's decks keep their piers
+  /// out of (see [CityTileBucket.corridors]).
+  List<CityTileCorridor> corridors = const [];
+
   /// Body-centre distance of the outermost building centre in the tile
   /// (0 with no buildings): the shell the camera's altitude is measured
   /// over in [CityNodes.tileCanDetail].
@@ -3421,6 +3426,7 @@ class _Tile {
     patches = b.patches;
     ends = b.ends;
     junctions = b.junctions;
+    corridors = b.corridors;
     maxRadiusM = b.maxRadiusM;
     structureKey = b.structureKey;
   }
