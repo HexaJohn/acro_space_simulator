@@ -3303,16 +3303,31 @@ class CitySim {
 
   /// The datum radii (m from the body centre, at its start and at its end)
   /// each plain road corridor segment was cut to, by its [shapedTerrain]
-  /// key — kept as the brush is recorded
+  /// key, and the voxel (m) it asked the ground to be meshed at
+  /// (`TerrainBrush.minVoxelM`) — kept as the brush is recorded
   /// (`CityTerrainShaper.markShaped`).
   ///
   /// A road is drawn on the corridor it was graded to, and that corridor is
   /// these datums: the ground read back at a knot afterwards is not, where
   /// the next segment's easing has pulled it (a curve's knots are metres
-  /// apart, inside that easing). Transient, like the brushes it describes:
-  /// not saved, and rebuilt as the shaper re-grades a loaded colony from
-  /// its pristine ground.
-  final Map<String, (double, double)> corridorDatums = {};
+  /// apart, inside that easing). The voxel says how closely the drawn road
+  /// must follow it: ground meshed finer than the colony's shows the
+  /// corridor's bends. Transient, like the brushes it describes: not saved,
+  /// and rebuilt as the shaper re-grades a loaded colony from its pristine
+  /// ground.
+  final Map<String, (double, double, {double voxelM})> corridorDatums = {};
+
+  /// The plain road corridor segments, by their [shapedTerrain] keys, cut
+  /// to be meshed finer than the colony's ground: the ground they were laid
+  /// over stood off their grade by more than the colony's voxel carries
+  /// (`CityTerrainShaper.corridorReliefTolM`).
+  ///
+  /// Saved, unlike the brushes. A load re-grades the colony from its
+  /// pristine ground in one call, where a road run through a lot's
+  /// levelled field cannot see the field — the lot is levelled in that same
+  /// call — and would be meshed coarse, and drawn in pieces again. The
+  /// judgement made on the ground the road was laid over is kept instead.
+  final Set<String> fineCorridors = {};
 
   /// The sprawl past the platted core, or null for a colony with none. Set
   /// by the generator; the plan is grown from it on demand and cached, and a
@@ -4504,6 +4519,10 @@ class CitySim {
           'junctions': [
             for (final o in junctionOverrides.values) o.toJson(),
           ],
+        // Omitted when empty, so a colony with no road cut through relief
+        // saves as it always has.
+        if (_savedFineCorridors.isNotEmpty)
+          'fineCorridors': _savedFineCorridors,
         'manualLots': [
           for (final p in layout.manualParcels)
             {
@@ -4542,6 +4561,12 @@ class CitySim {
         },
         'support': support.toList(),
       };
+
+  /// [fineCorridors] as saved: those of roads still in the layout.
+  List<String> get _savedFineCorridors => [
+        for (final k in fineCorridors)
+          if (layout.roadById(k.split(':')[1]) != null) k,
+      ];
 
   factory CitySim.fromJson(
     Map<String, dynamic> j, {
@@ -4661,6 +4686,8 @@ class CitySim {
         if (!o.isEmpty) sim.junctionOverrides[o.key] = o;
       } catch (_) {}
     }
+    final fine = j['fineCorridors'];
+    if (fine is List) sim.fineCorridors.addAll(fine.whereType<String>());
     sim._roadsRevision++;
     for (final mj in (j['manualLots'] as List)) {
       final m = mj as Map;

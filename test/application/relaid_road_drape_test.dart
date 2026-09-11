@@ -171,18 +171,18 @@ void main() {
     // The frame it is laid, before the tick cuts its corridor: drawn where
     // the corridor will be, not over the lot edge's cliff it is about to
     // cut through.
-    final before = pointsOf(drawn(c.city, c.edits, relaid))
-        .map((p) => p.length)
-        .toList();
+    final before = pointsOf(drawn(c.city, c.edits, relaid));
     shape(c.city, c.edits);
     final after = drawn(c.city, c.edits, relaid);
     final off = offGround(after, c.edits);
     expect(off.every((d) => d.abs() < tolM), isTrue,
         reason: 'drawn off its graded ground by [${fmt(off)}] m');
     final pts = pointsOf(after);
+    // Each point as drawn the frame it was laid, against the ground under
+    // it once cut. By place, not by index: cut through relief it is drawn
+    // with more points than the frame before (the corridor's bends).
     final ahead = [
-      for (var k = 0; k < pts.length; k++)
-        before[k] - groundRadius(c.edits, pts[k].normalized),
+      for (final p in before) p.length - groundRadius(c.edits, p.normalized),
     ];
     expect(ahead.every((d) => d.abs() < tolM), isTrue,
         reason: 'before its corridor was cut it was drawn '
@@ -300,19 +300,17 @@ void main() {
       expect(moved.quote.ok, isTrue, reason: '$name: ${moved.quote.reason}');
       expect(moved.quote.deck, isNull, reason: name);
       final relaid = moved.roadId!;
-      final before = pointsOf(drawn(c.city, c.edits, relaid))
-          .map((p) => p.length)
-          .toList();
+      final before = pointsOf(drawn(c.city, c.edits, relaid));
       shape(c.city, c.edits);
       final after = drawn(c.city, c.edits, relaid);
       final offAfter = offGround(after, c.edits);
       expect(offAfter.every((d) => d.abs() < tolM), isTrue,
           reason: '$name, re-laid: drawn off the ground it was cut to by '
               '[${fmt(offAfter)}] m');
-      final pts = pointsOf(after);
+      // By place, not by index (see the one-way above).
       final ahead = [
-        for (var k = 0; k < pts.length; k++)
-          before[k] - groundRadius(c.edits, pts[k].normalized),
+        for (final p in before)
+          p.length - groundRadius(c.edits, p.normalized),
       ];
       expect(ahead.every((d) => d.abs() < tolM), isTrue,
           reason: '$name, re-laid: before its corridor was cut it was drawn '

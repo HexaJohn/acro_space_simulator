@@ -33,6 +33,10 @@ class CityTerrainShaper {
     this.roadFalloffM = 6,
     this.padEdgeM = 0.6,
     this.voxelM = 15,
+    this.corridorReliefTolM = 0.5,
+    this.corridorCrossFallTolM = 1.0,
+    this.corridorVoxelsAcross = 4,
+    this.minCorridorVoxelM = 1,
   });
 
   /// How far a levelled pad extends beyond the building footprint.
@@ -56,7 +60,44 @@ class CityTerrainShaper {
   /// colony sits at level 13 (boosted). The trade is edge sharpness: pad
   /// rims and road shoulders are smoothed at this scale, which the ground
   /// patches cover inside the colony. First-test value; tune from the studio.
+  ///
+  /// Not for a road that cuts or fills: see [corridorReliefTolM].
   final double voxelM;
+
+  /// How far (m) the ground around a graded road may stand off the grade it
+  /// is cut to before the road asks for a finer mesh than [voxelM].
+  ///
+  /// A road is drawn on its corridor — the analytic field, exactly — but the
+  /// ground is drawn from a MESH of that field, and at [voxelM] a mesh
+  /// cannot hold a cut eight metres wide: the lattice lands a sample in it
+  /// here and there and smooths the rest back up to the hillside. A road
+  /// cut through the edge of a levelled lot on the dev site was drawn in
+  /// pieces, the grass of that smoothing across it between them, 4.5 m over
+  /// the carriageway where the cut was 5 m deep. Ground within this of the
+  /// road's grade — a town founded on its own hillside, every generated
+  /// street — the coarse mesh carries (to the kerb, give or take the
+  /// ribbon's lift), and those corridors keep [voxelM].
+  final double corridorReliefTolM;
+
+  /// How steep a cross-fall (m, from the carriageway's centre to its edge)
+  /// the coarse mesh may leave a corridor levelled flat across before the
+  /// road asks for a finer one. Separate from [corridorReliefTolM]: a plane
+  /// meshes exactly at any voxel, so a road on a side slope is off only
+  /// where its flat bench is cut into it — the starter streets' 0.3 m, which
+  /// read fine; a generated town's streets fall to 0.7 m — and a metre is a
+  /// bench cut into a hillside. A flat bench is off by half its cross-fall
+  /// at half its width, which is why this is twice [corridorReliefTolM].
+  final double corridorCrossFallTolM;
+
+  /// Voxels across a road's carriageway (its full width) when its corridor
+  /// cuts or fills past [corridorReliefTolM]: four puts the cells whose
+  /// vertices draw the carriageway inside its levelled core, so the mesh
+  /// under the road IS the road's grade (a one-way: 2 m, within 0.1 m of it).
+  final double corridorVoxelsAcross;
+
+  /// Floor (m) under that finer voxel, so a narrow path cannot drag the
+  /// quadtree past the levels a road needs.
+  final double minCorridorVoxelM;
 
   /// Brushes for everything in [city] that is not yet shaped.
   ///
@@ -208,10 +249,19 @@ class CityTerrainShaper {
             tick: tick);
         continue;
       }
-      for (var i = 1; i < pts.length; i++) {
+      final todo = [
+        for (var i = 1; i < pts.length; i++)
+          if (!city.shapedTerrain.contains('road:${road.id}:$hw:$i')) i,
+      ];
+      if (todo.isEmpty) continue;
+      // Meshed finer where the colony's voxel cannot carry the ground it was
+      // laid over, and for a stretch either side ([_fineSegments]).
+      final fine = _fineSegments(city, road, pts, todo, hw, groundUnder);
+      final fineM = _fineVoxelM(road);
+      for (final i in todo) {
         final key = 'road:${road.id}:$hw:$i';
-        if (city.shapedTerrain.contains(key)) continue;
         final a = pts[i - 1], b = pts[i];
+        if (fine.contains(i)) city.fineCorridors.add(key);
         out.add((
           key: key,
           brush: TerrainBrush.cutFill(
@@ -222,12 +272,84 @@ class CityTerrainShaper {
             datumRadiusEndM: groundUnder(b),
             falloffM: roadFalloffM,
             tick: tick,
-            minVoxelM: voxelM,
+            minVoxelM: fine.contains(i) ? fineM : voxelM,
           ),
         ));
       }
     }
     return out;
+  }
+
+  /// The voxel (m) a plain graded road's corridor asks to be meshed at where
+  /// the colony's voxel cannot carry it ([_fineSegments]):
+  /// [corridorVoxelsAcross] across its carriageway, no finer than
+  /// [minCorridorVoxelM].
+  double _fineVoxelM(RoadSpline road) => math.max(
+      minCorridorVoxelM, road.halfWidth * 2 / corridorVoxelsAcross);
+
+  /// How many segments either side of one the colony's voxel cannot carry
+  /// are meshed as finely as it: a road meshed fine where it cuts and coarse
+  /// right up to it is drawn in pieces at the seam — the live one-way was
+  /// buried a quarter metre along the two segments beside its cut — while
+  /// a trunk road run past one levelled lot need not be fine for kilometres.
+  static const int corridorFineSpan = 2;
+
+  /// Which of the segments [todo] of a plain graded road (segment i from
+  /// knot i - 1 to knot i of [pts]; [hw] its half width as keyed) are cut
+  /// to be meshed finer than [voxelM]: those the ground they are laid over
+  /// stands off the grade they are cut to by more than the coarse mesh
+  /// carries ([corridorReliefTolM], [corridorCrossFallTolM]), those
+  /// [CitySim.fineCorridors] already holds, and those within
+  /// [corridorFineSpan] of either.
+  ///
+  /// Per segment, on the ground as it stands before this call: the ground a
+  /// quarter, half and three quarters along against the straight grade
+  /// between its knots (what the cut takes out, or the fill puts in, under
+  /// the carriageway), then either side of its middle one coarse voxel past
+  /// its edge — the ground the coarse mesh would smooth over it — their
+  /// mean against the grade and their fall across it.
+  ///
+  /// Not the brushes laid in the same call: a colony laid in one call — a
+  /// generated town, the starter kit, founded on pristine ground — is cut
+  /// from the ground its roads were laid over, and keeps the colony's
+  /// voxel. A road the player lays through the town is judged on the town
+  /// it is laid through. That judgement is kept ([CitySim.fineCorridors]):
+  /// a load re-grades the colony in one call, where the lot the road was
+  /// laid through is levelled beside it and cannot be seen.
+  Set<int> _fineSegments(CitySim city, RoadSpline road, List<Vec2> pts,
+      List<int> todo, String hw, double Function(Vec2) groundUnder) {
+    if (voxelM <= 0) return const {}; // derived from each brush's radius
+    if (_fineVoxelM(road) >= voxelM) return const {};
+    final halfW = road.halfWidth;
+    final lat = halfW + voxelM;
+    bool carried(int i) {
+      final a = pts[i - 1], b = pts[i];
+      final da = groundUnder(a), db = groundUnder(b);
+      for (final t in const [0.25, 0.5, 0.75]) {
+        final g = groundUnder(a + (b - a) * t);
+        if ((g - (da + (db - da) * t)).abs() > corridorReliefTolM) return false;
+      }
+      final run = b - a;
+      final len = run.length;
+      if (len < 1e-6) return true;
+      final side = Vec2(-run.n / len, run.e / len);
+      final m = a + run * 0.5;
+      final gl = groundUnder(m + side * lat), gr = groundUnder(m - side * lat);
+      return ((gl + gr) / 2 - (da + db) / 2).abs() <= corridorReliefTolM &&
+          (gl - gr).abs() / (2 * lat) * halfW <= corridorCrossFallTolM;
+    }
+
+    final hit = <int>{
+      for (final i in todo)
+        if (city.fineCorridors.contains('road:${road.id}:$hw:$i') ||
+            !carried(i))
+          i,
+    };
+    if (hit.isEmpty) return hit;
+    return {
+      for (final i in todo)
+        if (hit.any((h) => (h - i).abs() <= corridorFineSpan)) i,
+    };
   }
 
   /// Spacing (m) of a road corridor's knots: a road is graded as straight
@@ -247,7 +369,11 @@ class CityTerrainShaper {
   static void markShaped(CitySim city, String key, TerrainBrush brush) {
     city.shapedTerrain.add(key);
     if (brush.kind == TerrainBrushKind.cutFill) {
-      city.corridorDatums[key] = (brush.datumRadiusM, brush.datumRadiusEndM);
+      city.corridorDatums[key] = (
+        brush.datumRadiusM,
+        brush.datumRadiusEndM,
+        voxelM: brush.minVoxelM,
+      );
     }
   }
 

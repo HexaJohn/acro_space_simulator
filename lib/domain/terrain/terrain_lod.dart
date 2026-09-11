@@ -629,6 +629,53 @@ List<TerrainRefinement> _mergeTargets(
   ];
 }
 
+/// Lateral resolution a chunk [k] of a body of [radiusM] meshes at among the
+/// edit [brushes] near it: [resolution] times the smallest power-of-two
+/// boost, capped at [maxBoost], that meshes the finest brush over the chunk
+/// at the voxel [refinementsFor] asked for it (floor included) — the "mesh
+/// finer instead of splitting deeper" half of forced refinement. A brush
+/// the full boost cannot reach from this chunk is splitting's job and does
+/// not count.
+///
+/// Whether a brush is over the chunk is judged at the brush's OWN radius
+/// ([TerrainBrush.centreBF] lies on the ground), not on the datum sphere the
+/// chunk's centre is kept on: on a site hundreds of metres off its datum a
+/// deep chunk — a road's, ~90 m across at level 16 — is further from its
+/// datum centre than its own reach, and a datum test found no brush over
+/// it, so the leaf refined to carry a road cut was meshed four times too
+/// coarse. Scoped invalidation in the renderer learned the same lesson.
+///
+/// Pure, so the renderer's choice is testable headless.
+int editResolutionFor(
+  ChunkKey k,
+  double radiusM,
+  int resolution,
+  Iterable<TerrainBrush> brushes, {
+  int maxBoost = 4,
+  double voxelsAcrossBrush = 8,
+  double? circumradiusM,
+}) {
+  if (maxBoost <= 1) return resolution;
+  final reach = circumradiusM ?? k.circumradiusM(radiusM);
+  final dir = k.centreDirection;
+  final chunkVoxelM = reach * 2.0 / resolution;
+  var boost = 1;
+  for (final b in brushes) {
+    final centre = dir * b.centreBF.length;
+    if ((b.centreBF - centre).length > reach + b.lateralReachM) continue;
+    // Same target as [refinementsFor], floor included, so the boost a chunk
+    // gets and the level the tree was forced to agree.
+    final targetM =
+        math.max(b.radiusM * 2.0 / voxelsAcrossBrush, b.minVoxelM);
+    if (chunkVoxelM > targetM * maxBoost) continue; // splitting's job
+    while (boost < maxBoost && chunkVoxelM > targetM * boost) {
+      boost <<= 1;
+    }
+    if (boost >= maxBoost) break;
+  }
+  return resolution * boost;
+}
+
 /// Refinement targets covering [brush]'s footprint on a body of [radiusM].
 ///
 /// Returns the centre plus a ring on the footprint's edge rather than a single
@@ -676,8 +723,19 @@ List<TerrainRefinement> refinementsFor(
     final start = brush.centreBF * 2.0 - end;
     final axis = end - start;
     final len = axis.length;
-    final lat = brush.radiusM + brush.falloffM;
-    if (len <= 0 || lat <= 0) return const [];
+    final shoulder = brush.radiusM + brush.falloffM;
+    // A corridor meshed with four voxels or more across its carriageway is
+    // one that asked to show its cut (a road laid through relief). The ring
+    // the 2:1 balance puts round its island is a level coarser and
+    // unboosted — eight times its voxel at the default boost — and a mesh
+    // overlaps a voxel past its own edge: the island reaches that far past
+    // the shoulders, or the ring is drawn over the carriageway wherever the
+    // island ends beside it (a grass wedge across a re-laid one-way where
+    // its island's edge crossed it). A corridor at a colony's coarse voxel
+    // shows no cut to cover, and keeps its targets where they were.
+    final resolved = targetVoxelM * 4 <= brush.radiusM * 2;
+    final lat = shoulder + (resolved ? 8 * targetVoxelM : 0);
+    if (len <= 0 || shoulder <= 0) return const [];
     final aDir = axis / len;
     final targets = <TerrainRefinement>[];
     void addAt(Vector3 p) {
@@ -692,7 +750,7 @@ List<TerrainRefinement> refinementsFor(
     // Shoulder samples spaced about one shoulder-width apart (bounded, so a
     // very long road stays a bounded list — mergedRefinementsFor dedupes the
     // overlap against the chunks they land in anyway).
-    final n = (len / math.max(lat, len / 64)).ceil().clamp(1, 64);
+    final n = (len / math.max(shoulder, len / 64)).ceil().clamp(1, 64);
     for (var i = 0; i <= n; i++) {
       final p = start + aDir * (len * i / n);
       var side = aDir.cross(p.normalized);
@@ -701,6 +759,14 @@ List<TerrainRefinement> refinementsFor(
       side = side / sl;
       addAt(p + side * lat);
       addAt(p - side * lat);
+      if (resolved) {
+        // Every cell the carriageway crosses, not only those its shoulders
+        // reach: a cell the road clips at a corner holds no shoulder
+        // sample, stayed a level coarser, and its seam crossed the road.
+        addAt(p);
+        addAt(p + side * brush.radiusM);
+        addAt(p - side * brush.radiusM);
+      }
     }
     addAt(start - aDir * lat);
     addAt(end + aDir * lat);
