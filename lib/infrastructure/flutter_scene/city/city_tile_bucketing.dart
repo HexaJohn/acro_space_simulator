@@ -482,8 +482,10 @@ class CityTileBucketer {
   }
 
   /// The end-table key of a road end at ([x], [y], [z]), body-fixed, with
-  /// its deck [liftM] above the drape. UI-thread only (`Object.hash` is
-  /// salted per isolate).
+  /// its deck [liftM] above the drape. A key made on one isolate compares
+  /// only with keys made on it — the table's on the UI thread, a worker's
+  /// own matching of two ends on the worker — and never crosses between
+  /// them (`Object.hash` is salted per isolate).
   ///
   /// Ten metres of position, and the lift in [RoadElevation.nodeMatchM]
   /// steps — with everything within that of the ground counted as the

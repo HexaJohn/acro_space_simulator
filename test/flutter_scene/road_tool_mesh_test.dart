@@ -1240,6 +1240,63 @@ void main() {
           roadEnds: [(hw, 2), null, (hw, 2), null]);
       expect(aboveDeck(res).any((p) => p.x.abs() < 1), isTrue);
     });
+
+    /// The junction pass's entry for [leg]'s first end, the one at the
+    /// origin, as the cut hands it to the tile the end lies in.
+    CityTileEnd endOf(RoadSnapshot leg) => CityTileEnd(
+        Vector3(leg.points[0], leg.points[1], leg.points[2]),
+        Vector3(leg.points[3], leg.points[4], leg.points[5]),
+        hw, RoadClass.street, true, false,
+        isStart: true, liftM: up);
+
+    test("an L's parapets stand clear of the other leg's lanes", () {
+      // Two raised streets joined end to end at a corner — the second
+      // snapped onto the first's free end. Only two ends meet and no plate
+      // is drawn, but each leg's inside parapet ran on across the other's
+      // lanes. The other end is found among the tile's roads, among its
+      // junction ends, and — the other leg the next tile's — there alone.
+      final cases = <(String, List<RoadSnapshot>, List<CityTileEnd>)>[
+        ('both legs in the tile', [east, north], const []),
+        ('and their ends', [east, north], [endOf(east), endOf(north)]),
+        ('north the next tile\'s', [east], [endOf(east), endOf(north)]),
+        ('east the next tile\'s', [north], [endOf(east), endOf(north)]),
+      ];
+      for (final (label, roads, ends) in cases) {
+        final walls = aboveDeck(meshWith(roads, CityTier.mid,
+            roadEnds: [for (final _ in roads) ...[(hw, 2), null]],
+            ends: ends));
+        expect(walls, isNotEmpty, reason: label);
+        for (final p in walls) {
+          final inEast = p.y.abs() < hw - 0.01 && p.x > 0;
+          final inNorth = p.x.abs() < hw - 0.01 && p.y > 0;
+          expect(inEast || inNorth, isFalse, reason: '$label: a parapet at $p');
+        }
+        // Held back at the corner, and running on past it down both legs.
+        if (roads.contains(east)) {
+          expect(walls.any((p) => p.x > 20), isTrue, reason: label);
+        }
+        if (roads.contains(north)) {
+          expect(walls.any((p) => p.y > 20), isTrue, reason: label);
+        }
+      }
+    });
+
+    test('a deck bending gently through a joint keeps its parapets', () {
+      // Ten degrees off straight on is still one road going on.
+      final a = 10 * math.pi / 180;
+      final on = leg([
+        for (var i = 0; i < 11; i++)
+          (i * 20.0 * math.cos(a), i * 20.0 * math.sin(a)),
+      ]);
+      for (final ends in [
+        const <CityTileEnd>[],
+        [endOf(west), endOf(on)],
+      ]) {
+        final res = meshWith([west, on], CityTier.mid,
+            roadEnds: [(hw, 2), null, (hw, 2), null], ends: ends);
+        expect(aboveDeck(res).any((p) => p.x.abs() < 1), isTrue);
+      }
+    });
   });
 
   group('one-way arrows', () {
