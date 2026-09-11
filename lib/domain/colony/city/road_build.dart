@@ -508,10 +508,15 @@ List<Vec2> controlsWithMovedEnd(
 
 /// § as the HUD prints it: rounded up to the whole coin — a bill of
 /// §1,239.20 needs §1,240 in the bank — with thousands separated.
+///
+/// Up from the nearest CENT, not from the raw double: a length times a
+/// price per metre lands a hair over the whole number (§1,080.0000000000007
+/// for a §1,080 road), and rounding that up printed a coin nobody owes.
 String formatMoney(double amount) {
-  final whole = amount.isFinite ? amount.ceil().abs() : 0;
+  final cents = amount.isFinite ? (amount * 100).roundToDouble() : 0.0;
+  final whole = (cents / 100).ceil().abs();
   final digits = whole.toString();
-  final out = StringBuffer(amount < 0 ? '-§' : '§');
+  final out = StringBuffer(cents < 0 && whole > 0 ? '-§' : '§');
   for (var i = 0; i < digits.length; i++) {
     if (i > 0 && (digits.length - i) % 3 == 0) out.write(',');
     out.write(digits[i]);
