@@ -245,6 +245,29 @@ void main() {
       expect(find.textContaining('Drag an end circle'), findsNothing);
     });
 
+    testWidgets('Routes counts one route as a route', (t) async {
+      final city = colony();
+      final id =
+          city.commitRoad(const [Vec2(0, 0), Vec2(0, 200)], RoadClass.street)!;
+      for (var i = 0; i < 1000 && !city.trafficReadout.hasRun; i++) {
+        city.roadTraffic.advance(0.1);
+      }
+      expect(city.trafficReadout.hasRun, isTrue);
+      final c = await pumpTool(t, city, tool: CityEditTool.traffic);
+      c.selectRoad(id);
+      final name = city.roadNameOf(id);
+      for (final (n, text) in [
+        (1, '$name: 1 route'),
+        (2, '$name: 2 routes'),
+        (0, '$name: 0 routes'),
+      ]) {
+        c.routeCount = n;
+        c.changed();
+        await t.pump();
+        expect(find.text(text), findsOneWidget, reason: '$n');
+      }
+    });
+
     testWidgets('Routes filters by why a trip travels', (t) async {
       final c = await pumpTool(t, colony(), tool: CityEditTool.traffic);
       expect(find.text('Goods'), findsOneWidget);

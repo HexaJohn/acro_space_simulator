@@ -504,6 +504,7 @@ class TrafficToolPanel extends StatelessWidget {
   Widget _routesRow() {
     final c = controller;
     final id = c.selectedRoadId;
+    final n = c.routeCount ?? 0;
     return _row([
       for (final k in TripKind.values) _kindChip(k),
       const SizedBox(width: 8),
@@ -512,7 +513,8 @@ class TrafficToolPanel extends StatelessWidget {
       else if (id == null)
         _hint('Click a road to see the trips that use it')
       else
-        _value('${city.roadNameOf(id)}: ${c.routeCount ?? 0} routes', _text),
+        _value('${city.roadNameOf(id)}: $n ${n == 1 ? 'route' : 'routes'}',
+            _text),
     ]);
   }
 
