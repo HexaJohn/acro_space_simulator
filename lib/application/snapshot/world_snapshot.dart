@@ -1403,6 +1403,20 @@ class RoadSnapshot {
   final double? startHalfWidthM;
   final double? endHalfWidthM;
 
+  /// The road's id in its colony's layout: what the road tool's overlays
+  /// and the renderer's instant edited-road path map a drawn road back to.
+  /// Travels on the frame, never into the tile columns (a string per road
+  /// would cost every tile's pack).
+  final String? id;
+
+  /// `RoadDecoration.index`: decorative grass or trees (0 = plain).
+  final int decoration;
+
+  /// Deck above the drape, metres, one per point: the road tool's raised
+  /// and sunk roads. EMPTY for a road that follows the ground. Below
+  /// `-RoadElevation.tunnelCoverM` the road is in a tunnel.
+  final List<double> lifts;
+
   const RoadSnapshot({
     required this.colonyId,
     required this.body,
@@ -1415,6 +1429,9 @@ class RoadSnapshot {
     this.bridges = const [],
     this.startHalfWidthM,
     this.endHalfWidthM,
+    this.id,
+    this.decoration = 0,
+    this.lifts = const [],
   });
 
   Map<String, dynamic> toJson() => {
@@ -1429,6 +1446,9 @@ class RoadSnapshot {
         if (bridges.isNotEmpty) 'br': bridges,
         if (startHalfWidthM != null) 'hw0': startHalfWidthM,
         if (endHalfWidthM != null) 'hw1': endHalfWidthM,
+        if (id != null) 'id': id,
+        if (decoration != 0) 'deco': decoration,
+        if (lifts.isNotEmpty) 'lift': lifts,
       };
 
   factory RoadSnapshot.fromJson(Map<String, dynamic> j) => RoadSnapshot(
@@ -1447,6 +1467,11 @@ class RoadSnapshot {
         ]),
         startHalfWidthM: (j['hw0'] as num?)?.toDouble(),
         endHalfWidthM: (j['hw1'] as num?)?.toDouble(),
+        id: j['id'] as String?,
+        decoration: (j['deco'] as num?)?.toInt() ?? 0,
+        lifts: Float64List.fromList([
+          for (final v in (j['lift'] as List?) ?? const []) (v as num).toDouble()
+        ]),
       );
 }
 

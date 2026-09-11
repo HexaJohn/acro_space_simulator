@@ -45,11 +45,33 @@ import '../../../domain/shared/vector3.dart';
 /// what the road is. Body-fixed; the junction pass anchors it.
 class CityTileEnd {
   const CityTileEnd(this.at, this.next, this.halfWidthM, this.roadClass,
-      this.paved, this.collector);
+      this.paved, this.collector,
+      {this.isStart = false, this.liftM = 0});
   final Vector3 at, next;
   final double halfWidthM;
   final RoadClass roadClass;
   final bool paved, collector;
+
+  /// This end is its road's FIRST point — in the direction of travel, since
+  /// the frame flips a reversed one-way road. What the traffic-light warrant
+  /// reads to tell a one-way road leaving a junction from one arriving.
+  final bool isStart;
+
+  /// The road's deck above the drape at this end (0 at grade). Ends at
+  /// different heights are not one junction: an overpass end is not a leg
+  /// of the crossing under it.
+  final double liftM;
+}
+
+/// A player's override of one junction in a tile (the Junctions view),
+/// body-fixed: lights forced on (1), off (0) or left to the warrant (-1),
+/// and a point 12 m out along each leg that stops (xyz triplets; empty
+/// leaves the default stop legs).
+class CityTileJunction {
+  const CityTileJunction(this.at, this.lights, this.stopPoints);
+  final Vector3 at;
+  final int lights;
+  final List<double> stopPoints;
 }
 
 /// A tile's members as the mesher reads them: the snapshot lists, rebuilt
@@ -62,7 +84,11 @@ class CityTileMembers {
     required this.ends,
     required this.roadEnds,
     required this.transitEnds,
+    this.junctions = const [],
   });
+
+  /// The player's junction overrides that fall in the tile.
+  final List<CityTileJunction> junctions;
 
   final List<BuildingSnapshot> buildings;
   final List<RoadSnapshot> roads;
