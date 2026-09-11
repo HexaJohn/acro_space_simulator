@@ -6,6 +6,7 @@
 import 'dart:math' as math;
 
 import 'package:acro_space_simulator/domain/colony/city/traffic_readout.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/agent_traffic_readout.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/traffic_tuning.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -124,7 +125,7 @@ void main() {
     expect(m.hasRun, isTrue, reason: 'the routed model has a picture too');
     for (final lot in city.layout.autoParcels) {
       expect(r.serviceReach(lot.id), m.serviceReach(lot.id));
-      expect(r.fireReach(lot.id), m.serviceReach(lot.id));
+      expect(r.fireReach(lot.id), m.fireReach(lot.id));
       expect(r.deliveryReach(lot.id), m.deliveryReach(lot.id));
       expect(r.noiseOf(lot.id), m.noiseOf(lot.id));
       expect(r.landValueOf(lot.id), m.landValueOf(lot.id));
@@ -132,4 +133,79 @@ void main() {
     expect(r.averageLandValue, m.averageLandValue);
     expect(r.taxLandValueFactor, m.taxLandValueFactor);
   });
+
+  test('fire reach is the routed model\'s fire reach, not its service reach; '
+      'passes count its pictures with ours, and never go back', () {
+    final a = agentsOn(town());
+    final routed = _Routed()..passes = 5;
+    final r = AgentTrafficReadout(a, routed);
+    final lot = a.city.layout.autoParcels.first.id;
+    expect(r.serviceReach(lot), isTrue);
+    expect(r.fireReach(lot), isFalse,
+        reason: 'an ambulance reaching a lot is no fire cover there');
+
+    expect(r.passes, 0,
+        reason: 'no picture of ours yet, whatever the routed model has');
+    runAgents(a, 60);
+    final own = a.pictures;
+    expect(own, greaterThan(0));
+    expect(r.passes, own + 5);
+    routed.passes = 6;
+    expect(r.passes, own + 6,
+        reason: 'the forwarded answers moved, so a view must redraw');
+
+    // Off and on again: the tables start afresh, and the count stands.
+    a.enabled = false;
+    a.enabled = true;
+    expect(r.hasRun, isFalse);
+    expect(r.passes, own + 6);
+  });
+}
+
+/// A routed model that tells fire reach from service reach, with a pass
+/// count the test moves by hand.
+class _Routed implements CityTrafficReadout {
+  @override
+  int passes = 0;
+
+  @override
+  bool get hasRun => true;
+
+  @override
+  double get peakCongestion => 0;
+
+  @override
+  double get averageCongestion => 0;
+
+  @override
+  double congestionOf(String roadId) => 0;
+
+  @override
+  double volumeOf(String roadId) => 0;
+
+  @override
+  List<TripRoute> routesThrough(String roadId,
+          {Set<TripKind>? kinds, int limit = 64}) =>
+      const [];
+
+  @override
+  bool serviceReach(String lotId) => true;
+
+  @override
+  bool fireReach(String lotId) => false;
+
+  @override
+  bool deliveryReach(String lotId) => true;
+
+  @override
+  double noiseOf(String lotId) => 0;
+
+  @override
+  double landValueOf(String lotId) => 0.5;
+
+  @override
+  double get averageLandValue => 0.5;
+
+  @override
+  double get taxLandValueFactor => 1;
 }

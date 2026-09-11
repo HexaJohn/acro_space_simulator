@@ -51,11 +51,21 @@ class AgentTrafficReadout implements CityTrafficReadout {
   @override
   bool get hasRun => agents.stats.hasRun;
 
-  /// Pictures taken: 0 before the first, moving with every one and never
-  /// going back, so a view can key what it drew on it. Our own count only —
-  /// the routed model's forwarded answers join it once dev's readout
-  /// carries a `passes` of its own (not in this checkout).
-  int get passes => agents.pictures;
+  /// Pictures published: ours, and the routed model's that the forwarded
+  /// answers come from — 0 before our first, then moving whenever either
+  /// takes one, so a view keyed on it redraws whenever any answer may have
+  /// changed (D47).
+  ///
+  /// Never going back: both counts only grow, and ours is the colony's
+  /// ever ([CityAgents.pictures]). Gated on that rather than on [hasRun],
+  /// which falls back to false when the agents are switched off and on
+  /// again and their tables start afresh: gated on it, the count would drop
+  /// to 0 across the restart.
+  @override
+  int get passes {
+    final own = agents.pictures;
+    return own == 0 ? 0 : own + routed.passes;
+  }
 
   @override
   double get peakCongestion => hasRun ? agents.stats.peakCongestion : 0.0;
@@ -157,11 +167,11 @@ class AgentTrafficReadout implements CityTrafficReadout {
   @override
   bool serviceReach(String lotId) => routed.serviceReach(lotId);
 
-  /// Reach from the stations with safety cover only (D47). Forwarded to the
-  /// routed model's service reach in this checkout, whose readout has no
-  /// fire reach of its own yet; it becomes `routed.fireReach` — and an
-  /// override — once dev's readout carries one.
-  bool fireReach(String lotId) => routed.serviceReach(lotId);
+  /// Reach from the stations with safety cover only (D47): the routed
+  /// model's fire reach, never its service reach — a clinic's ambulance
+  /// reaching a lot puts no fire out there.
+  @override
+  bool fireReach(String lotId) => routed.fireReach(lotId);
 
   @override
   bool deliveryReach(String lotId) => routed.deliveryReach(lotId);
