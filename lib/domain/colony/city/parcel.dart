@@ -771,9 +771,18 @@ class RoadDeck {
     );
   }
 
+  /// How far past either end of a range an arc still reads as in it. The
+  /// survey closes its last range at its own sum of two-metre samples, and
+  /// a road's length summed another way — its index's chord, a split's
+  /// piece — lands a few ulps either side of it. Read exactly, a deck on
+  /// its piers to its very end came off them at its last point and met the
+  /// street beneath it: the graph joined what the snap and the tiles kept
+  /// apart. A micrometre is noise to every range, and no gap between two.
+  static const double _withinSlackM = 1e-6;
+
   static bool _within(double s, List<(double, double)> ranges) {
     for (final (a, b) in ranges) {
-      if (s >= a && s <= b) return true;
+      if (s >= a - _withinSlackM && s <= b + _withinSlackM) return true;
     }
     return false;
   }

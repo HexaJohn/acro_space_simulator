@@ -12,6 +12,7 @@ import 'package:acro_space_simulator/domain/colony/city/sprawl_plan.dart'
     show kMileM;
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_bucketing.dart';
+import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_columns.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// The cut is incremental: a tile whose structure key held is kept as
@@ -292,28 +293,20 @@ void main() {
   group('an overpass end is tabled apart from the crossing under it', () {
     final p = at(1600, 1600);
 
-    test('the lift term: zero at grade, otherwise never zero', () {
-      expect(CityTileBucketer.liftTermOf(0), 0);
-      expect(CityTileBucketer.liftTermOf(1.9), 0);
-      expect(CityTileBucketer.liftTermOf(-1.9), 0);
-      expect(CityTileBucketer.liftTermOf(2.1), isNot(0));
-      expect(CityTileBucketer.liftTermOf(-2.1), isNot(0));
-      expect(CityTileBucketer.liftTermOf(6), 3);
-      expect(CityTileBucketer.liftTermOf(-6), -3);
-    });
+    int key([double? deck]) => CityTileBucketer.endKeyOf(p.x, p.y, p.z, deck);
+    (double, int)? entry(CityBucketPlan plan, [double? deck]) =>
+        plan.endHalf['moon']![key(deck)];
 
-    test('keys fuse at grade and at one deck height, not across heights',
+    test('the roads on the ground share a key; each deck end has its own',
         () {
-      int key(double lift) => CityTileBucketer.endKeyOf(p.x, p.y, p.z, lift);
-      // A deck end at grade meets the ground roads there.
-      expect(key(1.5), key(0));
-      // Two decks at the same height meet each other.
-      expect(key(6.4), key(6));
+      // A deck laid flush is still a deck.
+      expect(key(0), isNot(key()));
       // The tool's steps — 3, 6, 12 m — never fall on the ground's key.
       for (final lift in [3.0, 6.0, 12.0, -6.0, -12.0]) {
-        expect(key(lift), isNot(key(0)), reason: '$lift m');
+        expect(key(lift), isNot(key()), reason: '$lift m');
       }
       expect(key(12), isNot(key(6)));
+      expect(key(12), key(12));
     });
 
     test('a raised road ending over a street is its own end entry', () {
@@ -321,12 +314,56 @@ void main() {
       final raised = road([(1600, 1600), (1900, 1600), (2200, 1600)],
           lifts: const [12, 12, 12]);
       final flatOne = road([(1600, 1600), (1900, 1600), (2200, 1600)]);
-      final table = cut(frame([street, raised])).endHalf['moon']!;
-      expect(table[CityTileBucketer.endKeyOf(p.x, p.y, p.z, 0)], (4.0, 1));
-      expect(table[CityTileBucketer.endKeyOf(p.x, p.y, p.z, 12)], (4.0, 1));
+      final table = cut(frame([street, raised]));
+      expect(entry(table), (4.0, 1));
+      expect(entry(table, 12), (4.0, 1));
       // On the ground the two ends are one meeting of two.
-      final fused = cut(frame([street, flatOne])).endHalf['moon']!;
-      expect(fused[CityTileBucketer.endKeyOf(p.x, p.y, p.z, 0)], (4.0, 2));
+      expect(entry(cut(frame([street, flatOne]))), (4.0, 2));
+    });
+
+    test('ends meet by the grade-separation rule, pair by pair', () {
+      RoadSnapshot west([List<double> lifts = const []]) =>
+          road([(1000, 1600), (1300, 1600), (1600, 1600)], lifts: lifts);
+      RoadSnapshot east([List<double> lifts = const []]) =>
+          road([(1600, 1600), (1900, 1600), (2200, 1600)], lifts: lifts);
+      RoadSnapshot south([List<double> lifts = const []]) =>
+          road([(1600, 1000), (1600, 1300), (1600, 1600)], lifts: lifts);
+      RoadSnapshot north([List<double> lifts = const []]) =>
+          road([(1600, 1600), (1600, 1900), (1600, 2200)], lifts: lifts);
+      List<double> deck(double lift) => [lift, lift, lift];
+
+      // Two decks crossing on their piers four metres apart: one junction
+      // in the air, as the layout cut it — every leg pulls back from it.
+      final decks = cut(frame(
+          [west(deck(20)), east(deck(20)), south(deck(24)), north(deck(24))]));
+      expect(entry(decks, 20), (4.0, 4));
+      expect(entry(decks, 24), (4.0, 4));
+      // At the grade separation they pass: two roads carrying on.
+      final passing = cut(frame([
+        west(deck(20)),
+        east(deck(20)),
+        south(deck(24.5)),
+        north(deck(24.5)),
+      ]));
+      expect(entry(passing, 20), (4.0, 2));
+      expect(entry(passing, 24.5), (4.0, 2));
+
+      // A road sunk three metres into a cutting, ending on a street: graded
+      // into the ground, it meets both the street's pieces and they it.
+      final cutting = cut(frame([west(), east(), north(deck(-3))]));
+      expect(entry(cutting), (4.0, 3));
+      expect(entry(cutting, -3), (4.0, 3));
+      // In its tunnel it passes under.
+      final tunnel = cut(frame([west(), east(), north(deck(-9))]));
+      expect(entry(tunnel), (4.0, 2));
+      expect(entry(tunnel, -9), (4.0, 1));
+
+      // A deck laid flush meets the street, and a deck three metres up;
+      // the street does not meet the one on its piers.
+      final flush = cut(frame([west(), east(deck(0)), north(deck(3))]));
+      expect(entry(flush), (4.0, 2));
+      expect(entry(flush, 0), (4.0, 3));
+      expect(entry(flush, 3), (4.0, 2));
     });
 
     test('ends carry which is the start of travel, and their deck lift', () {
@@ -340,6 +377,47 @@ void main() {
       expect(last.liftM, 12);
       expect(first.at, at(1600, 1600));
       expect(last.at, at(2200, 1600));
+    });
+
+    test('ends carry whether their road has a deck, through the columns',
+        () {
+      final flush = road([(1600, 1600), (1900, 1600), (2200, 1600)],
+          lifts: const [0, 0, 0]);
+      final ground = road([(1000, 1600), (1300, 1600), (1600, 1600)]);
+      final ends = cut(frame([flush, ground])).tiles[tileA]!.ends;
+      expect(ends, hasLength(4));
+      // A deck laid flush is a deck, at a lift of 0.
+      final decked = ends.where((e) => e.onDeck).toList();
+      expect(decked, hasLength(2));
+      expect(decked.map((e) => e.liftM), [0, 0]);
+      final back = CityTileColumns.fromSnapshots(
+        buildings: const [],
+        roads: const [],
+        patches: CityPatchColumns.empty,
+        ends: ends,
+        roadEnds: const [],
+        transitEnds: const [],
+      ).toSnapshots().ends;
+      expect([for (final e in back) e.onDeck], [for (final e in ends) e.onDeck]);
+      expect([for (final e in back) e.liftM], [for (final e in ends) e.liftM]);
+    });
+
+    test('a deck laid flush re-keys the tiles it meets', () {
+      // The same line on the ground and as a flush deck: the same points,
+      // the same lift of 0 — only the deck tells them apart.
+      final street = road([(1000, 1600), (1300, 1600), (1600, 1600)]);
+      final before = keys(cut(frame([
+        street,
+        road([(1600, 1600), (1900, 1600), (2200, 1600)]),
+      ])));
+      final d = CityTileBucketer.diff(
+          before,
+          cut(frame([
+            street,
+            road([(1600, 1600), (1900, 1600), (2200, 1600)],
+                lifts: const [0, 0, 0]),
+          ])));
+      expect(d.rekeyed, [tileA]);
     });
   });
 

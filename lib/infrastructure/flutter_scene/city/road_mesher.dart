@@ -53,7 +53,9 @@ class RoadEnd {
       {this.paved = true,
       this.collector = false,
       this.isStart = false,
-      this.liftM = 0});
+      this.liftM = 0,
+      bool? onDeck})
+      : onDeck = onDeck ?? liftM != 0;
   final Vector3 at;
   final Vector3 next;
   final double halfWidthM;
@@ -73,6 +75,13 @@ class RoadEnd {
   /// different heights are not one junction — an overpass's end is not a
   /// leg of the crossing under it (see [RoadMesher.liftsSeparated]).
   final double liftM;
+
+  /// The road has a deck here — raised, sunk, or laid flush at a lift of
+  /// exactly 0 — rather than lying on the drape: which side of
+  /// [RoadMesher.liftsSeparated] the end answers to, and what a lift of 0
+  /// alone cannot say. The tiles carry it from the cut
+  /// (`CityTileEnd.onDeck`); unsaid, any lift at all is a deck.
+  final bool onDeck;
 }
 
 /// One leg of a junction: the direction it leaves the node in, and what it is.
@@ -1001,21 +1010,24 @@ class RoadMesher {
   /// difference of the decks' heights; and a deck stands clear of the
   /// ground — on piers or in its tunnel — where its lift is past
   /// [RoadElevation.structureClearM] or below `-tunnelCoverM`, the survey's
-  /// own line. No lift at all is a road on the ground (the snapshot carries
-  /// lifts only for a deck), which has no level of its own. So: two roads
-  /// on the ground meet; two decks pass [RoadElevation.gradeSeparationM]
-  /// apart or more; a deck and a road on the ground pass where the deck is
-  /// clear of the ground. (A 1.5 m tolerance of its own left two decks four
-  /// metres apart, or a road sunk three metres into a cutting, cut into a
-  /// junction nobody saw.) The generator's roads carry no lifts, so every
-  /// end it lays meets every other exactly as it always has.
-  static bool liftsSeparated(double liftA, double liftB) {
-    final onA = liftA == 0, onB = liftB == 0;
-    if (onA && onB) return false;
-    if (!onA && !onB) {
+  /// own line. [deckA] and [deckB] say which ends are on a deck
+  /// ([RoadEnd.onDeck]); an end on none is a road on the ground, which has
+  /// no level of its own. So: two roads on the ground meet; two decks pass
+  /// [RoadElevation.gradeSeparationM] apart or more; a deck and a road on
+  /// the ground pass where the deck is clear of the ground. (A 1.5 m
+  /// tolerance of its own left two decks four metres apart, or a road sunk
+  /// three metres into a cutting, cut into a junction nobody saw; and a
+  /// deck told from the ground by a lift of 0 took one laid flush for the
+  /// ground, and parted it from a deck three metres up that the layout
+  /// joins it to.) The generator's roads carry no deck, so every end it
+  /// lays meets every other exactly as it always has.
+  static bool liftsSeparated(
+      double liftA, bool deckA, double liftB, bool deckB) {
+    if (!deckA && !deckB) return false;
+    if (deckA && deckB) {
       return (liftA - liftB).abs() >= RoadElevation.gradeSeparationM;
     }
-    final deck = onA ? liftB : liftA;
+    final deck = deckA ? liftA : liftB;
     return deck > RoadElevation.structureClearM ||
         deck < -RoadElevation.tunnelCoverM;
   }
@@ -1126,7 +1138,10 @@ class RoadMesher {
               if (math.sqrt(ex * ex + ey * ey + ez * ez) > toleranceM) continue;
               // Not the seed's level: a road passing over the node or
               // under it, which is no leg of it.
-              if (liftsSeparated(ends[j].liftM, ends[i].liftM)) continue;
+              if (liftsSeparated(ends[j].liftM, ends[j].onDeck,
+                  ends[i].liftM, ends[i].onDeck)) {
+                continue;
+              }
               near.add(j);
             }
           }
@@ -1145,11 +1160,15 @@ class RoadMesher {
       final lift = ends[i].liftM;
       if (lift < -RoadElevation.tunnelCoverM) continue;
       final legs = <RoadLeg>[];
+      // Any leg on a deck at all is the tool's (see [byClass]) — one laid
+      // flush included, as the graph counts it: a deck, not a lift.
+      var lifted = false;
       for (final e in group) {
         final inward = e.next - e.at;
         if (inward.length < 1e-6) continue;
         legs.add(RoadLeg(inward.normalized, e.halfWidthM, e.roadClass,
             paved: e.paved, startsHere: e.isStart, liftM: e.liftM));
+        lifted = lifted || e.onDeck;
       }
       // Where two collectors cross — all four legs collectors, or three at
       // a T — a subdivision builds a roundabout, not a four-way stop.
@@ -1163,8 +1182,6 @@ class RoadMesher {
           JunctionLeg(legs[k].roadClass,
               startsHere: legs[k].startsHere, heading: headings?[k] ?? 0),
       ];
-      // Any lift at all is a deck the tool laid (see [byClass]).
-      final lifted = legs.any((l) => l.liftM != 0);
       final plan = junctionPlan(jlegs,
           lifted: lifted,
           roundaboutPreferred: collectors >= 3,

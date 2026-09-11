@@ -473,17 +473,22 @@ List<RoadJunction> referenceJunctionsFromEnds(List<RoadEnd> ends,
     for (var j = i + 1; j < ends.length; j++) {
       if (used[j]) continue;
       if ((ends[j].at - at).length > toleranceM) continue;
-      if (RoadMesher.liftsSeparated(ends[j].liftM, ends[i].liftM)) continue;
+      if (RoadMesher.liftsSeparated(
+          ends[j].liftM, ends[j].onDeck, ends[i].liftM, ends[i].onDeck)) {
+        continue;
+      }
       used[j] = true;
       group.add(ends[j]);
     }
     if (ends[i].liftM < -RoadElevation.tunnelCoverM) continue;
     final legs = <RoadLeg>[];
+    var lifted = false;
     for (final e in group) {
       final inward = e.next - e.at;
       if (inward.length < 1e-6) continue;
       legs.add(RoadLeg(inward.normalized, e.halfWidthM, e.roadClass,
           paved: e.paved, startsHere: e.isStart, liftM: e.liftM));
+      lifted = lifted || e.onDeck;
     }
     // Where two collectors cross — all four legs collectors, or three at
     // a T — a subdivision builds a roundabout, not a four-way stop.
@@ -491,7 +496,6 @@ List<RoadJunction> referenceJunctionsFromEnds(List<RoadEnd> ends,
     final jlegs = [
       for (final l in legs) JunctionLeg(l.roadClass, startsHere: l.startsHere)
     ];
-    final lifted = legs.any((l) => l.liftM != 0);
     final plan = RoadMesher.junctionPlan(jlegs,
         lifted: lifted, roundaboutPreferred: collectors >= 3);
     if (plan.control == JunctionControl.none) continue;

@@ -608,9 +608,9 @@ void main() {
     // At the pole, so the node's tangent frame is the town's own: east +X,
     // north +Y.
     RoadEnd end(double dx, double dy, RoadClass cls,
-            {bool isStart = false, double lift = 0}) =>
+            {bool isStart = false, double lift = 0, bool? onDeck}) =>
         RoadEnd(Vector3.zero, Vector3(dx, dy, 0), cls.halfWidth, cls,
-            isStart: isStart, liftM: lift);
+            isStart: isStart, liftM: lift, onDeck: onDeck);
 
     test('ends meet only at one level', () {
       final js = RoadMesher.junctionsFromEnds([
@@ -672,15 +672,36 @@ void main() {
           ], anchorBF: anchor);
       expect(sunk(-3).single.legs, hasLength(3));
       expect(sunk(-9), isEmpty);
-      // The rule, both ways round, in lifts: none is the ground.
-      expect(RoadMesher.liftsSeparated(0, 0), isFalse);
-      expect(RoadMesher.liftsSeparated(-3, 0), isFalse);
-      expect(RoadMesher.liftsSeparated(0, 2.4), isFalse);
-      expect(RoadMesher.liftsSeparated(0, 2.6), isTrue);
-      expect(RoadMesher.liftsSeparated(-5.1, 0), isTrue);
-      expect(RoadMesher.liftsSeparated(24, 20), isFalse);
-      expect(RoadMesher.liftsSeparated(-6, -10), isFalse);
-      expect(RoadMesher.liftsSeparated(12, 17), isTrue);
+      // The rule, both ways round, in lifts: an end on no deck is the
+      // ground.
+      expect(RoadMesher.liftsSeparated(0, false, 0, false), isFalse);
+      expect(RoadMesher.liftsSeparated(-3, true, 0, false), isFalse);
+      expect(RoadMesher.liftsSeparated(0, false, 2.4, true), isFalse);
+      expect(RoadMesher.liftsSeparated(0, false, 2.6, true), isTrue);
+      expect(RoadMesher.liftsSeparated(-5.1, true, 0, false), isTrue);
+      expect(RoadMesher.liftsSeparated(24, true, 20, true), isFalse);
+      expect(RoadMesher.liftsSeparated(-6, true, -10, true), isFalse);
+      expect(RoadMesher.liftsSeparated(12, true, 17, true), isTrue);
+    });
+
+    test('a deck laid flush is a deck, not the ground', () {
+      // A deck at a lift of exactly 0 where two deck ends stand three
+      // metres up on their piers: two decks short of the grade separation,
+      // one junction — as the layout cut it and the graph routes it. A
+      // road on the ground there passes under the pair.
+      List<RoadJunction> over({required bool onDeck}) =>
+          RoadMesher.junctionsFromEnds([
+            end(10, 0, RoadClass.street, lift: 0, onDeck: onDeck),
+            end(-10, 0, RoadClass.street, lift: 3),
+            end(0, 10, RoadClass.street, lift: 3),
+          ], anchorBF: anchor);
+      expect(over(onDeck: true).single.legs, hasLength(3));
+      expect(over(onDeck: false), isEmpty);
+      expect(RoadMesher.liftsSeparated(0, true, 3, true), isFalse);
+      expect(RoadMesher.liftsSeparated(0, false, 3, true), isTrue);
+      // Unsaid, a lift says a deck: the only way a hand-built end is one.
+      expect(end(1, 0, RoadClass.street, lift: 3).onDeck, isTrue);
+      expect(end(1, 0, RoadClass.street).onDeck, isFalse);
     });
 
     test('an outgoing one-way leg has no bar, no mast and no signal', () {
@@ -823,10 +844,10 @@ void main() {
       // The crossing as a tile holds it: body-fixed ends, flags and all,
       // and the player's overrides, through the whole mesher at near.
       CityTileEnd tileEnd(double dx, double dy, RoadClass cls,
-              {bool isStart = false, double lift = 0}) =>
+              {bool isStart = false, double lift = 0, bool? onDeck}) =>
           CityTileEnd(anchor, anchor + Vector3(dx, dy, 0), cls.halfWidth, cls,
               true, false,
-              isStart: isStart, liftM: lift);
+              isStart: isStart, liftM: lift, onDeck: onDeck);
       final ends = [
         tileEnd(10, 0, RoadClass.boulevard),
         tileEnd(-10, 0, RoadClass.boulevard),
@@ -869,6 +890,22 @@ void main() {
               liftM: -9),
       ]);
       expect(sunk.groups, isEmpty);
+      // A deck laid flush over the node, with two decks three metres up on
+      // their piers: one junction where the flush end is a deck, none where
+      // it is a road on the ground — the tile carries which it is.
+      List<CityTileEnd> overDecks({required bool onDeck}) => [
+            tileEnd(10, 0, RoadClass.street, lift: 0, onDeck: onDeck),
+            tileEnd(-10, 0, RoadClass.street, lift: 3),
+            tileEnd(0, 10, RoadClass.street, lift: 3),
+          ];
+      expect(
+          meshWith(const [], CityTier.near, ends: overDecks(onDeck: true))
+              .groups,
+          isNotEmpty);
+      expect(
+          meshWith(const [], CityTier.near, ends: overDecks(onDeck: false))
+              .groups,
+          isEmpty);
     });
 
     test("the generator's junctions keep the class warrant, whichever way "

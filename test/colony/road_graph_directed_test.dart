@@ -8,8 +8,12 @@
 /// they are entered from.
 library;
 
+import 'dart:math' as math;
+
 import 'package:acro_space_simulator/domain/colony/city/city_layout.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
+import 'package:acro_space_simulator/domain/colony/city/road_build.dart';
+import 'package:acro_space_simulator/domain/colony/city/road_catalog.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_graph.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_junction.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
@@ -298,6 +302,39 @@ void main() {
         endOffsetM: -12,
         tunnels: [(0.0, 145.0)]);
     expect(stub(tunnel).nodeCount, 4);
+  });
+
+  test('a deck on its piers to its very end never meets the street under it',
+      () {
+    // The survey closes the deck's last range at its own sum of two-metre
+    // samples; the road's index length can come out a few ulps past it.
+    // Read exactly, the last end fell off its piers — onto the street
+    // twelve metres below, which the layout never snapped it to.
+    final type = RoadType.byId('two-lane')!;
+    var joined = 0;
+    final missed = <String>[];
+    for (var k = 0; k < 20; k++) {
+      final len = 57.3 + k * 13.7;
+      for (final a in const [0.0, 0.37, 0.74]) {
+        final end = Vec2(len * math.cos(a), len * math.sin(a));
+        final out = Vec2(-math.sin(a), math.cos(a));
+        final layout = CityLayout();
+        layout.commitRoad(controls: [end, end + out * 150]);
+        final deck = quoteRoadBuild(RoadBuildRequest(
+          controls: [const Vec2(0, 0), end],
+          type: type,
+          startElevationM: 12,
+          endElevationM: 12,
+        )).deck!;
+        layout.commitRoad(controls: [const Vec2(0, 0), end], deck: deck);
+        final g = RoadGraph.of(layout);
+        if (g.nodeCount != 4 || g.nodeNear(end)!.legs.length != 1) {
+          joined++;
+          missed.add('len $len, angle $a');
+        }
+      }
+    }
+    expect(joined, 0, reason: 'joined at ${missed.join('; ')}');
   });
 
   test('an alley meeting a street is a curb cut: no stop, as the tiles '

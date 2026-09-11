@@ -49,7 +49,8 @@ import '../../../domain/shared/vector3.dart';
 class CityTileEnd {
   const CityTileEnd(this.at, this.next, this.halfWidthM, this.roadClass,
       this.paved, this.collector,
-      {this.isStart = false, this.liftM = 0});
+      {this.isStart = false, this.liftM = 0, bool? onDeck})
+      : onDeck = onDeck ?? liftM != 0;
   final Vector3 at, next;
   final double halfWidthM;
   final RoadClass roadClass;
@@ -64,6 +65,11 @@ class CityTileEnd {
   /// different heights are not one junction: an overpass end is not a leg
   /// of the crossing under it.
   final double liftM;
+
+  /// The road has a deck ([RoadEnd.onDeck]): the cut sets it from whether
+  /// the snapshot carries lifts, since a deck laid flush has a lift of 0
+  /// as a draped road does. Unsaid, any lift at all is a deck.
+  final bool onDeck;
 }
 
 /// A player's override of one junction in a tile (the Junctions view),
@@ -253,7 +259,7 @@ class CityTileColumns {
   final Float64List endF;
 
   /// Per end: roadClass index, flags ([pavedFlag], [endCollectorFlag],
-  /// [endStartFlag]).
+  /// [endStartFlag], [endDeckFlag]).
   final Int32List endI;
 
   /// Per road end (two per road, first then last): the widest half width
@@ -305,6 +311,7 @@ class CityTileColumns {
   static const int pavedFlag = 1;
   static const int endCollectorFlag = 2;
   static const int endStartFlag = 4;
+  static const int endDeckFlag = 8;
   static const int stopsSetFlag = 1;
   static const int noEntry = -1;
 
@@ -506,7 +513,8 @@ class CityTileColumns {
       endI[i * 2] = e.roadClass.index;
       endI[i * 2 + 1] = (e.paved ? pavedFlag : 0) |
           (e.collector ? endCollectorFlag : 0) |
-          (e.isStart ? endStartFlag : 0);
+          (e.isStart ? endStartFlag : 0) |
+          (e.onDeck ? endDeckFlag : 0);
     }
 
     final transit = Float64List(transitEnds.length * 3);
@@ -672,6 +680,7 @@ class CityTileColumns {
         flags & endCollectorFlag != 0,
         isStart: flags & endStartFlag != 0,
         liftM: endF[f + 7],
+        onDeck: flags & endDeckFlag != 0,
       );
     }, growable: false);
 

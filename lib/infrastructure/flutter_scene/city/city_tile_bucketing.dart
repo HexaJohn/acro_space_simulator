@@ -62,6 +62,7 @@ import '../../../domain/colony/city/road_junction.dart' show JunctionOverride;
 import '../../../domain/shared/vector3.dart';
 import 'city_tile_columns.dart';
 import 'road_deck.dart' show RoadCorridors;
+import 'road_mesher.dart' show RoadMesher;
 
 /// The colony's tangent frame on its body: up through the root's anchor,
 /// east and north across it, and the radius the anchor sits at.
@@ -190,8 +191,9 @@ class CityBucketPlan {
   /// building, else its first patch, else the middle of its first road.
   final Map<String, Vector3> anchors;
 
-  /// Per body: the widest half width and the count of road ends at each
-  /// quantised end point (see [CityTileBucketer.endKeyOf]).
+  /// Per body: the widest half width and the count of road ends meeting at
+  /// each quantised end point — one entry for the roads on the ground
+  /// there, one for each deck end (see [CityTileBucketer.endKeyOf]).
   final Map<String, Map<int, (double, int)>> endHalf = {};
 
   /// Per body: every end of every piece of elevated rail, body-fixed.
@@ -308,6 +310,8 @@ class CityTileBucketer {
       plan.byBody.putIfAbsent(body, () => []);
       tileFor(body, at).patches.add(ps, i);
     }
+    // Deck ends — body, point, lift, half width — for [_tableDeckEnds].
+    final deckEnds = <(String, Vector3, double, double)>[];
     for (final r in snap.roads) {
       final pts = r.points;
       final n = pts.length ~/ 3;
@@ -324,25 +328,37 @@ class CityTileBucketer {
       // The deck above the drape at either end: 0 for a road on the ground.
       final lift0 = r.lifts.isEmpty ? 0.0 : r.lifts.first;
       final lift1 = r.lifts.isEmpty ? 0.0 : r.lifts.last;
+      // Whether it has a deck at all: the snapshot carries lifts for a deck
+      // and only for one, and a deck laid flush has a lift of 0 like the
+      // ground.
+      final onDeck = r.lifts.isNotEmpty;
       // Widest carriageway meeting each road END, so a sidewalk can stop
       // short of its crossing instead of bridging the intersecting street.
       // Legs split from one crossing land on (nearly) the same point — the
       // junction pass tolerates 8 m of drift — so a coarse quantised key
-      // groups them; its lift term keeps an overpass's end out of the
-      // crossing under it. The count says whether anything ELSE meets
-      // there: a dead end keeps its pavement all the way to the kerb line.
+      // groups them. A deck's end waits for the rest of the cut, to be
+      // tabled with the ends it meets by the grade-separation rule
+      // ([_tableDeckEnds]): an overpass's end is none of the crossing under
+      // it. The count says whether anything ELSE meets there: a dead end
+      // keeps its pavement all the way to the kerb line.
       if (!cls.isElevated) {
-        final table = plan.endHalf[r.body] ??= {};
-        void meet(Vector3 p, double lift) {
-          final k = endKeyOf(p.x, p.y, p.z, lift);
-          final prev = table[k];
-          table[k] = prev == null
-              ? (r.halfWidthM, 1)
-              : (math.max(prev.$1, r.halfWidthM), prev.$2 + 1);
-        }
+        if (onDeck) {
+          deckEnds
+            ..add((r.body, first, lift0, r.halfWidthM))
+            ..add((r.body, last, lift1, r.halfWidthM));
+        } else {
+          final table = plan.endHalf[r.body] ??= {};
+          void meet(Vector3 p) {
+            final k = endKeyOf(p.x, p.y, p.z);
+            final prev = table[k];
+            table[k] = prev == null
+                ? (r.halfWidthM, 1)
+                : (math.max(prev.$1, r.halfWidthM), prev.$2 + 1);
+          }
 
-        meet(first, lift0);
-        meet(last, lift1);
+          meet(first);
+          meet(last);
+        }
       }
       // Every road END, with the point just inside it (for the leg
       // direction), to the tile the end lies in. Roads are already SPLIT at
@@ -356,10 +372,10 @@ class CityTileBucketer {
             Vector3(pts[3 * n - 6], pts[3 * n - 5], pts[3 * n - 4]);
         tileFor(r.body, first).ends.add(CityTileEnd(
             first, second, r.halfWidthM, cls, cls.paved, r.collector,
-            isStart: true, liftM: lift0));
+            isStart: true, liftM: lift0, onDeck: onDeck));
         tileFor(r.body, last).ends.add(CityTileEnd(
             last, penult, r.halfWidthM, cls, cls.paved, r.collector,
-            liftM: lift1));
+            liftM: lift1, onDeck: onDeck));
       }
       if (cls == RoadClass.transit) {
         (plan.transitEnds[r.body] ??= [])
@@ -367,6 +383,7 @@ class CityTileBucketer {
           ..add(last);
       }
     }
+    _tableDeckEnds(plan.endHalf, deckEnds);
     // The players' junction overrides, to the tile each lies in — and, near
     // a cell edge, to the tile across it: a junction is drawn by the tile
     // holding its seed end, which can be the neighbour's. Never a tile of
@@ -496,14 +513,20 @@ class CityTileBucketer {
   /// another.
   ///
   /// Two passes over the frame's roads, the second only on a body that has
-  /// such an end. First the joints wanted: a road on the ground has no
-  /// parapet to hold back, so a body nobody raised a road on is done with
-  /// at one look at each road's lifts. Then every end the table counted —
-  /// the roads that are not elevated, keyed with the lift it keyed them
-  /// with — at a joint wanted: the first of the two to arrive leaves its
-  /// inward heading there, and the second is held to it.
+  /// such an end. First the deck ends wanted, by the point they stand at: a
+  /// road on the ground has no parapet to hold back, so a body nobody
+  /// raised a road on is done with at one look at each road's lifts. Then
+  /// every end the table counted — the roads that are not elevated — at a
+  /// point wanted, with its level and its inward heading. Each deck end
+  /// wanted is then held to the one end there that MEETS it by the rule
+  /// the table counted it by ([RoadMesher.liftsSeparated], see
+  /// [_tableDeckEnds]): a deck end has a key of its own, and the end it
+  /// meets — a road on the ground it is graded into, or a deck a few
+  /// metres off its lift — keys another, so no key can pair them.
   static void _findBends(CityBucketPlan plan) {
-    Map<String, Map<int, Vector3?>>? wanted;
+    // body → point key → the deck ends wanted there: road, which end, its
+    // lift and its own key.
+    Map<String, Map<int, List<(RoadSnapshot, bool, double, int)>>>? wanted;
     for (final r in plan._roads) {
       final l = r.lifts;
       if (l.isEmpty || _classOf(r).isElevated) continue;
@@ -511,36 +534,57 @@ class CityTileBucketer {
       final n = p.length ~/ 3;
       final table = plan.endHalf[r.body];
       if (n < 2 || table == null) continue;
-      for (final k in [
-        endKeyAt(p, 0, l.first),
-        endKeyAt(p, 3 * n - 3, l.last),
-      ]) {
-        if (table[k]?.$2 == 2) ((wanted ??= {})[r.body] ??= {})[k] = null;
+      for (final first in const [true, false]) {
+        final i = first ? 0 : 3 * n - 3;
+        final lift = first ? l.first : l.last;
+        final k = endKeyAt(p, i, lift);
+        if (table[k]?.$2 != 2) continue;
+        (((wanted ??= {})[r.body] ??= {})[endKeyAt(p, i)] ??= [])
+            .add((r, first, lift, k));
       }
     }
     if (wanted == null) return;
+    // body → point key → every end there: road, which end, its deck's lift
+    // (null on the ground) and its inward heading.
+    final ends = <String, Map<int, List<(RoadSnapshot, bool, double?, Vector3)>>>{};
     for (final r in plan._roads) {
-      final joints = wanted[r.body];
-      if (joints == null || _classOf(r).isElevated) continue;
+      final points = wanted[r.body];
+      if (points == null || _classOf(r).isElevated) continue;
       final p = r.points;
       final n = p.length ~/ 3;
       if (n < 2) continue;
       final l = r.lifts;
       for (final first in const [true, false]) {
         final i = first ? 0 : 3 * n - 3, j = first ? 3 : 3 * n - 6;
-        final k =
-            endKeyAt(p, i, l.isEmpty ? 0.0 : (first ? l.first : l.last));
-        if (!joints.containsKey(k)) continue;
+        final at = endKeyAt(p, i);
+        if (!points.containsKey(at)) continue;
         final inward =
             Vector3(p[j] - p[i], p[j + 1] - p[i + 1], p[j + 2] - p[i + 2]);
-        final other = joints[k];
-        if (other == null) {
-          joints[k] = inward;
-        } else if (_turns(other, inward)) {
-          (plan.endBends[r.body] ??= {}).add(k);
-        }
+        ((ends[r.body] ??= {})[at] ??= []).add(
+            (r, first, l.isEmpty ? null : (first ? l.first : l.last), inward));
       }
     }
+    wanted.forEach((body, points) {
+      points.forEach((at, decks) {
+        final here = ends[body]?[at] ?? const [];
+        for (final (r, first, lift, key) in decks) {
+          Vector3? mine, other;
+          var meeting = 0;
+          for (final (o, oFirst, oLift, inward) in here) {
+            if (identical(o, r) && oFirst == first) {
+              mine = inward;
+            } else if (!RoadMesher.liftsSeparated(
+                oLift ?? 0.0, oLift != null, lift, true)) {
+              other = inward;
+              meeting++;
+            }
+          }
+          if (meeting == 1 && mine != null && _turns(mine, other!)) {
+            (plan.endBends[body] ??= {}).add(key);
+          }
+        }
+      });
+    });
   }
 
   /// Whether two ends leaving one joint along [u] and [v] turn off one
@@ -643,33 +687,79 @@ class CityTileBucketer {
     ]);
   }
 
-  /// The end-table key of a road end at ([x], [y], [z]), body-fixed, with
-  /// its deck [liftM] above the drape. A key made on one isolate compares
-  /// only with keys made on it — the table's on the UI thread, a worker's
-  /// own matching of two ends on the worker — and never crosses between
-  /// them (`Object.hash` is salted per isolate).
+  /// The end-table key of a road end at ([x], [y], [z]), body-fixed: for an
+  /// end on a deck, with its [deckLiftM] above the drape (null for a road
+  /// on the ground). A key made on one isolate compares only with keys made
+  /// on it — the table's on the UI thread, a worker's own matching of two
+  /// ends on the worker — and never crosses between them (`Object.hash` is
+  /// salted per isolate).
   ///
-  /// Ten metres of position, and the lift in [RoadElevation.nodeMatchM]
-  /// steps — with everything within that of the ground counted as the
-  /// ground, since a deck end at grade meets the roads there. The tool's
-  /// elevation steps are three metres and up, inside both the 10 m cell and
-  /// the junction pass's 8 m tolerance, so without the lift an overpass's
-  /// end above a crossing fused into it and shared its pull-backs and its
-  /// dead-end count.
-  static int endKeyOf(double x, double y, double z, [double liftM = 0]) =>
-      Object.hash((x / 10).round(), (y / 10).round(), (z / 10).round(),
-          liftTermOf(liftM));
+  /// Ten metres of position. The roads on the ground at a point share one
+  /// entry; a deck end has one of its own, keyed by its lift to the bit —
+  /// a deck laid flush included — which holds the ends it meets
+  /// ([_tableDeckEnds]). The tool's elevation steps are three metres and
+  /// up, inside both the 10 m cell and the junction pass's 8 m tolerance,
+  /// so without its lift an overpass's end above a crossing fused into it
+  /// and shared its pull-backs and its dead-end count.
+  static int endKeyOf(double x, double y, double z, [double? deckLiftM]) {
+    final ex = (x / 10).round(), ey = (y / 10).round(), ez = (z / 10).round();
+    return deckLiftM == null
+        ? Object.hash(ex, ey, ez, 0)
+        : Object.hash(ex, ey, ez, 1, deckLiftM);
+  }
 
   /// The same key read straight off a road's [points] at [i].
-  static int endKeyAt(List<double> points, int i, [double liftM = 0]) =>
-      endKeyOf(points[i], points[i + 1], points[i + 2], liftM);
+  static int endKeyAt(List<double> points, int i, [double? deckLiftM]) =>
+      endKeyOf(points[i], points[i + 1], points[i + 2], deckLiftM);
 
-  /// The lift's part of an end key: 0 at grade, else the lift in
-  /// [RoadElevation.nodeMatchM] steps (never 0).
-  static int liftTermOf(double liftM) =>
-      liftM.abs() < RoadElevation.nodeMatchM
-          ? 0
-          : (liftM / RoadElevation.nodeMatchM).round();
+  /// Table a cut's deck ends — body, point, lift, half width, as [bucket]
+  /// gathers them — once every road on the ground is in.
+  ///
+  /// Each deck end's entry ([endKeyOf] with its lift) holds the widest
+  /// carriageway and the count of the ends at its point it MEETS by the
+  /// grade-separation rule ([RoadMesher.liftsSeparated], the rule the
+  /// junction pass draws the plate by): the decks short of the grade
+  /// separation from it, itself among them, and the roads on the ground
+  /// there wherever it is graded into it — and each deck so graded counts
+  /// on the ground's entry in turn. Which ends meet is a question of
+  /// pairs — two decks three metres apart meet, and a third three metres
+  /// over the second meets it and not the first — that no step of lift in
+  /// a key can answer. (Two-metre steps parted the legs of the junctions
+  /// the tiles draw — decks at 20 and 24 m, a road sunk three metres into
+  /// a cutting and the street it was cut into — and each leg ran its
+  /// pavement across the plate as though nothing met it there.)
+  static void _tableDeckEnds(Map<String, Map<int, (double, int)>> endHalf,
+      List<(String, Vector3, double, double)> decks) {
+    if (decks.isEmpty) return;
+    final byPoint = <(String, int), List<(int, double, double)>>{};
+    for (final (body, p, lift, half) in decks) {
+      (byPoint[(body, endKeyOf(p.x, p.y, p.z))] ??= [])
+          .add((endKeyOf(p.x, p.y, p.z, lift), lift, half));
+    }
+    byPoint.forEach((at, here) {
+      final table = endHalf[at.$1] ??= {};
+      final ground = table[at.$2];
+      var withDecks = ground;
+      for (final (key, lift, half) in here) {
+        final graded = !RoadMesher.liftsSeparated(0, false, lift, true);
+        var widest = 0.0, n = 0;
+        if (graded && ground != null) {
+          widest = ground.$1;
+          n = ground.$2;
+        }
+        for (final (_, other, otherHalf) in here) {
+          if (RoadMesher.liftsSeparated(other, true, lift, true)) continue;
+          widest = math.max(widest, otherHalf);
+          n++;
+        }
+        table[key] = (widest, n);
+        if (graded && withDecks != null) {
+          withDecks = (math.max(withDecks.$1, half), withDecks.$2 + 1);
+        }
+      }
+      if (withDecks != null) table[at.$2] = withDecks;
+    });
+  }
 
   /// Everything of [r] a tile's build reads, hashed: its class, flags,
   /// widths and tapers, decoration, and every point, bridge and lift in
@@ -762,9 +852,9 @@ class CityTileBucketer {
       final p = r.points;
       final last = 3 * (p.length ~/ 3) - 3;
       h = _mixEnd(h,
-          endHalf[endKeyAt(p, 0, r.lifts.isEmpty ? 0.0 : r.lifts.first)]);
+          endHalf[endKeyAt(p, 0, r.lifts.isEmpty ? null : r.lifts.first)]);
       h = _mixEnd(h,
-          endHalf[endKeyAt(p, last, r.lifts.isEmpty ? 0.0 : r.lifts.last)]);
+          endHalf[endKeyAt(p, last, r.lifts.isEmpty ? null : r.lifts.last)]);
       // And of a deck's ends, whether each turns off the other end meeting
       // it, whichever tile that is. Not of a road on the ground's, which
       // has no parapet to hold back: the generator's keys are as they were.
@@ -803,7 +893,10 @@ class CityTileBucketer {
       h = _mixD(h, e.halfWidthM);
       h = _mix(h, e.roadClass.index);
       h = _mix(h,
-          (e.paved ? 1 : 0) | (e.collector ? 2 : 0) | (e.isStart ? 4 : 0));
+          (e.paved ? 1 : 0) |
+              (e.collector ? 2 : 0) |
+              (e.isStart ? 4 : 0) |
+              (e.onDeck ? 8 : 0));
       h = _mixD(h, e.liftM);
     }
     for (final j in t.junctions) {

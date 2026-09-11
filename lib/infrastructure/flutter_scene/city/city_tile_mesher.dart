@@ -1780,7 +1780,8 @@ class CityTileMeshJob {
             paved: e.paved,
             collector: e.collector,
             isStart: e.isStart,
-            liftM: e.liftM),
+            liftM: e.liftM,
+            onDeck: e.onDeck),
     ];
     // The player's say over the tile's junctions (the Junctions view):
     // lights 1 on, 0 off, -1 the warrant's; and a point out along each

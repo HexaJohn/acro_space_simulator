@@ -1491,13 +1491,14 @@ class CityNodes {
       final r = roads[i];
       final p = r.points;
       final last = 3 * (p.length ~/ 3) - 3;
-      // Keyed with each end's deck lift, as the cut tabled it: an
-      // overpass's end reads its own entry, not the crossing's under it.
+      // Keyed as the cut tabled it — a deck end by its lift, a road on the
+      // ground by its point alone: an overpass's end reads its own entry,
+      // not the crossing's under it.
       final lifts = r.lifts;
       roadEnds[2 * i] = root.endHalf[CityTileBucketer.endKeyAt(
-          p, 0, lifts.isEmpty ? 0.0 : lifts.first)];
+          p, 0, lifts.isEmpty ? null : lifts.first)];
       roadEnds[2 * i + 1] = root.endHalf[CityTileBucketer.endKeyAt(
-          p, last, lifts.isEmpty ? 0.0 : lifts.last)];
+          p, last, lifts.isEmpty ? null : lifts.last)];
       // Whether a deck's ends turn off the one other end meeting each, as
       // the cut found them off the whole body's roads.
       if (lifts.isNotEmpty) {
