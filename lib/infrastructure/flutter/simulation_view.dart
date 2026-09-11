@@ -2668,7 +2668,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     return Scaffold(
       backgroundColor: const Color(0xFF000000),
       // Keep the FAB stack clear of the notch/home indicator.
-      floatingActionButton: SafeArea(
+      //
+      // Not in city mode: a Scaffold draws its floating button OVER its
+      // body, so this flight stack covered the city toolbar and HUD however
+      // topmost they sat in the body. The city's few controls live in the
+      // body instead, under both (see [_cityViewControls]).
+      floatingActionButton: widget.cityMode ? null : SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -2777,11 +2782,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                     decoration: BoxDecoration(color: const Color(0xFF2A3A4A), borderRadius: BorderRadius.circular(20)),
                     child: Text(
-                      _warpTarget != null
-                          ? '→$_warpTargetLabel ${_fmtCountdown(_warpTarget!.seconds - _clock.epoch.seconds)}'
-                          : _warpLevels[_warpIndex] == 0
-                              ? '⏸'
-                              : '${_warpLevels[_warpIndex].toStringAsFixed(0)}x',
+                      _warpReadout(),
                       style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold),
                     ),
                   ),
@@ -3307,6 +3308,11 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                 // the HUD. Built by the colony part (`_cityPickLayer`), which
                 // owns its gate and which gestures each tool declares.
                 if (_editingCity != null) _cityPickLayer(),
+                // City mode's own few controls, in place of the flight
+                // stack: over the pick layer, so a held tool cannot swallow
+                // a click on Save, and UNDER the toolbar and the HUD, so a
+                // wide toolbar or an open drawer is never covered by them.
+                if (widget.cityMode) _cityViewControls(),
                 // City editor toolbar. LAST in the stack so it sits over the
                 // HUD rather than under it — a toolbar you cannot click is
                 // worse than no toolbar.
@@ -3343,6 +3349,97 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                   ),
               ],
             ),
+        ),
+      ),
+    );
+  }
+
+  /// The time-warp readout: the level, paused, or the countdown to a warp
+  /// target.
+  String _warpReadout() => _warpTarget != null
+      ? '→$_warpTargetLabel ${_fmtCountdown(_warpTarget!.seconds - _clock.epoch.seconds)}'
+      : _warpLevels[_warpIndex] == 0
+          ? '⏸'
+          : '${_warpLevels[_warpIndex].toStringAsFixed(0)}x';
+
+  /// City mode's controls: what of the flight stack the city game uses —
+  /// Save and Load, time warp (also , and .), the debug panel. Leaving is
+  /// the HUD's exit; the camera, flight and render toggles would only fight
+  /// the city camera, so they are not offered.
+  ///
+  /// Top LEFT, just under the HUD's one-row bar. The HUD's drawers hang
+  /// from the bar's RIGHT end and grow down it — a busy bar reaches the
+  /// window edge and takes the Budget drawer with it — and the toolbar grows
+  /// up from the bottom, so this corner is the one neither reaches at the
+  /// default window size. Where a narrow window makes them meet, these sit
+  /// beneath both in the stack.
+  Widget _cityViewControls() {
+    return Positioned.fill(
+      child: SafeArea(
+        child: Align(
+          alignment: Alignment.topLeft,
+          child: Padding(
+            padding: const EdgeInsets.only(left: 8, top: 72),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                FloatingActionButton.small(
+                  heroTag: 'save',
+                  tooltip: 'Save',
+                  onPressed: _save,
+                  child: const Icon(Icons.save),
+                ),
+                const SizedBox(height: 8),
+                FloatingActionButton.small(
+                  heroTag: 'load',
+                  tooltip: 'Load',
+                  onPressed: _savedGame == null ? null : _load,
+                  backgroundColor: _savedGame == null ? Colors.grey : null,
+                  child: const Icon(Icons.folder_open),
+                ),
+                const SizedBox(height: 16),
+                FloatingActionButton.small(
+                  heroTag: 'warpup',
+                  tooltip: 'Faster (.)',
+                  onPressed: () => _stepWarp(1),
+                  child: const Icon(Icons.fast_forward),
+                ),
+                const SizedBox(height: 6),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                  decoration: BoxDecoration(
+                      color: const Color(0xFF2A3A4A),
+                      borderRadius: BorderRadius.circular(16)),
+                  child: Text(
+                    _warpReadout(),
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                FloatingActionButton.small(
+                  heroTag: 'warpdown',
+                  tooltip: 'Slower (,)',
+                  onPressed: () => _stepWarp(-1),
+                  child: const Icon(Icons.fast_rewind),
+                ),
+                const SizedBox(height: 16),
+                FloatingActionButton.small(
+                  heroTag: 'debug',
+                  tooltip: 'Debug panel',
+                  backgroundColor: _showDebugPanel
+                      ? const Color(0xFF7FB0E0)
+                      : const Color(0xFF2A3A4A),
+                  onPressed: () =>
+                      setState(() => _showDebugPanel = !_showDebugPanel),
+                  child: const Icon(Icons.bug_report),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );
