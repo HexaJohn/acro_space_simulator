@@ -29,6 +29,8 @@ import '../../domain/terrain/terrain_brush.dart';
 import '../../domain/terrain/terrain_edits.dart';
 import '../../domain/terrain/terrain_feature.dart';
 import 'city_patch_columns.dart';
+import 'city_traffic_frame.dart';
+import 'traffic_capture.dart';
 
 // The patch classes live in their own file (the columns are a fair amount of
 // code) but are part of the frame's vocabulary, so they come with it.
@@ -1911,6 +1913,13 @@ class WorldSnapshot {
   /// [JunctionSnapshot]).
   final List<JunctionSnapshot> junctions;
 
+  /// Every agent colony's traffic (docs/plans/agent-traffic.md §13.1): its
+  /// vehicles' latest columns and the geometry they are drawn on, all by
+  /// reference. Empty for a colony without agents, and in every frame not
+  /// captured from a ticking colony — the studios', the wire codec's.
+  /// Transient: not serialised, since a JSON frame is not a save.
+  final List<CityTrafficFrame> cityTraffic;
+
   // Not const: the empty patch columns are typed lists, which have no const
   // form, and nothing constructs a frame as a constant.
   WorldSnapshot({
@@ -1927,6 +1936,7 @@ class WorldSnapshot {
     this.megastructures = const [],
     this.roadsRevision = const {},
     this.junctions = const [],
+    this.cityTraffic = const [],
   }) : patches = patches ?? CityPatchColumns.empty;
 
   /// The same frame at a different sim time.
@@ -1950,6 +1960,7 @@ class WorldSnapshot {
         megastructures: megastructures,
         roadsRevision: roadsRevision,
         junctions: junctions,
+        cityTraffic: cityTraffic,
       );
 
   /// The deformations for [bodyId], rebuilt as a domain store ready to hand to
@@ -1999,6 +2010,7 @@ class WorldSnapshot {
       }
     }
     final roads = <RoadSnapshot>[];
+    final cityTraffic = <CityTrafficFrame>[];
     final junctions = <JunctionSnapshot>[];
     final roadsRevision = <String, int>{};
     final patches = CityPatchColumnsBuilder();
@@ -2217,6 +2229,9 @@ class WorldSnapshot {
           ));
         }
         roadsRevision[city.id] = city.roadsRevision;
+        if (city.agents.enabled) {
+          cityTraffic.add(TrafficCapture.frameFor(city, body.id.value, roads));
+        }
         // Roads, zoned-but-unbuilt lots and support platforms. These are what
         // the player has actually placed a moment after founding, so leaving
         // them out is what made a new colony look like nothing happened.
@@ -2376,6 +2391,7 @@ class WorldSnapshot {
       roads: roads,
       roadsRevision: roadsRevision,
       junctions: junctions,
+      cityTraffic: cityTraffic,
       patches: patches.build(),
       events: events,
       terrainEdits: terrainEdits == null

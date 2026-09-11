@@ -80,6 +80,8 @@ import 'vehicle_meshes.dart';
 import 'city_textures.dart';
 import 'city_traffic.dart';
 import 'device_buffer_pool.dart';
+import 'agent_traffic_pass.dart';
+import 'signal_head_layer.dart';
 
 // The tile vocabulary moved to the mesher with the meshing; everything
 // that spoke it through this file still does.
@@ -93,6 +95,8 @@ export 'city_tile_mesher.dart'
 
 // And the tangent grid moved to the cut, which is pure now.
 export 'city_tile_bucketing.dart' show ColonyTangentBasis;
+
+part 'agent_nodes.dart';
 
 /// One generated archetype, uploaded.
 class _CityMesh {
@@ -1206,12 +1210,14 @@ class CityNodes {
     phaseMs['city.anchors'] = sw.elapsedMicroseconds / 1000;
     sw.reset();
     _syncTraffic(snap, origin, moved, focusWorld);
+    _syncAgents(snap, origin, moved, focusWorld);
     phaseMs['city.traffic'] = sw.elapsedMicroseconds / 1000;
     sw.reset();
     _syncCursor(snap, origin, moved);
     _syncZoning(snap, origin, moved);
     _syncInstantRoads(snap, origin, moved);
     _syncRoadOverlay(snap, origin, moved);
+    _syncAgentExtras(snap, origin, moved);
     phaseMs['city.cursor'] = sw.elapsedMicroseconds / 1000;
 
     var draws = 0, skylineTris = 0;
@@ -2106,7 +2112,7 @@ class CityNodes {
     // which is what lets the tables be built once.
     _traffic
       ..density = trafficDensity
-      ..maxVehicles = _maxVehicles
+      ..maxVehicles = snap.cityTraffic.isEmpty ? _maxVehicles : 0
       ..rangeM = trafficRangeM
       ..begin(_structureSig);
     for (final t in _tiles.values) {

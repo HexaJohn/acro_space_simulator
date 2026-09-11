@@ -42,6 +42,7 @@ import 'road_traffic_model.dart';
 import 'shuttle_run.dart';
 import 'sprawl_plan.dart';
 import 'commodity.dart';
+import 'traffic/city_agents.dart';
 
 /// A craft visiting a spaceport — a relief mission or a scheduled delivery. It
 /// descends onto a free pad, dwells ~30 s while loading/unloading (the payload
@@ -3333,6 +3334,11 @@ class CitySim {
   /// Peak road load on the spline network, 0..1. The parcel city's congestion,
   /// feeding the same commute penalty the cell traffic does.
   double parcelCongestion = 0;
+
+  /// The colony's agents (docs/plans/agent-traffic.md, E2): real vehicles
+  /// on locked routes, once [CityAgents.enabled] is set. The constructor
+  /// allocates nothing, so a colony that never enables them pays nothing.
+  late final CityAgents agents = CityAgents(this);
 
   /// The routed traffic model: a directed graph of the roads, trips
   /// assigned over it, and what the lots get from it — whether a fire

@@ -21,10 +21,17 @@
 /// Rows are SLOTS: row i is the vehicle in slot i, so a vehicle keeps its
 /// row as long as it lives, and an empty slot's row reads handle −1 and
 /// element −1 (not drawn).
+///
+/// [TrafficNetColumns] is the other half of what the renderer is told: what
+/// it needs of the network itself — the signal heads and the plans that
+/// time them — once per lane-graph object rather than once per sub-step.
 library;
 
+import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'lane_graph.dart';
+import 'node_control.dart';
 import 'vehicle_table.dart';
 
 /// Bits of [AgentFrame.flags].
@@ -46,10 +53,14 @@ const double kBrakeLightMps2 = 0.6;
 /// One published sample of every vehicle. Its lists are never written again
 /// once it is handed out.
 class AgentFrame {
-  AgentFrame._({
+  /// A frame over columns the caller filled: a host replaying a recorded
+  /// sample, or a test placing vehicles where it wants them. The same
+  /// contract as a published frame — the lists are not written again once
+  /// they are handed over.
+  AgentFrame.fromColumns({
     required this.count,
     required this.timeUs,
-    required this.worldEpochS,
+    this.worldEpochS = 0,
     required this.graphRev,
     required this.handle,
     required this.elem,
@@ -65,7 +76,7 @@ class AgentFrame {
 
   /// No vehicles: what a colony without agents, or before its first
   /// sub-step, publishes.
-  static final AgentFrame empty = AgentFrame._(
+  static final AgentFrame empty = AgentFrame.fromColumns(
     count: 0,
     timeUs: 0,
     worldEpochS: 0,
@@ -193,7 +204,7 @@ class AgentFrameBuilder {
     }
     _next = (k + 1) % 3;
     published++;
-    return latest = AgentFrame._(
+    return latest = AgentFrame.fromColumns(
       count: hw,
       timeUs: timeUs.toDouble(),
       worldEpochS: worldEpochS,
@@ -208,6 +219,118 @@ class AgentFrameBuilder {
       kind: set.kind,
       variant: set.variant,
       flags: set.flags,
+    );
+  }
+}
+
+/// What the renderer needs of the network itself, beyond where the vehicles
+/// are (§13.1, §13.6): the signal heads, and the plans that time them.
+///
+/// One per lane-graph object — built with the graph, and again when a
+/// junction override refreshes its controls — and handed to every frame by
+/// reference, so it costs nothing per sub-step. The same heads and
+/// [SignalPlan.stateAt] are what the road agent was offered for its own
+/// lamps (C3): the function the arbiter asks is the function the lamps are
+/// drawn by, so a light and the car waiting at it cannot disagree.
+///
+/// Stops, stubs and the traffic view's node list arrive with the slices
+/// that have them.
+class TrafficNetColumns {
+  TrafficNetColumns._({
+    required this.graphRev,
+    required this.controlsRev,
+    required this.plans,
+    required this.headNode,
+    required this.headPlan,
+    required this.headLeg,
+    required this.headPhase,
+    required this.headDirE,
+    required this.headDirN,
+    required this.headHalfWidth,
+    required this.headR,
+  });
+
+  /// No network: no heads.
+  static final TrafficNetColumns empty = TrafficNetColumns._(
+    graphRev: 0,
+    controlsRev: 0,
+    plans: const [],
+    headNode: Int32List(0),
+    headPlan: Int32List(0),
+    headLeg: Int32List(0),
+    headPhase: Int8List(0),
+    headDirE: Float32List(0),
+    headDirN: Float32List(0),
+    headHalfWidth: Float32List(0),
+    headR: Float32List(0),
+  );
+
+  /// The agents' revisions these were built at.
+  final int graphRev, controlsRev;
+
+  /// The signalised nodes' plans, the controls' own list.
+  final List<SignalPlan> plans;
+
+  /// One head per leg a vehicle arrives by at a signalised node, of the
+  /// legs the tiles draw (`RoadClass.joinsJunctions` — an alley meeting a
+  /// crossing gets no mast), in plan order with each node's legs in
+  /// heading order: its node (road-graph id), its plan (index in [plans]),
+  /// its leg (`RoadNode.legs` index) and the phase that leg waits on.
+  final Int32List headNode, headPlan, headLeg;
+  final Int8List headPhase;
+
+  /// Unit vector from the node out along the leg, colony east and north.
+  final Float32List headDirE, headDirN;
+
+  /// The leg's half width, and the radius of the junction's plate — its
+  /// widest drawn leg × [kPlateRadiusPerHalfWidth] — which is where the
+  /// tiles stand a leg's mast (road_mesher.dart, `_crossing`).
+  final Float32List headHalfWidth, headR;
+
+  int get headCount => headNode.length;
+
+  /// What head [h] shows at agent time [timeUs]: the plan's own clock.
+  SignalState stateOf(int h, int timeUs) =>
+      plans[headPlan[h]].stateAt(headPhase[h], timeUs);
+
+  /// The heads of [lg]'s signalised nodes.
+  factory TrafficNetColumns.of(LaneGraph lg,
+      {int graphRev = 0, int controlsRev = 0}) {
+    final g = lg.graph;
+    final plans = lg.controls.plans;
+    final node = <int>[], plan = <int>[], leg = <int>[], phase = <int>[];
+    final dirE = <double>[], dirN = <double>[];
+    final halfWidth = <double>[], radius = <double>[];
+    for (var p = 0; p < plans.length; p++) {
+      final n = g.nodes[plans[p].node];
+      final r = junctionHalfWidthOf(n) * kPlateRadiusPerHalfWidth;
+      for (final k in headingOrder(n)) {
+        final l = n.legs[k];
+        final ph = plans[p].legPhase[k];
+        if (ph < 0 || !l.roadClass.joinsJunctions) continue;
+        node.add(n.id);
+        plan.add(p);
+        leg.add(k);
+        phase.add(ph);
+        // Headings run from north toward east (`Vec2.heading`).
+        dirE.add(math.sin(l.heading));
+        dirN.add(math.cos(l.heading));
+        halfWidth.add(l.roadClass.halfWidth);
+        radius.add(r);
+      }
+    }
+    return TrafficNetColumns._(
+      graphRev: graphRev,
+      controlsRev: controlsRev,
+      plans: plans,
+      headNode: Int32List.fromList(node),
+      headPlan: Int32List.fromList(plan),
+      headLeg: Int32List.fromList(leg),
+      headPhase: Int8List.fromList(phase),
+      headDirE: Float32List.fromList(dirE),
+      headDirN: Float32List.fromList(dirN),
+      headHalfWidth: Float32List.fromList(halfWidth),
+      headR: Float32List.fromList(radius),
     );
   }
 }
