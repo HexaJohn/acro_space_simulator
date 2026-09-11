@@ -36,6 +36,7 @@ import 'package:vector_math/vector_math.dart' as vm;
 
 import '../../../application/snapshot/world_snapshot.dart';
 import '../../../domain/colony/city/parcel.dart';
+import '../../../domain/colony/city/road_elevation.dart';
 import '../../../domain/colony/city/sprawl_plan.dart';
 import '../../../domain/shared/vector3.dart';
 import '../coord_convert.dart';
@@ -87,6 +88,7 @@ class TrafficRoad {
     required this.laneOffsetsM,
     required this.oneWay,
     required this.ranges,
+    required this.lifts,
     required this.ax,
     required this.ay,
     required this.az,
@@ -125,6 +127,10 @@ class TrafficRoad {
 
   /// Start,end pairs along the road that ride a bridge.
   final List<(double, double)> ranges;
+
+  /// The deck above the drape at each point, for a road the tool raised
+  /// or sank (see `RoadSnapshot.lifts`); empty for one on the ground.
+  final Float64List lifts;
 
   /// The road's two ends, BODY-FIXED, for the range gate — the focus comes
   /// in the body's frame, so the gate is a subtraction rather than a
@@ -247,8 +253,15 @@ class TrafficRoad {
           // In its lane, to the right of the centreline in its own
           // direction of travel — and on the DECK of an elevated road or a
           // bridge rather than the ground the columns stand on.
-          final lift =
+          var lift =
               roadClass.deckHeightM + SprawlPlan.bridgeLiftAt(d, ranges);
+          if (lifts.isNotEmpty) {
+            // A raised or sunk road's deck, between the points either side.
+            final deck = lifts[k] + (lifts[k + 1] - lifts[k]) * t;
+            // In a tunnel the road is under the ground, and so is the car.
+            if (deck < -RoadElevation.tunnelCoverM) continue;
+            lift += deck;
+          }
           final ox = sx * laneOffset + ux * lift;
           final oy = sy * laneOffset + uy * lift;
           final oz = sz * laneOffset + uz * lift;
@@ -489,9 +502,12 @@ class TrafficTile {
       for (final w in [r.startHalfWidthM, r.endHalfWidthM]) {
         if (w != null && w < narrow) narrow = w;
       }
-      // Where the lanes are. A road with no layout — there is none — gets
-      // one stream each way, half way out to the curb.
-      final layout = cls.lanes;
+      // Where the lanes are — as the road is dressed: a decorated four- or
+      // six-lane road's lanes sit either side of its planted median. A
+      // road with no layout — there is none — gets one stream each way,
+      // half way out to the curb.
+      final layout = cls.lanesFor(RoadDecoration
+          .values[r.decoration.clamp(0, RoadDecoration.values.length - 1)]);
       final laneScale = layout == null ? 1.0 : r.halfWidthM / layout.halfWidthM;
       // Only the lanes that run the piece's whole length.
       final drivable = narrow - (layout?.shoulderM ?? 0) * laneScale;
@@ -517,6 +533,9 @@ class TrafficTile {
         laneOffsetsM: laneOffsets,
         oneWay: layout?.oneWay ?? false,
         ranges: ranges,
+        lifts: r.lifts.length == n
+            ? Float64List.fromList(r.lifts)
+            : Float64List(0),
         ax: ax, ay: ay, az: az, bx: bx, by: by, bz: bz,
       ));
     }

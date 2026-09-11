@@ -34,6 +34,8 @@ import '../../../domain/architecture/building_generator.dart';
 import '../../../domain/architecture/building_massing.dart';
 import '../../../domain/colony/city/city_building_spec.dart';
 import '../../../domain/colony/city/parcel.dart';
+import '../../../domain/colony/city/road_catalog.dart';
+import '../../../domain/colony/city/road_elevation.dart';
 import '../../../domain/scatter/mesh_builder.dart';
 import '../../../domain/scatter/prop_mesh.dart';
 import '../../../domain/shared/quaternion.dart';
@@ -46,6 +48,7 @@ import 'mesh_merge.dart';
 import 'oriented_box.dart';
 import 'pedestrian_tube.dart';
 import 'railway.dart';
+import 'road_deck.dart';
 import 'road_mesher.dart';
 import 'street_furniture.dart';
 import 'vehicle_meshes.dart';
@@ -765,8 +768,10 @@ class CityMeshStep {
 /// archetype cache was a hundred milliseconds; a twenty-mile city has a
 /// thousand such runs.
 class CityTileMeshJob {
-  CityTileMeshJob(this.request, this.libraries, {CityMeshScratch? scratch})
-      : _scratch = scratch ?? CityMeshScratch() {
+  CityTileMeshJob(this.request, this.libraries,
+      {CityMeshScratch? scratch, CityTileMembers? members})
+      : _scratch = scratch ?? CityMeshScratch(),
+        _given = members {
     libraries.syncKnobs(request.knobs);
     _plan();
   }
@@ -782,8 +787,12 @@ class CityTileMeshJob {
 
   /// The tile's members, rebuilt from the request's columns here — once
   /// per job, on whichever side meshes — so the emitters read the snapshot
-  /// objects they always did (see `city_tile_columns.dart`).
-  late final CityTileMembers members = request.columns.toSnapshots();
+  /// objects they always did (see `city_tile_columns.dart`). A caller that
+  /// already holds them hands them in instead ([_given]) — a test meshing
+  /// a road's deck and dressing straight from its snapshot, say — and the
+  /// columns are then read for nothing but the transit ends.
+  late final CityTileMembers members = _given ?? request.columns.toSnapshots();
+  final CityTileMembers? _given;
 
   /// The parts of the build, run one per call from the end. A running
   /// step may push more onto the end, and they run next.
@@ -1073,6 +1082,9 @@ class CityTileMeshJob {
       (t.featureCars, CityMaterialKind.facade, false),
       (t.featureGlow, CityMaterialKind.glazing, false),
       (t.patches, CityMaterialKind.ground, false),
+      // A decorated road's grass, on the ground sheet's palette and in its
+      // draw; empty — and so skipped by the merge — on every other road.
+      (r.verge, CityMaterialKind.ground, false),
     ];
   }
 
@@ -1436,57 +1448,123 @@ class CityTileMeshJob {
       return;
     }
 
-    if (cls == RoadClass.rail) {
-      // Track, not tarmac: no ribbon, no pavement, no furniture, no
-      // junction plates — a level crossing is the road's business.
-      Railway.emit(rb.railBallast, rb.railConcrete, rb.railSteel,
-          pts: pts, anchorBF: anchorBF, halfWidthM: road.halfWidthM);
-      return;
-    }
+    // A raised or sunk road's deck, as a lift above the drape at each
+    // point (see `RoadSnapshot.lifts`). Null for a road that follows the
+    // ground — every road the generator lays — which takes exactly the
+    // path every road took before one could leave the ground: one run, its
+    // own points, the plan's bridges, to the byte.
+    final lifts = road.lifts.isNotEmpty && road.lifts.length == pts.length
+        ? road.lifts
+        : null;
+    final ranges = <(double, double)>[
+      for (var i = 0; i + 1 < road.bridges.length; i += 2)
+        (road.bridges[i], road.bridges[i + 1]),
+    ];
+    // The stretches above ground: the whole road, or — for one the tool
+    // sank into a tunnel — the runs between its portals.
+    final runs =
+        lifts == null ? [RoadRun.whole(pts)] : RoadDeckMesher.runs(pts, lifts);
+    final liftAts = <double Function(double s)?>[
+      for (final run in runs)
+        run.lifts != null
+            ? RoadDeckMesher.liftAt(run.pts, run.lifts!,
+                bridges: ranges, s0: run.s0)
+            : ranges.isEmpty
+                ? null
+                : (double s) => RoadMesher.bridgeLiftAt(s, ranges),
+    ];
+    final deco = RoadDecoration
+        .values[road.decoration.clamp(0, RoadDecoration.values.length - 1)];
+    // The cross-section as dressed: a decorated four- or six-lane road
+    // gives lane width to a planted median, at the class's own width.
+    final lanes = cls.lanesFor(deco);
 
-    if (cls == RoadClass.alley) {
-      RoadMesher.ribbon(rb.alleyRibbon, pts, anchorBF, road.halfWidthM);
-    } else if (!paved) {
-      RoadMesher.ribbon(rb.dirtRibbon, pts, anchorBF, road.halfWidthM);
-    } else {
-      // The carriageway with its lanes painted on — the same pipeline the
-      // whole city draws through, downtown and county line alike — lifted
-      // onto its bridges and tapered into what it meets.
-      final ranges = <(double, double)>[
-        for (var i = 0; i + 1 < road.bridges.length; i += 2)
-          (road.bridges[i], road.bridges[i + 1]),
-      ];
-      final liftAt = ranges.isEmpty
-          ? null
-          : (double s) => RoadMesher.bridgeLiftAt(s, ranges);
-      RoadMesher.carriageway(rb.ribbon, pts, anchorBF, cls,
-          halfWidthM: road.halfWidthM,
-          startHalfWidthM: road.startHalfWidthM,
-          endHalfWidthM: road.endHalfWidthM,
-          liftAt: liftAt,
-          paint: paint,
-          solid: near ? rb.propSolid : null);
-      if (liftAt != null) {
-        RoadMesher.piers(rb.propSolid, pts, anchorBF, road.halfWidthM, liftAt);
-      }
-      if (road.soundWalls && cls.canHaveSoundWalls && paint) {
-        RoadMesher.soundWalls(rb.propSolid, pts, anchorBF, road.halfWidthM,
-            startHalfWidthM: road.startHalfWidthM,
-            endHalfWidthM: road.endHalfWidthM,
+    for (var k = 0; k < runs.length; k++) {
+      final run = runs[k];
+      final rp = run.pts;
+      final liftAt = liftAts[k];
+      final raised = run.lifts != null;
+      if (cls == RoadClass.rail) {
+        // Track, not tarmac: no ribbon, no pavement, no furniture, no
+        // junction plates — a level crossing is the road's business. A
+        // raised line's track is laid on its deck.
+        Railway.emit(rb.railBallast, rb.railConcrete, rb.railSteel,
+            pts: raised ? RoadDeckMesher.raise(rp, anchorBF, liftAt!) : rp,
+            anchorBF: anchorBF,
+            halfWidthM: road.halfWidthM);
+      } else if (cls == RoadClass.alley) {
+        RoadMesher.ribbon(rb.alleyRibbon, rp, anchorBF, road.halfWidthM,
+            liftAt: raised ? liftAt : null);
+      } else if (!paved) {
+        RoadMesher.ribbon(rb.dirtRibbon, rp, anchorBF, road.halfWidthM,
+            liftAt: raised ? liftAt : null);
+      } else {
+        // The carriageway with its lanes painted on — the same pipeline the
+        // whole city draws through, downtown and county line alike — lifted
+        // onto its deck and its bridges, tapered into what it meets, and
+        // on a one-way road an arrow down every lane.
+        RoadMesher.carriageway(rb.ribbon, rp, anchorBF, cls,
+            halfWidthM: road.halfWidthM,
+            startHalfWidthM: run.fromStart ? road.startHalfWidthM : null,
+            endHalfWidthM: run.toEnd ? road.endHalfWidthM : null,
             liftAt: liftAt,
-            posts: near);
+            paint: paint,
+            solid: near ? rb.propSolid : null,
+            layout: lanes,
+            arrows: true,
+            // Nothing grows in vacuum.
+            planting: road.sealed ? null : rb.verge,
+            plantingU: CityTileMesher.grassU);
+        if (!raised && liftAt != null) {
+          RoadMesher.piers(rb.propSolid, rp, anchorBF, road.halfWidthM, liftAt);
+        }
+        if (road.soundWalls && cls.canHaveSoundWalls && paint) {
+          RoadMesher.soundWalls(rb.propSolid, rp, anchorBF, road.halfWidthM,
+              startHalfWidthM: run.fromStart ? road.startHalfWidthM : null,
+              endHalfWidthM: run.toEnd ? road.endHalfWidthM : null,
+              liftAt: liftAt,
+              posts: near,
+              // Up on a structure the parapets are the walls.
+              skipAboveM: raised ? RoadElevation.structureClearM : 0.3);
+        }
+      }
+      if (!raised) continue;
+      // What a raised deck stands on, and a portal at each end of the run
+      // that is a tunnel's mouth, facing out of the hill.
+      RoadDeckMesher.structure(
+          rb.propSolid, rp, anchorBF, road.halfWidthM, liftAt!);
+      if (!run.fromStart) {
+        RoadDeckMesher.portal(
+            rb.propSolid, rp.first, rp.first - rp[1], anchorBF, road.halfWidthM);
+      }
+      if (!run.toEnd) {
+        RoadDeckMesher.portal(rb.propSolid, rp.last,
+            rp.last - rp[rp.length - 2], anchorBF, road.halfWidthM);
       }
     }
+    if (cls == RoadClass.rail) return;
+
     // What the body's end table says of this road's two ends (see
     // [CityTileMembers.roadEnds]).
     final startEnd = members.roadEnds[2 * index];
     final lastEnd = members.roadEnds[2 * index + 1];
     // A street that ends where nothing else does ends in a turning
-    // circle: a subdivision's cul-de-sac, or the edge of town.
+    // circle: a subdivision's cul-de-sac, or the edge of town — on its
+    // deck where the tool raised it a little, and not at all where it
+    // ends in its tunnel or up on a structure.
     if (paint && cls == RoadClass.street) {
-      for (final (end, e) in [(pts.first, startEnd), (pts.last, lastEnd)]) {
+      for (final (end, e, lift) in [
+        (pts.first, startEnd, lifts?.first ?? 0.0),
+        (pts.last, lastEnd, lifts?.last ?? 0.0),
+      ]) {
         if (e != null && e.$2 > 1) continue;
-        RoadMesher.culDeSac(rb.ribbon, end, anchorBF, 11.0);
+        if (lifts == null) {
+          RoadMesher.culDeSac(rb.ribbon, end, anchorBF, 11.0);
+        } else if (lift >= -RoadElevation.tunnelCoverM &&
+            lift <= RoadElevation.structureClearM) {
+          RoadMesher.culDeSac(rb.ribbon, end, anchorBF, 11.0,
+              liftM: RoadMesher.ribbonLiftM + lift);
+        }
       }
     }
     if (!near) return;
@@ -1501,48 +1579,134 @@ class CityTileMeshJob {
     // to raise. Not on a sealed world — pedestrians there travel in the
     // tube, and an open sidewalk in vacuum is set dressing for nobody.
     final walked = paved && cls.hasPavement && !road.sealed;
-    if (walked) {
-      RoadMesher.sidewalks(rb.walkRibbon, pts, road.halfWidthM, 3.0, anchorBF,
-          pullStart: pullAt(startEnd), pullEnd: pullAt(lastEnd));
-    }
-    // Nobody lights a dirt track, and nobody lights an alley either.
-    if (paved && cls.hasPavement) {
-      RoadMesher.lamps(rb.lampSolid, rb.lampGlow, pts, anchorBF,
-          road.halfWidthM, cls,
-          liftM: walked ? CityTileMesher.walkTopLiftM : 0.0);
-    }
-    if (rb.propBudget > 0) {
-      rb.propBudget -= StreetFurniture.emit(
-        rb.propSolid,
-        rb.propGlow,
-        pts: pts,
-        anchorBF: anchorBF,
-        cls: cls,
-        halfWidthM: road.halfWidthM,
-        pavementM: 3.0,
-        // Furniture stands on the raised walk now, not on the bare drape.
-        liftM: walked ? CityTileMesher.walkTopLiftM : 0.0,
-        // A RoadSnapshot carries no id — it is pure geometry on the wire —
-        // so the seed comes from the geometry itself. Stable frame to frame
-        // for a road that has not been redrawn, which is what keeps the
-        // furniture from jittering about the pavement — and stable across
-        // isolates, which `Object.hash` is not (see the library docs).
-        seed: CityTileMesher.roadSeed(road),
-        budget: rb.propBudget,
-        treesOut: rb.treePits,
-        shrubsOut: rb.shrubPits,
-      );
-    }
-    // Vacuum outside: pedestrians travel in a pressurised tube, not on a
-    // pavement. The glazing builder already exists for dome caps.
-    if (paved && cls.hasPavement && r.knobs.onStreetParking && rb.curbCars > 0) {
-      rb.curbCars -= CityTileMesher.curbParkingFor(
-          rb.curbSolid, rb.curbGlass, pts, road, anchorBF,
-          budget: rb.curbCars);
-    }
-    if (road.sealed) {
-      PedestrianTube.emit(rb.tubeSolid, rb.tubeGlass,
-          pts: pts, halfWidthM: road.halfWidthM, anchorBF: anchorBF);
+    // Decoration: grass — and trees — on a two-lane road's verges, trees
+    // down a four- or six-lane road's planted median, and the kerb the
+    // parked cars would have had (see [CityTileMesher.curbParks]).
+    final verged = walked &&
+        deco != RoadDecoration.none &&
+        (cls == RoadClass.street || cls == RoadClass.streetOneWay);
+    final medianTrees = deco == RoadDecoration.trees &&
+        !road.sealed &&
+        lanes?.median == MedianStyle.planted;
+    final parks = CityTileMesher.curbParks(cls, deco);
+    // A RoadSnapshot's id never reaches the tiles — it is not in the
+    // columns — so the seed comes from the geometry itself. Stable frame
+    // to frame for a road that has not been redrawn, which is what keeps
+    // the furniture from jittering about the pavement — and stable across
+    // isolates, which `Object.hash` is not (see the library docs).
+    final seed = CityTileMesher.roadSeed(road);
+    var span = 0;
+    for (var k = 0; k < runs.length; k++) {
+      final run = runs[k];
+      final liftAt = liftAts[k];
+      // The pavement and all it carries stand where the deck runs at
+      // grade: on the drape itself for a road on the ground, on the points
+      // lifted onto the deck for a raised or sunk one. Not beside a
+      // structure — the ground under a deck is no pavement's — which keeps
+      // only its lamps, up on the deck.
+      final List<(int, int)> graded;
+      final List<(int, int)> onDeck;
+      if (run.lifts == null) {
+        graded = [(0, run.pts.length - 1)];
+        onDeck = const [];
+      } else {
+        final s = RoadDeckMesher.spans(run.pts, liftAt!);
+        graded = s.graded;
+        onDeck = s.raised;
+      }
+      for (final (a, b) in graded) {
+        final sp = run.lifts == null
+            ? run.pts
+            : RoadDeckMesher.raise(run.pts, anchorBF, liftAt!, from: a, to: b);
+        final pullStart = run.fromStart && a == 0 ? pullAt(startEnd) : 0.0;
+        final pullEnd =
+            run.toEnd && b == run.pts.length - 1 ? pullAt(lastEnd) : 0.0;
+        // Every span after the first dresses from a seed of its own.
+        final spanSeed =
+            span == 0 ? seed : (seed ^ (span * 0x9E3779B1)) & 0xFFFFFFFF;
+        span++;
+        if (walked) {
+          RoadMesher.sidewalks(rb.walkRibbon, sp, road.halfWidthM, 3.0,
+              anchorBF,
+              pullStart: pullStart, pullEnd: pullEnd);
+        }
+        if (verged) {
+          RoadMesher.verges(rb.verge, sp, road.halfWidthM, anchorBF,
+              widthM: CityTileMesher.vergeWidthM,
+              u: CityTileMesher.grassU,
+              pullStart: pullStart,
+              pullEnd: pullEnd,
+              treesOut: deco == RoadDecoration.trees ? rb.treePits : null,
+              seed: spanSeed);
+        }
+        // Nobody lights a dirt track, and nobody lights an alley either.
+        if (paved && cls.hasPavement) {
+          RoadMesher.lamps(rb.lampSolid, rb.lampGlow, sp, anchorBF,
+              road.halfWidthM, cls,
+              liftM: walked ? CityTileMesher.walkTopLiftM : 0.0);
+        }
+        if (rb.propBudget > 0) {
+          rb.propBudget -= StreetFurniture.emit(
+            rb.propSolid,
+            rb.propGlow,
+            pts: sp,
+            anchorBF: anchorBF,
+            cls: cls,
+            halfWidthM: road.halfWidthM,
+            pavementM: 3.0,
+            // Furniture stands on the raised walk now, not on the bare drape.
+            liftM: walked ? CityTileMesher.walkTopLiftM : 0.0,
+            seed: spanSeed,
+            budget: rb.propBudget,
+            treesOut: rb.treePits,
+            shrubsOut: rb.shrubPits,
+          );
+        }
+        // Cars at the kerb, where the road keeps one to park at.
+        if (paved &&
+            cls.hasPavement &&
+            parks &&
+            r.knobs.onStreetParking &&
+            rb.curbCars > 0) {
+          rb.curbCars -= CityTileMesher.curbParkingFor(
+              rb.curbSolid, rb.curbGlass, sp, road, anchorBF,
+              budget: rb.curbCars);
+        }
+        // Vacuum outside: pedestrians travel in a pressurised tube, not on
+        // a pavement. The glazing builder already exists for dome caps.
+        if (road.sealed) {
+          PedestrianTube.emit(rb.tubeSolid, rb.tubeGlass,
+              pts: sp, halfWidthM: road.halfWidthM, anchorBF: anchorBF);
+        }
+        if (medianTrees) {
+          // A row down the planted median, clear of the crossings.
+          final total = RoadDeckMesher.cumulative(sp).last;
+          var i = 0;
+          for (final (p, _, s)
+              in RoadMesher.every(sp, CityTileMesher.medianTreeSpacingM)) {
+            if (s < pullStart + 6 || s > total - pullEnd - 6) continue;
+            final up = (p + anchorBF).normalized;
+            rb.treePits.add((
+              p + up * (RoadMesher.ribbonLiftM + 0.05),
+              RoadMesher.yawOf(spanSeed, i++),
+            ));
+          }
+        }
+      }
+      // A structure's lamps, up on its deck just inside the parapet.
+      if (paved && cls.hasPavement) {
+        for (final (a, b) in onDeck) {
+          RoadMesher.lamps(
+              rb.lampSolid,
+              rb.lampGlow,
+              RoadDeckMesher.raise(run.pts, anchorBF, liftAt!, from: a, to: b),
+              anchorBF,
+              road.halfWidthM,
+              cls,
+              liftM: RoadMesher.ribbonLiftM,
+              offsetM: road.halfWidthM - 0.45);
+        }
+      }
     }
   }
 
@@ -1560,9 +1724,29 @@ class CityTileMeshJob {
       for (final e in members.ends)
         RoadEnd(e.at - r.anchorBF, e.next - r.anchorBF, e.halfWidthM,
             e.roadClass,
-            paved: e.paved, collector: e.collector),
+            paved: e.paved,
+            collector: e.collector,
+            isStart: e.isStart,
+            liftM: e.liftM),
     ];
-    final junctions = RoadMesher.junctionsFromEnds(ends);
+    // The player's say over the tile's junctions (the Junctions view):
+    // lights 1 on, 0 off, -1 the warrant's; and a point out along each
+    // leg that stops.
+    final overrides = <RoadOverride>[
+      for (final o in members.junctions)
+        RoadOverride(
+          o.at - r.anchorBF,
+          lights: o.lights == 1 ? true : (o.lights == 0 ? false : null),
+          stopPoints: [
+            for (var i = 0; i + 2 < o.stopPoints.length; i += 3)
+              Vector3(o.stopPoints[i], o.stopPoints[i + 1],
+                      o.stopPoints[i + 2]) -
+                  r.anchorBF,
+          ],
+        ),
+    ];
+    final junctions = RoadMesher.junctionsFromEnds(ends,
+        overrides: overrides, anchorBF: r.anchorBF);
     final furniture = r.tier == CityTier.near;
     const perStep = 40;
     for (var end = junctions.length; end > 0; end -= perStep) {
@@ -1588,6 +1772,13 @@ const int kGroundSwatches = 14;
 /// into the ground material for it, since the facade atlas has no green.
 /// Last in the palette, after the placement heatmap's pair.
 const int kLeafSwatch = 9;
+
+/// The palette band a road's grass takes — its verges and a planted
+/// median: the leaf's green. A band nothing else lays on the ground, so a
+/// verge never reads as zoning (bands 1-4 and their pale twins), and the
+/// palette keeps its size — [kGroundSwatches] is still every colour the
+/// bake holds.
+const int kVergeSwatch = kLeafSwatch;
 
 /// The palette band a PLAT LOT is painted in, or null when it is not painted.
 ///
@@ -2094,6 +2285,26 @@ class CityTileMesher {
     return h;
   }
 
+  /// U of a road's grass on the ground palette: the middle of the verge
+  /// swatch, where no filtering or mip level reaches a neighbour.
+  static const double grassU = (kVergeSwatch + 0.5) / kGroundSwatches;
+
+  /// Width of the grass verge a decorated two-lane road lays between its
+  /// kerb and its walk, out of the pavement's three metres.
+  static const double vergeWidthM = 1.3;
+
+  /// Spacing of the trees down a planted median.
+  static const double medianTreeSpacingM = 14.0;
+
+  /// Whether a road of [cls] dressed with [decoration] parks cars at its
+  /// kerb: the menu's own answer ([RoadType.hasParking]) — decoration
+  /// takes the kerb, except on a four-lane road, which keeps its parking.
+  /// Undecorated, it is every road with a pavement, as it always was.
+  static bool curbParks(RoadClass cls, RoadDecoration decoration) =>
+      decoration == RoadDecoration.none
+          ? cls.hasPavement
+          : RoadType.forClass(cls, decoration: decoration).hasParking;
+
   /// Cars parked at the curb, nose to tail.
   ///
   /// Static, unlike the road traffic: these are part of the street's furniture
@@ -2173,6 +2384,9 @@ class CityRoadBuilders {
   final MeshBuilder railBallast = MeshBuilder();
   final MeshBuilder railConcrete = MeshBuilder();
   final MeshBuilder railSteel = MeshBuilder();
+  // A decorated road's grass: its verges and its planted median, on the
+  // ground palette.
+  final MeshBuilder verge = MeshBuilder();
 
   /// The road being emitted, as the anchor-relative points every emitter
   /// takes: filled per road and read within the same call, one list for
@@ -2200,6 +2414,7 @@ class CityRoadBuilders {
         railBallast,
         railConcrete,
         railSteel,
+        verge,
       ];
 
   /// Empty every builder and list, keeping their capacity, and restore the

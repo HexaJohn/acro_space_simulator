@@ -462,6 +462,13 @@ void main() {
     // furniture, and its instance keys and transforms — pinned from before
     // the block tier was boxed at every tier. `Object.hash` is salted per
     // run, so the archetype goes in as its fields.
+    //
+    // Repinned once since, for the road tool's leg-aware junctions: the
+    // fixture's one junction (a street T, an all-way stop) now bars each
+    // leg across its inbound half only, which moves the near tile's bytes
+    // and nothing else — `road_tool_mesh_test` holds this tile with its
+    // junctions aside to the bytes it had. Mid and far draw no bars and
+    // keep their digests.
     int fnv(int h, int v) => ((h ^ (v & 0xFFFFFFFF)) * 0x01000193) & 0xFFFFFFFF;
     int digest(CityTileResult res) {
       var h = 0x811C9DC5;
@@ -496,7 +503,7 @@ void main() {
       expect(near.lodCounts, {BuildingDetail.exterior: buildings.length});
       expect(near.groups, hasLength(5));
       expect(near.instances, hasLength(9));
-      expect(digest(near), 0xf5d18ccb);
+      expect(digest(near), 0x96d875bb);
     });
 
     test('with the detail layer off the tile is the same to the byte', () {
@@ -518,7 +525,7 @@ void main() {
             detailLayer: false,
           ),
           CityBuildingLibraries());
-      expect(digest(off), 0xf5d18ccb);
+      expect(digest(off), 0x96d875bb);
       expect(off.archetypeMeshes, isEmpty);
     });
 
@@ -542,7 +549,7 @@ void main() {
       expect(cut.lodCounts, {BuildingDetail.full: 3, BuildingDetail.exterior: 8});
       expect(cut.groups, hasLength(7));
       expect(cut.instances, hasLength(11));
-      expect(digest(cut), 0x5b35df04);
+      expect(digest(cut), 0x1e983d64);
 
       final whole = mesh();
       expect(whole.groups, hasLength(6));
@@ -576,10 +583,10 @@ void main() {
       int at(CityTier tier) => digest(
           CityTileMesher.mesh(request(tier), libraries, scratch: scratch)
               .detached());
-      expect(at(CityTier.near), 0xf5d18ccb);
+      expect(at(CityTier.near), 0x96d875bb);
       expect(at(CityTier.far), 0x07d559a4);
       expect(at(CityTier.mid), 0x0759f3c8);
-      expect(at(CityTier.near), 0xf5d18ccb);
+      expect(at(CityTier.near), 0x96d875bb);
       expect(at(CityTier.far), 0x07d559a4);
     });
   });

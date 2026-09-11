@@ -6,6 +6,7 @@
 import 'dart:math' as math;
 
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
+import 'package:acro_space_simulator/domain/colony/city/road_elevation.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_junction.dart';
 import 'package:acro_space_simulator/domain/scatter/mesh_builder.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
@@ -263,6 +264,7 @@ void main() {
             reason: '${reason ?? ''} junction $k sits on a different end');
         expect(g.control, w.control, reason: reason);
         expect(g.liftM, w.liftM, reason: reason);
+        expect(g.stopLegs, w.stopLegs, reason: reason);
         expect(g.legs, hasLength(w.legs.length),
             reason: '${reason ?? ''} junction $k has other legs');
         for (var l = 0; l < w.legs.length; l++) {
@@ -270,22 +272,36 @@ void main() {
           expect(g.legs[l].halfWidthM, w.legs[l].halfWidthM, reason: reason);
           expect(g.legs[l].roadClass, w.legs[l].roadClass, reason: reason);
           expect(g.legs[l].paved, w.legs[l].paved, reason: reason);
+          expect(g.legs[l].startsHere, w.legs[l].startsHere, reason: reason);
+          expect(g.legs[l].liftM, w.legs[l].liftM, reason: reason);
         }
       }
     }
 
     // A random end: any class, sometimes a collector, sometimes unpaved,
     // and now and then a degenerate direction (next on the end itself) so
-    // the leg-skipping path is exercised too.
+    // the leg-skipping path is exercised too. Half the ends start their
+    // road; one in five stands on a deck — a tool step up, a shade off
+    // the ground (inside the height tolerance), or down in a tunnel — so
+    // the grouping by height and the underground drop are matched too.
     RoadEnd randomEnd(math.Random rng, Vector3 at) {
       final cls = RoadClass.values[rng.nextInt(RoadClass.values.length)];
       final len = rng.nextInt(12) == 0 ? 0.0 : 5 + rng.nextDouble() * 40;
       final dir = Vector3(rng.nextDouble() - 0.5, rng.nextDouble() - 0.5,
               (rng.nextDouble() - 0.5) * 0.1)
           .normalized;
+      final lift = switch (rng.nextInt(10)) {
+        0 => const [3.0, 6.0, 12.0][rng.nextInt(3)],
+        1 => rng.nextDouble() * 2.0,
+        2 => -8.0,
+        _ => 0.0,
+      };
       return RoadEnd(at, at + dir * len,
           rng.nextBool() ? cls.halfWidth : 2 + rng.nextDouble() * 20, cls,
-          paved: rng.nextInt(5) != 0, collector: rng.nextInt(3) == 0);
+          paved: rng.nextInt(5) != 0,
+          collector: rng.nextInt(3) == 0,
+          isStart: rng.nextBool(),
+          liftM: lift);
     }
 
     // Ends in clusters sized around the tolerance — tight knots that all
@@ -435,10 +451,14 @@ void main() {
   });
 }
 
-/// The pair scan [RoadMesher.junctionsFromEnds] replaced, copied verbatim as
-/// the reference the bucketed version must match exactly: for each lowest
-/// unused end, every later unused end within the tolerance joins its group
-/// in index order.
+/// The pair scan [RoadMesher.junctionsFromEnds] replaced, as the reference
+/// the bucketed version must match exactly: for each lowest unused end,
+/// every later unused end within the tolerance — and within
+/// [RoadMesher.junctionLiftToleranceM] of its height — joins its group in
+/// index order. Copied verbatim once; since the road tool it mirrors the
+/// new semantics as well: a node in a tunnel is dropped, a leg carries
+/// whether its road starts there, and the control and the stop legs are
+/// the leg-aware plan's ([junctionPlanFor]).
 List<RoadJunction> referenceJunctionsFromEnds(List<RoadEnd> ends,
     {double toleranceM = 8.0}) {
   final out = <RoadJunction>[];
@@ -451,24 +471,32 @@ List<RoadJunction> referenceJunctionsFromEnds(List<RoadEnd> ends,
     for (var j = i + 1; j < ends.length; j++) {
       if (used[j]) continue;
       if ((ends[j].at - at).length > toleranceM) continue;
+      if ((ends[j].liftM - ends[i].liftM).abs() >
+          RoadMesher.junctionLiftToleranceM) {
+        continue;
+      }
       used[j] = true;
       group.add(ends[j]);
     }
+    if (ends[i].liftM < -RoadElevation.tunnelCoverM) continue;
     final legs = <RoadLeg>[];
     for (final e in group) {
       final inward = e.next - e.at;
       if (inward.length < 1e-6) continue;
       legs.add(RoadLeg(inward.normalized, e.halfWidthM, e.roadClass,
-          paved: e.paved));
+          paved: e.paved, startsHere: e.isStart, liftM: e.liftM));
     }
     // Where two collectors cross — all four legs collectors, or three at
     // a T — a subdivision builds a roundabout, not a four-way stop.
     final collectors = group.where((e) => e.collector).length;
-    final control = junctionControlFor(
-        [for (final l in legs) l.roadClass],
-        roundaboutPreferred: collectors >= 3);
-    if (control == JunctionControl.none) continue;
-    out.add(RoadJunction(at, legs, control));
+    final plan = junctionPlanFor([
+      for (final l in legs) JunctionLeg(l.roadClass, startsHere: l.startsHere)
+    ], roundaboutPreferred: collectors >= 3);
+    if (plan.control == JunctionControl.none) continue;
+    out.add(RoadJunction(at, legs, plan.control,
+        liftM: ends[i].liftM,
+        stopLegs:
+            plan.control == JunctionControl.stop ? plan.stopLegs : null));
   }
   return out;
 }

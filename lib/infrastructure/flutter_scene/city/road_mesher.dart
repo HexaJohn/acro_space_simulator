@@ -17,9 +17,12 @@
 /// Everything here works on an anchor-relative polyline in metres and a
 /// [RoadClass], and every caller — [CityNodes] for the core, the sprawl's
 /// section and group builders for the suburbs, the viaduct for its deck —
-/// draws through it. A road is a road: its class says how many lanes it
-/// has, its lanes say where the paint goes, and a junction is decided by
-/// [junctionControlFor] from the classes meeting there, wherever it is.
+/// draws through it. A road is a road: its class (and its dressing) says
+/// how many lanes it has, its lanes say where the paint goes, and a
+/// junction is decided by [junctionPlanFor] from the legs meeting there —
+/// their sizes, and which of them are one-way roads leaving — wherever it
+/// is. A road the tool lifted rides its deck ([RoadEnd.liftM], and the
+/// carriageway's `liftAt`); `road_deck.dart` builds what the deck stands on.
 ///
 /// Geometry, not texture, carries the markings. The carriageway is an
 /// asphalt ribbon the road's full width; each painted line is its own thin
@@ -32,6 +35,7 @@ import 'dart:math' as math;
 
 import '../../../domain/architecture/architecture_style.dart';
 import '../../../domain/colony/city/parcel.dart';
+import '../../../domain/colony/city/road_elevation.dart';
 import '../../../domain/colony/city/road_junction.dart';
 import '../../../domain/colony/city/sprawl_plan.dart';
 import '../../../domain/scatter/mesh_builder.dart';
@@ -44,7 +48,10 @@ import 'oriented_box.dart';
 /// along the road (for the leg's direction), and what the road is.
 class RoadEnd {
   const RoadEnd(this.at, this.next, this.halfWidthM, this.roadClass,
-      {this.paved = true, this.collector = false});
+      {this.paved = true,
+      this.collector = false,
+      this.isStart = false,
+      this.liftM = 0});
   final Vector3 at;
   final Vector3 next;
   final double halfWidthM;
@@ -53,33 +60,93 @@ class RoadEnd {
 
   /// A subdivision's collector: two of them crossing warrant a roundabout.
   final bool collector;
+
+  /// This end is its road's FIRST point in the direction of travel (see
+  /// `CityTileEnd.isStart`): a one-way road that starts here only ever
+  /// LEAVES the junction, which is what the traffic-light warrant and the
+  /// stop bars turn on.
+  final bool isStart;
+
+  /// The road's deck above the drape at this end: 0 on the ground. Ends at
+  /// different heights are not one junction — an overpass's end is not a
+  /// leg of the crossing under it (see
+  /// [RoadMesher.junctionLiftToleranceM]).
+  final double liftM;
 }
 
 /// One leg of a junction: the direction it leaves the node in, and what it is.
 class RoadLeg {
-  const RoadLeg(this.dir, this.halfWidthM, this.roadClass, {this.paved = true});
+  const RoadLeg(this.dir, this.halfWidthM, this.roadClass,
+      {this.paved = true, this.startsHere = false, this.liftM = 0});
 
   /// Unit vector from the junction out along the road.
   final Vector3 dir;
   final double halfWidthM;
   final RoadClass roadClass;
   final bool paved;
+
+  /// The road's first point in the direction of travel is at the junction
+  /// ([RoadEnd.isStart]).
+  final bool startsHere;
+
+  /// The leg's deck above the drape where it meets the node ([RoadEnd.liftM]):
+  /// within [RoadMesher.junctionLiftToleranceM] of every other leg's.
+  final double liftM;
+
+  bool get oneWay => roadClass.oneWay;
+
+  /// Traffic on this leg only ever leaves the junction: a one-way road
+  /// that starts here. Nothing arrives along it, so nothing stops on it —
+  /// no bar, no sign, no signal (see [JunctionLeg.outgoing]).
+  bool get outgoing => oneWay && startsHere;
+
+  /// Traffic arrives at the junction along this leg.
+  bool get inbound => !outgoing;
 }
 
 /// A junction, ready to draw: where, what meets there, and how it is
 /// controlled.
 class RoadJunction {
-  const RoadJunction(this.at, this.legs, this.control, {this.liftM = 0});
+  const RoadJunction(this.at, this.legs, this.control,
+      {this.liftM = 0, this.stopLegs});
   final Vector3 at;
   final List<RoadLeg> legs;
   final JunctionControl control;
 
   /// Radial lift of the node above the draped ground — a ramp terminal on a
-  /// bridge approach, say.
+  /// bridge approach, say, or a crossing of two roads the tool raised.
   final double liftM;
+
+  /// Indices into [legs] that STOP at a [JunctionControl.stop] junction —
+  /// the plan's [JunctionPlan.stopLegs]: every leg of an all-way stop, the
+  /// minor road where it meets a bigger one, or whichever the player chose.
+  /// Null stops every inbound leg.
+  final Set<int>? stopLegs;
 
   double get maxHalfWidthM =>
       legs.fold(0.0, (m, l) => math.max(m, l.halfWidthM));
+
+  /// Whether leg [i] carries the junction's control: a stop bar and a sign
+  /// at a stop, a stop bar and a signal at lights, a yield line at a
+  /// roundabout. Never on an outgoing leg — nothing arrives along it.
+  bool controls(int i) {
+    if (!legs[i].inbound) return false;
+    if (control == JunctionControl.stop) return stopLegs?.contains(i) ?? true;
+    return true;
+  }
+}
+
+/// A player's override of one junction (the Junctions view), as the
+/// junction pass takes it: anchor-relative like the ends, the lights
+/// forced on (true), off (false) or left to the warrant (null), and a point
+/// out along each leg that stops — empty leaves the default stop legs (see
+/// [JunctionOverride], which names a leg by its heading; these points are
+/// that heading, carried in the frame's body-fixed metres).
+class RoadOverride {
+  const RoadOverride(this.at, {this.lights, this.stopPoints = const []});
+  final Vector3 at;
+  final bool? lights;
+  final List<Vector3> stopPoints;
 }
 
 /// A point on a polyline with its local frame.
@@ -229,8 +296,10 @@ class RoadMesher {
 
   /// Sound barriers along both edges of [pts]: precast panels a road
   /// segment long, and with [posts] a steel post every few metres. Skipped
-  /// over any stretch [liftAt] carries on a bridge, which has parapets of
-  /// its own, and over the last stretch at either end. The walled variant
+  /// over any stretch [liftAt] carries more than [skipAboveM] up — a
+  /// bridge, which has parapets of its own; a road the tool raised passes
+  /// the structure clearance, so its walls ride the deck where it is at
+  /// grade — and over the last stretch at either end. The walled variant
   /// of a highway, the one that runs past housing.
   static void soundWalls(
     MeshBuilder solid,
@@ -242,6 +311,7 @@ class RoadMesher {
     double Function(double s)? liftAt,
     double liftM = ribbonLiftM,
     bool posts = false,
+    double skipAboveM = 0.3,
   }) {
     if (pts.length < 2) return;
     final st = _stations(pts, anchorBF);
@@ -259,7 +329,7 @@ class RoadMesher {
         final s0 = math.max(a.s, soundWallEndGapM);
         final s1 = math.min(b.s, total - soundWallEndGapM);
         if (s1 - s0 < 1) continue;
-        if ((liftAt?.call((s0 + s1) / 2) ?? 0) > 0.3) continue;
+        if ((liftAt?.call((s0 + s1) / 2) ?? 0) > skipAboveM) continue;
         final seg = b.p - a.p;
         final len = b.s - a.s;
         if (len < 1e-6) continue;
@@ -321,13 +391,21 @@ class RoadMesher {
   /// plus a barrier where the layout has one ([solid] takes it).
   ///
   /// [halfWidthM] overrides the class's own width for a road drawn at the
-  /// width it was built at; the lane layout is scaled to fit.
+  /// width it was built at; the lane layout is scaled to fit. [layout]
+  /// overrides the class's lanes for a road dressed otherwise at the same
+  /// width — a decorated four-lane road's planted median (see
+  /// [RoadClass.lanesFor]).
   ///
   /// [startHalfWidthM] and [endHalfWidthM] taper the road over [taperM]
   /// at either end into what it meets there — a lane drop, or the deck it
   /// comes off. Over the taper the edge moves in and any line outside the
   /// narrowed edge converges onto it, which is what a dropped lane's
   /// divider does; lines inside keep their place.
+  ///
+  /// With [arrows], a one-way layout gets an arrow down every lane (see
+  /// [arrowSpacingM]); with [planting], a planted median is grassed over
+  /// inside its kerbs, on the flat colour at [plantingU] of the ground
+  /// palette — the builder [planting] draws with.
   static void carriageway(
     MeshBuilder m,
     List<Vector3> pts,
@@ -340,10 +418,14 @@ class RoadMesher {
     double Function(double s)? liftAt,
     bool paint = true,
     MeshBuilder? solid,
+    LaneLayout? layout,
+    bool arrows = false,
+    MeshBuilder? planting,
+    double plantingU = 0.5,
   }) {
     if (pts.length < 2) return;
     final st = _stations(pts, anchorBF);
-    final lanes = cls.lanes;
+    final lanes = layout ?? cls.lanes;
     final hw = halfWidthM ?? cls.halfWidth;
     final total = st.last.s;
     final hw0 = startHalfWidthM, hw1 = endHalfWidthM;
@@ -398,12 +480,112 @@ class RoadMesher {
               liftAt: liftAt);
           if (solid != null) _barrier(solid, st, liftM, liftAt);
         case MedianStyle.planted:
-          // A kerbed strip down the middle; its grass and trees are laid
-          // over it by the decoration pass.
+          // A kerbed strip down the middle, and — given [planting] — its
+          // grass inside the kerbs. The decoration's trees are the
+          // caller's: pits the scatter system plants.
           _strip(m, st, -mh, mh, CityTextureBakes.roadConcrete, liftM + 0.02,
               liftAt: liftAt);
+          if (planting != null && mh > 0.4) {
+            _flatStrip(planting, st, -mh + 0.3, mh - 0.3, liftM + 0.05,
+                plantingU,
+                liftAt: liftAt);
+          }
       }
     }
+    if (arrows && lanes.oneWay) {
+      _arrows(m, st, lanes, scale, hwAt, shoulder, liftM, liftAt);
+    }
+  }
+
+  /// A strip from lateral [x0] to [x1] along every station in one flat
+  /// colour of a palette: every vertex samples [u] at the swatch's middle,
+  /// the way a ground patch does, so no filtering can bleed a neighbour in.
+  static void _flatStrip(MeshBuilder m, List<_Station> st, double x0,
+      double x1, double lift, double u,
+      {double Function(double s)? liftAt}) {
+    int? prevL, prevR;
+    for (final k in st) {
+      final h = lift + (liftAt?.call(k.s) ?? 0);
+      final c = k.p + k.up * h;
+      final l = m.vertex(_s(c + k.side * x0), k.up, u, 0.5);
+      final r = m.vertex(_s(c + k.side * x1), k.up, u, 0.5);
+      if (prevL != null && prevR != null) m.quad(prevL, prevR, r, l);
+      prevL = l;
+      prevR = r;
+    }
+  }
+
+  /// Road between the arrows painted down a one-way road: about one a
+  /// block, spread evenly so that a short road still gets one, midway.
+  static const double arrowSpacingM = 50.0;
+
+  /// An arrow down each lane of a one-way road every [arrowSpacingM],
+  /// pointing the way the traffic runs: first point to last, the frame's
+  /// travel order (a reversed road is flipped before it reaches here).
+  /// Geometry on the solid white band, like every other painted line, not
+  /// a band of its own — a new atlas band would move every band's U, the
+  /// lot aprons' included.
+  static void _arrows(
+    MeshBuilder m,
+    List<_Station> st,
+    LaneLayout lanes,
+    double scale,
+    double Function(double s) hwAt,
+    double shoulder,
+    double lift,
+    double Function(double s)? liftAt,
+  ) {
+    final total = st.last.s;
+    if (total < 20) return;
+    final count = math.max(1, (total / arrowSpacingM).floor());
+    final u0 = bandU(CityTextureBakes.roadWhite, 0);
+    final u1 = bandU(CityTextureBakes.roadWhite, 1);
+    // A shaft 0.3 m wide and 2.8 long under a head 1.1 m across and 1.6
+    // long: big enough to read from a car, and from the air.
+    const shaftHalf = 0.15, headHalf = 0.55;
+    const back = -2.2, neck = 0.6, tip = 2.2;
+    for (var a = 0; a < count; a++) {
+      final s = (a + 0.5) * total / count;
+      final f = _frameAt(st, s);
+      final h = lift + paintLiftM + (liftAt?.call(s) ?? 0);
+      final edge = hwAt(s) - shoulder;
+      for (final o0 in lanes.laneOffsets) {
+        final o = o0 * scale;
+        // A lane the taper has dropped by here gets no arrow.
+        if (o.abs() + headHalf > edge) continue;
+        final c = f.p + f.up * h + f.side * o;
+        Vector3 at(double along, double across) =>
+            c + f.along * along + f.side * across;
+        final l0 = m.vertex(_s(at(back, -shaftHalf)), f.up, u0, 0);
+        final r0 = m.vertex(_s(at(back, shaftHalf)), f.up, u1, 0);
+        final r1 = m.vertex(_s(at(neck, shaftHalf)), f.up, u1, 0.5);
+        final l1 = m.vertex(_s(at(neck, -shaftHalf)), f.up, u0, 0.5);
+        m.quad(l0, r0, r1, l1);
+        final hl = m.vertex(_s(at(neck, -headHalf)), f.up, u0, 0.5);
+        final hr = m.vertex(_s(at(neck, headHalf)), f.up, u1, 0.5);
+        final ht = m.vertex(_s(at(tip, 0)), f.up, (u0 + u1) / 2, 1);
+        m.triangle(hl, hr, ht);
+      }
+    }
+  }
+
+  /// The frame at arc [s] along [st]: the point between the stations
+  /// either side of it, with their up interpolated and the segment's own
+  /// direction.
+  static _Station _frameAt(List<_Station> st, double s) {
+    for (var i = 1; i < st.length; i++) {
+      final b = st[i];
+      if (b.s < s && i < st.length - 1) continue;
+      final a = st[i - 1];
+      final span = b.s - a.s;
+      final t = span > 1e-9 ? ((s - a.s) / span).clamp(0.0, 1.0) : 0.0;
+      final up = (a.up * (1 - t) + b.up * t).normalized;
+      final seg = b.p - a.p;
+      final along = seg.length > 1e-6 ? seg.normalized : a.along;
+      return _Station(
+          a.p + seg * t, up, along, along.cross(up).normalized, s);
+    }
+    return st.first;
   }
 
   /// A concrete Jersey barrier down the centreline: one box per segment,
@@ -488,23 +670,13 @@ class RoadMesher {
 
   // ---- Sidewalks ----------------------------------------------------------------------
 
-  /// Raised pavements with a real curb face, one strip each side.
-  ///
-  /// The walk rides [curbHeightM] above the carriageway ribbon, a vertical
-  /// curb face closes the step, and both ends pull back so the strip stops
-  /// at its crossing instead of bridging the intersecting street — the gap
-  /// is where the curb cut and the zebra live. U samples the sidewalk tile
-  /// across the walk (curb stones under 0.06, flags above); the curb face
-  /// wraps the same curb band down its vertical.
-  static void sidewalks(
-    MeshBuilder m,
-    List<Vector3> pts,
-    double halfWidth,
-    double pavementM,
-    Vector3 anchorBF, {
-    double pullStart = 0,
-    double pullEnd = 0,
-  }) {
+  /// [pts] trimmed [pullStart] metres in from its first point and
+  /// [pullEnd] from its last, the cut points interpolated — or null where
+  /// that leaves no real run: each pull is held to 45% of the road, and
+  /// under five metres left is none. What a pavement and its verge are
+  /// laid along, stopping short of the crossing at either end.
+  static List<Vector3>? _trimmed(
+      List<Vector3> pts, double pullStart, double pullEnd) {
     var total = 0.0;
     for (var i = 1; i < pts.length; i++) {
       total += (pts[i] - pts[i - 1]).length;
@@ -512,7 +684,7 @@ class RoadMesher {
     // Keep a real run of pavement mid-block or draw none at all.
     pullStart = math.min(pullStart, total * 0.45);
     pullEnd = math.min(pullEnd, total * 0.45);
-    if (total - pullStart - pullEnd < 5.0) return;
+    if (total - pullStart - pullEnd < 5.0) return null;
 
     // Trim the centreline to the kept span, interpolating the cut points.
     final kept = <Vector3>[];
@@ -535,7 +707,129 @@ class RoadMesher {
         break;
       }
     }
-    if (kept.length < 2) return;
+    return kept.length < 2 ? null : kept;
+  }
+
+  /// Grass verges between the kerb and the walk, one strip each side: a
+  /// decorated two-lane road's dressing. [widthM] of grass laid over the
+  /// inner edge of the pavement, just clear of the kerb stones and a
+  /// shade above the flags, on the flat colour at [u] of the ground
+  /// palette; pulled back from the crossings exactly as the pavement is.
+  ///
+  /// With [treesOut], a street tree every [treeSpacingM] down the middle
+  /// of each verge: a pit (anchor-relative, and a yaw from [seed]) for the
+  /// scatter system to plant, like the pavement's own street trees.
+  static void verges(
+    MeshBuilder m,
+    List<Vector3> pts,
+    double halfWidth,
+    Vector3 anchorBF, {
+    required double widthM,
+    required double u,
+    double pullStart = 0,
+    double pullEnd = 0,
+    List<(Vector3, double)>? treesOut,
+    double treeSpacingM = 12,
+    int seed = 0,
+  }) {
+    final kept = _trimmed(pts, pullStart, pullEnd);
+    if (kept == null) return;
+    final inner = halfWidth + 0.12;
+    final outer = inner + widthM;
+    const lift = walkTopLiftM + 0.015;
+    for (final s in const [-1.0, 1.0]) {
+      int? pIn, pOut;
+      for (var i = 0; i < kept.length; i++) {
+        final p = kept[i];
+        final up = (p + anchorBF).normalized;
+        final ahead = i + 1 < kept.length ? kept[i + 1] - p : p - kept[i - 1];
+        final along = ahead.length > 1e-6 ? ahead.normalized : Vector3.unitX;
+        final side = along.cross(up).normalized;
+        final iIn = m.vertex(_s(p + side * (inner * s) + up * lift), up, u, 0.5);
+        final iOut =
+            m.vertex(_s(p + side * (outer * s) + up * lift), up, u, 0.5);
+        if (pIn != null) {
+          // The sidewalk's winding: the s < 0 strip runs its edges the
+          // other way round.
+          if (s > 0) {
+            m.quad(pIn, pOut!, iOut, iIn);
+          } else {
+            m.quad(pOut!, pIn, iIn, iOut);
+          }
+        }
+        pIn = iIn;
+        pOut = iOut;
+      }
+    }
+    if (treesOut == null) return;
+    var n = 0;
+    for (final (p, along, _) in every(kept, treeSpacingM)) {
+      final up = (p + anchorBF).normalized;
+      final side = along.cross(up).normalized;
+      for (final s in const [-1.0, 1.0]) {
+        treesOut.add((
+          p + side * ((inner + outer) / 2 * s) + up * walkTopLiftM,
+          yawOf(seed, n++),
+        ));
+      }
+    }
+  }
+
+  /// Points every [spacingM] along [pts], the first half a spacing in:
+  /// each with the direction of the segment it falls on and its arc from
+  /// the first point. Where a row of trees stands.
+  static List<(Vector3, Vector3, double)> every(
+      List<Vector3> pts, double spacingM) {
+    final out = <(Vector3, Vector3, double)>[];
+    var carry = spacingM * 0.5;
+    var arc = 0.0;
+    for (var i = 1; i < pts.length; i++) {
+      final a = pts[i - 1];
+      final seg = pts[i] - a;
+      final len = seg.length;
+      if (len < 1e-6) continue;
+      final dir = seg * (1 / len);
+      var s = carry;
+      while (s < len) {
+        out.add((a + dir * s, dir, arc + s));
+        s += spacingM;
+      }
+      carry = s - len;
+      arc += len;
+    }
+    return out;
+  }
+
+  /// A yaw for the [i]th pit a road with [seed] plants: an integer
+  /// scramble, so every isolate turns the same tree the same way (see
+  /// `city_tile_mesher.dart` on why nothing here seeds from `Object.hash`).
+  static double yawOf(int seed, int i) {
+    var h = (seed ^ (i * 0x27D4EB2F)) & 0x7FFFFFFF;
+    h = (h ^ (h >> 15)) * 0x2C1B3C6D & 0x7FFFFFFF;
+    h = (h ^ (h >> 12)) * 0x297A2D39 & 0x7FFFFFFF;
+    h ^= h >> 15;
+    return (h & 0xFFFF) / 65536.0 * 2 * math.pi;
+  }
+
+  /// Raised pavements with a real curb face, one strip each side.
+  ///
+  /// The walk rides [curbHeightM] above the carriageway ribbon, a vertical
+  /// curb face closes the step, and both ends pull back so the strip stops
+  /// at its crossing instead of bridging the intersecting street — the gap
+  /// is where the curb cut and the zebra live. U samples the sidewalk tile
+  /// across the walk (curb stones under 0.06, flags above); the curb face
+  /// wraps the same curb band down its vertical.
+  static void sidewalks(
+    MeshBuilder m,
+    List<Vector3> pts,
+    double halfWidth,
+    double pavementM,
+    Vector3 anchorBF, {
+    double pullStart = 0,
+    double pullEnd = 0,
+  }) {
+    final kept = _trimmed(pts, pullStart, pullEnd);
+    if (kept == null) return;
 
     for (final s in const [-1.0, 1.0]) {
       int? pIn, pOut, pCurbT, pCurbB;
@@ -581,6 +875,10 @@ class RoadMesher {
   /// Derived on the client from the road itself rather than shipped: the rule
   /// is deterministic, and a thousand lamp positions per colony is a lot of
   /// wire for something both ends can compute.
+  ///
+  /// [offsetM] is how far out from the centreline a column stands: on the
+  /// verge by default, and on a raised deck just inside its parapet, where
+  /// there is no verge to stand on.
   static void lamps(
     MeshBuilder solid,
     MeshBuilder glow,
@@ -589,6 +887,7 @@ class RoadMesher {
     double halfWidthM,
     RoadClass cls, {
     double liftM = 0,
+    double? offsetM,
   }) {
     final scale = halfWidthM / 4.0; // street half-width is 4 m
     final spacing = 34.0 * math.sqrt(math.max(scale, 0.25));
@@ -606,7 +905,7 @@ class RoadMesher {
       final up = (p + anchorBF).normalized;
       final along = (pts[i] - pts[i - 1]).normalized;
       final side = along.cross(up).normalized;
-      final offset = halfWidthM + 1.2;
+      final offset = offsetM ?? halfWidthM + 1.2;
       for (final s in both ? const [1.0, -1.0] : [flip]) {
         // On the raised walk when there is one — a column standing on the
         // old bare-drape height would float a curb's worth over the flags.
@@ -662,13 +961,31 @@ class RoadMesher {
 
   // ---- Junctions -----------------------------------------------------------------------------
 
-  /// Junctions from road ENDS: ends within [toleranceM] of each other are one
-  /// node, and the node's control comes from the classes meeting there.
+  /// How near in height two ends must be to meet: a junction is one level.
+  /// The tool's smallest elevation step, three metres, is well outside
+  /// it; the drape's own disagreement at a shared end is well inside.
+  static const double junctionLiftToleranceM = 1.5;
+
+  /// Junctions from road ENDS: ends within [toleranceM] of each other —
+  /// and within [junctionLiftToleranceM] of each other's height — are one
+  /// node, and the node's control and the legs that stop come from the
+  /// legs meeting there ([junctionPlanFor]): their sizes, and which of
+  /// them are one-way roads leaving.
   ///
   /// Roads are split at their crossings, so an intersection is simply a
   /// place where three or more ends meet — the topology is there; this
   /// finds it. Legs split from one crossing land on (nearly) the same
   /// point; the tolerance covers the sampling step they were rebuilt from.
+  /// An end the tool raised over the crossing, or sank under it, lands on
+  /// the same point in plan and is no leg of it: its height is what tells
+  /// an overpass from a crossing. A node deeper than
+  /// [RoadElevation.tunnelCoverM] is in a tunnel and draws nothing.
+  ///
+  /// [overrides] are the player's, anchor-relative like the ends: the
+  /// nearest within [JunctionOverride.matchM] of a node is that node's.
+  /// Its stop points are read as headings in the node's own tangent
+  /// frame — the frame its legs' headings are read in — with [anchorBF]
+  /// saying which way is up there.
   ///
   /// Grouping is star-shaped and greedy: the lowest unused end seeds a
   /// node, every later unused end within the tolerance OF THE SEED joins
@@ -677,8 +994,12 @@ class RoadMesher {
   /// only measures the 27 cells around its own — the same groups, in the
   /// same order, without the all-pairs scan that made this the one
   /// indivisible build step to blow a frame.
-  static List<RoadJunction> junctionsFromEnds(List<RoadEnd> ends,
-      {double toleranceM = 8.0}) {
+  static List<RoadJunction> junctionsFromEnds(
+    List<RoadEnd> ends, {
+    double toleranceM = 8.0,
+    List<RoadOverride> overrides = const [],
+    Vector3 anchorBF = Vector3.zero,
+  }) {
     // The cell is a shade wider than the tolerance so that two ends within
     // it can never land more than one cell apart, even where the division
     // rounds the wrong way on an exact-tolerance pair. A non-positive
@@ -748,6 +1069,12 @@ class RoadMesher {
               // falls the same side it always did — minus the allocation.
               final ex = q.x - at.x, ey = q.y - at.y, ez = q.z - at.z;
               if (math.sqrt(ex * ex + ey * ey + ez * ez) > toleranceM) continue;
+              // Not the seed's level: a road passing over the node or
+              // under it, which is no leg of it.
+              if ((ends[j].liftM - ends[i].liftM).abs() >
+                  junctionLiftToleranceM) {
+                continue;
+              }
               near.add(j);
             }
           }
@@ -762,23 +1089,76 @@ class RoadMesher {
         used[j] = true;
         group.add(ends[j]);
       }
+      // A node in its tunnel draws nothing: no plate, no bar, no mast.
+      final lift = ends[i].liftM;
+      if (lift < -RoadElevation.tunnelCoverM) continue;
       final legs = <RoadLeg>[];
       for (final e in group) {
         final inward = e.next - e.at;
         if (inward.length < 1e-6) continue;
         legs.add(RoadLeg(inward.normalized, e.halfWidthM, e.roadClass,
-            paved: e.paved));
+            paved: e.paved, startsHere: e.isStart, liftM: e.liftM));
       }
       // Where two collectors cross — all four legs collectors, or three at
       // a T — a subdivision builds a roundabout, not a four-way stop.
       final collectors = group.where((e) => e.collector).length;
-      final control = junctionControlFor(
-          [for (final l in legs) l.roadClass],
-          roundaboutPreferred: collectors >= 3);
-      if (control == JunctionControl.none) continue;
-      out.add(RoadJunction(at, legs, control));
+      final override = overrides.isEmpty
+          ? null
+          : _overrideFor(at, legs, overrides, anchorBF);
+      final headings = override?.$2;
+      final plan = junctionPlanFor([
+        for (var k = 0; k < legs.length; k++)
+          JunctionLeg(legs[k].roadClass,
+              startsHere: legs[k].startsHere, heading: headings?[k] ?? 0),
+      ], roundaboutPreferred: collectors >= 3, override: override?.$1);
+      if (plan.control == JunctionControl.none) continue;
+      out.add(RoadJunction(at, legs, plan.control,
+          liftM: lift,
+          stopLegs:
+              plan.control == JunctionControl.stop ? plan.stopLegs : null));
     }
     return out;
+  }
+
+  /// The player's override of the node at [at] with [legs] — the nearest
+  /// of [overrides] within [JunctionOverride.matchM] — as the plan takes
+  /// it, with each leg's heading when it names stop legs (null when it
+  /// does not: a heading is read only to match a stop point against).
+  static (JunctionOverride, List<double>?)? _overrideFor(Vector3 at,
+      List<RoadLeg> legs, List<RoadOverride> overrides, Vector3 anchorBF) {
+    RoadOverride? best;
+    var bestD = double.infinity;
+    for (final o in overrides) {
+      final d = (o.at - at).length;
+      if (d <= JunctionOverride.matchM && d < bestD) {
+        best = o;
+        bestD = d;
+      }
+    }
+    if (best == null) return null;
+    final up = (at + anchorBF).normalized;
+    final stops = best.stopPoints.isEmpty
+        ? null
+        : [for (final p in best.stopPoints) headingOf(p - at, up)];
+    return (
+      // Where it is has been matched here, in the tile's own metres; the
+      // plan reads only what it says.
+      JunctionOverride(
+          at: const Vec2(0, 0), lights: best.lights, stopHeadings: stops),
+      stops == null ? null : [for (final l in legs) headingOf(l.dir, up)],
+    );
+  }
+
+  /// The heading of [dir] in the tangent plane at [up]: radians from north
+  /// toward east, [Vec2.heading]'s convention — what a stop-sign override
+  /// names a leg by. East is the body's spin axis crossed with up, north
+  /// is up crossed with east; at a pole, where that vanishes, east is +X.
+  static double headingOf(Vector3 dir, Vector3 up) {
+    var east = Vector3.unitZ.cross(up);
+    if (east.lengthSquared < 1e-12) east = Vector3.unitY.cross(up);
+    east = east.normalized;
+    final north = up.cross(east);
+    return math.atan2(dir.dot(east), dir.dot(north));
   }
 
   /// Draw [junctions]: a plate, and — with [furniture] — the stop bars,
@@ -836,15 +1216,17 @@ class RoadMesher {
   }
 
   /// A painted bar across a leg: [from] to [to] metres out along [dir],
-  /// [halfW] each side, on [band]. V runs ALONG the bar so a dashed band
-  /// breaks across the road — a yield line.
+  /// [halfW] each side of a line [offset] metres to its [side] (the leg's
+  /// centreline by default), on [band]. V runs ALONG the bar so a dashed
+  /// band breaks across the road — a yield line.
   static void _bar(MeshBuilder m, Vector3 at, Vector3 up, Vector3 dir,
       Vector3 side, double from, double to, double halfW, int band,
-      {double vScale = 0}) {
+      {double vScale = 0, double offset = 0}) {
     final lift = up * (plateLiftM + paintLiftM);
     final u0 = bandU(band, 0), u1 = bandU(band, 1);
-    final near = at + dir * from;
-    final far = at + dir * to;
+    final c = offset == 0 ? at : at + side * offset;
+    final near = c + dir * from;
+    final far = c + dir * to;
     final v1 = vScale > 0 ? 2 * halfW * vScale : 0.5;
     final q = [
       m.vertex(_s(near - side * halfW + lift), up, u0, 0),
@@ -855,8 +1237,27 @@ class RoadMesher {
     m.quad(q[0], q[1], q[2], q[3]);
   }
 
-  /// A stop or signal crossing: plate, stop bars, zebras on a signalised
-  /// one, and a mast or a sign on every leg.
+  /// A bar across the lanes a [leg] ARRIVES in, [hw] its half width: the
+  /// whole of a one-way road coming in, the inbound half of a two-way one.
+  /// Traffic keeps right, so the traffic leaving along the leg is on its
+  /// +[side] (to the right of the leg's direction, as a station's side
+  /// is) and the traffic arriving on its -side; a bar across all of it
+  /// would stop the drivers pulling away.
+  static void _inboundBar(MeshBuilder m, Vector3 at, Vector3 up, RoadLeg leg,
+      Vector3 side, double from, double to, double hw, int band,
+      {double vScale = 0}) {
+    if (leg.oneWay) {
+      _bar(m, at, up, leg.dir, side, from, to, hw, band, vScale: vScale);
+    } else {
+      _bar(m, at, up, leg.dir, side, from, to, hw / 2, band,
+          vScale: vScale, offset: -hw / 2);
+    }
+  }
+
+  /// A stop or signal crossing: plate, zebras on a signalised one, and on
+  /// every leg that stops (see [RoadJunction.controls]) a stop bar across
+  /// its arriving lanes and a mast or a sign — none on a one-way road
+  /// leaving, where nothing arrives to stop.
   static void _crossing(MeshBuilder m, MeshBuilder poles, MeshBuilder lights,
       RoadJunction j, Vector3 anchorBF, double epoch, bool furniture) {
     if (!j.legs.any((l) => l.paved)) return;
@@ -870,16 +1271,20 @@ class RoadMesher {
     final signals = j.control == JunctionControl.signals;
     final (t1, t2) = _tangents(up);
 
-    for (final leg in j.legs) {
+    for (var li = 0; li < j.legs.length; li++) {
+      final leg = j.legs[li];
       if (!leg.paved) continue;
       final dir = leg.dir;
       final side = dir.cross(up).normalized;
       final hw = leg.halfWidthM * 0.92;
+      final stops = j.controls(li);
       // A stop bar across the leg at the plate's edge: the mark that says a
       // driver yields here, and the reason the crossing reads as controlled
       // rather than as an accident of geometry.
-      _bar(m, at, up, dir, side, r * 0.92, r * 0.92 + 0.5, hw,
-          CityTextureBakes.roadWhite);
+      if (stops) {
+        _inboundBar(m, at, up, leg, side, r * 0.92, r * 0.92 + 0.5, hw,
+            CityTextureBakes.roadWhite);
+      }
 
       if (signals) {
         // Zebra OUTSIDE the stop bar: bars run along the direction of
@@ -904,6 +1309,7 @@ class RoadMesher {
         }
       }
 
+      if (!stops) continue;
       // Control. Signals on the arterial crossing, a sign on the local one
       // — the same rule a traffic engineer would apply, and it means the
       // two read differently from the cockpit.
@@ -968,13 +1374,15 @@ class RoadMesher {
     }
     if (!furniture) return;
     // Circulating lane line round the island, and a broken yield line
-    // across every approach at the plate's edge.
-    for (final leg in j.legs) {
-      if (!leg.paved) continue;
+    // across the arriving lanes of every approach at the plate's edge —
+    // none across a one-way road leaving the circle.
+    for (var li = 0; li < j.legs.length; li++) {
+      final leg = j.legs[li];
+      if (!leg.paved || !j.controls(li)) continue;
       final dir = leg.dir;
       final side = dir.cross(up).normalized;
-      _bar(m, at, up, dir, side, r * 0.96, r * 0.96 + 0.45, leg.halfWidthM * 0.92,
-          CityTextureBakes.roadDashedWhite,
+      _inboundBar(m, at, up, leg, side, r * 0.96, r * 0.96 + 0.45,
+          leg.halfWidthM * 0.92, CityTextureBakes.roadDashedWhite,
           vScale: 1 / 1.2);
       // A keep-right sign on the splitter side of each approach.
       final post = at + dir * (r + 1.2) + side * (leg.halfWidthM + 1.2);
