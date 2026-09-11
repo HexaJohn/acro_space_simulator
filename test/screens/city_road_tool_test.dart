@@ -293,6 +293,27 @@ void main() {
         reason: 'Esc reached the view and dropped the selection');
   });
 
+  testWidgets('the lot-sized ground cursor shows only for the tools that '
+      'work on lots', (t) async {
+    // On the road tool it hid most of a short road's ghost and its arrows,
+    // and on Look it marked a lot nothing was going to happen to.
+    CityNodes.cursorBF = null;
+    await pumpCity(t);
+    const at = '0.5,0.45';
+    for (final tool in ['road', 'traffic', 'look']) {
+      road({'tool': tool, 'hover': at});
+      expect(CityNodes.cursorBF, isNull, reason: tool);
+    }
+    for (final label in ['Zone', 'Build', 'Clear']) {
+      await jitteryClick(t, t.getCenter(find.text(label)));
+      road({'hover': at});
+      expect(CityNodes.cursorBF, isNotNull, reason: label);
+      // And a road tool picked up after it takes the cursor away again.
+      road({'tool': 'road', 'hover': at});
+      expect(CityNodes.cursorBF, isNull, reason: 'Road after $label');
+    }
+  });
+
   testWidgets('loading a save puts the road tool down with the editor',
       (t) async {
     await pumpCity(t);

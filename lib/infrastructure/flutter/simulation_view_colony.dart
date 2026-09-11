@@ -106,6 +106,23 @@ extension SimulationViewColony on _SimulationViewState {
     return null;
   }
 
+  /// Whether [tool] shows the lot-sized ground cursor: the tools that zone,
+  /// build on, clear or paint LOTS and cells. Not the road tools — they draw
+  /// their own ghost and arrows — and not Look, which marks nothing.
+  static bool _showsLotCursor(CityEditTool tool) => switch (tool) {
+        CityEditTool.zone ||
+        CityEditTool.utility ||
+        CityEditTool.bulldoze ||
+        CityEditTool.road ||
+        CityEditTool.retrofit ||
+        CityEditTool.support =>
+          true,
+        CityEditTool.inspect ||
+        CityEditTool.roadSpline ||
+        CityEditTool.traffic =>
+          false,
+      };
+
   /// Apply the held city tool to the ground under [local].
   ///
   /// The tap resolves to a real point on the planet — the same ground the craft
@@ -124,7 +141,11 @@ extension SimulationViewColony on _SimulationViewState {
       CityNodes.cursorBF = null;
       return;
     }
-    CityNodes.cursorBF = hit.bodyFixed;
+    // The lot-sized square marks where a LOT tool lands. The road tools
+    // draw their own ghost and arrows, which it hid on a short road, and
+    // Look acts on nothing it would mark.
+    CityNodes.cursorBF =
+        _showsLotCursor(_cityEdit.tool) ? hit.bodyFixed : null;
     CityNodes.cursorBodyId = city.body.id.value;
     // The ghost is the site the placement will actually stake out — width AND
     // depth, because a starport is 1800 x 2600, not a square — and it turns
