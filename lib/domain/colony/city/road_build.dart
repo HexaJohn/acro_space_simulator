@@ -400,7 +400,10 @@ const double kRelayClearM = RoadCosts.cellM;
 /// dragged back 25 m ran from [to] BACK through the controls it passed
 /// and on again — a Z folded over itself, platted on both folds and
 /// priced as added length. Where [to] projects off the end (the road is
-/// dragged longer) only the end control moves, as it always did.
+/// dragged longer) only the end control moves, as it always did — and so
+/// it does where [to] is nearer another arm of the road than the stretch
+/// by the end: the projection is looked for only as far round the road
+/// as a drag that long could have come back along it.
 ///
 /// The controls are a centripetal Catmull-Rom spline's or a dense
 /// polyline's, as the layout keeps them; the other end is never moved.
@@ -432,10 +435,18 @@ List<Vec2> controlsWithMovedEnd(
     cum.add(cum[i - 1] + pts[i].distanceTo(pts[i - 1]));
   }
 
-  // Where [to] projects onto the line.
+  // Where [to] projects onto the line NEAR the moved end. An end dragged
+  // [drag] metres back along the road can have passed at most the arc of a
+  // semicircle on that chord; the line further on is another arm of the
+  // road, not the stretch it was dragged back over. Searched to the far
+  // end, the start of a U nudged 30 m aside toward its own far arm
+  // projected 250 m round the road, dropped every control before it and
+  // re-laid the road as a 10 m stub — every lot along it gone, for free.
+  final drag = to.distanceTo(cs.first);
+  final reach = drag * math.pi / 2 + kRelayClearM;
   var best = double.infinity;
   var sTo = 0.0;
-  for (var i = 1; i < pts.length; i++) {
+  for (var i = 1; i < pts.length && cum[i - 1] <= reach; i++) {
     final a = pts[i - 1], ab = pts[i] - a;
     final len2 = ab.dot(ab);
     final t = len2 <= 1e-12
@@ -449,12 +460,19 @@ List<Vec2> controlsWithMovedEnd(
   }
   if (sTo <= 1e-6) return finish(swapped); // dragged off the end: longer
 
-  return finish([
-    to,
-    for (var i = 1; i < cs.length - 1; i++)
-      if (cum[at[i]] > sTo + kRelayClearM) cs[i],
-    cs.last,
-  ]);
+  var k = 1; // the first control kept past the stretch given up
+  while (k < cs.length - 1 && cum[at[k]] <= sTo + kRelayClearM) {
+    k++;
+  }
+  // The net under the search's bound: the road runs from [to] straight to
+  // the first control kept, so it is that much shorter than it was. A
+  // drag can give up no more than the arc it could have passed; a road
+  // cut far shorter than that is not what the player dragged, and only
+  // the end moves.
+  final shortened = cum[at[k]] - to.distanceTo(cs[k]);
+  if (shortened > reach + kRelayClearM) return finish(swapped);
+
+  return finish([to, ...cs.skip(k)]);
 }
 
 /// § as the HUD prints it: rounded up to the whole coin — a bill of

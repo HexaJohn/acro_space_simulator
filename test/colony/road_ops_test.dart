@@ -378,6 +378,66 @@ void main() {
           east(controlsWithMovedEnd(line,
               atStart: true, to: const Vec2(-20, 0))),
           [-20, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
+      // Back along it and a little aside is still back along it: the
+      // stretch behind goes rather than the road folding over it.
+      expect(
+          east(controlsWithMovedEnd(line,
+              atStart: true, to: const Vec2(45, 6))),
+          [45, 60, 70, 80, 90, 100]);
+    });
+
+    // A U, 40 m between its arms: the start nudged 30 m sideways lands
+    // 10 m from the FAR arm, 250 m on round the road.
+    const uBend = [
+      Vec2(0, 0), Vec2(50, 0), Vec2(100, 0), Vec2(120, 20), //
+      Vec2(100, 40), Vec2(50, 40), Vec2(0, 40),
+    ];
+
+    test('an end nudged near the far arm of a U only moves the end', () {
+      List<(double, double)> pts(List<Vec2> cs) => [for (final c in cs) (c.e, c.n)];
+      expect(
+          pts(controlsWithMovedEnd(uBend,
+              atStart: true, to: const Vec2(0, 30))),
+          pts([const Vec2(0, 30), ...uBend.skip(1)]),
+          reason: 'not the far arm\'s stub (0,30)-(0,40)');
+      expect(
+          pts(controlsWithMovedEnd(uBend,
+              atStart: false, to: const Vec2(0, 10))),
+          pts([...uBend.take(uBend.length - 1), const Vec2(0, 10)]));
+    });
+
+    test('a U adjusted near its own far arm keeps its length and its lots',
+        () {
+      final sim = colony();
+      sim.commitRoad(uBend, RoadClass.street);
+      final oldLen = sim.layout.roadIndex.byId('r0')!.lengthM;
+      final lots = sim.layout.autoParcels.length;
+      expect(lots, greaterThan(8));
+      // Buildings along the far arm, 150 m and more round from the start.
+      final far = [
+        for (final p in sim.layout.autoParcels)
+          if (p.centroid.n > 40) p,
+      ];
+      expect(far.length, greaterThanOrEqualTo(3));
+      for (final lot in far) {
+        sim.parcelBuildings[lot.id] = clinic;
+      }
+      final r = sim.moveRoadEnd('r0', atStart: true, to: const Vec2(0, 30));
+      expect(r.quote.ok, isTrue, reason: r.quote.reason);
+      final rec = sim.layout.roadIndex.byId(r.roadId!)!;
+      expect(rec.lengthM, closeTo(oldLen, 40),
+          reason: 'the end moved, not a 10 m stub left of the U');
+      expect(rec.samples.first.n, closeTo(30, 1e-6));
+      expect(sim.layout.autoParcels.length, greaterThanOrEqualTo(lots - 4));
+      // The re-plat runs from the moved start, so a lot or two may fall
+      // off the far end; the rest of the far arm's buildings are carried.
+      final ids = {for (final p in sim.layout.parcels) p.id};
+      final standing = [
+        for (final id in sim.parcelBuildings.keys)
+          if (ids.contains(id)) id,
+      ];
+      expect(standing.length, greaterThanOrEqualTo(far.length - 2),
+          reason: 'the far arm\'s buildings keep their lots');
     });
 
     test('a bridge drawn short of a street is surveyed on the line laid', () {
