@@ -132,7 +132,8 @@ void main() {
     expect(pending, isNotEmpty, reason: 'the downtown is still graded');
     for (final p in pending) {
       if (p.key.startsWith('road:')) {
-        final rid = p.key.substring(5, p.key.lastIndexOf(':'));
+        // 'road:<id>:<half width>:<segment>'.
+        final rid = p.key.split(':')[1];
         expect(ids.contains(CityGenerator.baseRoadId(rid)), isFalse,
             reason: '${p.key} grades a suburb street');
       } else if (p.key.startsWith('pad:')) {

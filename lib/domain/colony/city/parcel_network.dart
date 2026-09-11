@@ -22,6 +22,7 @@ import 'dart:math' as math;
 
 import 'city_layout.dart';
 import 'parcel.dart';
+import 'road_elevation.dart';
 import 'spatial_index.dart';
 
 class ParcelNetwork {
@@ -51,6 +52,39 @@ class ParcelNetwork {
     return best;
   }
 
+  /// Arc length along [rec] of its nearest point on segment [seg] to [p].
+  static double _arcOn(IndexedRoad rec, int seg, Vec2 p) {
+    if (seg == 0) return 0;
+    final (q, _) = rec.nearestOnSegment(p, seg);
+    return rec.cum[seg - 1] + rec.sampleAt(seg - 1).distanceTo(q);
+  }
+
+  /// Whether [a] at [sA] along it and [b] at [sB] pass one over the other
+  /// rather than meet — a viaduct does not serve the street it crosses,
+  /// and a tunnel does not join the road above it.
+  ///
+  /// Only a road with a DECK (`RoadSpline.deck`) can be separated: two
+  /// draped roads touch where their carriageways do, as they always have.
+  /// Two decks are separated when their heights there differ by
+  /// [RoadElevation.gradeSeparationM] or more — two raised roads meeting at
+  /// one height are one junction in the air. A deck and a draped road,
+  /// which has no height here but the ground's, are separated where the
+  /// deck is on its piers or in its tunnel, or stands that far off the
+  /// ground it was laid on.
+  static bool gradeSeparated(
+      IndexedRoad a, double sA, IndexedRoad b, double sB) {
+    final da = a.road.deck, db = b.road.deck;
+    if (da == null && db == null) return false;
+    if (da != null && db != null) {
+      return (da.heightAt(sA, a.lengthM) - db.heightAt(sB, b.lengthM)).abs() >=
+          RoadElevation.gradeSeparationM;
+    }
+    final (deck, s, lengthM) =
+        da != null ? (da, sA, a.lengthM) : (db!, sB, b.lengthM);
+    if (deck.onStructureAt(s) || deck.inTunnelAt(s)) return true;
+    return deck.offsetAt(s, lengthM).abs() >= RoadElevation.gradeSeparationM;
+  }
+
   factory ParcelNetwork.of(
     CityLayout layout, {
     Vec2 root = const Vec2(0, 0),
@@ -64,13 +98,14 @@ class ParcelNetwork {
     // Roads join where their carriageways touch: a sample of one within the
     // two half-widths plus slack of a segment of the other. Probed every
     // 12 m along each road, which is well under any lot frontage, so a
-    // junction cannot slip between two probes.
+    // junction cannot slip between two probes. A touch where one road
+    // passes over or under the other is no join (see [gradeSeparated]).
     final touching = <int, Set<int>>{};
     final stride = math.max(1, (12 / idx.sampleM).round());
     for (final (slotA, a) in idx.indexed) {
       final mine = touching[slotA] ??= {};
       final reach = a.road.halfWidth + _maxHalfWidth + junctionSlackM;
-      for (var i = 0; i < a.sampleCount; i += stride) {
+      void probe(int i) {
         final p = a.sampleAt(i);
         idx.visit(Box2.around(p, reach), 0, (slotB, b, seg) {
           if (slotB == slotA || mine.contains(slotB)) return;
@@ -79,25 +114,22 @@ class ParcelNetwork {
               ? p.distanceTo(b.sampleAt(0))
               : b.distanceToSegment(p, seg);
           if (d <= limit) {
+            if ((a.road.deck != null || b.road.deck != null) &&
+                gradeSeparated(a, a.cum[i], b, _arcOn(b, seg, p))) {
+              return;
+            }
             mine.add(slotB);
             (touching[slotB] ??= {}).add(slotA);
           }
         });
       }
+
+      for (var i = 0; i < a.sampleCount; i += stride) {
+        probe(i);
+      }
       // The last sample too: a short stub's end is where it meets a road.
       if (a.sampleCount > 1 && (a.sampleCount - 1) % stride != 0) {
-        final p = a.sampleAt(a.sampleCount - 1);
-        idx.visit(Box2.around(p, reach), 0, (slotB, b, seg) {
-          if (slotB == slotA || mine.contains(slotB)) return;
-          final limit = a.road.halfWidth + b.road.halfWidth + junctionSlackM;
-          final d = seg == 0
-              ? p.distanceTo(b.sampleAt(0))
-              : b.distanceToSegment(p, seg);
-          if (d <= limit) {
-            mine.add(slotB);
-            (touching[slotB] ??= {}).add(slotA);
-          }
-        });
+        probe(a.sampleCount - 1);
       }
     }
 

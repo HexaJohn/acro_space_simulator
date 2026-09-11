@@ -19,6 +19,7 @@
 library;
 
 import 'city_building_spec.dart';
+import 'road_catalog.dart';
 
 /// One rung of the ladder: a population the colony passes, what passing it pays
 /// out, and (derived) what the catalogue opens at that population.
@@ -206,6 +207,19 @@ class CityProgression {
     return [
       for (final s in kUtilCatalog)
         if (s.unlockPop > floor && s.unlockPop <= m.population) s,
+    ];
+  }
+
+  /// Road-menu entries this tier opens: the same band as [unlockedBy], over
+  /// the road catalogue's own `unlockPop` — so the milestone panel and the
+  /// road menu (`CitySim.roadTypeUnlocked`) can never disagree about when
+  /// a highway opens. A separate list rather than a wider [unlockedBy]:
+  /// that one's callers expect buildings.
+  static List<RoadType> roadsUnlockedBy(CityMilestone m) {
+    final floor = m.tier == 0 ? -1 : all[m.tier - 1].population;
+    return [
+      for (final t in kRoadCatalog)
+        if (t.unlockPop > floor && t.unlockPop <= m.population) t,
     ];
   }
 

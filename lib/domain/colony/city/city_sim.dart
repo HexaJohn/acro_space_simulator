@@ -32,7 +32,10 @@ import 'city_layout.dart';
 import 'city_progression.dart';
 import 'parcel.dart';
 import 'parcel_network.dart';
+import 'road_build.dart';
+import 'road_catalog.dart';
 import 'road_junction.dart';
+import 'road_names.dart';
 import 'shuttle_run.dart';
 import 'sprawl_plan.dart';
 import 'commodity.dart';
@@ -394,8 +397,9 @@ class CitySim {
   /// Net §/s the standing laws add (positive) or cost (negative).
   double lawUpkeepRate = 0;
 
-  /// What the treasury is actually gaining or losing per second.
-  double get netFundsRate => taxIncomeRate + lawUpkeepRate;
+  /// What the treasury is actually gaining or losing per second: tax, the
+  /// laws, and the upkeep of every road (see [roadUpkeepRate]).
+  double get netFundsRate => taxIncomeRate + lawUpkeepRate - roadUpkeepRate;
 
   /// Milestone tiers already awarded, by [CityMilestone.tier].
   ///
@@ -409,7 +413,14 @@ class CitySim {
   /// override. What the snapshot and the renderer key road work on: an
   /// in-place edit keeps the road COUNT, and a cache keyed on counts never
   /// sees it (an upgraded road went on being drawn as what it was).
-  int roadsRevision = 0;
+  ///
+  /// The sim's own count (junction overrides, a load, its road wrappers)
+  /// plus the layout's [CityLayout.revision], which every mutation of a
+  /// road moves — so the generator, which edits the layout directly, moves
+  /// it too. Both only ever grow, so their sum does, strictly, on any
+  /// change to either.
+  int get roadsRevision => _roadsRevision + layout.revision;
+  int _roadsRevision = 0;
 
   /// The player's say over junctions — lights on or off, which legs stop —
   /// from the Junctions view, by [JunctionOverride.key].
@@ -1127,6 +1138,26 @@ class CitySim {
   /// complexity unlocks more systems to manage.
   bool systemOn(double threshold) => complexity >= threshold;
 
+  /// Seconds of colony time in one of the host body's days. A reference
+  /// Earth day (~86400 s sidereal) is compressed to ~120 s of play; faster
+  /// spinners get proportionally shorter days, slow or tidally locked ones
+  /// longer — clamped to 20..1200 s so a day is neither a flicker nor a
+  /// session. The one calendar the colony has: the day/night cycle turns on
+  /// it, and [weekSec] (what road upkeep is priced per) is seven of them.
+  double get dayLengthSec {
+    const refDaySeconds = 120.0; // an Earth day, in real seconds of play
+    final rot = body.siderealRotationPeriod.abs();
+    final dayLen = rot <= 1 ? refDaySeconds : refDaySeconds * (rot / 86400.0);
+    return dayLen.clamp(20.0, 1200.0);
+  }
+
+  /// A week of colony time: seven days of [dayLengthSec]. Upkeep is quoted
+  /// per week, as a city builder quotes it, and charged per second of
+  /// COLONY time (the time [advance] integrates, which the world clock can
+  /// outrun at high warp) so the treasury and the economy it pays for run
+  /// on the same clock.
+  double get weekSec => 7 * dayLengthSec;
+
 
   /// Advance the colony by [simDt] seconds of SIMULATION time.
   ///
@@ -1144,13 +1175,9 @@ class CitySim {
     final dt = (simDt * eventSimWarp).clamp(0.0, 0.5);
     if (dt <= 0) return;
 
-    // Day/night: advance the day phase by the body's rotation rate. A reference
-    // Earth-day (~86400 s sidereal) is compressed to ~120 s of play; faster
-    // spinners get proportionally shorter days, slow/tidELocked ones longer.
-    const refDaySeconds = 120.0; // an Earth day, in real seconds of play
-    final rot = body.siderealRotationPeriod.abs();
-    final dayLen = rot <= 1 ? refDaySeconds : refDaySeconds * (rot / 86400.0);
-    dayPhase = (dayPhase + dt / dayLen.clamp(20.0, 1200.0)) % 1.0;
+    // Day/night: advance the day phase by the body's rotation rate (see
+    // [dayLengthSec]).
+    dayPhase = (dayPhase + dt / dayLengthSec) % 1.0;
 
     final active = activeSpecs.toList();
 
@@ -1500,7 +1527,9 @@ class CitySim {
     // these, nothing reads them back.
     taxIncomeRate = taxIncome;
     lawUpkeepRate = lawFundsRate();
-    funds += (taxIncomeRate + lawUpkeepRate) * dt;
+    // Road upkeep: cached on the road network's revision, so this is a
+    // lookup, not a walk of the roads, however many ticks a frame runs.
+    funds += (taxIncomeRate + lawUpkeepRate - roadUpkeepRate) * dt;
     research += population *
         happiness *
         researchPerPopPerSec *
@@ -3385,6 +3414,16 @@ class CitySim {
     bool snapEnd = true,
     double bridgeClearStartM = CityLayout.bridgeEndClearM,
     double bridgeClearEndM = CityLayout.bridgeEndClearM,
+    /// Dressing, deck, direction and a player's name — see
+    /// [CityLayout.commitRoad]. Wherever a deck is involved — this road's
+    /// or one it crosses — [groundAt] is also the height of the ground a
+    /// draped road stands on at the crossing, so it must return metres
+    /// above the body datum (`groundRadius - body.radius`); the grade gate
+    /// only compares heights, so that form serves it too.
+    RoadDecoration decoration = RoadDecoration.none,
+    RoadDeck? deck,
+    bool reversed = false,
+    String? name,
   }) {
     if (groundAt != null && controls.length >= 2) {
       final samples = RoadSpline(
@@ -3392,7 +3431,17 @@ class CitySim {
         controls: controls,
         roadClass: roadClass,
       ).sample(stepM: 12);
-      final grade = RoadGradeCheck.of(samples, groundAt, roadClass);
+      // A raised or sunk road climbs its deck's grade, not the ground's.
+      final RoadGradeCheck grade;
+      if (deck != null) {
+        var lengthM = 0.0;
+        for (var i = 1; i < samples.length; i++) {
+          lengthM += samples[i].distanceTo(samples[i - 1]);
+        }
+        grade = RoadGradeCheck.ofDeck(deck, lengthM, roadClass);
+      } else {
+        grade = RoadGradeCheck.of(samples, groundAt, roadClass);
+      }
       if (!grade.ok) return null;
     }
     final result = layout.commitRoad(
@@ -3415,9 +3464,25 @@ class CitySim {
       bridgeClearStartM: bridgeClearStartM,
       bridgeClearEndM: bridgeClearEndM,
       regenerateLots: regenerateLots,
+      decoration: decoration,
+      deck: deck,
+      reversed: reversed,
+      name: name,
+      groundAt: groundAt,
     );
     lastCommitCrossings = result.crossings;
-    for (final e in result.renamedLots.entries) {
+    _carryRenamedLots(result.renamedLots);
+    _roadsRevision++;
+    return result.roadId;
+  }
+
+  /// Re-key everything the colony holds against a lot onto the lot that
+  /// replaced it: [renamed] is old lot id -> new lot id, as a re-plat
+  /// reports it ([CityLayout.commitRoad], [CityLayout.upgradeRoad]). One
+  /// carry for every road edit, so a road built, upgraded or re-laid keeps
+  /// the district along it exactly as a road committed always has.
+  void _carryRenamedLots(Map<String, String> renamed) {
+    for (final e in renamed.entries) {
       final placed = parcelBuildings.remove(e.key);
       if (placed != null) parcelBuildings[e.value] = placed;
       final grown = grownParcels.remove(e.key);
@@ -3434,8 +3499,429 @@ class CitySim {
         if (c.site == e.key) c.site = e.value;
       }
     }
-    return result.roadId;
   }
+
+  // ---- The road tool: building, upgrading and adjusting roads -----------
+  //
+  // The generator and the starter kit lay roads free through [commitRoad];
+  // the PLAYER builds through these, which price what they do (see
+  // `road_build.dart`) and charge the treasury for it. Every one moves
+  // [roadsRevision], so the renderer, the traffic model and the upkeep see
+  // an edit the moment it lands.
+
+  /// Whether the road menu offers [t] yet: the colony has reached its
+  /// milestone population — or the unlock cheat is on, as for buildings.
+  bool roadTypeUnlocked(RoadType t) =>
+      ignoreUnlocks || population >= t.unlockPop;
+
+  /// What building [r] would cost, and whether it can be. Pure — safe to
+  /// call on every mouse move; see [quoteRoadBuild] for the rules.
+  /// [groundAt] is the natural ground in metres above the body datum
+  /// (`groundRadius - body.radius`); [gradeGate] grade-checks a road on
+  /// the ground against its type's limit.
+  RoadQuote quoteRoad(
+    RoadBuildRequest r, {
+    double Function(Vec2)? groundAt,
+    bool gradeGate = false,
+  }) =>
+      quoteRoadBuild(r,
+          groundAt: groundAt,
+          gradeGate: gradeGate,
+          funds: funds,
+          unlocked: roadTypeUnlocked(r.type));
+
+  /// Build [r] if it can be built: quote it, lay it (junctions split, lots
+  /// re-cut, the district along every renamed lot carried across — exactly
+  /// as [commitRoad] lays a road), and charge the treasury the quote.
+  /// Returns the road's id — its BASE id; the pieces a junction cut it into
+  /// are `<id>x<i>` — or null with the quote saying why not (and [blocked]
+  /// saying it to the player).
+  ({String? roadId, RoadQuote quote}) buildRoad(
+    RoadBuildRequest r, {
+    double Function(Vec2)? groundAt,
+    bool gradeGate = false,
+  }) {
+    final q = quoteRoad(r, groundAt: groundAt, gradeGate: gradeGate);
+    if (!q.ok) {
+      blocked = q.reason;
+      return (roadId: null, quote: q);
+    }
+    final t = r.type;
+    final result = layout.commitRoad(
+      controls: r.controls,
+      roadClass: t.roadClass,
+      sealed: !breathable,
+      soundWalls: t.soundWalls,
+      decoration: t.decoration,
+      deck: q.deck,
+      groundAt: groundAt,
+      snapStart: r.snapStart,
+      snapEnd: r.snapEnd,
+    );
+    lastCommitCrossings = result.crossings;
+    _carryRenamedLots(result.renamedLots);
+    funds -= q.cost;
+    _roadsRevision++;
+    return (roadId: result.roadId, quote: q);
+  }
+
+  /// A road's length as the index holds it — the length its deck's ranges
+  /// were sliced on.
+  double _roadLengthM(RoadSpline road) =>
+      layout.roadIndex.byId(road.id)?.lengthM ?? road.length(stepM: 2);
+
+  /// What turning the road [roadId] into [to] would cost: the difference in
+  /// construction over its length, pier and tunnel stretches priced at
+  /// theirs; a downgrade is free, not a refund. Refused where [to] cannot
+  /// be what the road is — a gravel road in a tunnel, a deck too steep for
+  /// the new type's limit — or is not yet open, or the treasury is short.
+  RoadQuote quoteUpgrade(String roadId, RoadType to) {
+    final road = layout.roadById(roadId);
+    if (road == null) return RoadQuote.refused(to, RoadRefusal.notFound);
+    final cls = to.roadClass;
+    final lengthM = _roadLengthM(road);
+    final deck = road.deck;
+    final structureM = deck?.structureM ?? 0.0;
+    final tunnelM = deck?.tunnelM ?? 0.0;
+    final bridgeM = deck == null ? 0.0 : estimateBridgeM(deck, lengthM);
+    final gradePct = deck?.gradePct(lengthM) ?? 0.0;
+    RoadRefusal? refusal;
+    if (deck != null) {
+      final raised = deck.structures.isNotEmpty ||
+          math.max(deck.startOffsetM, deck.endOffsetM) > 1e-6;
+      if (deck.tunnels.isNotEmpty && !cls.canTunnel) {
+        refusal = RoadRefusal.noTunnel;
+      } else if (raised && !cls.canElevate) {
+        refusal = RoadRefusal.noElevation;
+      } else if (gradePct > cls.maxGradePct + 1e-9) {
+        refusal = RoadRefusal.tooSteep;
+      }
+    }
+    final cost = RoadCosts.upgrade(RoadType.of(road), to,
+        lengthM: lengthM,
+        structureM: structureM,
+        bridgeM: bridgeM,
+        tunnelM: tunnelM);
+    refusal ??= !roadTypeUnlocked(to)
+        ? RoadRefusal.locked
+        : (cost > funds + 1e-9 ? RoadRefusal.funds : null);
+    return RoadQuote(
+      type: to,
+      lengthM: lengthM,
+      cost: cost,
+      upkeepPerWeek: RoadCosts.upkeepPerWeek(to,
+          lengthM: lengthM, structureM: structureM, tunnelM: tunnelM),
+      structureM: structureM,
+      bridgeM: bridgeM,
+      tunnelM: tunnelM,
+      gradePct: gradePct,
+      gradeLimitPct: cls.maxGradePct,
+      deck: deck,
+      refusal: refusal,
+    );
+  }
+
+  /// Upgrade (or downgrade) the road [roadId] to [to] in place, if
+  /// [quoteUpgrade] allows it: same id, same geometry and deck, the lots
+  /// re-cut for its new width and the district carried across, the quote
+  /// charged. Upgrading a road to what it already is changes nothing.
+  RoadQuote upgradeRoad(String roadId, RoadType to) {
+    final q = quoteUpgrade(roadId, to);
+    if (!q.ok) {
+      blocked = q.reason;
+      return q;
+    }
+    final road = layout.roadById(roadId)!;
+    final cls = to.roadClass;
+    final same = road.roadClass == cls &&
+        road.decoration ==
+            (cls.supportsDecoration ? to.decoration : RoadDecoration.none) &&
+        road.soundWalls == (to.soundWalls && cls.canHaveSoundWalls);
+    if (same) return q;
+    final renamed = layout.upgradeRoad(roadId,
+        roadClass: cls, decoration: to.decoration, soundWalls: to.soundWalls);
+    if (renamed != null) _carryRenamedLots(renamed);
+    funds -= q.cost;
+    _roadsRevision++;
+    return q;
+  }
+
+  /// Reverse the direction of the one-way road [roadId]: its traffic now
+  /// runs the other way. Nothing else moves — no lot, no building. False
+  /// (with [blocked] saying why) for a road that is gone or runs both ways.
+  bool reverseRoad(String roadId) {
+    final road = layout.roadById(roadId);
+    if (road == null || !road.oneWay) {
+      blocked = RoadQuote.refused(
+              road == null
+                  ? RoadType.forClass(RoadClass.street)
+                  : RoadType.of(road),
+              road == null ? RoadRefusal.notFound : RoadRefusal.notOneWay)
+          .reason;
+      return false;
+    }
+    layout.reverseRoad(roadId);
+    _roadsRevision++;
+    return true;
+  }
+
+  /// Name the road [roadId] — EVERY piece of it: the road the player drew,
+  /// which the junctions it crosses have cut into pieces sharing its base
+  /// id ([CityLayout.baseRoadId]). Null or blank restores the generated
+  /// name. False for a road that is gone.
+  bool renameRoad(String roadId, String? name) {
+    if (layout.roadById(roadId) == null) return false;
+    final base = CityLayout.baseRoadId(roadId);
+    final pieces = [
+      for (final r in layout.roads)
+        if (CityLayout.baseRoadId(r.id) == base) r.id,
+    ];
+    for (final id in pieces) {
+      layout.renameRoad(id, name);
+    }
+    _roadsRevision++;
+    return true;
+  }
+
+  /// What the road [roadId] is called: the player's name for it (on this
+  /// piece, else on any piece of the same road), else a generated street
+  /// name — the same on every load, for every piece of the road (see
+  /// `road_names.dart`).
+  String roadNameOf(String roadId) {
+    final road = layout.roadById(roadId);
+    final own = road?.name;
+    if (own != null) return own;
+    final base = CityLayout.baseRoadId(roadId);
+    final named = _playerRoadNames()[base];
+    if (named != null) return named;
+    return RoadNames.generated(base, road?.roadClass ?? RoadClass.street);
+  }
+
+  /// Base road id -> the name a player gave it, rebuilt only when a road
+  /// changes: a name is read per hover, and a colony has tens of thousands
+  /// of road pieces.
+  Map<String, String> _playerRoadNames() {
+    final rev = roadsRevision;
+    final cached = _roadNames;
+    if (cached != null && _roadNamesRevision == rev) return cached;
+    final names = <String, String>{
+      for (final r in layout.roads)
+        if (r.name != null) CityLayout.baseRoadId(r.id): r.name!,
+    };
+    _roadNames = names;
+    _roadNamesRevision = rev;
+    return names;
+  }
+
+  Map<String, String>? _roadNames;
+  int _roadNamesRevision = -1;
+
+  /// Adjust Roads: drag one END of the road [roadId] to [to] and re-lay it.
+  ///
+  /// The end left where it was keeps its deck height exactly; the moved end
+  /// stands [toHeightM] above the datum when given (it was dropped on a
+  /// raised road — `deckHeightAt`), else as high above the ground at [to]
+  /// as it stood above the ground it left. A road on the ground stays on
+  /// the ground. [atStart] names the road's FIRST CONTROL, whichever way
+  /// its traffic runs.
+  ///
+  /// Re-laid through [CityLayout.commitRoad] with every attribute it had —
+  /// class, dressing, walls, direction, name, how it plats, collector,
+  /// graded, sealed — under a new id that keeps its base road (and so its
+  /// name): the moved end joins whatever it is dropped on, and every lot
+  /// it re-cuts is carried by containment. Charged the road as re-laid less
+  /// the road it replaces — the added length, at its own price on piers or
+  /// underground — never refunded for a shorter one. Returns the id it was
+  /// re-laid under (its pieces are `<id>x<i>` where a junction cut it), or
+  /// null with the quote saying why not.
+  ({String? roadId, RoadQuote quote}) moveRoadEnd(
+    String roadId, {
+    required bool atStart,
+    required Vec2 to,
+    double? toHeightM,
+    double Function(Vec2)? groundAt,
+  }) {
+    final road = layout.roadById(roadId);
+    if (road == null || road.controls.length < 2) {
+      final q = RoadQuote.refused(
+          road == null ? RoadType.forClass(RoadClass.street) : RoadType.of(road),
+          RoadRefusal.notFound);
+      blocked = q.reason;
+      return (roadId: null, quote: q);
+    }
+    final type = RoadType.of(road);
+    final controls = List<Vec2>.of(road.controls);
+    final fixedEnd = atStart ? controls.last : controls.first;
+    controls[atStart ? 0 : controls.length - 1] = to;
+
+    final deck = road.deck;
+    double? fixedH, movedH;
+    if (deck != null || toHeightM != null) {
+      final ground = groundAt ?? (Vec2 _) => 0.0;
+      fixedH = deck == null
+          ? ground(fixedEnd)
+          : (atStart ? deck.endM : deck.startM);
+      final offset = deck == null
+          ? 0.0
+          : (atStart ? deck.startOffsetM : deck.endOffsetM);
+      movedH = toHeightM ?? ground(to) + offset;
+    }
+    final full = quoteRoadBuild(
+      RoadBuildRequest(
+        controls: controls,
+        type: type,
+        startHeightM: atStart ? movedH : fixedH,
+        endHeightM: atStart ? fixedH : movedH,
+        snapStart: atStart,
+        snapEnd: !atStart,
+      ),
+      groundAt: groundAt,
+    );
+    final oldLen = _roadLengthM(road);
+    final oldCost = RoadCosts.construction(type,
+        lengthM: oldLen,
+        structureM: deck?.structureM ?? 0,
+        bridgeM: deck == null ? 0 : estimateBridgeM(deck, oldLen),
+        tunnelM: deck?.tunnelM ?? 0);
+    final added = math.max(0.0, full.cost - oldCost);
+    var q = full.copyWith(cost: added);
+    if (q.ok && added > funds + 1e-9) {
+      q = q.copyWith(refusal: RoadRefusal.funds);
+    }
+    if (!q.ok) {
+      blocked = q.reason;
+      return (roadId: null, quote: q);
+    }
+
+    // Bridge ranges run from the first control: moving the start moves
+    // them along by however much longer the road now is.
+    final shift = atStart ? full.lengthM - oldLen : 0.0;
+    final bridges = [
+      for (final (a, b) in road.bridges)
+        if (b + shift > 0 && a + shift < full.lengthM) (a + shift, b + shift),
+    ];
+
+    final newId = layout.childIdFor(roadId);
+    layout.removeRoad(roadId, regenerateLots: false);
+    final result = layout.commitRoad(
+      controls: controls,
+      roadClass: road.roadClass,
+      // The end left alone stays exactly where it was; the moved one joins
+      // whatever it was dropped on.
+      snapStart: atStart,
+      snapEnd: !atStart,
+      bridges: bridges,
+      startHalfWidthM: road.startHalfWidthM,
+      endHalfWidthM: road.endHalfWidthM,
+      sealed: road.sealed,
+      soundWalls: road.soundWalls,
+      lotFrontageM: road.lotFrontageM,
+      lotDepthM: road.lotDepthM,
+      frontsLots: road.frontsLots,
+      collector: road.collector,
+      graded: road.graded,
+      decoration: road.decoration,
+      deck: q.deck,
+      reversed: road.reversed,
+      name: road.name,
+      groundAt: groundAt,
+      id: newId,
+    );
+    lastCommitCrossings = result.crossings;
+    _carryRenamedLots(result.renamedLots);
+    funds -= q.cost;
+    _roadsRevision++;
+    return (roadId: result.roadId, quote: q);
+  }
+
+  /// The deck height of the road [roadId] at its nearest point to [p],
+  /// metres above the body datum — what a road drawn to meet a raised or
+  /// sunk one takes as its end's height ([RoadBuildRequest.startHeightM]).
+  /// Null for a road laid on the ground, or one that is gone.
+  double? deckHeightAt(String roadId, Vec2 p) {
+    final deck = layout.roadById(roadId)?.deck;
+    if (deck == null) return null;
+    final rec = layout.roadIndex.byId(roadId);
+    if (rec == null || rec.sampleCount < 2) return deck.startM;
+    var best = double.infinity;
+    var s = 0.0;
+    for (var i = 1; i < rec.sampleCount; i++) {
+      final (q, d) = rec.nearestOnSegment(p, i);
+      if (d < best) {
+        best = d;
+        s = rec.cum[i - 1] + rec.sampleAt(i - 1).distanceTo(q);
+      }
+    }
+    return deck.heightAt(s, rec.lengthM);
+  }
+
+  /// Set the player's say over the junction at [o]'s place (the Junctions
+  /// view), replacing whatever was said about it — any override within
+  /// [JunctionOverride.matchM] of it is the same junction. An override
+  /// that says nothing ([JunctionOverride.isEmpty]) removes it: the
+  /// warrant's own answer again.
+  void setJunctionOverride(JunctionOverride o) {
+    junctionOverrides.removeWhere((_, v) => v.matches(o.at));
+    if (!o.isEmpty) junctionOverrides[o.key] = o;
+    _roadsRevision++;
+  }
+
+  /// The player's override for the junction at [p] — the nearest within
+  /// [JunctionOverride.matchM] — or null.
+  JunctionOverride? junctionOverrideNear(Vec2 p) {
+    JunctionOverride? best;
+    var bestD = JunctionOverride.matchM;
+    for (final o in junctionOverrides.values) {
+      final d = o.at.distanceTo(p);
+      if (d <= bestD) {
+        bestD = d;
+        best = o;
+      }
+    }
+    return best;
+  }
+
+  /// What every road in the colony costs to keep, § per week: each at its
+  /// type's rate over its length, its pier and tunnel stretches at theirs
+  /// ([RoadCosts.upkeepPerWeek]). The generator's roads as much as the
+  /// player's — a road is a road to the treasury.
+  ///
+  /// Walked once per change to the network ([roadsRevision], and the plat's
+  /// [CityLayout.version]) and cached: [advance] reads it every tick, up to
+  /// twenty-five times a frame, and a sprawl has tens of thousands of roads.
+  double get roadUpkeepPerWeek {
+    final rev = roadsRevision;
+    if (rev != _upkeepRevision || layout.version != _upkeepVersion) {
+      // A type per (class, dressing, walls): the catalogue lookup once per
+      // kind of road, not once per road.
+      final types = <int, RoadType>{};
+      var sum = 0.0;
+      for (final road in layout.roads) {
+        final kind = (road.roadClass.index * RoadDecoration.values.length +
+                    road.decoration.index) *
+                2 +
+            (road.soundWalls ? 1 : 0);
+        final type = types[kind] ??= RoadType.of(road);
+        final deck = road.deck;
+        sum += RoadCosts.upkeepPerWeek(type,
+            lengthM: _roadLengthM(road),
+            structureM: deck?.structureM ?? 0,
+            tunnelM: deck?.tunnelM ?? 0);
+      }
+      _upkeepPerWeek = sum;
+      _upkeepRevision = rev;
+      _upkeepVersion = layout.version;
+    }
+    return _upkeepPerWeek;
+  }
+
+  double _upkeepPerWeek = 0;
+  int _upkeepRevision = -1;
+  int _upkeepVersion = -1;
+
+  /// Road upkeep as the treasury pays it: § per second of colony time
+  /// SPENT (never negative) — [roadUpkeepPerWeek] over [weekSec].
+  double get roadUpkeepRate => roadUpkeepPerWeek / weekSec;
 
   /// Grow (or abandon) buildings on zoned lots under RCI demand.
   ///
@@ -3672,11 +4158,22 @@ class CitySim {
                 ],
               if (r.startHalfWidthM != null) 'hw0': r.startHalfWidthM,
               if (r.endHalfWidthM != null) 'hw1': r.endHalfWidthM,
+              // The road tool's attributes, each omitted at its default so
+              // a colony that never used the tool saves as it always has.
+              if (r.decoration != RoadDecoration.none)
+                'deco': r.decoration.index,
+              if (r.deck != null) 'deck': r.deck!.toJson(),
+              if (r.reversed) 'rev': true,
+              if (r.name != null) 'name': r.name,
               'pts': [
                 for (final c in r.controls) ...[c.e, c.n]
               ],
             },
         ],
+        if (junctionOverrides.isNotEmpty)
+          'junctions': [
+            for (final o in junctionOverrides.values) o.toJson(),
+          ],
         'manualLots': [
           for (final p in layout.manualParcels)
             {
@@ -3785,9 +4282,22 @@ class CitySim {
     for (final rj in (j['roads'] as List)) {
       final r = rj as Map;
       final pts = (r['pts'] as List).cast<num>();
+      // Indices from a newer build than this one land on something drawable
+      // rather than throwing the whole colony away: an unknown class is a
+      // street, an unknown dressing is none.
+      final ci = (r['class'] as num).toInt();
+      final di = (r['deco'] as num?)?.toInt() ?? 0;
       sim.layout.addRoad(RoadSpline(
         id: r['id'] as String,
-        roadClass: RoadClass.values[(r['class'] as num).toInt()],
+        roadClass: ci >= 0 && ci < RoadClass.values.length
+            ? RoadClass.values[ci]
+            : RoadClass.street,
+        decoration: di >= 0 && di < RoadDecoration.values.length
+            ? RoadDecoration.values[di]
+            : RoadDecoration.none,
+        deck: RoadDeck.fromJson(r['deck']),
+        reversed: r['rev'] == true,
+        name: r['name'] is String ? r['name'] as String : null,
         closed: r['closed'] as bool,
         sealed: r['sealed'] == true,
         soundWalls: r['walls'] == true,
@@ -3811,6 +4321,17 @@ class CitySim {
         ],
       ));
     }
+    // The Junctions view's overrides. Tolerant: an entry this build cannot
+    // read is skipped, not the colony.
+    final junctions = j['junctions'];
+    for (final oj in junctions is List ? junctions : const []) {
+      if (oj is! Map) continue;
+      try {
+        final o = JunctionOverride.fromJson(oj.cast<String, dynamic>());
+        if (!o.isEmpty) sim.junctionOverrides[o.key] = o;
+      } catch (_) {}
+    }
+    sim._roadsRevision++;
     for (final mj in (j['manualLots'] as List)) {
       final m = mj as Map;
       final poly = (m['poly'] as List).cast<num>();

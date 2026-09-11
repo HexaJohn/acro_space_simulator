@@ -7,6 +7,7 @@ import 'dart:collection' show UnmodifiableListView;
 import 'dart:math' as math;
 
 import 'parcel.dart';
+import 'road_elevation.dart';
 import 'spatial_index.dart';
 
 /// Player-facing knobs for how land is cut up.
@@ -97,10 +98,24 @@ class CityLayout {
   ParcelSettings _settings;
   int _nextId = 0;
 
-  /// Bumped on every [regenerate], which every mutation goes through.
-  /// The connectivity cache is keyed on it, so the graph walk runs when a
-  /// road is drawn, not every tick.
+  /// The PLAT's version: bumped on every [regenerate] — every re-cut of the
+  /// lots, which a road laid, removed or [upgradeRoad]d goes through, and a
+  /// manual lot or a settings change too. The connectivity cache is keyed
+  /// on it, so the graph walk runs when a road is drawn, not every tick.
+  ///
+  /// NOT bumped by an edit that leaves the lots where they were — a road
+  /// reversed or renamed, [updateRoad]'s walls, a batch commit the caller
+  /// has not re-cut yet. For "did any road change", ask [revision].
   int version = 0;
+
+  /// The ROAD NETWORK's revision: bumped by every mutation of a road — laid,
+  /// split, removed, upgraded, reversed, renamed, its attributes replaced,
+  /// a save's road restored — whether or not the lots were re-cut. What a
+  /// cache of anything drawn or priced from the roads keys on: an in-place
+  /// edit keeps the road COUNT, and a cache keyed on counts never sees it.
+  /// Direct callers of this layout (the generator) move it as surely as
+  /// the sim's own wrappers do.
+  int revision = 0;
 
   ParcelSettings get settings => _settings;
 
@@ -146,6 +161,7 @@ class CityLayout {
   void addRoad(RoadSpline road) {
     _roads[road.id] = road;
     _index.add(road);
+    revision++;
     final m = RegExp(r'^r(\d+)').firstMatch(road.id);
     if (m != null) {
       final n = int.parse(m.group(1)!);
@@ -189,6 +205,28 @@ class CityLayout {
       if (d < best) best = d;
     }
     return best;
+  }
+
+  /// Arc length along [rec] of its nearest point to [p] among [segs].
+  static double _nearestArcOf(IndexedRoad rec, List<int> segs, Vec2 p) {
+    var best = double.infinity;
+    var arc = 0.0;
+    for (final s in segs) {
+      if (s == 0) {
+        final d = p.distanceTo(rec.sampleAt(0));
+        if (d < best) {
+          best = d;
+          arc = 0;
+        }
+        continue;
+      }
+      final (q, d) = rec.nearestOnSegment(p, s);
+      if (d < best) {
+        best = d;
+        arc = rec.cum[s - 1] + rec.sampleAt(s - 1).distanceTo(q);
+      }
+    }
+    return arc;
   }
 
   /// The nearest point on any road within [withinM] of [p], for endpoint
@@ -273,15 +311,37 @@ class CityLayout {
     // call [regenerate] itself afterwards, and gets no rename map — safe only
     // when nothing is built yet.
     bool regenerateLots = true,
+    // How it is dressed, which way a one-way road's traffic runs, and the
+    // name the player gave it — see [RoadSpline.decoration],
+    // [RoadSpline.reversed], [RoadSpline.name]. Carried onto every piece.
+    RoadDecoration decoration = RoadDecoration.none,
+    bool reversed = false,
+    String? name,
+    // Where it runs when the road tool raised or sank it: a [RoadDeck] over
+    // THIS road's own length as laid (its 2 m samples, after the end snap),
+    // sliced onto each piece it is cut into. Null lays it on the ground,
+    // as every road was laid before the tool could lift one.
+    RoadDeck? deck,
+    // The natural ground under a local point, metres above the body datum
+    // (null: flat ground at the datum). Asked only where a deck is
+    // involved — a draped road's height where a deck crosses it, and the
+    // ground at each cut a deck is sliced at — so a draped network never
+    // pays for a ground sample here.
+    double Function(Vec2)? groundAt,
+    // The id to lay it under; null mints the next `r<N>`. For re-laying a
+    // piece in place of another (Adjust Roads, see [childIdFor]) under an
+    // id that keeps its base road — and so its name. Must be free.
+    String? id,
   }) {
     // Where every keyed thing stood, before the ground moves.
     final before = <String, Vec2>{
       for (final p in autoParcels) p.id: p.centroid,
     };
 
-    final id = 'r${_commitSeq++}';
+    final newId = id ?? 'r${_commitSeq++}';
+    final newDeck = deck;
     var pts =
-        RoadSpline(id: id, controls: controls, roadClass: roadClass)
+        RoadSpline(id: newId, controls: controls, roadClass: roadClass)
             .sample(stepM: 2);
 
     // Endpoint snap: an end drawn near an existing road lands ON it.
@@ -317,6 +377,24 @@ class CityLayout {
         if (_inRanges(sNew, newBridges) || other.bridgedAt(sOld)) {
           crossings.add(RoadCrossing(other.id, sNew, sOld, at, bridged: true));
           return;
+        }
+        // A raised or sunk road passing over or under the other: no
+        // junction, and neither is cut. Asked only where a deck is
+        // involved — two roads on the ground keep the rules below exactly
+        // — with a draped road standing on the ground at the crossing.
+        final otherDeck = other.deck;
+        if (newDeck != null || otherDeck != null) {
+          final hNew = newDeck != null
+              ? newDeck.heightAt(sNew, newCum.last)
+              : (groundAt?.call(at) ?? 0.0);
+          final hOld = otherDeck != null
+              ? otherDeck.heightAt(sOld, rec.lengthM)
+              : (groundAt?.call(at) ?? 0.0);
+          if ((hNew - hOld).abs() >= RoadElevation.gradeSeparationM) {
+            crossings
+                .add(RoadCrossing(other.id, sNew, sOld, at, bridged: true));
+            return;
+          }
         }
         // An expressway meets nothing at grade. Where an ordinary road
         // crosses one, the expressway is carried over it on a bridge and
@@ -378,11 +456,14 @@ class CityLayout {
     // Split the crossed roads.
     existingCuts.forEach((rid, cuts) {
       final road = _roads.remove(rid)!;
-      final samples = _index.byId(rid)!.samples;
+      final rec = _index.byId(rid)!;
+      final samples = rec.samples;
+      final total = rec.lengthM;
       _index.remove(rid);
       final pieces = _splitPolyline(samples, cuts.toList());
       for (var i = 0; i < pieces.length; i++) {
         final (piecePts, s0) = pieces[i];
+        final pieceLen = _cumulative(piecePts).last;
         final piece = RoadSpline(
           id: '${rid}x$i',
           roadClass: road.roadClass,
@@ -395,9 +476,13 @@ class CityLayout {
           frontsLots: road.frontsLots,
           collector: road.collector,
           graded: road.graded,
-          bridges: shiftBridges(road.bridges, s0, _cumulative(piecePts).last),
+          bridges: shiftBridges(road.bridges, s0, pieceLen),
           startHalfWidthM: i == 0 ? road.startHalfWidthM : null,
           endHalfWidthM: i == pieces.length - 1 ? road.endHalfWidthM : null,
+          decoration: road.decoration,
+          deck: _sliceDeck(road.deck, s0, pieceLen, total, piecePts, groundAt),
+          reversed: road.reversed,
+          name: road.name,
         );
         _roads[piece.id] = piece;
         _indexPiece(piece, piecePts);
@@ -409,7 +494,8 @@ class CityLayout {
     final merged = mergeRanges(newBridges);
     for (var i = 0; i < pieces.length; i++) {
       final (piecePts, s0) = pieces[i];
-      final pid = pieces.length == 1 ? id : '${id}x$i';
+      final pieceLen = _cumulative(piecePts).last;
+      final pid = pieces.length == 1 ? newId : '${newId}x$i';
       final piece = RoadSpline(
         id: pid,
         roadClass: roadClass,
@@ -421,23 +507,42 @@ class CityLayout {
         frontsLots: frontsLots,
         collector: collector,
         graded: graded,
-        bridges: shiftBridges(merged, s0, _cumulative(piecePts).last),
+        bridges: shiftBridges(merged, s0, pieceLen),
         startHalfWidthM: i == 0 ? startHalfWidthM : null,
         endHalfWidthM: i == pieces.length - 1 ? endHalfWidthM : null,
+        // Dressing only where the class has a verge for it, a direction
+        // only where it has one to reverse — as the walls are sanitised.
+        decoration: roadClass.supportsDecoration
+            ? decoration
+            : RoadDecoration.none,
+        deck: _sliceDeck(newDeck, s0, pieceLen, newCum.last, piecePts, groundAt),
+        reversed: reversed && roadClass.oneWay,
+        name: name,
       );
       _roads[pid] = piece;
       _indexPiece(piece, piecePts);
     }
     _index.compact();
+    revision++;
     if (!regenerateLots) {
       // Batch mode: the caller re-cuts once, when the whole network is in.
       // No lots were re-cut, so nothing was renamed.
       return (
-        roadId: id,
+        roadId: newId,
         renamedLots: const <String, String>{},
         crossings: distinct
       );
     }
+    final renamed = _replatCarrying(before);
+    return (roadId: newId, renamedLots: renamed, crossings: distinct);
+  }
+
+  /// Re-cut the lots and match every lot that did not survive the re-cut
+  /// to the lot now standing on its ground: [before] is every auto lot's
+  /// centroid from before the edit. Returns old lot id -> new lot id, with
+  /// the zoning already carried across; the caller carries whatever else it
+  /// keys by lot (buildings, bookings).
+  Map<String, String> _replatCarrying(Map<String, Vec2> before) {
     regenerate();
 
     // Old lot -> the new lot standing on the same ground.
@@ -456,9 +561,18 @@ class CityLayout {
       }
     }
     if (renamed.isNotEmpty) regenerate(); // re-apply the moved zoning
-
-    return (roadId: id, renamedLots: renamed, crossings: distinct);
+    return renamed;
   }
+
+  /// [deck] (over a road [total] long) cut to the piece from [s0] that is
+  /// [pieceLen] long, its offsets at the cuts taken from the ground there
+  /// when [groundAt] can say. Null for a draped road — and then the ground
+  /// is never asked.
+  static RoadDeck? _sliceDeck(RoadDeck? deck, double s0, double pieceLen,
+          double total, List<Vec2> piecePts, double Function(Vec2)? groundAt) =>
+      deck?.slice(s0, s0 + pieceLen, total,
+          groundStartM: groundAt?.call(piecePts.first),
+          groundEndM: groundAt?.call(piecePts.last));
 
   /// Whether the [start] or the end of [rec] is a free end: no other road
   /// ends within a couple of metres of it.
@@ -479,6 +593,18 @@ class CityLayout {
   static bool _inRanges(double s, List<(double, double)> ranges) {
     for (final (a, b) in ranges) {
       if (s >= a && s <= b) return true;
+    }
+    return false;
+  }
+
+  /// Whether any of [s0]..[s1] along a road with [deck] stands on its
+  /// piers or runs in its tunnel.
+  static bool _offGroundAlong(RoadDeck deck, double s0, double s1) {
+    for (final (a, b) in deck.structures) {
+      if (a < s1 && b > s0) return true;
+    }
+    for (final (a, b) in deck.tunnels) {
+      if (a < s1 && b > s0) return true;
     }
     return false;
   }
@@ -513,18 +639,23 @@ class CityLayout {
   /// the cut would fall within a car's length of an end. No lots are
   /// re-cut and no buildings carried: for laying a network, not editing a
   /// built one.
-  List<String>? splitRoadAt(String id, double sM) {
+  /// [groundAt] (metres above the body datum) sets a sliced deck's offset at
+  /// the cut from the ground there; without it the offset is interpolated.
+  List<String>? splitRoadAt(String id, double sM,
+      {double Function(Vec2)? groundAt}) {
     final rec = _index.byId(id);
     final road = _roads[id];
     if (rec == null || road == null) return null;
     if (sM <= 8 || sM >= rec.lengthM - 8) return null;
     final samples = rec.samples;
+    final total = rec.lengthM;
     _roads.remove(id);
     _index.remove(id);
     final pieces = _splitPolyline(samples, [sM]);
     final ids = <String>[];
     for (var i = 0; i < pieces.length; i++) {
       final (pts, s0) = pieces[i];
+      final pieceLen = _cumulative(pts).last;
       final piece = RoadSpline(
         id: '${id}x$i',
         roadClass: road.roadClass,
@@ -536,28 +667,124 @@ class CityLayout {
         frontsLots: road.frontsLots,
         collector: road.collector,
         graded: road.graded,
-        bridges: shiftBridges(road.bridges, s0, _cumulative(pts).last),
+        bridges: shiftBridges(road.bridges, s0, pieceLen),
         startHalfWidthM: i == 0 ? road.startHalfWidthM : null,
         endHalfWidthM: i == pieces.length - 1 ? road.endHalfWidthM : null,
+        decoration: road.decoration,
+        deck: _sliceDeck(road.deck, s0, pieceLen, total, pts, groundAt),
+        reversed: road.reversed,
+        name: road.name,
       );
       _roads[piece.id] = piece;
       _indexPiece(piece, pts);
       ids.add(piece.id);
     }
+    revision++;
     return ids;
   }
 
   /// Replace a road's ATTRIBUTES — walls, bridges, a taper, its class —
   /// keeping its geometry. The controls must be the ones it has; nothing
-  /// is re-cut.
+  /// is re-cut, so [version] stays; [revision] moves.
   bool updateRoad(RoadSpline road) {
     if (!_roads.containsKey(road.id)) return false;
     _roads[road.id] = road;
     _index.replace(road);
+    revision++;
     return true;
   }
 
   RoadSpline? roadById(String id) => _roads[id];
+
+  /// Turn the road [id] into another road IN PLACE: same id, same geometry,
+  /// a different class, dressing or walls — the Upgrade tool, which also
+  /// downgrades. Each attribute left null keeps the road's own. The
+  /// dressing and the walls are dropped where the new class has no verge
+  /// or no call for them, and a direction where it is no longer one way.
+  ///
+  /// A different class is a different width and a different plat (a street
+  /// fronts lots, a highway fronts none), so the lots are RE-CUT — [version]
+  /// moves and the connectivity walk re-runs — and every lot that did not
+  /// survive the re-cut is matched to the lot standing on its ground, as
+  /// [commitRoad] matches them. Returns that rename map (zoning already
+  /// carried), or null for an unknown road.
+  Map<String, String>? upgradeRoad(
+    String id, {
+    RoadClass? roadClass,
+    RoadDecoration? decoration,
+    bool? soundWalls,
+  }) {
+    final road = _roads[id];
+    if (road == null) return null;
+    final cls = roadClass ?? road.roadClass;
+    final updated = road.copyWith(
+      roadClass: cls,
+      decoration: cls.supportsDecoration
+          ? (decoration ?? road.decoration)
+          : RoadDecoration.none,
+      soundWalls: (soundWalls ?? road.soundWalls) && cls.canHaveSoundWalls,
+      reversed: road.reversed && cls.oneWay,
+    );
+    final before = <String, Vec2>{
+      for (final p in autoParcels) p.id: p.centroid,
+    };
+    _roads[id] = updated;
+    _index.replace(updated);
+    revision++;
+    return _replatCarrying(before);
+  }
+
+  /// Flip which way a one-way road's traffic runs ([RoadSpline.reversed]).
+  /// Nothing else moves — not the geometry, not a lot — so nothing is
+  /// re-cut. False for an unknown road or one with no direction to flip.
+  bool reverseRoad(String id) {
+    final road = _roads[id];
+    if (road == null || !road.oneWay) return false;
+    final updated = road.copyWith(reversed: !road.reversed);
+    _roads[id] = updated;
+    _index.replace(updated);
+    revision++;
+    return true;
+  }
+
+  /// Give the road [id] a player's [name] (null or blank: back to the
+  /// generated one). This piece only — the sim names every piece of a road.
+  bool renameRoad(String id, String? name) {
+    final road = _roads[id];
+    if (road == null) return false;
+    final clean = name?.trim();
+    final updated = clean == null || clean.isEmpty
+        ? road.copyWith(clearName: true)
+        : road.copyWith(name: clean);
+    _roads[id] = updated;
+    _index.replace(updated);
+    revision++;
+    return true;
+  }
+
+  /// The id a road was LAID under, before any junction split it: the id up
+  /// to its first `x` (`r12x0x3` -> `r12`). Every piece of one drawn road
+  /// shares it — what "the whole road" means to the Rename and Upgrade
+  /// tools and to its generated street name.
+  static String baseRoadId(String id) {
+    final i = id.indexOf('x');
+    return i < 0 ? id : id.substring(0, i);
+  }
+
+  /// A free id for a road re-laid in place of [id] that keeps [id]'s base
+  /// road: `<id>x<k>` for the first k no road has, nor any piece cut from
+  /// one. Never [id] itself — the terrain shaper and the snapshot's ground
+  /// cache both key on a road's id, and new geometry under an old id would
+  /// read their records of the old.
+  String childIdFor(String id) {
+    for (var k = 0;; k++) {
+      final candidate = '${id}x$k';
+      if (_roads.containsKey(candidate)) continue;
+      final pieces = '${candidate}x';
+      if (_roads.keys.any((r) => r.startsWith(pieces))) continue;
+      return candidate;
+    }
+  }
 
   static List<double> _cumulative(List<Vec2> pts) {
     final cum = <double>[0];
@@ -661,7 +888,7 @@ class CityLayout {
   /// and stakes its plot in one batch, and re-cutting per removal would be
   /// the quadratic cost the generator's deferral exists to avoid.
   void removeRoad(String id, {bool regenerateLots = true}) {
-    _roads.remove(id);
+    if (_roads.remove(id) != null) revision++;
     _index.remove(id);
     if (regenerateLots) regenerate();
   }
@@ -863,6 +1090,7 @@ class CityLayout {
     final out = <Parcel>[];
     final sides = _settings.bothSides ? [1.0, -1.0] : [1.0];
     final setback = road.halfWidth + _settings.sidewalkM;
+    final deck = road.deck;
 
     for (final side in sides) {
       var s = start;
@@ -874,6 +1102,14 @@ class CityLayout {
             break;
           }
           s1 = end;
+        }
+        // No frontage along a raised road's piers or its tunnel: there is
+        // no kerb there to build on. The lot's number is still spent, so
+        // the lots either side keep their names.
+        if (deck != null && _offGroundAlong(deck, s, s1)) {
+          index++;
+          s = s1;
+          continue;
         }
         final a = _pointAt(pts, cum, s);
         final b = _pointAt(pts, cum, s1);
@@ -957,6 +1193,12 @@ class CityLayout {
         if (identical(ob, own) || ob.id == own.id) continue;
         // An alley is a back, not a street, and nothing in the air is either.
         if (!ob.roadClass.platsLots) continue;
+        // Nor is a raised road's span, or a tunnel beneath: no kerb there.
+        final od = ob.deck;
+        if (od != null) {
+          final s = _nearestArcOf(rec, entry.value, mid);
+          if (od.onStructureAt(s) || od.inTunnelAt(s)) continue;
+        }
         final margin = ob.halfWidth + _settings.sidewalkM;
         final d = (_nearestOf(rec, entry.value, mid) - margin).abs();
         if (d < tol && d < bestD) {
@@ -1003,6 +1245,14 @@ class CityLayout {
       final t =
           raySegment(front, outward, rec.sampleAt(i - 1), rec.sampleAt(i));
       if (t == null || t > probe) return;
+      // Nor does a raised road where it stands on its piers, nor one
+      // running in a tunnel under the block.
+      final od = ob.deck;
+      if (od != null) {
+        final hit = front + outward * t;
+        final s = rec.cum[i - 1] + rec.sampleAt(i - 1).distanceTo(hit);
+        if (od.onStructureAt(s) || od.inTunnelAt(s)) return;
+      }
       final gap = t -
           (ob.halfWidth +
               (ob.roadClass.hasPavement ? _settings.sidewalkM : 0.6));
@@ -1078,6 +1328,14 @@ class CityLayout {
         }
       }
       if (bi == 0) continue;
+      // A raised road's piers and a tunnel beneath clip nothing: the lot
+      // runs on under the one and over the other.
+      final od = ob.deck;
+      if (od != null) {
+        final (q, _) = rec.nearestOnSegment(c, bi);
+        final s = rec.cum[bi - 1] + rec.sampleAt(bi - 1).distanceTo(q);
+        if (od.onStructureAt(s) || od.inTunnelAt(s)) continue;
+      }
       final p = rec.sampleAt(bi - 1);
       final along = rec.sampleAt(bi) - p;
       if (along.length <= 1e-9) continue;

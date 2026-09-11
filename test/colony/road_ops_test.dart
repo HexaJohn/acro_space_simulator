@@ -1,0 +1,368 @@
+// Copyright (c) 2026 John Peroutka
+//
+// This work is licensed under the PolyForm Noncommercial License 1.0.0.
+// To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
+
+/// The road tool's edits on a built colony: Upgrade (and downgrade),
+/// reversing a one-way road, naming a road, Adjust Roads' dragged ends,
+/// junction overrides — and the save that has to remember all of it.
+library;
+
+import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart';
+import 'package:acro_space_simulator/domain/colony/city/city_config.dart';
+import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
+import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
+import 'package:acro_space_simulator/domain/colony/city/road_build.dart';
+import 'package:acro_space_simulator/domain/colony/city/road_catalog.dart';
+import 'package:acro_space_simulator/domain/colony/city/road_junction.dart';
+import 'package:acro_space_simulator/domain/colony/city/road_names.dart';
+import 'package:acro_space_simulator/domain/universe/real_solar_system.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  final bodies = RealSolarSystem.build().all.where((b) => !b.isStar).toList();
+  CitySim colony({double funds = 1e6}) => CitySim.found(
+        const CityConfig(
+            bodyId: 'earth', gridSize: 20, latitude: 0, longitude: 0),
+        bodies: bodies,
+        id: 'c',
+        name: 'c',
+      )..funds = funds;
+  RoadType type(String id) => RoadType.byId(id)!;
+  final clinic = kUtilCatalog.firstWhere((s) => s.label == 'Clinic');
+  const vertical = [Vec2(0, -300), Vec2(0, 300)];
+  const horizontal = [Vec2(-300, 0), Vec2(300, 0)];
+
+  group('upgrade', () {
+    test('re-cuts the lots, carries the buildings, charges the difference',
+        () {
+      final sim = colony(funds: 10000);
+      sim.commitRoad(vertical, RoadClass.street);
+      for (final lot in sim.layout.autoParcels.take(4)) {
+        sim.parcelBuildings[lot.id] = clinic;
+      }
+      final rev = sim.roadsRevision;
+      final q = sim.upgradeRoad('r0', type('four-lane'));
+      expect(q.ok, isTrue, reason: q.reason);
+      expect(q.cost, closeTo(600 / 8 * (60 - 40), 1e-6));
+      expect(sim.funds, closeTo(10000 - 1500, 1e-6));
+      expect(sim.layout.roadById('r0')!.roadClass, RoadClass.avenue);
+      expect(sim.roadsRevision, greaterThan(rev));
+      expect(sim.parcelBuildings, hasLength(4));
+      final ids = {for (final p in sim.layout.parcels) p.id};
+      for (final id in sim.parcelBuildings.keys) {
+        expect(ids, contains(id));
+      }
+      // Wider: the lots stand further back from the centreline.
+      final lot = sim.layout.parcelById(sim.parcelBuildings.keys.first)!;
+      expect(lot.frontageMidpoint!.e.abs(), closeTo(8 + 3, 1e-6));
+    });
+
+    test('a downgrade is free; the same type changes nothing', () {
+      final sim = colony(funds: 10000);
+      sim.commitRoad(vertical, RoadClass.avenue);
+      final q = sim.upgradeRoad('r0', type('two-lane'));
+      expect(q.ok, isTrue);
+      expect(q.cost, 0);
+      expect(sim.funds, 10000);
+      expect(sim.layout.roadById('r0')!.roadClass, RoadClass.street);
+      final rev = sim.roadsRevision;
+      final version = sim.layout.version;
+      expect(sim.upgradeRoad('r0', type('two-lane')).ok, isTrue);
+      expect(sim.roadsRevision, rev, reason: 'nothing to do');
+      expect(sim.layout.version, version);
+    });
+
+    test('is refused where the new type cannot be what the road is', () {
+      final sim = colony(funds: 0);
+      sim.commitRoad(vertical, RoadClass.street);
+      expect(sim.quoteUpgrade('ghost', type('four-lane')).refusal,
+          RoadRefusal.notFound);
+      expect(sim.quoteUpgrade('r0', type('four-lane')).refusal,
+          RoadRefusal.funds);
+      expect(
+          sim.quoteUpgrade('r0', type('highway')).refusal, RoadRefusal.locked);
+      sim.commitRoad(const [Vec2(500, -300), Vec2(500, 300)], RoadClass.street,
+          deck: const RoadDeck(
+              startM: -12,
+              endM: -12,
+              startOffsetM: -12,
+              endOffsetM: -12,
+              tunnels: [(0, 600)]));
+      expect(sim.quoteUpgrade('r1', type('gravel')).refusal,
+          RoadRefusal.noTunnel);
+      expect(sim.upgradeRoad('r1', type('gravel')).ok, isFalse);
+      expect(sim.layout.roadById('r1')!.roadClass, RoadClass.street);
+    });
+  });
+
+  group('reverse', () {
+    test('turns a one-way road round and keeps every lot', () {
+      final sim = colony();
+      sim.commitRoad(vertical, RoadClass.streetOneWay);
+      final lot = sim.layout.autoParcels.first;
+      sim.parcelBuildings[lot.id] = clinic;
+      final lots = [for (final p in sim.layout.autoParcels) p.id];
+      final rev = sim.roadsRevision;
+      expect(sim.reverseRoad('r0'), isTrue);
+      final road = sim.layout.roadById('r0')!;
+      expect(road.reversed, isTrue);
+      expect(road.travelStart.n, closeTo(300, 1e-6));
+      expect([for (final p in sim.layout.autoParcels) p.id], lots);
+      expect(sim.parcelBuildings.keys, [lot.id]);
+      expect(sim.roadsRevision, greaterThan(rev));
+    });
+
+    test('a two-way road has no direction to reverse', () {
+      final sim = colony();
+      sim.commitRoad(vertical, RoadClass.street);
+      expect(sim.reverseRoad('r0'), isFalse);
+      expect(sim.blocked, 'Only a one-way road has a direction to reverse');
+      expect(sim.reverseRoad('ghost'), isFalse);
+    });
+  });
+
+  group('names', () {
+    test('a name is given to every piece of the road', () {
+      final sim = colony();
+      sim.commitRoad(horizontal, RoadClass.street);
+      sim.commitRoad(vertical, RoadClass.street);
+      expect(sim.layout.roadById('r0x0'), isNotNull);
+      final rev = sim.roadsRevision;
+      expect(sim.renameRoad('r0x1', '  High Street '), isTrue);
+      expect(sim.layout.roadById('r0x0')!.name, 'High Street');
+      expect(sim.layout.roadById('r0x1')!.name, 'High Street');
+      expect(sim.layout.roadById('r1x0')!.name, isNull, reason: 'another road');
+      expect(sim.roadNameOf('r0x0'), 'High Street');
+      expect(sim.roadsRevision, greaterThan(rev));
+      sim.renameRoad('r0x0', null);
+      expect(sim.roadNameOf('r0x1'), RoadNames.generated('r0', RoadClass.street));
+      expect(sim.renameRoad('ghost', 'x'), isFalse);
+    });
+
+    test('a generated name is the same for every piece, on every load', () {
+      final sim = colony();
+      sim.commitRoad(horizontal, RoadClass.street);
+      sim.commitRoad(vertical, RoadClass.street);
+      final name = sim.roadNameOf('r0x0');
+      expect(name, endsWith(' Street'));
+      expect(sim.roadNameOf('r0x1'), name);
+      final back = CitySim.fromJson(sim.toJson(), bodies: bodies);
+      expect(back.roadNameOf('r0x0'), name);
+      expect(RoadNames.suffixFor(RoadClass.ramp), 'Ramp');
+      expect(RoadNames.suffixFor(RoadClass.motorway), 'Highway');
+      expect(RoadNames.suffixFor(RoadClass.boulevard), 'Boulevard');
+      // Roads laid one after another are not all one street.
+      final names = {
+        for (var i = 0; i < 20; i++) RoadNames.generated('r$i', RoadClass.street)
+      };
+      expect(names.length, greaterThan(10));
+    });
+
+    test("a player's name on any piece of the road wins", () {
+      final sim = colony();
+      sim.commitRoad(horizontal, RoadClass.street);
+      sim.commitRoad(vertical, RoadClass.street);
+      sim.layout.renameRoad('r0x1', 'Quay'); // one piece only
+      expect(sim.roadNameOf('r0x0'), 'Quay');
+      expect(sim.roadNameOf('r1x0'), isNot('Quay'));
+    });
+  });
+
+  group('adjust roads', () {
+    test('dragging an end re-lays the piece and charges what it adds', () {
+      final sim = colony(funds: 10000);
+      sim.commitRoad(const [Vec2(0, 0), Vec2(0, 300)], RoadClass.street);
+      final lot = sim.layout.autoParcels.firstWhere((p) => p.centroid.n < 100);
+      sim.parcelBuildings[lot.id] = clinic;
+      final before = sim.roadNameOf('r0');
+      final rev = sim.roadsRevision;
+      final r = sim.moveRoadEnd('r0', atStart: false, to: const Vec2(0, 400));
+      expect(r.quote.ok, isTrue, reason: r.quote.reason);
+      expect(r.roadId, 'r0x0');
+      expect(sim.layout.roadById('r0'), isNull);
+      final road = sim.layout.roadById('r0x0')!;
+      expect(road.controls.first.n, closeTo(0, 1e-6));
+      expect(road.controls.last.n, closeTo(400, 1e-6));
+      expect(r.quote.cost, closeTo(100 / 8 * 40, 1e-6));
+      expect(sim.funds, closeTo(10000 - 500, 1e-6));
+      expect(sim.roadNameOf('r0x0'), before, reason: 'the same street');
+      expect(sim.roadsRevision, greaterThan(rev));
+      // The building stands on the lot now where its lot stood.
+      final ids = {for (final p in sim.layout.parcels) p.id};
+      expect(sim.parcelBuildings.keys.single, isIn(ids));
+      expect(sim.parcelBuildings.keys.single, isNot(lot.id));
+    });
+
+    test('shortening a road is free', () {
+      final sim = colony(funds: 10000);
+      sim.commitRoad(const [Vec2(0, 0), Vec2(0, 300)], RoadClass.street);
+      final r = sim.moveRoadEnd('r0', atStart: true, to: const Vec2(0, 50));
+      expect(r.quote.ok, isTrue);
+      expect(r.quote.cost, 0);
+      expect(sim.funds, 10000);
+      expect(sim.layout.roadById(r.roadId!)!.controls.first.n,
+          closeTo(50, 1e-6));
+    });
+
+    test('every attribute rides the re-lay', () {
+      final sim = colony();
+      sim.commitRoad(const [Vec2(0, 0), Vec2(0, 300)], RoadClass.streetOneWay,
+          decoration: RoadDecoration.grass,
+          reversed: true,
+          name: 'Mews',
+          collector: true,
+          graded: false,
+          lotFrontageM: 18);
+      final r = sim.moveRoadEnd('r0', atStart: false, to: const Vec2(40, 350));
+      final road = sim.layout.roadById(r.roadId!)!;
+      expect(road.roadClass, RoadClass.streetOneWay);
+      expect(road.decoration, RoadDecoration.grass);
+      expect(road.reversed, isTrue);
+      expect(road.name, 'Mews');
+      expect(road.collector, isTrue);
+      expect(road.graded, isFalse);
+      expect(road.lotFrontageM, 18);
+    });
+
+    test('a raised road keeps the height of the end left alone', () {
+      final sim = colony();
+      sim.commitRoad(const [Vec2(0, 0), Vec2(0, 400)], RoadClass.street,
+          deck: const RoadDeck(
+              startM: 0, endM: 12, endOffsetM: 12, structures: [(100, 400)]));
+      final r = sim.moveRoadEnd('r0',
+          atStart: false, to: const Vec2(0, 480), groundAt: (_) => 2);
+      expect(r.quote.ok, isTrue, reason: r.quote.reason);
+      final deck = sim.layout.roadById(r.roadId!)!.deck!;
+      expect(deck.startM, closeTo(0, 1e-9), reason: 'the end left alone');
+      expect(deck.endM, closeTo(2 + 12, 1e-9),
+          reason: 'as high above its new ground as it stood above the old');
+    });
+
+    test('a moved end joins the road it is dropped on', () {
+      final sim = colony();
+      sim.commitRoad(const [Vec2(-300, 500), Vec2(300, 500)], RoadClass.street);
+      sim.commitRoad(const [Vec2(0, 0), Vec2(0, 300)], RoadClass.street);
+      final r = sim.moveRoadEnd('r1', atStart: false, to: const Vec2(0, 505));
+      expect(r.quote.ok, isTrue, reason: r.quote.reason);
+      expect(sim.layout.roadById(r.roadId!)!.controls.last.n,
+          closeTo(500, 1e-6),
+          reason: 'snapped onto it');
+      expect(sim.layout.roadById('r0'), isNull,
+          reason: 'the road it lands on is cut for the T');
+      expect(sim.layout.roads.length, 3);
+    });
+
+    test('a road that is gone cannot be adjusted', () {
+      final sim = colony();
+      final r = sim.moveRoadEnd('ghost', atStart: true, to: const Vec2(0, 0));
+      expect(r.roadId, isNull);
+      expect(r.quote.refusal, RoadRefusal.notFound);
+    });
+  });
+
+  test("a deck's height is read at the nearest point of its road", () {
+    final sim = colony();
+    sim.commitRoad(const [Vec2(0, 0), Vec2(400, 0)], RoadClass.street,
+        deck: const RoadDeck(
+            startM: 0, endM: 12, endOffsetM: 12, structures: [(100, 400)]));
+    expect(sim.deckHeightAt('r0', const Vec2(200, 30)), closeTo(6, 1e-9));
+    expect(sim.deckHeightAt('r0', const Vec2(-50, 0)), closeTo(0, 1e-9));
+    sim.commitRoad(const [Vec2(0, 500), Vec2(400, 500)], RoadClass.street);
+    expect(sim.deckHeightAt('r1', const Vec2(200, 500)), isNull);
+    expect(sim.deckHeightAt('ghost', const Vec2(0, 0)), isNull);
+  });
+
+  test('junction overrides: set, found near, replaced, removed', () {
+    final sim = colony();
+    final rev = sim.roadsRevision;
+    sim.setJunctionOverride(
+        const JunctionOverride(at: Vec2(100, 100), lights: true));
+    expect(sim.roadsRevision, greaterThan(rev));
+    expect(sim.junctionOverrideNear(const Vec2(103, 102))!.lights, isTrue);
+    expect(sim.junctionOverrideNear(const Vec2(120, 100)), isNull);
+    // The same junction said again a metre off: replaced, not doubled.
+    sim.setJunctionOverride(
+        const JunctionOverride(at: Vec2(101, 100), lights: false));
+    expect(sim.junctionOverrides, hasLength(1));
+    expect(sim.junctionOverrideNear(const Vec2(100, 100))!.lights, isFalse);
+    // Saying nothing gives the junction back to the warrant.
+    sim.setJunctionOverride(const JunctionOverride(at: Vec2(100, 100)));
+    expect(sim.junctionOverrides, isEmpty);
+  });
+
+  group('the save', () {
+    test('round-trips every road-tool attribute and the overrides', () {
+      final sim = colony();
+      sim.commitRoad(const [Vec2(0, 0), Vec2(400, 0)], RoadClass.streetOneWay,
+          decoration: RoadDecoration.trees,
+          deck: const RoadDeck(
+              startM: 3,
+              endM: -9,
+              startOffsetM: 0.5,
+              endOffsetM: -12,
+              structures: [(0, 40)],
+              tunnels: [(200, 400)]),
+          reversed: true,
+          name: 'Harbour Row');
+      sim.setJunctionOverride(const JunctionOverride(
+          at: Vec2(10, 20), lights: false, stopHeadings: [0.5, 2.0]));
+      final back = CitySim.fromJson(sim.toJson(), bodies: bodies);
+      final r = back.layout.roadById('r0')!;
+      expect(r.roadClass, RoadClass.streetOneWay);
+      expect(r.decoration, RoadDecoration.trees);
+      expect(r.reversed, isTrue);
+      expect(r.name, 'Harbour Row');
+      final deck = r.deck!;
+      expect(deck.startM, closeTo(3, 1e-9));
+      expect(deck.endM, closeTo(-9, 1e-9));
+      expect(deck.startOffsetM, closeTo(0.5, 1e-9));
+      expect(deck.endOffsetM, closeTo(-12, 1e-9));
+      expect(deck.structures.single.$2, closeTo(40, 1e-9));
+      expect(deck.tunnels.single.$1, closeTo(200, 1e-9));
+      expect(deck.tunnels.single.$2, closeTo(400, 1e-6));
+      final o = back.junctionOverrideNear(const Vec2(10, 20))!;
+      expect(o.lights, isFalse);
+      expect(o.stopHeadings, [0.5, 2.0]);
+      expect(back.roadsRevision, greaterThan(0));
+    });
+
+    test('a road that never used the tool saves as it always has', () {
+      final sim = colony();
+      sim.commitRoad(const [Vec2(0, 0), Vec2(400, 0)], RoadClass.street);
+      final json = sim.toJson();
+      final road = (json['roads'] as List).single as Map;
+      for (final key in ['deco', 'deck', 'rev', 'name']) {
+        expect(road.containsKey(key), isFalse, reason: key);
+      }
+      expect(json.containsKey('junctions'), isFalse);
+      final back = CitySim.fromJson(json, bodies: bodies);
+      final r = back.layout.roadById('r0')!;
+      expect(r.decoration, RoadDecoration.none);
+      expect(r.deck, isNull);
+      expect(r.reversed, isFalse);
+      expect(r.name, isNull);
+      expect(back.junctionOverrides, isEmpty);
+    });
+
+    test('indices from a newer build load as something drawable', () {
+      final sim = colony();
+      sim.commitRoad(const [Vec2(0, 0), Vec2(400, 0)], RoadClass.street);
+      final json = sim.toJson();
+      final road = (json['roads'] as List).single as Map;
+      road['class'] = 99;
+      road['deco'] = 7;
+      json['junctions'] = [
+        {'at': 'garbage'},
+        {
+          'at': [1, 2],
+          'lights': true
+        },
+      ];
+      final back = CitySim.fromJson(json, bodies: bodies);
+      expect(back.layout.roadById('r0')!.roadClass, RoadClass.street);
+      expect(back.layout.roadById('r0')!.decoration, RoadDecoration.none);
+      expect(back.junctionOverrides, hasLength(1));
+    });
+  });
+}

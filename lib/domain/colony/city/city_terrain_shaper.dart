@@ -62,6 +62,12 @@ class CityTerrainShaper {
   /// [groundRadiusAt] returns the natural ground radius (m from the body
   /// centre) along a body-fixed direction — normally the terrain field's own
   /// query, so a pad levels to the real ground rather than to the datum sphere.
+  ///
+  /// The caller records each returned brush and adds its key to
+  /// [CitySim.shapedTerrain]. The one exception is a raised or sunk road's
+  /// stretch on piers or in a tunnel, which is shaped by NOT touching the
+  /// ground: its key is added to [CitySim.shapedTerrain] here, with no
+  /// brush to record, so it is settled once like every other segment.
   List<({String key, TerrainBrush brush})> pending(
     CitySim city, {
     required double bodyRadiusM,
@@ -163,8 +169,22 @@ class CityTerrainShaper {
       if (!road.graded) continue;
       final pts = road.sample(stepM: 24);
       if (pts.length < 2) continue;
+      // Keyed by WIDTH as well as by place. The key is the record that a
+      // corridor was cut, and an upgrade keeps a road's id: keyed by place
+      // alone, a street widened to an avenue kept its street's corridor
+      // for ever, the avenue's edges riding the unshaped hillside.
+      final hw = road.halfWidth.toStringAsFixed(2);
+      final deck = road.deck;
+      if (deck != null) {
+        _deckCorridor(city, road, deck, pts, hw, out,
+            bodyRadiusM: bodyRadiusM,
+            dirOf: dirOf,
+            groundUnder: groundUnder,
+            tick: tick);
+        continue;
+      }
       for (var i = 1; i < pts.length; i++) {
-        final key = 'road:${road.id}:$i';
+        final key = 'road:${road.id}:$hw:$i';
         if (city.shapedTerrain.contains(key)) continue;
         final a = pts[i - 1], b = pts[i];
         out.add((
@@ -183,6 +203,78 @@ class CityTerrainShaper {
       }
     }
     return out;
+  }
+
+  /// How far past the deepest cut or tallest fill a deck corridor's bound
+  /// reaches: the brush must be anchored within its bound of the real
+  /// ground or it culls every sample (see `onGround` above).
+  static const double deckCutMarginM = 10;
+
+  /// The corridor of a raised or sunk road ([RoadSpline.deck]).
+  ///
+  /// Graded to the DECK, not to the ground: each 24 m segment is cut or
+  /// filled to the deck's own straight grade line, so the road that looks
+  /// level on its embankment is the road the ground was shaped to. Where
+  /// the segment's midpoint stands on piers or runs in a tunnel nothing is
+  /// emitted — a cut-and-fill is a radial prism, which under a bridge
+  /// would raise an earth wall to the deck and over a tunnel would open a
+  /// trench to the sky — but its key is recorded all the same, straight
+  /// into [CitySim.shapedTerrain], so the stretch is never asked about
+  /// again (the caller only records the keys it gets a brush for).
+  void _deckCorridor(
+    CitySim city,
+    RoadSpline road,
+    RoadDeck deck,
+    List<Vec2> pts,
+    String hw,
+    List<({String key, TerrainBrush brush})> out, {
+    required double bodyRadiusM,
+    required Vector3 Function(Vec2) dirOf,
+    required double Function(Vec2) groundUnder,
+    required int tick,
+  }) {
+    // Arc along the 24 m samples, scaled to the road's own length — the
+    // length its deck's ranges were measured on (the 2 m samples it was
+    // cut from; a curve's 24 m chords run a little short of it).
+    final cum = <double>[0];
+    for (var i = 1; i < pts.length; i++) {
+      cum.add(cum[i - 1] + pts[i].distanceTo(pts[i - 1]));
+    }
+    final lengthM = city.layout.roadIndex.byId(road.id)?.lengthM ?? cum.last;
+    final scale = cum.last <= 1e-9 ? 1.0 : lengthM / cum.last;
+    for (var i = 1; i < pts.length; i++) {
+      final key = 'road:${road.id}:$hw:$i';
+      if (city.shapedTerrain.contains(key)) continue;
+      final sA = cum[i - 1] * scale, sB = cum[i] * scale;
+      final sMid = (sA + sB) / 2;
+      if (deck.onStructureAt(sMid) || deck.inTunnelAt(sMid)) {
+        city.shapedTerrain.add(key);
+        continue;
+      }
+      final a = pts[i - 1], b = pts[i];
+      final datumA = bodyRadiusM + deck.heightAt(sA, lengthM);
+      final datumB = bodyRadiusM + deck.heightAt(sB, lengthM);
+      final fill = math.max(
+          (datumA - groundUnder(a)).abs(), (datumB - groundUnder(b)).abs());
+      out.add((
+        key: key,
+        brush: TerrainBrush.cutFill(
+          // Anchored on the deck, which is within the bound of the ground
+          // because the bound reaches past the fill.
+          startBF: dirOf(a) * datumA,
+          endBF: dirOf(b) * datumB,
+          radiusM: road.halfWidth,
+          datumRadiusM: datumA,
+          datumRadiusEndM: datumB,
+          // An embankment's side eases out over half again its height: a
+          // six-metre falloff under a twelve-metre fill is a cliff.
+          falloffM: math.max(roadFalloffM, fill * 1.5),
+          maxCutM: math.max(40.0, fill + deckCutMarginM),
+          tick: tick,
+          minVoxelM: voxelM,
+        ),
+      ));
+    }
   }
 
   /// Peak-to-trough ground relief across a parcel, sampled at its corners and
