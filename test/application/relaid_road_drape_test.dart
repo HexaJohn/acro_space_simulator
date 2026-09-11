@@ -10,6 +10,7 @@ import 'package:acro_space_simulator/adapters/repositories/in_memory_repositorie
 import 'package:acro_space_simulator/adapters/repositories/in_memory_world_repositories.dart';
 import 'package:acro_space_simulator/application/snapshot/world_snapshot.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_config.dart';
+import 'package:acro_space_simulator/domain/colony/city/city_generator.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_starter_kit.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_terrain_shaper.dart';
@@ -460,6 +461,101 @@ void main() {
 
     // And a quiet frame after them both still asks nothing.
     expect(work(() => drawn(c.city, c.edits, 'r0x0')), (queries: 0, drapes: 0));
+  });
+
+  test('a colony founded kilometres above its datum is drawn on its ground, '
+      'and a cold frame asks little of it', () {
+    // The shaper lays its corridors on the tangent plane at the body's
+    // DATUM radius; the frame draws on the plane at the site's ground. On a
+    // site ~3 km up the same (e, n) are metres apart a few km out, so the
+    // frame carries the corridor's knots across (siteRadius / body.radius).
+    // Without that, a generated colony's streets were drawn up to 8 cm off
+    // their ground, and its own corridors went unrecognised under half of
+    // every long road — 2,021 ground queries on a cold frame, not 264.
+    final bodies = system.all.where((b) => !b.isStar).toList();
+    final city = const CityGenerator()
+        .generate(const CityGenSpec(seed: 2, blocksAcross: 2), bodies: bodies);
+    expect(city.body.id.value, 'earth',
+        reason: 'the helpers here shape and sample the earth');
+    final edits = InMemoryTerrainEditsRepository();
+    shape(city, edits);
+
+    final q = WorldSnapshot.groundQueries;
+    WorldSnapshot.capture(1, InMemoryVesselRepository(const []),
+        system: system,
+        cities: InMemoryCityRepository([city]),
+        terrainEdits: edits);
+    final queries = WorldSnapshot.groundQueries - q;
+
+    final site = city.groundCache['site']!.radius;
+    expect(site - earth.radius, greaterThan(1000),
+        reason: 'the case needs a site well above its datum');
+    var checked = 0;
+    final off = <String>[];
+    for (final road in city.layout.roads) {
+      if (!road.graded || road.deck != null) continue;
+      final drape = city.drapeCache[road.id];
+      if (drape == null) continue;
+      for (var i = 0; i < drape.pts.length; i++) {
+        // Plane-corrected: the radius the frame drapes the point at against
+        // the ground along the direction it means, not the chord's length.
+        final dir =
+            city.localToBodyFixed(drape.pts[i], bodyRadiusM: site).normalized;
+        final d = drape.radii[i] - groundRadius(edits, dir);
+        checked++;
+        if (d.abs() >= tolM) off.add('${road.id}#$i: ${d.toStringAsFixed(3)}');
+      }
+    }
+    expect(checked, greaterThan(1000), reason: 'a real colony, not a toy');
+    expect(off, isEmpty, reason: 'drawn off the ground at [${off.join(', ')}]');
+    expect(queries, lessThanOrEqualTo(400),
+        reason: 'a cold frame asked the ground $queries times');
+  });
+
+  test('a road drawn downhill across a lot\'s step is drawn on its ground, '
+      'however steep the cut', () {
+    // A straight two-lane run down the edge of a levelled lot: one of its
+    // corridor segments falls more than a metre per metre, and the next
+    // segment's easing reaches back over it. The drape's solve stopped
+    // after eight passes, each keeping about half the error there, and drew
+    // the road 7 cm off its ground. It now runs to the fixed point.
+    final c = devColony();
+    shape(c.city, c.edits);
+    double ground(Vec2 p) =>
+        groundRadius(
+            c.edits,
+            c.city
+                .localToBodyFixed(p, bodyRadiusM: earth.radius)
+                .normalized) -
+        earth.radius;
+    final built = c.city.buildRoad(
+        RoadBuildRequest(
+            controls: const [Vec2(62, -150), Vec2(12, -150)],
+            type: RoadType.byId('two-lane')!),
+        groundAt: ground);
+    expect(built.quote.ok, isTrue, reason: built.quote.reason);
+    expect(built.quote.deck, isNull);
+    final id = built.roadId!;
+    shape(c.city, c.edits);
+    final off = misses(c.city, c.edits);
+    expect(off, isEmpty,
+        reason: 'drawn off the ground at [${off.join(', ')}] m');
+
+    // What makes it a test: a corridor segment steeper than 1.2 m per m.
+    var steepest = 0.0;
+    for (final road in c.city.layout.roads) {
+      if (road.id != id && !road.id.startsWith('${id}x')) continue;
+      final knots = road.sample(stepM: CityTerrainShaper.corridorStepM);
+      final hw = road.halfWidth.toStringAsFixed(2);
+      for (var i = 1; i < knots.length; i++) {
+        final d = c.city.corridorDatums['road:${road.id}:$hw:$i'];
+        final run = knots[i - 1].distanceTo(knots[i]);
+        if (d == null || run < 1e-6) continue;
+        steepest = math.max(steepest, (d.$2 - d.$1).abs() / run);
+      }
+    }
+    expect(steepest, greaterThan(1.2),
+        reason: 'no segment of it falls steeply — the case is gone');
   });
 
   /// How far the ground at a cut road's END knots lies off the datums its

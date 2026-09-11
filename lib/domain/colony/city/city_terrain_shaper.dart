@@ -357,7 +357,12 @@ class CityTerrainShaper {
       final before = datumStart[own] + rise[own] * t0;
       final first = own > 0 ? own - 1 : 0;
       var r = before;
-      for (var pass = 0; pass < 8; pass++) {
+      // Run to the fixed point, not a set number of passes: on a steep chord
+      // under the next segment's easing each pass keeps a share of the
+      // error — about (1 - w) * rise^2 / len^3 of it, half at a 155% grade —
+      // and eight passes left a road drawn downhill across a lot's step
+      // 7 cm off its ground. The drape is cached, so this is paid once.
+      for (var pass = 0; pass < 400; pass++) {
         var v = before;
         // The segments in the order they were recorded: the one before (its
         // end cap, overruled by the point's own segment), its own, and
