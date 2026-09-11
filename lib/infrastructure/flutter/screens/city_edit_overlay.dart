@@ -374,7 +374,11 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
                 TrafficToolPanel(controller: controller, city: city),
               if (controller.tool == CityEditTool.utility) _buildRow(),
               _readoutRow(),
-              if (_readout != null) _readoutPanel(_readout!),
+              // Flexible: where the host gives the editor less than the
+              // drawer's 45% cap (city mode keeps it below its own
+              // controls), the drawer takes what is left and scrolls,
+              // rather than overflowing up over them.
+              if (_readout != null) Flexible(child: _readoutPanel(_readout!)),
             ],
           ),
         ),

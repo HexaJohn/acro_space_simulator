@@ -14,6 +14,7 @@ import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_starter_kit.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/universe/real_solar_system.dart';
+import 'package:acro_space_simulator/infrastructure/flutter/screens/city_edit_overlay.dart';
 import 'package:acro_space_simulator/infrastructure/flutter/sim_view_control.dart';
 import 'package:acro_space_simulator/infrastructure/flutter/simulation_view.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_nodes.dart';
@@ -333,6 +334,45 @@ void main() {
     expect(o.markers, isEmpty);
     expect(o.lines, isEmpty);
     // Let the save and load notices run out.
+    await t.pump(const Duration(seconds: 3));
+  });
+
+  testWidgets('a road built after Load is priced and built on the loaded '
+      'colony', (t) async {
+    // Load swaps the colony for a new object with the same id. Load does
+    // not re-arm the road tool's ground: every road action binds it to the
+    // colony it acts on before pricing, so the first road after a Load is
+    // quoted, built and billed on the loaded colony, and the ghost it
+    // replaced keeps what it had.
+    final injected = await pumpCity(t);
+    Finder fab(String tag) => find.byWidgetPredicate(
+        (w) => w is FloatingActionButton && w.heroTag == tag);
+    await t.tap(fab('save'));
+    await t.pump();
+    await t.tap(fab('load'));
+    await t.pump();
+    final loaded = t.widget<CityEditOverlay>(find.byType(CityEditOverlay)).city;
+    expect(identical(loaded, injected), isFalse, reason: 'the load ran');
+    final injectedRoads = injected.layout.roads.length;
+    final injectedFunds = injected.funds;
+    final roads = loaded.layout.roads.length;
+    final revision = loaded.roadsRevision;
+    await holdRoadTool(t);
+    road({'snap': ''});
+    await jitteryClick(t, const Offset(700, 380));
+    final funds = loaded.funds;
+    await jitteryClick(t, const Offset(900, 380));
+    final s = road();
+    final q = s['lastQuote']! as Map;
+    expect(q['ok'], isTrue, reason: '${q['reason']}');
+    expect(loaded.layout.roads.length, greaterThan(roads));
+    expect(loaded.roadsRevision, isNot(revision));
+    final cost = q['cost']! as double;
+    expect(cost, greaterThan(0));
+    expect(loaded.funds, closeTo(funds - cost, cost * 0.05),
+        reason: 'the quote is the bill, on the loaded treasury');
+    expect(injected.layout.roads.length, injectedRoads);
+    expect(injected.funds, injectedFunds);
     await t.pump(const Duration(seconds: 3));
   });
 }

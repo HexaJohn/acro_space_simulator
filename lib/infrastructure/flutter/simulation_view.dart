@@ -2668,12 +2668,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         if (c.id == wasEditing) back = c;
       }
       back ??= cities.isEmpty ? null : cities.first;
-      if (back != null) {
-        _editingCity = back;
-        // Re-armed on the loaded colony, as every road action does: the
-        // one ground the tool prices on, above the body datum.
-        _bindRoadGround(back);
-      }
+      // Nothing to re-arm for the road tool here: every road action binds
+      // its ground to the colony it acts on before it prices anything (see
+      // `_bindRoadGround`), and nothing reads that ground in between.
+      if (back != null) _editingCity = back;
     }
     setState(() {});
     ScaffoldMessenger.of(
@@ -3332,13 +3330,22 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                 // City mode's own few controls, in place of the flight
                 // stack: over the pick layer, so a held tool cannot swallow
                 // a click on Save, and UNDER the toolbar and the HUD, so a
-                // wide toolbar or an open drawer is never covered by them.
+                // wide toolbar is never covered by them.
                 if (widget.cityMode) _cityViewControls(),
                 // City editor toolbar. LAST in the stack so it sits over the
                 // HUD rather than under it — a toolbar you cannot click is
                 // worse than no toolbar.
+                //
+                // In city mode it starts BELOW the controls: a readout drawer
+                // is full width and up to 45% of the window, and grown up
+                // from the bottom it covered Save, Load, warp and debug at the
+                // default window size. There the drawer takes what is left
+                // and scrolls.
                 if (_editingCity != null)
                   Positioned.fill(
+                    top: widget.cityMode
+                        ? MediaQuery.paddingOf(context).top + _cityEditorTop
+                        : 0,
                     child: CityEditOverlay(
                       controller: _cityEdit,
                       city: _editingCity!,
@@ -3389,6 +3396,15 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           ? '⏸'
           : '${_warpLevels[_warpIndex].toStringAsFixed(0)}x';
 
+  /// Where city mode's own controls start: just under the HUD's one-row bar.
+  static const double _cityControlsTop = 72;
+
+  /// Where the city editor's area starts in city mode: below those
+  /// controls — two rows of small buttons, each at most 48 px (a padded tap
+  /// target; 40 on the desktop), and the gap between them. The editor's own
+  /// margin is the gap under them.
+  static const double _cityEditorTop = _cityControlsTop + 48 + 8 + 48;
+
   /// City mode's controls: what of the flight stack the city game uses —
   /// Save and Load, time warp (also , and .), the debug panel. Leaving is
   /// the HUD's exit; the camera, flight and render toggles would only fight
@@ -3403,8 +3419,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   /// window edge and takes the Budget drawer with it — and the toolbar grows
   /// up from the bottom, so this corner is the one neither reaches at the
   /// default window size. Two short rows, not a column, so it ends well
-  /// above the toolbar's tallest row (Build's buildings). Where a narrow
-  /// window makes them meet, these sit beneath both in the stack.
+  /// above the toolbar's tallest row (Build's buildings). The toolbar's
+  /// area starts at [_cityEditorTop], below them, so neither it nor an open
+  /// readout drawer can reach up over them.
   Widget _cityViewControls() {
     final canLeave =
         _editingCity == null && Navigator.of(context).canPop();
@@ -3413,7 +3430,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         child: Align(
           alignment: Alignment.topLeft,
           child: Padding(
-            padding: const EdgeInsets.only(left: 8, top: 72),
+            padding: const EdgeInsets.only(left: 8, top: _cityControlsTop),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,

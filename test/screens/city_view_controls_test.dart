@@ -143,14 +143,73 @@ void main() {
   testWidgets('with any tool held, every city control stays clickable',
       (t) async {
     await pumpCity(t);
+    void expectControls(String when) {
+      for (final tag in ['save', 'load', 'warpdown', 'warpup', 'debug']) {
+        expect(fab(tag).hitTestable(), findsOneWidget, reason: '$tag $when');
+      }
+    }
+
+    // A readout tab, not a word of the same spelling in its drawer: the
+    // tabs come first in the toolbar's column.
+    Finder tab(CityReadout r) => find
+        .descendant(
+            of: find.byType(CityEditOverlay), matching: find.text(r.label))
+        .first;
+
+    // The open readout drawer is on screen, shows something, and can be
+    // scrolled to its end: squeezed under the controls it scrolls, and
+    // nothing of it is out of reach.
+    Future<void> expectDrawerReachable(String when) async {
+      final list = find.descendant(
+          of: find.byType(CityEditOverlay),
+          matching: find.byWidgetPredicate((w) => w is ListView && w.shrinkWrap));
+      expect(list, findsOneWidget, reason: 'the drawer is open $when');
+      final box = t.renderObject(list) as RenderBox;
+      final r = box.localToGlobal(Offset.zero) & box.size;
+      expect(r.top >= 0 && r.bottom <= window.height, isTrue,
+          reason: 'the drawer is on screen $when: $r');
+      expect(r.height, greaterThan(48), reason: 'the drawer shows rows $when');
+      expect(list.hitTestable(), findsOneWidget,
+          reason: 'the drawer takes a drag $when');
+      final pos = t
+          .state<ScrollableState>(
+              find.descendant(of: list, matching: find.byType(Scrollable)))
+          .position;
+      // Drag after drag, as a player would: each loses its start to the
+      // touch slop, and a half-height drag keeps the pointer on the list.
+      for (var i = 0; i < 20 && pos.pixels < pos.maxScrollExtent - 0.5; i++) {
+        await t.drag(list, Offset(0, -r.height / 2));
+        await t.pump();
+      }
+      expect(pos.pixels, closeTo(pos.maxScrollExtent, 0.5),
+          reason: 'drags reach the end of the drawer $when');    }
+
     // Build's row of buildings is the toolbar's tallest; it once covered
-    // the debug toggle at the foot of a ~320 px column.
+    // the debug toggle at the foot of a ~320 px column. A readout drawer
+    // is full width and up to 45% of the window: open under Road's or
+    // Build's row it once reached up over Save, Load, warp and debug.
     for (final tool in ['Zone', 'Road', 'Traffic', 'Build', 'Clear']) {
       await tapShown(t, find.text(tool).first);
-      for (final tag in ['save', 'load', 'warpdown', 'warpup', 'debug']) {
-        expect(fab(tag).hitTestable(), findsOneWidget,
-            reason: '$tag with the $tool tool held');
+      expectControls('with the $tool tool held');
+      if (tool != 'Road' && tool != 'Build') continue;
+      for (final r in CityReadout.values) {
+        await tapShown(t, tab(r));
+        // The drawers share one list, and the last one's scroll carries
+        // over and springs back into the new one's range: let it settle.
+        for (var i = 0; i < 10; i++) {
+          await t.pump(const Duration(milliseconds: 50));
+        }
+        expectControls('with $tool held and the ${r.label} drawer open');
+        await expectDrawerReachable('with $tool held, ${r.label}');
       }
+      // The open tab again: the drawer shuts.
+      await tapShown(t, tab(CityReadout.values.last));
+      expect(
+          find.descendant(
+              of: find.byType(CityEditOverlay),
+              matching:
+                  find.byWidgetPredicate((w) => w is ListView && w.shrinkWrap)),
+          findsNothing);
     }
   });
 
