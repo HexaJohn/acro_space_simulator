@@ -722,7 +722,7 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
       },
     )) {
       _edits.record(body.id, p.brush);
-      sim.shapedTerrain.add(p.key);
+      CityTerrainShaper.markShaped(sim, p.key, p.brush);
     }
   }
 
@@ -731,6 +731,7 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
   void _clearEdits() {
     _edits = InMemoryTerrainEditsRepository();
     _sim?.shapedTerrain.clear();
+    _sim?.corridorDatums.clear();
     _recapture();
     setState(() {});
   }

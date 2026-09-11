@@ -15,6 +15,7 @@ import 'package:acro_space_simulator/domain/colony/city/city_terrain_shaper.dart
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_build.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_catalog.dart';
+import 'package:acro_space_simulator/domain/colony/city/road_curves.dart';
 import 'package:acro_space_simulator/domain/planetary/planet_surface.dart'
     show Biome;
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
@@ -68,7 +69,7 @@ void main() {
         bodyRadiusM: earth.radius,
         groundRadiusAt: (d) => groundRadius(edits, d))) {
       edits.record(earth.id, p.brush);
-      city.shapedTerrain.add(p.key);
+      CityTerrainShaper.markShaped(city, p.key, p.brush);
     }
   }
 
@@ -205,5 +206,184 @@ void main() {
     expect(off.abs(), lessThan(tolM),
         reason: 'the road\'s end is drawn ${off.toStringAsFixed(2)} m off '
             'the ground the crater left');
+  });
+
+  /// How far the ground at a cut road's knots lies off the datum its own
+  /// segment was cut to there — what the next segment's easing pulled it
+  /// by. The old drape took that pulled ground for the segment's datum.
+  double knotPull(CitySim city, InMemoryTerrainEditsRepository e, String id) {
+    final road = city.layout.roadById(id)!;
+    final knots = road.sample(stepM: CityTerrainShaper.corridorStepM);
+    final hw = road.halfWidth.toStringAsFixed(2);
+    var worst = 0.0;
+    for (var k = 1; k < knots.length; k++) {
+      final datums = city.corridorDatums['road:$id:$hw:$k'];
+      if (datums == null) continue;
+      final dir = city
+          .localToBodyFixed(knots[k], bodyRadiusM: earth.radius)
+          .normalized;
+      worst = math.max(worst, (groundRadius(e, dir) - datums.$2).abs());
+    }
+    return worst;
+  }
+
+  test('a curved road is drawn on the corridor it was cut to — built, and '
+      're-laid — not on the ground its knots were pulled to', () {
+    double ground(CitySim city, InMemoryTerrainEditsRepository e, Vec2 p) =>
+        groundRadius(
+            e,
+            city
+                .localToBodyFixed(p, bodyRadiusM: earth.radius)
+                .normalized) -
+        earth.radius;
+
+    // Curves across the pump's levelled field and the 10 m step at its
+    // edge, on the dev site: a two-lane drawn through three points, and
+    // two drawn as the tool lays them — its Curved mode (a Bézier) and its
+    // Freeform mode (an arc off a heading), points 4 m apart. Every way,
+    // buildRoad keeps controls a few metres apart and every control is a
+    // corridor knot, well inside the next segment's easing: the ground at
+    // a knot once cut was pulled 9-10 m off its segment's datum here, and
+    // draped from it the old way these roads were drawn 8-9.6 m in the hill.
+    const from = Vec2(-40.53, 35.79), to = Vec2(-95, 90);
+    final cases = <String, List<Vec2>>{
+      'through three points': const [from, Vec2(-70, 55), to],
+      'the tool\'s Curved mode':
+          RoadCurves.quadratic(from, const Vec2(-90, 40), to),
+      'the tool\'s Freeform mode':
+          RoadCurves.tangentArc(from, const Vec2(-1, 0), to),
+    };
+    for (final MapEntry(key: name, value: controls) in cases.entries) {
+      final c = devColony();
+      shape(c.city, c.edits);
+      final built = c.city.buildRoad(
+          RoadBuildRequest(
+              controls: controls, type: RoadType.byId('two-lane')!),
+          groundAt: (p) => ground(c.city, c.edits, p));
+      expect(built.quote.ok, isTrue, reason: '$name: ${built.quote.reason}');
+      expect(built.quote.deck, isNull, reason: name);
+      final id = built.roadId!;
+      shape(c.city, c.edits);
+      final off = offGround(drawn(c.city, c.edits, id), c.edits);
+      expect(off.every((d) => d.abs() < tolM), isTrue,
+          reason: '$name: drawn off the ground it was cut to by '
+              '[${fmt(off)}] m');
+      // What makes it a test: the easing really has pulled a knot's ground
+      // metres off its own segment's datum.
+      expect(knotPull(c.city, c.edits, id), greaterThan(1.0),
+          reason: '$name: no knot pulled off its datum — the case is gone');
+
+      // Its end dragged on, out past the field (Adjust Roads): drawn where
+      // its corridor will be the frame it is laid, and on it once cut.
+      final moved = c.city.moveRoadEnd(id,
+          atStart: false,
+          to: const Vec2(-130, 140),
+          groundAt: (p) => ground(c.city, c.edits, p));
+      expect(moved.quote.ok, isTrue, reason: '$name: ${moved.quote.reason}');
+      expect(moved.quote.deck, isNull, reason: name);
+      final relaid = moved.roadId!;
+      final before = pointsOf(drawn(c.city, c.edits, relaid))
+          .map((p) => p.length)
+          .toList();
+      shape(c.city, c.edits);
+      final after = drawn(c.city, c.edits, relaid);
+      final offAfter = offGround(after, c.edits);
+      expect(offAfter.every((d) => d.abs() < tolM), isTrue,
+          reason: '$name, re-laid: drawn off the ground it was cut to by '
+              '[${fmt(offAfter)}] m');
+      final pts = pointsOf(after);
+      final ahead = [
+        for (var k = 0; k < pts.length; k++)
+          before[k] - groundRadius(c.edits, pts[k].normalized),
+      ];
+      expect(ahead.every((d) => d.abs() < tolM), isTrue,
+          reason: '$name, re-laid: before its corridor was cut it was drawn '
+              '[${fmt(ahead)}] m off the ground it was then cut to');
+    }
+  });
+
+  test('a frame in which nothing changed asks nothing of the ground; a '
+      'brush far off keeps what the colony holds, one under a road does not',
+      () {
+    final c = devColony();
+    shape(c.city, c.edits);
+    // A one-way to turn round later (the live run's).
+    final oneWay = c.city
+        .buildRoad(
+            RoadBuildRequest(controls: const [
+              Vec2(-40.53494707193965, 35.79178164252065),
+              Vec2(-59.22824161951971, 80.00219601467299),
+            ], type: RoadType.byId('one-way')!),
+            groundAt: (p) =>
+                groundRadius(
+                    c.edits,
+                    c.city
+                        .localToBodyFixed(p, bodyRadiusM: earth.radius)
+                        .normalized) -
+                earth.radius)
+        .roadId!;
+    shape(c.city, c.edits);
+    drawn(c.city, c.edits, 'r0x0');
+    final held = c.city.groundCache.length;
+    expect(held, greaterThan(0));
+
+    ({int queries, int drapes}) work(void Function() frame) {
+      final q = WorldSnapshot.groundQueries;
+      final d = WorldSnapshot.roadDrapesComputed;
+      frame();
+      return (
+        queries: WorldSnapshot.groundQueries - q,
+        drapes: WorldSnapshot.roadDrapesComputed - d,
+      );
+    }
+
+    // A quiet frame: every drape held, no corridor modelled, no query.
+    final quiet = work(() => drawn(c.city, c.edits, 'r0x0'));
+    expect(quiet, (queries: 0, drapes: 0));
+
+    // Craters on the far side of the body and 20 km off — an impact, a
+    // drill's quantum, a pit on another site: nothing the colony stands on.
+    final siteDir = c.city
+        .localToBodyFixed(const Vec2(0, 0), bodyRadiusM: earth.radius)
+        .normalized;
+    for (final dir in [
+      siteDir * -1.0,
+      c.city
+          .localToBodyFixed(const Vec2(20000, 0), bodyRadiusM: earth.radius)
+          .normalized,
+    ]) {
+      c.edits.record(
+          earth.id,
+          TerrainBrush.crater(
+              contactBF: dir * groundRadius(c.edits, dir),
+              normalBF: dir,
+              radiusM: 14,
+              depthM: 4));
+    }
+    final far = work(() => drawn(c.city, c.edits, 'r0x0'));
+    expect(far, (queries: 0, drapes: 0),
+        reason: 'a brush that cannot reach the colony re-read its ground');
+    expect(c.city.groundCache.length, held);
+
+    // A road edit that moves nothing on the ground (a one-way turned
+    // round): each drape worked out again, from ground already held.
+    expect(c.city.reverseRoad(oneWay), isTrue);
+    final reversed = work(() => drawn(c.city, c.edits, 'r0x0'));
+    expect(reversed.drapes, c.city.layout.roads.length);
+    expect(reversed.queries, 0);
+
+    // A crater under a street's end: the colony's ground is read again.
+    final end = pointsOf(drawn(c.city, c.edits, 'r0x0')).first.normalized;
+    c.edits.record(
+        earth.id,
+        TerrainBrush.crater(
+            contactBF: end * groundRadius(c.edits, end),
+            normalBF: end,
+            radiusM: 14,
+            depthM: 4));
+    final near = work(() => drawn(c.city, c.edits, 'r0x0'));
+    expect(near.queries, greaterThan(0),
+        reason: 'a crater under a road left its ground as it was');
+    expect(near.drapes, c.city.layout.roads.length);
   });
 }

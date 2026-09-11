@@ -4,6 +4,7 @@
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import '../../shared/vector3.dart';
 import '../../terrain/terrain_brush.dart';
@@ -236,91 +237,114 @@ class CityTerrainShaper {
   /// 48.00000000000001 m one every 16 m — see [corridorGround].
   static const double corridorStepM = 24;
 
+  /// Record that [brush], returned by [pending] under [key], has been laid
+  /// on [city]'s ground — what every caller of [pending] does with each
+  /// brush it records.
+  ///
+  /// A road corridor's segment also keeps the datum radii it was cut to
+  /// ([CitySim.corridorDatums]): the road is drawn on them
+  /// ([corridorGround]), not on the ground read back at its knots.
+  static void markShaped(CitySim city, String key, TerrainBrush brush) {
+    city.shapedTerrain.add(key);
+    if (brush.kind == TerrainBrushKind.cutFill) {
+      city.corridorDatums[key] = (brush.datumRadiusM, brush.datumRadiusEndM);
+    }
+  }
+
   /// The ground a plain corridor — a graded road with no deck, as [pending]
   /// cuts it — leaves under [pts], the road's own points in order, as radii
   /// from the body centre written into [out].
   ///
   /// [knots] are the corridor's knots (`road.sample(stepM: corridorStepM)`),
-  /// [knotRadii] the ground radius at each and [halfWidthM] the road's half
-  /// width. Read back from the brushes' own rules rather than asked of the
-  /// field at every point, which in a built colony is a march through every
-  /// brush there: segment j is cut or filled to the straight line between
-  /// its knots' ground, at full weight within [halfWidthM] of its chord;
-  /// the segment after it, recorded after it, holds the last metres before
-  /// its own first knot at that knot's height and eases out over
-  /// [roadFalloffM] ([TerrainBrush.falloffWeight]).
+  /// segment j running from knot j to knot j + 1; [datumStart] and
+  /// [datumEnd] are the radii segment j is cut to at its two knots, and
+  /// [halfWidthM] is the road's half width. Read back from the brushes' own
+  /// rules rather than asked of the field at every point, which in a built
+  /// colony is a march through every brush there: segment j is cut or
+  /// filled to the straight line between its datums, at full weight within
+  /// [halfWidthM] of its chord; each segment after it, recorded after it,
+  /// holds the last metres before its own first knot at that knot's datum
+  /// and eases out over [roadFalloffM] ([TerrainBrush.falloffWeight]).
   ///
-  /// A knot's ground is what its segment levelled it to — that brush is
-  /// the last word there — so the profile is the same from the ground at
-  /// the knots before the corridor is cut as after: the road is drawn on
-  /// the ground it is graded to, the frame it is laid and every frame
-  /// after. Interpolating every fourth 6 m point instead missed the graded
-  /// ground by metres wherever the knots fell elsewhere and the grade
-  /// changed — a re-laid street crossing a levelled lot's edge was drawn
-  /// as slabs in and out of the hill.
+  /// The datums are the ones the shaper CUT to ([CitySim.corridorDatums]),
+  /// not the ground read back at the knots once it has. A knot's ground is
+  /// not its segment's datum wherever the next segment's easing reaches
+  /// back over it — and on a curve it always does, its knots metres apart:
+  /// taken for a datum, that pulled-down ground drew a whole segment on the
+  /// wrong line, a curved street buried 9.6 m where it crossed a levelled
+  /// lot's edge. Before a segment is cut its datums are the ground at its
+  /// knots, which is exactly what [pending] will measure: the road is drawn
+  /// on the ground it is about to be graded to.
+  ///
+  /// [knotResidual], when given, is added at each knot and interpolated
+  /// between: what else has moved the ground under a corridor already cut
+  /// — a crater, a later road over its end — as measured at its knots.
   ///
   /// Measured in the colony's plane (metres east and north) plus the rise
   /// between knots: over a corridor segment the body's curve is
   /// millimetres. A brush reads a point's place along its chord in three
-  /// dimensions — the chord rising from one knot's ground to the next — so
-  /// a point the next segment's cap pulls below a steep chord reads a
-  /// little further along it, and the ground is the height that agrees
-  /// with itself: found by iterating, a few passes, as the rise over a
-  /// segment is small against its length.
+  /// dimensions — the chord rising from one datum to the next — so a
+  /// point the next segment's cap pulls below a steep chord reads a little
+  /// further along it, and the ground is the height that agrees with
+  /// itself: found by iterating, a few passes, as the rise over a segment
+  /// is small against its length.
+  ///
+  /// Each segment's chord is worked out once, not per point and pass, and
+  /// nothing is allocated per point: this ran every frame for every graded
+  /// road until the snapshot cached its result.
   void corridorGround(
     List<Vec2> pts,
     List<Vec2> knots,
-    List<double> knotRadii,
+    List<double> datumStart,
+    List<double> datumEnd,
     double halfWidthM,
-    List<double> out,
-  ) {
-    assert(knots.length == knotRadii.length);
-    assert(out.length >= pts.length);
-    if (knots.isEmpty) return;
+    List<double> out, {
+    List<double>? knotResidual,
+  }) {
     final m = knots.length - 1;
-    if (m < 1) {
-      for (var i = 0; i < pts.length; i++) {
-        out[i] = knotRadii.first;
-      }
-      return;
+    assert(m >= 1, 'a corridor has at least one segment');
+    assert(datumStart.length >= m && datumEnd.length >= m);
+    assert(knotResidual == null || knotResidual.length >= knots.length);
+    assert(out.length >= pts.length);
+    if (m < 1) return;
+    // Each segment's chord: its first knot, its run in plan, its rise.
+    final ke = Float64List(m + 1), kn = Float64List(m + 1);
+    for (var k = 0; k <= m; k++) {
+      ke[k] = knots[k].e;
+      kn[k] = knots[k].n;
     }
-    // Where [p] lies along segment [j] in plan, 0 at its first knot and 1
-    // at its last: which segment a point runs along. A segment of no
+    final de = Float64List(m), dn = Float64List(m);
+    final plan2 = Float64List(m), rise = Float64List(m), len3 = Float64List(m);
+    for (var j = 0; j < m; j++) {
+      de[j] = ke[j + 1] - ke[j];
+      dn[j] = kn[j + 1] - kn[j];
+      plan2[j] = de[j] * de[j] + dn[j] * dn[j];
+      rise[j] = datumEnd[j] - datumStart[j];
+      len3[j] = plan2[j] + rise[j] * rise[j];
+    }
+    // Where (pe, pn) lies along segment [j] in plan, 0 at its first knot
+    // and 1 at its last: which segment a point runs along. A segment of no
     // length is always passed (its brush levels nothing — `cutFill`).
-    double plan(Vec2 p, int j) {
-      final a = knots[j], d = knots[j + 1] - a;
-      final len2 = d.e * d.e + d.n * d.n;
-      if (len2 <= 1e-9) return 1;
-      final w = p - a;
-      return (w.e * d.e + w.n * d.n) / len2;
-    }
-
-    // Where [p], at radius [r], projects along segment [j]'s chord as its
-    // brush projects it: in three dimensions, the chord rising from one
-    // knot's ground to the next.
-    double along(Vec2 p, double r, int j) {
-      final a = knots[j], d = knots[j + 1] - a;
-      final rise = knotRadii[j + 1] - knotRadii[j];
-      final len2 = d.e * d.e + d.n * d.n + rise * rise;
-      final w = p - a;
-      return (w.e * d.e + w.n * d.n + (r - knotRadii[j]) * rise) / len2;
-    }
+    double plan(double pe, double pn, int j) => plan2[j] <= 1e-9
+        ? 1
+        : ((pe - ke[j]) * de[j] + (pn - kn[j]) * dn[j]) / plan2[j];
 
     final reach = halfWidthM + roadFalloffM;
+    final reach2 = reach * reach;
     var own = 0;
     for (var i = 0; i < pts.length; i++) {
-      final p = pts[i];
+      final pe = pts[i].e, pn = pts[i].n;
       // The segment the point runs along: the first whose far knot it has
       // not passed. The points are in order, so this only moves on.
-      while (own < m - 1 && plan(p, own) >= 1) {
+      while (own < m - 1 && plan(pe, pn, own) >= 1) {
         own++;
       }
-      final t0 = plan(p, own).clamp(0.0, 1.0);
+      var t0 = plan(pe, pn, own);
+      t0 = t0 < 0 ? 0.0 : (t0 > 1 ? 1.0 : t0);
       // The ground before this corridor, as far as it matters: wherever
       // the point's own segment levels it outright, not at all.
-      final before =
-          knotRadii[own] + (knotRadii[own + 1] - knotRadii[own]) * t0;
-      final first = math.max(0, own - 1);
+      final before = datumStart[own] + rise[own] * t0;
+      final first = own > 0 ? own - 1 : 0;
       var r = before;
       for (var pass = 0; pass < 8; pass++) {
         var v = before;
@@ -328,19 +352,31 @@ class CityTerrainShaper {
         // end cap, overruled by the point's own segment), its own, and
         // those after it whose first knot's cap reaches back to the point.
         for (var j = first; j < m; j++) {
-          if (j > own + 1 && p.distanceTo(knots[j]) > reach) break;
-          final a = knots[j], d = knots[j + 1] - a;
-          if (d.e * d.e + d.n * d.n <= 1e-9) continue;
-          final t = along(p, r, j).clamp(0.0, 1.0);
+          if (j > own + 1) {
+            final ex = pe - ke[j], en = pn - kn[j];
+            if (ex * ex + en * en > reach2) break;
+          }
+          if (plan2[j] <= 1e-9) continue;
+          // Where the point, at radius r, projects along the segment's
+          // chord as its brush projects it: in three dimensions.
+          var t = ((pe - ke[j]) * de[j] +
+                  (pn - kn[j]) * dn[j] +
+                  (r - datumStart[j]) * rise[j]) /
+              len3[j];
+          t = t < 0 ? 0.0 : (t > 1 ? 1.0 : t);
+          final ce = ke[j] + de[j] * t - pe, cn = kn[j] + dn[j] * t - pn;
           final w = TerrainBrush.falloffWeight(
-              p.distanceTo(a + d * t), halfWidthM, roadFalloffM);
+              math.sqrt(ce * ce + cn * cn), halfWidthM, roadFalloffM);
           if (w <= 0) continue;
-          final datum = knotRadii[j] + (knotRadii[j + 1] - knotRadii[j]) * t;
-          v = v * (1 - w) + datum * w;
+          v = v * (1 - w) + (datumStart[j] + rise[j] * t) * w;
         }
         final moved = (v - r).abs();
         r = v;
         if (moved < 1e-5) break;
+      }
+      if (knotResidual != null) {
+        r += knotResidual[own] +
+            (knotResidual[own + 1] - knotResidual[own]) * t0;
       }
       out[i] = r;
     }

@@ -16,6 +16,7 @@
 library;
 
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import '../../planetary/atmospheric_composition.dart';
 import '../../planetary/liquid_mix.dart';
@@ -3300,6 +3301,19 @@ class CitySim {
   /// on how long the session had been running.
   final Set<String> shapedTerrain = {};
 
+  /// The datum radii (m from the body centre, at its start and at its end)
+  /// each plain road corridor segment was cut to, by its [shapedTerrain]
+  /// key — kept as the brush is recorded
+  /// (`CityTerrainShaper.markShaped`).
+  ///
+  /// A road is drawn on the corridor it was graded to, and that corridor is
+  /// these datums: the ground read back at a knot afterwards is not, where
+  /// the next segment's easing has pulled it (a curve's knots are metres
+  /// apart, inside that easing). Transient, like the brushes it describes:
+  /// not saved, and rebuilt as the shaper re-grades a loaded colony from
+  /// its pristine ground.
+  final Map<String, (double, double)> corridorDatums = {};
+
   /// The sprawl past the platted core, or null for a colony with none. Set
   /// by the generator; the plan is grown from it on demand and cached, and a
   /// save stores only the spec — the plan is deterministic in it.
@@ -3325,11 +3339,25 @@ class CitySim {
   /// Ground radius under parcel-city geometry (lots, road samples), keyed by
   /// feature. Filled by the snapshot from the terrain field WITH edits, so a
   /// road reads the corridor that was graded for it and a building reads its
-  /// own levelled pad. Cleared whenever the ground under the colony changes:
-  /// [groundCacheStamp] is the snapshot's stamp of [shapedTerrain]'s size
-  /// and the body's edit store (which a crater or a pit also adds to).
+  /// own levelled pad. Cleared whenever the ground under the colony may have
+  /// changed: the shaper settled something ([groundCacheShaped], the size of
+  /// [shapedTerrain] it was filled at), the body's edit store was replaced
+  /// or shrank ([groundCacheEditStore]), or a brush added to it since
+  /// ([groundCacheEditCount]) reaches the colony. A crater on the far side
+  /// of the body, a drill quantum or a quarry's pit elsewhere leaves it be.
   final Map<String, double> groundCache = {};
-  int groundCacheStamp = -1;
+  int groundCacheShaped = -1;
+  Object? groundCacheEditStore;
+  int groundCacheEditCount = 0;
+
+  /// Each road's drape as the snapshot last worked it out — its 6 m points
+  /// and the ground radius under each — by road id, with the road it was
+  /// worked out for. Cleared with [groundCache] and whenever
+  /// [roadsRevision] moves ([drapeCacheRevision]), so a frame in which
+  /// nothing changed asks nothing of the ground and models no corridor.
+  final Map<String, ({RoadSpline road, List<Vec2> pts, Float64List radii})>
+      drapeCache = {};
+  int drapeCacheRevision = -1;
 
   // ---- Parcel city: growth, connectivity, traffic, fire ----
 

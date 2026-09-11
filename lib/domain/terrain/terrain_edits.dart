@@ -67,6 +67,11 @@ class TerrainEdits {
 
   int get length => _all.length;
 
+  /// The edit at ordinal [index], in application order — without the copy
+  /// [all] makes, for a reader that only wants what was added since it last
+  /// looked.
+  TerrainBrush brushAt(int index) => _all[index];
+
   bool get isEmpty => _all.isEmpty;
 
   bool get isNotEmpty => _all.isNotEmpty;
