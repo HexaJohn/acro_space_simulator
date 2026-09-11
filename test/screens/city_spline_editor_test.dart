@@ -15,11 +15,13 @@ import 'package:flutter_test/flutter_test.dart';
 /// is the whole point of parcels — a grid tile has no frontage, so nothing can
 /// be subdivided from it.
 void main() {
+  // Roads are bought from the treasury now: a colony with the money to
+  // build what these tests draw.
   CitySim colony() => CitySim.found(
         const CityConfig(bodyId: 'earth', gridSize: 20),
         bodies: RealSolarSystem.build().all.where((b) => !b.isStar).toList(),
         id: 'draw',
-      );
+      )..funds = 1e6;
 
   test('drawing a road cuts parcels along it', () {
     final city = colony();
@@ -205,8 +207,39 @@ void main() {
     }
     c.commitSpline(city);
     expect(city.layout.roads, isEmpty);
-    expect(c.blocked, contains('Too steep'));
+    // The quote's own reason, with the grade and the limit in it — not the
+    // one "Too steep" every refusal used to read as.
+    expect(c.blocked, contains('too steep'));
+    expect(c.blocked, contains('of 12%'));
     expect(c.pending, hasLength(3), reason: 'kept, to be re-routed');
+  });
+
+  test('drawing a road charges the treasury what it was quoted', () {
+    final city = colony()..funds = 10000;
+    final c = CityEditController()..set(CityEditTool.roadSpline);
+    for (final p in const [Vec2(0, -150), Vec2(0, 150)]) {
+      c.addSplinePoint(p);
+    }
+    c.commitSpline(city);
+    expect(city.layout.roads, hasLength(1));
+    final q = c.lastQuote!;
+    expect(q.ok, isTrue);
+    // A two-lane road, §40 a cell of 8 m, over 300 m.
+    expect(q.cost, closeTo(300 / 8 * 40, 1.0));
+    expect(city.funds, closeTo(10000 - q.cost, 1e-6));
+  });
+
+  test('a road the treasury cannot pay for is refused, its points kept', () {
+    final city = colony()..funds = 100;
+    final c = CityEditController()..set(CityEditTool.roadSpline);
+    for (final p in const [Vec2(0, -150), Vec2(0, 150)]) {
+      c.addSplinePoint(p);
+    }
+    c.commitSpline(city);
+    expect(city.layout.roads, isEmpty);
+    expect(city.funds, 100);
+    expect(c.blocked, contains('Not enough money'));
+    expect(c.pending, hasLength(2));
   });
 
   test('terrain respected: a gentle route is graded into the ground', () {

@@ -20,6 +20,8 @@ import 'package:flutter/material.dart';
 import '../../../domain/colony/city/city_building_spec.dart';
 import '../../../domain/colony/city/city_progression.dart';
 import '../../../domain/colony/city/city_sim.dart';
+import '../../../domain/colony/city/road_build.dart' show formatMoney;
+import '../../../domain/colony/city/road_catalog.dart';
 import 'app_theme.dart';
 
 /// Which drawer is open under the top bar.
@@ -420,6 +422,7 @@ class _CityGameHudState extends State<CityGameHud> {
     final current = m.tier == reached.tier;
     final isNext = m.tier == reached.tier + 1;
     final unlocks = CityProgression.unlockedBy(m);
+    final roads = CityProgression.roadsUnlockedBy(m);
     final color =
         done ? AppTheme.accent2 : (isNext ? AppTheme.accent : AppTheme.textDim);
     return Container(
@@ -454,13 +457,16 @@ class _CityGameHudState extends State<CityGameHud> {
                 style: AppTheme.mono
                     .copyWith(fontSize: 11, color: AppTheme.accent2)),
           ),
-        if (unlocks.isNotEmpty)
+        if (unlocks.isNotEmpty || roads.isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(top: 5),
             child: Wrap(
               spacing: 4,
               runSpacing: 4,
-              children: [for (final s in unlocks) _unlockChip(s, done)],
+              children: [
+                for (final s in unlocks) _unlockChip(s, done),
+                for (final t in roads) _roadUnlockChip(t, done),
+              ],
             ),
           ),
       ]),
@@ -480,6 +486,32 @@ class _CityGameHudState extends State<CityGameHud> {
                 fontSize: 10, color: open ? AppTheme.text : AppTheme.textDim)),
       );
 
+  /// A road the tier opens, beside its buildings: the road menu greys a
+  /// locked road with the population that opens it, and this is the other
+  /// end of that promise.
+  Widget _roadUnlockChip(RoadType t, bool open) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(
+              color: open ? AppTheme.accent : const Color(0xFF2A3948)),
+          color: open ? AppTheme.accent.withValues(alpha: 0.12) : null,
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(Icons.add_road,
+              size: 11, color: open ? AppTheme.accent : AppTheme.textDim),
+          const SizedBox(width: 3),
+          // Flexible: "Two-Lane One-Way Road with Decorative Grass" is
+          // wider than the drawer, and wraps rather than overflows.
+          Flexible(
+            child: Text(t.label,
+                style: TextStyle(
+                    fontSize: 10,
+                    color: open ? AppTheme.text : AppTheme.textDim)),
+          ),
+        ]),
+      );
+
   List<Widget> _budgetPanel() {
     final controllable = city.economy.taxControllable;
     final tax = city.effectiveTax();
@@ -488,8 +520,10 @@ class _CityGameHudState extends State<CityGameHud> {
       const Text('BUDGET', style: AppTheme.heading),
       const SizedBox(height: 2),
       Text(
-          'The treasury pays for land and policy. CONSTRUCTION is paid in ore — '
-          'mine it, ship it in, or earn it at a milestone.',
+          'The treasury pays for ROADS, land and policy: a road is bought '
+          'when it is laid and costs upkeep every week after — more on a '
+          'bridge, most in a tunnel. BUILDINGS are paid in ore — mine it, '
+          'ship it in, or earn it at a milestone.',
           style: AppTheme.dim.copyWith(fontSize: 11)),
       const SizedBox(height: 10),
       _kv('Treasury', '§${city.funds.toStringAsFixed(0)}'),
@@ -497,6 +531,17 @@ class _CityGameHudState extends State<CityGameHud> {
           AppTheme.accent2),
       _kv('Ordinances', '${city.lawUpkeepRate.toStringAsFixed(2)} §/s',
           city.lawUpkeepRate < 0 ? AppTheme.warn : AppTheme.accent2),
+      // Cached by the sim per change to the network, so reading it every
+      // frame this drawer is open walks no roads.
+      _kv('Road upkeep', '−${city.roadUpkeepRate.toStringAsFixed(2)} §/s',
+          city.roadUpkeepRate > 0 ? AppTheme.warn : AppTheme.accent2),
+      Padding(
+        padding: const EdgeInsets.only(bottom: 2),
+        child: Text(
+            '${formatMoney(city.roadUpkeepPerWeek)} a week for '
+            '${city.layout.roads.length} roads',
+            style: AppTheme.dim.copyWith(fontSize: 10)),
+      ),
       const Divider(height: 14, color: Color(0xFF1E2A38)),
       _kv('Net', '${net >= 0 ? '+' : ''}${net.toStringAsFixed(2)} §/s',
           net >= 0 ? AppTheme.accent2 : AppTheme.danger),

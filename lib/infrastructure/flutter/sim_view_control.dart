@@ -85,6 +85,14 @@ class SimViewControl {
   /// Current camera/backend state for assertions and closed-loop control.
   Map<String, Object?> Function()? status;
 
+  /// Drive the city editor's road tool by name (`ext.acro.roadtool`): the
+  /// params as the extension receives them — `tool`, `mode`, `type`,
+  /// `elev`, `step`, `snap`, `view`, and `hover` / `click` / `rclick` /
+  /// `drag` at screen fractions, `key` — applied through the same paths a
+  /// player's input takes. Returns the tool's status; an empty map reads
+  /// it without changing anything.
+  Map<String, Object?> Function(Map<String, String> params)? roadTool;
+
   void clear() {
     orbit = null;
     zoom = null;
@@ -103,5 +111,6 @@ class SimViewControl {
     dropImpactor = null;
     spawnLanded = null;
     status = null;
+    roadTool = null;
   }
 }

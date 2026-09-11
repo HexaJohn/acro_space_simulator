@@ -21,6 +21,10 @@ import '../../../domain/colony/city/parcel.dart';
 import 'app_theme.dart';
 import 'city_model.dart';
 import 'city_panels.dart';
+import 'road_tool_controller.dart';
+import 'road_tool_panel.dart';
+
+export 'road_tool_controller.dart';
 
 /// What the editor does with a tap on the ground.
 enum CityEditTool {
@@ -35,12 +39,20 @@ enum CityEditTool {
   /// Drag out a road SPLINE. Releasing subdivides the blocks either side into
   /// parcels, which is what the grid road tool cannot do — a tile has no
   /// frontage, so nothing can be cut from it.
+  ///
+  /// The ROAD tool: Straight, Curved, Freeform and Upgrade, one click a
+  /// stretch (see [RoadToolEditing]).
   roadSpline,
+
+  /// The road info views — Traffic Routes, Junctions, Adjust Roads. A tool
+  /// rather than a HUD panel because each changes what a click on the
+  /// ground means.
+  traffic,
 }
 
 /// Editor state, held by the flight view so it survives a rebuild and can be
 /// read by the picker without rebuilding the toolbar.
-class CityEditController extends ChangeNotifier {
+class CityEditController extends ChangeNotifier with RoadToolEditing {
   CityEditTool tool = CityEditTool.inspect;
   String zoneKind = 'residential';
   Density density = Density.low;
@@ -50,32 +62,23 @@ class CityEditController extends ChangeNotifier {
   int? hoverCell;
 
   /// Last thing the editor refused to do, shown in the toolbar.
+  @override
   String? blocked;
 
-  /// Control points of the spline currently being drawn, in colony-local
-  /// metres. Empty when not drawing.
-  final List<Vec2> pending = [];
-
-  /// Road class the spline tool lays.
-  RoadClass roadClass = RoadClass.street;
-
-  /// Lay the walled variant — sound barriers along both edges — where the
-  /// class allows it (see [RoadClass.canHaveSoundWalls]).
-  bool soundWalls = false;
-
-  /// Ground height under a colony-local point, injected by the flight view
-  /// (the overlay has no terrain access of its own). Null leaves road grades
-  /// ungated, which is what headless callers and tests want.
+  /// Ground under a colony-local point, metres above the body DATUM,
+  /// injected by the flight view (the overlay has no terrain access of its
+  /// own) — the domain's ground convention, which a raised road's deck is
+  /// measured on. Null is flat ground at the datum, which is what headless
+  /// callers and tests want.
+  @override
   double Function(Vec2)? groundAt;
-
-  /// Steepest grade of the route being drawn, percent — the live readout the
-  /// player steers by. Null until two points exist.
-  double? previewGradePct;
 
   /// Free build: the ground is not a gate.
   ///
   /// On, a road is never refused for its grade and a site never for its
-  /// slope, and the previews ride the site's datum instead of the field.
+  /// slope, and the site heatmap rides the datum instead of the field.
+  /// (The road tool reads the ground either way, from a cached raster:
+  /// which stretch of a road is a bridge and which a tunnel needs it.)
   /// What is laid is still graded into the land — the pad under a
   /// building, the corridor under a road — so nothing floats or clips;
   /// the road's grading is what levels the lots it cuts, which is why a
@@ -85,11 +88,14 @@ class CityEditController extends ChangeNotifier {
   /// terrain samples per candidate, eighty-one candidates for the
   /// suitability heatmap, each sample composing every brush in a graded
   /// town at ~16 ms — a stall of seconds on every cell the cursor crossed.
+  @override
   bool ignoreTerrain = true;
 
   /// Frontage/depth the blocks are cut at. These are the "user settings" the
   /// parcels are drawn from — change them and the same street re-subdivides.
+  @override
   double frontageM = 24;
+  @override
   double lotDepthM = 32;
 
   /// The palette row currently expanded for detail, by label. One at a
@@ -99,58 +105,19 @@ class CityEditController extends ChangeNotifier {
   /// Build-palette filter, lowercased on read. Same search the 2D builder has.
   String buildSearch = '';
 
-  /// Add a control point to the road being drawn.
-  void addSplinePoint(Vec2 p) {
-    // Skip points a hand-drag dumps almost on top of each other: they make the
-    // curve cusp and buy nothing.
-    if (pending.isNotEmpty && pending.last.distanceTo(p) < 8) return;
-    pending.add(p);
-    notifyListeners();
-  }
-
-  /// Throw the half-drawn road away.
-  void cancelSpline() {
-    pending.clear();
-    previewGradePct = null;
-    notifyListeners();
-  }
-
-  /// Commit the drawn road: junctions split, lots re-cut, buildings carried
-  /// across any lot renames.
-  void commitSpline(CitySim city) {
-    if (pending.length < 2) {
-      pending.clear();
-      notifyListeners();
-      return;
-    }
-    city.layout.settings = city.layout.settings.copyWith(
-      frontageM: frontageM,
-      depthM: lotDepthM,
-    );
-    final id = city.commitRoad(List.of(pending), roadClass,
-        groundAt: ignoreTerrain ? null : groundAt,
-        soundWalls: soundWalls && roadClass.canHaveSoundWalls);
-    if (id == null) {
-      // Refused on grade. The pending points are KEPT: the player adjusts the
-      // route or drops a tier, rather than redrawing from nothing.
-      blocked = 'Too steep for a ${roadClass.label} '
-          '(limit ${roadClass.maxGradePct.toStringAsFixed(0)}%).';
-      notifyListeners();
-      return;
-    }
-    pending.clear();
-    previewGradePct = null;
-    notifyListeners();
-  }
-
   bool get active => tool != CityEditTool.inspect;
 
   /// Public rebuild signal. `notifyListeners` is protected, so the toolbar's
   /// own controls — which mutate settings directly — go through this rather
   /// than reaching into the base class.
+  @override
   void changed() => notifyListeners();
 
+  /// Pick up [t]. Putting the road tool down ends the road being drawn —
+  /// a chain left armed under another tool would build on the next Road
+  /// click from wherever it was abandoned.
   void set(CityEditTool t) {
+    if (t != tool) resetRoadTool();
     tool = t;
     blocked = null;
     notifyListeners();
@@ -194,6 +161,7 @@ class CityEditController extends ChangeNotifier {
         notifyListeners();
       case CityEditTool.inspect:
       case CityEditTool.roadSpline:
+      case CityEditTool.traffic:
       case CityEditTool.road:
       case CityEditTool.retrofit:
       case CityEditTool.support:
@@ -216,11 +184,11 @@ class CityEditController extends ChangeNotifier {
     final spec = selectedUtil;
     if (tool != CityEditTool.utility) return;
     if (!city.unlocked(spec)) {
-      blocked = '\${spec.label} needs \${spec.unlockPop} population.';
+      blocked = '${spec.label} needs ${spec.unlockPop} population.';
       return;
     }
     if (city.stockOf('ore') < spec.buildCost) {
-      blocked = 'Needs \${spec.buildCost.toStringAsFixed(0)} ore.';
+      blocked = 'Needs ${spec.buildCost.toStringAsFixed(0)} ore.';
       return;
     }
     if (!city.placeOnParcel(parcelId, spec)) {
@@ -240,9 +208,11 @@ class CityEditController extends ChangeNotifier {
     blocked = null;
     switch (tool) {
       case CityEditTool.inspect:
-      // The spline tool works in continuous metres, not cells — it is driven
-      // by addSplinePoint/commitSpline, never by a cell tap.
+      // The road tools work in continuous metres, not cells — they are
+      // driven by clicks on the ground (see [RoadToolEditing]), never by a
+      // cell tap.
       case CityEditTool.roadSpline:
+      case CityEditTool.traffic:
         return;
       case CityEditTool.zone:
         if (city.roads.contains(cell)) {
@@ -368,6 +338,7 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
                 _tool(CityEditTool.inspect, Icons.search, 'Look'),
                 _tool(CityEditTool.zone, Icons.grid_view, 'Zone'),
                 _tool(CityEditTool.roadSpline, Icons.timeline, 'Road'),
+                _tool(CityEditTool.traffic, Icons.traffic, 'Traffic'),
                 _tool(CityEditTool.utility, Icons.factory, 'Build'),
                 _tool(CityEditTool.bulldoze, Icons.clear, 'Clear'),
                 _terrainChip(),
@@ -377,7 +348,14 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
                 _stat('Pop', city.population),
                 const SizedBox(width: 8),
                 IconButton(
-                  onPressed: onClose,
+                  // Down tools first: the listener that keeps the world's
+                  // overlays in step with the editor takes the road tool's
+                  // ghost and markers with it, which a bare close would leave
+                  // hanging over the view.
+                  onPressed: () {
+                    controller.set(CityEditTool.inspect);
+                    onClose();
+                  },
                   icon: const Icon(Icons.close, size: 16),
                   color: const Color(0xFF9FB4CC),
                   tooltip: 'Close editor',
@@ -385,7 +363,10 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
                 ]),
               ),
               if (controller.tool == CityEditTool.zone) _zoneRow(),
-              if (controller.tool == CityEditTool.roadSpline) _splineRow(),
+              if (controller.tool == CityEditTool.roadSpline)
+                RoadToolPanel(controller: controller, city: city),
+              if (controller.tool == CityEditTool.traffic)
+                TrafficToolPanel(controller: controller, city: city),
               if (controller.tool == CityEditTool.utility) _buildRow(),
               _readoutRow(),
               if (_readout != null) _readoutPanel(_readout!),
@@ -506,7 +487,6 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
             style: const TextStyle(color: Color(0xFF7FE0A0), fontSize: 11)),
       );
 
-  /// Road class and the frontage/depth the blocks get cut at.
   /// The free-build switch (see [CityEditController.ignoreTerrain]), on
   /// the strip itself: it changes what every tool does to the ground.
   Widget _terrainChip() => Padding(
@@ -543,129 +523,6 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
           ),
         ),
       );
-
-  Widget _splineRow() => Padding(
-        padding: const EdgeInsets.only(top: 5),
-        child: SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: Row(mainAxisSize: MainAxisSize.min, children: [
-          for (final c in RoadClass.values)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 2),
-              child: InkWell(
-                onTap: () {
-                  controller.roadClass = c;
-                  controller.changed();
-                },
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(4),
-                    border: Border.all(
-                        color: controller.roadClass == c
-                            ? Colors.white
-                            : const Color(0xFF2A3948)),
-                  ),
-                  child: Text(c.label,
-                      style: const TextStyle(
-                          fontSize: 10, color: Color(0xFFD6E2EE))),
-                ),
-              ),
-            ),
-          if (controller.roadClass.canHaveSoundWalls)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 6),
-              child: InkWell(
-                onTap: () {
-                  controller.soundWalls = !controller.soundWalls;
-                  controller.changed();
-                },
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(4),
-                    color: controller.soundWalls
-                        ? const Color(0xFF2A3948)
-                        : Colors.transparent,
-                    border: Border.all(
-                        color: controller.soundWalls
-                            ? Colors.white
-                            : const Color(0xFF2A3948)),
-                  ),
-                  child: Text(
-                      controller.soundWalls
-                          ? 'Sound barriers: on'
-                          : 'Sound barriers: off',
-                      style: const TextStyle(
-                          fontSize: 10, color: Color(0xFFD6E2EE))),
-                ),
-              ),
-            ),
-          const SizedBox(width: 10),
-          _slider('Frontage', controller.frontageM, 8, 80,
-              (v) => controller.frontageM = v),
-          _slider('Depth', controller.lotDepthM, 12, 120,
-              (v) => controller.lotDepthM = v),
-          if (controller.pending.isNotEmpty) ...[
-            Padding(
-              padding: const EdgeInsets.only(left: 8),
-              child: Text('${controller.pending.length} pts',
-                  style: const TextStyle(
-                      fontSize: 10, color: Color(0xFF7FE0A0))),
-            ),
-            if (controller.previewGradePct != null)
-              Padding(
-                padding: const EdgeInsets.only(left: 6),
-                child: Text(
-                  '${controller.previewGradePct!.toStringAsFixed(1)}% '
-                  '/ ${controller.roadClass.maxGradePct.toStringAsFixed(0)}%',
-                  style: TextStyle(
-                    fontSize: 10,
-                    color: controller.previewGradePct! >
-                            controller.roadClass.maxGradePct
-                        ? const Color(0xFFFF8A80)
-                        : const Color(0xFF9FB4CC),
-                  ),
-                ),
-              ),
-            IconButton(
-              onPressed: () => controller.commitSpline(city),
-              icon: const Icon(Icons.check, size: 16),
-              color: const Color(0xFF7FE0A0),
-              tooltip: 'Build road',
-            ),
-            IconButton(
-              onPressed: controller.cancelSpline,
-              icon: const Icon(Icons.close, size: 16),
-              color: const Color(0xFFFF8A80),
-              tooltip: 'Discard',
-            ),
-          ],
-          ]),
-        ),
-      );
-
-  Widget _slider(
-      String label, double value, double lo, double hi, void Function(double) set) {
-    return Row(mainAxisSize: MainAxisSize.min, children: [
-      Text('$label ${value.round()}m',
-          style: const TextStyle(fontSize: 10, color: Color(0xFF9FB4CC))),
-      SizedBox(
-        width: 90,
-        child: Slider(
-          value: value.clamp(lo, hi),
-          min: lo,
-          max: hi,
-          onChanged: (v) {
-            set(v);
-            controller.changed();
-          },
-        ),
-      ),
-    ]);
-  }
 
   /// Zone kind and density: the 2D builder's picker, brought across. Named
   /// chips rather than anonymous colour swatches, because "Residential /

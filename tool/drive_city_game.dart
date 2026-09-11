@@ -8,16 +8,33 @@
 /// console instead of by eye.
 ///
 ///   dart run tool/drive_city_game.dart <vm-service-uri> [out.png] [waitSeconds]
+///       [walk] [--script=steps.json]
+///
+/// `--script` runs a list of extension calls after the settle and before
+/// the screenshot — `[{"ext": "ext.acro.roadtool", "params": {"tool":
+/// "road", "click": "0.5,0.45"}, "waitMs": 500}, ...]` — printing each
+/// reply, so a road-tool session (lay a chain, raise it, upgrade it) can be
+/// replayed and judged from the console and the shot.
 library;
 
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:vm_service/vm_service_io.dart';
 
-Future<void> main(List<String> args) async {
+Future<void> main(List<String> argv) async {
+  const scriptFlag = '--script=';
+  final scriptPath = argv
+      .where((a) => a.startsWith(scriptFlag))
+      .map((a) => a.substring(scriptFlag.length))
+      .firstOrNull;
+  final args = [
+    for (final a in argv)
+      if (!a.startsWith('--')) a
+  ];
   if (args.isEmpty) {
     stderr.writeln('usage: drive_city_game.dart <vm-service-uri> '
-        '[out.png] [waitSeconds]');
+        '[out.png] [waitSeconds] [walk] [--script=<steps.json>]');
     exit(64);
   }
   final ws = args[0]
@@ -25,6 +42,11 @@ Future<void> main(List<String> args) async {
       .replaceFirst(RegExp(r'/?$'), '/ws');
   final out = args.length > 1 ? args[1] : 'city_game_shot.png';
   final wait = args.length > 2 ? int.parse(args[2]) : 20;
+  // Read up front: a typo in the path should fail before the settle, not
+  // after twenty seconds of it.
+  final List<Object?> steps = scriptPath == null
+      ? const []
+      : jsonDecode(File(scriptPath).readAsStringSync()) as List<Object?>;
 
   final vm = await vmServiceConnectUri(ws);
   final isolateId = (await vm.getVM()).isolates!.first.id!;
@@ -46,6 +68,20 @@ Future<void> main(List<String> args) async {
   if (args.length > 3 && args[3] == 'walk') {
     await call('ext.acro.citygame', {'walk': 'on'});
     await Future<void>.delayed(const Duration(seconds: 2));
+  }
+
+  for (final (i, step) in steps.indexed) {
+    final m = (step as Map).cast<String, Object?>();
+    final ext = m['ext'] as String;
+    final params = {
+      for (final e in ((m['params'] as Map?) ?? const {}).entries)
+        '${e.key}': '${e.value}',
+    };
+    final reply = await call(ext, params);
+    stdout.writeln('== step $i $ext $params');
+    stdout.writeln('   ${jsonEncode(reply)}');
+    final waitMs = (m['waitMs'] as num?)?.toInt() ?? 0;
+    if (waitMs > 0) await Future<void>.delayed(Duration(milliseconds: waitMs));
   }
 
   final s = await call('ext.acro.citygame');

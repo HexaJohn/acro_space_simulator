@@ -15,6 +15,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/gestures.dart'
     show
+        DragStartBehavior,
         GestureBinding,
         PointerScrollEvent,
         ScaleGestureRecognizer,
@@ -41,6 +42,7 @@ import 'pointer_lock.dart';
 import 'screens/city_edit_overlay.dart';
 import 'screens/city_game_hud.dart';
 import 'screens/city_site_actions.dart';
+import 'screens/road_tool_scene.dart';
 import 'screens/craft_assembly_screen.dart';
 import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
@@ -695,6 +697,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           'expUp': SceneSync.adaptUpS,
           'expDown': SceneSync.adaptDownS,
         };
+    _registerRoadToolControl(c);
   }
   // Latest world snapshot for the flutter_scene backend (null when the
   // software backend is active — capture cost is zero when unused).
@@ -1233,6 +1236,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     LogicalKeyboardKey.arrowRight,
     LogicalKeyboardKey.arrowUp,
     LogicalKeyboardKey.arrowDown,
+    // The road tool's elevation (macOS Fn+Up/Down arrive as these).
+    LogicalKeyboardKey.pageUp,
+    LogicalKeyboardKey.pageDown,
   };
 
   KeyEventResult _keyResult(KeyEvent e) => _simKeys.contains(e.logicalKey)
@@ -1253,6 +1259,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         HardwareKeyboard.instance.isAltPressed) {
       return KeyEventResult.ignored;
     }
+    final cityKey = _onCityEditKey(e);
+    if (cityKey != null) return cityKey;
     if (e is KeyDownEvent) {
       // Toggle manual control with M.
       if (e.logicalKey == LogicalKeyboardKey.keyM) {
@@ -2187,6 +2195,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     // Held by whatever editor last drove it; a flight opened next must not
     // inherit a colony's zoning view.
     CityNodes.zoneOverlay = false;
+    _disposeCityRoadTool();
     SimViewControl.instance.clear();
     final timingsCb = _timingsCb;
     if (timingsCb != null) {
@@ -3291,48 +3300,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                     ),
                   ),
                 ), // end overlay SafeArea Positioned.fill
-                // Ground picking. LAST but one, so it wins the gesture arena
-                // against the camera's own drag handler wrapping this stack —
-                // as a lower sibling it lost every pan, which is why painting
-                // did nothing. Opaque only while a tool is held; on Inspect it
-                // still tracks hover but lets the flight controls have the
-                // gesture.
-                if (_editingCity != null)
-                  Positioned.fill(
-                    child: MouseRegion(
-                      opaque: false,
-                      onHover: (e) => _hoverCityAt(e.localPosition),
-                      onExit: (_) => CityNodes.cursorBF = null,
-                      child: _PickGate(
-                        // A held tool paints anywhere, so the gate stands
-                        // open. On Look it opens only over a BUILDING —
-                        // every other tap belongs to the HUD underneath, and
-                        // a gesture arena cannot tell the two apart on its
-                        // own.
-                        pick: (p) =>
-                            _cityEdit.active || _siteUnder(p) != null,
-                        child: GestureDetector(
-                          behavior: _cityEdit.active
-                              ? HitTestBehavior.opaque
-                              : HitTestBehavior.translucent,
-                          onTapUp: (d) => _cityEdit.active
-                              ? _editCityAt(d.localPosition)
-                              : _inspectCityAt(d.localPosition),
-                          onPanStart: _cityEdit.active ? (_) {} : null,
-                          // Panning PAINTS for the lot tools but does not draw
-                          // roads: the road tool is click-to-place, Skylines
-                          // style — each tap a control point, the toolbar's
-                          // check to build. A freehand scribble is not how
-                          // anyone lays an avenue.
-                          onPanUpdate:
-                              _cityEdit.active &&
-                                  _cityEdit.tool != CityEditTool.roadSpline
-                              ? (d) => _editCityAt(d.localPosition)
-                              : null,
-                        ),
-                      ),
-                    ),
-                  ),
+                // Ground picking: over the camera layer, under the toolbar and
+                // the HUD. Built by the colony part (`_cityPickLayer`), which
+                // owns its gate and which gestures each tool declares.
+                if (_editingCity != null) _cityPickLayer(),
                 // City editor toolbar. LAST in the stack so it sits over the
                 // HUD rather than under it — a toolbar you cannot click is
                 // worse than no toolbar.

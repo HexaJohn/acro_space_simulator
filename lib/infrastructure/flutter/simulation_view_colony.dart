@@ -62,7 +62,10 @@ extension SimulationViewColony on _SimulationViewState {
     // can do to a building is on the building itself.
     rebuild(() {
       _editingCity = colony;
-      _cityEdit.groundAt = (p) => _groundAtLocal(colony, p);
+      // Metres above the body DATUM — the ground convention a raised
+      // road's deck is measured on. (A radius here would stand every deck
+      // a planet's radius up.)
+      _cityEdit.groundAt = (p) => _groundAtLocal(colony, p) - body.radius;
       _cityEdit.set(CityEditTool.zone);
     });
   }
@@ -140,11 +143,14 @@ extension SimulationViewColony on _SimulationViewState {
     }
     _syncSiteHeatmap(city, Vec2(hit.east, hit.north));
     // While a road is being drawn, the ghost follows the mouse: the next
-    // segment is visible BEFORE it is clicked, which is the whole difference
-    // between placing a road and discovering one.
-    if (_cityEdit.tool == CityEditTool.roadSpline &&
-        _cityEdit.pending.isNotEmpty) {
-      _syncRoutePreview(city, hover: Vec2(hit.east, hit.north));
+    // stretch is visible — and priced — BEFORE it is clicked, which is the
+    // whole difference between placing a road and discovering one.
+    final tool = _cityEdit.tool;
+    if (tool == CityEditTool.roadSpline || tool == CityEditTool.traffic) {
+      final s = _roadScene;
+      s.hover = Vec2(hit.east, hit.north);
+      s.hoverPxM = _metresPerPixelAt(hit);
+      _scheduleRoadRefresh(city);
     }
   }
 
@@ -513,12 +519,14 @@ extension SimulationViewColony on _SimulationViewState {
     CityNodes.heatCellM = cell;
   }
 
-  /// Keep the renderer's editor ghosts in step with the editor's own state.
+  /// Keep the renderer's editor overlays in step with the editor's own state.
   ///
-  /// Committing or discarding a spline empties `pending` but cannot clear the
-  /// ghost itself — the toolbar that does both knows nothing about the scene,
-  /// so a finished road went on haunting the view. Listening for the change is
-  /// the one hook both paths share.
+  /// The toolbar changes the tool, the mode, the type and the elevation
+  /// without going anywhere near the scene, so a finished road — or a tool
+  /// put down — went on haunting the view. Listening for the change is the
+  /// one hook every path shares: it redraws the road tool from where the
+  /// cursor last was (so PAGE UP lifts the ghost before the mouse moves)
+  /// and drops everything the moment another tool is picked up.
   void _onCityEditChanged() {
     final city = _editingCity;
     _syncZoneView();
@@ -529,58 +537,22 @@ extension SimulationViewColony on _SimulationViewState {
       CityNodes.heatKind = const [];
       CityNodes.heatCellM = 0;
     }
-    if (city == null || _cityEdit.pending.isEmpty) {
-      CityNodes.pendingRouteBF = const [];
-      CityNodes.pendingRouteBad = false;
-      _cityEdit.previewGradePct = null;
-      return;
+    // The road tool draws through RoadOverlayState now; the old spline
+    // ghost stays down (the terrain studio still drives it on its own).
+    CityNodes.pendingRouteBF = const [];
+    CityNodes.pendingRouteBad = false;
+    final s = _roadScene;
+    final tool = _cityEdit.tool;
+    if (s.toolChanged(tool)) {
+      s.cancelDrag();
+      s.clear();
     }
-    _syncRoutePreview(city);
-  }
-
-  /// Push the in-progress road into the renderer: the true SPLINE through the
-  /// placed points (plus the hover point as a ghost segment), draped point by
-  /// point on the real ground, red when the grade check refuses it.
-  void _syncRoutePreview(CitySim city, {Vec2? hover}) {
-    final body = _universe.current().body(city.body.id);
-    if (body == null) return;
-    final controls = [
-      ..._cityEdit.pending,
-      if (hover != null) hover,
-    ];
-    if (controls.length < 2) {
-      CityNodes.pendingRouteBF = const [];
-      CityNodes.pendingRouteBad = false;
-      _cityEdit.previewGradePct = null;
-      return;
+    if (city != null &&
+        (tool == CityEditTool.roadSpline || tool == CityEditTool.traffic)) {
+      _refreshRoadTool(city);
+    } else {
+      s.clear();
     }
-    final samples = RoadSpline(
-      id: 'preview',
-      controls: controls,
-      roadClass: _cityEdit.roadClass,
-    ).sample(stepM: 8);
-    if (_cityEdit.ignoreTerrain) {
-      // Free build: no grade to read, and the ghost rides the site's datum
-      // rather than the field — one ground sample per preview instead of
-      // one per eight metres of route, each composing every brush in town.
-      _cityEdit.previewGradePct = null;
-      CityNodes.pendingRouteBad = false;
-      CityNodes.pendingWidthM = _cityEdit.roadClass.width;
-      final datum = _colonySiteRadius(city);
-      CityNodes.pendingRouteBF = [
-        for (final p in samples) city.localToBodyFixed(p, bodyRadiusM: datum),
-      ];
-      return;
-    }
-    final grade = RoadGradeCheck.of(
-        samples, (p) => _groundAtLocal(city, p), _cityEdit.roadClass);
-    _cityEdit.previewGradePct = grade.maxPct;
-    CityNodes.pendingRouteBad = !grade.ok;
-    CityNodes.pendingWidthM = _cityEdit.roadClass.width;
-    CityNodes.pendingRouteBF = [
-      for (final p in samples)
-        city.localToBodyFixed(p, bodyRadiusM: _groundAtLocal(city, p)),
-    ];
   }
 
   /// A pad centre in body-fixed metres, standing on the real ground.
@@ -631,15 +603,15 @@ extension SimulationViewColony on _SimulationViewState {
     if (hit == null) return;
     _hoverCityAt(local);
 
-    // Road drawing works in continuous metres — no cell involved. Points
-    // near an existing road SNAP onto it, so drawing toward a street joins it
-    // (and the commit splits it there: a junction).
+    // Road drawing works in continuous metres — no cell involved. Each click
+    // snaps (onto a road it joins, a guideline, a round angle) and builds
+    // the stretch from the last one; see [RoadToolEditing.clickAt].
     if (_cityEdit.tool == CityEditTool.roadSpline) {
-      var p = Vec2(hit.east, hit.north);
-      final near = city.layout.nearestRoadPoint(p, withinM: 15);
-      if (near != null) p = near.point;
-      _cityEdit.addSplinePoint(p);
-      _syncRoutePreview(city);
+      _roadClickAt(city, hit);
+      return;
+    }
+    if (_cityEdit.tool == CityEditTool.traffic) {
+      _trafficClickAt(city, hit);
       return;
     }
 
@@ -772,7 +744,463 @@ extension SimulationViewColony on _SimulationViewState {
       _manualControl = false;
     });
   }
+
+  // ---- The road tool ---------------------------------------------------------
+
+  /// The road tool's view-side state: its ground, the hover throttle, a drag
+  /// in progress. An extension can own no fields, and one [Expando] keyed on
+  /// the view keeps the host's field list — which other features are busy
+  /// editing — untouched.
+  RoadToolScene get _roadScene => _roadScenes[this] ??= RoadToolScene();
+
+  /// Point the road tool's ground at [city]'s body as it stands now: the
+  /// edited field, cached per edit list and version (see [RoadToolScene]).
+  /// False when the body is not in this world.
+  bool _bindRoadGround(CitySim city) {
+    final body = _universe.current().body(city.body.id);
+    if (body == null) return false;
+    final s = _roadScene;
+    s.bindGround(city, body, _terrainEdits.forBody(body.id));
+    // The one ground the whole tool prices on — preview, click and the
+    // controller's own commit alike. City mode never set it, so its commits
+    // skipped the grade gate the preview had applied.
+    _cityEdit.groundAt = s.exactHeightAt;
+    return true;
+  }
+
+  /// Metres one screen pixel spans at [hit]: what the snap tolerances and
+  /// the markers are scaled by, so both stay a few pixels wide at any zoom.
+  double _metresPerPixelAt(SurfaceHit hit) {
+    final f = _camera.focalPx;
+    return f > 0 && f.isFinite ? hit.rangeM / f : 1.0;
+  }
+
+  /// Redraw the road tool for the latest hover — at most thirty times a
+  /// second. A move inside the interval is not dropped: a frame callback
+  /// draws the latest one once the interval has passed, so the ghost always
+  /// ends where the mouse stopped.
+  void _scheduleRoadRefresh(CitySim city) {
+    final s = _roadScene;
+    if (s.refreshDue()) {
+      _refreshRoadTool(city);
+      return;
+    }
+    s.dirty = true;
+    if (s.flushScheduled) return;
+    s.flushScheduled = true;
+    SchedulerBinding.instance.addPostFrameCallback((_) => _flushRoadRefresh());
+  }
+
+  void _flushRoadRefresh() {
+    final s = _roadScene;
+    s.flushScheduled = false;
+    final city = _editingCity;
+    if (!mounted || city == null || !s.dirty) return;
+    if (!s.refreshDue()) {
+      s.flushScheduled = true;
+      SchedulerBinding.instance
+          .addPostFrameCallback((_) => _flushRoadRefresh());
+      return;
+    }
+    _refreshRoadTool(city);
+  }
+
+  /// Everything the road tool shows, re-derived from where the cursor last
+  /// was: the stretch the next click would build and its price, the ghost,
+  /// the guidelines, the info views. No setState — it writes the overlay
+  /// state and the controller's preview, and the toolbar reads the preview
+  /// on the next frame the host builds anyway.
+  void _refreshRoadTool(CitySim city) {
+    final s = _roadScene;
+    s.markRefreshed();
+    if (!_bindRoadGround(city)) return;
+    s.beginFrame();
+    final c = _cityEdit;
+    final hover = s.hover;
+    switch (c.tool) {
+      case CityEditTool.roadSpline:
+        if (c.mode == RoadToolMode.upgrade) {
+          if (hover != null) {
+            c.upgradeHover(city, hover,
+                ground: s.heightAt, scale: s.snapScale);
+          }
+          s.showUpgrade(city, c, pxM: s.hoverPxM);
+        } else {
+          if (hover != null) {
+            c.previewTo(city, hover, ground: s.heightAt, scale: s.snapScale);
+          }
+          s.showRoadTool(city, c, pxM: s.hoverPxM);
+        }
+      case CityEditTool.traffic:
+        s.showTraffic(city, c, pxM: s.hoverPxM);
+      default:
+        s.clear();
+    }
+  }
+
+  /// A click with the Road tool at [hit]: priced and laid on the EXACT
+  /// ground — a click happens once, not per move. The controller notifies,
+  /// and the listener redraws from here.
+  void _roadClickAt(CitySim city, SurfaceHit hit) {
+    if (!_bindRoadGround(city)) return;
+    final s = _roadScene;
+    final p = Vec2(hit.east, hit.north);
+    s.hover = p;
+    s.hoverPxM = _metresPerPixelAt(hit);
+    rebuild(() => _cityEdit.clickAt(city, p,
+        ground: s.exactHeightAt, scale: s.snapScale));
+  }
+
+  /// A click with the Traffic tool at [hit], by view.
+  void _trafficClickAt(CitySim city, SurfaceHit hit) {
+    final s = _roadScene;
+    final p = Vec2(hit.east, hit.north);
+    s.hover = p;
+    s.hoverPxM = _metresPerPixelAt(hit);
+    final c = _cityEdit;
+    final scale = s.snapScale;
+    rebuild(() {
+      switch (c.trafficView) {
+        case TrafficInfoView.junctions:
+          c.toggleJunctionAt(city, p, scale: scale);
+        case TrafficInfoView.routes:
+          c.selectRoad(c.roadAt(city, p, scale: scale));
+        case TrafficInfoView.adjust:
+          // A click on the selected road's own end circle keeps it: that is
+          // a drag that never started, not a pick of the road beneath.
+          if (s.handleAt(city, c.selectedRoadId, p, 14 * s.hoverPxM) == null) {
+            c.selectRoad(c.roadAt(city, p, scale: scale));
+          }
+      }
+    });
+    // A pick that changed nothing notifies nobody, but the view still has
+    // to be drawn from where the cursor is now.
+    _refreshRoadTool(city);
+  }
+
+  /// A right-click on the world while a tool is held — the pick layer's
+  /// secondary tap, never the outer Listener, which is an ancestor of the
+  /// toolbar and the HUD and would act on a right-click over them too.
+  /// Drawing: one step back. Upgrade: reverse the one-way road under it.
+  /// The info views: drop the selection or the drag.
+  void _cityRightClickAt(Offset local) {
+    final city = _editingCity;
+    if (city == null || _walkMode) return;
+    final hit = _pickCityGround(local);
+    final p = hit == null ? null : Vec2(hit.east, hit.north);
+    final s = _roadScene;
+    if (hit != null) s.hoverPxM = _metresPerPixelAt(hit);
+    rebuild(() {
+      switch (_cityEdit.tool) {
+        case CityEditTool.roadSpline:
+          _bindRoadGround(city);
+          _cityEdit.rightClickAt(city, p, scale: s.snapScale);
+        case CityEditTool.traffic:
+          s.cancelDrag();
+          _cityEdit.selectRoad(null);
+        default:
+          break;
+      }
+    });
+  }
+
+  /// The editor's keys, asked by `_onKey` before anything else it does with
+  /// a key: PAGE UP / PAGE DOWN raise and lower the road being drawn (held
+  /// down, they repeat), Esc ends it. Null leaves the key to the rest of
+  /// `_onKey`. Never while walking: the walk's Esc frees a captured mouse,
+  /// and that must keep working.
+  KeyEventResult? _onCityEditKey(KeyEvent e) {
+    if (_editingCity == null) return null;
+    // Typing in a text field — a road's new name, the palette search — is
+    // typing: no key of it may walk (G), zone (Z), pan (WASD) or orbit (the
+    // arrows) the world. Ignored here, the key goes on up to the app's text
+    // editing shortcuts, which is where a field's caret and backspace live.
+    if (_textFieldFocused) return KeyEventResult.ignored;
+    if (_walkMode) return null;
+    final k = e.logicalKey;
+    if (k == LogicalKeyboardKey.pageUp || k == LogicalKeyboardKey.pageDown) {
+      // A key-down or a repeat: `_onKey` has already returned on a key-up.
+      return _cityEditKeyAction(k) ? KeyEventResult.handled : null;
+    }
+    if (k == LogicalKeyboardKey.escape && e is KeyDownEvent) {
+      return _cityEditKeyAction(k) ? KeyEventResult.handled : null;
+    }
+    return null;
+  }
+
+  /// One editor key, by name — the keyboard's path and the dev hook's.
+  /// Whether it did anything.
+  bool _cityEditKeyAction(LogicalKeyboardKey k) {
+    final c = _cityEdit;
+    if (k == LogicalKeyboardKey.pageUp || k == LogicalKeyboardKey.pageDown) {
+      if (c.tool != CityEditTool.roadSpline) return false;
+      rebuild(() => c.stepElevation(k == LogicalKeyboardKey.pageUp ? 1 : -1));
+      return true;
+    }
+    if (k == LogicalKeyboardKey.escape) {
+      final city = _editingCity;
+      if (_roadScene.cancelDrag()) {
+        if (city != null) _refreshRoadTool(city);
+        return true;
+      }
+      var done = false;
+      rebuild(() {
+        done = switch (c.tool) {
+          CityEditTool.roadSpline => c.escape(),
+          CityEditTool.traffic => c.escapeTraffic(),
+          _ => false,
+        };
+      });
+      return done;
+    }
+    return false;
+  }
+
+  /// Whether the keyboard is typing into a text field.
+  bool get _textFieldFocused {
+    final ctx = FocusManager.instance.primaryFocus?.context;
+    if (ctx == null) return false;
+    return ctx.widget is EditableText ||
+        ctx.findAncestorWidgetOfExactType<EditableText>() != null;
+  }
+
+  /// The city's ground-picking layer: over the camera, under the toolbar
+  /// and the HUD. A MouseRegion for the cursor, a gate that decides at hit
+  /// time whether this pointer is the editor's at all, and the gestures.
+  ///
+  /// Which gestures depends on the tool, and that is the point:
+  ///
+  /// * The CLICK tools — every road mode, the Routes and Junctions views —
+  ///   declare no pan. A mouse's pan slop is about two pixels against a
+  ///   tap's eighteen, so a click carrying a pixel of hand jitter was won
+  ///   by a pan that did nothing, and the road tool placed nothing at all.
+  /// * The lot tools paint by dragging, so they pan.
+  /// * Adjust Roads drags a road's end circles, its pan reporting the
+  ///   pressed point ([DragStartBehavior.down]). Its gate opens only near a
+  ///   handle or over a road, so a drag on open ground still reaches the
+  ///   camera beneath; one that starts on a road but not a handle orbits
+  ///   here instead, by the camera layer's own law.
+  /// * A right-click is admitted only while a tool is held: on Look, a
+  ///   right-press over a building is nobody's.
+  ///
+  /// And a pointer a held tool takes is the tool's ALONE ([_PickClaim]):
+  /// the hover region must not be opaque — it tracks the cursor over the
+  /// camera's ground too — and a region that is not opaque answers "not
+  /// me" to the Stack even when the detector under it took the pointer, so
+  /// the camera beneath was hit as well and its scale recognizer, with a
+  /// mouse's two-pixel slop, won every click that wobbled.
+  Widget _cityPickLayer() {
+    final c = _cityEdit;
+    final adjust = c.tool == CityEditTool.traffic &&
+        c.trafficView == TrafficInfoView.adjust;
+    final paints = c.active &&
+        c.tool != CityEditTool.roadSpline &&
+        c.tool != CityEditTool.traffic;
+    // A held tool acts anywhere, so the gate stands open — but in Adjust
+    // only over what can be picked or dragged. On Look it opens only over a
+    // BUILDING: every other tap belongs to the HUD underneath, and a gesture
+    // arena cannot tell the two apart on its own.
+    bool open(Offset p) =>
+        adjust ? _adjustGateOpen(p) : c.active || _siteUnder(p) != null;
+    return Positioned.fill(
+      child: _PickClaim(
+        // Not while walking: a click on the world then also takes the mouse
+        // back for looking, on the camera layer beneath.
+        claim: (p) => c.active && !_walkMode && open(p),
+        child: MouseRegion(
+          opaque: false,
+          onHover: (e) => _hoverCityAt(e.localPosition),
+          onExit: (_) => CityNodes.cursorBF = null,
+          child: _PickGate(
+            pick: open,
+            child: GestureDetector(
+              behavior: c.active
+                  ? HitTestBehavior.opaque
+                  : HitTestBehavior.translucent,
+              dragStartBehavior:
+                  adjust ? DragStartBehavior.down : DragStartBehavior.start,
+              onTapUp: (d) => c.active
+                  ? _editCityAt(d.localPosition)
+                  : _inspectCityAt(d.localPosition),
+              onSecondaryTapUp:
+                  c.active ? (d) => _cityRightClickAt(d.localPosition) : null,
+              onPanDown: adjust ? (d) => _adjustDown(d.localPosition) : null,
+              onPanStart: adjust || paints ? (_) {} : null,
+              onPanUpdate: adjust
+                  ? (d) => _adjustMove(d.localPosition, d.delta)
+                  : paints
+                      ? (d) => _editCityAt(d.localPosition)
+                      : null,
+              onPanEnd: adjust ? (_) => _adjustEnd() : null,
+              onPanCancel: adjust ? _adjustCancel : null,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Whether the Adjust view takes this pointer: near an end circle of the
+  /// selected road (a drag re-lays it) or over a road (a click picks it).
+  /// Anywhere else it passes to the camera beneath.
+  bool _adjustGateOpen(Offset local) {
+    final city = _editingCity;
+    if (city == null) return false;
+    final hit = _pickCityGround(local);
+    if (hit == null) return false;
+    final p = Vec2(hit.east, hit.north);
+    final pxM = _metresPerPixelAt(hit);
+    if (_roadScene.handleAt(city, _cityEdit.selectedRoadId, p, 14 * pxM) !=
+        null) {
+      return true;
+    }
+    return _cityEdit.roadAt(city, p, scale: pxM.clamp(1.0, 20.0)) != null;
+  }
+
+  void _adjustDown(Offset local) {
+    final city = _editingCity;
+    final s = _roadScene;
+    s.cancelDrag();
+    s.dragDownAt = local;
+    if (city == null) return;
+    final hit = _pickCityGround(local);
+    if (hit == null) return;
+    final pxM = _metresPerPixelAt(hit);
+    s.hoverPxM = pxM;
+    s.drag = s.handleAt(
+        city, _cityEdit.selectedRoadId, Vec2(hit.east, hit.north), 14 * pxM);
+  }
+
+  void _adjustMove(Offset local, Offset delta) {
+    final s = _roadScene;
+    s.dragTravelPx += delta.distance;
+    if (s.drag == null) {
+      // Not a handle: the camera's own drag — once it is one. Inside the
+      // click threshold it is a click's jitter, and a click must not nudge
+      // the view (see [_adjustEnd]).
+      if (s.dragTravelPx >= 6) {
+        _orbitCamera(delta.dx * 0.005, delta.dy * 0.005);
+      }
+      return;
+    }
+    final city = _editingCity;
+    final hit = _pickCityGround(local);
+    if (city == null || hit == null) return;
+    s.dragTo = Vec2(hit.east, hit.north);
+    if (!_bindRoadGround(city)) return;
+    s.beginFrame();
+    // With a button held the mouse's hover is silent: the drag draws its
+    // own ghost.
+    s.showTraffic(city, _cityEdit, pxM: s.hoverPxM);
+  }
+
+  void _adjustEnd() {
+    final s = _roadScene;
+    final city = _editingCity;
+    final drag = s.drag;
+    final to = s.dragTo;
+    final down = s.dragDownAt;
+    final travel = s.dragTravelPx;
+    s.cancelDrag();
+    if (city == null) return;
+    if (drag != null && to != null) {
+      _bindRoadGround(city);
+      rebuild(() => _cityEdit.moveSelectedEnd(city,
+          atStart: drag.atStart, to: to, ground: s.exactHeightAt));
+      return;
+    }
+    if (travel < 6 && down != null) {
+      // A click with a pixel or two of jitter, won by the pan: still a click.
+      final hit = _pickCityGround(down);
+      if (hit != null) _trafficClickAt(city, hit);
+      return;
+    }
+    _refreshRoadTool(city);
+  }
+
+  void _adjustCancel() {
+    final city = _editingCity;
+    if (_roadScene.cancelDrag() && city != null) _refreshRoadTool(city);
+  }
+
+  /// The flight view is going: nothing of the road tool may hang over the
+  /// next world opened — the overlay is process-wide, like the zoning view.
+  void _disposeCityRoadTool() => RoadToolScene.clearOverlay();
+
+  /// The road tool's dev hook (`ext.acro.roadtool`): the editor driven by
+  /// name through the SAME calls a player's input makes — a click is
+  /// [_editCityAt], a right-click [_cityRightClickAt], a key
+  /// [_cityEditKeyAction], a drag the Adjust pan's own handlers — so a
+  /// driver script exercises the picking, snapping, pricing and overlay a
+  /// player would. Points are screen fractions.
+  void _registerRoadToolControl(SimViewControl c) {
+    c.roadTool = (params) {
+      final city = _editingCity;
+      if (!mounted || city == null) {
+        return const {'error': 'no colony is being edited'};
+      }
+      final e = _cityEdit;
+      Offset? at(String? v) {
+        final xy = v?.split(',').map((s) => double.tryParse(s.trim())).toList();
+        if (xy == null || xy.length != 2 || xy.contains(null)) return null;
+        return Offset(xy[0]! * _screenW, xy[1]! * _screenH);
+      }
+
+      rebuild(() {
+        switch (params['tool']) {
+          case 'road':
+            e.set(CityEditTool.roadSpline);
+          case 'traffic':
+            e.set(CityEditTool.traffic);
+          case 'look':
+            e.set(CityEditTool.inspect);
+        }
+        e.applyToolParams(params, unlocked: city.roadTypeUnlocked);
+      });
+      final hover = at(params['hover']);
+      if (hover != null) {
+        _hoverCityAt(hover);
+        // A script's hover is one move, not a stream: draw it now.
+        if (e.tool == CityEditTool.roadSpline ||
+            e.tool == CityEditTool.traffic) {
+          _refreshRoadTool(city);
+        }
+      }
+      final click = at(params['click']);
+      if (click != null) _editCityAt(click);
+      final rclick = at(params['rclick']);
+      if (rclick != null) _cityRightClickAt(rclick);
+      final drag = params['drag']?.split(',').map(double.tryParse).toList();
+      if (drag != null && drag.length == 4 && !drag.contains(null)) {
+        final from = Offset(drag[0]! * _screenW, drag[1]! * _screenH);
+        final to = Offset(drag[2]! * _screenW, drag[3]! * _screenH);
+        _adjustDown(from);
+        _adjustMove(to, to - from);
+        _adjustEnd();
+      }
+      final key = switch (params['key']) {
+        'pageUp' => LogicalKeyboardKey.pageUp,
+        'pageDown' => LogicalKeyboardKey.pageDown,
+        'escape' => LogicalKeyboardKey.escape,
+        _ => null,
+      };
+      if (key != null) _cityEditKeyAction(key);
+      return {
+        'tool': e.tool.name,
+        ...e.roadToolStatus(),
+        'roads': city.layout.roads.length,
+        'funds': city.funds,
+        'roadUpkeepPerWeek': city.roadUpkeepPerWeek,
+        'roadUpkeepPerSec': city.roadUpkeepRate,
+        'roadsRevision': city.roadsRevision,
+        'overlay': _roadScene.overlayStatus(),
+      };
+    };
+  }
 }
+
+/// The road tool's view-side state per flight view — see `_roadScene`.
+final Expando<RoadToolScene> _roadScenes = Expando<RoadToolScene>('road tool');
 
 /// A hit-test gate: the pointer passes straight through unless [pick] says
 /// there is something here to hit.
@@ -804,4 +1232,40 @@ class _RenderPickGate extends RenderProxyBox {
   @override
   bool hitTest(BoxHitTestResult result, {required Offset position}) =>
       pick(position) && super.hitTest(result, position: position);
+}
+
+/// Stops the pointer at the pick layer when [claim] says it is the
+/// editor's, whatever its child answered.
+///
+/// The child is the hover region, which must not be opaque (it tracks the
+/// cursor everywhere) — and a MouseRegion that is not opaque reports every
+/// hit test as a miss, even one the gesture detector inside it took, so the
+/// Stack went on to hit the camera layer below it too. Its scale
+/// recognizer then won any click carrying two pixels of jitter from the
+/// held tool's tap: the view orbited and the tool did nothing.
+class _PickClaim extends SingleChildRenderObjectWidget {
+  const _PickClaim({required this.claim, required Widget super.child});
+
+  final bool Function(Offset local) claim;
+
+  @override
+  _RenderPickClaim createRenderObject(BuildContext context) =>
+      _RenderPickClaim(claim);
+
+  @override
+  void updateRenderObject(BuildContext context, _RenderPickClaim renderObject) {
+    renderObject.claim = claim;
+  }
+}
+
+class _RenderPickClaim extends RenderProxyBox {
+  _RenderPickClaim(this.claim);
+
+  bool Function(Offset local) claim;
+
+  @override
+  bool hitTest(BoxHitTestResult result, {required Offset position}) {
+    final hit = super.hitTest(result, position: position);
+    return hit || (size.contains(position) && claim(position));
+  }
 }
