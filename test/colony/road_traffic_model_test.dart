@@ -231,6 +231,54 @@ void main() {
       expect(west.goods, isFalse);
       expect(west.grown, lessThan(1.5), reason: 'what stands declines');
     });
+
+    test("a works' own lorries turning at the junction are no delivery", () {
+      // A two-way street, and a spur off its far corner, past the one-way
+      // of the tests above. Reversed, the one-way runs out of them into the
+      // junction and nothing runs in. A works grown on the two-way street
+      // ships its goods both ways along it, and its lorries come back to
+      // its door by turning at the junction or up the spur: its own still,
+      // and no delivery. A second works up the spur is.
+      ({bool goods, double grown}) works(
+          {required bool reversed, bool neighbour = false}) {
+        final c = colony('selfturn');
+        c.commitRoad(const [Vec2(-100, 0), Vec2(100, 0)], RoadClass.street);
+        final o = c.commitRoad(
+            const [Vec2(100, 0), Vec2(400, 0)], RoadClass.streetOneWay)!;
+        if (reversed) {
+          c.layout.updateRoad(c.layout.roadById(o)!.copyWith(reversed: true));
+        }
+        final s = c.commitRoad(
+            const [Vec2(400, 0), Vec2(700, 0)], RoadClass.street)!;
+        final spur = c.commitRoad(
+            const [Vec2(700, 0), Vec2(700, 300)], RoadClass.street)!;
+        final lot = lotOn(c.layout, s, const Vec2(550, 20), north: true);
+        c.layout.setUse(lot.id, ParcelUse.industrial);
+        c.grownParcels[lot.id] = 1.5;
+        if (neighbour) {
+          final next = lotOn(c.layout, spur, const Vec2(720, 200), north: true);
+          c.layout.setUse(next.id, ParcelUse.industrial);
+          c.grownParcels[next.id] = 1.5;
+        }
+        c.infiniteDemand = true;
+        c.roadTraffic.advance(1);
+        expect(c.trafficReadout.hasRun, isTrue);
+        final goods = c.trafficReadout.deliveryReach(lot.id);
+        c.advanceParcelGrowth(10);
+        return (goods: goods, grown: c.grownParcels[lot.id] ?? 0);
+      }
+
+      final open = works(reversed: false);
+      expect(open.goods, isTrue, reason: 'in off-world through the landing site');
+      expect(open.grown, greaterThan(1.5));
+      final alone = works(reversed: true);
+      expect(alone.goods, isFalse, reason: 'only its own lorries come back');
+      expect(alone.grown, lessThan(1.5), reason: 'what stands declines');
+      final paired = works(reversed: true, neighbour: true);
+      expect(paired.goods, isTrue,
+          reason: "the spur's works delivers, through the corner its own "
+              'lorries reach first');
+    });
   });
 
   group('routing', () {

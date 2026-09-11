@@ -20,6 +20,7 @@ import 'package:acro_space_simulator/domain/colony/city/city_config.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_layout.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
+import 'package:acro_space_simulator/domain/colony/city/road_graph.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_traffic_model.dart';
 import 'package:acro_space_simulator/domain/universe/real_solar_system.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -204,6 +205,73 @@ void main() {
     }
     expect(traffic.model.passes, greaterThanOrEqualTo(3));
     expect(traffic.hasRun, isTrue);
+    expect(
+        maxWork,
+        lessThanOrEqualTo(tuning.workPerStep +
+            tuning.routesPerOrigin * tuning.maxSettled +
+            1000));
+  });
+
+  test('a pass dropped inside a reach field leaves the next no sweep', () {
+    // A pass dropped while a reach field is searched or read off leaves
+    // that search holding every node the field reached, and the next
+    // pass's seeding forgot them all in one step: on this grid of 1,760
+    // junctions, a step over a thousand units past its budget. Dropped at
+    // every step of a pass in turn, no step of the next overruns.
+    final layout = CityLayout();
+    const n = 40;
+    const spacing = 100.0;
+    const half = (n - 1) * spacing / 2;
+    for (var i = 0; i < n; i++) {
+      final x = -half + i * spacing;
+      layout.commitRoad(
+          controls: [Vec2(x, -half - 30), Vec2(x, half + 30)],
+          regenerateLots: false);
+      layout.commitRoad(
+          controls: [Vec2(-half - 30, x), Vec2(half + 30, x)],
+          regenerateLots: false);
+    }
+    final g = RoadGraph.of(layout);
+    expect(g.nodeCount, greaterThan(1700));
+    // A police station mid-town (the service and fire fields reach most of
+    // the grid) and a works near the edge (the goods field, all of it).
+    TrafficSite siteOn(int road, CityBuildingSpec spec) {
+      final p = (g.roadFirstPiece[road] + g.roadFirstPiece[road + 1]) ~/ 2;
+      return TrafficSite(spec,
+          piece: p,
+          sM: (g.pieceS0[p] + g.pieceS1[p]) / 2,
+          dirs: RoadGraph.forwardBit | RoadGraph.backwardBit);
+    }
+
+    final sites = [
+      siteOn(g.roadCount ~/ 2, kUtilCatalog.firstWhere((s) => s.type == 'police')),
+      siteOn(3, kZoneSpecs['industrial']![Density.low]!),
+    ];
+    TrafficLot? none(String _) => null;
+    const tuning =
+        TrafficTuning(workPerStep: 500, maxSettled: 100, routesPerOrigin: 1);
+    final m = CityTrafficModel(g, tuning: tuning);
+    m.beginPass(none, sites: sites);
+    var steps = 0;
+    while (m.passing) {
+      m.step();
+      steps++;
+    }
+    expect(m.hasRun, isTrue);
+    var maxWork = 0;
+    for (var k = 1; k < steps; k++) {
+      m.beginPass(none, sites: sites);
+      for (var j = 0; j < k; j++) {
+        m.step();
+        maxWork = math.max(maxWork, m.lastStepWork);
+      }
+      // Dropped k steps in.
+      m.beginPass(none, sites: sites);
+      while (m.passing) {
+        m.step();
+        maxWork = math.max(maxWork, m.lastStepWork);
+      }
+    }
     expect(
         maxWork,
         lessThanOrEqualTo(tuning.workPerStep +

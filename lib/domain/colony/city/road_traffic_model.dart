@@ -252,7 +252,8 @@ class CityTrafficModel {
   CityTrafficModel(RoadGraph graph, {this.tuning = const TrafficTuning()})
       : _graph = graph,
         _resGraph = graph,
-        _search = _Search(graph.nodeCount) {
+        _search = _Search(graph.nodeCount),
+        _owned = _OwnedSearch(graph.nodeCount) {
     _allocate(graph);
   }
 
@@ -260,6 +261,10 @@ class CityTrafficModel {
 
   RoadGraph _graph;
   _Search _search;
+
+  /// The goods field's search: it tells each node's nearest source from the
+  /// nearest on another lot, so a works' own lorries are not its delivery.
+  _OwnedSearch _owned;
 
   /// The graph passes run on — which may be newer than the last published
   /// window's.
@@ -317,6 +322,7 @@ class CityTrafficModel {
       return;
     }
     _search = _Search(g.nodeCount);
+    _owned = _OwnedSearch(g.nodeCount);
     _phase = _Phase.idle;
     _source = null;
     _sites = const [];
@@ -327,6 +333,19 @@ class CityTrafficModel {
   /// plat. A pass in flight is dropped.
   void beginPass(TrafficLotSource source,
       {List<TrafficSite> sites = const []}) {
+    // A pass dropped inside a reach field leaves its search holding every
+    // node the field reached, and the next pass's seeding would forget
+    // them all in one step: that search is replaced (arrays sized to the
+    // graph, as a new graph gets), not swept.
+    if (_phase == _Phase.seed ||
+        _phase == _Phase.field ||
+        _phase == _Phase.fill) {
+      if (_reachField == _goodsField) {
+        _owned = _OwnedSearch(_graph.nodeCount);
+      } else {
+        _search = _Search(_graph.nodeCount);
+      }
+    }
     _source = source;
     _sites = sites;
     _cursor = 0;
@@ -503,14 +522,16 @@ class CityTrafficModel {
   /// spaceport, or from off-world through the landing site — over the
   /// one-way streets the way they run. True before the first window and
   /// for a lot the last window did not know. A works' own lorries are not
-  /// its delivery: a works on a street nothing else reaches the right way
+  /// its delivery — not leaving its door, and not turning at the junction
+  /// beside it: a works on a street nothing else reaches the right way
   /// round is as cut off as a shop there.
   bool deliveryReach(String lotId) {
     final p = _pub;
     if (p == null || p.graph.lotNoOf(lotId) == null) return true;
+    final b = p.loads;
     return p
-        .reachDistance(lotId, p.loads.goodsDist, p.goodsOnPiece,
-            ownCounts: false)
+        .reachDistance(lotId, b.goodsDist, p.goodsOnPiece,
+            nearestLot: b.goodsLot, otherDist: b.goodsOtherDist)
         .isFinite;
   }
 
@@ -992,15 +1013,21 @@ class CityTrafficModel {
   // the nearest station that fights fires (both bounded), and from the
   // nearest source of goods (unbounded), over directed edges.
 
-  /// Ready the search for [field]; the work of clearing the last search
-  /// back — one unit after a field, whose fill forgot its search node by
-  /// node under the budget.
+  /// Ready the search for [field] — the goods field has its own
+  /// ([_OwnedSearch]) — and the work of clearing its last search back: one
+  /// unit after a field, whose fill forgot its search node by node under
+  /// the budget.
   int _beginSeeds(int field) {
     _reachField = field;
-    final s = _search;
-    final work = s.clear();
-    s.bound = field == _goodsField ? double.infinity : tuning.serviceReachM;
-    s.maxSettled = 1 << 30;
+    final int work;
+    if (field == _goodsField) {
+      work = _owned.clear();
+    } else {
+      final s = _search;
+      work = s.clear();
+      s.bound = tuning.serviceReachM;
+      s.maxSettled = 1 << 30;
+    }
     _onPiece = <int, _OnPiece>{};
     _cursor = 0;
     _phase = _Phase.seed;
@@ -1043,20 +1070,35 @@ class CityTrafficModel {
     final g = _graph;
     var work = 0;
     if (mask & RoadGraph.forwardBit != 0 && g.pieceFwdEdge[piece] >= 0) {
-      _search.seed(g.pieceTo[piece], g.pieceS1[piece] - s);
+      _seedNode(g.pieceTo[piece], g.pieceS1[piece] - s, lot);
       work += (onPiece[piece * 2] ??= _OnPiece())
           .insert(s - g.pieceS0[piece], lot);
     }
     if (mask & RoadGraph.backwardBit != 0 && g.pieceBwdEdge[piece] >= 0) {
-      _search.seed(g.pieceFrom[piece], s - g.pieceS0[piece]);
+      _seedNode(g.pieceFrom[piece], s - g.pieceS0[piece], lot);
       work += (onPiece[piece * 2 + 1] ??= _OnPiece())
           .insert(g.pieceS1[piece] - s, lot);
     }
     return work;
   }
 
+  void _seedNode(int node, double d, int lot) {
+    if (_reachField == _goodsField) {
+      _owned.seed(node, d, lot);
+    } else {
+      _search.seed(node, d);
+    }
+  }
+
   int _field(int budget) {
     final g = _graph;
+    if (_reachField == _goodsField) {
+      final work = _owned.run(g, g.edgeLength, budget);
+      if (!_owned.done) return work;
+      _cursor = 0;
+      _phase = _Phase.fill;
+      return work + 1;
+    }
     final work = _search.run(g, g.edgeLength, budget);
     if (!_search.done) return work;
     _cursor = 0;
@@ -1070,13 +1112,10 @@ class CityTrafficModel {
   /// reset here, node by node under the budget, and not all at once by the
   /// next field's seeding or the first origin's search.
   int _fill(int budget) {
+    if (_reachField == _goodsField) return _fillGoods(budget);
     final nN = _graph.nodeCount;
     final b = _loads[_back];
-    final dst = switch (_reachField) {
-      _svcField => b.svcDist,
-      _fireField => b.fireDist,
-      _ => b.goodsDist,
-    };
+    final dst = _reachField == _svcField ? b.svcDist : b.fireDist;
     final s = _search;
     var work = 0;
     while (_cursor < nN && work < budget) {
@@ -1087,12 +1126,30 @@ class CityTrafficModel {
     }
     if (_cursor < nN) return work;
     work += s.forgotten();
-    if (_reachField == _goodsField) {
-      _cursor = 0;
-      _phase = _Phase.clear;
-    } else {
-      work += _beginSeeds(_reachField + 1);
+    work += _beginSeeds(_reachField + 1);
+    return work + 1;
+  }
+
+  /// [_fill] for the goods field: each node's nearest source, the lot it
+  /// stands on, and the nearest on any other lot.
+  int _fillGoods(int budget) {
+    final nN = _graph.nodeCount;
+    final b = _loads[_back];
+    final s = _owned;
+    var work = 0;
+    while (_cursor < nN && work < budget) {
+      final n = _cursor++;
+      work++;
+      final k = s.settled[n];
+      b.goodsDist[n] = k >= 1 ? s.dist[n] : double.infinity;
+      b.goodsLot[n] = k >= 1 ? s.lot[n] : -1;
+      b.goodsOtherDist[n] = k == 2 ? s.dist2[n] : double.infinity;
+      s.forgetNode(n);
     }
+    if (_cursor < nN) return work;
+    work += s.forgotten();
+    _cursor = 0;
+    _phase = _Phase.clear;
     return work + 1;
   }
 
@@ -1901,10 +1958,19 @@ class _Loads {
         svcDist = Float64List(g.nodeCount),
         fireDist = Float64List(g.nodeCount),
         goodsDist = Float64List(g.nodeCount),
+        goodsOtherDist = Float64List(g.nodeCount),
+        goodsLot = Int32List(g.nodeCount),
         lotNoise = Float32List(g.lotCount),
         lotBonus = Float32List(g.lotCount);
 
   final Float64List roadVol, roadCong, svcDist, fireDist, goodsDist;
+
+  /// Per node, the lot the nearest source of goods stands on (-1 for none:
+  /// the landing site, a grid site), and the distance from the nearest on
+  /// any other lot — so a works can be asked about everyone's lorries but
+  /// its own ([_OwnedSearch]).
+  final Float64List goodsOtherDist;
+  final Int32List goodsLot;
   final Float32List lotNoise, lotBonus;
 }
 
@@ -1936,14 +2002,17 @@ class _Results {
   /// node behind it, in a direction it accepts — or from the nearest source
   /// on its own piece behind it. Infinite when unreached or unknown.
   ///
-  /// With [ownCounts] false a source standing on the lot itself is passed
-  /// over for the next one behind it: a works ships goods and needs them,
-  /// and its own lorries leaving are no delivery. (Through the node behind
-  /// the lot its own source counts only round a real loop of the network,
-  /// which is a route like any other.)
+  /// With [nearestLot] — the lot each node's [nodeDist] source stands on —
+  /// the lot's own sources are passed over: at a node one of them is
+  /// nearest to, [otherDist] (the nearest source on any other lot) is read
+  /// instead, and on its own piece the next source behind it. A works
+  /// ships goods and needs them, and its own lorries are no delivery,
+  /// whether they are leaving its door or turning at the junction beside
+  /// it.
   double reachDistance(
       String lotId, Float64List nodeDist, Map<int, _OnPiece> onPiece,
-      {bool ownCounts = true}) {
+      {Int32List? nearestLot, Float64List? otherDist}) {
+    assert((nearestLot == null) == (otherDist == null));
     final g = graph;
     final i = g.lotNoOf(lotId);
     if (i == null) return double.infinity;
@@ -1951,20 +2020,28 @@ class _Results {
     if (piece < 0) return double.infinity;
     final s = g.lotS[i];
     final mask = g.lotDirs[i];
-    final skip = ownCounts ? null : i;
+    final skip = nearestLot == null ? null : i;
     var best = double.infinity;
     if (mask & RoadGraph.forwardBit != 0 && g.pieceFwdEdge[piece] >= 0) {
       final c = s - g.pieceS0[piece];
-      best = math.min(best, nodeDist[g.pieceFrom[piece]] + c);
+      final n = g.pieceFrom[piece];
+      best = math.min(best, _atNode(n, nodeDist, nearestLot, otherDist, i) + c);
       best = math.min(best, _behind(onPiece[piece * 2], c, skip));
     }
     if (mask & RoadGraph.backwardBit != 0 && g.pieceBwdEdge[piece] >= 0) {
       final c = g.pieceS1[piece] - s;
-      best = math.min(best, nodeDist[g.pieceTo[piece]] + c);
+      final n = g.pieceTo[piece];
+      best = math.min(best, _atNode(n, nodeDist, nearestLot, otherDist, i) + c);
       best = math.min(best, _behind(onPiece[piece * 2 + 1], c, skip));
     }
     return best;
   }
+
+  /// The field at node [n] for lot [lot]: [nodeDist], or [otherDist] where
+  /// the nearest source stands on the lot itself ([nearestLot] given).
+  static double _atNode(int n, Float64List nodeDist, Int32List? nearestLot,
+          Float64List? otherDist, int lot) =>
+      nearestLot != null && nearestLot[n] == lot ? otherDist![n] : nodeDist[n];
 
   /// Metres back from travel coordinate [c] to the nearest source at or
   /// behind it in [along] — the largest coordinate not past [c], passing
@@ -2242,5 +2319,191 @@ class _Search {
     }
     _hk[i] = k;
     _hn[i] = n;
+  }
+}
+
+/// A resumable, unbounded Dijkstra from sources that each stand on a lot
+/// (-1 for a source on none — the landing site, a grid site — all of which
+/// count as one), keeping two labels a node: the nearest source ([dist],
+/// on [lot]) and the nearest on any other lot ([dist2]). So a lot can be
+/// told how far the field is from a node counting every source but its
+/// own — the goods field, where a works' own lorries turning at the
+/// junction beside it are no delivery, while a works on the next street
+/// still is.
+///
+/// A node is settled at most twice, once a label, and only settled labels
+/// are carried on: a source two others beat to a node is beaten by them
+/// to everywhere past it too. So it costs at most twice the one-label
+/// search's work, and resumes and resets like [_Search] — through the
+/// nodes it touched, or node by node by a caller that walks them all.
+class _OwnedSearch {
+  _OwnedSearch(int n)
+      : dist = Float64List(n)..fillRange(0, n, double.infinity),
+        dist2 = Float64List(n)..fillRange(0, n, double.infinity),
+        lot = Int32List(n),
+        lot2 = Int32List(n),
+        settled = Uint8List(n);
+
+  /// Per node, the nearest source's distance and lot, and the nearest on
+  /// another lot's: tentative until [settled] says the label is final.
+  final Float64List dist, dist2;
+  final Int32List lot, lot2;
+
+  /// How many of a node's labels are final: 0, 1 or 2.
+  final Uint8List settled;
+  final _IntBuf touched = _IntBuf();
+
+  Float64List _hk = Float64List(64);
+  Int32List _hn = Int32List(64), _ho = Int32List(64);
+  int _hs = 0;
+
+  bool done = true;
+
+  /// Forget the last search, through the nodes it touched. The work, for
+  /// the caller's budget.
+  int clear() {
+    final count = touched.length;
+    for (var k = 0; k < count; k++) {
+      forgetNode(touched[k]);
+    }
+    return count + forgotten();
+  }
+
+  /// Forget node [n] — see [_Search.forgetNode].
+  void forgetNode(int n) {
+    dist[n] = double.infinity;
+    dist2[n] = double.infinity;
+    settled[n] = 0;
+  }
+
+  /// Every node the last search touched has been forgotten. One unit.
+  int forgotten() {
+    touched.clear();
+    _hs = 0;
+    done = false;
+    return 1;
+  }
+
+  void seed(int n, double d, int onLot) {
+    if (_offer(n, d, onLot)) _push(n, d, onLot);
+  }
+
+  /// A source on [onLot] reaches node [n] at [d]: true when that is one of
+  /// the node's two labels now — the nearest, or the nearest of another
+  /// lot than the nearest's.
+  bool _offer(int n, double d, int onLot) {
+    final k = settled[n];
+    if (k == 2) return false;
+    final d1 = dist[n];
+    if (d1 == double.infinity) {
+      touched.add(n);
+      dist[n] = d;
+      lot[n] = onLot;
+      return true;
+    }
+    if (lot[n] == onLot) {
+      // A settled label is final (every later offer is further anyway).
+      if (k > 0 || d >= d1) return false;
+      dist[n] = d;
+      return true;
+    }
+    final d2 = dist2[n];
+    final second = d2 != double.infinity && lot2[n] == onLot;
+    if (second && d >= d2) return false;
+    if (k == 0 && d < d1) {
+      // The new nearest: the old one is the other lot's now.
+      dist2[n] = d1;
+      lot2[n] = lot[n];
+      dist[n] = d;
+      lot[n] = onLot;
+      return true;
+    }
+    if (!second && d >= d2) return false;
+    dist2[n] = d;
+    lot2[n] = onLot;
+    return true;
+  }
+
+  /// Settle labels until the search is exhausted or [budget] units (pops
+  /// and relaxations) are spent. Returns the units.
+  int run(RoadGraph g, Float64List weight, int budget) {
+    var work = 0;
+    final outStart = g.outStart, outEdges = g.outEdges, to = g.edgeTo;
+    while (_hs > 0 && work < budget) {
+      final d = _hk[0];
+      final u = _hn[0];
+      final o = _ho[0];
+      _pop();
+      work++;
+      final k = settled[u];
+      if (k == 2) continue;
+      if (k == 0 && lot[u] == o && dist[u] == d) {
+        // The nearest label.
+      } else if (dist2[u] == d && lot2[u] == o && (k == 1 || dist[u] == d)) {
+        // The other lot's label — or, unsettled, a tie with the nearest,
+        // which it may as well be.
+        if (k == 0) {
+          dist2[u] = dist[u];
+          lot2[u] = lot[u];
+          dist[u] = d;
+          lot[u] = o;
+        }
+      } else {
+        // Stale: bettered since, or beaten to the node by two other lots.
+        continue;
+      }
+      settled[u] = k + 1;
+      for (var e = outStart[u]; e < outStart[u + 1]; e++) {
+        work++;
+        final edge = outEdges[e];
+        final v = to[edge];
+        final nd = d + weight[edge];
+        if (_offer(v, nd, o)) _push(v, nd, o);
+      }
+    }
+    if (_hs == 0) done = true;
+    return work;
+  }
+
+  void _push(int n, double k, int o) {
+    if (_hs == _hk.length) {
+      _hk = Float64List(_hk.length * 2)..setRange(0, _hs, _hk);
+      _hn = Int32List(_hn.length * 2)..setRange(0, _hs, _hn);
+      _ho = Int32List(_ho.length * 2)..setRange(0, _hs, _ho);
+    }
+    var i = _hs++;
+    while (i > 0) {
+      final p = (i - 1) >> 1;
+      if (_hk[p] <= k) break;
+      _hk[i] = _hk[p];
+      _hn[i] = _hn[p];
+      _ho[i] = _ho[p];
+      i = p;
+    }
+    _hk[i] = k;
+    _hn[i] = n;
+    _ho[i] = o;
+  }
+
+  void _pop() {
+    _hs--;
+    if (_hs == 0) return;
+    final k = _hk[_hs];
+    final n = _hn[_hs];
+    final o = _ho[_hs];
+    var i = 0;
+    while (true) {
+      var c = 2 * i + 1;
+      if (c >= _hs) break;
+      if (c + 1 < _hs && _hk[c + 1] < _hk[c]) c++;
+      if (_hk[c] >= k) break;
+      _hk[i] = _hk[c];
+      _hn[i] = _hn[c];
+      _ho[i] = _ho[c];
+      i = c;
+    }
+    _hk[i] = k;
+    _hn[i] = n;
+    _ho[i] = o;
   }
 }
