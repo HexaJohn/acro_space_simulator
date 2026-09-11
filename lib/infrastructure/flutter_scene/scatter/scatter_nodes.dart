@@ -147,6 +147,14 @@ class ScatterNodes {
   /// pre-edit field, so their results are dropped on arrival.
   final Set<_CellId> _stalePending = {};
 
+  /// Resident cells an edit or a new road made stale, still drawn until
+  /// their regeneration lands. Dropping them at once blinked the forest out:
+  /// a road re-scatters the whole colony, so every prop in view vanished for
+  /// the seconds regeneration took. Props the new ground now covers are
+  /// taken off a stale cell at once (see [_filterByMask]); the rest stand
+  /// until the fresh cell replaces them.
+  final Set<_CellId> _staleCells = {};
+
   /// This frame's wanted set; an arriving cell not in it is dropped rather
   /// than parked (regeneration is cheap and deterministic).
   Set<_CellId> _wantedNow = const {};
@@ -405,6 +413,7 @@ class ScatterNodes {
     for (final id in _cells.keys.toList()) {
       if (!wanted.contains(id)) {
         _cells.remove(id);
+        _staleCells.remove(id);
         _dirty = true;
       }
     }
@@ -427,7 +436,9 @@ class ScatterNodes {
     }
     final missing = [
       for (final id in wanted)
-        if (!_cells.containsKey(id) && !_pendingCells.contains(id)) id,
+        if ((!_cells.containsKey(id) || _staleCells.contains(id)) &&
+            !_pendingCells.contains(id))
+          id,
     ];
     if (missing.isNotEmpty && _pendingCells.length < cellBudgetPerFrame) {
       final distById = <_CellId, double>{
@@ -758,6 +769,7 @@ class ScatterNodes {
       if (_stalePending.remove(id)) return;
       if (!_wantedNow.contains(id)) return;
       _cells[id] = _CellData(instances);
+      _staleCells.remove(id);
       _dirty = true;
     }).catchError((Object e) {
       _pendingCells.remove(id);
@@ -785,11 +797,9 @@ class ScatterNodes {
             ...TerrainEdits.chunksTouchedBy(brush, level),
         },
     };
-    for (final id in _cells.keys.toList()) {
-      if (touched[id.cell.level]!.contains(id.cell)) {
-        _cells.remove(id);
-        _dirty = true;
-      }
+    for (final id in _cells.keys) {
+      // Still drawn until it regenerates (see [_staleCells]).
+      if (touched[id.cell.level]!.contains(id.cell)) _staleCells.add(id);
     }
     for (final id in _pendingCells) {
       if (touched[id.cell.level]!.contains(id.cell)) {
@@ -818,11 +828,31 @@ class ScatterNodes {
     }
 
     for (final id in _cells.keys.toList()) {
-      if (near(id.cell)) _cells.remove(id);
+      if (!near(id.cell)) continue;
+      // Still drawn until it regenerates (see [_staleCells]) — less the
+      // props the new road or lot now covers, which go now.
+      _staleCells.add(id);
+      _filterByMask(id);
     }
     for (final id in _pendingCells) {
       if (near(id.cell)) _stalePending.add(id);
     }
+  }
+
+  /// Take off a stale cell, at once, every prop the colony's current mask
+  /// covers — a tree standing in a road drawn this frame. The cell keeps
+  /// drawing the rest until its regeneration replaces it.
+  void _filterByMask(_CellId id) {
+    final mask = _mask;
+    final data = _cells[id];
+    if (mask == null || data == null) return;
+    final kept = [
+      for (final i in data.instances)
+        if (!mask.blocks(i.positionBF.normalized)) i
+    ];
+    if (kept.length == data.instances.length) return;
+    _cells[id] = _CellData(kept);
+    _dirty = true;
   }
 
   /// Rebuild the colony footprint from the frame if it has changed.
@@ -1056,6 +1086,7 @@ class ScatterNodes {
     // In-flight jobs drain on their own; the epoch bump drops their results.
     _genEpoch++;
     _stalePending.clear();
+    _staleCells.clear();
     _wantedCache.clear();
     _wantedNow = const {};
     // The mask belongs to the body that was being drawn. Left behind, its

@@ -566,6 +566,20 @@ class TerrainNodes {
   /// job and the whole mesh cache for an edit that touches a few chunks.
   final Set<ChunkKey> _staleInFlight = {};
 
+  /// Resident chunks meshed from the ground BEFORE an edit, kept on screen
+  /// until their re-mesh lands.
+  ///
+  /// A new brush used to detach every chunk it touched at once — and with
+  /// their ancestors long retired, nothing stood in: the whole footprint
+  /// dropped to the loading grid over the dark under-sphere for the second
+  /// or two the re-mesh took. Every road the city tool laid blacked out the
+  /// ground around it. A stale chunk is wrong by the edit — metres, inside a
+  /// road corridor — for that second; a hole is wrong by the planet. It
+  /// counts as missing to the submit loop (and is re-meshed directly, never
+  /// up the ladder), its arrival replaces it in the same frame, it never
+  /// feeds the mesh cache, and it leaves the moment nothing needs it.
+  final Set<ChunkKey> _editStale = {};
+
   /// Chunks that meshed to NO geometry (isosurface not in their shell —
   /// legitimate, e.g. below a sea floor). Remembered so they are not
   /// resubmitted every frame; cleared with the generation.
@@ -1028,6 +1042,7 @@ class TerrainNodes {
       }
       _clearBatches();
       _chunks.clear();
+      _editStale.clear();
       _ancestorRefCount.clear();
       _invalidateInFlight();
       _builtSkirtVoxels = skirtVoxels;
@@ -1166,8 +1181,8 @@ class TerrainNodes {
             final centre = k.centreDirection * brush.centreBF.length;
             if ((brush.centreBF - centre).length <=
                 reach + brush.lateralReachM) {
-              _detachVisual(k, _chunks.remove(k)!);
-              _bumpAncestorRefs(k, -1);
+              // Stays drawn until its re-mesh lands (see [_editStale]).
+              _editStale.add(k);
               break;
             }
           }
@@ -1202,11 +1217,9 @@ class TerrainNodes {
         // well be gone, so the attempt count starts again.
         _clippedRetries.removeWhere((k, _) => touches(k));
         _meshCache.removeWhere((k, _) => touches(k));
-        for (final k in _chunks.keys.toList()) {
-          if (touches(k)) {
-            _detachVisual(k, _chunks.remove(k)!);
-            _bumpAncestorRefs(k, -1);
-          }
+        for (final k in _chunks.keys) {
+          // Stays drawn until its re-mesh lands (see [_editStale]).
+          if (touches(k)) _editStale.add(k);
         }
       }
     }
@@ -1302,7 +1315,9 @@ class TerrainNodes {
       // less than a voxel, so the nearer one simply wins the depth test.
       final missingNow = <ChunkKey>{
         for (final k in wanted)
-          if (!_chunks.containsKey(k) && !_emptyChunks.contains(k)) k,
+          if ((!_chunks.containsKey(k) || _editStale.contains(k)) &&
+              !_emptyChunks.contains(k))
+            k,
       };
       // The NEAREST resident ancestor of each missing chunk is its coarse
       // stand-in for a pending split — and ONLY the nearest. Protecting every
@@ -1326,6 +1341,9 @@ class TerrainNodes {
       // the truly bare subset).
       final stillLoading = <ChunkKey>{};
       for (final m in missingNow) {
+        // A stale resident covers its own ground until its re-mesh lands:
+        // no loading grid over it, no coverage root under it.
+        if (_editStale.contains(m)) continue;
         ChunkKey? nearest;
         for (var a = m.parent; a != null; a = a.parent) {
           if (_chunks.containsKey(a)) {
@@ -1400,7 +1418,13 @@ class TerrainNodes {
         // commit 294a84a removed, snuck back in through the side door.
         final c = _chunks[k]!;
         final invisible = _frame - c.lastVisibleFrame > retireGraceFrames;
-        if (invisible && !standsIn(k)) {
+        // A stale chunk no longer drawn for its own sake — the edit forced
+        // finer ground there, or its re-mesh came back empty — leaves as
+        // soon as nothing needs it to stand in, with no grace: it is the
+        // ground from before the edit.
+        final staleDone = _editStale.contains(k) &&
+            (!visibleSet.contains(k) || _emptyChunks.contains(k));
+        if ((invisible || staleDone) && !standsIn(k)) {
           _removeResident(k);
         }
       }
@@ -1469,7 +1493,7 @@ class TerrainNodes {
         _dropStaleGen++;
         continue;
       }
-      if (_chunks.containsKey(a.key)) continue;
+      if (_chunks.containsKey(a.key) && !_editStale.contains(a.key)) continue;
       if (!admitsArrival(a.key,
           wanted: wanted,
           bareAncestors: bareAncestors,
@@ -1492,6 +1516,9 @@ class TerrainNodes {
         continue;
       }
       _ladderRungs.remove(a.key);
+      // The re-mesh of a chunk an edit touched: the stale one standing in
+      // leaves in the frame its replacement arrives.
+      if (_editStale.contains(a.key)) _removeResident(a.key);
       if (profSw != null) {
         final t0 = profSw.elapsedMicroseconds;
         _addChunk(a.key, a.cell, shader as gpu.Shader, a.resolution);
@@ -1560,7 +1587,7 @@ class TerrainNodes {
     final missing = [
       for (final k in visible)
         if (wanted.contains(k) &&
-            !_chunks.containsKey(k) &&
+            (!_chunks.containsKey(k) || _editStale.contains(k)) &&
             !_pending.contains(k) &&
             !held.contains(k) &&
             !_emptyChunks.contains(k))
@@ -1816,6 +1843,17 @@ class TerrainNodes {
   /// by the coverage-root pass and the `missing` pass, both run in full
   /// every frame in [update].
   void _tryAdvanceMissing(ChunkKey want, TerrainField field, int levelStep) {
+    // A chunk an edit touched is still drawn, at the level it is wanted at:
+    // re-mesh THAT, directly. The ladder below climbs from the deepest
+    // resident ANCESTOR, which for ground refined long ago is none — it
+    // would re-stream the region from a face root while the stale chunk
+    // waited, and the pre-edit ground would linger for every rung.
+    if (_editStale.contains(want)) {
+      if (_pending.length >= frameBudgets.meshJobsInFlight) return;
+      if (_pending.contains(want)) return;
+      _submit(field, want, _resolutionFor(want, field.radius));
+      return;
+    }
     // --- Step the level, do not leap it -----------------------------------
     //
     // Coverage roots are level 0 and targets are often level 14+, so the
@@ -2315,6 +2353,7 @@ class TerrainNodes {
   void _removeResident(ChunkKey key) {
     final c = _chunks.remove(key);
     if (c == null) return;
+    final stale = _editStale.remove(key);
     _bumpAncestorRefs(key, -1);
     // Cover under every ancestor just shrank: a stand-in retired as fully
     // covered may genuinely be needed there again (see [_fullyCovered]).
@@ -2324,7 +2363,8 @@ class TerrainNodes {
     _detachVisual(key, c);
     _meshCache.remove(key); // re-insert -> newest LRU position
     // The FULL mesh — masks are runtime state — with its meshed resolution.
-    _meshCache[key] = (c.cell, c.resolution);
+    // Never a stale one: it was meshed from the ground before an edit.
+    if (!stale) _meshCache[key] = (c.cell, c.resolution);
     while (_meshCache.length > meshCacheSize) {
       _meshCache.remove(_meshCache.keys.first);
     }
@@ -2372,6 +2412,7 @@ class TerrainNodes {
     }
     _clearBatches();
     _chunks.clear();
+    _editStale.clear();
     _ancestorRefCount.clear();
     _clearPlaceholders();
     _invalidateInFlight();
