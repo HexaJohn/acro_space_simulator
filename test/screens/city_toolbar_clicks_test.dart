@@ -17,6 +17,7 @@ import 'package:acro_space_simulator/domain/universe/real_solar_system.dart';
 import 'package:acro_space_simulator/infrastructure/flutter/sim_view_control.dart';
 import 'package:acro_space_simulator/infrastructure/flutter/simulation_view.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_nodes.dart';
+import 'package:acro_space_simulator/infrastructure/flutter_scene/render_backend.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -26,7 +27,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
 
-  Future<void> pumpCity(WidgetTester t) async {
+  Future<void> pumpCity(WidgetTester t,
+      {RenderBackend backend = RenderBackend.software}) async {
     t.view.physicalSize = const Size(1600, 1000);
     t.view.devicePixelRatio = 1.0;
     addTearDown(t.view.reset);
@@ -40,6 +42,7 @@ void main() {
         injectedCity: colony,
         cityMode: true,
         spawnDemoOrbiter: false,
+        initialBackend: backend,
       ),
     ));
     await t.pump(const Duration(milliseconds: 16));
@@ -113,9 +116,19 @@ void main() {
 
   testWidgets('G steps out onto the camera pivot, not under the boom',
       (t) async {
-    await pumpCity(t);
-    // At open the pivot IS the colony site; the eye hangs a kilometre and a
-    // half away on the boom. Walking must start at the pivot.
+    // The 3D backend, because the bug lived there: only with a scene
+    // snapshot does the flight view's focus resolve to the PLANET'S CENTRE,
+    // and walking off "the focus plus the eye offset" then lands wherever the
+    // camera happens to be pointing, from the middle of the Earth.
+    await pumpCity(t, backend: RenderBackend.flutterScene);
+    // At open the pivot IS the colony site; the eye hangs on the boom. The
+    // first version of this test ran in the software view's ORTHO camera,
+    // where the eye sits on the pivot — so it passed while G was still
+    // landing the walker under the eye. Perspective, with a real boom, is
+    // the camera the mode actually plays in.
+    SimViewControl.instance.setPerspective?.call(true);
+    SimViewControl.instance.zoom?.call(rangeM: 1800);
+    await t.pump();
     await t.sendKeyEvent(LogicalKeyboardKey.keyG);
     await t.pump();
     final s = status();

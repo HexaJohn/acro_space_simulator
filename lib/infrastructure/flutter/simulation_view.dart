@@ -770,6 +770,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   /// anchor) and DROPS the anchor onto the ground beneath wherever the camera
   /// is looking from — so it doubles as "put me on the surface here".
   void _toggleWalk() {
+    // Read BEFORE the flip: `_cityCamera` is false whenever walking, so asked
+    // after `_walkMode` turns on it always said no, and the city branch below
+    // never ran.
+    final fromCityCamera = _cityCamera;
     setState(() {
       _walkMode = !_walkMode;
       if (_walkMode) {
@@ -777,13 +781,21 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         // AT: a body lock focuses the body's CENTRE, so anchoring on the focus
         // buried the walker at the core of the planet. The EYE is already
         // outside, above the ground it is looking down at.
-        final eyeWorld = _currentFocusWorld() + _camera.eyeOffset;
+        //
+        // In the freecam the focus is the freecam ANCHOR. `_currentFocusWorld`
+        // is the toggle-INTO-freecam helper and answers with the locked body's
+        // CENTRE whenever a body is focused and a frame exists — so "focus plus
+        // eye offset" put the eye a boom-length from the middle of the planet,
+        // and the walker came down wherever the camera happened to point:
+        // measured at 6,228 km from the colony it was standing over.
+        final focusNow = _freecam ? _freecamWorld : _currentFocusWorld();
+        final eyeWorld = focusNow + _camera.eyeOffset;
         // ...except under the CITY turntable, whose focus is a pivot ON the
         // ground — the point the player has been looking at and steering by.
         // That is where "walk the streets" means: step out onto the spot the
         // camera circles, not onto the patch of field a kilometre back under
         // the boom.
-        final cityPivotBF = _cityCamera ? _freecamRelLocal : null;
+        final cityPivotBF = fromCityCamera ? _freecamRelLocal : null;
         _rangeBeforeWalk = _range;
         _viewBeforeWalk = _view;
         // A walker's horizon has to be level, which means the camera gimbal
