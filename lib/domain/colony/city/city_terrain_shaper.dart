@@ -65,9 +65,11 @@ class CityTerrainShaper {
   ///
   /// The caller records each returned brush and adds its key to
   /// [CitySim.shapedTerrain]. The one exception is a raised or sunk road's
-  /// stretch on piers or in a tunnel, which is shaped by NOT touching the
-  /// ground: its key is added to [CitySim.shapedTerrain] here, with no
-  /// brush to record, so it is settled once like every other segment.
+  /// segment that is not simply one graded piece: on piers or in a tunnel
+  /// it is shaped by NOT touching the ground, and where it runs onto a
+  /// bridge or into a portal it is cut or filled piece by piece. Its own
+  /// key is added to [CitySim.shapedTerrain] here, with no brush to record
+  /// under it, so it is settled once like every other segment.
   List<({String key, TerrainBrush brush})> pending(
     CitySim city, {
     required double bodyRadiusM,
@@ -219,12 +221,22 @@ class CityTerrainShaper {
   /// Graded to the DECK, not to the ground: each 24 m segment is cut or
   /// filled to the deck's own straight grade line, so the road that looks
   /// level on its embankment is the road the ground was shaped to. Where
-  /// the segment's midpoint stands on piers or runs in a tunnel nothing is
-  /// emitted — a cut-and-fill is a radial prism, which under a bridge
-  /// would raise an earth wall to the deck and over a tunnel would open a
-  /// trench to the sky — but its key is recorded all the same, straight
-  /// into [CitySim.shapedTerrain], so the stretch is never asked about
-  /// again (the caller only records the keys it gets a brush for).
+  /// it stands on piers or runs in a tunnel nothing is emitted — a
+  /// cut-and-fill is a radial prism, which under a bridge would raise an
+  /// earth wall to the deck and over a tunnel would open a trench to the
+  /// sky.
+  ///
+  /// Clipped, not classified: the survey cuts its structure and tunnel
+  /// ranges every 8 m, anywhere along a segment, and judged by its midpoint
+  /// a segment straddling a bridge's end either left up to 12 m of graded
+  /// deck unfilled (a slab floating over the hillside, too low for piers)
+  /// or ran its prism 12 m under the bridge. So only a segment's GRADED
+  /// pieces ([gradedPieces]) are cut or filled, each to the deck between
+  /// its own ends. A segment that is one piece keeps its key; one that
+  /// splits keys its pieces `'<key>:<j>'` for the caller to record. Either
+  /// way nothing is asked about again: a segment with no piece, or several,
+  /// has its own key recorded here, straight into [CitySim.shapedTerrain]
+  /// (the caller only records the keys it gets a brush for).
   void _deckCorridor(
     CitySim city,
     RoadSpline road,
@@ -250,35 +262,70 @@ class CityTerrainShaper {
       final key = 'road:${road.id}:$hw:$i';
       if (city.shapedTerrain.contains(key)) continue;
       final sA = cum[i - 1] * scale, sB = cum[i] * scale;
-      final sMid = (sA + sB) / 2;
-      if (deck.onStructureAt(sMid) || deck.inTunnelAt(sMid)) {
-        city.shapedTerrain.add(key);
-        continue;
-      }
+      final pieces = gradedPieces(deck, sA, sB);
+      // Settled here unless it is one piece, whose brush the caller
+      // records under this same key.
+      if (pieces.length != 1) city.shapedTerrain.add(key);
       final a = pts[i - 1], b = pts[i];
-      final datumA = bodyRadiusM + deck.heightAt(sA, lengthM);
-      final datumB = bodyRadiusM + deck.heightAt(sB, lengthM);
-      final fill = math.max(
-          (datumA - groundUnder(a)).abs(), (datumB - groundUnder(b)).abs());
-      out.add((
-        key: key,
-        brush: TerrainBrush.cutFill(
-          // Anchored on the deck, which is within the bound of the ground
-          // because the bound reaches past the fill.
-          startBF: dirOf(a) * datumA,
-          endBF: dirOf(b) * datumB,
-          radiusM: road.halfWidth,
-          datumRadiusM: datumA,
-          datumRadiusEndM: datumB,
-          // An embankment's side eases out over half again its height: a
-          // six-metre falloff under a twelve-metre fill is a cliff.
-          falloffM: math.max(roadFalloffM, fill * 1.5),
-          maxCutM: math.max(40.0, fill + deckCutMarginM),
-          tick: tick,
-          minVoxelM: voxelM,
-        ),
-      ));
+      // A cut at a range's end lands on the chord between the samples, at
+      // its share of the segment's arc. The segment's own ends are the
+      // samples themselves, so an unclipped segment is the brush it was.
+      Vec2 at(double s) => s <= sA
+          ? a
+          : s >= sB
+              ? b
+              : a + (b - a) * ((s - sA) / (sB - sA));
+      for (var j = 0; j < pieces.length; j++) {
+        final (g0, g1) = pieces[j];
+        final pa = at(g0), pb = at(g1);
+        final datumA = bodyRadiusM + deck.heightAt(g0, lengthM);
+        final datumB = bodyRadiusM + deck.heightAt(g1, lengthM);
+        final fill = math.max((datumA - groundUnder(pa)).abs(),
+            (datumB - groundUnder(pb)).abs());
+        out.add((
+          key: pieces.length == 1 ? key : '$key:$j',
+          brush: TerrainBrush.cutFill(
+            // Anchored on the deck, which is within the bound of the ground
+            // because the bound reaches past the fill.
+            startBF: dirOf(pa) * datumA,
+            endBF: dirOf(pb) * datumB,
+            radiusM: road.halfWidth,
+            datumRadiusM: datumA,
+            datumRadiusEndM: datumB,
+            // An embankment's side eases out over half again its height: a
+            // six-metre falloff under a twelve-metre fill is a cliff.
+            falloffM: math.max(roadFalloffM, fill * 1.5),
+            maxCutM: math.max(40.0, fill + deckCutMarginM),
+            tick: tick,
+            minVoxelM: voxelM,
+          ),
+        ));
+      }
     }
+  }
+
+  /// A graded piece shorter than this is left to its neighbours' falloff:
+  /// a brush a metre long is an edit to the ground that shapes nothing.
+  static const double minPieceM = 1;
+
+  /// What is left of the arc range [sA]..[sB] of [deck]'s road once its
+  /// stretches on piers and underground are cut out: the pieces that run
+  /// near enough the ground to be cut or filled to it, in order, each
+  /// longer than [minPieceM].
+  static List<(double, double)> gradedPieces(
+      RoadDeck deck, double sA, double sB) {
+    final off = [
+      for (final r in [...deck.structures, ...deck.tunnels])
+        if (r.$2 > sA && r.$1 < sB) r,
+    ]..sort((x, y) => x.$1.compareTo(y.$1));
+    final out = <(double, double)>[];
+    var from = sA;
+    for (final (a, b) in off) {
+      if (a - from > minPieceM) out.add((from, a));
+      if (b > from) from = b;
+    }
+    if (sB - from > minPieceM) out.add((from, sB));
+    return out;
   }
 
   /// Peak-to-trough ground relief across a parcel, sampled at its corners and
