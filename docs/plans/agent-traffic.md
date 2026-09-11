@@ -1,15 +1,16 @@
 # Agent-based traffic (Cities: Skylines style) — design
 
-Status: design, revision 2, branch feat/agent-traffic, 2026-09-11
+Status: design, revision 3, branch feat/agent-traffic, 2026-09-11
 
 This document is self-contained. An implementer needs only this and the code.
 
-- **Baseline.** Every E-hook (§1.2), and every line cited in a file that changed after the worktree's base, is cited against `dev` at **`62a3a55`**. The worktree `.claude/worktrees/agent-traffic` sits at `ac9527b`, 11 commits behind.
-  - Those commits add the road agent's directed `RoadGraph` (road_graph.dart) and its routed traffic model (`CityTrafficModel` and `CityRoadTraffic`, road_traffic_model.dart). They wire that model into `CitySim.advance`, add road noise and land value, and give the tiles and the graph one junction warrant (`junctionPlanForNetwork`).
-  - They rewrite `city_sim.dart`, `city_layout.dart`, `world_snapshot.dart`, `city_nodes.dart`, `city_traffic.dart`, `city_tile_mesher.dart` and `road_mesher.dart`.
-  - Files they did not touch read the same in both trees. Among them: `parcel.dart`, `road_catalog.dart`, `road_elevation.dart`, `spatial_index.dart`, `city_building_spec.dart`, `city_generator.dart`, `city_starter_kit.dart`, `simulation_view.dart`, `simulation_view_colony.dart`, `scene_sync.dart` and `main_city_game_dev.dart`.
-  - **The worktree is rebased onto `dev` before any slice-1 code is written.**
-- **Lineage of the design.** The skeleton is the panel's "integration" design. Grafts come from the "fidelity" and "scale" designs, and every fatal flaw the judges listed has been fixed. §0.3 records each decision with a one-line reason. Revision 2 answers a critic's review and the landing of the road agent's routed model; the **Revision log** at the end lists every change.
+- **Baseline.** Every E-hook (§1.2), and every line cited in a file that changed after `62a3a55`, is cited against `dev` at **`c672eb3`** (revision 3). Its last two commits touch no file this document cites, so every anchor reads the same at `721e585`.
+  - Revision 2's baseline, `62a3a55`, had added the road agent's directed `RoadGraph` (road_graph.dart) and its routed traffic model (`CityTrafficModel` and `CityRoadTraffic`, road_traffic_model.dart). It wired that model into `CitySim.advance`, added road noise and land value, and gave the tiles and the graph one junction warrant (`junctionPlanForNetwork`).
+  - Since then dev has added the traffic readout seam (`CityTrafficReadout`, f66e0d8 and 38e05fe), fire reach and real deliveries (1d2e78d, e608e35), a graph that clusters ends by the layout's level rule and plans junctions over drawn legs (229cb9c to 50c8b4e), lost lots torn down on a re-plat (08f8cf3), and the road tool's editor (ec9e5e9, b7e62e7).
+  - Those commits rewrite `road_graph.dart`, `road_traffic_model.dart`, `simulation_view_colony.dart`, `city_edit_overlay.dart` and `city_tile_bucketing.dart`. They move lines in `city_sim.dart` (by up to 33 past line 3345), `city_layout.dart`, `parcel.dart`, `road_junction.dart`, `road_mesher.dart`, `city_tile_mesher.dart`, `city_traffic.dart`, `city_nodes.dart`, `simulation_view.dart`, `city_game_hud.dart`, `sim_view_control.dart`, `main_city_game_dev.dart` and `tool/drive_city_game.dart`.
+  - Files dev has not touched since `62a3a55` read the same at both. Among them: `road_catalog.dart`, `road_elevation.dart`, `spatial_index.dart`, `city_building_spec.dart`, `city_generator.dart`, `city_starter_kit.dart`, `world_snapshot.dart`, `vehicle_meshes.dart` and `scene_sync.dart`.
+  - The worktree branch holds this design (`5476ca9`) and slices 1a and 1b (`f634f4b`, `4b114f8`) on dev's `cf36b49`, 24 commits behind `c672eb3`. **It is rebased onto `dev` again before slice 1 merges.**
+- **Lineage of the design.** The skeleton is the panel's "integration" design. Grafts come from the "fidelity" and "scale" designs, and every fatal flaw the judges listed has been fixed. §0.3 records each decision with a one-line reason. Revision 2 answers a critic's review and the landing of the road agent's routed model. Revision 3 follows dev to `c672eb3`: the traffic readout seam, fire and delivery reach, the graph's level rule and drawn-leg plans, and the landed road tool. The **Revision log** at the end lists every change.
 - **Paths.** `lib/` and `test/` are the repo's own. "The road agent" is the other agent working on road placement on `dev`.
 
 ---
@@ -19,9 +20,9 @@ This document is self-contained. An implementer needs only this and the code.
 ### 0.1 The architecture in fifteen lines
 
 1. A new pure-Dart package, `lib/domain/colony/city/traffic/`, holds the whole simulation behind one facade, `CityAgents`. `CitySim` owns one, as `CitySim.agents`. The names `traffic` (the grid's per-cell map) and `roadTraffic` (the road agent's routed model, city_sim.dart:3343) are already taken.
-2. **One tick hook.** In agent colonies, `CitySim.advance` calls `agents.advance(dt)` in place of `advanceParcelTraffic()` (city_sim.dart:1677). The road agent's `roadTraffic.advance(dt)` (1675) keeps running beside it. Every other `CitySim` edit is a guarded one- or two-line hook (§1.2).
+2. **One tick hook, one readout.** In agent colonies, `CitySim.advance` calls `agents.advance(dt)` right after the road agent's `roadTraffic.advance(dt)` (city_sim.dart:1675). Everything that reads traffic reads `CitySim.trafficReadout` (3352), which E37 points at the agents' `CityTrafficReadout`, so `advanceParcelTraffic()` (1677) stays as it is and takes their measured congestion. In slice 1 the agents answer congestion, volumes and routes, and forward reach, noise, land value and the tax factor to the routed model. From slice 2 they answer everything, and `roadTraffic.advance` no longer runs in agent colonies (§12.3, D46). Every other `CitySim` edit is a guarded one- or two-line hook (§1.2).
 3. **The lane graph is derived from the road agent's `RoadGraph`** (`CitySim.roadGraph`, city_sim.dart:3344).
-   - We use their nodes (road ends clustered in plan and in height), pieces, directed edges, junction plans and lot access as they are, and add lanes, connectors, conflicts and stub sinks.
+   - We use their nodes (road ends clustered in plan and by the layout's grade-separation rule), pieces, directed edges, junction plans (read over the legs the tiles draw) and lot access as they are, and add lanes, connectors, conflicts and stub sinks. Alleys and paths still route; outside the plan, they give way to the drawn legs (D48).
    - We rebuild when the `RoadGraph` object changes. That happens on `roadsRevision`, which moves with every road edit and every junction override. A graph that was only patched (overrides or road names) needs a refresh of node controls, nothing more.
 4. **Routing happens at spawn only.** It is an edge-based A* whose cost is seconds:
    - length ÷ limit × road-type weight;
@@ -81,11 +82,11 @@ This document is self-contained. An implementer needs only this and the code.
 |---|---|---|---|
 | D1 | Base | Integration's structure, edit list and coordination contract | The only complete design, and the lowest merge risk |
 | D2 | Facade name | `CitySim.agents` / `CityAgents` | `traffic` and `roadTraffic` are already taken on `CitySim` |
-| D3 | Graph source and revision | The lane graph is **derived from `CitySim.roadGraph`**, the road agent's `RoadGraph`, and keyed on that object's identity. `CitySim.roadsRevision` (city_sim.dart:425) moves on every road mutation (`CityLayout.revision`, city_layout.dart:125; bumped at 171, 615, 772, 783, 854, 867, 882 and 1012) and on every junction override (city_sim.dart:4004). | One clustering of one network, so our routes, their fire reach and their delivery reach agree about what connects. No duplicate build, and no counter of our own. |
+| D3 | Graph source and revision | The lane graph is **derived from `CitySim.roadGraph`**, the road agent's `RoadGraph`, and keyed on that object's identity. `CitySim.roadsRevision` (city_sim.dart:425) moves on every road mutation (`CityLayout.revision`, city_layout.dart:125; bumped at 171, 643, 800, 811, 882, 895, 910 and 1040) and on every junction override (city_sim.dart:4035). | One clustering of one network, so our routes, their fire reach and their delivery reach agree about what connects. No duplicate build, and no counter of our own. |
 | D4 | Junction-override key | **Removed.** Overrides reach us through the graph's own node plans (`RoadGraph.withOverrides`). | `setJunctionOverride` already moves `roadsRevision` |
 | D5 | Lane connectors | Interval-overlap turn bands; straight from every lane that has an aligned out-lane; turns that may land in any out-lane; median-aligned continuations; **adjacent-lane straight connectors at real junctions** (rule 5) | New trips are lane-feasible by construction, so there is no A* retry loop. Rule 5 is the spec's "change lanes at nodes". |
 | D6 | Kerb lane at the destination | The last connector fixes it. The destination lane set is {kerb lane}, or {innermost lane} for a far-side driveway. | There is no mid-segment "move to lane 0 for the last 60 m" |
-| D7 | Far-side access | Exactly where `RoadGraph`'s lot access allows it (`lotDirs`, road_graph.dart:649-660): two-way roads with one lane each way. On two-way roads with two or more lanes each way, own side only. On one-way roads, either kerb, from the travel direction. Kerb **parking** is on the right kerb of travel, and on both kerbs of a one-way road. | Our reachability must match the network's. Cars never cross a median or a four-lane road mid-block. |
+| D7 | Far-side access | Exactly where `RoadGraph`'s lot access allows it (`lotDirs`, road_graph.dart:685-696): two-way roads with one lane each way. On two-way roads with two or more lanes each way, own side only. On one-way roads, either kerb, from the travel direction. Kerb **parking** is on the right kerb of travel, and on both kerbs of a one-way road. | Our reachability must match the network's. Cars never cross a median or a four-lane road mid-block. |
 | D8 | Sub-step | h = 0.2 s on an integer-µs accumulator | Half the 25× cost of 0.1 s, and any partition of dt gives an identical sub-step sequence |
 | D9 | Degradation | None driven by wall-clock time. Shedding uses a vehicle cap, a path-queue cap and the frame hold (D35), all counted in agents, expansions or sub-steps. Deferred spawns wait at their origin. Milliseconds are only reported and fed to `FrameBudget`. | A time-driven ladder breaks determinism |
 | D10 | Over-capacity trips | Deferred: the citizen waits at the origin. No "virtual" teleport trips. | Every trip is an individual entity |
@@ -100,8 +101,8 @@ This document is self-contained. An implementer needs only this and the code.
 | D19 | Render geometry | Per-edge polylines are **sliced from the same capture's `RoadSnapshot.points`**, which the road agent already flips for reversed roads (world_snapshot.dart:2134-2158). They are cached per (graph object, `groundCacheStamp`). There is no second drape. | Cars sit exactly on the paint, with zero extra ground reads |
 | D20 | Height | Deck roads use `RoadSnapshot.lifts`; draped roads with bridges use the cosmetic pass's bridge-lift term (city_traffic.dart:257). Both add the ribbon lift. | One height reference per road, never counted twice |
 | D21 | Worker isolate | Slice 11, lock-step. `cityClockHeldS` holds the economy's dt until the worker confirms. A free-run mode exists for development only and is declared non-deterministic. | A late reply would otherwise feed stale state or stall ambiguously |
-| D22 | Tools and overlays | Our own `TrafficToolController` and `TrafficOverlayState`. No edits to `city_edit_overlay.dart`, `road_mesher.dart`, `road_overlay_state.dart` or `road_overlay_nodes.dart`. **One** traffic view per colony, shared with the road agent's Traffic Routes view (C8). | Those files are the road agent's, and two views of one question would disagree |
-| D23 | Baked signal lamps | A coordination request (C3). Until it lands, lamps are drawn twice. The baked ones switch only by epoch parity at mesh time (road_mesher.dart:1394-1398). | We don't edit the mesher |
+| D22 | Tools and overlays | Our own `TrafficToolController` and `TrafficOverlayState`. No edits to `city_edit_overlay.dart`, the `road_tool_*.dart` files, `road_mesher.dart`, `road_overlay_state.dart` or `road_overlay_nodes.dart`. The road agent's Routes view reads `CitySim.trafficReadout`, so in an agent colony it draws the agents' routes; ours is the lane-speed view and the route inspector (C8, resolved). | Those files are the road agent's, and one question gets one answer: their view asks the readout, and the agents answer it |
+| D23 | Baked signal lamps | A coordination request (C3). Until it lands, lamps are drawn twice. The baked ones switch only by epoch parity at mesh time (road_mesher.dart:1431-1435). | We don't edit the mesher |
 | D24 | Exposure | In slices 1–10, agents are enabled only for City Builder colonies, through `CityStarterKit.found(agentTraffic: true)`. **Slice 11 turns them on in every ticking colony**, behind the topology audit and the perf gates. The enabled flag persists from slice 1 (E15/E16), and the lot-rename hooks land in slice 1 (E12–E14). | "Re-plan only when impossible" must hold the first time the player draws a road or saves, and the spec rules out an abstract flow number anywhere |
 | D25 | Outside sinks | One virtual 2,000 m edge pair per stub, with a U-turn at its own sink. The sink sits at `stub.at + heading × 2000 m`. No shared sink. | A shared sink would let through trips bypass the town; a sink position keeps the heuristic admissible |
 | D26 | Bus-line legs | **Routed once at line creation, remapped on every graph revision, and a leg is re-routed only when its remap fails.** Stops re-resolve each revision: an edge within 8 m, heading within 45°, stop on the right-hand side. | Lines follow the same locked-route rule as cars |
@@ -121,9 +122,12 @@ This document is self-contained. An implementer needs only this and the code.
 | D40 | Rail and the L | In scope, as slice 9b: trains as agents on rail edges, stations as stops, rail in mode choice. Freight rail sits behind a knob. | Decision 3: every mode is in scope |
 | D41 | Mail and goods | A direct happiness drag (E34), not a leisure rewrite | `serviceCoverage` takes the minimum of clamped ratios (city_sim.dart:2820-2829), which hides both |
 | D42 | Layering | The domain publishes `AgentKind` plus an opaque variant byte; the `VehicleKind` mapping is the renderer's | The domain may not import infrastructure (source_hygiene_test.dart:183-190) |
-| D43 | Beside the routed model | In agent colonies the agents own congestion, commute, safety, health and, under the fire flag, fire. The road agent's model keeps noise, land value and delivery reach until its volume seam lands (C7). | The two models must never both write one scalar |
+| D43 | Beside the routed model | **Superseded by D46 (revision 3).** Was: the agents own congestion, commute, safety, health and fire, and the routed model keeps noise, land value and delivery reach until a volume seam lands (C7). | The two models must never both write one scalar. D46 keeps that rule and needs no seam. |
 | D44 | Tapers | No lane cut. A tapered end keeps its lanes, and the drop or add happens at the seam's continuation connectors. Rendering scales lanes laterally over the taper. | A cut at the taper could leave an edge with no lane at all |
 | D45 | Where agents are drawn | A `part` file of `city_nodes.dart` with its own slots, run outside the cosmetic `traffic` toggle. The cosmetic road-car cap is zeroed in `_syncTraffic`'s cascade, before `begin`. | Four one-line hunks in a shared file, and no rewrite of its `place` closure |
+| D46 | The readout seam | `CityAgents.readout` is an `AgentTrafficReadout implements CityTrafficReadout` (traffic_readout.dart:49-105), and E37 makes `CitySim.trafficReadout` return it in agent colonies. **Slice 1:** the agents answer `hasRun`, `peakCongestion`, `averageCongestion`, `congestionOf` and `volumeOf` (measured from speeds and flows), `routesThrough` (live vehicles' locked routes) and `passes`. `serviceReach`, `fireReach`, `deliveryReach`, `noiseOf`, `landValueOf`, `averageLandValue` and `taxLandValueFactor` are forwarded to `city.roadTraffic`, which keeps advancing. **Slice 2:** the agents answer all of them, and `roadTraffic.advance` is skipped in agent colonies (E3a). `advanceParcelTraffic` is kept unchanged. | Every consumer already reads the seam (the tax line, the delivery and noise gates, `advanceParcelTraffic`, lot fires, the road tool's Routes view), so none changes, and each question has exactly one answerer |
+| D47 | The readout's contract | Answers are the last **complete** picture. Before one they punish nothing: `hasRun` false, congestion 0, every lot reached, noise 0, a tax factor of exactly 1. `passes` is 0 before the first picture, never goes back, and moves whenever any answer may have changed. `fireReach` counts only stations with safety cover (`TrafficRole.fightsFires`, road_traffic_model.dart:149-152), so a clinic's ambulance is no fire cover. `deliveryReach` never counts a lot's own goods, its own lorries turning at the next node included. | The road agent's rules (traffic_readout.dart:15-17, 54-57 and 77-91; 1d2e78d, e608e35, 38e05fe), and their views key what they drew on `passes` |
+| D48 | Graph levels and junction plans | We take `RoadGraph`'s clustering as it is. Ends meet by `CityLayout.levelsSeparated`: two decks meet unless 4.5 m or more apart, and a deck meets the ground unless it is on piers or in a tunnel there. A node's plan is read over its **drawn** legs (`RoadClass.joinsJunctions`), with `stopLegs` numbered back into the full leg list. The arbiter reads `RoadNode.plan` as it is. A leg outside the plan (an alley or a path) gives way to every drawn leg; no second plan is computed. | The graph joins what the layout cut and the tiles drew (229cb9c), so a stop the player sees is a stop the agents make, and an alley stays a kerb cut |
 
 ---
 
@@ -174,9 +178,11 @@ This document is self-contained. An implementer needs only this and the code.
 | `D/rail_transit.dart` | domain | Slice 9b: rail and L lines, trains, block signalling, station queues; optional freight rail |
 | `D/agent_frame.dart` | domain | `AgentFrame` and `PedFrame` columns, the triple-buffer `AgentFrameBuilder`, `TrafficNetColumns` (heads, stops, stubs per revision) |
 | `D/traffic_stats.dart` | domain | Rolling statistics read by `CitySim`, the HUD and the development hooks |
+| `D/agent_traffic_readout.dart` | domain | `AgentTrafficReadout implements CityTrafficReadout` (traffic_readout.dart:49-105; D46, D47): measured congestion and volumes, live routes as `TripRoute`s, and `passes`. In slice 1 it forwards reach, noise, land value and the tax factor to `city.roadTraffic`. From slice 2 it answers them from `agent_reach.dart` and a noise pass on `RoadNoiseSampler` (road_noise.dart:110-136). |
+| `D/agent_reach.dart` | domain | Slice 2: the reach fields behind the readout. Bounded multi-source searches over directed edges: from every station that sends vehicles (service), from stations with safety cover only (fire), and from goods sources, never the lot's own (delivery). |
 | `D/traffic_metrics.dart` | domain | Wall-clock timings for **reporting only**. The only traffic file allowed to use `Stopwatch`. |
 | `D/agents_codec.dart` | domain | `toJson` / `restore` for the `'agents'` save block |
-| `D/city_agents.dart` | domain | The `CityAgents` facade. Holds `advance`, the frame hold (`holdTick`, `endFrame`), the edit and rename hooks, `ownsSpec`, `serves`, the derived scalars, `routesThrough(roadId)` for the shared traffic view and `describe(handle)`. Its constructor allocates nothing; the tables are built when `enabled` turns on. |
+| `D/city_agents.dart` | domain | The `CityAgents` facade. Holds `advance`, the frame hold (`holdTick`, `endFrame`), the edit and rename hooks, `ownsSpec`, `serves`, the derived scalars, `readout` (the colony's `CityTrafficReadout`, D46) and `describe(handle)`. Its constructor allocates nothing; the tables are built when `enabled` turns on. |
 | `D/agent_scheduler.dart`, `D/agent_scheduler_sync.dart`, `D/agent_scheduler_isolate.dart` | domain | Slice 11: the scheduler seam, chosen by conditional import on `dart.library.isolate`, following mesh_scheduler.dart:24-31 |
 | `lib/application/snapshot/city_traffic_frame.dart` | application | `CityTrafficFrame` and `TrafficGeometry` (the wire types) |
 | `lib/application/snapshot/traffic_capture.dart` | application | `TrafficCapture.frameFor(city, bodyId, roads)`: per-edge geometry sliced from this colony's `RoadSnapshot`s in the same capture, cached per (graph object, `groundCacheStamp`) in an `Expando<CitySim>`; everything else passed by reference |
@@ -190,15 +196,15 @@ This document is self-contained. An implementer needs only this and the code.
 | `lib/infrastructure/flutter/screens/city_traffic_panels.dart` | infrastructure | Traffic, Services and Transit drawers; the vehicle inspector card; the extra rows on the site sheet |
 | `test/traffic/**` | test | Fixtures, unit, property, scenario, determinism and benchmark tests (§17) |
 
-### 1.2 Edits to existing files (all of them), cited against `dev` at `62a3a55`
+### 1.2 Edits to existing files (all of them), cited against `dev` at `c672eb3`
 
-"Risk" is the risk of a textual or semantic conflict with the road agent's work. Their work so far covers road build, upgrade and adjust; decks, decorations and names carried through splits and saves; the wire's road ids, lifts and reversed flip; the directed `RoadGraph` and routed traffic model wired into the tick; one junction warrant; and the tile bucketing. Still announced: the road-tool UI and the renderer's lamp pass.
+"Risk" is the risk of a textual or semantic conflict with the road agent's work. Their work so far covers road build, upgrade and adjust; decks, decorations and names carried through splits and saves; the wire's road ids, lifts and reversed flip; the directed `RoadGraph` and routed traffic model wired into the tick; one junction warrant; the tile bucketing; the traffic readout seam; a graph that clusters by the layout's level rule and plans over drawn legs; and the road tool's editor, panel and input (ec9e5e9, b7e62e7). Still announced: the renderer's lamp pass.
 
 | # | File : line | Edit | Why | Risk |
 |---|---|---|---|---|
 | E1 | — | **Removed in revision 2.** The graph keys on the `RoadGraph` object (D3); `spatial_index.dart` is untouched. | `roadsRevision` is live on dev | — |
-| E2 | `city_sim.dart` after `parcelCongestion` (3335) | `late final CityAgents agents = CityAgents(this);` plus an import. The constructor allocates nothing. | Owner of the agent state | MED (beside their `roadTraffic` block, 3336-3345) |
-| E3a | `city_sim.dart:1677` | `if (agents.enabled) { agents.advance(dt); } else { advanceParcelTraffic(); }` | The tick hook. In agent colonies the routed model's congestion branch in `advanceParcelTraffic` (4107-4117) never runs; `roadTraffic.advance(dt)` (1675) is untouched. | MED (their 1675-1678 block) |
+| E2 | `city_sim.dart` after `parcelCongestion` (3335) | `late final CityAgents agents = CityAgents(this);` plus an import. The constructor allocates nothing. | Owner of the agent state | MED (beside their `roadTraffic` and `trafficReadout` block, 3337-3352) |
+| E3a | `city_sim.dart:1675`, right after `roadTraffic.advance(dt);` | `if (agents.enabled) agents.advance(dt);`. **Slice 2:** line 1675 itself becomes `if (!agents.enabled) roadTraffic.advance(dt);`. | The tick hook. `advanceParcelTraffic()` (1677) is kept unchanged: it reads `trafficReadout` (4143-4148), which E37 points at the agents, so `parcelCongestion` takes their measured congestion by itself. From slice 2 the agents answer the whole readout (D46), and the routed model stops running in agent colonies. | MED (their 1675-1678 block) |
 | E3b | `city_sim.dart:1176-1178`, first line of `advance` | `if (agents.holdTick(simDt)) return;` | The frame hold (D35, §5.7). Returns false unless a host has set `agents.frameBudgeted`. | LOW |
 | E4 | `city_sim.dart:1244` | `final commuteEff = agents.enabled ? agents.stats.commuteEff : 1 - math.max(congestion, parcelCongestion) * 0.4;` | Staffing from measured trips from slice 1 (D33), with the same one-tick lag as today | LOW |
 | E5 | `city_sim.dart`, after the medicine gate (1272) | `if (agents.enabled) agents.rewriteServices(services, population);` | Safety and health come from deliveries under their flags (§9.5) | LOW |
@@ -208,34 +214,35 @@ This document is self-contained. An implementer needs only this and the code.
 | E8 | `city_sim.dart:1482-1490` | Under `agents.ownsPopulation`: `agents.ledger.addDeaths(died)` instead of writing `population` (1483). Under `agents.serves(deathcare)`: `corpses` is not incremented (1484) and `careRate` (1486-1490) is skipped. | Deaths are assigned to homes; corpses are derived | LOW |
 | E9 | `city_sim.dart:1564-1576` | The migration arithmetic unchanged, into a local `next`; then `if (agents.ownsPopulation) agents.ledger.addMigration(next - population); else population = next;` | Population is realised by citizens (D16) | LOW |
 | E10 | `city_sim.dart:1772` | First line of `transitBonus()`: `if (agents.serves(ServiceKind.transit)) return agents.transitBonus;` | Ridership (§11.6) | LOW |
-| E11 | `city_sim.dart:4157`, in `advanceParcelFires` after the fire-disaster spark (4150-4156) and before `if (lotFires.isEmpty) return;` | `if (agents.serves(ServiceKind.fire)) { agents.advanceLotFires(dt); return; }`. The agents' step owns growth, engines on scene, burnout, spread (on `TrafficRng`) and the new ignition. | Engines must be on scene; lot fires become deterministic (§9.4) | MED (their `reach` factor, 4171, sits in the step it replaces) |
-| E12 | `city_sim.dart:3505`, first line of `_carryRenamedLots` | `agents.onLotsRenamed(renamed);` | One line covers every road operation that renames lots: `commitRoad` (3495), `buildRoad` (3647), `upgradeRoad` (3752) and `moveRoadEnd` (3969) | MED (their helper; one line) |
-| E13 | `city_sim.dart:4668`, in `_carryLotsAcross`, before its `removeWhere` | `agents.onLotsRenamed(moved);`. The buildings that `removeWhere` drops are tombstoned by the next building sync. | Same | LOW |
-| E14 | `city_sim.dart:4861` (`clearParcel`) | `agents.onLotCleared(parcelId);` | Evict residents, cancel requests, mark the building gone for trips arriving there | LOW |
-| E15 | `city_sim.dart:4374` (`toJson`, after `'support'`, the last key) | `if (agents.hasState) 'agents': agents.toJson(),`. Slice 1 writes `{'v': 1, 'enabled': true}`; slice 3 adds the rest. | Persistence from slice 1 | MED (their `'roads'` and junction keys sit earlier in the same map) |
-| E16 | `city_sim.dart:4547` (`fromJson`, after `sim.recompute()`, before `return sim`) | `sim.agents.restore(j['agents']);` | Persistence from slice 1 | LOW |
+| E11 | `city_sim.dart:4188`, in `advanceParcelFires` (4179) after the fire-disaster spark (4181-4187) and before `if (lotFires.isEmpty) return;` | `if (agents.serves(ServiceKind.fire)) { agents.advanceLotFires(dt); return; }`. The agents' step owns growth, engines on scene, burnout, spread (on `TrafficRng`) and the new ignition. | Engines must be on scene; lot fires become deterministic (§9.4) | MED (their `fireReach` factor, 4204, sits in the step it replaces) |
+| E12 | `city_sim.dart:3515`, first line of `_carryRenamedLots` | `agents.onLotsRenamed(renamed);` | One line covers every road operation that renames lots: `commitRoad` (3503, only when it re-plats), `buildRoad` (3678), `upgradeRoad` (3783) and `moveRoadEnd` (4000). The helper then tears down whatever stood on a lot the re-plat gave up (`_dropLostLots`, called at 3533, body 3544-3554; 08f8cf3). The next building sync, immediate because the layout moved (§2.6), tombstones those buildings. | MED (their helper; one line) |
+| E13 | `city_sim.dart:4702`, in `_carryLotsAcross` (4673), before its `_dropLostLots()` | `agents.onLotsRenamed(moved);`. The buildings `_dropLostLots` tears down are tombstoned by the next building sync. | Same | LOW |
+| E14 | `city_sim.dart:4894` (`clearParcel`) | `agents.onLotCleared(parcelId);` | Evict residents, cancel requests, mark the building gone for trips arriving there | LOW |
+| E15 | `city_sim.dart:4407` (`toJson`, after `'support'`, the last key) | `if (agents.hasState) 'agents': agents.toJson(),`. Slice 1 writes `{'v': 1, 'enabled': true}`; slice 3 adds the rest. | Persistence from slice 1 | MED (their `'roads'` and junction keys sit earlier in the same map) |
+| E16 | `city_sim.dart:4580` (`fromJson`, after `sim.recompute()`, before `return sim`) | `sim.agents.restore(j['agents']);` | Persistence from slice 1 | LOW |
 | E17 | `city_starter_kit.dart:153-259` | A `bool agentTraffic = false` parameter. When it is true: `sim.agents.enabled = true;`, and from slice 8 the two trunk spurs with enabled stubs (§10.4). Both happen before `claimMilestones()` (258). | Enables agents for City Builder only (D24, D39) | LOW |
 | E18 | `lib/infrastructure/flutter/screens/city_game_screen.dart:76` | Pass `agentTraffic: true` | The play surface | LOW |
 | E19 | `lib/application/snapshot/world_snapshot.dart` | Field `final List<CityTrafficFrame> cityTraffic` (default `const []`); constructor parameter (1916-1930); `copyWithEpoch` passes it (1939-1953); a local list beside `roads` (2001). After `roadsRevision[city.id] = city.roadsRevision;` (2219): `if (city.agents.enabled) cityTraffic.add(TrafficCapture.frameFor(city, body.id.value, roads));`. Passed in the return (2356-2378). `toJson` untouched. | The renderer's only input | HIGH file. No hunk inside their road loop (2071-2183) or junction loop (2188-2218). |
-| E20 | `lib/infrastructure/flutter_scene/city/city_nodes.dart` | Four one-line hunks: (a) `part 'agent_nodes.dart';`; (b) in `_syncTraffic`'s cascade (2107-2111), `..maxVehicles = snap.cityTraffic.isEmpty ? _maxVehicles : 0` before `..begin(...)`; (c) after `_syncTraffic(...)` (1208), `_syncAgents(snap, origin, moved, focusWorld);`; (d) after `_syncRoadOverlay(...)` (1214), `_syncAgentExtras(snap, origin, moved);`. Both bodies live in our part file with their own slots (§13.8). | Draw agents; cosmetic road cars off in agent frames; cosmetic trains untouched | HIGH file; four one-line hunks, none in their tile or overlay code |
-| E21 | `lib/infrastructure/flutter_scene/city/vehicle_meshes.dart:26-56` | **Append**, all at once in slice 5: `bus, garbageTruck, hearse, policeCar, ambulance, fireEngine, mailVan, deliveryVan`. `emit` covers them. Add a `liveryU` getter: 0.5 for the existing five, fixed per kind for the new ones. `road` and `airless` (54-55) are **unchanged**. | New models. The parked-car family picks (city_tile_mesher.dart:2369) index those lists, so they must not move. | LOW |
+| E20 | `lib/infrastructure/flutter_scene/city/city_nodes.dart` | Four one-line hunks: (a) `part 'agent_nodes.dart';`; (b) in `_syncTraffic`'s cascade (2125-2129), `..maxVehicles = snap.cityTraffic.isEmpty ? _maxVehicles : 0` before `..begin(...)`; (c) after `_syncTraffic(...)` (1208), `_syncAgents(snap, origin, moved, focusWorld);`; (d) after `_syncRoadOverlay(...)` (1214), `_syncAgentExtras(snap, origin, moved);`. Both bodies live in our part file with their own slots (§13.8). | Draw agents; cosmetic road cars off in agent frames; cosmetic trains untouched | HIGH file; four one-line hunks, none in their tile or overlay code |
+| E21 | `lib/infrastructure/flutter_scene/city/vehicle_meshes.dart:26-56` | **Append**, all at once in slice 5: `bus, garbageTruck, hearse, policeCar, ambulance, fireEngine, mailVan, deliveryVan`. `emit` covers them. Add a `liveryU` getter: 0.5 for the existing five, fixed per kind for the new ones. `road` and `airless` (54-55) are **unchanged**. | New models. The parked-car family picks (city_tile_mesher.dart:2398) index those lists, so they must not move. | LOW |
 | E22 | `lib/domain/colony/city/city_building_spec.dart`, plus the massing and parking rule tables that test/architecture/installation_massing_test.dart and installation_parking_test.dart read | New specs: Post Office after Police Station (358), Fire Station after Emergency Services (496), Bus Depot and Cargo Terminal after Freight Yard (512). Massing and parking rules for the two site-claiming ones (§9.7). Regenerate `docs/REFERENCE.md` with `test/tools/gen_reference_test.dart` (C11). | New depots; specs persist by label | LOW-MED |
 | E23 | `lib/domain/colony/city/commodity.dart` | `goods` constant, label, and the FINISHED GOODS section (the default of `section()`, 60-65) | Freight (slice 8) | LOW |
 | E24 | `lib/infrastructure/flutter_scene/perf_knobs.dart:55` | Append the §15.4 knobs to `PerfKnobs.all` | A/B testing | LOW |
-| E25 | `lib/main_city_game_dev.dart:60-67`, `91-136`, `178-196` | `agentTraffic: const bool.fromEnvironment('AGENTS', defaultValue: true)` in the founding call. New `ext.acro.citygame` parameters handled before the status return (115). An `agents` block in `_status`. | Headless verification | LOW |
-| E26 | `lib/infrastructure/flutter/simulation_view.dart` | (a) After the tick loop (1942): `for (final c in _cities.all()) c.agents.endFrame();`, then `SceneSync.tickCostMs = anyAgentColony ? swSteps.elapsedMicroseconds / 1000.0 : 0;` and `SceneSync.simWarp = _clock.warpFactor;`. (b) Where the injected city is taken (initState): if it has agents, set `agents.frameBudgeted = true`, and from slice 4 `CityNodes.onStreetParking = false; CityNodes.maxParkedCars = 0;` before the first frame. (c) `dispose` (2172+): restore those statics and reset the `TrafficOverlayState` statics. (d) **V** in `_simKeys` (1208-1236) and `_onKey`, for the traffic view. (e) `CityGameHud(...)` (3354) gets `trafficOn`/`onToggleTraffic` and a `tools` argument. (f) The `_PickGate` predicate (3312) becomes `_cityEdit.active \|\| _trafficTools.active \|\| _siteUnder(p) != null \|\| _vehicleUnder(p) != null`. | The frame hold, budget visibility, baked cars off, the inspector | MED |
-| E27 | `lib/infrastructure/flutter/simulation_view_colony.dart` | `_editCityAt` (627): early `if (_trafficTools.active) { _trafficTools.tap(city, hit); return; }`. `_hoverCityAt` (117): the same for hover. `_inspectCityAt` (700): try `_vehicleUnder` before the site sheet. Plus a new `_vehicleUnder(Offset)` helper in this `part` file. | Line and stub tools, and clicking a vehicle | HIGH (their road-tool area). One early return each; lands after their tool UI (C4). Development hooks cover the gap. |
+| E25 | `lib/main_city_game_dev.dart:69-76`, `100-145`, `206-224` | `agentTraffic: const bool.fromEnvironment('AGENTS', defaultValue: true)` in the founding call. New `ext.acro.citygame` parameters handled before the status return (124), after the existing `zones=`, `walk=` and `zone=` (103-123). An `agents` block in `_status`. Their `ext.acro.roadtool` (151-164) is not touched. | Headless verification | LOW |
+| E26 | `lib/infrastructure/flutter/simulation_view.dart` | (a) After the tick loop (1950): `for (final c in _cities.all()) c.agents.endFrame();`, then `SceneSync.tickCostMs = anyAgentColony ? swSteps.elapsedMicroseconds / 1000.0 : 0;` and `SceneSync.simWarp = _clock.warpFactor;`. (b) Where the injected city is taken (initState): if it has agents, set `agents.frameBudgeted = true`, and from slice 4 `CityNodes.onStreetParking = false; CityNodes.maxParkedCars = 0;` before the first frame. (c) `dispose` (2180+): restore those statics and reset the `TrafficOverlayState` statics. (d) **V** in `_simKeys` (1211-1242, where V is still free) and `_onKey`, for the traffic view. (e) `CityGameHud(...)` (3328) gets `trafficOn`/`onToggleTraffic` beside `zonesOn`/`onToggleZones` (3331-3332), and a `tools` argument. (f) The pick gate moved into the colony part, `_cityPickLayer()` (simulation_view_colony.dart:998-1047, placed at simulation_view.dart:3309). Its `open` predicate (1009-1010) becomes `adjust ? _adjustGateOpen(p) : c.active \|\| _trafficTools.active \|\| _siteUnder(p) != null \|\| _vehicleUnder(p) != null`, and `_PickClaim`'s `claim` (1015) and the tap routing (1028-1030) treat `_trafficTools.active` as they treat `c.active`. | The frame hold, budget visibility, baked cars off, the inspector | MED ((f) sits in their input code) |
+| E27 | `lib/infrastructure/flutter/simulation_view_colony.dart` | `_editCityAt` (599): early `if (_trafficTools.active) { _trafficTools.tap(city, hit); return; }` after its ground pick (602-603) and before the road tool's branch (609-612). `_hoverCityAt` (120): the same for hover, after its ground pick. `_inspectCityAt` (672): try `_vehicleUnder` before the site sheet. Plus a new `_vehicleUnder(Offset)` helper in this `part` file. | Line and stub tools, and clicking a vehicle | HIGH (their road tool's input lives here now, and the file changed heavily since `62a3a55`). One early return each. Their tool UI has landed (C4), so nothing waits on it. |
 | E28 | `lib/infrastructure/flutter_scene/scene_sync.dart:119`, `354-355` | `static double tickCostMs = 0; static double simWarp = 1;` and `+ tickCostMs` inside `frameBudget.feed(...)` | `FrameBudget` sees agent tick cost (D31); the render clock sees pauses (D18) | LOW |
-| E29 | `lib/infrastructure/flutter/screens/city_game_hud.dart` | `CityGamePanel` (26) gains `traffic, services, transit`; `_drawer` (396-398) becomes a `switch`; a Flow chip; a traffic toggle mirroring `zonesOn` (160-164) | Panels | LOW-MED |
+| E29 | `lib/infrastructure/flutter/screens/city_game_hud.dart` | `CityGamePanel` (28, `{ none, milestones, budget }`) gains `traffic, services, transit`; `_drawer`'s two-way choice (398-400) becomes a `switch`; a Flow chip; a traffic toggle mirroring `zonesOn` (fields 35-36 and 49-50, button 162-166) | Panels | LOW-MED |
 | E30 | `lib/infrastructure/flutter/screens/city_panels.dart:191-211` | The congestion row reads `sim.parcelCongestion` when `sim.agents.enabled` | The two readouts agree | LOW |
 | E31 | `lib/domain/colony/city/city_generator.dart`, after the interstates are laid (1204-1253) | `if (city.agents.stubsEnabled) city.agents.stubs.markFreeEnds(...)` | Outside connections on generated colonies, in slice 11 when those colonies get agents | MED (their merge fixes sit near 1703-1718) |
-| E32 | `lib/infrastructure/flutter/sim_view_control.dart:17-106` | `selectVehicle`, `setTrafficView`, `trafficTool` references, and all three in `clear()` | Development hooks | LOW |
-| E33 | `tool/drive_city_game.dart:17-60` | Every argument of the form `key=value` is forwarded to `ext.acro.citygame` before the status call; `step=<s>` waits until the colony has advanced | Manual acceptance (today the tool takes positional arguments only) | LOW |
+| E32 | `lib/infrastructure/flutter/sim_view_control.dart:17-116` | `selectVehicle`, `setTrafficView`, `trafficTool` references beside their `roadTool` (88-94), and all three in `clear()` (96-115) | Development hooks | LOW |
+| E33 | `tool/drive_city_game.dart:25-96` | Every bare argument of the form `key=value` is forwarded to `ext.acro.citygame` before the status call; `step=<s>` waits until the colony has advanced | Manual acceptance from the command line. The tool already replays a JSON list of extension calls (`--script=<steps.json>`, 10-17 and 73-85), which covers anything longer. | LOW |
 | E34 | `city_sim.dart:1499-1506` (`socialDrag`) | `+ agents.happinessDrag`, which is 0 when disabled: `0.15·mailBacklog + 0.15·goodsShortage` | Mail and goods move happiness (D41) | LOW |
 | E35 | `city_sim.dart:1826`, in `socialTick` after the curfew line | `if (agents.serves(ServiceKind.police)) crimeTarget = agents.crimeTarget;` | Crime from per-building accumulators (D37) | LOW |
 | E36 | `city_nodes.dart:442` and `622` | `static const int _maxParkedCars = 400;` becomes `static int maxParkedCars = 400;`, and its one use follows | Baked lot cars off in agent colonies (D32, slice 4) | MED |
+| E37 | `city_sim.dart:3352` | `CityTrafficReadout get trafficReadout => agents.enabled ? agents.readout : roadTraffic;` | The readout seam (D46). Every consumer already reads it: the tax line (1530), the delivery and noise gates (4113, 4125), `advanceParcelTraffic` (4143-4148), the lot-fire reach (4204), and the road tool's Routes view (road_tool_scene.dart:578-603; road_tool_panel.dart:510). | LOW (one line of theirs, written for this) |
 
-**Untouched on purpose:** `road_mesher.dart`, `city_edit_overlay.dart`, `road_overlay_state.dart`, `road_overlay_nodes.dart`, `city_layout.dart`, `parcel.dart`, `road_junction.dart`, `road_graph.dart`, `road_traffic_model.dart`, `road_noise.dart`, `spatial_index.dart`, `city_traffic.dart`, `city_tile_mesher.dart`, `city_tile_bucketing.dart`, `city_tile_columns.dart`, and `test/flutter_scene/city_traffic_test.dart`.
+**Untouched on purpose:** `road_mesher.dart`, `city_edit_overlay.dart`, `road_tool_controller.dart`, `road_tool_panel.dart`, `road_tool_scene.dart`, `road_overlay_state.dart`, `road_overlay_nodes.dart`, `city_layout.dart`, `parcel.dart`, `road_junction.dart`, `road_graph.dart`, `road_traffic_model.dart`, `road_noise.dart`, `traffic_readout.dart` (we implement it), `spatial_index.dart`, `city_traffic.dart`, `city_tile_mesher.dart`, `city_tile_bucketing.dart`, `city_tile_columns.dart`, and `test/flutter_scene/city_traffic_test.dart`.
 
 ### 1.3 Coordination contract with the road agent (post, and settle, before slice 1 merges)
 
@@ -246,34 +253,32 @@ This document is self-contained. An implementer needs only this and the code.
     - keep `sharesStructureWith` meaning "nothing routing reads has changed";
     - tell us before changing the clustering, attach or lot-access rules, because remaps and access points depend on them.
   - We add nothing to `road_graph.dart`. `node_control_test` also compares `RoadNode.plan` with what the tiles draw (`RoadMesher.junctionPlan` over `junctionsFromEnds`); any mismatch is reported to them, since both are theirs.
+  - The clustering has changed once already (229cb9c to 50c8b4e: ends meet by `CityLayout.levelsSeparated`, and plans are read over drawn legs). §3.1, §3.2 and §3.7 follow it; D48 records how.
 - **C2. Who writes what in an agent colony.**
   - **Agents:**
-    - `parcelCongestion`: E3a skips `advanceParcelTraffic`, including its routed-model branch;
+    - the traffic readout (E37, D46): congestion, volumes, routes and `passes` from slice 1; reach, noise, land value and the tax factor from slice 2;
+    - `parcelCongestion`, through `advanceParcelTraffic`, unchanged, which reads the readout;
     - `commuteEff` (E4);
     - `services['safety']` and `services['health']` under their flags (E5);
     - `crime` under the police flag (E35);
-    - fire under the fire flag (E11, which replaces the whole lot-fire step, their `serviceReach` factor at 4171 included).
-  - **The routed model, unchanged:**
-    - `roadTraffic.advance` (1675);
-    - the `deliveryReach` and `noiseOf` gates on growth (4080-4097);
-    - `taxLandValueFactor` (1530).
+    - fire under the fire flag (E11, which replaces the whole lot-fire step, its `fireReach` factor at 4204 included).
+  - **The routed model:**
+    - in slice 1, `roadTraffic.advance` (1675) runs and answers what the readout forwards to it: `serviceReach`, `fireReach`, `deliveryReach`, `noiseOf`, `landValueOf`, `averageLandValue` and `taxLandValueFactor`, as read by the growth gates (4113, 4125), the tax line (1530) and the lot-fire step (4204);
+    - from slice 2, nothing: E3a skips its `advance` in agent colonies, and `city.roadGraph` still syncs the graph on read (road_traffic_model.dart:1697-1700).
   - Colonies without agents are untouched.
 - **C3. Signal lamps.**
-  - **Request.** While a frame carries `cityTraffic`, the junction pass bakes masts **without** lit lamps. Today it switches them by epoch parity (road_mesher.dart:1394-1398, fed the tile's epoch at city_tile_mesher.dart:1787). A `CityMeshKnobs.agentSignals` flag would do.
+  - **Request.** While a frame carries `cityTraffic`, the junction pass bakes masts **without** lit lamps. Today it switches them by epoch parity (road_mesher.dart:1431-1435, fed the tile's epoch at city_tile_mesher.dart:1816). A `CityMeshKnobs.agentSignals` flag would do.
   - **Offer.** `TrafficNetColumns.nodes` (position, `NodeControlKind`, per-leg stop flags) and `SignalPlan.stateAt`, so that their lamps and our arbiter agree.
-- **C4.** `CityEditTool` and the editor toolbar are theirs. Our tools live in `TrafficToolController`. E27's early returns land **after** their tool UI; until then the tools are reachable from our HUD drawer and the development hooks.
+- **C4. Their editor has landed.** `CityEditTool` (city_edit_overlay.dart:30-51, with its `traffic` tool at 50) and the editor toolbar are theirs. So are `RoadToolEditing` (road_tool_controller.dart:215), `TrafficInfoView` (55-67), `road_tool_panel.dart` and `road_tool_scene.dart` (ec9e5e9, b7e62e7). Ground input moved into the colony part's `_cityPickLayer()` (simulation_view_colony.dart:998-1047). Our tools live in `TrafficToolController` and open from our HUD drawer. E26(f) and E27 are re-anchored on that code and wait on nothing; they land with their slices (2, 8 and 9). Buttons for our tools in their toolbar remain a request.
 - **C5. The wire.**
   - Our edge geometry is sliced from the capture's own `RoadSnapshot`s: `id`, points flipped for reversed roads, and `lifts`, all at world_snapshot.dart:2134-2182. We depend on those semantics and ask to be told before they change.
   - Our capture hook sits after 2219, outside their loops. In `city_nodes.dart` we touch only the four E20 lines and E36.
+  - Since 229cb9c the tiles group junction ends by the graph's own rule, read in lifts (`RoadMesher.liftsSeparated`, road_mesher.dart:1024-1033), and every tile end carries an `onDeck` flag into its key (city_tile_bucketing.dart:334-378 and 899; city_tile_columns.dart:517 and 683). So every node we draw signal heads at is a junction the tiles drew. We depend on that as well.
 - **C6. Generator topology.** Ramp merges ending 9–16 m beside the mainline are now joined by `RoadGraph`'s dead-end attach. We report what is still dangling (`graph=audit`, `sprawl_topology_audit_test`) to them.
-- **C7. A volume seam (new).**
-  - In agent colonies, noise, land value and delivery reach still come from the routed model's **assigned** volumes. That is an abstract flow figure, which the spec rules out.
-  - **Request.** An optional per-road volume source on `CityRoadTraffic` that agents fill with **measured** vehicles per road (departures per road per 600 s). The model would then skip its own assignment.
-  - Until it lands, this is a recorded residual (§19.1).
-- **C8. One traffic view (new).**
-  - Their pending Traffic Routes view (road_overlay_state.dart:34; `routesThrough`, road_traffic_model.dart:458-485) and our lane-speed view and route inspector become **one** view.
-  - In an agent colony its routes are live agents' locked routes, from `CityAgents.routesThrough(roadId)` in their `TripRoute` shape.
-  - Settle before slice 2.
+- **C7. A volume seam: resolved in revision 3, and not needed.** From slice 2 the agents answer noise, land value, the tax factor and reach themselves through the readout (D46), from measured flows and their own searches, and E3a skips `roadTraffic.advance` in agent colonies. No assigned volume is left in an agent colony, so nothing is asked of `CityRoadTraffic`.
+- **C8. One traffic view: resolved in revision 3.**
+  - Their Routes view reads `city.trafficReadout` (road_tool_scene.dart:567-617, keyed on `passes` at 584; road_tool_panel.dart:504-516) and draws `routesThrough` in the `TripRoute` shape (traffic_readout.dart:26-46). In an agent colony that is our readout, so from slice 1 it draws live vehicles' locked routes with no second code path. Their Junctions view draws `city.roadGraph`'s plans (road_tool_scene.dart:492-493), the plans our arbiter reads.
+  - Our slice-2 view is the lane-speed overlay (V) and the route inspector (§13.9). It shows per-lane speeds and one vehicle's remaining route, which theirs does not, so the two complement each other.
 - **C9. Renderer hooks (new).**
   - A per-body cosmetic cap (`CityTraffic.capFor(bodyId)`), needed once slice 11 runs agent and non-agent colonies side by side.
   - Hiding cosmetic trains per body, for slice 9b.
@@ -303,7 +308,7 @@ This document is self-contained. An implementer needs only this and the code.
 | Entity | Runtime id | Persisted id | Lifetime |
 |---|---|---|---|
 | Node / edge / lane / connector | dense int per `LaneGraph` build; edge ids equal the `RoadGraph`'s | none (lineage remaps across builds) | one graph object |
-| Building | dense int in `BuildingTable` | **site id** string: the lot id (`lot-<road>-<r\|l><n>`, city_layout.dart:1264; `lot-m<n>` for a hand-drawn lot, 1037) or `cell-<k>` for a grid building | until demolished. Follows the rename seams: `_carryRenamedLots` (E12), `_carryLotsAcross` (E13) and `clearParcel` (E14). |
+| Building | dense int in `BuildingTable` | **site id** string: the lot id (`lot-<road>-<r\|l><n>`, city_layout.dart:1294; `lot-m<n>` for a hand-drawn lot, 1065) or `cell-<k>` for a grid building | until demolished. Follows the rename seams: `_carryRenamedLots` (E12), `_carryLotsAcross` (E13) and `clearParcel` (E14). |
 | Citizen | handle | dense index at save time, rewritten densely | from arrival to emigration or death |
 | Visitor | row in the `VisitorTable` (§10.4) | not persisted | from the stub back to a stub |
 | Vehicle / pedestrian | handle | not persisted | one trip, one service run, or one bus or train shift |
@@ -451,22 +456,31 @@ The design point is 5,000 citizens, 2,000 vehicles and 1,000 pedestrians.
 
 ### 3.1 Derived from the road agent's `RoadGraph`
 
-**Source.** `final g = city.roadGraph;` (city_sim.dart:3344), a getter on `roadTraffic.graph` (road_traffic_model.dart:1621).
-- `CityRoadTraffic._sync` (road_traffic_model.dart:1647-1679) keeps it current on `(layout.version, roadsRevision, junctionOverrides.length)`.
+**Source.** `final g = city.roadGraph;` (city_sim.dart:3344), a getter on `roadTraffic.graph` (road_traffic_model.dart:1697-1700).
+- `CityRoadTraffic._sync` (road_traffic_model.dart:1729-1761) keeps it current on `(layout.version, roadsRevision, junctionOverrides.length)`.
 - It either rebuilds the graph (`RoadGraph.of`) or patches it (`refreshedFor`, `withOverrides`) when only overrides or names changed.
-- By the time `agents.advance` runs, `roadTraffic.advance` (city_sim.dart:1675) has already synced it this tick, so the read is a few integer compares.
+- In slice 1, `roadTraffic.advance` (city_sim.dart:1675) has already synced it this tick when `agents.advance` runs, so the read is a few integer compares. From slice 2 E3a skips that call in agent colonies, and the getter syncs on read instead: the same compares, and the rebuild after an edit.
 
-**What `RoadGraph` decides, and we never re-decide:**
-- **Nodes.** Road ends are clustered within `nodeMatchPlanM = 8` m in plan and at one level. `_sameLevel` (road_graph.dart:1259-1263) accepts two ends on the ground, or two decks within `RoadElevation.nodeMatchM` (2 m).
-  - A draped road is on the ground **whatever its bridges**. So a bridged mainline's split ends meet a ground-level ramp, which is the cloverleaf loop-ramp case.
-  - A deck end meets only ends at its own height, so viaducts, decks and transit never join the streets they cross in plan.
-- **Dead ends against another road.** The dead-end attach pass in `RoadGraph.of` joins a dead end lying against another road to it, part way along, as a node on that road.
+**What `RoadGraph` decides, and we never re-decide** (at `c672eb3`; D48):
+- **Nodes.** Road ends are clustered within `nodeMatchPlanM = 8` m in plan (road_graph.dart:202) wherever the layout's grade-separation rule says they meet (799-858). Each end's level is `CityLayout.levelOf(deck, s, len)` (city_layout.dart:318-332), and two ends join unless `CityLayout.levelsSeparated` (357-363) says they pass. That is the rule that cut the roads into junctions and snapped their ends, so the graph joins exactly what the layout cut (229cb9c).
+  - Two ends on the ground always meet. A draped road is on the ground **whatever its bridges**, so a bridged mainline's split ends meet a ground-level ramp, which is the cloverleaf loop-ramp case.
+  - Two deck ends meet unless their heights differ by `RoadElevation.gradeSeparationM` (4.5 m, road_elevation.dart:59) or more.
+  - A deck end meets a ground end unless the deck is clear of the ground there, on its piers or in its tunnel. So viaducts and tunnels never join the streets they cross in plan, and a deck graded into the ground does.
+  - `RoadNode.atGrade` is false when any end at the node is off the ground (road_graph.dart:968-979); it holds when every end has `level == null || !level.offGround`.
+  - The old rule is gone from the graph: decks within `RoadElevation.nodeMatchM` (2 m), `_sameLevel`, and `startAtGrade`.
+  - **Deck ranges.** A deck's structure and tunnel ranges are measured along the road its survey walked: `RoadDeck.rangeLengthM` (parcel.dart:700), saved as `'l'` (794). A probe of them at an index arc goes through `RoadDeck.offGroundAt` (715-718) or `CityLayout.levelOf`, which read it at `rangeArc` (705-711). A save re-samples a curved road by millimetres, and read raw at its very end a viaduct stepped off its piers and joined the street below. Our code (access points, the rail graph of §11.7, the audit) never reads `onStructureAt` or `inTunnelAt` directly.
+- **Dead ends against another road.** The dead-end attach pass in `RoadGraph.of` joins a dead end lying against another road to it, part way along, as a node on that road (road_graph.dart:896-935).
   - The reach is `own.halfWidth + other.halfWidth + attachSlackM` (4 m).
   - Only a ramp may meet a limited-access road part way along.
+  - The end must be at that road's level there, by the same rule (road_graph.dart:926-931).
   - This covers ramp merges ending 9–16 m beside the mainline, failed merges, and T's the layout never cut.
-- **Pieces and directed edges.** A piece is the stretch of one road between consecutive nodes. Directed edges honour `oneWay` and `reversed` (road_graph.dart:1060-1097).
-- **Legs and plans.** Every non-rail road end at a node is a leg, alleys, paths and decks included. Each node's plan is `junctionPlanForNetwork(legs, lifted:, roundaboutPreferred:, override:)` (road_graph.dart:1023-1058; road_junction.dart:334-413). The tiles ask the same question (`RoadMesher.junctionPlan`, road_mesher.dart:1174-1180), so a light the player sees is a light the agents wait at.
-- **Lot access.** Each lot has a piece, an arc position and a direction mask (road_graph.dart:1129-1170, `_dirsFor` at 649-660). Grid sites go through `attachFootprint`, the same call the routed model makes (road_traffic_model.dart:1762-1794).
+- **Pieces and directed edges.** A piece is the stretch of one road between consecutive nodes. Directed edges honour `oneWay` and `reversed` (road_graph.dart:1093-1130).
+- **Legs and plans.** Every non-rail road end at a node is a leg, alleys, paths and decks included, and every leg routes (`RoadNode.legs`, road_graph.dart:81-84).
+  - The plan is read over the **drawn** legs only: those whose class `joinsJunctions` (parcel.dart:246-250: roads that carry cars, other than the elevated road, an alley or a path). `_planOf` (road_graph.dart:639-669) runs `junctionPlanForNetwork` (road_junction.dart:392-421) over them and numbers `stopLegs` back into the full leg list. The roundabout and `lifted` inputs count drawn legs too (1068-1073).
+  - So an alley or a path meeting a street is a kerb cut, never a stop, and a node with fewer than three drawn legs stops nobody (`junctionControlFor`, road_junction.dart:53-83).
+  - `defaultStopLegs` (road_junction.dart:279-305) decides the all-way stop over every car leg, leaving legs included. A motorway off-ramp, or a one-way street leaving an avenue, no longer stops the through road; an on-ramp still stops the ramp. Only the leg-aware warrant reads it, at junctions the road tool had a hand in.
+  - The tiles ask the same question over the same legs (`RoadMesher.junctionPlan`, road_mesher.dart:1211-1220), so a light the player sees is a light the agents wait at.
+- **Lot access.** Each lot has a piece, an arc position and a direction mask (road_graph.dart:1162-1203, `_dirsFor` at 685-696). Grid sites go through `attachFootprint`, the same call the routed model makes (road_traffic_model.dart:1844-1876).
 
 **What we keep.** A reference to the graph object: its `roads`, its `roadRecs` (`IndexedRoad` records whose `Float64List`s are never mutated) and its arrays. The old object stays alive for exactly one rebuild, for lineage (§3.9).
 
@@ -480,12 +494,13 @@ The design point is 5,000 citizens, 2,000 vehicles and 1,000 pedestrians.
 | one leg, not `atGrade` | `danglingDeck`: a dead end, drawn in the traffic view as a network error |
 | two legs, plan `none`; or plan `merge` with no ramp leg | `continuation` (the 6→4 seams, a class change, a ring's seam) |
 | plan `merge` with a ramp leg | `rampMerge` |
-| plan `stop`, every inbound car leg in `stopLegs` | `allWayStop` |
+| plan `stop`, every inbound **drawn** car leg in `stopLegs` | `allWayStop` |
 | plan `stop`, otherwise | `stop`, with a per-leg stop flag |
 | plan `signals` | `signals` |
 | plan `roundabout` | `roundabout` |
 
-- With `RoadGraph`'s legs, the warrant never returns `none` for three or more legs (road_junction.dart:53-83, 211-238). Should it ever, the node is `uncontrolled`, and the arbiter uses tier rank and then the right-hand rule (§5.4).
+- The warrant never returns `none` for three or more legs (road_junction.dart:53-83, 211-238), but the plan is read over the **drawn** legs (§3.1). A node of three or more legs with fewer than three drawn, such as a street's seam with an alley or a path meeting it, therefore plans `none`. It is `uncontrolled`: legs outside the plan give way to drawn legs, and the rest follow tier rank and then the right-hand rule (§5.4).
+- The elevated road is outside the plan too, so its two-leg seam with an expressway plans `none` where it planned `merge`. Both map to `continuation`.
 - **A ring piece** has `from == to`. An example is the beltway without interchanges: its first and last controls coincide (city_generator.dart:1238-1250), and it is committed as an ordinary open expressway8 (1514-1519).
   - Its node is a `continuation` whose straight connector joins the edge to itself.
   - The connector, planner and lineage code treat a piece whose ends are the same node explicitly, and never as a U-turn.
@@ -513,7 +528,7 @@ The design point is 5,000 citizens, 2,000 vehicles and 1,000 pedestrians.
 
 ### 3.4 Lanes and offsets
 
-- **Index.** Lane `k = 0` is the **rightmost (kerb) lane** of the directed edge, increasing to the left. Let `L = lanesEachWay` of `road.lanes` (decoration-aware, parcel.dart:938) and `w = laneWidthM`.
+- **Index.** Lane `k = 0` is the **rightmost (kerb) lane** of the directed edge, increasing to the left. Let `L = lanesEachWay` of `road.lanes` (decoration-aware, parcel.dart:1001) and `w = laneWidthM`.
 - **Offsets**, in metres right of travel:
   - Two-way road: `offTravel(k) = medianM/2 + (L−1−k+0.5)·w`. That is `laneOffsets[L−1−k]` (parcel.dart:593-596).
   - One-way road: `offTravel(k) = (L−1−k+0.5)·w − L·w/2` (parcel.dart:588-591).
@@ -522,7 +537,7 @@ The design point is 5,000 citizens, 2,000 vehicles and 1,000 pedestrians.
 - **Stored per lane:** `laneEdge`, `laneIdx`, `laneOff` (`Float32`, right of travel, at full width).
 - **Tapers (D44).** A road with `startHalfWidthM` or `endHalfWidthM` keeps all L lanes to its end node. Examples: the radial interstates, which start at the avenue's or the viaduct's half width (city_generator.dart:1213-1220), and the 6→4 seams.
   - The drop or add happens at that node's `continuation` connectors (rule 2), which is where lanes may change.
-  - The renderer scales lane offsets over the tapered stretch by `hw(s)/hw`, the cosmetic pass's `laneScale` rule (city_traffic.dart:511-516).
+  - The renderer scales lane offsets over the tapered stretch by `hw(s)/hw`, the cosmetic pass's `laneScale` rule (city_traffic.dart:534-539).
   - No edge ever has zero lanes.
   - **Example.** The radial expressway6 has 3 lanes each way and starts at the avenue's half width of 8.0 m. It meets the core avenue, which has 2 lanes each way.
     - Inbound (3 → 2): in-lanes 2 and 1 align to out-lanes 1 and 0; in-lane 0 merges into out-lane 0 as a dropped lane.
@@ -589,8 +604,8 @@ For node N with in-edges I and out-edges O.
   - Two connectors of one node conflict if their 8-point Bézier polylines intersect, or if they merge into the same out-lane from different in-lanes. Diverging from one in-lane is not a conflict.
   - Each conflict stores the arc position of the conflict point on both connectors, which the arbiter-safety property uses.
 
-**Stop back-off.** `stopBack(N) = maxHalfWidth × 1.45 × 0.92`. That is the renderer's stop-bar radius: road_mesher.dart:1342 sets `r = maxHalfWidthM × 1.45`, and 1353-1359 draws the bars at `r × 0.92`.
-- For roundabouts: `max(14, maxHalfWidth·2 + 6) × 0.96`, the renderer's yield line (road_mesher.dart:1420-1460).
+**Stop back-off.** `stopBack(N) = maxHalfWidth × 1.45 × 0.92`. That is the renderer's stop-bar radius: road_mesher.dart:1379 sets `r = maxHalfWidthM × 1.45`, and 1390-1396 draws the bars at `r × 0.92`.
+- For roundabouts: `max(14, maxHalfWidth·2 + 6) × 0.96`, the renderer's yield line (road_mesher.dart:1457-1497).
 - For none, continuation, merge and dead-end nodes: 0.
 - Lanes run from `stopBack(from)` to `edgeLen − stopBack(to)`, and connectors cross the plate, so vehicles stop at the drawn bar.
 
@@ -604,10 +619,11 @@ For node N with in-edges I and out-edges O.
 ### 3.7 Node control and who owns signal state
 
 **Legs.** The node's `RoadGraph` legs (`RoadNode.legs`, with `startsHere` and `heading` as the graph built them), sorted by heading, ascending, so `stopLegs` indices are reproducible (road-agent trap 9).
-- Alley and path approaches are legs like any other. They carry cars, and the warrant ranks them `RoadTier.minor`.
-- The arbiter always treats them as minor: they yield and stop.
+- Every leg routes, alleys and paths included. They carry cars, and the warrant ranks them `RoadTier.minor`.
+- The plan is read over the drawn legs only (§3.1, D48). An alley or a path leg is never in `stopLegs` and never shapes the control, and `stopLegs` already index the full leg list.
+- The arbiter gives every leg outside the plan one rule: it gives way to every drawn leg (§5.4). No plan of our own is computed.
 
-**Plan.** `RoadNode.plan` as the graph computed it: the warrant chosen by `keepsClassWarrant` (the class-only warrant for the generator's junctions, the leg-aware one where the road tool had a hand), with the player's nearest override within 6 m applied. We map it to a kind by §3.2 and never re-evaluate it, so the tiles, the routed model and the agents all read one answer.
+**Plan.** `RoadNode.plan` as the graph computed it over the drawn legs: the warrant chosen by `keepsClassWarrant` (road_junction.dart:379-380; the class-only warrant for the generator's junctions, the leg-aware one where the road tool had a hand), with the player's nearest override within 6 m applied. We map it to a kind by §3.2 and never re-evaluate it, so the tiles, the routed model and the agents all read one answer.
 
 **`SignalPlan`** (`node_control.dart`):
 - **Phase grouping.** Inbound legs are grouped into axes: a leg joins axis 0 when `|cos(heading − h₀)| ≥ cos 45°`, where h₀ is leg 0's heading; otherwise it joins axis 1. If the result is degenerate (for example three legs within 90°), each leg gets its own phase.
@@ -619,7 +635,7 @@ For node N with in-edges I and out-edges O.
 **Ownership.**
 - Signal state belongs to the simulation's agent clock. It is not stored: it is a function of `timeUs`.
 - The renderer draws heads from `TrafficNetColumns.heads` (per revision) through `SignalPlan.stateAt(renderTimeUs)` (§13.6).
-- The tiles' epoch-parity lamps (road_mesher.dart:1394-1398) stay until C3 lands.
+- The tiles' epoch-parity lamps (road_mesher.dart:1431-1435) stay until C3 lands.
 
 ### 3.8 Revision and invalidation
 
@@ -627,7 +643,7 @@ For node N with in-edges I and out-edges O.
 - `graph` is the `RoadGraph` object, compared with `identical`.
 - `stubsRev` and `stopsRev` are ours, bumped by our tools and hooks.
 - **Polling.** `agents.advance` first compares `city.roadsRevision` (city_sim.dart:425) and `layout.version` (city_layout.dart:116) with the values it last saw. It fetches `city.roadGraph` only when either has moved.
-- There is no hash of the junction overrides. `setJunctionOverride` moves `roadsRevision` (city_sim.dart:4004), and the graph carries the resulting plans.
+- There is no hash of the junction overrides. `setJunctionOverride` moves `roadsRevision` (city_sim.dart:4035), and the graph carries the resulting plans.
 
 **When the key moves.** At the start of the next `advance`, before its first sub-step:
 
@@ -641,11 +657,11 @@ For node N with in-edges I and out-edges O.
 **Build cost.** The derivation is O(edges + connectors), with no clustering of its own. Target: ≤ 5 ms for 2,000 roads, confirmed by the slice-1 benchmark (§15.5).
 - `RoadGraph.of`'s own cost is paid by the road agent's model on every edit, whether or not agents exist.
 - Above `graphBuildInlineMaxRoads = 3000`, `LaneGraphBuilder` runs resumably across advances. Its phases are edges → lanes → connectors → conflicts → controls, each budgeted by item count. The old lane graph keeps running meanwhile, and new spawns wait.
-- In batch generation (`regenerateLots: false`, city_layout.dart:406, 616) nothing ticks, so no rebuild storm occurs.
+- In batch generation (`regenerateLots: false`, city_layout.dart:434, 644) nothing ticks, so no rebuild storm occurs.
 
 ### 3.9 Road-split lineage and route remap
 
-**Why remapping is possible.** Split pieces are named `'${id}x$i'`, numbered along the parent after slivers under 8 m are dropped (city_layout.dart:955). The old `RoadGraph` holds the old roads' `IndexedRoad`s, whose lists are never mutated.
+**Why remapping is possible.** Split pieces are named `'${id}x$i'`, numbered along the parent after slivers under 8 m are dropped (city_layout.dart:983). The old `RoadGraph` holds the old roads' `IndexedRoad`s, whose lists are never mutated.
 
 **Children of an old road R** in the new graph:
 - Every new road whose id starts with `R.id + 'x'`. This covers nested chains such as `r5x1x0`.
@@ -654,11 +670,11 @@ For node N with in-edges I and out-edges O.
 - Children are ordered by `c0`.
 - A gap between children of up to 8.5 m (a dropped sliver) is bridged **only if** the two children share a node in the new graph.
 - **A re-laid road is not a child.**
-  - Adjust Roads lays new geometry under `childIdFor(id)`, which is `<id>x<k>` (city_layout.dart:900-908; city_sim.dart:3943-3967).
+  - Adjust Roads lays new geometry under `childIdFor(id)`, which is `<id>x<k>` (city_layout.dart:928-936; city_sim.dart:3974-3998).
   - A candidate whose ends do not both project within 0.5 m is treated as **a new road**. Every route through R fails its remap, because the network changed under it, and re-plans.
   - A vehicle on R stays only if its current position projects onto the new road within 0.5 m in the travelled direction. Otherwise it despawns (`despawnEdit`).
 
-**The same road id still present** (an attribute change; `upgradeRoad` keeps the id, city_layout.dart:817 ff.):
+**The same road id still present** (an attribute change; `upgradeRoad` keeps the id, city_layout.dart:845 ff.):
 - The edge maps to the same arc range if the direction still exists.
 - A reversal removes the old direction, so routes in it fail.
 - A changed lane count triggers the sticky lane repair (step 3).
@@ -692,8 +708,8 @@ For node N with in-edges I and out-edges O.
 - **Layout lots** (auto and hand-drawn): `g.lotPiece[i]`, `g.lotS[i]` and `g.lotDirs[i]`.
   - An auto lot hangs on its own frontage road at its frontage midpoint.
   - A hand-drawn lot hangs on the nearest road within 90 m of any part of its footprint.
-  - Both rules are at road_graph.dart:1129-1170.
-- **Grid sites** (utilities and grown cells placed with the 2D builder): `g.attachFootprint(parcelForCell(anchor, spec).polygon)` (city_sim.dart:4216). This is exactly what `CityRoadTraffic._gridSites` does, and the result is cached while `sharesStructureWith` holds.
+  - Both rules are at road_graph.dart:1162-1203.
+- **Grid sites** (utilities and grown cells placed with the 2D builder): `g.attachFootprint(parcelForCell(anchor, spec).polygon)` (city_sim.dart:4249). This is exactly what `CityRoadTraffic._gridSites` does, and the result is cached while `sharesStructureWith` holds.
 
 **The lot's side.** It is computed from the lot centroid against the road polyline at `lotS`: a negative cross is the right of the polyline direction.
 - Never use the `'r'`/`'l'` letter in the lot id, which is backwards (road-topology trap 14).
@@ -800,7 +816,8 @@ So "measured at plan time" means measured at most 2 s before the search started.
 - `load(e) = D/(D + len/limit)`, in [0, 1), for the traffic view.
 - `laneSpeedPct[l]`: a 60 s EMA of the mean `v/limit` of vehicles on lane `l`, quantised 0–100 into a `Uint8`.
 - `congestionIndex = 1 − (distance driven)/(distance at the limit over the same vehicle-time)`, as an EMA over 60 s. It needs no delay table, so it ships in **slice 1**. It is CS's "traffic flow" inverted: the HUD shows Flow = 1 − index.
-- `congestionIndex` is written into `CitySim.parcelCongestion` (city_sim.dart:3335) from slice 1. The HUD row (city_game_hud.dart:537-538) therefore keeps working unchanged.
+- **Per road**, for the readout (D46): `congestionOf(road)` is the congestion index over the road's worst piece in the last 60 s window, and `volumeOf(road)` the vehicles through its busiest piece in the last 600 s.
+- The readout publishes `averageCongestion = congestionIndex` and `peakCongestion` = the worst road's `congestionOf`. `advanceParcelTraffic` (city_sim.dart:4137-4172, unchanged) turns them into `parcelCongestion` (3335) = `0.5·(peak + average)` once `hasRun` (4143-4148). From slice 1 the HUD row (city_game_hud.dart:582-583) therefore shows measured congestion with no code change.
 
 ### 4.3 Heuristic and ties
 
@@ -1053,9 +1070,10 @@ At signals this is the permissive left. It applies equally at stop and priority 
 **Stop (minor legs) and priority:**
 - Stopping legs halt, then accept a gap. The gap needs every conflicting higher-rank connector (`RoadTier.rank`, parcel.dart:471-481) unoccupied, with no approaching vehicle at ETA < 4.0 s.
 - Priority legs go subject to the box check, an unoccupied conflict set, and, for lefts, the opposing gap.
-- Alley and path approaches are always minor.
+- **A leg outside the plan** (an alley or a path, §3.7) gives way to every drawn leg at every control. It halts at its line and takes a gap as a stopping leg does, against every conflicting drawn connector whatever its rank. Among themselves such legs follow the uncontrolled rules below. The arbiter reads `RoadNode.plan` as it is and computes no plan of its own (D48).
 
-**Uncontrolled nodes** (`uncontrolled`, §3.2; not expected with `RoadGraph`'s legs, but defined):
+**Uncontrolled nodes** (`uncontrolled`, §3.2: three or more legs, fewer than three of them drawn, such as a street seam with an alley):
+- Legs outside the plan give way to drawn legs first (above).
 - A lower-rank approach yields to a higher-rank one.
 - Among equal ranks, the right-hand rule applies: yield to conflicts coming from the right.
 - Lefts also take the opposing gap.
@@ -1095,7 +1113,7 @@ At signals this is the permissive left. It applies equally at stop and priority 
   - in `holdAtEdgeEnd` while its re-plan request is still queued (§3.9).
   So a fire engine fighting a large fire for 300 s, or a bus boarding a crowd, is never despawned.
 - **Despawn** at `stuckDespawnS = 120` s of agent time (a knob, 30–600): "despawning hides mistakes". The vehicle is unlinked, its reservations freed and its route block returned.
-- **Accounting.** `stats.despawnStuck` and `edgeStuckCount[e]` go up; the latter feeds the red dots in the traffic view. No `DomainEvent` is raised, because the event list is capped at 64 per frame (simulation_view.dart:1750).
+- **Accounting.** `stats.despawnStuck` and `edgeStuckCount[e]` go up; the latter feeds the red dots in the traffic view. No `DomainEvent` is raised, because the event list is capped at 64 per frame (simulation_view.dart:1758).
 - **What happens to the owner:**
   - **Citizen:** placed at the destination, and the trip counts as **failed** (§6.2 commute efficiency).
     - Their car is **garaged**, exactly as in a parking give-up (§7.3 step 5). It becomes a virtual row that is never drawn and takes no kerb or lot space.
@@ -1113,7 +1131,7 @@ At signals this is the permissive left. It applies equally at stop and priority 
 - **`eventSimWarp`** (0.4–2.1) scales dt before it reaches us, as it does for everything else.
 
 **The frame hold (D35).**
-- **The problem.** The host runs up to 25 ticks in one frame when time has piled up (simulation_view.dart:1926-1942; fixed step 0.02 s, simulation_clock.dart:27). At 25× or more each tick is dt 0.5 s (simulation_clock.dart:31). So one catch-up frame can owe 12.5 s of city time: about 62 sub-steps, ≈ 50 ms at the §15.1 cost per sub-step. A long frame then owes more ticks, which feeds the step spiral.
+- **The problem.** The host runs up to 25 ticks in one frame when time has piled up (simulation_view.dart:1934-1950; fixed step 0.02 s, simulation_clock.dart:27). At 25× or more each tick is dt 0.5 s (simulation_clock.dart:31). So one catch-up frame can owe 12.5 s of city time: about 62 sub-steps, ≈ 50 ms at the §15.1 cost per sub-step. A long frame then owes more ticks, which feeds the step spiral.
 - **The hold.** The host marks an agent colony with `agents.frameBudgeted = true`; `SimulationView` does this for its injected City Builder colony (E26).
   - Every `CitySim.advance(simDt)` of that colony is then **queued whole** by `holdTick` (E3b) instead of run.
   - After the tick loop the host calls `agents.endFrame()` (E26). It replays queued ticks, oldest first, while the frame's budget of `maxAgentSubStepsPerFrame = 4` agent sub-steps allows, counting each tick's sub-steps exactly from `accumUs`.
@@ -1129,7 +1147,7 @@ At signals this is the permissive left. It applies equally at stop and priority 
 - The generator's single `advance(0.1)` (city_generator.dart:472) and `fromJson` spawn nothing. A generated colony gets agents only in slice 11, after generation. A restored colony starts its spawn ramp.
 - `warmupS = 10` s ramps `maxSpawnsPerStep` from 0.
 
-**Pause** (warp 0) runs no ticks (simulation_view.dart:1932), so the agents freeze exactly.
+**Pause** (warp 0) runs no ticks (simulation_view.dart:1940), so the agents freeze exactly.
 
 ### 5.8 Deadlock avoidance, summarised
 
@@ -1148,7 +1166,7 @@ At signals this is the permissive left. It applies equally at stop and priority 
 
 ### 6.1 The time-scale decision
 
-- **Vehicles move at real speeds.** City Builder opens at 1× (simulation_view.dart:1615), so cars must look right there: a street's 40 km/h is 11.1 m/s.
+- **Vehicles move at real speeds.** City Builder opens at 1× (simulation_view.dart:1623), so cars must look right there: a street's 40 km/h is 11.1 m/s.
 - **The colony's day** is `dayLengthSec` (city_sim.dart:1150): 120 s for an Earth-like rotation, scaled by the body's rotation to 20–1200 s. A 1.5 km commute takes about 140 s, longer than an Earth-like day.
 - **So activities run on dwell timers in agent seconds, not on `dayPhase`.** `dayPhase` only *modulates* departure rates, as rush-hour flavour:
 
@@ -1171,14 +1189,14 @@ At signals this is the permissive left. It applies equally at stop and priority 
 |---|---|
 | `migrationBudget` | E9. Migration (city_sim.dart:1564-1576) is computed exactly as today, but only its **delta** is added. |
 | `deathBudget` | E8. `died` from 1482. |
-| `externalBudget` | Any change to `population` the agents did not make: a revolt (1853), disasters (2298-2448), a relief crew (4919), a test setting `city.population = 200`, a save load. At the start of each `agents.advance`, `ext = population − lastWrittenPopulation` is added here. |
+| `externalBudget` | Any change to `population` the agents did not make: a revolt (1853), disasters (2298-2448), a relief crew (4952), a test setting `city.population = 200`, a save load. At the start of each `agents.advance`, `ext = population − lastWrittenPopulation` is added here. |
 | `pendingFraction` | The part of each budget smaller than one person |
 
 **Realisation,** on each sub-step in which a budget holds a whole person:
 
 - **Arrival (+1): spawn a citizen.**
   - Home: a building with a vacancy, drawn by `TrafficRng` weighted by vacancy, in stable building order; `home = −1` (homeless) if there is none.
-  - Entry point: drawn between the spaceport and the resolved stubs. The spaceport is weighted by `padCountOf` (city_sim.dart:4696-4700), each stub by `2·classFactor(stub)` (§10.4).
+  - Entry point: drawn between the spaceport and the resolved stubs. The spaceport is weighted by `padCountOf` (city_sim.dart:4729-4733), each stub by `2·classFactor(stub)` (§10.4).
   - The citizen starts `movingIn`. That is either a car trip from a stub to the new home (an inbound stub vehicle that parks at home, §7.3, §10.4), or a walk from the pad's access point (a rover on sealed worlds). They **count in population from the moment they are spawned**.
   - At most `max(4, 0.02·count)` spawns per sync; the rest waits in the budget.
 - **Departure (−1): remove a citizen.**
@@ -1247,7 +1265,7 @@ At signals this is the permissive left. It applies equally at stop and priority 
 
 ### 6.6 Car ownership
 
-- **At arrival:** `hasCar = rng < carOwnership`. The default is 0.75 on breathable worlds and 0.6 on sealed ones, where the vehicle drawn is a rover (city_traffic.dart:497).
+- **At arrival:** `hasCar = rng < carOwnership`. The default is 0.75 on breathable worlds and 0.6 on sealed ones, where the vehicle drawn is a rover (city_traffic.dart:520).
 - **Where a new car goes:** a parked car at home, in the home lot if it has room, otherwise at a kerb slot within 150 m, otherwise `garaged` (a virtual space that is never drawn).
 - Buying and selling cars is out of scope.
 
@@ -1340,8 +1358,8 @@ Nothing is reserved at plan time. A car trip ends at the destination's access po
   - Lot cars go on the **same bay grid** that `LotFeatures.emitLot` lays: ranks, bay width and depth, the driveway gap (lot_features.dart:305-352). The grid is computed by a positions-only port in `agent_nodes.dart`, pinned by a test against `emitLot`'s bay count.
   - One instanced slot per model is rewritten only when the columns change.
 - **Baked parked cars go, all of them, in slice 4.**
-  - Baked kerb cars follow `CityNodes.onStreetParking` (city_tile_mesher.dart:1690-1699).
-  - Baked lot cars follow the parked-car ceiling (`_carBudget = knobs.maxParkedCars`, city_tile_mesher.dart:815 and 1369-1394), which E36 turns into the settable static `CityNodes.maxParkedCars`.
+  - Baked kerb cars follow `CityNodes.onStreetParking` (city_tile_mesher.dart:1718-1727).
+  - Baked lot cars follow the parked-car ceiling (`_carBudget = knobs.maxParkedCars`, city_tile_mesher.dart:815 and 1379-1404), which E36 turns into the settable static `CityNodes.maxParkedCars`.
   - Both are read only when a tile request is built (city_nodes.dart:612-624), and neither is in the base-tile key (D32). Flipping them later would leave already-built tiles as they were.
   - So E26 sets `onStreetParking = false` and `maxParkedCars = 0` **before the first frame** of an agent colony. City Builder hands its colony to `SimulationView` before any tile is requested.
   - A mid-session enable (the drawer button, §19.2 Q6) calls `CityNodes.invalidate()` once, paying one full re-cut and re-stream.
@@ -1355,16 +1373,16 @@ Nothing is reserved at plan time. A car trip ends at the destination's access po
 
 ### 8.1 The pavement graph (`PedestrianGraph`, built with the lane graph)
 
-- **Pavements.** For every road with `hasPavement && paved && !sealed` (the renderer's walked predicate, city_tile_mesher.dart:1606), the graph has **two** undirected pavement edges, left and right, at a lateral of ±(halfWidth + 2.3) m.
-  - That is inside the 3 m raised pavement (road_mesher.dart:845-900), and outside the street-furniture band at 0.66–1.65 m from the kerb (street_furniture.dart:58-66).
+- **Pavements.** For every road with `hasPavement && paved && !sealed` (the renderer's walked predicate, city_tile_mesher.dart:1634), the graph has **two** undirected pavement edges, left and right, at a lateral of ±(halfWidth + 2.3) m.
+  - That is inside the 3 m raised pavement (road_mesher.dart:853-908), and outside the street-furniture band at 0.66–1.65 m from the kerb (street_furniture.dart:58-66).
 - **Sealed roads.** One tube edge on the **right-hand side only**, at `halfWidth + 1.7 + 1.0` (pedestrian_tube.dart:57). Walkers use the tube in both directions.
   - Buildings on the far side reach it through node crossings, which are drawn as nothing (an underpass).
 - **Paths** (`RoadClass.path`) are walked along their centreline. **Alleys** are walked on the carriageway, at 1.5× cost.
 - **Corner nodes.**
   - At each lane-graph node there is one corner node between each pair of adjacent legs, sorted by heading.
-  - Pavement ends pull back to the corner at `halfWidth × 1.45 + 5.5` (city_tile_mesher.dart:1601).
+  - Pavement ends pull back to the corner at `halfWidth × 1.45 + 5.5` (city_tile_mesher.dart:1629).
 - **Crossings.** One crossing edge spans each junction leg, joining the corners either side of it. Its length is the leg's width plus 2 m.
-  - At `signals` nodes the crossing walks on the parallel phase. Zebras are drawn only there (road_mesher.dart:1365-1374).
+  - At `signals` nodes the crossing walks on the parallel phase. Zebras are drawn only there (road_mesher.dart:1402-1411).
   - At stop, none and roundabout nodes it is uncontrolled. The crossing exists in the graph even though nothing is drawn, as in CS1.
 - There are **no mid-block crossings and no jaywalking.**
 - **Building entrances** are points on the pavement edge on the building's side, at `accessS`. Manual sites use their gate.
@@ -1436,7 +1454,7 @@ What follows from the two constraints:
   - `homelessNear_b` is the number of homeless citizens whose `sleepsNear` is b, over `max(1, occupants_b)`, capped at 1.
 - **The fleet is scaled by staffing:** `fleetAvail = round(fleet × min(1, workers_b/jobs_b))`. Before slice 10 that is the global `staffing`.
 - **Fleet upkeep:** 0.02 § per vehicle-second on the road, from slice 8, inside `agents.fundsRate` (E5b). Buses and trains carry their own upkeep (§11.3, §11.7).
-- **Fire ignition is new in normal play.** Today a parcel lot ignites only from the fire disaster (city_sim.dart:4150-4156). Under the fire flag, `agents.advanceLotFires` also runs the per-building ignition above. That is a balance change (§19.1).
+- **Fire ignition is new in normal play.** Today a parcel lot ignites only from the fire disaster (city_sim.dart:4181-4187). Under the fire flag, `agents.advanceLotFires` also runs the per-building ignition above. That is a balance change (§19.1).
 
 ### 9.3 Requests and dispatch
 
@@ -1479,10 +1497,10 @@ What follows from the two constraints:
   - **Growth:** `next = intensity + (kFireGrow − kFireSuppress·engines(id))·dt`, with `kFireGrow = 0.0025/s` (burn-out in about 6.7 min without an engine) and `kFireSuppress = 0.01/s` per engine on scene.
   - **Engines wanted** follow intensity (§9.2), and dispatch fills the difference.
   - **Burn-out** at 1.0 removes the building as today (`parcelBuildings`, `grownParcels`). A fire is put out at ≤ 0.
-  - **Spread** to built lots within 30 m, with probability `next × 0.15 × 0.01 × dt` per neighbour per step, drawn from `TrafficRng` in lot-id order. Today's spread draws unseeded `math.Random()` (city_sim.dart:4190); this is what makes lot fires deterministic.
+  - **Spread** to built lots within 30 m, with probability `next × 0.15 × 0.01 × dt` per neighbour per step, drawn from `TrafficRng` in lot-id order. Today's spread draws unseeded `math.Random()` (city_sim.dart:4223); this is what makes lot fires deterministic.
   - **Ignition**, per §9.2.
   - **Engines stay** until the lot's fire is out or burned out (their dwell rule; `stuckT` frozen, §5.6), then return.
-  - Colonies without the flag keep today's step, including the road agent's reach factor (4171). The existing fire test (parcel_growth_test.dart:171-194) is unchanged.
+  - Colonies without the flag keep today's step, including its reach factor, which reads `trafficReadout.fireReach` (4204). That counts only stations with safety cover (`TrafficRole.fightsFires`, road_traffic_model.dart:149-152), so a clinic's ambulance is no fire cover (1d2e78d). In an agent colony before slice 7 the answer is the routed model's in slice 1 and the agents' own from slice 2, by the same rule (D47). The existing fire test (parcel_growth_test.dart:171-194) is unchanged.
 - **Health.** An ambulance takes the patient to the nearest depot that has a free bed (beds = `services.health / 20`: clinic 4, hospital 10, emergency 3). Treatment takes 60 s.
   - Treatment succeeds with probability `medCov = stockOf(medicine)/(medDemand + 0.01)`, which is the gate at city_sim.dart:1261-1272 recomputed over the building table.
   - Otherwise the patient goes home still sick, and counts ×5 in the death-assignment weights.
@@ -1505,7 +1523,7 @@ What follows from the two constraints:
 | `goodsShortage` (new, slice 8) | The jobs-weighted share of commercial buildings whose goods buffer is empty, as a 300 s EMA. |
 | `happinessDrag` (E34) | `0.15·mailBacklog + 0.15·goodsShortage`. |
 | fire suppression | Per lot, from engines on scene (E11) |
-| `parcelCongestion` (3335) | `stats.congestionIndex` (§4.2), from slice 1 |
+| `parcelCongestion` (3335) | Written by `advanceParcelTraffic`, unchanged, from the agents' readout: `0.5·(peak + average)` of measured congestion (§4.2, D46), from slice 1 |
 
 **Safety.** Under the police flag, `services['safety']` is replaced outright.
 - **Every passive safety term is retired:**
@@ -1515,7 +1533,7 @@ What follows from the two constraints:
 - **`policeCoverage`** is a 600 s EMA of the occupant-weighted share of police calls answered within 300 s of their stamp.
   - With no calls in the window, it is 1 if the colony has a police depot with `fleetAvail > 0`, and 0 otherwise.
   - So a colony with no Police Station reads 0 from the first tick, and coverage rises only as police cars arrive.
-- **Its readers** are `serviceCoverage` (city_sim.dart:2820-2829) and, while the fire flag is off, lot-fire suppression (4162-4164).
+- **Its readers** are `serviceCoverage` (city_sim.dart:2820-2829) and, while the fire flag is off, lot-fire suppression (4193-4195).
 
 **Crime.** The target formula at 1822-1825 is replaced by:
 - `Σ_b occ_b·min(1, crime_b/3) / Σ_b occ_b`, where a building with 3 unanswered calls counts as fully criminal;
@@ -1538,7 +1556,7 @@ What follows from the two constraints:
 | police | **Every** passive term in `services['safety']`: Police Station, Emergency Services and the four military specs. The crime target formula (1822-1825). |
 | mail | Nothing (new) |
 | health | The clinic, hospital and emergency terms in `services['health']` |
-| fire | The city-wide lot-fire step (4158-4200), including the road agent's reach factor, and its unseeded spread |
+| fire | The city-wide lot-fire step (4189-4233), including its `fireReach` factor, and its unseeded spread |
 
 The flags are `agents.serves(kind)`, all on for agent colonies once their slice lands.
 
@@ -1555,12 +1573,13 @@ Every `unlockPop` sits on a milestone rung (city_progression.dart: 0/60/80/120/2
 | Bus Depot | `busdepot` | `transport` | 20 | 10 | 60 | 120 | 180×90 m |
 | Cargo Terminal | `cargoterminal` | `transport` | 30 | 12 | 120 | 200 | 300×160 m, `storageBonus: 600` (goods) |
 
-- `kDepotByLabel` in `service_dispatch.dart` is keyed by **label**. Labels are the persistence key (the `utils` map in `toJson`, city_sim.dart:4366-4368, and the lot buildings), and types collide.
+- `kDepotByLabel` in `service_dispatch.dart` is keyed by **label**. Labels are the persistence key (the `utils` map in `toJson`, city_sim.dart:4399-4401, and the lot buildings), and types collide.
 - **Site-claiming specs are swept by existing tests.** Bus Depot and Cargo Terminal claim their own site (`claimsOwnSite = siteWidthM > 0`, city_building_spec.dart:135).
   - `installation_massing_test.dart:92-117` iterates every `kUtilCatalog` spec. It requires finite volumes inside the site at scales 1.0, 0.3 and 0.05.
   - `installation_parking_test.dart:31` iterates every site-claiming spec.
   - So E22 adds a massing rule (a depot shed plus a yard) and a parking rule for each, in the rule tables those tests read (`building_massing.dart`). Both tests stay green (§17.5).
 - `docs/REFERENCE.md` is regenerated with `test/tools/gen_reference_test.dart` in the same commit (C11).
+- **Fire Station declares a `safety` service term**, as Emergency Services does. In a colony without agents that is what makes it fire cover: the lot-fire step suppresses by `services['safety']` (city_sim.dart:4193-4195), and `fireReach` counts only stations with it (`TrafficRole.fightsFires`, road_traffic_model.dart:149-152). Under the police flag the term is retired with the other passive safety terms (D37), and engines do the work (§9.4).
 
 ---
 
@@ -1583,6 +1602,7 @@ Every `unlockPop` sits on a milestone rung (city_progression.dart: 0/60/80/120/2
 - **Loads.** A truck or delivery van carries 20 u. Imports and exports run as semis carrying 60 u.
 - **Exports.** An industrial building with at least 20 u and no local request for 30 s ships to a warehouse or Cargo Terminal with room. Failing that it ships to a stub, as an **export**.
 - **No path.** The next supplier or customer by the same score, then a 60 s back-off (§4.8).
+- **Delivery reach**, the growth gate on shops and works (city_sim.dart:4112-4113), stays a reach question: the routed model's in slice 1, the agents' own from slice 2 (D46), by one rule. Goods reach a lot only from another lot's source. A works' own goods, and its own lorries turning at the node beside it, are no delivery (e608e35; road_traffic_model.dart:521-537), so a works on a street nothing else reaches the right way round declines like a shop there.
 - **Scale check.** 10 `i-med` buildings (28 jobs each) make 0.56 u/s. That is 0.028 truck trips/s, or about 8 trucks moving at a 300 s trip.
 
 ### 10.3 Money (behind the `freightEconomy` flag)
@@ -1591,7 +1611,7 @@ Every `unlockPop` sits on a milestone rung (city_progression.dart: 0/60/80/120/2
 - An import costs **−1.2 §/u** when dispatched, and is lost if the truck despawns.
 - Service fleet upkeep (§9.2), bus upkeep (§11.3) and train upkeep (§11.7) are charged in the same `agents.fundsRate`.
 - The funds line becomes `funds += (taxIncomeRate + lawUpkeepRate - roadUpkeepRate + agents.fundsRate) * dt;` (E5b, city_sim.dart:1538), and `netFundsRate` (405) agrees.
-- A new display field, `tradeIncomeRate`, joins the Budget drawer (city_game_hud.dart:483-540) through E29.
+- A new display field, `tradeIncomeRate`, joins the Budget drawer (city_game_hud.dart:515-585) through E29.
 - **Balance check.** The existing tax is `workforce·h·tax·0.05` (about 2.25 §/s at 500 workers). Against that, 0.56 u/s of exports is about 0.45 §/s: a real but secondary income. `freight_balance_test` pins a mid-size colony's funds trend over 3,600 s to within ±20% of the same colony without freight.
 
 ### 10.4 The outside-connection stub
@@ -1729,7 +1749,7 @@ The tool is `TrafficToolController` in `traffic_tools.dart` (D22).
   - `setVehicles(lineId, n)` (buses or trains);
   - `deleteLine(id)`;
   - `toggleStub(CitySim, hit)`.
-- **Sub-row widget.** Follows the pattern of `_splineRow` (city_edit_overlay.dart:547-648): the line list, a vehicle-count stepper, a colour swatch, and tick and cross buttons. It lives in *our* file, and until C4 lands it is opened from the HUD's Transit drawer.
+- **Sub-row widget.** Follows the pattern of their `TrafficToolPanel` (road_tool_panel.dart:461-588), a row of mode chips over a row for the mode. Ours holds the line list, a vehicle-count stepper, a colour swatch, and tick and cross buttons. It lives in *our* file and opens from the HUD's Transit drawer; a button in their toolbar is a request (C4).
 - **Preview.** Pending stops draw as rings and the routed legs as a dashed ribbon in the line's colour, through `TrafficOverlayState`, never `RoadOverlayState`. Hover runs through E27's early return.
 
 ### 11.6 Transit and happiness
@@ -1761,7 +1781,7 @@ Decision 3 puts every mode in scope, and the game already has a railway (`RoadCl
 - **Freight rail** (knob `freightRail`, default off): freight trains between a Freight Yard and a rail stub at a free rail end. A rail stub is marked like a road stub (§10.4). Freight trains carry imports and exports in place of semis.
 - **Rendering.**
   - Train agents use the existing rail car and train meshes: `_railCarMesh` and `ElevatedStructure.emitTrainCar`, as the cosmetic pass draws them in `_syncTraffic`.
-  - The cosmetic trains are hidden for agent bodies through C9. If C9 has not landed, a fifth E20 hunk skips `sink.railCars` and `sink.trainCars` for bodies in `snap.cityTraffic` (city_nodes.dart:2166-2185).
+  - The cosmetic trains are hidden for agent bodies through C9. If C9 has not landed, a fifth E20 hunk skips `sink.railCars` and `sink.trainCars` for bodies in `snap.cityTraffic` (city_nodes.dart:2184-2203).
 - **Rules.** Trains follow the same determinism, allocation and locked-route rules as every other agent.
 
 ---
@@ -1789,18 +1809,19 @@ Line numbers are those of `CitySim.advance` on dev (city_sim.dart:1176-1720). "p
 | 11 `socialTick` and the others | 1425-1441 | In `socialTick`, E35 replaces the crime target under the police flag (1826) |
 | 12 Mortality | 1443-1490 | `deathRate` formula unchanged. E8: `died` goes to the ledger; `corpses = agents.corpseTotal` (prev); `careRate` skipped. |
 | 13 Happiness | 1492-1519 | Formula unchanged, plus E34's `agents.happinessDrag` in `socialDrag` (1499-1506). Reads the derived scalars and `transitBonus()` (E10). |
-| 14 Tax and research | 1521-1543 | Unchanged. The road agent's land-value factor (1530) stays. E5b adds `agents.fundsRate` at 1538, from slice 8. |
+| 14 Tax and research | 1521-1543 | Unchanged. The land-value factor (1530) reads `trafficReadout.taxLandValueFactor`: the routed model's through the readout in slice 1, the agents' own from slice 2 (D46). E5b adds `agents.fundsRate` at 1538, from slice 8. |
 | 15 Population | 1545-1576 | E9: the migration delta goes to the ledger when `ownsPopulation` |
 | 16 RCI | 1578-1596 | Unchanged |
 | 17 Grid growth | 1598-1671 | Unchanged |
-| 18 Parcel dynamics | 1673-1678 | See the four bullets below |
+| 18 Parcel dynamics | 1673-1678 | See the bullets below |
 | 19 Cap sweep, milestones | 1680 onward | Unchanged. Garbage is no longer in `stock`, so the sweep cannot delete it. |
 
 Step 18 in detail:
-- `roadTraffic.advance(dt)` (theirs, 1675) is unchanged.
-- `advanceParcelGrowth(dt)` (1676) reads their `deliveryReach` and `noiseOf`.
-- **E3a** (1677) runs `agents.advance(dt)` in place of `advanceParcelTraffic()`.
-- `advanceParcelFires(dt)` (1678) contains E11.
+- `roadTraffic.advance(dt)` (theirs, 1675) runs in slice 1. From slice 2, E3a skips it in agent colonies.
+- **E3a**, right after it: `if (agents.enabled) agents.advance(dt);`.
+- `advanceParcelGrowth(dt)` (1676) reads `trafficReadout.deliveryReach` and `noiseOf` (4113, 4125): the routed model's answers in slice 1, the agents' own from slice 2.
+- `advanceParcelTraffic()` (1677) is unchanged. It reads `trafficReadout` (4143-4148), so it writes `parcelCongestion` from the agents' measured congestion.
+- `advanceParcelFires(dt)` (1678) contains E11. Until the fire flag, its reach factor reads `trafficReadout.fireReach` (4204).
 
 ### 12.2 What `agents.advance(dt)` does, in order
 
@@ -1810,7 +1831,7 @@ Step 18 in detail:
 4. **Integrate accumulators** by `dt` for every flagged service (§9.2), including fire ignition under the fire flag. This is per building, O(buildings), with no allocation.
 5. **Run the sub-step loop** (§5.1–5.2), which includes ledger realisation, dispatch, and the visitor, through and freight schedules.
 6. **Process depot buffers** (§9.4).
-7. **Roll up statistics**, then publish the derived scalars and coverage numbers for the next tick's hooks: `parcelCongestion`, `commuteEff`, `wasteBacklog`, `corpseTotal`, `policeCoverage`, `crimeTarget`, `treatedShare`, `mailBacklog`, `goodsShortage`, `happinessDrag`, `transitBonus`, `fundsRate`, `depotRun`.
+7. **Roll up statistics**, then publish the readout's picture when a congestion epoch completes (D47), and the derived scalars and coverage numbers for the next tick's hooks: `commuteEff`, `wasteBacklog`, `corpseTotal`, `policeCoverage`, `crimeTarget`, `treatedShare`, `mailBacklog`, `goodsShortage`, `happinessDrag`, `transitBonus`, `fundsRate`, `depotRun`.
 8. **Write back** `population` (§6.2).
 9. **Report timing** through `TrafficMetrics` (reporting only).
 
@@ -1818,8 +1839,8 @@ Step 18 in detail:
 
 | Today | Becomes (flag / slice) |
 |---|---|
-| `advanceParcelTraffic()` (called at 1677; body 4105-4141, including its routed-model branch) | `agents.advance(dt)` (enabled, slice 1). Kept in place for non-agent colonies until slice 11 turns agents on everywhere. |
-| `parcelCongestion` (3335) | Written by the agents from **slice 1**: `stats.congestionIndex`, measured from vehicle speeds (§4.2) |
+| `advanceParcelTraffic()` (called at 1677; body 4137-4172) | **Kept, unchanged** (revision 3). Its readout branch (4143-4148) reads `trafficReadout`, the agents' in an agent colony (E37), so from slice 1 it writes their measured congestion. Its frontage-local fallback runs only before a first picture. |
+| `parcelCongestion` (3335) | From **slice 1**: `0.5·(peak + average)` of the agents' measured congestion, written by `advanceParcelTraffic` from the readout (§4.2) |
 | `commuteEff = 1 − max(congestion, parcelCongestion)·0.4` (1244) | From **slice 1** (E4): `stats.commuteEff = clamp(1 − 0.4·(0.5·(tripRatio − 1) + failedShare), 0.6, 1)`. `tripRatio` is an EMA of actual/free-flow time over completed commutes, capped at 3; `CommuteSynth` trips feed it in slices 1–2. `failedShare` is the despawned share of commutes over the last 600 s. Grid `congestion` is ignored in agent colonies. |
 | `workforce = min(pop, jobs)` (1238) | Slice 10: `Σ_b min(present_b + recentlyArrived_b, jobs_b)`. A job nobody can reach is an unfilled job. |
 | Staffing (1248-1255) | Slice 10: per building, `staff_b = present_b/jobs_b`, applied as `uf × staff_b` in the parcel production loop. This is part of E6's line, keyed by spec plus a per-building staffing lookup. The global `staffing` becomes the job-weighted mean, for the UI. |
@@ -1829,19 +1850,24 @@ Step 18 in detail:
 | Crime target (1822-1825) | E35 (slice 6): from the per-building accumulators (§9.5) |
 | `services['safety']` | E5 (slice 6): `policeCoverage × pop`, every passive term retired (§9.5) |
 | Waste (1405-1423), corpses (1482-1490) | E7 and E8 (slice 5) |
-| Lot fires (4158-4200) | E11 (slice 7) |
-| HUD Congestion (city_game_hud.dart:537-538) | Code unchanged; it reads the agent-fed `parcelCongestion` |
+| Lot fires (4189-4233) | E11 (slice 7) |
+| HUD Congestion (city_game_hud.dart:582-583) | Code unchanged; it reads the agent-fed `parcelCongestion` |
 | Status-panel congestion (city_panels.dart:191-211) | E30: reads `parcelCongestion` when the agents are enabled |
 
-**Beside the routed model (D43, C2).** In an agent colony:
-- **Unchanged:** `roadTraffic.advance(dt)` still runs. Its `deliveryReach` still gates commercial and industrial growth (4080-4085), its `noiseOf` still slows homes (4092-4095), and its land value still scales tax (1530).
-- **Unused:** its congestion never reaches `parcelCongestion`, because E3a skips `advanceParcelTraffic`. Its fire reach is replaced under the fire flag (E11).
-- **Residual:** noise, land value and delivery reach are computed from the routed model's **assigned** volumes, not from agents. This stays until C7 lets agents supply measured volumes (§19.1 risk 11).
+**The readout (D46, D47, C2).** In an agent colony everything that reads traffic reads `CitySim.trafficReadout`, and E37 makes that `agents.readout`.
+- **Slice 1.** The agents answer `hasRun`, `peakCongestion`, `averageCongestion`, `congestionOf` and `volumeOf` (§4.2), `routesThrough` and `passes`.
+  - `routesThrough(road)` lists the live vehicles whose locked route uses the road. Each is a `TripRoute` (traffic_readout.dart:26-46): `TripKind` from the trip's purpose (commute → commuter; errands, visits and out-of-town trips → shopper; freight → goods; service, bus and train runs → service), weight 1 per vehicle, `roadIds` in route order with each visit once, and the whole route's polyline from `RoadGraph.polylineOf` (road_graph.dart:351-353). They come heaviest first, ties by handle, at most `limit`, filtered by `kinds`.
+  - The picture is taken at each congestion epoch (2 s), and `passes` moves with it.
+  - `serviceReach`, `fireReach`, `deliveryReach`, `noiseOf`, `landValueOf`, `averageLandValue` and `taxLandValueFactor` are forwarded to `city.roadTraffic`, which keeps advancing (1675). So that a forwarded answer that changes moves `passes` too, `passes` is `hasRun ? own + roadTraffic.passes : 0`; neither count ever goes back (road_traffic_model.dart:1712-1715).
+- **Slice 2.** The agents answer the rest, and E3a skips `roadTraffic.advance`.
+  - **Noise, land value and the tax factor.** Per piece, emission is `g.roadEmission[r] × RoadNoise.volumeFactor(c_p)` (road_graph.dart:247; road_noise.dart:46-51). `c_p` is the piece's measured load: the larger of its speed-based congestion and its flow against capacity (vehicles per lane-minute over the last 60 s against `AgentTuning.laneFlowPerMin = 30`, a lane at free flow). A lot's noise is `RoadNoiseSampler.noiseAt` over those emissions (road_noise.dart:110-136). Land value is `RoadNoise.landValue` with the frontage bonus and the colony's pollution. The tax factor is `RoadNoise.taxFactor` of the built lots' average without pollution, exactly 1 until a built lot is valued (road_noise.dart:99-100; road_traffic_model.dart:566-575).
+  - **Reach** (`agent_reach.dart`). Bounded multi-source searches over directed edges, run through the path budget's skim lane: `serviceReach` from every station that sends vehicles, `fireReach` from stations with safety cover only, and `deliveryReach` from every goods source but the lot's own (D47). The radius is the routed model's, `TrafficTuning.serviceReachM` (4 km).
+- **Nothing abstract is left.** From slice 2, no answer in an agent colony comes from assigned volumes. The old residual (C7) is resolved.
 
 ### 12.4 HUD and panel compatibility
 
 - **No field changes type.** Every scalar the UI reads still exists and is written every tick: `parcelCongestion`, `wasteBacklog`, `corpses`, `crime`, `homeless`, `services[...]`, `staffing`, `throttle`, `population`.
-- **New readouts** come from `agents.stats`. They are precomputed in the tick, because `CityGameHud` rebuilds every frame (city_game_hud.dart:88-90).
+- **New readouts** come from `agents.stats`. They are precomputed in the tick, because `CityGameHud` rebuilds every frame (city_game_hud.dart:90-92).
 
 ---
 
@@ -1931,7 +1957,7 @@ The domain publishes `TrafficNetColumns` per graph revision, holding everything 
 The simulation publishes `(elem, s, lat)`. The renderer maps these through the travel-order geometry. Reasons:
 
 1. **Frames and drape.** The domain has no terrain field, and per-agent ground queries are forbidden. Slicing the ribbon's own points puts cars **exactly on the paint**.
-2. **Precision.** Geometry is `Float64`, converted once per geometry identity to be anchor-relative on the body root's `anchorBF`, the same frame as `TrafficTile.build` (city_traffic.dart:421). `s` in `Float32` is exact to 1 mm on edges under 8 km.
+2. **Precision.** Geometry is `Float64`, converted once per geometry identity to be anchor-relative on the body root's `anchorBF`, the same frame as `TrafficTile.build` (city_traffic.dart:427). `s` in `Float32` is exact to 1 mm on edges under 8 km.
 3. **Payload.** About 30 B per agent, against 40 B or more for positions plus a basis. There is no conversion work in the domain or in capture.
 4. **Interpolation** is natural in `s` (§13.4).
 5. **Direction.** Edge polylines are **in travel order**. The renderer never flips anything; the only flip is the road agent's own on the wire.
@@ -1939,14 +1965,14 @@ The simulation publishes `(elem, s, lat)`. The renderer maps these through the t
 **Arc mismatch.** Simulation `s` is measured on the index polyline (2 m samples, or the two controls of a straight road). The geometry is the capture's 6 m samples through the same controls; the two differ by decimetres (road-topology trap 13). The pass maps `s_geom = s × cumGeom.last / simLen` per edge, a uniform rescale. For an edge of a reversed road, the offset is measured from the flipped start. The residual is centimetres of along-road error, never lateral.
 
 **Lift (one reference per road, D20):**
-- For an edge of a **deck** road: `L = RoadMesher.ribbonLiftM` (0.12, road_mesher.dart:185) `+ lifts[i]`, interpolated between samples from `RoadSnapshot.lifts`. The same numbers raise the ribbon.
+- For an edge of a **deck** road: `L = RoadMesher.ribbonLiftM` (0.12, road_mesher.dart:193) `+ lifts[i]`, interpolated between samples from `RoadSnapshot.lifts`. The same numbers raise the ribbon.
 - For an edge of a **draped** road: `L = ribbonLiftM + cls.deckHeightM + SprawlPlan.bridgeLiftAt(s, bridges)`. This is the cosmetic pass's own term (city_traffic.dart:257) plus the ribbon lift it missed (renderer trap 3: cars sat 0.12 m inside the asphalt).
-- For a connector: `plateLiftM` (0.16, road_mesher.dart:196) plus the end lifts, interpolated.
+- For a connector: `plateLiftM` (0.16, road_mesher.dart:204) plus the end lifts, interpolated.
 - `traffic_capture_test` pins our deck-road `L` to `RoadSnapshot.lifts`.
 
 **Lateral and basis:**
 - `fwd` = segment direction (travel order);
-- `up = normalize(p + anchorBF)` (radial, as city_traffic.dart:878-880);
+- `up = normalize(p + anchorBF)` (radial, as city_traffic.dart:919-921);
 - `side = fwd × up` (right of travel, determinant +1, never mirrored: instance_packing's mirrored path draws a second call);
 - `pos = p + side·(laneOff·scale(s) + lat) + up·lift`, where `scale(s) = hw(s)/hw` on a tapered stretch and 1 elsewhere (§3.4);
 - written with `TrafficRoad.writePose` (city_traffic.dart:302).
@@ -1958,7 +1984,7 @@ The simulation publishes `(elem, s, lat)`. The renderer maps these through the t
 `AgentTrafficPass` keeps `renderT` (seconds of agent time) per colony.
 
 - **Rate estimate.** On the first frame that carries a new `AgentFrame` identity, the pass records `(wallNow, cols.timeUs)`. `rate` is `Δ agent time / Δ wall time` over the samples from the last 0.5 s of wall time, as an EMA. That gives 1 at 1× and about 25 at the clamp.
-- **Why a frame without a tick is normal.** World ticks are a fixed 20 ms accumulated per frame (simulation_view.dart:1926-1937; simulation_clock.dart:27). So at 60 Hz about one frame in six runs no tick, and at 120–144 Hz most frames run none. A frame whose `snap.epoch` did not move is **not** a pause: `renderT` keeps advancing at the estimated rate.
+- **Why a frame without a tick is normal.** World ticks are a fixed 20 ms accumulated per frame (simulation_view.dart:1934-1945; simulation_clock.dart:27). So at 60 Hz about one frame in six runs no tick, and at 120–144 Hz most frames run none. A frame whose `snap.epoch` did not move is **not** a pause: `renderT` keeps advancing at the estimated rate.
 - **Pause.** `rate = 0` exactly when `SceneSync.simWarp ≤ 0` (E26, E28), the host's own warp.
 - **Stall guard.** If no new `AgentFrame` has arrived for 0.5 s of wall time while the warp is above 0 (a hitch, or a held frame queue), `renderT` is clamped to `t + h`, so cars never run away.
 - **Advance.** Each frame: `renderT += wallDt × rate`, then clamp `renderT` into `[t − h, t + h]`, where `t = cols.timeUs/1e6`. If it falls outside `[t − 2h, t + 2h]` (a hitch, a warp change, the first frame), snap it to `t`.
@@ -1979,13 +2005,13 @@ A vehicle on a connector is lerped along the connector's 8 Bézier points by `s/
 
 ### 13.6 Signal heads (`signal_head_layer.dart`)
 
-- **Why.** Tile junctions bake one head per signalised leg. The junction pass switches its lamps by epoch parity (road_mesher.dart:1394-1398), fed the epoch the tile was meshed at (city_tile_mesher.dart:1787). So a drawn light does not follow the simulation's signal clock.
+- **Why.** Tile junctions bake one head per signalised leg. The junction pass switches its lamps by epoch parity (road_mesher.dart:1431-1435), fed the epoch the tile was meshed at (city_tile_mesher.dart:1816). So a drawn light does not follow the simulation's signal clock.
 - **Geometry.** From `net.heads`:
-  - `corner = at + dir·r·0.98 + side·(hw + 1.6)` and `top = corner + up·4.6`, the mesher's own mast placement in `_crossing` (road_mesher.dart:1336-1400, with `r = maxHalfWidth × 1.45` at 1342);
+  - `corner = at + dir·r·0.98 + side·(hw + 1.6)` and `top = corner + up·4.6`, the mesher's own mast placement in `_crossing` (road_mesher.dart:1373-1437, with `r = maxHalfWidth × 1.45` at 1379);
   - `at` comes from the node position, lifted like the connectors (plate lift plus the end lifts).
 - **Drawing.** Three `InstancedMesh`es (red, amber, green lamp boxes), each with **one instance per head, always**.
   - A head not showing a colour gets a zero-scale matrix in that colour's mesh.
-  - Counts stay constant, so only `setInstanceTransform` runs and never the clear-and-re-add path (city_nodes.dart:2208).
+  - Counts stay constant, so only `setInstanceTransform` runs and never the clear-and-re-add path (city_nodes.dart:2226).
   - Lamps sit 0.4 m beside the baked box until C3 removes it.
 - **State.** `SignalPlan.stateAt(phaseOf(head), renderTimeUs)`: the **same function** the arbiter calls.
   - The drawn state can lag the arbiter's by at most one sub-step (0.2 s), which falls inside the 3 s amber.
@@ -1993,7 +2019,7 @@ A vehicle on a connector is lerped along the connector's 8 Bézier points by `s/
 
 ### 13.7 Meshes, liveries, kinds
 
-**New `VehicleKind`s, appended all at once in slice 5** (E21). `road` and `airless` at vehicle_meshes.dart:54-55 are unchanged, so the parked-car family picks at city_tile_mesher.dart:2369 do not move.
+**New `VehicleKind`s, appended all at once in slice 5** (E21). `road` and `airless` at vehicle_meshes.dart:54-55 are unchanged, so the parked-car family picks at city_tile_mesher.dart:2398 do not move.
 
 | Kind | Length (m) | Width (m) | Height (m) | Axles | `liveryU` |
 |---|---|---|---|---|---|
@@ -2010,7 +2036,7 @@ A vehicle on a connector is lerped along the connector's 8 Bézier points by `s/
 - **Mapping** (in `agent_traffic_pass.dart`, infrastructure; D42). `AgentKind` → `VehicleKind`:
   - Private cars pick coupe or sedan by `variant & 1`.
   - Trucks map to truck, and semis to semi.
-  - On sealed worlds, cars and trucks map to rover, the cosmetic rule (city_traffic.dart:497). Service vehicles and buses keep their shapes.
+  - On sealed worlds, cars and trucks map to rover, the cosmetic rule (city_traffic.dart:520). Service vehicles and buses keep their shapes.
   - Trains and L trains use the existing rail car and train meshes (§11.7).
 - **Pedestrians.** `PedestrianMeshes.emitModel`: 1.75 m tall, body and head boxes, no glazing.
 - **Tests.** `traffic_meshes_test.dart` gains the new kinds in its "every kind" loops. The family pin (`VehicleKind.airless == [rover]`, line 76) is untouched.
@@ -2019,15 +2045,15 @@ A vehicle on a connector is lerped along the connector's 8 Bézier points by `s/
 
 - **Where the code lives.** `agent_nodes.dart`, a `part of 'city_nodes.dart'` (E20's `part` directive).
   - It reaches `CityNodes`' private scene, roots, `_vehicleMesh` and `_anchorTransform` without widening their API.
-  - It keeps its **own** slot map. The cosmetic `_trafficSlots` and the `place` closure inside `_syncTraffic` (city_nodes.dart:2131-2157) are not touched.
+  - It keeps its **own** slot map. The cosmetic `_trafficSlots` and the `place` closure inside `_syncTraffic` (city_nodes.dart:2149-2175) are not touched.
 - **Cosmetic road cars off.**
-  - In `_syncTraffic`'s cascade (2107-2111): `..maxVehicles = snap.cityTraffic.isEmpty ? _maxVehicles : 0`.
-  - It is set **before** `..begin(_structureSig)`, because `begin` captures each sink's cap (`sink._reset(maxVehicles)`, city_traffic.dart:676-690). Setting the cap after `begin` would change nothing.
+  - In `_syncTraffic`'s cascade (2125-2129): `..maxVehicles = snap.cityTraffic.isEmpty ? _maxVehicles : 0`.
+  - It is set **before** `..begin(_structureSig)`, because `begin` captures each sink's cap (`sink._reset(maxVehicles)`, city_traffic.dart:703-717). Setting the cap after `begin` would change nothing.
   - A frame carrying any agent colony zeroes the cosmetic road-car cap for every body; City Builder has one colony.
   - A per-body cap needs `city_traffic.dart` (C9), which matters only once slice 11 runs agents beside non-agent colonies.
-  - Cosmetic trains are not counted against the cap (city_traffic.dart:584-587). They keep running until slice 9b.
+  - Cosmetic trains are not counted against the cap (city_traffic.dart:611-614). They keep running until slice 9b.
 - **Independent of the `traffic` toggle.**
-  - `_syncAgents` runs after `_syncTraffic` (1208), outside its `if (!traffic)` early return (2093-2096). The cosmetic toggle hides scenery, not the simulation.
+  - `_syncAgents` runs after `_syncTraffic` (1208), outside its `if (!traffic)` early return (2111-2114). The cosmetic toggle hides scenery, not the simulation.
   - Agents have their own render knob, `agentsDrawn`.
 - **Near and far slots.**
   - Keys are `'$bodyId/agent/${kind.name}/near|far/solid|glazing'`.
@@ -2035,7 +2061,7 @@ A vehicle on a connector is lerped along the connector's 8 Bézier points by `s/
 - **Distance rings.** Selection fills rings of 0–500, 500–1,500 and 1,500–3,500 m nearest-first, taking agents in column (slot) order within each ring. Lanes are bucketed into rings by their geometry bounds, once per geometry. The result is deterministic, and the cap goes to what is near.
 - **High-water counts.**
   - Per slot, the pass keeps `hw = max(hw, roundUp(count, 64))` and pads the buffer with zero-scale matrices.
-  - The count only grows, so the in-place `setInstanceTransform` path is taken (as `_setInstances` does at 2199-2207). Agents coming and going never trigger `clearInstances()`.
+  - The count only grows, so the in-place `setInstanceTransform` path is taken (as `_setInstances` does at 2217-2225). Agents coming and going never trigger `clearInstances()`.
   - `hw` resets when the slots are dropped.
 - **Caps.** `agentRenderCap` (a static knob, default 1500) and `agentRangeM` 3500. Pedestrians and parked cars have their own caps (§7.4, §8.4).
 - **`_syncAgentExtras`** runs after `_syncRoadOverlay` (1214): signal heads, pedestrians, parked cars, traffic overlays.
@@ -2044,18 +2070,18 @@ A vehicle on a connector is lerped along the connector's 8 Bézier points by `s/
 
 ### 13.9 Overlays
 
-- **Traffic view: one view, shared with the road agent's Traffic Routes view (C8).**
-  - Toggled by key **V** (free in `_simKeys`, simulation_view.dart:1208-1236) or a HUD chip, into the `TrafficOverlayState.trafficView` static.
+- **Traffic view: the lane-speed view (V), beside the road agent's Routes view (C8).**
+  - Toggled by key **V** (free in `_simKeys`, simulation_view.dart:1211-1242) or a HUD chip, into the `TrafficOverlayState.trafficView` static.
   - Draws lane ribbons from the geometry, coloured by `laneSpeedPct`: green ≥ 70, amber 40–70, red < 40.
-  - One mesh per body, rebuilt only when the `laneSpeedPct` identity changes (every 2 s), following the signature pattern of `_syncZoning` (city_nodes.dart:2399+).
+  - One mesh per body, rebuilt only when the `laneSpeedPct` identity changes (every 2 s), following the signature pattern of `_syncZoning` (city_nodes.dart:2417+).
   - Also shows red dots for stuck-despawn hotspots, and warning markers for `danglingDeck` nodes, broken stops and broken stubs.
-  - **Routes through a road.** In an agent colony, the view's per-road route list comes from `CityAgents.routesThrough(roadId)`: the locked routes of live agents on, or bound for, that road. It uses the routed model's `TripRoute` shape (road_traffic_model.dart:58-78), so their view needs no second code path.
+  - **Routes through a road** are the road agent's Routes view, not ours. It reads `city.trafficReadout.routesThrough` (road_tool_scene.dart:578-603), which in an agent colony is our readout from slice 1: the locked routes of the live vehicles using that road, in the `TripRoute` shape (traffic_readout.dart:26-46; §12.3). Their view needs no second code path.
 - **Route inspector.**
   - `CityNodes.vehicleNearBF(bodyId, bf, radiusM: 4)` scans the agent pose buffers drawn this frame (≤ 1,500 entries).
-  - It is called only from `_PickGate.pick` (click and hover hit tests, a few microseconds) and from `_inspectCityAt`.
+  - It is called only from the pick layer's `open` predicate (simulation_view_colony.dart:1009-1010, which `_PickGate` runs on every click and hover hit test, a few microseconds) and from `_inspectCityAt`.
   - The picked handle goes into `TrafficOverlayState.selected`.
   - `CityAgents.describe(handle)` returns: kind, owner, purpose, origin and destination site ids, trip time against free-flow, stuck timer, and the remaining connector list with its lanes.
-  - The view draws the remaining route as a ribbon (from geometry plus connectors) in `traffic_overlay_nodes.dart`. Like `PlannerOverlay`, this state is UI-only, never on the frame (simulation_view.dart:287; scene_sync.dart:140).
+  - The view draws the remaining route as a ribbon (from geometry plus connectors) in `traffic_overlay_nodes.dart`. Like `PlannerOverlay`, this state is UI-only, never on the frame (simulation_view.dart:289; scene_sync.dart:140).
 - **Service heat.** Per-building accumulator heat through the existing `heatBF` / `heatKind` statics (city_nodes.dart:510-513), per kind, while the Services drawer is open.
 - **Stops, stations and stubs.** Rings and arrows from the `net` and `transit` columns. Bus shelters are drawn at resolved stops (§11.1).
 
@@ -2109,7 +2135,7 @@ Under `CitySim.toJson()['agents']` (E15), present only when `agents.hasState`. F
 
 ### 14.3 Agents in flight
 
-They are **not saved**. That follows the `toJson` philosophy that transient machinery re-derives (the comment above `CitySim.toJson`, city_sim.dart:4269), and it avoids saving a route arena tied to one graph object.
+They are **not saved**. That follows the `toJson` philosophy that transient machinery re-derives (the comment above `CitySim.toJson`, city_sim.dart:4302), and it avoids saving a route arena tied to one graph object.
 
 On load:
 - A citizen who was travelling resumes at their trip **origin**, with `wakeInUs = 5 s`. Their car is where it was parked before the trip.
@@ -2126,15 +2152,15 @@ On load:
 - `agents.v` bumps on any change to the agents schema. `restore` migrates the previous version or drops the block with a logged warning.
 - Enums saved by index (`CitizenState`, `ServiceKind`, the car `where`) are **append-only**.
 - **Load order.**
-  - `fromJson` builds the layout and calls `recompute()` (city_sim.dart:4377-4547). `agents.restore` (E16) runs **after** that and only stores the JSON.
+  - `fromJson` builds the layout and calls `recompute()` (city_sim.dart:4410-4580). `agents.restore` (E16) runs **after** that and only stores the JSON.
   - Binding sites to building ints happens lazily on the first `advance`, once lot ids exist.
   - An unknown site id drops the home or job. It happens with a lot renamed by a changed plat rule, or a megatower or strip mall that vanished on load (services-economy report §5.9). The citizen becomes homeless or unemployed and is re-matched.
-- **The in-memory save.** `SimulationView._save`/`_load` (simulation_view.dart:2613-2649) round-trip every colony through `CitySim.fromJson` (game_state_codec.dart:229). From slice 1 that keeps the `enabled` flag, so loading a City Builder game no longer turns agents off.
+- **The in-memory save.** `SimulationView._save`/`_load` (simulation_view.dart:2622-2661) round-trip every colony through `CitySim.fromJson` (game_state_codec.dart:229). From slice 1 that keeps the `enabled` flag, so loading a City Builder game no longer turns agents off.
 
 ### 14.5 Dependency on the road agent
 
 **Resolved on dev.**
-- Splits carry `reversed`, `deck`, `decoration` and `name` (city_layout.dart:571-573, 763-765).
+- Splits carry `reversed`, `deck`, `decoration` and `name` (city_layout.dart:599-601, 791-793).
 - Saves persist them, with junctions per colony (commit 121277e).
 - The wire flips reversed roads and fills `id`, `decoration` and `lifts` (world_snapshot.dart:2134-2182, commit 56a8cb2).
 - So a reversed one-way road loads pointing the way it was saved, and routes after a load match the network that was saved. Stops, stubs and kerb cars still re-snap by position and heading, which also covers a lot renamed by a re-cut.
@@ -2153,7 +2179,7 @@ The design point is a City Builder colony of 5,000 citizens, 2,000 vehicles, 1,0
 | Path pump | ≤ 4,000 expansions × ≈ 150 ns = 0.6 ms per sub-step | 0.6 ms on 1 frame in 12 | ≈ 1.25 ms/frame |
 | Pedestrians | ≤ 40 ns each | 0.04 ms | 0.08 ms/frame |
 | Building sync, accumulators, dispatch | O(buildings), in quarters per advance | ≤ 0.1 ms per tick | ≤ 0.1 ms per tick |
-| **Catch-up frame** | The host runs up to 25 ticks in one frame (simulation_view.dart:1933-1942). At ≥ 25× each tick is dt 0.5 s (simulation_clock.dart:31; city_sim.dart:1178), so one frame can owe 62 sub-steps. | — | ≈ 50 ms inline **without** the hold; **≤ 4 sub-steps ≈ 3.2 ms with the hold** (D35), the rest replayed on later frames |
+| **Catch-up frame** | The host runs up to 25 ticks in one frame (simulation_view.dart:1941-1950). At ≥ 25× each tick is dt 0.5 s (simulation_clock.dart:31; city_sim.dart:1178), so one frame can owe 62 sub-steps. | — | ≈ 50 ms inline **without** the hold; **≤ 4 sub-steps ≈ 3.2 ms with the hold** (D35), the rest replayed on later frames |
 | Capture | O(1) references plus a cached-geometry key compare | ≤ 0.05 ms/frame | same |
 | Geometry rebuild | Only on a graph or terrain change; slices the capture's own `RoadSnapshot`s, with no ground reads | a few ms, once | — |
 | Graph derivation and remap | ≤ 5 ms for 2,000 roads (the `RoadGraph` build itself is the routed model's, already paid); remapping ≤ 4 ms at 4,096 vehicles | once per edit | — |
@@ -2168,7 +2194,7 @@ The design point is a City Builder colony of 5,000 citizens, 2,000 vehicles, 1,0
 These fit the 2–4 ms of in-motion headroom under the 15 ms target (perf-threading report §1.5).
 
 **`FrameBudget` visibility** (E26 and E28, slice 1).
-- `SceneSync.frameBudget.feed` (scene_sync.dart:354-355) includes `tickCostMs`: the frame's measured tick-loop time, `endFrame` included (simulation_view.dart:1926-1942).
+- `SceneSync.frameBudget.feed` (scene_sync.dart:354-355) includes `tickCostMs`: the frame's measured tick-loop time, `endFrame` included (simulation_view.dart:1934-1950).
 - It does so **only while an agent colony ticks**. Otherwise `tickCostMs` is 0, and every other mode, the flight view at high warp included, behaves exactly as today.
 - `TrafficMetrics` reports `phaseMs['city.agents.tick']` separately.
 
@@ -2201,7 +2227,7 @@ These fit the 2–4 ms of in-motion headroom under the 15 ms target (perf-thread
 **Slice 11: `IsolateAgentScheduler`,** behind `AgentScheduler.platform()`, a conditional import on `dart.library.isolate` following mesh_scheduler.dart:24-31.
 - One persistent worker owns the `AgentCore` (every table and the graph; everything except `CitySim`).
 - **Inputs:**
-  - Per graph object: road and parcel columns as typed lists, **shipped once**, as the terrain pool ships its field once (mesh_scheduler_isolate.dart:17-24). Object graphs are never sent: a send deep-copies, and 13 sends once cost 214 ms (city_nodes.dart:1373).
+  - Per graph object: road and parcel columns as typed lists, **shipped once**, as the terrain pool ships its field once (mesh_scheduler_isolate.dart:17-24). Object graphs are never sent: a send deep-copies, and 13 sends once cost 214 ms (city_nodes.dart:1376).
   - Per tick: small typed deltas `{dtUs, budgets, building capacities, renames, clears, tool commands}`.
 - **Outputs:** the `AgentFrame` and `PedFrame` bytes for **in-range rows only** (≤ 64 KB) through `TransferableTypedData`, plus a derived-scalar block.
 - **Determinism** (D21). Dart cannot block on a port, so **the city clock waits for the agents**.
@@ -2288,8 +2314,8 @@ These fit the 2–4 ms of in-motion headroom under the 15 ms target (perf-thread
   - A tap on a free end toggles its stub. Enabling costs 200 § and needs the end at least 1.5 km from the origin. Disabling is free, and is a network edit (§4.7).
   - The ghost is an arrow marker with the label "to the next colony".
   - The starter spurs' stubs (E17) exist, enabled, from founding.
-- **Where they live.** All tools are opened from the HUD's Transit drawer. After C4 they also get buttons in the editor toolbar.
-- **Routing input.** Taps and hover reach the controller through E27's early returns. While a tool is held, `_PickGate` opens (E26).
+- **Where they live.** All tools are opened from the HUD's Transit drawer. Buttons in their editor toolbar (city_edit_overlay.dart:341) are a request to the road agent (C4).
+- **Routing input.** Taps and hover reach the controller through E27's early returns. While a tool is held, the pick layer's gate opens and claims the pointer (E26 f).
 - **New buildings** (Post Office, Fire Station, Bus Depot, Cargo Terminal) use the existing Build tool.
 
 ### 16.2 Panels (`city_traffic_panels.dart`, reached through E29)
@@ -2319,7 +2345,7 @@ The traffic view, route inspector, service heat, stops and stubs (§13.9). They 
 
 ### 16.4 `ext.acro.citygame` (E25)
 
-`main_city_game_dev.dart` founds its colony with `agentTraffic: const bool.fromEnvironment('AGENTS', defaultValue: true)` (60-67), so the headless entrypoint has agents unless told otherwise. Parameters are handled **before** the status that is always returned (115). Each maps to a `CityAgents` debug API on the captured `colony`.
+`main_city_game_dev.dart` founds its colony with `agentTraffic: const bool.fromEnvironment('AGENTS', defaultValue: true)` (69-76), so the headless entrypoint has agents unless told otherwise. Parameters are handled **before** the status that is always returned (124). Each maps to a `CityAgents` debug API on the captured `colony`.
 
 | Parameter | Action |
 |---|---|
@@ -2331,11 +2357,11 @@ The traffic view, route inspector, service heat, stops and stubs (§13.9). They 
 | `service=<kind>[&site=<id>&amount=<x>]` | per-kind requests, fleets and backlogs; optionally inject an accumulator |
 | `line=add&mode=bus\|rail\|L&stops=e,n,h;e,n,h;…&vehicles=<n>` | create a line |
 | `oc=add&e=<e>&n=<n>` / `oc=off&id=<id>` / `oc=clear` | stubs |
-| `road=add&pts=e,n;e,n&class=<index>` | `commitRoad`, to exercise remaps live. An avenue across a starter street gives a signalised junction. |
+| `road=add&pts=e,n;e,n&class=<index>` | `commitRoad`, to exercise remaps live. An avenue across a starter street gives a signalised junction. Their `ext.acro.roadtool` (151-164) lays a road the player's way instead: snapped, priced and built with `buildRoad`. |
 | `step=<cityS>` | advance the colony headless by agent seconds in `advance(0.5)` chunks, for scripted scenarios |
 | `graph=audit` | node, edge, lane and connector counts; dead ends; dangling decks; no-access sites; stub state |
 
-`_status` (178-196) gains:
+`_status` (206-224) gains:
 
 ```
 agents: {enabled, citizens, visitors, vehicles, peds, parked, pathQueue, deferred,
@@ -2346,9 +2372,9 @@ agents: {enabled, citizens, visitors, vehicles, peds, parked, pathQueue, deferre
          graph: {rev, nodes, edges, lanes, connectors, deadEnds, danglingDecks}, tickMs}
 ```
 
-- `SimViewControl` (E32) gains `selectVehicle`, `setTrafficView` and `trafficTool`, all nulled in `clear()` (sim_view_control.dart:88-106).
-- `tool/drive_city_game.dart` (E33) takes positional arguments today: `<uri> [out.png] [waitSeconds] [walk]` (17-60).
-  - It gains one rule: every later argument of the form `key=value` is forwarded to `ext.acro.citygame` before the status call.
+- `SimViewControl` (E32) gains `selectVehicle`, `setTrafficView` and `trafficTool`, all nulled in `clear()` (sim_view_control.dart:96-115).
+- `tool/drive_city_game.dart` (E33) takes positional arguments, `<uri> [out.png] [waitSeconds] [walk]`, and `--script=<steps.json>`, a list of extension calls replayed after the settle (10-17, 26-49 and 73-85).
+  - It gains one rule: every later bare argument of the form `key=value` is forwarded to `ext.acro.citygame` before the status call.
   - Example: `drive_city_game.dart <uri> shot.png 20 - zone=residential step=600 traffic=stats`, where `-` keeps the fourth positional empty.
 
 ---
@@ -2370,8 +2396,8 @@ agents: {enabled, citizens, visitors, vehicles, peds, parked, pathQueue, deferre
 | `stall(handle)` | `CityAgents.debugStall` |
 | `freezeDelays()`, `setDelay(edge, s)` | Pin the delay table, for tests whose arithmetic assumes a known `D` |
 
-**Every scenario sets** `hostility = 0` and `autoDisasterTimer = 1e9`. This keeps the 20 unseeded `math.Random()` calls in `CitySim` (city_sim.dart:889 … 4190) from firing:
-- the disasters that start grid fires (`fireTick`, 2587-2589) and parcel fire sparks (4150-4156) never happen;
+**Every scenario sets** `hostility = 0` and `autoDisasterTimer = 1e9`. This keeps the 20 unseeded `math.Random()` calls in `CitySim` (city_sim.dart:889 … 4223) from firing:
+- the disasters that start grid fires (`fireTick`, 2587-2589) and parcel fire sparks (4181-4187) never happen;
 - with the fire flag on, lot fires, their spread and their ignition run on `TrafficRng` (E11), so they are deterministic too.
 
 ### 17.1 Unit tests
@@ -2389,8 +2415,9 @@ agents: {enabled, citizens, visitors, vehicles, peds, parked, pathQueue, deferre
     - The kind is `allWayStop`: the class-only warrant gives `stop`, and every inbound leg stops.
   - **A street T-snapped mid-road** joins the graph's attach node.
   - **A ramp ending 12.8 m beside an expressway6** joins the attach node. Its only connector goes to mainline lane 0 on the correct carriageway.
-  - **A cloverleaf** loop ramp (ground level) merging onto the bridged over-road's split end joins it. The split ends sit about 8 m up by `bridgeLiftAt`, but a draped road counts as ground (`_sameLevel`).
+  - **A cloverleaf** loop ramp (ground level) merging onto the bridged over-road's split end joins it. The split ends sit about 8 m up by `bridgeLiftAt`, but a draped road has no level, and two ground ends always meet (`CityLayout.levelsSeparated`).
   - **An elevated road** crossing a street in plan shares **no** node.
+  - **Levels by the layout's rule** (D48). Two deck ends 4 m apart in height share a node, and 5 m apart they do not. A deck end on its piers does not join the street below; the same deck graded into the ground does. A deck saved with `rangeLengthM` and re-sampled on load keeps its end on its piers.
   - **A reversed one-way** gives a backward edge only.
   - **Tapers.**
     - A 6→4 taper keeps 3 lanes to the seam, and the seam's continuation drops in-lane 0 into out-lane 0.
@@ -2414,6 +2441,8 @@ agents: {enabled, citizens, visitors, vehicles, peds, parked, pathQueue, deferre
   - On the generator fixture, at every node the tiles draw (`RoadMesher.junctionsFromEnds` over the same roads), `RoadMesher.junctionPlan` gives the same control. A mismatch is reported to the road agent (C1), since both functions are theirs.
   - An override with `lights: true` flips stop to signals through `withOverrides`, and **editing an override in place** refreshes the control.
   - Stop legs come out in heading order.
+  - **Drawn legs only** (D48). A street seam with an alley T is `uncontrolled`, and the alley gives way. A four-way street stop with an alley as a fifth leg stays `allWayStop` over its drawn legs. No alley or path leg is ever in `stopLegs`, and `stopLegs` index `RoadNode.legs`.
+  - **Leaving legs.** At a leg-aware junction, an off-ramp or a one-way street leaving an avenue stops nothing on the avenue, and an on-ramp's own leg stops.
 - **`signal_plan_test`.** `stateAt` is periodic. Offsets are stable across a split (keyed by position). Two axes are never green together. The amber and all-red durations hold.
 - **`access_points_test`:**
   - Access equals `RoadGraph`'s `lotPiece`, `lotS` and `lotDirs`.
@@ -2458,6 +2487,13 @@ agents: {enabled, citizens, visitors, vehicles, peds, parked, pathQueue, deferre
   - A despawned truck re-queues its requests with the original stamps.
   - **A depot on a disconnected road** yields to the next depot. With none left, the request backs off 60 s and counts as unreachable. It never spends path budget every second.
 - **`population_ledger_test`.** Budgets realise to whole citizens. An external write becomes a budget. Deaths pick residents.
+- **`traffic_readout_test`** (slice 1; the D47 contract):
+  - before the first picture: `hasRun` false, `passes` 0, congestion 0, no routes, every reach true, noise 0, a tax factor of exactly 1;
+  - `passes` never goes back, across publishes, graph rebuilds, remaps and a save and load, and it moves on every publish and whenever a forwarded answer changes;
+  - `routesThrough` lists live vehicles' locked routes: kinds from purpose, weight 1, `roadIds` in route order with each visit once, the polyline from `RoadGraph.polylineOf`, and the `kinds` filter and `limit` honoured;
+  - `CitySim.trafficReadout` is `agents.readout` exactly when agents are enabled (E37), and after a tick `parcelCongestion` equals `0.5·(peak + average)` of it;
+  - slice 1 forwards reach, noise, land value and the tax factor to `roadTraffic` answer for answer, and a clinic up the street is no fire cover.
+- **`agent_reach_test`** (slice 2). Reach follows one-way streets. `fireReach` counts only stations with safety cover. A works' own goods, and its own lorries turning at the next node, are no delivery. A lot the picture does not know is reached. `roadTraffic.advance` never runs in an agent colony.
 - **`traffic_capture_test`:**
   - Every car edge's polyline equals the matching slice of that capture's `RoadSnapshot.points`, **byte for byte**. For reversed roads it is compared with the **flipped** snapshot the capture sent.
   - A deck road's `L` equals `ribbonLiftM + RoadSnapshot.lifts`.
@@ -2618,7 +2654,7 @@ Determinism is claimed **per platform**. Cross-platform bit-identity is not clai
 - `source_hygiene_test`
 - `sprawl_roads_test`
 - `test/architecture/installation_massing_test.dart` and `installation_parking_test.dart`, which sweep E22's new site-claiming specs
-- the road agent's `road_graph_directed_test`, `road_traffic_model_test`, `road_traffic_window_test` and `road_wire_test`. We change none of their code, so a failure means a hook leaked.
+- the road agent's `road_graph_directed_test`, `road_traffic_model_test`, `road_traffic_window_test`, `road_traffic_economy_test`, `road_ops_test` and `road_wire_test`, and the road tool's `road_tool_controller_test`, `road_tool_scene_test` and `road_tool_panel_test`. We change none of their code, so a failure means a hook leaked.
 - `gen_reference_test`, with `docs/REFERENCE.md` regenerated (C11)
 
 **New in slice 1:** `sprawl_topology_audit_test`.
@@ -2646,7 +2682,7 @@ Sizes include tests.
 - stop at the drawn stop bars, and obey live, cycling signal heads where a junction has lights (draw an avenue across a starter street to get one);
 - U-turn at dead ends and vanish if wedged.
 
-Drawing a new road never teleports a car: routes remap through the split, lots renamed by the re-cut keep their trips, and trips re-plan only when their road is removed. The HUD's congestion figure is measured from vehicle speeds, and staffing follows measured commutes. Saving and loading keeps agents on.
+Drawing a new road never teleports a car: routes remap through the split, lots renamed by the re-cut keep their trips, and trips re-plan only when their road is removed. The HUD's congestion figure is measured from vehicle speeds, and staffing follows measured commutes. Saving and loading keeps agents on, and the road tool's Routes view draws the cars' locked routes.
 
 **Commit order:**
 - **1a, groundwork (lands dark):** `traffic_rng`, `traffic_time`, `traffic_tuning`, `agent_kind` (every `AgentKind` declared), `slot_pool`, `route_arena`, the fixture, `traffic_source_hygiene`.
@@ -2655,10 +2691,10 @@ Drawing a new road never teleports a car: routes remap through the split, lots r
   - `path_search`, `lane_planner`, `lane_state_search`, `vehicle_table`, `vehicle_mover`, `junction_arbiter`, `graph_lineage`;
   - `building_table`, with capacities, access, and the rename and clear hooks;
   - `trip_planner`, with `CommuteSynth` only;
-  - `traffic_stats` (`congestionIndex` → `parcelCongestion`; `commuteEff`), `traffic_metrics`, `city_agents` (with the frame hold), `agent_frame`, `agents_codec` (the `enabled` flag only).
+  - `traffic_stats` (`congestionIndex`; `commuteEff`), `agent_traffic_readout` (congestion, volumes, live routes and `passes`; the rest forwarded to `roadTraffic`), `traffic_metrics`, `city_agents` (with the frame hold), `agent_frame`, `agents_codec` (the `enabled` flag only).
 - **1d, wire and renderer:** `city_traffic_frame`, `traffic_capture`, `agent_traffic_pass`, `agent_nodes`, `signal_head_layer`.
 - **Edits:**
-  - E2, E3a, E3b, E4, E12, E13, E14;
+  - E2, E3a, E3b, E4, E12, E13, E14, E37;
   - E15 and E16 (the flag only);
   - E17 (the flag only), E18, E19, E20, E24;
   - E25 (`agentTraffic`, `agents`, `traffic=stats|spawn`, `vehicle=`, `road=add`, `step=`, `graph=audit`);
@@ -2667,19 +2703,21 @@ Drawing a new road never teleports a car: routes remap through the split, lots r
 
 **Scope cuts:**
 - No measured delay: `D ≡ 0`, so cost is free-flow plus penalties. Speed-based congestion and measured commutes still ship.
+- Reach, noise, land value and the tax factor are still the routed model's, forwarded through the readout (D46).
 - Roundabouts arbitrate as yield-to-circulating; they are already in the rules.
 - No parking: vehicles appear and vanish at access points.
 - No pedestrians and no citizens.
 - Persistence holds only the `enabled` flag (E15/E16), which is enough for a save and load to keep agents on.
 
 **Acceptance.**
-- §17.1: derivation, builder, connectors, node control, signals, access, path search, lane planner, state search, arena, remap, IDM, capture equality, pass.
+- §17.1: derivation, builder, connectors, node control, signals, access, path search, lane planner, state search, arena, remap, IDM, capture equality, pass, and the readout contract (`traffic_readout_test`).
 - §17.2: connector coverage, feasibility (free and fixed start), arbiter safety, lanes-only-at-nodes.
 - §17.3:
   - #1, the X-locked half only; the "Y takes B" half needs slice 2's delay table;
   - #3, #4, #5, #6, #7 (car variant), #11 (on `signalised()`), #12, #14, #23, #33.
 - §17.4: twin run, partition invariance, frame-hold invariance, and the save round trip of the flag.
 - `sprawl_topology_audit_test`.
+- The road tool's Routes view lists live agents' routes in an agent colony (`ext.acro.roadtool` with `tool=traffic&view=routes`, then a click on a road).
 - Benchmarks 1–3 and 5, plus the catch-up case of 4. The p95 ≤ baseline + 1 ms gate at 1,000 agents.
 - **Manual:**
   1. Launch `main_city_game_dev` (agents on by default).
@@ -2694,15 +2732,17 @@ Drawing a new road never teleports a car: routes remap through the split, lots r
 
 **Goal.**
 - New trips avoid congested roads using delay measured at plan time, while old trips stay on their locked routes.
-- The one traffic view (V), shared with the road agent's Traffic Routes view (C8, settled first). The route inspector (click a car). The Flow chip and the Traffic drawer.
+- The agents answer the whole readout: noise, land value and the tax factor from measured flow, and service, fire and delivery reach from their own searches. The routed model stops advancing in agent colonies (E3a, D46).
+- The lane-speed view (V), beside the road agent's Routes view (C8). The route inspector (click a car). The Flow chip and the Traffic drawer.
 
 **Files:**
-- `edge_delay`, the planner's cost term, `traffic_overlay_state`, `traffic_overlay_nodes`, `city_traffic_panels` (Traffic drawer), `routesThrough`;
+- `edge_delay`, the planner's cost term, `traffic_overlay_state`, `traffic_overlay_nodes`, `city_traffic_panels` (Traffic drawer);
+- `agent_reach` and the readout's slice-2 half (noise, land value, the tax factor, reach), and E3a's slice-2 line;
 - E26 d–f (the V key, the HUD arguments, `_PickGate`);
 - E27, `_vehicleUnder` and `_inspectCityAt` only (the tool early returns come in slices 8 and 9);
 - E29, E30, E32.
 
-**Acceptance:** §17.3 #1 (full) and #2; `edge_delay_test`, including the empty-network case; the inspector's `describe` matches `vehicle=`; overlay rebuilds limited to 0.5 Hz; the road agent's Traffic Routes view lists live agents' routes in an agent colony.
+**Acceptance:** §17.3 #1 (full) and #2; `edge_delay_test`, including the empty-network case; the inspector's `describe` matches `vehicle=`; overlay rebuilds limited to 0.5 Hz; `agent_reach_test`; the road agent's economy probe (`road_traffic_economy_test`'s starter town, zoned all three ways) still grows all three ways with agents on; `roadTraffic.advance` never runs in an agent colony (a counter pinned at 0).
 
 ### Slice 3 — Citizens — L, ≈ 2.6k LOC, depends on slice 2
 
@@ -2780,7 +2820,7 @@ Drawing a new road never teleports a car: routes remap through the split, lots r
 - E17 (the starter spurs and their stubs);
 - E34 (the goods term);
 - `TrafficToolController` (outside-connection mode);
-- E27 (the tool early returns, after C4; the dev hook `oc=add` covers the gap until then).
+- E27 (the tool early returns, on their landed input code, C4).
 
 **Acceptance:** §17.3 #9, #18, #21 and #30; imports, exports and fleet upkeep appear in the budget readout.
 
@@ -2823,7 +2863,7 @@ Drawing a new road never teleports a car: routes remap through the split, lots r
 
 **Goal:**
 - Big colonies stay inside the frame budget.
-- **Every ticking colony runs agents.** No colony keeps `advanceParcelTraffic`'s abstract congestion number.
+- **Every ticking colony runs agents.** No colony keeps an abstract traffic figure: every readout is the agents'.
 
 **Scope:**
 - `agent_scheduler*`: the isolate binding with `cityClockHeldS` and graph shipping.
@@ -2843,13 +2883,13 @@ Drawing a new road never teleports a car: routes remap through the split, lots r
 - `binding_equivalence_test`.
 - A 16k-vehicle benchmark with UI traffic cost ≤ 1 ms p95.
 - The zero-allocation gate on the worker.
-- A generated colony in the flight view runs agents, and `advanceParcelTraffic` is never called in any ticking colony (a counter pinned at 0).
+- A generated colony in the flight view runs agents, and `roadTraffic.advance` is never called in any ticking colony (a counter pinned at 0). `advanceParcelTraffic` still runs, and its frontage-local fallback only before a first picture.
 
 ### Slice 12 — Polish and retirement — M, depends on slice 11
 
 **Scope:**
 - The shelter random-bag weight set to 0 for agent colonies, through a tile-mesher knob (coordination).
-- Toolbar buttons once C4 lands.
+- Toolbar buttons, if the road agent takes the request (C4).
 - Deletion of the flag-off `else` branches after their tests migrate.
 - The service heat overlay.
 - Documentation (a `docs/plans` follow-up and the wiki).
@@ -2870,10 +2910,10 @@ Drawing a new road never teleports a car: routes remap through the split, lots r
    - Mitigations:
      - every E hook is 1–5 lines and listed with its dev anchor (§1.2);
      - we don't edit their files (§1.2, "Untouched on purpose");
-     - E27 lands after C4;
+     - E26(f) and E27 are anchored on their landed input code (C4);
      - each slice is re-anchored and rebased before merging;
      - `traffic_capture_test` catches any drift in their wire.
-2. **The graph is theirs (C1).** A change to `RoadGraph`'s clustering, attach or lot-access rules changes our topology.
+2. **The graph is theirs (C1).** A change to `RoadGraph`'s clustering, attach or lot-access rules changes our topology. It has happened once (229cb9c: the level rule and drawn-leg plans), and revision 3 absorbed it with no change to our derivation (D48).
    - Mitigations: `graph_derivation_test` and `access_points_test` pin what we rely on; C1 asks for notice; the derivation reads only public arrays.
 3. **Topology holes in generated colonies:** offset or failed ramp merges, the 8 m sliver drop, the elevated road over the central avenue.
    - Mitigations:
@@ -2900,8 +2940,7 @@ Drawing a new road never teleports a car: routes remap through the split, lots r
 8. **Old-generation GC.** Any per-agent object that slips into steady state shows up as pauses of 25–78 ms. The zero-allocation gate catches it.
 9. **Double signal lamps** until C3 lands. It is a visual glitch only.
 10. **Calibration constants are targets** (§9.2). The steady-state tests are the contract, not the numbers.
-11. **A residual abstract flow number (C7).** In agent colonies, noise, land value and delivery reach still come from the routed model's assigned volumes until C7 lands. Congestion, commute and services are the agents'.
-12. **A mid-session enable re-cuts every tile** (D32, C10). That is one hitch, paid once. City Builder colonies enable before their first frame and never pay it.
+11. **A mid-session enable re-cuts every tile** (D32, C10). That is one hitch, paid once. City Builder colonies enable before their first frame and never pay it.
 
 ### 19.2 Open questions (each has a default; the user may overrule)
 
@@ -3043,3 +3082,22 @@ Trains, the L and freight rail are **in scope**: slice 9b.
 **Rejected:** none.
 
 **One fix took a different route than the critic suggested.** For the 25-tick frame (§15.1), the design neither caps world ticks at host level nor only documents the hitch. It holds whole city ticks in a queue (D35), so the sequence of `advance` calls, and therefore every result, is unchanged. That is the critic's "cap ticks for agent colonies" option, made deterministic.
+
+**Revision 3 (2026-09-11)** follows dev from `62a3a55` to `c672eb3`.
+
+- **The readout seam** (D46, D47, E37; §0.1, §1.3, §12.3). Everything that reads traffic reads `CitySim.trafficReadout` (`CityTrafficReadout`, f66e0d8 and 38e05fe). `CityAgents.readout` implements it, and E37 returns it in agent colonies.
+  - Slice 1: the agents answer congestion, volumes, live routes and `passes`; reach, noise, land value and the tax factor are forwarded to the routed model, which keeps advancing.
+  - Slice 2: the agents answer everything, and `roadTraffic.advance` is skipped in agent colonies.
+  - E3a is replaced: `advanceParcelTraffic` stays as it is and takes the agents' congestion through the readout, and `agents.advance` runs right after `roadTraffic.advance`. §4.2, §9.5 and §12.1–12.3 follow.
+  - D43 is superseded. C7 (a volume seam) and C8 (one traffic view) are resolved, and the residual-flow risk is gone from §19.1.
+  - New tests: `traffic_readout_test` (slice 1) and `agent_reach_test` (slice 2).
+  - Slice 11's gate becomes "`roadTraffic.advance` never runs in a ticking colony", since `advanceParcelTraffic` keeps running.
+- **Fire and delivery reach** (D47; §9.4, §9.7, §10.2). Fire cover counts only stations with safety cover, so a clinic is no fire cover (1d2e78d). A works' own goods, and its own lorries turning at the next node, are no delivery (e608e35). Fire Station declares a `safety` term.
+- **The graph's new rules** (D48; §3.1, §3.2, §3.7, §5.4, §17.1).
+  - Ends meet by `CityLayout.levelsSeparated`, and deck ranges are read through `offGroundAt` or `levelOf`.
+  - Plans are read over drawn legs, with `stopLegs` mapped back, and `defaultStopLegs` asks every car leg.
+  - The arbiter reads the plan as it is; alleys and paths give way to drawn legs.
+  - The `_sameLevel` and 2 m text is gone, and new builder and node-control cases pin the rules.
+- **The road tool has landed** (C4; E25, E26, E27, E29, E32, E33; §11.5, §16). The pick gate moved into `_cityPickLayer()` in simulation_view_colony.dart, and E26(f) moved with it. Our UI edits no longer wait on theirs. `drive_city_game` already takes `--script`, and E33 is reworded.
+- **Lost lots** (E12, E13). A re-plat now tears down what stood on a lot it gave up (`_dropLostLots`, 08f8cf3), and the building sync tombstones those buildings.
+- **Re-anchored.** Every E-hook, and every line cited in a file that changed since `62a3a55`, is re-cited against `c672eb3`. The header records the worktree's position.
