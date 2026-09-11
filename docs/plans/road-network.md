@@ -446,7 +446,12 @@ lots carried; the difference is charged), `reverseRoad` (a one-way road's
 `renameRoad` (every piece of the base road), `moveRoadEnd` (Adjust Roads).
 Every edit re-plats through one carry: a building whose lot survives goes
 with it, and what stood on a lot the road gave up is torn down as the Clear
-tool would — never left under a dead lot id, counted and saved.
+tool would — never left under a dead lot id, counted and saved. An Adjust
+move is planned once (`CitySim.planMoveRoadEnd`): `moveRoadEnd` lays it,
+`quoteMoveRoadEnd` prices it and the tool's drag preview draws it. A road on
+the ground is re-laid on the ground unless its end joins a road clear of the
+ground, and neither the drop snap nor the drawing snap lands a ground-level
+end on a tunnel it cannot see.
 `roadsRevision` moves with every road or override change; the renderer, the
 upkeep cache and the traffic model key on it — an in-place edit keeps the
 road COUNT, and a count-keyed cache never saw it.
@@ -498,7 +503,17 @@ until their tiles land; the tool's ghost, guidelines, handles and route
 lines are an overlay node over `RoadOverlayState`. The mesher raises every
 emitter by the lifts, stands piers (clear of the roads beneath) and girders,
 skips tunnel runs and builds portals at their mouths, paints one-way arrows,
-grass verges and planted medians, and plans junctions by legs.
+grass verges and planted medians, and plans junctions by legs. A graded
+road on the ground is draped from the corridor the shaper actually cut: each
+segment's datums are kept on the city as they are recorded
+(`CityTerrainShaper.markShaped` → `CitySim.corridorDatums`, rebuilt as a
+loaded colony re-grades), the frame models the brush's own cut and easing to
+its fixed point, and wherever a later brush was laid over the road it asks
+the ground itself. Sampling every fourth 6 m point and drawing straight
+lines between them had drawn a road re-laid to 64.5 m as tilted slabs, half
+buried in its own cutting. Each road's drape is cached, and a new brush
+forgets only the ground and the drapes it can reach: a hand-drill quantum
+costs a few queries, not a cold frame.
 
 **The ground.** A road build adds terrain brushes, and the terrain renderer
 used to detach every chunk a new brush touched before its re-mesh existed —
@@ -538,7 +553,10 @@ non-opaque hover region had let the camera's scale recognizer into the
 arena, and a click with a pixel of jitter orbited instead of placing a point.
 PAGE UP/DOWN and Esc come through one key hook that stands aside while
 walking and while a text field has focus. The Budget drawer carries road
-upkeep; each milestone lists the roads it opens.
+upkeep; each milestone lists the roads it opens. In city mode the flight
+view's buttons give way to a small column of what the city game uses (Save,
+Load, time warp, debug), under the HUD and above the editor; the colony can
+always be left, and Load returns to the editor.
 
 **Verification.** `lib/main_road_showcase_dev.dart` lays a showcase round
 the city camera's pivot (overpass, ramp-down tunnel — refused on a slope
