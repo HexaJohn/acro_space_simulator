@@ -492,6 +492,34 @@ a black hole with the loading wireframe over the town on every road built.
 Touched chunks now stand in until their replacement lands (`_editStale`);
 scatter keeps stale cells drawn, less the props the new road covers.
 
+**The editor.** `road_tool_controller.dart` (a `RoadToolEditing` mixin on
+`CityEditController`) is the tool's state: the mode — Straight, Curved
+(start, the point the curve bends toward, end), Freeform (each stretch
+leaves on the last one's heading), Upgrade — the road type, the elevation
+and its step, the snap options, and the chain's ANCHOR, which carries the
+built end's heading and, only where that end is off the ground, its deck
+height. An end snapped onto a road takes that road's level: a street's
+ground, a viaduct's deck. Every click goes `snapRoadRequest` → `buildRoad`,
+and the ghost is drawn on the same snapped line, so what the player sees is
+what is laid and what is charged. Right-click drops the curve point, then
+ends the chain; in Upgrade it reverses a one-way road. `road_tool_panel.dart`
+is the toolbar — mode chips, the snapping popup, the menu by group with
+locked types greyed (never hidden), the vertical elevation bar with its
+3/6/12 m step, the quote's readouts — and the Traffic tool's three views:
+Routes (lines per trip kind through the clicked road), Junctions (lights
+toggled inside the marker's ring, a stop sign per leg outside it) and Adjust
+(drag an end circle; the drag preview and the release share one plan, so the
+previewed price is the charge; rename). `road_tool_scene.dart` is the view
+side: a `ColonyGroundSampler` over the edited terrain, the hover at 30 Hz
+with no `setState`, and the overlay published only when what it draws has
+changed. Input lives in `simulation_view_colony.dart`: click tools declare no
+pan, and a `_PickClaim` keeps a held tool's pointer from the camera — a
+non-opaque hover region had let the camera's scale recognizer into the
+arena, and a click with a pixel of jitter orbited instead of placing a point.
+PAGE UP/DOWN and Esc come through one key hook that stands aside while
+walking and while a text field has focus. The Budget drawer carries road
+upkeep; each milestone lists the roads it opens.
+
 **Verification.** `lib/main_road_showcase_dev.dart` lays a showcase round
 the city camera's pivot (overpass, ramp-down tunnel — refused on a slope
 too steep, as it should be — one-way pair, decorated four-/six-lane
