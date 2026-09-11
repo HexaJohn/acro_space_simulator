@@ -403,7 +403,9 @@ const double kRelayClearM = RoadCosts.cellM;
 /// dragged longer) only the end control moves, as it always did — and so
 /// it does where [to] is nearer another arm of the road than the stretch
 /// by the end: the projection is looked for only as far round the road
-/// as a drag that long could have come back along it.
+/// as a drag that long could have come back along it, and on past that
+/// only while the road keeps nearing [to] — round a bend it doubles back
+/// on, a U's end dragged back to its other arm.
 ///
 /// The controls are a centripetal Catmull-Rom spline's or a dense
 /// polyline's, as the layout keeps them; the other end is never moved.
@@ -444,18 +446,42 @@ List<Vec2> controlsWithMovedEnd(
   // re-laid the road as a 10 m stub — every lot along it gone, for free.
   final drag = to.distanceTo(cs.first);
   final reach = drag * math.pi / 2 + kRelayClearM;
-  var best = double.infinity;
-  var sTo = 0.0;
-  for (var i = 1; i < pts.length && cum[i - 1] <= reach; i++) {
+  // [to]'s distance from the line's i-th segment, and the arc there.
+  (double, double) projected(int i) {
     final a = pts[i - 1], ab = pts[i] - a;
     final len2 = ab.dot(ab);
     final t = len2 <= 1e-12
         ? 0.0
         : ((to - a).dot(ab) / len2).clamp(0.0, 1.0).toDouble();
-    final d = to.distanceTo(a + ab * t);
+    return (to.distanceTo(a + ab * t), cum[i - 1] + (cum[i] - cum[i - 1]) * t);
+  }
+
+  var best = double.infinity;
+  var sTo = 0.0;
+  var nearest = 0; // the segment it was found on
+  var i = 1;
+  for (; i < pts.length && cum[i - 1] <= reach; i++) {
+    final (d, s) = projected(i);
     if (d < best) {
       best = d;
-      sTo = cum[i - 1] + (cum[i] - cum[i - 1]) * t;
+      sTo = s;
+      nearest = i;
+    }
+  }
+  // Still nearing [to] where the search stopped: the road bends back round
+  // toward it, and the end was dragged back over more than a semicircle of
+  // it. Followed on for as long as it keeps nearing — stopped at the bound,
+  // a U's end dragged back round its bend to its other arm projected onto
+  // the bend, kept the arm's far control and ran out to it and back.
+  if (nearest > 0 && nearest == i - 1) {
+    for (var prev = best; i < pts.length; i++) {
+      final (d, s) = projected(i);
+      if (d > prev + 1e-6) break;
+      prev = d;
+      if (d < best) {
+        best = d;
+        sTo = s;
+      }
     }
   }
   if (sTo <= 1e-6) return finish(swapped); // dragged off the end: longer
@@ -466,11 +492,12 @@ List<Vec2> controlsWithMovedEnd(
   }
   // The net under the search's bound: the road runs from [to] straight to
   // the first control kept, so it is that much shorter than it was. A
-  // drag can give up no more than the arc it could have passed; a road
-  // cut far shorter than that is not what the player dragged, and only
-  // the end moves.
+  // drag can give up no more than the arc it could have passed — or, where
+  // the line was followed on past that, the stretch it was followed over;
+  // a road cut far shorter than that is not what the player dragged, and
+  // only the end moves.
   final shortened = cum[at[k]] - to.distanceTo(cs[k]);
-  if (shortened > reach + kRelayClearM) return finish(swapped);
+  if (shortened > math.max(reach, sTo) + kRelayClearM) return finish(swapped);
 
   return finish([to, ...cs.skip(k)]);
 }

@@ -3499,7 +3499,8 @@ class CitySim {
       groundAt: groundHeightAt,
     );
     lastCommitCrossings = result.crossings;
-    _carryRenamedLots(result.renamedLots);
+    // Batch mode re-cut nothing, so no lot is renamed or gone yet.
+    if (regenerateLots) _carryRenamedLots(result.renamedLots);
     _roadsRevision++;
     return result.roadId;
   }
@@ -3508,7 +3509,9 @@ class CitySim {
   /// replaced it: [renamed] is old lot id -> new lot id, as a re-plat
   /// reports it ([CityLayout.commitRoad], [CityLayout.upgradeRoad]). One
   /// carry for every road edit, so a road built, upgraded or re-laid keeps
-  /// the district along it exactly as a road committed always has.
+  /// the district along it exactly as a road committed always has — and
+  /// what stood on a lot the re-plat did not carry is torn down with it
+  /// ([_dropLostLots]).
   void _carryRenamedLots(Map<String, String> renamed) {
     for (final e in renamed.entries) {
       final placed = parcelBuildings.remove(e.key);
@@ -3527,6 +3530,27 @@ class CitySim {
         if (c.site == e.key) c.site = e.value;
       }
     }
+    _dropLostLots();
+  }
+
+  /// Tear down whatever the colony holds against a lot that no longer
+  /// exists — exactly what [clearParcel] tears down, and as it does, for
+  /// nothing back. A road edit's re-plat carries a lot only where a new
+  /// one stands on its ground: a road shortened, re-laid or re-cut wider
+  /// leaves the lots it gave up with none, and their buildings used to
+  /// stay keyed by the dead ids — counted in the colony's totals, saved,
+  /// and a spaceport among them still taking bookings. Grid sites
+  /// (`cell-N`) are not lots and are left alone.
+  void _dropLostLots() {
+    final live = {for (final p in layout.parcels) p.id};
+    bool lost(String site) => cellOfSiteId(site) == null && !live.contains(site);
+    parcelBuildings.removeWhere((id, _) => lost(id));
+    grownParcels.removeWhere((id, _) => lost(id));
+    lotFires.removeWhere((id, _) => lost(id));
+    deliveries.removeWhere((id, _) => lost(id));
+    craft.removeWhere((c) => lost(c.site));
+    final pad = landerPad;
+    if (pad != null && lost(pad)) landerPad = null;
   }
 
   // ---- The road tool: building, upgrading and adjusting roads -----------
@@ -4671,9 +4695,9 @@ class CitySim {
       }
     }
     // Anything whose ground is simply gone (built over by the new plot) is
-    // dropped rather than left dangling against a lot that no longer exists.
-    parcelBuildings.removeWhere(
-        (id, _) => !layout.parcels.any((p) => p.id == id));
+    // dropped rather than left dangling against a lot that no longer exists
+    // — by the same rule a road edit drops it.
+    _dropLostLots();
   }
 
   /// The lot with this id, or null. Linear because the layout is a list and a
