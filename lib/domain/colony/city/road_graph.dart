@@ -45,12 +45,19 @@ class RoadNode {
     required this.atGrade,
     required this.heightM,
     required bool roundaboutPreferred,
-  }) : _roundaboutPreferred = roundaboutPreferred;
+    required bool lifted,
+  })  : _roundaboutPreferred = roundaboutPreferred,
+        _lifted = lifted;
 
-  /// Every leg a collector: the warrant prefers a roundabout. Kept so a
-  /// re-plan under a new override ([RoadGraph.withOverrides]) asks the
+  /// Three collector legs or more: the warrant prefers a roundabout — the
+  /// renderer's rule, so the sim times the junction the tiles draw. Kept so
+  /// a re-plan under a new override ([RoadGraph.withOverrides]) asks the
   /// warrant the question the build asked.
   final bool _roundaboutPreferred;
+
+  /// A leg on a deck: the road tool's junction, planned by the leg-aware
+  /// warrant (see `keepsClassWarrant`).
+  final bool _lifted;
 
   /// This node under a different [plan] — everything else as it is.
   RoadNode _withPlan(JunctionPlan plan) => RoadNode._(
@@ -62,6 +69,7 @@ class RoadNode {
         atGrade: atGrade,
         heightM: heightM,
         roundaboutPreferred: _roundaboutPreferred,
+        lifted: _lifted,
       );
 
   /// Index in [RoadGraph.nodes].
@@ -501,8 +509,9 @@ class RoadGraph {
     for (var n = 0; n < nN; n++) {
       if (replan[n] == 0) continue;
       final node = nodes[n];
-      newNodes[n] = node._withPlan(junctionPlanFor(
+      newNodes[n] = node._withPlan(junctionPlanForNetwork(
         node.legs,
+        lifted: node._lifted,
         roundaboutPreferred: node._roundaboutPreferred,
         override: _nearestOverride(list, node.at),
       ));
@@ -1023,10 +1032,15 @@ class RoadGraph {
           JunctionLeg(d.road.roadClass,
               startsHere: d.startsHere, heading: d.heading)
       ];
-      final roundabout =
-          drafts.isNotEmpty && drafts.every((d) => d.road.collector);
-      final plan = junctionPlanFor(
+      // The tiles' rules, so a light the player sees is a light the traffic
+      // waits at: three collector legs make a roundabout, and a junction
+      // the tool had a hand in (a deck, a class only the tool lays) takes
+      // the leg-aware warrant — see `junctionPlanForNetwork`.
+      final roundabout = drafts.where((d) => d.road.collector).length >= 3;
+      final lifted = drafts.any((d) => d.road.deck != null);
+      final plan = junctionPlanForNetwork(
         legs,
+        lifted: lifted,
         roundaboutPreferred: roundabout,
         override: _nearestOverride(overrideList, at),
       );
@@ -1039,6 +1053,7 @@ class RoadGraph {
         atGrade: nodeGrade[n] == 1,
         heightM: nodeH[n].isNaN ? null : nodeH[n],
         roundaboutPreferred: roundabout,
+        lifted: lifted,
       ));
     }
 

@@ -1756,15 +1756,15 @@ class CityTileMeshJob {
     ];
     // The player's say over the tile's junctions (the Junctions view):
     // lights 1 on, 0 off, -1 the warrant's; and a point out along each
-    // leg that stops. A tile's override says it chose the stop legs only
-    // by carrying points, so one with none leaves them to the warrant —
-    // "no leg stops" needs the wire's own flag to say (`stopsSet`).
+    // leg that stops. `stopsSet` says whether the player chose the stop
+    // legs at all: clear, the warrant's default legs stop; set with no
+    // points, no leg does.
     final overrides = <RoadOverride>[
       for (final o in members.junctions)
         RoadOverride(
           o.at - r.anchorBF,
           lights: o.lights == 1 ? true : (o.lights == 0 ? false : null),
-          stopPoints: o.stopPoints.isEmpty
+          stopPoints: !o.stopsSet
               ? null
               : [
                   for (var i = 0; i + 2 < o.stopPoints.length; i += 3)

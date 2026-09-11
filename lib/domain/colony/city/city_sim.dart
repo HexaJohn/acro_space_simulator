@@ -35,8 +35,10 @@ import 'parcel_network.dart';
 import 'road_build.dart';
 import 'road_catalog.dart';
 import 'road_elevation.dart';
+import 'road_graph.dart';
 import 'road_junction.dart';
 import 'road_names.dart';
+import 'road_traffic_model.dart';
 import 'shuttle_run.dart';
 import 'sprawl_plan.dart';
 import 'commodity.dart';
@@ -1522,7 +1524,10 @@ class CitySim {
         tax *
         taxPerWorkerPerSec *
         economy.fundsMult *
-        (1 - corruption * 0.6);
+        (1 - corruption * 0.6) *
+        // Land value: quiet, leafy streets pay more (exactly 1 until the
+        // traffic model has valued a built lot).
+        roadTraffic.taxLandValueFactor;
     // Split, and kept, so a budget readout can say WHERE the money comes from
     // instead of watching a total tick over. Display only: the tick writes
     // these, nothing reads them back.
@@ -1667,6 +1672,7 @@ class CitySim {
 
     // 5.9 Parcel-city dynamics: zoned lots grow under demand, roads load
     // up, fires burn along blocks.
+    roadTraffic.advance(dt);
     advanceParcelGrowth(dt);
     advanceParcelTraffic();
     advanceParcelFires(dt);
@@ -3328,6 +3334,16 @@ class CitySim {
   /// feeding the same commute penalty the cell traffic does.
   double parcelCongestion = 0;
 
+  /// The routed traffic model: a directed graph of the roads, trips
+  /// assigned over it, and what the lots get from it — whether a fire
+  /// engine and a delivery lorry can reach them the right way round the
+  /// one-way streets, how loud their road is, what their land is worth.
+  /// Stepped from [advance] under a work budget; everything it reports is
+  /// its last finished pass.
+  late final CityRoadTraffic roadTraffic = CityRoadTraffic(this);
+  RoadGraph get roadGraph => roadTraffic.graph;
+  CityTrafficModel get trafficModel => roadTraffic.model;
+
   ParcelNetwork? _parcelNet;
   int _parcelNetVersion = -1;
 
@@ -4060,7 +4076,11 @@ class CitySim {
       if (parcelBuildings.containsKey(parcel.id)) continue;
       final demand = infiniteDemand ? 1.0 : demandFor(kind);
       final cur = grownParcels[parcel.id] ?? 0;
-      if (!net.lotServed(parcel.id) || demand < growThreshold) {
+      // Shops and works need their goods delivered: a lot no lorry can
+      // reach the right way round does not grow, and what stands declines.
+      final delivered =
+          kind == 'residential' || roadTraffic.deliveryReach(parcel.id);
+      if (!net.lotServed(parcel.id) || !delivered || demand < growThreshold) {
         final next = cur - dt * 0.02;
         if (next <= 0) {
           grownParcels.remove(parcel.id);
@@ -4069,7 +4089,12 @@ class CitySim {
         }
         continue;
       }
-      grownParcels[parcel.id] = math.min(3.2, cur + dt * 0.03 * demand);
+      // Homes come up slower beside a loud road.
+      final quiet = kind == 'residential'
+          ? 1 - 0.5 * roadTraffic.noiseOf(parcel.id)
+          : 1.0;
+      grownParcels[parcel.id] =
+          math.min(3.2, cur + dt * 0.03 * demand * quiet);
     }
   }
 
@@ -4079,6 +4104,17 @@ class CitySim {
   /// toward the trunk, but per-road occupancy is the honest cheap version and
   /// already rewards laying an avenue through a dense district.
   void advanceParcelTraffic() {
+    // Once the routed model has published, congestion is where the traffic
+    // actually GOES, not only where it starts. Half the worst stretch and
+    // half what the typical trip meets: a routed peak sits on the trunk
+    // road every trip funnels onto, and read alone it throttles a whole
+    // colony for one busy junction.
+    if (roadTraffic.hasRun) {
+      final m = roadTraffic.model;
+      parcelCongestion =
+          (0.5 * (m.peakCongestion + m.averageCongestion)).clamp(0.0, 1.0);
+      return;
+    }
     if (layout.parcels.isEmpty) {
       parcelCongestion = 0;
       return;
@@ -4130,7 +4166,10 @@ class CitySim {
     final spread = <String>[];
     final done = <String>[];
     lotFires.forEach((id, intensity) {
-      final next = intensity + (0.25 - suppression * 0.45) * dt;
+      // The engine has to be able to GET there: a lot no station reaches
+      // along the one-way streets burns with a fraction of the cover.
+      final reach = roadTraffic.serviceReach(id) ? 1.0 : 0.3;
+      final next = intensity + (0.25 - suppression * reach * 0.45) * dt;
       if (next <= 0) {
         done.add(id); // put out before it took the building
         return;

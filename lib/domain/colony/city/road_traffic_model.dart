@@ -1634,12 +1634,7 @@ class CityRoadTraffic {
 
   /// The colony day, colony seconds: the tick's own day length (an Earth
   /// day is 120 s of play, scaled by the body's rotation, 20..1200 s).
-  static double colonyDaySec(CitySim sim) {
-    const refDaySeconds = 120.0;
-    final rot = sim.body.siderealRotationPeriod.abs();
-    final dayLen = rot <= 1 ? refDaySeconds : refDaySeconds * (rot / 86400.0);
-    return dayLen.clamp(20.0, 1200.0);
-  }
+  static double colonyDaySec(CitySim sim) => sim.dayLengthSec;
 
   /// Bring the graph up to date when the roads, the plat or the overrides
   /// have moved. Integer compares otherwise: this runs every tick.

@@ -190,8 +190,12 @@ void main() {
 
   test('each colony\'s roads revision reaches the frame', () {
     final city = colony(spline());
-    city.roadsRevision = 7;
-    expect(capture(city).roadsRevision, {'roads': 7});
+    final before = city.roadsRevision;
+    // A junction override is a road edit the frame must see.
+    city.setJunctionOverride(
+        const JunctionOverride(at: Vec2(0, 0), lights: true));
+    expect(city.roadsRevision, greaterThan(before));
+    expect(capture(city).roadsRevision, {'roads': city.roadsRevision});
   });
 
   test('the new fields survive the wire', () {
@@ -199,7 +203,6 @@ void main() {
         deck: const RoadDeck(startM: 50, endM: 60),
         reversed: true,
         decoration: RoadDecoration.grass));
-    city.roadsRevision = 4;
     city.junctionOverrides['0,0'] = const JunctionOverride(
         at: Vec2(0, 0), lights: false, stopHeadings: [math.pi]);
     city.junctionOverrides['1,1'] =
@@ -213,7 +216,7 @@ void main() {
     expect(b.decoration, a.decoration);
     expect(b.lifts, a.lifts);
     expect(b.points, a.points);
-    expect(back.roadsRevision, {'roads': 4});
+    expect(back.roadsRevision, {'roads': city.roadsRevision});
     expect(back.junctions, hasLength(2));
     for (var i = 0; i < 2; i++) {
       final x = snap.junctions[i], y = back.junctions[i];
@@ -255,7 +258,6 @@ void main() {
 
   test('a frame advanced in time keeps its revision and overrides', () {
     final city = colony(spline());
-    city.roadsRevision = 9;
     city.junctionOverrides['0,0'] =
         const JunctionOverride(at: Vec2(0, 0), lights: true);
     final snap = capture(city);

@@ -1159,96 +1159,28 @@ class RoadMesher {
     return out;
   }
 
-  /// Whether [cls] is a road only the road tool lays — one the generator
-  /// never has — so that a junction with a leg of it is the tool's to
-  /// decide (see [byClass]). Exhaustive on purpose: a class appended to
-  /// the menu must say whether the generator lays it too.
-  static bool toolOnly(RoadClass cls) => switch (cls) {
-        RoadClass.streetOneWay || RoadClass.boulevard || RoadClass.motorway =>
-          true,
-        RoadClass.street ||
-        RoadClass.avenue ||
-        RoadClass.highway ||
-        RoadClass.path ||
-        RoadClass.alley ||
-        RoadClass.elevated ||
-        RoadClass.transit ||
-        RoadClass.trunk ||
-        RoadClass.rail ||
-        RoadClass.expressway4 ||
-        RoadClass.expressway6 ||
-        RoadClass.expressway8 ||
-        RoadClass.ramp =>
-          false,
-      };
+  /// Whether [cls] is a road only the road tool lays — see [roadToolOnly],
+  /// where the rule lives so the sim's road graph asks the same question.
+  static bool toolOnly(RoadClass cls) => roadToolOnly(cls);
 
-  /// Whether a junction of [legs] keeps the class-only warrant the
-  /// generator's towns have always had ([junctionControlFor]): true unless
-  /// the road tool had a hand in it — a leg of a class only the tool lays
-  /// ([toolOnly]), or a leg on a deck ([lifted]; the generator's roads lie
-  /// on the drape and carry no lift at all, so any lift is the tool's).
-  ///
-  /// The leg-aware warrant ([junctionPlanFor]) reads which way each road
-  /// was DRAWN — a two-lane road drawn away from a four-lane one makes no
-  /// lights — and that is the player's say: the tool draws a road the way
-  /// its traffic runs. The generator draws its two-way streets in no
-  /// particular direction, so read by that warrant its avenue T's would
-  /// get lights at one corner and a stop sign at the next, at random, and
-  /// an avenue ending on two streets would gain signals it never had.
+  /// Whether a junction of [legs] keeps the generator's class-only warrant
+  /// — see [keepsClassWarrant].
   static bool byClass(List<JunctionLeg> legs, {bool lifted = false}) =>
-      !lifted && !legs.any((l) => toolOnly(l.roadClass));
+      keepsClassWarrant(legs, lifted: lifted);
 
-  /// The plan the tiles draw a junction of [legs] by: the class-only
-  /// warrant with every arriving leg stopping where [byClass] keeps it,
-  /// the leg-aware plan ([junctionPlanFor]) where the tool had a hand.
-  ///
-  /// A player's [override] applies over whichever warrant the legs chose —
-  /// lights forced on or off where there is a stop or a signal, and at a
-  /// stop the legs whose headings its [JunctionOverride.stopHeadings] name
-  /// — so choosing the stop signs at a junction never swaps its warrant
-  /// for the other one under the player's feet.
-  ///
-  /// Domain types only, so that it can move beside [junctionPlanFor] and
-  /// the road graph ask the same question the tiles do.
+  /// The plan the tiles draw a junction of [legs] by — see
+  /// [junctionPlanForNetwork], which the sim's road graph times the same
+  /// junction by.
   static JunctionPlan junctionPlan(
     List<JunctionLeg> legs, {
     bool lifted = false,
     bool roundaboutPreferred = false,
     JunctionOverride? override,
-  }) {
-    if (!byClass(legs, lifted: lifted)) {
-      return junctionPlanFor(legs,
-          roundaboutPreferred: roundaboutPreferred, override: override);
-    }
-    var control = junctionControlFor([for (final l in legs) l.roadClass],
-        roundaboutPreferred: roundaboutPreferred);
-    if (override != null &&
-        (control == JunctionControl.stop ||
-            control == JunctionControl.signals)) {
-      if (override.lights == true) control = JunctionControl.signals;
-      if (override.lights == false) control = JunctionControl.stop;
-    }
-    if (control != JunctionControl.stop) return JunctionPlan(control);
-    final headings = override?.stopHeadings;
-    return JunctionPlan(control, {
-      for (var i = 0; i < legs.length; i++)
-        if (legs[i].inbound &&
-            (headings == null ||
-                (legs[i].roadClass.carriesCars &&
-                    headings.any((h) =>
-                        _angleBetween(h, legs[i].heading) <=
-                        JunctionOverride.headingMatchRad))))
-          i
-    });
-  }
-
-  /// The angle between headings [a] and [b], radians, 0 to pi.
-  static double _angleBetween(double a, double b) {
-    const tau = 2 * math.pi;
-    var d = (a - b) % tau;
-    if (d < 0) d += tau;
-    return d > math.pi ? tau - d : d;
-  }
+  }) =>
+      junctionPlanForNetwork(legs,
+          lifted: lifted,
+          roundaboutPreferred: roundaboutPreferred,
+          override: override);
 
   /// The player's override of the node at [at] with [legs] — the nearest
   /// of [overrides] within [JunctionOverride.matchM] — as the plan takes
