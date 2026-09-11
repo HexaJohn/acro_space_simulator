@@ -9,9 +9,9 @@
 /// Per frame this is a lookup: the agents' latest [AgentFrame] goes out by
 /// reference, and so do the geometry and the network columns, which are
 /// built only when what they depend on moves — the geometry per (lane-graph
-/// structure, `groundCacheStamp`), the network columns per lane-graph
-/// object. The cache hangs off the colony in an [Expando], so the colony
-/// carries no field of the renderer's.
+/// structure, the drape of each of its roads), the network columns per
+/// lane-graph object. The cache hangs off the colony in an [Expando], so
+/// the colony carries no field of the renderer's.
 ///
 /// The geometry is sliced from the road snapshots THIS capture just made
 /// for the colony, never re-sampled and never re-draped: every height in
@@ -34,6 +34,7 @@ import 'dart:typed_data';
 
 import '../../domain/colony/city/city_sim.dart';
 import '../../domain/colony/city/parcel.dart';
+import '../../domain/colony/city/road_graph.dart';
 import '../../domain/colony/city/spatial_index.dart';
 import '../../domain/colony/city/sprawl_plan.dart';
 import '../../domain/colony/city/traffic/agent_frame.dart';
@@ -75,19 +76,18 @@ class TrafficCapture {
       );
     }
     final c = _cache[city] ??= _Cache();
-    final stamp = city.groundCacheStamp;
     var geometry = c.geometry;
     // A geometry the capture could not complete (it ran between an edit and
     // the agents' next advance) is tried again once the roads move on; the
     // agents' own rebuild makes a new structure anyway.
     if (geometry == null ||
         !identical(c.structure, lg.laneEdge) ||
-        c.stamp != stamp ||
+        !c.drapesHold(city, lg.graph) ||
         (!geometry.complete && c.roadsRevision != city.roadsRevision)) {
       geometry = c.geometry =
           geometryOf(city, lg, roads, graphRev: agents.graphRev);
       c.structure = lg.laneEdge;
-      c.stamp = stamp;
+      c.holdDrapes(city, lg.graph);
       c.roadsRevision = city.roadsRevision;
     }
     var net = c.net;
@@ -129,12 +129,75 @@ class TrafficCapture {
 /// What [TrafficCapture] keeps per colony between frames.
 class _Cache {
   /// The lane structure (its `laneEdge` list, shared by every refresh of
-  /// one build), the ground stamp and the roads revision [geometry] was
-  /// built at.
+  /// one build) and the roads revision [geometry] was built at.
   Object? structure;
-  int stamp = 0;
   int roadsRevision = 0;
   TrafficGeometry? geometry;
+
+  /// The drape of each of the graph's roads, by road number, that
+  /// [geometry] was sliced from: its points and the ground radius under
+  /// each, as the capture worked them out and holds them
+  /// (`CitySim.drapeCache`). Null for a road the capture held none for.
+  List<List<Vec2>?> drapePts = const [];
+  List<Float64List?> drapeRadii = const [];
+
+  /// Whether every road of [g] is still draped as [geometry] was sliced:
+  /// the same drape, or one worked out again to the same points at the
+  /// same heights.
+  ///
+  /// The capture works a drape out again whenever something MAY have
+  /// moved it — a road edit anywhere, a junction override, the shaper
+  /// settling, a brush laid within its reach — and holds it otherwise, so
+  /// a frame in which nothing changed finds every drape the one it had,
+  /// for a lookup a road. One worked out again to what it was (the ground
+  /// under it never moved) is taken as the one held, and the geometry
+  /// stands: an override re-times a light and moves no car.
+  bool drapesHold(CitySim city, RoadGraph g) {
+    final n = g.roadCount;
+    if (drapeRadii.length != n) return false;
+    for (var r = 0; r < n; r++) {
+      final d = city.drapeCache[g.roads[r].id];
+      final held = drapeRadii[r];
+      if (d == null) {
+        if (held != null) return false;
+        continue;
+      }
+      if (identical(d.radii, held)) continue;
+      if (held == null || !_sameDrape(d.pts, d.radii, drapePts[r]!, held)) {
+        return false;
+      }
+      drapePts[r] = d.pts;
+      drapeRadii[r] = d.radii;
+    }
+    return true;
+  }
+
+  /// Holds the drape of every road of [g], as [geometry] was just sliced.
+  void holdDrapes(CitySim city, RoadGraph g) {
+    final n = g.roadCount;
+    drapePts = List<List<Vec2>?>.filled(n, null);
+    drapeRadii = List<Float64List?>.filled(n, null);
+    for (var r = 0; r < n; r++) {
+      final d = city.drapeCache[g.roads[r].id];
+      if (d == null) continue;
+      drapePts[r] = d.pts;
+      drapeRadii[r] = d.radii;
+    }
+  }
+
+  static bool _sameDrape(List<Vec2> pts, Float64List radii, List<Vec2> heldPts,
+      Float64List heldRadii) {
+    final n = radii.length;
+    if (heldRadii.length != n || pts.length != n || heldPts.length != n) {
+      return false;
+    }
+    for (var i = 0; i < n; i++) {
+      if (radii[i] != heldRadii[i]) return false;
+      final a = pts[i], b = heldPts[i];
+      if (a.e != b.e || a.n != b.n) return false;
+    }
+    return true;
+  }
 
   /// The lane-graph object [net] was built from.
   LaneGraph? netGraph;

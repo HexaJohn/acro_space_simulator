@@ -9,7 +9,7 @@
 /// Every edge's polyline is the capture's own road points, sliced — byte
 /// for byte, in travel order, a reversed road's from the flipped copy the
 /// capture sent — with its heights from the same snapshots and nothing asked
-/// of the ground. The geometry is built once per graph and ground stamp and
+/// of the ground. The geometry is built once per graph and drapes and
 /// handed out by reference, frame after frame; the vehicles' columns are the
 /// agents' own, never copied.
 library;
@@ -412,7 +412,7 @@ void main() {
   });
 
   group('frames', () {
-    test('built once per graph and ground stamp, handed out by reference', () {
+    test('built once per graph and drapes, handed out by reference', () {
       final city = live(signalised());
       final first = capture(city).cityTraffic.single;
       final again = capture(city).cityTraffic.single;
@@ -443,10 +443,45 @@ void main() {
       expect(identical(refreshed.net, first.net), isFalse);
       expect(refreshed.net.headCount, 0, reason: 'the light is switched off');
 
-      // The ground re-shaped: every drape is new, and so is the geometry.
+      // The shaper settled something: every drape is worked out again, and
+      // on ground that did not move they come back as they were, so the
+      // geometry stands.
       city.shapedTerrain.add('traffic-capture-test');
       final reshaped = capture(city).cityTraffic.single;
-      expect(identical(reshaped.geometry, first.geometry), isFalse);
+      expect(identical(reshaped.geometry, first.geometry), isTrue);
+
+      // One road's drape worked out a metre higher (a brush laid under it):
+      // new geometry, that road's points a metre further up.
+      final lg = city.agents.laneGraph!;
+      final id = lg.graph.roads.first.id;
+      final held = city.drapeCache[id]!;
+      city.drapeCache[id] = (
+        road: held.road,
+        pts: held.pts,
+        dirs: held.dirs,
+        radii: Float64List.fromList([for (final r in held.radii) r + 1]),
+      );
+      final raised = capture(city).cityTraffic.single;
+      expect(identical(raised.geometry, first.geometry), isFalse);
+      final up = city.localToBodyFixed(const Vec2(0, 0), bodyRadiusM: 1);
+      double height(TrafficGeometry g, int k) =>
+          g.pts[3 * k] * up.x + g.pts[3 * k + 1] * up.y + g.pts[3 * k + 2] * up.z;
+      var moved = 0;
+      for (var e = 0; e < lg.roadEdgeCount; e++) {
+        if (lg.edgeRoad[e] != 0) continue;
+        final a = first.geometry.edgePtStart[e];
+        final b = first.geometry.edgePtStart[e + 1];
+        expect(raised.geometry.edgePtStart[e + 1] - raised.geometry.edgePtStart[e],
+            b - a);
+        for (var k = 0; k < b - a; k++) {
+          final k1 = raised.geometry.edgePtStart[e] + k;
+          expect(height(raised.geometry, k1) - height(first.geometry, a + k),
+              closeTo(1, 1e-6),
+              reason: 'edge $e, point $k');
+          moved++;
+        }
+      }
+      expect(moved, greaterThan(0));
 
       // A road laid: a new graph, a new revision, new geometry.
       final rev = city.agents.graphRev;
@@ -455,7 +490,7 @@ void main() {
       final rebuilt = capture(city).cityTraffic.single;
       expect(city.agents.graphRev, rev + 1);
       expect(rebuilt.geometry.graphRev, rev + 1);
-      expect(identical(rebuilt.geometry, reshaped.geometry), isFalse);
+      expect(identical(rebuilt.geometry, raised.geometry), isFalse);
       expect(rebuilt.agents.graphRev, rev + 1);
     });
 
