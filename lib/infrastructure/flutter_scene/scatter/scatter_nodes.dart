@@ -10,6 +10,7 @@ import 'package:vector_math/vector_math.dart' as vm;
 
 import '../../../adapters/presenters/camera_view.dart';
 import '../../../application/snapshot/world_snapshot.dart';
+import '../../../domain/colony/city/road_elevation.dart';
 import '../../../domain/scatter/prop_catalog.dart';
 import '../../../domain/scatter/prop_model.dart';
 import '../../../domain/scatter/scatter_instance.dart';
@@ -113,8 +114,10 @@ class ScatterNodes {
   /// changes shape. See [ScatterMask].
   ScatterMask? _mask;
   int _maskSig = 0;
-  int _maskRoads = 0;
-  int _maskRoadPoints = 0;
+
+  /// [roadMaskSignature] of the roads the live mask was built from: what
+  /// says a road was drawn, moved, widened or removed (see [_refreshMask]).
+  int _maskRoadHash = 0;
 
   /// Building sites the live mask was built from, by id. Kept for ONE reason:
   /// to work out what changed when it is rebuilt (see [_maskSitesMoved]).
@@ -864,25 +867,22 @@ class ScatterNodes {
   /// polylines and buildings as body-fixed sites, which is all a renderer is
   /// given and all a networked client will ever have.
   List<(Vector3, double)> _refreshMask(WorldSnapshot snap, String bodyId) {
-    // A cheap signature rather than a deep compare: the shape of a colony
-    // changes by GAINING things — a road drawn, a lot grown — so counts catch
-    // it, and a per-frame hash over a hundred thousand buildings would cost
-    // more than the rebuild it is trying to avoid.
-    var roads = 0, points = 0, builds = 0;
-    for (final r in snap.roads) {
-      if (r.body != bodyId) continue;
-      roads++;
-      points += r.points.length;
-    }
+    // A cheap signature rather than a deep compare: a colony's buildings
+    // change by GAINING things — a lot grown — so their count catches it,
+    // and a per-frame hash over a hundred thousand buildings would cost more
+    // than the rebuild it is trying to avoid. Roads are few enough to hash
+    // one by one, and must be: the road tool edits them IN PLACE, where no
+    // count moves (see [roadMaskSignature]).
+    final (:roads, hash: roadHash) = roadMaskSignature(snap.roads, bodyId);
+    var builds = 0;
     for (final b in snap.buildings.values) {
       if (b.body == bodyId) builds++;
     }
-    final sig = Object.hash(bodyId, roads, points, builds);
+    final sig = Object.hash(bodyId, roadHash, builds);
     if (sig == _maskSig) return const [];
-    final roadsMoved = roads != _maskRoads || points != _maskRoadPoints;
+    final roadsMoved = roadHash != _maskRoadHash;
     _maskSig = sig;
-    _maskRoads = roads;
-    _maskRoadPoints = points;
+    _maskRoadHash = roadHash;
     if (roads == 0 && builds == 0) {
       final moved = _maskSitesMoved(const {});
       _mask = null;
@@ -922,27 +922,8 @@ class ScatterNodes {
     // and they are the features worth keeping if the cap bites.
     var features = 0;
     for (final r in snap.roads) {
-      if (r.body != bodyId || r.points.length < 6) continue;
-      final radius = r.halfWidthM + _roadMarginM;
-      var ax = r.points[0], ay = r.points[1], az = r.points[2];
-      var run = 0.0;
-      for (var i = 3; i + 2 < r.points.length; i += 3) {
-        final bx = r.points[i], by = r.points[i + 1], bz = r.points[i + 2];
-        final dx = bx - ax, dy = by - ay, dz = bz - az;
-        run = math.sqrt(dx * dx + dy * dy + dz * dz);
-        // Merge the sampled polyline into corridor-length capsules. The
-        // samples are metres apart; one capsule each would be tens of
-        // thousands of features for a town's worth of streets, and the chord
-        // error over 40 m of a street's curvature is under the verge margin.
-        final last = i + 5 >= r.points.length;
-        if (run < _maskSegmentM && !last) continue;
-        builder.addCapsule(
-            Vector3(ax, ay, az), Vector3(bx, by, bz), radius);
-        features++;
-        ax = bx;
-        ay = by;
-        az = bz;
-      }
+      if (r.body != bodyId) continue;
+      features += addRoadCorridor(builder, r);
     }
 
     // Then the sites. A rectangle is masked as the capsule inscribed along its
@@ -1010,6 +991,123 @@ class ScatterNodes {
 
   /// Corridor length a road's samples are merged into, metres.
   static const double _maskSegmentM = 40;
+
+  /// The roads on [bodyId], and a hash of everything about them the mask
+  /// reads: each road's id, half width, sample count, and the DIRECTIONS of
+  /// its two ends.
+  ///
+  /// Counts alone were the old signature, and the road tool edits in place:
+  /// an Upgrade keeps a road's id and controls, so its samples and the
+  /// colony's road count stay put while its width doubles, and an Adjust
+  /// drag re-lays a road as one road for one, with the same sample count
+  /// whenever its length moves by less than a sample. Neither rebuilt the
+  /// mask, and the trees stood on in the new lanes. The ends are hashed as
+  /// directions (to about six centimetres on an Earth-sized body) because
+  /// that is all the mask takes from a point: a road whose ground is
+  /// re-graded under it moves radially, which is the terrain's own
+  /// invalidation to answer, not a road that moved.
+  ///
+  /// It runs every frame over every road, so it is folded by hand rather
+  /// than through `Object.hash`: over fifty thousand roads, in a debug test
+  /// run, that measured 13 ms against this 8 and the old counts' 3.
+  static ({int roads, int hash}) roadMaskSignature(
+      Iterable<RoadSnapshot> roads, String bodyId) {
+    var count = 0, h = 0;
+    for (final r in roads) {
+      if (r.body != bodyId) continue;
+      count++;
+      final p = r.points;
+      final n = p.length ~/ 3;
+      h = _fold(h, r.id.hashCode);
+      h = _fold(h, (r.halfWidthM * 100).round());
+      h = _fold(h, n);
+      if (n == 0) continue;
+      h = _foldEnd(h, p[0], p[1], p[2]);
+      final last = 3 * (n - 1);
+      h = _foldEnd(h, p[last], p[last + 1], p[last + 2]);
+    }
+    return (roads: count, hash: h);
+  }
+
+  /// One value into a running hash, kept to 30 bits so the arithmetic is
+  /// exact on the web too.
+  static int _fold(int h, int v) => (h * 31 + (v & 0x3fffffff)) & 0x3fffffff;
+
+  /// A road end's unit direction from the body centre, each component
+  /// quantised to 1e-8.
+  static int _foldEnd(int h, double x, double y, double z) {
+    final len = math.sqrt(x * x + y * y + z * z);
+    if (len <= 0) return _fold(h, 0);
+    final q = 1e8 / len;
+    h = _fold(h, (x * q).round());
+    h = _fold(h, (y * q).round());
+    return _fold(h, (z * q).round());
+  }
+
+  /// Adds [r]'s corridor to [builder], [_roadMarginM] wider than its
+  /// carriageway, and returns how many capsules that took.
+  ///
+  /// Only the stretches that come up to the surface: a tunnel's points are
+  /// written at the ground ABOVE it (its deck travels separately, in
+  /// [RoadSnapshot.lifts]), and masked they cut a road-wide treeless strip
+  /// across the hill it runs under — the one mark it left on the surface,
+  /// giving away a tunnel that shows only while the road tool is held below
+  /// ground. The corridor is cut at each portal into runs of samples no
+  /// deeper than [RoadElevation.tunnelCoverM], the road mesher's own rule
+  /// for where tarmac is drawn. A bridge or a viaduct stays masked: it is
+  /// over the ground, and a tree through its deck is still a tree in the
+  /// road. A road with no deck is one run, masked exactly as before.
+  static int addRoadCorridor(ScatterMaskBuilder builder, RoadSnapshot r) {
+    final p = r.points;
+    final n = p.length ~/ 3;
+    if (n < 2) return 0;
+    final radius = r.halfWidthM + _roadMarginM;
+    final lifts = r.lifts.length == n ? r.lifts : null;
+    bool under(int k) =>
+        lifts != null && lifts[k] < -RoadElevation.tunnelCoverM;
+    var added = 0;
+    for (var k = 0; k < n;) {
+      if (under(k)) {
+        k++;
+        continue;
+      }
+      var end = k;
+      while (end + 1 < n && !under(end + 1)) {
+        end++;
+      }
+      added += _addRoadRun(builder, p, k, end, radius);
+      k = end + 1;
+    }
+    return added;
+  }
+
+  /// Samples [k0]..[k1] (inclusive) of a road's flattened [p], as capsules.
+  static int _addRoadRun(
+      ScatterMaskBuilder builder, List<double> p, int k0, int k1, double radius) {
+    var ax = p[3 * k0], ay = p[3 * k0 + 1], az = p[3 * k0 + 2];
+    if (k1 == k0) {
+      // One sample between two tunnels: the road surfaces for a few metres.
+      builder.addDisc(Vector3(ax, ay, az), radius);
+      return 1;
+    }
+    var added = 0;
+    for (var k = k0 + 1; k <= k1; k++) {
+      final bx = p[3 * k], by = p[3 * k + 1], bz = p[3 * k + 2];
+      final dx = bx - ax, dy = by - ay, dz = bz - az;
+      final run = math.sqrt(dx * dx + dy * dy + dz * dz);
+      // Merge the sampled polyline into corridor-length capsules. The
+      // samples are metres apart; one capsule each would be tens of
+      // thousands of features for a town's worth of streets, and the chord
+      // error over 40 m of a street's curvature is under the verge margin.
+      if (run < _maskSegmentM && k < k1) continue;
+      builder.addCapsule(Vector3(ax, ay, az), Vector3(bx, by, bz), radius);
+      added++;
+      ax = bx;
+      ay = by;
+      az = bz;
+    }
+    return added;
+  }
 
   /// Whether [cell] is within [viewDistanceM] of the surface point under
   /// [anchorDir], measured ALONG THE GROUND (great-circle arc), with the
@@ -1094,8 +1192,7 @@ class ScatterNodes {
     // coordinates that mean something else there.
     _mask = null;
     _maskSig = 0;
-    _maskRoads = 0;
-    _maskRoadPoints = 0;
+    _maskRoadHash = 0;
     _maskSites.clear();
     _composedField = null;
     _composedEditsId = _unset;
