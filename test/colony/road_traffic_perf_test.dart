@@ -160,4 +160,54 @@ void main() {
       expect(traffic.volumeOf(road.id), closeTo(w, 1e-9 * (1 + w)));
     }
   }, timeout: const Timeout(Duration(minutes: 10)));
+
+  test("a reach field's search is forgotten inside the step budget", () {
+    // The goods field reaches every node in the city. Forgetting that
+    // search all at once — as the next field seeds, or as the first origin
+    // is searched — put the whole network into one step: on this grid of
+    // 1,760 junctions, a step more than 300 units past the most the
+    // budget allows.
+    final c = CitySim.found(
+      const CityConfig(bodyId: 'earth', gridSize: 20),
+      bodies: RealSolarSystem.build().all.where((b) => !b.isStar).toList(),
+      id: 'sweep',
+    );
+    const n = 40;
+    const spacing = 100.0;
+    const half = (n - 1) * spacing / 2;
+    for (var i = 0; i < n; i++) {
+      final x = -half + i * spacing;
+      c.layout.commitRoad(
+          controls: [Vec2(x, -half - 30), Vec2(x, half + 30)],
+          regenerateLots: false);
+      c.layout.commitRoad(
+          controls: [Vec2(-half - 30, x), Vec2(half + 30, x)],
+          regenerateLots: false);
+    }
+    c.layout.regenerate();
+    final lots = c.layout.autoParcels;
+    final police = kUtilCatalog.firstWhere((s) => s.type == 'police');
+    final homes = kZoneSpecs['residential']![Density.low]!;
+    c.parcelBuildings[lots[lots.length ~/ 2].id] = police;
+    for (var i = 0; i < lots.length; i += 7) {
+      c.parcelBuildings.putIfAbsent(lots[i].id, () => homes);
+    }
+
+    const tuning = TrafficTuning(
+        workPerStep: 500, maxSettled: 100, routesPerOrigin: 1, cadenceSec: 0);
+    final traffic = CityRoadTraffic(c, tuning: tuning);
+    expect(traffic.graph.nodeCount, greaterThan(1700));
+    var maxWork = 0;
+    for (var guard = 0; traffic.model.passes < 3 && guard < 100000; guard++) {
+      traffic.advance(0.02);
+      maxWork = math.max(maxWork, traffic.model.lastStepWork);
+    }
+    expect(traffic.model.passes, greaterThanOrEqualTo(3));
+    expect(traffic.hasRun, isTrue);
+    expect(
+        maxWork,
+        lessThanOrEqualTo(tuning.workPerStep +
+            tuning.routesPerOrigin * tuning.maxSettled +
+            1000));
+  });
 }

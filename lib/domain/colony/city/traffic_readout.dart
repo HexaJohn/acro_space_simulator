@@ -74,6 +74,13 @@ abstract interface class CityTrafficReadout {
   /// does not know: no lot is punished for not having been looked at.
   bool serviceReach(String lotId);
 
+  /// Whether a vehicle from a station with safety cover — the police, a
+  /// fire station, the barracks: the cover a fire is put out with — reaches
+  /// [lotId] the way the one-way streets run. A clinic's ambulance counts
+  /// for [serviceReach], not here: it puts no fire out. True before a
+  /// picture, and for a lot it does not know.
+  bool fireReach(String lotId);
+
   /// Whether goods reach [lotId] the way the one-way streets run. True
   /// before a picture, and for a lot it does not know.
   bool deliveryReach(String lotId);

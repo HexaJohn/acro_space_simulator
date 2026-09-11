@@ -4197,9 +4197,11 @@ class CitySim {
     final spread = <String>[];
     final done = <String>[];
     lotFires.forEach((id, intensity) {
-      // The engine has to be able to GET there: a lot no station reaches
-      // along the one-way streets burns with a fraction of the cover.
-      final reach = trafficReadout.serviceReach(id) ? 1.0 : 0.3;
+      // The engine has to be able to GET there: a lot no station with
+      // safety cover reaches along the one-way streets burns with a
+      // fraction of the cover. A clinic's ambulance reaching it puts
+      // nothing out.
+      final reach = trafficReadout.fireReach(id) ? 1.0 : 0.3;
       final next = intensity + (0.25 - suppression * reach * 0.45) * dt;
       if (next <= 0) {
         done.add(id); // put out before it took the building

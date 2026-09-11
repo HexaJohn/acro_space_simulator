@@ -159,6 +159,78 @@ void main() {
       expect(west.goods, isFalse);
       expect(west.home, isTrue);
     });
+
+    test("a clinic's ambulance is no fire cover", () {
+      // A one-way street east, and a house on it the police station down
+      // the street cannot reach: nothing leads back. In one colony a
+      // clinic stands up the street from the house.
+      ({bool service, bool fire, double burn}) house({required bool clinic}) {
+        final c = colony('fire');
+        final s = c.commitRoad(
+            const [Vec2(0, 0), Vec2(600, 0)], RoadClass.streetOneWay)!;
+        final station = lotOn(c.layout, s, const Vec2(504, -20), north: false);
+        final home = lotOn(c.layout, s, const Vec2(144, -20), north: false);
+        expect(c.placeOnParcel(station.id, util('Police Station')), isTrue);
+        expect(c.placeOnParcel(home.id, homes), isTrue);
+        if (clinic) {
+          final at = lotOn(c.layout, s, const Vec2(48, -20), north: false);
+          expect(c.placeOnParcel(at.id, util('Clinic')), isTrue);
+        }
+        c.roadTraffic.advance(1);
+        expect(c.trafficReadout.hasRun, isTrue);
+        // Cover enough to put the fire out, if an engine could get there.
+        c.population = 100;
+        c.services['safety'] = 100;
+        c.lotFires[home.id] = 0.5;
+        c.advanceParcelFires(0.1);
+        return (
+          service: c.trafficReadout.serviceReach(home.id),
+          fire: c.trafficReadout.fireReach(home.id),
+          burn: c.lotFires[home.id] ?? 0,
+        );
+      }
+
+      final alone = house(clinic: false);
+      expect(alone.service, isFalse);
+      expect(alone.fire, isFalse);
+      expect(alone.burn, greaterThan(0.5), reason: 'out of reach, it spreads');
+      final beside = house(clinic: true);
+      expect(beside.service, isTrue, reason: 'the ambulance gets there');
+      expect(beside.fire, isFalse, reason: 'but no engine does');
+      expect(beside.burn, closeTo(alone.burn, 1e-12),
+          reason: 'an ambulance puts no fire out');
+    });
+
+    test('a works on a street nothing reaches is not its own delivery', () {
+      // The reversed one-way of the test above: it runs INTO the junction
+      // from a dead end. A works grown on it ships goods — but only away,
+      // towards the junction, never back to its own door.
+      ({bool goods, double grown}) works({required bool reversed}) {
+        final c = colony('selfsupply');
+        c.commitRoad(const [Vec2(-100, 0), Vec2(100, 0)], RoadClass.street);
+        final o = c.commitRoad(
+            const [Vec2(100, 0), Vec2(400, 0)], RoadClass.streetOneWay)!;
+        if (reversed) {
+          c.layout.updateRoad(c.layout.roadById(o)!.copyWith(reversed: true));
+        }
+        final lot = lotOn(c.layout, o, const Vec2(220, 20), north: true);
+        c.layout.setUse(lot.id, ParcelUse.industrial);
+        c.grownParcels[lot.id] = 1.5;
+        c.infiniteDemand = true;
+        c.roadTraffic.advance(1);
+        expect(c.trafficReadout.hasRun, isTrue);
+        final goods = c.trafficReadout.deliveryReach(lot.id);
+        c.advanceParcelGrowth(10);
+        return (goods: goods, grown: c.grownParcels[lot.id] ?? 0);
+      }
+
+      final east = works(reversed: false);
+      expect(east.goods, isTrue, reason: 'in off-world through the landing site');
+      expect(east.grown, greaterThan(1.5));
+      final west = works(reversed: true);
+      expect(west.goods, isFalse);
+      expect(west.grown, lessThan(1.5), reason: 'what stands declines');
+    });
   });
 
   group('routing', () {

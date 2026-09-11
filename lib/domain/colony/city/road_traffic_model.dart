@@ -145,6 +145,11 @@ class TrafficRole {
   /// A station whose vehicles answer calls: police, fire, ambulance.
   static bool sendsServiceVehicles(CityBuildingSpec s) =>
       (s.services['safety'] ?? 0) > 0 || (s.services['health'] ?? 0) > 0;
+
+  /// A station whose vehicles put fires out: one with the 'safety' cover
+  /// the fire line suppresses with. A clinic sends ambulances, not engines.
+  static bool fightsFires(CityBuildingSpec s) =>
+      (s.services['safety'] ?? 0) > 0;
 }
 
 /// The model's numbers.
@@ -480,15 +485,32 @@ class CityTrafficModel {
     return serviceDistanceTo(lotId) != null;
   }
 
+  /// Whether a vehicle from a station that fights fires
+  /// ([TrafficRole.fightsFires]) reaches [lotId] within
+  /// [TrafficTuning.serviceReachM], over the one-way streets the way they
+  /// run. Its own field, not [serviceReach]'s: a clinic upstream of a
+  /// house reaches it, and the police station the one-way street leads
+  /// away from still does not. True before the first window and for a lot
+  /// the last window did not know.
+  bool fireReach(String lotId) {
+    final p = _pub;
+    if (p == null || p.graph.lotNoOf(lotId) == null) return true;
+    return p.reachDistance(lotId, p.loads.fireDist, p.fireOnPiece) <=
+        tuning.serviceReachM;
+  }
+
   /// Whether goods can reach [lotId] — from a works, a warehouse, the
   /// spaceport, or from off-world through the landing site — over the
   /// one-way streets the way they run. True before the first window and
-  /// for a lot the last window did not know.
+  /// for a lot the last window did not know. A works' own lorries are not
+  /// its delivery: a works on a street nothing else reaches the right way
+  /// round is as cut off as a shop there.
   bool deliveryReach(String lotId) {
     final p = _pub;
     if (p == null || p.graph.lotNoOf(lotId) == null) return true;
     return p
-        .reachDistance(lotId, p.loads.goodsDist, p.goodsOnPiece)
+        .reachDistance(lotId, p.loads.goodsDist, p.goodsOnPiece,
+            ownCounts: false)
         .isFinite;
   }
 
@@ -590,7 +612,7 @@ class CityTrafficModel {
   final _IntBuf _gPiece = _IntBuf(), _gMask = _IntBuf();
   final List<_DblBuf> _prod = List.generate(4, (_) => _DblBuf());
   final List<_DblBuf> _attr = List.generate(4, (_) => _DblBuf());
-  final _Sources _svc = _Sources(), _goods = _Sources();
+  final _Sources _svc = _Sources(), _fire = _Sources(), _goods = _Sources();
   double _resTotal = 0, _jobsTotal = 0, _shopTotal = 0;
   double _goodsDemand = 0, _goodsSupply = 0;
 
@@ -611,10 +633,11 @@ class CityTrafficModel {
   List<Float64List?> _remapped = const [];
   int _remapShare = 0;
 
-  // Reach fields.
-  bool _fieldService = true;
-  Map<int, List<double>> _onPiece = {};
-  Map<int, List<double>> _svcOnPiece = {}, _goodsOnPiece = {};
+  // Reach fields, in the order a pass fills them.
+  static const int _svcField = 0, _fireField = 1, _goodsField = 2;
+  int _reachField = _svcField;
+  Map<int, _OnPiece> _onPiece = {};
+  Map<int, _OnPiece> _svcOnPiece = {}, _fireOnPiece = {}, _goodsOnPiece = {};
 
   // Assignment.
   final _IntBuf _sampled = _IntBuf();
@@ -758,6 +781,7 @@ class CityTrafficModel {
       _attr[k].clear();
     }
     _svc.clear();
+    _fire.clear();
     _goods.clear();
     _resTotal = _jobsTotal = _shopTotal = 0;
     _goodsDemand = _goodsSupply = 0;
@@ -806,14 +830,16 @@ class CityTrafficModel {
       final spec = lot.spec;
       if (spec == null) continue;
       _lotFlags[i] |= _flagBuilt;
-      _addBuilding(spec, lot.occupancy, g.lotPiece[i], g.lotS[i], g.lotDirs[i]);
+      _addBuilding(
+          spec, lot.occupancy, g.lotPiece[i], g.lotS[i], g.lotDirs[i], i);
     }
     if (_cursor < nL) return work;
     final sites = _sites;
     while (_cursor2 < sites.length && work < budget) {
       final site = sites[_cursor2++];
       work += _lotWork;
-      _addBuilding(site.spec, site.occupancy, site.piece, site.sM, site.dirs);
+      _addBuilding(
+          site.spec, site.occupancy, site.piece, site.sM, site.dirs, -1);
     }
     if (_cursor2 < sites.length) return work;
     _finishGather();
@@ -821,8 +847,11 @@ class CityTrafficModel {
   }
 
   /// A building's trips, onto the group of the stretch it is entered from.
+  /// [lot] is the graph lot it stands on, -1 for a site off the plat: a
+  /// reach field it seeds knows its sources' lots, so a works is not its
+  /// own delivery.
   void _addBuilding(CityBuildingSpec spec, double occupancy, int piece,
-      double s, int dirs) {
+      double s, int dirs, int lot) {
     // A building no road reaches puts nobody on the roads.
     if (piece < 0 || dirs == 0) return;
     final t = tuning;
@@ -845,7 +874,7 @@ class CityTrafficModel {
           (spec.storageBonus > 0 ? t.goodsTripsPerStore : 0);
       _prod[2][gi] += trips;
       _goodsSupply += trips;
-      _goods.add(piece, s, dirs);
+      _goods.add(piece, s, dirs, lot);
     }
     if (TrafficRole.needsDeliveries(spec)) {
       final a = math.max(1.0, jobs);
@@ -854,8 +883,9 @@ class CityTrafficModel {
     }
     if (TrafficRole.sendsServiceVehicles(spec)) {
       _prod[3][gi] += t.serviceTripsPerStation;
-      _svc.add(piece, s, dirs);
+      _svc.add(piece, s, dirs, lot);
     }
+    if (TrafficRole.fightsFires(spec)) _fire.add(piece, s, dirs, lot);
     _attr[3][gi] += 1;
   }
 
@@ -876,7 +906,7 @@ class CityTrafficModel {
         _attr[2][gi] +=
             math.max(0.0, _goodsSupply - _goodsDemand) / t.goodsTripsPerJob;
       }
-      _goods.add(g.rootPiece, g.rootS, g.rootDirs);
+      _goods.add(g.rootPiece, g.rootS, g.rootDirs, -1);
     }
     final nG = _gPiece.length;
     _gBest.setLength(nG);
@@ -950,7 +980,7 @@ class CityTrafficModel {
       if (k != _shareNo && _resState[k] == _missing) _willPublish = false;
     }
     if (_willPublish) {
-      work += _beginSeeds(service: true);
+      work += _beginSeeds(_svcField);
     } else {
       _cursor = 0;
       _phase = _Phase.clear;
@@ -958,34 +988,46 @@ class CityTrafficModel {
     return work + 1;
   }
 
-  // ---- Reach fields: distance from the nearest service station (bounded),
-  // and from the nearest source of goods (unbounded), over directed edges.
+  // ---- Reach fields: distance from the nearest service station and from
+  // the nearest station that fights fires (both bounded), and from the
+  // nearest source of goods (unbounded), over directed edges.
 
-  /// Ready the search for a field; the work of clearing the last one back.
-  int _beginSeeds({required bool service}) {
-    _fieldService = service;
+  /// Ready the search for [field]; the work of clearing the last search
+  /// back — one unit after a field, whose fill forgot its search node by
+  /// node under the budget.
+  int _beginSeeds(int field) {
+    _reachField = field;
     final s = _search;
     final work = s.clear();
-    s.bound = service ? tuning.serviceReachM : double.infinity;
+    s.bound = field == _goodsField ? double.infinity : tuning.serviceReachM;
     s.maxSettled = 1 << 30;
-    _onPiece = <int, List<double>>{};
+    _onPiece = <int, _OnPiece>{};
     _cursor = 0;
     _phase = _Phase.seed;
     return work;
   }
 
   int _seed(int budget) {
-    final src = _fieldService ? _svc : _goods;
+    final src = switch (_reachField) {
+      _svcField => _svc,
+      _fireField => _fire,
+      _ => _goods,
+    };
     var work = 0;
     while (_cursor < src.length && work < budget) {
       final k = _cursor++;
-      work += 2 + _seedDistance(src.piece[k], src.s[k], src.dirs[k], _onPiece);
+      work += 2 +
+          _seedDistance(
+              src.piece[k], src.s[k], src.dirs[k], src.lot[k], _onPiece);
     }
     if (_cursor < src.length) return work;
-    if (_fieldService) {
-      _svcOnPiece = _onPiece;
-    } else {
-      _goodsOnPiece = _onPiece;
+    switch (_reachField) {
+      case _svcField:
+        _svcOnPiece = _onPiece;
+      case _fireField:
+        _fireOnPiece = _onPiece;
+      default:
+        _goodsOnPiece = _onPiece;
     }
     _phase = _Phase.field;
     return work + 1;
@@ -994,34 +1036,23 @@ class CityTrafficModel {
   /// Seed the search with a vehicle leaving arc [s] of [piece] in the
   /// directions [mask] allows: it reaches the node ahead, and passes every
   /// lot ahead of it on its own piece ([onPiece]: the travel coordinates the
-  /// sources sit at, per piece and direction, ascending). Work units back.
-  int _seedDistance(
-      int piece, double s, int mask, Map<int, List<double>> onPiece) {
+  /// sources sit at, and the [lot] each stands on, per piece and direction).
+  /// Work units back.
+  int _seedDistance(int piece, double s, int mask, int lot,
+      Map<int, _OnPiece> onPiece) {
     final g = _graph;
     var work = 0;
     if (mask & RoadGraph.forwardBit != 0 && g.pieceFwdEdge[piece] >= 0) {
       _search.seed(g.pieceTo[piece], g.pieceS1[piece] - s);
-      work += _insertSorted(
-          onPiece[piece * 2] ??= <double>[], s - g.pieceS0[piece]);
+      work += (onPiece[piece * 2] ??= _OnPiece())
+          .insert(s - g.pieceS0[piece], lot);
     }
     if (mask & RoadGraph.backwardBit != 0 && g.pieceBwdEdge[piece] >= 0) {
       _search.seed(g.pieceFrom[piece], s - g.pieceS0[piece]);
-      work += _insertSorted(
-          onPiece[piece * 2 + 1] ??= <double>[], g.pieceS1[piece] - s);
+      work += (onPiece[piece * 2 + 1] ??= _OnPiece())
+          .insert(g.pieceS1[piece] - s, lot);
     }
     return work;
-  }
-
-  /// [v] into ascending [list]; the elements moved, plus one.
-  static int _insertSorted(List<double> list, double v) {
-    var i = list.length;
-    list.add(v);
-    while (i > 0 && list[i - 1] > v) {
-      list[i] = list[i - 1];
-      i--;
-    }
-    list[i] = v;
-    return list.length - i;
   }
 
   int _field(int budget) {
@@ -1033,24 +1064,34 @@ class CityTrafficModel {
     return work + 1;
   }
 
-  /// The settled distances into the field being published.
+  /// The settled distances into the field being published, and the search
+  /// forgotten as they are read off it. A field touches every node it
+  /// reaches — the goods field, every node in the city — so the search is
+  /// reset here, node by node under the budget, and not all at once by the
+  /// next field's seeding or the first origin's search.
   int _fill(int budget) {
     final nN = _graph.nodeCount;
     final b = _loads[_back];
-    final dst = _fieldService ? b.svcDist : b.goodsDist;
+    final dst = switch (_reachField) {
+      _svcField => b.svcDist,
+      _fireField => b.fireDist,
+      _ => b.goodsDist,
+    };
     final s = _search;
     var work = 0;
     while (_cursor < nN && work < budget) {
       final n = _cursor++;
       work++;
       dst[n] = s.settled[n] == 1 ? s.dist[n] : double.infinity;
+      s.forgetNode(n);
     }
     if (_cursor < nN) return work;
-    if (_fieldService) {
-      work += _beginSeeds(service: false);
-    } else {
+    work += s.forgotten();
+    if (_reachField == _goodsField) {
       _cursor = 0;
       _phase = _Phase.clear;
+    } else {
+      work += _beginSeeds(_reachField + 1);
     }
     return work + 1;
   }
@@ -1500,6 +1541,7 @@ class CityTrafficModel {
       peak: _peak,
       average: _sumV > 0 ? _sumVC / _sumV : 0,
       svcOnPiece: _svcOnPiece,
+      fireOnPiece: _fireOnPiece,
       goodsOnPiece: _goodsOnPiece,
       landValueRaw:
           _lvCount == 0 ? RoadNoise.baseLandValue : _lvSum / _lvCount,
@@ -1786,6 +1828,8 @@ class CityRoadTraffic implements CityTrafficReadout {
   @override
   bool serviceReach(String lotId) => model.serviceReach(lotId);
   @override
+  bool fireReach(String lotId) => model.fireReach(lotId);
+  @override
   bool deliveryReach(String lotId) => model.deliveryReach(lotId);
   @override
   double noiseOf(String lotId) => model.noiseOf(lotId);
@@ -1855,11 +1899,12 @@ class _Loads {
       : roadVol = Float64List(g.roadCount),
         roadCong = Float64List(g.roadCount),
         svcDist = Float64List(g.nodeCount),
+        fireDist = Float64List(g.nodeCount),
         goodsDist = Float64List(g.nodeCount),
         lotNoise = Float32List(g.lotCount),
         lotBonus = Float32List(g.lotCount);
 
-  final Float64List roadVol, roadCong, svcDist, goodsDist;
+  final Float64List roadVol, roadCong, svcDist, fireDist, goodsDist;
   final Float32List lotNoise, lotBonus;
 }
 
@@ -1870,6 +1915,7 @@ class _Results {
     required this.peak,
     required this.average,
     required this.svcOnPiece,
+    required this.fireOnPiece,
     required this.goodsOnPiece,
     required this.landValueRaw,
     required this.builtLots,
@@ -1880,7 +1926,7 @@ class _Results {
   final RoadGraph graph;
   final _Loads loads;
   final double peak, average;
-  final Map<int, List<double>> svcOnPiece, goodsOnPiece;
+  final Map<int, _OnPiece> svcOnPiece, fireOnPiece, goodsOnPiece;
   final double landValueRaw;
   final int builtLots;
   final List<List<_Route>> routes;
@@ -1889,8 +1935,15 @@ class _Results {
   /// Route metres to [lotId] in a reach field: into its piece from the
   /// node behind it, in a direction it accepts — or from the nearest source
   /// on its own piece behind it. Infinite when unreached or unknown.
+  ///
+  /// With [ownCounts] false a source standing on the lot itself is passed
+  /// over for the next one behind it: a works ships goods and needs them,
+  /// and its own lorries leaving are no delivery. (Through the node behind
+  /// the lot its own source counts only round a real loop of the network,
+  /// which is a route like any other.)
   double reachDistance(
-      String lotId, Float64List nodeDist, Map<int, List<double>> onPiece) {
+      String lotId, Float64List nodeDist, Map<int, _OnPiece> onPiece,
+      {bool ownCounts = true}) {
     final g = graph;
     final i = g.lotNoOf(lotId);
     if (i == null) return double.infinity;
@@ -1898,24 +1951,27 @@ class _Results {
     if (piece < 0) return double.infinity;
     final s = g.lotS[i];
     final mask = g.lotDirs[i];
+    final skip = ownCounts ? null : i;
     var best = double.infinity;
     if (mask & RoadGraph.forwardBit != 0 && g.pieceFwdEdge[piece] >= 0) {
       final c = s - g.pieceS0[piece];
       best = math.min(best, nodeDist[g.pieceFrom[piece]] + c);
-      best = math.min(best, _behind(onPiece[piece * 2], c));
+      best = math.min(best, _behind(onPiece[piece * 2], c, skip));
     }
     if (mask & RoadGraph.backwardBit != 0 && g.pieceBwdEdge[piece] >= 0) {
       final c = g.pieceS1[piece] - s;
       best = math.min(best, nodeDist[g.pieceTo[piece]] + c);
-      best = math.min(best, _behind(onPiece[piece * 2 + 1], c));
+      best = math.min(best, _behind(onPiece[piece * 2 + 1], c, skip));
     }
     return best;
   }
 
   /// Metres back from travel coordinate [c] to the nearest source at or
-  /// behind it among the ascending coordinates [sorted] — the largest one
-  /// not past [c] — or infinity when every source is ahead.
-  static double _behind(List<double>? sorted, double c) {
+  /// behind it in [along] — the largest coordinate not past [c], passing
+  /// over the source on lot [skip] — or infinity when every source is
+  /// ahead.
+  static double _behind(_OnPiece? along, double c, int? skip) {
+    final sorted = along?.c;
     if (sorted == null || sorted.isEmpty || sorted[0] > c + 1e-6) {
       return double.infinity;
     }
@@ -1928,7 +1984,38 @@ class _Results {
         hi = mid - 1;
       }
     }
+    if (skip != null) {
+      final lots = along!.lot;
+      while (lo >= 0 && lots[lo] == skip) {
+        lo--;
+      }
+      if (lo < 0) return double.infinity;
+    }
     return c - sorted[lo];
+  }
+}
+
+/// The sources of a reach field on one piece in one direction: the travel
+/// coordinates they sit at, ascending, and the graph lot each stands on
+/// (-1 for a site off the plat and for the landing site).
+class _OnPiece {
+  final List<double> c = <double>[];
+  final List<int> lot = <int>[];
+
+  /// A source at [v] on [owner] into its place; the elements moved, plus
+  /// one.
+  int insert(double v, int owner) {
+    var i = c.length;
+    c.add(v);
+    lot.add(owner);
+    while (i > 0 && c[i - 1] > v) {
+      c[i] = c[i - 1];
+      lot[i] = lot[i - 1];
+      i--;
+    }
+    c[i] = v;
+    lot[i] = owner;
+    return c.length - i;
   }
 }
 
@@ -1993,23 +2080,26 @@ class _DblBuf {
 }
 
 /// Where the sources of a reach field sit: a piece, the arc along its
-/// road, the directions they leave by.
+/// road, the directions they leave by, and the graph lot each stands on
+/// (-1 for none).
 class _Sources {
-  final _IntBuf piece = _IntBuf(), dirs = _IntBuf();
+  final _IntBuf piece = _IntBuf(), dirs = _IntBuf(), lot = _IntBuf();
   final _DblBuf s = _DblBuf();
 
   int get length => piece.length;
 
-  void add(int p, double sM, int d) {
+  void add(int p, double sM, int d, int onLot) {
     piece.add(p);
     s.add(sM);
     dirs.add(d);
+    lot.add(onLot);
   }
 
   void clear() {
     piece.clear();
     s.clear();
     dirs.clear();
+    lot.clear();
   }
 }
 
@@ -2047,16 +2137,28 @@ class _Search {
   int clear() {
     final count = touched.length;
     for (var k = 0; k < count; k++) {
-      final n = touched[k];
-      dist[n] = double.infinity;
-      pred[n] = -1;
-      settled[n] = 0;
+      forgetNode(touched[k]);
     }
+    return count + forgotten();
+  }
+
+  /// Forget node [n]. A caller that walks every node anyway — a reach
+  /// field's fill, under its budget — forgets the search as it goes, then
+  /// says so ([forgotten]), and the next [clear] has nothing left to do.
+  void forgetNode(int n) {
+    dist[n] = double.infinity;
+    pred[n] = -1;
+    settled[n] = 0;
+  }
+
+  /// Every node the last search touched has been forgotten: drop the lists
+  /// that named them. One unit of work.
+  int forgotten() {
     touched.clear();
     order.clear();
     _hs = 0;
     done = false;
-    return count + 1;
+    return 1;
   }
 
   void seed(int n, double d) {
