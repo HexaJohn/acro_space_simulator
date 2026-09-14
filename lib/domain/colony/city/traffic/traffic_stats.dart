@@ -21,8 +21,10 @@
 /// is the worst piece over the last complete minute, and the volume the
 /// vehicles through its busiest piece over the last ten. Those are taken as
 /// a PICTURE at each congestion epoch (2 s of agent time) — the readout's
-/// last complete picture (D47) — and nothing is published until a vehicle
-/// has driven: before then every answer punishes nothing.
+/// last complete picture (D47) — from the very first epoch, whether or not
+/// anything has driven: an empty picture is no congestion and no routes, so
+/// before the first car every answer still punishes nothing, and nothing
+/// waits for one.
 ///
 /// Everything here is rolled on agent time, in the sub-step, with no
 /// allocation once a graph is bound.
@@ -133,7 +135,8 @@ class TrafficStats {
 
   // ---- Congestion ---------------------------------------------------------------
 
-  /// Whether a picture has been taken: a vehicle has driven.
+  /// Whether a picture has been taken: the first congestion epoch has
+  /// passed, cars or no cars.
   bool hasRun = false;
 
   /// Pictures taken. Moves with every one, never goes back.
@@ -217,8 +220,13 @@ class TrafficStats {
     }
     mover.clearBooks();
     if (windowEnd) _closeWindow();
-    if (!hasRun && _emaLimit > 0) hasRun = true;
-    if (hasRun) _picture(lg);
+    // A picture at every epoch from the first, whether or not anything has
+    // driven: a network nothing drives on is a picture too, of no
+    // congestion and no routes. Waiting for the first car left a colony with
+    // no commuters — the starter kit before anything is zoned — "still being
+    // counted" for good in the Routes view.
+    hasRun = true;
+    _picture(lg);
   }
 
   /// The minute closes: its books become the last complete window's, and

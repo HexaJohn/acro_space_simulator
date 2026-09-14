@@ -47,8 +47,8 @@ void main() {
     expect(r.taxLandValueFactor, 1.0);
   });
 
-  test('a picture every congestion epoch once a vehicle has driven, and the '
-      'count never goes back', () {
+  test('a picture every congestion epoch from the first, and the count never '
+      'goes back', () {
     final a = agentsOn(town());
     final r = a.readout;
     var prevT = a.timeUs, prevP = 0;
@@ -163,6 +163,29 @@ void main() {
     a.enabled = true;
     expect(r.hasRun, isFalse);
     expect(r.passes, own + 6);
+  });
+
+  test('a town no car has driven still publishes pictures, so the Routes view '
+      'is never left waiting for the first car', () {
+    // The starter kit as founded, nothing zoned: ticked through the colony's
+    // own advance, as the running game ticks it.
+    final city = starterKit(agentTraffic: true);
+    final r = city.trafficReadout;
+    expect(identical(r, city.agents.readout), isTrue);
+    for (var i = 0; i < 20 && !r.hasRun; i++) {
+      city.advance(0.5);
+    }
+    expect(r.hasRun, isTrue,
+        reason: 'a picture at the first congestion epoch, cars or no cars');
+    expect(r.passes, greaterThan(city.roadTraffic.passes));
+    if (city.agents.stats.spawned == 0) {
+      expect(r.peakCongestion, 0, reason: 'an empty picture punishes nothing');
+      expect(r.averageCongestion, 0);
+      for (final road in city.layout.roads) {
+        expect(r.congestionOf(road.id), 0);
+        expect(r.routesThrough(road.id), isEmpty);
+      }
+    }
   });
 
   test('the colony\'s count never goes back across the switch to the agents '
