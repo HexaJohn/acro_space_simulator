@@ -57,9 +57,10 @@ void main() {
     );
   }
 
-  /// Checks one placed building against its lot, and returns whether the
-  /// site frame agreed with `Parcel.facing` (so the handedness was checked).
-  bool expectFacesStreet(
+  /// Checks one placed building against its lot, and returns why the
+  /// handedness check ran or was skipped ([_UCheck.checked] when local +X was
+  /// checked against the site frame's `u`).
+  _UCheck expectFacesStreet(
       CitySim city, Parcel parcel, BuildingSnapshot b, String label) {
     final a = axesOf(city, b);
     expect(a.upZ, closeTo(1, 1e-9), reason: '$label stands upright');
@@ -68,13 +69,21 @@ void main() {
             '(front ${a.front}, facing ${parcel.facing})');
     final frame = SiteFrame.of(
         parcel.polygon, parcel.frontage, city.layout.roadIndex);
-    if (frame == null || frame.usedEffectiveFrontage) return false;
-    // `Parcel.facing` runs centroid → frontage midpoint, so on a skewed lot
-    // it leans off the frontage normal by the skew; "equal" within 0.5°.
-    if (parcel.facing.dot(frame.v * -1) < 0.99996) return false;
-    expect(a.right.dot(frame.u), greaterThan(0.99),
+    if (frame == null) return _UCheck.noFrame;
+    if (frame.usedEffectiveFrontage) return _UCheck.effectiveFrontage;
+    // (u, −v) is a turn of (+X, −Y), so a turned building has
+    // right·u == front·(−v) whatever the skew between `Parcel.facing`
+    // (centroid → frontage midpoint) and the frontage normal; a mirror
+    // flips the sign of right and fails.
+    final along = a.front.dot(frame.v * -1);
+    expect(along, greaterThan(0.5),
+        reason: '$label: the front leans off −v by the lot skew only');
+    expect(a.right.dot(frame.u), closeTo(along, 1e-6),
         reason: '$label: local +X must run along u (a turn, not a mirror)');
-    return true;
+    // `Parcel.facing` equal to −v within 0.5°: the plain case.
+    return parcel.facing.dot(frame.v * -1) < 0.99996
+        ? _UCheck.checkedSkewed
+        : _UCheck.checked;
   }
 
   group('the starter kit', () {
@@ -91,16 +100,17 @@ void main() {
       final types = {for (final (_, s) in built) s.type};
       expect(types, containsAll(['spaceport', 'solar', 'warehouse']));
       expect(built.length, 5, reason: 'four manual sites and the depot');
-      var framed = 0;
-      for (final (parcel, spec) in built) {
-        final b = BuildingSnapshot.ofParcel(city, parcel, spec, city.body,
-            siteRadiusM: city.body.radius);
-        if (expectFacesStreet(city, parcel, b, '${spec.type} ${parcel.id}')) {
-          framed++;
-        }
-      }
+      final checks = <_UCheck>[
+        for (final (parcel, spec) in built)
+          expectFacesStreet(
+              city,
+              parcel,
+              BuildingSnapshot.ofParcel(city, parcel, spec, city.body,
+                  siteRadiusM: city.body.radius),
+              '${spec.type} ${parcel.id}'),
+      ];
       // Every starter lot stores a frontage the frame uses as is.
-      expect(framed, 5);
+      expect(checks, everyElement(_UCheck.checked));
     });
 
     test('grid cells face their stored (north) frontage', () {
@@ -135,17 +145,29 @@ void main() {
         bodies: bodies);
     final built = city.parcelBuiltLots().toList();
     expect(built, isNotEmpty);
-    var framed = 0;
+    final fronted = <_UCheck, int>{for (final c in _UCheck.values) c: 0};
+    final frontless = <_UCheck, int>{for (final c in _UCheck.values) c: 0};
     for (final (parcel, spec) in built) {
       final b = BuildingSnapshot.ofParcel(city, parcel, spec, city.body,
           siteRadiusM: city.body.radius);
-      if (expectFacesStreet(city, parcel, b, '${spec.type} ${parcel.id}')) {
-        framed++;
-      }
+      final c = expectFacesStreet(city, parcel, b, '${spec.type} ${parcel.id}');
+      final tally = parcel.frontage != null ? fronted : frontless;
+      tally[c] = tally[c]! + 1;
     }
+    // ignore: avoid_print
+    print('u check, fronted lots: $fronted; frontage-less lots: $frontless');
+    // Every fronted lot gets the handedness check, skewed ones included; a
+    // regression in SiteFrame agreement (no frame, or a frame that falls
+    // back to the effective frontage) shows up here as a count, not a skip.
+    expect(fronted[_UCheck.noFrame], 0);
+    expect(fronted[_UCheck.effectiveFrontage], 0);
+    expect(fronted[_UCheck.checked], greaterThan(0));
+    expect(fronted[_UCheck.checked]! + fronted[_UCheck.checkedSkewed]!,
+        built.where((e) => e.$1.frontage != null).length);
     // Frontage-less generator lots (installations, megas) are checked
     // against `Parcel.facing` only; their turn is R4's (§3.1).
-    final fronted = built.where((e) => e.$1.frontage != null).length;
-    expect(framed, greaterThan(fronted ~/ 2));
   });
 }
+
+/// Whether the handedness (local +X along `u`) check ran, and why not.
+enum _UCheck { checked, checkedSkewed, noFrame, effectiveFrontage }
