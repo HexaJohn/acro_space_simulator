@@ -1279,7 +1279,9 @@ joins; the book re-resolves it). A footprint join (`joinRef` −1) names no grap
 - **Input signature** per site, `inSig = fnv1a32` over:
   - a program-version constant;
   - the polygon (1 cm), the frontage used, `graded`;
-  - every slot of the lot (piece's road id, `s`, right, room, flags, and the crossed lots' ids);
+  - every slot of the lot (piece's road id, `s`, right, room, flags, and the crossed lots' ids); **as built (R2
+    book repair):** the road's class and decoration too, which the seed and back-out rule 1 read and a decoration
+    upgrade changes without moving a slot;
   - the BUILT bit of each crossed lot, in `joinCrossLot` order (§3.7a: the one cross-site input);
   - the spec (`type`, `housing`, `jobs`, `siteWidthM`, `siteDepthM`, `siteKind`, group);
   - whether an alley candidate exists.
@@ -1422,6 +1424,86 @@ class SiteAccessBook {                       // CitySim: late final SiteAccessBo
 - **The capture never generates.** A built site still awaiting its plan is `kerbside` to agents, and legacy to the
   renderer until R7.
 
+**As built (R2 book, `site_access_book.dart`).** The §4.1 API is exact, plus what tests and the dev hook need. Small
+deviations, each local:
+- **Budget constants live on the book** (`SiteAccessBook.defaultUnitsPerTick = 128`, `defaultChecksPerTick = 4096`,
+  `unlimited`): `site_access_constants.dart` is core's to edit and has no `kSyncUnitsPerTick` /
+  `kSyncCheckUnitsPerTick`. Units are charged per §4.3 from `classifyProgram`'s offer.
+- **Drains.** `CitySim.fromJson` ends with a full drain (`sync(maxUnits: unlimited, maxChecks: unlimited)`), so a
+  load re-derives every plan inside the loading phase and the layout reads the book's easements before any UI
+  action; `CityStarterKit.found` drains explicitly at its end. The generator has no separate hook: its closing
+  `advance(0.1)` runs inside generation progress, and **the first `sync` of a book drains in full** whatever budget
+  it is handed (the rule also covers any other colony built without either). (R2 book repair: the load drain first
+  rode on the first `advance`, which stalled the first gameplay frame and left `layout.easementOf` unset until then;
+  `site_access_persistence_test` now pins the drain before any advance.)
+- **Checks.** A site whose `Parcel`, spec and graph stamp are unchanged (identity, or equal values after a re-cut)
+  costs nothing. Otherwise the §3.9 signature is recomputed: the lot half (polygon at 1 cm, frontage, side-street
+  edge, graded, spec) and the slot half, read straight off the graph's join columns (the road's id, class and
+  decoration, `s`, side, dirs, room, flags, the kerb point and normal by their bits so V3 stays exact, the crossed
+  lots and their built bits). The class and decoration are there because the seed and back-out rule 1 read them and
+  a decoration upgrade moves no slot: hashed by id alone, a live book kept home drives on a newly divided avenue that
+  a load re-derives as `kerbOnly` (`site_access_sync_test`, live against fresh). Equal,
+  the plan is **re-resolved in place** (`graphStamp`, `graphLot`, `joinRef`, `joinPiece`, `joinRoadNo`; `rev`
+  kept, `sitesRev` not moved); different, the site re-plans. Sites whose slot crosses lots are always re-hashed
+  (their built bits). The signature is change detection only, never persisted: it hashes word by word, not byte by
+  byte. **Limit:** the side-street slot is hashed only into plans that use it (placing it for every corner lot cost
+  about a third of the drain); a corner car park, yard or installation inside a dirty box is re-planned instead.
+- **Triggers.** A structure change (`structureStamp`) queues the built lots in the dirty box, sorted by id (the
+  roads added, removed or changed, by id and samples, and any manual lot new to the graph, whose box covers the auto
+  lots it re-cut; inflated by `dirtyReachM` = `max(manualReachM + widest half width, 120 m)`), and restarts the
+  resumable walk, which re-resolves every other site: until the walk reaches it, a site outside the box is not stale
+  but is not current either (its stamp). A `layout.version` change restarts the walk; a change of the cheap built
+  key (placed, grown, grid counts, `CityLayout.useRevision`, `CitySim.siteBuiltRevision`, both new counters)
+  re-walks after the walk in flight. A finished walk drops every site it did not see. `siteBuiltRevision` moves on
+  every tier crossing and on every building removal that bumps no `layout.version` (burned out, cleared, flattened,
+  bulldozed, a zoneless grown cell dropped, a lost lot dropped, a cell abandoned or reoccupied, a grid re-key): the
+  counts alone missed a burnout cancelled by a growth start in the same tick.
+- **Measured (`bench/site_access_sync_bench_test.dart`, `flutter test` JIT, sprawl fixture, 30,559 plans, generator
+  stubs):** drain 1.08–1.35 s; steady tick 0.06 ms; one 1024-site chunk re-pack 1.3–2.0 ms; after a road edit
+  (warm) 14–15 budgeted ticks, a first tick of 12.7–17.6 ms and ~10 ms a tick on average (4096 checks, ~2,100
+  re-resolutions and 3–5 re-packed chunks). **The ≤ 2 ms road-edit tick is MISSED** (not re-budgeted): the checks
+  run at ~2.5 µs each and every re-resolved chunk is re-packed. The graph's own `structureStamp` read after the edit
+  costs 23–41 ms more (core's, once per structure change). Levers: fewer checks per tick while only re-resolving,
+  re-packing a chunk by typed `setRange` runs, and a stamp hashed incrementally.
+  **Design contradiction behind the miss (recorded, for the user, §10.1):** §4.2 step 1 says lots outside the dirty
+  box "are not touched", but the contract says otherwise. `isCurrentFor` is `graphStamp == g.structureStamp`, and
+  `joinRef` / `joinPiece` / `joinRoadNo` / `graphLot` index the rebuilt graph's columns. So after ANY road edit
+  every plan in the town is out of date until it is re-resolved and its chunk re-packed, wherever the edit was. On
+  the 127k town that walk is ~127k checks at 4096 per tick: about 31 ticks at ~10 ms each. The
+  choice is the user's: (a) accept a town-wide re-resolution spread over ticks, at a lower check budget while only
+  re-resolving (≤ 2 ms a tick, but plans away from the edit read kerbside to traffic for longer); (b) make the
+  contract edit-local: `isCurrentFor` compares a per-site slot tuple, not the whole-graph stamp, and join handles
+  become `(lotId, slot)` resolved through `RoadGraph.joinOfRef` at read time. That is an R2a contract change for the
+  Agent Traffic session. Until decided, the book does (a) at the default budget and the ≤ 2 ms figure stays missed.
+  **Built-state latency (recorded, also for §10.1):** the built-state trigger (placed, grown, tier, removal) does not
+  queue the site that changed; it re-walks the colony after the walk in flight, at 4096 checks a tick. On the 127k
+  town a newly placed or grown building can therefore wait about 31 ticks (a fresh walk) to about 62 ticks (one in
+  flight, then its own) for its plan, against §4.3's "placing 500 zoned houses completes in 8 ticks", which holds
+  only where the walk is short (the starter kit and small towns drain in one tick). Until then the site reads
+  kerbside to traffic (legal, §4.1). The lever, not taken: queue the ids of buildings placed, grown or cleared through
+  the `CitySim` hooks ahead of the walk, as the dirty box is.
+- **Chunks** are re-packed from published rows (`SiteChunkLayout` + `SiteAccessChunk.packed`, the R2a builder's
+  own packing entry points; `site_access_sync_test` pins the re-pack byte-equal to `PlanBuilder.build`), so a
+  copy-on-write never regenerates a neighbour. An anchor the grid reports twice is walked once.
+- **`onLotsRenamed`** is order-independent (every new id is taken from the ids before the call) rather than "sorted
+  old-id order": the book may not iterate the map (hygiene), and the result is the same. It re-keys the easement
+  LOTS as well as the sites, so a renamed crossed lot answers `easementOf(newId)` at once, not after the next sync
+  (R2 book repair). Both `CitySim` call sites (`_carryRenamedLots`, and `_carryLotsAcross` on the claim path) are
+  pinned by `site_access_sync_test` ("CitySim rename hooks"): a renamed built lot keeps its slot and `sitesRev` does
+  not move, before any sync.
+- **An easement-priority site inside the dirty box** is checked as a queued site in the priority pass and leaves the
+  queue there, so it is current at once and costs the check budget nothing (R2 book repair).
+- **`corridorHits`** tests the sites whose slot 0 carries `kJoinEasement` or `kJoinOffFrontage`: the stretch of each
+  cut join's throat outside the site's own lot, within `kAccessCorridorHalfM`. `claimSite` (with or without
+  `checkAccess`) and `siteBlockedReason` refuse such a plot.
+- **The inspector string** is `CitySim.lotInspectorNote(lotId)` (`access easement for <site label>`), shown by the
+  edit overlay when zoning or placing on the lot is refused.
+- **Extras:** constructor `generators`, `easements` (the `easementOf` rule, fakes in tests) and `validate`;
+  `lastSync` (`SiteAccessSyncStats`), `debugCorridorHits`, `debugRepack`, `sitePlanJson` (the dev hook
+  `ext.acro.citygame site=plan&id=`), `CitySim.debugTickProbe` (the tick-order test).
+- The refusal half of `site_easement_test` is `site_easement_refusal_test.dart`, so the two tracks' files do not
+  collide.
+
 ### 4.2 Triggers (cheap O(1) checks decide whether to walk)
 
 | Change | RoadGraph | Lane graph | Plans / `sitesRev` |
@@ -1486,6 +1568,30 @@ play and ≤ 2 ms for the sync of a road edit on the 127k town.
     can move is a seed flip at a 0.5 m boundary of `W` or `D`. Any key change fails the test, and the message
     prints that lot's distance from the nearest boundary, so a fixture that lands on one is diagnosed at once. The
     fixture is fixed, so the result never varies from run to run.
+
+**As built (R2 book).** Two findings, both outside the book:
+- A save restores placed buildings only from the utility catalogue (`CitySim.fromJson`), so a zone building PLACED
+  on a lot (the built-town fixture, the generator's towns) is dropped by a load. The persistence fixtures therefore
+  use GROWN buildings (`town(grown: true)`; the generated town's placed zone buildings are converted to grown ones
+  before the round trip). Not a site access defect; reported.
+- **R2 core finding:** on the curved-road fixture (324 lots on two S-bend streets), one lot, `lot-r2-r21`, flips
+  `kerbOnly` (demotion `homeGeometry`) → `homeDriveway` over a load: the home generator's §3.4 fit decides
+  differently on the millimetre re-sample (W 23.28716 → 23.28792 m, D 31.96215 → 31.96174 m, slot 0 unchanged at
+  s = 535.5). Every other lot keeps its program and stall keys. The test pins exactly that one flip, so a fix or a
+  second flip is seen at once; the fix is core's (`home_driveway.dart`, for example quantising `W` and `D` before
+  the fit). **Until core fixes it, this section's acceptance ("any key or program change fails the test") is NOT
+  met: the flip is an open item for the R2 merge,** at which the pin becomes `isEmpty`.
+- **Live against loaded (R2 book repair).** Every other case compares two fresh drains. `site_access_persistence_test`
+  also syncs `city.siteAccess` in budgeted ticks through a grown house avenue, a road edit that renames lots, a
+  decoration upgrade, a tier change and a burnout, then compares every plan per site id (`sitePlanJson`, programs,
+  `rev` and stall keys) against `drained(roundTrip(city))`. That is the comparison that catches a live book
+  diverging from what a load re-derives.
+- **Load order as built (R2 book repair):** `fromJson` → `recompute()` → `agents.restore` → `siteAccess.sync`
+  (full drain, inside `fromJson`) → first `advance` (a no-op sync) → traffic building sync. The first gameplay frame
+  no longer carries the drain; `site_access_persistence_test` checks the loaded book is complete, byte-identical and
+  wired to `layout.easementOf` before any advance.
+- **The `lot-r2-r21` pin stays on this branch** (skeptic, low): the flip is core's home fit; core quantises `W` and
+  `D` before the §3.4 fit, and the pin becomes `isEmpty` at integration.
 
 ---
 
@@ -2087,6 +2193,12 @@ separate site columns (site ordinal + site lane) in `AgentFrame`, with `AgentFra
 Limbo plans are freed at the end of the sub-step in which their last car leaves. No site change edits a road route in
 flight, and `stats.replans` still counts only network re-plans.
 
+**As built (R2 book):** the book keeps no limbo. A cleared or re-planned site's old row stays readable in the chunk
+object traffic already holds (published chunks are never written), so traffic's limbo is a reference to that chunk
+and site index; `changedSince(sitesRev)` names every site that appeared, went or changed `rev`. A re-resolution
+against a new graph (same `rev`) and a rename move no `sitesRev`: traffic sees those through `isCurrentFor` and its
+own `onLotsRenamed`.
+
 ### 7.7 Plan-doc and D-number impacts (agent-traffic.md; text is theirs to apply)
 
 | Item | Change |
@@ -2403,6 +2515,7 @@ class DepthProfile { double depthAt(double x); bool containsRect(Rect r); double
 | An auto lot zoned and grown in front of an unbuilt set-back site blocks that site's access later | built crossed lots make the plan `kPlanAccessBlocked` (visible in the inspector); §10.2 Q12 offers reserving corridors from geometry alone |
 | The 127k-town drain exceeds 3 s once the real program mix is measured | budget is Σ count × unit cost, printed by the bench in R2; if it exceeds 3 s the added load time is reported to the user before R2 merges |
 | A road edit leaves plans stale for a few ticks | dirty-box diff, 4096 checks per tick; stale plans read as kerbside to traffic and keep drawing (§4.2) |
+| A road edit makes EVERY plan not current (`isCurrentFor` compares the whole-graph `structureStamp`; join refs index the rebuilt graph), contradicting §4.2 step 1 "lots outside the box are not touched"; the ≤ 2 ms road-edit tick is missed at ~10–17 ms (§4.1 as built) | **user decision needed:** (a) keep town-wide re-resolution, spread under a lower check budget (plans away from the edit read kerbside longer), or (b) an edit-local contract (per-site slot tuple for currency, `(lotId, slot)` join handles resolved at read), an R2a contract change for the Agent Traffic session |
 | Lot access moves for most lots (narrow-lot drive side) and shifts routed-model pictures | R1 alone, re-pins ledgered, economy tests as the gate; mid-block wide lots move only by the quantum |
 | Conservative windows cost small corner lots their driveway on short blocks | sprawl audit pins `kJoinLegacy` and program counts; starter kit required at 100% for its four sites; an exact bound from traffic can replace the reserve later |
 | Generated towns look different (front car parks push shops back; houses narrow beside drives) | F2 bias for W < 40 keeps street walls; homes fall back to kerb parking; screenshots before R7 |
