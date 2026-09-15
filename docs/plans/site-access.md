@@ -955,9 +955,10 @@ Everything is axis-aligned in the frame. Bays are 2.6 × 5.2 m, two-way aisles 6
   from `B`: `x_J` is `B`'s x. F1/F2 add a `driveway` segment `B → J`; F3's first aisle and a yard's spine start at
   `B`. The throat's pave is a quad along the normal (its kerb corners blend), and the drive's pave starts
   `throatW/2·|nu|` in front of the frontage so the two meet. Stalls beside a drive that starts at `B` start past the
-  quad's far corner (V9). A site with `k < 7` drifts at most 1.23 m, inside the slack, and keeps the straight throat.
+  quad's far corner (V9). A site with `k < 7` drifts at most 1.23 m, inside a 6 m throat's slack, and keeps the
+  straight throat; a 7 m yard throat whose side edge would leave the corridor there gets no yard (§3.6 as built).
   Pinned by `car_park_packer_test` (a set-back lot turned 5.7°, and 500 random sites: 43 of 116 car parks bend, every
-  pave corner off the parcel within 4.5 m of the normal).
+  pave corner off the parcel, and every pave edge just below the frontage line, within 4.5 m of the normal).
 - **Block interval.** The run of 0.5 m profile columns around `x_J` deep enough for the block, inset by the 0.3 m
   profile margin (the example's `[0.3, 23.7]`). F1's block moves back until its first aisle's centre is at least `yT`
   (the single-module example's aisle `[1, 7]`). F2 lays its modules from the depth of `x_J`'s column toward the
@@ -986,7 +987,9 @@ Everything is axis-aligned in the frame. Bays are 2.6 × 5.2 m, two-way aisles 6
   the rear, F3 from the spine). `bay` is the lattice place along its aisle segment, counted from the segment's start
   (on a ring's first aisle, the segment ending at `J` counts from 4096). A dropped place keeps its number, so stalls on
   one aisle keep their keys when another aisle changes (pinned by `car_park_packer_test`).
-- **Not built (left for a follow-up):** second joins (slot 1 or 2).
+- **Not built (left for a follow-up, open at the R2 merge report):** second joins (slot 1 or 2 when `W ≥ 80`, `≥ 60`
+  stalls, or a corner lot with `≥ 30` stalls), and §3.8's bend for skews over 10° (those slots fall to `kerbOnly`,
+  counted `carParkNoFit`). Neither is in the §8.3 or §9 R2 acceptance lists.
 - **Cost.** Generation is branch and bound. A candidate whose best possible score (stalls up to the cap, the free area
   of the envelope's region `[1.5, W − 1.5] × [0, maxDepth]` less the part of its block inside that region, its drive) is
   below the 1 % tie band of the best score so far is dropped before its envelope search, or while its stalls pack past
@@ -1017,17 +1020,28 @@ compose: 18 m holds neither a 25 m circle nor a 7 m lane plus a 15 m bay. The ya
   `Y` (radius 12.5 m). The apron pave runs from 3.5 m beyond the spine's centre on the far side to `Y` across, and from
   18.5 m in front of the apron segment to 3.5 m behind it.
 - **Circle (repair round).** §3.7 step 4's rule applies: the circle's bounding square `Y ± 12.5` must pass
-  `containsRect`, or there is no yard. The square is paved as its own pave, so the envelope keeps clear of it. The
-  apron is `kYardApronWidthM` = 18 m long, which puts the circle 2 m clear of the 7 m lane band around the spine.
-  Where the lot on the apron's side is narrower than `18 + 12.5 + 0.3` m, the apron shortens to fit the square, but
-  never below 11.5 m, the length that holds both bays. The circle then overlaps the spine's last 12.5 m, which has no
-  stall inside it: the far row lies beyond the lane's far edge, and the near row stops at the bays' front ends.
-  (The first landing checked no square. Its circle, 18 m out on the deepest apron, reached up to 9 m past the rear lot
-  line in every yard it produced.)
-- **Bays.** Two 3.5 × 15 m bays sit on the apron segment, 4.5 m apart. They are centred on it, or pushed out until the
-  inner one clears the 7 m lane band. Their noses point along `−v`. The envelope stands in front of them: the apron is
-  beside the envelope's rear face. The envelope search is limited to the apron's side of the spine, and a candidate
-  whose envelope does not meet the bays' front ends (within the 1 m clearance and one column) is rejected.
+  `containsRect`, or there is no yard. The square is paved as its own pave, so the envelope keeps clear of it.
+- **Apron length (second repair round, deviation from `kYardApronWidthM`).** A truck's only U-turn (V13) is the
+  circle, so no loading bay may lie inside its disc (§3.7: bays sit "on the circle's far edge", never inside): a truck
+  parked in a bay would block the turnaround. The bays' far edge is 11.5 m from the spine, so the apron is
+  `11.5 + 12.5` = 24 m long, not 18 m, and the pair's far edge stands a full radius short of `Y`. The apron never
+  shortens: a lot with less than `24 + 12.5 + 0.3` m on the apron's side gets no yard (the car park fallback). (The
+  first repair round kept 18 m and shortened it to 11.5 m on narrower lots. Both bays then lay inside the disc on
+  every yard, their nearest points 6.1 m and 10.1 m from `Y`.) Pinned by `car_park_packer_test`: every bay rectangle's
+  nearest point is at least 12.5 m from every circle node, on every yard of every test set.
+- **Bays.** Two 3.5 × 15 m bays sit on the apron segment, 4.5 m apart, the inner one just clear of the 7 m lane band
+  around the spine. Their noses point along `−v`. The envelope stands in front of them: the apron is beside the
+  envelope's rear face. The envelope search is limited to the apron's side of the spine, and a candidate whose envelope
+  does not meet the bays' front ends (within the 1 m clearance and one column) is rejected.
+- **Lamps (second repair round).** One post every 25 m, starting 12.5 m in, along the outer edge of the far stall row.
+  Where that row leaves the lot, along the near row's outer edge, or else along the spine's far edge. They always stand
+  on an accepted pave, so inside the lot (the first landing put them on the far row's line even when that row was
+  skipped: 3.7 m outside a 40 m lot joined 4.5 m from its side). Pinned: every lamp inside the parcel.
+- **Throat corridor (second repair round).** A straight throat (no bend, `k < 7`) has its side edge meet the frontage
+  `throatW/2 · nv + k · |nu|` off the road normal. For the 7 m yard throat on a skewed site with `k` just under 7 that
+  can exceed the 4.5 m §3.7a half width, and a bend would be shorter than 7 m. Such a slot gets no yard (and no car
+  park throat, though the 6 m one stays within 4.2 m). The test samples every pave edge where it crosses just below
+  the frontage line, not only the corners.
 - **Candidates.** The apron's `y` is taken at three values: the shallowest that leaves an 8 m envelope in front of the
   bays, the one whose spine holds the capacity target, and the deepest whose circle square stays within the depth over
   the apron and the circle (`y_A + 12.5 ≤ yRear`). No `num.clamp` is used: the bounds may meet within 1e-6 (pinned at
@@ -1035,7 +1049,8 @@ compose: 18 m holds neither a 25 m circle nor a 7 m lane plus a 15 m bay. The ya
   bias.
 - **Where yards land.** A generated town's industrial lots (30 × 46 m) cannot hold a 25 m circle square beside the
   spine together with 18.5 m of bays in front of an 8 m envelope. Their yards fall back to car parks (`yardNoFit`):
-  0 yards in six generated towns of 4–6 blocks. The sprawl's larger industrial lots get 42 yards from 62 offers.
+  0 yards in six generated towns of 4–6 blocks. The sprawl's larger industrial lots get 40 yards from 62 offers (42
+  with the 18 m apron).
 - **Fallback.** A slot with room < 4.5, or no yard candidate, falls to `carParkPlanOf`. V13's truck path is the throat,
   the spine and the apron, reversing into the circle.
 

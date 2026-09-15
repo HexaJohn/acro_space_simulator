@@ -30,7 +30,7 @@
 /// A yard (§3.6, as built) is a 7 m truck spine carrying side stall rows,
 /// then an apron turning across its end to a 12.5 m circle whose bounding
 /// square lies inside the lot and is paved, with two 3.5 × 15 m loading bays
-/// facing the envelope's rear face (see `_yard`).
+/// outside the circle's disc, facing the envelope's rear face (see `_yard`).
 ///
 /// The footpath runs from the door along the envelope's front edge to the
 /// nearest stall-free gap, then straight to the frontage (§6.1 step 6).
@@ -342,6 +342,13 @@ class _Site {
     // takes the normal to a bend node on y = 0 (the corridor's own line).
     final drift = k * nu / nv;
     final bend = k >= kThroatMinM - kGenEpsM && drift.abs() > kThroatStraightM;
+    // A straight throat's side edge meets the frontage `tw/2·nv + k·|nu|` off
+    // the road normal; past the §3.7a corridor's half width (a 7 m yard
+    // throat on a skewed site with k just under 7) there is no throat: a bend
+    // would be shorter than 7 m.
+    if (!bend && tw / 2 * nv + k * nu.abs() > kAccessCorridorHalfM - kGenEpsM) {
+      return null;
+    }
     var lo = double.infinity, hi = double.negativeInfinity;
     for (final p in ctx.parcel.polygon) {
       final x = f.toLocal(p).e;
@@ -1817,18 +1824,26 @@ const double _kYardBayPitchM = kLoadingBayWidthM + _kYardBayGapM;
 const double _kYardBayMidMinT =
     kYardThroatWidthM / 2 + kLoadingBayWidthM / 2 + _kYardBayPitchM / 2;
 
-/// The shortest apron that holds both bays: the pair's far edge.
-const double _kYardApronMinM =
+/// The pair's far edge from the spine: 11.5 m.
+const double _kYardBayFarT =
     _kYardBayMidMinT + _kYardBayPitchM / 2 + kLoadingBayWidthM / 2;
 
-/// The apron length, spine to circle node `Y`: [kYardApronWidthM], or less
-/// where the lot on the apron's side is too narrow for the circle's bounding
-/// square, never under [_kYardApronMinM]; NaN when even that fails.
+/// The apron length, spine to circle node `Y`: the bays' far edge plus the
+/// circle's radius (24 m), so no bay reaches into the disc a U-turning truck
+/// sweeps (§3.7: bays sit outside the circle, never inside). Longer than
+/// [kYardApronWidthM] (18 m), which would put both bays inside it.
+final double _kYardApronLenM =
+    math.max(kYardApronWidthM, _kYardBayFarT + kYardCircleRadiusM);
+
+/// The apron length, [_kYardApronLenM]; NaN where the lot on the apron's
+/// side is too narrow for it and the circle's bounding square
+/// (24 + 12.5 + 0.3 m): no yard, the car park fallback.
 double _yardApronLen(_Site s) {
   final room = s.sideDir > 0 ? s.lotHi - s.xJ : s.xJ - s.lotLo;
-  final t = math.min(
-      kYardApronWidthM, room - kDepthProfileMarginM - kYardCircleRadiusM);
-  return t < _kYardApronMinM - kGenEpsM ? double.nan : t;
+  return room - kDepthProfileMarginM - kYardCircleRadiusM <
+          _kYardApronLenM - kGenEpsM
+      ? double.nan
+      : _kYardApronLenM;
 }
 
 /// The frame y of the apron segment for each yard candidate: the shallowest
@@ -1863,11 +1878,11 @@ List<double> _yardApronYs(_Site s, double apronLen) {
 /// aisle `T → A` along `v` (6 m, trucks), with a stall row on the far side
 /// (away from the envelope) and, when [bothSides], a row on the near side
 /// that stops short of the bays. At `A` the apron segment turns along `±u`
-/// toward the side with more room, [apronLen] (18 m, or down to 11.5 m on a
-/// narrower lot) to the circle node `Y` (12.5 m), whose bounding square must
-/// lie inside the lot and is paved; its two 3.5 × 15 m bays hang toward the
-/// frontage, noses on `−v`, so the envelope stands in front of them: the
-/// apron is beside its rear face.
+/// toward the side with more room, [apronLen] (24 m) to the circle node `Y`
+/// (12.5 m), whose bounding square must lie inside the lot and is paved; its
+/// two 3.5 × 15 m bays, outside the circle's disc, hang toward the frontage,
+/// noses on `−v`, so the envelope stands in front of them: the apron is
+/// beside its rear face.
 CarParkCandidate _yard(_Site s, double yA, double apronLen, bool bothSides) {
   const fam = CarParkFamily.yard;
   const r = kYardCircleRadiusM;
@@ -1930,13 +1945,22 @@ CarParkCandidate _yard(_Site s, double yA, double apronLen, bool bothSides) {
     ..add(spineRect)
     ..add(apronRect)
     ..add(circleRect);
-  // Rows: the far side up to A, the near side up to the bays.
-  void row(int side, double top) {
-    if (top - rowY0 < kStallWidthM) return;
+  // Rows: the far side up to A, the near side up to the bays. Lamps run
+  // along the outer edge of the far row, or of the near row when the far
+  // one leaves the lot, or else along the spine's far edge: always on an
+  // accepted pave, so inside the lot.
+  var lampT = double.nan;
+  var lampTop = yA;
+  bool row(int side, double top) {
+    if (top - rowY0 < kStallWidthM) return false;
     final rows = side < 0
         ? band(-ha - kStallLengthM, -ha, rowY0, top)
         : band(ha, ha + kStallLengthM, rowY0, top);
-    if (!s.profile.containsRect(rows)) return;
+    if (!s.profile.containsRect(rows)) return false;
+    if (lampT.isNaN) {
+      lampT = side * (ha + kStallLengthM);
+      lampTop = top;
+    }
     p.paves.add(rows);
     p.pack(
         seg: spine,
@@ -1950,14 +1974,16 @@ CarParkCandidate _yard(_Site s, double yA, double apronLen, bool bothSides) {
         lo: lo,
         hi: top - yT,
         row: side < 0 ? 0 : 1);
+    return true;
   }
 
   row(-1, yA);
   if (bothSides) row(1, bayY0);
-  // Two bays on the apron segment, centred on it (or pushed out until the
-  // inner one clears the lane band), noses toward the frontage.
+  // Two bays on the apron segment, the inner one just clear of the lane
+  // band and the outer one's far edge a radius short of `Y`, noses toward
+  // the frontage.
   final bayY = yA - kYardThroatWidthM / 2 - kLoadingBayLengthM / 2;
-  final mid = math.max(apronLen / 2, _kYardBayMidMinT);
+  const mid = _kYardBayMidMinT;
   var bx0 = double.infinity, bx1 = double.negativeInfinity;
   for (var i = 0; i < kYardBays; i++) {
     final sb = mid + (i - (kYardBays - 1) / 2) * _kYardBayPitchM;
@@ -1966,7 +1992,7 @@ CarParkCandidate _yard(_Site s, double yA, double apronLen, bool bothSides) {
     bx0 = math.min(bx0, xOf(sb) - kLoadingBayWidthM / 2);
     bx1 = math.max(bx1, xOf(sb) + kLoadingBayWidthM / 2);
   }
-  p.lampsY(xOf(-ha - kStallLengthM), rowY0, yA);
+  p.lampsY(xOf(lampT.isNaN ? -ha : lampT), rowY0, lampTop);
   // The envelope stands in front of the bays, on the apron's side of the
   // spine, its rear face against them.
   return p.finish(fam, 1, single,

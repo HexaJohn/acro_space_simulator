@@ -211,36 +211,103 @@ void main() {
     return out;
   }
 
-  /// The throat of [p] runs along slot 0's road normal, and every pave
-  /// corner off the parcel (frame y < 0) lies inside the slot's §3.7a
-  /// corridor, the 4.5 m band along that normal from the kerb point.
-  void throatInCorridor(SiteContext ctx, SiteAccessPlan p) {
+  /// The throat of [p] runs along slot 0's road normal, and its pave off the
+  /// parcel (frame y < 0) lies inside the slot's §3.7a corridor, the 4.5 m
+  /// band along that normal from the kerb point: every pave corner there,
+  /// and every pave edge where it crosses just below the frontage line (a
+  /// straight throat's side edge meets it between corners). Returns the
+  /// largest offset found.
+  double throatInCorridor(SiteContext ctx, SiteAccessPlan p) {
     final f = ctx.frame!;
     final s = ctx.slot0;
     final k0 = p.segFrom(0), k1 = p.segTo(0);
     final de = p.nodeE(k1) - p.nodeE(k0), dn = p.nodeN(k1) - p.nodeN(k0);
     final len = math.sqrt(de * de + dn * dn);
     final cosToNormal = (de * s.normE + dn * s.normN) / len;
+    var worst = 0.0;
+    void check(Vec2 w, int q, String what) {
+      final off =
+          ((w.e - s.kerbE) * -s.normN + (w.n - s.kerbN) * s.normE).abs();
+      if (off > worst) worst = off;
+      expect(off, lessThanOrEqualTo(kAccessCorridorHalfM + 1e-6),
+          reason: '${ctx.siteId}: pave $q $what ${off.toStringAsFixed(3)} m '
+              'off the road normal (throat cos ${cosToNormal.toStringAsFixed(6)})');
+    }
+
+    const yc = -1e-4;
     for (var q = 0; q < p.paveCount; q++) {
-      for (var i = p.paveStart(q); i < p.paveStart(q + 1); i++) {
-        final pt = p.pavePt(i);
-        final e = p.ptE(pt), n = p.ptN(pt);
-        if (f.toLocal(Vec2(e, n)).n >= -1e-6) continue;
-        final off = ((e - s.kerbE) * -s.normN + (n - s.kerbN) * s.normE).abs();
-        expect(off, lessThanOrEqualTo(kAccessCorridorHalfM + 1e-6),
-            reason: '${ctx.siteId}: pave $q corner ${off.toStringAsFixed(3)} m '
-                'off the road normal (throat cos ${cosToNormal.toStringAsFixed(6)})');
+      final ring = paveRing(ctx, p, q);
+      for (var i = 0; i < ring.length; i++) {
+        final a = ring[i], b = ring[(i + 1) % ring.length];
+        if (a.n < -1e-6) check(f.toWorld(a), q, 'corner');
+        if ((a.n - yc) * (b.n - yc) < 0) {
+          final t = (yc - a.n) / (b.n - a.n);
+          check(f.toWorld(Vec2(a.e + (b.e - a.e) * t, yc)), q, 'edge at y = 0');
+        }
+      }
+    }
+    return worst;
+  }
+
+  /// Every loading bay rectangle of [p] lies outside every circle
+  /// turnaround's disc (§3.7: bays sit on the circle's far edge, never
+  /// inside, so a parked truck never blocks the U-turn).
+  void baysOutsideCircles(SiteContext ctx, SiteAccessPlan p) {
+    final f = ctx.frame!;
+    for (var n = 0; n < p.nodeCount; n++) {
+      if (p.nodeTurnKind(n) != TurnaroundKind.circle) continue;
+      final c = f.toLocal(Vec2(p.nodeE(n), p.nodeN(n)));
+      final r = p.nodeTurnR(n);
+      for (var b = 0; b < p.bayCount; b++) {
+        final ce = f.toLocal(Vec2(p.bayE(b), p.bayN(b)));
+        final du = p.bayDirE(b) * f.u.e + p.bayDirN(b) * f.u.n;
+        final ex =
+            du.abs() > 0.5 ? kLoadingBayLengthM / 2 : kLoadingBayWidthM / 2;
+        final ey =
+            du.abs() > 0.5 ? kLoadingBayWidthM / 2 : kLoadingBayLengthM / 2;
+        final dx = math.max(0.0, (c.e - ce.e).abs() - ex);
+        final dy = math.max(0.0, (c.n - ce.n).abs() - ey);
+        expect(math.sqrt(dx * dx + dy * dy), greaterThanOrEqualTo(r - 1e-4),
+            reason: '${ctx.siteId}: bay $b at $ce inside the circle at $c');
       }
     }
   }
 
-  /// The repair round's checks on a written car park or yard: circles in
-  /// the lot and paved, the footpath clear of stalls, bays and lanes along
-  /// v, and the throat inside the slot's corridor.
+  /// Every lamp of [p] stands inside the parcel (on its boundary counts).
+  void lampsInside(SiteContext ctx, SiteAccessPlan p) {
+    final poly = ctx.parcel.polygon;
+    for (var l = 0; l < p.lampCount; l++) {
+      final e = p.ptE(p.lampPt(l)), n = p.ptN(p.lampPt(l));
+      var inside = false;
+      var nearEdge = false;
+      for (var i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        final a = poly[i], b = poly[j];
+        if ((a.n > n) != (b.n > n) &&
+            e < (b.e - a.e) * (n - a.n) / (b.n - a.n) + a.e) {
+          inside = !inside;
+        }
+        final dx = b.e - a.e, dy = b.n - a.n;
+        final t = (((e - a.e) * dx + (n - a.n) * dy) / (dx * dx + dy * dy))
+            .clamp(0.0, 1.0);
+        final px = a.e + dx * t - e, py = a.n + dy * t - n;
+        if (px * px + py * py < 1e-6) nearEdge = true;
+      }
+      expect(inside || nearEdge, isTrue,
+          reason: '${ctx.siteId}: lamp $l at '
+              '${ctx.frame!.toLocal(Vec2(e, n))} outside the lot');
+    }
+  }
+
+  /// The repair rounds' checks on a written car park or yard: circles in
+  /// the lot and paved, bays outside the circles, lamps inside the lot, the
+  /// footpath clear of stalls, bays and lanes along v, and the throat inside
+  /// the slot's corridor.
   void checkPark(SiteContext ctx, SiteAccessPlan p) {
     if (!p.hasNetwork) return;
     stallsInside(ctx, p);
     circlesInsideAndPaved(ctx, p);
+    baysOutsideCircles(ctx, p);
+    lampsInside(ctx, p);
     expect(footpathCrossings(ctx, p), isEmpty);
     throatInCorridor(ctx, p);
   }
@@ -445,8 +512,8 @@ void main() {
     test('an industrial 70 × 100 lot gets a yard: 7 m truck throat, apron, '
         '12.5 m circle inside the lot and paved, two bays facing the '
         'envelope, trucks admitted (V13)', () {
-      // x_J 20: 50 m of lot on the apron's side holds the 18 m apron and
-      // the circle's square (18 + 12.5 + 0.3 m).
+      // x_J 20: 50 m of lot on the apron's side holds the 24 m apron and
+      // the circle's square (24 + 12.5 + 0.3 m).
       final ctx = on(rect(70, 100, xJ: 20), iMed);
       final y = yardPlanOf(ctx);
       expect(y, isNotNull);
@@ -484,21 +551,44 @@ void main() {
         final front = c.n - kLoadingBayLengthM / 2;
         expect(front - p.envY1, inInclusiveRange(1.0 - 1e-5, 1.5 + 1e-5));
       }
-      // The apron runs the full 18 m to the circle node.
+      // The apron runs 24 m to the circle node: the bays' far edge (11.5 m)
+      // plus the radius, so both bays stand outside the disc.
       for (var k = 0; k < p.segCount; k++) {
         if (p.segKind(k) == SiteSegmentKind.apron) {
-          expect(p.segLenM(k), closeTo(kYardApronWidthM, 1e-6));
+          expect(p.segLenM(k), closeTo(11.5 + kYardCircleRadiusM, 1e-6));
         }
       }
       expect(circlesInsideAndPaved(ctx, p), 1);
       checkPark(ctx, p);
     });
 
-    test('a narrower lot shortens the apron (not under 11.5 m) so the '
-        "circle's square stays inside it; every yard candidate's circle is "
-        'inside the lot', () {
-      var shortened = 0;
-      for (var w = 30.0; w <= 44; w += 2) {
+    test('the loading bays stand outside the 12.5 m truck circle (§3.7: '
+        'never inside), on the skeptic probes', () {
+      final probes = <(String, Parcel)>[
+        ('70 x 100', rect(70, 100, xJ: 20)),
+        ('45 x 60', rect(45, 60, xJ: 4.5)),
+        ('60 x 100 mid', rect(60, 100, xJ: 12)),
+        ('trapezoid', drawn([(0, 0), (80, 0), (70, 90), (10, 90)], 20)),
+      ];
+      var yards = 0;
+      for (final (name, parcel) in probes) {
+        final ctx = on(parcel, iMed);
+        final y = yardPlanOf(ctx);
+        if (y == null || y.program != SiteProgram.yard) continue;
+        yards++;
+        final (p, _) = plan(ctx);
+        expect(p.bayCount, kYardBays, reason: name);
+        baysOutsideCircles(ctx, p);
+        checkPark(ctx, p);
+      }
+      expect(yards, probes.length);
+    });
+
+    test('a narrower lot gets no yard: the apron never shortens, and a yard '
+        "needs 24 + 12.5 + 0.3 m on the apron's side; every yard candidate's "
+        'circle is inside the lot', () {
+      var yards = 0, fellBack = 0;
+      for (var w = 30.0; w <= 50; w += 2) {
         for (final d in const [60.0, 80.0]) {
           final ctx = on(rect(w, d, xJ: 4.5), iMed);
           for (final c in yardCandidatesOf(ctx)) {
@@ -507,22 +597,80 @@ void main() {
                     'rectangle: $c');
           }
           final y = yardPlanOf(ctx);
+          final fits = w - 4.5 >= 24 + 12.5 + 0.3 - 1e-9;
+          if (!fits) {
+            expect(yardCandidatesOf(ctx).where((c) => c.valid), isEmpty,
+                reason: '$w x $d');
+            expect(y?.program, isNot(SiteProgram.yard));
+            fellBack++;
+            continue;
+          }
           if (y == null || y.program != SiteProgram.yard) continue;
           final (p, _) = plan(ctx);
           expect(p.program, SiteProgram.yard);
           for (var k = 0; k < p.segCount; k++) {
             if (p.segKind(k) != SiteSegmentKind.apron) continue;
-            final len = p.segLenM(k);
-            expect(len, inInclusiveRange(11.5 - 1e-6, kYardApronWidthM + 1e-6));
-            // room − margin − radius, capped at 18.
-            expect(len, closeTo(math.min(18, w - 4.5 - 0.3 - 12.5), 1e-6));
-            if (len < kYardApronWidthM - 1e-6) shortened++;
+            expect(p.segLenM(k), closeTo(24, 1e-6));
           }
           expect(circlesInsideAndPaved(ctx, p), 1);
           checkPark(ctx, p);
+          yards++;
         }
       }
-      expect(shortened, greaterThan(0));
+      expect(yards, greaterThan(0));
+      expect(fellBack, greaterThan(0));
+    });
+
+    test('yard lamps stand inside the lot when the far stall row leaves it '
+        '(a lot joined 4.5 m from its side)', () {
+      final ctx = on(rect(45, 60, xJ: 4.5), iMed);
+      final y = yardPlanOf(ctx);
+      expect(y?.program, SiteProgram.yard);
+      final (p, _) = plan(ctx);
+      expect(p.lampCount, greaterThan(0));
+      final f = ctx.frame!;
+      // No stall on the far side (x < 4.5 − 3): the far row left the lot.
+      for (var i = 0; i < p.stallCount; i++) {
+        expect(f.toLocal(Vec2(p.stallE(i), p.stallN(i))).e, greaterThan(4.5));
+      }
+      lampsInside(ctx, p);
+      checkPark(ctx, p);
+    });
+
+    test('a 7 m yard throat whose side edge would leave the §3.7a corridor at '
+        'the frontage (k 6.8, skew sin 0.16): no yard, the 6 m car park '
+        'throat stays inside it', () {
+      const sin = 0.16;
+      final cos = math.sqrt(1 - sin * sin);
+      final sn = slot.normN.sign;
+      const w = 80.0, d = 100.0, xJ = 20.0;
+      final back = 6.8 / cos;
+      Vec2 at(double x, double y) {
+        final dx = x - xJ;
+        return Vec2(slot.s + dx * cos - y * sin * sn,
+            slot.kerbN + (back + dx * sin * sn + y * cos) * sn);
+      }
+
+      final ctx = on(
+          Parcel(
+            id: lotParcel.id,
+            polygon: [at(0, 0), at(w, 0), at(w, d), at(0, d)],
+            roadId: 'r0',
+            frontage: (at(0, 0), at(w, 0)),
+          ),
+          iMed);
+      final f = ctx.frame!;
+      final nv = slot.normE * f.v.e + slot.normN * f.v.n;
+      expect(nv, closeTo(cos, 1e-6));
+      expect(-f.toLocal(Vec2(slot.kerbE, slot.kerbN)).n, closeTo(6.8, 1e-6));
+      // 3.5·cos + 6.8·sin = 4.54 m > 4.5 m.
+      expect(3.5 * cos + 6.8 * sin, greaterThan(kAccessCorridorHalfM));
+      expect(yardCandidatesOf(ctx), isEmpty);
+      final (p, stats) = plan(ctx);
+      expect(p.program, SiteProgram.carPark);
+      expect(stats.demotionCount(SiteDemotion.yardNoFit), 1);
+      expect(throatInCorridor(ctx, p), lessThanOrEqualTo(kAccessCorridorHalfM));
+      checkPark(ctx, p);
     });
 
     test('no yard where the circle cannot fit: a 30 m lot joined at its '
@@ -545,7 +693,8 @@ void main() {
         dStar + 3e-7,
       ];
       for (final d in depths) {
-        for (final w in const [40.0, 60.0]) {
+        // Both widths hold the 24 m apron and its circle beside x_J 10.
+        for (final w in const [60.0, 80.0]) {
           final ctx = on(rect(w, d, xJ: 10), iMed);
           expect(() => yardCandidatesOf(ctx), returnsNormally, reason: '$d');
           expect(() => yardPlanOf(ctx), returnsNormally, reason: '$d');
