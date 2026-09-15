@@ -62,22 +62,37 @@ void main() {
       }
 
       var cuts = 0;
-      for (var j = 0; j < g.joinCount; j++) {
-        if (g.joinFlags[j] & kJoinCut == 0) continue;
+      void covers(String slot, int flags, int p, double s, double m) {
+        if (flags & kJoinCut == 0) return;
         cuts++;
-        final p = g.joinPiece[j];
-        final s = g.joinS[j], m = g.joinRoomM[j];
         expect(m, greaterThanOrEqualTo(kJoinMinRoomM - 1e-4));
         for (final e in [g.pieceFwdEdge[p], g.pieceBwdEdge[p]]) {
           if (e < 0) continue;
           final t = lg.travelArc(e, s);
           expect(t - m, greaterThanOrEqualTo(lg.edgeLaneS0[e] + 6 - 1e-3),
-              reason: '$why: slot $j at $s ± $m on edge $e');
+              reason: '$why: $slot at $s ± $m on edge $e');
           expect(t + m, lessThanOrEqualTo(lg.edgeLaneS1[e] - 6 + 1e-3),
-              reason: '$why: slot $j at $s ± $m on edge $e');
+              reason: '$why: $slot at $s ± $m on edge $e');
         }
       }
+
+      for (var j = 0; j < g.joinCount; j++) {
+        covers('slot $j', g.joinFlags[j], g.joinPiece[j], g.joinS[j],
+            g.joinRoomM[j]);
+      }
+      // The side-street slots, asked for.
+      var sides = 0;
+      for (var i = 0; i < g.lotCount; i++) {
+        final side = g.sideStreetJoinOf(i);
+        if (side == null) continue;
+        sides++;
+        covers('${g.lotIds[i]} side street', side.flags, side.piece, side.s,
+            side.roomM);
+      }
       expect(cuts, greaterThan(0), reason: why);
+      if (name != 'signalised') {
+        expect(sides, greaterThan(0), reason: '$why: corner lots');
+      }
 
       // A lot's access point meets its lane where its slot is: sOn never
       // clamps a cut join.

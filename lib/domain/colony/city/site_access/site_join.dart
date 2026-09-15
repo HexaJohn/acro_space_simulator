@@ -320,18 +320,33 @@ class JoinSlot {
 
 /// Growable typed join columns, in `RoadGraph`'s layout (§2.2).
 class JoinColumns {
+  /// Room for [capacity] slots before the first growth: a road graph sizes
+  /// it to its lots, so a sprawl's columns are allocated about once.
+  JoinColumns([int capacity = 8])
+      : piece = Int32List(math.max(1, capacity)),
+        s = Float64List(math.max(1, capacity)),
+        dirs = Uint8List(math.max(1, capacity)),
+        right = Uint8List(math.max(1, capacity)),
+        flags = Uint16List(math.max(1, capacity)),
+        roomM = Float32List(math.max(1, capacity)),
+        kerbE = Float64List(math.max(1, capacity)),
+        kerbN = Float64List(math.max(1, capacity)),
+        normE = Float64List(math.max(1, capacity)),
+        normN = Float64List(math.max(1, capacity)),
+        crossStart = Int32List(math.max(1, capacity) + 1);
+
   int count = 0;
-  Int32List piece = Int32List(64);
-  Float64List s = Float64List(64);
-  Uint8List dirs = Uint8List(64);
-  Uint8List right = Uint8List(64);
-  Uint16List flags = Uint16List(64);
-  Float32List roomM = Float32List(64);
-  Float64List kerbE = Float64List(64), kerbN = Float64List(64);
-  Float64List normE = Float64List(64), normN = Float64List(64);
+  Int32List piece;
+  Float64List s;
+  Uint8List dirs;
+  Uint8List right;
+  Uint16List flags;
+  Float32List roomM;
+  Float64List kerbE, kerbN;
+  Float64List normE, normN;
 
   /// Slot k crosses `crossLot[crossStart[k] .. crossStart[k + 1] − 1]`.
-  Int32List crossStart = Int32List(65);
+  Int32List crossStart;
   Int32List crossLot = Int32List(16);
   int crossCount = 0;
 
@@ -519,7 +534,8 @@ class SiteJoinPlacer {
   }) {
     final own = roadId == null ? null : roadNoOf(roadId);
     var leg = legacy;
-    if (own == null) {
+    if (own == null && roadId != null) {
+      // An auto lot whose road is not in the graph.
       leg ??= ownLot >= 0 ? legacyOfLot?.call(ownLot) : null;
       if (leg == null) return 0;
     }
@@ -538,7 +554,9 @@ class SiteJoinPlacer {
     } else {
       final frame = SiteFrame.of(polygon, frontage, index);
       if (frame == null) {
-        _emitLegacy(out, leg ?? legacyOfLot!(ownLot)!);
+        leg ??= ownLot >= 0 ? legacyOfLot?.call(ownLot) : null;
+        if (leg == null) return 0;
+        _emitLegacy(out, leg);
         return 1;
       }
       ax = frame.origin.e;
@@ -551,15 +569,14 @@ class SiteJoinPlacer {
     final ip = _interior(polygon);
 
     var placed = false;
-    int? sideRoad;
     if (own != null) {
       if (isEligibleJoinRoad(roads[own].roadClass)) {
         placed = _place(own, ax, ay, bx, by, v, ip, ownLot,
             manual: false, side: false);
       }
-      if (sideStreet != null) {
-        sideRoad = _sideStreetRoad(sideStreet, own, placed ? _piece : -1);
-        if (!placed && sideRoad != null) {
+      if (sideStreet != null && !placed) {
+        final sideRoad = _sideStreetRoad(sideStreet, own, -1);
+        if (sideRoad != null) {
           placed = _place(sideRoad, sideStreet.$1.e, sideStreet.$1.n,
               sideStreet.$2.e, sideStreet.$2.n, null, ip, ownLot,
               manual: false, side: true);
@@ -575,9 +592,19 @@ class SiteJoinPlacer {
             manual: true, side: false);
         if (placed) break;
       }
+      // A lot with no road within reach today keeps no slot. Today's point
+      // is looked for (the costly part of a hand-drawn lot: every road
+      // segment near the whole site against every corner) only when the
+      // road just placed on does not already prove one within reach.
+      if (placed && leg == null && !_reachesToday(_road, polygon)) {
+        leg = ownLot >= 0 ? legacyOfLot?.call(ownLot) : null;
+        if (leg == null) return 0;
+      }
     }
     if (!placed) {
-      _emitLegacy(out, leg ?? legacyOfLot!(ownLot)!);
+      leg ??= ownLot >= 0 ? legacyOfLot?.call(ownLot) : null;
+      if (leg == null) return 0;
+      _emitLegacy(out, leg);
       return 1;
     }
 
@@ -589,18 +616,43 @@ class SiteJoinPlacer {
         width >= kSecondSlotMinFrontageM) {
       _farSlot(out, ip, ownLot);
     }
-    // Slot 2: a corner lot's side street, unless slot 0 already is.
-    if (sideStreet != null &&
-        sideRoad != null &&
-        slot0Flags & kJoinSideStreet == 0 &&
-        out.count - start < kMaxJoinSlots) {
-      if (_place(sideRoad, sideStreet.$1.e, sideStreet.$1.n, sideStreet.$2.e,
-          sideStreet.$2.n, null, ip, ownLot,
-          manual: false, side: true)) {
-        _emit(out);
-      }
-    }
+    // Slot 2, a corner lot's side street, is not packed here: it is offered
+    // on request ([sideStreetSlot]), which a sprawl's seventeen thousand
+    // corner lots would otherwise pay on every build (§3.2, R-B1).
     return out.count - start;
+  }
+
+  /// Slot 2 of an auto lot (§3.2): a second cut on its side street, offered
+  /// when its slot 0 is a cut on its own road (flags [slot0Flags], piece
+  /// [slot0Piece]); null when the lot has no side street, slot 0 is legacy or
+  /// already on the side street, or no cut fits there. [polygon], [roadId]
+  /// and [sideStreet] are the lot's, as [addSlots] was given them; the
+  /// answer is the one [addSlots] would have packed after slot 0 and slot 1.
+  JoinSlot? sideStreetSlot(
+    List<Vec2> polygon, {
+    required String? roadId,
+    required (Vec2, Vec2)? sideStreet,
+    required int slot0Piece,
+    required int slot0Flags,
+    int ownLot = -1,
+  }) {
+    if (sideStreet == null || roadId == null) return null;
+    if (slot0Flags & kJoinCut == 0 || slot0Flags & kJoinSideStreet != 0) {
+      return null;
+    }
+    final own = roadNoOf(roadId);
+    if (own == null) return null;
+    final sideRoad = _sideStreetRoad(sideStreet, own, slot0Piece);
+    if (sideRoad == null) return null;
+    final ip = _interior(polygon);
+    if (!_place(sideRoad, sideStreet.$1.e, sideStreet.$1.n, sideStreet.$2.e,
+        sideStreet.$2.n, null, ip, ownLot,
+        manual: false, side: true)) {
+      return null;
+    }
+    final out = JoinColumns(1);
+    _emit(out);
+    return out.slotAt(0);
   }
 
   /// Whether [frontage] is one [SiteFrame.of] trusts on [polygon]: a finite
@@ -1517,6 +1569,53 @@ class SiteJoinPlacer {
     return a + d * t;
   }
 
+  /// Whether a corner or an edge midpoint of [polygon] lies within
+  /// `manualReachM` plus its half width of graph road [r]: then today's rule
+  /// for a hand-drawn lot (the nearest road within reach of any corner,
+  /// edge midpoint or the centroid) finds a road, whichever it is. The same
+  /// squared-distance arithmetic, square-rooted, as that rule; false says
+  /// only that this road proves nothing.
+  bool _reachesToday(int r, List<Vec2> polygon) {
+    final limit = RoadGraph.manualReachM + roads[r].halfWidth;
+    final n = polygon.length;
+    for (var i = 0; i < n; i++) {
+      final a = polygon[i];
+      if (_within(r, a.e, a.n, limit)) return true;
+    }
+    for (var i = 0; i < n; i++) {
+      final a = polygon[i], b = polygon[(i + 1) % n];
+      if (_within(r, (a.e + b.e) * 0.5, (a.n + b.n) * 0.5, limit)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Whether ([pe], [pn]) lies within [limit] of a segment of road [r]; a
+  /// long road is asked only through the index around the point (a segment
+  /// that near shares a cell with the box).
+  bool _within(int r, double pe, double pn, double limit) {
+    final rec = recs[r];
+    _pBest = double.infinity;
+    _pSeg = 1;
+    _pU = 0;
+    final nS = rec.sampleCount;
+    if (nS <= _scanSamples) {
+      for (var seg = 1; seg < nS; seg++) {
+        _consider(rec, seg, pe, pn);
+      }
+    } else {
+      final slot = _roadSlot[r];
+      if (slot < 0) return false;
+      index.visit(Box2(pe - limit, pn - limit, pe + limit, pn + limit), 0,
+          (s, other, seg) {
+        if (s != slot || seg == 0 || !identical(other.e, rec.e)) return;
+        _consider(rec, seg, pe, pn);
+      });
+    }
+    return math.sqrt(_pBest) <= limit;
+  }
+
   /// Distance from ([pe], [pn]) to road [r] over the at most [_scanSamples]
   /// segments at its end nearer [node] (its whole length when shorter).
   double _distanceNearEnd(int r, Vec2 node, double pe, double pn) {
@@ -1535,6 +1634,37 @@ class SiteJoinPlacer {
     }
     return math.sqrt(_pBest);
   }
+
+  /// Node n's roads: `_nodeRoadStart[n] .. _nodeRoadStart[n + 1] − 1` of the
+  /// returned list, the graph road of every piece ending at n, ascending
+  /// (a road through n, or looping back to it, twice in a row). The same
+  /// roads as the node's `legRoadIds`, without a string look-up per lot;
+  /// built on the first side-street question.
+  Int32List _nodeRoads() {
+    final built = _nodeRoad;
+    if (built != null) return built;
+    final nN = nodes.length, nP = pieceFrom.length;
+    final start = Int32List(nN + 1);
+    for (var p = 0; p < nP; p++) {
+      start[pieceFrom[p] + 1]++;
+      start[pieceTo[p] + 1]++;
+    }
+    for (var n = 0; n < nN; n++) {
+      start[n + 1] += start[n];
+    }
+    final fill = Int32List.fromList(start);
+    final out = Int32List(2 * nP);
+    for (var r = 0; r < roads.length; r++) {
+      for (var p = roadFirstPiece[r]; p < roadFirstPiece[r + 1]; p++) {
+        out[fill[pieceFrom[p]]++] = r;
+        out[fill[pieceTo[p]]++] = r;
+      }
+    }
+    _nodeRoadStart = start;
+    return _nodeRoad = out;
+  }
+
+  Int32List? _nodeRoadStart, _nodeRoad;
 
   /// An auto lot's side street (§3.2 candidate 1): the eligible road other
   /// than [own] whose kerb line lies nearest the side edge [edge]'s midpoint
@@ -1556,10 +1686,14 @@ class SiteJoinPlacer {
       final nf = nodes[pieceFrom[p]], nt = nodes[pieceTo[p]];
       final df = (nf.at.e - me) * (nf.at.e - me) + (nf.at.n - mn) * (nf.at.n - mn);
       final dt = (nt.at.e - me) * (nt.at.e - me) + (nt.at.n - mn) * (nt.at.n - mn);
-      final node = df <= dt ? nf : nt;
-      for (final id in node.legRoadIds) {
-        final r = roadNoOf(id);
-        if (r == null || r == own) continue;
+      final nodeNo = df <= dt ? pieceFrom[p] : pieceTo[p];
+      final node = nodes[nodeNo];
+      // The node's legs' roads (its `legRoadIds`, by graph road number).
+      final legs = _nodeRoads();
+      final legStart = _nodeRoadStart!;
+      for (var k = legStart[nodeNo]; k < legStart[nodeNo + 1]; k++) {
+        final r = legs[k];
+        if (r == own || (k > legStart[nodeNo] && r == legs[k - 1])) continue;
         if (!isEligibleJoinRoad(roads[r].roadClass)) continue;
         final gap = (_distanceNearEnd(r, node.at, me, mn) -
                 roads[r].halfWidth -
@@ -1582,9 +1716,16 @@ class SiteJoinPlacer {
       if (r < 0 || r == own || !identical(rec.e, recs[r].e)) return;
       final road = roads[r];
       if (!isEligibleJoinRoad(road.roadClass)) return;
+      // `IndexedRoad.distanceToSegment`'s arithmetic, without its point.
+      final ae = rec.e[seg - 1], an = rec.n[seg - 1];
+      final ex = rec.e[seg] - ae, en = rec.n[seg] - an;
+      final len2 = ex * ex + en * en;
+      final t = len2 <= 1e-12
+          ? 0.0
+          : (((me - ae) * ex + (mn - an) * en) / len2).clamp(0.0, 1.0);
+      final dx = me - (ae + ex * t), dn = mn - (an + en * t);
       final gap =
-          (rec.distanceToSegment(Vec2(me, mn), seg) - road.halfWidth - sidewalkM)
-              .abs();
+          (math.sqrt(dx * dx + dn * dn) - road.halfWidth - sidewalkM).abs();
       if (gap < best || (gap == best && r < bestR)) {
         best = gap;
         bestR = r;

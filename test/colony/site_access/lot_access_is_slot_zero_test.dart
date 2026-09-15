@@ -86,7 +86,28 @@ void main() {
         }
         final cross = g.joinCrossStart[j + 1] - g.joinCrossStart[j];
         expect(f & kJoinEasement != 0, cross > 0, reason: why);
+        if (j > k) {
+          expect(f & kJoinSideStreet, 0,
+              reason: '$why: the side-street slot is asked for, not packed');
+        }
       }
+      // Slot 2, on request: a cut on another road beside a slot 0 on the
+      // lot's own road.
+      final side = g.sideStreetJoinOf(i);
+      if (side == null) continue;
+      final road = g.roads[g.pieceRoad[side.piece]];
+      expect(side.flags & (kJoinCut | kJoinSideStreet),
+          kJoinCut | kJoinSideStreet, reason: why);
+      expect(g.joinFlags[k] & kJoinCut, kJoinCut, reason: why);
+      expect(road.id, isNot(g.roads[g.pieceRoad[g.joinPiece[k]]].id),
+          reason: why);
+      expect(side.dirs, joinDirsFor(road, side.right), reason: why);
+      expect((side.s / kJoinQuantumM).roundToDouble() * kJoinQuantumM, side.s,
+          reason: why);
+      expect(side.roomM, greaterThanOrEqualTo(kJoinMinRoomM - 1e-4),
+          reason: why);
+      expect(g.kerbWindows.roomAt(side.piece, side.s),
+          closeTo(side.roomM, 1e-4), reason: why);
     }
   }
 
@@ -178,8 +199,9 @@ void main() {
       if (f & kJoinEasement != 0) bump('easement');
       if (f & kJoinCorridorBlocked != 0) bump('corridorBlocked');
       for (var j = k + 1; j < end; j++) {
-        bump(g.joinFlags[j] & kJoinSideStreet != 0 ? 'slot2' : 'slot1');
+        bump('slot1');
       }
+      if (g.sideStreetJoinOf(i) != null) bump('slot2');
     }
     // ignore: avoid_print
     print('sprawl join slots (site-access R1 audit): $counts');
@@ -224,10 +246,13 @@ void main() {
   });
 }
 
-/// The 12-mile sprawl's slot counts, pinned (§8.3 R1 sprawl audit).
+/// The 12-mile sprawl's slot counts, pinned (§8.3 R1 sprawl audit). 'slots'
+/// is the packed columns (slot 0 and slot 1); 'slot2' counts the side-street
+/// slots [RoadGraph.sideStreetJoinOf] offers, the 17,233 the build packed
+/// before it asked for them lazily (72,038 packed then).
 const Map<String, int> _sprawlAudit = {
   'lots': 54257,
-  'slots': 72038,
+  'slots': 54805,
   'legacy': 48,
   'cut': 54207,
   'clamped': 268,

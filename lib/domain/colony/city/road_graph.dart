@@ -204,6 +204,7 @@ class RoadGraph {
     required this.kerbWindows,
     required List<Parcel> parcels,
     required double sidewalkM,
+    Map<int, JoinSlot?>? sideStreetJoins,
     required this.rootPiece,
     required this.rootS,
     required this.rootDirs,
@@ -212,7 +213,8 @@ class RoadGraph {
   })  : _roadNo = roadNo,
         _lotNo = lotNo,
         _parcels = parcels,
-        _sidewalkM = sidewalkM;
+        _sidewalkM = sidewalkM,
+        _sideStreetJoins = sideStreetJoins ?? {};
 
   /// Two road ends this close in plan (and at one level:
   /// [CityLayout.levelsSeparated] says they meet) are one node — the
@@ -317,7 +319,9 @@ class RoadGraph {
 
   /// JOIN SLOTS (docs/plans/site-access.md §2.2, §3.2): where each lot can
   /// meet its road. Lot i owns slots `lotJoinStart[i] .. lotJoinStart[i +
-  /// 1] - 1`, slot 0 first; `lotJoinStart` has [lotCount] + 1 entries.
+  /// 1] - 1`, slot 0 first, then slot 1 (a second cut at the far end of a
+  /// wide span) when offered; `lotJoinStart` has [lotCount] + 1 entries. A
+  /// corner lot's side-street slot is not packed: ask [sideStreetJoinOf].
   ///
   /// Per slot: the piece; the arc on the piece's road from its first control,
   /// quantised to 0.25 m ([joinS]); the access mask, which is
@@ -356,6 +360,35 @@ class RoadGraph {
   final double _sidewalkM;
 
   int get joinCount => joinPiece.length;
+
+  /// Slot 2 of graph lot [lot] (§3.2): a cut on a corner lot's side street,
+  /// offered beside its slot 0 on its own road. Null when the lot is no
+  /// corner lot, has no slot 0 on its own road, or no cut fits on the side
+  /// street. Placed on the first ask and kept (by every graph sharing these
+  /// slots: [withOverrides], [refreshedFor]); the answer never depends on
+  /// when it is asked.
+  JoinSlot? sideStreetJoinOf(int lot) {
+    final cache = _sideStreetJoins;
+    if (cache.containsKey(lot)) return cache[lot];
+    JoinSlot? slot;
+    final k = lotJoinStart[lot];
+    if (k < lotJoinStart[lot + 1]) {
+      final p = _parcels[lot];
+      slot = _placer.sideStreetSlot(
+        p.polygon,
+        roadId: p.roadId,
+        sideStreet: p.sideStreet,
+        slot0Piece: joinPiece[k],
+        slot0Flags: joinFlags[k],
+        ownLot: lot,
+      );
+    }
+    cache[lot] = slot;
+    return slot;
+  }
+
+  /// The side-street slots asked for so far, by graph lot index.
+  final Map<int, JoinSlot?> _sideStreetJoins;
 
   /// The landing site's place on the network — where the colony meets the
   /// rest of the world, and so where goods it does not make arrive from:
@@ -708,6 +741,7 @@ class RoadGraph {
         kerbWindows: kerbWindows,
         parcels: _parcels,
         sidewalkM: _sidewalkM,
+        sideStreetJoins: _sideStreetJoins,
         rootPiece: rootPiece,
         rootS: rootS,
         rootDirs: rootDirs,
@@ -797,7 +831,8 @@ class RoadGraph {
   }
 
   /// Whether two records of one road route alike: the same in everything
-  /// the build reads of a road — all of it but the name.
+  /// the build reads of a road — all of it but the name. The join slots read
+  /// its bridges and its tapers ([KerbWindows]), so those count too.
   static bool _routesAlike(RoadSpline a, RoadSpline b) =>
       a.id == b.id &&
       a.roadClass == b.roadClass &&
@@ -805,7 +840,20 @@ class RoadGraph {
       a.decoration == b.decoration &&
       a.soundWalls == b.soundWalls &&
       a.collector == b.collector &&
-      a.deck == b.deck;
+      a.deck == b.deck &&
+      a.startHalfWidthM == b.startHalfWidthM &&
+      a.endHalfWidthM == b.endHalfWidthM &&
+      _sameRanges(a.bridges, b.bridges);
+
+  static bool _sameRanges(
+      List<(double, double)> a, List<(double, double)> b) {
+    if (identical(a, b)) return true;
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i].$1 != b[i].$1 || a[i].$2 != b[i].$2) return false;
+    }
+    return true;
+  }
 
   /// A hand-drawn lot's road: the nearest segment of any graph road to the
   /// footprint [polygon] — reaching to its nearest point, not its centre
@@ -1357,7 +1405,8 @@ class RoadGraph {
       legacyOfLot: legacyOf,
     );
     final lotJoinStart = Int32List(nL + 1);
-    final joins = JoinColumns();
+    // Most lots have one slot, a corner lot two.
+    final joins = JoinColumns(nL + (nL >> 1) + 16);
     for (var i = 0; i < nL; i++) {
       final p = parcels[i];
       final c = p.centroid;
@@ -1456,17 +1505,17 @@ class RoadGraph {
       lotE: lotE,
       lotN: lotN,
       lotJoinStart: lotJoinStart,
-      joinPiece: joins.piece.sublist(0, nJ),
-      joinS: joins.s.sublist(0, nJ),
-      joinDirs: joins.dirs.sublist(0, nJ),
-      joinRight: joins.right.sublist(0, nJ),
-      joinFlags: joins.flags.sublist(0, nJ),
-      joinRoomM: joins.roomM.sublist(0, nJ),
-      joinKerbE: joins.kerbE.sublist(0, nJ),
-      joinKerbN: joins.kerbN.sublist(0, nJ),
-      joinNormE: joins.normE.sublist(0, nJ),
-      joinNormN: joins.normN.sublist(0, nJ),
-      joinCrossStart: joins.crossStart.sublist(0, nJ + 1),
+      joinPiece: Int32List.sublistView(joins.piece, 0, nJ),
+      joinS: Float64List.sublistView(joins.s, 0, nJ),
+      joinDirs: Uint8List.sublistView(joins.dirs, 0, nJ),
+      joinRight: Uint8List.sublistView(joins.right, 0, nJ),
+      joinFlags: Uint16List.sublistView(joins.flags, 0, nJ),
+      joinRoomM: Float32List.sublistView(joins.roomM, 0, nJ),
+      joinKerbE: Float64List.sublistView(joins.kerbE, 0, nJ),
+      joinKerbN: Float64List.sublistView(joins.kerbN, 0, nJ),
+      joinNormE: Float64List.sublistView(joins.normE, 0, nJ),
+      joinNormN: Float64List.sublistView(joins.normN, 0, nJ),
+      joinCrossStart: Int32List.sublistView(joins.crossStart, 0, nJ + 1),
       joinCrossLot: joins.crossLot.sublist(0, joins.crossCount),
       kerbWindows: windows,
       parcels: parcels,

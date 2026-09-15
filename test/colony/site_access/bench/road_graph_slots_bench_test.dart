@@ -21,12 +21,12 @@ void main() {
         const CityGenSpec(blocksAcross: 4, seed: 5, sprawlMiles: 12),
         bodies: fixtureBodies);
     final layout = city.layout;
-    for (var i = 0; i < 3; i++) {
+    for (var i = 0; i < 5; i++) {
       RoadGraph.of(layout);
     }
     final ms = <double>[];
     late RoadGraph g;
-    for (var i = 0; i < 9; i++) {
+    for (var i = 0; i < 21; i++) {
       final sw = Stopwatch()..start();
       g = RoadGraph.of(layout);
       ms.add(sw.elapsedMicroseconds / 1000);

@@ -7,6 +7,7 @@ import 'package:acro_space_simulator/domain/colony/city/city_layout.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_graph.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_access_constants.dart';
+import 'package:acro_space_simulator/domain/colony/city/site_access/site_join.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// Join slot placement (docs/plans/site-access.md §3.2, §3.7a, slice R1).
@@ -157,25 +158,69 @@ void main() {
   });
 
   group('slots 1 and 2', () {
-    test('a corner lot is offered its side street as a second slot', () {
+    test('a corner lot is offered its side street, on request', () {
       final layout = CityLayout();
       layout.commitRoad(controls: const [Vec2(0, -300), Vec2(0, 300)]);
       layout.commitRoad(controls: const [Vec2(-300, 0), Vec2(300, 0)]);
       final g = RoadGraph.of(layout);
       var corners = 0;
       for (final p in layout.autoParcels) {
-        if (p.sideStreet == null) continue;
+        final i = g.lotNoOf(p.id)!;
+        if (p.sideStreet == null) {
+          expect(g.sideStreetJoinOf(i), isNull, reason: p.id);
+          continue;
+        }
         corners++;
         final s0 = slot(g, p.id);
         expect(s0.road, p.roadId, reason: '${p.id}: its own road first');
         expect(s0.flags & kJoinSideStreet, 0);
-        expect(slotCount(g, p.id), 2, reason: p.id);
-        final s2 = slot(g, p.id, 1);
+        // Not packed among the lot's slots: a sprawl's corner lots would pay
+        // for it on every build (R-B1).
+        expect(slotCount(g, p.id), 1, reason: p.id);
+        final s2 = g.sideStreetJoinOf(i)!;
+        expect(identical(g.sideStreetJoinOf(i), s2), isTrue,
+            reason: '${p.id}: placed once, then kept');
         expect(s2.flags & kJoinSideStreet, kJoinSideStreet, reason: p.id);
         expect(s2.flags & kJoinCut, kJoinCut, reason: p.id);
-        expect(s2.road, isNot(p.roadId), reason: p.id);
+        expect(g.roads[g.pieceRoad[s2.piece]].id, isNot(p.roadId),
+            reason: p.id);
+        expect(s2.dirs, joinDirsFor(g.roads[g.pieceRoad[s2.piece]], s2.right),
+            reason: p.id);
+        expect(g.kerbWindows.roomAt(s2.piece, s2.s), closeTo(s2.roomM, 1e-4),
+            reason: p.id);
       }
       expect(corners, greaterThan(0), reason: 'the plat marks corner lots');
+    });
+
+    test('a hand-drawn lot no corner or edge midpoint of which is within '
+        'reach keeps no slot, though a road faces an edge', () {
+      // A 400 m site; a street dead-ends 50 m short of its south edge at
+      // e = 100. Nearest corner (0, 0): 112 m; nearest edge midpoint
+      // (200, 0): 112 m; the reach is 90 + 4. Today's rule finds no road,
+      // so the lot is without access, as it was.
+      final layout = layoutOf(const [
+        RoadSpline(id: 'r0', controls: [Vec2(100, -50), Vec2(100, -600)]),
+      ]);
+      final site = layout.addManualParcel(const [
+        Vec2(0, 0), Vec2(400, 0), Vec2(400, 400), Vec2(0, 400),
+      ])!;
+      final g = RoadGraph.of(layout);
+      final i = g.lotNoOf(site.id)!;
+      expect(slotCount(g, site.id), 0);
+      expect(g.lotPiece[i], -1);
+      expect(g.accessOf(site.id), isNull);
+      // The same street ending 20 m short of the corner (0, 0) (22 m off):
+      // the lot is reached, and its slot stands.
+      final near = layoutOf(const [
+        RoadSpline(id: 'r0', controls: [Vec2(10, -20), Vec2(10, -600)]),
+      ]);
+      final nearSite = near.addManualParcel(const [
+        Vec2(0, 0), Vec2(400, 0), Vec2(400, 400), Vec2(0, 400),
+      ])!;
+      final gn = RoadGraph.of(near);
+      expect(slotCount(gn, nearSite.id), greaterThan(0),
+          reason: 'corner (0, 0) is 22 m off');
+      expect(gn.accessOf(nearSite.id), isNotNull);
     });
 
     test('a wide manual lot is offered the far end of its span', () {

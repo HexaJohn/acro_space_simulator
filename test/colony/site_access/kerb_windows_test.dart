@@ -250,6 +250,45 @@ void main() {
       expect(g.kerbWindows.countOf(between.single), 0);
     });
 
+    test('a bridge or a taper set in place forces a rebuild; a name does not',
+        () {
+      // updateRoad swaps a road's attributes and keeps its samples. The
+      // windows (and every slot placed on them) read bridges and tapers, so
+      // a refreshed graph must not keep windows built without them.
+      CityLayout fresh() => CityLayout()
+        ..addRoad(const RoadSpline(
+            id: 'r0', controls: [Vec2(0, 0), Vec2(600, 0)]));
+      for (final (name, change, rebuilds) in [
+        ('a bridge', (RoadSpline r) => r.copyWith(bridges: const [(200, 240)]),
+            true),
+        ('a moved bridge',
+            (RoadSpline r) => r.copyWith(bridges: const [(200, 250)]), true),
+        ('a start taper', (RoadSpline r) => r.copyWith(startHalfWidthM: 6),
+            true),
+        ('an end taper', (RoadSpline r) => r.copyWith(endHalfWidthM: 6), true),
+        ('a name', (RoadSpline r) => r.copyWith(name: 'Main Street'), false),
+      ]) {
+        final layout = fresh();
+        if (name == 'a moved bridge') {
+          layout.updateRoad(
+              layout.roadById('r0')!.copyWith(bridges: const [(200, 240)]));
+        }
+        final g = RoadGraph.of(layout);
+        expect(layout.updateRoad(change(layout.roadById('r0')!)), isTrue);
+        final refreshed = g.refreshedFor(layout);
+        if (!rebuilds) {
+          expect(refreshed, isNotNull, reason: name);
+          expect(identical(refreshed!.kerbWindows, g.kerbWindows), isTrue,
+              reason: name);
+          continue;
+        }
+        expect(refreshed, isNull, reason: '$name: only RoadGraph.of will do');
+        final rebuilt = RoadGraph.of(layout);
+        expect(windowsOf(rebuilt, 'r0'), isNot(windowsOf(g, 'r0')),
+            reason: name);
+      }
+    });
+
     test('windows and slots are shared by a graph under new overrides', () {
       final city = starterKit();
       final g = city.roadGraph;
@@ -261,6 +300,10 @@ void main() {
       expect(identical(o.joinS, g.joinS), isTrue);
       expect(identical(o.lotJoinStart, g.lotJoinStart), isTrue);
       expect(o.sharesStructureWith(g), isTrue);
+      // A side-street slot asked of one is the other's.
+      for (var i = 0; i < g.lotCount; i++) {
+        expect(identical(o.sideStreetJoinOf(i), g.sideStreetJoinOf(i)), isTrue);
+      }
       // A fresh build under the override places every slot alike.
       final fresh = RoadGraph.of(city.layout,
           overrides: const [JunctionOverride(at: Vec2(0, 0), lights: true)]);
