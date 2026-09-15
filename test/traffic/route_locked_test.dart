@@ -13,9 +13,11 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'traffic_fixture.dart';
 
-/// §17.3 #1, the half slice 1 can pin (docs/plans/agent-traffic.md §4.6):
-/// a route never changes for traffic. (Who takes the other road next time
-/// needs slice 2's delay table.)
+/// §17.3 #1, `route_locked_despite_traffic` (docs/plans/agent-traffic.md
+/// §4.6, §4.2): a route never changes for traffic — and the next trip,
+/// planned once the jam has been measured, goes the other way. Congestion
+/// is read at spawn (the user's decision 1), never by a trip already on the
+/// road.
 ///
 /// Two parallel routes join the spur O to the spur D ([_twoRoutes]): A,
 /// short, by the avenue N; B, 800 m longer, by S. A car planned on A has
@@ -26,6 +28,11 @@ import 'traffic_fixture.dart';
 /// into the free lane, would have acted. A re-plan from where it stands
 /// would leave a shorter block than the planned one, so the hash would see
 /// it; a move to the free lane would show in its lanes.
+///
+/// The whole scenario runs on [_nearRoutes], where B is dearer than A by
+/// less than the jam: Y, planned at the first delay epoch after the jam
+/// stands, is priced by it (§4.2's live queue) and takes B, while X, in the
+/// jam, keeps A.
 void main() {
   // No background demand: only the trips each test sends.
   setUp(() => AgentTuning.commuteRatePerResident = 0);
@@ -123,6 +130,114 @@ void main() {
     expect(a.stats.replans, 0);
   });
 
+  test('§17.3 #1 in full: X, planned on A before the jam, keeps its route '
+      'and lanes through it; Y, planned after the next delay epoch, takes B',
+      () {
+    // Y's own trip, on a free network: by A, like X. What sends it by B is
+    // the jam, and nothing else.
+    final free = _nearRoutes();
+    final f = agentsOn(free);
+    runAgents(f, AgentTuning.warmupS + 1);
+    final (fo, fd) = _ends(free);
+    final unjammed = routeOf(f, _pullOut(f, [forceTrip(f, fo[2], fd[1])]).single);
+    expect(_southOf(free, unjammed), isNull, reason: 'free, Y goes by A');
+    _avenueOf(free, unjammed);
+
+    final city = _nearRoutes();
+    final a = agentsOn(city);
+    runAgents(a, AgentTuning.warmupS + 1);
+    final (origins, dests) = _ends(city);
+    final t = a.vehicles!;
+
+    // X, planned on A while A is empty: nothing measured, D = 0 everywhere.
+    final xTrip = forceTrip(a, origins[3], dests[0]);
+    final xh = _pullOut(a, [xTrip]).single;
+    final xs = SlotPool.slotOf(xh);
+    final hash = routeHash(a, xh);
+    final planned = routeOf(a, xh);
+    final n = _avenueOf(city, planned);
+    final nEdge = _edgeOfRoad(a, xh, n);
+    final xLane = laneOn(a, xh, n);
+    expect(_southOf(city, planned), isNull, reason: 'X is on A, not B');
+
+    final lots = _lotsOnN(city);
+    final jam = [
+      for (var i = 0; i < 30; i++)
+        forceTrip(a, lots[i % lots.length], dests[i % 2]),
+    ];
+    for (final tr in jam) {
+      expect(tr, greaterThanOrEqualTo(0), reason: 'the trip was taken');
+    }
+
+    final epochUs = usOf(AgentTuning.congestionEpochS);
+    final stalled = <int>{};
+    var standing = false;
+    var yTrip = -1;
+    var yh = -1;
+    var yRoute = const <String>[];
+    var priced = 0.0;
+    var queuedUs = 0;
+    var released = false;
+    var ticks = 0;
+    while (t.isLive(xh)) {
+      expect(routeHash(a, xh), hash, reason: 'its connectors, at ${a.timeUs}');
+      final now = routeOf(a, xh);
+      expect(now, planned.sublist(planned.length - now.length),
+          reason: 'its lanes, at ${a.timeUs}');
+      if (!released) {
+        for (final tr in jam) {
+          final h = vehicleOfTrip(a, tr);
+          if (h < 0 || stalled.contains(h)) continue;
+          final sl = SlotPool.slotOf(h);
+          final odo = t.odo[sl];
+          if (odo >= _stallAfterM || (odo > 0.5 && t.v[sl] < 0.1)) {
+            expect(laneOn(a, h, n), xLane, reason: 'in X\'s own lane');
+            stall(a, h);
+            stalled.add(h);
+          }
+        }
+        standing = standing ||
+            (stalled.length == jam.length &&
+                _onEdgeAt(a, xh, nEdge) >= 0 &&
+                t.v[xs] < 0.1);
+        // The first delay epoch with the jam standing has just published:
+        // Y is asked for now, and priced by it.
+        if (standing && yTrip < 0 && a.timeUs % epochUs == 0) {
+          priced = a.pathQueue!.delays![nEdge];
+          yTrip = forceTrip(a, origins[2], dests[1]);
+          expect(yTrip, greaterThanOrEqualTo(0));
+        }
+        if (yTrip >= 0 && yh < 0) {
+          yh = vehicleOfTrip(a, yTrip);
+          if (yh >= 0) yRoute = routeOf(a, yh);
+        }
+        if (yh >= 0) queuedUs += kStepUs;
+        if (queuedUs >= usOf(20)) {
+          for (final h in jam) {
+            unstall(a, h);
+          }
+          released = true;
+        }
+      }
+      a.advance(kStepS);
+      expect(++ticks, lessThan(4000), reason: 'X should have arrived');
+    }
+    expect(released, isTrue, reason: 'Y pulled out while X stood in the jam');
+    expect(priced, greaterThan(20),
+        reason: 'thirty cars standing on N: its live queue');
+
+    expect(yRoute, isNotEmpty, reason: 'Y pulled out');
+    for (final w in yRoute) {
+      final road = city.layout.roadById(w.substring(0, w.length - 2));
+      expect(road?.roadClass, isNot(RoadClass.avenue),
+          reason: 'Y avoids the jammed avenue: $yRoute');
+    }
+    expect(_southOf(city, yRoute), isNotNull, reason: 'Y takes B: $yRoute');
+    expect(a.stats.replans, 0);
+    expect(a.stats.appendedLegs, 0);
+    expect(a.stats.despawnStuck + a.stats.despawnWedge, 0);
+  });
+
   test('Z, behind a car stalled for good in its own lane of N, keeps its '
       'route and lanes until the stuck timer takes it: no re-plan', () {
     final city = _twoRoutes();
@@ -191,6 +306,37 @@ CitySim _twoRoutes() {
   zoneAll(city, const [ParcelUse.residential]);
   buildAll(city);
   return city;
+}
+
+/// [_twoRoutes] with S drawn at y = 0 instead of −300, the spurs still at
+/// y = 200 between it and N: B is then 200 m longer than A, and on streets
+/// where A has the avenue — 16 s dearer by §4.1's prices, where it was 34 s
+/// on [_twoRoutes]. Thirty cars standing in one lane of N, a 29 s live
+/// queue, outweigh that.
+CitySim _nearRoutes() {
+  final city = foundFlat(roads: const [
+    FixtureRoad([Vec2(-400, 300), Vec2(700, 300)], roadClass: RoadClass.avenue),
+    FixtureRoad([Vec2(-400, 0), Vec2(-400, 300)]),
+    FixtureRoad([Vec2(-400, 0), Vec2(400, 0)]),
+    FixtureRoad([Vec2(400, 0), Vec2(400, 300)]),
+    FixtureRoad([Vec2(-400, 200), Vec2(-700, 200)]),
+    FixtureRoad([Vec2(400, 200), Vec2(700, 200)]),
+  ]);
+  zoneAll(city, const [ParcelUse.residential]);
+  buildAll(city);
+  return city;
+}
+
+/// The road of route [words] (in [routeOf]'s words) that runs along S at
+/// y = 0 — B's own street — or null when the route does not use it.
+String? _southOf(CitySim city, List<String> words) {
+  for (final w in words) {
+    final id = w.substring(0, w.length - 2);
+    final road = city.layout.roadById(id);
+    if (road == null) continue;
+    if (road.controls.every((c) => c.n.abs() < 1)) return id;
+  }
+  return null;
 }
 
 /// The four home lots on O the trips leave from, and the two on D they
