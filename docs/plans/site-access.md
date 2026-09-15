@@ -535,20 +535,29 @@ Each site then gets a 56 m access road from the kerb (e = ±4) to its frontage l
   An auto lot's frontage is its pavement line by construction; on a bend its chord reads up to ~1.7 m further back
   and would send every lot on a curve to the search.
 - A lot with no access point today (`lotPiece < 0`) gets no slot at all, so the count is unchanged by construction.
+  For a manual lot, today's point (`_nearestRoadTo`, a walk of every road segment near the whole site) is looked
+  for only when the lot gets no cut or the road it was placed on has no corner or edge midpoint within
+  `manualReachM + hw`; otherwise that road already proves today's rule finds a road (same arithmetic).
 - Candidate intervals are narrowed to the 0.25 m quanta they hold (a bound within 1e-6 of a quantum is that quantum);
   a target is tested for membership within 1e-6 m. Without that, float noise in a corner's projection (492 of 600 m
   reads 491.99999999999994) pushed narrow lots to their other end.
 - A corner lot's side street is looked up among the roads meeting the node at the nearer end of its piece (within
   12 m of its kerb line), and only else in the index. A manual lot's other candidate roads are looked up only when
   the road its frontage faces yields no span. Slot 1 on a tie takes the high end of the span.
-- Slots of one lot are packed (slot 0, then slot 1 and slot 2 when offered); slot 2 is the one flagged
-  `kJoinSideStreet`.
+- Slots of one lot are packed (slot 0, then slot 1 when offered). **Slot 2 is not packed** (R1 repair, for R-B1):
+  `RoadGraph.sideStreetJoinOf(lot)` places it on the first ask and keeps it (shared by `withOverrides` /
+  `refreshedFor` copies), flagged `kJoinCut | kJoinSideStreet`. Same answer the packed build gave (the sprawl
+  offers 17,233; packed columns 72,038 -> 54,805). A slot 0 that fell back to the side street is still packed as
+  slot 0 with `kJoinSideStreet`.
+- `refreshedFor` keeps a graph only if bridges and start/end tapers are also unchanged (`_routesAlike`): the
+  windows and every slot read them.
 - `effectiveFrontage` (R-F) walks each edge's own box rather than the polygon's: the same candidates and the same
   answer, measured 13-19 ms → 6-9 ms over the sprawl's 25 frontage-less installations.
-- **R-B1 budget not met:** `RoadGraph.of` on the 12-mile sprawl fixture went from median 138 / best 122 ms to median
-  187 / best 166 ms (+36%), against ≤ +15%. About 17 ms is slots on 54k auto lots (17k corner lots place a second
-  slot), about 30 ms the 627 generator installations (618 set-back corridor searches, ~25 µs each, inside §3.10's
-  200 µs).
+- **R-B1 (repaired):** bench `road_graph_slots_bench_test` (5 warm-ups, 21 timed builds, same machine, base lib
+  files of 40b9eb9 swapped in for the baseline): base median 117-121 / best 107-114 ms; first R1 build median 188 /
+  best 170 ms (+59%); after the repair median 130-131 / best 125 ms (about +10%, within ≤ +15%). The repair: slot 2
+  on request (about 19 ms), the manual-lot legacy look-up skipped where proven (about 20 ms), join columns sized to
+  the lots and published as views (GC; about 20 ms of median), node legs by road number instead of id look-ups.
 
 **How today's numbers move (C1 notice, §7.3):**
 - Narrow lots move to their drive side: about 7.5 m on a 24 m lot. That covers most auto lots.
@@ -1473,7 +1482,7 @@ change. Road side commits R1 and posts this notice with the hash:
 > **C1: lot access = join slot 0 (commit `<hash>`).**
 > - `RoadGraph` publishes join slots (`lotJoinStart`, `joinPiece/S/Dirs/Right/Flags/RoomM/KerbE,N/NormE,N`,
 >   `joinCrossStart/joinCrossLot`), and `lotPiece/lotS/lotDirs` are slot 0's. `attachFootprint` returns slot 0 of
->   `attachFootprintJoins`.
+>   `attachFootprintJoins`. (As built: a corner lot's side-street slot is `sideStreetJoinOf(lot)`, not packed.)
 > - `joinFlags`: `kJoinCut`, `kJoinLegacy`, `kJoinSideStreet`, `kJoinClamped` (s moved > 0.25 m from its target),
 >   `kJoinOffFrontage` (no span on this road; nearest window point), `kJoinEasement` (the corridor crosses auto
 >   lots), `kJoinCorridorBlocked`, `kJoinAlley` (reserved).
@@ -2096,4 +2105,4 @@ reason, commit.
 | R1 | road_traffic_model_test.dart:90 (one-way loop) | 808 | 823 | same: 119.5 + 100 + 400 + 100 + 103.5 | 5eb031b |
 | R1 | road_traffic_model_test.dart:128 (avenue, same kerb) | 192 | 177 | same | 5eb031b |
 | R1 | road_traffic_model_test.dart:131 (street, far kerb) | 192 | 177 | same | 5eb031b |
-| R1 | test/traffic/live_rebuild_test.dart (traffic-owned, not changed) | green | red | cars stand inside the new crossing's stop line at the edit (moved 5.2 m) and trips end on slots at 151.5 m, 1.5 m past the new street; fix is the traffic session's (C1 notice) | – |
+| R1 | test/traffic/live_rebuild_test.dart (traffic-owned, not changed) | green | red | cars stand inside the new crossing's stop line at the edit (moved 5.2 m) and trips end on slots at 151.5 m, 1.5 m past the new street; fix is the traffic session's (C1 notice). MERGE GATE: R1 must not reach dev alone; the traffic fix (re-resolve in-flight trips' destS against the new slots on a regraph, carry cars standing inside a newly created stop line) lands in the same merge window, or the orchestrator records an accepted traffic-owned skip here | – |
