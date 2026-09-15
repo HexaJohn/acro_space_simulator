@@ -17,11 +17,14 @@
 /// CONGESTION, measured from vehicle SPEEDS: the distance vehicles drove
 /// against the distance the same vehicle-time covers at the limit. It needs
 /// no delay table, so it ships in slice 1. Network-wide it is an EMA over a
-/// minute ([congestionIndex]; the HUD's Flow is one minus it); per road it
-/// is the worst piece over the last complete minute, and the volume the
-/// vehicles through its busiest piece over the last ten. Those are taken as
-/// a PICTURE at each congestion epoch (2 s of agent time) — the readout's
-/// last complete picture (D47) — from the very first epoch, whether or not
+/// minute ([congestionIndex]; the HUD's Flow is one minus it); per PIECE it
+/// is the last complete minute's ([pieceCongestion]), with the piece's FLOW
+/// beside it — vehicles through it a minute ([pieceFlowPerMin]) — which is
+/// what the readout loads each piece's noise by (§12.3); per road it is the
+/// worst piece, and the volume the vehicles through its busiest piece over
+/// the last ten minutes, which the Routes view reads. Those are taken as a
+/// PICTURE at each congestion epoch (2 s of agent time) — the readout's last
+/// complete picture (D47) — from the very first epoch, whether or not
 /// anything has driven: an empty picture is no congestion and no routes, so
 /// before the first car every answer still punishes nothing, and nothing
 /// waits for one.
@@ -161,13 +164,44 @@ class TrafficStats {
   Float32List _lastD = Float32List(0), _lastL = Float32List(0);
   Int32List _exits = Int32List(0);
 
+  /// Per minute bucket: the epochs whose vehicles it holds, so a flow is
+  /// taken over the time its books actually cover — a colony's first ten
+  /// minutes, a bucket begun part way through, books started afresh by a
+  /// rebuild — and never the whole ten minutes they will.
+  final Int32List _bucketEpochs = Int32List(kWindowBuckets);
+
   // ---- The picture ----------------------------------------------------------------
 
   RoadGraph? _picGraph;
   Float32List _roadCong = Float32List(0), _roadVol = Float32List(0);
+  Float32List _pieceCong = Float32List(0), _pieceFlow = Float32List(0);
 
   /// The worst road's congestion in the last picture, and the network's.
   double peakCongestion = 0, averageCongestion = 0;
+
+  /// The seconds the last picture's flows were taken over: what the volume
+  /// books cover, and never under one window (see [pieceFlowPerMin]).
+  double flowWindowS = 0;
+
+  /// The road graph the last picture was taken on: what [pieceCongestion]
+  /// and [pieceFlowPerMin] are indexed by. Null before a picture.
+  RoadGraph? get pictureGraph => _picGraph;
+
+  /// Per piece of [pictureGraph], in the last picture: the speed-based
+  /// congestion of the traffic both ways along it over the last complete
+  /// minute, 0..1 (0 below [kMinSampleM] of it at the limit). A buffer the
+  /// statistics keep and write again at the next picture: read, never kept.
+  Float32List get pieceCongestion => _pieceCong;
+
+  /// Per piece of [pictureGraph], in the last picture: vehicles through it,
+  /// both ways, a minute — the volume books' count over the seconds they
+  /// cover ([flowWindowS]): the last ten minutes once a colony has run ten,
+  /// and before that what it has run, so a young colony's flow is its rate
+  /// and not a tenth of it. Never over less than one window
+  /// (`AgentTuning.congestionWindowS`), the minute §12.3 counts a lane's
+  /// flow over: the first car of a colony's first seconds is not a jam's
+  /// rate. Written again at the next picture: read, never kept.
+  Float32List get pieceFlowPerMin => _pieceFlow;
 
   /// Every buffer the statistics keep from one sub-step to the next, by
   /// name into [into], for the allocation test (§15.2): the per-edge books
@@ -183,8 +217,11 @@ class TrafficStats {
     into['$name.lastD'] = _lastD;
     into['$name.lastL'] = _lastL;
     into['$name.exits'] = _exits;
+    into['$name.bucketEpochs'] = _bucketEpochs;
     into['$name.roadCong'] = _roadCong;
     into['$name.roadVol'] = _roadVol;
+    into['$name.pieceCong'] = _pieceCong;
+    into['$name.pieceFlow'] = _pieceFlow;
   }
 
   /// Puts the per-edge books on [lg]. A graph sharing [lg]'s structure keeps
@@ -200,6 +237,7 @@ class TrafficStats {
     _lastD = Float32List(nE);
     _lastL = Float32List(nE);
     _exits = Int32List(nE * kWindowBuckets);
+    _bucketEpochs.fillRange(0, kWindowBuckets, 0);
   }
 
   /// One congestion epoch: [mover]'s books since the last one go into the
@@ -224,6 +262,7 @@ class TrafficStats {
       _winL[e] += l[e];
       _exits[e * kWindowBuckets + b] += x[e];
     }
+    _bucketEpochs[b]++;
     mover.clearBooks();
     if (windowEnd) _closeWindow();
     // A picture at every epoch from the first, whether or not anything has
@@ -248,6 +287,7 @@ class TrafficStats {
     for (var i = b; i < _exits.length; i += kWindowBuckets) {
       _exits[i] = 0;
     }
+    _bucketEpochs[b] = 0;
     _doneIn[b] = 0;
     _failedIn[b] = 0;
   }
@@ -263,11 +303,24 @@ class TrafficStats {
 
   void _picture(LaneGraph lg) {
     final g = lg.graph;
-    final nR = g.roadCount;
+    final nR = g.roadCount, nP = g.pieceCount;
     if (_roadCong.length != nR) {
       _roadCong = Float32List(nR);
       _roadVol = Float32List(nR);
     }
+    if (_pieceCong.length != nP) {
+      _pieceCong = Float32List(nP);
+      _pieceFlow = Float32List(nP);
+    }
+    // The seconds the volume books cover, floored at one window.
+    var epochs = 0;
+    for (var i = 0; i < kWindowBuckets; i++) {
+      epochs += _bucketEpochs[i];
+    }
+    final covered = epochs * AgentTuning.congestionEpochS;
+    final windowS = AgentTuning.congestionWindowS;
+    flowWindowS = covered > windowS ? covered : windowS;
+    final perMin = 60 / flowWindowS;
     final nE = _lastD.length;
     var peak = 0.0;
     for (var r = 0; r < nR; r++) {
@@ -288,9 +341,13 @@ class TrafficStats {
           n += _through(bk);
         }
         final c = ll > kMinSampleM ? _clamp01(1 - dd / ll) : 0.0;
+        _pieceCong[p] = c;
+        _pieceFlow[p] = n * perMin;
         if (c > worst) worst = c;
         if (n > busiest) busiest = n;
       }
+      // The road's answers are its pieces' worst and busiest, as before the
+      // pieces were published: the Routes view reads them.
       _roadCong[r] = worst;
       _roadVol[r] = busiest.toDouble();
       // Read back as stored, so the peak IS the worst road's answer.

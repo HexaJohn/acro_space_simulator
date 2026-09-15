@@ -110,6 +110,12 @@ class AgentTuning {
   /// HUD's Flow is one minus the index.
   static double congestionWindowS = 60;
 
+  /// Vehicles one lane carries a minute at free flow (§12.3's
+  /// `laneFlowPerMin`): the flow at which a piece's measured load, and so
+  /// its traffic noise, is full — a piece of `lanes` lanes carrying
+  /// `lanes × laneFlowPerMin` vehicles a minute both ways.
+  static double laneFlowPerMin = 30;
+
   /// Agent seconds between incremental building syncs (§2.6).
   static double buildingSyncS = 2.0;
 
@@ -192,6 +198,7 @@ class AgentTuning {
     maxHandOversPerStep = 4;
     congestionEpochS = 2.0;
     congestionWindowS = 60;
+    laneFlowPerMin = 30;
     buildingSyncS = 2.0;
     commuteRatePerResident = 0.00042;
     commuteReturnMinS = 240;
@@ -232,6 +239,7 @@ class AgentTuning {
         'maxHandOversPerStep': maxHandOversPerStep,
         'congestionEpochS': congestionEpochS,
         'congestionWindowS': congestionWindowS,
+        'laneFlowPerMin': laneFlowPerMin,
         'buildingSyncS': buildingSyncS,
         'commuteRatePerResident': commuteRatePerResident,
         'commuteReturnMinS': commuteReturnMinS,

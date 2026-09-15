@@ -24,8 +24,8 @@ import 'traffic_fixture.dart';
 /// are the locked routes of the vehicles driving it; switched off, every
 /// answer is the routed model's; and live (slice 2), reach is the agents'
 /// own and noise, land value and the tax factor are the routed model's
-/// formulas over the loads the agents measured, changing only when the
-/// pass count does.
+/// formulas over the loads the agents measured piece by piece, changing
+/// only when the pass count does.
 void main() {
   setUp(() => AgentTuning.commuteRatePerResident = 0.004);
   tearDown(AgentTuning.reset);
@@ -162,20 +162,22 @@ void main() {
     final lg = a.laneGraph!, g = lg.graph;
     expect(identical(r.reach.laneGraph, lg), isTrue);
 
-    // Every piece's emission from its road's load in the last picture.
+    // Every piece's emission from its own load in the last picture.
     final stats = a.stats;
+    expect(identical(stats.pictureGraph, g), isTrue);
     final emission = Float64List(g.pieceCount);
     var loud = 0;
     for (var road = 0; road < g.roadCount; road++) {
-      final id = g.roads[road].id;
-      final load = AgentTrafficReadout.measuredLoad(
-          stats.congestionOf(id), stats.volumeOf(id), g.roadLanes[road]);
-      if (load > 0) loud++;
       for (var p = g.roadFirstPiece[road]; p < g.roadFirstPiece[road + 1]; p++) {
+        final load = AgentTrafficReadout.measuredLoad(
+            stats.pieceCongestion[p].toDouble(),
+            stats.pieceFlowPerMin[p].toDouble(),
+            g.roadLanes[road]);
+        if (load > 0) loud++;
         emission[p] = g.roadEmission[road] * RoadNoise.volumeFactor(load);
       }
     }
-    expect(loud, greaterThan(0), reason: 'the commuters loaded some road');
+    expect(loud, greaterThan(0), reason: 'the commuters loaded some piece');
     final sampler = RoadNoiseSampler(g);
     var sum = 0.0, built = 0;
     for (final lot in city.layout.autoParcels) {

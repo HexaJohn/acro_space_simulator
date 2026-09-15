@@ -19,12 +19,15 @@
 ///
 /// - REACH — service, fire and delivery — from bounded multi-source searches
 ///   over the lane graph's directed edges ([AgentReach], agent_reach.dart);
-/// - NOISE, from each road's MEASURED load through the routed model's own
+/// - NOISE, from each PIECE's measured load through the routed model's own
 ///   sampler and formulas (road_noise.dart): a piece throws
-///   `roadEmission × RoadNoise.volumeFactor(load)` at its kerbs, where the
-///   load is the larger of the road's speed-based congestion and its flow
-///   against a lane at free flow ([kLaneFlowPerMin]) — measured vehicles
-///   where the routed model has assigned ones;
+///   `roadEmission × RoadNoise.volumeFactor(load)` at its kerbs, as the
+///   routed model loads a piece by its own volume against its road's lanes
+///   (road_traffic_model.dart `_loadsOnRoads`), where the load is the larger
+///   of the piece's speed-based congestion and its flow against its road's
+///   lanes at free flow (`AgentTuning.laneFlowPerMin`) — measured vehicles
+///   where the routed model has assigned ones, and a quiet piece of a long
+///   road as quiet as it is;
 /// - LAND VALUE, [RoadNoise.landValue] of that noise, the frontage bonus
 ///   and the colony's air; and the TAX FACTOR, [RoadNoise.taxFactor] of the
 ///   built lots' average without the air, exactly 1 until a built lot has
@@ -72,15 +75,8 @@ import 'building_table.dart';
 import 'city_agents.dart';
 import 'lane_graph.dart';
 import 'slot_pool.dart';
-import 'traffic_stats.dart';
 import 'traffic_tuning.dart';
 import 'vehicle_table.dart';
-
-/// Vehicles one lane carries a minute at free flow: the flow against which
-/// a road's measured volume is a load of 1 (§12.3's `laneFlowPerMin`). Kept
-/// here, beside the only formula that reads it, until the tuning panel
-/// wants it as a knob.
-const double kLaneFlowPerMin = 30;
 
 /// A colony's agents as a [CityTrafficReadout].
 class AgentTrafficReadout implements CityTrafficReadout {
@@ -318,11 +314,12 @@ class AgentTrafficReadout implements CityTrafficReadout {
   /// of their old tables stands.
   BuildingTable? _tables;
 
-  static const int _idle = 0, _reach = 1, _loads = 2, _lots = 3, _done = 4;
+  static const int _idle = 0, _loads = 1, _reach = 2, _lots = 3, _done = 4;
   int _phase = _idle;
   int _cursor = 0;
   LaneGraph? _passLg;
   int _passPicture = -1;
+  int _loadsPicture = -1;
   bool _loadsMoved = false;
   double _lvSum = 0;
   int _lvCount = 0;
@@ -431,10 +428,11 @@ class AgentTrafficReadout implements CityTrafficReadout {
     final s = _sampler;
     if (s == null || !identical(s.graph, g)) _sampler = RoadNoiseSampler(g);
     _cursor = 0;
+    _loadsPicture = agents.stats.pictures;
     _loadsMoved = false;
     _lvSum = 0;
     _lvCount = 0;
-    _phase = _reach;
+    _phase = _loads;
   }
 
   void _step(int budget) {
@@ -442,11 +440,11 @@ class AgentTrafficReadout implements CityTrafficReadout {
     while (work < budget && _phase != _idle && _phase != _done) {
       final left = budget - work;
       switch (_phase) {
-        case _reach:
-          work += reach.step(left);
-          if (!reach.passing) _phase = _loads;
         case _loads:
           work += _loadsStep(left);
+        case _reach:
+          work += reach.step(left);
+          if (!reach.passing) _phase = _lots;
         case _lots:
           work += _lotsStep(left);
       }
@@ -474,51 +472,65 @@ class AgentTrafficReadout implements CityTrafficReadout {
     return f != null && g.sharesStructureWith(f.graph);
   }
 
-  /// Every piece's emission from its road's measured load — the picture's
-  /// congestion and volume, read by road id so a picture taken on the
-  /// network before a rebuild still lands on the roads that kept their
-  /// ids.
+  /// Every piece's emission from its own measured load in the picture the
+  /// pass began at: `roadEmission × volumeFactor(load)`, the load from the
+  /// piece's congestion and flow ([measuredLoad]) against its road's lanes —
+  /// the routed model's piece rule (`_loadsOnRoads`), measured instead of
+  /// assigned. The first phase of a pass, so it reads one picture: the
+  /// statistics write theirs again at the next epoch, and loads begun on one
+  /// and read on another would mix two. Should the next picture come first
+  /// all the same (a network too big for a sub-step's budget), the loads
+  /// start again on it.
   int _loadsStep(int budget) {
     final g = _passLg!.graph;
     final b = _noiseBack!;
     final stats = agents.stats;
+    if (stats.pictures != _loadsPicture) {
+      _loadsPicture = stats.pictures;
+      _cursor = 0;
+      _loadsMoved = false;
+    }
+    final pic = stats.pictureGraph;
+    final cong = stats.pieceCongestion, flow = stats.pieceFlowPerMin;
+    // Always the pass's own network (a pass begins at a picture on it, and
+    // is dropped when the network changes); a picture on any other would
+    // index other pieces, and loads nothing.
+    final pictured = pic != null &&
+        cong.length == g.pieceCount &&
+        (identical(pic, g) || g.sharesStructureWith(pic));
     final aligned = _alignedWithFront(g);
     final front = _noiseFront;
     var work = 0;
     while (_cursor < g.roadCount && work < budget) {
       final r = _cursor++;
-      final id = g.roads[r].id;
-      final e =
-          g.roadEmission[r] *
-          RoadNoise.volumeFactor(
-            measuredLoad(
-              stats.congestionOf(id),
-              stats.volumeOf(id),
-              g.roadLanes[r],
-            ),
-          );
+      final emission = g.roadEmission[r];
+      final lanes = g.roadLanes[r];
       for (var p = g.roadFirstPiece[r]; p < g.roadFirstPiece[r + 1]; p++) {
+        final load = pictured
+            ? measuredLoad(cong[p].toDouble(), flow[p].toDouble(), lanes)
+            : 0.0;
+        final e = emission * RoadNoise.volumeFactor(load);
         b.emission[p] = e;
         if (!aligned || front!.emission[p] != e) _loadsMoved = true;
       }
-      work += 2 + g.roadFirstPiece[r + 1] - g.roadFirstPiece[r];
+      work += 2 + 2 * (g.roadFirstPiece[r + 1] - g.roadFirstPiece[r]);
     }
     if (_cursor < g.roadCount) return work;
     if (!aligned) _loadsMoved = true;
     _cursor = 0;
-    _phase = _lots;
+    _phase = _reach;
     return work + 1;
   }
 
-  /// A road's measured load, 0..1: the larger of its speed-based congestion
-  /// ([congestion], its worst piece over the last complete minute) and its
-  /// flow against its lanes at free flow — [volume] vehicles through its
-  /// busiest piece, both ways, over the last [kWindowBuckets] minutes,
-  /// against [lanes] lanes of [kLaneFlowPerMin] each.
-  static double measuredLoad(double congestion, double volume, int lanes) {
+  /// A piece's measured load, 0..1: the larger of its speed-based
+  /// [congestion] (the traffic both ways along it over the last complete
+  /// minute) and its flow against its road's lanes at free flow —
+  /// [flowPerMin] vehicles a minute through it, both ways, against [lanes]
+  /// lanes of `AgentTuning.laneFlowPerMin` each (§12.3).
+  static double measuredLoad(double congestion, double flowPerMin, int lanes) {
     final flow = lanes <= 0
         ? 0.0
-        : volume / kWindowBuckets / (lanes * kLaneFlowPerMin);
+        : flowPerMin / (lanes * AgentTuning.laneFlowPerMin);
     final load = congestion > flow ? congestion : flow;
     return load < 0 ? 0.0 : (load > 1 ? 1.0 : load);
   }

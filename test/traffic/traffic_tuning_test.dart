@@ -34,6 +34,7 @@ void main() {
     expect(AgentTuning.maxAgentSubStepsPerFrame, 4);
     expect(AgentTuning.maxHeldCityS, 15);
     expect(AgentTuning.congestionEpochS, 2.0);
+    expect(AgentTuning.laneFlowPerMin, 30);
     expect(AgentTuning.buildingSyncS, 2.0);
     expect(AgentTuning.warmupS, 10);
     expect(AgentTuning.graphBuildInlineMaxRoads, 3000);
@@ -62,6 +63,7 @@ void main() {
     AgentTuning.maxHandOversPerStep = 1;
     AgentTuning.congestionEpochS = 1;
     AgentTuning.congestionWindowS = 1;
+    AgentTuning.laneFlowPerMin = 1;
     AgentTuning.buildingSyncS = 1;
     AgentTuning.commuteRatePerResident = 1;
     AgentTuning.commuteReturnMinS = 1;
