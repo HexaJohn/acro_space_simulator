@@ -1241,9 +1241,13 @@ deviations, each local:
 - **Budget constants live on the book** (`SiteAccessBook.defaultUnitsPerTick = 128`, `defaultChecksPerTick = 4096`,
   `unlimited`): `site_access_constants.dart` is core's to edit and has no `kSyncUnitsPerTick` /
   `kSyncCheckUnitsPerTick`. Units are charged per §4.3 from `classifyProgram`'s offer.
-- **The first `sync` of a book drains in full**, whatever budget it is handed. That is the load and generation drain
-  of this section: a loaded colony's first `advance` re-derives every plan (the starter kit drains explicitly at the
-  end of `found`). No separate hook sits in `fromJson` or the generator.
+- **Drains.** `CitySim.fromJson` ends with a full drain (`sync(maxUnits: unlimited, maxChecks: unlimited)`), so a
+  load re-derives every plan inside the loading phase and the layout reads the book's easements before any UI
+  action; `CityStarterKit.found` drains explicitly at its end. The generator has no separate hook: its closing
+  `advance(0.1)` runs inside generation progress, and **the first `sync` of a book drains in full** whatever budget
+  it is handed (the rule also covers any other colony built without either). (R2 book repair: the load drain first
+  rode on the first `advance`, which stalled the first gameplay frame and left `layout.easementOf` unset until then;
+  `site_access_persistence_test` now pins the drain before any advance.)
 - **Checks.** A site whose `Parcel`, spec and graph stamp are unchanged (identity, or equal values after a re-cut)
   costs nothing. Otherwise the §3.9 signature is recomputed: the lot half (polygon at 1 cm, frontage, side-street
   edge, graded, spec) and the slot half, read straight off the graph's join columns (the road's id, class and
@@ -1283,11 +1287,24 @@ deviations, each local:
   contract edit-local: `isCurrentFor` compares a per-site slot tuple, not the whole-graph stamp, and join handles
   become `(lotId, slot)` resolved through `RoadGraph.joinOfRef` at read time. That is an R2a contract change for the
   Agent Traffic session. Until decided, the book does (a) at the default budget and the ≤ 2 ms figure stays missed.
+  **Built-state latency (recorded, also for §10.1):** the built-state trigger (placed, grown, tier, removal) does not
+  queue the site that changed; it re-walks the colony after the walk in flight, at 4096 checks a tick. On the 127k
+  town a newly placed or grown building can therefore wait about 31 ticks (a fresh walk) to about 62 ticks (one in
+  flight, then its own) for its plan, against §4.3's "placing 500 zoned houses completes in 8 ticks", which holds
+  only where the walk is short (the starter kit and small towns drain in one tick). Until then the site reads
+  kerbside to traffic (legal, §4.1). The lever, not taken: queue the ids of buildings placed, grown or cleared through
+  the `CitySim` hooks ahead of the walk, as the dirty box is.
 - **Chunks** are re-packed from published rows (`SiteChunkLayout` + `SiteAccessChunk.packed`, the R2a builder's
   own packing entry points; `site_access_sync_test` pins the re-pack byte-equal to `PlanBuilder.build`), so a
   copy-on-write never regenerates a neighbour. An anchor the grid reports twice is walked once.
 - **`onLotsRenamed`** is order-independent (every new id is taken from the ids before the call) rather than "sorted
-  old-id order": the book may not iterate the map (hygiene), and the result is the same.
+  old-id order": the book may not iterate the map (hygiene), and the result is the same. It re-keys the easement
+  LOTS as well as the sites, so a renamed crossed lot answers `easementOf(newId)` at once, not after the next sync
+  (R2 book repair). Both `CitySim` call sites (`_carryRenamedLots`, and `_carryLotsAcross` on the claim path) are
+  pinned by `site_access_sync_test` ("CitySim rename hooks"): a renamed built lot keeps its slot and `sitesRev` does
+  not move, before any sync.
+- **An easement-priority site inside the dirty box** is checked as a queued site in the priority pass and leaves the
+  queue there, so it is current at once and costs the check budget nothing (R2 book repair).
 - **`corridorHits`** tests the sites whose slot 0 carries `kJoinEasement` or `kJoinOffFrontage`: the stretch of each
   cut join's throat outside the site's own lot, within `kAccessCorridorHalfM`. `claimSite` (with or without
   `checkAccess`) and `siteBlockedReason` refuse such a plot.
@@ -1381,6 +1398,12 @@ play and ≤ 2 ms for the sync of a road edit on the 127k town.
   decoration upgrade, a tier change and a burnout, then compares every plan per site id (`sitePlanJson`, programs,
   `rev` and stall keys) against `drained(roundTrip(city))`. That is the comparison that catches a live book
   diverging from what a load re-derives.
+- **Load order as built (R2 book repair):** `fromJson` → `recompute()` → `agents.restore` → `siteAccess.sync`
+  (full drain, inside `fromJson`) → first `advance` (a no-op sync) → traffic building sync. The first gameplay frame
+  no longer carries the drain; `site_access_persistence_test` checks the loaded book is complete, byte-identical and
+  wired to `layout.easementOf` before any advance.
+- **The `lot-r2-r21` pin stays on this branch** (skeptic, low): the flip is core's home fit; core quantises `W` and
+  `D` before the §3.4 fit, and the pin becomes `isEmpty` at integration.
 
 ---
 

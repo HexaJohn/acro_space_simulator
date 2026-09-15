@@ -31,9 +31,10 @@
 ///   their built bits) is recomputed: unchanged, the plan is re-resolved in
 ///   place (join handles, pieces, `graphStamp`; `rev` kept); changed, the
 ///   site is re-planned.
-/// - **The first sync** of a book drains in full whatever budgets it is
-///   given (the load and generation drain of §4.1, see the deviation note in
-///   §4.1).
+/// - **Drains (§4.1).** `CitySim.fromJson` and `CityStarterKit.found` drain
+///   explicitly; the generator's closing `advance` drains through the rule
+///   that the first sync of a book drains in full, whatever budgets it is
+///   given (see the deviation note in §4.1).
 ///
 /// Determinism (§3.9): no platform hash, draw, clock, map or set iteration,
 /// no trigonometry. Maps here are lookups only; everything walked is a list.
@@ -369,6 +370,36 @@ class SiteAccessBook {
     for (final (rec, _) in moved) {
       if (identical(_byId[rec.id], rec)) _byId.remove(rec.id);
     }
+    // The easement lots themselves are renamed too (a re-plat renames the
+    // unbuilt lots a corridor crosses): each live site's lots are re-keyed
+    // from the ids before the call, so `easementOf(newId)` answers at once
+    // rather than after the next sync re-plans the site (§3.7a rule 2).
+    final lotMoves = <(String, String)>[];
+    for (final rec in _sites) {
+      if (rec.dead || rec.easement.isEmpty) continue;
+      var changed = false;
+      final lots = <String>[];
+      for (final lot in rec.easement) {
+        final to = renamed[lot];
+        if (to != null && to != lot) {
+          changed = true;
+          if (_easementByLot[lot] == rec.id) lotMoves.add((lot, to));
+          lots.add(to);
+        } else {
+          lots.add(lot);
+        }
+      }
+      if (changed) rec.easement = lots;
+    }
+    final lotOwners = <String>[
+      for (final (lot, _) in lotMoves) _easementByLot[lot]!,
+    ];
+    for (final (lot, _) in lotMoves) {
+      _easementByLot.remove(lot);
+    }
+    for (var i = 0; i < lotMoves.length; i++) {
+      _easementByLot[lotMoves[i].$2] = lotOwners[i];
+    }
     for (final (rec, to) in moved) {
       final from = rec.id;
       rec.id = to;
@@ -380,15 +411,19 @@ class SiteAccessBook {
         _record(rec.slot, _Change.rename(to));
       }
     }
+    // Queue entries already checked (an easement-priority site, §4.2) stay
+    // out of [_queued]: only the ones still waiting are re-marked stale.
+    final waiting = <bool>[
+      for (var i = _queueHead; i < _queue.length; i++)
+        _queued.contains(_queue[i]),
+    ];
     for (var i = _queueHead; i < _queue.length; i++) {
+      _queued.remove(_queue[i]);
       final to = renamed[_queue[i]];
-      if (to != null) {
-        _queued.remove(_queue[i]);
-        _queue[i] = to;
-      }
+      if (to != null) _queue[i] = to;
     }
     for (var i = _queueHead; i < _queue.length; i++) {
-      _queued.add(_queue[i]);
+      if (waiting[i - _queueHead]) _queued.add(_queue[i]);
     }
     _priorityIds = [for (final id in _priorityIds) renamed[id] ?? id];
     _flush();
@@ -460,16 +495,25 @@ class SiteAccessBook {
     for (final id in _priorityIds) {
       final parcel = layout.parcelById(id);
       if (parcel == null) continue;
-      _check(id, parcel, -1, _lotSpec(city, parcel), priority: true);
+      // A priority site in the dirty box is checked as a queued one (its
+      // corner re-plan included) and leaves the queue: current at once.
+      final queued = _queued.remove(id);
+      _check(id, parcel, -1, _lotSpec(city, parcel),
+          priority: true, queued: queued);
       stats.priorityChecks++;
     }
     // 2. The dirty box queue.
     while (_queueHead < _queue.length) {
+      final id = _queue[_queueHead];
+      if (!_queued.contains(id)) {
+        // Already checked this sync (an easement-priority site): free.
+        _queueHead++;
+        continue;
+      }
       if (stats.checks >= maxChecks) {
         stopped = true;
         break;
       }
-      final id = _queue[_queueHead];
       final parcel = layout.parcelById(id);
       if (parcel != null &&
           !_check(id, parcel, -1, _lotSpec(city, parcel), queued: true)) {

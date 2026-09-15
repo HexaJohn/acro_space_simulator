@@ -201,6 +201,41 @@ void main() {
       expect(book.isCurrentFor(east.first.id, g), isFalse);
     });
 
+    test('an easement-priority site inside the dirty box is current after its '
+        'priority check, and costs the queue nothing', () {
+      // A street through the grown block puts the starter installations
+      // behind it inside its dirty box.
+      final city = town(grown: true);
+      final book = city.siteAccess;
+      drain(city, book);
+      commit(city, const FixtureRoad([Vec2(-150, -290), Vec2(-150, 290)]));
+      final g = city.roadGraph;
+      final priority = [
+        for (var lot = 0; lot < g.lotCount; lot++)
+          if (g.lotJoinStart[lot] < g.lotJoinStart[lot + 1] &&
+              g.joinFlags[g.lotJoinStart[lot]] & kJoinEasement != 0)
+            g.lotIds[lot],
+      ];
+      expect(priority, hasLength(4));
+      book.sync(city, g, maxChecks: 0, maxUnits: 0);
+      expect(book.lastSync.priorityChecks, 4);
+      expect(book.lastSync.checks, 0);
+      for (final id in priority) {
+        expect(book.isStale(id), isFalse, reason: id);
+        expect(book.isCurrentFor(id, g), isTrue, reason: id);
+      }
+      // Some other lot of the box is still waiting.
+      expect(builtLots(city).where(book.isStale), isNotEmpty);
+      final before = {
+        for (final id in priority) id: (book.planOf(id)!.rev, book.slotOf(id)),
+      };
+      drain(city, book);
+      for (final id in priority) {
+        expect((book.planOf(id)!.rev, book.slotOf(id)), before[id]);
+        expect(book.isCurrentFor(id, g), isTrue, reason: id);
+      }
+    });
+
     test('a re-check that finds the same inputs keeps rev and slot', () {
       final (city, _, west) = setUp();
       final book = city.siteAccess;
@@ -390,6 +425,66 @@ void main() {
       expect(back['joins'], isNotEmpty);
       expect(SiteProgram.values.map((p) => p.name), contains(back['program']));
       expect(back['pavement'], hasLength(2));
+    });
+  });
+
+  group('CitySim rename hooks (§4.1, §7.6: a renamed lot keeps its handle)', () {
+    /// Every auto lot id of [city], every planned site's slot, and sitesRev.
+    (Set<String>, Set<int>, int) snapshot(CitySim city) {
+      final book = city.siteAccess;
+      return (
+        {for (final p in city.layout.autoParcels) p.id},
+        {for (final id in idsOf(book)) book.slotOf(id)},
+        book.sitesRev,
+      );
+    }
+
+    /// The built auto lots [city] has that [oldIds] did not: the renamed ones.
+    List<String> renamedBuilt(CitySim city, Set<String> oldIds) => [
+          for (final p in city.layout.autoParcels)
+            if (!oldIds.contains(p.id) && city.grownParcels.containsKey(p.id))
+              p.id,
+        ];
+
+    void expectCarried(CitySim city, (Set<String>, Set<int>, int) was) {
+      final (oldIds, oldSlots, rev) = was;
+      final book = city.siteAccess;
+      final renamed = renamedBuilt(city, oldIds);
+      expect(renamed, isNotEmpty);
+      // Before any sync: the plans already answer under the new ids, in
+      // slots they held before, and no plan appeared, went or changed.
+      final taken = <int>{};
+      for (final id in renamed) {
+        final slot = book.slotOf(id);
+        expect(slot, greaterThanOrEqualTo(0), reason: id);
+        expect(oldSlots.contains(slot), isTrue, reason: id);
+        expect(taken.add(slot), isTrue, reason: id);
+        expect(book.planOf(id)!.siteId, id);
+      }
+      expect(book.sitesRev, rev);
+    }
+
+    test('a road commit carries renamed lots\' plans (_carryRenamedLots)', () {
+      final city = town(grown: true);
+      drain(city, city.siteAccess);
+      final was = snapshot(city);
+      commit(city, const FixtureRoad([Vec2(-150, -290), Vec2(-150, 290)]));
+      expectCarried(city, was);
+    });
+
+    test('a claimed plot carries renamed lots\' plans (_carryLotsAcross)', () {
+      // A batch road (no re-cut) splits the grown block's roads; the next
+      // plot staked (the same frame, before any sync) re-cuts the plat, and
+      // the claim path carries the renames.
+      final city = town(grown: true)..stock['ore'] = 1e9;
+      drain(city, city.siteAccess);
+      final was = snapshot(city);
+      city.commitRoad(
+          const [Vec2(-150, -290), Vec2(-150, 290)], RoadClass.street,
+          regenerateLots: false);
+      expect(city.claimSite(house, const Vec2(1500, 0), checkAccess: false),
+          isNotNull);
+      expectCarried(city, was);
     });
   });
 

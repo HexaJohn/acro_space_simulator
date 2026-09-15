@@ -117,12 +117,35 @@ void main() {
       expect(idsOf(b), idsOf(a));
       expect(plansOf(b), plansOf(a));
       expect(sameChunks(b.chunks, a.chunks), isTrue);
-      // The loaded colony's own book drains on its first sync, whatever the
-      // budget it is handed (the loading drain, §4.1).
-      expect(loaded.siteAccess.sync(loaded, loaded.roadGraph), isTrue);
-      expect(sameChunks(loaded.siteAccess.chunks, a.chunks), isTrue);
+      // The loaded colony's own book drained inside the load (§4.1, §3.10),
+      // before any advance: its plans are there and complete, and the layout
+      // already reads its easements (§3.7a).
+      final own = loaded.siteAccess;
+      expect(own.lastSync.complete, isTrue);
+      expect(sameChunks(own.chunks, a.chunks), isTrue);
+      expect(loaded.layout.easementOf, isNotNull);
+      expect(loaded.layout.easementOf, own.easementOf);
+      expect(own.sync(loaded, loaded.roadGraph), isTrue);
+      expect(own.lastSync.generated, 0);
     });
   }
+
+  test('a load drains before the first advance, and the easement hook is live',
+      () {
+    final city = starterKit();
+    final loaded = roundTrip(city);
+    final book = loaded.siteAccess;
+    // The drain ran in fromJson: the book is complete and has every plan.
+    expect(book.lastSync.complete, isTrue);
+    expect(book.lastSync.generated, greaterThan(4));
+    expect(idsOf(book), idsOf(drained(city)));
+    for (final (p, _) in loaded.parcelBuiltLots()) {
+      expect(book.isCurrentFor(p.id, loaded.roadGraph), isTrue, reason: p.id);
+    }
+    // The layout already asks this book which lots are easements (the
+    // refusal itself is site_easement_refusal_test's).
+    expect(loaded.layout.easementOf, book.easementOf);
+  });
 
   test('a live book synced through edits equals the loaded colony\'s drain',
       () {

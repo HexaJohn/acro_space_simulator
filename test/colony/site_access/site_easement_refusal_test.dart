@@ -166,6 +166,28 @@ void main() {
       expect(city.layout.setUse(front, ParcelUse.residential), isTrue);
     });
 
+    test('a renamed easement lot is still an easement at once, before a sync',
+        () {
+      final city = starterKit();
+      final book = fakeBook(city);
+      const other = 'lot-r0x0-l0';
+      final otherSite = book.easementOf(other)!;
+      expect(otherSite, isNot(spaceport));
+      final rev = book.sitesRev;
+      // A rename onto a fresh id, and a swap of two easement lots.
+      book.onLotsRenamed({front: 'lot-renamed'});
+      expect(book.easementOf('lot-renamed'), spaceport);
+      expect(book.easementOf(front), isNull);
+      book.onLotsRenamed({'lot-renamed': other, other: front});
+      expect(book.easementOf(other), spaceport);
+      expect(book.easementOf(front), otherSite);
+      expect(book.sitesRev, rev);
+      // Clearing the site lifts the lot under its new name.
+      book.onLotCleared(spaceport);
+      expect(book.easementOf(other), isNull);
+      expect(book.easementOf(front), otherSite);
+    });
+
     test('a crossed lot that is already built blocks the site', () {
       final city = starterKit();
       // Built before any easement existed (an old save, §3.7a rule 1).

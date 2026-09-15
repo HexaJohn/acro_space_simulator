@@ -4834,6 +4834,13 @@ class CitySim {
     sim.support.addAll((j['support'] as List).cast<int>());
     sim.recompute();
     sim.agents.restore(j['agents']);
+    // The loading drain (docs/plans/site-access.md §4.1, §3.10): every plan
+    // is re-derived inside the load, not on the first gameplay tick, and
+    // creating the book hands the layout its easement lookup (§3.7a) before
+    // any UI action can zone or build on an easement lot.
+    sim.siteAccess.sync(sim, sim.roadGraph,
+        maxUnits: SiteAccessBook.unlimited,
+        maxChecks: SiteAccessBook.unlimited);
     return sim;
   }
 
