@@ -4,7 +4,12 @@
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
 import 'dart:math' as math;
+import 'dart:typed_data';
 
+import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
+import 'package:acro_space_simulator/domain/colony/city/road_noise.dart';
+import 'package:acro_space_simulator/domain/colony/city/road_traffic_model.dart'
+    show CityRoadTraffic, TrafficTuning;
 import 'package:acro_space_simulator/domain/colony/city/traffic_readout.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/agent_traffic_readout.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/traffic_tuning.dart';
@@ -12,13 +17,15 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'traffic_fixture.dart';
 
-/// The traffic readout's contract, slice 1's half (docs/plans/
-/// agent-traffic.md §12.3, D46, D47; §17.1 traffic_readout_test): before a
-/// picture it punishes nothing; pictures come every congestion epoch and
-/// never go back, not even across the colony's switch to the agents and
-/// back; the routes through a road are the locked routes of the vehicles
-/// driving it; and reach, noise, land value and the tax factor are the
-/// routed model's, answer for answer.
+/// The traffic readout's contract (docs/plans/agent-traffic.md §12.3, D46,
+/// D47; §17.1 traffic_readout_test): before a picture it punishes nothing;
+/// pictures come every congestion epoch and never go back, not even across
+/// the colony's switch to the agents and back; the routes through a road
+/// are the locked routes of the vehicles driving it; switched off, every
+/// answer is the routed model's; and live (slice 2), reach is the agents'
+/// own and noise, land value and the tax factor are the routed model's
+/// formulas over the loads the agents measured, changing only when the
+/// pass count does.
 void main() {
   setUp(() => AgentTuning.commuteRatePerResident = 0.004);
   tearDown(AgentTuning.reset);
@@ -38,12 +45,19 @@ void main() {
       expect(r.volumeOf(road.id), 0);
       expect(r.routesThrough(road.id), isEmpty);
     }
+    final quiet = RoadNoise.landValue(noise: 0, pollution: city.pollution);
     for (final lot in city.layout.autoParcels) {
       expect(r.serviceReach(lot.id), isTrue);
       expect(r.fireReach(lot.id), isTrue);
       expect(r.deliveryReach(lot.id), isTrue);
       expect(r.noiseOf(lot.id), 0);
+      expect(r.landValueOf(lot.id), quiet,
+          reason: 'a quiet plain street in the colony\'s air, as the routed '
+              'model values a lot before its first pass');
     }
+    expect(r.averageLandValue,
+        (RoadNoise.baseLandValue - RoadNoise.pollutionPenalty(city.pollution))
+            .clamp(0.0, 1.0));
     expect(r.taxLandValueFactor, 1.0);
   });
 
@@ -116,14 +130,15 @@ void main() {
     expect(a.readout.routesThrough('no-such-road'), isEmpty);
   });
 
-  test('reach, noise, land value and the tax factor are the routed model\'s, '
-      'answer for answer', () {
+  test('switched off, reach, noise, land value and the tax factor are the '
+      'routed model\'s, answer for answer', () {
     final city = town();
     final a = agentsOn(city);
     for (var i = 0; i < 400; i++) {
       city.roadTraffic.advance(0.5);
       a.advance(0.5);
     }
+    a.enabled = false;
     final r = a.readout, m = city.roadTraffic;
     expect(m.hasRun, isTrue, reason: 'the routed model has a picture too');
     for (final lot in city.layout.autoParcels) {
@@ -137,15 +152,151 @@ void main() {
     expect(r.taxLandValueFactor, m.taxLandValueFactor);
   });
 
-  test('fire reach is the routed model\'s fire reach, not its service reach; '
-      'passes count its pictures with ours, and never go back', () {
+  test('live, reach is the agents\' own fields, and noise and land value '
+      'are the routed formulas over the measured loads (slice 2)', () {
+    final city = town();
+    final a = agentsOn(city);
+    runAgents(a, 200);
+    final r = a.readout..settle();
+    expect(r.hasRun, isTrue);
+    final lg = a.laneGraph!, g = lg.graph;
+    expect(identical(r.reach.laneGraph, lg), isTrue);
+
+    // Every piece's emission from its road's load in the last picture.
+    final stats = a.stats;
+    final emission = Float64List(g.pieceCount);
+    var loud = 0;
+    for (var road = 0; road < g.roadCount; road++) {
+      final id = g.roads[road].id;
+      final load = AgentTrafficReadout.measuredLoad(
+          stats.congestionOf(id), stats.volumeOf(id), g.roadLanes[road]);
+      if (load > 0) loud++;
+      for (var p = g.roadFirstPiece[road]; p < g.roadFirstPiece[road + 1]; p++) {
+        emission[p] = g.roadEmission[road] * RoadNoise.volumeFactor(load);
+      }
+    }
+    expect(loud, greaterThan(0), reason: 'the commuters loaded some road');
+    final sampler = RoadNoiseSampler(g);
+    var sum = 0.0, built = 0;
+    for (final lot in city.layout.autoParcels) {
+      final id = lot.id;
+      expect(r.serviceReach(id), r.reach.serviceReach(id));
+      expect(r.fireReach(id), r.reach.fireReach(id));
+      expect(r.deliveryReach(id), r.reach.deliveryReach(id));
+      final i = g.lotNoOf(id)!;
+      final noise = sampler.noiseAt(Vec2(g.lotE[i], g.lotN[i]), emission);
+      final piece = g.lotPiece[i];
+      final bonus = piece < 0 ? 0.0 : g.roadBonus[g.pieceRoad[piece]];
+      expect(r.noiseOf(id), closeTo(noise, 1e-6));
+      expect(
+          r.landValueOf(id),
+          closeTo(
+              RoadNoise.landValue(
+                  noise: noise, bonus: bonus, pollution: city.pollution),
+              1e-6));
+      sum += RoadNoise.baseLandValue + bonus - RoadNoise.noiseWeight * noise;
+      built++;
+    }
+    // The town's every street lot is built, and so are the kit's own lots.
+    for (var i = 0; i < g.lotCount; i++) {
+      final id = g.lotIds[i];
+      if (city.layout.autoParcels.any((p) => p.id == id)) continue;
+      if (!city.parcelBuildings.containsKey(id)) continue;
+      final piece = g.lotPiece[i];
+      final bonus = piece < 0 ? 0.0 : g.roadBonus[g.pieceRoad[piece]];
+      final noise = sampler.noiseAt(Vec2(g.lotE[i], g.lotN[i]), emission);
+      sum += RoadNoise.baseLandValue + bonus - RoadNoise.noiseWeight * noise;
+      built++;
+    }
+    final average = sum / built;
+    expect(
+        r.averageLandValue,
+        closeTo(
+            (average - RoadNoise.pollutionPenalty(city.pollution))
+                .clamp(0.0, 1.0),
+            1e-9));
+    expect(r.taxLandValueFactor,
+        closeTo(RoadNoise.taxFactor(average.clamp(0.0, 1.0)), 1e-9));
+  });
+
+  test('with no traffic on either, noise, land value and the tax factor are '
+      'the routed model\'s to the bit: the formulas are one', () {
+    // Nobody commutes on the agents' side, and the routed model is tuned to
+    // send no trip of any kind: both load every road at 0.
+    AgentTuning.commuteRatePerResident = 0;
+    final city = town();
+    final a = agentsOn(city);
+    runAgents(a, 30);
+    final r = a.readout..settle();
+    expect(a.stats.spawned, 0);
+    final m = CityRoadTraffic(city,
+        tuning: const TrafficTuning(
+          workPerStep: 1 << 30,
+          commuteTripsPerResident: 0,
+          shopTripsPerResident: 0,
+          goodsTripsPerJob: 0,
+          goodsTripsPerStore: 0,
+          serviceTripsPerStation: 0,
+        ))
+      ..advance(1);
+    expect(m.hasRun, isTrue);
+    expect(m.model.builtLots, greaterThan(0));
+    for (var i = 0; i < a.laneGraph!.graph.lotCount; i++) {
+      final id = a.laneGraph!.graph.lotIds[i];
+      expect(r.noiseOf(id), m.noiseOf(id), reason: id);
+      expect(r.landValueOf(id), m.landValueOf(id), reason: id);
+    }
+    expect(r.averageLandValue, m.averageLandValue);
+    expect(r.taxLandValueFactor, m.taxLandValueFactor);
+    expect(r.taxLandValueFactor, isNot(1.0),
+        reason: 'built lots valued: the factor is the land\'s, not the '
+            'placeholder');
+  });
+
+  test('the agents\' answers change only when passes moves (D47)', () {
+    final city = town();
+    final a = agentsOn(city);
+    final r = a.readout;
+    final lots = [for (final p in city.layout.autoParcels) p.id];
+    String answers() => [
+          r.taxLandValueFactor,
+          r.averageLandValue,
+          for (final id in lots) ...[
+            r.noiseOf(id),
+            r.landValueOf(id),
+            r.deliveryReach(id),
+            r.fireReach(id),
+            r.serviceReach(id),
+          ],
+        ].join(',');
+    var passes = r.passes;
+    var seen = answers();
+    var moved = 0;
+    for (var i = 0; i < 400; i++) {
+      a.advance(0.25);
+      final now = answers();
+      if (r.passes == passes) {
+        expect(now, seen, reason: 'no picture since, at tick $i');
+      } else if (now != seen) {
+        moved++;
+      }
+      passes = r.passes;
+      seen = now;
+    }
+    expect(moved, greaterThan(0), reason: 'the noise followed the traffic');
+    expect(r.publishedPasses, greaterThan(1));
+  });
+
+  test('passes count the routed model\'s pictures with ours, and never go '
+      'back; switched off, fire reach is the routed model\'s fire reach, not '
+      'its service reach', () {
     final a = agentsOn(town());
     final routed = _Routed()..passes = 5;
     final r = AgentTrafficReadout(a, routed);
     final lot = a.city.layout.autoParcels.first.id;
-    expect(r.serviceReach(lot), isTrue);
-    expect(r.fireReach(lot), isFalse,
-        reason: 'an ambulance reaching a lot is no fire cover there');
+    expect(r.fireReach(lot), isTrue,
+        reason: 'live, the agents answer — and before a picture they punish '
+            'nothing');
 
     expect(r.passes, 5,
         reason: 'no picture of ours yet: the routed count, so the switch to '
@@ -158,11 +309,19 @@ void main() {
     expect(r.passes, own + 6,
         reason: 'the forwarded answers moved, so a view must redraw');
 
-    // Off and on again: the tables start afresh, and the count stands.
+    // Off: every answer forwarded — and the routed model's fire reach, not
+    // its service reach: an ambulance reaching a lot is no fire cover.
     a.enabled = false;
+    expect(r.serviceReach(lot), isTrue);
+    expect(r.fireReach(lot), isFalse);
+    expect(r.passes, own + 6);
+
+    // On again: the tables start afresh, and the count stands.
     a.enabled = true;
     expect(r.hasRun, isFalse);
     expect(r.passes, own + 6);
+    expect(r.fireReach(lot), isTrue,
+        reason: 'nothing of the old tables\' picture stands');
   });
 
   test('a town no car has driven still publishes pictures, so the Routes view '
