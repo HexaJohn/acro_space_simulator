@@ -543,8 +543,14 @@ class AgentTrafficReadout implements CityTrafficReadout {
   int _lotsStep(int budget) {
     final g = _passLg!.graph;
     final b = _noiseBack!;
-    final front = _noiseFront;
-    final carry = !_loadsMoved && front != null;
+    // The published picture's samples, when they may be carried: a nullable
+    // local tested at every lot. Never the picture promoted through a
+    // boolean (`carry = front != null && …; carry ? front.raw[i] : …`): this
+    // SDK's AOT build (dart 3.13.0-264.0.dev) read through null there on a
+    // colony's first pass, before any picture was published — a native
+    // access violation in profile and release builds, 25–35 s into the
+    // City Builder, that no JIT test sees (tool/aot_traffic_smoke.dart).
+    final Float64List? carried = _loadsMoved ? null : _noiseFront?.raw;
     final sampler = _sampler!;
     final city = agents.city;
     var work = 0;
@@ -567,9 +573,9 @@ class AgentTrafficReadout implements CityTrafficReadout {
         built = city.parcelGrownSpec(id, parcel.use) != null;
       }
       double noise;
-      final carried = carry ? front.raw[i] : double.nan;
-      if (!carried.isNaN) {
-        noise = carried;
+      final kept = carried != null ? carried[i] : double.nan;
+      if (!kept.isNaN) {
+        noise = kept;
       } else {
         final before = sampler.work;
         noise = sampler.noiseAtEN(g.lotE[i], g.lotN[i], b.emission);
