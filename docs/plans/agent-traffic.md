@@ -2890,7 +2890,32 @@ Drawing a new road never teleports a car: routes remap through the split, lots r
 
 Built on the road side's R2a fixtures (`SyntheticSites`: HOME, STRIP, LOOP, UTILITY, KERBSIDE) first, then real plans after their R2, and the wire after their R3.
 
-**Acceptance:** site-access §7.9 A4–A11 (A9 is `home_back_out_test`, §7.5; A10 with its save/resume case), A13–A15, and the traffic half of A12. Merge is gated on the structural allocation test A13 (`site_alloc_test`), not on the weighed §15.2 allocation gate, which slice 11 owes.
+**Agreed with the road side on 2026-09-15.** This supersedes the text above where they differ.
+- **Order.**
+  - P1: access, site sync, D17 parking and the site mover.
+  - P2: the gate, forward-out departures and access events.
+  - P3: D36, persistence, the digest, A13 and acceptance.
+  - P4: the wire. It starts after R3's hash.
+- **File boundary.**
+  - `city_sim.dart` is ours to hook now.
+  - Until R3 merges, stay out of: world_snapshot.dart, city_site_frame.dart, city_nodes.dart (and so agent_nodes), city_tile_bucketing / columns / mesher, city_detail_layer, city_studio_screen, site_access_book.dart and site_access/kerb_cuts.dart.
+- **Kerb masks.** Take them from the road side's `KerbCuts.parkingBlocked(entries, side, s_i)`: home kinds at (12, 3) m, a dropped kerb at (3.25, 3.25) m. It is a commit right after R3, and item 8's masks wait for it. There is no local copy.
+- **E36 stage 1.**
+  - `CityAgents.agentManaged` is a `Uint8List` indexed by `siteAccess.slotOf(siteId)`, 0 or 1, with `int agentManagedRev`. A slot past its length reads 0.
+  - R3's `CitySiteFrame` reads it by chunk, where chunk = slot ~/ 1024; R6 skips baked lot cars there.
+- **Heights (A14).** By reference from R3's `SiteChunkGeometry`: `ptUp(row)` and `stallUp(row)`, chunk-global rows, metres above the body datum along the colony up. There is no ground query in capture.
+- **Not-current sites.**
+  - A site that is not current reads kerbside at slot 0.
+  - Cars already inside keep their immutable old chunk until they leave.
+  - The user accepted about 260 ticks of latency after a road edit.
+- **Split tests.**
+  - A10: the traffic half is `test/traffic/renamed_lot_keeps_parked_cars_test.dart`; the road half is `test/colony/site_access/renamed_lot_keeps_plan_test.dart`.
+  - A12: the traffic half is `test/traffic/kerb_cut_masks_kerb_slots_test.dart`, and it holds the 0.5 m cross-check; the road half is `test/flutter_scene/kerb_cut_masks_baked_test.dart`.
+- **Scope.**
+  - Cars on CommuteSynth trips only: no trucks in bays, no pedestrians, no residents' cars.
+  - Homes stay kerbside for destination trips, so no agent car stands in a home driveway in T4a. **Home back-out and A9 move to T4b.**
+
+**Acceptance:** site-access §7.9 A4–A8, A10, A11 (A10 with its save/resume case), A13–A15, and the traffic half of A12. A9 moves to T4b. Merge is gated on the structural allocation test A13 (`site_alloc_test`), not on the weighed §15.2 allocation gate, which slice 11 owes.
 
 ### Slice 3 — Citizens — L, ≈ 2.6k LOC, depends on slice 2 and T4a (whose opaque lot-car owners it ports)
 
