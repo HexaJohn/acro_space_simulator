@@ -107,6 +107,33 @@ void main() {
     }
   });
 
+  test('packed copies: lists the caller still holds cannot change the chunk',
+      () {
+    final src = SyntheticSites.starterChunk(g);
+    final lists = src.debugRetained;
+    final f64 = Float64List.fromList(lists[0] as Float64List);
+    final f32 = Float32List.fromList(lists[1] as Float32List);
+    final i32 = Int32List.fromList(lists[2] as Int32List);
+    final u8 = Uint8List.fromList(lists[3] as Uint8List);
+    final off = Int32List.fromList(lists[4] as Int32List);
+    final ids = List<String>.of(lists[5] as List<String>);
+    final c = SiteAccessChunk.packed(
+        siteId: ids, f64: f64, f32: f32, i32: i32, u8: u8, offsets: off);
+    final before = digest(c);
+    final rev0 = c.rev(0), id0 = c.siteId(0);
+    f64.fillRange(0, f64.length, 7);
+    f32.fillRange(0, f32.length, 7);
+    i32.fillRange(0, i32.length, 7);
+    u8.fillRange(0, u8.length, 7);
+    off.fillRange(0, off.length, 0);
+    ids[0] = 'mutated';
+    expect(digest(c), before);
+    expect(c.rev(0), rev0);
+    expect(c.siteId(0), id0);
+    expect(() => (c.debugRetained[5] as List<String>)[0] = 'x',
+        throwsUnsupportedError);
+  });
+
   test('the column schema: 104 columns; CSR families own count + 1 rows per '
       'site', () {
     final c = SyntheticSites.starterChunk(g);

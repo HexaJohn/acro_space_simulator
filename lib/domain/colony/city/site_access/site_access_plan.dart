@@ -308,7 +308,28 @@ int _csrBaseFamily(int f) => switch (f) {
 /// Immutable packed columns for up to [kSitesPerChunk] sites (§2.3). See the
 /// library comment for the layout. Built only by `PlanBuilder`.
 class SiteAccessChunk {
-  SiteAccessChunk.packed({
+  /// PlanBuilder's packing entry point: NOT for traffic or any other caller.
+  /// It COPIES every list it is given (the site id list into an unmodifiable
+  /// list of the same string instances), so nothing the caller still holds
+  /// can change the chunk.
+  factory SiteAccessChunk.packed({
+    required List<String> siteId,
+    required Float64List f64,
+    required Float32List f32,
+    required Int32List i32,
+    required Uint8List u8,
+    required Int32List offsets,
+  }) =>
+      SiteAccessChunk._(
+        siteId: List.unmodifiable(siteId),
+        f64: Float64List.fromList(f64),
+        f32: Float32List.fromList(f32),
+        i32: Int32List.fromList(i32),
+        u8: Uint8List.fromList(u8),
+        offsets: Int32List.fromList(offsets),
+      );
+
+  SiteAccessChunk._({
     required List<String> siteId,
     required Float64List f64,
     required Float32List f32,
@@ -806,7 +827,8 @@ class SiteAccessPlan {
   double fenceGapT1(int g) => chunk.fenceGapT1(_fence + g);
 }
 
-/// Internal to the builder: layout facts it packs by.
+/// Internal to the builder: layout facts it packs by. NOT for traffic or any
+/// other caller; it may change without notice.
 abstract final class SiteChunkLayout {
   static int familyOf(int col) => _familyOf(col);
   static int typeOf(int col) => _typeOf(col);

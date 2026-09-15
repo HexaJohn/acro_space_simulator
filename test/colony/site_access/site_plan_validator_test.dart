@@ -8,6 +8,7 @@ import 'dart:typed_data';
 import 'package:acro_space_simulator/domain/colony/city/road_graph.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_access_constants.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_access_plan.dart';
+import 'package:acro_space_simulator/domain/colony/city/site_access/site_lane_graph.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_plan_validator.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -123,6 +124,33 @@ void main() {
       rejects(d, SiteInvariant.v4Roles);
     });
 
+    test('two cuts on one piece need a 6 m gap between their EDGES', () {
+      List<String> spacing(double gapM) {
+        final d = draft(SyntheticTemplate.strip);
+        final j0 = d.joins[0];
+        d.joins.add(DraftJoin(
+          slot: 1,
+          ref: j0.ref,
+          piece: j0.piece,
+          roadS: j0.roadS + 2 * j0.cutHalfM + gapM,
+          right: j0.right,
+          dirs: j0.dirs,
+          roadNo: j0.roadNo,
+          cutHalfM: j0.cutHalfM,
+        ));
+        return [
+          for (final v in violations(d))
+            if (v.invariant == SiteInvariant.v4Roles &&
+                v.detail.contains('edge to edge'))
+              v.detail
+        ];
+      }
+
+      // Centres 13.9 m apart with 4 m halves: the old centre reading passed.
+      expect(spacing(5.9), hasLength(1));
+      expect(spacing(6.0), isEmpty);
+    });
+
     test('no out-capable join (the site then also falls apart, V7)', () {
       final d = draft(SyntheticTemplate.strip);
       d.joins[0].role = SiteJoinRole.inOnly;
@@ -199,13 +227,26 @@ void main() {
       moveNode(d, 2, 0.2, 0); // P
       rejects(d, SiteInvariant.v5Throat);
     });
+
+    test('a bent home pad: a via 0.2 m off the axis, its end back on it', () {
+      final d = draft(SyntheticTemplate.homeTandem);
+      d.segs[1].vias = [d.w(0.2, 4 + 5.2)];
+      final vs = violations(d);
+      rejects(d, SiteInvariant.v5Throat);
+      expect(vs.single.detail, contains('via'));
+    });
   });
 
-  test('V6: two nodes within 0.5 m', () {
+  test('V6: two nodes within 0.5 m (the aisle stub between them < 1 m)', () {
     final d = draft(SyntheticTemplate.strip);
-    final e = d.nodes[2];
-    d.nodes.add(DraftNode(e.e + 0.3, e.n));
+    // E(42, 8.5) goes on 0.3 m to a new dead end X with the circle.
+    final x = d.node(42.3, 8.5,
+        flags: kNodeDeadEnd, turn: TurnaroundKind.circle, turnR: 6.5);
+    d.segs.add(DraftSeg(2, x,
+        kind: SiteSegmentKind.aisle, mode: SiteLaneMode.twoWay, widthM: 6));
+    final vs = violations(d);
     rejects(d, SiteInvariant.v6Nodes);
+    expect(vs.where((v) => v.detail.contains('within')), isNotEmpty);
   });
 
   group('V7 connected', () {
@@ -231,6 +272,47 @@ void main() {
         ..n = gate.n;
       final got = {for (final v in violations(d)) v.invariant};
       expect(got, contains(SiteInvariant.v7Connected));
+    });
+
+    test('two halves joined only by the road: each strongly connected through '
+        'road links, but join 1 is unreachable inside the site from join 0',
+        () {
+      final d = draft(SyntheticTemplate.loop);
+      // Nodes K1, K2, A, B, C: drop C and the aisles A→C, C→B with their
+      // stalls; two-way 6 m throats, both joins both ways, circles at A, B.
+      d.nodes.removeLast();
+      d.segs.removeRange(2, 4);
+      d.stalls.clear();
+      d.paves.removeRange(2, 4);
+      for (final s in d.segs) {
+        s
+          ..mode = SiteLaneMode.twoWay
+          ..widthM = 6;
+      }
+      for (final j in d.joins) {
+        j
+          ..role = SiteJoinRole.both
+          ..cutHalfM = 3 + kCutFlareM;
+      }
+      for (final n in [d.nodes[2], d.nodes[3]]) {
+        n
+          ..flags = kNodeDeadEnd
+          ..turn = TurnaroundKind.circle
+          ..turnR = 6;
+      }
+      d.entranceNode = 2;
+      final lg = SiteLaneGraph.of(planOf(d));
+      expect(lg.isStronglyConnected, isTrue); // the old V7 passed it
+      final vs = violations(d);
+      rejects(d, SiteInvariant.v7Connected);
+      expect(vs.where((v) => v.detail.contains('unreachable')), isNotEmpty);
+    });
+
+    test('a node of site degree 0', () {
+      final d = draft(SyntheticTemplate.strip)..node(20, 40);
+      final vs = violations(d);
+      rejects(d, SiteInvariant.v7Connected);
+      expect(vs.single.detail, contains('isolated node'));
     });
 
     test('the home exception is scoped to homeDriveway', () {
@@ -274,6 +356,18 @@ void main() {
       d.stalls[0].inDirs |= kSiteDirFwd;
       rejects(d, SiteInvariant.v9Stalls);
     });
+
+    test('a perpendicular stall moved 4.6 m into its own aisle', () {
+      final d = draft(SyntheticTemplate.strip);
+      final s = d.stalls[0];
+      final (e, n) = d.dir(0, 4.6); // toward the centreline (side 0 is −v)
+      s
+        ..e += e
+        ..n += n;
+      final vs = violations(d);
+      rejects(d, SiteInvariant.v9Stalls);
+      expect(vs.single.detail, contains('own carriageway'));
+    });
   });
 
   test('V10: an aisle ahead of the throat', () {
@@ -281,9 +375,30 @@ void main() {
     rejects(d, SiteInvariant.v10OrderAndKeys);
   });
 
-  test('V11: a network plan without an entrance node', () {
-    final d = draft(SyntheticTemplate.strip)..entranceNode = -1;
-    rejects(d, SiteInvariant.v11Entrance);
+  group('V11 entrance', () {
+    test('a network plan without an entrance node', () {
+      final d = draft(SyntheticTemplate.strip)..entranceNode = -1;
+      rejects(d, SiteInvariant.v11Entrance);
+    });
+
+    test('no door (entrancePt −1)', () {
+      rejects(draft(SyntheticTemplate.strip)..omitEntrance = true,
+          SiteInvariant.v11Entrance);
+      rejects(draft(SyntheticTemplate.kerbside)..omitEntrance = true,
+          SiteInvariant.v11Entrance);
+    });
+
+    test('no pavement point (pavementPt −1)', () {
+      rejects(draft(SyntheticTemplate.kerbside)..omitPavement = true,
+          SiteInvariant.v11Entrance);
+      rejects(draft(SyntheticTemplate.strip)..omitPavement = true,
+          SiteInvariant.v11Entrance);
+    });
+
+    test('an entrance node out of range', () {
+      final d = draft(SyntheticTemplate.strip)..entranceNode = 99;
+      rejects(d, SiteInvariant.v11Entrance);
+    });
   });
 
   test('V12: a rev that is not the content hash', () {
@@ -292,10 +407,30 @@ void main() {
     rejects(d, SiteInvariant.v12Revision);
   });
 
-  test('V13: trucks admitted with a 10 m turning circle', () {
-    final d = draft(SyntheticTemplate.yard);
-    d.nodes[3].turnR = 10;
-    rejects(d, SiteInvariant.v13Reserved);
+  group('V13 trucks', () {
+    test('trucks admitted with a 10 m turning circle', () {
+      final d = draft(SyntheticTemplate.yard);
+      d.nodes[3].turnR = 10;
+      rejects(d, SiteInvariant.v13Reserved);
+    });
+
+    test('the bays reached only past a 6 m circle while a 12.5 m circle '
+        'stands on another truck spur', () {
+      final d = draft(SyntheticTemplate.yard);
+      d.segs[1].maxVehLenM = kTruckMinVehLenM; // the aisle J→E takes trucks
+      d.nodes[2].turnR = kTruckTurnMinM; // E
+      d.nodes[3].turnR = 6; // Y, the apron's end
+      rejects(d, SiteInvariant.v13Reserved);
+    });
+
+    test('one-way lanes are respected: an apron trucks can only leave', () {
+      final d = draft(SyntheticTemplate.utility);
+      // The spine Y→G one-way toward Y: no truck lane reaches the bays from
+      // Y, and from the gate end nothing enters.
+      d.segs[8].mode = SiteLaneMode.oneWayBackward;
+      final got = {for (final v in violations(d)) v.invariant};
+      expect(got, contains(SiteInvariant.v13Reserved));
+    });
   });
 
   test('geometry: a coordinate that is not finite stops the check', () {

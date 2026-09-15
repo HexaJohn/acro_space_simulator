@@ -632,8 +632,10 @@ class PlanBuilder {
           }
       }
     }
-    final chunk = SiteAccessChunk.packed(
-      siteId: List.unmodifiable(_ids),
+    // `packed` copies, so `rev` (which hashes no `rev`) is computed on a
+    // first packing and the published chunk is packed with it written.
+    final hashing = SiteAccessChunk.packed(
+      siteId: _ids,
       f64: f64,
       f32: f32,
       i32: i32,
@@ -642,8 +644,16 @@ class PlanBuilder {
     );
     final revBase = offsets[SiteCol.rev];
     for (var k = 0; k < nS; k++) {
-      i32[revBase + k] = _revOverride[k] ?? chunk.revisionOf(k);
+      i32[revBase + k] = _revOverride[k] ?? hashing.revisionOf(k);
     }
+    final chunk = SiteAccessChunk.packed(
+      siteId: _ids,
+      f64: f64,
+      f32: f32,
+      i32: i32,
+      u8: u8,
+      offsets: offsets,
+    );
     if (validate) {
       assert(() {
         final bad = SitePlanValidator.validateChunk(chunk, graph: graph);

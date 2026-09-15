@@ -184,6 +184,10 @@ class DraftSite {
   XY pavement = (0, 0);
   int? revOverride;
 
+  /// Tests: emit no door / no pavement point (`entrancePt` / `pavementPt`
+  /// stay −1), a broken fixture for V11.
+  bool omitEntrance = false, omitPavement = false;
+
   /// Frame (x, y) to world.
   XY w(double x, double y) =>
       (oE + uE * x + vE() * y, oN + uN * x + vN() * y);
@@ -415,8 +419,10 @@ abstract final class SyntheticSites {
     for (final path in d.paths) {
       b.path([for (final (e, n) in path) b.point(e, n)]);
     }
-    b.entrance(b.point(d.entrance.$1, d.entrance.$2), node: d.entranceNode);
-    b.pavement(b.point(d.pavement.$1, d.pavement.$2));
+    if (!d.omitEntrance) {
+      b.entrance(b.point(d.entrance.$1, d.entrance.$2), node: d.entranceNode);
+    }
+    if (!d.omitPavement) b.pavement(b.point(d.pavement.$1, d.pavement.$2));
     if (d.revOverride != null) b.debugOverrideRev(d.revOverride!);
     b.endSite();
   }

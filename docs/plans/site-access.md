@@ -396,16 +396,29 @@ reported under one name.
   `site_access/` imports no traffic), it also checks `[edgeLaneS0 + 6, edgeLaneS1 − 6]` and the home swing margin
   `t − 12 ≥ edgeLaneS0`. The window form of the swing margin is `[s − 6, s + m]` forward and `[s − m, s + 6]` backward.
 - V4 also requires `kPlanNetwork` ⇔ segments ⇔ a program other than `none`/`kerbOnly`, and cut joins only on a network
-  plan. Cuts on one piece need `|Δs| ≥ max(m₁ + m₂, 6)`.
+  plan. Cuts on one piece need a 6 m gap between their EDGES: `|Δs| − m₁ − m₂ ≥ 6`.
 - V5 owns a throat's via spacing, and V8 owns every other segment's and all widths. V7 owns circles ≥ 6 m. V13 owns
   the ≥ 12.5 m truck circle, which may be a pass-through node (the installation yard `Y`). V9 owns stall direction
-  bits: V7's home-pad exception asks only for ≥ 1 stall, all `inline`, and only in a `homeDriveway` plan.
+  bits: V7's home-pad exception asks only for ≥ 1 stall, all `inline`, and only in a `homeDriveway` plan. The home
+  pad's straight run checks every via point of the pad, not only its end node.
 - V7's strong connectivity counts `SiteLaneGraph`'s road links (§2.5). A kerb node has site degree 1, so without them
-  no site is strongly connected. A role-only break (no out-capable join) therefore also fails V7.
+  no site is strongly connected. A role-only break (no out-capable join) therefore also fails V7. Because a road link
+  is no site path, V7 also walks the site links alone (road links excluded): from every in-capable join's in-lane,
+  every stall entry lane (per `stallInDirs`) and every out-capable join's out-lane are reachable; from every stall exit
+  lane (per `stallOutDirs`, the pad's backward lane for `inline`), every out-capable join's out-lane is reachable. So
+  two halves joined only by the road fail V7. A node of site degree 0 fails V7.
 - V9: a perpendicular or angled stall's nose is tested against the vector from the centreline point at `stallS`
   to its centre. An inline or parallel stall's nose is tested against the tangent there. An inline stall "lies on
   its pad" when its centre is within half the pad width of the centreline. A stall is tested for overlap against
-  every segment except its own (the mouth edge).
+  every segment except its own. On its own segment only the mouth edge is exempt: a non-`inline` stall's mouth-edge
+  midpoint (`centre − dir·len/2`) lies ≥ `width/2 − 0.01` m from that segment's centreline at `stallS`, so an angled
+  stall's corner wedge may cross the carriageway rectangle but no stall sits in its aisle.
+- V11 owns `entrancePt` and `pavementPt` (a real point each) and `entranceNode` in range; V6's index check does not.
+- V13 walks `SiteLaneGraph` lanes of truck segments (width ≥ 3.5 m, `segMaxVehLenM` ≥ 12): movements as §2.5 allows,
+  U-turns only at a `circle` of radius ≥ 12.5 m, no inline-stall or road links. Some bay on a truck segment `k` needs
+  a lane `L` of `k` reachable from an in-capable join's in-lane, from which an out-capable join's out-lane is reachable;
+  or, when an end node of `k` is a ≥ 12.5 m circle, the truck may reverse out of the bay into it and leave by `L`
+  reversed (the §3.7 bays sit on the circle's far edge).
 - V10's segment ranks are: throats in join order, then aisles by `(y, x)`, then access-road and non-throat driveway
   pieces, then aprons. "Path order" inside a rank is not checkable and is not checked.
 - V11: a kerbside plan's `pavementPt` lies within 3.5 m of slot 0's kerb point.
@@ -426,7 +439,8 @@ reported under one name.
   copy equal on the fixtures.
 - **As built (R2a):** links carry a kind: movement, U-turn, inline stall (homes only) and ROAD. A road link runs from
   every out-capable cut join's out-lane to every in-capable one's in-lane. It stands for the road between EXIT and
-  ENTER, so strong connectivity means something for a site. It is never a site path.
+  ENTER, so strong connectivity means something for a site. It is never a site path: V7 also checks reachability over
+  the site links alone (§2.4 deviations), and traffic routes only over non-road links.
 
 ---
 
@@ -1056,8 +1070,10 @@ lot-r0x0-r1, lot-r0x1-r5}` (spaceport, solar farm, farm, pump), and 78 of the 82
 
 **Measured (R2a):** a chunk retains 7 objects at 1, 64 and 1024 sites. The §2.3 column set packs the HOME fixture in
 753 B per site, not ≤ 512 B: the site row is about 137 B, two stalls 112 B, and each point 26 B (3 nodes, a 4-point
-pave, a 2-point path, door, pavement). `site_access_chunk_test` pins ≤ 768 B. R2's bench settles the target, for
-example with parametric home rows (§10.1).
+pave, a 2-point path, door, pavement). `site_access_chunk_test` pins ≤ 768 B. This is a design budget miss, kept
+as a deviation. **R2 owns the ≤ 512 B target:** its generation bench measures bytes per home site on the starter kit
+and the small town and either meets 512 B (for example with parametric home rows, §10.1) or reports the miss with
+the measured figure at R2 review.
 
 **The drain budget is a sum, not a guess.** R1's sprawl audit already counts lots per road class on the sprawl
 audit fixture; R2 adds program counts, and the generation bench prints the mix and the sum next to the measured
@@ -2052,7 +2068,7 @@ class DepthProfile { double depthAt(double x); bool containsRect(Rect r); double
 | **R0 Orientation** | road | `site_envelope.dart` move (pure, re-exported); orientation tests; the π spin fix at world_snapshot.dart:1888 (legacy rule of §3.1, `Parcel.heading + π`) | `building_front_test` and `site_orientation_test` both fail before and pass after; if `building_front_test` passes before the fix, stop and report; all digests unchanged; headless studio screenshots (starter kit + a generated block) show shopfronts and awnings to the street |
 | **R1 Join slots** | road | `hash32`, constants, `site_join.dart` (with the cul-de-sac reserve and the §3.7a corridor search), `CityLayout.parcelsNear`, `RoadGraph` slot and crossing columns, lot loop (road_graph.dart:1162-1203), `attachFootprintJoins`; C1 notice | A2, A3 green; the §3.2 starter table exact (n = 264 / −276 / −252 / 144, easement lots listed); `RoadGraph.of` ≤ +15% on sprawl; layouts byte-identical; traffic fixture 4/5/8 unchanged; tile digests unchanged; re-pins ledgered; notice posted with the hash |
 | **R2a Contract types** | road | enums, `SiteAccessChunk`/`SiteAccessPlan`, `PlanBuilder`, validator, `SiteLaneGraph`, `SyntheticSites` fixtures, hygiene test | fixtures pass V1–V13; one hand-broken fixture per V is rejected; API frozen and announced; T4a can start |
-| **R2 Generator + book** | road | `classifyProgram`, home, car park, yard, installation, envelope/entrance/lamps, `SiteAccessBook` + `CitySim` hooks + resumable sync + budgets, easements (`easementOf`, `CityLayout.easementOf` hook, `setUse`/`placeOnParcel`/growth refusal, inspector string), full drain at the end of `CityStarterKit.found`, corridor refusal in placement, dev hook `ext.acro.citygame site=plan&id=` | A1 on starter kit, small town, 500 random lots; starter sites: 56 m throat `K→F`, yard, gate `G` on the fence line, ≥ 12 stalls, and exactly the four easement lots of §3.7a (no site `kPlanAccessBlocked`); `city_starter_kit_test` green with its easement assertion; home thresholds exact (§3.4: W 16.6 m tandem, 17.6 m side by side, D 15 m; §3.3 back-out eligibility: road class, speed and median, room ≥ 4.0, 12 m swing margin, 10° skew) with demotions counted by rule; persistence test green; twin runs give identical plans with capture interleaved; zero ground reads in plan code; §3.10 budgets met (or the load-time risk reported); road-edit sync bench ≤ 2 ms |
+| **R2 Generator + book** | road | `classifyProgram`, home, car park, yard, installation, envelope/entrance/lamps, `SiteAccessBook` + `CitySim` hooks + resumable sync + budgets, easements (`easementOf`, `CityLayout.easementOf` hook, `setUse`/`placeOnParcel`/growth refusal, inspector string), full drain at the end of `CityStarterKit.found`, corridor refusal in placement, dev hook `ext.acro.citygame site=plan&id=` | A1 on starter kit, small town, 500 random lots; starter sites: 56 m throat `K→F`, yard, gate `G` on the fence line, ≥ 12 stalls, and exactly the four easement lots of §3.7a (no site `kPlanAccessBlocked`); `city_starter_kit_test` green with its easement assertion; home thresholds exact (§3.4: W 16.6 m tandem, 17.6 m side by side, D 15 m; §3.3 back-out eligibility: road class, speed and median, room ≥ 4.0, 12 m swing margin, 10° skew) with demotions counted by rule; persistence test green; twin runs give identical plans with capture interleaved; zero ground reads in plan code; §3.10 budgets met (or the load-time risk reported), including ≤ 512 B per home site, which R2 owns (R2a packs 753 B); road-edit sync bench ≤ 2 ms |
 | **R3 Wire + keys** | road | `CitySiteFrame` + heights + cache, `BuildingSnapshot.siteSlot/gate`, `RoadSnapshot.kerbCuts`, JSON, `sitesSignature`, bucketing membership/keys, tile and detail columns; the new static knob `CityNodes.siteAccess` stays off, so the renderer treats every building as legacy | R3 tests; all mesh digests unchanged; capture ≤ 0.02 ms steady, zero queries |
 | **R4 Draw** | road (2 tracks) | A: `SiteAccessMesher` structural tiers (the §5.4 mid rule); kerb cuts in sidewalks, verges, furniture, kerb cars, lamps via canonical `KerbCuts`; instant path. B: envelope placement with the plan-served heading (`−SiteFrame.buildingHeading`, §3.1); `surfaceParking: false`; front alignment; min-fit; setback and bucket alignment; installation gates on the envelope front edge; lighting from plans. Knob on | **the starter kit's four sites visibly connected** (orbit screenshot at mid tier: access roads across their easement lots, gates, car parks, dropped kerbs); R4 tests incl. `envelope_axes_test` and `entrance_matches_door_test`; old digests unchanged; the reference town's mid-tile vertex count ≤ +10% measured BEFORE the knob goes on; §8.4 frame/tile budgets |
 | **R5 Terrain** | road | shaper access corridors, `padDatums`, capture reads corridor datums | R5 tests; the starter kit adds exactly 4 corridor runs; `relaid_road_drape_test` unchanged |

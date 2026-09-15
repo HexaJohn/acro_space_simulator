@@ -26,7 +26,13 @@
 ///
 /// Strong connectivity (V7) counts the ROAD links of `SiteLaneGraph`
 /// (every out-join's out-lane to every in-join's in-lane): a kerb node has
-/// site degree 1, so no site is strongly connected without them.
+/// site degree 1, so no site is strongly connected without them. Because a
+/// road link is no site path, V7 ALSO walks the site links alone: from every
+/// in-join's in-lane to every stall entry lane and every out-join's
+/// out-lane, and from every stall exit lane to every out-join's out-lane. A
+/// node of site degree 0 fails V7.
+///
+/// V13 walks the directed lanes of truck segments (see `_truckPath`).
 ///
 /// Allocates freely: build-time assertion and tests only.
 library;
@@ -281,9 +287,7 @@ class _Check {
       final h = p.ptHJoin(i);
       if (h != kPtNoJoin && h >= p.joinCount) errs.add('ptHJoin[$i]');
     }
-    if (!inR(p.entrancePt, 0, nP)) errs.add('entrancePt');
-    if (!inR(p.pavementPt, 0, nP)) errs.add('pavementPt');
-    if (!inR(p.entranceNode, -1, nN)) errs.add('entranceNode');
+    // entrancePt, pavementPt and entranceNode are V11's (read guarded there).
     if (errs.isEmpty) return true;
     bad(SiteInvariant.v6Nodes, 'index out of range: ${errs.join(', ')}');
     return false;
@@ -672,12 +676,15 @@ class _Check {
       for (var b = a + 1; b < p.joinCount; b++) {
         if (!p.joinIsCut(a) || !p.joinIsCut(b)) continue;
         if (p.joinPiece(a) != p.joinPiece(b)) continue;
-        final d = (p.joinRoadS(a) - p.joinRoadS(b)).abs();
-        if (d < p.joinCutHalfM(a) + p.joinCutHalfM(b) - _eps ||
-            d < kJoinWindowClearM - _eps) {
+        // A 6 m gap between the cuts' EDGES, not their centres.
+        final gap = (p.joinRoadS(a) - p.joinRoadS(b)).abs() -
+            p.joinCutHalfM(a) -
+            p.joinCutHalfM(b);
+        if (gap < kJoinWindowClearM - _eps) {
           bad(SiteInvariant.v4Roles,
               'cuts $a and $b on piece ${p.joinPiece(a)} overlap or lie '
-              'under 6 m apart');
+              '${gap.toStringAsFixed(3)} m apart edge to edge, under '
+              '$kJoinWindowClearM m');
         }
       }
     }
@@ -771,14 +778,22 @@ class _Check {
             final a = p.segFrom(k), b = p.segTo(k);
             if (a != far && b != far) continue;
             pads++;
-            final end = a == far ? b : a;
-            final ex = p.nodeE(end) - ke, ey = p.nodeN(end) - kN;
-            final off = (ex * -cn + ey * ce).abs();
-            final along = ex * ce + ey * cn;
-            if (off > kThroatStraightM + 1e-9 || along <= chord) {
-              bad(SiteInvariant.v5Throat,
-                  'home pad $k end lies ${off.toStringAsFixed(3)} m off the '
-                  'throat axis');
+            // One straight run: every via point AND the end node lie on the
+            // throat's chord extended, beyond the throat.
+            final pxy = _poly[k];
+            final np = pxy.length ~/ 2;
+            final farAt = a == far ? 0 : np - 1;
+            for (var i = 0; i < np; i++) {
+              if (i == farAt) continue;
+              final ex = pxy[2 * i] - ke, ey = pxy[2 * i + 1] - kN;
+              final off = (ex * -cn + ey * ce).abs();
+              final along = ex * ce + ey * cn;
+              if (off > kThroatStraightM + 1e-9 || along <= chord) {
+                final what = i == np - 1 - farAt ? 'end' : 'via';
+                bad(SiteInvariant.v5Throat,
+                    'home pad $k $what lies ${off.toStringAsFixed(3)} m off '
+                    'the throat axis');
+              }
             }
           }
           if (pads == 0) {
@@ -874,7 +889,12 @@ class _Check {
         bad(SiteInvariant.v7Connected, 'out-capable join $j has no out-lane');
       }
     }
+    _v7Reach(lg);
     for (var n = 0; n < p.nodeCount; n++) {
+      if (_degree[n] == 0) {
+        bad(SiteInvariant.v7Connected, 'isolated node $n (site degree 0)');
+        continue;
+      }
       if (_degree[n] != 1 || p.nodeFlags(n) & kNodeKerb != 0) continue;
       switch (p.nodeTurnKind(n)) {
         case TurnaroundKind.circle:
@@ -894,6 +914,99 @@ class _Check {
             bad(SiteInvariant.v7Connected,
                 'dead end $n has no turnaround and is no home pad end');
           }
+      }
+    }
+  }
+
+  /// The lanes reachable from [from] over site links only (every kind but
+  /// ROAD), or, with [reverse], the lanes [from] is reachable from.
+  static Uint8List _reach(SiteLaneGraph lg, List<int> from,
+      {bool reverse = false}) {
+    final n = lg.laneCount;
+    final seen = Uint8List(n);
+    final stack = <int>[];
+    for (final l in from) {
+      if (l >= 0 && l < n && lg.isPresent(l) && seen[l] == 0) {
+        seen[l] = 1;
+        stack.add(l);
+      }
+    }
+    // Reverse adjacency, built only when asked.
+    List<List<int>>? into;
+    if (reverse) {
+      into = List.generate(n, (_) => <int>[]);
+      for (var a = 0; a < n; a++) {
+        for (var i = lg.linkStart[a]; i < lg.linkStart[a + 1]; i++) {
+          if (lg.linkKind[i] == kSiteLinkRoad) continue;
+          into[lg.linkTo[i]].add(a);
+        }
+      }
+    }
+    while (stack.isNotEmpty) {
+      final a = stack.removeLast();
+      if (into != null) {
+        for (final b in into[a]) {
+          if (seen[b] == 0 && lg.isPresent(b)) {
+            seen[b] = 1;
+            stack.add(b);
+          }
+        }
+        continue;
+      }
+      for (var i = lg.linkStart[a]; i < lg.linkStart[a + 1]; i++) {
+        if (lg.linkKind[i] == kSiteLinkRoad) continue;
+        final b = lg.linkTo[i];
+        if (seen[b] == 0 && lg.isPresent(b)) {
+          seen[b] = 1;
+          stack.add(b);
+        }
+      }
+    }
+    return seen;
+  }
+
+  /// §2.4 V7 inside the site (road links excluded): from every in-capable
+  /// join's in-lane, every stall entry lane and every out-capable join's
+  /// out-lane; from every stall exit lane, every out-capable join's out-lane.
+  void _v7Reach(SiteLaneGraph lg) {
+    final entries = <(int, int)>[]; // (stall, lane)
+    final exits = <(int, int)>[];
+    for (var i = 0; i < p.stallCount; i++) {
+      for (final dir in const [kSiteDirFwd, kSiteDirBwd]) {
+        final lane = lg.stallLane(i, dir);
+        if (!lg.isPresent(lane)) continue; // absent lanes are V9's
+        if (p.stallInDirs(i) & dir != 0) entries.add((i, lane));
+        if (p.stallOutDirs(i) & dir != 0) exits.add((i, lane));
+      }
+    }
+    for (var j = 0; j < p.joinCount; j++) {
+      if (!p.joinIsCut(j) || !p.joinCanIn(j) || lg.inLane(j) < 0) continue;
+      final r = _reach(lg, [lg.inLane(j)]);
+      for (var o = 0; o < p.joinCount; o++) {
+        if (!p.joinIsCut(o) || !p.joinCanOut(o) || lg.outLane(o) < 0) continue;
+        if (r[lg.outLane(o)] == 0) {
+          bad(SiteInvariant.v7Connected,
+              'join $o\'s out-lane is unreachable inside the site from join '
+              '$j\'s in-lane');
+        }
+      }
+      for (final (i, lane) in entries) {
+        if (r[lane] == 0) {
+          bad(SiteInvariant.v7Connected,
+              'stall $i entry lane $lane is unreachable from join $j');
+        }
+      }
+    }
+    // Lanes that reach each out-lane, once per out-join.
+    for (var o = 0; o < p.joinCount; o++) {
+      if (!p.joinIsCut(o) || !p.joinCanOut(o) || lg.outLane(o) < 0) continue;
+      final back = _reach(lg, [lg.outLane(o)], reverse: true);
+      for (final (i, lane) in exits) {
+        if (back[lane] == 0) {
+          bad(SiteInvariant.v7Connected,
+              'join $o\'s out-lane is unreachable from stall $i exit lane '
+              '$lane');
+        }
       }
     }
   }
@@ -1113,6 +1226,20 @@ class _Check {
           bad(SiteInvariant.v9Stalls, 'stalls $i and $o overlap');
         }
       }
+      // Its own segment is exempt only at the mouth edge: a non-inline
+      // stall's mouth-edge midpoint lies on or past its carriageway's edge
+      // (an angled stall's corner wedge may still cross the rectangle).
+      if (angle != StallAngle.inline) {
+        final hl = p.stallLenM(i) / 2;
+        final me = p.stallE(i) - de * hl, mn = p.stallN(i) - dn * hl;
+        final lateral = ((me - pe) * -tn + (mn - pn) * te).abs();
+        if (lateral < p.segWidthM(k) / 2 - _touchM) {
+          bad(SiteInvariant.v9Stalls,
+              'stall $i intrudes on its own carriageway: mouth edge '
+              '${lateral.toStringAsFixed(3)} m off the centreline of segment '
+              '$k (half width ${p.segWidthM(k) / 2})');
+        }
+      }
       for (var k2 = 0; k2 < p.segCount; k2++) {
         if (k2 == k) continue;
         for (final r in _segRects(k2)) {
@@ -1199,12 +1326,23 @@ class _Check {
   // ---- V11 -------------------------------------------------------------------
 
   void _v11() {
-    final ep = p.entrancePt;
+    final ep = p.entrancePt, pp = p.pavementPt, en = p.entranceNode;
+    final hasDoor = ep >= 0 && ep < p.pointCount;
+    final hasPavement = pp >= 0 && pp < p.pointCount;
+    if (!hasDoor) {
+      bad(SiteInvariant.v11Entrance, 'no entrance: entrancePt $ep');
+    }
+    if (!hasPavement) {
+      bad(SiteInvariant.v11Entrance, 'no pavement point: pavementPt $pp');
+    }
+    if (en < -1 || en >= p.nodeCount) {
+      bad(SiteInvariant.v11Entrance, 'entranceNode $en out of range');
+      return;
+    }
     if (p.hasNetwork) {
-      final en = p.entranceNode;
       if (en < 0) {
         bad(SiteInvariant.v11Entrance, 'network plan without an entrance node');
-      } else {
+      } else if (hasDoor) {
         final d = _dist(p.ptE(ep), p.ptN(ep), p.nodeE(en), p.nodeN(en));
         if (d > kEntranceMaxM + _eps) {
           bad(SiteInvariant.v11Entrance,
@@ -1217,10 +1355,12 @@ class _Check {
       bad(SiteInvariant.v11Entrance, 'kerbside plan with an entrance node');
     }
     final graph = g;
-    if (graph != null && p.joinCount > 0 && p.joinRef(0) != kJoinRefNone) {
+    if (graph != null &&
+        hasPavement &&
+        p.joinCount > 0 &&
+        p.joinRef(0) != kJoinRefNone) {
       final slot = graph.joinOfRef(p.joinRef(0));
       if (slot != null) {
-        final pp = p.pavementPt;
         final d = _dist(p.ptE(pp), p.ptN(pp), slot.kerbE, slot.kerbN);
         if (d > kPavementPointMaxM + _eps) {
           bad(SiteInvariant.v11Entrance,
@@ -1254,55 +1394,96 @@ class _Check {
       bad(SiteInvariant.v13Reserved,
           'truckTurnRadiusM ${p.truckTurnRadiusM} under $kTruckTurnMinM');
     }
-    // Components of truck segments, by node (union-find).
-    final parent = Int32List.fromList(List.generate(p.nodeCount, (i) => i));
-    int find(int x) {
-      while (parent[x] != x) {
-        parent[x] = parent[parent[x]];
-        x = parent[x];
-      }
-      return x;
+    if (!_truckPath()) {
+      bad(SiteInvariant.v13Reserved,
+          'kPlanAdmitsTrucks without a directed in→bay→out truck path (width '
+          '≥ 3.5 m, vehicles ≥ 12 m, U-turns and bay reversals only at '
+          '≥ 12.5 m circles)');
     }
+  }
 
-    bool truck(int k) =>
+  /// Whether a truck can drive in by some in-lane, serve some bay and leave
+  /// by some out-lane, over the [SiteLaneGraph] lanes of truck segments
+  /// (width ≥ 3.5 m, `segMaxVehLenM` ≥ 12):
+  /// - movements between truck lanes as §2.5 allows them;
+  /// - a U-turn only at a `circle` of radius ≥ 12.5 m;
+  /// - a bay on segment k is entered forward from a reachable lane L of k.
+  ///   Leaving it, the truck reverses out: onto EITHER lane of k when an end
+  ///   node of k is such a circle (the reversal swings into the circle),
+  ///   otherwise it goes on along L.
+  bool _truckPath() {
+    if (p.segCount == 0 || p.bayCount == 0) return false;
+    final lg = SiteLaneGraph.of(p);
+    final n = lg.laneCount;
+    bool truckSeg(int k) =>
         p.segWidthM(k) >= kTruckMinWidthM - 1e-4 &&
         p.segMaxVehLenM(k) >= kTruckMinVehLenM - 1e-4;
-    for (var k = 0; k < p.segCount; k++) {
-      if (!truck(k)) continue;
-      final a = find(p.segFrom(k)), b = find(p.segTo(k));
-      if (a != b) parent[math.max(a, b)] = math.min(a, b);
+    bool bigCircle(int node) =>
+        p.nodeTurnKind(node) == TurnaroundKind.circle &&
+        p.nodeTurnR(node) >= kTruckTurnMinM - 1e-4;
+    bool truckLane(int l) => lg.isPresent(l) && truckSeg(SiteLaneGraph.segOf(l));
+    bool usable(int i) {
+      final kind = lg.linkKind[i];
+      if (kind == kSiteLinkMovement) return true;
+      if (kind == kSiteLinkUTurn) return bigCircle(lg.linkVia[i]);
+      return false; // inline-stall and road links carry no truck
     }
-    var ok = false;
-    for (var b = 0; b < p.bayCount && !ok; b++) {
-      final k = p.baySeg(b);
-      if (!truck(k)) continue;
-      final c = find(p.segFrom(k));
-      var inJ = false, outJ = false;
-      for (var j = 0; j < p.joinCount; j++) {
-        final t = p.joinThroatSeg(j);
-        if (!p.joinIsCut(j) || t < 0 || !truck(t)) continue;
-        if (find(p.segFrom(t)) != c) continue;
-        inJ |= p.joinCanIn(j);
-        outJ |= p.joinCanOut(j);
-      }
-      var circle = false;
-      for (var n = 0; n < p.nodeCount; n++) {
-        if (p.nodeTurnKind(n) != TurnaroundKind.circle) continue;
-        if (p.nodeTurnR(n) < kTruckTurnMinM - 1e-4) continue;
-        if (find(n) != c) continue;
-        var onTruck = false;
-        for (var s = 0; s < p.segCount; s++) {
-          if (truck(s) && (p.segFrom(s) == n || p.segTo(s) == n)) onTruck = true;
+
+    Uint8List walk(List<int> from, {required bool reverse}) {
+      final seen = Uint8List(n);
+      final stack = <int>[];
+      for (final l in from) {
+        if (truckLane(l) && seen[l] == 0) {
+          seen[l] = 1;
+          stack.add(l);
         }
-        circle |= onTruck;
       }
-      ok = inJ && outJ && circle;
+      while (stack.isNotEmpty) {
+        final a = stack.removeLast();
+        if (reverse) {
+          for (var x = 0; x < n; x++) {
+            if (seen[x] == 1 || !truckLane(x)) continue;
+            for (var i = lg.linkStart[x]; i < lg.linkStart[x + 1]; i++) {
+              if (lg.linkTo[i] == a && usable(i)) {
+                seen[x] = 1;
+                stack.add(x);
+                break;
+              }
+            }
+          }
+          continue;
+        }
+        for (var i = lg.linkStart[a]; i < lg.linkStart[a + 1]; i++) {
+          final b = lg.linkTo[i];
+          if (seen[b] == 0 && truckLane(b) && usable(i)) {
+            seen[b] = 1;
+            stack.add(b);
+          }
+        }
+      }
+      return seen;
     }
-    if (!ok) {
-      bad(SiteInvariant.v13Reserved,
-          'kPlanAdmitsTrucks without an in→bay→out path of width ≥ 3.5 m, '
-          'vehicles ≥ 12 m and a ≥ 12.5 m turning circle');
+
+    final ins = <int>[], outs = <int>[];
+    for (var j = 0; j < p.joinCount; j++) {
+      if (!p.joinIsCut(j)) continue;
+      if (p.joinCanIn(j) && lg.inLane(j) >= 0) ins.add(lg.inLane(j));
+      if (p.joinCanOut(j) && lg.outLane(j) >= 0) outs.add(lg.outLane(j));
     }
+    final fromIn = walk(ins, reverse: false);
+    final toOut = walk(outs, reverse: true);
+    for (var b = 0; b < p.bayCount; b++) {
+      final k = p.baySeg(b);
+      if (!truckSeg(k)) continue;
+      final swing = bigCircle(p.segFrom(k)) || bigCircle(p.segTo(k));
+      for (final l in [2 * k, 2 * k + 1]) {
+        if (l >= n || fromIn[l] == 0) continue;
+        if (toOut[l] == 1) return true;
+        final r = SiteLaneGraph.reverseOf(l);
+        if (swing && r < n && toOut[r] == 1) return true;
+      }
+    }
+    return false;
   }
 
   // ---- geometry --------------------------------------------------------------
