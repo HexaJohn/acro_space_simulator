@@ -24,13 +24,25 @@
 /// Its own seam, which no book has: [FixturePlanSource.replace] edits the
 /// plans mid-test, and [FixturePlanSource.markStale] makes a site not
 /// current without touching the graph (§0 Q5).
+///
+/// [SiteWorld] puts a colony, its buildings, its lane graph and a synced
+/// [SiteTable] together, which is what every site test needs before it can
+/// say anything, and [SiteChanges] records what a sync told the §7.6 sink.
 library;
 
+import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_graph.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_access_plan.dart';
+import 'package:acro_space_simulator/domain/colony/city/site_access/site_lane_graph.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/building_table.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/lane_graph.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/lane_graph_builder.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/site_plan_source.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/site_table.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/slot_pool.dart';
 
 import '../colony/site_access/site_plan_fixtures.dart';
+import 'traffic_fixture.dart';
 
 /// `SyntheticSites` templates on the lots of one road graph, as the plan
 /// source traffic reads. See the library comment.
@@ -156,3 +168,95 @@ class FixturePlanSource implements SitePlanSource {
             [SyntheticSites.chunkOf(graph, drafts, validate: validate)]);
   }
 }
+
+/// What a sync told the §7.6 sink, in the order it told it: [kind] is one
+/// of [kSiteChangeRev], [kSiteChangeLostRole] and [kSiteChangeGone].
+const int kSiteChangeRev = 0;
+const int kSiteChangeLostRole = 1;
+const int kSiteChangeGone = 2;
+
+/// The §7.6 sink, writing down what it was told rather than acting on it.
+class SiteChanges implements SiteChangeSink {
+  final List<int> kind = <int>[];
+  final List<int> oldRow = <int>[];
+  final List<int> newRow = <int>[];
+
+  int get count => kind.length;
+
+  void clear() {
+    kind.clear();
+    oldRow.clear();
+    newRow.clear();
+  }
+
+  void _add(int k, int was, int now) {
+    kind.add(k);
+    oldRow.add(was);
+    newRow.add(now);
+  }
+
+  @override
+  void siteRevChanged(int was, int now) => _add(kSiteChangeRev, was, now);
+
+  @override
+  void siteLostRole(int was, int now) => _add(kSiteChangeLostRole, was, now);
+
+  @override
+  void siteGone(int was) => _add(kSiteChangeGone, was, -1);
+}
+
+/// A colony whose lots carry synthetic plans, with the buildings, the lane
+/// graph and the site table a site test reads.
+///
+/// Every lot named in [byLot] is a BUILT lot of the town, so the building
+/// table has a slot for it and the site table can hang a row on that slot.
+class SiteWorld {
+  SiteWorld(Map<String, SyntheticTemplate> byLot, {CitySim? on})
+      : city = on ?? town() {
+    graph = city.roadGraph;
+    lg = LaneGraphBuilder.build(graph);
+    buildings = BuildingTable()..sync(city, lg);
+    plans = FixturePlanSource(graph, byLot);
+  }
+
+  /// The town the lots stand in, and the graph and lanes its cars drive.
+  final CitySim city;
+  late final RoadGraph graph;
+  late final LaneGraph lg;
+
+  /// Every built site, the plans on them, and the synced site networks.
+  late final BuildingTable buildings;
+  late final FixturePlanSource plans;
+  final SiteTable sites = SiteTable();
+
+  /// What the last [sync] told the sink.
+  final SiteChanges changes = SiteChanges();
+
+  /// One sync, its §7.6 cases recorded afresh.
+  void sync({bool keepChanges = false}) {
+    if (!keepChanges) changes.clear();
+    sites.sync(plans, buildings, lg, changes);
+  }
+
+  /// The building slot of [lotId], or −1.
+  int buildingOf(String lotId) {
+    final h = buildings.handleOfSite(lotId);
+    return h == null ? -1 : SlotPool.slotOf(h);
+  }
+
+  /// The site row of [lotId], or −1 when it has none.
+  int rowOf(String lotId) => sites.rowOfBuilding(buildingOf(lotId));
+
+  SiteAccessPlan planOf(String lotId) => sites.plan[rowOf(lotId)]!;
+
+  SiteLaneGraph lanesOf(String lotId) => sites.lanes[rowOf(lotId)]!;
+}
+
+/// The starter lot each template stands on, as `SyntheticSites` places it.
+String lotOf(SyntheticTemplate t) => SyntheticSites.starterLots[t]!.$1;
+
+/// Every template on its own starter lot: the widest world a site test can
+/// ask for.
+Map<String, SyntheticTemplate> everyTemplate() => <String, SyntheticTemplate>{
+      for (final t in SyntheticTemplate.values) lotOf(t): t,
+    };
