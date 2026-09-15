@@ -6,15 +6,19 @@
 /// Car parks and yards (docs/plans/site-access.md §3.5, §3.6).
 ///
 /// Everything is axis-aligned in the site frame (x along the frontage, y into
-/// the lot). A car park is a throat from slot 0's kerb point straight along
-/// the frame's `v` (so V5's "within 10° of the road normal" is the slot's
-/// skew, checked up front), then a block of `m` modules:
+/// the lot). A car park is a throat from slot 0's kerb point `K`, then a
+/// block of `m` modules. The throat runs along the frame's `v` (so V5's
+/// "within 10° of the road normal" is the slot's skew, checked up front),
+/// except on a set-back site (`k ≥ 7`) whose skew would carry it more than
+/// 0.1 m sideways by the frontage: there it runs along the ROAD normal to a
+/// bend node `B` on the frontage line, inside the slot's §3.7a corridor, and
+/// the drive continues along `v` from `B` (§3.8).
 ///
 /// - **F1 front:** aisles along x, the block at the frontage, the envelope
-///   behind it. The throat meets the first aisle in a T at `J`.
-/// - **F2 rear:** aisles along x, the block at the back, the throat a side
+///   behind it. The drive meets the first aisle in a T at `J`.
+/// - **F2 rear:** aisles along x, the block at the back, the drive a side
 ///   drive to the front-most aisle, the envelope in front beside the drive.
-/// - **F3 side:** aisles along y, the throat continuing straight into the
+/// - **F3 side:** aisles along y, the drive continuing straight into the
 ///   first aisle, the modules toward the side with more room.
 ///
 /// `m = 1` blocks end in V7(b) T ends (F1/F2 arms longer than 8.6 m; shorter
@@ -24,14 +28,19 @@
 /// (scores within 1 % tie, broken by `SiteContext.tieBreak(family)`).
 ///
 /// A yard (§3.6, as built) is a 7 m truck spine carrying side stall rows,
-/// then an apron turning across its end to a 12.5 m circle, with two
-/// 3.5 × 15 m loading bays facing the envelope's rear face (see `_yard`).
+/// then an apron turning across its end to a 12.5 m circle whose bounding
+/// square lies inside the lot and is paved, with two 3.5 × 15 m loading bays
+/// facing the envelope's rear face (see `_yard`).
+///
+/// The footpath runs from the door along the envelope's front edge to the
+/// nearest stall-free gap, then straight to the frontage (§6.1 step 6).
 ///
 /// Generation is branch and bound: a candidate whose best possible score
-/// (stalls up to the cap, the lot's free area less its block, its drive)
+/// (stalls up to the cap, the free area left beside its block, its drive)
 /// cannot reach the 1 % tie band of the best so far is dropped before its
 /// envelope search, or while its stalls pack past the cap. The winner is the
 /// exhaustive enumeration's ([carParkCandidatesOf] lists every candidate).
+/// Drafts are pooled per site: a rejected candidate's buffers are reused.
 ///
 /// Reads only the [SiteContext] (frame, profile, slot 0, spec, seed) and the
 /// §3.5/§3.6 constants. Determinism (§3.9): no platform hash, draw, clock, map
@@ -77,7 +86,7 @@ const double _kYardBayGapM = 1.0;
 class CarParkCandidate {
   CarParkCandidate._(this.family, this.modules, this.singleLast, this._plan,
       this.stallCount, this.envelope, this.score, this.driveLengthM,
-      this.rejection);
+      this.rejection, this.scoreBound);
 
   final CarParkFamily family;
 
@@ -102,6 +111,10 @@ class CarParkCandidate {
 
   /// Why the candidate was rejected; null when it is valid.
   final String? rejection;
+
+  /// The least upper bound branch and bound held this candidate's score to
+  /// (a valid candidate's [score] never exceeds it); infinity when rejected.
+  final double scoreBound;
 
   bool get valid => rejection == null;
 
@@ -128,6 +141,10 @@ class CarParkPlan implements SiteGeneratedPlan {
   int get stallCount => winner.stallCount;
   int get bayCount => winner._plan!.bays.length ~/ _Draft.bayStride;
   bool get admitsTrucks => winner._plan!.trucks;
+
+  /// Whether the throat runs along the road normal to a bend node on the
+  /// frontage line (a skewed set-back site, §3.8).
+  bool get bends => winner._plan!.hasQuad;
 
   @override
   void emit(PlanBuilder b, SiteContext ctx, int dispatchFlags) =>
@@ -218,6 +235,7 @@ List<CarParkCandidate> _carParkCandidates(_Site s, {bool prune = false}) {
     for (var m = 1; m <= kMaxModules; m++) {
       var fitted = false;
       for (final single in const [false, true]) {
+        s.candBound = double.infinity;
         final c = fam == CarParkFamily.side
             ? _alongY(s, m, single)
             : _alongX(s, fam, m, single);
@@ -233,14 +251,16 @@ List<CarParkCandidate> _carParkCandidates(_Site s, {bool prune = false}) {
 List<CarParkCandidate> _yardCandidates(_Site s, {bool prune = false}) {
   s.prune = prune;
   final out = <CarParkCandidate>[];
-  final ys = _yardApronYs(s);
+  final apronLen = _yardApronLen(s);
+  final ys = _yardApronYs(s, apronLen);
   for (final bothSides in const [false, true]) {
     if (ys.isEmpty) {
       out.add(_rejected(CarParkFamily.yard, 1, !bothSides, _kNoBlock));
       continue;
     }
     for (final yA in ys) {
-      out.add(_yard(s, yA, bothSides));
+      s.candBound = double.infinity;
+      out.add(_yard(s, yA, apronLen, bothSides));
     }
   }
   return out;
@@ -248,19 +268,41 @@ List<CarParkCandidate> _yardCandidates(_Site s, {bool prune = false}) {
 
 const String _kNoBlock = 'block does not fit';
 const String _kDominated = 'dominated by a better candidate';
+const String _kNoEnvelopeRoom = 'no room for an A_min envelope beside the block';
 
+/// A rejected candidate; its draft, if any, goes back to the site's pool.
 CarParkCandidate _rejected(
-        CarParkFamily fam, int m, bool single, String why,
-        {_Draft? plan, SiteRect? env, int stalls = 0, double drive = 0}) =>
-    CarParkCandidate._(fam, m, single, plan, stalls, env, null, drive, why);
+    CarParkFamily fam, int m, bool single, String why,
+    {_Draft? plan, SiteRect? env, int stalls = 0, double drive = 0}) {
+  if (plan != null) plan.site.release(plan);
+  return CarParkCandidate._(
+      fam, m, single, null, stalls, env, null, drive, why, double.infinity);
+}
 
 // ---- the site ----------------------------------------------------------------
 
 /// One site's packing inputs, derived once per generator call.
 class _Site {
-  _Site._(this.ctx, this.frame, this.throatW, this.throatMode, this.truck,
-      this.xJ, this.k, this.yT, this.lotLo, this.lotHi, this.depths, this.cap,
-      this.aMin, this.maxStalls);
+  _Site._({
+    required this.ctx,
+    required this.frame,
+    required this.throatW,
+    required this.throatMode,
+    required this.truck,
+    required this.xK,
+    required this.xJ,
+    required this.k,
+    required this.nu,
+    required this.nv,
+    required this.bend,
+    required this.yT,
+    required this.lotLo,
+    required this.lotHi,
+    required this.depths,
+    required this.cap,
+    required this.aMin,
+    required this.maxStalls,
+  });
 
   /// [truck]: the yard spine (a 7 m two-way throat, room ≥ 4.5); else a car
   /// park throat (§3.3: 6 m two-way, or 3.0–5.5 m `sharedSingle` with at
@@ -271,6 +313,9 @@ class _Site {
     if (f == null || spec == null || ctx.slotCount == 0) return null;
     final slot = ctx.slot0;
     if (slot.flags & kJoinCut == 0) return null;
+    // A site beyond the road end reaches its frontage by the §3.7 dogleg
+    // corridor, which no car park throat follows.
+    if (slot.flags & kJoinOffFrontage != 0) return null;
     final programW = truck ? kYardThroatWidthM : kCarParkThroatWidthM;
     final tw = math.min(programW, 2 * (slot.roomM - kCutFlareM));
     SiteLaneMode mode;
@@ -286,12 +331,17 @@ class _Site {
     } else {
       return null;
     }
-    // The throat runs along v: V5 needs v within 10° of the road normal.
-    if (slot.normE * f.v.e + slot.normN * f.v.n < kCos10 + _kSkewMarginCos) {
-      return null;
-    }
+    // The drive runs along v: V5 needs v within 10° of the road normal.
+    final nu = slot.normE * f.u.e + slot.normN * f.u.n;
+    final nv = slot.normE * f.v.e + slot.normN * f.v.n;
+    if (nv < kCos10 + _kSkewMarginCos) return null;
     final kl = f.toLocal(Vec2(slot.kerbE, slot.kerbN));
     final k = -kl.n;
+    // §3.8: a set-back site whose skew would carry a throat along v off the
+    // road normal by more than the straightness tolerance at the frontage
+    // takes the normal to a bend node on y = 0 (the corridor's own line).
+    final drift = k * nu / nv;
+    final bend = k >= kThroatMinM - kGenEpsM && drift.abs() > kThroatStraightM;
     var lo = double.infinity, hi = double.negativeInfinity;
     for (final p in ctx.parcel.polygon) {
       final x = f.toLocal(p).e;
@@ -307,9 +357,26 @@ class _Site {
     final program = truck ? SiteProgram.yard : SiteProgram.carPark;
     final cap = math.max(capacityScoreCap(spec),
         capacityTarget(program, spec).toDouble());
-    return _Site._(ctx, f, tw, mode, truck, kl.e, k,
-        math.max(0.0, kThroatMinM - k), lo, hi, depths, cap,
-        minEnvelopeArea(spec), maxStalls);
+    return _Site._(
+      ctx: ctx,
+      frame: f,
+      throatW: tw,
+      throatMode: mode,
+      truck: truck,
+      xK: kl.e,
+      xJ: bend ? kl.e + drift : kl.e,
+      k: k,
+      nu: nu,
+      nv: nv,
+      bend: bend,
+      yT: bend ? 0.0 : math.max(0.0, kThroatMinM - k),
+      lotLo: lo,
+      lotHi: hi,
+      depths: depths,
+      cap: cap,
+      aMin: minEnvelopeArea(spec),
+      maxStalls: maxStalls,
+    );
   }
 
   final SiteContext ctx;
@@ -318,10 +385,21 @@ class _Site {
   final SiteLaneMode throatMode;
   final bool truck;
 
-  /// Slot 0's kerb point in the frame: x_J, and k (kerb to frontage).
-  final double xJ, k;
+  /// Slot 0's kerb point's frame x, and k (kerb to frontage).
+  final double xK, k;
 
-  /// `max(0, 7 − k)`: the nearest frame y the throat may end at.
+  /// The frame x of the drive on the lot: `x_K`, or the bend node's.
+  final double xJ;
+
+  /// The slot's road normal in the frame (`nv` its cosine to `v`).
+  final double nu, nv;
+
+  /// Whether the throat runs along the road normal to a bend node `B` at
+  /// `(x_J, 0)`.
+  final bool bend;
+
+  /// `max(0, 7 − k)`: the nearest frame y the throat may end at (0 with a
+  /// bend, whose throat along the normal is already ≥ 7 m).
   final double yT;
 
   /// The polygon's frame x extent: the depth profile's column grid.
@@ -336,29 +414,67 @@ class _Site {
   DepthProfile get profile => frame.profile;
   double get widthM => frame.widthM;
 
+  /// Σ segment lengths from `K` to the drive's point at frame [y] on `x_J`.
+  double throatLenTo(double y) => bend ? k / nv + y : k + y;
+
+  /// How far past the frontage line a bent throat's far end reaches: its
+  /// lane rectangle ends square to the road normal, so one far corner stands
+  /// `throatW/2 · |nu|` inside the lot. A stall beside a drive that starts at
+  /// the bend (F3's first aisle, a yard's spine) starts beyond it.
+  double get bendRise =>
+      bend ? throatW / 2 * nu.abs() + _kF32SlackM : 0.0;
+
   /// Branch and bound over the candidates (generation only; the candidate
   /// lists tests read are not pruned): the best valid score so far.
   bool prune = false;
   double best = double.negativeInfinity;
 
-  /// Whether a candidate whose score cannot exceed [upperBound] can no longer
-  /// win or tie (§3.5's 1 % band only rises with the best score).
-  bool dominated(double upperBound) =>
-      prune &&
-      best > double.negativeInfinity &&
-      upperBound < best - kScoreTieFraction * best.abs() - kGenEpsM;
+  /// The least bound computed for the candidate being built.
+  double candBound = double.infinity;
 
-  /// §3.5's score at most for a block of [blockArea] m², a drive of [drive]
-  /// m and at most [atMost] stalls, before anything is drawn.
+  /// Whether a candidate whose score cannot exceed [upperBound] can no longer
+  /// win or tie (§3.5's 1 % band only rises with the best score). Records
+  /// the bound in [candBound] either way.
+  bool cut(double upperBound) {
+    if (upperBound < candBound) candBound = upperBound;
+    return prune &&
+        best > double.negativeInfinity &&
+        upperBound < best - kScoreTieFraction * best.abs() - kGenEpsM;
+  }
+
+  /// §3.5's score at most for a block overlapping the envelope's region by
+  /// [blockArea] m², a drive of [drive] m and at most [atMost] stalls,
+  /// before anything is drawn.
   double boundOf(double blockArea, double drive, double bias, int atMost) =>
       kScoreStall * math.min(atMost.toDouble(), cap) +
       kScoreEnvelopeArea * envelopeBound(blockArea) -
       kScoreDriveLength * drive +
       bias;
 
-  /// The free area an envelope could have at most, less [blockArea].
+  /// The free area an envelope could have at most: its region `[1.5, W −
+  /// 1.5] × [0, maxDepth]`, less [blockArea] (a block's [regionOverlap]).
   double envelopeBound(double blockArea) => math.max(0.0,
       (widthM - 2 * kSideSetbackM) * profile.maxDepthM - blockArea);
+
+  /// The area of `[x0, x1] × [y0, y1]` inside the envelope's region: all an
+  /// envelope bound may subtract for a pave (a block reaches past the side
+  /// setbacks to the profile margin).
+  double regionOverlap(double x0, double y0, double x1, double y1) {
+    final w = math.min(x1, widthM - kSideSetbackM) - math.max(x0, kSideSetbackM);
+    final d = math.min(y1, profile.maxDepthM) - math.max(y0, 0.0);
+    return w > 0 && d > 0 ? w * d : 0.0;
+  }
+
+  double rectOverlap(SiteRect r) => regionOverlap(r.x0, r.y0, r.x1, r.y1);
+
+  /// Generation only: whether a block overlapping the envelope's region by
+  /// [overlap] m² leaves too little of it for an envelope of `A_min` (and
+  /// 8 × 8 m) whatever is packed, so the candidate cannot be valid. The
+  /// candidate lists tests read go on to the envelope rule instead.
+  bool noEnvelopeBeside(double overlap) =>
+      prune &&
+      envelopeBound(overlap) <
+          math.max(aMin, kEnvelopeMinSideM * kEnvelopeMinSideM) - kGenEpsM;
 
   /// The throat corridor half width, `throatW/2 + 1`.
   double get corridorHalf => throatW / 2 + kThroatCorridorClearM;
@@ -398,10 +514,25 @@ class _Site {
     return d;
   }
 
+  // ---- the draft pool ----------------------------------------------------------
+
+  final List<_Draft> _pool = [];
+
+  /// A cleared draft: a released one when there is one.
+  _Draft draft() {
+    if (_pool.isEmpty) return _Draft(this);
+    return _pool.removeLast()..reset();
+  }
+
+  void release(_Draft d) => _pool.add(d);
+
+  // ---- the free rectangle --------------------------------------------------------
+
   /// §6.1 step 2 exactly as `largestFreeRect` computes it (the same column
   /// grid from [xMin], the same fronts, histogram and tie rule, `yMin` the
   /// profile margin), with the grid's profile reads cached across every
-  /// candidate of this site that asks for the same `[xMin, xMax]`.
+  /// candidate of this site that asks for the same `[xMin, xMax]`, and its
+  /// scratch buffers kept on the site.
   SiteRect? freeRect(
       List<SiteRect> blocked, double clearanceM, double xMin, double xMax) {
     const step = kDepthProfileStepM;
@@ -423,9 +554,17 @@ class _Site {
       }
     }
     final nb = blocked.length;
-    final gx0 = Float64List(nb), gy0 = Float64List(nb);
-    final gx1 = Float64List(nb), gy1 = Float64List(nb);
-    final fronts = <double>[yMin];
+    if (_gx0.length < nb) {
+      final cap = math.max(nb, 2 * _gx0.length);
+      _gx0 = Float64List(cap);
+      _gy0 = Float64List(cap);
+      _gx1 = Float64List(cap);
+      _gy1 = Float64List(cap);
+    }
+    final gx0 = _gx0, gy0 = _gy0, gx1 = _gx1, gy1 = _gy1;
+    final fronts = _fronts
+      ..clear()
+      ..add(yMin);
     for (var i = 0; i < nb; i++) {
       final b = blocked[i];
       gx0[i] = b.x0 - clearanceM;
@@ -438,23 +577,28 @@ class _Site {
     final heights = _heights, stack = _stack;
     SiteRect? best;
     var bestArea = 0.0;
-    double? lastFront;
-    for (final y0 in fronts) {
-      if (lastFront != null && (y0 - lastFront).abs() <= kGenEpsM) continue;
+    var bx0 = 0.0, by0 = 0.0, bx1 = 0.0, by1 = 0.0;
+    var lastFront = double.nan;
+    for (var fi = 0; fi < fronts.length; fi++) {
+      final y0 = fronts[fi];
+      if (fi > 0 && (y0 - lastFront).abs() <= kGenEpsM) continue;
       lastFront = y0;
+      // Each column's far edge: the profile's, cut by every blocked
+      // rectangle over the columns it overlaps (`gx1 > xa && gx0 < xb`,
+      // exactly as a per-column test reads it).
       for (var c = 0; c < n; c++) {
-        final xa = lo + c * step, xb = xa + step;
-        var far = _gridFar[c];
-        for (var i = 0; i < nb; i++) {
-          if (gx1[i] <= xa || gx0[i] >= xb) continue;
-          if (gy1[i] <= y0) continue;
-          if (gy0[i] <= y0) {
-            far = y0;
-          } else if (gy0[i] < far) {
-            far = gy0[i];
-          }
+        heights[c] = _gridFar[c];
+      }
+      for (var i = 0; i < nb; i++) {
+        if (gy1[i] <= y0) continue;
+        final cut = gy0[i] <= y0 ? y0 : gy0[i];
+        final (ca, cb) = _columnsUnder(lo, n, gx0[i], gx1[i]);
+        for (var c = ca; c <= cb; c++) {
+          if (cut < heights[c]) heights[c] = cut;
         }
-        heights[c] = math.max(0.0, far - y0);
+      }
+      for (var c = 0; c < n; c++) {
+        heights[c] = math.max(0.0, heights[c] - y0);
       }
       var sp = 0;
       for (var c = 0; c <= n; c++) {
@@ -466,12 +610,16 @@ class _Site {
           final area = height * (c - left) * step;
           if (area > bestArea + 1e-9 && height > 0) {
             bestArea = area;
-            best = SiteRect(lo + left * step, y0, lo + c * step, y0 + height);
+            bx0 = lo + left * step;
+            by0 = y0;
+            bx1 = lo + c * step;
+            by1 = y0 + height;
           }
         }
         if (c < n) stack[sp++] = c;
       }
     }
+    if (bestArea > 0) best = SiteRect(bx0, by0, bx1, by1);
     return best;
   }
 
@@ -479,26 +627,71 @@ class _Site {
   Float64List _gridFar = Float64List(0);
   Float64List _heights = Float64List(0);
   Int32List _stack = Int32List(0);
+  Float64List _gx0 = Float64List(0), _gy0 = Float64List(0);
+  Float64List _gx1 = Float64List(0), _gy1 = Float64List(0);
+  final List<double> _fronts = [];
+
+  /// The blocked list [_Draft.finish] hands [freeRect], reused.
+  final List<SiteRect> blocked = [];
 
   /// The side of x_J with more room (+1: larger x), ties by the seed.
-  int get sideDir {
+  late final int sideDir = () {
     final right = widthM - xJ, left = xJ;
     if ((right - left).abs() <= kGenEpsM) {
       return ctx.tieBreak('car-park-side') & 1 == 0 ? 1 : -1;
     }
     return right > left ? 1 : -1;
+  }();
+}
+
+/// The columns `c` in `[0, n)` of a grid from [lo] (`xa = lo + c·step`,
+/// `xb = xa + step`) with `x1 > xa` and `x0 < xb`, as `(first, last)`
+/// (empty when first > last). Both tests are monotone in `c`, so an estimate
+/// walked to the exact edges gives exactly the columns a per-column test
+/// finds.
+(int, int) _columnsUnder(double lo, int n, double x0, double x1) {
+  const step = kDepthProfileStepM;
+  bool afterStart(int c) => (lo + c * step) + step > x0; // xb > x0
+  bool beforeEnd(int c) => lo + c * step < x1; // xa < x1
+  final e0 = (x0 - lo) / step, e1 = (x1 - lo) / step;
+  if (!(e0 < n + 1) || !(e1 > -1)) return (0, -1);
+  var a = math.max(0, math.min(n, e0.floor() - 1));
+  while (a > 0 && afterStart(a - 1)) {
+    a--;
   }
+  while (a < n && !afterStart(a)) {
+    a++;
+  }
+  var z = math.max(-1, math.min(n - 1, e1.ceil() + 1));
+  while (z >= 0 && !beforeEnd(z)) {
+    z--;
+  }
+  while (z + 1 < n && beforeEnd(z + 1)) {
+    z++;
+  }
+  return (a, z);
 }
 
 // ---- the draft plan, frame metres ---------------------------------------------
 
 /// A plan under construction, in frame metres. Node 0 is the kerb node `K`,
-/// segment 0 the throat, pave 0 the throat's pave.
+/// segment 0 the throat. Pave 0 is the throat's pave on the lot (from the
+/// kerb unless the throat bends; then [quad] is the throat's pave along the
+/// road normal).
 class _Draft {
   _Draft(this.site);
 
   final _Site site;
   bool trucks = false;
+
+  /// The node the drive reaches on `x_J` (the throat's far node, or with a
+  /// bend the node the drive along `v` reaches).
+  int throatFar = 1;
+
+  /// The bent throat's pave corners (frame x, y × 4, counter-clockwise, the
+  /// kerb pair first), when [hasQuad].
+  final Float64List quad = Float64List(8);
+  bool hasQuad = false;
 
   // Nodes: x, y, flags, turn kind, turn radius, turn direction (frame).
   final List<double> nodes = [];
@@ -535,6 +728,27 @@ class _Draft {
   final List<SiteRect> rows = [];
   final List<double> lamps = [];
 
+  /// Clears every buffer for the next candidate (the pool's reuse).
+  void reset() {
+    trucks = false;
+    throatFar = 1;
+    hasQuad = false;
+    nodes.clear();
+    nodeInts.clear();
+    segInts.clear();
+    segDoubles.clear();
+    stallInts.clear();
+    stallDoubles.clear();
+    bays.clear();
+    bayInts.clear();
+    paves.clear();
+    boundBlockArea = 0;
+    boundBias = 0;
+    abandoned = false;
+    rows.clear();
+    lamps.clear();
+  }
+
   int get nodeCount => nodes.length ~/ nodeStride;
   int get segCount => segInts.length ~/ segIntStride;
   int get stallCount => stallInts.length ~/ stallIntStride;
@@ -548,16 +762,30 @@ class _Draft {
       double r = 0,
       double dx = 0,
       double dy = 0}) {
-    nodes.addAll([x, y, r, dx, dy]);
-    nodeInts.addAll([flags, turn.index]);
+    nodes
+      ..add(x)
+      ..add(y)
+      ..add(r)
+      ..add(dx)
+      ..add(dy);
+    nodeInts
+      ..add(flags)
+      ..add(turn.index);
     return nodeCount - 1;
   }
 
   int seg(int from, int to, SiteSegmentKind kind, SiteLaneMode mode,
       double widthM,
       {int flags = 0, double maxVehLenM = kSegMinVehLenM}) {
-    segInts.addAll([from, to, kind.index, mode.index, flags]);
-    segDoubles.addAll([widthM, maxVehLenM]);
+    segInts
+      ..add(from)
+      ..add(to)
+      ..add(kind.index)
+      ..add(mode.index)
+      ..add(flags);
+    segDoubles
+      ..add(widthM)
+      ..add(maxVehLenM);
     return segCount - 1;
   }
 
@@ -614,6 +842,9 @@ class _Draft {
       bandInside = site.profile.containsRect(SiteRect(math.min(ax0, ax1),
           math.min(ay0, ay1), math.max(ax0, ax1), math.max(ay0, ay1)));
     }
+    final ex = tx.abs() * hw + ox.abs() * hl;
+    final ey = ty.abs() * hw + oy.abs() * hl;
+    final side = ty * ox - tx * oy > 0 ? 0 : 1; // right of travel: side 0
     for (var i = 0;; i++) {
       final sc = lo + hw + kStallWidthM * i;
       if (sc + hw > hi + 1e-9) break;
@@ -628,11 +859,11 @@ class _Draft {
       }
       if (inDirs == 0) continue;
       final cx = ax + tx * sc + ox * off, cy = ay + ty * sc + oy * off;
-      final ex = tx.abs() * hw + ox.abs() * hl;
-      final ey = ty.abs() * hw + oy.abs() * hl;
-      final rect = SiteRect(cx - ex, cy - ey, cx + ex, cy + ey);
-      if (!bandInside && !site.profile.containsRect(rect)) continue;
-      final side = ty * ox - tx * oy > 0 ? 0 : 1; // right of travel: side 0
+      if (!bandInside &&
+          !site.profile
+              .containsRect(SiteRect(cx - ex, cy - ey, cx + ex, cy + ey))) {
+        continue;
+      }
       stallInts
         ..add(seg)
         ..add(side)
@@ -650,14 +881,14 @@ class _Draft {
       if (site.prune &&
           stallCount > site.cap &&
           stallCount % 8 == 0 &&
-          site.dominated(upperBound(boundBlockArea, boundBias,
+          site.cut(upperBound(boundBlockArea, boundBias,
               stalls: stallCount))) {
         abandoned = true;
       }
-      x0 = math.min(x0, rect.x0);
-      y0 = math.min(y0, rect.y0);
-      x1 = math.max(x1, rect.x1);
-      y1 = math.max(y1, rect.y1);
+      x0 = math.min(x0, cx - ex);
+      y0 = math.min(y0, cy - ey);
+      x1 = math.max(x1, cx + ex);
+      y1 = math.max(y1, cy + ey);
       if (abandoned) break;
     }
     if (x1 > x0) rows.add(SiteRect(x0, y0, x1, y1));
@@ -665,25 +896,36 @@ class _Draft {
 
   void bay(int seg, int side, double s, double x, double y, double dx,
       double dy) {
-    bays.addAll([s, x, y, dx, dy]);
-    bayInts.addAll([seg, side]);
+    bays
+      ..add(s)
+      ..add(x)
+      ..add(y)
+      ..add(dx)
+      ..add(dy);
+    bayInts
+      ..add(seg)
+      ..add(side);
   }
 
   void lampsX(double x0, double x1, double y) {
-    for (final (lx, ly) in lampsAlong(x0, x1, y)) {
-      lamps.addAll([lx, ly]);
+    for (var x = x0 + kLampStartM; x <= x1 + kGenEpsM; x += kLampPitchM) {
+      lamps
+        ..add(x)
+        ..add(y);
     }
   }
 
   void lampsY(double x, double y0, double y1) {
     for (var y = y0 + kLampStartM; y <= y1 + kGenEpsM; y += kLampPitchM) {
-      lamps.addAll([x, y]);
+      lamps
+        ..add(x)
+        ..add(y);
     }
   }
 
   /// §3.5's score at most, for exactly [stalls] packed (or, before packing,
-  /// at most [atMost]) and a block of [blockArea] m² the envelope cannot
-  /// overlap.
+  /// at most [atMost]) and a block overlapping the envelope's region by
+  /// [blockArea] m².
   double upperBound(double blockArea, double bias,
       {int? stalls, int? atMost}) {
     final double stallTerm;
@@ -705,11 +947,11 @@ class _Draft {
   CarParkCandidate? preCheck(CarParkFamily fam, int m, bool single,
       SiteRect block, double bias, int maxStalls) {
     if (!site.profile.containsRect(block)) {
-      return _rejected(fam, m, single, 'block pave leaves the lot');
+      return _rejected(fam, m, single, 'block pave leaves the lot', plan: this);
     }
-    boundBlockArea = block.width * block.depth;
+    boundBlockArea = site.rectOverlap(block);
     boundBias = bias;
-    if (site.dominated(upperBound(boundBlockArea, bias, atMost: maxStalls))) {
+    if (site.cut(upperBound(boundBlockArea, bias, atMost: maxStalls))) {
       return _rejected(fam, m, single, _kDominated, plan: this);
     }
     return null;
@@ -746,9 +988,9 @@ class _Draft {
     }
     var biggest = 0.0;
     for (var q = 1; q < paves.length; q++) {
-      biggest = math.max(biggest, paves[q].width * paves[q].depth);
+      biggest = math.max(biggest, s.rectOverlap(paves[q]));
     }
-    if (s.dominated(upperBound(biggest, bias, stalls: n))) {
+    if (s.cut(upperBound(biggest, bias, stalls: n))) {
       return _rejected(fam, m, single, _kDominated,
           plan: this, stalls: n, drive: drive);
     }
@@ -764,11 +1006,12 @@ class _Draft {
       ry1 = math.max(ry1, r.y1);
     }
     const walk = kWalkStripM - kEnvelopeClearLotM;
-    final blocked = <SiteRect>[
-      ...paves,
-      if (rows.isNotEmpty)
-        SiteRect(rx0 - walk, ry0 - walk, rx1 + walk, ry1 + walk),
-    ];
+    final blocked = s.blocked
+      ..clear()
+      ..addAll(paves);
+    if (rows.isNotEmpty) {
+      blocked.add(SiteRect(rx0 - walk, ry0 - walk, rx1 + walk, ry1 + walk));
+    }
     final env = s.freeRect(blocked, kEnvelopeClearLotM,
         math.max(kSideSetbackM, envXMin),
         math.min(s.widthM - kSideSetbackM, envXMax));
@@ -801,7 +1044,7 @@ class _Draft {
         bias;
     if (score > s.best) s.best = score;
     return CarParkCandidate._(
-        fam, m, single, this, n, env, score, drive, null);
+        fam, m, single, this, n, env, score, drive, null, s.candBound);
   }
 
   /// The network node nearest the envelope's door (never the kerb node), or
@@ -820,6 +1063,108 @@ class _Draft {
     }
     final reach = kEntranceMaxM - 1e-3;
     return bestD <= reach * reach ? best : -1;
+  }
+
+  /// §6.1 step 6: the frame x the footpath runs to the frontage on, from a
+  /// jog along `y = door.y`. The run from `y = 0` up to the door's `y`
+  /// crosses no stall or bay and never runs along a drive laid along `v` (a
+  /// throat, a bend's drive, an F2 side drive), each kept half the path's
+  /// width away; aisles are gaps between rows and may be walked. The
+  /// candidates are the door's own x, then every end of a blocked x-run,
+  /// nearest the door first (ties to the smaller x); the first whose run
+  /// and jog lie inside the lot and whose jog crosses no stall, bay or
+  /// drive wins. None: the door's x (the straight run).
+  double footpathX(SiteRect env) {
+    const h = kFootpathWidthM / 2;
+    final doorX = (env.x0 + env.x1) / 2, top = env.y0;
+    final iv = <(double, double)>[];
+    final jog = <SiteRect>[];
+    void block(double x0, double y0, double x1, double y1) {
+      if (y0 < top + h - kGenEpsM && y1 > top - h + kGenEpsM) {
+        jog.add(SiteRect(x0, y0, x1, y1));
+      }
+      if (y1 <= kGenEpsM || y0 >= top - kGenEpsM) return;
+      iv.add((x0 - h, x1 + h));
+    }
+
+    for (var i = 0; i < stallCount; i++) {
+      final d = i * stallDoubleStride;
+      final cx = stallDoubles[d + 1], cy = stallDoubles[d + 2];
+      final alongX = stallDoubles[d + 3] != 0;
+      final ex = alongX ? kStallLengthM / 2 : kStallWidthM / 2;
+      final ey = alongX ? kStallWidthM / 2 : kStallLengthM / 2;
+      block(cx - ex, cy - ey, cx + ex, cy + ey);
+    }
+    for (var i = 0; i < bays.length ~/ bayStride; i++) {
+      final d = i * bayStride;
+      final cx = bays[d + 1], cy = bays[d + 2];
+      final alongX = bays[d + 3] != 0;
+      final ex = alongX ? kLoadingBayLengthM / 2 : kLoadingBayWidthM / 2;
+      final ey = alongX ? kLoadingBayWidthM / 2 : kLoadingBayLengthM / 2;
+      block(cx - ex, cy - ey, cx + ex, cy + ey);
+    }
+    for (var k = 0; k < segCount; k++) {
+      if (segInts[k * segIntStride + 2] != SiteSegmentKind.driveway.index) {
+        continue;
+      }
+      final a = segInts[k * segIntStride], c = segInts[k * segIntStride + 1];
+      if ((nx(a) - nx(c)).abs() > kGenEpsM) continue;
+      final hw = segDoubles[k * segDoubleStride] / 2;
+      block(nx(a) - hw, math.min(ny(a), ny(c)), nx(a) + hw,
+          math.max(ny(a), ny(c)));
+    }
+    if (iv.isEmpty) return doorX;
+    iv.sort((p, q) => p.$1 != q.$1 ? p.$1.compareTo(q.$1) : p.$2.compareTo(q.$2));
+    // Merge into disjoint runs; the candidates are the door and run ends.
+    final runs = <double>[];
+    var a = iv[0].$1, z = iv[0].$2;
+    for (var i = 1; i <= iv.length; i++) {
+      if (i < iv.length && iv[i].$1 <= z) {
+        z = math.max(z, iv[i].$2);
+        continue;
+      }
+      runs
+        ..add(a)
+        ..add(z);
+      if (i < iv.length) {
+        a = iv[i].$1;
+        z = iv[i].$2;
+      }
+    }
+    bool free(double x) {
+      for (var r = 0; r < runs.length; r += 2) {
+        if (x > runs[r] + kGenEpsM && x < runs[r + 1] - kGenEpsM) return false;
+      }
+      return true;
+    }
+
+    bool clear(double x) {
+      if (!free(x)) return false;
+      final j0 = math.min(x, doorX), j1 = math.max(x, doorX);
+      for (final r in jog) {
+        if (r.x0 < j1 + h - kGenEpsM && r.x1 > j0 - h + kGenEpsM) return false;
+      }
+      const t = 0.01;
+      if (top > kContainsInsetM + t &&
+          !site.profile.containsRect(SiteRect(x - t, kContainsInsetM, x + t, top))) {
+        return false;
+      }
+      return j1 - j0 <= t ||
+          site.profile.containsRect(SiteRect(
+              j0, math.max(kContainsInsetM, top - t), j1, top + t));
+    }
+
+    if (free(doorX)) return doorX;
+    final order = List<int>.generate(runs.length, (i) => i)
+      ..sort((p, q) {
+        final dp = (runs[p] - doorX).abs(), dq = (runs[q] - doorX).abs();
+        if (dp != dq) return dp.compareTo(dq);
+        return runs[p] != runs[q] ? runs[p].compareTo(runs[q]) : p - q;
+      });
+    for (final i in order) {
+      if (clear(runs[i])) return runs[i];
+    }
+    return doorX;
   }
 
   // ---- emission ----------------------------------------------------------------
@@ -849,14 +1194,21 @@ class _Draft {
           turnHx: ue * dx + ve * dy,
           turnHn: un * dx + vn * dy);
     }
-    // Segments: the throat, then aisles by the (y, x) of their start, then
-    // aprons (V10).
+    // Segments (V10): the throat, then aisles by the (y, x) of their start,
+    // then drives, then aprons.
     final order = <int>[0];
     final aisles = <int>[];
+    final drives = <int>[];
     final aprons = <int>[];
     for (var k = 1; k < segCount; k++) {
       final kind = segInts[k * segIntStride + 2];
-      (kind == SiteSegmentKind.aisle.index ? aisles : aprons).add(k);
+      if (kind == SiteSegmentKind.aisle.index) {
+        aisles.add(k);
+      } else if (kind == SiteSegmentKind.apron.index) {
+        aprons.add(k);
+      } else {
+        drives.add(k);
+      }
     }
     aisles.sort((a, c) {
       final na = segInts[a * segIntStride], nc = segInts[c * segIntStride];
@@ -868,6 +1220,7 @@ class _Draft {
     });
     order
       ..addAll(aisles)
+      ..addAll(drives)
       ..addAll(aprons);
     final segAt = Int32List(segCount);
     for (var i = 0; i < order.length; i++) {
@@ -931,13 +1284,20 @@ class _Draft {
       );
     }
     // Paves: the throat's kerb corners blend from the kerb (§6.3).
+    int corner(double x, double y, bool atKerb) => atKerb
+        ? ctx.localPoint(b, x, y, ref: SiteHeightRef.blend, hJoin: j, hT: 1)
+        : ctx.localPoint(b, x, y);
+    if (hasQuad) {
+      b.pave([
+        corner(quad[0], quad[1], true),
+        corner(quad[2], quad[3], true),
+        corner(quad[4], quad[5], false),
+        corner(quad[6], quad[7], false),
+      ]);
+    }
     for (var q = 0; q < paves.length; q++) {
       final r = paves[q];
-      final kerbEdge = q == 0;
-      int corner(double x, double y, bool atKerb) => atKerb
-          ? ctx.localPoint(b, x, y,
-              ref: SiteHeightRef.blend, hJoin: j, hT: 1)
-          : ctx.localPoint(b, x, y);
+      final kerbEdge = q == 0 && !hasQuad;
       b.pave([
         corner(r.x0, r.y0, kerbEdge),
         corner(r.x1, r.y0, kerbEdge),
@@ -948,32 +1308,62 @@ class _Draft {
     for (var l = 0; l < lamps.length ~/ 2; l++) {
       b.lamp(ctx.localPoint(b, lamps[2 * l], lamps[2 * l + 1]));
     }
+    // The door, the pavement point where the footpath meets the frontage,
+    // and the path (§6.1 steps 5–6, V11), as `finishPedestrians` writes
+    // them, with the path's jog along the envelope's front edge.
     final env = envelope.rect;
     final (dx, dy) = envelopeDoor(envelope);
+    final xp = footpathX(env);
     final door = ctx.localPoint(b, dx, dy);
-    final pavement = ctx.localPoint(b, dx, 0);
-    ctx.finishPedestrians(b, door, pavement,
-        entranceNode: entranceNode(env));
+    final pavement = ctx.localPoint(b, xp, 0);
+    b.entrance(door, node: entranceNode(env));
+    b.pavement(pavement);
+    if (xp == dx) {
+      b.path([pavement, door]);
+    } else {
+      b.path([pavement, ctx.localPoint(b, xp, dy), door]);
+    }
     b.endSite();
   }
 }
 
-/// The throat `K → (x_J, y)` and its pave; null when its on-parcel stretch
-/// leaves the lot.
-_Draft _throat(_Site s, double y) {
-  final p = _Draft(s);
+/// The throat from `K`, and with a bend the drive along `v` to [y] on `x_J`;
+/// null when a bent drive to [y] would be shorter than a segment.
+_Draft? _throat(_Site s, double y) {
+  final p = s.draft();
   final flags = kSegThroat |
       (s.ctx.crossesPavement(s.ctx.slot0) ? kSegCrossesPavement : 0) |
       (s.truck ? kSegTruck : 0);
-  final k = p.node(s.xJ, -s.k, flags: kNodeKerb);
+  final veh = s.truck ? kTruckMinVehLenM : kSegMinVehLenM;
+  final k = p.node(s.xK, -s.k, flags: kNodeKerb);
+  if (!s.bend) {
+    final far = p.node(s.xJ, y);
+    p.seg(k, far, SiteSegmentKind.driveway, s.throatMode, s.throatW,
+        flags: flags, maxVehLenM: veh);
+    p.throatFar = far;
+    return p;
+  }
+  final bn = p.node(s.xJ, 0);
+  p.seg(k, bn, SiteSegmentKind.driveway, s.throatMode, s.throatW,
+      flags: flags, maxVehLenM: veh);
+  if (y <= kGenEpsM) {
+    p.throatFar = bn;
+    return p;
+  }
+  if (y < kSegMinLenM - kGenEpsM) {
+    s.release(p);
+    return null;
+  }
   final far = p.node(s.xJ, y);
-  p.seg(k, far, SiteSegmentKind.driveway, s.throatMode, s.throatW,
-      flags: flags,
-      maxVehLenM: s.truck ? kTruckMinVehLenM : kSegMinVehLenM);
+  p.seg(bn, far, SiteSegmentKind.driveway, s.throatMode, s.throatW,
+      flags: s.truck ? kSegTruck : 0, maxVehLenM: veh);
+  p.throatFar = far;
   return p;
 }
 
-/// The throat's pave from the kerb to [y1], its on-parcel stretch checked.
+/// The throat's pave to [y1], its on-parcel stretch checked. With a bend,
+/// the throat's own pave is the quad along the road normal (off the parcel)
+/// and pave 0 the drive's from just in front of the frontage line.
 bool _throatPave(_Draft p, double y1) {
   final s = p.site;
   final hw = s.throatW / 2;
@@ -982,7 +1372,24 @@ bool _throatPave(_Draft p, double y1) {
           SiteRect(s.xJ - hw, kContainsInsetM, s.xJ + hw, y1))) {
     return false;
   }
-  p.paves.add(SiteRect(s.xJ - hw, -s.k, s.xJ + hw, y1));
+  if (!s.bend) {
+    p.paves.add(SiteRect(s.xJ - hw, -s.k, s.xJ + hw, y1));
+    return true;
+  }
+  // The normal (nu, nv) turned a quarter clockwise points along +x.
+  final px = s.nv * hw, py = -s.nu * hw;
+  p.quad
+    ..[0] = s.xK - px
+    ..[1] = -s.k - py
+    ..[2] = s.xK + px
+    ..[3] = -s.k + py
+    ..[4] = s.xJ + px
+    ..[5] = py
+    ..[6] = s.xJ - px
+    ..[7] = -py;
+  p.hasQuad = true;
+  // Down to the quad's lower end corner, so the two meet without a gap.
+  p.paves.add(SiteRect(s.xJ - hw, -hw * s.nu.abs(), s.xJ + hw, math.max(y1, 0)));
   return true;
 }
 
@@ -1046,10 +1453,21 @@ class _Modules {
   int get rowCount => rowAisle.length;
 
   void addRow(double q0, double q1, int aisle, int side) {
-    rowQ.addAll([q0, q1]);
+    rowQ
+      ..add(q0)
+      ..add(q1);
     rowAisle.add(aisle);
     rowSide.add(side);
   }
+}
+
+/// The module layouts are site-free: built once per isolate, on first use.
+final List<_Modules?> _modulesCache =
+    List<_Modules?>.filled(4 * kMaxModules, null);
+
+_Modules _modulesOf(int m, bool single, {bool firstCentred = false}) {
+  final i = ((m - 1) * 2 + (single ? 1 : 0)) * 2 + (firstCentred ? 1 : 0);
+  return _modulesCache[i] ??= _Modules(m, single, firstCentred: firstCentred);
 }
 
 // ---- F1 / F2: aisles along x -------------------------------------------------
@@ -1058,8 +1476,9 @@ CarParkCandidate _alongX(_Site s, CarParkFamily fam, int m, bool single) {
   final rear = fam == CarParkFamily.rear;
   final bias =
       rear && s.widthM < kScoreRearBiasMaxWidthM ? kScoreRearBias : 0.0;
-  final mod = _Modules(m, single);
+  final mod = _modulesOf(m, single);
   final depth = mod.end;
+  final nA = mod.aisles.length;
   // Frame y of a q, and of the block ends.
   late final double base;
   late final double yRear;
@@ -1084,17 +1503,16 @@ CarParkCandidate _alongX(_Site s, CarParkFamily fam, int m, bool single) {
   }
   if (run == null) return _rejected(fam, m, single, _kNoBlock);
   final (xL, xR) = run;
-  // Aisles in ascending frame y; the throat meets the first (nearest the
-  // frontage).
-  final aisleY = [for (final q in mod.aisles) yOf(q)];
-  final byY = List<int>.generate(aisleY.length, (i) => i)
-    ..sort((a, b) => aisleY[a].compareTo(aisleY[b]));
-  final jA = byY.first;
-  final yJ = aisleY[jA];
+  // Aisles in ascending frame y (rank 0 nearest the frontage): the modules'
+  // own order at the front, reversed at the rear. The drive meets rank 0.
+  int aisleOfRank(int r) => rear ? nA - 1 - r : r;
+  int rankOfAisle(int a) => rear ? nA - 1 - a : a;
+  double aisleY(int a) => yOf(mod.aisles[a]);
+  final yJ = aisleY(aisleOfRank(0));
   if (yJ < s.yT - kGenEpsM) return _rejected(fam, m, single, _kNoBlock);
   {
     // The bound before any allocation: the block, its drive and its rows.
-    final throatM = yJ + s.k;
+    final throatM = s.throatLenTo(yJ);
     double drive, bx0, bx1;
     if (m == 1) {
       final armL = s.xJ - xL, armR = xR - s.xJ;
@@ -1106,21 +1524,26 @@ CarParkCandidate _alongX(_Site s, CarParkFamily fam, int m, bool single) {
     } else {
       drive = throatM +
           (xR - xL - kCrossAisleWidthM) * m +
-          2 * (aisleY[byY.last] - yJ);
+          2 * (aisleY(aisleOfRank(nA - 1)) - yJ);
       bx0 = xL;
       bx1 = xR;
     }
-    if (s.dominated(s.boundOf((bx1 - bx0) * (blockY1 - blockY0), drive, bias,
+    final overlap = s.regionOverlap(bx0, blockY0, bx1, blockY1);
+    if (s.noEnvelopeBeside(overlap)) {
+      return _rejected(fam, m, single, _kNoEnvelopeRoom);
+    }
+    if (s.cut(s.boundOf(overlap, drive, bias,
         mod.rowCount * (((bx1 - bx0) / kStallWidthM).floor() + 1)))) {
       return _rejected(fam, m, single, _kDominated);
     }
   }
   final p = _throat(s, yJ);
+  if (p == null) return _rejected(fam, m, single, 'bend under a segment');
   const ha = kAisleTwoWayWidthM / 2;
   if (!_throatPave(p, yJ - ha)) {
-    return _rejected(fam, m, single, 'throat leaves the lot');
+    return _rejected(fam, m, single, 'throat leaves the lot', plan: p);
   }
-  const j = 1;
+  final j = p.throatFar;
   final c = s.corridorHalf;
   final aisleFlags = s.truck ? kSegTruck : 0;
   final veh = s.truck ? kTruckMinVehLenM : kSegMinVehLenM;
@@ -1137,7 +1560,9 @@ CarParkCandidate _alongX(_Site s, CarParkFamily fam, int m, bool single) {
     final armL = s.xJ - xL, armR = xR - s.xJ;
     final hasR = armR > kArmHammerheadMinM + kGenEpsM;
     final hasL = armL > kArmHammerheadMinM + kGenEpsM;
-    if (!hasR && !hasL) return _rejected(fam, m, single, 'both arms cut');
+    if (!hasR && !hasL) {
+      return _rejected(fam, m, single, 'both arms cut', plan: p);
+    }
     final segR = hasR
         ? aisle(j, p.node(xR, yJ,
             flags: kNodeDeadEnd,
@@ -1183,22 +1608,28 @@ CarParkCandidate _alongX(_Site s, CarParkFamily fam, int m, bool single) {
   } else {
     final xW = xL + kCrossAisleWidthM / 2, xE = xR - kCrossAisleWidthM / 2;
     if (s.xJ - xW < kSegMinLenM || xE - s.xJ < kSegMinLenM) {
-      return _rejected(fam, m, single, 'throat meets a cross aisle');
+      return _rejected(fam, m, single, 'throat meets a cross aisle', plan: p);
     }
-    final west = <int>[], east = <int>[];
-    for (final a in byY) {
-      west.add(p.node(xW, aisleY[a]));
-      east.add(p.node(xE, aisleY[a]));
+    // Nodes by rank: west, east (rank 0's west and east are the ring's first
+    // aisle's ends either side of J).
+    final nodeBase = p.nodeCount;
+    for (var i = 0; i < nA; i++) {
+      final y = aisleY(aisleOfRank(i));
+      p
+        ..node(xW, y)
+        ..node(xE, y);
     }
-    final segBefore = aisle(west[0], j);
-    final segAfter = aisle(j, east[0]);
-    final aisleSeg = <int>[-1];
-    for (var i = 1; i < byY.length; i++) {
-      aisleSeg.add(aisle(west[i], east[i]));
+    int west(int i) => nodeBase + 2 * i;
+    int east(int i) => nodeBase + 2 * i + 1;
+    final segBefore = aisle(west(0), j);
+    final segAfter = aisle(j, east(0));
+    final segBase = p.segCount; // rank i ≥ 1: segBase + i − 1
+    for (var i = 1; i < nA; i++) {
+      aisle(west(i), east(i));
     }
-    for (var i = 0; i + 1 < byY.length; i++) {
-      aisle(west[i], west[i + 1]);
-      aisle(east[i], east[i + 1]);
+    for (var i = 0; i + 1 < nA; i++) {
+      aisle(west(i), west(i + 1));
+      aisle(east(i), east(i + 1));
     }
     paveX0 = xL;
     paveX1 = xR;
@@ -1208,9 +1639,9 @@ CarParkCandidate _alongX(_Site s, CarParkFamily fam, int m, bool single) {
     if (pre != null) return pre;
     const cross = kCrossAisleWidthM / 2;
     for (var r = 0; r < mod.rowCount; r++) {
-      final rank = byY.indexOf(mod.rowAisle[r]);
+      final rank = rankOfAisle(mod.rowAisle[r]);
       final oy = rowO(r);
-      final y = aisleY[mod.rowAisle[r]];
+      final y = aisleY(mod.rowAisle[r]);
       if (rank == 0) {
         final front = inFront(r);
         final dJ = s.xJ - xW;
@@ -1237,8 +1668,8 @@ CarParkCandidate _alongX(_Site s, CarParkFamily fam, int m, bool single) {
       } else {
         final len = xE - xW;
         p.pack(
-            seg: aisleSeg[rank], ax: xW, ay: y, tx: 1, ty: 0, ox: 0, oy: oy,
-            len: len, lo: cross, hi: len - cross, row: r);
+            seg: segBase + rank - 1, ax: xW, ay: y, tx: 1, ty: 0, ox: 0,
+            oy: oy, len: len, lo: cross, hi: len - cross, row: r);
       }
     }
   }
@@ -1259,7 +1690,8 @@ CarParkCandidate _alongX(_Site s, CarParkFamily fam, int m, bool single) {
 CarParkCandidate _alongY(_Site s, int m, bool single) {
   const fam = CarParkFamily.side;
   final dir = s.sideDir;
-  final mod = _Modules(m, single, firstCentred: true);
+  final mod = _modulesOf(m, single, firstCentred: true);
+  final nA = mod.aisles.length;
   double xOf(double t) => s.xJ + dir * t;
   final xa = xOf(mod.start), xb = xOf(mod.end);
   final bx0 = math.min(xa, xb), bx1 = math.max(xa, xb);
@@ -1273,90 +1705,84 @@ CarParkCandidate _alongY(_Site s, int m, bool single) {
           yC - y0 < kTEndAisleMinM + kStallWidthM)) {
     return _rejected(fam, m, single, _kNoBlock);
   }
+  final by0 = m == 1 ? math.max(yT, y0) : y0;
   {
     // The bound before any allocation.
-    final aisles = mod.aisles.length;
-    final drive = yT +
-        s.k +
+    final drive = s.throatLenTo(yT) +
         (m == 1
             ? yRear - yT
             : (yC - yT) +
-                (aisles - 1) * (yC - y0) +
+                (nA - 1) * (yC - y0) +
                 (mod.aisles.last - mod.aisles.first).abs());
-    final by0 = m == 1 ? math.max(yT, y0) : y0;
-    if (s.dominated(s.boundOf((bx1 - bx0) * (yRear - by0), drive,
-        kScoreSideBias,
+    final overlap = s.regionOverlap(bx0, by0, bx1, yRear);
+    if (s.noEnvelopeBeside(overlap)) {
+      return _rejected(fam, m, single, _kNoEnvelopeRoom);
+    }
+    if (s.cut(s.boundOf(overlap, drive, kScoreSideBias,
         mod.rowCount * (((yRear - y0) / kStallWidthM).floor() + 1)))) {
       return _rejected(fam, m, single, _kDominated);
     }
   }
   final p = _throat(s, yT);
+  if (p == null) return _rejected(fam, m, single, 'bend under a segment');
   if (!_throatPave(p, yT)) {
-    return _rejected(fam, m, single, 'throat leaves the lot');
+    return _rejected(fam, m, single, 'throat leaves the lot', plan: p);
   }
-  const t = 1;
+  final t = p.throatFar;
   final aisleFlags = s.truck ? kSegTruck : 0;
   final veh = s.truck ? kTruckMinVehLenM : kSegMinVehLenM;
   int aisle(int a, int b) => p.seg(a, b, SiteSegmentKind.aisle,
       SiteLaneMode.twoWay, kAisleTwoWayWidthM,
       flags: aisleFlags, maxVehLenM: veh);
-  // Stall rectangles start at least at the profile margin and at y_T.
-  final loFirst = math.max(0.0, y0 - yT);
-  final segOf = <int>[];
-  final startY = <double>[];
-  final lenOf = <double>[];
-  final loOf = <double>[];
+  // Stall rectangles start at least at the profile margin and at y_T, and
+  // past a bent throat's far corner.
+  final loFirst = math.max(math.max(0.0, y0 - yT), s.bendRise - yT);
+  // Aisle a's segment is segFirst + a; it starts at y_T (a = 0) or y0.
+  final int segFirst;
   if (m == 1) {
-    final len = yRear - yT;
-    segOf.add(aisle(t, p.node(s.xJ, yRear,
+    segFirst = aisle(t, p.node(s.xJ, yRear,
         flags: kNodeDeadEnd,
         turn: TurnaroundKind.hammerhead,
         r: kTEndClearM,
-        dy: 1)));
-    startY.add(yT);
-    lenOf.add(len);
-    loOf.add(loFirst);
+        dy: 1));
   } else {
-    final rear = <int>[];
-    for (var i = 0; i < mod.aisles.length; i++) {
-      rear.add(p.node(xOf(mod.aisles[i]), yC));
+    final rearBase = p.nodeCount;
+    for (var i = 0; i < nA; i++) {
+      p.node(xOf(mod.aisles[i]), yC);
     }
-    segOf.add(aisle(t, rear[0]));
-    startY.add(yT);
-    lenOf.add(yC - yT);
-    loOf.add(loFirst);
-    for (var i = 1; i < mod.aisles.length; i++) {
-      final front = p.node(xOf(mod.aisles[i]), y0,
+    final frontBase = p.nodeCount - 1; // aisle i ≥ 1: frontBase + i
+    for (var i = 1; i < nA; i++) {
+      p.node(xOf(mod.aisles[i]), y0,
           flags: kNodeDeadEnd,
           turn: TurnaroundKind.hammerhead,
           r: kTEndClearM,
           dy: -1);
-      segOf.add(aisle(front, rear[i]));
-      startY.add(y0);
-      lenOf.add(yC - y0);
-      loOf.add(kTEndClearM + _kF32SlackM);
     }
-    for (var i = 0; i + 1 < rear.length; i++) {
-      aisle(rear[i], rear[i + 1]);
+    segFirst = aisle(t, rearBase);
+    for (var i = 1; i < nA; i++) {
+      aisle(frontBase + i, rearBase + i);
+    }
+    for (var i = 0; i + 1 < nA; i++) {
+      aisle(rearBase + i, rearBase + i + 1);
     }
   }
-  final block = SiteRect(bx0, math.max(m == 1 ? yT : y0, y0), bx1, yRear);
+  final block = SiteRect(bx0, by0, bx1, yRear);
   final pre = p.preCheck(fam, m, single, block, kScoreSideBias,
       mod.rowCount * (((yRear - y0) / kStallWidthM).floor() + 1));
   if (pre != null) return pre;
   for (var r = 0; r < mod.rowCount; r++) {
     final a = mod.rowAisle[r];
-    final len = lenOf[a];
+    final len = m == 1 ? yRear - yT : (a == 0 ? yC - yT : yC - y0);
     p.pack(
-        seg: segOf[a],
+        seg: segFirst + a,
         ax: xOf(mod.aisles[a]),
-        ay: startY[a],
+        ay: a == 0 ? yT : y0,
         tx: 0,
         ty: 1,
         ox: (dir * mod.rowSide[r]).toDouble(),
         oy: 0,
         len: len,
-        lo: loOf[a],
+        lo: a == 0 ? loFirst : kTEndClearM + _kF32SlackM,
         hi: len - (m == 1 ? kTEndClearM : kCrossAisleWidthM / 2) - _kF32SlackM,
         row: r);
   }
@@ -1382,18 +1808,39 @@ const double _kYardMinAisleM =
 /// (half the 7 m apron lane, then the 15 m bay).
 const double _kYardBayBandM = kYardThroatWidthM / 2 + kLoadingBayLengthM;
 
-/// The apron's frame t-range across the spine: the spine's far edge to the
-/// circle node at the apron segment's end.
+/// The apron pave's near edge across the spine: the throat's width.
 const double _kYardApronT0 = -kYardThroatWidthM / 2;
-const double _kYardApronT1 = kYardApronWidthM;
+
+/// The bays' pitch, and the centre of the pair when its inner bay stands
+/// just clear of the 7 m lane band around the spine.
+const double _kYardBayPitchM = kLoadingBayWidthM + _kYardBayGapM;
+const double _kYardBayMidMinT =
+    kYardThroatWidthM / 2 + kLoadingBayWidthM / 2 + _kYardBayPitchM / 2;
+
+/// The shortest apron that holds both bays: the pair's far edge.
+const double _kYardApronMinM =
+    _kYardBayMidMinT + _kYardBayPitchM / 2 + kLoadingBayWidthM / 2;
+
+/// The apron length, spine to circle node `Y`: [kYardApronWidthM], or less
+/// where the lot on the apron's side is too narrow for the circle's bounding
+/// square, never under [_kYardApronMinM]; NaN when even that fails.
+double _yardApronLen(_Site s) {
+  final room = s.sideDir > 0 ? s.lotHi - s.xJ : s.xJ - s.lotLo;
+  final t = math.min(
+      kYardApronWidthM, room - kDepthProfileMarginM - kYardCircleRadiusM);
+  return t < _kYardApronMinM - kGenEpsM ? double.nan : t;
+}
 
 /// The frame y of the apron segment for each yard candidate: the shallowest
 /// that leaves an 8 m envelope in front of the bays, the one whose spine
-/// holds the capacity target, and the deepest. Ascending, distinct; empty
+/// holds the capacity target, and the deepest whose circle square stays
+/// inside the depth over the apron and circle. Ascending, distinct; empty
 /// when none fits.
-List<double> _yardApronYs(_Site s) {
+List<double> _yardApronYs(_Site s, double apronLen) {
+  if (apronLen.isNaN) return const [];
   final dir = s.sideDir;
-  final xa = s.xJ + dir * _kYardApronT0, xb = s.xJ + dir * _kYardApronT1;
+  final xa = s.xJ + dir * _kYardApronT0,
+      xb = s.xJ + dir * (apronLen + kYardCircleRadiusM);
   final yRear = s.depthOverRange(math.min(xa, xb), math.max(xa, xb));
   final lo = math.max(
       s.yT + _kYardMinAisleM,
@@ -1401,9 +1848,11 @@ List<double> _yardApronYs(_Site s) {
           kEnvelopeMinSideM +
           kEnvelopeClearLotM +
           _kYardBayBandM);
-  final hi = yRear - kYardThroatWidthM / 2;
+  final hi = yRear - kYardCircleRadiusM;
   if (hi < lo - kGenEpsM) return const [];
-  final want = (s.yT + kStallWidthM * s.cap.ceil()).clamp(lo, hi);
+  // No num.clamp: hi may lie up to kGenEpsM under lo (§3.7).
+  final want = math.min(
+      math.max(s.yT + kStallWidthM * s.cap.ceil(), lo), math.max(lo, hi));
   final out = <double>[lo];
   if (want - out.last > kGenEpsM) out.add(want);
   if (hi - out.last > kGenEpsM) out.add(hi);
@@ -1414,67 +1863,80 @@ List<double> _yardApronYs(_Site s) {
 /// aisle `T → A` along `v` (6 m, trucks), with a stall row on the far side
 /// (away from the envelope) and, when [bothSides], a row on the near side
 /// that stops short of the bays. At `A` the apron segment turns along `±u`
-/// toward the side with more room, 18 m to the circle node `Y` (12.5 m); its
-/// two 3.5 × 15 m bays hang toward the frontage, noses on `−v`, so the
-/// envelope stands in front of them: the apron is beside its rear face.
-CarParkCandidate _yard(_Site s, double yA, bool bothSides) {
+/// toward the side with more room, [apronLen] (18 m, or down to 11.5 m on a
+/// narrower lot) to the circle node `Y` (12.5 m), whose bounding square must
+/// lie inside the lot and is paved; its two 3.5 × 15 m bays hang toward the
+/// frontage, noses on `−v`, so the envelope stands in front of them: the
+/// apron is beside its rear face.
+CarParkCandidate _yard(_Site s, double yA, double apronLen, bool bothSides) {
   const fam = CarParkFamily.yard;
+  const r = kYardCircleRadiusM;
   final single = !bothSides;
   final dir = s.sideDir;
   double xOf(double t) => s.xJ + dir * t;
   SiteRect band(double t0, double t1, double y0, double y1) => SiteRect(
       math.min(xOf(t0), xOf(t1)), y0, math.max(xOf(t0), xOf(t1)), y1);
-  final yRear = s.depthOverRange(
-      band(_kYardApronT0, _kYardApronT1, 0, 1).x0,
-      band(_kYardApronT0, _kYardApronT1, 0, 1).x1);
-  if (yA + kYardThroatWidthM / 2 > yRear + kGenEpsM) {
+  final xa = xOf(_kYardApronT0), xb = xOf(apronLen + r);
+  final yRear = s.depthOverRange(math.min(xa, xb), math.max(xa, xb));
+  if (yA + r > yRear + kGenEpsM) {
     return _rejected(fam, 1, single, _kNoBlock);
   }
   final yT = s.yT;
   final bayY0 = yA - _kYardBayBandM;
-  final p = _throat(s, yT)..trucks = true;
-  if (!_throatPave(p, yT)) {
-    return _rejected(fam, 1, single, 'throat leaves the lot');
+  const y0 = kDepthProfileMarginM;
+  final rowY0 = math.max(yT, y0);
+  final len = yA - yT;
+  const ha = kAisleTwoWayWidthM / 2;
+  final apronRect =
+      band(_kYardApronT0, apronLen, bayY0, yA + kYardThroatWidthM / 2);
+  final circleRect = band(apronLen - r, apronLen + r, yA - r, yA + r);
+  final spineRect = band(-ha, ha, rowY0, yA);
+  if (!s.profile.containsRect(apronRect) || !s.profile.containsRect(spineRect)) {
+    return _rejected(fam, 1, single, 'yard pave leaves the lot');
   }
-  const t = 1;
+  // §3.7 step 4's rule: a circle whose bounding square leaves the lot is no
+  // circle, so no yard.
+  if (!s.profile.containsRect(circleRect)) {
+    return _rejected(fam, 1, single, 'the truck circle leaves the lot');
+  }
+  final blockArea =
+      math.max(s.rectOverlap(apronRect), s.rectOverlap(circleRect));
+  if (s.noEnvelopeBeside(blockArea)) {
+    return _rejected(fam, 1, single, _kNoEnvelopeRoom);
+  }
+  if (s.cut(s.boundOf(blockArea, s.throatLenTo(yT) + len + apronLen, 0,
+      2 * ((len / kStallWidthM).floor() + 1)))) {
+    return _rejected(fam, 1, single, _kDominated);
+  }
+  final p = _throat(s, yT);
+  if (p == null) return _rejected(fam, 1, single, 'bend under a segment');
+  p.trucks = true;
+  if (!_throatPave(p, yT)) {
+    return _rejected(fam, 1, single, 'throat leaves the lot', plan: p);
+  }
+  final t = p.throatFar;
   final a = p.node(s.xJ, yA);
-  final y = p.node(xOf(_kYardApronT1), yA,
-      flags: kNodeDeadEnd, turn: TurnaroundKind.circle, r: kYardCircleRadiusM);
+  final y = p.node(xOf(apronLen), yA,
+      flags: kNodeDeadEnd, turn: TurnaroundKind.circle, r: r);
   final spine = p.seg(t, a, SiteSegmentKind.aisle, SiteLaneMode.twoWay,
       kAisleTwoWayWidthM,
       flags: kSegTruck, maxVehLenM: kTruckMinVehLenM);
   final apron = p.seg(a, y, SiteSegmentKind.apron, SiteLaneMode.twoWay,
       kYardThroatWidthM,
       flags: kSegTruck, maxVehLenM: kTruckMinVehLenM);
-  const y0 = kDepthProfileMarginM;
-  final rowY0 = math.max(yT, y0);
-  final len = yA - yT;
-  final lo = math.max(0.0, y0 - yT);
-  const ha = kAisleTwoWayWidthM / 2;
-  final apronRect = band(_kYardApronT0, _kYardApronT1, bayY0,
-      yA + kYardThroatWidthM / 2);
-  final spineRect = band(-ha, ha, rowY0, yA);
-  if (!s.profile.containsRect(apronRect) || !s.profile.containsRect(spineRect)) {
-    return _rejected(fam, 1, single, 'yard pave leaves the lot');
-  }
-  p.boundBlockArea = apronRect.width * apronRect.depth;
-  if (s.dominated(p.upperBound(p.boundBlockArea, 0,
-      atMost: 2 * ((len / kStallWidthM).floor() + 1)))) {
-    return _rejected(fam, 1, single, _kDominated, plan: p);
-  }
+  final lo = math.max(math.max(0.0, y0 - yT), s.bendRise - yT);
+  p.boundBlockArea = blockArea;
   p.paves
     ..add(spineRect)
-    ..add(apronRect);
+    ..add(apronRect)
+    ..add(circleRect);
   // Rows: the far side up to A, the near side up to the bays.
-  for (final (side, top) in [
-    (-1, yA),
-    if (bothSides) (1, bayY0),
-  ]) {
-    if (top - rowY0 < kStallWidthM) continue;
+  void row(int side, double top) {
+    if (top - rowY0 < kStallWidthM) return;
     final rows = side < 0
         ? band(-ha - kStallLengthM, -ha, rowY0, top)
         : band(ha, ha + kStallLengthM, rowY0, top);
-    if (!s.profile.containsRect(rows)) continue;
+    if (!s.profile.containsRect(rows)) return;
     p.paves.add(rows);
     p.pack(
         seg: spine,
@@ -1489,13 +1951,16 @@ CarParkCandidate _yard(_Site s, double yA, bool bothSides) {
         hi: top - yT,
         row: side < 0 ? 0 : 1);
   }
-  // Two bays on the apron segment, centred, noses toward the frontage.
+
+  row(-1, yA);
+  if (bothSides) row(1, bayY0);
+  // Two bays on the apron segment, centred on it (or pushed out until the
+  // inner one clears the lane band), noses toward the frontage.
   final bayY = yA - kYardThroatWidthM / 2 - kLoadingBayLengthM / 2;
-  final pitch = kLoadingBayWidthM + _kYardBayGapM;
-  final mid = kYardApronWidthM / 2;
+  final mid = math.max(apronLen / 2, _kYardBayMidMinT);
   var bx0 = double.infinity, bx1 = double.negativeInfinity;
   for (var i = 0; i < kYardBays; i++) {
-    final sb = mid + (i - (kYardBays - 1) / 2) * pitch;
+    final sb = mid + (i - (kYardBays - 1) / 2) * _kYardBayPitchM;
     // Travel along dir·u: its right is −v when dir > 0.
     p.bay(apron, dir > 0 ? 0 : 1, sb, xOf(sb), bayY, 0, -1);
     bx0 = math.min(bx0, xOf(sb) - kLoadingBayWidthM / 2);

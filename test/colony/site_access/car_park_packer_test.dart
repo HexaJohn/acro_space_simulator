@@ -105,6 +105,146 @@ void main() {
     }
   }
 
+  /// Frame corners of pave ring [q] of [p].
+  List<Vec2> paveRing(SiteContext ctx, SiteAccessPlan p, int q) => [
+        for (var i = p.paveStart(q); i < p.paveStart(q + 1); i++)
+          ctx.frame!.toLocal(Vec2(p.ptE(p.pavePt(i)), p.ptN(p.pavePt(i)))),
+      ];
+
+  /// Every circle turnaround of [p]: its bounding square inside the lot
+  /// (§3.7 step 4's rule) and inside one pave ring (§2.4: paving stays in
+  /// the parcel, and the envelope keeps clear of it). Returns the circles.
+  int circlesInsideAndPaved(SiteContext ctx, SiteAccessPlan p) {
+    final f = ctx.frame!;
+    var circles = 0;
+    for (var n = 0; n < p.nodeCount; n++) {
+      if (p.nodeTurnKind(n) != TurnaroundKind.circle) continue;
+      circles++;
+      final c = f.toLocal(Vec2(p.nodeE(n), p.nodeN(n)));
+      final r = p.nodeTurnR(n);
+      const t = 1e-6;
+      expect(
+          f.profile.containsRect(
+              SiteRect(c.e - r + t, c.n - r + t, c.e + r - t, c.n + r - t)),
+          isTrue,
+          reason: '${ctx.siteId}: circle at $c leaves the lot');
+      var paved = false;
+      for (var q = 0; q < p.paveCount && !paved; q++) {
+        final ring = paveRing(ctx, p, q);
+        var x0 = double.infinity, y0 = double.infinity;
+        var x1 = double.negativeInfinity, y1 = double.negativeInfinity;
+        for (final v in ring) {
+          x0 = math.min(x0, v.e);
+          y0 = math.min(y0, v.n);
+          x1 = math.max(x1, v.e);
+          y1 = math.max(y1, v.n);
+        }
+        paved = x0 <= c.e - r + 1e-5 &&
+            y0 <= c.n - r + 1e-5 &&
+            x1 >= c.e + r - 1e-5 &&
+            y1 >= c.n + r - 1e-5;
+      }
+      expect(paved, isTrue, reason: '${ctx.siteId}: circle at $c not paved');
+    }
+    return circles;
+  }
+
+  /// The footpath of [p] (§6.1 step 6): frame-axis-aligned legs from the
+  /// pavement point on y = 0 to the door, crossing no stall or bay rectangle
+  /// and running along no lane laid along v. Returns the crossings.
+  List<String> footpathCrossings(SiteContext ctx, SiteAccessPlan p) {
+    final f = ctx.frame!;
+    final out = <String>[];
+    Vec2 local(int pt) => f.toLocal(Vec2(p.ptE(pt), p.ptN(pt)));
+    final pts = [
+      for (var i = p.pathStart(0); i < p.pathStart(1); i++) local(p.pathPt(i)),
+    ];
+    expect(pts.first.n, closeTo(0, 1e-6), reason: ctx.siteId);
+    final door = local(p.entrancePt);
+    expect(pts.last.e, closeTo(door.e, 1e-9));
+    expect(pts.last.n, closeTo(door.n, 1e-9));
+    final rects = <(String, SiteRect)>[];
+    for (var i = 0; i < p.stallCount; i++) {
+      final ce = f.toLocal(Vec2(p.stallE(i), p.stallN(i)));
+      final du = p.stallDirE(i) * f.u.e + p.stallDirN(i) * f.u.n;
+      final ex = du.abs() > 0.5 ? kStallLengthM / 2 : kStallWidthM / 2;
+      final ey = du.abs() > 0.5 ? kStallWidthM / 2 : kStallLengthM / 2;
+      rects.add(('stall $i', SiteRect(ce.e - ex, ce.n - ey, ce.e + ex, ce.n + ey)));
+    }
+    for (var b = 0; b < p.bayCount; b++) {
+      final ce = f.toLocal(Vec2(p.bayE(b), p.bayN(b)));
+      final du = p.bayDirE(b) * f.u.e + p.bayDirN(b) * f.u.n;
+      final ex = du.abs() > 0.5 ? kLoadingBayLengthM / 2 : kLoadingBayWidthM / 2;
+      final ey = du.abs() > 0.5 ? kLoadingBayWidthM / 2 : kLoadingBayLengthM / 2;
+      rects.add(('bay $b', SiteRect(ce.e - ex, ce.n - ey, ce.e + ex, ce.n + ey)));
+    }
+    for (var k = 0; k < p.segCount; k++) {
+      // "Never runs along a throat" (§6.1): the drives; aisles are gaps.
+      if (p.segKind(k) != SiteSegmentKind.driveway) continue;
+      final a = f.toLocal(Vec2(p.nodeE(p.segFrom(k)), p.nodeN(p.segFrom(k))));
+      final b = f.toLocal(Vec2(p.nodeE(p.segTo(k)), p.nodeN(p.segTo(k))));
+      if ((a.e - b.e).abs() > 1e-6) continue;
+      final hw = p.segWidthM(k) / 2;
+      rects.add((
+        'drive $k along v',
+        SiteRect(a.e - hw, math.min(a.n, b.n), a.e + hw, math.max(a.n, b.n))
+      ));
+    }
+    const t = 1e-6;
+    for (var i = 0; i + 1 < pts.length; i++) {
+      final a = pts[i], b = pts[i + 1];
+      final vertical = (a.e - b.e).abs() <= 1e-6;
+      expect(vertical || (a.n - b.n).abs() <= 1e-6, isTrue,
+          reason: '${ctx.siteId}: path leg $i is not frame-aligned');
+      for (final (what, r) in rects) {
+        // A drive along v is only met by running along it.
+        if (!vertical && what.startsWith('drive')) continue;
+        final hitX = vertical
+            ? a.e > r.x0 + t && a.e < r.x1 - t
+            : math.max(math.min(a.e, b.e), r.x0) < math.min(math.max(a.e, b.e), r.x1) - t;
+        final hitY = vertical
+            ? math.max(math.min(a.n, b.n), r.y0) < math.min(math.max(a.n, b.n), r.y1) - t
+            : a.n > r.y0 + t && a.n < r.y1 - t;
+        if (hitX && hitY) out.add('${ctx.siteId}: path leg $i crosses $what');
+      }
+    }
+    return out;
+  }
+
+  /// The throat of [p] runs along slot 0's road normal, and every pave
+  /// corner off the parcel (frame y < 0) lies inside the slot's §3.7a
+  /// corridor, the 4.5 m band along that normal from the kerb point.
+  void throatInCorridor(SiteContext ctx, SiteAccessPlan p) {
+    final f = ctx.frame!;
+    final s = ctx.slot0;
+    final k0 = p.segFrom(0), k1 = p.segTo(0);
+    final de = p.nodeE(k1) - p.nodeE(k0), dn = p.nodeN(k1) - p.nodeN(k0);
+    final len = math.sqrt(de * de + dn * dn);
+    final cosToNormal = (de * s.normE + dn * s.normN) / len;
+    for (var q = 0; q < p.paveCount; q++) {
+      for (var i = p.paveStart(q); i < p.paveStart(q + 1); i++) {
+        final pt = p.pavePt(i);
+        final e = p.ptE(pt), n = p.ptN(pt);
+        if (f.toLocal(Vec2(e, n)).n >= -1e-6) continue;
+        final off = ((e - s.kerbE) * -s.normN + (n - s.kerbN) * s.normE).abs();
+        expect(off, lessThanOrEqualTo(kAccessCorridorHalfM + 1e-6),
+            reason: '${ctx.siteId}: pave $q corner ${off.toStringAsFixed(3)} m '
+                'off the road normal (throat cos ${cosToNormal.toStringAsFixed(6)})');
+      }
+    }
+  }
+
+  /// The repair round's checks on a written car park or yard: circles in
+  /// the lot and paved, the footpath clear of stalls, bays and lanes along
+  /// v, and the throat inside the slot's corridor.
+  void checkPark(SiteContext ctx, SiteAccessPlan p) {
+    if (!p.hasNetwork) return;
+    stallsInside(ctx, p);
+    circlesInsideAndPaved(ctx, p);
+    expect(footpathCrossings(ctx, p), isEmpty);
+    throatInCorridor(ctx, p);
+  }
+
   group('§3.5 worked example (c-med on a 24 × 32 auto lot, x_J 4.5)', () {
     final starter = starterKit();
     final sg = starter.roadGraph;
@@ -221,6 +361,32 @@ void main() {
       expect(p.envY1, closeTo(31.7, 1e-5));
       stallsInside(ctx, p);
     });
+
+    test('§6.1 step 6: the footpath jogs along the envelope front to the '
+        'right T end, the nearest stall-free gap, then runs to the frontage',
+        () {
+      final (p, _) =
+          plan(ctx, graph: sg, laneSpans: SyntheticSites.laneSpansOf(sg));
+      final f = ctx.frame!;
+      final pts = [
+        for (var i = p.pathStart(0); i < p.pathStart(1); i++)
+          f.toLocal(Vec2(p.ptE(p.pathPt(i)), p.ptN(p.pathPt(i)))),
+      ];
+      // The door (12, 18.7) stands over both rows ([8.5, 18.9] and
+      // [3.2, 18.8]) and the throat band [1.5, 7.5]: blocked x [0.75, 19.65]
+      // with the 0.75 m half path. Its left end lies outside the envelope's
+      // front edge [2.25, 21.75], so the path takes x = 19.65.
+      expect(pts, hasLength(3));
+      expect(pts[0].e, closeTo(19.65, 1e-6));
+      expect(pts[0].n, closeTo(0, 1e-6));
+      expect(pts[1].e, closeTo(19.65, 1e-6));
+      expect(pts[1].n, closeTo(18.7, 1e-6));
+      expect(pts[2].e, closeTo(12, 1e-6));
+      expect(pts[2].n, closeTo(18.7, 1e-6));
+      final pave = f.toLocal(Vec2(p.ptE(p.pavementPt), p.ptN(p.pavementPt)));
+      expect(pave.e, closeTo(19.65, 1e-6));
+      checkPark(ctx, p);
+    });
   });
 
   group('§3.3 throat sized to the slot', () {
@@ -276,10 +442,12 @@ void main() {
   });
 
   group('§3.6 yard', () {
-    test('an industrial 60 × 100 lot gets a yard: 7 m truck throat, apron, '
-        '12.5 m circle, two bays facing the envelope, trucks admitted (V13)',
-        () {
-      final ctx = on(rect(60, 100), iMed);
+    test('an industrial 70 × 100 lot gets a yard: 7 m truck throat, apron, '
+        '12.5 m circle inside the lot and paved, two bays facing the '
+        'envelope, trucks admitted (V13)', () {
+      // x_J 20: 50 m of lot on the apron's side holds the 18 m apron and
+      // the circle's square (18 + 12.5 + 0.3 m).
+      final ctx = on(rect(70, 100, xJ: 20), iMed);
       final y = yardPlanOf(ctx);
       expect(y, isNotNull);
       expect(y!.program, SiteProgram.yard);
@@ -316,7 +484,73 @@ void main() {
         final front = c.n - kLoadingBayLengthM / 2;
         expect(front - p.envY1, inInclusiveRange(1.0 - 1e-5, 1.5 + 1e-5));
       }
-      stallsInside(ctx, p);
+      // The apron runs the full 18 m to the circle node.
+      for (var k = 0; k < p.segCount; k++) {
+        if (p.segKind(k) == SiteSegmentKind.apron) {
+          expect(p.segLenM(k), closeTo(kYardApronWidthM, 1e-6));
+        }
+      }
+      expect(circlesInsideAndPaved(ctx, p), 1);
+      checkPark(ctx, p);
+    });
+
+    test('a narrower lot shortens the apron (not under 11.5 m) so the '
+        "circle's square stays inside it; every yard candidate's circle is "
+        'inside the lot', () {
+      var shortened = 0;
+      for (var w = 30.0; w <= 44; w += 2) {
+        for (final d in const [60.0, 80.0]) {
+          final ctx = on(rect(w, d, xJ: 4.5), iMed);
+          for (final c in yardCandidatesOf(ctx)) {
+            expect(c.rejection, isNot(contains('circle leaves')),
+                reason: 'the apron length keeps the square inside a '
+                    'rectangle: $c');
+          }
+          final y = yardPlanOf(ctx);
+          if (y == null || y.program != SiteProgram.yard) continue;
+          final (p, _) = plan(ctx);
+          expect(p.program, SiteProgram.yard);
+          for (var k = 0; k < p.segCount; k++) {
+            if (p.segKind(k) != SiteSegmentKind.apron) continue;
+            final len = p.segLenM(k);
+            expect(len, inInclusiveRange(11.5 - 1e-6, kYardApronWidthM + 1e-6));
+            // room − margin − radius, capped at 18.
+            expect(len, closeTo(math.min(18, w - 4.5 - 0.3 - 12.5), 1e-6));
+            if (len < kYardApronWidthM - 1e-6) shortened++;
+          }
+          expect(circlesInsideAndPaved(ctx, p), 1);
+          checkPark(ctx, p);
+        }
+      }
+      expect(shortened, greaterThan(0));
+    });
+
+    test('no yard where the circle cannot fit: a 30 m lot joined at its '
+        'middle', () {
+      final ctx = on(rect(30, 80, xJ: 15), iMed);
+      expect(yardCandidatesOf(ctx).where((c) => c.valid), isEmpty);
+      expect(yardPlanOf(ctx)?.program, isNot(SiteProgram.yard));
+    });
+
+    test('the apron y range does not throw where its bounds meet (no '
+        'num.clamp, §3.7): depth 40.6 m ± 3e-7', () {
+      // lo = 0.3 + 8 + 1 + 3.5 + 15 = 27.8; hi = yRear − 12.5 with
+      // yRear = D − 0.3, so hi = lo at D = 40.6.
+      const dStar = 0.3 + 8 + 1 + 3.5 + 15 + 12.5 + 0.3;
+      final depths = [
+        for (var i = -150; i <= 150; i++) dStar + i * 2e-9,
+        dStar - 1e-7,
+        dStar + 1e-7,
+        dStar - 3e-7,
+        dStar + 3e-7,
+      ];
+      for (final d in depths) {
+        for (final w in const [40.0, 60.0]) {
+          final ctx = on(rect(w, d, xJ: 10), iMed);
+          expect(() => yardCandidatesOf(ctx), returnsNormally, reason: '$d');
+          expect(() => yardPlanOf(ctx), returnsNormally, reason: '$d');
+        }
+      }
     });
 
     test('a lot too small for a yard or a car park: null, then kerb only with '
@@ -341,7 +575,7 @@ void main() {
           programs.add(p.program);
           if (p.hasNetwork) {
             expect(p.stallCount, greaterThan(0));
-            stallsInside(ctx, p);
+            checkPark(ctx, p);
           }
         }
       }
@@ -375,7 +609,7 @@ void main() {
         final (p, _) = plan(ctx);
         if (p.hasNetwork) {
           networks.add('$name ${spec.type}');
-          stallsInside(ctx, p);
+          checkPark(ctx, p);
         }
       }
     }
@@ -406,17 +640,141 @@ void main() {
           final p = b.build(validate: false).plan(0);
           final bad = SitePlanValidator.validate(p, graph: cg, laneSpans: sp);
           expect(bad, isEmpty, reason: bad.join('\n'));
-          stallsInside(ctx, p);
+          checkPark(ctx, p);
           if (got == SiteProgram.yard) expect(p.admitsTrucks, isTrue);
         }
         // ignore: avoid_print
         print('$name: $stats');
         expect(parks, greaterThan(0), reason: '$stats');
-        if (name == 'small generated town') {
-          expect(stats.programCount(SiteProgram.yard), greaterThan(0));
-        }
       });
     }
+
+    // The towns' industrial lots (30 × 46 m) hold no 12.5 m circle beside a
+    // spine and bays in front of an 8 m envelope: their yards fall back to
+    // car parks. The sprawl's larger industrial lots do get yards.
+    test('sprawl: every yard passes V1–V13, circle inside the lot and paved',
+        () {
+      final city = const CityGenerator().generate(
+          const CityGenSpec(blocksAcross: 4, seed: 5, sprawlMiles: 12),
+          bodies: fixtureBodies);
+      final cg = city.roadGraph;
+      final sp = SyntheticSites.laneSpansOf(cg);
+      var yards = 0, offered = 0;
+      final gens = SiteGenerators(yard: (ctx) {
+        offered++;
+        return yardPlanOf(ctx);
+      });
+      for (final ctx in siteContextsOf(city, graph: cg)) {
+        if (ctx.spec == null || !isIndustrialSpec(ctx.spec!)) continue;
+        final b = PlanBuilder(graph: cg);
+        if (planSite(b, ctx, generators: gens) != SiteProgram.yard) continue;
+        yards++;
+        final p = b.build(validate: false).plan(0);
+        final bad = SitePlanValidator.validate(p, graph: cg, laneSpans: sp);
+        expect(bad, isEmpty, reason: bad.join('\n'));
+        expect(p.admitsTrucks, isTrue);
+        expect(p.bayCount, kYardBays);
+        expect(circlesInsideAndPaved(ctx, p), 1);
+        checkPark(ctx, p);
+      }
+      // ignore: avoid_print
+      print('sprawl: $yards yards of $offered offered');
+      expect(yards, greaterThan(0));
+    });
+  });
+
+  test('§3.8 a set-back skewed lot: the throat runs along the road normal '
+      'to a bend node on the frontage, inside the slot corridor', () {
+    // The frontage 40 m behind the kerb, turned 5.7° (sin 0.1): a throat
+    // along v would drift about 4 m off the normal by the frontage.
+    const sin = 0.1;
+    final cos = math.sqrt(1 - sin * sin);
+    final sn = slot.normN.sign;
+    Parcel setBack(double w, double d, double xJ, double back) {
+      Vec2 at(double x, double y) {
+        final dx = x - xJ;
+        return Vec2(slot.s + dx * cos - y * sin * sn,
+            slot.kerbN + (back + dx * sin * sn + y * cos) * sn);
+      }
+
+      return Parcel(
+        id: lotParcel.id,
+        polygon: [at(0, 0), at(w, 0), at(w, d), at(0, d)],
+        roadId: 'r0',
+        frontage: (at(0, 0), at(w, 0)),
+      );
+    }
+
+    for (final (w, d, spec) in [
+      (60.0, 60.0, cMed),
+      (40.0, 50.0, cLow),
+      (80.0, 40.0, cHigh),
+    ]) {
+      final ctx = on(setBack(w, d, w / 2, 40), spec);
+      final f = ctx.frame!;
+      final nv = slot.normE * f.v.e + slot.normN * f.v.n;
+      expect(nv, closeTo(cos, 1e-6), reason: 'the lot is turned as drawn');
+      final cp = carParkPlanOf(ctx);
+      expect(cp, isNotNull, reason: '$w x $d');
+      expect(cp!.bends, isTrue);
+      final (p, _) = plan(ctx);
+      expect(p.program, SiteProgram.carPark);
+      // Segment 0 is the throat along the normal, its far node on y = 0.
+      final k0 = p.segFrom(0), b0 = p.segTo(0);
+      final de = p.nodeE(b0) - p.nodeE(k0), dn = p.nodeN(b0) - p.nodeN(k0);
+      final len = math.sqrt(de * de + dn * dn);
+      expect((de * slot.normE + dn * slot.normN) / len, closeTo(1, 1e-9));
+      expect(f.toLocal(Vec2(p.nodeE(b0), p.nodeN(b0))).n, closeTo(0, 1e-6));
+      expect(len, greaterThanOrEqualTo(kThroatMinM));
+      checkPark(ctx, p);
+    }
+  });
+
+  test('500 random sites (skewed footprints, curved roads): every car park '
+      'and yard valid, its throat inside the corridor, its circle inside the '
+      'lot, its footpath clear', () {
+    final spansOf = <RoadGraph, List<SiteLaneSpans>>{};
+    var parks = 0, bends = 0;
+    for (final r in RandomSites.build()) {
+      final ctx = r.context();
+      final b = PlanBuilder(graph: r.graph);
+      final got = planSite(b, ctx);
+      if (got != SiteProgram.carPark && got != SiteProgram.yard) continue;
+      parks++;
+      final p = b.build(validate: false).plan(0);
+      final bad = SitePlanValidator.validate(p,
+          graph: r.graph,
+          laneSpans: spansOf[r.graph] ??= SyntheticSites.laneSpansOf(r.graph));
+      expect(bad, isEmpty, reason: '${ctx.siteId}: ${bad.join('\n')}');
+      checkPark(ctx, p);
+      final cp = got == SiteProgram.yard ? yardPlanOf(ctx) : carParkPlanOf(ctx);
+      if (cp!.bends) bends++;
+    }
+    // ignore: avoid_print
+    print('random sites: $parks car parks and yards, $bends bent throats');
+    expect(parks, greaterThan(20));
+  });
+
+  test('branch and bound: no valid candidate scores above the bound it was '
+      'held to (the block counts only inside the side setbacks)', () {
+    final sites = <SiteContext>[
+      for (final w in const [12.0, 14.0, 16.0, 20.0, 24.0, 40.0, 80.0])
+        for (final d in const [30.0, 45.0, 60.0, 120.0])
+          for (final spec in [cLow, cMed, cHigh, iMed])
+            for (final xJ in const [4.5, 0.5])
+              on(rect(w, d, xJ: xJ < 1 ? w / 2 : xJ), spec),
+      for (final r in RandomSites.build()) r.context(),
+    ];
+    var checked = 0;
+    for (final ctx in sites) {
+      for (final c in [...carParkCandidatesOf(ctx), ...yardCandidatesOf(ctx)]) {
+        if (!c.valid) continue;
+        checked++;
+        expect(c.score!, lessThanOrEqualTo(c.scoreBound + 1e-9),
+            reason: '${ctx.siteId} $c bound ${c.scoreBound}');
+      }
+    }
+    expect(checked, greaterThan(100));
   });
 
   test('stall keys are stable when an unrelated aisle changes (V10, ask 8)',
