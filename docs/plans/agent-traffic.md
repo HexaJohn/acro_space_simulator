@@ -1939,8 +1939,8 @@ Step 18 in detail:
   - The picture is taken at each congestion epoch (2 s), and `passes` moves with it.
   - `serviceReach`, `fireReach`, `deliveryReach`, `noiseOf`, `landValueOf`, `averageLandValue` and `taxLandValueFactor` are forwarded to `city.roadTraffic`, which keeps advancing (1675). So that a forwarded answer that changes moves `passes` too, `passes` is `hasRun ? own + roadTraffic.passes : 0`; neither count ever goes back (road_traffic_model.dart:1712-1715).
 - **Slice 2.** The agents answer the rest, and E3a skips `roadTraffic.advance`.
-  - **Noise, land value and the tax factor.** Per piece, emission is `g.roadEmission[r] × RoadNoise.volumeFactor(c_p)` (road_graph.dart:247; road_noise.dart:46-51). `c_p` is the piece's measured load: the larger of its speed-based congestion and its flow against capacity (vehicles per lane-minute over the last 60 s against `AgentTuning.laneFlowPerMin = 30`, a lane at free flow). A lot's noise is `RoadNoiseSampler.noiseAt` over those emissions (road_noise.dart:110-136). Land value is `RoadNoise.landValue` with the frontage bonus and the colony's pollution. The tax factor is `RoadNoise.taxFactor` of the built lots' average without pollution, exactly 1 until a built lot is valued (road_noise.dart:99-100; road_traffic_model.dart:566-575).
-  - **Reach** (`agent_reach.dart`). Bounded multi-source searches over directed edges, run through the path budget's skim lane: `serviceReach` from every station that sends vehicles, `fireReach` from stations with safety cover only, and `deliveryReach` from every goods source but the lot's own (D47). The radius is the routed model's, `TrafficTuning.serviceReachM` (4 km).
+  - **Noise, land value and the tax factor.** Per piece, emission is `g.roadEmission[r] × RoadNoise.volumeFactor(c_p)` (road_graph.dart:247; road_noise.dart:46-51). `c_p` is the piece's measured load: the larger of its speed-based congestion and its flow against capacity (vehicles per lane-minute against `AgentTuning.laneFlowPerMin = 30`, a lane at free flow). As built (1ed4ff7), the rate is `through_p × 60 / max(coveredS, 60)`: vehicles leaving the piece's two edges over the ten-minute books, divided by the time those books actually cover. A young colony therefore doesn't read quiet, and one car in its first seconds isn't a jam. Loads are read in the picture's own sub-step, as the first phase of a pass. A lot's noise is `RoadNoiseSampler.noiseAt` over those emissions (road_noise.dart:110-136). Land value is `RoadNoise.landValue` with the frontage bonus and the colony's pollution. The tax factor is `RoadNoise.taxFactor` of the built lots' average without pollution, exactly 1 until a built lot is valued (road_noise.dart:99-100; road_traffic_model.dart:566-575).
+  - **Reach** (`agent_reach.dart`). Bounded multi-source searches over directed edges. Revision 5 (474c7aa): the searches do not use the path budget's skim lane, which §4.8 serves only when the queue is empty, so a busy colony would never publish. They are also never driven by a question. The noise, land-value and reach pass runs in the sub-step, after `stats.epoch`, on its own `AgentTuning.readoutWorkPerStep` (24,000 units; at 25× that is no more per tick than the routed model's 60,000). It starts at a picture and publishes only at a picture, and a lane-graph change drops it. Every readout query is a pure read. `readout_determinism_test` pins it: asking every question between ticks, or none, leaves the digests and answers identical. Reach covers: `serviceReach` from every station that sends vehicles, `fireReach` from stations with safety cover only, and `deliveryReach` from every goods source but the lot's own (D47). The radius is the routed model's, `TrafficTuning.serviceReachM` (4 km).
 - **Nothing abstract is left.** From slice 2, no answer in an agent colony comes from assigned volumes. The old residual (C7) is resolved.
 
 ### 12.4 HUD and panel compatibility
@@ -2843,6 +2843,18 @@ Drawing a new road never teleports a car: routes remap through the split, lots r
 - **Economy rules.** Reach rules, `RoadNoiseSampler` and the land-value and tax formulas do not change in R2–R4. Reach builds on join slot 0 (`lotPiece`/`lotS`/`lotDirs`).
 - **The economy probe.** From R2, the four starter easement lots (lot-r0x1-l10, lot-r0x0-l0, lot-r0x0-r1, lot-r0x1-r5) refuse growth, so the probe must not count on them.
 - **Merge order:** R2, slice 2, then R3.
+
+**As built (be0d05c … 1ed4ff7).**
+- **UI.** `CityGamePanel.traffic` toggles the tool; the `services` and `transit` panels come with their slices.
+  - The pick reads the domain frame through `VehiclePicker` (vehicle_inspection.dart), not `CityNodes.vehicleNearBF`.
+  - Lane ribbons and the route line lie on the ground, as the Routes view's lines do.
+  - Stuck hotspots and broken-stub markers wait for R3's wire.
+  - **Lane speed on the wire:** `laneSpeedPct` is not on the wire. The tool scene reads `CityAgents.laneSpeeds` directly, as the Routes view reads the readout.
+- **Open.**
+  - **Mesh cost:** one overlay line per lane (a big sprawl's rebuild on a band change is unmeasured).
+  - **Allocation:** `RoadNoiseSampler` allocates per lot, now inside the sub-step; that adds to the weighed §15.2 gate.
+  - **Stop-sign delay:** the all-way stop's `J` = 5 s is about 1.6 s under the measured delay.
+  - **Budget:** `readoutWorkPerStep` has not been benched against the frame gates.
 
 **Acceptance:** §17.3 #1 (full) and #2; `edge_delay_test`, including the empty-network case; the inspector's `describe` matches `vehicle=`; overlay rebuilds limited to 0.5 Hz; `agent_reach_test`; the road agent's economy probe (`road_traffic_economy_test`'s starter town, zoned all three ways) still grows all three ways with agents on; `roadTraffic.advance` never runs in an agent colony (a counter pinned at 0).
 
