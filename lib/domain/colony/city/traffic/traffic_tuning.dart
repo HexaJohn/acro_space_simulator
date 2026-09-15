@@ -42,10 +42,17 @@ class AgentTuning {
   /// skim lane", which §4.8 serves only when the queue is otherwise empty
   /// and gives no share; a busy colony would never publish. So the pass has
   /// a budget of its own, counted like every other (D9), spent in the
-  /// sub-step and never on a question: never more per colony tick at the
-  /// 25× clamp's 2.5 sub-steps than the routed model's 60,000 a tick, whose
-  /// work it takes over (E3a), and a pass of 240,000 an epoch.
-  static int readoutWorkPerStep = 24000;
+  /// sub-step and never on a question.
+  ///
+  /// Sized by §15.1's frame gates (readout_pass_bench_test, JIT test VM,
+  /// the 2-mile sprawl): a unit costs 25–40 ns, so the 24,000 first shipped
+  /// took 0.6–1.1 ms a sub-step, and a 25× held frame of four sub-steps,
+  /// the rest of the agents' work included, read 3.9–4.8 ms at p99 — over
+  /// the 3.2 ms gate. At 8,000 that frame stayed under 2.8 ms and a 1×
+  /// frame under 1.5 ms in every frame measured. A pass gets 80,000 units
+  /// an epoch: that sprawl's pass (about 190,000) publishes every third
+  /// picture.
+  static int readoutWorkPerStep = 8000;
 
   /// The pedestrian searches' own budget (slice 4).
   static int pedExpansionsPerStep = 1500;
@@ -180,7 +187,7 @@ class AgentTuning {
   static void reset() {
     agentsOn = true;
     pathExpansionsPerStep = 4000;
-    readoutWorkPerStep = 24000;
+    readoutWorkPerStep = 8000;
     pedExpansionsPerStep = 1500;
     maxVehicles = 4096;
     serviceReserveShare = 0.10;

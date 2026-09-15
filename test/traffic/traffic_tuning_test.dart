@@ -15,7 +15,7 @@ void main() {
   test("the defaults are the design's (§15.4)", () {
     expect(AgentTuning.agentsOn, isTrue);
     expect(AgentTuning.pathExpansionsPerStep, 4000);
-    expect(AgentTuning.readoutWorkPerStep, 24000);
+    expect(AgentTuning.readoutWorkPerStep, 8000);
     expect(AgentTuning.pedExpansionsPerStep, 1500);
     expect(AgentTuning.maxVehicles, 4096);
     expect(AgentTuning.maxPeds, 4096);
