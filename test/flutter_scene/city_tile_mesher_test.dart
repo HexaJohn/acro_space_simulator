@@ -572,11 +572,15 @@ void main() {
           0x07d559a4);
     });
 
-    test('site access on the wire leaves every tier to the byte '
-        '(docs/plans/site-access.md §9 R3)', () {
+    test('site access on the wire leaves every tier to the byte with the knob '
+        'off, and only the kerbside moves with it on '
+        '(docs/plans/site-access.md §9 R3, R4)', () {
       // Every building served with a gate, every road with kerb cuts: the
-      // wire fields R3 adds, carried by the columns. Nothing draws them
-      // until R4, with the knob off or on.
+      // wire fields R3 adds, carried by the columns. With the knob OFF
+      // nothing reads them, at any tier. With it ON (R4) the dropped kerbs
+      // are laid and the masked kerb cars stand down, which is the near
+      // tier's dressing; mid and far draw no kerbside and no site (the
+      // fixture carries no `CitySiteFrame`), so they stay to the byte.
       final served = CityTileColumns.fromSnapshots(
         buildings: [
           for (final (i, b) in buildings.indexed)
@@ -637,13 +641,15 @@ void main() {
       );
       expect(knobs.keyTerms.contains('siteAccess'), isFalse);
       expect(on.keyTerms, '${knobs.keyTerms}|siteAccess');
-      for (final k in [knobs, on]) {
-        int at(CityTier tier) => digest(CityTileMesher.mesh(
-            request(tier, members: served, k: k), CityBuildingLibraries()));
-        expect(at(CityTier.near), 0xf5d18ccb, reason: k.keyTerms);
-        expect(at(CityTier.mid), 0x0759f3c8, reason: k.keyTerms);
-        expect(at(CityTier.far), 0x07d559a4, reason: k.keyTerms);
-      }
+      int at(CityMeshKnobs k, CityTier tier) => digest(CityTileMesher.mesh(
+          request(tier, members: served, k: k), CityBuildingLibraries()));
+      expect(at(knobs, CityTier.near), 0xf5d18ccb);
+      expect(at(knobs, CityTier.mid), 0x0759f3c8);
+      expect(at(knobs, CityTier.far), 0x07d559a4);
+      // On: the near tier's kerbside reads the cuts; nothing else does.
+      expect(at(on, CityTier.near), isNot(0xf5d18ccb));
+      expect(at(on, CityTier.mid), 0x0759f3c8);
+      expect(at(on, CityTier.far), 0x07d559a4);
     });
 
     test('through one scratch, job after job, every tier to the byte', () {

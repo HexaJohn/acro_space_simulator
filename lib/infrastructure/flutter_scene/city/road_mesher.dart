@@ -33,11 +33,13 @@
 library;
 
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import '../../../domain/architecture/architecture_style.dart';
 import '../../../domain/colony/city/parcel.dart';
 import '../../../domain/colony/city/road_elevation.dart';
 import '../../../domain/colony/city/road_junction.dart';
+import '../../../domain/colony/city/site_access/kerb_cuts.dart';
 import '../../../domain/colony/city/sprawl_plan.dart';
 import '../../../domain/scatter/mesh_builder.dart';
 import '../../../domain/shared/vector3.dart';
@@ -714,7 +716,9 @@ class RoadMesher {
   /// that leaves no real run: each pull is held to 45% of the road, and
   /// under five metres left is none. What a pavement and its verge are
   /// laid along, stopping short of the crossing at either end.
-  static List<Vector3>? _trimmed(
+  /// Its first point's arc along [pts] comes back with it: what a caller
+  /// reading kerb cuts measures its stations from.
+  static (List<Vector3>, double)? _trimmedFrom(
       List<Vector3> pts, double pullStart, double pullEnd) {
     var total = 0.0;
     for (var i = 1; i < pts.length; i++) {
@@ -746,7 +750,78 @@ class RoadMesher {
         break;
       }
     }
-    return kept.length < 2 ? null : kept;
+    return kept.length < 2 ? null : (kept, pullStart);
+  }
+
+  // ---- Kerb cuts ------------------------------------------------------------------------
+
+  /// The flare a dropped kerb eases over, each side of the cut (§5.5).
+  static const double cutFlareM = 1.0;
+
+  /// The kerb-edge lift across a dropped kerb: the walk laid on the
+  /// carriageway, a 2.5 cm lip left of the kerb face.
+  static const double cutTopLiftM = ribbonLiftM + 0.025;
+
+  /// How far the grass is dropped each side of a cut, and how near a cut a
+  /// tree pit is left out (§5.5).
+  static const double cutVergeGapM = 0.5;
+  static const double cutTreeClearM = 4.0;
+
+  /// The walk's top lift on kerb [side] at arc [s]: [walkTopLiftM] clear of
+  /// every drawn cut, [cutTopLiftM] inside one, eased over [cutFlareM].
+  static double kerbTopLiftAt(Float64List? cuts, int side, double s) {
+    if (cuts == null) return walkTopLiftM;
+    var lift = walkTopLiftM;
+    for (var i = 0; i + KerbCuts.stride <= cuts.length; i += KerbCuts.stride) {
+      if (cuts[i] != side || cuts[i + 4] == KerbCuts.kindHomeFarSwing) continue;
+      final d = (s - cuts[i + 1]).abs(), h = cuts[i + 2];
+      if (d >= h + cutFlareM) continue;
+      final t = d <= h ? 0.0 : (d - h) / cutFlareM;
+      final l = cutTopLiftM + (walkTopLiftM - cutTopLiftM) * t;
+      if (l < lift) lift = l;
+    }
+    return lift;
+  }
+
+  /// [pts] with a point inserted at each arc of [arcs] that falls strictly
+  /// inside it, in order. The polyline is unchanged; only its stations are
+  /// denser, which is what lets a lift ease across a cut.
+  static List<Vector3> _withStations(List<Vector3> pts, List<double> arcs) {
+    if (arcs.isEmpty) return pts;
+    final wanted = [...arcs]..sort();
+    final out = <Vector3>[pts.first];
+    var d = 0.0, next = 0;
+    for (var i = 1; i < pts.length; i++) {
+      final seg = pts[i] - pts[i - 1];
+      final len = seg.length;
+      if (len < 1e-6) continue;
+      final d0 = d;
+      d += len;
+      while (next < wanted.length && wanted[next] <= d0 + 1e-6) {
+        next++;
+      }
+      while (next < wanted.length && wanted[next] < d - 1e-6) {
+        out.add(pts[i - 1] + seg * ((wanted[next] - d0) / len));
+        next++;
+      }
+      out.add(pts[i]);
+    }
+    return out;
+  }
+
+  /// The stations a dropped kerb wants on kerb [side]: `s0 − 1, s0, s1,
+  /// s1 + 1` per drawn cut, as arcs from [from].
+  static List<double> _cutStations(Float64List? cuts, double from, double to) {
+    if (cuts == null) return const [];
+    final out = <double>[];
+    for (var i = 0; i + KerbCuts.stride <= cuts.length; i += KerbCuts.stride) {
+      if (cuts[i + 4] == KerbCuts.kindHomeFarSwing) continue;
+      final c = cuts[i + 1], h = cuts[i + 2];
+      for (final s in [c - h - cutFlareM, c - h, c + h, c + h + cutFlareM]) {
+        if (s > from && s < to) out.add(s - from);
+      }
+    }
+    return out;
   }
 
   /// Grass verges between the kerb and the walk, one strip each side: a
@@ -770,24 +845,57 @@ class RoadMesher {
     List<(Vector3, double)>? treesOut,
     double treeSpacingM = 12,
     int seed = 0,
+    Float64List? cuts,
+    double arcOffset = 0,
   }) {
-    final kept = _trimmed(pts, pullStart, pullEnd);
-    if (kept == null) return;
+    final trimmed = _trimmedFrom(pts, pullStart, pullEnd);
+    if (trimmed == null) return;
+    var kept = trimmed.$1;
+    final from = arcOffset + trimmed.$2;
     final inner = halfWidth + 0.12;
     final outer = inner + widthM;
     const lift = walkTopLiftM + 0.015;
+    final drop = cuts != null && cuts.isNotEmpty;
+    if (drop) {
+      var total = 0.0;
+      for (var i = 1; i < kept.length; i++) {
+        total += (kept[i] - kept[i - 1]).length;
+      }
+      // The grass stops half a metre clear of a dropped kerb, so it is cut
+      // where the drive crosses and not a hand's width either side of it.
+      final stations = <double>[];
+      for (var i = 0; i + KerbCuts.stride <= cuts.length;
+          i += KerbCuts.stride) {
+        if (cuts[i + 4] == KerbCuts.kindHomeFarSwing) continue;
+        final c = cuts[i + 1], h = cuts[i + 2];
+        for (final s in [c - h - cutVergeGapM, c + h + cutVergeGapM]) {
+          if (s > from && s < from + total) stations.add(s - from);
+        }
+      }
+      kept = _withStations(kept, stations);
+    }
     for (final s in const [-1.0, 1.0]) {
+      final sideBit = s > 0 ? 1 : 0;
       int? pIn, pOut;
+      var arc = from;
       for (var i = 0; i < kept.length; i++) {
         final p = kept[i];
         final up = (p + anchorBF).normalized;
         final ahead = i + 1 < kept.length ? kept[i + 1] - p : p - kept[i - 1];
         final along = ahead.length > 1e-6 ? ahead.normalized : Vector3.unitX;
         final side = along.cross(up).normalized;
+        final was = arc;
+        if (i > 0) arc += (p - kept[i - 1]).length;
         final iIn = m.vertex(_s(p + side * (inner * s) + up * lift), up, u, 0.5);
         final iOut =
             m.vertex(_s(p + side * (outer * s) + up * lift), up, u, 0.5);
-        if (pIn != null) {
+        final gap = drop &&
+            i > 0 &&
+            KerbCuts.blocked(cuts, sideBit, (was + arc) / 2,
+                upstreamM: cutVergeGapM,
+                downstreamM: cutVergeGapM,
+                drawnOnly: true);
+        if (pIn != null && !gap) {
           // The sidewalk's winding: the s < 0 strip runs its edges the
           // other way round.
           if (s > 0) {
@@ -802,13 +910,23 @@ class RoadMesher {
     }
     if (treesOut == null) return;
     var n = 0;
-    for (final (p, along, _) in every(kept, treeSpacingM)) {
+    for (final (p, along, s0) in every(kept, treeSpacingM)) {
       final up = (p + anchorBF).normalized;
       final side = along.cross(up).normalized;
       for (final s in const [-1.0, 1.0]) {
+        // The yaw counter advances whether or not the pit is planted, so
+        // every other tree on the road is turned exactly as it was.
+        final yaw = yawOf(seed, n++);
+        if (drop &&
+            KerbCuts.blocked(cuts, s > 0 ? 1 : 0, from + s0,
+                upstreamM: cutTreeClearM,
+                downstreamM: cutTreeClearM,
+                drawnOnly: true)) {
+          continue;
+        }
         treesOut.add((
           p + side * ((inner + outer) / 2 * s) + up * walkTopLiftM,
-          yawOf(seed, n++),
+          yaw,
         ));
       }
     }
@@ -858,6 +976,13 @@ class RoadMesher {
   /// is where the curb cut and the zebra live. U samples the sidewalk tile
   /// across the walk (curb stones under 0.06, flags above); the curb face
   /// wraps the same curb band down its vertical.
+  /// With [cuts] — the road's own drawn kerb cuts (`RoadSnapshot.kerbCuts`,
+  /// §5.2), measured from the arc [arcOffset] of [pts]'s first point along
+  /// the whole road — a dropped kerb is laid where each cut is: stations at
+  /// `s0 − 1, s0, s1, s1 + 1`, the kerb edge easing from [walkTopLiftM] to
+  /// [cutTopLiftM] across the flare, and the kerb face following it down to
+  /// 2.5 cm. With no cuts the output is byte-identical to what it always
+  /// was.
   static void sidewalks(
     MeshBuilder m,
     List<Vector3> pts,
@@ -866,27 +991,49 @@ class RoadMesher {
     Vector3 anchorBF, {
     double pullStart = 0,
     double pullEnd = 0,
+    Float64List? cuts,
+    double arcOffset = 0,
   }) {
-    final kept = _trimmed(pts, pullStart, pullEnd);
-    if (kept == null) return;
+    final trimmed = _trimmedFrom(pts, pullStart, pullEnd);
+    if (trimmed == null) return;
+    var kept = trimmed.$1;
+    final from = arcOffset + trimmed.$2;
+    final drop = cuts != null && cuts.isNotEmpty;
+    if (drop) {
+      var total = 0.0;
+      for (var i = 1; i < kept.length; i++) {
+        total += (kept[i] - kept[i - 1]).length;
+      }
+      kept = _withStations(kept, _cutStations(cuts, from, from + total));
+    }
 
     for (final s in const [-1.0, 1.0]) {
+      final sideBit = s > 0 ? 1 : 0;
       int? pIn, pOut, pCurbT, pCurbB;
       var v = 0.0;
+      var arc = from;
       for (var i = 0; i < kept.length; i++) {
         final p = kept[i];
         final up = (p + anchorBF).normalized;
         final ahead = i + 1 < kept.length ? kept[i + 1] - p : p - kept[i - 1];
         final along = ahead.length > 1e-6 ? ahead.normalized : Vector3.unitX;
         final side = along.cross(up).normalized;
-        if (i > 0) v += (p - kept[i - 1]).length / 9.6; // four flags a tile
+        if (i > 0) {
+          final step = (p - kept[i - 1]).length;
+          v += step / 9.6; // four flags a tile
+          arc += step;
+        }
+        final top = drop ? kerbTopLiftAt(cuts, sideBit, arc) : walkTopLiftM;
         final inner = p + side * (halfWidth * s);
         final outer = p + side * ((halfWidth + pavementM) * s);
         // The face looks at the carriageway.
         final curbN = side * -s;
-        final iIn = m.vertex(_s(inner + up * walkTopLiftM), up, 0.03, v);
+        // Only the KERB EDGE drops: the back of the walk keeps its height,
+        // so the flags ramp across their width, which is what a dropped
+        // kerb is.
+        final iIn = m.vertex(_s(inner + up * top), up, 0.03, v);
         final iOut = m.vertex(_s(outer + up * walkTopLiftM), up, 0.97, v);
-        final iCt = m.vertex(_s(inner + up * walkTopLiftM), curbN, 0.03, v);
+        final iCt = m.vertex(_s(inner + up * top), curbN, 0.03, v);
         final iCb = m.vertex(_s(inner + up * ribbonLiftM), curbN, 0.055, v);
         if (pIn != null) {
           // Winding follows the ribbon's convention; the s < 0 strip runs
@@ -927,11 +1074,14 @@ class RoadMesher {
     RoadClass cls, {
     double liftM = 0,
     double? offsetM,
+    Float64List? cuts,
+    double arcOffset = 0,
   }) {
     final scale = halfWidthM / 4.0; // street half-width is 4 m
     final spacing = 34.0 * math.sqrt(math.max(scale, 0.25));
     final height = 9.0 * math.sqrt(math.max(scale, 0.25));
     final both = cls != RoadClass.street;
+    final shift = cuts != null && cuts.isNotEmpty;
     var travelled = 0.0;
     var next = spacing * 0.5;
     var flip = 1.0;
@@ -946,14 +1096,49 @@ class RoadMesher {
       final side = along.cross(up).normalized;
       final offset = offsetM ?? halfWidthM + 1.2;
       for (final s in both ? const [1.0, -1.0] : [flip]) {
+        // A column standing in a dropped kerb moves to the cut's end plus a
+        // metre (`KerbCuts.shiftOut`), the same station the lighting pass
+        // gives it.
+        var at = p, dir = along, radial = up, across = side;
+        if (shift) {
+          final want = arcOffset + travelled;
+          final moved = KerbCuts.shiftOut(cuts, s > 0 ? 1 : 0, want);
+          if ((moved - want).abs() > 1e-9) {
+            final sample = _sampleAt(pts, moved - arcOffset);
+            if (sample != null) {
+              at = sample.$1;
+              dir = sample.$2;
+              radial = (at + anchorBF).normalized;
+              across = dir.cross(radial).normalized;
+            }
+          }
+        }
         // On the raised walk when there is one — a column standing on the
         // old bare-drape height would float a curb's worth over the flags.
-        final base = p + side * (offset * s) + up * (0.1 + liftM);
-        column(solid, base, up, along, height);
-        head(glow, base + up * height, up, along);
+        final base = at + across * (offset * s) + radial * (0.1 + liftM);
+        column(solid, base, radial, dir, height);
+        head(glow, base + radial * height, radial, dir);
       }
       flip = -flip;
     }
+  }
+
+  /// The point of [pts] at arc [s] from its first, with the direction of the
+  /// segment it falls on; null when [s] is off the polyline.
+  static (Vector3, Vector3)? _sampleAt(List<Vector3> pts, double s) {
+    if (pts.length < 2 || s < 0) return null;
+    var d = 0.0;
+    for (var i = 1; i < pts.length; i++) {
+      final seg = pts[i] - pts[i - 1];
+      final len = seg.length;
+      if (len < 1e-6) continue;
+      if (s <= d + len) {
+        final dir = seg * (1 / len);
+        return (pts[i - 1] + dir * (s - d), dir);
+      }
+      d += len;
+    }
+    return null;
   }
 
   /// A galvanised column: a mast, a lamp post, a sign post. Its faces map
