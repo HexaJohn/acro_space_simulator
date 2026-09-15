@@ -402,6 +402,39 @@ void main() {
       );
     });
 
+    test('a sampled road through the lot fronts no edge, whichever way it runs',
+        () {
+      // Controls every 5 m, so the index holds 2 m samples: the segments
+      // either side of the crossing one lie just outside the edges.
+      final ns = RoadSpline(
+        id: 'ns',
+        controls: [for (var n = -100.0; n <= 100; n += 5) Vec2(30, n)],
+        roadClass: RoadClass.street,
+      );
+      final ew = RoadSpline(
+        id: 'ew',
+        controls: [for (var e = -100.0; e <= 100; e += 5) Vec2(e, 30 + e / 400)],
+        roadClass: RoadClass.street,
+      );
+      final fallback = SiteFrame.of(square, null, empty)!;
+      for (final road in [ns, ew]) {
+        final roads = roadsOf([road]);
+        expect(effectiveFrontage(square, roads), isNull, reason: road.id);
+        final frame = SiteFrame.of(square, null, roads)!;
+        expect(frame.usedEffectiveFrontage, isTrue, reason: road.id);
+        expectVec(frame.origin, fallback.origin);
+        expectVec(frame.u, fallback.u);
+      }
+      // The through road does not hide a real frontage beside it.
+      final roads = roadsOf([
+        ns,
+        street('south', const Vec2(-100, 4), const Vec2(100, 4)),
+      ]);
+      final f = effectiveFrontage(square, roads)!;
+      expectVec(f.$1, const Vec2(10, 10));
+      expectVec(f.$2, const Vec2(50, 10));
+    });
+
     test('no road in reach: the longest edge, flagged effective', () {
       const lot = [Vec2(0, 0), Vec2(40, 0), Vec2(40, 10), Vec2(0, 10)];
       final frame = SiteFrame.of(lot, null, empty)!;

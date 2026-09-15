@@ -165,6 +165,31 @@ Vec2 interiorPoint(List<Vec2> polygon) {
 
   final box = Box2.of(p);
   final slack = reachM + _maxEligibleHalfWidth;
+
+  // A road through the lot has its nearest point ON the lot, never outside
+  // an edge: it fronts no edge at all. Judged per road, not per sample
+  // segment, since a sampled road's segments beside the crossing one lie just
+  // outside the edge. Only looked up, never iterated.
+  final xs = [for (final q in p) q.e];
+  final ys = [for (final q in p) q.n];
+  final through = <int>{};
+  roads.visit(box, 0, (slot, rec, seg) {
+    if (through.contains(slot)) return;
+    final q1 = rec.sampleAt(seg);
+    if (_ringContains(xs, ys, q1.e, q1.n)) {
+      through.add(slot);
+      return;
+    }
+    if (seg == 0) return;
+    final q0 = rec.sampleAt(seg - 1);
+    for (var k = 0; k < m; k++) {
+      if (_segmentsCross(p[k], p[(k + 1) % m], q0, q1)) {
+        through.add(slot);
+        return;
+      }
+    }
+  });
+
   for (var k = 0; k < m; k++) {
     final a = p[k], b = p[(k + 1) % m];
     final edge = b - a;
@@ -173,14 +198,12 @@ Vec2 interiorPoint(List<Vec2> polygon) {
     final tEdge = edge * (1 / edgeLen);
     roads.visit(box, slack, (slot, rec, seg) {
       if (seg == 0) return; // a one-sample road has no tangent
+      if (through.contains(slot)) return;
       if (!isEligibleJoinRoad(rec.road.roadClass)) return;
       final q0 = rec.sampleAt(seg - 1), q1 = rec.sampleAt(seg);
       final roadDir = q1 - q0;
       final roadLen = roadDir.length;
       if (roadLen <= 1e-9) return;
-      // A road crossing the edge has its nearest point ON it, never outside:
-      // it is not this edge's frontage.
-      if (_segmentsCross(a, b, q0, q1)) return;
 
       // The true nearest pair of the two segments. Candidates in a fixed
       // order; the first strictly nearest is kept.
