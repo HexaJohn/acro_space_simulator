@@ -2832,6 +2832,18 @@ Drawing a new road never teleports a car: routes remap through the split, lots r
 - E27, `_vehicleUnder` and `_inspectCityAt` only (the tool early returns come in slices 8 and 9);
 - E29, E30, E32.
 
+**Agreed with the road side on 2026-09-15.** This supersedes the drawer and the separate V view above.
+- **Lane speed is a fourth `TrafficInfoView`** (`'Lane speed'`) inside the road agent's Traffic tool. There is no Traffic drawer.
+  - Traffic supplies the overlay nodes and the data behind a small provider API.
+  - The only edits in their files are minimal wiring: the enum value in road_tool_controller.dart, and one tab plus a switch arm in road_tool_panel.dart and road_tool_scene.dart that call the provider. They are flagged at merge.
+  - **V** and the **Flow chip** both open the Traffic tool on Lane speed. The `traffic` panel (E29) routes to the tool.
+  - A vehicle pick comes before the site sheet in the default inspect path, and on Lane speed. Routes' road click is unchanged.
+- **E3a and the tick pin.** E3a lands after the road side's R2 merge: city_sim.dart, city_layout.dart and city_starter_kit.dart stay untouched until then. The pin becomes "siteAccess.sync runs before agents.advance, and before roadTraffic.advance whenever that runs" (site_access_tick_order_test).
+- **Wire and capture.** R3 owns world_snapshot.dart and city_nodes.dart. Any wire or capture change slice 2 needs stays small and is announced first.
+- **Economy rules.** Reach rules, `RoadNoiseSampler` and the land-value and tax formulas do not change in R2–R4. Reach builds on join slot 0 (`lotPiece`/`lotS`/`lotDirs`).
+- **The economy probe.** From R2, the four starter easement lots (lot-r0x1-l10, lot-r0x0-l0, lot-r0x0-r1, lot-r0x1-r5) refuse growth, so the probe must not count on them.
+- **Merge order:** R2, slice 2, then R3.
+
 **Acceptance:** §17.3 #1 (full) and #2; `edge_delay_test`, including the empty-network case; the inspector's `describe` matches `vehicle=`; overlay rebuilds limited to 0.5 Hz; `agent_reach_test`; the road agent's economy probe (`road_traffic_economy_test`'s starter town, zoned all three ways) still grows all three ways with agents on; `roadTraffic.advance` never runs in an agent colony (a counter pinned at 0).
 
 ### Slice T4a — Site networks and lot parking — L, depends on slice 1 and the road side's R1 + R2a; scheduled after slice 2
