@@ -272,6 +272,21 @@ Int32List), so the heap cost is ≤ 10 objects per 1024 sites, i.e. ≤ 1 retain
 (copy-on-write, §4.1) and the book swaps its reference; the old chunk stays valid for as long as anything references
 it. Limbo plans (§7.6) and cars mid-manoeuvre hold the old chunk and keep reading it unchanged.
 
+**Deviations (R2a, as built):**
+- Three index columns are added: `viaPt`, `pavePt`, `pathPt`. `segViaStart`, `paveStart` and `pathStart` are CSR into
+  them (plan-local), and they hold plan-local point indices. Without them vias, rings and paths would need contiguous
+  point runs. A CSR column inside a plan has count + 1 rows per site, so its rows for site k start at its count
+  family's start + k. The chunk has 104 logical columns (`SiteCol`). No logical column is u16, so the u8 backing is
+  plain bytes. Column accessors live on the chunk (chunk-global rows) and on the plan (plan-local indices).
+- `joinRoadIdIdx` is reserved and written −1: a road-id string table would break the 7-object bound.
+- `RoadGraph` has no `structureStamp` yet. `PlanBuilder` stores the caller's int, and R2's book supplies the stamp.
+- `rev` hashes each site's family counts instead of the chunk-global starts. It excludes the graph resolution
+  (`graphStamp`, `graphLot`, `joinRef`, `joinPiece`, `joinRoadNo`, `joinRoadIdIdx`), so re-resolving a plan against a
+  new graph keeps its `rev`. `rev` and `stallKey` are stored signed (`toSigned(32)`), and `stallIndexOfKey` accepts
+  either sign.
+- `PlanBuilder` computes what no generator may get wrong: `segLenM`, stall order `(seg, s, side)` and stall keys.
+  The heading octant has sectors centred on multiples of 45° from `u`, picked by comparison with tan 22.5°.
+
 ### 2.4 Invariants (the validator; `assert` in the builder, always in tests)
 
 - **V1 Window.** For each `cut` join, `joinRoadS ± joinCutHalfM` lies inside the slot window (§3.2). On EVERY
@@ -375,6 +390,28 @@ it. Limbo plans (§7.6) and cars mid-manoeuvre hold the old chunk and keep readi
   - Access corridors are clear of other manual parcels, of built auto lots, and of every other at-grade road's
     carriageway and pavement; the unbuilt auto lots they cross are easements (§3.7a).
 
+**Deviations (R2a, as built, `site_plan_validator.dart`):** each rule belongs to exactly one V, so one defect is
+reported under one name.
+- V1 reads `kerbWindows`, which hold for every override. Given lane graphs' spans (`SiteLaneSpans`, a record, so
+  `site_access/` imports no traffic), it also checks `[edgeLaneS0 + 6, edgeLaneS1 − 6]` and the home swing margin
+  `t − 12 ≥ edgeLaneS0`. The window form of the swing margin is `[s − 6, s + m]` forward and `[s − m, s + 6]` backward.
+- V4 also requires `kPlanNetwork` ⇔ segments ⇔ a program other than `none`/`kerbOnly`, and cut joins only on a network
+  plan. Cuts on one piece need `|Δs| ≥ max(m₁ + m₂, 6)`.
+- V5 owns a throat's via spacing, and V8 owns every other segment's and all widths. V7 owns circles ≥ 6 m. V13 owns
+  the ≥ 12.5 m truck circle, which may be a pass-through node (the installation yard `Y`). V9 owns stall direction
+  bits: V7's home-pad exception asks only for ≥ 1 stall, all `inline`, and only in a `homeDriveway` plan.
+- V7's strong connectivity counts `SiteLaneGraph`'s road links (§2.5). A kerb node has site degree 1, so without them
+  no site is strongly connected. A role-only break (no out-capable join) therefore also fails V7.
+- V9: a perpendicular or angled stall's nose is tested against the vector from the centreline point at `stallS`
+  to its centre. An inline or parallel stall's nose is tested against the tangent there. An inline stall "lies on
+  its pad" when its centre is within half the pad width of the centreline. A stall is tested for overlap against
+  every segment except its own (the mouth edge).
+- V10's segment ranks are: throats in join order, then aisles by `(y, x)`, then access-road and non-throat driveway
+  pieces, then aprons. "Path order" inside a rank is not checkable and is not checked.
+- V11: a kerbside plan's `pavementPt` lies within 3.5 m of slot 0's kerb point.
+- Not checked in R2a (they need the parcel and the corridor, R2): paving inside `parcel ∪ corridor`, and corridor
+  clearance. Checked as `geometry`: finite numbers, convex CCW pave rings, and paving ∩ envelope = ∅.
+
 ### 2.5 Site lanes: the one definition of connectivity (`site_lane_graph.dart`)
 
 - Segment `k` gives lane `2k` (from→to) and `2k+1` (to→from), present per `segLaneMode`. `twoWay` lane centres sit
@@ -387,6 +424,9 @@ it. Limbo plans (§7.6) and cars mid-manoeuvre hold the old chunk and keep readi
 - `SiteLaneGraph.of(plan)` returns CSR adjacency, `present[]`, `strongComponent[]`, `inLane(join)` and
   `outLane(join)`. It allocates and runs only at build and sync. If traffic copies the rule, a test pins the
   copy equal on the fixtures.
+- **As built (R2a):** links carry a kind: movement, U-turn, inline stall (homes only) and ROAD. A road link runs from
+  every out-capable cut join's out-lane to every in-capable one's in-lane. It stands for the road between EXIT and
+  ENTER, so strong connectivity means something for a site. It is never a site path.
 
 ---
 
@@ -1013,6 +1053,11 @@ lot-r0x0-r1, lot-r0x1-r5}` (spaceport, solar farm, farm, pump), and 78 of the 82
 | Corridor search per set-back lot (§3.7a, in `RoadGraph.of`) | ≤ 200 µs |
 | Full drain, 127k-building generated town | `Σ_p count_p × unitBudget_p` over the program mix, ≤ 3 s, inside generation/load progress only |
 | Memory | ≤ 1 retained object per 100 sites (§2.3 packing); ≤ 512 B per home site; ≤ 4 KB per 50-stall car park |
+
+**Measured (R2a):** a chunk retains 7 objects at 1, 64 and 1024 sites. The §2.3 column set packs the HOME fixture in
+753 B per site, not ≤ 512 B: the site row is about 137 B, two stalls 112 B, and each point 26 B (3 nodes, a 4-point
+pave, a 2-point path, door, pavement). `site_access_chunk_test` pins ≤ 768 B. R2's bench settles the target, for
+example with parametric home rows (§10.1).
 
 **The drain budget is a sum, not a guess.** R1's sprawl audit already counts lots per road class on the sprawl
 audit fixture; R2 adds program counts, and the generation bench prints the mix and the sum next to the measured
@@ -1809,6 +1854,16 @@ by `SyntheticSites.placeAt(graph, lotId, template)`:
 | LOOP | in-join and out-join, one-way loop, angled60 stalls |
 | UTILITY | 56 m throat with vias to `F`, yard circle `Y`, gate `G` on the fence line (hammerhead (a)), connector to an aisle loop with 20 stalls, 2 bays |
 | KERBSIDE | kerbside only |
+
+**As built (R2a):** `SyntheticSites.draftAt/placeAt(graph, lotId, SyntheticTemplate)`. All fixtures stand on the
+starter kit and pass V1–V13 on its graph under all five A2 override kinds. They differ from the table as follows:
+- STRIP's throat is 11.5 m (the §3.5 F1-double shape) and its aisle is 42 m.
+- LOOP is a corner lot's one-way through drive, in at slot 0 and out at the side-street slot 2 (`joinRef ≤ −2`), with
+  3 `angled60` stalls. It is not a closed ring.
+- UTILITY's 20 stalls sit inside a two-way aisle ring.
+- Every segment over 24 m carries vias (V8).
+- Two templates are added: YARD (a 7 m truck throat, an aisle, an apron with 2 bays and a 12.5 m circle) and
+  FOOTPRINT (STRIP on `attachFootprintJoins` slot 0, `graphLot` −1, `joinRef` −1).
 
 ---
 

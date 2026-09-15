@@ -31,6 +31,8 @@ import 'parcel.dart';
 import 'road_catalog.dart';
 import 'road_junction.dart';
 import 'road_noise.dart';
+import 'site_access/site_access_constants.dart'
+    show kJoinRefNone, kJoinRefSideStreetBase, kJoinSlotSideStreet;
 import 'site_access/site_join.dart';
 import 'spatial_index.dart';
 
@@ -389,6 +391,54 @@ class RoadGraph {
 
   /// The side-street slots asked for so far, by graph lot index.
   final Map<int, JoinSlot?> _sideStreetJoins;
+
+  /// The join handle (docs/plans/site-access.md §2.3) of slot [slot] of graph
+  /// lot [lot]: the packed join index for slot 0 or 1
+  /// (`lotJoinStart[lot] + slot`), `kJoinRefSideStreetBase − lot` for the
+  /// side-street slot 2, or `kJoinRefNone` (−1) when the lot has no such
+  /// slot. Slot 2 is placed on the first ask ([sideStreetJoinOf]). Sync and
+  /// tests only; never per sub-step.
+  ///
+  /// Every copy sharing this graph's structure ([sharesStructureWith])
+  /// answers the same.
+  int joinRefOf(int lot, int slot) {
+    if (lot < 0 || lot >= lotCount) return kJoinRefNone;
+    if (slot == kJoinSlotSideStreet) {
+      return sideStreetJoinOf(lot) == null
+          ? kJoinRefNone
+          : kJoinRefSideStreetBase - lot;
+    }
+    if (slot < 0 || slot > 1) return kJoinRefNone;
+    final k = lotJoinStart[lot] + slot;
+    return k < lotJoinStart[lot + 1] ? k : kJoinRefNone;
+  }
+
+  /// The join slot a handle from [joinRefOf] names, or null for
+  /// `kJoinRefNone` or a handle this graph does not hold. Sync and tests
+  /// only: it allocates.
+  JoinSlot? joinOfRef(int ref) {
+    if (ref >= 0) {
+      if (ref >= joinCount) return null;
+      return JoinSlot(
+        piece: joinPiece[ref],
+        s: joinS[ref],
+        dirs: joinDirs[ref],
+        right: joinRight[ref] == 1,
+        flags: joinFlags[ref],
+        roomM: joinRoomM[ref],
+        kerbE: joinKerbE[ref],
+        kerbN: joinKerbN[ref],
+        normE: joinNormE[ref],
+        normN: joinNormN[ref],
+        crossLots: List.unmodifiable(
+            joinCrossLot.sublist(joinCrossStart[ref], joinCrossStart[ref + 1])),
+      );
+    }
+    if (ref == kJoinRefNone) return null;
+    final lot = kJoinRefSideStreetBase - ref;
+    if (lot < 0 || lot >= lotCount) return null;
+    return sideStreetJoinOf(lot);
+  }
 
   /// The landing site's place on the network — where the colony meets the
   /// rest of the world, and so where goods it does not make arrive from:
