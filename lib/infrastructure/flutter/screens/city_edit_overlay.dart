@@ -154,7 +154,11 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
       case CityEditTool.utility:
         applyToParcel(city, parcelId);
       case CityEditTool.zone:
-        city.layout.setUse(parcelId, _useForKind());
+        // An access easement refuses zoning (site-access.md §3.7a): say whose.
+        if (!city.layout.setUse(parcelId, _useForKind())) {
+          final note = city.lotInspectorNote(parcelId);
+          if (note != null) blocked = 'This lot is an $note.';
+        }
         notifyListeners();
       case CityEditTool.bulldoze:
         city.clearParcel(parcelId);
@@ -192,7 +196,8 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
       return;
     }
     if (!city.placeOnParcel(parcelId, spec)) {
-      blocked = 'That lot is taken.';
+      final note = city.lotInspectorNote(parcelId);
+      blocked = note == null ? 'That lot is taken.' : 'This lot is an $note.';
       return;
     }
     city.stock['ore'] = city.stockOf('ore') - spec.buildCost;

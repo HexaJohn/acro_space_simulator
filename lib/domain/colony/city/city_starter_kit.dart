@@ -23,6 +23,7 @@ import 'city_config.dart';
 import 'city_sim.dart';
 import 'commodity.dart';
 import 'parcel.dart';
+import 'site_access/site_access_book.dart';
 import '../../universe/celestial_body.dart';
 
 /// How much rope the colony is given, as one pick on the setup screen.
@@ -262,6 +263,12 @@ class CityStarterKit {
     // starts where the colony does and the first banner the player sees is a
     // tier they actually climbed.
     sim.claimMilestones();
+
+    // Every site's access plan, drained in full (docs/plans/site-access.md
+    // §4.1, §3.7a rule 3): the starter easements exist before the player can
+    // zone a lot.
+    sim.siteAccess.sync(sim, sim.roadGraph,
+        maxUnits: SiteAccessBook.unlimited, maxChecks: SiteAccessBook.unlimited);
     return sim;
   }
 

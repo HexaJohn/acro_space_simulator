@@ -41,6 +41,7 @@ import 'road_junction.dart';
 import 'road_names.dart';
 import 'road_traffic_model.dart';
 import 'shuttle_run.dart';
+import 'site_access/site_access_book.dart';
 import 'sprawl_plan.dart';
 import 'commodity.dart';
 import 'traffic/city_agents.dart';
@@ -1705,7 +1706,14 @@ class CitySim {
 
     // 5.9 Parcel-city dynamics: zoned lots grow under demand, roads load
     // up, fires burn along blocks.
+    // Site access plans first (docs/plans/site-access.md §4.1): every consumer
+    // this tick — the routed model, the agents — sees one book, and a plan
+    // made this tick is visible to the agents this tick.
+    debugTickProbe?.call('siteAccess.sync');
+    siteAccess.sync(this, roadGraph);
+    debugTickProbe?.call('roadTraffic.advance');
     roadTraffic.advance(dt);
+    debugTickProbe?.call('agents.advance');
     if (agents.enabled) agents.advance(dt);
     advanceParcelGrowth(dt);
     advanceParcelTraffic();
@@ -3440,6 +3448,33 @@ class CitySim {
   /// allocates nothing, so a colony that never enables them pays nothing.
   late final CityAgents agents = CityAgents(this);
 
+  /// The colony's site access plans (docs/plans/site-access.md §4.1):
+  /// driveways, car parks and access roads, derived from the layout, the
+  /// buildings and the road graph, synced from [advance]. Never saved.
+  /// Creating it hands the layout its easement lookup (§3.7a).
+  late final SiteAccessBook siteAccess = () {
+    final book = SiteAccessBook();
+    layout.easementOf = book.easementOf;
+    return book;
+  }();
+
+  /// Tests only: told each phase of [advance]'s parcel-city step by name,
+  /// in order (`siteAccess.sync`, `roadTraffic.advance`, `agents.advance`).
+  void Function(String phase)? debugTickProbe;
+
+  /// Bumped whenever a grown lot's building changes tier (construction
+  /// finished, a density upgrade or decline, the lot cleared by decay): the
+  /// site access book re-checks the colony's sites on it (§4.2).
+  int parcelTierRevision = 0;
+
+  /// The inspector's note for lot [lotId]: `access easement for <site name>`
+  /// while the lot is an access easement (§3.7a), else null.
+  String? lotInspectorNote(String lotId) {
+    final site = layout.easementOf?.call(lotId);
+    if (site == null) return null;
+    return 'access easement for ${siteSpec(site)?.label ?? site}';
+  }
+
   /// The routed traffic model: a directed graph of the roads, trips
   /// assigned over it, and what the lots get from it — whether a fire
   /// engine and a delivery lorry can reach them the right way round the
@@ -3625,6 +3660,7 @@ class CitySim {
   /// ([_dropLostLots]).
   void _carryRenamedLots(Map<String, String> renamed) {
     agents.onLotsRenamed(renamed);
+    siteAccess.onLotsRenamed(renamed);
     for (final e in renamed.entries) {
       final placed = parcelBuildings.remove(e.key);
       if (placed != null) parcelBuildings[e.value] = placed;
@@ -4278,12 +4314,24 @@ class CitySim {
   void advanceParcelGrowth(double dt) {
     if (layout.parcels.isEmpty) return;
     final net = parcelNetwork();
+    final easementOf = layout.easementOf;
+    // A grown lot's building tier: none, low, medium, high.
+    int tier(double? p) => p == null || p < parcelConstructFrac
+        ? 0
+        : p >= 3.0
+            ? 3
+            : p >= 2.0
+                ? 2
+                : 1;
     for (final parcel in layout.parcels) {
       final kind = zoneKindOf(parcel.use);
       if (kind == null) continue;
       if (parcelBuildings.containsKey(parcel.id)) continue;
+      // An access easement never grows; its zoning stays, inert (§3.7a).
+      if (easementOf != null && easementOf(parcel.id) != null) continue;
       final demand = infiniteDemand ? 1.0 : demandFor(kind);
       final cur = grownParcels[parcel.id] ?? 0;
+      final tierBefore = tier(grownParcels[parcel.id]);
       // Shops and works need their goods delivered: a lot no lorry can
       // reach the right way round does not grow, and what stands declines.
       final delivered =
@@ -4295,14 +4343,16 @@ class CitySim {
         } else {
           grownParcels[parcel.id] = next;
         }
+        if (tier(next <= 0 ? null : next) != tierBefore) parcelTierRevision++;
         continue;
       }
       // Homes come up slower beside a loud road.
       final quiet = kind == 'residential'
           ? 1 - 0.5 * trafficReadout.noiseOf(parcel.id)
           : 1.0;
-      grownParcels[parcel.id] =
-          math.min(3.2, cur + dt * 0.03 * demand * quiet);
+      final next = math.min(3.2, cur + dt * 0.03 * demand * quiet);
+      grownParcels[parcel.id] = next;
+      if (tier(next) != tierBefore) parcelTierRevision++;
     }
   }
 
@@ -4412,10 +4462,11 @@ class CitySim {
 
 
   /// Place [spec] on the parcel [parcelId]. Returns false if that parcel is
-  /// unknown or already built on.
+  /// unknown, already built on, or an access easement (§3.7a).
   bool placeOnParcel(String parcelId, CityBuildingSpec spec) {
     if (parcelBuildings.containsKey(parcelId)) return false;
     if (layout.parcelById(parcelId) == null) return false;
+    if (layout.easementOf?.call(parcelId) != null) return false;
     parcelBuildings[parcelId] = spec;
     return true;
   }
@@ -4888,6 +4939,7 @@ class CitySim {
       }
     }
     agents.onLotsRenamed(moved);
+    siteAccess.onLotsRenamed(moved);
     // Anything whose ground is simply gone (built over by the new plot) is
     // dropped rather than left dangling against a lot that no longer exists
     // — by the same rule a road edit drops it.
@@ -4998,6 +5050,8 @@ class CitySim {
     if (!layout.canAddManualParcel(poly)) {
       return 'Blocked — the site crosses a road or another plot.';
     }
+    final corridor = _corridorBlockedReason(poly);
+    if (corridor != null) return corridor;
     if (layout.roads.isEmpty) return 'No road to serve it.';
     var best = double.infinity;
     for (final v in [...poly, centre]) {
@@ -5009,6 +5063,17 @@ class CitySim {
           '${siteAccessReachM.round()} m.';
     }
     return null;
+  }
+
+  /// Why a new plot [polygon] may not be staked: it overlaps a live access
+  /// corridor (docs/plans/site-access.md §3.7a rule 5); null when it does
+  /// not.
+  String? _corridorBlockedReason(List<Vec2> polygon) {
+    final hits = siteAccess.corridorHits(polygon);
+    if (hits.isEmpty) return null;
+    final site = hits.first;
+    return 'Blocked — the site crosses the access road to '
+        '${siteSpec(site)?.label ?? site}.';
   }
 
   /// Stake out a plot for [spec] at [centre] and build on it.
@@ -5029,7 +5094,9 @@ class CitySim {
       Vec2? facing,
       /// Whether the ground is levelled for the plot; see [RoadSpline.graded].
       bool graded = true}) {
-    final why = checkAccess ? siteBlockedReason(spec, centre) : null;
+    final why = checkAccess
+        ? siteBlockedReason(spec, centre)
+        : _corridorBlockedReason(siteFootprint(spec, centre));
     if (why != null) {
       blocked = why;
       return null;
@@ -5092,6 +5159,7 @@ class CitySim {
     if (landerPad == parcelId) landerPad = null;
     layout.setUse(parcelId, ParcelUse.unzoned);
     agents.onLotCleared(parcelId);
+    siteAccess.onLotCleared(parcelId);
   }
 
   // ---- Spaceport traffic: relief missions + scheduled deliveries ----

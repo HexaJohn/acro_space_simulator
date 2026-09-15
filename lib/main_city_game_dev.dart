@@ -40,6 +40,8 @@
 ///   step=S                         run the colony S seconds headless
 ///   vehicle=H                      one vehicle, its route lane by lane
 ///   traffic=stats | graph=audit    the agents' numbers; their lane graph
+///   site=plan&id=SITE              a site's access plan as JSON
+///                                  (docs/plans/site-access.md §4)
 library;
 
 import 'dart:convert';
@@ -56,6 +58,7 @@ import 'domain/colony/city/city_progression.dart';
 import 'domain/colony/city/city_sim.dart';
 import 'domain/colony/city/city_starter_kit.dart';
 import 'domain/colony/city/parcel.dart';
+import 'domain/colony/city/site_access/site_access_book.dart';
 import 'domain/colony/city/traffic/agent_kind.dart';
 import 'domain/colony/city/traffic/building_table.dart';
 import 'domain/colony/city/traffic/city_agents.dart';
@@ -296,7 +299,27 @@ Map<String, Object?> _agentHooks(CitySim c, Map<String, String> p) {
   if (h != null) did['vehicle'] = a.describe(h);
   if (p['traffic'] == 'stats') did['traffic'] = _trafficStats(c);
   if (p['graph'] == 'audit') did['graph'] = _graphAudit(a);
+  if (p['site'] == 'plan') did['site'] = _sitePlan(c, p['id']);
   return did;
+}
+
+/// `site=plan&id=<siteId>` (docs/plans/site-access.md §9 R2): the site's
+/// access plan as JSON, whether it is current for the colony's road graph,
+/// stale, or an easement, and what the book's last sync did.
+Map<String, Object?> _sitePlan(CitySim c, String? id) {
+  final book = c.siteAccess;
+  final plan = id == null ? null : book.planOf(id);
+  return {
+    'id': id,
+    'slot': id == null ? -1 : book.slotOf(id),
+    'current': id != null && book.isCurrentFor(id, c.roadGraph),
+    'stale': id != null && book.isStale(id),
+    'easementFor': id == null ? null : book.easementOf(id),
+    'sitesRev': book.sitesRev,
+    'chunks': book.chunks.length,
+    'lastSync': book.lastSync.toJson(),
+    'plan': plan == null ? null : sitePlanJson(plan),
+  };
 }
 
 /// `e,n;e,n;…` as colony-local points; a malformed pair is skipped.
