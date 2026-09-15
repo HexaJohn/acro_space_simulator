@@ -7,6 +7,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:acro_space_simulator/application/snapshot/world_snapshot.dart';
+import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/colony/city/sprawl_plan.dart'
     show kMileM;
@@ -14,6 +15,8 @@ import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_bucketing.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_columns.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import '../application/site_town_fixture.dart';
 
 /// The cut is incremental: a tile whose structure key held is kept as
 /// built, nodes and all. So the key must move for every change the tile's
@@ -906,4 +909,234 @@ void main() {
         '${plan.tiles.length} tiles in ${ms.toStringAsFixed(1)} ms');
     expect(ms, lessThan(5000));
   });
+
+  _siteAccessKeys();
 }
+
+/// Site access in the cut (docs/plans/site-access.md §5.3, §8.3 R3), on a
+/// real colony's frame: with the knob off, membership and every key are what
+/// a frame without site access gives; on, the sites are cut in and keyed, a
+/// tile without them keys as before, one plan change re-keys exactly the
+/// site's tile and its join road's tile, and the gate sees the change.
+void _siteAccessKeys() {
+  group('site access keys', () {
+    late CitySim city;
+    late WorldSnapshot snap;
+    late Map<String, Vector3> anchors;
+    // Small tiles, so a site, its road and their neighbours part.
+    const tileM = 160.0;
+
+    setUpAll(() {
+      city = siteTown();
+      snap = captureSiteTown(city);
+      final b = snap.buildings.values.first;
+      anchors = {b.body: Vector3(b.px, b.py, b.pz)};
+    });
+
+    /// [s] without anything site access put on it.
+    WorldSnapshot stripped(WorldSnapshot s) => WorldSnapshot(
+          tick: s.tick,
+          vessels: s.vessels,
+          bodies: s.bodies,
+          buildings: {
+            for (final e in s.buildings.entries) e.key: _legacy(e.value),
+          },
+          roads: [for (final r in s.roads) _uncut(r)],
+          patches: s.patches,
+          roadsRevision: s.roadsRevision,
+          junctions: s.junctions,
+        );
+
+    Map<String, String> keysOf(CityBucketPlan p) =>
+        {for (final t in p.tiles.values) t.key: t.structureKey};
+
+    CityBucketPlan cutOf(WorldSnapshot s, {bool on = false}) =>
+        CityTileBucketer.bucket(s,
+            anchors: anchors, tileM: tileM, siteAccess: on);
+
+    test('off: membership and keys are exactly a frame without site access',
+        () {
+      expect(snap.sites, isNotEmpty);
+      expect(snap.roads.where((r) => r.kerbCuts.isNotEmpty), isNotEmpty);
+      final off = cutOf(snap), plain = cutOf(stripped(snap));
+      expect(keysOf(off), keysOf(plain));
+      for (final t in off.tiles.values) {
+        final p = plain.tiles[t.key]!;
+        expect(t.sites, isEmpty);
+        expect([for (final b in t.buildings) b.id], [for (final b in p.buildings) b.id]);
+        expect(t.roads.length, p.roads.length);
+        expect(t.roadHashes, p.roadHashes);
+      }
+    });
+
+    test('on: every site cut in once, its tile keyed; the rest as before', () {
+      final off = cutOf(snap), on = cutOf(snap, on: true);
+      final frame = snap.sites.single;
+      expect(on.tiles.values.fold<int>(0, (n, t) => n + t.sites.length),
+          frame.siteCount);
+      // A road's content hash never takes its cuts.
+      for (final t in on.tiles.values) {
+        final o = off.tiles[t.key];
+        if (o != null) expect(t.roadHashes, o.roadHashes);
+      }
+      var moved = 0, same = 0;
+      for (final t in on.tiles.values) {
+        final touched = t.sites.isNotEmpty ||
+            t.buildings.any((b) => b.siteSlot >= 0) ||
+            t.roads.any((r) => r.kerbCuts.isNotEmpty);
+        final was = off.tiles[t.key]?.structureKey;
+        if (touched) {
+          expect(t.structureKey, isNot(was), reason: t.key);
+          moved++;
+        } else {
+          expect(t.structureKey, was, reason: t.key);
+          same++;
+        }
+      }
+      expect(moved, greaterThan(0));
+      expect(same, greaterThan(0));
+    });
+
+    test('one plan change re-keys exactly its tile and its join road\'s', () {
+      final frame = snap.sites.single;
+      final before = cutOf(snap, on: true);
+      // A house on a street: its plan's key and its road's cut move.
+      final g = frame.chunks.single;
+      final k = [
+        for (var i = 0; i < g.siteCount; i++)
+          if (g.plan.program(i).name == 'homeDriveway') i,
+      ].first;
+      final siteTile = before.tiles.values
+          .firstWhere((t) => t.sites.any((s) => s.site == k))
+          .key;
+      final plan = g.plan.plan(k);
+      final join = [
+        for (var j = 0; j < plan.joinCount; j++)
+          if (plan.joinIsCut(j)) j,
+      ].first;
+      final roadId = city.roadGraph.roads[plan.joinRoadNo(join)].id;
+      expect(snap.roads.firstWhere((r) => r.id == roadId).kerbCuts, isNotEmpty);
+      final changed = CitySiteFrame(
+        colonyId: frame.colonyId,
+        bodyId: frame.bodyId,
+        sitesRev: frame.sitesRev + 1,
+        geometryStamp: frame.geometryStamp + 1,
+        datumRadiusM: frame.datumRadiusM,
+        up: frame.up,
+        east: frame.east,
+        north: frame.north,
+        chunks: [g.debugWithSiteKey(k, g.siteKey(k) ^ 0x5A5A)],
+      );
+      final after = WorldSnapshot(
+        tick: snap.tick,
+        vessels: snap.vessels,
+        bodies: snap.bodies,
+        buildings: snap.buildings,
+        roads: [
+          for (final r in snap.roads)
+            r.id == roadId ? _withCuts(r, [...r.kerbCuts]..[1] += 0.25) : r,
+        ],
+        patches: snap.patches,
+        roadsRevision: snap.roadsRevision,
+        junctions: snap.junctions,
+        sites: [changed],
+      );
+      final cut = cutOf(after, on: true);
+      final roadTile = cut.tiles.values
+          .firstWhere((t) => t.roads.any((r) => r.id == roadId))
+          .key;
+      final diff = CityTileBucketer.diff(keysOf(before), cut);
+      expect(diff.added, isEmpty);
+      expect(diff.removed, isEmpty);
+      expect(diff.rekeyed.toSet(), {siteTile, roadTile});
+      // Off, the same change moves nothing.
+      expect(CityTileBucketer.diff(keysOf(cutOf(snap)), cutOf(after)).rekeyed,
+          isEmpty);
+      // And the gate: the frame's sites signature moved.
+      expect(CityTileBucketer.sitesSignature(after),
+          isNot(CityTileBucketer.sitesSignature(snap)));
+    });
+
+    test('the gate\'s sites signature holds on a steady frame and moves on '
+        'a plan change', () {
+      final city = siteTown();
+      final a = captureSiteTown(city);
+      city.advance(0.5);
+      final b = captureSiteTown(city);
+      expect(CityTileBucketer.sitesSignature(b), CityTileBucketer.sitesSignature(a));
+      final lot = city.parcelBuildings.keys.firstWhere(
+          (id) => city.siteAccess.slotOf(id) >= 0 && id.startsWith('lot-r'));
+      city.clearParcel(lot);
+      city.advance(0.5);
+      final c = captureSiteTown(city);
+      expect(CityTileBucketer.sitesSignature(c),
+          isNot(CityTileBucketer.sitesSignature(a)));
+      // A gate keyed with it cuts again; without it (the knob off) the
+      // counts alone decide.
+      final gate = CityCutGate();
+      String sig(WorldSnapshot s) => 'x|${CityTileBucketer.sitesSignature(s)}';
+      expect(gate.wantsCut(a, sig(a), rangeM: 1e9, focusBF: (_) => null), isTrue);
+      gate.cut(sig(a));
+      expect(gate.wantsCut(b, sig(b), rangeM: 1e9, focusBF: (_) => null), isFalse);
+      expect(gate.wantsCut(c, sig(c), rangeM: 1e9, focusBF: (_) => null), isTrue);
+    });
+
+    test('a detail job packs the sites of the buildings it gathered', () {
+      final frame = snap.sites.single;
+      final served = [
+        for (final b in snap.buildings.values)
+          if (b.siteSlot >= 0) b,
+      ].take(7).toList();
+      final sites = CityTileBucketer.sitesOfBuildings(snap.sites, served);
+      expect([for (final s in sites) s.geometry.plan.siteId(s.site)],
+          [for (final b in served) b.id]);
+      final packed = CityTileBucketer.siteFramesOf(sites);
+      expect(packed, hasLength(1));
+      expect(packed.single.siteCount, 7);
+      expect(packed.single.chunks.single.plan.siteIds,
+          [for (final b in served) b.id]);
+      expect(identical(packed.single.up, frame.up), isTrue);
+    });
+  });
+}
+
+BuildingSnapshot _legacy(BuildingSnapshot b) => BuildingSnapshot(
+      id: b.id,
+      type: b.type,
+      colonyId: b.colonyId,
+      body: b.body,
+      px: b.px,
+      py: b.py,
+      pz: b.pz,
+      qw: b.qw,
+      qx: b.qx,
+      qy: b.qy,
+      qz: b.qz,
+      lat: b.lat,
+      lon: b.lon,
+      siteWidthM: b.siteWidthM,
+      siteDepthM: b.siteDepthM,
+      siteKindIndex: b.siteKindIndex,
+      corner: b.corner,
+      colorArgb: b.colorArgb,
+    );
+
+RoadSnapshot _withCuts(RoadSnapshot r, List<double> cuts) => RoadSnapshot(
+      colonyId: r.colonyId,
+      body: r.body,
+      points: r.points,
+      halfWidthM: r.halfWidthM,
+      roadClassIndex: r.roadClassIndex,
+      sealed: r.sealed,
+      soundWalls: r.soundWalls,
+      collector: r.collector,
+      bridges: r.bridges,
+      startHalfWidthM: r.startHalfWidthM,
+      endHalfWidthM: r.endHalfWidthM,
+      id: r.id,
+      decoration: r.decoration,
+      lifts: r.lifts,
+      kerbCuts: cuts,
+    );
+
+RoadSnapshot _uncut(RoadSnapshot r) => _withCuts(r, const []);

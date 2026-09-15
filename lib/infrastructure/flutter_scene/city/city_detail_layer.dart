@@ -55,6 +55,7 @@ import 'city_nodes.dart'
         CityStagedUpload,
         CityTileReveal,
         CityUploadByteBudget;
+import 'city_tile_bucketing.dart' show CityTileBucketer;
 import 'city_tile_columns.dart';
 import 'city_tile_mesher.dart';
 import 'city_tile_scheduler.dart';
@@ -114,7 +115,12 @@ class CityDetailWant {
     required this.epoch,
     required this.knobs,
     required this.candidates,
+    this.sites = const [],
   });
+
+  /// The frame's site access plans (`WorldSnapshot.sites`): a job packs the
+  /// gathered buildings' own while `knobs.siteAccess` is on.
+  final List<CitySiteFrame> sites;
 
   /// The body the eye is over, and the eye in its frame.
   final String bodyId;
@@ -237,6 +243,7 @@ class CityDetailLayer {
     required double epoch,
     required CityMeshKnobs knobs,
     required List<BuildingArchetype> known,
+    List<CitySiteFrame> sites = const [],
   }) =>
       CityTileRequest(
         tileKey: 'detail/$bodyId',
@@ -251,6 +258,12 @@ class CityDetailLayer {
           ends: const [],
           roadEnds: const [],
           transitEnds: const [],
+          // The gathered buildings' plans, by `siteSlot >> 10` → chunk
+          // (docs/plans/site-access.md §5.3); none while the knob is off.
+          sites: knobs.siteAccess
+              ? CityTileBucketer.siteFramesOf(
+                  CityTileBucketer.sitesOfBuildings(sites, buildings))
+              : const [],
         ),
         focusBF: focusBF,
         colonyTier: colonyTier,
@@ -403,6 +416,7 @@ class CityDetailLayer {
       epoch: want.epoch,
       knobs: want.knobs,
       known: known,
+      sites: want.sites,
     );
     final job = _job = _DetailJob(key, _cacheEpoch, frame.root, centre,
         frame.rootAnchorBF, frame.pool);

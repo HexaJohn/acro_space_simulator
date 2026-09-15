@@ -50,6 +50,15 @@
 /// Lots are the one member left out. The tiles do not draw them — the zoning
 /// node paints the plat on the UI thread (see `CityNodes`) — so a lot zoned
 /// or built moves no tile's key, and a zone stroke re-meshes nothing.
+///
+/// Site access is in (docs/plans/site-access.md §5.3), when the cut is made
+/// with `siteAccess`: each site goes to the tile its envelope centre lies in,
+/// and its key term (its plan `rev` and heights) goes into that tile's key;
+/// each building's slot and gate go in beside its kind, and each road's kerb
+/// cuts after its content hash — never INTO it, so placing a building never
+/// makes its road an edited one. A tile with no site, no served building and
+/// no cut keys exactly as it did, and a cut made without `siteAccess` keys
+/// and fills every tile exactly as it did.
 library;
 
 import 'dart:math' as math;
@@ -148,6 +157,10 @@ class CityTileBucket {
   final List<BuildingSnapshot> buildings = [];
   final List<RoadSnapshot> roads = [];
 
+  /// The site access plans whose envelope centre lies in the tile, in the
+  /// frame's order; empty unless the cut was made with `siteAccess`.
+  final List<CityTileSite> sites = [];
+
   /// Per road in [roads], its own content hash ([CityTileBucketer.roadHash]),
   /// written with the [structureKey]: what the instant edited-road path
   /// tells an edited road by.
@@ -178,9 +191,21 @@ class CityTileBucket {
   String structureKey = '';
 }
 
+/// One site of a colony's [CitySiteFrame] in a tile: its chunk geometry and
+/// its row there.
+class CityTileSite {
+  const CityTileSite(this.frame, this.geometry, this.site);
+  final CitySiteFrame frame;
+  final SiteChunkGeometry geometry;
+  final int site;
+}
+
 /// A whole cut of a frame.
 class CityBucketPlan {
   CityBucketPlan._(this.anchors);
+
+  /// Whether the cut takes site access (see the library docs).
+  bool siteAccess = false;
 
   /// Every tile, in the order the cut made them.
   final Map<String, CityTileBucket> tiles = {};
@@ -267,10 +292,12 @@ class CityTileBucketer {
     required Map<String, Vector3> anchors,
     required double tileM,
     bool keyed = true,
+    bool siteAccess = false,
   }) {
     final plan = CityBucketPlan._(Map.of(anchors))
       .._roads = snap.roads
-      .._tileM = tileM;
+      .._tileM = tileM
+      ..siteAccess = siteAccess;
     ColonyTangentBasis basisOf(String bodyId) => plan._bases.putIfAbsent(
         bodyId, () => ColonyTangentBasis.at(plan.anchors[bodyId]!));
     // The half diagonal stays the cube cell's, not the square's: it is a
@@ -384,6 +411,28 @@ class CityTileBucketer {
       }
     }
     _tableDeckEnds(plan.endHalf, deckEnds);
+    // Site access plans, each to the tile its envelope centre lies in —
+    // its building's tile once plans place buildings (§5.3) — on a body
+    // something else already anchored. The cells are held per chunk
+    // geometry, so an unchanged chunk costs a lookup per site.
+    if (siteAccess) {
+      for (final f in snap.sites) {
+        final anchor = plan.anchors[f.bodyId];
+        if (anchor == null) continue;
+        final basis = basisOf(f.bodyId);
+        for (final g in f.chunks) {
+          final cells = _siteCells(f, g, anchor, basis, tileM);
+          for (var k = 0; k < g.siteCount; k++) {
+            final ie = cells[2 * k], iN = cells[2 * k + 1];
+            final key = '${f.bodyId}/$ie/$iN';
+            (plan.tiles[key] ??= CityTileBucket(key, f.bodyId,
+                    basis.cellCentre(ie, iN, tileM), halfDiagonalM))
+                .sites
+                .add(CityTileSite(f, g, k));
+          }
+        }
+      }
+    }
     // The players' junction overrides, to the tile each lies in — and, near
     // a cell edge, to the tile across it: a junction is drawn by the tile
     // holding its seed end, which can be the neighbour's. Never a tile of
@@ -405,6 +454,88 @@ class CityTileBucketer {
     }
     if (keyed) keyTiles(plan);
     return plan;
+  }
+
+  /// The tile cell of each site of [g] (two ints a site), on the grid of
+  /// [anchor] at [tileM]: held per geometry for as long as the grid is the
+  /// same, so a cut of an unchanged chunk does no arithmetic per site.
+  static Int32List _siteCells(CitySiteFrame f, SiteChunkGeometry g,
+      Vector3 anchor, ColonyTangentBasis basis, double tileM) {
+    final held = _cellCache[g];
+    if (held != null &&
+        held.$1 == tileM &&
+        held.$2.x == anchor.x &&
+        held.$2.y == anchor.y &&
+        held.$2.z == anchor.z &&
+        identical(held.$3, f.up)) {
+      return held.$4;
+    }
+    final c = g.plan;
+    final cells = Int32List(2 * g.siteCount);
+    for (var k = 0; k < g.siteCount; k++) {
+      final (e, n) = CitySiteFrame.envelopeCentreLocal(c, k);
+      final (ie, iN) = basis.cellOf(f.localToBodyFixed(e, n, 0), tileM);
+      cells[2 * k] = ie;
+      cells[2 * k + 1] = iN;
+    }
+    _cellCache[g] = (tileM, anchor, f.up, cells);
+    return cells;
+  }
+
+  static final Expando<(double, Vector3, Vector3, Int32List)> _cellCache =
+      Expando('CityTileBucketer.siteCells');
+
+  /// [sites], per colony frame in the order they come, as frames of just
+  /// those sites (`CitySiteFrame.subset`): what a tile or a detail job
+  /// sends a worker. Empty for none, which is every tile of a cut made
+  /// without `siteAccess`.
+  static List<CitySiteFrame> siteFramesOf(List<CityTileSite> sites) {
+    if (sites.isEmpty) return const [];
+    final out = <CitySiteFrame>[];
+    var from = 0;
+    for (var i = 1; i <= sites.length; i++) {
+      if (i < sites.length && identical(sites[i].frame, sites[from].frame)) {
+        continue;
+      }
+      out.add(sites[from].frame.subset([
+        for (var k = from; k < i; k++) (sites[k].geometry, sites[k].site),
+      ]));
+      from = i;
+    }
+    return out;
+  }
+
+  /// The sites of [frames] that [buildings] are served by, in the
+  /// buildings' order, each once: what a detail job packs (§5.3,
+  /// `siteSlot >> 10` → chunk).
+  static List<CityTileSite> sitesOfBuildings(
+      List<CitySiteFrame> frames, List<BuildingSnapshot> buildings) {
+    if (frames.isEmpty) return const [];
+    final out = <CityTileSite>[];
+    for (final b in buildings) {
+      if (b.siteSlot < 0) continue;
+      for (final f in frames) {
+        if (f.colonyId != b.colonyId || f.bodyId != b.body) continue;
+        final at = f.locate(b.siteSlot);
+        if (at != null) out.add(CityTileSite(f, at.$1, at.$2));
+        break;
+      }
+    }
+    return out;
+  }
+
+  /// The frame's site access, as far as a cut gate needs it (§5.3): each
+  /// colony's `sitesRev` and geometry stamp. Appended to the gate's
+  /// signature only while `CityNodes.siteAccess` is on.
+  static int sitesSignature(WorldSnapshot snap) {
+    var h = 0x3C6EF372;
+    for (final f in snap.sites) {
+      h = _mix(h, f.colonyId.hashCode);
+      h = _mix(h, f.bodyId.hashCode);
+      h = _mix(h, f.sitesRev);
+      h = _mix(h, f.geometryStamp);
+    }
+    return h;
   }
 
   /// Give every tile with a deck on piers the ground roads of other tiles
@@ -663,7 +794,8 @@ class CityTileBucketer {
       t.structureKey = structureKeyOf(t,
           endHalf: plan.endHalf[t.bodyId] ?? const {},
           endBends: plan.endBends[t.bodyId] ?? const {},
-          transitHash: transitHash[t.bodyId] ?? 0);
+          transitHash: transitHash[t.bodyId] ?? 0,
+          siteAccess: plan.siteAccess);
     }
   }
 
@@ -817,6 +949,7 @@ class CityTileBucketer {
     required Map<int, (double, int)> endHalf,
     Set<int> endBends = const {},
     int transitHash = 0,
+    bool siteAccess = false,
   }) {
     var h = 0x2545F491;
     for (final b in t.buildings) {
@@ -836,8 +969,23 @@ class CityTileBucketer {
       h = _mixD(h, b.siteWidthM);
       h = _mixD(h, b.siteDepthM);
       h = _mix(h, b.siteKindIndex);
+      // Its plan's slot and gate, beside its kind: only for a served
+      // building of a cut that takes site access, so a legacy building
+      // keys as it did.
+      if (siteAccess && b.siteSlot >= 0) {
+        h = _mix(h, b.siteSlot);
+        h = _mixD(h, b.gateXM);
+        h = _mixD(h, b.gateWM);
+      }
       h = _mix(h, b.corner ? 1 : 0);
       h = _mix(h, b.colorArgb);
+    }
+    // Each site's key term (its plan rev and heights) and flags.
+    for (final s in t.sites) {
+      final c = s.geometry.plan;
+      h = _mix(h, s.geometry.siteSlot(s.site));
+      h = _mix(h, s.geometry.siteKey(s.site));
+      h = _mix(h, c.flags(s.site));
     }
     t.roadHashes.clear();
     var transit = false;
@@ -845,6 +993,8 @@ class CityTileBucketer {
       final rh = roadHash(r);
       t.roadHashes.add(rh);
       h = _mix(h, rh);
+      // Its kerb cuts, after its content hash and never in it.
+      if (siteAccess && r.kerbCuts.isNotEmpty) h = _mixList(h, r.kerbCuts);
       // What the body's end table says of the road's two ends — the widest
       // carriageway meeting each and how many ends meet: the pull-back and
       // the turning circle read them, and they move when a road in ANOTHER

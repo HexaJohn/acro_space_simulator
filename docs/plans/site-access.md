@@ -130,6 +130,7 @@ lib/domain/colony/city/site_access/
                                MOVED here from world_snapshot.dart:1031-1042, 1577-1605 (re-exported there)
   site_grade.dart              SiteGrade: height rule shared by shaper and capture (§6.3)
   kerb_cuts.dart               KerbCut, KerbCuts.blocked/shiftOut: shared by renderer, lighting, traffic kerb masks
+                               (R3 as built: the canonical form `canonicalOf`, `toDrawn`, `sigmaOf`; masks in R4)
   site_access_book.dart        SiteAccessBook: slots, chunks, sync, budget, renames, clears (§4)
 ```
 
@@ -1799,6 +1800,41 @@ class SiteChunkGeometry {                  // ≤ 3 retained objects: itself, on
     (dropped kerb and swing mask), 2 = a home cut's far-kerb swing mask (never drawn). Only kinds 0 and 1 are drawn.
   - The conversion (rescale + flip) is unit-tested against the canonical form within 0.5 m (§5.5).
 
+**As built (R3, `city_site_frame.dart`, `kerb_cuts.dart`).** Small deviations, each local:
+- **Frame fields.** `CitySiteFrame` also carries `datumRadiusM` and the colony's tangent frame (`up`, `east`, `north`),
+  so a renderer places a point as `up·(datum + ptUp) + east·e + north·n` from the frame alone. `SiteChunkGeometry`
+  holds `chunkIndex` and, in `i32`, `siteKey` and the book `siteSlot` per site (`CitySiteFrame.locate(slot)` finds a
+  building's row). **`siteTile` is not stored:** the application does not know the renderer's tile grid, so the cut
+  holds each geometry's cells in an `Expando` keyed by geometry identity and grid (O(1) per unchanged chunk).
+- **Cache.** `SiteCapture` hangs off the colony in an `Expando` (as `TrafficCapture` does), not a
+  `CitySim.siteGeometryCache` field: the domain holds no application type. Heights rebuild on a chunk identity change
+  or a ground stamp change (`groundCacheShaped`, `groundCacheEditCount`, the edit store's identity,
+  `drapeCacheRevision`); a rebuild whose keys and heights are unchanged keeps the old geometry. `geometryStamp` is a
+  hash of every chunk's site keys and slots AND of the canonical kerb-cut table, so it moves when a cut moves too.
+- **Book, additive API (recorded).** `SiteAccessBook.rowOfSlot(slot)`, `SiteAccessBook.graph` (the last synced
+  graph: the capture reads road ids and lengths through it and never builds a graph) and `SiteAccessBook.repack(rows)`
+  (`debugRepack` now delegates). No R2a-frozen file changed; the JSON and the tile columns read a chunk's typed lists
+  through `debugRetained`, as the book's own re-publish does.
+- **Kerb-cut cache.** The canonical table is built per (chunk set, book graph), not per `sitesRev` (a re-resolution
+  re-publishes chunks without moving `sitesRev`); each road's drawn copy is held per (layout road index, drape points
+  identity). A stale plan (§4.2 step 3) maps its `joinRoadNo` through the road ids of the graph it was resolved
+  against (the last four graphs the capture saw) to the same road id now, so it keeps drawing its cuts on roads that
+  stayed; a cut whose road is gone is left out (the edit re-cut that tile). Cut half widths are not rescaled.
+- **Heights before R5.** A pad point stands on the lot's cached `groundFor('lot:<id>')` (cells: `cellGroundRadius`);
+  a draped lot's pad point more than 24 m from the centroid takes `groundFor('site:<id>:<point>')` once per plan; a
+  kerb point stands on its road's drape at `joinRoadS` rescaled to the drape's plan arc; `blend` is linear. The
+  `padDatums` / `corridorDatums` reads arrive with R5. `stallUp` is interpolated along the stall's segment polyline;
+  `siteMaxGrade` is the steepest rise over run between consecutive segment points.
+- **Gates.** `gateXM = gateX − (envX0 + envX1)/2` (along the building's local X from the envelope centre), `gateWM =
+  gateW`; both 0 when the plan has no gate.
+- **Measured (`site_capture_test`, `flutter test` JIT).** The steady fixed part (a chunk identity compare per chunk,
+  the held frame returned) median ≤ 0.001 ms on the site town (120 sites) and a 6-block generated town (574 sites);
+  zero ground queries; no geometry or cut table rebuilt. Two parts scale with the colony and are reported, not
+  inside the 0.02 ms: each road snapshot's cut lookup (a list index and an identity compare, ~0.02–0.04 µs a road
+  on the generated town) and each building's slot lookup (one book map lookup, ~0.04–0.10 µs a building, against a
+  whole steady capture of ~8–47 µs a building). On the 127k reference town that is a few milliseconds of lookups
+  in a capture already far larger; not measured there (the R4 A/B owns it).
+
 ### 5.3 Tile cut and keys
 
 - **Gate:** `CityTileBucketer.sitesSignature(snap)` mixes `(sitesRev, geometryStamp)` per colony. It is appended to
@@ -1818,6 +1854,22 @@ class SiteChunkGeometry {                  // ≤ 3 retained objects: itself, on
     `roadLifts` (:239-240);
   - `toSnapshots()` round-trips exactly;
   - detail jobs pack the sites of gathered buildings by `siteSlot >> 10` → chunk.
+
+**As built (R3).** The knob is `CityNodes.siteAccess` (default off), carried to workers as
+`CityMeshKnobs.siteAccess` (its `keyTerms` term appended only when on, as `agentSignals`'). Off, nothing below
+happens: `sitesSignature` is not appended to the cut gate, `CityTileBucketer.bucket(siteAccess: false)` cuts no site,
+and `structureKeyOf` mixes no site term, so every tile's membership, key and mesh digest are as before
+(`city_tile_bucketing_test` "site access keys", `city_tile_mesher_test` pins with the wire fields present). On:
+- a site's key term is its book slot, `siteKey` and flags; a building's slot and gate are mixed only when
+  `siteSlot ≥ 0`; a road's drawn `kerbCuts` after its `roadHash`, only when non-empty. Until R4 places buildings on
+  their envelopes, a site's tile (its envelope centre) can differ from its building's (the centroid).
+- **Tile columns deviation:** instead of `sitePts` / `siteI` / `siteF`, a tile carries its sites as
+  `CitySiteFrame`s of just its own sites (`CitySiteFrame.subset`: the rows re-packed by `SiteAccessBook.repack`, in
+  chunks of ≤ 1024, with their heights, keys and slots copied row for row). A chunk is five typed lists, so it crosses
+  to a worker as blocks, `toSnapshots()` returns the same objects (`CityTileMembers.sites`), and R4's mesher reads the
+  frozen plan accessors rather than a second packing. `roadCuts` / `roadCutStarts` are as designed; `gateXM`, `gateWM`
+  ride `buildingF` and `siteSlot` rides `buildingI`. Detail jobs pack the gathered buildings' sites
+  (`CityTileBucketer.sitesOfBuildings` → `siteFramesOf`) while the knob is on.
 
 ### 5.4 `SiteAccessMesher` (new, `lib/infrastructure/flutter_scene/city/site_access_mesher.dart`)
 

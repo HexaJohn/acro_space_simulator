@@ -340,6 +340,12 @@ class SiteAccessBook {
   /// Moves when any plan appears, goes or changes `rev`.
   int get sitesRev => _sitesRev;
 
+  /// The road graph of the last [sync], or null before the first: the
+  /// graph a current plan's join resolutions (`joinRoadNo`, `joinPiece`)
+  /// index. The capture reads road ids through it, so a frame never builds a
+  /// graph of its own (R3 wire, docs/plans/site-access.md §5.2 as built).
+  RoadGraph? get graph => _graph;
+
   /// The published chunks. A chunk's identity changes only when one of its
   /// sites changed (appeared, went, changed, was re-resolved or renamed).
   List<SiteAccessChunk> get chunks => UnmodifiableListView(_chunks);
@@ -347,6 +353,14 @@ class SiteAccessBook {
   /// [siteId]'s slot, or −1 when it has no plan. Stable while the site
   /// lives; a rename keeps it.
   int slotOf(String siteId) => _byId[siteId]?.slot ?? -1;
+
+  /// The row [slot] holds in its published chunk
+  /// (`chunks[slot ~/ kSitesPerChunk]`), or −1 when it holds none. Between
+  /// syncs every slot [slotOf] reports is published, and its row is this.
+  /// (R3 wire, docs/plans/site-access.md §5.2 as built: the capture reads a
+  /// building's plan row by it, and a chunk's slots by row.)
+  int rowOfSlot(int slot) =>
+      slot >= 0 && slot < _rowOfSlot.length ? _rowOfSlot[slot] : -1;
 
   /// [siteId]'s plan, or null. Allocates a view: sync, tests and diagnostics.
   SiteAccessPlan? planOf(String siteId) {
@@ -1738,6 +1752,13 @@ class SiteAccessBook {
   /// Tests only: [rows] of published chunks packed as the book packs them.
   static SiteAccessChunk debugRepack(
           List<(SiteAccessChunk chunk, int site)> rows) =>
+      repack(rows);
+
+  /// [rows] of published chunks (at most [kSitesPerChunk]) packed into a new
+  /// chunk, verbatim, in the book's layout. The renderer's tile and detail
+  /// columns carry a tile's sites this way (R3 wire, §5.3 as built); not for
+  /// traffic.
+  static SiteAccessChunk repack(List<(SiteAccessChunk chunk, int site)> rows) =>
       _pack([for (final (c, s) in rows) _Row(c, s, c.siteId(s))]);
 
   // ---- corridors --------------------------------------------------------------------------------

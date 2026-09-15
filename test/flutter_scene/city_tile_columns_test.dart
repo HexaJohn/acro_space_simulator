@@ -4,14 +4,19 @@
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:isolate';
 import 'dart:math' as math;
 
 import 'package:acro_space_simulator/application/snapshot/world_snapshot.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
+import 'package:acro_space_simulator/domain/colony/city/site_access/site_access_book.dart'
+    show sitePlanJson;
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_columns.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import '../application/site_town_fixture.dart';
 
 /// The columns are the tile's members in another shape: everything the
 /// snapshots hold comes back from them, field for field — and the shape
@@ -279,6 +284,107 @@ void main() {
       expect(b.pointsBF, orderedEquals(a.pointsBF));
       expect(b.halfWidthM, a.halfWidthM);
     }
+  });
+
+  group('site access (docs/plans/site-access.md §5.3, R3)', () {
+    late WorldSnapshot snap;
+    late CityTileColumns columns;
+    late CitySiteFrame frame;
+    setUpAll(() {
+      snap = captureSiteTown(siteTown());
+      frame = snap.sites.single;
+      final rows = [
+        for (final g in frame.chunks)
+          for (var k = 0; k < g.siteCount; k++) (g, k),
+      ];
+      columns = CityTileColumns.fromSnapshots(
+        buildings: snap.buildings.values.toList(),
+        roads: snap.roads,
+        patches: CityPatchColumns.empty,
+        ends: const [],
+        roadEnds: List.filled(2 * snap.roads.length, null),
+        transitEnds: const [],
+        sites: [frame.subset(rows.reversed.toList())],
+      );
+    });
+
+    /// One site's plan and wire geometry as words: what the worker must see.
+    String siteWords(SiteChunkGeometry g, int k) {
+      final c = g.plan;
+      return [
+        jsonEncode(sitePlanJson(c.plan(k))),
+        c.rev(k),
+        g.siteKey(k),
+        g.siteSlot(k),
+        g.siteMaxGrade(k),
+        for (var p = c.ptStart(k); p < c.ptStart(k + 1); p++) g.ptUp(p),
+        for (var s = c.stallStart(k); s < c.stallStart(k + 1); s++) g.stallUp(s),
+      ].join(',');
+    }
+
+    Map<String, String> wordsOf(CitySiteFrame f) => {
+          for (final g in f.chunks)
+            for (var k = 0; k < g.siteCount; k++)
+              g.plan.siteId(k): siteWords(g, k),
+        };
+
+    test('slots, gates, kerb cuts and sites round-trip', () {
+      final back = columns.toSnapshots();
+      final served = snap.buildings.values.toList();
+      var slots = 0, gates = 0;
+      for (var i = 0; i < served.length; i++) {
+        final a = served[i], b = back.buildings[i];
+        expect([b.siteSlot, b.gateXM, b.gateWM], [a.siteSlot, a.gateXM, a.gateWM]);
+        if (a.siteSlot >= 0) slots++;
+        if (a.gateWM > 0) gates++;
+      }
+      expect(slots, greaterThan(80));
+      expect(gates, greaterThan(0));
+      var cuts = 0;
+      for (var i = 0; i < snap.roads.length; i++) {
+        expect(back.roads[i].kerbCuts, orderedEquals(snap.roads[i].kerbCuts));
+        cuts += snap.roads[i].kerbCuts.length;
+      }
+      expect(cuts, greaterThan(0));
+      expect(columns.roadCuts.length, cuts);
+      // Every site comes back, its plan and its heights word for word.
+      expect(back.sites, hasLength(1));
+      expect(wordsOf(back.sites.single), wordsOf(frame));
+      // Found by slot in the subset too.
+      final b0 = served.firstWhere((b) => b.siteSlot >= 0);
+      final at = back.sites.single.locate(b0.siteSlot)!;
+      expect(at.$1.plan.siteId(at.$2), b0.id);
+      expect(columns.typedBytes, greaterThan(frame.chunks.single.plan.byteLength));
+    });
+
+    test('a worker receives the site columns whole', () async {
+      final want = wordsOf(frame);
+      final there = await Isolate.run(() {
+        final m = columns.toSnapshots();
+        return (
+          wordsOf(m.sites.single),
+          [for (final r in m.roads) r.kerbCuts.length],
+          [for (final b in m.buildings) b.siteSlot],
+        );
+      });
+      expect(there.$1, want);
+      expect(there.$2, [for (final r in snap.roads) r.kerbCuts.length]);
+      expect(there.$3, [for (final b in snap.buildings.values) b.siteSlot]);
+    });
+
+    test('a tile with no sites packs none, and carries no site bytes', () {
+      final plain = CityTileColumns.fromSnapshots(
+        buildings: const [],
+        roads: const [],
+        patches: CityPatchColumns.empty,
+        ends: const [],
+        roadEnds: const [],
+        transitEnds: const [],
+      );
+      expect(plain.sites, isEmpty);
+      expect(plain.toSnapshots().sites, isEmpty);
+      expect(plain.roadCuts, isEmpty);
+    });
   });
 
   test('an end of a class this build does not know decodes clamped', () {

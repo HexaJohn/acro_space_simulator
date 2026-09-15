@@ -1375,6 +1375,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
       events: frame.events,
       terrainEdits: frame.terrainEdits,
       megastructures: frame.megastructures,
+      sites: frame.sites,
     );
   }
 
