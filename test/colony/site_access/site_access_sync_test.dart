@@ -109,6 +109,19 @@ void main() {
       expect(sameChunks(b.siteAccess.chunks, a.siteAccess.chunks), isTrue);
     });
 
+    test('a check budget under one hashed check still finishes a road edit',
+        () {
+      final city = town();
+      houseStreet(city, const [Vec2(1500, -150), Vec2(1500, 150)]);
+      drain(city, city.siteAccess);
+      commit(city, const FixtureRoad([Vec2(1650, -150), Vec2(1650, 150)]));
+      var done = false;
+      for (var tick = 0; tick < 20000 && !done; tick++) {
+        done = city.siteAccess.sync(city, city.roadGraph, maxChecks: 1);
+      }
+      expect(done, isTrue);
+    });
+
     test('the default budget is 128 units and 4096 checks', () {
       expect(SiteAccessBook.defaultUnitsPerTick, 128);
       expect(SiteAccessBook.defaultChecksPerTick, 4096);

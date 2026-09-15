@@ -886,8 +886,10 @@ is kerb only, and so is any house lot whose slot 0 fails the §3.3 back-out rule
 - The house side is the side with more room, ties broken by `tieBreak('home-side')`. The same rule covers the
   mirror.
 - `containsRect` checks the drive's on-parcel bounding box `[minX, maxX] × [0.05, deepest corner]` (0.05 m in
-  from the frontage line, where a corner would lie on the boundary) and the house envelope
-  `[x0, x1] × [yT, D_house − 3]`.
+  from the frontage line, where a corner would lie on the boundary) and the house rectangle
+  `[x0, x1] × [yT, D_house − 3]` GROWN by `kContainsInsetM` (0.05 m) on every side, so the emitted envelope (inside
+  that rectangle) stands at least 5 cm inside the lot and a millimetre re-sample cannot flip the fit (§4.4). A1
+  checks every home envelope with the exact `containsRect`.
 - The door is the envelope front midpoint `(x, yT)`. `pavementPt` is its projection onto `y = 0`, and the footpath
   reuses those two points. `entranceNode` is `H`. The drive pave's two kerb corners are `blend` with `hT = 1` on join
   0; every other point is `pad`.
@@ -1553,9 +1555,13 @@ deviations, each local:
   | sprawl 20 mi (118,823 plans) | 257–260 (was 50–53) | 0.76–1.15 / 0.99–1.79 / 4.0–8.8 ms | 2–7 % | 2.5–6.7 ms |
 
   Before the repair every tick of an edit ran 12–15 ms (worst 24–36 ms). **The typical tick now meets 2 ms at the
-  127k stand-in (p90 under 1.8 ms), but the WORST tick is still MISSED:** 2–7 % of ticks run 2–9 ms. Their stats
-  match an ordinary tick (about 500 re-resolutions, one or two shared re-publishes), so these are JIT and GC
-  pauses, and the re-planning ticks add a generator run and a whole re-pack. The price of (a) is latency: after an
+  127k stand-in (p90 under 1.8 ms), but the WORST tick is still MISSED:** 2–7 % of ticks run 2–9 ms.
+  **Corrected at the R2 merge review:** the re-planning ticks are over 2 ms BY CONSTRUCTION, not by JIT or GC. A
+  budgeted tick may run one whole 1024-site re-pack (measured 1.0–3.3 ms) plus a generator run, and a skeptic's
+  re-run measured re-planning ticks at p50 2.1–5.2 ms on the 12-mile sprawl (worst 3.7–17.5 ms) and re-resolving
+  ticks at p99 3.0–4.0 ms on the 20-mile one. Meeting 2 ms needs a patch or append into a chunk that does not copy
+  all its rows, or re-packs deferred to ticks that do nothing else; the spikes on re-resolving ticks were not
+  profiled. The price of (a) is latency: after an
   edit on the 127k town a plan away from the edit reads kerbside to traffic for about 260 ticks, not 50 (legal,
   §4.2 step 3). Option (b) stays open for §10.1. The `structureStamp` hash (79 ms at 20 mi) is left out of the
   tick figures, as before: it is the graph rebuild's cost (the rebuild itself is 5–10 s there), paid by its first
@@ -1671,8 +1677,11 @@ unlimited is a drain and is not shaped. The worst-tick figure for a road edit is
   s = 535.5). Every other lot keeps its program and stall keys. **CLOSED at the R2 integration repair:** the cause
   was not `W` or `D` but the house containment test, `profile.containsRect(hx0, yT, hx1, hy1)` flush with the
   polygon; live, every variant failed only that test by under a millimetre, loaded, it passed (the other margins
-  are metres). The house rectangle is now tested inset by `kContainsInsetM` (0.05 m) on every side, as the drive's
-  front edge already was, which moves the edge far beyond the re-sample error. The sprawl audit's demotions did not
+  are metres). The house rectangle is now tested GROWN by `kContainsInsetM` (0.05 m) on every side (stricter: the
+  envelope stands at least 5 cm inside the lot), which moves the decision far beyond the re-sample error; the lot
+  stays `kerbOnly` both live and loaded. (The first repair shrank the tested rectangle instead, which admitted
+  envelopes up to 5 cm OUTSIDE their lot, e.g. random site `cell-rand-446`; corrected at the R2 merge, and A1 now
+  checks every home envelope.) The sprawl audit's demotions did not
   move (no Appendix A entry), and the test now expects no flip at all (`isEmpty`): this section's acceptance is met.
 - **Live against loaded (R2 book repair).** Every other case compares two fresh drains. `site_access_persistence_test`
   also syncs `city.siteAccess` in budgeted ticks through a grown house avenue, a road edit that renames lots, a
@@ -2725,5 +2734,5 @@ reason, commit.
 | R2 merge | site_plan_generator_test.dart ("the built town grows home driveways", blocked sites) | `> 0` | `0` on `town()`, plus a new old-save case (a crossed lot built around the refusal) that blocks exactly `lot-m0` | the founded kit's book makes the four §3.7a lots easements before `town()` zones, so none is built; the stub installation made none | R2 merge |
 | R2 merge | site_easement_refusal_test.dart (growth skip, built crossed lot, corridor refusal) | red once merged | green | the tests assumed the stub installation (no real easement or corridor on the founded kit); each now unhooks or fakes the real book where it stages "before" | R2 merge |
 | R2 merge | traffic_fixture `town()` (no pin) | 82 built lots | 78 built lots | the four easement lots refuse zoning; no traffic test pin moved (full suite green) | R2 merge |
-| R2 integration repair | site_access_persistence_test.dart ("200 curved-road lots", home fit flips) | `['lot-r2-r21']` | `isEmpty` | the §3.4 house containment is now tested inset by `kContainsInsetM`, so the load's millimetre re-sample no longer flips that lot (§4.4); the sprawl audit's demotions did not move | R2 integration repair |
+| R2 integration repair | site_access_persistence_test.dart ("200 curved-road lots", home fit flips) | `['lot-r2-r21']` | `isEmpty` | the §3.4 house containment is now tested with the rectangle grown by `kContainsInsetM` (stricter by 5 cm), so the load's millimetre re-sample no longer flips that lot (§4.4); the sprawl audit's demotions did not move | R2 integration repair |
 | R1 | test/traffic/live_rebuild_test.dart (traffic-owned) | green | red, then green | cars stood inside the new crossing's stop line at the edit (moved 5.2 m) and trips ended on slots at 151.5 m, 1.5 m past the new street. A real traffic bug R1 exposed (RouteRemapper clamped into the lane, dragging cars onto the car behind). MERGE GATE CLEARED: fixed on the traffic side (cars in a new junction box carried onto their connector, an appended leg when a destination's access moved, a no-overlap guard, a stop at a lane's start counted 1 m in from a connector), merged with R1 in one window; no skip. The test's drive-on window grew 900 s → 1800 s: the new test street re-hangs hand-drawn lot-m0/lot-m3 onto other roads (their effective frontage, §3.1), so their trips detour | 14a7bef, 6f1784f, merge a309f85 |

@@ -8,6 +8,7 @@ import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_graph.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_access_constants.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_access_plan.dart';
+import 'package:acro_space_simulator/domain/colony/city/site_access/site_frame.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_paving_check.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_plan_builder.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_plan_generator.dart';
@@ -47,6 +48,15 @@ void main() {
               '$v',
           ])
           ..addAll(sitePavingViolations(planned[k], p));
+        // §3.4 / §6.1: a home's house envelope passes the exact containment.
+        final frame = planned[k].frame;
+        if (p.program == SiteProgram.homeDriveway &&
+            frame != null &&
+            !frame.profile.containsRect(
+                SiteRect(p.envX0, p.envY0, p.envX1, p.envY1))) {
+          bad.add('${p.siteId}: home envelope '
+              '(${p.envX0}, ${p.envY0})-(${p.envX1}, ${p.envY1}) leaves the lot');
+        }
       }
       b = PlanBuilder(graph: g);
       planned = [];

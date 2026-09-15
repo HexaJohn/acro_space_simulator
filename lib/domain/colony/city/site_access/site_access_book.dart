@@ -285,6 +285,14 @@ class SiteAccessBook {
   /// nothing changed keeps its 4096 checks.
   static const int _hashCheckUnits = 8;
 
+  /// Whether a sync that has spent [checks] of [maxChecks] must stop before a
+  /// check that may hash. The first check of a sync runs whatever it costs
+  /// (as one plan always runs, §4.3), so a positive budget under
+  /// [_hashCheckUnits] still progresses; a budget of 0 checks nothing.
+  static bool _checksSpent(int checks, int maxChecks) =>
+      maxChecks <= 0 ||
+      (checks > 0 && checks + _hashCheckUnits > maxChecks);
+
   /// Whether the last [_check] got as far as the signature.
   bool _lastCheckHashed = false;
 
@@ -571,7 +579,7 @@ class SiteAccessBook {
         _queueHead++;
         continue;
       }
-      if (stats.checks + _hashCheckUnits > maxChecks) {
+      if (_checksSpent(stats.checks, maxChecks)) {
         stopped = true;
         break;
       }
@@ -596,7 +604,7 @@ class SiteAccessBook {
           nLots = nManual + _walkAuto.length,
           total = nLots + _walkCells.length;
       while (_cursor < total) {
-        if (stats.checks + _hashCheckUnits > maxChecks) break;
+        if (_checksSpent(stats.checks, maxChecks)) break;
         _lastCheckHashed = false;
         final bool ok;
         if (_cursor < nLots) {
