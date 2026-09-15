@@ -2862,6 +2862,9 @@ Drawing a new road never teleports a car: routes remap through the split, lots r
     - Only colours change, never the geometry, so the fix is a retained-geometry colour rewrite, chunked or indexed into a palette, on the road side's overlay mesher. It is requested of them.
     - City Builder colonies, the only agent colonies before slice 11, are far below this.
     - **Since 3da1db4:** ribbons keep only the points a straight ribbon doesn't pass within 0.15 m of (runs capped at 16 samples). The 2-mile sprawl is now 10k points; a band change's mesh is 2 ms median (11 ms worst) and 1.1 MB. It is still over the 768 KB upload budget, so the road side's palette path stays wanted.
+    - **Resolved in f8d9bee (road side).** Lane speed draws through `RoadOverlayState.setPalette`, with shapeKey `(laneGraph, graphRev, bodyId, groundKey)` (the overlay's drape key). The ribbons are meshed once per shape. A band change rewrites a palette texture instead: 16 KB and a byte loop on the 2-mile sprawl.
+    - The view's 2 s gate stays, because the agents publish lane speeds once per congestion epoch (2 s) anyway.
+    - **Contract kept by `TrafficLaneSpeedOverlay`:** while the drape key holds, the same lanes appear in the same order with the same points.
   - **Allocation:** `RoadNoiseSampler` allocates per lot, now inside the sub-step; that adds to the weighed §15.2 gate.
   - **Stop-sign delay:** the all-way stop's `J` = 5 s is about 1.6 s under the measured delay.
   - **Budget:** `readoutWorkPerStep` is benched and set to 8,000 (above). The 12-mile sprawl fails both frame gates even without the readout, with about 10 ms at the sub-step where the building sync and the congestion epoch coincide. That is slice 11's.
