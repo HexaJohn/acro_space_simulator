@@ -1531,9 +1531,13 @@ through in-capable join `j` whose `T` is `destS`:
   - Forced grant after 120 s refused: only the ETA terms waive (to a 6 s floor), never with a body in the
     footprint; counted. A parked car does not accrue stuck time.
   - Pedestrians (T4b): the back-out yields to pedestrians on the pavement crossing (`kSegCrossesPavement`).
-  - **Needs the traffic session's ack:** on an avenue or a two-lane one-way street the arc overhangs the ADJACENT
-    same-direction lane, which the 1+1 rule does not name. This contract proposes the same body-free check there,
-    within `[T − 6, T + 6]`.
+  - Adjacent same-direction lane (acked by the traffic session 2026-09-15): on an avenue or a two-lane one-way
+    street the arc overhangs the next same-direction lane, so that lane must also have no vehicle body within
+    `[T − 6, T + 6]` AND every approaching vehicle in it must have an ETA to `T − 6` of ≥ 8 s, taking its speed as
+    `max(v, 5 m/s)`, as for `L`. The 120 s forced grant waives only the ETA terms (6 s floor), never a body.
+  - Home plans' connectivity exception (acked): the inline stall's fwd→bwd lane link is a reverse-only movement and the
+    pad is a reverse-only exit path; the strongly-connected rule is relaxed for this exception only, scoped to
+    `homeDriveway`.
 - **EXIT logging** (`lane_changes_only_at_nodes`).
   - `EXIT` is logged when the rear crosses the kerb line. From that instant the car's element is `L`, inserted into
     `L`'s ordered list as a REVERSING vehicle (a flag): followers see its footprint as a stopped obstacle.
