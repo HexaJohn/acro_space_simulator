@@ -63,6 +63,50 @@ void main() {
     });
   });
 
+  group('simplify', () {
+    test('a straight lane on even ground keeps only its ends', () {
+      final pts = [
+        for (var i = 0; i <= TrafficLaneSpeedOverlay.maxRun; i++)
+          Vector3(i * 10.0, 5, 1000)
+      ];
+      final s = TrafficLaneSpeedOverlay.simplify(pts);
+      expect(s.length, 2);
+      expect(identical(s.first, pts.first), isTrue);
+      expect(identical(s.last, pts.last), isTrue);
+    });
+
+    test('a corner and a rise are kept, and every point dropped lies within '
+        'the tolerance of the ribbon drawn', () {
+      final pts = <Vector3>[
+        for (var i = 0; i <= 10; i++) Vector3(i * 10.0, 0, 1000),
+        for (var i = 1; i <= 10; i++) Vector3(100, i * 10.0, 1000),
+        for (var i = 1; i <= 10; i++)
+          Vector3(100 + i * 10.0, 100, 1000 + (i == 5 ? 0.6 : 0)),
+      ];
+      final s = TrafficLaneSpeedOverlay.simplify(pts);
+      expect(s.length, lessThan(pts.length));
+      expect(s.any((p) => p.x == 100 && p.y == 0), isTrue, reason: 'corner');
+      expect(s.any((p) => p.z > 1000.5), isTrue, reason: 'rise');
+      for (final p in pts) {
+        var best = double.infinity;
+        for (var k = 0; k + 1 < s.length; k++) {
+          final d = s[k + 1] - s[k];
+          final v = p - s[k];
+          final t = (v.dot(d) / d.lengthSquared).clamp(0.0, 1.0);
+          final e = (v - d * t).length;
+          if (e < best) best = e;
+        }
+        expect(best,
+            lessThanOrEqualTo(TrafficLaneSpeedOverlay.simplifyTolM + 1e-9));
+      }
+    });
+
+    test('two points stay two', () {
+      final pts = [Vector3(0, 0, 0), Vector3(1, 0, 0)];
+      expect(TrafficLaneSpeedOverlay.simplify(pts), same(pts));
+    });
+  });
+
   group('the rebuild gate', () {
     test('the first read is due; after it, a new revision waits out 2 s', () {
       final g = LaneSpeedGate();
@@ -134,7 +178,11 @@ void main() {
         expect(l.argb,
             TrafficLaneSpeedOverlay.argbOfBand(AgentLaneSpeeds.band(pct[lane])));
         expect(l.pointsBF.first, flatDrape(pts.first));
-        expect(l.pointsBF, hasLength(pts.length));
+        expect(l.pointsBF.last, flatDrape(pts.last));
+        expect(l.pointsBF,
+            hasLength(TrafficLaneSpeedOverlay.simplify(
+                    [for (final p in pts) flatDrape(p)])
+                .length));
       }
     });
 

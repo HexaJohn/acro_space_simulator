@@ -117,6 +117,51 @@ class TrafficLaneSpeedOverlay {
   /// on rolling ground, few enough that a sprawl's lanes mesh quickly.
   static const double stepM = 10;
 
+  /// How far a draped point may sit off the straight line between the
+  /// points kept either side of it before it must be kept: well under the
+  /// ribbon's lift, so a ribbon dropped to its corners still clears the road.
+  static const double simplifyTolM = 0.15;
+
+  /// The most samples one straight run of a ribbon may span.
+  static const int maxRun = 16;
+
+  /// [pts] with the points a straight ribbon would pass within
+  /// [simplifyTolM] of dropped. The mesher's cost goes with the points it
+  /// is handed, and most of a sprawl's lanes are straight on even ground, so
+  /// the ten-metre samples the drape needs are mostly nothing to draw
+  /// (lane_ribbon_bench_test). The ends are always kept.
+  static List<Vector3> simplify(List<Vector3> pts) {
+    if (pts.length < 3) return pts;
+    final out = <Vector3>[pts.first];
+    final tol2 = simplifyTolM * simplifyTolM;
+    var anchor = 0;
+    for (var i = 1; i < pts.length - 1; i++) {
+      // Point i may go only if the chord from the last kept point to the
+      // point after i passes within the tolerance of every point between.
+      final a = pts[anchor];
+      final d = pts[i + 1] - a;
+      final len2 = d.lengthSquared;
+      // A run is re-checked whole at every step, so a long straight one
+      // would cost its length squared: one point every [maxRun] samples
+      // keeps the first build linear for a line kept to its ends.
+      var keep = i - anchor >= maxRun;
+      for (var j = anchor + 1; !keep && j <= i; j++) {
+        final v = pts[j] - a;
+        final t = len2 > 0 ? (v.dot(d) / len2).clamp(0.0, 1.0) : 0.0;
+        if ((v - d * t).lengthSquared > tol2) {
+          keep = true;
+          break;
+        }
+      }
+      if (keep) {
+        out.add(pts[i]);
+        anchor = i;
+      }
+    }
+    out.add(pts.last);
+    return out;
+  }
+
   /// [AgentLaneSpeeds.band]'s colour.
   static int argbOfBand(int band) => switch (band) {
         2 => greenArgb,
@@ -189,7 +234,9 @@ class TrafficLaneSpeedOverlay {
       _drapeGraph = speeds.laneGraph;
       _drapes = [
         for (var lane = 0; lane < n; lane++)
-          [for (final p in speeds.laneLine(lane, stepM: stepM)) drape(p)],
+          simplify([
+            for (final p in speeds.laneLine(lane, stepM: stepM)) drape(p)
+          ]),
       ];
     }
     final m = pct.length < n ? pct.length : n;
