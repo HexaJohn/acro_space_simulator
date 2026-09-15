@@ -103,6 +103,7 @@ class CityMeshKnobs {
     required this.sealedWorld,
     required this.maxParkedCars,
     this.agentSignals = false,
+    this.siteAccess = false,
   });
 
   /// The architecture kit the colony is built in (see
@@ -139,6 +140,11 @@ class CityMeshKnobs {
   /// heads (signal_head_layer.dart, agent-traffic.md C3).
   final bool agentSignals;
 
+  /// Site access plans served (docs/plans/site-access.md §5.3,
+  /// `CityNodes.siteAccess`): the tiles take the frame's sites and kerb
+  /// cuts. Off, every building is legacy and every build is as it was.
+  final bool siteAccess;
+
   ArchitectureStyle get style => ArchitectureStyle.byId(styleId);
 
   /// Whether the archetype libraries built for [other] serve this too.
@@ -154,7 +160,8 @@ class CityMeshKnobs {
       '|${blockRangeM.round()}|${interiorRangeM.round()}|${lodDebug ? 1 : 0}'
       '|${onStreetParking ? 1 : 0}|${sealedWorld ? 1 : 0}|$maxParkedCars'
       // Appended only when on, so every existing key reads as it did.
-      '${agentSignals ? '|agentSignals' : ''}';
+      '${agentSignals ? '|agentSignals' : ''}'
+      '${siteAccess ? '|siteAccess' : ''}';
 }
 
 /// Everything one tile build reads: the tile's members, the few facts of

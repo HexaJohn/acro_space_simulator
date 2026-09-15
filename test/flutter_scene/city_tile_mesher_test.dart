@@ -572,6 +572,80 @@ void main() {
           0x07d559a4);
     });
 
+    test('site access on the wire leaves every tier to the byte '
+        '(docs/plans/site-access.md §9 R3)', () {
+      // Every building served with a gate, every road with kerb cuts: the
+      // wire fields R3 adds, carried by the columns. Nothing draws them
+      // until R4, with the knob off or on.
+      final served = CityTileColumns.fromSnapshots(
+        buildings: [
+          for (final (i, b) in buildings.indexed)
+            BuildingSnapshot(
+              id: b.id,
+              type: b.type,
+              colonyId: b.colonyId,
+              body: b.body,
+              px: b.px,
+              py: b.py,
+              pz: b.pz,
+              qw: b.qw,
+              qx: b.qx,
+              qy: b.qy,
+              qz: b.qz,
+              lat: b.lat,
+              lon: b.lon,
+              siteWidthM: b.siteWidthM,
+              siteDepthM: b.siteDepthM,
+              siteKindIndex: b.siteKindIndex,
+              colorArgb: b.colorArgb,
+              corner: b.corner,
+              siteSlot: 1024 + i,
+              gateXM: i * 1.5,
+              gateWM: 8,
+            ),
+        ],
+        roads: [
+          for (final x in roads)
+            RoadSnapshot(
+              colonyId: x.colonyId,
+              body: x.body,
+              points: x.points,
+              halfWidthM: x.halfWidthM,
+              roadClassIndex: x.roadClassIndex,
+              sealed: x.sealed,
+              kerbCuts: const [1, 20, 4, 1, 1, 0, 20, 4, -1, 2, 0, 60, 3.5, -1, 0],
+            ),
+        ],
+        patches: patches,
+        ends: ends,
+        roadEnds: roadEnds,
+        transitEnds: const [],
+      );
+      expect(served.toSnapshots().buildings.first.siteSlot, 1024);
+      const on = CityMeshKnobs(
+        styleId: 'masonry-street',
+        bucketM: 6,
+        variants: 4,
+        perBuildingLod: true,
+        blockRangeM: 300,
+        interiorRangeM: 50,
+        lodDebug: false,
+        onStreetParking: true,
+        sealedWorld: false,
+        maxParkedCars: 400,
+        siteAccess: true,
+      );
+      expect(knobs.keyTerms.contains('siteAccess'), isFalse);
+      expect(on.keyTerms, '${knobs.keyTerms}|siteAccess');
+      for (final k in [knobs, on]) {
+        int at(CityTier tier) => digest(CityTileMesher.mesh(
+            request(tier, members: served, k: k), CityBuildingLibraries()));
+        expect(at(CityTier.near), 0xf5d18ccb, reason: k.keyTerms);
+        expect(at(CityTier.mid), 0x0759f3c8, reason: k.keyTerms);
+        expect(at(CityTier.far), 0x07d559a4, reason: k.keyTerms);
+      }
+    });
+
     test('through one scratch, job after job, every tier to the byte', () {
       // The ground and lot builders live in the scratch beside the road
       // builders, and the road pass fills one point list for every road:

@@ -130,6 +130,7 @@ lib/domain/colony/city/site_access/
                                MOVED here from world_snapshot.dart:1031-1042, 1577-1605 (re-exported there)
   site_grade.dart              SiteGrade: height rule shared by shaper and capture (§6.3)
   kerb_cuts.dart               KerbCut, KerbCuts.blocked/shiftOut: shared by renderer, lighting, traffic kerb masks
+                               (R3 as built: the canonical form `canonicalOf`, `toDrawn`, `sigmaOf`; masks in R4)
   site_access_book.dart        SiteAccessBook: slots, chunks, sync, budget, renames, clears (§4)
 ```
 
@@ -1799,6 +1800,53 @@ class SiteChunkGeometry {                  // ≤ 3 retained objects: itself, on
     (dropped kerb and swing mask), 2 = a home cut's far-kerb swing mask (never drawn). Only kinds 0 and 1 are drawn.
   - The conversion (rescale + flip) is unit-tested against the canonical form within 0.5 m (§5.5).
 
+**As built (R3, `city_site_frame.dart`, `kerb_cuts.dart`).** Small deviations, each local:
+- **Frame fields.** `CitySiteFrame` also carries `datumRadiusM` and the colony's tangent frame (`up`, `east`, `north`),
+  so a renderer places a point as `up·(datum + ptUp) + east·e + north·n` from the frame alone. `SiteChunkGeometry`
+  holds `chunkIndex` and, in `i32`, `siteKey` and the book `siteSlot` per site (`CitySiteFrame.locate(slot)` finds a
+  building's row). **`siteTile` is not stored:** the application does not know the renderer's tile grid, so the cut
+  holds each geometry's cells in an `Expando` keyed by geometry identity and grid (O(1) per unchanged chunk).
+- **Cache.** `SiteCapture` hangs off the colony in an `Expando` (as `TrafficCapture` does), not a
+  `CitySim.siteGeometryCache` field: the domain holds no application type. Heights rebuild on a chunk identity change
+  or a ground stamp change (`groundCacheShaped`, `groundCacheEditCount`, the edit store's identity,
+  `drapeCacheRevision`); a rebuild whose keys and heights are unchanged keeps the old geometry. `geometryStamp` is a
+  hash of every chunk's site keys and slots AND of the canonical kerb-cut table, so it moves when a cut moves too.
+- **Book, additive API (recorded).** `SiteAccessBook.rowOfSlot(slot)`, `SiteAccessBook.graph` (the last synced
+  graph: the capture reads road ids and lengths through it and never builds a graph) and `SiteAccessBook.repack(rows)`
+  (`debugRepack` now delegates). No R2a-frozen file changed; the JSON and the tile columns read a chunk's typed lists
+  through `debugRetained`, as the book's own re-publish does.
+- **Kerb-cut cache.** The canonical table is built per (chunk set, book graph), not per `sitesRev` (a re-resolution
+  re-publishes chunks without moving `sitesRev`); each road's drawn copy is held per (layout road index, drape points
+  identity). A stale plan (§4.2 step 3) maps its `joinRoadNo` through the road ids of the graph it was resolved
+  against (the last four graphs the capture saw) to the same road id now, so it keeps drawing its cuts on roads that
+  stayed; a cut whose road is gone is left out (the edit re-cut that tile). Cut half widths are not rescaled.
+- **Heights before R5.** A pad point stands on the lot's cached `groundFor('lot:<id>')` (cells: `cellGroundRadius`);
+  a draped lot's pad point more than 24 m from the centroid takes `groundFor('site:<id>:<point>')` once per plan; a
+  kerb point stands on its road's drape at `joinRoadS` rescaled to the drape's plan arc; `blend` is linear. The
+  `padDatums` / `corridorDatums` reads arrive with R5. `stallUp` is interpolated along the stall's segment polyline;
+  `siteMaxGrade` is the steepest rise over run between consecutive segment points.
+- **Gates.** `gateXM = gateX − (envX0 + envX1)/2` (along the building's local X from the envelope centre), `gateWM =
+  gateW`; both 0 when the plan has no gate.
+- **Measured (`site_capture_test`, `flutter test` JIT).** The steady fixed part (a chunk identity compare per chunk,
+  the held frame returned) median ≤ 0.001 ms on the site town (120 sites) and a 6-block generated town (574 sites);
+  zero ground queries; no geometry or cut table rebuilt. Two parts scale with the colony and are reported, not
+  inside the 0.02 ms: each road snapshot's cut lookup (a list index and an identity compare, ~0.02–0.04 µs a road
+  on the generated town) and each building's slot lookup (one book map lookup, ~0.04–0.10 µs a building, against a
+  whole steady capture of ~8–47 µs a building). On the 127k reference town that is a few milliseconds of lookups
+  in a capture already far larger; not measured there (the R4 A/B owns it).
+  - *R3 review:* measured again at 0.09–0.10 µs a building and 0.036 µs a road (JIT), about 12 ms on 127k
+    buildings: 0.3–0.5 % of a steady capture of 21–37 µs a building, paid with the knob off too. The test now
+    bounds the building lookup under 5 % of the steady capture a building. **R4 gate:** the A/B on
+    `tool/measure_city_studio.ps1` confirms it on the reference town; if it shows, `SiteCapture` holds
+    `(slot, gateXM, gateWM)` per site id, rebuilt only when the chunk set moves.
+- **Held-frame gate (R3 review).** The steady-frame early return also compares the cut-table hash the held frame's
+  `geometryStamp` was taken with: the book can swap its graph under unchanged chunks (a deferred budgeted sync after
+  a one-way reversal or a road removal, once the capture has already seen the new roads revision), which re-cuts
+  `RoadSnapshot.kerbCuts` without moving `sitesRev`, a chunk or the ground stamp.
+- **Row check (R3 review).** `buildingSiteOf` serves a slot only when the chunk the capture holds names the same
+  site at the book's row; a book that moved since `SiteCapture.begin` (a drop re-packed the chunk) reads legacy
+  until the next begin. `sitesSignature` mixes `fnv1a32` of the colony and body ids, not `hashCode`.
+
 ### 5.3 Tile cut and keys
 
 - **Gate:** `CityTileBucketer.sitesSignature(snap)` mixes `(sitesRev, geometryStamp)` per colony. It is appended to
@@ -1818,6 +1866,22 @@ class SiteChunkGeometry {                  // ≤ 3 retained objects: itself, on
     `roadLifts` (:239-240);
   - `toSnapshots()` round-trips exactly;
   - detail jobs pack the sites of gathered buildings by `siteSlot >> 10` → chunk.
+
+**As built (R3).** The knob is `CityNodes.siteAccess` (default off), carried to workers as
+`CityMeshKnobs.siteAccess` (its `keyTerms` term appended only when on, as `agentSignals`'). Off, nothing below
+happens: `sitesSignature` is not appended to the cut gate, `CityTileBucketer.bucket(siteAccess: false)` cuts no site,
+and `structureKeyOf` mixes no site term, so every tile's membership, key and mesh digest are as before
+(`city_tile_bucketing_test` "site access keys", `city_tile_mesher_test` pins with the wire fields present). On:
+- a site's key term is its book slot, `siteKey` and flags; a building's slot and gate are mixed only when
+  `siteSlot ≥ 0`; a road's drawn `kerbCuts` after its `roadHash`, only when non-empty. Until R4 places buildings on
+  their envelopes, a site's tile (its envelope centre) can differ from its building's (the centroid).
+- **Tile columns deviation:** instead of `sitePts` / `siteI` / `siteF`, a tile carries its sites as
+  `CitySiteFrame`s of just its own sites (`CitySiteFrame.subset`: the rows re-packed by `SiteAccessBook.repack`, in
+  chunks of ≤ 1024, with their heights, keys and slots copied row for row). A chunk is five typed lists, so it crosses
+  to a worker as blocks, `toSnapshots()` returns the same objects (`CityTileMembers.sites`), and R4's mesher reads the
+  frozen plan accessors rather than a second packing. `roadCuts` / `roadCutStarts` are as designed; `gateXM`, `gateWM`
+  ride `buildingF` and `siteSlot` rides `buildingI`. Detail jobs pack the gathered buildings' sites
+  (`CityTileBucketer.sitesOfBuildings` → `siteFramesOf`) while the knob is on.
 
 ### 5.4 `SiteAccessMesher` (new, `lib/infrastructure/flutter_scene/city/site_access_mesher.dart`)
 
@@ -2614,10 +2678,10 @@ class DepthProfile { double depthAt(double x); bool containsRect(Rect r); double
 | R4 turns frontage-less manual sites and grid-cell buildings to face their access road (saved and generated sites) | one heading rule (§3.1) so envelope, gate and door can never disagree with the massing; `envelope_axes_test`; behind the knob until screenshots are reviewed; §10.2 Q10 |
 | Easements cost the player zonable lots (4 of 82 in the starter kit) | fewest-lots corridor, centred; inspector explains why; §10.2 Q12 |
 | An auto lot zoned and grown in front of an unbuilt set-back site blocks that site's access later | built crossed lots make the plan `kPlanAccessBlocked` (visible in the inspector); §10.2 Q12 offers reserving corridors from geometry alone |
-| The 127k-town drain exceeds 3 s once the real program mix is measured | budget is Σ count × unit cost, printed by the bench in R2; if it exceeds 3 s the added load time is reported to the user before R2 merges. **Happened (R2 merge, §3.10):** on the 118,824-site 20-mile sprawl the Σ is 3.33 s and the measured drain 5.0 s; the road-edit tick is 12–36 ms against 2 ms (§4.1) and homes pack 694 B against 512 B. **For the user at the R2 merge (all still MISSED, reported, not re-budgeted):** drain 5.0–5.5 s against 3 s (Σ at unit budgets 3.33 s); unit costs per written plan `kerbOnly` 19.9 µs (5), home 21.5 µs (12), car park 125.8 µs (60), yard 124.3 µs (60); 694 B per home site (512 B). The road-edit tick after the integration repair is below |
+| The 127k-town drain exceeds 3 s once the real program mix is measured | **Decided by the user 2026-09-15: the drain, unit-cost and 512 B misses below are accepted for now, to be tuned later** (levers: typed per-column `PlanBuilder` buffers, a profile-free kerbside envelope, parametric home rows). Budget is Σ count × unit cost, printed by the bench in R2; if it exceeds 3 s the added load time is reported to the user before R2 merges. **Happened (R2 merge, §3.10):** on the 118,824-site 20-mile sprawl the Σ is 3.33 s and the measured drain 5.0 s; the road-edit tick is 12–36 ms against 2 ms (§4.1) and homes pack 694 B against 512 B. **For the user at the R2 merge (all still MISSED, reported, not re-budgeted):** drain 5.0–5.5 s against 3 s (Σ at unit budgets 3.33 s); unit costs per written plan `kerbOnly` 19.9 µs (5), home 21.5 µs (12), car park 125.8 µs (60), yard 124.3 µs (60); 694 B per home site (512 B). The road-edit tick after the integration repair is below |
 | An auto lot zoned and grown in front of a set-back site by the generator, before its closing drain | on the 12-mile sprawl 65 sites start `accessBlocked`, but only 3 because of that order: 62 are corridor-blocked by manual parcels or at-grade roads (§3.7a); a mid-generation drain would move 3 and change every generated town's buildings, so it waits for §10.2 Q12 |
 | A road edit leaves plans stale for a few ticks | dirty-box diff, 4096 checks per tick; stale plans read as kerbside to traffic and keep drawing (§4.2) |
-| A road edit makes EVERY plan not current (`isCurrentFor` compares the whole-graph `structureStamp`; join refs index the rebuilt graph), contradicting §4.2 step 1 "lots outside the box are not touched"; the ≤ 2 ms road-edit tick was missed at ~10–17 ms (§4.1 as built) | **(a) built at the R2 integration repair** (§4.1): shared-column re-publishes, signature checks at 8 units, one whole re-pack a tick, the diff tick split off, a budgeted sweep. On the 20-mile sprawl a re-resolving tick is now p50 0.8–1.2 ms and p90 1.0–1.8 ms, but 2–7 % of ticks still reach 2–9 ms (JIT and GC pauses; re-plan ticks add a generator run), so the worst-tick budget is still missed. The price is latency: plans away from an edit read kerbside for ~260 ticks, not ~50. **User decision still open:** accept (a) as built, or (b) an edit-local contract (per-site slot tuple for currency, `(lotId, slot)` join handles resolved at read), an R2a contract change for the Agent Traffic session |
+| A road edit makes EVERY plan not current (`isCurrentFor` compares the whole-graph `structureStamp`; join refs index the rebuilt graph), contradicting §4.2 step 1 "lots outside the box are not touched"; the ≤ 2 ms road-edit tick was missed at ~10–17 ms (§4.1 as built) | **(a) built at the R2 integration repair** (§4.1): shared-column re-publishes, signature checks at 8 units, one whole re-pack a tick, the diff tick split off, a budgeted sweep. On the 20-mile sprawl a re-resolving tick is now p50 0.8–1.2 ms and p90 1.0–1.8 ms, but 2–7 % of ticks still reach 2–9 ms (JIT and GC pauses; re-plan ticks add a generator run), so the worst-tick budget is still missed. The price is latency: plans away from an edit read kerbside for ~260 ticks, not ~50. **Decided by the user 2026-09-15: (a) as built**; tune later. (b), an edit-local contract (per-site slot tuple for currency, `(lotId, slot)` join handles resolved at read, an R2a contract change for the Agent Traffic session), stays on file as the lever if the latency proves a problem |
 | Lot access moves for most lots (narrow-lot drive side) and shifts routed-model pictures | R1 alone, re-pins ledgered, economy tests as the gate; mid-block wide lots move only by the quantum |
 | Conservative windows cost small corner lots their driveway on short blocks | sprawl audit pins `kJoinLegacy` and program counts; starter kit required at 100% for its four sites; an exact bound from traffic can replace the reserve later |
 | Generated towns look different (front car parks push shops back; houses narrow beside drives) | F2 bias for W < 40 keeps street walls; homes fall back to kerb parking; screenshots before R7 |

@@ -30,8 +30,13 @@ import '../../domain/terrain/terrain_brush.dart';
 import '../../domain/terrain/terrain_edits.dart';
 import '../../domain/terrain/terrain_feature.dart';
 import 'city_patch_columns.dart';
+import 'city_site_frame.dart';
 import 'city_traffic_frame.dart';
 import 'traffic_capture.dart';
+
+// Site access on the frame (docs/plans/site-access.md §5.2), part of its
+// vocabulary like the patches.
+export 'city_site_frame.dart' show CitySiteFrame, SiteChunkGeometry;
 
 // The patch classes live in their own file (the columns are a fair amount of
 // code) but are part of the frame's vocabulary, so they come with it.
@@ -1589,8 +1594,24 @@ class BuildingSnapshot {
   /// Palette colour, so a client tints facades without a spec table.
   final int colorArgb;
 
+  /// The site access book slot of this building's plan
+  /// (docs/plans/site-access.md §5.2), or −1: no published plan, and the
+  /// legacy path. `siteSlot >> 10` is the index of its chunk in the colony's
+  /// `CitySiteFrame`; the frame finds its row
+  /// (`CitySiteFrame.locate`). Stable while the site lives, so a plan change
+  /// moves no building field.
+  final int siteSlot;
+
+  /// Where the plan's primary drive crosses the envelope's front edge:
+  /// [gateXM] along the building's local X from the envelope centre, and
+  /// its width [gateWM] (0: no gate).
+  final double gateXM, gateWM;
+
   const BuildingSnapshot({
     this.corner = false,
+    this.siteSlot = -1,
+    this.gateXM = 0,
+    this.gateWM = 0,
     required this.id,
     required this.type,
     required this.colonyId,
@@ -1671,6 +1692,9 @@ class BuildingSnapshot {
     CityBuildingSpec spec,
     CelestialBody body, {
     required double siteRadiusM,
+    int siteSlot = -1,
+    double gateXM = 0,
+    double gateWM = 0,
   }) {
     final t = _parcelTransform(city, parcel, siteRadiusM);
     final dir = t.position.normalized;
@@ -1709,6 +1733,9 @@ class BuildingSnapshot {
       siteKindIndex: spec.siteKind.index,
       colorArgb: spec.colorArgb,
       corner: parcel.isCorner,
+      siteSlot: siteSlot,
+      gateXM: gateXM,
+      gateWM: gateWM,
     );
   }
 
@@ -1726,6 +1753,9 @@ class BuildingSnapshot {
     /// Ground radius under the colony. Defaults to the body's datum for the
     /// callers that have no terrain field to sample.
     double? siteRadiusM,
+    int siteSlot = -1,
+    double gateXM = 0,
+    double gateWM = 0,
   }) {
     final radius = siteRadiusM ?? body.radius;
     final half = city.grid / 2.0;
@@ -1778,6 +1808,9 @@ class BuildingSnapshot {
       siteDepthM: spec.siteMetres(cellM: CitySim.cellM).depth,
       siteKindIndex: spec.siteKind.index,
       colorArgb: spec.colorArgb,
+      siteSlot: siteSlot,
+      gateXM: gateXM,
+      gateWM: gateWM,
     );
   }
 
@@ -1794,6 +1827,10 @@ class BuildingSnapshot {
         'sd': siteDepthM,
         'sk': siteKindIndex,
         'c': colorArgb,
+        // Omitted at their defaults: a legacy building's JSON is as it was.
+        if (siteSlot != -1) 'ss': siteSlot,
+        if (gateXM != 0) 'gx': gateXM,
+        if (gateWM != 0) 'gw': gateWM,
       };
 
   factory BuildingSnapshot.fromJson(Map<String, dynamic> j) {
@@ -1817,6 +1854,9 @@ class BuildingSnapshot {
       siteDepthM: (j['sd'] as num?)?.toDouble() ?? 24,
       siteKindIndex: (j['sk'] as num?)?.toInt() ?? 0,
       colorArgb: (j['c'] as num?)?.toInt() ?? 0xFF9E9E9E,
+      siteSlot: (j['ss'] as num?)?.toInt() ?? -1,
+      gateXM: (j['gx'] as num?)?.toDouble() ?? 0,
+      gateWM: (j['gw'] as num?)?.toDouble() ?? 0,
     );
   }
 }
@@ -1908,6 +1948,15 @@ class RoadSnapshot {
   /// `-RoadElevation.tunnelCoverM` the road is in a tunnel.
   final List<double> lifts;
 
+  /// Where site access joins break this road's kerbs
+  /// (docs/plans/site-access.md §5.2, `KerbCuts`): quintuples
+  /// `(side, c, h, σ, kind)` along the road AS THE FRAME DRAWS IT — `c` on
+  /// arc along [points], side 1 right of the first → last point, `σ` the
+  /// travel sign of the lane beside that kerb, all flipped with the points
+  /// for a reversed road. EMPTY for a road with none. Never part of a road's
+  /// content hash: a building placed never makes its road an edited one.
+  final List<double> kerbCuts;
+
   const RoadSnapshot({
     required this.colonyId,
     required this.body,
@@ -1923,6 +1972,7 @@ class RoadSnapshot {
     this.id,
     this.decoration = 0,
     this.lifts = const [],
+    this.kerbCuts = const [],
   });
 
   Map<String, dynamic> toJson() => {
@@ -1940,6 +1990,7 @@ class RoadSnapshot {
         if (id != null) 'id': id,
         if (decoration != 0) 'deco': decoration,
         if (lifts.isNotEmpty) 'lift': lifts,
+        if (kerbCuts.isNotEmpty) 'kc': kerbCuts,
       };
 
   factory RoadSnapshot.fromJson(Map<String, dynamic> j) => RoadSnapshot(
@@ -1963,6 +2014,11 @@ class RoadSnapshot {
         lifts: Float64List.fromList([
           for (final v in (j['lift'] as List?) ?? const []) (v as num).toDouble()
         ]),
+        kerbCuts: j['kc'] is List
+            ? Float64List.fromList([
+                for (final v in j['kc'] as List) (v as num).toDouble()
+              ])
+            : const <double>[],
       );
 }
 
@@ -2443,6 +2499,13 @@ class WorldSnapshot {
   /// Transient: not serialised, since a JSON frame is not a save.
   final List<CityTrafficFrame> cityTraffic;
 
+  /// Every colony's site access plans, their heights and keys
+  /// (docs/plans/site-access.md §5.2), by reference: a colony whose book has
+  /// published nothing has none, and neither has a hand-built frame (the
+  /// studios', the wire codec's), whose buildings then draw the legacy way.
+  /// Serialised; not in [fingerprint].
+  final List<CitySiteFrame> sites;
+
   // Not const: the empty patch columns are typed lists, which have no const
   // form, and nothing constructs a frame as a constant.
   WorldSnapshot({
@@ -2460,6 +2523,7 @@ class WorldSnapshot {
     this.roadsRevision = const {},
     this.junctions = const [],
     this.cityTraffic = const [],
+    this.sites = const [],
   }) : patches = patches ?? CityPatchColumns.empty;
 
   /// The same frame at a different sim time.
@@ -2484,6 +2548,7 @@ class WorldSnapshot {
         roadsRevision: roadsRevision,
         junctions: junctions,
         cityTraffic: cityTraffic,
+        sites: sites,
       );
 
   /// The deformations for [bodyId], rebuilt as a domain store ready to hand to
@@ -2536,6 +2601,7 @@ class WorldSnapshot {
     final cityTraffic = <CityTrafficFrame>[];
     final junctions = <JunctionSnapshot>[];
     final roadsRevision = <String, int>{};
+    final sites = <CitySiteFrame>[];
     final patches = CityPatchColumnsBuilder();
     // City-builder colonies. Their cells are placed on the same tangent grid as
     // the legacy colonies, but centred on the colony site rather than running
@@ -2652,7 +2718,13 @@ class WorldSnapshot {
             return field.groundRadiusAt(d.x, d.y, d.z);
           });
         }
+        // The colony's site access plans (docs/plans/site-access.md §5.2):
+        // null while its book has published none. On a steady frame a few
+        // identity compares; the kerb cuts below are a list index a road.
+        final siteCap = SiteCapture.begin(city);
+        var roadIndex = -1;
         for (final road in city.layout.roads) {
+          roadIndex++;
           // Worked out once per change to the road or to the ground under
           // the colony, and held ([CitySim.drapeCache]): the capture runs
           // every frame, and re-sampling and re-modelling every graded
@@ -2751,6 +2823,9 @@ class WorldSnapshot {
             id: road.id,
             decoration: road.decoration.index,
             lifts: lifts ?? const <double>[],
+            kerbCuts: siteCap == null
+                ? const <double>[]
+                : siteCap.kerbCutsFor(roadIndex, reversed, drape.pts),
           ));
         }
         // The players' junction overrides, each on the ground at its own
@@ -2859,6 +2934,9 @@ class WorldSnapshot {
         // lot's real width and turns to face its road — which is the whole
         // reason parcels exist.
         for (final (parcel, spec) in city.parcelBuiltLots()) {
+          final (slot, gateX, gateW) = siteCap == null
+              ? (-1, 0.0, 0.0)
+              : siteCap.buildingSiteOf(parcel.id);
           buildings['${city.id}/${parcel.id}'] = BuildingSnapshot.ofParcel(
             city,
             parcel,
@@ -2866,6 +2944,9 @@ class WorldSnapshot {
             body,
             siteRadiusM:
                 groundFor('lot:${parcel.id}', parcel.centroid),
+            siteSlot: slot,
+            gateXM: gateX,
+            gateWM: gateW,
           );
         }
         // Empty lots, drawn so the subdivision is visible before anything is
@@ -2916,6 +2997,9 @@ class WorldSnapshot {
           );
         }
         for (final e in city.occupiedCells()) {
+          final (slot, gateX, gateW) = siteCap == null
+              ? (-1, 0.0, 0.0)
+              : siteCap.buildingSiteOf(CitySim.siteIdOfCell(e.key));
           buildings['${city.id}/${e.key}'] = BuildingSnapshot.ofCityCell(
             city,
             e.key,
@@ -2924,7 +3008,22 @@ class WorldSnapshot {
             placement,
             heights,
             siteRadiusM: radiusOf(e.key),
+            siteSlot: slot,
+            gateXM: gateX,
+            gateWM: gateW,
           );
+        }
+        // After every lot and cell above has asked its ground: the pads the
+        // heights stand on are cached by then, so a steady frame asks
+        // nothing more (§6.4, §8.4).
+        if (siteCap != null) {
+          sites.add(siteCap.frame(
+            bodyId: body.id.value,
+            datumRadiusM: body.radius,
+            siteRadiusM: siteRadius,
+            groundFor: groundFor,
+            cellRadius: radiusOf,
+          ));
         }
       }
     }
@@ -2952,6 +3051,7 @@ class WorldSnapshot {
       roadsRevision: roadsRevision,
       junctions: junctions,
       cityTraffic: cityTraffic,
+      sites: sites,
       patches: patches.build(),
       events: events,
       terrainEdits: terrainEdits == null
@@ -2991,6 +3091,7 @@ class WorldSnapshot {
           'terrainEdits': [for (final e in terrainEdits) e.toJson()],
         if (megastructures.isNotEmpty)
           'megastructures': [for (final m in megastructures) m.toJson()],
+        if (sites.isNotEmpty) 'sites': [for (final s in sites) s.toJson()],
       };
 
   factory WorldSnapshot.fromJson(Map<String, dynamic> j) {
@@ -3050,6 +3151,10 @@ class WorldSnapshot {
       megastructures: [
         for (final m in (j['megastructures'] as List?) ?? const [])
           MegastructureSnapshot.fromJson(m as Map<String, dynamic>),
+      ],
+      sites: [
+        for (final s in (j['sites'] as List?) ?? const [])
+          if (s is Map) CitySiteFrame.fromJson(s.cast<String, dynamic>()),
       ],
     );
   }

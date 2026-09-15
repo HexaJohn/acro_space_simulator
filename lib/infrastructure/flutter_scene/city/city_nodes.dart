@@ -450,6 +450,14 @@ class CityNodes {
   /// `cityTraffic` (set in [update]).
   static bool agentSignals = false;
 
+  /// Whether the tiles take the frame's site access plans
+  /// (docs/plans/site-access.md §5.3): the sites cut into tiles and keyed,
+  /// served buildings' slots and gates and roads' kerb cuts keyed, and the
+  /// sites packed into the requests. OFF (the default) until the slice that
+  /// draws them: every building is legacy, and every tile's membership, key
+  /// and mesh are exactly as they were.
+  static bool siteAccess = false;
+
   /// Scales how many vehicles a road carries. A hook for the colony's own
   /// congestion once that reaches the frame; 1.0 is an ordinary working day.
   static double trafficDensity = 1.0;
@@ -638,6 +646,7 @@ class CityNodes {
         sealedWorld: sealedWorld,
         maxParkedCars: _maxParkedCars,
         agentSignals: agentSignals,
+        siteAccess: siteAccess,
       );
 
   /// Rebuild the archetype libraries if their knobs moved. Everything already
@@ -836,7 +845,10 @@ class CityNodes {
     // camera comes back within range (see [CityCutGate]).
     final sig = '${snap.buildings.length}|${snap.roads.length}|'
         '${snap.patches.length}|${snap.terrainEdits.length}|'
-        '${CityTileBucketer.roadsSignature(snap)}';
+        '${CityTileBucketer.roadsSignature(snap)}'
+        // Site access, only while the tiles take it: a plan appearing or a
+        // height moving re-cuts, and the detail layer's key inherits it.
+        '${siteAccess ? '|${CityTileBucketer.sitesSignature(snap)}' : ''}';
     final focusOf = _focusOfBodies(snap, focusWorld);
     if (_cutGate.wantsCut(snap, sig, rangeM: maxRangeM, focusBF: focusOf)) {
       _cutGate.cut(sig);
@@ -1314,7 +1326,8 @@ class CityNodes {
     final plan = CityTileBucketer.bucket(snap,
         anchors: {for (final r in _roots.values) r.bodyId: r.anchorBF},
         tileM: tileM,
-        keyed: false);
+        keyed: false,
+        siteAccess: siteAccess);
     final bounds = CityCullBounds.ofPlan(plan);
     if (bounds.nearestM(focusBF) > maxRangeM) {
       _cull(bounds);
@@ -1582,6 +1595,7 @@ class CityNodes {
       junctions: t.junctions,
       corridors: t.corridors,
       roadEndBent: bent ?? const [],
+      sites: CityTileBucketer.siteFramesOf(t.sites),
     );
   }
 
@@ -3399,6 +3413,7 @@ class CityNodes {
           epoch: snap.epoch,
           knobs: _knobsNow(),
           candidates: () => _detailCandidates(bodyId, focusBF),
+          sites: snap.sites,
         ),
       );
     }
@@ -3554,6 +3569,9 @@ class _Tile {
   /// out of (see [CityTileBucket.corridors]).
   List<CityTileCorridor> corridors = const [];
 
+  /// The site access plans the tile holds (see [CityTileBucket.sites]).
+  List<CityTileSite> sites = const [];
+
   /// Body-centre distance of the outermost building centre in the tile
   /// (0 with no buildings): the shell the camera's altitude is measured
   /// over in [CityNodes.tileCanDetail].
@@ -3570,6 +3588,7 @@ class _Tile {
     ends = b.ends;
     junctions = b.junctions;
     corridors = b.corridors;
+    sites = b.sites;
     maxRadiusM = b.maxRadiusM;
     structureKey = b.structureKey;
   }

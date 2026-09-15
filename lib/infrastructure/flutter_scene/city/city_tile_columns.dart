@@ -117,7 +117,13 @@ class CityTileMembers {
     this.junctions = const [],
     this.corridors = const [],
     this.roadEndBent = const [],
+    this.sites = const [],
   });
+
+  /// The site access plans the tile draws, per colony, as frames of just
+  /// the tile's own sites (docs/plans/site-access.md §5.3): empty unless the
+  /// request was cut with `CityMeshKnobs.siteAccess` on.
+  final List<CitySiteFrame> sites;
 
   /// The player's junction overrides that fall in the tile.
   final List<CityTileJunction> junctions;
@@ -181,6 +187,9 @@ class CityTileColumns {
     required this.roadBridgeStarts,
     required this.roadLifts,
     required this.roadLiftStarts,
+    required this.roadCuts,
+    required this.roadCutStarts,
+    required this.sites,
     required this.roadF,
     required this.roadI,
     required this.patches,
@@ -211,10 +220,10 @@ class CityTileColumns {
   final Int32List buildingStrings;
 
   /// Per building: px, py, pz, qw, qx, qy, qz, lat, lon, siteWidthM,
-  /// siteDepthM.
+  /// siteDepthM, gateXM, gateWM.
   final Float64List buildingF;
 
-  /// Per building: siteKindIndex, flags ([cornerFlag]).
+  /// Per building: siteKindIndex, flags ([cornerFlag]), siteSlot.
   final Int32List buildingI;
 
   /// Per building: colorArgb.
@@ -238,6 +247,16 @@ class CityTileColumns {
   /// at all. The road's [hasLiftsFlag] says the same, for the unpack.
   final Float64List roadLifts;
   final Int32List roadLiftStarts;
+
+  /// Every road's kerb cuts (`RoadSnapshot.kerbCuts`), likewise: an empty
+  /// range for a road with none.
+  final Float64List roadCuts;
+  final Int32List roadCutStarts;
+
+  /// The tile's site access plans, per colony, as frames of just its own
+  /// sites (see [CityTileMembers.sites]). Their chunks are typed lists too,
+  /// so they cross as blocks.
+  final List<CitySiteFrame> sites;
 
   /// Per road: halfWidthM, startHalfWidthM, endHalfWidthM — the last two
   /// meaningful only where the road's flags say the snapshot had them.
@@ -315,7 +334,8 @@ class CityTileColumns {
   static const int stopsSetFlag = 1;
   static const int noEntry = -1;
 
-  static const int _buildingF = 11;
+  static const int _buildingF = 13;
+  static const int _buildingI = 3;
   static const int _endF = 8;
 
   int get buildingCount => buildingIds.length;
@@ -356,6 +376,12 @@ class CityTileColumns {
       roadBridgeStarts.lengthInBytes +
       roadLifts.lengthInBytes +
       roadLiftStarts.lengthInBytes +
+      roadCuts.lengthInBytes +
+      roadCutStarts.lengthInBytes +
+      sites.fold<int>(
+          0,
+          (n, f) => f.chunks.fold<int>(
+              n, (m, g) => m + g.byteLength + g.plan.byteLength)) +
       roadF.lengthInBytes +
       roadI.lengthInBytes +
       patches.typedBytes +
@@ -390,6 +416,7 @@ class CityTileColumns {
     List<CityTileJunction> junctions = const [],
     List<CityTileCorridor> corridors = const [],
     List<bool> roadEndBent = const [],
+    List<CitySiteFrame> sites = const [],
   }) {
     if (roadEnds.length != 2 * roads.length) {
       throw ArgumentError(
@@ -411,7 +438,7 @@ class CityTileColumns {
         growable: false);
     final buildingStrings = Int32List(nb * 3);
     final buildingF = Float64List(nb * _buildingF);
-    final buildingI = Int32List(nb * 2);
+    final buildingI = Int32List(nb * _buildingI);
     final buildingColors = Uint32List(nb);
     for (var i = 0; i < nb; i++) {
       final b = buildings[i];
@@ -430,18 +457,24 @@ class CityTileColumns {
       buildingF[f + 8] = b.lon;
       buildingF[f + 9] = b.siteWidthM;
       buildingF[f + 10] = b.siteDepthM;
-      buildingI[i * 2] = b.siteKindIndex;
-      buildingI[i * 2 + 1] = b.corner ? cornerFlag : 0;
+      buildingF[f + 11] = b.gateXM;
+      buildingF[f + 12] = b.gateWM;
+      buildingI[i * _buildingI] = b.siteKindIndex;
+      buildingI[i * _buildingI + 1] = b.corner ? cornerFlag : 0;
+      buildingI[i * _buildingI + 2] = b.siteSlot;
       buildingColors[i] = b.colorArgb;
     }
 
     final nr = roads.length;
-    var pointCount = 0, bridgeCount = 0, liftCount = 0;
+    var pointCount = 0, bridgeCount = 0, liftCount = 0, cutCount = 0;
     for (final r in roads) {
       pointCount += r.points.length;
       bridgeCount += r.bridges.length;
       liftCount += r.lifts.length;
+      cutCount += r.kerbCuts.length;
     }
+    final roadCuts = Float64List(cutCount);
+    final roadCutStarts = Int32List(nr + 1);
     final roadStrings = Int32List(nr * 2);
     final roadPoints = Float64List(pointCount);
     final roadPointStarts = Int32List(nr + 1);
@@ -453,7 +486,7 @@ class CityTileColumns {
     final roadI = Int32List(nr * 2);
     final roadEndHalf = Float64List(nr * 2);
     final roadEndCount = Int32List(nr * 2);
-    var pAt = 0, bAt = 0, lAt = 0;
+    var pAt = 0, bAt = 0, lAt = 0, kAt = 0;
     for (var i = 0; i < nr; i++) {
       final r = roads[i];
       roadStrings[i * 2] = intern(r.colonyId);
@@ -467,6 +500,9 @@ class CityTileColumns {
       roadLiftStarts[i] = lAt;
       roadLifts.setRange(lAt, lAt + r.lifts.length, r.lifts);
       lAt += r.lifts.length;
+      roadCutStarts[i] = kAt;
+      roadCuts.setRange(kAt, kAt + r.kerbCuts.length, r.kerbCuts);
+      kAt += r.kerbCuts.length;
       roadF[i * 3] = r.halfWidthM;
       roadF[i * 3 + 1] = r.startHalfWidthM ?? 0;
       roadF[i * 3 + 2] = r.endHalfWidthM ?? 0;
@@ -487,6 +523,7 @@ class CityTileColumns {
     roadPointStarts[nr] = pAt;
     roadBridgeStarts[nr] = bAt;
     roadLiftStarts[nr] = lAt;
+    roadCutStarts[nr] = kAt;
     var bentCount = 0;
     for (final b in roadEndBent) {
       if (b) bentCount++;
@@ -579,6 +616,9 @@ class CityTileColumns {
       roadBridgeStarts: roadBridgeStarts,
       roadLifts: roadLifts,
       roadLiftStarts: roadLiftStarts,
+      roadCuts: roadCuts,
+      roadCutStarts: roadCutStarts,
+      sites: List<CitySiteFrame>.of(sites, growable: false),
       roadF: roadF,
       roadI: roadI,
       patches: patches,
@@ -626,8 +666,11 @@ class CityTileColumns {
         lon: buildingF[f + 8],
         siteWidthM: buildingF[f + 9],
         siteDepthM: buildingF[f + 10],
-        siteKindIndex: buildingI[i * 2],
-        corner: buildingI[i * 2 + 1] & cornerFlag != 0,
+        gateXM: buildingF[f + 11],
+        gateWM: buildingF[f + 12],
+        siteKindIndex: buildingI[i * _buildingI],
+        corner: buildingI[i * _buildingI + 1] & cornerFlag != 0,
+        siteSlot: buildingI[i * _buildingI + 2],
         colorArgb: buildingColors[i],
       );
     }, growable: false);
@@ -653,6 +696,10 @@ class CityTileColumns {
         lifts: flags & hasLiftsFlag != 0
             ? Float64List.sublistView(
                 roadLifts, roadLiftStarts[i], roadLiftStarts[i + 1])
+            : const <double>[],
+        kerbCuts: roadCutStarts[i + 1] > roadCutStarts[i]
+            ? Float64List.sublistView(
+                roadCuts, roadCutStarts[i], roadCutStarts[i + 1])
             : const <double>[],
       );
     }, growable: false);
@@ -719,6 +766,7 @@ class CityTileColumns {
       junctions: junctions,
       corridors: corridors,
       roadEndBent: roadEndBent,
+      sites: sites,
     );
   }
 }
