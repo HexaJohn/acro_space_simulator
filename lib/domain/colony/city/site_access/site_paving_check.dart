@@ -104,7 +104,17 @@ List<String> sitePavingViolations(SiteContext ctx, SiteAccessPlan plan) {
       for (var i = 0; i + 1 < line.length; i++) _Leg(line[i], line[i + 1]),
     ];
     // The last leg runs on until its whole width is past the frontage line.
-    if (line.length >= 2) {
+    // A kerb on (or behind) the frontage line has no leg of its own; it
+    // gets that extension alone, from the kerb along the slot normal, so a
+    // skewed lot's kerb corners are covered as a set-back lot's are.
+    if (line.length == 1) {
+      final nrm = Vec2(slot.normE, slot.normN);
+      final dv = nrm.dot(frame.v);
+      final ext = dv > 1e-6
+          ? kAccessCorridorHalfM * nrm.dot(frame.u).abs() / dv
+          : 0.0;
+      if (ext > 1e-6) legs.add(_Leg(line[0], line[0] + nrm * ext));
+    } else {
       final last = own.last;
       final dv = last.t.dot(frame.v);
       final ext = dv > 1e-6

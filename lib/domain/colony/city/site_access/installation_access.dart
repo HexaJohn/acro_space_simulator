@@ -7,7 +7,7 @@
 /// (docs/plans/site-access.md §3.7).
 ///
 /// ```
-///   y ▲   envelope = [0, W] × [Df, D]; the fence line y = Df holds gate G
+///   y ▲   envelope = the largest lot rectangle in y ≥ Df; G on the fence y = Df
 ///  Df ├──────────────G──────────────   G: kNodeGate, dead end, hammerhead (a)
 ///     │      ▭ ▭     ║     ▭ ▭          loading bays beside Y→G
 ///     │             (Y)══════C═╗       connector along ±u to the first aisle
@@ -36,6 +36,9 @@
 /// - A dogleg (`kJoinOffFrontage`) follows R1's corridor polyline `K → T → Q
 ///   → F` exactly; one whose bend `T` does not lie in front of the frontage
 ///   line gets no plan.
+/// - The envelope is the largest lot rectangle behind the fence line that
+///   spans the gate gap ([_envelopeOf]); the car park band starts behind a
+///   skewed throat ([_farYBeyond]).
 ///
 /// Determinism (§3.9): no platform hash, draw, clock, map iteration or
 /// trigonometry; ties go to the smaller candidate, the side tie to the seed.
@@ -650,8 +653,14 @@ InstallationPlan? installationPlanOf(SiteContext ctx) {
 
   // ---- 6: staff car park -----------------------------------------------------
   final target = capacityTarget(SiteProgram.installation, spec);
+  // The throat's frame footprint K→T (a dogleg's legs lie before the lot and
+  // its spine leaves F along v, so only a straight throat can lean into the
+  // car park's band).
+  final throat = dogleg == null
+      ? (kerbL, Vec2(gateX, frontY), Vec2(nu, c))
+      : null;
   final carPark = _staffCarPark(ctx, gateX, branchY, dMax, target,
-      bayNeed: bays.isNotEmpty ? bayNeed : 0);
+      bayNeed: bays.isNotEmpty ? bayNeed : 0, throat: throat);
 
   // ---- 7: forecourt depth, without clamp -------------------------------------
   final need = math.max(
@@ -669,6 +678,8 @@ InstallationPlan? installationPlanOf(SiteContext ctx) {
       math.max(spineY, kContainsInsetM), gateX + hw, df))) {
     return null;
   }
+  final envelope = _envelopeOf(profile, wLot, df, gateX);
+  if (envelope == null) return null;
   return InstallationPlan._(
     throatLengthM: throatM,
     frontY: frontY,
@@ -680,11 +691,100 @@ InstallationPlan? installationPlanOf(SiteContext ctx) {
     bays: bays,
     carPark: carPark,
     forecourtDepthM: df,
-    envelope: SiteEnvelope(0, df, wLot, depth,
-        frontInset: df,
-        gateX: gateX,
-        gateW: kInstallationThroatWidthM + kGateExtraWidthM),
+    envelope: envelope,
   );
+}
+
+/// §3.7 step 9 with §6.1 steps 2–3 on an odd lot (§3.8): the largest frame
+/// rectangle inside [profile] with its front on the fence line `y = Df`
+/// ([df]) that holds the whole gate gap `gateX ± gateW/2`; null when there is
+/// none with both sides at least [kEnvelopeMinSideM].
+///
+/// As `largestFreeRect` (§6.1 step 2), over 0.5 m columns from 0.3 m inside
+/// each lot line (a corner ON the boundary is neither in nor out of
+/// `containsRect`), each column's free depth the shallower of its two edges;
+/// but the rectangle must span the gate's columns (the fence gap, the gate
+/// node and the envelope's front edge coincide, §6.2), so the unconstrained
+/// largest one — often a strip beside the gate on an L or a triangle — is not
+/// the answer. The sweep takes every candidate height (the running minimum
+/// outward from the gate on either side), tallest first; the largest area
+/// wins, ties to the taller.
+/// A result whose column-edge corners fail the exact `containsRect` (a back
+/// edge steeper than the 0.3 m margin covers over half a column) has its back
+/// edge pulled in by bisection until it passes. Nothing of the plan lies past
+/// `Df` (the car park ends 6 m before it, the bays 3 m, the gate apron on
+/// it), so no pave blocks it.
+SiteEnvelope? _envelopeOf(
+    DepthProfile profile, double wLot, double df, double gateX) {
+  const gateW = kInstallationThroatWidthM + kGateExtraWidthM;
+  const step = kDepthProfileStepM;
+  const lo = kDepthProfileMarginM;
+  final n = ((wLot - 2 * lo) / step + 1e-9).floor();
+  if (n <= 0) return null;
+  // The gate's columns [cL, cR]: x0 = lo + cL·step ≤ gateX − gateW/2 and
+  // x1 = lo + (cR + 1)·step ≥ gateX + gateW/2.
+  final cL = ((gateX - gateW / 2 - lo) / step + 1e-9).floor();
+  final cR = ((gateX + gateW / 2 - lo) / step - 1e-9).ceil() - 1;
+  if (cL < 0 || cR >= n || cR < cL) return null;
+  double heightOf(int c) {
+    final xa = lo + c * step, xb = xa + step;
+    final far =
+        math.min(profile.depthAt(xa + 1e-9), profile.depthAt(xb - 1e-9));
+    return math.max(0.0, far - df);
+  }
+
+  var core = double.infinity;
+  for (var c = cL; c <= cR; c++) {
+    core = math.min(core, heightOf(c));
+  }
+  if (core < kEnvelopeMinSideM - kGenEpsM) return null;
+  // Running minimum outward: left[i] over [cL − i, cR], right[j] over
+  // [cL, cR + j]; both non-increasing.
+  final left = <double>[core];
+  for (var c = cL - 1; c >= 0; c--) {
+    left.add(math.min(left.last, heightOf(c)));
+  }
+  final right = <double>[core];
+  for (var c = cR + 1; c < n; c++) {
+    right.add(math.min(right.last, heightOf(c)));
+  }
+  final heights = [...left, ...right]..sort((a, b) => b.compareTo(a));
+  var bestArea = 0.0;
+  SiteRect? best;
+  var li = 0, ri = 0;
+  for (final h in heights) {
+    if (h < kEnvelopeMinSideM - kGenEpsM) break;
+    while (li + 1 < left.length && left[li + 1] >= h) {
+      li++;
+    }
+    while (ri + 1 < right.length && right[ri + 1] >= h) {
+      ri++;
+    }
+    final x0 = lo + (cL - li) * step, x1 = lo + (cR + ri + 1) * step;
+    final area = (x1 - x0) * h;
+    if (area > bestArea + 1e-9) {
+      bestArea = area;
+      best = SiteRect(x0, df, x1, df + h);
+    }
+  }
+  final r = best;
+  if (r == null || r.width < kEnvelopeMinSideM - kGenEpsM) return null;
+  var y1 = r.y1;
+  if (!profile.containsRect(SiteRect(r.x0, df, r.x1, y1))) {
+    var ok = df + kEnvelopeMinSideM, bad = y1;
+    if (!profile.containsRect(SiteRect(r.x0, df, r.x1, ok))) return null;
+    for (var i = 0; i < 24 && bad - ok > kGenEpsM; i++) {
+      final mid = (ok + bad) / 2;
+      if (profile.containsRect(SiteRect(r.x0, df, r.x1, mid))) {
+        ok = mid;
+      } else {
+        bad = mid;
+      }
+    }
+    y1 = ok;
+  }
+  return SiteEnvelope(r.x0, df, r.x1, y1,
+      frontInset: df, gateX: gateX, gateW: gateW);
 }
 
 /// §3.7 step 6: the best staff car park on the roomier side of the spine at
@@ -702,7 +802,7 @@ InstallationPlan? installationPlanOf(SiteContext ctx) {
 /// Ties go to the smaller `k`, then the shallower block.
 InstallationCarPark? _staffCarPark(SiteContext ctx, double gateX,
     double branchY, double dMax, int target,
-    {required double bayNeed}) {
+    {required double bayNeed, (Vec2, Vec2, Vec2)? throat}) {
   final frame = ctx.frame!;
   final profile = frame.profile;
   final wLot = frame.widthM;
@@ -718,12 +818,21 @@ InstallationCarPark? _staffCarPark(SiteContext ctx, double gateX,
   final room = sigma > 0 ? roomPlus : roomMinus;
   final bandTop = dMax - kForecourtCarParkClearM;
   const halfAisle = kAisleTwoWayWidthM / 2;
-  final firstRowY = _kBandFrontM + halfAisle; // aisle end nodes, near side
+  // The band's front: 0.3 m, or behind the throat where a skewed throat
+  // leans into the block's x range (§3.7 as built: the block pave never
+  // overlaps the throat's).
+  var bandFront = _kBandFrontM;
+  if (throat != null) {
+    final (a, t, d) = throat;
+    bandFront = math.max(bandFront,
+        _farYBeyond(a, t, d, kInstallationThroatWidthM / 2, gateX, sigma));
+  }
+  final firstRowY = bandFront + halfAisle; // aisle end nodes, near side
   // C strictly inside aisle 0 only when both its stretches are T-end long.
   final connectorAtEnd = branchY - firstRowY < kTEndAisleMinM - kGenEpsM;
   final aisleY0 = connectorAtEnd ? branchY : firstRowY;
   final paveY0 = aisleY0 - halfAisle;
-  if (paveY0 < _kBandFrontM - kGenEpsM) return null;
+  if (paveY0 < bandFront - kGenEpsM) return null;
   final dC = InstallationCarPark.offsetOf(0);
   final cx0 = sigma > 0 ? gateX : gateX - dC;
   final cx1 = sigma > 0 ? gateX + dC : gateX;
@@ -787,6 +896,29 @@ InstallationCarPark? _staffCarPark(SiteContext ctx, double gateX,
     }
   }
   return best;
+}
+
+/// The largest frame y of the throat rectangle from [a] to [t] (unit
+/// direction [d], half width [hw]) on the car park's side [sigma] at or past
+/// the block's near edge `x_G ± kStaffCarParkBandM`; −∞ where none of it
+/// reaches there. The rectangle is clipped to that half-plane (one
+/// Sutherland–Hodgman pass); its highest remaining vertex is the answer.
+double _farYBeyond(
+    Vec2 a, Vec2 t, Vec2 d, double hw, double gateX, int sigma) {
+  final p = Vec2(-d.n, d.e) * hw;
+  final ring = [a - p, t - p, t + p, a + p];
+  double side(Vec2 q) => sigma * (q.e - gateX) - kStaffCarParkBandM;
+  var far = double.negativeInfinity;
+  for (var i = 0; i < ring.length; i++) {
+    final q0 = ring[i], q1 = ring[(i + 1) % ring.length];
+    final s0 = side(q0), s1 = side(q1);
+    if (s0 >= 0) far = math.max(far, q0.n);
+    if ((s0 < 0) != (s1 < 0)) {
+      final f = s0 / (s0 - s1);
+      far = math.max(far, q0.n + (q1.n - q0.n) * f);
+    }
+  }
+  return far;
 }
 
 /// The stalls of [cp]'s rows: every aisle's far row, and its near row from

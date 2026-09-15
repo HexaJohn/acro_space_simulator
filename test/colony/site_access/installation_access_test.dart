@@ -3,6 +3,8 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
+import 'dart:math' as math;
+
 import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_layout.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
@@ -26,7 +28,9 @@ import 'site_plan_fixtures.dart';
 /// with vias, `Y` at y = 15, four bays, gate `G` on the fence line, the staff
 /// car park outside `x_G ± 15` with at least 12 stalls), a 130 m-deep site
 /// (`Df = 40`, bays dropped, trucks not admitted), a spine near a lot side
-/// (no yard, branch `B`), a dogleg, and a narrow slot that fits no 7 m
+/// (no yard, branch `B`), a dogleg, odd lots whose envelope must stay inside
+/// the lot and span the gate (§3.8), a gate with no room behind it, skewed
+/// throats clear of the car park block, and a narrow slot that fits no 7 m
 /// throat. Every plan passes V1–V13 (V1 under the five override kinds) and
 /// the R2 paving checks.
 void main() {
@@ -273,6 +277,108 @@ void main() {
       }
     });
 
+    /// A 200 × 200 m lot turned [deg]° about the point [k] m behind slot 0's
+    /// kerb, so the slot normal lies [deg]° off the frame's v.
+    Parcel skewedLot(double deg, double k) {
+      final a = deg * math.pi / 180;
+      final v0 = Vec2(0, slot.normN.sign);
+      const u0 = Vec2(1, 0);
+      final u = u0 * math.cos(a) + v0 * math.sin(a);
+      final v = v0 * math.cos(a) - u0 * math.sin(a);
+      final c0 = Vec2(slot.kerbE, slot.kerbN) + v * k;
+      final p0 = c0 - u * 100, p1 = c0 + u * 100;
+      return Parcel(
+          id: 'site',
+          polygon: [p0, p1, p1 + v * 200, p0 + v * 200],
+          frontage: (p0, p1));
+    }
+
+    test('odd lots (§3.8): the envelope lies inside the lot and holds the gate',
+        () {
+      final sn = slot.normN.sign;
+      Vec2 at(double x, double yy) => Vec2(x, slot.kerbN + (3 + yy) * sn);
+      final x0 = slot.s - 100, x1 = slot.s + 100;
+      final lots = {
+        // Deep only left of the gate (x_G = 100): the largest rectangle
+        // behind the fence, [0.3, 90] × [Df, 199.7], misses the gate; the
+        // envelope is the full-width strip behind it instead.
+        'L': [
+          at(x0, 0), at(x1, 0), at(x1, 70), at(x0 + 90, 70), //
+          at(x0 + 90, 200), at(x0, 200),
+        ],
+        'trapezoid': [at(x0, 0), at(x1, 0), at(x1, 120), at(x0, 200)],
+      };
+      for (final MapEntry(key: name, value: poly) in lots.entries) {
+        final parcel = Parcel(
+            id: 'site', polygon: poly, frontage: (poly[0], poly[1]));
+        final ctx = ctxOf(parcel);
+        final plan = installationPlanOf(ctx);
+        expect(plan, isNotNull, reason: name);
+        final env = plan!.envelope;
+        expect(ctx.frame!.profile.containsRect(env.rect), isTrue,
+            reason: '$name $env');
+        expect(env.y0, closeTo(plan.forecourtDepthM, 1e-9), reason: name);
+        expect(env.x0, lessThanOrEqualTo(env.gateX - env.gateW / 2),
+            reason: '$name $env');
+        expect(env.x1, greaterThanOrEqualTo(env.gateX + env.gateW / 2),
+            reason: '$name $env');
+        expect(env.width, greaterThanOrEqualTo(kEnvelopeMinSideM));
+        expect(env.depth, greaterThanOrEqualTo(kEnvelopeMinSideM));
+        final p = planOf(ctx, spans);
+        expect(p.envX1 - p.envX0, closeTo(env.width, 1e-4));
+        expect(p.envY1, closeTo(env.y1, 1e-4));
+      }
+    });
+
+    test('a gate with no 8 m of lot behind its fence gets no plan', () {
+      // Deep only beside the gate: 45 m under the gate columns and Df ≥ 40,
+      // so under 5 m of lot stands behind the fence gap there, though the
+      // lot is 200 m deep (D) beside it.
+      final sn = slot.normN.sign;
+      Vec2 at(double x, double yy) => Vec2(x, slot.kerbN + (3 + yy) * sn);
+      final x0 = slot.s - 100, x1 = slot.s + 100;
+      final poly = [
+        at(x0, 0), at(x1, 0), at(x1, 45), at(x0 + 90, 45), //
+        at(x0 + 90, 200), at(x0, 200),
+      ];
+      final ctx = ctxOf(
+          Parcel(id: 'site', polygon: poly, frontage: (poly[0], poly[1])));
+      expect(installationPlanOf(ctx), isNull);
+    });
+
+    test('a skewed throat never runs under the staff car park block', () {
+      for (final deg in const [-59.0, -50.0, 50.0, 59.0]) {
+        for (final k in const [0.0, 1.0, 3.0]) {
+          final ctx = ctxOf(skewedLot(deg, k));
+          final plan = installationPlanOf(ctx);
+          expect(plan, isNotNull, reason: '$deg° k $k');
+          final cp = plan!.carPark;
+          expect(cp, isNotNull, reason: '$deg° k $k');
+          planOf(ctx, spans);
+          // The throat K→T in the frame, and the block pave.
+          final slot0 = ctx.slot0;
+          final kl = ctx.kerbLocal(slot0);
+          final n = Vec2(slot0.normE, slot0.normN);
+          final d = Vec2(n.dot(ctx.frame!.u), n.dot(ctx.frame!.v));
+          final t = Vec2(plan.gateX, plan.frontY);
+          final p = Vec2(-d.n, d.e) * (kInstallationThroatWidthM / 2);
+          final throat = [kl - p, t - p, t + p, kl + p];
+          const near = kStaffCarParkBandM;
+          final far = InstallationCarPark.offsetOf(cp!.aisles - 1) +
+              kAisleTwoWayWidthM / 2 +
+              kStallLengthM;
+          final bx0 = cp.sigma > 0 ? plan.gateX + near : plan.gateX - far;
+          final bx1 = cp.sigma > 0 ? plan.gateX + far : plan.gateX - near;
+          final block = [
+            Vec2(bx0, cp.paveY0), Vec2(bx1, cp.paveY0), //
+            Vec2(bx1, cp.depthM), Vec2(bx0, cp.depthM),
+          ];
+          expect(_overlaps(throat, block), isFalse,
+              reason: '$deg° k $k: pave from ${cp.paveY0}');
+        }
+      }
+    });
+
     test('a slot too narrow for a 7 m throat (room 4.0) falls back to kerbOnly',
         () {
       final narrow = JoinSlot(
@@ -298,4 +404,27 @@ void main() {
       expect(installationPlanOf(ctxOf(lotOf(100, 100, 300))), isNotNull);
     });
   });
+}
+
+/// Whether convex rings [a] and [b] overlap by more than 1 cm (separating
+/// axes: every edge normal of both).
+bool _overlaps(List<Vec2> a, List<Vec2> b) {
+  for (final ring in [a, b]) {
+    for (var i = 0; i < ring.length; i++) {
+      final e = ring[(i + 1) % ring.length] - ring[i];
+      final axis = Vec2(-e.n, e.e).normalized;
+      var aLo = double.infinity, aHi = -double.infinity;
+      var bLo = double.infinity, bHi = -double.infinity;
+      for (final q in a) {
+        aLo = math.min(aLo, q.dot(axis));
+        aHi = math.max(aHi, q.dot(axis));
+      }
+      for (final q in b) {
+        bLo = math.min(bLo, q.dot(axis));
+        bHi = math.max(bHi, q.dot(axis));
+      }
+      if (aHi <= bLo + 0.01 || bHi <= aLo + 0.01) return false;
+    }
+  }
+  return true;
 }

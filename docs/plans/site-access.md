@@ -459,7 +459,9 @@ reported under one name.
 - **R2 (`site_paving_check.dart`, `sitePavingViolations`):** the corridor of every cut join is its §3.7a polyline
   (kerb → frontage along the slot normal, or R1's dogleg), ±4.5 m, no end caps, its last leg run on past the frontage
   line until its whole width is inside the lot (`h·|d·u|/(d·v)`), so a drive off a skewed kerb is never read as
-  outside. Pave rings are sampled (vertices, edges every 0.25 m, inside every 1 m; 5 cm tolerance). Clearance: no used
+  outside. A kerb ON (or behind) the frontage line has no leg of its own, so it gets that run-on alone, from the kerb
+  along the slot normal (repair: at `k = 0` on a lot skewed ≥ 12° the throat's kerb corners read as outside; pinned by
+  `site_paving_check_test`). Pave rings are sampled (vertices, edges every 0.25 m, inside every 1 m; 5 cm tolerance). Clearance: no used
   slot is `kJoinCorridorBlocked`, no crossed lot is built, and, only for a set-back corridor (longer than 3.5 m) or a
   dogleg — the corridors R1 searched — no other at-grade road's carriageway + pavement (the join road's beyond 12 m of
   arc) comes within it (a plat lot's 3 m kerb crossing beside another street's dead end is the plat's; the small
@@ -1051,7 +1053,18 @@ car park with at least 12 stalls on its connector, and a gate on the fence line 
   0.02·envelope area` (the target first: on a 780 m field the area term prices each metre of forecourt at 15.6 points
   and stopped the car park at 10 stalls). Starter results: spaceport 2 aisles / 24 stalls / `Df` 46; solar farm and farm
   2 / 14 / 46; pump 1 / 12 / 50.8.
-- Step 9: the envelope columns are a rectangle, `[0, W] × [Df, D]` (`D` the true depth).
+- Step 6 on a skewed throat: the car park band's front is `max(0.3, the throat footprint's highest y at |x − x_G| ≥
+  15 on the car park's side)`, so on a lot skewed 50–59° with `k ≤ 3` the block pave starts behind the throat instead
+  of overlapping it in front of aisle 0 (the aisle end nodes and stalls move with it).
+- Step 9 (with §6.1 steps 2–3 and §3.8): the envelope columns hold one rectangle, so it is the largest frame
+  rectangle inside the DepthProfile with its front on `y = Df` that spans the whole gate gap `gateX ± gateW/2`: 0.5 m
+  columns from 0.3 m inside each lot line, each column's depth the shallower of its edges, heights swept outward from
+  the gate (largest area, ties to the taller); a back edge the exact `containsRect` rejects is pulled in by bisection.
+  No such rectangle with both sides ≥ 8 m → no plan (`installationNoFit`). Nothing of the plan lies past `Df`, so no
+  pave blocks it. Not the unconstrained `largestFreeRect`: on L lots and triangles that is often a strip beside the
+  gate, and requiring it to hold the gate turned 96 of the 196 A1 installation plans into fallbacks; the gate-spanning
+  sweep keeps 156, every envelope inside its lot (the remaining 40 have under 8 m of lot behind the gate, or a gate
+  gap past a lot line). Pinned by `installation_access_test` (an L lot, a trapezoid, a shallow gate).
 - Paves: the throat in two rings split where it crosses the frontage line (the corridor stretch and the lot stretch,
   kerb corners `blend`), one ring per access-road leg, the yard circle's circumscribed octagon, one ring over the bays,
   the connector, and the car-park block. `pavementPt` is slot 0's kerb point moved 1.5 m along the normal; the footpath
