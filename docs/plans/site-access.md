@@ -456,6 +456,16 @@ reported under one name.
 - Not checked in R2a (they need the parcel and the corridor, R2): paving inside `parcel ∪ corridor`, and corridor
   clearance. Checked as `geometry`: finite numbers (fence-gap `t0/t1` included), convex CCW pave rings, and
   paving ∩ envelope = ∅.
+- **R2 (`site_paving_check.dart`, `sitePavingViolations`):** the corridor of every cut join is its §3.7a polyline
+  (kerb → frontage along the slot normal, or R1's dogleg), ±4.5 m, no end caps, its last leg run on past the frontage
+  line until its whole width is inside the lot (`h·|d·u|/(d·v)`), so a drive off a skewed kerb is never read as
+  outside. Pave rings are sampled (vertices, edges every 0.25 m, inside every 1 m; 5 cm tolerance). Clearance: no used
+  slot is `kJoinCorridorBlocked`, no crossed lot is built, and, only for a set-back corridor (longer than 3.5 m) or a
+  dogleg — the corridors R1 searched — no other at-grade road's carriageway + pavement (the join road's beyond 12 m of
+  arc) comes within it (a plat lot's 3 m kerb crossing beside another street's dead end is the plat's; the small
+  generated town has one). Other manual parcels are not re-tested: `RoadGraph` exposes no lot polygons, so that stays
+  R1's placement guarantee and the book's placement refusal (§3.7a rule 5). The other road's pavement width is the
+  layout default 3 m (`RoadGraph`'s own `sidewalkM` is private).
 
 ### 2.5 Site lanes: the one definition of connectivity (`site_lane_graph.dart`)
 
@@ -1023,6 +1033,30 @@ park band `y ∈ [0.3, 34]` (pinned by `installation_access_test`; no `ArgumentE
 The four starter sites each get a 56 m throat `K→F` across their easement lot, a yard circle with 4 bays, a staff
 car park with at least 12 stalls on its connector, and a gate on the fence line at `y = Df`.
 
+**As built (R2 installation track, `installation_access.dart`; pinned by `installation_access_test`):**
+- Step 1 on a skewed slot: `T` is placed at frame depth `T.y = max(0, 12 − k)` along the road normal `n`, so
+  `|K→T| = (k + T.y)/(n·v)` (exactly `max(12, k)` when `n = v`). The spine always leaves `T` along `v`; within 3° that
+  is the straight run, beyond it `T` is the bend. A slot whose normal is more than 60° off `v` gets no plan (a private
+  bound, not a §3.7 number). The throat's vias sit every 24 m from `K` (24 and 48 m on a 56 m throat); every other
+  access-road, connector and aisle segment gets vias the same way (V8).
+- Step 2: the dogleg is R1's corridor polyline exactly. One whose bend `T` does not lie in front of the frontage line
+  (`T.y > −1`) gets no plan.
+- Step 6: the staff car park is this file's own F3-form packer, not a call into `car_park_packer.dart` (another track's
+  file, whose F3 starts from a throat, not a connector). Aisles run along `y` at `x_G ± (18 + 16.4 i)`; aisle 0 carries
+  only its far row; the aisle end nodes lie 3 m inside the block pave (`y = 3.3` on the band's front), `C` splits aisle 0
+  when both stretches are ≥ 6 m and is its near end otherwise; `k ≥ 2` aisles are joined by cross aisles at both ends,
+  `k = 1` ends in two V7(b) T ends; stalls keep 3 m clear of every aisle end. Candidates `k = 1..8` × the block's far
+  edge on a 2.6 m lattice (stopping at the first that reaches the target). The candidate holding the most stalls up to
+  `clamp(C*, 12, 240)` wins, then the §3.5 score `10·min(n, C) − 2·max(0, n − C) − 0.5·(aisle + connector length) +
+  0.02·envelope area` (the target first: on a 780 m field the area term prices each metre of forecourt at 15.6 points
+  and stopped the car park at 10 stalls). Starter results: spaceport 2 aisles / 24 stalls / `Df` 46; solar farm and farm
+  2 / 14 / 46; pump 1 / 12 / 50.8.
+- Step 9: the envelope columns are a rectangle, `[0, W] × [Df, D]` (`D` the true depth).
+- Paves: the throat in two rings split where it crosses the frontage line (the corridor stretch and the lot stretch,
+  kerb corners `blend`), one ring per access-road leg, the yard circle's circumscribed octagon, one ring over the bays,
+  the connector, and the car-park block. `pavementPt` is slot 0's kerb point moved 1.5 m along the normal; the footpath
+  runs from it to the gate. No fence-gap rows yet (R6 dressing).
+
 ### 3.7a Access easements (set-back lots behind auto lots)
 
 A set-back lot (§3.2: frontage line > 3.5 m behind the kerb) must cross whatever lies between its street and its
@@ -1088,6 +1122,11 @@ no lot is re-platted: the corridor crosses the fewest UNBUILT auto lots, and tho
 
 **Starter kit result (pinned by `site_easement_test`):** easements are exactly `{lot-r0x1-l10, lot-r0x0-l0,
 lot-r0x0-r1, lot-r0x1-r5}` (spaceport, solar farm, farm, pump), and 78 of the 82 auto lots stay zonable.
+
+**As built (R2, `site_easement.dart` `easementOf`, the pure half):** the union of the crossed lots of the plan's CUT
+joins' graph slots (`joinOfRef`), ascending and once; none for a kerbside plan, for a plan any of whose crossed lots
+is built, and for a plan whose `graphStamp` is not the graph's `structureStamp` (its handles name another structure's
+joins; the book re-resolves it). A footprint join (`joinRef` −1) names no graph join and carries no easement.
 
 ### 3.8 Odd polygons
 
