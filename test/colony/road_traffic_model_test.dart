@@ -79,11 +79,15 @@ void main() {
     }
 
     test('a one-way street sends the police the long way round', () {
+      // Each 24 m lot is entered at its join slot 0 (docs/plans/
+      // site-access.md §3.2): 4.5 m in from its lot line at the end away
+      // from the nearer junction — the station's (276..300) at 280.5, the
+      // house's (84..108) at 103.5.
       // Two-way: straight back along the street.
-      expect(loop(RoadClass.street), closeTo(192, 2));
+      expect(loop(RoadClass.street), closeTo(177, 2));
       // One-way east: on to the corner, round the block, back in at the
-      // start — 112 + 100 + 400 + 100 + 96.
-      expect(loop(RoadClass.streetOneWay), closeTo(808, 2));
+      // start — 119.5 + 100 + 400 + 100 + 103.5.
+      expect(loop(RoadClass.streetOneWay), closeTo(823, 2));
     });
 
     test('past four kilometres of route a lot is out of reach', () {
@@ -117,12 +121,14 @@ void main() {
       }
 
       // The north kerb is left of eastbound traffic: on a four-lane road
-      // its lots are reached, and left, westbound only. Same kerb: straight
-      // there. Far kerb: west to the end, turn, and back — 288 + 96.
-      expect(distance(RoadClass.avenue, targetNorth: true), closeTo(192, 2));
+      // its lots are reached, and left, westbound only. Each lot is entered
+      // at its join slot 0 (site-access.md §3.2): the station at 280.5, the
+      // targets at 103.5. Same kerb: straight there. Far kerb: west to the
+      // end, turn, and back — 280.5 + 103.5.
+      expect(distance(RoadClass.avenue, targetNorth: true), closeTo(177, 2));
       expect(distance(RoadClass.avenue, targetNorth: false), closeTo(384, 2));
       // A two-lane street has no median to go round.
-      expect(distance(RoadClass.street, targetNorth: false), closeTo(192, 2));
+      expect(distance(RoadClass.street, targetNorth: false), closeTo(177, 2));
     });
 
     test('reversing a one-way road flips which lots it can reach', () {

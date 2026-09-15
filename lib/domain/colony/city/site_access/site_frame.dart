@@ -196,7 +196,10 @@ Vec2 interiorPoint(List<Vec2> polygon) {
     final edgeLen = edge.length;
     if (edgeLen < kEffectiveFrontageMinEdgeM) continue;
     final tEdge = edge * (1 / edgeLen);
-    roads.visit(box, slack, (slot, rec, seg) {
+    // Only segments within the slack of THIS edge can score: the edge's own
+    // box, not the polygon's (the same candidates, since every tie is broken
+    // by the explicit order below; a far cheaper walk on a large site).
+    roads.visit(Box2.of([a, b]), slack, (slot, rec, seg) {
       if (seg == 0) return; // a one-sample road has no tangent
       if (through.contains(slot)) return;
       if (!isEligibleJoinRoad(rec.road.roadClass)) return;

@@ -149,6 +149,14 @@ class CityLayout {
 
   Parcel? parcelById(String id) => _byId[id];
 
+  /// Every lot whose bounds come near [box] (within [slack]), each once, in
+  /// the order the lots were indexed (after a re-cut, [parcels] order: manual
+  /// first, then auto in plat order). A look-up of the
+  /// plat's own index, never a scan; what an access corridor asks of the lots
+  /// it could cross (docs/plans/site-access.md §3.7a).
+  List<Parcel> parcelsNear(Box2 box, [double slack = 0]) =>
+      _lotIndex.near(box, slack);
+
   void _reindex() {
     _byId.clear();
     _lotIndex = BoxIndex<Parcel>();

@@ -31,6 +31,7 @@ import 'parcel.dart';
 import 'road_catalog.dart';
 import 'road_junction.dart';
 import 'road_noise.dart';
+import 'site_access/site_join.dart';
 import 'spatial_index.dart';
 
 /// One junction (or a bend, or a dead end): where road ends meet.
@@ -187,13 +188,31 @@ class RoadGraph {
     required this.lotDirs,
     required this.lotE,
     required this.lotN,
+    required this.lotJoinStart,
+    required this.joinPiece,
+    required this.joinS,
+    required this.joinDirs,
+    required this.joinRight,
+    required this.joinFlags,
+    required this.joinRoomM,
+    required this.joinKerbE,
+    required this.joinKerbN,
+    required this.joinNormE,
+    required this.joinNormN,
+    required this.joinCrossStart,
+    required this.joinCrossLot,
+    required this.kerbWindows,
+    required List<Parcel> parcels,
+    required double sidewalkM,
     required this.rootPiece,
     required this.rootS,
     required this.rootDirs,
     required this.overrides,
     required this.overridesSignature,
   })  : _roadNo = roadNo,
-        _lotNo = lotNo;
+        _lotNo = lotNo,
+        _parcels = parcels,
+        _sidewalkM = sidewalkM;
 
   /// Two road ends this close in plan (and at one level:
   /// [CityLayout.levelsSeparated] says they meet) are one node — the
@@ -286,13 +305,57 @@ class RoadGraph {
   /// Every lot — manual first, as [CityLayout.parcels] lists them — with
   /// the piece it is entered from (-1: none within reach), the arc position
   /// on that piece's road, and its access mask ([forwardBit] /
-  /// [backwardBit]); and its centroid.
+  /// [backwardBit]); and its centroid. The piece, arc and mask are ALWAYS
+  /// the lot's join slot 0 ([joinPiece], [joinS], [joinDirs] at
+  /// `lotJoinStart[i]`), or -1/0/0 when it has none.
   final List<String> lotIds;
   final Map<String, int> _lotNo;
   final Int32List lotPiece;
   final Float64List lotS;
   final Uint8List lotDirs;
   final Float64List lotE, lotN;
+
+  /// JOIN SLOTS (docs/plans/site-access.md §2.2, §3.2): where each lot can
+  /// meet its road. Lot i owns slots `lotJoinStart[i] .. lotJoinStart[i +
+  /// 1] - 1`, slot 0 first; `lotJoinStart` has [lotCount] + 1 entries.
+  ///
+  /// Per slot: the piece; the arc on the piece's road from its first control,
+  /// quantised to 0.25 m ([joinS]); the access mask, which is
+  /// [joinDirsFor] of the road and [joinRight] (one traffic-direction rule
+  /// for every lot: a one-way road's direction, a lot's own side only on a
+  /// road of two lanes or more each way); 1 when the lot lies right of the road
+  /// polyline (first to last) at [joinS]; the `kJoin*` flags
+  /// (site_access_constants.dart); the largest kerb-cut half width legal
+  /// there (0 for a legacy slot); the kerb point (the centreline at [joinS]
+  /// plus the inward normal times the half width) and the unit road normal
+  /// into the lot.
+  final Int32List lotJoinStart;
+  final Int32List joinPiece;
+  final Float64List joinS;
+  final Uint8List joinDirs;
+  final Uint8List joinRight;
+  final Uint16List joinFlags;
+  final Float32List joinRoomM;
+  final Float64List joinKerbE, joinKerbN;
+  final Float64List joinNormE, joinNormN;
+
+  /// Slot k's access corridor crosses the AUTO lots (graph lot indices,
+  /// ascending) `joinCrossLot[joinCrossStart[k] .. joinCrossStart[k + 1] -
+  /// 1]` (§3.7a); `joinCrossStart` has [joinCount] + 1 entries.
+  final Int32List joinCrossStart;
+  final Int32List joinCrossLot;
+
+  /// Where on each piece a kerb cut may go (§3.2). Reads no override, so
+  /// [withOverrides] shares it.
+  final KerbWindows kerbWindows;
+
+  /// The lots the slots were placed among, by graph lot index, and the
+  /// pavement width they were placed with: what [attachFootprintJoins] needs
+  /// to place a footprint's slots by the same rule.
+  final List<Parcel> _parcels;
+  final double _sidewalkM;
+
+  int get joinCount => joinPiece.length;
 
   /// The landing site's place on the network — where the colony meets the
   /// rest of the world, and so where goods it does not make arrive from:
@@ -404,8 +467,22 @@ class RoadGraph {
   /// layout's lots — one the colony's grid placed — is entered from, by the
   /// hand-drawn lot's rule: the nearest road within [manualReachM] of any
   /// part of it. Null when no road is that near.
+  ///
+  /// Slot 0 of [attachFootprintJoins]: the same rule a hand-drawn lot's
+  /// access follows.
   PieceAccess? attachFootprint(List<Vec2> polygon, {Vec2? centroid}) {
-    if (polygon.isEmpty) return null;
+    final slots = attachFootprintJoins(polygon, centroid: centroid);
+    if (slots.isEmpty) return null;
+    final s0 = slots.first;
+    return PieceAccess(s0.piece, s0.s, s0.dirs);
+  }
+
+  /// The join slots (§2.2, §3.2) of a building with footprint [polygon] that
+  /// is not one of the layout's lots — a grid cell: placed as a hand-drawn
+  /// lot without a frontage (its effective frontage), slot 0 first. Empty
+  /// when no road is within [manualReachM] of it.
+  List<JoinSlot> attachFootprintJoins(List<Vec2> polygon, {Vec2? centroid}) {
+    if (polygon.isEmpty) return const [];
     var c = centroid;
     if (c == null) {
       var e = 0.0, n = 0.0;
@@ -416,12 +493,47 @@ class RoadGraph {
       c = Vec2(e / polygon.length, n / polygon.length);
     }
     final hit = _nearestRoadTo(index, slotToRoad, roadRecs, roads, polygon, c);
-    if (hit == null) return null;
+    if (hit == null) return const [];
     final rec = roadRecs[hit.road];
-    final s = rec.arcAt(hit.seg, hit.u);
-    return PieceAccess(pieceAt(hit.road, s), s,
-        _dirsFor(roads[hit.road], _rightOf(rec, hit.seg, hit.u, hit.probe)));
+    return _placer.slotsFor(polygon,
+        legacy: (
+          road: hit.road,
+          s: rec.arcAt(hit.seg, hit.u),
+          right: _rightOf(rec, hit.seg, hit.u, hit.probe),
+        ));
   }
+
+  /// The slot placer over this graph, for footprints placed after the build.
+  /// Its lot look-up is an index of [_parcels] made on first use.
+  late final SiteJoinPlacer _placer = () {
+    BoxIndex<int>? lots;
+    return SiteJoinPlacer(
+      index: index,
+      slotToRoad: slotToRoad,
+      roads: roads,
+      recs: roadRecs,
+      roadFirstPiece: roadFirstPiece,
+      pieceS0: pieceS0,
+      pieceS1: pieceS1,
+      pieceFrom: pieceFrom,
+      pieceTo: pieceTo,
+      nodes: nodes,
+      windows: kerbWindows,
+      parcels: _parcels,
+      lotsNear: (box) {
+        if (lots == null) {
+          final built = BoxIndex<int>();
+          for (var i = 0; i < _parcels.length; i++) {
+            built.add(i, Box2.of(_parcels[i].polygon));
+          }
+          lots = built;
+        }
+        return lots!.nearIndices(box);
+      },
+      roadNoOf: roadNoOf,
+      sidewalkM: _sidewalkM,
+    );
+  }();
 
   /// This graph brought up to date with [layout]'s roads and the player's
   /// [overrides] without a rebuild, where none is needed:
@@ -580,6 +692,22 @@ class RoadGraph {
         lotDirs: lotDirs,
         lotE: lotE,
         lotN: lotN,
+        lotJoinStart: lotJoinStart,
+        joinPiece: joinPiece,
+        joinS: joinS,
+        joinDirs: joinDirs,
+        joinRight: joinRight,
+        joinFlags: joinFlags,
+        joinRoomM: joinRoomM,
+        joinKerbE: joinKerbE,
+        joinKerbN: joinKerbN,
+        joinNormE: joinNormE,
+        joinNormN: joinNormN,
+        joinCrossStart: joinCrossStart,
+        joinCrossLot: joinCrossLot,
+        kerbWindows: kerbWindows,
+        parcels: _parcels,
+        sidewalkM: _sidewalkM,
         rootPiece: rootPiece,
         rootS: rootS,
         rootDirs: rootDirs,
@@ -678,20 +806,6 @@ class RoadGraph {
       a.soundWalls == b.soundWalls &&
       a.collector == b.collector &&
       a.deck == b.deck;
-
-  /// The directions of travel along [road] a lot beside it is reached (and
-  /// left) by, the lot being on the right of its first-to-last direction or
-  /// not.
-  static int _dirsFor(RoadSpline road, bool rightOfForward) {
-    if (road.oneWay) return road.reversed ? backwardBit : forwardBit;
-    // A road of two or more lanes each way — the four-lane road's median,
-    // the six-lane's — forbids the left turn across it mid-block: a lot
-    // is reached, and left, only by the traffic on its own side.
-    if (road.roadClass.lanesEachWay >= 2) {
-      return rightOfForward ? forwardBit : backwardBit;
-    }
-    return forwardBit | backwardBit;
-  }
 
   /// A hand-drawn lot's road: the nearest segment of any graph road to the
   /// footprint [polygon] — reaching to its nearest point, not its centre
@@ -1159,8 +1273,25 @@ class RoadGraph {
       return lo;
     }
 
-    // ---- Lots: an auto lot on its own frontage road at its frontage
-    // midpoint; a hand-drawn one on the nearest road within reach.
+    // ---- Kerb windows: where on each piece a cut may go (§3.2).
+    final pFrom = Int32List.fromList(pieceFrom);
+    final pTo = Int32List.fromList(pieceTo);
+    final windows = KerbWindows.of(
+      nodes: nodes,
+      roads: roads,
+      recs: recs,
+      roadFirstPiece: roadFirstPiece,
+      pieceS0: pS0,
+      pieceS1: pS1,
+      pieceFrom: pFrom,
+      pieceTo: pTo,
+    );
+
+    // ---- Lots: each lot's join slots, slot 0 its access (§3.2). Today's
+    // point — an auto lot on its own frontage road at its frontage midpoint,
+    // a hand-drawn one on the nearest road within reach — is what a lot with
+    // no legal cut keeps (a legacy slot), and a lot with no such point has no
+    // slot at all.
     final parcels = layout.parcels;
     final nL = parcels.length;
     final lotIds = List<String>.filled(nL, '');
@@ -1174,33 +1305,81 @@ class RoadGraph {
       final p = parcels[i];
       lotIds[i] = p.id;
       lotNo[p.id] = i;
+    }
+    // Today's point of lot i, asked only of a lot that needs it.
+    LegacyAccess? legacyOf(int i) {
+      final p = parcels[i];
       final c = p.centroid;
-      lotE[i] = c.e;
-      lotN[i] = c.n;
       final rid = p.roadId;
       if (rid != null) {
         final r = roadNo[rid];
-        if (r == null) continue;
+        if (r == null) return null;
         final rec = recs[r];
         final mid = p.frontageMidpoint ?? c;
-        final hit = _nearestOnRoad(idx, slots[r], rec, mid,
-            roads[r].halfWidth + sidewalk + 8);
-        final s = rec.arcAt(hit.seg, hit.u);
-        lotPiece[i] = pieceAtRoad(r, s);
-        lotS[i] = s;
-        lotDirs[i] = _dirsFor(roads[r], hit.rightOfForward);
-        continue;
+        final hit = _nearestOnRoad(
+            idx, slots[r], rec, mid, roads[r].halfWidth + sidewalk + 8);
+        return (
+          road: r,
+          s: rec.arcAt(hit.seg, hit.u),
+          right: hit.rightOfForward,
+        );
       }
       // A hand-drawn lot: the nearest road within reach of any part of it.
       final hit = _nearestRoadTo(idx, slotToRoad, recs, roads, p.polygon, c);
-      if (hit == null) continue;
+      if (hit == null) return null;
       final rec = recs[hit.road];
-      final s = rec.arcAt(hit.seg, hit.u);
-      lotPiece[i] = pieceAtRoad(hit.road, s);
-      lotS[i] = s;
-      lotDirs[i] =
-          _dirsFor(roads[hit.road], _rightOf(rec, hit.seg, hit.u, hit.probe));
+      return (
+        road: hit.road,
+        s: rec.arcAt(hit.seg, hit.u),
+        right: _rightOf(rec, hit.seg, hit.u, hit.probe),
+      );
     }
+
+    final placer = SiteJoinPlacer(
+      index: idx,
+      slotToRoad: slotToRoad,
+      roads: roads,
+      recs: recs,
+      roadFirstPiece: roadFirstPiece,
+      pieceS0: pS0,
+      pieceS1: pS1,
+      pieceFrom: pFrom,
+      pieceTo: pTo,
+      nodes: nodes,
+      windows: windows,
+      parcels: parcels,
+      lotsNear: (box) => [
+        for (final q in layout.parcelsNear(box))
+          if (lotNo[q.id] case final int k) k,
+      ],
+      roadNoOf: (id) => roadNo[id],
+      sidewalkM: sidewalk,
+      legacyOfLot: legacyOf,
+    );
+    final lotJoinStart = Int32List(nL + 1);
+    final joins = JoinColumns();
+    for (var i = 0; i < nL; i++) {
+      final p = parcels[i];
+      final c = p.centroid;
+      lotE[i] = c.e;
+      lotN[i] = c.n;
+      final k = lotJoinStart[i] = joins.count;
+      final n = placer.addSlots(
+        joins,
+        p.polygon,
+        frontage: p.frontage,
+        roadId: p.roadId,
+        sideStreet: p.sideStreet,
+        ownLot: i,
+      );
+      if (n > 0) {
+        lotPiece[i] = joins.piece[k];
+        lotS[i] = joins.s[k];
+        lotDirs[i] = joins.dirs[k];
+      }
+    }
+    lotJoinStart[nL] = joins.count;
+    final nJ = joins.count;
 
     // ---- The root: the nearest road point to the colony origin.
     var rootPiece = -1;
@@ -1256,8 +1435,8 @@ class RoadGraph {
       pieceRoad: pRoad,
       pieceS0: pS0,
       pieceS1: pS1,
-      pieceFrom: Int32List.fromList(pieceFrom),
-      pieceTo: Int32List.fromList(pieceTo),
+      pieceFrom: pFrom,
+      pieceTo: pTo,
       pieceFwdEdge: pieceFwd,
       pieceBwdEdge: pieceBwd,
       edgeFrom: Int32List.fromList(eFrom),
@@ -1276,6 +1455,22 @@ class RoadGraph {
       lotDirs: lotDirs,
       lotE: lotE,
       lotN: lotN,
+      lotJoinStart: lotJoinStart,
+      joinPiece: joins.piece.sublist(0, nJ),
+      joinS: joins.s.sublist(0, nJ),
+      joinDirs: joins.dirs.sublist(0, nJ),
+      joinRight: joins.right.sublist(0, nJ),
+      joinFlags: joins.flags.sublist(0, nJ),
+      joinRoomM: joins.roomM.sublist(0, nJ),
+      joinKerbE: joins.kerbE.sublist(0, nJ),
+      joinKerbN: joins.kerbN.sublist(0, nJ),
+      joinNormE: joins.normE.sublist(0, nJ),
+      joinNormN: joins.normN.sublist(0, nJ),
+      joinCrossStart: joins.crossStart.sublist(0, nJ + 1),
+      joinCrossLot: joins.crossLot.sublist(0, joins.crossCount),
+      kerbWindows: windows,
+      parcels: parcels,
+      sidewalkM: sidewalk,
       rootPiece: rootPiece,
       rootS: rootS,
       rootDirs: rootDirs,
