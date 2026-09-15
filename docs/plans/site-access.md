@@ -943,6 +943,39 @@ Everything is axis-aligned in the frame. Bays are 2.6 × 5.2 m, two-way aisles 6
   attach to an existing aisle, never to a stall row.
 - **Lamps:** one post every 25 m along each back-to-back line, starting 12.5 m in.
 
+**As built (R2 car park / yard track, `car_park_packer.dart`):**
+- **Throat.** Laid from slot 0's kerb point straight along the frame's `v`, so V5's 10° rule is the slot's skew, tested
+  up front with a 0.002 margin on the cosine (the validator measures the normal from the road polyline). A slot more
+  skewed than that (for example a corner lot whose slot 0 fell back to its side street) gets no car park: §3.8's bend
+  node is not built.
+- **Block interval.** The run of 0.5 m profile columns around `x_J` deep enough for the block, inset by the 0.3 m
+  profile margin (the example's `[0.3, 23.7]`). F1's block moves back until its first aisle's centre is at least `yT`
+  (the single-module example's aisle `[1, 7]`). F2 lays its modules from the depth of `x_J`'s column toward the
+  frontage, and its drive runs to the front-most aisle. F3 centres module 0's aisle on `x_J`, grows toward the side of
+  `x_J` with more room (ties by `tieBreak`), keeps stall rectangles at `y ≥ yT`, and for `m ≥ 2` puts the cross aisle at
+  the rear, with the other aisles' front ends as T ends at `y = 0.3`. F1/F2 rings put their cross aisles 3 m inside the
+  interval and reject a `J` within 1 m of one.
+- **Arms.** One arm packs from `x_J ∓ 1.3` (the example's 3.2, mirrored on a lot whose join is at its other end); with
+  both arms, the right arm starts at `x_J − 1.3` and the left arm stops there. On a ring's first aisle the segments on
+  either side of `J`, and the bays next to a cross aisle, keep the same clearances.
+- **Envelope rule.** The envelope is the free rectangle itself, not fitted to `buildingFootprint` (the worked example's
+  21 × 13 m requires that). The walk strip is applied to one rectangle, the union of the packed stall rows. The free
+  rectangle's 0.5 m columns start at the 1.5 m side setback, so the example's F3 measures 7.5 m wide, not 7.8 m (both
+  are under 8 m). The door is the envelope's front midpoint, `entranceNode` is the nearest non-kerb node (a candidate
+  whose door is further than 60 m away is rejected), and the footpath runs straight to the door's projection on
+  `y = 0`: routing it through a gap between rows is not built.
+- **Score cap.** `max(capacityScoreCap, capacityTarget)`, so a spec whose `C*` lies under §3.3's minimum (4, 6 or 8)
+  is still rewarded up to that minimum. A `sharedSingle` throat keeps the first 8 stalls packed.
+- **Stall keys (V10, ask 8).** `row` is the row's index in the block's own module order (F1 from the frontage, F2 from
+  the rear, F3 from the spine). `bay` is the lattice place along its aisle segment, counted from the segment's start
+  (on a ring's first aisle, the segment ending at `J` counts from 4096). A dropped place keeps its number, so stalls on
+  one aisle keep their keys when another aisle changes (pinned by `car_park_packer_test`).
+- **Not built (left for a follow-up):** second joins (slot 1 or 2).
+- **Cost.** Generation is branch and bound. A candidate whose best possible score (stalls up to the cap, the lot's free
+  area less its block, its drive) is below the 1 % tie band of the best score so far is dropped before its envelope
+  search, or while its stalls pack past the cap. The winner is the exhaustive enumeration's (pinned by
+  `car_park_packer_test` against `carParkCandidatesOf`).
+
 ### 3.6 Yard (industrial)
 
 A yard is a car-park candidate plus an 18 × 24 m truck apron beside the envelope's side or rear face.
@@ -952,6 +985,25 @@ A yard is a car-park candidate plus an 18 × 24 m truck apron beside the envelop
 - The apron has a `circle` turnaround node of radius 12.5 m and two 3.5 × 15 m loading bays facing the envelope.
 - `admitsTrucks` is set and `truckTurnRadiusM` is 12.5.
 - If the apron does not fit, the car park is emitted alone, with trucks not admitted and no bays.
+
+**As built (R2 car park / yard track, deviation).** "An 18 × 24 m apron with a 12.5 m circle and 15 m bays" does not
+compose: 18 m holds neither a 25 m circle nor a 7 m lane plus a 15 m bay. The yard is built as one layout:
+- **Spine.** The 7 m throat `K → T` continues as a 6 m stall aisle `T → A` along `v` (trucks: `segMaxVehLenM` 12,
+  `kSegTruck`). It carries a stall row on the side away from the envelope, and optionally a row on the envelope side
+  that stops short of the bays.
+- **Apron.** At `A` the apron segment turns along `±u`, toward the side with more room, for `kYardApronWidthM` = 18 m
+  to the dead-end `circle` node `Y` (radius 12.5 m; the node carries the turning radius, the pave does not draw the
+  circle). The apron pave runs from the spine's far edge to `Y` across, and from 18.5 m in front of the apron segment
+  to 3.5 m behind it: 21.5 × 22 m.
+- **Bays.** Two 3.5 × 15 m bays sit on the apron segment, centred 4.5 m apart, noses on `−v`. The envelope stands in
+  front of them: the apron is beside the envelope's rear face. The envelope search is limited to the apron's side of
+  the spine, and a candidate whose envelope does not meet the bays' front ends (within the 1 m clearance and one
+  column) is rejected.
+- **Candidates.** The apron's `y` is the shallowest that leaves an 8 m envelope in front of the bays, the one whose
+  spine holds the capacity target, and the deepest. Each is tried with and without the envelope-side row, scored by
+  §3.5's formula with no bias.
+- **Fallback.** A slot with room < 4.5, or no yard candidate, falls to `carParkPlanOf`. V13's truck path is the throat,
+  the spine and the apron, reversing into the circle.
 
 ### 3.7 Installations (`installation_access.dart`)
 
@@ -1180,6 +1232,17 @@ every generator in place, at the R2 merge, and the load-time risk is reported to
 **R2a-frozen file touched (R2 core):** `PlanBuilder`'s stall sort returns early when the rows are already in
 `(seg, s, side)` order. The base comparator breaks ties by index, so ordered rows sort to the identity: output bytes
 are unchanged and no API changed (an R2 budget change, no notice line).
+
+**Measured (R2 car park / yard track, `bench/car_park_bench_test.dart` and the core generation bench, `flutter test`
+JIT, frames and profiles warm, dispatcher time per written plan):** sprawl fixture 4,423 car parks at 150–215 µs and
+44 yards at about 220 µs (a noisy 44-site sample, 110–730 µs); small generated town 106 car parks at about 210 µs; built
+town 41 car parks at 220–310 µs. **The 60 µs unit budget is MISSED by about 3–4×**, and this is reported, not
+re-budgeted. The sprawl's car parks average 41 stalls, and writing one into `PlanBuilder` (boxed rows, the O(n²)
+stall-key collision scan) is about 60–100 µs of that time. Generation, the other part, is branch and bound (§3.5 as
+built) with no envelope search on dominated candidates: 1.5 free-rectangle searches per site on the sprawl. The core
+bench's measured sprawl drain went from 910 ms to 2.0 s with car parks and yards in place (installations still stubs),
+so the load-time risk of §10.1 grows. The levers are `PlanBuilder`'s typed per-column buffers and key index (core), and
+per-candidate allocation in the packer.
 
 **The drain budget is a sum, not a guess.** R1's sprawl audit already counts lots per road class on the sprawl
 audit fixture; R2 adds program counts, and the generation bench prints the mix and the sum next to the measured
