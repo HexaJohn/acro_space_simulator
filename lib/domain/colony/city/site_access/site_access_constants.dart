@@ -54,6 +54,20 @@ const double kCulDeSacRadiusM = 11.0;
 /// half width, and of the cul-de-sac reserve.
 const double kCutFlareM = 1.0;
 
+/// Kerb parking beside a `homeDriveway` cut (§5.5, §7.4 Home back-out): kept
+/// clear this far UPSTREAM and DOWNSTREAM of the cut (in the travel of the
+/// lane beside that kerb) beyond its half width, so no kerb car stands in a
+/// back-out's swing `[T − 12, T + 3]`.
+const double kHomeSwingUpM = 12.0;
+const double kHomeSwingDownM = 3.0;
+
+/// Kerb parking beside any other cut: kept clear this far each side beyond
+/// its half width.
+const double kKerbMaskM = 3.25;
+
+/// A lamp or post standing in a drawn cut moves this far past the cut's end.
+const double kKerbShiftOutM = 1.0;
+
 /// A crossing plate's radius per unit of the widest leg's half width, and the
 /// stop bar's place on it. Pinned against `traffic/node_control.dart`.
 const double kReservePlatePerHalfWidth = 1.45;

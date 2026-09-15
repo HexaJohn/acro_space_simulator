@@ -22,9 +22,9 @@
 ///
 /// Entries of one road are ordered by (side, c, kind), so the form is a pure
 /// function of the plans. The renderer's copy ([toDrawn]) is rescaled to its
-/// drawn arc and flipped for reversed roads. The mask functions over the form
-/// (`blocked`, `parkingBlocked`, `shiftOut`) arrive with the slice that draws
-/// the cuts (R4).
+/// drawn arc and flipped for reversed roads. The mask functions ([blocked],
+/// [parkingBlocked], [shiftOut]) read either copy: an arc and its entries
+/// must be in the same frame (canonical for the agents, drawn for the tiles).
 ///
 /// Determinism (§3.9): no platform hash, draw, clock, map or set iteration,
 /// no trigonometry.
@@ -137,6 +137,75 @@ abstract final class KerbCuts {
         ..add(canonical[i + 4]);
     }
     return _sorted(out);
+  }
+
+  /// The asymmetric mask (§5.5): whether an entry of [entries] on kerb [side]
+  /// holds `−(h + upstreamM) < σ·(s − c) < h + downstreamM` at arc [s].
+  /// Upstream and downstream run along the travel of the lane beside that
+  /// kerb (σ), so the upstream side flips with the direction served. With
+  /// equal extents it is the symmetric `|s − c| < h + x`. [drawnOnly] leaves
+  /// out the far-swing masks ([kindHomeFarSwing]), which break no kerb.
+  /// Allocates nothing.
+  static bool blocked(Float64List? entries, int side, double s,
+      {required double upstreamM,
+      required double downstreamM,
+      bool drawnOnly = false}) {
+    if (entries == null) return false;
+    for (var i = 0; i + stride <= entries.length; i += stride) {
+      if (entries[i] != side) continue;
+      if (drawnOnly && entries[i + 4] == kindHomeFarSwing) continue;
+      final h = entries[i + 2];
+      final x = entries[i + 3] * (s - entries[i + 1]);
+      if (-(h + upstreamM) < x && x < h + downstreamM) return true;
+    }
+    return false;
+  }
+
+  /// Kerb parking (§5.5, A12): whether a kerb slot centred at arc [s] on kerb
+  /// [side] is masked. Every entry with its program's extents: home kinds
+  /// ([kindHomeLot], [kindHomeFarSwing]) at `(kHomeSwingUpM,
+  /// kHomeSwingDownM)` — the back-out swing `[T − 12, T + 3]` in travel terms
+  /// — and [kindDropped] at the symmetric `kKerbMaskM`. The agents' kerb
+  /// slots (canonical arc) and the baked kerb cars (drawn arc) both ask this.
+  /// Allocates nothing.
+  static bool parkingBlocked(Float64List? entries, int side, double s) {
+    if (entries == null) return false;
+    for (var i = 0; i + stride <= entries.length; i += stride) {
+      if (entries[i] != side) continue;
+      final home = entries[i + 4] != kindDropped;
+      final up = home ? kHomeSwingUpM : kKerbMaskM;
+      final down = home ? kHomeSwingDownM : kKerbMaskM;
+      final h = entries[i + 2];
+      final x = entries[i + 3] * (s - entries[i + 1]);
+      if (-(h + up) < x && x < h + down) return true;
+    }
+    return false;
+  }
+
+  /// A station (lamp, post) at arc [s] on kerb [side] moved out of any drawn
+  /// cut: toward the nearer end of the first cut it stands in, to that end
+  /// plus [kKerbShiftOutM], and on the same way past every further cut that
+  /// lands it in (so two overlapping cuts cannot bounce it back). [s] itself
+  /// when it stands in none. Far-swing masks move nothing.
+  static double shiftOut(Float64List? entries, int side, double s) {
+    if (entries == null) return s;
+    var at = s;
+    var dir = 0; // −1 toward smaller arc, +1 larger; 0 until the first cut
+    final passes = entries.length ~/ stride;
+    for (var pass = 0; pass <= passes; pass++) {
+      var moved = false;
+      for (var i = 0; i + stride <= entries.length; i += stride) {
+        if (entries[i] != side || entries[i + 4] == kindHomeFarSwing) continue;
+        final c = entries[i + 1], h = entries[i + 2];
+        if ((at - c).abs() < h) {
+          if (dir == 0) dir = at < c ? -1 : 1;
+          at = dir < 0 ? c - h - kKerbShiftOutM : c + h + kKerbShiftOutM;
+          moved = true;
+        }
+      }
+      if (!moved) break;
+    }
+    return at;
   }
 
   /// [flat] entries ordered by (side, c, kind), as a typed list.
