@@ -530,6 +530,26 @@ Each site then gets a 56 m access road from the kerb (e = ±4) to its frontage l
 32 m across its easement lot and 21 m of unowned ground. No site is `kJoinOffFrontage`, so none doglegs. Every cut
 (`s ± 4.5`) lies inside its road window and clear of the n = ±300 bulbs.
 
+**Deviations (R1, as built):**
+- The set-back test (and so the corridor search) runs only for lots the plat did not cut (manual lots and footprints).
+  An auto lot's frontage is its pavement line by construction; on a bend its chord reads up to ~1.7 m further back
+  and would send every lot on a curve to the search.
+- A lot with no access point today (`lotPiece < 0`) gets no slot at all, so the count is unchanged by construction.
+- Candidate intervals are narrowed to the 0.25 m quanta they hold (a bound within 1e-6 of a quantum is that quantum);
+  a target is tested for membership within 1e-6 m. Without that, float noise in a corner's projection (492 of 600 m
+  reads 491.99999999999994) pushed narrow lots to their other end.
+- A corner lot's side street is looked up among the roads meeting the node at the nearer end of its piece (within
+  12 m of its kerb line), and only else in the index. A manual lot's other candidate roads are looked up only when
+  the road its frontage faces yields no span. Slot 1 on a tie takes the high end of the span.
+- Slots of one lot are packed (slot 0, then slot 1 and slot 2 when offered); slot 2 is the one flagged
+  `kJoinSideStreet`.
+- `effectiveFrontage` (R-F) walks each edge's own box rather than the polygon's: the same candidates and the same
+  answer, measured 13-19 ms → 6-9 ms over the sprawl's 25 frontage-less installations.
+- **R-B1 budget not met:** `RoadGraph.of` on the 12-mile sprawl fixture went from median 138 / best 122 ms to median
+  187 / best 166 ms (+36%), against ≤ +15%. About 17 ms is slots on 54k auto lots (17k corner lots place a second
+  slot), about 30 ms the 627 generator installations (618 set-back corridor searches, ~25 µs each, inside §3.10's
+  200 µs).
+
 **How today's numbers move (C1 notice, §7.3):**
 - Narrow lots move to their drive side: about 7.5 m on a 24 m lot. That covers most auto lots.
 - Wide lots move only by the clamp and the 0.25 m quantum.
@@ -850,6 +870,10 @@ no lot is re-platted: the corridor crosses the fewest UNBUILT auto lots, and tho
   (city_layout.dart:1396-1410), it SKIPS `RoadClass.isElevated` roads and any deck stretch where
   `deck.offGroundAt(s, lengthM)` holds (a raised stretch or a tunnel): nothing at grade is there to hit.
 - **Soft obstacles** (counted): AUTO lots. A lot counts when the corridor overlaps it by more than 0.05 m.
+- **As built (R1):** each corridor leg is a rectangle without end caps. A road hits it when its centreline comes
+  within `halfWidth + sidewalkM` (`halfWidth` for a class without pavement) of the rectangle. The join road is skipped
+  within 12 m of arc of `s`, and the first leg is tested against it from past its pavement. A candidate is
+  best-first: the target crossing nothing ends the search; the choice order is unchanged.
 
 **Candidates** (each quantised to 0.25 m, each with `[s ± m]` inside the slot window and `s` inside the lot span):
 
@@ -2068,4 +2092,8 @@ reason, commit.
 
 | Slice | Test:line | Old | New | Reason | Commit |
 |---|---|---|---|---|---|
-| – | – | – | – | – | – |
+| R1 | road_traffic_model_test.dart:87 (two-way loop service distance) | 192 | 177 | lot access = slot 0: station (276..300) joins at 280.5, house (84..108) at 103.5 | 5eb031b |
+| R1 | road_traffic_model_test.dart:90 (one-way loop) | 808 | 823 | same: 119.5 + 100 + 400 + 100 + 103.5 | 5eb031b |
+| R1 | road_traffic_model_test.dart:128 (avenue, same kerb) | 192 | 177 | same | 5eb031b |
+| R1 | road_traffic_model_test.dart:131 (street, far kerb) | 192 | 177 | same | 5eb031b |
+| R1 | test/traffic/live_rebuild_test.dart (traffic-owned, not changed) | green | red | cars stand inside the new crossing's stop line at the edit (moved 5.2 m) and trips end on slots at 151.5 m, 1.5 m past the new street; fix is the traffic session's (C1 notice) | – |
