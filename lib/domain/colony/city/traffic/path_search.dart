@@ -30,6 +30,7 @@ library;
 import 'dart:typed_data';
 
 import 'agent_kind.dart';
+import 'edge_delay.dart';
 import 'lane_planner.dart';
 import 'lane_state_search.dart';
 import 'route_cost.dart';
@@ -427,7 +428,12 @@ abstract interface class PathSink {
 /// junction between to change at), the same request runs the state search,
 /// which returns a drivable route or none. A fixed-start request runs the
 /// state search from the start.
-class PathQueue {
+///
+/// Every search prices each edge's measured delay from the buffer [delays]
+/// named when it BEGAN (§4.2), and keeps that buffer to its end, however
+/// many sub-steps it spans; the delay table asks [holdsDelays] before it
+/// writes a buffer, so none a search still prices by is ever written.
+class PathQueue implements DelayHolders {
   /// A queue with [contexts] search contexts.
   PathQueue({int contexts = 4})
       : _slots = List<_Slot>.generate(contexts, (_) => _Slot(),
@@ -442,9 +448,24 @@ class PathQueue {
   RouteCost? _cost;
   double _seq = 0;
 
-  /// The delay buffer a search captures when it begins (slice 2, §4.2): set
-  /// by the owner at every publish. Null prices every edge at D = 0.
+  /// The delay buffer a search captures when it begins (§4.2): the delay
+  /// table's last published, set by the owner at every publish. Null prices
+  /// every edge at D = 0.
   Float32List? delays;
+
+  /// Whether a search not yet finished prices by [buffer]: one suspended in
+  /// a context. A context marked to restart does not count — it begins
+  /// again on [delays] as they stand then.
+  @override
+  bool holdsDelays(Float32List buffer) {
+    for (var i = 0; i < _slots.length; i++) {
+      final s = _slots[i];
+      if (!s.busy || s.restart) continue;
+      final held = s.byState ? s.state?.delays : s.edge?.delays;
+      if (identical(held, buffer)) return true;
+    }
+    return false;
+  }
 
   /// Lane occupancy for the lane pass's tie-break; null reads every lane
   /// empty.

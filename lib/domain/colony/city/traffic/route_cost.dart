@@ -21,9 +21,13 @@
 ///       + Σ_j [ J(n_j) + T(turn_j) ]
 ///
 /// with the first and last edges charged only for the part driven. `D` is
-/// the measured delay each edge had when the search began: the slice-2
-/// seam. A search is handed the published delay buffer, or null, and null
-/// prices every edge at D = 0 — slice 1's free-flow routing.
+/// the measured delay each edge had when the search began, at weight 1.0
+/// and with no cap beyond the table's 600 s: the buffer `EdgeDelayTable`
+/// last published (edge_delay.dart, §4.2), which the search keeps to its
+/// end — a part of an edge pays its share of it. Null prices every edge at
+/// D = 0, and so does an empty network's buffer, bit for bit: every `D` is
+/// +0.0 there, and a cost plus +0.0 is the same cost, so an empty network
+/// routes exactly as slice 1's free flow did.
 library;
 
 import 'dart:math' as math;

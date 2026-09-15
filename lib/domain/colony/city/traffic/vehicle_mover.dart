@@ -36,9 +36,15 @@
 /// a route are always joined by a connector (§5.5): no vehicle ever moves
 /// sideways into a sibling lane.
 ///
+/// On the way it keeps the books the measurements are read from: per edge,
+/// the distance driven against the limit (the congestion index), the
+/// vehicles through, and — for the delay table (edge_delay.dart, §4.2) — a
+/// log of delay observations, taken as a vehicle leaves an edge's connector
+/// or arrives on it, and per lane the speeds of the vehicles on it.
+///
 /// Nothing in a step allocates (§15.2): the leader search answers through
-/// fields, the hand-over list is a typed column, events go to a
-/// [VehicleSink].
+/// fields, the hand-over list and the observation log are typed columns,
+/// events go to a [VehicleSink].
 library;
 
 import 'dart:math' as math;
@@ -195,6 +201,30 @@ class VehicleMover {
   double drivenM = 0;
   double limitM = 0;
 
+  // ---- The delay table's books (§4.2, edge_delay.dart) ------------------------
+
+  /// This sub-step's delay observations, in the order they happened, until
+  /// the delay table takes them in (`EdgeDelayTable.absorb`): the edge, the
+  /// seconds it and its connector took over their free time, and 1 where
+  /// the vehicle left through a node — whose expected control delay the
+  /// table subtracts — or 0 where it stopped on the edge at the end of its
+  /// trip.
+  Int32List obsEdge = Int32List(0);
+  Float32List obsS = Float32List(0);
+  Uint8List obsAtNode = Uint8List(0);
+  int observationCount = 0;
+
+  /// Per edge, since the delay table last took them: vehicles that left it,
+  /// through a connector or by arriving — its flow.
+  Int32List edgeDeparts = Int32List(0);
+
+  /// Per lane, since the delay table last took them: the sum over sub-steps
+  /// of each vehicle's `v / limit` on it, and how many were summed — the
+  /// lane speeds' samples. A vehicle standing on purpose (a stall, a dwell)
+  /// samples 0: the lane is blocked all the same.
+  Float64List laneVSum = Float64List(0);
+  Int32List laneSamples = Int32List(0);
+
   // ---- Scratch ------------------------------------------------------------------
 
   Int32List _hand = Int32List(0);
@@ -239,6 +269,11 @@ class VehicleMover {
       edgeStuck = Int32List(nE);
       drivenM = 0;
       limitM = 0;
+      // Edge and lane ids mean nothing across two builds.
+      edgeDeparts = Int32List(nE);
+      laneVSum = Float64List(lg.laneCount);
+      laneSamples = Int32List(lg.laneCount);
+      observationCount = 0;
     }
   }
 
@@ -252,6 +287,21 @@ class VehicleMover {
     into['$name.edgeStuck'] = edgeStuck;
     into['$name.hand'] = _hand;
     into['$name.victims'] = _victims;
+    into['$name.obsEdge'] = obsEdge;
+    into['$name.obsS'] = obsS;
+    into['$name.obsAtNode'] = obsAtNode;
+    into['$name.edgeDeparts'] = edgeDeparts;
+    into['$name.laneVSum'] = laneVSum;
+    into['$name.laneSamples'] = laneSamples;
+  }
+
+  /// Zeroes the departures book.
+  void clearDepartures() => edgeDeparts.fillRange(0, edgeDeparts.length, 0);
+
+  /// Zeroes the lane-speed samples.
+  void clearLaneBooks() {
+    laneVSum.fillRange(0, laneVSum.length, 0);
+    laneSamples.fillRange(0, laneSamples.length, 0);
   }
 
   /// Zeroes the edges' books.
@@ -269,6 +319,15 @@ class VehicleMover {
     final lg = graph, t = table;
     final hw = t.highWater;
     if (_hand.length < t.capacity) _hand = Int32List(t.capacity);
+    // A vehicle observes at most one edge per two hand-overs, and once more
+    // when it arrives: the log never fills, and is sized once.
+    final obsCap =
+        t.capacity * ((AgentTuning.maxHandOversPerStep + 1) ~/ 2 + 1);
+    if (obsEdge.length < obsCap) {
+      obsEdge = Int32List(obsCap)..setRange(0, observationCount, obsEdge);
+      obsS = Float32List(obsCap)..setRange(0, observationCount, obsS);
+      obsAtNode = Uint8List(obsCap)..setRange(0, observationCount, obsAtNode);
+    }
     arbiter.beginStep();
     for (var sl = 0; sl < hw; sl++) {
       t.flags[sl] &= ~(kHandedOver | kRefused);
@@ -297,7 +356,7 @@ class VehicleMover {
     }
 
     // 4. Arrivals and stuck timers.
-    _settle(sink);
+    _settle(nowUs, sink);
   }
 
   /// Takes [handle] off the road: [sink] told first, then everything it
@@ -329,6 +388,8 @@ class VehicleMover {
     if (st == _dwelling || st == _leaving) {
       t.v[sl] = 0;
       t.a[sl] = 0;
+      // Standing in its lane on purpose, it blocks the lane all the same.
+      if (st == _dwelling && el < lg.laneCount) laneSamples[el]++;
       return;
     }
     final k = t.kind[sl];
@@ -381,11 +442,14 @@ class VehicleMover {
     t.movedM[sl] += ds;
     if (onLane) {
       final e = lg.laneEdge[el];
-      final lim = lg.edgeLimit[e] * kStepS;
+      final limit = lg.edgeLimit[e];
+      final lim = limit * kStepS;
       edgeDrivenM[e] += ds;
       edgeLimitM[e] += lim;
       drivenM += ds;
       limitM += lim;
+      if (limit > 0) laneVSum[el] += vn / limit;
+      laneSamples[el]++;
     }
     if (t.flags[sl] & kRefused != 0 && vn < kWaitingMps) {
       t.waitUs[sl] += kStepUs;
@@ -555,6 +619,7 @@ class VehicleMover {
         }
         t.unlink(sl);
         edgeExits[lg.laneEdge[el]]++;
+        edgeDeparts[lg.laneEdge[el]]++;
         arbiter.entered(sl, c);
         t.elem[sl] = nL + c;
         t.routeCur[sl] = i;
@@ -564,6 +629,7 @@ class VehicleMover {
       } else {
         final c = el - nL;
         final lane = lg.conToLane[c];
+        _observeThrough(sl, c, nowUs);
         t.unlink(sl);
         t.elem[sl] = lane;
         t.s[sl] = sNow - elemLen;
@@ -582,6 +648,59 @@ class VehicleMover {
     if (t.s[sl] > elemLen) _holdAt(sl, t.s[sl].toDouble(), elemLen);
   }
 
+  // ---- Delay observations (§4.2) ---------------------------------------------
+
+  /// Whether [sl] came onto the edge it is on at the start of its lane, at
+  /// `edgeEnterUs`: through a connector, after its trip began. A vehicle
+  /// that pulled out part way along, or whose time on the edge an edit or a
+  /// wait for a plan made meaningless (`CityAgents` marks those −1),
+  /// observes nothing there.
+  bool _observable(int sl) {
+    final t = table;
+    return t.edgeEnterUs[sl] > t.tripT0Us[sl];
+  }
+
+  /// [sl] is leaving connector [c] at [nowUs]: one observation for the edge
+  /// the connector leaves — its lane and the connector against their free
+  /// time at the vehicle's own desired speed (the table subtracts the
+  /// node's expected control delay).
+  void _observeThrough(int sl, int c, int nowUs) {
+    if (!_observable(sl)) return;
+    final t = table, lg = graph;
+    final from = lg.conFromLane[c];
+    final e = lg.laneEdge[from];
+    final f = t.f[sl].toDouble();
+    final vLane = lg.edgeLimit[e] * f;
+    final vCon = _conV0(c, f);
+    if (vLane <= 0 || vCon <= 0) return;
+    final free = lg.laneLength(from) / vLane + lg.conLen[c] / vCon;
+    _book(e, (nowUs - t.edgeEnterUs[sl]) / kUsPerSecond - free, 1);
+  }
+
+  /// [sl] has arrived on lane [lane] at [nowUs]: its lane time up to its
+  /// stop, against the free time of the metres to it — no connector, and no
+  /// node to wait at.
+  void _observeArrival(int sl, int lane, int nowUs) {
+    final t = table, lg = graph;
+    final e = lg.laneEdge[lane];
+    edgeDeparts[e]++;
+    if (!_observable(sl)) return;
+    final v = lg.edgeLimit[e] * t.f[sl];
+    if (v <= 0) return;
+    final m = t.destS[sl] - lg.edgeLaneS0[e];
+    final free = (m > 0 ? m : 0.0) / v;
+    _book(e, (nowUs - t.edgeEnterUs[sl]) / kUsPerSecond - free, 0);
+  }
+
+  void _book(int edge, double seconds, int atNode) {
+    final i = observationCount;
+    if (i >= obsEdge.length) return;
+    obsEdge[i] = edge;
+    obsS[i] = seconds;
+    obsAtNode[i] = atNode;
+    observationCount = i + 1;
+  }
+
   /// Puts [sl]'s front back from [sNow] to [at], and its odometers with it.
   void _holdAt(int sl, double sNow, double at) {
     final t = table;
@@ -594,7 +713,7 @@ class VehicleMover {
 
   // ---- 4. Arrivals and stuck timers ------------------------------------------
 
-  void _settle(VehicleSink? sink) {
+  void _settle(int nowUs, VehicleSink? sink) {
     final t = table, lg = graph;
     final nL = lg.laneCount;
     final stuckLimit = usOf(AgentTuning.stuckDespawnS);
@@ -614,6 +733,7 @@ class VehicleMover {
           t.routeCur[sl] >= t.routeLen[sl] - 1 &&
           t.s[sl] >= t.destS[sl] - lg.edgeLaneS0[lg.laneEdge[el]] - kArriveM) {
         arrivals++;
+        _observeArrival(sl, el, nowUs);
         t.state[sl] = _leaving;
         sink?.arrived(h);
         if (t.isLive(h) && t.state[sl] == _leaving) {

@@ -50,13 +50,14 @@ void main() {
 
   test('in steady state nothing is reallocated: every column, the route '
       'arena, the pull-out queue, the path queue and its searches, the '
-      'junction books, the frame sets', () {
+      'junction books, the delay table and its pools, the frame sets', () {
     final a = agentsOn(town());
     runAgents(a, 600);
     final before = _buffers(a);
     final arena = a.vehicles!.arena;
     final growths = arena.growths, capacity = arena.capacity;
     final spawned = a.stats.spawned, arrived = a.stats.arrived;
+    final publishes = a.delays!.publishes;
     expect(a.planner!.waiting, greaterThan(64),
         reason: 'the pull-out queue is past its first size, so a column '
             'that grew with it has grown');
@@ -68,6 +69,8 @@ void main() {
     expect(a.stats.spawned - spawned, greaterThan(20),
         reason: 'the window did work');
     expect(a.stats.arrived - arrived, greaterThan(20));
+    expect(a.delays!.publishes - publishes, 100,
+        reason: 'a delay buffer every congestion epoch, from the pool');
     final after = _buffers(a);
     expect(after.keys.toList(), before.keys.toList(),
         reason: 'no buffer, nor search context, made in steady state');
@@ -193,7 +196,8 @@ Future<String> _where(HeapProbe probe, CityAgents a) async {
 
 /// Every buffer the agents keep from one sub-step to the next, by name: the
 /// tables' columns, and what the planner, the path queue and its search
-/// contexts, the mover, the junction rules and the statistics hold.
+/// contexts, the mover, the junction rules, the statistics and the delay
+/// table (its EMAs, flows and both pools of published buffers) hold.
 Map<String, Object> _buffers(CityAgents a) {
   final t = a.vehicles!, b = a.buildings!, c = a.commutes!, m = a.mover!;
   final out = <String, Object>{
@@ -246,5 +250,6 @@ Map<String, Object> _buffers(CityAgents a) {
   m.collectBuffers(out, 'mover');
   m.arbiter.collectBuffers(out, 'arbiter');
   a.stats.collectBuffers(out, 'stats');
+  a.delays!.collectBuffers(out, 'delays');
   return out;
 }

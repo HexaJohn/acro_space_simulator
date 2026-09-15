@@ -27,7 +27,9 @@
 ///    moved (and every `buildingSyncS` of agent time).
 /// 3. Run the sub-steps the tick's time pays for, each in the fixed order
 ///    of §5.2: demand on the whole second, the spawn queue, the path pump,
-///    the vehicles, the congestion epoch, the frame.
+///    the vehicles, the edge delays — and at the congestion epoch a fresh
+///    delay buffer, which every search begun from then on prices by (§4.2,
+///    the user's spawn-time congestion) — the readout's picture, the frame.
 ///
 /// Everything a result depends on is counted — sub-steps, expansions,
 /// spawns — never timed, and runs in integer-id order, so two colonies fed
@@ -42,11 +44,13 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import '../city_sim.dart';
+import '../parcel.dart';
 import 'agent_frame.dart';
 import 'agent_kind.dart';
 import 'agent_traffic_readout.dart';
 import 'agents_codec.dart';
 import 'building_table.dart';
+import 'edge_delay.dart';
 import 'graph_lineage.dart';
 import 'junction_arbiter.dart';
 import 'lane_graph.dart';
@@ -125,6 +129,7 @@ class CityAgents {
   TrafficStats? _idleStats;
   TrafficMetrics? _metrics;
   int _picturesBefore = 0;
+  int _laneSpeedRevBefore = 0;
 
   /// Whether this colony runs agents — and, with it, whether anything
   /// else reads them (E3a, E4, E37). Also off while the `agentsOn` A/B knob
@@ -136,6 +141,8 @@ class CityAgents {
     _enabled = on;
     if (!on) {
       _picturesBefore += _core?.stats.pictures ?? 0;
+      // One more, for the lane speeds dropped with the tables.
+      _laneSpeedRevBefore += (_core?.delays.laneSpeedRev ?? 0) + 1;
       _core = null;
     }
   }
@@ -189,6 +196,12 @@ class CityAgents {
 
   VehicleTable? get vehicles => _core?.table;
   BuildingTable? get buildings => _core?.buildings;
+
+  /// The measured delays new trips are priced by (§4.2), once built.
+  EdgeDelayTable? get delays => _core?.delays;
+
+  /// What the Lane speed view reads (§13.9): see [AgentLaneSpeeds].
+  late final AgentLaneSpeeds laneSpeeds = AgentLaneSpeeds._(this);
   CommuteSynth? get commutes => _core?.commutes;
   TripPlanner? get planner => _core?.planner;
   PathQueue? get pathQueue => _core?.queue;
@@ -405,6 +418,29 @@ class CityAgents {
   /// Stops vehicle [handle] where it stands, for good (§17's `stall`).
   void debugStall(int handle) => _core?.table.stall(handle);
 
+  /// Pins every edge's published delay at 0 from now on (§17's
+  /// `freezeDelays`), for a test whose arithmetic assumes a known `D`, and
+  /// publishes at once. Measuring goes on underneath; trips already planned
+  /// keep their routes.
+  void freezeDelays() {
+    if (!enabled) return;
+    final core = _core ??= _Core(this);
+    core.prime();
+    core.delays.freeze();
+    core.publishDelays();
+  }
+
+  /// Pins lane-graph edge [edge]'s published delay at [seconds] (§17's
+  /// `setDelay`), freezing the rest, and publishes at once: every search
+  /// begun from now on prices it, and none already planned is touched.
+  void setDelay(int edge, double seconds) {
+    if (!enabled) return;
+    final core = _core ??= _Core(this);
+    core.prime();
+    core.delays.setDelay(edge, seconds);
+    core.publishDelays();
+  }
+
   /// Vehicle [handle] for the inspector and `vehicle=` (§13.9): its kind,
   /// state, owner and purpose, the sites it drives between, its time
   /// against free flow, its stuck timer and its remaining route, lane by
@@ -416,6 +452,93 @@ class CityAgents {
   /// out, the junction rules' passes and queues, the path queue's requests:
   /// two colonies fed the same ticks agree on it to the bit.
   int digest() => _core?.digest() ?? kFnvOffset32;
+}
+
+/// What the Lane speed view reads (§13.9): a small, read-only window on the
+/// agents' lane speeds for the road agent's Traffic tool, whose fourth
+/// `TrafficInfoView` ('Lane speed') draws them, and which the V key and the
+/// Flow chip open (§18 slice 2, agreed with the road side on 2026-09-15).
+///
+/// A view keys what it drew on [revision] and [graphRev]: when either moves
+/// it reads [pct] afresh and rebuilds, at most once an epoch (2 s). Lane ids
+/// index [laneGraph], whose lanes [laneLine] draws in colony metres; the
+/// wire's `TrafficGeometry` carries the same lanes body-fixed. Nothing here
+/// allocates but [laneLine], which a view calls only when it rebuilds.
+class AgentLaneSpeeds {
+  AgentLaneSpeeds._(this._agents);
+
+  final CityAgents _agents;
+
+  /// Per lane id of [laneGraph]: the lane's speed as a percentage of its
+  /// limit, 0–100 — a 60 s EMA of the mean `v / limit` of the vehicles on
+  /// it, sampled every sub-step, where a lane nothing stood on samples
+  /// free. Null before the first congestion epoch on the lane graph running
+  /// now: agents off, no roads yet, or a rebuild less than an epoch ago.
+  ///
+  /// A new identity every epoch, from a pool of three, so a buffer is not
+  /// written again until three epochs (6 s) later: read it when [revision]
+  /// moves, and do not keep it longer than that.
+  Uint8List? get pct => _agents._core?.delays.laneSpeedPct;
+
+  /// Moves whenever [pct] may have changed — every epoch, a rebuild of the
+  /// lane graph, agents switched off or on — and never goes back.
+  int get revision =>
+      _agents._laneSpeedRevBefore + (_agents._core?.delays.laneSpeedRev ?? 0);
+
+  /// The lane graph [pct] indexes, and its revision: bumped on every
+  /// rebuild, when every lane id changes meaning.
+  LaneGraph? get laneGraph => _agents.laneGraph;
+  int get graphRev => _agents.graphRev;
+
+  /// Lanes of [laneGraph]; 0 with none.
+  int get laneCount => laneGraph?.laneCount ?? 0;
+
+  /// The band §13.9 colours a lane of [percent] in: 2 green (70 and up), 1
+  /// amber (40 up to 70), 0 red (below 40).
+  static int band(int percent) => percent >= 70 ? 2 : (percent >= 40 ? 1 : 0);
+
+  /// The id of the road lane [lane] runs along, or null for no such lane.
+  String? roadOfLane(int lane) {
+    final lg = laneGraph;
+    if (lg == null || lane < 0 || lane >= lg.laneCount) return null;
+    final e = lg.laneEdge[lane];
+    if (e >= lg.roadEdgeCount) return null;
+    return lg.graph.roads[lg.edgeRoad[e]].id;
+  }
+
+  /// The centreline of lane [lane] in colony-local metres (east, north),
+  /// in travel order from the stop bar behind it to the one ahead: its
+  /// road's own line shifted the lane's offset right of travel, a point at
+  /// least every [stepM] metres and one at each end. Empty for no such lane.
+  List<Vec2> laneLine(int lane, {double stepM = 6}) {
+    final lg = laneGraph;
+    if (lg == null || lane < 0 || lane >= lg.laneCount) return const [];
+    final e = lg.laneEdge[lane];
+    if (e >= lg.roadEdgeCount) return const [];
+    final t0 = lg.edgeLaneS0[e].toDouble(), t1 = lg.edgeLaneS1[e].toDouble();
+    final len = t1 - t0;
+    final n = len > 0 && stepM > 0 ? math.max(1, (len / stepM).ceil()) : 1;
+    final off = lg.laneOff[lane].toDouble();
+    final pt = Float64List(4);
+    final out = <Vec2>[];
+    for (var i = 0; i <= n; i++) {
+      final t = len > 0 ? t0 + len * i / n : t0;
+      // The heading from a quarter metre on, or back where that runs off.
+      final ahead = t + 0.25 <= lg.edgeLen[e];
+      RouteCost.pointOn(lg, e, t, pt, 0);
+      RouteCost.pointOn(lg, e, ahead ? t + 0.25 : t - 0.25, pt, 2);
+      var de = pt[2] - pt[0], dn = pt[3] - pt[1];
+      if (!ahead) {
+        de = -de;
+        dn = -dn;
+      }
+      final l = math.sqrt(de * de + dn * dn);
+      out.add(l < 1e-9
+          ? Vec2(pt[0], pt[1])
+          : Vec2(pt[0] + dn / l * off, pt[1] - de / l * off));
+    }
+    return out;
+  }
 }
 
 /// Everything an enabled colony's agents hold, built at its first advance.
@@ -431,6 +554,7 @@ class _Core implements PathResolver, PathSink, VehicleSink {
     arbiter = JunctionArbiter(table);
     mover = VehicleMover(table, arbiter);
     queue.load = table;
+    delays.holders = queue;
     planner = TripPlanner(table, arbiter, rng.fork(_spawnSalt), stats);
     commutes = CommuteSynth(
       buildings: buildings,
@@ -454,6 +578,7 @@ class _Core implements PathResolver, PathSink, VehicleSink {
   final PathQueue queue = PathQueue();
   final BuildingTable buildings = BuildingTable();
   final TrafficStats stats = TrafficStats();
+  final EdgeDelayTable delays = EdgeDelayTable();
   final AgentFrameBuilder frames = AgentFrameBuilder();
   late final JunctionArbiter arbiter;
   late final VehicleMover mover;
@@ -515,6 +640,14 @@ class _Core implements PathResolver, PathSink, VehicleSink {
     if (_buildingsMoved()) _syncBuildings();
   }
 
+  /// A delay buffer published now, outside the epoch, and handed to the
+  /// path queue for the searches that begin from here on.
+  void publishDelays() {
+    if (lg == null) return;
+    delays.publishNow(table);
+    queue.delays = delays.published;
+  }
+
   /// One sub-step, in §5.2's order.
   void _subStep() {
     final now = clock.timeUs;
@@ -531,9 +664,16 @@ class _Core implements PathResolver, PathSink, VehicleSink {
     // 3–5. The vehicles, their arrivals and despawns.
     mover.step(now, this);
     if (clock.onWholeSecond) table.compactRoutes();
-    // 6. The congestion epoch, and the readout's picture.
+    // 6. The edge delays: this sub-step's observations; and at the
+    // congestion epoch the flow windows, the lane speeds and a fresh delay
+    // buffer, which every search begun from now on prices by (§4.2) — then
+    // the readout's picture.
+    delays.absorb(mover);
     if (now % epochUs == 0) {
-      stats.epoch(mover, windowEnd: now % windowUs == 0);
+      final windowEnd = now % windowUs == 0;
+      delays.epoch(mover, table, windowEnd: windowEnd);
+      queue.delays = delays.published;
+      stats.epoch(mover, windowEnd: windowEnd);
     }
     // 7. The frame.
     frames.publish(table,
@@ -596,6 +736,11 @@ class _Core implements PathResolver, PathSink, VehicleSink {
     final c = cost = RouteCost(next);
     queue.bind(c);
     stats.bind(next);
+    // A refreshed graph keeps its measured delays; a rebuilt one starts
+    // afresh, priced at D = 0 until its first epoch. Either way every search
+    // restarts on the buffer the table holds now.
+    delays.bind(next);
+    queue.delays = delays.published;
     if (rm != null && planner.waiting > 0) planner.remapWaiting(rm, commutes);
     if (rebuild) {
       graphRev++;
@@ -667,6 +812,10 @@ class _Core implements PathResolver, PathSink, VehicleSink {
       if (_rmOp[sl] == _opNone || !t.isSlotLive(sl)) continue;
       t.place(sl, _rmElem[sl], _rmS[sl]);
       _setV0(sl, next);
+      // Its time on the edge it was on is time on another edge now, of
+      // another length: it observes nothing until it enters the next one
+      // (§4.2).
+      t.edgeEnterUs[sl] = -1;
     }
     t.relinkAll();
     _separate(next);
@@ -925,6 +1074,9 @@ class _Core implements PathResolver, PathSink, VehicleSink {
     table.state[sl] = _driving;
     table.stuckUs[sl] = 0;
     table.movedM[sl] = 0;
+    // It stood on this edge waiting for the plan: that wait is no delay the
+    // edge caused, so the edge is not observed (§4.2).
+    table.edgeEnterUs[sl] = -1;
     if (request.tag == kRetargetTag) {
       table.purpose[sl] = TripPurpose.homeward.index;
     }
@@ -1073,6 +1225,7 @@ class _Core implements PathResolver, PathSink, VehicleSink {
     h = planner.digest(h);
     h = arbiter.digest(h);
     h = queue.digest(h);
+    h = delays.digest(h);
     final spawn = planner.rng.toJson();
     for (var i = 0; i < spawn.length; i++) {
       h = fnv1aU32(h, spawn[i]);
