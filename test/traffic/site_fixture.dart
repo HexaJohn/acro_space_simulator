@@ -56,6 +56,7 @@ class FixturePlanSource implements SitePlanSource {
     for (final lot in lots) {
       _lot.add(lot);
       _template.add(byLot[lot]!);
+      _change.add(null);
       _sitesRev++;
     }
     _rebuild();
@@ -66,9 +67,11 @@ class FixturePlanSource implements SitePlanSource {
 
   final bool validate;
 
-  /// Per slot: its lot id and template, or null for a free slot.
+  /// Per slot: its lot id and template, or null for a free slot, and the
+  /// edit made to its draft before it is emitted.
   final List<String?> _lot = [];
   final List<SyntheticTemplate?> _template = [];
+  final List<void Function(DraftSite)?> _change = [];
 
   /// Per slot: its row in the chunk, or −1.
   final List<int> _rowOfSlot = [];
@@ -117,6 +120,7 @@ class FixturePlanSource implements SitePlanSource {
     if (template == null) {
       _lot[slot] = null;
       _template[slot] = null;
+      _change[slot] = null;
     } else if (slot >= 0) {
       _template[slot] = template;
     } else {
@@ -128,12 +132,30 @@ class FixturePlanSource implements SitePlanSource {
         free = _lot.length;
         _lot.add(null);
         _template.add(null);
+        _change.add(null);
       }
       _lot[free] = lotId;
       _template[free] = template;
+      _change[free] = null;
     }
     _sitesRev++;
     _stale.remove(lotId);
+    _rebuild();
+  }
+
+  /// Edits [lotId]'s draft with [change] — null to stop editing it — before
+  /// it is emitted, and republishes as [replace] does.
+  ///
+  /// The templates are whole sites, so swapping one for another moves every
+  /// stall it has; a re-plan that moved PART of a site (a stall taken out,
+  /// the rest left where it was) is what `stallKey` exists for, and this is
+  /// the only way to build one. [validate] is worth turning off for an edit
+  /// the road side's generators would never emit.
+  void edit(String lotId, void Function(DraftSite)? change) {
+    final slot = slotOf(lotId);
+    if (slot < 0) return;
+    _change[slot] = change;
+    _sitesRev++;
     _rebuild();
   }
 
@@ -160,7 +182,9 @@ class FixturePlanSource implements SitePlanSource {
       final t = _template[s];
       if (lot == null || t == null) continue;
       _rowOfSlot[s] = drafts.length;
-      drafts.add(SyntheticSites.draftAt(graph, lot, t, siteId: lot));
+      final draft = SyntheticSites.draftAt(graph, lot, t, siteId: lot);
+      _change[s]?.call(draft);
+      drafts.add(draft);
     }
     _chunks = drafts.isEmpty
         ? const []
@@ -211,12 +235,13 @@ class SiteChanges implements SiteChangeSink {
 /// Every lot named in [byLot] is a BUILT lot of the town, so the building
 /// table has a slot for it and the site table can hang a row on that slot.
 class SiteWorld {
-  SiteWorld(Map<String, SyntheticTemplate> byLot, {CitySim? on})
+  SiteWorld(Map<String, SyntheticTemplate> byLot,
+      {CitySim? on, bool validate = true})
       : city = on ?? town() {
     graph = city.roadGraph;
     lg = LaneGraphBuilder.build(graph);
     buildings = BuildingTable()..sync(city, lg);
-    plans = FixturePlanSource(graph, byLot);
+    plans = FixturePlanSource(graph, byLot, validate: validate);
   }
 
   /// The town the lots stand in, and the graph and lanes its cars drive.
