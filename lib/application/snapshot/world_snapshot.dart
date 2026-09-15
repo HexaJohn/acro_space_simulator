@@ -37,6 +37,11 @@ import 'traffic_capture.dart';
 // code) but are part of the frame's vocabulary, so they come with it.
 export 'city_patch_columns.dart'
     show CityPatchSnapshot, CityPatchColumns, CityPatchColumnsBuilder;
+// The footprint rule moved to the site envelope (docs/plans/site-access.md
+// §2.1, R0); re-exported so every caller keeps reading it from the frame.
+export '../../domain/colony/city/site_access/site_envelope.dart'
+    show buildingFootprint, kLotSetbackM, lotCoverageFor, lotSetbackFor;
+import '../../domain/colony/city/site_access/site_envelope.dart';
 import '../../domain/terrain/terrain_field.dart';
 import '../../domain/terrain/terrain_profile.dart';
 import '../../domain/universe/celestial_body.dart';
@@ -1023,31 +1028,6 @@ class BodyDescriptorSnapshot {
   }
 }
 
-/// The footprint a building takes on [parcel], metres.
-///
-/// One rule, because two things need the same answer: the building itself, and
-/// the ring of ZONED GROUND drawn around it. Compute them separately and the
-/// yard either overlaps the walls or leaves a gap of bare terrain.
-({double width, double depth}) buildingFootprint(
-    Parcel parcel, CityBuildingSpec spec) {
-  final extent = parcel.inscribedExtent;
-  final back = lotSetbackFor(spec);
-  final cover = lotCoverageFor(spec);
-  final lotW = math.max((extent.width - 2 * back) * cover, extent.width * 0.35);
-  final lotD = math.max((extent.depth - 2 * back) * cover, extent.depth * 0.35);
-  return (
-    width: spec.siteWidthM > 0 ? math.min(lotW, spec.siteWidthM) : lotW,
-    depth: spec.siteDepthM > 0 ? math.min(lotD, spec.siteDepthM) : lotD,
-  );
-}
-
-/// Smallest setback from a lot line, metres.
-///
-/// Wider than `CityTerrainShaper.padEdgeM`, which is what makes it work: the
-/// pad is flat right out to the lot line and eases off over that edge, so a
-/// building inset past the ease-off stands wholly on level ground. Nothing may
-/// be inset less than this or it starts straddling the step to the terrace
-/// next door.
 /// Road-drape ground sampling stride, in units of the 6 m spline samples,
 /// for a road that is not a plain graded corridor: one that follows the
 /// land, or the ground under a deck. Not the corridor's knots — `sample`
@@ -1574,36 +1554,6 @@ void _forgetGroundUnder(CitySim city, TerrainBrush brush) {
   });
 }
 
-const double kLotSetbackM = 1.2;
-
-/// Setback for [spec], metres.
-///
-/// Density decides how much of its plot a building takes. A tower downtown
-/// meets the pavement and leaves no slack; a low-density house sits back
-/// behind a garden. Every building used the SAME setback before, so a dense
-/// street had the same gaps as a suburban one and the whole colony read at one
-/// density however it was zoned.
-///
-/// Intensity — residents plus workers per building — is the density signal a
-/// spec actually carries; `Density` itself does not survive onto the spec.
-double lotSetbackFor(CityBuildingSpec spec) {
-  final intensity = spec.housing + spec.jobs;
-  if (intensity >= 90) return kLotSetbackM; // towers meet the street
-  if (intensity >= 30) return 2.2;
-  return 4.0; // detached, with room around it
-}
-
-/// Share of its plot [spec] covers, once set back.
-///
-/// The other half of the same idea: a dense block fills what it is given, a
-/// low-density one leaves garden around the footprint.
-double lotCoverageFor(CityBuildingSpec spec) {
-  final intensity = spec.housing + spec.jobs;
-  if (intensity >= 90) return 0.96;
-  if (intensity >= 30) return 0.86;
-  return 0.72;
-}
-
 /// A colony building, placed BODY-FIXED so it rotates with the planet. [px..pz]
 /// and the quaternion [qw..qz] are in the body frame (local +Z radial-up, +Y
 /// north); [lat]/[lon] (radians) is the surface point the renderer can ray-cast
@@ -1806,6 +1756,10 @@ class BuildingSnapshot {
       cell: CitySim.cellM,
       elevation: elevation,
     );
+    // A cell fronts its north edge (`CitySim.parcelForCell`: the 2D map has
+    // no road direction to read), so its street heading is 0 and it takes
+    // the same legacy spin as a parcel: street face, local −Y, to the north.
+    final q = t.orientation * _legacyBuildingSpin(0);
     return BuildingSnapshot(
       id: '$cell',
       type: spec.type,
@@ -1814,10 +1768,10 @@ class BuildingSnapshot {
       px: t.position.x,
       py: t.position.y,
       pz: t.position.z,
-      qw: t.orientation.w,
-      qx: t.orientation.x,
-      qy: t.orientation.y,
-      qz: t.orientation.z,
+      qw: q.w,
+      qx: q.x,
+      qy: q.y,
+      qz: q.z,
       lat: trueLat,
       lon: trueLon,
       siteWidthM: spec.siteMetres(cellM: CitySim.cellM).width,
@@ -1882,12 +1836,26 @@ class BuildingSnapshot {
     east: c.e,
     north: c.n,
   );
-  // place() gives local +X east, +Y north, +Z up. A parcel's heading is
-  // measured from north toward east, and a building is authored facing +Y, so
-  // the spin about up is the NEGATIVE of that heading.
-  final spin = Quaternion.axisAngle(Vector3.unitZ, -parcel.heading);
-  return (position: base.position, orientation: base.orientation * spin);
+  return (
+    position: base.position,
+    orientation: base.orientation * _legacyBuildingSpin(parcel.heading),
+  );
 }
+
+/// The spin about local up that turns a building onto its street, for a lot
+/// whose street lies along [parcelHeading] (`Parcel.heading`: radians from
+/// north toward east, the direction from the lot's centroid to its frontage).
+///
+/// `SurfacePlacement.place` gives local +X east, +Y north, +Z up, and a
+/// building is authored with its street face on local −Y: the generator's
+/// front wall, bays and awnings, the massing's entrance and curb line
+/// (y = −depth/2), and the lot dressing all sit there. Spinning by
+/// `−heading` alone carried local +Y onto the street and drew every parcel
+/// building backwards; the π turns local −Y onto `Parcel.facing` and local +X
+/// onto the site frame's `u` (docs/plans/site-access.md §3.1 legacy rule,
+/// §5.1). Plan-served sites take `−SiteFrame.buildingHeading` instead (R4).
+Quaternion _legacyBuildingSpin(double parcelHeading) =>
+    Quaternion.axisAngle(Vector3.unitZ, -(parcelHeading + math.pi));
 
 /// A colony road, flattened for the wire.
 ///

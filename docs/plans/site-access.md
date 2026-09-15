@@ -1104,6 +1104,13 @@ flip, still from `Parcel.heading`. Cells get the same fix if their assertion fai
 **What moves:** every parcel building's quaternion, and screenshots. No mesh digest moves (fixtures hand-build
 quaternions).
 
+**As built (R0):** both tests failed before the fix (the drawn spaceport door stood 834 m from its frontage midpoint
+against the centre's 450 m), so the stop rule did not fire. The π lives in one helper, `_legacyBuildingSpin`, used by
+`_parcelTransform` and by `BuildingSnapshot.ofCityCell` (cells failed their assertion, so they take the spin with
+street heading 0, their stored north frontage). `_parcelTransform` also places plat lot patches; they turn π too,
+which draws the same centred rectangle. `buildingFootprint`, `lotSetbackFor`, `lotCoverageFor` and `kLotSetbackM`
+moved unchanged to `site_envelope.dart` and are re-exported from `world_snapshot.dart`.
+
 **Stop rule (keyed to the renderer, so a downstream compensation cannot be double-flipped):** both
 `building_front_test` and `site_orientation_test` must FAIL before the fix and PASS after it. If
 `building_front_test` already passes before the fix, some renderer step compensates for the flip: stop, report where
