@@ -1,8 +1,8 @@
 # Agent-based traffic (Cities: Skylines style) — design
 
-Status: design, revision 3, branch feat/agent-traffic, 2026-09-11
+Status: design, revision 4, branch feat/agent-traffic, 2026-09-15
 
-This document is self-contained. An implementer needs only this and the code.
+This document is self-contained, with one exception: parking in sites (driveways, car parks, access roads) follows the road side's `docs/plans/site-access.md`, whose §7 is the contract (D49). An implementer needs only these and the code.
 
 - **Baseline.** Every E-hook (§1.2), and every line cited in a file that changed after `62a3a55`, is cited against `dev` at **`c672eb3`** (revision 3). Its last two commits touch no file this document cites, so every anchor reads the same at `721e585`.
   - Revision 2's baseline, `62a3a55`, had added the road agent's directed `RoadGraph` (road_graph.dart) and its routed traffic model (`CityTrafficModel` and `CityRoadTraffic`, road_traffic_model.dart). It wired that model into `CitySim.advance`, added road noise and land value, and gave the tiles and the graph one junction warrant (`junctionPlanForNetwork`).
@@ -10,7 +10,7 @@ This document is self-contained. An implementer needs only this and the code.
   - Those commits rewrite `road_graph.dart`, `road_traffic_model.dart`, `simulation_view_colony.dart`, `city_edit_overlay.dart` and `city_tile_bucketing.dart`. They move lines in `city_sim.dart` (by up to 33 past line 3345), `city_layout.dart`, `parcel.dart`, `road_junction.dart`, `road_mesher.dart`, `city_tile_mesher.dart`, `city_traffic.dart`, `city_nodes.dart`, `simulation_view.dart`, `city_game_hud.dart`, `sim_view_control.dart`, `main_city_game_dev.dart` and `tool/drive_city_game.dart`.
   - Files dev has not touched since `62a3a55` read the same at both. Among them: `road_catalog.dart`, `road_elevation.dart`, `spatial_index.dart`, `city_building_spec.dart`, `city_generator.dart`, `city_starter_kit.dart`, `world_snapshot.dart`, `vehicle_meshes.dart` and `scene_sync.dart`.
   - The worktree branch holds this design (`5476ca9`) and slices 1a and 1b (`f634f4b`, `4b114f8`) on dev's `cf36b49`, 24 commits behind `c672eb3`. **It is rebased onto `dev` again before slice 1 merges.**
-- **Lineage of the design.** The skeleton is the panel's "integration" design. Grafts come from the "fidelity" and "scale" designs, and every fatal flaw the judges listed has been fixed. §0.3 records each decision with a one-line reason. Revision 2 answers a critic's review and the landing of the road agent's routed model. Revision 3 follows dev to `c672eb3`: the traffic readout seam, fire and delivery reach, the graph's level rule and drawn-leg plans, and the landed road tool. The **Revision log** at the end lists every change.
+- **Lineage of the design.** The skeleton is the panel's "integration" design. Grafts come from the "fidelity" and "scale" designs, and every fatal flaw the judges listed has been fixed. §0.3 records each decision with a one-line reason. Revision 2 answers a critic's review and the landing of the road agent's routed model. Revision 3 follows dev to `c672eb3`: the traffic readout seam, fire and delivery reach, the graph's level rule and drawn-leg plans, and the landed road tool. Revision 4 adopts the road side's site-access contract (site networks, stall parking, home back-outs) and splits slice 4 into T4a and T4b. The **Revision log** at the end lists every change.
 - **Paths.** `lib/` and `test/` are the repo's own. "The road agent" is the other agent working on road placement on `dev`.
 
 ---
@@ -85,8 +85,8 @@ This document is self-contained. An implementer needs only this and the code.
 | D3 | Graph source and revision | The lane graph is **derived from `CitySim.roadGraph`**, the road agent's `RoadGraph`, and keyed on that object's identity. `CitySim.roadsRevision` (city_sim.dart:425) moves on every road mutation (`CityLayout.revision`, city_layout.dart:125; bumped at 171, 643, 800, 811, 882, 895, 910 and 1040) and on every junction override (city_sim.dart:4035). | One clustering of one network, so our routes, their fire reach and their delivery reach agree about what connects. No duplicate build, and no counter of our own. |
 | D4 | Junction-override key | **Removed.** Overrides reach us through the graph's own node plans (`RoadGraph.withOverrides`). | `setJunctionOverride` already moves `roadsRevision` |
 | D5 | Lane connectors | Interval-overlap turn bands; straight from every lane that has an aligned out-lane; turns that may land in any out-lane; median-aligned continuations; **adjacent-lane straight connectors at real junctions** (rule 5) | New trips are lane-feasible by construction, so there is no A* retry loop. Rule 5 is the spec's "change lanes at nodes". |
-| D6 | Kerb lane at the destination | The last connector fixes it. The destination lane set is {kerb lane}, or {innermost lane} for a far-side driveway. | There is no mid-segment "move to lane 0 for the last 60 m" |
-| D7 | Far-side access | Exactly where `RoadGraph`'s lot access allows it (`lotDirs`, road_graph.dart:685-696): two-way roads with one lane each way. On two-way roads with two or more lanes each way, own side only. On one-way roads, either kerb, from the travel direction. Kerb **parking** is on the right kerb of travel, and on both kerbs of a one-way road. | Our reachability must match the network's. Cars never cross a median or a four-lane road mid-block. |
+| D6 | Kerb lane at the destination | The last connector fixes it. The destination lane set is {kerb lane}, or {innermost lane} for a far-side driveway. Unchanged by site plans: applied per join, so each in-capable join has its own mask (§3.10). | There is no mid-segment "move to lane 0 for the last 60 m" |
+| D7 | Far-side access | Exactly where `RoadGraph`'s lot access allows it (`lotDirs`, road_graph.dart:685-696): two-way roads with one lane each way. On two-way roads with two or more lanes each way, own side only. On one-way roads, either kerb, from the travel direction. Kerb **parking** is on the right kerb of travel, and on both kerbs of a one-way road. Unchanged by site plans: every join has `joinDirs == _dirsFor(road, side)`, and a join's role restricts in or out, never direction. | Our reachability must match the network's. Cars never cross a median or a four-lane road mid-block. |
 | D8 | Sub-step | h = 0.2 s on an integer-µs accumulator | Half the 25× cost of 0.1 s, and any partition of dt gives an identical sub-step sequence |
 | D9 | Degradation | None driven by wall-clock time. Shedding uses a vehicle cap, a path-queue cap and the frame hold (D35), all counted in agents, expansions or sub-steps. Deferred spawns wait at their origin. Milliseconds are only reported and fed to `FrameBudget`. | A time-driven ladder breaks determinism |
 | D10 | Over-capacity trips | Deferred: the citizen waits at the origin. No "virtual" teleport trips. | Every trip is an individual entity |
@@ -96,17 +96,17 @@ This document is self-contained. An implementer needs only this and the code.
 | D14 | Waste and corpses at depots | Per-depot buffers, processed at the spec rate × throttle. Owned specs skip the global production loop, and their pollution scales with the work they did. | The stock-cap sweep (city_sim.dart:1680-1684) would otherwise delete truck loads |
 | D15 | `wasteBacklog` | Overdue garbage (above the request threshold) plus the sewage stock, over population × 2 | Same normaliser as today (1415-1419); sewage stays a pipe scalar |
 | D16 | Population | `population` stays the field every reader reads. With agents owning it, migration and deaths become budgets realised as citizens. External writes are detected as deltas and turned into budgets. One-tick contract (§12). | Migration becomes visible and spatial, and no existing reader or writer breaks |
-| D17 | Parking | Searched on arrival: the destination lot, then the arrival edge's kerb, then adjacent edges within 800 m. A found slot is reserved and **the reservation is binding**. With nothing free the car circles, and it gives up after the third circle. | The spec asks to *find* a spot; reserving at plan time hides that, and a binding reservation leaves no race |
+| D17 | Parking | Searched on arrival, in this order (revision 4, site-access §7.5): (1) the destination's own stalls, reserved at the arrival gate; (2) kerb slots ahead on the arrival edge within 60 m, skipping slots masked by `KerbCuts.blocked`; (3) adjacent edges within 800 m; (4) circling, with step 1 retried only if the loop ends on an in-capable join's edge; (5) giving up after the third circle, and the car is garaged. Every found stall or slot is reserved and **the reservation is binding**. Other sites' lots are never searched. On a home driveway the car parks nose-in and leaves by backing out into the street on a gap; car parks, yards and installations are left forward through their throats (§7.5). | The spec asks to *find* a spot; reserving at plan time hides that, and a binding reservation leaves no race |
 | D18 | Frame timing | Published per sub-step and stamped with the agent clock. The renderer keeps its own agent clock, advanced by wall time × a measured rate. That clock pauses only when the host's warp is 0 (`SceneSync.simWarp`), never merely because a frame ran no tick. | Removes the 10 Hz stutter and the epoch-quantisation stutter |
-| D19 | Render geometry | Per-edge polylines are **sliced from the same capture's `RoadSnapshot.points`**, which the road agent already flips for reversed roads (world_snapshot.dart:2134-2158). They are cached per (graph object, `groundCacheStamp`). There is no second drape. | Cars sit exactly on the paint, with zero extra ground reads |
-| D20 | Height | Deck roads use `RoadSnapshot.lifts`; draped roads with bridges use the cosmetic pass's bridge-lift term (city_traffic.dart:257). Both add the ribbon lift. | One height reference per road, never counted twice |
+| D19 | Render geometry | Per-edge polylines are **sliced from the same capture's `RoadSnapshot.points`**, which the road agent already flips for reversed roads (world_snapshot.dart:2134-2158). They are cached per (graph object, `groundCacheStamp`). There is no second drape. Unchanged for roads; site poses (D49) are placed on the plan's own points, never sliced from a road. | Cars sit exactly on the paint, with zero extra ground reads |
+| D20 | Height | Deck roads use `RoadSnapshot.lifts`; draped roads with bridges use the cosmetic pass's bridge-lift term (city_traffic.dart:257). Both add the ribbon lift. Unchanged for roads; site poses use `CitySiteFrame` heights (`ptUp`, `stallUp`; site-access §5.2), their own source, never a re-drape. | One height reference per road, never counted twice |
 | D21 | Worker isolate | Slice 11, lock-step. `cityClockHeldS` holds the economy's dt until the worker confirms. A free-run mode exists for development only and is declared non-deterministic. | A late reply would otherwise feed stale state or stall ambiguously |
 | D22 | Tools and overlays | Our own `TrafficToolController` and `TrafficOverlayState`. No edits to `city_edit_overlay.dart`, the `road_tool_*.dart` files, `road_mesher.dart`, `road_overlay_state.dart` or `road_overlay_nodes.dart`. The road agent's Routes view reads `CitySim.trafficReadout`, so in an agent colony it draws the agents' routes; ours is the lane-speed view and the route inspector (C8, resolved). | Those files are the road agent's, and one question gets one answer: their view asks the readout, and the agents answer it |
 | D23 | Baked signal lamps | A coordination request (C3). Until it lands, lamps are drawn twice. The baked ones switch only by epoch parity at mesh time (road_mesher.dart:1431-1435). | We don't edit the mesher |
 | D24 | Exposure | In slices 1–10, agents are enabled only for City Builder colonies, through `CityStarterKit.found(agentTraffic: true)`. **Slice 11 turns them on in every ticking colony**, behind the topology audit and the perf gates. The enabled flag persists from slice 1 (E15/E16), and the lot-rename hooks land in slice 1 (E12–E14). | "Re-plan only when impossible" must hold the first time the player draws a road or saves, and the spec rules out an abstract flow number anywhere |
 | D25 | Outside sinks | One virtual 2,000 m edge pair per stub, with a U-turn at its own sink. The sink sits at `stub.at + heading × 2000 m`. No shared sink. | A shared sink would let through trips bypass the town; a sink position keeps the heuristic admissible |
 | D26 | Bus-line legs | **Routed once at line creation, remapped on every graph revision, and a leg is re-routed only when its remap fails.** Stops re-resolve each revision: an edge within 8 m, heading within 45°, stop on the right-hand side. | Lines follow the same locked-route rule as cars |
-| D27 | RNG and maths | xoshiro128**, which multiplies only by 5 and 9 and so is exact on web. `fnv1a32` uses a split 32-bit multiply. No `exp`, `log` or trigonometry in the sub-step; lookup tables instead (`sqrt` is correctly rounded everywhere). Determinism is claimed **per platform**. | Web-safe and honest |
+| D27 | RNG and maths | xoshiro128**, which multiplies only by 5 and 9 and so is exact on web. `fnv1a32` uses a split 32-bit multiply. No `exp`, `log` or trigonometry in the sub-step; lookup tables instead (`sqrt` is correctly rounded everywhere). Determinism is claimed **per platform**. Unchanged by site networks: the site mover's sub-step maths (site-lane IDM, stall manoeuvres, the home back-out arc) follows the same rules, and the road side's plan generation uses no trigonometry either (site-access C-11). | Web-safe and honest |
 | D28 | Stuck despawn | 120 s of agent time (a knob), accrued only while driving. The timer is frozen while dwelling, and while held for a queued re-plan. | A colony day is `dayLengthSec` (120 s on an Earth-like body, city_sim.dart:1150); a fire engine on scene is not stuck |
 | D29 | `city_traffic_test.dart` | Not retired | The cosmetic pass still serves the studio, which never ticks, and non-agent colonies until slice 11 |
 | D30 | Save schema | `GameStateCodec.schemaVersion` stays **1** (game_state_codec.dart:35). The new `'agents'` key is additive and has its own `v`. | The city JSON is nested |
@@ -115,7 +115,7 @@ This document is self-contained. An implementer needs only this and the code.
 | D33 | Staffing | Slice 1: `commuteEff` comes from measured trips (E4), so the published congestion and staffing move together. Slice 10: per-building presence. | No slice changes staffing silently |
 | D34 | Fixed-start plans | Re-plans, and appended legs that begin in the lane the vehicle already occupies, run an A* over (edge, lane) states that expands only real connectors. New trips keep edge A* plus the lane pass. | A fixed lane can make an edge sequence lane-infeasible; the state search never returns an undrivable route |
 | D35 | Frame hold | When the host sets `frameBudgeted`, at most `maxAgentSubStepsPerFrame = 4` agent sub-steps run per UI frame. Further world ticks are queued **whole** and replayed in order on later frames, with economy and agents advancing together. | A 25-tick catch-up frame would otherwise run about 62 sub-steps (≈ 50 ms); replaying whole ticks keeps the `advance` sequence identical |
-| D36 | What may change a plan | Only network edits: roads, junction overrides, stubs, and bus or rail lines and stops. A destination demolished mid-trip is found on arrival and handled by an appended leg. A delayed bus never changes a rider's plan. | Decision 1 and the spec, verbatim |
+| D36 | What may change a plan | Only network edits: roads, junction overrides, stubs, and bus or rail lines and stops. A destination demolished mid-trip is found on arrival and handled by an appended leg. A delayed bus never changes a rider's plan. A site-plan change re-plans only the site legs of cars in or bound for that site, and their road routes stay locked (snap, relocate, garage, limbo, `siteRetarget`: site-access §7.6). | Decision 1 and the spec, verbatim |
 | D37 | Safety and crime | Under the police flag every passive safety term is retired: the Police Station's, Emergency Services' and the military specs'. `services['safety'] = policeCoverage × pop`, from answered calls. The crime target comes from per-building crime (E35). | Decision 2 retires global coverage for crime |
 | D38 | Stub flows | Visitors come in on a schedule. Out-of-town errands and emigrants go out as they arise. Trucks in and out are exactly the §10.2 imports and exports. Through traffic is scheduled per stub pair and does not scale with population. | Every inbound vehicle has a destination building and every outbound one an origin building |
 | D39 | Starter spurs | An agent City Builder colony is founded with two trunk spurs to enabled stubs (E17, slice 8) | Otherwise no player sees traffic from the map edge |
@@ -128,6 +128,14 @@ This document is self-contained. An implementer needs only this and the code.
 | D46 | The readout seam | `CityAgents.readout` is an `AgentTrafficReadout implements CityTrafficReadout` (traffic_readout.dart:49-105), and E37 makes `CitySim.trafficReadout` return it in agent colonies. **Slice 1:** the agents answer `hasRun`, `peakCongestion`, `averageCongestion`, `congestionOf` and `volumeOf` (measured from speeds and flows), `routesThrough` (live vehicles' locked routes) and `passes`. `serviceReach`, `fireReach`, `deliveryReach`, `noiseOf`, `landValueOf`, `averageLandValue` and `taxLandValueFactor` are forwarded to `city.roadTraffic`, which keeps advancing. **Slice 2:** the agents answer all of them, and `roadTraffic.advance` is skipped in agent colonies (E3a). `advanceParcelTraffic` is kept unchanged. | Every consumer already reads the seam (the tax line, the delivery and noise gates, `advanceParcelTraffic`, lot fires, the road tool's Routes view), so none changes, and each question has exactly one answerer |
 | D47 | The readout's contract | Answers are the last **complete** picture. Before one they punish nothing: `hasRun` false, congestion 0, every lot reached, noise 0, a tax factor of exactly 1. The agents take a picture at every congestion epoch from the first, whether or not anything has driven (an empty picture is no congestion and no routes), so a colony with no traffic yet is never left "still being counted". `passes` starts at the routed model's own count, never goes back, and moves whenever any answer may have changed. `fireReach` counts only stations with safety cover (`TrafficRole.fightsFires`, road_traffic_model.dart:149-152), so a clinic's ambulance is no fire cover. `deliveryReach` never counts a lot's own goods, its own lorries turning at the next node included. | The road agent's rules (traffic_readout.dart:15-17, 54-57 and 77-91; 1d2e78d, e608e35, 38e05fe), and their views key what they drew on `passes` |
 | D48 | Graph levels and junction plans | We take `RoadGraph`'s clustering as it is. Ends meet by `CityLayout.levelsSeparated`: two decks meet unless 4.5 m or more apart, and a deck meets the ground unless it is on piers or in a tunnel there. A node's plan is read over its **drawn** legs (`RoadClass.joinsJunctions`), with `stopLegs` numbered back into the full leg list. The arbiter reads `RoadNode.plan` as it is. A leg outside the plan (an alley or a path) gives way to every drawn leg; no second plan is computed. | The graph joins what the layout cut and the tiles drew (229cb9c), so a stop the player sees is a stop the agents make, and an alley stays a kerb cut |
+| D49 | Site networks | Driveways, car parks and access roads are **not** in the `LaneGraph`, which stays roads only. **Plans are the road side's:** `SiteAccessPlan` views over `SiteAccessChunk`s, immutable after publish and replaced copy-on-write (site-access §2.3, §4.1); traffic never generates, edits or re-derives site geometry. **Traffic owns** a per-site network (site lanes, stall bitmaps, binding reservations, `stallOrder[j]`, next hops) and a site mover (IDM on site lanes, turnarounds, stall manoeuvres, `sharedSingle` claims, the home back-out of §7.5). Both are rebuilt on `sitesRev`, never on `graphRev`. A vehicle crosses between road and site **only at a join**, as a logged ENTER or EXIT access event (§5.5). The book's sync runs inside `CitySim.advance` before `roadTraffic.advance` and `agents.advance`, so a plan made this tick is seen by agents this tick and the frame hold (D35) replays it with the tick. Site vehicles count against `maxVehicles`; parked cars do not. | Plans never move `roadsRevision` (site-access S1), so a site change cannot rebuild the lane graph or remap a locked route, and one generator is the only source of site geometry for renderer and agents alike |
+
+**Revision 4 (site access).** `docs/plans/site-access.md` is the parking contract for sites, and its §7 is binding on this document (D49; §3.10, §7, §13.1, §14.1, §18). Its three amendments that needed our ack are **acked**:
+- **C-5:** the generation seed is position-free (program version, frame W and D at 0.5 m, road class, spec type), not a hash of the site id.
+- **C-19:** stall indices are stable only per plan `rev`, so traffic keys reservations and saves by `stallKey` and remaps indices on every `rev` change.
+- **C-20:** the plan's `joins[0]` comes **from** `RoadGraph` join slot 0 (slot → plan), not the other way round.
+
+The user decided site-access §10.2 on 2026-09-15: every recommendation is accepted except Q3, which is changed so that home-driveway cars back out into the street (§7.5). The schedule is road R0–R4 now, and traffic slice 2 → T4a → slice 3 → T4b (§18).
 
 ---
 
@@ -152,7 +160,7 @@ This document is self-contained. An implementer needs only this and the code.
 | `D/node_control.dart` | domain | `NodeControl`; `SignalPlan` (phases, integer-µs clock, `stateAt`); the mapping from `RoadNode.plan` to `NodeControlKind` |
 | `D/network_key.dart` | domain | `TrafficNetKey(graph, stubsRev, stopsRev)`: the `RoadGraph` object, compared with `identical`, plus our two counters |
 | `D/graph_lineage.dart` | domain | `EdgeLineage` and `RouteRemapper`. Holds the *old* `RoadGraph` for exactly one rebuild. |
-| `D/access_points.dart` | domain | Building and site access from `RoadGraph` (`lotPiece`, `lotS` and `lotDirs`; `attachFootprint` for grid sites), the lot's side, destination lane sets |
+| `D/access_points.dart` | domain | Building and site access from `RoadGraph` (`lotPiece`, `lotS` and `lotDirs`; `attachFootprint` for grid sites), the lot's side, destination lane sets. From T4a, per join of the site's plan (`ofJoin`, side from `joinRight`; §3.10). |
 | `D/edge_delay.dart` | domain | `EdgeDelayTable`: signed observations, EMA, live queue, per-edge 60 s flow counters, and a pool of three published epoch buffers |
 | `D/route_arena.dart` | domain | `RouteArena`: an `Int32List` with power-of-two size-class free lists |
 | `D/path_search.dart` | domain | `SearchContext` (a resumable edge-based A* with a typed heap and generation-stamped scratch) and `PathQueue` (a FIFO budgeted in expansions, with a separate lane for service, transit and freight requests) |
@@ -229,7 +237,7 @@ This document is self-contained. An implementer needs only this and the code.
 | E23 | `lib/domain/colony/city/commodity.dart` | `goods` constant, label, and the FINISHED GOODS section (the default of `section()`, 60-65) | Freight (slice 8) | LOW |
 | E24 | `lib/infrastructure/flutter_scene/perf_knobs.dart:55` | Append the §15.4 knobs to `PerfKnobs.all` | A/B testing | LOW |
 | E25 | `lib/main_city_game_dev.dart:69-76`, `100-145`, `206-224` | `agentTraffic: const bool.fromEnvironment('AGENTS', defaultValue: true)` in the founding call. New `ext.acro.citygame` parameters handled before the status return (124), after the existing `zones=`, `walk=` and `zone=` (103-123). An `agents` block in `_status`. Their `ext.acro.roadtool` (151-164) is not touched. | Headless verification | LOW |
-| E26 | `lib/infrastructure/flutter/simulation_view.dart` | (a) After the tick loop (1950): `for (final c in _cities.all()) c.agents.endFrame();`, then `SceneSync.tickCostMs = anyAgentColony ? swSteps.elapsedMicroseconds / 1000.0 : 0;` and `SceneSync.simWarp = _clock.warpFactor;`. (b) Where the injected city is taken (initState): if it has agents, set `agents.frameBudgeted = true`, and from slice 4 `CityNodes.onStreetParking = false; CityNodes.maxParkedCars = 0;` before the first frame. (c) `dispose` (2180+): restore those statics and reset the `TrafficOverlayState` statics. (d) **V** in `_simKeys` (1211-1242, where V is still free) and `_onKey`, for the traffic view. (e) `CityGameHud(...)` (3328) gets `trafficOn`/`onToggleTraffic` beside `zonesOn`/`onToggleZones` (3331-3332), and a `tools` argument. (f) The pick gate moved into the colony part, `_cityPickLayer()` (simulation_view_colony.dart:998-1047, placed at simulation_view.dart:3309). Its `open` predicate (1009-1010) becomes `adjust ? _adjustGateOpen(p) : c.active \|\| _trafficTools.active \|\| _siteUnder(p) != null \|\| _vehicleUnder(p) != null`, and `_PickClaim`'s `claim` (1015) and the tap routing (1028-1030) treat `_trafficTools.active` as they treat `c.active`. | The frame hold, budget visibility, baked cars off, the inspector | MED ((f) sits in their input code) |
+| E26 | `lib/infrastructure/flutter/simulation_view.dart` | (a) After the tick loop (1950): `for (final c in _cities.all()) c.agents.endFrame();`, then `SceneSync.tickCostMs = anyAgentColony ? swSteps.elapsedMicroseconds / 1000.0 : 0;` and `SceneSync.simWarp = _clock.warpFactor;`. (b) Where the injected city is taken (initState): if it has agents, set `agents.frameBudgeted = true`, and from T4b (E36 stage 2) `CityNodes.onStreetParking = false; CityNodes.maxParkedCars = 0;` before the first frame. (c) `dispose` (2180+): restore those statics and reset the `TrafficOverlayState` statics. (d) **V** in `_simKeys` (1211-1242, where V is still free) and `_onKey`, for the traffic view. (e) `CityGameHud(...)` (3328) gets `trafficOn`/`onToggleTraffic` beside `zonesOn`/`onToggleZones` (3331-3332), and a `tools` argument. (f) The pick gate moved into the colony part, `_cityPickLayer()` (simulation_view_colony.dart:998-1047, placed at simulation_view.dart:3309). Its `open` predicate (1009-1010) becomes `adjust ? _adjustGateOpen(p) : c.active \|\| _trafficTools.active \|\| _siteUnder(p) != null \|\| _vehicleUnder(p) != null`, and `_PickClaim`'s `claim` (1015) and the tap routing (1028-1030) treat `_trafficTools.active` as they treat `c.active`. | The frame hold, budget visibility, baked cars off, the inspector | MED ((f) sits in their input code) |
 | E27 | `lib/infrastructure/flutter/simulation_view_colony.dart` | `_editCityAt` (599): early `if (_trafficTools.active) { _trafficTools.tap(city, hit); return; }` after its ground pick (602-603) and before the road tool's branch (609-612). `_hoverCityAt` (120): the same for hover, after its ground pick. `_inspectCityAt` (672): try `_vehicleUnder` before the site sheet. Plus a new `_vehicleUnder(Offset)` helper in this `part` file. | Line and stub tools, and clicking a vehicle | HIGH (their road tool's input lives here now, and the file changed heavily since `62a3a55`). One early return each. Their tool UI has landed (C4), so nothing waits on it. |
 | E28 | `lib/infrastructure/flutter_scene/scene_sync.dart:119`, `354-355` | `static double tickCostMs = 0; static double simWarp = 1;` and `+ tickCostMs` inside `frameBudget.feed(...)` | `FrameBudget` sees agent tick cost (D31); the render clock sees pauses (D18) | LOW |
 | E29 | `lib/infrastructure/flutter/screens/city_game_hud.dart` | `CityGamePanel` (28, `{ none, milestones, budget }`) gains `traffic, services, transit`; `_drawer`'s two-way choice (398-400) becomes a `switch`; a Flow chip; a traffic toggle mirroring `zonesOn` (fields 35-36 and 49-50, button 162-166) | Panels | LOW-MED |
@@ -239,7 +247,7 @@ This document is self-contained. An implementer needs only this and the code.
 | E33 | `tool/drive_city_game.dart:25-96` | Every bare argument of the form `key=value` is forwarded to `ext.acro.citygame` before the status call; `step=<s>` waits until the colony has advanced | Manual acceptance from the command line. The tool already replays a JSON list of extension calls (`--script=<steps.json>`, 10-17 and 73-85), which covers anything longer. | LOW |
 | E34 | `city_sim.dart:1499-1506` (`socialDrag`) | `+ agents.happinessDrag`, which is 0 when disabled: `0.15·mailBacklog + 0.15·goodsShortage` | Mail and goods move happiness (D41) | LOW |
 | E35 | `city_sim.dart:1826`, in `socialTick` after the curfew line | `if (agents.serves(ServiceKind.police)) crimeTarget = agents.crimeTarget;` | Crime from per-building accumulators (D37) | LOW |
-| E36 | `city_nodes.dart:442` and `622` | `static const int _maxParkedCars = 400;` becomes `static int maxParkedCars = 400;`, and its one use follows | Baked lot cars off in agent colonies (D32, slice 4) | MED |
+| E36 | `city_nodes.dart:442` and `622` | `static const int _maxParkedCars = 400;` becomes `static int maxParkedCars = 400;`, and its one use follows. **Staged per site (revision 4).** Stage 1, T4a: traffic publishes the agent-managed site ordinals (destination lots with a live network plan), and `CitySiteFrame.agentManaged` makes the road side's R6 baking skip those sites. Stage 2, T4b, completes E36: `maxParkedCars = 0` and `onStreetParking = false` before the first tile request (E26 b). | Baked lot cars off in agent colonies (D32; T4a per site, T4b everywhere) | MED |
 | E37 | `city_sim.dart:3352` | `CityTrafficReadout get trafficReadout => agents.enabled ? agents.readout : roadTraffic;` | The readout seam (D46). Every consumer already reads it: the tax line (1530), the delivery and noise gates (4113, 4125), `advanceParcelTraffic` (4143-4148), the lot-fire reach (4204), and the road tool's Routes view (road_tool_scene.dart:578-603; road_tool_panel.dart:510). | LOW (one line of theirs, written for this) |
 
 **Untouched on purpose:** `road_mesher.dart`, `city_edit_overlay.dart`, `road_tool_controller.dart`, `road_tool_panel.dart`, `road_tool_scene.dart`, `road_overlay_state.dart`, `road_overlay_nodes.dart`, `city_layout.dart`, `parcel.dart`, `road_junction.dart`, `road_graph.dart`, `road_traffic_model.dart`, `road_noise.dart`, `traffic_readout.dart` (we implement it), `spatial_index.dart`, `city_traffic.dart`, `city_tile_mesher.dart`, `city_tile_bucketing.dart`, `city_tile_columns.dart`, and `test/flutter_scene/city_traffic_test.dart`.
@@ -254,6 +262,10 @@ This document is self-contained. An implementer needs only this and the code.
     - tell us before changing the clustering, attach or lot-access rules, because remaps and access points depend on them.
   - We add nothing to `road_graph.dart`. `node_control_test` also compares `RoadNode.plan` with what the tiles draw (`RoadMesher.junctionPlan` over `junctionsFromEnds`); any mismatch is reported to them, since both are theirs.
   - The clustering has changed once already (229cb9c to 50c8b4e: ends meet by `CityLayout.levelsSeparated`, and plans are read over drawn legs). §3.1, §3.2 and §3.7 follow it; D48 records how.
+  - **Lot access = join slot 0 (revision 4).** The rule moves into `lib/domain/colony/city/site_access/site_join.dart` (`SiteJoinPlacer.primary`), the road side's R1, posted to us as a C1 notice with its commit hash (site-access §7.3).
+    - `RoadGraph` publishes join slot columns: `lotJoinStart`, `joinPiece`, `joinS`, `joinDirs`, `joinRight`, `joinFlags`, `joinRoomM`, `joinKerbE/N`, `joinNormE/N`, `joinCrossStart` and `joinCrossLot` (site-access §2.2). They ride `withOverrides` and `refreshedFor`, so `sharesStructureWith` keeps its meaning.
+    - `lotPiece`, `lotS` and `lotDirs` are always slot 0's, and `attachFootprint` is slot 0 of `attachFootprintJoins`. A site plan's `joins[0]` comes from slot 0 (C-20, acked).
+    - We read a join's side from `joinRight`, never from the centroid. We still add nothing to `road_graph.dart`.
 - **C2. Who writes what in an agent colony.**
   - **Agents:**
     - the traffic readout (E37, D46): congestion, volumes, routes and `passes` from slice 1; reach, noise, land value and the tax factor from slice 2;
@@ -385,7 +397,7 @@ It is rebuilt incrementally every `buildingSyncS = 2.0` s of agent time. It is r
 | `use` | `Uint8List` | `ParcelUse.index` |
 | `housing`, `jobs` | `Int32List` | `(x*uf).round()`, exactly as city_sim.dart:1202-1203 and 1227-1228 do it. `uf` is 1 for placed lots and `parcelUtil` for grown ones (1220-1222). |
 | `served` | `Uint8List` | `parcelNetwork().lotServed(id)` (city_sim.dart:1217-1219) until slice 10, then reachability on the lane graph |
-| `accessEdge`, `accessS`, `accessSide` | `Int32List` / `Float32List` / `Uint8List` | §3.10 |
+| `accessEdge`, `accessS`, `accessSide` | `Int32List` / `Float32List` / `Uint8List` | §3.10. From T4a, per-join access rows (edge, `T`, lane, left bit per direction, role, kind) replace them; slot 0 comes first. |
 | `centroidE`, `centroidN` | `Float64List` | from the parcel |
 | `lotCap`, `lotUsed` | `Int16List` | parking (§7.1) |
 | `garbage`, `corpses`, `crime`, `mail`, `goods` | `Float32List` | accumulators (§9); `goods` is the freight buffer |
@@ -408,10 +420,10 @@ It is rebuilt incrementally every `buildingSyncS = 2.0` s of agent time. It is r
   - Per directed edge: `kerbCap` (`Uint16`) and `kerbUsed` (`Uint16`), plus an occupancy bitmap in one shared `Uint8List`, addressed through `kerbBitOff[edge]`. A set bit is a parked car **or a binding reservation** (§7.3).
   - For one-way roads, both kerbs belong to the single edge: `kerbCapL` and `kerbCapR`.
   - Slot i sits at `s = stopBack(from) + 6 + (i + 0.5)·6.5` m.
-- **Lots.** `BuildingTable.lotCap` and `lotUsed`.
+- **Lots.** `BuildingTable.lotCap` and `lotUsed`. From T4a, each site with a network plan also has a stall bitmap (a parked car or a binding reservation), synced on `sitesRev` (§7.3, D49).
 - **`ParkedCarTable`** (capacity 16384) has these columns:
   - `where` (lot, kerb, garaged);
-  - `building` or `edge` + `slot` + `side`;
+  - `building` or `edge` + `slot` + `side`; a lot car from T4a holds `(site, stallKey)` (§7.4);
   - `owner` (a citizen handle, or a visitor row);
   - `variant`.
 
@@ -708,22 +720,27 @@ For node N with in-edges I and out-edges O.
 - **Layout lots** (auto and hand-drawn): `g.lotPiece[i]`, `g.lotS[i]` and `g.lotDirs[i]`.
   - An auto lot hangs on its own frontage road at its frontage midpoint.
   - A hand-drawn lot hangs on the nearest road within 90 m of any part of its footprint.
-  - Both rules are at road_graph.dart:1162-1203.
-- **Grid sites** (utilities and grown cells placed with the 2D builder): `g.attachFootprint(parcelForCell(anchor, spec).polygon)` (city_sim.dart:4249). This is exactly what `CityRoadTraffic._gridSites` does, and the result is cached while `sharesStructureWith` holds.
+  - Both rules are at road_graph.dart:1162-1203. From the road side's R1 they are join slot 0's rule in `site_access/site_join.dart` (C1): narrow lots join 4.5 m from the lot line, wide lots at the clamped midpoint, set-back lots at their corridor (site-access §3.2, §3.7a).
+- **Grid sites** (utilities and grown cells placed with the 2D builder): `g.attachFootprint(parcelForCell(anchor, spec).polygon)` (city_sim.dart:4249). This is exactly what `CityRoadTraffic._gridSites` does, and the result is cached while `sharesStructureWith` holds. From R1, `attachFootprint` is slot 0 of `attachFootprintJoins`.
+- **Sites with a plan (from T4a; D49).** A site's access is **its plan's joins**. `joins[0]` is `RoadGraph` join slot 0, which is `lotPiece`, `lotS` and `lotDirs`; further joins are further slots of the same lot, each with a role (in, out or both).
+  - `AccessPoints.ofJoin(lg, joinNo)` resolves one join; `ofLotIndex(i)` becomes `ofJoin(lotJoinStart[i])`.
+  - **Goals** come from in-capable joins (`addGoals`), each with its own D6 lane mask. **Origins** come from out-capable joins (`addOrigins`), from any lane. `leftOf` resolves by `(edge, T)`.
+  - A plan with `!SiteAccessBook.isCurrentFor(siteId, graph)`, for the `RoadGraph` the agents run, is **kerbside at that graph's slot 0**, never at its old joins. So is a built site whose plan has not been generated yet.
+  - The routed model's consumers keep reading `lotPiece`, `lotS` and `lotDirs`.
 
-**The lot's side.** It is computed from the lot centroid against the road polyline at `lotS`: a negative cross is the right of the polyline direction.
+**The lot's side.** Today it is computed from the lot centroid against the road polyline at `lotS`: a negative cross is the right of the polyline direction. From R1 it is read from `joinRight` (1 = the lot is right of the road polyline, first to last control, at `joinS`), never from the centroid.
 - Never use the `'r'`/`'l'` letter in the lot id, which is backwards (road-topology trap 14).
-- `RoadGraph._rightOf` is private, so `access_points.dart` re-implements it. A test pins it to `lotDirs` on roads with two or more lanes each way, where the mask implies the side.
+- `RoadGraph._rightOf` is private, so until R1 `access_points.dart` re-implements it. A test pins it to `lotDirs` on roads with two or more lanes each way, where the mask implies the side.
 
-**Serving directed edges and lane sets.** The serving edges are the directions in `lotDirs`:
+**Serving directed edges and lane sets.** The serving edges are the directions in `lotDirs` (per join: `joinDirs`):
 - a lot on the right of travel → destination lane set `{0}`;
 - a lot on the left of travel → `{L−1}`, a left-in or left-out driveway movement from the innermost lane. This happens on the far side of a two-way street with one lane each way, and at the left kerb of a one-way road.
 
-`RoadGraph` allows far-side access only on two-way roads with one lane each way (`_dirsFor`). So agents never cross a median, or a four-lane road, mid-block (D7).
+`RoadGraph` allows far-side access only on two-way roads with one lane each way (`_dirsFor`). So agents never cross a median, or a four-lane road, mid-block (D7). Every join has `joinDirs == _dirsFor(road, side)`; its role restricts in or out, never direction.
 
-**Resolution.** Access resolves on every graph build. After a split, lots are hung on the new pieces by the graph itself.
+**Resolution.** Access resolves on every graph build. After a split, lots are hung on the new pieces by the graph itself. A site's access also re-resolves on a new site, a spec change, or a `sitesRev` change for that site. A control refresh never changes access.
 
-**Unreachable buildings.** A building with no access (`lotPiece < 0`, or `attachFootprint` returned null) is `noAccess`. One whose access node lies outside the largest strongly connected component is `isolated`. Both show in the inspector. From slice 10 they replace `ParcelNetwork.lotServed` for agent colonies (§12.3).
+**Unreachable buildings.** A building with no access (`lotPiece < 0`, or `attachFootprint` returned null) is `noAccess`. One whose access node lies outside the largest strongly connected component is `isolated`. Both show in the inspector. From slice 10 they replace `ParcelNetwork.lotServed` for agent colonies (§12.3). **Reachability is per role:** a site with a plan is reachable when it is served, has an in-capable join with a serving edge in the main component, and has an out-capable join likewise. A kerbside plan reduces to the rule above.
 
 ---
 
@@ -987,7 +1004,7 @@ Running a full multimodal search per trip would not fit the budget. Instead, the
   - A transit trip runs the pedestrian A* to s₁ at departure, followed by queued boarding (§11.4).
   - The transfer walk and the egress walk (s₂ → destination) are **appended legs planned at alighting**, just as parking is appended at arrival.
 - **Before the modes exist:**
-  - Before slice 4 (pedestrians), the walk from the car is an instant placement, and citizens without a car travel as instant placements (`stats.instantTrips`).
+  - Before T4b (pedestrians), the walk from the car is an instant placement, and citizens without a car travel as instant placements (`stats.instantTrips`).
   - Before slice 9 (transit), the bus mode does not exist.
 
 ---
@@ -1057,7 +1074,7 @@ s = min(s, sLeaderTail − 0.1)                    // never overlaps
 - no conflicting connector is occupied; and
 - no vehicle on an opposing approach lane it crosses has ETA < 4.0 s.
 
-At signals this is the permissive left. It applies equally at stop and priority legs, at uncontrolled nodes and at driveways. A driveway left-out also needs that gap in every lane it crosses and in its target lane (§5.5).
+At signals this is the permissive left. It applies equally at stop and priority legs, at uncontrolled nodes and at driveways. A driveway left-out also needs that gap in every lane it crosses and in its target lane (§5.5). **A far-side left-in takes the opposing gap at the arrival gate** (site-access §7.4 G2, their ask 14): no ENTER while an opposing vehicle's ETA at the crossing is below 4.0 s, using `canJoin`'s `fromLeft` predicate; the ETA part is waived after 25 s, as a counted forced grant.
 
 **Signals:**
 - Green: go, subject to the box check, the opposing-left gap for lefts, and pedestrians.
@@ -1085,7 +1102,7 @@ At signals this is the permissive left. It applies equally at stop and priority 
 
 **Roundabout.** Every entry yields to occupied conflicting connectors of the same node, i.e. the circulating traffic. No ring geometry is modelled.
 
-**Pedestrians** (slice 4). A connector is refused while any crossing it passes is **occupied**, or while a pedestrian is **stepping on** to it. Stepping on means committed (§8.3): the walker is on the crossing edge or started it this sub-step. A pedestrian waiting at the kerb does not count. So right-turners on green give way to walkers, and a stopped car and a waiting walker cannot deadlock each other.
+**Pedestrians** (slice T4b). A connector is refused while any crossing it passes is **occupied**, or while a pedestrian is **stepping on** to it. Stepping on means committed (§8.3): the walker is on the crossing edge or started it this sub-step. A pedestrian waiting at the kerb does not count. So right-turners on green give way to walkers, and a stopped car and a waiting walker cannot deadlock each other.
 
 **Don't block the box** (knob `dontBlockBox`, default on). Entry requires the **exit** lane to have `freeTail ≥ len + s₀`, or its tail vehicle to be moving faster than 3 m/s.
 
@@ -1096,10 +1113,11 @@ At signals this is the permissive left. It applies equally at stop and priority 
 ### 5.5 Lane changes: only through connectors, or at an access point
 
 - `elem` changes only when the vehicle hands over to its next route element, and consecutive elements are always joined by a connector. So no vehicle ever moves to a sibling lane of the same edge.
-- **The two exceptions are both access points,** which act as nodes for lane choice:
-  - Leaving an access point, the vehicle enters a lane of `A₁` at `s = accessS`. The arbiter checks for a gap in every lane from 0 up to its target lane. A far-side left-out also needs the opposing-left gap in every opposing lane it crosses (§5.4).
-  - Arriving, it leaves the carriageway from its locked destination lane.
+- **The two exceptions are the access events EXIT and ENTER** (site-access §7.4), logged at an access point, which acts as a node for lane choice:
+  - **EXIT.** Leaving an access point, the vehicle enters a lane of `A₁` at `s = accessS`. The arbiter checks for a gap in every lane from 0 up to its target lane. A far-side left-out also needs the opposing-left gap in every opposing lane it crosses (§5.4). A site's out-join logs EXIT on a `canJoin` grant; a home back-out logs it when the car's rear crosses the kerb line (§7.5).
+  - **ENTER.** Arriving, it leaves the carriageway from its locked destination lane. A site's in-join logs ENTER on a grant at the arrival gate (§7.3).
 - Property test (§17.2): at every sub-step, for every vehicle, `laneEdge(elem_t) == laneEdge(elem_{t−1}) ⇒ elem_t == elem_{t−1}`, unless an access event is logged.
+  - **Site elements (from T4a).** A road↔site element change is legal only with a logged event whose `(edge, T ± 1.5 m)` is that join's, and whose lane is `destLane` (ENTER) or inside `canJoin`'s target set (EXIT; for a home back-out, its target lane). Inside a site, the site lane changes only through site-access §2.5 movements or stall manoeuvres.
 
 ### 5.6 Stuck detection and despawn
 
@@ -1159,6 +1177,7 @@ At signals this is the permissive left. It applies equally at stop and priority 
    - No connector joins an edge back into its own start node, except at dead ends, stubs, roundabouts, and a ring piece's continuation, where `from == to` (§3.2).
    - An all-way stop's FIFO is capped at 16.
 6. Waiting pedestrians get priority after 20 s, and walkers give up after 300 s without progress (§8.3).
+7. **Site access (from T4a).** `sharedSingle` throats are one claim unit, with opposite claims refused and ties by (sub-step, handle) (site-access §7.4); arrival-gate forced grants and give-ups (§7.3); the home back-out's serialised claims, inbound priority and tandem shuffle (§7.5).
 
 ---
 
@@ -1299,7 +1318,9 @@ kerbCap = max(0, floor((edgeLen − stopBack(from) − stopBack(to) − 12) / 6.
 - On a two-way road, each directed edge owns its **right** kerb.
 - On a one-way road, the single edge owns both kerbs.
 
-**Lot spaces** per building:
+**Lot spaces.** From T4a, `lotCap = stallCount` of the site's network plan (`SiteAccessPlan.capacity`), and 0 for a kerbside plan. `lotUsed` counts parked cars plus binding reservations. A network plan with `stallCount == 0` is a legal drop-off-only site.
+
+The table below is therefore no longer a capacity. It becomes the road generator's target, which the road side sizes from `parkingSpaces(spec)` (site-access §3.3); only the stall count is contractual. Until T4a it is the capacity:
 
 | Building | Spaces |
 |---|---|
@@ -1310,7 +1331,7 @@ kerbCap = max(0, floor((edgeLen − stopBack(from) − stopBack(to) − 12) / 6.
 | `claimsOwnSite` installation | 80 |
 | spaceport | 200 |
 
-The lot entrance is the building's access point (§3.10).
+The lot's entrances are its in-capable joins (§3.10).
 
 ### 7.2 Where parked cars sit: no overlap with moving cars
 
@@ -1329,8 +1350,13 @@ Result:
 
 Nothing is reserved at plan time. A car trip ends at the destination's access point, in its locked destination lane, and then searches **in this order**:
 
-1. **The destination's own lot**, if `lotUsed < lotCap`. The car enters from its locked lane (right-in, or left-in where §3.10 allows it) and parks at once. No travel is involved, so no reservation is needed.
+1. **The destination's own stalls** (revision 4, site-access §7.4–§7.5), if the destination has a network plan current for the graph (§3.10), the arrival join is in-capable, and a stall is free.
+   - The stall is reserved **at the arrival gate**: the first free stall in `stallOrder[j]`, precomputed at site sync by site-path length from the join's in-lane, ties by index. **The reservation is binding.**
+   - The gate grants when the throat in-lane has room for the car, no outbound `sharedSingle` claim is held, a far-side left-in has its opposing gap (§5.4), and the car is at ≤ 3 m/s. A refused car is held at `destS` by its virtual leader. After 25 s the ETA part is waived (a counted forced grant); after 30 s refused on throat room alone, the car releases the stall and goes to step 2.
+   - On the grant it logs ENTER (§5.5), turns in from its locked lane (right-in, or a far-side left-in), drives the site under IDM and parks forward-in (nose-in) with a scripted final curve that ends exactly on the stall pose.
+   - A kerbside plan (`lotCap = 0`), an in-incapable join or a full lot goes straight to step 2, and this lot is never retried on this arrival. Other sites' lots are never searched (`kPlanPublic` is reserved).
 2. **Kerb slots ahead on the arrival edge**, within 60 m, on the kerb its lane serves: lane 0 → the right kerb; lane `L−1` on a one-way road → the left kerb.
+   - **Kerb masks (from T4a).** A slot is skipped when `KerbCuts.blocked(cuts, side, s_i, halfLenM: 3.25)` holds for a cut join of a live network plan. The slot's travel arc and right-of-travel side are first converted to the canonical index arc and `joinRight` side (`s = T` on a forward edge; `s = L − T`, side flipped, on a backward edge; site-access §5.5). The owning kerb follows D7. Masks update on `sitesRev`, and a car on a newly masked slot relocates as a car on a vanished stall does.
 3. **Adjacent edges.** A breadth-first search over the directed edges leaving the arrival edge's end node: up to 800 m of network distance, at most 64 edges, in deterministic edge-id order. Each free slot is scored `walkDistance + 10 × BFS rank`, with the walk distance measured on the pedestrian graph.
    - **A slot found in step 2 or 3 is reserved, and the reservation is binding.** Its bit is set at once, so no other car can take it, and a car never finds its reserved slot taken.
    - A **parking leg** is appended (§4.6). It is a fixed-start plan (§4.5) from the car's `(edge, lane, s)` to `(edge, slotS)`. Its destination lane set is `{0}` for a right-kerb slot and `{L−1}` for a left-kerb slot on a one-way road.
@@ -1338,34 +1364,75 @@ Nothing is reserved at plan time. A car trip ends at the destination's access po
    - `stats.parkWalkM` records the walk distance.
 4. **Circling.** If nothing is free within 800 m:
    - `parkTry += 1`, and a loop leg (a fixed-start plan) is appended to an edge 150–300 m away drawn by `TrafficRng`.
-   - On reaching it, the car searches again from step 2. Step 1 is retried only if the loop ends on the destination's access edge.
+   - On reaching it, the car searches again from step 2. Step 1 is retried only if the loop ends on the edge of one of the destination's in-capable joins.
    - This adds real vehicle-kilometres and congestion.
 5. **Give up** when `parkTry` reaches 3, i.e. when the third circle also finds nothing.
    - The car is `garaged` at the destination: removed from the world, not drawn, holding no slot, and counted in `stats.parkingGiveUps`.
    - The citizen walks from the car's current position.
    - When the citizen next leaves, the car reappears at that building's access point.
 
-**After parking,** the citizen spawns as a pedestrian from the slot to the building's entrance. The walk is skipped (instant) when it is under 15 m. Parking and pedestrians land together in slice 4, so no parking search ever runs without a pedestrian graph.
+**After parking,** the citizen spawns as a pedestrian from the slot or stall to the building's entrance (`entrancePt`/`entranceNode` for a site with a plan). The walk is skipped (instant) when it is under 15 m.
+
+**Staging (revision 4).** T4a runs steps 1 and 2 only and garages what they cannot place; the walk from the car is an instant placement. T4b brings steps 3–5 (adjacent edges, circling, give-up) together with the pedestrian graph, so the walk-scored search of step 3 never runs without one.
 
 ### 7.4 Parked cars as entities, and how they are drawn
 
-- **Rows.** A `ParkedCarTable` row is created when a car parks and deleted when it leaves. `parkedRev` is bumped each time.
+- **Rows.** A `ParkedCarTable` row is created when a car parks and deleted when it leaves. `parkedRev` is bumped each time. A lot car's row is `(site, stallKey, variant, owner)`, created when the stall manoeuvre ends and the vehicle row is freed.
 - **The frame** carries parked-car columns only when `parkedRev` changes, at most at 0.5 Hz:
   - kerb cars as `(edge, side, s, variant)`;
-  - lot cars as `(building, index, variant)`.
+  - lot cars **on plan stalls, under `sitesRev`**: `ParkedColumns` gains `sitesRev` and lot rows `(lotSite, lotStall, lotVariant)`, where `lotSite` is the site's ordinal in `CitySiteFrame` order and `lotStall` the stall index in the plan of that `sitesRev` (site-access §7.5).
 - **Drawing.**
   - Kerb cars are placed by the pose pass on the edge geometry, at the lateral in §7.2.
-  - Lot cars go on the **same bay grid** that `LotFeatures.emitLot` lays: ranks, bay width and depth, the driveway gap (lot_features.dart:305-352). The grid is computed by a positions-only port in `agent_nodes.dart`, pinned by a test against `emitLot`'s bay count.
+  - Lot cars are drawn at the stall pose (`stallE/N`, nose along `stallDir`) at the `CitySiteFrame` height `stallUp`, only when the columns' `sitesRev` matches the frame's; otherwise the layer holds its last publish once. No lot geometry is derived in `agent_nodes.dart`.
   - One instanced slot per model is rewritten only when the columns change.
-- **Baked parked cars go, all of them, in slice 4.**
+- **Baked parked cars go in two stages (E36).**
+  - **T4a:** traffic publishes the agent-managed site ordinals, and `CitySiteFrame.agentManaged` makes the road side's R6 baking skip those sites. Home pads and kerbs keep baked cars.
+  - **T4b completes it,** as the rest of this list describes.
   - Baked kerb cars follow `CityNodes.onStreetParking` (city_tile_mesher.dart:1718-1727).
   - Baked lot cars follow the parked-car ceiling (`_carBudget = knobs.maxParkedCars`, city_tile_mesher.dart:815 and 1379-1404), which E36 turns into the settable static `CityNodes.maxParkedCars`.
   - Both are read only when a tile request is built (city_nodes.dart:612-624), and neither is in the base-tile key (D32). Flipping them later would leave already-built tiles as they were.
-  - So E26 sets `onStreetParking = false` and `maxParkedCars = 0` **before the first frame** of an agent colony. City Builder hands its colony to `SimulationView` before any tile is requested.
+  - So from T4b E26 sets `onStreetParking = false` and `maxParkedCars = 0` **before the first frame** of an agent colony. City Builder hands its colony to `SimulationView` before any tile is requested.
   - A mid-session enable (the drawer button, §19.2 Q6) calls `CityNodes.invalidate()` once, paying one full re-cut and re-stream.
   - `dispose` restores both.
-  - From slice 4, every parked car drawn in an agent colony is an agent.
+  - From T4b, every parked car drawn in an agent colony is an agent.
 - **Rendering caps:** `parkedRenderCap = 1500`, within 1.5 km of the focus.
+
+### 7.5 Home driveways: cars back out into the street
+
+**User decision** (site-access §10.2 Q3, changed 2026-09-15). On a home driveway (program `homeDriveway`) a car drives in forward and parks nose-in, and leaves by **backing out into the street**. Car parks, yards and installations keep forward-out departures through their throats: reverse out of the stall inside the lot, wait 1 m inside the kerb line, EXIT on a `canJoin` grant (site-access §7.4). This section is traffic's side of the home rule.
+
+**Arrival.** Through the arrival gate like any site (§7.3 step 1), up the driveway forward, nose-in into a stall. Tandem stalls fill **deepest free stall first**.
+
+**Departure.**
+1. The road route is planned first, from the join's `(edge, T)`; the car stays parked during the search.
+2. **Target lane:** the near-direction kerb lane. On a 1+1 undivided street, where `joinDirs` allow the far direction, it may be the far lane, with the near lane crossed.
+3. **Gap acceptance**, checked before the reverse starts. All of these must hold:
+
+   | Rule | Value |
+   |---|---|
+   | Footprint on the target lane | `[T − 10 m, T + 2 m]`, along the target lane's travel |
+   | Bodies | none in the footprint, and no queue within 15 m upstream of it |
+   | Approaching vehicles | ETA to the footprint ≥ 8 s, with ETA = distance / `max(v, 5 m/s)`; ≥ 10 s when crossing to the far lane |
+   | Opposing lane (1+1 streets) | also free of bodies within `[T − 6, T + 6]` |
+   | Forced grant | after 120 s of waiting, waives only the ETA rule, down to a 6 s floor; counted |
+
+4. **The manoeuvre.** The car reverses down the driveway and, at the kerb line, swings its tail upstream onto the target lane in one scripted arc (D27). It stops for 0.5 s, then drives off forward.
+5. **EXIT is logged when the rear crosses the kerb line** (§5.5). From then the car is in the target lane as a reversing vehicle, flagged `reversing` on the wire (§13.1), and followers treat its footprint as a stopped obstacle. A far-direction departure also holds a claim on the near-lane footprint until it drives off.
+
+**Where home driveways exist** (the road side's generator enforces it; traffic relies on it):
+- minor-tier roads at ≤ 40 km/h, in both allowed directions;
+- avenues (50 km/h), near direction only;
+- no `homeDriveway` on roads above 50 km/h or on divided roads.
+
+**Deadlock rules:**
+- Overlapping back-out claims (neighbouring driveways whose footprints overlap) are serialised by (sub-step, handle).
+- An outbound car that has not committed yields to an inbound car held in its footprint.
+- Tandem stalls are assigned LIFO. If a deeper car must leave while the outer one stays, it waits; after 120 s the outer car is shuffled to a free kerb slot (counted).
+- A back-out yields to pedestrians on the pavement crossing (T4b).
+
+**Test.** `home_back_out_test` replaces site-access A9 (`home_pad_hammerhead_test`): 2 stalls; both directions on a 1+1 street; a 60 s kerb-lane stream; the inbound/outbound conflict; a tandem shuffle. It asserts no EXIT with a body in the footprint, and no deadlock over 600 s at 10× rate.
+
+**Pending on the road side.** The rewrite of site-access §3.4, the home rows of V9, §7.4's departure and A9 to this rule. The geometry guarantees are theirs: a window margin of ≥ 12 m upstream for `homeDriveway` joins, kerb masks of `[T − 12, T + 3]` around them, and side-by-side stalls preferred, with tandem at most 2 deep.
 
 ---
 
@@ -1885,8 +1952,9 @@ class CityTrafficFrame {                 // application/snapshot/city_traffic_fr
   final TrafficGeometry geometry;        // identity per (graph object, groundCacheStamp)
   final TrafficNetColumns net;           // per graphRev: signal heads + plans, stops, stubs, node list
   final Uint8List laneSpeedPct;          // per congestion epoch (2 s); 0..100, index = lane id
-  final ParkedColumns parked;            // per parkedRev
+  final ParkedColumns parked;            // per parkedRev; carries sitesRev for its lot rows (§7.4)
   final TransitColumns transit;          // per stopsRev/graphRev: stop and station poses, line colours + lane lists
+  final CitySiteFrame sites;             // per sitesRev, by identity: the SAME object as the colony's WorldSnapshot.sites entry (site-access §5.2); from T4a
 }
 ```
 
@@ -1896,21 +1964,25 @@ class CityTrafficFrame {                 // application/snapshot/city_traffic_fr
   - `count`;
   - `timeUs` (the agent clock at this sample, a `double` holding an exact integer);
   - `worldEpochS` (the world epoch the tick carried);
-  - `graphRev`.
+  - `graphRev`;
+  - `sitesRev` (from T4a): the site revision the site columns refer to.
 - Rows:
 
   | Column | Type | Meaning |
   |---|---|---|
   | `handle` | `Int32List` | vehicle handle |
-  | `elem` | `Int32List` | lane `< nLanes`, connector `≥ nLanes`, −1 = not drawn (parked, garaged, on a virtual stub edge) |
+  | `elem` | `Int32List` | lane `< nLanes`, connector `≥ nLanes`, −1 = not on a road element (parked, garaged, on a virtual stub edge, or inside a site) |
   | `next` | `Int32List` | next element on the route, or −1 |
-  | `s`, `v`, `a` | `Float32List` | position, speed, acceleration |
+  | `s`, `v`, `a` | `Float32List` | position, speed, acceleration (along the site lane while inside a site) |
   | `lat` | `Float32List` | extra lateral offset: 0 while driving; the §7.2 nudge; −0.8 m while dwelling at a kerb |
   | `kind` | `Uint8List` | `AgentKind` |
   | `variant` | `Uint8List` | the opaque per-vehicle byte (§2.3); the renderer maps `(kind, variant)` to a mesh (§13.7) |
-  | `flags` | `Uint8List` | braking, emergency lights, doors, stopping |
+  | `flags` | `Uint8List` | braking, emergency lights, doors, stopping, reversing (a stall manoeuvre or a home back-out, §7.5) |
+  | `siteOrd` | `Int32List` | from T4a: the site's ordinal in `CityTrafficFrame.sites` order while the vehicle is inside a site, −1 on the road |
+  | `siteLane` | `Int32List` | from T4a: the plan-local site lane (site-access §2.5) while `siteOrd ≥ 0`, else −1 |
 
-- Rows are written in slot order, so a vehicle keeps its row while it lives. About 30 B per vehicle.
+- **Site elements are separate columns** (D49), never encoded as `elem ≤ −2`, so the lane-id space and every road consumer of `elem` are unchanged. Site poses use the plan's points and `CitySiteFrame` heights (D19, D20); the site manoeuvre geometry is built in `traffic_capture.dart`.
+- Rows are written in slot order, so a vehicle keeps its row while it lives. About 30 B per vehicle, plus 8 B for the site columns.
 - The domain never stores or publishes a `VehicleKind` (D42).
 
 **`PedFrame`**: `handle`, `pav`, `s`, `side` (`Int8`), `v`, `flags`.
@@ -2099,7 +2171,7 @@ Its byte-equality test keeps holding. We only **add** `agent_traffic_pass_test.d
 
 ### 14.1 What is saved
 
-Under `CitySim.toJson()['agents']` (E15), present only when `agents.hasState`. From slice 1 the block is at least `{"v": 1, "enabled": true}`, so a save and load keeps agents on. Slice 3 adds the rest:
+Under `CitySim.toJson()['agents']` (E15), present only when `agents.hasState`. From slice 1 the block is at least `{"v": 1, "enabled": true}`, so a save and load keeps agents on. T4a adds `sites` and the lot rows of `cars`, with the opaque owner of §18 until slice 3 ports ownership to citizens. Slice 3 adds the rest:
 
 ```json
 { "v": 1, "enabled": true, "serves": [0,1,2,3],
@@ -2107,7 +2179,7 @@ Under `CitySim.toJson()['agents']` (E15), present only when `agents.hasState`. F
   "seq": {"stop": 12, "line": 3, "oc": 2},
   "sites": ["cell-212", "lot-r3-l2", "..."],
   "cit":  {"home": [..], "work": [..], "car": [..], "state": [..], "wakeInUs": [..], "flags": [..]},
-  "cars": [[ownerIdx, where, siteIdx, e, n, headingMilli, variant], ...],
+  "cars": [[ownerIdx, where, siteIdx, stallKey, variant], [ownerIdx, where, siteIdx, e, n, headingMilli, variant], ...],
   "acc":  {"g": [..], "c": [..], "cr": [..], "m": [..], "sick": [..], "goods": [..]},
   "depots": {"<siteIdx>": buffer, ...},
   "ledger": {"mig": 0.4, "death": 0.7, "ext": 0.0},
@@ -2120,7 +2192,7 @@ Under `CitySim.toJson()['agents']` (E15), present only when `agents.hasState`. F
 - **Format.** Columns are plain JSON number lists; the codec is JSON (game_state_codec.dart:58-59).
 - **Citizens** are written densely, in slot order at save time. `home`, `work` and car `siteIdx` are indices into `sites` (−1 for none).
 - **Parked cars:**
-  - in a lot: `where = 0`, with `siteIdx`;
+  - in a lot, from T4a: `[ownerIdx, where = 0, siteIdx, stallKey, variant]`, i.e. by `(siteId, stallKey)`, **never by stall index** (C-19). `siteIdx` names the lot or site id string current at save (renames follow `_carryRenamedLots`). On load, after the site-access full drain (site-access §4.4), the stall is `stallIndexOfKey(stallKey)` on the site's plan; if the key is gone, the nearest free stall by distance; if there is none, the car is garaged. A site unknown after load drops its lot cars. Reservations and vehicles inside sites are not saved;
   - at the kerb: `where = 1`, with `(e, n, heading)`, re-snapped on load to the nearest kerb slot within 12 m whose heading is within 45°;
   - garaged: `where = 2`.
 
@@ -2519,7 +2591,7 @@ agents: {enabled, citizens, visitors, vehicles, peds, parked, pathQueue, deferre
   - random free-start routes are never lane-infeasible;
   - random fixed-start state searches return only drivable routes.
 - **Arbiter safety.** Two conflicting granted connectors are never both occupied short of their conflict point, except for forced grants, which are logged and counted.
-- **Lane changes only at nodes.** 500 agents, 2,000 sub-steps. For every agent and sub-step, `laneEdge(elem_t) == laneEdge(elem_{t−1}) ⇒ elem_t == elem_{t−1}` unless an access event is logged, and the lane id is never a sibling lane of the same edge.
+- **Lane changes only at nodes.** 500 agents, 2,000 sub-steps. For every agent and sub-step, `laneEdge(elem_t) == laneEdge(elem_{t−1}) ⇒ elem_t == elem_{t−1}` unless an access event is logged, and the lane id is never a sibling lane of the same edge. From T4a it adds the site-element rule of §5.5 (road↔site changes only with a matching ENTER or EXIT; site lanes change only through site movements or stall manoeuvres), run with STRIP and LOOP sites on the grid (site-access A15).
 - **Occupancy consistency.** Heads, tails and prev/next round-trip. `gap ≥ 0` after every sub-step.
 - **Capacity invariants.** `Σ residents ≤ Σ housing` and `Σ workers ≤ Σ jobs` after each sync. Accumulators are never negative. Loads are conserved: building → vehicle → depot, or lost with a counter.
 - **Random edits.** Sequences of commits, splits, removals and end drags never crash, and every surviving route stays connector-contiguous.
@@ -2677,6 +2749,8 @@ Determinism is claimed **per platform**. Cross-platform bit-identity is not clai
 - Before every merge: rebase on the road agent's latest work, re-check every E-hook's anchor (§1.2), run `flutter test`, run `flutter analyze`, and capture a `tool/drive_city_game.dart` screenshot.
 - Every slice is **playable** in City Builder and survives a save and load. The only exception is the scale slice's worker, which is invisible to the player by design.
 
+**Order (revision 4, the user's decision of 2026-09-15):** 1 → 2 → **T4a** → 3 → **T4b** → 5 onward. Slice 4 is split into T4a and T4b (site-access §9). Meanwhile the road side builds R0–R4, which connects the starter sites visibly without agents; T4a needs their R1 and R2a.
+
 Sizes include tests.
 
 ### Slice 1 — Real cars on real routes (City Builder) — L, ≈ 5.8k LOC, depends on nothing
@@ -2748,36 +2822,59 @@ Drawing a new road never teleports a car: routes remap through the split, lots r
 
 **Acceptance:** §17.3 #1 (full) and #2; `edge_delay_test`, including the empty-network case; the inspector's `describe` matches `vehicle=`; overlay rebuilds limited to 0.5 Hz; `agent_reach_test`; the road agent's economy probe (`road_traffic_economy_test`'s starter town, zoned all three ways) still grows all three ways with agents on; `roadTraffic.advance` never runs in an agent colony (a counter pinned at 0).
 
-### Slice 3 — Citizens — L, ≈ 2.6k LOC, depends on slice 2
+### Slice T4a — Site networks and lot parking — L, depends on slice 1 and the road side's R1 + R2a; scheduled after slice 2
+
+**Goal.**
+- Cars on today's `CommuteSynth` trips turn in at a kerb cut, drive the site, park nose-in in a reserved stall, and leave again: forward out through the throat of a car park, yard or installation, or backing out of a home driveway (§7.5).
+- Parked lot cars are agents, drawn on plan stalls, and survive a save and load.
+
+**Scope** (site-access §7.8 items 1–11):
+- **Access:** `AccessPoints.ofJoin`, per-join `BuildingTable` rows, `addGoals`/`addOrigins`/`leftOf`, reachability per role (§3.10).
+- **Site networks (D49):** site sync on `sitesRev` (plan reference and `rev` per building, `lotCap`, stall bitmaps, binding reservations, `stallOrder[j]`, next hops, site elements); the site mover (IDM on site lanes, node movements, turnarounds, stall manoeuvres, `sharedSingle` claims, speed caps).
+- **Arrival gate and departure** (§7.3 step 1, §7.5): the gate's grants, forced grant and give-up, the far-side left-in gap (§5.4); route first, reverse out, `throatWait` and `canJoin`, the home back-out; route remap on a graph rebuild.
+- **Access events** and the extended property test (§5.5, §17.2); the D36 extension (snap, relocate, garage, limbo, `siteRetarget`, with counters).
+- **Parking:** `parking` with D17 steps 1–2 and the kerb masks; what they cannot place is garaged. The lot-car owner is opaque (`ownerKind` + id), for slice 3's port.
+- **Wire:** lot rows in `ParkedColumns`, `siteOrd`/`siteLane` and `sitesRev` in `AgentFrame`, `CityTrafficFrame.sites`, site manoeuvre geometry in `traffic_capture`, drawing in `agent_nodes` (§7.4, §13.1).
+- **Persistence** of lot cars by `(siteId, stallKey)` (§14.1), so no save between T4a and T4b holds lot cars under another scheme or drops them.
+- **Digest:** `CityAgents.digest` folds `plan.rev`, stall bitmaps and reservation owners.
+- **E36 stage 1:** baked cars off on agent-managed sites only (§7.4).
+
+Built on the road side's R2a fixtures (`SyntheticSites`: HOME, STRIP, LOOP, UTILITY, KERBSIDE) first, then real plans after their R2, and the wire after their R3.
+
+**Acceptance:** site-access §7.9 A4–A11 (A9 is `home_back_out_test`, §7.5; A10 with its save/resume case), A13–A15, and the traffic half of A12. Merge is gated on the structural allocation test A13 (`site_alloc_test`), not on the weighed §15.2 allocation gate, which slice 11 owes.
+
+### Slice 3 — Citizens — L, ≈ 2.6k LOC, depends on slice 2 and T4a (whose opaque lot-car owners it ports)
 
 **Goal.**
 - Traffic comes from people: homes, jobs and cars, with rush-hour flavour on the visible day.
 - Emigrants leave, and deaths are assigned to homes.
 - Population is realised from citizens, and citizens are saved.
 
-**Interim until slice 4:**
-- cars still appear and vanish at access points, as in slice 1, because there is no parking yet;
+**Interim until T4b:**
+- cars park in destination stalls and at kerbs ahead, as in T4a; at homes they still appear and vanish at the access point, because residents' cars at home pads and kerbs come in T4b;
 - citizens without a car travel as instant placements (`instantTrips`);
 - arrivals from the spaceport are placed at their new home at once;
-- walkers and parked cars arrive together in slice 4.
+- walkers arrive in T4b.
 
-**Files:** `citizen_table`, `population_ledger`, `trip_planner` (the activity loop; `CommuteSynth` deleted), `building_table` (occupancy), `agents_codec` (the full block); E8 (the death budget only), E9.
+**Files:** `citizen_table`, `population_ledger`, `trip_planner` (the activity loop; `CommuteSynth` deleted), `building_table` (occupancy), `agents_codec` (the full block), the port of T4a's lot-car owners to citizens; E8 (the death budget only), E9.
 
 **Acceptance:** §17.3 #15, #20; §17.4 save/resume; the capacity properties; `city_save_roundtrip_test` extended.
 
-### Slice 4 — Parking and pedestrians — L, ≈ 2.8k LOC, depends on slice 3
+### Slice T4b — Residents' parking and pedestrians — L, with or after slice 3
+
+Slice 4 before revision 4, less what moved to T4a.
 
 **Goal.**
-- Cars search, circle and park at the kerb and in lots, or give up. Every drawn parked car in an agent colony is an agent: baked kerb **and lot** cars are gone.
-- People walk from the car to the door, cross at corners on the walk phase, and walk short trips.
+- Residents' cars park at home pads and kerbs. Cars search, circle and park, or give up (the full D17). Every drawn parked car in an agent colony is an agent: baked kerb **and lot** cars are gone.
+- People walk from the stall or kerb to the door (`entrancePt`/`entranceNode`), cross at corners on the walk phase, and walk short trips.
 - Tubes on airless worlds.
-- Vehicles yield to pedestrians.
+- Vehicles yield to pedestrians, a home back-out included (§7.5).
 
-**Files:** `parking`, `pedestrian_graph`, `pedestrian_table`, `pedestrian_meshes`, `zone_skims`, the walk and car mode choice, mode-aware job matching, and the parked and lot-car layers in `agent_nodes`. E36. E26 b: both knobs set before the first frame, and restored in dispose.
+**Files:** `parking` (D17 steps 3–5), `pedestrian_graph`, `pedestrian_table`, `pedestrian_meshes`, `zone_skims`, the walk and car mode choice, mode-aware job matching, and the kerb-car layer in `agent_nodes`. E36 stage 2. E26 b: both knobs set before the first frame, and restored in dispose.
 
-**Acceptance:** §17.3 #10, #24, #25, #26 and #34; the lanes-only-at-nodes property still green with access events; the pedestrian render cap respected; a screenshot showing no baked parked car in the agent colony.
+**Acceptance:** §17.3 #10, #24, #25, #26 and #34; the lanes-only-at-nodes property still green with access events; the pedestrian render cap respected; site-access A16, a screenshot showing no baked parked car in the agent colony and cars entering and leaving the pump and home-pad lots.
 
-### Slice 5 — Services I: garbage and deathcare — L, ≈ 2.3k LOC, depends on slice 3 (slice 4 recommended)
+### Slice 5 — Services I: garbage and deathcare — L, ≈ 2.3k LOC, depends on slice 3 (T4b recommended)
 
 **Goal.**
 - Garbage and corpses accumulate per building until a truck or hearse arrives.
@@ -2810,7 +2907,7 @@ Drawing a new road never teleports a car: routes remap through the split, lots r
 
 **Acceptance:** §17.3 #13 (fire and health), #22, #29 (the fire engine); untreated patients raise mortality when medicine runs out; `parcel_growth_test`'s fire test is unchanged because the flag is off; `twin_run_digest` with the fire flag on.
 
-### Slice 8 — Outside connections and freight — L, ≈ 2.6k LOC, depends on slices 4 and 5
+### Slice 8 — Outside connections and freight — L, ≈ 2.6k LOC, depends on slices T4b and 5
 
 **Goal:**
 - Highway stubs bring visitors in, take residents out on errands and back, carry emigrants and immigrants, and pass through traffic between stubs.
@@ -2828,7 +2925,7 @@ Drawing a new road never teleports a car: routes remap through the split, lots r
 
 **Acceptance:** §17.3 #9, #18, #21 and #30; imports, exports and fleet upkeep appear in the budget readout.
 
-### Slice 9 — Transit (buses) — L, ≈ 2.4k LOC, depends on slices 4 and 8 (the tool controller)
+### Slice 9 — Transit (buses) — L, ≈ 2.4k LOC, depends on slices T4b and 8 (the tool controller)
 
 **Goal:**
 - Draw bus lines with stops. Buses run from a depot and dwell in the kerb lane.
@@ -3106,3 +3203,15 @@ Trains, the L and freight rail are **in scope**: slice 9b.
 - **The road tool has landed** (C4; E25, E26, E27, E29, E32, E33; §11.5, §16). The pick gate moved into `_cityPickLayer()` in simulation_view_colony.dart, and E26(f) moved with it. Our UI edits no longer wait on theirs. `drive_city_game` already takes `--script`, and E33 is reworded.
 - **Lost lots** (E12, E13). A re-plat now tears down what stood on a lot it gave up (`_dropLostLots`, 08f8cf3), and the building sync tombstones those buildings.
 - **Re-anchored.** Every E-hook, and every line cited in a file that changed since `62a3a55`, is re-cited against `c672eb3`. The header records the worktree's position.
+
+**Revision 4 (2026-09-15)** adopts the road side's site-access design (`docs/plans/site-access.md`) as the parking contract, applying its §7.7 list. Anchors are not re-cited; line numbers still read against `c672eb3`.
+
+- **The contract and the acks** (§0.3 note). C-5 (position-free generation seed), C-19 (stall indices stable per plan `rev` only, so reservations and saves key on `stallKey`) and C-20 (the plan's `joins[0]` comes from `RoadGraph` slot 0) are acked. The user accepted every site-access §10.2 recommendation except Q3.
+- **Site networks** (new D49; D19, D20, D27 notes). Separate from the lane graph; plans are the road side's, immutable and copy-on-write; traffic owns the per-site network and site mover, rebuilt on `sitesRev`, never `graphRev`; handover only at joins; the book syncs inside `CitySim.advance` before the agents.
+- **Access per join** (§3.10, D6, D7, C1, §1.1, §2.6). A site's access is its plan's joins, with `joins[0]` = slot 0 = `lotPiece/lotS/lotDirs`; side from `joinRight`; goals from in-capable joins, origins from out-capable joins; reachability per role; a plan not current for the graph is kerbside at slot 0. C1 records the R1 join slot columns and `site_join.dart`.
+- **Gate and events** (§5.4, §5.5, §5.8, §17.2). The far-side left-in takes the opposing gap at the arrival gate. The access-point exceptions are the ENTER and EXIT access events, and the property test gains the site-element rule.
+- **Parking** (§7.1, §7.3, §7.4, D17, §2.7). `lotCap = stallCount`, and the old capacity table becomes the generator's target. D17's order: destination stalls at the gate, masked kerb slots ahead within 60 m, adjacent edges, circling, give-up. Lot cars sit on plan stalls under `sitesRev`, and the positions-only `emitLot` port is deleted.
+- **Home back-outs** (new §7.5, D17, D49). Q3 changed by the user: home-driveway cars park nose-in and back out into the street on a gap, with the target-lane, gap-acceptance, EXIT, restriction and deadlock rules; `home_back_out_test` replaces A9. The road side's rewrite of site-access §3.4, V9, §7.4 and A9 is pending.
+- **D36.** A site-plan change re-plans only site legs; road routes stay locked.
+- **Wire and saves** (§13.1, §14.1). `CityTrafficFrame.sites`, `AgentFrame.sitesRev`, and `siteOrd`/`siteLane` as separate columns (not `elem ≤ −2`), plus a `reversing` flag. Lot cars are saved by `(siteId, stallKey)` from T4a.
+- **Slices** (§18, E26, E36, §6.2). Slice 4 is split into T4a (site networks, lot parking, persistence, E36 stage 1) and T4b (residents' cars, full D17, pedestrians, E36 stage 2). The order becomes 1 → 2 → T4a → 3 → T4b. Slice 3 now depends on T4a, and slices 5, 8 and 9 on T4b.
