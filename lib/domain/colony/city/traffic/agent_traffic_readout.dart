@@ -32,18 +32,27 @@
 ///
 /// Those come from a PASS of bounded work — the reach fields when their
 /// sources or the network have changed, the noise at every lot when the
-/// measured loads have — which the readout pumps itself: once each time the
-/// agent clock has moved when something asks, so no query costs more than a
-/// budget's work and every answer after it is an array read. The routed
-/// model is not consulted for any of it (C7: nothing assigned is left).
+/// measured loads have — which the agents' own tick runs ([tick], §12.2
+/// step 7): begun at a congestion epoch's picture, stepped every sub-step
+/// by `AgentTuning.readoutWorkPerStep`. The routed model is not consulted
+/// for any of it (C7: nothing assigned is left).
+///
+/// Every question is a READ: no work, no state, whoever asks and whenever.
+/// The views ask when they draw — the road tool's Routes view on the render
+/// side, a panel, an inspector — at moments set by the frame rate and by
+/// what the player has open. A pass pumped by its readers ran as far as
+/// they had asked, on the colony as it stood when they did, and the growth,
+/// tax and fire gates reading its answers carried the difference into the
+/// colony (§17.4; readout_determinism_test). Driven by the tick, it runs on
+/// the same state at the same sub-step in every run fed the same ticks.
 ///
 /// The contract (D47): answers are the last complete picture, and before
 /// the first one they punish nothing — no congestion, no routes, every lot
 /// reached, no noise, a tax factor of exactly 1, and the land value of a
 /// quiet plain street in the colony's air (what the routed model answers
 /// before its first pass). A pass's answers are published only at a picture
-/// — at the first question after the congestion epoch that took it — so
-/// they change exactly when [passes] moves, never between.
+/// — the sub-step of the congestion epoch that took it — so they change
+/// exactly when [passes] moves, never between.
 ///
 /// Once a colony's agents have taken a picture, the colony answers through
 /// this readout for good (E37). Switched off, it forwards every answer to
@@ -64,6 +73,7 @@ import 'city_agents.dart';
 import 'lane_graph.dart';
 import 'slot_pool.dart';
 import 'traffic_stats.dart';
+import 'traffic_tuning.dart';
 import 'vehicle_table.dart';
 
 /// Vehicles one lane carries a minute at free flow: the flow against which
@@ -71,12 +81,6 @@ import 'vehicle_table.dart';
 /// here, beside the only formula that reads it, until the tuning panel
 /// wants it as a knob.
 const double kLaneFlowPerMin = 30;
-
-/// Work units the readout's pass may do each time it is pumped — the routed
-/// model's own step budget (`TrafficTuning.workPerStep`), in the same units:
-/// a label settled, an edge relaxed, a building or a lot looked at, an index
-/// cell or road segment the noise sampler measured.
-const int kReadoutWorkPerPump = 60000;
 
 /// A colony's agents as a [CityTrafficReadout].
 class AgentTrafficReadout implements CityTrafficReadout {
@@ -90,17 +94,18 @@ class AgentTrafficReadout implements CityTrafficReadout {
   /// routed model, `CitySim.roadTraffic`.
   final CityTrafficReadout routed;
 
-  /// The reach fields (agent_reach.dart), pumped with the noise pass.
+  /// The reach fields (agent_reach.dart), searched in the readout's pass.
   final AgentReach reach;
-
-  /// Routes asked for since the last picture, by road, kinds and limit: the
-  /// Routes view asks for the same road every frame while it is selected.
-  final Map<String, List<TripRoute>> _routes = {};
-  int _routesPictures = -1;
 
   /// Whether the agents answer: they are switched on. Switched off, every
   /// answer is the routed model's.
   bool get _live => agents.enabled;
+
+  /// Whether what the pass published was taken from the agents' tables as
+  /// they stand. Switched off and on, the agents start afresh, and until
+  /// their first sub-step drops the old picture ([tick]) nothing of it
+  /// stands: a read may not drop it itself.
+  bool get _current => identical(_tables, agents.buildings);
 
   @override
   bool get hasRun => _live ? agents.stats.hasRun : routed.hasRun;
@@ -148,6 +153,12 @@ class AgentTrafficReadout implements CityTrafficReadout {
   /// roads in route order (each once per visit) and its line from where the
   /// route leaves its first road to where it stops. All weigh the same, so
   /// "heaviest first" is by handle.
+  ///
+  /// Gathered afresh at every call, from the vehicle table as it stands: a
+  /// read like every other, with nothing kept. A memo kept by picture held
+  /// the vehicles of whenever the picture was FIRST asked about, so what a
+  /// view drew hung on when some view had asked before it. The Routes view
+  /// keys what it drew on [passes] and asks again only when that moves.
   @override
   List<TripRoute> routesThrough(
     String roadId, {
@@ -156,19 +167,7 @@ class AgentTrafficReadout implements CityTrafficReadout {
   }) {
     if (!_live) return routed.routesThrough(roadId, kinds: kinds, limit: limit);
     if (!hasRun || limit <= 0) return const [];
-    final pictures = agents.pictures;
-    if (pictures != _routesPictures) {
-      _routes.clear();
-      _routesPictures = pictures;
-    }
-    var mask = 0;
-    if (kinds != null) {
-      for (final k in TripKind.values) {
-        if (kinds.contains(k)) mask |= 1 << k.index;
-      }
-    }
-    final key = '$roadId|$mask|$limit';
-    return _routes[key] ??= _collect(roadId, kinds, limit);
+    return _collect(roadId, kinds, limit);
   }
 
   List<TripRoute> _collect(String roadId, Set<TripKind>? kinds, int limit) {
@@ -234,8 +233,7 @@ class AgentTrafficReadout implements CityTrafficReadout {
   @override
   bool serviceReach(String lotId) {
     if (!_live) return routed.serviceReach(lotId);
-    pump();
-    return reach.serviceReach(lotId);
+    return !_current || reach.serviceReach(lotId);
   }
 
   /// Reach from the stations with safety cover only (D47): a clinic's
@@ -243,27 +241,28 @@ class AgentTrafficReadout implements CityTrafficReadout {
   @override
   bool fireReach(String lotId) {
     if (!_live) return routed.fireReach(lotId);
-    pump();
-    return reach.fireReach(lotId);
+    return !_current || reach.fireReach(lotId);
   }
 
   /// Whether goods reach [lotId] from anywhere but its own door.
   @override
   bool deliveryReach(String lotId) {
     if (!_live) return routed.deliveryReach(lotId);
-    pump();
-    return reach.deliveryReach(lotId);
+    return !_current || reach.deliveryReach(lotId);
   }
 
   // ---- Noise, land value, the tax factor (slice 2: measured flow) ---------
+
+  /// The published noise picture of the agents' tables as they stand; null
+  /// before one.
+  _NoiseFields? get _front => _current ? _noiseFront : null;
 
   /// Traffic noise at [lotId], 0..1: 0 before a picture, for a lot the
   /// picture does not know, and for one nobody zoned or built on.
   @override
   double noiseOf(String lotId) {
     if (!_live) return routed.noiseOf(lotId);
-    pump();
-    final n = _noiseFront;
+    final n = _front;
     final i = n?.graph.lotNoOf(lotId);
     return i == null ? 0.0 : n!.noise[i].toDouble();
   }
@@ -273,9 +272,8 @@ class AgentTrafficReadout implements CityTrafficReadout {
   @override
   double landValueOf(String lotId) {
     if (!_live) return routed.landValueOf(lotId);
-    pump();
     final pollution = agents.city.pollution;
-    final n = _noiseFront;
+    final n = _front;
     final i = n?.graph.lotNoOf(lotId);
     if (i == null) return RoadNoise.landValue(noise: 0, pollution: pollution);
     return RoadNoise.landValue(
@@ -290,12 +288,11 @@ class AgentTrafficReadout implements CityTrafficReadout {
   @override
   double get averageLandValue {
     if (!_live) return routed.averageLandValue;
-    pump();
     return _average(agents.city.pollution);
   }
 
   double _average(double pollution) {
-    final raw = _noiseFront?.landValueRaw ?? RoadNoise.baseLandValue;
+    final raw = _front?.landValueRaw ?? RoadNoise.baseLandValue;
     return (raw - RoadNoise.pollutionPenalty(pollution)).clamp(0.0, 1.0);
   }
 
@@ -305,8 +302,7 @@ class AgentTrafficReadout implements CityTrafficReadout {
   @override
   double get taxLandValueFactor {
     if (!_live) return routed.taxLandValueFactor;
-    pump();
-    final n = _noiseFront;
+    final n = _front;
     if (n == null || n.builtLots == 0) return 1.0;
     return RoadNoise.taxFactor(_average(0));
   }
@@ -321,13 +317,12 @@ class AgentTrafficReadout implements CityTrafficReadout {
   /// start afresh when they are switched off and on, and nothing published
   /// of their old tables stands.
   BuildingTable? _tables;
-  int _pumpUs = -1;
-  int _pumpPictures = -1;
 
   static const int _idle = 0, _reach = 1, _loads = 2, _lots = 3, _done = 4;
   int _phase = _idle;
   int _cursor = 0;
   LaneGraph? _passLg;
+  int _passPicture = -1;
   bool _loadsMoved = false;
   double _lvSum = 0;
   int _lvCount = 0;
@@ -335,53 +330,75 @@ class AgentTrafficReadout implements CityTrafficReadout {
   /// Passes the readout has published (reach and noise together).
   int publishedPasses = 0;
 
-  /// Brings the answers up to the agents' latest picture, a budget's work at
-  /// a time: at most once per move of the agent clock, however many
-  /// questions are asked in between. Every answer calls it first.
+  bool get _passing => _phase != _idle && _phase != _done;
+
+  /// Every buffer the pass keeps from one sub-step to the next, by name into
+  /// [into], for the allocation test (§15.2) — the reach fields' and the two
+  /// noise pictures', which change places at every publish: the same pair,
+  /// never a new one, while the network keeps its pieces and lots.
+  void collectBuffers(Map<String, Object> into, String name) {
+    reach.collectBuffers(into, '$name.reach');
+    void noise(String k, _NoiseFields? f) {
+      if (f == null) return;
+      into['$name.$k.emission'] = f.emission;
+      into['$name.$k.raw'] = f.raw;
+      into['$name.$k.noise'] = f.noise;
+      into['$name.$k.bonus'] = f.bonus;
+    }
+
+    noise('front', _noiseFront);
+    noise('back', _noiseBack);
+  }
+
+  /// The readout's share of one agent sub-step (§12.2 step 7), run by the
+  /// agents after the statistics have rolled up; [picture] when this
+  /// sub-step's congestion epoch took one. Nothing else does the pass's
+  /// work: a question never does.
   ///
-  /// At a picture — the first call after a congestion epoch — a finished
-  /// pass is published, a new one is begun if none is in flight, and the
-  /// pass is stepped; one that finishes within that same call is published
-  /// at once, since nothing has read an answer since the picture. Between
-  /// pictures the pass in flight is stepped, and one that finishes waits
-  /// for the next picture: answers change when [passes] does.
-  void pump() {
+  /// At a picture a finished pass is published, and a new one is begun on
+  /// the loads just pictured if none is in flight. Every sub-step the pass
+  /// in flight does `AgentTuning.readoutWorkPerStep` of work; one that
+  /// finishes at a picture's own sub-step is published at once, since that
+  /// is still the picture, and one that finishes on any other waits for the
+  /// next: answers change when [passes] does. A pass the network changed
+  /// under is dropped — what it gathered was the old network's — and begun
+  /// again at the next picture, which is the new network's.
+  void tick({required bool picture}) {
     final tables = agents.buildings;
     if (!identical(tables, _tables)) {
       _tables = tables;
       _resetPass();
     }
-    if (tables == null) return;
-    final now = agents.timeUs;
-    if (now == _pumpUs) return;
-    _pumpUs = now;
     final lg = agents.laneGraph;
-    if (lg == null || !agents.stats.hasRun) return;
-    if (_phase != _idle && _phase != _done && !identical(lg, _passLg)) {
-      // The network changed under the pass: what it gathered was the old
-      // one's. Begun again on the new one at once.
-      _begin(lg, tables);
+    if (tables == null || lg == null) return;
+    if (_passing && !identical(lg, _passLg)) _abortPass();
+    if (picture) {
+      if (_phase == _done) _publish();
+      if (_phase == _idle && agents.stats.hasRun) _begin(lg, tables);
     }
-    final pictures = agents.pictures;
-    if (pictures == _pumpPictures) {
-      if (_phase != _idle && _phase != _done) _step(kReadoutWorkPerPump);
-      return;
-    }
-    _pumpPictures = pictures;
-    if (_phase == _done) _publish();
-    if (_phase == _idle) _begin(lg, tables);
-    _step(kReadoutWorkPerPump);
-    if (_phase == _done) _publish();
+    if (!_passing) return;
+    _step(AgentTuning.readoutWorkPerStep);
+    if (picture && _phase == _done) _publish();
   }
 
-  /// Runs the pass to its end and publishes it now, whatever the budget: for
-  /// tests that read the answers of the picture they have just taken.
+  /// Runs a pass on the latest picture to its end and publishes it now,
+  /// whatever the budget: for tests that read the answers of the picture
+  /// they have just taken. A pass in flight on that picture is finished; one
+  /// on an older picture, or on another network, is begun again.
   void settle() {
-    pump();
-    final tables = agents.buildings, lg = agents.laneGraph;
+    final tables = agents.buildings;
+    if (!identical(tables, _tables)) {
+      _tables = tables;
+      _resetPass();
+    }
+    final lg = agents.laneGraph;
     if (tables == null || lg == null || !agents.stats.hasRun) return;
-    if (_phase == _idle || !identical(lg, _passLg)) _begin(lg, tables);
-    while (_phase != _done) {
+    if (_phase == _idle ||
+        !identical(lg, _passLg) ||
+        _passPicture != agents.pictures) {
+      _begin(lg, tables);
+    }
+    while (_passing) {
       _step(1 << 30);
     }
     _publish();
@@ -392,14 +409,18 @@ class AgentTrafficReadout implements CityTrafficReadout {
     _noiseFront = null;
     _noiseBack = null;
     _sampler = null;
+    _abortPass();
+  }
+
+  void _abortPass() {
+    reach.abort();
     _phase = _idle;
     _passLg = null;
-    _pumpUs = -1;
-    _pumpPictures = -1;
   }
 
   void _begin(LaneGraph lg, BuildingTable tables) {
     _passLg = lg;
+    _passPicture = agents.pictures;
     reach.begin(lg, tables);
     final g = lg.graph;
     var b = _noiseBack;

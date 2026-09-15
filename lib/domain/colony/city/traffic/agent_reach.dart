@@ -171,6 +171,35 @@ class AgentReach {
     return work;
   }
 
+  /// Every buffer the fields and the pass keep from one sub-step to the
+  /// next, by name into [into], for the allocation test (§15.2): the fields
+  /// are sized by the lane graph and change places at a publish that
+  /// searched, so two names may swap buffers, never gain a new one; the
+  /// sources and the searches' heaps grow by doubling, in warm-up.
+  void collectBuffers(Map<String, Object> into, String name) {
+    void fields(String k, _Fields? f) {
+      if (f == null) return;
+      into['$name.$k.svcDist'] = f.svcDist;
+      into['$name.$k.fireDist'] = f.fireDist;
+      into['$name.$k.goodsDist'] = f.goodsDist;
+      into['$name.$k.goodsDist2'] = f.goodsDist2;
+      into['$name.$k.goodsLot'] = f.goodsLot;
+      into['$name.$k.svcOn'] = f.svcOn.start;
+      into['$name.$k.fireOn'] = f.fireOn.start;
+      into['$name.$k.goodsOn'] = f.goodsOn.start;
+    }
+
+    fields('front', _front);
+    fields('back', _back);
+    into['$name.gSvc'] = _gSvc.edge;
+    into['$name.gFire'] = _gFire.edge;
+    into['$name.gGoods'] = _gGoods.edge;
+    into['$name.searchHeap'] = _search._hk;
+    into['$name.searchSettled'] = _search._settled;
+    into['$name.ownedHeap'] = _owned._hk;
+    into['$name.ownedSettled'] = _owned._settled;
+  }
+
   /// Runs a whole pass now and publishes it: for tests and small tools.
   void runPass(LaneGraph lg, BuildingTable table) {
     begin(lg, table);

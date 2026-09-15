@@ -50,7 +50,8 @@ void main() {
 
   test('in steady state nothing is reallocated: every column, the route '
       'arena, the pull-out queue, the path queue and its searches, the '
-      'junction books, the delay table and its pools, the frame sets', () {
+      'junction books, the delay table and its pools, the readout\'s pass, '
+      'the frame sets', () {
     final a = agentsOn(town());
     runAgents(a, 600);
     final before = _buffers(a);
@@ -58,6 +59,7 @@ void main() {
     final growths = arena.growths, capacity = arena.capacity;
     final spawned = a.stats.spawned, arrived = a.stats.arrived;
     final publishes = a.delays!.publishes;
+    final passes = a.readout.publishedPasses;
     expect(a.planner!.waiting, greaterThan(64),
         reason: 'the pull-out queue is past its first size, so a column '
             'that grew with it has grown');
@@ -71,6 +73,8 @@ void main() {
     expect(a.stats.arrived - arrived, greaterThan(20));
     expect(a.delays!.publishes - publishes, 100,
         reason: 'a delay buffer every congestion epoch, from the pool');
+    expect(a.readout.publishedPasses - passes, greaterThan(20),
+        reason: 'the readout\'s pass ran in the sub-steps weighed');
     final after = _buffers(a);
     expect(after.keys.toList(), before.keys.toList(),
         reason: 'no buffer, nor search context, made in steady state');
@@ -197,7 +201,8 @@ Future<String> _where(HeapProbe probe, CityAgents a) async {
 /// Every buffer the agents keep from one sub-step to the next, by name: the
 /// tables' columns, and what the planner, the path queue and its search
 /// contexts, the mover, the junction rules, the statistics and the delay
-/// table (its EMAs, flows and both pools of published buffers) hold.
+/// table (its EMAs, flows and both pools of published buffers) and the
+/// readout's pass (its reach fields and noise pictures) hold.
 Map<String, Object> _buffers(CityAgents a) {
   final t = a.vehicles!, b = a.buildings!, c = a.commutes!, m = a.mover!;
   final out = <String, Object>{
@@ -251,5 +256,6 @@ Map<String, Object> _buffers(CityAgents a) {
   m.arbiter.collectBuffers(out, 'arbiter');
   a.stats.collectBuffers(out, 'stats');
   a.delays!.collectBuffers(out, 'delays');
+  a.readout.collectBuffers(out, 'readout');
   return out;
 }

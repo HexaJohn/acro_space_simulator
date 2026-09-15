@@ -29,7 +29,8 @@
 ///    of §5.2: demand on the whole second, the spawn queue, the path pump,
 ///    the vehicles, the edge delays — and at the congestion epoch a fresh
 ///    delay buffer, which every search begun from then on prices by (§4.2,
-///    the user's spawn-time congestion) — the readout's picture, the frame.
+///    the user's spawn-time congestion) — the readout's picture, a budget of
+///    the readout's pass (reach, noise, land value), the frame.
 ///
 /// Everything a result depends on is counted — sub-steps, expansions,
 /// spawns — never timed, and runs in integer-id order, so two colonies fed
@@ -669,12 +670,19 @@ class _Core implements PathResolver, PathSink, VehicleSink {
     // buffer, which every search begun from now on prices by (§4.2) — then
     // the readout's picture.
     delays.absorb(mover);
-    if (now % epochUs == 0) {
+    final picture = now % epochUs == 0;
+    if (picture) {
       final windowEnd = now % windowUs == 0;
       delays.epoch(mover, table, windowEnd: windowEnd);
       queue.delays = delays.published;
       stats.epoch(mover, windowEnd: windowEnd);
     }
+    // The readout's pass (§12.2 step 7): reach, noise and land value from
+    // the pictured loads, a fixed budget of it every sub-step, published at
+    // a picture. Here and nowhere else — never pumped by a question, whose
+    // timing is the views' — so two colonies fed the same ticks publish the
+    // same answers at the same sub-step (§17.4).
+    agents.readout.tick(picture: picture);
     // 7. The frame.
     frames.publish(table,
         timeUs: now, worldEpochS: agents.worldEpochS, graphRev: graphRev);

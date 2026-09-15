@@ -34,6 +34,19 @@ class AgentTuning {
   /// its search contexts. A search that runs out resumes on the next one.
   static int pathExpansionsPerStep = 4000;
 
+  /// Work units the readout's pass — reach, noise, land value (§12.3) — may
+  /// do per sub-step, in the routed model's own units
+  /// (`TrafficTuning.workPerStep`): a label settled, an edge relaxed, a
+  /// building, a road or a lot looked at, an index cell or road segment the
+  /// noise sampler measured. §12.3 runs reach "through the path budget's
+  /// skim lane", which §4.8 serves only when the queue is otherwise empty
+  /// and gives no share; a busy colony would never publish. So the pass has
+  /// a budget of its own, counted like every other (D9), spent in the
+  /// sub-step and never on a question: never more per colony tick at the
+  /// 25× clamp's 2.5 sub-steps than the routed model's 60,000 a tick, whose
+  /// work it takes over (E3a), and a pass of 240,000 an epoch.
+  static int readoutWorkPerStep = 24000;
+
   /// The pedestrian searches' own budget (slice 4).
   static int pedExpansionsPerStep = 1500;
 
@@ -161,6 +174,7 @@ class AgentTuning {
   static void reset() {
     agentsOn = true;
     pathExpansionsPerStep = 4000;
+    readoutWorkPerStep = 24000;
     pedExpansionsPerStep = 1500;
     maxVehicles = 4096;
     serviceReserveShare = 0.10;
@@ -200,6 +214,7 @@ class AgentTuning {
   static Map<String, Object> snapshot() => {
         'agentsOn': agentsOn,
         'pathExpansionsPerStep': pathExpansionsPerStep,
+        'readoutWorkPerStep': readoutWorkPerStep,
         'pedExpansionsPerStep': pedExpansionsPerStep,
         'maxVehicles': maxVehicles,
         'serviceReserveShare': serviceReserveShare,
