@@ -6,6 +6,7 @@
 import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/access_points.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/building_table.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/city_agents.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/slot_pool.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/traffic_rng.dart';
@@ -75,21 +76,32 @@ void main() {
     for (var sl = 0; sl < b.highWater; sl++) {
       if (!b.isSlotLive(sl)) continue;
       final ap = AccessPoints.ofLot(lg, b.siteId[sl]);
+      final base = BuildingTable.accRow0(sl);
       if (ap == null) {
-        expect(b.accFwd[sl], -1);
-        expect(b.accBwd[sl], -1);
+        expect(b.accCount[sl], 0);
+        expect(b.accEdge[base], -1);
         continue;
       }
+      // No colony has plans while the agents run without them: every
+      // building is kerbside at slot 0, one row per direction it is served
+      // from, forward first.
       final h = b.handleOf(sl);
-      expect(b.accFwd[sl], ap.fwdEdge);
-      expect(b.accBwd[sl], ap.bwdEdge);
-      for (final e in [ap.fwdEdge, ap.bwdEdge]) {
-        if (e < 0) continue;
-        final fwd = e == ap.fwdEdge;
-        expect(fwd ? b.accFwdT[sl] : b.accBwdT[sl],
-            closeTo(ap.sOn(lg, e), 1e-3));
-        expect(fwd ? b.accFwdLane[sl] : b.accBwdLane[sl], ap.destLane(lg, e));
+      final want = [
+        for (final e in [ap.fwdEdge, ap.bwdEdge])
+          if (e >= 0) e,
+      ];
+      expect(b.accCount[sl], want.length, reason: b.siteId[sl]);
+      for (var i = 0; i < want.length; i++) {
+        final e = want[i];
+        expect(b.accEdge[base + i], e);
+        expect(b.accT[base + i], closeTo(ap.sOn(lg, e), 1e-3));
+        expect(b.accLane[base + i], ap.destLane(lg, e));
+        expect(b.accJoin[base + i], ap.joinRef);
+        expect(b.accBits[base + i] & kAccIn, kAccIn);
+        expect(b.accBits[base + i] & kAccOut, kAccOut);
         expect(b.leftOf(h, e), !ap.rightOfTravel(lg, e));
+        expect(b.leftOfAt(h, e, b.accT[base + i]), !ap.rightOfTravel(lg, e));
+        expect(b.joinAt(h, e, b.accT[base + i], 1), ap.joinRef);
       }
       checked++;
     }
@@ -113,8 +125,15 @@ void main() {
         centroid: fp.centroid);
     expect(ap, isNotNull);
     final sl = SlotPool.slotOf(h!);
-    expect(b.accFwd[sl], ap!.fwdEdge);
-    expect(b.accBwd[sl], ap.bwdEdge);
+    final base = BuildingTable.accRow0(sl);
+    final want = [
+      for (final e in [ap!.fwdEdge, ap.bwdEdge])
+        if (e >= 0) e,
+    ];
+    expect(b.accCount[sl], want.length);
+    for (var i = 0; i < want.length; i++) {
+      expect(b.accEdge[base + i], want[i]);
+    }
     expect(b.jobs[sl], spec.jobs);
   });
 

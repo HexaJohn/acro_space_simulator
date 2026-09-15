@@ -479,7 +479,7 @@ Map<String, Object?> _graphAudit(CityAgents a) {
   if (b != null) {
     for (var sl = 0; sl < b.highWater; sl++) {
       if (!b.isSlotLive(sl)) continue;
-      if (b.accFwd[sl] < 0 && b.accBwd[sl] < 0) {
+      if (b.accCount[sl] == 0) {
         noAccess++;
       } else if ((b.accessFlags[sl] & kAccessIsolated) != 0) {
         isolated++;

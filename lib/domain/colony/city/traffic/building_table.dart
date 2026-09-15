@@ -25,10 +25,22 @@
 /// torn down and another put up, and every trip to it would arrive at
 /// nothing.
 ///
+/// **Access is per JOIN** (site-access.md §7.3, C1). A site with a current
+/// plan is reached and left at that plan's joins, each with its own role
+/// (in, out or both); every other building — one with no plan, and one whose
+/// plan is not current for the graph the vehicles drive (§0 Q5) — is reached
+/// kerbside at the road graph's join slot 0, which is today's access exactly.
+/// The rows below hold one row per join PER SERVING DIRECTION, because the
+/// lane a car uses, the side it is on and the arc it stops at are all
+/// direction's own; [kAccRows] of them per building covers the four slots a
+/// lot may offer, both ways.
+///
 /// The sync may allocate: it runs on edits and once every two seconds,
 /// never inside a sub-step's inner loops (§15.2). It walks the plat's own
 /// lot views and the grid's buildings, never `layout.parcels` (a copy) nor
-/// `parcelBuiltLots()` (a generator over that copy).
+/// `parcelBuiltLots()` (a generator over that copy). The access rows
+/// themselves are sized by capacity and reused: a sync rewrites them in
+/// place and allocates nothing unless the building count grew.
 library;
 
 import 'dart:typed_data';
@@ -37,21 +49,37 @@ import '../city_building_spec.dart';
 import '../city_sim.dart';
 import '../parcel.dart';
 import '../parcel_network.dart';
+import '../site_access/site_access_constants.dart';
 import 'access_points.dart';
 import 'lane_graph.dart';
 import 'route_cost.dart';
+import 'site_plan_source.dart';
 import 'slot_pool.dart';
 import 'traffic_rng.dart';
 
-/// Bits of [BuildingTable.accessFlags]: the building's serving edges are
-/// all outside the network's largest strongly connected part, so a trip
-/// could reach it and not leave, or leave and not come back
-/// ([kAccessIsolated]); it lies on the LEFT of travel along its forward or
-/// backward serving edge ([kAccessFwdLeft], [kAccessBwdLeft]) — a driveway
-/// across the road, or a one-way road's left kerb.
+/// Bits of [BuildingTable.accessFlags]: no trip can both reach the building
+/// and leave it again, because it has no in-capable join on a serving edge
+/// in the network's largest strongly connected part, or no out-capable one
+/// (§3.10 "reachability is per role"). A building with no access at all
+/// ([BuildingTable.accCount] 0) carries it too.
 const int kAccessIsolated = 1;
-const int kAccessFwdLeft = 2;
-const int kAccessBwdLeft = 4;
+
+/// Access rows per building: four join slots (own road, far end, side
+/// street, alley) each served from at most two directions (site-access.md
+/// §2.2). Building in slot `sl` owns rows `sl * kAccRows ..
+/// sl * kAccRows + accCount[sl] - 1`.
+const int kAccRows = 8;
+
+/// Bits of [BuildingTable.accBits], per access row: a car may turn IN here
+/// ([kAccIn]) and may pull OUT here ([kAccOut]) — the join's role; the
+/// building lies on the LEFT of travel along this row's edge ([kAccLeft]),
+/// which is a driveway across the road or a one-way road's left kerb; and
+/// the join is a kerb CUT into the site rather than a stop at the kerb
+/// ([kAccCut]).
+const int kAccIn = 1;
+const int kAccOut = 2;
+const int kAccLeft = 4;
+const int kAccCut = 8;
 
 /// 2^-32: a 32-bit hash scaled onto [0, 1).
 const double _unit32 = 1.0 / 4294967296.0;
@@ -80,7 +108,7 @@ class BuildingTable {
   /// `ParcelUse` index, and 1 where the plat's own network serves it.
   late Uint8List use, served;
 
-  /// The [kAccessIsolated]… bits.
+  /// The [kAccessIsolated] bits.
   late Uint8List accessFlags;
 
   /// Homes and jobs, rounded exactly as the tick rounds them.
@@ -89,12 +117,18 @@ class BuildingTable {
   /// Where it stands, colony-local metres.
   late Float64List centroidE, centroidN;
 
-  /// The directed edges that serve it — along its road's polyline and
-  /// against it — or −1; the travel arc it is met at on each; the lane a
-  /// trip along each arrives in and leaves from (0 the kerb lane).
-  late Int32List accFwd, accBwd;
-  late Float32List accFwdT, accBwdT;
-  late Uint8List accFwdLane, accBwdLane;
+  /// How many access rows the building owns, and its rows: for row
+  /// `r = sl * kAccRows + i` with `i < accCount[sl]`, the directed edge the
+  /// join is served by ([accEdge], −1 for an unused row), the travel arc it
+  /// is met at on that edge ([accT]), the lane a trip along it arrives in
+  /// and leaves from ([accLane], 0 the kerb lane, D6), the [kAccIn] bits,
+  /// and the join's handle ([accJoin], site-access.md §2.3 — the same value
+  /// on both directions of one join).
+  late Uint8List accCount;
+  late Int32List accEdge;
+  late Float32List accT;
+  late Uint8List accLane, accBits;
+  late Int32List accJoin;
 
   /// `CommuteSynth`'s trips owed and not yet sent (slices 1–2): a fraction
   /// of a trip carried from one second to the next. It starts at a phase
@@ -108,6 +142,12 @@ class BuildingTable {
 
   int _stamp = 0;
   LaneGraph? _accessGraph;
+
+  /// The plan source access was last resolved against, and its `sitesRev`
+  /// then: a plan that appeared, went or changed moves the revision, and
+  /// every site re-resolves (§7.3 "re-resolve on … `sitesRev`").
+  SitePlanSource? _accessPlans;
+  int _accessSitesRev = 0;
   bool _fresh = false;
 
   /// Syncs run, buildings renamed, and buildings torn down, since the table
@@ -130,6 +170,10 @@ class BuildingTable {
   bool isSlotLive(int slot) => pool.isSlotLive(slot);
   int handleOf(int slot) => pool.handleOf(slot);
 
+  /// The first access row of the building in slot [slot]. Its rows run to
+  /// `accRow0(slot) + accCount[slot]`.
+  static int accRow0(int slot) => slot * kAccRows;
+
   /// The handle of the building on [site], or null.
   int? handleOfSite(String site) {
     final h = _idOf[site];
@@ -150,24 +194,28 @@ class BuildingTable {
     jobs = Int32List(n);
     centroidE = Float64List(n);
     centroidN = Float64List(n);
-    accFwd = Int32List(n)..fillRange(0, n, -1);
-    accBwd = Int32List(n)..fillRange(0, n, -1);
-    accFwdT = Float32List(n);
-    accBwdT = Float32List(n);
-    accFwdLane = Uint8List(n);
-    accBwdLane = Uint8List(n);
+    accCount = Uint8List(n);
+    final rows = n * kAccRows;
+    accEdge = Int32List(rows)..fillRange(0, rows, -1);
+    accT = Float32List(rows);
+    accLane = Uint8List(rows);
+    accBits = Uint8List(rows);
+    accJoin = Int32List(rows)..fillRange(0, rows, kJoinRefNone);
     commuteOwed = Float64List(n);
     _seen = Int32List(n);
   }
 
-  /// Doubles the table, keeping every building and handle.
+  /// Doubles the table, keeping every building and handle. The access rows
+  /// carry over unmoved: their stride is fixed, so slot `sl`'s rows are at
+  /// `sl * kAccRows` in the new arrays as they were in the old.
   void _grow() {
     final old = capacity, n = old * 2;
     pool.grow(n);
     final sid = siteId, sp = spec;
     final u = use, sv = served, af = accessFlags, ho = housing, jo = jobs;
-    final ce = centroidE, cn = centroidN, fa = accFwd, ba = accBwd;
-    final ft = accFwdT, bt = accBwdT, fl = accFwdLane, bl = accBwdLane;
+    final ce = centroidE, cn = centroidN;
+    final an = accCount, ae = accEdge, at = accT;
+    final al = accLane, ab = accBits, aj = accJoin;
     final ow = commuteOwed, se = _seen;
     _alloc(n);
     siteId.setRange(0, old, sid);
@@ -179,12 +227,13 @@ class BuildingTable {
     jobs.setRange(0, old, jo);
     centroidE.setRange(0, old, ce);
     centroidN.setRange(0, old, cn);
-    accFwd.setRange(0, old, fa);
-    accBwd.setRange(0, old, ba);
-    accFwdT.setRange(0, old, ft);
-    accBwdT.setRange(0, old, bt);
-    accFwdLane.setRange(0, old, fl);
-    accBwdLane.setRange(0, old, bl);
+    accCount.setRange(0, old, an);
+    final rows = old * kAccRows;
+    accEdge.setRange(0, rows, ae);
+    accT.setRange(0, rows, at);
+    accLane.setRange(0, rows, al);
+    accBits.setRange(0, rows, ab);
+    accJoin.setRange(0, rows, aj);
     commuteOwed.setRange(0, old, ow);
     _seen.setRange(0, old, se);
   }
@@ -192,39 +241,49 @@ class BuildingTable {
   // ---- The sync --------------------------------------------------------------
 
   /// Brings the table up to [city] as it stands, with access on [lg] (null:
-  /// no lane graph yet, and no access). Every built site is in afterwards,
-  /// its capacities read again; every site no longer built is torn down.
+  /// no lane graph yet, and no access) read from [plans] (null: no site
+  /// plans, so every building is kerbside). Every built site is in
+  /// afterwards, its capacities read again; every site no longer built is
+  /// torn down.
   ///
   /// Access is resolved for a building new to the table, one whose spec
-  /// changed, and for all of them when [lg] is a new network — a graph that
-  /// only re-planned junctions shares every edge, so its access stands.
-  void sync(CitySim city, LaneGraph? lg) {
+  /// changed, for all of them when [lg] is a new network — a graph that only
+  /// re-planned junctions shares every edge, so its access stands — and for
+  /// all of them when the plans moved (§7.3). Hold ONE [SitePlanSource] and
+  /// hand it back every sync: a new source object reads as new plans, and
+  /// every building resolves again.
+  void sync(CitySim city, LaneGraph? lg, [SitePlanSource? plans]) {
     final was = _accessGraph;
     final regraph = !identical(lg, was) &&
         !(lg != null && was != null && lg.sharesStructureWith(was));
+    final rev = plans == null ? 0 : plans.sitesRev;
+    final replan = !identical(plans, _accessPlans) || rev != _accessSitesRev;
+    final again = regraph || replan;
     _stamp++;
     syncs++;
     final net = city.parcelNetwork();
     final layout = city.layout;
     for (final p in layout.manualParcels) {
-      _lot(city, net, p, lg, regraph);
+      _lot(city, net, p, lg, plans, again);
     }
     for (final p in layout.autoParcels) {
-      _lot(city, net, p, lg, regraph);
+      _lot(city, net, p, lg, plans, again);
     }
     for (final cell in city.occupiedCells()) {
       if (city.abandoned.contains(cell.key)) continue;
-      _cell(city, cell.key, cell.value, lg, regraph);
+      _cell(city, cell.key, cell.value, lg, plans, again);
     }
     for (var sl = 0; sl < pool.highWater; sl++) {
       if (pool.isSlotLive(sl) && _seen[sl] != _stamp) _remove(sl);
     }
     _accessGraph = lg;
+    _accessPlans = plans;
+    _accessSitesRev = rev;
     _jobsDirty = true;
   }
 
   void _lot(CitySim city, ParcelNetwork net, Parcel p, LaneGraph? lg,
-      bool regraph) {
+      SitePlanSource? plans, bool again) {
     final id = p.id;
     var s = city.parcelBuildings[id];
     var uf = 1.0;
@@ -240,16 +299,21 @@ class BuildingTable {
       centroidE[sl] = c.e;
       centroidN[sl] = c.n;
     }
-    if (_fresh || regraph) {
-      _setAccess(sl, lg == null ? null : AccessPoints.ofLot(lg, id), lg);
+    if (!_fresh && !again) return;
+    if (lg == null) {
+      _clearAccess(sl);
+    } else if (!_planAccess(sl, lg, plans)) {
+      // Kerbside at slot 0 (§0 Q5): today's access, and the only access a
+      // site without a plan has ever had.
+      _joinAccess(sl, lg, AccessPoints.ofLot(lg, id));
     }
   }
 
   void _cell(CitySim city, int anchor, CityBuildingSpec s, LaneGraph? lg,
-      bool regraph) {
+      SitePlanSource? plans, bool again) {
     final id = CitySim.siteIdOfCell(anchor);
     final sl = _upsert(id, s, city.utilFactor(anchor), city.isConnected(anchor));
-    if (!_fresh && !regraph) return;
+    if (!_fresh && !again) return;
     // The footprint the grid gives it, hung on the nearest road by the
     // hand-drawn lot's rule: the same call the routed model makes for it.
     final fp = city.parcelForCell(anchor, s);
@@ -257,9 +321,12 @@ class BuildingTable {
     use[sl] = fp.use.index;
     centroidE[sl] = c.e;
     centroidN[sl] = c.n;
-    _setAccess(sl,
-        lg == null ? null : AccessPoints.ofFootprint(lg, fp.polygon, centroid: c),
-        lg);
+    if (lg == null) {
+      _clearAccess(sl);
+    } else if (!_planAccess(sl, lg, plans)) {
+      _joinAccess(
+          sl, lg, AccessPoints.ofFootprint(lg, fp.polygon, centroid: c));
+    }
   }
 
   /// The slot of [id], made if new, with its spec and capacities set. Sets
@@ -290,26 +357,91 @@ class BuildingTable {
     return sl;
   }
 
-  void _setAccess(int sl, AccessPoint? ap, LaneGraph? lg) {
-    accFwd[sl] = -1;
-    accBwd[sl] = -1;
-    accessFlags[sl] = 0;
-    if (ap == null || lg == null) return;
-    var bits = ap.isolated(lg) ? kAccessIsolated : 0;
+  // ---- Access (§3.10, site-access.md §7.3) --------------------------------------
+
+  /// Rows for the joins of the building's own plan, or false when it has
+  /// none to offer: no plan source, no plan, a plan queued for a check or
+  /// resolved against another graph (§0 Q5), or one whose joins this graph
+  /// no longer holds. Each of those reads kerbside at slot 0 instead.
+  bool _planAccess(int sl, LaneGraph lg, SitePlanSource? plans) {
+    if (plans == null) return false;
+    final id = siteId[sl];
+    if (!plans.isCurrentFor(id, lg.graph)) return false;
+    final plan = plans.planOf(id);
+    if (plan == null) return false;
+    _clearAccess(sl);
+    final base = accRow0(sl);
+    var n = 0;
+    for (var j = 0; j < plan.joinCount && n < kAccRows; j++) {
+      n = _addJoin(base, n, lg, AccessPoints.ofPlanJoin(lg, plan, j));
+    }
+    if (n == 0) return false;
+    _finishAccess(sl, lg, n);
+    return true;
+  }
+
+  /// Rows for one join [ap] — the kerbside fallback — as a site with no plan
+  /// is reached and left.
+  void _joinAccess(int sl, LaneGraph lg, AccessPoint? ap) {
+    _clearAccess(sl);
+    _finishAccess(sl, lg, _addJoin(accRow0(sl), 0, lg, ap));
+  }
+
+  /// Rows for [ap]'s serving directions, appended after row [n] of [base].
+  int _addJoin(int base, int n, LaneGraph lg, AccessPoint? ap) {
+    if (ap == null) return n;
     final f = ap.fwdEdge, b = ap.bwdEdge;
-    if (f >= 0) {
-      accFwd[sl] = f;
-      accFwdT[sl] = ap.sOn(lg, f);
-      accFwdLane[sl] = ap.destLane(lg, f);
-      if (!ap.rightOfTravel(lg, f)) bits |= kAccessFwdLeft;
+    var k = n;
+    if (f >= 0 && k < kAccRows) k = _addRow(base, k, lg, ap, f);
+    if (b >= 0 && k < kAccRows) k = _addRow(base, k, lg, ap, b);
+    return k;
+  }
+
+  int _addRow(int base, int n, LaneGraph lg, AccessPoint ap, int edge) {
+    final r = base + n;
+    accEdge[r] = edge;
+    accT[r] = ap.sOn(lg, edge);
+    accLane[r] = ap.destLane(lg, edge);
+    accJoin[r] = ap.joinRef;
+    var bits = 0;
+    if (ap.canIn) bits |= kAccIn;
+    if (ap.canOut) bits |= kAccOut;
+    if (!ap.rightOfTravel(lg, edge)) bits |= kAccLeft;
+    if (ap.isCut) bits |= kAccCut;
+    accBits[r] = bits;
+    return n + 1;
+  }
+
+  void _clearAccess(int sl) {
+    final base = accRow0(sl);
+    for (var i = 0; i < kAccRows; i++) {
+      final r = base + i;
+      accEdge[r] = -1;
+      accT[r] = 0;
+      accLane[r] = 0;
+      accBits[r] = 0;
+      accJoin[r] = kJoinRefNone;
     }
-    if (b >= 0) {
-      accBwd[sl] = b;
-      accBwdT[sl] = ap.sOn(lg, b);
-      accBwdLane[sl] = ap.destLane(lg, b);
-      if (!ap.rightOfTravel(lg, b)) bits |= kAccessBwdLeft;
+    accCount[sl] = 0;
+    accessFlags[sl] = 0;
+  }
+
+  /// Counts the rows written and judges the site: a trip can reach it and
+  /// leave it again only if some IN-capable row and some OUT-capable row
+  /// stand on edges in the network's largest strongly connected part
+  /// (§3.10). A kerbside plan, whose one join is both, reduces to the old
+  /// rule — neither serving edge in the main part.
+  void _finishAccess(int sl, LaneGraph lg, int n) {
+    accCount[sl] = n;
+    final base = accRow0(sl);
+    var canIn = false, canOut = false;
+    for (var i = 0; i < n; i++) {
+      final r = base + i;
+      if (lg.edgeInMainScc[accEdge[r]] != 1) continue;
+      if (accBits[r] & kAccIn != 0) canIn = true;
+      if (accBits[r] & kAccOut != 0) canOut = true;
     }
-    accessFlags[sl] = bits;
+    accessFlags[sl] = canIn && canOut ? 0 : kAccessIsolated;
   }
 
   /// Tears down the building in [sl]: its handle goes stale.
@@ -323,9 +455,7 @@ class BuildingTable {
     housing[sl] = 0;
     jobs[sl] = 0;
     served[sl] = 0;
-    accFwd[sl] = -1;
-    accBwd[sl] = -1;
-    accessFlags[sl] = 0;
+    _clearAccess(sl);
     commuteOwed[sl] = 0;
     removals++;
     _jobsDirty = true;
@@ -377,68 +507,102 @@ class BuildingTable {
   // ---- What trips ask -----------------------------------------------------------
 
   /// Whether the building in [sl] can be driven to and away from: served,
-  /// with a serving edge, and not cut off from the rest of the network.
+  /// with access, and not cut off from the rest of the network — which is
+  /// per role ([_finishAccess]).
   bool reachable(int sl) =>
       served[sl] != 0 &&
-      (accFwd[sl] >= 0 || accBwd[sl] >= 0) &&
+      accCount[sl] != 0 &&
       accessFlags[sl] & kAccessIsolated == 0;
 
   /// Whether live building [handle] has a serving edge at all.
-  bool hasAccess(int handle) {
-    if (!pool.isLive(handle)) return false;
-    final sl = SlotPool.slotOf(handle);
-    return accFwd[sl] >= 0 || accBwd[sl] >= 0;
-  }
+  bool hasAccess(int handle) =>
+      pool.isLive(handle) && accCount[SlotPool.slotOf(handle)] != 0;
 
   /// Whether live building [handle] is met on [edge] within [tolM] of travel
   /// arc [t]: whether a trip that stopped there stopped at its access as
   /// the table resolves it now, on the graph of the last sync.
-  bool meetsAt(int handle, int edge, double t, double tolM) {
-    if (!pool.isLive(handle) || edge < 0) return false;
-    final sl = SlotPool.slotOf(handle);
-    return (edge == accFwd[sl] && (accFwdT[sl] - t).abs() <= tolM) ||
-        (edge == accBwd[sl] && (accBwdT[sl] - t).abs() <= tolM);
+  bool meetsAt(int handle, int edge, double t, double tolM) =>
+      _rowAt(handle, edge, t, tolM) >= 0;
+
+  /// The join (its handle, site-access.md §2.3) building [handle] is met by
+  /// on [edge] within [tolM] of travel arc [t], or [kJoinRefNone]: which
+  /// driveway a car that stopped there stopped at. Cuts on one edge are
+  /// ≥ 6 m apart (V4), so `(edge, T)` names one join.
+  int joinAt(int handle, int edge, double t, double tolM) {
+    final r = _rowAt(handle, edge, t, tolM);
+    return r < 0 ? kJoinRefNone : accJoin[r];
   }
 
-  /// Whether building [handle] lies on the left of travel along [edge].
-  bool leftOf(int handle, int edge) {
-    if (!pool.isLive(handle)) return false;
-    final sl = SlotPool.slotOf(handle);
-    if (edge == accFwd[sl]) return accessFlags[sl] & kAccessFwdLeft != 0;
-    if (edge == accBwd[sl]) return accessFlags[sl] & kAccessBwdLeft != 0;
-    return false;
+  /// Whether building [handle] lies on the left of travel along [edge] at
+  /// travel arc [t] — the join a car stopped at, not merely the first on
+  /// that edge. A left join is a turn across the road, or a one-way road's
+  /// left kerb (D6).
+  bool leftOfAt(int handle, int edge, double t) {
+    final r = _rowAt(handle, edge, t, double.infinity);
+    return r >= 0 && accBits[r] & kAccLeft != 0;
   }
 
-  /// Adds building [handle]'s serving edges to [ends] as origins, from any
-  /// lane: a trip pulling out of an access point chooses its lane there
-  /// (§5.5). False for a building gone or without access.
-  bool addOrigins(int handle, PathEnds ends) {
-    if (!pool.isLive(handle)) return false;
+  /// Whether building [handle] lies on the left of travel along [edge], at
+  /// whichever of its joins that edge serves: for a departure, which has an
+  /// edge but no arc of its own yet.
+  bool leftOf(int handle, int edge) => leftOfAt(handle, edge, double.nan);
+
+  /// The access row of [handle] on [edge] nearest travel arc [t], within
+  /// [tolM], or −1. A NaN [t] takes the first row on the edge, so a caller
+  /// with no arc still gets the join.
+  int _rowAt(int handle, int edge, double t, double tolM) {
+    if (!pool.isLive(handle) || edge < 0) return -1;
     final sl = SlotPool.slotOf(handle);
-    var any = false;
-    if (accFwd[sl] >= 0) {
-      ends.addOrigin(accFwd[sl], accFwdT[sl]);
-      any = true;
+    final base = accRow0(sl);
+    final n = accCount[sl];
+    var best = -1;
+    var bestM = double.infinity;
+    for (var i = 0; i < n; i++) {
+      final r = base + i;
+      if (accEdge[r] != edge) continue;
+      final d = (accT[r] - t).abs();
+      if (d.isNaN) return r;
+      if (d > tolM || d >= bestM) continue;
+      best = r;
+      bestM = d;
     }
-    if (accBwd[sl] >= 0) {
-      ends.addOrigin(accBwd[sl], accBwdT[sl]);
+    return best;
+  }
+
+  /// Adds building [handle]'s out-capable access to [ends] as origins, from
+  /// any lane: a trip pulling out of an access point chooses its lane there
+  /// (§5.5). With [nearEdge] set, only rows on that edge are offered — a car
+  /// backing out onto a road it may not cross leaves in the near direction
+  /// only. False for a building gone, without access, or with none that
+  /// answers.
+  bool addOrigins(int handle, PathEnds ends, {int nearEdge = -1}) {
+    if (!pool.isLive(handle)) return false;
+    final sl = SlotPool.slotOf(handle);
+    final base = accRow0(sl);
+    final n = accCount[sl];
+    var any = false;
+    for (var i = 0; i < n; i++) {
+      final r = base + i;
+      if (accBits[r] & kAccOut == 0) continue;
+      if (nearEdge >= 0 && accEdge[r] != nearEdge) continue;
+      ends.addOrigin(accEdge[r], accT[r]);
       any = true;
     }
     return any;
   }
 
-  /// Adds building [handle]'s serving edges to [ends] as goals, each
+  /// Adds building [handle]'s in-capable access to [ends] as goals, each
   /// reached in the one lane a car pulls in from on that side (D6).
   bool addGoals(int handle, PathEnds ends) {
     if (!pool.isLive(handle)) return false;
     final sl = SlotPool.slotOf(handle);
+    final base = accRow0(sl);
+    final n = accCount[sl];
     var any = false;
-    if (accFwd[sl] >= 0) {
-      ends.addGoal(accFwd[sl], accFwdT[sl], laneMask: 1 << accFwdLane[sl]);
-      any = true;
-    }
-    if (accBwd[sl] >= 0) {
-      ends.addGoal(accBwd[sl], accBwdT[sl], laneMask: 1 << accBwdLane[sl]);
+    for (var i = 0; i < n; i++) {
+      final r = base + i;
+      if (accBits[r] & kAccIn == 0) continue;
+      ends.addGoal(accEdge[r], accT[r], laneMask: 1 << accLane[r]);
       any = true;
     }
     return any;
@@ -486,8 +650,8 @@ class BuildingTable {
     _jobsDirty = false;
   }
 
-  /// [hash] with every live building's handle, capacities and owed trips
-  /// folded in, in slot order: for `CityAgents.digest`.
+  /// [hash] with every live building's handle, capacities, access rows and
+  /// owed trips folded in, in slot order: for `CityAgents.digest`.
   int digest(int hash) {
     var h = fnv1aU32(hash, pool.highWater);
     for (var sl = 0; sl < pool.highWater; sl++) {
@@ -495,8 +659,15 @@ class BuildingTable {
       h = fnv1aU32(h, pool.handleOf(sl));
       h = fnv1aU32(h, housing[sl]);
       h = fnv1aU32(h, jobs[sl]);
-      h = fnv1aU32(h, accFwd[sl]);
-      h = fnv1aU32(h, accBwd[sl]);
+      final base = accRow0(sl);
+      final n = accCount[sl];
+      h = fnv1aU32(h, n);
+      for (var i = 0; i < n; i++) {
+        final r = base + i;
+        h = fnv1aU32(h, accEdge[r]);
+        h = fnv1aU32(h, accJoin[r]);
+        h = fnv1aByte(h, accBits[r] | (accLane[r] << 4));
+      }
       h = fnv1aU32(h, (commuteOwed[sl] * 1e6).round());
     }
     return h;

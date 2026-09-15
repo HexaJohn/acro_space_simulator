@@ -8,6 +8,7 @@ import 'package:acro_space_simulator/domain/colony/city/city_layout.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_graph.dart';
+import 'package:acro_space_simulator/domain/colony/city/site_access/site_access_constants.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/access_points.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/lane_graph.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/lane_graph_builder.dart';
@@ -54,9 +55,14 @@ void main() {
         continue;
       }
       resolved++;
+      final k = g.lotJoinStart[i];
       expect(a!.piece, g.lotPiece[i]);
       expect(a.roadS, g.lotS[i]);
       expect(a.dirs, g.lotDirs[i]);
+      expect(a.joinRef, k, reason: 'slot 0 IS the lot\'s access (C1)');
+      expect(a.rightOfForward, g.joinRight[k] == 1,
+          reason: 'the side is read, never re-derived from the centroid');
+      expect(a.canIn && a.canOut, isTrue, reason: 'a graph slot is both');
       final p = g.lotPiece[i];
       expect(a.fwdEdge,
           g.lotDirs[i] & RoadGraph.forwardBit != 0 ? g.pieceFwdEdge[p] : -1);
@@ -173,9 +179,11 @@ void main() {
     expect(a.piece, hit.piece);
     expect(a.roadS, hit.sM);
     expect(a.dirs, hit.dirs);
-    expect(a.rightOfForward,
-        AccessPoints.rightOf(g.roadRecs[g.pieceRoad[hit.piece]], hit.sM,
-            fp.centroid));
+    // Its side is the placer's own, as a lot's is: a footprint has no graph
+    // handle, so it is the one join traffic cannot name (kJoinRefNone).
+    final slot = g.attachFootprintJoins(fp.polygon, centroid: fp.centroid).first;
+    expect(a.rightOfForward, slot.right);
+    expect(a.joinRef, kJoinRefNone);
   });
 
   test('a lot on a road cut off from the rest is isolated', () {

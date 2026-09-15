@@ -298,14 +298,12 @@ class AgentReach {
   }
 
   static void _addSite(_Sources to, LaneGraph lg, BuildingTable t, int sl) {
-    final fe = t.accFwd[sl], be = t.accBwd[sl];
-    if (fe >= 0 && fe < lg.edgeCount) {
-      final at = t.accFwdT[sl].toDouble();
-      to.add(fe, at, lg.edgeLen[fe] - at, -1);
-    }
-    if (be >= 0 && be < lg.edgeCount) {
-      final at = t.accBwdT[sl].toDouble();
-      to.add(be, at, lg.edgeLen[be] - at, -1);
+    final base = BuildingTable.accRow0(sl);
+    for (var i = 0; i < t.accCount[sl]; i++) {
+      final e = t.accEdge[base + i];
+      if (e < 0 || e >= lg.edgeCount) continue;
+      final at = t.accT[base + i].toDouble();
+      to.add(e, at, lg.edgeLen[e] - at, -1);
     }
   }
 

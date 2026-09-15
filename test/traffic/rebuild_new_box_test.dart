@@ -6,6 +6,7 @@
 import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/building_table.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/city_agents.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/lane_graph.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/slot_pool.dart';
@@ -170,14 +171,14 @@ void main() {
     final lg0 = s.a.laneGraph!;
     final b = s.a.buildings!;
     final dest = b.handleOfSite(site)!;
-    final before = b.accFwd[SlotPool.slotOf(dest)];
+    final before = b.accEdge[BuildingTable.accRow0(SlotPool.slotOf(dest))];
     expect(lg0.graph.roads[lg0.edgeRoad[before]].id, s.mainRoad,
         reason: 'hung on the main road while it is the only one');
     s.standAt(car, -200);
 
     s.drawCrossing();
     final lg = s.a.laneGraph!;
-    final now = b.accFwd[SlotPool.slotOf(dest)];
+    final now = b.accEdge[BuildingTable.accRow0(SlotPool.slotOf(dest))];
     expect(lg.graph.roads[lg.edgeRoad[now]].id, startsWith(s.crossing!),
         reason: 'the new street is nearer now');
 
