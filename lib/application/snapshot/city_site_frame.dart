@@ -199,6 +199,23 @@ class CitySiteFrame {
     return (c.frameE(site) + ue * x - un * y, c.frameN(site) + un * x + ue * y);
   }
 
+  /// [site]'s building heading, radians in the `Parcel.heading` convention
+  /// (§3.1): spinning a building by `−buildingHeading` puts its local +Y on
+  /// the frame's `v` (into the lot) and its local +X on `u` (along the
+  /// frontage), so the envelope, the gate and the door share the building's
+  /// axes by construction.
+  ///
+  /// Read off the stored frame vector rather than rebuilt from the lot: a
+  /// plan is a pure function of the layout it was made against, and a
+  /// re-derived frame would turn a saved building on a lot whose polygon has
+  /// since been re-sampled.
+  static double buildingHeadingOf(SiteAccessChunk c, int site) {
+    // v = u.perp = (−u.n, u.e), so the street side −v is (u.n, −u.e).
+    // Written as `0 ± x` so no component is −0.0 (see `SiteFrame`).
+    final ue = c.frameUE(site), un = c.frameUN(site);
+    return Vec2(0.0 + un, 0.0 - ue).heading + math.pi;
+  }
+
   /// A frame of just [rows] (geometry, site), in that order: the sites a
   /// tile or a detail job sends a worker (§5.3). Chunks of at most
   /// [kSitesPerChunk] sites, packed as the book packs them; heights and keys
@@ -314,6 +331,45 @@ class CitySiteFrame {
   static List<int> _ints(List xs) => [for (final x in xs) (x as num).toInt()];
 }
 
+/// Where a PLAN-SERVED building stands (docs/plans/site-access.md §5.2 R4,
+/// §6.1): on its plan's envelope, turned to face its access road.
+///
+/// Everything here is read off the plan, so the building, the envelope, the
+/// gate and the door cannot disagree: the renderer re-derives none of it.
+class SitePlacement {
+  const SitePlacement({
+    required this.slot,
+    required this.centreE,
+    required this.centreN,
+    required this.widthM,
+    required this.depthM,
+    required this.headingRad,
+    required this.gateXM,
+    required this.gateWM,
+  });
+
+  /// The book slot (`BuildingSnapshot.siteSlot`).
+  final int slot;
+
+  /// The envelope's centre in colony-local east/north metres.
+  final double centreE, centreN;
+
+  /// The envelope across the frontage (the building's local X) and into the
+  /// lot (local Y). Zero on a plan whose envelope is empty — a degenerate or
+  /// fully paved site — which keeps the legacy footprint.
+  final double widthM, depthM;
+
+  /// `SiteFrame.buildingHeading`: the building is spun by MINUS this (§3.1).
+  final double headingRad;
+
+  /// The plan's gate on the envelope's front edge: along local X from the
+  /// envelope centre, and its width (0: none).
+  final double gateXM, gateWM;
+
+  /// Whether this plan actually carries an envelope to stand on.
+  bool get hasEnvelope => widthM > 0 && depthM > 0;
+}
+
 /// Builds a colony's [CitySiteFrame] and its roads' kerb cuts for the
 /// capture, from a cache that hangs off the colony (see the library docs).
 class SiteCapture {
@@ -328,6 +384,17 @@ class SiteCapture {
   /// Work counted for tests and profiling: chunk geometries built, and
   /// canonical kerb-cut tables built.
   static int geometriesBuilt = 0, cutTablesBuilt = 0;
+
+  /// Whether a plan-served building is placed on its plan's ENVELOPE, turned
+  /// to face its access road (§5.2 R4, §6.2), rather than on the legacy
+  /// centroid-and-`Parcel.heading` path. OFF by default.
+  ///
+  /// This is the storage behind `CityNodes.siteAccess`, the renderer's name
+  /// for the same knob: placement happens here, in the capture, and the
+  /// tiles must key what the capture placed. Off, a served building's
+  /// position, orientation and site size are exactly what they were — only
+  /// its slot and gate ride the wire, which no legacy path reads.
+  static bool envelopePlacement = false;
 
   final CitySim _city;
 
@@ -474,21 +541,43 @@ class SiteCapture {
   /// since [begin]). `gateXM` is along the building's local X from the
   /// envelope centre.
   (int, double, double) buildingSiteOf(String siteId) {
+    final p = placementOf(siteId);
+    return p == null ? (-1, 0, 0) : (p.slot, p.gateXM, p.gateWM);
+  }
+
+  /// [siteId]'s plan-served placement (§5.2 R4), or null when it has none:
+  /// the envelope it stands on, the heading it takes and its gate, all read
+  /// off the published plan.
+  ///
+  /// Null on the same terms as [buildingSiteOf]: no published plan, or the
+  /// book's slot table and the chunks this capture holds disagree on the row
+  /// (the book moved since [begin]).
+  SitePlacement? placementOf(String siteId) {
     final book = _city.siteAccess;
     final slot = book.slotOf(siteId);
-    if (slot < 0) return (-1, 0, 0);
+    if (slot < 0) return null;
     final c = slot ~/ kSitesPerChunk;
     final row = book.rowOfSlot(slot);
     if (row < 0 ||
         c >= _chunks.length ||
         row >= _chunks[c].siteCount ||
         _chunks[c].siteId(row) != siteId) {
-      return (-1, 0, 0);
+      return null;
     }
     final chunk = _chunks[c];
     final gw = chunk.gateW(row);
-    if (!(gw > 0)) return (slot, 0, 0);
-    return (slot, chunk.gateX(row) - (chunk.envX0(row) + chunk.envX1(row)) / 2, gw);
+    final centreX = (chunk.envX0(row) + chunk.envX1(row)) / 2;
+    final (e, n) = CitySiteFrame.envelopeCentreLocal(chunk, row);
+    return SitePlacement(
+      slot: slot,
+      centreE: e,
+      centreN: n,
+      widthM: chunk.envX1(row) - chunk.envX0(row),
+      depthM: chunk.envY1(row) - chunk.envY0(row),
+      headingRad: CitySiteFrame.buildingHeadingOf(chunk, row),
+      gateXM: gw > 0 ? chunk.gateX(row) - centreX : 0,
+      gateWM: gw > 0 ? gw : 0,
+    );
   }
 
   /// This frame's [CitySiteFrame] for the colony on [bodyId] (datum

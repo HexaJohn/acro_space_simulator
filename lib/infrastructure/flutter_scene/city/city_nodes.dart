@@ -43,6 +43,7 @@ import 'package:flutter_scene/src/geometry/mesh_geometry.dart'
     show MeshGeometry, StagedMeshUpload;
 import 'package:vector_math/vector_math.dart' as vm;
 
+import '../../../application/snapshot/city_site_frame.dart';
 import '../../../application/snapshot/world_snapshot.dart';
 import '../../../domain/architecture/building_generator.dart';
 import '../../../domain/colony/city/city_building_spec.dart';
@@ -451,12 +452,20 @@ class CityNodes {
   static bool agentSignals = false;
 
   /// Whether the tiles take the frame's site access plans
-  /// (docs/plans/site-access.md §5.3): the sites cut into tiles and keyed,
-  /// served buildings' slots and gates and roads' kerb cuts keyed, and the
-  /// sites packed into the requests. OFF (the default) until the slice that
-  /// draws them: every building is legacy, and every tile's membership, key
-  /// and mesh are exactly as they were.
-  static bool siteAccess = false;
+  /// (docs/plans/site-access.md §5.3, §6.2): the sites cut into tiles and
+  /// keyed, served buildings' slots and gates and roads' kerb cuts keyed, the
+  /// sites packed into the requests, and a served building placed on its
+  /// plan's ENVELOPE, turned to face its access road. OFF (the default):
+  /// every building is legacy, and every tile's membership, key and mesh are
+  /// exactly as they were.
+  ///
+  /// One knob, one place it is kept. Envelope placement happens where the
+  /// frame is captured (`SiteCapture`, an application type the renderer
+  /// cannot reach from a worker), so the flag LIVES there and this is its
+  /// public name: two flags could disagree, and a frame placed one way and
+  /// keyed the other draws a building beside its own driveway.
+  static bool get siteAccess => SiteCapture.envelopePlacement;
+  static set siteAccess(bool on) => SiteCapture.envelopePlacement = on;
 
   /// Scales how many vehicles a road carries. A hook for the colony's own
   /// congestion once that reaches the frame; 1.0 is an ordinary working day.
@@ -1766,8 +1775,10 @@ class CityNodes {
   _CityMesh _meshArchetype(BuildingArchetype key, BuildingSnapshot b) {
     final tier = key.detail;
     final lib = _libraries.forTier(tier);
-    final built =
-        lib.get(specOf(b), parcelOf(b), seed: b.id.hashCode, detail: tier);
+    final built = lib.get(specOf(b), parcelOf(b),
+        seed: b.id.hashCode,
+        detail: tier,
+        gate: CityTileMesher.gateOf(b, siteAccess: siteAccess));
     if (lodDebug) {
       // The building's own massing, as one box. Same size, same place,
       // no detail — so what you are looking at is purely which tier each

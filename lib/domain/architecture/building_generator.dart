@@ -96,8 +96,11 @@ class BuildingGenerator {
     Parcel parcel, {
     int seed = 0,
     BuildingDetail detail = BuildingDetail.full,
+
+    /// A PLAN-SERVED building's gate (see [BuildingMassingRules.massFor]).
+    SiteGate? gate,
   }) {
-    final massing = rules.massFor(spec, parcel, seed: seed);
+    final massing = rules.massFor(spec, parcel, seed: seed, gate: gate);
     final b = PropBuilder();
     final lamps = <Vector3>[];
     final windows = <Vector3>[];
@@ -1468,6 +1471,17 @@ class BuildingArchetype {
   /// one is a different mesh, not a different transform.
   final bool corner;
 
+  /// Whether this building draws a surface car park of its own. False for a
+  /// PLAN-SERVED building (docs/plans/site-access.md §6.2): the plan owns its
+  /// parking, and the massing is front-aligned on the envelope instead of
+  /// centred in a strip — a different mesh, so it is part of the key.
+  final bool surfaceParking;
+
+  /// The plan's gate on the envelope's front edge, quantised
+  /// ([gateBucketOf]); 0 with none. The fence gap is cut in the MESH, so two
+  /// buildings whose gates differ cannot share one.
+  final int gateBucket;
+
   const BuildingArchetype({
     required this.type,
     required this.widthBucket,
@@ -1476,7 +1490,36 @@ class BuildingArchetype {
     required this.variant,
     this.styleId = 'utilitarian',
     this.corner = false,
+    this.surfaceParking = true,
+    this.gateBucket = 0,
   });
+
+  /// [gate] quantised to the metre for the key, and packed web-safely (under
+  /// 2^21): 0 for no gate at all.
+  static int gateBucketOf(SiteGate? gate) {
+    if (gate == null || !gate.isOpen) return 0;
+    final x = gate.xM.round().clamp(-2047, 2047) + 2048;
+    final w = gate.widthM.round().clamp(1, 255);
+    return x * 256 + w;
+  }
+
+  /// The gate a bucket stands for: what the canonical lot is generated with.
+  static SiteGate? gateOfBucket(int bucket, {required bool surfaceParking}) {
+    if (surfaceParking) return null;
+    if (bucket == 0) return const SiteGate();
+    return SiteGate(
+        xM: ((bucket ~/ 256) - 2048).toDouble(),
+        widthM: (bucket % 256).toDouble());
+  }
+
+  /// [x] in buckets of [bucketM]. A plan-served building takes the MIN-FIT
+  /// bucket (§6.2): rounding up can overshoot its envelope by half a bucket,
+  /// and an envelope is a line the plan drew round the paving.
+  static int bucketOf(double x, double bucketM, {bool minFit = false}) {
+    var k = (x / bucketM).round();
+    if (minFit && k * bucketM > x + 0.25) k = (x / bucketM).floor();
+    return math.max(1, k);
+  }
 
   /// Bucket a spec/parcel pair. [variants] different meshes per bucket keep a
   /// street from looking cloned; 4 is enough to break the pattern by eye.
@@ -1493,16 +1536,20 @@ class BuildingArchetype {
     int variants = 4,
     String styleId = 'utilitarian',
     bool? corner,
+    SiteGate? gate,
   }) {
     final extent = parcel.buildableExtent;
+    final minFit = gate != null;
     return BuildingArchetype(
       type: spec.type,
-      widthBucket: math.max(1, (extent.width / bucketM).round()),
-      depthBucket: math.max(1, (extent.depth / bucketM).round()),
+      widthBucket: bucketOf(extent.width, bucketM, minFit: minFit),
+      depthBucket: bucketOf(extent.depth, bucketM, minFit: minFit),
       detail: detail,
       variant: seed.abs() % variants,
       styleId: styleId,
       corner: corner ?? parcel.isCorner,
+      surfaceParking: gate == null,
+      gateBucket: gateBucketOf(gate),
     );
   }
 
@@ -1515,11 +1562,13 @@ class BuildingArchetype {
       other.detail == detail &&
       other.variant == variant &&
       other.styleId == styleId &&
-      other.corner == corner;
+      other.corner == corner &&
+      other.surfaceParking == surfaceParking &&
+      other.gateBucket == gateBucket;
 
   @override
-  int get hashCode => Object.hash(
-      type, widthBucket, depthBucket, detail, variant, styleId, corner);
+  int get hashCode => Object.hash(type, widthBucket, depthBucket, detail,
+      variant, styleId, corner, surfaceParking, gateBucket);
 }
 
 /// Generate-once cache keyed by [BuildingArchetype].
@@ -1552,6 +1601,7 @@ class BuildingLibrary {
     Parcel parcel, {
     int seed = 0,
     BuildingDetail detail = BuildingDetail.full,
+    SiteGate? gate,
   }) {
     final key = BuildingArchetype.of(spec, parcel,
         detail: detail,
@@ -1559,11 +1609,15 @@ class BuildingLibrary {
         bucketM: bucketM,
         variants: variants,
         styleId: generator.style.id,
-        corner: parcel.isCorner);
+        corner: parcel.isCorner,
+        gate: gate);
     return _cache.putIfAbsent(
       key,
       () => generator.generate(spec, _canonicalLot(key),
-          seed: key.variant, detail: detail),
+          seed: key.variant,
+          detail: detail,
+          gate: BuildingArchetype.gateOfBucket(key.gateBucket,
+              surfaceParking: key.surfaceParking)),
     );
   }
 

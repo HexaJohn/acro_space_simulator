@@ -142,11 +142,29 @@ class CityLighting {
       }
     }
 
-    // Car-park masts: cold light, wider throw, taller columns. The massing is
-    // re-derived rather than read back off the colony, so the lighting pass
-    // does not force a dependency from the city sim onto the architecture
-    // layer — the rules are deterministic, so both agree by construction.
+    // Car-park masts: cold light, wider throw, taller columns.
+    //
+    // A site with a PLAN takes them from the plan's own lamp posts
+    // (docs/plans/site-access.md §5.4, §6.2): the plan is the one thing that
+    // knows where that site's cars actually stand, and re-running the massing
+    // here was the fifth lot line in the colony — masts lighting a car park
+    // the renderer no longer draws. A site without one keeps the legacy
+    // derivation: the rules are deterministic, so it and the massing agree by
+    // construction.
     for (final (parcel, spec) in city.buildingParcels()) {
+      final plan = city.siteAccess.planOf(parcel.id);
+      if (plan != null) {
+        for (var l = 0; l < plan.lampCount; l++) {
+          final p = plan.lampPt(l);
+          out.add(StreetLamp(
+            position: Vec2(plan.ptE(p), plan.ptN(p)),
+            heightM: 12,
+            radiusM: 30,
+            warm: false,
+          ));
+        }
+        continue;
+      }
       final lot = rules.massFor(spec, parcel).parking;
       if (lot == null) continue;
       final centre = parcel.centroid;
