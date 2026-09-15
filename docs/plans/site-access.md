@@ -137,6 +137,25 @@ lib/domain/colony/city/site_access/
 traffic hygiene rules all the same, and a new `site_access_source_hygiene_test` runs the
 `traffic_source_hygiene_test.dart:131-157` scan over it.
 
+**Deviation (R2 core, as built):** two files are added. `site_plan_generator.dart` holds the entry point shared by
+every generator: `SiteContext` (graph + stamp, parcel, spec, frame, slots, emission helpers), `SiteGeneratedPlan`
+(a generator's finished plan, written only once complete, since `PlanBuilder` has no rollback), the dispatcher
+`planSite`, `emitKerbOnly`, and the full-town `planSites` / `siteContextsOf` / `planCity`. `site_easement.dart` holds
+the pure `easementOf` (§3.7a rule 2), so the installation/easement track owns it apart from the book.
+
+**R2 core repair, as built:** a third file, `site_paving_check.dart`, holds `sitePavingViolations(SiteContext,
+SiteAccessPlan) → List<String>`. It covers the two R2 checks the frozen R2a validator leaves open: paving inside
+parcel ∪ corridor, and corridor clearance. A1 calls it on every plan. `planSite` / `planSites` / `planCity` take an
+optional `SiteGenerators` (the four generator entry points, default `SiteGenerators.standard`) so dispatch tests can
+use fakes. Ownership inside R2, so the parallel tracks neither collide nor drop work:
+
+| Owner | Files (lib) | Tests and R2 acceptance items |
+|---|---|---|
+| core | `site_access_constants.dart` (the only editor), `site_program.dart`, `site_plan_generator.dart`, `home_driveway.dart`, `site_envelope.dart`, `road_graph.dart` `structureStamp` | `home_driveway_test`, `site_plan_generator_test`, `site_plan_dispatch_test`, `site_program_constants_pin_test`, `site_envelope_helpers_test`, `road_graph_structure_stamp_test`, **A1** `site_plan_contract_test` (with `site_random_sites.dart`), `site_plan_property_test`, `site_plan_revision_test`, `site_program_sprawl_audit_test` (the full mix is re-pinned at the R2 merge), `bench/site_generation_bench_test`, the §3.10 report |
+| car park / yard | `car_park_packer.dart` (`carParkPlanOf`, `yardPlanOf`) | `car_park_packer_test` (§8.3), with a yard-to-car-park fallback case |
+| installation / easement | `installation_access.dart` (`installationPlanOf`), `site_easement.dart` (`easementOf`), `site_paving_check.dart` (`sitePavingViolations`) | `installation_access_test`, `site_easement_test` (the pure half), `site_paving_check_test`; the starter-site acceptance items (56 m throat, yard, gate, ≥ 12 stalls, four easement lots) |
+| book | `site_access_book.dart`, the `CitySim` hooks, `CityLayout.easementOf` hook, `setUse`/`placeOnParcel`/growth refusal, inspector string, starter-kit drain, dev hook | `site_access_persistence_test`, `site_access_sync_test`, `site_access_tick_order_test`, `site_easement_test` (the refusal half), `city_starter_kit_test` easement assertion, the road-edit sync bench |
+
 ### 2.2 Join slots on `RoadGraph` (beside the lot columns, road_graph.dart:286-295)
 
 ```dart
@@ -280,12 +299,25 @@ it. Limbo plans (§7.6) and cars mid-manoeuvre hold the old chunk and keep readi
   plain bytes. Column accessors live on the chunk (chunk-global rows) and on the plan (plan-local indices).
 - `joinRoadIdIdx` is reserved and written −1: a road-id string table would break the 7-object bound.
 - `RoadGraph` has no `structureStamp` yet. `PlanBuilder` stores the caller's int, and R2's book supplies the stamp.
+  **R2 core:** `RoadGraph.structureStamp` exists: a signed 32-bit word hash (web-safe `mul32`) over the roads (id,
+  class, decoration, direction, samples), nodes, pieces, edges, lots, join and crossed-lot columns and kerb windows,
+  hashed on first read into a cell every `withOverrides` / `refreshedFor` copy shares. Copies that
+  `sharesStructureWith` stamp equal; a structure change stamps differently (up to a 32-bit collision). A rebuild of
+  an unchanged layout stamps the SAME (every lot index and join handle it gives is the same), so `isCurrentFor`
+  stays true across it. Doubles are hashed by their bits, so a stamp is per platform, like `rev`.
 - `rev` hashes each site's family counts instead of the chunk-global starts. It excludes the graph resolution
   (`graphStamp`, `graphLot`, `joinRef`, `joinPiece`, `joinRoadNo`, `joinRoadIdIdx`), so re-resolving a plan against a
   new graph keeps its `rev`. `rev` and `stallKey` are stored signed (`toSigned(32)`), and `stallIndexOfKey` accepts
   either sign.
 - `PlanBuilder` computes what no generator may get wrong: `segLenM`, stall order `(seg, s, side)` and stall keys.
   The heading octant has sectors centred on multiples of 45° from `u`, picked by comparison with tan 22.5°.
+- **R2a-frozen file touched (R2 integration repair, notice line sent):** `SiteAccessChunk.adopt(...)` is added
+  beside `SiteAccessChunk.packed`, with the same arguments. It TAKES the typed lists rather than copying them, so the
+  book can re-publish a re-resolved chunk that shares its unchanged `f64` / `f32` / `u8` / offset lists with the
+  chunk it replaces, and a whole re-pack need not copy its fresh lists twice (§4.1 as built: the copies and their GC
+  were most of the road-edit tick). Like `packed`, it is not for traffic. Nothing a reader sees changes: both
+  chunks are published and never written, and the bytes are identical (`site_access_sync_test`). No existing member
+  changed.
 
 ### 2.4 Invariants (the validator; `assert` in the builder, always in tests)
 
@@ -431,6 +463,20 @@ reported under one name.
 - Not checked in R2a (they need the parcel and the corridor, R2): paving inside `parcel ∪ corridor`, and corridor
   clearance. Checked as `geometry`: finite numbers (fence-gap `t0/t1` included), convex CCW pave rings, and
   paving ∩ envelope = ∅.
+- **R2 (`site_paving_check.dart`, `sitePavingViolations`):** the corridor of every cut join is its §3.7a polyline
+  (kerb → frontage along the slot normal, or R1's dogleg), ±4.5 m, no end caps, its last leg run on past the frontage
+  line until its whole width is inside the lot (`h·|d·u|/(d·v)`), so a drive off a skewed kerb is never read as
+  outside. A kerb ON (or behind) the frontage line has no leg of its own, so it gets that run-on alone, from the kerb
+  along the slot normal (repair: at `k = 0` on a lot skewed ≥ 12° the throat's kerb corners read as outside; pinned by
+  `site_paving_check_test`). Past the frontage line (frame `y > 0`) every corridor leg, the run-on included, counts only
+  between the lot's side lines `0 ≤ x ≤ W` (repair: at 60° skew the run-on reached ~7.8 m past the frontage line and
+  read pave across a side line near the frontage corner as inside the corridor; pinned at `k = 0` and `k = 6`). Pave rings are sampled (vertices, edges every 0.25 m, inside every 1 m; 5 cm tolerance). Clearance: no used
+  slot is `kJoinCorridorBlocked`, no crossed lot is built, and, only for a set-back corridor (longer than 3.5 m) or a
+  dogleg — the corridors R1 searched — no other at-grade road's carriageway + pavement (the join road's beyond 12 m of
+  arc) comes within it (a plat lot's 3 m kerb crossing beside another street's dead end is the plat's; the small
+  generated town has one). Other manual parcels are not re-tested: `RoadGraph` exposes no lot polygons, so that stays
+  R1's placement guarantee and the book's placement refusal (§3.7a rule 5). The other road's pavement width is the
+  layout default 3 m (`RoadGraph`'s own `sidewalkM` is private).
 
 ### 2.5 Site lanes: the one definition of connectivity (`site_lane_graph.dart`)
 
@@ -725,6 +771,28 @@ The score rewards stalls up to 1.5·C* for `com` and 1.0·C* otherwise. Overflow
 - `A_min = requiredArea(spec)/floorsCap` (building_massing.dart:266).
 - `w, d ≥ 8 m`.
 
+**As built (R2 core, `site_program.dart`, `site_plan_generator.dart`):**
+- `classifyProgram` returns the program a row OFFERS; `planSite` runs the generators in fall-through order. Rows 0b
+  (legacy), 0c (blocked corridor, or a BUILT lot in slot 0's `joinCrossLot`) and 2 (mega) settle `kerbOnly` outright,
+  as do two §3.8 rows placed after 0c: no frame (degenerate) and a sliver (true D < 8 m or W < 6 m). "Unbuilt", "no
+  slot" and "a frontage-less site with no eligible road in reach" store no plan.
+- A small installation site (row 1, `W < 60 or D < 120`) is offered `yard` and carries `kPlanFallback`. Every program
+  lesser than the one offered carries `kPlanFallback`: a home demoted by a back-out rule or by §3.4, and a car park,
+  yard or installation that falls through (to a car park or to `kerbOnly`). Row 0c carries `kPlanAccessBlocked`.
+- **The yard rule (frozen, repair round):** `yardPlanOf` makes the car park attempt itself. It returns a `yard` plan,
+  or a `carPark` plan when the apron does not fit, or null exactly when neither fits. The dispatcher writes a
+  `carPark` result with `kPlanFallback` and counts `yardNoFit`. On null it counts `yardNoFit` and writes `kerbOnly`
+  with `kPlanFallback`, without calling `carParkPlanOf` again. `site_plan_dispatch_test` pins this with fake
+  generators.
+- Demotions are counted by rule in `SiteProgramStats` (`SiteDemotion`: `homeRoad`, `homeRoom`, `homeSwingMargin`,
+  `homeSkew`, `homeGeometry`, `installationTooSmall`, `installationNoFit`, `yardNoFit`, `carParkNoFit`,
+  `legacySlot`, `accessBlocked`, `mega`, `sliver`, `degenerate`). Back-out rules are checked in the order 1–4, and
+  only the first failure is counted.
+- Rule 1 reads the median from `RoadSpline.lanes`, which includes the decoration: a decorated avenue's planted 2 m
+  median is a median, so that avenue is `kerbOnly` for homes.
+- W is the frame's frontage length. D is the profile's deepest column plus its 0.3 m margin (the lot's true depth).
+  Thresholds compare with a 1e-6 m tolerance, so `16.6 = 4.5 + 12.1` holds whatever the float noise of the sum.
+
 ### 3.4 Home driveway and pad ("both")
 
 Cars on a home lot drive in forward, park nose-in, and leave by **backing out into the street** (§10.2 Q3; the
@@ -807,6 +875,34 @@ Against the plat, a downtown 24 × 32 lot gets 2 stalls side by side. Sprawl hou
 (city_generator.dart:1963-1967) get 2 stalls in tandem below 17.6 m and side by side from 17.6 m. A 12 m infill lot
 is kerb only, and so is any house lot whose slot 0 fails the §3.3 back-out rules.
 
+**As built (R2 core, `home_driveway.dart`):**
+- The drive is laid from the kerb point along the slot's ROAD normal `n`, because V5 and §3.4 make it straight along
+  the normal. `H` lies where the drive reaches frame `y = yT`, so `|K→H| = (k + yT)/(n·v)`, which is 7.0 m when
+  `v = n`. Every threshold is measured on the drive's real corners in the frame: the house starts 1 m past the
+  drive's largest frame x (or ends 1 m before its smallest), the outer edge is the drive's nearer corner to its lot
+  line, and "depth over the drive" is compared with the drive's deepest corner + 0.5 m. On a lot whose `v` is the
+  normal these are exactly the table's rules. On a skewed lot (≤ 10°) they are conservative, and the envelope never
+  meets the drive.
+- The house side is the side with more room, ties broken by `tieBreak('home-side')`. The same rule covers the
+  mirror.
+- `containsRect` checks the drive's on-parcel bounding box `[minX, maxX] × [0.05, deepest corner]` (0.05 m in
+  from the frontage line, where a corner would lie on the boundary) and the house rectangle
+  `[x0, x1] × [yT, D_house − 3]` GROWN by `kContainsInsetM` (0.05 m) on every side, so the emitted envelope (inside
+  that rectangle) stands at least 5 cm inside the lot and a millimetre re-sample cannot flip the fit (§4.4). A1
+  checks every home envelope with the exact `containsRect`.
+- The door is the envelope front midpoint `(x, yT)`. `pavementPt` is its projection onto `y = 0`, and the footpath
+  reuses those two points. `entranceNode` is `H`. The drive pave's two kerb corners are `blend` with `hT = 1` on join
+  0; every other point is `pad`.
+- A site set far back from its kerb (a footprint, or a lot on a curved road, where `k` reaches 40 m) has a throat
+  `K→H` longer than V5's 24 m via gap. It gets `ceil(|K→H|/24) − 1` evenly spaced vias on its chord. A1's random
+  lots found this, and `home_driveway_test` pins it.
+- The house envelope is the building footprint (§6.1 step 3, `fitFootprint` without A_min) fitted into the free side
+  region `[drive edge + 1, W − 1.5] × [yT, D − 3]` and set against the drive. §3.4's 8 × 8 m house is the home's own
+  minimum; the massing A_min is a whole-building figure (420 m² for r-low) that no home lot meets, so homes do not use
+  it. The width is capped at `2·(60 − |near edge − H.x| − |yT − H.y|)`, so the door stays within V11's 60 m of `H` on
+  any lot; below 8 m the variant is refused. Without this, a 250 m wide r-low lot put its door 63.55 m from `H` (V11).
+  `home_driveway_test` pins 60, 250 and 300 m wide lots.
+
 ### 3.5 Car parks (`car_park_packer.dart`)
 
 Everything is axis-aligned in the frame. Bays are 2.6 × 5.2 m, two-way aisles 6.0 m, the throat corridor has
@@ -870,6 +966,70 @@ Everything is axis-aligned in the frame. Bays are 2.6 × 5.2 m, two-way aisles 6
   attach to an existing aisle, never to a stall row.
 - **Lamps:** one post every 25 m along each back-to-back line, starting 12.5 m in.
 
+**As built (R2 car park / yard track, `car_park_packer.dart`):**
+- **Throat.** Laid from slot 0's kerb point straight along the frame's `v`, so V5's 10° rule is the slot's skew, tested
+  up front with a 0.002 margin on the cosine (the validator measures the normal from the road polyline). A slot more
+  skewed than that (for example a corner lot whose slot 0 fell back to its side street) gets no car park: §3.8's bend
+  for skews over 10° is not built. A `kJoinOffFrontage` slot gets no car park either (its corridor is §3.7's dogleg).
+- **Bend node (repair round).** A throat along `v` drifts `k·tan θ` sideways off the road normal by the frontage, and
+  §3.7a lays a set-back slot's corridor along that normal with a 4.5 m half width (1.5 m of slack beside a 6 m
+  throat). So on a site with `k ≥ 7` whose drift exceeds `kThroatStraightM` (0.1 m), the throat runs along the ROAD
+  normal to a bend node `B` where it meets `y = 0` (at least 7 m, so `yT = 0`), and the drive continues along `v`
+  from `B`: `x_J` is `B`'s x. F1/F2 add a `driveway` segment `B → J`; F3's first aisle and a yard's spine start at
+  `B`. The throat's pave is a quad along the normal (its kerb corners blend), and the drive's pave starts
+  `throatW/2·|nu|` in front of the frontage so the two meet. Stalls beside a drive that starts at `B` start past the
+  quad's far corner (V9). A site with `k < 7` drifts at most 1.23 m, inside a 6 m throat's slack, and keeps the
+  straight throat; a 7 m yard throat whose side edge would leave the corridor there gets no yard (§3.6 as built).
+  Pinned by `car_park_packer_test` (a set-back lot turned 5.7°, and 500 random sites: 43 of 116 car parks bend, every
+  pave corner off the parcel, and every pave edge just below the frontage line, within 4.5 m of the normal).
+- **Straight throat's kerb corners (R2 merge).** The straight throat's pave put its two kerb corners on the frame's
+  `y = −k`, so on a skewed site one corner stood up to `hw·tan 10°` (0.05–0.5 m) behind the kerb line, in the
+  carriageway and outside parcel ∪ corridor. The track's own test checks pave against the normal, not against
+  `sitePavingViolations`, which landed on the other track; merged, A1 reported 1 small-town and at least 25
+  random-site car parks and yards. The corners now sit on the kerb line through `K`, at `y = −k − (x − x_K)·nu/nv`. The rest of the
+  plan (nodes, segments, stalls, keys) is unchanged.
+- **Block interval.** The run of 0.5 m profile columns around `x_J` deep enough for the block, inset by the 0.3 m
+  profile margin (the example's `[0.3, 23.7]`). F1's block moves back until its first aisle's centre is at least `yT`
+  (the single-module example's aisle `[1, 7]`). F2 lays its modules from the depth of `x_J`'s column toward the
+  frontage, and its drive runs to the front-most aisle. F3 centres module 0's aisle on `x_J`, grows toward the side of
+  `x_J` with more room (ties by `tieBreak`), keeps stall rectangles at `y ≥ yT`, and for `m ≥ 2` puts the cross aisle at
+  the rear, with the other aisles' front ends as T ends at `y = 0.3`. F1/F2 rings put their cross aisles 3 m inside the
+  interval and reject a `J` within 1 m of one.
+- **Arms.** One arm packs from `x_J ∓ 1.3` (the example's 3.2, mirrored on a lot whose join is at its other end); with
+  both arms, the right arm starts at `x_J − 1.3` and the left arm stops there. On a ring's first aisle the segments on
+  either side of `J`, and the bays next to a cross aisle, keep the same clearances.
+- **Envelope rule.** The envelope is the free rectangle itself, not fitted to `buildingFootprint` (the worked example's
+  21 × 13 m requires that). The walk strip is applied to one rectangle, the union of the packed stall rows. The free
+  rectangle's 0.5 m columns start at the 1.5 m side setback, so the example's F3 measures 7.5 m wide, not 7.8 m (both
+  are under 8 m). The door is the envelope's front midpoint, and `entranceNode` is the nearest non-kerb node (a
+  candidate whose door is further than 60 m away is rejected).
+- **Footpath (§6.1 step 6, repair round).** The path runs from the pavement point on `y = 0` straight along `v`, then
+  jogs along `y = door.y` to the door. Its x is the door's own when that run crosses no stall or bay and runs along no
+  drive laid along `v` (a throat, a bend's drive, an F2 side drive), each kept 0.75 m (half the path) away. Aisles
+  count as gaps between rows and may be walked. Otherwise the x is the nearest end of a blocked run (ties to the smaller
+  x) whose run and jog stay inside the lot and whose jog crosses nothing. The pavement point is where the path meets
+  `y = 0`, not the door's projection. When no candidate is clear, the path runs straight (none on the test sets). In the
+  worked example the path runs up `x = 19.65`, beside the right T end.
+- **Score cap.** `max(capacityScoreCap, capacityTarget)`, so a spec whose `C*` lies under §3.3's minimum (4, 6 or 8)
+  is still rewarded up to that minimum. A `sharedSingle` throat keeps the first 8 stalls packed.
+- **Stall keys (V10, ask 8).** `row` is the row's index in the block's own module order (F1 from the frontage, F2 from
+  the rear, F3 from the spine). `bay` is the lattice place along its aisle segment, counted from the segment's start
+  (on a ring's first aisle, the segment ending at `J` counts from 4096). A dropped place keeps its number, so stalls on
+  one aisle keep their keys when another aisle changes (pinned by `car_park_packer_test`).
+- **Not built (left for a follow-up, open at the R2 merge report):** second joins (slot 1 or 2 when `W ≥ 80`, `≥ 60`
+  stalls, or a corner lot with `≥ 30` stalls), and §3.8's bend for skews over 10° (those slots fall to `kerbOnly`,
+  counted `carParkNoFit`). Neither is in the §8.3 or §9 R2 acceptance lists.
+- **Cost.** Generation is branch and bound. A candidate whose best possible score (stalls up to the cap, the free area
+  of the envelope's region `[1.5, W − 1.5] × [0, maxDepth]` less the part of its block inside that region, its drive) is
+  below the 1 % tie band of the best score so far is dropped before its envelope search, or while its stalls pack past
+  the cap. A candidate whose block leaves less than `max(A_min, 64 m²)` of that region is dropped as well. The
+  winner is the exhaustive enumeration's (pinned by `car_park_packer_test` against `carParkCandidatesOf`), and every
+  valid candidate's score is at most the bound it was held to (pinned: counting the whole block, which reaches past
+  the side setbacks, made that fail). Drafts are pooled per site (a rejected candidate's buffers are reused), module
+  layouts are built once, and the free-rectangle search keeps its scratch on the site and cuts each blocked rectangle
+  over only its own columns. A one-off A/B against the first landing (cf8f8b8) gave identical candidates (549,342) and
+  winners (30,926) on every straight site of the starter kit, both towns, the sprawl and the random sites.
+
 ### 3.6 Yard (industrial)
 
 A yard is a car-park candidate plus an 18 × 24 m truck apron beside the envelope's side or rear face.
@@ -879,6 +1039,49 @@ A yard is a car-park candidate plus an 18 × 24 m truck apron beside the envelop
 - The apron has a `circle` turnaround node of radius 12.5 m and two 3.5 × 15 m loading bays facing the envelope.
 - `admitsTrucks` is set and `truckTurnRadiusM` is 12.5.
 - If the apron does not fit, the car park is emitted alone, with trucks not admitted and no bays.
+
+**As built (R2 car park / yard track, deviation).** "An 18 × 24 m apron with a 12.5 m circle and 15 m bays" does not
+compose: 18 m holds neither a 25 m circle nor a 7 m lane plus a 15 m bay. The yard is built as one layout:
+- **Spine.** The 7 m throat `K → T` continues as a 6 m stall aisle `T → A` along `v` (trucks: `segMaxVehLenM` 12,
+  `kSegTruck`). It carries a stall row on the side away from the envelope, and optionally a row on the envelope side
+  that stops short of the bays.
+- **Apron.** At `A` the apron segment turns along `±u`, toward the side with more room, to the dead-end `circle` node
+  `Y` (radius 12.5 m). The apron pave runs from 3.5 m beyond the spine's centre on the far side to `Y` across, and from
+  18.5 m in front of the apron segment to 3.5 m behind it.
+- **Circle (repair round).** §3.7 step 4's rule applies: the circle's bounding square `Y ± 12.5` must pass
+  `containsRect`, or there is no yard. The square is paved as its own pave, so the envelope keeps clear of it.
+- **Apron length (second repair round, deviation from `kYardApronWidthM`).** A truck's only U-turn (V13) is the
+  circle, so no loading bay may lie inside its disc (§3.7: bays sit "on the circle's far edge", never inside): a truck
+  parked in a bay would block the turnaround. The bays' far edge is 11.5 m from the spine, so the apron is
+  `11.5 + 12.5` = 24 m long, not 18 m, and the pair's far edge stands a full radius short of `Y`. The apron never
+  shortens: a lot with less than `24 + 12.5 + 0.3` m on the apron's side gets no yard (the car park fallback). (The
+  first repair round kept 18 m and shortened it to 11.5 m on narrower lots. Both bays then lay inside the disc on
+  every yard, their nearest points 6.1 m and 10.1 m from `Y`.) Pinned by `car_park_packer_test`: every bay rectangle's
+  nearest point is at least 12.5 m from every circle node, on every yard of every test set.
+- **Bays.** Two 3.5 × 15 m bays sit on the apron segment, 4.5 m apart, the inner one just clear of the 7 m lane band
+  around the spine. Their noses point along `−v`. The envelope stands in front of them: the apron is beside the
+  envelope's rear face. The envelope search is limited to the apron's side of the spine, and a candidate whose envelope
+  does not meet the bays' front ends (within the 1 m clearance and one column) is rejected.
+- **Lamps (second repair round).** One post every 25 m, starting 12.5 m in, along the outer edge of the far stall row.
+  Where that row leaves the lot, along the near row's outer edge, or else along the spine's far edge. They always stand
+  on an accepted pave, so inside the lot (the first landing put them on the far row's line even when that row was
+  skipped: 3.7 m outside a 40 m lot joined 4.5 m from its side). Pinned: every lamp inside the parcel.
+- **Throat corridor (second repair round).** A straight throat (no bend, `k < 7`) has its side edge meet the frontage
+  `throatW/2 · nv + k · |nu|` off the road normal. For the 7 m yard throat on a skewed site with `k` just under 7 that
+  can exceed the 4.5 m §3.7a half width, and a bend would be shorter than 7 m. Such a slot gets no yard (and no car
+  park throat, though the 6 m one stays within 4.2 m). The test samples every pave edge where it crosses just below
+  the frontage line, not only the corners.
+- **Candidates.** The apron's `y` is taken at three values: the shallowest that leaves an 8 m envelope in front of the
+  bays, the one whose spine holds the capacity target, and the deepest whose circle square stays within the depth over
+  the apron and the circle (`y_A + 12.5 ≤ yRear`). No `num.clamp` is used: the bounds may meet within 1e-6 (pinned at
+  depth 40.6 m ± 3e-7). Each value is tried with and without the envelope-side row, scored by §3.5's formula with no
+  bias.
+- **Where yards land.** A generated town's industrial lots (30 × 46 m) cannot hold a 25 m circle square beside the
+  spine together with 18.5 m of bays in front of an 8 m envelope. Their yards fall back to car parks (`yardNoFit`):
+  0 yards in six generated towns of 4–6 blocks. The sprawl's larger industrial lots get 40 yards from 62 offers (42
+  with the 18 m apron).
+- **Fallback.** A slot with room < 4.5, or no yard candidate, falls to `carParkPlanOf`. V13's truck path is the throat,
+  the spine and the apron, reversing into the circle.
 
 ### 3.7 Installations (`installation_access.dart`)
 
@@ -950,6 +1153,43 @@ park band `y ∈ [0.3, 34]` (pinned by `installation_access_test`; no `ArgumentE
 The four starter sites each get a 56 m throat `K→F` across their easement lot, a yard circle with 4 bays, a staff
 car park with at least 12 stalls on its connector, and a gate on the fence line at `y = Df`.
 
+**As built (R2 installation track, `installation_access.dart`; pinned by `installation_access_test`):**
+- Step 1 on a skewed slot: `T` is placed at frame depth `T.y = max(0, 12 − k)` along the road normal `n`, so
+  `|K→T| = (k + T.y)/(n·v)` (exactly `max(12, k)` when `n = v`). The spine always leaves `T` along `v`; within 3° that
+  is the straight run, beyond it `T` is the bend. A slot whose normal is more than 60° off `v` gets no plan (a private
+  bound, not a §3.7 number). The throat's vias sit every 24 m from `K` (24 and 48 m on a 56 m throat); every other
+  access-road, connector and aisle segment gets vias the same way (V8).
+- Step 2: the dogleg is R1's corridor polyline exactly. One whose bend `T` does not lie in front of the frontage line
+  (`T.y > −1`) gets no plan. The dogleg trusts R1's corridor search (step 11) for its legs' road clearance and does
+  not re-test it: a `kJoinOffFrontage` slot R1 did not search (a fabricated one) can yield a plan
+  `sitePavingViolations` rejects.
+- Step 6: the staff car park is this file's own F3-form packer, not a call into `car_park_packer.dart` (another track's
+  file, whose F3 starts from a throat, not a connector). Aisles run along `y` at `x_G ± (18 + 16.4 i)`; aisle 0 carries
+  only its far row; the aisle end nodes lie 3 m inside the block pave (`y = 3.3` on the band's front), `C` splits aisle 0
+  when both stretches are ≥ 6 m and is its near end otherwise; `k ≥ 2` aisles are joined by cross aisles at both ends,
+  `k = 1` ends in two V7(b) T ends; stalls keep 3 m clear of every aisle end. Candidates `k = 1..8` × the block's far
+  edge on a 2.6 m lattice (stopping at the first that reaches the target). The candidate holding the most stalls up to
+  `clamp(C*, 12, 240)` wins, then the §3.5 score `10·min(n, C) − 2·max(0, n − C) − 0.5·(aisle + connector length) +
+  0.02·envelope area` (the target first: on a 780 m field the area term prices each metre of forecourt at 15.6 points
+  and stopped the car park at 10 stalls). Starter results: spaceport 2 aisles / 24 stalls / `Df` 46; solar farm and farm
+  2 / 14 / 46; pump 1 / 12 / 50.8.
+- Step 6 on a skewed throat: the car park band's front is `max(0.3, the throat footprint's highest y at |x − x_G| ≥
+  15 on the car park's side)`, so on a lot skewed 50–59° with `k ≤ 3` the block pave starts behind the throat instead
+  of overlapping it in front of aisle 0 (the aisle end nodes and stalls move with it).
+- Step 9 (with §6.1 steps 2–3 and §3.8): the envelope columns hold one rectangle, so it is the largest frame
+  rectangle inside the DepthProfile with its front on `y = Df` that spans the whole gate gap `gateX ± gateW/2`: 0.5 m
+  columns from 0.3 m inside each lot line, each column's depth the shallower of its edges, heights swept outward from
+  the gate (largest area, ties to the taller); a back edge the exact `containsRect` rejects is pulled in by bisection.
+  No such rectangle with both sides ≥ 8 m → no plan (`installationNoFit`). Nothing of the plan lies past `Df`, so no
+  pave blocks it. Not the unconstrained `largestFreeRect`: on L lots and triangles that is often a strip beside the
+  gate, and requiring it to hold the gate turned 96 of the 196 A1 installation plans into fallbacks; the gate-spanning
+  sweep keeps 156, every envelope inside its lot (the remaining 40 have under 8 m of lot behind the gate, or a gate
+  gap past a lot line). Pinned by `installation_access_test` (an L lot, a trapezoid, a shallow gate).
+- Paves: the throat in two rings split where it crosses the frontage line (the corridor stretch and the lot stretch,
+  kerb corners `blend`), one ring per access-road leg, the yard circle's circumscribed octagon, one ring over the bays,
+  the connector, and the car-park block. `pavementPt` is slot 0's kerb point moved 1.5 m along the normal; the footpath
+  runs from it to the gate. No fence-gap rows yet (R6 dressing).
+
 ### 3.7a Access easements (set-back lots behind auto lots)
 
 A set-back lot (§3.2: frontage line > 3.5 m behind the kerb) must cross whatever lies between its street and its
@@ -1013,15 +1253,30 @@ no lot is re-platted: the corridor crosses the fewest UNBUILT auto lots, and tho
    and grow first, and the site is then blocked when it is built (rule 1). §10.2 Q12 asks whether to reserve the
    corridor from the slot geometry alone instead.
 
+**Blocked sites on a generated town (R2 integration repair, a §10.2 Q12 input).** The sprawl audit pins
+`accessBlocked 65` on the 12-mile sprawl, so 65 set-back sites start with no visible access. Split by cause: **62**
+carry `kJoinCorridorBlocked` from slot placement. A hard obstacle (another manual parcel or an at-grade road) crosses
+every candidate corridor, and no ordering can help those. 51 of them are medium commercial manual sites. Only **3** (a
+station and two `c-med` sites) are blocked by rule 1: the generator zoned and grew the auto lot in front of them before
+its closing drain made that lot an easement. Draining between placing manual sites and zoning would move those 3. It
+would also change which lots the generator zones and grows, and so every generated town's buildings and the pins
+downstream of them. That is not done in R2, and the figure is reported here and in §10.1.
+
 **Starter kit result (pinned by `site_easement_test`):** easements are exactly `{lot-r0x1-l10, lot-r0x0-l0,
 lot-r0x0-r1, lot-r0x1-r5}` (spaceport, solar farm, farm, pump), and 78 of the 82 auto lots stay zonable.
+
+**As built (R2, `site_easement.dart` `easementOf`, the pure half):** the union of the crossed lots of the plan's CUT
+joins' graph slots (`joinOfRef`), ascending and once, taken per slot: a slot any of whose crossed lots is built
+contributes nothing and the plan's other slots keep theirs (row 0c blocks a site on slot 0 itself); none for a
+kerbside plan, and for a plan whose `graphStamp` is not the graph's `structureStamp` (its handles name another structure's
+joins; the book re-resolves it). A footprint join (`joinRef` −1) names no graph join and carries no easement.
 
 ### 3.8 Odd polygons
 
 | Case | Detection | Result |
 |---|---|---|
 | < 3 vertices, area < 30 m², zero frontage | frame | `none` / `kerbOnly`, legacy slot |
-| Sliver (inscribed depth < 8 m or W < 6 m) | profile | `kerbOnly` |
+| Sliver (inscribed depth < 8 m or W < 6 m) | profile | `kerbOnly` (as built, R2 core: the TRUE depth D, the profile's deepest column, not an inscribed depth; a pointed or spiky lot runs the generators, which fall back by fit) |
 | Triangle | profile tapers | generators run; usually `kerbOnly` below ~400 m² |
 | Concave L/U, self-touching | profile + exact `containsRect` | stalls never outside; pockets unused; never crashes |
 | Frontage < 2(m + 0.5) | spans empty on that road | side street, other road, then legacy |
@@ -1048,7 +1303,9 @@ lot-r0x0-r1, lot-r0x1-r5}` (spaceport, solar farm, farm, pump), and 78 of the 82
 - **Input signature** per site, `inSig = fnv1a32` over:
   - a program-version constant;
   - the polygon (1 cm), the frontage used, `graded`;
-  - every slot of the lot (piece's road id, `s`, right, room, flags, and the crossed lots' ids);
+  - every slot of the lot (piece's road id, `s`, right, room, flags, and the crossed lots' ids); **as built (R2
+    book repair):** the road's class and decoration too, which the seed and back-out rule 1 read and a decoration
+    upgrade changes without moving a slot;
   - the BUILT bit of each crossed lot, in `joinCrossLot` order (§3.7a: the one cross-site input);
   - the spec (`type`, `housing`, `jobs`, `siteWidthM`, `siteDepthM`, `siteKind`, group);
   - whether an alley candidate exists.
@@ -1081,6 +1338,83 @@ pave, a 2-point path, door, pavement). `site_access_chunk_test` pins ≤ 768 B. 
 as a deviation. **R2 owns the ≤ 512 B target:** its generation bench measures bytes per home site on the starter kit
 and the small town and either meets 512 B (for example with parametric home rows, §10.1) or reports the miss with
 the measured figure at R2 review.
+
+**Measured (R2 core, `bench/site_generation_bench_test.dart`, `flutter test` JIT, car park / yard / installation
+still stubs so their sites read `kerbOnly`):** on the sprawl fixture (`blocksAcross 4, seed 5, sprawlMiles 12`)
+30,561 built sites became 24,996 `homeDriveway`, 5,563 `kerbOnly` and 2 unplanned, in 952 ms in all. That is
+19.4 µs per home plan (budget 12) and 35.5 µs per `kerbOnly` plan (budget 5); each figure includes the site frame
+and depth profile (about 6 µs) and, for kerbside, the §6.1 free-rectangle envelope (about 4 µs). With the frame
+cached, `PlanBuilder` emission of a home plan is 8–10 µs of it (per-row boxed `List<num>` writes). Home demotions on
+that fixture: room 154, swing margin 411, skew 36, geometry 107. Bytes: 694 B per home site (budget 512 B: MISSED,
+down from R2a's 753 B because the footpath reuses the door and pavement points) and 254 B per kerbside site. **Both
+unit budgets and the 512 B home target are missed, and this is reported, not re-budgeted.** At the measured
+~31 µs/site average, the 127k-building town's drain would be about 4 s (> 3 s). The levers are typed per-column
+buffers in `PlanBuilder` (unboxed), a profile-free kerbside envelope, and parametric home rows (§10.1).
+
+**Corrected (repair round): that ~4 s is a LOWER BOUND, not the Σ this section asks for.** Two things make it low.
+While the car park, yard and installation generators are stubs, their sites are costed at the `kerbOnly` figure. And
+it is extrapolated from the 30.5k-site sprawl fixture, not measured on the 127k-building reference town. On the
+sprawl, the bench now also prints Σ with each stubbed site at the unit budget of the program it was offered (its
+`NoFit` demotion counts it). Re-run: 910 ms measured in all; 24,996 homes × 12 µs + 812 remaining `kerbOnly` × 5 µs
++ 4,542 car parks × 60 µs + 62 yards × 60 µs + 147 installations × 3 ms = **1.021 s**. That is 33.4 µs per site, or
+**≈ 4.24 s scaled to 127k buildings** (> 3 s). Homes (17.2 µs) and `kerbOnly` (34.9 µs) already run over their unit
+budgets, so the real drain will be higher once the tracks land. The drain is re-measured on the reference town, with
+every generator in place, at the R2 merge, and the load-time risk is reported to the user then (§10.1).
+
+**R2a-frozen file touched (R2 core):** `PlanBuilder`'s stall sort returns early when the rows are already in
+`(seg, s, side)` order. The base comparator breaks ties by index, so ordered rows sort to the identity: output bytes
+are unchanged and no API changed (an R2 budget change, no notice line).
+
+**Measured (R2 car park / yard track, `bench/car_park_bench_test.dart` and the core generation bench, `flutter test`
+JIT, frames and profiles warm, dispatcher time per written plan):** sprawl fixture 4,423 car parks at 150–215 µs and
+44 yards at about 220 µs (a noisy 44-site sample, 110–730 µs); small generated town 106 car parks at about 210 µs; built
+town 41 car parks at 220–310 µs. **The 60 µs unit budget is MISSED by about 3–4×**, and this is reported, not
+re-budgeted. The sprawl's car parks average 41 stalls, and writing one into `PlanBuilder` (boxed rows, the O(n²)
+stall-key collision scan) is about 60–100 µs of that time. Generation, the other part, is branch and bound (§3.5 as
+built) with no envelope search on dominated candidates: 1.5 free-rectangle searches per site on the sprawl. The core
+bench's measured sprawl drain went from 910 ms to 2.0 s with car parks and yards in place (installations still stubs),
+so the load-time risk of §10.1 grows. The levers are `PlanBuilder`'s typed per-column buffers and key index (core), and
+per-candidate allocation in the packer.
+
+**Re-measured (repair round, `bench/car_park_bench_test.dart`).** The figures above are dispatcher time per written
+plan. That time includes `PlanBuilder` emission (core's), and it was taken over a few hundred JIT-cold calls, which read
+3–5× slower than warm code. The bench now also times the packer alone (`carParkPlanOf` / `yardPlanOf`, nothing
+written) over exactly the sites the dispatcher offers each program, after 20,000 warm-up calls, best of three. A yard
+call includes its car park fallback. Packer time per call:
+
+| Fixture | car park (offered) | yard (offered) |
+|---|---|---|
+| built town | 11.0 µs (20) | 12.6 µs (21) |
+| small generated town | 15.5 µs (143) | 20.3 µs (10) |
+| sprawl | 24.7 µs (4,542) | 48.6 µs (62; 59–69 µs on other runs) |
+
+**The packer meets the 60 µs unit budget**, the sprawl's yards only just. Over the same sites, the first landing's
+packer measured warm at 18 / 41 / 46 µs for car parks and 600–1,100 µs for industrial sites. Most of that cost came
+from a few huge manual lots (solar, refinery), where every candidate packed 1,024 stalls before its door failed V11;
+the dispatcher offers those sites to the installation generator, not to these. Dispatcher time per written plan,
+including `PlanBuilder` emission, is still 110–270 µs, so the drain risk of §10.1 stands. It is re-measured at the R2
+merge.
+
+**Re-measured at the R2 merge (every generator in place, `bench/site_generation_bench_test.dart`, `flutter test`
+JIT, one run).** The bench now also plans the 20-mile sprawl (`blocksAcross 4, seed 5, sprawlMiles 20`, the studio
+perf town's sprawl setting), which has 118,824 sites and so stands in for the 127k-building reference town:
+
+| Fixture | Sites | Mix (kerbOnly / home / car park / yard / installation) | Measured, all in | Σ count × unit budget (no-fit at offered) |
+|---|---|---|---|---|
+| sprawl 12 mi | 30,561 | 952 / 24,996 / 4,427 / 40 / 144 | 1.49 s (48.9 µs/site) | 1.005 s (1.022 s) |
+| sprawl 20 mi | 118,824 | 4,688 / 102,242 / 10,529 / 900 / 464 | **5.03 s** (42.4 µs/site) | **3.33 s (3.38 s)** |
+
+Unit costs on the 20-mile sprawl, per written plan including emission: `kerbOnly` 19.9 µs (budget 5), home 21.5 µs
+(12), car park 125.8 µs (60), yard 124.3 µs (60), installation 309.8 µs (3 ms, met). **The 3 s drain is MISSED** on
+both measures: the Σ at unit budgets is 3.33 s, because homes are 86 % of sites, and the measured drain is 5.0 s (about
+5.4 s scaled to 127k). This is the load-time risk of §10.1, reported to the user rather than re-budgeted: a generated
+town or a load of that size spends about 5 s more in its progress phase. The levers are unchanged (typed per-column
+`PlanBuilder` buffers and key index, a profile-free kerbside envelope, parametric home rows).
+
+**Bytes per home site at the R2 merge: 694 B** (starter-sized built town 706 B; kerbside 254 B), against the 512 B
+target: **MISSED**. Meeting it needs fewer stored points per home (3 nodes, a 4-point pave, door and pavement at 26 B
+each) or parametric home rows, and both change what the frozen R2a columns hold for a home plan, so it is left for the
+user's §10.1 decision rather than done inside R2.
 
 **The drain budget is a sum, not a guess.** R1's sprawl audit already counts lots per road class on the sprawl
 audit fixture; R2 adds program counts, and the generation bench prints the mix and the sum next to the measured
@@ -1116,6 +1450,9 @@ class SiteAccessBook {                       // CitySim: late final SiteAccessBo
 - **Walk order** follows BuildingTable's: manual lots, auto lots, occupied cells, preceded in every walk by the
   sites whose slot 0 carries `kJoinEasement` (§3.7a rule 3). Slots are assigned on first appearance and freed slots
   are reused lowest-first. Slots are not saved, and nothing persisted refers to them.
+  **As built (R2 core, `siteContextsOf`):** occupied cells are walked in ascending anchor order, and abandoned cells
+  are skipped as BuildingTable skips them. `CitySim.occupiedCells` iterates a set and a map in insertion order, and a
+  loaded save can differ from a live town there, which §3.9 forbids. The book orders its cells the same way.
 - **The walk is resumable.** The book keeps a cursor over that walk order and a queue of sites to check. Each tick it
   spends at most `kSyncCheckUnitsPerTick` site checks (one `inSig` hash plus lookups each) and
   `kSyncUnitsPerTick` generation units (§4.3), then resumes from the cursor next tick.
@@ -1131,6 +1468,133 @@ class SiteAccessBook {                       // CitySim: late final SiteAccessBo
   of generation, at the end of `CityStarterKit.found`, and in the loading phase.
 - **The capture never generates.** A built site still awaiting its plan is `kerbside` to agents, and legacy to the
   renderer until R7.
+
+**As built (R2 book, `site_access_book.dart`).** The §4.1 API is exact, plus what tests and the dev hook need. Small
+deviations, each local:
+- **Budget constants live on the book** (`SiteAccessBook.defaultUnitsPerTick = 128`, `defaultChecksPerTick = 4096`,
+  `unlimited`): `site_access_constants.dart` is core's to edit and has no `kSyncUnitsPerTick` /
+  `kSyncCheckUnitsPerTick`. Units are charged per §4.3 from `classifyProgram`'s offer.
+- **Drains.** `CitySim.fromJson` ends with a full drain (`sync(maxUnits: unlimited, maxChecks: unlimited)`), so a
+  load re-derives every plan inside the loading phase and the layout reads the book's easements before any UI
+  action; `CityStarterKit.found` drains explicitly at its end. The generator has no separate hook: its closing
+  `advance(0.1)` runs inside generation progress, and **the first `sync` of a book drains in full** whatever budget
+  it is handed (the rule also covers any other colony built without either). (R2 book repair: the load drain first
+  rode on the first `advance`, which stalled the first gameplay frame and left `layout.easementOf` unset until then;
+  `site_access_persistence_test` now pins the drain before any advance.)
+- **Checks.** A site whose `Parcel`, spec and graph stamp are unchanged (identity, or equal values after a re-cut)
+  costs nothing. Otherwise the §3.9 signature is recomputed: the lot half (polygon at 1 cm, frontage, side-street
+  edge, graded, spec) and the slot half, read straight off the graph's join columns (the road's id, class and
+  decoration, `s`, side, dirs, room, flags, the kerb point and normal by their bits so V3 stays exact, the crossed
+  lots and their built bits). The class and decoration are there because the seed and back-out rule 1 read them and
+  a decoration upgrade moves no slot: hashed by id alone, a live book kept home drives on a newly divided avenue that
+  a load re-derives as `kerbOnly` (`site_access_sync_test`, live against fresh). Equal,
+  the plan is **re-resolved in place** (`graphStamp`, `graphLot`, `joinRef`, `joinPiece`, `joinRoadNo`; `rev`
+  kept, `sitesRev` not moved); different, the site re-plans. Sites whose slot crosses lots are always re-hashed
+  (their built bits). The signature is change detection only, never persisted: it hashes word by word, not byte by
+  byte. **Limit:** the side-street slot is hashed only into plans that use it (placing it for every corner lot cost
+  about a third of the drain); a corner car park, yard or installation inside a dirty box is re-planned instead.
+- **Triggers.** A structure change (`structureStamp`) queues the built lots in the dirty box, sorted by id (the
+  roads added, removed or changed, by id and samples, and any manual lot new to the graph, whose box covers the auto
+  lots it re-cut; inflated by `dirtyReachM` = `max(manualReachM + widest half width, 120 m)`), and restarts the
+  resumable walk, which re-resolves every other site: until the walk reaches it, a site outside the box is not stale
+  but is not current either (its stamp). A `layout.version` change restarts the walk; a change of the cheap built
+  key (placed, grown, grid counts, `CityLayout.useRevision`, `CitySim.siteBuiltRevision`, both new counters)
+  re-walks after the walk in flight. A finished walk drops every site it did not see. `siteBuiltRevision` moves on
+  every tier crossing and on every building removal that bumps no `layout.version` (burned out, cleared, flattened,
+  bulldozed, a zoneless grown cell dropped, a lost lot dropped, a cell abandoned or reoccupied, a grid re-key): the
+  counts alone missed a burnout cancelled by a growth start in the same tick.
+- **Measured (`bench/site_access_sync_bench_test.dart`, `flutter test` JIT, sprawl fixture, 30,559 plans, generator
+  stubs):** drain 1.08–1.35 s; steady tick 0.06 ms; one 1024-site chunk re-pack 1.3–2.0 ms; after a road edit
+  (warm) 14–15 budgeted ticks, a first tick of 12.7–17.6 ms and ~10 ms a tick on average (4096 checks, ~2,100
+  re-resolutions and 3–5 re-packed chunks). **The ≤ 2 ms road-edit tick is MISSED** (not re-budgeted): the checks
+  run at ~2.5 µs each and every re-resolved chunk is re-packed. The graph's own `structureStamp` read after the edit
+  costs 23–41 ms more (core's, once per structure change). Levers: fewer checks per tick while only re-resolving,
+  re-packing a chunk by typed `setRange` runs, and a stamp hashed incrementally.
+  **Design contradiction behind the miss (recorded, for the user, §10.1):** §4.2 step 1 says lots outside the dirty
+  box "are not touched", but the contract says otherwise. `isCurrentFor` is `graphStamp == g.structureStamp`, and
+  `joinRef` / `joinPiece` / `joinRoadNo` / `graphLot` index the rebuilt graph's columns. So after ANY road edit
+  every plan in the town is out of date until it is re-resolved and its chunk re-packed, wherever the edit was. On
+  the 127k town that walk is ~127k checks at 4096 per tick: about 31 ticks at ~10 ms each. The
+  choice is the user's: (a) accept a town-wide re-resolution spread over ticks, at a lower check budget while only
+  re-resolving (≤ 2 ms a tick, but plans away from the edit read kerbside to traffic for longer); (b) make the
+  contract edit-local: `isCurrentFor` compares a per-site slot tuple, not the whole-graph stamp, and join handles
+  become `(lotId, slot)` resolved through `RoadGraph.joinOfRef` at read time. That is an R2a contract change for the
+  Agent Traffic session. Until decided, the book does (a); the R2 integration repair below shapes its ticks.
+  **Re-measured at the R2 merge (every generator in place):** sprawl 12 mi (30,559 plans): drain 1.66 s, steady
+  tick 0.055 ms, a 1024-site re-pack 3.1 ms, a road edit settles in 14–17 ticks with a worst tick of 18–43 ms
+  (the first edit's includes the JIT and an installation re-plan). Sprawl 20 mi (118,823 plans, the 127k stand-in):
+  drain 5.5 s, steady tick 0.006 ms, a road edit settles in 50–53 ticks of about 12–15 ms on average, worst 24–36 ms.
+  The graph's `structureStamp` read after an edit is 24–29 ms (12 mi) and 79 ms (20 mi). **The ≤ 2 ms road-edit
+  tick stays MISSED by about 10×**; a single chunk re-pack alone is over budget, so no budget constant meets it
+  without the (a)/(b) decision above.
+  **R2 integration repair: option (a) built, no R2a contract change beyond one additive constructor.** Profiling
+  the edit ticks on the 20-mile sprawl showed where the time went: re-packing (copies and the GC they cause), then
+  the checks, then one-off first-tick work. Five levers, each local to the book:
+  1. A chunk whose rows were only re-resolved or renamed is re-published by `_derive`: its `f64`, `f32`, `u8` and
+     offset lists are SHARED with the chunk it replaces (neither is ever written), and only `i32` is block-copied
+     and patched (`graphStamp`, `graphLot`, `joinRef`, `joinPiece`, `joinRoadNo`). A graph lot's re-resolution
+     is recorded as a shared marker and written straight from the graph's join columns at flush, with nothing
+     allocated per site. A whole re-pack copies rows in runs, one `setRange` per column per run of consecutive rows,
+     and adopts its fresh lists. Both need `SiteAccessChunk.adopt` (§2.3 as built).
+  2. A check that recomputes a signature costs 8 check units, and an unchanged site costs 1. A re-resolving walk
+     therefore takes about 500 sites a tick, while a built-state re-walk that finds nothing changed keeps its 4096.
+  3. A budgeted sync re-packs at most ONE chunk whole (a write or a drop); the site that would re-pack a second
+     waits for the next tick. Easement-priority sites and drains are exempt.
+  4. The budgeted sync that diffs a structure change does only the diff and the priority sites. The queue and the
+     walk start on the next tick. The road diff is one two-pointer pass that also carries each road's signature
+     over: a road inserted mid-list had cost a lookup per road, 23 ms.
+  5. The walk reads the layout's lot lists as views (restarting if a manual lot is staked without a re-cut),
+     starts at most once per sync, and the sites a finished walk did not see are swept in budgeted steps (16 sites
+     a unit), not in one 8 ms loop.
+  **Measured after the repair** (`bench/site_access_sync_bench_test.dart`, `flutter test` JIT, five edits per
+  fixture, the first also warming the JIT). Each tick is classed by whether it wrote or dropped a plan:
+
+  | Fixture | Ticks per edit | Re-resolving ticks: p50 / p90 / max | Over 2 ms | Re-planning ticks: max |
+  |---|---|---|---|---|
+  | sprawl 12 mi (30,559 plans) | 67–72 (was 14–17) | 0.64–1.12 / 0.97–2.04 / 3.9–6.1 ms (cold first edit 1.67 / 2.4 / 11.3 ms) | 5–11 % (cold first edit 29 %) | 2.1–8.3 ms (cold 18 ms) |
+  | sprawl 20 mi (118,823 plans) | 257–260 (was 50–53) | 0.76–1.15 / 0.99–1.79 / 4.0–8.8 ms | 2–7 % | 2.5–6.7 ms |
+
+  Before the repair every tick of an edit ran 12–15 ms (worst 24–36 ms). **The typical tick now meets 2 ms at the
+  127k stand-in (p90 under 1.8 ms), but the WORST tick is still MISSED:** 2–7 % of ticks run 2–9 ms.
+  **Corrected at the R2 merge review:** the re-planning ticks are over 2 ms BY CONSTRUCTION, not by JIT or GC. A
+  budgeted tick may run one whole 1024-site re-pack (measured 1.0–3.3 ms) plus a generator run, and a skeptic's
+  re-run measured re-planning ticks at p50 2.1–5.2 ms on the 12-mile sprawl (worst 3.7–17.5 ms) and re-resolving
+  ticks at p99 3.0–4.0 ms on the 20-mile one. Meeting 2 ms needs a patch or append into a chunk that does not copy
+  all its rows, or re-packs deferred to ticks that do nothing else; the spikes on re-resolving ticks were not
+  profiled. The price of (a) is latency: after an
+  edit on the 127k town a plan away from the edit reads kerbside to traffic for about 260 ticks, not 50 (legal,
+  §4.2 step 3). Option (b) stays open for §10.1. The `structureStamp` hash (79 ms at 20 mi) is left out of the
+  tick figures, as before: it is the graph rebuild's cost (the rebuild itself is 5–10 s there), paid by its first
+  reader.
+  **Built-state latency (recorded, also for §10.1):** the built-state trigger (placed, grown, tier, removal) does not
+  queue the site that changed; it re-walks the colony after the walk in flight, at 4096 checks a tick. On the 127k
+  town a newly placed or grown building can therefore wait about 31 ticks (a fresh walk) to about 62 ticks (one in
+  flight, then its own) for its plan, against §4.3's "placing 500 zoned houses completes in 8 ticks", which holds
+  only where the walk is short (the starter kit and small towns drain in one tick). Until then the site reads
+  kerbside to traffic (legal, §4.1). The lever, not taken: queue the ids of buildings placed, grown or cleared through
+  the `CitySim` hooks ahead of the walk, as the dirty box is.
+- **Chunks** are re-packed from published rows (`SiteChunkLayout` + `SiteAccessChunk.packed`, the R2a builder's
+  own packing entry points; `site_access_sync_test` pins the re-pack byte-equal to `PlanBuilder.build`), so a
+  copy-on-write never regenerates a neighbour. (R2 integration repair: in runs, into lists `SiteAccessChunk.adopt`
+  takes; a chunk only re-resolved or renamed shares every column but `i32` with its predecessor, §4.1 below.) An anchor the grid reports twice is walked once.
+- **`onLotsRenamed`** is order-independent (every new id is taken from the ids before the call) rather than "sorted
+  old-id order": the book may not iterate the map (hygiene), and the result is the same. It re-keys the easement
+  LOTS as well as the sites, so a renamed crossed lot answers `easementOf(newId)` at once, not after the next sync
+  (R2 book repair). Both `CitySim` call sites (`_carryRenamedLots`, and `_carryLotsAcross` on the claim path) are
+  pinned by `site_access_sync_test` ("CitySim rename hooks"): a renamed built lot keeps its slot and `sitesRev` does
+  not move, before any sync.
+- **An easement-priority site inside the dirty box** is checked as a queued site in the priority pass and leaves the
+  queue there, so it is current at once and costs the check budget nothing (R2 book repair).
+- **`corridorHits`** tests the sites whose slot 0 carries `kJoinEasement` or `kJoinOffFrontage`: the stretch of each
+  cut join's throat outside the site's own lot, within `kAccessCorridorHalfM`. `claimSite` (with or without
+  `checkAccess`) and `siteBlockedReason` refuse such a plot.
+- **The inspector string** is `CitySim.lotInspectorNote(lotId)` (`access easement for <site label>`), shown by the
+  edit overlay when zoning or placing on the lot is refused.
+- **Extras:** constructor `generators`, `easements` (the `easementOf` rule, fakes in tests) and `validate`;
+  `lastSync` (`SiteAccessSyncStats`), `debugCorridorHits`, `debugRepack`, `sitePlanJson` (the dev hook
+  `ext.acro.citygame site=plan&id=`), `CitySim.debugTickProbe` (the tick-order test).
+- The refusal half of `site_easement_test` is `site_easement_refusal_test.dart`, so the two tracks' files do not
+  collide.
 
 ### 4.2 Triggers (cheap O(1) checks decide whether to walk)
 
@@ -1180,6 +1644,11 @@ checks per tick bound the signature walk (§4.2). The easement-priority sites (�
 check budget, and their count is pinned by the sprawl audit. The benches confirm a worst tick ≤ 3 ms in steady
 play and ≤ 2 ms for the sync of a road edit on the 127k town.
 
+**As built (R2 integration repair, §4.1):** a check that recomputes a signature costs 8 of the 4096 check units and
+an unchanged site costs 1. A budgeted sync re-packs at most one chunk whole. The sync that diffs a structure change
+does only that and the priority sites. The post-walk sweep costs one unit per 16 sites. A sync with either budget
+unlimited is a drain and is not shaped. The worst-tick figure for a road edit is still missed (§4.1).
+
 ### 4.4 Save and load
 
 - **Nothing new is saved.** `CitySim.toJson` (city_sim.dart:4479-4590) is unchanged. Manual lots already persist
@@ -1196,6 +1665,34 @@ play and ≤ 2 ms for the sync of a road edit on the 127k town.
     can move is a seed flip at a 0.5 m boundary of `W` or `D`. Any key change fails the test, and the message
     prints that lot's distance from the nearest boundary, so a fixture that lands on one is diagnosed at once. The
     fixture is fixed, so the result never varies from run to run.
+
+**As built (R2 book).** Two findings, both outside the book:
+- A save restores placed buildings only from the utility catalogue (`CitySim.fromJson`), so a zone building PLACED
+  on a lot (the built-town fixture, the generator's towns) is dropped by a load. The persistence fixtures therefore
+  use GROWN buildings (`town(grown: true)`; the generated town's placed zone buildings are converted to grown ones
+  before the round trip). Not a site access defect; reported.
+- **R2 core finding:** on the curved-road fixture (324 lots on two S-bend streets), one lot, `lot-r2-r21`, flips
+  `kerbOnly` (demotion `homeGeometry`) → `homeDriveway` over a load: the home generator's §3.4 fit decides
+  differently on the millimetre re-sample (W 23.28716 → 23.28792 m, D 31.96215 → 31.96174 m, slot 0 unchanged at
+  s = 535.5). Every other lot keeps its program and stall keys. **CLOSED at the R2 integration repair:** the cause
+  was not `W` or `D` but the house containment test, `profile.containsRect(hx0, yT, hx1, hy1)` flush with the
+  polygon; live, every variant failed only that test by under a millimetre, loaded, it passed (the other margins
+  are metres). The house rectangle is now tested GROWN by `kContainsInsetM` (0.05 m) on every side (stricter: the
+  envelope stands at least 5 cm inside the lot), which moves the decision far beyond the re-sample error; the lot
+  stays `kerbOnly` both live and loaded. (The first repair shrank the tested rectangle instead, which admitted
+  envelopes up to 5 cm OUTSIDE their lot, e.g. random site `cell-rand-446`; corrected at the R2 merge, and A1 now
+  checks every home envelope.) The sprawl audit's demotions did not
+  move (no Appendix A entry), and the test now expects no flip at all (`isEmpty`): this section's acceptance is met.
+- **Live against loaded (R2 book repair).** Every other case compares two fresh drains. `site_access_persistence_test`
+  also syncs `city.siteAccess` in budgeted ticks through a grown house avenue, a road edit that renames lots, a
+  decoration upgrade, a tier change and a burnout, then compares every plan per site id (`sitePlanJson`, programs,
+  `rev` and stall keys) against `drained(roundTrip(city))`. That is the comparison that catches a live book
+  diverging from what a load re-derives.
+- **Load order as built (R2 book repair):** `fromJson` → `recompute()` → `agents.restore` → `siteAccess.sync`
+  (full drain, inside `fromJson`) → first `advance` (a no-op sync) → traffic building sync. The first gameplay frame
+  no longer carries the drain; `site_access_persistence_test` checks the loaded book is complete, byte-identical and
+  wired to `layout.easementOf` before any advance.
+- **The `lot-r2-r21` pin** became `isEmpty` at the R2 integration repair (above).
 
 ---
 
@@ -1451,6 +1948,20 @@ spun by `−SiteFrame.buildingHeading` (§3.1), so envelope x/y ARE the building
    edge exactly, with no style input (S2 holds).
 6. **The footpath** runs from the door to `pavementPt` (its projection onto `y = 0`, or the gate), 1.5 m wide. It
    moves to the nearest gap between stall rows rather than crossing one, and never runs along a throat.
+
+**As built (R2 core, `site_envelope.dart`, shared by every generator):**
+- `SiteEnvelope` holds the `env*`, `envFrontInset`, `gateX` and `gateW` columns, in frame metres.
+- `largestFreeRect(profile, W, blocked:, clearanceM:, yMin:, xMin:, xMax:)` is step 2. It is a histogram of free depth
+  over the 0.5 m columns, one pass per candidate front (`yMin` and each blocked rectangle's far edge + the clearance).
+  Ties go to the smaller front, then the smaller x.
+- `fitFootprint(free, footW, footD, minArea:)` is step 3: centred across, FRONT-aligned (§6.2), and null under 8 m a
+  side or `A_min`.
+- `envelopeDoor(env)` is step 5. `lampsAlong(x0, x1, y)` is the §3.5 lamp rule. `depthOver(profile, x0, x1)` is the
+  true depth §3.3/§3.4 measure.
+- A kerbside plan's envelope is the free rectangle inside the 1.5 m side setbacks, fitted to `buildingFootprint`
+  (the free rectangle itself when 8 × 8 m does not fit). Its door is that envelope's front midpoint (the polygon's
+  interior point when there is none). Its pavement point is slot 0's kerb point moved `kPavementPointInsetM = 1.5`
+  along the slot normal, which covers footprint sites too (V11's 3.5 m, pinned by `site_plan_generator_test`).
 
 ### 6.2 Massing inside the envelope (only for `siteSlot ≥ 0`, so the legacy path is untouched)
 
@@ -1783,6 +2294,12 @@ separate site columns (site ordinal + site lane) in `AgentFrame`, with `AgentFra
 Limbo plans are freed at the end of the sub-step in which their last car leaves. No site change edits a road route in
 flight, and `stats.replans` still counts only network re-plans.
 
+**As built (R2 book):** the book keeps no limbo. A cleared or re-planned site's old row stays readable in the chunk
+object traffic already holds (published chunks are never written), so traffic's limbo is a reference to that chunk
+and site index; `changedSince(sitesRev)` names every site that appeared, went or changed `rev`. A re-resolution
+against a new graph (same `rev`) and a rename move no `sitesRev`: traffic sees those through `isCurrentFor` and its
+own `onLotsRenamed`.
+
 ### 7.7 Plan-doc and D-number impacts (agent-traffic.md; text is theirs to apply)
 
 | Item | Change |
@@ -2097,8 +2614,10 @@ class DepthProfile { double depthAt(double x); bool containsRect(Rect r); double
 | R4 turns frontage-less manual sites and grid-cell buildings to face their access road (saved and generated sites) | one heading rule (§3.1) so envelope, gate and door can never disagree with the massing; `envelope_axes_test`; behind the knob until screenshots are reviewed; §10.2 Q10 |
 | Easements cost the player zonable lots (4 of 82 in the starter kit) | fewest-lots corridor, centred; inspector explains why; §10.2 Q12 |
 | An auto lot zoned and grown in front of an unbuilt set-back site blocks that site's access later | built crossed lots make the plan `kPlanAccessBlocked` (visible in the inspector); §10.2 Q12 offers reserving corridors from geometry alone |
-| The 127k-town drain exceeds 3 s once the real program mix is measured | budget is Σ count × unit cost, printed by the bench in R2; if it exceeds 3 s the added load time is reported to the user before R2 merges |
+| The 127k-town drain exceeds 3 s once the real program mix is measured | budget is Σ count × unit cost, printed by the bench in R2; if it exceeds 3 s the added load time is reported to the user before R2 merges. **Happened (R2 merge, §3.10):** on the 118,824-site 20-mile sprawl the Σ is 3.33 s and the measured drain 5.0 s; the road-edit tick is 12–36 ms against 2 ms (§4.1) and homes pack 694 B against 512 B. **For the user at the R2 merge (all still MISSED, reported, not re-budgeted):** drain 5.0–5.5 s against 3 s (Σ at unit budgets 3.33 s); unit costs per written plan `kerbOnly` 19.9 µs (5), home 21.5 µs (12), car park 125.8 µs (60), yard 124.3 µs (60); 694 B per home site (512 B). The road-edit tick after the integration repair is below |
+| An auto lot zoned and grown in front of a set-back site by the generator, before its closing drain | on the 12-mile sprawl 65 sites start `accessBlocked`, but only 3 because of that order: 62 are corridor-blocked by manual parcels or at-grade roads (§3.7a); a mid-generation drain would move 3 and change every generated town's buildings, so it waits for §10.2 Q12 |
 | A road edit leaves plans stale for a few ticks | dirty-box diff, 4096 checks per tick; stale plans read as kerbside to traffic and keep drawing (§4.2) |
+| A road edit makes EVERY plan not current (`isCurrentFor` compares the whole-graph `structureStamp`; join refs index the rebuilt graph), contradicting §4.2 step 1 "lots outside the box are not touched"; the ≤ 2 ms road-edit tick was missed at ~10–17 ms (§4.1 as built) | **(a) built at the R2 integration repair** (§4.1): shared-column re-publishes, signature checks at 8 units, one whole re-pack a tick, the diff tick split off, a budgeted sweep. On the 20-mile sprawl a re-resolving tick is now p50 0.8–1.2 ms and p90 1.0–1.8 ms, but 2–7 % of ticks still reach 2–9 ms (JIT and GC pauses; re-plan ticks add a generator run), so the worst-tick budget is still missed. The price is latency: plans away from an edit read kerbside for ~260 ticks, not ~50. **User decision still open:** accept (a) as built, or (b) an edit-local contract (per-site slot tuple for currency, `(lotId, slot)` join handles resolved at read), an R2a contract change for the Agent Traffic session |
 | Lot access moves for most lots (narrow-lot drive side) and shifts routed-model pictures | R1 alone, re-pins ledgered, economy tests as the gate; mid-block wide lots move only by the quantum |
 | Conservative windows cost small corner lots their driveway on short blocks | sprawl audit pins `kJoinLegacy` and program counts; starter kit required at 100% for its four sites; an exact bound from traffic can replace the reserve later |
 | Generated towns look different (front car parks push shops back; houses narrow beside drives) | F2 bias for W < 40 keeps street walls; homes fall back to kerb parking; screenshots before R7 |
@@ -2211,4 +2730,9 @@ reason, commit.
 | R1 | road_traffic_model_test.dart:90 (one-way loop) | 808 | 823 | same: 119.5 + 100 + 400 + 100 + 103.5 | 5eb031b |
 | R1 | road_traffic_model_test.dart:128 (avenue, same kerb) | 192 | 177 | same | 5eb031b |
 | R1 | road_traffic_model_test.dart:131 (street, far kerb) | 192 | 177 | same | 5eb031b |
+| R2 merge | site_program_sprawl_audit_test.dart `_audit` | 8 keys (planned 30,559, unplanned 2, homeDriveway 24,996, five home rules) | the full mix: those, plus none 0, kerbOnly 952, carPark 4,427, yard 40, installation 144, installationTooSmall 0, installationNoFit 3, yardNoFit 22, carParkNoFit 130, legacySlot 37, accessBlocked 65, mega 1, sliver 1, degenerate 0 | every generator landed; the core pins were unchanged by the merge | R2 merge |
+| R2 merge | site_plan_generator_test.dart ("the built town grows home driveways", blocked sites) | `> 0` | `0` on `town()`, plus a new old-save case (a crossed lot built around the refusal) that blocks exactly `lot-m0` | the founded kit's book makes the four §3.7a lots easements before `town()` zones, so none is built; the stub installation made none | R2 merge |
+| R2 merge | site_easement_refusal_test.dart (growth skip, built crossed lot, corridor refusal) | red once merged | green | the tests assumed the stub installation (no real easement or corridor on the founded kit); each now unhooks or fakes the real book where it stages "before" | R2 merge |
+| R2 merge | traffic_fixture `town()` (no pin) | 82 built lots | 78 built lots | the four easement lots refuse zoning; no traffic test pin moved (full suite green) | R2 merge |
+| R2 integration repair | site_access_persistence_test.dart ("200 curved-road lots", home fit flips) | `['lot-r2-r21']` | `isEmpty` | the §3.4 house containment is now tested with the rectangle grown by `kContainsInsetM` (stricter by 5 cm), so the load's millimetre re-sample no longer flips that lot (§4.4); the sprawl audit's demotions did not move | R2 integration repair |
 | R1 | test/traffic/live_rebuild_test.dart (traffic-owned) | green | red, then green | cars stood inside the new crossing's stop line at the edit (moved 5.2 m) and trips ended on slots at 151.5 m, 1.5 m past the new street. A real traffic bug R1 exposed (RouteRemapper clamped into the lane, dragging cars onto the car behind). MERGE GATE CLEARED: fixed on the traffic side (cars in a new junction box carried onto their connector, an appended leg when a destination's access moved, a no-overlap guard, a stop at a lane's start counted 1 m in from a connector), merged with R1 in one window; no skip. The test's drive-on window grew 900 s → 1800 s: the new test street re-hangs hand-drawn lot-m0/lot-m3 onto other roads (their effective frontage, §3.1), so their trips detour | 14a7bef, 6f1784f, merge a309f85 |

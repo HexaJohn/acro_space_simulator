@@ -113,6 +113,28 @@ void main() {
         reason: 'the opening position must not be a death spiral');
   });
 
+  test('the founding leaves exactly the four access easement lots unzonable',
+      () {
+    // docs/plans/site-access.md §3.7a: the spaceport, solar farm, farm and
+    // pump reach their streets across one unbuilt auto lot each, and the kit
+    // drains its site access book before the player can zone.
+    for (final body in ['earth', 'moon']) {
+      final city = founded(body: body);
+      final easements = {
+        for (final lot in city.layout.autoParcels)
+          if (city.layout.easementOf?.call(lot.id) != null) lot.id,
+      };
+      expect(easements,
+          {'lot-r0x1-l10', 'lot-r0x0-l0', 'lot-r0x0-r1', 'lot-r0x1-r5'},
+          reason: body);
+      for (final id in easements) {
+        expect(city.layout.setUse(id, ParcelUse.residential), isFalse);
+        expect(city.lotInspectorNote(id), startsWith('access easement for '));
+      }
+      expect(city.layout.autoParcels.length - easements.length, 78);
+    }
+  });
+
   test('the kit works on an airless world too', () {
     final city = founded(body: 'moon');
     expect(city.hasSpaceport, isTrue);

@@ -27,6 +27,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'city_layout.dart';
+import 'hash32.dart';
 import 'parcel.dart';
 import 'road_catalog.dart';
 import 'road_junction.dart';
@@ -124,6 +125,11 @@ class RoadNode {
   }
 }
 
+/// The lazily hashed [RoadGraph.structureStamp], one cell per structure.
+class _StructureStamp {
+  int? value;
+}
+
 /// Where a lot is entered from: a road, the arc position on it, and the
 /// directions of travel along it from which the lot can be reached (and in
 /// which it can be left).
@@ -212,11 +218,110 @@ class RoadGraph {
     required this.rootDirs,
     required this.overrides,
     required this.overridesSignature,
+    _StructureStamp? stamp,
   })  : _roadNo = roadNo,
         _lotNo = lotNo,
         _parcels = parcels,
         _sidewalkM = sidewalkM,
-        _sideStreetJoins = sideStreetJoins ?? {};
+        _sideStreetJoins = sideStreetJoins ?? {},
+        _stamp = stamp ?? _StructureStamp();
+
+  /// The [structureStamp] cell, shared by every copy sharing this graph's
+  /// structure ([withOverrides], [refreshedFor]), so it is hashed once.
+  final _StructureStamp _stamp;
+
+  /// A deterministic, web-safe 32-bit stamp of this graph's STRUCTURE
+  /// (docs/plans/site-access.md §2.3, §4.1): its roads (id, class, dressing,
+  /// direction, samples), nodes, pieces, edges, lots, join slots, crossed
+  /// lots and kerb windows, and nothing an override or a road rename changes.
+  ///
+  /// Equal for graphs that [sharesStructureWith] each other; a graph rebuilt
+  /// after any structure change stamps differently (up to a 32-bit hash
+  /// collision). A rebuild of an unchanged layout stamps the same, which is
+  /// right: every join handle and lot index it gives is the same. Hashed on
+  /// the first read and kept; stamps are per platform (doubles are hashed by
+  /// their bits in the platform's byte order). Signed 32-bit, as a chunk's
+  /// `graphStamp` column holds it.
+  int get structureStamp => _stamp.value ??= _hashStructure();
+
+  int _hashStructure() {
+    var h = kFnvOffset32;
+    int word(int x) => h = mul32(h ^ (x & 0xFFFFFFFF), 0x01000193);
+    void ints(List<int> xs) {
+      word(xs.length);
+      for (var i = 0; i < xs.length; i++) {
+        word(xs[i]);
+      }
+    }
+
+    void f64(Float64List xs) {
+      word(xs.length);
+      ints(xs.buffer.asUint32List(xs.offsetInBytes, xs.length * 2));
+    }
+
+    void f32(Float32List xs) {
+      word(xs.length);
+      ints(xs.buffer.asUint32List(xs.offsetInBytes, xs.length));
+    }
+
+    word(roads.length);
+    for (var r = 0; r < roads.length; r++) {
+      final road = roads[r];
+      word(fnv1a32(road.id));
+      word(road.roadClass.index);
+      word(road.decoration.index);
+      word(road.reversed ? 1 : 0);
+      f64(roadRecs[r].e);
+      f64(roadRecs[r].n);
+    }
+    ints(roadFirstPiece);
+    word(nodes.length);
+    for (final node in nodes) {
+      final at = Float64List(2)
+        ..[0] = node.at.e
+        ..[1] = node.at.n;
+      f64(at);
+      word(node.legs.length);
+    }
+    ints(pieceRoad);
+    f64(pieceS0);
+    f64(pieceS1);
+    ints(pieceFrom);
+    ints(pieceTo);
+    ints(edgeFrom);
+    ints(edgeTo);
+    ints(edgePiece);
+    ints(edgeForward);
+    f64(edgeLength);
+    word(lotIds.length);
+    for (final id in lotIds) {
+      word(fnv1a32(id));
+    }
+    ints(lotPiece);
+    f64(lotS);
+    ints(lotDirs);
+    f64(lotE);
+    f64(lotN);
+    ints(lotJoinStart);
+    ints(joinPiece);
+    f64(joinS);
+    ints(joinDirs);
+    ints(joinRight);
+    ints(joinFlags);
+    f32(joinRoomM);
+    f64(joinKerbE);
+    f64(joinKerbN);
+    f64(joinNormE);
+    f64(joinNormN);
+    ints(joinCrossStart);
+    ints(joinCrossLot);
+    ints(kerbWindows.start);
+    f64(kerbWindows.lo);
+    f64(kerbWindows.hi);
+    // Signed, as `SiteAccessChunk.graphStamp` stores it (Int32), so the two
+    // compare with ==.
+    return (h & 0xFFFFFFFF).toSigned(32);
+  }
 
   /// Two road ends this close in plan (and at one level:
   /// [CityLayout.levelsSeparated] says they meet) are one node — the
@@ -797,6 +902,7 @@ class RoadGraph {
         rootDirs: rootDirs,
         overrides: overrides ?? this.overrides,
         overridesSignature: overridesSignature ?? this.overridesSignature,
+        stamp: _stamp,
       );
 
   /// The id a road was LAID under, before any junction split it: the id up

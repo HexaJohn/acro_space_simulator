@@ -475,6 +475,16 @@ class PlanBuilder {
     final seg = _site[SiteCol.stallSeg];
     final s = _site[SiteCol.stallS];
     final side = _site[SiteCol.stallSide];
+    // Generators emit in order: a stable sort of ordered rows is the
+    // identity, so skip the copies (R2 generation budget, §3.10).
+    var ordered = true;
+    for (var i = 1; i < n && ordered; i++) {
+      var c = seg[i - 1].compareTo(seg[i]);
+      if (c == 0) c = _f32(s[i - 1]).compareTo(_f32(s[i]));
+      if (c == 0) c = side[i - 1].compareTo(side[i]);
+      if (c > 0) ordered = false;
+    }
+    if (ordered) return;
     final order = List<int>.generate(n, (i) => i);
     order.sort((a, b) {
       var c = seg[a].compareTo(seg[b]);

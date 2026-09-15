@@ -329,6 +329,31 @@ class SiteAccessChunk {
         offsets: Int32List.fromList(offsets),
       );
 
+  /// The site access book's re-publishing entry point (R2 integration
+  /// repair, docs/plans/site-access.md §4.1 as built): NOT for traffic or any
+  /// other caller. Like [SiteAccessChunk.packed], but it TAKES the typed
+  /// lists instead of copying them, so a chunk re-published copy-on-write
+  /// can share the columns it did not change with the chunk it replaces
+  /// (a re-resolution rewrites only `i32`). The caller must never write any
+  /// list it hands over, nor any list it took from another chunk, again:
+  /// every chunk sharing them is published. The site id list is copied.
+  factory SiteAccessChunk.adopt({
+    required List<String> siteId,
+    required Float64List f64,
+    required Float32List f32,
+    required Int32List i32,
+    required Uint8List u8,
+    required Int32List offsets,
+  }) =>
+      SiteAccessChunk._(
+        siteId: List.unmodifiable(siteId),
+        f64: f64,
+        f32: f32,
+        i32: i32,
+        u8: u8,
+        offsets: offsets,
+      );
+
   SiteAccessChunk._({
     required List<String> siteId,
     required Float64List f64,

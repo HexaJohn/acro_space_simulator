@@ -1132,10 +1132,23 @@ class CityLayout {
   /// ids are deterministic; [regenerate] re-applies it to the fresh cut.
   final Map<String, ParcelUse> _uses = {};
 
-  /// Zone a parcel. Returns false for an unknown id.
+  /// The site an unbuilt auto lot is an ACCESS EASEMENT for, or null
+  /// (docs/plans/site-access.md §3.7a rule 2): assigned by the colony when it
+  /// creates its site access book (`SiteAccessBook.easementOf`); null in a
+  /// bare layout, where no lot is an easement.
+  String? Function(String lotId)? easementOf;
+
+  /// Bumped by every [setUse] that changed a lot: zoning moves no [version],
+  /// but a grown lot's building follows its zone, so the site access book
+  /// keys its re-check on this.
+  int useRevision = 0;
+
+  /// Zone a parcel. Returns false for an unknown id, and for an access
+  /// easement lot (§3.7a) and any [use] but [ParcelUse.unzoned].
   bool setUse(String id, ParcelUse use) {
     final p = _byId[id];
     if (p == null) return false;
+    if (use != ParcelUse.unzoned && easementOf?.call(id) != null) return false;
     final updated = p.copyWith(use: use);
     if (p.manual) {
       final i = _manual.indexOf(p);
@@ -1157,6 +1170,7 @@ class CityLayout {
     } else {
       _uses[id] = use;
     }
+    useRevision++;
     return true;
   }
 
