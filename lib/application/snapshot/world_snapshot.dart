@@ -1701,9 +1701,14 @@ class BuildingSnapshot {
     /// empty envelope) keeps the legacy centroid placement exactly.
     SitePlacement? placement,
   }) {
-    final t = placement != null && placement.hasEnvelope
-        ? _planTransform(city, placement, siteRadiusM)
-        : _parcelTransform(city, parcel, siteRadiusM);
+    // The plan, or null when there is nothing to stand on. Narrowed ONCE,
+    // into a nullable of its own, so nothing below reads it through a
+    // promoting bool (the pinned SDK miscompiles that natively).
+    final plan =
+        placement != null && placement.hasEnvelope ? placement : null;
+    final t = plan == null
+        ? _parcelTransform(city, parcel, siteRadiusM)
+        : _planTransform(city, plan, siteRadiusM);
     final dir = t.position.normalized;
     // Stand the building INSIDE its own terrace.
     //
@@ -1724,12 +1729,8 @@ class BuildingSnapshot {
     // paving. The renderer inflates it by the style's setbacks and fits the
     // massing inside, so nothing it draws can stand on the drive.
     final foot = buildingFootprint(parcel, spec);
-    final w = placement != null && placement.hasEnvelope
-        ? placement.widthM
-        : foot.width;
-    final d = placement != null && placement.hasEnvelope
-        ? placement.depthM
-        : foot.depth;
+    final w = plan == null ? foot.width : plan.widthM;
+    final d = plan == null ? foot.depth : plan.depthM;
     return BuildingSnapshot(
       id: parcel.id,
       type: spec.type,
@@ -1778,7 +1779,9 @@ class BuildingSnapshot {
     /// and stands on its envelope inside the cell (§3.1, §10.2 Q10).
     SitePlacement? sitePlan,
   }) {
-    final planned = sitePlan != null && sitePlan.hasEnvelope;
+    // Narrowed ONCE, into a nullable of its own: nothing below reads the
+    // plan through a promoting bool (the pinned SDK miscompiles that).
+    final plan = sitePlan != null && sitePlan.hasEnvelope ? sitePlan : null;
     final radius = siteRadiusM ?? body.radius;
     final half = city.grid / 2.0;
     final gx = (cell % city.grid) - half;
@@ -1804,22 +1807,22 @@ class BuildingSnapshot {
     // offsets directly rather than from its grid cell. The elevation is the
     // cell's own: a plan never moves a building off its pad, and the
     // envelope is at most half a cell away.
-    final t = planned
-        ? placement.place(
-            radius: radius,
-            lat: lat,
-            lon: lon,
-            east: sitePlan.centreE,
-            north: sitePlan.centreN,
-            elevation: elevation,
-          )
-        : placement.building(
+    final t = plan == null
+        ? placement.building(
             radius: radius,
             lat: lat,
             lon: lon,
             gridX: gx.round(),
             gridY: gy.round(),
             cell: CitySim.cellM,
+            elevation: elevation,
+          )
+        : placement.place(
+            radius: radius,
+            lat: lat,
+            lon: lon,
+            east: plan.centreE,
+            north: plan.centreN,
             elevation: elevation,
           );
     // A cell fronts its north edge (`CitySim.parcelForCell`: the 2D map has
@@ -1828,9 +1831,9 @@ class BuildingSnapshot {
     // Its plan knows better — it found the road the cell really fronts — so
     // a served cell takes the plan's heading instead (§3.1).
     final q = t.orientation *
-        (planned
-            ? Quaternion.axisAngle(Vector3.unitZ, -sitePlan.headingRad)
-            : _legacyBuildingSpin(0));
+        (plan == null
+            ? _legacyBuildingSpin(0)
+            : Quaternion.axisAngle(Vector3.unitZ, -plan.headingRad));
     return BuildingSnapshot(
       id: '$cell',
       type: spec.type,
@@ -1845,12 +1848,12 @@ class BuildingSnapshot {
       qz: q.z,
       lat: trueLat,
       lon: trueLon,
-      siteWidthM: planned
-          ? sitePlan.widthM
-          : spec.siteMetres(cellM: CitySim.cellM).width,
-      siteDepthM: planned
-          ? sitePlan.depthM
-          : spec.siteMetres(cellM: CitySim.cellM).depth,
+      siteWidthM: plan == null
+          ? spec.siteMetres(cellM: CitySim.cellM).width
+          : plan.widthM,
+      siteDepthM: plan == null
+          ? spec.siteMetres(cellM: CitySim.cellM).depth
+          : plan.depthM,
       siteKindIndex: spec.siteKind.index,
       colorArgb: spec.colorArgb,
       siteSlot: siteSlot,
