@@ -162,7 +162,7 @@ void main() {
       }
     });
 
-    testWidgets('offers its three views; the rename field only while Adjust '
+    testWidgets('offers its four views; the rename field only while Adjust '
         'has a road', (t) async {
       final city = colony();
       final id =

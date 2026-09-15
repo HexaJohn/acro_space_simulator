@@ -4,6 +4,7 @@
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
 import 'package:acro_space_simulator/domain/colony/city/city_config.dart';
+import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_starter_kit.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -48,9 +49,17 @@ void main() {
     }
     final pop0 = c.population;
 
-    // Thirty minutes of colony time in the tick's own 0.5 s steps.
+    // Thirty minutes of colony time in the tick's own 0.5 s steps. A lot has
+    // grown when it came up past its foundations at any point: a shop that
+    // stands can sit right at them, sliding back while commercial demand
+    // dips below the threshold and coming up again when it recovers, so the
+    // last tick alone says more about demand than about the gates.
+    final most = <String, double>{};
     for (var i = 0; i < 3600; i++) {
       c.advance(0.5);
+      c.grownParcels.forEach((id, g) {
+        if (g > (most[id] ?? 0)) most[id] = g;
+      });
     }
 
     final r = c.trafficReadout;
@@ -66,7 +75,7 @@ void main() {
         ];
     List<String> grown(ParcelUse use) => [
           for (final p in zoned(use))
-            if ((c.grownParcels[p.id] ?? 0) >= 0.3) p.id,
+            if ((most[p.id] ?? 0) >= CitySim.parcelConstructFrac) p.id,
         ];
     final homes = zoned(ParcelUse.residential);
     final shops = zoned(ParcelUse.commercial);

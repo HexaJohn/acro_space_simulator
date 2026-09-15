@@ -441,13 +441,31 @@ void main() {
     });
   });
 
-  test(
-    'roadTraffic.advance never runs in an agent colony',
-    () {},
-    skip:
-        'E3a: lands in city_sim.dart after the road side\'s R2 merge '
-        '(docs/plans/agent-traffic.md, slice 2 "Agreed with the road side")',
-  );
+  test('roadTraffic.advance never runs in an agent colony (E3a), and runs in '
+      'any other', () {
+    AgentTuning.reset();
+    final agents = town(agentTraffic: true);
+    final routed = town();
+    var agentsPhases = 0, routedPhases = 0;
+    agents.debugTickProbe = (p) {
+      if (p == 'roadTraffic.advance') agentsPhases++;
+    };
+    routed.debugTickProbe = (p) {
+      if (p == 'roadTraffic.advance') routedPhases++;
+    };
+    final agentsPasses = agents.roadTraffic.passes;
+    for (var i = 0; i < 240; i++) {
+      agents.advance(0.5);
+      routed.advance(0.5);
+    }
+    expect(agentsPhases, 0);
+    expect(agents.roadTraffic.passes, agentsPasses,
+        reason: 'the routed model never republished in the agent colony');
+    expect(agents.trafficReadout, same(agents.agents.readout));
+    expect(agents.trafficReadout.hasRun, isTrue);
+    expect(routedPhases, 240);
+    expect(routed.roadTraffic.passes, greaterThan(0));
+  });
 }
 
 /// Every graph lot's reach, the agents' against the routed model's: the

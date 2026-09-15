@@ -186,6 +186,17 @@ void main() {
       expect(r.fireReach(id), r.reach.fireReach(id));
       expect(r.deliveryReach(id), r.reach.deliveryReach(id));
       final i = g.lotNoOf(id)!;
+      // The lots an access easement crosses (the road side's R2) take no
+      // zoning and stand empty: unzoned ground, whose noise nobody asks
+      // about, reads as quiet plain ground — the routed model's rule.
+      if (!city.parcelBuildings.containsKey(id) &&
+          lot.use == ParcelUse.unzoned) {
+        expect(city.layout.easementOf?.call(id), isNotNull);
+        expect(r.noiseOf(id), 0);
+        expect(r.landValueOf(id),
+            RoadNoise.landValue(noise: 0, pollution: city.pollution));
+        continue;
+      }
       final noise = sampler.noiseAt(Vec2(g.lotE[i], g.lotN[i]), emission);
       final piece = g.lotPiece[i];
       final bonus = piece < 0 ? 0.0 : g.roadBonus[g.pieceRoad[piece]];

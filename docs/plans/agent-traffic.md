@@ -2839,6 +2839,11 @@ Drawing a new road never teleports a car: routes remap through the split, lots r
   - **V** and the **Flow chip** both open the Traffic tool on Lane speed. The `traffic` panel (E29) routes to the tool.
   - A vehicle pick comes before the site sheet in the default inspect path, and on Lane speed. Routes' road click is unchanged.
 - **E3a and the tick pin.** E3a lands after the road side's R2 merge: city_sim.dart, city_layout.dart and city_starter_kit.dart stay untouched until then. The pin becomes "siteAccess.sync runs before agents.advance, and before roadTraffic.advance whenever that runs" (site_access_tick_order_test).
+  - **Landed on top of R2 (88c13c1).** `CitySim.advance` runs `agents.advance` in an agent colony and `roadTraffic.advance` in any other, never both, and `debugTickProbe` names only the phase that runs.
+  - `agent_reach_test` pins it over 240 ticks: no routed phase, and `roadTraffic.passes` frozen, in the agent colony; one routed phase a tick in the other.
+  - **R2 fallout in our tests.**
+    - The four easement lots stay unzoned, and their noise reads 0 by the routed rule (traffic_readout_test).
+    - The economy probe counts a lot as grown when it reached its foundations at any point in the run. A standing shop can sit right at 0.30 and slide under it while commercial demand dips.
 - **Wire and capture.** R3 owns world_snapshot.dart and city_nodes.dart. Any wire or capture change slice 2 needs stays small and is announced first.
 - **Economy rules.** Reach rules, `RoadNoiseSampler` and the land-value and tax formulas do not change in R2–R4. Reach builds on join slot 0 (`lotPiece`/`lotS`/`lotDirs`).
 - **The economy probe.** From R2, the four starter easement lots (lot-r0x1-l10, lot-r0x0-l0, lot-r0x0-r1, lot-r0x1-r5) refuse growth, so the probe must not count on them.

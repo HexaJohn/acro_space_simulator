@@ -24,11 +24,30 @@ import 'site_access_book_fixtures.dart';
 
 void main() {
   test('the book syncs before the routed traffic and the agents', () {
-    final city = starterKit(agentTraffic: true);
-    final phases = <String>[];
-    city.debugTickProbe = phases.add;
-    city.advance(0.5);
-    expect(phases, ['siteAccess.sync', 'roadTraffic.advance', 'agents.advance']);
+    // The rule, whichever traffic runs: the sync first, before
+    // agents.advance, and before roadTraffic.advance whenever that runs. An
+    // agent colony skips the routed model (E3a); any other runs it.
+    void syncsFirst(List<String> phases) {
+      expect(phases.first, 'siteAccess.sync');
+      for (final later in ['agents.advance', 'roadTraffic.advance']) {
+        final i = phases.indexOf(later);
+        if (i >= 0) expect(i, greaterThan(phases.indexOf('siteAccess.sync')));
+      }
+    }
+
+    final agents = starterKit(agentTraffic: true);
+    final withAgents = <String>[];
+    agents.debugTickProbe = withAgents.add;
+    agents.advance(0.5);
+    syncsFirst(withAgents);
+    expect(withAgents, ['siteAccess.sync', 'agents.advance']);
+
+    final routed = starterKit();
+    final withRouted = <String>[];
+    routed.debugTickProbe = withRouted.add;
+    routed.advance(0.5);
+    syncsFirst(withRouted);
+    expect(withRouted, ['siteAccess.sync', 'roadTraffic.advance']);
   });
 
   test('a plan made this tick is visible to the agents this tick', () {

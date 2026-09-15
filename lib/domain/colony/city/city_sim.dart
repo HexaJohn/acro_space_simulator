@@ -1714,10 +1714,17 @@ class CitySim {
     // made this tick is visible to the agents this tick.
     debugTickProbe?.call('siteAccess.sync');
     siteAccess.sync(this, roadGraph);
-    debugTickProbe?.call('roadTraffic.advance');
-    roadTraffic.advance(dt);
-    debugTickProbe?.call('agents.advance');
-    if (agents.enabled) agents.advance(dt);
+    // E3a (docs/plans/agent-traffic.md §12.1, slice 2): an agent colony's
+    // readout is the agents' own, every answer of it, so the routed model has
+    // nothing left to say there and does not run. `roadGraph` still syncs the
+    // graph on read.
+    if (agents.enabled) {
+      debugTickProbe?.call('agents.advance');
+      agents.advance(dt);
+    } else {
+      debugTickProbe?.call('roadTraffic.advance');
+      roadTraffic.advance(dt);
+    }
     advanceParcelGrowth(dt);
     advanceParcelTraffic();
     advanceParcelFires(dt);
@@ -3464,8 +3471,9 @@ class CitySim {
     return book;
   }();
 
-  /// Tests only: told each phase of [advance]'s parcel-city step by name,
-  /// in order (`siteAccess.sync`, `roadTraffic.advance`, `agents.advance`).
+  /// Tests only: told each phase of [advance]'s parcel-city step that runs,
+  /// by name, in order: `siteAccess.sync`, then `agents.advance` in an agent
+  /// colony or `roadTraffic.advance` in any other (E3a).
   void Function(String phase)? debugTickProbe;
 
   /// Bumped whenever what stands on a site changes in a way the building
