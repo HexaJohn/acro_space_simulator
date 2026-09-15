@@ -572,7 +572,7 @@ class AgentTrafficReadout implements CityTrafficReadout {
         noise = carried;
       } else {
         final before = sampler.work;
-        noise = sampler.noiseAt(Vec2(g.lotE[i], g.lotN[i]), b.emission);
+        noise = sampler.noiseAtEN(g.lotE[i], g.lotN[i], b.emission);
         work += sampler.work - before;
       }
       final piece = g.lotPiece[i];

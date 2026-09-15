@@ -21,8 +21,10 @@
 /// clears a draw, and a head whose light did not change is not written at
 /// all.
 ///
-/// The lamps hang beside the baked head on the tiles' own mast until the
-/// road agent bakes masts without lit lamps in agent colonies (C3).
+/// The lamps hang on the tiles' own mast, in the head's place: while a frame
+/// carries agent traffic the tiles bake the masts with no lamp heads
+/// (`CityMeshKnobs.agentSignals`, C3), and this layer draws only for such a
+/// frame.
 ///
 /// [SignalHeadPlacement] is the arithmetic, testable without a renderer;
 /// [SignalHeadLayer] owns the draws.
@@ -63,10 +65,7 @@ class SignalHeadPlacement {
   static const double mastSideM = 1.6;
   static const double mastHeightM = 4.6;
 
-  /// Half the baked head's width across the road, the gap our lamps keep
-  /// from it, and a lamp's edge.
-  static const double bakedHalfM = 0.55;
-  static const double besideM = 0.4;
+  /// A lamp's edge.
   static const double lampM = 0.3;
 
   /// Each colour's height above the mast's top, red uppermost; indexed by
@@ -149,15 +148,15 @@ class SignalHeadPlacement {
         ..[f + 6] = ux
         ..[f + 7] = uy
         ..[f + 8] = uz;
-      // The lamps hang in toward the road, clear of the baked head.
-      const across = bakedHalfM + besideM + lampM / 2;
+      // The lamps stack on the mast's top, where the baked head hung before
+      // the tiles left it off for agent traffic.
       for (var c = 0; c < 3; c++) {
         final rise = lampRiseM[c];
         TrafficRoad.writePose(
             _lit[3 * h + c],
-            tx - sx * across + ux * rise,
-            ty - sy * across + uy * rise,
-            tz - sz * across + uz * rise,
+            tx + ux * rise,
+            ty + uy * rise,
+            tz + uz * rise,
             sx, sy, sz, dx, dy, dz, ux, uy, uz);
       }
     }

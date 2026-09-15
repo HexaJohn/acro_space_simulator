@@ -169,15 +169,11 @@ void main() {
       final up = Vector3(fr[9 * h + 6], fr[9 * h + 7], fr[9 * h + 8]);
       for (var c = 0; c < 3; c++) {
         final offset = centreOf(heads.matricesOf(c)[h]) - top;
-        // Clear of the baked head's half width by the gap, to the lamp's
-        // centre; an unlit lamp keeps its place, only its scale goes. (An
-        // instance matrix is single precision: good to a hundredth of a
-        // millimetre this near the anchor.)
-        expect(offset.dot(side),
-            closeTo(-(SignalHeadPlacement.bakedHalfM +
-                    SignalHeadPlacement.besideM +
-                    SignalHeadPlacement.lampM / 2),
-                1e-4));
+        // On the mast, in the head's place (the tiles bake no head under
+        // agent traffic); an unlit lamp keeps its place, only its scale
+        // goes. (An instance matrix is single precision: good to a
+        // hundredth of a millimetre this near the anchor.)
+        expect(offset.dot(side).abs(), lessThan(1e-4));
         expect(offset.dot(up), closeTo(SignalHeadPlacement.lampRiseM[c], 1e-4));
         expect(offset.dot(dir).abs(), lessThan(1e-4));
       }
