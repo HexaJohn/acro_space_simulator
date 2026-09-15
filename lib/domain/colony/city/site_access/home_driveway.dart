@@ -234,10 +234,36 @@ HomeDrivewayPlan? homeDrivewayPlanOf(SiteContext ctx) {
         !profile.containsRect(SiteRect(hx0, yT, hx1, hy1))) {
       continue;
     }
+    // §6.1 step 3: the house envelope is the footprint fitted into that free
+    // side region, set against the drive. §3.4's 8 × 8 m house is the home's
+    // own minimum (the massing A_min is a whole-building figure no home lot
+    // meets). Its width is capped so the door, the front-edge midpoint, stays
+    // within V11's reach of H however wide the lot is: |door − H| ≤
+    // |near edge − H.x| + width/2 + |yT − H.y| ≤ kEntranceMaxM.
+    var width = hx1 - hx0, depth = hy1 - yT;
+    final spec = ctx.spec;
+    if (spec != null) {
+      final foot = buildingFootprint(ctx.parcel, spec);
+      final fit = fitFootprint(
+          SiteRect(hx0, yT, hx1, hy1), foot.width, foot.depth);
+      if (fit != null) {
+        width = fit.width;
+        depth = fit.depth;
+      }
+    }
+    final h = frame.toLocal(
+        Vec2(slot.kerbE + ne * throatM, slot.kerbN + nn * throatM));
+    final nearX = right ? hx0 : hx1;
+    final reach = kEntranceMaxM - (nearX - h.e).abs() - (yT - h.n).abs();
+    width = math.min(width, 2 * (reach - kGenEpsM));
+    if (width < kHomeMinHouseM - kGenEpsM) continue;
+    final ex0 = right ? hx0 : hx1 - width;
+    final ex1 = right ? hx0 + width : hx1;
+    final ey1 = yT + depth;
     return HomeDrivewayPlan._(
       variant: variant,
       houseOnRight: right,
-      envelope: SiteEnvelope(hx0, yT, hx1, hy1),
+      envelope: SiteEnvelope(ex0, yT, ex1, ey1),
       frontY: yT,
       throatLengthM: throatM,
     );

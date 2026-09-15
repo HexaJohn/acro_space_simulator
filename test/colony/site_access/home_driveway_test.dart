@@ -12,6 +12,7 @@ import 'package:acro_space_simulator/domain/colony/city/road_graph.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/home_driveway.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_access_constants.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_access_plan.dart';
+import 'package:acro_space_simulator/domain/colony/city/site_access/site_envelope.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_join.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_plan_builder.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_plan_generator.dart';
@@ -247,6 +248,33 @@ void main() {
     expect(p.ptE(via), closeTo(slot.kerbE, 1e-9));
     expect((p.ptN(via) - slot.kerbN).abs(), closeTo(20.5, 1e-9));
     expect(p.nodeCount, 3);
+  });
+
+  test('a very wide home lot fits the house to its footprint beside the drive: '
+      'door within 60 m of H (V11)', () {
+    final long = RoadGraph.of(layoutOf(const [
+      RoadSpline(id: 'r0', controls: [Vec2(0, 0), Vec2(600, 0)]),
+    ]));
+    final hw = RoadClass.street.halfWidth;
+    for (final w in [60.0, 250.0, 300.0]) {
+      final y0 = hw + 3;
+      final parcel = Parcel(id: 'cell-wide', polygon: [
+        Vec2(300 - w / 2, y0), Vec2(300 + w / 2, y0),
+        Vec2(300 + w / 2, y0 + 40), Vec2(300 - w / 2, y0 + 40),
+      ]);
+      final ctx = SiteContext.ofFootprint(long, parcel, rLow);
+      final (p, stats) = plan(ctx, laneSpans: SyntheticSites.laneSpansOf(long));
+      expect(p!.program, SiteProgram.homeDriveway, reason: 'W $w $stats');
+      final foot = buildingFootprint(parcel, rLow);
+      expect(p.envX1 - p.envX0, lessThanOrEqualTo(foot.width + 1e-6),
+          reason: 'W $w');
+      expect(p.envX1 - p.envX0, greaterThanOrEqualTo(kHomeMinHouseM),
+          reason: 'W $w');
+      final door = p.entrancePt, h = p.entranceNode;
+      final gap = math.sqrt(math.pow(p.ptE(door) - p.nodeE(h), 2) +
+          math.pow(p.ptN(door) - p.nodeN(h), 2));
+      expect(gap, lessThanOrEqualTo(kEntranceMaxM), reason: 'W $w');
+    }
   });
 
   group('§3.3 back-out eligibility, demotions counted by rule', () {

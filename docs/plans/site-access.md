@@ -873,6 +873,12 @@ is kerb only, and so is any house lot whose slot 0 fails the §3.3 back-out rule
 - A site set far back from its kerb (a footprint, or a lot on a curved road, where `k` reaches 40 m) has a throat
   `K→H` longer than V5's 24 m via gap. It gets `ceil(|K→H|/24) − 1` evenly spaced vias on its chord. A1's random
   lots found this, and `home_driveway_test` pins it.
+- The house envelope is the building footprint (§6.1 step 3, `fitFootprint` without A_min) fitted into the free side
+  region `[drive edge + 1, W − 1.5] × [yT, D − 3]` and set against the drive. §3.4's 8 × 8 m house is the home's own
+  minimum; the massing A_min is a whole-building figure (420 m² for r-low) that no home lot meets, so homes do not use
+  it. The width is capped at `2·(60 − |near edge − H.x| − |yT − H.y|)`, so the door stays within V11's 60 m of `H` on
+  any lot; below 8 m the variant is refused. Without this, a 250 m wide r-low lot put its door 63.55 m from `H` (V11).
+  `home_driveway_test` pins 60, 250 and 300 m wide lots.
 
 ### 3.5 Car parks (`car_park_packer.dart`)
 
@@ -1170,6 +1176,10 @@ sprawl, the bench now also prints Σ with each stubbed site at the unit budget o
 **≈ 4.24 s scaled to 127k buildings** (> 3 s). Homes (17.2 µs) and `kerbOnly` (34.9 µs) already run over their unit
 budgets, so the real drain will be higher once the tracks land. The drain is re-measured on the reference town, with
 every generator in place, at the R2 merge, and the load-time risk is reported to the user then (§10.1).
+
+**R2a-frozen file touched (R2 core):** `PlanBuilder`'s stall sort returns early when the rows are already in
+`(seg, s, side)` order. The base comparator breaks ties by index, so ordered rows sort to the identity: output bytes
+are unchanged and no API changed (an R2 budget change, no notice line).
 
 **The drain budget is a sum, not a guess.** R1's sprawl audit already counts lots per road class on the sprawl
 audit fixture; R2 adds program counts, and the generation bench prints the mix and the sum next to the measured
