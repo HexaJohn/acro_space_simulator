@@ -4,11 +4,9 @@
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
 import 'dart:math' as math;
-import 'dart:typed_data';
 
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/lane_graph.dart';
-import 'package:acro_space_simulator/domain/colony/city/traffic/route_cost.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/traffic_time.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/traffic_tuning.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/vehicle_table.dart';
@@ -23,13 +21,20 @@ import 'traffic_fixture.dart';
 /// them, and every vehicle is carried onto the new graph where it was.
 ///
 /// - A car on a lane stays on the same road (or the piece of it the split
-///   cut), in the same direction and lane, at the same place.
+///   cut), in the same direction and lane, at the same place — or, if it
+///   stood where the new street's junction box now is, on the connector
+///   straight through that box, on its road's own movement, still where it
+///   stood.
 /// - A car crossing a junction stays on that movement, as far through it
 ///   as it was, on the new graph's connector for it.
-/// - Every element's list is relinked in order ([VehicleTable.relinkAll]).
+/// - Every element's list is relinked in order ([VehicleTable.relinkAll]),
+///   and no car had to be moved off another to get there.
 /// - A frame is published on the new ids before any sub-step runs.
 ///
-/// Then they all drive on, and none is re-planned or taken off for it.
+/// Then they all drive on, and none is re-planned or taken off for it. A
+/// trip whose lot the new street re-cut may find its building's access
+/// moved on from where its route stops, and drive on to it by an appended
+/// leg (D36's `siteRetarget`) — never a re-plan.
 void main() {
   setUp(() => AgentTuning.commuteRatePerResident = 0.002);
   tearDown(AgentTuning.reset);
@@ -83,10 +88,14 @@ void main() {
         'impossible');
     expect(a.stats.despawnEdit, 0);
     expect(occupancyErrors(t), isEmpty, reason: 'every list relinked');
+    expect(a.stats.remapNudges, 0, reason: 'every car kept its own place');
+    var intoBox = 0;
     for (final e in before.entries) {
       final h = e.key;
       expect(t.isLive(h), isTrue, reason: 'handle $h');
-      e.value.expectCarriedTo(_Place.of(lg, t, h & 0xFFFFF), 'handle $h');
+      final now = _Place.of(lg, t, h & 0xFFFFF);
+      if (!e.value.onConnector && now.onConnector) intoBox++;
+      e.value.expectCarriedTo(now, 'handle $h');
     }
     final f = a.frame;
     expect(f.graphRev, a.graphRev, reason: 'a frame on the new ids at once');
@@ -96,15 +105,25 @@ void main() {
       expect(f.s[sl], t.s[sl]);
     }
 
-    // And on they drive: every one of them off the road by arriving.
+    // And on they drive: every one of them off the road by arriving. The
+    // town is saturated by then — its spawn queue full — and the new street
+    // re-hangs some of the starter kit's hand-drawn lots on other roads
+    // (their nearest-road rule sees the split pieces afresh), so trips to
+    // them drive on round the block by an appended leg: half an hour of
+    // agent time, not a quarter.
     final stuck = a.stats.despawnStuck + a.stats.despawnWedge;
-    for (var i = 0; i < 1800 && before.keys.any(t.isLive); i++) {
+    for (var i = 0; i < 3600 && before.keys.any(t.isLive); i++) {
       a.advance(0.5);
     }
     expect(before.keys.where(t.isLive), isEmpty, reason: 'all arrived');
     expect(a.stats.despawnEdit, 0);
-    expect(a.stats.replans, 0);
+    expect(a.stats.replans, 0, reason: 'an appended leg is not a re-plan');
+    expect(a.stats.remapNudges, 0);
     expect(a.stats.despawnStuck + a.stats.despawnWedge, stuck);
+    // ignore: avoid_print
+    print('live rebuild: $intoBox of ${before.length} cars carried into the '
+        'new box, ${a.stats.appendedLegs} legs appended, '
+        '${a.stats.remapNudges} nudged');
   });
 }
 
@@ -122,16 +141,14 @@ class _Place {
   factory _Place.of(LaneGraph lg, VehicleTable t, int sl) {
     final el = t.elem[sl];
     final s = t.s[sl].toDouble();
+    final at = elementPoint(lg, el, s);
     if (el < lg.laneCount) {
       final e = lg.laneEdge[el];
-      final pt = Float64List(2);
-      RouteCost.pointOn(lg, e, lg.edgeLaneS0[e] + s, pt, 0);
       return _Place._(false, _roadOf(lg, e), lg.edgeForward[e] == 1,
-          lg.laneIdx[el], '', false, -1, pt[0], pt[1], s, 0);
+          lg.laneIdx[el], '', false, -1, at.e, at.n, s, 0);
     }
     final c = el - lg.laneCount;
     final from = lg.conFromLane[c], to = lg.conToLane[c];
-    final at = lg.graph.nodes[lg.conNode[c]].at;
     return _Place._(
         true,
         _roadOf(lg, lg.laneEdge[from]),
@@ -154,7 +171,8 @@ class _Place {
   final bool toForward;
   final int toLane;
 
-  /// The place on a lane, or the node a connector crosses, colony metres.
+  /// Where its front is, on its lane or its connector's path, colony
+  /// metres ([elementPoint]).
   final double e, n;
 
   /// Metres along the element, and a connector's length.
@@ -165,13 +183,26 @@ class _Place {
 
   /// Checks [now], this vehicle on the rebuilt graph, is where it was.
   void expectCarriedTo(_Place now, String who) {
+    final moved = math.sqrt(
+        (now.e - e) * (now.e - e) + (now.n - n) * (now.n - n));
+    if (!onConnector && now.onConnector) {
+      // It stood in the new junction's box: on the movement straight
+      // through it from one piece of its road to the next, in its own lane
+      // on one side of the node or the other.
+      expect(_descends(now.road, road) && _descends(now.toRoad, road), isTrue,
+          reason: '$who: ${now.road} → ${now.toRoad} is not along $road');
+      expect(now.forward, forward, reason: who);
+      expect(now.toForward, forward, reason: who);
+      expect(now.lane == lane || now.toLane == lane, isTrue,
+          reason: '$who: lane ${now.lane} → ${now.toLane}, not $lane');
+      expect(moved, lessThan(1), reason: '$who: moved $moved m into the box');
+      return;
+    }
     expect(now.onConnector, onConnector, reason: '$who: element kind');
     expect(_descends(now.road, road), isTrue,
         reason: '$who: ${now.road} is not $road or a piece of it');
     expect(now.forward, forward, reason: who);
     expect(now.lane, lane, reason: '$who: lane');
-    final moved = math.sqrt(
-        (now.e - e) * (now.e - e) + (now.n - n) * (now.n - n));
     if (!onConnector) {
       expect(moved, lessThan(0.5), reason: '$who: moved $moved m on $road');
       return;
@@ -180,7 +211,7 @@ class _Place {
         reason: '$who: into ${now.toRoad}, not $toRoad');
     expect(now.toForward, toForward, reason: who);
     expect(now.toLane, toLane, reason: '$who: lane taken');
-    expect(moved, lessThan(1), reason: '$who: at another node');
+    expect(moved, lessThan(1), reason: '$who: moved $moved m on its movement');
     expect(now.s, closeTo(math.min(s, now.len - 0.01), 1e-3),
         reason: '$who: as far through the junction');
   }

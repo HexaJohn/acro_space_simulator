@@ -11,12 +11,14 @@
 /// lane change but through a connector.
 library;
 
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:acro_space_simulator/domain/colony/city/city_layout.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/agent_kind.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/junction_arbiter.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/lane_connectors.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/lane_graph.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/route_cost.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/slot_pool.dart';
@@ -231,6 +233,48 @@ CityLayout mixedGrid() {
         regenerateLots: false);
   }
   return layout;
+}
+
+/// Where a vehicle's front is, [s] metres along element [elem] of [lg]
+/// (colony-local east, north): on a lane, the lane's own line — its road's
+/// line at the travel arc, `laneOff` to the right of travel; on a connector,
+/// its path, [kConnectorPoints] points, walked [s] metres along. Where the
+/// renderer draws it, so a place kept across a rebuild is one on screen.
+Vec2 elementPoint(LaneGraph lg, int elem, double s) {
+  if (elem < lg.laneCount) {
+    final e = lg.laneEdge[elem];
+    final t = lg.edgeLaneS0[e] + s;
+    final pt = Float64List(4);
+    // The heading from a quarter metre along, back where that runs off the
+    // edge.
+    final ahead = t + 0.25 <= lg.edgeLen[e];
+    RouteCost.pointOn(lg, e, t, pt, 0);
+    RouteCost.pointOn(lg, e, ahead ? t + 0.25 : t - 0.25, pt, 2);
+    var de = pt[2] - pt[0], dn = pt[3] - pt[1];
+    if (!ahead) {
+      de = -de;
+      dn = -dn;
+    }
+    final l = math.sqrt(de * de + dn * dn);
+    final off = lg.laneOff[elem];
+    return l < 1e-9
+        ? Vec2(pt[0], pt[1])
+        : Vec2(pt[0] + dn / l * off, pt[1] - de / l * off);
+  }
+  final at = 2 * kConnectorPoints * (elem - lg.laneCount);
+  final p = lg.conPts;
+  var left = s;
+  for (var k = 1; k < kConnectorPoints; k++) {
+    final ae = p[at + 2 * k - 2], an = p[at + 2 * k - 1];
+    final be = p[at + 2 * k], bn = p[at + 2 * k + 1];
+    final seg = math.sqrt((be - ae) * (be - ae) + (bn - an) * (bn - an));
+    if (left <= seg || k == kConnectorPoints - 1) {
+      final u = seg < 1e-9 ? 0.0 : math.min(1.0, math.max(0.0, left / seg));
+      return Vec2(ae + (be - ae) * u, an + (bn - an) * u);
+    }
+    left -= seg;
+  }
+  return Vec2(p[at], p[at + 1]);
 }
 
 /// Whatever is wrong with the table's lists: a vehicle listed where it is

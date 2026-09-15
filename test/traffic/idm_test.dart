@@ -5,6 +5,7 @@
 
 import 'dart:math' as math;
 
+import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/agent_kind.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/traffic_time.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/vehicle_mover.dart';
@@ -128,6 +129,29 @@ void main() {
         expect(gap, inInclusiveRange(s0 - 0.2, s0 + 0.6),
             reason: 'gap behind handle $ahead');
         ahead = h;
+      }
+    });
+
+    test('a stop at the very start of the lane it turns into: it pulls onto '
+        'the lane and arrives, never held on the connector short of it', () {
+      final lg = crossroads();
+      final west = edgeNear(lg, const Vec2(-150, 0), const Vec2(1, 0));
+      final east = edgeNear(lg, const Vec2(150, 0), const Vec2(1, 0));
+      final d = Drive(lg);
+      // At the stop bar, and half a metre past it: both inside the reach
+      // a car comes to rest short of its stop by.
+      for (final into in const [0.0, 0.5]) {
+        final h = d.trip(west, 200, east, lg.edgeLaneS0[east] + into,
+            speed: 8);
+        expect(h, greaterThanOrEqualTo(0));
+        // Past the 120 s a car stranded on the connector would be taken off
+        // stuck in.
+        for (var i = 0; i < 1000 && d.table.isLive(h); i++) {
+          d.step();
+        }
+        expect(d.arrivedHandles, contains(h),
+            reason: 'it arrived, on its lane ($into m in)');
+        expect(d.despawns, isEmpty);
       }
     });
 

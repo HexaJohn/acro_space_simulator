@@ -73,11 +73,17 @@ class TrafficStats {
 
   /// Routes a network edit made impossible, planned again from where the
   /// vehicle was (§4.7), and legs appended after an arrival (a re-target
-  /// from a building gone: §4.6).
+  /// from a building gone, §4.6; or from a stop its building's access has
+  /// moved away from, D36's `siteRetarget`).
   int replans = 0, appendedLegs = 0;
 
   /// Routes the remaps carried across an edit with some lanes chosen again.
   int lanesRepaired = 0;
+
+  /// Vehicles a rebuild placed onto the one ahead of them and moved back to
+  /// clear it (`CityAgents`' remap). The carry through a new junction's box
+  /// should leave none: each is a place the remap could not keep.
+  int remapNudges = 0;
 
   /// Trips deferred by a cap (D10), and trips dropped because nothing joins
   /// their ends.
