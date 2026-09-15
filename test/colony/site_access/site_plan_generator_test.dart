@@ -186,6 +186,32 @@ void main() {
     expect(SitePlanValidator.validate(p, graph: g), isEmpty);
   });
 
+  test('siteContextsOf walks cells in ascending anchor order, whatever the '
+      'insertion history, and skips abandoned cells', () {
+    final spec = kZoneSpecs['commercial']![Density.low]!;
+    List<String> cellIds(List<int> insertOrder, {int? abandoned}) {
+      final c = foundFlat(id: 'cells');
+      for (final k in insertOrder) {
+        c.utils[k] = spec;
+      }
+      if (abandoned != null) c.abandoned.add(abandoned);
+      return [
+        for (final ctx in siteContextsOf(c))
+          if (ctx.graphLot < 0) ctx.siteId,
+      ];
+    }
+
+    final live = foundFlat(id: 'cells');
+    final base = live.grid * (live.grid ~/ 2) + live.grid ~/ 2;
+    final keys = [base + 7, base + 2, base + 5];
+    String idOf(int k) => live.parcelForCell(k, spec).id;
+    final ascending = [for (final k in [base + 2, base + 5, base + 7]) idOf(k)];
+    expect(cellIds(keys), ascending);
+    expect(cellIds(keys.reversed.toList()), ascending);
+    expect(cellIds(keys, abandoned: base + 5),
+        [idOf(base + 2), idOf(base + 7)]);
+  });
+
   test('unbuilt sites and sites with no slot store no plan (row 0a)', () {
     final g = starter.roadGraph;
     final lot = starter.layout.autoParcels.first;

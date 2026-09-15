@@ -383,13 +383,16 @@ const String kCommercialGroup = 'com';
 const int kHomeMaxHousing = 24;
 
 /// Row 4: the industrial groups. Pinned equal to
-/// `BuildingMassingRules._isIndustrial` (building_massing.dart:278).
+/// `BuildingMassingRules._isIndustrial` (building_massing.dart:278) through
+/// its public effect, the industrial storey, by
+/// `site_program_constants_pin_test`.
 const List<String> kIndustrialGroups = [
   'ind', 'res-x', 'power', 'waste', 'storage', 'aero', //
 ];
 
-/// §3.8 sliver: an inscribed depth under [kSliverMinDepthM] or a frontage
-/// under [kSliverMinWidthM] is `kerbOnly`.
+/// §3.8 sliver: a true depth D (the profile's deepest column, as built; not
+/// an inscribed depth) under [kSliverMinDepthM] or a frontage under
+/// [kSliverMinWidthM] is `kerbOnly`.
 const double kSliverMinDepthM = 8.0;
 const double kSliverMinWidthM = 6.0;
 

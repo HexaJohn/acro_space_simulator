@@ -143,6 +143,19 @@ every generator: `SiteContext` (graph + stamp, parcel, spec, frame, slots, emiss
 `planSite`, `emitKerbOnly`, and the full-town `planSites` / `siteContextsOf` / `planCity`. `site_easement.dart` holds
 the pure `easementOf` (§3.7a rule 2), so the installation/easement track owns it apart from the book.
 
+**R2 core repair, as built:** a third file, `site_paving_check.dart`, holds `sitePavingViolations(SiteContext,
+SiteAccessPlan) → List<String>`. It covers the two R2 checks the frozen R2a validator leaves open: paving inside
+parcel ∪ corridor, and corridor clearance. A1 calls it on every plan. `planSite` / `planSites` / `planCity` take an
+optional `SiteGenerators` (the four generator entry points, default `SiteGenerators.standard`) so dispatch tests can
+use fakes. Ownership inside R2, so the parallel tracks neither collide nor drop work:
+
+| Owner | Files (lib) | Tests and R2 acceptance items |
+|---|---|---|
+| core | `site_access_constants.dart` (the only editor), `site_program.dart`, `site_plan_generator.dart`, `home_driveway.dart`, `site_envelope.dart`, `road_graph.dart` `structureStamp` | `home_driveway_test`, `site_plan_generator_test`, `site_plan_dispatch_test`, `site_program_constants_pin_test`, `site_envelope_helpers_test`, `road_graph_structure_stamp_test`, **A1** `site_plan_contract_test` (with `site_random_sites.dart`), `site_plan_property_test`, `site_plan_revision_test`, `site_program_sprawl_audit_test` (the full mix is re-pinned at the R2 merge), `bench/site_generation_bench_test`, the §3.10 report |
+| car park / yard | `car_park_packer.dart` (`carParkPlanOf`, `yardPlanOf`) | `car_park_packer_test` (§8.3), with a yard-to-car-park fallback case |
+| installation / easement | `installation_access.dart` (`installationPlanOf`), `site_easement.dart` (`easementOf`), `site_paving_check.dart` (`sitePavingViolations`) | `installation_access_test`, `site_easement_test` (the pure half), `site_paving_check_test`; the starter-site acceptance items (56 m throat, yard, gate, ≥ 12 stalls, four easement lots) |
+| book | `site_access_book.dart`, the `CitySim` hooks, `CityLayout.easementOf` hook, `setUse`/`placeOnParcel`/growth refusal, inspector string, starter-kit drain, dev hook | `site_access_persistence_test`, `site_access_sync_test`, `site_access_tick_order_test`, `site_easement_test` (the refusal half), `city_starter_kit_test` easement assertion, the road-edit sync bench |
+
 ### 2.2 Join slots on `RoadGraph` (beside the lot columns, road_graph.dart:286-295)
 
 ```dart
@@ -745,6 +758,11 @@ The score rewards stalls up to 1.5·C* for `com` and 1.0·C* otherwise. Overflow
 - A small installation site (row 1, `W < 60 or D < 120`) is offered `yard` and carries `kPlanFallback`. Every program
   lesser than the one offered carries `kPlanFallback`: a home demoted by a back-out rule or by §3.4, and a car park,
   yard or installation that falls through (to a car park or to `kerbOnly`). Row 0c carries `kPlanAccessBlocked`.
+- **The yard rule (frozen, repair round):** `yardPlanOf` makes the car park attempt itself. It returns a `yard` plan,
+  or a `carPark` plan when the apron does not fit, or null exactly when neither fits. The dispatcher writes a
+  `carPark` result with `kPlanFallback` and counts `yardNoFit`. On null it counts `yardNoFit` and writes `kerbOnly`
+  with `kPlanFallback`, without calling `carParkPlanOf` again. `site_plan_dispatch_test` pins this with fake
+  generators.
 - Demotions are counted by rule in `SiteProgramStats` (`SiteDemotion`: `homeRoad`, `homeRoom`, `homeSwingMargin`,
   `homeSkew`, `homeGeometry`, `installationTooSmall`, `installationNoFit`, `yardNoFit`, `carParkNoFit`,
   `legacySlot`, `accessBlocked`, `mega`, `sliver`, `degenerate`). Back-out rules are checked in the order 1–4, and
@@ -852,6 +870,9 @@ is kerb only, and so is any house lot whose slot 0 fails the §3.3 back-out rule
 - The door is the envelope front midpoint `(x, yT)`. `pavementPt` is its projection onto `y = 0`, and the footpath
   reuses those two points. `entranceNode` is `H`. The drive pave's two kerb corners are `blend` with `hT = 1` on join
   0; every other point is `pad`.
+- A site set far back from its kerb (a footprint, or a lot on a curved road, where `k` reaches 40 m) has a throat
+  `K→H` longer than V5's 24 m via gap. It gets `ceil(|K→H|/24) − 1` evenly spaced vias on its chord. A1's random
+  lots found this, and `home_driveway_test` pins it.
 
 ### 3.5 Car parks (`car_park_packer.dart`)
 
@@ -1067,7 +1088,7 @@ lot-r0x0-r1, lot-r0x1-r5}` (spaceport, solar farm, farm, pump), and 78 of the 82
 | Case | Detection | Result |
 |---|---|---|
 | < 3 vertices, area < 30 m², zero frontage | frame | `none` / `kerbOnly`, legacy slot |
-| Sliver (inscribed depth < 8 m or W < 6 m) | profile | `kerbOnly` |
+| Sliver (inscribed depth < 8 m or W < 6 m) | profile | `kerbOnly` (as built, R2 core: the TRUE depth D, the profile's deepest column, not an inscribed depth; a pointed or spiky lot runs the generators, which fall back by fit) |
 | Triangle | profile tapers | generators run; usually `kerbOnly` below ~400 m² |
 | Concave L/U, self-touching | profile + exact `containsRect` | stalls never outside; pockets unused; never crashes |
 | Frontage < 2(m + 0.5) | spans empty on that road | side street, other road, then legacy |
@@ -1140,6 +1161,16 @@ unit budgets and the 512 B home target are missed, and this is reported, not re-
 ~31 µs/site average, the 127k-building town's drain would be about 4 s (> 3 s). The levers are typed per-column
 buffers in `PlanBuilder` (unboxed), a profile-free kerbside envelope, and parametric home rows (§10.1).
 
+**Corrected (repair round): that ~4 s is a LOWER BOUND, not the Σ this section asks for.** Two things make it low.
+While the car park, yard and installation generators are stubs, their sites are costed at the `kerbOnly` figure. And
+it is extrapolated from the 30.5k-site sprawl fixture, not measured on the 127k-building reference town. On the
+sprawl, the bench now also prints Σ with each stubbed site at the unit budget of the program it was offered (its
+`NoFit` demotion counts it). Re-run: 910 ms measured in all; 24,996 homes × 12 µs + 812 remaining `kerbOnly` × 5 µs
++ 4,542 car parks × 60 µs + 62 yards × 60 µs + 147 installations × 3 ms = **1.021 s**. That is 33.4 µs per site, or
+**≈ 4.24 s scaled to 127k buildings** (> 3 s). Homes (17.2 µs) and `kerbOnly` (34.9 µs) already run over their unit
+budgets, so the real drain will be higher once the tracks land. The drain is re-measured on the reference town, with
+every generator in place, at the R2 merge, and the load-time risk is reported to the user then (§10.1).
+
 **The drain budget is a sum, not a guess.** R1's sprawl audit already counts lots per road class on the sprawl
 audit fixture; R2 adds program counts, and the generation bench prints the mix and the sum next to the measured
 drain. Illustration only (the mix is measured in R2): 80% homes, 12% `kerbOnly`, 8% car parks and yards, 100
@@ -1174,6 +1205,9 @@ class SiteAccessBook {                       // CitySim: late final SiteAccessBo
 - **Walk order** follows BuildingTable's: manual lots, auto lots, occupied cells, preceded in every walk by the
   sites whose slot 0 carries `kJoinEasement` (§3.7a rule 3). Slots are assigned on first appearance and freed slots
   are reused lowest-first. Slots are not saved, and nothing persisted refers to them.
+  **As built (R2 core, `siteContextsOf`):** occupied cells are walked in ascending anchor order, and abandoned cells
+  are skipped as BuildingTable skips them. `CitySim.occupiedCells` iterates a set and a map in insertion order, and a
+  loaded save can differ from a live town there, which §3.9 forbids. The book orders its cells the same way.
 - **The walk is resumable.** The book keeps a cursor over that walk order and a queue of sites to check. Each tick it
   spends at most `kSyncCheckUnitsPerTick` site checks (one `inSig` hash plus lookups each) and
   `kSyncUnitsPerTick` generation units (§4.3), then resumes from the cursor next tick.

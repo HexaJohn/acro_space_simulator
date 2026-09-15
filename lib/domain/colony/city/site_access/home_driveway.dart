@@ -98,7 +98,16 @@ class HomeDrivewayPlan implements SiteGeneratedPlan {
     final kNode = ctx.kerbNode(b, slot, j);
     final hNode = b.node(b.point(he, hn));
     final pNode = b.node(b.point(pe, pn), flags: kNodeDeadEnd);
+    // A site set far back from its kerb (a footprint, a curved road) has a
+    // throat longer than V5's via gap: evenly spaced vias on the chord.
+    final gaps = (throatLengthM / kViaMaxGapM).ceil();
+    final vias = [
+      for (var i = 1; i < gaps; i++)
+        b.point(ke + ne * throatLengthM * i / gaps,
+            kn + nn * throatLengthM * i / gaps),
+    ];
     final throat = b.segment(kNode, hNode,
+        vias: vias,
         kind: SiteSegmentKind.driveway,
         mode: SiteLaneMode.sharedSingle,
         widthM: w,

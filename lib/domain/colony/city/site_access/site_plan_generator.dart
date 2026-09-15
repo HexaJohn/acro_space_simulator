@@ -379,17 +379,47 @@ void emitKerbOnly(PlanBuilder b, SiteContext ctx, {int flags = 0}) {
   b.endSite();
 }
 
+/// The generator entry points [planSite] dispatches to. [standard] is the
+/// real set; tests hand in fakes to pin the dispatch rules (a yard generator
+/// that returns a car park, say) without depending on a track's generator.
+class SiteGenerators {
+  const SiteGenerators({
+    this.installation = installationPlanOf,
+    this.home = homeDrivewayPlanOf,
+    this.yard = yardPlanOf,
+    this.carPark = carParkPlanOf,
+  });
+
+  /// The generators of `installation_access.dart`, `home_driveway.dart` and
+  /// `car_park_packer.dart`.
+  static const SiteGenerators standard = SiteGenerators();
+
+  final SiteGeneratedPlan? Function(SiteContext ctx) installation;
+  final SiteGeneratedPlan? Function(SiteContext ctx) home;
+  final SiteGeneratedPlan? Function(SiteContext ctx) yard;
+  final SiteGeneratedPlan? Function(SiteContext ctx) carPark;
+}
+
 /// Plans one site into [b] by §3.3 (first match wins) and returns the program
 /// written, or null when no plan is stored: unbuilt (row 0a), no join slot,
 /// or no eligible road in reach of a frontage-less site (§3.1 `none`).
 ///
 /// Fall-through: installation → kerbOnly; a small installation site → yard →
-/// car park → kerbOnly; home (back-out rules 1–4, then §3.4) → kerbOnly;
-/// industrial yard → car park → kerbOnly; everything else car park →
-/// kerbOnly. A program lesser than the one offered carries `kPlanFallback`;
-/// row 0c carries `kPlanAccessBlocked`. Each demotion is counted in [stats].
+/// kerbOnly; home (back-out rules 1–4, then §3.4) → kerbOnly; industrial
+/// yard → kerbOnly; everything else car park → kerbOnly.
+///
+/// The yard rule (frozen): `yardPlanOf` tries the car park itself. It returns
+/// a `yard` plan, or a `carPark` plan when the apron does not fit (counted
+/// `yardNoFit`, flagged `kPlanFallback`), or null exactly when neither fits
+/// (counted `yardNoFit`, then `kerbOnly` with `kPlanFallback`; the car park
+/// generator is NOT asked again).
+///
+/// A program lesser than the one offered carries `kPlanFallback` (a yard
+/// offered to a small installation site carries it too); row 0c carries
+/// `kPlanAccessBlocked`. Each demotion is counted in [stats].
 SiteProgram? planSite(PlanBuilder b, SiteContext ctx,
-    {SiteProgramStats? stats}) {
+    {SiteProgramStats? stats,
+    SiteGenerators generators = SiteGenerators.standard}) {
   final spec = ctx.spec;
   if (spec == null || ctx.slotCount == 0 || ctx.noFrontageRoad) {
     stats?.unplanned++;
@@ -426,7 +456,7 @@ SiteProgram? planSite(PlanBuilder b, SiteContext ctx,
     case SiteProgram.kerbOnly:
       return kerb(offer.flags);
     case SiteProgram.installation:
-      final p = installationPlanOf(ctx);
+      final p = generators.installation(ctx);
       if (p != null) return written(p, 0);
       demote(SiteDemotion.installationNoFit);
       return kerb(kPlanFallback);
@@ -436,21 +466,19 @@ SiteProgram? planSite(PlanBuilder b, SiteContext ctx,
         demote(rule);
         return kerb(kPlanFallback);
       }
-      final p = homeDrivewayPlanOf(ctx);
+      final p = generators.home(ctx);
       if (p != null) return written(p, 0);
       demote(SiteDemotion.homeGeometry);
       return kerb(kPlanFallback);
     case SiteProgram.yard:
       final fell = od == SiteDemotion.installationTooSmall ? kPlanFallback : 0;
-      final y = yardPlanOf(ctx);
-      if (y != null) return written(y, fell);
+      final y = generators.yard(ctx);
+      if (y != null && y.program == SiteProgram.yard) return written(y, fell);
       demote(SiteDemotion.yardNoFit);
-      final c = carParkPlanOf(ctx);
-      if (c != null) return written(c, kPlanFallback);
-      demote(SiteDemotion.carParkNoFit);
+      if (y != null) return written(y, kPlanFallback);
       return kerb(kPlanFallback);
     case SiteProgram.carPark:
-      final c = carParkPlanOf(ctx);
+      final c = generators.carPark(ctx);
       if (c != null) return written(c, 0);
       demote(SiteDemotion.carParkNoFit);
       return kerb(kPlanFallback);
@@ -462,7 +490,9 @@ SiteProgram? planSite(PlanBuilder b, SiteContext ctx,
 /// sites in the same order give byte-identical chunks. With [validate], each
 /// chunk is checked against V1–V13 in debug builds (`PlanBuilder.build`).
 List<SiteAccessChunk> planSites(RoadGraph graph, List<SiteContext> sites,
-    {SiteProgramStats? stats, bool validate = true}) {
+    {SiteProgramStats? stats,
+    bool validate = true,
+    SiteGenerators generators = SiteGenerators.standard}) {
   final chunks = <SiteAccessChunk>[];
   var b = PlanBuilder(graph: graph);
   for (final ctx in sites) {
@@ -470,16 +500,22 @@ List<SiteAccessChunk> planSites(RoadGraph graph, List<SiteContext> sites,
       chunks.add(b.build(validate: validate));
       b = PlanBuilder(graph: graph);
     }
-    planSite(b, ctx, stats: stats);
+    planSite(b, ctx, stats: stats, generators: generators);
   }
   if (b.siteCount > 0) chunks.add(b.build(validate: validate));
   return chunks;
 }
 
 /// Every BUILT site of [city] as a context over [graph] (default: the city's
-/// road graph), in BuildingTable's walk order: manual lots, auto lots, then
-/// occupied grid cells (§4.1). A convenience for full-town runs, tests and
-/// benches; the book keeps its own resumable walk.
+/// road graph), in §4.1's order: manual lots, auto lots (both in the
+/// layout's list order), then occupied grid cells in ASCENDING anchor order,
+/// abandoned cells skipped as BuildingTable skips them.
+///
+/// The cells are sorted because `CitySim.occupiedCells` walks a set and a map
+/// (insertion order: a loaded save can differ from a live town), which §3.9
+/// forbids generation to depend on. A convenience for full-town runs, tests
+/// and benches; the book keeps its own resumable walk (with its easement
+/// sites first, §4.1), and orders its cells the same way.
 List<SiteContext> siteContextsOf(CitySim city, {RoadGraph? graph}) {
   final g = graph ?? city.roadGraph;
   final stamp = g.structureStamp;
@@ -490,20 +526,30 @@ List<SiteContext> siteContextsOf(CitySim city, {RoadGraph? graph}) {
     return p != null && city.parcelGrownSpec(id, p.use) != null;
   }
 
+  // (anchor, walk index, spec): ascending anchor, the walk index breaking
+  // the tie of a cell reported twice (grown and a utility), as before.
+  final cells = <(int, int, CityBuildingSpec)>[];
+  for (final cell in city.occupiedCells()) {
+    if (city.abandoned.contains(cell.key)) continue;
+    cells.add((cell.key, cells.length, cell.value));
+  }
+  cells.sort((a, b) => a.$1 != b.$1 ? a.$1.compareTo(b.$1) : a.$2 - b.$2);
   return [
     for (final (parcel, spec) in city.parcelBuiltLots())
       SiteContext.ofLot(g, parcel, spec, graphStamp: stamp, lotBuilt: built),
-    for (final cell in city.occupiedCells())
-      SiteContext.ofFootprint(
-          g, city.parcelForCell(cell.key, cell.value), cell.value,
+    for (final (anchor, _, spec) in cells)
+      SiteContext.ofFootprint(g, city.parcelForCell(anchor, spec), spec,
           graphStamp: stamp, lotBuilt: built),
   ];
 }
 
 /// [siteContextsOf] [city], planned ([planSites]).
 List<SiteAccessChunk> planCity(CitySim city,
-        {RoadGraph? graph, SiteProgramStats? stats, bool validate = true}) {
+    {RoadGraph? graph,
+    SiteProgramStats? stats,
+    bool validate = true,
+    SiteGenerators generators = SiteGenerators.standard}) {
   final g = graph ?? city.roadGraph;
   return planSites(g, siteContextsOf(city, graph: g),
-      stats: stats, validate: validate);
+      stats: stats, validate: validate, generators: generators);
 }

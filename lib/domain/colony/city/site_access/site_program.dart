@@ -57,7 +57,9 @@ enum SiteDemotion {
   /// The installation generator found nothing.
   installationNoFit,
 
-  /// The yard generator found nothing (row 4 goes on to a car park).
+  /// The yard generator's apron did not fit: its car park alone was written
+  /// (`carPark`, `kPlanFallback`), or, when that did not fit either,
+  /// `kerbOnly`.
   yardNoFit,
 
   /// The car park generator found nothing.
@@ -72,7 +74,7 @@ enum SiteDemotion {
   /// Row 2: a megatower parks in its podium.
   mega,
 
-  /// §3.8: an inscribed depth under 8 m or a frontage under 6 m.
+  /// §3.8: a true depth D under 8 m or a frontage under 6 m.
   sliver,
 
   /// §3.8: no site frame (degenerate polygon); kerbside at slot 0.
@@ -132,9 +134,9 @@ bool isIndustrialSpec(CityBuildingSpec spec) =>
 
 /// §3.3 rows 0b–5 for a BUILT site (row 0a, unbuilt, is the caller's: it
 /// stores no plan). [slot0] is the site's slot 0, [widthM] and [depthM] its
-/// frame W and true D (0 when it has no frame), [inscribedDepthM] the deepest
-/// rectangle the profile holds across its frontage, [lotBuilt] whether a
-/// graph lot has a building.
+/// frame W and true D (0 when it has no frame; the sliver row tests this true
+/// D, not an inscribed depth, §3.8 as built), [hasFrame] whether it has a
+/// frame, [lotBuilt] whether a graph lot has a building.
 ProgramOffer classifyProgram({
   required CityBuildingSpec spec,
   required JoinSlot slot0,

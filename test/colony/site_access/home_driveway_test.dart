@@ -227,6 +227,28 @@ void main() {
     }
   });
 
+  test('a lot 40 m behind its kerb gets a throat with vias at most 24 m apart '
+      '(V5)', () {
+    final sn = slot.normN.sign;
+    final yF = slot.kerbN + 40 * sn;
+    Vec2 at(double s, double depth) => Vec2(s, yF + depth * sn);
+    final far = Parcel(
+      id: 'lot-r0-l3',
+      polygon: [at(84, 0), at(108, 0), at(108, 32), at(84, 32)],
+      roadId: 'r0',
+      frontage: (at(84, 0), at(108, 0)),
+    );
+    final (p, _) = plan(ctxOf(far), laneSpans: spans);
+    expect(p!.program, SiteProgram.homeDriveway);
+    // k = 40, yT = 1: a 41 m throat in two 20.5 m legs.
+    expect(p.segLenM(0), closeTo(41, 1e-9));
+    expect(p.segViaCount(0), 1);
+    final via = p.viaPt(p.segViaStart(0));
+    expect(p.ptE(via), closeTo(slot.kerbE, 1e-9));
+    expect((p.ptN(via) - slot.kerbN).abs(), closeTo(20.5, 1e-9));
+    expect(p.nodeCount, 3);
+  });
+
   group('§3.3 back-out eligibility, demotions counted by rule', () {
     test('rule 1: road class, speed and median', () {
       final layout = layoutOf([

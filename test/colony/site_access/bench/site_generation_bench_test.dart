@@ -79,8 +79,23 @@ void main() {
         report('  ${p.name}: $n plans, ${f(micros[p.index] / n, 1)} µs each '
             '(budget ${unit[p]} µs)');
       }
-      report('  drain sum Σ count × unit budget: ${f(budget / 1e6, 3)} s '
-          '(budget 3 s for the 127k-building town)');
+      report('  drain sum Σ count × unit budget, stubs as kerbOnly: '
+          '${f(budget / 1e6, 3)} s (budget 3 s for the 127k-building town)');
+      // While car park / yard / installation are stubs, their sites fall to
+      // kerbOnly and are costed at 5 µs: the sum above is a LOWER bound.
+      // Cost each stubbed site at the unit budget of the program it was
+      // offered instead (its NoFit demotion counts it).
+      final cp = stats.demotionCount(SiteDemotion.carParkNoFit);
+      final yd = stats.demotionCount(SiteDemotion.yardNoFit);
+      final inst = stats.demotionCount(SiteDemotion.installationNoFit);
+      final offered = budget +
+          cp * (unit[SiteProgram.carPark]! - unit[SiteProgram.kerbOnly]!) +
+          yd * (unit[SiteProgram.yard]! - unit[SiteProgram.kerbOnly]!) +
+          inst * (unit[SiteProgram.installation]! - unit[SiteProgram.kerbOnly]!);
+      report('  drain sum Σ with the stubbed sites at their offered program\'s '
+          'unit budget ($cp car park, $yd yard, $inst installation): '
+          '${f(offered / 1e6, 3)} s; per site ${f(offered / sites.length, 1)} '
+          'µs, × 127k buildings ≈ ${f(offered / sites.length * 0.127, 2)} s');
       for (final (what, pb) in [('home', homes), ('kerbside', kerbs)]) {
         if (pb.siteCount == 0) continue;
         final chunk = pb.build(validate: false);

@@ -29,7 +29,13 @@ import 'site_plan_generator.dart';
 SiteGeneratedPlan? carParkPlanOf(SiteContext ctx) => null;
 
 /// §3.6: a car park plus an 18 × 24 m truck apron (circle 12.5 m, two
-/// 3.5 × 15 m bays, `kPlanAdmitsTrucks`) on [ctx]; the car park alone
-/// (trucks not admitted) where the apron does not fit; null when neither
-/// fits (the dispatcher then tries [carParkPlanOf]).
+/// 3.5 × 15 m bays, `kPlanAdmitsTrucks`) on [ctx], its `program` `yard`.
+///
+/// Where the apron does not fit, the car park alone: a plan whose `program`
+/// is `carPark` (trucks not admitted); the dispatcher counts `yardNoFit` and
+/// writes it with `kPlanFallback`. Null EXACTLY when neither a yard nor a car
+/// park fits: the dispatcher counts `yardNoFit` and writes `kerbOnly` with
+/// `kPlanFallback`, and does NOT call [carParkPlanOf] again, so this function
+/// owns the car park attempt (at the yard's own throat width or the car
+/// park's, §3.3).
 SiteGeneratedPlan? yardPlanOf(SiteContext ctx) => null;

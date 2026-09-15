@@ -125,14 +125,14 @@ class RoadNode {
   }
 }
 
-/// Where a lot is entered from: a road, the arc position on it, and the
-/// directions of travel along it from which the lot can be reached (and in
-/// which it can be left).
 /// The lazily hashed [RoadGraph.structureStamp], one cell per structure.
 class _StructureStamp {
   int? value;
 }
 
+/// Where a lot is entered from: a road, the arc position on it, and the
+/// directions of travel along it from which the lot can be reached (and in
+/// which it can be left).
 class LotAccess {
   const LotAccess(this.roadId, this.sM, {required this.forward, required this.backward});
 
