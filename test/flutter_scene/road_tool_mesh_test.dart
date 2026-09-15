@@ -738,6 +738,55 @@ void main() {
       expect(count(into, 2), 4 * 2);
     });
 
+    test('with agent signals the masts stand without lamps (C3)', () {
+      final j = RoadMesher.junctionsFromEnds([
+        end(10, 0, RoadClass.boulevard),
+        end(-10, 0, RoadClass.boulevard),
+        end(0, 10, RoadClass.street),
+        end(0, -10, RoadClass.street),
+      ], anchorBF: anchor).single;
+      expect(j.control, JunctionControl.signals);
+      (int, int, int) counts({required bool lit}) {
+        final m = [MeshBuilder(), MeshBuilder(), MeshBuilder()];
+        RoadMesher.junctions(m[0], m[1], m[2], [j], anchor, 0, litHeads: lit);
+        return (m[0].triangleCount, m[1].triangleCount, m[2].triangleCount);
+      }
+
+      final lit = counts(lit: true), dark = counts(lit: false);
+      expect(lit.$3, greaterThan(0));
+      expect(dark.$3, 0, reason: 'no lamp heads');
+      expect(dark.$1, lit.$1, reason: 'the plate, bars and zebras stay');
+      expect(dark.$2, lit.$2, reason: 'the masts stay');
+      // The knob keys a tile only when it is on: default keys are unchanged.
+      const off = CityMeshKnobs(
+        styleId: 's',
+        bucketM: 4,
+        variants: 2,
+        perBuildingLod: false,
+        blockRangeM: 100,
+        interiorRangeM: 10,
+        lodDebug: false,
+        onStreetParking: true,
+        sealedWorld: false,
+        maxParkedCars: 400,
+      );
+      const on = CityMeshKnobs(
+        styleId: 's',
+        bucketM: 4,
+        variants: 2,
+        perBuildingLod: false,
+        blockRangeM: 100,
+        interiorRangeM: 10,
+        lodDebug: false,
+        onStreetParking: true,
+        sealedWorld: false,
+        maxParkedCars: 400,
+        agentSignals: true,
+      );
+      expect(off.keyTerms, 's|4.0|2|0|100|10|0|1|0|400');
+      expect(on.keyTerms, '${off.keyTerms}|agentSignals');
+    });
+
     test('the bar on a two-way leg spans the inbound half; a one-way '
         'arriving is barred across', () {
       final j = RoadMesher.junctionsFromEnds([

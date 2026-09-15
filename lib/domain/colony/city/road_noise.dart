@@ -112,15 +112,27 @@ class RoadNoiseSampler {
       : _stamp = Int32List(graph.slotToRoad.length),
         _bestD = Float64List(graph.slotToRoad.length),
         _bestSeg = Int32List(graph.slotToRoad.length),
-        _bestU = Float64List(graph.slotToRoad.length);
+        _bestU = Float64List(graph.slotToRoad.length),
+        _touched = Int32List(graph.slotToRoad.length) {
+    _visitor = _measure;
+  }
 
   final RoadGraph graph;
   final Int32List _stamp;
   final Float64List _bestD;
   final Int32List _bestSeg;
   final Float64List _bestU;
-  final List<int> _touched = [];
+
+  /// The slots measured this sample, `[0, _touchedCount)`: each at most once.
+  final Int32List _touched;
+  int _touchedCount = 0;
   int _epoch = 0;
+
+  /// [_measure], torn off once, so a sample passes the index no new closure.
+  late final void Function(int slot, IndexedRoad rec, int seg) _visitor;
+
+  /// The point being sampled, read by [_measure].
+  double _qe = 0, _qn = 0;
 
   /// Work so far, in the unit the traffic model budgets its noise pass in:
   /// an index cell looked in (a map probe whether or not a road is there),
@@ -133,58 +145,77 @@ class RoadNoiseSampler {
   /// Noise at [p], 0..1: every road within [RoadNoise.reachM] of its kerb,
   /// each at its piece's [pieceEmission] (see [RoadNoise.emission]) faded
   /// by distance, nothing from a stretch in a tunnel, summed.
-  double noiseAt(Vec2 p, Float64List pieceEmission) {
+  double noiseAt(Vec2 p, Float64List pieceEmission) =>
+      noiseAtEN(p.e, p.n, pieceEmission);
+
+  /// [noiseAt] at `(e, n)`, allocating nothing: the index is walked by
+  /// bounds with a visitor torn off once, the touched roads are typed
+  /// scratch, and every loop is indexed. Bit-identical to [noiseAt].
+  double noiseAtEN(double e, double n, Float64List pieceEmission) {
     final g = graph;
     _epoch++;
     if (_epoch == 0x3fffffff) {
       _stamp.fillRange(0, _stamp.length, 0);
       _epoch = 1;
     }
-    _touched.clear();
+    _touchedCount = 0;
+    _qe = e;
+    _qn = n;
     final reach = RoadNoise.reachM + RoadGraph.maxHalfWidth;
-    final box = Box2.around(p, reach);
+    final minE = e - reach, maxE = e + reach;
+    final minN = n - reach, maxN = n + reach;
     final cellM = g.index.cellM;
-    work += ((box.maxE / cellM).floor() - (box.minE / cellM).floor() + 1) *
-        ((box.maxN / cellM).floor() - (box.minN / cellM).floor() + 1);
-    g.index.visit(box, 0, (slot, rec, seg) {
-      work++;
-      if (seg == 0 || slot >= g.slotToRoad.length) return;
-      final r = g.slotToRoad[slot];
-      // Same samples as at the build: an attribute swap keeps them, a
-      // re-laid road does not.
-      if (r < 0 || !identical(rec.e, g.roadRecs[r].e)) return;
-      final ae = rec.e[seg - 1], an = rec.n[seg - 1];
-      final ex = rec.e[seg] - ae, en = rec.n[seg] - an;
-      final len2 = ex * ex + en * en;
-      final u = len2 <= 1e-12
-          ? 0.0
-          : (((p.e - ae) * ex + (p.n - an) * en) / len2).clamp(0.0, 1.0);
-      final dx = p.e - (ae + ex * u), dn = p.n - (an + en * u);
-      final d = math.sqrt(dx * dx + dn * dn);
-      if (_stamp[slot] != _epoch) {
-        _stamp[slot] = _epoch;
-        _touched.add(slot);
-        _bestD[slot] = d;
-        _bestSeg[slot] = seg;
-        _bestU[slot] = u;
-      } else if (d < _bestD[slot]) {
-        _bestD[slot] = d;
-        _bestSeg[slot] = seg;
-        _bestU[slot] = u;
-      }
-    });
+    work += ((maxE / cellM).floor() - (minE / cellM).floor() + 1) *
+        ((maxN / cellM).floor() - (minN / cellM).floor() + 1);
+    g.index.visitBounds(minE, minN, maxE, maxN, _visitor);
     var total = 0.0;
-    work += 4 * _touched.length;
-    for (final slot in _touched) {
+    work += 4 * _touchedCount;
+    for (var k = 0; k < _touchedCount; k++) {
+      final slot = _touched[k];
       final r = g.slotToRoad[slot];
       final road = g.roads[r];
       final kerb = _bestD[slot] - road.halfWidth;
       final f = RoadNoise.falloff(kerb);
       if (f <= 0) continue;
       final s = g.roadRecs[r].arcAt(_bestSeg[slot], _bestU[slot]);
-      if (road.deck?.inTunnelAt(s) ?? false) continue;
+      final deck = road.deck;
+      if (deck != null && deck.inTunnelAt(s)) continue;
       total += pieceEmission[g.pieceAt(r, s)] * f;
     }
-    return total.clamp(0.0, 1.0);
+    return total <= 0 ? 0.0 : (total >= 1 ? 1.0 : total);
+  }
+
+  /// One (road, segment) near the point: keeps each road's nearest segment.
+  void _measure(int slot, IndexedRoad rec, int seg) {
+    work++;
+    final g = graph;
+    if (seg == 0 || slot >= g.slotToRoad.length) return;
+    final r = g.slotToRoad[slot];
+    // Same samples as at the build: an attribute swap keeps them, a
+    // re-laid road does not.
+    if (r < 0 || !identical(rec.e, g.roadRecs[r].e)) return;
+    final pe = _qe, pn = _qn;
+    final ae = rec.e[seg - 1], an = rec.n[seg - 1];
+    final ex = rec.e[seg] - ae, en = rec.n[seg] - an;
+    final len2 = ex * ex + en * en;
+    var u = 0.0;
+    if (len2 > 1e-12) {
+      u = ((pe - ae) * ex + (pn - an) * en) / len2;
+      // As num.clamp(0.0, 1.0): -0.0 compares below 0.0 and becomes 0.0.
+      u = u <= 0 ? 0.0 : (u >= 1 ? 1.0 : u);
+    }
+    final dx = pe - (ae + ex * u), dn = pn - (an + en * u);
+    final d = math.sqrt(dx * dx + dn * dn);
+    if (_stamp[slot] != _epoch) {
+      _stamp[slot] = _epoch;
+      _touched[_touchedCount++] = slot;
+      _bestD[slot] = d;
+      _bestSeg[slot] = seg;
+      _bestU[slot] = u;
+    } else if (d < _bestD[slot]) {
+      _bestD[slot] = d;
+      _bestSeg[slot] = seg;
+      _bestU[slot] = u;
+    }
   }
 }

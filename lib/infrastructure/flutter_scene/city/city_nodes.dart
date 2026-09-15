@@ -445,6 +445,11 @@ class CityNodes {
   /// triangles for something nobody counts.
   static const int _maxParkedCars = 400;
 
+  /// Whether the tiles bake signal masts WITHOUT lit lamps, because agent
+  /// traffic draws the live heads. Follows the frame: on while it carries
+  /// `cityTraffic` (set in [update]).
+  static bool agentSignals = false;
+
   /// Scales how many vehicles a road carries. A hook for the colony's own
   /// congestion once that reaches the frame; 1.0 is an ordinary working day.
   static double trafficDensity = 1.0;
@@ -624,6 +629,7 @@ class CityNodes {
         onStreetParking: onStreetParking,
         sealedWorld: sealedWorld,
         maxParkedCars: _maxParkedCars,
+        agentSignals: agentSignals,
       );
 
   /// Rebuild the archetype libraries if their knobs moved. Everything already
@@ -937,6 +943,15 @@ class CityNodes {
     // whole-colony path; see [detailFor] for why one tier for a whole city
     // is not enough once the city is big.
     final colonyTier = tierForDistance(nearest);
+
+    // Agent traffic lights its own signal heads (signal_head_layer.dart), so
+    // while the frame carries it the tiles bake their masts without lamps
+    // (agent-traffic.md C3). A flip re-meshes every tile, once.
+    final agentOn = snap.cityTraffic.isNotEmpty;
+    if (agentOn != agentSignals) {
+      agentSignals = agentOn;
+      invalidate();
+    }
 
     // Each tile's tier from its distance (with hysteresis, see
     // [tierAtDistance]), and the key its build depends on: what is in it,

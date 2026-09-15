@@ -102,6 +102,7 @@ class CityMeshKnobs {
     required this.onStreetParking,
     required this.sealedWorld,
     required this.maxParkedCars,
+    this.agentSignals = false,
   });
 
   /// The architecture kit the colony is built in (see
@@ -134,6 +135,10 @@ class CityMeshKnobs {
   /// Ceiling on parked cars per tile.
   final int maxParkedCars;
 
+  /// Signal masts baked without lit lamps: agent traffic draws the live
+  /// heads (signal_head_layer.dart, agent-traffic.md C3).
+  final bool agentSignals;
+
   ArchitectureStyle get style => ArchitectureStyle.byId(styleId);
 
   /// Whether the archetype libraries built for [other] serve this too.
@@ -147,7 +152,9 @@ class CityMeshKnobs {
   /// The ranges go rounded to the metre, as the tile keys carry them.
   String get keyTerms => '$styleId|$bucketM|$variants|${perBuildingLod ? 1 : 0}'
       '|${blockRangeM.round()}|${interiorRangeM.round()}|${lodDebug ? 1 : 0}'
-      '|${onStreetParking ? 1 : 0}|${sealedWorld ? 1 : 0}|$maxParkedCars';
+      '|${onStreetParking ? 1 : 0}|${sealedWorld ? 1 : 0}|$maxParkedCars'
+      // Appended only when on, so every existing key reads as it did.
+      '${agentSignals ? '|agentSignals' : ''}';
 }
 
 /// Everything one tile build reads: the tile's members, the few facts of
@@ -1814,7 +1821,7 @@ class CityTileMeshJob {
         // the same on every client looking at the same tick.
         RoadMesher.junctions(_roads.ribbon, _roads.lampSolid, _roads.lampGlow,
             junctions.sublist(from, to), r.anchorBF, r.epoch,
-            furniture: furniture);
+            furniture: furniture, litHeads: !r.knobs.agentSignals);
       }));
     }
   }

@@ -36,13 +36,21 @@ void main() {
     }
     final pop0 = c.population;
 
-    // Thirty minutes of colony time in the tick's own 0.5 s steps.
+    // Thirty minutes of colony time in the tick's own 0.5 s steps. A lot
+    // counts as grown once it has passed its foundations (0.3) at ANY tick:
+    // a standing shop sits right at that line and dips under it while
+    // commercial demand does, so a last-tick read flips whenever the sim
+    // takes a different path (as it did when site access landed).
+    final reachedFoundations = <String>{};
     for (var i = 0; i < 3600; i++) {
       c.advance(0.5);
+      c.grownParcels.forEach((id, g) {
+        if (g >= 0.3) reachedFoundations.add(id);
+      });
     }
 
     int grown(ParcelUse use) => c.layout.autoParcels
-        .where((p) => p.use == use && (c.grownParcels[p.id] ?? 0) >= 0.3)
+        .where((p) => p.use == use && reachedFoundations.contains(p.id))
         .length;
     final traffic = c.roadTraffic;
     final commercial = c.layout.autoParcels

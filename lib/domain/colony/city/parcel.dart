@@ -834,7 +834,10 @@ class RoadDeck {
   static const double _withinSlackM = 1e-6;
 
   static bool _within(double s, List<(double, double)> ranges) {
-    for (final (a, b) in ranges) {
+    // Indexed, not for-in: the noise sampler asks this per lot in traffic's
+    // sub-step, which allocates nothing.
+    for (var i = 0; i < ranges.length; i++) {
+      final (a, b) = ranges[i];
       if (s >= a - _withinSlackM && s <= b + _withinSlackM) return true;
     }
     return false;

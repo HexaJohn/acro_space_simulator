@@ -304,13 +304,22 @@ class SegmentIndex {
   void visit(Box2 box, double slack,
       void Function(int slot, IndexedRoad road, int seg) f) {
     final q = slack == 0 ? box : box.grow(slack);
-    final x0 = (q.minE / cellM).floor(), x1 = (q.maxE / cellM).floor();
-    final y0 = (q.minN / cellM).floor(), y1 = (q.maxN / cellM).floor();
+    visitBounds(q.minE, q.minN, q.maxE, q.maxN, f);
+  }
+
+  /// [visit] over the box `[minE, maxE] × [minN, maxN]`, in the same order,
+  /// allocating nothing itself: a caller that passes a tear-off it made once
+  /// visits with no allocation at all.
+  void visitBounds(double minE, double minN, double maxE, double maxN,
+      void Function(int slot, IndexedRoad road, int seg) f) {
+    final x0 = (minE / cellM).floor(), x1 = (maxE / cellM).floor();
+    final y0 = (minN / cellM).floor(), y1 = (maxN / cellM).floor();
     for (var ix = x0; ix <= x1; ix++) {
       for (var iy = y0; iy <= y1; iy++) {
         final cell = _cells[_cellKey(ix, iy)];
         if (cell == null) continue;
-        for (final entry in cell) {
+        for (var k = 0; k < cell.length; k++) {
+          final entry = cell[k];
           final slot = entry ~/ _segBits;
           final rec = _roads[slot];
           if (rec == null) continue;

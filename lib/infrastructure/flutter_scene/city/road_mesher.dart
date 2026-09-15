@@ -1274,7 +1274,9 @@ class RoadMesher {
   /// zebras, signal masts, signs and islands each control calls for.
   ///
   /// Signal phase comes from [epoch]: deterministic, stateless, and the
-  /// same on every client looking at the same tick.
+  /// same on every client looking at the same tick. With [litHeads] false
+  /// the masts stand with no lamp on them: agent traffic lights its own
+  /// heads, which follow the lights its drivers obey.
   static void junctions(
     MeshBuilder m,
     MeshBuilder poles,
@@ -1283,6 +1285,7 @@ class RoadMesher {
     Vector3 anchorBF,
     double epoch, {
     bool furniture = true,
+    bool litHeads = true,
   }) {
     for (final j in junctions) {
       switch (j.control) {
@@ -1291,7 +1294,7 @@ class RoadMesher {
           break;
         case JunctionControl.stop:
         case JunctionControl.signals:
-          _crossing(m, poles, lights, j, anchorBF, epoch, furniture);
+          _crossing(m, poles, lights, j, anchorBF, epoch, furniture, litHeads);
         case JunctionControl.roundabout:
           _roundabout(m, poles, j, anchorBF, furniture);
       }
@@ -1370,7 +1373,8 @@ class RoadMesher {
   /// its arriving lanes and a mast or a sign — none on a one-way road
   /// leaving, where nothing arrives to stop.
   static void _crossing(MeshBuilder m, MeshBuilder poles, MeshBuilder lights,
-      RoadJunction j, Vector3 anchorBF, double epoch, bool furniture) {
+      RoadJunction j, Vector3 anchorBF, double epoch, bool furniture,
+      bool litHeads) {
     if (!j.legs.any((l) => l.paved)) return;
     final up = (j.at + anchorBF).normalized;
     final at = j.at + up * (plateLiftM + j.liftM);
@@ -1431,10 +1435,12 @@ class RoadMesher {
         // The heads CYCLE. Derived from the epoch rather than stored: it is
         // deterministic, costs no state, and opposing legs are out of phase
         // because their inbound directions differ by a quarter turn.
-        final axis = (dir.dot(t1).abs() > dir.dot(t2).abs()) ? 0 : 1;
-        final green = ((epoch / 12.0).floor() + axis).isEven;
-        final top = corner + up * 4.6;
-        head(lights, top + up * (green ? 0.0 : 0.55), up, dir);
+        if (litHeads) {
+          final axis = (dir.dot(t1).abs() > dir.dot(t2).abs()) ? 0 : 1;
+          final green = ((epoch / 12.0).floor() + axis).isEven;
+          final top = corner + up * 4.6;
+          head(lights, top + up * (green ? 0.0 : 0.55), up, dir);
+        }
       } else {
         // A sign: a small plate on a short post, facing the driver — the
         // plate in safety red off the facade atlas.
