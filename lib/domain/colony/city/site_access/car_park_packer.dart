@@ -1302,12 +1302,20 @@ class _Draft {
         corner(quad[6], quad[7], false),
       ]);
     }
+    // A straight throat's kerb corners sit ON the kerb line through K (square
+    // to the road normal, `y = −k − (x − x_K)·nu/nv`), not on the frame's
+    // `y = −k`: on a skewed site the frame edge would put one corner up to
+    // `hw·tan 10°` into the carriageway, outside parcel ∪ corridor (§2.4
+    // geometry, `sitePavingViolations`; R2 merge).
+    final kerbSlope = site.nu / site.nv;
     for (var q = 0; q < paves.length; q++) {
       final r = paves[q];
       final kerbEdge = q == 0 && !hasQuad;
+      final y00 = kerbEdge ? r.y0 - (r.x0 - site.xK) * kerbSlope : r.y0;
+      final y10 = kerbEdge ? r.y0 - (r.x1 - site.xK) * kerbSlope : r.y0;
       b.pave([
-        corner(r.x0, r.y0, kerbEdge),
-        corner(r.x1, r.y0, kerbEdge),
+        corner(r.x0, y00, kerbEdge),
+        corner(r.x1, y10, kerbEdge),
         corner(r.x1, r.y1, false),
         corner(r.x0, r.y1, false),
       ]);

@@ -108,8 +108,7 @@ void main() {
     print('A1 random: $all');
   });
 
-  test('the paving check stub reports nothing until its track fills it in',
-      () {
+  test('the paving check reports nothing on the first starter site', () {
     final city = starterKit();
     final g = city.roadGraph;
     final ctx = siteContextsOf(city).first;

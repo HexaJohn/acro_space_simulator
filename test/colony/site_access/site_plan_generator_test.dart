@@ -103,7 +103,28 @@ void main() {
     }
     int d(SiteDemotion x) => stats.demotionCount(x);
     expect(blocked, d(SiteDemotion.accessBlocked));
-    expect(blocked, greaterThan(0));
+    // R2 merge: the founded kit's book makes the four §3.7a lots easements
+    // before the town zones, so `town()` builds none of them and no site is
+    // blocked. A crossed lot built around the refusal (an old save) still
+    // blocks its site, below.
+    expect(blocked, 0, reason: '$stats');
+    final old = starterKit();
+    old.parcelBuildings['lot-r0x1-l10'] =
+        kZoneSpecs['residential']![Density.low]!;
+    final oldStats = SiteProgramStats();
+    var oldBlocked = 0;
+    for (final ch in planCity(old, stats: oldStats, validate: false)) {
+      for (var k = 0; k < ch.siteCount; k++) {
+        final p = ch.plan(k);
+        if (p.flags & kPlanAccessBlocked == 0) continue;
+        expect(p.program, SiteProgram.kerbOnly, reason: p.siteId);
+        expect(p.flags & kPlanFallback, 0, reason: p.siteId);
+        expect(p.siteId, 'lot-m0');
+        oldBlocked++;
+      }
+    }
+    expect(oldBlocked, 1);
+    expect(oldStats.demotionCount(SiteDemotion.accessBlocked), 1);
     expect(
         kerbFallback,
         greaterThanOrEqualTo(d(SiteDemotion.homeRoad) +

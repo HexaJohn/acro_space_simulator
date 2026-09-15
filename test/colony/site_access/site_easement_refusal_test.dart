@@ -117,6 +117,9 @@ void main() {
 
     test('growth skips an easement lot zoned before it became one', () {
       final city = starterKit()..infiniteDemand = true;
+      // The founded kit already reads its real book, whose spaceport plan
+      // makes `front` an easement; unhook it to zone the lot "before".
+      city.layout.easementOf = null;
       city.layout.setUse(front, ParcelUse.residential);
       city.layout.setUse('lot-r0x1-l9', ParcelUse.residential);
       city.layout.easementOf = (id) => id == front ? spaceport : null;
@@ -190,7 +193,9 @@ void main() {
 
     test('a crossed lot that is already built blocks the site', () {
       final city = starterKit();
-      // Built before any easement existed (an old save, §3.7a rule 1).
+      // Built before any easement existed (an old save, §3.7a rule 1). The
+      // founded kit's real book already refuses the lot, so unhook it.
+      city.layout.easementOf = null;
       expect(city.placeOnParcel(front, house), isTrue);
       final book = fakeBook(city);
       final plan = book.planOf(spaceport)!;
@@ -230,8 +235,9 @@ void main() {
       expect(city.blocked, contains('access road'));
       expect(city.siteBlockedReason(house, Vec2(kerb.e + 16, kerb.n)),
           contains('access road'));
-      // With no corridor there, the same plot is staked.
-      city.siteAccess.debugCorridorHits = null;
+      // With no corridor there, the same plot is staked. (A null fake would
+      // read the colony's own book, whose real spaceport corridor is there.)
+      city.siteAccess.debugCorridorHits = (_) => const <String>[];
       expect(city.claimSite(house, Vec2(kerb.e + 16, kerb.n), checkAccess: false),
           isNotNull);
     });

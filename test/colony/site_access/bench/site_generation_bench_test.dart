@@ -18,16 +18,24 @@ import '../../../traffic/traffic_fixture.dart';
 /// mix, the measured cost per program, the drain sum `Σ count × unitBudget`
 /// against the 3 s budget, and bytes per home and kerbside site.
 ///
-/// R2 core: car park, yard and installation generators are still stubs, so
-/// their sites read as `kerbOnly` here until their tracks land.
+/// R2 merge: every generator is in place. The "offered" sum still costs a
+/// site that fell through to `kerbOnly` at the unit budget of the program it
+/// was offered (the generator ran and failed), and the measured drain is
+/// scaled to 127k buildings by sites.
 void main() {
-  test('bench: plan generation on the built town and the sprawl fixture', () {
+  test('bench: plan generation on the built town and the sprawl fixtures', () {
     for (final (name, city) in <(String, CitySim Function())>[
       ('built town', () => town()),
       (
         'sprawl',
         () => const CityGenerator().generate(
             const CityGenSpec(blocksAcross: 4, seed: 5, sprawlMiles: 12),
+            bodies: fixtureBodies)
+      ),
+      (
+        'sprawl 20 mi (the studio perf town\'s sprawl)',
+        () => const CityGenerator().generate(
+            const CityGenSpec(blocksAcross: 4, seed: 5, sprawlMiles: 20),
             bodies: fixtureBodies)
       ),
     ]) {
@@ -63,7 +71,9 @@ void main() {
       b.build(validate: false);
       total.stop();
       report('$name: ${sites.length} sites, $stats; all in '
-          '${f(total.elapsedMicroseconds / 1000)} ms');
+          '${f(total.elapsedMicroseconds / 1000)} ms; '
+          '${f(total.elapsedMicroseconds / sites.length, 1)} µs per site, '
+          '× 127k ≈ ${f(total.elapsedMicroseconds / sites.length * 0.127, 2)} s');
       const unit = {
         SiteProgram.kerbOnly: 5.0,
         SiteProgram.homeDriveway: 12.0,
@@ -79,12 +89,11 @@ void main() {
         report('  ${p.name}: $n plans, ${f(micros[p.index] / n, 1)} µs each '
             '(budget ${unit[p]} µs)');
       }
-      report('  drain sum Σ count × unit budget, stubs as kerbOnly: '
+      report('  drain sum Σ count × unit budget, as written: '
           '${f(budget / 1e6, 3)} s (budget 3 s for the 127k-building town)');
-      // While car park / yard / installation are stubs, their sites fall to
-      // kerbOnly and are costed at 5 µs: the sum above is a LOWER bound.
-      // Cost each stubbed site at the unit budget of the program it was
-      // offered instead (its NoFit demotion counts it).
+      // A site whose car park / yard / installation did not fit is written
+      // kerbOnly but paid its generator's attempt: cost it at the unit budget
+      // of the program it was offered (its NoFit demotion counts it).
       final cp = stats.demotionCount(SiteDemotion.carParkNoFit);
       final yd = stats.demotionCount(SiteDemotion.yardNoFit);
       final inst = stats.demotionCount(SiteDemotion.installationNoFit);
@@ -92,7 +101,7 @@ void main() {
           cp * (unit[SiteProgram.carPark]! - unit[SiteProgram.kerbOnly]!) +
           yd * (unit[SiteProgram.yard]! - unit[SiteProgram.kerbOnly]!) +
           inst * (unit[SiteProgram.installation]! - unit[SiteProgram.kerbOnly]!);
-      report('  drain sum Σ with the stubbed sites at their offered program\'s '
+      report('  drain sum Σ with the no-fit sites at their offered program\'s '
           'unit budget ($cp car park, $yd yard, $inst installation): '
           '${f(offered / 1e6, 3)} s; per site ${f(offered / sites.length, 1)} '
           'µs, × 127k buildings ≈ ${f(offered / sites.length * 0.127, 2)} s');
