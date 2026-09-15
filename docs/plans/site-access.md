@@ -1,7 +1,8 @@
 # Site access: driveways, car parks and access roads
 
 Status: authoritative design, 2026-09-14, revised after review round 1 (24 findings resolved in place; decisions that
-belong to the user are in §10.2), for review before a multi-agent build. Baseline `dev` at `690cbd4`
+belong to the user are in §10.2; revised 2026-09-15 for the user's §10.2 decisions and the Agent Traffic session's
+home back-out constraints), for review before a multi-agent build. Baseline `dev` at `690cbd4`
 (`== feat/agent-traffic`). Paths are relative to the repo root; `file:line` anchors were read at that commit.
 This document merges three independent designs (generation, integration, traffic contract) and the Agent
 Traffic session's 14 required constraints. Where the designs disagreed, §1.3 records what was decided and why.
@@ -18,7 +19,7 @@ the two; this document does not design traffic internals beyond it.
 
 Procedurally generate DRIVEWAYS, PARKING LOTS and ACCESS ROADS for every city parcel from the parcel's SHAPE,
 drawn in the city tiles and USABLE BY TRAFFIC AGENTS: a car turns in at a kerb cut, circulates, parks
-forward-in in a stall and pulls back out.
+forward-in in a stall and pulls back out (on a home driveway it backs out into the street, §10.2 Q3).
 
 Motivating case: the starter kit's four utility sites have no visible link to their street
 (city_starter_kit.dart:187-240). There are four stacked causes. First, no car park is generated: perimeter
@@ -98,11 +99,12 @@ Design principles that follow from these decisions and the project invariants:
 | C-14 | Pin policy | Existing digests stay byte-identical until the legacy-removal slice R7, then one ledgered re-pin | Every slice proves it changed nothing else |
 | C-15 | Hash quantisation | Coordinates to 1 cm in `rev` and `inSig` (change detection only, never persisted identity); join `s` to 0.25 m; stall keys from site-frame lattice integers, never coordinates (V10); seed position-free (C-5) | Loads re-sample curved roads by millimetres (parcel.dart:692-700), so nothing saved or tie-breaking may hash a coordinate |
 | C-16 | `lotE/lotN` | Stay the centroid. Side comes from `joinRight` | Fewer ripples, since the side is no longer read from them |
-| C-17 | Hammerhead | A 6 × 6 m clear apron (homes: the apron runs ≥ 6 m past the last stall, `xE = x_d + 2.6(n−1) + 7.3`), or a T end whose empty last bays take the reverse (car parks) | A 3 m arm alone gives no room to reverse, both forms cost no frontage, and the home run-up rule (V9) needs the longer apron |
+| C-17 | Hammerhead | A 6 × 6 m clear apron (installation gates), or a T end whose empty last bays take the reverse (car parks). A home pad has none: its end is a dead end whose stalls are left by backing out to the street (§3.4, V7) | A 3 m arm alone gives no room to reverse, and both forms cost no frontage; a car that reverses out of its home stall never turns on the pad (§10.2 Q3) |
 | C-18 | Schedule | Traffic 2 → 4a → 3 → 4b; road side R0–R4 now | §10 Q1 |
 | C-19 | Stall index stability (ask 8 says "unchanged by edits that don't touch that aisle") | **Amended:** indices are stable only per plan `rev`. Generation is whole-plan, so a changed capacity target or envelope can move every aisle of that site and renumber its stalls; traffic remaps by `stallKey` (V10, §7.6) | Per-aisle stability would need incremental generation with saved lattice state, which contradicts "plans are derived, never saved". **Needs the traffic session's ack** |
 | C-20 | Direction of the lot-access dependency (ask 2 says "RoadGraph's lot access should come FROM the plan's primary join") | **Amended:** the plan's `joins[0]` comes FROM `RoadGraph` slot 0 (slot → plan). One function (`SiteJoinPlacer.primary`) is still the single source | Zoning does not bump `layout.version` (city_layout.dart:1128), so a use-dependent join would go stale inside an unchanged graph. **Needs the traffic session's ack** |
 | C-21 | Installations behind a row of auto lots | Access easement over the fewest unbuilt auto lots (§3.7a) | Without it the pump, farm and solar farm are `kPlanAccessBlocked` (the motivating case fails); layouts stay byte-identical. **User decision, §10.2 Q12** |
+| C-22 | Where the home back-out's road rules apply (the traffic session asks for a 12 m upstream window margin, a ≥ 4.0 m cut half and road-class limits on `homeDriveway` joins) | At program classification (§3.3): a lot whose slot 0 fails them is demoted from `homeDriveway` to `kerbOnly`. Slots in `RoadGraph.of` stay use-independent and R1 is unchanged | A use-dependent slot would go stale inside an unchanged graph (C-20); the rules read only the slot, its road and its piece's windows, so classification can apply them exactly |
 
 ---
 
@@ -178,7 +180,8 @@ enum SiteJoinRole    { both, inOnly, outOnly }
 enum SiteJoinKind    { kerbside, cut }
 enum SiteSegmentKind { driveway, accessRoad, aisle, apron }                   // apron: home pad, truck yard
 enum SiteLaneMode    { twoWay, oneWayForward, oneWayBackward, sharedSingle }  // sharedSingle: one lane, alternating
-enum StallAngle      { perpendicular, angled60, angled45, parallel }           // v1 emits perpendicular only
+enum StallAngle      { perpendicular, angled60, angled45, parallel, inline }   // v1 emits perpendicular, and inline on home pads
+                                                                               // inline: the stall lies ON its pad segment, nose along from→to
 enum TurnaroundKind  { none, hammerhead, circle }
 enum SiteHeightRef   { pad, kerb, blend }
 enum PaveSurface     { asphalt, concrete, gravel }
@@ -212,7 +215,7 @@ class SiteAccessChunk {
   final Int32List stallSeg, stallKey, stallKeySorted, stallKeyIdx;
   final Float32List stallS, stallDirE, stallDirN, stallLenM, stallWidthM;
   final Float64List stallE, stallN;
-  final Uint8List stallSide, stallAngle, stallInDirs, stallOutDirs;              // side 0 right, 1 left; dirs bit0 fwd, bit1 bwd
+  final Uint8List stallSide, stallAngle, stallInDirs, stallOutDirs;              // side 0 right (or on the axis), 1 left; dirs bit0 fwd, bit1 bwd
   // loading bays (reserved; filled for yards/installations)
   final Float64List bayE, bayN; final Float32List bayDirE, bayDirN, bayLenM, bayWidthM, bayS;
   final Int32List baySeg; final Uint8List baySide, bayKind;
@@ -251,6 +254,10 @@ it. Limbo plans (§7.6) and cars mid-manoeuvre hold the old chunk and keep readi
   `[edgeLaneS0[e]+6, edgeLaneS1[e]−6]` for every serving edge. It also stays off bridges, off off-ground or
   off-grade deck stretches and tunnels, off tapers (90 m), and off limited-access, ramp, rail and car-less
   classes. `AccessPoint.sOn`'s clamp (access_points.dart:76-80) never fires for a cut join.
+  A `homeDriveway` cut join also keeps its **swing margin**: for each direction in `joinDirs`, the 12 m of that
+  direction's travel upstream of `T` lies inside `[edgeLaneS0[e], edgeLaneS1[e]]` under any override, so a back-out's
+  tail swing never enters a junction box or crosses a stop bar (§3.3 applies it at classification; the slot itself
+  stays use-independent, C-22).
 - **V2 Side and directions.** `joinDirs == _dirsFor(road, joinRight)`. The side comes from geometry (§3.2),
   never from the `r`/`l` in a lot id.
 - **V3 One source.** `joins[0]` is slot 0. Every join's `(piece, s, right, dirs, kerb point)` equals its slot's
@@ -264,16 +271,25 @@ it. Limbo plans (§7.6) and cars mid-manoeuvre hold the old chunk and keep readi
   - its far node is ANY node: a branch, a bend, a gate, a frontage node or a turnaround;
   - no stall mouth, bay mouth or branch node lies within 7 m of the kerb node measured along the site path;
   - it is ≥ 3.0 m wide, and ≥ 5.5 m wide for `twoWay`;
-  - it carries `kSegThroat`, plus `kSegCrossesPavement` when a pavement lies within its first 3 m.
+  - it carries `kSegThroat`, plus `kSegCrossesPavement` when a pavement lies within its first 3 m;
+  - **`homeDriveway` joins** (cars back out through it, §7.4): `joinCutHalfM ≥ kHomeCutHalfM = 4.0` for the tail
+    swing; the pad segment continues the throat's axis (its end node within 0.1 m of the throat's chord extended), so
+    the drive from the deepest stall to the kerb is one straight run within 10° of the road normal; the first 7 m
+    from the kerb carries no stall (the rule above).
 - **V6 Nodes (ask 4).** Segments reference node indices, and polyline ends ARE the node points. No two nodes
   lie within 0.5 m. No segment is shorter than 1 m. `nodeCount ≤ 4096`.
 - **V7 Connected (ask 5).** Under §2.5 the present site lanes form ONE strongly connected component. It holds
   every cut join's in-lane and out-lane and every stall's entry and exit lanes, which is stronger than the ask:
   every stall reaches EVERY out-join. Every degree-1 non-kerb node is a turnaround. It is either a `circle` of
   radius ≥ 6 m (≥ 12.5 m for trucks), or a `hammerhead` that is one of:
-  - (a) a clear paved rectangle ≥ 6 × 6 m adjoining the node (the home apron);
+  - (a) a clear paved rectangle ≥ 6 × 6 m adjoining the node (an installation gate apron);
   - (b) a T end: the last ≥ 3 m of a ≥ 6 m aisle is stall-free on both rows, with ≥ 5.2 m of paved row depth on at
     least one side to reverse into.
+
+  **The one exception is a home pad end** (`P`, §3.4): the `to` node of an `apron` segment whose stalls are all
+  `inline` with `stallInDirs = {fwd}` and `stallOutDirs = {bwd}`. It has `nodeTurnKind = none` and `kNodeDeadEnd`;
+  its stalls link the pad's forward lane to its backward lane (§2.5), which keeps the component strongly connected.
+  No car turns there: it reverses out of its stall to the street.
 
   One-way segments occur only inside cycles.
 - **V8 Segments (ask 6).**
@@ -292,13 +308,22 @@ it. Limbo plans (§7.6) and cars mid-manoeuvre hold the old chunk and keep readi
     bit is set only when the car has run-up for the turn (`kStallRunupM = 5.0`, half stall width 1.3):
     - the forward bit only if `stallS − 1.3 ≥ 5.0` from the segment's from-node;
     - the backward bit only if `segLenM − stallS − 1.3 ≥ 5.0`.
+  - **Home stalls are `inline`** (§3.4): they lie on their pad segment, nose along its from→to direction, and are
+    entered forward, straight up the drive: `stallInDirs = {fwd}` exactly. The run-up rule does not apply (the car
+    arrives aligned along the ≥ 7 m straight throat on the same axis).
   - Every stall has at least one `stallInDirs` bit; a stall that would have none is not emitted.
   - Perpendicular and angled stalls are left by reversing. `stallOutDirs` names the lanes a car may take after
     reversing out.
-  - Rectangles do not overlap each other, any carriageway (except the mouth edge), the throat or the envelope.
+  - **Home stalls are left by reversing out to the street:** `stallOutDirs = {bwd}` exactly, naming the pad's and
+    then the throat's to→from lane, which the car runs in reverse to the kerb before it backs out onto the road
+    (§7.4 Home back-out). Stall order along the pad is from the street outward (V10 already orders by `s`).
+  - Rectangles do not overlap each other, any carriageway (except the mouth edge), the throat or the envelope. An
+    `inline` stall lies on its own pad segment, which this rule exempts; inline stalls may share an edge with each
+    other and with the throat's far end, never overlap.
   - `stallCount ≤ 1024`.
 - **V10 Order and keys (ask 8).** Stalls are strictly ordered by `(seg, s, side)`. Segment order is: throats in
-  join order, then aisles by the `(y, x)` of their start in the frame, then access-road pieces in path order.
+  join order, then aisles by the `(y, x)` of their start in the frame, then access-road pieces in path order, then
+  aprons (home pads, truck yards) in path order.
   - `stallKey` is an `fnv1aU32` chain over generator-lattice INTEGERS in the site frame, never world
     coordinates: `(segment kind ordinal, module or row index, bay index along the row, side, heading octant
     relative to the frame's u)`. A millimetre shift of the frame (a curved-road re-sample) cannot change a key.
@@ -330,6 +355,8 @@ it. Limbo plans (§7.6) and cars mid-manoeuvre hold the old chunk and keep readi
   at ±width/4, right of travel. The others sit on the centreline.
 - A movement at node `n` from arriving lane `a` to leaving lane `b` is allowed when they belong to different
   segments and the deflection is ≤ 150°, or when `n` is a turnaround and `b` is `a` reversed.
+- An `inline` stall (home pads, V9) links its entry lane (the pad's forward lane) to its exit lane (the pad's backward
+  lane, run in reverse). That link is what connects a home pad's dead end `P` (V7); no movement exists at `P`.
 - A kerb node has site degree 1. Its road side is reached only through access events (§7.4).
 - `SiteLaneGraph.of(plan)` returns CSR adjacency, `present[]`, `strongComponent[]`, `inLane(join)` and
   `outLane(join)`. It allocates and runs only at build and sync. If traffic copies the rule, a test pins the
@@ -446,7 +473,9 @@ end (a manual lot wholly past a dead end), `F` becomes the nearest window point,
 the plan bridges the gap with a dogleg access road of at most 120 m (§3.7). The starter sites are NOT this case:
 their spans overlap the windows, and they are only `kJoinClamped`.
 
-**Slot 0: `SiteJoinPlacer.primary`.** It does not depend on use.
+**Slot 0: `SiteJoinPlacer.primary`.** It does not depend on use. The home back-out's extra requirements (a 4.0 m
+cut half, the 12 m swing margin, the road rules) are NOT applied here: §3.3 checks them when it classifies a lot as a
+home, and demotes a lot that fails to `kerbOnly` (C-22).
 
 | Frontage W | Preferred cut half `m` (incl. 1 m flare) | Target |
 |---|---|---|
@@ -511,14 +540,36 @@ Each site then gets a 56 m access road from the kerb (e = ±4) to its frontage l
 | 0c | slot 0 is `kJoinCorridorBlocked`, or its `joinCrossLot` holds a BUILT auto lot | `kerbOnly` + `kPlanAccessBlocked` |
 | 1 | `spec.siteKind != building`, or `claimsOwnSite && min(W, D) ≥ 150` and the group is not `res`/`com` | `installation`; if `W < 60 or D < 120`, fall through to 4 |
 | 2 | `spec.type == 'mega'` (`parkingSpaces` = 0) | `kerbOnly` (podium garage: R8) |
-| 3 | group `res` and `housing ≤ 24` (r-low; sprawl house lots) | `homeDriveway` if §3.4 fits, else `kerbOnly` |
+| 3 | group `res` and `housing ≤ 24` (r-low; sprawl house lots) | `homeDriveway` if slot 0 is back-out eligible (below) and §3.4 fits, else `kerbOnly` |
 | 4 | industrial groups (`_isIndustrial`, building_massing.dart:278-285) | `yard` if it fits, else `carPark`, else `kerbOnly` |
 | 5 | everything else (commercial, civic, r-med, r-high, strip mall) | `carPark` if it fits, else `kerbOnly` |
 
-- `homeDriveway` is demoted to `kerbOnly` on `RoadClass.boulevard` and `RoadClass.highway` ONLY (3 and 4 lanes each
-  way, parcel.dart:272-333). `RoadClass.avenue` and `RoadClass.streetOneWay` (2 lanes each way) keep home driveways.
+- **Back-out eligibility (homes only, §10.2 Q3).** A home car leaves by backing out into the street (§7.4 Home
+  back-out), so `homeDriveway` needs slot 0 to pass ALL of the following. They read only the slot, its road and its
+  piece's `kerbWindows`, and are checked here, never in `RoadGraph.of` (slots stay use-independent, C-22). A lot that
+  fails any of them is demoted to `kerbOnly` (kerb parking), and the sprawl audit counts demotions by rule.
+  1. **Road** (`RoadType.of(road).speedKmh`, road_catalog.dart; `lanes.medianM`, parcel.dart:538-562):
+     - a minor tier at ≤ 40 km/h: `street`, `streetOneWay` (40 km/h, so eligible), `alley`, `path`. Back-outs are
+       allowed in every direction `joinDirs` allows (both on a 1+1 street; the one direction of a one-way street);
+     - `avenue` (50 km/h, 2 lanes each way): near direction only, into the kerb lane, never across. `_dirsFor`
+       (road_graph.dart:685-694) already gives it only the lot-side direction, and traffic's departure planner also
+       restricts its origins to the near edge;
+     - divided or medianed (`medianM > 0`), or above 50 km/h: `kerbOnly`. In the road catalog that is
+       `boulevard` (60 km/h, barrier median) and `highway` (urban highway, 70 km/h, painted median); a minor tier
+       whose type is faster than 40 km/h is also demoted (none exists in the catalog).
+  2. **Cut half.** `joinRoomM(slot 0) ≥ kHomeCutHalfM = 4.0` (the tail swing, V5). A narrow slot's preferred room is
+     already 4.0 and a wide one's 4.5 (§3.2), so this costs no frontage; it demotes homes whose slot only fit at
+     `kJoinMinRoomM = 2.5`.
+  3. **Swing margin** (`kHomeSwingMarginM = 12`, V1). For each direction in `joinDirs`, the 12 m upstream of the join
+     along that direction's travel must lie inside the lane span under any override. The windows are 6 m inside the
+     lane span (V1), so the use-free test on the piece's `kerbWindows` is: forward travel `[s − 6, s + 4.0]` lies in
+     one window interval; backward travel `[s − 4.0, s + 6]`; a join with both directions (a 1+1 street) needs
+     `[s − 6, s + 6]`. It keeps every tail swing out of junction boxes and behind stop bars.
+  4. **Skew.** `v` is within 10° of the road normal at the join: `v · joinNorm ≥ 0.98481` (cos 10° as a constant,
+     no trig, C-11). A back-out needs one straight run from the stall to the kerb, so homes get no bent throat.
+  5. **Geometry.** §3.4 fits.
 - `carPark`, `yard` and `installation` are allowed on any eligible road, because their throats hold cars off the
-  carriageway.
+  carriageway and they leave forward.
 - A generator returns null when nothing meets its minimum, and classification then falls to the next program.
 - **Every generator sizes its throat to the slot.** It reads `room = joinRoomM(slot)` and sets
   `throatW = min(programWidth, 2·(room − kCutFlareM))`. If `throatW` is below the program minimum, the generator
@@ -526,19 +577,20 @@ Each site then gets a 56 m access road from the kerb (e = ±4) to its frontage l
 
   | Program | `programWidth` | Minimum `throatW` |
   |---|---|---|
-  | homeDriveway | 3.2 (`sharedSingle`) | 3.0 |
+  | homeDriveway | 5.2 side by side, 3.2 tandem or single (`sharedSingle`, §3.4) | the variant's full width (room ≥ 4.0 is required above, which always gives it) |
   | carPark | 6.0 (`twoWay`) | 5.5 `twoWay`; or 3.0 `sharedSingle`, only when the plan has ≤ 8 stalls |
   | yard, installation | 7.0 (`twoWay`) | 7.0 |
 
-  The cut half is then `throatW/2 + kCutFlareM`, and the throat corridor used by the packers is
-  `x_J ± (throatW/2 + 1)`. On a narrow slot (room 4.0) a yard gets `throatW = 6.0 < 7.0` and falls through to
-  `carPark`; on a `kJoinMinRoomM` slot (room 2.5) a car park gets a 3.0 m `sharedSingle` throat and at most 8 stalls.
+  The cut half is then `throatW/2 + kCutFlareM` (homes: `max(kHomeCutHalfM, throatW/2 + kCutFlareM)` = 4.0 for both
+  widths), and the throat corridor used by the packers is `x_J ± (throatW/2 + 1)`. On a narrow slot (room 4.0) a yard
+  gets `throatW = 6.0 < 7.0` and falls through to `carPark`; on a `kJoinMinRoomM` slot (room 2.5) a car park gets a
+  3.0 m `sharedSingle` throat and at most 8 stalls, and a home is already `kerbOnly` (room < 4.0).
 
 **Capacity targets:** `C* = parkingSpaces(spec)` (building_massing.dart:289-299).
 
 | Program | Target |
 |---|---|
-| home | 2, or 1 on the narrow variant |
+| home | 2 (side by side, else tandem), or 1 where only a single stall fits |
 | carPark | `max(C*, com ? 6 : 4)`; civic/utility `max(C*, 8)` |
 | installation | `clamp(C*, 12, 240)` |
 
@@ -551,57 +603,85 @@ The score rewards stalls up to 1.5·C* for `com` and 1.0·C* otherwise. Overflow
 
 ### 3.4 Home driveway and pad ("both")
 
-In the frame, `k` is the distance from the kerb to the frontage line (3 m on auto lots, `sidewalkM`,
-city_layout.dart:50), `x_d` is the join's frame x, `yT = max(7 − k, 1)` and `yA = yT + 3`.
+Cars on a home lot drive in forward, park nose-in, and leave by **backing out into the street** (§10.2 Q3; the
+manoeuvre, gap acceptance and event logging are traffic's, §7.4 Home back-out). So the drive and its pad are ONE
+straight run from the kerb, with the stalls on it and no turnaround. In the frame, `k` is the distance from the kerb
+to the frontage line (3 m on auto lots, `sidewalkM`, city_layout.dart:50), `x_d` is the join's frame x,
+`yT = max(7 − k, 1)`, `w` is the drive width and `r` the number of stall rows along the pad (1, or 2 in tandem).
 
 ```
-  y ▲         rear yard ≥ 3 m
-    │   ┌─────── house envelope [pad1+1, W-1.5] × [yA+4, D-3] ───────┐
-    │ ┌─┴─┬───┐ stalls S0,S1 2.6×5.2, nose +v, entered from E→H only │
- yA+3 ├─┼───┴───┴──────────────────┐ apron 6 m (H→E, twoWay)           │
- yA │ │ H ──────────────────────── E  hammerhead (a): clear 6 × 6 past the last stall
-    │ │throat 3.2 m sharedSingle   │  xE = x_d + 2.6(n−1) + 7.3
-  0 └─┴──┬──┴─────────────────────────────── frontage line
-   -k    K kerb node (cut half 1.6 + 1.0 flare = 2.6)        x = x_d (4.5 on a narrow auto lot)
+      y ▲                                              rear yard ≥ 3 m
+        │                  ┌─ house envelope [xP+1, W−1.5] × [yT, D−3] ─┐
+        │                  │                                            │
+ yT+5.2 │  ┌─────┬─────┐ P │                                            │
+        │  │ S1  │ S0  │   │                                            │
+        │  │     │     │   │                                            │
+     yT │  ├─────H─────┤   └────────────────────────────────────────────┘
+        │  │  throat   │   K→H: straight along the road normal, sharedSingle,
+        │  │   K→H     │   5.2 m wide side by side (3.2 m tandem or single)
+      0 ├──┤           ├─────────────────────────────────────────── frontage line
+     -k │  └─────K─────┘   kerb node: cut half 4.0 (x_d ± 4.0); x = x_d (4.5 on a narrow auto lot)
 ```
 
-- **Nodes:** `K` (kerb, ref `kerb`); `H = (x_d, yA)` (the throat's far node, `pad`); `E = (xE, yA)` (dead end,
-  `hammerhead`, arm direction toward the interior), with `xE = x_d + 2.6(n−1) + 7.3`, so the apron runs 6.0 m past
-  the last stall's far edge (V7 form (a)).
+Side by side is drawn (the preferred form). **Tandem:** a 3.2 m drive, `S0` on the axis at `[yT, yT + 5.2]`, `S1`
+behind it at `[yT + 5.2, yT + 10.4]`, `P` at `yT + 10.4`. **Single:** a 3.2 m drive, `S0` on the axis, `P` at
+`yT + 5.2`.
+
+- **Nodes:** `K` (kerb, ref `kerb`); `H = (x_d, yT)` (the throat's far node, `pad`); `P = (x_d, yT + 5.2r)` (the pad
+  end, `pad`, `kNodeDeadEnd`, `nodeTurnKind = none`: V7's home exception).
 - **Segments:**
-  - `K→H`: driveway, `throatW` (3.2 m, §3.3), `sharedSingle`, 10 km/h, `kSegThroat|kSegCrossesPavement`. Its
-    length `k + yA` is ≥ 10 m.
-  - `H→E`: `apron`, 6.0 m, `twoWay`, 10 km/h, length `2.6(n−1) + 7.3` (7.3 m for one stall, 9.9 m for two).
-- **Stalls:** n = 1 or 2 on the +y side of `H→E` at `s = 0` and `s = 2.6`. Stall 0 continues the driveway axis.
-  - Run-up (V9): the forward bit needs `s − 1.3 ≥ 5.0`, which no home stall meets. The backward bit needs
-    `segLen − s − 1.3 ≥ 5.0`: 6.0 m (one stall), 8.6 m and 6.0 m (two stalls). So every home stall has
-    `stallInDirs = {bwd}` and `stallOutDirs = {bwd}`.
-  - **The manoeuvre:** an arriving car comes up the throat to `H`, turns onto the apron toward `E` (passing the
-    stalls), turns around in `E`'s hammerhead, and on the way back along `E→H` turns right into its stall nose
-    first (+y is right of `E→H` travel). It leaves by reversing out onto the apron, drives forward to `H` and out
-    through the throat. It never reverses onto the street (§10 Q3).
-- **Mirror:** if the join hugs `x = W`, every x is mirrored about `W/2` (the stalls then sit left of `E→H` travel,
-  and the manoeuvre mirrors). A wide lot's mid join puts the pad toward the larger side, with ties broken by the
-  seed.
-- **Skew:** if `v` is more than 10° off the road normal at the join, `K` runs along the road normal for ≥ 7 m to a
-  bend node, then along `v` to `H`. The throat is `K`→bend (V5: its far node may be a bend). If the pad then no
-  longer fits, the lot is `kerbOnly`.
+  - `K→H`: driveway, width `w`, `sharedSingle`, 10 km/h, `kSegThroat|kSegCrossesPavement`. It runs along the road
+    normal (within 10°, §3.3 rule 4) and its length `k + yT` is ≥ 7 m (7.0 on auto lots), so the first stall mouth
+    is 7 m from the kerb (V5) and a parked car's rear stays off the pavement.
+  - `H→P`: `apron` (the pad), width `w`, `sharedSingle`, 10 km/h, collinear with `K→H` (V5), length `5.2r`.
+  - `K→H→P` is one `sharedSingle` claim unit (§7.4). The cut half is `kHomeCutHalfM = 4.0` for both widths (§3.3).
+- **Stalls:** 2.6 × 5.2 m, `inline`, nose `+v`, `stallInDirs = {fwd}`, `stallOutDirs = {bwd}` (V9), ordered from the
+  street outward.
+  - **Side by side** (`w = 5.2`, preferred): two stalls at `s = 0`, centred at `x_d + 1.3` (`S0`, side 0, right of
+    `+v` travel) and `x_d − 1.3` (`S1`, side 1). They fill the pad, and the drive keeps the pad's full 5.2 m width
+    down to the kerb, so a car reversing out of either stall can reach the kerb line on the join axis `x_d`, where
+    §7.4 measures its footprint.
+  - **Tandem** (`w = 3.2`, at most 2 deep): `S0` (outer) at `s = 0` and `S1` (deep) at `s = 5.2`, both on the axis
+    (side 0). An arriving car takes the deepest free stall; a deep car blocked by an outer one is traffic's (LIFO
+    assignment and the 120 s shuffle, §7.5).
+  - **Single** (`w = 3.2`): `S0` on the axis at `s = 0`.
+- **Variant order:** side by side, then tandem, then single; the first that passes the thresholds below wins.
+- **The manoeuvre** (traffic's, §7.4): in forward up the throat onto the pad, nose-in to the reserved stall; out by
+  reversing down the pad and the throat in one straight run, then backing out into the street lane on a gap. No car
+  turns on the pad.
+- **Mirror:** if the join hugs `x = W`, every x is mirrored about `W/2` (the house then stands at `x < x_d`). A wide
+  lot's mid join puts the house on the larger side, with ties broken by the seed.
+- **Skew:** a lot whose `v` is more than 10° off the road normal at the join is `kerbOnly` (§3.3 rule 4). A home drive
+  never bends, because a car reverses its whole length.
 
-**Thresholds** (derived from the geometry above; `pad1 = x_d − 1.3 + 2.6n`, side setback 1.5, gap 1.0, house
-≥ 8 × 8, rear yard ≥ 3). The longer apron lies below the house (apron y ≤ yA + 3, house y ≥ yA + 4) and ends at
-`xE = 11.8` (one stall) or `14.4` (two), inside `W − 0.3` whenever the house rule holds, so the thresholds are
-unchanged:
+**Thresholds** (derived from the geometry above; `xP = x_d + w/2` is the drive's inner edge; side setback 1.5, gap
+1.0, a house ≥ 8 × 8 standing beside the drive from the throat's far-node line, i.e. inside
+`[xP + 1, W − 1.5] × [yT, D − 3]`; rear yard ≥ 3; 0.5 m clear behind the deepest stall):
 
-| Rule | Auto lot (k = 3, x_d = 4.5) |
+| Rule | Auto lot (k = 3, x_d = 4.5, yT = 4) |
 |---|---|
-| 2 stalls: `W ≥ pad1(2) + 1 + 8 + 1.5` (apron end 14.4 ≤ W − 0.3 is weaker) | **W ≥ 18.9 m** |
-| 1 stall: `W ≥ pad1(1) + 10.5` (apron end 11.8 ≤ W − 0.3 is weaker) | **16.3 ≤ W < 18.9** |
-| depth over the house x-range `≥ yA + 4 + 8 + 3`, and over the pad `≥ yA + 8.2 + 0.5` | **D ≥ 22 m** |
-| the throat strip `[x_d ± 2.6] × [0, yA+3]`, the apron `[x_d − 1.6, xE] × [yA − 3, yA + 3]` and the stalls pass `containsRect` | required |
+| 2 side by side (`w = 5.2`): `W ≥ x_d + 2.6 + 1 + 8 + 1.5 = x_d + 13.1`, and the drive's outer edge `x_d − 2.6 ≥ 0.3` (1.9) | **W ≥ 17.6 m** |
+| 2 tandem (`w = 3.2`): `W ≥ x_d + 1.6 + 1 + 8 + 1.5 = x_d + 12.1`, and depth over the drive `≥ yT + 10.4 + 0.5` (14.9, weaker than the house rule on a rectangular lot) | **16.6 ≤ W < 17.6** |
+| 1 stall (`w = 3.2`): `W ≥ x_d + 12.1`, and depth over the drive `≥ yT + 5.2 + 0.5` (9.7) | **W ≥ 16.6**, used only where the drive's columns are shallower than 14.9 m (irregular lots) |
+| depth over the house x-range `≥ yT + 8 + 3` | **D ≥ 15 m** |
+| slot 0 back-out eligible: road, room ≥ 4.0, 12 m swing margin, skew ≤ 10° (§3.3) | required |
+| the drive `[x_d ± w/2] × [−k, yT + 5.2r]` and the stalls pass `containsRect` | required |
 | otherwise | `kerbOnly` |
 
-Against the plat, a downtown 24 × 32 lot gets 2 stalls. Sprawl house lots of 17–33 × 36
-(city_generator.dart:1963-1967) get 1 stall below 18.9 m and 2 above. A 12 m infill lot is kerb only.
+**What moved from the turn-on-the-pad design** (a 6 m apron beside the stalls with the house behind it):
+
+- Two stalls: W ≥ 18.9 m → **W ≥ 17.6 m** (side by side). The pad is centred on the drive's axis instead of hanging
+  off it, so its inner edge is 7.1 m, not 8.4 m.
+- The narrowest home: W ≥ 16.3 m with 1 stall → **W ≥ 16.6 m with 2 stalls in tandem**. The 3.2 m drive now runs
+  beside the house, so its edge at 6.1 m binds instead of the old stall edge at 5.8 m.
+- Depth: D ≥ 22 m → **D ≥ 15 m**. The house front moves from behind the apron (y = 11) to `yT` (y = 4).
+- The 4.0 m cut half (up from 1.6 + 1.0 = 2.6) moves no threshold: the cut lies in the kerb and pavement, and a
+  narrow slot already sits `m + cc = 4.0 + 0.5 = 4.5 m` in from its lot line (§3.2). It only demotes homes on
+  `kJoinMinRoomM` slots.
+
+Against the plat, a downtown 24 × 32 lot gets 2 stalls side by side. Sprawl house lots of 17–33 × 36
+(city_generator.dart:1963-1967) get 2 stalls in tandem below 17.6 m and side by side from 17.6 m. A 12 m infill lot
+is kerb only, and so is any house lot whose slot 0 fails the §3.3 back-out rules.
 
 ### 3.5 Car parks (`car_park_packer.dart`)
 
@@ -817,7 +897,8 @@ lot-r0x0-r1, lot-r0x1-r5}` (spaceport, solar farm, farm, pump), and 78 of the 82
 | Triangle | profile tapers | generators run; usually `kerbOnly` below ~400 m² |
 | Concave L/U, self-touching | profile + exact `containsRect` | stalls never outside; pockets unused; never crashes |
 | Frontage < 2(m + 0.5) | spans empty on that road | side street, other road, then legacy |
-| Skewed lot or curved road | frame | throat along the road normal, bend node after ≥ 7 m |
+| Skewed lot or curved road | frame | throat along the road normal, bend node after ≥ 7 m; a home more than 10° off the normal is `kerbOnly` (§3.3 rule 4) |
+| House lot whose slot 0 fails the back-out rules (road, room < 4.0, swing margin) | §3.3 | `kerbOnly` (kerb parking) |
 | Piece shorter than `reserves + 12 + 2m` | no window | other road or legacy (counted by the sprawl audit) |
 | Join road without pavement (path, alley) | class | kerb = carriageway edge; no kerb-cut mesh; throat still ≥ 7 m |
 | Sealed (airless) road | flag | same geometry (rovers); tube crossing is §10 Q8 |
@@ -1064,15 +1145,19 @@ class SiteChunkGeometry {                  // ≤ 3 retained objects: itself, on
   (`gateXM` along local X, on the envelope front edge at local −Y) and the door therefore share the building's axes
   by construction, for frontage-less manual lots and cells too. Legacy sites keep the §5.1 R0 transform. The ground
   key stays `'lot:<id>'` at the centroid, so no new query is made.
-- **`RoadSnapshot.kerbCuts`:** a `Float64List` of triples `(side, s0, s1)`: the renderer's COPY of the canonical
+- **`RoadSnapshot.kerbCuts`:** a `Float64List` of quintuples (below): the renderer's COPY of the canonical
   `KerbCuts` (§5.5), converted to the snapshot's own drawn arc.
   - Built in the road loop (world_snapshot.dart:2763-2786) from `siteAccess` cut joins.
   - Canonical index arc is scaled to drape arc per road, the rescale `TrafficGeometry` documents
     (city_traffic_frame.dart:67-71).
-  - Flipped for reversed roads (`s → L − s`, `side → −side`), and overlapping cuts per side are merged.
+  - Flipped for reversed roads (`c → L − c`, `side → −side`, `σ → −σ`). Masks are evaluated per entry; only the
+    drawn dropped-kerb ranges are merged per side, for meshing.
   - Cached per road on `(sitesRev, drape identity)`, and omitted when empty.
-  - The cut half is `throatW/2 + kCutFlareM` (1.0 m). The SAME constant sizes the drawn dropped kerb and the
-    kerb-parking mask.
+  - The cut half is `joinCutHalfM`: `throatW/2 + kCutFlareM` (1.0 m), and 4.0 m for `homeDriveway` (§3.3). The SAME
+    value sizes the drawn dropped kerb and every kerb mask (§5.5).
+  - Each entry is a quintuple `(side, c, h, σ, kind)`: centre, cut half, the travel sign of the lane beside that
+    kerb (+1 toward larger arc), and `kind` 0 = the dropped kerb of a non-home cut, 1 = a home cut's lot-side kerb
+    (dropped kerb and swing mask), 2 = a home cut's far-kerb swing mask (never drawn). Only kinds 0 and 1 are drawn.
   - The conversion (rescale + flip) is unit-tested against the canonical form within 0.5 m (§5.5).
 
 ### 5.3 Tile cut and keys
@@ -1111,8 +1196,9 @@ the anchor. Output uses the existing builders: `featureApron` (road material), `
 | Access-road edge kerb (near) | 0.13, with a 0.10 m face |
 
 **Tiers.** A site is "big" when its pave area is ≥ 1500 m² or its access road is ≥ 40 m. A site is "mid-visible"
-when it is big or its pave area is ≥ 150 m² (`kMidPaveAreaM2`). Homes (≈ 130 m² of apron, stalls and throat) are
-not, so the 127k town's mostly-home tiles add nothing at mid.
+when it is big or its pave area is ≥ 150 m² (`kMidPaveAreaM2`). Homes (≈ 55–65 m² of drive and pad: 5.2 × 12.2 m
+side by side, 3.2 × 17.4 m in tandem, on an auto lot) are not, so the 127k town's mostly-home tiles add nothing at
+mid.
 
 | Element | far | mid | near base | detail exterior | detail full |
 |---|---|---|---|---|---|
@@ -1157,27 +1243,45 @@ not, so the 127k town's mostly-home tiles add nothing at mid.
 - **`RoadMesher.verges`** (:761-815) drops grass over `[s0 − 0.5, s1 + 0.5]` and tree pits within 4 m of a cut. The
   yaw counter still advances, so every other tree is unchanged.
 - **`StreetFurniture.emit`** (street_furniture.dart:116-173) and street trees: a slot where
-  `KerbCuts.blocked(side, arc, halfLenM: 2.0)` holds consumes the same random draws and skips placement. `placed` is
-  not incremented, so every other prop is byte-identical.
-- **`curbParkingFor`** (city_tile_mesher.dart:2374-2407): a car is skipped when
-  `KerbCuts.blocked(side, arc, halfLenM: 3.7)` (half the 7.4 m bay). The `placed.isEven` alternation still
-  advances.
+  `KerbCuts.blocked(dropped, side, arc, upstreamM: 2.0, downstreamM: 2.0)` holds consumes the same random draws and
+  skips placement. `placed` is not incremented, so every other prop is byte-identical. Furniture, verges and lamps
+  read dropped kerbs only (kinds 0 and 1), never the swing masks: a swing is on the carriageway, not the pavement.
+- **`curbParkingFor`** (city_tile_mesher.dart:2374-2407): a car is skipped when `KerbCuts.parkingBlocked(side, arc)`
+  holds, the SAME asymmetric form traffic's kerb masks use (§7.5), so a baked kerb car never stands in a home
+  back-out's swing path. The `placed.isEven` alternation still advances.
 - **Lamps:** a station inside a cut moves to `KerbCuts.shiftOut` (the cut end + 1 m). `CityLighting.lamps`
   (city_lighting.dart:106-142) calls the same function.
 - **Instant path:** `instant_road_nodes.dart` passes the snapshot's `kerbCuts` to `sidewalks`.
 - **`KerbCuts`: one canonical form, per-caller conversions.**
-  - **Canonical:** per road, cuts as `(side, s0, s1)` in the road's INDEX arc measured from its first control
-    (the arc `joinS` uses), with `side = joinRight` (1 = right of the first → last polyline). Built once per
-    `sitesRev` from the book's cut joins. `KerbCuts.blocked(cuts, side, s, halfLenM)` is true when any cut on that
-    side has `|s − centre| < halfLenM + cutHalf`; `KerbCuts.shiftOut` moves a station to the cut end + 1 m.
+  - **Canonical:** per road, entries `(side, c, h, σ, kind)` (§5.2) in the road's INDEX arc measured from its first
+    control (the arc `joinS` uses). `side` is 1 for the kerb right of the first → last polyline; `c` is the join's
+    `s`, `h` its `joinCutHalfM`; `σ` is the travel sign of the lane beside that kerb (on a two-way road +1 on side 1
+    and −1 on side 0; on a one-way road the road's own direction on both kerbs). Built once per `sitesRev` from the
+    book's cut joins:
+    - every cut join adds its lot-side kerb (`side = joinRight`): kind 0, or kind 1 for `homeDriveway`;
+    - a `homeDriveway` join whose `joinDirs` allow a far-direction back-out (a 1+1 street, §7.4) also adds the far
+      kerb beside the reverse edge's lane: kind 2.
+  - **The asymmetric form.** `KerbCuts.blocked(entries, side, s_i, {upstreamM, downstreamM})` is true when some
+    entry on that side has `−(h + upstreamM) < σ·(s_i − c) < h + downstreamM`. Upstream and downstream are measured
+    along the travel of the lane beside that kerb, so the upstream side flips with the served travel direction on
+    that side. With equal extents it is today's symmetric `|s_i − c| < h + x`. `KerbCuts.shiftOut` moves a station to
+    the cut end + 1 m.
+  - **Kerb parking** (`KerbCuts.parkingBlocked(side, s_i)`) evaluates every entry with its program's extents:
+    kinds 1 and 2 (`homeDriveway`) at `(upstreamM: 12, downstreamM: 3)` (`kHomeSwingUpM`, `kHomeSwingDownM`), the
+    traffic session's swing mask `[T − 12, T + 3]` in travel terms on each served side; kind 0 (every other program)
+    at the symmetric `(3.25, 3.25)` (`kKerbMaskM`). Because the cut half is added as it is today, a slot CENTRE near
+    a home join is masked over `(T − 16, T + 7)` (h = 4.0), so no kerb-car body (half length ≤ 3.7 m) reaches
+    `[T − 12, T + 3]`. A kerb car in the swing path would block every departure (§7.4).
   - **Traffic** kerb slots convert their edge travel arc `T` and "right of travel" to the canonical `(s, side)`
     per edge direction (`s = T` on a forward edge, `s = L − T` and the side flipped on a backward edge), then call
-    `blocked` with `halfLenM: 3.25`.
-  - **Renderer** (`sidewalks`, `verges`, `StreetFurniture`, `curbParkingFor`, lamps) calls the same function on
-    `RoadSnapshot.kerbCuts`, its copy rescaled to drape arc and flipped for reversed roads (§5.2).
+    `parkingBlocked`.
+  - **Renderer** (`sidewalks`, `verges`, `StreetFurniture`, `curbParkingFor`, lamps) calls the same functions on
+    `RoadSnapshot.kerbCuts`, its copy rescaled to drape arc and flipped for reversed roads (§5.2): `curbParkingFor`
+    calls `parkingBlocked` (it no longer uses its own 3.7 m bay half), the others `blocked` over kinds 0 and 1.
   - **`CityLighting`** works on domain polylines, i.e. index arc: it uses the canonical form directly.
   - **Tests:** each caller's conversion is unit-tested, and A12 asserts that traffic's masked intervals and the
-    renderer's skipped kerb cars agree within 0.5 m (the bounded index-vs-drape error, §10.1), not bit for bit.
+    renderer's skipped kerb cars agree within 0.5 m (the bounded index-vs-drape error, §10.1), not bit for bit, both
+    through the same asymmetric `parkingBlocked`.
 
 ---
 
@@ -1307,18 +1411,18 @@ for each plan of a GRADED parcel (cells: never):
 
 | # | Ask | How it is satisfied |
 |---|---|---|
-| 1 | `roadS` in `[edgeLaneS0+6, edgeLaneS1−6]`, never on deck/tunnel/bridge/taper | §3.2 reserve ≥ every `stopBackOf` any override can produce, plus the pavement pull-back (and the drawn cul-de-sac bulb at street dead ends), + 6 m, applied to the WHOLE cut `s ± cutHalf`; exclusions for bridges, off-ground/off-grade decks, tunnels, 90 m tapers and ineligible classes. V1. Test A2 builds lane graphs under every override kind. Kerbside/legacy joins draw nothing and may still clamp. |
+| 1 | `roadS` in `[edgeLaneS0+6, edgeLaneS1−6]`, never on deck/tunnel/bridge/taper | §3.2 reserve ≥ every `stopBackOf` any override can produce, plus the pavement pull-back (and the drawn cul-de-sac bulb at street dead ends), + 6 m, applied to the WHOLE cut `s ± cutHalf`; exclusions for bridges, off-ground/off-grade decks, tunnels, 90 m tapers and ineligible classes. V1. Test A2 builds lane graphs under every override kind. Kerbside/legacy joins draw nothing and may still clamp. A `homeDriveway` join also keeps 12 m of lane upstream of `T` per served direction (the swing margin, applied at classification, §3.3). |
 | 2 | Several joins with roles; dirs ⊆ lotDirs; RoadGraph lot access FROM the primary join | Several joins, roles and dirs: satisfied. Up to 4 join slots per lot on `RoadGraph` (own road, far end, side street, alley reserved); a plan selects slots, with `joinRole` in/out/both and `joinDirs == _dirsFor(road, side)` (V2). **Amended (C-20, needs ack):** the dependency is inverted. `joins[0]` = slot 0 = `lotPiece/lotS/lotDirs` (V3), and slot 0 comes from `RoadGraph`, not from the plan, because zoning does not bump `layout.version` (city_layout.dart:1128), so a use-dependent join would go stale inside an unchanged graph. One function (`SiteJoinPlacer.primary`) is still the single source. C1 notice (§7.3) with the R1 commit. |
-| 3 | Straight throat ≥ 7 m before any branch or stall | V5 (straight within 0.1 m, ≥ 7 m, no stall, bay or branch within 7 m of the kerb node along the path); every generator's first segment (home `k + yA ≥ 10 m`, car park `yT = 7 − k`, installation `max(12, k)`). Departing cars stop `kSiteThroatStopM = 1 m` inside the kerb line. |
+| 3 | Straight throat ≥ 7 m before any branch or stall | V5 (straight within 0.1 m, ≥ 7 m, no stall, bay or branch within 7 m of the kerb node along the path); every generator's first segment (home `k + yT ≥ 7 m`, car park `yT = 7 − k`, installation `max(12, k)`). Forward-out departures stop `kSiteThroatStopM = 1 m` inside the kerb line; a home car waits in its stall and backs out on a gap (§7.4 Home back-out), down a throat that is straight within 10° of the normal with a ≥ 4.0 m cut half (V5). |
 | 4 | Explicit node list; shared ends are the same node | Node table with `nodePt`; segments hold node indices; polyline ends ARE node points (no duplicated coordinates); V6. |
-| 5 | Directed and connected; flagged turnarounds; one-way loops ok, two-way default | §2.5 movement rule; V7 (one SCC containing every cut join's in and out lanes and every stall: stronger than asked); `hammerhead` ≥ 6 × 6 m clear or `circle` ≥ 6 m. |
+| 5 | Directed and connected; flagged turnarounds; one-way loops ok, two-way default | §2.5 movement rule; V7 (one SCC containing every cut join's in and out lanes and every stall: stronger than asked); `hammerhead` ≥ 6 × 6 m clear or `circle` ≥ 6 m; a home pad end needs none, because its `inline` stalls link the pad's lanes and are left in reverse (V7, §2.5). |
 | 6 | Width, oneWay + direction, speed, kind per segment; heights | `segWidthM`, `segLaneMode`, `segSpeedMps` (10/20 km/h defaults), `segKind`; per-point height refs resolved at capture into `ptUp`/`stallUp` above the body datum, linear between nodes on graded sites, which is exactly what the shaper grades (§6.3). |
-| 7 | Stall pose, nose heading, size, aisle seg + s, side, index; forward-turn reachable; aisle widths; angled only on one-way | Stall columns; V9 (`stallInDirs/OutDirs` set only where the 5 m run-up exists, every stall has ≥ 1 in-dir, 6 m two-way for perpendicular, angled only on one-way ≥ 3.5 m). v1 emits perpendicular only. Home stalls are `{bwd}` (§3.4). |
+| 7 | Stall pose, nose heading, size, aisle seg + s, side, index; forward-turn reachable; aisle widths; angled only on one-way | Stall columns; V9 (perpendicular and angled `stallInDirs` set only where the 5 m run-up exists, every stall has ≥ 1 in-dir, 6 m two-way for perpendicular, angled only on one-way ≥ 3.5 m). v1 emits perpendicular, plus `inline` stalls on home pads: entered forward (`stallInDirs = {fwd}`) and left by reversing out to the street (`stallOutDirs = {bwd}`), side by side where the lot allows, else tandem at most 2 deep, ordered from the street outward (§3.4, §7.4). |
 | 8 | Index by (segment, s, side), stable; `rev` only on geometry change; follows renames | Ordering, `rev` and renames: satisfied by V10 ordering, V12 content-hash `rev` excluding site id, and `onLotsRenamed` re-keying with `rev` unchanged; position-free seed (C-5); vanished stalls are traffic's (§7.6). **Amended (C-19, needs ack):** "unchanged by edits that don't touch that aisle" is not met. Indices are stable per `rev` only, because whole-plan regeneration can move every aisle of a site; traffic remaps by `stallKey` (frame-lattice integers, V10). |
 | 9 | Loading bays and truck flag reserved | Bay columns always present (filled for yards and installations); `kPlanAdmitsTrucks`, `truckTurnRadiusM`, `segMaxVehLenM`; V13. |
 | 10 | Capacity = stall count; one pedestrian entrance per building | `capacity == stallCount` (replaces agent-traffic §7.1's formula, which becomes the generator's target); V11 door + `pavementPt` + `entranceNode`. |
 | 11 | Deterministic generation (fnv1a32 seed, no hashCode, no map iteration) | §3.9; `site_access_source_hygiene_test`; generation only inside `advance` (C-8). **Amended (C-5, needs ack):** the seed is position-free `fnv1a32(program version, W and D at 0.5 m, road class, spec type)`, not of the site id. |
-| 12 | Plans by reference per revision; traffic draws lot cars from stall indices; road side draws paint and curbs; E36 is traffic's | `CitySiteFrame`/`SiteChunkGeometry` by identity (§5.2), also as `CityTrafficFrame.sites`; lot-car rows `(site ordinal, stall index, variant)` under `sitesRev` (§7.5); road side draws paves, paint, kerb cuts, fences; baked lot cars only when `maxParkedCars > 0` and the site is not agent-managed (per-site bit, staged E36, §5.5); E36 stays theirs. |
+| 12 | Plans by reference per revision; traffic draws lot cars from stall indices; road side draws paint and curbs; E36 is traffic's | `CitySiteFrame`/`SiteChunkGeometry` by identity (§5.2), also as `CityTrafficFrame.sites`; lot-car rows `(site ordinal, stall index, kind, variant)` under `sitesRev` (§7.5); road side draws paves, paint, kerb cuts, fences; baked lot cars only when `maxParkedCars > 0` and the site is not agent-managed (per-site bit, staged E36, §5.5); E36 stays theirs. |
 | 13 | D36 extension: a site change re-plans only site legs; road routes stay locked | Plans never move `roadsRevision` (S1); `changedSince(sitesRev)`; the §7.6 table. |
 | 14 | Far-side left-in has no opposing-gap check | Traffic's fix at the arrival gate (G2, §7.4); the plan supplies `joinRight` and `joinDirs`; test A6. |
 
@@ -1365,7 +1469,8 @@ through in-capable join `j` whose `T` is `destS`:
 
 1. A kerbside plan or an in-incapable join keeps today's behaviour: vanish before slice 4, D17 step 2 in slice 4.
 2. **Reserve:** take the first free stall in `stallOrder[j]`, which is precomputed at site sync (by site-path
-   length from j's in-lane, ties by index). The reservation is BINDING (D17). With no stall the lot is full: go to
+   length from j's in-lane, ties by index; on a tandem home pad, deepest first with LIFO assignment, §7.5). The
+   reservation is BINDING (D17). With no stall the lot is full: go to
    D17 step 2 and never retry X on this arrival.
 3. **Grant** when all of these hold:
    - **G1:** the throat in-lane has room for the car's length;
@@ -1379,15 +1484,16 @@ through in-capable join `j` whose `T` is `destS`:
 5. **Granted:** log `ENTER(v, edge, lane, site, join)`, unlink from the lane, place the car on the throat in-lane at
    `s = 0`, then drive the site leg under IDM. The final stall manoeuvre is a scripted curve that ends exactly on
    the stall pose, so "within 0.05 m and 2°" is a snap, not an IDM tolerance. The
-   vehicle row is then freed and a `ParkedCarTable` row `(site, stallKey, variant, owner)` created.
+   vehicle row is then freed and a `ParkedCarTable` row `(site, stallKey, kind, variant, owner)` created.
 
-**Departure:**
+**Departure** (car parks, yards and installations leave forward through their throats; homes back out, below):
 
 1. The road route is planned first, from every out-capable join's `(edge, T)` (V7: every stall reaches every
    out-join). The car stays parked during the search, and `noRoute` leaves it parked.
 2. The join is the one whose `(edge, T)` matches the route origin (V4 makes it unique).
-3. A vehicle row spawns on a reverse-out manoeuvre from the stall (parallel stalls pull forward). The stall is
-   released when the car's rear clears the mouth line.
+3. A vehicle row spawns on a reverse-out manoeuvre from the stall (parallel stalls pull forward; home `inline`
+   stalls follow the Home back-out below instead of steps 3–6). The stall is released when the car's rear clears
+   the mouth line.
 4. The car drives to the join's throat out-lane and stops with its front 1 m inside the kerb line (`throatWait`).
 5. Each sub-step it asks `arbiter.canJoin(route[0], at, len, kind, fromLeft)` (junction_arbiter.dart:777-797). On
    a grant it logs `EXIT`, unlinks from the site, and inserts into the lane at `v = 0`, as today's `_spawn` does
@@ -1395,15 +1501,81 @@ through in-capable join `j` whose `T` is `destS`:
 6. `throatWait` accrues stuck time only after 60 s (recommended). A graph rebuild while the car is in the site
    remaps its held route from the join's `(edge, T)` as `remapWaiting` does.
 
+**Home back-out** (`homeDriveway` only, §10.2 Q3). Every number here lives in traffic's `AgentTuning` unless marked
+**ROAD**, which the road side guarantees in generation (§3.3, §3.4, V1, V5, §5.5).
+
+- **Manoeuvre.**
+  - Arrive: forward up the throat and pad, nose-in to the reserved stall (tandem: the DEEPEST free stall first).
+  - Depart, as one scripted motion with no stop to straighten: reverse down the pad and the throat (≤ 2 m/s); at
+    the kerb line swing the tail UPSTREAM of the target lane on an arc (R ≈ 5 m), ending fully in the target lane,
+    aligned with its travel, nose downstream; stop 0.5 s to shift; then drive forward under IDM along the locked
+    route.
+  - Departure steps 1–2 still choose the route and the join first, and the car stays parked until a gap is
+    accepted. On a side-by-side pad the stall axes are 1.3 m either side of the join axis; the drive keeps its
+    5.2 m width to the kerb (§3.4), so the reverse reaches the kerb line on the join axis and the footprint below is
+    measured from `T` for both stalls.
+- **Target lane `L`:** the lane the route's first edge starts in on the lot side.
+  - Near-direction departure: the kerb lane of the edge that has the lot on its right (on a one-way street, the
+    lot-side lane of its one edge).
+  - Far-direction departure, only where `joinDirs` allow it (1+1 undivided streets): the reverse edge's lane, with
+    the tail swung across the near lane.
+- **Gap acceptance**, checked each sub-step before the reverse starts; the manoeuvre commits once the rear reaches
+  the kerb line. The footprint on `L` is `[T − 10, T + 2]` (the upstream part is the tail swing), `T` being the
+  join's `s` on that edge.
+  - Near direction, clear when: (a) no vehicle body is inside the footprint; (b) no vehicle is stopped or queued in
+    `L` within 15 m upstream of the footprint; (c) every approaching vehicle on `L` has an ETA to `T − 10` of ≥ 8 s,
+    taking its speed as `max(v, 5 m/s)`.
+  - Near direction on a 1+1 street: the arc overhangs the opposing lane, so also no vehicle body in the opposing
+    lane within `[T − 6, T + 6]`.
+  - Far direction: the near lane passes (a) and (c) as well, and the far lane is checked like `L` with a 10 s ETA.
+  - Forced grant after 120 s refused: only the ETA terms waive (to a 6 s floor), never with a body in the
+    footprint; counted. A parked car does not accrue stuck time.
+  - Pedestrians (T4b): the back-out yields to pedestrians on the pavement crossing (`kSegCrossesPavement`).
+  - **Needs the traffic session's ack:** on an avenue or a two-lane one-way street the arc overhangs the ADJACENT
+    same-direction lane, which the 1+1 rule does not name. This contract proposes the same body-free check there,
+    within `[T − 6, T + 6]`.
+- **EXIT logging** (`lane_changes_only_at_nodes`).
+  - `EXIT` is logged when the rear crosses the kerb line. From that instant the car's element is `L`, inserted into
+    `L`'s ordered list as a REVERSING vehicle (a flag): followers see its footprint as a stopped obstacle.
+  - For a far-direction departure, the near-lane footprint is a claim for the manoeuvre's duration, not occupancy.
+  - Property-test tolerance for a back-out `EXIT`: edge + `T ± 11 m`, lane == `L`. Nothing else changes lane until
+    a connector.
+- **Restrictions** (**ROAD** for eligibility, applied by §3.3; traffic for direction):
+  - minor-tier roads ≤ 40 km/h (`street`, `streetOneWay`, `alley`, `path`): both directions where `joinDirs` allow;
+  - `avenue` (50 km/h, 4 lanes): near direction only (the kerb lane), never across; the departure planner restricts
+    origins to the near edge;
+  - above 50 km/h, or divided or medianed: no `homeDriveway` (kerb parking), as §10.2 Q11 already has for
+    boulevards and urban highways.
+- **ROAD generation guarantees:**
+  1. the swing margin: for each served direction, ≥ 12 m of lane upstream of `T` inside `[laneS0, laneS1]`, so a
+     swing never enters a junction box or crosses a stop bar (V1, §3.3 rule 3);
+  2. the throat is straight and within 10° of the normal, the cut half is ≥ 4.0 m for the tail swing, and the first
+     7 m from the kerb carries no stall (V5, §3.4);
+  3. kerb-parking masks of `[T − 12, T + 3]` in travel terms on each served side, in traffic's kerb masks AND the
+     baked `curbParkingFor` (§5.5, §7.5): a kerb car in the swing path would block every departure;
+  4. home stalls along the drive: side by side on a 5.2 m pad where the lot allows, else tandem at most 2 deep,
+     ordered from the street outward (§3.4).
+- **Deadlock and gridlock** (traffic):
+  - Two neighbours: a granted back-out takes a claim on its footprint; overlapping claims are refused, ties by
+    (sub-step, handle). Neighbouring back-outs are serialized, never simultaneous.
+  - Behind a reversing car: followers stop at its footprint (≤ ~8 s); no gridlock.
+  - Inbound vs outbound at the same driveway: if an inbound car is held at `destS` (it is IN the footprint) and the
+    outbound car has not committed, the outbound yields its throat claim and waits in its stall until the inbound
+    has parked. Once the outbound has committed, the inbound waits on the road. The `sharedSingle` claim unit
+    stays as specified below.
+  - Tandem blocking: §7.5 (LIFO assignment, the 120 s shuffle).
+
 **Single-lane throats and driveways (`sharedSingle`).** The chain from the kerb node to the first two-way or
-turnaround node is one claim unit. Inbound claims it at the gate, and outbound claims it at the unit's lot end.
-Opposite claims are refused, and ties go by (sub-step, handle). No deadlock can form: an inbound car waits on the
-road, and an outbound car waits in the lot.
+turnaround node (on a home, `K→H→P`) is one claim unit. Inbound claims it at the gate, and outbound claims it at the
+unit's lot end. Opposite claims are refused, and ties go by (sub-step, handle). No deadlock can form: an inbound car
+waits on the road, and an outbound car waits in the lot; on a home drive an uncommitted outbound car yields its claim
+to an inbound car held at `destS` (Home back-out above).
 
 **Access events in the property test** (`lane_changes_only_at_nodes`):
 
 - A road↔site element change is legal only with a logged event whose `(edge, T ± 1.5 m)` is that join's, whose lane
-  is `destLane` (ENTER) or inside `canJoin`'s target set (EXIT).
+  is `destLane` (ENTER) or inside `canJoin`'s target set (EXIT). A home back-out `EXIT` is legal at `(edge, T ± 11 m)`
+  with lane == `L`, logged as the rear crosses the kerb line, the car then a REVERSING vehicle in `L`.
 - Inside a site, lanes change only through §2.5 movements or stall manoeuvres.
 
 ### 7.5 Parking semantics
@@ -1413,6 +1585,12 @@ road, and an outbound car waits in the lot.
 - **agent-traffic §7.3 step 1, revised:** the destination's own stalls if it has a network plan, the arrival join is
   in-capable and a stall is free. The stall is reserved at the gate, and the car turns in from its locked lane, drives
   the site and parks forward-in.
+- **Home pads (traffic):** home cars park nose-in and leave by backing out (§7.4 Home back-out).
+  - **Tandem:** an arriving car takes the DEEPEST free stall first. Where departures are known, assignment is LIFO:
+    the car due out first goes in the outer stall.
+  - **Shuffle:** a deep car still blocked by a parked outer car after 120 s has the outer car moved to a free kerb
+    slot (a counted "shuffle": a parked-car relocation, never a teleport onto the carriageway).
+  - A parked car accrues no stuck time.
 - **D17 order, revised:**
   1. destination stalls at the gate;
   2. kerb slots ahead on the arrival edge within 60 m, skipping masked slots;
@@ -1421,15 +1599,21 @@ road, and an outbound car waits in the lot.
   5. give up and garage.
 
   Other sites' lots are not searched; `kPlanPublic` is reserved.
-- **Kerb masks:** a kerb slot on site X's side is masked when `KerbCuts.blocked(cuts, side, s_i, halfLenM: 3.25)`
-  holds for a cut join of a live network plan, with the slot's travel arc and right-of-travel side first converted
-  to the canonical index arc and `joinRight` side (§5.5). The owning kerb follows the D7 rules. Masks update on `sitesRev` too. A car on a
-  newly masked slot relocates as a vanished stall does.
+- **Kerb masks:** a kerb slot at `s_i` is masked when `KerbCuts.parkingBlocked(side, s_i)` holds for a cut join of a
+  live network plan, with the slot's travel arc and right-of-travel side first converted to the canonical index arc
+  and side (§5.5). The form is asymmetric, in the travel terms of the lane beside that kerb:
+  - `homeDriveway` joins: `blocked(…, upstreamM: 12, downstreamM: 3)`, i.e. the swing mask `[T − 12, T + 3]`, on
+    EACH served side: the lot-side kerb, plus the far kerb where a far-direction back-out is allowed (1+1 streets);
+  - every other program: the symmetric `(3.25, 3.25)` around its cut.
+
+  The baked `curbParkingFor` uses the same form (A12). The owning kerb follows the D7 rules. Masks update on
+  `sitesRev` too. A car on a newly masked slot relocates as a vanished stall does.
 - **Lot cars on the wire:** `ParkedColumns` gains `sitesRev` and lot rows `(lotSite = ordinal in CitySiteFrame
-  order, lotStall = stall index, lotVariant)`. The renderer draws them at the stall pose and `stallUp` only when
-  `sitesRev` matches its frame, and otherwise holds one publish. This replaces agent-traffic §7.4's "positions-only
-  port of emitLot".
-- **Persistence:** lot cars are saved as `[ownerIdx, where = lot, siteId, stallKey, variant]`, never by stall
+  order, lotStall = stall index, lotKind, lotVariant)`. `lotKind` is the `AgentKind` index (always car in T4a), so
+  yard and depot parking for vans and trucks in later traffic slices does not change the wire (D42). The renderer
+  draws them at the stall pose and `stallUp` only when `sitesRev` matches its frame, and otherwise holds one publish.
+  This replaces agent-traffic §7.4's "positions-only port of emitLot".
+- **Persistence:** lot cars are saved as `[ownerIdx, where = lot, siteId, stallKey, kind, variant]`, never by stall
   index. `siteId` is the lot or site id string current at save (renames follow `_carryRenamedLots`). On
   load, `stallIndexOfKey`. If the key is gone, the nearest free stall by distance. If there is none, garaged.
   Reservations and in-site vehicles are not saved.
@@ -1459,18 +1643,18 @@ flight, and `stats.replans` still counts only network re-plans.
 | D6 (88) | Unchanged, applied per join |
 | D7 (89) | Unchanged: `joinDirs == _dirsFor(road, side)`; a role restricts in/out, never direction |
 | §5.4 (1056-1060) | The far-side left-in takes the opposing gap at the arrival gate (ask 14) |
-| §5.5 (1096-1102) | The two access-point exceptions become the ENTER/EXIT access events; site element rule added to the property test |
+| §5.5 (1096-1102) | The two access-point exceptions become the ENTER/EXIT access events; site element rule added to the property test; a home back-out's EXIT is logged as the rear crosses the kerb line, at `(edge, T ± 11 m)` into lane `L` as a REVERSING vehicle (§7.4) |
 | §7.1 (1288-1313) | `lotCap = stallCount`; the table becomes the generator's target (road side uses `parkingSpaces`) |
 | §7.3 step 1 (1332), D17 (99) | §7.5 revised text and order |
 | §7.4 (1350-1368) | Lot cars on plan stalls under `sitesRev`; delete the positions-only emitLot port |
 | §13.1 | `CityTrafficFrame.sites`, `AgentFrame.sitesRev`, site elements |
-| §14.1 (2122-2125) | Lot cars saved by `(siteId, stallKey)`, from T4a on |
+| §14.1 (2122-2125) | Lot cars saved by `(siteId, stallKey)` with kind and variant, from T4a on |
 | D19/D20 (101-102) | Unchanged for roads; site poses use `CitySiteFrame` heights (its own source, never a re-drape) |
 | D27 (109) | Unchanged; site mover sub-step math follows it; generation uses no trig (C-11) |
 | D36 (118) | Append: a site-plan change re-plans only site legs of cars in or bound for that site; road routes stay locked (§7.6) |
-| D42 (124) | Unchanged: lot cars carry kind + variant |
+| D42 (124) | Unchanged: lot cars carry kind + variant; on the wire as `lotKind` (the `AgentKind` index, car in T4a) + `lotVariant` in the lot rows, and saved with both (§7.5) |
 | C1 (249-256) | Lot access = join slot 0, rule in `site_access/site_join.dart` |
-| New D49 "Site networks" | Separate from the lane graph; plans owned by the road side; rebuilt on `sitesRev`, never `graphRev`; handover only at joins |
+| New D49 "Site networks" | Separate from the lane graph; plans owned by the road side; rebuilt on `sitesRev`, never `graphRev`; handover only at joins; home driveways are left by backing out into the street (§7.4 Home back-out: manoeuvre, target lane, gap acceptance, footprint claims, REVERSING vehicles; numbers in `AgentTuning`), while car parks, yards and installations leave forward |
 | Slice 4 (2768-2778) | Split into T4a and T4b (§9) |
 | E36 (242) | Theirs, staged: in T4a baked cars go off only on agent-managed sites (per-site bit read by R6 baking, §5.5); in T4b `maxParkedCars = 0` and `onStreetParking = false` before the first tile request |
 
@@ -1480,17 +1664,28 @@ flight, and `stats.replans` still counts only network re-plans.
    site-level reachability.
 2. **Site sync:** plan reference and `rev` per building slot, `lotCap`, stall bitmaps, binding reservations,
    `stallOrder[j]`, next-hop tables and site elements, re-synced on `sitesRev`.
-3. **Site mover:** IDM on site lanes, node movements, turnaround U-turns, stall in/out manoeuvres, `sharedSingle`
-   claims and speed caps.
-4. **Arrival gate:** G1–G3, forced grant, give-up, and ask 14.
-5. **Departure:** route first, spawn on the stall, reverse out, `throatWait` + `canJoin`, EXIT, and route remap on
-   rebuild.
-6. **Access events** and the extended property test.
+3. **Site mover:** IDM on site lanes, node movements, turnaround U-turns, stall in/out manoeuvres (home `inline`
+   stalls: forward in, the scripted reverse down the drive and the tail swing into `L`), `sharedSingle` claims and
+   speed caps.
+4. **Arrival gate:** G1–G3, forced grant, give-up, and ask 14; on a home drive, the inbound-vs-outbound rule (an
+   uncommitted outbound yields to an inbound car held at `destS`).
+5. **Departure:**
+   - car parks, yards and installations (forward out): route first, spawn on the stall, reverse out, `throatWait` +
+     `canJoin`, EXIT, and route remap on rebuild;
+   - homes (Home back-out, §7.4): route first; the car waits in its stall; gap acceptance on the target lane `L`
+     (footprint `[T − 10, T + 2]`, stopped/queued and ETA terms, the opposing-lane and far-direction checks, the
+     120 s forced grant that never waives a body in the footprint); a claim on the footprint; the reverse and swing;
+     EXIT when the rear crosses the kerb line, with the car in `L` as a REVERSING vehicle; the 0.5 s shift stop; then
+     IDM on the locked route. Tandem LIFO assignment and the 120 s shuffle to a kerb slot (§7.5).
+6. **Access events** and the extended property test (a home back-out EXIT at `T ± 11 m`, lane == `L`).
 7. **The D36 extension:** snap, relocate, garage, limbo, `siteRetarget`, with counters.
-8. **D17 order**, kerb masks via `KerbCuts.blocked`, and `lotCap` from stalls.
-9. **Wire:** lot rows in `ParkedColumns`, site elements plus `sitesRev` in `AgentFrame`, `CityTrafficFrame.sites`,
-   site manoeuvre geometry in `traffic_capture.dart`, drawing in `agent_nodes.dart`, and E36.
-10. **Persistence** of lot cars by `stallKey` (in T4a, so no save ever holds lot cars under another scheme; §9).
+8. **D17 order**, kerb masks via `KerbCuts.parkingBlocked` (the asymmetric form: `(12, 3)` for home joins on each
+   served side, `(3.25, 3.25)` otherwise, §5.5), and `lotCap` from stalls.
+9. **Wire:** lot rows `(lotSite, lotStall, lotKind, lotVariant)` in `ParkedColumns`, site elements plus `sitesRev` in
+   `AgentFrame`, `CityTrafficFrame.sites`, site manoeuvre geometry in `traffic_capture.dart`, drawing in
+   `agent_nodes.dart`, and E36.
+10. **Persistence** of lot cars by `stallKey`, with kind and variant (in T4a, so no save ever holds lot cars under
+    another scheme; §9).
 11. **Digest:** `CityAgents.digest` folds `plan.rev`, stall bitmaps and reservation owners. Also hygiene,
     zero steady-state allocation (`traffic_alloc_test`) and benches.
 12. **The acks on C-5** (position-free seed), **C-19** (indices stable per `rev` only; remap by `stallKey`) and
@@ -1510,14 +1705,14 @@ Traffic runtime budgets (their targets):
 | A2 | `join_window_covers_controls_test` | road (imports traffic read-only) | for every node × every override kind, `LaneGraphBuilder.build` puts every cut inside `[edgeLaneS0+6, edgeLaneS1−6]`; `sOn` never clamps a cut join; the reserve ≥ `stopBackOf` for all kinds |
 | A3 | `lot_access_is_slot_zero_test` | road | `lotPiece/lotS/lotDirs == slot 0`; `accessOf` agrees; the §3.2 starter table exactly; `lotPiece < 0` count unchanged on the sprawl fixture; layouts byte-identical |
 | A4 | `drive_in_and_park_test` | traffic | a forced starter colony trip (`forceTrip`, not CommuteSynth rates) → aquifer pump: one ENTER at `T ± 1 m`, drives the throat, parks on `stallOrder[j][0]` within 0.05 m/2°, `lotUsed == 1`, within 90 s |
-| A5 | `pull_back_out_test` | traffic | reverse out, stall released at the mouth line, front never past kerb − 1 m before EXIT, EXIT only with a `canJoin` gap under a 60 s kerb-lane stream |
+| A5 | `pull_back_out_test` | traffic | car parks, yards and installations only (forward-out departures; homes are A9): reverse out of the stall, stall released at the mouth line, front never past kerb − 1 m before EXIT, EXIT only with a `canJoin` gap under a 60 s kerb-lane stream |
 | A6 | `far_side_left_in_gap_test` | traffic | no ENTER with opposing ETA < 4 s (forced grants counted, none within 25 s); turns in on a gap |
 | A7 | `lot_full_goes_to_kerb_test` | traffic | 2 stalls, 3 arrivals: 2 park, the third never ENTERs and reserves an unmasked kerb slot |
 | A8 | `site_plan_change_mid_trip_test` | traffic (+ road fixture) | growth: `replans == 0`, keys kept, movers snap; stall removed → relocated; demolition → garaged / limbo / `arrivedGone` |
-| A9 | `home_pad_hammerhead_test` | traffic | HOME (`stallInDirs = {bwd}`): up the throat, along the apron past the stalls to `E`, turn in `E`'s hammerhead, forward into the stall from `E→H`, reverse out onto the apron, out forward through the throat; never reverses onto the street; `sharedSingle` never double-occupied; no deadlock over 600 s at 10× rate |
+| A9 | `home_back_out_test` | traffic | HOME and HOME_TANDEM on a 1+1 street: 2 stalls, cars in forward and nose-in, out by backing out in both directions (near into the kerb lane, far across it) under a 60 s kerb-lane stream; the inbound/outbound conflict at one driveway; a tandem shuffle. No EXIT with a body in the footprint; every back-out EXIT at `T ± 11 m` in lane `L`; `sharedSingle` never double-occupied; no deadlock over 600 s at 10× rate |
 | A10 | `renamed_lot_keeps_parked_cars_test` | both | a re-cut renames the pump lot: `rev` and keys unchanged, easement unchanged, cars stay, trips arrive; also a save/resume with lot cars parked (T4a) |
 | A11 | twin-run / partition / frame-hold digests | traffic | identical with site movers active, a plan change mid-run, and capture calls interleaved (rendered vs headless) |
-| A12 | `kerb_cut_masks_kerb_slots_test` | both | agent kerb-slot masks (canonical arc, converted from `T`) and baked `curbParkingFor` skips (drawn arc) agree within 0.5 m per cut, both via `KerbCuts.blocked`; each conversion unit-tested; kerbside joins mask nothing |
+| A12 | `kerb_cut_masks_kerb_slots_test` | both | agent kerb-slot masks (canonical arc, converted from `T`) and baked `curbParkingFor` skips (drawn arc) agree within 0.5 m per cut, both checked against the same asymmetric `KerbCuts.parkingBlocked` form: a home join masks `[T − 12, T + 3]` in travel terms on each served side (both kerbs on a 1+1 street, the upstream side flipped per travel direction, on a forward and a reversed road), other programs `(3.25, 3.25)`; each conversion unit-tested; kerbside joins mask nothing |
 | A13 | `site_alloc_test` | traffic | 1,000 sub-steps, 50 cars cycling lots: no buffer reallocated |
 | A14 | `site_wire_test` | both | frame identity stable until `sitesRev`; kerb-node heights = road drape ±1 cm; lot-car rows map to stall poses ±1 cm; `sitesRev` mismatch holds lot cars one publish |
 | A15 | `lane_changes_only_at_nodes` (extended) | traffic | §7.4 event rules, 500 agents, 2,000 sub-steps, STRIP and LOOP sites on the grid |
@@ -1528,7 +1723,8 @@ by `SyntheticSites.placeAt(graph, lotId, template)`:
 
 | Template | Shape |
 |---|---|
-| HOME | `sharedSingle` 3.2 × 10 m throat, 6 × 9.9 m apron, hammerhead, 2 stalls with `stallInDirs = {bwd}` |
+| HOME | on a 1+1 street slot: `sharedSingle` 5.2 m drive, 7 m throat `K→H` + 5.2 m pad `H→P` (collinear), cut half 4.0, 2 side-by-side `inline` stalls (`stallInDirs = {fwd}`, `stallOutDirs = {bwd}`), pad end `P` with no turnaround |
+| HOME_TANDEM | as HOME with a 3.2 m drive and a 10.4 m pad: 2 `inline` stalls in tandem (outer `S0`, deep `S1`) |
 | STRIP | 6 × 7 m two-way throat, 40 m aisle, 12 + 12 stalls, circle turnaround |
 | LOOP | in-join and out-join, one-way loop, angled60 stalls |
 | UTILITY | 56 m throat with vias to `F`, yard circle `Y`, gate `G` on the fence line (hammerhead (a)), connector to an aisle loop with 20 stalls, 2 bays |
@@ -1590,14 +1786,22 @@ by `SyntheticSites.placeAt(graph, lotId, template)`:
     block); quantisation;
   - `hash32_test`, A2, A3, sprawl audit counts (`kJoinLegacy`, `kJoinEasement`, programs later), bench R-B1.
 - **R2a:** validator rejection cases, one per V; fixture validity; `site_access_source_hygiene_test`. V5 fixtures:
-  ACCEPTED: a 56 m throat with vias at 24 and 48 m ending at a frontage node; the home `K→H→E` chain (throat far
-  node `H` of degree 2, dead end `E`). REJECTED: a via 0.2 m off the chord; vias 25 m apart; a 6.9 m throat; a stall
-  mouth or branch 6.9 m from the kerb node along the path. V9 fixtures: a home stall with its forward bit set
-  (no run-up) is rejected; a stall with no in-dir bit is rejected. V8: a `segLenM` off by 2e-6 is rejected.
+  ACCEPTED: a 56 m throat with vias at 24 and 48 m ending at a frontage node; the home `K→H→P` straight run (throat
+  far node `H` of degree 2, pad end `P` with no turnaround). REJECTED: a via 0.2 m off the chord; vias 25 m apart; a
+  6.9 m throat; a stall mouth or branch 6.9 m from the kerb node along the path; a home cut half of 3.9 m; a home pad
+  whose end node lies 0.2 m off the throat's axis. V7: a dead end without a turnaround that is not a home pad end is
+  rejected. V9 fixtures: an `inline` home stall with `stallInDirs ≠ {fwd}` or `stallOutDirs ≠ {bwd}` is rejected; a
+  stall with no in-dir bit is rejected. V1: a home join with only 11.9 m of lane upstream of `T` in a served direction
+  is rejected. V8: a `segLenM` off by 2e-6 is rejected.
 - **R2:**
-  - `home_driveway_test`: W 16.2 → kerb, 16.3 → 1 stall, 18.8 → 1, 18.9 → 2; D 21.9 → kerb, 22 → home; r-med
-    never; boulevard and highway → kerb; avenue and one-way street → home; every home stall `stallInDirs = {bwd}`;
-    `xE = x_d + 2.6(n−1) + 7.3`;
+  - `home_driveway_test` (auto lot, k = 3, x_d = 4.5): W 16.5 → kerb, 16.6 → 2 in tandem, 17.5 → tandem, 17.6 → 2
+    side by side; D 14.9 → kerb, 15 → home; a single stall only on a profile whose drive columns are < 14.9 m deep;
+    r-med never. Back-out eligibility (§3.3): street, one-way street (40 km/h), alley and path → home; avenue →
+    home (its `joinDirs` hold only the near direction); boulevard, urban highway, any medianed road or any road above
+    50 km/h → kerb; slot room 3.9 → kerb; a swing margin 0.1 m short on one served side → kerb (a both-directions
+    street join checks both sides, an avenue or one-way join only its upstream side); `v` 10.1° off the normal →
+    kerb. Every home stall `inline`, `stallInDirs = {fwd}`, `stallOutDirs = {bwd}`, ordered from the street outward;
+    the pad collinear with the throat; the cut half 4.0; no turnaround node;
   - `car_park_packer_test`: 20–120 m rectangles; the §3.5 worked example with its exact numbers (F1 double wins,
     10 stalls at the listed x-ranges, envelope `[1.5, 22.5] × [18.7, 31.7]`, scores 90.11 / 54.25, F2 254.8 m² and
     F3 7.8 m rejected); a `kJoinMinRoomM` slot (room 2.5 → a 3.0 m `sharedSingle` throat and ≤ 8 stalls, else null);
@@ -1618,6 +1822,8 @@ by `SyntheticSites.placeAt(graph, lotId, template)`:
     `agents.advance`; a plan made this tick is visible to agents this tick; `isCurrentFor` flips false on a road edit
     and true after the re-check, identically in headless and rendered runs;
   - A1;
+  - sprawl audit: program counts, and home demotions to `kerbOnly` counted by §3.3 back-out rule (road, room, swing
+    margin, skew, geometry);
   - generation benches (program mix and Σ printed, §3.10) and the road-edit sync bench (≤ 2 ms worst tick, §4.2).
 - **R3:**
   - `site_capture_test`: identity reuse, zero steady-state queries, kerb node = drape ±1 cm, pad node = lot pad,
@@ -1635,7 +1841,8 @@ by `SyntheticSites.placeAt(graph, lotId, template)`:
   - `entrance_matches_door_test`: `instanceTransform(massing.entrance)` is within 0.5 m of the plan's `entrancePt`
     for each style × {r-low, c-low, i-med, aquifer}, including a min-fit bucketed depth;
   - `kerb_cut_test`: no cuts → identical sidewalk bytes; lift at the cut centre; props outside cuts unchanged; no
-    kerb car within the mask; no cut in a pull-back, deck, taper or bridge;
+    kerb car within the mask (a home join's asymmetric swing mask on each served kerb included, a far-kerb swing mask
+    never drawn and never moving a prop or tree); no cut in a pull-back, deck, taper or bridge;
   - `envelope_containment_test`: each style × {r-low, r-med, c-low, c-high, i-med, aquifer, spaceport, solar,
     farm}, every volume corner within envelope + 0.30 m and outside paves − 0.2 m;
   - installation gate tests: gap exactly at the gate, no volume in the gate lane;
@@ -1710,14 +1917,14 @@ class DepthProfile { double depthAt(double x); bool containsRect(Rect r); double
 | **R0 Orientation** | road | `site_envelope.dart` move (pure, re-exported); orientation tests; the π spin fix at world_snapshot.dart:1888 (legacy rule of §3.1, `Parcel.heading + π`) | `building_front_test` and `site_orientation_test` both fail before and pass after; if `building_front_test` passes before the fix, stop and report; all digests unchanged; headless studio screenshots (starter kit + a generated block) show shopfronts and awnings to the street |
 | **R1 Join slots** | road | `hash32`, constants, `site_join.dart` (with the cul-de-sac reserve and the §3.7a corridor search), `CityLayout.parcelsNear`, `RoadGraph` slot and crossing columns, lot loop (road_graph.dart:1162-1203), `attachFootprintJoins`; C1 notice | A2, A3 green; the §3.2 starter table exact (n = 264 / −276 / −252 / 144, easement lots listed); `RoadGraph.of` ≤ +15% on sprawl; layouts byte-identical; traffic fixture 4/5/8 unchanged; tile digests unchanged; re-pins ledgered; notice posted with the hash |
 | **R2a Contract types** | road | enums, `SiteAccessChunk`/`SiteAccessPlan`, `PlanBuilder`, validator, `SiteLaneGraph`, `SyntheticSites` fixtures, hygiene test | fixtures pass V1–V13; one hand-broken fixture per V is rejected; API frozen and announced; T4a can start |
-| **R2 Generator + book** | road | `classifyProgram`, home, car park, yard, installation, envelope/entrance/lamps, `SiteAccessBook` + `CitySim` hooks + resumable sync + budgets, easements (`easementOf`, `CityLayout.easementOf` hook, `setUse`/`placeOnParcel`/growth refusal, inspector string), full drain at the end of `CityStarterKit.found`, corridor refusal in placement, dev hook `ext.acro.citygame site=plan&id=` | A1 on starter kit, small town, 500 random lots; starter sites: 56 m throat `K→F`, yard, gate `G` on the fence line, ≥ 12 stalls, and exactly the four easement lots of §3.7a (no site `kPlanAccessBlocked`); `city_starter_kit_test` green with its easement assertion; home thresholds exact; persistence test green; twin runs give identical plans with capture interleaved; zero ground reads in plan code; §3.10 budgets met (or the load-time risk reported); road-edit sync bench ≤ 2 ms |
+| **R2 Generator + book** | road | `classifyProgram`, home, car park, yard, installation, envelope/entrance/lamps, `SiteAccessBook` + `CitySim` hooks + resumable sync + budgets, easements (`easementOf`, `CityLayout.easementOf` hook, `setUse`/`placeOnParcel`/growth refusal, inspector string), full drain at the end of `CityStarterKit.found`, corridor refusal in placement, dev hook `ext.acro.citygame site=plan&id=` | A1 on starter kit, small town, 500 random lots; starter sites: 56 m throat `K→F`, yard, gate `G` on the fence line, ≥ 12 stalls, and exactly the four easement lots of §3.7a (no site `kPlanAccessBlocked`); `city_starter_kit_test` green with its easement assertion; home thresholds exact (§3.4: W 16.6 m tandem, 17.6 m side by side, D 15 m; §3.3 back-out eligibility: road class, speed and median, room ≥ 4.0, 12 m swing margin, 10° skew) with demotions counted by rule; persistence test green; twin runs give identical plans with capture interleaved; zero ground reads in plan code; §3.10 budgets met (or the load-time risk reported); road-edit sync bench ≤ 2 ms |
 | **R3 Wire + keys** | road | `CitySiteFrame` + heights + cache, `BuildingSnapshot.siteSlot/gate`, `RoadSnapshot.kerbCuts`, JSON, `sitesSignature`, bucketing membership/keys, tile and detail columns; the new static knob `CityNodes.siteAccess` stays off, so the renderer treats every building as legacy | R3 tests; all mesh digests unchanged; capture ≤ 0.02 ms steady, zero queries |
 | **R4 Draw** | road (2 tracks) | A: `SiteAccessMesher` structural tiers (the §5.4 mid rule); kerb cuts in sidewalks, verges, furniture, kerb cars, lamps via canonical `KerbCuts`; instant path. B: envelope placement with the plan-served heading (`−SiteFrame.buildingHeading`, §3.1); `surfaceParking: false`; front alignment; min-fit; setback and bucket alignment; installation gates on the envelope front edge; lighting from plans. Knob on | **the starter kit's four sites visibly connected** (orbit screenshot at mid tier: access roads across their easement lots, gates, car parks, dropped kerbs); R4 tests incl. `envelope_axes_test` and `entrance_matches_door_test`; old digests unchanged; the reference town's mid-tile vertex count ≤ +10% measured BEFORE the knob goes on; §8.4 frame/tile budgets |
 | **R5 Terrain** | road | shaper access corridors, `padDatums`, capture reads corridor datums | R5 tests; the starter kit adds exactly 4 corridor runs; `relaid_road_drape_test` unchanged |
 | **R6 Dressing** | road | stall paint on small lots, baked lot cars in stalls (skipped on agent-managed sites via the per-site bit, §5.5), footpaths, lamps, wheel stops, bay hatch, fence rings with gaps, signs by the throat | R6 tests; detail on/off identity holds; screenshots of a generated suburb and a strip mall |
 | **T4a Site networks** | traffic | needs R1 (join slot columns for `AccessPoints.ofJoin`) and R2a; §7.8 items 1–11 for today's CommuteSynth trips, INCLUDING item 10 (lot-car persistence by `(siteId, stallKey)`, so no save between T4a and T4b holds lot cars under the old §14.1 scheme or drops them); D17 step 2 only (garage what it cannot place); lot-car owner opaque (`ownerKind` + id) for the slice-3 port | A4–A11 (A10 with its save/resume case), A13–A15, A12 (traffic half); built on R2a fixtures, then real R2 plans; wire after R3; merge gated on the structural allocation gate (A13), not the traffic-wide weighed allocation number (not met today, owed by traffic slice 11); staged E36 (agent-managed sites only) |
 | **R7 Legacy removal** | road | delete `emitLot`, `ParkingLot` meshing (building_generator.dart:246-254, :787-844) and massing parking for parcel buildings and cells; ledgered re-pin; rewrite road-network.md §3b (stale: `CityNodes._emitLotFeatures` is `CityTileMesher._emitLotFeatures`, SprawlSectionBuilder is gone) and docs/REFERENCE.md | one re-pin commit with the ledger; all tests green; screenshots reviewed; after T4a merged |
-| **T4b Residents and pedestrians** | traffic | with or after citizens (slice 3): residents' cars at home pads and kerbs (E36 completes: all baked cars off), full D17 circling/give-up, stall → door walks via `entrancePt/entranceNode` | A16 |
+| **T4b Residents and pedestrians** | traffic | with or after citizens (slice 3): residents' cars at home pads (backing out to the street, §7.4 Home back-out; yielding to pedestrians on the pavement crossing) and kerbs (E36 completes: all baked cars off), full D17 circling/give-up, stall → door walks via `entrancePt/entranceNode` | A16 |
 | **R8 Polish** (later) | road | alley rear joins (slot 3, F2a), second gates on a second road, one-way loops with angled stalls, podium garage portals for `mega`, sealed-world tube crossings, public lots (`kPlanPublic`) | per feature |
 
 ---
@@ -1744,17 +1951,17 @@ class DepthProfile { double depthAt(double x); bool containsRect(Rect r); double
 | Brush growth on graded hillside downtowns | 0.25 m relief tolerance; one run per changed plan; a counter in the build log |
 | Whole-plan regeneration renumbers a site's stalls | `stallKey` remap; §7.6 relocation rules |
 | Two definitions of site connectivity drift | one `SiteLaneGraph`; a test pins any traffic copy equal |
-| Deadlock on single-lane driveways | claim unit + give-up timers; A9 at 10× rate |
+| Deadlock on single-lane driveways | claim unit + give-up timers; on a home drive an uncommitted outbound car yields its claim to an inbound car held at `destS`, and a committed one makes the inbound wait on the road; A9 at 10× rate |
+| Home back-outs put reversing cars on the carriageway (§10.2 Q3): neighbours' swings collide, a street queues behind them, a kerb car or a queue pins a car in its stall | only onto undivided roads ≤ 40 km/h (avenues at 50 km/h, near direction only) with ≥ 12 m of lane upstream per served direction (§3.3); gap acceptance before the reverse (body, stopped/queued, 8 s ETA; opposing lane on 1+1 streets; 10 s for the far lane), commit at the kerb line; a granted back-out claims its footprint, so neighbours are serialized (ties by sub-step, handle); followers stop at a reversing car's footprint for ≤ ~8 s; the forced grant after 120 s waives only the ETA terms (6 s floor), never a body in the footprint; kerb-parking masks keep kerb cars out of the swing path; tandem LIFO and the 120 s shuffle to a kerb slot; A9 `home_back_out_test` over 600 s at 10× |
+| Home swing masks (`[T − 12, T + 3]` per served kerb) remove most kerb parking on streets of narrow house lots, both drawn and agent | the masks are what keeps a departure from being blocked forever; overflow uses D17 steps 3–4 (adjacent edges, circling); baked kerb cars follow the same asymmetric form (A12), so the picture matches the agents; reviewed in the R6 suburb screenshots |
+| The back-out rules demote more homes to kerb parking (swing margin near junctions, room < 4.0, skew > 10°) | the sprawl audit counts demotions by rule in R2; thresholds pinned by `home_driveway_test` |
 
 ### 10.2 Open questions for the user (recommendations in bold)
 
-**Decided 2026-09-15 by the user: every recommendation below is accepted, except Q3.** Q3 is changed: on home
-driveways (`homeDriveway`), cars **back out into the street** instead of turning on the pad. A car drives in forward and
-parks; on departure it reverses out of its stall straight through the throat into the kerb lane, on a gap, then drives
-off forward. Car parks, yards and installations keep forward-out departures through their throats. The pad therefore
-needs no end hammerhead or extended run-up. §3.4, the home rows of V9, §7.4 departure and A9 are to be revised to this
-rule once the Agent Traffic session has given its constraints for the reverse-onto-carriageway manoeuvre (gap
-acceptance, which lanes, access-event logging); until then the Q3 text below is superseded.
+**Decided 2026-09-15 by the user: every recommendation below is accepted, except Q3, which the user changed** (Q3
+below records the decision). The Agent Traffic session's constraints for the back-out are folded into this document:
+§3.3 (eligibility), §3.4 (the pad), V1, V5, V7 and V9, §5.5 and §7.5 (kerb masks), §7.4 (Home back-out), §7.5 (tandem),
+§7.8, A9 (`home_back_out_test`) and §10.1.
 
 1. **Scheduling.** Traffic planned slice 2 (measured congestion/views) → 3 (citizens) → 4 (parking + pedestrians).
    It offers 4a (site networks, in-lot driving, stall reservations, lot cars for today's commuter trips) before
@@ -1767,11 +1974,22 @@ acceptance, which lanes, access-event logging); until then the Q3 text below is 
    - If you prefer the original order, R0–R7 still land, and agents appear and vanish at slot 0, which is already
      the drawn driveway's position.
 2. **The 180° building turn (R0).** Land it alone as the first commit, with before/after screenshots? **Yes.**
-3. **Home pads.** Cars never reverse onto the street: an arriving car drives past its stalls to the end of the pad,
-   turns in the hammerhead, and noses into its stall on the way back; it leaves by reversing onto the pad and driving
-   out forward. The pad runs about 3 m longer than a bare two-stall pad to give that turn its run-up. Lots under
-   16.3 m of frontage or 22 m of depth use kerb parking. **Accept.** Reversing onto the street complicates the road
-   rules and risks gridlock.
+3. **Home pads. Decided by the user: cars back out into the street** (this replaced the recommendation to turn on
+   the pad).
+   - On `homeDriveway` lots a car drives in forward and parks nose-in. It departs by reversing down its drive and
+     backing out through the throat into the street lane on a gap, then drives off forward (§7.4 Home back-out).
+   - Car parks, yards and installations keep forward-out departures through their throats.
+   - The pad has no turnaround. Stalls sit side by side on a 5.2 m drive where the lot allows, else in tandem (at
+     most 2 deep), ordered from the street outward (§3.4).
+   - Back-outs are allowed onto minor roads ≤ 40 km/h (street, one-way street, alley, path) in both directions where
+     `joinDirs` allow, and onto avenues (50 km/h) in the near direction only. A home also needs a 4.0 m cut half,
+     12 m of lane upstream of its join per served direction, and a drive within 10° of the road normal. Lots on
+     divided, medianed or faster roads, or failing those rules, use kerb parking (§3.3).
+   - On an auto lot (k = 3), lots under 16.6 m of frontage or 15 m of depth use kerb parking; from 16.6 m the two
+     stalls are in tandem, and from 17.6 m side by side.
+   - Kerb parking is masked over `[T − 12, T + 3]` on each served side, so a kerb car never blocks a swing (§5.5).
+   - Traffic serializes neighbouring back-outs by footprint claims, lets an inbound car held at the kerb park first,
+     and shuffles a blocking tandem car to the kerb after 120 s; A9 checks 600 s at 10× with no deadlock (§10.1).
 4. **Narrow lots' access point moves** about 7.5 m to the drive side, shifting routed-model traffic pictures in
    existing saves. **Accept.**
 5. **Paving unowned land.** Each starter access road crosses 21 m of unowned ground (plus its easement lot, Q12),
@@ -1798,7 +2016,10 @@ acceptance, which lanes, access-event logging); until then the Q3 text below is 
     - demolition with cars parked: they vanish (garaged virtually) and moving cars drive out;
     - lots whose only road is an expressway, ramp or deck keep invisible kerbside access, with a "no driveway"
       warning in the lot inspector;
-    - home driveways are dropped on boulevards and urban highways only; avenues and one-way streets keep them;
+    - home driveways follow the back-out eligibility (§3.3, Q3): minor tiers ≤ 40 km/h keep them with back-outs in
+      both directions where `joinDirs` allow (street, one-way street at 40 km/h, alley, path); avenues keep them with
+      near-direction back-outs only; divided, medianed or > 50 km/h roads are `kerbOnly` (in the catalog: boulevards
+      and urban highways);
     - public parking, alley access and second gates wait for R8.
     **Accept all.**
 12. **Access easements over auto lots.** None of the four starter utilities (nor any set-back site behind a lot row)
