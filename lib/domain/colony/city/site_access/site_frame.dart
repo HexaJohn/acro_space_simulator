@@ -12,7 +12,8 @@
 /// frontage running backwards, grid cells front a fake north edge and hand
 /// drawn sites may have no frontage at all. The frame normalises all of it:
 /// a counter-clockwise copy of the polygon, a frontage direction chosen so the
-/// inward normal points at an interior point, and an effective frontage
+/// normal agrees with the inward normal of the CCW edge under it, and an
+/// effective frontage
 /// wherever the stored one is missing or off the polygon.
 ///
 /// Determinism (§3.9): no platform hash, no draw from a generator, no clock, no
@@ -293,8 +294,29 @@ class SiteFrame {
     if (!(w >= kFrameDegenerateM)) return null;
     var u = (b - a) * (1 / w);
     var v = u.perp;
-    final c = interiorPoint(p);
-    if ((c - a).dot(v) < 0) {
+    // Orient v by the canonical CCW edge under the frontage midpoint, whose
+    // left normal points into the lot by construction. (§3.1's pseudocode
+    // compares against interiorPoint, which on a concave lot can lie across
+    // the frontage line, e.g. an L lot fronting its notch floor.) The interior
+    // point is only the fallback when that edge is perpendicular to u.
+    final mid = (a + b) * 0.5;
+    var nearest = double.infinity;
+    Vec2? inward;
+    for (var k = 0; k < p.length; k++) {
+      final e = p[(k + 1) % p.length] - p[k];
+      final len = e.length;
+      if (len <= 1e-9) continue;
+      final d = _pointSegmentDistance(mid, p[k], p[(k + 1) % p.length]);
+      if (d < nearest) {
+        nearest = d;
+        inward = (e * (1 / len)).perp;
+      }
+    }
+    final side = inward == null ? 0.0 : v.dot(inward);
+    final flip = side.abs() >= 1e-9
+        ? side < 0
+        : (interiorPoint(p) - a).dot(v) < 0;
+    if (flip) {
       final t = a;
       a = b;
       b = t;
@@ -406,7 +428,12 @@ class DepthProfile {
       }
       y0 += kDepthProfileMarginM;
       y1 -= kDepthProfileMarginM;
-      if (!bestGap.isFinite || y1 <= y0) {
+      // A column whose nearest interval starts past the frontage line (plus
+      // the 1 m a trusted stored frontage may sit off the lot) cannot be
+      // reached from the frontage: an open U's notch. It reads 0.
+      if (!bestGap.isFinite ||
+          y1 <= y0 ||
+          y0 > kDepthProfileMarginM + kFrontageOffPolygonM + 1e-9) {
         _far[col] = 0;
         continue;
       }
@@ -427,8 +454,9 @@ class DepthProfile {
   }
 
   /// How far into the lot (frame y, metres from the frontage line) the usable
-  /// interval of the column holding [x] reaches; 0 outside the lot or where the
-  /// column's interval is thinner than its margins.
+  /// interval of the column holding [x] reaches; 0 outside the lot, where the
+  /// column's interval is thinner than its margins, or where that interval
+  /// starts more than 1 m past the frontage line (unreachable from it).
   double depthAt(double x) {
     final i = _column(x);
     if (i < 0) return 0;

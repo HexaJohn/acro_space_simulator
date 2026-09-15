@@ -492,6 +492,71 @@ void main() {
       expectVec(frame.origin, const Vec2(0, 0));
       expectVec(frame.v, const Vec2(0, 1));
     });
+
+    // v is oriented by the canonical CCW edge under the frontage, not by
+    // interiorPoint: on concave lots the interior point can sit across the
+    // frontage line (a deviation from the §3.1 pseudocode).
+    bool inside(List<Vec2> poly, Vec2 q) {
+      var c = false;
+      for (var i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        final pi = poly[i], pj = poly[j];
+        if ((pi.n > q.n) != (pj.n > q.n) &&
+            q.e < (pj.e - pi.e) * (q.n - pi.n) / (pj.n - pi.n) + pi.e) {
+          c = !c;
+        }
+      }
+      return c;
+    }
+
+    test('an L lot fronting its notch: v points into the lot, not the notch', () {
+      const l = [
+        Vec2(0, 0), Vec2(40, 0), Vec2(40, 10), //
+        Vec2(10, 10), Vec2(10, 40), Vec2(0, 40),
+      ];
+      // The interior point lies north of the notch floor n = 10.
+      expect(interiorPoint(l).n, greaterThan(10));
+      final roads = roadsOf([
+        street('notch', const Vec2(15, 25), const Vec2(40, 25)),
+      ]);
+      final f = effectiveFrontage(l, roads)!;
+      expectVec(f.$1, const Vec2(40, 10));
+      expectVec(f.$2, const Vec2(10, 10));
+
+      final frames = [
+        SiteFrame.of(l, null, roads)!,
+        SiteFrame.of(l.reversed.toList(), null, roads)!,
+        SiteFrame.of(l, (const Vec2(10, 10), const Vec2(40, 10)), roads)!,
+        SiteFrame.of(l, (const Vec2(40, 10), const Vec2(10, 10)), roads)!,
+      ];
+      for (final frame in frames) {
+        expectVec(frame.origin, const Vec2(40, 10));
+        expectVec(frame.u, const Vec2(-1, 0));
+        expectVec(frame.v, const Vec2(0, -1));
+        // Just behind the frontage is the lot, along its whole width.
+        for (final x in [1.0, 15.0, 29.0]) {
+          expect(inside(l, frame.toWorld(Vec2(x, 0.5))), isTrue);
+          expect(inside(l, frame.toWorld(Vec2(x, -0.5))), isFalse);
+        }
+        expect(frame.profile.depthAt(15), closeTo(9.7, 1e-9));
+      }
+    });
+
+    test('an interior point on the frontage line: both orders, one frame', () {
+      const l2 = [
+        Vec2(0, 0), Vec2(20, 0), Vec2(20, 10), //
+        Vec2(10, 10), Vec2(10, 20), Vec2(0, 20),
+      ];
+      expectVec(interiorPoint(l2), const Vec2(5, 10));
+      for (final f in const [
+        (Vec2(10, 10), Vec2(20, 10)),
+        (Vec2(20, 10), Vec2(10, 10)),
+      ]) {
+        final frame = SiteFrame.of(l2, f, empty)!;
+        expectVec(frame.origin, const Vec2(20, 10));
+        expectVec(frame.v, const Vec2(0, -1));
+        expect(inside(l2, frame.toWorld(const Vec2(5, 0.5))), isTrue);
+      }
+    });
   });
 
   group('depth profile', () {
@@ -551,6 +616,34 @@ void main() {
       expect(p.containsRect(const SiteRect(2, 12, 8, 28)), isTrue);
       expect(p.depthAt(15), closeTo(9.7, 1e-9));
       expect(p.depthAt(25), closeTo(29.7, 1e-9));
+    });
+
+    test('a column whose nearest interval starts deep in the lot reads 0', () {
+      // An open U: the notch reaches the frontage, the column at x = 15 is
+      // inside only for y in [20, 30], unreachable from the frontage.
+      const u = [
+        Vec2(0, 0), Vec2(10, 0), Vec2(10, 20), Vec2(20, 20), //
+        Vec2(20, 0), Vec2(30, 0), Vec2(30, 30), Vec2(0, 30),
+      ];
+      final p = SiteFrame.of(u, (
+        const Vec2(0, 0),
+        const Vec2(10, 0),
+      ), empty)!.profile;
+      expect(p.depthAt(15), 0);
+      expect(p.depthAt(5), closeTo(29.7, 1e-9));
+      expect(p.depthAt(25), closeTo(29.7, 1e-9));
+      expect(p.maxDepthM, closeTo(29.7, 1e-9));
+      expect(p.containsRect(const SiteRect(12, 1, 18, 5)), isFalse);
+    });
+
+    test('a stored frontage up to 1 m off the lot still has depth', () {
+      // Trusted 0.9 m outside the north edge: the lot starts at y = 0.9.
+      const square = [Vec2(10, 10), Vec2(50, 10), Vec2(50, 50), Vec2(10, 50)];
+      final p = SiteFrame.of(square, (
+        const Vec2(10, 50.9),
+        const Vec2(50, 50.9),
+      ), empty)!.profile;
+      expect(p.depthAt(20), closeTo(40.9 - 0.3, 1e-9));
     });
 
     test('a triangle tapers', () {

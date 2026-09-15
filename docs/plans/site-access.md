@@ -408,8 +408,16 @@ SiteFrame.of(polygon, frontageOrNull, roadHint):
   `none` (no plan is stored, so the building stays legacy and keeps `Parcel.facing`).
 - **`interiorPoint`** is the vertex average if the polygon contains it. Otherwise it is the midpoint of the
   longest horizontal chord through that average, which handles concave L and U lots.
+- **Deviation (R-F, as built): `v` is oriented by the edge, not by `interiorPoint`.** On a concave lot the interior
+  point can lie across the frontage line (an L lot fronting its notch floor) or exactly on it, which flips `v`
+  out of the lot or makes the two frontage orders disagree. `SiteFrame.of` instead takes the canonical CCW edge of
+  `P` nearest the frontage midpoint (ties to the smaller index, zero-length edges skipped) and swaps `a`/`b` when
+  `v·edge.perp < 0`. `interiorPoint` is only the fallback when `|v·edge.perp| < 1e-9` (that edge perpendicular to
+  the frontage).
 - **`DepthProfile`** has one column every 0.5 m across `P` in the frame. Each column keeps the single inside
-  interval nearest the frontage, less a 0.3 m margin. Search uses the profile. Every emitted rectangle must also
+  interval nearest the frontage, less a 0.3 m margin. A column whose kept interval starts more than 1 m (the
+  stored-frontage tolerance) past the frontage line reads depth 0: it cannot be reached from the frontage (the
+  notch of an open U). Search uses the profile. Every emitted rectangle must also
   pass the exact `containsRect` test: all corners inside and no edge crossing (Liang-Barsky). A rectangle that
   fails is dropped, never nudged. Cost: `W/0.5 × edges`, about 200 tests for a 24 m lot and 7,200 for the
   spaceport.
