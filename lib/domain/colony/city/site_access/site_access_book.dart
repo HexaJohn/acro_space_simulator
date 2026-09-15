@@ -23,6 +23,14 @@
 ///   both budgets. A road edit queues only the built lots in its dirty box
 ///   (checked next, marked [isStale]); the rest of the colony is re-resolved
 ///   against the new graph by the resumable walk.
+/// - **Tick shape under a budget (R2 integration repair, §4.1 as built).**
+///   The sync that diffs a structure change does only the diff and the
+///   priority sites; a check that recomputes a signature costs 8 check
+///   units; a sync re-packs at most one chunk whole (writes, drops), while a
+///   chunk whose rows were only re-resolved or renamed is re-published
+///   sharing every column but `i32` with the chunk it replaces; the sites a
+///   finished walk did not see are swept in budgeted steps. A drain (either
+///   budget unlimited) is not shaped.
 /// - **Checks.** A site whose lot, building and graph stamp are unchanged
 ///   costs two identity compares. Otherwise its input signature (§3.9: the
 ///   polygon at 1 cm, frontage, graded, spec, and every slot's road id,
@@ -67,8 +75,9 @@ typedef SiteEasementRule = SiteEasement Function(
 
 /// What one [SiteAccessBook.sync] did (tests, benches, the dev hook).
 class SiteAccessSyncStats {
-  /// Site checks spent inside the check budget, and outside it (the
-  /// easement-priority sites).
+  /// Check units spent inside the check budget (1 per unchanged site, 8 per
+  /// recomputed signature, 1 per 16 sites swept), and site checks outside it
+  /// (the easement-priority sites).
   int checks = 0, priorityChecks = 0;
 
   /// Generation units charged, plans generated, plans re-resolved in place,
@@ -155,29 +164,47 @@ class _Resolve {
 class _Change {
   _Change.write(this.builderChunk, this.builderRow)
       : resolve = null,
+        lotResolve = false,
         drop = false,
         rename = null;
   _Change.resolve(this.resolve)
       : builderChunk = -1,
         builderRow = -1,
+        lotResolve = false,
+        drop = false,
+        rename = null;
+  const _Change._lot()
+      : builderChunk = -1,
+        builderRow = -1,
+        resolve = null,
+        lotResolve = true,
         drop = false,
         rename = null;
   _Change.drop()
       : builderChunk = -1,
         builderRow = -1,
         resolve = null,
+        lotResolve = false,
         drop = true,
         rename = null;
   _Change.rename(this.rename)
       : builderChunk = -1,
         builderRow = -1,
         resolve = null,
+        lotResolve = false,
         drop = false;
+
+  /// A graph lot's re-resolution, read off the graph's join columns at flush
+  /// (the site's `graphLot` at the book's stamp): nothing allocated per site.
+  static const _Change lot = _Change._lot();
 
   final int builderChunk, builderRow;
   final _Resolve? resolve;
+  final bool lotResolve;
   final bool drop;
   final String? rename;
+
+  bool get isResolve => resolve != null || lotResolve;
 }
 
 /// The colony's site access plans. See the library comment.
@@ -220,7 +247,7 @@ class SiteAccessBook {
   final List<int> _freeSlots = [];
 
   final Map<String, _Site> _byId = {};
-  final List<_Site> _sites = [];
+  List<_Site> _sites = [];
   final Map<String, String> _easementByLot = {};
 
   int _sitesRev = 0;
@@ -236,7 +263,8 @@ class SiteAccessBook {
   int _tierRevision = -1, _utils = -1, _gridGrown = -1, _zones = -1;
   int _abandoned = -1;
 
-  List<Parcel> _walkLots = const [];
+  List<Parcel> _walkManual = const [], _walkAuto = const [];
+  int _walkManualCount = 0;
   List<(int, CityBuildingSpec)> _walkCells = const [];
   int _cursor = 0, _passNo = 0;
   bool _passActive = false, _rewalk = false;
@@ -246,6 +274,19 @@ class SiteAccessBook {
   final Set<String> _queued = {};
 
   List<String> _priorityIds = const [];
+
+  /// What a check that recomputes a site's signature costs in check units
+  /// (§4.3 as built, R2 integration repair): an unchanged site is two
+  /// identity compares and a lookup, one unit; a signature, a re-resolution
+  /// and its record cost several times that, eight units. A road edit's
+  /// re-resolving walk hashes every built site, so at 4096 units a tick it
+  /// re-resolves about 500 sites, and the tick stays near 1 ms on the
+  /// 20-mile sprawl (the §4.2 bench); a built-state re-walk that finds
+  /// nothing changed keeps its 4096 checks.
+  static const int _hashCheckUnits = 8;
+
+  /// Whether the last [_check] got as far as the signature.
+  bool _lastCheckHashed = false;
 
   // Per-sync scratch.
   CitySim? _city;
@@ -267,9 +308,15 @@ class SiteAccessBook {
   static int _roadSig(RoadSpline road) =>
       _w(_w(fnv1a32(road.id), road.roadClass.index), road.decoration.index);
   int _maxUnits = 0;
+
+  /// Chunks this sync re-packs whole (writes, drops), and how many a budgeted
+  /// sync may: one (every chunk when a budget is unlimited, as in a drain).
+  final List<int> _repacked = [];
+  int _maxRepacks = unlimited;
   PlanBuilder? _builder;
   final List<SiteAccessChunk> _builtChunks = [];
-  final Map<int, _Change> _changes = {};
+  /// The pending change of each slot (null: none), indexed like [_bySlot].
+  final List<_Change?> _changes = [];
   final List<int> _changedSlots = [];
 
   /// What the last [sync] did.
@@ -455,42 +502,56 @@ class SiteAccessBook {
     _g = g;
     _builtFn = _built;
     _maxUnits = maxUnits;
+    _repacked.clear();
+    final budgeted = maxUnits < unlimited && maxChecks < unlimited;
+    _maxRepacks = budgeted ? 1 : unlimited;
     final layout = city.layout;
     final stamp = g.structureStamp;
 
     // Triggers (§4.2): integer compares unless something moved.
     final old = _graph;
+    var restart = false;
+    // A budgeted sync that diffs a structure change spends its tick on the
+    // diff and the easement-priority sites; the queue and the walk start on
+    // the next (R2 integration repair: the diff alone is about 1 ms on the
+    // 20-mile sprawl).
+    final deferWork = budgeted && old != null && stamp != _stamp;
     if (old == null || stamp != _stamp) {
-      if (old != null) _queueDirtyBox(old, g, city);
-      _priorityIds = _priorityOf(g);
-      final hashes = Int32List(g.roadCount);
-      for (var r = 0; r < g.roadCount; r++) {
-        hashes[r] = old != null &&
-                r < old.roadCount &&
-                r < _roadHash.length &&
-                identical(old.roads[r], g.roads[r])
-            ? _roadHash[r]
-            : _roadSig(g.roads[r]);
+      if (old != null) {
+        _queueDirtyBox(old, g, city);
+      } else {
+        final hashes = Int32List(g.roadCount);
+        for (var r = 0; r < g.roadCount; r++) {
+          hashes[r] = _roadSig(g.roads[r]);
+        }
+        _roadHash = hashes;
       }
-      _roadHash = hashes;
+      _priorityIds = _priorityOf(g);
       _stamp = stamp;
-      _startPass(city);
+      restart = true;
     }
     _graph = g;
     if (layout.version != _layoutVersion) {
       _layoutVersion = layout.version;
-      _startPass(city);
+      restart = true;
     }
-    if (_builtKeyMoved(city)) {
+    // The walk reads the layout's lot lists as views: a manual lot staked
+    // without a re-cut (no version bump) shifts them, so the walk restarts.
+    if (_passActive && layout.manualParcels.length != _walkManualCount) {
+      restart = true;
+    }
+    if (_builtKeyMoved(city) && !restart) {
       // A walk that has not begun sees the change anyway.
       if (_passActive && _cursor > 0) {
         _rewalk = true;
       } else {
-        _startPass(city);
+        restart = true;
       }
     }
+    // One walk start per sync, whatever moved.
+    if (restart) _startPass(city);
 
-    var stopped = false;
+    var stopped = deferWork;
     // 1. Easement-priority sites, outside both budgets (§3.7a rule 3).
     for (final id in _priorityIds) {
       final parcel = layout.parcelById(id);
@@ -503,17 +564,18 @@ class SiteAccessBook {
       stats.priorityChecks++;
     }
     // 2. The dirty box queue.
-    while (_queueHead < _queue.length) {
+    while (!deferWork && _queueHead < _queue.length) {
       final id = _queue[_queueHead];
       if (!_queued.contains(id)) {
         // Already checked this sync (an easement-priority site): free.
         _queueHead++;
         continue;
       }
-      if (stats.checks >= maxChecks) {
+      if (stats.checks + _hashCheckUnits > maxChecks) {
         stopped = true;
         break;
       }
+      _lastCheckHashed = false;
       final parcel = layout.parcelById(id);
       if (parcel != null &&
           !_check(id, parcel, -1, _lotSpec(city, parcel), queued: true)) {
@@ -522,7 +584,7 @@ class SiteAccessBook {
       }
       _queued.remove(id);
       _queueHead++;
-      stats.checks++;
+      stats.checks += _lastCheckHashed ? _hashCheckUnits : 1;
     }
     if (_queueHead >= _queue.length) {
       _queue.clear();
@@ -530,13 +592,18 @@ class SiteAccessBook {
     }
     // 3. The walk.
     if (!stopped && _passActive) {
-      final nLots = _walkLots.length, total = nLots + _walkCells.length;
+      final nManual = _walkManualCount,
+          nLots = nManual + _walkAuto.length,
+          total = nLots + _walkCells.length;
       while (_cursor < total) {
-        if (stats.checks >= maxChecks) break;
+        if (stats.checks + _hashCheckUnits > maxChecks) break;
+        _lastCheckHashed = false;
         final bool ok;
         if (_cursor < nLots) {
           // Zoning replaces a lot's Parcel without a new walk: read it now.
-          final walked = _walkLots[_cursor];
+          final walked = _cursor < nManual
+              ? _walkManual[_cursor]
+              : _walkAuto[_cursor - nManual];
           final p = layout.parcelById(walked.id) ?? walked;
           ok = _check(p.id, p, -1, _lotSpec(city, p));
         } else {
@@ -545,16 +612,19 @@ class SiteAccessBook {
         }
         if (!ok) break;
         _cursor++;
-        stats.checks++;
+        stats.checks += _lastCheckHashed ? _hashCheckUnits : 1;
       }
       if (_cursor >= total) _endPass(city);
+    }
+    if (!deferWork && _sweeping && stats.checks < maxChecks) {
+      stats.checks += _sweep(maxChecks - stats.checks);
     }
     _flush();
     _everSynced = true;
     _city = null;
     _g = null;
     _builtFn = null;
-    stats.complete = _queue.isEmpty && !_passActive && !_rewalk;
+    stats.complete = _queue.isEmpty && !_passActive && !_rewalk && !_sweeping;
     return stats.complete;
   }
 
@@ -603,7 +673,14 @@ class SiteAccessBook {
   /// lots, then occupied cells in ascending anchor order (abandoned cells
   /// skipped; an anchor reported twice walks once, its first report).
   void _startPass(CitySim city) {
-    _walkLots = city.layout.parcels;
+    // Views, not a copy of every lot (2 ms a restart on the 20-mile sprawl).
+    // The auto view keeps the plat it was taken from (a re-cut publishes a
+    // new list and bumps the version); the manual list grows in place only
+    // when a plot is staked without a re-cut, which [sync] turns into a
+    // restart.
+    _walkManual = city.layout.manualParcels;
+    _walkAuto = city.layout.autoParcels;
+    _walkManualCount = _walkManual.length;
     final cells = <(int, int, CityBuildingSpec)>[];
     for (final cell in city.occupiedCells()) {
       if (city.abandoned.contains(cell.key)) continue;
@@ -622,15 +699,60 @@ class SiteAccessBook {
     _rewalk = false;
   }
 
-  /// A finished walk: every site it did not see is gone.
+  /// A finished walk: every site it did not see is gone. The sites are swept
+  /// for that in budgeted steps ([_sweep]), not in the tick the walk ends
+  /// (8 ms on the 20-mile sprawl; R2 integration repair).
   void _endPass(CitySim city) {
-    for (final rec in _sites) {
-      if (!rec.dead && rec.seenPass != _passNo) _forget(rec);
-    }
-    _sites.removeWhere((r) => r.dead);
+    // A sweep still in flight is finished first: its walk's verdicts stand.
+    if (_sweeping) _sweep(unlimited);
     _passActive = false;
+    _sweepPass = _passNo;
+    _sweepAt = 0;
+    _sweepEnd = _sites.length;
+    _sweepKeep = [];
+    _sweeping = true;
     if (_rewalk) _startPass(city);
   }
+
+  /// One budgeted step of the sweep after a walk: forgets the sites the
+  /// walk [_sweepPass] did not see, a check unit per [_sweepSitesPerUnit]
+  /// sites, and compacts [_sites] when done. A site seen by that walk or a
+  /// later one is kept; a site added since the walk ended lies past
+  /// [_sweepEnd] and is kept. Returns the check units spent.
+  int _sweep(int units) {
+    final keep = _sweepKeep;
+    var spent = 0;
+    while (_sweepAt < _sweepEnd && spent < units) {
+      final stop = _sweepAt + _sweepSitesPerUnit < _sweepEnd
+          ? _sweepAt + _sweepSitesPerUnit
+          : _sweepEnd;
+      for (var k = _sweepAt; k < stop; k++) {
+        final rec = _sites[k];
+        if (rec.dead) continue;
+        if (rec.seenPass < _sweepPass) {
+          _forget(rec);
+        } else {
+          keep.add(rec);
+        }
+      }
+      _sweepAt = stop;
+      spent++;
+    }
+    if (_sweepAt >= _sweepEnd) {
+      for (var k = _sweepEnd; k < _sites.length; k++) {
+        if (!_sites[k].dead) keep.add(_sites[k]);
+      }
+      _sites = keep;
+      _sweepKeep = const [];
+      _sweeping = false;
+    }
+    return spent;
+  }
+
+  static const int _sweepSitesPerUnit = 16;
+  bool _sweeping = false;
+  int _sweepPass = 0, _sweepAt = 0, _sweepEnd = 0;
+  List<_Site> _sweepKeep = const [];
 
   /// The lots whose slot 0 carries `kJoinEasement`, in graph lot order.
   static List<String> _priorityOf(RoadGraph g) {
@@ -657,20 +779,51 @@ class SiteAccessBook {
       n1 = n1 == null || b.maxN > n1! ? b.maxN : n1;
     }
 
-    // Roads: the same RoadSpline at the same index is unchanged without a
-    // lookup (a road edit appends and splits; the rest keep their places).
+    // Roads, diffed in one two-pointer pass that also carries each road's
+    // [_roadSig] over: the same RoadSpline in the same relative order is
+    // unchanged without a lookup, so a road inserted mid-list (which shifts
+    // every index after it) costs a few lookups, not one per road (23 ms on
+    // the 20-mile sprawl; R2 integration repair).
+    final hashes = Int32List(g.roadCount);
+    final oldHash = _roadHash;
+    int hashOf(int o, int r) =>
+        o < oldHash.length && identical(old.roads[o], g.roads[r])
+            ? oldHash[o]
+            : _roadSig(g.roads[r]);
+    void goneOrMoved(int o) {
+      if (g.roadNoOf(old.roads[o].id) == null) grow(old.roadRecs[o].box);
+    }
+
+    var i = 0;
     for (var r = 0; r < g.roadCount; r++) {
-      if (r < old.roadCount && identical(old.roads[r], g.roads[r])) continue;
-      final o = old.roadNoOf(g.roads[r].id);
-      if (o == null || !_sameRoad(old, o, g, r)) {
-        grow(g.roadRecs[r].box);
-        if (o != null) grow(old.roadRecs[o].box);
+      if (i < old.roadCount && identical(old.roads[i], g.roads[r])) {
+        hashes[r] = i < oldHash.length ? oldHash[i] : _roadSig(g.roads[r]);
+        i++;
+        continue;
       }
+      final o = old.roadNoOf(g.roads[r].id);
+      if (o == null) {
+        grow(g.roadRecs[r].box);
+        hashes[r] = _roadSig(g.roads[r]);
+        continue;
+      }
+      if (o >= i) {
+        // Old roads i..o-1 were removed, or moved later (then met again).
+        for (var k = i; k < o; k++) {
+          goneOrMoved(k);
+        }
+        i = o + 1;
+      }
+      if (!_sameRoad(old, o, g, r)) {
+        grow(g.roadRecs[r].box);
+        grow(old.roadRecs[o].box);
+      }
+      hashes[r] = hashOf(o, r);
     }
-    for (var r = 0; r < old.roadCount; r++) {
-      if (r < g.roadCount && identical(old.roads[r], g.roads[r])) continue;
-      if (g.roadNoOf(old.roads[r].id) == null) grow(old.roadRecs[r].box);
+    for (var k = i; k < old.roadCount; k++) {
+      goneOrMoved(k);
     }
+    _roadHash = hashes;
     // A new manual lot (a claimed site) re-cuts the auto lots around it, so
     // its box covers theirs; auto lots re-cut by a road lie near that road.
     final layout = city.layout;
@@ -724,7 +877,10 @@ class SiteAccessBook {
     var rec = _byId[id];
     if (rec != null && rec.dead) rec = null;
     if (spec == null) {
-      if (rec != null) _forget(rec);
+      if (rec != null) {
+        if (rec.slot >= 0 && !_mayRepack(rec.slot, priority)) return false;
+        _forget(rec);
+      }
       return true;
     }
     final g = _g!, city = _city!;
@@ -753,6 +909,7 @@ class SiteAccessBook {
     }
 
     final built = _builtFn!;
+    _lastCheckHashed = true;
     // A lot's slots are hashed straight off the graph's columns (no context,
     // no allocation); a cell's through its footprint context.
     SiteContext? ctx;
@@ -795,8 +952,12 @@ class SiteAccessBook {
       if (rec.stamp != _stamp &&
           rec.slot >= 0 &&
           _rowOfSlot[rec.slot] >= 0 &&
-          !_changes.containsKey(rec.slot)) {
-        _record(rec.slot, _Change.resolve(_resolveOf(rec, g, lot, ctx)));
+          _changes[rec.slot] == null) {
+        _record(
+            rec.slot,
+            ctx == null
+                ? _Change.lot
+                : _Change.resolve(_resolveOf(rec, g, lot, ctx)));
         lastSync.resolved++;
       }
       rec
@@ -815,6 +976,10 @@ class SiteAccessBook {
     if (!priority &&
         lastSync.units > 0 &&
         lastSync.units + units > _maxUnits) {
+      return false;
+    }
+    // The chunk it writes is re-packed whole: at most [_maxRepacks] a sync.
+    if (!_mayRepack(rec.slot >= 0 ? rec.slot : _nextSlot, priority)) {
       return false;
     }
     lastSync.units += units;
@@ -1058,10 +1223,29 @@ class SiteAccessBook {
 
   // ---- slots and changes ------------------------------------------------------------------
 
+  /// The slot [_takeSlot] would hand out next.
+  int get _nextSlot =>
+      _freeSlots.isNotEmpty ? _freeSlots.last : _bySlot.length;
+
+  /// Whether a write or drop at [slot] may re-pack its chunk this sync: a
+  /// chunk already re-packed this sync is free; another counts against
+  /// [_maxRepacks] (R2 integration repair: a full re-pack of 1024 sites is
+  /// most of a 2 ms tick). An easement-priority site always may.
+  bool _mayRepack(int slot, bool priority) {
+    final c = slot ~/ kSitesPerChunk;
+    for (final x in _repacked) {
+      if (x == c) return true;
+    }
+    if (!priority && _repacked.length >= _maxRepacks) return false;
+    _repacked.add(c);
+    return true;
+  }
+
   int _takeSlot() {
     if (_freeSlots.isNotEmpty) return _freeSlots.removeLast();
     _bySlot.add(null);
     _rowOfSlot.add(-1);
+    _changes.add(null);
     return _bySlot.length - 1;
   }
 
@@ -1079,7 +1263,7 @@ class SiteAccessBook {
   }
 
   void _record(int slot, _Change change) {
-    if (!_changes.containsKey(slot)) _changedSlots.add(slot);
+    if (_changes[slot] == null) _changedSlots.add(slot);
     _changes[slot] = change;
   }
 
@@ -1093,7 +1277,7 @@ class SiteAccessBook {
   void _dropSlot(_Site rec) {
     final slot = rec.slot;
     _liftEasements(rec);
-    if (_rowOfSlot[slot] >= 0 || _changes.containsKey(slot)) {
+    if (_rowOfSlot[slot] >= 0 || _changes[slot] != null) {
       _record(slot, _Change.drop());
     }
     if (_rowOfSlot[slot] >= 0) _logChange(rec.id);
@@ -1114,6 +1298,28 @@ class SiteAccessBook {
       if (_easementByLot[lot] == rec.id) _easementByLot.remove(lot);
     }
     rec.easement = const [];
+  }
+
+  void _validateChunk(SiteAccessChunk chunk) {
+    if (!validate) return;
+    assert(() {
+      final bad = SitePlanValidator.validateChunk(chunk, graph: _g);
+      if (bad.isNotEmpty) {
+        throw StateError('SiteAccessBook: invalid plans:\n${bad.join('\n')}');
+      }
+      return true;
+    }());
+  }
+
+  /// Whether every pending change in chunk [c] (slots up to [end]) only
+  /// re-resolves or renames a published row, so its rows keep their places.
+  bool _patchOnly(int c, int end) {
+    for (var s = c * kSitesPerChunk; s < end; s++) {
+      final ch = _changes[s];
+      if (ch == null) continue;
+      if (ch.drop || ch.builderChunk >= 0 || _rowOfSlot[s] < 0) return false;
+    }
+    return true;
   }
 
   /// Publishes every pending change, one new chunk per touched chunk.
@@ -1139,11 +1345,18 @@ class SiteAccessBook {
     final written = <int>[];
     for (final c in touched) {
       final old = _chunks[c];
-      final rows = <_Row>[];
-      final slots = <int>[];
       final end = (c + 1) * kSitesPerChunk < _bySlot.length
           ? (c + 1) * kSitesPerChunk
           : _bySlot.length;
+      if (_patchOnly(c, end)) {
+        final chunk = _derive(old, c, end);
+        _validateChunk(chunk);
+        _chunks[c] = chunk;
+        lastSync.chunks++;
+        continue;
+      }
+      final rows = <_Row>[];
+      final slots = <int>[];
       for (var s = c * kSitesPerChunk; s < end; s++) {
         final ch = _changes[s];
         final oldRow = _rowOfSlot[s];
@@ -1160,23 +1373,22 @@ class SiteAccessBook {
           rows.add(_Row(src, ch.builderRow, src.siteId(ch.builderRow)));
           written.add(s);
         } else if (oldRow >= 0) {
-          rows.add(_Row(old, oldRow, ch.rename ?? old.siteId(oldRow),
-              ch.resolve));
+          final rec = _bySlot[s];
+          rows.add(_Row(
+              old,
+              oldRow,
+              ch.rename ?? old.siteId(oldRow),
+              ch.resolve ??
+                  (ch.lotResolve && rec != null
+                      ? _resolveOf(rec, _g!, rec.graphLot, null)
+                      : null)));
         } else {
           continue;
         }
         slots.add(s);
       }
       final chunk = _pack(rows);
-      if (validate) {
-        assert(() {
-          final bad = SitePlanValidator.validateChunk(chunk, graph: _g);
-          if (bad.isNotEmpty) {
-            throw StateError('SiteAccessBook: invalid plans:\n${bad.join('\n')}');
-          }
-          return true;
-        }());
-      }
+      _validateChunk(chunk);
       // What the written slots held before the swap: a plan appears, or
       // changes rev, or another site took the slot.
       final mine = <int>[], wasRev = <int>[];
@@ -1211,6 +1423,15 @@ class SiteAccessBook {
         if (ch.drop || ch.rename != null) continue;
         final rec = _bySlot[s];
         if (rec == null) continue;
+        // A re-resolution kept every slot input (crossed lots and their built
+        // bits included): a site that crosses no lot has no easement to
+        // re-derive, and costs no plan view.
+        if (ch.isResolve &&
+            !rec.crosses &&
+            !rec.usesSide &&
+            rec.easement.isEmpty) {
+          continue;
+        }
         _liftEasements(rec);
         final row = _rowOfSlot[s];
         if (row < 0) continue;
@@ -1238,7 +1459,9 @@ class SiteAccessBook {
         }
       }
     }
-    _changes.clear();
+    for (final s in _changedSlots) {
+      _changes[s] = null;
+    }
     _changedSlots.clear();
     _builtChunks.clear();
   }
@@ -1339,74 +1562,167 @@ class SiteAccessBook {
       }
       i32[o + nS] = acc;
     }
-    // Every other column.
+    // Every other column, copied in RUNS: consecutive rows of one source
+    // chunk, in site order, are contiguous in each of its columns (a CSR
+    // column's count + 1 entries per site included), so a run is one
+    // `setRange` per column however many sites it holds. A chunk re-packed
+    // around a few changed slots is a handful of block copies (§4.1 as built,
+    // R2 integration repair: the per-element copy was 3 ms per 1024 sites).
+    final runStart = <int>[];
+    final runRaw = <List<Object>>[];
+    for (var k = 0; k < nS; k++) {
+      final r = rows[k];
+      if (k == 0 ||
+          !identical(r.chunk, rows[k - 1].chunk) ||
+          r.site != rows[k - 1].site + 1) {
+        runStart.add(k);
+        runRaw.add(r.chunk.debugRetained);
+      }
+    }
+    runStart.add(nS);
     for (var col = 0; col < SiteCol.count; col++) {
       final kind = _colKind[col];
       if (kind == 1) continue;
       final o = offsets[col];
       final t = _L.typeOf(col);
       final fi = _colFamily[col];
-      final patched = col == SiteCol.graphStamp ||
-          col == SiteCol.graphLot ||
-          col == SiteCol.joinRef ||
-          col == SiteCol.joinPiece ||
-          col == SiteCol.joinRoadNo;
       var w = 0;
-      for (var k = 0; k < nS; k++) {
-        final r = rows[k];
-        final c = r.chunk;
+      for (var q = 0; q + 1 < runStart.length; q++) {
+        final a = runStart[q], b = runStart[q + 1] - 1;
+        final raw = runRaw[q];
+        final srcOff = raw[4] as Int32List;
         final int row0, n;
         switch (kind) {
           case 0:
-            row0 = r.site;
-            n = 1;
+            row0 = rows[a].site;
+            n = b - a + 1;
           case 2:
-            row0 = st[2 * k * fams + fi];
-            n = cnt[k * fams + fi];
+            row0 = st[2 * a * fams + fi];
+            n = st[2 * b * fams + fams + fi] - row0;
           default:
-            row0 = st[2 * k * fams + fi] + r.site;
-            n = cnt[k * fams + fi] + 1;
+            row0 = st[2 * a * fams + fi] + rows[a].site;
+            n = st[2 * b * fams + fams + fi] + rows[b].site + 1 - row0;
         }
-        switch (t) {
-          case _L.tF64:
-            for (var i = 0; i < n; i++) {
-              f64[o + w + i] = c.f64(col, row0 + i);
-            }
-          case _L.tF32:
-            for (var i = 0; i < n; i++) {
-              f32[o + w + i] = c.f32(col, row0 + i);
-            }
-          case _L.tI32:
-            final res = r.resolve;
-            if (patched && res != null) {
-              for (var i = 0; i < n; i++) {
-                i32[o + w + i] = switch (col) {
-                  SiteCol.graphStamp => res.stamp,
-                  SiteCol.graphLot => res.graphLot,
-                  SiteCol.joinRef => res.refs[i],
-                  SiteCol.joinPiece => res.pieces[i],
-                  _ => res.roadNos[i],
-                };
-              }
-            } else {
-              for (var i = 0; i < n; i++) {
-                i32[o + w + i] = c.i32(col, row0 + i);
-              }
-            }
-          default:
-            for (var i = 0; i < n; i++) {
-              u8[o + w + i] = c.u8(col, row0 + i);
-            }
+        if (n > 0) {
+          final from = srcOff[col] + row0;
+          switch (t) {
+            case _L.tF64:
+              f64.setRange(o + w, o + w + n, raw[0] as Float64List, from);
+            case _L.tF32:
+              f32.setRange(o + w, o + w + n, raw[1] as Float32List, from);
+            case _L.tI32:
+              i32.setRange(o + w, o + w + n, raw[2] as Int32List, from);
+            default:
+              u8.setRange(o + w, o + w + n, raw[3] as Uint8List, from);
+          }
         }
         w += n;
       }
     }
-    return SiteAccessChunk.packed(
+    // The graph resolution of re-resolved rows, patched over the copy.
+    for (var k = 0; k < nS; k++) {
+      final res = rows[k].resolve;
+      if (res != null) _patch(i32, offsets, k, res);
+    }
+    // The lists are this call's own: adopted, not copied again.
+    return SiteAccessChunk.adopt(
       siteId: [for (final r in rows) r.id],
       f64: f64,
       f32: f32,
       i32: i32,
       u8: u8,
+      offsets: offsets,
+    );
+  }
+
+  /// Writes [res] (`graphStamp`, `graphLot`, and per join its handle, piece
+  /// and road number) into site [row] of the unpublished columns [i32] laid
+  /// out by [offsets].
+  static void _patch(Int32List i32, Int32List offsets, int row, _Resolve res) {
+    i32[offsets[SiteCol.graphStamp] + row] = res.stamp;
+    i32[offsets[SiteCol.graphLot] + row] = res.graphLot;
+    final j0 = i32[offsets[SiteCol.startBase + _joinFamily] + row];
+    final oRef = offsets[SiteCol.joinRef] + j0,
+        oPiece = offsets[SiteCol.joinPiece] + j0,
+        oRoad = offsets[SiteCol.joinRoadNo] + j0;
+    for (var i = 0; i < res.refs.length; i++) {
+      i32[oRef + i] = res.refs[i];
+      i32[oPiece + i] = res.pieces[i];
+      i32[oRoad + i] = res.roadNos[i];
+    }
+  }
+
+  static final int _joinFamily = _colFamily[SiteCol.joinRef];
+
+  /// [_resolveOf] for graph lot [lot], written straight into site [row] of
+  /// [i32] (a copy of [old]'s, same layout) instead of allocating.
+  void _patchLot(
+      Int32List i32, Int32List offsets, int row, SiteAccessChunk old, int lot) {
+    final g = _g!;
+    i32[offsets[SiteCol.graphStamp] + row] = _stamp;
+    i32[offsets[SiteCol.graphLot] + row] = lot;
+    final j0 = old.joinStart(row), n = old.joinCountOf(row);
+    final oRef = offsets[SiteCol.joinRef] + j0,
+        oPiece = offsets[SiteCol.joinPiece] + j0,
+        oRoad = offsets[SiteCol.joinRoadNo] + j0;
+    for (var j = 0; j < n; j++) {
+      final k = old.joinSlot(j0 + j);
+      var ref = kJoinRefNone;
+      var piece = old.joinPiece(j0 + j);
+      if (lot >= 0) {
+        ref = g.joinRefOf(lot, k);
+        if (k == kJoinSlotSideStreet) {
+          final s = g.sideStreetJoinOf(lot);
+          if (s != null) piece = s.piece;
+        } else if (ref >= 0) {
+          piece = g.joinPiece[ref];
+        }
+      }
+      i32[oRef + j] = ref;
+      i32[oPiece + j] = piece;
+      i32[oRoad + j] = piece >= 0 && piece < g.pieceCount
+          ? g.pieceRoad[piece]
+          : old.joinRoadNo(j0 + j);
+    }
+  }
+
+  /// [old] re-published with only its graph resolutions and ids changed: the
+  /// rows keep their places, so every column but `i32` is SHARED with [old]
+  /// (both are published and never written) and `i32` is copied once and
+  /// patched. Byte-identical to re-packing the same rows (§4.1 as built, R2
+  /// integration repair).
+  SiteAccessChunk _derive(SiteAccessChunk old, int c, int end) {
+    final raw = old.debugRetained;
+    final offsets = raw[4] as Int32List;
+    var i32 = raw[2] as Int32List;
+    List<String>? ids;
+    for (var s = c * kSitesPerChunk; s < end; s++) {
+      final ch = _changes[s];
+      if (ch == null) continue;
+      final row = _rowOfSlot[s];
+      final rename = ch.rename;
+      if (rename != null) {
+        (ids ??= List.of(old.siteIds))[row] = rename;
+      }
+      if (ch.isResolve) {
+        if (identical(i32, raw[2])) {
+          // A block copy (fromList copies element by element under the JIT).
+          i32 = Int32List(i32.length)..setRange(0, i32.length, i32);
+        }
+        final res = ch.resolve;
+        if (res != null) {
+          _patch(i32, offsets, row, res);
+        } else {
+          _patchLot(i32, offsets, row, old, _bySlot[s]!.graphLot);
+        }
+      }
+    }
+    return SiteAccessChunk.adopt(
+      siteId: ids ?? old.siteIds,
+      f64: raw[0] as Float64List,
+      f32: raw[1] as Float32List,
+      i32: i32,
+      u8: raw[3] as Uint8List,
       offsets: offsets,
     );
   }

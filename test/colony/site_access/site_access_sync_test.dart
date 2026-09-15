@@ -17,6 +17,7 @@ library;
 
 import 'dart:convert';
 
+import 'package:acro_space_simulator/domain/colony/city/city_generator.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_access_book.dart';
@@ -248,6 +249,71 @@ void main() {
         expect((plan.rev, book.slotOf(p.id)), before[p.id]);
         expect(plan.graphStamp, city.roadGraph.structureStamp);
         expect(plan.graphLot, city.roadGraph.lotNoOf(p.id));
+      }
+    });
+  });
+
+  group('a road edit on a two-chunk town (§4.2 bench levers, R2 integration)',
+      () {
+    // A generated town of 1,420 sites: two chunks, so a tick can re-publish
+    // one chunk while the other waits.
+    (CitySim, SiteAccessBook) edited() {
+      final city = const CityGenerator().generate(
+          const CityGenSpec(blocksAcross: 4, seed: 5, sprawlMiles: 4),
+          bodies: fixtureBodies);
+      final book = SiteAccessBook();
+      drain(city, book);
+      expect(book.chunks.length, 2);
+      commit(city, const FixtureRoad([Vec2(-400, 55), Vec2(400, 55)]));
+      return (city, book);
+    }
+
+    test('the tick that diffs a structure change checks nothing else', () {
+      final (city, book) = edited();
+      expect(book.sync(city, city.roadGraph), isFalse);
+      expect(book.lastSync.checks, 0);
+      expect(book.lastSync.generated, 0);
+    });
+
+    test('budgeted ticks hash at most 4096 / 8 sites, re-pack at most one '
+        'chunk whole, share the columns a re-resolution keeps, and end equal '
+        'to a fresh drain', () {
+      final (city, book) = edited();
+      final g = city.roadGraph;
+      var ticks = 0, shared = 0, done = false;
+      while (!done) {
+        final before = book.chunks.toList();
+        final copies = [for (final c in before) copyOf(c)];
+        done = book.sync(city, g);
+        final s = book.lastSync;
+        expect(
+            s.checks, lessThanOrEqualTo(SiteAccessBook.defaultChecksPerTick));
+        expect(s.resolved, lessThanOrEqualTo(4096 ~/ 8));
+        var whole = 0;
+        for (var i = 0; i < before.length; i++) {
+          final now = book.chunks[i];
+          // A published chunk is never written, whatever replaced it.
+          expect(unchanged(before[i], copies[i]), isTrue);
+          if (identical(now, before[i])) continue;
+          final keptF64 =
+              identical(now.debugRetained[0], before[i].debugRetained[0]);
+          if (keptF64) {
+            shared++;
+          } else {
+            whole++;
+          }
+        }
+        expect(whole, lessThanOrEqualTo(1),
+            reason: 'tick $ticks: ${s.toJson()}');
+        ticks++;
+        expect(ticks, lessThan(500));
+      }
+      expect(shared, greaterThan(0));
+      final fresh = SiteAccessBook();
+      drain(city, fresh);
+      expect(plansJsonOf(book), plansJsonOf(fresh));
+      for (final id in plansJsonOf(fresh).keys) {
+        expect(book.isCurrentFor(id, g), isTrue, reason: id);
       }
     });
   });

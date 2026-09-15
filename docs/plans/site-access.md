@@ -311,6 +311,13 @@ it. Limbo plans (§7.6) and cars mid-manoeuvre hold the old chunk and keep readi
   either sign.
 - `PlanBuilder` computes what no generator may get wrong: `segLenM`, stall order `(seg, s, side)` and stall keys.
   The heading octant has sectors centred on multiples of 45° from `u`, picked by comparison with tan 22.5°.
+- **R2a-frozen file touched (R2 integration repair, notice line sent):** `SiteAccessChunk.adopt(...)` is added
+  beside `SiteAccessChunk.packed`, with the same arguments. It TAKES the typed lists rather than copying them, so the
+  book can re-publish a re-resolved chunk that shares its unchanged `f64` / `f32` / `u8` / offset lists with the
+  chunk it replaces, and a whole re-pack need not copy its fresh lists twice (§4.1 as built: the copies and their GC
+  were most of the road-edit tick). Like `packed`, it is not for traffic. Nothing a reader sees changes: both
+  chunks are published and never written, and the bytes are identical (`site_access_sync_test`). No existing member
+  changed.
 
 ### 2.4 Invariants (the validator; `assert` in the builder, always in tests)
 
@@ -1244,6 +1251,15 @@ no lot is re-platted: the corridor crosses the fewest UNBUILT auto lots, and tho
    and grow first, and the site is then blocked when it is built (rule 1). §10.2 Q12 asks whether to reserve the
    corridor from the slot geometry alone instead.
 
+**Blocked sites on a generated town (R2 integration repair, a §10.2 Q12 input).** The sprawl audit pins
+`accessBlocked 65` on the 12-mile sprawl, so 65 set-back sites start with no visible access. Split by cause: **62**
+carry `kJoinCorridorBlocked` from slot placement. A hard obstacle (another manual parcel or an at-grade road) crosses
+every candidate corridor, and no ordering can help those. 51 of them are medium commercial manual sites. Only **3** (a
+station and two `c-med` sites) are blocked by rule 1: the generator zoned and grew the auto lot in front of them before
+its closing drain made that lot an easement. Draining between placing manual sites and zoning would move those 3. It
+would also change which lots the generator zones and grows, and so every generated town's buildings and the pins
+downstream of them. That is not done in R2, and the figure is reported here and in §10.1.
+
 **Starter kit result (pinned by `site_easement_test`):** easements are exactly `{lot-r0x1-l10, lot-r0x0-l0,
 lot-r0x0-r1, lot-r0x1-r5}` (spaceport, solar farm, farm, pump), and 78 of the 82 auto lots stay zonable.
 
@@ -1501,7 +1517,7 @@ deviations, each local:
   re-resolving (≤ 2 ms a tick, but plans away from the edit read kerbside to traffic for longer); (b) make the
   contract edit-local: `isCurrentFor` compares a per-site slot tuple, not the whole-graph stamp, and join handles
   become `(lotId, slot)` resolved through `RoadGraph.joinOfRef` at read time. That is an R2a contract change for the
-  Agent Traffic session. Until decided, the book does (a) at the default budget and the ≤ 2 ms figure stays missed.
+  Agent Traffic session. Until decided, the book does (a); the R2 integration repair below shapes its ticks.
   **Re-measured at the R2 merge (every generator in place):** sprawl 12 mi (30,559 plans): drain 1.66 s, steady
   tick 0.055 ms, a 1024-site re-pack 3.1 ms, a road edit settles in 14–17 ticks with a worst tick of 18–43 ms
   (the first edit's includes the JIT and an installation re-plan). Sprawl 20 mi (118,823 plans, the 127k stand-in):
@@ -1509,6 +1525,41 @@ deviations, each local:
   The graph's `structureStamp` read after an edit is 24–29 ms (12 mi) and 79 ms (20 mi). **The ≤ 2 ms road-edit
   tick stays MISSED by about 10×**; a single chunk re-pack alone is over budget, so no budget constant meets it
   without the (a)/(b) decision above.
+  **R2 integration repair: option (a) built, no R2a contract change beyond one additive constructor.** Profiling
+  the edit ticks on the 20-mile sprawl showed where the time went: re-packing (copies and the GC they cause), then
+  the checks, then one-off first-tick work. Five levers, each local to the book:
+  1. A chunk whose rows were only re-resolved or renamed is re-published by `_derive`: its `f64`, `f32`, `u8` and
+     offset lists are SHARED with the chunk it replaces (neither is ever written), and only `i32` is block-copied
+     and patched (`graphStamp`, `graphLot`, `joinRef`, `joinPiece`, `joinRoadNo`). A graph lot's re-resolution
+     is recorded as a shared marker and written straight from the graph's join columns at flush, with nothing
+     allocated per site. A whole re-pack copies rows in runs, one `setRange` per column per run of consecutive rows,
+     and adopts its fresh lists. Both need `SiteAccessChunk.adopt` (§2.3 as built).
+  2. A check that recomputes a signature costs 8 check units, and an unchanged site costs 1. A re-resolving walk
+     therefore takes about 500 sites a tick, while a built-state re-walk that finds nothing changed keeps its 4096.
+  3. A budgeted sync re-packs at most ONE chunk whole (a write or a drop); the site that would re-pack a second
+     waits for the next tick. Easement-priority sites and drains are exempt.
+  4. The budgeted sync that diffs a structure change does only the diff and the priority sites. The queue and the
+     walk start on the next tick. The road diff is one two-pointer pass that also carries each road's signature
+     over: a road inserted mid-list had cost a lookup per road, 23 ms.
+  5. The walk reads the layout's lot lists as views (restarting if a manual lot is staked without a re-cut),
+     starts at most once per sync, and the sites a finished walk did not see are swept in budgeted steps (16 sites
+     a unit), not in one 8 ms loop.
+  **Measured after the repair** (`bench/site_access_sync_bench_test.dart`, `flutter test` JIT, five edits per
+  fixture, the first also warming the JIT). Each tick is classed by whether it wrote or dropped a plan:
+
+  | Fixture | Ticks per edit | Re-resolving ticks: p50 / p90 / max | Over 2 ms | Re-planning ticks: max |
+  |---|---|---|---|---|
+  | sprawl 12 mi (30,559 plans) | 67–72 (was 14–17) | 0.64–1.12 / 0.97–2.04 / 3.9–6.1 ms (cold first edit 1.67 / 2.4 / 11.3 ms) | 5–11 % (cold first edit 29 %) | 2.1–8.3 ms (cold 18 ms) |
+  | sprawl 20 mi (118,823 plans) | 257–260 (was 50–53) | 0.76–1.15 / 0.99–1.79 / 4.0–8.8 ms | 2–7 % | 2.5–6.7 ms |
+
+  Before the repair every tick of an edit ran 12–15 ms (worst 24–36 ms). **The typical tick now meets 2 ms at the
+  127k stand-in (p90 under 1.8 ms), but the WORST tick is still MISSED:** 2–7 % of ticks run 2–9 ms. Their stats
+  match an ordinary tick (about 500 re-resolutions, one or two shared re-publishes), so these are JIT and GC
+  pauses, and the re-planning ticks add a generator run and a whole re-pack. The price of (a) is latency: after an
+  edit on the 127k town a plan away from the edit reads kerbside to traffic for about 260 ticks, not 50 (legal,
+  §4.2 step 3). Option (b) stays open for §10.1. The `structureStamp` hash (79 ms at 20 mi) is left out of the
+  tick figures, as before: it is the graph rebuild's cost (the rebuild itself is 5–10 s there), paid by its first
+  reader.
   **Built-state latency (recorded, also for §10.1):** the built-state trigger (placed, grown, tier, removal) does not
   queue the site that changed; it re-walks the colony after the walk in flight, at 4096 checks a tick. On the 127k
   town a newly placed or grown building can therefore wait about 31 ticks (a fresh walk) to about 62 ticks (one in
@@ -1518,7 +1569,8 @@ deviations, each local:
   the `CitySim` hooks ahead of the walk, as the dirty box is.
 - **Chunks** are re-packed from published rows (`SiteChunkLayout` + `SiteAccessChunk.packed`, the R2a builder's
   own packing entry points; `site_access_sync_test` pins the re-pack byte-equal to `PlanBuilder.build`), so a
-  copy-on-write never regenerates a neighbour. An anchor the grid reports twice is walked once.
+  copy-on-write never regenerates a neighbour. (R2 integration repair: in runs, into lists `SiteAccessChunk.adopt`
+  takes; a chunk only re-resolved or renamed shares every column but `i32` with its predecessor, §4.1 below.) An anchor the grid reports twice is walked once.
 - **`onLotsRenamed`** is order-independent (every new id is taken from the ids before the call) rather than "sorted
   old-id order": the book may not iterate the map (hygiene), and the result is the same. It re-keys the easement
   LOTS as well as the sites, so a renamed crossed lot answers `easementOf(newId)` at once, not after the next sync
@@ -1585,6 +1637,11 @@ before generating. Placing 500 zoned houses completes in 8 ticks. Separately, `k
 checks per tick bound the signature walk (§4.2). The easement-priority sites (§3.7a rule 3) are checked outside the
 check budget, and their count is pinned by the sprawl audit. The benches confirm a worst tick ≤ 3 ms in steady
 play and ≤ 2 ms for the sync of a road edit on the 127k town.
+
+**As built (R2 integration repair, §4.1):** a check that recomputes a signature costs 8 of the 4096 check units and
+an unchanged site costs 1. A budgeted sync re-packs at most one chunk whole. The sync that diffs a structure change
+does only that and the priority sites. The post-walk sweep costs one unit per 16 sites. A sync with either budget
+unlimited is a drain and is not shaped. The worst-tick figure for a road edit is still missed (§4.1).
 
 ### 4.4 Save and load
 
@@ -2548,9 +2605,10 @@ class DepthProfile { double depthAt(double x); bool containsRect(Rect r); double
 | R4 turns frontage-less manual sites and grid-cell buildings to face their access road (saved and generated sites) | one heading rule (§3.1) so envelope, gate and door can never disagree with the massing; `envelope_axes_test`; behind the knob until screenshots are reviewed; §10.2 Q10 |
 | Easements cost the player zonable lots (4 of 82 in the starter kit) | fewest-lots corridor, centred; inspector explains why; §10.2 Q12 |
 | An auto lot zoned and grown in front of an unbuilt set-back site blocks that site's access later | built crossed lots make the plan `kPlanAccessBlocked` (visible in the inspector); §10.2 Q12 offers reserving corridors from geometry alone |
-| The 127k-town drain exceeds 3 s once the real program mix is measured | budget is Σ count × unit cost, printed by the bench in R2; if it exceeds 3 s the added load time is reported to the user before R2 merges. **Happened (R2 merge, §3.10):** on the 118,824-site 20-mile sprawl the Σ is 3.33 s and the measured drain 5.0 s; the road-edit tick is 12–36 ms against 2 ms (§4.1) and homes pack 694 B against 512 B |
+| The 127k-town drain exceeds 3 s once the real program mix is measured | budget is Σ count × unit cost, printed by the bench in R2; if it exceeds 3 s the added load time is reported to the user before R2 merges. **Happened (R2 merge, §3.10):** on the 118,824-site 20-mile sprawl the Σ is 3.33 s and the measured drain 5.0 s; the road-edit tick is 12–36 ms against 2 ms (§4.1) and homes pack 694 B against 512 B. **For the user at the R2 merge (all still MISSED, reported, not re-budgeted):** drain 5.0–5.5 s against 3 s (Σ at unit budgets 3.33 s); unit costs per written plan `kerbOnly` 19.9 µs (5), home 21.5 µs (12), car park 125.8 µs (60), yard 124.3 µs (60); 694 B per home site (512 B). The road-edit tick after the integration repair is below |
+| An auto lot zoned and grown in front of a set-back site by the generator, before its closing drain | on the 12-mile sprawl 65 sites start `accessBlocked`, but only 3 because of that order: 62 are corridor-blocked by manual parcels or at-grade roads (§3.7a); a mid-generation drain would move 3 and change every generated town's buildings, so it waits for §10.2 Q12 |
 | A road edit leaves plans stale for a few ticks | dirty-box diff, 4096 checks per tick; stale plans read as kerbside to traffic and keep drawing (§4.2) |
-| A road edit makes EVERY plan not current (`isCurrentFor` compares the whole-graph `structureStamp`; join refs index the rebuilt graph), contradicting §4.2 step 1 "lots outside the box are not touched"; the ≤ 2 ms road-edit tick is missed at ~10–17 ms (§4.1 as built) | **user decision needed:** (a) keep town-wide re-resolution, spread under a lower check budget (plans away from the edit read kerbside longer), or (b) an edit-local contract (per-site slot tuple for currency, `(lotId, slot)` join handles resolved at read), an R2a contract change for the Agent Traffic session |
+| A road edit makes EVERY plan not current (`isCurrentFor` compares the whole-graph `structureStamp`; join refs index the rebuilt graph), contradicting §4.2 step 1 "lots outside the box are not touched"; the ≤ 2 ms road-edit tick was missed at ~10–17 ms (§4.1 as built) | **(a) built at the R2 integration repair** (§4.1): shared-column re-publishes, signature checks at 8 units, one whole re-pack a tick, the diff tick split off, a budgeted sweep. On the 20-mile sprawl a re-resolving tick is now p50 0.8–1.2 ms and p90 1.0–1.8 ms, but 2–7 % of ticks still reach 2–9 ms (JIT and GC pauses; re-plan ticks add a generator run), so the worst-tick budget is still missed. The price is latency: plans away from an edit read kerbside for ~260 ticks, not ~50. **User decision still open:** accept (a) as built, or (b) an edit-local contract (per-site slot tuple for currency, `(lotId, slot)` join handles resolved at read), an R2a contract change for the Agent Traffic session |
 | Lot access moves for most lots (narrow-lot drive side) and shifts routed-model pictures | R1 alone, re-pins ledgered, economy tests as the gate; mid-block wide lots move only by the quantum |
 | Conservative windows cost small corner lots their driveway on short blocks | sprawl audit pins `kJoinLegacy` and program counts; starter kit required at 100% for its four sites; an exact bound from traffic can replace the reserve later |
 | Generated towns look different (front car parks push shops back; houses narrow beside drives) | F2 bias for W < 40 keeps street walls; homes fall back to kerb parking; screenshots before R7 |
@@ -2667,4 +2725,5 @@ reason, commit.
 | R2 merge | site_plan_generator_test.dart ("the built town grows home driveways", blocked sites) | `> 0` | `0` on `town()`, plus a new old-save case (a crossed lot built around the refusal) that blocks exactly `lot-m0` | the founded kit's book makes the four §3.7a lots easements before `town()` zones, so none is built; the stub installation made none | R2 merge |
 | R2 merge | site_easement_refusal_test.dart (growth skip, built crossed lot, corridor refusal) | red once merged | green | the tests assumed the stub installation (no real easement or corridor on the founded kit); each now unhooks or fakes the real book where it stages "before" | R2 merge |
 | R2 merge | traffic_fixture `town()` (no pin) | 82 built lots | 78 built lots | the four easement lots refuse zoning; no traffic test pin moved (full suite green) | R2 merge |
+| R2 integration repair | site_access_persistence_test.dart ("200 curved-road lots", home fit flips) | `['lot-r2-r21']` | `isEmpty` | the §3.4 house containment is now tested inset by `kContainsInsetM`, so the load's millimetre re-sample no longer flips that lot (§4.4); the sprawl audit's demotions did not move | R2 integration repair |
 | R1 | test/traffic/live_rebuild_test.dart (traffic-owned) | green | red, then green | cars stood inside the new crossing's stop line at the edit (moved 5.2 m) and trips ended on slots at 151.5 m, 1.5 m past the new street. A real traffic bug R1 exposed (RouteRemapper clamped into the lane, dragging cars onto the car behind). MERGE GATE CLEARED: fixed on the traffic side (cars in a new junction box carried onto their connector, an appended leg when a destination's access moved, a no-overlap guard, a stop at a lane's start counted 1 m in from a connector), merged with R1 in one window; no skip. The test's drive-on window grew 900 s → 1800 s: the new test street re-hangs hand-drawn lot-m0/lot-m3 onto other roads (their effective frontage, §3.1), so their trips detour | 14a7bef, 6f1784f, merge a309f85 |

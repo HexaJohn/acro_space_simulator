@@ -66,6 +66,8 @@ void main() {
           (1, 55.0),
           (2, -545.0),
           (3, 655.0),
+          (4, -245.0),
+          (5, 355.0),
         ].indexed) {
           final oldG = g;
           final roadStart = Stopwatch()..start();
@@ -91,12 +93,17 @@ void main() {
           stampSw.stop();
           var worst = 0.0, first = 0.0, ticks = 0, done = false;
           var worstStats = '';
+          // Tick times by kind: a tick that re-packed a chunk whole (it wrote
+          // or dropped a plan) or only re-resolved / checked.
+          final replan = <double>[], resolve = <double>[];
           final all = Stopwatch()..start();
-          while (!done && ticks < 1000) {
+          while (!done && ticks < 5000) {
             final t = Stopwatch()..start();
             done = book.sync(city, g);
             t.stop();
             final ms = t.elapsedMicroseconds / 1000;
+            final s = book.lastSync;
+            (s.generated + s.dropped > 0 ? replan : resolve).add(ms);
             if (ticks == 0) first = ms;
             if (ms > worst) {
               worst = ms;
@@ -105,6 +112,14 @@ void main() {
             ticks++;
           }
           all.stop();
+          String dist(List<double> xs) {
+            if (xs.isEmpty) return 'none';
+            final s = [...xs]..sort();
+            double p(double q) => s[((s.length - 1) * q).round()];
+            final over = s.where((x) => x > 2).length;
+            return '${s.length} ticks, p50 ${f(p(0.5), 3)} p90 ${f(p(0.9), 3)} '
+                'p99 ${f(p(0.99), 3)} max ${f(s.last, 3)} ms, $over over 2 ms';
+          }
           report(
             '  road edit $i (commit + graph '
             '${f(roadStart.elapsedMicroseconds / 1000)} ms; stamp '
@@ -115,6 +130,8 @@ void main() {
             '${f(first, 3)} ms, worst tick ${f(worst, 3)} ms (budget 2 ms) '
             '$worstStats',
           );
+          report('    re-resolving ticks: ${dist(resolve)}');
+          report('    re-planning ticks: ${dist(replan)}');
         }
       }
     },
