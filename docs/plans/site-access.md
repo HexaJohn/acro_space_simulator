@@ -461,7 +461,9 @@ reported under one name.
   line until its whole width is inside the lot (`h·|d·u|/(d·v)`), so a drive off a skewed kerb is never read as
   outside. A kerb ON (or behind) the frontage line has no leg of its own, so it gets that run-on alone, from the kerb
   along the slot normal (repair: at `k = 0` on a lot skewed ≥ 12° the throat's kerb corners read as outside; pinned by
-  `site_paving_check_test`). Pave rings are sampled (vertices, edges every 0.25 m, inside every 1 m; 5 cm tolerance). Clearance: no used
+  `site_paving_check_test`). Past the frontage line (frame `y > 0`) every corridor leg, the run-on included, counts only
+  between the lot's side lines `0 ≤ x ≤ W` (repair: at 60° skew the run-on reached ~7.8 m past the frontage line and
+  read pave across a side line near the frontage corner as inside the corridor; pinned at `k = 0` and `k = 6`). Pave rings are sampled (vertices, edges every 0.25 m, inside every 1 m; 5 cm tolerance). Clearance: no used
   slot is `kJoinCorridorBlocked`, no crossed lot is built, and, only for a set-back corridor (longer than 3.5 m) or a
   dogleg — the corridors R1 searched — no other at-grade road's carriageway + pavement (the join road's beyond 12 m of
   arc) comes within it (a plat lot's 3 m kerb crossing beside another street's dead end is the plat's; the small
@@ -1042,7 +1044,9 @@ car park with at least 12 stalls on its connector, and a gate on the fence line 
   bound, not a §3.7 number). The throat's vias sit every 24 m from `K` (24 and 48 m on a 56 m throat); every other
   access-road, connector and aisle segment gets vias the same way (V8).
 - Step 2: the dogleg is R1's corridor polyline exactly. One whose bend `T` does not lie in front of the frontage line
-  (`T.y > −1`) gets no plan.
+  (`T.y > −1`) gets no plan. The dogleg trusts R1's corridor search (step 11) for its legs' road clearance and does
+  not re-test it: a `kJoinOffFrontage` slot R1 did not search (a fabricated one) can yield a plan
+  `sitePavingViolations` rejects.
 - Step 6: the staff car park is this file's own F3-form packer, not a call into `car_park_packer.dart` (another track's
   file, whose F3 starts from a throat, not a connector). Aisles run along `y` at `x_G ± (18 + 16.4 i)`; aisle 0 carries
   only its far row; the aisle end nodes lie 3 m inside the block pave (`y = 3.3` on the band's front), `C` splits aisle 0
@@ -1137,8 +1141,9 @@ no lot is re-platted: the corridor crosses the fewest UNBUILT auto lots, and tho
 lot-r0x0-r1, lot-r0x1-r5}` (spaceport, solar farm, farm, pump), and 78 of the 82 auto lots stay zonable.
 
 **As built (R2, `site_easement.dart` `easementOf`, the pure half):** the union of the crossed lots of the plan's CUT
-joins' graph slots (`joinOfRef`), ascending and once; none for a kerbside plan, for a plan any of whose crossed lots
-is built, and for a plan whose `graphStamp` is not the graph's `structureStamp` (its handles name another structure's
+joins' graph slots (`joinOfRef`), ascending and once, taken per slot: a slot any of whose crossed lots is built
+contributes nothing and the plan's other slots keep theirs (row 0c blocks a site on slot 0 itself); none for a
+kerbside plan, and for a plan whose `graphStamp` is not the graph's `structureStamp` (its handles name another structure's
 joins; the book re-resolves it). A footprint join (`joinRef` −1) names no graph join and carries no easement.
 
 ### 3.8 Odd polygons

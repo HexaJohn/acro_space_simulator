@@ -14,7 +14,10 @@
 /// either side, no end caps. As built, its last leg runs on past the frontage
 /// line until its whole width is inside the lot (`h·|d·u|/(d·v)` further), so a
 /// drive leaving a skewed kerb is inside the corridor or the parcel at every
-/// point ("restricted to the stretch outside the lot's own polygon").
+/// point ("restricted to the stretch outside the lot's own polygon"). Past the
+/// frontage line (frame `y > 0`) every leg, the run-on included, is clipped to
+/// the lot's side lines (`0 ≤ x ≤ W`): pave past a side line near the
+/// frontage corner is still reported.
 ///
 /// Paving: each ring is sampled (its vertices, its edges every 0.25 m, its
 /// inside on a 1 m grid); a sample inside the parcel polygon or a corridor leg
@@ -63,20 +66,33 @@ const double _kPavementM = 3.0;
 
 /// One straight corridor leg, world metres.
 class _Leg {
-  _Leg(this.a, this.b)
+  _Leg(this.a, this.b, {this.sides})
       : len = a.distanceTo(b),
         t = (b - a).normalized;
   final Vec2 a, b;
   final double len;
   final Vec2 t;
 
+  /// The site frame the corridor is clipped by: past the frontage line
+  /// (`y > 0`) a sample counts only between the lot's side lines `x = 0` and
+  /// `x = W` (the corridor is the stretch outside the lot; pave past a side
+  /// line near the frontage corner is in a neighbour, not the corridor).
+  final SiteFrame? sides;
+
   bool contains(Vec2 p) {
     final d = p - a;
     final along = d.dot(t);
     final lat = d.dot(t.perp).abs();
-    return along >= -_kTolM &&
-        along <= len + _kTolM &&
-        lat <= kAccessCorridorHalfM + _kTolM;
+    if (along < -_kTolM ||
+        along > len + _kTolM ||
+        lat > kAccessCorridorHalfM + _kTolM) {
+      return false;
+    }
+    final f = sides;
+    if (f == null) return true;
+    final l = f.toLocal(p);
+    if (l.n <= _kTolM) return true;
+    return l.e >= -_kTolM && l.e <= f.widthM + _kTolM;
   }
 }
 
@@ -113,16 +129,21 @@ List<String> sitePavingViolations(SiteContext ctx, SiteAccessPlan plan) {
       final ext = dv > 1e-6
           ? kAccessCorridorHalfM * nrm.dot(frame.u).abs() / dv
           : 0.0;
-      if (ext > 1e-6) legs.add(_Leg(line[0], line[0] + nrm * ext));
+      if (ext > 1e-6) {
+        legs.add(_Leg(line[0], line[0] + nrm * ext, sides: frame));
+      }
     } else {
       final last = own.last;
       final dv = last.t.dot(frame.v);
       final ext = dv > 1e-6
           ? kAccessCorridorHalfM * last.t.dot(frame.u).abs() / dv
           : 0.0;
-      legs
-        ..addAll(own.take(own.length - 1))
-        ..add(_Leg(last.a, last.b + last.t * ext));
+      for (final l in own) {
+        legs.add(_Leg(l.a, l.b, sides: frame));
+      }
+      if (ext > 1e-6) {
+        legs.add(_Leg(last.b, last.b + last.t * ext, sides: frame));
+      }
     }
     _clearance(ctx, slot, j, own, out, id);
   }
