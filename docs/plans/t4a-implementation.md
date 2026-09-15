@@ -4,12 +4,24 @@ Working plan for traffic slice T4a (agent-traffic.md "Slice T4a", including the 
 
 ## 0. Settled with the road side (overrides anything below)
 
-- **Kerb masks (Q1):** no interim adapter and no local copy of the formula. `KerbMask` stays an interface; its only implementation wraps the road side's `KerbCuts.parkingBlocked(entries, side, s_i)`, which lands right after R3. Until then, D's kerb slots are masked by a test double, and A12 waits.
+- **Kerb masks (Q1):** no local copy of the formula. `KerbMask`'s only real implementation wraps the road side's `KerbCuts`. **Landed at cfdc998** in `lib/domain/colony/city/site_access/kerb_cuts.dart`:
+  - `KerbCuts.blocked(Float64List? entries, int side, double s, {required double upstreamM, required double downstreamM, bool drawnOnly = false})` — true when some entry on that kerb holds `−(h + upstreamM) < σ·(s − c) < h + downstreamM`, bounds open;
+  - `KerbCuts.parkingBlocked(entries, side, s)` — kinds 1 and 2 at (12, 3), kind 0 at 3.25 both ways. This is A12's function for both halves;
+  - `KerbCuts.shiftOut(entries, side, s)`;
+  - `toDrawn(canonical, indexLengthM:, drawnLengthM:, reversed:)`. **Entries and the arc must be in the same frame**: traffic works in the canonical arc, the renderer in the drawn one.
 - **Wire ordinal (Q4):** `siteOrd` is the book's `slotOf(siteId)`. E36 stage 1 publishes `CityAgents.agentManaged` (a `Uint8List` by slot) and `agentManagedRev`.
 - **Stale plans (Q5):** a not-current plan reads kerbside for new arrivals only. Cars already inside, and cars parked there, keep the old immutable chunk.
 - **Heights (A14):** from R3's `SiteChunkGeometry.ptUp` and `stallUp`, by reference.
 - **Home back-out and A9** are in T4a.
 - **Commits:** each agent commits its own paths with `git commit -- <paths>`. No `git add -A`.
+- **R3 landed (906e6ff, 34ce6f4; dev at cfdc998), so package F is unblocked.** What F builds on:
+  - `WorldSnapshot.sites: List<CitySiteFrame>` — in an agent colony, share that object as `CityTrafficFrame.sites`. It is cached per colony and rebuilt only when chunk identity, the ground and drape stamps or the kerb-cut hash move.
+  - `CitySiteFrame`: colonyId, bodyId, sitesRev, geometryStamp, datumRadiusM, up/east/north, `localToBodyFixed(e, n, up)`, chunks, siteCount, `locate(slot)`, subset.
+  - `SiteChunkGeometry`: the book's chunk by reference, `ptUp(row)`, stall pave heights, `siteKey(k)`, `siteSlot(k)`. A point is `up·(datumRadiusM + ptUp) + east·e + north·n`, the `traffic_capture` convention. A14's ±1 cm is pinned road-side in `site_capture_test`.
+  - `BuildingSnapshot.siteSlot` (−1 = legacy), `gateXM`, `gateWM`. `RoadSnapshot.kerbCuts`: quintuples (side, c, h, σ, kind), stride 5, in the DRAWN frame.
+  - `SiteAccessBook.rowOfSlot(slot)`, `graph`, `repack(rows)`.
+  - `CityNodes.siteAccess` is the renderer knob, default off; with it off, every mesh digest is unchanged.
+  - **Still to come from them:** the `agentManaged` column. Publish `CityAgents.agentManaged` plus `agentManagedRev` in P3 and tell them; they add the column and the R6 skip. Nothing in T4a blocks on it.
 
 ## Code facts at the start
 
