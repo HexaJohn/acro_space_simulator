@@ -25,7 +25,8 @@
 ///   against the new graph by the resumable walk.
 /// - **Checks.** A site whose lot, building and graph stamp are unchanged
 ///   costs two identity compares. Otherwise its input signature (§3.9: the
-///   polygon at 1 cm, frontage, graded, spec, and every slot's road id, arc,
+///   polygon at 1 cm, frontage, graded, spec, and every slot's road id,
+///   class and decoration, arc,
 ///   side, directions, room, flags, kerb point bits and crossed lots with
 ///   their built bits) is recomputed: unchanged, the plan is re-resolved in
 ///   place (join handles, pieces, `graphStamp`; `rev` kept); changed, the
@@ -250,8 +251,20 @@ class SiteAccessBook {
   RoadGraph? _g;
   bool Function(int lot)? _builtFn;
 
-  /// `fnv1a32` of each road id of the graph last stamped.
+  /// [_roadSig] of each road of the graph last stamped.
   Int32List _roadHash = Int32List(0);
+
+  /// A road's part of every slot signature on it (§3.9): its id, and what
+  /// the dispatch reads of it beyond the slot columns: the class (the seed,
+  /// back-out rule 1, `crossesPavement`) and the decoration (`RoadType.of`'s
+  /// speed and `RoadSpline.lanes`' median, rule 1). A decoration upgrade
+  /// moves no kerb point, so without these a live book would keep a home
+  /// drive on what is now a divided avenue while a load re-derives kerb
+  /// parking. Both are in `structureStamp`, so a change always re-hashes.
+  /// (Sound walls are not: they stand only on classes rule 1 already
+  /// refuses.)
+  static int _roadSig(RoadSpline road) =>
+      _w(_w(fnv1a32(road.id), road.roadClass.index), road.decoration.index);
   int _maxUnits = 0;
   PlanBuilder? _builder;
   final List<SiteAccessChunk> _builtChunks = [];
@@ -422,7 +435,7 @@ class SiteAccessBook {
                 r < _roadHash.length &&
                 identical(old.roads[r], g.roads[r])
             ? _roadHash[r]
-            : fnv1a32(g.roads[r].id);
+            : _roadSig(g.roads[r]);
       }
       _roadHash = hashes;
       _stamp = stamp;
@@ -506,7 +519,7 @@ class SiteAccessBook {
     final use = city.layout.useRevision,
         placed = city.parcelBuildings.length,
         grownLots = city.grownParcels.length,
-        tier = city.parcelTierRevision,
+        tier = city.siteBuiltRevision,
         utils = city.utils.length,
         gridGrown = city.grown.length,
         zones = city.zones.length,
@@ -893,7 +906,8 @@ class SiteAccessBook {
     return _w(h, fnv1a32(spec.group));
   }
 
-  /// One slot's part of the §3.9 input signature: its road's id, arc, side,
+  /// One slot's part of the §3.9 input signature: its road ([_roadSig]: id,
+  /// class, decoration), arc, side,
   /// directions, room, flags, the kerb point and normal by their bits, and
   /// the crossed lots with their built bits.
   int _slotHash(int h, RoadGraph g, int piece, double s, bool right, int dirs,

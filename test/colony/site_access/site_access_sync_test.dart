@@ -217,6 +217,86 @@ void main() {
     });
   });
 
+  group('a live book agrees with a fresh drain', () {
+    test('after a decoration upgrade of a house avenue (back-out rule 1)', () {
+      final city = town();
+      final lots = houseStreet(
+          city, const [Vec2(1500, -300), Vec2(1500, 300)],
+          roadClass: RoadClass.avenue);
+      expect(lots.length, greaterThan(8));
+      final book = city.siteAccess;
+      drain(city, book);
+      int homes(SiteAccessBook b) => [
+            for (final p in lots)
+              if (b.planOf(p.id)?.program == SiteProgram.homeDriveway) p,
+          ].length;
+      // An undivided avenue at 50 km/h takes home drives...
+      expect(homes(book), greaterThan(0));
+      upgrade(city, city.layout.parcelById(lots.first.id)!.roadId!,
+          'four-lane-grass');
+      drain(city, book);
+      final fresh = SiteAccessBook();
+      drain(city, fresh);
+      // ...a planted median refuses them (§3.3 rule 1), live and fresh alike.
+      expect(homes(fresh), 0);
+      expect(plansJsonOf(book), plansJsonOf(fresh));
+      for (final id in plansJsonOf(fresh).keys) {
+        expect(book.isCurrentFor(id, city.roadGraph), isTrue, reason: id);
+      }
+    });
+
+    test('after a burnout and a growth start in the same tick (§4.2)', () {
+      final city = town(grown: true);
+      final book = city.siteAccess;
+      // A zoned lot with nothing grown on it yet.
+      final bare = freeLots(city)
+          .firstWhere((p) => city.grownParcels.containsKey(p.id));
+      city.grownParcels.remove(bare.id);
+      drain(city, book);
+      final victim = idsOf(book).firstWhere((id) =>
+          city.grownParcels.containsKey(id) &&
+          book.planOf(id)!.program == SiteProgram.homeDriveway);
+      // One building starts growing; another burns out: every count the
+      // cheap key reads is as it was.
+      final placed = city.parcelBuildings.length,
+          grownLots = city.grownParcels.length;
+      city.grownParcels[bare.id] = 0.01;
+      city.lotFires[victim] = 5.0;
+      city.advanceParcelFires(1.0);
+      expect(city.grownParcels.containsKey(victim), isFalse);
+      expect(
+          (city.parcelBuildings.length, city.grownParcels.length),
+          (placed, grownLots));
+      drain(city, book);
+      expect(book.planOf(victim), isNull);
+      final fresh = SiteAccessBook();
+      drain(city, fresh);
+      expect(plansJsonOf(book), plansJsonOf(fresh));
+    });
+
+    test('every building removal without a layout bump moves the built key',
+        () {
+      final city = town(grown: true);
+      final lots = idsOf(city.siteAccess);
+      var rev = city.siteBuiltRevision;
+      void moved(String what) {
+        expect(city.siteBuiltRevision, greaterThan(rev), reason: what);
+        rev = city.siteBuiltRevision;
+      }
+
+      city.lotFires[lots[0]] = 5.0;
+      city.advanceParcelFires(1.0);
+      moved('burned out');
+      city.clearParcel(lots[1]);
+      moved('cleared');
+      final cell = city.hubKey + 1;
+      city.flattenAt(cell);
+      moved('flattened');
+      city.clearCell(cell);
+      moved('bulldozed');
+    });
+  });
+
   group('chunks', () {
     test('are copy-on-write: only the changed site\'s chunk is republished',
         () {

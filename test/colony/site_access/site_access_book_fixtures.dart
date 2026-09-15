@@ -7,9 +7,12 @@
 /// §4): chunk byte compares, plan fingerprints and a far street of houses.
 library;
 
+import 'dart:convert';
+
 import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
+import 'package:acro_space_simulator/domain/colony/city/road_catalog.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_access_book.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_access_plan.dart';
 
@@ -71,6 +74,26 @@ Map<String, String> plansOf(SiteAccessBook book) => {
           c.siteId(k): '${c.program(k).name} ${c.rev(k)} ${keysOf(c.plan(k))}',
     };
 
+/// Every plan of [book] by site id, as the dev hook dumps it
+/// ([sitePlanJson], encoded): slot and row order play no part.
+Map<String, String> plansJsonOf(SiteAccessBook book) => {
+      for (final c in book.chunks)
+        for (var k = 0; k < c.siteCount; k++)
+          c.siteId(k): jsonEncode(sitePlanJson(c.plan(k))),
+    };
+
+/// The road type [id] of the menu.
+RoadType roadType(String id) => kRoadCatalog.firstWhere((t) => t.id == id);
+
+/// Upgrades [roadId] to the menu's [typeId], failing the test on a refusal.
+void upgrade(CitySim city, String roadId, String typeId) {
+  city
+    ..funds = 1e12
+    ..ignoreUnlocks = true;
+  final q = city.upgradeRoad(roadId, roadType(typeId));
+  if (!q.ok) throw StateError('upgrade of $roadId refused: ${q.reason}');
+}
+
 /// A plan's program and stall keys, without its `rev`.
 String programAndKeys(SiteAccessPlan p) => '${p.program.name} ${keysOf(p)}';
 
@@ -82,12 +105,13 @@ List<String> idsOf(SiteAccessBook book) => [
       for (final c in book.chunks) ...c.siteIds,
     ];
 
-/// Commits a street through [controls] and puts a house on every lot it
-/// platted — placed, or with [grown] zoned and grown (what a save keeps: it
-/// restores only catalogue buildings as placed ones); returns those lots.
+/// Commits a [roadClass] road through [controls] and puts a house on every
+/// lot it platted — placed, or with [grown] zoned and grown (what a save
+/// keeps: it restores only catalogue buildings as placed ones); returns those
+/// lots.
 List<Parcel> houseStreet(CitySim city, List<Vec2> controls,
-    {bool grown = false}) {
-  final road = commit(city, FixtureRoad(controls));
+    {bool grown = false, RoadClass roadClass = RoadClass.street}) {
+  final road = commit(city, FixtureRoad(controls, roadClass: roadClass));
   final lots = [
     for (final p in city.layout.autoParcels)
       if (p.roadId == road && !city.parcelBuildings.containsKey(p.id)) p,

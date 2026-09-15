@@ -1121,7 +1121,9 @@ lot-r0x0-r1, lot-r0x1-r5}` (spaceport, solar farm, farm, pump), and 78 of the 82
 - **Input signature** per site, `inSig = fnv1a32` over:
   - a program-version constant;
   - the polygon (1 cm), the frontage used, `graded`;
-  - every slot of the lot (piece's road id, `s`, right, room, flags, and the crossed lots' ids);
+  - every slot of the lot (piece's road id, `s`, right, room, flags, and the crossed lots' ids); **as built (R2
+    book repair):** the road's class and decoration too, which the seed and back-out rule 1 read and a decoration
+    upgrade changes without moving a slot;
   - the BUILT bit of each crossed lot, in `joinCrossLot` order (§3.7a: the one cross-site input);
   - the spec (`type`, `housing`, `jobs`, `siteWidthM`, `siteDepthM`, `siteKind`, group);
   - whether an alley candidate exists.
@@ -1244,8 +1246,11 @@ deviations, each local:
   end of `found`). No separate hook sits in `fromJson` or the generator.
 - **Checks.** A site whose `Parcel`, spec and graph stamp are unchanged (identity, or equal values after a re-cut)
   costs nothing. Otherwise the §3.9 signature is recomputed: the lot half (polygon at 1 cm, frontage, side-street
-  edge, graded, spec) and the slot half, read straight off the graph's join columns (road id, `s`, side, dirs, room,
-  flags, the kerb point and normal by their bits so V3 stays exact, the crossed lots and their built bits). Equal,
+  edge, graded, spec) and the slot half, read straight off the graph's join columns (the road's id, class and
+  decoration, `s`, side, dirs, room, flags, the kerb point and normal by their bits so V3 stays exact, the crossed
+  lots and their built bits). The class and decoration are there because the seed and back-out rule 1 read them and
+  a decoration upgrade moves no slot: hashed by id alone, a live book kept home drives on a newly divided avenue that
+  a load re-derives as `kerbOnly` (`site_access_sync_test`, live against fresh). Equal,
   the plan is **re-resolved in place** (`graphStamp`, `graphLot`, `joinRef`, `joinPiece`, `joinRoadNo`; `rev`
   kept, `sitesRev` not moved); different, the site re-plans. Sites whose slot crosses lots are always re-hashed
   (their built bits). The signature is change detection only, never persisted: it hashes word by word, not byte by
@@ -1256,8 +1261,11 @@ deviations, each local:
   lots it re-cut; inflated by `dirtyReachM` = `max(manualReachM + widest half width, 120 m)`), and restarts the
   resumable walk, which re-resolves every other site: until the walk reaches it, a site outside the box is not stale
   but is not current either (its stamp). A `layout.version` change restarts the walk; a change of the cheap built
-  key (placed, grown, grid counts, `CityLayout.useRevision`, `CitySim.parcelTierRevision`, both new counters)
-  re-walks after the walk in flight. A finished walk drops every site it did not see.
+  key (placed, grown, grid counts, `CityLayout.useRevision`, `CitySim.siteBuiltRevision`, both new counters)
+  re-walks after the walk in flight. A finished walk drops every site it did not see. `siteBuiltRevision` moves on
+  every tier crossing and on every building removal that bumps no `layout.version` (burned out, cleared, flattened,
+  bulldozed, a zoneless grown cell dropped, a lost lot dropped, a cell abandoned or reoccupied, a grid re-key): the
+  counts alone missed a burnout cancelled by a growth start in the same tick.
 - **Measured (`bench/site_access_sync_bench_test.dart`, `flutter test` JIT, sprawl fixture, 30,559 plans, generator
   stubs):** drain 1.08–1.35 s; steady tick 0.06 ms; one 1024-site chunk re-pack 1.3–2.0 ms; after a road edit
   (warm) 14–15 budgeted ticks, a first tick of 12.7–17.6 ms and ~10 ms a tick on average (4096 checks, ~2,100
@@ -1265,6 +1273,16 @@ deviations, each local:
   run at ~2.5 µs each and every re-resolved chunk is re-packed. The graph's own `structureStamp` read after the edit
   costs 23–41 ms more (core's, once per structure change). Levers: fewer checks per tick while only re-resolving,
   re-packing a chunk by typed `setRange` runs, and a stamp hashed incrementally.
+  **Design contradiction behind the miss (recorded, for the user, §10.1):** §4.2 step 1 says lots outside the dirty
+  box "are not touched", but the contract says otherwise. `isCurrentFor` is `graphStamp == g.structureStamp`, and
+  `joinRef` / `joinPiece` / `joinRoadNo` / `graphLot` index the rebuilt graph's columns. So after ANY road edit
+  every plan in the town is out of date until it is re-resolved and its chunk re-packed, wherever the edit was. On
+  the 127k town that walk is ~127k checks at 4096 per tick: about 31 ticks at ~10 ms each. The
+  choice is the user's: (a) accept a town-wide re-resolution spread over ticks, at a lower check budget while only
+  re-resolving (≤ 2 ms a tick, but plans away from the edit read kerbside to traffic for longer); (b) make the
+  contract edit-local: `isCurrentFor` compares a per-site slot tuple, not the whole-graph stamp, and join handles
+  become `(lotId, slot)` resolved through `RoadGraph.joinOfRef` at read time. That is an R2a contract change for the
+  Agent Traffic session. Until decided, the book does (a) at the default budget and the ≤ 2 ms figure stays missed.
 - **Chunks** are re-packed from published rows (`SiteChunkLayout` + `SiteAccessChunk.packed`, the R2a builder's
   own packing entry points; `site_access_sync_test` pins the re-pack byte-equal to `PlanBuilder.build`), so a
   copy-on-write never regenerates a neighbour. An anchor the grid reports twice is walked once.
@@ -1355,7 +1373,14 @@ play and ≤ 2 ms for the sync of a road edit on the 127k town.
   `kerbOnly` (demotion `homeGeometry`) → `homeDriveway` over a load: the home generator's §3.4 fit decides
   differently on the millimetre re-sample (W 23.28716 → 23.28792 m, D 31.96215 → 31.96174 m, slot 0 unchanged at
   s = 535.5). Every other lot keeps its program and stall keys. The test pins exactly that one flip, so a fix or a
-  second flip is seen at once; the fix is core's (`home_driveway.dart`).
+  second flip is seen at once; the fix is core's (`home_driveway.dart`, for example quantising `W` and `D` before
+  the fit). **Until core fixes it, this section's acceptance ("any key or program change fails the test") is NOT
+  met: the flip is an open item for the R2 merge,** at which the pin becomes `isEmpty`.
+- **Live against loaded (R2 book repair).** Every other case compares two fresh drains. `site_access_persistence_test`
+  also syncs `city.siteAccess` in budgeted ticks through a grown house avenue, a road edit that renames lots, a
+  decoration upgrade, a tier change and a burnout, then compares every plan per site id (`sitePlanJson`, programs,
+  `rev` and stall keys) against `drained(roundTrip(city))`. That is the comparison that catches a live book
+  diverging from what a load re-derives.
 
 ---
 
@@ -2279,6 +2304,7 @@ class DepthProfile { double depthAt(double x); bool containsRect(Rect r); double
 | An auto lot zoned and grown in front of an unbuilt set-back site blocks that site's access later | built crossed lots make the plan `kPlanAccessBlocked` (visible in the inspector); §10.2 Q12 offers reserving corridors from geometry alone |
 | The 127k-town drain exceeds 3 s once the real program mix is measured | budget is Σ count × unit cost, printed by the bench in R2; if it exceeds 3 s the added load time is reported to the user before R2 merges |
 | A road edit leaves plans stale for a few ticks | dirty-box diff, 4096 checks per tick; stale plans read as kerbside to traffic and keep drawing (§4.2) |
+| A road edit makes EVERY plan not current (`isCurrentFor` compares the whole-graph `structureStamp`; join refs index the rebuilt graph), contradicting §4.2 step 1 "lots outside the box are not touched"; the ≤ 2 ms road-edit tick is missed at ~10–17 ms (§4.1 as built) | **user decision needed:** (a) keep town-wide re-resolution, spread under a lower check budget (plans away from the edit read kerbside longer), or (b) an edit-local contract (per-site slot tuple for currency, `(lotId, slot)` join handles resolved at read), an R2a contract change for the Agent Traffic session |
 | Lot access moves for most lots (narrow-lot drive side) and shifts routed-model pictures | R1 alone, re-pins ledgered, economy tests as the gate; mid-block wide lots move only by the quantum |
 | Conservative windows cost small corner lots their driveway on short blocks | sprawl audit pins `kJoinLegacy` and program counts; starter kit required at 100% for its four sites; an exact bound from traffic can replace the reserve later |
 | Generated towns look different (front car parks push shops back; houses narrow beside drives) | F2 bias for W < 40 keeps street walls; homes fall back to kerb parking; screenshots before R7 |

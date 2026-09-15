@@ -1691,12 +1691,15 @@ class CitySim {
       final failed = !isConnected(k) || powerRatio < 0.35;
       if (failed) {
         abandonTimer[k] = (abandonTimer[k] ?? 0) + dt;
-        if ((abandonTimer[k] ?? 0) >= abandonDelay) abandoned.add(k);
+        if ((abandonTimer[k] ?? 0) >= abandonDelay && abandoned.add(k)) {
+          siteBuiltRevision++;
+        }
       } else {
         abandonTimer[k] = 0;
-        abandoned.remove(k);
+        if (abandoned.remove(k)) siteBuiltRevision++;
       }
     }
+    if (removed.isNotEmpty) siteBuiltRevision++;
     for (final k in removed) {
       grown.remove(k);
       abandoned.remove(k);
@@ -2563,6 +2566,7 @@ class CitySim {
       fires.remove(c); // a flattened building stops burning
     }
     footprint.removeWhere((cell, anchor) => anchor == k);
+    siteBuiltRevision++;
     grown.remove(k);
     utils.remove(k);
     zones.remove(k);
@@ -3202,6 +3206,7 @@ class CitySim {
         footprint.remove(c);
       }
     }
+    siteBuiltRevision++;
     zones.remove(anchor);
     utils.remove(anchor);
     roads.remove(k);
@@ -3252,6 +3257,7 @@ class CitySim {
       final bst = {for (final e in buildStyle.entries) rekey(e.key): e.value};
       // Footprint maps cell->anchor; both ends are cell ids, so rekey both.
       final fp = {for (final e in footprint.entries) rekey(e.key): rekey(e.value)};
+      siteBuiltRevision++;
       zones..clear()..addAll(z);
       utils..clear()..addAll(u);
       footprint..clear()..addAll(fp);
@@ -3462,10 +3468,16 @@ class CitySim {
   /// in order (`siteAccess.sync`, `roadTraffic.advance`, `agents.advance`).
   void Function(String phase)? debugTickProbe;
 
-  /// Bumped whenever a grown lot's building changes tier (construction
-  /// finished, a density upgrade or decline, the lot cleared by decay): the
-  /// site access book re-checks the colony's sites on it (§4.2).
-  int parcelTierRevision = 0;
+  /// Bumped whenever what stands on a site changes in a way the building
+  /// counts alone may not show within one tick (docs/plans/site-access.md
+  /// §4.2): a grown lot's building changes tier (construction finished, a
+  /// density upgrade or decline, the lot cleared by decay), a building is
+  /// removed without a layout version bump (burned out, flattened,
+  /// bulldozed, a zoneless grown cell dropped, a lot cleared or lost), a
+  /// cell is abandoned or reoccupied, or the grid is re-keyed. The site
+  /// access book re-walks the colony when it moves: a burnout and a growth
+  /// start in the same tick leave every count as it was.
+  int siteBuiltRevision = 0;
 
   /// The inspector's note for lot [lotId]: `access easement for <site name>`
   /// while the lot is an access easement (§3.7a), else null.
@@ -3692,6 +3704,7 @@ class CitySim {
   void _dropLostLots() {
     final live = {for (final p in layout.parcels) p.id};
     bool lost(String site) => cellOfSiteId(site) == null && !live.contains(site);
+    siteBuiltRevision++;
     parcelBuildings.removeWhere((id, _) => lost(id));
     grownParcels.removeWhere((id, _) => lost(id));
     lotFires.removeWhere((id, _) => lost(id));
@@ -4343,7 +4356,7 @@ class CitySim {
         } else {
           grownParcels[parcel.id] = next;
         }
-        if (tier(next <= 0 ? null : next) != tierBefore) parcelTierRevision++;
+        if (tier(next <= 0 ? null : next) != tierBefore) siteBuiltRevision++;
         continue;
       }
       // Homes come up slower beside a loud road.
@@ -4352,7 +4365,7 @@ class CitySim {
           : 1.0;
       final next = math.min(3.2, cur + dt * 0.03 * demand * quiet);
       grownParcels[parcel.id] = next;
-      if (tier(next) != tierBefore) parcelTierRevision++;
+      if (tier(next) != tierBefore) siteBuiltRevision++;
     }
   }
 
@@ -4438,6 +4451,7 @@ class CitySim {
         // Burned out: the building is gone, the lot reverts to zoned ground.
         parcelBuildings.remove(id);
         grownParcels.remove(id);
+        siteBuiltRevision++;
         done.add(id);
         return;
       }
@@ -5151,6 +5165,7 @@ class CitySim {
   /// `parcelBuildings` itself, which left a demolished spaceport's deliveries
   /// still in the book, dispatching craft at a lot with nothing on it.
   void clearParcel(String parcelId) {
+    siteBuiltRevision++;
     parcelBuildings.remove(parcelId);
     grownParcels.remove(parcelId);
     lotFires.remove(parcelId);

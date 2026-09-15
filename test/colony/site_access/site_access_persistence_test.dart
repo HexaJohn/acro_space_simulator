@@ -124,6 +124,55 @@ void main() {
     });
   }
 
+  test('a live book synced through edits equals the loaded colony\'s drain',
+      () {
+    final city = town(grown: true);
+    final book = city.siteAccess;
+    // Budgeted ticks, as `advance` runs them, until the book is complete.
+    void tick() {
+      var n = 0;
+      while (!book.sync(city, city.roadGraph, maxUnits: 16, maxChecks: 256)) {
+        expect(++n, lessThan(2000));
+      }
+    }
+
+    tick();
+    // A grown house avenue far from the town.
+    final avenue = houseStreet(city, const [Vec2(1800, -300), Vec2(1800, 300)],
+        grown: true, roadClass: RoadClass.avenue);
+    tick();
+    // A road edit through the grown block (re-plats and renames lots).
+    commit(city, const FixtureRoad([Vec2(-150, -290), Vec2(-150, 290)]));
+    tick();
+    // A decoration upgrade: the avenue's homes lose their drives.
+    upgrade(city, avenue.first.roadId!, 'four-lane-grass');
+    tick();
+    // A tier change, as `advanceParcelGrowth` makes one.
+    final lot = idsOf(book).firstWhere((id) =>
+        city.grownParcels[id] == 1.0 &&
+        city.layout.parcelById(id)?.use == ParcelUse.residential);
+    city.grownParcels[lot] = 2.5;
+    city.siteBuiltRevision++;
+    tick();
+    // A burnout.
+    final victim =
+        idsOf(book).firstWhere((id) => city.grownParcels.containsKey(id));
+    city.lotFires[victim] = 5.0;
+    city.advanceParcelFires(1.0);
+    tick();
+
+    final loaded = drained(roundTrip(city));
+    expect(idsOf(book).length, greaterThan(4));
+    expect(plansOf(book), plansOf(loaded));
+    expect(plansJsonOf(book), plansJsonOf(loaded));
+    // Stall keys and programs per site, whatever the slot order.
+    for (final id in idsOf(loaded)) {
+      expect(programAndKeys(book.planOf(id)!),
+          programAndKeys(loaded.planOf(id)!),
+          reason: id);
+    }
+  });
+
   test('200 curved-road lots keep their programs and stall keys over a load',
       () {
     final city = starterKit();
