@@ -485,7 +485,13 @@ class VehicleMover {
         final lane = lg.conToLane[cur - nL];
         final last = i >= rLen - 1;
         if (last) {
-          final dl = t.destS[sl] - lg.edgeLaneS0[lg.laneEdge[lane]];
+          // Its stop, taken no nearer than [kArriveM] into the lane: a
+          // vehicle comes to rest [kStopShortM] short of its stop, and it
+          // arrives only on a lane, so a stop at the lane's very start — a
+          // building met at the stop bar, a stop an edit's new junction
+          // box swallowed — would hold it on the connector for good.
+          final dl = math.max(
+              t.destS[sl] - lg.edgeLaneS0[lg.laneEdge[lane]], kArriveM);
           _lead(rem + dl + s0 - kStopShortM, 0, rem + dl);
         }
         final tail = t.elemTail[lane];
