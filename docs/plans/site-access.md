@@ -1834,6 +1834,18 @@ class SiteChunkGeometry {                  // ≤ 3 retained objects: itself, on
   on the generated town) and each building's slot lookup (one book map lookup, ~0.04–0.10 µs a building, against a
   whole steady capture of ~8–47 µs a building). On the 127k reference town that is a few milliseconds of lookups
   in a capture already far larger; not measured there (the R4 A/B owns it).
+  - *R3 review:* measured again at 0.09–0.10 µs a building and 0.036 µs a road (JIT), about 12 ms on 127k
+    buildings: 0.3–0.5 % of a steady capture of 21–37 µs a building, paid with the knob off too. The test now
+    bounds the building lookup under 5 % of the steady capture a building. **R4 gate:** the A/B on
+    `tool/measure_city_studio.ps1` confirms it on the reference town; if it shows, `SiteCapture` holds
+    `(slot, gateXM, gateWM)` per site id, rebuilt only when the chunk set moves.
+- **Held-frame gate (R3 review).** The steady-frame early return also compares the cut-table hash the held frame's
+  `geometryStamp` was taken with: the book can swap its graph under unchanged chunks (a deferred budgeted sync after
+  a one-way reversal or a road removal, once the capture has already seen the new roads revision), which re-cuts
+  `RoadSnapshot.kerbCuts` without moving `sitesRev`, a chunk or the ground stamp.
+- **Row check (R3 review).** `buildingSiteOf` serves a slot only when the chunk the capture holds names the same
+  site at the book's row; a book that moved since `SiteCapture.begin` (a drop re-packed the chunk) reads legacy
+  until the next begin. `sitesSignature` mixes `fnv1a32` of the colony and body ids, not `hashCode`.
 
 ### 5.3 Tile cut and keys
 

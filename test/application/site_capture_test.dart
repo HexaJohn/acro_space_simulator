@@ -21,6 +21,7 @@ import 'package:acro_space_simulator/domain/colony/city/city_generator.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/kerb_cuts.dart';
+import 'package:acro_space_simulator/domain/colony/city/site_access/site_access_book.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_access_plan.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -183,6 +184,11 @@ void main() {
         'building against a whole steady capture of '
         '${captureUs.toStringAsFixed(3)} µs a building (${ids.length} '
         'buildings; slot sum $slots)');
+    // The per-building part scales with the colony and sits outside the
+    // 0.02 ms (§5.2 as built): it must stay a small share of the steady
+    // capture it rides in (measured ~0.3–0.8 %; R4's A/B on the reference
+    // town owns the absolute number).
+    expect(perBuildingUs, lessThan(captureUs * 0.05));
     return median;
   }
 
@@ -387,6 +393,87 @@ void main() {
     final late = cutsOf(capture(c));
     expect(early, before);
     expect(late, before);
+  });
+
+  test('the geometry stamp moves with the cut table when the book swaps its '
+      'graph under unchanged chunks', () {
+    // A street of houses on a reversed one-way and nothing else: no
+    // easement-priority site, so a deferred sync re-resolves no plan and
+    // republishes no chunk when the graph changes.
+    final c = foundFlat(id: 'one-way', roads: const [
+      FixtureRoad([Vec2(0, -200), Vec2(0, 200)],
+          roadClass: RoadClass.streetOneWay, reversed: true),
+    ])
+      ..funds = 1e12
+      ..ignoreUnlocks = true;
+    for (final p in List.of(c.layout.autoParcels)) {
+      c.placeOnParcel(p.id, siteTownHouse);
+    }
+    c.advance(0.5);
+    expect(
+        c.siteAccess.sync(c, c.roadGraph,
+            maxUnits: SiteAccessBook.unlimited,
+            maxChecks: SiteAccessBook.unlimited),
+        isTrue);
+    final oneWay = c.layout.roads.firstWhere((r) => r.oneWay && r.reversed);
+    Map<String, List<double>> cutsOf(WorldSnapshot s) => {
+          for (final r in s.roads)
+            if (r.kerbCuts.isNotEmpty) r.id!: List.of(r.kerbCuts),
+        };
+    capture(c);
+    // Reversed: the capture sees the new roads revision before the book
+    // has synced the new graph, then again once it has (every chunk kept).
+    expect(c.reverseRoad(oneWay.id), isTrue);
+    final seen = capture(c);
+    final chunks = List.of(c.siteAccess.chunks);
+    final cuts0 = SiteCapture.cutTablesBuilt;
+    final stampBefore = c.siteAccess.graph!.structureStamp;
+    c.siteAccess.sync(c, c.roadGraph, maxUnits: 1, maxChecks: 1);
+    expect(c.roadGraph.structureStamp, isNot(stampBefore));
+    expect(c.siteAccess.graph!.structureStamp, c.roadGraph.structureStamp);
+    final kept = c.siteAccess.chunks;
+    expect(kept.length, chunks.length);
+    for (var i = 0; i < kept.length; i++) {
+      expect(identical(kept[i], chunks[i]), isTrue,
+          reason: 'the deferred sync republishes nothing');
+    }
+    final swapped = capture(c);
+    expect(SiteCapture.cutTablesBuilt, greaterThan(cuts0));
+    expect(cutsOf(swapped)[oneWay.id], isNot(cutsOf(seen)[oneWay.id]),
+        reason: 'the reversed one-way\'s cut directions flipped');
+    expect(swapped.sites.single.sitesRev, seen.sites.single.sitesRev);
+    expect(swapped.sites.single.geometryStamp,
+        isNot(seen.sites.single.geometryStamp));
+  });
+
+  test('a building whose slot row no longer matches the held chunks is '
+      'legacy until the next begin', () {
+    final c = siteTown();
+    capture(c);
+    final book = c.siteAccess;
+    final chunk = book.chunks.first;
+    // Two lots in consecutive rows of the first chunk.
+    var row = -1;
+    for (var k = 0; k + 1 < chunk.siteCount; k++) {
+      if (c.parcelBuildings.containsKey(chunk.siteId(k)) &&
+          c.parcelBuildings.containsKey(chunk.siteId(k + 1))) {
+        row = k;
+        break;
+      }
+    }
+    expect(row, greaterThanOrEqualTo(0));
+    final gone = chunk.siteId(row), next = chunk.siteId(row + 1);
+    final cap = SiteCapture.begin(c)!;
+    expect(cap.buildingSiteOf(next).$1, book.slotOf(next));
+    // The book drops a row (its chunk re-packs) while the capture still
+    // holds the old chunks: `next`'s row now names another site there.
+    c.clearParcel(gone);
+    expect(book.slotOf(next), greaterThanOrEqualTo(0));
+    expect(book.rowOfSlot(book.slotOf(next)), row);
+    expect(cap.buildingSiteOf(next), (-1, 0.0, 0.0));
+    // A fresh begin reads the re-packed chunk and serves it again.
+    final again = SiteCapture.begin(c)!;
+    expect(again.buildingSiteOf(next).$1, book.slotOf(next));
   });
 
   test('the geometry stamp holds on a frame that changed no plan, and moves '

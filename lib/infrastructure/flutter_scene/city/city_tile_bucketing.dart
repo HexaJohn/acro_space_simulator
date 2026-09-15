@@ -65,6 +65,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import '../../../application/snapshot/world_snapshot.dart';
+import '../../../domain/colony/city/hash32.dart' show fnv1a32;
 import '../../../domain/colony/city/parcel.dart';
 import '../../../domain/colony/city/road_elevation.dart';
 import '../../../domain/colony/city/road_junction.dart' show JunctionOverride;
@@ -530,8 +531,8 @@ class CityTileBucketer {
   static int sitesSignature(WorldSnapshot snap) {
     var h = 0x3C6EF372;
     for (final f in snap.sites) {
-      h = _mix(h, f.colonyId.hashCode);
-      h = _mix(h, f.bodyId.hashCode);
+      h = _mix(h, fnv1a32(f.colonyId));
+      h = _mix(h, fnv1a32(f.bodyId));
       h = _mix(h, f.sitesRev);
       h = _mix(h, f.geometryStamp);
     }

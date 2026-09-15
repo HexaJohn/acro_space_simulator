@@ -8,6 +8,7 @@ import 'dart:typed_data';
 
 import 'package:acro_space_simulator/application/snapshot/world_snapshot.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
+import 'package:acro_space_simulator/domain/colony/city/hash32.dart' show fnv1a32;
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/colony/city/sprawl_plan.dart'
     show kMileM;
@@ -1079,6 +1080,20 @@ void _siteAccessKeys() {
       gate.cut(sig(a));
       expect(gate.wantsCut(b, sig(b), rangeM: 1e9, focusBF: (_) => null), isFalse);
       expect(gate.wantsCut(c, sig(c), rangeM: 1e9, focusBF: (_) => null), isTrue);
+    });
+
+    test('the sites signature hashes ids with fnv1a32, never hashCode', () {
+      // The workspace rule for site-access keys and signatures: no platform
+      // hash. The expected value is the documented mix over fnv1a32 ids.
+      var want = 0x3C6EF372;
+      for (final f in snap.sites) {
+        want = CityHash32.mix(want, fnv1a32(f.colonyId));
+        want = CityHash32.mix(want, fnv1a32(f.bodyId));
+        want = CityHash32.mix(want, f.sitesRev);
+        want = CityHash32.mix(want, f.geometryStamp);
+      }
+      expect(snap.sites, isNotEmpty);
+      expect(CityTileBucketer.sitesSignature(snap), want);
     });
 
     test('a detail job packs the sites of the buildings it gathered', () {

@@ -343,6 +343,12 @@ class SiteCapture {
   /// the layout's road order (built with it and the roads revision).
   final Map<String, (Float64List, double)> _canonById = {};
   int _cutHash = 0;
+
+  /// The [_cutHash] the held frame's `geometryStamp` was taken with: the
+  /// cut table can move without the chunks, `sitesRev` or the ground (the
+  /// book's graph swapped under unchanged chunks, e.g. a one-way reversed
+  /// after the capture already saw the new roads revision).
+  int _frameCutHash = 0;
   List<(Float64List, double)?> _canonByIndex = const [];
   int _indexedRoadsRev = -1, _indexedRoadCount = -1;
   bool _indexStale = true;
@@ -463,15 +469,20 @@ class SiteCapture {
   }
 
   /// [siteId]'s book slot and the plan's gate, for its building: slot −1
-  /// (legacy) when it has no published plan. `gateXM` is along the building's
-  /// local X from the envelope centre.
+  /// (legacy) when it has no published plan, or when the book's slot table
+  /// and the chunks this capture holds disagree on the row (the book moved
+  /// since [begin]). `gateXM` is along the building's local X from the
+  /// envelope centre.
   (int, double, double) buildingSiteOf(String siteId) {
     final book = _city.siteAccess;
     final slot = book.slotOf(siteId);
     if (slot < 0) return (-1, 0, 0);
     final c = slot ~/ kSitesPerChunk;
     final row = book.rowOfSlot(slot);
-    if (row < 0 || c >= _chunks.length || row >= _chunks[c].siteCount) {
+    if (row < 0 ||
+        c >= _chunks.length ||
+        row >= _chunks[c].siteCount ||
+        _chunks[c].siteId(row) != siteId) {
       return (-1, 0, 0);
     }
     final chunk = _chunks[c];
@@ -500,6 +511,7 @@ class SiteCapture {
     final book = city.siteAccess;
     if (held != null &&
         !groundMoved &&
+        _frameCutHash == _cutHash &&
         held.bodyId == bodyId &&
         held.sitesRev == book.sitesRev &&
         _geos.length == _chunks.length) {
@@ -554,6 +566,7 @@ class SiteCapture {
     _geoHash = hashes;
     if (held != null &&
         same &&
+        _frameCutHash == _cutHash &&
         held.geometryStamp == stamp &&
         held.bodyId == bodyId &&
         held.sitesRev == book.sitesRev) {
@@ -562,6 +575,7 @@ class SiteCapture {
     final up = city.localToBodyFixed(const Vec2(0, 0), bodyRadiusM: 1);
     final east = city.localToBodyFixed(const Vec2(1, 0), bodyRadiusM: 1) - up;
     final north = city.localToBodyFixed(const Vec2(0, 1), bodyRadiusM: 1) - up;
+    _frameCutHash = _cutHash;
     return _frame = CitySiteFrame(
       colonyId: city.id,
       bodyId: bodyId,
