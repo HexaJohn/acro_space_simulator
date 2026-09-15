@@ -1414,7 +1414,10 @@ Nothing is reserved at plan time. A car trip ends at the destination's access po
    | Bodies | none in the footprint, and no queue within 15 m upstream of it |
    | Approaching vehicles | ETA to the footprint ≥ 8 s, with ETA = distance / `max(v, 5 m/s)`; ≥ 10 s when crossing to the far lane |
    | Opposing lane (1+1 streets) | also free of bodies within `[T − 6, T + 6]` |
-   | Forced grant | after 120 s of waiting, waives only the ETA rule, down to a 6 s floor; counted |
+   | Next same-direction lane (avenues, 2-lane one-way streets) | the ~5 m tail swing overhangs it: free of bodies within `[T − 6, T + 6]`, and approaching vehicles' ETA to `T − 6` ≥ 8 s (same speed floor) |
+   | Forced grant | after 120 s of waiting, waives only the ETA rules, down to a 6 s floor; never with a body in any checked interval; counted |
+
+   The footprint is measured from `T` whichever stall the car left: side-by-side stall axes sit ±1.3 m from `T` on a 5.2 m drive, and the scripted arc always ends on the target lane. Home stalls on the pad axis are `inline` (an appended `StallAngle`): the stall links the pad's forward and backward lanes as a reverse-only movement, and the pad end is the one dead end a plan may have without a turnaround (site-access V7, V9; 42d1c53).
 
 4. **The manoeuvre.** The car reverses down the driveway and, at the kerb line, swings its tail upstream onto the target lane in one scripted arc (D27). It stops for 0.5 s, then drives off forward.
 5. **EXIT is logged when the rear crosses the kerb line** (§5.5). From then the car is in the target lane as a reversing vehicle, flagged `reversing` on the wire (§13.1), and followers treat its footprint as a stopped obstacle. A far-direction departure also holds a claim on the near-lane footprint until it drives off.
