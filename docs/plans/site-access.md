@@ -137,6 +137,12 @@ lib/domain/colony/city/site_access/
 traffic hygiene rules all the same, and a new `site_access_source_hygiene_test` runs the
 `traffic_source_hygiene_test.dart:131-157` scan over it.
 
+**Deviation (R2 core, as built):** two files are added. `site_plan_generator.dart` holds the entry point shared by
+every generator: `SiteContext` (graph + stamp, parcel, spec, frame, slots, emission helpers), `SiteGeneratedPlan`
+(a generator's finished plan, written only once complete, since `PlanBuilder` has no rollback), the dispatcher
+`planSite`, `emitKerbOnly`, and the full-town `planSites` / `siteContextsOf` / `planCity`. `site_easement.dart` holds
+the pure `easementOf` (§3.7a rule 2), so the installation/easement track owns it apart from the book.
+
 ### 2.2 Join slots on `RoadGraph` (beside the lot columns, road_graph.dart:286-295)
 
 ```dart
@@ -280,6 +286,12 @@ it. Limbo plans (§7.6) and cars mid-manoeuvre hold the old chunk and keep readi
   plain bytes. Column accessors live on the chunk (chunk-global rows) and on the plan (plan-local indices).
 - `joinRoadIdIdx` is reserved and written −1: a road-id string table would break the 7-object bound.
 - `RoadGraph` has no `structureStamp` yet. `PlanBuilder` stores the caller's int, and R2's book supplies the stamp.
+  **R2 core:** `RoadGraph.structureStamp` exists: a signed 32-bit word hash (web-safe `mul32`) over the roads (id,
+  class, decoration, direction, samples), nodes, pieces, edges, lots, join and crossed-lot columns and kerb windows,
+  hashed on first read into a cell every `withOverrides` / `refreshedFor` copy shares. Copies that
+  `sharesStructureWith` stamp equal; a structure change stamps differently (up to a 32-bit collision). A rebuild of
+  an unchanged layout stamps the SAME (every lot index and join handle it gives is the same), so `isCurrentFor`
+  stays true across it. Doubles are hashed by their bits, so a stamp is per platform, like `rev`.
 - `rev` hashes each site's family counts instead of the chunk-global starts. It excludes the graph resolution
   (`graphStamp`, `graphLot`, `joinRef`, `joinPiece`, `joinRoadNo`, `joinRoadIdIdx`), so re-resolving a plan against a
   new graph keeps its `rev`. `rev` and `stallKey` are stored signed (`toSigned(32)`), and `stallIndexOfKey` accepts
@@ -725,6 +737,23 @@ The score rewards stalls up to 1.5·C* for `com` and 1.0·C* otherwise. Overflow
 - `A_min = requiredArea(spec)/floorsCap` (building_massing.dart:266).
 - `w, d ≥ 8 m`.
 
+**As built (R2 core, `site_program.dart`, `site_plan_generator.dart`):**
+- `classifyProgram` returns the program a row OFFERS; `planSite` runs the generators in fall-through order. Rows 0b
+  (legacy), 0c (blocked corridor, or a BUILT lot in slot 0's `joinCrossLot`) and 2 (mega) settle `kerbOnly` outright,
+  as do two §3.8 rows placed after 0c: no frame (degenerate) and a sliver (true D < 8 m or W < 6 m). "Unbuilt", "no
+  slot" and "a frontage-less site with no eligible road in reach" store no plan.
+- A small installation site (row 1, `W < 60 or D < 120`) is offered `yard` and carries `kPlanFallback`. Every program
+  lesser than the one offered carries `kPlanFallback`: a home demoted by a back-out rule or by §3.4, and a car park,
+  yard or installation that falls through (to a car park or to `kerbOnly`). Row 0c carries `kPlanAccessBlocked`.
+- Demotions are counted by rule in `SiteProgramStats` (`SiteDemotion`: `homeRoad`, `homeRoom`, `homeSwingMargin`,
+  `homeSkew`, `homeGeometry`, `installationTooSmall`, `installationNoFit`, `yardNoFit`, `carParkNoFit`,
+  `legacySlot`, `accessBlocked`, `mega`, `sliver`, `degenerate`). Back-out rules are checked in the order 1–4, and
+  only the first failure is counted.
+- Rule 1 reads the median from `RoadSpline.lanes`, which includes the decoration: a decorated avenue's planted 2 m
+  median is a median, so that avenue is `kerbOnly` for homes.
+- W is the frame's frontage length. D is the profile's deepest column plus its 0.3 m margin (the lot's true depth).
+  Thresholds compare with a 1e-6 m tolerance, so `16.6 = 4.5 + 12.1` holds whatever the float noise of the sum.
+
 ### 3.4 Home driveway and pad ("both")
 
 Cars on a home lot drive in forward, park nose-in, and leave by **backing out into the street** (§10.2 Q3; the
@@ -806,6 +835,23 @@ behind it at `[yT + 5.2, yT + 10.4]`, `P` at `yT + 10.4`. **Single:** a 3.2 m dr
 Against the plat, a downtown 24 × 32 lot gets 2 stalls side by side. Sprawl house lots of 17–33 × 36
 (city_generator.dart:1963-1967) get 2 stalls in tandem below 17.6 m and side by side from 17.6 m. A 12 m infill lot
 is kerb only, and so is any house lot whose slot 0 fails the §3.3 back-out rules.
+
+**As built (R2 core, `home_driveway.dart`):**
+- The drive is laid from the kerb point along the slot's ROAD normal `n`, because V5 and §3.4 make it straight along
+  the normal. `H` lies where the drive reaches frame `y = yT`, so `|K→H| = (k + yT)/(n·v)`, which is 7.0 m when
+  `v = n`. Every threshold is measured on the drive's real corners in the frame: the house starts 1 m past the
+  drive's largest frame x (or ends 1 m before its smallest), the outer edge is the drive's nearer corner to its lot
+  line, and "depth over the drive" is compared with the drive's deepest corner + 0.5 m. On a lot whose `v` is the
+  normal these are exactly the table's rules. On a skewed lot (≤ 10°) they are conservative, and the envelope never
+  meets the drive.
+- The house side is the side with more room, ties broken by `tieBreak('home-side')`. The same rule covers the
+  mirror.
+- `containsRect` checks the drive's on-parcel bounding box `[minX, maxX] × [0.05, deepest corner]` (0.05 m in
+  from the frontage line, where a corner would lie on the boundary) and the house envelope
+  `[x0, x1] × [yT, D_house − 3]`.
+- The door is the envelope front midpoint `(x, yT)`. `pavementPt` is its projection onto `y = 0`, and the footpath
+  reuses those two points. `entranceNode` is `H`. The drive pave's two kerb corners are `blend` with `hT = 1` on join
+  0; every other point is `pad`.
 
 ### 3.5 Car parks (`car_park_packer.dart`)
 
@@ -1081,6 +1127,18 @@ pave, a 2-point path, door, pavement). `site_access_chunk_test` pins ≤ 768 B. 
 as a deviation. **R2 owns the ≤ 512 B target:** its generation bench measures bytes per home site on the starter kit
 and the small town and either meets 512 B (for example with parametric home rows, §10.1) or reports the miss with
 the measured figure at R2 review.
+
+**Measured (R2 core, `bench/site_generation_bench_test.dart`, `flutter test` JIT, car park / yard / installation
+still stubs so their sites read `kerbOnly`):** on the sprawl fixture (`blocksAcross 4, seed 5, sprawlMiles 12`)
+30,561 built sites became 24,996 `homeDriveway`, 5,563 `kerbOnly` and 2 unplanned, in 952 ms in all. That is
+19.4 µs per home plan (budget 12) and 35.5 µs per `kerbOnly` plan (budget 5); each figure includes the site frame
+and depth profile (about 6 µs) and, for kerbside, the §6.1 free-rectangle envelope (about 4 µs). With the frame
+cached, `PlanBuilder` emission of a home plan is 8–10 µs of it (per-row boxed `List<num>` writes). Home demotions on
+that fixture: room 154, swing margin 411, skew 36, geometry 107. Bytes: 694 B per home site (budget 512 B: MISSED,
+down from R2a's 753 B because the footpath reuses the door and pavement points) and 254 B per kerbside site. **Both
+unit budgets and the 512 B home target are missed, and this is reported, not re-budgeted.** At the measured
+~31 µs/site average, the 127k-building town's drain would be about 4 s (> 3 s). The levers are typed per-column
+buffers in `PlanBuilder` (unboxed), a profile-free kerbside envelope, and parametric home rows (§10.1).
 
 **The drain budget is a sum, not a guess.** R1's sprawl audit already counts lots per road class on the sprawl
 audit fixture; R2 adds program counts, and the generation bench prints the mix and the sum next to the measured
@@ -1451,6 +1509,20 @@ spun by `−SiteFrame.buildingHeading` (§3.1), so envelope x/y ARE the building
    edge exactly, with no style input (S2 holds).
 6. **The footpath** runs from the door to `pavementPt` (its projection onto `y = 0`, or the gate), 1.5 m wide. It
    moves to the nearest gap between stall rows rather than crossing one, and never runs along a throat.
+
+**As built (R2 core, `site_envelope.dart`, shared by every generator):**
+- `SiteEnvelope` holds the `env*`, `envFrontInset`, `gateX` and `gateW` columns, in frame metres.
+- `largestFreeRect(profile, W, blocked:, clearanceM:, yMin:, xMin:, xMax:)` is step 2. It is a histogram of free depth
+  over the 0.5 m columns, one pass per candidate front (`yMin` and each blocked rectangle's far edge + the clearance).
+  Ties go to the smaller front, then the smaller x.
+- `fitFootprint(free, footW, footD, minArea:)` is step 3: centred across, FRONT-aligned (§6.2), and null under 8 m a
+  side or `A_min`.
+- `envelopeDoor(env)` is step 5. `lampsAlong(x0, x1, y)` is the §3.5 lamp rule. `depthOver(profile, x0, x1)` is the
+  true depth §3.3/§3.4 measure.
+- A kerbside plan's envelope is the free rectangle inside the 1.5 m side setbacks, fitted to `buildingFootprint`
+  (the free rectangle itself when 8 × 8 m does not fit). Its door is that envelope's front midpoint (the polygon's
+  interior point when there is none). Its pavement point is slot 0's kerb point moved `kPavementPointInsetM = 1.5`
+  along the slot normal, which covers footprint sites too (V11's 3.5 m, pinned by `site_plan_generator_test`).
 
 ### 6.2 Massing inside the envelope (only for `siteSlot ≥ 0`, so the legacy path is untouched)
 

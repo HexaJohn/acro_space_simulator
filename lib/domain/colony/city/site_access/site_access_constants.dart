@@ -336,3 +336,261 @@ const double kPavementPointMaxM = 3.5;
 /// vectors ×1000.
 const double kRevMetresScale = 100.0;
 const double kRevUnitScale = 1000.0;
+
+// =============================================================================
+// Generation (slice R2). Every generator number of §3.3–§3.8 and §6.1 lives
+// here, named by its section. The R2 tracks (car park / yard, installation /
+// easement, book) READ this file and never edit it: a number a track finds
+// missing is added by the core owner.
+// =============================================================================
+
+// ---- Determinism (§3.9) ----
+
+/// The program version hashed into every seed and input signature. Bump it
+/// when generation changes what it emits for the same inputs.
+const int kSiteProgramVersion = 1;
+
+/// The frame's W and D are quantised to this before seeding.
+const double kSeedQuantumM = 0.5;
+
+/// Equality tolerance of generation's threshold tests (metres): a
+/// threshold derived as `x_d + 13.1` holds at exactly 17.6 m whatever the
+/// float noise of the sum.
+const double kGenEpsM = 1e-6;
+
+/// An emitted rectangle's edge lying ON the lot line is tested this far
+/// inside it by `DepthProfile.containsRect` (a corner on the boundary is
+/// neither in nor out).
+const double kContainsInsetM = 0.05;
+
+// ---- Program classification (§3.3) ----
+
+/// Row 1: an own-site building of at least this in both W and D (not
+/// `res`/`com`) is an installation.
+const double kInstallationMinSiteM = 150.0;
+
+/// Row 1: an installation site narrower or shallower than these falls
+/// through to row 4.
+const double kInstallationMinWidthM = 60.0;
+const double kInstallationMinDepthM = 120.0;
+
+/// Row 2: the spec type that parks in its podium (`parkingSpaces` = 0).
+const String kMegaSpecType = 'mega';
+
+/// Row 3: a `res` building housing at most this many is a house.
+const String kResidentialGroup = 'res';
+const String kCommercialGroup = 'com';
+const int kHomeMaxHousing = 24;
+
+/// Row 4: the industrial groups. Pinned equal to
+/// `BuildingMassingRules._isIndustrial` (building_massing.dart:278).
+const List<String> kIndustrialGroups = [
+  'ind', 'res-x', 'power', 'waste', 'storage', 'aero', //
+];
+
+/// §3.8 sliver: an inscribed depth under [kSliverMinDepthM] or a frontage
+/// under [kSliverMinWidthM] is `kerbOnly`.
+const double kSliverMinDepthM = 8.0;
+const double kSliverMinWidthM = 6.0;
+
+/// Back-out eligibility rule 1 (§3.3, §7.4): the speed limits. A minor-tier
+/// road (street, one-way street, alley, path) up to [kHomeMinorMaxSpeedKmh];
+/// an avenue (near direction only) up to [kHomeAvenueMaxSpeedKmh]; any
+/// median, or anything faster, is `kerbOnly`.
+const double kHomeMinorMaxSpeedKmh = 40.0;
+const double kHomeAvenueMaxSpeedKmh = 50.0;
+
+/// Throat width per program (§3.3 table): `throatW = min(programWidth,
+/// 2·(room − kCutFlareM))`.
+const double kHomeSideBySideWidthM = 5.2;
+const double kHomeTandemWidthM = 3.2;
+const double kCarParkThroatWidthM = 6.0;
+const double kCarParkThroatMinTwoWayM = 5.5;
+const double kCarParkSharedSingleThroatM = 3.0;
+const int kCarParkSharedSingleMaxStalls = 8;
+const double kYardThroatWidthM = 7.0;
+const double kInstallationThroatWidthM = 7.0;
+
+/// The packers' throat corridor clears the throat by this each side:
+/// `x_J ± (throatW/2 + kThroatCorridorClearM)`.
+const double kThroatCorridorClearM = 1.0;
+
+/// Capacity targets (§3.3): car parks `max(C*, com ? 6 : 4)`, civic/utility
+/// `max(C*, 8)`, installations `clamp(C*, 12, 240)`; the score rewards
+/// stalls up to 1.5·C* for `com`.
+const int kCarParkMinStallsCom = 6;
+const int kCarParkMinStalls = 4;
+const int kCarParkMinStallsCivic = 8;
+const int kInstallationMinStalls = 12;
+const int kInstallationMaxStalls = 240;
+const double kCapacityScoreComFactor = 1.5;
+
+/// Home capacity: two stalls (side by side, else tandem), else one.
+const int kHomeStalls = 2;
+
+/// Minimum envelope (§3.3): `A_min = requiredArea/floorsCap`, with floorsCap
+/// by intensity (`housing + jobs`), 1.4 for industry; sides ≥ 8 m.
+const double kFloorsCapTall = 12.0;
+const double kFloorsCapMid = 4.0;
+const double kFloorsCapLow = 2.0;
+const double kFloorsCapIndustrial = 1.4;
+const int kFloorsIntensityTall = 90;
+const int kFloorsIntensityMid = 30;
+const double kEnvelopeMinSideM = 8.0;
+
+// ---- Home driveway and pad (§3.4) ----
+
+/// A stall: width across, length along its nose (every program).
+const double kStallWidthM = 2.6;
+const double kStallLengthM = 5.2;
+
+/// `yT = max(kHomeThroatReachM − k, kHomeMinFrontYM)`: the throat's far node
+/// lies [kThroatMinM] from the kerb, and at least 1 m inside the lot.
+const double kHomeThroatReachM = 7.0;
+const double kHomeMinFrontYM = 1.0;
+
+/// The house beside the drive: side setback, gap to the drive, the smallest
+/// house, the rear yard; the clear behind the deepest stall; the drive's
+/// outer edge from its lot line.
+const double kHomeSideSetbackM = 1.5;
+const double kHomeDriveGapM = 1.0;
+const double kHomeMinHouseM = 8.0;
+const double kHomeRearYardM = 3.0;
+const double kHomeStallClearM = 0.5;
+const double kHomeOuterEdgeM = 0.3;
+
+/// Tandem pads are at most this many stalls deep.
+const int kHomeMaxTandem = 2;
+
+// ---- Car parks (§3.5) ----
+
+/// A double-loaded module (row / aisle / row) and a single-loaded one
+/// (aisle, row), and at most this many modules in a block.
+const double kAisleTwoWayWidthM = 6.0;
+const double kModuleDoubleM = 16.4;
+const double kModuleSingleM = 11.2;
+const int kMaxModules = 8;
+
+/// `k = 1`: a T arm longer than this ends in a hammerhead (V7 b), shorter
+/// arms are cut to an L.
+const double kArmHammerheadMinM = 8.6;
+
+/// `k ≥ 2`: cross aisles at both block ends.
+const double kCrossAisleWidthM = 6.0;
+
+/// F2: the side drive's width.
+const double kRearDriveWidthM = 6.0;
+
+/// The envelope clears a stall row facing it by the walk strip; every other
+/// pave by the lot / installation clearance (§6.1).
+const double kWalkStripM = 2.0;
+const double kEnvelopeClearLotM = 1.0;
+const double kEnvelopeClearInstallationM = 3.0;
+
+/// Envelope sides `[kSideSetbackM, W − kSideSetbackM]` unless a drive runs
+/// beside it.
+const double kSideSetbackM = 1.5;
+
+/// Lamps: one post every [kLampPitchM] along each back-to-back line, the
+/// first [kLampStartM] in.
+const double kLampPitchM = 25.0;
+const double kLampStartM = 12.5;
+
+/// Score `10·min(n, cap) − 2·max(0, n − cap) + 0.02·envelopeArea −
+/// 0.5·driveLength + bias`; F2 +5 below 40 m of frontage; F3 −2; scores
+/// within 1% tie, broken by `xorshift32(seed ^ fnv('family'))`.
+const double kScoreStall = 10.0;
+const double kScoreOverflow = 2.0;
+const double kScoreEnvelopeArea = 0.02;
+const double kScoreDriveLength = 0.5;
+const double kScoreRearBias = 5.0;
+const double kScoreRearBiasMaxWidthM = 40.0;
+const double kScoreSideBias = -2.0;
+const double kScoreTieFraction = 0.01;
+
+/// Second joins (slot 1 or 2): from this frontage, this many stalls, or a
+/// corner lot with this many.
+const double kSecondJoinMinWidthM = 80.0;
+const int kSecondJoinMinStalls = 60;
+const int kSecondJoinCornerStalls = 30;
+
+// ---- Yard (§3.6) ----
+
+/// The truck apron beside the envelope, its circle, and its loading bays.
+const double kYardApronWidthM = 18.0;
+const double kYardApronDepthM = 24.0;
+const double kYardCircleRadiusM = 12.5;
+const double kLoadingBayWidthM = 3.5;
+const double kLoadingBayLengthM = 15.0;
+const int kYardBays = 2;
+
+// ---- Installations (§3.7) ----
+
+/// The throat runs `max(kInstallationThroatMinM, k)` along the road normal.
+const double kInstallationThroatMinM = 12.0;
+
+/// A dogleg `K→F` is at most this long.
+const double kDoglegMaxM = 120.0;
+
+/// cos 3°: a spine whose `v` is further than 3° off the road normal starts
+/// at a bend node.
+const double kCos3 = 0.99863;
+
+/// `Dmax = max(kForecourtMinM, kForecourtDepthFraction·D)`.
+const double kForecourtMinM = 40.0;
+const double kForecourtDepthFraction = 0.25;
+
+/// The yard circle `Y` (radius, and the gap past the throat's far node);
+/// without a yard, the branch node `B` this far along the spine.
+const double kInstallationCircleRadiusM = 13.0;
+const double kInstallationCircleGapM = 2.0;
+const double kInstallationBranchNoYardM = 7.0;
+
+/// Loading bays beside `Y→G`: `|x − x_G|` in [4, 7.5] and [8, 11.5]; at most
+/// 4, fewer than 2 left → none.
+const double kInstallationBayInnerX0M = 4.0;
+const double kInstallationBayInnerX1M = 7.5;
+const double kInstallationBayOuterX0M = 8.0;
+const double kInstallationBayOuterX1M = 11.5;
+const int kInstallationMaxBays = 4;
+const int kInstallationMinBays = 2;
+
+/// The staff car park band starts this far from the spine; its first aisle
+/// is centred this far from it.
+const double kStaffCarParkBandM = 15.0;
+const double kStaffAisleOffsetM = 18.0;
+
+/// The connector from the branch node to the first aisle.
+const double kConnectorWidthM = 6.0;
+
+/// Forecourt: `need = max(40, carParkDepth + 6, bays ? Y + 13 + 15 + 3 : 0)`.
+const double kForecourtCarParkClearM = 6.0;
+const double kForecourtBayRearClearM = 3.0;
+
+/// The gate: its lane is the road width plus this.
+const double kGateExtraWidthM = 2.0;
+
+/// An installation's truck turning radius (the yard circle).
+const double kInstallationTruckTurnM = 13.0;
+
+// ---- Access easements (§3.7a) ----
+// The corridor numbers are R1's (Access corridors, above). An easement adds
+// none: a crossed lot is BUILT when a placed or grown building stands on it.
+
+// ---- Odd polygons (§3.8) ----
+
+/// A triangle under this area is usually `kerbOnly` (a note, not a rule: the
+/// generators decide by fit).
+const double kTriangleKerbOnlyAreaM2 = 400.0;
+
+/// The capture's `siteMaxGrade` flag (§6.4): `|pad − kerb| / length` above this.
+const double kSiteMaxGradeFraction = 0.15;
+
+// ---- Envelope, entrance, footpaths, lamps (§6.1) ----
+
+/// A footpath from the door to the pavement point.
+const double kFootpathWidthM = 1.5;
+
+/// A kerbside plan's pavement point lies this far in from its slot's kerb
+/// point along the slot normal (inside V11's [kPavementPointMaxM]).
+const double kPavementPointInsetM = 1.5;
