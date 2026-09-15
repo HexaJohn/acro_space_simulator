@@ -107,6 +107,63 @@ class AgentTuning {
   /// short connectors at the fastest limit.
   static int maxHandOversPerStep = 4;
 
+  // ---- Sites: the arrival gate, departures and the home back-out ----------
+  //
+  // Slice T4a (site-access.md §7.4, §7.5; docs/plans/t4a-implementation.md
+  // §1.8). Added once and frozen: the site mover, the gate and the kerb
+  // slots read these, never literals of their own.
+
+  /// The arrival gate (§7.4 steps 3–4): the fastest a car may be to be
+  /// granted the turn in (G3, m/s); the seconds refused after which the
+  /// far-side ETA test is waived (a forced grant, counted); and the seconds
+  /// refused on the throat's room alone after which the car gives the stall
+  /// up and looks for a kerb slot (D17 step 2).
+  static double gateMaxMps = 3;
+  static double gateForcedS = 25;
+  static double gateGiveUpS = 30;
+
+  /// A forward-out departure stops with its front this far inside the kerb
+  /// line (`throatWait`, §7.4 step 4, ROAD's `kSiteThroatStopM`), and accrues
+  /// stuck time there only after this many seconds (step 6).
+  static double throatStopM = 1;
+  static double throatStuckAfterS = 60;
+
+  /// Home back-out gap acceptance (§7.4): the ETA an approaching vehicle in
+  /// the target lane must be at least (s), the far lane's for a
+  /// far-direction departure, the floor the forced grant waives them to,
+  /// and the seconds refused before that forced grant (never with a body in
+  /// the footprint).
+  static double backOutEtaS = 8;
+  static double backOutFarEtaS = 10;
+  static double backOutEtaFloorS = 6;
+  static double backOutForcedS = 120;
+
+  /// Home back-out geometry (§7.4), metres from the join's `T` on the target
+  /// lane: the footprint runs [backOutUpM] upstream (the tail swing) to
+  /// [backOutDownM] downstream; no vehicle may be stopped or queued within
+  /// [backOutQueueM] upstream of it; the opposing and adjacent lanes are
+  /// checked within ±[backOutSideM]. The reverse is no faster than
+  /// [backOutMaxMps].
+  static double backOutUpM = 10;
+  static double backOutDownM = 2;
+  static double backOutQueueM = 15;
+  static double backOutSideM = 6;
+  static double backOutMaxMps = 2;
+
+  /// The stop to shift from reverse to drive once a back-out is in its lane
+  /// (s), and the seconds a deep tandem car waits blocked before the outer
+  /// car is shuffled to a kerb slot (§7.5).
+  static double shiftStopS = 0.5;
+  static double tandemShuffleS = 120;
+
+  /// D17 step 2's reach: kerb slots ahead on the arrival edge within this
+  /// many metres (§7.5). A site change snaps a car moving inside a site to
+  /// the nearest new site lane within [siteSnapM] metres whose direction is
+  /// within the angle of cosine [siteSnapCos] (60°) of its own (§7.6).
+  static double kerbAheadM = 60;
+  static double siteSnapM = 3;
+  static double siteSnapCos = 0.5;
+
   // ---- Measurement ------------------------------------------------------------
 
   /// Agent seconds between published delay tables (§4.2). A search prices
@@ -203,6 +260,25 @@ class AgentTuning {
     wedgeHeads = 3;
     allWayStopQueueCap = 16;
     maxHandOversPerStep = 4;
+    gateMaxMps = 3;
+    gateForcedS = 25;
+    gateGiveUpS = 30;
+    throatStopM = 1;
+    throatStuckAfterS = 60;
+    backOutEtaS = 8;
+    backOutFarEtaS = 10;
+    backOutEtaFloorS = 6;
+    backOutForcedS = 120;
+    backOutUpM = 10;
+    backOutDownM = 2;
+    backOutQueueM = 15;
+    backOutSideM = 6;
+    backOutMaxMps = 2;
+    shiftStopS = 0.5;
+    tandemShuffleS = 120;
+    kerbAheadM = 60;
+    siteSnapM = 3;
+    siteSnapCos = 0.5;
     congestionEpochS = 2.0;
     congestionWindowS = 60;
     laneFlowPerMin = 30;
@@ -244,6 +320,25 @@ class AgentTuning {
         'wedgeHeads': wedgeHeads,
         'allWayStopQueueCap': allWayStopQueueCap,
         'maxHandOversPerStep': maxHandOversPerStep,
+        'gateMaxMps': gateMaxMps,
+        'gateForcedS': gateForcedS,
+        'gateGiveUpS': gateGiveUpS,
+        'throatStopM': throatStopM,
+        'throatStuckAfterS': throatStuckAfterS,
+        'backOutEtaS': backOutEtaS,
+        'backOutFarEtaS': backOutFarEtaS,
+        'backOutEtaFloorS': backOutEtaFloorS,
+        'backOutForcedS': backOutForcedS,
+        'backOutUpM': backOutUpM,
+        'backOutDownM': backOutDownM,
+        'backOutQueueM': backOutQueueM,
+        'backOutSideM': backOutSideM,
+        'backOutMaxMps': backOutMaxMps,
+        'shiftStopS': shiftStopS,
+        'tandemShuffleS': tandemShuffleS,
+        'kerbAheadM': kerbAheadM,
+        'siteSnapM': siteSnapM,
+        'siteSnapCos': siteSnapCos,
         'congestionEpochS': congestionEpochS,
         'congestionWindowS': congestionWindowS,
         'laneFlowPerMin': laneFlowPerMin,

@@ -785,13 +785,28 @@ class JunctionArbiter {
     for (var j = lo; j <= hi; j++) {
       if (!_laneRoom(lg.laneOf(e, j), at, len, s0)) return false;
     }
+    if (fromLeft && !opposingClear(lane, at, len)) return false;
+    return true;
+  }
+
+  /// Whether every lane of the carriageway opposing [lane] is clear across
+  /// the point a vehicle [len] long crosses to reach [at] lane metres of
+  /// [lane], with nothing arriving there inside [kOpposingGapS]: the far
+  /// half of [canJoin]'s pull-out from the left, on its own. True on a road
+  /// with no opposing carriageway.
+  ///
+  /// Public for the site arrival gate (docs/plans/t4a-implementation.md §2):
+  /// a far-side left-in crosses the same lanes the other way, and takes the
+  /// same gap (G2, site-access.md §7.4, ask 14).
+  bool opposingClear(int lane, double at, double len) {
+    final lg = graph;
+    final e = lg.laneEdge[lane];
     final r = lg.edgeReverse[e];
-    if (fromLeft && r >= 0) {
-      final t = lg.edgeLen[e] - (lg.edgeLaneS0[e] + at);
-      final atR = t - lg.edgeLaneS0[r];
-      for (var j = 0; j < lg.edgeLaneCount[r]; j++) {
-        if (!_crossingClear(lg.laneOf(r, j), atR, len)) return false;
-      }
+    if (r < 0) return true;
+    final t = lg.edgeLen[e] - (lg.edgeLaneS0[e] + at);
+    final atR = t - lg.edgeLaneS0[r];
+    for (var j = 0; j < lg.edgeLaneCount[r]; j++) {
+      if (!_crossingClear(lg.laneOf(r, j), atR, len)) return false;
     }
     return true;
   }

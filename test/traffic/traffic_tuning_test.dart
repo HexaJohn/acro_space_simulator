@@ -40,6 +40,28 @@ void main() {
     expect(AgentTuning.graphBuildInlineMaxRoads, 3000);
   });
 
+  test("the site defaults are T4a's (site-access.md §7.4–§7.6)", () {
+    expect(AgentTuning.gateMaxMps, 3);
+    expect(AgentTuning.gateForcedS, 25);
+    expect(AgentTuning.gateGiveUpS, 30);
+    expect(AgentTuning.throatStopM, 1);
+    expect(AgentTuning.throatStuckAfterS, 60);
+    expect(AgentTuning.backOutEtaS, 8);
+    expect(AgentTuning.backOutFarEtaS, 10);
+    expect(AgentTuning.backOutEtaFloorS, 6);
+    expect(AgentTuning.backOutForcedS, 120);
+    expect(AgentTuning.backOutUpM, 10);
+    expect(AgentTuning.backOutDownM, 2);
+    expect(AgentTuning.backOutQueueM, 15);
+    expect(AgentTuning.backOutSideM, 6);
+    expect(AgentTuning.backOutMaxMps, 2);
+    expect(AgentTuning.shiftStopS, 0.5);
+    expect(AgentTuning.tandemShuffleS, 120);
+    expect(AgentTuning.kerbAheadM, 60);
+    expect(AgentTuning.siteSnapM, 3);
+    expect(AgentTuning.siteSnapCos, 0.5);
+  });
+
   test('reset puts back every knob a test turned', () {
     final defaults = AgentTuning.snapshot();
 
@@ -61,6 +83,25 @@ void main() {
     AgentTuning.wedgeHeads = 1;
     AgentTuning.allWayStopQueueCap = 1;
     AgentTuning.maxHandOversPerStep = 1;
+    AgentTuning.gateMaxMps = 1;
+    AgentTuning.gateForcedS = 1;
+    AgentTuning.gateGiveUpS = 1;
+    AgentTuning.throatStopM = 2;
+    AgentTuning.throatStuckAfterS = 1;
+    AgentTuning.backOutEtaS = 1;
+    AgentTuning.backOutFarEtaS = 1;
+    AgentTuning.backOutEtaFloorS = 1;
+    AgentTuning.backOutForcedS = 1;
+    AgentTuning.backOutUpM = 1;
+    AgentTuning.backOutDownM = 1;
+    AgentTuning.backOutQueueM = 1;
+    AgentTuning.backOutSideM = 1;
+    AgentTuning.backOutMaxMps = 1;
+    AgentTuning.shiftStopS = 1;
+    AgentTuning.tandemShuffleS = 1;
+    AgentTuning.kerbAheadM = 1;
+    AgentTuning.siteSnapM = 1;
+    AgentTuning.siteSnapCos = 1;
     AgentTuning.congestionEpochS = 1;
     AgentTuning.congestionWindowS = 1;
     AgentTuning.laneFlowPerMin = 1;

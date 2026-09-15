@@ -781,6 +781,10 @@ class _Core implements PathResolver, PathSink, VehicleSink {
       _rmOp[sl] = _opNone;
       if (!t.isSlotLive(sl)) continue;
       final el = t.elem[sl];
+      // Inside a site, off the road: it holds no element of the old graph
+      // to be carried from, and stays unplaced here; the site mover remaps
+      // its held road route (docs/plans/t4a-implementation.md §1.2, §2).
+      if (el < 0) continue;
       final off = t.routeOff[sl], len = t.routeLen[sl], cur = t.routeCur[sl];
       final destS = t.destS[sl].toDouble();
       if (el < nOld) {
@@ -942,6 +946,9 @@ class _Core implements PathResolver, PathSink, VehicleSink {
   /// Each element's list, head to tail, is its vehicles by descending
   /// place, and moving one back never takes it behind the next: the
   /// relinked order stands.
+  ///
+  /// It walks the lists, never a slot's element: a vehicle inside a site
+  /// (element −1) is on no list, and is never met here.
   void _separate(LaneGraph next) {
     final t = table;
     final nEl = next.elementCount;

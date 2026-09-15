@@ -307,7 +307,12 @@ List<String> occupancyErrors(VehicleTable t) {
     if (t.elemCount[el] != n) errs.add('element $el: count ${t.elemCount[el]}, not $n');
   }
   for (var sl = 0; sl < t.highWater; sl++) {
-    if (t.isSlotLive(sl) && !seen.contains(sl)) errs.add('slot $sl not listed');
+    // A vehicle inside a site is on no element and on no list, by design
+    // (T4a, docs/plans/t4a-implementation.md §1.2): only a vehicle ON the
+    // road must be listed.
+    if (t.isSlotLive(sl) && t.elem[sl] >= 0 && !seen.contains(sl)) {
+      errs.add('slot $sl not listed');
+    }
   }
   return errs;
 }

@@ -32,6 +32,7 @@ import 'dart:typed_data';
 
 import 'lane_graph.dart';
 import 'node_control.dart';
+import 'site_vehicles.dart';
 import 'vehicle_table.dart';
 
 /// Bits of [AgentFrame.flags].
@@ -164,8 +165,18 @@ class AgentFrameBuilder {
   /// Writes the next column set from [table] and returns the frame over it,
   /// stamped with agent time [timeUs]. Allocates only the frame itself —
   /// and, when the table has grown, the column set it is written to.
+  ///
+  /// [site] and [sitesRev] are the site columns and revision the frame will
+  /// carry (`siteOrd`/`siteLane`, site-access.md §7.6, §13.1): accepted now
+  /// so the facade can pass them, and read by nothing until the wire lands
+  /// (package F, docs/plans/t4a-implementation.md §2). A vehicle inside a
+  /// site already publishes element −1, which the renderer does not draw.
   AgentFrame publish(VehicleTable table,
-      {required int timeUs, double worldEpochS = 0, int graphRev = 0}) {
+      {required int timeUs,
+      double worldEpochS = 0,
+      int graphRev = 0,
+      SiteVehicles? site,
+      int sitesRev = 0}) {
     final k = _next;
     var set = _sets[k];
     if (set == null || set.capacity < table.capacity) {

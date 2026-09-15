@@ -16,7 +16,11 @@
 /// or `laneCount + c` on connector c — and `s`, the metres its FRONT has
 /// come along that element. Its body runs `len` metres back from there, so
 /// a car that has just crossed into a lane still has its tail on the
-/// connector behind it; the mover and the arbiter both allow for that.
+/// connector behind it; the mover and the arbiter both allow for that. A
+/// vehicle inside a site is on no element: its element is −1 and it is on
+/// no list (D49, docs/plans/t4a-implementation.md §1.2), so everything that
+/// walks the lists never meets it, and everything that reads an element by
+/// slot checks for −1 first.
 ///
 /// Its route is the locked connector list the planner returned,
 /// `[firstLane, c₁, …, c_n]`, copied into the [RouteArena]. [routeCur] is
@@ -63,6 +67,19 @@ enum VehicleState {
 
   /// Despawned at the end of this sub-step.
   leaving,
+
+  /// Inside a site (docs/plans/t4a-implementation.md §1.2, D49): off the
+  /// road, its [VehicleTable.elem] −1 and on no element's list. Where it is
+  /// lives in the site columns (`SiteVehicles.row`/`lane`) and its
+  /// [VehicleTable.s]; the site mover moves it, and the road mover never
+  /// sees it.
+  onSite,
+
+  /// On the road but not driving it: a car whose pose the site mover owns
+  /// for a scripted manoeuvre (a home back-out's reverse and tail swing,
+  /// site-access.md §7.4). The road mover treats it as it treats a dwell —
+  /// a stationary obstacle in its lane, its stuck timer frozen.
+  manoeuvre,
 }
 
 /// Bits of [VehicleTable.flags].
@@ -70,11 +87,15 @@ enum VehicleState {
 /// [kHalted]: it has come to rest at the stop line it is waiting at, as a
 /// stop sign demands. [kInFifo]: it holds a place in an all-way stop's
 /// arrival queue. [kHandedOver]: it moved onto a new element this sub-step.
-/// [kRefused]: the junction ahead refused it this sub-step.
+/// [kRefused]: the junction ahead refused it this sub-step. [kReversing]: a
+/// home back-out in its target lane, logged EXIT as its rear crossed the
+/// kerb line (site-access.md §7.4): followers see its footprint as a
+/// stopped obstacle.
 const int kHalted = 1;
 const int kInFifo = 2;
 const int kHandedOver = 4;
 const int kRefused = 8;
+const int kReversing = 16;
 
 /// How each kind of vehicle drives and how long it is (§5.3).
 ///
@@ -215,7 +236,8 @@ class VehicleTable implements LaneLoad {
   /// The [GrantReason] index of the last clearance the arbiter gave it.
   late Uint8List grant;
 
-  /// Its element, and the route edge it is on or heading onto.
+  /// Its element (−1 inside a site), and the route edge it is on or heading
+  /// onto.
   late Int32List elem, routeCur;
 
   /// Its route block in [arena]: offset and length.
@@ -283,7 +305,8 @@ class VehicleTable implements LaneLoad {
 
   /// Vehicles on [lane] now: the lane planner's tie-break (§4.5).
   @override
-  int vehiclesOn(int lane) => lane < elemCount.length ? elemCount[lane] : 0;
+  int vehiclesOn(int lane) =>
+      lane >= 0 && lane < elemCount.length ? elemCount[lane] : 0;
 
   void _allocColumns(int n) {
     kind = Uint8List(n);
@@ -401,10 +424,12 @@ class VehicleTable implements LaneLoad {
   int connectorOfRouteEdge(int slot, int i) => arena.data[routeOff[slot] + i];
 
   /// The element [slot] moves onto after its current one, or −1 on its last
-  /// edge.
+  /// edge — and −1 off the road (a vehicle inside a site, [detach]), whose
+  /// next place is no element at all until it is attached.
   int nextElemOf(int slot) {
     final lg = graph;
     final el = elem[slot];
+    if (el < 0) return -1;
     if (el >= lg.laneCount) return lg.conToLane[el - lg.laneCount];
     final i = routeCur[slot] + 1;
     if (i >= routeLen[slot]) return -1;
@@ -484,13 +509,82 @@ class VehicleTable implements LaneLoad {
     final laneLen = lg.laneLength(lane);
     if (at < 0) at = 0;
     if (at > laneLen) at = laneLen;
+    _init(sl, kind, lane, off, routeLength, at, speed, lg.edgeLimit[e],
+        destT, nowUs, purpose, variant, owner, speedFactor, freeFlowS);
+    link(sl);
+    return h;
+  }
+
+  /// A new vehicle OFF the road (docs/plans/t4a-implementation.md §1.4): a
+  /// car that starts its trip in a site stall. Everything [spawn] sets is
+  /// set, the route included, but its [elem] is −1, its [s] 0 and its speed
+  /// 0, and it is on no element's list; the caller marks it
+  /// `VehicleState.onSite` (it starts [VehicleState.driving], as [spawn]
+  /// does) and the site mover drives it to its throat, where [attach] puts
+  /// it on the road.
+  ///
+  /// [originT] is where on the route's first edge the road leg will start:
+  /// the table keeps no column for it (the facade's planner does), but it is
+  /// asked for so both spawns read alike at their call sites. [SlotPool.none]
+  /// when the table is full or the route too long, as for [spawn].
+  int spawnDetached({
+    required AgentKind kind,
+    required Int32List route,
+    required int routeLength,
+    required double originT,
+    required double destT,
+    required int nowUs,
+    TripPurpose purpose = TripPurpose.commute,
+    int variant = 0,
+    int owner = -1,
+    double speedFactor = 1.0,
+    double freeFlowS = 0,
+  }) {
+    if (routeLength < 1 || routeLength > RouteArena.maxBlock) {
+      return SlotPool.none;
+    }
+    final h = pool.alloc();
+    if (h == SlotPool.none) return h;
+    final sl = h & SlotPool.slotMask;
+    final lg = graph;
+    final off = arena.alloc(routeLength);
+    arena.data.setRange(off, off + routeLength, route);
+    // The desired speed of the road it will pull out onto; the site mover
+    // caps its own speeds, and [attach] sets this again.
+    final limit = lg.edgeLimit[lg.laneEdge[route[0]]];
+    _init(sl, kind, -1, off, routeLength, 0, 0, limit, destT, nowUs, purpose,
+        variant, owner, speedFactor, freeFlowS);
+    prev[sl] = -1;
+    next[sl] = -1;
+    return h;
+  }
+
+  /// Every column of a vehicle just handed slot [sl]: [spawn]'s and
+  /// [spawnDetached]'s one initialisation, so the two can never disagree on
+  /// a column one of them forgot.
+  void _init(
+      int sl,
+      AgentKind kind,
+      int element,
+      int off,
+      int routeLength,
+      double at,
+      double speed,
+      double limit,
+      double destT,
+      int nowUs,
+      TripPurpose purpose,
+      int variant,
+      int owner,
+      double speedFactor,
+      double freeFlowS) {
     this.kind[sl] = kind.index;
     this.variant[sl] = variant & 0xFF;
     state[sl] = VehicleState.driving.index;
     this.purpose[sl] = purpose.index;
     flags[sl] = 0;
     grant[sl] = 0;
-    elem[sl] = lane;
+    elem[sl] = element;
     routeCur[sl] = 0;
     routeOff[sl] = off;
     routeLen[sl] = routeLength;
@@ -502,7 +596,7 @@ class VehicleTable implements LaneLoad {
     v[sl] = speed;
     a[sl] = 0;
     f[sl] = speedFactor;
-    v0[sl] = lg.edgeLimit[e] * speedFactor;
+    v0[sl] = limit * speedFactor;
     len[sl] = VehicleKinds.lengthM[kind.index];
     destS[sl] = destT;
     movedM[sl] = 0;
@@ -512,8 +606,6 @@ class VehicleTable implements LaneLoad {
     odo[sl] = 0;
     edgeEnterUs[sl] = nowUs.toDouble();
     tripT0Us[sl] = nowUs.toDouble();
-    link(sl);
-    return h;
   }
 
   /// Takes [handle] off the road: out of its element's list, its route
@@ -536,9 +628,11 @@ class VehicleTable implements LaneLoad {
 
   /// Puts [slot] into its element's list, in order of [s]: walked from the
   /// tail, so a vehicle arriving at the back — every hand-over — costs one
-  /// step. Equal [s] goes behind.
+  /// step. Equal [s] goes behind. A vehicle off the road ([elem] −1, inside
+  /// a site) has no list, and is left out.
   void link(int slot) {
     final el = elem[slot];
+    if (el < 0) return;
     final at = s[slot];
     var ahead = elemTail[el];
     while (ahead >= 0 && s[ahead] < at) {
@@ -589,8 +683,10 @@ class VehicleTable implements LaneLoad {
     elemCount[el]--;
   }
 
-  /// Re-inserts every live vehicle, in slot order, at its [elem] and [s]:
-  /// after a rebuild has placed them on the new graph.
+  /// Re-inserts every live vehicle on the road, in slot order, at its [elem]
+  /// and [s]: after a rebuild has placed them on the new graph. A vehicle
+  /// inside a site ([elem] −1) holds no road element to relink: the site
+  /// mover relinks its own lists (docs/plans/t4a-implementation.md §1.2).
   void relinkAll() {
     elemHead.fillRange(0, elemHead.length, -1);
     elemTail.fillRange(0, elemTail.length, -1);
@@ -600,8 +696,59 @@ class VehicleTable implements LaneLoad {
       next[sl] = -1;
     }
     for (var sl = 0; sl < highWater; sl++) {
-      if (pool.isSlotLive(sl)) link(sl);
+      if (pool.isSlotLive(sl) && elem[sl] >= 0) link(sl);
     }
+  }
+
+  // ---- Access events: off the road and back (site-access.md §7.4) ----------
+
+  /// Takes [slot] off the road into a site: out of its element's list, its
+  /// [elem] −1 (an ENTER, docs/plans/t4a-implementation.md §1.2). Its route
+  /// block, its speed and its [s] are left as they are, for the site mover
+  /// to set; so is [state], which the caller makes `VehicleState.onSite`.
+  /// Whatever it held at a junction — a pass, a queue place — is the
+  /// caller's to release first (`JunctionArbiter.release`), as for [free].
+  /// Detaching a vehicle already off the road changes nothing.
+  void detach(int slot) {
+    unlink(slot);
+    elem[slot] = -1;
+    prev[slot] = -1;
+    next[slot] = -1;
+  }
+
+  /// Puts [slot], off the road, into [lane] with its front at [laneS] lane
+  /// metres (clamped onto the lane) moving at [speed]: an EXIT
+  /// (docs/plans/t4a-implementation.md §1.4). The caller has set the route
+  /// it drives from here ([setRoute], `routeCur` the edge [lane] is on) and
+  /// its state; the flags are its too (a home back-out sets [kReversing]).
+  ///
+  /// The desired speed is the lane's, and the stuck clock starts afresh: a
+  /// car just out of a site has not been stuck on this road. Its entry time
+  /// is marked −1, as for a vehicle that pulled out part way along an edge:
+  /// it observes nothing on this edge (§4.2, `VehicleMover`'s delay books),
+  /// whose free time would be the whole lane's. [nowUs], the sub-step of the
+  /// EXIT, is asked for as [spawn] asks for it; no column keeps it today.
+  void attach(int slot, int lane, double laneS,
+      {double speed = 0, required int nowUs}) {
+    final lg = graph;
+    if (elem[slot] >= 0) unlink(slot);
+    final laneLen = lg.laneLength(lane);
+    var at = laneS;
+    if (at < 0) at = 0;
+    if (at > laneLen) at = laneLen;
+    elem[slot] = lane;
+    s[slot] = at;
+    v[slot] = speed;
+    a[slot] = 0;
+    v0[slot] = lg.edgeLimit[lg.laneEdge[lane]] * f[slot];
+    sPre[slot] = at;
+    vPre[slot] = speed;
+    stuckUs[slot] = 0;
+    movedM[slot] = 0;
+    waitUs[slot] = 0;
+    pass[slot] = -1;
+    edgeEnterUs[slot] = -1;
+    link(slot);
   }
 
   /// Packs the arena when fragmentation calls for it (§2.10): every live

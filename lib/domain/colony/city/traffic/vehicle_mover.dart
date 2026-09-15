@@ -27,8 +27,10 @@
 /// inside a step. A vehicle's leader is the car ahead on its own element;
 /// else the last car on the next elements of ITS route (at most
 /// [kLookAheadElems] elements or [kLookAheadM] metres on); else a virtual
-/// standing car at a stop line the arbiter refuses it, at its own stop, or
-/// at the end of the edge it is held on. A hard limit on top keeps the
+/// standing car at a stop line the arbiter refuses it, at its own stop, at
+/// the end of the edge it is held on, or at an obstacle [LaneObstacles]
+/// reports in its lane (a home back-out's footprint or claim,
+/// site-access.md §7.4). A hard limit on top keeps the
 /// front [kLeaderClearM] behind the leader's tail whatever the model says:
 /// nothing ever overlaps.
 ///
@@ -52,6 +54,7 @@ import 'dart:typed_data';
 
 import 'junction_arbiter.dart';
 import 'lane_graph.dart';
+import 'lane_obstacles.dart';
 import 'slot_pool.dart';
 import 'traffic_time.dart';
 import 'traffic_tuning.dart';
@@ -172,6 +175,12 @@ class VehicleMover {
   final VehicleTable table;
   final JunctionArbiter arbiter;
 
+  /// Obstacles in road lanes that are on no list: the site mover's back-out
+  /// footprints and far-direction claims (docs/plans/t4a-implementation.md
+  /// §2). Null, or a count of 0, and no vehicle asks — the road mover costs
+  /// what it did before sites.
+  LaneObstacles? obstacles;
+
   LaneGraph? _lg;
 
   // ---- Counters -------------------------------------------------------------
@@ -232,6 +241,9 @@ class VehicleMover {
   final Int32List _victims = Int32List(64);
   final IdmStep _idm = IdmStep();
 
+  /// [LaneObstacles.obstacleAhead]'s answer: near end (lane metres), speed.
+  final Float64List _obsOut = Float64List(2);
+
   /// The leader search's answer: the IDM gap and the leader's speed, the
   /// hard limit on how far the front may move and the speed that goes with
   /// it, and the desired speed, lowered for slower elements ahead.
@@ -246,6 +258,7 @@ class VehicleMover {
   static final int _dwelling = VehicleState.dwelling.index;
   static final int _parking = VehicleState.parkingSearch.index;
   static final int _leaving = VehicleState.leaving.index;
+  static final int _manoeuvre = VehicleState.manoeuvre.index;
 
   LaneGraph get graph {
     final lg = _lg;
@@ -287,6 +300,7 @@ class VehicleMover {
     into['$name.edgeStuck'] = edgeStuck;
     into['$name.hand'] = _hand;
     into['$name.victims'] = _victims;
+    into['$name.obsOut'] = _obsOut;
     into['$name.obsEdge'] = obsEdge;
     into['$name.obsS'] = obsS;
     into['$name.obsAtNode'] = obsAtNode;
@@ -385,11 +399,14 @@ class VehicleMover {
   void _move(int sl, int el, int nowUs) {
     final t = table, lg = graph;
     final st = t.state[sl];
-    if (st == _dwelling || st == _leaving) {
+    // A manoeuvring car stands as a dwelling one does: the site mover owns
+    // its pose (a back-out's reverse and swing, site-access.md §7.4), and to
+    // the road it is a stationary obstacle its followers stop behind.
+    if (st == _dwelling || st == _manoeuvre || st == _leaving) {
       t.v[sl] = 0;
       t.a[sl] = 0;
       // Standing in its lane on purpose, it blocks the lane all the same.
-      if (st == _dwelling && el < lg.laneCount) laneSamples[el]++;
+      if (st != _leaving && el < lg.laneCount) laneSamples[el]++;
       return;
     }
     final k = t.kind[sl];
@@ -422,6 +439,19 @@ class VehicleMover {
       } else if (st == _hold) {
         final dist = elemLen - s;
         _lead(dist + s0 - kStopShortM, 0, dist - kLineClearM);
+      }
+    }
+    // An obstacle on no list — a back-out's footprint, a far-direction
+    // claim — in the lane it is on or, from a connector, the lane it is
+    // entering: a leader like any other (§7.4). A local, promoted directly:
+    // never through a boolean (agent_traffic_readout.dart `_lotsStep`).
+    final obs = obstacles;
+    if (obs != null && obs.count > 0) {
+      final lane = onLane ? el : lg.conToLane[el - nL];
+      final at = onLane ? s : s - elemLen;
+      if (obs.obstacleAhead(lane, at, _obsOut)) {
+        final g = _obsOut[0] - at;
+        _lead(g, _obsOut[1], g - kLeaderClearM);
       }
     }
 
@@ -728,6 +758,9 @@ class VehicleMover {
         continue;
       }
       final el = t.elem[sl];
+      // Off the road, inside a site: its arrival and its clocks are the
+      // site mover's (docs/plans/t4a-implementation.md §1.2).
+      if (el < 0) continue;
       if (st == _driving &&
           el < nL &&
           t.routeCur[sl] >= t.routeLen[sl] - 1 &&
