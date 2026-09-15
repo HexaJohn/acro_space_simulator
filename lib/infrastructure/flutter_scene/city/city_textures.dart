@@ -36,6 +36,15 @@ class CityTextures {
 
   static Future<void>? _loading;
 
+  /// A host-visible RGBA texture [width] × [height], one level, whose bytes
+  /// are rewritten in place (the road overlay's palette).
+  static Object hostTexture(int width, int height) => gpu.gpuContext
+      .createTexture(gpu.StorageMode.hostVisible, width, height);
+
+  /// [rgba] over the whole of [texture] (a [hostTexture]).
+  static void overwrite(Object texture, Uint8List rgba) =>
+      (texture as gpu.Texture).overwrite(ByteData.sublistView(rgba));
+
   static bool get ready =>
       facade != null &&
       glazing != null &&

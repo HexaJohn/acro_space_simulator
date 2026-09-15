@@ -17,6 +17,8 @@
 /// one integer compare.
 library;
 
+import 'dart:typed_data';
+
 import '../../../domain/shared/vector3.dart';
 
 /// How the road being drawn reads.
@@ -142,6 +144,50 @@ class RoadOverlayState {
   /// is held below ground. The renderer may also use it to reveal portals.
   bool showUnderground = false;
 
+  // ---- Palette lines: shapes kept, colours rewritten -------------------------
+
+  /// Many lines whose SHAPES stay put while their COLOURS change often — the
+  /// Lane speed view's ribbons, one a lane, recoloured every couple of
+  /// seconds. Drawn in their own node, apart from [lines]: their geometry is
+  /// meshed once per [paletteShapeKey], and a recolour rewrites a palette
+  /// texture of four bytes a line, never the mesh. Each line's own
+  /// [OverlayLine.argb] is ignored; [paletteArgb] colours it.
+  List<OverlayLine> paletteLines = const [];
+
+  /// What the shapes of [paletteLines] were laid from. The writer's promise:
+  /// while it is `==` to the last, every line has the same points, width and
+  /// lift as before, in the same order — so only the colours can differ.
+  Object? paletteShapeKey;
+
+  /// One colour per [paletteLines] entry, 0xAARRGGBB.
+  Uint32List paletteArgb = Uint32List(0);
+
+  /// Bumped by [setPalette] and a cleared palette; the renderer's question.
+  int paletteRevision = 0;
+
+  /// Publish palette lines: [lines] laid from [shapeKey], coloured [argb]
+  /// (one each). With the same key as last time the renderer only
+  /// recolours; with another it meshes the lines again.
+  void setPalette(List<OverlayLine> lines,
+      {required Object shapeKey, required Uint32List argb}) {
+    if (argb.length != lines.length) {
+      throw ArgumentError('${argb.length} colours for ${lines.length} lines');
+    }
+    paletteLines = lines;
+    paletteShapeKey = shapeKey;
+    paletteArgb = argb;
+    paletteRevision++;
+  }
+
+  /// Draw no palette lines.
+  void clearPalette() {
+    if (paletteLines.isEmpty && paletteShapeKey == null) return;
+    paletteLines = const [];
+    paletteShapeKey = null;
+    paletteArgb = Uint32List(0);
+    paletteRevision++;
+  }
+
   /// Publish a change: the renderer redraws on its next frame.
   void changed() => revision++;
 
@@ -158,6 +204,7 @@ class RoadOverlayState {
     lines = const [];
     markers = const [];
     showUnderground = false;
+    clearPalette();
     if (hadAny) changed();
   }
 }

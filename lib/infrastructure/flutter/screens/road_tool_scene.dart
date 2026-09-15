@@ -22,6 +22,7 @@
 library;
 
 import 'dart:math' as math;
+import 'dart:typed_data';
 import 'dart:ui' show Offset;
 
 import '../../../domain/colony/city/city_sim.dart';
@@ -279,6 +280,7 @@ class RoadToolScene {
     }
     o.lines = lines;
     o.markers = markers;
+    o.clearPalette();
     o.changed();
   }
 
@@ -304,6 +306,7 @@ class RoadToolScene {
     o.lines = const [];
     o.markers = const [];
     o.showUnderground = false;
+    o.clearPalette();
     o.changed();
   }
 
@@ -330,9 +333,16 @@ class RoadToolScene {
       case TrafficInfoView.adjust:
         (lines, markers, ghost) = _adjustFrame(city, c, pxM);
       case TrafficInfoView.laneSpeed:
-        lines = TrafficLaneSpeedOverlay.of(this).lines(city.agents.laneSpeeds,
-            drape: drape, bodyId: _bodyId, groundKey: _groundKey);
+        // The ribbons go to the palette channel: meshed once per lane graph
+        // and ground, recoloured by a few kilobytes of texture a band change
+        // (RoadOverlayState.paletteLines).
+        final speeds = city.agents.laneSpeeds;
+        _publishLanes(
+            TrafficLaneSpeedOverlay.of(this).lines(speeds,
+                drape: drape, bodyId: _bodyId, groundKey: _groundKey),
+            (speeds.laneGraph, speeds.graphRev, _bodyId, _groundKey));
     }
+    if (c.trafficView != TrafficInfoView.laneSpeed) overlay.clearPalette();
     if (!ghost &&
         o.ghostBF.isEmpty &&
         !o.showUnderground &&
@@ -347,6 +357,24 @@ class RoadToolScene {
     o.lines = lines;
     o.markers = markers;
     o.changed();
+  }
+
+  /// [lanes] as palette lines laid from [shapeKey]: said again only when the
+  /// list handed back is a new one (a lane changed band, or the lanes were
+  /// laid again), its colours read off the lines.
+  void _publishLanes(List<OverlayLine> lanes, Object shapeKey) {
+    final o = overlay;
+    if (o.bodyId == _bodyId && identical(o.paletteLines, lanes)) return;
+    o.bodyId = _bodyId;
+    if (lanes.isEmpty) {
+      o.clearPalette();
+      return;
+    }
+    final argb = Uint32List(lanes.length);
+    for (var i = 0; i < lanes.length; i++) {
+      argb[i] = lanes[i].argb;
+    }
+    o.setPalette(lanes, shapeKey: shapeKey, argb: argb);
   }
 
   /// The end of [roadId] within [withinM] of [p], or null.

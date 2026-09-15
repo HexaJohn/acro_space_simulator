@@ -4,6 +4,7 @@
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/scatter/mesh_builder.dart';
@@ -237,6 +238,102 @@ void main() {
       final pts = eastward(3);
       s.ghostBF = pts;
       expect(RoadOverlayMesher.anchorOf(s), pts.first);
+    });
+  });
+
+  group('palette lines (shapes kept, colours rewritten)', () {
+    /// [n] parallel lines, each 4 points, [gapM] apart.
+    List<OverlayLine> lanes(int n, {double gapM = 3}) => [
+          for (var k = 0; k < n; k++)
+            OverlayLine(
+              pointsBF: [
+                for (var i = 0; i < 4; i++)
+                  Vector3(radius, -i * 10.0, k * gapM).normalized * radius,
+              ],
+              argb: 0xFF123456, // ignored: the palette colours it
+              widthM: 2.2,
+              liftM: 0.95,
+            ),
+        ];
+
+    test('the palette: rows a power of two of 1024-texel rows, RGBA bytes',
+        () {
+      expect(OverlayPalette.rowsFor(0), 1);
+      expect(OverlayPalette.rowsFor(1024), 1);
+      expect(OverlayPalette.rowsFor(1025), 2);
+      expect(OverlayPalette.rowsFor(2109), 4);
+      expect(OverlayPalette.rowsFor(20000), 32);
+      final argb = Uint32List.fromList([0xD943A047, 0x80FFB300]);
+      final rgba = Uint8List(OverlayPalette.width * 4);
+      OverlayPalette.write(argb, rgba);
+      expect(rgba.sublist(0, 8), [0x43, 0xA0, 0x47, 0xD9, 0xFF, 0xB3, 0x00, 0x80]);
+      expect(OverlayPalette.uvOf(0, 4), (0.5 / 1024, 0.5 / 4));
+      expect(OverlayPalette.uvOf(1025, 4), (1.5 / 1024, 1.5 / 4));
+    });
+
+    test('every vertex of line i samples texel i; white; the same strips '
+        'the lines draw as ordinary lines', () {
+      final lines = lanes(3);
+      final m = RoadOverlayMesher.buildPalette(lines, anchor);
+      s.lines = lines;
+      final plain = RoadOverlayMesher.build(s, anchor).translucent;
+      expect(m.triangleCount, plain.triangleCount);
+      expect(m.positions, plain.positions);
+      // 4 points a line, two vertices a point.
+      expect(m.vertexCount, 3 * 8);
+      final uv = m.texCoords;
+      for (var v = 0; v < m.vertexCount; v++) {
+        final (u, w) = OverlayPalette.uvOf(v ~/ 8, OverlayPalette.rowsFor(3));
+        expect((uv[2 * v], uv[2 * v + 1]), (u, w), reason: 'vertex $v');
+        expect(m.colorAt(v), [1.0, 1.0, 1.0, 1.0]);
+      }
+    });
+
+    test('the gate meshes on new shapes, recolours on a new revision alone',
+        () {
+      final gate = PaletteOverlayGate();
+      final lines = lanes(2);
+      s.bodyId = 'moon';
+      s.setPalette(lines,
+          shapeKey: (7, 'ground'), argb: Uint32List.fromList([1, 2]));
+      expect(gate.wantsShape(s.paletteShapeKey, lines.length, 'moon', anchor,
+          s.paletteRevision), isTrue);
+      expect(gate.wantsColours(s.paletteRevision), isFalse);
+      for (var frame = 0; frame < 30; frame++) {
+        expect(gate.wantsShape(s.paletteShapeKey, lines.length, 'moon', anchor,
+            s.paletteRevision), isFalse);
+        expect(gate.wantsColours(s.paletteRevision), isFalse);
+      }
+      // A band change: a new list of the same shapes, under the same key.
+      s.setPalette(lanes(2),
+          shapeKey: (7, 'ground'), argb: Uint32List.fromList([3, 4]));
+      expect(gate.wantsShape(s.paletteShapeKey, 2, 'moon', anchor,
+          s.paletteRevision), isFalse);
+      expect(gate.wantsColours(s.paletteRevision), isTrue);
+      expect(gate.wantsColours(s.paletteRevision), isFalse);
+      // A rebuilt lane graph: another key meshes again.
+      s.setPalette(lanes(2),
+          shapeKey: (8, 'ground'), argb: Uint32List.fromList([3, 4]));
+      expect(gate.wantsShape(s.paletteShapeKey, 2, 'moon', anchor,
+          s.paletteRevision), isTrue);
+      expect(gate.wantsColours(s.paletteRevision), isFalse);
+      expect((gate.shapes, gate.recolours), (2, 1));
+    });
+
+    test('the state: one colour a line, cleared with the rest', () {
+      expect(
+          () => s.setPalette(lanes(2),
+              shapeKey: 1, argb: Uint32List.fromList([1])),
+          throwsArgumentError);
+      final before = s.paletteRevision;
+      s.setPalette(lanes(2), shapeKey: 1, argb: Uint32List.fromList([1, 2]));
+      expect(s.paletteRevision, before + 1);
+      s.clear();
+      expect(s.paletteLines, isEmpty);
+      expect(s.paletteShapeKey, isNull);
+      expect(s.paletteRevision, before + 2);
+      s.clearPalette();
+      expect(s.paletteRevision, before + 2, reason: 'nothing to clear');
     });
   });
 }

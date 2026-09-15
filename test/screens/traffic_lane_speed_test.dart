@@ -209,17 +209,28 @@ void main() {
         ..set(CityEditTool.traffic)
         ..setTrafficView(TrafficInfoView.laneSpeed);
       s.showTraffic(city, c);
-      expect(o.lines, isNotEmpty);
-      expect(o.lines.first.argb,
+      // The ribbons ride the palette channel: shapes meshed once, colours
+      // in a texture (RoadOverlayState.paletteLines).
+      expect(o.lines, isEmpty);
+      expect(o.paletteLines, isNotEmpty);
+      expect(o.paletteArgb, hasLength(o.paletteLines.length));
+      expect(o.paletteArgb.first,
           anyOf(TrafficLaneSpeedOverlay.greenArgb,
               TrafficLaneSpeedOverlay.amberArgb,
               TrafficLaneSpeedOverlay.redArgb));
-      final rev = o.revision;
+      final rev = o.revision, palette = o.paletteRevision;
+      final key = o.paletteShapeKey;
       for (var i = 1; i <= 10; i++) {
         s.hover = Vec2(5.0 + i, 5);
         s.showTraffic(city, c);
       }
       expect(o.revision, rev, reason: 'only the mouse moved');
+      expect(o.paletteRevision, palette, reason: 'only the mouse moved');
+      expect(o.paletteShapeKey, key);
+      // Another view puts the ribbons down.
+      c.setTrafficView(TrafficInfoView.routes);
+      s.showTraffic(city, c);
+      expect(o.paletteLines, isEmpty);
     });
 
     Future<CityEditController> pumpTraffic(WidgetTester t, CitySim city) async {

@@ -989,9 +989,10 @@ class TerrainNodes {
 
     // Focus on the surface — the followed vessel if any, else the camera.
     final fv = focusVesselId == null ? null : snap.vessels[focusVesselId];
-    final vesselFocus = fv != null;
     var anchorWorld = eyeWorld;
-    if (vesselFocus) {
+    // Tested on fv itself, never through a bool local: this SDK's AOT build
+    // can read through a promotion made by one.
+    if (fv != null) {
       final vb = snap.bodies[fv.body];
       if (vb != null) {
         anchorWorld = Vector3(vb.px + fv.px, vb.py + fv.py, vb.pz + fv.pz);

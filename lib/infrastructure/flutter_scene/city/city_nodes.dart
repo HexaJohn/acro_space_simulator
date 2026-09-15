@@ -583,6 +583,14 @@ class CityNodes {
   /// vertices, in the depth-sorted blended pass.
   fs.UnlitMaterial? _overlayMaterial;
 
+  /// The palette lines' node (see [RoadOverlayState.paletteLines]): meshed
+  /// once per shape key, recoloured through [_paletteTexture].
+  fs.Node? _paletteNode;
+  final PaletteOverlayGate _paletteGate = PaletteOverlayGate();
+  Object? _paletteTexture;
+  Uint8List _paletteBytes = Uint8List(0);
+  int _paletteRows = 0;
+
   /// What [_cursorNode] was built from, so an unmoved mouse costs nothing.
   Object? _cursorKey;
 
@@ -1232,6 +1240,7 @@ class CityNodes {
     _syncZoning(snap, origin, moved);
     _syncInstantRoads(snap, origin, moved);
     _syncRoadOverlay(snap, origin, moved);
+    _syncPaletteOverlay(snap, origin, moved);
     _syncAgentExtras(snap, origin, moved);
     phaseMs['city.cursor'] = sw.elapsedMicroseconds / 1000;
 
@@ -2273,6 +2282,7 @@ class CityNodes {
     // overlay's gate forgets it was built.
     _dropInstantNodes();
     _dropRoadOverlay();
+    _dropPaletteOverlay();
     final cursor = _cursorNode;
     if (cursor != null) {
       _scene.remove(cursor);
@@ -2681,6 +2691,97 @@ class CityNodes {
     _removeOverlayNode();
     _overlayGate.reset();
     _overlayMaterial = null;
+  }
+
+  /// Draw [RoadOverlayState.paletteLines]: meshed only when their shape key,
+  /// count, body or anchor moves; otherwise a new palette revision rewrites
+  /// the palette texture (four bytes a line, a power-of-two number of
+  /// 1024-texel rows) and nothing else. A frame with neither costs two
+  /// compares.
+  void _syncPaletteOverlay(
+      WorldSnapshot snap, FloatingOrigin origin, Map<String, bool> moved) {
+    final s = RoadOverlayState.instance;
+    final lines = s.paletteLines;
+    final body = snap.bodies[s.bodyId];
+    Vector3? first;
+    for (final l in lines) {
+      if (l.pointsBF.length >= 2) {
+        first = l.pointsBF.first;
+        break;
+      }
+    }
+    if (body == null || first == null) {
+      _dropPaletteOverlay();
+      return;
+    }
+    final anchor = _roots[s.bodyId]?.anchorBF ?? first;
+    phaseCount['overlay.paletteBytes'] = 0;
+    if (_paletteGate.wantsShape(s.paletteShapeKey, lines.length, s.bodyId,
+        anchor, s.paletteRevision)) {
+      _removePaletteNode();
+      final rows = OverlayPalette.rowsFor(lines.length);
+      if (_paletteTexture == null || rows != _paletteRows) {
+        _paletteRows = rows;
+        _paletteBytes = Uint8List(OverlayPalette.width * rows * 4);
+        _paletteTexture = CityTextures.hostTexture(OverlayPalette.width, rows);
+      }
+      _writePalette(s.paletteArgb);
+      final m = RoadOverlayMesher.buildPalette(lines, anchor);
+      if (m.isEmpty) return;
+      final node = fs.Node(
+        mesh: fs.Mesh(
+          fs.MeshGeometry.fromArrays(
+            positions: m.positions,
+            normals: m.normals,
+            texCoords: m.texCoords,
+            indices: m.indices,
+            retainCpuData: false,
+          ),
+          // Its colour from the palette texel under its UVs, nothing from
+          // the vertices; blended like the rest of the overlay.
+          fs.UnlitMaterial()
+            ..baseColorTexture = _paletteTexture
+            ..alphaMode = fs.AlphaMode.blend
+            ..vertexColorWeight = 0.0,
+        ),
+      )..castsShadow = false;
+      node.localTransform = _anchorTransform(body, anchor, origin);
+      _scene.add(node);
+      _paletteNode = node;
+      return;
+    }
+    if (_paletteGate.wantsColours(s.paletteRevision)) {
+      _writePalette(s.paletteArgb);
+    }
+    final node = _paletteNode;
+    if (node != null && (moved[s.bodyId] ?? true)) {
+      node.localTransform = _anchorTransform(body, anchor, origin);
+    }
+  }
+
+  /// [argb] into the palette texture, whole.
+  void _writePalette(Uint32List argb) {
+    final tex = _paletteTexture;
+    if (tex == null) return;
+    OverlayPalette.write(argb, _paletteBytes);
+    CityTextures.overwrite(tex, _paletteBytes);
+    phaseCount['overlay.paletteBytes'] = _paletteBytes.length;
+  }
+
+  void _removePaletteNode() {
+    final node = _paletteNode;
+    if (node == null) return;
+    _scene.remove(node);
+    _paletteNode = null;
+  }
+
+  /// Drop the palette lines' node and texture, so the next sync meshes
+  /// them again.
+  void _dropPaletteOverlay() {
+    _removePaletteNode();
+    _paletteGate.reset();
+    _paletteTexture = null;
+    _paletteRows = 0;
   }
 
   /// Height a street tree is grown at. Real pollarded street stock runs

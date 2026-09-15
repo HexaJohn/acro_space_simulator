@@ -63,7 +63,11 @@ class OverlayMeshBuilder {
   /// One vertex at [scenePos] with [normal], coloured [argb] (0xAARRGGBB,
   /// sRGB as a designer writes it — linearised here, since the shader
   /// multiplies the vertex colour into its linear output).
-  int vertex(Vector3 scenePos, Vector3 normal, int argb) {
+  ///
+  /// [u], [v]: the texture coordinate — the white placeholder's centre by
+  /// default, a palette texel's centre for a palette line.
+  int vertex(Vector3 scenePos, Vector3 normal, int argb,
+      {double u = 0.5, double v = 0.5}) {
     final i = _vc;
     if (i + 1 > _c.length ~/ 4) _grow(i + 1);
     _p[3 * i] = scenePos.x;
@@ -72,8 +76,8 @@ class OverlayMeshBuilder {
     _n[3 * i] = normal.x;
     _n[3 * i + 1] = normal.y;
     _n[3 * i + 2] = normal.z;
-    _uv[2 * i] = 0.5;
-    _uv[2 * i + 1] = 0.5;
+    _uv[2 * i] = u;
+    _uv[2 * i + 1] = v;
     _c[4 * i] = _linear((argb >> 16) & 0xFF);
     _c[4 * i + 1] = _linear((argb >> 8) & 0xFF);
     _c[4 * i + 2] = _linear(argb & 0xFF);
@@ -194,6 +198,91 @@ class RoadOverlayGate {
     _revision = null;
     _bodyId = null;
     _anchorBF = null;
+  }
+}
+
+/// The palette texture palette lines are coloured from: one texel a line,
+/// [width] texels a row, rows a power of two, straight RGBA in the sRGB
+/// bytes a designer writes (the unlit shader linearises what it samples, as
+/// the vertex path does in [OverlayMeshBuilder.vertex]). Sampled nearest at
+/// texel centres, so a texel is exactly its line's colour.
+abstract final class OverlayPalette {
+  static const int width = 1024;
+
+  /// Texture rows for [lines] lines: a power of two, at least 1.
+  static int rowsFor(int lines) {
+    final need = (lines + width - 1) ~/ width;
+    var rows = 1;
+    while (rows < need) {
+      rows *= 2;
+    }
+    return rows;
+  }
+
+  /// The centre of line [i]'s texel in a palette of [rows] rows.
+  static (double, double) uvOf(int i, int rows) =>
+      (((i % width) + 0.5) / width, ((i ~/ width) + 0.5) / rows);
+
+  /// The texture's bytes for [argb] (0xAARRGGBB, one a line) into [rgba],
+  /// sized `width × rowsFor(argb.length) × 4`; texels past the last line are
+  /// left as they are. Allocates nothing.
+  static void write(Uint32List argb, Uint8List rgba) {
+    for (var i = 0; i < argb.length; i++) {
+      final c = argb[i], o = 4 * i;
+      rgba[o] = (c >> 16) & 0xFF;
+      rgba[o + 1] = (c >> 8) & 0xFF;
+      rgba[o + 2] = c & 0xFF;
+      rgba[o + 3] = (c >> 24) & 0xFF;
+    }
+  }
+}
+
+/// When the palette lines' node must be meshed again (a new shape key, line
+/// count, body or anchor), and when only recoloured (a new palette revision
+/// under the same shapes).
+class PaletteOverlayGate {
+  Object? _shapeKey;
+  int _count = -1;
+  String? _bodyId;
+  Vector3? _anchorBF;
+  int? _revision;
+
+  /// Meshes and recolours granted so far.
+  int shapes = 0, recolours = 0;
+
+  /// Whether the lines must be meshed again; taking it also takes
+  /// [revision] as drawn.
+  bool wantsShape(Object? shapeKey, int count, String bodyId, Vector3 anchorBF,
+      int revision) {
+    if (shapeKey == _shapeKey &&
+        count == _count &&
+        bodyId == _bodyId &&
+        anchorBF == _anchorBF) {
+      return false;
+    }
+    _shapeKey = shapeKey;
+    _count = count;
+    _bodyId = bodyId;
+    _anchorBF = anchorBF;
+    _revision = revision;
+    shapes++;
+    return true;
+  }
+
+  /// Under shapes [wantsShape] declined: whether the colours moved.
+  bool wantsColours(int revision) {
+    if (revision == _revision) return false;
+    _revision = revision;
+    recolours++;
+    return true;
+  }
+
+  void reset() {
+    _shapeKey = null;
+    _count = -1;
+    _bodyId = null;
+    _anchorBF = null;
+    _revision = null;
   }
 }
 
@@ -386,19 +475,41 @@ class RoadOverlayMesher {
     }
   }
 
+  // ---- Palette lines ---------------------------------------------------------
+
+  /// The geometry of [RoadOverlayState.paletteLines], relative to
+  /// [anchorBF]: each line exactly as [build] lays it, but white, with every
+  /// vertex of line `i` at the centre of palette texel `i` (see
+  /// [OverlayPalette]). Meshed once per shape key; colours never touch it.
+  static OverlayMeshBuilder buildPalette(
+      List<OverlayLine> lines, Vector3 anchorBF) {
+    final m = OverlayMeshBuilder();
+    final rows = OverlayPalette.rowsFor(lines.length);
+    for (var i = 0; i < lines.length; i++) {
+      final (u, v) = OverlayPalette.uvOf(i, rows);
+      _line(m, lines[i], anchorBF, argb: _white, u: u, v: v);
+    }
+    return m;
+  }
+
   // ---- Lines -----------------------------------------------------------------
 
-  static void _line(OverlayMeshBuilder m, OverlayLine line, Vector3 anchorBF) {
+  static void _line(OverlayMeshBuilder m, OverlayLine line, Vector3 anchorBF,
+      {int? argb, double u = 0.5, double v = 0.5}) {
     final bf = line.pointsBF;
     final n = bf.length;
     if (n < 2) return;
-    final extra = line.liftsM;
-    final lifted = extra != null && extra.length == n;
+    final colour = argb ?? line.argb;
+    // A nullable local tested where it is read, never a bool that promotes
+    // it: this SDK's AOT build hoists a load through such a promotion out of
+    // the loop and reads through null (agent traffic's d3eb112 crash).
+    final List<double>? extra =
+        line.liftsM != null && line.liftsM!.length == n ? line.liftsM : null;
     final hw = line.widthM / 2;
     final ups = [for (final p in bf) p.normalized];
     final pts = [
       for (var i = 0; i < n; i++)
-        bf[i] - anchorBF + ups[i] * (line.liftM + (lifted ? extra[i] : 0.0)),
+        bf[i] - anchorBF + ups[i] * (line.liftM + (extra?[i] ?? 0.0)),
     ];
     if (!line.dashed) {
       int? pl, pr;
@@ -406,8 +517,10 @@ class RoadOverlayMesher {
         final ahead = pts[i < n - 1 ? i + 1 : i] - pts[i > 0 ? i - 1 : i];
         if (ahead.length <= 1e-9) continue;
         final side = ahead.normalized.cross(ups[i]).normalized;
-        final l = m.vertex(_scene(pts[i] - side * hw), ups[i], line.argb);
-        final r = m.vertex(_scene(pts[i] + side * hw), ups[i], line.argb);
+        final l =
+            m.vertex(_scene(pts[i] - side * hw), ups[i], colour, u: u, v: v);
+        final r =
+            m.vertex(_scene(pts[i] + side * hw), ups[i], colour, u: u, v: v);
         if (pl != null && pr != null) m.quad(pl, pr, r, l);
         pl = l;
         pr = r;
@@ -434,10 +547,10 @@ class RoadOverlayMesher {
         if (w1 <= w0) continue;
         final p0 = a + along * (w0 - s0), p1 = a + along * (w1 - s0);
         m.quad(
-          m.vertex(_scene(p0 - side * hw), up, line.argb),
-          m.vertex(_scene(p0 + side * hw), up, line.argb),
-          m.vertex(_scene(p1 + side * hw), up, line.argb),
-          m.vertex(_scene(p1 - side * hw), up, line.argb),
+          m.vertex(_scene(p0 - side * hw), up, colour, u: u, v: v),
+          m.vertex(_scene(p0 + side * hw), up, colour, u: u, v: v),
+          m.vertex(_scene(p1 + side * hw), up, colour, u: u, v: v),
+          m.vertex(_scene(p1 - side * hw), up, colour, u: u, v: v),
         );
       }
       s0 = s1;
