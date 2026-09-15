@@ -60,7 +60,12 @@ enum TrafficInfoView {
   junctions('Junctions'),
 
   /// Drag a road's end circles to re-lay it; rename it.
-  adjust('Adjust');
+  adjust('Adjust'),
+
+  /// Every lane coloured by how fast the agents drive it against its limit;
+  /// click a car to inspect it. Agent traffic's view: V and the HUD's Flow
+  /// chip open it (traffic_lane_speed_overlay.dart).
+  laneSpeed('Lane speed');
 
   const TrafficInfoView(this.label);
   final String label;

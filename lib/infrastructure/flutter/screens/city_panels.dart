@@ -176,6 +176,14 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
           _meterRow('Terraforming', '${(sim.terraform * 100).toStringAsFixed(0)}%',
               sim.terraform, AppTheme.accent2),
       ];
+
+  /// The congestion the status panel shows. With agents on it is theirs —
+  /// `parcelCongestion`, which reads the congestion they measured through
+  /// `trafficReadout` — so this row and the HUD's Flow chip agree about the
+  /// same streets; without them, the grid model's peak, as before (E30).
+  double get _congestion =>
+      sim.agents.enabled ? sim.parcelCongestion : sim.congestion;
+
   List<Widget> cityStatusPanel() => [
         const Text('COLONY STATUS', style: AppTheme.heading),
         const SizedBox(height: 8),
@@ -188,14 +196,14 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
         _powerRow(),
         _computeRow(),
         _happinessRow(),
-        if (sim.congestion > 0.02)
+        if (_congestion > 0.02)
           _meterRow('Traffic congestion',
-              '${(sim.congestion * 100).toStringAsFixed(0)}%', sim.congestion,
-              sim.congestion > 0.6
+              '${(_congestion * 100).toStringAsFixed(0)}%', _congestion,
+              _congestion > 0.6
                   ? AppTheme.danger
-                  : (sim.congestion > 0.35 ? AppTheme.warn : AppTheme.accent2),
-              warn: sim.congestion > 0.5
-                  ? 'Gridlock — workers stuck commuting, staffing down ${((1 - (1 - sim.congestion * 0.4)) * 100).toStringAsFixed(0)}%.'
+                  : (_congestion > 0.35 ? AppTheme.warn : AppTheme.accent2),
+              warn: _congestion > 0.5
+                  ? 'Gridlock — workers stuck commuting, staffing down ${((1 - (1 - _congestion * 0.4)) * 100).toStringAsFixed(0)}%.'
                   : null,
               onExplain: () => showExplain(context, 
                   'Traffic Congestion',

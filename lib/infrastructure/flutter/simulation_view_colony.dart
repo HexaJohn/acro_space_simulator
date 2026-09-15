@@ -632,6 +632,15 @@ extension SimulationViewColony on _SimulationViewState {
       return;
     }
     if (_cityEdit.tool == CityEditTool.traffic) {
+      // On Lane speed a click on a car inspects it (§18 slice 2); the other
+      // views' clicks are the road side's, unchanged.
+      if (_cityEdit.trafficView == TrafficInfoView.laneSpeed) {
+        final vehicle = _vehicleUnder(local);
+        if (vehicle != null) {
+          _openVehicleInspector(city, vehicle);
+          return;
+        }
+      }
       _trafficClickAt(city, hit);
       return;
     }
@@ -690,10 +699,21 @@ extension SimulationViewColony on _SimulationViewState {
   /// This is what the Look tool is FOR. It used to do nothing at all: tapping a
   /// spaceport you were standing in front of had no effect, and everything you
   /// could actually do with one lived behind a button that left the world.
+  ///
+  /// A vehicle under the click comes first: a car driving past a building is
+  /// what was clicked, and it opens the route inspector instead (E27).
   void _inspectCityAt(Offset local) {
     final city = _editingCity;
-    final found = _siteUnder(local);
-    if (city == null || found == null) return;
+    if (city == null) return;
+    final target =
+        InspectOrder.pick(() => _vehicleUnder(local), () => _siteUnder(local));
+    if (target == null) return;
+    final vehicle = target.vehicle;
+    if (vehicle != null) {
+      _openVehicleInspector(city, vehicle);
+      return;
+    }
+    final found = target.site!;
     showCitySiteMenu(
       context: context,
       sim: city,
@@ -898,6 +918,10 @@ extension SimulationViewColony on _SimulationViewState {
           if (s.handleAt(city, c.selectedRoadId, p, 14 * s.hoverPxM) == null) {
             c.selectRoad(c.roadAt(city, p, scale: scale));
           }
+        case TrafficInfoView.laneSpeed:
+          // A car under the click was taken before this ([_editCityAt]);
+          // open ground and roads pick nothing here.
+          break;
       }
     });
     // A pick that changed nothing notifies nobody, but the view still has
@@ -1027,8 +1051,9 @@ extension SimulationViewColony on _SimulationViewState {
     // only over what can be picked or dragged. On Look it opens only over a
     // BUILDING: every other tap belongs to the HUD underneath, and a gesture
     // arena cannot tell the two apart on its own.
-    bool open(Offset p) =>
-        adjust ? _adjustGateOpen(p) : c.active || _siteUnder(p) != null;
+    bool open(Offset p) => adjust
+        ? _adjustGateOpen(p)
+        : c.active || _siteUnder(p) != null || _vehicleUnder(p) != null;
     return Positioned.fill(
       child: _PickClaim(
         // Not while walking: a click on the world then also takes the mouse
@@ -1230,10 +1255,164 @@ extension SimulationViewColony on _SimulationViewState {
       };
     };
   }
+
+  // ---- Agent traffic: the Lane speed view and the route inspector -----------
+  //
+  // docs/plans/agent-traffic.md §13.9 and §18 slice 2, as agreed with the
+  // road side: Lane speed is the road agent's Traffic tool's fourth view, V
+  // and the HUD's Flow chip open it, and a click on a car opens the route
+  // inspector — before the site sheet on Look, and on Lane speed.
+
+  /// Agent traffic's view-side state per flight view (see [_roadScene] for
+  /// why an [Expando]).
+  _AgentTrafficView get _agentView =>
+      _agentViews[this] ??= _AgentTrafficView();
+
+  /// Whether the Traffic tool is held on its Lane speed view.
+  bool get _onLaneSpeed =>
+      _cityEdit.tool == CityEditTool.traffic &&
+      _cityEdit.trafficView == TrafficInfoView.laneSpeed;
+
+  /// V and the Flow chip: the Traffic tool on Lane speed — or, when it is
+  /// already there, put down.
+  void _toggleLaneSpeedView() {
+    if (_editingCity == null) return;
+    final c = _cityEdit;
+    final close = _onLaneSpeed;
+    rebuild(() {
+      if (close) {
+        c.set(CityEditTool.inspect);
+      } else {
+        c.set(CityEditTool.traffic);
+        c.setTrafficView(TrafficInfoView.laneSpeed);
+      }
+    });
+  }
+
+  /// Once a frame while Lane speed is up: redraw it when its overlay would
+  /// read the speeds again (at most every 2 s), with no mouse moving to ask.
+  /// Two integer compares a frame otherwise.
+  void _pollLaneSpeedView() {
+    final city = _editingCity;
+    if (city == null || !_onLaneSpeed || _agentView.inspecting != null) return;
+    final s = _roadScene;
+    if (!s.refreshDue()) return;
+    if (TrafficLaneSpeedOverlay.of(s).due(city.agents.laneSpeeds)) {
+      _refreshRoadTool(city);
+    }
+  }
+
+  /// The vehicle under [local], by handle, or null.
+  ///
+  /// Runs on every hit test while the editor is open (`_PickGate`), so it
+  /// is a ray pick and a scan of the frame the agents last published, whose
+  /// rows it mostly rejects on a box compare — and nothing at all while the
+  /// colony runs no agents or has no car on the road.
+  int? _vehicleUnder(Offset local) {
+    final city = _editingCity;
+    if (city == null) return null;
+    final agents = city.agents;
+    if (!agents.enabled || agents.liveVehicles == 0) return null;
+    final hit = _pickCityGround(local);
+    if (hit == null) return null;
+    // A car is a few pixels long from a district's zoom: about eight pixels
+    // of reach, never less than a car's half length, never a block.
+    final radiusM = (8 * _metresPerPixelAt(hit)).clamp(4.0, 20.0).toDouble();
+    final h = _agentView.picker
+        .pick(agents, Vec2(hit.east, hit.north), radiusM: radiusM);
+    return h < 0 ? null : h;
+  }
+
+  /// Opens the route inspector on [handle], with the road it still has to
+  /// drive laid over the world while the sheet is up.
+  ///
+  /// The route is added to what the overlay already shows (the Lane speed
+  /// ribbons, or nothing on Look) and taken off again when the sheet
+  /// closes — unless something else has drawn over it meanwhile.
+  void _openVehicleInspector(CitySim city, int handle) {
+    final view = _agentView;
+    final o = RoadOverlayState.instance;
+    final before = o.lines;
+    List<OverlayLine>? drawn;
+    if (_bindRoadGround(city)) {
+      final route = VehiclePicker.routeAhead(city.agents, handle);
+      if (route.length >= 2) {
+        final s = _roadScene;
+        drawn = [
+          ...before,
+          OverlayLine(
+            pointsBF: [for (final p in route) s.drape(p)],
+            argb: _AgentTrafficView.routeArgb,
+            widthM: 3,
+            liftM: 1.1,
+          ),
+        ];
+        o.bodyId = city.body.id.value;
+        o.lines = drawn;
+        o.changed();
+      }
+    }
+    view.inspecting = handle;
+    showVehicleInspector(context: context, city: city, handle: handle)
+        .whenComplete(() {
+      if (view.inspecting == handle) view.inspecting = null;
+      if (drawn != null && identical(o.lines, drawn)) {
+        o.lines = before;
+        o.changed();
+      }
+    });
+  }
+
+  /// The route inspector and the Lane speed view for dev tooling (E32):
+  /// the same paths V and a click on a car take.
+  void _registerTrafficControl(SimViewControl c) {
+    c.selectVehicle = (handle) {
+      final city = _editingCity;
+      if (!mounted || city == null) return null;
+      final d = city.agents.describe(handle);
+      if (d != null) _openVehicleInspector(city, handle);
+      return d;
+    };
+    c.setTrafficView = (view) {
+      final city = _editingCity;
+      if (!mounted || city == null) {
+        return const {'error': 'no colony is being edited'};
+      }
+      final e = _cityEdit;
+      rebuild(() {
+        if (view == null) {
+          if (e.tool == CityEditTool.traffic) e.set(CityEditTool.inspect);
+          return;
+        }
+        for (final v in TrafficInfoView.values) {
+          if (v.name != view) continue;
+          e.set(CityEditTool.traffic);
+          e.setTrafficView(v);
+        }
+      });
+      return {'tool': e.tool.name, 'trafficView': e.trafficView.name};
+    };
+  }
 }
 
 /// The road tool's view-side state per flight view — see `_roadScene`.
 final Expando<RoadToolScene> _roadScenes = Expando<RoadToolScene>('road tool');
+
+/// Agent traffic's view-side state per flight view — see `_agentView`.
+final Expando<_AgentTrafficView> _agentViews =
+    Expando<_AgentTrafficView>('agent traffic');
+
+class _AgentTrafficView {
+  /// Finds the car under the pointer; keeps its boxes per lane graph.
+  final VehiclePicker picker = VehiclePicker();
+
+  /// The vehicle the route inspector is open on, or null.
+  int? inspecting;
+
+  /// The inspected car's road ahead: the accent the Routes view's selection
+  /// highlight is drawn in, opaque enough to read over the lane ribbons.
+  static const int routeArgb = 0xE633D1FF;
+}
 
 /// A hit-test gate: the pointer passes straight through unless [pick] says
 /// there is something here to hit.

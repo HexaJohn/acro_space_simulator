@@ -35,14 +35,18 @@ import '../../domain/colony/city/city_building_spec.dart';
 import '../../domain/colony/city/city_config.dart';
 import '../../domain/colony/city/city_sim.dart';
 import '../../domain/colony/city/parcel.dart';
+import '../../domain/colony/city/traffic/vehicle_inspection.dart';
 import '../../adapters/presenters/surface_picker.dart';
 import '../flutter_scene/city/city_nodes.dart';
+import '../flutter_scene/city/road_overlay_state.dart';
 import 'flight_session.dart';
 import 'pointer_lock.dart';
 import 'screens/city_edit_overlay.dart';
 import 'screens/city_game_hud.dart';
 import 'screens/city_site_actions.dart';
 import 'screens/road_tool_scene.dart';
+import 'screens/traffic_lane_speed_overlay.dart';
+import 'screens/traffic_vehicle_inspector.dart';
 import 'screens/craft_assembly_screen.dart';
 import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
@@ -698,6 +702,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           'expDown': SceneSync.adaptDownS,
         };
     _registerRoadToolControl(c);
+    _registerTrafficControl(c);
   }
   // Latest world snapshot for the flutter_scene backend (null when the
   // software backend is active — capture cost is zero when unused).
@@ -1222,6 +1227,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     LogicalKeyboardKey.keyJ,
     LogicalKeyboardKey.keyC,
     LogicalKeyboardKey.keyZ,
+    // The Traffic tool's Lane speed view over a colony.
+    LogicalKeyboardKey.keyV,
     LogicalKeyboardKey.escape,
     LogicalKeyboardKey.space,
     LogicalKeyboardKey.shiftLeft,
@@ -1271,6 +1278,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       // builder has, on the key it has it on.
       if (e.logicalKey == LogicalKeyboardKey.keyZ && _editingCity != null) {
         _toggleZoneOverlay();
+        return KeyEventResult.handled;
+      }
+      // V opens the Traffic tool on Lane speed — how fast every lane is
+      // driven — and closes it again (docs/plans/agent-traffic.md §13.9).
+      if (e.logicalKey == LogicalKeyboardKey.keyV && _editingCity != null) {
+        _toggleLaneSpeedView();
         return KeyEventResult.handled;
       }
       // Esc frees a captured mouse — to reach the toolbar, or another
@@ -1965,6 +1978,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     SceneSync.tickCostMs =
         agentColony ? swSteps.elapsedMicroseconds / 1000.0 : 0;
     SceneSync.simWarp = _clock.warpFactor;
+    // The Lane speed view follows the agents' measurements with no mouse
+    // moving over it: redrawn when they publish, at most every 2 s.
+    _pollLaneSpeedView();
     if (swSteps.elapsedMilliseconds > 500) {
       debugPrint('simSteps: $steps steps in ${swSteps.elapsedMilliseconds}ms');
     }
@@ -3418,6 +3434,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                         onExit: () => Navigator.of(context).maybePop(),
                         zonesOn: _zoneViewPinned,
                         onToggleZones: _toggleZoneOverlay,
+                        trafficOn: _onLaneSpeed,
+                        onToggleTraffic: _toggleLaneSpeedView,
                       ),
                     ),
                   ),

@@ -25,6 +25,7 @@ import '../../../domain/colony/city/road_snapper.dart';
 import '../../../domain/colony/city/road_traffic_model.dart' show TripKind;
 import 'app_theme.dart';
 import 'city_edit_overlay.dart';
+import 'traffic_lane_speed_overlay.dart';
 
 const Color _dim = Color(0xFF9FB4CC);
 const Color _text = Color(0xFFD6E2EE);
@@ -487,6 +488,11 @@ class TrafficToolPanel extends StatelessWidget {
               icon: Icons.edit_road,
               on: c.trafficView == TrafficInfoView.adjust,
               onTap: () => c.setTrafficView(TrafficInfoView.adjust)),
+          _chip(
+              label: TrafficInfoView.laneSpeed.label,
+              icon: Icons.speed,
+              on: c.trafficView == TrafficInfoView.laneSpeed,
+              onTap: () => c.setTrafficView(TrafficInfoView.laneSpeed)),
         ]),
         const SizedBox(height: 4),
         switch (c.trafficView) {
@@ -496,6 +502,7 @@ class TrafficToolPanel extends StatelessWidget {
                   'along one of its roads to toggle that stop sign'),
             ]),
           TrafficInfoView.adjust => _adjustRow(),
+          TrafficInfoView.laneSpeed => TrafficLaneSpeedLegend(city: city),
         },
       ]),
     );

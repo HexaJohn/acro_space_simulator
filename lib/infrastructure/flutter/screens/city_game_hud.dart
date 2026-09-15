@@ -22,10 +22,18 @@ import '../../../domain/colony/city/city_progression.dart';
 import '../../../domain/colony/city/city_sim.dart';
 import '../../../domain/colony/city/road_build.dart' show formatMoney;
 import '../../../domain/colony/city/road_catalog.dart';
+import '../../../domain/colony/city/traffic/city_agents.dart'
+    show AgentLaneSpeeds;
 import 'app_theme.dart';
+import 'traffic_lane_speed_overlay.dart' show TrafficLaneSpeedOverlay;
 
 /// Which drawer is open under the top bar.
-enum CityGamePanel { none, milestones, budget }
+///
+/// [traffic] has no drawer: agent traffic's readout is the road tool's
+/// Traffic tool on its Lane speed view (docs/plans/agent-traffic.md §18
+/// slice 2, agreed with the road side), so opening it hands over to
+/// [CityGameHud.onToggleTraffic] and the drawer stays shut.
+enum CityGamePanel { none, milestones, budget, traffic }
 
 class CityGameHud extends StatefulWidget {
   const CityGameHud({
@@ -34,6 +42,8 @@ class CityGameHud extends StatefulWidget {
     this.onExit,
     this.zonesOn = false,
     this.onToggleZones,
+    this.trafficOn = false,
+    this.onToggleTraffic,
   });
 
   final CitySim city;
@@ -48,6 +58,12 @@ class CityGameHud extends StatefulWidget {
   /// cannot be built in a test without one.
   final bool zonesOn;
   final VoidCallback? onToggleZones;
+
+  /// Whether the Traffic tool is up on Lane speed, and how to open or close
+  /// it — what the Flow chip and V do. Passed in for the reason [zonesOn]
+  /// is: the tool is the flight view's, not the HUD's.
+  final bool trafficOn;
+  final VoidCallback? onToggleTraffic;
 
   @override
   State<CityGameHud> createState() => _CityGameHudState();
@@ -161,6 +177,8 @@ class _CityGameHudState extends State<CityGameHud> {
           const SizedBox(width: 6),
           _rciCluster(),
           const SizedBox(width: 6),
+          if (widget.onToggleTraffic != null && city.agents.enabled)
+            _flowChip(),
           if (widget.onToggleZones != null)
             _toggle(Icons.layers, 'Zones', widget.zonesOn,
                 widget.onToggleZones!,
@@ -329,7 +347,8 @@ class _CityGameHudState extends State<CityGameHud> {
 
   /// A plain on/off chip, styled like the panel buttons beside it.
   Widget _toggle(IconData icon, String label, bool on, VoidCallback onTap,
-          String tooltip) =>
+          String tooltip,
+          {Color accent = AppTheme.accent2}) =>
       Tooltip(
         message: tooltip,
         child: Padding(
@@ -339,31 +358,61 @@ class _CityGameHudState extends State<CityGameHud> {
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
               decoration: BoxDecoration(
-                color: on ? AppTheme.accent2.withValues(alpha: 0.18) : null,
+                color: on ? accent.withValues(alpha: 0.18) : null,
                 borderRadius: BorderRadius.circular(5),
                 border: Border.all(
-                    color: on ? AppTheme.accent2 : const Color(0xFF2A3948)),
+                    color: on ? accent : const Color(0xFF2A3948)),
               ),
               child: Row(mainAxisSize: MainAxisSize.min, children: [
-                Icon(icon,
-                    size: 14, color: on ? AppTheme.accent2 : AppTheme.textDim),
+                Icon(icon, size: 14, color: on ? accent : AppTheme.textDim),
                 const SizedBox(width: 5),
                 Text(label,
                     style: TextStyle(
-                        fontSize: 11,
-                        color: on ? AppTheme.accent2 : AppTheme.textDim)),
+                        fontSize: 11, color: on ? accent : AppTheme.textDim)),
               ]),
             ),
           ),
         ),
       );
 
+  /// "Flow 82% · 412 cars": how freely the colony's agents are driving (one
+  /// minus their congestion index) and how many are on the road, coloured
+  /// by the Lane speed view's bands. Tapping it opens that view.
+  Widget _flowChip() {
+    final agents = city.agents;
+    final flow = (1 - agents.stats.congestionIndex).clamp(0.0, 1.0);
+    final pct = (flow * 100).round();
+    final colour = Color(
+        TrafficLaneSpeedOverlay.argbOfBand(AgentLaneSpeeds.band(pct)) |
+            0xFF000000);
+    final cars = agents.liveVehicles;
+    return _toggle(
+      Icons.speed,
+      'Flow $pct% · $cars ${cars == 1 ? 'car' : 'cars'}',
+      widget.trafficOn,
+      () => _open(CityGamePanel.traffic),
+      'How freely traffic moves against the speed limits — tap for the Lane '
+      'speed view (V)',
+      accent: colour,
+    );
+  }
+
+  /// Open [panel], or shut it when it is open. [CityGamePanel.traffic] is
+  /// the Traffic tool's, not a drawer: it goes to [CityGameHud.onToggleTraffic].
+  void _open(CityGamePanel panel) {
+    if (panel == CityGamePanel.traffic) {
+      widget.onToggleTraffic?.call();
+      return;
+    }
+    setState(() => _panel = _panel == panel ? CityGamePanel.none : panel);
+  }
+
   Widget _panelButton(CityGamePanel panel, IconData icon, String label) {
     final on = _panel == panel;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 2),
       child: InkWell(
-        onTap: () => setState(() => _panel = on ? CityGamePanel.none : panel),
+        onTap: () => _open(panel),
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
           decoration: BoxDecoration(
@@ -402,9 +451,12 @@ class _CityGameHudState extends State<CityGameHud> {
       child: SingleChildScrollView(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-          children: _panel == CityGamePanel.milestones
-              ? _milestonePanel()
-              : _budgetPanel(),
+          children: switch (_panel) {
+            CityGamePanel.milestones => _milestonePanel(),
+            CityGamePanel.budget => _budgetPanel(),
+            // The Traffic tool, not a drawer ([_open]); never open here.
+            CityGamePanel.traffic || CityGamePanel.none => const <Widget>[],
+          },
         ),
       ),
     );

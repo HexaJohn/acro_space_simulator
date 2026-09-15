@@ -38,6 +38,7 @@ import '../../../domain/terrain/terrain_field.dart';
 import '../../../domain/universe/celestial_body.dart';
 import '../../flutter_scene/city/road_overlay_state.dart';
 import 'road_tool_controller.dart';
+import 'traffic_lane_speed_overlay.dart';
 
 /// A handle picked in the Adjust view: one end of a road.
 typedef RoadEndHandle = ({String roadId, bool atStart});
@@ -328,6 +329,9 @@ class RoadToolScene {
         lines = _routeLines(city, c, pxM);
       case TrafficInfoView.adjust:
         (lines, markers, ghost) = _adjustFrame(city, c, pxM);
+      case TrafficInfoView.laneSpeed:
+        lines = TrafficLaneSpeedOverlay.of(this).lines(city.agents.laneSpeeds,
+            drape: drape, bodyId: _bodyId, groundKey: _groundKey);
     }
     if (!ghost &&
         o.ghostBF.isEmpty &&

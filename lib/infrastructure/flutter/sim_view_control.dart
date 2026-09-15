@@ -93,6 +93,17 @@ class SimViewControl {
   /// it without changing anything.
   Map<String, Object?> Function(Map<String, String> params)? roadTool;
 
+  /// Open the route inspector on the colony's vehicle [handle], as a click
+  /// on the car does (docs/plans/agent-traffic.md §16.4, E32). Returns what
+  /// `CityAgents.describe` says of it — the sheet's source — or null when
+  /// the handle is not on the road, and nothing opens.
+  Map<String, Object?>? Function(int handle)? selectVehicle;
+
+  /// Hold the Traffic tool on the view named [view] (a `TrafficInfoView`
+  /// name: `laneSpeed`, `routes`, …), as V and the Flow chip do for Lane
+  /// speed; null puts the tool down. Returns the tool and its view.
+  Map<String, Object?> Function(String? view)? setTrafficView;
+
   void clear() {
     orbit = null;
     zoom = null;
@@ -112,5 +123,7 @@ class SimViewControl {
     spawnLanded = null;
     status = null;
     roadTool = null;
+    selectVehicle = null;
+    setTrafficView = null;
   }
 }
