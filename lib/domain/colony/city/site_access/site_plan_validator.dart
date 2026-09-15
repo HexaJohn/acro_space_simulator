@@ -228,6 +228,10 @@ class _Check {
       f(p.bayWidthM(b), 'bayWidthM[$b]');
       f(p.bayS(b), 'bayS[$b]');
     }
+    for (var q = 0; q < p.fenceGapCount; q++) {
+      f(p.fenceGapT0(q), 'fenceGapT0[$q]');
+      f(p.fenceGapT1(q), 'fenceGapT1[$q]');
+    }
     if (bad.isEmpty) return true;
     this.bad(SiteInvariant.geometry, 'not finite: ${bad.join(', ')}');
     return false;
@@ -761,9 +765,13 @@ class _Check {
                 'join $j throat is more than 10° off the road normal');
           }
           final cls = graph.roads[r].roadClass;
-          if (_hasPavement(cls) && p.segFlags(t) & kSegCrossesPavement == 0) {
+          final flagged = p.segFlags(t) & kSegCrossesPavement != 0;
+          if (_hasPavement(cls) && !flagged) {
             bad(SiteInvariant.v5Throat,
                 'join $j throat crosses a pavement without kSegCrossesPavement');
+          } else if (!_hasPavement(cls) && flagged) {
+            bad(SiteInvariant.v5Throat,
+                'join $j throat carries kSegCrossesPavement on a road without one');
           }
         }
         if (p.program == SiteProgram.homeDriveway) {
@@ -1211,6 +1219,13 @@ class _Check {
           if (inD & kSiteDirBwd != 0 &&
               len - s - kStallRunupHalfWidthM < kStallRunupM - 1e-4) {
             bad(SiteInvariant.v9Stalls, 'stall $i backward bit without run-up');
+          }
+          if (angle == StallAngle.perpendicular &&
+              inD == (kSiteDirFwd | kSiteDirBwd) &&
+              (p.segLaneMode(k) != SiteLaneMode.twoWay ||
+                  p.segWidthM(k) < kTwoWayPerpendicularMinWidthM - 1e-4)) {
+            bad(SiteInvariant.v9Stalls,
+                'stall $i takes both in-dirs; that needs a two-way segment >= 6 m');
           }
       }
       if (inD == 0) bad(SiteInvariant.v9Stalls, 'stall $i has no in-dir bit');

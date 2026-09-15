@@ -412,7 +412,11 @@ reported under one name.
   its pad" when its centre is within half the pad width of the centreline. A stall is tested for overlap against
   every segment except its own. On its own segment only the mouth edge is exempt: a non-`inline` stall's mouth-edge
   midpoint (`centre − dir·len/2`) lies ≥ `width/2 − 0.01` m from that segment's centreline at `stallS`, so an angled
-  stall's corner wedge may cross the carriageway rectangle but no stall sits in its aisle.
+  stall's corner wedge may cross the carriageway rectangle but no stall sits in its aisle. A perpendicular stall
+  that takes BOTH in-dirs needs a `twoWay` segment ≥ 6 m, so a narrower `sharedSingle` aisle cannot slip past V8's
+  two-way width rule.
+- V5: `kSegCrossesPavement` is checked both ways against the join road's class: a throat off a road with a pavement
+  must carry it, and a throat off a road without one must not.
 - V11 owns `entrancePt` and `pavementPt` (a real point each) and `entranceNode` in range; V6's index check does not.
 - V13 walks `SiteLaneGraph` lanes of truck segments (width ≥ 3.5 m, `segMaxVehLenM` ≥ 12): movements as §2.5 allows,
   U-turns only at a `circle` of radius ≥ 12.5 m, no inline-stall or road links. Some bay on a truck segment `k` needs
@@ -421,9 +425,12 @@ reported under one name.
   reversed (the §3.7 bays sit on the circle's far edge).
 - V10's segment ranks are: throats in join order, then aisles by `(y, x)`, then access-road and non-throat driveway
   pieces, then aprons. "Path order" inside a rank is not checkable and is not checked.
-- V11: a kerbside plan's `pavementPt` lies within 3.5 m of slot 0's kerb point.
+- V11: a kerbside plan's `pavementPt` lies within 3.5 m of slot 0's kerb point. A footprint kerbside plan
+  (`joinRef == −1`) has no graph kerb point and no kerb node, so its pavement point is not distance-checked in R2a;
+  R2's footprint generator places it from `attachFootprintJoins` and its test pins the distance.
 - Not checked in R2a (they need the parcel and the corridor, R2): paving inside `parcel ∪ corridor`, and corridor
-  clearance. Checked as `geometry`: finite numbers, convex CCW pave rings, and paving ∩ envelope = ∅.
+  clearance. Checked as `geometry`: finite numbers (fence-gap `t0/t1` included), convex CCW pave rings, and
+  paving ∩ envelope = ∅.
 
 ### 2.5 Site lanes: the one definition of connectivity (`site_lane_graph.dart`)
 

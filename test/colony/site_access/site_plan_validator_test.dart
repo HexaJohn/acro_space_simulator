@@ -368,6 +368,36 @@ void main() {
       rejects(d, SiteInvariant.v9Stalls);
       expect(vs.single.detail, contains('own carriageway'));
     });
+
+    test('both in-dirs on a perpendicular stall need a two-way aisle of 6 m',
+        () {
+      // The strip's mid-aisle stalls take both bits on its 6 m two-way aisle.
+      final strip = draft(SyntheticTemplate.strip);
+      final k = strip.stalls[5].seg;
+      expect(strip.segs[k].mode, SiteLaneMode.twoWay);
+      expect(strip.stalls[5].inDirs, kSiteDirFwd | kSiteDirBwd);
+      accepts(strip);
+      // The same stalls on a 5.4 m shared single lane (legal for V8).
+      final shared = draft(SyntheticTemplate.strip);
+      shared.segs[k]
+        ..mode = SiteLaneMode.sharedSingle
+        ..widthM = 5.4;
+      final both = [
+        for (var i = 0; i < shared.stalls.length; i++)
+          if (shared.stalls[i].seg == k &&
+              shared.stalls[i].inDirs == kSiteDirFwd | kSiteDirBwd)
+            i,
+      ];
+      final vs = violations(shared);
+      rejects(shared, SiteInvariant.v9Stalls);
+      expect(vs, hasLength(both.length));
+      expect(vs.every((v) => v.detail.contains('both in-dirs')), isTrue);
+      // Down to one direction each, they pass.
+      for (final i in both) {
+        shared.stalls[i].inDirs = kSiteDirBwd;
+      }
+      accepts(shared);
+    });
   });
 
   test('V10: an aisle ahead of the throat', () {
@@ -436,6 +466,13 @@ void main() {
   test('geometry: a coordinate that is not finite stops the check', () {
     final d = draft(SyntheticTemplate.strip);
     d.stalls[0].e = double.nan;
+    rejects(d, SiteInvariant.geometry);
+  });
+
+  test('geometry: a fence gap that is not finite', () {
+    final d = draft(SyntheticTemplate.strip)..fenceGaps = [(0, 0.2, 0.4)];
+    accepts(d);
+    d.fenceGaps = [(0, double.nan, 0.4)];
     rejects(d, SiteInvariant.geometry);
   });
 }
