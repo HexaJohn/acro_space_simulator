@@ -383,6 +383,23 @@ class BuildingTable {
       (accFwd[sl] >= 0 || accBwd[sl] >= 0) &&
       accessFlags[sl] & kAccessIsolated == 0;
 
+  /// Whether live building [handle] has a serving edge at all.
+  bool hasAccess(int handle) {
+    if (!pool.isLive(handle)) return false;
+    final sl = SlotPool.slotOf(handle);
+    return accFwd[sl] >= 0 || accBwd[sl] >= 0;
+  }
+
+  /// Whether live building [handle] is met on [edge] within [tolM] of travel
+  /// arc [t]: whether a trip that stopped there stopped at its access as
+  /// the table resolves it now, on the graph of the last sync.
+  bool meetsAt(int handle, int edge, double t, double tolM) {
+    if (!pool.isLive(handle) || edge < 0) return false;
+    final sl = SlotPool.slotOf(handle);
+    return (edge == accFwd[sl] && (accFwdT[sl] - t).abs() <= tolM) ||
+        (edge == accBwd[sl] && (accBwdT[sl] - t).abs() <= tolM);
+  }
+
   /// Whether building [handle] lies on the left of travel along [edge].
   bool leftOf(int handle, int edge) {
     if (!pool.isLive(handle)) return false;

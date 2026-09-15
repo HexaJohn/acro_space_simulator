@@ -270,6 +270,9 @@ class RouteRemapper {
   double _placeT = 0;
   double _lastT = 0;
 
+  /// The old road the vehicle was on, or −1 off the roads (a sink edge).
+  int _oldRoad = -1;
+
   /// A vehicle strictly inside its edge, and a range never empty: at a cut,
   /// "the piece ahead" is then never in doubt.
   static const double _eps = 1e-3;
@@ -281,7 +284,10 @@ class RouteRemapper {
   int routeLength = 0;
 
   /// The vehicle's lane on the new network, and metres along it (0 when it
-  /// lands there from a connector).
+  /// lands there from a connector). [laneS] is clamped onto the lane: a
+  /// vehicle standing where the edit put a junction's box has its [placeT]
+  /// before the lane's start or past its end, and the owner carries it onto
+  /// the connector through the box instead ([connectorBehind]).
   int lane = -1;
   double laneS = 0;
 
@@ -314,12 +320,14 @@ class RouteRemapper {
     lane = -1;
     laneS = 0;
     stopS = 0;
+    _oldRoad = -1;
     if (len <= 0 || at < 0 || at >= len) return RemapStatus.despawn;
 
     // Where the vehicle is: on its lane, or entering the edge from its
     // connector.
     final lane0 = _laneAt(data, off, at);
     final e0 = from.laneEdge[lane0];
+    if (e0 < from.roadEdgeCount) _oldRoad = from.edgeRoad[e0];
     final k0 = from.laneIdx[lane0];
     final len0 = from.edgeLen[e0];
     var t0 = onConnector ? 0.0 : from.edgeLaneS0[e0] + s;
@@ -385,6 +393,57 @@ class RouteRemapper {
     routeLength = n;
     stopS = _clamp(_lastT, to.edgeLaneS0[eLast], to.edgeLaneS1[eLast]);
     return RemapStatus.kept;
+  }
+
+  /// The connector into [lane] — the lane the last [remap] placed the
+  /// vehicle in — from the piece before it on the vehicle's own road: the
+  /// edge of that road's lineage (a child of the old road, or a road re-laid
+  /// in its place) that runs the same way and ends at the node [lane]'s edge
+  /// starts from, leaving from the lane of [lane]'s index, else the nearest
+  /// index that has one (the lower on a tie). −1 when no piece of the road
+  /// runs into that node, or none of its lanes reaches [lane].
+  ///
+  /// This is the movement straight through a junction the edit put in the
+  /// vehicle's road: a vehicle placed past the new node but short of where
+  /// its lane now begins stands on it (`CityAgents`' remap).
+  int connectorBehind(int lane) {
+    final to = lineage.to;
+    final r = _oldRoad;
+    if (r < 0 || lane < 0 || lane >= to.laneCount) return -1;
+    final e = to.laneEdge[lane];
+    final node = to.edgeFrom[e];
+    final k = to.laneIdx[lane];
+    for (var i = to.inStart[node]; i < to.inStart[node + 1]; i++) {
+      final x = to.inEdges[i];
+      if (x >= to.roadEdgeCount || to.edgeForward[x] != to.edgeForward[e]) {
+        continue;
+      }
+      if (!_ofLineage(to.edgeRoad[x], r)) continue;
+      var best = -1, bestD = 256;
+      for (var j = 0; j < to.edgeLaneCount[x]; j++) {
+        final c = to.connector(to.laneOf(x, j), lane);
+        final d = (j - k).abs();
+        if (c >= 0 && d < bestD) {
+          best = c;
+          bestD = d;
+        }
+      }
+      if (best >= 0) return best;
+    }
+    return -1;
+  }
+
+  /// Whether new road [road] descends from old road [r]: a child on its
+  /// line, or a road re-laid in its place.
+  bool _ofLineage(int road, int r) {
+    final l = lineage;
+    for (var k = l.childStart[r]; k < l.childStart[r + 1]; k++) {
+      if (l.childRoad[k] == road) return true;
+    }
+    for (var k = l.relaidStart[r]; k < l.relaidStart[r + 1]; k++) {
+      if (l.relaidRoad[k] == road) return true;
+    }
+    return false;
   }
 
   int _laneAt(Int32List data, int off, int i) =>

@@ -375,6 +375,7 @@ Map<String, Object?> _trafficStats(CitySim c) {
     'replans': s.replans,
     'appendedLegs': s.appendedLegs,
     'lanesRepaired': s.lanesRepaired,
+    'remapNudges': s.remapNudges,
     'deferred': s.deferred,
     'noRoute': s.noRoute,
     'commutes': {

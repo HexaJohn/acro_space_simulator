@@ -442,6 +442,13 @@ class CommuteSynth implements SpawnSink {
     return leg[sl] == _toWork ? job[sl] : home[sl];
   }
 
+  /// The building the leg vehicle [vehicleHandle] drives is heading for, or
+  /// −1 for a vehicle no commuter's leg is driving.
+  int destOfVehicle(int vehicleHandle) {
+    final ch = _commuterOf(vehicleHandle);
+    return ch < 0 ? -1 : destOf(ch);
+  }
+
   /// The building [commuter]'s current leg set off from, or −1.
   int originOf(int commuter) {
     if (!pool.isLive(commuter)) return -1;

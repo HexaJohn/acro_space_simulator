@@ -72,6 +72,18 @@ const int kReplanTag = 1;
 /// re-targeted home from where it stopped (§4.7).
 const int kRetargetTag = 2;
 
+/// The tag of an appended leg to the building a vehicle was driving to,
+/// still standing, from a stop that is no longer its access (D36's
+/// `siteRetarget`): the edit that carried the route re-cut the building's
+/// lot, and its access moved on along the kerb or across a new street.
+const int kSiteRetargetTag = 3;
+
+/// How far from its building's access, as the table resolves it now, a
+/// vehicle may stop and still have arrived there: a join window's reach
+/// either side of its join (§5.5), well over the centimetres a split's
+/// re-sampling moves a stop by.
+const double kSiteRetargetM = 1.5;
+
 /// Salts of the RNG's sub-streams: each subsystem draws from its own, so a
 /// draw added to one never shifts another's.
 const int _demandSalt = 0x44454D41; // 'DEMA'
@@ -458,10 +470,12 @@ class _Core implements PathResolver, PathSink, VehicleSink {
   int _syncUtils = -1, _syncCells = -1;
   LaneGraph? _syncGraph;
 
-  // The remap's scratch, by vehicle slot.
+  // The remap's scratch, by vehicle slot; and a route one connector longer
+  // than a remapped one.
   Uint8List _rmOp = Uint8List(0);
   Int32List _rmElem = Int32List(0);
   Float64List _rmS = Float64List(0);
+  Int32List _rmRoute = Int32List(64);
   final Int32List _one = Int32List(1);
 
   static const int _opNone = 0, _opPlace = 1, _opHold = 2;
@@ -469,6 +483,17 @@ class _Core implements PathResolver, PathSink, VehicleSink {
   /// How far short of its lane's end a vehicle on a connector is taken to
   /// be when its route is carried across an edit from the lane it left.
   static const double _laneEndM = 0.01;
+
+  /// How far outside its new lane a vehicle must stand to be carried onto
+  /// the connector through a new junction's box: the remapper's own
+  /// "strictly inside" margin, so a vehicle exactly at a lane's end or
+  /// start stays on the lane.
+  static const double _boxEps = 1e-3;
+
+  /// The least a rebuild leaves between a vehicle's front and the tail of
+  /// the one ahead of it on its element: [kStopShortM], the gap a vehicle
+  /// comes to rest at before a line.
+  static const double _placeClearM = kStopShortM;
 
   static final int _driving = VehicleState.driving.index;
   static final int _hold = VehicleState.holdAtEdgeEnd.index;
@@ -587,7 +612,8 @@ class _Core implements PathResolver, PathSink, VehicleSink {
   }
 
   /// §3.9 for every vehicle, by [rm]: remapped while the table still holds
-  /// the old graph, then placed on [next] and relinked.
+  /// the old graph, then placed on [next], relinked, and kept clear of one
+  /// another.
   void _remapAll(RouteRemapper rm, LaneGraph next) {
     final old = rm.lineage.from;
     final t = table;
@@ -607,7 +633,7 @@ class _Core implements PathResolver, PathSink, VehicleSink {
       if (el < nOld) {
         final st = rm.remap(t.arena.data, off, len,
             at: cur, s: t.s[sl].toDouble(), destS: destS);
-        _settleRemap(sl, rm, st, next);
+        _settleRemap(sl, rm, st, next, onLane: true);
         continue;
       }
       // On a connector: carried from the end of the lane it left, it keeps
@@ -643,6 +669,7 @@ class _Core implements PathResolver, PathSink, VehicleSink {
       _setV0(sl, next);
     }
     t.relinkAll();
+    _separate(next);
     for (var sl = 0; sl < hw; sl++) {
       if (_rmOp[sl] == _opHold && t.isSlotLive(sl)) {
         stats.replans++;
@@ -651,13 +678,18 @@ class _Core implements PathResolver, PathSink, VehicleSink {
     }
   }
 
-  void _settleRemap(int sl, RouteRemapper rm, RemapStatus st, LaneGraph next) {
+  /// Settles [sl] by the remap's outcome [st]: its new route and place, a
+  /// hold for a re-plan, or off the road. [onLane]: it was on a lane of the
+  /// old graph, not a connector.
+  void _settleRemap(int sl, RouteRemapper rm, RemapStatus st, LaneGraph next,
+      {bool onLane = false}) {
     final t = table;
     switch (st) {
       case RemapStatus.kept:
-        t.setRoute(sl, rm.route, rm.routeLength, destS: rm.stopS);
         _rmOp[sl] = _opPlace;
         if (rm.lanesRepaired) stats.lanesRepaired++;
+        if (onLane && _carryThroughBox(sl, rm, next)) return;
+        t.setRoute(sl, rm.route, rm.routeLength, destS: rm.stopS);
       case RemapStatus.replan:
         // It drives on to the end of the edge it is on and holds there,
         // its stuck timer frozen, while a fixed-start plan from its lane is
@@ -675,6 +707,104 @@ class _Core implements PathResolver, PathSink, VehicleSink {
     _rmElem[sl] = rm.lane;
     _rmS[sl] = rm.laneS;
     planner.originT[sl] = next.edgeLaneS0[next.laneEdge[rm.lane]] + rm.laneS;
+  }
+
+  /// A vehicle that stood where the edit put a junction's box on its road:
+  /// past the new stop line on the piece behind the new node, or past the
+  /// node and short of where the next piece's lane now begins. Clamped onto
+  /// its lane it would be dragged up to the box's depth, onto the car
+  /// behind it or ahead; instead it goes on the connector of its own
+  /// movement straight through the box, as far through it as it stands.
+  /// True when [sl] was placed so — its route, its element and place, its
+  /// origin — and false to leave it to the lane.
+  ///
+  /// Only a vehicle on its way: one standing still for a plan it waits on
+  /// (a re-plan's hold, an appended leg's dwell) is planned from the lane
+  /// it is in (`resolve`), and keeps it.
+  bool _carryThroughBox(int sl, RouteRemapper rm, LaneGraph next) {
+    final t = table;
+    final st = t.state[sl];
+    if (st == _hold || st == _dwelling) return false;
+    final lane = rm.lane;
+    final e = next.laneEdge[lane];
+    final s0 = next.edgeLaneS0[e].toDouble(), s1 = next.edgeLaneS1[e].toDouble();
+    final at = rm.placeT;
+    final nNew = next.laneCount;
+    if (at > s1 + _boxEps) {
+      // Past the stop line, onto the route's first connector. A route that
+      // ends on this edge has its stop clamped to the lane's end, where the
+      // lane places it, and it arrives there.
+      if (rm.routeLength < 2 || rm.route[0] != lane) return false;
+      if (!t.setRoute(sl, rm.route, rm.routeLength,
+          destS: rm.stopS, routeCur: 1)) {
+        return false;
+      }
+      final c = rm.route[1];
+      _rmElem[sl] = nNew + c;
+      _rmS[sl] = _intoConnector(next, c, at - s1);
+      planner.originT[sl] = s1;
+      return true;
+    }
+    if (at < s0 - _boxEps) {
+      // Past the node, on the connector into its lane from the piece of its
+      // road behind — none where the node is not on its road, and then the
+      // lane has it.
+      final c = rm.connectorBehind(lane);
+      if (c < 0) return false;
+      final n = rm.routeLength + 1;
+      if (_rmRoute.length < n) _rmRoute = Int32List(2 * n);
+      _rmRoute[0] = next.conFromLane[c];
+      _rmRoute[1] = c;
+      _rmRoute.setRange(2, n, rm.route, 1);
+      if (!t.setRoute(sl, _rmRoute, n, destS: rm.stopS, routeCur: 1)) {
+        return false;
+      }
+      _rmElem[sl] = nNew + c;
+      _rmS[sl] = _intoConnector(next, c, next.conLen[c] - (s0 - at));
+      planner.originT[sl] = next.edgeLaneS1[next.conFromEdge(c)];
+      return true;
+    }
+    return false;
+  }
+
+  /// [s] metres along connector [c] of [g], kept on it: no further than
+  /// [_laneEndM] short of its end, so the vehicle hands over by moving.
+  static double _intoConnector(LaneGraph g, int c, double s) {
+    final hi = g.conLen[c] - _laneEndM;
+    return s > hi ? (hi > 0 ? hi : 0.0) : (s > 0 ? s : 0.0);
+  }
+
+  /// After a rebuild has placed and relinked every vehicle: no vehicle's
+  /// front is left within [_placeClearM] of the tail of the one ahead of it
+  /// on its element. Where the remap could not keep a vehicle where it was,
+  /// the place it had instead may be on or against another; that vehicle —
+  /// the one behind — is moved back until it clears, never behind the start
+  /// of its element, and counted in `stats.remapNudges` (a vehicle that
+  /// cannot clear even there stays at the start, counted too).
+  ///
+  /// Each element's list, head to tail, is its vehicles by descending
+  /// place, and moving one back never takes it behind the next: the
+  /// relinked order stands.
+  void _separate(LaneGraph next) {
+    final t = table;
+    final nEl = next.elementCount;
+    for (var el = 0; el < nEl; el++) {
+      final head = t.elemHead[el];
+      if (head < 0) continue;
+      for (var ahead = head, sl = t.next[head];
+          sl >= 0;
+          ahead = sl, sl = t.next[sl]) {
+        final clear = t.s[ahead] - t.len[ahead] - _placeClearM;
+        final s = t.s[sl].toDouble();
+        if (s <= clear) continue;
+        final to = clear > 0 ? clear : 0.0;
+        final back = s - to;
+        t.s[sl] = to;
+        t.odo[sl] -= back;
+        t.movedM[sl] -= back;
+        stats.remapNudges++;
+      }
+    }
   }
 
   /// The desired speed of the element [sl] was just placed on.
@@ -782,6 +912,11 @@ class _Core implements PathResolver, PathSink, VehicleSink {
         // Nowhere to go from where it stopped: it leaves the road quietly.
         commutes.vanished(h);
         table.state[sl] = VehicleState.leaving.index;
+      } else if (request.tag == kSiteRetargetTag) {
+        // No way on to where its building is met now: it has come as near
+        // as its route could bring it, and arrives where it stopped.
+        table.state[sl] = VehicleState.leaving.index;
+        _arrive(h);
       } else {
         mover.despawn(h, DespawnReason.edit, this);
       }
@@ -800,6 +935,24 @@ class _Core implements PathResolver, PathSink, VehicleSink {
 
   @override
   void arrived(int handle) {
+    final sl = SlotPool.slotOf(handle);
+    if (_accessMoved(sl, commutes.destOfVehicle(handle))) {
+      // Its building stands, but is no longer met where the route stops
+      // (D36's `siteRetarget`): an edit re-cut its lot while it drove, and
+      // the route, locked, was carried to the old stop. An appended leg
+      // takes it on, from its lane, to the access as it is now; it arrives
+      // there. Not a re-plan: the route it drove was never edited.
+      table.state[sl] = _dwelling;
+      stats.appendedLegs++;
+      _ask(handle, kSiteRetargetTag);
+      return;
+    }
+    _arrive(handle);
+  }
+
+  /// [handle] has arrived where its route stopped: the trip's leg is done —
+  /// or, its building found gone, an appended leg takes it home (§4.7).
+  void _arrive(int handle) {
     stats.arrived++;
     final back = commutes.arrived(handle, clock.timeUs);
     if (back < 0) return;
@@ -808,6 +961,20 @@ class _Core implements PathResolver, PathSink, VehicleSink {
     table.state[SlotPool.slotOf(handle)] = _dwelling;
     stats.appendedLegs++;
     _ask(handle, kRetargetTag);
+  }
+
+  /// Whether the vehicle in [sl], at its stop, stopped short of or past
+  /// building [dest]'s access: [dest] still stands and has access, on the
+  /// lane graph of the last sync, but not on the edge the vehicle is on
+  /// within [kSiteRetargetM] of its stop. False for no building (−1), one
+  /// gone — that is §4.7's re-target — or one with no access left to go to.
+  bool _accessMoved(int sl, int dest) {
+    final g = lg;
+    if (g == null || dest < 0 || !buildings.hasAccess(dest)) return false;
+    final el = table.elem[sl];
+    if (el < 0 || el >= g.laneCount) return false;
+    return !buildings.meetsAt(
+        dest, g.laneEdge[el], table.destS[sl].toDouble(), kSiteRetargetM);
   }
 
   @override
@@ -922,6 +1089,7 @@ class _Core implements PathResolver, PathSink, VehicleSink {
     h = fnv1aU32(h, stats.noRoute);
     h = fnv1aU32(h, stats.pictures);
     h = fnv1aU32(h, stats.lanesRepaired);
+    h = fnv1aU32(h, stats.remapNudges);
     h = fnv1aU32(h, (stats.congestionIndex * 1e6).round());
     h = fnv1aU32(h, (stats.tripRatio * 1e6).round());
     return h;
