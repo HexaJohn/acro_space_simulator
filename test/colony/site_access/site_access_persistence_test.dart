@@ -227,9 +227,10 @@ void main() {
       if (x.rev != y.rev) revMoved++;
       if (x.program != y.program &&
           _homeGeometryFlip(city, loaded, lot.id)) {
-        // R2 CORE FINDING, not the book's: the home generator's §3.4 fit
-        // (home_driveway.dart) decides differently on the load's millimetre
-        // re-sample of this lot (docs/plans/site-access.md §4.4 as built).
+        // The home generator's §3.4 fit deciding differently on the load's
+        // millimetre re-sample (docs/plans/site-access.md §4.4 as built:
+        // lot-r2-r21 did, until the house containment test was inset). Named
+        // here so a regression says what it is; any flip fails below.
         geometryFlips.add(lot.id);
         continue;
       }
@@ -239,8 +240,9 @@ void main() {
               '$kSeedQuantumM m seed quantum');
     }
     expect(planned, greaterThanOrEqualTo(200));
-    // Pinned so a second flip, or a fix, is seen at once.
-    expect(geometryFlips, ['lot-r2-r21']);
+    // §4.4: any key or program change fails the test (R2 integration repair:
+    // the lot-r2-r21 flip is closed by the inset house containment test).
+    expect(geometryFlips, isEmpty);
     // ignore: avoid_print
     print('curved lots ${lots.length}: planned $planned, with stalls '
         '$withStalls, rev moved $revMoved, home fit flips $geometryFlips');

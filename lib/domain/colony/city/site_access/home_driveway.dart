@@ -229,9 +229,15 @@ HomeDrivewayPlan? homeDrivewayPlanOf(SiteContext ctx) {
     final houseDepth = depthOver(profile, hx0, hx1);
     final hy1 = houseDepth - kHomeRearYardM;
     if (hy1 - yT < kHomeMinHouseM - kGenEpsM) continue;
-    // Exact containment of the drive's on-parcel stretch and the house.
+    // Exact containment of the drive's on-parcel stretch and the house. The
+    // house rectangle is tested inset by kContainsInsetM on every side, as the
+    // drive is at its front: tested flush, a lot whose house corner touches
+    // the polygon decides on the load's millimetre re-sample (lot-r2-r21 of
+    // site_access_persistence_test flipped kerbOnly -> homeDriveway, §4.4).
     if (!profile.containsRect(SiteRect(minX, kContainsInsetM, maxX, maxY)) ||
-        !profile.containsRect(SiteRect(hx0, yT, hx1, hy1))) {
+        !profile.containsRect(SiteRect(hx0 + kContainsInsetM,
+            yT + kContainsInsetM, hx1 - kContainsInsetM,
+            hy1 - kContainsInsetM))) {
       continue;
     }
     // §6.1 step 3: the house envelope is the footprint fitted into that free

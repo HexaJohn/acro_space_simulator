@@ -1611,10 +1611,12 @@ play and ≤ 2 ms for the sync of a road edit on the 127k town.
 - **R2 core finding:** on the curved-road fixture (324 lots on two S-bend streets), one lot, `lot-r2-r21`, flips
   `kerbOnly` (demotion `homeGeometry`) → `homeDriveway` over a load: the home generator's §3.4 fit decides
   differently on the millimetre re-sample (W 23.28716 → 23.28792 m, D 31.96215 → 31.96174 m, slot 0 unchanged at
-  s = 535.5). Every other lot keeps its program and stall keys. The test pins exactly that one flip, so a fix or a
-  second flip is seen at once; the fix is core's (`home_driveway.dart`, for example quantising `W` and `D` before
-  the fit). **Until core fixes it, this section's acceptance ("any key or program change fails the test") is NOT
-  met: the flip is an open item for the R2 merge,** at which the pin becomes `isEmpty`.
+  s = 535.5). Every other lot keeps its program and stall keys. **CLOSED at the R2 integration repair:** the cause
+  was not `W` or `D` but the house containment test, `profile.containsRect(hx0, yT, hx1, hy1)` flush with the
+  polygon; live, every variant failed only that test by under a millimetre, loaded, it passed (the other margins
+  are metres). The house rectangle is now tested inset by `kContainsInsetM` (0.05 m) on every side, as the drive's
+  front edge already was, which moves the edge far beyond the re-sample error. The sprawl audit's demotions did not
+  move (no Appendix A entry), and the test now expects no flip at all (`isEmpty`): this section's acceptance is met.
 - **Live against loaded (R2 book repair).** Every other case compares two fresh drains. `site_access_persistence_test`
   also syncs `city.siteAccess` in budgeted ticks through a grown house avenue, a road edit that renames lots, a
   decoration upgrade, a tier change and a burnout, then compares every plan per site id (`sitePlanJson`, programs,
@@ -1624,8 +1626,7 @@ play and ≤ 2 ms for the sync of a road edit on the 127k town.
   (full drain, inside `fromJson`) → first `advance` (a no-op sync) → traffic building sync. The first gameplay frame
   no longer carries the drain; `site_access_persistence_test` checks the loaded book is complete, byte-identical and
   wired to `layout.easementOf` before any advance.
-- **The `lot-r2-r21` pin stays on this branch** (skeptic, low): the flip is core's home fit; core quantises `W` and
-  `D` before the §3.4 fit, and the pin becomes `isEmpty` at integration.
+- **The `lot-r2-r21` pin** became `isEmpty` at the R2 integration repair (above).
 
 ---
 
