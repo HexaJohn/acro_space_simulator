@@ -195,12 +195,14 @@ enum BayKind         { dock, kerbBay }                                         /
 class SiteAccessChunk {
   // site
   final List<String> siteId; final Int32List rev, flags, graphStamp; final Uint8List program; // graphStamp: RoadGraph.structureStamp the joins were resolved against
+  final Int32List graphLot;                                                      // the site's RoadGraph lot index at graphStamp; -1 for a site that is not a graph lot
   final Float64List frameE, frameN; final Float32List frameUE, frameUN;          // SiteFrame origin + unit u
   final Float32List envX0, envX1, envY0, envY1, envFrontInset, gateX, gateW;    // frame metres
   // points: every position that carries a height (node, via, pave vertex, lamp, entrance, path)
   final Float64List ptE, ptN; final Uint8List ptHRef, ptHJoin; final Float32List ptHT, ptDz;
   // joins (joins[0] = slot 0)
-  final Uint8List joinSlot, joinRight, joinDirs, joinRole, joinKind;
+  final Uint8List joinSlot, joinRight, joinDirs, joinRole, joinKind;            // joinSlot 0, 1, or 2 = side street (unpacked)
+  final Int32List joinRef, joinPiece;                                            // join handle (below) and piece, resolved at graphStamp
   final Int32List joinRoadNo, joinRoadIdIdx, joinKerbNode, joinThroatSeg;       // road no. diagnostic; re-resolved per graph
   final Float64List joinRoadS; final Float32List joinCutHalfM;
   // nodes
@@ -238,6 +240,29 @@ class SiteAccessPlan {
 }
 ```
 
+**Join handles (`joinRef`).** Every plan join names its graph join with one Int32 that the book resolves once, at sync,
+against the graph it stamps into `graphStamp`. The encoding (constants and helpers in `site_access_constants.dart` and
+on `RoadGraph`):
+
+| `joinRef` | Meaning | Graph read (sync only) |
+|---|---|---|
+| `≥ 0` | packed join index: slot 0 or slot 1, `lotJoinStart[graphLot] + position` | the `join*` columns at that index |
+| `−1` (`kJoinRefNone`) | no graph join: a footprint site's own join (`attachFootprintJoins`) or a kerbside plan with no slot | none; the plan's copied columns are the only source |
+| `≤ −2` | the corner lot's side-street slot 2: `kJoinRefSideStreetBase − lot` with `kJoinRefSideStreetBase = −2`, so `lot = −2 − joinRef` | `RoadGraph.sideStreetJoinOf(lot)` |
+
+- `RoadGraph.joinRefOf(int lot, int slot)` returns the handle, or −1 when the lot has no such slot.
+  `RoadGraph.joinOfRef(int ref)` returns a `JoinSlot`, or null for −1. Both run at sync and in tests only.
+- **Stable while `sharesStructureWith` holds.** Copies made by `withOverrides` and `refreshedFor` share `lotJoinStart`,
+  the join columns and the side-street cache. `graphLot`, every `joinRef` and the values behind them are therefore
+  identical across such rebuilds, and `(graphLot, joinSlot) ↔ joinRef` is a bijection for the plan's joins.
+- **Across a structure change.** Handles are never carried over. `graphStamp` changes, `isCurrentFor` turns false and
+  the book re-resolves on its next check (§4.2). Nothing persisted stores a `joinRef`: saves key on `siteId + stallKey`
+  (§7.5).
+- **No lookup per sub-step.** Every value a car needs is copied into the plan's columns at sync: `joinPiece`,
+  `joinRoadS`, `joinDirs`, `joinRight`, `joinCutHalfM`, and the kerb point via `joinKerbNode`. That includes slot 2.
+  Traffic reads the columns, and uses `joinRef` only as the join's identity (with `(edge, T)`, V4) and for diagnostics.
+  V3 checks that the copies equal `joinOfRef(joinRef)` bit for bit.
+
 Kerbside plans carry exactly one join (slot 0, `kerbside`) and no nodes, segments or stalls. They are stored
 as a single site row with empty ranges, so a kerb-only town costs almost nothing. A chunk retains ≤ 7 objects
 (itself, five typed lists, the `siteId` list) and its `SiteChunkGeometry` (§5.2) ≤ 3 (itself, one Float32List, one
@@ -261,7 +286,8 @@ it. Limbo plans (§7.6) and cars mid-manoeuvre hold the old chunk and keep readi
 - **V2 Side and directions.** `joinDirs == _dirsFor(road, joinRight)`. The side comes from geometry (§3.2),
   never from the `r`/`l` in a lot id.
 - **V3 One source.** `joins[0]` is slot 0. Every join's `(piece, s, right, dirs, kerb point)` equals its slot's
-  columns bit for bit in the graph the plan was synced against.
+  columns bit for bit in the graph the plan was synced against. For the side-street slot that is
+  `joinOfRef(joinRef)`, and `joinRef == joinRefOf(graphLot, joinSlot)`.
 - **V4 Roles.** A network plan has ≥ 1 in-capable and ≥ 1 out-capable cut join. Cuts on one edge do not
   overlap and are ≥ 6 m apart, so `(edge, T)` identifies a join.
 - **V5 Throat (ask 3).** Each cut join's throat is the segment leaving its kerb node:
@@ -1498,7 +1524,9 @@ change. Road side commits R1 and posts this notice with the hash:
 **Traffic-side semantics** (their implementation):
 
 - `AccessPoints.ofJoin(lg, joinNo)` takes the side from `joinRight`, and `ofLotIndex(i)` becomes
-  `ofJoin(lotJoinStart[i])`.
+  `ofJoin(lotJoinStart[i])`. For a plan join, traffic reads the plan's copied join columns. Its identity is the
+  plan's `joinRef` (§2.3 join handles): `≥ 0` is packed, `≤ −2` is a side street, `−1` is none. No
+  `sideStreetJoinOf` call happens after sync.
 - `BuildingTable` gets per-join access rows (edge, `T`, lane, left bit per direction, role, kind) in place of
   `accFwd/accBwd` (building_table.dart:92-97).
   - `addGoals` covers in-capable joins with D6 lane masks.
