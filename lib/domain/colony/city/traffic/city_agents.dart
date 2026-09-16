@@ -2146,6 +2146,12 @@ class _Core
   }
 
   @override
+  int buildingOfSite(String siteId) {
+    final h = buildings.handleOfSite(siteId);
+    return h == null ? -1 : SlotPool.slotOf(h);
+  }
+
+  @override
   int stallOfKey(int row, int stallKey) {
     final s = sites.stallIndexOfKey(row, stallKey);
     return s >= 0 && !sites.stallTaken(row, s) ? s : -1;
@@ -2200,10 +2206,13 @@ class _Core
   }
 
   @override
-  void garage(int car, int row) {
+  void garage(int car, int row, int building) {
     final s = _restoring;
     if (s == null) return;
-    final b = sites.isRowLive(row) ? sites.building[row] : -1;
+    // Its site row when it has one, else the building the codec found: a car
+    // garaged at a kerbside home is still that home's, and its pool hands it
+    // back when its owner drives (§7.5).
+    final b = sites.isRowLive(row) ? sites.building[row] : building;
     final made = parked.garage(
         building: b,
         ownerKind: CarOwnerKind.values[s.cars.ownerKind[car]],

@@ -22,7 +22,9 @@
 /// what it can and says so in order (§14.1):
 ///
 /// 1. an unknown site — renamed by a changed plat rule, demolished — drops
-///    its cars, as a citizen's unknown home is dropped;
+///    its cars, as a citizen's unknown home is dropped. A site that is still
+///    there but has no LOT (a kerbside plan, or a building whose plan has
+///    not been made) is not unknown: its cars are garaged at it;
 /// 2. a key that is gone takes the nearest free stall of that lot;
 /// 3. a lot with no free stall garages the car, and so does a kerb the car
 ///    can no longer be snapped to.
@@ -60,9 +62,20 @@ abstract interface class CarSaveSource {
 /// a handle: the columns there say whose car it is, what kind and what
 /// variant, and the sink reads them as it places it.
 abstract interface class CarRestoreSink {
-  /// The site row of [siteId], or −1 when the colony has no such site: its
-  /// cars are dropped.
+  /// The site row of [siteId], or −1 when it has none — which is NOT the
+  /// same as having no such site: a kerbside plan, and a building whose plan
+  /// has not been made yet, are both real places with no lot to park in.
+  /// [buildingOfSite] tells the two apart.
   int rowOfSite(String siteId);
+
+  /// The building slot [siteId] names, or −1 when the colony has no such
+  /// building at all.
+  ///
+  /// This is what keeps a garaged car whose site has no lot: it belongs to a
+  /// building that is still standing, and it comes back out of that
+  /// building's pool when its owner drives again. Reading only [rowOfSite]
+  /// would have dropped it as though the whole lot were gone.
+  int buildingOfSite(String siteId);
 
   /// The stall of [row] keyed [stallKey] (`SiteTable.stallIndexOfKey`), or
   /// −1 when the re-plan dropped it.
@@ -79,9 +92,11 @@ abstract interface class CarRestoreSink {
   /// false when there is none to snap to, and the codec garages it.
   bool parkKerb(int car);
 
-  /// Takes saved car [car] out of the world, at site row [row] (−1 when its
-  /// site is unknown or it has none).
-  void garage(int car, int row);
+  /// Takes saved car [car] out of the world, at site row [row] (−1 when it
+  /// has none) of [building] (−1 when even that is unknown): a car garaged
+  /// at a building is still that building's, and is handed back when its
+  /// owner drives.
+  void garage(int car, int row, int building);
 }
 
 /// The parked cars of a save, decoded: the columns of the `cars` table, with
@@ -223,12 +238,20 @@ class AgentsCodec {
     var lot = 0, kerb = 0, garaged = 0, dropped = 0;
     for (var i = 0; i < cars.count; i++) {
       final s = cars.site[i];
-      final row = s < 0 ? -1 : sink.rowOfSite(saved.sites[s]);
-      if (s >= 0 && row < 0) {
-        // The lot was renamed by a changed plat rule, or it is gone: there
-        // is nowhere to put the car and nobody left to own it.
-        dropped++;
-        continue;
+      final id = s < 0 ? null : saved.sites[s];
+      final row = id == null ? -1 : sink.rowOfSite(id);
+      var building = -1;
+      if (id != null && row < 0) {
+        // No lot row is not the same as no site. A kerbside plan and a
+        // building whose plan has not been made both answer −1 here and are
+        // still standing, and a car garaged at one of them belongs to it: it
+        // is garaged again, not dropped. Only a building the colony no
+        // longer has takes its cars with it.
+        building = sink.buildingOfSite(id);
+        if (building < 0) {
+          dropped++;
+          continue;
+        }
       }
       switch (CarWhere.values[cars.where[i]]) {
         case CarWhere.lot:
@@ -237,7 +260,7 @@ class AgentsCodec {
             stall = sink.nearestFreeStall(row, cars.stallKey[i]);
           }
           if (stall < 0) {
-            sink.garage(i, row);
+            sink.garage(i, row, building);
             garaged++;
           } else {
             sink.parkLot(i, row, stall);
@@ -247,11 +270,11 @@ class AgentsCodec {
           if (sink.parkKerb(i)) {
             kerb++;
           } else {
-            sink.garage(i, row);
+            sink.garage(i, row, building);
             garaged++;
           }
         case CarWhere.garaged:
-          sink.garage(i, row);
+          sink.garage(i, row, building);
           garaged++;
       }
     }

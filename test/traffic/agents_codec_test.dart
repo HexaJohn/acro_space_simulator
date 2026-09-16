@@ -184,7 +184,7 @@ void main() {
       expect(back.placed, contains('lot 1 stall 0 owner 5 variant 3'),
           reason: 'the key, not the index: stall 0 of the other site');
       expect(back.placed, contains('kerb 12.5,-40.25 @1500 owner 7'));
-      expect(back.placed, contains('garage 1 owner 8'));
+      expect(back.placed, contains('garage 1 building -1 owner 8'));
     });
 
     test('a key that is gone takes the nearest free stall, then the garage',
@@ -205,7 +205,7 @@ void main() {
       // And with no free stall left, the car is garaged at its site.
       final full = _World(sites: const ['lot-a', 'lot-b'])..keys[0] = {555: 2};
       expect(full.restore(saved), (lot: 1, kerb: 1, garaged: 2, dropped: 0));
-      expect(full.placed, contains('garage 1 owner 5'));
+      expect(full.placed, contains('garage 1 building -1 owner 5'));
 
       // A kerb the car cannot be snapped to garages it as well.
       final noKerb = _World(sites: const ['lot-a', 'lot-b'])
@@ -213,7 +213,7 @@ void main() {
         ..keys[1] = {777: 0}
         ..kerbSnaps = false;
       expect(noKerb.restore(saved), (lot: 2, kerb: 0, garaged: 2, dropped: 0));
-      expect(noKerb.placed, contains('garage -1 owner 7'),
+      expect(noKerb.placed, contains('garage -1 building -1 owner 7'),
           reason: 'a kerb car belongs to no site row');
     });
 
@@ -228,6 +228,29 @@ void main() {
               'and its garaged car go with it');
       expect(renamed.placed, hasLength(2));
       expect(renamed.placed, contains('lot 0 stall 2 owner 6 variant 1'));
+    });
+
+    test('a car garaged at a site with no LOT survives the load', () {
+      // The bug this pins: a kerbside site, and a building whose plan has
+      // not been made, both have no site row, so reading `rowOfSite` alone
+      // could not tell them from a site that is gone — and a car garaged at
+      // one was dropped on every load, silently, for good.
+      final (cars, world) = parked();
+      final saved = AgentsCodec.decode(
+          jsonDecode(jsonEncode(AgentsCodec.encode(
+              enabled: true, cars: cars, world: world))))!;
+      final kerbside = _World(sites: const ['lot-a'])
+        ..keys[0] = {555: 2}
+        ..lotless.add('lot-b');
+      expect(kerbside.restore(saved), (lot: 1, kerb: 1, garaged: 2, dropped: 0),
+          reason: 'lot-b keeps its building and loses only its stalls: its '
+              'garaged car is garaged again, and the car that stood on a '
+              'stall is garaged there too');
+      expect(kerbside.placed, hasLength(4));
+      expect(kerbside.placed, contains('garage -1 building 200 owner 8'),
+          reason: 'garaged at the building it belongs to, so its home pool '
+              'can hand it back when its owner drives');
+      expect(kerbside.placed, contains('garage -1 building 200 owner 5'));
     });
 
     test('a v1 save still loads, with no cars', () {
@@ -327,8 +350,13 @@ void main() {
 class _World implements CarSaveSource, CarRestoreSink {
   _World({required this.sites});
 
-  /// Site ids the colony still has, in the save's own order.
+  /// Site ids the colony still has a LOT at, in the save's own order.
   final List<String> sites;
+
+  /// Site ids whose building is still standing but has no lot to park in: a
+  /// kerbside plan, or one that has not been made. Their cars are garaged
+  /// there, never dropped.
+  final List<String> lotless = [];
 
   /// Per car handle: its site id, and a kerb car's pose.
   final Map<int, String> carSite = {};
@@ -372,6 +400,14 @@ class _World implements CarSaveSource, CarRestoreSink {
   int rowOfSite(String siteId) => sites.indexOf(siteId);
 
   @override
+  int buildingOfSite(String siteId) {
+    final row = sites.indexOf(siteId);
+    if (row >= 0) return 100 + row;
+    final k = lotless.indexOf(siteId);
+    return k < 0 ? -1 : 200 + k;
+  }
+
+  @override
   int stallOfKey(int row, int stallKey) => keys[row]?[stallKey] ?? -1;
 
   @override
@@ -392,8 +428,8 @@ class _World implements CarSaveSource, CarRestoreSink {
   }
 
   @override
-  void garage(int car, int row) =>
-      placed.add('garage $row owner ${_owner(car)}');
+  void garage(int car, int row, int building) =>
+      placed.add('garage $row building $building owner ${_owner(car)}');
 
   int _owner(int car) => cars!.owner[car];
 
