@@ -267,7 +267,10 @@ abstract final class SiteManoeuvre {
     if (back < 0) back = 0;
     _backM = back;
     final pe = se - de * back, pn = sn - dn * back;
-    roadPose(lg, lane, restLaneS(p, join, lane, lg, lenM), _b, 4);
+    // The swing ends with the car's CENTRE half a length behind the front
+    // [restLaneS] answers: a pose is a centre, `VehicleTable.s` is a front
+    // (§2.3), and the half length between them is taken HERE, once.
+    roadPose(lg, lane, restLaneS(p, join, lane, lg) - lenM / 2, _b, 4);
     final qe = _b[4], qn = _b[5], ue = _b[6], un = _b[7];
     _write(_b, 0, pe, pn, de, dn);
     // The swing's handles: away from the kerb along the drive at one end,
@@ -284,23 +287,32 @@ abstract final class SiteManoeuvre {
   /// Lane metres a back-out comes to rest at: its FRONT on the join's own
   /// `T`, the axis it backed down.
   ///
+  /// A FRONT, because `VehicleTable.s` is one (§2.3, §5.3) and this very arc
+  /// is what `attach` is handed as the rear crosses the kerb (§7.4 EXIT
+  /// logging): ONE definition of the place, so the car the road mover takes
+  /// over is drawn where the swing left it rather than half a length
+  /// upstream of it. Whoever wants the CENTRE — a POSE, which is what the
+  /// curve's own end is — takes half a length off, as [_backOutEnds] does.
+  /// No length enters the arc itself, so it is exactly the arc
+  /// `SiteMover._takeFootprint` claims the footprint about.
+  ///
   /// Everything the swing sweeps then lies inside the footprint
   /// `[T − backOutUpM, T + backOutDownM]` the gap rules cleared — the body
   /// at rest runs back to `T − lenM`, the tail never reaches `T − 10`, and
   /// the nose's excursion past `T` mid-swing is centimetres — so the
   /// downstream two metres stay what they are for: clearance ahead, not
   /// room the car itself takes. `site_manoeuvre_test` pins it.
-  static double restLaneS(
-      SiteAccessPlan p, int join, int lane, LaneGraph lg, double lenM) {
+  static double restLaneS(SiteAccessPlan p, int join, int lane, LaneGraph lg) {
     final e = lg.laneEdge[lane];
-    final t = lg.travelArc(e, p.joinRoadS(join));
-    return t - lenM / 2 - lg.edgeLaneS0[e];
+    return lg.travelArc(e, p.joinRoadS(join)) - lg.edgeLaneS0[e];
   }
 
-  /// The pose of a car whose centre is [laneS] lane metres along road [lane]
+  /// The pose of a car whose CENTRE is [laneS] lane metres along road [lane]
   /// of [lg], written into [out] at [o] as east, north, dirE, dirN: the
   /// road's own line at that travel arc, `laneOff` to the right of travel —
-  /// where the renderer draws a vehicle on that lane.
+  /// where the renderer draws a vehicle on that lane, which it does half a
+  /// length behind the front `VehicleTable.s` counts, so a caller holding an
+  /// `s` takes that half length off before it asks.
   static void roadPose(
       LaneGraph lg, int lane, double laneS, Float64List out, int o) {
     final e = lg.laneEdge[lane];

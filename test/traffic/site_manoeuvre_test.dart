@@ -154,6 +154,7 @@ void main() {
         "front on the join's T", () {
       final out = Float64List(4);
       final road = Float64List(4);
+      final axis = Float64List(4);
       for (final t in [SyntheticTemplate.home, SyntheticTemplate.homeTandem]) {
         final lot = lotOf(t);
         final p = world.planOf(lot);
@@ -167,12 +168,32 @@ void main() {
           expect(out[3], closeTo(p.stallDirN(i), 1e-9));
           SiteManoeuvre.backOutPose(p, 0, i, lane, world.lg, 1, out, 0,
               lenM: kCarM);
-          final rest =
-              SiteManoeuvre.restLaneS(p, 0, lane, world.lg, kCarM);
-          SiteManoeuvre.roadPose(world.lg, lane, rest, road, 0);
+          // `restLaneS` answers where the car's FRONT rests — the arc the
+          // mover hands to `VehicleTable.attach`, whose `s` is a front
+          // (§2.3) — so the POSE that ends the swing, a centre, is half a
+          // length behind it.
+          final rest = SiteManoeuvre.restLaneS(p, 0, lane, world.lg);
+          SiteManoeuvre.roadPose(world.lg, lane, rest - kCarM / 2, road, 0);
           for (var k = 0; k < 4; k++) {
             expect(out[k], closeTo(road[k], 1e-9), reason: '$lot stall $i');
           }
+          // And that front really is on `T`: the nose of the body the pose
+          // describes, projected onto the lane at the join, lands on the
+          // join's own arc. Centimetres, not a bit, because the lane may
+          // curve under the length the nose reaches over.
+          final e = world.lg.laneEdge[lane];
+          SiteManoeuvre.roadPose(
+              world.lg,
+              lane,
+              world.lg.travelArc(e, p.joinRoadS(0)) - world.lg.edgeLaneS0[e],
+              axis,
+              0);
+          final noseE = out[0] + out[2] * kCarM / 2;
+          final noseN = out[1] + out[3] * kCarM / 2;
+          final along =
+              (noseE - axis[0]) * axis[2] + (noseN - axis[1]) * axis[3];
+          expect(along, closeTo(0, 0.02),
+              reason: '$lot stall $i rests with its front on T');
         }
       }
     });

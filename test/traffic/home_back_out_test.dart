@@ -16,6 +16,10 @@
 ///   the reverse is granted, and none when the EXIT is logged;
 /// - the EXIT lands at `T ± 11 m` in the target lane `L`, and the car is a
 ///   REVERSING vehicle there until it has shifted;
+/// - the drawn pose does not STEP when the road mover takes the car over:
+///   the arc the swing ends on is the front `VehicleTable.s` counts, so the
+///   site capture's last pose and the road's first differ by no more than a
+///   sub-step of motion (agent-traffic.md §13.3);
 /// - both directions work — near into the kerb lane, far across it — under a
 ///   minute of traffic down the street;
 /// - the drive is one `sharedSingle` claim unit, never held both ways, and an
@@ -25,9 +29,11 @@
 /// - ten minutes of both homes cycling deadlocks nothing.
 library;
 
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:acro_space_simulator/domain/colony/city/traffic/access_events.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/site_manoeuvre.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/site_vehicles.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/slot_pool.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/traffic_time.dart';
@@ -131,6 +137,67 @@ void main() {
       }
       expect(sawShift, isTrue, reason: 'the 0.5 s stop to shift happened');
       expect(reversingS, greaterThan(AgentTuning.shiftStopS));
+    });
+
+    test('the drawn pose carries across the hand-over to the road mover', () {
+      final lot = starterLotOf(SyntheticTemplate.home);
+      final d = SiteDrive({lot: SyntheticTemplate.home});
+      final e = servingEdges(d, lot);
+      final p = d.planOf(lot);
+      d.park(lot, 0);
+      final out = d.departure(lot, stall: 0, edge: e.near);
+      expect(out, isNot(SlotPool.none));
+      final sl = SlotPool.slotOf(out);
+
+      // The two ways a car is DRAWN, each taken exactly as its own side of
+      // the wire takes it: inside a site the capture calls the manoeuvre
+      // curve (`_SiteCars._poseOf`, traffic_capture.dart), and on the road
+      // the pass puts the centre half a length behind the front `s` counts
+      // (§13.3, agent_traffic_pass.dart). The moment the shift ends the car
+      // crosses from one to the other, and the drawn pose must not step.
+      final pose = Float64List(4);
+      final last = Float64List(4);
+      var onSite = false, handedOver = false;
+      var gap = -1.0;
+      for (var i = 0; i < 900 && !handedOver; i++) {
+        d.step();
+        if (!d.table.isLive(out)) break;
+        final lenM = d.table.len[sl].toDouble();
+        if (d.cols.phase[sl] != SitePhase.none.index) {
+          SiteManoeuvre.backOutPose(
+              p,
+              d.cols.join[sl],
+              d.cols.claim[sl],
+              d.table.arena.data[d.table.routeOff[sl]],
+              d.lg,
+              d.cols.manU[sl].toDouble(),
+              pose,
+              0,
+              lenM: lenM);
+          last.setAll(0, pose);
+          onSite = true;
+          continue;
+        }
+        if (!onSite) continue;
+        SiteManoeuvre.roadPose(
+            d.lg, d.table.elem[sl], d.table.s[sl] - lenM / 2, pose, 0);
+        final de = pose[0] - last[0], dn = pose[1] - last[1];
+        gap = math.sqrt(de * de + dn * dn);
+        handedOver = true;
+      }
+
+      expect(handedOver, isTrue, reason: 'the road mover did take it over');
+      // ignore: avoid_print
+      print('A9 hand-over: ${(gap * 1000).toStringAsFixed(1)} mm');
+      // A sub-step of the manoeuvre is `backOutMaxMps × kStepS` = 0.4 m, and
+      // the car is standing still to shift, so anything a real motion could
+      // explain is well under half a metre. Half a car length — the front
+      // read as a centre — is not.
+      expect(gap, lessThan(0.5),
+          reason: 'the pose stepped ${gap.toStringAsFixed(2)} m at the '
+              'hand-over: one end of it is not measuring what the other is');
+      expect(pose[2] * last[2] + pose[3] * last[3], greaterThan(0.999),
+          reason: 'and it is still pointing where it was');
     });
 
     test('the far direction crosses the near lane and lands in the far one',

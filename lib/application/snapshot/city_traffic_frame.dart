@@ -103,8 +103,13 @@ class CityTrafficFrame {
 /// its kind, variant and flags are read there.
 ///
 /// The pose is the car's CENTRE and the way its NOSE points, which is what a
-/// stall pose is; a lane pose is taken half a length behind the front the
-/// simulation drives by, so the two agree everywhere.
+/// stall pose is. On a SITE lane it is taken at the simulation's own `s`,
+/// because a manoeuvre's `u = 0` is the lane pose at the stall's mouth (see
+/// `TrafficCapture`'s `_poseOf`); on the ROAD the renderer draws that centre
+/// half a length behind `VehicleTable.s`, which is a FRONT (§13.3), and a
+/// back-out is attached at the front its swing ends on
+/// (`SiteManoeuvre.restLaneS`) — so the drawn pose does not step half a
+/// length when the road mover takes the car over (`home_back_out_test`).
 class SitePoseColumns {
   SitePoseColumns({
     required this.count,

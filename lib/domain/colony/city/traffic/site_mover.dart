@@ -786,7 +786,7 @@ class SiteMover implements LaneObstacles {
     if (u > 1) u = 1;
     site.manU[sl] = u;
     if (was < uk && u >= uk) {
-      _backOutExit(sl, nowUs, row, join, stall, lane, lenM, sink);
+      _backOutExit(sl, nowUs, row, join, stall, lane, sink);
     }
     if (u >= 1) {
       site.phase[sl] = SitePhase.shift.index;
@@ -797,13 +797,18 @@ class SiteMover implements LaneObstacles {
   /// The rear crosses the kerb line: EXIT logged, the car inserted into its
   /// target lane as a REVERSING vehicle at the place its swing ends — inside
   /// the footprint it cleared, and nowhere else (§7.4 EXIT logging).
+  ///
+  /// [SiteManoeuvre.restLaneS] answers where the FRONT rests, which is what
+  /// [VehicleTable.attach] wants and what the road mover and the renderer
+  /// both read `s` as (§2.3, §13.3): the same arc the swing ends on, so the
+  /// pose does not step half a length when the road takes the car over.
   void _backOutExit(int sl, int nowUs, int row, int join, int stall, int lane,
-      double lenM, SiteSink sink) {
+      SiteSink sink) {
     final t = table, lg = _lg!;
     final p = sites.plan[row]!;
     final edge = lg.laneEdge[lane];
     final arc = lg.travelArc(edge, p.joinRoadS(join));
-    final rest = SiteManoeuvre.restLaneS(p, join, lane, lg, lenM);
+    final rest = SiteManoeuvre.restLaneS(p, join, lane, lg);
     events.log(
         AccessEventKind.backOutExit, t.handleOf(sl), edge, arc, lane, row, join);
     stats.exits++;
