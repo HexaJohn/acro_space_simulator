@@ -1785,6 +1785,29 @@ class SiteChunkGeometry {                  // ≤ 3 retained objects: itself, on
   (`gateXM` along local X, on the envelope front edge at local −Y) and the door therefore share the building's axes
   by construction, for frontage-less manual lots and cells too. Legacy sites keep the §5.1 R0 transform. The ground
   key stays `'lot:<id>'` at the centroid, so no new query is made.
+  - **As built (R4 track B, deviations, each local):**
+    - **The knob lives here.** Placement happens in the capture, which a renderer worker cannot reach, so the flag is
+      `SiteCapture.envelopePlacement` (application) and `CityNodes.siteAccess` is a getter/setter onto it: ONE
+      storage, because a frame placed one way and keyed the other draws a building beside its own driveway. With it
+      off a served building's position, spin and size are the legacy ones to the bit (`envelope_axes_test`), while
+      its slot and gate still ride the wire as R3 left them.
+    - **`SiteCapture.placementOf(siteId)`** returns the whole placement (slot, envelope centre, extents, heading,
+      gate) in one lookup; `buildingSiteOf` is now a wrapper on it, so the per-building cost is unchanged.
+      `CitySiteFrame.buildingHeadingOf(chunk, site)` derives the heading from the STORED frame vector (`−v` in the
+      `Parcel.heading` convention, plus π), never from a re-derived `SiteFrame`: a lot re-sampled since the plan was
+      made must not turn the building.
+    - **Cells** are placed from the envelope centre as a tangent offset (`SurfacePlacement.place`), keeping the
+      cell's own reported elevation — the envelope is at most half a cell from where the cell stood, and no new
+      terrain query is made.
+    - An empty envelope (zero width or depth) keeps the legacy placement: there is nothing to stand on. **That is
+      ONE predicate, in `SiteCapture.placementOf`,** which returns null for such a plan — so the building's wire
+      `siteSlot` is −1 and the renderer's own test for plan-served (`CityTileMesher.gateOf`: `siteSlot ≥ 0`) reads
+      the same fact. Placed one way and drawn the other, a building would be front-aligned and stripped of its car
+      park against a legacy footprint that is not an envelope. The case is reachable: `kerbsideEnvelope` returns
+      `SiteEnvelope.empty` without a frame, or where `largestFreeRect` finds nothing inside the 1.5 m side setbacks
+      (a site frame narrower than 3 m), and `emitKerbOnly` publishes that plan with an interior-point door. The site
+      keeps its row in the chunks — only the BUILDING reads legacy; a kerbside plan has no paving to draw.
+      Pinned by `envelope_axes_test` over a fixture lot staked with a 2.5 m stored frontage.
 - **`RoadSnapshot.kerbCuts`:** a `Float64List` of quintuples (below): the renderer's COPY of the canonical
   `KerbCuts` (§5.5), converted to the snapshot's own drawn arc.
   - Built in the road loop (world_snapshot.dart:2763-2786) from `siteAccess` cut joins.
@@ -2122,6 +2145,48 @@ spun by `−SiteFrame.buildingHeading` (§3.1), so envelope x/y ARE the building
   - With no gate the volumes are byte-identical.
 - **`CityLighting`** car-park masts come from the plan's `lampPt` (city_lighting.dart:145-165), no longer from
   re-running `massFor`. That removes the fifth lot line.
+
+**As built (R4 track B).** The rules above all hold; five deviations, each local:
+
+- **One switch, not two.** `massFor(spec, parcel, {int seed, SiteGate? gate})`: a non-null `SiteGate` IS
+  "plan-served", and it carries the only number the massing cannot derive — where the drive crosses the front edge.
+  There is no `BuildingMassingRules.surfaceParking` field and no `SiteEnvelope` parameter: the envelope already
+  reaches the massing as the parcel `parcelOf` inflates by the style's setbacks, and two ways of saying the same
+  thing can disagree. `BuildingGenerator.generate` and `BuildingLibrary.get` take the same `gate`;
+  `BuildingArchetype` keys `surfaceParking` (`gate == null`) and `gateBucket` as designed, the gate quantised to the
+  metre and packed under 2^21 (`gateBucketOf` / `gateOfBucket`), so a mesh is shared only by buildings whose gate is
+  cut in the same place. `BuildingArchetype.bucketOf(x, b, minFit:)` is the min-fit rule, used by the key and by the
+  instance shift alike.
+- **The re-centre is done in the massing.** A plan-served `_massIn` puts its buildable strip at
+  `[−envD/2, +envD/2]` instead of `[frontEdge, rearEdge]` — the same span, moved by `(front − rear)/2` — so the
+  massing's own origin IS the envelope centre. It has to be: the centred massings (installations, fields, pits,
+  aprons, the railway's two ends) sit at that origin and would otherwise draw `(front − rear)/2` off their gate and
+  their fence line. `instanceTransform` therefore carries only the bucketing term,
+  `offsetY = (bucketedDepth − envelopeDepth)/2` with both depths inflated, which is the designed formula with its
+  first term already spent.
+- **The gate lane is opened on the finished volumes**, not by a `_fenceRun` in each installation's own list: a
+  volume standing in the lane is dropped, and a thin axis-aligned run ACROSS it is cut into the two pieces either
+  side (`_openGateLane`). One pass opens every fence line there is — solar farm, aquifer, spaceport and anything
+  later — and none of the eight nominal-coordinate lists has to learn about plans.
+  - **The same pass stands that fence line on the envelope's front edge** (the rule above, and §3.7 step 9). Each
+    installation lays its fence out in its OWN nominal metres, inset from the plot it fills and scaled with it, so
+    the run the gate is cut in stood behind the plan's fence line `y = Df`: measured on `envelopeTown()`, solar farm
+    2.00 m, aquifer 3.38 m, spaceport 7.49 m — the drive would have ended that far short of the gap it is drawn to
+    pass through. `_frontFenceLine` finds the front-most thin run standing across the gate lane and `_onFrontEdge`
+    moves that line out: the run along the frontage stands with its OUTER FACE on `y = −envelopeDepth/2` (it has to,
+    or its own thickness would stand outside the envelope, so its centre is half its 0.12–0.15 m thickness inside),
+    and the runs into the lot that met it are lengthened to reach it, which keeps the fence's front corners closed.
+    A massing whose fence is already on the edge, and every massing with no fence across its gate (the starter
+    farm), is returned untouched.
+- **A plan-served massing is clipped to the envelope** (`_clipToEnvelope`, 0.05 m of floating-point tolerance) the
+  way `_clipToParcel` clips to the lot line. The street massings fit by construction, but an installation lays its
+  yard out in NOMINAL metres and overhangs its plot by a few (measured: one volume of 90 on the aquifer, none on the
+  starter kit's four) — and for a plan-served building that overhang is its own driveway. With the min-fit bucket
+  (never more than 0.25 m over) this is what makes `envelope_containment_test` hold at 0.30 m.
+- **`CityLighting` switches on the PLAN, not the knob:** a site with a published plan takes its masts from
+  `lampPt`, and a site without one keeps the legacy derivation. `CityLighting.lamps` has no renderer caller (the
+  tiles light their own roads), so nothing drawn depends on the knob here, and the domain keeps no flag of the
+  renderer's.
 
 ### 6.3 Terrain
 
@@ -2556,6 +2621,7 @@ starter kit and pass V1–V13 on its graph under all five A2 override kinds. The
 | Shaper brush counts | city_terrain_shaping_test, shaper_ground_samples_test, starter `terrainEdits` | R5 | access corridors |
 | Starter zoning | `city_starter_kit_test.dart:57-67` ('zoning the starter block grows buildings on it') | R2 (assertion added; existing expectations unchanged) | four starter lots become access easements (§3.7a): the loop's `setUse` returns false for them, and the test now asserts exactly `{lot-r0x1-l10, lot-r0x0-l0, lot-r0x0-r1, lot-r0x1-r5}` stay unzoned and unbuilt while `grownParcels` is non-empty |
 | Degenerate lots, generator, style | degenerate_lots_test.dart:79-93, building_generator_test.dart:59-77, architecture_style_test.dart:60-72 | never (legacy default); R7 re-checks | – |
+| The R3 fixture's tiers with the knob **ON** | city_tile_mesher_test.dart 'site access on the wire…' | R4 | R3 pinned the knob-on tiers EQUAL to the legacy ones, to prove the knob drew nothing yet; R4 draws the plan, so the three on-values move (and are asserted different from the off ones). The knob-OFF pins `0xf5d18ccb` / `0x0759f3c8` / `0x07d559a4` do not move. Ledgered in Appendix A; track A's mesher and kerb cuts move the on-values again at the R4 merge |
 
 **Never move:**
 - road tool `0x5e473abb`, `0x09731332`, `0x07d559a4`;
@@ -2661,6 +2727,18 @@ starter kit and pass V1–V13 on its graph under all five A2 override kinds. The
   shifted out, a lamp shifted off the end of its span clamped to the end),
   `kerb_cut_masks_baked_test` (A12's road half). The R3 case in `city_tile_mesher_test` now reads
   "off: every tier to the byte; on: only the near tier's kerbside moves", since drawing the cuts is what R4 is.
+
+  - **As built (track B):** `envelope_axes_test`, `entrance_matches_door_test` and `envelope_containment_test` live in
+    `test/flutter_scene/`, over one fixture (`site_envelope_fixture.dart`: the site town plus a frontage-less claimed
+    plot and a grid-cell utility, the two §10.2 Q10 cases). The gate tests are inside `envelope_axes_test` — the
+    drawn gate point against the plan's `gateX` on the envelope's front edge (0.05 m), the lane clear, a fence
+    run ending exactly on the lane edge, and that run's OWN drawn y — its outer face — on the plan's `envY0` to the
+    same 0.05 m, over at least three fenced sites (without the §6.2 move it stands 2.0–7.5 m inside) — since they
+    share its scene. The fixture also stakes a lot with a 2.5 m stored frontage, whose plan is published with an
+    EMPTY envelope: its building must read legacy on both sides of the knob (§5.2). `envelope_axes_test` also carries the knob-off
+    identity check (position, spin and site size equal to `ofParcel`'s legacy values, building by building), and
+    `city_lighting_test` gains the masts-from-`lampPt` case (§8.2). Containment is checked at the full and exterior
+    tiers; the block tier draws from the coarse library, where half a bucket of silhouette is the point.
 - **R5:** shaper corridor tests (emitted once, keyed, graded only, datums recorded, drawn height = datum ±1 cm, ≤ 2
   asks per new segment, sprawl adds 0, **a generated graded downtown block on flat ground adds 0 site brushes**,
   the starter kit adds exactly 4).
@@ -2874,3 +2952,5 @@ reason, commit.
 | R2 merge | traffic_fixture `town()` (no pin) | 82 built lots | 78 built lots | the four easement lots refuse zoning; no traffic test pin moved (full suite green) | R2 merge |
 | R2 integration repair | site_access_persistence_test.dart ("200 curved-road lots", home fit flips) | `['lot-r2-r21']` | `isEmpty` | the §3.4 house containment is now tested with the rectangle grown by `kContainsInsetM` (stricter by 5 cm), so the load's millimetre re-sample no longer flips that lot (§4.4); the sprawl audit's demotions did not move | R2 integration repair |
 | R1 | test/traffic/live_rebuild_test.dart (traffic-owned) | green | red, then green | cars stood inside the new crossing's stop line at the edit (moved 5.2 m) and trips ended on slots at 151.5 m, 1.5 m past the new street. A real traffic bug R1 exposed (RouteRemapper clamped into the lane, dragging cars onto the car behind). MERGE GATE CLEARED: fixed on the traffic side (cars in a new junction box carried onto their connector, an appended leg when a destination's access moved, a no-overlap guard, a stop at a lane's start counted 1 m in from a connector), merged with R1 in one window; no skip. The test's drive-on window grew 900 s → 1800 s: the new test street re-hangs hand-drawn lot-m0/lot-m3 onto other roads (their effective frontage, §3.1), so their trips detour | 14a7bef, 6f1784f, merge a309f85 |
+| R4 track B | city_tile_mesher_test.dart ('site access on the wire…', the knob **ON** only) | near `0xf5d18ccb`, mid `0x0759f3c8`, far `0x07d559a4` (R3: the knob drew nothing) | near `0x856e8b38`, mid `0xcf757f38`, far `0xbf7c5994` | R4 draws the plan: a served building loses its own car park, is front-aligned on its envelope, takes the min-fit bucket and has its gate lane cut open. The knob-OFF pins are unchanged, and the test now also asserts on ≠ off at every tier. Track A's site mesher and kerb cuts move the ON values again at the R4 merge | R4 track B |
+| R4 merge | city_tile_mesher_test.dart ('site access on the wire…', the knob **ON**, near only) | `0x856e8b38` (track B alone) | `0x6a1f715e` | track A's kerb cuts land on the same tile: the fixture's road carries three cuts, so the near tier's kerbside lays the dropped kerbs and stands the masked kerb cars down on top of track B's envelope massing. Mid and far keep track B's values (`0xcf757f38`, `0xbf7c5994`): neither draws a kerbside, and the fixture carries no `CitySiteFrame`, so the site mesher emits nothing here. The knob-OFF pins never moved | R4 merge |

@@ -1049,7 +1049,9 @@ class CityTileMeshJob {
     final tier = key.detail;
     final built = libraries.forTier(tier).get(
         CityTileMesher.specOf(b), CityTileMesher.parcelOf(b, k.style),
-        seed: b.id.hashCode, detail: tier);
+        seed: b.id.hashCode,
+        detail: tier,
+        gate: CityTileMesher.gateOf(b, siteAccess: k.siteAccess));
     if (k.lodDebug) {
       return CityArchetypeMesh(
         archetype: key,
@@ -1236,9 +1238,11 @@ class CityTileMeshJob {
     // material for the whole tile rather than instanced per archetype.
     // The visualiser keeps the instanced path so its boxes stay one per
     // archetype.
+    final gate = CityTileMesher.gateOf(b, siteAccess: k.siteAccess);
     if (tier == BuildingDetail.block && !k.lodDebug) {
-      final built = lib.get(spec, parcel, seed: seed, detail: tier);
-      final m = CityTileMesher.instanceTransform(r.anchorBF, b);
+      final built = lib.get(spec, parcel, seed: seed, detail: tier, gate: gate);
+      final m = CityTileMesher.instanceTransform(r.anchorBF, b,
+          gate: gate, style: k.style, bucketM: lib.bucketM);
       // Under the detail layer a NEAR tile's boxes are drawn a little
       // inside the building, so the layer's model over one hides it (see
       // [CityTileMesher.nearBoxInset]). The glazing bands take the same
@@ -1282,11 +1286,11 @@ class CityTileMeshJob {
         bucketM: lib.bucketM,
         variants: lib.variants,
         styleId: k.styleId,
-        corner: b.corner);
-    _groups
-        .putIfAbsent(key, () => (b, []))
-        .$2
-        .add(CityTileMesher.instanceTransform(r.anchorBF, b));
+        corner: b.corner,
+        gate: gate);
+    _groups.putIfAbsent(key, () => (b, [])).$2.add(
+        CityTileMesher.instanceTransform(r.anchorBF, b,
+            gate: gate, style: k.style, bucketM: lib.bucketM));
   }
 
   /// Flat ground patches: roads, zoned lots, support decks.
@@ -1387,9 +1391,10 @@ class CityTileMeshJob {
       // The massing the building was DRAWN from — the library's cached one,
       // canonical lot and variant and all — so the lot the paint goes on and
       // the door the path runs to are the ones in the mesh.
-      final built = libraries
-          .forTier(tier)
-          .get(spec, parcel, seed: b.id.hashCode, detail: tier);
+      final built = libraries.forTier(tier).get(spec, parcel,
+          seed: b.id.hashCode,
+          detail: tier,
+          gate: CityTileMesher.gateOf(b, siteAccess: k.siteAccess));
       final massing = built.massing;
       final lot = massing.parking;
       if (edging == LotEdging.none && !sign && lot == null) continue;
@@ -2286,6 +2291,20 @@ class CityTileMesher {
     );
   }
 
+  /// The plan brief [b] is drawn from, or null for the legacy path
+  /// (docs/plans/site-access.md §6.2).
+  ///
+  /// A building is PLAN-SERVED when it carries a site access slot and the
+  /// knob is on: it then stands on its plan's envelope (the wire's
+  /// `siteWidthM`/`siteDepthM` ARE that envelope), front-aligned on the
+  /// envelope's front edge, with the plan's parking instead of its own and
+  /// its gate left open. With the knob off, or with no plan, every building
+  /// is legacy and nothing below it changes.
+  static SiteGate? gateOf(BuildingSnapshot b, {required bool siteAccess}) =>
+      siteAccess && b.siteSlot >= 0
+          ? SiteGate(xM: b.gateXM, widthM: b.gateWM)
+          : null;
+
   /// The archetype [b] keys to at [detail] under [k]: exactly the key the
   /// meshing groups its instances by, for the UI side to look its mesh up
   /// with.
@@ -2298,7 +2317,8 @@ class CityTileMesher {
         bucketM: bucketM,
         variants: variants,
         styleId: k.styleId,
-        corner: b.corner);
+        corner: b.corner,
+        gate: gateOf(b, siteAccess: k.siteAccess));
   }
 
   /// Model transform for one building.
@@ -2307,15 +2327,29 @@ class CityTileMesher {
   /// east, +Y north, +Z radial up), and generated buildings are authored Z-up
   /// with their origin at the base — so the two compose directly, and a
   /// building lands standing on its pad rather than buried or lying down.
-  static vm.Matrix4 instanceTransform(Vector3 anchorBF, BuildingSnapshot b) {
+  /// Pass [gate] (with the [style] and the library's [bucketM]) for a
+  /// PLAN-SERVED building: its mesh was generated against the BUCKETED
+  /// envelope, so the instance is shifted back along its own local +Y by half
+  /// the bucketing slack, which keeps the drawn front wall — and the door on
+  /// it — on the envelope's real front edge (§6.2). Without it the transform
+  /// is exactly what it was.
+  static vm.Matrix4 instanceTransform(Vector3 anchorBF, BuildingSnapshot b,
+      {SiteGate? gate, ArchitectureStyle? style, double bucketM = 6}) {
     final offset = Vector3(b.px, b.py, b.pz) - anchorBF;
     final surface = Quaternion(b.qw, b.qx, b.qy, b.qz);
-    return vm.Matrix4.compose(
+    final m = vm.Matrix4.compose(
       vm.Vector3(lengthToScene(offset.x), lengthToScene(offset.y),
           lengthToScene(offset.z)),
       quatToScene(surface),
       vm.Vector3.all(lengthToScene(1.0)),
     );
+    if (gate == null || style == null) return m;
+    final depth = b.siteDepthM + style.frontSetbackM + style.rearSetbackM;
+    final bucketed =
+        BuildingArchetype.bucketOf(depth, bucketM, minFit: true) * bucketM;
+    final shift = (bucketed - depth) / 2;
+    if (shift != 0) m.multiply(vm.Matrix4.translationValues(0, shift, 0));
+    return m;
   }
 
   /// A massing as plain boxes: what a far tile draws a building as.
