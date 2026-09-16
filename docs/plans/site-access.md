@@ -2237,6 +2237,31 @@ for each plan of a GRADED parcel (cells: never):
 - The capture flags `siteMaxGrade` when `|pad − kerb|/length > 15%`. It is diagnostic only, and plans never
   change for slope (§10 Q7).
 
+**Measured at R4, and why the starter kit's throats do not yet read as connected on a hillside.** With the knob on,
+the city-game dev colony (lat −45.03, lon 168.66 — rolling forest) was probed for every plan point: the drawn height
+against the ground under it. Inside each parcel the paving sits on the ground (the pad brush cut the platform, and
+`pad` is that datum). The **off-parcel throats do not**, by −12.9 m to **+41.6 m**:
+
+| Site | Worst point (colony-local) | Drawn − ground |
+|---|---|---|
+| lot-m0 (spaceport) | (28, 264) — the 56 m throat | **+41.57 m** |
+| lot-m1 (solar) | (28, −276) | +21.42 m |
+| lot-m2 (farm) | (−60, −295) | −12.91 m |
+| lot-m3 (pump) | (−28, 144) | −7.58 m |
+| lot-r0x0-r0 (a street lot's home drive) | (−8, −288) | −2.17 m |
+
+This is the design working as written, not a drawing bug: a `blend` point is the straight line from the pad datum to
+the kerb datum (the table above), the pad is a 900 m platform cut tens of metres into the hillside, and **nothing has
+cut the ground under the 56 m between them yet**. §6.3 is exactly that cut, and it is R5's — "the starter kit adds
+four corridor runs: each site's `K→F` throat (56 m off-parcel)". So at R4 the four utility sites draw their paving,
+car parks, stalls, bays, gates and fence gaps on the ground, and their access roads and hammerheads are drawn in the
+right place but stand off the unshaped easement; a street lot's home drive, whose throat crosses only the 3 m
+pavement, is within about 2 m and reads as connected. **R5 acceptance gains this probe**: after the corridors are
+cut, every plan point of the starter kit must be within 1 cm of the ground under it (the §8.3 R5 "drawn height =
+datum ±1 cm" item, measured over the whole plan rather than the corridor alone). Until then the §9 R4 line "the
+starter kit's four sites visibly connected" is met on the plan and in the mesh, and on screen only for the paving
+inside the lots and for the driveways and dropped kerbs of a generated block.
+
 ---
 
 ## 7. The traffic contract
@@ -2786,6 +2811,31 @@ massing car parks the envelope replaced — is where it is measured again. The w
 1,802,608 vertices over 127,783 plans: **kerbOnly 0, homeDriveway 10 a site** (110,310 sites), **carPark 35.6**
 (10,512), **yard 146** (1,519), **installation 239** (435); at mid, homes and kerb-only sites draw **nothing** and
 the town's sites come to 148,400 vertices, which is the §5.4 mid rule doing exactly what it was written for.
+Archetype sharing is NOT the cost the gate key suggested it might be: keying on `(surfaceParking, gateBucket)` takes
+the reference town from **982 to 1,104** distinct archetypes over 127,785 buildings (+12 %), because the canonical-lot
+buckets dominate and gates repeat.
+
+**The live A/B** (`tool/measure_city_studio.ps1`, twice each side; the knob turned by the new `siteAccess` perf knob,
+so both sides are one build):
+
+| Gate | OFF run 1 / run 2 | ON run 1 / run 2 | Delta (run 2, the clean pair) | Budget |
+|---|---|---|---|---|
+| static UI build | 16.45 / 17.22 ms | 17.05 / **18.49** ms | **+1.27 ms** | ±0.3 ms ✗ |
+| warm-orbit UI build | 21.83 / 21.51 ms | 39.21* / **23.16** ms | **+1.65 ms** | ±0.3 ms ✗ |
+| sweep worst frame | 91.68 / 70.84 ms | 145.85 / **112.51** ms | **+41.7 ms** | ≤ 120 ms — passes on run 2, fails on run 1 |
+| plat raster (2D, unaffected) | 12.34 / 8.72 ms | 8.74 / 9.24 ms | +0.5 ms | ≤ 8 ms ✗ both sides |
+
+\* run 1's 39.21 ms is an outlier; the same knob read 23.16 ms on the repeat, and the plat raster swung 12.34 → 8.72
+between the two OFF runs, so this rig's run-to-run spread is tens of percent. **Read the run-2 pair.**
+
+Two things, kept apart. **First, the gate is already red on both sides**: static 16–18 ms against its 10 ms threshold
+and warm orbit 21.5 ms against 13, where the script's own note records today's floor as 8.4 / 11.6. That drift is
+`dev`'s, not this slice's — it is measured here with the knob OFF. **Second, R4's own cost** is about **+1.3 ms
+static and +1.7 ms warm orbit (+7 %)**, past the ±0.3 ms line, and **+42 ms on the worst sweep frame**, consistent
+across both pairs: a near tile build carrying a fifth more geometry spikes further when it lands. The near-tile
+deviation above is the same finding measured a second way. Both are recorded, not fixed, and both belong to the same
+follow-up: R7 deletes the legacy massing car parks the envelope replaced, and the worst-frame spike is a tile-build
+budget question (the frame budget's slice), not a site-access one.
 
 ---
 
@@ -2843,7 +2893,7 @@ class DepthProfile { double depthAt(double x); bool containsRect(Rect r); double
 | **T4a Site networks** | traffic | needs R1 (join slot columns for `AccessPoints.ofJoin`) and R2a; §7.8 items 1–11 for today's CommuteSynth trips, INCLUDING item 10 (lot-car persistence by `(siteId, stallKey)`, so no save between T4a and T4b holds lot cars under the old §14.1 scheme or drops them); D17 step 2 only (garage what it cannot place); lot-car owner opaque (`ownerKind` + id) for the slice-3 port | A4–A11 (A10 with its save/resume case), A13–A15, A12 (traffic half); built on R2a fixtures, then real R2 plans; wire after R3; merge gated on the structural allocation gate (A13), not the traffic-wide weighed allocation number (not met today, owed by traffic slice 11); staged E36 (agent-managed sites only) |
 | **R7 Legacy removal** | road | delete `emitLot`, `ParkingLot` meshing (building_generator.dart:246-254, :787-844) and massing parking for parcel buildings and cells; ledgered re-pin; rewrite road-network.md §3b (stale: `CityNodes._emitLotFeatures` is `CityTileMesher._emitLotFeatures`, SprawlSectionBuilder is gone) and docs/REFERENCE.md | one re-pin commit with the ledger; all tests green; screenshots reviewed; after T4a merged |
 | **T4b Residents and pedestrians** | traffic | with or after citizens (slice 3): residents' cars at home pads (backing out to the street, §7.4 Home back-out; yielding to pedestrians on the pavement crossing) and kerbs (E36 completes: all baked cars off), full D17 circling/give-up, stall → door walks via `entrancePt/entranceNode` | A16 |
-| **R4 as built** | road | tracks A and B merged; `CityNodes.siteAccess` **on by default**; the perf knob `siteAccess` added so `tool/measure_city_studio.ps1` can A/B it without a rebuild; `installation_parking_test` gained its plan case (§8.2) | the §8.4 measurements above; the mid vertex gate +0.96 %; the near-tile deviation recorded in §8.4; the whole suite green with the knob on, with only the one ON pin of `city_tile_mesher_test` moved at the merge (Appendix A) |
+| **R4 as built** | road | tracks A and B merged; `CityNodes.siteAccess` **on by default**; the perf knob `siteAccess` added, and `ext.acro.citygame` takes `knob=<name>:<value>`, so a live A/B needs no rebuild; `installation_parking_test` gained its plan case (§8.2) | the §8.4 measurements above; the mid vertex gate +0.96 %; the near-tile deviation recorded in §8.4; the off-parcel throat heights recorded in §6.4 (an R5 dependency, with the probe R5 inherits); the whole suite green with the knob on, with only the one ON pin of `city_tile_mesher_test` moved at the merge (Appendix A) |
 | **R8 Polish** (later) | road | alley rear joins (slot 3, F2a), second gates on a second road, one-way loops with angled stalls, podium garage portals for `mega`, sealed-world tube crossings, public lots (`kPlanPublic`) | per feature |
 
 ---

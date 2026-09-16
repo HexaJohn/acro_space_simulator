@@ -70,6 +70,7 @@ import 'infrastructure/flutter/sim_view_control.dart';
 import 'infrastructure/flutter/simulation_view.dart';
 import 'infrastructure/flutter_scene/city/city_nodes.dart';
 import 'infrastructure/flutter/windows_key_event_workaround.dart';
+import 'infrastructure/flutter_scene/perf_knobs.dart';
 import 'infrastructure/flutter_scene/render_backend.dart';
 
 final GlobalKey _shotKey = GlobalKey();
@@ -127,6 +128,16 @@ Future<void> main() async {
     if (params['walk'] != null) {
       SimViewControl.instance.setWalk?.call(params['walk'] == 'on');
     }
+    // A render knob by name, as the city studio's own A/B does
+    // (`knob=siteAccess:0`, `knob=detailLayer:1`; several separated by `,`).
+    // One run can then shoot both sides of a knob instead of two builds,
+    // which is what an A/B screenshot pair is.
+    if (params['knob'] != null) {
+      for (final pair in params['knob']!.split(',')) {
+        final i = pair.indexOf(':');
+        if (i > 0) PerfKnobs.set(pair.substring(0, i), pair.substring(i + 1));
+      }
+    }
     // Zone every street lot at once. The only way to drive zoning without a
     // mouse, which is what a capture of the zoning view needs.
     if (params['zone'] != null) {
@@ -145,6 +156,7 @@ Future<void> main() async {
     return developer.ServiceExtensionResponse.result(jsonEncode({
       ..._status(colony),
       if (did.isNotEmpty) 'did': did,
+      if (params['knob'] != null) 'knobs': PerfKnobs.snapshot(),
       // The camera's own geometry, so a framing complaint can be answered with
       // a number instead of a screenshot.
       'camera': {
