@@ -14,6 +14,7 @@ import '../surface_placement.dart';
 import 'city_building_spec.dart';
 import 'city_sim.dart';
 import 'parcel.dart';
+import 'site_access/site_grade.dart';
 
 /// The lateral resolution the renderer meshes chunk [k] of a body of
 /// [radiusM] at among the edit [brushes] near it: [editResolutionFor], a
@@ -68,6 +69,8 @@ class CityTerrainShaper {
     this.minCorridorVoxelM = 1,
     this.corridorCurveHalfM = 5,
     this.corridorCurveCrossFallTolM = 0.03,
+    this.siteCorridorTolM = 0.25,
+    this.siteCorridorReliefTolM = 0.5,
   });
 
   /// How far a levelled pad extends beyond the building footprint.
@@ -358,7 +361,170 @@ class CityTerrainShaper {
         ));
       }
     }
+
+    // ---- Site access corridors ------------------------------------------
+    // Last, because brushes compose in record order: a site's drive is cut
+    // into the pad it leaves and the road it meets, not under them.
+    _siteCorridors(city, out,
+        groundUnder: groundUnder, dirOf: dirOf, tick: tick);
     return out;
+  }
+
+  /// How far (m) a site's access corridor may stand off the pad it leaves
+  /// before the ground under it is cut, where its run is too short to
+  /// qualify on length alone (§6.3).
+  ///
+  /// A downtown drive crosses only the pavement; on flat ground its pad and
+  /// its kerb are the same height, and cutting a metre of ground to say so
+  /// would put a brush under every lot in a generated town.
+  final double siteCorridorTolM;
+
+  /// How far (m) a site's access corridor may cut or fill before it asks to
+  /// be meshed finer than [voxelM] — its own [corridorReliefTolM].
+  ///
+  /// Its own because it is judged differently: a road's corridor is judged
+  /// against the ground it was laid over, a site's against the two heights
+  /// it grades between, which are known without asking the ground five
+  /// times a segment.
+  final double siteCorridorReliefTolM;
+
+  /// How far (m) a site's access corridor eases back into the ground past
+  /// the width it levels: §6.3's `min(roadFalloffM, clearance)`, with the
+  /// clearance taken as the corridor's own levelled half width.
+  ///
+  /// Narrower than a road's on purpose. Sites stand shoulder to shoulder,
+  /// and a six-metre ease reaches nine metres from the chord: on the dev
+  /// kit a street car park's drive eased over the solar farm's throat 8.9 m
+  /// away and pulled it 3.8 cm off the grade it is drawn on — the capture
+  /// reads back one corridor's own datums, not the whole composed field, so
+  /// a neighbour that reaches into a corridor is a drawing error, not a
+  /// softer edge.
+  double siteCorridorFalloffM(double halfM) => math.min(roadFalloffM, halfM);
+
+  /// Site access corridors and the pads they grade to
+  /// (docs/plans/site-access.md §6.3): each plan's drive and access road cut
+  /// into the ground the way a road corridor is, at the plan's own heights,
+  /// so what the renderer draws sits on the ground.
+  ///
+  /// Once per plan revision, never per frame: the decision — cut, or nothing
+  /// to cut — is settled in [CitySim.shapedSites] whichever way it goes, and
+  /// the whole walk is skipped while the book's `sitesRev` has not moved.
+  ///
+  /// Scoped: only the site's own corridor, and only the stretch its ramp
+  /// covers. A sprawl lot is draped, not graded, and adds nothing.
+  void _siteCorridors(
+    CitySim city,
+    List<({String key, TerrainBrush brush})> out, {
+    required double Function(Vec2) groundUnder,
+    required Vector3 Function(Vec2) dirOf,
+    required int tick,
+  }) {
+    final book = city.siteAccess;
+    final chunks = book.chunks;
+    if (chunks.isEmpty) return;
+    if (city.siteShapedRev == book.sitesRev) return;
+    final layout = city.layout;
+    final minOffM = math.max(layout.settings.sidewalkM + 0.5, 3.0);
+    for (final chunk in chunks) {
+      for (var k = 0; k < chunk.siteCount; k++) {
+        final id = chunk.siteId(k);
+        // The cheapest test first, and it settles nothing: a lot that
+        // follows the land is draped, and a cell (no parcel at all) has no
+        // lot line to cross. A map lookup a site, where a settled key is a
+        // string built and hashed — and a sprawl is tens of thousands of
+        // draped lots this walk passes over every time the book moves.
+        final parcel = layout.parcelById(id);
+        if (parcel == null || !parcel.graded) continue;
+        final rev = chunk.rev(k);
+        final runKey = SiteGrade.runKey(id, rev);
+        if (city.shapedSites.contains(runKey)) continue;
+        final run = SiteCorridorRun.of(chunk.plan(k), parcel: parcel);
+        if (run == null) {
+          city.shapedSites.add(runKey);
+          continue;
+        }
+        // The pad the corridor grades to: the datum its brush cut, or —
+        // before it is cut, in this same call — the ground under the
+        // centroid, which is exactly what that brush will use.
+        final padDatum =
+            city.padDatums[SiteGrade.padKey(id)] ?? groundUnder(parcel.centroid);
+        // The kerb it grades from: the ground where it meets the road,
+        // which IS that road's corridor once cut. Asked of the ground
+        // rather than modelled from the road's datums, so the corridor ties
+        // into whatever is actually there (§6.3 as built).
+        final kerbDatum = groundUnder(run.a[0]);
+        city.shapedSites.add(runKey);
+        if (run.offParcelM <= minOffM &&
+            (padDatum - kerbDatum).abs() <= siteCorridorTolM) {
+          continue;
+        }
+        // Meshed as finely as a road's corridor where it cuts or fills past
+        // what the colony's voxel carries: a mesh cannot hold an eight-metre
+        // cut at fifteen metres, and the drive would be drawn in pieces with
+        // the hillside smoothed across it ([corridorReliefTolM]).
+        final fine = (padDatum - kerbDatum).abs() > siteCorridorReliefTolM;
+        // The platform under the site's own paving, RE-cut after the roads.
+        // A road corridor eases [roadFalloffM] past its kerb, which on a
+        // slope is inside the lot line, and it is recorded after the pad:
+        // the platform edge the plan's paving is drawn on had been taken
+        // with it (1.13 m on the dev kit's one street car park). The same
+        // brush, the same datum — so a lot no road reaches is untouched —
+        // under its own key, and only for a site whose ground this call is
+        // moving anyway.
+        final padKey = SiteGrade.padRecutKey(id, rev);
+        final spec = city.parcelBuildings[id];
+        if (!city.shapedTerrain.contains(padKey) &&
+            spec != null &&
+            !_isPit(spec)) {
+          out.add((
+            key: padKey,
+            // Anchored on the platform it re-cuts, not on the ground: the
+            // lot is already levelled to it, so this asks the ground
+            // nothing at all, and the bound reaches past whatever has since
+            // been eased over its edge.
+            brush: TerrainBrush.padPoly(
+              centreBF: dirOf(parcel.centroid) * padDatum,
+              polygonBF: [for (final v in parcel.polygon) dirOf(v) * padDatum],
+              datumRadiusM: padDatum,
+              falloffM: padEdgeM,
+              maxCutM: math.max(20, (padDatum - kerbDatum).abs() * 1.5),
+              tick: tick,
+              minVoxelM: voxelM,
+            ),
+          ));
+        }
+        for (var i = 0; i < run.length; i++) {
+          final key = SiteGrade.corridorKey(id, rev, run.segs[i]);
+          if (city.shapedTerrain.contains(key)) continue;
+          final (d0, d1) = run.datumsOf(i, padDatum, kerbDatum);
+          // Anchored on the GRADE, not on the ground under it — a deck
+          // corridor's rule ([_deckCorridor]), for the same reason. A brush
+          // reads a point's place along its chord in three dimensions, so
+          // its ends must be the two datums it grades between: anchored on
+          // ground that is metres off them, the chord tilts and every point
+          // along it reads a little further on than it is. The bound
+          // reaches past the cut, or the brush culls the very samples it is
+          // there to move. Sized from the grade's own drop rather than from
+          // the ground under it, so the ground is asked once per site and
+          // not once per knot.
+          out.add((
+            key: key,
+            brush: TerrainBrush.cutFill(
+              startBF: dirOf(run.a[i]) * d0,
+              endBF: dirOf(run.b[i]) * d1,
+              radiusM: run.halfM[i],
+              datumRadiusM: d0,
+              datumRadiusEndM: d1,
+              falloffM: siteCorridorFalloffM(run.halfM[i]),
+              maxCutM: math.max(40.0, (d1 - d0).abs() + deckCutMarginM),
+              tick: tick,
+              minVoxelM: fine ? _fineVoxelM(run.halfM[i]) : voxelM,
+            ),
+          ));
+        }
+      }
+    }
+    city.siteShapedRev = book.sitesRev;
   }
 
   /// The vertical curve a segment cut fine, from [knot] to [after], meets
@@ -541,6 +707,13 @@ class CityTerrainShaper {
   /// ([corridorGround]), not on the ground read back at its knots.
   static void markShaped(CitySim city, String key, TerrainBrush brush) {
     city.shapedTerrain.add(key);
+    // A lot's pad also keeps the datum it was levelled to
+    // ([CitySim.padDatums]): its paving is drawn on that, and its access
+    // corridor grades to it at the lot line
+    // (docs/plans/site-access.md §6.3, §6.4).
+    if (brush.kind == TerrainBrushKind.padPoly) {
+      city.padDatums[key] = brush.datumRadiusM;
+    }
     if (brush.kind == TerrainBrushKind.cutFill) {
       city.corridorDatums[key] = (brush.datumRadiusM, brush.datumRadiusEndM);
       // And the vertical curve it meets the segment before it with, if any

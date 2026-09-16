@@ -43,6 +43,7 @@ import '../../domain/colony/city/site_access/kerb_cuts.dart';
 import '../../domain/colony/city/site_access/site_access_book.dart';
 import '../../domain/colony/city/site_access/site_access_constants.dart';
 import '../../domain/colony/city/site_access/site_access_plan.dart';
+import '../../domain/colony/city/site_access/site_grade.dart';
 import '../../domain/shared/vector3.dart';
 
 /// One chunk's heights and keys, beside the chunk itself. Retains at most
@@ -789,7 +790,25 @@ class SiteCapture {
           final at = parcel.centroid;
           centroid = at;
           graded = parcel.graded;
-          pad = groundFor('lot:$id', at);
+          // The datum the pad brush CUT where the lot is shaped (§6.4), and
+          // the cached ground under the centroid until it is.
+          pad = _city.padDatums[SiteGrade.padKey(id)] ?? groundFor('lot:$id', at);
+        }
+      }
+      // The access corridor, where one has been cut: the datums the shaper
+      // cut each segment to (§6.3). A point the corridor levelled is drawn
+      // on those, so the paving IS the graded ground — not on a blend of a
+      // pad and a kerb the ground between them never followed.
+      final plan = chunk.plan(k);
+      final run = SiteCorridorRun.of(plan);
+      List<(double, double)?>? cut;
+      if (run != null) {
+        for (var i = 0; i < run.length; i++) {
+          final d = _city
+              .corridorDatums[SiteGrade.corridorKey(id, chunk.rev(k), run.segs[i])];
+          if (d == null) continue;
+          cut ??= List<(double, double)?>.filled(run.length, null);
+          cut[i] = d;
         }
       }
       // Kerb radius per join, off its road's drape; the pad without one.
@@ -807,26 +826,29 @@ class SiteCapture {
         final e = chunk.ptE(p), nn = chunk.ptN(p);
         final hj = chunk.ptHJoin(p);
         final kerbR = hj < nJ ? kerb[hj] : pad;
-        double radius;
-        switch (chunk.ptHRef(p)) {
-          case SiteHeightRef.pad:
-            if (!graded && centroid != null) {
-              final de = e - centroid.e, dn = nn - centroid.n;
-              radius = de * de + dn * dn > padReachM * padReachM
-                  ? groundFor('site:$id:${p - p0}', Vec2(e, nn))
-                  : pad;
-            } else {
-              radius = pad;
-            }
-          case SiteHeightRef.kerb:
-            radius = kerbR;
-          case SiteHeightRef.blend:
-            radius = pad + (kerbR - pad) * chunk.ptHT(p);
+        // A point the corridor levelled stands on what it was cut to; the
+        // rest follow the §6.4 table.
+        double? radius = cut == null ? null : run!.radiusAt(e, nn, cut);
+        if (radius == null) {
+          switch (chunk.ptHRef(p)) {
+            case SiteHeightRef.pad:
+              if (!graded && centroid != null) {
+                final de = e - centroid.e, dn = nn - centroid.n;
+                radius = de * de + dn * dn > padReachM * padReachM
+                    ? groundFor('site:$id:${p - p0}', Vec2(e, nn))
+                    : pad;
+              } else {
+                radius = pad;
+              }
+            case SiteHeightRef.kerb:
+              radius = kerbR;
+            case SiteHeightRef.blend:
+              radius = pad + (kerbR - pad) * chunk.ptHT(p);
+          }
         }
         f32[p] = radius + chunk.ptDz(p) - datum;
       }
       // Stalls: the pave under each, along its segment's polyline.
-      final plan = chunk.plan(k);
       final st0 = chunk.stallStart(k), st1 = chunk.stallStart(k + 1);
       for (var st = st0; st < st1; st++) {
         f32[nP + st] = _upAlong(chunk, plan, f32, p0,
