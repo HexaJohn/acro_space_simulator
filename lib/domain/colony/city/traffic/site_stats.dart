@@ -42,6 +42,14 @@ class SiteStats {
   /// `tandemShuffleS` (§7.4, §7.5).
   int backOutForced = 0, shuffles = 0;
 
+  /// Home departures given up after `backOutGiveUpS` because no gap ever
+  /// came: the car back on its stall and its owner's leg asked for again
+  /// (§7.5). The forced grant waives ETA and never a body, so this is what
+  /// a driveway held by something that does not move reads as — one per
+  /// attempt, so a wedged drive counts up steadily instead of standing
+  /// silently in `backOutWait`.
+  int backOutGiveUps = 0;
+
   /// [h] with every counter folded in, in declaration order.
   int digest(int h) {
     var x = fnv1aU32(h, enters);
@@ -58,6 +66,7 @@ class SiteStats {
     x = fnv1aU32(x, siteRetargets);
     x = fnv1aU32(x, backOutForced);
     x = fnv1aU32(x, shuffles);
+    x = fnv1aU32(x, backOutGiveUps);
     return x;
   }
 }

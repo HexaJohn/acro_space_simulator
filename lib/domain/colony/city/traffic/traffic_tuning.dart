@@ -138,6 +138,14 @@ class AgentTuning {
   static double backOutEtaFloorS = 6;
   static double backOutForcedS = 120;
 
+  /// The seconds a home car waits in its stall before it gives the
+  /// departure up altogether (§7.5): the forced grant never waives a body in
+  /// the footprint, so a driveway blocked by something that does not move
+  /// would otherwise hold the car — and its owner's leg — for ever. Five
+  /// minutes: long past the forced grant, which by then has had three
+  /// minutes of waived ETA to find a gap in any street that has one.
+  static double backOutGiveUpS = 300;
+
   /// Home back-out geometry (§7.4), metres from the join's `T` on the target
   /// lane: the footprint runs [backOutUpM] upstream (the tail swing) to
   /// [backOutDownM] downstream; no vehicle may be stopped or queued within
@@ -269,6 +277,7 @@ class AgentTuning {
     backOutFarEtaS = 10;
     backOutEtaFloorS = 6;
     backOutForcedS = 120;
+    backOutGiveUpS = 300;
     backOutUpM = 10;
     backOutDownM = 2;
     backOutQueueM = 15;
@@ -329,6 +338,7 @@ class AgentTuning {
         'backOutFarEtaS': backOutFarEtaS,
         'backOutEtaFloorS': backOutEtaFloorS,
         'backOutForcedS': backOutForcedS,
+        'backOutGiveUpS': backOutGiveUpS,
         'backOutUpM': backOutUpM,
         'backOutDownM': backOutDownM,
         'backOutQueueM': backOutQueueM,

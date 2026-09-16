@@ -50,6 +50,7 @@ void main() {
     expect(AgentTuning.backOutFarEtaS, 10);
     expect(AgentTuning.backOutEtaFloorS, 6);
     expect(AgentTuning.backOutForcedS, 120);
+    expect(AgentTuning.backOutGiveUpS, 300);
     expect(AgentTuning.backOutUpM, 10);
     expect(AgentTuning.backOutDownM, 2);
     expect(AgentTuning.backOutQueueM, 15);
@@ -92,6 +93,7 @@ void main() {
     AgentTuning.backOutFarEtaS = 1;
     AgentTuning.backOutEtaFloorS = 1;
     AgentTuning.backOutForcedS = 1;
+    AgentTuning.backOutGiveUpS = 1;
     AgentTuning.backOutUpM = 1;
     AgentTuning.backOutDownM = 1;
     AgentTuning.backOutQueueM = 1;

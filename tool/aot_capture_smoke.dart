@@ -385,21 +385,26 @@ void main(List<String> args) {
       '${r.passes} passes, site poses $posesSeen (peak $maxPoses), '
       'peak parked rows $maxParked, $reloads reloads, '
       'sink ${sink.isFinite}');
-  // The waiting counters, which are Int32 microseconds: a car that never
-  // gets its gap accumulates one sub-step a sub-step, and the run is long
-  // enough in colony time to say whether any of them has run past 2^31.
+  // The waiting counters: a car that never gets its gap accumulates one
+  // sub-step a sub-step, and the run is long enough in colony time to say
+  // whether any of them has run away. Both saturate now rather than wrapping
+  // past 2^31 (traffic_time.dart, "clocks that only count up"), so a
+  // NEGATIVE worst here is a defect and not a long wait — which is how the
+  // wrap was found in the first place.
   final st = agents.siteVehicles, vt = agents.vehicles;
   var worstWait = 0, worstRoad = 0, waiting = 0;
   if (st != null && vt != null) {
     for (var sl = 0; sl < vt.highWater; sl++) {
       if (!vt.isSlotLive(sl)) continue;
       if (st.phase[sl] != SitePhase.none.index) waiting++;
-      if (st.waitUs[sl].abs() > worstWait.abs()) worstWait = st.waitUs[sl];
+      if (st.waitMs[sl].abs() > worstWait.abs()) worstWait = st.waitMs[sl];
       if (vt.waitUs[sl].abs() > worstRoad.abs()) worstRoad = vt.waitUs[sl];
     }
   }
-  stdout.writeln('  waits: $waiting on sites, worst site waitUs $worstWait, '
-      'worst road waitUs $worstRoad');
+  stdout.writeln('  waits: $waiting on sites, worst site waitMs $worstWait, '
+      'worst road waitUs $worstRoad, '
+      '${agents.siteStats.backOutForced} back-outs forced, '
+      '${agents.siteStats.backOutGiveUps} given up');
   stdout.writeln('  site phases seen: ${[
     for (var i = 0; i < phases.length; i++)
       if (phases[i] > 0) '${SitePhase.values[i].name}=${phases[i]}'

@@ -953,8 +953,9 @@ class _Core
     // 3–5. The vehicles, their arrivals and despawns; then the cars inside
     // sites, which an arrival this very sub-step may have handed to the gate.
     mover.step(now, this);
-    siteMover.step(now, this, this);
+    siteMover.step(now, this, this, this);
     if (_gaveUpCount > 0) _drainGiveUps();
+    if (_siteReplanCount > 0) _drainSiteReplans();
     if (clock.onWholeSecond) table.compactRoutes();
     // 6. The edge delays: this sub-step's observations; and at the
     // congestion epoch the flow windows, the lane speeds and a fresh delay
@@ -1166,6 +1167,15 @@ class _Core
   void _remapSiteHeld(RouteRemapper rm) {
     _siteReplanCount = 0;
     siteMover.remapHeld(rm, this, this);
+    _drainSiteReplans();
+  }
+
+  /// Everyone the site mover handed a leg back to, asked for it again: a
+  /// route it could not carry across a rebuild (§7.6), a home departure no
+  /// gap ever came for (§7.5). Always after the mover's walk, never inside
+  /// it — the cars are back on their stalls by then, so the leg is planned
+  /// from the site's out-joins as a fresh departure is.
+  void _drainSiteReplans() {
     for (var i = 0; i < _siteReplanCount; i++) {
       stats.replans++;
       commutes.replanFromSite(_siteReplan[i], kSiteReplanTag);

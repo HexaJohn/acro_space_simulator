@@ -135,7 +135,7 @@ class SiteDrive implements SiteSink, VehicleSink, SpawnSink {
     events.beginStep();
     mover.step(nowUs, this);
     probe?.call();
-    siteMover.step(nowUs, this, this);
+    siteMover.step(nowUs, this, this, this);
     for (var i = 0; i < events.count; i++) {
       log.add(LoggedAccess(
           AccessEventKind.values[events.kind[i]],
@@ -259,6 +259,25 @@ class SiteDrive implements SiteSink, VehicleSink, SpawnSink {
     );
   }
 
+  /// A car standing in the street at travel arc [t] of [edge] and never
+  /// moving again: a van at the kerb, a breakdown, a jam that will not clear
+  /// — the permanent obstruction a gap rule can never see past. It is a
+  /// `dwelling` vehicle, which the road mover holds where it stands and
+  /// accrues no stuck time for (§5.6), so it is a body in the lane for as
+  /// long as the test wants one. Returns its handle.
+  int obstruct(int edge, double t) {
+    final hi = lg.edgeLaneS1[edge] - 1.0;
+    var to = t + 10;
+    if (to > hi) to = hi;
+    final h = roadTrip(edge, t, edge, to);
+    if (h == SlotPool.none) return h;
+    table.state[SlotPool.slotOf(h)] = VehicleState.dwelling.index;
+    return h;
+  }
+
+  /// Takes [handle] out of the street again: the obstruction clears.
+  void clear(int handle) => mover.despawn(handle, DespawnReason.edit, this);
+
   /// A stream of cars down [edge], one every [everyS] seconds while the run
   /// lasts: what a back-out or a left-in has to find a gap in. Call it from
   /// a `run`'s callback.
@@ -361,8 +380,13 @@ class SiteDrive implements SiteSink, VehicleSink, SpawnSink {
   @override
   void spawned(int owner, int handle) {}
 
+  /// Owners the mover handed their leg back to: a route it could not carry
+  /// (§7.6), a home departure it gave up on (§7.5). Planning them again is
+  /// package E's, so here they are only recorded.
+  final List<int> replanned = [];
+
   @override
-  void replanWaiting(int owner) {}
+  void replanWaiting(int owner) => replanned.add(owner);
 }
 
 /// The starter lot each template stands on, with its serving edges: what a

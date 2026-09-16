@@ -40,6 +40,48 @@ int usOf(double seconds) => (seconds * kUsPerSecond).round();
 /// [us] microseconds in seconds.
 double secondsOf(int us) => us / kUsPerSecond;
 
+// ---- Clocks that only count up ---------------------------------------------
+//
+// A wait is a clock: it starts at zero, adds a sub-step for as long as what
+// it measures is still true, and is read against a threshold — the 25 s
+// before a junction grant is forced (§5.4), the 60 s before a wedge is
+// broken (§5.8), the 120 s before a home back-out is forced (§7.5). Every
+// one of them lives in an `Int32List` cell, which holds 2³¹ − 1: in
+// MICROseconds that is 35 minutes 47 seconds, and a wait that runs past it
+// wraps NEGATIVE. Nothing crashes; the threshold silently un-fires, and the
+// car that has waited longest reads as the one that has waited least. So a
+// clock that can run for hours counts MILLISECONDS, and every clock adds
+// through [addClock], which saturates rather than wraps.
+
+/// One sub-step in whole milliseconds. [kStepUs] is a whole number of them,
+/// so a millisecond clock counts sub-steps exactly as a microsecond one
+/// does: 0.2 s is 200 ms, and nothing is rounded away.
+const int kStepMs = kStepUs ~/ 1000;
+
+/// Milliseconds in a second.
+const int kMsPerSecond = 1000;
+
+/// [seconds] as whole milliseconds, rounded to nearest: what a millisecond
+/// clock's thresholds are written in.
+int msOf(double seconds) => (seconds * kMsPerSecond).round();
+
+/// [ms] milliseconds in seconds, for readouts.
+double secondsOfMs(int ms) => ms / kMsPerSecond;
+
+/// Where a counting clock stops. Two thousand million, which is inside the
+/// 2³¹ − 1 an `Int32List` cell holds with a whole sub-step to spare in
+/// either unit, so no add can step over the top and wrap: 23 days of agent
+/// time in milliseconds, 33 minutes in microseconds.
+const int kClockMax = 2000000000;
+
+/// [was] plus [add], held at [kClockMax]: a clock that has passed its
+/// threshold stays past it for ever, which is what every rule that reads one
+/// assumes. [add] is a sub-step's worth, never negative.
+int addClock(int was, int add) {
+  final now = was + add;
+  return now > kClockMax ? kClockMax : now;
+}
+
 /// The agents' clock: the time of the last sub-step run, and what the ticks
 /// have fed that has not been run yet.
 class AgentClock {

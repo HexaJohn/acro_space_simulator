@@ -345,6 +345,102 @@ void main() {
     });
   });
 
+  group('A9: a gap that never comes', () {
+    test('an hour of waiting still reads as waiting, and the forced grant '
+        'fires on the far side of it', () {
+      // The give-up is not what this one is about: the point is the CLOCK,
+      // which in microseconds would have wrapped negative at 35.8 minutes
+      // and quietly disarmed the forced grant it drives (§7.5).
+      AgentTuning.backOutGiveUpS = 7200;
+      final lot = starterLotOf(SyntheticTemplate.home);
+      final d = SiteDrive({lot: SyntheticTemplate.home});
+      final e = servingEdges(d, lot);
+      final t = d.access(lot).sOn(d.lg, e.near);
+      d.park(lot, 0);
+      // A body parked squarely in the footprint: a forced grant waives the
+      // ETA terms and never this, so the car waits for as long as it stands.
+      final blocker = d.obstruct(e.near, t);
+      expect(blocker, isNot(SlotPool.none));
+      final out = d.departure(lot, stall: 0, edge: e.near);
+      final sl = SlotPool.slotOf(out);
+
+      // An hour and a minute of agent time, driven through the fixture's own
+      // clock: 18,300 sub-steps of 0.2 s.
+      var was = 0, backwards = 0;
+      for (var i = 0; i < 18300; i++) {
+        d.step();
+        final now = d.cols.waitMs[sl];
+        if (now < was) backwards++;
+        was = now;
+      }
+      expect(backwards, 0, reason: 'the wait went backwards $backwards times');
+      expect(secondsOf(d.nowUs), greaterThan(3600));
+      expect(d.table.isLive(out), isTrue);
+      expect(d.cols.phase[sl], SitePhase.backOutWait.index);
+      expect(was, greaterThan(msOf(3600)),
+          reason: 'an hour of waiting, counted whole');
+      expect(d.stats.backOutForced, 0,
+          reason: 'nothing was granted while a body stood in the footprint');
+      expect(d.stats.backOutGiveUps, 0, reason: 'the give-up was turned off');
+
+      // The street clears, and the very next decision is a FORCED grant: the
+      // wait is still read as past `backOutForcedS` an hour later, which is
+      // exactly what a wrapped counter would have lost.
+      d.clear(blocker);
+      d.run(1);
+      expect(d.stats.backOutForced, 1);
+      expect(d.cols.phase[sl], SitePhase.backOut.index);
+      d.run(40);
+      expect(d.of(AccessEventKind.backOutExit), hasLength(1));
+    });
+
+    test('a departure an obstruction never clears is given up, counted, and '
+        'no car crosses the kerb to do it', () {
+      final lot = starterLotOf(SyntheticTemplate.home);
+      final d = SiteDrive({lot: SyntheticTemplate.home});
+      final e = servingEdges(d, lot);
+      final lane = d.lg.laneOf(e.near, 0);
+      final t = d.access(lot).sOn(d.lg, e.near);
+      final at = t - d.lg.edgeLaneS0[e.near];
+      final lo = at - AgentTuning.backOutUpM, hi = at + AgentTuning.backOutDownM;
+      d.park(lot, 0);
+      d.obstruct(e.near, t);
+      final out = d.departure(lot, stall: 0, edge: e.near);
+      final sl = SlotPool.slotOf(out);
+      final row = d.rowOf(lot);
+
+      // Twice the give-up, so a rule that never fired would be plain.
+      var gaveUpAtS = -1.0;
+      for (var i = 0; i < 3000 && gaveUpAtS < 0; i++) {
+        d.step();
+        expect(bodiesIn(d, lane, lo, hi), hasLength(1),
+            reason: 'the obstruction stayed where it was put');
+        if (!d.table.isLive(out)) {
+          gaveUpAtS = secondsOf(d.nowUs);
+          break;
+        }
+        expect(d.cols.phase[sl], SitePhase.backOutWait.index,
+            reason: 'it never committed to a reverse it could not finish');
+      }
+
+      expect(gaveUpAtS, greaterThan(AgentTuning.backOutForcedS),
+          reason: 'it waited out the forced grant first');
+      expect(gaveUpAtS, closeTo(AgentTuning.backOutGiveUpS, 1));
+      expect(d.stats.backOutGiveUps, 1, reason: 'and it is counted');
+      expect(d.of(AccessEventKind.backOutExit), isEmpty,
+          reason: 'no EXIT with a body in the footprint — not once');
+      expect(d.of(AccessEventKind.exit), isEmpty);
+      // Back on the stall it never left, with its leg handed to its owner to
+      // plan again, and nothing of the car left inside the site.
+      expect(d.parked[out], 0);
+      expect(d.taken(lot, 0), isTrue);
+      expect(d.replanned, hasLength(1));
+      expect(d.world.sites.inside[row], 0);
+      expect(siteOccupancyErrors(d), isEmpty);
+      expect(claimErrors(d), isEmpty);
+    });
+  });
+
   group('A9: tandem stalls', () {
     test('a deep car blocked by its neighbour has it shuffled away', () {
       AgentTuning.tandemShuffleS = 5;

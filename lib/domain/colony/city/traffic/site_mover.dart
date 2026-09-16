@@ -21,7 +21,10 @@
 ///   through [AccessGaps]), forced after `AgentTuning.gateForcedS`, given up
 ///   after `gateGiveUpS` refused on the throat's room alone
 ///   ([SiteSink.gateGaveUp]). A grant logs ENTER, detaches the car and puts
-///   it on the throat in-lane at s = 0.
+///   it on the throat in-lane at s = 0. Every clock here counts MILLISECONDS
+///   and saturates ([addClock]): a wait may run for hours, and an `Int32` of
+///   microseconds wraps negative after 35.8 minutes, which would disarm the
+///   very grant it was measuring for (traffic_time.dart).
 /// - **Departures** ([SiteMover.spawnFromStall]): a car park, yard or
 ///   installation spawns a vehicle row detached at the stall, reverses out
 ///   along the very curve it came in by, drives to the throat and waits with
@@ -31,7 +34,11 @@
 ///   and swings its tail upstream into its target lane, logged
 ///   `backOutExit` as its rear crosses the kerb line, from which instant it
 ///   is a REVERSING vehicle in that lane (`VehicleState.manoeuvre`,
-///   `kReversing`) until the 0.5 s shift is done.
+///   `kReversing`) until the 0.5 s shift is done. A gap that never comes is
+///   given up after `AgentTuning.backOutGiveUpS`: the car goes back on its
+///   stall and its owner is asked for the leg again (§7.5), because the
+///   forced grant waives the ETA terms and NEVER a body in the footprint,
+///   and a blocked driveway must not hold a car for ever.
 /// - **Lane obstacles.** A granted back-out CLAIMS its footprint (and, for a
 ///   far-direction departure, the near lane it swings across) before its
 ///   body is in the lane, and the road mover reads those claims through
@@ -160,13 +167,13 @@ class SiteMover implements LaneObstacles {
   /// of its business, so the unit needs a column of its own.
   Int32List _unit = Int32List(0);
 
-  /// Microseconds refused at the gate on the throat's ROOM alone: what the
-  /// 30 s give-up counts, as against `SiteVehicles.waitUs`, which counts
+  /// Milliseconds refused at the gate on the throat's ROOM alone: what the
+  /// 30 s give-up counts, as against `SiteVehicles.waitMs`, which counts
   /// every refusal and drives the 25 s forced grant (§7.4 step 4).
-  Int32List _g1Us = Int32List(0);
+  Int32List _g1Ms = Int32List(0);
 
-  /// Microseconds a deep tandem car has been blocked by a parked outer car.
-  Int32List _shuffleUs = Int32List(0);
+  /// Milliseconds a deep tandem car has been blocked by a parked outer car.
+  Int32List _shuffleMs = Int32List(0);
 
   /// The travel arc on its route's first edge a departing car pulls out at.
   Float32List _originT = Float32List(0);
@@ -221,8 +228,8 @@ class SiteMover implements LaneObstacles {
     site.claim[sl] = stall;
     site.phase[sl] = SitePhase.gateHeld.index;
     _unit[sl] = -1;
-    _g1Us[sl] = 0;
-    _shuffleUs[sl] = 0;
+    _g1Ms[sl] = 0;
+    _shuffleMs[sl] = 0;
   }
 
   /// Spawns a departing car detached on [stall] of site [row], leaving by
@@ -283,8 +290,8 @@ class SiteMover implements LaneObstacles {
     site.owner[sl] = owner;
     site.ownerKind[sl] = ownerKind & 0xFF;
     _unit[sl] = -1;
-    _g1Us[sl] = 0;
-    _shuffleUs[sl] = 0;
+    _g1Ms[sl] = 0;
+    _shuffleMs[sl] = 0;
     _originT[sl] = originT;
     sites.inside[row]++;
     if (back) {
@@ -307,8 +314,10 @@ class SiteMover implements LaneObstacles {
 
   /// One sub-step at agent time [nowUs], after the road mover's: the gate,
   /// the site lanes, the manoeuvres, the throats and the back-outs, telling
-  /// [s] and [v] what became of each vehicle.
-  void step(int nowUs, SiteSink s, VehicleSink v) {
+  /// [s] and [v] what became of each vehicle, and [spawns] whose leg has to
+  /// be planned again — a home departure no gap ever came for (§7.5), which
+  /// leaves its owner with a car back on a stall and nowhere to be.
+  void step(int nowUs, SiteSink s, VehicleSink v, SpawnSink spawns) {
     final lg = _lg;
     if (lg == null) return;
     _ensure();
@@ -333,7 +342,7 @@ class SiteMover implements LaneObstacles {
       } else if (ph == SitePhase.throatWait.index) {
         _throat(sl, nowUs, s);
       } else if (ph == SitePhase.backOutWait.index) {
-        _backOutGap(sl, s);
+        _backOutGap(sl, s, spawns);
       } else if (ph == SitePhase.shift.index) {
         _shift(sl);
       }
@@ -403,7 +412,7 @@ class SiteMover implements LaneObstacles {
     final edge = lg.laneEdge[el];
     final left = _leftOfTravel(p, join, lg, edge);
     final at = t.s[sl].toDouble();
-    final forced = site.waitUs[sl] >= usOf(AgentTuning.gateForcedS);
+    final forced = site.waitMs[sl] >= msOf(AgentTuning.gateForcedS);
     final crossOk =
         !left || gaps.turnInClear(el, at, len, forced: forced);
     if (speedOk && roomOk && unitOk && crossOk) {
@@ -413,12 +422,12 @@ class SiteMover implements LaneObstacles {
       _enter(sl, row, join, stall, inLane, el, edge);
       return;
     }
-    site.waitUs[sl] += kStepUs;
+    site.waitMs[sl] = addClock(site.waitMs[sl], kStepMs);
     // The give-up clock runs only while the throat's room, or the claim on
     // it, is the reason: everything else clears by itself (§7.4 step 4).
     if (!roomOk || !unitOk) {
-      _g1Us[sl] += kStepUs;
-      if (_g1Us[sl] >= usOf(AgentTuning.gateGiveUpS)) _giveUpGate(sl, sink);
+      _g1Ms[sl] = addClock(_g1Ms[sl], kStepMs);
+      if (_g1Ms[sl] >= msOf(AgentTuning.gateGiveUpS)) _giveUpGate(sl, sink);
     }
   }
 
@@ -441,8 +450,8 @@ class SiteMover implements LaneObstacles {
     site.phase[sl] = SitePhase.inbound.index;
     site.lane[sl] = inLane;
     site.target[sl] = sites.stallTarget(row, stall);
-    site.waitUs[sl] = 0;
-    _g1Us[sl] = 0;
+    site.waitMs[sl] = 0;
+    _g1Ms[sl] = 0;
     final unit = sites.elemUnit[sites.elemBase[row] + inLane];
     if (unit >= 0) _claim(unit, kUnitIn, sl);
     sites.inside[row]++;
@@ -458,7 +467,7 @@ class SiteMover implements LaneObstacles {
     // handed out again must never inherit a dead car's site business.
     site.clear(sl);
     _unit[sl] = -1;
-    _g1Us[sl] = 0;
+    _g1Ms[sl] = 0;
   }
 
   // ---- Driving the site lanes ----------------------------------------------
@@ -581,7 +590,7 @@ class SiteMover implements LaneObstacles {
       return;
     }
     site.phase[sl] = SitePhase.throatWait.index;
-    site.waitUs[sl] = 0;
+    site.waitMs[sl] = 0;
   }
 
   /// One sub-step of a scripted stall manoeuvre, in or out. The car holds
@@ -703,11 +712,13 @@ class SiteMover implements LaneObstacles {
     final kind = AgentKind.values[t.kind[sl]];
     if (!arbiter.canJoin(lane, at, t.len[sl].toDouble(), kind,
         fromLeft: left)) {
-      site.waitUs[sl] += kStepUs;
+      site.waitMs[sl] = addClock(site.waitMs[sl], kStepMs);
       // §7.4 step 6: a car queueing for its gap is not stuck until it has
-      // been there a minute.
-      if (site.waitUs[sl] > usOf(AgentTuning.throatStuckAfterS)) {
-        t.stuckUs[sl] += kStepUs;
+      // been there a minute. Its stuck clock saturates too: the road mover
+      // never sees a car inside a site, so nothing else bounds this one, and
+      // in microseconds it would wrap after 35.8 minutes at the throat.
+      if (site.waitMs[sl] > msOf(AgentTuning.throatStuckAfterS)) {
+        t.stuckUs[sl] = addClock(t.stuckUs[sl], kStepUs);
       }
       return;
     }
@@ -727,25 +738,35 @@ class SiteMover implements LaneObstacles {
 
   // ---- The home back-out (§7.4 Home back-out) ------------------------------
 
-  /// A car waiting in its stall: the blockers, the claims and the gap.
-  void _backOutGap(int sl, SiteSink sink) {
+  /// A car waiting in its stall: the clock, the give-up, the blockers, the
+  /// claims and the gap.
+  ///
+  /// The clock is first and the give-up second, before anything that can
+  /// answer "not yet", so that NO path through this method leaves a car
+  /// waiting for ever — not a blocker nowhere will take, not a plan that
+  /// went, not a footprint something stands in all day (§7.5).
+  void _backOutGap(int sl, SiteSink sink, SpawnSink spawns) {
     final t = table, lg = _lg!;
     final row = site.row[sl], join = site.join[sl], stall = site.claim[sl];
     final p = sites.isRowLive(row) ? sites.plan[row] : null;
+    site.waitMs[sl] = addClock(site.waitMs[sl], kStepMs);
+    if (site.waitMs[sl] >= msOf(AgentTuning.backOutGiveUpS)) {
+      _giveUpBackOut(sl, sink, spawns);
+      return;
+    }
     if (p == null || t.routeLen[sl] <= 0 || stall < 0) return;
-    site.waitUs[sl] += kStepUs;
     // Physically blocked by the car in front of it on a tandem pad: it goes
     // nowhere until that car is shuffled away (§7.5).
     final blocker = _blockerOf(row, p, stall);
     if (blocker >= 0) {
-      _shuffleUs[sl] += kStepUs;
-      if (_shuffleUs[sl] >= usOf(AgentTuning.tandemShuffleS)) {
-        _shuffleUs[sl] = 0;
+      _shuffleMs[sl] = addClock(_shuffleMs[sl], kStepMs);
+      if (_shuffleMs[sl] >= msOf(AgentTuning.tandemShuffleS)) {
+        _shuffleMs[sl] = 0;
         if (sink.shuffleBlocker(t.handleOf(sl), row, blocker)) stats.shuffles++;
       }
       return;
     }
-    _shuffleUs[sl] = 0;
+    _shuffleMs[sl] = 0;
     // An inbound car held at the gate has the right of way while we are
     // uncommitted: we wait in the stall (§7.4 deadlock).
     if (row < _heldRow.length && _heldRow[row] > 0) return;
@@ -755,7 +776,7 @@ class SiteMover implements LaneObstacles {
     final edge = lg.laneEdge[lane];
     final arc = lg.travelArc(edge, p.joinRoadS(join));
     final far = _leftOfTravel(p, join, lg, edge);
-    final forced = site.waitUs[sl] >= usOf(AgentTuning.backOutForcedS);
+    final forced = site.waitMs[sl] >= msOf(AgentTuning.backOutForcedS);
     // Two neighbours never reverse into each other: an overlapping claim is
     // refused, the earlier slot of this sub-step keeping it.
     if (_claimOverlaps(lane, edge, arc)) return;
@@ -766,9 +787,35 @@ class SiteMover implements LaneObstacles {
     site.phase[sl] = SitePhase.backOut.index;
     site.lane[sl] = -1;
     site.manU[sl] = 0;
-    site.waitUs[sl] = 0;
+    site.waitMs[sl] = 0;
     _curveM[sl] = SiteManoeuvre.backOutLengthM(
         p, join, stall, lane, lg, t.len[sl].toDouble());
+  }
+
+  /// §7.5: the departure no gap ever came for. The forced grant waives the
+  /// ETA terms and nothing else — a body in the footprint is a collision
+  /// however long the car has waited, and so is a queue it would reverse
+  /// into — so a drive held by something that does not move (a van standing
+  /// at the kerb, a jam that never clears, a tandem blocker nowhere would
+  /// take) would hold the car, its stall and its owner's leg for as long as
+  /// the obstruction stood. After `backOutGiveUpS` it gives the departure
+  /// up: the car goes back on the stall it never left, counted, and its
+  /// owner is asked for the leg again, which plans a fresh route from the
+  /// site's out-joins and may come back by another join or another
+  /// direction (the same way out `remapHeld` takes for a route it cannot
+  /// carry, §7.6).
+  ///
+  /// No gap is accepted and no kerb is crossed, so the one safety rule the
+  /// back-out has — never an EXIT with a body in the footprint — is not
+  /// touched by any of this.
+  void _giveUpBackOut(int sl, SiteSink sink, SpawnSink spawns) {
+    stats.backOutGiveUps++;
+    // The owner is told BEFORE the car is parked, because parking it frees
+    // the vehicle row and with it the owner column this reads (§7.4's
+    // gateGaveUp takes what it needs in the same order, and for the same
+    // reason).
+    spawns.replanWaiting(table.owner[sl]);
+    _backToStall(sl, sink);
   }
 
   /// The reverse and the swing, one sub-step at `backOutMaxMps`.
@@ -790,7 +837,7 @@ class SiteMover implements LaneObstacles {
     }
     if (u >= 1) {
       site.phase[sl] = SitePhase.shift.index;
-      site.waitUs[sl] = 0;
+      site.waitMs[sl] = 0;
     }
   }
 
@@ -826,8 +873,8 @@ class SiteMover implements LaneObstacles {
   /// The 0.5 s stop to shift out of reverse, and then the car is the road
   /// mover's again.
   void _shift(int sl) {
-    site.waitUs[sl] += kStepUs;
-    if (site.waitUs[sl] < usOf(AgentTuning.shiftStopS)) return;
+    site.waitMs[sl] = addClock(site.waitMs[sl], kStepMs);
+    if (site.waitMs[sl] < msOf(AgentTuning.shiftStopS)) return;
     final t = table;
     t.flags[sl] &= ~kReversing;
     t.state[sl] = VehicleState.driving.index;
@@ -1320,8 +1367,8 @@ class SiteMover implements LaneObstacles {
         ..fillRange(0, n, -1)
         ..setRange(0, a.length, a);
       _unit = i32(_unit);
-      _g1Us = Int32List(n)..setRange(0, _g1Us.length, _g1Us);
-      _shuffleUs = Int32List(n)..setRange(0, _shuffleUs.length, _shuffleUs);
+      _g1Ms = Int32List(n)..setRange(0, _g1Ms.length, _g1Ms);
+      _shuffleMs = Int32List(n)..setRange(0, _shuffleMs.length, _shuffleMs);
       _originT = Float32List(n)..setRange(0, _originT.length, _originT);
       _curveM = Float32List(n)..setRange(0, _curveM.length, _curveM);
       _hand = Int32List(n);
@@ -1340,8 +1387,8 @@ class SiteMover implements LaneObstacles {
   /// Every buffer by name into [into], for the allocation test (A13).
   void collectBuffers(Map<String, Object> into, String name) {
     into['$name.unit'] = _unit;
-    into['$name.g1Us'] = _g1Us;
-    into['$name.shuffleUs'] = _shuffleUs;
+    into['$name.g1Ms'] = _g1Ms;
+    into['$name.shuffleMs'] = _shuffleMs;
     into['$name.originT'] = _originT;
     into['$name.curveM'] = _curveM;
     into['$name.hand'] = _hand;
@@ -1364,8 +1411,8 @@ class SiteMover implements LaneObstacles {
       if (!table.isSlotLive(sl) || site.phase[sl] == 0) continue;
       h = fnv1aU32(h, table.handleOf(sl));
       h = fnv1aU32(h, _unit[sl]);
-      h = fnv1aU32(h, _g1Us[sl]);
-      h = fnv1aU32(h, _shuffleUs[sl]);
+      h = fnv1aU32(h, _g1Ms[sl]);
+      h = fnv1aU32(h, _shuffleMs[sl]);
       h = fnv1aU32(h, (_originT[sl] * 1000).round());
       h = fnv1aU32(h, (_curveM[sl] * 1000).round());
       // The claims this car holds, in the order it took them.

@@ -482,7 +482,13 @@ class VehicleMover {
       laneSamples[el]++;
     }
     if (t.flags[sl] & kRefused != 0 && vn < kWaitingMps) {
-      t.waitUs[sl] += kStepUs;
+      // Saturating, not wrapping: only a grant clears this clock, and a car
+      // that creeps a metre now and then keeps resetting its STUCK timer
+      // without ever being let through — so nothing bounds this one by an
+      // hour. Wrapped negative it would tell the impatient grant (§5.4) and
+      // the wedge breaker (§5.8) that the longest waiter at the node had
+      // only just arrived (traffic_time.dart, "clocks that only count up").
+      t.waitUs[sl] = addClock(t.waitUs[sl], kStepUs);
     }
     if (sn >= elemLen) _hand[_nHand++] = sl;
   }

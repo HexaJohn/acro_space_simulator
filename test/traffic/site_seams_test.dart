@@ -40,7 +40,7 @@ void main() {
         expect(c.sNext[sl], -1);
         expect(c.owner[sl], -1);
         expect(c.claim[sl], -1);
-        expect(c.waitUs[sl], 0);
+        expect(c.waitMs[sl], 0);
         expect(c.manU[sl], 0);
       }
       c
@@ -48,13 +48,13 @@ void main() {
         ..lane[2] = 5
         ..phase[2] = SitePhase.inbound.index
         ..manU[2] = 0.5
-        ..waitUs[2] = 17;
+        ..waitMs[2] = 17;
       c.clear(2);
       expect(c.row[2], -1);
       expect(c.lane[2], -1);
       expect(c.phase[2], SitePhase.none.index);
       expect(c.manU[2], 0);
-      expect(c.waitUs[2], 0);
+      expect(c.waitMs[2], 0);
     });
 
     test('ensure grows without losing a row, and asks for nothing twice', () {
@@ -109,7 +109,7 @@ void main() {
         () => c.sNext[sl] = 0,
         () => c.owner[sl] = 9,
         () => c.ownerKind[sl] = 2,
-        () => c.waitUs[sl] = 200000,
+        () => c.waitMs[sl] = 200000,
         () => c.claim[sl] = 3,
         () => c.manU[sl] = 0.125,
         () => c.phase[sl] = SitePhase.stallIn.index,

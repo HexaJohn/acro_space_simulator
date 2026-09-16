@@ -84,9 +84,17 @@ class SiteVehicles {
   /// ports it), or −1.
   late Int32List owner;
 
-  /// Microseconds refused at the gate or waiting at a throat or for a gap:
-  /// what the forced grants and give-ups count against.
-  late Int32List waitUs;
+  /// Milliseconds refused at the gate or waiting at a throat or for a gap:
+  /// what the forced grants and the give-ups count against.
+  ///
+  /// Milliseconds, not microseconds, because this is the one clock in the
+  /// site columns with no bound of its own: a car can be refused its gap for
+  /// as long as the street stays busy. An `Int32List` of microseconds wraps
+  /// negative after 35.8 minutes, which would disarm the forced grant and
+  /// every give-up that reads it at the very moment they are needed most
+  /// (traffic_time.dart, "clocks that only count up"). It is added to
+  /// through `addClock`, so it never goes backwards either.
+  late Int32List waitMs;
 
   /// The stall, kerb slot or claim unit it holds, or −1.
   late Int32List claim;
@@ -108,7 +116,7 @@ class SiteVehicles {
     sPrev = Int32List(n);
     sNext = Int32List(n);
     owner = Int32List(n);
-    waitUs = Int32List(n);
+    waitMs = Int32List(n);
     claim = Int32List(n);
     phase = Uint8List(n);
     ownerKind = Uint8List(n);
@@ -130,7 +138,7 @@ class SiteVehicles {
     sPrev = i32(sPrev);
     sNext = i32(sNext);
     owner = i32(owner);
-    waitUs = i32(waitUs);
+    waitMs = i32(waitMs);
     claim = i32(claim);
     phase = u8(phase);
     ownerKind = u8(ownerKind);
@@ -151,7 +159,7 @@ class SiteVehicles {
     sPrev[slot] = -1;
     sNext[slot] = -1;
     owner[slot] = -1;
-    waitUs[slot] = 0;
+    waitMs[slot] = 0;
     claim[slot] = -1;
     phase[slot] = 0;
     ownerKind[slot] = 0;
@@ -169,7 +177,7 @@ class SiteVehicles {
     into['$name.sPrev'] = sPrev;
     into['$name.sNext'] = sNext;
     into['$name.owner'] = owner;
-    into['$name.waitUs'] = waitUs;
+    into['$name.waitMs'] = waitMs;
     into['$name.claim'] = claim;
     into['$name.phase'] = phase;
     into['$name.ownerKind'] = ownerKind;
@@ -194,7 +202,7 @@ class SiteVehicles {
       h = fnv1aU32(h, sPrev[sl]);
       h = fnv1aU32(h, sNext[sl]);
       h = fnv1aU32(h, owner[sl]);
-      h = fnv1aU32(h, waitUs[sl]);
+      h = fnv1aU32(h, waitMs[sl]);
       h = fnv1aU32(h, claim[sl]);
       h = fnv1aU32(h, (manU[sl] * 1000).round());
     }
