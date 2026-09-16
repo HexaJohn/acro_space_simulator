@@ -18,6 +18,11 @@
 ///                                  ore, tier, RCI, roads, lots)
 ///   ext.acro.citygame?zones=on|off      raise/drop the zoning view
 ///   ext.acro.citygame?zone=residential  zone every street lot at once
+///   ext.acro.citygame?knob=NAME&value=V a perf trade-off by name, live
+///                                  (`PerfKnobs`, as the city studio drives
+///                                  them): `agentsDrawn=0` takes the
+///                                  vehicle draws out without a rebuild,
+///                                  which is how the renderer is bisected
 ///   ext.acro.camera?elevationDeg=&azimuthDeg=&rangeM=
 ///                                  aim the camera, for framing the shot
 ///   ext.acro.roadtool              the road tool, driven by name through
@@ -68,8 +73,9 @@ import 'domain/universe/real_solar_system.dart';
 import 'infrastructure/baked_terrain_data.dart';
 import 'infrastructure/flutter/sim_view_control.dart';
 import 'infrastructure/flutter/simulation_view.dart';
-import 'infrastructure/flutter_scene/city/city_nodes.dart';
 import 'infrastructure/flutter/windows_key_event_workaround.dart';
+import 'infrastructure/flutter_scene/city/city_nodes.dart';
+import 'infrastructure/flutter_scene/perf_knobs.dart';
 import 'infrastructure/flutter_scene/render_backend.dart';
 
 final GlobalKey _shotKey = GlobalKey();
@@ -140,10 +146,20 @@ Future<void> main() async {
         colony.layout.setUse(lot.id, use);
       }
     }
+    // knob=<name>&value=<v>: any perf trade-off by name, live, exactly as
+    // `main_city_studio_dev` drives them (docs/plans/agent-traffic.md
+    // §15.5). Here because the City Builder is where the renderer is bisected
+    // and a Windows profile rebuild is a three-minute round trip: turning
+    // `agentsDrawn` off, or `agentRenderCap` down, says whether a fault is in
+    // the vehicle draws without touching a line of code.
+    final knob = params['knob'];
+    final knobOk = knob == null || PerfKnobs.set(knob, params['value'] ?? '');
     final did = _agentHooks(colony, params);
     final view = SimViewControl.instance.status?.call() ?? const {};
     return developer.ServiceExtensionResponse.result(jsonEncode({
       ..._status(colony),
+      if (knob != null) 'knobs': PerfKnobs.snapshot(),
+      if (!knobOk) 'error': 'unknown knob or bad value: $knob',
       if (did.isNotEmpty) 'did': did,
       // The camera's own geometry, so a framing complaint can be answered with
       // a number instead of a screenshot.
