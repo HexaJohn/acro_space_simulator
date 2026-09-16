@@ -236,23 +236,34 @@ class SceneSync {
     _lensBodyQuat = lensBody == null
         ? Quaternion.identity
         : Quaternion(lensBody.qw, lensBody.qx, lensBody.qy, lensBody.qz);
-    final perspective = camera != null &&
-        camera.usesDistanceCull &&
-        viewport != null &&
-        viewport.height > 0 &&
-        camera.focalPx > 0;
-    final liveFov = perspective
-        ? 2 * math.atan(viewport.height * 0.5 / camera.focalPx)
-        : 0.8;
-    final liveAspect = perspective ? viewport.width / viewport.height : 1.0;
+    // The live lens numbers. The camera and the viewport are read inside a
+    // test of their own, never through a boolean that promotes them —
+    // `perspective ? viewport.height … : 0.8` is the shape this SDK's AOT
+    // build reads through null (the readout's `_lotsStep`, e456be6;
+    // `road_overlay_nodes._line`), and both really are null on a frame
+    // taken before the first layout or with no camera at all, which is why
+    // everything else here spells them `camera?.`.
+    final cam = camera, vp = viewport;
+    var perspective = false;
+    var liveFov = 0.8;
+    var liveAspect = 1.0;
+    if (cam != null &&
+        vp != null &&
+        cam.usesDistanceCull &&
+        vp.height > 0 &&
+        cam.focalPx > 0) {
+      perspective = true;
+      liveFov = 2 * math.atan(vp.height * 0.5 / cam.focalPx);
+      liveAspect = vp.width / vp.height;
+    }
     if (lensFreezeRequested) {
       lensFreezeRequested = false;
-      if (perspective) {
+      if (perspective && cam != null) {
         lensRig.freeze(
-          eyeWorld: origin.focusWorld + camera.eyeOffset,
-          forwardWorld: camera.forward,
-          upWorld: camera.up,
-          focalPx: camera.focalPx,
+          eyeWorld: origin.focusWorld + cam.eyeOffset,
+          forwardWorld: cam.forward,
+          upWorld: cam.up,
+          focalPx: cam.focalPx,
           fovRadiansY: liveFov,
           aspect: liveAspect,
           bodyCentreWorld: _lensBodyCentre,
