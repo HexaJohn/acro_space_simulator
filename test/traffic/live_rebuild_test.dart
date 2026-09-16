@@ -58,7 +58,9 @@ void main() {
       var crossing = 0;
       var intoNorth = false, onNorth = false;
       for (var sl = 0; sl < t.highWater; sl++) {
-        if (!t.isSlotLive(sl)) continue;
+        // A car inside a site is on no element of the road graph at all
+        // (T4a, D49): it holds no place a rebuild could carry.
+        if (!t.isSlotLive(sl) || t.elem[sl] < 0) continue;
         final p = _Place.of(lg0, t, sl);
         if (p.onConnector) {
           crossing++;
@@ -75,7 +77,8 @@ void main() {
 
     final before = <int, _Place>{
       for (var sl = 0; sl < t.highWater; sl++)
-        if (t.isSlotLive(sl)) t.handleOf(sl): _Place.of(lg0, t, sl),
+        if (t.isSlotLive(sl) && t.elem[sl] >= 0)
+          t.handleOf(sl): _Place.of(lg0, t, sl),
     };
     final rev = a.graphRev;
     commit(a.city, const FixtureRoad([Vec2(-250, 150), Vec2(250, 150)]));

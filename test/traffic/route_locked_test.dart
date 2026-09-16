@@ -118,7 +118,11 @@ void main() {
     expect(released, isTrue, reason: 'X stood a minute behind the jam');
     expect(a.stats.despawnStuck + a.stats.despawnWedge, 0);
     expect(a.stats.replans, 0);
-    expect(a.stats.appendedLegs, 0);
+    // From T4a every arrival appends a parking leg (D17 step 2), so what
+    // is pinned here is that the EDIT appended none: no re-plan, and no
+    // re-target of a destination that moved under the car.
+    expect(a.stats.arrivedGone, 0);
+    expect(a.siteStats.siteRetargets, 0);
 
     // The thirty, set going again, arrive too — X among them.
     runAgents(a, 300);
@@ -234,7 +238,11 @@ void main() {
     }
     expect(_southOf(city, yRoute), isNotNull, reason: 'Y takes B: $yRoute');
     expect(a.stats.replans, 0);
-    expect(a.stats.appendedLegs, 0);
+    // From T4a every arrival appends a parking leg (D17 step 2), so what
+    // is pinned here is that the EDIT appended none: no re-plan, and no
+    // re-target of a destination that moved under the car.
+    expect(a.stats.arrivedGone, 0);
+    expect(a.siteStats.siteRetargets, 0);
     expect(a.stats.despawnStuck + a.stats.despawnWedge, 0);
   });
 

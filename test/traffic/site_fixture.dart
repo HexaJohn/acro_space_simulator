@@ -240,8 +240,10 @@ class SiteWorld {
       : city = on ?? town() {
     graph = city.roadGraph;
     lg = LaneGraphBuilder.build(graph);
-    buildings = BuildingTable()..sync(city, lg);
+    // The plans first: a building's access rows ARE its plan's joins (§7.3),
+    // so the table is synced against the same source the site table reads.
     plans = FixturePlanSource(graph, byLot, validate: validate);
+    buildings = BuildingTable()..sync(city, lg, plans);
   }
 
   /// The town the lots stand in, and the graph and lanes its cars drive.

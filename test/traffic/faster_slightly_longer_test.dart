@@ -83,9 +83,12 @@ void main() {
 
     // X keeps the avenue, its connectors and its lanes, to its stop; the
     // pinned delay stands through every epoch meanwhile.
+    // From T4a a car keeps its vehicle row past its arrival while it parks
+    // (§7.3 D17): the locked route is pinned to the arrival, which is where
+    // the trip it was planned for ends.
     final arrived = a.stats.arrived;
     var ticks = 0;
-    while (a.vehicles!.isLive(xh)) {
+    while (a.vehicles!.isLive(xh) && a.stats.arrived == arrived) {
       expect(routeHash(a, xh), hash, reason: 'X, at ${a.timeUs}');
       final now = routeOf(a, xh);
       expect(now, planned.sublist(planned.length - now.length),
@@ -96,7 +99,10 @@ void main() {
     }
     expect(a.stats.arrived, greaterThan(arrived));
     expect(a.stats.replans, 0);
-    expect(a.stats.appendedLegs, 0);
+    expect(a.stats.arrivedGone, 0);
+    // What legs are appended here are the parking legs D17 step 2 adds on
+    // arrival (T4a): never a re-plan, never a re-target.
+    expect(a.siteStats.siteRetargets, 0);
     expect(a.stats.despawnStuck + a.stats.despawnWedge, 0);
   });
 }

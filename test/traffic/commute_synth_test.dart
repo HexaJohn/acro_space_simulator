@@ -4,6 +4,7 @@
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
 import 'package:acro_space_simulator/domain/colony/city/traffic/agent_kind.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/site_vehicles.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/slot_pool.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/traffic_tuning.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/trip_planner.dart';
@@ -87,9 +88,26 @@ void main() {
     expect(peak, lessThanOrEqualTo(cap));
     expect(peak, greaterThan(cap ~/ 2));
     expect(s.deferred, greaterThan(0));
+    // From T4a a car keeps its vehicle row past its arrival while it parks
+    // (§7.3 D17): held at a gate, driving the site, or on the one-element
+    // leg to a kerb slot ahead. Such a car is counted BOTH in `arrived` and
+    // among the live, so it is the slack in the accounting.
+    var parking = 0;
+    final cols = a.siteVehicles!;
+    final t = a.vehicles!;
+    for (var sl = 0; sl < t.highWater; sl++) {
+      if (!t.isSlotLive(sl)) continue;
+      final ph = SitePhase.values[cols.phase[sl]];
+      if (ph == SitePhase.gateHeld ||
+          ph == SitePhase.kerbBound ||
+          ph == SitePhase.inbound ||
+          ph == SitePhase.stallIn) {
+        parking++;
+      }
+    }
     expect(s.spawned,
         s.arrived + s.despawnStuck + s.despawnWedge + s.despawnEdit +
-            a.liveVehicles,
+            a.liveVehicles - parking,
         reason: 'every vehicle that went on the road is on it, arrived, or '
             'was counted off it');
   });

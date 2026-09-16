@@ -150,7 +150,11 @@ void main() {
     expect(s.a.stats.appendedLegs, 0);
 
     final last = s.driveOut([car]);
-    expect(s.a.stats.appendedLegs, 1, reason: 'one leg on, at the old stop');
+    // One leg on from the old stop, and — from T4a — the parking leg every
+    // arrival appends after it (D17 step 2).
+    expect(s.a.siteStats.siteRetargets, 1,
+        reason: 'one leg on, at the old stop');
+    expect(s.a.stats.appendedLegs, greaterThanOrEqualTo(1));
     expect(s.a.stats.replans, 0, reason: 'never a re-plan');
     expect(s.a.stats.arrived, 1);
     expect(s.a.stats.arrivedGone, 0);
@@ -183,7 +187,8 @@ void main() {
         reason: 'the new street is nearer now');
 
     final last = s.driveOut([car]);
-    expect(s.a.stats.appendedLegs, 1);
+    expect(s.a.siteStats.siteRetargets, 1, reason: 'one leg on');
+    expect(s.a.stats.appendedLegs, greaterThanOrEqualTo(1));
     expect(s.a.stats.replans, 0);
     expect(s.a.stats.arrived, 1);
     expect(s.a.stats.noRoute, 0);

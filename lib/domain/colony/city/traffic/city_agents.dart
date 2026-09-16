@@ -32,6 +32,16 @@
 ///    the user's spawn-time congestion) — the readout's picture, a budget of
 ///    the readout's pass (reach, noise, land value), the frame.
 ///
+/// **Sites** (T4a, site-access.md §7; docs/plans/t4a-implementation.md §2).
+/// A colony's site plans are read through one [SitePlanSource] — the book's,
+/// or a test's — and synced into a [SiteTable] whenever `sitesRev` or a
+/// chunk moves, never on `graphRev` (D49). A trip that reaches a site with
+/// stalls is held at its arrival gate, drives the site and parks
+/// ([SiteMover]); what the gate cannot take goes to a kerb slot ahead
+/// ([KerbTable]) and what nothing can place is garaged (D17 steps 1–2).
+/// Parked cars are rows of their own ([ParkedCarTable]), saved by
+/// `(siteId, stallKey)` and driven away again from where they stand.
+///
 /// Everything a result depends on is counted — sub-steps, expansions,
 /// spawns — never timed, and runs in integer-id order, so two colonies fed
 /// the same ticks make the same history ([digest]). The frame hold changes
@@ -46,6 +56,8 @@ import 'dart:typed_data';
 
 import '../city_sim.dart';
 import '../parcel.dart';
+import '../site_access/site_access_plan.dart';
+import 'access_events.dart';
 import 'agent_frame.dart';
 import 'agent_kind.dart';
 import 'agent_traffic_readout.dart';
@@ -54,11 +66,19 @@ import 'building_table.dart';
 import 'edge_delay.dart';
 import 'graph_lineage.dart';
 import 'junction_arbiter.dart';
+import 'kerb_mask.dart';
+import 'kerb_slots.dart';
 import 'lane_graph.dart';
 import 'lane_graph_builder.dart';
 import 'network_key.dart';
+import 'parked_cars.dart';
 import 'path_search.dart';
 import 'route_cost.dart';
+import 'site_mover.dart';
+import 'site_plan_source.dart';
+import 'site_stats.dart';
+import 'site_table.dart';
+import 'site_vehicles.dart';
 import 'slot_pool.dart';
 import 'traffic_metrics.dart';
 import 'traffic_rng.dart';
@@ -83,11 +103,24 @@ const int kRetargetTag = 2;
 /// lot, and its access moved on along the kerb or across a new street.
 const int kSiteRetargetTag = 3;
 
+/// The tag of a leg asked for again because the road route a car held
+/// INSIDE a site could not be carried across a lane-graph rebuild (§7.6,
+/// `SiteMover.remapHeld`). Its origins are the site's out-joins, exactly as
+/// a fresh departure's are: the car is back on a stall by then.
+const int kSiteReplanTag = 4;
+
 /// How far from its building's access, as the table resolves it now, a
 /// vehicle may stop and still have arrived there: a join window's reach
 /// either side of its join (§5.5), well over the centimetres a split's
-/// re-sampling moves a stop by.
+/// re-sampling moves a stop by. It is also how near an arrival's stop a
+/// plan join must be for the arrival to be THAT join's (§7.4 step 2).
 const double kSiteRetargetM = 1.5;
+
+/// How near a saved or displaced kerb car's pose a slot must be for the car
+/// to be put back on it, and how far its heading may have turned (§14.1:
+/// 12 m, 45°). Past either it is garaged.
+const double kKerbSnapM = 12;
+const double kKerbSnapCos = 0.7071067811865476;
 
 /// Salts of the RNG's sub-streams: each subsystem draws from its own, so a
 /// draw added to one never shifts another's.
@@ -128,9 +161,24 @@ class CityAgents {
   bool _enabled = false;
   _Core? _core;
   TrafficStats? _idleStats;
+  SiteStats? _idleSiteStats;
   TrafficMetrics? _metrics;
   int _picturesBefore = 0;
   int _laneSpeedRevBefore = 0;
+
+  /// The colony's own book as a plan source, made once (§1.1). A new source
+  /// object reads as new plans to `BuildingTable.sync`, so one rebuilt per
+  /// sync would re-resolve every building's access every sync.
+  SitePlanSource? _bookPlans;
+  SitePlanSource? _debugPlans;
+
+  /// The `'agents'` block a load handed over, waiting for the first advance
+  /// to give it a lane graph and site rows to be placed against (§14.4's
+  /// load order: `restore` only stores the JSON).
+  SavedAgents? _saved;
+
+  /// What [agentManaged] answers before there are any tables.
+  static final Uint8List _noSites = Uint8List(0);
 
   /// Whether this colony runs agents — and, with it, whether anything
   /// else reads them (E3a, E4, E37). Also off while the `agentsOn` A/B knob
@@ -197,6 +245,59 @@ class CityAgents {
 
   VehicleTable? get vehicles => _core?.table;
   BuildingTable? get buildings => _core?.buildings;
+
+  // ---- The sites (T4a) ---------------------------------------------------------
+
+  /// The site plans the agents read (§1.1): the colony's book, or whatever
+  /// [debugPlans] put in its place.
+  SitePlanSource get plans =>
+      _debugPlans ?? (_bookPlans ??= BookPlanSource(city.siteAccess));
+
+  /// Synthetic plans in place of the colony's book, for the site tests
+  /// (`FixturePlanSource`). Setting it re-resolves every building's access
+  /// and re-syncs the site rows at the next advance.
+  set debugPlans(SitePlanSource? source) {
+    if (identical(source, _debugPlans)) return;
+    _debugPlans = source;
+    _core?.plansReplaced();
+  }
+
+  /// The synced site networks, the parked cars, the kerb slots, this
+  /// sub-step's access events and the site columns — what the site tests,
+  /// the wire and the allocation gate read. Null before the tables exist.
+  SiteTable? get sites => _core?.sites;
+  ParkedCarTable? get parkedCars => _core?.parked;
+  KerbTable? get kerbs => _core?.kerbs;
+  AccessEventLog? get accessEvents => _core?.events;
+  SiteVehicles? get siteVehicles => _core?.siteCols;
+  SiteMover? get siteMover => _core?.siteMover;
+
+  /// What the site traffic counted (§1.8). Like [stats], it survives the
+  /// tables being dropped only as far as the idle instance: the counters are
+  /// the running colony's.
+  SiteStats get siteStats =>
+      _core?.siteStats ?? (_idleSiteStats ??= SiteStats());
+
+  /// E36 stage 1 (§0 Q4): 1 at the book slot of every site whose parking the
+  /// agents manage, so the road side's baking skips its lot cars. A slot past
+  /// the list's length reads 0, and so does every slot while the agents are
+  /// off. [agentManagedRev] moves whenever the list may have changed and
+  /// never goes back.
+  Uint8List get agentManaged => _core?.agentManaged ?? _noSites;
+  int get agentManagedRev => _core?.agentManagedRev ?? 0;
+
+  /// Every buffer the site half keeps from one sub-step to the next, by name
+  /// into [into], for the allocation gate (A13, §15.2): once warm, none of
+  /// them is ever replaced. Nothing is added while the tables do not exist.
+  void collectSiteBuffers(Map<String, Object> into) =>
+      _core?.collectSiteBuffers(into);
+
+  /// Sends parked car [car] away now: a one-way trip from the building it
+  /// stands at to a job drawn on the demand stream, departing from THAT car
+  /// (§17's hooks; A9's tandem shuffle). Returns the trip's handle, or
+  /// `SlotPool.none` when the car is gone, its building is not one trips can
+  /// leave, or a cap deferred it.
+  int debugDepart(int car) => _core?.debugDepart(car) ?? SlotPool.none;
 
   /// The measured delays new trips are priced by (§4.2), once built.
   EdgeDelayTable? get delays => _core?.delays;
@@ -389,13 +490,37 @@ class CityAgents {
   /// their way there drive on, and find it gone when they arrive (§4.7).
   void onLotCleared(String siteId) => _core?.buildings.clear(siteId);
 
-  /// The `'agents'` save block (E15): slice 1 keeps only the flag.
-  Map<String, Object?> toJson() => AgentsCodec.encode(enabled: _enabled);
+  /// The `'agents'` save block (E15): the flag, and from T4a the parked cars
+  /// by `(siteId, stallKey)` (§14.1, §4 Q2). Vehicles in flight and stall
+  /// reservations are never saved (§14.3), so a colony with nothing parked
+  /// writes the bytes it wrote before T4a.
+  ///
+  /// It runs no held tick of its own: a save is the colony as of the moment
+  /// it is taken, and running a tick half way through `CitySim.toJson` would
+  /// move the colony under the fields already written. A host that holds
+  /// ticks calls [flushHeld] before it saves (§5.7).
+  Map<String, Object?> toJson() {
+    final core = _core;
+    if (core == null) return AgentsCodec.encode(enabled: _enabled);
+    return AgentsCodec.encode(
+        enabled: _enabled, cars: core.parked, world: core);
+  }
 
   /// Restores the save block [json] (E16), after the colony itself is
-  /// restored. No block, or one this build cannot read: agents off.
+  /// restored. No block, or one this build cannot read: agents off. The cars
+  /// are only STORED here — lot ids and site plans exist from the first
+  /// advance on, and that is where they are placed (§14.4's load order).
   void restore(Object? json) {
-    enabled = AgentsCodec.enabledOf(json) ?? false;
+    final saved = AgentsCodec.decode(json);
+    enabled = saved?.enabled ?? false;
+    _saved = enabled && saved != null && saved.cars.count > 0 ? saved : null;
+  }
+
+  /// The cars a load is still holding, taken once: `null` after.
+  SavedAgents? takeSaved() {
+    final s = _saved;
+    _saved = null;
+    return s;
   }
 
   // ---- Development hooks ------------------------------------------------------
@@ -543,7 +668,16 @@ class AgentLaneSpeeds {
 }
 
 /// Everything an enabled colony's agents hold, built at its first advance.
-class _Core implements PathResolver, PathSink, VehicleSink {
+class _Core
+    implements
+        PathResolver,
+        PathSink,
+        VehicleSink,
+        SpawnSink,
+        SiteChangeSink,
+        SiteSink,
+        CarSaveSource,
+        CarRestoreSink {
   _Core(this.agents)
       : city = agents.city,
         source = CityNetSource(agents.city),
@@ -565,6 +699,19 @@ class _Core implements PathResolver, PathSink, VehicleSink {
       stats: stats,
       rng: rng.fork(_demandSalt),
     );
+    siteMover = SiteMover(table, siteCols, sites, arbiter, events, siteStats);
+    // A back-out's footprint is an obstacle to the road's own followers
+    // (§7.4): bound once, and never asked while no back-out holds one.
+    mover.obstacles = siteMover;
+    // What stands behind what on a tandem pad is the PLAN's to know, so the
+    // car table asks the sites (parked_cars.dart, §7.5).
+    parked.tandem = _TandemPlan(sites);
+    planner
+      ..cars = parked
+      ..sites = sites
+      ..kerbs = kerbs
+      ..stalls = _StallSpawns(siteMover);
+    commutes.cars = parked;
   }
 
   final CityAgents agents;
@@ -585,6 +732,62 @@ class _Core implements PathResolver, PathSink, VehicleSink {
   late final VehicleMover mover;
   late final TripPlanner planner;
   late final CommuteSynth commutes;
+
+  // ---- The sites (T4a) --------------------------------------------------------
+
+  final SiteTable sites = SiteTable();
+  final SiteVehicles siteCols = SiteVehicles(AgentTuning.maxVehicles);
+  final AccessEventLog events = AccessEventLog();
+  final SiteStats siteStats = SiteStats();
+  final ParkedCarTable parked = ParkedCarTable();
+  final KerbTable kerbs = KerbTable();
+  late final SiteMover siteMover;
+
+  /// Per site slot: 1 where the agents manage that site's parking (E36
+  /// stage 1), and a revision that moves with it.
+  Uint8List agentManaged = Uint8List(0);
+  int agentManagedRev = 0;
+
+  /// Whether this colony has any site state at all to fold into [digest]:
+  /// a site row, a car parked anywhere, a kerb slot claimed, a vehicle with
+  /// site business. Until it has, the digest is exactly what it was before
+  /// T4a, so a colony without plans agrees with its own old history.
+  bool _siteState = false;
+
+  /// Per vehicle slot, for a car bound for a kerb slot ahead (D17 step 2):
+  /// the building it is parking for. `SiteVehicles.row` is a SITE row and
+  /// stays −1 for such a car, because a sync's snap and evacuate match on
+  /// that column and would take a building slot for one of their own.
+  Int32List _kerbFor = Int32List(0);
+
+  /// Kerb cars caught by a rebuild, with the pose they had on the graph that
+  /// is going: four doubles each (east, north, dirE, dirN). Re-snapped onto
+  /// the new kerbs by §14.1's rule once they are laid.
+  Int32List _movedCar = Int32List(0);
+  Float64List _movedPose = Float64List(0);
+  int _movedCount = 0;
+
+  /// Owners whose held site route a rebuild could not carry (§7.6): asked
+  /// for again AFTER the remap, because the mover puts their cars back on
+  /// their stalls as it goes.
+  Int32List _siteReplan = Int32List(16);
+  int _siteReplanCount = 0;
+
+  /// Cars the arrival gate gave up on this sub-step, four ints each: the
+  /// handle, the building it was parking for, and the car's opaque owner and
+  /// kind. See [gateGaveUp].
+  Int32List _gaveUp = Int32List(0);
+  int _gaveUpCount = 0;
+  static const int _gaveUpStride = 4;
+
+  /// The saved cars being placed now, so the codec's sink can read their
+  /// columns; null outside a restore.
+  SavedAgents? _restoring;
+
+  /// Scratch: the two points a kerb pose is read from, and the pose itself.
+  /// Nothing here is re-entered, so one of each is enough (§15.2).
+  final Float64List _pt = Float64List(8);
+  final Float64List _pose4 = Float64List(4);
 
   LaneGraph? lg;
   RouteCost? cost;
@@ -635,10 +838,92 @@ class _Core implements PathResolver, PathSink, VehicleSink {
     }
   }
 
-  /// The network and the buildings brought up to the colony as it stands.
+  /// The network, the buildings and the site networks brought up to the
+  /// colony as it stands, in that order: a building's access rows come from
+  /// its plan's joins, and a site row hangs on a building slot (§2).
   void prime() {
+    _ensureCols();
     _poll();
     if (_buildingsMoved()) _syncBuildings();
+    if (sites.needsSync(agents.plans, lg)) _syncSites();
+    // The cars a load is holding go down once there are rows to put them on,
+    // and not before: taken only when there is a network to place them on,
+    // so a colony primed without one keeps them for the advance that has one.
+    if (lg != null) {
+      final saved = agents.takeSaved();
+      if (saved != null) _placeSavedCars(saved);
+    }
+  }
+
+  /// A test put other plans in front of the book ([CityAgents.debugPlans]):
+  /// every building resolves its access again at the next prime.
+  void plansReplaced() => _syncGraph = null;
+
+  // ---- The site networks (§7.6, D49) ------------------------------------------
+
+  /// One site sync: the rows, then the mover relinked onto the renumbered
+  /// site elements, then the kerb masks the new plans imply.
+  void _syncSites() {
+    sites.sync(agents.plans, buildings, lg, this);
+    siteMover.relink();
+    siteStats.limboRows = sites.rowsLimboed;
+    if (sites.highWater > 0) _siteState = true;
+    _publishManaged();
+    _remask();
+  }
+
+  /// E36 stage 1: the book slot of every live, current site with stalls the
+  /// agents park on. Rebuilt on a sync, and only published when it changed,
+  /// so the road side re-bakes nothing it need not.
+  void _publishManaged() {
+    var top = -1;
+    for (var r = 0; r < sites.highWater; r++) {
+      if (!sites.isRowLive(r) || sites.lotCap[r] <= 0) continue;
+      if (sites.bookSlot[r] > top) top = sites.bookSlot[r];
+    }
+    final n = top + 1;
+    final to = Uint8List(n);
+    for (var r = 0; r < sites.highWater; r++) {
+      if (!sites.isRowLive(r) || sites.lotCap[r] <= 0) continue;
+      final slot = sites.bookSlot[r];
+      if (slot >= 0 && slot < n) to[slot] = 1;
+    }
+    final was = agentManaged;
+    if (was.length == n) {
+      var same = true;
+      for (var i = 0; i < n && same; i++) {
+        same = was[i] == to[i];
+      }
+      if (same) return;
+    }
+    agentManaged = to;
+    agentManagedRev++;
+  }
+
+  /// The kerb slots' masks, taken from the road side's cuts over the plans
+  /// running now (§0 Q1), and whatever that displaced. The colony keeps no
+  /// graph history, so a site still resolved against an older graph
+  /// contributes no cut — which is what `KerbCuts.canonicalOf` leaves out
+  /// without a `roadIdsAt`.
+  void _remask() {
+    final g = lg;
+    if (g == null) return;
+    kerbs.applyMasks(sites, g, CutKerbMask.of(g, agents.plans));
+    for (var i = 0; i < kerbs.relocateCount; i++) {
+      final car = kerbs.relocateCar(i);
+      if (!parked.isLive(car)) continue;
+      final j = SlotPool.slotOf(car);
+      final was = parked.slot[j];
+      if (was >= 0) kerbs.release(was);
+      if (_toKerb(car, parked.building[j])) {
+        siteStats.relocates++;
+      } else {
+        parked.moveToGarage(car);
+        siteStats.garaged++;
+        siteStats.siteGarages++;
+      }
+    }
+    kerbs.clearRelocations();
   }
 
   /// A delay buffer published now, outside the epoch, and handed to the
@@ -652,6 +937,9 @@ class _Core implements PathResolver, PathSink, VehicleSink {
   /// One sub-step, in §5.2's order.
   void _subStep() {
     final now = clock.timeUs;
+    // This sub-step's access events, and nothing older: the property test
+    // reads the log after every sub-step (§5.5).
+    events.beginStep();
     commutes.nowUs = now;
     planner.beginStep(now);
     if (now % syncUs == 0) _syncBuildings();
@@ -662,8 +950,11 @@ class _Core implements PathResolver, PathSink, VehicleSink {
     if (pending == null) {
       queue.pump(AgentTuning.pathExpansionsPerStep, this, this);
     }
-    // 3–5. The vehicles, their arrivals and despawns.
+    // 3–5. The vehicles, their arrivals and despawns; then the cars inside
+    // sites, which an arrival this very sub-step may have handed to the gate.
     mover.step(now, this);
+    siteMover.step(now, this, this);
+    if (_gaveUpCount > 0) _drainGiveUps();
     if (clock.onWholeSecond) table.compactRoutes();
     // 6. The edge delays: this sub-step's observations; and at the
     // congestion epoch the flow windows, the lane speeds and a fresh delay
@@ -683,9 +974,17 @@ class _Core implements PathResolver, PathSink, VehicleSink {
     // timing is the views' — so two colonies fed the same ticks publish the
     // same answers at the same sub-step (§17.4).
     agents.readout.tick(picture: picture);
-    // 7. The frame.
+    // 7. The frame, with the site columns the wire draws in-site cars from
+    // (package F reads them; until then they ride along unread).
     frames.publish(table,
-        timeUs: now, worldEpochS: agents.worldEpochS, graphRev: graphRev);
+        timeUs: now,
+        worldEpochS: agents.worldEpochS,
+        graphRev: graphRev,
+        site: siteCols,
+        sitesRev: sites.syncedSitesRev);
+    // Last: a plan held in limbo is freed in the sub-step its last car left
+    // (§7.6 row 3).
+    sites.endStep();
   }
 
   // ---- The network (§3.8) -------------------------------------------------------
@@ -730,6 +1029,12 @@ class _Core implements PathResolver, PathSink, VehicleSink {
   /// the new ids at once; a refreshed one keeps every id.
   void _swap(LaneGraph next, {required bool rebuild}) {
     final old = lg;
+    // Kerb slots are laid off the lane graph and nothing else, so a rebuild
+    // numbers every one of them afresh: the cars standing on them are
+    // remembered by their POSE while the old graph can still say where that
+    // is, and put back by §14.1's rule once the new kerbs are laid.
+    final relayKerbs = old == null || !next.sharesStructureWith(old);
+    if (relayKerbs && old != null) _captureKerbCars(old);
     final rm = rebuild &&
             old != null &&
             (table.liveCount > 0 || planner.waiting > 0)
@@ -741,6 +1046,16 @@ class _Core implements PathResolver, PathSink, VehicleSink {
       mover.bind(next);
     }
     lg = next;
+    siteMover.bind(next);
+    if (relayKerbs) {
+      kerbs.bind(next);
+      _remask();
+      _replaceKerbCars();
+    }
+    // Cars still inside a site hold a road route they have not started: it
+    // is carried across as a waiting route is (§7.6), and what could not be
+    // carried is planned again from the site's out-joins.
+    if (rm != null) _remapSiteHeld(rm);
     final c = cost = RouteCost(next);
     queue.bind(c);
     stats.bind(next);
@@ -832,11 +1147,29 @@ class _Core implements PathResolver, PathSink, VehicleSink {
     t.relinkAll();
     _separate(next);
     for (var sl = 0; sl < hw; sl++) {
-      if (_rmOp[sl] == _opHold && t.isSlotLive(sl)) {
-        stats.replans++;
-        _ask(t.handleOf(sl), kReplanTag);
-      }
+      if (_rmOp[sl] != _opHold || !t.isSlotLive(sl)) continue;
+      // A car held at an arrival gate has already arrived: its route is
+      // spent, and the edit only moved the lane it waits in. It waits there
+      // on the new lane (the gate reads the lane, not the route); a re-plan
+      // would send it to the building it is standing at.
+      if (siteCols.phase[sl] == SitePhase.gateHeld.index) continue;
+      stats.replans++;
+      _ask(t.handleOf(sl), kReplanTag);
     }
+  }
+
+  /// §7.6 for the cars waiting INSIDE sites: their held road routes carried
+  /// across [rm], and whoever lost one asked for a leg again once the mover
+  /// has put its car back on a stall (which it does as it goes, so the
+  /// re-requests wait until it is done).
+  void _remapSiteHeld(RouteRemapper rm) {
+    _siteReplanCount = 0;
+    siteMover.remapHeld(rm, this, this);
+    for (var i = 0; i < _siteReplanCount; i++) {
+      stats.replans++;
+      commutes.replanFromSite(_siteReplan[i], kSiteReplanTag);
+    }
+    _siteReplanCount = 0;
   }
 
   /// Settles [sl] by the remap's outcome [st]: its new route and place, a
@@ -1007,16 +1340,21 @@ class _Core implements PathResolver, PathSink, VehicleSink {
 
   // ---- Buildings (§2.6) -------------------------------------------------------------
 
+  /// A building's access rows are its PLAN's joins (§7.3), so the plans
+  /// moving is a reason to sync as much as the plat moving is:
+  /// `SiteTable.needsSync` is that question, `sitesRev` and the chunks'
+  /// identities both.
   bool _buildingsMoved() =>
       city.layout.version != _syncLayout ||
       city.parcelBuildings.length != _syncPlaced ||
       city.grownParcels.length != _syncGrown ||
       city.utils.length != _syncUtils ||
       city.grown.length != _syncCells ||
-      !identical(lg, _syncGraph);
+      !identical(lg, _syncGraph) ||
+      sites.needsSync(agents.plans, lg);
 
   void _syncBuildings() {
-    buildings.sync(city, lg);
+    buildings.sync(city, lg, agents.plans);
     _syncLayout = city.layout.version;
     _syncPlaced = city.parcelBuildings.length;
     _syncGrown = city.grownParcels.length;
@@ -1031,8 +1369,15 @@ class _Core implements PathResolver, PathSink, VehicleSink {
   bool resolve(PathRequest request, PathEnds ends) {
     final g = lg;
     if (g == null) return false;
-    if (request.tag == kTripTag) {
-      if (!buildings.addOrigins(request.origin, ends)) return false;
+    if (request.tag == kTripTag || request.tag == kSiteReplanTag) {
+      // A trip leaves from its own parked car (§7.4 Departure): a car on a
+      // lot stall leaves by its site's out-joins, which are the building's
+      // access rows; one at a kerb leaves from its SLOT, in the lane that
+      // kerb serves, and nowhere else.
+      if (!_carOrigin(request.requester, g, ends) &&
+          !buildings.addOrigins(request.origin, ends)) {
+        return false;
+      }
     } else {
       // A vehicle on the road: from the lane it is in, where it is now —
       // read at the moment the search starts, so a search restarted after
@@ -1048,9 +1393,26 @@ class _Core implements PathResolver, PathSink, VehicleSink {
     return buildings.addGoals(request.dest, ends);
   }
 
+  /// The origin of [commuter]'s trip when its car stands at a KERB: that
+  /// slot's `(edge, T)`, in the lane beside it. False for a trip with no car,
+  /// or one whose car is on a stall or garaged — those leave from the
+  /// building's own access rows.
+  bool _carOrigin(int commuter, LaneGraph g, PathEnds ends) {
+    final car = commutes.carOf(commuter);
+    if (car < 0 || !parked.isLive(car)) return false;
+    final i = SlotPool.slotOf(car);
+    if (parked.where[i] != CarWhere.kerb.index) return false;
+    final slot = parked.slot[i];
+    if (slot < 0 || slot >= kerbs.slotCount) return false;
+    final lane = kerbs.slotLane(slot);
+    if (lane < 0 || lane >= g.laneCount) return false;
+    ends.addOrigin(g.laneEdge[lane], kerbs.slotT(slot), lane: lane);
+    return true;
+  }
+
   @override
   void onPath(PathRequest request, PathOutcome outcome, PlannedRoute route) {
-    if (request.tag == kTripTag) {
+    if (request.tag == kTripTag || request.tag == kSiteReplanTag) {
       commutes.onPath(request, outcome, route, clock.timeUs);
       return;
     }
@@ -1080,7 +1442,7 @@ class _Core implements PathResolver, PathSink, VehicleSink {
         // No way on to where its building is met now: it has come as near
         // as its route could bring it, and arrives where it stopped.
         table.state[sl] = VehicleState.leaving.index;
-        _arrive(h);
+        _arrive(h, commutes.destOfVehicle(h));
       } else {
         mover.despawn(h, DespawnReason.edit, this);
       }
@@ -1103,7 +1465,14 @@ class _Core implements PathResolver, PathSink, VehicleSink {
   @override
   void arrived(int handle) {
     final sl = SlotPool.slotOf(handle);
-    if (_accessMoved(sl, commutes.destOfVehicle(handle))) {
+    // A car sent on the one-element leg to a kerb slot ahead (D17 step 2):
+    // it has reached the slot it reserved, and it parks there.
+    if (siteCols.phase[sl] == SitePhase.kerbBound.index) {
+      _parkAtKerb(handle);
+      return;
+    }
+    final dest = commutes.destOfVehicle(handle);
+    if (_accessMoved(sl, dest)) {
       // Its building stands, but is no longer met where the route stops
       // (D36's `siteRetarget`): an edit re-cut its lot while it drove, and
       // the route, locked, was carried to the old stop. An appended leg
@@ -1111,23 +1480,197 @@ class _Core implements PathResolver, PathSink, VehicleSink {
       // there. Not a re-plan: the route it drove was never edited.
       table.state[sl] = _dwelling;
       stats.appendedLegs++;
+      siteStats.siteRetargets++;
       _ask(handle, kSiteRetargetTag);
       return;
     }
-    _arrive(handle);
+    _arrive(handle, dest);
   }
 
-  /// [handle] has arrived where its route stopped: the trip's leg is done —
-  /// or, its building found gone, an appended leg takes it home (§4.7).
-  void _arrive(int handle) {
+  /// [handle] has arrived where its route stopped: the trip's leg is done
+  /// and its car looks for somewhere to stand (D17) — or, its building found
+  /// gone, an appended leg takes it home (§4.7).
+  ///
+  /// Everything the parking needs of the trip is read BEFORE
+  /// `CommuteSynth.arrived`, which clocks the commuter in and lets go of its
+  /// vehicle: whose car this is, and which way it was going.
+  void _arrive(int handle, int dest) {
     stats.arrived++;
+    final sl = SlotPool.slotOf(handle);
+    final commuter = table.owner[sl];
+    final homeward = table.purpose[sl] == TripPurpose.homeward.index;
+    final home = commutes.homeOf(commuter);
     final back = commutes.arrived(handle, clock.timeUs);
-    if (back < 0) return;
-    // An appended leg (§4.6): it waits at its stop, in its lane, while the
-    // way on from there is found.
-    table.state[SlotPool.slotOf(handle)] = _dwelling;
-    stats.appendedLegs++;
-    _ask(handle, kRetargetTag);
+    if (back >= 0) {
+      // An appended leg (§4.6): it waits at its stop, in its lane, while the
+      // way on from there is found.
+      table.state[sl] = _dwelling;
+      stats.appendedLegs++;
+      _ask(handle, kRetargetTag);
+      return;
+    }
+    _park(handle, dest, commuter, homeward ? -1 : home, homeward);
+  }
+
+  // ---- Parking (D17 steps 1–2, §7.5) ------------------------------------------
+
+  /// Where [handle]'s car stands from here. [commuter] is whose trip it was,
+  /// [carOwner] and [homeward] the opaque owner the car takes: a car left at
+  /// work belongs to the commuter that drove it, and names the home it came
+  /// from; a car brought home joins that home's pool, which is what the next
+  /// commute out of it takes (§0 Q3).
+  void _park(int handle, int dest, int commuter, int carOwner, bool homeward) {
+    final g = lg;
+    final sl = SlotPool.slotOf(handle);
+    final kind = homeward ? CarOwnerKind.homePool : CarOwnerKind.commuter;
+    siteCols.owner[sl] = carOwner;
+    siteCols.ownerKind[sl] = kind.index;
+    if (g == null || !buildings.isLive(dest)) {
+      _garageFor(handle, dest, carOwner, kind, commuter);
+      return;
+    }
+    // Step 1: the destination's own stalls, reserved at the arrival gate.
+    final row = sites.rowOfBuilding(SlotPool.slotOf(dest));
+    final el = table.elem[sl];
+    if (row >= 0 && el >= 0 && el < g.laneCount) {
+      final join = _joinOfArrival(row, g.laneEdge[el], table.destS[sl]);
+      if (join >= 0) {
+        final stall = sites.firstFreeStall(row, join);
+        if (stall >= 0 && sites.reserve(row, stall, handle)) {
+          table.state[sl] = VehicleState.parkingSearch.index;
+          siteMover.holdAtGate(handle, row, join, stall);
+          // `holdAtGate` clears the site columns first, so the car's owner
+          // goes back on after it.
+          siteCols.owner[sl] = carOwner;
+          siteCols.ownerKind[sl] = kind.index;
+          _siteState = true;
+          return;
+        }
+      }
+    }
+    _kerbOrGarage(handle, dest, carOwner, kind, commuter);
+  }
+
+  /// Step 2: the first free, unmasked kerb slot ahead on the arrival edge,
+  /// reserved bindingly, and a one-element leg to it — the same lane, a new
+  /// stop, counted as an appended leg (§0 Q6). Steps 3–5 are T4b's, so what
+  /// this cannot place is garaged.
+  void _kerbOrGarage(int handle, int dest, int carOwner, CarOwnerKind kind,
+      int commuter) {
+    final g = lg;
+    final sl = SlotPool.slotOf(handle);
+    final el = g == null ? -1 : table.elem[sl];
+    if (g != null && el >= 0 && el < g.laneCount) {
+      final slot = kerbs.reserveAhead(el, table.destS[sl].toDouble(), handle);
+      if (slot >= 0) {
+        _one[0] = el;
+        if (table.setRoute(sl, _one, 1, destS: kerbs.slotT(slot))) {
+          table.state[sl] = _driving;
+          table.stuckUs[sl] = 0;
+          table.movedM[sl] = 0;
+          table.edgeEnterUs[sl] = -1;
+          stats.appendedLegs++;
+          siteCols.clear(sl);
+          siteCols.phase[sl] = SitePhase.kerbBound.index;
+          siteCols.claim[sl] = slot;
+          siteCols.owner[sl] = carOwner;
+          siteCols.ownerKind[sl] = kind.index;
+          _ensureCols();
+          _kerbFor[sl] = dest;
+          _siteState = true;
+          return;
+        }
+        kerbs.release(slot);
+      }
+    }
+    _garageFor(handle, dest, carOwner, kind, commuter);
+  }
+
+  /// [handle] has reached the kerb slot it reserved: its car stands there and
+  /// its vehicle row goes.
+  void _parkAtKerb(int handle) {
+    final sl = SlotPool.slotOf(handle);
+    final slot = siteCols.claim[sl];
+    final dest = _kerbFor.length > sl ? _kerbFor[sl] : -1;
+    final b = buildings.isLive(dest) ? SlotPool.slotOf(dest) : -1;
+    final car = slot < 0
+        ? SlotPool.none
+        : parked.parkKerb(
+            building: b,
+            edge: kerbs.slotEdge(slot),
+            slot: slot,
+            side: kerbs.slotSide(slot),
+            ownerKind: CarOwnerKind.values[siteCols.ownerKind[sl]],
+            owner: siteCols.owner[sl],
+            kind: table.kind[sl],
+            variant: table.variant[sl]);
+    if (car != SlotPool.none) {
+      kerbs.occupy(slot, car);
+      siteStats.parkedKerb++;
+      _giveCar(table.owner[sl], car);
+    } else if (slot >= 0) {
+      kerbs.release(slot);
+    }
+    _siteState = true;
+    _freeParked(handle, sl);
+  }
+
+  /// Nowhere would take it: the car leaves the world, still its owner's, and
+  /// comes back at the building's access when that owner drives again
+  /// (§7.5 D17 step 5, §5.6).
+  void _garageFor(int handle, int dest, int carOwner, CarOwnerKind kind,
+      int commuter) {
+    final sl = SlotPool.slotOf(handle);
+    final car = parked.garage(
+        building: buildings.isLive(dest) ? SlotPool.slotOf(dest) : -1,
+        ownerKind: kind,
+        owner: carOwner,
+        kind: table.kind[sl],
+        variant: table.variant[sl]);
+    if (car != SlotPool.none) {
+      siteStats.garaged++;
+      _giveCar(commuter, car);
+      _siteState = true;
+    }
+    _freeParked(handle, sl);
+  }
+
+  /// The vehicle row of a car that has finished parking: off the road, its
+  /// queued requests dropped, its site columns emptied.
+  void _freeParked(int handle, int sl) {
+    queue.cancel(_vehicleRequester(handle));
+    arbiter.release(sl);
+    siteCols.clear(sl);
+    if (_kerbFor.length > sl) _kerbFor[sl] = -1;
+    table.free(handle);
+  }
+
+  /// [commuter] keeps [car], so its next leg departs from where it stands.
+  void _giveCar(int commuter, int car) => commutes.setCar(commuter, car);
+
+  /// The plan-local in-join of site [row] a car that stopped at travel arc
+  /// [t] of [edge] arrived at, or −1 (§7.4 step 2; V4 makes it unique).
+  int _joinOfArrival(int row, int edge, double t) {
+    final g = lg;
+    if (g == null || !sites.isRowLive(row)) return -1;
+    final p = sites.plan[row];
+    if (p == null) return -1;
+    final rg = g.graph;
+    var best = -1;
+    var bestM = kSiteRetargetM;
+    for (var j = 0; j < p.joinCount; j++) {
+      if (!p.joinCanIn(j)) continue;
+      final piece = p.joinPiece(j);
+      if (piece < 0 || piece >= rg.pieceCount) continue;
+      if (rg.pieceFwdEdge[piece] != edge && rg.pieceBwdEdge[piece] != edge) {
+        continue;
+      }
+      final d = (g.travelArc(edge, p.joinRoadS(j)) - t).abs();
+      if (d > bestM) continue;
+      best = j;
+      bestM = d;
+    }
+    return best;
   }
 
   /// Whether the vehicle in [sl], at its stop, stopped short of or past
@@ -1155,7 +1698,565 @@ class _Core implements PathResolver, PathSink, VehicleSink {
         stats.despawnEdit++;
     }
     queue.cancel(_vehicleRequester(handle));
+    final sl = SlotPool.slotOf(handle);
+    final commuter = table.owner[sl];
+    final dest = commutes.destOfVehicle(handle);
+    final home = commutes.homeOf(commuter);
+    final kind = table.kind[sl], variant = table.variant[sl];
+    _releaseSite(sl);
     commutes.despawned(handle, clock.timeUs);
+    // §5.6: a citizen lost on the way is at their destination all the same,
+    // and their car is GARAGED — never dropped, or the colony would quietly
+    // lose a car on every jam and the home pools would drain.
+    if (!commutes.isLive(commuter) || commutes.carOf(commuter) >= 0) return;
+    final car = parked.garage(
+        building: buildings.isLive(dest) ? SlotPool.slotOf(dest) : -1,
+        ownerKind: CarOwnerKind.commuter,
+        owner: home,
+        kind: kind,
+        variant: variant);
+    if (car == SlotPool.none) return;
+    siteStats.garaged++;
+    _siteState = true;
+    _giveCar(commuter, car);
+  }
+
+  /// Whatever the vehicle in [sl] held of a site goes back: a stall it had
+  /// reserved at a gate, a kerb slot it was driving to. What is inside a
+  /// site is the mover's, and a sync's evacuate or snap answers for it.
+  void _releaseSite(int sl) {
+    final ph = siteCols.phase[sl];
+    if (ph == SitePhase.none.index) return;
+    final claim = siteCols.claim[sl];
+    if (ph == SitePhase.kerbBound.index) {
+      if (claim >= 0) kerbs.release(claim);
+    } else {
+      final row = siteCols.row[sl];
+      if (claim >= 0 && sites.isRowLive(row)) sites.unreserve(row, claim);
+    }
+    siteCols.clear(sl);
+    if (_kerbFor.length > sl) _kerbFor[sl] = -1;
+  }
+
+  /// Room in the facade's own per-vehicle columns, as the tables grow.
+  void _ensureCols() {
+    final n = table.capacity;
+    if (_kerbFor.length >= n) return;
+    _kerbFor = Int32List(n)
+      ..fillRange(0, n, -1)
+      ..setRange(0, _kerbFor.length, _kerbFor);
+  }
+
+  // ---- The spawn sink, for the site mover's lost routes ------------------------
+
+  @override
+  void spawned(int owner, int handle) => commutes.spawned(owner, handle);
+
+  @override
+  void replanWaiting(int owner) {
+    if (_siteReplanCount >= _siteReplan.length) {
+      final n = _siteReplan.length * 2;
+      _siteReplan = Int32List(n)..setRange(0, _siteReplanCount, _siteReplan);
+    }
+    _siteReplan[_siteReplanCount++] = owner;
+  }
+
+  // ---- The site mover's sink (§7.4, §7.5) -------------------------------------
+
+  @override
+  void parkedInStall(int handle, int row, int stall) {
+    final sl = SlotPool.slotOf(handle);
+    final ownerKind = CarOwnerKind.values[siteCols.ownerKind[sl]];
+    final owner = siteCols.owner[sl];
+    final commuter = table.owner[sl];
+    final b = sites.isRowLive(row) ? sites.building[row] : -1;
+    var car = SlotPool.none;
+    if (stall >= 0 && sites.isRowLive(row)) {
+      final p = sites.plan[row];
+      final key = p != null && stall < p.stallCount ? p.stallKey(stall) : 0;
+      car = parked.parkLot(
+          building: b,
+          row: row,
+          stall: stall,
+          stallKey: key,
+          ownerKind: ownerKind,
+          owner: owner,
+          kind: table.kind[sl],
+          variant: table.variant[sl]);
+      if (car != SlotPool.none) {
+        sites.occupy(row, stall, car);
+        siteStats.parkedLot++;
+      } else {
+        sites.unreserve(row, stall);
+      }
+    }
+    if (car == SlotPool.none) {
+      // The mover had nowhere to put it (§7.6 row 1's last resort), or the
+      // car table is full: out of the world, still its owner's.
+      car = parked.garage(
+          building: b,
+          ownerKind: ownerKind,
+          owner: owner,
+          kind: table.kind[sl],
+          variant: table.variant[sl]);
+      if (car != SlotPool.none) siteStats.garaged++;
+    }
+    if (car != SlotPool.none) _giveCar(commuter, car);
+    _siteState = true;
+    _freeParked(handle, sl);
+  }
+
+  @override
+  void gateGaveUp(int handle) {
+    // The lot was full, or thirty seconds refused on the throat's room: D17
+    // step 2 from where it stands. The mover empties this car's site columns
+    // the instant this returns — a slot handed out again must never inherit
+    // a dead car's business — so what step 2 needs of it is taken now and
+    // the step itself runs after the mover's walk ([_drainGiveUps]).
+    if (!table.isLive(handle)) return;
+    final sl = SlotPool.slotOf(handle);
+    if (_gaveUpCount * _gaveUpStride >= _gaveUp.length) {
+      final n = _gaveUp.isEmpty ? 4 * _gaveUpStride : _gaveUp.length * 2;
+      _gaveUp = Int32List(n)
+        ..setRange(0, _gaveUpCount * _gaveUpStride, _gaveUp);
+    }
+    final o = _gaveUpCount * _gaveUpStride;
+    _gaveUp[o] = handle;
+    _gaveUp[o + 1] = commutes.destOf(table.owner[sl]);
+    _gaveUp[o + 2] = siteCols.owner[sl];
+    _gaveUp[o + 3] = siteCols.ownerKind[sl];
+    _gaveUpCount++;
+  }
+
+  /// D17 step 2 for everyone the gate gave up on this sub-step.
+  void _drainGiveUps() {
+    final n = _gaveUpCount;
+    _gaveUpCount = 0;
+    for (var i = 0; i < n; i++) {
+      final o = i * _gaveUpStride;
+      final h = _gaveUp[o];
+      if (!table.isLive(h)) continue;
+      final sl = SlotPool.slotOf(h);
+      table.state[sl] = _driving;
+      _kerbOrGarage(h, _gaveUp[o + 1], _gaveUp[o + 2],
+          CarOwnerKind.values[_gaveUp[o + 3]], table.owner[sl]);
+    }
+  }
+
+  @override
+  void exited(int handle) {
+    // It is the road's again: nothing of ours is left to give back.
+  }
+
+  @override
+  bool shuffleBlocker(int handle, int row, int blocker) {
+    if (!sites.isRowLive(row)) return false;
+    final at = sites.stallBase[row] + blocker;
+    if (at < 0 || at >= sites.stallCar.length) return false;
+    final car = sites.stallCar[at];
+    if (car < 0 || !parked.isLive(car)) return false;
+    if (!_toKerb(car, sites.building[row])) return false;
+    sites.vacate(row, blocker);
+    return true;
+  }
+
+  // ---- What a site sync changed (§7.6) ----------------------------------------
+
+  @override
+  void siteRevChanged(int oldRow, int newRow) {
+    _remapParked(oldRow, newRow);
+    siteMover.snap(oldRow, newRow);
+  }
+
+  @override
+  void siteLostRole(int oldRow, int newRow) {
+    if (newRow >= 0) {
+      _remapParked(oldRow, newRow);
+      siteMover.snap(oldRow, newRow);
+      return;
+    }
+    // Kerbside now: there are no stalls left to stand on at all.
+    _clearParked(oldRow);
+    siteMover.evacuate(oldRow);
+  }
+
+  @override
+  void siteGone(int oldRow) {
+    // The movers carry on in the plan held in limbo; the parked cars have
+    // nothing to stand on and go at once (§7.6 row 3).
+    siteMover.evacuate(oldRow);
+    _clearParked(oldRow, garageOnly: true);
+  }
+
+  /// Every car parked on [oldRow] onto [newRow], by its `stallKey` (C-19):
+  /// the key's own stall where it survived, else the nearest free one, else
+  /// garaged — each of the last two counted.
+  ///
+  /// In TWO passes, and that is the whole of it: a car whose key survived
+  /// has a place of its own, and a car whose key went must not be given that
+  /// place first simply because it came earlier in the table.
+  void _remapParked(int oldRow, int newRow) {
+    for (var pass = 0; pass < 2; pass++) {
+      for (var i = 0; i < parked.pool.highWater; i++) {
+        if (!parked.pool.isSlotLive(i)) continue;
+        if (parked.where[i] != CarWhere.lot.index) continue;
+        if (parked.row[i] != oldRow) continue;
+        final key = parked.stallKey[i];
+        var stall = sites.stallIndexOfKey(newRow, key);
+        if (stall >= 0 && sites.stallTaken(newRow, stall)) stall = -1;
+        if (pass == 0) {
+          if (stall < 0) continue;
+        } else {
+          stall = _nearestFreeStall(newRow, key);
+        }
+        final car = parked.pool.handleOf(i);
+        if (sites.isRowLive(oldRow)) sites.vacate(oldRow, parked.stall[i]);
+        if (stall < 0) {
+          parked.moveToGarage(car);
+          siteStats.garaged++;
+          siteStats.siteGarages++;
+          continue;
+        }
+        final p = sites.plan[newRow];
+        parked.moveToStall(
+            car, newRow, stall, p == null ? key : p.stallKey(stall));
+        sites.occupy(newRow, stall, car);
+        if (pass == 1) siteStats.relocates++;
+      }
+    }
+  }
+
+  /// Every car parked on [oldRow] off it: to a kerb slot near its building
+  /// where one is free, else garaged. [garageOnly]: the site went, and a
+  /// kerb beside a demolished lot is no place to leave it (§7.6 row 3).
+  void _clearParked(int oldRow, {bool garageOnly = false}) {
+    for (var i = 0; i < parked.pool.highWater; i++) {
+      if (!parked.pool.isSlotLive(i)) continue;
+      if (parked.where[i] != CarWhere.lot.index) continue;
+      if (parked.row[i] != oldRow) continue;
+      final car = parked.pool.handleOf(i);
+      if (sites.isRowLive(oldRow)) sites.vacate(oldRow, parked.stall[i]);
+      if (!garageOnly && _toKerb(car, parked.building[i])) {
+        siteStats.relocates++;
+        continue;
+      }
+      parked.moveToGarage(car);
+      siteStats.garaged++;
+      siteStats.siteGarages++;
+    }
+  }
+
+  /// The free stall of [row] whose key is nearest [key]. Stall keys are the
+  /// plan's frame lattice (V10), so a near key is a near place — which is as
+  /// close to §14.1's "nearest free stall by distance" as a caller that no
+  /// longer holds the old geometry can come.
+  int _nearestFreeStall(int row, int key) {
+    if (!sites.isRowLive(row)) return -1;
+    final p = sites.plan[row];
+    if (p == null) return -1;
+    var best = -1;
+    var bestD = 0;
+    for (var s = 0; s < sites.stallCount[row]; s++) {
+      if (sites.stallTaken(row, s)) continue;
+      final d = (p.stallKey(s) - key).abs();
+      if (best < 0 || d < bestD) {
+        best = s;
+        bestD = d;
+      }
+    }
+    return best;
+  }
+
+  /// Moves [car] to a free kerb slot near where it stands, or near
+  /// [buildingSlot]'s access, and answers whether it found one (§7.5's
+  /// shuffle and relocations: a parked-car move, never a teleport onto the
+  /// carriageway).
+  bool _toKerb(int car, int buildingSlot) {
+    if (!parked.isLive(car)) return false;
+    final i = SlotPool.slotOf(car);
+    var edge = -1;
+    var t = 0.0;
+    var side = 1;
+    if (parked.where[i] == CarWhere.kerb.index && parked.slot[i] >= 0) {
+      final s = parked.slot[i];
+      edge = kerbs.slotEdge(s);
+      t = kerbs.slotT(s);
+      side = kerbs.slotSide(s);
+    } else {
+      final r = _accessRowOf(buildingSlot);
+      if (r < 0) return false;
+      edge = buildings.accEdge[r];
+      t = buildings.accT[r].toDouble();
+      side = buildings.accBits[r] & kAccLeft == 0 ? 1 : 0;
+    }
+    if (edge < 0) return false;
+    final slot = kerbs.nearestFree(edge, t, side);
+    if (slot < 0) return false;
+    parked.moveToKerb(car, kerbs.slotEdge(slot), slot, kerbs.slotSide(slot));
+    kerbs.occupy(slot, car);
+    _siteState = true;
+    return true;
+  }
+
+  /// The first access row of building slot [buildingSlot], or −1.
+  int _accessRowOf(int buildingSlot) {
+    if (buildingSlot < 0 || buildingSlot >= buildings.highWater) return -1;
+    if (!buildings.isSlotLive(buildingSlot)) return -1;
+    final base = BuildingTable.accRow0(buildingSlot);
+    for (var k = 0; k < buildings.accCount[buildingSlot]; k++) {
+      if (buildings.accEdge[base + k] >= 0) return base + k;
+    }
+    return -1;
+  }
+
+  // ---- Kerb cars across a rebuild, and across a save (§14.1) -------------------
+
+  /// The pose of a car standing on kerb slot [slot] of [g]: its lane's line
+  /// at the slot's arc, with the lane's own offset, and the way that lane
+  /// travels. No trigonometry (D27): a direction, not an angle.
+  bool _kerbPose(LaneGraph g, int slot, Float64List out, int o) {
+    if (slot < 0 || slot >= kerbs.slotCount) return false;
+    final lane = kerbs.slotLane(slot);
+    if (lane < 0 || lane >= g.laneCount) return false;
+    final e = g.laneEdge[lane];
+    final t = kerbs.slotT(slot);
+    final ahead = t + 0.25 <= g.edgeLen[e];
+    RouteCost.pointOn(g, e, t, _pt, 0);
+    RouteCost.pointOn(g, e, ahead ? t + 0.25 : t - 0.25, _pt, 2);
+    var de = _pt[2] - _pt[0], dn = _pt[3] - _pt[1];
+    if (!ahead) {
+      de = -de;
+      dn = -dn;
+    }
+    final l = math.sqrt(de * de + dn * dn);
+    if (l < 1e-9) return false;
+    final ue = de / l, un = dn / l;
+    final off = g.laneOff[lane].toDouble();
+    out[o] = _pt[0] + un * off;
+    out[o + 1] = _pt[1] - ue * off;
+    out[o + 2] = ue;
+    out[o + 3] = un;
+    return true;
+  }
+
+  /// The free kerb slot nearest (e, n) within [kKerbSnapM] whose lane runs
+  /// within [kKerbSnapCos] of (dirE, dirN), or −1 (§14.1's re-snap rule).
+  /// Ties go to the lower slot, so two machines place a car alike.
+  int _snapKerb(double e, double n, double dirE, double dirN) {
+    final g = lg;
+    if (g == null) return -1;
+    var best = -1;
+    var bestD = kKerbSnapM * kKerbSnapM;
+    for (var s = 0; s < kerbs.slotCount; s++) {
+      if (!kerbs.isFree(s)) continue;
+      if (!_kerbPose(g, s, _pose4, 0)) continue;
+      if (_pose4[2] * dirE + _pose4[3] * dirN < kKerbSnapCos) continue;
+      final de = _pose4[0] - e, dn = _pose4[1] - n;
+      final d = de * de + dn * dn;
+      if (d >= bestD) continue;
+      best = s;
+      bestD = d;
+    }
+    return best;
+  }
+
+  /// Where each kerb car stands on the graph that is going, before its slots
+  /// are numbered afresh.
+  void _captureKerbCars(LaneGraph old) {
+    _movedCount = 0;
+    for (var i = 0; i < parked.pool.highWater; i++) {
+      if (!parked.pool.isSlotLive(i)) continue;
+      if (parked.where[i] != CarWhere.kerb.index) continue;
+      if (_movedCount >= _movedCar.length) {
+        final n = _movedCar.isEmpty ? 16 : _movedCar.length * 2;
+        _movedCar = Int32List(n)..setRange(0, _movedCount, _movedCar);
+        _movedPose = Float64List(4 * n)
+          ..setRange(0, 4 * _movedCount, _movedPose);
+      }
+      if (!_kerbPose(old, parked.slot[i], _movedPose, 4 * _movedCount)) {
+        continue;
+      }
+      _movedCar[_movedCount] = parked.pool.handleOf(i);
+      _movedCount++;
+    }
+  }
+
+  /// The cars [_captureKerbCars] remembered, put back on the kerbs as they
+  /// are now: the nearest free slot within 12 m and 45°, else garaged.
+  void _replaceKerbCars() {
+    for (var k = 0; k < _movedCount; k++) {
+      final car = _movedCar[k];
+      if (!parked.isLive(car)) continue;
+      final o = 4 * k;
+      final slot = _snapKerb(
+          _movedPose[o], _movedPose[o + 1], _movedPose[o + 2], _movedPose[o + 3]);
+      if (slot < 0) {
+        parked.moveToGarage(car);
+        siteStats.garaged++;
+        siteStats.siteGarages++;
+        continue;
+      }
+      parked.moveToKerb(car, kerbs.slotEdge(slot), slot, kerbs.slotSide(slot));
+      kerbs.occupy(slot, car);
+    }
+    _movedCount = 0;
+  }
+
+  // ---- The save (§14.1) -------------------------------------------------------
+
+  @override
+  String? siteIdOf(int car) {
+    if (!parked.isLive(car)) return null;
+    final b = parked.building[SlotPool.slotOf(car)];
+    if (b < 0 || b >= buildings.highWater || !buildings.isSlotLive(b)) {
+      return null;
+    }
+    final id = buildings.siteId[b];
+    return id.isEmpty ? null : id;
+  }
+
+  @override
+  bool kerbPoseOf(int car, Float64List out) {
+    final g = lg;
+    if (g == null || !parked.isLive(car)) return false;
+    final i = SlotPool.slotOf(car);
+    if (!_kerbPose(g, parked.slot[i], _pose4, 0)) return false;
+    out[0] = _pose4[0];
+    out[1] = _pose4[1];
+    // Only here, and on the way back: a heading is an angle in the save and a
+    // direction everywhere else (D27 keeps the sub-step free of trig).
+    out[2] = math.atan2(_pose4[3], _pose4[2]);
+    return true;
+  }
+
+  // ---- The load (§14.1's order) -----------------------------------------------
+
+  void _placeSavedCars(SavedAgents saved) {
+    _restoring = saved;
+    AgentsCodec.restoreCars(saved, this);
+    _restoring = null;
+    if (parked.count > 0) _siteState = true;
+  }
+
+  @override
+  int rowOfSite(String siteId) {
+    final h = buildings.handleOfSite(siteId);
+    return h == null ? -1 : sites.rowOfBuilding(SlotPool.slotOf(h));
+  }
+
+  @override
+  int stallOfKey(int row, int stallKey) {
+    final s = sites.stallIndexOfKey(row, stallKey);
+    return s >= 0 && !sites.stallTaken(row, s) ? s : -1;
+  }
+
+  @override
+  int nearestFreeStall(int row, int stallKey) =>
+      _nearestFreeStall(row, stallKey);
+
+  @override
+  void parkLot(int car, int row, int stall) {
+    final s = _restoring;
+    if (s == null || !sites.isRowLive(row)) return;
+    final p = sites.plan[row];
+    final key = p != null && stall < p.stallCount ? p.stallKey(stall) : 0;
+    final made = parked.parkLot(
+        building: sites.building[row],
+        row: row,
+        stall: stall,
+        stallKey: key,
+        ownerKind: CarOwnerKind.values[s.cars.ownerKind[car]],
+        owner: s.cars.owner[car],
+        kind: s.cars.kind[car],
+        variant: s.cars.variant[car]);
+    if (made == SlotPool.none) return;
+    sites.occupy(row, stall, made);
+    _wakeRestored(made, sites.building[row]);
+  }
+
+  @override
+  bool parkKerb(int car) {
+    final s = _restoring;
+    if (s == null) return false;
+    // A heading in the save, a direction here (D27).
+    final a = s.cars.heading[car];
+    final slot = _snapKerb(s.cars.e[car], s.cars.n[car], math.cos(a),
+        math.sin(a));
+    if (slot < 0) return false;
+    final made = parked.parkKerb(
+        building: -1,
+        edge: kerbs.slotEdge(slot),
+        slot: slot,
+        side: kerbs.slotSide(slot),
+        ownerKind: CarOwnerKind.values[s.cars.ownerKind[car]],
+        owner: s.cars.owner[car],
+        kind: s.cars.kind[car],
+        variant: s.cars.variant[car]);
+    if (made == SlotPool.none) return false;
+    kerbs.occupy(slot, made);
+    _wakeRestored(made, -1);
+    return true;
+  }
+
+  @override
+  void garage(int car, int row) {
+    final s = _restoring;
+    if (s == null) return;
+    final b = sites.isRowLive(row) ? sites.building[row] : -1;
+    final made = parked.garage(
+        building: b,
+        ownerKind: CarOwnerKind.values[s.cars.ownerKind[car]],
+        owner: s.cars.owner[car],
+        kind: s.cars.kind[car],
+        variant: s.cars.variant[car]);
+    if (made != SlotPool.none) _wakeRestored(made, b);
+  }
+
+  /// A restored car that belongs to a COMMUTER is a commuter at work: it
+  /// wakes on this side of the return window and drives home in that car
+  /// (§0 Q3, §14.3 — agents in flight are never saved). Its home is the
+  /// building handle the car carries as its opaque owner, which a colony
+  /// loaded from its own save resolves because the building table is rebuilt
+  /// from the same layout in the same order. A home that no longer answers
+  /// leaves the car standing where it is.
+  void _wakeRestored(int car, int buildingSlot) {
+    final i = SlotPool.slotOf(car);
+    if (parked.ownerKind[i] != CarOwnerKind.commuter.index) return;
+    final home = parked.owner[i];
+    if (home < 0 || !buildings.isLive(home) || buildingSlot < 0) return;
+    final job = buildings.handleOf(buildingSlot);
+    if (job == home) return;
+    commutes.restoreAtWork(home, job, car);
+  }
+
+  /// See [CityAgents.collectSiteBuffers].
+  void collectSiteBuffers(Map<String, Object> into) {
+    sites.collectBuffers(into, 'sites');
+    siteCols.collectBuffers(into, 'siteCols');
+    events.collectBuffers(into, 'events');
+    parked.collectBuffers(into, 'parked');
+    kerbs.collectBuffers(into, 'kerbs');
+    siteMover.collectBuffers(into, 'siteMover');
+    into['core.kerbFor'] = _kerbFor;
+    into['core.gaveUp'] = _gaveUp;
+    into['core.siteReplan'] = _siteReplan;
+  }
+
+  // ---- Development hooks ------------------------------------------------------
+
+  /// See [CityAgents.debugDepart].
+  int debugDepart(int car) {
+    prime();
+    if (!parked.isLive(car)) return SlotPool.none;
+    final i = SlotPool.slotOf(car);
+    final b = parked.building[i];
+    if (b < 0 || b >= buildings.highWater || !buildings.isSlotLive(b)) {
+      return SlotPool.none;
+    }
+    final from = buildings.handleOf(b);
+    final to = buildings.drawJob(commutes.rng, except: b);
+    if (to < 0 || to == from) return SlotPool.none;
+    return commutes.force(from, to, car: car);
   }
 
   // ---- Inspection ---------------------------------------------------------------------
@@ -1260,6 +2361,24 @@ class _Core implements PathResolver, PathSink, VehicleSink {
     h = fnv1aU32(h, stats.remapNudges);
     h = fnv1aU32(h, (stats.congestionIndex * 1e6).round());
     h = fnv1aU32(h, (stats.tripRatio * 1e6).round());
+    // The sites, the cars and the kerbs (§7.8 item 11). Folded only once the
+    // colony has site state of any kind, so a colony with no plans and
+    // nothing parked digests exactly as it did before T4a.
+    if (_siteState) {
+      h = sites.digest(h);
+      h = parked.digest(h);
+      h = kerbs.digest(h);
+      h = siteCols.digest(h, table);
+      h = siteMover.digest(h);
+      h = events.digest(h);
+      h = siteStats.digest(h);
+      for (var sl = 0; sl < table.highWater; sl++) {
+        if (table.isSlotLive(sl) && _kerbFor[sl] >= 0) {
+          h = fnv1aU32(h, sl);
+          h = fnv1aU32(h, _kerbFor[sl]);
+        }
+      }
+    }
     return h;
   }
 
@@ -1270,4 +2389,80 @@ class _Core implements PathResolver, PathSink, VehicleSink {
   /// pass 2³² after an hour and a quarter.
   static int _wide(int hash, int x) =>
       fnv1aU32(fnv1aU32(hash, x & 0xFFFFFFFF), x ~/ 0x100000000);
+}
+
+/// The site mover as the planner's [StallDepartures]: one call, named
+/// twice, so trip_planner.dart need not import the mover that imports it.
+final class _StallSpawns implements StallDepartures {
+  _StallSpawns(this.mover);
+
+  final SiteMover mover;
+
+  @override
+  int spawnFromStall(
+          {required int row,
+          required int stall,
+          required int join,
+          required AgentKind kind,
+          required int variant,
+          required int ownerKind,
+          required int owner,
+          required Int32List route,
+          required int n,
+          required double originT,
+          required double destT,
+          required int nowUs,
+          required double speedFactor,
+          required double freeFlowS}) =>
+      mover.spawnFromStall(
+        row: row,
+        stall: stall,
+        join: join,
+        kind: kind,
+        variant: variant,
+        ownerKind: ownerKind,
+        owner: owner,
+        route: route,
+        n: n,
+        originT: originT,
+        destT: destT,
+        nowUs: nowUs,
+        speedFactor: speedFactor,
+        freeFlowS: freeFlowS,
+      );
+}
+
+/// What stands between a stall and the drive, read off the plan
+/// (parked_cars.dart's [TandemStalls]; site-access.md §7.5).
+///
+/// Only a home pad ever has one: its `inline` stalls lie ALONG the drive, so
+/// a stall nearer the street — a smaller arc on the same segment — is a car
+/// the one behind it cannot get past. Every other program parks off an aisle,
+/// where each stall reaches the drive on its own. The nearest such stall is
+/// the blocker, and a pad is at most two deep (§3.4), so there is only one.
+final class _TandemPlan implements TandemStalls {
+  _TandemPlan(this.sites);
+
+  final SiteTable sites;
+
+  @override
+  int blockerOf(int row, int stall) {
+    if (!sites.isRowLive(row) || stall < 0) return -1;
+    final SiteAccessPlan? p = sites.plan[row];
+    if (p == null || p.program != SiteProgram.homeDriveway) return -1;
+    if (stall >= p.stallCount) return -1;
+    final seg = p.stallSeg(stall), s = p.stallS(stall);
+    var best = -1;
+    var bestS = 0.0;
+    for (var i = 0; i < p.stallCount; i++) {
+      if (i == stall || p.stallSeg(i) != seg) continue;
+      final si = p.stallS(i);
+      if (si >= s) continue;
+      if (best < 0 || si > bestS) {
+        best = i;
+        bestS = si;
+      }
+    }
+    return best;
+  }
 }

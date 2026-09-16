@@ -253,6 +253,11 @@ Map<String, Object> _buffers(CityAgents a) {
   };
   a.planner!.collectBuffers(out, 'planner');
   a.pathQueue!.collectBuffers(out, 'paths');
+  // The site half (T4a): the site table, the site vehicle rows, the access
+  // events, the parked cars, the kerb slots and the mover's scratch. A13
+  // gates them on a town whose cars are cycling the lots; here they ride
+  // along, so a buffer this town replaces shows up wherever it happens.
+  a.collectSiteBuffers(out);
   m.collectBuffers(out, 'mover');
   m.arbiter.collectBuffers(out, 'arbiter');
   a.stats.collectBuffers(out, 'stats');

@@ -13,6 +13,8 @@ import 'package:acro_space_simulator/domain/colony/city/traffic/traffic_time.dar
 import 'package:acro_space_simulator/domain/colony/city/traffic/traffic_tuning.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../colony/site_access/site_plan_fixtures.dart';
+import 'site_fixture.dart';
 import 'traffic_fixture.dart';
 
 /// One seed, one input, one history (docs/plans/agent-traffic.md §17.4):
@@ -55,6 +57,117 @@ void main() {
     expect(a.graphRev, 2, reason: 'the road rebuilt the lane graph once');
     expect(a.stats.spawned, greaterThan(20));
     expect(a.stats.arrived, greaterThan(5));
+  });
+
+  group('A11: with site movers active', () {
+    // STRIP and LOOP on the starter kit's own lots: cars turn in at their
+    // cuts, drive their aisles, park on their stalls and pull out again, so
+    // every column T4a added is moving while the digests are compared
+    // (site-access.md §7.9 A11).
+    Map<String, SyntheticTemplate> byLot() => {
+          lotOf(SyntheticTemplate.strip): SyntheticTemplate.strip,
+          lotOf(SyntheticTemplate.loop): SyntheticTemplate.loop,
+          lotOf(SyntheticTemplate.home): SyntheticTemplate.home,
+        };
+
+    /// Everything a rendered host asks the agents between ticks: the frame,
+    /// a vehicle's description, the readout's answers, the site columns and
+    /// the wire's own lists. None of it may move the history (§17.4).
+    void capture(CityAgents a) {
+      a.frame;
+      a.readout.hasRun;
+      a.readout.peakCongestion;
+      a.agentManaged;
+      a.agentManagedRev;
+      a.sites?.syncedSitesRev;
+      a.parkedCars?.parkedRev;
+      a.accessEvents?.count;
+      a.siteStats.enters;
+      final t = a.vehicles;
+      if (t == null) return;
+      for (var sl = 0; sl < t.highWater; sl++) {
+        if (t.isSlotLive(sl)) a.describe(t.handleOf(sl));
+      }
+    }
+
+    ({int digest, CityAgents agents}) drive(List<double> dts,
+        {required bool asked}) {
+      final city = town();
+      final a = agentsOn(city);
+      final plans = FixturePlanSource(city.roadGraph, byLot());
+      a.debugPlans = plans;
+      var t = 0.0;
+      var edited = false;
+      for (final dt in dts) {
+        // A plan change mid-run: the strip is re-planned as a loop, so the
+        // §7.6 row-1 and row-2 moves (snap, relocate, garage) run inside the
+        // window the digests cover.
+        if (!edited && t >= 120) {
+          plans.replace(
+              lotOf(SyntheticTemplate.strip), SyntheticTemplate.homeTandem);
+          edited = true;
+        }
+        a.advance(dt);
+        if (asked) capture(a);
+        t += dt;
+      }
+      return (digest: a.digest(), agents: a);
+    }
+
+    test('twin runs with a plan change mid-run, and capture calls '
+        'interleaved, make one history', () {
+      final dts = _ticks(TrafficRng(0x51E), 300);
+      final quiet = drive(dts, asked: false);
+      final asked = drive(dts, asked: true);
+      expect(asked.digest, quiet.digest);
+      final a = quiet.agents;
+      expect(a.siteStats.enters, greaterThan(0), reason: 'cars turned in');
+      expect(a.siteStats.parkedLot, greaterThan(0), reason: 'and parked');
+      expect(a.sites!.syncs, greaterThan(1), reason: 'the plan changed');
+      expect(a.digest(), asked.agents.digest(),
+          reason: 'and asking again after the run moves nothing');
+    });
+
+    test('partition invariance holds with sites: 3000 ticks of 0.02 s and '
+        '120 of 0.5 s agree', () {
+      final fine = _sited(), coarse = _sited();
+      for (var i = 0; i < 120; i++) {
+        for (var k = 0; k < 25; k++) {
+          fine.advance(0.02);
+        }
+        coarse.advance(0.5);
+        expect(fine.timeUs, coarse.timeUs, reason: 'after ${(i + 1) / 2} s');
+        if (i % 20 == 19) expect(fine.digest(), coarse.digest());
+      }
+      expect(coarse.siteStats.enters, greaterThan(0));
+      expect(fine.digest(), coarse.digest());
+    });
+
+    test('frame-hold invariance holds with sites, at 1, 4 and 12 sub-steps '
+        'a frame', () {
+      final dts = _ticks(TrafficRng(0xF0), 120);
+      final inline = _sited();
+      for (final dt in dts) {
+        inline.advance(dt);
+      }
+      expect(inline.siteStats.enters, greaterThan(0));
+      for (final budget in [1, 4, 12]) {
+        AgentTuning.maxAgentSubStepsPerFrame = budget;
+        final held = _heldSited();
+        final frames = TrafficRng(budget);
+        var i = 0;
+        while (i < dts.length) {
+          final k = 1 + frames.nextInt(25);
+          for (var j = 0; j < k && i < dts.length; j++, i++) {
+            if (!held.holdTick(dts[i])) held.advance(dts[i]);
+          }
+          held.endFrame();
+        }
+        held.flushHeld();
+        expect(held.timeUs, inline.timeUs, reason: 'budget $budget');
+        expect(held.digest(), inline.digest(), reason: 'budget $budget');
+      }
+    });
   });
 
   test('partition invariance: 3000 ticks of 0.02 s and 120 of 0.5 s run the '
@@ -183,6 +296,27 @@ void main() {
 /// The most sub-steps one tick of 0.5 s runs, from any leftover on the
 /// agent clock: what a frame of the hold may run past its budget (D35).
 const int _tickSteps = 3;
+
+/// A town whose starter lots carry STRIP, LOOP and HOME plans, with agents
+/// of the test's own driving into them (A11).
+CityAgents _sited() {
+  final city = town();
+  final a = agentsOn(city);
+  a.debugPlans = FixturePlanSource(city.roadGraph, {
+    lotOf(SyntheticTemplate.strip): SyntheticTemplate.strip,
+    lotOf(SyntheticTemplate.loop): SyntheticTemplate.loop,
+    lotOf(SyntheticTemplate.home): SyntheticTemplate.home,
+  });
+  return a;
+}
+
+/// [_sited], held to a frame budget as [_held] holds one.
+CityAgents _heldSited() {
+  final a = _sited()..frameBudgeted = true;
+  a.replayTick = (_, simDt) =>
+      a.advance((simDt * a.city.eventSimWarp).clamp(0.0, 0.5));
+  return a;
+}
 
 /// Agents of the test's own on [city] held to a frame budget, replaying a
 /// tick as `CitySim.advance` would once E3a and E3b are in: clamped, and

@@ -21,6 +21,16 @@
 /// is re-targeted home by an appended leg — its route is never edited
 /// (§4.7).
 ///
+/// **A trip starts from its own parked car** (site-access.md §7.4 Departure,
+/// §7.5; t4a-implementation.md §2, item 6). A commuter leaving home takes a
+/// car out of that home's pool ([ParkedCarTable.takePooled]), and the leg
+/// home leaves the car it parked at work. Where that car STANDS decides how
+/// it joins the road: a car on a lot stall is handed to the site mover,
+/// which reverses it out and asks for its gap at the throat or backs it down
+/// the drive ([StallDepartures]); a car at a kerb slot joins the lane from
+/// the slot through the same `canJoin` every spawn asks; a garaged car
+/// simply appears at the building's access, as §5.6 says it does.
+///
 /// Both run on agent time, in the sub-step, and allocate nothing once warm:
 /// commuters are a [SlotPool] of typed columns, the waiting routes a
 /// [RouteArena] of their own.
@@ -29,15 +39,19 @@ library;
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import '../site_access/site_access_plan.dart';
 import 'agent_kind.dart';
 import 'building_table.dart';
 import 'graph_lineage.dart';
 import 'junction_arbiter.dart';
+import 'kerb_slots.dart';
 import 'lane_graph.dart';
 import 'node_control.dart';
+import 'parked_cars.dart';
 import 'path_search.dart';
 import 'route_arena.dart';
 import 'route_cost.dart';
+import 'site_table.dart';
 import 'slot_pool.dart';
 import 'traffic_rng.dart';
 import 'traffic_stats.dart';
@@ -57,6 +71,35 @@ const int kRouteTooLong = -2;
 /// At most this many trips a home may owe and not yet have sent: past it,
 /// demand a cap deferred is shed rather than saved up for a burst.
 const double kMaxOwedTrips = 3;
+
+/// How near a route's origin arc a site's out-join must be for the departure
+/// to be that join's (site-access.md §7.4 departure step 2). The origin came
+/// from the very join column the match is against, so this is slack for the
+/// clamp `AccessPoint.sOn` applies beside a junction, not a search radius;
+/// V4 keeps two cuts on one edge at least 6 m apart, so it names one join.
+const double kDepartJoinM = 1.5;
+
+/// Puts a parked car on the road out of its site stall: the site mover's
+/// `spawnFromStall` (site_mover.dart), behind an interface so this file does
+/// not import the mover that imports it.
+abstract interface class StallDepartures {
+  /// See `SiteMover.spawnFromStall`.
+  int spawnFromStall(
+      {required int row,
+      required int stall,
+      required int join,
+      required AgentKind kind,
+      required int variant,
+      required int ownerKind,
+      required int owner,
+      required Int32List route,
+      required int n,
+      required double originT,
+      required double destT,
+      required int nowUs,
+      required double speedFactor,
+      required double freeFlowS});
+}
 
 /// Told what became of a route that had to wait to pull out.
 abstract interface class SpawnSink {
@@ -121,12 +164,25 @@ class TripPlanner {
   /// where a drawn route starts (the readout's `TripRoute.polyline`).
   Float32List originT;
 
+  /// Where a departing trip's own car stands, and what the departure takes
+  /// from it: the parked cars, the synced sites (for the out-join a stall
+  /// leaves by), the kerb slots and the site mover. All null until T4a's
+  /// facade sets them, and then a colony with no plans simply never has a
+  /// car to depart from.
+  ParkedCarTable? cars;
+  SiteTable? sites;
+  KerbTable? kerbs;
+  StallDepartures? stalls;
+
   final RouteArena _arena = RouteArena(4096);
   final Int32List _scratch = Int32List(RouteArena.maxBlock);
   Int32List _owner = Int32List(64), _off = Int32List(64), _len = Int32List(64);
   Uint8List _kind = Uint8List(64), _purpose = Uint8List(64);
   Uint8List _left = Uint8List(64);
   Float64List _fromT = Float64List(64), _toT = Float64List(64);
+
+  /// Per waiting route: the parked car it departs from, or −1.
+  Int32List _carOf = Int32List(64)..fillRange(0, 64, -1);
   int _waiting = 0;
   int _spawnsLeft = 0;
 
@@ -150,6 +206,7 @@ class TripPlanner {
     into['$name.left'] = _left;
     into['$name.fromT'] = _fromT;
     into['$name.toT'] = _toT;
+    into['$name.carOf'] = _carOf;
   }
 
   /// Car trips may have this many vehicles on the road; the rest of
@@ -178,16 +235,17 @@ class TripPlanner {
   /// A route found for [owner]'s trip by a [kind] vehicle for [purpose]:
   /// on the road at once if nothing is waiting ahead of it and there is a
   /// gap, else queued to pull out when there is. [fromLeft]: the origin is
-  /// on the left of travel along the first edge. Returns the vehicle's
-  /// handle; `SlotPool.none` when it waits; [kRouteTooLong] when no route
-  /// block can hold it.
+  /// on the left of travel along the first edge. [car] is the parked car the
+  /// trip departs from (−1 for none), which decides where it joins the road
+  /// (§7.4 Departure). Returns the vehicle's handle; `SlotPool.none` when it
+  /// waits; [kRouteTooLong] when no route block can hold it.
   int deliver(int owner, AgentKind kind, TripPurpose purpose, PlannedRoute route,
-      {required bool fromLeft, required int nowUs}) {
+      {required bool fromLeft, required int nowUs, int car = -1}) {
     final n = route.length;
     if (n < 1 || n > RouteArena.maxBlock) return kRouteTooLong;
     if (_waiting == 0) {
       final h = _spawn(owner, kind.index, purpose.index, fromLeft, route.elems,
-          n, route.originT, route.destT, nowUs);
+          n, route.originT, route.destT, nowUs, car);
       if (h != SlotPool.none) return h;
     }
     if (_waiting == _owner.length) _growWaiting();
@@ -202,6 +260,7 @@ class TripPlanner {
     _left[i] = fromLeft ? 1 : 0;
     _fromT[i] = route.originT;
     _toT[i] = route.destT;
+    _carOf[i] = car;
     return SlotPool.none;
   }
 
@@ -216,7 +275,7 @@ class TripPlanner {
         final n = _len[i];
         _scratch.setRange(0, n, _arena.data, _off[i]);
         h = _spawn(_owner[i], _kind[i], _purpose[i], _left[i] == 1, _scratch, n,
-            _fromT[i], _toT[i], nowUs);
+            _fromT[i], _toT[i], nowUs, _carOf[i]);
       }
       if (h != SlotPool.none) {
         _arena.free(_off[i], _len[i]);
@@ -284,49 +343,165 @@ class TripPlanner {
       }
       h = fnv1aU32(h, (_fromT[i] * 1000).round());
       h = fnv1aU32(h, (_toT[i] * 1000).round());
+      // Only a route that HAS a car folds one, so a colony that parks
+      // nothing digests exactly as it did before T4a.
+      if (_carOf[i] >= 0) h = fnv1aU32(h, _carOf[i]);
     }
     return fnv1aU32(h, _spawnsLeft);
   }
 
   int _spawn(int owner, int kind, int purpose, bool left, Int32List route,
-      int n, double fromT, double toT, int nowUs) {
+      int n, double fromT, double toT, int nowUs, int car) {
     if (_spawnsLeft <= 0 || table.liveCount >= carCap) return SlotPool.none;
     final lg = table.graph;
     final lane = route[0];
     final e = lg.laneEdge[lane];
-    final k = AgentKind.values[kind];
+    // Its own car, if it has one still standing: its kind and its variant are
+    // the CAR's, never a fresh draw, because the thing that drives away is
+    // the thing that was drawn parked there a moment ago (D42).
+    final parked = cars;
+    final i = car >= 0 && parked != null && parked.isLive(car)
+        ? SlotPool.slotOf(car)
+        : -1;
+    final k = i >= 0 ? parked!.kind[i] : kind;
+    final ak = AgentKind.values[k];
+    // A car on a lot stall leaves through its site, by the out-join its route
+    // starts at (§7.4 departure step 2). With no such join — a stale plan, a
+    // route that starts somewhere else — it leaves from the access point, as
+    // a garaged car does.
+    var row = -1, stall = -1, join = -1;
+    if (i >= 0 &&
+        stalls != null &&
+        parked!.where[i] == CarWhere.lot.index &&
+        _canLeaveStall(parked.row[i], parked.stall[i])) {
+      join = _outJoinOf(parked.row[i], e, fromT);
+      if (join >= 0) {
+        row = parked.row[i];
+        stall = parked.stall[i];
+      }
+    }
     var at = fromT - lg.edgeLaneS0[e];
     final laneLen = lg.laneLength(lane);
     if (at < 0) at = 0;
     if (at > laneLen) at = laneLen;
-    if (!arbiter.canJoin(lane, at, VehicleKinds.lengthM[kind], k,
-        fromLeft: left)) {
+    // Only a car that starts ON the road asks for its gap here: one leaving a
+    // stall crosses the kerb under the site mover's own rules — the throat's
+    // `canJoin`, or the home back-out's gap acceptance (§7.4).
+    if (row < 0 &&
+        !arbiter.canJoin(lane, at, VehicleKinds.lengthM[k], ak,
+            fromLeft: left)) {
       return SlotPool.none;
     }
-    final f = VehicleKinds.drawFactor(k, rng);
-    final variant = rng.nextU32() & 0xFF;
-    final h = table.spawn(
-      kind: k,
-      route: route,
-      routeLength: n,
-      originT: fromT,
-      destT: toT,
-      nowUs: nowUs,
-      purpose: TripPurpose.values[purpose],
-      variant: variant,
-      owner: owner,
-      speedFactor: f,
-      freeFlowS: freeFlowSeconds(lg, route, n, fromT, toT, f),
-    );
+    // Both draws happen either way, so the spawn stream does not depend on
+    // whether a trip found a car (§17.4).
+    final f = VehicleKinds.drawFactor(ak, rng);
+    final drawn = rng.nextU32() & 0xFF;
+    final variant = i >= 0 ? parked!.variant[i] : drawn;
+    final ff = freeFlowSeconds(lg, route, n, fromT, toT, f);
+    final h = row >= 0
+        ? stalls!.spawnFromStall(
+            row: row,
+            stall: stall,
+            join: join,
+            kind: ak,
+            variant: variant,
+            ownerKind: parked!.ownerKind[i],
+            owner: owner,
+            route: route,
+            n: n,
+            originT: fromT,
+            destT: toT,
+            nowUs: nowUs,
+            speedFactor: f,
+            freeFlowS: ff)
+        : table.spawn(
+            kind: ak,
+            route: route,
+            routeLength: n,
+            originT: fromT,
+            destT: toT,
+            nowUs: nowUs,
+            purpose: TripPurpose.values[purpose],
+            variant: variant,
+            owner: owner,
+            speedFactor: f,
+            freeFlowS: ff,
+          );
     if (h == SlotPool.none) return h;
     _spawnsLeft--;
     stats.spawned++;
     final sl = SlotPool.slotOf(h);
+    // `spawnDetached` knows nothing of purposes: a leg home that starts in a
+    // stall is still a leg home.
+    if (row >= 0) table.purpose[sl] = purpose;
+    if (i >= 0) _leaveParking(parked!, car, i, fromStall: row >= 0);
     if (originT.length < table.capacity) {
       originT = Float32List(table.capacity)..setRange(0, originT.length, originT);
     }
     originT[sl] = fromT;
     return h;
+  }
+
+  /// Whether the site mover could take a car off [stall] of [row] at all:
+  /// the row and stall still stand, and the stall has a lane to pull out
+  /// onto — unless it is a home `inline` stall, which is left by reversing
+  /// down the drive and needs none (§7.4 Home back-out).
+  ///
+  /// Asked BEFORE the spawn because a departure the site can never make
+  /// would otherwise sit in the pull-out queue for the rest of the colony's
+  /// life, holding a car nobody can drive. Where it cannot, the car leaves
+  /// from the access point instead, as a garaged car does.
+  bool _canLeaveStall(int row, int stall) {
+    final s = sites;
+    if (s == null || !s.isRowLive(row)) return false;
+    final p = s.plan[row];
+    if (p == null || stall < 0 || stall >= s.stallCount[row]) return false;
+    if (p.program == SiteProgram.homeDriveway &&
+        p.stallAngle(stall) == StallAngle.inline) {
+      return true;
+    }
+    return s.laneOfTarget(row, s.stallTarget(row, stall)) >= 0;
+  }
+
+  /// The plan-local out-join of site [row] whose `(edge, T)` is the route
+  /// origin [t] on [edge], or −1: which driveway this departure leaves by
+  /// (§7.4 departure step 2, V4).
+  int _outJoinOf(int row, int edge, double t) {
+    final s = sites;
+    if (s == null || !s.isRowLive(row)) return -1;
+    final p = s.plan[row];
+    if (p == null) return -1;
+    final lg = table.graph;
+    final g = lg.graph;
+    var best = -1;
+    var bestM = kDepartJoinM;
+    for (var j = 0; j < p.joinCount; j++) {
+      if (s.joinTarget(row, j) < 0) continue;
+      final piece = p.joinPiece(j);
+      if (piece < 0 || piece >= g.pieceCount) continue;
+      if (g.pieceFwdEdge[piece] != edge && g.pieceBwdEdge[piece] != edge) {
+        continue;
+      }
+      final d = (lg.travelArc(edge, p.joinRoadS(j)) - t).abs();
+      if (d > bestM) continue;
+      best = j;
+      bestM = d;
+    }
+    return best;
+  }
+
+  /// The car [car] has become a vehicle: its row goes, and whatever it held
+  /// goes with it — except the STALL it is still standing on, which the site
+  /// mover releases when the car's rear clears the mouth line (§7.4
+  /// departure step 3), and which would otherwise be handed to an arrival
+  /// driving into the car reversing out of it.
+  void _leaveParking(ParkedCarTable parked, int car, int i,
+      {required bool fromStall}) {
+    if (!fromStall && parked.where[i] == CarWhere.kerb.index) {
+      final slot = parked.slot[i];
+      if (slot >= 0) kerbs?.release(slot);
+    }
+    parked.remove(car);
   }
 
   void _move(int i, int w) {
@@ -338,6 +513,7 @@ class TripPlanner {
     _left[w] = _left[i];
     _fromT[w] = _fromT[i];
     _toT[w] = _toT[i];
+    _carOf[w] = _carOf[i];
   }
 
   void _growWaiting() {
@@ -350,6 +526,9 @@ class TripPlanner {
     _left = Uint8List(n)..setRange(0, _waiting, _left);
     _fromT = Float64List(n)..setRange(0, _waiting, _fromT);
     _toT = Float64List(n)..setRange(0, _waiting, _toT);
+    _carOf = Int32List(n)
+      ..fillRange(0, n, -1)
+      ..setRange(0, _waiting, _carOf);
   }
 }
 
@@ -389,7 +568,8 @@ class CommuteSynth implements SpawnSink {
         oneWay = Uint8List(capacity),
         kind = Uint8List(capacity),
         purpose = Uint8List(capacity),
-        wakeUs = Float64List(capacity);
+        wakeUs = Float64List(capacity),
+        car = Int32List(capacity)..fillRange(0, capacity, -1);
 
   final BuildingTable buildings;
   final TripPlanner planner;
@@ -409,6 +589,15 @@ class CommuteSynth implements SpawnSink {
 
   /// The vehicle driving the current leg, or −1.
   final Int32List vehicle;
+
+  /// The parked car this leg departs from, or −1 (§0 Q3): a home-pool car
+  /// taken when the trip is REQUESTED — it stands on its stall until the
+  /// vehicle spawns — or, on the leg home, the car parked at work.
+  final Int32List car;
+
+  /// Where those cars live; null while the owner keeps none, and then every
+  /// trip departs from the access point as it did before T4a.
+  ParkedCarTable? cars;
 
   /// Leg, stage, whether it is a one-way forced trip, the `AgentKind` and
   /// the outbound `TripPurpose` — indices.
@@ -460,18 +649,59 @@ class CommuteSynth implements SpawnSink {
   int vehicleOf(int commuter) =>
       pool.isLive(commuter) ? vehicle[SlotPool.slotOf(commuter)] : -1;
 
+  /// Whether [commuter] names a live row.
+  bool isLive(int commuter) => pool.isLive(commuter);
+
+  /// The parked car [commuter]'s current leg departs from, or −1.
+  int carOf(int commuter) =>
+      pool.isLive(commuter) ? car[SlotPool.slotOf(commuter)] : -1;
+
+  /// The building [commuter] lives at (a forced trip: where it started), or
+  /// −1: the opaque owner a car parked at work carries (§0 Q3).
+  int homeOf(int commuter) =>
+      pool.isLive(commuter) ? home[SlotPool.slotOf(commuter)] : -1;
+
+  /// Gives [commuter] the car it has just parked, so its next leg departs
+  /// from there (§7.4 Departure step 1).
+  void setCar(int commuter, int car) {
+    if (!pool.isLive(commuter)) return;
+    this.car[SlotPool.slotOf(commuter)] = car;
+  }
+
+  /// A commuter restored at work with its car [car] parked there, on its way
+  /// home within the return window (§0 Q3, §14.1): what a load makes of a
+  /// `commuter`-owned car, since agents in flight are never saved (§14.3).
+  /// Returns its handle, or `SlotPool.none` when the pool is full.
+  int restoreAtWork(int home, int job, int car) {
+    final h = pool.alloc();
+    if (h == SlotPool.none) return h;
+    final sl = SlotPool.slotOf(h);
+    this.home[sl] = home;
+    this.job[sl] = job;
+    vehicle[sl] = -1;
+    this.car[sl] = car;
+    oneWay[sl] = 0;
+    kind[sl] = AgentKind.car.index;
+    purpose[sl] = TripPurpose.commute.index;
+    _clockIn(sl, nowUs);
+    return h;
+  }
+
   /// A trip from building [from] to [to] by a [kind] vehicle, planned now
   /// and driven once: what the development hooks' `traffic=spawn` and the
-  /// scenario tests ask for. Returns the commuter's handle, or
-  /// `SlotPool.none` when a cap deferred it.
+  /// scenario tests ask for. [car] departs from that parked car rather than
+  /// from whatever the home pool offers (`CityAgents.debugDepart`). Returns
+  /// the commuter's handle, or `SlotPool.none` when a cap deferred it.
   int force(int from, int to,
       {AgentKind kind = AgentKind.car,
-      TripPurpose purpose = TripPurpose.commute}) {
+      TripPurpose purpose = TripPurpose.commute,
+      int car = -1}) {
     if (!_open()) {
       stats.deferred++;
       return SlotPool.none;
     }
-    return _start(from, to, oneWay: true, kind: kind, purpose: purpose);
+    return _start(from, to,
+        oneWay: true, kind: kind, purpose: purpose, car: car);
   }
 
   // ---- Once per agent second (§5.2 step 1) ----------------------------------
@@ -526,13 +756,15 @@ class CommuteSynth implements SpawnSink {
   int _start(int from, int to,
       {required bool oneWay,
       required AgentKind kind,
-      required TripPurpose purpose}) {
+      required TripPurpose purpose,
+      int car = -1}) {
     final h = pool.alloc();
     if (h == SlotPool.none) return h;
     final sl = SlotPool.slotOf(h);
     home[sl] = from;
     job[sl] = to;
     vehicle[sl] = -1;
+    this.car[sl] = car;
     leg[sl] = _toWork;
     this.oneWay[sl] = oneWay ? 1 : 0;
     this.kind[sl] = kind.index;
@@ -541,21 +773,34 @@ class CommuteSynth implements SpawnSink {
     return _request(h) ? h : SlotPool.none;
   }
 
-  /// Asks for the path of [commuter]'s current leg. False, and the leg
-  /// deferred, when the queue refused it.
-  bool _request(int commuter) {
+  /// Asks for the path of [commuter]'s current leg, under [tag]. False, and
+  /// the leg deferred, when the queue refused it.
+  ///
+  /// An outbound leg takes a car out of its home's pool here rather than at
+  /// the spawn (§0 Q3): the car is promised to this trip from the moment it
+  /// is asked for, so two commuters leaving one house in the same second
+  /// never claim the same car — and the car keeps standing on its stall,
+  /// where it still blocks whatever is behind it on a tandem pad.
+  bool _request(int commuter, {int tag = kTripTag}) {
     final sl = SlotPool.slotOf(commuter);
     final out = leg[sl] == _toWork;
     stage[sl] = _stagePlanning;
+    if (out && car[sl] < 0) {
+      final parked = cars;
+      if (parked != null && home[sl] >= 0) {
+        car[sl] = parked.takePooled(SlotPool.slotOf(home[sl]));
+      }
+    }
     final ok = queue.enqueue(PathPriority.car,
         requester: commuter,
         kind: AgentKind.values[kind[sl]],
         origin: out ? home[sl] : job[sl],
         dest: out ? job[sl] : home[sl],
-        tag: kTripTag);
+        tag: tag);
     if (ok) return true;
     stats.deferred++;
     if (out) {
+      _dropCar(sl);
       pool.free(commuter);
     } else {
       // Still at work: it tries again next second.
@@ -564,6 +809,14 @@ class CommuteSynth implements SpawnSink {
       wakeUs[sl] = nowUs.toDouble();
     }
     return false;
+  }
+
+  /// The trip that took [sl]'s car never ran: the car goes back in its
+  /// pool, where it stood all along.
+  void _dropCar(int sl) {
+    final c = car[sl];
+    car[sl] = -1;
+    if (c >= 0) cars?.returnPooled(c);
   }
 
   // ---- Paths, spawns, arrivals ------------------------------------------------
@@ -577,6 +830,7 @@ class CommuteSynth implements SpawnSink {
     if (stage[sl] != _stagePlanning) return;
     if (outcome != PathOutcome.found) {
       stats.noRoute++;
+      _dropCar(sl);
       pool.free(h);
       return;
     }
@@ -589,9 +843,11 @@ class CommuteSynth implements SpawnSink {
         out ? TripPurpose.values[purpose[sl]] : TripPurpose.homeward,
         route,
         fromLeft: buildings.leftOf(from, firstEdge),
-        nowUs: nowUs);
+        nowUs: nowUs,
+        car: car[sl]);
     if (v == kRouteTooLong) {
       stats.noRoute++;
+      _dropCar(sl);
       pool.free(h);
     } else if (v != SlotPool.none) {
       spawned(h, v);
@@ -606,6 +862,8 @@ class CommuteSynth implements SpawnSink {
     final sl = SlotPool.slotOf(owner);
     vehicle[sl] = handle;
     stage[sl] = _stageDriving;
+    // The car IS the vehicle now: its parked row went with the spawn.
+    car[sl] = -1;
   }
 
   @override
@@ -613,6 +871,17 @@ class CommuteSynth implements SpawnSink {
     if (!pool.isLive(owner)) return;
     if (stage[SlotPool.slotOf(owner)] != _stageWaiting) return;
     _request(owner);
+  }
+
+  /// [owner]'s leg, asked for again under [tag] because the route it held
+  /// INSIDE a site could not be carried across a lane-graph rebuild (§7.6,
+  /// `SiteMover.remapHeld`). Its car is back on a stall by now, so the leg
+  /// starts from the site's out-joins again, and no pooled car is taken.
+  void replanFromSite(int owner, int tag) {
+    if (!pool.isLive(owner)) return;
+    final sl = SlotPool.slotOf(owner);
+    vehicle[sl] = -1;
+    _request(owner, tag: tag);
   }
 
   /// The commuter driving vehicle [vehicleHandle], or −1.
@@ -641,6 +910,7 @@ class CommuteSynth implements SpawnSink {
         leg[sl] = _toHome;
         return home[sl];
       }
+      _dropCar(sl);
       pool.free(ch);
       return -1;
     }
@@ -648,6 +918,7 @@ class CommuteSynth implements SpawnSink {
     if (out && oneWay[sl] == 0) {
       _clockIn(sl, nowUs);
     } else {
+      _dropCar(sl);
       pool.free(ch);
     }
     return -1;
@@ -666,6 +937,7 @@ class CommuteSynth implements SpawnSink {
     if (leg[sl] == _toWork && oneWay[sl] == 0) {
       _clockIn(sl, nowUs);
     } else {
+      _dropCar(sl);
       pool.free(ch);
     }
   }
@@ -676,6 +948,7 @@ class CommuteSynth implements SpawnSink {
     final ch = _commuterOf(vehicleHandle);
     if (ch < 0) return;
     stats.noRoute++;
+    _dropCar(SlotPool.slotOf(ch));
     pool.free(ch);
   }
 
@@ -699,6 +972,9 @@ class CommuteSynth implements SpawnSink {
       h = fnv1aU32(h, job[sl]);
       h = fnv1aU32(h, vehicle[sl]);
       h = fnv1aU32(h, leg[sl] | stage[sl] << 8 | oneWay[sl] << 16);
+      // Only a leg that HAS a car folds one, so a colony that parks nothing
+      // digests exactly as it did before T4a.
+      if (car[sl] >= 0) h = fnv1aU32(h, car[sl]);
       final w = wakeUs[sl].toInt();
       h = fnv1aU32(h, w & 0xFFFFFFFF);
       h = fnv1aU32(h, w ~/ 0x100000000);
