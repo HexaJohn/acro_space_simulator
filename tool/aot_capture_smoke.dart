@@ -404,7 +404,8 @@ void main(List<String> args) {
   stdout.writeln('  waits: $waiting on sites, worst site waitMs $worstWait, '
       'worst road waitUs $worstRoad, '
       '${agents.siteStats.backOutForced} back-outs forced, '
-      '${agents.siteStats.backOutGiveUps} given up');
+      '${agents.siteStats.backOutGiveUps} given up, '
+      '${agents.siteStats.throatGiveUps} throats given up');
   stdout.writeln('  site phases seen: ${[
     for (var i = 0; i < phases.length; i++)
       if (phases[i] > 0) '${SitePhase.values[i].name}=${phases[i]}'

@@ -50,6 +50,16 @@ class SiteStats {
   /// silently in `backOutWait`.
   int backOutGiveUps = 0;
 
+  /// Forward-out departures given up at a throat after `throatStuckAfterS`
+  /// of grace and then `stuckDespawnS` of stuck time: the car back on a
+  /// stall of its site and its owner's leg asked for again (§5.6). `canJoin`
+  /// has no impatient term and never waives a body, and the road mover's
+  /// despawn cannot reach a car whose element is −1, so this is what a
+  /// throat whose street never opens reads as — one per attempt, so a wedged
+  /// car park counts up steadily instead of standing silently in
+  /// `throatWait`.
+  int throatGiveUps = 0;
+
   /// [h] with every counter folded in, in declaration order.
   int digest(int h) {
     var x = fnv1aU32(h, enters);
@@ -67,6 +77,7 @@ class SiteStats {
     x = fnv1aU32(x, backOutForced);
     x = fnv1aU32(x, shuffles);
     x = fnv1aU32(x, backOutGiveUps);
+    x = fnv1aU32(x, throatGiveUps);
     return x;
   }
 }

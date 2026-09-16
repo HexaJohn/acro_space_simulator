@@ -29,7 +29,13 @@
 ///   installation spawns a vehicle row detached at the stall, reverses out
 ///   along the very curve it came in by, drives to the throat and waits with
 ///   its front `throatStopM` inside the kerb line for `canJoin`; a grant logs
-///   EXIT and attaches it. A home `inline` stall waits IN the stall for a
+///   EXIT and attaches it. A street that never opens is given up: the wait
+///   accrues §5.6's own stuck clock after `AgentTuning.throatStuckAfterS`,
+///   and at `stuckDespawnS` of it the car goes back on a stall of its site
+///   and its owner is asked for the leg again ([SiteStats.throatGiveUps]),
+///   because `canJoin` has no impatient term to waive a body with and the
+///   road mover's despawn cannot reach a car whose element is −1. A home
+///   `inline` stall waits IN the stall for a
 ///   back-out gap ([AccessGaps.backOutClear]), then reverses down the drive
 ///   and swings its tail upstream into its target lane, logged
 ///   `backOutExit` as its rear crosses the kerb line, from which instant it
@@ -315,8 +321,9 @@ class SiteMover implements LaneObstacles {
   /// One sub-step at agent time [nowUs], after the road mover's: the gate,
   /// the site lanes, the manoeuvres, the throats and the back-outs, telling
   /// [s] and [v] what became of each vehicle, and [spawns] whose leg has to
-  /// be planned again — a home departure no gap ever came for (§7.5), which
-  /// leaves its owner with a car back on a stall and nowhere to be.
+  /// be planned again — a home departure no gap ever came for (§7.5), or a
+  /// forward-out one (§5.6), each of which leaves its owner with a car back
+  /// on a stall and nowhere to be.
   void step(int nowUs, SiteSink s, VehicleSink v, SpawnSink spawns) {
     final lg = _lg;
     if (lg == null) return;
@@ -340,7 +347,7 @@ class SiteMover implements LaneObstacles {
       if (ph == SitePhase.gateHeld.index) {
         _gate(sl, nowUs, s);
       } else if (ph == SitePhase.throatWait.index) {
-        _throat(sl, nowUs, s);
+        _throat(sl, nowUs, s, spawns);
       } else if (ph == SitePhase.backOutWait.index) {
         _backOutGap(sl, s, spawns);
       } else if (ph == SitePhase.shift.index) {
@@ -700,10 +707,31 @@ class SiteMover implements LaneObstacles {
 
   // ---- Forward-out departures (§7.4 departure steps 4–5) -------------------
 
-  void _throat(int sl, int nowUs, SiteSink sink) {
+  /// A car stopped `throatStopM` inside the kerb line: the clocks, the
+  /// give-up, and the gap it is waiting for.
+  ///
+  /// The clocks are first and the give-up second, before anything that can
+  /// answer "not yet" — a plan that went, a route a rebuild left it without,
+  /// a street that never opens — so that NO path through this method leaves
+  /// a car waiting for ever (§5.6).
+  void _throat(int sl, int nowUs, SiteSink sink, SpawnSink spawns) {
     final t = table, lg = _lg!;
     final row = site.row[sl], join = site.join[sl];
     final p = sites.isRowLive(row) ? sites.plan[row] : null;
+    site.waitMs[sl] = addClock(site.waitMs[sl], kStepMs);
+    // §7.4 step 6: a car queueing for its gap is not stuck until it has been
+    // there a minute, and then it accrues §5.6's own clock — which, at
+    // §5.6's own threshold, is what ends the wait ([_giveUpThroat]). Both
+    // clocks saturate: the road mover never sees a car inside a site, so
+    // nothing else bounds either, and in microseconds a wait would wrap
+    // negative after 35.8 minutes and read as no wait at all.
+    if (site.waitMs[sl] > msOf(AgentTuning.throatStuckAfterS)) {
+      t.stuckUs[sl] = addClock(t.stuckUs[sl], kStepUs);
+      if (t.stuckUs[sl] >= usOf(AgentTuning.stuckDespawnS)) {
+        _giveUpThroat(sl, sink, spawns);
+        return;
+      }
+    }
     if (p == null || t.routeLen[sl] <= 0) return;
     final lane = t.arena.data[t.routeOff[sl]];
     final edge = lg.laneEdge[lane];
@@ -712,14 +740,6 @@ class SiteMover implements LaneObstacles {
     final kind = AgentKind.values[t.kind[sl]];
     if (!arbiter.canJoin(lane, at, t.len[sl].toDouble(), kind,
         fromLeft: left)) {
-      site.waitMs[sl] = addClock(site.waitMs[sl], kStepMs);
-      // §7.4 step 6: a car queueing for its gap is not stuck until it has
-      // been there a minute. Its stuck clock saturates too: the road mover
-      // never sees a car inside a site, so nothing else bounds this one, and
-      // in microseconds it would wrap after 35.8 minutes at the throat.
-      if (site.waitMs[sl] > msOf(AgentTuning.throatStuckAfterS)) {
-        t.stuckUs[sl] = addClock(t.stuckUs[sl], kStepUs);
-      }
       return;
     }
     events.log(AccessEventKind.exit, t.handleOf(sl), edge,
@@ -734,6 +754,41 @@ class SiteMover implements LaneObstacles {
     sink.exited(t.handleOf(sl));
     site.clear(sl);
     _unit[sl] = -1;
+  }
+
+  /// §5.6 at a throat: the departure no gap ever came for.
+  ///
+  /// `canJoin` is a safety test and nothing else. §5.4's forced priority
+  /// waives the ETA half of a gap at a stop line, but never an occupied
+  /// conflict, because joining into a body is a collision however long the
+  /// car has waited — and a throat has no impatient term at all (§7.4 step
+  /// 5). So a street held by something that does not move — a van at the
+  /// kerb, a queue that never opens, a stream with no gap in it — would hold
+  /// the car, the throat behind it and its owner's leg for as long as the
+  /// obstruction stood. §5.6 despawns a road vehicle for exactly this and
+  /// cannot reach this one: its element is −1, so the road mover skips it,
+  /// and the stuck clock it keeps at the throat (§7.4 step 6) was read by
+  /// nobody.
+  ///
+  /// It is read here, at §5.6's own threshold, and resolved the gentler way
+  /// §7.5 resolves a back-out: the car goes back on a stall of its site —
+  /// the first free one in the join's order, garaged when the lot filled
+  /// behind it — counted, and its owner is asked for the leg again, which
+  /// plans a fresh route from the site's out-joins and may come back by
+  /// another join or another direction (the way out `remapHeld` takes for a
+  /// route it cannot carry, §7.6). A give-up and not a despawn because a car
+  /// inside a site can be put back where it came from, which a car wedged on
+  /// a carriageway cannot.
+  ///
+  /// Nothing crosses the kerb to do it, so an EXIT still comes from a
+  /// `canJoin` gap and from nothing else.
+  void _giveUpThroat(int sl, SiteSink sink, SpawnSink spawns) {
+    stats.throatGiveUps++;
+    // The owner is told BEFORE the car is parked, because parking it frees
+    // the vehicle row and with it the owner column this reads — the order
+    // [_giveUpBackOut] and [_giveUpGate] take, and for the same reason.
+    spawns.replanWaiting(table.owner[sl]);
+    _backToStall(sl, sink);
   }
 
   // ---- The home back-out (§7.4 Home back-out) ------------------------------
