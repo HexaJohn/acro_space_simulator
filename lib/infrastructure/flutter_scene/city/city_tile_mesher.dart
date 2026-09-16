@@ -36,6 +36,7 @@ import '../../../domain/colony/city/city_building_spec.dart';
 import '../../../domain/colony/city/parcel.dart';
 import '../../../domain/colony/city/road_catalog.dart';
 import '../../../domain/colony/city/road_elevation.dart';
+import '../../../domain/colony/city/site_access/kerb_cuts.dart';
 import '../../../domain/scatter/mesh_builder.dart';
 import '../../../domain/scatter/prop_mesh.dart';
 import '../../../domain/shared/quaternion.dart';
@@ -50,6 +51,7 @@ import 'pedestrian_tube.dart';
 import 'railway.dart';
 import 'road_deck.dart';
 import 'road_mesher.dart';
+import 'site_access_mesher.dart';
 import 'street_furniture.dart';
 import 'vehicle_meshes.dart';
 
@@ -756,6 +758,9 @@ enum CityMeshStepKind {
   buildings,
   patches,
   lots,
+  // A site access plan's structural surfaces: paving, ribbons, throats,
+  // gates and stall paint (see `site_access_mesher.dart`).
+  sites,
   // A detail job's archetype meshes the UI thread lacks, generated.
   archetypes,
   // Every builder of one material and the skyline into one geometry.
@@ -940,6 +945,11 @@ class CityTileMeshJob {
       }));
     }
     steps.add(CityMeshStep(CityMeshStepKind.patches, _emitPatches));
+    // The tile's site access plans, at EVERY tier and gated by neither
+    // `canDetail` nor the detail layer (§5.4): a 900 m site's access road
+    // is structure, not dressing, and the 300 m lot-dressing gate is what
+    // hid the starter kit's sites in the first place.
+    _addSiteStep(SiteAccessMesher.tierFor(r.tier));
     // Only where some building can resolve past a box: the furniture pass
     // skips every block-tier lot, so a tile that cannot detail would run
     // its steps to emit nothing (see `CityNodes.tileCanDetail`). Under the
@@ -978,7 +988,9 @@ class CityTileMeshJob {
     steps.setAll(0, steps.reversed.toList());
   }
 
-  /// The lot furniture, in runs.
+  /// The lot furniture, in runs — and the sites' own detail half, which
+  /// goes with it so the structural half is identical with the detail layer
+  /// on and off (§5.4).
   void _addLotSteps(List<BuildingSnapshot> buildings) {
     const perStep = 60;
     for (var i = 0; i < buildings.length; i += perStep) {
@@ -986,6 +998,23 @@ class CityTileMeshJob {
       steps.add(CityMeshStep(CityMeshStepKind.lots,
           () => _emitLotFeatures(buildings.sublist(from, to))));
     }
+    _addSiteStep(SiteDrawTier.detail);
+  }
+
+  /// A step for the tile's sites at [tier], when the knob is on and the
+  /// request carries any.
+  void _addSiteStep(SiteDrawTier tier) {
+    if (!request.knobs.siteAccess || members.sites.isEmpty) return;
+    steps.add(CityMeshStep(CityMeshStepKind.sites, () {
+      final tb = _tile;
+      SiteAccessMesher.emitAll(
+        members.sites,
+        apron: tb.featureApron,
+        solid: tb.featureSolid,
+        anchorBF: request.anchorBF,
+        tier: tier,
+      );
+    }));
   }
 
   /// The archetypes this job's instances key to that the UI thread did
@@ -1452,6 +1481,12 @@ class CityTileMeshJob {
     final paved = cls.paved;
     final near = tier == CityTier.near;
     final paint = tier != CityTier.far;
+    // The road's kerb cuts as the tiles read them — the frame's own copy,
+    // already in this polyline's drawn arc and flipped for a reversed road
+    // (§5.2) — as a typed list the masks walk without a bounds check per
+    // read. Null with the knob off, so a road with cuts on the wire draws
+    // exactly as it did.
+    final cuts = r.knobs.siteAccess ? CityTileMesher.cutsOf(road) : null;
 
     if (cls.isElevated) {
       // No ground ribbon, no curb, no junction furniture: there is nothing
@@ -1688,6 +1723,15 @@ class CityTileMeshJob {
         final pullStart = run.fromStart && a == 0 ? pullAt(startEnd) : 0.0;
         final pullEnd =
             run.toEnd && b == run.pts.length - 1 ? pullAt(lastEnd) : 0.0;
+        // Where this span's first point stands along the whole road: what
+        // its kerb cuts are measured from.
+        var spanArc = 0.0;
+        if (cuts != null) {
+          spanArc = run.s0;
+          for (var i = 0; i < a; i++) {
+            spanArc += (run.pts[i + 1] - run.pts[i]).length;
+          }
+        }
         // Every span after the first dresses from a seed of its own.
         final spanSeed =
             span == 0 ? seed : (seed ^ (span * 0x9E3779B1)) & 0xFFFFFFFF;
@@ -1695,7 +1739,10 @@ class CityTileMeshJob {
         if (walked) {
           RoadMesher.sidewalks(rb.walkRibbon, sp, road.halfWidthM, 3.0,
               anchorBF,
-              pullStart: pullStart, pullEnd: pullEnd);
+              pullStart: pullStart,
+              pullEnd: pullEnd,
+              cuts: cuts,
+              arcOffset: spanArc);
         }
         if (verged) {
           RoadMesher.verges(rb.verge, sp, road.halfWidthM, anchorBF,
@@ -1704,13 +1751,17 @@ class CityTileMeshJob {
               pullStart: pullStart,
               pullEnd: pullEnd,
               treesOut: deco == RoadDecoration.trees ? rb.treePits : null,
-              seed: spanSeed);
+              seed: spanSeed,
+              cuts: cuts,
+              arcOffset: spanArc);
         }
         // Nobody lights a dirt track, and nobody lights an alley either.
         if (paved && cls.hasPavement) {
           RoadMesher.lamps(rb.lampSolid, rb.lampGlow, sp, anchorBF,
               road.halfWidthM, cls,
-              liftM: walked ? CityTileMesher.walkTopLiftM : 0.0);
+              liftM: walked ? CityTileMesher.walkTopLiftM : 0.0,
+              cuts: cuts,
+              arcOffset: spanArc);
         }
         if (rb.propBudget > 0) {
           rb.propBudget -= StreetFurniture.emit(
@@ -1727,6 +1778,8 @@ class CityTileMeshJob {
             budget: rb.propBudget,
             treesOut: rb.treePits,
             shrubsOut: rb.shrubPits,
+            cuts: cuts,
+            arcOffset: spanArc,
           );
         }
         // Cars at the kerb, where the road keeps one to park at.
@@ -1737,7 +1790,7 @@ class CityTileMeshJob {
             rb.curbCars > 0) {
           rb.curbCars -= CityTileMesher.curbParkingFor(
               rb.curbSolid, rb.curbGlass, sp, road, anchorBF,
-              budget: rb.curbCars);
+              budget: rb.curbCars, cuts: cuts, arcOffset: spanArc);
         }
         // Vacuum outside: pedestrians travel in a pressurised tube, not on
         // a pavement. The glazing builder already exists for dome caps.
@@ -2385,6 +2438,14 @@ class CityTileMesher {
   /// bumpers — a solid line of touching cars reads as a wall.
   ///
   /// Returns how many it placed, so the caller can hold a budget.
+  ///
+  /// With [cuts] — the road's drawn kerb cuts, measured from the arc
+  /// [arcOffset] of [pts]'s first point — a bay whose centre
+  /// `KerbCuts.parkingBlocked` masks stands empty: the SAME asymmetric form
+  /// the agents' kerb slots ask (§5.5, A12), so a baked car never stands
+  /// across a drive or in a home back-out's swing. The kerb alternation
+  /// still advances over a masked bay, so the cars either side of one are
+  /// on the kerbs they always were.
   static int curbParkingFor(
     MeshBuilder body,
     MeshBuilder glass,
@@ -2392,11 +2453,14 @@ class CityTileMesher {
     RoadSnapshot road,
     Vector3 anchorBF, {
     required int budget,
+    Float64List? cuts,
+    double arcOffset = 0,
   }) {
     const spacing = 7.4; // a car plus the room to get out of the bay
     var travelled = 0.0;
     var next = spacing;
     var placed = 0;
+    final masked = cuts != null && cuts.isNotEmpty;
     final family = road.sealed ? VehicleKind.airless : VehicleKind.road;
     for (var i = 1; i < pts.length && placed < budget; i++) {
       travelled += (pts[i] - pts[i - 1]).length;
@@ -2412,12 +2476,27 @@ class CityTileMesher {
       final kind = family[h % family.length];
       // Nothing long parks at a curb bay.
       if (kind.lengthM > spacing * 0.85) continue;
+      if (masked &&
+          KerbCuts.parkingBlocked(
+              cuts, s > 0 ? 1 : 0, arcOffset + travelled)) {
+        placed++;
+        continue;
+      }
       VehicleMeshes.emit(body, glass, kind,
           p + side * (road.halfWidthM * s * 0.78), along, up,
           u: (h >> 16 & 0xFF) / 255.0);
       placed++;
     }
     return placed;
+  }
+
+  /// [road]'s kerb cuts as a typed list, or null when it carries none. The
+  /// wire holds them as a plain `List<double>`; a road cut by the capture
+  /// already hands over a `Float64List` view, which is taken as it is.
+  static Float64List? cutsOf(RoadSnapshot road) {
+    final k = road.kerbCuts;
+    if (k.isEmpty) return null;
+    return k is Float64List ? k : Float64List.fromList(k);
   }
 }
 

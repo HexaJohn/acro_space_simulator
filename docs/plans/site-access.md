@@ -1922,6 +1922,42 @@ mid.
 - **Ribbons** use a local copy of `RoadMesher.ribbon`'s cross-section with point heights and never re-drape
   (D19/D20).
 
+**As built (R4 track A, `site_access_mesher.dart`).** Small deviations, each local:
+- **Tiers** are a `SiteDrawTier` (`far`, `mid`, `near`, `detail`) and `SiteDrawSize` (`sizeOf(plan)` measures the
+  pave area and the access-road length once). `CityTileMeshJob._plan` adds one `CityMeshStepKind.sites` step at the
+  tile's tier, after patches, gated only by `knobs.siteAccess` and a non-empty `CityTileMembers.sites`. The DETAIL
+  half (stall paint on small sites) rides `_addLotSteps`, which both a near tile with the layer off and a detail job
+  call, so the structural half is identical with the layer on and off, as designed.
+- **The throat lift** eases in three parts, measured from the kerb node (`SiteAccessMesher.throatLiftAt`):
+  `RoadMesher.cutTopLiftM + paintLiftM` at the kerb, up to `walkTopLiftM + paintLiftM` over the 3 m pavement band,
+  then down to `kPaveLiftM` over the next 1.5 m. Holding the walk's top to the lot line and stepping to the pave lift
+  there would leave a 14 cm step in the middle of the drive. **Deviation from the lift-stack table above**, which
+  gives the ends as `walkTopLiftM` and `ribbonLiftM + 0.02`: the WALK ramps across the same 3 m band, from
+  `cutTopLiftM` at the dropped kerb to `walkTopLiftM` at its back edge, so a throat drawn at exactly those heights is
+  5 mm under the flags at the kerb and coplanar with them at the lot line — buried for its whole crossing. One
+  paint's lift over the walk at every offset is what makes the crossing visible, which is what the row was for.
+- **Throat stations.** The plan's own stations are its vias, tens of metres apart on an installation's spine, so the
+  two knees of the ease (at `throatRampM` and `throatRampM + throatSettleM` from the kerb) are inserted as stations
+  of their own, as `RoadMesher._withStations` does for a dropped kerb. Without them the ribbon is one long slope from
+  the kerb and the crossing is drawn nowhere near the heights above.
+- **The ribbons are cut at the pave rings**, as the lift-stack row says: a ribbon quad, a turnaround disc wedge or a
+  hammerhead triangle whose CENTRE falls inside a ring and which is not lifted clear of it is left out — the ring
+  carries that surface, and drawing it twice is a z-fight between two bands over the whole of a drive. The cut is by
+  primitive centre, not a true boolean trim, so a primitive that straddles a ring's edge may still overlap it by a
+  sliver. A throat's raised crossing is never cut: the exception is "at the pave lift", not "inside a ring".
+- **Turnaround pads** come from `nodeTurnKind` / `nodeTurnR`: a circle is a 16-segment disc, a hammerhead a square
+  apron of side `nodeTurnR` about the node, aligned to its arm (`nodeTurnHx/Hn`) where it has one.
+- **Stall paint** is the line down each side of a bay. An `inline` stall takes none: it lies ON its pad segment (a
+  home drive), and there is no bay to mark. Arrows, bay hatch and wheel stops stay with R6, as §9 lists them.
+- **Gate posts** stand at `gateX ± gateW/2` about the plan's `kNodeGate` node, on the facade material.
+- **Access-road edge kerbs** are a 10 cm face down each edge, on the road material (the road's own kerb is part of
+  the sidewalk builder, which a site has none of).
+- **The instant path** is a SITE path: `InstantSiteTracker` in the same file, the road tracker's twin, keyed on
+  `(book slot, siteKey)`; `CityNodes._syncInstantRoads` draws its pending sites at the near tier into the same body
+  node, and retires them on the same "the tile shows its current structure" test. §5.5's line — "instant_road_nodes
+  passes the snapshot's `kerbCuts` to `sidewalks`" — is vacuous as the code stands: the instant road path draws the
+  carriageway and its piers only, never a pavement, so it has no kerb to drop.
+
 ### 5.5 Lot features, kerb cuts and kerb-side dressing
 
 - **`_emitLotFeatures`** (city_tile_mesher.dart:1327-1409) branches on `b.siteSlot`:
@@ -1985,6 +2021,31 @@ mid.
   - **Tests:** each caller's conversion is unit-tested, and A12 asserts that traffic's masked intervals and the
     renderer's skipped kerb cars agree within 0.5 m (the bounded index-vs-drape error, §10.1), not bit for bit, both
     through the same asymmetric `parkingBlocked`.
+
+**As built (R4 track A).** Small deviations, each local:
+- **The walk keeps its own texture across a cut.** `walkRibbon` is the sidewalk material, which has no
+  `roadConcrete` band to take; the concrete over the pavement is the THROAT ribbon's, which rides one
+  `RoadMesher.paintLiftM` over the walk at every offset across the band (§5.4's as-built throat lift), so it is the
+  surface that is seen there. Only the kerb EDGE drops
+  (`RoadMesher.kerbTopLiftAt`, `walkTopLiftM` → `ribbonLiftM + 0.025`, eased over the 1 m flare, `min` where two
+  cuts overlap); the back of the walk keeps its height, so the flags ramp across their width, which is what a
+  dropped kerb is. The kerb face follows the edge down and is 2.5 cm across the cut, as designed.
+- **`RoadMesher` takes `cuts` and `arcOffset`** on `sidewalks`, `verges` and `lamps`, `StreetFurniture.emit` and
+  `CityTileMesher.curbParkingFor` likewise. `arcOffset` is the arc of the span's first point along the whole drawn
+  road (a road cut into graded spans by its decks dresses each span separately). With no cuts every one of them is
+  byte-identical (`kerb_cut_test`).
+- **`StreetFurniture.place` gains `dryRun`**: a blocked slot draws exactly the random values it would have drawn and
+  stands nothing, which is what keeps the props after it byte-identical. `placed` is not incremented, as designed.
+- **`curbParkingFor` counts a masked bay against `placed`** — the doc's "the `placed.isEven` alternation still
+  advances" — so a masked bay costs its budget and the cars either side of it stay on the kerbs they were on.
+- **A column shifted off the end of its span clamps to the end.** `RoadMesher.lamps` resamples the moved station on
+  the span it is drawing; a cut near a span boundary (routine on a road the decks cut into graded spans) puts it past
+  the span, and the old code left the column standing in the dropped kerb — the one case the shift is for.
+- **`CityLighting.lamps` is untouched this slice.** It has no production caller (tests only), its car-park masts are
+  track B's (§6.2), and the drawn street lamps are `RoadMesher.lamps`, which does take `shiftOut`. The domain-side
+  `shiftOut` call stays available for whoever wires that function to a caller.
+- **Knob discipline:** the tiles read `RoadSnapshot.kerbCuts` only when `CityMeshKnobs.siteAccess` is on, so a frame
+  carrying cuts draws exactly as it did with the knob off (`city_tile_mesher_test`, all four tier digests).
 
 ---
 
@@ -2587,6 +2648,19 @@ starter kit and pass V1–V13 on its graph under all five A2 override kinds. The
   - installation gate tests: gap exactly at the gate, no volume in the gate lane;
   - body-fixed check that the gate gap matches the plan's gate node;
   - A12 (road half).
+
+  **As built (R4 track A):** `site_access_mesher_test` (the fixture's mix — four big installations, 38 car parks at
+  mid, 78 houses at neither; a house nothing at far or mid; a mid-visible site exactly its ring fans at mid; a big
+  site at every tier; the detail pass small sites only, and only paint; every vertex inside the plan and its widest
+  ribbon; the tile's `sites` step planned at every tier and only with the knob; the instant tracker's four cases; no
+  triangle every corner of which lies on the surface of a ring it is a metre inside — the ribbons and the pads are
+  cut, and the check bites: it is red without either cut; the throat one paint over the walk at 0, 1.5 and 3 m from
+  the kerb, and a station at each knee of the ease, at the knee's own height),
+  `kerb_cut_test` (eleven cases: no cuts and a far-swing mask are the road to the byte, the drop at the cut centre,
+  the 2.5 cm face, `arcOffset` on a later span, the verge gap and its tree pits, the props' subsequence, the lamp
+  shifted out, a lamp shifted off the end of its span clamped to the end),
+  `kerb_cut_masks_baked_test` (A12's road half). The R3 case in `city_tile_mesher_test` now reads
+  "off: every tier to the byte; on: only the near tier's kerbside moves", since drawing the cuts is what R4 is.
 - **R5:** shaper corridor tests (emitted once, keyed, graded only, datums recorded, drawn height = datum ±1 cm, ≤ 2
   asks per new segment, sprawl adds 0, **a generated graded downtown block on flat ground adds 0 site brushes**,
   the starter kit adds exactly 4).
