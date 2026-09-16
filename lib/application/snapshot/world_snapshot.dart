@@ -2864,9 +2864,10 @@ class WorldSnapshot {
           ));
         }
         roadsRevision[city.id] = city.roadsRevision;
-        if (city.agents.enabled) {
-          cityTraffic.add(TrafficCapture.frameFor(city, body.id.value, roads));
-        }
+        // The agents' frame is added below, once the site frame it shares
+        // exists: a car inside a lot is placed off those very plans and
+        // heights (agent-traffic.md §13.1), and the site frame cannot be
+        // built until every lot and cell has asked its ground.
         // Roads, zoned-but-unbuilt lots and support platforms. These are what
         // the player has actually placed a moment after founding, so leaving
         // them out is what made a new colony look like nothing happened.
@@ -3016,14 +3017,20 @@ class WorldSnapshot {
         // After every lot and cell above has asked its ground: the pads the
         // heights stand on are cached by then, so a steady frame asks
         // nothing more (§6.4, §8.4).
-        if (siteCap != null) {
-          sites.add(siteCap.frame(
-            bodyId: body.id.value,
-            datumRadiusM: body.radius,
-            siteRadiusM: siteRadius,
-            groundFor: groundFor,
-            cellRadius: radiusOf,
-          ));
+        final siteFrame = siteCap?.frame(
+          bodyId: body.id.value,
+          datumRadiusM: body.radius,
+          siteRadiusM: siteRadius,
+          groundFor: groundFor,
+          cellRadius: radiusOf,
+        );
+        if (siteFrame != null) sites.add(siteFrame);
+        // The agents, with that same site frame by reference (§13.1): its
+        // roads are already in [roads], so the slicing reads what it read
+        // before, and now the lots do too.
+        if (city.agents.enabled) {
+          cityTraffic.add(TrafficCapture.frameFor(city, body.id.value, roads,
+              sites: siteFrame));
         }
       }
     }

@@ -43,6 +43,7 @@ import 'package:flutter_scene/src/geometry/mesh_geometry.dart'
     show MeshGeometry, StagedMeshUpload;
 import 'package:vector_math/vector_math.dart' as vm;
 
+import '../../../application/snapshot/city_traffic_frame.dart';
 import '../../../application/snapshot/world_snapshot.dart';
 import '../../../domain/architecture/building_generator.dart';
 import '../../../domain/colony/city/city_building_spec.dart';

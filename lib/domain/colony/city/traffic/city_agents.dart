@@ -975,12 +975,13 @@ class _Core
     // same answers at the same sub-step (§17.4).
     agents.readout.tick(picture: picture);
     // 7. The frame, with the site columns the wire draws in-site cars from
-    // (package F reads them; until then they ride along unread).
+    // (§13.1: the book slot of the site and the plan-local lane).
     frames.publish(table,
         timeUs: now,
         worldEpochS: agents.worldEpochS,
         graphRev: graphRev,
         site: siteCols,
+        siteRows: sites,
         sitesRev: sites.syncedSitesRev);
     // Last: a plan held in limbo is freed in the sub-step its last car left
     // (§7.6 row 3).

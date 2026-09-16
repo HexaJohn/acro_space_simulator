@@ -27,6 +27,12 @@
 /// nodes here are put down at: on the same surface as the road points,
 /// however far from the centre — a point's length would be a little more,
 /// by `(e² + n²) / 2r`, which is most of a metre three kilometres out.
+///
+/// The SITE half (T4a, site-access.md §7.4–7.5) follows the same rule from
+/// the other source: a car inside a lot, and a car parked on a stall, are
+/// placed off the plan the simulation is driving, at the heights R3's
+/// `CitySiteFrame` published for that plan's own points and stalls. Nothing
+/// is re-draped and nothing is asked of the ground there either (D19/D20).
 library;
 
 import 'dart:math' as math;
@@ -35,10 +41,17 @@ import 'dart:typed_data';
 import '../../domain/colony/city/city_sim.dart';
 import '../../domain/colony/city/parcel.dart';
 import '../../domain/colony/city/road_graph.dart';
+import '../../domain/colony/city/site_access/site_access_constants.dart';
+import '../../domain/colony/city/site_access/site_access_plan.dart';
+import '../../domain/colony/city/site_access/site_lane_graph.dart';
 import '../../domain/colony/city/spatial_index.dart';
 import '../../domain/colony/city/sprawl_plan.dart';
 import '../../domain/colony/city/traffic/agent_frame.dart';
 import '../../domain/colony/city/traffic/lane_graph.dart';
+import '../../domain/colony/city/traffic/parked_cars.dart';
+import '../../domain/colony/city/traffic/site_manoeuvre.dart';
+import '../../domain/colony/city/traffic/site_vehicles.dart';
+import '../../domain/colony/city/traffic/vehicle_table.dart';
 import '../../domain/shared/vector3.dart';
 import 'city_traffic_frame.dart';
 import 'world_snapshot.dart';
@@ -61,9 +74,11 @@ class TrafficCapture {
 
   /// [city]'s traffic for this frame. [roads] is the capture's road list so
   /// far, holding this colony's snapshots — the ones [city]'s road loop has
-  /// just added.
+  /// just added — and [sites] the colony's site frame, the very object the
+  /// snapshot carries (§13.1: shared, never copied).
   static CityTrafficFrame frameFor(
-      CitySim city, String bodyId, List<RoadSnapshot> roads) {
+      CitySim city, String bodyId, List<RoadSnapshot> roads,
+      {CitySiteFrame? sites}) {
     final agents = city.agents;
     final lg = agents.laneGraph;
     if (lg == null) {
@@ -73,6 +88,9 @@ class TrafficCapture {
         agents: agents.frame,
         geometry: TrafficGeometry.empty,
         net: TrafficNetColumns.empty,
+        sites: sites,
+        agentManaged: agents.agentManaged,
+        agentManagedRev: agents.agentManagedRev,
       );
     }
     final c = _cache[city] ??= _Cache();
@@ -89,6 +107,7 @@ class TrafficCapture {
       c.structure = lg.laneEdge;
       c.holdDrapes(city, lg.graph);
       c.roadsRevision = city.roadsRevision;
+      c.sealed = _allSealed(geometry);
     }
     var net = c.net;
     if (net == null || !identical(c.netGraph, lg)) {
@@ -102,7 +121,24 @@ class TrafficCapture {
       agents: agents.frame,
       geometry: geometry,
       net: net,
+      sites: sites,
+      sitePoses: _SiteCars.poses(city, sites, c),
+      parked: _SiteCars.parked(city, sites, c),
+      agentManaged: agents.agentManaged,
+      agentManagedRev: agents.agentManagedRev,
     );
+  }
+
+  /// Whether every road edge of [g] is sealed: an airless world's colony,
+  /// where the cosmetic rule draws every car as a rover (§13.7). Worked out
+  /// with the geometry, so a frame reads a bool.
+  static bool _allSealed(TrafficGeometry g) {
+    final n = g.edgeSealed.length;
+    if (n == 0) return false;
+    for (var e = 0; e < n; e++) {
+      if (g.edgeSealed[e] == 0) return false;
+    }
+    return true;
   }
 
   /// The geometry of [lg] from [city]'s snapshots among [roads]: what
@@ -199,9 +235,59 @@ class _Cache {
     return true;
   }
 
+  /// Whether every road edge of [geometry] is sealed (see `_allSealed`).
+  bool sealed = false;
+
   /// The lane-graph object [net] was built from.
   LaneGraph? netGraph;
   TrafficNetColumns? net;
+
+  // ---- The site half (T4a) ---------------------------------------------------
+
+  /// Three site-pose column sets, written in turn, as the agents' own frames
+  /// are (§13.2): a set is written again only two publishes later, so a
+  /// frame a renderer still holds is never changed under it.
+  final List<_PoseSet> poseSets = [_PoseSet(), _PoseSet(), _PoseSet()];
+  int _nextPoseSet = 0;
+
+  _PoseSet takePoseSet() {
+    final set = poseSets[_nextPoseSet];
+    _nextPoseSet = (_nextPoseSet + 1) % poseSets.length;
+    return set;
+  }
+
+  /// The parked cars last published, and the site frame they were placed
+  /// against: both compared by identity, so a steady frame republishes
+  /// nothing (§7.4, §13.2).
+  ParkedColumns? parked;
+  CitySiteFrame? parkedFor;
+}
+
+/// One reusable set of site-pose columns. It grows to the most cars that
+/// have ever been inside this colony's lots at once and is then never
+/// replaced (§15.2), which on any real town is a few dozen rows.
+class _PoseSet {
+  Int32List row = Int32List(0);
+  Float32List e = Float32List(0),
+      n = Float32List(0),
+      up = Float32List(0),
+      dirE = Float32List(0),
+      dirN = Float32List(0);
+
+  int get capacity => row.length;
+
+  /// Room for one more row.
+  void grow() {
+    final was = capacity;
+    final want = was == 0 ? 16 : was * 2;
+    row = Int32List(want)..setRange(0, was, row);
+    Float32List f(Float32List a) => Float32List(want)..setRange(0, was, a);
+    e = f(e);
+    n = f(n);
+    up = f(up);
+    dirE = f(dirE);
+    dirN = f(dirN);
+  }
 }
 
 /// One road's snapshot as the slicing reads it: its points with their arc,
@@ -579,5 +665,281 @@ class _GeometryBuild {
     out[3 * n] = v.x / l;
     out[3 * n + 1] = v.y / l;
     out[3 * n + 2] = v.z / l;
+  }
+}
+
+/// The cars a site holds, placed for the frame: the ones driving inside it
+/// and the ones parked on its stalls (site-access.md §7.4–7.5, D19/D20).
+///
+/// Everything here reads the plan the SIMULATION is driving (`SiteTable`'s
+/// own view) for where a car is, and the frame's [SiteChunkGeometry] for how
+/// high the ground under it is — and only when the two are the same plan
+/// object, so a site re-planned under a car is never drawn against another
+/// revision's points. The curves are `SiteManoeuvre`'s, the very functions
+/// the site mover steps by: one definition of a turn-in, never two.
+abstract final class _SiteCars {
+  /// Scratch for one pose: east, north, dirE, dirN, and the metres above the
+  /// datum worked out beside it. Static because this runs once per car per
+  /// frame and may not allocate; safe because nothing here re-enters it.
+  static final Float64List _scratch = Float64List(8);
+
+  static final int _none = SitePhase.none.index;
+  static final int _gateHeld = SitePhase.gateHeld.index;
+  static final int _kerbBound = SitePhase.kerbBound.index;
+  static final int _inbound = SitePhase.inbound.index;
+  static final int _stallIn = SitePhase.stallIn.index;
+  static final int _stallOut = SitePhase.stallOut.index;
+  static final int _toThroat = SitePhase.toThroat.index;
+  static final int _throatWait = SitePhase.throatWait.index;
+  static final int _lot = CarWhere.lot.index;
+
+  // ---- The cars driving inside sites ----------------------------------------
+
+  /// Every vehicle inside one of [sf]'s sites, placed into the next of [c]'s
+  /// three pose sets.
+  static SitePoseColumns poses(CitySim city, CitySiteFrame? sf, _Cache c) {
+    final agents = city.agents;
+    final sites = agents.sites;
+    final cols = agents.siteVehicles;
+    final table = agents.vehicles;
+    final lg = agents.laneGraph;
+    if (sf == null ||
+        sites == null ||
+        cols == null ||
+        table == null ||
+        lg == null ||
+        sites.highWater == 0) {
+      return SitePoseColumns.empty;
+    }
+    final set = c.takePoseSet();
+    final out = _scratch;
+    final hw = table.highWater;
+    var n = 0;
+    for (var sl = 0; sl < hw; sl++) {
+      if (!table.isSlotLive(sl)) continue;
+      // A car held at a gate, or bound for a kerb slot, is still out on the
+      // street: the road geometry places it, as it always did.
+      final ph = cols.phase[sl];
+      if (ph == _none || ph == _gateHeld || ph == _kerbBound) continue;
+      final row = cols.row[sl];
+      if (row < 0 || !sites.isRowLive(row)) continue;
+      final plan = sites.plan[row];
+      if (plan == null) continue;
+      final at = sf.locate(sites.bookSlot[row]);
+      if (at == null) continue;
+      final g = at.$1, k = at.$2;
+      // The frame's heights are this very plan's, or they are no use: a site
+      // re-planned since, or a car still driving a LIMBO plan (§7.6 row 3),
+      // is left undrawn for that publish rather than put down on another
+      // revision's points.
+      if (!identical(g.plan, plan.chunk) || k != plan.site) continue;
+      if (!_poseOf(plan, g, k, table, cols, sl, lg, ph, out)) continue;
+      if (n == set.capacity) set.grow();
+      set.row[n] = sl;
+      set.e[n] = out[0];
+      set.n[n] = out[1];
+      set.dirE[n] = out[2];
+      set.dirN[n] = out[3];
+      set.up[n] = out[4];
+      n++;
+    }
+    return SitePoseColumns(
+      count: n,
+      sitesRev: sites.syncedSitesRev,
+      sealed: c.sealed,
+      row: set.row,
+      e: set.e,
+      n: set.n,
+      up: set.up,
+      dirE: set.dirE,
+      dirN: set.dirN,
+    );
+  }
+
+  /// Vehicle slot [sl]'s pose into [out] as east, north, dirE, dirN and the
+  /// metres above the datum; false when its columns describe none.
+  ///
+  /// **The pose is the car's CENTRE.** On a site lane it is taken at the
+  /// simulation's own `s` rather than half a length behind it, because a
+  /// manoeuvre's `u = 0` IS the lane pose at the stall's mouth
+  /// (`SiteManoeuvre.stallPose`): drawing both by one convention is what
+  /// makes a car turning into its stall carry on from where it was driving
+  /// rather than jump half its length.
+  static bool _poseOf(
+      SiteAccessPlan plan,
+      SiteChunkGeometry g,
+      int k,
+      VehicleTable table,
+      SiteVehicles cols,
+      int sl,
+      LaneGraph lg,
+      int ph,
+      Float64List out) {
+    final ptBase = g.plan.ptStart(k);
+    final lane = cols.lane[sl];
+    if (ph == _inbound || ph == _toThroat || ph == _throatWait) {
+      if (lane < 0 || lane >= 2 * plan.segCount) return false;
+      return _lanePose(plan, g, ptBase, lane, table.s[sl].toDouble(), out);
+    }
+    if (ph == _stallIn || ph == _stallOut) {
+      if (lane < 0 || lane >= 2 * plan.segCount) return false;
+      final stall = cols.claim[sl];
+      // A pull-out drops its stall the moment its nose is clear of it (§7.4
+      // departure step 3); from then the curve cannot be rebuilt, and the
+      // car is drawn on its aisle at the mouth — where that curve's own
+      // `u = 0` stands.
+      if (stall < 0 || stall >= plan.stallCount) {
+        return _lanePose(plan, g, ptBase, lane, table.s[sl].toDouble(), out);
+      }
+      final fwd = SiteLaneGraph.isForward(lane);
+      final dir = fwd ? kSiteDirFwd : kSiteDirBwd;
+      final u = cols.manU[sl].toDouble();
+      SiteManoeuvre.stallPose(plan, stall, dir, u, out, 0);
+      final seg = SiteLaneGraph.segOf(lane);
+      final mouth = SiteManoeuvre.mouthS(plan, stall, dir);
+      final aisle = _upAlong(
+          g, plan, ptBase, seg, fwd ? mouth : plan.segLenM(seg) - mouth);
+      final onStall = g.stallUp(g.plan.stallStart(k) + stall);
+      out[4] = aisle + (onStall - aisle) * u;
+      return true;
+    }
+    // A home back-out: waiting in its stall, reversing down the drive, or
+    // stopped in its lane to shift (§7.4 Home back-out). Its road lane is
+    // the first element of the route it locked before it moved.
+    final stall = cols.claim[sl];
+    final join = cols.join[sl];
+    if (stall < 0 ||
+        stall >= plan.stallCount ||
+        join < 0 ||
+        join >= plan.joinCount ||
+        table.routeLen[sl] <= 0) {
+      return false;
+    }
+    final road = table.arena.data[table.routeOff[sl]];
+    if (road < 0 || road >= lg.laneCount) return false;
+    final u = cols.manU[sl].toDouble();
+    SiteManoeuvre.backOutPose(plan, join, stall, road, lg, u, out, 0,
+        lenM: table.len[sl].toDouble());
+    // It reverses off the pave of its stall onto the kerb line, so its
+    // height runs between the two: the kerb node stands on the road's own
+    // drape, which is where it ends up.
+    final onStall = g.stallUp(g.plan.stallStart(k) + stall);
+    final kerbNode = plan.joinKerbNode(join);
+    final onKerb =
+        kerbNode < 0 ? onStall : g.ptUp(ptBase + plan.nodePt(kerbNode));
+    out[4] = onStall + (onKerb - onStall) * u;
+    return true;
+  }
+
+  /// The pose [s] metres along site [lane] of [plan] into [out].
+  static bool _lanePose(SiteAccessPlan plan, SiteChunkGeometry g, int ptBase,
+      int lane, double s, Float64List out) {
+    var at = s;
+    if (at < 0) at = 0;
+    SiteManoeuvre.lanePose(plan, lane, at, out, 0);
+    final seg = SiteLaneGraph.segOf(lane);
+    final len = plan.segLenM(seg);
+    if (at > len) at = len;
+    // The lane's arc runs the way the LANE does and the points the way the
+    // SEGMENT does, so a backward lane reads them from the other end.
+    out[4] = _upAlong(g, plan, ptBase, seg,
+        SiteLaneGraph.isForward(lane) ? at : len - at);
+    return true;
+  }
+
+  /// Metres above the datum at [s] along segment [seg]'s polyline, from the
+  /// heights R3 published for its points — `SiteCapture._upAlong` read from
+  /// the other side of the wire.
+  static double _upAlong(SiteChunkGeometry g, SiteAccessPlan plan, int ptBase,
+      int seg, double s) {
+    if (seg < 0 || seg >= plan.segCount) return 0;
+    final m = plan.segPointCount(seg);
+    final first = plan.segPoint(seg, 0);
+    if (m < 2) return g.ptUp(ptBase + first);
+    var acc = 0.0;
+    for (var i = 1; i < m; i++) {
+      final a = plan.segPoint(seg, i - 1), b = plan.segPoint(seg, i);
+      final de = plan.ptE(b) - plan.ptE(a), dn = plan.ptN(b) - plan.ptN(a);
+      final len = math.sqrt(de * de + dn * dn);
+      if (s <= acc + len || i == m - 1) {
+        final u = len > 0 ? ((s - acc) / len).clamp(0.0, 1.0) : 0.0;
+        final ua = g.ptUp(ptBase + a), ub = g.ptUp(ptBase + b);
+        return ua + (ub - ua) * u;
+      }
+      acc += len;
+    }
+    return g.ptUp(ptBase + first);
+  }
+
+  // ---- The cars parked on stalls --------------------------------------------
+
+  /// The colony's lot cars, rebuilt only when one came or went or the site
+  /// geometry moved, and HELD one publish whenever the agents' site revision
+  /// and the frame's disagree (§7.5): a stall index means something only
+  /// against the plan it was taken from, so a car is better drawn where it
+  /// stood a moment ago than on some other stall.
+  static ParkedColumns parked(CitySim city, CitySiteFrame? sf, _Cache c) {
+    final agents = city.agents;
+    final cars = agents.parkedCars;
+    final sites = agents.sites;
+    if (cars == null || sites == null || sf == null) return ParkedColumns.empty;
+    final held = c.parked;
+    if (sites.syncedSitesRev != sf.sitesRev) {
+      return held ?? ParkedColumns.empty;
+    }
+    if (held != null &&
+        held.parkedRev == cars.parkedRev &&
+        identical(c.parkedFor, sf)) {
+      return held;
+    }
+    final cap = cars.lotCars;
+    final site = Int32List(cap), stall = Int32List(cap);
+    final kind = Uint8List(cap), variant = Uint8List(cap);
+    final e = Float32List(cap),
+        n = Float32List(cap),
+        up = Float32List(cap),
+        dirE = Float32List(cap),
+        dirN = Float32List(cap);
+    var count = 0;
+    final hw = cars.pool.highWater;
+    for (var i = 0; i < hw && count < cap; i++) {
+      if (!cars.pool.isSlotLive(i) || cars.where[i] != _lot) continue;
+      final row = cars.row[i], st = cars.stall[i];
+      if (row < 0 || !sites.isRowLive(row)) continue;
+      final plan = sites.plan[row];
+      if (plan == null || st < 0 || st >= plan.stallCount) continue;
+      final slot = sites.bookSlot[row];
+      final at = sf.locate(slot);
+      if (at == null) continue;
+      final g = at.$1, k = at.$2;
+      if (!identical(g.plan, plan.chunk) || k != plan.site) continue;
+      site[count] = slot;
+      stall[count] = st;
+      kind[count] = cars.kind[i];
+      variant[count] = cars.variant[i];
+      // The stall pose itself (§7.4): the car's centre, its nose along the
+      // stall's direction, on the pave R3 measured under it.
+      e[count] = plan.stallE(st);
+      n[count] = plan.stallN(st);
+      dirE[count] = plan.stallDirE(st);
+      dirN[count] = plan.stallDirN(st);
+      up[count] = g.stallUp(g.plan.stallStart(k) + st);
+      count++;
+    }
+    c.parkedFor = sf;
+    return c.parked = ParkedColumns(
+      parkedRev: cars.parkedRev,
+      sitesRev: sf.sitesRev,
+      lotCount: count,
+      lotSite: site,
+      lotStall: stall,
+      lotKind: kind,
+      lotVariant: variant,
+      lotE: e,
+      lotN: n,
+      lotUp: up,
+      lotDirE: dirE,
+      lotDirN: dirN,
+    );
   }
 }

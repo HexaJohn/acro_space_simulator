@@ -32,6 +32,7 @@ import 'dart:typed_data';
 
 import 'lane_graph.dart';
 import 'node_control.dart';
+import 'site_table.dart';
 import 'site_vehicles.dart';
 import 'vehicle_table.dart';
 
@@ -42,10 +43,16 @@ import 'vehicle_table.dart';
 /// end of the edge it is held on, its dwell — so the renderer must not roll
 /// it on into its next element. [kFrameEmergency] and [kFrameDoors] are the
 /// service fleets' and the buses' (slices 5 and 9).
+///
+/// [kFrameReversing]: the car is going BACKWARDS — a stall pull-out inside a
+/// lot, or a home back-out into the street (§7.5, site-access §7.4). Its
+/// pose is the site manoeuvre's, not its element's, and on the road its
+/// followers see its footprint as a stopped obstacle.
 const int kFrameBraking = 1;
 const int kFrameStopping = 2;
 const int kFrameEmergency = 4;
 const int kFrameDoors = 8;
+const int kFrameReversing = 16;
 
 /// A deceleration past this shows brake lights, m/s²: harder than a car
 /// coasting, softer than the comfortable braking of any kind.
@@ -63,6 +70,7 @@ class AgentFrame {
     required this.timeUs,
     this.worldEpochS = 0,
     required this.graphRev,
+    this.sitesRev = 0,
     required this.handle,
     required this.elem,
     required this.next,
@@ -73,7 +81,23 @@ class AgentFrame {
     required this.kind,
     required this.variant,
     required this.flags,
-  });
+    Int32List? siteOrd,
+    Int32List? siteLane,
+  })  : siteOrd = siteOrd ?? _noSites(count),
+        siteLane = siteLane ?? _noSites(count);
+
+  /// [n] site ordinals of "not in a site". Shared and never written: a
+  /// caller that built its own columns without site business — a test, a
+  /// replay — reads −1 at every row, which is what it means.
+  static Int32List _noSites(int n) {
+    var all = _allNone;
+    if (all.length < n) {
+      all = _allNone = Int32List(n)..fillRange(0, n, -1);
+    }
+    return n == all.length ? all : Int32List.sublistView(all, 0, n);
+  }
+
+  static Int32List _allNone = Int32List(0);
 
   /// No vehicles: what a colony without agents, or before its first
   /// sub-step, publishes.
@@ -109,6 +133,12 @@ class AgentFrame {
   /// the geometry of the same revision.
   final int graphRev;
 
+  /// The site revision [siteOrd] and [siteLane] were written against
+  /// (`SiteTable.syncedSitesRev`, site-access.md §7.6): a plan's lanes and
+  /// stalls are its own revision's, so a consumer holding a site frame of
+  /// another revision must not place a car by them.
+  final int sitesRev;
+
   /// The vehicle's handle, or −1 for an empty slot.
   final Int32List handle;
 
@@ -126,6 +156,19 @@ class AgentFrame {
   /// `AgentKind` index; the opaque byte the renderer picks a model by
   /// (D42); the [kFrameBraking]… bits.
   final Uint8List kind, variant, flags;
+
+  /// The BOOK SLOT of the site the row is inside (`SiteTable.bookSlot`,
+  /// settled with the road side as the wire ordinal: t4a-implementation.md
+  /// §0 Q4), or −1 on the road. Site elements are a separate id space from
+  /// the lane graph's (D49), so a car inside a lot still publishes element
+  /// −1 and is placed by its site columns instead.
+  final Int32List siteOrd;
+
+  /// The plan-local site lane it drives while [siteOrd] is not −1
+  /// (site-access.md §2.5), or −1 while its pose is a scripted manoeuvre's —
+  /// a stall turn-in or pull-out, or a home back-out — which no lane
+  /// describes.
+  final Int32List siteLane;
 }
 
 /// One set of columns, sized to the vehicle table.
@@ -140,11 +183,14 @@ class _Columns {
         lat = Float32List(n),
         kind = Uint8List(n),
         variant = Uint8List(n),
-        flags = Uint8List(n);
+        flags = Uint8List(n),
+        siteOrd = Int32List(n),
+        siteLane = Int32List(n);
 
   final Int32List handle, elem, next;
   final Float32List s, v, a, lat;
   final Uint8List kind, variant, flags;
+  final Int32List siteOrd, siteLane;
 
   int get capacity => handle.length;
 }
@@ -162,20 +208,35 @@ class AgentFrameBuilder {
 
   static final int _driving = VehicleState.driving.index;
 
+  /// The site phases whose row is placed by its ROAD element, not by a site
+  /// one: a car held at an arrival gate and a car bound for a kerb slot are
+  /// both still out on the street (site-access.md §7.4 steps 1–4).
+  static final int _gateHeld = SitePhase.gateHeld.index;
+  static final int _kerbBound = SitePhase.kerbBound.index;
+
+  /// The phases a car is going BACKWARDS in (§7.5): out of its stall, and
+  /// the reverse and swing of a home back-out. The vehicle table's own
+  /// [kReversing] covers the back-out once it is in its lane; this covers it
+  /// while it is still on the plan.
+  static final int _stallOut = SitePhase.stallOut.index;
+  static final int _backOut = SitePhase.backOut.index;
+
   /// Writes the next column set from [table] and returns the frame over it,
   /// stamped with agent time [timeUs]. Allocates only the frame itself —
   /// and, when the table has grown, the column set it is written to.
   ///
-  /// [site] and [sitesRev] are the site columns and revision the frame will
-  /// carry (`siteOrd`/`siteLane`, site-access.md §7.6, §13.1): accepted now
-  /// so the facade can pass them, and read by nothing until the wire lands
-  /// (package F, docs/plans/t4a-implementation.md §2). A vehicle inside a
-  /// site already publishes element −1, which the renderer does not draw.
+  /// [site] and [siteRows] are the site columns and the synced site rows the
+  /// frame's `siteOrd`/`siteLane` are taken from, and [sitesRev] the
+  /// revision they mean something against (site-access.md §7.6, §13.1). A
+  /// vehicle inside a site publishes element −1 — site elements are their
+  /// own id space (D49) — and its place on the plan in the site columns
+  /// instead.
   AgentFrame publish(VehicleTable table,
       {required int timeUs,
       double worldEpochS = 0,
       int graphRev = 0,
       SiteVehicles? site,
+      SiteTable? siteRows,
       int sitesRev = 0}) {
     final k = _next;
     var set = _sets[k];
@@ -195,6 +256,8 @@ class AgentFrameBuilder {
         set.kind[sl] = 0;
         set.variant[sl] = 0;
         set.flags[sl] = 0;
+        set.siteOrd[sl] = -1;
+        set.siteLane[sl] = -1;
         continue;
       }
       final acc = table.a[sl];
@@ -202,6 +265,21 @@ class AgentFrameBuilder {
       if (table.state[sl] != _driving || table.flags[sl] & kRefused != 0) {
         bits |= kFrameStopping;
       }
+      if (table.flags[sl] & kReversing != 0) bits |= kFrameReversing;
+      var ord = -1, lane = -1;
+      if (site != null && siteRows != null) {
+        final ph = site.phase[sl];
+        if (ph != 0 && ph != _gateHeld && ph != _kerbBound) {
+          final row = site.row[sl];
+          if (row >= 0 && row < siteRows.bookSlot.length) {
+            ord = siteRows.bookSlot[row];
+            lane = site.lane[sl];
+          }
+        }
+        if (ph == _stallOut || ph == _backOut) bits |= kFrameReversing;
+      }
+      set.siteOrd[sl] = ord;
+      set.siteLane[sl] = lane;
       set.handle[sl] = table.handleOf(sl);
       set.elem[sl] = table.elem[sl];
       set.next[sl] = table.nextElemOf(sl);
@@ -220,6 +298,7 @@ class AgentFrameBuilder {
       timeUs: timeUs.toDouble(),
       worldEpochS: worldEpochS,
       graphRev: graphRev,
+      sitesRev: sitesRev,
       handle: set.handle,
       elem: set.elem,
       next: set.next,
@@ -230,6 +309,8 @@ class AgentFrameBuilder {
       kind: set.kind,
       variant: set.variant,
       flags: set.flags,
+      siteOrd: set.siteOrd,
+      siteLane: set.siteLane,
     );
   }
 }

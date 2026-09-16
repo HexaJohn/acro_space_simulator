@@ -29,8 +29,15 @@ import 'package:acro_space_simulator/domain/colony/city/road_graph.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_junction.dart';
 import 'package:acro_space_simulator/domain/colony/city/sprawl_plan.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/agent_frame.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/city_agents.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/lane_graph.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/node_control.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/site_manoeuvre.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/site_mover.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/site_vehicles.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/slot_pool.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/traffic_time.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/traffic_tuning.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/road_mesher.dart';
 import 'package:acro_space_simulator/infrastructure/sample_world.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -570,4 +577,111 @@ void main() {
       expect(phases[RoadClass.avenue], isNot(phases[RoadClass.street]));
     });
   });
+
+  group('the sites on the wire (T4a, site-access.md §7.4-7.5)', () {
+    // A forced trip and nothing else on the road, so the one car inside the
+    // lot is the one the test asked for.
+    setUp(() => AgentTuning.commuteRatePerResident = 0);
+    tearDown(AgentTuning.reset);
+
+    test('a car inside a site is placed off the plan, and parks where it '
+        'was last drawn', () {
+      final city = starterKit(agentTraffic: true);
+      final a = city.agents;
+      final trip = a.forceTrip('lot-m2', 'lot-m3');
+      expect(trip, isNot(SlotPool.none), reason: 'both sites are built');
+      final cols = a.siteVehicles!;
+      final table = a.vehicles!;
+
+      // 1. Drive it in. The gate hands it over to the site lanes, and from
+      // there it is on no road element at all.
+      var slot = -1;
+      for (var i = 0; i < 900 && slot < 0; i++) {
+        a.advance(kStepS);
+        slot = _phaseSlot(a, SitePhase.inbound);
+      }
+      expect(slot, greaterThanOrEqualTo(0),
+          reason: 'the car drove into the pump lot');
+
+      final f1 = capture(city).cityTraffic.single;
+      expect(f1.sites, isNotNull);
+      final row = cols.row[slot];
+      expect(f1.agents.elem[slot], -1, reason: 'a site is no road element');
+      expect(f1.agents.siteOrd[slot], a.sites!.bookSlot[row]);
+      expect(f1.agents.siteLane[slot], cols.lane[slot]);
+      expect(f1.agents.sitesRev, a.sites!.syncedSitesRev);
+      expect(f1.sitePoses.sitesRev, f1.sites!.sitesRev);
+      var k = -1;
+      for (var i = 0; i < f1.sitePoses.count; i++) {
+        if (f1.sitePoses.row[i] == slot) k = i;
+      }
+      expect(k, greaterThanOrEqualTo(0), reason: 'the capture placed it');
+      // On the very curve the simulation drives, at its own arc: the pose is
+      // the car's CENTRE at `s`, which is where a stall manoeuvre's `u = 0`
+      // begins, so the two never disagree by half a car.
+      final want = Float64List(4);
+      SiteManoeuvre.lanePose(a.sites!.plan[row]!, cols.lane[slot],
+          table.s[slot].toDouble(), want, 0);
+      expect(f1.sitePoses.e[k], closeTo(want[0], 0.01));
+      expect(f1.sitePoses.n[k], closeTo(want[1], 0.01));
+      expect(f1.sitePoses.dirE[k], closeTo(want[2], 1e-6));
+      expect(f1.sitePoses.dirN[k], closeTo(want[3], 1e-6));
+
+      // 2. It turns into its stall. The last pose drawn while it was still
+      // a vehicle is where the parked car has to appear.
+      var lastE = double.nan, lastN = double.nan, lastUp = double.nan;
+      for (var i = 0; i < 900 && a.parkedCars!.lotCars == 0; i++) {
+        a.advance(kStepS);
+        final s = _phaseSlot(a, SitePhase.stallIn);
+        if (s < 0 || cols.manU[s] < 0.9) continue;
+        final f = capture(city).cityTraffic.single;
+        for (var j = 0; j < f.sitePoses.count; j++) {
+          if (f.sitePoses.row[j] != s) continue;
+          lastE = f.sitePoses.e[j];
+          lastN = f.sitePoses.n[j];
+          lastUp = f.sitePoses.up[j];
+        }
+      }
+      expect(a.parkedCars!.lotCars, 1, reason: 'it parked');
+      expect(lastE, isNot(isNaN), reason: 'and it was drawn on its way in');
+
+      final f2 = capture(city).cityTraffic.single;
+      expect(f2.parked.lotCount, 1);
+      expect(f2.parked.lotSite[0], a.sites!.bookSlot[row]);
+      final de = f2.parked.lotE[0] - lastE, dn = f2.parked.lotN[0] - lastN;
+      final du = f2.parked.lotUp[0] - lastUp;
+      final moved = math.sqrt(de * de + dn * dn + du * du);
+      // One sub-step of the manoeuvre is the most it can have moved between
+      // the last sample and the stall it lands on, and the failure this
+      // guards against — the wrong stall, or the aisle — is metres away.
+      expect(moved, lessThan(kStallManoeuvreMps * kStepS + 0.05),
+          reason: 'the vehicle row went and the parked car took its place, '
+              'in the same spot: ${moved.toStringAsFixed(3)} m apart');
+      // ignore: avoid_print
+      print('site wire: the parked car appeared '
+          '${(moved * 1000).round()} mm from where the vehicle was drawn');
+      expect(f2.sitePoses.count, 0, reason: 'nothing is inside the lot now');
+
+      // 3. And a steady frame republishes nothing and asks the ground
+      // nothing, the site half included.
+      final q0 = WorldSnapshot.groundQueries;
+      final f3 = capture(city).cityTraffic.single;
+      expect(WorldSnapshot.groundQueries - q0, 0);
+      expect(identical(f3.parked, f2.parked), isTrue);
+      expect(identical(f3.sites, f2.sites), isTrue);
+    });
+  });
+}
+
+/// The slot of [a]'s one vehicle in [phase], or −1: the site business is
+/// read off the columns rather than the trip, because a car that has been
+/// handed to a site is no longer the trip's to name.
+int _phaseSlot(CityAgents a, SitePhase phase) {
+  final t = a.vehicles;
+  final cols = a.siteVehicles;
+  if (t == null || cols == null) return -1;
+  for (var s = 0; s < t.highWater; s++) {
+    if (t.isSlotLive(s) && cols.phase[s] == phase.index) return s;
+  }
+  return -1;
 }
