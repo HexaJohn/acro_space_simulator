@@ -56,6 +56,11 @@ String? envelopeClaimedId;
 /// The grid cell the fixture stands [envelopeCellSpec] on.
 int? envelopeCell;
 
+/// The id of the lot whose plan has NO envelope, once [envelopeTown] has made
+/// one: a published plan with nothing to stand on, which is legacy on both
+/// sides of the knob (§5.2).
+String? envelopeNoEnvelopeId;
+
 /// The site town, with a shop, a works, a frontage-less claimed plot and a
 /// grid-cell utility added, every plan drained.
 CitySim envelopeTown() {
@@ -84,6 +89,13 @@ CitySim envelopeTown() {
   // And a grid-cell utility, whose stored north edge is fake.
   envelopeCell = _cell(city);
 
+  // A lot whose stored frontage is 2.5 m wide: the site frame is that wide,
+  // so no rectangle fits inside the side setbacks and the plan is published
+  // with an EMPTY envelope. Such a site has nothing to stand on, so it is
+  // legacy on BOTH sides of the knob (§5.2) — this is the fixture that says
+  // so.
+  envelopeNoEnvelopeId = _narrowFrontage(city)?.id;
+
   city.advance(0.5);
   final done = city.siteAccess.sync(city, city.roadGraph,
       maxUnits: SiteAccessBook.unlimited, maxChecks: SiteAccessBook.unlimited);
@@ -99,6 +111,29 @@ Parcel? _claim(CitySim city) {
     for (var e = -1200.0; e <= 1200; e += 200) {
       final lot = city.claimSite(envelopeClaimSpec, Vec2(e, n));
       if (lot != null) return lot;
+    }
+  }
+  return null;
+}
+
+/// Stakes a 30 m lot with a 2.5 m stored FRONTAGE near the north street and
+/// builds on it, or null when nothing takes. The site frame is as wide as the
+/// frontage, so `largestFreeRect` finds nothing inside the 1.5 m side
+/// setbacks and the kerbside plan carries `SiteEnvelope.empty` (§6.1).
+Parcel? _narrowFrontage(CitySim city) {
+  for (var n = 405.0; n <= 600; n += 15) {
+    for (var e = -300.0; e <= 400; e += 25) {
+      final poly = [
+        Vec2(e, n),
+        Vec2(e + 30, n),
+        Vec2(e + 30, n + 30),
+        Vec2(e, n + 30),
+      ];
+      final mid = e + 15;
+      final p = city.layout.addManualParcel(poly,
+          frontage: (Vec2(mid - 1.25, n), Vec2(mid + 1.25, n)));
+      if (p == null) continue;
+      if (city.placeOnParcel(p.id, envelopeShop)) return p;
     }
   }
   return null;

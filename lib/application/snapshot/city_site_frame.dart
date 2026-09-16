@@ -536,10 +536,10 @@ class SiteCapture {
   }
 
   /// [siteId]'s book slot and the plan's gate, for its building: slot −1
-  /// (legacy) when it has no published plan, or when the book's slot table
-  /// and the chunks this capture holds disagree on the row (the book moved
-  /// since [begin]). `gateXM` is along the building's local X from the
-  /// envelope centre.
+  /// (legacy) when it has no published plan, when that plan has no envelope
+  /// to stand on, or when the book's slot table and the chunks this capture
+  /// holds disagree on the row (the book moved since [begin]). `gateXM` is
+  /// along the building's local X from the envelope centre.
   (int, double, double) buildingSiteOf(String siteId) {
     final p = placementOf(siteId);
     return p == null ? (-1, 0, 0) : (p.slot, p.gateXM, p.gateWM);
@@ -549,9 +549,11 @@ class SiteCapture {
   /// the envelope it stands on, the heading it takes and its gate, all read
   /// off the published plan.
   ///
-  /// Null on the same terms as [buildingSiteOf]: no published plan, or the
-  /// book's slot table and the chunks this capture holds disagree on the row
-  /// (the book moved since [begin]).
+  /// Null on the same terms as [buildingSiteOf]: no published plan, a plan
+  /// whose ENVELOPE is empty (a degenerate or fully paved site: there is
+  /// nothing to stand on, so the building is legacy — placed AND drawn, which
+  /// is one predicate, not two), or the book's slot table and the chunks this
+  /// capture holds disagree on the row (the book moved since [begin]).
   SitePlacement? placementOf(String siteId) {
     final book = _city.siteAccess;
     final slot = book.slotOf(siteId);
@@ -565,6 +567,13 @@ class SiteCapture {
       return null;
     }
     final chunk = _chunks[c];
+    // An empty envelope is not a site to draw on: the wire says legacy, so
+    // the renderer's "plan-served" test (`siteSlot >= 0`) and the placement's
+    // cannot part company and stand a building beside its own driveway.
+    if (chunk.envX1(row) - chunk.envX0(row) <= 0 ||
+        chunk.envY1(row) - chunk.envY0(row) <= 0) {
+      return null;
+    }
     final gw = chunk.gateW(row);
     final centreX = (chunk.envX0(row) + chunk.envX1(row)) / 2;
     final (e, n) = CitySiteFrame.envelopeCentreLocal(chunk, row);

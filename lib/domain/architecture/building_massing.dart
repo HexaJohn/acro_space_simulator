@@ -398,8 +398,9 @@ class BuildingMassingRules {
     return (v.x.abs() + hw, v.y.abs() + hd);
   }
 
-  /// Leave the gate lane clear (§6.2): a fence run across it is cut open at
-  /// the gate, and anything else standing in it is dropped.
+  /// Stand the front fence line on the envelope's front edge and leave the
+  /// gate lane clear (§6.2, §3.7 step 9): a fence run across the lane is cut
+  /// open at the gate, and anything else standing in it is dropped.
   ///
   /// Done on the finished volumes rather than inside each installation's own
   /// list, so a gate opens every fence line there is (and none of the eight
@@ -410,9 +411,17 @@ class BuildingMassingRules {
     final y0 = -_envelopeDepth(spec, parcel) / 2;
     final y1 = y0 + SiteGate.laneDepthM;
     final gx0 = gate.xM - gate.widthM / 2, gx1 = gate.xM + gate.widthM / 2;
+    final line = _frontFenceLine(m, gate, y0, y1, gx0, gx1);
     var changed = false;
     final kept = <MassBox>[];
-    for (final v in m.volumes) {
+    for (final raw in m.volumes) {
+      // §3.7 step 9: the PLAN's fence line is the envelope's front edge, and
+      // gate node G stands on it. Each installation lays its own fence out in
+      // nominal metres a few inside that line, which would end the drive short
+      // of the gap it is drawn to pass through — so the front run, and the
+      // side runs that met it, move out onto the edge first.
+      final v = _onFrontEdge(raw, line, y0);
+      if (!identical(v, raw)) changed = true;
       final vy0 = v.y - v.depth / 2, vy1 = v.y + v.depth / 2;
       final vx0 = v.x - v.width / 2, vx1 = v.x + v.width / 2;
       if (vy1 <= y0 || vy0 >= y1 || vx1 <= gx0 || vx0 >= gx1) {
@@ -461,6 +470,81 @@ class BuildingMassingRules {
       corner: m.corner,
     );
   }
+
+  /// How far off the front fence line a run may sit and still count as part
+  /// of it, metres. A fence is laid out in one statement per side, so its
+  /// runs meet to the bit; this is float slack, not a search radius.
+  static const double _fenceLineTolM = 0.05;
+
+  /// The y of the massing's own front fence line, or null when there is no
+  /// fence to move: the front-most thin run standing across the gate lane.
+  ///
+  /// Null too when that run is already on the envelope's front edge, so a
+  /// massing that needs nothing done is returned untouched.
+  double? _frontFenceLine(BuildingMassing m, SiteGate gate, double y0,
+      double y1, double gx0, double gx1) {
+    double? found;
+    for (final v in m.volumes) {
+      if (v.shape != MassShape.box ||
+          v.yaw != 0 ||
+          v.floors != 0 ||
+          v.depth > 1.0 ||
+          v.width <= gate.widthM) {
+        continue;
+      }
+      if (v.y < y0 || v.y > y1) continue;
+      if (v.x - v.width / 2 >= gx1 || v.x + v.width / 2 <= gx0) continue;
+      final f = found;
+      if (f == null || v.y < f) found = v.y;
+    }
+    final f = found;
+    if (f == null || f <= y0 + _fenceOnEdgeTolM) return null;
+    return f;
+  }
+
+  /// A fence line closer than this to the edge already stands on it.
+  static const double _fenceOnEdgeTolM = 0.01;
+
+  /// [v] moved out onto the envelope's front edge [y0] when it belongs to the
+  /// front fence line [line] (§6.2): the run along the frontage stands with
+  /// its outer face on the edge (so it is still inside the envelope), and a
+  /// run into the lot that met it is lengthened to reach it, which keeps the
+  /// fence's corners closed.
+  MassBox _onFrontEdge(MassBox v, double? line, double y0) {
+    if (line == null ||
+        v.shape != MassShape.box ||
+        v.yaw != 0 ||
+        v.floors != 0) {
+      return v;
+    }
+    if (v.depth <= 1.0 && v.width > 1.0) {
+      if ((v.y - line).abs() > _fenceLineTolM) return v;
+      return _movedInDepth(v, y0 + v.depth / 2, v.depth);
+    }
+    if (v.width <= 1.0 && v.depth > 1.0) {
+      if ((v.y - v.depth / 2 - line).abs() > _fenceLineTolM) return v;
+      final rear = v.y + v.depth / 2;
+      return _movedInDepth(v, (y0 + rear) / 2, rear - y0);
+    }
+    return v;
+  }
+
+  /// [v] at [y], [depth] deep; everything else as it was.
+  MassBox _movedInDepth(MassBox v, double y, double depth) => MassBox(
+        x: v.x,
+        y: y,
+        z: v.z,
+        width: v.width,
+        depth: depth,
+        height: v.height,
+        floors: v.floors,
+        glazed: v.glazed,
+        shape: v.shape,
+        topScale: v.topScale,
+        yaw: v.yaw,
+        tilt: v.tilt,
+        material: v.material,
+      );
 
   /// [m] as a PLAN-SERVED massing (§6.2): its car park is the plan's, and its
   /// entrance is the gate on the envelope's front edge [frontEdge]. Used by

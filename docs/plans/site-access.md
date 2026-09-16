@@ -1799,7 +1799,15 @@ class SiteChunkGeometry {                  // ≤ 3 retained objects: itself, on
     - **Cells** are placed from the envelope centre as a tangent offset (`SurfacePlacement.place`), keeping the
       cell's own reported elevation — the envelope is at most half a cell from where the cell stood, and no new
       terrain query is made.
-    - An empty envelope (zero width or depth) keeps the legacy placement: there is nothing to stand on.
+    - An empty envelope (zero width or depth) keeps the legacy placement: there is nothing to stand on. **That is
+      ONE predicate, in `SiteCapture.placementOf`,** which returns null for such a plan — so the building's wire
+      `siteSlot` is −1 and the renderer's own test for plan-served (`CityTileMesher.gateOf`: `siteSlot ≥ 0`) reads
+      the same fact. Placed one way and drawn the other, a building would be front-aligned and stripped of its car
+      park against a legacy footprint that is not an envelope. The case is reachable: `kerbsideEnvelope` returns
+      `SiteEnvelope.empty` without a frame, or where `largestFreeRect` finds nothing inside the 1.5 m side setbacks
+      (a site frame narrower than 3 m), and `emitKerbOnly` publishes that plan with an interior-point door. The site
+      keeps its row in the chunks — only the BUILDING reads legacy; a kerbside plan has no paving to draw.
+      Pinned by `envelope_axes_test` over a fixture lot staked with a 2.5 m stored frontage.
 - **`RoadSnapshot.kerbCuts`:** a `Float64List` of quintuples (below): the renderer's COPY of the canonical
   `KerbCuts` (§5.5), converted to the snapshot's own drawn arc.
   - Built in the road loop (world_snapshot.dart:2763-2786) from `siteAccess` cut joins.
@@ -2099,6 +2107,16 @@ spun by `−SiteFrame.buildingHeading` (§3.1), so envelope x/y ARE the building
   volume standing in the lane is dropped, and a thin axis-aligned run ACROSS it is cut into the two pieces either
   side (`_openGateLane`). One pass opens every fence line there is — solar farm, aquifer, spaceport and anything
   later — and none of the eight nominal-coordinate lists has to learn about plans.
+  - **The same pass stands that fence line on the envelope's front edge** (the rule above, and §3.7 step 9). Each
+    installation lays its fence out in its OWN nominal metres, inset from the plot it fills and scaled with it, so
+    the run the gate is cut in stood behind the plan's fence line `y = Df`: measured on `envelopeTown()`, solar farm
+    2.00 m, aquifer 3.38 m, spaceport 7.49 m — the drive would have ended that far short of the gap it is drawn to
+    pass through. `_frontFenceLine` finds the front-most thin run standing across the gate lane and `_onFrontEdge`
+    moves that line out: the run along the frontage stands with its OUTER FACE on `y = −envelopeDepth/2` (it has to,
+    or its own thickness would stand outside the envelope, so its centre is half its 0.12–0.15 m thickness inside),
+    and the runs into the lot that met it are lengthened to reach it, which keeps the fence's front corners closed.
+    A massing whose fence is already on the edge, and every massing with no fence across its gate (the starter
+    farm), is returned untouched.
 - **A plan-served massing is clipped to the envelope** (`_clipToEnvelope`, 0.05 m of floating-point tolerance) the
   way `_clipToParcel` clips to the lot line. The street massings fit by construction, but an installation lays its
   yard out in NOMINAL metres and overhangs its plot by a few (measured: one volume of 90 on the aquifer, none on the
@@ -2638,8 +2656,11 @@ starter kit and pass V1–V13 on its graph under all five A2 override kinds. The
   - **As built (track B):** `envelope_axes_test`, `entrance_matches_door_test` and `envelope_containment_test` live in
     `test/flutter_scene/`, over one fixture (`site_envelope_fixture.dart`: the site town plus a frontage-less claimed
     plot and a grid-cell utility, the two §10.2 Q10 cases). The gate tests are inside `envelope_axes_test` — the
-    drawn gate point against the plan's `gateX` on the envelope's front edge (0.05 m), the lane clear, and a fence
-    run ending exactly on the lane edge — since they share its scene. `envelope_axes_test` also carries the knob-off
+    drawn gate point against the plan's `gateX` on the envelope's front edge (0.05 m), the lane clear, a fence
+    run ending exactly on the lane edge, and that run's OWN drawn y — its outer face — on the plan's `envY0` to the
+    same 0.05 m, over at least three fenced sites (without the §6.2 move it stands 2.0–7.5 m inside) — since they
+    share its scene. The fixture also stakes a lot with a 2.5 m stored frontage, whose plan is published with an
+    EMPTY envelope: its building must read legacy on both sides of the knob (§5.2). `envelope_axes_test` also carries the knob-off
     identity check (position, spin and site size equal to `ofParcel`'s legacy values, building by building), and
     `city_lighting_test` gains the masts-from-`lampPt` case (§8.2). Containment is checked at the full and exterior
     tiers; the block tier draws from the coarse library, where half a bucket of silhouette is the point.

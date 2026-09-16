@@ -100,7 +100,7 @@ void main() {
   });
 
   test('the massing\'s gate gap lies on the plan\'s gate edge', () {
-    var checked = 0, cut = 0;
+    var checked = 0, cut = 0, fenced = 0;
     for (final b in scene.buildings) {
       final plan = scene.planOf(b);
       if (plan == null || !(plan.gateW > 0)) continue;
@@ -142,6 +142,7 @@ void main() {
       // Where there IS a fence line across the front, the gap is cut in it
       // exactly at the gate: a run ends on one edge of the lane, and
       // (unless the gate is at a corner) another starts on the other.
+      double? front;
       for (final vol in built.massing.volumes) {
         if (vol.depth > 1.0 || vol.width < 2 || vol.floors != 0) continue;
         if (vol.y - vol.depth / 2 > y0 + 12 || vol.y + vol.depth / 2 < y0) {
@@ -151,7 +152,27 @@ void main() {
         if ((x1 - (canon.xM - canon.widthM / 2)).abs() < 1e-6 ||
             (x0 - (canon.xM + canon.widthM / 2)).abs() < 1e-6) {
           cut++;
+          final f = front;
+          if (f == null || vol.y - vol.depth / 2 < f) {
+            front = vol.y - vol.depth / 2;
+          }
         }
+      }
+      // ...and that run stands ON the plan's fence line, not a few metres
+      // inside it: §3.7 step 9 puts gate node G on `envY0`, where the access
+      // road ends, so the gap and the end of the drive are the same place.
+      // The run is laid with its OUTER FACE on the line (it has to be, or its
+      // own thickness would stand outside the envelope), so the face is the
+      // number pinned here, to the 0.05 m the gate point above is pinned to.
+      final f = front;
+      if (f != null) {
+        fenced++;
+        final at = scene.drawn(b, gate.xM, f);
+        final into =
+            (at.e - plan.frameE) * v.e + (at.n - plan.frameN) * v.n;
+        expect(into, closeTo(plan.envY0, 0.05),
+            reason: '${b.id}: the cut fence run stands off the plan\'s '
+                'fence line');
       }
     }
     expect(checked, greaterThanOrEqualTo(4),
@@ -159,6 +180,39 @@ void main() {
     expect(cut, greaterThanOrEqualTo(1),
         reason: 'a fence run across the front is CUT at the gate, not '
             'deleted');
+    expect(fenced, greaterThanOrEqualTo(3),
+        reason: 'the solar farm, the aquifer and the spaceport all fence '
+            'their frontage');
+  });
+
+  test('a plan with no envelope is legacy on both sides of the knob', () {
+    final id = envelopeNoEnvelopeId;
+    expect(id, isNotNull, reason: 'the fixture stakes a narrow-frontage lot');
+    // The plan IS published — it just has nothing to stand on.
+    final plan = city.siteAccess.planOf(id!);
+    expect(plan, isNotNull);
+    expect(plan!.envX1 - plan.envX0, 0);
+    expect(plan.envY1 - plan.envY0, 0);
+    expect(city.siteAccess.slotOf(id), greaterThanOrEqualTo(0));
+
+    final b = scene.buildings.firstWhere((b) => b.id == id);
+    // So the wire says legacy...
+    expect(b.siteSlot, -1,
+        reason: 'an empty envelope is not a site to stand on');
+    // ...the renderer agrees (one predicate, not two: a building DRAWN
+    // plan-served but PLACED the legacy way stands beside its own
+    // driveway)...
+    expect(scene.gateOf(b), isNull);
+    // ...and it is placed exactly where the legacy path puts it.
+    final parcel = city.layout.parcelById(id)!;
+    final legacy = BuildingSnapshot.ofParcel(
+        city, parcel, city.parcelBuildings[id]!, city.body,
+        siteRadiusM: city.groundCache['lot:$id']!.radius);
+    expect(b.px, legacy.px);
+    expect(b.py, legacy.py);
+    expect(b.qw, legacy.qw);
+    expect(b.siteWidthM, legacy.siteWidthM);
+    expect(b.siteDepthM, legacy.siteDepthM);
   });
 
   test('with the knob off every served building is placed the legacy way',
@@ -182,8 +236,16 @@ void main() {
       expect(b.qz, legacy.qz, reason: b.id);
       expect(b.siteWidthM, legacy.siteWidthM, reason: b.id);
       expect(b.siteDepthM, legacy.siteDepthM, reason: b.id);
-      // ...and the slot and gate still ride the wire, as R3 left them.
-      expect(b.siteSlot, city.siteAccess.slotOf(b.id), reason: b.id);
+      // ...and the slot and gate still ride the wire, as R3 left them —
+      // except on a plan with no envelope, which is legacy either way (see
+      // 'a plan with no envelope is legacy on both sides of the knob').
+      final plan = city.siteAccess.planOf(b.id);
+      final slot = plan == null ||
+              plan.envX1 - plan.envX0 <= 0 ||
+              plan.envY1 - plan.envY0 <= 0
+          ? -1
+          : city.siteAccess.slotOf(b.id);
+      expect(b.siteSlot, slot, reason: b.id);
       final on = scene.buildings.firstWhere((x) => x.id == b.id);
       if (on.px != b.px || on.py != b.py || on.pz != b.pz) moved++;
     }
