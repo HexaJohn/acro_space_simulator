@@ -12,9 +12,11 @@ import '../../terrain/terrain_brush.dart';
 import '../../terrain/terrain_lod.dart';
 import '../surface_placement.dart';
 import 'city_building_spec.dart';
+import 'city_layout.dart';
 import 'city_sim.dart';
 import 'parcel.dart';
 import 'site_access/site_grade.dart';
+import 'spatial_index.dart';
 
 /// The lateral resolution the renderer meshes chunk [k] of a body of
 /// [radiusM] at among the edit [brushes] near it: [editResolutionFor], a
@@ -388,9 +390,10 @@ class CityTerrainShaper {
   /// times a segment.
   final double siteCorridorReliefTolM;
 
-  /// How far (m) a site's access corridor eases back into the ground past
-  /// the width it levels: §6.3's `min(roadFalloffM, clearance)`, with the
-  /// clearance taken as the corridor's own levelled half width.
+  /// The CAP (m) on how far a site's access corridor eases back into the
+  /// ground past the width it levels — §6.3's `roadFalloffM` half of
+  /// `min(roadFalloffM, clearance)`, tightened to the corridor's own levelled
+  /// half width.
   ///
   /// Narrower than a road's on purpose. Sites stand shoulder to shoulder,
   /// and a six-metre ease reaches nine metres from the chord: on the dev
@@ -399,7 +402,109 @@ class CityTerrainShaper {
   /// reads back one corridor's own datums, not the whole composed field, so
   /// a neighbour that reaches into a corridor is a drawing error, not a
   /// softer edge.
+  ///
+  /// The CLEARANCE half is [siteCorridorClearanceM], measured per segment:
+  /// this cap alone is not a clearance, and on a generated town it buried
+  /// the neighbours (§6.3 as built, the R5 review round 2).
   double siteCorridorFalloffM(double halfM) => math.min(roadFalloffM, halfM);
+
+  /// §6.3's `clearance`: the plan distance (m) from the chord [a] → [b] to
+  /// the nearest OTHER graded parcel's boundary, or infinity where no graded
+  /// parcel lies within [reachM] of it.
+  ///
+  /// This is the whole of the R5 review's round-2 repair. A corridor's ease
+  /// is a full-weight edit at its levelled edge falling to nothing
+  /// [siteCorridorFalloffM] further out, and at a drive's 4.0–4.5 m half
+  /// width that reaches 8–9 m from the chord — past the lot line of any
+  /// generated town. The ground it moved out there is ground a NEIGHBOUR's
+  /// paving is still drawn on: its own pad datum, cut before this corridor
+  /// and never re-cut, because the site section records each lot's
+  /// `sitepad:` re-cut ahead of the corridors. On a 2-block town that left
+  /// one lot 1.25 m under its own pad, and on a 4-block town 139 plan points
+  /// over 0.1 m and 75 over 0.5 m.
+  ///
+  /// Only GRADED parcels: a draped lot is drawn on the land, whatever the
+  /// land does. Only OTHER parcels: the corridor's far end IS this site's
+  /// own pad, and it must reach it — the site's own platform is a clearance
+  /// too, but a lateral distance is the wrong way to measure it, and the
+  /// call site handles it by the length of the chord ON the parcel instead.
+  ///
+  /// A lot the chord runs THROUGH is skipped as well: measured from its
+  /// boundary it reads as a hard zero, and a lot the corridor already
+  /// crosses cannot be a clearance from it. That is the set-back throat's
+  /// case exactly (§3.7a) — it crosses a row of unbuilt access easements on
+  /// purpose, and it is the lots BESIDE them that its ease must not reach.
+  /// Without it every starter-kit throat would lose its verge and become a
+  /// vertical-walled trench up to 40 m deep.
+  ///
+  /// Plan distance, as everything about a corridor is (`planLevel`), over
+  /// [CityLayout.parcelsNear] in plat order: no hashing, no iteration order
+  /// to depend on, and a box no wider than the ease can reach.
+  static double siteCorridorClearanceM(
+      CityLayout layout, String ownId, Vec2 a, Vec2 b, double reachM) {
+    final box = Box2(
+      (a.e < b.e ? a.e : b.e) - reachM,
+      (a.n < b.n ? a.n : b.n) - reachM,
+      (a.e > b.e ? a.e : b.e) + reachM,
+      (a.n > b.n ? a.n : b.n) + reachM,
+    );
+    var best = double.infinity;
+    for (final p in layout.parcelsNear(box)) {
+      if (!p.graded || p.id == ownId) continue;
+      final poly = p.polygon;
+      if (poly.length < 3) continue;
+      if (_chordCrosses(p, a, b)) continue;
+      for (var i = 0; i < poly.length; i++) {
+        final d = _segSegDistM(a, b, poly[i], poly[(i + 1) % poly.length]);
+        if (d < best) best = d;
+      }
+    }
+    return best;
+  }
+
+  /// Does the chord [a] → [b] run through [parcel]? Sampled every
+  /// [_crossSampleM] along it, which is the same answer a clip would give
+  /// for anything as wide as a lot and is what `SiteCorridorRun` measures
+  /// its off-parcel stretch with.
+  static bool _chordCrosses(Parcel parcel, Vec2 a, Vec2 b) {
+    final len = a.distanceTo(b);
+    final n = len <= _crossSampleM ? 1 : (len / _crossSampleM).ceil();
+    for (var i = 0; i <= n; i++) {
+      final t = i / n;
+      if (parcel.contains(Vec2(a.e + (b.e - a.e) * t, a.n + (b.n - a.n) * t))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  static const double _crossSampleM = 2;
+
+  /// The least plan distance (m) between the segments [a] → [b] and
+  /// [c] → [d]: zero where they cross, otherwise the nearest of the four
+  /// point-to-segment distances.
+  static double _segSegDistM(Vec2 a, Vec2 b, Vec2 c, Vec2 d) {
+    double cross(Vec2 o, Vec2 p, Vec2 q) =>
+        (p.e - o.e) * (q.n - o.n) - (p.n - o.n) * (q.e - o.e);
+    final d1 = cross(c, d, a), d2 = cross(c, d, b);
+    final d3 = cross(a, b, c), d4 = cross(a, b, d);
+    if (((d1 > 0) != (d2 > 0)) && ((d3 > 0) != (d4 > 0))) return 0;
+    var m = _pointSegDistM(a, c, d);
+    final m2 = _pointSegDistM(b, c, d);
+    if (m2 < m) m = m2;
+    final m3 = _pointSegDistM(c, a, b);
+    if (m3 < m) m = m3;
+    final m4 = _pointSegDistM(d, a, b);
+    return m4 < m ? m4 : m;
+  }
+
+  static double _pointSegDistM(Vec2 p, Vec2 a, Vec2 b) {
+    final ex = b.e - a.e, en = b.n - a.n;
+    final len2 = ex * ex + en * en;
+    var t = len2 <= 1e-12 ? 0.0 : ((p.e - a.e) * ex + (p.n - a.n) * en) / len2;
+    t = t < 0 ? 0 : (t > 1 ? 1 : t);
+    return p.distanceTo(Vec2(a.e + ex * t, a.n + en * t));
+  }
 
   /// Site access corridors and the pads they grade to
   /// (docs/plans/site-access.md §6.3): each plan's drive and access road cut
@@ -505,6 +610,38 @@ class CityTerrainShaper {
           final key = SiteGrade.corridorKey(id, rev, run.segs[i]);
           if (city.shapedTerrain.contains(key)) continue;
           final (d0, d1) = run.datumsOf(i, padDatum, kerbDatum);
+          // §6.3's `falloffM = min(roadFalloffM, clearance)`, with the
+          // clearance a real clearance: how far this segment's chord stands
+          // from the nearest other graded lot line, less the width the
+          // corridor levels. The ease stops at the lot line, so it cannot
+          // move ground the neighbour's paving is still drawn on its own pad
+          // datum ([siteCorridorClearanceM]). Where there is room it is the
+          // cap, exactly as it was.
+          //
+          // A segment that runs ON the lot it serves has no clearance at
+          // all: every metre beside it is this site's OWN platform, levelled
+          // to `padDatum` and re-cut under `sitepad:` just above — before
+          // this corridor, so nothing puts it back. A house drive climbing
+          // its front garden pulled the lot's own paving 2.18 m under the
+          // ground that way (lot-r3x1x1x0-l4 on the 4-block town). Measured
+          // by the chord's on-parcel length, not by a lateral distance: a
+          // set-back throat ENDS on its own lot line, which laterally reads
+          // as a hard zero, and there — at the pad end of the ramp — the
+          // corridor's datum IS the pad's and the ease moves nothing.
+          final halfM = run.halfM[i];
+          final capM = siteCorridorFalloffM(halfM);
+          final chordM = run.a[i].distanceTo(run.b[i]);
+          final offM = i < run.segOffParcelM.length
+              ? run.segOffParcelM[i]
+              : chordM;
+          final double easeM;
+          if (chordM - offM > minPieceM) {
+            easeM = 0;
+          } else {
+            final clearM = siteCorridorClearanceM(
+                layout, id, run.a[i], run.b[i], halfM + capM);
+            easeM = math.max(0.0, math.min(capM, clearM - halfM));
+          }
           // Anchored on the GRADE, not on the ground under it — a deck
           // corridor's rule ([_deckCorridor]), for the same reason. Its ends
           // must be the two datums it grades between: anchored on ground
@@ -519,10 +656,10 @@ class CityTerrainShaper {
             brush: TerrainBrush.cutFill(
               startBF: dirOf(run.a[i]) * d0,
               endBF: dirOf(run.b[i]) * d1,
-              radiusM: run.halfM[i],
+              radiusM: halfM,
               datumRadiusM: d0,
               datumRadiusEndM: d1,
-              falloffM: siteCorridorFalloffM(run.halfM[i]),
+              falloffM: easeM,
               maxCutM: math.max(40.0, (d1 - d0).abs() + deckCutMarginM),
               tick: tick,
               minVoxelM: fine ? _fineVoxelM(run.halfM[i]) : voxelM,

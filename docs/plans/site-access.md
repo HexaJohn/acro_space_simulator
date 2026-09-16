@@ -2250,11 +2250,13 @@ the §6.4 probe:
 - **The shoulder is 1.0 m, not 0.5** (`SiteGrade.corridorShoulderM`): the throat's pave ring runs `width/2 + 0.5`
   either side of the drive, so half a metre put its corners exactly ON the levelling edge, where a hair outside costs
   a centimetre of the ease — the whole probe budget.
-- **`falloffM = min(roadFalloffM, halfM)`** — §6.3's `min(roadFalloffM, clearance)` with the clearance taken as the
-  corridor's own levelled half width. Sites stand shoulder to shoulder and a six-metre ease reaches nine metres from
-  the chord: a street car park's drive eased over the solar farm's throat 8.9 m away and pulled it **3.8 cm** off the
-  grade it is drawn on. The capture reads back one corridor's own datums, not the whole composed field, so a
-  neighbour reaching into a corridor is a drawing error, not a softer edge.
+- **`falloffM = min(roadFalloffM, halfM, clearance − halfM)`** — §6.3's `min(roadFalloffM, clearance)` with the
+  `roadFalloffM` half tightened to the corridor's own levelled half width (`siteCorridorFalloffM`, the CAP) and the
+  clearance measured per segment (`CityTerrainShaper.siteCorridorClearanceM`, the R5 review's round 2 — see below).
+  Sites stand shoulder to shoulder and a six-metre ease reaches nine metres from the chord: a street car park's drive
+  eased over the solar farm's throat 8.9 m away and pulled it **3.8 cm** off the grade it is drawn on. The capture
+  reads back one corridor's own datums, not the whole composed field, so a neighbour reaching into a corridor is a
+  drawing error, not a softer edge.
 - **Meshed fine where it cuts** (`minVoxelM = _fineVoxelM(halfM)` past the new `siteCorridorReliefTolM`, default
   0.5 m), not §6.3's colony voxel. A mesh cannot hold an eight-metre cut at fifteen metres — the same finding, and
   the same rule, as a road cut through relief. Its own tolerance because it is judged differently: a road's corridor
@@ -2267,7 +2269,12 @@ the §6.4 probe:
   line, and it is recorded after the pad: the platform edge the plan's paving is drawn on had been taken with it —
   **1.13 m on the dev kit's one street car park**, a figure R4 saw (−2.17 m at (−8, −288)) and attributed to the
   throat. Anchored on the platform, so it asks the ground nothing; a lot no road reaches is untouched, and on flat
-  ground no site is cut at all, so a generated downtown block still adds none.
+  ground no site is cut at all, so a generated downtown block still adds none. **On FLAT ground.** A town founded on
+  real relief is cut freely: at the dev colony's own site a 2-block generated town takes **32 corridor segments** and a
+  4-block one **123**, because on a hillside a downtown drive meets the 0.25 m clause. The
+  brush-count figures above and in §8.4 are the flat ones, and they say which sites are cut by GEOMETRY, never that a
+  generated town's ground is the same with site shaping and without it. It is not, and the R5 review's round 2 is
+  what that difference was hiding.
 - **Settled apart from `shapedTerrain`** (`CitySim.shapedSites`, keyed `site:<id>:<rev hex8>`). A key in
   `shapedTerrain` stamps the ground cache (`groundCacheShaped`), and a downtown lot that needs no cut must not clear
   a colony's thousands of cached ground reads to say so. The walk itself is gated on the book's `sitesRev`
@@ -2306,6 +2313,52 @@ the §6.4 probe:
 - **`padDatums` keeps the pad's own key only.** `markShaped` recorded every `padPoly`, which included the site
   section's own re-cut (`sitepad:<id>:<rev hex8>`); nothing reads those, and one accumulated per site per plan
   revision in a map that is never swept.
+
+**Repaired after the R5 review, round 2 (`CityTerrainShaper._siteCorridors`): the clearance is a real clearance.**
+
+One finding, blocking. The cap above is not a clearance, and the brush's ease is a full-weight edit at the levelled
+edge falling to nothing `falloffM` further out: at a drive's 4.0–4.5 m half width the ease reached **8–9 m from the
+chord**, well past the lot line of any generated town. What it moved out there is ground a NEIGHBOUR's paving is
+still drawn on — its own pad datum, cut before this corridor and never put back, since the site section records each
+lot's `sitepad:` re-cut ahead of the corridors. **R5 buried paving it did not cut.** Measured over towns generated at
+the dev colony's founding (lat −45.03, lon 168.66, `CityGenSpec` seed 1, sprawl 2 mi), the same capture both sides,
+paired point by point against the town's own shaping with only the `site:` brushes withheld from the ground:
+
+| Town | Plan points worse | Worst |
+|---|---|---|
+| 2 blocks | 26 of 1,032 over 1 cm | **1.248 m** — `lot-r2x0-l3` pad pt 2 at (−70, −18), 0.000 m → 1.248 m under its own platform. `lot-r2x0-l4`'s corridor runs 5.28 m away at `halfM` 4.0 and eased to 8.0 |
+| 4 blocks | 147 of 3,739 | **41.044 m** — `lot-m16` (the quarry) pad pts 31–32 at (1370–1381, 502): its own corridor's ease filled 41 m of the pit its plan is drawn in. Then 2.526 m at `lot-r1x1x0-r4` pad pt 9 and 2.241 m at `lot-r2x1x1x0-r5` pad pt 11 |
+
+**§6.3's `clearance`, taken literally** (`siteCorridorClearanceM`, and the ONLY new geometry): per segment, the plan
+distance from its chord to the nearest OTHER graded parcel's boundary, over `CityLayout.parcelsNear` in plat order
+(no hashing, no iteration order, a box no wider than the ease can reach), and
+`falloffM = max(0, min(cap, clearance − halfM))`. The ease now stops at the lot line and keeps the cap wherever there
+is room. Two readings of "clearance" are recorded because both were measured:
+
+- **A lot the chord runs THROUGH is not a clearance from it.** Measured from its boundary it reads as a hard zero,
+  and a set-back throat crosses a row of unbuilt access easements ON PURPOSE (§3.7a) — it is the lots BESIDE them
+  whose ground it must leave alone. Without this reading every starter-kit throat loses its verge and becomes a
+  vertical-walled trench up to 40 m deep, and the four throats are exactly what the R4/R5 orbit screenshots frame.
+  Sampled every 2 m along the chord, the same way `SiteCorridorRun` measures its off-parcel stretch.
+- **A segment that runs ON the lot it serves has no clearance at all,** and its ease is 0. Every metre beside such a
+  segment is this site's OWN platform, levelled to `padDatum` and re-cut under `sitepad:` just above — before this
+  corridor. A house drive climbing its front garden pulled its own lot's paving **2.18 m** under the ground that way
+  (`lot-r3x1x1x0-l4`, 4 blocks), and the quarry's own corridor is the 41 m row. Measured by the chord's ON-parcel
+  length (`SiteCorridorRun.segOffParcelM`, already computed), not by a lateral distance to the lot line: a set-back
+  throat ENDS on its own lot line, which laterally reads as a hard zero, and there — at the pad end of the ramp —
+  the corridor's datum IS the pad's and its ease moves nothing.
+
+**What it changes, brush by brush** (`site:` falloff, before → after). The starter kit's four utility throats keep
+the full 4.5 m, flat and on the dev hillside alike — **nothing about the kit's four sites is redrawn**. The fifth
+corridor the dev hillside adds (`lot-r0x0-r0`, the street car park's drive, the 0.25 m clause) goes 4.0 → 0, and so
+does every downtown auto-lot drive of a generated town: 29 of a 2-block town's 32 corridors, with its three set-back
+manual sites (`lot-m0`, `lot-m5`, `lot-m22`) keeping the cap. A drive that runs on its own lot is now cut with a
+square edge where the lot's own platform meets it, which is the height the lot's paving is drawn at.
+
+After it, no plan point of any graded lot of either town stands further from the ground than it does with the site
+corridors withheld: worst **+0.055 mm** (2 blocks) and **+0.068 mm** (4 blocks), against 1.248 m and 41.044 m before
+(`site_neighbour_ground_test`, §8.3). The §6.4 probe is unmoved to the digit — 9.6 mm on the dev colony, 0.35 mm in
+the Alps in the shaper's basis, 37.6 mm under the drawn point — because the kit's own corridors did not change.
 
 ### 6.4 Heights (ask 6)
 
@@ -2917,7 +2970,13 @@ starter kit and pass V1–V13 on its graph under all five A2 override kinds. The
     with the `sitesRev` gate forced open and the settled set dropped; the pad and corridor datums recorded; at most
     two ground reads a new segment — 5 for the kit's 4; a draped lot and the sprawl add none; a generated 2-block
     town's downtown adds none and only its set-back manual sites are cut) and `site_ground_probe_test` (the §6.4
-    probe, the whole plan, on the dev colony's hillside; red by 41.6 m without the cut). `road_corridor_mesh_test`
+    probe, the whole plan, on the dev colony's hillside; red by 41.6 m without the cut).
+    **Round 2 adds `site_neighbour_ground_test`** (test/application/, beside the §6.4 probe): over 2- and 4-block
+    towns generated at the dev colony's own founding, no plan point of a GRADED lot may stand further from the ground
+    than it does with the `site:` corridor brushes withheld from that same shaping — the town's own bookkeeping is
+    the full one either way, so both sides draw identically and only the ground moves. A corridor may pull a point
+    ONTO the ground; it may not push one off. Red at **1.248 m** and **41.044 m** before the clearance, green at
+    0.055 mm and 0.068 mm after, against a 1 mm bound. `road_corridor_mesh_test`
     now tells a site corridor from a road corridor — it scanned every `cutFill` on the body and a site's is one —
     and names the leaves a fine site corridor refines instead of asserting there are none (Appendix A).
 - **R6:** `site_detail_dressing_test` (cars ≤ stalls; `maxParkedCars = 0` → none; fences never cross a drive).
@@ -3001,6 +3060,20 @@ is unchanged; the last column is the work a chunk rebuild no longer does (§6.4 
 unchanged: the kit's near view keeps its 10 refinement targets and 10 boosted leaves, and a 2- and 4-block town
 their 0 and 2 (`road_corridor_mesh_test`, no pin moved).
 
+**Re-measured at the R5 review's round 2** (same rig and same method, JIT, seed 1 — so these rows are the FIRST R5
+table's, re-run). The clearance is a `parcelsNear` box query and a polygon-edge minimum per corridor segment, paid
+once per segment when it is cut and never again, and it does not show:
+
+| Colony | Plans | Site brushes | First walk | Ground asks | Settled tick | Walk, gate forced open |
+|---|---|---|---|---|---|---|
+| starter kit, dev hillside | 5 | 10 (5 corridors, 5 pad re-cuts) | 24.6 ms once (5 real ground marches) | 5 | 0.06 ms | 0.09 ms |
+| generated town, 2 blocks + 4 mi sprawl, flat | 1,716 | 15 (8 corridors, 7 pad re-cuts) | 1.8 ms once | 38 | 0.86 ms | 0.79 ms |
+| generated town, 4 blocks + 4 mi sprawl, flat | 1,864 | 15 (8 corridors, 7 pad re-cuts) | 3.1 ms once | 149 | 0.60 ms | 0.67 ms |
+
+Brush counts and ground asks are identical to the R5 row above (15 brushes, 38 and 149 asks) — the clearance decides
+how wide a corridor eases, never whether one is cut. The mesh pins are unchanged again (kit 10/10, 2-block 0/0,
+4-block 2/2, `road_corridor_mesh_test`), and no Appendix A row moves.
+
 **The live A/B** (`tool/measure_city_studio.ps1`, twice each side; the knob turned by the new `siteAccess` perf knob,
 so both sides are one build):
 
@@ -3077,6 +3150,7 @@ class DepthProfile { double depthAt(double x); bool containsRect(Rect r); double
 | **R5 Terrain** | road | shaper access corridors, `padDatums`, capture reads corridor datums | R5 tests; the starter kit adds exactly 4 corridor runs; `relaid_road_drape_test` unchanged; **R4's held tick**: the §6.4 probe (every starter-kit plan point within 1 cm of the ground under it) and the re-shot orbit screenshot of the four sites visibly connected |
 | **R5 as built** | road | `site_grade.dart` (`SiteGrade`, `SiteCorridorRun`), the shaper's third section with `CitySim.padDatums` / `shapedSites` / `siteShapedRev`, the capture's readback, `site_terrain_test` and `site_ground_probe_test` | **R4's held tick is TAKEN.** The probe is green over all 277 plan points and stalls of the founded kit, worst **9.6 mm** (§6.4 as built), and it is red by 41.6 m without the cut. Four corridor runs on flat ground exactly, pinned; five on the dev hillside, the fifth being the 0.25 m clause doing its job. `relaid_road_drape_test` unchanged, to the test. The A/B orbit pair on the dev colony (same poses, `770bf4d` against this slice) shows a utility site's drive leaving the street at its dropped kerb and running into its pad in a cut bench where dev draws bare hillside, and a street car park's paving meeting its street where dev clips it. The deviations of §6.3/§6.4 as built, the §8.4 shaping cost, and one Appendix A row (`road_corridor_mesh_test`: the kit's four throats are cut fine) |
 | **R5 repair** | road | `TerrainBrush.planLevel` and its wire field, `SiteCorridorRun.kerbAt` / `segOffParcelM`, `CitySim.siteCutRev`, the `markShaped` pad-key guard, the terrain studio's Clear edits, `LAT`/`LON` on the city dev entrypoint | the R5 review's five findings, each with a test. The probe now runs at **three** foundings — the dev colony under the drawn point (worst 9.6 mm, unchanged) and the Alps and the Andes in the shaper's own basis (worst **1.6 mm**, against **77.7 m** and **156.3 m** before the plan-projected cut) — and `levelling_brush_test` pins the brush rule itself: a 43 m cut through the middle of a 56 m run, levelled in plan, left untouched by the 3-D projection. Four corridor runs on the kit still, exactly; `relaid_road_drape_test` and every mesh pin unchanged (no Appendix A row). The A/B orbit pair is re-shot on the dev colony (`770bf4d` against this branch, same poses): at the aquifer pump the drive and its hammerhead stand in the field with grass between them and the street on dev, and on this branch the same drive runs down to the street and meets it at its dropped kerb; at the spaceport the throat is a notch cut through the bank dev draws unbroken. The repair itself is INVISIBLE at that founding by construction — the dev kit's throat falls 0.74 per metre and was cut correctly before it — and the same pair shot at `LAT=46.5 LON=8.0`, where it is worth 77.7 m, shows no visible difference either: the camera extension orbits the city centre, and lot-m0's throat at 264 m out reads as a few pixels behind the platform's own edge at every range that frames the kit. Its evidence is the probe |
+| **R5 repair 2** | road | `CityTerrainShaper.siteCorridorClearanceM` and the per-segment `falloffM` at its one call site (§6.3 as built, round 2) | the R5 review's round-2 finding, with the probe it asked for. `site_neighbour_ground_test` (new, beside the §6.4 probe): over 2- and 4-block towns generated at the dev colony's own founding, no plan point of a graded lot may stand further from the ground than it does with the `site:` corridor brushes withheld from the same shaping. **Red at 1.248 m** (`lot-r2x0-l3` pad pt 2, buried by the neighbour `lot-r2x0-l4`'s corridor 5.28 m away) **and 41.044 m** (`lot-m16`, the quarry, filled by its own corridor's ease), 26 and 147 points over a centimetre; **green at 0.055 mm and 0.068 mm** against a 1 mm bound. Every R5 acceptance holds unmoved: four corridor runs on flat ground exactly and five on the dev hillside, idempotent and scoped, `relaid_road_drape_test` and every `road_corridor_mesh_test` pin unchanged (kit 10/10, 2-block 0/0, 4-block 2/2, no Appendix A row), the §6.4 probe identical to the digit (9.6 mm at the dev colony, 0.35 mm in the Alps in the shaper's basis, 37.6 mm under the drawn point), and the §8.4 shaping cost re-measured at the same brush counts and ground asks. On the dev colony **exactly one brush changes** — the fifth corridor, `lot-r0x0-r0`'s drive, 4.0 m of ease to 0, because it runs on the lot it serves; the kit's four throats keep the full 4.5 m, so the orbit pair (`fix_dev` against `fix2_dev`, same rig, same poses) is the same picture, differing only where the trees sway between runs (a third run at the same build reproduces that spread) | 
 | **R6 Dressing** | road | stall paint on small lots, baked lot cars in stalls (skipped on agent-managed sites via the per-site bit, §5.5), footpaths, lamps, wheel stops, bay hatch, fence rings with gaps, signs by the throat | R6 tests; detail on/off identity holds; screenshots of a generated suburb and a strip mall |
 | **T4a Site networks** | traffic | needs R1 (join slot columns for `AccessPoints.ofJoin`) and R2a; §7.8 items 1–11 for today's CommuteSynth trips, INCLUDING item 10 (lot-car persistence by `(siteId, stallKey)`, so no save between T4a and T4b holds lot cars under the old §14.1 scheme or drops them); D17 step 2 only (garage what it cannot place); lot-car owner opaque (`ownerKind` + id) for the slice-3 port | A4–A11 (A10 with its save/resume case), A13–A15, A12 (traffic half); built on R2a fixtures, then real R2 plans; wire after R3; merge gated on the structural allocation gate (A13), not the traffic-wide weighed allocation number (not met today, owed by traffic slice 11); staged E36 (agent-managed sites only) |
 | **R7 Legacy removal** | road | delete `emitLot`, `ParkingLot` meshing (building_generator.dart:246-254, :787-844) and massing parking for parcel buildings and cells; ledgered re-pin; rewrite road-network.md §3b (stale: `CityNodes._emitLotFeatures` is `CityTileMesher._emitLotFeatures`, SprawlSectionBuilder is gone) and docs/REFERENCE.md | one re-pin commit with the ledger; all tests green; screenshots reviewed; after T4a merged |
