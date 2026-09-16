@@ -115,11 +115,14 @@ class TerrainBrush {
     this.squareStart = false,
     this.curveInGrade = 0,
     this.curveHalfM = 0,
+    this.planLevel = false,
   })  : assert(radiusM > 0, 'a zero-radius brush cuts nothing'),
         assert(minVoxelM >= 0, 'a voxel floor cannot be negative'),
         assert(curveHalfM >= 0, 'a vertical curve has a length'),
         assert(curveHalfM == 0 || squareStart,
             'a vertical curve is how a square start meets the grade before it'),
+        assert(!planLevel || curveHalfM == 0,
+            'a plan-projected corridor has no vertical curve of its own'),
         _axis = axisBF.normalized {
     // Bowl geometry, solved from the cavity mouth radius and the depth. A
     // sphere of radius `rs` whose centre sits `h0` ABOVE the contact plane
@@ -378,6 +381,7 @@ class TerrainBrush {
     bool squareStart = false,
     double curveInGrade = 0,
     double curveHalfM = 0,
+    bool planLevel = false,
   }) {
     // Stored centre is the MIDPOINT so the spherical influence bound (and the
     // spatial index built on it) actually encloses the whole corridor.
@@ -397,6 +401,7 @@ class TerrainBrush {
       squareStart: squareStart,
       curveInGrade: curveInGrade,
       curveHalfM: curveHalfM,
+      planLevel: planLevel,
     );
   }
 
@@ -512,6 +517,33 @@ class TerrainBrush {
   /// start's easing reaches — so inside the round shape's reach
   /// ([lateralReachM], every bound).
   final double curveHalfM;
+
+  /// Whether a [TerrainBrushKind.cutFill] corridor takes a sample's place
+  /// along its run IN PLAN — across the sample's own vertical — rather than
+  /// by projecting onto its rising chord in three dimensions.
+  ///
+  /// The two agree wherever the ground is near the grade, which is where a
+  /// road's corridor is cut (its datums ARE the ground at its knots). A
+  /// corridor that grades between two heights the ground between them never
+  /// followed is a different case: past about 1:1 the 3-D projection sends a
+  /// sample offset radially from the chord to a far-off place along it, the
+  /// lateral test at that place then rejects it, and the brush stops moving
+  /// the ground across the middle of its own run — the ends cut, the middle
+  /// untouched hillside. A site's access corridor drops its whole platform
+  /// cut over a throat's length and meets exactly that: 77.7 m of hillside
+  /// left standing through a starter kit founded in the Alps, drawn on
+  /// datums the brush had recorded but not cut to.
+  ///
+  /// In plan the projection is the same for every sample on one radial, so
+  /// the levelled surface is the grade itself however steep it is — and it
+  /// is the fixed point of the 3-D rule (a point AT the interpolated radius
+  /// lies on the chord, and a lateral offset is square to it), which is what
+  /// lets the renderer read the cut back arithmetically
+  /// (`SiteCorridorRun.radiusAt`).
+  ///
+  /// [curveHalfM] is already measured in plan for the same reason
+  /// ([_curvedLevel]), and the two are exclusive.
+  final bool planLevel;
 
   /// Farthest polygon vertex from the centre, for the bounds.
   double get _polyReachM {
@@ -799,6 +831,7 @@ class TerrainBrush {
         final len2 = axis.lengthSquared;
         if (len2 <= 1e-9) return null;
         if (curveHalfM > 0) return _curvedLevel(p, start, axis);
+        if (planLevel) return _planLevel(p, start, axis);
         final along = (p - start).dot(axis) / len2;
         final t = along.clamp(0.0, 1.0);
         final up = p.normalized;
@@ -833,6 +866,33 @@ class TerrainBrush {
       case TerrainBrushKind.crater:
         return null;
     }
+  }
+
+  /// [_levelAt] for a corridor levelled IN PLAN ([planLevel]), its run from
+  /// [start] along [axis]: the straight grade between its two datums,
+  /// levelled at full weight within [radiusM] of its run measured across the
+  /// sample's own vertical, eased out over [falloffM] past that, and held at
+  /// its ends' datums under its round caps.
+  ///
+  /// The same prism the plain rule cuts, placed by where the sample stands
+  /// on the GROUND rather than by where it projects onto a rising chord —
+  /// see [planLevel] for what that costs a steep run.
+  ({double weight, double datum})? _planLevel(
+      Vector3 p, Vector3 start, Vector3 axis) {
+    final up = p.normalized;
+    final run = axis - up * axis.dot(up);
+    final plan2 = run.lengthSquared;
+    if (plan2 <= 1e-9) return null;
+    final v = p - start;
+    final flat = v - up * v.dot(up);
+    var t = flat.dot(run) / plan2;
+    if (t < 0) t = 0;
+    if (t > 1) t = 1;
+    final lateral = (flat - run * t).length;
+    return (
+      weight: _falloffWeight(lateral, radiusM),
+      datum: datumRadiusM + (datumRadiusEndM - datumRadiusM) * t,
+    );
   }
 
   /// [_levelAt] for a corridor that meets the grade before it in a vertical

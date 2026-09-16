@@ -2278,6 +2278,35 @@ the §6.4 probe:
   0.25 m clause, which is what that clause is for. The pinned figure is the flat one — it is the geometry, not the
   relief, that the four are about.
 
+**Repaired after the R5 review (the same files, the same slice).** Four findings, each measured:
+
+- **The corridor is levelled IN PLAN, not by projecting onto its own chord** (`TerrainBrush.planLevel`, new, and
+  used by nothing else). `cutFill` placed a sample along its run by a three-dimensional projection, which is right
+  wherever the ground is near the grade — a road's corridor, whose datums ARE the ground at its knots. A site's
+  corridor is the other case: it drops a whole platform cut over the length of a throat, and past about a metre of
+  fall per metre along, a sample offset radially from that chord projects to a far-off place along it, where the
+  lateral test rejects it. **The ends were cut and the middle was not.** The dev kit's throat falls 0.74 per metre
+  and came out right either way, which is why one founding pinned nothing: founded in the Alps (46.5, 8.0) the same
+  throat falls 1.61 and left 27 to 82 metres of hillside standing through the drive, drawn **77.7 m** buried at
+  lot-m0's (52, 264); in the Andes (−13.2, −72.5), **156.3 m**. In plan the projection is the same for every sample
+  on one radial, so the levelled surface is the grade however steep it is — and it is the fixed point of the 3-D
+  rule, which is what lets the capture read the cut back arithmetically (§6.4 as built). After it, every plan point
+  of the kit at those two foundings stands within **1.6 mm** of the ground the shaper cut under it
+  (`site_ground_probe_test`, which now probes three foundings, not one).
+- **The kerb datum is asked at the run's KERB end** (`SiteCorridorRun.kerbAt`: the endpoint at the top of the
+  derived ramp), not at the first corridor segment's first point. Nothing in §2.3 fixes which way a plan stores a
+  drive, and the ground under the wrong end would grade the whole corridor backwards, by the depth of the platform.
+  The generators happen to store every drive kerb-first today, so this is a latent one, pinned by a fixture stored
+  both ways.
+- **§6.3's cut clause is per SEGMENT**, as it is written here ("the segment has an off-parcel stretch longer than
+  …"), not summed over the run: a corridor that leaves its lot in several short stubs, none longer than the pavement
+  it crosses, is one the design says to leave alone. The DECISION stays the whole run's, because the ramp is derived
+  along the chain and half a cut run would draw the rest of itself on datums nothing cut. No site of the starter kit
+  or of a 2- or 4-block generated town changes hands either way — it is the rule that was wrong, not the towns.
+- **`padDatums` keeps the pad's own key only.** `markShaped` recorded every `padPoly`, which included the site
+  section's own re-cut (`sitepad:<id>:<rev hex8>`); nothing reads those, and one accumulated per site per plan
+  revision in a map that is never swept.
+
 ### 6.4 Heights (ask 6)
 
 | Point ref | Graded parcel | Draped parcel |
@@ -2352,6 +2381,18 @@ and stalls of the founded kit, drawn height (`ptUp` less the point's own lift `p
 | `blend` | +0.36 m | +0.0061 m |
 | `kerb` | −0.043 m | +0.0062 m |
 | stall | +0.008 m | +0.0083 m |
+
+**Repaired after the R5 review.**
+
+- **A corridor run is built only for a site the shaper CUT** (`CitySim.siteCutRev`, site id → the plan revision it
+  was cut at, transient like `corridorDatums`). `SiteCorridorRun.of` was being built for every site of every rebuilt
+  chunk, whether or not that site had a cut corridor: every house lot with a driveway has corridor segments, and the
+  run walks the plan and allocates a list per column to discover that none of them was cut. Measured over a
+  generated town's 1,420 plans that is **1.1 ms a full rebuild, 0.8 µs a site** (warm; 3.7–4.0 µs a site on the
+  first, cold pass) — small, but paid for nothing. It is now a map lookup on the colony, and the run is built for
+  the handful of sites whose datums there are to read.
+- **The probe is pinned at three foundings, not one** (§6.3 as built): the dev colony under the drawn point, and two
+  steep ones in the shaper's own basis, where the shaping is what is being measured.
 
 **The residual is the frame's basis, not the shaping.** `CitySiteFrame.localToBodyFixed` places a point flat on the
 tangent plane (`up·(datum + ptUp) + east·e + north·n`), so a point `s` metres from the colony origin is drawn
@@ -2944,6 +2985,21 @@ steady frame is unchanged (both new reads are map lookups on the colony, and nei
 cut). What DOES reach the frame is the terrain mesh: the kit's four throats are cut fine, which takes the near view
 from 2 refinement targets and 0 boosted leaves to 10 and 10 — the cost of drawing a 56 m throat on the ground rather
 than 41 m above it.
+
+**Re-measured at the R5 repair** (same rig, JIT, seed 5; the pads and roads settled first, so the figure is the
+site section's alone). The plan-projected brush costs the same to build and the same per sample; what moved is the
+capture's gate:
+
+| Colony | Plans | Site brushes | First walk | Ground asks | Settled tick | Walk, gate forced open | A run for every site (what the capture's gate saves) |
+|---|---|---|---|---|---|---|---|
+| starter kit, dev hillside | 5 | 10 (5 corridors, 5 pad re-cuts) | 24 ms once (5 real ground marches) | 5 | 0.07–0.29 ms | 0.07–0.09 ms | 0.06 ms / 12 µs a site (cold) |
+| generated town, 2 blocks + 4 mi sprawl, flat | 1,479 | 21 (11 corridors) | 2.2 ms once | 53 | 0.81 ms | 0.84 ms | 5.4 ms / 3.7 µs a site (cold) |
+| generated town, 4 blocks + 4 mi sprawl, flat | 1,420 | 14 (7 corridors) | 2.6 ms once | 141 | 0.60 ms | 0.85 ms | **1.1 ms / 0.8 µs a site (warm)** |
+
+**No frame-budget effect, and one taken back.** Shaping still runs in the world tick, and the capture's steady frame
+is unchanged; the last column is the work a chunk rebuild no longer does (§6.4 as built). The mesh figures are
+unchanged: the kit's near view keeps its 10 refinement targets and 10 boosted leaves, and a 2- and 4-block town
+their 0 and 2 (`road_corridor_mesh_test`, no pin moved).
 
 **The live A/B** (`tool/measure_city_studio.ps1`, twice each side; the knob turned by the new `siteAccess` perf knob,
 so both sides are one build):

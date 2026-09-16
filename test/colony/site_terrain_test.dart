@@ -8,12 +8,16 @@ import 'package:acro_space_simulator/domain/colony/city/city_generator.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_starter_kit.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_terrain_shaper.dart';
+import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
+import 'package:acro_space_simulator/domain/colony/city/site_access/site_access_plan.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_grade.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/domain/terrain/terrain_brush.dart';
 import 'package:acro_space_simulator/domain/universe/celestial_body.dart';
 import 'package:acro_space_simulator/infrastructure/sample_world.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import 'site_access/site_plan_fixtures.dart';
 
 /// The shaper's site access corridors (docs/plans/site-access.md §6.3, the
 /// §8.3 R5 list): a site's drive is cut into the ground the way a road
@@ -95,6 +99,37 @@ void main() {
     // And with the settled set dropped too: the keys are already shaped.
     city.shapedSites.clear();
     expect(corridorKeys(flatPending(city)), isEmpty);
+  });
+
+  test('the capture is told which sites were cut, and at which revision', () {
+    final city = kit();
+    flatPending(city);
+    // The four utility sites, each at its plan's own revision: what a
+    // rebuilt chunk tests before it builds a corridor run at all (§6.4).
+    final cut = city.siteCutRev;
+    expect(cut.keys.toList()..sort(), ['lot-m0', 'lot-m1', 'lot-m2', 'lot-m3']);
+    for (final id in cut.keys) {
+      expect(cut[id], city.siteAccess.planOf(id)!.rev, reason: id);
+    }
+    // And no house lot with a driveway: on flat ground its drive crosses
+    // only its pavement, and nothing was cut for it.
+    for (final p in city.layout.autoParcels) {
+      expect(cut.containsKey(p.id), isFalse, reason: p.id);
+    }
+  });
+
+  test('the pad re-cut leaves no entry in padDatums but the pad itself does',
+      () {
+    final city = kit();
+    record(city, flatPending(city));
+    expect(
+        [for (final k in city.padDatums.keys) if (!k.startsWith('pad:')) k],
+        isEmpty,
+        reason: 'the site section re-cuts the same platform under a key of '
+            'its own, and nothing reads it back');
+    for (final id in ['lot-m0', 'lot-m1', 'lot-m2', 'lot-m3']) {
+      expect(city.padDatums[SiteGrade.padKey(id)], isNotNull, reason: id);
+    }
   });
 
   test('the datums the capture reads are recorded', () {
@@ -185,5 +220,77 @@ void main() {
       expect(platted.contains(id), isFalse, reason: k);
       expect(town.layout.parcelById(id)?.graded, isTrue, reason: k);
     }
+  });
+
+  group('the corridor run', () {
+    final city = SyntheticSites.starterCity();
+    final graph = city.roadGraph;
+
+    test('takes its kerb end from the ramp, whichever way the plan stores '
+        'its drive', () {
+      // The shaper asks the ground for the corridor's KERB datum at this
+      // point (§6.3 as built). A plan is free to store a drive running from
+      // its pad out to the street — nothing in §2.3 fixes the direction —
+      // and the ground under the wrong end would grade the whole corridor
+      // backwards, by the depth of the platform.
+      final draft =
+          SyntheticSites.draftAt(graph, 'lot-m3', SyntheticTemplate.utility);
+      final forward = SiteCorridorRun.of(
+          SyntheticSites.chunkOf(graph, [draft], validate: false).plan(0))!;
+      final plan =
+          SyntheticSites.chunkOf(graph, [draft], validate: false).plan(0);
+      final kerbNode = plan.joinKerbNode(0);
+      final kerbPt = plan.nodePt(kerbNode);
+      expect(forward.kerbAt.e, closeTo(plan.ptE(kerbPt), 1e-9));
+      expect(forward.kerbAt.n, closeTo(plan.ptN(kerbPt), 1e-9));
+
+      // The same drive, stored the other way about.
+      for (final seg in draft.segs) {
+        if (seg.kind != SiteSegmentKind.driveway &&
+            seg.kind != SiteSegmentKind.accessRoad) {
+          continue;
+        }
+        final from = seg.from;
+        seg.from = seg.to;
+        seg.to = from;
+        seg.vias = seg.vias.reversed.toList();
+      }
+      final back = SiteCorridorRun.of(
+          SyntheticSites.chunkOf(graph, [draft], validate: false).plan(0))!;
+      expect(back.kerbAt.e, closeTo(forward.kerbAt.e, 1e-9),
+          reason: 'the kerb end is the kerb end either way');
+      expect(back.kerbAt.n, closeTo(forward.kerbAt.n, 1e-9));
+      // And the grade still runs from the kerb down to the pad.
+      final (d0, d1) = back.datumsOf(0, 100, 180);
+      final (f0, f1) = forward.datumsOf(0, 100, 180);
+      expect(d0, closeTo(f1, 1e-9));
+      expect(d1, closeTo(f0, 1e-9));
+    });
+
+    test("§6.3's off-parcel clause is measured per segment, not summed over "
+        'the run', () {
+      // A through drive that leaves its lot in two short stubs — three
+      // metres each, the pavement it crosses — and nothing between them.
+      // Summed, that is six metres and over the clause; §6.3 asks it of
+      // "the segment", and neither stub is.
+      final chunk =
+          SyntheticSites.placeAt(graph, 'lot-r0x1-r0', SyntheticTemplate.loop);
+      const lot = Parcel(
+        id: 'stub-lot',
+        polygon: [Vec2(-7, 7), Vec2(-7, 60), Vec2(-40, 60), Vec2(-40, 7)],
+        manual: true,
+      );
+      final run = SiteCorridorRun.of(chunk.plan(0), parcel: lot)!;
+      expect(run.length, 2);
+      for (final off in run.segOffParcelM) {
+        expect(off, closeTo(3.0, 0.3));
+      }
+      expect(run.segOffParcelM.reduce((a, b) => a + b), greaterThan(3.5),
+          reason: 'summed, this run would be cut');
+      // What `CityTerrainShaper._siteCorridors` tests against
+      // max(sidewalkM + 0.5, 3.0) = 3.5 m on the kit's streets.
+      expect(run.maxSegOffParcelM, lessThanOrEqualTo(3.5),
+          reason: 'per segment, it is not');
+    });
   });
 }

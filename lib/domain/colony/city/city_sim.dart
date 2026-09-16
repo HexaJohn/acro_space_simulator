@@ -3367,6 +3367,18 @@ class CitySim {
   /// O(1) gate on that walk (docs/plans/site-access.md §6.3).
   int siteShapedRev = -1;
 
+  /// The plan revision at which each site's access corridor was CUT, by site
+  /// id — the sites whose heights the capture reads back from
+  /// [corridorDatums] (docs/plans/site-access.md §6.4).
+  ///
+  /// A lookup, never iterated. It is what a rebuilt chunk asks before it
+  /// builds a `SiteCorridorRun` at all: every house lot with a driveway has
+  /// corridor segments and almost none of them is ever cut, and building the
+  /// run to discover that walks the plan and allocates a list per column.
+  /// One entry a site, replaced when its plan moves, removed when a re-plan
+  /// needs no cut. Transient, like [corridorDatums].
+  final Map<String, int> siteCutRev = {};
+
   /// The vertical curve (the grade before it, and the curve's half length
   /// in metres) each plain road corridor segment cut fine starts with, by
   /// its [shapedTerrain] key — kept as the brush is recorded

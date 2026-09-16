@@ -800,7 +800,14 @@ class SiteCapture {
       // on those, so the paving IS the graded ground — not on a blend of a
       // pad and a kerb the ground between them never followed.
       final plan = chunk.plan(k);
-      final run = SiteCorridorRun.of(plan);
+      // Only for a site the shaper actually CUT (`CitySim.siteCutRev`, at
+      // this plan's own revision). Every house lot with a driveway has
+      // corridor segments and almost none is ever cut; building the run to
+      // find that out walks the plan and allocates a list per column, for
+      // every site of every rebuilt chunk.
+      final run = _city.siteCutRev[id] == chunk.rev(k)
+          ? SiteCorridorRun.of(plan)
+          : null;
       List<(double, double)?>? cut;
       if (run != null) {
         for (var i = 0; i < run.length; i++) {

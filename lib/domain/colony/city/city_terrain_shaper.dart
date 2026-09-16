@@ -441,6 +441,7 @@ class CityTerrainShaper {
         final run = SiteCorridorRun.of(chunk.plan(k), parcel: parcel);
         if (run == null) {
           city.shapedSites.add(runKey);
+          city.siteCutRev.remove(id);
           continue;
         }
         // The pad the corridor grades to: the datum its brush cut, or —
@@ -452,10 +453,17 @@ class CityTerrainShaper {
         // which IS that road's corridor once cut. Asked of the ground
         // rather than modelled from the road's datums, so the corridor ties
         // into whatever is actually there (§6.3 as built).
-        final kerbDatum = groundUnder(run.a[0]);
+        final kerbDatum = groundUnder(run.kerbAt);
         city.shapedSites.add(runKey);
-        if (run.offParcelM <= minOffM &&
+        // §6.3's cut clause, per SEGMENT: a corridor that leaves the lot in
+        // several short stubs, none of them longer than the pavement it
+        // crosses, is one the design says to leave alone. The decision is
+        // still the whole run's — the ramp is derived along the chain
+        // (§6.3 as built), and half a cut run would draw the rest of itself
+        // on datums nothing cut.
+        if (run.maxSegOffParcelM <= minOffM &&
             (padDatum - kerbDatum).abs() <= siteCorridorTolM) {
+          city.siteCutRev.remove(id);
           continue;
         }
         // Meshed as finely as a road's corridor where it cuts or fills past
@@ -498,15 +506,14 @@ class CityTerrainShaper {
           if (city.shapedTerrain.contains(key)) continue;
           final (d0, d1) = run.datumsOf(i, padDatum, kerbDatum);
           // Anchored on the GRADE, not on the ground under it — a deck
-          // corridor's rule ([_deckCorridor]), for the same reason. A brush
-          // reads a point's place along its chord in three dimensions, so
-          // its ends must be the two datums it grades between: anchored on
-          // ground that is metres off them, the chord tilts and every point
-          // along it reads a little further on than it is. The bound
-          // reaches past the cut, or the brush culls the very samples it is
-          // there to move. Sized from the grade's own drop rather than from
-          // the ground under it, so the ground is asked once per site and
-          // not once per knot.
+          // corridor's rule ([_deckCorridor]), for the same reason. Its ends
+          // must be the two datums it grades between: anchored on ground
+          // that is metres off them, the chord tilts and every point along
+          // it reads a little further on than it is. The bound reaches past
+          // the cut, or the brush culls the very samples it is there to
+          // move. Sized from the grade's own drop rather than from the
+          // ground under it, so the ground is asked once per site and not
+          // once per knot.
           out.add((
             key: key,
             brush: TerrainBrush.cutFill(
@@ -519,9 +526,28 @@ class CityTerrainShaper {
               maxCutM: math.max(40.0, (d1 - d0).abs() + deckCutMarginM),
               tick: tick,
               minVoxelM: fine ? _fineVoxelM(run.halfM[i]) : voxelM,
+              // Levelled by where the ground stands IN PLAN under the run,
+              // not by projecting onto its rising chord
+              // ([TerrainBrush.planLevel]). A site's corridor drops a whole
+              // platform cut over the length of a throat, and past about a
+              // metre of fall per metre along, the 3-D projection sends a
+              // sample offset radially from that chord to a far-off place
+              // along it, where the lateral test then rejects it: the ends
+              // cut, the middle left standing hillside, and the drive drawn
+              // buried in it — 77.7 m of it on a kit founded in the Alps,
+              // 156.3 m in the Andes (`site_ground_probe_test`). It is also
+              // the rule the capture reads back
+              // (`SiteCorridorRun.radiusAt`), so the two agree exactly
+              // however steep the throat.
+              planLevel: true,
             ),
           ));
         }
+        // What the capture tests before it builds a corridor run at all: a
+        // site with a cut corridor reads its datums back, and every other
+        // site — every house lot with a driveway — keeps the §6.4 table and
+        // pays nothing for the run it does not have.
+        city.siteCutRev[id] = rev;
       }
     }
     city.siteShapedRev = book.sitesRev;
@@ -711,7 +737,11 @@ class CityTerrainShaper {
     // ([CitySim.padDatums]): its paving is drawn on that, and its access
     // corridor grades to it at the lot line
     // (docs/plans/site-access.md §6.3, §6.4).
-    if (brush.kind == TerrainBrushKind.padPoly) {
+    // Under the PAD's own key only: the site section re-cuts the same
+    // platform under a key of its own (`SiteGrade.padRecutKey`), and
+    // recording that too would leave an entry per site per plan revision
+    // that nothing ever reads.
+    if (brush.kind == TerrainBrushKind.padPoly && key.startsWith('pad:')) {
       city.padDatums[key] = brush.datumRadiusM;
     }
     if (brush.kind == TerrainBrushKind.cutFill) {

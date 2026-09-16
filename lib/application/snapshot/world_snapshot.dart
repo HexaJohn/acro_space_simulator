@@ -2321,6 +2321,7 @@ class TerrainEditSnapshot {
     this.squareStart = false,
     this.curveInGrade = 0,
     this.curveHalf = 0,
+    this.planLevel = false,
   });
 
   /// Body id — joins to [WorldSnapshot.bodies].
@@ -2389,6 +2390,12 @@ class TerrainEditSnapshot {
   /// [squareStart].
   final double curveInGrade, curveHalf;
 
+  /// Whether a corridor brush levels by where a sample stands in PLAN
+  /// ([TerrainBrush.planLevel]) — the shape of the ground it cuts, carried
+  /// like [squareStart], or a loaded colony's drives are meshed on a
+  /// corridor its own shaper never cut.
+  final bool planLevel;
+
   static TerrainEditSnapshot of(BodyId body, TerrainBrush b) =>
       TerrainEditSnapshot(
         body: body.value,
@@ -2411,6 +2418,7 @@ class TerrainEditSnapshot {
         squareStart: b.squareStart,
         curveInGrade: b.curveInGrade,
         curveHalf: b.curveHalfM,
+        planLevel: b.planLevel,
         ex: b.endBF?.x,
         ey: b.endBF?.y,
         ez: b.endBF?.z,
@@ -2438,6 +2446,7 @@ class TerrainEditSnapshot {
         squareStart: squareStart,
         curveInGrade: curveInGrade,
         curveHalfM: curveHalf,
+        planLevel: planLevel,
         endBF: ex == null || ey == null || ez == null
             ? null
             : Vector3(ex!, ey!, ez!),
@@ -2463,6 +2472,7 @@ class TerrainEditSnapshot {
         if (minVoxel != 0) 'mv': minVoxel,
         if (squareStart) 'sq': true,
         if (curveHalf != 0) 'vc': [curveInGrade, curveHalf],
+        if (planLevel) 'pl': true,
         if (ex != null) 'e': [ex, ey, ez],
         if (polygon.isNotEmpty) 'poly': polygon,
       };
@@ -2493,6 +2503,7 @@ class TerrainEditSnapshot {
       squareStart: j['sq'] == true,
       curveInGrade: vc == null ? 0 : (vc[0] as num).toDouble(),
       curveHalf: vc == null ? 0 : (vc[1] as num).toDouble(),
+      planLevel: j['pl'] == true,
       ex: e == null ? null : (e[0] as num).toDouble(),
       ey: e == null ? null : (e[1] as num).toDouble(),
       ez: e == null ? null : (e[2] as num).toDouble(),

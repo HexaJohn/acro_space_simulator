@@ -100,14 +100,14 @@ abstract final class SiteGrade {
 /// is the drive, whose far end is the first pad node.
 class SiteCorridorRun {
   SiteCorridorRun._(this.segs, this.a, this.b, this.tStart, this.tEnd,
-      this.halfM, this.offParcelM);
+      this.halfM, this.segOffParcelM, this.kerbAt);
 
   /// [p]'s corridor run, or null when it has none (a kerbside plan, a plan
   /// whose drives never leave the pad, a cut join with no kerb node).
   ///
-  /// [parcel], where given, measures [offParcelM] — the arc of the run
-  /// outside the lot line, which decides whether the ground needs cutting
-  /// at all (§6.3). The capture passes none: it only reads back.
+  /// [parcel], where given, measures [segOffParcelM] — each segment's arc
+  /// outside the lot line, which decides whether the ground needs cutting at
+  /// all (§6.3). The capture passes none: it only reads back.
   static SiteCorridorRun? of(SiteAccessPlan p, {Parcel? parcel}) {
     final nSeg = p.segCount;
     if (nSeg == 0) return null;
@@ -169,13 +169,34 @@ class SiteCorridorRun {
       half.add(p.segWidthM(k) / 2 + SiteGrade.corridorShoulderM);
     }
     if (kept.isEmpty) return null;
-    var off = 0.0;
+    // Per SEGMENT, as §6.3 asks it ("the segment has an off-parcel stretch
+    // longer than ..."), not summed over the run: a corridor that leaves the
+    // lot in several short stubs, none of them over the threshold, is one
+    // §6.3 says to leave alone.
+    final off = <double>[];
     if (parcel != null) {
       for (var i = 0; i < kept.length; i++) {
-        off += _outsideLength(parcel, a[i], b[i]);
+        off.add(_outsideLength(parcel, a[i], b[i]));
       }
     }
-    return SiteCorridorRun._(kept, a, b, t0, t1, half, off);
+    // The kerb end of the run: the endpoint standing highest on the ramp,
+    // which is a cut join's kerb node (arc 0 → t 1). Not simply the first
+    // segment's first point — a plan is free to store a drive running from
+    // its pad out to the street, and the ground under the wrong end would
+    // grade the whole corridor backwards.
+    var kerbAt = a[0];
+    var best = t0[0];
+    for (var i = 0; i < kept.length; i++) {
+      if (t0[i] > best) {
+        best = t0[i];
+        kerbAt = a[i];
+      }
+      if (t1[i] > best) {
+        best = t1[i];
+        kerbAt = b[i];
+      }
+    }
+    return SiteCorridorRun._(kept, a, b, t0, t1, half, off, kerbAt);
   }
 
   /// The plan-local segments cut, in order.
@@ -191,9 +212,24 @@ class SiteCorridorRun {
   /// Half the ground each segment levels either side of its chord.
   final List<double> halfM;
 
-  /// How much of the run lies outside the lot line (0 when it was built
-  /// without a parcel).
-  final double offParcelM;
+  /// How much of EACH segment lies outside the lot line, in [segs] order
+  /// (empty when the run was built without a parcel).
+  final List<double> segOffParcelM;
+
+  /// The run's kerb end: the endpoint at the top of the ramp, where it
+  /// meets the road. What the ground is asked for the corridor's kerb
+  /// datum (§6.3 as built).
+  final Vec2 kerbAt;
+
+  /// The longest single segment's stretch outside the lot line — §6.3's cut
+  /// clause, which is per segment.
+  double get maxSegOffParcelM {
+    var m = 0.0;
+    for (final x in segOffParcelM) {
+      if (x > m) m = x;
+    }
+    return m;
+  }
 
   int get length => segs.length;
 
