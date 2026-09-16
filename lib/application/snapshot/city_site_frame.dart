@@ -387,14 +387,16 @@ class SiteCapture {
 
   /// Whether a plan-served building is placed on its plan's ENVELOPE, turned
   /// to face its access road (§5.2 R4, §6.2), rather than on the legacy
-  /// centroid-and-`Parcel.heading` path. OFF by default.
+  /// centroid-and-`Parcel.heading` path. ON since R4 landed (§9 R4).
   ///
   /// This is the storage behind `CityNodes.siteAccess`, the renderer's name
   /// for the same knob: placement happens here, in the capture, and the
   /// tiles must key what the capture placed. Off, a served building's
   /// position, orientation and site size are exactly what they were — only
-  /// its slot and gate ride the wire, which no legacy path reads.
-  static bool envelopePlacement = false;
+  /// its slot and gate ride the wire, which no legacy path reads; that is
+  /// still the A/B the perf knob `siteAccess` turns, and every legacy pin
+  /// is asserted against it.
+  static bool envelopePlacement = true;
 
   final CitySim _city;
 

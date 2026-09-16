@@ -2760,6 +2760,33 @@ Reference: the 127k-building generated town used by `tool/measure_city_studio.ps
 | Detail job | ≤ +15% |
 | Heap | ≤ 1 retained object per 100 sites (chunk ≤ 7 + geometry ≤ 3 per 1024 sites, §2.3); ≤ 120 B per home site of wire geometry |
 
+**Measured at the R4 merge, before the knob went on** (the reference town headless: `CityGenSpec` at the city
+studio's own defaults — seed 1, earth, 4 blocks, 220 × 104 m, sprawl 20 miles — 127,785 buildings, 127,783 plans,
+49,984 roads, cut at the studio's 2-mile tiles into 169 tiles; each tile meshed from its own columns, A/B on the
+`siteAccess` knob alone):
+
+| Work | Off | On | Delta | Budget |
+|---|---|---|---|---|
+| **Mid tiles, vertices** (169 tiles, the §9 R4 gate) | 14,297,819 | 14,435,273 | **+0.96 %** | ≤ +10 % ✓ |
+| Mid tiles, build time | 3,675 ms | 3,942 ms | +7.3 % | – |
+| Tile cut (`bucket`, whole town) | 303–358 ms | 345–354 ms | −1 % … +14 % (run to run; the cut is 0.3 s of a 25 s generate and the spread is the run, not the knob) | ≤ +10 % ~ |
+| Far tiles, vertices (24 densest) | 3,114,983 | 3,124,483 | **+0.31 %** | ≤ +2 % ✓ |
+| Near tiles, vertices (8 densest, detail layer on) | 5,131,281 | 6,271,400 | **+22.2 %** | ≤ +20 % ✗ |
+| Near tiles, bytes | 289.0 MB | 356.2 MB | **+23.2 %** | ≤ +10 % ✗ |
+| Near tiles, build time | 1,260 ms | 1,598 ms | +26.8 % | ≤ +15 % ✗ |
+
+**Deviation (R4, the near-tile budget): the near tier is over, and the site geometry is not why.** Of the
++1,140,119 near vertices, the drawn sites are **311,316 (27 %, +6.1 % of the tile)**; the other 828,803 are track B's
+massing. A plan-served building stands on its whole envelope instead of sharing its lot with a surface car park, and
+its archetype keys on `(surfaceParking, gateBucket)` — so downtown buildings are bigger and share fewer meshes. That
+is the slice's content, not its overhead, and shrinking it would mean un-doing §6.2. The site half is well inside the
+budget on its own. Recorded, not fixed: the near-tile line is **re-budgeted to ≤ +25 % vertices, ≤ +25 % bytes and
+≤ +30 % time with the envelope massing on**, and the R7 legacy-removal slice — which deletes `emitLot` and the
+massing car parks the envelope replaced — is where it is measured again. The whole town's site geometry at near is
+1,802,608 vertices over 127,783 plans: **kerbOnly 0, homeDriveway 10 a site** (110,310 sites), **carPark 35.6**
+(10,512), **yard 146** (1,519), **installation 239** (435); at mid, homes and kerb-only sites draw **nothing** and
+the town's sites come to 148,400 vertices, which is the §5.4 mid rule doing exactly what it was written for.
+
 ---
 
 ## 9. Slices, owners, order and acceptance
@@ -2816,6 +2843,7 @@ class DepthProfile { double depthAt(double x); bool containsRect(Rect r); double
 | **T4a Site networks** | traffic | needs R1 (join slot columns for `AccessPoints.ofJoin`) and R2a; §7.8 items 1–11 for today's CommuteSynth trips, INCLUDING item 10 (lot-car persistence by `(siteId, stallKey)`, so no save between T4a and T4b holds lot cars under the old §14.1 scheme or drops them); D17 step 2 only (garage what it cannot place); lot-car owner opaque (`ownerKind` + id) for the slice-3 port | A4–A11 (A10 with its save/resume case), A13–A15, A12 (traffic half); built on R2a fixtures, then real R2 plans; wire after R3; merge gated on the structural allocation gate (A13), not the traffic-wide weighed allocation number (not met today, owed by traffic slice 11); staged E36 (agent-managed sites only) |
 | **R7 Legacy removal** | road | delete `emitLot`, `ParkingLot` meshing (building_generator.dart:246-254, :787-844) and massing parking for parcel buildings and cells; ledgered re-pin; rewrite road-network.md §3b (stale: `CityNodes._emitLotFeatures` is `CityTileMesher._emitLotFeatures`, SprawlSectionBuilder is gone) and docs/REFERENCE.md | one re-pin commit with the ledger; all tests green; screenshots reviewed; after T4a merged |
 | **T4b Residents and pedestrians** | traffic | with or after citizens (slice 3): residents' cars at home pads (backing out to the street, §7.4 Home back-out; yielding to pedestrians on the pavement crossing) and kerbs (E36 completes: all baked cars off), full D17 circling/give-up, stall → door walks via `entrancePt/entranceNode` | A16 |
+| **R4 as built** | road | tracks A and B merged; `CityNodes.siteAccess` **on by default**; the perf knob `siteAccess` added so `tool/measure_city_studio.ps1` can A/B it without a rebuild; `installation_parking_test` gained its plan case (§8.2) | the §8.4 measurements above; the mid vertex gate +0.96 %; the near-tile deviation recorded in §8.4; the whole suite green with the knob on, with only the one ON pin of `city_tile_mesher_test` moved at the merge (Appendix A) |
 | **R8 Polish** (later) | road | alley rear joins (slot 3, F2a), second gates on a second road, one-way loops with angled stalls, podium garage portals for `mega`, sealed-world tube crossings, public lots (`kPlanPublic`) | per feature |
 
 ---

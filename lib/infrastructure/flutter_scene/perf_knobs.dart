@@ -126,6 +126,17 @@ class PerfKnobs {
       isFlag: true,
     ),
     PerfKnob(
+      'siteAccess',
+      'Site access plans drawn (docs/plans/site-access.md §9 R4): driveways, '
+          'car parks, access roads, gates and dropped kerbs, and a served '
+          'building standing on its plan envelope. Off, every building is '
+          'legacy and no site is cut into a tile — the A/B the render '
+          'budgets are measured against.',
+      () => CityNodes.siteAccess ? 1 : 0,
+      (v) => CityNodes.siteAccess = v != 0,
+      isFlag: true,
+    ),
+    PerfKnob(
       'detailBudgetMs',
       'The floor of UI-thread upload the detail layer gets a frame; it '
           'also takes what the tile build leaves. More lands detail faster '

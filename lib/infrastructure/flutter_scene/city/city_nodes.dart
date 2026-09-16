@@ -456,9 +456,10 @@ class CityNodes {
   /// (docs/plans/site-access.md §5.3, §6.2): the sites cut into tiles and
   /// keyed, served buildings' slots and gates and roads' kerb cuts keyed, the
   /// sites packed into the requests, and a served building placed on its
-  /// plan's ENVELOPE, turned to face its access road. OFF (the default):
-  /// every building is legacy, and every tile's membership, key and mesh are
-  /// exactly as they were.
+  /// plan's ENVELOPE, turned to face its access road. ON since R4 (§9 R4).
+  /// Off — the perf knob `siteAccess`, and what every legacy pin is asserted
+  /// against — every building is legacy, and every tile's membership, key
+  /// and mesh are exactly as they were.
   ///
   /// One knob, one place it is kept. Envelope placement happens where the
   /// frame is captured (`SiteCapture`, an application type the renderer

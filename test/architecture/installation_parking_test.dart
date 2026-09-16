@@ -54,4 +54,34 @@ void main() {
     }
     expect(withLots, greaterThan(3), reason: 'the installations that park');
   });
+
+  // R4 (docs/plans/site-access.md §6.2, §8.2): a PLAN-SERVED installation
+  // has no car park of its own. The site access plan drew its car park, its
+  // aisles and its stalls outside the envelope, and a massing lot laid over
+  // them would be a second, disagreeing one — the fifth lot line the slice
+  // exists to remove. The gate lane is the plan's drive, so nothing stands
+  // in it either.
+  test('a plan-served installation keeps no car park of its own, and nothing '
+      'stands in its gate lane', () {
+    const gate = SiteGate(xM: 0, widthM: 9);
+    var served = 0;
+    for (final spec in kUtilCatalog.where((s) => s.claimsOwnSite)) {
+      final parcel = plotFor(spec);
+      if (rules.massFor(spec, parcel).parking == null) continue;
+      served++;
+      final m = rules.massFor(spec, parcel, gate: gate);
+      expect(m.parking, isNull, reason: '${spec.type}: the plan parks it');
+      final extent = parcel.buildableExtent;
+      final front = -extent.depth / 2;
+      for (final v in m.volumes) {
+        final overlapsX = v.x + v.width / 2 > gate.xM - gate.widthM / 2 &&
+            v.x - v.width / 2 < gate.xM + gate.widthM / 2;
+        if (!overlapsX) continue;
+        expect(v.y - v.depth / 2,
+            greaterThanOrEqualTo(front + SiteGate.laneDepthM - 1e-6),
+            reason: '${spec.type}: a volume stands in the gate lane');
+      }
+    }
+    expect(served, greaterThan(3), reason: 'the installations that park');
+  });
 }
