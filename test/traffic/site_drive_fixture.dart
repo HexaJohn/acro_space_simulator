@@ -106,6 +106,14 @@ class SiteDrive implements SiteSink, VehicleSink, SpawnSink {
   final List<int> gaveUp = [];
   final List<int> leftSite = [];
 
+  /// The road lane each gave-up car was still held in when the gate let it
+  /// go, or −1 if it was no longer on the road at all.
+  final Map<int, int> gaveUpOn = {};
+
+  /// Why each car left the world, so a test can tell an ending the site
+  /// rules chose from §5.6's despawn, which is a trip LOST.
+  final Map<int, DespawnReason> despawns = {};
+
   /// Arrivals whose lot was full when they got there (D17 step 2 is D's).
   final List<int> lotFull = [];
 
@@ -328,7 +336,13 @@ class SiteDrive implements SiteSink, VehicleSink, SpawnSink {
   @override
   void gateGaveUp(int handle) {
     gaveUp.add(handle);
-    // D17 step 2 is package D's: here the car simply leaves the world.
+    // Where it stood when the gate let it go. D17 step 2 reserves a kerb
+    // slot AHEAD on this very lane (§7.3 step 2), so a car handed over with
+    // no lane under it has nowhere to go but a garage: what the mover owes
+    // step 2 is a live car still on its arrival lane.
+    gaveUpOn[handle] =
+        table.isLive(handle) ? table.elem[SlotPool.slotOf(handle)] : -1;
+    // D17 step 2 itself is package D's: here the car simply leaves the world.
     mover.despawn(handle, DespawnReason.edit, this);
   }
 
@@ -373,7 +387,7 @@ class SiteDrive implements SiteSink, VehicleSink, SpawnSink {
   }
 
   @override
-  void despawned(int handle, DespawnReason reason) {}
+  void despawned(int handle, DespawnReason reason) => despawns[handle] = reason;
 
   // ---- SpawnSink -----------------------------------------------------------
 

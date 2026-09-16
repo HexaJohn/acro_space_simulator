@@ -16,8 +16,11 @@
 /// - G1, the throat's room, and G1b, the `sharedSingle` claim;
 /// - G2, the opposing gap, waived after `gateForcedS` and counted;
 /// - G3, the speed;
-/// - the give-up after `gateGiveUpS` refused on the throat alone, which is
-///   what sends a car on to D17 step 2.
+/// - the give-up after `gateGiveUpS` refused — whatever refused it — which
+///   is what sends a car on to D17 step 2. The forced grant waives the ETA
+///   half of G2 and never a body across the crossing, so a far-side left-in
+///   over a carriageway that never opens is refused for ever, and that is
+///   the wait the last group here bounds (agent-traffic.md §7.3 step 1).
 library;
 
 import 'package:acro_space_simulator/domain/colony/city/traffic/access_events.dart';
@@ -25,6 +28,7 @@ import 'package:acro_space_simulator/domain/colony/city/traffic/site_vehicles.da
 import 'package:acro_space_simulator/domain/colony/city/traffic/slot_pool.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/traffic_time.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/traffic_tuning.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/vehicle_mover.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../colony/site_access/site_plan_fixtures.dart';
@@ -212,6 +216,94 @@ void main() {
       final waited = secondsOf(ev.nowUs - d.heldSince[ev.handle]!);
       expect(waited, lessThan(AgentTuning.gateForcedS));
       expect(d.parked, hasLength(1));
+    });
+  });
+
+  group('a turn in that can never be taken (§7.3 step 1)', () {
+    test('the stall goes back at gateGiveUpS, counted on the crossing, and '
+        'the car is still on its lane for D17 step 2', () {
+      final lot = starterLotOf(SyntheticTemplate.home);
+      final d = SiteDrive({lot: SyntheticTemplate.home});
+      final e = servingEdges(d, lot);
+      expect(e.far, isNot(-1), reason: 'a 1+1 street has both directions');
+      // A body standing squarely across the crossing, and never moving
+      // again. The forced grant waives the ETA half of G2 and NEVER a body,
+      // so the gap this car wants never comes, at 25 s or at any other time.
+      expect(d.obstruct(e.near, d.access(lot).sOn(d.lg, e.near)),
+          isNot(SlotPool.none));
+      final h = d.arrival(lot, edge: e.far, backM: 90);
+      expect(h, isNot(SlotPool.none));
+      final row = d.rowOf(lot);
+
+      // Twice the bound, so a rule that never fired would be plain.
+      var gaveUpAtUs = -1;
+      for (var i = 0; i < (120 / kStepS).round() && gaveUpAtUs < 0; i++) {
+        d.step();
+        expect(d.world.sites.lotUsed[row], lessThanOrEqualTo(1),
+            reason: 'one reservation at a time, and only while it is held');
+        if (d.gaveUp.isNotEmpty) gaveUpAtUs = d.nowUs;
+      }
+
+      expect(gaveUpAtUs, greaterThanOrEqualTo(0), reason: 'it gave up at all');
+      final held = d.heldSince[h];
+      expect(held, isNotNull, reason: 'it reached the gate');
+      expect(secondsOf(gaveUpAtUs - held!), closeTo(AgentTuning.gateGiveUpS, 0.25),
+          reason: 'bounded from the sub-step it was handed over');
+      expect(d.gaveUp, [h], reason: 'on to D17 step 2, once');
+      expect(d.stats.gateGiveUps, 1);
+      expect(d.stats.gateCrossGiveUps, 1,
+          reason: 'the crossing was what was still refusing it');
+
+      // The safety half: nothing crossed the kerb, and no forced grant was
+      // given, because a body is never waived however long the wait ran.
+      expect(d.of(AccessEventKind.enter), isEmpty,
+          reason: 'no ENTER across a body — not once');
+      expect(d.stats.gateForced, 0);
+
+      // The stall is free for the next car, exactly once, and the car went
+      // to step 2 from the lane it was held in, not to §5.6's despawn.
+      expect(d.world.sites.lotUsed[row], 0);
+      for (var s = 0; s < d.planOf(lot).stallCount; s++) {
+        expect(d.taken(lot, s), isFalse, reason: 'stall $s is free again');
+      }
+      expect(d.gaveUpOn[h], isNotNull);
+      expect(d.gaveUpOn[h], greaterThanOrEqualTo(0),
+          reason: 'still live, still on its arrival lane');
+      expect(d.despawns.values, isNot(contains(DespawnReason.stuck)),
+          reason: 'resolved by the gate, not lost to §5.6');
+      expect(siteOccupancyErrors(d), isEmpty);
+      expect(claimErrors(d), isEmpty);
+    });
+
+    test('a crossing that clears before the give-up is still a grant, and '
+        'the give-up never pre-empts a real gap', () {
+      final lot = starterLotOf(SyntheticTemplate.home);
+      final d = SiteDrive({lot: SyntheticTemplate.home});
+      final e = servingEdges(d, lot);
+      final blocker = d.obstruct(e.near, d.access(lot).sOn(d.lg, e.near));
+      expect(blocker, isNot(SlotPool.none));
+      final h = d.arrival(lot, edge: e.far, backM: 90);
+      expect(h, isNot(SlotPool.none));
+
+      // To the gate first, then held there until the give-up is five seconds
+      // away: past the forced grant, which a body does not answer.
+      for (var i = 0; i < (60 / kStepS).round() && d.heldSince[h] == null; i++) {
+        d.step();
+      }
+      expect(d.heldSince[h], isNotNull, reason: 'it reached the gate');
+      d.run(AgentTuning.gateGiveUpS - 5);
+      expect(d.of(AccessEventKind.enter), isEmpty,
+          reason: 'the body held it the whole time');
+      expect(d.stats.gateForced, 0, reason: 'and no body was ever waived');
+      expect(d.gaveUp, isEmpty, reason: 'and the give-up had not come yet');
+      d.clear(blocker);
+      d.run(10);
+
+      expect(d.gaveUp, isEmpty, reason: 'it got in instead of giving up');
+      expect(d.of(AccessEventKind.enter), hasLength(1));
+      expect(d.stats.gateGiveUps, 0);
+      expect(d.stats.gateCrossGiveUps, 0);
+      expect(d.world.sites.lotUsed[d.rowOf(lot)], 1);
     });
   });
 }

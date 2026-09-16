@@ -405,7 +405,9 @@ void main(List<String> args) {
       'worst road waitUs $worstRoad, '
       '${agents.siteStats.backOutForced} back-outs forced, '
       '${agents.siteStats.backOutGiveUps} given up, '
-      '${agents.siteStats.throatGiveUps} throats given up');
+      '${agents.siteStats.throatGiveUps} throats given up, '
+      '${agents.siteStats.gateGiveUps} gates given up '
+      '(${agents.siteStats.gateCrossGiveUps} on the crossing)');
   stdout.writeln('  site phases seen: ${[
     for (var i = 0; i < phases.length; i++)
       if (phases[i] > 0) '${SitePhase.values[i].name}=${phases[i]}'

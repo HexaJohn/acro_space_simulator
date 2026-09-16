@@ -23,8 +23,17 @@ class SiteStats {
 
   /// Arrival gate grants given with the far-side ETA test waived after
   /// `gateForcedS` (§7.4 step 4), and arrivals that gave their stall up
-  /// after `gateGiveUpS` refused on the throat's room (to D17 step 2).
+  /// after `gateGiveUpS` refused, whatever refused them (to D17 step 2).
   int gateForced = 0, gateGiveUps = 0;
+
+  /// Of those give-ups, the ones the far-side left-in (G2) was still
+  /// refusing: a turn in across a carriageway that never opened. The forced
+  /// grant waives the ETA half of G2 and never a body across the crossing,
+  /// so this is what a busy street reads as, where [gateGiveUps] on its own
+  /// is mostly a throat too small for the arrivals it gets. One per attempt,
+  /// so a driveway nobody can turn into counts up steadily instead of cars
+  /// standing silently at `destS` until §5.6 despawned them.
+  int gateCrossGiveUps = 0;
 
   /// Cars parked in a lot stall, parked at a kerb slot, and garaged: taken
   /// out of the world because nowhere could place them (§7.5).
@@ -66,6 +75,7 @@ class SiteStats {
     x = fnv1aU32(x, exits);
     x = fnv1aU32(x, gateForced);
     x = fnv1aU32(x, gateGiveUps);
+    x = fnv1aU32(x, gateCrossGiveUps);
     x = fnv1aU32(x, parkedLot);
     x = fnv1aU32(x, parkedKerb);
     x = fnv1aU32(x, garaged);

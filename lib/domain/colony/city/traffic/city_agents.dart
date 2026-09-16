@@ -1819,8 +1819,11 @@ class _Core
 
   @override
   void gateGaveUp(int handle) {
-    // The lot was full, or thirty seconds refused on the throat's room: D17
-    // step 2 from where it stands. The mover empties this car's site columns
+    // The lot was full, or thirty seconds refused — the throat's room, or a
+    // crossing that never opened — so D17 step 2 from where it stands: a
+    // kerb slot ahead on the lane it was held in, and the trip finishes
+    // instead of the car standing there until §5.6 despawned it. The mover
+    // empties this car's site columns
     // the instant this returns — a slot handed out again must never inherit
     // a dead car's business — so what step 2 needs of it is taken now and
     // the step itself runs after the mover's walk ([_drainGiveUps]).

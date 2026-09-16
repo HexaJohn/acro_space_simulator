@@ -18,10 +18,13 @@
 ///   nose on a home drive.
 /// - **The arrival gate** ([SiteMover.holdAtGate]): a car at `destS` with a
 ///   reserved stall is granted on G1–G3 (G2 by `JunctionArbiter.opposingClear`
-///   through [AccessGaps]), forced after `AgentTuning.gateForcedS`, given up
-///   after `gateGiveUpS` refused on the throat's room alone
-///   ([SiteSink.gateGaveUp]). A grant logs ENTER, detaches the car and puts
-///   it on the throat in-lane at s = 0. Every clock here counts MILLISECONDS
+///   through [AccessGaps]), forced after `AgentTuning.gateForcedS`, and given
+///   up after `gateGiveUpS` — whatever the refusal was, because the forced
+///   grant never waives a body and a far-side left-in across a carriageway
+///   that never opens would otherwise wait for ever
+///   ([SiteSink.gateGaveUp], [SiteStats.gateCrossGiveUps]). A grant logs
+///   ENTER, detaches the car and puts it on the throat in-lane at s = 0.
+///   Every clock here counts MILLISECONDS
 ///   and saturates ([addClock]): a wait may run for hours, and an `Int32` of
 ///   microseconds wraps negative after 35.8 minutes, which would disarm the
 ///   very grant it was measuring for (traffic_time.dart).
@@ -107,7 +110,12 @@ abstract interface class SiteSink {
   void parkedInStall(int handle, int row, int stall);
 
   /// [handle] gave its reserved stall up at the gate — the lot full, or 30 s
-  /// refused on the throat's room: go on to D17 step 2 (a kerb slot).
+  /// refused whatever the reason: go on to D17 step 2 (a kerb slot).
+  ///
+  /// The car is still LIVE and still on its arrival lane when this is
+  /// called, which is what step 2 needs of it: the slot it takes is one
+  /// ahead of where it stands (§7.3 step 2). Its site columns are emptied
+  /// the instant this returns.
   void gateGaveUp(int handle);
 
   /// [handle] crossed the kerb line out of its site onto the road (EXIT
@@ -173,11 +181,6 @@ class SiteMover implements LaneObstacles {
   /// of its business, so the unit needs a column of its own.
   Int32List _unit = Int32List(0);
 
-  /// Milliseconds refused at the gate on the throat's ROOM alone: what the
-  /// 30 s give-up counts, as against `SiteVehicles.waitMs`, which counts
-  /// every refusal and drives the 25 s forced grant (§7.4 step 4).
-  Int32List _g1Ms = Int32List(0);
-
   /// Milliseconds a deep tandem car has been blocked by a parked outer car.
   Int32List _shuffleMs = Int32List(0);
 
@@ -234,7 +237,6 @@ class SiteMover implements LaneObstacles {
     site.claim[sl] = stall;
     site.phase[sl] = SitePhase.gateHeld.index;
     _unit[sl] = -1;
-    _g1Ms[sl] = 0;
     _shuffleMs[sl] = 0;
   }
 
@@ -296,7 +298,6 @@ class SiteMover implements LaneObstacles {
     site.owner[sl] = owner;
     site.ownerKind[sl] = ownerKind & 0xFF;
     _unit[sl] = -1;
-    _g1Ms[sl] = 0;
     _shuffleMs[sl] = 0;
     _originT[sl] = originT;
     sites.inside[row]++;
@@ -383,6 +384,12 @@ class SiteMover implements LaneObstacles {
     }
   }
 
+  /// A car held at the gate: G1–G3, the forced grant, and the give-up that
+  /// bounds the whole wait (§7.3 step 1).
+  ///
+  /// There is no "not yet" return between the refusal and the clock, and the
+  /// two structural give-ups above it end the wait outright, so NO path
+  /// through this method leaves a car held for ever.
   void _gate(int sl, int nowUs, SiteSink sink) {
     final t = table, lg = _lg!;
     final row = site.row[sl], join = site.join[sl], stall = site.claim[sl];
@@ -429,12 +436,31 @@ class SiteMover implements LaneObstacles {
       _enter(sl, row, join, stall, inLane, el, edge);
       return;
     }
+    // §7.3 step 1: ONE clock, and it bounds every refusal alike.
+    //
+    // The give-up used to run only while the throat's room or the claim on
+    // it was the reason, on the grounds that everything else clears by
+    // itself. G2 does not. The forced grant waives the ETA half of it and
+    // NEVER a body across the crossing — turning in front of one is a
+    // collision however long the car has waited — so a far-side left-in
+    // across a carriageway that never opens was refused for ever. Nothing
+    // bounded it but §5.6's road despawn, which took the car after three
+    // minutes of standing at `destS` in `parkingSearch`: the trip LOST
+    // rather than resolved, and the stall it had reserved released that late.
+    //
+    // So the wait the forced grant is measured from is the wait the give-up
+    // is measured from: `gateForcedS` of honest gap-seeking, the rest of
+    // `gateGiveUpS` trying again with the ETA waived, and then the stall
+    // goes back and the car takes D17 step 2 from where it stands — a kerb
+    // slot ahead on the very lane it is waiting in. Nothing crosses the kerb
+    // to do it, so G2 itself is untouched: the car simply stops waiting on it.
     site.waitMs[sl] = addClock(site.waitMs[sl], kStepMs);
-    // The give-up clock runs only while the throat's room, or the claim on
-    // it, is the reason: everything else clears by itself (§7.4 step 4).
-    if (!roomOk || !unitOk) {
-      _g1Ms[sl] = addClock(_g1Ms[sl], kStepMs);
-      if (_g1Ms[sl] >= msOf(AgentTuning.gateGiveUpS)) _giveUpGate(sl, sink);
+    if (site.waitMs[sl] >= msOf(AgentTuning.gateGiveUpS)) {
+      // Which refusal was standing at the end, for the readouts: the throat
+      // filling is a lot that is too small, a crossing that never clears is
+      // a street that is too busy, and they want different answers.
+      if (roomOk && unitOk && !crossOk) stats.gateCrossGiveUps++;
+      _giveUpGate(sl, sink);
     }
   }
 
@@ -458,13 +484,18 @@ class SiteMover implements LaneObstacles {
     site.lane[sl] = inLane;
     site.target[sl] = sites.stallTarget(row, stall);
     site.waitMs[sl] = 0;
-    _g1Ms[sl] = 0;
     final unit = sites.elemUnit[sites.elemBase[row] + inLane];
     if (unit >= 0) _claim(unit, kUnitIn, sl);
     sites.inside[row]++;
     _link(sl, row, inLane);
   }
 
+  /// The stall back, the car on to D17 step 2 (§7.3 step 1).
+  ///
+  /// The reservation is released FIRST and exactly once — `site.clear` takes
+  /// the claim column away at the end of this, and `gateHeld` is the only
+  /// phase that reaches here, so there is no second path to the same stall —
+  /// which is what keeps `lotUsed` exact for the very next car to arrive.
   void _giveUpGate(int sl, SiteSink sink) {
     final row = site.row[sl], stall = site.claim[sl];
     if (sites.isRowLive(row) && stall >= 0) sites.unreserve(row, stall);
@@ -474,7 +505,6 @@ class SiteMover implements LaneObstacles {
     // handed out again must never inherit a dead car's site business.
     site.clear(sl);
     _unit[sl] = -1;
-    _g1Ms[sl] = 0;
   }
 
   // ---- Driving the site lanes ----------------------------------------------
@@ -1422,7 +1452,6 @@ class SiteMover implements LaneObstacles {
         ..fillRange(0, n, -1)
         ..setRange(0, a.length, a);
       _unit = i32(_unit);
-      _g1Ms = Int32List(n)..setRange(0, _g1Ms.length, _g1Ms);
       _shuffleMs = Int32List(n)..setRange(0, _shuffleMs.length, _shuffleMs);
       _originT = Float32List(n)..setRange(0, _originT.length, _originT);
       _curveM = Float32List(n)..setRange(0, _curveM.length, _curveM);
@@ -1442,7 +1471,6 @@ class SiteMover implements LaneObstacles {
   /// Every buffer by name into [into], for the allocation test (A13).
   void collectBuffers(Map<String, Object> into, String name) {
     into['$name.unit'] = _unit;
-    into['$name.g1Ms'] = _g1Ms;
     into['$name.shuffleMs'] = _shuffleMs;
     into['$name.originT'] = _originT;
     into['$name.curveM'] = _curveM;
@@ -1455,10 +1483,11 @@ class SiteMover implements LaneObstacles {
     into['$name.clTo'] = _clTo;
   }
 
-  /// [hash] with the mover's own state folded in — the gate and shuffle
-  /// clocks, the claim unit each car holds, and where its road leg starts —
-  /// in slot order, and only for cars that have site business, so a colony
-  /// with no site traffic digests exactly as it did before T4a.
+  /// [hash] with the mover's own state folded in — the shuffle clock, the
+  /// claim unit each car holds, and where its road leg starts — in slot
+  /// order, and only for cars that have site business, so a colony with no
+  /// site traffic digests exactly as it did before T4a. The gate's own wait
+  /// is `SiteVehicles.waitMs`, which that table digests.
   int digest(int hash) {
     var h = hash;
     final hw = table.highWater;
@@ -1466,7 +1495,6 @@ class SiteMover implements LaneObstacles {
       if (!table.isSlotLive(sl) || site.phase[sl] == 0) continue;
       h = fnv1aU32(h, table.handleOf(sl));
       h = fnv1aU32(h, _unit[sl]);
-      h = fnv1aU32(h, _g1Ms[sl]);
       h = fnv1aU32(h, _shuffleMs[sl]);
       h = fnv1aU32(h, (_originT[sl] * 1000).round());
       h = fnv1aU32(h, (_curveM[sl] * 1000).round());

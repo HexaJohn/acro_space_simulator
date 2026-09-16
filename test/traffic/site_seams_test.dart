@@ -209,6 +209,7 @@ void main() {
       () => s.exits++,
       () => s.gateForced++,
       () => s.gateGiveUps++,
+      () => s.gateCrossGiveUps++,
       () => s.parkedLot++,
       () => s.parkedKerb++,
       () => s.garaged++,
@@ -219,6 +220,8 @@ void main() {
       () => s.siteRetargets++,
       () => s.backOutForced++,
       () => s.shuffles++,
+      () => s.backOutGiveUps++,
+      () => s.throatGiveUps++,
     ]) {
       final before = s.digest(kFnvOffset32);
       turn();

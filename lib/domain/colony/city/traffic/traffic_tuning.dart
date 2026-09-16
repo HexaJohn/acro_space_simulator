@@ -116,8 +116,10 @@ class AgentTuning {
   /// The arrival gate (§7.4 steps 3–4): the fastest a car may be to be
   /// granted the turn in (G3, m/s); the seconds refused after which the
   /// far-side ETA test is waived (a forced grant, counted); and the seconds
-  /// refused on the throat's room alone after which the car gives the stall
-  /// up and looks for a kerb slot (D17 step 2).
+  /// refused — whatever refused it, since the forced grant never waives a
+  /// body — after which the car gives the stall up and looks for a kerb slot
+  /// (D17 step 2). The give-up must stay the later of the two, or no car
+  /// would ever get the forced grant it is waiting for.
   static double gateMaxMps = 3;
   static double gateForcedS = 25;
   static double gateGiveUpS = 30;
