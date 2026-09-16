@@ -10,8 +10,11 @@
 ///   fvm flutter run -d windows --profile -t lib/main_city_game_dev.dart \
 ///       --enable-impeller --enable-flutter-gpu
 ///
-/// `--dart-define=BODY=moon` founds it elsewhere; `START=harsh` changes the
-/// difficulty. Extensions:
+/// `--dart-define=BODY=moon` founds it elsewhere; `LAT` and `LON` found it on
+/// other ground of the same body (`LAT=46.5 LON=8.0` is an alpine hillside,
+/// where the starter kit's platforms are cut ninety metres deep and its
+/// throats fall 1.6 m per metre — what docs/plans/site-access.md §6.3 as
+/// built is measured on); `START=harsh` changes the difficulty. Extensions:
 ///
 ///   ext.acro.screenshot?path=PNG   capture the RepaintBoundary
 ///   ext.acro.citygame              the colony's live numbers (pop, funds,
@@ -84,11 +87,17 @@ Future<void> main() async {
   const startName = String.fromEnvironment('START', defaultValue: 'standard');
   final start = CityStart.values.firstWhere((s) => s.name == startName,
       orElse: () => CityStart.standard);
+  // Strings, not doubles: there is no `double.fromEnvironment`.
+  const latText = String.fromEnvironment('LAT', defaultValue: '-45.03');
+  const lonText = String.fromEnvironment('LON', defaultValue: '168.66');
 
   final colony = CityStarterKit.found(
     bodies: RealSolarSystem.build().all.where((b) => !b.isStar).toList(),
-    config: const CityConfig(
-        bodyId: bodyId, latitude: -45.03, longitude: 168.66, biome: Biome.forest),
+    config: CityConfig(
+        bodyId: bodyId,
+        latitude: double.parse(latText),
+        longitude: double.parse(lonText),
+        biome: Biome.forest),
     start: start,
     id: 'city-dev',
     name: 'Dev Colony',
