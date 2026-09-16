@@ -36,7 +36,12 @@ void main() {
 
   setUpAll(() => city = envelopeTown());
 
-  tearDown(() => SiteCapture.envelopePlacement = false);
+  // Put the knob back the way this suite found it, never to a hard-coded
+  // value: the production default is ON, and restoring OFF would hide a
+  // regression in the default path from every test that runs after.
+  late bool wasPlacement;
+  setUp(() => wasPlacement = SiteCapture.envelopePlacement);
+  tearDown(() => SiteCapture.envelopePlacement = wasPlacement);
 
   for (final style in ArchitectureStyle.kits) {
     test('${style.id}: every drawn door lands on its plan\'s door', () {

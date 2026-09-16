@@ -192,12 +192,15 @@ class EnvelopeScene {
   /// [city] captured with the envelope knob ON, in [style].
   factory EnvelopeScene.of(CitySim city, ArchitectureStyle style,
       {double bucketM = 6}) {
+    final was = SiteCapture.envelopePlacement;
     SiteCapture.envelopePlacement = true;
     try {
       return EnvelopeScene(city, captureSiteTown(city), style,
           bucketM: bucketM);
     } finally {
-      SiteCapture.envelopePlacement = false;
+      // Back to what the caller had, not to a hard-coded off: the production
+      // default is on.
+      SiteCapture.envelopePlacement = was;
     }
   }
 

@@ -40,7 +40,12 @@ void main() {
     scene = EnvelopeScene.of(city, style);
   });
 
-  tearDown(() => SiteCapture.envelopePlacement = false);
+  // Put the knob back the way this suite found it, never to a hard-coded
+  // value: the production default is ON, and restoring OFF would hide a
+  // regression in the default path from every test that runs after.
+  late bool wasPlacement;
+  setUp(() => wasPlacement = SiteCapture.envelopePlacement);
+  tearDown(() => SiteCapture.envelopePlacement = wasPlacement);
 
   test('every served building takes its plan\'s axes and envelope', () {
     var served = 0, turned = 0;
@@ -251,6 +256,26 @@ void main() {
     }
     expect(moved, greaterThan(50),
         reason: 'the knob is what moves them, and it moves most of them');
+  });
+
+  // R4 review: these suites used to put the knob back to a hard-coded OFF,
+  // which stopped being the default at 'the sites are drawn by default'. A
+  // test that runs after one of them would then read the knob OFF while
+  // production reads it ON, and a regression in the default path would go
+  // unseen. Declared LAST on purpose: it is the one that would have been
+  // handed the wrong value.
+  test('every case here starts from production\'s own knob, and the fixture '
+      'gives it back', () {
+    expect(SiteCapture.envelopePlacement, isTrue,
+        reason: 'the production default (§9 "R4 as built"), not what the '
+            'case before this one happened to leave behind');
+    EnvelopeScene.of(city, style);
+    expect(SiteCapture.envelopePlacement, isTrue,
+        reason: 'the fixture restores what it found, it does not force off');
+    SiteCapture.envelopePlacement = false;
+    EnvelopeScene.of(city, style);
+    expect(SiteCapture.envelopePlacement, isFalse,
+        reason: 'and it gives an OFF caller its OFF back');
   });
 }
 
