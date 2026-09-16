@@ -303,6 +303,41 @@ void main() {
       }
     });
 
+    test('a column shifted past the end of its span stops at the end', () {
+      // A road cut into graded spans by its decks dresses each span on its
+      // own, so a cut near a span's edge shifts a column off the end of it.
+      // It belongs at the end, not left standing in the dropped kerb.
+      final span = pts.sublist(0, 30); // 58 m of the road
+      final solid = MeshBuilder(), glow = MeshBuilder();
+      RoadMesher.lamps(solid, glow, span, anchor, halfWidth, RoadClass.street,
+          liftM: RoadMesher.walkTopLiftM,
+          cuts: cuts([(0, 51.0, 6.5, KerbCuts.kindDropped)]));
+      final m = glow.build();
+      // Two columns on this span: 18 m on side 1, 52 m on side 0. The
+      // second stands in the cut, whose far end (57.5 m) plus a metre is
+      // past the span's last point.
+      final arcs = () {
+        final per = m.vertexCount ~/ 2;
+        return [
+          for (var k = 0; k < 2; k++)
+            () {
+              var sum = 0.0;
+              for (var i = k * per; i < (k + 1) * per; i++) {
+                sum += arcOf(m, i);
+              }
+              return sum / per;
+            }(),
+        ];
+      }();
+      expect(arcs[0], closeTo(18, 0.5));
+      expect(arcs[1], closeTo(58, 0.5), reason: 'clamped to the span end');
+      // And it really moved: standing put it would be at 52 m, inside the
+      // cut that runs from 44.5 m to 57.5 m.
+      expect(KerbCuts.blocked(cuts([(0, 51.0, 6.5, KerbCuts.kindDropped)]), 0,
+              52, upstreamM: 0, downstreamM: 0),
+          isTrue);
+    });
+
     test('a cut on the other kerb, and a far-swing mask, move nothing', () {
       final plain = positionsOf(lamps().$2);
       expect(

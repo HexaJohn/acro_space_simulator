@@ -8,8 +8,11 @@
 /// instant path.
 library;
 
+import 'dart:math' as math;
+
 import 'package:acro_space_simulator/application/snapshot/city_site_frame.dart';
 import 'package:acro_space_simulator/domain/architecture/building_generator.dart';
+import 'package:acro_space_simulator/domain/colony/city/site_access/site_access_constants.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_access_plan.dart';
 import 'package:acro_space_simulator/domain/scatter/mesh_builder.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
@@ -17,6 +20,7 @@ import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile
 import 'package:acro_space_simulator/application/snapshot/city_patch_columns.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_columns.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_mesher.dart';
+import 'package:acro_space_simulator/infrastructure/flutter_scene/city/road_mesher.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/site_access_mesher.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -157,6 +161,244 @@ void main() {
         if (bays > 0) painted++;
       }
       expect(painted, greaterThan(20));
+    });
+  });
+
+  group('the paving is drawn once (§5.4: the ribbons are cut at the rings)',
+      () {
+    /// The drawn surface of [plan]'s pave rings at colony-local ([e], [n]):
+    /// the radius of the ring fan there, barycentric over the very triangle
+    /// the mesher fans, or null when no ring covers the point.
+    double? ringRadiusAt(
+        SiteChunkGeometry g, int site, SiteAccessPlan plan, double e,
+        double n) {
+      final p0 = g.plan.ptStart(site);
+      for (var r = 0; r < plan.paveCount; r++) {
+        final a = plan.paveStart(r), b = plan.paveStart(r + 1);
+        if (b - a < 3) continue;
+        (double, double, double) vert(int i) {
+          final p = plan.pavePt(i);
+          return (
+            plan.ptE(p),
+            plan.ptN(p),
+            frame.localToBodyFixed(plan.ptE(p), plan.ptN(p), g.ptUp(p0 + p))
+                    .length +
+                SiteAccessMesher.paveLiftM,
+          );
+        }
+
+        final o = vert(a);
+        for (var i = a + 1; i + 1 < b; i++) {
+          final u = vert(i), v = vert(i + 1);
+          // Barycentric of (e, n) in the fan triangle (o, u, v).
+          final d = (u.$2 - v.$2) * (o.$1 - v.$1) + (v.$1 - u.$1) * (o.$2 - v.$2);
+          if (d.abs() < 1e-12) continue;
+          final l0 = ((u.$2 - v.$2) * (e - v.$1) + (v.$1 - u.$1) * (n - v.$2)) / d;
+          final l1 = ((v.$2 - o.$2) * (e - v.$1) + (o.$1 - v.$1) * (n - v.$2)) / d;
+          final l2 = 1 - l0 - l1;
+          if (l0 < -1e-9 || l1 < -1e-9 || l2 < -1e-9) continue;
+          return o.$3 * l0 + u.$3 * l1 + v.$3 * l2;
+        }
+      }
+      return null;
+    }
+
+    /// How far colony-local ([e], [n]) lies INSIDE the deepest ring that
+    /// holds it, metres; negative when no ring does. A quad is cut by its
+    /// centre, so a triangle that straddles a ring's edge may still overlap
+    /// it by a sliver: what must never be drawn again is paving well inside.
+    double paveDepth(SiteAccessPlan plan, double e, double n) {
+      var best = double.negativeInfinity;
+      for (var r = 0; r < plan.paveCount; r++) {
+        final a = plan.paveStart(r), b = plan.paveStart(r + 1);
+        if (b - a < 3) continue;
+        var twice = 0.0;
+        for (var i = a; i < b; i++) {
+          final p = plan.pavePt(i);
+          final q = plan.pavePt(i + 1 < b ? i + 1 : a);
+          twice += plan.ptE(p) * plan.ptN(q) - plan.ptE(q) * plan.ptN(p);
+        }
+        if (twice.abs() < 1e-9) continue;
+        final want = twice > 0 ? 1.0 : -1.0;
+        var depth = double.infinity;
+        for (var i = a; i < b; i++) {
+          final p = plan.pavePt(i);
+          final q = plan.pavePt(i + 1 < b ? i + 1 : a);
+          final ex = plan.ptE(q) - plan.ptE(p), nx = plan.ptN(q) - plan.ptN(p);
+          final len = math.sqrt(ex * ex + nx * nx);
+          if (len < 1e-9) continue;
+          final d =
+              (ex * (n - plan.ptN(p)) - nx * (e - plan.ptE(p))) * want / len;
+          if (d < depth) depth = d;
+        }
+        if (depth > best) best = depth;
+      }
+      return best;
+    }
+
+    test('nothing a site draws stands on the surface of its own pave rings',
+        () {
+      var checked = 0, deep = 0, lying = 0;
+      for (final (g, k) in rows) {
+        final plan = g.plan.plan(k);
+        final (_, apron, _) = drawn(g, k, SiteDrawTier.near);
+        final mesh = apron.build();
+        final fans = ringTris(plan);
+        expect(mesh.triangleCount, greaterThan(fans),
+            reason: '${plan.siteId}: the throat crossing is never cut');
+        for (var t = fans; t < mesh.triangleCount; t++) {
+          checked++;
+          // A triangle every corner of which lies on the ring surface, well
+          // inside the ring, is the paving drawn a second time — the z-fight
+          // the cut exists to stop. A surface that CROSSES the ring (the
+          // throat landing on it, an access road's kerb face) has corners
+          // above and below, and is what the tiers are meant to draw.
+          var on = 0, inside = 0;
+          for (var c = 0; c < 3; c++) {
+            final i = mesh.indices[t * 3 + c];
+            final at = Vector3(mesh.positions[i * 3], mesh.positions[i * 3 + 1],
+                        mesh.positions[i * 3 + 2]) *
+                    1000.0 +
+                anchor;
+            final e = at.dot(frame.east), n = at.dot(frame.north);
+            if (paveDepth(plan, e, n) < 1.0) continue;
+            inside++;
+            final ring = ringRadiusAt(g, k, plan, e, n);
+            if (ring != null && (at.length - ring).abs() <= 0.02) on++;
+          }
+          if (inside == 3) deep++;
+          if (on == 3) lying++;
+          expect(on, lessThan(3),
+              reason: '${plan.siteId}: a surface on its own paving '
+                  '(tri $t of ${mesh.triangleCount}, fans $fans)');
+        }
+      }
+      expect(checked, greaterThan(200));
+      expect(lying, 0);
+      expect(deep, greaterThan(0),
+          reason: 'the fixture draws inside its rings, so the check bites');
+    });
+
+    test('the fixture has turnaround pads its own paving already carries', () {
+      var pads = 0, cut = 0;
+      for (final (g, k) in rows) {
+        final plan = g.plan.plan(k);
+        for (var n = 0; n < plan.nodeCount; n++) {
+          if (plan.nodeTurnKind(n) == TurnaroundKind.none) continue;
+          if (!(plan.nodeTurnR(n) > 0)) continue;
+          pads++;
+          final row = plan.nodePt(n);
+          if (SiteAccessMesher.insidePave(
+              plan, plan.ptE(row), plan.ptN(row))) {
+            cut++;
+          }
+        }
+      }
+      expect(pads, greaterThan(0));
+      expect(cut, greaterThan(0), reason: 'the fixture has pads on paving');
+      // A pad on a ring draws nothing: the near count is the same whether or
+      // not the plan has one, which the triangle audit above proves point by
+      // point. Here only that the fixture exercises the branch.
+    });
+  });
+
+  group('the throat rides over the walk it crosses (§5.4, §5.5)', () {
+    /// The walk's top [d] metres in from the kerb edge across a dropped
+    /// kerb: `cutTopLiftM` at the kerb easing to `walkTopLiftM` at the back
+    /// of the 3 m pavement band (road_mesher `sidewalks`).
+    double walkTopAt(double d) =>
+        RoadMesher.cutTopLiftM +
+        (RoadMesher.walkTopLiftM - RoadMesher.cutTopLiftM) * (d / 3.0);
+
+    test('at 0, 1.5 and 3 m from the kerb it stands one paint over the flags',
+        () {
+      for (final d in const [0.0, 1.5, 3.0]) {
+        expect(SiteAccessMesher.throatLiftAt(d), greaterThan(walkTopAt(d)),
+            reason: '$d m in');
+        expect(SiteAccessMesher.throatLiftAt(d) - walkTopAt(d),
+            closeTo(RoadMesher.paintLiftM, 1e-9));
+      }
+      // Inside the lot line it settles onto the site's own paving.
+      expect(
+          SiteAccessMesher.throatLiftAt(
+              SiteAccessMesher.throatRampM + SiteAccessMesher.throatSettleM),
+          SiteAccessMesher.paveLiftM);
+    });
+
+    test('every drawn throat has a station at each knee, at the knee height',
+        () {
+      var throats = 0;
+      for (final (g, k) in rows) {
+        final plan = g.plan.plan(k);
+        final p0 = g.plan.ptStart(k);
+        final (_, apron, _) = drawn(g, k, SiteDrawTier.near);
+        final mesh = apron.build();
+        for (var s = 0; s < plan.segCount; s++) {
+          if (plan.segFlags(s) & kSegThroat == 0) continue;
+          final n = plan.segPointCount(s);
+          // The throat's own points, body-fixed at their heights: the drape
+          // the mesher rides, sampled where it samples it.
+          final pts = [
+            for (var i = 0; i < n; i++)
+              () {
+                final p = plan.segPoint(s, i);
+                return frame.localToBodyFixed(
+                    plan.ptE(p), plan.ptN(p), g.ptUp(p0 + p));
+              }(),
+          ];
+          var whole = 0.0;
+          for (var i = 1; i < pts.length; i++) {
+            whole += (pts[i] - pts[i - 1]).length;
+          }
+          final from = plan.segFrom(s);
+          final fromKerb = from >= 0 &&
+              from < plan.nodeCount &&
+              plan.nodeFlags(from) & kNodeKerb != 0;
+          for (final d in [
+            0.0,
+            SiteAccessMesher.throatRampM,
+            SiteAccessMesher.throatRampM + SiteAccessMesher.throatSettleM,
+          ]) {
+            if (d >= whole - 1e-3) continue;
+            final want = fromKerb ? d : whole - d;
+            // The point at that arc, and the radius the mesher draws there.
+            var run = 0.0;
+            var ground = pts.first;
+            for (var i = 1; i < pts.length; i++) {
+              final seg = pts[i] - pts[i - 1];
+              final len = seg.length;
+              if (len < 1e-6) continue;
+              if (want <= run + len) {
+                ground = pts[i - 1] + seg * ((want - run) / len);
+                break;
+              }
+              run += len;
+            }
+            final target =
+                ground.length + SiteAccessMesher.throatLiftAt(d);
+            var best = double.infinity;
+            for (var i = 0; i < mesh.vertexCount; i++) {
+              final at = Vector3(
+                          mesh.positions[i * 3],
+                          mesh.positions[i * 3 + 1],
+                          mesh.positions[i * 3 + 2]) *
+                      1000.0 +
+                  anchor;
+              // The ribbon's edges lie half a width either side of the
+              // centre, so a knee station is found by its arc, not its
+              // point: take the nearest vertex within half the width.
+              final across = (at - ground).length;
+              if (across > plan.segWidthM(s) / 2 + 0.3) continue;
+              final gap = (at.length - target).abs();
+              if (gap < best) best = gap;
+            }
+            expect(best, lessThan(0.01),
+                reason: '${plan.siteId}: no station $d m from the kerb');
+          }
+          throats++;
+        }
+      }
+      expect(throats, greaterThan(50));
     });
   });
 
@@ -305,7 +547,7 @@ void main() {
           ]),
         ];
 
-    test('the first cut of a body draws nothing new', () {
+    test("a body's first cut counts every site as new", () {
       final t = InstantSiteTracker();
       t.noteCut(cut(rows.take(4).toList()));
       // A body's first cut IS every site: the road tracker's rule, so a

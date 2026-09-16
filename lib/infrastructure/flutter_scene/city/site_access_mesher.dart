@@ -190,11 +190,13 @@ class InstantSiteTracker {
 }
 
 /// One station of a site ribbon: the point, its radial, the unit normal
-/// across it and its arc from the ribbon's first point.
+/// across it, its arc from the ribbon's first point, and the colony-local
+/// (east, north) it came from — what the pave rings are measured in, so a
+/// ribbon can be cut where a ring already carries the surface.
 class _Station {
-  const _Station(this.p, this.up, this.side, this.s);
+  const _Station(this.p, this.up, this.side, this.s, this.e, this.n);
   final Vector3 p, up, side;
-  final double s;
+  final double s, e, n;
 }
 
 abstract final class SiteAccessMesher {
@@ -217,7 +219,16 @@ abstract final class SiteAccessMesher {
 
   /// The throat's lift ease (§5.4): the dropped kerb at the road, the walk's
   /// top over the pavement band, then the site's own paving.
-  static const double throatKerbLiftM = RoadMesher.ribbonLiftM + 0.02;
+  ///
+  /// The crossing rides one paint's lift over the walk the whole way: the
+  /// flags themselves ramp from [RoadMesher.cutTopLiftM] at the dropped kerb
+  /// to [RoadMesher.walkTopLiftM] at their back edge over the same
+  /// [throatRampM] band, so a throat drawn at the walk's own heights would be
+  /// buried under it for its whole crossing.
+  static const double throatKerbLiftM =
+      RoadMesher.cutTopLiftM + RoadMesher.paintLiftM;
+  static const double throatWalkLiftM =
+      RoadMesher.walkTopLiftM + RoadMesher.paintLiftM;
   static const double throatRampM = 3.0;
   static const double throatSettleM = 1.5;
 
@@ -227,6 +238,26 @@ abstract final class SiteAccessMesher {
   /// A gate post: its side and its height.
   static const double gatePostM = 0.35;
   static const double gatePostHeightM = 2.6;
+
+  /// A throat's lift [d] metres from its kerb node (§5.4): one paint's lift
+  /// over the dropped kerb, one paint's lift over the flags at the back of
+  /// the pavement band, and the site's own paving a settle later.
+  ///
+  /// The walk under it ramps from [RoadMesher.cutTopLiftM] to
+  /// [RoadMesher.walkTopLiftM] across the same [throatRampM] band, so the
+  /// difference over the whole crossing is exactly [RoadMesher.paintLiftM].
+  static double throatLiftAt(double d) {
+    if (d <= 0) return throatKerbLiftM;
+    if (d < throatRampM) {
+      return throatKerbLiftM +
+          (throatWalkLiftM - throatKerbLiftM) * (d / throatRampM);
+    }
+    if (d < throatRampM + throatSettleM) {
+      final t = (d - throatRampM) / throatSettleM;
+      return throatWalkLiftM + (paveLiftM - throatWalkLiftM) * t;
+    }
+    return paveLiftM;
+  }
 
   /// The draw tier of a tile at [tier]. A detail job asks for
   /// [SiteDrawTier.detail] itself.
@@ -385,9 +416,10 @@ abstract final class SiteAccessMesher {
       {required bool kerbs}) {
     final n = plan.segPointCount(k);
     if (n < 2) return;
-    final pts = <Vector3>[for (var i = 0; i < n; i++) at(plan.segPoint(k, i))];
-    final st = _stationsOf(pts, anchorBF);
-    if (st.length < 2) return;
+    final rows = <int>[for (var i = 0; i < n; i++) plan.segPoint(k, i)];
+    var pts = <Vector3>[for (final p in rows) at(p)];
+    var es = <double>[for (final p in rows) plan.ptE(p)];
+    var ns = <double>[for (final p in rows) plan.ptN(p)];
     final half = plan.segWidthM(k) / 2;
     if (half <= 0) return;
     final throat = plan.segFlags(k) & kSegThroat != 0;
@@ -395,38 +427,66 @@ abstract final class SiteAccessMesher {
     // height, rises to the walk's top over the pavement band and settles
     // onto the site's paving inside the lot line.
     final fromKerb = throat && _kerbAtStart(plan, k);
-    final total = st.last.s;
-    double liftAt(double s) {
-      if (!throat) return paveLiftM;
-      final d = fromKerb ? s : total - s;
-      if (d <= 0) return throatKerbLiftM;
-      if (d < throatRampM) {
-        return throatKerbLiftM +
-            (RoadMesher.walkTopLiftM - throatKerbLiftM) * (d / throatRampM);
+    if (throat) {
+      // The plan's own stations are its vias — tens of metres apart on an
+      // installation's spine. The ease has to be sampled where it bends or
+      // the crossing is one long slope from the kerb, so the two knees go in
+      // as stations of their own, as `RoadMesher._withStations` does for a
+      // dropped kerb.
+      var whole = 0.0;
+      for (var i = 1; i < pts.length; i++) {
+        whole += (pts[i] - pts[i - 1]).length;
       }
-      if (d < throatRampM + throatSettleM) {
-        final t = (d - throatRampM) / throatSettleM;
-        return RoadMesher.walkTopLiftM +
-            (paveLiftM - RoadMesher.walkTopLiftM) * t;
-      }
-      return paveLiftM;
+      final knees = fromKerb
+          ? [throatRampM, throatRampM + throatSettleM]
+          : [whole - throatRampM - throatSettleM, whole - throatRampM];
+      (pts, es, ns) = _densified(pts, es, ns, [
+        for (final d in knees)
+          if (d > 1e-3 && d < whole - 1e-3) d,
+      ]);
     }
+    final st = _stationsOf(pts, es, ns, anchorBF);
+    if (st.length < 2) return;
+    final total = st.last.s;
+    double liftAt(double s) =>
+        throat ? throatLiftAt(fromKerb ? s : total - s) : paveLiftM;
 
     if (kerbs) {
       _emitEdgeKerbs(m, st, half, liftAt);
       return;
+    }
+    // Where a pave ring already carries the surface the ribbon is cut
+    // (§5.4's lift stack), so a drive is not drawn twice, exactly coplanar
+    // and in two different bands. Only the flat part is cut: a throat's ramp
+    // over the pavement rides above every ring and stays whole.
+    final drawn = List<bool>.filled(st.length - 1, true);
+    for (var i = 0; i + 1 < st.length; i++) {
+      final mid = (st[i].s + st[i + 1].s) / 2;
+      if (liftAt(mid) > paveLiftM + 1e-9) continue;
+      if (insidePave(plan, (st[i].e + st[i + 1].e) / 2,
+          (st[i].n + st[i + 1].n) / 2)) {
+        drawn[i] = false;
+      }
     }
     final band = throat
         ? CityTextureBakes.roadConcrete
         : CityTextureBakes.roadAsphalt;
     final u0 = RoadMesher.bandU(band, 0), u1 = RoadMesher.bandU(band, 1);
     int? prevL, prevR;
-    for (final k0 in st) {
+    for (var i = 0; i < st.length; i++) {
+      final before = i > 0 && drawn[i - 1];
+      final after = i + 1 < st.length && drawn[i];
+      if (!before && !after) {
+        prevL = null;
+        prevR = null;
+        continue;
+      }
+      final k0 = st[i];
       final c = k0.p + k0.up * liftAt(k0.s);
       final v = k0.s / RoadMesher.tileM;
       final l = m.vertex((c - k0.side * half) * kRenderScale, k0.up, u0, v);
       final r = m.vertex((c + k0.side * half) * kRenderScale, k0.up, u1, v);
-      if (prevL != null && prevR != null) m.quad(prevL, prevR, r, l);
+      if (before && prevL != null && prevR != null) m.quad(prevL, prevR, r, l);
       prevL = l;
       prevR = r;
     }
@@ -478,21 +538,49 @@ abstract final class SiteAccessMesher {
       final up = (centre + anchorBF).normalized;
       final band = CityTextureBakes.roadAsphalt;
       final uMid = RoadMesher.bandU(band, 0.5);
+      // A pad lies flat on the site's paving, so it is cut at the pave rings
+      // exactly as the ribbons are: a triangle whose centre a ring already
+      // carries is the ring's own surface drawn again.
+      bool covered(Vector3 a, Vector3 b, Vector3 c) {
+        final mid = (a + b + c) * (1 / 3) + anchorBF;
+        return insidePave(plan, mid.dot(frame.east), mid.dot(frame.north));
+      }
+
       if (kind == TurnaroundKind.circle) {
         const steps = 16;
+        final (ax, ay) = _axesOf(frame, plan, up);
+        final rim = <Vector3>[
+          for (var i = 0; i < steps; i++)
+            () {
+              final a = 2 * math.pi * i / steps;
+              return centre + ax * (r * math.cos(a)) + ay * (r * math.sin(a));
+            }(),
+        ];
+        final keep = <bool>[
+          for (var i = 0; i < steps; i++)
+            !covered(centre, rim[i], rim[(i + 1) % steps]),
+        ];
+        var any = false;
+        for (final k in keep) {
+          any = any || k;
+        }
+        if (!any) continue;
         final hub = m.vertex(
             (centre + up * paveLiftM) * kRenderScale, up, uMid, 0.5);
-        final ring = <int>[];
-        final (ax, ay) = _axesOf(frame, plan, up);
-        for (var i = 0; i < steps; i++) {
+        final ring = List<int?>.filled(steps, null);
+        int vert(int i) {
+          final was = ring[i];
+          if (was != null) return was;
           final a = 2 * math.pi * i / steps;
-          final p = centre + ax * (r * math.cos(a)) + ay * (r * math.sin(a));
-          ring.add(m.vertex((p + up * paveLiftM) * kRenderScale, up,
+          return ring[i] = m.vertex((rim[i] + up * paveLiftM) * kRenderScale,
+              up,
               RoadMesher.bandU(band, 0.5 + 0.4 * math.cos(a)),
-              0.5 + 0.4 * math.sin(a)));
+              0.5 + 0.4 * math.sin(a));
         }
+
         for (var i = 0; i < steps; i++) {
-          m.triangle(hub, ring[i], ring[(i + 1) % steps]);
+          if (!keep[i]) continue;
+          m.triangle(hub, vert(i), vert((i + 1) % steps));
         }
         continue;
       }
@@ -506,13 +594,18 @@ abstract final class SiteAccessMesher {
         centre + ax * h + ay * h,
         centre - ax * h + ay * h,
       ];
+      // `quad(a, b, c, d)` is (a, b, c) and (a, c, d).
+      final first = !covered(corners[0], corners[1], corners[2]);
+      final second = !covered(corners[0], corners[2], corners[3]);
+      if (!first && !second) continue;
       final idx = [
         for (var i = 0; i < 4; i++)
           m.vertex((corners[i] + up * paveLiftM) * kRenderScale, up,
               RoadMesher.bandU(band, i == 1 || i == 2 ? 1 : 0),
               i >= 2 ? 2 * h / RoadMesher.tileM : 0),
       ];
-      m.quad(idx[0], idx[1], idx[2], idx[3]);
+      if (first) m.triangle(idx[0], idx[1], idx[2]);
+      if (second) m.triangle(idx[0], idx[2], idx[3]);
     }
   }
 
@@ -582,8 +675,10 @@ abstract final class SiteAccessMesher {
   // ---- Frames and helpers ----------------------------------------------------------
 
   /// [pts] as stations: each point's radial, the unit normal across the
-  /// polyline there, and its arc from the first.
-  static List<_Station> _stationsOf(List<Vector3> pts, Vector3 anchorBF) {
+  /// polyline there, its arc from the first, and its colony-local ([es],
+  /// [ns]) — the three lists are one row per point.
+  static List<_Station> _stationsOf(List<Vector3> pts, List<double> es,
+      List<double> ns, Vector3 anchorBF) {
     final out = <_Station>[];
     var s = 0.0;
     for (var i = 0; i < pts.length; i++) {
@@ -593,9 +688,79 @@ abstract final class SiteAccessMesher {
       if (ahead.length < 1e-6) continue;
       final up = (p + anchorBF).normalized;
       final side = ahead.normalized.cross(up).normalized;
-      out.add(_Station(p, up, side, s));
+      out.add(_Station(p, up, side, s, es[i], ns[i]));
     }
     return out;
+  }
+
+  /// [pts] (with its colony-local [es], [ns]) carrying a point at each arc of
+  /// [arcs] that falls strictly inside it. The polyline is unchanged; only
+  /// its stations are denser.
+  static (List<Vector3>, List<double>, List<double>) _densified(
+      List<Vector3> pts,
+      List<double> es,
+      List<double> ns,
+      List<double> arcs) {
+    if (arcs.isEmpty || pts.length < 2) return (pts, es, ns);
+    final wanted = [...arcs]..sort();
+    final op = <Vector3>[pts.first];
+    final oe = <double>[es.first], on = <double>[ns.first];
+    var d = 0.0, next = 0;
+    for (var i = 1; i < pts.length; i++) {
+      final seg = pts[i] - pts[i - 1];
+      final len = seg.length;
+      if (len < 1e-6) continue;
+      final d0 = d;
+      d += len;
+      while (next < wanted.length && wanted[next] <= d0 + 1e-6) {
+        next++;
+      }
+      while (next < wanted.length && wanted[next] < d - 1e-6) {
+        final t = (wanted[next] - d0) / len;
+        op.add(pts[i - 1] + seg * t);
+        oe.add(es[i - 1] + (es[i] - es[i - 1]) * t);
+        on.add(ns[i - 1] + (ns[i] - ns[i - 1]) * t);
+        next++;
+      }
+      op.add(pts[i]);
+      oe.add(es[i]);
+      on.add(ns[i]);
+    }
+    return (op, oe, on);
+  }
+
+  // ---- Pave cover ------------------------------------------------------------------
+
+  /// Whether colony-local ([e], [n]) lies inside any of [plan]'s pave rings.
+  ///
+  /// A ring carries the surface (§5.4: the ribbons are "cut at pave rings"),
+  /// so a ribbon quad or a turnaround pad the ring already covers is left
+  /// out rather than drawn a second time, exactly coplanar with it.
+  static bool insidePave(SiteAccessPlan plan, double e, double n) {
+    for (var r = 0; r < plan.paveCount; r++) {
+      if (_insideRing(plan, r, e, n)) return true;
+    }
+    return false;
+  }
+
+  /// Ring [r] is convex by the generation contract, so the point is in it
+  /// when it is on the ring's own side of every edge. A ring that is not
+  /// convex, or degenerate, reads as not covering: the ribbon is drawn, which
+  /// is the safe way to be wrong.
+  static bool _insideRing(SiteAccessPlan plan, int r, double e, double n) {
+    final a = plan.paveStart(r), b = plan.paveStart(r + 1);
+    if (b - a < 3) return false;
+    final area = _signedRingArea(plan, r);
+    if (area.abs() < 1e-9) return false;
+    final want = area > 0 ? 1.0 : -1.0;
+    for (var i = a; i < b; i++) {
+      final p = plan.pavePt(i);
+      final q = plan.pavePt(i + 1 < b ? i + 1 : a);
+      final ex = plan.ptE(q) - plan.ptE(p), nx = plan.ptN(q) - plan.ptN(p);
+      final cross = ex * (n - plan.ptN(p)) - nx * (e - plan.ptE(p));
+      if (cross * want < 0) return false;
+    }
+    return true;
   }
 
   /// Whether segment [k]'s FIRST point is its kerb end.
@@ -636,7 +801,12 @@ abstract final class SiteAccessMesher {
   }
 
   /// Ring [r]'s area, by the shoelace over its points.
-  static double _ringArea(SiteAccessPlan plan, int r) {
+  static double _ringArea(SiteAccessPlan plan, int r) =>
+      _signedRingArea(plan, r).abs();
+
+  /// Ring [r]'s signed area: positive when its points run counter-clockwise
+  /// in the colony's (east, north).
+  static double _signedRingArea(SiteAccessPlan plan, int r) {
     final a = plan.paveStart(r), b = plan.paveStart(r + 1);
     if (b - a < 3) return 0;
     var twice = 0.0;
@@ -645,7 +815,7 @@ abstract final class SiteAccessMesher {
       final q = plan.pavePt(i + 1 < b ? i + 1 : a);
       twice += plan.ptE(p) * plan.ptN(q) - plan.ptE(q) * plan.ptN(p);
     }
-    return twice.abs() / 2;
+    return twice / 2;
   }
 
   /// Colony-local ([e], [n]) in the site's own frame metres.

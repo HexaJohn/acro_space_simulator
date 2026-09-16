@@ -856,7 +856,11 @@ class RoadMesher {
     final outer = inner + widthM;
     const lift = walkTopLiftM + 0.015;
     final drop = cuts != null && cuts.isNotEmpty;
-    if (drop) {
+    // Tested on `cuts` itself, never through `drop`: this SDK's AOT build can
+    // read a nullable through a promotion a bool local made (see
+    // terrain_nodes.dart:993), and the reads below are in a loop. `drop` is
+    // only ever passed on as a flag, or beside `cuts` as a nullable argument.
+    if (cuts != null && cuts.isNotEmpty) {
       var total = 0.0;
       for (var i = 1; i < kept.length; i++) {
         total += (kept[i] - kept[i - 1]).length;
@@ -1104,13 +1108,16 @@ class RoadMesher {
           final want = arcOffset + travelled;
           final moved = KerbCuts.shiftOut(cuts, s > 0 ? 1 : 0, want);
           if ((moved - want).abs() > 1e-9) {
-            final sample = _sampleAt(pts, moved - arcOffset);
-            if (sample != null) {
-              at = sample.$1;
-              dir = sample.$2;
-              radial = (at + anchorBF).normalized;
-              across = dir.cross(radial).normalized;
-            }
+            // A cut near the end of a span (a road cut into graded spans by
+            // its decks makes that routine) shifts the column past this
+            // span's last point. Clamp to the end rather than leave it
+            // standing in the dropped kerb, which is the one case the shift
+            // is for.
+            final sample = _sampleClamped(pts, moved - arcOffset);
+            at = sample.$1;
+            dir = sample.$2;
+            radial = (at + anchorBF).normalized;
+            across = dir.cross(radial).normalized;
           }
         }
         // On the raised walk when there is one — a column standing on the
@@ -1121,6 +1128,26 @@ class RoadMesher {
       }
       flip = -flip;
     }
+  }
+
+  /// [_sampleAt], with an arc off either end of [pts] clamped to that end.
+  /// A station shifted out of a cut that sits near a span's edge lands past
+  /// the span; it belongs at the span's end, not back inside the cut.
+  static (Vector3, Vector3) _sampleClamped(List<Vector3> pts, double s) {
+    final inside = _sampleAt(pts, s);
+    if (inside != null) return inside;
+    if (s < 0) {
+      for (var i = 1; i < pts.length; i++) {
+        final seg = pts[i] - pts[0];
+        if (seg.length > 1e-6) return (pts.first, seg.normalized);
+      }
+      return (pts.first, Vector3.unitX);
+    }
+    for (var i = pts.length - 2; i >= 0; i--) {
+      final seg = pts.last - pts[i];
+      if (seg.length > 1e-6) return (pts.last, seg.normalized);
+    }
+    return (pts.last, Vector3.unitX);
   }
 
   /// The point of [pts] at arc [s] from its first, with the direction of the
