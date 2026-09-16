@@ -19,7 +19,8 @@ import 'bench_support.dart';
 /// the parked-car columns T4a put on the wire, which the traffic-only smoke
 /// never builds, with the site frame, the drapes and the ground moving
 /// under them as a town grows. A bench, since it compiles an executable and
-/// then runs a few minutes of colony.
+/// then runs the better part of an hour of colony time in it — past the
+/// forty minutes the live crash took.
 void main() {
   test('bench: the city capture survives an AOT build', () async {
     final root = Platform.environment['FLUTTER_ROOT'];
@@ -44,5 +45,9 @@ void main() {
     } finally {
       out.deleteSync(recursive: true);
     }
-  }, skip: benchSkip, timeout: benchTimeout);
+    // Ten minutes, not the benches' five: this one compiles an executable
+    // AND runs three quarters of an hour of colony time in it, and the
+    // suite runs its files in parallel on every core, so the clean minute
+    // it takes alone is not the minute it takes here.
+  }, skip: benchSkip, timeout: const Timeout(Duration(minutes: 10)));
 }
