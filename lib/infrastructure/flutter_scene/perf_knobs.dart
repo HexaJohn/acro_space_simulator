@@ -371,7 +371,15 @@ class PerfKnobs {
         ? 1
         : k.isFlag && (lower == 'false' || lower == 'off')
             ? 0
-            : num.tryParse(lower);
+            // Dart parses only the capitalised `Infinity`, and the value has
+            // already been lower-cased for the flag words above — so a knob
+            // that means "no limit" (a range ring, a cap) could be turned
+            // off from the panel only by typing a big number and hoping.
+            : (lower == 'infinity' || lower == 'inf'
+                ? double.infinity
+                : lower == '-infinity' || lower == '-inf'
+                    ? double.negativeInfinity
+                    : num.tryParse(lower));
     if (v == null) return false;
     k.set(v);
     return true;

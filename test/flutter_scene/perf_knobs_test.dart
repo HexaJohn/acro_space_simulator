@@ -34,6 +34,21 @@ void main() {
     }
   });
 
+  test('a limit can be turned off by name, in any case', () {
+    // `set` lower-cases its value for the flag words, and Dart parses only
+    // the capitalised `Infinity` — so a range knob could be lifted from the
+    // panel only by typing a big number and hoping (the road side hit this
+    // A/B-ing parkedRangeM and had to use 1e9).
+    for (final spelling in ['infinity', 'Infinity', 'INF', ' inf ']) {
+      expect(PerfKnobs.set('parkedRangeM', '1500'), isTrue);
+      expect(SiteCarPass.parkedRangeM, 1500);
+      expect(PerfKnobs.set('parkedRangeM', spelling), isTrue,
+          reason: spelling);
+      expect(SiteCarPass.parkedRangeM, double.infinity, reason: spelling);
+    }
+    expect(PerfKnobs.set('parkedRangeM', 'nonsense'), isFalse);
+  });
+
   test('a number sets the static it fronts and reads back', () {
     expect(PerfKnobs.set('tierCacheMiB', '64'), isTrue);
     expect(CityNodes.tierCacheBytes, 64 << 20);
