@@ -290,9 +290,14 @@ void main() {
       );
       int at(CityTier tier) =>
           digest(mesh(columns, tier, canDetail: tier == CityTier.near));
-      expect(at(CityTier.near), 0x5e473abb);
-      expect(at(CityTier.mid), 0x09731332);
-      expect(at(CityTier.far), 0x07d559a4);
+      // R7 moved all three: this fixture carries BUILDINGS beside its roads,
+      // and a legacy-massed building no longer gives a strip of its depth to a
+      // surface car park (docs/plans/site-access.md §9 R7, Appendix A). The
+      // roads themselves are unmoved — the zoo above, which carries no
+      // building, is byte-identical.
+      expect(at(CityTier.near), 0x22bdc865);
+      expect(at(CityTier.mid), 0x057be2b6);
+      expect(at(CityTier.far), 0xb51e60e0);
     });
 
     test('a ramp is what it was, and then its arrows', () {

@@ -104,6 +104,18 @@ class RenderItem {
   /// without its matrix changing.
   bool packedWindingFlipped = false;
 
+  // PATCHED (acro_space_simulator): the emplaced views of [packedCache], so
+  // the passes of one frame upload a pack ONCE instead of each emplacing its
+  // own copy of the same bytes. The depth pre-pass and the colour pass draw
+  // the same instances of the same item with the same world transform, so
+  // their instance data is identical; a city at close range was pushing
+  // ~4 MB of instance transforms a frame through the shared instance host
+  // buffer, most of it that duplicate. Valid only while [packedViewFrame]
+  // is the current [InstanceTransformBuffers.frameId] AND the pack object is
+  // still [packedCache] — a repack replaces the object, so a moved instance
+  // cannot be drawn from a stale upload.
+  final PackedViewCache packedViews = PackedViewCache();
+
   /// Whether this item is a leaf of the [RenderScene]'s current BVH.
   /// Owned by [RenderScene]; set on a full rebuild.
   bool bvhLeaf = false;

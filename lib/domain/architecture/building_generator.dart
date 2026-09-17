@@ -34,12 +34,9 @@ class GeneratedBuilding {
   /// Exterior + interior geometry, ready to instance.
   final PropModel model;
 
-  /// The massing it was built from — kept so lighting, pathing and the parking
-  /// pass can read the same numbers the geometry was cut from.
+  /// The massing it was built from — kept so lighting and pathing can read the
+  /// same numbers the geometry was cut from.
   final BuildingMassing massing;
-
-  /// Street-lamp column bases in building-local metres, for the lighting pass.
-  final List<Vector3> lampPosts;
 
   /// Window-band centres in building-local metres. The night pass emits its
   /// glow sprites from these rather than re-deriving them from the mesh.
@@ -48,18 +45,16 @@ class GeneratedBuilding {
   const GeneratedBuilding({
     required this.model,
     required this.massing,
-    this.lampPosts = const [],
     this.windowCentres = const [],
   });
 }
 
 /// Detail tiers a building is generated at.
 enum BuildingDetail {
-  /// Everything: facades, glazing, interior slabs and partitions, roof plant,
-  /// parking bays, curbs, lamps.
+  /// Everything: facades, glazing, interior slabs and partitions, roof plant.
   full,
 
-  /// Exterior shell, glazing and roof plant. No interior, simplified lot.
+  /// Exterior shell, glazing and roof plant. No interior.
   exterior,
 
   /// A single massing silhouette. What a distant district is drawn from.
@@ -70,7 +65,6 @@ class BuildingGenerator {
   const BuildingGenerator({
     this.rules = const BuildingMassingRules(),
     this.windowHeightFraction = 0.55,
-    this.lampHeightM = 9,
   });
 
   final BuildingMassingRules rules;
@@ -82,14 +76,11 @@ class BuildingGenerator {
   BuildingGenerator withStyle(ArchitectureStyle s) => BuildingGenerator(
         rules: rules.withStyle(s),
         windowHeightFraction: windowHeightFraction,
-        lampHeightM: lampHeightM,
       );
 
   /// How much of a storey is glass. 0.55 leaves a spandrel band above and
   /// below, which is what stops a facade reading as a stack of glass boxes.
   final double windowHeightFraction;
-
-  final double lampHeightM;
 
   GeneratedBuilding generate(
     CityBuildingSpec spec,
@@ -102,7 +93,6 @@ class BuildingGenerator {
   }) {
     final massing = rules.massFor(spec, parcel, seed: seed, gate: gate);
     final b = PropBuilder();
-    final lamps = <Vector3>[];
     final windows = <Vector3>[];
 
     final (bu0, bu1) = bandUV(massing.material);
@@ -246,20 +236,9 @@ class BuildingGenerator {
       _roofClutter(b.solid, roof, style, rnd, pu0, pu1);
     }
 
-    final lot = massing.parking;
-    if (lot != null) {
-      _parking(b.solid, b.foliage, lot,
-          detail: detail,
-          lamps: lamps,
-          lampHeight: lampHeightM,
-          u0: pu0,
-          u1: pu1);
-    }
-
     return GeneratedBuilding(
       model: PropModel(solid: b.solid.build(), foliage: b.foliage.build()),
       massing: massing,
-      lampPosts: lamps,
       windowCentres: windows,
     );
   }
@@ -785,65 +764,6 @@ class BuildingGenerator {
       u0: u0,
       u1: u1,
     );
-  }
-
-  /// The car park: deck, curb, bay markings at close range, and lamp columns.
-  void _parking(
-    MeshBuilder solid,
-    MeshBuilder glow,
-    ParkingLot lot, {
-    required BuildingDetail detail,
-    required List<Vector3> lamps,
-    required double lampHeight,
-    required double u0,
-    required double u1,
-  }) {
-    // Deck, raised a few centimetres so it wins the depth test against the pad
-    // it sits on instead of z-fighting with it.
-    _box(
-      solid,
-      cx: lot.x,
-      cy: lot.y,
-      z0: 0,
-      width: lot.width,
-      depth: lot.depth,
-      height: 0.08,
-      uRepeat: math.max(1, (lot.width / 6).round()).toDouble(),
-      vRepeat: math.max(1, (lot.depth / 6).round()).toDouble(),
-      u0: u0,
-      u1: u1,
-    );
-
-    for (final (lx, ly) in lot.lampPosts) {
-      lamps.add(Vector3(lx, ly, 0));
-      if (detail == BuildingDetail.block) continue;
-      // Column.
-      _box(
-        solid,
-        cx: lx,
-        cy: ly,
-        z0: 0,
-        width: 0.28,
-        depth: 0.28,
-        height: lampHeight,
-        uRepeat: 1,
-        vRepeat: 1,
-        u0: u0,
-        u1: u1,
-      );
-      // Head, in the glowing channel so the night pass can light it.
-      _box(
-        glow,
-        cx: lx,
-        cy: ly,
-        z0: lampHeight,
-        width: 1.1,
-        depth: 0.5,
-        height: 0.22,
-        uRepeat: 1,
-        vRepeat: 1,
-      );
-    }
   }
 
   /// An axis-aligned box with outward normals and per-face UVs.
@@ -1471,10 +1391,14 @@ class BuildingArchetype {
   /// one is a different mesh, not a different transform.
   final bool corner;
 
-  /// Whether this building draws a surface car park of its own. False for a
-  /// PLAN-SERVED building (docs/plans/site-access.md §6.2): the plan owns its
-  /// parking, and the massing is front-aligned on the envelope instead of
-  /// centred in a strip — a different mesh, so it is part of the key.
+  /// True for a LEGACY-MASSED building, false for a PLAN-SERVED one
+  /// (docs/plans/site-access.md §6.2): the plan-served massing is
+  /// front-aligned on its envelope and clipped to it, where the legacy one is
+  /// centred in its parcel — a different mesh, so it is part of the key.
+  ///
+  /// The name is R7's (§6.2 as built): no archetype draws a car park any more,
+  /// the plan owns the parking on every lot, and renaming a key term would
+  /// move nothing but the diff. Read it as "not plan-served".
   final bool surfaceParking;
 
   /// The plan's gate on the envelope's front edge, quantised

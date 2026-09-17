@@ -175,6 +175,10 @@ class BuildingPreviewStats {
   final double footprintW;
   final double footprintD;
   final double floorAreaM2;
+
+  /// Spaces this spec DEMANDS (`BuildingMassingRules.parkingSpaces`), which is
+  /// the capacity target its site plan packs for. The massing itself lays no
+  /// car park any more (docs/plans/site-access.md §6.2, R7).
   final int parkingSpaces;
 
   /// The lot's own area, and how much of it the footprint covers.
@@ -280,7 +284,7 @@ class BuildingPreviewNodes {
       fw = math.max(fw, m.footprint.width);
       fd = math.max(fd, m.footprint.depth);
       area = math.max(area, m.floorArea);
-      spaces = math.max(spaces, m.parking?.spaces ?? 0);
+      spaces = math.max(spaces, generator.rules.parkingSpaces(r.spec));
 
       for (final v in m.volumes.where((v) => v.floors > 0)) {
         frontGap = math.min(frontGap, (v.y - v.depth / 2 + offsetY) - curbY);

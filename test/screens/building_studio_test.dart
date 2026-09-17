@@ -175,6 +175,11 @@ void main() {
     await t.pump(const Duration(milliseconds: 400));
     expect(find.textContaining('Office park'), findsWidgets,
         reason: 'the note did not follow the selection');
+    // R7 deleted the massing's surface car park, so the note a player reads
+    // here must not still promise one. `architecture_style_test` pins the
+    // string on every kit; this pins that the string ON SCREEN is that one.
+    expect(find.textContaining('deep front setback'), findsWidgets,
+        reason: 'the utilitarian note on screen is not the R7 wording');
     expect(t.takeException(), isNull);
   });
   _shapesAndPlots();

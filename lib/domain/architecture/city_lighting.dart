@@ -16,7 +16,6 @@ import 'dart:math' as math;
 
 import '../colony/city/city_sim.dart';
 import '../colony/city/parcel.dart';
-import 'building_massing.dart';
 
 /// A lamp column: a road light, a car-park mast, or a pad floodlight.
 class StreetLamp {
@@ -73,17 +72,12 @@ class LightingState {
 
 class CityLighting {
   const CityLighting({
-    this.rules = const BuildingMassingRules(),
     this.lampSpacingM = 34,
     this.dawnElevation = 0.10,
     this.duskElevation = -0.12,
     this.lampOnElevation = -0.02,
     this.lampOffElevation = 0.05,
   });
-
-  /// Massing rules, shared with the building generator so car-park masts land
-  /// where the generated lots actually are.
-  final BuildingMassingRules rules;
 
   /// Along-road spacing between lamp columns on a street. Wider roads get
   /// proportionally wider spacing (and taller columns) below.
@@ -101,8 +95,8 @@ class CityLighting {
   final double lampOnElevation;
   final double lampOffElevation;
 
-  /// Lamp columns for every road in [city], plus the car-park masts the
-  /// building generator placed.
+  /// Lamp columns for every road in [city], plus the car-park masts its site
+  /// plans place.
   List<StreetLamp> lamps(CitySim city) {
     final out = <StreetLamp>[];
     for (final road in city.layout.roads) {
@@ -144,37 +138,18 @@ class CityLighting {
 
     // Car-park masts: cold light, wider throw, taller columns.
     //
-    // A site with a PLAN takes them from the plan's own lamp posts
-    // (docs/plans/site-access.md §5.4, §6.2): the plan is the one thing that
-    // knows where that site's cars actually stand, and re-running the massing
-    // here was the fifth lot line in the colony — masts lighting a car park
-    // the renderer no longer draws. A site without one keeps the legacy
-    // derivation: the rules are deterministic, so it and the massing agree by
-    // construction.
-    for (final (parcel, spec) in city.buildingParcels()) {
+    // They come from the site PLAN's own lamp posts (docs/plans/site-access.md
+    // §5.4, §6.2): the plan is the one thing that knows where that site's cars
+    // actually stand, and re-running the massing here was the fifth lot line in
+    // the colony. A site with no plan has no car park at all now that the
+    // massing draws none (R7), so it takes no masts either.
+    for (final (parcel, _) in city.buildingParcels()) {
       final plan = city.siteAccess.planOf(parcel.id);
-      if (plan != null) {
-        for (var l = 0; l < plan.lampCount; l++) {
-          final p = plan.lampPt(l);
-          out.add(StreetLamp(
-            position: Vec2(plan.ptE(p), plan.ptN(p)),
-            heightM: 12,
-            radiusM: 30,
-            warm: false,
-          ));
-        }
-        continue;
-      }
-      final lot = rules.massFor(spec, parcel).parking;
-      if (lot == null) continue;
-      final centre = parcel.centroid;
-      final facing = parcel.facing;
-      final right = facing.perp;
-      for (final (lx, ly) in lot.lampPosts) {
-        // Building-local (x along frontage, y away from street) into colony
-        // local, using the parcel's own frame.
+      if (plan == null) continue;
+      for (var l = 0; l < plan.lampCount; l++) {
+        final p = plan.lampPt(l);
         out.add(StreetLamp(
-          position: centre + right * lx + facing * -ly,
+          position: Vec2(plan.ptE(p), plan.ptN(p)),
           heightM: 12,
           radiusM: 30,
           warm: false,

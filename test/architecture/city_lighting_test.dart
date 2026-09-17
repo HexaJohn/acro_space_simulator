@@ -144,16 +144,6 @@ void main() {
     expect(dim.lampIntensity, lessThan(bright.lampIntensity));
   });
 
-  test('car parks get their own cold-light masts', () {
-    final city = colony();
-    final mall = kUtilCatalog.firstWhere((s) => s.label == 'Data Center');
-    city.placeUtil(city.hubKey + 1, mall);
-
-    final masts = lighting.lamps(city).where((l) => !l.warm).toList();
-    expect(masts, isNotEmpty);
-    expect(masts.first.radiusM, greaterThan(25));
-  });
-
   test('a site with a PLAN lights the plan car park, not a re-massed one',
       () {
     // docs/plans/site-access.md §6.2: the masts come from the plan's own
@@ -176,7 +166,16 @@ void main() {
     }
     expect(planned, greaterThan(0),
         reason: 'the site town parks cars on plans');
-    // ...and nothing else: a planned site adds no mast of its own.
+    // ...and nothing else: no mast comes from anywhere but a plan. A site
+    // WITHOUT one takes none at all — the massing lays no car park to light
+    // (R7), which is what retired the legacy derivation this used to have.
     expect(masts, hasLength(planned));
+    expect(masts.first.radiusM, greaterThan(25),
+        reason: 'a mast throws wider than a street lamp');
+    final plain = colony();
+    plain.placeUtil(plain.hubKey + 1,
+        kUtilCatalog.firstWhere((s) => s.label == 'Data Center'));
+    expect(lighting.lamps(plain).where((l) => !l.warm), isEmpty,
+        reason: 'no plan, no car park, no mast');
   });
 }

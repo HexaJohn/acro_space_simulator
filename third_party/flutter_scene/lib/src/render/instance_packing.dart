@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_scene/src/gpu/gpu.dart' as gpu;
 import 'package:flutter_scene/src/render/render_scene.dart';
+import 'package:flutter_scene/src/scene_encoder.dart' show SceneFrameStats;
 import 'package:vector_math/vector_math.dart';
 
 /// Per-instance world transforms packed for the instance-rate vertex buffer
@@ -141,6 +142,75 @@ void bindInstanceTransforms(
   );
 }
 
+/// PATCHED (acro_space_simulator): which uploads of a [RenderItem]'s packed
+/// instances the passes of ONE frame may share.
+///
+/// A view is handed back only while both the pack OBJECT and the frame are
+/// the ones it was emplaced for: a repack (an instance moved, the node moved,
+/// the winding flipped) makes a new pack, and a new frame cycles the host
+/// buffer's storage, so either must upload again or a draw would read bytes
+/// that have been overwritten. Pure, so the rule is testable without a GPU.
+class PackedViewCache {
+  Object? _ccw;
+  Object? _cw;
+  Object? _of;
+  int _frame = -1;
+
+  /// The view of [packed]'s [ccw] parity already emplaced in [frame], or
+  /// null when it must be uploaded again (which also drops both parities).
+  Object? viewFor(Object packed, int frame, {required bool ccw}) {
+    if (!identical(_of, packed) || _frame != frame) {
+      _of = packed;
+      _frame = frame;
+      _ccw = null;
+      _cw = null;
+      return null;
+    }
+    return ccw ? _ccw : _cw;
+  }
+
+  /// Remembers [view] as the upload of the current pack's [ccw] parity.
+  void remember(Object view, {required bool ccw}) {
+    if (ccw) {
+      _ccw = view;
+    } else {
+      _cw = view;
+    }
+  }
+}
+
+/// PATCHED (acro_space_simulator): binds [item]'s packed instances, uploading
+/// them at most ONCE per frame however many passes draw the item.
+///
+/// The depth pre-pass and the colour pass draw the same instances of the same
+/// item at the same world transform, so their instance bytes are identical;
+/// each emplacing its own copy doubled the traffic through the shared
+/// instance host buffer (a city at close range measured ~4 MB a frame, and
+/// shadow draws outnumbered colour draws two to one). The views are cached on
+/// the item against the pack OBJECT and the current [frameId], so a repack
+/// (any instance moved, the node moved, winding flipped) or a new frame
+/// uploads again — a stale upload can never be drawn.
+///
+/// Returns nothing; binds the parity [ccw] asks for, if it has instances.
+void bindPackedInstances(
+  gpu.RenderPass pass,
+  RenderItem item,
+  PackedInstanceTransforms packed, {
+  required bool ccw,
+  int slot = 1,
+}) {
+  final data = ccw ? packed.ccw : packed.cw;
+  if (data.isEmpty) return;
+  final frame = instanceTransformBuffers.frameId;
+  var view = item.packedViews.viewFor(packed, frame, ccw: ccw);
+  if (view == null) {
+    view = instanceTransformBuffers.emplace(ByteData.sublistView(data));
+    item.packedViews.remember(view, ccw: ccw);
+    SceneFrameStats.accumulating.instanceUploads += data.length ~/ 16;
+  }
+  pass.bindVertexBuffer(view as gpu.BufferView, slot: slot);
+}
+
 /// A `HostBuffer` dedicated to instance-rate transform vertex data, kept
 /// apart from the uniform transients buffer (see [bindInstanceTransforms]
 /// for why). [beginFrame] cycles it to the next frame's backing storage
@@ -151,9 +221,20 @@ class InstanceTransformBuffers {
   gpu.HostBuffer? _buffer;
   gpu.HostBuffer get _host => _buffer ??= gpu.gpuContext.createHostBuffer();
 
+  // PATCHED (acro_space_simulator): a frame counter, so a pack emplaced by
+  // one pass can be re-bound by the next pass of the SAME frame instead of
+  // being uploaded again (see [bindPackedInstances]). It only ever moves
+  // forward, and a view cached against an older frame is never reused: the
+  // storage behind it is cycled by [beginFrame].
+  int _frameId = 0;
+  int get frameId => _frameId;
+
   /// Cycles to the next frame's backing storage. Call once per frame
   /// before any [emplace].
-  void beginFrame() => _host.reset();
+  void beginFrame() {
+    _frameId++;
+    _host.reset();
+  }
 
   /// Emplaces [data] and returns a view to bind as the instance-rate
   /// vertex buffer.

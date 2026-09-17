@@ -43,6 +43,15 @@ class SceneFrameStats {
   int shadowDraws = 0;
   int packedInstances = 0;
   int instancesEmplaced = 0;
+
+  // PATCHED (acro_space_simulator): instance transforms actually UPLOADED
+  // into the frame's instance host buffer. [instancesEmplaced] counts every
+  // instance a pass bound, which since the per-frame upload sharing (see
+  // bindPackedInstances) is no longer the same thing: the colour, depth,
+  // shadow and filter passes of one frame bind the same pack and upload it
+  // once. This is the number that measures the buffer's real traffic —
+  // multiply by 64 bytes (16 floats) for the bytes.
+  int instanceUploads = 0;
   int materialBinds = 0;
 
   /// Full spatial-structure rebuilds this frame (a refit does not count).
@@ -59,6 +68,7 @@ class SceneFrameStats {
     shadowDraws = 0;
     packedInstances = 0;
     instancesEmplaced = 0;
+    instanceUploads = 0;
     materialBinds = 0;
     bvhRebuilds = 0;
     prePassMs = 0;
@@ -77,7 +87,8 @@ class SceneFrameStats {
   String toString() =>
       'SceneFrameStats(colourDraws: $colourDraws, shadowDraws: $shadowDraws, '
       'packedInstances: $packedInstances, '
-      'instancesEmplaced: $instancesEmplaced, materialBinds: $materialBinds, '
+      'instancesEmplaced: $instancesEmplaced, '
+      'instanceUploads: $instanceUploads, materialBinds: $materialBinds, '
       'bvhRebuilds: $bvhRebuilds, prePassMs: ${prePassMs.toStringAsFixed(2)}, '
       'bvhMs: ${bvhMs.toStringAsFixed(2)}, '
       'shadowMs: ${shadowMs.toStringAsFixed(2)}, '
@@ -594,13 +605,17 @@ base class SceneEncoder {
     stats.instancesEmplaced += instances.length;
     final instanceSlot = geometry.vertexStreamCount;
     if (packed.ccwCount > 0) {
-      bindInstanceTransforms(_renderPass, packed.ccw, slot: instanceSlot);
+      // PATCHED (acro_space_simulator): one upload a frame per pack, shared
+      // with the depth pre-pass (see bindPackedInstances).
+      bindPackedInstances(_renderPass, item, packed,
+          ccw: true, slot: instanceSlot);
       _setWinding(false);
       geometry.draw(_renderPass, instanceCount: packed.ccwCount);
       stats.colourDraws++;
     }
     if (packed.cwCount > 0) {
-      bindInstanceTransforms(_renderPass, packed.cw, slot: instanceSlot);
+      bindPackedInstances(_renderPass, item, packed,
+          ccw: false, slot: instanceSlot);
       _setWinding(true);
       geometry.draw(_renderPass, instanceCount: packed.cwCount);
       stats.colourDraws++;

@@ -206,13 +206,16 @@ class ShadowEncoder {
       }
       stats.instancesEmplaced += instances.length;
       if (packed.ccwCount > 0) {
-        bindInstanceTransforms(_renderPass, packed.ccw);
+        // PATCHED (acro_space_simulator): one upload a frame per pack, shared
+        // with the colour and depth passes (see bindPackedInstances). A
+        // cascade used to emplace its own copy of bytes already uploaded.
+        bindPackedInstances(_renderPass, item, packed, ccw: true);
         _setWinding(false);
         geometry.draw(_renderPass, instanceCount: packed.ccwCount);
         stats.shadowDraws++;
       }
       if (packed.cwCount > 0) {
-        bindInstanceTransforms(_renderPass, packed.cw);
+        bindPackedInstances(_renderPass, item, packed, ccw: false);
         _setWinding(true);
         geometry.draw(_renderPass, instanceCount: packed.cwCount);
         stats.shadowDraws++;

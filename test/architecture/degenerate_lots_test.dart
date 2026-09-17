@@ -76,11 +76,10 @@ void main() {
     // wall gets no openings and no piers rather than a pier that cannot fit.
     final gen =
         const BuildingGenerator().withStyle(ArchitectureStyle.masonryStreet);
-    // A pit spec with NO staff and NO visitors, so it draws no car park.
-    // Measured against a real one, the glazing channel also carries the car
-    // park's lamp heads — and a lamp head is a box, so four of its six faces
-    // have horizontal normals too. Filtering the output could not separate
-    // them; controlling the input can.
+    // A pit spec with NO staff and NO visitors. (It used to matter that it
+    // drew no car park: the lamp heads on one rode the glazing channel, and a
+    // head is a box, so four of its six faces have horizontal normals too. No
+    // massing lays a car park now, R7, but the spec stays the controlled one.)
     const pit = CityBuildingSpec(
       type: 'test-pit',
       label: 'Test Pit',
@@ -89,8 +88,6 @@ void main() {
       siteKind: SiteKind.pit,
     );
 
-    expect(gen.generate(pit, lot(4, 4)).massing.parking, isNull,
-        reason: 'this spec must draw no car park, or it measures the lamps');
     expect(gen.generate(pit, lot(4, 4)).model.foliage.triangleCount, 0,
         reason: 'a sub-metre shed was given windows');
     expect(gen.generate(pit, lot(60, 60)).model.foliage.triangleCount,

@@ -29,7 +29,7 @@ import 'architecture_style.dart';
 /// of and a box is not: a refinery is tanks and columns, a power station is
 /// cooling towers and a stack, a mill is sheds under pitched roofs, a wind
 /// farm is towers with rotors on top. Each is still a MassBox — one footprint,
-/// one height — so the plat, the parking rule and the LOD tiers need not know
+/// one height — so the plat, the envelope rule and the LOD tiers need not know
 /// there is anything but boxes.
 enum MassShape {
   box,
@@ -130,9 +130,11 @@ class MassBox {
 /// reaches the massing as the parcel it is handed — the envelope inflated by
 /// the style's own setbacks — so a plan-served massing needs nothing more.
 ///
-/// Plan-served means: no surface car park (the plan owns the parking), the
-/// building FRONT-ALIGNED on the envelope's front edge so the drawn entrance
-/// lands on the plan's door, and the gate lane left clear.
+/// Plan-served means: the building FRONT-ALIGNED on the envelope's front edge
+/// so the drawn entrance lands on the plan's door, the massing clipped to the
+/// envelope, and the gate lane left clear. (Since R7 the plan owns the parking
+/// on EVERY lot, served or not, so being served is no longer what decides
+/// whether a car park is drawn — no massing draws one.)
 class SiteGate {
   const SiteGate({this.xM = 0, this.widthM = 0});
 
@@ -147,32 +149,9 @@ class SiteGate {
   static const double laneDepthM = 12.0;
 }
 
-/// A surface car park attached to a building.
-class ParkingLot {
-  /// Centre in building-local plan metres.
-  final double x, y;
-  final double width, depth;
-  final int spaces;
-
-  /// Light column positions in building-local metres, on the lot.
-  final List<(double x, double y)> lampPosts;
-
-  const ParkingLot({
-    required this.x,
-    required this.y,
-    required this.width,
-    required this.depth,
-    required this.spaces,
-    this.lampPosts = const [],
-  });
-
-  double get area => width * depth;
-}
-
 /// The complete shape brief for one building.
 class BuildingMassing {
   final List<MassBox> volumes;
-  final ParkingLot? parking;
 
   /// Storey height used throughout, metres.
   final double storeyM;
@@ -211,7 +190,6 @@ class BuildingMassing {
     required this.storeyM,
     required this.floorArea,
     required this.entrance,
-    this.parking,
     double? groundStoreyM,
     this.style = ArchitectureStyle.utilitarian,
     this.material = FacadeMaterial.precast,
@@ -252,7 +230,6 @@ class BuildingMassingRules {
     this.areaPerWorker = 22,
     this.setbackM = 3,
     this.maxFloors = 60,
-    this.parkingSpaceM2 = 26,
   });
 
   /// The urban idiom: where the building stands on its lot, how tall its
@@ -269,7 +246,6 @@ class BuildingMassingRules {
         areaPerWorker: areaPerWorker,
         setbackM: setbackM,
         maxFloors: maxFloors,
-        parkingSpaceM2: parkingSpaceM2,
       );
 
   /// Habitable storey height. Industrial sheds get a taller one — a factory
@@ -284,9 +260,6 @@ class BuildingMassingRules {
   final double setbackM;
 
   final int maxFloors;
-
-  /// Bay plus its share of aisle and circulation.
-  final double parkingSpaceM2;
 
   /// Floor area this building's function demands, m².
   double requiredArea(CityBuildingSpec spec) {
@@ -328,9 +301,9 @@ class BuildingMassingRules {
   ///
   /// Pass [gate] for a PLAN-SERVED building (docs/plans/site-access.md §6.2):
   /// [parcel] is then the plan's envelope inflated by this style's setbacks,
-  /// the building is front-aligned on the envelope's front edge, it gets no
-  /// surface car park, and the gate lane is left clear. Without it nothing
-  /// below changes: the legacy massing is byte-identical.
+  /// the building is front-aligned on the envelope's front edge, its volumes
+  /// are clipped back to the envelope, and the gate lane is left clear.
+  /// Without it nothing below changes: the legacy massing is byte-identical.
   BuildingMassing massFor(CityBuildingSpec spec, Parcel parcel,
       {int seed = 0, SiteGate? gate}) {
     final m = _clipToParcel(_massIn(spec, parcel, seed: seed, gate: gate), parcel);
@@ -380,7 +353,6 @@ class BuildingMassingRules {
       storeyM: m.storeyM,
       floorArea: m.floorArea,
       entrance: m.entrance,
-      parking: m.parking,
       groundStoreyM: m.groundStoreyM,
       style: m.style,
       material: m.material,
@@ -463,7 +435,6 @@ class BuildingMassingRules {
       storeyM: m.storeyM,
       floorArea: m.floorArea,
       entrance: m.entrance,
-      parking: m.parking,
       groundStoreyM: m.groundStoreyM,
       style: m.style,
       material: m.material,
@@ -546,8 +517,8 @@ class BuildingMassingRules {
         material: v.material,
       );
 
-  /// [m] as a PLAN-SERVED massing (§6.2): its car park is the plan's, and its
-  /// entrance is the gate on the envelope's front edge [frontEdge]. Used by
+  /// [m] as a PLAN-SERVED massing (§6.2): its entrance is the gate the plan
+  /// put on the envelope's front edge [frontEdge]. Used by
   /// the massings that centre themselves in their plot — installations,
   /// fields, pits, aprons, the railway's two ends — whose door IS their gate.
   BuildingMassing _planned(
@@ -611,7 +582,6 @@ class BuildingMassingRules {
       storeyM: m.storeyM,
       floorArea: m.floorArea,
       entrance: m.entrance,
-      parking: m.parking,
       groundStoreyM: m.groundStoreyM,
       style: m.style,
       material: m.material,
@@ -638,9 +608,9 @@ class BuildingMassingRules {
     //
     // The setbacks come from the style, and they are asymmetric on purpose: a
     // street-wall building stands hard on the front line and keeps its yard at
-    // the back, where the alley and the parking go. Taking the same margin off
-    // both ends is what centred every building in its lot and left a downtown
-    // block looking like a business park.
+    // the back, where the alley and the loading bay go. Taking the same margin
+    // off both ends is what centred every building in its lot and left a
+    // downtown block looking like a business park.
     //
     // Zero side setback does NOT mean building over the property line: the
     // parcel handed in here has already been inset by the density rule in the
@@ -710,24 +680,11 @@ class BuildingMassingRules {
     }
 
     final needed = requiredArea(spec);
-    // The plan owns the parking, so a plan-served building keeps none of its
-    // own: no strip off the buildable depth, and no lot.
-    final spaces = planned ? 0 : parkingSpaces(spec);
-    final parkArea = spaces * parkingSpaceM2;
-
-    // Parking takes a strip off one END of the buildable depth whenever there
-    // is room for it; a building that would then have nowhere to stand keeps
-    // its plot and loses the lot instead.
-    //
-    // WHICH end is a style decision and it is not cosmetic. A lot out front
-    // pushes the building back off the street and opens a gap in the block —
-    // it is the single change that turns a downtown into a strip. Behind the
-    // building, off the alley, the same cars are invisible from the pavement.
-    var parkDepth = 0.0;
-    if (parkArea > 0) {
-      parkDepth = (parkArea / availW).clamp(0.0, availD * 0.55);
-    }
-    final buildD = math.max(6.0, availD - parkDepth);
+    // The PLAN owns the parking, wherever a building stands (R7): the strip a
+    // massing used to take off its own buildable depth for a surface car park
+    // is gone, and with it the lot that was drawn on it. A building fills its
+    // buildable strip, and where its cars go is the site plan's answer.
+    final buildD = math.max(6.0, availD);
     final buildW = availW;
 
     // Footprint: industrial fills its plot, everything else keeps a slimmer
@@ -819,22 +776,14 @@ class BuildingMassingRules {
     }
 
     final volumes = <MassBox>[];
-    // Where the building sits within its buildable strip, and where the cars
-    // go. Front-parking pushes the building back; rear-parking pulls it
-    // forward onto the street line.
+    // Where the building sits within its buildable strip.
     // FRONT ALIGNMENT (§6.2). Centring the footprint in the buildable strip
     // leaves the entrance (1 − coverD)/2 · buildD behind the front edge —
     // 2.7 m on a house, tens of metres on an installation — so a plan-served
     // building is aligned on its FOOTPRINT instead, which puts the drawn
     // entrance on the envelope's front edge exactly, with no style input.
-    final buildCentreY = planned
-        ? frontEdge + footD / 2
-        : (style.parkingBehind
-            ? frontEdge + buildD / 2
-            : frontEdge + parkDepth + buildD / 2);
-    final parkCentreY = style.parkingBehind
-        ? frontEdge + buildD + parkDepth / 2
-        : frontEdge + parkDepth / 2;
+    final buildCentreY =
+        planned ? frontEdge + footD / 2 : frontEdge + buildD / 2;
     // Total height of a stack of [n] floors, with the ground storey taller.
     double stack(int n) => n <= 0 ? 0 : ground + (n - 1) * storey;
 
@@ -995,17 +944,6 @@ class BuildingMassingRules {
           : style.materialFor(seed ^ spec.type.hashCode),
       floorArea: area,
       entrance: (0, buildCentreY - footD / 2),
-      parking: parkDepth <= 0.5
-          ? null
-          : ParkingLot(
-              x: 0,
-              y: parkCentreY,
-              width: availW,
-              depth: parkDepth,
-              spaces: spaces,
-              lampPosts: _lampGrid(availW, parkDepth,
-                  y0: parkCentreY - parkDepth / 2),
-            ),
     );
   }
 
@@ -1117,7 +1055,6 @@ class BuildingMassingRules {
       floorArea: 18 * 12 * k * k,
       entrance: (x0 + 9 * k, -d / 2),
       style: style,
-      parking: _lotFor(spec, math.min(w, 40), frontY: -d / 2, volumes: volumes),
     );
   }
 
@@ -1218,7 +1155,6 @@ class BuildingMassingRules {
       floorArea: officeW * officeD * 2,
       entrance: (-w / 2 + w * 0.04, -d / 2),
       style: style,
-      parking: _lotFor(spec, math.min(w, 120), frontY: -d / 2, volumes: volumes),
     );
   }
 
@@ -1340,7 +1276,6 @@ class BuildingMassingRules {
       floorArea: hallW * hallD * 2,
       entrance: (0, -d / 2),
       style: style,
-      parking: _lotFor(spec, math.min(w, 120), frontY: -d / 2, volumes: volumes),
     );
   }
 
@@ -1427,7 +1362,6 @@ class BuildingMassingRules {
       floorArea: shedW * shedD + 18 * 12 * 2,
       entrance: (w / 2 - 22, -d / 2),
       style: style,
-      parking: _lotFor(spec, math.min(w, 120), frontY: -d / 2, volumes: volumes),
     );
   }
 
@@ -1601,7 +1535,6 @@ class BuildingMassingRules {
     final hw = nomW / 2, hd = nomD / 2;
     List<MassBox>? nominal;
     var floorArea = 0.0;
-    var parkW = math.min(nomW, 120.0);
 
     switch (spec.type) {
       case 'wind':
@@ -1631,7 +1564,6 @@ class BuildingMassingRules {
           _office(-hw + 16, -hd + 10, 16, 10, 1, storey),
         ];
         floorArea = 160;
-        parkW = 40;
       case 'aquifer':
         // A groundwater pumping station: two ground storage tanks under
         // low aluminium domes; the pump house, a long white shed with the
@@ -1734,7 +1666,6 @@ class BuildingMassingRules {
                 material: FacadeMaterial.steel),
         ];
         floorArea = 40 * 22;
-        parkW = 80;
       case 'gas':
         // A combined-cycle plant: two gas-turbine trains — a white
         // enclosure, a silver boiler block, a steel stack — feeding one
@@ -1809,7 +1740,6 @@ class BuildingMassingRules {
                     : FacadeMaterial.industrialBlue),
         ];
         floorArea = 40 * 16 * 2;
-        parkW = 60;
       case 'reactor':
         // A two-unit pressurised-water station, and everything a real one
         // has round its big pieces — which is what gives them their scale:
@@ -2033,7 +1963,6 @@ class BuildingMassingRules {
                 material: FacadeMaterial.steel),
         ];
         floorArea = 60 * 22 * 3 + 30 * 15 * 2 + 40 * 20 * 2;
-        parkW = 160;
       case 'fusion':
         nominal = [
           _tank(0, 0, 200, 12),
@@ -2139,7 +2068,6 @@ class BuildingMassingRules {
           _office(hw * 0.55, hd * 0.65, 80, 24, 2, storey),
         ];
         floorArea = 80 * 24 * 2;
-        parkW = 80;
       case 'spaceport':
         // A launch complex, the Cape's kind: each pad a raised concrete
         // mound with its flame trench, the launch mount and — on every
@@ -2336,7 +2264,6 @@ class BuildingMassingRules {
                 material: FacadeMaterial.steel),
         ];
         floorArea = 60 * 22 * 2;
-        parkW = 120;
       case 'terraformer':
         nominal = [
           _stack(0, 0, 70, 260, top: 0.35),
@@ -2421,7 +2348,6 @@ class BuildingMassingRules {
             _stack(sx * math.min(8.0, nomW * 0.32), 0, 0.5, 4, top: 1),
         ];
         floorArea = 0;
-        parkW = 0;
       case 'warning':
         nominal = [
           _tank(0, nomD * 0.1, math.min(18.0, nomW * 0.5), 8),
@@ -2440,9 +2366,6 @@ class BuildingMassingRules {
       floorArea: floorArea * k * k,
       entrance: (0, -d / 2),
       style: style,
-      parking: parkW > 0
-          ? _lotFor(spec, math.min(w, parkW * k), frontY: -d / 2, volumes: volumes)
-          : null,
     );
   }
 
@@ -2489,7 +2412,6 @@ class BuildingMassingRules {
       floorArea: volumes.first.floorArea,
       entrance: (-w / 2, -d / 2),
       style: style,
-      parking: _lotFor(spec, math.min(w, 160), frontY: -d / 2, volumes: volumes),
     );
   }
 
@@ -2523,63 +2445,6 @@ class BuildingMassingRules {
       floorArea: 22 * 22 * 8,
       entrance: (-w / 2 + 30, -d / 2),
       style: style,
-      parking: _lotFor(spec, math.min(w, 240), frontY: -d / 2, volumes: volumes),
     );
-  }
-
-  /// A car park for a site whose building does not front a street.
-  /// An installation's car park, INSIDE its plot: in the strip between the
-  /// plot's front line [frontY] and the nearest of its [volumes], as deep
-  /// as the spaces need and no deeper than that strip allows. Null when
-  /// the strip is too shallow for a rank of bays.
-  ///
-  /// These used to be laid a fixed distance OUTSIDE the front line — the
-  /// one place the plot does not own, and where the street it fronts is.
-  ParkingLot? _lotFor(
-    CityBuildingSpec spec,
-    double w, {
-    required double frontY,
-    required List<MassBox> volumes,
-    double clearM = 4,
-  }) {
-    final spaces = parkingSpaces(spec);
-    if (spaces <= 0) return null;
-    var reach = double.infinity;
-    for (final v in volumes) {
-      final front = v.y - v.depth / 2;
-      if (front > frontY && front < reach) reach = front;
-    }
-    final room = (reach.isFinite ? reach : frontY + 60) - clearM - (frontY + clearM);
-    if (room < 8) return null;
-    final depth = (spaces * parkingSpaceM2 / math.max(20.0, w))
-        .clamp(8.0, math.min(140.0, room))
-        .toDouble();
-    final y0 = frontY + clearM; // the lot's near edge
-    return ParkingLot(
-      x: 0,
-      y: y0 + depth / 2,
-      width: w,
-      depth: depth,
-      spaces: spaces,
-      lampPosts: _lampGrid(w, depth, y0: y0),
-    );
-  }
-
-  /// Lamp columns on a ~22 m grid — close enough that the pools of light on the
-  /// tarmac overlap, which is what makes a car park read as lit rather than as
-  /// a dark rectangle with dots on it.
-  List<(double, double)> _lampGrid(double w, double d, {required double y0}) {
-    final out = <(double, double)>[];
-    final cols = math.max(1, (w / 22).round());
-    final rows = math.max(1, (d / 22).round());
-    for (var i = 0; i < cols; i++) {
-      for (var j = 0; j < rows; j++) {
-        out.add((
-          -w / 2 + w * (i + 0.5) / cols,
-          y0 + d * (j + 0.5) / rows,
-        ));
-      }
-    }
-    return out;
   }
 }

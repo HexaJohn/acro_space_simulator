@@ -2030,15 +2030,16 @@ split the way the identity rule needs it and four deviations, each local:
   the seed picks among those that fit the stall length (+10 %), the palette column from the same seed. Occupancy is
   §5.5's `0.25 + (fnv1a32(siteId) % 1000)/1000 · 0.6` in integer per-mille, and WHICH stalls hold a car is seeded by
   `(siteId, stallKey)` — never by index — so a re-plan that keeps a stall keeps its car (`SiteDressing`). At most
-  12 a site (`LotFeatures.emitLot`'s own ceiling) and at most the tile's `maxParkedCars`, shared with the kerb cars
-  and the legacy lots as one budget. Home pads take them too, on their `inline` stalls: E36 is staged, and T4b turns
+  12 a site (the ceiling the legacy `emitLot` kept, carried over as `SiteDressing`'s own) and at most the tile's
+  `maxParkedCars`, shared with the kerb cars as one budget. Home pads take them too, on their `inline` stalls: E36 is staged, and T4b turns
   them off (§5.5).
 
 
 ### 5.5 Lot features, kerb cuts and kerb-side dressing
 
 - **`_emitLotFeatures`** (city_tile_mesher.dart:1327-1409) branches on `b.siteSlot`:
-  - **`< 0`:** today's code, byte-identical.
+  - **`< 0`:** today's code, byte-identical. **(R7: the fence and the sign of it. The car park, its drive, its bays,
+    its cars and its footpath are gone from this branch too — see "As built (R7)" below.)**
   - **Plan-served:** no `massing.parking` and no `emitLot`.
     - `LotFeatures.emitFenceRing` walks the REAL parcel polygon and leaves the plan's `fenceGap`s open (every drive
       and footpath crossing, plus the whole front edge for commercial lots). The domain decides what is open, so a
@@ -2175,6 +2176,36 @@ split the way the identity rule needs it and four deviations, each local:
   - A managed site bakes **no lot cars**; everything else it draws is unchanged. E36 stays staged: home pads and
     kerbs keep their baked cars until T4b (§5.5 above).
 
+**As built (R7): the legacy half is gone, and what an unserved lot keeps.**
+
+`LotFeatures.emitLot` is deleted, with its call site, its bay/aisle/driveway/footpath constants and its quad helper;
+`BuildingGenerator._parking` and the `ParkingLot` it drew are deleted, and with them `BuildingMassing.parking`,
+`BuildingMassingRules._lotFor` / `_lampGrid` / `parkingSpaceM2`, `GeneratedBuilding.lampPosts`,
+`BuildingGenerator.lampHeightM` and `ArchitectureStyle.parkingBehind` (a car park that does not exist cannot go in
+front of or behind anything). `BuildingMassingRules.parkingSpaces` STAYS: it is the capacity target §3.3 packs a plan
+for (C-13), and it is now the only thing in the massing that knows a building attracts cars.
+
+Decided per case, since "the design says otherwise" only where it does:
+
+| Lot | What it drew before | What it draws now | Why |
+|---|---|---|---|
+| Plan-served (`siteSlot ≥ 0`, the knob on — every built lot of a played colony) | nothing legacy since R6 | unchanged, to the byte (the R4 knob-ON pins did not move) | the plan already owned it |
+| Unserved parcel building (`siteSlot < 0`: a site the book has no plan for, a request cut without sites) | fence, sign, and a massing car park with its drive, bays, cars and footpath | fence and sign | §9's R7 row: massing parking goes for parcel buildings AND cells. A lot with no plan has no drive the domain will vouch for, and the commonest reason a built lot has no plan is that it has no access — `kPlanAccessBlocked` (§3.3 row 0c) — where a drive drawn across the lot line leads nowhere. Pinned by `site_detail_dressing_test` ("an UNSERVED lot keeps its fence and its sign, and lays no paving") |
+| Grid cell | the same | the same | as above; a cell that fronts a road gets a plan like any lot (§10.2 Q10) |
+| The knob OFF | the whole legacy drawing | the legacy drawing less the car parks | the knob is the perf A/B (§8.4), not a shipping mode. It is no longer a picture of `dev`, and §8.4's R7 table says what that costs the comparison |
+| Building studio preview | the massing's car park, and a "parking N spaces" readout off it | no car park; the readout is now `parkingSpaces(spec)`, the DEMAND its plan would pack for | the studio previews a massing, and the massing no longer lays one |
+
+**What an unserved building also loses is depth of its own car park's strip — which it gains as building.** A legacy
+massing gave up to 55 % of its buildable depth to `parkArea`, and `buildD` is now the whole strip. So an unserved
+building is bigger and lower than it was (`building_generator_test`: a spec that attracts cars keeps its whole strip;
+`city_nodes_test` and `building_generator_test` both had to be re-fixtured, because what separated their tiers was the
+car park, not the building). This is the same change R4 made for plan-served buildings (§6.2), applied to the rest.
+
+**And one thing nobody sees any more: the car-park lamp masts of an unplanned site.** `CityLighting.lamps` kept a
+legacy derivation for a site without a plan (§6.2 as built, R4); it re-ran the massing to find `ParkingLot.lampPosts`,
+which no longer exist. A site with a plan lights its plan's `lampPt`s, as it has since R4; a site without one has no
+car park to light, so it takes no masts (`city_lighting_test`, both halves).
+
 ---
 
 ## 6. Massing coupling, terrain and heights
@@ -2220,7 +2251,9 @@ spun by `−SiteFrame.buildingHeading` (§3.1), so envelope x/y ARE the building
 
 - **Domain massing.** `massFor(spec, parcel, {seed, SiteEnvelope? envelope})` (building_massing.dart:302): the
   extent is the envelope rectangle, `parkArea = 0` (:431-447, :538-547, :707-719), `_lotFor` returns null
-  (:2248-2276), and `_installation`'s `parkW` is ignored (:2153-2155).
+  (:2248-2276), and `_installation`'s `parkW` is ignored (:2153-2155). **(R7: `parkArea`, `_lotFor` and `parkW` are
+  deleted outright — no massing lays a surface car park, plan-served or not, so this row is now the only rule there
+  is. See §5.5 as built, R7.)**
 - **Front alignment (envelope != null, i.e. `surfaceParking: false`).** `buildCentreY = frontEdge + footD/2`
   replaces both branches at :542-544, so the entrance `buildCentreY − footD/2` (:707) equals `frontEdge`. In both
   the domain `massFor` and the renderer's `parcelOf`, the extent handed to the massing is the envelope inflated in
@@ -2291,7 +2324,13 @@ spun by `−SiteFrame.buildingHeading` (§3.1), so envelope x/y ARE the building
 - **`CityLighting` switches on the PLAN, not the knob:** a site with a published plan takes its masts from
   `lampPt`, and a site without one keeps the legacy derivation. `CityLighting.lamps` has no renderer caller (the
   tiles light their own roads), so nothing drawn depends on the knob here, and the domain keeps no flag of the
-  renderer's.
+  renderer's. **(R7: the legacy derivation is deleted — a site without a plan has no car park to light. The switch
+  is the same one, with nothing on its other arm.)**
+
+**As built (R7).** `BuildingArchetype.surfaceParking` KEEPS its name and its place in the key, and it keeps meaning
+`gate == null`. It no longer says anything about a car park — no archetype has one — but it still separates a
+legacy-massed building from a plan-served one, which are still two different shapes (front alignment, the min-fit
+bucket, the gate lane, the envelope clip), and renaming a key term moves nothing but the diff.
 
 ### 6.3 Terrain
 
@@ -2935,6 +2974,7 @@ starter kit and pass V1–V13 on its graph under all five A2 override kinds. The
   existing tile, road and detail digest stays byte-identical through R6, and each slice's PR asserts that.
 - **R7** deletes the legacy path and re-pins in ONE commit, listing every old → new value and its reason in
   Appendix A, with before/after studio screenshots attached to the review (not committed, per the workspace rule).
+  **Done: nine pins moved, all of them legacy-massing ones, and no plan-served digest moved at all.**
 - The only earlier re-pins are R1's lot-access pins, which are unavoidable (lot access moves) and ledgered the same
   way.
 
@@ -2944,17 +2984,20 @@ starter kit and pass V1–V13 on its graph under all five A2 override kinds. The
 |---|---|---|---|
 | Lot `s` goldens, access and table tests | `road_graph_directed_test`, `road_traffic_model_test`, `access_points_test.dart:59-64` (green by construction), `building_table_test.dart:89-92`, `graph_derivation_test` if it hashes lot arrays | R1 | lot access = slot 0 (§3.2) |
 | Parcel building quaternions | screenshots only | R0 | orientation fix |
-| Tile digests near `0xf5d18ccb`, full `0x5b35df04`, mid `0x0759f3c8`, far `0x07d559a4` | city_tile_mesher_test.dart:505, :527, :551, :585-589 | R7 | fixture gains sites/slots; legacy lot features deleted |
-| Lot-features behaviour | test/colony/lot_features_test.dart | R7 (rewritten against plans) | `emitLot` deleted |
+| Tile digests near `0xf5d18ccb`, full `0x5b35df04`, mid `0x0759f3c8`, far `0x07d559a4` | city_tile_mesher_test.dart:505, :527, :551, :585-589 | R7 (**moved**, Appendix A) | the knob-OFF fixture's buildings lose their car parks and grow into the strip those took. The knob-ON pins did NOT move |
+| Lot-features behaviour | test/colony/lot_features_test.dart | R7 (`emitLot`'s cases deleted, not rewritten: the plan-served drawing is `site_detail_dressing_test`'s and `site_access_mesher_test`'s, where it has been since R4/R6) | `emitLot` deleted |
 | Installation parking | test/architecture/installation_parking_test.dart | R4 (plan cases added), R7 (legacy cases deleted) | plan-owned parking |
 | Lighting masts | test/architecture/city_lighting_test.dart:145 | R4 | masts from `lampPt` |
 | Shaper brush counts | city_terrain_shaping_test, shaper_ground_samples_test, starter `terrainEdits` | R5 | access corridors |
 | Starter zoning | `city_starter_kit_test.dart:57-67` ('zoning the starter block grows buildings on it') | R2 (assertion added; existing expectations unchanged) | four starter lots become access easements (§3.7a): the loop's `setUse` returns false for them, and the test now asserts exactly `{lot-r0x1-l10, lot-r0x0-l0, lot-r0x0-r1, lot-r0x1-r5}` stay unzoned and unbuilt while `grownParcels` is non-empty |
-| Degenerate lots, generator, style | degenerate_lots_test.dart:79-93, building_generator_test.dart:59-77, architecture_style_test.dart:60-72 | never (legacy default); R7 re-checks | – |
+| Degenerate lots, generator, style | degenerate_lots_test.dart:79-93, building_generator_test.dart:59-77, architecture_style_test.dart:60-72 | never (legacy default); R7 re-checks | **R7 re-checked them and three moved** (Appendix A): the style test's front/rear car-park case is deleted (there is no car park to place), the generator's two parking cases become one — a spec that attracts cars keeps its whole buildable strip — and the degenerate test drops an `isNull` guard that only ever guarded against a car park's lamps |
 | The R3 fixture's tiers with the knob **ON** | city_tile_mesher_test.dart 'site access on the wire…' | R4 | R3 pinned the knob-on tiers EQUAL to the legacy ones, to prove the knob drew nothing yet; R4 draws the plan, so the three on-values move (and are asserted different from the off ones). The knob-OFF pins `0xf5d18ccb` / `0x0759f3c8` / `0x07d559a4` do not move. Ledgered in Appendix A; track A's mesher and kerb cuts move the on-values again at the R4 merge |
 
 **Never move:**
-- road tool `0x5e473abb`, `0x09731332`, `0x07d559a4`;
+- road tool `0x5e473abb`, `0x09731332`, `0x07d559a4` — **broken at R7, by this row's own logic** (Appendix A): all
+  three are `road_tool_mesh_test`'s "the mesher fixture, its junctions aside" tile, which carries eleven BUILDINGS
+  beside its roads, so a change to the legacy massing moves them. The roads themselves are untouched: the road ZOO
+  digests below, which carry no building, are byte-identical, as are the ramp's;
 - road zoo `0xfaae5bd2`, `0xa687274b`, `0xb8c5ea2d` (road_tool_mesh_test.dart:217-219, :293-295). A new zoo case with
   cuts gets its own pin;
 - detail layer on/off and mid/far identity (city_detail_layer_test.dart:506-548, extended to sites);
@@ -3125,7 +3168,7 @@ Reference: the 127k-building generated town used by `tool/measure_city_studio.ps
 | Capture, steady frame | ≤ 0.02 ms for sites + kerb cuts; zero ground queries (`groundQueries` delta 0) |
 | Chunk heights rebuild | ≤ 1.5 µs per site, only on a stamp change |
 | Tile cut (`city.bucket`) | ≤ +10% |
-| Near tile build | ≤ +15% time, ≤ +20% vertices; mid ≤ +10% (vertex count measured on the reference town's mid tiles before the knob goes on, §5.4 mid rule); far ≤ +2% |
+| Near tile build | **re-budgeted at R4 and CONFIRMED at R7: ≤ +30% time, ≤ +25% vertices, ≤ +25% bytes** (was ≤ +15% time, ≤ +20% vertices); mid ≤ +10% (vertex count measured on the reference town's mid tiles before the knob goes on, §5.4 mid rule); far ≤ +2% |
 | Near tile send (`city.submit`) | ≤ +10% bytes |
 | Detail job | ≤ +15% |
 | Heap | ≤ 1 retained object per 100 sites (chunk ≤ 7 + geometry ≤ 3 per 1024 sites, §2.3); ≤ 120 B per home site of wire geometry |
@@ -3152,7 +3195,9 @@ its archetype keys on `(surfaceParking, gateBucket)` — so downtown buildings a
 is the slice's content, not its overhead, and shrinking it would mean un-doing §6.2. The site half is well inside the
 budget on its own. Recorded, not fixed: the near-tile line is **re-budgeted to ≤ +25 % vertices, ≤ +25 % bytes and
 ≤ +30 % time with the envelope massing on**, and the R7 legacy-removal slice — which deletes `emitLot` and the
-massing car parks the envelope replaced — is where it is measured again. The whole town's site geometry at near is
+massing car parks the envelope replaced — is where it is measured again. **(R7 measured it: the gap did not close, it
+opened, from +20.8 % to +21.3 % near vertices. The premise was wrong — the ON side had nothing left to delete, so the
+deletion made the OFF side leaner. The re-budget stands; see the R7 table below.)** The whole town's site geometry at near is
 1,802,608 vertices over 127,783 plans: **kerbOnly 0, homeDriveway 10 a site** (110,310 sites), **carPark 35.6**
 (10,512), **yard 146** (1,519), **installation 239** (435); at mid, homes and kerb-only sites draw **nothing** and
 the town's sites come to 148,400 vertices, which is the §5.4 mid rule doing exactly what it was written for.
@@ -3250,6 +3295,53 @@ deviation above is the same finding measured a second way. Both are recorded, no
 follow-up: R7 deletes the legacy massing car parks the envelope replaced, and the worst-frame spike is a tile-build
 budget question (the frame budget's slice), not a site-access one.
 
+**Measured at R7 (the legacy removal), and the verdict on the re-budget.** Same rig as the R6 table — the reference
+town (seed 1, 4 blocks, 20 miles of sprawl: 127,785 buildings, 127,783 plans, 49,984 roads), cut at the studio's two
+miles into 169 tiles, the 8 densest meshed at the NEAR tier from their own columns with the lot furniture on and
+`maxParkedCars` 400, every mid tile at mid and the 24 densest at far. One harness, run on `dev` (e2fc4e9) and on this
+branch, interleaved twice because the first pass of either side runs cold. Vertices and bytes are exact and repeat to
+the digit; the times are noisy (±30 % run to run) and both passes are given:
+
+| 8 densest near tiles | dev, knob OFF | dev, knob ON | R7, knob OFF | R7, knob ON |
+|---|---|---|---|---|
+| Vertices | 6,586,734 | 7,956,689 | **6,559,314** (−0.42 %) | **7,956,689** (unchanged, to the vertex) |
+| Triangles | 4,394,183 | 5,546,269 | 4,380,473 | 5,546,269 |
+| Bytes | 351.8 MB | 427.7 MB | 350.4 MB | 427.7 MB |
+| Build, cold / warm | 2,658 / 1,964 ms | 2,835 / 2,459 ms | 2,578 / 2,104 ms | 2,987 / 2,826 ms |
+
+| Whole town | dev OFF | dev ON | R7 OFF | R7 ON |
+|---|---|---|---|---|
+| Mid, 169 tiles, vertices | 15,762,262 | 15,888,817 | 15,762,262 | 15,888,817 |
+| Far, 24 densest, vertices | 3,204,367 | 3,213,905 | 3,204,367 | 3,213,905 |
+
+**What that says.**
+
+1. **The knob-ON drawing did not move by one vertex or one byte, at any tier.** R7 deletes only what a plan-served
+   lot had already stopped drawing at R6, so the shipped configuration is bit-identical. The three knob-ON tile
+   digests in `city_tile_mesher_test` say the same thing exactly.
+2. **The removal falls on the knob-OFF arm**, and it is small: −27,420 near vertices (−0.42 %) and −1.4 MB over eight
+   tiles. Small because the car park rode the ARCHETYPE mesh, which is shared by every building of its bucket and
+   counted once, and because `emitLot` only ever ran for buildings inside the 300 m block range. At mid and far the
+   count does not move at all: the legacy massing's boxes changed SIZE, not number, which is why those digests move
+   while their vertex counts do not.
+3. **So the near-tile gap did not close — it opened slightly**, from **+20.80 %** vertices on `dev` to **+21.30 %** on
+   this branch (bytes +21.6 % → +22.1 %). R4's expectation that R7 would shrink it was wrong in its premise: there
+   was nothing left to delete on the ON side, and what R7 deletes makes the OFF side leaner. Against the R4 table's
+   own figures (+22.2 % vertices, +23.2 % bytes, +26.8 % time, on a smaller absolute count) the picture is unchanged
+   within the rig's differences.
+
+**§8.4's re-budgeted near-tile line therefore STAYS at ≤ +25 % vertices, ≤ +25 % bytes, ≤ +30 % time, and does not go
+back to +20 / +10 / +15.** The measured +21.3 % vertices and +22.1 % bytes are inside the re-budget and outside the
+original; the original's +10 % bytes was never reachable with envelope massing on, which is §6.2's content, not its
+overhead. Build time is inside the re-budget on the cold pass (+15.9 %) and outside it on the warm one (+34.3 %),
+where the run-to-run spread is itself tens of percent — recorded as measured, not smoothed.
+
+**One more thing the knob-OFF arm now means.** With `siteAccess` off the renderer no longer draws what `dev` drew: it
+draws the legacy lot MINUS its car park. The knob is the perf A/B and nothing ships with it off, but an A/B against it
+is no longer an A/B against the pre-slice picture, and §8.4's own baseline column has to be read that way from here.
+The before/after pair at the R7 review shows it: with the knob off, `dev` stands a strip-mall block back from its
+street behind grey aprons, and this branch stands the same block with no aprons and bigger buildings.
+
 ---
 
 ## 9. Slices, owners, order and acceptance
@@ -3310,6 +3402,8 @@ class DepthProfile { double depthAt(double x); bool containsRect(Rect r); double
 | **R6 repair** | road | `CityTileBucketer.agentManagedSignature` (a quiet seam signs 0), the `knobs.siteAccess` guard in `CityTileMeshJob._siteOf`, two §5.4/§5.5 as-built notes, three new checks in `site_detail_dressing_test` | the R6 review's four findings, all lows, each with a test that is red without it. **The quiet seam is free:** the empty list, a null, a zero-length list and a 4096-byte list of zeros all sign 0, so installing the traffic hook before its first managed site adds no `|m<sig>` term to the cut gate and costs no whole-colony re-cut; a bucket with the quiet seam matches the bucket without it tile for tile, and a list WITH a set byte signs exactly as it did (the identity hash still starts at `0x6A09E667` at its first set byte), so the fake-source case is unmoved. **The knob discipline is one rule in both places:** `_siteOf` now tests `knobs.siteAccess` as `_addSiteStep` does, so a hand-built knob-off request carrying sites draws the legacy lot — pinned by a test that builds exactly that request and compares it, material for material, with the same request carrying no sites (and, so the check is not vacuous, with the knob-on draw, which differs). Two doc deviations recorded, not coded around: the tier table's "detail full" cell for baked lot cars reads "small" in the built code (§5.4 as built), and "no byte set" now covers a list of zeros (§5.5 as built). **Nothing drawn moved:** the full suite is green with every digest pin unchanged — no Appendix A row, no budget re-measure, and the R6 screenshots stand as shot |
 | **T4a Site networks** | traffic | needs R1 (join slot columns for `AccessPoints.ofJoin`) and R2a; §7.8 items 1–11 for today's CommuteSynth trips, INCLUDING item 10 (lot-car persistence by `(siteId, stallKey)`, so no save between T4a and T4b holds lot cars under the old §14.1 scheme or drops them); D17 step 2 only (garage what it cannot place); lot-car owner opaque (`ownerKind` + id) for the slice-3 port | A4–A11 (A10 with its save/resume case), A13–A15, A12 (traffic half); built on R2a fixtures, then real R2 plans; wire after R3; merge gated on the structural allocation gate (A13), not the traffic-wide weighed allocation number (not met today, owed by traffic slice 11); staged E36 (agent-managed sites only) |
 | **R7 Legacy removal** | road | delete `emitLot`, `ParkingLot` meshing (building_generator.dart:246-254, :787-844) and massing parking for parcel buildings and cells; ledgered re-pin; rewrite road-network.md §3b (stale: `CityNodes._emitLotFeatures` is `CityTileMesher._emitLotFeatures`, SprawlSectionBuilder is gone) and docs/REFERENCE.md | one re-pin commit with the ledger; all tests green; screenshots reviewed; after T4a merged |
+| **R7 as built** | road | `emitLot`, `BuildingGenerator._parking`, `ParkingLot`, `BuildingMassing.parking`, `_lotFor`, `_lampGrid`, `parkingSpaceM2`, `GeneratedBuilding.lampPosts`, `BuildingGenerator.lampHeightM`, `ArchitectureStyle.parkingBehind` and `CityLighting`'s legacy mast derivation all deleted; the unserved branch of `_emitLotFeatures` is the fence and the sign; road-network.md §3b rewritten | **The knob-ON drawing is bit-identical** — the three R4 knob-ON tile digests and every road-zoo and ramp pin are unchanged, which is what says this was a removal and not a redraw. Nine pins moved, all legacy-massing ones, in ONE commit with an Appendix A row each, including the three `road_tool_mesh_test` digests §8.2 called never-move (that fixture carries eleven buildings beside its roads — recorded as a deviation in §8.2). What an UNSERVED lot keeps is decided per case and tabled in §5.5 as built (R7), and pinned by a new `site_detail_dressing_test` case: fence and sign, no paving. The detail layer's on/off identity holds. §8.4's R7 table: knob-on unchanged to the vertex at every tier, knob-off −0.42 % near vertices, and the re-budgeted near-tile line **stays** at ≤ +25/+25/+30 — it cannot go back to +20/+10/+15. Screenshots (a generated suburb, a strip mall, the starter kit at orbit; `dev` e2fc4e9 against this branch, same poses): every pair is the same picture bar live traffic, foliage speckle and the sun's real-time drift — nothing a player sees changed. A second pair shot with the perf knob OFF shows what did go: the grey aprons beside a strip-mall block, and the bigger buildings that take their place. `docs/REFERENCE.md` is NOT touched (workspace rule) and is owed elsewhere |
+| **R7 repair** | road | the four stale car-park comments and the `note` string of `ArchitectureStyle`, the five in `BuildingMassing`, and the doc of `BuildingArchetype.surfaceParking`; two stale rationales in `architecture_style_test` | the R7 review's two findings, both lows, both prose the deletion left behind. Nothing drawn moved: no `lib` expression changed, so every digest, vertex pin and budget of the R7 table stands unmeasured-again and the screenshots stand as shot. The one behavioural surface among them IS pinned, because the style picker prints `note` verbatim (building_studio_screen.dart:516): a new `architecture_style_test` case fails on any kit whose note says "parking" or "car park" — red on `utilitarian`'s "parking out front" before the fix. `BuildingArchetype.surfaceParking` keeps its name by the §6.2 as-built decision, and its doc now says so instead of describing a car park |
 | **T4b Residents and pedestrians** | traffic | with or after citizens (slice 3): residents' cars at home pads (backing out to the street, §7.4 Home back-out; yielding to pedestrians on the pavement crossing) and kerbs (E36 completes: all baked cars off), full D17 circling/give-up, stall → door walks via `entrancePt/entranceNode` | A16 |
 | **R4 as built** | road | tracks A and B merged; `CityNodes.siteAccess` **on by default**; the perf knob `siteAccess` added, and `ext.acro.citygame` takes `knob=<name>:<value>`, so a live A/B needs no rebuild; `installation_parking_test` gained its plan case (§8.2) | the §8.4 measurements above; the mid vertex gate +0.96 %; the near-tile deviation recorded in §8.4; the off-parcel throat heights recorded in §6.4 (an R5 dependency, with the probe R5 inherits); the whole suite green with the knob on, with only the one ON pin of `city_tile_mesher_test` moved at the merge (Appendix A). **One criterion is HELD, not ticked**: "the starter kit's four sites visibly connected" is met on the plan, in the mesh and on screen for the paving, gates, car parks, driveways and dropped kerbs, but the four off-parcel throats stand off an unshaped easement until R5 cuts them (§6.4). The slice is accepted on everything else; that line is R5's to tick. **R5 took it** (the R5 as-built row below) |
 | **R8 Polish** (later) | road | alley rear joins (slot 3, F2a), second gates on a second road, one-way loops with angled stalls, podium garage portals for `mega`, sealed-world tube crossings, public lots (`kPlanPublic`) | per feature |
@@ -3451,3 +3545,18 @@ reason, commit.
 | R4 track B | city_tile_mesher_test.dart ('site access on the wire…', the knob **ON** only) | near `0xf5d18ccb`, mid `0x0759f3c8`, far `0x07d559a4` (R3: the knob drew nothing) | near `0x856e8b38`, mid `0xcf757f38`, far `0xbf7c5994` | R4 draws the plan: a served building loses its own car park, is front-aligned on its envelope, takes the min-fit bucket and has its gate lane cut open. The knob-OFF pins are unchanged, and the test now also asserts on ≠ off at every tier. Track A's site mesher and kerb cuts move the ON values again at the R4 merge | R4 track B |
 | R5 | road_corridor_mesh_test.dart ('a colony laid in one call…', the starter kit) | 2 refinement targets, 0 boosted leaves, and every leaf judged on the datum | 10 targets, 10 boosted leaves, 10 of them judged on the ground | the kit's four throats are cut fine (§6.3 as built): a mesh cannot hold an eight-metre cut at fifteen metres, which is why a road cut through relief is refined too. The test now separates a site corridor from a road corridor (it scanned every `cutFill` on the body) and asserts the leaves that differ are exactly the ones a fine SITE brush reaches — without them every leaf is judged on the datum as before. Its 'what makes it a test' case takes `siteCorridorReliefTolM: infinity` alongside the road tolerances, so dev-before-the-fix means before every fix | R5 |
 | R4 merge | city_tile_mesher_test.dart ('site access on the wire…', the knob **ON**, near only) | `0x856e8b38` (track B alone) | `0x6a1f715e` | track A's kerb cuts land on the same tile: the fixture's road carries three cuts, so the near tier's kerbside lays the dropped kerbs and stands the masked kerb cars down on top of track B's envelope massing. Mid and far keep track B's values (`0xcf757f38`, `0xbf7c5994`): neither draws a kerbside, and the fixture carries no `CitySiteFrame`, so the site mesher emits nothing here. The knob-OFF pins never moved | R4 merge |
+| R7 | city_tile_mesher_test.dart:505, :527, :648, :674 (near, knob OFF) | `0xf5d18ccb` | `0x8b0c9fe1` | the fixture's eleven buildings are unserved in the knob-OFF tile: each loses its massing car park (deck, lamp columns, lamp heads) and `emitLot`'s paving, drive, bays, cars and footpath, and grows into the depth the park strip took | R7 |
+| R7 | city_tile_mesher_test.dart:551 (full, camera in the street) | `0x5b35df04` | `0xe7497c94` | same, at the full tier | R7 |
+| R7 | city_tile_mesher_test.dart:569 (mid) | `0x0759f3c8` | `0xffd81c34` | same, at mid: no lot features there, so this is the massing alone | R7 |
+| R7 | city_tile_mesher_test.dart:571, :650, :675 (far) | `0x07d559a4` | `0xb51e60e0` | same, at far | R7 |
+| R7 | city_tile_mesher_test.dart (the knob **ON** tiers) | `0x6a1f715e` / `0xcf757f38` / `0xbf7c5994` | unchanged | the slice deletes nothing a plan-served building drew. This is the check that R7 is a REMOVAL and not a redraw | R7 |
+| R7 | road_tool_mesh_test.dart:293-295 ('the mesher fixture, its junctions aside') | near `0x5e473abb`, mid `0x09731332`, far `0x07d559a4` | near `0x22bdc865`, mid `0x057be2b6`, far `0xb51e60e0` | §8.2 lists these as never-move, and they moved: the fixture carries eleven buildings beside its roads. Deviation recorded in §8.2. The road zoo (`0xfaae5bd2`, `0xa687274b`, `0xb8c5ea2d`) and the ramp (`0x0610818f`, `0xe4af1e87`) are byte-identical, which is what says the roads did not move | R7 |
+| R7 | city_nodes_test.dart 'a distant colony drops to block silhouettes' | an r-med on a 24 m square, `block < full` | an r-high on a 12 m square | what made the two tiers differ for an r-med was the car park beside it: without one, an r-med on that lot is ONE box at every tier and `block == full`. Re-fixtured on a building that has a silhouette to collapse | R7 |
+| R7 | building_generator_test.dart 'generated geometry has walls, glazing and an interior' | a c-high on a 60 m square; `block.foliage < shell.foliage` | a c-high on a 24 m square; `block.foliage == shell.foliage` | the 60 m square now stands one storey (it has the whole plot), so it had no interior to lose; and the foliage comparison was counting the car park's LAMP HEADS, which ride the glazing channel and which the block tier skipped — with the car park gone the two tiers glaze alike, and the case says so | R7 |
+| R7 | building_generator_test.dart:59-77 (two parking cases) | 'parking is sized from demand and sits between building and street' + 'a building with no staff or visitors gets no car park' | one case: 'a demand for cars no longer takes a strip off the building' | there is no `ParkingLot` to size. What is worth pinning is the consequence: a spec that attracts cars keeps its whole buildable strip | R7 |
+| R7 | architecture_style_test.dart:60-72 ('the car park moves behind the building, not in front of it'), :271 | the case, and a `parking, isNull` guard | deleted | `ArchitectureStyle.parkingBehind` is deleted with the car park it placed | R7 |
+| R7 | degenerate_lots_test.dart:92 | `massing.parking, isNull` guard | deleted (the controlled spec stays) | the guard existed so the glazing channel held no lamp heads; no massing has any | R7 |
+| R7 | megatower_test.dart:41 | `m.parking, isNull` | `parkingSpaces(kMegatowerSpec) == 0` | the mega parks in its podium, which is now a statement about the spec's demand — the only place that fact still lives | R7 |
+| R7 | city_lighting_test.dart 'car parks get their own cold-light masts' | the legacy case (a util placed in a colony with no plans lights a re-massed car park) | deleted; the plan case gains its assertions (a mast throws wider than a street lamp; a site with no plan takes none) | §6.2 as built, R7: the legacy mast derivation is gone with the lot it read | R7 |
+| R7 | test/colony/lot_features_test.dart | four `emitLot` cases (occupancy, front lot, rear lot, paint lift) | deleted | `emitLot` is deleted. The drawing they covered is the plan's, and `site_detail_dressing_test` covers it lot by lot; a new case there pins what an UNSERVED lot keeps | R7 |
+| R7 | test/architecture/installation_parking_test.dart | 'every staked installation parks inside its own plot', and the parking half of the gate-lane case | deleted; the gate-lane half kept whole | the plan parks installations (§3.7). What the massing still owes a plan is the lane | R7 |

@@ -37,8 +37,9 @@ void main() {
     final fp = m.footprint;
     expect(fp.width, lessThanOrEqualTo(96.1));
     expect(fp.depth, lessThanOrEqualTo(88.1));
-    // No surface lot: eighteen thousand workers park in the podium.
-    expect(m.parking, isNull);
+    // Eighteen thousand workers park in the podium, which is why the spec
+    // asks for no spaces at all (§3.3 row 2 reads this).
+    expect(const BuildingMassingRules().parkingSpaces(kMegatowerSpec), 0);
   });
 
   test('two seeds are two different megatowers', () {

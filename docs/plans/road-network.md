@@ -175,39 +175,60 @@ position, control and flattened legs `(dir xyz, half width, class)`; both ride
 
 ## 3b. Lots: parking, driveways and footpaths
 
-The massing places a building's car park INSIDE its parcel — a strip off
-one end of the buildable depth, in front for suburban styles and behind
-(off the alley) for a street wall — and the building mesh draws its slab.
-The lot pass used to draw a second apron from a rough estimate of the lot,
-always at the front, with a neck that ended under the raised sidewalk. Now
-`CityNodes._emitLotFeatures` takes the massing the building was actually
-drawn from (the library's cached archetype, so the same variant) and
-`LotFeatures.emitLot` dresses that lot: bay lines and the cars in them
-(ranks against the long edges, two facing across an aisle when there is
-room), the driveway from the lot's road-side edge to the road — over the
-front setback and across the sidewalk as a concrete apron at the walk's
-height for a front lot, a metre into the alley for a rear one — and the
-footpath from the entrance to the front lot line (and to the back wall from
-a rear lot). Everything is paving on the road atlas; nothing is drawn on
-the ground palette. Front or rear is decided from where the lot IS relative
-to the entrance, not from the style flag, because an installation's lot is
-out front whatever the kit. The lot gets an asphalt surface of its own over
-the massing's pale slab, so a car park reads as tarmac.
+Rewritten 2026-09-17 (site access R7). What used to be here described a car
+park the MASSING laid beside a building and a lot pass that dressed it. Both
+are gone. A lot's paving is now the domain's, and the renderer draws what the
+domain publishes.
 
-Installations (`_lotFor` in the massing rules) used to lay their car park a
-fixed distance OUTSIDE the plot's front line — over whatever the plot
-fronted. They now park inside: in the strip between the front line and the
-nearest of their own volumes, as deep as the spaces need and no deeper than
-the strip allows, or not at all when there is no room for a rank of bays
-(`installation_parking_test`).
+**The domain owns the lot.** Every built lot gets a `SiteAccessPlan`
+(`lib/domain/colony/city/site_access/`, designed in `docs/plans/site-access.md`):
+its joins onto the road, its driveway or access road, its aisles, its stalls
+and their poses, its turnarounds, its footpaths, its lamp posts and its
+building envelope. The plan is derived from the saved layout, the spec and the
+road graph — never saved — and it is the single source of truth for that lot's
+geometry. The massing lays no car park at all: `massFor` takes a `SiteGate`
+when a plan serves the building, front-aligns it on the plan's envelope and
+keeps the gate lane clear, and a building with no plan simply fills its
+buildable strip.
 
-The sprawl does the same: strip malls get an asphalt lot between the box
-and the arterial with a driveway to the curb, a path to the door, two ranks
-of bays back to back and cars in them; industrial sheds now stand in the
-BLOCKS of the section's streets (the old coarse grid put them astride the
-streets) with a yard toward the block's street, a driveway and a path;
-houses get a concrete driveway over the sidewalk and a path along the front
-to the door.
+**The renderer.** `CityTileMesher._emitLotFeatures` (city_tile_mesher.dart;
+`CityNodes` has no such method — the old name here was stale) branches per
+building on `BuildingSnapshot.siteSlot`:
+
+- **Plan-served** (`siteSlot >= 0` and the tile's request carries that site's
+  `CitySiteFrame`): `SiteAccessMesher.emitDressing` draws the fence ring on the
+  REAL parcel polygon with the plan's gaps open at every drive and path, the
+  sign beside the primary throat at the lot line, the footpaths, the stall
+  paint, the arrows, the bay hatch, the wheel stops, the car-park lamps and the
+  cars standing in the stalls. The structural half — paving rings, driveway and
+  aisle ribbons, throats across the pavement, turnaround pads, access roads and
+  their edge kerbs, installation gate posts — is a `sites` step on the tile at
+  its own tier (`SiteAccessMesher.emit`), so a big site is drawn from far away
+  and a house from close up only.
+- **Unserved** (`siteSlot < 0`, or the knob off): the fence and the sign, on
+  the canonical lot rectangle, and nothing else. There is no driveway, no bay
+  paint, no parked car and no footpath, because nothing in the domain says
+  where they would go.
+
+Everything paved rides the road atlas (`featureApron`, the road material) at
+the lift stack of site-access §5.4; fences, signs and cars ride the facade
+material and the sign's lit face the glazing one. Nothing is drawn on the
+ground palette.
+
+**Where a drive meets the street** is a KERB CUT, not an apron laid over the
+pavement: the plan's joins become `RoadSnapshot.kerbCuts`, and `RoadMesher`'s
+`sidewalks`, `verges` and `lamps`, `StreetFurniture.emit` and the baked kerb
+cars all read them through `KerbCuts` — the kerb edge drops across the flare,
+the verge and its tree pits open, a lamp or a prop in the cut stands aside, and
+no kerb car parks in a home's back-out swing. With no cuts every one of them is
+byte-identical to what it drew before.
+
+**The sprawl is the same code.** There is no `SprawlSectionBuilder` any more
+(see §8, "One plat"): sprawl blocks are plat blocks, their buildings are parcel
+buildings, and they take plans, dressing and kerb cuts exactly as a downtown
+lot does. A strip mall's car park, a works's yard and a house's drive and pad
+are three programs of one generator (`site_program.dart`), not three
+hand-written builders.
 
 ## 4. One mesher — `road_mesher.dart`
 

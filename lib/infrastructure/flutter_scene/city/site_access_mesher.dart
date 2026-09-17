@@ -415,8 +415,8 @@ abstract final class SiteAccessMesher {
         maxCars: math.min(maxLotCars, carBudget), airless: airless);
   }
 
-  /// The most cars one site bakes, whatever the tile's budget: the legacy
-  /// lot's own ceiling (`LotFeatures.emitLot`).
+  /// The most cars one site bakes, whatever the tile's budget: the ceiling
+  /// the legacy `emitLot` kept, carried over when it was deleted (R7).
   static const int maxLotCars = 12;
 
   /// The DRESSING of one plan-served building's site (§5.4, §5.5, R6),

@@ -35,7 +35,10 @@ void main() {
   test('the same building goes tall on a narrow lot, low on a wide one', () {
     // A hospital, not a shed: industrial specs deliberately stay low-rise.
     final tower = spec('Hospital');
-    final narrow = rules.massFor(tower, lot(width: 30, depth: 40));
+    // 20 x 24 m: a plot that fits the whole hospital in ONE storey is not a
+    // narrow plot. (It used to be 30 x 40, which was narrow while a car park
+    // took a strip off its depth; R7 gives that strip back to the building.)
+    final narrow = rules.massFor(tower, lot(width: 20, depth: 24));
     final wide = rules.massFor(tower, lot(width: 400, depth: 400));
 
     expect(narrow.height, greaterThan(wide.height));
@@ -56,29 +59,32 @@ void main() {
     expect(tower.width, lessThan(podium.width));
   });
 
-  test('parking is sized from demand and sits between building and street', () {
-    final mall = spec('Data Center');
-    final m = rules.massFor(mall, lot(width: 120, depth: 160));
-    final lotArea = m.parking!;
-
-    expect(lotArea.spaces, rules.parkingSpaces(mall));
-    expect(lotArea.area,
-        greaterThan(lotArea.spaces * rules.parkingSpaceM2 * 0.5));
-    // The car park is on the street side (lower y) of the building.
-    final building = m.volumes.first;
-    expect(lotArea.y, lessThan(building.y));
-    expect(lotArea.lampPosts, isNotEmpty);
-  });
-
-  test('a building with no staff or visitors gets no car park', () {
-    final store = spec('Warehouse');
-    final m = rules.massFor(store, lot(width: 40, depth: 40));
-    expect(m.parking?.spaces ?? 0, 0);
-    expect(m.parking, isNull);
+  test('a demand for cars no longer takes a strip off the building', () {
+    // R7: the PLAN owns the parking (docs/plans/site-access.md §6.2), so a
+    // spec that attracts cars fills its buildable strip like any other. It
+    // used to give up to 55% of that depth to a rectangle of tarmac beside
+    // itself, which is what `emitLot` drew and what the plan draws now.
+    final busy = spec('Hospital');
+    expect(rules.parkingSpaces(busy), greaterThan(0),
+        reason: 'this spec does attract cars, or the check is vacuous');
+    final parcel = lot(width: 30, depth: 40);
+    final m = rules.massFor(busy, parcel);
+    final availD = parcel.inscribedExtent.depth -
+        rules.style.frontSetbackM -
+        rules.style.rearSetbackM;
+    // The old strip was `spaces x 26 m2 / width`, capped at 55% of the depth,
+    // and this spec asks for far more than that cap: it left the building
+    // about a third of its own plot.
+    expect(m.footprint.depth, greaterThan(availD * 0.6),
+        reason: 'the building has the whole strip');
   });
 
   test('generated geometry has walls, glazing and an interior', () {
-    final b = gen.generate(zone('commercial', Density.high), lot(width: 60, depth: 60));
+    // 24 x 24: tall enough for an interior and for a stepped silhouette. A
+    // c-high spec on a 60 m square now stands ONE storey — R7 gave it the
+    // depth its car park used to take, so it needs no height.
+    final b =
+        gen.generate(zone('commercial', Density.high), lot(width: 24, depth: 24));
 
     expect(b.model.solid.triangleCount, greaterThan(0));
     expect(b.model.foliage.triangleCount, greaterThan(0),
@@ -87,7 +93,7 @@ void main() {
 
     // Interiors: dropping to the exterior tier must remove triangles.
     final shell = gen.generate(zone('commercial', Density.high),
-        lot(width: 60, depth: 60), detail: BuildingDetail.exterior);
+        lot(width: 24, depth: 24), detail: BuildingDetail.exterior);
     expect(shell.model.solid.triangleCount,
         lessThan(b.model.solid.triangleCount));
 
@@ -96,14 +102,18 @@ void main() {
     // the night emissive live, and a skyline of dead grey boxes after dark
     // was the tell that the block tier was a different kind of thing.
     final block = gen.generate(zone('commercial', Density.high),
-        lot(width: 60, depth: 60), detail: BuildingDetail.block);
+        lot(width: 24, depth: 24), detail: BuildingDetail.block);
     expect(block.model.solid.triangleCount,
         lessThan(shell.model.solid.triangleCount));
     expect(block.model.foliage.triangleCount, greaterThan(0),
         reason: 'block keeps its window bands so distant towers light up');
     expect(block.model.foliage.triangleCount,
-        lessThan(shell.model.foliage.triangleCount),
-        reason: 'but far fewer of them than the near tier pays for');
+        shell.model.foliage.triangleCount,
+        reason: 'the same bands: the collapsed box is glazed per storey too. '
+            'This used to read FEWER, but what it was counting was the car '
+            "park's lamp heads — they ride the glazing channel and the block "
+            'tier skipped them. R7 deleted the car park, so the glazing is '
+            'now all this measures, and the two tiers glaze alike.');
   });
 
   test('geometry stands on the ground and within its lot', () {
