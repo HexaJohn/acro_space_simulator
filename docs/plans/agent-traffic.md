@@ -2930,6 +2930,21 @@ Built on the road side's R2a fixtures (`SyntheticSites`: HOME, STRIP, LOOP, UTIL
 
 **Acceptance:** site-access §7.9 A4–A11 (A9 is `home_back_out_test`, §7.5; A10 with its save/resume case), A13–A15, and the traffic half of A12. Merge is gated on the structural allocation test A13 (`site_alloc_test`), not on the weighed §15.2 allocation gate, which slice 11 owes.
 
+**As built.** T4a is on dev at `e2fc4e9`. The implementation plan and its packages are `docs/plans/t4a-implementation.md`.
+- **Acceptance measured.** A4 parks on `stallOrder[j][0]` 80 s after spawn, 0.0 mm and 0.000° off the plan's stall, with one ENTER 0.89 m from the cut's `T`. A15 ran 540 agents over 2,000 sub-steps on a 25-site grid with no access-event violation. A10 restores every lot car to its own key's stall.
+- **Liveness, found after the packages and fixed.** Every wait a car can sit in now ends.
+  - `SiteVehicles.waitMs` counts milliseconds through a saturating `addClock` (traffic_time.dart): as microseconds in an `Int32List` it wrapped at 35.8 minutes and silently disarmed both forced grants.
+  - A home back-out gives up at `backOutGiveUpS` (300 s), goes back on its stall and re-plans (`backOutGiveUps`).
+  - A throat wait gives up at `throatStuckAfterS + stuckDespawnS` (180 s), §5.6's own knobs (`throatGiveUps`).
+  - The arrival gate gives up at `gateGiveUpS` whatever the refusal, including a crossing that never clears — which used to end in a despawn instead of D17 step 2 (`gateCrossGiveUps`).
+  - `gateGiveUpS > gateForcedS` is load-bearing and unenforced; so is `throatStuckAfterS + stuckDespawnS`.
+- **The renderer, after the road side measured a grown town pushing 4.0 MB of instance transforms a frame at 95 m.**
+  - `0495be9`: the agent draws upload only what moved — a still frame writes nothing, parked cars only when one comes or goes. That cuts CPU repacks, not uploads: the host buffer's storage is cycled every frame, so every pack a frame BINDS is uploaded once whatever happened to it.
+  - `68c81f7`: the site and parked band/range test measures anchor-relative metres, as the road pass does. It compared a pose matrix's translation in SCENE KILOMETRES against metres, so every site and parked car read as 1000× closer: always a shadow caster, never range-culled. Shadow casters in those halves fall 31–100% with the town's size and the camera. The parked "already placed" gate carries the focus on a 32 m stride (`SiteCarPass.parkedBandStepM`), so a panning camera does not rewrite hundreds of instances a frame.
+  - The road side's own patch shares one upload per pack per frame across the colour, depth, shadow and filter passes: 4.0 MB → 804 KB on the same town.
+  - **Deferred to T4b, deliberately:** parked cars pass `range2 = infinity`, so §7.4's 1.5 km ring is not applied and a 9 km parked car is still drawn, in the no-shadow band. A test asserts it IS drawn, so T4b trips it on purpose.
+- **Open: a rare native crash.** A profile build of a grown colony dies about once in 26 live sessions, idle, with no Dart error, no crash dump and nothing in the event logs. Ruled out headlessly under `dart compile exe`: the agents' tick, the whole capture path (200k captures, every manoeuvre branch), the codec, live road edits, agents off and on, and a Dart-side leak (`tool/aot_capture_smoke.dart`, bench-gated). Neither switching the agent draws off (0 in 4) nor 5× the cars (0 in 3) moved the rate. The remaining suspect is the engine's process-wide instance host buffer, which is why the traffic above was worth cutting whether or not it is the cause.
+
 ### Slice 3 — Citizens — L, ≈ 2.6k LOC, depends on slice 2 and T4a (whose opaque lot-car owners it ports)
 
 **Goal.**
