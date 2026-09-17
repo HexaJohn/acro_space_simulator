@@ -813,6 +813,156 @@ void main() {
     });
   });
 
+  group('the site and parked cars are banded in metres', () {
+    // The units. The knobs are METRES (§15.4) and so is every distance the
+    // road pass compares (`_placeRow`), but an instance matrix holds the
+    // SCENE's kilometres — `TrafficRoad.writePose` puts the centre through
+    // `lengthToScene` on its way in. T4a banded the site and parked cars off
+    // the matrix, so every distance came out 1,000× too small: every one of
+    // them read as near, cast a shadow and was never range-culled. These pin
+    // the quantity and the unit so it cannot come back quietly.
+    const double r = 6.371e6;
+    const anchor = Vector3(0, 0, r);
+    // A frame whose (east, north, up) ARE the axes and whose datum is the
+    // anchor's radius, so a car at colony-local (e, 0) stands exactly e
+    // metres from an anchor-and-focus on the datum — the distance the band
+    // is supposed to measure, with no arithmetic of the test's own.
+    final sites = CitySiteFrame(
+        colonyId: 'c',
+        bodyId: 'earth',
+        sitesRev: 1,
+        geometryStamp: 0,
+        datumRadiusM: r,
+        up: const Vector3(0, 0, 1),
+        east: const Vector3(1, 0, 0),
+        north: const Vector3(0, 1, 0),
+        chunks: const []);
+
+    late CityTrafficFrame base;
+    setUpAll(() {
+      base = captured(live(foundFlat(id: 'bands', roads: const [
+        FixtureRoad([Vec2(-100, 0), Vec2(100, 0)]),
+      ])));
+    });
+
+    /// A frame with one site car and one parked car [metresOut] metres east
+    /// of the anchor, all private cars, so all of one model.
+    CityTrafficFrame carsAt(List<double> metresOut, {int parkedRev = 1}) {
+      final n = metresOut.length;
+      return CityTrafficFrame(
+        colonyId: 'c',
+        bodyId: 'earth',
+        agents: frameOf([for (var i = 0; i < n; i++) parked(0, 10)],
+            base.geometry.graphRev),
+        geometry: base.geometry,
+        net: base.net,
+        sites: sites,
+        sitePoses: SitePoseColumns(
+          count: n,
+          sitesRev: 1,
+          sealed: false,
+          row: Int32List.fromList([for (var i = 0; i < n; i++) i]),
+          e: Float32List.fromList(metresOut),
+          n: Float32List(n),
+          up: Float32List(n),
+          dirE: Float32List(n)..fillRange(0, n, 1),
+          dirN: Float32List(n),
+        ),
+        parked: ParkedColumns(
+          parkedRev: parkedRev,
+          sitesRev: 1,
+          lotCount: n,
+          lotSite: Int32List(n),
+          lotStall: Int32List(n),
+          lotKind: Uint8List(n)..fillRange(0, n, AgentKind.car.index),
+          lotVariant: Uint8List(n),
+          lotE: Float32List.fromList(metresOut),
+          lotN: Float32List(n),
+          lotUp: Float32List(n),
+          lotDirE: Float32List(n)..fillRange(0, n, 1),
+          lotDirN: Float32List(n),
+        ),
+      );
+    }
+
+    final nearSlot = VehicleKind.coupe.index * 2;
+    final farSlot = nearSlot + 1;
+
+    test('a car at a known distance lands in the band the road pass would '
+        'put it in, and one past the range cap is not drawn at all', () {
+      final pass = SiteCarPass();
+      // Either side of the shadow range (800 m) and either side of the
+      // range cap (3,500 m), in metres.
+      final placed =
+          pass.place(carsAt([95, 799, 801, 3499, 3501]), anchor, anchor);
+      expect(placed, 4, reason: 'the car at 3,501 m is beyond the range cap');
+      expect(pass.vehicles.live[nearSlot], 2, reason: '95 m and 799 m cast');
+      expect(pass.vehicles.live[farSlot], 2,
+          reason: '801 m and 3,499 m are drawn, and cast nothing');
+
+      // The band a road car at the same metres would land in: the very
+      // predicate `AgentTrafficPass._placeRow` applies, read here off the
+      // same knob.
+      for (final d in [95.0, 799.0, 801.0, 3499.0]) {
+        final roadWouldCast = d < AgentTrafficPass.shadowRangeM;
+        expect(roadWouldCast, d < 800, reason: '$d m');
+      }
+
+      // And why the matrix is the wrong thing to have asked: what it holds
+      // is kilometres. 95 m is 0.095 of them — which is why every distance
+      // read off it came out inside every band.
+      final m = pass.vehicles.poses[nearSlot]!.matrices[0];
+      expect(m.storage[12], closeTo(f32(lengthToScene(95)), 1e-9));
+      expect(m.storage[12].abs(), lessThan(1),
+          reason: 'kilometres, not the 95 the band is measured in');
+    });
+
+    test('the band follows the shadow-range knob, in metres', () {
+      addTearDown(() => AgentTrafficPass.shadowRangeM = 800);
+      AgentTrafficPass.shadowRangeM = 200;
+      final pass = SiteCarPass();
+      expect(pass.place(carsAt([199, 201]), anchor, anchor), 2);
+      expect(pass.vehicles.live[nearSlot], 1);
+      expect(pass.vehicles.live[farSlot], 1);
+    });
+
+    test('parked cars are banded the same way, and T4a still draws the '
+        'distant ones', () {
+      final pass = SiteCarPass();
+      pass.place(carsAt([95, 801, 9000]), anchor, anchor);
+      expect(pass.parked.live[nearSlot], 1);
+      // §7.4: the parked half has no range ring until T4b, so the 9 km car
+      // is still drawn — but by the slot that casts nothing, as it always
+      // should have been.
+      expect(pass.parked.live[farSlot], 2);
+    });
+
+    test('the parked band follows the focus by strides, not by frames', () {
+      final pass = SiteCarPass();
+      final f = carsAt([95, 900]);
+      expect(pass.place(f, anchor, anchor), 2);
+      expect(pass.parked.live[nearSlot], 1);
+      expect(pass.parked.live[farSlot], 1);
+      final rev = pass.parked.rev;
+
+      // A nudge inside the stride rewrites not one parked matrix: they are
+      // hundreds of instances, and §13.8 keeps them out of the shared buffer.
+      expect(
+          pass.place(f, anchor,
+              const Vector3(SiteCarPass.parkedBandStepM / 2, 0, r)),
+          2);
+      expect(pass.parked.rev, rev);
+
+      // A stride: the camera stands beside the far car, and the bands swap.
+      expect(pass.place(f, anchor, const Vector3(900, 0, r)), 2);
+      expect(pass.parked.rev, greaterThan(rev));
+      expect(pass.parked.live[nearSlot], 1,
+          reason: 'the 900 m car is under the camera now');
+      expect(pass.parked.live[farSlot], 1,
+          reason: 'and the one at 95 m is 805 m off');
+    });
+  });
+
   test('every agent kind maps to a model, or to none', () {
     VehicleKind? kindOf(AgentKind k, [int variant = 0, bool sealed = false]) =>
         agentVehicleKind(k.index, variant, sealed: sealed);
