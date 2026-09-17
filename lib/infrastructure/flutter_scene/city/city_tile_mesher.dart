@@ -1394,7 +1394,9 @@ class CityTileMeshJob {
     }
   }
 
-  /// Fences and shop signs, car parks and their cars, into the tile.
+  /// What stands on a lot beside its building, into the tile: a plan-served
+  /// lot's whole dressing (its fence ring, sign, footpaths, stall paint, lamps
+  /// and parked cars), and an unserved one's fence and sign.
   ///
   /// What a lot is zoned decides what stands on its boundary: a picket fence
   /// round a house, chain link round a works, a lit board over a shopfront.
@@ -1450,18 +1452,12 @@ class CityTileMeshJob {
         );
         continue;
       }
+      // UNSERVED (no plan on the wire for this building): the fence and the
+      // sign it always had, on the canonical lot rectangle. The car park,
+      // its drive, its bays and its footpath are the PLAN's now (R7), so a
+      // lot without one keeps only what a lot line carries.
+      if (edging == LotEdging.none && !sign) continue;
       final spec = CityTileMesher.specOf(b);
-      final parcel = CityTileMesher.parcelOf(b, k.style);
-      // The massing the building was DRAWN from — the library's cached one,
-      // canonical lot and variant and all — so the lot the paint goes on and
-      // the door the path runs to are the ones in the mesh.
-      final built = libraries.forTier(tier).get(spec, parcel,
-          seed: b.id.hashCode,
-          detail: tier,
-          gate: CityTileMesher.gateOf(b, siteAccess: k.siteAccess));
-      final massing = built.massing;
-      final lot = massing.parking;
-      if (edging == LotEdging.none && !sign && lot == null) continue;
 
       final at = Vector3(b.px, b.py, b.pz) - anchorBF;
       final up = (at + anchorBF).normalized;
@@ -1470,7 +1466,6 @@ class CityTileMeshJob {
       // from the street into the lot.
       final q = Quaternion(b.qw, b.qx, b.qy, b.qz);
       final along = q.rotate(Vector3.unitY).normalized;
-      final sideAxis = q.rotate(Vector3.unitX).normalized;
 
       // Out to the LOT LINE, not the building's own edge: the footprint has
       // already been inset by its setback and shrunk by its coverage, and a
@@ -1487,35 +1482,6 @@ class CityTileMeshJob {
       if (sign) {
         LotFeatures.emitSign(solid, glow, at, along, up, halfW, halfD,
             math.max(1.0, b.siteWidthM / 18));
-      }
-      if (lot != null && _carBudget > 0) {
-        // Occupancy has no field on the wire yet, so it is DERIVED: a
-        // deterministic per-lot fraction, so a district reads as busy or quiet
-        // and two clients agree, without pretending to know the real number.
-        final h = (b.id.hashCode & 0x7FFFFFFF) % 1000 / 1000.0;
-        // The parcel's REAL lot lines, in the frame the massing was placed
-        // in — its centroid, the street at negative Y. [halfD] is the lot
-        // line the fence stands on: the site plus the coverage and setback
-        // the density rule took off it, which is where the sidewalk begins.
-        final depth = halfD * 2;
-        // The back wall: the rear of the deepest floored volume.
-        var rearWall = double.negativeInfinity;
-        for (final v in massing.volumes) {
-          if (v.floors > 0) rearWall = math.max(rearWall, v.y + v.depth / 2);
-        }
-        _carBudget -= LotFeatures.emitLot(
-          apron, cars, glow, at, sideAxis, along, up, lot, massing.entrance,
-          frontLineY: -depth / 2,
-          rearLineY: depth / 2,
-          // Where the lot IS, not where the style says it goes: an
-          // installation's lot is out front whatever the kit.
-          behind: lot.y > massing.entrance.$2,
-          rearDoorY: rearWall.isFinite ? rearWall : lot.y - lot.depth / 2,
-          occupancy: 0.25 + h * 0.6,
-          airless: k.sealedWorld,
-          maxCars: math.min(12, _carBudget),
-          detailed: tier == BuildingDetail.full,
-        );
       }
     }
   }

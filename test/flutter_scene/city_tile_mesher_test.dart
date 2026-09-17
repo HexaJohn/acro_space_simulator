@@ -502,7 +502,7 @@ void main() {
       expect(near.lodCounts, {BuildingDetail.exterior: buildings.length});
       expect(near.groups, hasLength(5));
       expect(near.instances, hasLength(9));
-      expect(digest(near), 0xf5d18ccb);
+      expect(digest(near), 0x8b0c9fe1);
     });
 
     test('with the detail layer off the tile is the same to the byte', () {
@@ -524,7 +524,7 @@ void main() {
             detailLayer: false,
           ),
           CityBuildingLibraries());
-      expect(digest(off), 0xf5d18ccb);
+      expect(digest(off), 0x8b0c9fe1);
       expect(off.archetypeMeshes, isEmpty);
     });
 
@@ -548,7 +548,7 @@ void main() {
       expect(cut.lodCounts, {BuildingDetail.full: 3, BuildingDetail.exterior: 8});
       expect(cut.groups, hasLength(7));
       expect(cut.instances, hasLength(11));
-      expect(digest(cut), 0x5b35df04);
+      expect(digest(cut), 0xe7497c94);
 
       final whole = mesh();
       expect(whole.groups, hasLength(6));
@@ -567,9 +567,9 @@ void main() {
 
     test('mid and far: the tile to the byte', () {
       expect(digest(CityTileMesher.mesh(request(CityTier.mid), CityBuildingLibraries())),
-          0x0759f3c8);
+          0xffd81c34);
       expect(digest(CityTileMesher.mesh(request(CityTier.far), CityBuildingLibraries())),
-          0x07d559a4);
+          0xb51e60e0);
     });
 
     test('site access on the wire leaves every tier to the byte with the '
@@ -645,9 +645,9 @@ void main() {
       expect(on.keyTerms, '${knobs.keyTerms}|siteAccess');
       int at(CityMeshKnobs k, CityTier tier) => digest(CityTileMesher.mesh(
           request(tier, members: served, k: k), CityBuildingLibraries()));
-      expect(at(knobs, CityTier.near), 0xf5d18ccb, reason: knobs.keyTerms);
-      expect(at(knobs, CityTier.mid), 0x0759f3c8, reason: knobs.keyTerms);
-      expect(at(knobs, CityTier.far), 0x07d559a4, reason: knobs.keyTerms);
+      expect(at(knobs, CityTier.near), 0x8b0c9fe1, reason: knobs.keyTerms);
+      expect(at(knobs, CityTier.mid), 0xffd81c34, reason: knobs.keyTerms);
+      expect(at(knobs, CityTier.far), 0xb51e60e0, reason: knobs.keyTerms);
       // R4, the knob on: the served buildings are drawn from their plans —
       // no car park of their own, front-aligned on the envelope, the gate
       // lane cut open — and the near tier's kerbside lays the dropped kerbs
@@ -671,11 +671,11 @@ void main() {
       int at(CityTier tier) => digest(
           CityTileMesher.mesh(request(tier), libraries, scratch: scratch)
               .detached());
-      expect(at(CityTier.near), 0xf5d18ccb);
-      expect(at(CityTier.far), 0x07d559a4);
-      expect(at(CityTier.mid), 0x0759f3c8);
-      expect(at(CityTier.near), 0xf5d18ccb);
-      expect(at(CityTier.far), 0x07d559a4);
+      expect(at(CityTier.near), 0x8b0c9fe1);
+      expect(at(CityTier.far), 0xb51e60e0);
+      expect(at(CityTier.mid), 0xffd81c34);
+      expect(at(CityTier.near), 0x8b0c9fe1);
+      expect(at(CityTier.far), 0xb51e60e0);
     });
   });
 

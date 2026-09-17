@@ -94,7 +94,6 @@ class ArchitectureStyle {
     this.frontSetbackM = 3,
     this.sideSetbackM = 3,
     this.rearSetbackM = 3,
-    this.parkingBehind = false,
     this.groundStoreyM = 3.6,
     this.upperStoreyM = 3.6,
     this.rhythm = FacadeRhythm.ribbon,
@@ -137,11 +136,6 @@ class ArchitectureStyle {
 
   /// Rear yard — where the alley, the loading bay and the car park live.
   final double rearSetbackM;
-
-  /// Put the car park BEHIND the building rather than between it and the
-  /// street. A front lot is the strip-mall pattern: it is what breaks a
-  /// downtown block open, and no amount of frontage detail survives it.
-  final bool parkingBehind;
 
   // ---- Storeys -----------------------------------------------------------
 
@@ -303,7 +297,6 @@ class ArchitectureStyle {
     frontSetbackM: 0,
     sideSetbackM: 0,
     rearSetbackM: 6,
-    parkingBehind: true,
     groundStoreyM: 4.6,
     upperStoreyM: 3.5,
     rhythm: FacadeRhythm.punched,
@@ -371,7 +364,6 @@ class ArchitectureStyle {
     frontSetbackM: 2,
     sideSetbackM: 2,
     rearSetbackM: 4,
-    parkingBehind: true,
     groundStoreyM: 3.2,
     upperStoreyM: 3.0,
     rhythm: FacadeRhythm.punched,

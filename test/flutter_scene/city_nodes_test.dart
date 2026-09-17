@@ -125,8 +125,14 @@ void main() {
   test('a distant colony drops to block silhouettes', () {
     // The tiers exist and are ordered; the node family picks between them by
     // range, and a block must be cheaper than a full building.
-    final spec = CityNodes.specOf(bldg());
-    final parcel = CityNodes.parcelOf(bldg());
+    // A building tall enough to HAVE a silhouette to collapse: an r-med on a
+    // 24 m square is ONE box at every tier, and what used to separate its
+    // tiers here was the car park beside it (R7 deleted that, §9). A dense
+    // block on a 12 m lot is a podium and a tower, which is what collapsing
+    // to a silhouette is for.
+    final tall = bldg(type: 'r-high', w: 12, d: 12);
+    final spec = CityNodes.specOf(tall);
+    final parcel = CityNodes.parcelOf(tall);
     const gen = BuildingGenerator();
     final full = gen.generate(spec, parcel).model.solid.triangleCount;
     final block =

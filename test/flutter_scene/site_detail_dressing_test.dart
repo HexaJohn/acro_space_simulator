@@ -673,6 +673,27 @@ void main() {
           CityBuildingLibraries());
     }
 
+    test('an UNSERVED lot keeps its fence and its sign, and lays no paving '
+        '(section 9, R7)', () {
+      // No sites in the columns: every building takes the legacy branch, the
+      // one a building with no plan of its own takes in a real colony. R7
+      // deleted the car park that branch used to draw — the massing's lot,
+      // its drive, its bays, its cars and its footpath — and kept the
+      // boundary: the fence and the sign.
+      final unserved = _byMaterial(tileOf(siteAccess: true, carry: false));
+      // The tile's own groups are its features; the buildings themselves are
+      // instanced. So the facade count here IS the fences and the signs.
+      expect(unserved[CityMaterialKind.facade] ?? 0, greaterThan(0),
+          reason: 'the fence and the sign still stand');
+      // This tile carries no road and no patch, so every road-material
+      // triangle would be lot paving. There is none.
+      expect(unserved[CityMaterialKind.road] ?? 0, 0,
+          reason: 'no car park, no drive, no footpath: the plan owns those');
+      // Not vacuous: the same lots WITH their plans do pave.
+      final served = _byMaterial(tileOf(siteAccess: true, carry: true));
+      expect(served[CityMaterialKind.road] ?? 0, greaterThan(0));
+    });
+
     test('with the knob off a request that carries sites anyway draws the '
         'legacy lot, not the plan\'s dressing', () {
       final bare = _byMaterial(tileOf(siteAccess: false, carry: false));

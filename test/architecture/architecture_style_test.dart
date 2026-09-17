@@ -57,22 +57,6 @@ void main() {
       expect(park.footprint.width, lessThan(ext.width * 0.85));
     });
 
-    test('the car park moves behind the building, not in front of it', () {
-      final wall = massed(ArchitectureStyle.masonryStreet);
-      final park = massed(ArchitectureStyle.utilitarian);
-      // Both must actually have one, or this proves nothing.
-      expect(wall.parking, isNotNull);
-      expect(park.parking, isNotNull);
-      final wallFront =
-          wall.volumes.map((v) => v.y - v.depth / 2).reduce((a, b) => a < b ? a : b);
-      final parkFront =
-          park.volumes.map((v) => v.y - v.depth / 2).reduce((a, b) => a < b ? a : b);
-      expect(wall.parking!.y, greaterThan(wallFront),
-          reason: 'behind the building, off the alley');
-      expect(park.parking!.y, lessThan(parkFront),
-          reason: 'out front, which is exactly the strip-mall look');
-    });
-
     test('a taller ground storey lifts the first floor, not the whole stack',
         () {
       final m = massed(ArchitectureStyle.masonryStreet);
@@ -268,9 +252,6 @@ void main() {
       final corner = const BuildingGenerator()
           .withStyle(ArchitectureStyle.masonryStreet)
           .generate(store, cornerLot());
-      expect(mid.massing.parking, isNull,
-          reason: 'a car park here means this measures its lamps');
-
       Set<String> planes(dynamic mesh) {
         final n = mesh.normals as List<double>;
         return {
