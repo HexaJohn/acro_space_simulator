@@ -79,6 +79,7 @@ import 'infrastructure/flutter/sim_view_control.dart';
 import 'infrastructure/flutter/simulation_view.dart';
 import 'infrastructure/flutter/windows_key_event_workaround.dart';
 import 'infrastructure/flutter_scene/city/city_nodes.dart';
+import 'infrastructure/flutter_scene/scatter/scatter_nodes.dart';
 import 'infrastructure/flutter_scene/perf_knobs.dart';
 import 'infrastructure/flutter_scene/render_backend.dart';
 
@@ -213,7 +214,21 @@ Future<void> main() async {
         // instance, render/instance_packing.dart).
         'instanceUploads': fs.Scene.lastFrameStats.instanceUploads,
         'instanceBytes': fs.Scene.lastFrameStats.instanceUploads * 16 * 4,
+        // Why the pack cache missed; the four sum to packedInstances.
+        'repackFirst': fs.Scene.lastFrameStats.repackFirst,
+        'repackVersion': fs.Scene.lastFrameStats.repackVersion,
+        'repackWinding': fs.Scene.lastFrameStats.repackWinding,
+        'repackWorld': fs.Scene.lastFrameStats.repackWorld,
+        'repackUs': fs.Scene.lastFrameStats.repackUs,
         'materialBinds': fs.Scene.lastFrameStats.materialBinds,
+        'prePassMs': fs.Scene.lastFrameStats.prePassMs,
+        'shadowMs': fs.Scene.lastFrameStats.shadowMs,
+        'colourMs': fs.Scene.lastFrameStats.colourMs,
+        // The stats above are the WHOLE scene, not the city: terrain scatter
+        // instances into the same scene a step before the city does
+        // (scene_sync.dart:328), so its props are in these counters too.
+        'scatter': ScatterNodes.debugLine,
+        'city': CityNodes.debugLine,
       },
     }));
   });

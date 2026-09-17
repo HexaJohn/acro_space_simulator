@@ -88,11 +88,27 @@ PackedInstanceTransforms packedInstancesFor(
       item.packedWorld == item.worldTransform) {
     return cached;
   }
+  // PATCHED (acro_space_simulator, diagnostic): why the cache missed, so a
+  // scene that repacks everything every frame can be told apart from one
+  // whose instances really moved. Attributed in the order the test above
+  // reads them, one reason per miss.
+  final stats = SceneFrameStats.accumulating;
+  if (cached == null) {
+    stats.repackFirst += instances.length;
+  } else if (item.packedVersion != item.instanceVersion) {
+    stats.repackVersion += instances.length;
+  } else if (item.packedWindingFlipped != item.windingFlipped) {
+    stats.repackWinding += instances.length;
+  } else {
+    stats.repackWorld += instances.length;
+  }
+  final sw = Stopwatch()..start();
   final packed = packInstanceTransforms(
     item.worldTransform,
     instances,
     nodeWindingFlipped: item.windingFlipped,
   );
+  stats.repackUs += sw.elapsedMicroseconds;
   item
     ..packedCache = packed
     ..packedVersion = item.instanceVersion

@@ -52,6 +52,20 @@ class SceneFrameStats {
   // once. This is the number that measures the buffer's real traffic —
   // multiply by 64 bytes (16 floats) for the bytes.
   int instanceUploads = 0;
+
+  // PATCHED (acro_space_simulator, diagnostic): [packedInstances] split by
+  // why the per-item pack cache missed — never packed before, the
+  // `InstancedMesh` version moved (the instances themselves changed), the
+  // winding parity flipped, or the node's world transform moved. The four
+  // sum to [packedInstances].
+  int repackFirst = 0;
+  int repackVersion = 0;
+  int repackWinding = 0;
+  int repackWorld = 0;
+
+  /// Wall-clock microseconds spent inside [packInstanceTransforms] this
+  /// frame — the CPU cost the pack cache exists to avoid.
+  int repackUs = 0;
   int materialBinds = 0;
 
   /// Full spatial-structure rebuilds this frame (a refit does not count).
@@ -69,6 +83,11 @@ class SceneFrameStats {
     packedInstances = 0;
     instancesEmplaced = 0;
     instanceUploads = 0;
+    repackFirst = 0;
+    repackVersion = 0;
+    repackWinding = 0;
+    repackWorld = 0;
+    repackUs = 0;
     materialBinds = 0;
     bvhRebuilds = 0;
     prePassMs = 0;
