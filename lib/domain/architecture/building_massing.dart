@@ -29,7 +29,7 @@ import 'architecture_style.dart';
 /// of and a box is not: a refinery is tanks and columns, a power station is
 /// cooling towers and a stack, a mill is sheds under pitched roofs, a wind
 /// farm is towers with rotors on top. Each is still a MassBox — one footprint,
-/// one height — so the plat, the parking rule and the LOD tiers need not know
+/// one height — so the plat, the envelope rule and the LOD tiers need not know
 /// there is anything but boxes.
 enum MassShape {
   box,
@@ -130,9 +130,11 @@ class MassBox {
 /// reaches the massing as the parcel it is handed — the envelope inflated by
 /// the style's own setbacks — so a plan-served massing needs nothing more.
 ///
-/// Plan-served means: no surface car park (the plan owns the parking), the
-/// building FRONT-ALIGNED on the envelope's front edge so the drawn entrance
-/// lands on the plan's door, and the gate lane left clear.
+/// Plan-served means: the building FRONT-ALIGNED on the envelope's front edge
+/// so the drawn entrance lands on the plan's door, the massing clipped to the
+/// envelope, and the gate lane left clear. (Since R7 the plan owns the parking
+/// on EVERY lot, served or not, so being served is no longer what decides
+/// whether a car park is drawn — no massing draws one.)
 class SiteGate {
   const SiteGate({this.xM = 0, this.widthM = 0});
 
@@ -299,9 +301,9 @@ class BuildingMassingRules {
   ///
   /// Pass [gate] for a PLAN-SERVED building (docs/plans/site-access.md §6.2):
   /// [parcel] is then the plan's envelope inflated by this style's setbacks,
-  /// the building is front-aligned on the envelope's front edge, it gets no
-  /// surface car park, and the gate lane is left clear. Without it nothing
-  /// below changes: the legacy massing is byte-identical.
+  /// the building is front-aligned on the envelope's front edge, its volumes
+  /// are clipped back to the envelope, and the gate lane is left clear.
+  /// Without it nothing below changes: the legacy massing is byte-identical.
   BuildingMassing massFor(CityBuildingSpec spec, Parcel parcel,
       {int seed = 0, SiteGate? gate}) {
     final m = _clipToParcel(_massIn(spec, parcel, seed: seed, gate: gate), parcel);
@@ -515,8 +517,8 @@ class BuildingMassingRules {
         material: v.material,
       );
 
-  /// [m] as a PLAN-SERVED massing (§6.2): its car park is the plan's, and its
-  /// entrance is the gate on the envelope's front edge [frontEdge]. Used by
+  /// [m] as a PLAN-SERVED massing (§6.2): its entrance is the gate the plan
+  /// put on the envelope's front edge [frontEdge]. Used by
   /// the massings that centre themselves in their plot — installations,
   /// fields, pits, aprons, the railway's two ends — whose door IS their gate.
   BuildingMassing _planned(
@@ -606,9 +608,9 @@ class BuildingMassingRules {
     //
     // The setbacks come from the style, and they are asymmetric on purpose: a
     // street-wall building stands hard on the front line and keeps its yard at
-    // the back, where the alley and the parking go. Taking the same margin off
-    // both ends is what centred every building in its lot and left a downtown
-    // block looking like a business park.
+    // the back, where the alley and the loading bay go. Taking the same margin
+    // off both ends is what centred every building in its lot and left a
+    // downtown block looking like a business park.
     //
     // Zero side setback does NOT mean building over the property line: the
     // parcel handed in here has already been inset by the density rule in the

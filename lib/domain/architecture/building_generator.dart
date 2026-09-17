@@ -1391,10 +1391,14 @@ class BuildingArchetype {
   /// one is a different mesh, not a different transform.
   final bool corner;
 
-  /// Whether this building draws a surface car park of its own. False for a
-  /// PLAN-SERVED building (docs/plans/site-access.md §6.2): the plan owns its
-  /// parking, and the massing is front-aligned on the envelope instead of
-  /// centred in a strip — a different mesh, so it is part of the key.
+  /// True for a LEGACY-MASSED building, false for a PLAN-SERVED one
+  /// (docs/plans/site-access.md §6.2): the plan-served massing is
+  /// front-aligned on its envelope and clipped to it, where the legacy one is
+  /// centred in its parcel — a different mesh, so it is part of the key.
+  ///
+  /// The name is R7's (§6.2 as built): no archetype draws a car park any more,
+  /// the plan owns the parking on every lot, and renaming a key term would
+  /// move nothing but the diff. Read it as "not plan-served".
   final bool surfaceParking;
 
   /// The plan's gate on the envelope's front edge, quantised

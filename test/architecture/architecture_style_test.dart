@@ -126,8 +126,8 @@ void main() {
       for (var i = 0; i + 2 < n.length; i += 3) {
         normals.add('${n[i].round()},${n[i + 1].round()},${n[i + 2].round()}');
       }
-      // Not an equality: the glazing channel also carries the lamp heads over
-      // the car park, which face up.
+      // Not an equality: the glazing channel carries more than the four wall
+      // planes (a gable's sloped glass, a rooftop plant box's faces).
       expect(normals,
           containsAll(<String>['0,-1,0', '0,1,0', '1,0,0', '-1,0,0']),
           reason: 'a wall lost its openings: $normals');
@@ -240,10 +240,13 @@ void main() {
       // of a block and wrong on a corner: it would put a windowless brick wall
       // on a street.
       //
-      // A warehouse, because it draws NO car park — and the car park's lamp
-      // heads ride the same glazing channel the windows do, with a box's full
-      // set of face normals. Measured on an ordinary spec this test passed
-      // against the lamps rather than against the wall.
+      // A warehouse, because it drew no car park even before R7 deleted the
+      // massing's: the car park's lamp heads rode the same glazing channel the
+      // windows do, with a box's full set of face normals, so measured on an
+      // ordinary spec this test passed against the lamps rather than against
+      // the wall. Now that no massing lights anything the spec no longer has
+      // to be chosen that way, but the case is kept: a big blank-flanked box
+      // is the sharpest probe there is for a party wall that opened.
       final store =
           kUtilCatalog.firstWhere((s) => s.label == 'Warehouse');
       final mid = const BuildingGenerator()
@@ -383,6 +386,20 @@ void main() {
       expect(
           ArchitectureStyle.utilitarian.targetFloors(downtown, 1), 0);
     });
+  });
+
+  test('no kit promises a car park it cannot draw (R7)', () {
+    // `note` is printed verbatim under the style picker in the building studio
+    // (building_studio_screen.dart:516), so it is a promise made to the player
+    // in the UI. Since R7 no massing lays any paving at all — the site access
+    // plan owns every lot's parking, served or not (docs/plans/site-access.md
+    // §6.2 as built) — and a kit that still advertised "parking out front"
+    // would be describing geometry no style can produce.
+    for (final s in ArchitectureStyle.kits) {
+      final note = s.note.toLowerCase();
+      expect(note, isNot(contains('parking')), reason: '${s.id}: ${s.note}');
+      expect(note, isNot(contains('car park')), reason: '${s.id}: ${s.note}');
+    }
   });
 
   test('the kits are distinct and resolvable by id', () {

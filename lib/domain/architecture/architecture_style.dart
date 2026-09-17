@@ -15,10 +15,12 @@
 /// two things that have nothing to do with the building's function:
 ///
 ///   * WHERE IT SITS. A downtown block is continuous because its buildings
-///     stand on the property line and touch their neighbours; the parking is
-///     behind, off an alley. Take the setbacks to zero and a row of ordinary
-///     boxes becomes a street wall — this single change does more for the look
-///     of a city than any amount of facade detail.
+///     stand on the property line and touch their neighbours, keeping their
+///     yard at the back off an alley. Take the setbacks to zero and a row of
+///     ordinary boxes becomes a street wall — this single change does more for
+///     the look of a city than any amount of facade detail. (R7: the plan owns
+///     the parking, so a style says where the BUILDING stands and never where
+///     its cars do.)
 ///   * HOW THE WALL IS DIVIDED. Masonry cities are PUNCHED: piers of brick
 ///     with windows between them, a heavy base, a cornice at the top. Curtain
 ///     wall is RIBBON: continuous glass, no piers. The two never read as each
@@ -134,7 +136,7 @@ class ArchitectureStyle {
   /// runs the full width of its lot and touches its neighbours.
   final double sideSetbackM;
 
-  /// Rear yard — where the alley, the loading bay and the car park live.
+  /// Rear yard — where the alley and the loading bay live.
   final double rearSetbackM;
 
   // ---- Storeys -----------------------------------------------------------
@@ -336,8 +338,10 @@ class ArchitectureStyle {
     ],
   );
 
-  /// What the generator did before styles existed: a freestanding box in the
-  /// middle of its lot with continuous glazing and its car park out front.
+  /// What the generator did before styles existed: a freestanding box set well
+  /// back from the street, with continuous glazing and open land in front of
+  /// it. (That land was the box's own car park until R7; the site plan draws
+  /// what stands on it now.)
   ///
   /// Kept, and kept as the DEFAULT, for two reasons. It is genuinely the right
   /// idiom for an office park, a retail box or a works — and it is the
@@ -346,7 +350,7 @@ class ArchitectureStyle {
   static const utilitarian = ArchitectureStyle(
     id: 'utilitarian',
     label: 'Utilitarian setback',
-    note: 'Freestanding box, ribbon glazing, parking out front. Office park, '
+    note: 'Freestanding box, ribbon glazing, deep front setback. Office park, '
         'retail shed, works.',
     materials: [FacadeMaterial.precast],
   );
