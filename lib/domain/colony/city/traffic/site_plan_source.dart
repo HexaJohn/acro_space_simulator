@@ -48,6 +48,19 @@ abstract interface class SitePlanSource {
   /// not queued for a check. A site that is not current reads kerbside at
   /// [g]'s slot 0 for new arrivals (§0 Q5).
   bool isCurrentFor(String siteId, RoadGraph g);
+
+  /// Whether the source has nothing left to plan: every site it knows of has
+  /// the plan it is going to have, so a site with no plan NOW has none
+  /// coming (site-access §4.1: the book's sync is resumable and budgeted, and
+  /// says so when it finishes).
+  ///
+  /// The load reads it and nothing else does (§14.1 as built). A saved car
+  /// whose lot has not been synced yet is held rather than garaged, and this
+  /// is what says the waiting is over: false while a re-plan backlog is still
+  /// in flight, true the moment the backlog drains. A source that can never
+  /// say true is not wrong, only slower — the load's own hold
+  /// ([kRestoreHoldS]) bounds it either way.
+  bool get plansComplete;
 }
 
 /// The colony's [SiteAccessBook] as a [SitePlanSource]: every read goes
@@ -75,4 +88,11 @@ final class BookPlanSource implements SitePlanSource {
   @override
   bool isCurrentFor(String siteId, RoadGraph g) =>
       book.isCurrentFor(siteId, g);
+
+  /// What the book's last sync reported (`SiteAccessSyncStats.complete`: an
+  /// empty queue, no walk, no re-walk and no sweep left). A book that has
+  /// never synced reports false, which is the safe answer — it has not said
+  /// it is finished.
+  @override
+  bool get plansComplete => book.lastSync.complete;
 }

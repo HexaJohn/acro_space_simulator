@@ -109,6 +109,12 @@ class FixturePlanSource implements SitePlanSource {
       !_stale.contains(siteId) &&
       g.structureStamp == graph.structureStamp;
 
+  /// The templates are put on their lots by the test, all at once: there is
+  /// never a plan on its way. [plansComplete] is settable so a test can say
+  /// otherwise — a source with a backlog still in flight.
+  @override
+  bool plansComplete = true;
+
   /// Puts [template] on lot [lotId] — a new site, another template, or null
   /// to clear it — and moves [sitesRev] and the chunk identity with it, as
   /// a book's re-plan does. A template that is already there changes

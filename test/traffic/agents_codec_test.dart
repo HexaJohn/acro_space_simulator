@@ -253,6 +253,80 @@ void main() {
       expect(kerbside.placed, contains('garage -1 building 200 owner 5'));
     });
 
+    test('a lot whose row has not arrived is HELD, and the retry puts its '
+        'car on its own key', () {
+      // The defect this pins: a site the colony has not synced yet answers
+      // −1 to `rowOfSite` exactly as a kerbside one does, and a load was one
+      // pass — so a lot car whose plans were still in flight was garaged for
+      // good. Now the codec offers it to the world first.
+      final (cars, world) = parked();
+      final saved = AgentsCodec.decode(
+          jsonDecode(jsonEncode(AgentsCodec.encode(
+              enabled: true, cars: cars, world: world))))!;
+
+      // Pass 1: lot-b's row is not there yet, and the world is still
+      // planning. Its LOT car waits; its GARAGED car does not, because a
+      // garaged car is garaged whenever it is asked.
+      final late = _World(sites: const ['lot-a'])
+        ..keys[0] = {555: 2}
+        ..lotless.add('lot-b')
+        ..holding = true;
+      expect(late.restore(saved), (lot: 1, kerb: 1, garaged: 1, dropped: 0));
+      expect(late.held, hasLength(1), reason: 'the one lot car of lot-b');
+      expect(late.placed, hasLength(3),
+          reason: 'the held car is placed nowhere at all, not garaged');
+
+      // Pass 2: lot-b arrived, with its key. The retry walks only the rows
+      // that waited, and puts the car on the very stall it was saved on.
+      final rows = Int32List.fromList(late.held);
+      final now = _World(sites: const ['lot-a', 'lot-b'])
+        ..keys[0] = {555: 2}
+        ..keys[1] = {777: 0};
+      expect(now.restore(saved, rows: rows, count: rows.length),
+          (lot: 1, kerb: 0, garaged: 0, dropped: 0),
+          reason: 'the retry touches the held rows and nothing else');
+      expect(now.placed, ['lot 1 stall 0 owner 5 variant 3']);
+    });
+
+    test('a held row is written back out, so a save-load-save keeps it', () {
+      final (cars, world) = parked();
+      final block = AgentsCodec.encode(enabled: true, cars: cars, world: world);
+      final saved = AgentsCodec.decode(jsonDecode(jsonEncode(block)))!;
+
+      // A colony that placed NOTHING — the load before its first advance —
+      // writes the block it is holding back out, byte for byte.
+      expect(jsonEncode(AgentsCodec.encode(enabled: true, held: saved)),
+          jsonEncode(block));
+
+      // And a colony that placed all but lot-b's lot car writes that row out
+      // beside the three it has: the same four rows, the same two sites.
+      final part = ParkedCarTable(capacity: 16);
+      final pw = _World(sites: const ['lot-a', 'lot-b']);
+      for (var i = 0; i < saved.cars.count; i++) {
+        if (saved.cars.where[i] == CarWhere.lot.index &&
+            saved.cars.stallKey[i] == 777) {
+          continue;
+        }
+        _rebuild(part, pw, saved, i);
+      }
+      final held = Int32List(1);
+      for (var i = 0; i < saved.cars.count; i++) {
+        if (saved.cars.where[i] == CarWhere.lot.index &&
+            saved.cars.stallKey[i] == 777) {
+          held[0] = i;
+        }
+      }
+      expect(
+          jsonEncode(AgentsCodec.encode(
+              enabled: true,
+              cars: part,
+              world: pw,
+              held: saved,
+              heldRows: held,
+              heldCount: 1)),
+          jsonEncode(block));
+    });
+
     test('a v1 save still loads, with no cars', () {
       final saved = AgentsCodec.decode({'v': 1, 'enabled': true})!;
       expect(saved.version, 1);
@@ -344,6 +418,49 @@ void main() {
   });
 }
 
+/// Saved row [i] of [saved] made a live car of [cars] again, with [world]
+/// told which site it belongs to and where a kerb car of it stands: the state
+/// a colony that PLACED that row holds, so what it writes next can be
+/// compared with what it read.
+void _rebuild(
+    ParkedCarTable cars, _World world, SavedAgents saved, int i) {
+  final c = saved.cars;
+  final s = c.site[i];
+  final ownerKind = CarOwnerKind.values[c.ownerKind[i]];
+  final int car;
+  switch (CarWhere.values[c.where[i]]) {
+    case CarWhere.lot:
+      car = cars.parkLot(
+          building: 1,
+          row: 0,
+          stall: 0,
+          stallKey: c.stallKey[i],
+          ownerKind: ownerKind,
+          owner: c.owner[i],
+          kind: c.kind[i],
+          variant: c.variant[i]);
+    case CarWhere.kerb:
+      car = cars.parkKerb(
+          building: 1,
+          edge: 4,
+          slot: 9,
+          side: 1,
+          ownerKind: ownerKind,
+          owner: c.owner[i],
+          kind: c.kind[i],
+          variant: c.variant[i]);
+      world.pose[car] = (c.e[i], c.n[i], c.heading[i]);
+    case CarWhere.garaged:
+      car = cars.garage(
+          building: 2,
+          ownerKind: ownerKind,
+          owner: c.owner[i],
+          kind: c.kind[i],
+          variant: c.variant[i]);
+  }
+  if (s >= 0) world.carSite[car] = saved.sites[s];
+}
+
 /// The colony a save is written from and read back into: which site each car
 /// belongs to, where a kerb car stood, and what the site table answers about
 /// stalls once the plans have been drained again.
@@ -370,6 +487,14 @@ class _World implements CarSaveSource, CarRestoreSink {
   /// Whether a saved kerb car can still be snapped to a slot.
   bool kerbSnaps = true;
 
+  /// Whether this colony's plans are still arriving, so a lot car whose site
+  /// has no row is HELD rather than garaged (§14.1 as built). A settled
+  /// colony — every test above — holds nothing.
+  bool holding = false;
+
+  /// The rows [holdForSite] took, in the order the codec offered them.
+  final List<int> held = [];
+
   /// What was put back, in the order the codec put it.
   final List<String> placed = [];
 
@@ -377,10 +502,11 @@ class _World implements CarSaveSource, CarRestoreSink {
   SavedCars? cars;
 
   /// [saved] put back into this colony: the codec names cars by their row in
-  /// the block it decoded, so the world reads their columns from it.
-  RestoreTally restore(SavedAgents saved) {
+  /// the block it decoded, so the world reads their columns from it. [rows]
+  /// is a retry over the rows a previous pass held, [count] of them.
+  RestoreTally restore(SavedAgents saved, {Int32List? rows, int count = 0}) {
     cars = saved.cars;
-    return AgentsCodec.restoreCars(saved, this);
+    return AgentsCodec.restoreCars(saved, this, rows: rows, count: count);
   }
 
   @override
@@ -430,6 +556,13 @@ class _World implements CarSaveSource, CarRestoreSink {
   @override
   void garage(int car, int row, int building) =>
       placed.add('garage $row building $building owner ${_owner(car)}');
+
+  @override
+  bool holdForSite(int car, int building) {
+    if (!holding) return false;
+    held.add(car);
+    return true;
+  }
 
   int _owner(int car) => cars!.owner[car];
 

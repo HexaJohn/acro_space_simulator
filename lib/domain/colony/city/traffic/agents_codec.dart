@@ -29,6 +29,18 @@
 /// 3. a lot with no free stall garages the car, and so does a kerb the car
 ///    can no longer be snapped to.
 ///
+/// **A lot that has not arrived yet is not a lot that is gone.** Step 1 above
+/// reads a site the plan source has not planned YET exactly as it reads one
+/// that is kerbside for good, and a load is one pass over the rows: whatever
+/// the colony had not synced by that instant was garaged, silently, with no
+/// second chance. The book plans on a budget (site-access §4.1, §7.6), so a
+/// colony that loads with a re-plan backlog in flight lost lot cars. So the
+/// restore ASKS, through [CarRestoreSink.holdForSite], whether the world will
+/// hold the car and try again when its site arrives; only a world that says
+/// no resolves it by step 1. The retries come back through [restoreCars] with
+/// [restoreCars.rows], the rows still waiting, so the order and the answers
+/// are the same ones a single pass would have given.
+///
 /// **The version.** The block carries its own `v`, and it says the LOWEST
 /// version that can read it back: 1 while it is the flag alone, 2 once it
 /// carries the site and car tables (§14.4 additive). So a colony that has
@@ -97,6 +109,17 @@ abstract interface class CarRestoreSink {
   /// at a building is still that building's, and is handed back when its
   /// owner drives.
   void garage(int car, int row, int building);
+
+  /// Offers saved lot car [car] — whose [building] is standing and whose lot
+  /// has no row — to the world to HOLD until its site arrives: true when the
+  /// world took it, and the codec leaves it alone.
+  ///
+  /// Only the world can answer this. The codec sees a site with no row and
+  /// cannot tell a lot the plans have not reached yet from one that is
+  /// kerbside for good; the world knows whether its plan source still has
+  /// work to do, and how long it is willing to wait. False puts the car back
+  /// on §14.1's order, which garages it at [building].
+  bool holdForSite(int car, int building);
 }
 
 /// The parked cars of a save, decoded: the columns of the `cars` table, with
@@ -172,24 +195,44 @@ class AgentsCodec {
   static const double headingScale = 1000;
 
   /// The block for a colony whose agents are [enabled], with the parked
-  /// [cars] of [world].
+  /// [cars] of [world] and whatever rows of an earlier load it is still
+  /// [held]ing.
   ///
   /// [cars] and [world] go together: without a world the codec cannot name a
   /// car's site or a kerb car's pose, so it writes the flag alone — which is
   /// also what a colony that has parked nothing writes.
+  ///
+  /// [held] is a block a load has not finished putting down: one waiting for
+  /// its first advance, or the rows still waiting for their sites (see the
+  /// library comment). [heldRows] names which of its rows are still waiting,
+  /// [heldCount] of them; null means every row of it. They are written back
+  /// out exactly as they came in, so a save taken while a load is still
+  /// settling loses nothing — a save, a load and a save again is the same
+  /// bytes, whatever the colony had managed to place in between.
   ///
   /// Rows are written in a total order of their own numbers, not in slot
   /// order: a colony resumed from a save re-creates its cars in another slot
   /// order, and saving it again must write the same bytes (the fidelity
   /// graft, §14.1).
   static Map<String, Object?> encode(
-      {required bool enabled, ParkedCarTable? cars, CarSaveSource? world}) {
+      {required bool enabled,
+      ParkedCarTable? cars,
+      CarSaveSource? world,
+      SavedAgents? held,
+      Int32List? heldRows,
+      int heldCount = 0}) {
     final rows = <List<num>>[];
     final ids = <String>[];
+    final byId = <String, int>{};
     if (cars != null && world != null) {
-      _writeCars(cars, world, rows, ids);
+      _writeCars(cars, world, rows, ids, byId);
+    }
+    if (held != null) {
+      _writeHeld(held, heldRows, heldCount, rows, ids, byId);
     }
     if (rows.isEmpty) return {'v': oldestVersion, 'enabled': enabled};
+    _sortIds(rows, ids);
+    rows.sort(_compareRows);
     return {
       'v': version,
       'enabled': enabled,
@@ -230,13 +273,22 @@ class AgentsCodec {
         version: v, enabled: enabled, sites: sites, cars: cars);
   }
 
-  /// Puts every car of [saved] back into [sink], in §14.1's order: the key,
+  /// Puts the cars of [saved] back into [sink], in §14.1's order: the key,
   /// then the nearest free stall, then the garage; and an unknown site drops
-  /// its cars.
-  static RestoreTally restoreCars(SavedAgents saved, CarRestoreSink sink) {
+  /// its cars. A lot car whose site has no row yet is offered to
+  /// [CarRestoreSink.holdForSite] first, and counted in none of the four
+  /// while the sink holds it.
+  ///
+  /// [rows] names which rows to put back, [count] of them — the rows a
+  /// previous pass held, retried now that their sites may have arrived.
+  /// Null is every row, which is what a load's first pass asks for.
+  static RestoreTally restoreCars(SavedAgents saved, CarRestoreSink sink,
+      {Int32List? rows, int count = 0}) {
     final cars = saved.cars;
+    final n = rows == null ? cars.count : count;
     var lot = 0, kerb = 0, garaged = 0, dropped = 0;
-    for (var i = 0; i < cars.count; i++) {
+    for (var k = 0; k < n; k++) {
+      final i = rows == null ? k : rows[k];
       final s = cars.site[i];
       final id = s < 0 ? null : saved.sites[s];
       final row = id == null ? -1 : sink.rowOfSite(id);
@@ -255,6 +307,12 @@ class AgentsCodec {
       }
       switch (CarWhere.values[cars.where[i]]) {
         case CarWhere.lot:
+          // A lot with no row is the one case worth waiting on: the site may
+          // be one the plans have not reached yet, and garaging the car here
+          // would be for ever. Only a car that stood on a STALL waits — a
+          // kerb car hangs on no site row, and a garaged car is garaged
+          // whenever it is asked, so neither gains anything by waiting.
+          if (row < 0 && sink.holdForSite(i, building)) continue;
           var stall = row < 0 ? -1 : sink.stallOfKey(row, cars.stallKey[i]);
           if (stall < 0 && row >= 0) {
             stall = sink.nearestFreeStall(row, cars.stallKey[i]);
@@ -282,7 +340,8 @@ class AgentsCodec {
   }
 
   /// Every live car of [cars] as a row of [rows], with the site ids they
-  /// name collected into [ids], sorted (§14.1).
+  /// name collected into [ids] (interned through [byId]); [encode] sorts
+  /// both afterwards (§14.1).
   ///
   /// A lot row is `[ownerKind, ownerIdx, where, siteIdx, stallKey, kind,
   /// variant]` and a kerb row `[ownerKind, ownerIdx, where, e, n,
@@ -290,8 +349,7 @@ class AgentsCodec {
   /// takes the lot row with no stall key, so it keeps the site it belongs
   /// to and comes back there when its owner drives again.
   static void _writeCars(ParkedCarTable cars, CarSaveSource world,
-      List<List<num>> rows, List<String> ids) {
-    final byId = <String, int>{};
+      List<List<num>> rows, List<String> ids, Map<String, int> byId) {
     final pose = Float64List(3);
     for (var i = 0; i < cars.pool.highWater; i++) {
       if (!cars.pool.isSlotLive(i)) continue;
@@ -313,15 +371,6 @@ class AgentsCodec {
         continue;
       }
       final id = world.siteIdOf(car);
-      var site = -1;
-      if (id != null) {
-        site = byId[id] ?? -1;
-        if (site < 0) {
-          site = ids.length;
-          ids.add(id);
-          byId[id] = site;
-        }
-      }
       // A kerb car with no pose left cannot be put back at a kerb: it is
       // saved garaged at the site it belongs to.
       final lot = w == CarWhere.lot;
@@ -329,14 +378,67 @@ class AgentsCodec {
         ownerKind,
         owner,
         lot ? CarWhere.lot.index : CarWhere.garaged.index,
-        site,
+        id == null ? -1 : _intern(id, ids, byId),
         lot ? cars.stallKey[i] : -1,
         kind,
         variant,
       ]);
     }
-    _sortIds(rows, ids);
-    rows.sort(_compareRows);
+  }
+
+  /// The rows of [held] a load has not put down, written back out into
+  /// [rows] with their site ids interned into [ids]: [rowsOf] names which of
+  /// them, [count] of them, and null means all of them.
+  ///
+  /// The columns go out exactly as they came in — the same `where`, the same
+  /// `stallKey`, the same pose — because they ARE what the earlier save
+  /// wrote. Nothing is re-derived from the colony: the whole point of a held
+  /// row is that the colony cannot say where it belongs yet (§14.1 as built).
+  static void _writeHeld(SavedAgents held, Int32List? rowsOf, int count,
+      List<List<num>> rows, List<String> ids, Map<String, int> byId) {
+    final cars = held.cars;
+    final n = rowsOf == null ? cars.count : count;
+    for (var k = 0; k < n; k++) {
+      final i = rowsOf == null ? k : rowsOf[k];
+      if (i < 0 || i >= cars.count) continue;
+      if (CarWhere.values[cars.where[i]] == CarWhere.kerb) {
+        rows.add([
+          cars.ownerKind[i],
+          cars.owner[i],
+          CarWhere.kerb.index,
+          cars.e[i],
+          cars.n[i],
+          (cars.heading[i] * headingScale).round(),
+          cars.kind[i],
+          cars.variant[i],
+        ]);
+        continue;
+      }
+      final s = cars.site[i];
+      rows.add([
+        cars.ownerKind[i],
+        cars.owner[i],
+        cars.where[i],
+        s < 0 || s >= held.sites.length
+            ? -1
+            : _intern(held.sites[s], ids, byId),
+        cars.stallKey[i],
+        cars.kind[i],
+        cars.variant[i],
+      ]);
+    }
+  }
+
+  /// [id]'s index in [ids], appended if it is new. [byId] is the lookup that
+  /// keeps the append linear; [encode] sorts [ids] afterwards and moves every
+  /// row's index with them.
+  static int _intern(String id, List<String> ids, Map<String, int> byId) {
+    final at = byId[id] ?? -1;
+    if (at >= 0) return at;
+    final made = ids.length;
+    ids.add(id);
+    byId[id] = made;
+    return made;
   }
 
   /// [ids] sorted, with every row's site index moved with them: the string

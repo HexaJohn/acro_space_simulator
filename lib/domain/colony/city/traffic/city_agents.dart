@@ -122,6 +122,22 @@ const double kSiteRetargetM = 1.5;
 const double kKerbSnapM = 12;
 const double kKerbSnapCos = 0.7071067811865476;
 
+/// How long a load holds a saved lot car whose site has not been synced yet
+/// before it gives up and resolves it as a site that is gone resolves —
+/// garaged at its building, dropped without one (§14.1 as built).
+///
+/// Agent seconds, and the BACKSTOP only: the hold normally ends the moment
+/// the plan source says it has nothing left to plan
+/// ([SitePlanSource.plansComplete]), which on a colony loaded through
+/// `CitySim.fromJson` is its very first prime. This bounds the case where
+/// nothing ever says so. Five agent minutes — over twice the ~260 ticks a
+/// road edit leaves a 127k-site colony re-planning for (site-access §7.6 as
+/// built), and the same five minutes a home back-out waits before it gives
+/// up (`backOutGiveUpS`). A car is never pending for longer, and never
+/// pending across a second save: [CityAgents.toJson] writes what is still
+/// held back out.
+const double kRestoreHoldS = 300;
+
 /// Salts of the RNG's sub-streams: each subsystem draws from its own, so a
 /// draw added to one never shifts another's.
 const int _demandSalt = 0x44454D41; // 'DEMA'
@@ -499,11 +515,28 @@ class CityAgents {
   /// it is taken, and running a tick half way through `CitySim.toJson` would
   /// move the colony under the fields already written. A host that holds
   /// ticks calls [flushHeld] before it saves (§5.7).
+  ///
+  /// A load that has not finished settling is written out whole (§14.1 as
+  /// built): the block [restore] is still holding, before the first advance
+  /// puts it down, and the rows that advance could not place yet because
+  /// their sites had not been synced. Either way a save, a load and a save
+  /// again carry the same cars — a colony caught mid-restore never writes a
+  /// save with fewer cars in it than the one it was loaded from.
   Map<String, Object?> toJson() {
     final core = _core;
+    final held = _saved;
+    if (held != null) {
+      return AgentsCodec.encode(
+          enabled: _enabled, cars: core?.parked, world: core, held: held);
+    }
     if (core == null) return AgentsCodec.encode(enabled: _enabled);
     return AgentsCodec.encode(
-        enabled: _enabled, cars: core.parked, world: core);
+        enabled: _enabled,
+        cars: core.parked,
+        world: core,
+        held: core.pendingBlock,
+        heldRows: core.pendingRows,
+        heldCount: core.pendingCount);
   }
 
   /// Restores the save block [json] (E16), after the colony itself is
@@ -514,9 +547,15 @@ class CityAgents {
     final saved = AgentsCodec.decode(json);
     enabled = saved?.enabled ?? false;
     _saved = enabled && saved != null && saved.cars.count > 0 ? saved : null;
+    // A second load over a colony whose first one had not settled: the rows
+    // still waiting belong to the save that is being replaced, so they go
+    // with it rather than being placed into the new colony's sites.
+    _core?.dropPending();
   }
 
-  /// The cars a load is still holding, taken once: `null` after.
+  /// The cars a load is still holding, taken once: `null` after. What the
+  /// first advance cannot place yet it holds itself, by row, and retries as
+  /// its sites arrive (§14.1 as built).
   SavedAgents? takeSaved() {
     final s = _saved;
     _saved = null;
@@ -784,6 +823,23 @@ class _Core
   /// columns; null outside a restore.
   SavedAgents? _restoring;
 
+  /// The load this colony is still settling (§14.1 as built): the block whose
+  /// rows are not all down, the rows of it still waiting for their sites, and
+  /// the spare buffer a retry reads from while [_pending] is written.
+  ///
+  /// Null when nothing waits, which is every colony that was not loaded and
+  /// every loaded one whose sites were all there at its first prime.
+  SavedAgents? _pendingSaved;
+  Int32List _pending = Int32List(0);
+  Int32List _pendingSpare = Int32List(0);
+  int _pendingCount = 0;
+
+  /// The agent time the hold runs out at, µs ([kRestoreHoldS] past the prime
+  /// that took the load), and whether this pass may still hold — read once
+  /// per pass so every row of it is answered the same way.
+  int _pendingUntilUs = 0;
+  bool _mayHold = false;
+
   /// Scratch: the two points a kerb pose is read from, and the pose itself.
   /// Nothing here is re-entered, so one of each is enough (§15.2).
   final Float64List _pt = Float64List(8);
@@ -845,14 +901,23 @@ class _Core
     _ensureCols();
     _poll();
     if (_buildingsMoved()) _syncBuildings();
-    if (sites.needsSync(agents.plans, lg)) _syncSites();
+    final synced = sites.needsSync(agents.plans, lg);
+    if (synced) _syncSites();
     // The cars a load is holding go down once there are rows to put them on,
     // and not before: taken only when there is a network to place them on,
     // so a colony primed without one keeps them for the advance that has one.
-    if (lg != null) {
-      final saved = agents.takeSaved();
-      if (saved != null) _placeSavedCars(saved);
+    if (lg == null) return;
+    final saved = agents.takeSaved();
+    if (saved != null) {
+      _placeSavedCars(saved);
+      return;
     }
+    // What that pass could not place waits for its sites, and is tried again
+    // when the site table SYNCS — a `sitesRev` move or a new row, never a
+    // timer (§14.1 as built). The one thing a clock decides is when to stop
+    // waiting, and that is asked whether or not anything synced, so a colony
+    // whose plans never move again still resolves its held cars.
+    if (_pendingSaved != null && (synced || !_holdOpen)) _retrySavedCars();
   }
 
   /// A test put other plans in front of the book ([CityAgents.debugPlans]):
@@ -2145,11 +2210,79 @@ class _Core
 
   // ---- The load (§14.1's order) -----------------------------------------------
 
+  /// The block a load is still settling, and the rows of it still waiting:
+  /// what [CityAgents.toJson] writes back out beside the cars that are down.
+  SavedAgents? get pendingBlock => _pendingSaved;
+  Int32List get pendingRows => _pending;
+  int get pendingCount => _pendingCount;
+
+  /// Whether a car whose lot has no row may still wait for one (§14.1 as
+  /// built). Not once the plan source has nothing left to plan — a site with
+  /// no row then has none coming — and not past [kRestoreHoldS] of agent
+  /// time, whatever the source says.
+  bool get _holdOpen =>
+      clock.timeUs < _pendingUntilUs && !agents.plans.plansComplete;
+
+  /// A second load over the first: the rows still waiting belong to the save
+  /// that is being replaced (see [CityAgents.restore]).
+  void dropPending() {
+    _pendingSaved = null;
+    _pendingCount = 0;
+  }
+
+  /// The first pass of a load, over every row of [saved].
   void _placeSavedCars(SavedAgents saved) {
+    _pendingUntilUs = clock.timeUs + usOf(kRestoreHoldS);
+    _restoreRows(saved, null, 0);
+  }
+
+  /// Another pass over the rows still waiting, now that their sites may have
+  /// arrived. The list is READ from the buffer the last pass wrote and
+  /// written into the other one, so a row that is still waiting is simply
+  /// held again; nothing is allocated unless the set grew.
+  void _retrySavedCars() {
+    final saved = _pendingSaved;
+    if (saved == null) return;
+    final was = _pending, n = _pendingCount;
+    _pending = _pendingSpare;
+    _pendingSpare = was;
+    _restoreRows(saved, was, n);
+  }
+
+  /// One restore pass: [rows] of [saved] ([count] of them, null for all) put
+  /// back by the codec's order, with what cannot be placed yet held.
+  void _restoreRows(SavedAgents saved, Int32List? rows, int count) {
+    // Read once, so every row of one pass is answered the same way and the
+    // pass that gives up gives up on all of them together.
+    _mayHold = _holdOpen;
     _restoring = saved;
-    AgentsCodec.restoreCars(saved, this);
+    _pendingCount = 0;
+    final tally =
+        AgentsCodec.restoreCars(saved, this, rows: rows, count: count);
+    siteStats.restoreDropped += tally.dropped;
     _restoring = null;
+    _pendingSaved = _pendingCount > 0 ? saved : null;
     if (parked.count > 0) _siteState = true;
+  }
+
+  @override
+  bool holdForSite(int car, int building) {
+    // Called for a saved lot car whose site is standing and has no row. It
+    // waits while the plans may still bring one; past that it is garaged at
+    // its building by §14.1's own order, which is what this build did to
+    // every one of them, once, at the first prime.
+    if (!_mayHold) {
+      if (_pendingSaved != null) siteStats.restoreGaveUp++;
+      return false;
+    }
+    if (_pendingSaved == null) siteStats.restoreHeld++;
+    if (_pendingCount >= _pending.length) {
+      final n = _pending.isEmpty ? 16 : _pending.length * 2;
+      _pending = Int32List(n)..setRange(0, _pendingCount, _pending);
+    }
+    _pending[_pendingCount] = car;
+    _pendingCount++;
+    return true;
   }
 
   @override
@@ -2263,6 +2396,8 @@ class _Core
     into['core.kerbFor'] = _kerbFor;
     into['core.gaveUp'] = _gaveUp;
     into['core.siteReplan'] = _siteReplan;
+    into['core.pending'] = _pending;
+    into['core.pendingSpare'] = _pendingSpare;
   }
 
   // ---- Development hooks ------------------------------------------------------

@@ -45,6 +45,7 @@ abstract interface class SitePlanSource {
   SiteAccessPlan? planOf(String siteId);         // sync only (allocates a view)
   int slotOf(String siteId);                     // the wire ordinal (settled)
   bool isCurrentFor(String siteId, RoadGraph g);
+  bool get plansComplete;                        // the load's hold only (§14.1)
 }
 final class BookPlanSource implements SitePlanSource { BookPlanSource(SiteAccessBook book); }
 ```

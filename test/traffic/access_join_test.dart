@@ -528,4 +528,8 @@ class _Drafted implements SitePlanSource {
   bool isCurrentFor(String siteId, RoadGraph g) =>
       _chunks[0].siteOf(siteId) >= 0 &&
       g.structureStamp == graph.structureStamp;
+
+  /// One chunk, built in the constructor: nothing is on its way.
+  @override
+  bool get plansComplete => true;
 }

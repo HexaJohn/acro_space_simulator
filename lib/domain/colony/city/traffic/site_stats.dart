@@ -59,6 +59,17 @@ class SiteStats {
   /// silently in `backOutWait`.
   int backOutGiveUps = 0;
 
+  /// The load (§14.1 as built): saved lot cars held back because their site
+  /// had no row yet, held cars the hold ran out on — garaged at their
+  /// building then, as a site that is gone garages them — and saved cars
+  /// dropped because the colony has no building of that site at all.
+  ///
+  /// A quiet load reads 0, 0, 0. `restoreHeld > 0` with `restoreGaveUp == 0`
+  /// is a colony that loaded with a re-plan backlog and caught every car up;
+  /// the other two are the shapes worth looking at, because a car counted
+  /// there is off the stall it was saved on for good.
+  int restoreHeld = 0, restoreGaveUp = 0, restoreDropped = 0;
+
   /// Forward-out departures given up at a throat after `throatStuckAfterS`
   /// of grace and then `stuckDespawnS` of stuck time: the car back on a
   /// stall of its site and its owner's leg asked for again (§5.6). `canJoin`
@@ -86,6 +97,9 @@ class SiteStats {
     x = fnv1aU32(x, siteRetargets);
     x = fnv1aU32(x, backOutForced);
     x = fnv1aU32(x, shuffles);
+    x = fnv1aU32(x, restoreHeld);
+    x = fnv1aU32(x, restoreGaveUp);
+    x = fnv1aU32(x, restoreDropped);
     x = fnv1aU32(x, backOutGiveUps);
     x = fnv1aU32(x, throatGiveUps);
     return x;
