@@ -2152,6 +2152,11 @@ A vehicle on a connector is lerped along the connector's 8 Bézier points by `s/
   - Per slot, the pass keeps `hw = max(hw, roundUp(count, 64))` and pads the buffer with zero-scale matrices.
   - The count only grows, so the in-place `setInstanceTransform` path is taken (as `_setInstances` does at 2217-2225). Agents coming and going never trigger `clearInstances()`.
   - `hw` resets when the slots are dropped.
+- **Uploads only what moved.** Every instanced draw in the process emplaces its matrices into ONE shared `gpu.HostBuffer` (`instance_packing.dart`, reset once a frame), and the engine repacks a render item whenever its `InstancedMesh.version` moves — which `setInstanceTransform` does on every call. So a batch is written into its mesh only when its poses were actually rewritten:
+  - Each batch (`AgentDrawBatch`, `SiteCarBatches`) carries a `rev`, bumped by its `finish`; each slot remembers the buffer and `rev` it last uploaded and skips the write when neither moved.
+  - `AgentTrafficPass.place` returns without placing when nothing that decides a pose moved: the same `AgentFrame` sample, the same geometry, a render clock that did not run (a paused host, or a sub-step already run out with no new sample), the same anchor, focus and knobs. A paused colony then costs the shared buffer nothing at all.
+  - `SiteCarPass` (the site and parked cars, §7.4) gates on the columns' identity, which the capture keeps across frames (§13.1, §13.2): the parked half — hundreds of instances — is written only when a car comes or goes.
+  - Counted per frame as `phaseCount['agent.instances']` (what the draws hold) against `phaseCount['agent.written']` (what was written into a mesh).
 - **Caps.** `agentRenderCap` (a static knob, default 1500) and `agentRangeM` 3500. Pedestrians and parked cars have their own caps (§7.4, §8.4).
 - **`_syncAgentExtras`** runs after `_syncRoadOverlay` (1214): signal heads, pedestrians, parked cars, traffic overlays.
 - **Baked parked cars** are switched off before the first frame (E26 plus E36, §7.4).

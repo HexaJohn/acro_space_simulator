@@ -27,11 +27,17 @@
 ///   client at the same focus, and the cap spent where the camera is.
 /// - As what. The domain publishes an `AgentKind` and an opaque variant
 ///   byte (D42); the model is chosen here ([agentVehicleKind]).
+/// - Off the road. A car inside a lot is on no road element, so
+///   [SiteCarPass] places it — and the cars parked on the stalls — off the
+///   frame's own site columns instead (site-access.md §7.4).
 library;
 
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:vector_math/vector_math.dart' as vm;
+
+import '../../../application/snapshot/city_site_frame.dart';
 import '../../../application/snapshot/city_traffic_frame.dart';
 import '../../../domain/colony/city/road_elevation.dart';
 import '../../../domain/colony/city/traffic/agent_frame.dart';
@@ -195,12 +201,20 @@ class AgentDrawBatch {
   /// its instances are moved in place rather than cleared and re-added.
   int highWater = 0;
 
+  /// Moves whenever these matrices were rewritten. The draw that reads them
+  /// uploads only when it moved (§13.8), because the engine's instance
+  /// buffer is PROCESS-WIDE: every upload emplaces into the one host buffer
+  /// the whole frame shares, and re-emplacing matrices nothing moved is
+  /// churn every other draw in the process pays for.
+  int rev = 0;
+
   void _begin() {
     poses.reset();
     live = 0;
   }
 
   void _finish() {
+    rev++;
     live = poses.count;
     if (live == 0) return;
     final want = (live + bucket - 1) ~/ bucket * bucket;
@@ -671,28 +685,75 @@ class AgentTrafficPass {
     for (final b in _batches) {
       b?.resetHighWater();
     }
+    // The marks went with the draws, so the batches' padding no longer
+    // stands for anything: the next frame must place afresh rather than be
+    // told it already has.
+    _fromAgents = null;
   }
+
+  /// What the batches, as they stand, were placed from (§13.8): the sample,
+  /// the geometry, the clock's reading, the frame's anchor and focus, and
+  /// the knobs that pick a vehicle and band it. Nothing else decides a
+  /// pose, so a frame carrying all of them again would write the very
+  /// matrices that are already there.
+  AgentFrame? _fromAgents;
+  TrafficGeometry? _fromGeometry;
+  Vector3? _fromAnchor;
+  Vector3? _fromFocus;
+  double _fromRenderT = double.nan;
+  double _fromRange = double.nan, _fromShadow = double.nan;
+  int _fromCap = -1;
+
+  /// Whether the batches already hold what this frame would place. The
+  /// first placement's [_fromRenderT] is a NaN, which equals nothing, so
+  /// there is no flag to get wrong.
+  bool _alreadyPlaced(
+          CityTrafficFrame frame, Vector3 anchorBF, Vector3 focusBF) =>
+      identical(frame.agents, _fromAgents) &&
+      identical(frame.geometry, _fromGeometry) &&
+      clock.renderT == _fromRenderT &&
+      anchorBF == _fromAnchor &&
+      focusBF == _fromFocus &&
+      renderCap == _fromCap &&
+      rangeM == _fromRange &&
+      shadowRangeM == _fromShadow;
 
   /// Places [frame]'s vehicles for this frame at wall time [wallNowS], the
   /// focus at [focusBF] (body-fixed) and every pose relative to [anchorBF].
   /// Returns how many were placed.
+  ///
+  /// A frame that moved nothing — the same sample, a clock that stood still
+  /// (the host paused, or a sub-step already run out), the same anchor and
+  /// focus — places nothing anew: the batches keep their matrices AND their
+  /// revisions, so the draws leave the shared instance buffer alone.
   int place(CityTrafficFrame frame, Vector3 anchorBF, Vector3 focusBF,
       {required double wallNowS, double? warp}) {
+    final f = frame.agents;
+    final g = frame.geometry;
+    // The clock first: how far it ran is half of whether anything moved,
+    // and it must keep time whether or not this frame places.
+    final tau = clock.advance(f, wallNowS, warp: warp ?? simWarp);
+    if (_alreadyPlaced(frame, anchorBF, focusBF)) return placed;
     for (final b in _batches) {
       b?._begin();
     }
     placed = 0;
     inRange = 0;
     hidden = 0;
-    final f = frame.agents;
-    final g = frame.geometry;
-    final tau = clock.advance(f, wallNowS, warp: warp ?? simWarp);
     if (f.count > 0 && g.graphRev == f.graphRev && g.laneCount > 0) {
       _placeAll(f, g, anchorBF, focusBF, tau);
     }
     for (final b in _batches) {
       b?._finish();
     }
+    _fromAgents = f;
+    _fromGeometry = g;
+    _fromAnchor = anchorBF;
+    _fromFocus = focusBF;
+    _fromRenderT = clock.renderT;
+    _fromRange = rangeM;
+    _fromShadow = shadowRangeM;
+    _fromCap = renderCap;
     return placed;
   }
 
@@ -810,4 +871,287 @@ class AgentTrafficPass {
 
   /// The element the last [advanceAlong] ended on.
   int get lastElement => _elem;
+}
+
+/// One colony's site-car poses: a buffer per model and band, with the same
+/// growing high-water mark the road draws keep, so cars coming and going
+/// move matrices in place rather than clearing the draw (§13.8).
+class SiteCarBatches {
+  static const int _bucket = AgentDrawBatch.bucket;
+
+  final List<TrafficBuffer?> poses =
+      List<TrafficBuffer?>.filled(VehicleKind.values.length * 2, null);
+  final Int32List highWater = Int32List(VehicleKind.values.length * 2);
+  final Int32List live = Int32List(VehicleKind.values.length * 2);
+
+  /// Moves whenever these buffers were rewritten, as
+  /// [AgentDrawBatch.rev] does, and for the same reason: a draw uploads
+  /// only what moved.
+  int rev = 0;
+
+  /// The buffer of [kind], [near] or far: `kind.index * 2 (+ 1)`.
+  TrafficBuffer bufOf(VehicleKind kind, bool near) {
+    final i = kind.index * 2 + (near ? 0 : 1);
+    return poses[i] ??= TrafficBuffer();
+  }
+
+  void begin() {
+    for (var i = 0; i < poses.length; i++) {
+      poses[i]?.reset();
+    }
+    live.fillRange(0, live.length, 0);
+  }
+
+  /// Every buffer padded out to its high-water mark with zero-scale
+  /// matrices, so a draw's instance count stands still.
+  void finish() {
+    rev++;
+    for (var i = 0; i < poses.length; i++) {
+      final b = poses[i];
+      if (b == null) continue;
+      live[i] = b.count;
+      if (b.count == 0) continue;
+      final want = (b.count + _bucket - 1) ~/ _bucket * _bucket;
+      if (want > highWater[i]) highWater[i] = want;
+      while (b.count < highWater[i]) {
+        b.next().setZero();
+      }
+    }
+  }
+
+  void resetHighWater() => highWater.fillRange(0, highWater.length, 0);
+}
+
+/// The cars inside one colony's sites and parked on its stalls (T4a,
+/// site-access.md §7.4), in the same models the road vehicles use.
+///
+/// A car inside a lot is on no road element, so its pose comes from the
+/// frame's own site columns — worked out by the capture off the plan the
+/// simulation drives and the heights R3 published for it — and a parked car
+/// from the stall pose of the plan its row names. No lot geometry is
+/// derived here, and nothing asks the ground (D19/D20).
+///
+/// Both halves are placed only while their columns' site revision is the
+/// site frame's: a site lane and a stall index mean something against one
+/// revision's plan and nothing against another's, so a frame whose two
+/// disagree keeps the parked draw exactly as it stands and leaves the
+/// moving cars out, rather than putting either somewhere wrong.
+///
+/// Neither half is rewritten when nothing that places a car moved: the
+/// columns are handed out by reference and keep their identity between
+/// captures (§13.1, §13.2), so an identity compare is the whole test, and a
+/// colony with hundreds of parked cars costs the shared instance buffer
+/// nothing on the frames they stand still — which is all of them but the
+/// few where a car comes or goes.
+class SiteCarPass {
+  /// Parked cars drawn per colony (§7.4's ceiling). They are not
+  /// range-culled in T4a: a lot car exists only where the agents manage the
+  /// parking, which E36 stage 1 keeps to the sites they actually run. T4b,
+  /// which switches every baked car off, adds the 1.5 km ring with the rest
+  /// of that list.
+  static const int parkedRenderCap = 1500;
+
+  /// The cars inside the sites: placed afresh whenever the capture
+  /// published new poses, because they move.
+  final SiteCarBatches vehicles = SiteCarBatches();
+
+  /// The cars parked on the stalls: placed afresh only when a car came or
+  /// went, the site geometry moved, or the anchor did (§7.4) — nothing else
+  /// can change where a parked car stands.
+  final SiteCarBatches parked = SiteCarBatches();
+
+  /// Cars placed inside the sites by the last placement (the parked ones
+  /// are not counted: they are not the frame's vehicles).
+  int placed = 0;
+
+  Object? _fromPoses, _fromSites, _fromAgents;
+  Vector3? _fromAnchor, _fromFocus;
+  double _fromRange = double.nan, _fromShadow = double.nan;
+  int _fromCap = -1;
+
+  Object? _parkedFrom, _parkedSites;
+  Vector3? _parkedAnchor;
+  double _parkedShadow = double.nan;
+
+  /// Forget both high-water marks, and what either half was placed from:
+  /// the draws were dropped, so the padding behind them stands for nothing.
+  void dropHighWater() {
+    vehicles.resetHighWater();
+    parked.resetHighWater();
+    _fromPoses = null;
+    _fromAgents = null;
+    _fromSites = null;
+    _parkedFrom = null;
+    _parkedSites = null;
+  }
+
+  /// [f]'s site cars, relative to [anchorBF], banded around [focusBF];
+  /// returns how many cars inside the sites were placed.
+  int place(CityTrafficFrame f, Vector3 anchorBF, Vector3 focusBF) {
+    final sf = f.sites;
+    _placeInside(f, sf, anchorBF, focusBF);
+    _placeParked(f, sf, anchorBF, focusBF);
+    return placed;
+  }
+
+  void _placeInside(CityTrafficFrame f, CitySiteFrame? sf, Vector3 anchorBF,
+      Vector3 focusBF) {
+    final poses = f.sitePoses;
+    // The sample as well as the poses: a row's model is read off it.
+    if (identical(poses, _fromPoses) &&
+        identical(f.agents, _fromAgents) &&
+        identical(sf, _fromSites) &&
+        anchorBF == _fromAnchor &&
+        focusBF == _fromFocus &&
+        AgentTrafficPass.renderCap == _fromCap &&
+        AgentTrafficPass.rangeM == _fromRange &&
+        AgentTrafficPass.shadowRangeM == _fromShadow) {
+      return;
+    }
+    _fromPoses = poses;
+    _fromAgents = f.agents;
+    _fromSites = sf;
+    _fromAnchor = anchorBF;
+    _fromFocus = focusBF;
+    _fromCap = AgentTrafficPass.renderCap;
+    _fromRange = AgentTrafficPass.rangeM;
+    _fromShadow = AgentTrafficPass.shadowRangeM;
+    placed = 0;
+    vehicles.begin();
+    if (sf == null) {
+      vehicles.finish();
+      return;
+    }
+    final agents = f.agents;
+    final qx = focusBF.x - anchorBF.x;
+    final qy = focusBF.y - anchorBF.y;
+    final qz = focusBF.z - anchorBF.z;
+    final shadow2 =
+        AgentTrafficPass.shadowRangeM * AgentTrafficPass.shadowRangeM;
+    final range2 = AgentTrafficPass.rangeM * AgentTrafficPass.rangeM;
+    if (poses.sitesRev == sf.sitesRev) {
+      final cap = AgentTrafficPass.renderCap;
+      for (var i = 0; i < poses.count && placed < cap; i++) {
+        final row = poses.row[i];
+        if (row < 0 || row >= agents.count) continue;
+        final kind = agentVehicleKind(agents.kind[row], agents.variant[row],
+            sealed: poses.sealed);
+        if (kind == null) continue;
+        placed += _placeOne(vehicles, sf, anchorBF, kind, poses.e[i],
+            poses.n[i], poses.up[i], poses.dirE[i], poses.dirN[i], qx, qy, qz,
+            shadow2, range2);
+      }
+    }
+    vehicles.finish();
+  }
+
+  void _placeParked(CityTrafficFrame f, CitySiteFrame? sf, Vector3 anchorBF,
+      Vector3 focusBF) {
+    if (sf == null) return;
+    final rows = f.parked;
+    if (rows.sitesRev != sf.sitesRev) return;
+    if (identical(rows, _parkedFrom) &&
+        identical(sf, _parkedSites) &&
+        anchorBF == _parkedAnchor &&
+        AgentTrafficPass.shadowRangeM == _parkedShadow) {
+      return;
+    }
+    _parkedFrom = rows;
+    _parkedSites = sf;
+    _parkedAnchor = anchorBF;
+    _parkedShadow = AgentTrafficPass.shadowRangeM;
+    final sealed = f.sitePoses.sealed;
+    final qx = focusBF.x - anchorBF.x;
+    final qy = focusBF.y - anchorBF.y;
+    final qz = focusBF.z - anchorBF.z;
+    final shadow2 =
+        AgentTrafficPass.shadowRangeM * AgentTrafficPass.shadowRangeM;
+    parked.begin();
+    var n = 0;
+    for (var i = 0; i < rows.lotCount && n < parkedRenderCap; i++) {
+      final kind =
+          agentVehicleKind(rows.lotKind[i], rows.lotVariant[i], sealed: sealed);
+      if (kind == null) continue;
+      n += _placeOne(parked, sf, anchorBF, kind, rows.lotE[i], rows.lotN[i],
+          rows.lotUp[i], rows.lotDirE[i], rows.lotDirN[i], qx, qy, qz, shadow2,
+          double.infinity);
+    }
+    parked.finish();
+  }
+
+  /// One car of [batches], in its band; 1 when it was placed.
+  int _placeOne(
+      SiteCarBatches batches,
+      CitySiteFrame sf,
+      Vector3 anchorBF,
+      VehicleKind kind,
+      double e,
+      double n,
+      double up,
+      double dirE,
+      double dirN,
+      double qx,
+      double qy,
+      double qz,
+      double shadow2,
+      double range2) {
+    // Written into the near buffer first, because how far away it is can
+    // only be read off the pose the write works out.
+    final near = batches.bufOf(kind, true);
+    final at = near.count;
+    if (!writePose(near.next(), sf, anchorBF, e, n, up, dirE, dirN)) {
+      near.count = at;
+      return 0;
+    }
+    final m = near.matrices[at];
+    final dx = m.storage[12] - qx;
+    final dy = m.storage[13] - qy;
+    final dz = m.storage[14] - qz;
+    final d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 > range2) {
+      near.count = at;
+      return 0;
+    }
+    if (d2 < shadow2) return 1;
+    near.count = at;
+    batches.bufOf(kind, false).next().setFrom(m);
+    return 1;
+  }
+
+  /// Writes into [m] the instance matrix of a car whose centre stands at
+  /// colony-local ([e], [n]), [up] metres above [sf]'s datum, its nose
+  /// along ([dirE], [dirN]) — the pose the capture published — relative to
+  /// [anchorBF]. False when the basis is degenerate.
+  ///
+  /// The basis is the road pass's: up is the radial at the car, side is
+  /// forward × up, and up is taken again as side × forward, so the car
+  /// pitches with the ground it stands on and the matrix is never mirrored.
+  static bool writePose(vm.Matrix4 m, CitySiteFrame sf, Vector3 anchorBF,
+      double e, double n, double up, double dirE, double dirN) {
+    final r = sf.datumRadiusM + up;
+    final px = sf.up.x * r + sf.east.x * e + sf.north.x * n;
+    final py = sf.up.y * r + sf.east.y * e + sf.north.y * n;
+    final pz = sf.up.z * r + sf.east.z * e + sf.north.z * n;
+    final pl = math.sqrt(px * px + py * py + pz * pz);
+    if (pl == 0) return false;
+    final ux = px / pl, uy = py / pl, uz = pz / pl;
+    var fx = sf.east.x * dirE + sf.north.x * dirN;
+    var fy = sf.east.y * dirE + sf.north.y * dirN;
+    var fz = sf.east.z * dirE + sf.north.z * dirN;
+    final fl = math.sqrt(fx * fx + fy * fy + fz * fz);
+    if (fl < 1e-9) return false;
+    fx /= fl;
+    fy /= fl;
+    fz /= fl;
+    var sx = fy * uz - fz * uy, sy = fz * ux - fx * uz, sz = fx * uy - fy * ux;
+    final sl = math.sqrt(sx * sx + sy * sy + sz * sz);
+    if (sl < 1e-9) return false;
+    sx /= sl;
+    sy /= sl;
+    sz /= sl;
+    final bx = sy * fz - sz * fy, by = sz * fx - sx * fz, bz = sx * fy - sy * fx;
+    TrafficRoad.writePose(m, px - anchorBF.x, py - anchorBF.y, pz - anchorBF.z,
+        sx, sy, sz, fx, fy, fz, bx, by, bz);
+    return true;
+  }
 }

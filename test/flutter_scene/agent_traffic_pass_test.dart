@@ -649,6 +649,170 @@ void main() {
     });
   });
 
+  group('a steady scene leaves the shared instance buffer alone', () {
+    // §13.8. Every instanced draw in the process emplaces its matrices into
+    // ONE host buffer (flutter_scene's `instance_packing.dart`), and the
+    // engine repacks an item whenever its mesh version moves — so the
+    // renderer must not write matrices back that nothing moved. Two rules
+    // here: a draw's instance count stands still (the bucket of 64), and a
+    // batch's revision moves only when a pose did.
+    late CityTrafficFrame steady;
+    late Vector3 at;
+
+    setUpAll(() {
+      final grown = live(town());
+      grown.agents.advance(60);
+      steady = captured(grown);
+      final p = steady.geometry.pts;
+      final r = math.sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+      at = grown.localToBodyFixed(const Vec2(0, 0), bodyRadiusM: r);
+    });
+
+    List<int> countsOf(AgentTrafficPass pass) =>
+        [for (final b in pass.batches) b?.poses.count ?? -1];
+    int revSum(AgentTrafficPass pass) =>
+        pass.batches.fold(0, (n, b) => n + (b?.rev ?? 0));
+
+    test('a frame that moved nothing places nothing anew', () {
+      final pass = AgentTrafficPass();
+      final placed = pass.place(steady, at, at, wallNowS: 0);
+      expect(placed, greaterThan(0));
+      final counts = countsOf(pass);
+      final revs = revSum(pass);
+
+      // The same sample at the same wall time: the clock did not run.
+      expect(pass.place(steady, at, at, wallNowS: 0), placed);
+      expect(revSum(pass), revs, reason: 'nothing to repack');
+      expect(countsOf(pass), counts);
+
+      // The host paused (E26): wall time runs on, the clock stands still,
+      // and a paused colony costs the buffer nothing at all.
+      for (var i = 1; i <= 30; i++) {
+        expect(pass.place(steady, at, at, wallNowS: i / 60, warp: 0), placed);
+      }
+      expect(revSum(pass), revs, reason: 'a paused host repacks nothing');
+      expect(countsOf(pass), counts);
+    });
+
+    test('the counts stand still while the clock runs, and the repacks stop '
+        'when it does', () {
+      final pass = AgentTrafficPass();
+      pass.place(steady, at, at, wallNowS: 0);
+      final counts = countsOf(pass);
+      var wall = 0.0, was = revSum(pass);
+      final moved = <bool>[];
+      for (var i = 0; i < 40; i++) {
+        wall += 1 / 60;
+        pass.place(steady, at, at, wallNowS: wall);
+        expect(countsOf(pass), counts, reason: 'frame $i');
+        final now = revSum(pass);
+        moved.add(now != was);
+        was = now;
+      }
+      expect(moved.first, isTrue, reason: 'the clock ran: the cars moved');
+      // With no new sample the clock runs one sub-step past it and waits
+      // there (§13.4) — and a clock that stands still repacks nothing.
+      expect(moved.last, isFalse);
+      expect(moved.where((m) => m).length, lessThan(20),
+          reason: 'it waits out the rest of the frames');
+    });
+
+    test('the site cars keep their counts, and the parked ones are written '
+        'only when a car comes or goes', () {
+      // Hand-built columns: what the capture hands the renderer (§13.1,
+      // §13.2, site-access.md §7.4) — a new pose set every capture, and a
+      // parked set whose identity moves only with the parked revision.
+      final sites = CitySiteFrame(
+          colonyId: 'c',
+          bodyId: 'earth',
+          sitesRev: 7,
+          geometryStamp: 0,
+          datumRadiusM: 6.371e6,
+          up: const Vector3(0, 0, 1),
+          east: const Vector3(1, 0, 0),
+          north: const Vector3(0, 1, 0),
+          chunks: const []);
+      final anchor = const Vector3(0, 0, 6.371e6);
+      final agents = frameOf(
+          [for (var i = 0; i < 8; i++) parked(0, 10)], steady.geometry.graphRev);
+
+      SitePoseColumns inside(int cars, double shift) => SitePoseColumns(
+            count: cars,
+            sitesRev: 7,
+            sealed: false,
+            row: Int32List.fromList([for (var i = 0; i < cars; i++) i]),
+            e: Float32List.fromList(
+                [for (var i = 0; i < cars; i++) 10.0 * i + shift]),
+            n: Float32List(cars),
+            up: Float32List(cars),
+            dirE: Float32List(cars)..fillRange(0, cars, 1),
+            dirN: Float32List(cars),
+          );
+      ParkedColumns onStalls(int cars) => ParkedColumns(
+            parkedRev: cars,
+            sitesRev: 7,
+            lotCount: cars,
+            lotSite: Int32List(cars),
+            lotStall: Int32List(cars),
+            lotKind: Uint8List(cars)..fillRange(0, cars, AgentKind.car.index),
+            lotVariant: Uint8List(cars),
+            lotE: Float32List.fromList([for (var i = 0; i < cars; i++) 4.0 * i]),
+            lotN: Float32List(cars),
+            lotUp: Float32List(cars),
+            lotDirE: Float32List(cars)..fillRange(0, cars, 1),
+            lotDirN: Float32List(cars),
+          );
+      CityTrafficFrame frameOfCars(SitePoseColumns p, ParkedColumns k) =>
+          CityTrafficFrame(
+              colonyId: 'c',
+              bodyId: 'earth',
+              agents: agents,
+              geometry: steady.geometry,
+              net: steady.net,
+              sites: sites,
+              sitePoses: p,
+              parked: k);
+
+      final site = SiteCarPass();
+      final near = VehicleKind.coupe.index * 2;
+      final p0 = inside(5, 0), k0 = onStalls(3);
+      expect(site.place(frameOfCars(p0, k0), anchor, anchor), 5);
+      expect(site.vehicles.live[near], 5);
+      expect(site.parked.live[near], 3);
+      for (final b in [site.vehicles, site.parked]) {
+        expect(b.poses[near]!.count, 64, reason: 'bucketed, like the road\'s');
+        for (var i = b.live[near]; i < 64; i++) {
+          expect(b.poses[near]!.matrices[i].storage.every((x) => x == 0), isTrue,
+              reason: 'the padding is zero scale');
+        }
+      }
+      final vRev = site.vehicles.rev, pRev = site.parked.rev;
+
+      // The same columns again — the capture published nothing new: neither
+      // half is written.
+      expect(site.place(frameOfCars(p0, k0), anchor, anchor), 5);
+      expect(site.vehicles.rev, vRev);
+      expect(site.parked.rev, pRev);
+
+      // The cars inside the sites moved and one more drove in; the parked
+      // ones did not move, and are not written for it.
+      final p1 = inside(6, 3);
+      expect(site.place(frameOfCars(p1, k0), anchor, anchor), 6);
+      expect(site.vehicles.rev, vRev + 1);
+      expect(site.vehicles.live[near], 6);
+      expect(site.vehicles.poses[near]!.count, 64, reason: 'the count stands still');
+      expect(site.parked.rev, pRev, reason: 'not one parked matrix rewritten');
+
+      // A car parked: the parked half is written, once, and its count does
+      // not move for it either.
+      expect(site.place(frameOfCars(p1, onStalls(4)), anchor, anchor), 6);
+      expect(site.parked.rev, pRev + 1);
+      expect(site.parked.live[near], 4);
+      expect(site.parked.poses[near]!.count, 64);
+      expect(site.vehicles.rev, vRev + 1, reason: 'the same poses: not written');
+    });
+  });
+
   test('every agent kind maps to a model, or to none', () {
     VehicleKind? kindOf(AgentKind k, [int variant = 0, bool sealed = false]) =>
         agentVehicleKind(k.index, variant, sealed: sealed);
