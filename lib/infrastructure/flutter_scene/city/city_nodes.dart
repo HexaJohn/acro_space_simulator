@@ -469,6 +469,32 @@ class CityNodes {
   static bool get siteAccess => SiteCapture.envelopePlacement;
   static set siteAccess(bool on) => SiteCapture.envelopePlacement = on;
 
+  /// The ROAD-SIDE SEAM for which sites agent traffic manages
+  /// (docs/plans/site-access.md §5.5 as built, R6): given the frame and one
+  /// colony's site frame, one byte per BOOK SLOT, nonzero where traffic
+  /// manages the site (a slot past the end reads 0). Null — the default —
+  /// is nothing managed, and every site bakes its lot cars.
+  ///
+  /// Read here, on the UI thread, once a frame, and never on a worker: the
+  /// cut folds the bits into the keys of the tiles that hold a managed site
+  /// (only when set) and carries them to the worker on the request's subset
+  /// frames (`CitySiteFrame.agentManaged`). A managed site bakes no lot cars.
+  ///
+  /// The Agent Traffic merge connects it with one line, where the renderer
+  /// is set up:
+  /// `CityNodes.agentManagedSites = (snap, sites) => snap.cityTraffic
+  ///     .where((t) => t.colonyId == sites.colonyId).firstOrNull?.agentManaged;`
+  static Uint8List? Function(WorldSnapshot snapshot, CitySiteFrame sites)?
+      agentManagedSites;
+
+  /// This frame's seam bytes, one per `WorldSnapshot.sites` entry; empty with
+  /// no seam or with the knob off.
+  static List<Uint8List?> agentManagedOf(WorldSnapshot snap) {
+    final source = agentManagedSites;
+    if (source == null || !siteAccess || snap.sites.isEmpty) return const [];
+    return [for (final f in snap.sites) source(snap, f)];
+  }
+
   /// Scales how many vehicles a road carries. A hook for the colony's own
   /// congestion once that reaches the frame; 1.0 is an ordinary working day.
   static double trafficDensity = 1.0;
@@ -596,6 +622,10 @@ class CityNodes {
   /// once beside those roads (docs/plans/site-access.md §5.4): a drive laid
   /// this frame is on the ground this frame.
   final InstantSiteTracker _instantSites = InstantSiteTracker();
+
+  /// This frame's agent-managed bytes ([agentManagedOf]), read once in
+  /// [update] and handed to the cut and the detail layer.
+  List<Uint8List?> _agentManaged = const [];
 
   /// The road tool's overlay (see [RoadOverlayState]): one node — the state
   /// names one body at a time — rebuilt only when the state's revision or
@@ -859,12 +889,17 @@ class CityNodes {
     // changes no count, and a cut keyed on counts alone never saw one. A
     // colony culled for range is cut again only when that moves or the
     // camera comes back within range (see [CityCutGate]).
+    final managed = _agentManaged = agentManagedOf(snap);
+    final managedSig = CityTileBucketer.agentManagedSignature(managed);
     final sig = '${snap.buildings.length}|${snap.roads.length}|'
         '${snap.patches.length}|${snap.terrainEdits.length}|'
         '${CityTileBucketer.roadsSignature(snap)}'
         // Site access, only while the tiles take it: a plan appearing or a
         // height moving re-cuts, and the detail layer's key inherits it.
-        '${siteAccess ? '|${CityTileBucketer.sitesSignature(snap)}' : ''}';
+        '${siteAccess ? '|${CityTileBucketer.sitesSignature(snap)}' : ''}'
+        // Which sites agent traffic manages (R6), only once the seam says
+        // some are: a bit flipped re-cuts.
+        '${managedSig != 0 ? '|m$managedSig' : ''}';
     final focusOf = _focusOfBodies(snap, focusWorld);
     if (_cutGate.wantsCut(snap, sig, rangeM: maxRangeM, focusBF: focusOf)) {
       _cutGate.cut(sig);
@@ -1343,7 +1378,8 @@ class CityNodes {
         anchors: {for (final r in _roots.values) r.bodyId: r.anchorBF},
         tileM: tileM,
         keyed: false,
-        siteAccess: siteAccess);
+        siteAccess: siteAccess,
+        agentManaged: _agentManaged);
     final bounds = CityCullBounds.ofPlan(plan);
     if (bounds.nearestM(focusBF) > maxRangeM) {
       _cull(bounds);
@@ -3465,6 +3501,7 @@ class CityNodes {
           knobs: _knobsNow(),
           candidates: () => _detailCandidates(bodyId, focusBF),
           sites: snap.sites,
+          agentManaged: _agentManaged,
         ),
       );
     }

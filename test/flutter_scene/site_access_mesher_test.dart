@@ -22,6 +22,7 @@ import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_mesher.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/road_mesher.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/site_access_mesher.dart';
+import 'package:acro_space_simulator/infrastructure/flutter_scene/city/site_dressing_mesher.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../application/site_town_fixture.dart';
@@ -140,8 +141,9 @@ void main() {
       expect(seen, 4);
     });
 
-    test('the detail pass draws the small sites only, and only paint', () {
-      var painted = 0;
+    test('the detail pass draws the small sites only, and only paint '
+        '(R6: the stall lines, the arrows and the bay hatch)', () {
+      var painted = 0, arrowed = 0;
       for (final (g, k) in rows) {
         final plan = g.plan.plan(k);
         final size = SiteAccessMesher.sizeOf(plan);
@@ -157,10 +159,20 @@ void main() {
         for (var i = 0; i < plan.stallCount; i++) {
           if (plan.stallAngle(i) != StallAngle.inline) bays++;
         }
-        expect(apron.triangleCount, bays * 4, reason: plan.siteId);
+        final d = SiteDraw(frame, g, k, anchor);
+        final arrows = SiteDressingMesher.arrows(d).length;
+        final hatch = SiteDressingMesher.hatchedBays(d);
+        // Four triangles a stall line pair, three an arrow, two a hatched
+        // bay: nothing else is drawn at the detail tier without the cars
+        // and lamps a lot pass hands over.
+        expect(apron.triangleCount, bays * 4 + arrows * 3 + hatch * 2,
+            reason: plan.siteId);
         if (bays > 0) painted++;
+        if (arrows > 0) arrowed++;
       }
       expect(painted, greaterThan(20));
+      expect(arrowed, greaterThan(0),
+          reason: 'the fixture has car parks with two-lane throats');
     });
   });
 

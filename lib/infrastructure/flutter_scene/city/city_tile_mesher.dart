@@ -988,9 +988,10 @@ class CityTileMeshJob {
     steps.setAll(0, steps.reversed.toList());
   }
 
-  /// The lot furniture, in runs — and the sites' own detail half, which
-  /// goes with it so the structural half is identical with the detail layer
-  /// on and off (§5.4).
+  /// The lot furniture, in runs. A plan-served building's site is DRESSED
+  /// here, with the furniture of the building it serves (§5.4, R6), so the
+  /// same site draws the same dressing whether the detail layer is on (the
+  /// layer's job runs this) or off (a near tile runs it).
   void _addLotSteps(List<BuildingSnapshot> buildings) {
     const perStep = 60;
     for (var i = 0; i < buildings.length; i += perStep) {
@@ -998,24 +999,53 @@ class CityTileMeshJob {
       steps.add(CityMeshStep(CityMeshStepKind.lots,
           () => _emitLotFeatures(buildings.sublist(from, to))));
     }
-    _addSiteStep(SiteDrawTier.detail);
   }
 
   /// A step for the tile's sites at [tier], when the knob is on and the
-  /// request carries any.
+  /// request carries any. At the NEAR tier a big site takes its dressing
+  /// here — its lamps and its stalls' cars — since no lot pass draws it.
   void _addSiteStep(SiteDrawTier tier) {
     if (!request.knobs.siteAccess || members.sites.isEmpty) return;
     steps.add(CityMeshStep(CityMeshStepKind.sites, () {
       final tb = _tile;
-      SiteAccessMesher.emitAll(
+      final near = tier == SiteDrawTier.near;
+      _carBudget -= SiteAccessMesher.emitAll(
         members.sites,
         apron: tb.featureApron,
         solid: tb.featureSolid,
         anchorBF: request.anchorBF,
         tier: tier,
+        cars: near ? tb.featureCars : null,
+        glow: near ? tb.featureGlow : null,
+        carBudget: near ? _carBudget : 0,
+        airless: request.knobs.sealedWorld,
       );
     }));
   }
+
+  /// The site of plan-served building [b], or null: its book slot in the
+  /// frames the request carries (`CityTileMembers.sites`), looked up
+  /// through one index built on first use.
+  (CitySiteFrame, SiteChunkGeometry, int, bool)? _siteOf(BuildingSnapshot b) {
+    if (b.siteSlot < 0 || members.sites.isEmpty) return null;
+    final byColony = _siteIndex ??= () {
+      final out = <String, Map<int, (CitySiteFrame, SiteChunkGeometry, int, bool)>>{};
+      for (final f in members.sites) {
+        final on = out['${f.colonyId}|${f.bodyId}'] ??= {};
+        for (var c = 0; c < f.chunks.length; c++) {
+          final g = f.chunks[c];
+          for (var k = 0; k < g.siteCount; k++) {
+            on[g.siteSlot(k)] = (f, g, k, f.isAgentManaged(c, k));
+          }
+        }
+      }
+      return out;
+    }();
+    return byColony['${b.colonyId}|${b.body}']?[b.siteSlot];
+  }
+
+  Map<String, Map<int, (CitySiteFrame, SiteChunkGeometry, int, bool)>>?
+      _siteIndex;
 
   /// The archetypes this job's instances key to that the UI thread did
   /// not list, as generation steps pushed to run next — a few keys a
@@ -1386,6 +1416,34 @@ class CityTileMeshJob {
       if (tier == BuildingDetail.block) continue;
       final edging = LotFeatures.edgingFor(b.type);
       final sign = LotFeatures.signFor(b.type);
+      // PLAN-SERVED (§5.5): the plan's own dressing instead of the legacy
+      // guess — the fence ring on the REAL parcel polygon with the plan's
+      // gaps open, the sign beside the throat, the footpaths, the lamps,
+      // the wheel stops and the cars in the stalls. A served building whose
+      // site the request does not carry falls through to the legacy path,
+      // which is what it drew before.
+      final served = _siteOf(b);
+      if (served != null) {
+        final (frame, geo, site, managed) = served;
+        _carBudget -= SiteAccessMesher.emitDressing(
+          apron: apron,
+          solid: solid,
+          glow: glow,
+          cars: cars,
+          frame: frame,
+          geo: geo,
+          site: site,
+          anchorBF: anchorBF,
+          full: tier == BuildingDetail.full,
+          edging: edging,
+          sign: sign,
+          signScale: math.max(1.0, b.siteWidthM / 18),
+          airless: k.sealedWorld,
+          agentManaged: managed,
+          carBudget: _carBudget,
+        );
+        continue;
+      }
       final spec = CityTileMesher.specOf(b);
       final parcel = CityTileMesher.parcelOf(b, k.style);
       // The massing the building was DRAWN from — the library's cached one,

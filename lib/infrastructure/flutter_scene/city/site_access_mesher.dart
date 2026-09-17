@@ -45,8 +45,10 @@ import '../coord_convert.dart';
 import 'city_texture_bakes.dart';
 import 'city_tile_bucketing.dart' show CityHash32, CityTileSite;
 import 'city_tile_mesher.dart' show CityTier;
+import 'lot_features.dart' show LotEdging;
 import 'oriented_box.dart';
 import 'road_mesher.dart';
+import 'site_dressing_mesher.dart';
 
 /// What a tile draws a site at: the tile's own tier, or the detail layer's
 /// pass over the buildings round the eye.
@@ -284,17 +286,28 @@ abstract final class SiteAccessMesher {
   /// Every site of [frames] into [apron] (the road material) and [solid]
   /// (the facade), at [tier]. The tile's own sites, as its request carries
   /// them (`CityTileMembers.sites`).
-  static void emitAll(
+  ///
+  /// With [cars] and [glow] a BIG site's near tier also takes its dressing
+  /// — its lamps and the cars baked into its stalls (§5.4, R6), at most
+  /// [carBudget] of them over all the sites here, and none on a site the
+  /// frame says agent traffic manages (§5.5). Returns the cars placed.
+  static int emitAll(
     List<CitySiteFrame> frames, {
     required MeshBuilder apron,
     required MeshBuilder solid,
     required Vector3 anchorBF,
     required SiteDrawTier tier,
+    MeshBuilder? cars,
+    MeshBuilder? glow,
+    int carBudget = 0,
+    bool airless = false,
   }) {
+    var placed = 0;
     for (final frame in frames) {
-      for (final geo in frame.chunks) {
+      for (var c = 0; c < frame.chunks.length; c++) {
+        final geo = frame.chunks[c];
         for (var site = 0; site < geo.siteCount; site++) {
-          emit(
+          placed += emit(
             apron: apron,
             solid: solid,
             frame: frame,
@@ -302,14 +315,21 @@ abstract final class SiteAccessMesher {
             site: site,
             anchorBF: anchorBF,
             tier: tier,
+            cars: cars,
+            glow: glow,
+            carBudget: carBudget - placed,
+            airless: airless,
+            agentManaged: frame.isAgentManaged(c, site),
           );
         }
       }
     }
+    return placed;
   }
 
-  /// One site of [geo] into the builders, at [tier].
-  static void emit({
+  /// One site of [geo] into the builders, at [tier]. Returns the baked lot
+  /// cars placed (0 without [cars]).
+  static int emit({
     required MeshBuilder apron,
     required MeshBuilder solid,
     required CitySiteFrame frame,
@@ -317,10 +337,15 @@ abstract final class SiteAccessMesher {
     required int site,
     required Vector3 anchorBF,
     required SiteDrawTier tier,
+    MeshBuilder? cars,
+    MeshBuilder? glow,
+    int carBudget = 0,
+    bool airless = false,
+    bool agentManaged = false,
   }) {
     final chunk = geo.plan;
     final plan = chunk.plan(site);
-    if (plan.segCount == 0 && plan.paveCount == 0) return;
+    if (plan.segCount == 0 && plan.paveCount == 0) return 0;
     final size = sizeOf(plan);
     // What this tier draws of a site this size.
     final bool paves, ribbons, kerbs, gate, stalls;
@@ -352,7 +377,7 @@ abstract final class SiteAccessMesher {
         gate = false;
         stalls = !size.big;
     }
-    if (!paves && !ribbons && !kerbs && !gate && !stalls) return;
+    if (!paves && !ribbons && !kerbs && !gate && !stalls) return 0;
 
     final p0 = chunk.ptStart(site);
     Vector3 at(int p) =>
@@ -373,7 +398,73 @@ abstract final class SiteAccessMesher {
       }
     }
     if (gate) _emitGate(solid, frame, plan, at, anchorBF);
-    if (stalls) _emitStalls(apron, frame, geo, site, plan, anchorBF);
+    if (!stalls) return 0;
+    // The paint, and the dressing that goes with it (§5.4, R6): the bays
+    // marked, the arrows on the drives, the hatch on the loading bays —
+    // and, where the caller hands over the builders, the lamps and the
+    // cars in the stalls.
+    _emitStalls(apron, frame, geo, site, plan, anchorBF);
+    final d = SiteDraw(frame, geo, site, anchorBF);
+    SiteDressingMesher.emitArrows(apron, d);
+    SiteDressingMesher.emitBayHatch(apron, d);
+    if (glow != null) SiteDressingMesher.emitLamps(solid, glow, d);
+    if (cars == null || glow == null || agentManaged || carBudget <= 0) {
+      return 0;
+    }
+    return SiteDressingMesher.emitLotCars(cars, glow, d,
+        maxCars: math.min(maxLotCars, carBudget), airless: airless);
+  }
+
+  /// The most cars one site bakes, whatever the tile's budget: the legacy
+  /// lot's own ceiling (`LotFeatures.emitLot`).
+  static const int maxLotCars = 12;
+
+  /// The DRESSING of one plan-served building's site (§5.4, §5.5, R6),
+  /// drawn with its lot furniture: its fence ring with the plan's gaps, its
+  /// sign, its footpaths, and — for a site its own tile does not dress
+  /// (anything but a BIG one) — its paint, arrows, hatch, lamps, wheel
+  /// stops and the cars in its stalls.
+  ///
+  /// Returns the cars placed. [full] is the building's own tier: pickets
+  /// rather than a coarse fence, and the wheel stops.
+  static int emitDressing({
+    required MeshBuilder apron,
+    required MeshBuilder solid,
+    required MeshBuilder glow,
+    required MeshBuilder cars,
+    required CitySiteFrame frame,
+    required SiteChunkGeometry geo,
+    required int site,
+    required Vector3 anchorBF,
+    required bool full,
+    required LotEdging edging,
+    required bool sign,
+    required double signScale,
+    required bool airless,
+    required bool agentManaged,
+    required int carBudget,
+  }) {
+    final d = SiteDraw(frame, geo, site, anchorBF);
+    SiteDressingMesher.emitFenceRing(solid, d, edging, coarse: !full);
+    if (sign) SiteDressingMesher.emitSign(solid, glow, d, signScale);
+    SiteDressingMesher.emitFootpaths(apron, d);
+    final small = !sizeOf(d.plan).big;
+    if (!small) return 0;
+    if (full) SiteDressingMesher.emitWheelStops(apron, d);
+    return emit(
+      apron: apron,
+      solid: solid,
+      frame: frame,
+      geo: geo,
+      site: site,
+      anchorBF: anchorBF,
+      tier: SiteDrawTier.detail,
+      cars: cars,
+      glow: glow,
+      carBudget: carBudget,
+      airless: airless,
+      agentManaged: agentManaged,
+    );
   }
 
   // ---- Paving --------------------------------------------------------------------

@@ -81,10 +81,6 @@ class LotFeatures {
   }) {
     if (kind == LotEdging.none) return;
     final side = along.cross(up).normalized;
-    final picket = kind == LotEdging.picket;
-    final height = picket ? 1.05 : 2.4;
-    final spacing = picket && !coarse ? 0.16 : 2.6;
-    final postR = picket ? 0.035 : 0.05;
 
     // Walk the four edges. The street edge (front) is left OPEN so the lot has
     // a way in — a fully enclosed plot reads as a compound.
@@ -98,27 +94,47 @@ class LotFeatures {
     ];
 
     for (final (a, b) in corners) {
-      final run = b - a;
-      final len = run.length;
-      if (len < 0.5) continue;
-      final dir = run * (1 / len);
-      final n = dir.cross(up).normalized;
+      emitFenceRun(m, kind, a, b, up, coarse: coarse);
+    }
+  }
 
-      // Uprights.
-      final count = math.max(2, (len / spacing).floor());
-      for (var i = 0; i <= count; i++) {
-        final p = a + dir * (len * i / count);
-        _post(m, p, up, dir, n, postR, height);
-      }
-      // Rails: a picket has two, chain link a top rail only.
-      for (final h in picket ? const [0.35, 0.92] : const [0.98]) {
-        _rail(m, a, b, up, n, height * h, picket ? 0.03 : 0.04);
-      }
-      // Chain link reads as a MESH panel: one thin translucent-ish slab per
-      // run, which at any distance a fence is seen from is what the wire does.
-      if (!picket) {
-        _panel(m, a, b, up, n, height);
-      }
+  /// One run of fence from [a] to [b], [up] the local radial: the posts, the
+  /// rails and (for chain link) the panel. What [emitFence] walks its four
+  /// edges with, and what a PLAN-SERVED lot's fence ring walks the real
+  /// parcel polygon with (docs/plans/site-access.md §5.5).
+  static void emitFenceRun(
+    MeshBuilder m,
+    LotEdging kind,
+    Vector3 a,
+    Vector3 b,
+    Vector3 up, {
+    bool coarse = false,
+  }) {
+    if (kind == LotEdging.none) return;
+    final picket = kind == LotEdging.picket;
+    final height = picket ? 1.05 : 2.4;
+    final spacing = picket && !coarse ? 0.16 : 2.6;
+    final postR = picket ? 0.035 : 0.05;
+    final run = b - a;
+    final len = run.length;
+    if (len < 0.5) return;
+    final dir = run * (1 / len);
+    final n = dir.cross(up).normalized;
+
+    // Uprights.
+    final count = math.max(2, (len / spacing).floor());
+    for (var i = 0; i <= count; i++) {
+      final p = a + dir * (len * i / count);
+      _post(m, p, up, dir, n, postR, height);
+    }
+    // Rails: a picket has two, chain link a top rail only.
+    for (final h in picket ? const [0.35, 0.92] : const [0.98]) {
+      _rail(m, a, b, up, n, height * h, picket ? 0.03 : 0.04);
+    }
+    // Chain link reads as a MESH panel: one thin translucent-ish slab per
+    // run, which at any distance a fence is seen from is what the wire does.
+    if (!picket) {
+      _panel(m, a, b, up, n, height);
     }
   }
 

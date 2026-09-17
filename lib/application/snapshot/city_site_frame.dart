@@ -54,18 +54,20 @@ class SiteChunkGeometry {
         _stallRows = plan.stallStart(plan.siteCount);
 
   /// [f32] and [i32] in this layout, taken, not copied:
-  /// `f32 = [ptUp × points][stallUp × stalls][siteMaxGrade × sites]`,
-  /// `i32 = [siteKey × sites][siteSlot × sites]`.
+  /// `f32 = [ptUp × points][stallUp × stalls][siteMaxGrade × sites]
+  /// [padUp × sites][lot ring (de, dn) × ring points]`,
+  /// `i32 = [siteKey × sites][siteSlot × sites][ringStart × (sites + 1)]`.
   factory SiteChunkGeometry.adopt(
       {required SiteAccessChunk plan,
       required int chunkIndex,
       required Float32List f32,
       required Int32List i32}) {
     final s = plan.siteCount;
-    final want = plan.ptStart(s) + plan.stallStart(s) + s;
-    if (f32.length != want || i32.length != 2 * s) {
+    final rings = i32.length == 3 * s + 1 ? i32[3 * s] : -1;
+    final want = plan.ptStart(s) + plan.stallStart(s) + 2 * s + 2 * rings;
+    if (rings < 0 || f32.length != want) {
       throw ArgumentError('geometry of ${f32.length}/${i32.length} for a '
-          'chunk wanting $want/${2 * s}');
+          'chunk wanting $want/${3 * s + 1}');
     }
     return SiteChunkGeometry._(plan, chunkIndex, f32, i32);
   }
@@ -92,6 +94,26 @@ class SiteChunkGeometry {
   /// The steepest rise over run of [site]'s drives: diagnostics and the
   /// overlay only, never read by the sim.
   double siteMaxGrade(int site) => _f32[_pointRows + _stallRows + site];
+
+  /// The height of [site]'s pad (its lot's ground, or the datum the pad was
+  /// cut to), as [ptUp]: what its fence and its sign stand on (§5.5, R6).
+  double padUp(int site) => _f32[_pointRows + _stallRows + siteCount + site];
+
+  /// How many points [site]'s lot ring has: the REAL parcel polygon (§5.5),
+  /// or none for a site whose lot is gone.
+  int lotRingCount(int site) =>
+      _i32[2 * siteCount + site + 1] - _i32[2 * siteCount + site];
+
+  /// Point [i] of [site]'s lot ring, colony-local metres east ([lotRingDE])
+  /// and north ([lotRingDN]) of the plan's frame origin: add the chunk's
+  /// `frameE`/`frameN` for colony-local. Offsets, so a Float32 holds them to
+  /// well under a millimetre on any lot.
+  double lotRingDE(int site, int i) =>
+      _f32[_ringBase + 2 * (_i32[2 * siteCount + site] + i)];
+  double lotRingDN(int site, int i) =>
+      _f32[_ringBase + 2 * (_i32[2 * siteCount + site] + i) + 1];
+
+  int get _ringBase => _pointRows + _stallRows + 2 * siteCount;
 
   /// [site]'s tile key term: its `rev` mixed with its quantised heights.
   int siteKey(int site) => _i32[site];
@@ -129,6 +151,28 @@ class SiteChunkGeometry {
   /// Bytes of the two lists.
   int get byteLength => _f32.lengthInBytes + _i32.lengthInBytes;
 
+  /// Tests only: this geometry with site [site]'s lot ring replaced by the
+  /// frame-origin offsets [de]/[dn], every other row as it was.
+  SiteChunkGeometry debugWithLotRing(
+      int site, List<double> de, List<double> dn) {
+    final n = siteCount;
+    final was = lotRingCount(site);
+    final grow = de.length - was;
+    final f32 = Float32List(_f32.length + 2 * grow);
+    final i32 = Int32List.fromList(_i32);
+    final at = _ringBase + 2 * _i32[2 * n + site];
+    f32.setRange(0, at, _f32);
+    for (var i = 0; i < de.length; i++) {
+      f32[at + 2 * i] = de[i];
+      f32[at + 2 * i + 1] = dn[i];
+    }
+    f32.setRange(at + 2 * de.length, f32.length, _f32, at + 2 * was);
+    for (var k = site + 1; k <= n; k++) {
+      i32[2 * n + k] += grow;
+    }
+    return SiteChunkGeometry._(plan, chunkIndex, f32, i32);
+  }
+
   /// Tests only: this geometry with site [site]'s key replaced.
   SiteChunkGeometry debugWithSiteKey(int site, int key) => SiteChunkGeometry._(
       plan, chunkIndex, _f32, Int32List.fromList(_i32)..[site] = key);
@@ -146,9 +190,30 @@ class CitySiteFrame {
     required this.east,
     required this.north,
     required this.chunks,
+    this.agentManaged,
   });
 
   final String colonyId, bodyId;
+
+  /// Which of this frame's sites agent traffic manages (§5.5, R6): one byte
+  /// per site ROW of this frame — row `position of its chunk in [chunks] ×
+  /// kSitesPerChunk + site` — 1 managed. Null: none is.
+  ///
+  /// A capture's frame never carries it (the application does not know what
+  /// traffic manages); the tile cut sets it on the frames it sends a worker
+  /// ([subset]), from the renderer's road-side seam
+  /// (`CityNodes.agentManagedSites`), so a worker reads it off its request
+  /// and never off a static. A managed site bakes no lot cars.
+  final Uint8List? agentManaged;
+
+  /// Whether site [site] of the chunk at position [chunkPos] in [chunks] is
+  /// agent-managed ([agentManaged]).
+  bool isAgentManaged(int chunkPos, int site) {
+    final m = agentManaged;
+    if (m == null) return false;
+    final row = chunkPos * kSitesPerChunk + site;
+    return row < m.length && m[row] != 0;
+  }
 
   /// The book's `sitesRev` when captured.
   final int sitesRev;
@@ -220,18 +285,26 @@ class CitySiteFrame {
   /// A frame of just [rows] (geometry, site), in that order: the sites a
   /// tile or a detail job sends a worker (§5.3). Chunks of at most
   /// [kSitesPerChunk] sites, packed as the book packs them; heights and keys
-  /// copied row for row.
-  CitySiteFrame subset(List<(SiteChunkGeometry, int)> rows) {
+  /// copied row for row. [managed], when given, is one flag per row of
+  /// [rows]: the subset's [agentManaged], left null when none is set.
+  CitySiteFrame subset(List<(SiteChunkGeometry, int)> rows,
+      {List<bool>? managed}) {
     final out = <SiteChunkGeometry>[];
     for (var a = 0; a < rows.length; a += kSitesPerChunk) {
       final b = a + kSitesPerChunk < rows.length ? a + kSitesPerChunk : rows.length;
       final part = rows.sublist(a, b);
       final plan = SiteAccessBook.repack([for (final (g, k) in part) (g.plan, k)]);
       final s = plan.siteCount;
-      final f32 = Float32List(plan.ptStart(s) + plan.stallStart(s) + s);
-      final i32 = Int32List(2 * s);
-      var pAt = 0, stAt = 0;
+      var ringPts = 0;
+      for (final (g, k) in part) {
+        ringPts += g.lotRingCount(k);
+      }
+      final f32 = Float32List(
+          plan.ptStart(s) + plan.stallStart(s) + 2 * s + 2 * ringPts);
+      final i32 = Int32List(3 * s + 1);
+      var pAt = 0, stAt = 0, rAt = 0;
       final stBase = plan.ptStart(s), gBase = stBase + plan.stallStart(s);
+      final rBase = gBase + 2 * s;
       for (var i = 0; i < s; i++) {
         final (g, k) = part[i];
         final src = g.plan;
@@ -243,10 +316,24 @@ class CitySiteFrame {
             g._pointRows + t0);
         stAt += t1 - t0;
         f32[gBase + i] = g.siteMaxGrade(k);
+        f32[gBase + s + i] = g.padUp(k);
         i32[i] = g.siteKey(k);
         i32[s + i] = g.siteSlot(k);
+        i32[2 * s + i] = rAt;
+        final rn = g.lotRingCount(k);
+        final from = g._ringBase + 2 * g._i32[2 * g.siteCount + k];
+        f32.setRange(rBase + 2 * rAt, rBase + 2 * (rAt + rn), g._f32, from);
+        rAt += rn;
       }
+      i32[3 * s] = rAt;
       out.add(SiteChunkGeometry._(plan, -1, f32, i32));
+    }
+    Uint8List? bits;
+    if (managed != null) {
+      for (var i = 0; i < managed.length && i < rows.length; i++) {
+        if (!managed[i]) continue;
+        (bits ??= Uint8List(rows.length))[i] = 1;
+      }
     }
     return CitySiteFrame(
       colonyId: colonyId,
@@ -258,6 +345,7 @@ class CitySiteFrame {
       east: east,
       north: north,
       chunks: out,
+      agentManaged: bits,
     );
   }
 
@@ -769,8 +857,31 @@ class SiteCapture {
     geometriesBuilt++;
     final nS = chunk.siteCount;
     final nP = chunk.ptStart(nS), nSt = chunk.stallStart(nS);
-    final f32 = Float32List(nP + nSt + nS);
-    final i32 = Int32List(2 * nS);
+    // The lot rings first (§5.5, R6): the real parcel polygon each site's
+    // fence walks, as offsets from its plan's frame origin. Read off the
+    // layout, never re-derived, and asking the ground nothing.
+    final ringStart = Int32List(nS + 1);
+    final ring = <double>[];
+    for (var k = 0; k < nS; k++) {
+      ringStart[k] = ring.length ~/ 2;
+      final poly = _lotPolygonOf(chunk.siteId(k));
+      if (poly == null) continue;
+      final oe = chunk.frameE(k), on = chunk.frameN(k);
+      for (final v in poly) {
+        ring
+          ..add(v.e - oe)
+          ..add(v.n - on);
+      }
+    }
+    final ringPts = ring.length ~/ 2;
+    ringStart[nS] = ringPts;
+    final f32 = Float32List(nP + nSt + 2 * nS + 2 * ringPts);
+    final i32 = Int32List(3 * nS + 1);
+    i32.setRange(2 * nS, 3 * nS + 1, ringStart);
+    final ringBase = nP + nSt + 2 * nS;
+    for (var i = 0; i < ring.length; i++) {
+      f32[ringBase + i] = ring[i];
+    }
     for (var s = c * kSitesPerChunk; s < (c + 1) * kSitesPerChunk; s++) {
       final row = book.rowOfSlot(s);
       if (row >= 0 && row < nS) i32[nS + row] = s;
@@ -876,6 +987,7 @@ class SiteCapture {
         }
       }
       f32[nP + nSt + k] = grade;
+      f32[nP + nSt + nS + k] = pad - datum;
       // The key: rev and the heights to the centimetre.
       var h = fnv1aU32(kFnvOffset32, chunk.rev(k));
       h = fnv1aU32(h, chunk.flags(k));
@@ -886,9 +998,29 @@ class SiteCapture {
       for (var st = st0; st < st1; st++) {
         h = fnv1aU32(h, (f32[nP + st] * 100).round());
       }
+      // And what the fence stands on: the pad and the lot ring, to the
+      // centimetre, so a lot re-drawn under an unchanged plan re-keys.
+      h = fnv1aU32(h, ((pad - datum) * 100).round());
+      for (var r = ringBase + 2 * ringStart[k];
+          r < ringBase + 2 * ringStart[k + 1];
+          r++) {
+        h = fnv1aU32(h, (f32[r] * 100).round());
+      }
       i32[k] = h == 0 ? 1 : h.toSigned(32);
     }
     return SiteChunkGeometry._(chunk, c, f32, i32);
+  }
+
+  /// The real polygon of the lot site [siteId] names: its parcel's, or a
+  /// grid building's cell footprint (`CitySim.parcelForCell`); null when
+  /// neither is there any more.
+  List<Vec2>? _lotPolygonOf(String siteId) {
+    final cell = CitySim.cellOfSiteId(siteId);
+    if (cell != null) {
+      final spec = _city.specAt(cell);
+      return spec == null ? null : _city.parcelForCell(cell, spec).polygon;
+    }
+    return _city.layout.parcelById(siteId)?.polygon;
   }
 
   /// The height of segment [seg]'s polyline [s] metres from its first
