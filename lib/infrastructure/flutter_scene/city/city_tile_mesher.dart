@@ -1026,8 +1026,14 @@ class CityTileMeshJob {
   /// The site of plan-served building [b], or null: its book slot in the
   /// frames the request carries (`CityTileMembers.sites`), looked up
   /// through one index built on first use.
+  ///
+  /// Gated on the knob like `_addSiteStep`: with `siteAccess` off a request
+  /// that carries sites anyway draws the legacy lot, never the plan's
+  /// dressing (the knob discipline of §5.5 as built).
   (CitySiteFrame, SiteChunkGeometry, int, bool)? _siteOf(BuildingSnapshot b) {
-    if (b.siteSlot < 0 || members.sites.isEmpty) return null;
+    if (!request.knobs.siteAccess || b.siteSlot < 0 || members.sites.isEmpty) {
+      return null;
+    }
     final byColony = _siteIndex ??= () {
       final out = <String, Map<int, (CitySiteFrame, SiteChunkGeometry, int, bool)>>{};
       for (final f in members.sites) {

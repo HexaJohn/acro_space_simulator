@@ -559,19 +559,25 @@ class CityTileBucketer {
 
   /// A hash of the seam's bytes for a cut gate: 0 for none, and one pass
   /// over a list only when its identity is new.
+  ///
+  /// A list with no set byte hashes to 0 and is NOT mixed in, so installing
+  /// the seam with nothing managed leaves the gate's signature exactly where
+  /// it was (§5.5 as built: the gate gains a term only when some byte is
+  /// set) and costs no re-cut.
   static int agentManagedSignature(List<Uint8List?> agentManaged) {
     var h = 0;
     for (final bits in agentManaged) {
       if (bits == null) continue;
       final held = _managedHash[bits];
       final v = held ?? () {
-        var x = 0x6A09E667;
+        var x = 0;
         for (var i = 0; i < bits.length; i++) {
-          if (bits[i] != 0) x = _mix(x, i);
+          if (bits[i] != 0) x = _mix(x == 0 ? 0x6A09E667 : x, i);
         }
         _managedHash[bits] = x;
         return x;
       }();
+      if (v == 0) continue; // nothing managed in this list
       h = _mix(h == 0 ? 0x3C6EF372 : h, v);
     }
     return h;

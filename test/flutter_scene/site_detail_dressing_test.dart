@@ -424,6 +424,30 @@ void main() {
               reason: '${d.plan.siteId} stall $i key $key');
         }
       }
+
+      // The KEY really reaches the seed: two stalls of one site seed
+      // differently, so a seed that reads the site alone is red here.
+      final many = drawOf(rows.firstWhere((r) => drawOf(r).plan.stallCount > 3));
+      final seeds = <int>{
+        for (var i = 0; i < many.plan.stallCount; i++)
+          SiteDressing.stallSeed(many.plan.siteId, many.plan.stallKey(i)),
+      };
+      expect(seeds, hasLength(greaterThan(1)),
+          reason: 'every stall of ${many.plan.siteId} seeds alike');
+
+      // And the mixing itself is pinned, so the function cannot drift:
+      // one site id, two keys, one occupied and one not (§5.5).
+      const pinId = 'r6-seed-pin';
+      expect(SiteDressing.occupancyPerMille(pinId), 549);
+      expect(SiteDressing.stallSeed(pinId, 7), 3164117196);
+      expect(SiteDressing.stallSeed(pinId, 4), 2904380927);
+      expect(SiteDressing.occupied(SiteDressing.stallSeed(pinId, 7), 549),
+          isTrue);
+      expect(SiteDressing.occupied(SiteDressing.stallSeed(pinId, 4), 549),
+          isFalse);
+      // A key stored signed reads as the same unsigned word (V10).
+      expect(SiteDressing.stallSeed(pinId, -1),
+          SiteDressing.stallSeed(pinId, 0xFFFFFFFF));
     });
 
     test('a plan change that keeps a stall keeps its car', () {
@@ -565,6 +589,97 @@ void main() {
         }
       }
       expect(bits, 1);
+    });
+
+    test('a seam that manages nothing costs no re-cut: the gate gains a term '
+        'only when some byte is set (§5.5)', () {
+      // Every shape of "nothing managed": no list, a null, an empty list and
+      // a list of zeros. None of them may move the gate's signature.
+      final quiet = <List<Uint8List?>>[
+        const [],
+        [null],
+        [Uint8List(0)],
+        [Uint8List(4096)],
+        [Uint8List(4096), null, Uint8List(0)],
+      ];
+      for (final m in quiet) {
+        expect(CityTileBucketer.agentManagedSignature(m), 0, reason: '$m');
+      }
+      // One set byte anywhere and the term appears.
+      final loud = Uint8List(4096)..[123] = 1;
+      expect(CityTileBucketer.agentManagedSignature([loud]), isNot(0));
+      // And a whole-colony cut with the quiet seam installed is the cut it
+      // was without it, tile for tile.
+      final anchors = {frame.bodyId: anchor};
+      const tileM = 300.0;
+      final without = CityTileBucketer.bucket(snap,
+          anchors: anchors, tileM: tileM, siteAccess: true);
+      final withQuiet = CityTileBucketer.bucket(snap,
+          anchors: anchors,
+          tileM: tileM,
+          siteAccess: true,
+          agentManaged: [Uint8List(4096)]);
+      expect(withQuiet.tiles.length, without.tiles.length);
+      for (final t in withQuiet.tiles.values) {
+        expect(t.structureKey, without.tiles[t.key]?.structureKey);
+      }
+    });
+  });
+
+  group('the knob gates the plan-served dressing (§5.5 knob discipline)', () {
+    CityMeshKnobs knobsWith({required bool siteAccess}) => CityMeshKnobs(
+          styleId: 'masonry-street',
+          bucketM: 6,
+          variants: 4,
+          perBuildingLod: true,
+          blockRangeM: 300,
+          interiorRangeM: 50,
+          lodDebug: false,
+          onStreetParking: true,
+          sealedWorld: false,
+          maxParkedCars: 400,
+          siteAccess: siteAccess,
+        );
+
+    CityTileResult tileOf({required bool siteAccess, required bool carry}) {
+      final gathered = CityDetailLayer.gather(
+          buildings, houseFocus, CityDetailLayer.gatherRadiusM(300));
+      final sites = carry
+          ? CityTileBucketer.siteFramesOf(
+              CityTileBucketer.sitesOfBuildings([frame], gathered))
+          : const <CitySiteFrame>[];
+      return CityTileMesher.mesh(
+          CityTileRequest(
+            tileKey: '${frame.bodyId}/0/0',
+            key: 'k',
+            tier: CityTier.near,
+            canDetail: true,
+            anchorBF: anchor,
+            columns: CityTileColumns.fromSnapshots(
+              buildings: gathered,
+              roads: const [],
+              patches: CityPatchColumns.of(const []),
+              ends: const [],
+              roadEnds: const [],
+              transitEnds: const [],
+              sites: sites,
+            ),
+            focusBF: houseFocus,
+            colonyTier: BuildingDetail.full,
+            epoch: 0,
+            knobs: knobsWith(siteAccess: siteAccess),
+            detailLayer: false,
+          ),
+          CityBuildingLibraries());
+    }
+
+    test('with the knob off a request that carries sites anyway draws the '
+        'legacy lot, not the plan\'s dressing', () {
+      final bare = _byMaterial(tileOf(siteAccess: false, carry: false));
+      expect(_byMaterial(tileOf(siteAccess: false, carry: true)), bare,
+          reason: 'the knob is off: the sites in the columns draw nothing');
+      // Not vacuous: with the knob ON the same columns draw the plan.
+      expect(_byMaterial(tileOf(siteAccess: true, carry: true)), isNot(bare));
     });
   });
 
