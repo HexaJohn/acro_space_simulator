@@ -195,10 +195,16 @@ class CityTileBucket {
 /// One site of a colony's [CitySiteFrame] in a tile: its chunk geometry and
 /// its row there.
 class CityTileSite {
-  const CityTileSite(this.frame, this.geometry, this.site);
+  const CityTileSite(this.frame, this.geometry, this.site,
+      {this.managed = false});
   final CitySiteFrame frame;
   final SiteChunkGeometry geometry;
   final int site;
+
+  /// Whether agent traffic manages the site (§5.5, R6): read once at the
+  /// cut from the seam's per-slot bytes, keyed only when set, and carried
+  /// to the worker on the subset frame ([CitySiteFrame.agentManaged]).
+  final bool managed;
 }
 
 /// A whole cut of a frame.
@@ -294,6 +300,7 @@ class CityTileBucketer {
     required double tileM,
     bool keyed = true,
     bool siteAccess = false,
+    List<Uint8List?> agentManaged = const [],
   }) {
     final plan = CityBucketPlan._(Map.of(anchors))
       .._roads = snap.roads
@@ -416,11 +423,15 @@ class CityTileBucketer {
     // its building's tile once plans place buildings (§5.3) — on a body
     // something else already anchored. The cells are held per chunk
     // geometry, so an unchanged chunk costs a lookup per site.
+    // [agentManaged] is aligned with the frame's sites: per colony, one
+    // byte per book slot, 1 for a site agent traffic manages (§5.5, R6).
     if (siteAccess) {
-      for (final f in snap.sites) {
+      for (var fi = 0; fi < snap.sites.length; fi++) {
+        final f = snap.sites[fi];
         final anchor = plan.anchors[f.bodyId];
         if (anchor == null) continue;
         final basis = basisOf(f.bodyId);
+        final managed = fi < agentManaged.length ? agentManaged[fi] : null;
         for (final g in f.chunks) {
           final cells = _siteCells(f, g, anchor, basis, tileM);
           for (var k = 0; k < g.siteCount; k++) {
@@ -429,7 +440,9 @@ class CityTileBucketer {
             (plan.tiles[key] ??= CityTileBucket(key, f.bodyId,
                     basis.cellCentre(ie, iN, tileM), halfDiagonalM))
                 .sites
-                .add(CityTileSite(f, g, k));
+                .add(CityTileSite(f, g, k,
+                    managed: managed != null &&
+                        isManagedSlot(managed, g.siteSlot(k))));
           }
         }
       }
@@ -498,9 +511,15 @@ class CityTileBucketer {
       if (i < sites.length && identical(sites[i].frame, sites[from].frame)) {
         continue;
       }
+      var anyManaged = false;
+      for (var k = from; k < i; k++) {
+        if (sites[k].managed) anyManaged = true;
+      }
       out.add(sites[from].frame.subset([
         for (var k = from; k < i; k++) (sites[k].geometry, sites[k].site),
-      ]));
+      ], managed: anyManaged
+          ? [for (var k = from; k < i; k++) sites[k].managed]
+          : null));
       from = i;
     }
     return out;
@@ -508,22 +527,63 @@ class CityTileBucketer {
 
   /// The sites of [frames] that [buildings] are served by, in the
   /// buildings' order, each once: what a detail job packs (§5.3,
-  /// `siteSlot >> 10` → chunk).
+  /// `siteSlot >> 10` → chunk). [agentManaged] is aligned with [frames], as
+  /// [bucket] takes it.
   static List<CityTileSite> sitesOfBuildings(
-      List<CitySiteFrame> frames, List<BuildingSnapshot> buildings) {
+      List<CitySiteFrame> frames, List<BuildingSnapshot> buildings,
+      {List<Uint8List?> agentManaged = const []}) {
     if (frames.isEmpty) return const [];
     final out = <CityTileSite>[];
     for (final b in buildings) {
       if (b.siteSlot < 0) continue;
-      for (final f in frames) {
+      for (var fi = 0; fi < frames.length; fi++) {
+        final f = frames[fi];
         if (f.colonyId != b.colonyId || f.bodyId != b.body) continue;
         final at = f.locate(b.siteSlot);
-        if (at != null) out.add(CityTileSite(f, at.$1, at.$2));
+        if (at != null) {
+          final bits = fi < agentManaged.length ? agentManaged[fi] : null;
+          out.add(CityTileSite(f, at.$1, at.$2,
+              managed: bits != null && isManagedSlot(bits, b.siteSlot)));
+        }
         break;
       }
     }
     return out;
   }
+
+  /// Whether book slot [slot] reads managed in [bits] — the traffic
+  /// session's convention: one byte per slot, nonzero managed, a slot past
+  /// the end not.
+  static bool isManagedSlot(Uint8List bits, int slot) =>
+      slot >= 0 && slot < bits.length && bits[slot] != 0;
+
+  /// A hash of the seam's bytes for a cut gate: 0 for none, and one pass
+  /// over a list only when its identity is new.
+  ///
+  /// A list with no set byte hashes to 0 and is NOT mixed in, so installing
+  /// the seam with nothing managed leaves the gate's signature exactly where
+  /// it was (§5.5 as built: the gate gains a term only when some byte is
+  /// set) and costs no re-cut.
+  static int agentManagedSignature(List<Uint8List?> agentManaged) {
+    var h = 0;
+    for (final bits in agentManaged) {
+      if (bits == null) continue;
+      final held = _managedHash[bits];
+      final v = held ?? () {
+        var x = 0;
+        for (var i = 0; i < bits.length; i++) {
+          if (bits[i] != 0) x = _mix(x == 0 ? 0x6A09E667 : x, i);
+        }
+        _managedHash[bits] = x;
+        return x;
+      }();
+      if (v == 0) continue; // nothing managed in this list
+      h = _mix(h == 0 ? 0x3C6EF372 : h, v);
+    }
+    return h;
+  }
+
+  static final Expando<int> _managedHash = Expando('agentManagedHash');
 
   /// The frame's site access, as far as a cut gate needs it (§5.3): each
   /// colony's `sitesRev` and geometry stamp. Appended to the gate's
@@ -987,6 +1047,9 @@ class CityTileBucketer {
       h = _mix(h, s.geometry.siteSlot(s.site));
       h = _mix(h, s.geometry.siteKey(s.site));
       h = _mix(h, c.flags(s.site));
+      // Agent-managed (R6): only when set, so a cut with no seam, or a
+      // site the seam leaves alone, keys exactly as before.
+      if (s.managed) h = _mix(h, 0x4D414E47);
     }
     t.roadHashes.clear();
     var transit = false;

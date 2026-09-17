@@ -1656,6 +1656,16 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     // Its agents' ticks are held for the replay after each frame's tick
     // loop (_onFrame); a colony without agents never holds one.
     city?.agents.frameBudgeted = true;
+    // E36 stage 1 (docs/plans/agent-traffic.md §7.4; site-access §5.5): where
+    // the agents park real cars, the tiles bake none. The road side reads the
+    // bytes this hands back — by `SiteAccessBook` slot, a slot past the end
+    // reading 0 — and skips its lot cars on those sites. Installing it costs
+    // nothing while nothing is managed: an all-zero or absent list signs 0,
+    // so no tile is re-cut until a colony's first site network appears.
+    CityNodes.agentManagedSites = (snap, sites) => snap.cityTraffic
+        .where((t) => t.colonyId == sites.colonyId)
+        .firstOrNull
+        ?.agentManaged;
 
     // CITY BUILDER: the colony is the subject. Open the editor on it and hang
     // the camera over its crossroads, so the mode starts looking at the thing
@@ -2226,8 +2236,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       ScatterNodes.cellBudgetPerFrame = 6;
     }
     // Held by whatever editor last drove it; a flight opened next must not
-    // inherit a colony's zoning view.
+    // inherit a colony's zoning view, nor a dead view's agent-managed sites.
     CityNodes.zoneOverlay = false;
+    CityNodes.agentManagedSites = null;
     // The frame hold and the budget's statics are this view's. A colony
     // that outlives it (the studio's) plays out what it held and holds no
     // more, since no later host replays it.

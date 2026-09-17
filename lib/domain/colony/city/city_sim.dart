@@ -3343,6 +3343,42 @@ class CitySim {
   /// its pristine ground.
   final Map<String, (double, double)> corridorDatums = {};
 
+  /// The datum radius (m from the body centre) each graded parcel's pad was
+  /// levelled to, by its [shapedTerrain] key (`pad:<id>`) — kept as the
+  /// brush is recorded (`CityTerrainShaper.markShaped`).
+  ///
+  /// What a site's paving stands on, and what its access corridor grades to
+  /// at the lot line (docs/plans/site-access.md §6.3, §6.4): the pad the
+  /// brush CUT, not the ground read back over it, for the same reason
+  /// [corridorDatums] keeps a road's. Transient, like [corridorDatums].
+  final Map<String, double> padDatums = {};
+
+  /// The sites whose access corridor the shaper has settled, by
+  /// `SiteGrade.runKey` (`site:<id>:<rev hex8>`) — whether or not it cut
+  /// anything there.
+  ///
+  /// Apart from [shapedTerrain] on purpose: a key there stamps the ground
+  /// cache (`groundCacheShaped`), and a downtown lot whose drive crosses
+  /// only its pavement needs no cut and must not clear a colony's thousands
+  /// of cached ground reads to say so. Transient, like [corridorDatums].
+  final Set<String> shapedSites = {};
+
+  /// The book's `sitesRev` the shaper last walked the sites at, or −1: the
+  /// O(1) gate on that walk (docs/plans/site-access.md §6.3).
+  int siteShapedRev = -1;
+
+  /// The plan revision at which each site's access corridor was CUT, by site
+  /// id — the sites whose heights the capture reads back from
+  /// [corridorDatums] (docs/plans/site-access.md §6.4).
+  ///
+  /// A lookup, never iterated. It is what a rebuilt chunk asks before it
+  /// builds a `SiteCorridorRun` at all: every house lot with a driveway has
+  /// corridor segments and almost none of them is ever cut, and building the
+  /// run to discover that walks the plan and allocates a list per column.
+  /// One entry a site, replaced when its plan moves, removed when a re-plan
+  /// needs no cut. Transient, like [corridorDatums].
+  final Map<String, int> siteCutRev = {};
+
   /// The vertical curve (the grade before it, and the curve's half length
   /// in metres) each plain road corridor segment cut fine starts with, by
   /// its [shapedTerrain] key — kept as the brush is recorded

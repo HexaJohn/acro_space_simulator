@@ -22,8 +22,10 @@
 library;
 
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import '../../../domain/colony/city/parcel.dart';
+import '../../../domain/colony/city/site_access/kerb_cuts.dart';
 import '../../../domain/scatter/mesh_builder.dart';
 import '../../../domain/shared/vector3.dart';
 import 'oriented_box.dart';
@@ -128,13 +130,23 @@ class StreetFurniture {
     // Radial lift for every placement — the height of the raised sidewalk
     // the furniture stands on, zero when the pavement is bare ground.
     double liftM = 0,
+    // The road's drawn kerb cuts (`RoadSnapshot.kerbCuts`, §5.2), measured
+    // from the arc [arcOffset] of [pts]'s first point: a slot inside a
+    // dropped kerb (within two metres of one) draws its share of the
+    // randomness and stands nothing there, so every other prop on the road
+    // is exactly where it was.
+    Float64List? cuts,
+    double arcOffset = 0,
   }) {
     if (!enabled || !cls.hasPavement || pts.length < 2 || budget <= 0) return 0;
     var placed = 0;
     final rnd = math.Random(seed);
+    final masked = cuts != null && cuts.isNotEmpty;
 
     for (final side in const [-1.0, 1.0]) {
+      final sideBit = side > 0 ? 1 : 0;
       var carry = pitchM * rnd.nextDouble();
+      var base = arcOffset;
       for (var i = 1; i < pts.length && placed < budget; i++) {
         final a = pts[i - 1], b = pts[i];
         final seg = b - a;
@@ -152,32 +164,63 @@ class StreetFurniture {
             final prop = _bag[rnd.nextInt(_bag.length)];
             final off = halfWidthM + pavementM * prop.curbFraction;
             final spot = at + across * off + up * liftM;
+            final blocked = masked &&
+                KerbCuts.blocked(cuts, sideBit, base + s,
+                    upstreamM: cutClearM,
+                    downstreamM: cutClearM,
+                    drawnOnly: true);
             if (prop == StreetProp.streetTree && treesOut != null) {
-              treesOut.add((spot, rnd.nextDouble() * math.pi * 2));
+              final yaw = rnd.nextDouble() * math.pi * 2;
+              if (!blocked) treesOut.add((spot, yaw));
             } else {
               place(prop.glazed ? glow : solid, prop, spot, dir, up, rnd,
-                  barePlanter: shrubsOut != null);
+                  barePlanter: shrubsOut != null, dryRun: blocked);
               if (prop == StreetProp.planter && shrubsOut != null) {
-                shrubsOut.add((spot + up * (prop.heightM * 0.85),
-                    rnd.nextDouble() * math.pi * 2));
+                final yaw = rnd.nextDouble() * math.pi * 2;
+                if (!blocked) {
+                  shrubsOut.add((spot + up * (prop.heightM * 0.85), yaw));
+                }
               }
             }
-            placed++;
+            // A blocked slot is not counted: the budget pays for what
+            // stands, and every other prop keeps its place.
+            if (!blocked) placed++;
           }
           s += pitchM * (0.55 + rnd.nextDouble() * 0.9);
         }
         carry = s - len;
+        base += len;
       }
     }
     return placed;
   }
 
+  /// How near a dropped kerb the pavement is left clear (§5.5).
+  static const double cutClearM = 2.0;
+
   /// Stand one [prop] at [at] (anchor-relative metres), facing [along].
   /// The pavement pass places from its bag; the sprawl places by name — a
   /// hydrant on a suburban curb, a shelter on a county highway.
+  /// With [dryRun] nothing is drawn and the same draws are taken from [rnd]:
+  /// what a slot inside a dropped kerb does, so the props after it are
+  /// byte-identical to the road without one (§5.5).
   static void place(MeshBuilder m, StreetProp prop, Vector3 at, Vector3 along,
       Vector3 up, math.Random rnd,
-      {bool barePlanter = false}) {
+      {bool barePlanter = false, bool dryRun = false}) {
+    if (dryRun) {
+      // Only the default case draws, and only one value.
+      switch (prop) {
+        case StreetProp.streetTree:
+        case StreetProp.busShelter:
+        case StreetProp.bench:
+        case StreetProp.planter:
+        case StreetProp.hydrant:
+          return;
+        default:
+          rnd.nextDouble();
+          return;
+      }
+    }
     switch (prop) {
       case StreetProp.streetTree:
         // Trunk plus two canopy slabs. Not the scatter system's tree: a street

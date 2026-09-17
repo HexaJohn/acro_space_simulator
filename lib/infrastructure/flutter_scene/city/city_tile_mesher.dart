@@ -36,6 +36,7 @@ import '../../../domain/colony/city/city_building_spec.dart';
 import '../../../domain/colony/city/parcel.dart';
 import '../../../domain/colony/city/road_catalog.dart';
 import '../../../domain/colony/city/road_elevation.dart';
+import '../../../domain/colony/city/site_access/kerb_cuts.dart';
 import '../../../domain/scatter/mesh_builder.dart';
 import '../../../domain/scatter/prop_mesh.dart';
 import '../../../domain/shared/quaternion.dart';
@@ -50,6 +51,7 @@ import 'pedestrian_tube.dart';
 import 'railway.dart';
 import 'road_deck.dart';
 import 'road_mesher.dart';
+import 'site_access_mesher.dart';
 import 'street_furniture.dart';
 import 'vehicle_meshes.dart';
 
@@ -756,6 +758,9 @@ enum CityMeshStepKind {
   buildings,
   patches,
   lots,
+  // A site access plan's structural surfaces: paving, ribbons, throats,
+  // gates and stall paint (see `site_access_mesher.dart`).
+  sites,
   // A detail job's archetype meshes the UI thread lacks, generated.
   archetypes,
   // Every builder of one material and the skyline into one geometry.
@@ -940,6 +945,11 @@ class CityTileMeshJob {
       }));
     }
     steps.add(CityMeshStep(CityMeshStepKind.patches, _emitPatches));
+    // The tile's site access plans, at EVERY tier and gated by neither
+    // `canDetail` nor the detail layer (§5.4): a 900 m site's access road
+    // is structure, not dressing, and the 300 m lot-dressing gate is what
+    // hid the starter kit's sites in the first place.
+    _addSiteStep(SiteAccessMesher.tierFor(r.tier));
     // Only where some building can resolve past a box: the furniture pass
     // skips every block-tier lot, so a tile that cannot detail would run
     // its steps to emit nothing (see `CityNodes.tileCanDetail`). Under the
@@ -978,7 +988,10 @@ class CityTileMeshJob {
     steps.setAll(0, steps.reversed.toList());
   }
 
-  /// The lot furniture, in runs.
+  /// The lot furniture, in runs. A plan-served building's site is DRESSED
+  /// here, with the furniture of the building it serves (§5.4, R6), so the
+  /// same site draws the same dressing whether the detail layer is on (the
+  /// layer's job runs this) or off (a near tile runs it).
   void _addLotSteps(List<BuildingSnapshot> buildings) {
     const perStep = 60;
     for (var i = 0; i < buildings.length; i += perStep) {
@@ -987,6 +1000,58 @@ class CityTileMeshJob {
           () => _emitLotFeatures(buildings.sublist(from, to))));
     }
   }
+
+  /// A step for the tile's sites at [tier], when the knob is on and the
+  /// request carries any. At the NEAR tier a big site takes its dressing
+  /// here — its lamps and its stalls' cars — since no lot pass draws it.
+  void _addSiteStep(SiteDrawTier tier) {
+    if (!request.knobs.siteAccess || members.sites.isEmpty) return;
+    steps.add(CityMeshStep(CityMeshStepKind.sites, () {
+      final tb = _tile;
+      final near = tier == SiteDrawTier.near;
+      _carBudget -= SiteAccessMesher.emitAll(
+        members.sites,
+        apron: tb.featureApron,
+        solid: tb.featureSolid,
+        anchorBF: request.anchorBF,
+        tier: tier,
+        cars: near ? tb.featureCars : null,
+        glow: near ? tb.featureGlow : null,
+        carBudget: near ? _carBudget : 0,
+        airless: request.knobs.sealedWorld,
+      );
+    }));
+  }
+
+  /// The site of plan-served building [b], or null: its book slot in the
+  /// frames the request carries (`CityTileMembers.sites`), looked up
+  /// through one index built on first use.
+  ///
+  /// Gated on the knob like `_addSiteStep`: with `siteAccess` off a request
+  /// that carries sites anyway draws the legacy lot, never the plan's
+  /// dressing (the knob discipline of §5.5 as built).
+  (CitySiteFrame, SiteChunkGeometry, int, bool)? _siteOf(BuildingSnapshot b) {
+    if (!request.knobs.siteAccess || b.siteSlot < 0 || members.sites.isEmpty) {
+      return null;
+    }
+    final byColony = _siteIndex ??= () {
+      final out = <String, Map<int, (CitySiteFrame, SiteChunkGeometry, int, bool)>>{};
+      for (final f in members.sites) {
+        final on = out['${f.colonyId}|${f.bodyId}'] ??= {};
+        for (var c = 0; c < f.chunks.length; c++) {
+          final g = f.chunks[c];
+          for (var k = 0; k < g.siteCount; k++) {
+            on[g.siteSlot(k)] = (f, g, k, f.isAgentManaged(c, k));
+          }
+        }
+      }
+      return out;
+    }();
+    return byColony['${b.colonyId}|${b.body}']?[b.siteSlot];
+  }
+
+  Map<String, Map<int, (CitySiteFrame, SiteChunkGeometry, int, bool)>>?
+      _siteIndex;
 
   /// The archetypes this job's instances key to that the UI thread did
   /// not list, as generation steps pushed to run next — a few keys a
@@ -1020,7 +1085,9 @@ class CityTileMeshJob {
     final tier = key.detail;
     final built = libraries.forTier(tier).get(
         CityTileMesher.specOf(b), CityTileMesher.parcelOf(b, k.style),
-        seed: b.id.hashCode, detail: tier);
+        seed: b.id.hashCode,
+        detail: tier,
+        gate: CityTileMesher.gateOf(b, siteAccess: k.siteAccess));
     if (k.lodDebug) {
       return CityArchetypeMesh(
         archetype: key,
@@ -1207,9 +1274,11 @@ class CityTileMeshJob {
     // material for the whole tile rather than instanced per archetype.
     // The visualiser keeps the instanced path so its boxes stay one per
     // archetype.
+    final gate = CityTileMesher.gateOf(b, siteAccess: k.siteAccess);
     if (tier == BuildingDetail.block && !k.lodDebug) {
-      final built = lib.get(spec, parcel, seed: seed, detail: tier);
-      final m = CityTileMesher.instanceTransform(r.anchorBF, b);
+      final built = lib.get(spec, parcel, seed: seed, detail: tier, gate: gate);
+      final m = CityTileMesher.instanceTransform(r.anchorBF, b,
+          gate: gate, style: k.style, bucketM: lib.bucketM);
       // Under the detail layer a NEAR tile's boxes are drawn a little
       // inside the building, so the layer's model over one hides it (see
       // [CityTileMesher.nearBoxInset]). The glazing bands take the same
@@ -1253,11 +1322,11 @@ class CityTileMeshJob {
         bucketM: lib.bucketM,
         variants: lib.variants,
         styleId: k.styleId,
-        corner: b.corner);
-    _groups
-        .putIfAbsent(key, () => (b, []))
-        .$2
-        .add(CityTileMesher.instanceTransform(r.anchorBF, b));
+        corner: b.corner,
+        gate: gate);
+    _groups.putIfAbsent(key, () => (b, [])).$2.add(
+        CityTileMesher.instanceTransform(r.anchorBF, b,
+            gate: gate, style: k.style, bucketM: lib.bucketM));
   }
 
   /// Flat ground patches: roads, zoned lots, support decks.
@@ -1353,14 +1422,43 @@ class CityTileMeshJob {
       if (tier == BuildingDetail.block) continue;
       final edging = LotFeatures.edgingFor(b.type);
       final sign = LotFeatures.signFor(b.type);
+      // PLAN-SERVED (§5.5): the plan's own dressing instead of the legacy
+      // guess — the fence ring on the REAL parcel polygon with the plan's
+      // gaps open, the sign beside the throat, the footpaths, the lamps,
+      // the wheel stops and the cars in the stalls. A served building whose
+      // site the request does not carry falls through to the legacy path,
+      // which is what it drew before.
+      final served = _siteOf(b);
+      if (served != null) {
+        final (frame, geo, site, managed) = served;
+        _carBudget -= SiteAccessMesher.emitDressing(
+          apron: apron,
+          solid: solid,
+          glow: glow,
+          cars: cars,
+          frame: frame,
+          geo: geo,
+          site: site,
+          anchorBF: anchorBF,
+          full: tier == BuildingDetail.full,
+          edging: edging,
+          sign: sign,
+          signScale: math.max(1.0, b.siteWidthM / 18),
+          airless: k.sealedWorld,
+          agentManaged: managed,
+          carBudget: _carBudget,
+        );
+        continue;
+      }
       final spec = CityTileMesher.specOf(b);
       final parcel = CityTileMesher.parcelOf(b, k.style);
       // The massing the building was DRAWN from — the library's cached one,
       // canonical lot and variant and all — so the lot the paint goes on and
       // the door the path runs to are the ones in the mesh.
-      final built = libraries
-          .forTier(tier)
-          .get(spec, parcel, seed: b.id.hashCode, detail: tier);
+      final built = libraries.forTier(tier).get(spec, parcel,
+          seed: b.id.hashCode,
+          detail: tier,
+          gate: CityTileMesher.gateOf(b, siteAccess: k.siteAccess));
       final massing = built.massing;
       final lot = massing.parking;
       if (edging == LotEdging.none && !sign && lot == null) continue;
@@ -1452,6 +1550,12 @@ class CityTileMeshJob {
     final paved = cls.paved;
     final near = tier == CityTier.near;
     final paint = tier != CityTier.far;
+    // The road's kerb cuts as the tiles read them — the frame's own copy,
+    // already in this polyline's drawn arc and flipped for a reversed road
+    // (§5.2) — as a typed list the masks walk without a bounds check per
+    // read. Null with the knob off, so a road with cuts on the wire draws
+    // exactly as it did.
+    final cuts = r.knobs.siteAccess ? CityTileMesher.cutsOf(road) : null;
 
     if (cls.isElevated) {
       // No ground ribbon, no curb, no junction furniture: there is nothing
@@ -1688,6 +1792,15 @@ class CityTileMeshJob {
         final pullStart = run.fromStart && a == 0 ? pullAt(startEnd) : 0.0;
         final pullEnd =
             run.toEnd && b == run.pts.length - 1 ? pullAt(lastEnd) : 0.0;
+        // Where this span's first point stands along the whole road: what
+        // its kerb cuts are measured from.
+        var spanArc = 0.0;
+        if (cuts != null) {
+          spanArc = run.s0;
+          for (var i = 0; i < a; i++) {
+            spanArc += (run.pts[i + 1] - run.pts[i]).length;
+          }
+        }
         // Every span after the first dresses from a seed of its own.
         final spanSeed =
             span == 0 ? seed : (seed ^ (span * 0x9E3779B1)) & 0xFFFFFFFF;
@@ -1695,7 +1808,10 @@ class CityTileMeshJob {
         if (walked) {
           RoadMesher.sidewalks(rb.walkRibbon, sp, road.halfWidthM, 3.0,
               anchorBF,
-              pullStart: pullStart, pullEnd: pullEnd);
+              pullStart: pullStart,
+              pullEnd: pullEnd,
+              cuts: cuts,
+              arcOffset: spanArc);
         }
         if (verged) {
           RoadMesher.verges(rb.verge, sp, road.halfWidthM, anchorBF,
@@ -1704,13 +1820,17 @@ class CityTileMeshJob {
               pullStart: pullStart,
               pullEnd: pullEnd,
               treesOut: deco == RoadDecoration.trees ? rb.treePits : null,
-              seed: spanSeed);
+              seed: spanSeed,
+              cuts: cuts,
+              arcOffset: spanArc);
         }
         // Nobody lights a dirt track, and nobody lights an alley either.
         if (paved && cls.hasPavement) {
           RoadMesher.lamps(rb.lampSolid, rb.lampGlow, sp, anchorBF,
               road.halfWidthM, cls,
-              liftM: walked ? CityTileMesher.walkTopLiftM : 0.0);
+              liftM: walked ? CityTileMesher.walkTopLiftM : 0.0,
+              cuts: cuts,
+              arcOffset: spanArc);
         }
         if (rb.propBudget > 0) {
           rb.propBudget -= StreetFurniture.emit(
@@ -1727,6 +1847,8 @@ class CityTileMeshJob {
             budget: rb.propBudget,
             treesOut: rb.treePits,
             shrubsOut: rb.shrubPits,
+            cuts: cuts,
+            arcOffset: spanArc,
           );
         }
         // Cars at the kerb, where the road keeps one to park at.
@@ -1737,7 +1859,7 @@ class CityTileMeshJob {
             rb.curbCars > 0) {
           rb.curbCars -= CityTileMesher.curbParkingFor(
               rb.curbSolid, rb.curbGlass, sp, road, anchorBF,
-              budget: rb.curbCars);
+              budget: rb.curbCars, cuts: cuts, arcOffset: spanArc);
         }
         // Vacuum outside: pedestrians travel in a pressurised tube, not on
         // a pavement. The glazing builder already exists for dome caps.
@@ -2233,6 +2355,20 @@ class CityTileMesher {
     );
   }
 
+  /// The plan brief [b] is drawn from, or null for the legacy path
+  /// (docs/plans/site-access.md §6.2).
+  ///
+  /// A building is PLAN-SERVED when it carries a site access slot and the
+  /// knob is on: it then stands on its plan's envelope (the wire's
+  /// `siteWidthM`/`siteDepthM` ARE that envelope), front-aligned on the
+  /// envelope's front edge, with the plan's parking instead of its own and
+  /// its gate left open. With the knob off, or with no plan, every building
+  /// is legacy and nothing below it changes.
+  static SiteGate? gateOf(BuildingSnapshot b, {required bool siteAccess}) =>
+      siteAccess && b.siteSlot >= 0
+          ? SiteGate(xM: b.gateXM, widthM: b.gateWM)
+          : null;
+
   /// The archetype [b] keys to at [detail] under [k]: exactly the key the
   /// meshing groups its instances by, for the UI side to look its mesh up
   /// with.
@@ -2245,7 +2381,8 @@ class CityTileMesher {
         bucketM: bucketM,
         variants: variants,
         styleId: k.styleId,
-        corner: b.corner);
+        corner: b.corner,
+        gate: gateOf(b, siteAccess: k.siteAccess));
   }
 
   /// Model transform for one building.
@@ -2254,15 +2391,29 @@ class CityTileMesher {
   /// east, +Y north, +Z radial up), and generated buildings are authored Z-up
   /// with their origin at the base — so the two compose directly, and a
   /// building lands standing on its pad rather than buried or lying down.
-  static vm.Matrix4 instanceTransform(Vector3 anchorBF, BuildingSnapshot b) {
+  /// Pass [gate] (with the [style] and the library's [bucketM]) for a
+  /// PLAN-SERVED building: its mesh was generated against the BUCKETED
+  /// envelope, so the instance is shifted back along its own local +Y by half
+  /// the bucketing slack, which keeps the drawn front wall — and the door on
+  /// it — on the envelope's real front edge (§6.2). Without it the transform
+  /// is exactly what it was.
+  static vm.Matrix4 instanceTransform(Vector3 anchorBF, BuildingSnapshot b,
+      {SiteGate? gate, ArchitectureStyle? style, double bucketM = 6}) {
     final offset = Vector3(b.px, b.py, b.pz) - anchorBF;
     final surface = Quaternion(b.qw, b.qx, b.qy, b.qz);
-    return vm.Matrix4.compose(
+    final m = vm.Matrix4.compose(
       vm.Vector3(lengthToScene(offset.x), lengthToScene(offset.y),
           lengthToScene(offset.z)),
       quatToScene(surface),
       vm.Vector3.all(lengthToScene(1.0)),
     );
+    if (gate == null || style == null) return m;
+    final depth = b.siteDepthM + style.frontSetbackM + style.rearSetbackM;
+    final bucketed =
+        BuildingArchetype.bucketOf(depth, bucketM, minFit: true) * bucketM;
+    final shift = (bucketed - depth) / 2;
+    if (shift != 0) m.multiply(vm.Matrix4.translationValues(0, shift, 0));
+    return m;
   }
 
   /// A massing as plain boxes: what a far tile draws a building as.
@@ -2385,6 +2536,14 @@ class CityTileMesher {
   /// bumpers — a solid line of touching cars reads as a wall.
   ///
   /// Returns how many it placed, so the caller can hold a budget.
+  ///
+  /// With [cuts] — the road's drawn kerb cuts, measured from the arc
+  /// [arcOffset] of [pts]'s first point — a bay whose centre
+  /// `KerbCuts.parkingBlocked` masks stands empty: the SAME asymmetric form
+  /// the agents' kerb slots ask (§5.5, A12), so a baked car never stands
+  /// across a drive or in a home back-out's swing. The kerb alternation
+  /// still advances over a masked bay, so the cars either side of one are
+  /// on the kerbs they always were.
   static int curbParkingFor(
     MeshBuilder body,
     MeshBuilder glass,
@@ -2392,11 +2551,14 @@ class CityTileMesher {
     RoadSnapshot road,
     Vector3 anchorBF, {
     required int budget,
+    Float64List? cuts,
+    double arcOffset = 0,
   }) {
     const spacing = 7.4; // a car plus the room to get out of the bay
     var travelled = 0.0;
     var next = spacing;
     var placed = 0;
+    final masked = cuts != null && cuts.isNotEmpty;
     final family = road.sealed ? VehicleKind.airless : VehicleKind.road;
     for (var i = 1; i < pts.length && placed < budget; i++) {
       travelled += (pts[i] - pts[i - 1]).length;
@@ -2412,12 +2574,27 @@ class CityTileMesher {
       final kind = family[h % family.length];
       // Nothing long parks at a curb bay.
       if (kind.lengthM > spacing * 0.85) continue;
+      if (masked &&
+          KerbCuts.parkingBlocked(
+              cuts, s > 0 ? 1 : 0, arcOffset + travelled)) {
+        placed++;
+        continue;
+      }
       VehicleMeshes.emit(body, glass, kind,
           p + side * (road.halfWidthM * s * 0.78), along, up,
           u: (h >> 16 & 0xFF) / 255.0);
       placed++;
     }
     return placed;
+  }
+
+  /// [road]'s kerb cuts as a typed list, or null when it carries none. The
+  /// wire holds them as a plain `List<double>`; a road cut by the capture
+  /// already hands over a `Float64List` view, which is taken as it is.
+  static Float64List? cutsOf(RoadSnapshot road) {
+    final k = road.kerbCuts;
+    if (k.isEmpty) return null;
+    return k is Float64List ? k : Float64List.fromList(k);
   }
 }
 

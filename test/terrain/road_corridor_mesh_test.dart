@@ -79,6 +79,11 @@ void main() {
     return f == null ? body.radius : f.groundRadiusAt(dir.x, dir.y, dir.z);
   }
 
+  /// The brushes [shape] laid for a SITE's access rather than for a road
+  /// (docs/plans/site-access.md §6.3): a site corridor is a `cutFill` too,
+  /// and everything below is about roads.
+  final siteBrushes = <TerrainBrush>{};
+
   /// What the world tick does after the colony advances.
   void shape(CitySim city, InMemoryTerrainEditsRepository e,
       [CityTerrainShaper shaper = const CityTerrainShaper()]) {
@@ -88,8 +93,17 @@ void main() {
         groundRadiusAt: (d) => groundRadius(e, body, d))) {
       e.record(body.id, p.brush);
       CityTerrainShaper.markShaped(city, p.key, p.brush);
+      if (p.key.startsWith('site:') || p.key.startsWith('sitepad:')) {
+        siteBrushes.add(p.brush);
+      }
     }
   }
+
+  /// The road corridors among [bs]: every `cutFill` a road was cut with.
+  List<TerrainBrush> roadCorridors(Iterable<TerrainBrush> bs) => [
+        for (final b in bs)
+          if (b.kind == TerrainBrushKind.cutFill && !siteBrushes.contains(b)) b,
+      ];
 
   /// The renderer's leaves around an eye [heightM] over the colony's centre.
   ({TerrainField field, Set<ChunkKey> leaves, List<TerrainBrush> near,
@@ -542,7 +556,11 @@ void main() {
     // The shaper that never asks for a finer mesh — dev before the fix.
     const coarse = CityTerrainShaper(
         corridorReliefTolM: double.infinity,
-        corridorCrossFallTolM: double.infinity);
+        corridorCrossFallTolM: double.infinity,
+        // The site access corridors too (docs/plans/site-access.md §6.3):
+        // this is dev BEFORE anything asked for a finer mesh, and the
+        // pump's own throat is cut through the field this road runs into.
+        siteCorridorReliefTolM: double.infinity);
     final city = devColony();
     final e = InMemoryTerrainEditsRepository();
     shape(city, e, coarse);
@@ -579,8 +597,8 @@ void main() {
     final fresh = InMemoryTerrainEditsRepository();
     shape(loaded, fresh);
     final corridors = [
-      for (final b in fresh.forBody(earth.id)!.all)
-        if (b.kind == TerrainBrushKind.cutFill && b.minVoxelM < 15) b,
+      for (final b in roadCorridors(fresh.forBody(earth.id)!.all))
+        if (b.minVoxelM < 15) b,
     ];
     expect(corridors.length, saved.length,
         reason: 'every segment the road was cut fine through is cut fine '
@@ -596,10 +614,8 @@ void main() {
     final again = InMemoryTerrainEditsRepository();
     shape(forgot, again);
     expect(
-        again
-            .forBody(earth.id)!
-            .all
-            .where((b) => b.kind == TerrainBrushKind.cutFill && b.minVoxelM < 15),
+        roadCorridors(again.forBody(earth.id)!.all)
+            .where((b) => b.minVoxelM < 15),
         isEmpty,
         reason: 'the case is gone: a load sees the relief without being told');
   }, timeout: const Timeout(Duration(minutes: 5)));
@@ -620,10 +636,7 @@ void main() {
       final e = InMemoryTerrainEditsRepository();
       shape(city, e);
       final body = system.body(city.body.id)!;
-      final corridors = [
-        for (final b in e.forBody(body.id)!.all)
-          if (b.kind == TerrainBrushKind.cutFill) b,
-      ];
+      final corridors = roadCorridors(e.forBody(body.id)!.all);
       expect(corridors, isNotEmpty, reason: name);
       expect(corridors.where((b) => b.minVoxelM != 15), isEmpty,
           reason: '$name: a road cut fine');
@@ -653,18 +666,43 @@ void main() {
       // ([colonyEditResolutionFor], the one call TerrainNodes meshes a leaf
       // at). Judged on the ground, the generated towns' leaves were boosted
       // — 38 and 47 of them — and their triangles in view doubled.
+      //
+      // Except where a SITE's access corridor is cut fine
+      // (docs/plans/site-access.md §6.3): a throat cut tens of metres into
+      // a hillside is meshed where it is drawn, for the reason a road cut
+      // through relief is, and its leaves are judged on the ground like any
+      // other fine brush. Those leaves are named and counted here rather
+      // than waved through.
       final r = a.field.radius;
-      var boosted = 0;
+      final fineSites = [
+        for (final s in siteBrushes)
+          if (s.minVoxelM < CityTerrainShaper.colonyVoxelM) s,
+      ];
+      final without = [
+        for (final b in a.near)
+          if (!fineSites.contains(b)) b,
+      ];
+      var boosted = 0, overSite = 0;
       for (final k in a.leaves) {
         final res =
             colonyEditResolutionFor(k, r, resolution, a.near, maxBoost: boost);
-        expect(res, datumResolution(k, r, a.near),
+        final base =
+            colonyEditResolutionFor(k, r, resolution, without, maxBoost: boost);
+        expect(base, datumResolution(k, r, without),
             reason: '$name: leaf $k meshed at a new resolution');
+        if (res != base) overSite++;
         if (res > resolution) boosted++;
       }
+      // A handful, and only over a site whose throat is cut: the kit's four,
+      // and a generated town's own set-back installations (§3.7a).
+      if (name == 'starter kit') {
+        expect(overSite, greaterThan(0),
+            reason: 'the kit\'s four throats ARE meshed where they are drawn');
+      }
+      expect(overSite, lessThan(20), reason: name);
       // ignore: avoid_print
       print('$name: ${a.targets.length} targets, ${a.leaves.length} leaves, '
-          '$boosted boosted');
+          '$boosted boosted, $overSite over a fine site corridor');
     }
 
     // And that is the renderer's choice, not a copy of it: TerrainNodes
@@ -689,10 +727,7 @@ void main() {
     final city = devColony();
     final e = InMemoryTerrainEditsRepository();
     shape(city, e, studio);
-    final corridors = [
-      for (final b in e.forBody(earth.id)!.all)
-        if (b.kind == TerrainBrushKind.cutFill) b,
-    ];
+    final corridors = roadCorridors(e.forBody(earth.id)!.all);
     expect(corridors, isNotEmpty);
     expect(corridors.every((b) => b.minVoxelM == 5 && !b.squareStart), isTrue);
     expect(city.fineCorridors, isEmpty);

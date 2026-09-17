@@ -572,11 +572,17 @@ void main() {
           0x07d559a4);
     });
 
-    test('site access on the wire leaves every tier to the byte '
-        '(docs/plans/site-access.md §9 R3)', () {
+    test('site access on the wire leaves every tier to the byte with the '
+        'knob OFF (docs/plans/site-access.md §9 R3, §9 R4)', () {
       // Every building served with a gate, every road with kerb cuts: the
-      // wire fields R3 adds, carried by the columns. Nothing draws them
-      // until R4, with the knob off or on.
+      // wire fields R3 adds, carried by the columns. With the knob OFF
+      // nothing draws them, at any tier — R3's statement, and the one R4
+      // keeps. With it ON, R4 draws the plan: track B's massing reads the
+      // envelope at every tier, and track A's kerb cuts lay the dropped
+      // kerbs on the near tier's kerbside (the fixture carries no
+      // `CitySiteFrame`, so the site mesher itself draws nothing here).
+      // Every tier therefore moves, and each is pinned below.
+
       final served = CityTileColumns.fromSnapshots(
         buildings: [
           for (final (i, b) in buildings.indexed)
@@ -637,13 +643,22 @@ void main() {
       );
       expect(knobs.keyTerms.contains('siteAccess'), isFalse);
       expect(on.keyTerms, '${knobs.keyTerms}|siteAccess');
-      for (final k in [knobs, on]) {
-        int at(CityTier tier) => digest(CityTileMesher.mesh(
-            request(tier, members: served, k: k), CityBuildingLibraries()));
-        expect(at(CityTier.near), 0xf5d18ccb, reason: k.keyTerms);
-        expect(at(CityTier.mid), 0x0759f3c8, reason: k.keyTerms);
-        expect(at(CityTier.far), 0x07d559a4, reason: k.keyTerms);
+      int at(CityMeshKnobs k, CityTier tier) => digest(CityTileMesher.mesh(
+          request(tier, members: served, k: k), CityBuildingLibraries()));
+      expect(at(knobs, CityTier.near), 0xf5d18ccb, reason: knobs.keyTerms);
+      expect(at(knobs, CityTier.mid), 0x0759f3c8, reason: knobs.keyTerms);
+      expect(at(knobs, CityTier.far), 0x07d559a4, reason: knobs.keyTerms);
+      // R4, the knob on: the served buildings are drawn from their plans —
+      // no car park of their own, front-aligned on the envelope, the gate
+      // lane cut open — and the near tier's kerbside lays the dropped kerbs
+      // and stands the masked kerb cars down. So every tier moves; the off
+      // values above never move.
+      for (final tier in CityTier.values) {
+        expect(at(on, tier), isNot(at(knobs, tier)), reason: tier.name);
       }
+      expect(at(on, CityTier.near), 0x6a1f715e, reason: on.keyTerms);
+      expect(at(on, CityTier.mid), 0xcf757f38, reason: on.keyTerms);
+      expect(at(on, CityTier.far), 0xbf7c5994, reason: on.keyTerms);
     });
 
     test('through one scratch, job after job, every tier to the byte', () {

@@ -121,6 +121,32 @@ class MassBox {
   double get floorArea => width * depth * math.max(1, floors);
 }
 
+/// The plan's brief for a building that stands on a site access ENVELOPE
+/// (docs/plans/site-access.md §6.2).
+///
+/// Its presence is what makes a massing plan-served, and it carries the one
+/// number the massing cannot derive: where the plan's primary drive crosses
+/// the envelope's front edge. Everything else about the envelope already
+/// reaches the massing as the parcel it is handed — the envelope inflated by
+/// the style's own setbacks — so a plan-served massing needs nothing more.
+///
+/// Plan-served means: no surface car park (the plan owns the parking), the
+/// building FRONT-ALIGNED on the envelope's front edge so the drawn entrance
+/// lands on the plan's door, and the gate lane left clear.
+class SiteGate {
+  const SiteGate({this.xM = 0, this.widthM = 0});
+
+  /// Along the building's local X from the envelope centre, and the lane's
+  /// width. A width of 0 is a plan-served site with no drive of its own
+  /// (kerb parking), not "no plan".
+  final double xM, widthM;
+
+  bool get isOpen => widthM > 0;
+
+  /// How far into the lot the gate lane is kept clear of volumes (§6.2).
+  static const double laneDepthM = 12.0;
+}
+
 /// A surface car park attached to a building.
 class ParkingLot {
   /// Centre in building-local plan metres.
@@ -299,8 +325,245 @@ class BuildingMassingRules {
   }
 
   /// Shape [spec] to fit [parcel].
-  BuildingMassing massFor(CityBuildingSpec spec, Parcel parcel, {int seed = 0}) =>
-      _clipToParcel(_massIn(spec, parcel, seed: seed), parcel);
+  ///
+  /// Pass [gate] for a PLAN-SERVED building (docs/plans/site-access.md §6.2):
+  /// [parcel] is then the plan's envelope inflated by this style's setbacks,
+  /// the building is front-aligned on the envelope's front edge, it gets no
+  /// surface car park, and the gate lane is left clear. Without it nothing
+  /// below changes: the legacy massing is byte-identical.
+  BuildingMassing massFor(CityBuildingSpec spec, Parcel parcel,
+      {int seed = 0, SiteGate? gate}) {
+    final m = _clipToParcel(_massIn(spec, parcel, seed: seed, gate: gate), parcel);
+    if (gate == null) return m;
+    return _openGateLane(_clipToEnvelope(m, spec, parcel), spec, parcel, gate);
+  }
+
+  /// The plan envelope inside [parcel] for [spec]: what the massing is handed,
+  /// less this style's setbacks (§6.2), centred on the parcel.
+  (double, double) _envelopeOf(CityBuildingSpec spec, Parcel parcel) {
+    final extent =
+        spec.claimsOwnSite ? parcel.buildableExtent : parcel.inscribedExtent;
+    return (
+      math.max(6.0, extent.width - style.sideSetbackM * 2),
+      math.max(6.0, extent.depth - style.frontSetbackM - style.rearSetbackM),
+    );
+  }
+
+  double _envelopeDepth(CityBuildingSpec spec, Parcel parcel) =>
+      _envelopeOf(spec, parcel).$2;
+
+  /// How far a plan-served volume may stand outside its envelope before it is
+  /// dropped, metres. It is not slack for the massing: it is the floating
+  /// point either side of a volume laid exactly on the line.
+  static const double _envelopeTolM = 0.05;
+
+  /// Drop every volume that stands outside the plan's ENVELOPE (§6.1, §6.2).
+  ///
+  /// For a plan-served building the envelope is the lot line: outside it is
+  /// the site's own drive, aisle or stalls, which the plan drew and the
+  /// renderer means to keep clear. The street massings fit by construction —
+  /// they are sized from the envelope — but an installation lays its yard out
+  /// in NOMINAL metres and overhangs its plot by a few of them, the same way
+  /// a solar field overhangs a tapered lot, and [_clipToParcel] cuts that
+  /// against a lot line an envelope is inside of.
+  BuildingMassing _clipToEnvelope(
+      BuildingMassing m, CityBuildingSpec spec, Parcel parcel) {
+    final (w, d) = _envelopeOf(spec, parcel);
+    final hw = w / 2 + _envelopeTolM, hd = d / 2 + _envelopeTolM;
+    final kept = [
+      for (final v in m.volumes)
+        if (_spanOf(v).$1 <= hw && _spanOf(v).$2 <= hd) v,
+    ];
+    if (kept.length == m.volumes.length) return m;
+    return BuildingMassing(
+      volumes: kept,
+      storeyM: m.storeyM,
+      floorArea: m.floorArea,
+      entrance: m.entrance,
+      parking: m.parking,
+      groundStoreyM: m.groundStoreyM,
+      style: m.style,
+      material: m.material,
+      corner: m.corner,
+    );
+  }
+
+  /// How far [v] reaches from the massing's origin in each plan axis. A
+  /// volume turned by a yaw (a plate, a vehicle) is taken at its bounding
+  /// square, which is the reading that cannot be wrong.
+  (double, double) _spanOf(MassBox v) {
+    final turned = v.yaw != 0;
+    final hw = (turned ? math.max(v.width, v.depth) : v.width) / 2;
+    final hd = (turned ? math.max(v.width, v.depth) : v.depth) / 2;
+    return (v.x.abs() + hw, v.y.abs() + hd);
+  }
+
+  /// Stand the front fence line on the envelope's front edge and leave the
+  /// gate lane clear (§6.2, §3.7 step 9): a fence run across the lane is cut
+  /// open at the gate, and anything else standing in it is dropped.
+  ///
+  /// Done on the finished volumes rather than inside each installation's own
+  /// list, so a gate opens every fence line there is (and none of the eight
+  /// nominal-coordinate lists has to learn about plans).
+  BuildingMassing _openGateLane(
+      BuildingMassing m, CityBuildingSpec spec, Parcel parcel, SiteGate gate) {
+    if (!gate.isOpen) return m;
+    final y0 = -_envelopeDepth(spec, parcel) / 2;
+    final y1 = y0 + SiteGate.laneDepthM;
+    final gx0 = gate.xM - gate.widthM / 2, gx1 = gate.xM + gate.widthM / 2;
+    final line = _frontFenceLine(m, gate, y0, y1, gx0, gx1);
+    var changed = false;
+    final kept = <MassBox>[];
+    for (final raw in m.volumes) {
+      // §3.7 step 9: the PLAN's fence line is the envelope's front edge, and
+      // gate node G stands on it. Each installation lays its own fence out in
+      // nominal metres a few inside that line, which would end the drive short
+      // of the gap it is drawn to pass through — so the front run, and the
+      // side runs that met it, move out onto the edge first.
+      final v = _onFrontEdge(raw, line, y0);
+      if (!identical(v, raw)) changed = true;
+      final vy0 = v.y - v.depth / 2, vy1 = v.y + v.depth / 2;
+      final vx0 = v.x - v.width / 2, vx1 = v.x + v.width / 2;
+      if (vy1 <= y0 || vy0 >= y1 || vx1 <= gx0 || vx0 >= gx1) {
+        kept.add(v);
+        continue;
+      }
+      changed = true;
+      // A fence: a thin axis-aligned run. It is cut, not deleted — a gate in
+      // a fence is a gap in that fence, and deleting the run would open the
+      // whole frontage.
+      final fence = v.shape == MassShape.box &&
+          v.yaw == 0 &&
+          v.floors == 0 &&
+          v.depth <= 1.0 &&
+          v.width > gate.widthM;
+      if (!fence) continue;
+      for (final (a, b) in [(vx0, gx0), (gx1, vx1)]) {
+        if (b - a < 0.5) continue;
+        kept.add(MassBox(
+          x: (a + b) / 2,
+          y: v.y,
+          z: v.z,
+          width: b - a,
+          depth: v.depth,
+          height: v.height,
+          floors: v.floors,
+          glazed: v.glazed,
+          shape: v.shape,
+          topScale: v.topScale,
+          yaw: v.yaw,
+          tilt: v.tilt,
+          material: v.material,
+        ));
+      }
+    }
+    if (!changed) return m;
+    return BuildingMassing(
+      volumes: kept,
+      storeyM: m.storeyM,
+      floorArea: m.floorArea,
+      entrance: m.entrance,
+      parking: m.parking,
+      groundStoreyM: m.groundStoreyM,
+      style: m.style,
+      material: m.material,
+      corner: m.corner,
+    );
+  }
+
+  /// How far off the front fence line a run may sit and still count as part
+  /// of it, metres. A fence is laid out in one statement per side, so its
+  /// runs meet to the bit; this is float slack, not a search radius.
+  static const double _fenceLineTolM = 0.05;
+
+  /// The y of the massing's own front fence line, or null when there is no
+  /// fence to move: the front-most thin run standing across the gate lane.
+  ///
+  /// Null too when that run is already on the envelope's front edge, so a
+  /// massing that needs nothing done is returned untouched.
+  double? _frontFenceLine(BuildingMassing m, SiteGate gate, double y0,
+      double y1, double gx0, double gx1) {
+    double? found;
+    for (final v in m.volumes) {
+      if (v.shape != MassShape.box ||
+          v.yaw != 0 ||
+          v.floors != 0 ||
+          v.depth > 1.0 ||
+          v.width <= gate.widthM) {
+        continue;
+      }
+      if (v.y < y0 || v.y > y1) continue;
+      if (v.x - v.width / 2 >= gx1 || v.x + v.width / 2 <= gx0) continue;
+      final f = found;
+      if (f == null || v.y < f) found = v.y;
+    }
+    final f = found;
+    if (f == null || f <= y0 + _fenceOnEdgeTolM) return null;
+    return f;
+  }
+
+  /// A fence line closer than this to the edge already stands on it.
+  static const double _fenceOnEdgeTolM = 0.01;
+
+  /// [v] moved out onto the envelope's front edge [y0] when it belongs to the
+  /// front fence line [line] (§6.2): the run along the frontage stands with
+  /// its outer face on the edge (so it is still inside the envelope), and a
+  /// run into the lot that met it is lengthened to reach it, which keeps the
+  /// fence's corners closed.
+  MassBox _onFrontEdge(MassBox v, double? line, double y0) {
+    if (line == null ||
+        v.shape != MassShape.box ||
+        v.yaw != 0 ||
+        v.floors != 0) {
+      return v;
+    }
+    if (v.depth <= 1.0 && v.width > 1.0) {
+      if ((v.y - line).abs() > _fenceLineTolM) return v;
+      return _movedInDepth(v, y0 + v.depth / 2, v.depth);
+    }
+    if (v.width <= 1.0 && v.depth > 1.0) {
+      if ((v.y - v.depth / 2 - line).abs() > _fenceLineTolM) return v;
+      final rear = v.y + v.depth / 2;
+      return _movedInDepth(v, (y0 + rear) / 2, rear - y0);
+    }
+    return v;
+  }
+
+  /// [v] at [y], [depth] deep; everything else as it was.
+  MassBox _movedInDepth(MassBox v, double y, double depth) => MassBox(
+        x: v.x,
+        y: y,
+        z: v.z,
+        width: v.width,
+        depth: depth,
+        height: v.height,
+        floors: v.floors,
+        glazed: v.glazed,
+        shape: v.shape,
+        topScale: v.topScale,
+        yaw: v.yaw,
+        tilt: v.tilt,
+        material: v.material,
+      );
+
+  /// [m] as a PLAN-SERVED massing (§6.2): its car park is the plan's, and its
+  /// entrance is the gate on the envelope's front edge [frontEdge]. Used by
+  /// the massings that centre themselves in their plot — installations,
+  /// fields, pits, aprons, the railway's two ends — whose door IS their gate.
+  BuildingMassing _planned(
+      BuildingMassing m, SiteGate? gate, double frontEdge) {
+    if (gate == null) return m;
+    return BuildingMassing(
+      volumes: m.volumes,
+      storeyM: m.storeyM,
+      floorArea: m.floorArea,
+      entrance: (gate.xM, frontEdge),
+      groundStoreyM: m.groundStoreyM,
+      style: m.style,
+      material: m.material,
+      corner: m.corner,
+    );
+  }
 
   /// Drop every volume that would stand over the lot line.
   ///
@@ -356,7 +619,8 @@ class BuildingMassingRules {
     );
   }
 
-  BuildingMassing _massIn(CityBuildingSpec spec, Parcel parcel, {int seed = 0}) {
+  BuildingMassing _massIn(CityBuildingSpec spec, Parcel parcel,
+      {int seed = 0, SiteGate? gate}) {
     // A street building is one thing and must fit: the rectangle inscribed
     // in its lot. An installation is many things over its plot's bounding
     // box, and [_clipToParcel] cuts the ones over the line.
@@ -392,8 +656,18 @@ class BuildingMassingRules {
     final capped = spec.siteWidthM > 0 && !_tilesItsPlot.contains(spec.type);
     final capW = capped ? site.width : double.infinity;
     final capD = capped ? site.depth : double.infinity;
-    final frontEdge = -extent.depth / 2 + style.frontSetbackM;
-    final rearEdge = extent.depth / 2 - style.rearSetbackM;
+    // A PLAN-SERVED building stands on its envelope, and the parcel it is
+    // handed is that envelope inflated by the style's setbacks. So its
+    // buildable strip is the envelope itself, CENTRED on the envelope rather
+    // than sitting (front − rear)/2 off it: the drawn front edge, the door,
+    // the gate and every centred installation then share the plan's own
+    // origin, and the instance needs no shift but the bucketing one (§6.2).
+    final planned = gate != null;
+    final envD = math.max(
+        6.0, extent.depth - style.frontSetbackM - style.rearSetbackM);
+    final frontEdge =
+        planned ? -envD / 2 : -extent.depth / 2 + style.frontSetbackM;
+    final rearEdge = planned ? envD / 2 : extent.depth / 2 - style.rearSetbackM;
     final availW =
         math.min(math.max(6.0, extent.width - style.sideSetbackM * 2), capW);
     final availD = math.min(math.max(6.0, rearEdge - frontEdge), capD);
@@ -401,35 +675,44 @@ class BuildingMassingRules {
     // The railway's two ends have massings of their own: a station is a hall
     // on a platform, a yard is hardstanding under a crane. Neither is the
     // shed the industrial path would make of them.
-    if (spec.type == 'station') return _station(spec, availW, availD, storey);
+    if (spec.type == 'station') {
+      return _planned(_station(spec, availW, availD, storey), gate, frontEdge);
+    }
     if (spec.type == 'freightyard') {
-      return _freightYard(spec, availW, availD, storey);
+      return _planned(
+          _freightYard(spec, availW, availD, storey), gate, frontEdge);
     }
     // A solar thermal plant sizes its towers to the plot it is given, not
     // to a nominal site: a bigger plot is more fields, not a bigger one.
     if (spec.type == 'solarthermal') {
-      return _solarThermal(spec, availW, availD, storey);
+      return _planned(
+          _solarThermal(spec, availW, availD, storey), gate, frontEdge);
     }
     // And the installations: each built of the things its real counterpart
     // is built of, so a refinery reads as a refinery from a kilometre up and
     // not as the same grey slab as the data centre next to it.
     final own = _installation(spec, availW, availD, storey);
-    if (own != null) return own;
+    if (own != null) return _planned(own, gate, frontEdge);
     switch (spec.siteKind) {
       case SiteKind.field:
-        return spec.type.startsWith('farm')
-            ? _farm(spec, availW, availD, storey)
-            : _field(spec, availW, availD);
+        return _planned(
+            spec.type.startsWith('farm')
+                ? _farm(spec, availW, availD, storey)
+                : _field(spec, availW, availD),
+            gate,
+            frontEdge);
       case SiteKind.pit:
-        return _pit(spec, availW, availD, storey);
+        return _planned(_pit(spec, availW, availD, storey), gate, frontEdge);
       case SiteKind.pad:
-        return _apron(spec, availW, availD, storey);
+        return _planned(_apron(spec, availW, availD, storey), gate, frontEdge);
       case SiteKind.building:
         break;
     }
 
     final needed = requiredArea(spec);
-    final spaces = parkingSpaces(spec);
+    // The plan owns the parking, so a plan-served building keeps none of its
+    // own: no strip off the buildable depth, and no lot.
+    final spaces = planned ? 0 : parkingSpaces(spec);
     final parkArea = spaces * parkingSpaceM2;
 
     // Parking takes a strip off one END of the buildable depth whenever there
@@ -539,9 +822,16 @@ class BuildingMassingRules {
     // Where the building sits within its buildable strip, and where the cars
     // go. Front-parking pushes the building back; rear-parking pulls it
     // forward onto the street line.
-    final buildCentreY = style.parkingBehind
-        ? frontEdge + buildD / 2
-        : frontEdge + parkDepth + buildD / 2;
+    // FRONT ALIGNMENT (§6.2). Centring the footprint in the buildable strip
+    // leaves the entrance (1 − coverD)/2 · buildD behind the front edge —
+    // 2.7 m on a house, tens of metres on an installation — so a plan-served
+    // building is aligned on its FOOTPRINT instead, which puts the drawn
+    // entrance on the envelope's front edge exactly, with no style input.
+    final buildCentreY = planned
+        ? frontEdge + footD / 2
+        : (style.parkingBehind
+            ? frontEdge + buildD / 2
+            : frontEdge + parkDepth + buildD / 2);
     final parkCentreY = style.parkingBehind
         ? frontEdge + buildD + parkDepth / 2
         : frontEdge + parkDepth / 2;

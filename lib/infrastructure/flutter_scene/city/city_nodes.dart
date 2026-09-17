@@ -43,6 +43,7 @@ import 'package:flutter_scene/src/geometry/mesh_geometry.dart'
     show MeshGeometry, StagedMeshUpload;
 import 'package:vector_math/vector_math.dart' as vm;
 
+import '../../../application/snapshot/city_site_frame.dart';
 import '../../../application/snapshot/city_traffic_frame.dart';
 import '../../../application/snapshot/world_snapshot.dart';
 import '../../../domain/architecture/building_generator.dart';
@@ -77,6 +78,7 @@ import 'rail_vehicles.dart';
 import 'road_mesher.dart';
 import 'road_overlay_nodes.dart';
 import 'road_overlay_state.dart';
+import 'site_access_mesher.dart';
 import 'vehicle_meshes.dart';
 import 'city_textures.dart';
 import 'city_traffic.dart';
@@ -452,12 +454,47 @@ class CityNodes {
   static bool agentSignals = false;
 
   /// Whether the tiles take the frame's site access plans
-  /// (docs/plans/site-access.md §5.3): the sites cut into tiles and keyed,
-  /// served buildings' slots and gates and roads' kerb cuts keyed, and the
-  /// sites packed into the requests. OFF (the default) until the slice that
-  /// draws them: every building is legacy, and every tile's membership, key
+  /// (docs/plans/site-access.md §5.3, §6.2): the sites cut into tiles and
+  /// keyed, served buildings' slots and gates and roads' kerb cuts keyed, the
+  /// sites packed into the requests, and a served building placed on its
+  /// plan's ENVELOPE, turned to face its access road. ON since R4 (§9 R4).
+  /// Off — the perf knob `siteAccess`, and what every legacy pin is asserted
+  /// against — every building is legacy, and every tile's membership, key
   /// and mesh are exactly as they were.
-  static bool siteAccess = false;
+  ///
+  /// One knob, one place it is kept. Envelope placement happens where the
+  /// frame is captured (`SiteCapture`, an application type the renderer
+  /// cannot reach from a worker), so the flag LIVES there and this is its
+  /// public name: two flags could disagree, and a frame placed one way and
+  /// keyed the other draws a building beside its own driveway.
+  static bool get siteAccess => SiteCapture.envelopePlacement;
+  static set siteAccess(bool on) => SiteCapture.envelopePlacement = on;
+
+  /// The ROAD-SIDE SEAM for which sites agent traffic manages
+  /// (docs/plans/site-access.md §5.5 as built, R6): given the frame and one
+  /// colony's site frame, one byte per BOOK SLOT, nonzero where traffic
+  /// manages the site (a slot past the end reads 0). Null — the default —
+  /// is nothing managed, and every site bakes its lot cars.
+  ///
+  /// Read here, on the UI thread, once a frame, and never on a worker: the
+  /// cut folds the bits into the keys of the tiles that hold a managed site
+  /// (only when set) and carries them to the worker on the request's subset
+  /// frames (`CitySiteFrame.agentManaged`). A managed site bakes no lot cars.
+  ///
+  /// The Agent Traffic merge connects it with one line, where the renderer
+  /// is set up:
+  /// `CityNodes.agentManagedSites = (snap, sites) => snap.cityTraffic
+  ///     .where((t) => t.colonyId == sites.colonyId).firstOrNull?.agentManaged;`
+  static Uint8List? Function(WorldSnapshot snapshot, CitySiteFrame sites)?
+      agentManagedSites;
+
+  /// This frame's seam bytes, one per `WorldSnapshot.sites` entry; empty with
+  /// no seam or with the knob off.
+  static List<Uint8List?> agentManagedOf(WorldSnapshot snap) {
+    final source = agentManagedSites;
+    if (source == null || !siteAccess || snap.sites.isEmpty) return const [];
+    return [for (final f in snap.sites) source(snap, f)];
+  }
 
   /// Scales how many vehicles a road carries. A hook for the colony's own
   /// congestion once that reaches the frame; 1.0 is an ordinary working day.
@@ -581,6 +618,15 @@ class CityNodes {
   final InstantRoadTracker _instant = InstantRoadTracker();
   final Map<String, fs.Node> _instantNodes = {};
   final Map<String, int> _instantBuilt = {};
+
+  /// The site access plans changed since their tiles last built, drawn at
+  /// once beside those roads (docs/plans/site-access.md §5.4): a drive laid
+  /// this frame is on the ground this frame.
+  final InstantSiteTracker _instantSites = InstantSiteTracker();
+
+  /// This frame's agent-managed bytes ([agentManagedOf]), read once in
+  /// [update] and handed to the cut and the detail layer.
+  List<Uint8List?> _agentManaged = const [];
 
   /// The road tool's overlay (see [RoadOverlayState]): one node — the state
   /// names one body at a time — rebuilt only when the state's revision or
@@ -844,12 +890,17 @@ class CityNodes {
     // changes no count, and a cut keyed on counts alone never saw one. A
     // colony culled for range is cut again only when that moves or the
     // camera comes back within range (see [CityCutGate]).
+    final managed = _agentManaged = agentManagedOf(snap);
+    final managedSig = CityTileBucketer.agentManagedSignature(managed);
     final sig = '${snap.buildings.length}|${snap.roads.length}|'
         '${snap.patches.length}|${snap.terrainEdits.length}|'
         '${CityTileBucketer.roadsSignature(snap)}'
         // Site access, only while the tiles take it: a plan appearing or a
         // height moving re-cuts, and the detail layer's key inherits it.
-        '${siteAccess ? '|${CityTileBucketer.sitesSignature(snap)}' : ''}';
+        '${siteAccess ? '|${CityTileBucketer.sitesSignature(snap)}' : ''}'
+        // Which sites agent traffic manages (R6), only once the seam says
+        // some are: a bit flipped re-cuts.
+        '${managedSig != 0 ? '|m$managedSig' : ''}';
     final focusOf = _focusOfBodies(snap, focusWorld);
     if (_cutGate.wantsCut(snap, sig, rangeM: maxRangeM, focusBF: focusOf)) {
       _cutGate.cut(sig);
@@ -1328,7 +1379,8 @@ class CityNodes {
         anchors: {for (final r in _roots.values) r.bodyId: r.anchorBF},
         tileM: tileM,
         keyed: false,
-        siteAccess: siteAccess);
+        siteAccess: siteAccess,
+        agentManaged: _agentManaged);
     final bounds = CityCullBounds.ofPlan(plan);
     if (bounds.nearestM(focusBF) > maxRangeM) {
       _cull(bounds);
@@ -1372,6 +1424,12 @@ class CityNodes {
     // The roads whose content is new since the last cut, for the instant
     // path to draw until their tiles catch up.
     _instant.noteCut(plan.tiles.values);
+    // And the site plans whose key is new, the same way.
+    if (siteAccess) {
+      _instantSites.noteCut([
+        for (final b in plan.tiles.values) (b.bodyId, b.key, b.sites),
+      ]);
+    }
     // The skyglow's density map, from the first body with buildings — the
     // same single-colony assumption the night factor makes.
     for (final entry in _byBody.entries) {
@@ -1767,8 +1825,10 @@ class CityNodes {
   _CityMesh _meshArchetype(BuildingArchetype key, BuildingSnapshot b) {
     final tier = key.detail;
     final lib = _libraries.forTier(tier);
-    final built =
-        lib.get(specOf(b), parcelOf(b), seed: b.id.hashCode, detail: tier);
+    final built = lib.get(specOf(b), parcelOf(b),
+        seed: b.id.hashCode,
+        detail: tier,
+        gate: CityTileMesher.gateOf(b, siteAccess: siteAccess));
     if (lodDebug) {
       // The building's own massing, as one box. Same size, same place,
       // no detail — so what you are looking at is purely which tier each
@@ -2574,18 +2634,25 @@ class CityNodes {
     // A tile shows its current structure once the set it shows was built
     // under its structure key: a build landed, or the tier cache answered
     // with one (a set parked under an older structure is never kept).
-    _instant.retire((tileKey) {
+    bool current(String tileKey) {
       final t = _tiles[tileKey];
       return t == null || t.shownKey.startsWith('${t.structureKey}|');
-    });
-    for (final bodyId in _instantNodes.keys.toList()) {
-      if (!_instant.hasPendingOn(bodyId)) _dropInstantFor(bodyId);
     }
-    for (final bodyId in _instant.bodies) {
+
+    _instant.retire(current);
+    _instantSites.retire(current);
+    for (final bodyId in _instantNodes.keys.toList()) {
+      if (!_instant.hasPendingOn(bodyId) &&
+          !_instantSites.hasPendingOn(bodyId)) {
+        _dropInstantFor(bodyId);
+      }
+    }
+    for (final bodyId in {..._instant.bodies, ..._instantSites.bodies}) {
       final root = _roots[bodyId];
       final body = snap.bodies[bodyId];
       if (root == null || body == null) continue;
-      final revision = _instant.revisionOf(bodyId);
+      final revision = _instant.revisionOf(bodyId) * 1000003 +
+          _instantSites.revisionOf(bodyId);
       if (_instantBuilt[bodyId] == revision) {
         final existing = _instantNodes[bodyId];
         if (existing != null && (moved[bodyId] ?? true)) {
@@ -2600,8 +2667,27 @@ class CityNodes {
       for (final e in _instant.pendingOn(bodyId)) {
         InstantRoadMesher.emit(g, e.road, root.anchorBF);
       }
+      // The changed site plans, drawn at the near tier into the same two
+      // materials the tiles draw them in.
+      final siteApron = MeshBuilder();
+      final siteSolid = MeshBuilder();
+      for (final e in _instantSites.pendingOn(bodyId)) {
+        SiteAccessMesher.emit(
+          apron: siteApron,
+          solid: siteSolid,
+          frame: e.frame,
+          geo: e.geometry,
+          site: e.site,
+          anchorBF: root.anchorBF,
+          tier: SiteDrawTier.near,
+        );
+      }
       final primitives = <fs.MeshPrimitive>[
-        for (final (m, kind) in g.parts)
+        for (final (m, kind) in [
+          ...g.parts,
+          (siteApron, CityMaterialKind.road),
+          (siteSolid, CityMaterialKind.facade),
+        ])
           if (_geometryOf(m.build()) case final geometry?)
             fs.MeshPrimitive(geometry, _materialOf(kind)),
       ];
@@ -3095,6 +3181,7 @@ class CityNodes {
     _roots.clear();
     // The tiles went with the roots: the next cut is every body's first.
     _instant.reset();
+    _instantSites.reset();
     _byBody = {};
     _dropResident();
   }
@@ -3415,6 +3502,7 @@ class CityNodes {
           knobs: _knobsNow(),
           candidates: () => _detailCandidates(bodyId, focusBF),
           sites: snap.sites,
+          agentManaged: _agentManaged,
         ),
       );
     }

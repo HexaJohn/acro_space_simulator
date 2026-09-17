@@ -156,6 +156,64 @@ void main() {
     }
   });
 
+  test('a corridor levelled in plan grades the MIDDLE of a steep run, '
+      'where the same corridor projected in 3-D leaves the hillside standing',
+      () {
+    // A site's access corridor: 56 m along, 80 m down into the platform its
+    // drive leaves — the case `TerrainBrush.planLevel` exists for
+    // (docs/plans/site-access.md §6.3). The middle of it is a 43 m cut.
+    final a = dirAt(0), b = dirAt(56);
+    TerrainBrush corridor({required bool planLevel}) => TerrainBrush.cutFill(
+          startBF: a * bodyR,
+          endBF: b * (bodyR - 80),
+          radiusM: 4.5,
+          datumRadiusM: bodyR,
+          datumRadiusEndM: bodyR - 80,
+          falloffM: 4.5,
+          maxCutM: 160,
+          planLevel: planLevel,
+        );
+
+    /// The composed field at [east] metres along, [r] from the centre.
+    double density(double east, double r, TerrainBrush brush) {
+      final p = dirAt(east) * r;
+      return brush.apply(baseDensity(p), p);
+    }
+
+    // In plan, every point of the run stands on the straight grade between
+    // its two datums — which is what the renderer draws it on
+    // (`SiteCorridorRun.radiusAt`).
+    final plan = corridor(planLevel: true);
+    for (final (east, want) in [
+      (0.0, bodyR),
+      (14.0, bodyR - 20),
+      (28.0, bodyR - 40),
+      (42.0, bodyR - 60),
+      (56.0, bodyR - 80),
+    ]) {
+      expect(surfaceRadius(dirAt(east), [plan]), closeTo(want, 0.05),
+          reason: 'the grade is wrong ${east}m along');
+      // And the hillside above the grade is gone: air, not rock.
+      expect(density(east, naturalGround(dirAt(east)), plan),
+          greaterThan(want == bodyR ? -0.01 : 20),
+          reason: 'the ground above the grade is still solid ${east}m along');
+    }
+
+    // Projected in three dimensions the same corridor cuts only its ends: a
+    // sample offset radially from a chord that steep maps to a far-off place
+    // along it, where the lateral test then rejects it, and the field keeps
+    // its natural value — the hillside standing through the middle of the
+    // drive, which the outermost-crossing ground query then reports as the
+    // ground (`TerrainField.groundRadiusAt`) and the mesher meshes.
+    final flat = corridor(planLevel: false);
+    for (final east in [14.0, 28.0, 42.0]) {
+      expect(density(east, naturalGround(dirAt(east)), flat).abs(),
+          lessThan(1e-9),
+          reason: 'the 3-D projection is what the plan rule is measured '
+              'against: it moved the ground ${east}m along after all');
+    }
+  });
+
   test('a levelling brush leaves the field untouched outside its bound', () {
     final centre = dirAt(0) * naturalGround(dirAt(0));
     final pad = TerrainBrush.pad(

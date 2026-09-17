@@ -1695,8 +1695,20 @@ class BuildingSnapshot {
     int siteSlot = -1,
     double gateXM = 0,
     double gateWM = 0,
+
+    /// Where the building's own PLAN puts it (docs/plans/site-access.md §5.2
+    /// R4): on its envelope, turned to face its access road. Null (or an
+    /// empty envelope) keeps the legacy centroid placement exactly.
+    SitePlacement? placement,
   }) {
-    final t = _parcelTransform(city, parcel, siteRadiusM);
+    // The plan, or null when there is nothing to stand on. Narrowed ONCE,
+    // into a nullable of its own, so nothing below reads it through a
+    // promoting bool (the pinned SDK miscompiles that natively).
+    final plan =
+        placement != null && placement.hasEnvelope ? placement : null;
+    final t = plan == null
+        ? _parcelTransform(city, parcel, siteRadiusM)
+        : _planTransform(city, plan, siteRadiusM);
     final dir = t.position.normalized;
     // Stand the building INSIDE its own terrace.
     //
@@ -1712,8 +1724,13 @@ class BuildingSnapshot {
     // was drawn to fill it, so buildings that state their own extent came out
     // far larger than they are. Specs that state nothing keep taking the lot,
     // which is the parcel-native sizing the grid never allowed.
+    // ...and on a PLAN-SERVED site the size IS the plan's envelope: the one
+    // rectangle the plan left for a building, measured clear of its own
+    // paving. The renderer inflates it by the style's setbacks and fits the
+    // massing inside, so nothing it draws can stand on the drive.
     final foot = buildingFootprint(parcel, spec);
-    final w = foot.width, d = foot.depth;
+    final w = plan == null ? foot.width : plan.widthM;
+    final d = plan == null ? foot.depth : plan.depthM;
     return BuildingSnapshot(
       id: parcel.id,
       type: spec.type,
@@ -1756,7 +1773,15 @@ class BuildingSnapshot {
     int siteSlot = -1,
     double gateXM = 0,
     double gateWM = 0,
+
+    /// The cell's PLAN (see [BuildingSnapshot.ofParcel]). A cell fronts a
+    /// FAKE north edge, so a served cell turns to the road its plan found
+    /// and stands on its envelope inside the cell (§3.1, §10.2 Q10).
+    SitePlacement? sitePlan,
   }) {
+    // Narrowed ONCE, into a nullable of its own: nothing below reads the
+    // plan through a promoting bool (the pinned SDK miscompiles that).
+    final plan = sitePlan != null && sitePlan.hasEnvelope ? sitePlan : null;
     final radius = siteRadiusM ?? body.radius;
     final half = city.grid / 2.0;
     final gx = (cell % city.grid) - half;
@@ -1777,19 +1802,38 @@ class BuildingSnapshot {
     final trueLat = math.asin(dir.z.clamp(-1.0, 1.0));
     final trueLon = math.atan2(dir.y, dir.x);
     final elevation = terrain.heightAt(body.id, trueLat, trueLon);
-    final t = placement.building(
-      radius: radius,
-      lat: lat,
-      lon: lon,
-      gridX: gx.round(),
-      gridY: gy.round(),
-      cell: CitySim.cellM,
-      elevation: elevation,
-    );
+    // A PLAN-SERVED cell stands on its envelope, which is a rectangle inside
+    // the cell in colony-local metres, so it is placed from the tangent
+    // offsets directly rather than from its grid cell. The elevation is the
+    // cell's own: a plan never moves a building off its pad, and the
+    // envelope is at most half a cell away.
+    final t = plan == null
+        ? placement.building(
+            radius: radius,
+            lat: lat,
+            lon: lon,
+            gridX: gx.round(),
+            gridY: gy.round(),
+            cell: CitySim.cellM,
+            elevation: elevation,
+          )
+        : placement.place(
+            radius: radius,
+            lat: lat,
+            lon: lon,
+            east: plan.centreE,
+            north: plan.centreN,
+            elevation: elevation,
+          );
     // A cell fronts its north edge (`CitySim.parcelForCell`: the 2D map has
     // no road direction to read), so its street heading is 0 and it takes
     // the same legacy spin as a parcel: street face, local −Y, to the north.
-    final q = t.orientation * _legacyBuildingSpin(0);
+    // Its plan knows better — it found the road the cell really fronts — so
+    // a served cell takes the plan's heading instead (§3.1).
+    final q = t.orientation *
+        (plan == null
+            ? _legacyBuildingSpin(0)
+            : Quaternion.axisAngle(Vector3.unitZ, -plan.headingRad));
     return BuildingSnapshot(
       id: '$cell',
       type: spec.type,
@@ -1804,8 +1848,12 @@ class BuildingSnapshot {
       qz: q.z,
       lat: trueLat,
       lon: trueLon,
-      siteWidthM: spec.siteMetres(cellM: CitySim.cellM).width,
-      siteDepthM: spec.siteMetres(cellM: CitySim.cellM).depth,
+      siteWidthM: plan == null
+          ? spec.siteMetres(cellM: CitySim.cellM).width
+          : plan.widthM,
+      siteDepthM: plan == null
+          ? spec.siteMetres(cellM: CitySim.cellM).depth
+          : plan.depthM,
       siteKindIndex: spec.siteKind.index,
       colorArgb: spec.colorArgb,
       siteSlot: siteSlot,
@@ -1879,6 +1927,39 @@ class BuildingSnapshot {
   return (
     position: base.position,
     orientation: base.orientation * _legacyBuildingSpin(parcel.heading),
+  );
+}
+
+/// Surface transform of a PLAN-SERVED building: its plan's envelope centre,
+/// turned by the plan's own heading (docs/plans/site-access.md §3.1, §5.2).
+///
+/// The envelope, the gate and the door are all computed in the site frame, so
+/// spinning by `−SiteFrame.buildingHeading` makes them the building's own
+/// local axes by construction — local +X on `u`, +Y on `v`, and the street
+/// face, local −Y, onto the road the plan joins. Where the lot stores a real
+/// frontage this is the legacy spin to the bit; where it does not (a claimed
+/// site, a generator installation, a grid cell) the building TURNS to face
+/// its access road, which is the visible change R4 carries (§10.2 Q10).
+///
+/// The ground radius is still the lot's, sampled at its centroid: a plan
+/// never moves a building off its own pad, so no new ground query is made.
+({Vector3 position, Quaternion orientation}) _planTransform(
+  CitySim city,
+  SitePlacement placement,
+  double siteRadiusM, [
+  SurfacePlacement surface = const SurfacePlacement(),
+]) {
+  final base = surface.place(
+    radius: siteRadiusM,
+    lat: city.cityLat * math.pi / 180.0,
+    lon: city.cityLon * math.pi / 180.0,
+    east: placement.centreE,
+    north: placement.centreN,
+  );
+  return (
+    position: base.position,
+    orientation: base.orientation *
+        Quaternion.axisAngle(Vector3.unitZ, -placement.headingRad),
   );
 }
 
@@ -2240,6 +2321,7 @@ class TerrainEditSnapshot {
     this.squareStart = false,
     this.curveInGrade = 0,
     this.curveHalf = 0,
+    this.planLevel = false,
   });
 
   /// Body id — joins to [WorldSnapshot.bodies].
@@ -2308,6 +2390,12 @@ class TerrainEditSnapshot {
   /// [squareStart].
   final double curveInGrade, curveHalf;
 
+  /// Whether a corridor brush levels by where a sample stands in PLAN
+  /// ([TerrainBrush.planLevel]) — the shape of the ground it cuts, carried
+  /// like [squareStart], or a loaded colony's drives are meshed on a
+  /// corridor its own shaper never cut.
+  final bool planLevel;
+
   static TerrainEditSnapshot of(BodyId body, TerrainBrush b) =>
       TerrainEditSnapshot(
         body: body.value,
@@ -2330,6 +2418,7 @@ class TerrainEditSnapshot {
         squareStart: b.squareStart,
         curveInGrade: b.curveInGrade,
         curveHalf: b.curveHalfM,
+        planLevel: b.planLevel,
         ex: b.endBF?.x,
         ey: b.endBF?.y,
         ez: b.endBF?.z,
@@ -2357,6 +2446,7 @@ class TerrainEditSnapshot {
         squareStart: squareStart,
         curveInGrade: curveInGrade,
         curveHalfM: curveHalf,
+        planLevel: planLevel,
         endBF: ex == null || ey == null || ez == null
             ? null
             : Vector3(ex!, ey!, ez!),
@@ -2382,6 +2472,7 @@ class TerrainEditSnapshot {
         if (minVoxel != 0) 'mv': minVoxel,
         if (squareStart) 'sq': true,
         if (curveHalf != 0) 'vc': [curveInGrade, curveHalf],
+        if (planLevel) 'pl': true,
         if (ex != null) 'e': [ex, ey, ez],
         if (polygon.isNotEmpty) 'poly': polygon,
       };
@@ -2412,6 +2503,7 @@ class TerrainEditSnapshot {
       squareStart: j['sq'] == true,
       curveInGrade: vc == null ? 0 : (vc[0] as num).toDouble(),
       curveHalf: vc == null ? 0 : (vc[1] as num).toDouble(),
+      planLevel: j['pl'] == true,
       ex: e == null ? null : (e[0] as num).toDouble(),
       ey: e == null ? null : (e[1] as num).toDouble(),
       ez: e == null ? null : (e[2] as num).toDouble(),
@@ -2935,9 +3027,7 @@ class WorldSnapshot {
         // lot's real width and turns to face its road — which is the whole
         // reason parcels exist.
         for (final (parcel, spec) in city.parcelBuiltLots()) {
-          final (slot, gateX, gateW) = siteCap == null
-              ? (-1, 0.0, 0.0)
-              : siteCap.buildingSiteOf(parcel.id);
+          final plan = siteCap?.placementOf(parcel.id);
           buildings['${city.id}/${parcel.id}'] = BuildingSnapshot.ofParcel(
             city,
             parcel,
@@ -2945,9 +3035,12 @@ class WorldSnapshot {
             body,
             siteRadiusM:
                 groundFor('lot:${parcel.id}', parcel.centroid),
-            siteSlot: slot,
-            gateXM: gateX,
-            gateWM: gateW,
+            siteSlot: plan?.slot ?? -1,
+            gateXM: plan?.gateXM ?? 0,
+            gateWM: plan?.gateWM ?? 0,
+            // Behind the knob: off, a served building's position, spin and
+            // size are exactly the legacy ones (§5.2 R4, §6.2).
+            placement: SiteCapture.envelopePlacement ? plan : null,
           );
         }
         // Empty lots, drawn so the subdivision is visible before anything is
@@ -2998,9 +3091,7 @@ class WorldSnapshot {
           );
         }
         for (final e in city.occupiedCells()) {
-          final (slot, gateX, gateW) = siteCap == null
-              ? (-1, 0.0, 0.0)
-              : siteCap.buildingSiteOf(CitySim.siteIdOfCell(e.key));
+          final plan = siteCap?.placementOf(CitySim.siteIdOfCell(e.key));
           buildings['${city.id}/${e.key}'] = BuildingSnapshot.ofCityCell(
             city,
             e.key,
@@ -3009,9 +3100,10 @@ class WorldSnapshot {
             placement,
             heights,
             siteRadiusM: radiusOf(e.key),
-            siteSlot: slot,
-            gateXM: gateX,
-            gateWM: gateW,
+            siteSlot: plan?.slot ?? -1,
+            gateXM: plan?.gateXM ?? 0,
+            gateWM: plan?.gateWM ?? 0,
+            sitePlan: SiteCapture.envelopePlacement ? plan : null,
           );
         }
         // After every lot and cell above has asked its ground: the pads the

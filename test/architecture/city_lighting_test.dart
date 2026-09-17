@@ -13,6 +13,8 @@ import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/universe/real_solar_system.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../application/site_town_fixture.dart';
+
 /// Colony lighting is driven by the real sun, not a clock: a polar colony sits
 /// in months of dusk and a tidally locked one never sees night, and a
 /// time-of-day curve gets both wrong.
@@ -150,5 +152,31 @@ void main() {
     final masts = lighting.lamps(city).where((l) => !l.warm).toList();
     expect(masts, isNotEmpty);
     expect(masts.first.radiusM, greaterThan(25));
+  });
+
+  test('a site with a PLAN lights the plan car park, not a re-massed one',
+      () {
+    // docs/plans/site-access.md §6.2: the masts come from the plan's own
+    // lamp posts. Re-running the massing here was the fifth lot line in the
+    // colony — masts over a car park the renderer no longer draws.
+    final city = siteTown();
+    final masts = lighting.lamps(city).where((l) => !l.warm).toList();
+    var planned = 0;
+    for (final chunk in city.siteAccess.chunks) {
+      for (var k = 0; k < chunk.siteCount; k++) {
+        final plan = chunk.plan(k);
+        for (var l = 0; l < plan.lampCount; l++) {
+          final at = plan.lampPt(l);
+          final want = Vec2(plan.ptE(at), plan.ptN(at));
+          planned++;
+          expect(masts.any((m) => m.position.distanceTo(want) < 1e-6), isTrue,
+              reason: '${plan.siteId}: a mast stands on lamp $l');
+        }
+      }
+    }
+    expect(planned, greaterThan(0),
+        reason: 'the site town parks cars on plans');
+    // ...and nothing else: a planned site adds no mast of its own.
+    expect(masts, hasLength(planned));
   });
 }

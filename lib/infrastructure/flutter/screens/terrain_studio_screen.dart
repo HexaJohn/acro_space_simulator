@@ -733,6 +733,15 @@ class _TerrainStudioScreenState extends State<TerrainStudioScreen>
     _sim?.shapedTerrain.clear();
     _sim?.corridorDatums.clear();
     _sim?.corridorCurves.clear();
+    // The site section settles apart from `shapedTerrain` and behind its own
+    // O(1) revision gate (docs/plans/site-access.md §6.3): left behind, it
+    // would refuse to re-cut a single site corridor or pad on ground that no
+    // longer has any, while the capture's datum lookups miss and the drives
+    // go back to standing off the unshaped easement.
+    _sim?.padDatums.clear();
+    _sim?.shapedSites.clear();
+    _sim?.siteCutRev.clear();
+    _sim?.siteShapedRev = -1;
     _recapture();
     setState(() {});
   }

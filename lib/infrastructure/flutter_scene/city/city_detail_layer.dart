@@ -116,11 +116,17 @@ class CityDetailWant {
     required this.knobs,
     required this.candidates,
     this.sites = const [],
+    this.agentManaged = const [],
   });
 
   /// The frame's site access plans (`WorldSnapshot.sites`): a job packs the
   /// gathered buildings' own while `knobs.siteAccess` is on.
   final List<CitySiteFrame> sites;
+
+  /// Which sites agent traffic manages, aligned with [sites]
+  /// (`CityNodes.agentManagedSites`, §5.5 R6): a managed site bakes no lot
+  /// cars, and the job carries the bits rather than reading a static.
+  final List<Uint8List?> agentManaged;
 
   /// The body the eye is over, and the eye in its frame.
   final String bodyId;
@@ -244,6 +250,7 @@ class CityDetailLayer {
     required CityMeshKnobs knobs,
     required List<BuildingArchetype> known,
     List<CitySiteFrame> sites = const [],
+    List<Uint8List?> agentManaged = const [],
   }) =>
       CityTileRequest(
         tileKey: 'detail/$bodyId',
@@ -262,7 +269,8 @@ class CityDetailLayer {
           // (docs/plans/site-access.md §5.3); none while the knob is off.
           sites: knobs.siteAccess
               ? CityTileBucketer.siteFramesOf(
-                  CityTileBucketer.sitesOfBuildings(sites, buildings))
+                  CityTileBucketer.sitesOfBuildings(sites, buildings,
+                      agentManaged: agentManaged))
               : const [],
         ),
         focusBF: focusBF,
@@ -417,6 +425,7 @@ class CityDetailLayer {
       knobs: want.knobs,
       known: known,
       sites: want.sites,
+      agentManaged: want.agentManaged,
     );
     final job = _job = _DetailJob(key, _cacheEpoch, frame.root, centre,
         frame.rootAnchorBF, frame.pool);
