@@ -4521,6 +4521,26 @@ class CitySim {
 
   /// Place [spec] on the parcel [parcelId]. Returns false if that parcel is
   /// unknown, already built on, or an access easement (§3.7a).
+  /// The spec a save's `parcelBuildings` label names: a utility first (the
+  /// catalogue placed buildings came from originally), then a ZONE spec.
+  ///
+  /// A save stores a placed building by its label, and the load used to look
+  /// only in [kUtilCatalog] — so a hand-placed zone building (homes, shops, a
+  /// workshop) came back as nothing at all, silently, taking any car parked
+  /// on its site with it. Grown buildings were never affected: `grownParcels`
+  /// is carried whole.
+  static CityBuildingSpec? _specByLabel(String label) {
+    for (final s in kUtilCatalog) {
+      if (s.label == label) return s;
+    }
+    for (final byDensity in kZoneSpecs.values) {
+      for (final s in byDensity.values) {
+        if (s.label == label) return s;
+      }
+    }
+    return null;
+  }
+
   bool placeOnParcel(String parcelId, CityBuildingSpec spec) {
     if (parcelBuildings.containsKey(parcelId)) return false;
     if (layout.parcelById(parcelId) == null) return false;
@@ -4850,8 +4870,7 @@ class CitySim {
       sim.layout.setUse(id as String, ParcelUse.values[(use as num).toInt()]);
     });
     (j['parcelBuildings'] as Map).forEach((id, label) {
-      final spec =
-          kUtilCatalog.where((s) => s.label == label).firstOrNull;
+      final spec = _specByLabel(label as String);
       if (spec != null) sim.parcelBuildings[id as String] = spec;
     });
     sim.grownParcels.addAll({
