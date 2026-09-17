@@ -245,18 +245,19 @@ class _DepthPrepassEncoder {
         return;
       }
       bindDraw(item.worldTransform);
-      final packed = packInstanceTransforms(
-        item.worldTransform,
-        instances,
-        nodeWindingFlipped: item.windingFlipped,
-      );
+      // PATCHED (acro_space_simulator): the item's own pack cache, and its
+      // upload shared with the colour pass of this frame — the two passes
+      // draw the same instances at the same transform, so re-multiplying and
+      // re-emplacing them was pure duplicate work and duplicate traffic
+      // through the shared instance host buffer.
+      final packed = packedInstancesFor(item, instances);
       if (packed.ccwCount > 0) {
-        bindInstanceTransforms(_renderPass, packed.ccw);
+        bindPackedInstances(_renderPass, item, packed, ccw: true);
         _renderPass.setWindingOrder(gpu.WindingOrder.counterClockwise);
         geometry.draw(_renderPass, instanceCount: packed.ccwCount);
       }
       if (packed.cwCount > 0) {
-        bindInstanceTransforms(_renderPass, packed.cw);
+        bindPackedInstances(_renderPass, item, packed, ccw: false);
         _renderPass.setWindingOrder(gpu.WindingOrder.clockwise);
         geometry.draw(_renderPass, instanceCount: packed.cwCount);
       }

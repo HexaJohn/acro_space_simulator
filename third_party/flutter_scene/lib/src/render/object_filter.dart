@@ -209,18 +209,16 @@ class _ObjectMaskEncoder {
         return;
       }
       bindDraw(item.worldTransform);
-      final packed = packInstanceTransforms(
-        item.worldTransform,
-        instances,
-        nodeWindingFlipped: item.windingFlipped,
-      );
+      // PATCHED (acro_space_simulator): the item's pack cache and its
+      // once-a-frame upload, as the colour, depth and shadow passes use.
+      final packed = packedInstancesFor(item, instances);
       if (packed.ccwCount > 0) {
-        bindInstanceTransforms(_renderPass, packed.ccw);
+        bindPackedInstances(_renderPass, item, packed, ccw: true);
         _renderPass.setWindingOrder(gpu.WindingOrder.counterClockwise);
         geometry.draw(_renderPass, instanceCount: packed.ccwCount);
       }
       if (packed.cwCount > 0) {
-        bindInstanceTransforms(_renderPass, packed.cw);
+        bindPackedInstances(_renderPass, item, packed, ccw: false);
         _renderPass.setWindingOrder(gpu.WindingOrder.clockwise);
         geometry.draw(_renderPass, instanceCount: packed.cwCount);
       }

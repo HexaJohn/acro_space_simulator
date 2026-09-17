@@ -60,6 +60,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter_scene/scene.dart' as fs;
 
 import 'domain/colony/city/city_config.dart';
 import 'domain/colony/city/city_progression.dart';
@@ -197,6 +198,22 @@ Future<void> main() async {
           'pointerLockCaptured',
         ])
           k: view[k],
+      },
+      // The engine's last frame, as the city studio's status reports it: a
+      // driver polling this hook keeps the numbers of the frame before a
+      // native death, which is the one measurement a crash dump does not
+      // leave behind (the instance-transform host buffer is the suspect).
+      'engine': {
+        'colourDraws': fs.Scene.lastFrameStats.colourDraws,
+        'shadowDraws': fs.Scene.lastFrameStats.shadowDraws,
+        'packedInstances': fs.Scene.lastFrameStats.packedInstances,
+        'instancesEmplaced': fs.Scene.lastFrameStats.instancesEmplaced,
+        // What the shared instance host buffer really carries: the passes of
+        // one frame bind the same pack and upload it once (16 floats an
+        // instance, render/instance_packing.dart).
+        'instanceUploads': fs.Scene.lastFrameStats.instanceUploads,
+        'instanceBytes': fs.Scene.lastFrameStats.instanceUploads * 16 * 4,
+        'materialBinds': fs.Scene.lastFrameStats.materialBinds,
       },
     }));
   });
