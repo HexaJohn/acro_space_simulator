@@ -944,28 +944,54 @@ class SiteCarBatches {
 /// nothing on the frames they stand still — which is all of them but the
 /// few where a car comes or goes.
 class SiteCarPass {
-  /// Parked cars drawn per colony (§7.4's ceiling). They are not
-  /// range-culled in T4a: a lot car exists only where the agents manage the
-  /// parking, which E36 stage 1 keeps to the sites they actually run. T4b,
-  /// which switches every baked car off, adds the 1.5 km ring with the rest
-  /// of that list. They ARE banded, though — a distant parked car is drawn
-  /// by a slot that casts no shadow, like every other far vehicle.
+  /// Parked cars drawn per colony (§7.4's ceiling): the cap on HOW MANY are
+  /// placed, whatever the town's shape.
+  ///
+  /// It and [parkedRangeM] are two different cuts and both hold. The cap
+  /// bounds a dense town standing under the camera; the ring bounds a sparse
+  /// one spread over a plat, where the cap alone would never bite and every
+  /// far car would still be placed. A car the ring drops is not placed at
+  /// all, so it spends no cap slot either: the cap goes to the cars near the
+  /// camera, as the road half's rings spend theirs (§13.8).
   static const int parkedRenderCap = 1500;
 
-  /// How far the focus may move before the parked cars are banded again,
-  /// metres.
+  /// Parked cars further than this from the focus are not placed, metres —
+  /// §7.4's ring: `parkedRenderCap = 1500`, within 1.5 km of the focus.
   ///
-  /// A car's band is how far it is from the camera, so the parked bands go
-  /// stale the moment the camera moves — but the parked half is hundreds of
-  /// instances that §13.8 keeps out of the shared instance buffer except on
-  /// the few frames a car comes or goes, and re-banding on every nudge would
-  /// put all of them back into it every frame the view moved. So the focus
-  /// is held to this stride: the shadow edge at
-  /// [AgentTrafficPass.shadowRangeM] is fuzzy by at most this much — 4% of
-  /// it, and no one can see a shadow switch off 32 m early 800 m away — and
-  /// a panning camera pays the rewrite once a stride instead of once a
-  /// frame. The cars INSIDE the sites are rewritten every capture anyway
-  /// (they are moving), so they keep the exact focus.
+  /// The parked half is the numerous one, and most of a grown town's parked
+  /// cars stand far from the camera. Every car placed is an instance the
+  /// frame BINDS, and §13.8's upload gate does not reach that: the engine's
+  /// host buffer is cycled every frame, so every pack a frame binds is
+  /// uploaded once whether or not a matrix in it moved. Until this ring the
+  /// parked half passed `range2 = infinity` and a lot car 9 km away was
+  /// bound and uploaded with the rest, in the no-shadow band.
+  ///
+  /// Unlike the road half there is no nearest-first selection here to spend
+  /// the cap where the camera is, so the distance cut IS the selection. It
+  /// is measured in the same anchor-relative metres as every other band
+  /// ([_placeOne]), and its membership is re-read on [parkedBandStepM]'s
+  /// stride, not per frame — a car crossing the ring is up to a stride late,
+  /// which is 2% of 1.5 km and nothing anyone can see at that distance.
+  ///
+  /// A knob (§15.4) rather than a const because the perf sweep A/Bs it;
+  /// `infinity` restores T4a's behaviour exactly.
+  static double parkedRangeM = 1500;
+
+  /// How far the focus may move before the parked cars are banded — and
+  /// ringed — again, metres.
+  ///
+  /// A car's band is how far it is from the camera, and so is its place
+  /// inside or outside [parkedRangeM], so both go stale the moment the
+  /// camera moves — but the parked half is hundreds of instances that §13.8
+  /// keeps out of the shared instance buffer except on the few frames a car
+  /// comes or goes, and re-banding on every nudge would put all of them back
+  /// into it every frame the view moved. So the focus is held to this
+  /// stride: the shadow edge at [AgentTrafficPass.shadowRangeM] is fuzzy by
+  /// at most this much — 4% of it, and no one can see a shadow switch off
+  /// 32 m early 800 m away — the ring's edge by 2% of itself, and a panning
+  /// camera pays the rewrite once a stride instead of once a frame. The cars
+  /// INSIDE the sites are rewritten every capture anyway (they are moving),
+  /// so they keep the exact focus.
   static const double parkedBandStepM = 32;
 
   /// The cars inside the sites: placed afresh whenever the capture
@@ -973,9 +999,10 @@ class SiteCarPass {
   final SiteCarBatches vehicles = SiteCarBatches();
 
   /// The cars parked on the stalls: placed afresh only when a car came or
-  /// went, the site geometry moved, the anchor did, or the focus moved a
-  /// whole [parkedBandStepM] (§7.4) — nothing else can change where a parked
-  /// car stands, or which band it stands in.
+  /// went, the site geometry moved, the anchor did, a render knob did, or
+  /// the focus moved a whole [parkedBandStepM] (§7.4) — nothing else can
+  /// change where a parked car stands, which band it stands in, or whether
+  /// [parkedRangeM]'s ring holds it at all.
   final SiteCarBatches parked = SiteCarBatches();
 
   /// Cars placed inside the sites by the last placement (the parked ones
@@ -989,11 +1016,12 @@ class SiteCarPass {
 
   Object? _parkedFrom, _parkedSites;
   Vector3? _parkedAnchor, _parkedFocus;
-  double _parkedShadow = double.nan;
+  double _parkedShadow = double.nan, _parkedRange = double.nan;
 
-  /// The centre [writePose] worked out for the car being placed,
-  /// anchor-relative METRES: what the bands and the range are measured
-  /// against. One list for the whole pass — the placement allocates nothing
+  /// The centre of the car being placed, anchor-relative METRES: what the
+  /// bands and the ranges are measured against. Written by [centreOf] before
+  /// the range is tested and again by [writePose] when there is a pose to
+  /// work out. One list for the whole pass — the placement allocates nothing
   /// per frame (§13.8).
   final Float64List _centreM = Float64List(3);
 
@@ -1084,13 +1112,18 @@ class SiteCarPass {
     if (rows.sitesRev != sf.sitesRev) return;
     // The focus as well as the rest, now that the band is measured in the
     // metres it was always meant to be: where the camera is decides which
-    // parked cars cast, so a view that moved a real distance must band them
-    // again — but only once a stride, for [parkedBandStepM]'s reason.
+    // parked cars cast AND which ones [parkedRangeM]'s ring holds, so a view
+    // that moved a real distance must place them again — but only once a
+    // stride, for [parkedBandStepM]'s reason. The ring therefore costs no
+    // frame anything the band did not already cost: it is evaluated exactly
+    // when this gate lets a placement through, which is once a stride and
+    // not once a frame.
     final bandedFrom = _parkedFocus;
     if (identical(rows, _parkedFrom) &&
         identical(sf, _parkedSites) &&
         anchorBF == _parkedAnchor &&
         AgentTrafficPass.shadowRangeM == _parkedShadow &&
+        parkedRangeM == _parkedRange &&
         bandedFrom != null &&
         _within(focusBF, bandedFrom, parkedBandStepM)) {
       return;
@@ -1100,21 +1133,25 @@ class SiteCarPass {
     _parkedAnchor = anchorBF;
     _parkedFocus = focusBF;
     _parkedShadow = AgentTrafficPass.shadowRangeM;
+    _parkedRange = parkedRangeM;
     final sealed = f.sitePoses.sealed;
     final qx = focusBF.x - anchorBF.x;
     final qy = focusBF.y - anchorBF.y;
     final qz = focusBF.z - anchorBF.z;
     final shadow2 =
         AgentTrafficPass.shadowRangeM * AgentTrafficPass.shadowRangeM;
+    final range2 = parkedRangeM * parkedRangeM;
     parked.begin();
     var n = 0;
+    // The cap counts what was PLACED, so a row the ring drops costs no slot
+    // and the cap is spent on the cars near the camera (§7.4).
     for (var i = 0; i < rows.lotCount && n < parkedRenderCap; i++) {
       final kind =
           agentVehicleKind(rows.lotKind[i], rows.lotVariant[i], sealed: sealed);
       if (kind == null) continue;
       n += _placeOne(parked, sf, anchorBF, kind, rows.lotE[i], rows.lotN[i],
           rows.lotUp[i], rows.lotDirE[i], rows.lotDirN[i], qx, qy, qz, shadow2,
-          double.infinity);
+          range2);
     }
     parked.finish();
   }
@@ -1135,20 +1172,17 @@ class SiteCarPass {
       double qz,
       double shadow2,
       double range2) {
-    // Written into the near buffer first, because how far away it is can
-    // only be read off the pose the write works out.
-    final near = batches.bufOf(kind, true);
-    final at = near.count;
-    if (!writePose(near.next(), sf, anchorBF, e, n, up, dirE, dirN,
-        centreM: _centreM)) {
-      near.count = at;
-      return 0;
-    }
-    final m = near.matrices[at];
+    // The range before the pose, off the centre alone: a car outside the
+    // ring is then not placed at all, and costs neither the basis and the
+    // matrix nor a slot in any buffer. [centreOf] is the cheap half of
+    // [writePose] — nine multiplies against its three normalisations, two
+    // cross products and sixteen stores — and on a grown town most parked
+    // rows are the far ones this drops (§7.4, §13.8).
+    centreOf(sf, anchorBF, e, n, up, _centreM);
     // ANCHOR-RELATIVE METRES on both sides, the quantity and the unit the
     // road pass bands by ([AgentTrafficPass._placeRow]) and the unit the
-    // knobs are in (§15.4). It must come from [_centreM] and never from the
-    // matrix: [TrafficRoad.writePose] puts the centre through
+    // knobs are in (§15.4). It must come from [_centreM] and never from an
+    // instance matrix: [TrafficRoad.writePose] puts the centre through
     // [lengthToScene] on its way in, so `m.storage[12..14]` is the scene's
     // KILOMETRES. Measured off the matrix, every distance came out 1,000×
     // too small — every site and parked car read as near, cast a shadow and
@@ -1157,14 +1191,38 @@ class SiteCarPass {
     final dy = _centreM[1] - qy;
     final dz = _centreM[2] - qz;
     final d2 = dx * dx + dy * dy + dz * dz;
-    if (d2 > range2) {
+    if (d2 > range2) return 0;
+    // Written into the near buffer first, and rolled back onto the far one
+    // once the pose is known to be one: the write is what fails on a
+    // degenerate basis.
+    final near = batches.bufOf(kind, true);
+    final at = near.count;
+    if (!writePose(near.next(), sf, anchorBF, e, n, up, dirE, dirN,
+        centreM: _centreM)) {
       near.count = at;
       return 0;
     }
     if (d2 < shadow2) return 1;
+    final m = near.matrices[at];
     near.count = at;
     batches.bufOf(kind, false).next().setFrom(m);
     return 1;
+  }
+
+  /// Into [centreM] (xyz) the centre of a car standing at colony-local
+  /// ([e], [n]), [up] metres above [sf]'s datum, in anchor-relative METRES:
+  /// what a band or a range is measured from.
+  ///
+  /// The same arithmetic [writePose] opens with, on its own so the ring and
+  /// the band can be decided before a pose is worked out at all — the two
+  /// must stay the same point, and `agent_traffic_pass_test` pins them
+  /// against each other.
+  static void centreOf(CitySiteFrame sf, Vector3 anchorBF, double e, double n,
+      double up, Float64List centreM) {
+    final r = sf.datumRadiusM + up;
+    centreM[0] = sf.up.x * r + sf.east.x * e + sf.north.x * n - anchorBF.x;
+    centreM[1] = sf.up.y * r + sf.east.y * e + sf.north.y * n - anchorBF.y;
+    centreM[2] = sf.up.z * r + sf.east.z * e + sf.north.z * n - anchorBF.z;
   }
 
   /// Writes into [m] the instance matrix of a car whose centre stands at
@@ -1177,7 +1235,9 @@ class SiteCarPass {
   /// kilometres ([TrafficRoad.writePose] converts through [lengthToScene]),
   /// so it is the wrong quantity to band or range a car by, and this is the
   /// metres to do it with. Required rather than optional so no caller can
-  /// reach for the matrix instead without saying so (§13.8).
+  /// reach for the matrix instead without saying so (§13.8). It is the point
+  /// [centreOf] gives, which is how a caller can range a car before it asks
+  /// for a pose at all.
   ///
   /// The basis is the road pass's: up is the radial at the car, side is
   /// forward × up, and up is taken again as side × forward, so the car

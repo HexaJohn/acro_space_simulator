@@ -344,6 +344,14 @@ class PerfKnobs {
       (v) => AgentTrafficPass.shadowRangeM = v.toDouble(),
       unit: 'm',
     ),
+    PerfKnob(
+      'parkedRangeM',
+      'Parked cars further than this from the focus are not placed; every '
+          'one placed is an instance the frame binds and uploads.',
+      () => SiteCarPass.parkedRangeM,
+      (v) => SiteCarPass.parkedRangeM = v.toDouble(),
+      unit: 'm',
+    ),
   ];
 
   static PerfKnob? byName(String name) {

@@ -926,15 +926,137 @@ void main() {
       expect(pass.vehicles.live[farSlot], 1);
     });
 
-    test('parked cars are banded the same way, and T4a still draws the '
+    test('parked cars are banded the same way, and the ring drops the '
         'distant ones', () {
       final pass = SiteCarPass();
       pass.place(carsAt([95, 801, 9000]), anchor, anchor);
-      expect(pass.parked.live[nearSlot], 1);
-      // §7.4: the parked half has no range ring until T4b, so the 9 km car
-      // is still drawn — but by the slot that casts nothing, as it always
-      // should have been.
-      expect(pass.parked.live[farSlot], 2);
+      expect(pass.parked.live[nearSlot], 1, reason: '95 m is placed and casts');
+      // §7.4's ring is LIVE: a parked car beyond [SiteCarPass.parkedRangeM]
+      // is not placed at all, so the 9 km one costs the frame no instance.
+      // T4a passed `range2 = infinity` here and bound and uploaded it with
+      // the rest, in the no-shadow band.
+      expect(pass.parked.live[farSlot], 1, reason: 'the 801 m car, and no more');
+    });
+
+    test('the ring is §7.4\'s 1.5 km: just inside is placed, just outside is '
+        'not, and the site half keeps its own range', () {
+      expect(SiteCarPass.parkedRangeM, 1500, reason: '§7.4: within 1.5 km');
+      final pass = SiteCarPass();
+      expect(pass.place(carsAt([95, 1499, 1501]), anchor, anchor), 3);
+      expect(pass.parked.live[nearSlot], 1, reason: '95 m is placed, and casts');
+      expect(pass.parked.live[farSlot], 1,
+          reason: '1,499 m is placed, and casts nothing');
+      // The car at 1,501 m is not placed at all — and the SITE car at those
+      // same metres still is, because the site half is cut by `agentRangeM`
+      // (3,500 m, §15.4). Two ranges, two knobs.
+      expect(pass.vehicles.live[nearSlot] + pass.vehicles.live[farSlot], 3);
+    });
+
+    test('the cap and the ring compose: a dense town inside the ring caps, '
+        'and the cars outside it spend no cap slot', () {
+      const cap = SiteCarPass.parkedRenderCap;
+      int parkedLive(SiteCarPass p) {
+        var n = 0;
+        for (final live in p.parked.live) {
+          n += live;
+        }
+        return n;
+      }
+
+      // Dense and near: every car is inside the ring, so the CAP is the cut
+      // — the ring never bites on a town packed under the camera.
+      final dense = SiteCarPass();
+      dense.place(carsAt([for (var i = 0; i < cap + 200; i++) 100.0 + i % 1300]),
+          anchor, anchor);
+      expect(parkedLive(dense), cap);
+
+      // Sparse and far: as many cars again, all of them outside the ring,
+      // with ten near ones BEHIND them in slot order. The ring drops a car
+      // before it is placed, so none of those far rows spends a slot and
+      // all ten near ones are drawn — which is the whole point of having
+      // both cuts (§7.4).
+      final far = SiteCarPass();
+      far.place(
+          carsAt([
+            for (var i = 0; i < cap + 200; i++) 9000.0,
+            for (var i = 0; i < 10; i++) 100.0 + i,
+          ]),
+          anchor,
+          anchor);
+      expect(parkedLive(far), 10);
+    });
+
+    test('the ring follows its knob, and infinity is T4a\'s behaviour', () {
+      addTearDown(() => SiteCarPass.parkedRangeM = 1500);
+      final pass = SiteCarPass();
+      // One pass and one set of columns throughout, so what re-places the
+      // parked half here is the knob and nothing else (§13.8's gate).
+      final f = carsAt([95, 9000]);
+      expect(pass.place(f, anchor, anchor), 1,
+          reason: 'the 9 km site car is past `agentRangeM` too');
+      expect(pass.parked.live[farSlot], 0);
+
+      SiteCarPass.parkedRangeM = double.infinity;
+      pass.place(f, anchor, anchor);
+      expect(pass.parked.live[farSlot], 1,
+          reason: 'the sweep can put T4a back without a rebuild');
+
+      SiteCarPass.parkedRangeM = 50;
+      pass.place(f, anchor, anchor);
+      expect(pass.parked.live[nearSlot], 0, reason: 'now 95 m is outside it');
+      expect(pass.parked.live[farSlot], 0);
+    });
+
+    test('the ring\'s membership rides the band\'s stride, not the frame', () {
+      // §7.4's ring changes with the focus exactly as the shadow band does,
+      // so it is read on [parkedBandStepM]'s stride: the parked half is
+      // hundreds of instances §13.8 keeps out of the shared buffer, and a
+      // panning camera must not put them back into it every frame.
+      final pass = SiteCarPass();
+      final f = carsAt([SiteCarPass.parkedRangeM + 10]);
+      expect(pass.place(f, anchor, anchor), 1, reason: 'the site half draws it');
+      expect(pass.parked.live[nearSlot] + pass.parked.live[farSlot], 0,
+          reason: 'the parked one is 10 m outside the ring');
+      final rev = pass.parked.rev;
+
+      // Half a stride towards it: the car is 6 m INSIDE the ring now, and
+      // not one parked matrix is rewritten to say so.
+      expect(
+          pass.place(f, anchor,
+              const Vector3(SiteCarPass.parkedBandStepM / 2, 0, r)),
+          1);
+      expect(pass.parked.rev, rev);
+      expect(pass.parked.live[farSlot], 0, reason: 'a stride late, by design');
+
+      // A whole stride: the ring is read again, and it holds the car.
+      expect(
+          pass.place(f, anchor,
+              const Vector3(SiteCarPass.parkedBandStepM + 1, 0, r)),
+          1);
+      expect(pass.parked.rev, greaterThan(rev));
+      expect(pass.parked.live[farSlot], 1);
+    });
+
+    test('the centre the ring measures is the pose\'s own', () {
+      // The ring is decided from [SiteCarPass.centreOf] before a pose is
+      // worked out at all, so that centre must be the very point
+      // [SiteCarPass.writePose] would have handed back — to the bit.
+      final m = vm.Matrix4.zero();
+      final fromPose = Float64List(3), direct = Float64List(3);
+      for (final (e, n, up) in [
+        (0.0, 0.0, 0.0),
+        (95.0, -40.0, 3.0),
+        (-1500.0, 2200.0, -7.5),
+      ]) {
+        expect(
+            SiteCarPass.writePose(m, sites, anchor, e, n, up, 1, 0,
+                centreM: fromPose),
+            isTrue);
+        SiteCarPass.centreOf(sites, anchor, e, n, up, direct);
+        for (var i = 0; i < 3; i++) {
+          expect(direct[i], fromPose[i], reason: 'axis $i of ($e, $n, $up)');
+        }
+      }
     });
 
     test('the parked band follows the focus by strides, not by frames', () {
