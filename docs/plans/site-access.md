@@ -712,7 +712,7 @@ Each site then gets a 56 m access road from the kerb (e = ±4) to its frontage l
 | 0b | slot 0 is `kJoinLegacy` | `kerbOnly` |
 | 0c | slot 0 is `kJoinCorridorBlocked`, or its `joinCrossLot` holds a BUILT auto lot | `kerbOnly` + `kPlanAccessBlocked` |
 | 1 | `spec.siteKind != building`, or `claimsOwnSite && min(W, D) ≥ 150` and the group is not `res`/`com` | `installation`; if `W < 60 or D < 120`, fall through to 4 |
-| 2 | `spec.type == 'mega'` (`parkingSpaces` = 0) | `kerbOnly` (podium garage: R8) |
+| 2 | `spec.type == 'mega'` (`parkingSpaces` = 0) | `kerbOnly` (the mega rule below) |
 | 3 | group `res` and `housing ≤ 24` (r-low; sprawl house lots) | `homeDriveway` if slot 0 is back-out eligible (below) and §3.4 fits, else `kerbOnly` |
 | 4 | industrial groups (`_isIndustrial`, building_massing.dart:278-285) | `yard` if it fits, else `carPark`, else `kerbOnly` |
 | 5 | everything else (commercial, civic, r-med, r-high, strip mall) | `carPark` if it fits, else `kerbOnly` |
@@ -795,6 +795,30 @@ The score rewards stalls up to 1.5·C* for `com` and 1.0·C* otherwise. Overflow
   median is a median, so that avenue is `kerbOnly` for homes.
 - W is the frame's frontage length. D is the profile's deepest column plus its 0.3 m margin (the lot's true depth).
   Thresholds compare with a 1e-6 m tolerance, so `16.6 = 4.5 + 12.1` holds whatever the float noise of the sum.
+
+**The mega rule (closed, R8 scoping).** Row 2's `kerbOnly` is not a placeholder for a podium garage. A megatower's
+parking is DEMAND THAT DOES NOT EXIST — `parkingSpaces(kMegatowerSpec) == 0`, which `megatower_test.dart:42` pins —
+and not capacity the plan owes somewhere; the spec attracts its people by other means and asks the site for no
+stalls, so a mega parks at its kerb like any other `kerbOnly` site with an unmet demand of zero. Drawing a
+portal through the podium into a garage was reserved for R8 and is CLOSED, for four reasons that do not turn on
+effort. It is one site: the sprawl audit counts `-mega: 1` against 30,559 planned
+(`site_program_sprawl_audit_test.dart:46,65`). Its aisles would stand under a podium nobody can see into, and a
+third of megatowers have no podium volume at all — `profile < 0.34` takes the straight extrusion that runs the
+whole footprint to the parapet (building_massing.dart:812-832). `MassShape` cannot express a hole, and
+`_openGateLane` DROPS any non-fence volume standing in the lane rather than cutting it (building_massing.dart:412,
+which keeps only a thin fence run and `continue`s past everything else), so a naive portal would delete the base of
+a 90-to-150-storey tower (:773-775) instead of opening one. Worst, a portal needs the first-ever exemption to
+§2.4's "envelope ∩ paving = ∅", enforced at site_plan_validator.dart:1267-1268 for a stall and :1525-1527 for a
+pave — the one rule that keeps a driveway out of a building on every planned site. Buying a garage for one building
+by making that rule optional for all 30,559 is the wrong trade, and it is the trade a podium portal asks for.
+
+**Public lots (`kPlanPublic`), deferred with a design (R8 scoping).** A public lot is a site whose stalls serve
+trips with no destination in the building beside them. Classifying one needs a row this table does not have and a
+use this game does not have: `ParcelUse` (parcel.dart:1192) holds no parking entry, so a public lot would arrive
+either as a staked own-site spec that asks for stalls and no floor area, or as a new use, and its row would offer
+`carPark` with `kPlanPublic` set (site_access_constants.dart:225) so that the traffic search can tell these stalls
+belong to the street rather than to one building. It is NOT built. §7.5 carries the decision and the evidence,
+because what blocks it is on the traffic side and not here.
 
 ### 3.4 Home driveway and pad ("both")
 
@@ -1021,7 +1045,39 @@ Everything is axis-aligned in the frame. Bays are 2.6 × 5.2 m, two-way aisles 6
   one aisle keep their keys when another aisle changes (pinned by `car_park_packer_test`).
 - **Not built (left for a follow-up, open at the R2 merge report):** second joins (slot 1 or 2 when `W ≥ 80`, `≥ 60`
   stalls, or a corner lot with `≥ 30` stalls), and §3.8's bend for skews over 10° (those slots fall to `kerbOnly`,
-  counted `carParkNoFit`). Neither is in the §8.3 or §9 R2 acceptance lists.
+  counted `carParkNoFit`). Neither is in the §8.3 or §9 R2 acceptance lists. As of the R8 scoping, NO plan this
+  game has ever built emits more than one join: every `addJoin` call site passes slot 0 (car_park_packer.dart:1190,
+  home_driveway.dart:97, installation_access.dart:199, and the kerbside plan at site_plan_generator.dart:368), so
+  slots 1 and 2 are offered by the graph and never picked. That is what "second joins" still means in §9's R8 row,
+  and it is a car-park feature: the gate is separately and permanently singular (§6.1 item 4).
+- **Closed: one-way loops with angled stalls (R8 scoping).** Angled bays on one-way aisles were reserved for R8 on
+  the intuition that they pack more cars into the same ground. In this repo's own dimensions they pack fewer, and
+  the arithmetic is written down here so the question is never re-litigated from intuition. Today a double-loaded
+  module is `kStallLengthM` + `kAisleTwoWayWidthM` + `kStallLengthM` = 5.2 + 6.0 + 5.2 = **16.4 m** deep and holds
+  two stalls every `kStallWidthM` = 2.6 m along it (site_access_constants.dart:461, :462, :486), so a stall costs
+  2.6 × 16.4 / 2 = **21.32 m²**. Turn the bays 60° and the pitch along the aisle becomes 2.6 / sin 60° = 3.002 m
+  while a row deepens to 5.2·sin 60° + 2.6·cos 60° = 5.803 m — the standard module arithmetic, which reproduces the
+  parking handbooks' 58 ft double-loaded 60° module at 9 × 18 ft bays, so it is not a figure invented here. At a
+  shippable 5.0 m one-way aisle the module is 2 × 5.803 + 5.0 = 16.607 m and a stall costs
+  3.002 × 16.607 / 2 = **24.93 m²**, 17 % worse than today; even at V8's own floor for an angled segment, 3.5 m, it
+  is **22.68 m²**, still 6 % worse. The nesting that makes angled parking look competitive on paper — adjacent
+  rows' rear sawteeth interlocking, worth `kStallWidthM`·cos 60° / 2 = 0.65 m a row, which is where the scoping
+  pass's 22.98 m²/stall came from — is not expressible here: §3.5's blocks are axis-aligned rectangles and §6.1's
+  free-rectangle search is a histogram over 0.5 m profile columns, so a sawtooth costs its bounding box.
+
+  The run-up rule takes the rest. A one-way aisle presents ONE lane, so a stall can set only one V9 direction bit,
+  and with no backward lane to rescue it every bay within `kStallRunupM` + 1.3 = 6.3 m of the aisle's from-node is
+  not emitted at all. Re-run the worked example above on its winner: the aisle `J→E` runs 19.2 m from `x_J` = 4.5,
+  so one-way packing starts at a stall edge of 4.5 + 5.0 = 9.5 m rather than 3.2 m, which also swallows the throat
+  exclusion (9.5 > 8.5, so both rows now pack the same 11.2 m). That is ⌊11.2 / 3.002⌋ = 3 angled stalls a row,
+  **6 in the module against the pinned winner's 10** — 8 if the bays stayed perpendicular, which is the scoping
+  pass's "about 7" bracketed from both sides. And that example could not take a one-way aisle at all: V7 allows
+  one-way segments only inside cycles, so a single L aisle ending in a hammerhead is not convertible, and the
+  `k ≥ 2` ring a real one-way loop needs is 2 × 16.607 = 33.2 m deep on a lot whose profile is 31.4 m — the site
+  would get no car park, not a smaller one. Angled parking's real benefit is turn-in clearance, and this sim cannot
+  represent it: `SiteManoeuvre.stallPose` is a cubic through four control points (site_manoeuvre.dart:164-176) with
+  no swept path, so an easier turn buys nothing that is simulated. Fewer stalls, a program that fits on fewer lots,
+  and no modelled benefit: closed, not deferred.
 - **Cost.** Generation is branch and bound. A candidate whose best possible score (stalls up to the cap, the free area
   of the envelope's region `[1.5, W − 1.5] × [0, maxDepth]` less the part of its block inside that region, its drive) is
   below the 1 % tie band of the best score so far is dropped before its envelope search, or while its stalls pack past
@@ -2221,7 +2277,17 @@ spun by `−SiteFrame.buildingHeading` (§3.1), so envelope x/y ARE the building
    free depth, O(columns).
 3. The envelope is `free` shrunk uniformly to hold `foot` where it fits, centred, with an `A_min` check (§3.3).
    `claimsOwnSite` installations use `min(spec site, free)` inside `y ≥ Df`.
-4. `gateX/gateW` are where the primary drive crosses the envelope front edge, with width `segWidth + 2`.
+4. `gateX/gateW` are where the primary drive crosses the envelope front edge, with width `segWidth + 2`. There is
+   exactly ONE, deliberately, and a second gate on a second road is closed rather than deferred (§9's R8 row): the
+   only thing that opens a gate is an installation (`kNodeGate` at installation_access.dart:248, the fence gap at
+   :787), which lays its one gate off slot 0 like every other generator (installation_access.dart:199), and an
+   installation's size gate — §3.3 row 1 wants `min(W, D) ≥ 150`, or at the least `W ≥ 60` and `D ≥ 120`
+   (site_program.dart:172-183) — is out of reach of a plat lot, which is 24 × 32 m by default and takes its depth
+   from its road (city_layout.dart:49, :1254), so a site that clears it is a staked manual parcel. A second ROAD
+   means the side-street slot, and `SiteJoinPlacer.sideStreetSlot` returns null without both `roadId` and
+   `sideStreet` (site_join.dart:639) — neither of which `CityLayout.addManualParcel` sets
+   (city_layout.dart:1067-1078). So the only program that can have a gate can never have a second road, and a
+   second gate on a second road is an empty intersection.
 5. **The door** is the midpoint of the envelope's street (front) edge, `y = envY0` (the chamfer corner nearer the
    side street on a corner lot); installations use the gate `G`, which lies on that edge (§3.7). Placing the building
    at the envelope centre is NOT enough on its own: today `_massIn` centres a footprint of depth
@@ -2816,7 +2882,32 @@ to an inbound car held at `destS` (Home back-out above).
   4. circle (step 1 is retried only if the loop ends on an in-capable join's edge);
   5. give up and garage.
 
-  Other sites' lots are not searched; `kPlanPublic` is reserved.
+  Other sites' lots are not searched, and no plan sets `kPlanPublic` (the bullet below).
+- **Public lots (`kPlanPublic`): deferred, with the design written down (R8 scoping).** A public lot is a site whose
+  stalls serve trips that have no destination in the building beside them — a town-centre car park a driver walks
+  away from — so it would enter D17 as a step between 1 and 2: the destination's own stalls, then a public lot
+  within a walk of the destination, then the kerb. The flag exists (`kPlanPublic`, site_access_constants.dart:225)
+  and §3.3 says what would set it. It is NOT built, and the decision is that no code lands until the traffic search
+  is scheduled, for two reasons.
+
+  The first is that it cannot even be shipped as scenery in the meantime, which is the obvious cheap step and the
+  one that does not work. `CityAgents._publishManaged` marks EVERY live site row with `lotCap > 0` agent-managed
+  (city_agents.dart:950-955), the bits ride the frame as `CitySiteFrame.agentManaged`
+  (city_site_frame.dart:207-216), and the mesher then bakes no lot cars on a managed site
+  (site_access_mesher.dart:411, the `agentManaged` term). So with agents on, a public car park drawn today renders
+  permanently and visibly EMPTY: the baked cars are suppressed because a live site's stalls are the agents' to
+  fill, and no agent ever parks there because nothing searches it. A car park nobody parks in is worse than no car
+  park.
+
+  The second is what the traffic half needs, as agreed with the Agent Traffic session. `SiteTable` keeps a row per
+  BUILDING SLOT whose plan it has synced (site_table.dart:10-16), and `rowOfBuilding` answering −1 is exactly how
+  the arrival gate learns there are no stalls here — so a public lot needs a site row that hangs off a SITE ID
+  rather than a `BuildingTable` slot, which no column in that table is shaped for today. It needs a rule for who
+  may park there (any trip? only trips whose destination is within some walk? only trips the destination's own
+  stalls turned away?). And it needs an answer for a trip's PURPOSE and its WALK LEG, because a public lot has no
+  destination building: today a parked car's trip ends at a stall and §7.5's stall → door walk is the destination's
+  own. It is therefore sequenced AFTER T4b (residents and pedestrians), which is where the walk leg gets built —
+  parking where nobody walks from is scenery with extra steps.
 - **Kerb masks:** a kerb slot at `s_i` is masked when `KerbCuts.parkingBlocked(side, s_i)` holds for a cut join of a
   live network plan, with the slot's travel arc and right-of-travel side first converted to the canonical index arc
   and side (§5.5). The form is asymmetric, in the travel terms of the lane beside that kerb:
@@ -3406,7 +3497,7 @@ class DepthProfile { double depthAt(double x); bool containsRect(Rect r); double
 | **R7 repair** | road | the four stale car-park comments and the `note` string of `ArchitectureStyle`, the five in `BuildingMassing`, and the doc of `BuildingArchetype.surfaceParking`; two stale rationales in `architecture_style_test` | the R7 review's two findings, both lows, both prose the deletion left behind. Nothing drawn moved: no `lib` expression changed, so every digest, vertex pin and budget of the R7 table stands unmeasured-again and the screenshots stand as shot. The one behavioural surface among them IS pinned, because the style picker prints `note` verbatim (building_studio_screen.dart:516): a new `architecture_style_test` case fails on any kit whose note says "parking" or "car park" — red on `utilitarian`'s "parking out front" before the fix. `BuildingArchetype.surfaceParking` keeps its name by the §6.2 as-built decision, and its doc now says so instead of describing a car park |
 | **T4b Residents and pedestrians** | traffic | with or after citizens (slice 3): residents' cars at home pads (backing out to the street, §7.4 Home back-out; yielding to pedestrians on the pavement crossing) and kerbs (E36 completes: all baked cars off), full D17 circling/give-up, stall → door walks via `entrancePt/entranceNode` | A16 |
 | **R4 as built** | road | tracks A and B merged; `CityNodes.siteAccess` **on by default**; the perf knob `siteAccess` added, and `ext.acro.citygame` takes `knob=<name>:<value>`, so a live A/B needs no rebuild; `installation_parking_test` gained its plan case (§8.2) | the §8.4 measurements above; the mid vertex gate +0.96 %; the near-tile deviation recorded in §8.4; the off-parcel throat heights recorded in §6.4 (an R5 dependency, with the probe R5 inherits); the whole suite green with the knob on, with only the one ON pin of `city_tile_mesher_test` moved at the merge (Appendix A). **One criterion is HELD, not ticked**: "the starter kit's four sites visibly connected" is met on the plan, in the mesh and on screen for the paving, gates, car parks, driveways and dropped kerbs, but the four off-parcel throats stand off an unshaped easement until R5 cuts them (§6.4). The slice is accepted on everything else; that line is R5's to tick. **R5 took it** (the R5 as-built row below) |
-| **R8 Polish** (later) | road | alley rear joins (slot 3, F2a), second gates on a second road, one-way loops with angled stalls, podium garage portals for `mega`, sealed-world tube crossings, public lots (`kPlanPublic`) | per feature |
+| **R8 Polish** (last road slice) | road | **Two features, each its own commit.** The sealed-world tube crossing, accepted as a SKYWAY (§10.2 Q8, Q13): the pedestrian tube lifts over a driveway rather than the drive ducking under it. Alley rear joins (slot 3, F2a, §3.2), built without an audit gate (§10.2 Q13). **The other four reservations of this row are settled, not scheduled.** Second gates on a second road: CLOSED, an empty intersection — the only program that can have a gate can never have a second road (§6.1 item 4); what is left of it is second joins (slots 1–2, §3.5's "Not built"), where the gate stays singular. One-way loops with angled stalls: CLOSED, the stated benefit is negative in this repo's own dimensions and the arithmetic is recorded in §3.5 so it is not re-opened from intuition. Podium garage portals for `mega`: CLOSED — a mega's parking is demand that does not exist, the governing rule is in §3.3. Public lots (`kPlanPublic`): DEFERRED with its design written down in §3.3 and §7.5, sequenced after T4b, and no code lands until the traffic search is scheduled | the tube crossing and the alley joins each per feature; the four settled items need no acceptance, only the reasons above standing |
 
 ---
 
@@ -3484,7 +3575,8 @@ below records the decision). The Agent Traffic session's constraints for the bac
    an overlay; traffic may slow on it). The alternative, kerb-only above a slope, makes plans ground-dependent.
    **Accept steep drives.**
 8. **Sealed (airless) worlds.** Where a driveway crosses the pedestrian tube: (a) a short raised tube bridge, (b) an
-   airlock break, or (c) overlap as today. **(c) through R7, then (a) in R8.**
+   airlock break, or (c) overlap as today. **(c) through R7, then (a) in R8** — and (a)'s built form is settled by
+   13 below: the tube lifts over the drive on a skyway.
 9. **Grid-cell colonies.** Generate plans from `parcelForCell` too, so R7 can delete the legacy path outright?
    **Yes.**
 10. **Plan-served sites without a stored frontage turn to face their access road.** Player-claimed sites, generator
@@ -3503,7 +3595,9 @@ below records the decision). The Agent Traffic session's constraints for the bac
       both directions where `joinDirs` allow (street, one-way street at 40 km/h, alley, path); avenues keep them with
       near-direction back-outs only; divided, medianed or > 50 km/h roads are `kerbOnly` (in the catalog: boulevards
       and urban highways);
-    - public parking, alley access and second gates wait for R8.
+    - alley access waits for R8, which builds it; public parking does NOT wait for R8, it is deferred past T4b with
+      its design written down (§3.3, §7.5); and second gates on a second road are not waiting for anything, because
+      the only program that can have a gate can never have a second road (§6.1 item 4, closed at the R8 scoping).
     **Accept all.**
 12. **Access easements over auto lots.** None of the four starter utilities (nor any set-back site behind a lot row)
     can reach its street without crossing a zonable auto lot: the lot rows cover every stretch of kerb where a
@@ -3522,6 +3616,18 @@ below records the decision). The Agent Traffic session's constraints for the bac
     geometry alone (every set-back manual lot, built or not, makes its crossed lots unzonable)? **Recommend no for
     now:** it would lock lots in front of every empty claimed parcel; the inspector shows the block, and demolishing
     the blocking building restores access.
+13. **R8's scope. Decided by the user 2026-09-18**, after the scoping pass that closed three of the six R8
+    reservations (§9's R8 row carries the settled list; §3.3, §3.5, §6.1 and §7.5 carry the reasons).
+    - **The tube crossing of Q8 is accepted AS A SKYWAY.** Q8 offered a short raised tube BRIDGE for a sealed
+      world; the built form is the pedestrian tube lifting over the driveway on a skyway, so the drive keeps the
+      ground and its grade and the tube takes the climb. The alternative, ducking the drive under the tube, would
+      make a plan read the ground, which §10.2 Q7 has already ruled out for steep lots, and would put a ramp in
+      the one place §3.4 needs a straight run for a back-out.
+    - **The alley slice is built without an audit gate.** Alley rear joins (slot 3, §3.2) land on their own
+      acceptance — the slice's tests and screenshots — rather than behind a sprawl-audit count agreed in advance.
+      Slot 3 is reserved and unbuilt today (§3.2), so a rear join can only be additive — it changes no program a
+      plan already picked, and an audit gate would measure nothing but how many lots gained one, which the slice's
+      own tests pin anyway.
 
 ---
 
