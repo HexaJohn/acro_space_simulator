@@ -36,13 +36,16 @@
 /// carry a steeper one, but this seam is handed a polyline and nothing else.
 ///
 /// Two crossings closer together than two ramps cannot get down and back up
-/// between them, so their holds MERGE and the tube simply stays up. At
-/// residential density (kerb cuts 12–17 m apart) that is every crossing on
-/// the street, and the result is one continuous raised walkway on legs down
-/// the whole block, with isolated bridges only where the cuts are sparse.
-/// That is the accepted picture, not an accident of the rule: a profile that
-/// tried to touch down between two near cuts would sag a few centimetres over
-/// a few metres, which reads as a fault in the structure rather than a ramp.
+/// between them, so their holds MERGE and the tube simply stays up. A house
+/// lot is 17–24 m of frontage (§3 C-1; `ParcelSettings.frontageM` is 24 m and
+/// `CitySpec.frontageM` 30 m), and a cut's spacing IS its lot's frontage, so
+/// on a terrace the clear gap between two holds is 7–14 m against 58.8 m of
+/// two ramps: every crossing on the street merges, and the result is one
+/// continuous raised walkway on legs down the whole block, with isolated
+/// bridges only where the cuts are sparse. That is a consequence of the rise
+/// and the grade rather than an accident of the rule: a profile that tried to
+/// touch down between two near cuts would sag a few centimetres over a few
+/// metres, which reads as a fault in the structure rather than a ramp.
 library;
 
 import 'dart:math' as math;
@@ -93,16 +96,24 @@ class PedestrianTube {
   /// clears the drive's edges rather than ending on them.
   static const double crossMarginM = 1.0;
 
-  /// Legs: a pair every [legSpacingM] wherever the deck stands at least
-  /// [legMinLiftM] over the drape, each [legHalfM] half-thick, [legOffsetM]
-  /// either side of the barrel's axis, set [legFootM] into the ground, and
-  /// never within [legClearM] of a drive.
+  /// Legs, each [legHalfM] half-thick, standing in pairs [legOffsetM] either
+  /// side of the barrel's axis and [legFootM] into the ground, wherever the
+  /// deck stands at least [legMinLiftM] over the CURB LINE — a deck top
+  /// `curbLiftM + legMinLiftM` (1.0 m) over the drape, and a soffit 0.65 m
+  /// over it. [legSpacingM] is the step WITHIN a clear run and not the whole
+  /// rule: no post may stand within [legClearM] of a drive, so the longest
+  /// unheld stretch is a drive's opening plus that clearance. [legArcsOf]
+  /// places them.
   static const double legSpacingM = 7.5;
   static const double legHalfM = 0.16;
   static const double legOffsetM = 1.15;
   static const double legFootM = 0.15;
   static const double legClearM = 2.0;
   static const double legMinLiftM = 0.8;
+
+  /// How far into an approach the deck still stands [legMinLiftM] over the
+  /// curb line, and so still wants holding up: 19.8 m of the 29.4 m ramp.
+  static const double legRunM = (crossLiftM - legMinLiftM) / rampGrade;
 
   /// The stretches of [cuts] the tube is held up over, in the road's own
   /// drawn arc, ascending and disjoint.
@@ -158,6 +169,69 @@ class PedestrianTube {
     return 0;
   }
 
+  /// The arcs a PAIR of legs stands at, in the road's own drawn arc,
+  /// ascending, over the crossings [over] and the drives [cuts] draws.
+  ///
+  /// The deck wants holding wherever it stands at least [legMinLiftM] over
+  /// the curb line, which is the hold plus [legRunM] into each approach. A
+  /// post may not stand in a drive, so [legClearM] either side of every drawn
+  /// cut on this kerb is kept clear — with equal extents the mask is
+  /// symmetric, so the lane's travel sign cancels and this is exactly the
+  /// stretch `KerbCuts.blocked` reports. A pair stands at each EDGE of every
+  /// such stretch, so the deck spans a drive's opening and nothing more, and
+  /// each clear run between them is divided evenly into steps of at most
+  /// [legSpacingM].
+  ///
+  /// These arcs are the structure's, not the polyline's: [emit] inserts them
+  /// as stations of their own, so a coarsely drawn street carries the same
+  /// legs a finely drawn one does. Placing posts only where the road happened
+  /// to have a vertex left a fused terrace standing on nothing at all.
+  static List<double> legArcsOf(
+      List<(double, double)> over, Float64List? cuts) {
+    final out = <double>[];
+    for (final (holdA, holdB) in over) {
+      final from = holdA - legRunM, to = holdB + legRunM;
+      // The drives inside this crossing, as the stretches no post may stand
+      // in, ascending by their near edge.
+      final shut = <(double, double)>[];
+      if (cuts != null) {
+        // Through a local, as `crossingsOf` reads it (the AOT promotion trap).
+        final table = cuts;
+        for (var i = 0;
+            i + KerbCuts.stride <= table.length;
+            i += KerbCuts.stride) {
+          if (table[i] != 1) continue;
+          if (table[i + 4] == KerbCuts.kindHomeFarSwing) continue;
+          final c = table[i + 1], w = table[i + 2] + legClearM;
+          if (c + w <= from || c - w >= to) continue;
+          shut.add((c - w, c + w));
+        }
+        shut.sort((x, y) => x.$1.compareTo(y.$1));
+      }
+      var at = from;
+      for (final (lo, hi) in shut) {
+        if (lo > at) _fill(out, at, lo);
+        if (hi > at) at = hi; // overlapping drives merge into one gap
+      }
+      if (to > at) _fill(out, at, to);
+    }
+    return out;
+  }
+
+  /// Posts at both ends of the clear run [u]–[v] and evenly between it, in
+  /// steps of at most [legSpacingM]. A run narrower than a post is thick
+  /// takes one post in the middle of it rather than two in the same place.
+  static void _fill(List<double> out, double u, double v) {
+    if (v - u < 2 * legHalfM) {
+      out.add((u + v) / 2);
+      return;
+    }
+    final n = ((v - u) / legSpacingM).ceil();
+    for (var k = 0; k <= n; k++) {
+      out.add(u + (v - u) * k / n);
+    }
+  }
+
   /// Build the tube carrying [pts] (anchor-relative metres) into [solid] (the
   /// curb) and [glass] (the barrel).
   ///
@@ -188,6 +262,7 @@ class PedestrianTube {
     ];
     final raised = over.isNotEmpty;
     var line = pts;
+    var legs = const <double>[];
     if (raised) {
       // The ramp's own corners, so the lift is piecewise linear in arc and
       // the barrel bends where the ramp bends and nowhere else.
@@ -198,6 +273,16 @@ class PedestrianTube {
           if (t > 0 && t < total) want.add(t);
         }
       }
+      // And the posts' own arcs, so the structure decides where it is held up
+      // rather than the density the road happens to be drawn at.
+      legs = [
+        for (final s in legArcsOf(over, cuts))
+          if (s >= arcOffset - 1e-6 && s <= arcOffset + total + 1e-6) s,
+      ];
+      for (final s in legs) {
+        final t = s - arcOffset;
+        if (t > 1e-6 && t < total - 1e-6) want.add(t);
+      }
       line = RoadMesher.withStations(line, want);
     }
     final across = halfWidthM + radiusM + clearOfLaneM;
@@ -206,14 +291,10 @@ class PedestrianTube {
     List<int>? prevCurb;
     List<int>? prevBeam;
     var arc = arcOffset;
-    var sinceLeg = legSpacingM;
+    var nextLeg = 0;
     for (var i = 0; i < line.length; i++) {
       final p = line[i];
-      if (i > 0) {
-        final step = (p - line[i - 1]).length;
-        arc += step;
-        sinceLeg += step;
-      }
+      if (i > 0) arc += (p - line[i - 1]).length;
       final up = (p + anchorBF).normalized;
       final ahead = i + 1 < line.length ? line[i + 1] - p : p - line[i - 1];
       if (ahead.length < 1e-6) continue;
@@ -282,12 +363,14 @@ class PedestrianTube {
           }
         }
       }
-      if (raised &&
-          lift >= legMinLiftM &&
-          sinceLeg >= legSpacingM &&
-          !KerbCuts.blocked(cuts, 1, arc,
-              upstreamM: legClearM, downstreamM: legClearM, drawnOnly: true)) {
-        sinceLeg = 0;
+      // Every post this station carries: its arc was inserted as a station
+      // above, so the first station at or past it IS it.
+      var post = false;
+      while (nextLeg < legs.length && legs[nextLeg] <= arc + 1e-6) {
+        nextLeg++;
+        post = true;
+      }
+      if (post) {
         // The ground under the axis, not under the centreline: the leg stands
         // where the deck is, which is what keeps it out of the carriageway.
         final foot = p + side * across;

@@ -284,7 +284,7 @@ void main() {
 
       // Its own pin: the tube, its raised deck, its legs and the kerbside
       // the cuts re-dress.
-      expect(digest(meshWith(cut, CityTier.near, k: on)), 0xa96767cb);
+      expect(digest(meshWith(cut, CityTier.near, k: on)), 0x3c455708);
 
       // With the knob off the cuts are not read at all, so the street is the
       // street it always was — the §8.1 discipline, checked here rather than
@@ -308,16 +308,28 @@ void main() {
           PedestrianTube.radiusM +
           PedestrianTube.clearOfLaneM;
       double floorAt(CityTileResult res, double arc) {
-        var best = double.infinity;
+        // The ring NEAREST the arc, not the lowest in a window: the tube
+        // inserts stations of its own for the ramp corners and every post, so
+        // a window wide enough to catch a ring on the plain street also
+        // catches one part way up a ramp on the cut one.
+        var at = double.nan;
         for (final p in verts(res, CityMaterialKind.glazing)) {
           // The street runs along +x at y = 900, so its side-1 kerb is at
           // smaller y, and the road's arc is x + 200.
           if ((p.y - (900 - across)).abs() > 0.01) continue;
-          if ((p.x - (arc - 200)).abs() > 6) continue;
+          if (at.isNaN || (p.x + 200 - arc).abs() < (at - arc).abs()) {
+            at = p.x + 200;
+          }
+        }
+        expect(at.isNaN, isFalse, reason: 'no tube near $arc');
+        expect((at - arc).abs(), lessThan(0.5), reason: 'no ring at $arc');
+        var best = double.infinity;
+        for (final p in verts(res, CityMaterialKind.glazing)) {
+          if ((p.y - (900 - across)).abs() > 0.01) continue;
+          if ((p.x + 200 - at).abs() > 0.01) continue;
           final h = (p + anchor).length - Vector3(p.x, p.y, r).length;
           if (h < best) best = h;
         }
-        expect(best.isFinite, isTrue, reason: 'no tube near $arc');
         return best;
       }
 
@@ -330,9 +342,10 @@ void main() {
       expect(floorAt(was, 120), closeTo(PedestrianTube.curbLiftM, 1e-2));
       // Three drives fifteen metres apart are ONE structure: level over each
       // of them and level between them, with no touchdown to sag through
-      // (§10.2 Q8 — the accepted fused form), and a bridge of its own 200 m
-      // on at the lone drive.
-      for (final at in [120.0, 125.0, 135.0, 142.0, 150.0, 350.0]) {
+      // (§10.2 Q8 — the fused form), and a bridge of its own 200 m on at the
+      // lone drive. Measured at the street's own ten-metre stations, which
+      // both meshes carry: 130 and 140 are between drives.
+      for (final at in [120.0, 130.0, 140.0, 150.0, 350.0]) {
         expect(floorAt(res, at) - floorAt(was, at),
             closeTo(PedestrianTube.crossLiftM, 2e-3),
             reason: 'the tube is not up over the drive at $at');
@@ -342,6 +355,36 @@ void main() {
       for (final at in [200.0, 250.0]) {
         expect(floorAt(res, at) - floorAt(was, at), closeTo(0, 1e-9),
             reason: 'the tube rose for nothing at $at');
+      }
+
+      // And the raised deck stands on something, in the TILE and not only in
+      // the emitter: the posts go into the facade material (this fixture has
+      // no building), their feet `legFootM` in the ground, and down the whole
+      // fused terrace no two stand further apart than one drive's opening and
+      // its clearance — even though the street itself is drawn at ten-metre
+      // stations, none of which may carry a post.
+      final posts = <double>[];
+      for (final p in verts(res, CityMaterialKind.facade)) {
+        final off = (p.y - (900 - across)).abs();
+        if ((off - PedestrianTube.legOffsetM).abs() >
+            PedestrianTube.legHalfM + 1e-3) {
+          continue;
+        }
+        final h = (p + anchor).length - Vector3(p.x, p.y, r).length;
+        if ((h + PedestrianTube.legFootM).abs() > 1e-2) continue;
+        final s = p.x + 200;
+        if (!posts.any((was) => (was - s).abs() < 0.5)) posts.add(s);
+      }
+      posts.sort();
+      final terrace = posts.where((s) => s < 250).toList();
+      expect(terrace.length, 12, reason: 'the deck stands on nothing');
+      // A leg run into the first approach, a leg run out of the last.
+      expect(terrace.first, closeTo(115 - PedestrianTube.legRunM, 0.3));
+      expect(terrace.last, closeTo(155 + PedestrianTube.legRunM, 0.3));
+      for (var i = 1; i < terrace.length; i++) {
+        expect(terrace[i] - terrace[i - 1],
+            lessThanOrEqualTo(2 * (4.0 + PedestrianTube.legClearM) + 0.5),
+            reason: 'unheld deck at ${terrace[i - 1]}');
       }
     });
 
