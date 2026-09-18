@@ -1829,9 +1829,16 @@ class CityTileMeshJob {
         }
         // Vacuum outside: pedestrians travel in a pressurised tube, not on
         // a pavement. The glazing builder already exists for dome caps.
+        // A sealed road has no pavement (`walked` above), so the tube is the
+        // only thing a kerb cut can break here: it rises over each drive on
+        // its own kerb and the drive passes under (§10.2 Q8 option (a)).
         if (road.sealed) {
           PedestrianTube.emit(rb.tubeSolid, rb.tubeGlass,
-              pts: sp, halfWidthM: road.halfWidthM, anchorBF: anchorBF);
+              pts: sp,
+              halfWidthM: road.halfWidthM,
+              anchorBF: anchorBF,
+              cuts: cuts,
+              arcOffset: spanArc);
         }
         if (medianTrees) {
           // A row down the planted median, clear of the crossings.
