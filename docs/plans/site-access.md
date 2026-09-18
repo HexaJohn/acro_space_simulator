@@ -1351,7 +1351,7 @@ joins; the book re-resolves it). A footprint join (`joinRef` −1) names no grap
 | House lot whose slot 0 fails the back-out rules (road, room < 4.0, swing margin) | §3.3 | `kerbOnly` (kerb parking) |
 | Piece shorter than `reserves + 12 + 2m` | no window | other road or legacy (counted by the sprawl audit) |
 | Join road without pavement (path, alley) | class | kerb = carriageway edge; no kerb-cut mesh; throat still ≥ 7 m |
-| Sealed (airless) road | flag | same geometry (rovers); tube crossing is §10 Q8 |
+| Sealed (airless) road | flag | same geometry (rovers); a sealed road has NO pavement, so the pedestrian tube is the only thing a cut can break. **As built (R8, §10.2 Q8 option (a)):** the tube RISES over each drive on its own kerb — 2.3 m of headroom, 1:12 approaches, a box beam on legs that stand clear of the drive — and two holds closer than two ramps merge, so a terrace of drives is ONE continuous raised walkway. A cut on the far kerb, and a far-swing mask, lift nothing |
 | Steep draped lot | capture | `siteMaxGrade` flag only (plans never read the ground) |
 | Site beyond the road end | §3.2 | `kJoinOffFrontage`, dogleg access road |
 | Target moved into the window (junction, dead end) | §3.2 | `kJoinClamped` only; no dogleg |
@@ -2240,6 +2240,63 @@ split the way the identity rule needs it and four deviations, each local:
   - A managed site bakes **no lot cars**; everything else it draws is unchanged. E36 stays staged: home pads and
     kerbs keep their baked cars until T4b (§5.5 above).
 
+**As built (R8): the sealed world's tube crossings.**
+
+A sealed road has no pavement — `city_tile_mesher.dart`'s `walked` is `paved && cls.hasPavement && !road.sealed` — so
+on an airless world there is nothing for a dropped kerb to drop: the sidewalk, the verge and their dressing are all
+off, and the only thing a kerb cut can break is the pedestrian tube. Until R8 the drive ran into the side of a glass
+barrel and over its 20 cm curb at both ends.
+
+- **`PedestrianTube.emit` takes `cuts` and `arcOffset`**, the same frame and the same pair of arguments
+  `RoadMesher.sidewalks` reads, passed from the same call site four lines below the kerb parking's
+  (`city_tile_mesher.dart`). **With no cut that reaches the span the output is byte-identical** to what it was, which
+  is checked in `kerb_cut_test` on the positions of both builders.
+- **Only the tube's OWN kerb counts.** The barrel runs down ONE verge — side 1, right of the first → last polyline —
+  so a drive that breaks the far kerb crosses nothing, and a far-swing mask (`kindHomeFarSwing`) breaks no kerb at
+  all. Both are ignored, as the pavement's own dressing ignores them.
+- **The profile.** Each drawn cut on that kerb holds `[c − h − 1.0, c + h + 1.0]` level at `crossLiftM` (2.45 m), with
+  a 1:12 approach either side (29.4 m). Two holds less than two ramps apart are MERGED, so the tube stays up between
+  them rather than sagging (§10.2 Q8). The ramp corners are inserted as stations
+  (`RoadMesher.withStations`, made public for this — it was `_withStations`), so the lift is piecewise linear in arc
+  and the barrel bends where the ramp bends and nowhere else.
+- **What carries it.** With cuts in reach the flat curb strip becomes a box beam 0.35 m deep — top, soffit and two
+  faces — so the raised stretch has an underside and the touchdown is one surface rather than a step (at grade the
+  beam's underside is simply in the ground, and its face is the curb face the tube never had). Pairs of legs hold it
+  1.15 m either side of the barrel's axis, 0.15 m into the ground, wherever the deck stands at least `legMinLiftM`
+  (0.8 m) over the CURB LINE — a deck top 1.0 m over the drape and a soffit 0.65 m over it — which is the hold plus
+  `legRunM` (19.8 m) into each approach.
+- **Where the posts go, and why they are not the road's vertices.** `PedestrianTube.legArcsOf` computes the arcs
+  first and `emit` then inserts them as stations of its own, the way it inserts the ramp corners. A post may not
+  stand in a drive, so `legClearM` (2 m) either side of every drawn cut is shut — with equal extents the mask is
+  symmetric, so the lane's travel sign cancels and the shut stretch is exactly what `KerbCuts.blocked` reports. A
+  pair stands at each EDGE of every shut stretch and the clear runs between them are divided EVENLY into steps of at
+  most `legSpacingM` (7.5 m). So the longest unheld stretch of deck is one drive's opening and its clearance —
+  12.0 m for a house's 8 m drive — and nothing else. **The first cut of this was wrong and is the R8 repair:** legs
+  were placed only where the polyline already had a vertex, and skipped when that vertex fell in a drive, so a fused
+  terrace drawn at ten-metre stations stood on four PAIRS of posts with 38 m of level deck on nothing, and a lone crossing on
+  a road drawn at 25 m stations (the zoo's own sealed street is drawn at 100) got no post at all. Leg arcs are now
+  measured, at five station densities, in `kerb_cut_test` and in the tile in `road_tool_mesh_test`.
+- **What `legClearM` buys at the post, not at the station.** The post's CENTRE is held 2 m clear of the cut, and the
+  post is `legHalfM` (0.16 m) thick along the road too, so its nearest corner stands **1.84 m** off the drive's edge.
+  That is the figure §8.3's R8 test asserts.
+- **Nothing else moved.** `RoadMesher.withStations` is a rename only. No pinned digest moved and there is no Appendix
+  A row: the only cut-carrying fixture (`city_tile_mesher_test`) is not sealed, and the road zoo's sealed street
+  carries no cut — which is exactly why R8 adds a fixture that carries both (§8.3 R8). That fixture's own pin was
+  re-taken once inside R8, by the repair above (`0xa96767cb` → `0x3c455708`): the posts moved, and the pin is one
+  slice old and has never been on `dev`, so it is a first pin and not an Appendix A re-pin.
+- **What it costs, and where.** The beam runs the WHOLE span once any crossing reaches it, not only the raised
+  stretch: that is what makes the touchdown one surface instead of a step, and at grade it also gives the tube the
+  curb FACE it never had. Measured where anyone can re-run it — `kerb_cut_test`'s 'what a crossing costs' asserts
+  these four numbers — `PedestrianTube.emit` ALONE over 400 m of street drawn at ten-metre stations, no cut against
+  a terrace of three drives plus a lone fourth: **328 → 1606 vertices and 560 → 1680 triangles**, so **+1278 v and
+  +1120 t** for two crossings: a fused terrace 98.8 m end to end (40 m of hold and two 29.4 m ramps), of which 79.6 m stands at least `legMinLiftM` up and is carried on twelve pairs of posts, and a lone 68.8 m bridge on eight. The whole TILE around that
+  street — §8.2's zoo case, which also carries the carriageway, the kerbside and its parked rovers, and which clips
+  the road to its own extent — goes **5294 → 6068 vertices and 3132 → 4000 triangles** over ALL groups. That second
+  pair is the honest tile figure; the first pair is the tube's own, and the two are different measurements of
+  different things. The §8.4 reference town is not a sealed world and carries no tube at all, so
+  no budget line there moves; on a sealed colony the cost is four curb faces where there was one, plus a pair of
+  posts at most every 7.5 m of raised deck.
+
 **As built (R7): the legacy half is gone, and what an unserved lot keeps.**
 
 `LotFeatures.emitLot` is deleted, with its call site, its bay/aisle/driveway/footpath constants and its quad helper;
@@ -3125,7 +3182,10 @@ starter kit and pass V1–V13 on its graph under all five A2 override kinds. The
   beside its roads, so a change to the legacy massing moves them. The roads themselves are untouched: the road ZOO
   digests below, which carry no building, are byte-identical, as are the ramp's;
 - road zoo `0xfaae5bd2`, `0xa687274b`, `0xb8c5ea2d` (road_tool_mesh_test.dart:217-219, :293-295). A new zoo case with
-  cuts gets its own pin;
+  cuts gets its own pin — **R8 took it**: 'a sealed street with drives carries its tube over them' pins
+  `0x3c455708` (near, sealed, `siteAccess` on) and the three zoo digests above are unmoved, since no zoo road
+  carries a cut. That pin was taken twice inside R8 — `0xa96767cb`, then `0x3c455708` when the repair moved the
+  posts — and neither value ever reached `dev`, so it is a first pin and not an Appendix A re-pin;
 - detail layer on/off and mid/far identity (city_detail_layer_test.dart:506-548, extended to sites);
 - `city_tile_bucketing_test` keys for tiles without sites;
 - `traffic_fixture_test.dart:32-34` (4 roads, 5 nodes, 8 edges);
@@ -3282,6 +3342,29 @@ starter kit and pass V1–V13 on its graph under all five A2 override kinds. The
     every shape (absent, null, empty, all-zero) and buckets tile for tile like no seam at all; and a knob-OFF
     request that carries sites anyway draws the legacy lot, material for material, while the same request knob-ON
     does not.
+- **R8 (sealed-world tube crossings):** a new `kerb_cut_test` group over `PedestrianTube.emit` — no cut on its own
+  kerb moves it to the byte (an empty table, a far-kerb cut, a far-swing mask, a cut whose whole approach falls off
+  the span); the floor rises to `curbLiftM + crossLiftM` over the drive, measures 1:12 on the approach and is the
+  curb again a ramp clear of it; the soffit stands at `crossClearM`, which is over a rover's 1.95 m; every leg reaches
+  the ground (its foot at `−legFootM`) and its head the soffit, and no post CORNER stands nearer than
+  `legClearM − legHalfM` = **1.84 m** to the drive's edge (the post's centre is what is held the 2 m clear, and the
+  post is 0.16 m thick along the road too);
+  three drives 15 m apart make ONE crossing with no sag between them, while two 120 m apart make two; and a span
+  reads its crossings through `arcOffset`. **The repair adds two cases.** 'the legs are the structure's, not the
+  polyline's' meshes the fused terrace on the same street drawn at 1, 2, 10, 25 and 100 m stations and asserts the
+  post arcs are the SAME list every time; that they run from a leg run into the first approach to a leg run out of
+  the last; that every step between posts is either `legSpacingM` or exactly one drive being spanned; and that a
+  post stands at each edge of every drive — then re-checks a LONE crossing on a road drawn at 25 and 100 m
+  stations, which used to get no post at all. 'what a crossing costs' pins the four vertex/triangle numbers §5.5
+  as built quotes, so the cost line is re-derivable from the suite rather than from an unpublished harness.
+  `city_infrastructure_test` gains the winding case for the raised form —
+  a reversed box beam is a box-shaped hole you can see the far city through, which a screenshot settles no better
+  than the barrel's own winding. `road_tool_mesh_test` gains the zoo case with its own pin (§8.2): a sealed street
+  carrying a terrace of three drives, a lone drive 200 m on, a far-kerb cut and a swing mask — with the knob off it
+  is byte-identical to the same street with no cuts, with the knob on it is not, and at mid and far (no tube) it is
+  identical either way; and, since the repair, the TILE's own posts are counted — twelve pairs down the terrace,
+  none further apart than one drive's opening — though the street is drawn at ten-metre stations, not one of which
+  may carry a post.
 - **R3/R4:** A14 (road half).
 
 ### 8.4 Performance budgets (render side; generation in §3.10, traffic in §7.8)
@@ -3533,6 +3616,8 @@ class DepthProfile { double depthAt(double x); bool containsRect(Rect r); double
 | **T4b Residents and pedestrians** | traffic | with or after citizens (slice 3): residents' cars at home pads (backing out to the street, §7.4 Home back-out; yielding to pedestrians on the pavement crossing) and kerbs (E36 completes: all baked cars off), full D17 circling/give-up, stall → door walks via `entrancePt/entranceNode` | A16 |
 | **R4 as built** | road | tracks A and B merged; `CityNodes.siteAccess` **on by default**; the perf knob `siteAccess` added, and `ext.acro.citygame` takes `knob=<name>:<value>`, so a live A/B needs no rebuild; `installation_parking_test` gained its plan case (§8.2) | the §8.4 measurements above; the mid vertex gate +0.96 %; the near-tile deviation recorded in §8.4; the off-parcel throat heights recorded in §6.4 (an R5 dependency, with the probe R5 inherits); the whole suite green with the knob on, with only the one ON pin of `city_tile_mesher_test` moved at the merge (Appendix A). **One criterion is HELD, not ticked**: "the starter kit's four sites visibly connected" is met on the plan, in the mesh and on screen for the paving, gates, car parks, driveways and dropped kerbs, but the four off-parcel throats stand off an unshaped easement until R5 cuts them (§6.4). The slice is accepted on everything else; that line is R5's to tick. **R5 took it** (the R5 as-built row below) |
 | **R8 Polish** (last road slice) | road | **Two features, each its own commit.** The sealed-world tube crossing, accepted as a SKYWAY (§10.2 Q8, Q13): the pedestrian tube lifts over a driveway rather than the drive ducking under it. Alley rear joins (slot 3, F2a, §3.2), built without an audit gate (§10.2 Q13). **The other four reservations of this row are settled, not scheduled.** Second gates on a second road: CLOSED — nothing the game generates can put a gate on a lot that has a second road, the one hand route that can is written out in §6.1 item 4, and the gate is laid off slot 0 either way; what is left of it is second joins (slots 1–2, §3.5's "Not built"), where the gate stays singular. One-way loops with angled stalls: CLOSED, the stated benefit is negative in this repo's own dimensions and the arithmetic is recorded in §3.5 so it is not re-opened from intuition. Podium garage portals for `mega`: CLOSED — a mega's parking demand is declared already met inside its own podium, so the plan is owed no surface stalls; the governing rule is in §3.3. Public lots (`kPlanPublic`): DEFERRED with its design written down in §3.3 and §7.5; no road-side code lands until the traffic search is scheduled, and the T4b sequencing is a REQUEST to the Agent Traffic session (not acked), with `agent-traffic.md`:1368 raised to them as a cross-session dependency | the tube crossing and the alley joins each per feature; the four settled items need no acceptance, only the reasons above standing |
+| **R8 sealed-world tube crossings, as built** | road | `PedestrianTube` gains `cuts`/`arcOffset`, `crossingsOf`, `liftAt`, the box beam and the legs; `RoadMesher._withStations` → `withStations`; the call site in `city_tile_mesher.dart` passes the `cuts`/`arcOffset` already in scope | §10.2 Q8 option (a): 2.45 m of rise, 1:12 approaches (29.4 m), holds within two ramps merged, so a terrace is one raised walkway on legs and a lone drive is a **68.8 m** bridge (2·29.4 + 2·(4.0 + 1.0)). The fused form is a consequence of the rise and the grade, not a separate user decision — see §10.2 Q8, where option (a)'s word "short" is marked superseded. **No pin moved and no Appendix A row** — the only cut-carrying fixture is not sealed and the zoo's sealed street carries no cut, which is why this slice adds a fixture that carries both (`road_tool_mesh_test`, pin `0x3c455708`). New tests in §8.3 R8; the whole suite green. **Screenshots: NOT shot in the app.** The workspace rule forbids starting `acro_space_simulator.exe`, which is what any windows run of this repo launches, and the city renders through flutter_scene/Impeller, which `flutter test` has no GPU for. The pair attached to the review is an offscreen render of the REAL tile mesh (`CityTileMeshJob.runAll` over a sealed street, with and without the cuts) through a plain perspective camera — the geometry is the shipped geometry, the shading is not the shipped shading |
+| **R8 repair** | road | `PedestrianTube.legArcsOf` and `_fill` (new), the leg placement in `emit` (station-driven → arc-driven), `legRunM`; two new `kerb_cut_test` cases and a post count in the `road_tool_mesh_test` zoo case; §5.5 / §8.2 / §8.3 / §9 / §10.2 prose | the R8 review's six findings. **The blocking one was real and is fixed:** legs landed only on a vertex the ROAD TOOL had drawn and were dropped when that vertex fell in a drive, so the doc's own terrace at the fixture's own ten-metre stations stood on four pairs of posts with 38 m of level deck on nothing, and a lone crossing on a road drawn at 25 m stations got no post at all. `legArcsOf` now computes the post arcs from the STRUCTURE — a pair at each edge of every drive's shut stretch, the clear runs between them divided evenly into steps of at most `legSpacingM` — and `emit` inserts them as stations of its own, so the same twelve pairs carry the terrace at 1, 2, 10, 25 and 100 m stations alike and the longest unheld stretch of deck is one drive's opening and its clearance (12.0 m). **The zoo pin moved with them, `0xa96767cb` → `0x3c455708`** — a pin one slice old that has never been on `dev`, so still a first pin and no Appendix A row; every other digest is unmoved. Five prose findings, all real, all fixed: the kerb-cut spacing "12–17 m" contradicted this document's own "17–24 m house lot" (§3 C-1) and the code's 24 m / 30 m frontage defaults, in three places; "about 68 m end to end" is **68.8 m**, now shown as 2·29.4 + 2·(4.0 + 1.0); "the deck is at least 0.8 m up" is a lift over the CURB LINE, so a deck top 1.0 m over the drape; "never within 2 m of a drive" is 2 m at the post's centre and **1.84 m** at its corner, and §8.3's 1.5 m now agrees; and the cost line's absolute vertex totals could not be re-derived from the fixture they named — they are replaced by the tube's own 328 → 1606 v / 560 → 1680 t, which `kerb_cut_test` now asserts, plus the tile's true 5294 → 6068 v / 3132 → 4000 t. **A wrong claim withdrawn, not restated:** §10.2 Q8 said "the user has accepted this shape explicitly" with no exchange behind it; §10.2 is the ledger later slices build on, so the sentence is gone and the divergence is recorded as what it is — a consequence of the rise and the grade, with option (a)'s "short" marked superseded. **Drawn geometry DID move** — the posts, which is the whole repair: twelve pairs down the terrace where there were four, at different arcs, and eight under the lone bridge where a coarse polyline gave none. Nothing else in the tile moved. **No picture is attached, and that is deliberate.** The workspace rule forbids starting `acro_space_simulator.exe` and `flutter test` has no GPU for Impeller, so the only picture available is another throwaway offscreen harness — which is precisely what the R8 review could not re-run and rightly objected to. The evidence that replaces it is committed and re-runnable: leg arcs measured at five station densities in `kerb_cut_test`, and the tile's own post count in `road_tool_mesh_test`. A screenshot of a 0.32 m post under a 2.45 m deck would settle neither |
 
 ---
 
@@ -3610,8 +3695,39 @@ below records the decision). The Agent Traffic session's constraints for the bac
    an overlay; traffic may slow on it). The alternative, kerb-only above a slope, makes plans ground-dependent.
    **Accept steep drives.**
 8. **Sealed (airless) worlds.** Where a driveway crosses the pedestrian tube: (a) a short raised tube bridge, (b) an
-   airlock break, or (c) overlap as today. **(c) through R7, then (a) in R8** — and (a)'s built form is settled by
-   13 below: the tube lifts over the drive on a skyway.
+   airlock break, or (c) overlap as today. **(c) through R7, then (a) in R8. Built in R8 — and the word "short" in
+   option (a) is SUPERSEDED, not met.** The arithmetic below is what supersedes it, but the divergence was NOT
+   settled by arithmetic alone: it was put to the user before the slice was built, with the skyway picture and the
+   two alternatives (keep (c); or bridge only where the cuts are sparse, leaving the overlap at residential
+   density), and the user chose the skyway knowing it is continuous down a dense street. Recorded as decision 13
+   below. R8's first cut of this entry claimed the acceptance without citing the exchange and its review struck the
+   sentence as unevidenced, which was right on the evidence the reviewer had; the exchange is real and is now
+   recorded where a later slice can find it.
+
+   The rise is not negotiable: a rover is 1.95 m tall, so the soffit stands 2.3 m over the drive, which with the
+   deck's own 0.35 m is **2.45 m of rise**. At 1:12 — the accessible-ramp maximum, the steepest grade that is still a
+   ramp and not a stair — each approach is **29.4 m**, so one isolated crossing is **68.8 m of structure end to
+   end**: `2·rampM + 2·(kHomeCutHalfM + crossMarginM)` = 2·29.4 + 2·(4.0 + 1.0), re-derivable from the constants.
+   A kerb cut's spacing IS its lot's frontage, and a house lot is **17–24 m** (§3 C-1; `ParcelSettings.frontageM`
+   defaults to 24 m and `CitySpec.frontageM` to 30 m), so two adjacent holds leave **7–14 m** of clear between them
+   against **58.8 m** of two ramps. Adjacent crossings therefore cannot touch down between them and their holds
+   MERGE: down a dense street the result is one **continuous raised walkway on legs** for the whole terrace, with
+   isolated bridges only where the cuts are sparse. That shape is a CONSEQUENCE of the rise and the grade, not a
+   preference and not a user decision — the alternative, letting two near ramps overlap and taking the higher of
+   them, sags a few centimetres over a few metres between the drives, which reads as a fault in the structure
+   rather than as a ramp, so the merge is the rule and not a special case.
+
+   What holds it up is not "a pair every 7.5 m" either, which is what R8's first cut claimed: a post may not stand
+   in a drive, so a pair stands at each EDGE of every drive's 2 m clear and the clear runs between them are divided
+   evenly into steps of at most 7.5 m. The longest unheld stretch of deck is one drive's opening and its clearance,
+   **12.0 m** for a house's 8 m drive (§5.5 as built, R8 repair).
+
+   Nothing at this seam knows what body it is on (`PedestrianTube.emit` is handed a polyline and a kerb-cut table
+   and nothing else), so the grade is the Earth standard applied unchanged. A sixth of a gravity would carry a
+   steeper one; making that read would mean threading the body through the renderer for one constant.
+
+   Not done, and not needed for (a): no airlock, no door and no interior — the barrel is drawn geometry, and a
+   colonist does not walk inside it yet. When one does, the ramp is already walkable at 8.33 %.
 9. **Grid-cell colonies.** Generate plans from `parcelForCell` too, so R7 can delete the legacy path outright?
    **Yes.**
 10. **Plan-served sites without a stored frontage turn to face their access road.** Player-claimed sites, generator

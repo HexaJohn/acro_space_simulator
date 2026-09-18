@@ -3,7 +3,10 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
+import 'dart:typed_data';
+
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
+import 'package:acro_space_simulator/domain/colony/city/site_access/kerb_cuts.dart';
 import 'package:acro_space_simulator/domain/scatter/mesh_builder.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/elevated_structure.dart';
@@ -203,12 +206,18 @@ void main() {
   });
 
   group('the pedestrian tube', () {
-    ({MeshBuilder solid, MeshBuilder glass}) tube() {
+    ({MeshBuilder solid, MeshBuilder glass}) tube({Float64List? cuts}) {
       final solid = MeshBuilder(), glass = MeshBuilder();
       PedestrianTube.emit(solid, glass,
-          pts: pts, halfWidthM: 4, anchorBF: anchorBF);
+          pts: pts, halfWidthM: 4, anchorBF: anchorBF, cuts: cuts);
       return (solid: solid, glass: glass);
     }
+
+    /// A drive breaking the tube's own kerb (side 1) half way along the
+    /// 300 m alignment, as the renderer reads one: `(side, c, h, σ, kind)` —
+    /// far enough in that both of its approaches fit on the road.
+    final drive = Float64List.fromList(
+        [1, 150, 4, 1, KerbCuts.kindHomeLot.toDouble()]);
 
     test('the barrel stands clear of the carriageway, on its curb', () {
       final t = tube();
@@ -235,6 +244,22 @@ void main() {
           reason: 'the glass barrel is wound inside out');
       expect(opposing(t.solid.build()), closeTo(want, 0.001),
           reason: 'the curb is wound upside down');
+    });
+
+    test('the walkway it carries over a drive is not inside out either', () {
+      // Raised, the curb strip becomes a box beam on legs (§10.2 Q8 option
+      // (a)) — four faces and four posts whose winding a screenshot settles
+      // no better than the barrel's, since a reversed box is a box-shaped
+      // hole you can see the far city through.
+      final want = opposing(build(RoadClass.elevated).deck.build());
+      final t = tube(cuts: drive);
+      expect(opposing(t.glass.build()), closeTo(want, 0.001),
+          reason: 'the barrel over the drive is wound inside out');
+      expect(opposing(t.solid.build()), closeTo(want, 0.001),
+          reason: 'the raised deck or its legs are wound inside out');
+      expect(t.solid.build().triangleCount,
+          greaterThan(tube().solid.build().triangleCount),
+          reason: 'nothing was built over the drive');
     });
   });
 
