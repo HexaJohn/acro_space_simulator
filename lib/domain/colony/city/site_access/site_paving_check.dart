@@ -198,13 +198,16 @@ List<Vec2> corridorLineOf(SiteFrame frame, JoinSlot slot) {
   return pts;
 }
 
-/// The slot plan join [j] uses: packed slot 0 or 1, or the side-street slot;
-/// null when the context has none matching the join's piece and arc.
+/// The slot plan join [j] uses: packed slot 0 or 1, or the side-street or
+/// rear-alley slot; null when the context has none matching the join's piece
+/// and arc.
 JoinSlot? _slotOf(SiteContext ctx, SiteAccessPlan plan, int j) {
   final k = plan.joinSlot(j);
   JoinSlot? s;
   if (k == kJoinSlotSideStreet) {
     s = ctx.sideStreetSlot;
+  } else if (k == kJoinSlotAlley) {
+    s = ctx.alleySlot;
   } else if (k >= 0 && k < ctx.slotCount) {
     s = ctx.slot(k);
   }

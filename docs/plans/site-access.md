@@ -646,7 +646,19 @@ home, and demotes a lot that fails to `kerbOnly` (C-22).
 
 - Slot 1 is a second own-road slot at the far end of the span, when `W ≥ 60 m` and `|Δs| ≥ 30 m`.
 - Slot 2 is the side-street slot of a corner lot, unless that is slot 0.
-- Slot 3 is reserved for a rear alley (R8).
+- Slot 3 is the REAR ALLEY join (R8, machinery landed): the one a downtown lot's bins, loading and back-of-house
+  parking come off, so its street frontage stays an unbroken run of shopfronts. **Slot 0 stays the frontage and
+  stays kerbside** — the alley is a second offer, never a move, so a stale or absent plan degrades to kerbside
+  frontage and not to a driveway that no longer exists. Flagged `kJoinCut | kJoinAlley`; offered ON REQUEST like
+  slot 2 (`RoadGraph.rearAlleyJoinOf`), handled by `kJoinRefAlleyBase − lot`.
+  **The rear edge** (a `Parcel` stores a frontage and a side street, nothing rear) is read off the polygon: of the
+  edges at least 6 m long whose outward normal lies within 45° of the frontage's inward normal (which rules out both
+  side lines at 90° and the frontage at 180°), the DEEPEST from the frontage line, ties to the lower edge index. On
+  the quad the plat cuts that is the back edge exactly. **Its alley** is the nearest `alley` whose carriageway edge
+  (an alley has no pavement, §3.8) lies within 12 m of that edge — `_otherRoads` asked of the rear edge alone over
+  that reach, not of the whole polygon, because a lot's side line ends ON its rear edge and would tie with it.
+  12 m is a fraction of the shallowest block a generated town cuts (`blockDepthM` 104), so the alley found is the
+  one behind THIS lot. On the 12-mile sprawl audit town (18 alley roads) 152 of 54,257 lots have a candidate.
 - Ties go to the smaller road number, then the smaller `s`.
 
 **Worked example: the starter kit.** The crossing node has a reserve of 11.3 m. Both street dead ends (n = ±300)
@@ -685,6 +697,16 @@ Each site then gets a 56 m access road from the kerb (e = ±4) to its frontage l
   `refreshedFor` copies), flagged `kJoinCut | kJoinSideStreet`. Same answer the packed build gave (the sprawl
   offers 17,233; packed columns 72,038 -> 54,805). A slot 0 that fell back to the side street is still packed as
   slot 0 with `kJoinSideStreet`.
+- **Slot 3 is not packed either** (R8, the same rule for the same reason): `RoadGraph.rearAlleyJoinOf(lot)` places it
+  on the first ask and keeps it, and `RoadGraph.hasRearAlley(lot)` answers the CANDIDATE question alone — the rear
+  search without the placement — as one cached byte a lot, because every built site's `inSig` carries that bit
+  (§3.9) while only a plan that takes the slot needs the placement. Both caches are shared by `withOverrides` /
+  `refreshedFor` copies, so the answer never depends on when it is asked. Measured on the 12-mile sprawl audit town:
+  the bit costs **0.67–0.82 µs a lot** on its first ask (36–44 ms for all 54,257 lots; 20–25 ms for the 30,559
+  built ones) and **0.005–0.011 µs** warm, so **0.34–0.42 ms of a 512-site hashing tick** (4096 checks at
+  `_hashCheckUnits` 8) and 0.005 ms once warm. Over a whole road edit (70 ticks) an A/B against pre-warmed bits
+  measured 3–45 ms of difference in total — inside that bench's own JIT/GC noise, whose worst ticks run 25–55 ms
+  either way — so the bit is not measurable above the noise of a real edit.
 - `refreshedFor` keeps a graph only if bridges and start/end tapers are also unchanged (`_routesAlike`): the
   windows and every slot read them.
 - `effectiveFrontage` (R-F) walks each edge's own box rather than the polygon's: the same candidates and the same
@@ -1375,7 +1397,10 @@ joins; the book re-resolves it). A footprint join (`joinRef` −1) names no grap
     upgrade changes without moving a slot;
   - the BUILT bit of each crossed lot, in `joinCrossLot` order (§3.7a: the one cross-site input);
   - the spec (`type`, `housing`, `jobs`, `siteWidthM`, `siteDepthM`, `siteKind`, group);
-  - whether an alley candidate exists.
+  - whether an alley candidate exists (`RoadGraph.hasRearAlley`; **as built, R8:** hashed for EVERY lot, placed or
+    not, and the side-street and rear-alley slots themselves only for the plans that take them, side street first).
+    Without the bit §4.2's tuple diff would never re-plan for a new alley: an alley drawn behind a built lot moves
+    no slot of it, so the diff would re-resolve it and stop there.
 
   Never utilisation, ground, controls, style or time. The same `inSig` gives the same plan rows, with no
   regeneration. The 1 cm polygon term is change detection only: nothing persisted or tie-breaking hashes a

@@ -206,6 +206,17 @@ class SiteContext {
       ? kJoinRefNone
       : graph.joinRefOf(graphLot, kJoinSlotSideStreet);
 
+  /// The rear alley slot 3 (placed on the graph on first ask) and its handle;
+  /// null / −1 for a footprint or a lot with no alley behind it.
+  JoinSlot? get alleySlot =>
+      graphLot < 0 ? null : graph.rearAlleyJoinOf(graphLot);
+  int get alleyRef =>
+      graphLot < 0 ? kJoinRefNone : graph.joinRefOf(graphLot, kJoinSlotAlley);
+
+  /// Whether an alley lies behind the lot (§3.9's input-signature term): the
+  /// rear search alone, without placing slot 3.
+  bool get hasAlleyCandidate => graphLot >= 0 && graph.hasRearAlley(graphLot);
+
   /// The site frame (§3.1); null for a degenerate polygon.
   late final SiteFrame? frame = SiteFrame.of(
       parcel.polygon, trustFrontage ? parcel.frontage : null, graph.index);
@@ -279,8 +290,9 @@ class SiteContext {
     );
   }
 
-  /// A join on packed slot [k] (0, 1) or, with [k] == `kJoinSlotSideStreet`,
-  /// on the side-street slot: its values copied from the graph's (V3).
+  /// A join on packed slot [k] (0, 1) or, with [k] == `kJoinSlotSideStreet` or
+  /// `kJoinSlotAlley`, on the side-street or rear-alley slot: its values
+  /// copied from the graph's (V3).
   int addJoin(
     PlanBuilder b,
     int k, {
@@ -290,11 +302,18 @@ class SiteContext {
     int kerbNode = -1,
     int throatSeg = -1,
   }) {
-    final side = k == kJoinSlotSideStreet;
-    final s = side ? sideStreetSlot! : _slots[k];
+    final s = switch (k) {
+      kJoinSlotSideStreet => sideStreetSlot!,
+      kJoinSlotAlley => alleySlot!,
+      _ => _slots[k],
+    };
     return b.join(
       slot: k,
-      ref: side ? sideStreetRef : _slotRefs[k],
+      ref: switch (k) {
+        kJoinSlotSideStreet => sideStreetRef,
+        kJoinSlotAlley => alleyRef,
+        _ => _slotRefs[k],
+      },
       piece: s.piece,
       roadS: s.s,
       right: s.right,

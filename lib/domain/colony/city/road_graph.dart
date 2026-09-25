@@ -33,7 +33,12 @@ import 'road_catalog.dart';
 import 'road_junction.dart';
 import 'road_noise.dart';
 import 'site_access/site_access_constants.dart'
-    show kJoinRefNone, kJoinRefSideStreetBase, kJoinSlotSideStreet;
+    show
+        kJoinRefAlleyBase,
+        kJoinRefNone,
+        kJoinRefSideStreetBase,
+        kJoinSlotAlley,
+        kJoinSlotSideStreet;
 import 'site_access/site_join.dart';
 import 'spatial_index.dart';
 
@@ -130,6 +135,17 @@ class _StructureStamp {
   int? value;
 }
 
+/// The rear-alley answers of one structure, shared by every copy of the graph
+/// ([RoadGraph.withOverrides], [RoadGraph.refreshedFor]): the candidate BIT
+/// per lot (0 unknown, 1 yes, 2 no) and the PLACED slot of the lots asked for
+/// it. The bit is a byte a lot rather than a map entry because every built
+/// lot's signature carries it (§3.9), while the slot is asked for only by a
+/// plan that takes it.
+class _RearAlleys {
+  Uint8List? bits;
+  final Map<int, JoinSlot?> slots = {};
+}
+
 /// Where a lot is entered from: a road, the arc position on it, and the
 /// directions of travel along it from which the lot can be reached (and in
 /// which it can be left).
@@ -213,6 +229,7 @@ class RoadGraph {
     required List<Parcel> parcels,
     required double sidewalkM,
     Map<int, JoinSlot?>? sideStreetJoins,
+    _RearAlleys? rearAlleys,
     required this.rootPiece,
     required this.rootS,
     required this.rootDirs,
@@ -224,6 +241,7 @@ class RoadGraph {
         _parcels = parcels,
         _sidewalkM = sidewalkM,
         _sideStreetJoins = sideStreetJoins ?? {},
+        _rearAlleys = rearAlleys ?? _RearAlleys(),
         _stamp = stamp ?? _StructureStamp();
 
   /// The [structureStamp] cell, shared by every copy sharing this graph's
@@ -428,7 +446,8 @@ class RoadGraph {
   /// meet its road. Lot i owns slots `lotJoinStart[i] .. lotJoinStart[i +
   /// 1] - 1`, slot 0 first, then slot 1 (a second cut at the far end of a
   /// wide span) when offered; `lotJoinStart` has [lotCount] + 1 entries. A
-  /// corner lot's side-street slot is not packed: ask [sideStreetJoinOf].
+  /// corner lot's side-street slot is not packed: ask [sideStreetJoinOf]. Nor
+  /// is a lot's rear alley slot: ask [rearAlleyJoinOf].
   ///
   /// Per slot: the piece; the arc on the piece's road from its first control,
   /// quantised to 0.25 m ([joinS]); the access mask, which is
@@ -497,11 +516,59 @@ class RoadGraph {
   /// The side-street slots asked for so far, by graph lot index.
   final Map<int, JoinSlot?> _sideStreetJoins;
 
+  /// Slot 3 of graph lot [lot] (§3.2): a cut on the ALLEY BEHIND it — where a
+  /// downtown lot's bins, loading and back-of-house parking come off, so its
+  /// street frontage stays an unbroken run of shopfronts. Null when no alley
+  /// lies behind the lot ([hasRearAlley]), when it has no slot 0 cut on a road
+  /// of its own, or when no cut fits on the alley. Placed on the first ask and
+  /// kept (by every graph sharing these slots: [withOverrides],
+  /// [refreshedFor]); the answer never depends on when it is asked.
+  JoinSlot? rearAlleyJoinOf(int lot) {
+    if (lot < 0 || lot >= lotCount) return null;
+    final cache = _rearAlleys.slots;
+    if (cache.containsKey(lot)) return cache[lot];
+    JoinSlot? slot;
+    final k = lotJoinStart[lot];
+    if (k < lotJoinStart[lot + 1] && hasRearAlley(lot)) {
+      final p = _parcels[lot];
+      slot = _placer.rearAlleySlot(
+        p.polygon,
+        frontage: p.frontage,
+        roadId: p.roadId,
+        slot0Flags: joinFlags[k],
+        ownLot: lot,
+      );
+    }
+    cache[lot] = slot;
+    return slot;
+  }
+
+  /// Whether an alley lies behind graph lot [lot] (§3.9: the input signature's
+  /// "whether an alley candidate exists"). The rear-edge search only, no
+  /// placement — the term every lot's slot tuple carries, so that an alley
+  /// drawn behind a built lot (which moves no slot of it) re-plans it. Read
+  /// once per lot and kept, like [rearAlleyJoinOf].
+  bool hasRearAlley(int lot) {
+    if (lot < 0 || lot >= lotCount) return false;
+    final bits = _rearAlleys.bits ??= Uint8List(lotCount);
+    final was = bits[lot];
+    if (was != 0) return was == 1;
+    final p = _parcels[lot];
+    final yes = _placer.hasRearAlley(p.polygon,
+        frontage: p.frontage, roadId: p.roadId);
+    bits[lot] = yes ? 1 : 2;
+    return yes;
+  }
+
+  /// The rear-alley answers so far, shared by every copy of this graph.
+  final _RearAlleys _rearAlleys;
+
   /// The join handle (docs/plans/site-access.md §2.3) of slot [slot] of graph
   /// lot [lot]: the packed join index for slot 0 or 1
   /// (`lotJoinStart[lot] + slot`), `kJoinRefSideStreetBase − lot` for the
-  /// side-street slot 2, or `kJoinRefNone` (−1) when the lot has no such
-  /// slot. Slot 2 is placed on the first ask ([sideStreetJoinOf]). Sync and
+  /// side-street slot 2, `kJoinRefAlleyBase − lot` for the rear-alley slot 3,
+  /// or `kJoinRefNone` (−1) when the lot has no such slot. Slots 2 and 3 are
+  /// placed on the first ask ([sideStreetJoinOf], [rearAlleyJoinOf]). Sync and
   /// tests only; never per sub-step.
   ///
   /// Every copy sharing this graph's structure ([sharesStructureWith])
@@ -512,6 +579,11 @@ class RoadGraph {
       return sideStreetJoinOf(lot) == null
           ? kJoinRefNone
           : kJoinRefSideStreetBase - lot;
+    }
+    if (slot == kJoinSlotAlley) {
+      return rearAlleyJoinOf(lot) == null
+          ? kJoinRefNone
+          : kJoinRefAlleyBase - lot;
     }
     if (slot < 0 || slot > 1) return kJoinRefNone;
     final k = lotJoinStart[lot] + slot;
@@ -540,6 +612,11 @@ class RoadGraph {
       );
     }
     if (ref == kJoinRefNone) return null;
+    // The alley form takes the bottom of the negative space, the side-street
+    // form the top: the two meet only on 2³⁰ lots (site_access_constants.dart).
+    if (ref <= kJoinRefAlleyBase) {
+      return rearAlleyJoinOf(kJoinRefAlleyBase - ref);
+    }
     final lot = kJoinRefSideStreetBase - ref;
     if (lot < 0 || lot >= lotCount) return null;
     return sideStreetJoinOf(lot);
@@ -897,6 +974,7 @@ class RoadGraph {
         parcels: _parcels,
         sidewalkM: _sidewalkM,
         sideStreetJoins: _sideStreetJoins,
+        rearAlleys: _rearAlleys,
         rootPiece: rootPiece,
         rootS: rootS,
         rootDirs: rootDirs,

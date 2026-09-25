@@ -61,6 +61,7 @@ import 'site_access_constants.dart';
 import 'site_access_plan.dart';
 import 'site_easement.dart' as site_easement show easementOf;
 import 'site_easement.dart' show SiteEasement;
+import 'site_join.dart' show JoinSlot;
 import 'site_plan_builder.dart';
 import 'site_plan_generator.dart';
 import 'site_plan_validator.dart';
@@ -131,6 +132,11 @@ class _Site {
   /// Whether its plan uses the side-street slot (then that slot is hashed
   /// into [slotSig]).
   bool usesSide = false;
+
+  /// Whether its plan uses the rear-alley slot (then that slot is hashed into
+  /// [slotSig] too, after the side street's). The alley CANDIDATE bit is in
+  /// every lot's tuple whether or not its plan takes the slot (§3.9).
+  bool usesAlley = false;
 
   /// Whether slot 0 carries a real access corridor (kJoinEasement or
   /// kJoinOffFrontage), so [SiteAccessBook.corridorHits] tests it.
@@ -948,7 +954,8 @@ class SiteAccessBook {
     } else {
       lot = g.lotNoOf(id) ?? -1;
       site = parcel!;
-      (slotSig, crosses) = _lotSlotSig(g, lot, built, withSide: rec.usesSide);
+      (slotSig, crosses) = _lotSlotSig(g, lot, built,
+          withSide: rec.usesSide, withAlley: rec.usesAlley);
     }
     final polySig = sameValues ? rec.polySig : _polySpecSig(site, spec);
     // A corner car park, yard or installation in the dirty box may take its
@@ -1014,10 +1021,12 @@ class SiteAccessBook {
     rec
       ..hasSig = true
       ..polySig = polySig
-      ..slotSig = rec.usesSide
-          ? _lotSlotSig(g, lot, built, withSide: false).$1
+      ..slotSig = rec.usesSide || rec.usesAlley
+          ? _lotSlotSig(g, lot, built, withSide: false, withAlley: false).$1
           : slotSig
-      ..usesSide = false // settled at flush, from the plan's joins
+      // Both settled at flush, from the plan's joins.
+      ..usesSide = false
+      ..usesAlley = false
       ..graphLot = lot
       ..stamp = _stamp
       ..parcel = site
@@ -1165,10 +1174,16 @@ class SiteAccessBook {
   }
 
   /// The slot half of a graph lot's signature, read off [g]'s join columns
-  /// (the lot's packed slots 0 and 1; with [withSide], its side-street slot
-  /// too), and whether any slot crosses a lot.
+  /// (the lot's packed slots 0 and 1; with [withSide] its side-street slot and
+  /// with [withAlley] its rear-alley slot too), and whether any slot crosses a
+  /// lot.
+  ///
+  /// Whether an ALLEY CANDIDATE exists is hashed for every lot (§3.9), placed
+  /// or not: a newly drawn alley moves no slot of the lots in front of it, so
+  /// without the bit §4.2's tuple diff would re-resolve them and never re-plan
+  /// them. One cached byte a lot on the graph ([RoadGraph.hasRearAlley]).
   (int, bool) _lotSlotSig(RoadGraph g, int lot, bool Function(int lot) built,
-      {required bool withSide}) {
+      {required bool withSide, required bool withAlley}) {
     if (lot < 0) return (_w(kFnvOffset32, -1), false);
     final k0 = g.lotJoinStart[lot];
     final n = g.lotJoinStart[lot + 1] - k0;
@@ -1183,13 +1198,22 @@ class SiteAccessBook {
       if (c1 > c0) crosses = true;
       h = _crossHash(h, g, g.joinCrossLot, c0, c1, built);
     }
+    h = _w(h, g.hasRearAlley(lot) ? 1 : 0);
     if (withSide) h = _sideHash(h, g, lot, built);
+    if (withAlley) h = _alleyHash(h, g, lot, built);
     return (h, crosses);
   }
 
   /// [h] with graph lot [lot]'s side-street slot (placed on first ask).
-  int _sideHash(int h, RoadGraph g, int lot, bool Function(int lot) built) {
-    final s = g.sideStreetJoinOf(lot);
+  int _sideHash(int h, RoadGraph g, int lot, bool Function(int lot) built) =>
+      _requestedHash(h, g.sideStreetJoinOf(lot), g, built);
+
+  /// [h] with graph lot [lot]'s rear-alley slot (placed on first ask).
+  int _alleyHash(int h, RoadGraph g, int lot, bool Function(int lot) built) =>
+      _requestedHash(h, g.rearAlleyJoinOf(lot), g, built);
+
+  int _requestedHash(int h, JoinSlot? s, RoadGraph g,
+      bool Function(int lot) built) {
     if (s == null) return _w(h, -2);
     h = _slotHash(h, g, s.piece, s.s, s.right, s.dirs, s.roomM, s.flags,
         s.kerbE, s.kerbN, s.normE, s.normN);
@@ -1229,6 +1253,9 @@ class SiteAccessBook {
         ref = g.joinRefOf(lot, k);
         if (k == kJoinSlotSideStreet) {
           final s = g.sideStreetJoinOf(lot);
+          if (s != null) piece = s.piece;
+        } else if (k == kJoinSlotAlley) {
+          final s = g.rearAlleyJoinOf(lot);
           if (s != null) piece = s.piece;
         } else if (ref >= 0) {
           piece = g.joinPiece[ref];
@@ -1451,6 +1478,7 @@ class SiteAccessBook {
         if (ch.isResolve &&
             !rec.crosses &&
             !rec.usesSide &&
+            !rec.usesAlley &&
             rec.easement.isEmpty) {
           continue;
         }
@@ -1458,16 +1486,26 @@ class SiteAccessBook {
         final row = _rowOfSlot[s];
         if (row < 0) continue;
         final chunk = _chunks[s ~/ kSitesPerChunk];
-        // A new plan that uses its side-street slot hashes that slot into
-        // its signature from now on.
+        // A new plan that uses its side-street or rear-alley slot hashes that
+        // slot into its signature from now on, side street first whatever
+        // order the plan emitted its joins in ([_lotSlotSig]'s order).
         if (ch.builderChunk >= 0 && rec.graphLot >= 0) {
           final j0 = chunk.joinStart(row), n = chunk.joinCountOf(row);
+          var side = false, alley = false;
           for (var j = j0; j < j0 + n; j++) {
-            if (chunk.joinSlot(j) != kJoinSlotSideStreet) continue;
+            final k = chunk.joinSlot(j);
+            if (k == kJoinSlotSideStreet) side = true;
+            if (k == kJoinSlotAlley) alley = true;
+          }
+          if (side) {
             rec
               ..usesSide = true
               ..slotSig = _sideHash(rec.slotSig, g, rec.graphLot, built);
-            break;
+          }
+          if (alley) {
+            rec
+              ..usesAlley = true
+              ..slotSig = _alleyHash(rec.slotSig, g, rec.graphLot, built);
           }
         }
         final plan = chunk.plan(row);
@@ -1695,6 +1733,9 @@ class SiteAccessBook {
         ref = g.joinRefOf(lot, k);
         if (k == kJoinSlotSideStreet) {
           final s = g.sideStreetJoinOf(lot);
+          if (s != null) piece = s.piece;
+        } else if (k == kJoinSlotAlley) {
+          final s = g.rearAlleyJoinOf(lot);
           if (s != null) piece = s.piece;
         } else if (ref >= 0) {
           piece = g.joinPiece[ref];

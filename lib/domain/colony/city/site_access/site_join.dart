@@ -16,10 +16,10 @@
 ///   cut may go (the reserves, bridges, deck stretches off the ground or off
 ///   grade, tunnels and tapers taken out).
 /// - [SiteJoinPlacer]: a lot's join slots. Slot 0 is the lot's access, the one
-///   `RoadGraph.lotPiece / lotS / lotDirs` report; slots 1 and 2 are offered
-///   for a plan to pick. A lot set back from its road runs the access
-///   corridor search, which may cross unbuilt auto lots (easements) but never
-///   a manual parcel or another road.
+///   `RoadGraph.lotPiece / lotS / lotDirs` report; slots 1, 2 and 3 (the rear
+///   alley) are offered for a plan to pick. A lot set back from its road runs
+///   the access corridor search, which may cross unbuilt auto lots (easements)
+///   but never a manual parcel or another road.
 ///
 /// Determinism (§3.9): no platform hash, no draw, no clock, no map iteration
 /// and no trigonometry. Every tie is broken by an explicit total order.
@@ -655,6 +655,146 @@ class SiteJoinPlacer {
     return out.slotAt(0);
   }
 
+  /// Slot 3 of an auto lot (§3.2): the cut on the ALLEY BEHIND it, the join a
+  /// downtown lot's bins, loading and back-of-house parking come off so its
+  /// street frontage stays an unbroken run of shopfronts (`RoadClass.alley`).
+  /// Null when the lot has no road of its own, when its slot 0 is not a cut on
+  /// a road that is not already the alley, when no alley lies behind it
+  /// ([hasRearAlley]), or when no cut fits there.
+  ///
+  /// Offered ON REQUEST, like slot 2: a sprawl's downtown lots would otherwise
+  /// pay the rear search on every road graph build (§3.2, R-B1).
+  /// [polygon], [frontage] and [roadId] are the lot's, as [addSlots] was given
+  /// them.
+  JoinSlot? rearAlleySlot(
+    List<Vec2> polygon, {
+    required (Vec2, Vec2)? frontage,
+    required String? roadId,
+    required int slot0Flags,
+    int ownLot = -1,
+  }) {
+    if (roadId == null) return null;
+    if (slot0Flags & kJoinCut == 0 || slot0Flags & kJoinAlley != 0) return null;
+    final own = roadNoOf(roadId);
+    if (own == null) return null;
+    final hit = _rearAlley(polygon, frontage, own);
+    if (hit == null) return null;
+    final (rear, r) = hit;
+    final ea = polygon[rear], eb = polygon[(rear + 1) % polygon.length];
+    final ip = _interior(polygon);
+    if (!_place(r, ea.e, ea.n, eb.e, eb.n, null, ip, ownLot,
+        manual: false, side: false, alley: true)) {
+      return null;
+    }
+    final out = JoinColumns(1);
+    _emit(out);
+    return out.slotAt(0);
+  }
+
+  /// Whether an alley lies behind the lot with footprint [polygon], stored
+  /// [frontage] and own road [roadId] (§3.9's "whether an alley candidate
+  /// exists"): the rear edge and the search for its alley, and none of
+  /// [rearAlleySlot]'s placement.
+  ///
+  /// The bit alone, because §4.2's dirty-box diff compares SLOT TUPLES: an
+  /// alley drawn behind a built lot moves no slot of it, so without this term
+  /// nothing would re-plan when the alley appears.
+  bool hasRearAlley(List<Vec2> polygon,
+      {required (Vec2, Vec2)? frontage, required String? roadId}) {
+    if (roadId == null) return false;
+    final own = roadNoOf(roadId);
+    if (own == null) return false;
+    return _rearAlley(polygon, frontage, own) != null;
+  }
+
+  /// The rear edge of [polygon] and the alley behind it, or null: the edge
+  /// index, and the graph road number of the nearest alley whose carriageway
+  /// edge lies within [kRearAlleyReachM] of that edge.
+  ///
+  /// The roads are [_otherRoads]', asked over the rear reach rather than a
+  /// manual lot's 90 m: one search, not two.
+  (int, int)? _rearAlley(
+      List<Vec2> polygon, (Vec2, Vec2)? frontage, int own) {
+    if (polygon.length < 3) return null;
+    // The frontage the frame fronts, taken exactly as [addSlots] takes it.
+    double ax, ay, bx, by;
+    if (frontage != null && _trusted(polygon, frontage)) {
+      ax = frontage.$1.e;
+      ay = frontage.$1.n;
+      bx = frontage.$2.e;
+      by = frontage.$2.n;
+    } else {
+      final frame = SiteFrame.of(polygon, frontage, index);
+      if (frame == null) return null;
+      ax = frame.origin.e;
+      ay = frame.origin.n;
+      bx = ax + frame.u.e * frame.widthM;
+      by = ay + frame.u.n * frame.widthM;
+    }
+    final ip = _interior(polygon);
+    final rear = _rearEdgeOf(polygon, ax, ay, bx, by, ip);
+    if (rear < 0) return null;
+    // The same search, asked of the REAR EDGE alone rather than of the whole
+    // lot: a lot's side line ends ON its rear edge, so asking of the polygon
+    // would tie with the side line and the nearest-edge tie-break would name
+    // that one. (Both "edges" of a two-corner run are the rear edge.)
+    final edge = [polygon[rear], polygon[(rear + 1) % polygon.length]];
+    for (final (r, _, d) in _otherRoads(edge, own, reachM: kRearAlleyReachM)) {
+      if (roads[r].roadClass != RoadClass.alley) continue;
+      // An alley has no pavement (§3.8), so its kerb is its carriageway edge.
+      if (d - roads[r].halfWidth > kRearAlleyReachM) continue;
+      return (rear, r);
+    }
+    return null;
+  }
+
+  /// The REAR edge of [polygon] against the frontage ([ax], [ay])–([bx],
+  /// [by]) with interior point [ip], or −1 where the polygon allows none.
+  ///
+  /// A `Parcel` stores a frontage and a side street but nothing rear, so the
+  /// rule is read off the polygon: the edge opposite the frontage is the one
+  /// facing AWAY from it — its outward normal within 45° of the frontage's
+  /// inward normal ([kCos45], which rules out both side lines at 90° and the
+  /// frontage itself) — and at least [kRearEdgeMinM] long, so a clipped
+  /// corner's chamfer is not a back. Of those the DEEPEST from the frontage
+  /// line wins, ties to the lower edge index: on the quad the plat cuts
+  /// (front, side, back, side) that is exactly the back edge.
+  static int _rearEdgeOf(List<Vec2> polygon, double ax, double ay, double bx,
+      double by, Vec2 ip) {
+    final fe = bx - ax, fn = by - ay;
+    final fl = math.sqrt(fe * fe + fn * fn);
+    if (!(fl >= kFrameDegenerateM)) return -1;
+    // v: the frontage's inward normal, the way the lot lies behind it.
+    var ve = -fn / fl, vn = fe / fl;
+    if ((ip.e - ax) * ve + (ip.n - ay) * vn < 0) {
+      ve = -ve;
+      vn = -vn;
+    }
+    var best = -1;
+    var bestDepth = double.negativeInfinity;
+    final n = polygon.length;
+    for (var k = 0; k < n; k++) {
+      final p = polygon[k], q = polygon[(k + 1) % n];
+      final ex = q.e - p.e, en = q.n - p.n;
+      final len = math.sqrt(ex * ex + en * en);
+      if (!(len >= kRearEdgeMinM)) continue;
+      final me = (p.e + q.e) * 0.5, mn = (p.n + q.n) * 0.5;
+      // The edge's OUTWARD normal: its perpendicular, turned away from [ip].
+      var ne = -en / len, nn = ex / len;
+      if ((me - ip.e) * ne + (mn - ip.n) * nn < 0) {
+        ne = -ne;
+        nn = -nn;
+      }
+      if (ne * ve + nn * vn < kCos45) continue;
+      final depth = (me - ax) * ve + (mn - ay) * vn;
+      if (depth > bestDepth) {
+        bestDepth = depth;
+        best = k;
+      }
+    }
+    return best;
+  }
+
   /// Whether [frontage] is one [SiteFrame.of] trusts on [polygon]: a finite
   /// polygon of three corners or more and at least 30 m², a frontage of some
   /// length whose midpoint lies within 1 m of the boundary. Then the frame
@@ -879,7 +1019,7 @@ class SiteJoinPlacer {
   /// false when no span fits even [kJoinMinRoomM].
   bool _place(int r, double ax, double ay, double bx, double by, Vec2? vIn,
       Vec2 ip, int ownLot,
-      {required bool manual, required bool side}) {
+      {required bool manual, required bool side, bool alley = false}) {
     final w = math.sqrt((bx - ax) * (bx - ax) + (by - ay) * (by - ay));
     if (!(w > 1e-6)) return false;
     final rec = recs[r];
@@ -907,7 +1047,9 @@ class SiteJoinPlacer {
           ? kJoinMinRoomM
           : (narrow ? kNarrowCutHalfM : kWideCutHalfM);
       final spanLo = sLo + m + cc, spanHi = sHi - m - cc;
-      var flags = kJoinCut | (side ? kJoinSideStreet : 0);
+      var flags = kJoinCut |
+          (side ? kJoinSideStreet : 0) |
+          (alley ? kJoinAlley : 0);
       _candN = 0;
       for (var p = _pieceAt(r, spanLo); p < pEnd && pieceS0[p] <= spanHi; p++) {
         for (var k = windows.start[p]; k < windows.start[p + 1]; k++) {
@@ -1422,7 +1564,9 @@ class SiteJoinPlacer {
       List<Vec2> polygon, Vec2 a, Vec2 b, Vec2 v) sync* {
     final face = _facingRoad(a, b, v);
     if (face >= 0) yield (face, a, b, true);
-    yield* _otherRoads(polygon, face);
+    for (final (r, edge, _) in _otherRoads(polygon, face)) {
+      yield (r, polygon[edge], polygon[(edge + 1) % polygon.length], false);
+    }
   }
 
   /// Whether segment q0–q1's bounding box lies further than [limit] from the
@@ -1479,23 +1623,28 @@ class SiteJoinPlacer {
     return faceRoad;
   }
 
-  /// Every eligible graph road but [exclude] within reach of an edge of
-  /// [polygon], nearest first, ties by road number, each with its nearest
-  /// edge.
-  List<(int, Vec2, Vec2, bool)> _otherRoads(List<Vec2> polygon, int exclude) {
+  /// Every eligible graph road but [exclude] within [reachM] (plus its own
+  /// half width) of an edge of [polygon], nearest first, ties by road number,
+  /// each as `(road, the index of its nearest edge, the distance to it)`.
+  ///
+  /// [reachM] is a manual lot's `manualReachM` by default; the rear-alley
+  /// search ([_rearAlley]) asks the same question of one edge over a few
+  /// metres, which is the whole of its cost — the index window is the given
+  /// run's box grown by the reach.
+  List<(int, int, double)> _otherRoads(List<Vec2> polygon, int exclude,
+      {double reachM = RoadGraph.manualReachM}) {
     final box = Box2.of(polygon);
     final seen = <int, int>{};
     final order = <int>[];
     final dist = <double>[];
     final edgeOf = <int>[];
-    index.visit(box, RoadGraph.manualReachM + _maxEligibleHalfWidth,
-        (slot, rec, seg) {
+    index.visit(box, reachM + _maxEligibleHalfWidth, (slot, rec, seg) {
       if (seg == 0 || slot >= slotToRoad.length) return;
       final r = slotToRoad[slot];
       if (r < 0 || r == exclude || !identical(rec.e, recs[r].e)) return;
       final road = roads[r];
       if (!isEligibleJoinRoad(road.roadClass)) return;
-      final limit = RoadGraph.manualReachM + road.halfWidth;
+      final limit = reachM + road.halfWidth;
       if (_boxFar(box.minE, box.minN, box.maxE, box.maxN, rec.e[seg - 1],
           rec.n[seg - 1], rec.e[seg], rec.n[seg], limit)) {
         return;
@@ -1522,15 +1671,7 @@ class SiteJoinPlacer {
         final c = dist[x].compareTo(dist[y]);
         return c != 0 ? c : order[x].compareTo(order[y]);
       });
-    return [
-      for (final i in idx)
-        (
-          order[i],
-          polygon[edgeOf[i]],
-          polygon[(edgeOf[i] + 1) % polygon.length],
-          false,
-        ),
-    ];
+    return [for (final i in idx) (order[i], edgeOf[i], dist[i])];
   }
 
   /// The nearest distance between segments [a]–[b] and [q0]–[q1], and the
