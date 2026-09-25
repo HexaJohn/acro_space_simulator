@@ -40,6 +40,31 @@ void main() {
     expect(AgentTuning.graphBuildInlineMaxRoads, 3000);
   });
 
+  test("the citizen defaults are the design's (§6.2–§6.6)", () {
+    expect(AgentTuning.citizensOwnPopulation, isTrue);
+    expect(AgentTuning.commuteRatePerResident, 0.00042,
+        reason: 'the demand scale is 1× the design rate by default');
+    expect(AgentTuning.carOwnership, 0.75);
+    expect(AgentTuning.carOwnershipSealed, 0.6);
+    expect(AgentTuning.homeCarRadiusM, 150);
+    expect(AgentTuning.rehousePerSync, 64);
+    expect(AgentTuning.jobMatchPerSync, 64);
+    expect(AgentTuning.arrivalsMin, 4);
+    expect(AgentTuning.arrivalsShare, 0.02);
+    expect(AgentTuning.homeDwellMinS, 150);
+    expect(AgentTuning.homeDwellMaxS, 420);
+    expect(AgentTuning.idleDwellMinS, 200);
+    expect(AgentTuning.idleDwellMaxS, 600);
+    expect(AgentTuning.errandDwellMinS, 40);
+    expect(AgentTuning.errandDwellMaxS, 120);
+    expect(AgentTuning.outOfTownMinS, 600);
+    expect(AgentTuning.outOfTownMaxS, 1800);
+    expect(AgentTuning.errandFromHome, 0.15);
+    expect(AgentTuning.errandFromIdle, 0.5);
+    expect(AgentTuning.errandFromWork, 0.2);
+    expect(AgentTuning.rushAmp, 0.6);
+  });
+
   test("the site defaults are T4a's (site-access.md §7.4–§7.6)", () {
     expect(AgentTuning.gateMaxMps, 3);
     expect(AgentTuning.gateForcedS, 25);
@@ -112,6 +137,26 @@ void main() {
     AgentTuning.commuteReturnMinS = 1;
     AgentTuning.commuteReturnMaxS = 2;
     AgentTuning.activityDwellScale = 2;
+    AgentTuning.citizensOwnPopulation = false;
+    AgentTuning.carOwnership = 1;
+    AgentTuning.carOwnershipSealed = 1;
+    AgentTuning.homeCarRadiusM = 1;
+    AgentTuning.rehousePerSync = 1;
+    AgentTuning.jobMatchPerSync = 1;
+    AgentTuning.arrivalsMin = 1;
+    AgentTuning.arrivalsShare = 1;
+    AgentTuning.homeDwellMinS = 1;
+    AgentTuning.homeDwellMaxS = 2;
+    AgentTuning.idleDwellMinS = 1;
+    AgentTuning.idleDwellMaxS = 2;
+    AgentTuning.errandDwellMinS = 1;
+    AgentTuning.errandDwellMaxS = 2;
+    AgentTuning.outOfTownMinS = 1;
+    AgentTuning.outOfTownMaxS = 2;
+    AgentTuning.errandFromHome = 1;
+    AgentTuning.errandFromIdle = 1;
+    AgentTuning.errandFromWork = 1;
+    AgentTuning.rushAmp = 1;
     AgentTuning.outOfTownShare = 1;
     AgentTuning.dispatchByPathCost = true;
     AgentTuning.freightEconomy = true;

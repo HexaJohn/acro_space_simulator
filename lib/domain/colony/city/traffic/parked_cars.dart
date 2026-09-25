@@ -41,8 +41,15 @@ import 'traffic_rng.dart';
 /// Where a parked car sits. The SAVE INDEX: append-only (§14.1).
 enum CarWhere { lot, kerb, garaged }
 
-/// Whose car it is, opaquely. Append-only; slice 3 appends `citizen`.
-enum CarOwnerKind { none, commuter, homePool }
+/// Whose car it is, opaquely. The SAVE INDEX: APPEND-ONLY (§14.1).
+///
+/// `commuter` and `homePool` keep their T4a meaning for ever, because a v2
+/// save written before slice 3 carries them: `owner` is a BUILDING slot —
+/// the home a car pools at, or the home a car left at work came from.
+/// `citizen` means `owner` is the dense citizen index of the same save's
+/// `cit` block (slice3 §0). `AgentsCodec` clamps a kind it does not know to
+/// `none`, so appending here never mis-reads an older save; inserting would.
+enum CarOwnerKind { none, commuter, homePool, citizen }
 
 /// Which stall of a site stands between another stall and the drive
 /// (site-access.md §7.5: tandem pads, at most 2 deep). The site table knows
@@ -103,6 +110,39 @@ class ParkedCarTable {
 
   /// Whether [car] names a live row.
   bool isLive(int car) => pool.isLive(car);
+
+  /// [car]'s opaque owner, or −1 for a stale handle: a building slot for a
+  /// `commuter` or `homePool` car, a citizen index for a `citizen` one —
+  /// [ownerKindOf] says which.
+  int ownerOf(int car) => pool.isLive(car) ? owner[SlotPool.slotOf(car)] : -1;
+
+  /// Whose [car] is, as a [CarOwnerKind] index; [CarOwnerKind.none] for a
+  /// stale handle.
+  int ownerKindOf(int car) => pool.isLive(car)
+      ? ownerKind[SlotPool.slotOf(car)]
+      : CarOwnerKind.none.index;
+
+  /// Hands [car] to [owner] under [kind] where it stands: slice 3's adoption
+  /// of a T4a car whose owner was a building handle (§0).
+  ///
+  /// Two columns are rewritten and NOTHING else moves — not the row, not its
+  /// place in its building's home-pool stack, not the stall it occupies. A
+  /// car that changed hands did not change places: it is still standing in
+  /// the way of whatever is behind it on a tandem pad, and the wire must not
+  /// see it leave and come back. [parkedRev] moves, because the owner is a
+  /// column the readout publishes.
+  ///
+  /// The pool link is kept on purpose, so an adopted car still counts in
+  /// [pooledCount] and still blocks what is behind it; whether [takePooled]
+  /// may hand out a car a citizen now owns is the activity loop's rule to
+  /// make, not the table's. A stale handle rewrites nothing.
+  void reown(int car, CarOwnerKind kind, int owner) {
+    if (!pool.isLive(car)) return;
+    final i = SlotPool.slotOf(car);
+    ownerKind[i] = kind.index;
+    this.owner[i] = owner;
+    parkedRev++;
+  }
 
   /// Grows the table to [newCapacity] rows. Every column is copied and live
   /// handles stay live. Only during warm-up or a rebuild (§2.1).

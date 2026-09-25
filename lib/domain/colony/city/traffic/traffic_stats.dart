@@ -92,6 +92,17 @@ class TrafficStats {
   /// their ends.
   int deferred = 0, noRoute = 0;
 
+  /// Departures refused because the route would not have left from where the
+  /// car STANDS (slice3 §3, `TripPlanner._spawn`): a car on a stall or in a
+  /// garage whose site names no out-join at the route's origin. The trip
+  /// keeps its place in the pull-out queue and asks again, rather than the
+  /// car being teleported to the origin building's access.
+  ///
+  /// A steady stream of these is a bug, not a jam: it means trips are being
+  /// planned from somewhere their car is not. It is not folded into the
+  /// digest — it counts how a history was reached, not what it is.
+  int departRefused = 0;
+
   // ---- Commutes -------------------------------------------------------------------
 
   /// Actual over free-flow time of completed commutes, averaged; 1 before

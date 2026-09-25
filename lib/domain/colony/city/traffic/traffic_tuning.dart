@@ -193,19 +193,85 @@ class AgentTuning {
   /// Agent seconds between incremental building syncs (§2.6).
   static double buildingSyncS = 2.0;
 
-  // ---- Demand (slices 1–2: CommuteSynth) and what later slices add ---------
+  // ---- Demand (§6.4, §6.5) -------------------------------------------------
 
-  /// Outbound car commutes per resident per agent second: 60% employed ×
-  /// 75% with a car × 85% driving, over a 915 s cycle (§6.5).
+  /// The DEMAND SCALE against §6.5's design rate, `kDesignCommuteRate`
+  /// (0.00042 outbound car commutes per resident per agent second: 60%
+  /// employed × 75% with a car × 85% driving, over a 915 s cycle).
+  ///
+  /// It was the rate itself while `CommuteSynth` stood in for citizens
+  /// (§6.7). The activity loop that replaced it multiplies its commute
+  /// wake-up probability by `commuteRatePerResident / kDesignCommuteRate`,
+  /// so the default is unchanged behaviour, twice the default is twice the
+  /// commuting — and **0 means no citizen trips at all**, which is how some
+  /// thirty test files ask for a colony that stands still (slice3 §0, Q1).
   static double commuteRatePerResident = 0.00042;
 
-  /// The dwell at work before the commute home, U(min, max) agent seconds.
+  /// The dwell at work before the commute home, U(min, max) agent seconds
+  /// (§6.4's `atWork` row), divided by `rush`.
   static double commuteReturnMinS = 240;
   static double commuteReturnMaxS = 540;
 
   /// Scales every activity dwell (slice 3); calibrated so moving vehicles
   /// are 8–12% of population.
   static double activityDwellScale = 1.0;
+
+  // ---- Citizens (slice 3: §6.2, §6.3, §6.4, §6.6) --------------------------
+  //
+  // Added once and frozen, so the packages of the slice agree on the numbers
+  // before any of them is written.
+
+  /// Whether the citizens, not `CitySim`'s scalar budget, ARE the colony's
+  /// population (§6.2, §0 Q5). On, so a bisect can put the scalar path back
+  /// without a revert; `CityAgents.ownsPopulation` is what reads it.
+  static bool citizensOwnPopulation = true;
+
+  /// The share of arriving citizens who own a car, on a breathable world and
+  /// on a sealed one, where the vehicle drawn is a rover (§6.6).
+  static double carOwnership = 0.75;
+  static double carOwnershipSealed = 0.6;
+
+  /// How far from home a new car may be parked at a kerb before it is
+  /// garaged instead (§6.6).
+  static double homeCarRadiusM = 150;
+
+  /// Homeless citizens re-housed, and unemployed ones matched to a job, per
+  /// building sync (§6.3): bounded, in citizen slot order, so a colony that
+  /// grows a thousand homes in one tick spreads the matching over the syncs
+  /// after it rather than over one frame.
+  static int rehousePerSync = 64;
+  static int jobMatchPerSync = 64;
+
+  /// Citizens realised out of the arrival budget per sync: at least
+  /// [arrivalsMin], and at most this share of those already alive (§6.2).
+  /// The rest stays owed in the ledger.
+  static int arrivalsMin = 4;
+  static double arrivalsShare = 0.02;
+
+  /// §6.4's dwells, U(min, max) agent seconds, each scaled by
+  /// [activityDwellScale]: at home with a job (divided by `rush`), at home
+  /// without one, on an errand, and out of town.
+  static double homeDwellMinS = 150;
+  static double homeDwellMaxS = 420;
+  static double idleDwellMinS = 200;
+  static double idleDwellMaxS = 600;
+  static double errandDwellMinS = 40;
+  static double errandDwellMaxS = 120;
+  static double outOfTownMinS = 600;
+  static double outOfTownMaxS = 1800;
+
+  /// §6.4's branch probabilities: the chance the next activity is an ERRAND
+  /// rather than the row's own next — leaving home for work (0.85 commute),
+  /// leaving home without a job (0.5 stay in), and leaving work (0.8 home).
+  static double errandFromHome = 0.15;
+  static double errandFromIdle = 0.5;
+  static double errandFromWork = 0.2;
+
+  /// The height of §6.1's rush-hour bumps at day phase 0.30 and 0.72:
+  /// `rush(φ) = 1 + rushAmp·(bump(φ; 0.30, 0.05) + bump(φ; 0.72, 0.05))`,
+  /// normalised so a day's throughput is unchanged and only its timing
+  /// moves.
+  static double rushAmp = 0.6;
 
   /// The share of car owners' errands that leave the map (slice 8).
   static double outOfTownShare = 0.08;
@@ -298,6 +364,26 @@ class AgentTuning {
     commuteReturnMinS = 240;
     commuteReturnMaxS = 540;
     activityDwellScale = 1.0;
+    citizensOwnPopulation = true;
+    carOwnership = 0.75;
+    carOwnershipSealed = 0.6;
+    homeCarRadiusM = 150;
+    rehousePerSync = 64;
+    jobMatchPerSync = 64;
+    arrivalsMin = 4;
+    arrivalsShare = 0.02;
+    homeDwellMinS = 150;
+    homeDwellMaxS = 420;
+    idleDwellMinS = 200;
+    idleDwellMaxS = 600;
+    errandDwellMinS = 40;
+    errandDwellMaxS = 120;
+    outOfTownMinS = 600;
+    outOfTownMaxS = 1800;
+    errandFromHome = 0.15;
+    errandFromIdle = 0.5;
+    errandFromWork = 0.2;
+    rushAmp = 0.6;
     outOfTownShare = 0.08;
     dispatchByPathCost = false;
     freightEconomy = false;
@@ -359,6 +445,26 @@ class AgentTuning {
         'commuteReturnMinS': commuteReturnMinS,
         'commuteReturnMaxS': commuteReturnMaxS,
         'activityDwellScale': activityDwellScale,
+        'citizensOwnPopulation': citizensOwnPopulation,
+        'carOwnership': carOwnership,
+        'carOwnershipSealed': carOwnershipSealed,
+        'homeCarRadiusM': homeCarRadiusM,
+        'rehousePerSync': rehousePerSync,
+        'jobMatchPerSync': jobMatchPerSync,
+        'arrivalsMin': arrivalsMin,
+        'arrivalsShare': arrivalsShare,
+        'homeDwellMinS': homeDwellMinS,
+        'homeDwellMaxS': homeDwellMaxS,
+        'idleDwellMinS': idleDwellMinS,
+        'idleDwellMaxS': idleDwellMaxS,
+        'errandDwellMinS': errandDwellMinS,
+        'errandDwellMaxS': errandDwellMaxS,
+        'outOfTownMinS': outOfTownMinS,
+        'outOfTownMaxS': outOfTownMaxS,
+        'errandFromHome': errandFromHome,
+        'errandFromIdle': errandFromIdle,
+        'errandFromWork': errandFromWork,
+        'rushAmp': rushAmp,
         'outOfTownShare': outOfTownShare,
         'dispatchByPathCost': dispatchByPathCost,
         'freightEconomy': freightEconomy,

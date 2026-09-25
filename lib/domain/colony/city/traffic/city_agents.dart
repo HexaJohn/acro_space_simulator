@@ -63,6 +63,10 @@ import 'agent_kind.dart';
 import 'agent_traffic_readout.dart';
 import 'agents_codec.dart';
 import 'building_table.dart';
+import 'citizen_match.dart';
+import 'citizen_population.dart';
+import 'citizen_table.dart';
+import 'citizen_trips.dart';
 import 'edge_delay.dart';
 import 'graph_lineage.dart';
 import 'junction_arbiter.dart';
@@ -73,6 +77,7 @@ import 'lane_graph_builder.dart';
 import 'network_key.dart';
 import 'parked_cars.dart';
 import 'path_search.dart';
+import 'population_ledger.dart';
 import 'route_cost.dart';
 import 'site_mover.dart';
 import 'site_plan_source.dart';
@@ -142,6 +147,8 @@ const double kRestoreHoldS = 300;
 /// draw added to one never shifts another's.
 const int _demandSalt = 0x44454D41; // 'DEMA'
 const int _spawnSalt = 0x5350574E; // 'SPWN'
+const int _matchSalt = 0x4D415443; // 'MATC'
+const int _peopleSalt = 0x50454F50; // 'PEOP'
 
 /// Items of a large network's lane graph built per advance while the old
 /// graph keeps running (§3.8).
@@ -320,10 +327,28 @@ class CityAgents {
 
   /// What the Lane speed view reads (§13.9): see [AgentLaneSpeeds].
   late final AgentLaneSpeeds laneSpeeds = AgentLaneSpeeds._(this);
-  CommuteSynth? get commutes => _core?.commutes;
+  CitizenTrips? get commutes => _core?.commutes;
   TripPlanner? get planner => _core?.planner;
   PathQueue? get pathQueue => _core?.queue;
   VehicleMover? get mover => _core?.mover;
+
+  /// The citizens, their population budgets and what realisation has done
+  /// with them (slice 3, §6.2). Null before the tables exist.
+  CitizenTable? get citizens => _core?.citizens;
+  PopulationLedger? get ledger => _core?.ledger;
+  CitizenPopulation? get populationStats => _core?.population;
+
+  /// Whether the citizens, not `CitySim`'s scalar budget, are this colony's
+  /// population — §6.2's one-tick contract, behind
+  /// `AgentTuning.citizensOwnPopulation` (§0 Q5).
+  ///
+  /// FALSE while slice 3 is being built: the ledger and the realisation are
+  /// package D's, and until they land `city_sim`'s own budget must go on
+  /// writing `population` or a colony would stop growing. Package E turns it
+  /// on — `_core != null && AgentTuning.citizensOwnPopulation` — in the same
+  /// commit as the E8 and E9 hooks that read it, so the two sides of the
+  /// contract never disagree.
+  bool get ownsPopulation => false;
 
   /// Vehicles on the road.
   int get liveVehicles => _core?.table.liveCount ?? 0;
@@ -730,7 +755,16 @@ class _Core
     queue.load = table;
     delays.holders = queue;
     planner = TripPlanner(table, arbiter, rng.fork(_spawnSalt), stats);
-    commutes = CommuteSynth(
+    match = CitizenMatch(citizens, buildings, rng.fork(_matchSalt));
+    population = CitizenPopulation(
+      citizens: citizens,
+      buildings: buildings,
+      ledger: ledger,
+      match: match,
+      rng: rng.fork(_peopleSalt),
+    );
+    commutes = CitizenTrips(
+      citizens: citizens,
       buildings: buildings,
       planner: planner,
       queue: queue,
@@ -770,7 +804,21 @@ class _Core
   late final JunctionArbiter arbiter;
   late final VehicleMover mover;
   late final TripPlanner planner;
-  late final CommuteSynth commutes;
+  late final CitizenTrips commutes;
+
+  // ---- The citizens (slice 3, §6.2–§6.4) --------------------------------------
+  //
+  // Built with the core and wired to nothing yet: package E runs the
+  // realisation in `_subStep`, the matching in `_syncBuildings` and the
+  // adoption sweep over legacy-owned cars, and folds all three into
+  // [digest]. Until then they are empty tables, so the colony behaves
+  // exactly as it did — which is what keeps the committed pre-citizens save
+  // fixture passing while the slice is built.
+
+  final CitizenTable citizens = CitizenTable();
+  final PopulationLedger ledger = PopulationLedger();
+  late final CitizenMatch match;
+  late final CitizenPopulation population;
 
   // ---- The sites (T4a) --------------------------------------------------------
 
@@ -1568,7 +1616,7 @@ class _Core
   /// gone, an appended leg takes it home (§4.7).
   ///
   /// Everything the parking needs of the trip is read BEFORE
-  /// `CommuteSynth.arrived`, which clocks the commuter in and lets go of its
+  /// `CitizenTrips.arrived`, which clocks the traveller in and lets go of its
   /// vehicle: whose car this is, and which way it was going.
   void _arrive(int handle, int dest) {
     stats.arrived++;
