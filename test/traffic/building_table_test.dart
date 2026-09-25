@@ -215,4 +215,100 @@ void main() {
       expect(b.drawJob(rng, except: home), isNot(b.handleOf(home)));
     }
   });
+
+  test('a vacancy is what is left of the capacity, and never less than '
+      'nothing', () {
+    final b = primed(town()).buildings!;
+    var homes = 0;
+    for (var sl = 0; sl < b.highWater; sl++) {
+      if (!b.isSlotLive(sl)) continue;
+      expect(b.residents[sl], 0, reason: 'a fresh table is empty');
+      expect(b.workers[sl], 0);
+      expect(b.corpses[sl], 0);
+      expect(b.housingVacancy(sl), b.housing[sl]);
+      expect(b.jobVacancy(sl), b.jobs[sl]);
+      if (b.housing[sl] > 0) homes++;
+    }
+    expect(homes, greaterThan(4));
+
+    final sl = [
+      for (var i = 0; i < b.highWater; i++)
+        if (b.isSlotLive(i) && b.housing[i] > 1) i,
+    ].first;
+    b.residents[sl] = 1;
+    expect(b.housingVacancy(sl), b.housing[sl] - 1);
+    // A building whose utilisation has just fallen is over-full until the
+    // sync's eviction catches up (§6.2), and offers nothing meanwhile.
+    b.residents[sl] = b.housing[sl] + 4;
+    expect(b.housingVacancy(sl), 0);
+    b.workers[sl] = b.jobs[sl] + 2;
+    expect(b.jobVacancy(sl), 0);
+  });
+
+  test('a home is drawn by its vacancy, in slot order, and only where the '
+      'colony reaches', () {
+    final b = primed(town()).buildings!;
+    final rng = TrafficRng(1971);
+    final homes = [
+      for (var sl = 0; sl < b.highWater; sl++)
+        if (b.isSlotLive(sl) && b.housing[sl] > 0) sl,
+    ];
+    expect(homes.length, greaterThan(4));
+    var total = 0;
+    for (final sl in homes) {
+      total += b.housing[sl];
+    }
+    const n = 40000;
+    final counts = <int, int>{};
+    for (var i = 0; i < n; i++) {
+      final sl = b.drawVacantHome(rng);
+      counts[sl] = (counts[sl] ?? 0) + 1;
+    }
+    expect(counts.length, homes.length,
+        reason: 'a building with no housing is never a home');
+    for (final sl in homes) {
+      expect((counts[sl] ?? 0) / n, closeTo(b.housing[sl] / total, 0.015),
+          reason: b.siteId[sl]);
+    }
+
+    // The gate is the colony's own network, not the lane graph: a citizen
+    // without a car walks home. An unserved building is out.
+    final out = homes.first;
+    b.served[out] = 0;
+    for (var i = 0; i < 2000; i++) {
+      expect(b.drawVacantHome(rng), isNot(out));
+    }
+    b.served[out] = 1;
+
+    // Full is full, and the answer is a SLOT — what `CitizenTable.home`
+    // holds — not the handle `drawJob` answers with.
+    for (final sl in homes) {
+      b.residents[sl] = b.housing[sl];
+    }
+    expect(b.drawVacantHome(rng), -1);
+    b.residents[homes.last] = 0;
+    expect(b.drawVacantHome(rng), homes.last);
+  });
+
+  test('a building that goes takes its occupancy and its bodies with it',
+      () {
+    final city = town();
+    final a = primed(city);
+    final b = a.buildings!;
+    final lots = [
+      for (final p in city.layout.autoParcels)
+        if (city.parcelBuildings.containsKey(p.id)) p.id,
+    ];
+    final sl = SlotPool.slotOf(b.handleOfSite(lots[0])!);
+    b.residents[sl] = 3;
+    b.workers[sl] = 2;
+    b.corpses[sl] = 1.5;
+
+    city.clearParcel(lots[0]);
+    a.onLotCleared(lots[0]);
+    expect(b.residents[sl], 0);
+    expect(b.workers[sl], 0);
+    expect(b.corpses[sl], 0,
+        reason: 'the next building to take the slot inherits no bodies');
+  });
 }

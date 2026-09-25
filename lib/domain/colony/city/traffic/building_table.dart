@@ -114,6 +114,18 @@ class BuildingTable {
   /// Homes and jobs, rounded exactly as the tick rounds them.
   late Int32List housing, jobs;
 
+  /// Citizens living and working here, as COUNTS (§6.2's invariants). The
+  /// people themselves hang off `CitizenTable`'s per-building lists, in
+  /// arrival order; these are the sums [housingVacancy] and [jobVacancy]
+  /// answer from, and `CitizenMatch` — the only thing that moves anyone in
+  /// or out — keeps them in step with those lists.
+  late Int32List residents, workers;
+
+  /// Bodies waiting for a hearse (§6.2's death, §9.2). A float because the
+  /// colony's own deathcare accrues a fraction of a death per tick, and the
+  /// hearses of slice 5 take whole ones away.
+  late Float32List corpses;
+
   /// Where it stands, colony-local metres.
   late Float64List centroidE, centroidN;
 
@@ -136,6 +148,13 @@ class BuildingTable {
   /// send its first commuters all in the same second — and a phase that
   /// comes from the name, not from a draw, is the same whenever a sync
   /// first sees the building.
+  ///
+  /// **Retired with slice 3's activity loop** (§6.4): demand becomes the
+  /// citizens' own, off the wheel, and a building owes nothing. The column,
+  /// its seeding in [_upsert] and its fold in [digest] all go together the
+  /// day `CitizenTrips._emit` stops reading it — until then the column is
+  /// still what the interim demand runs on, and taking it out now would
+  /// leave the tree uncompilable for every other package.
   late Float64List commuteOwed;
 
   late Int32List _seen;
@@ -192,6 +211,9 @@ class BuildingTable {
     accessFlags = Uint8List(n);
     housing = Int32List(n);
     jobs = Int32List(n);
+    residents = Int32List(n);
+    workers = Int32List(n);
+    corpses = Float32List(n);
     centroidE = Float64List(n);
     centroidN = Float64List(n);
     accCount = Uint8List(n);
@@ -213,6 +235,7 @@ class BuildingTable {
     pool.grow(n);
     final sid = siteId, sp = spec;
     final u = use, sv = served, af = accessFlags, ho = housing, jo = jobs;
+    final re = residents, wo = workers, co = corpses;
     final ce = centroidE, cn = centroidN;
     final an = accCount, ae = accEdge, at = accT;
     final al = accLane, ab = accBits, aj = accJoin;
@@ -225,6 +248,9 @@ class BuildingTable {
     accessFlags.setRange(0, old, af);
     housing.setRange(0, old, ho);
     jobs.setRange(0, old, jo);
+    residents.setRange(0, old, re);
+    workers.setRange(0, old, wo);
+    corpses.setRange(0, old, co);
     centroidE.setRange(0, old, ce);
     centroidN.setRange(0, old, cn);
     accCount.setRange(0, old, an);
@@ -454,6 +480,14 @@ class BuildingTable {
     spec[sl] = null;
     housing[sl] = 0;
     jobs[sl] = 0;
+    // The counts go with the building; the PEOPLE are turned out by
+    // `CitizenMatch`, which watches for a slot whose handle moved on and
+    // makes its residents homeless and its workers unemployed (§2.6's
+    // removal). A new building taking this slot must not inherit either
+    // them or the bodies waiting on the old one.
+    residents[sl] = 0;
+    workers[sl] = 0;
+    corpses[sl] = 0;
     served[sl] = 0;
     _clearAccess(sl);
     commuteOwed[sl] = 0;
@@ -608,6 +642,51 @@ class BuildingTable {
     return any;
   }
 
+  /// Homes standing empty at [sl] — never negative. A building whose
+  /// utilisation has just fallen reads over-full until the sync's eviction
+  /// catches up (§6.2), and an over-full building offers nothing.
+  int housingVacancy(int sl) {
+    final free = housing[sl] - residents[sl];
+    return free > 0 ? free : 0;
+  }
+
+  /// Jobs going at [sl], by the same rule (§6.3's job loss).
+  int jobVacancy(int sl) {
+    final free = jobs[sl] - workers[sl];
+    return free > 0 ? free : 0;
+  }
+
+  /// A building with a home to spare, drawn by [rng] weighted by its
+  /// vacancy in stable slot order; −1 when the colony is full (§6.2's
+  /// arrival).
+  ///
+  /// Answers a SLOT where [drawJob] answers a handle: a home is what
+  /// `CitizenTable.home` records, and that column holds slots.
+  ///
+  /// The gate is [served], not [reachable]: a citizen without a car walks
+  /// home, so a house the lane graph cannot drive to is still a house,
+  /// while one the colony's own network does not serve is not a working
+  /// building at all.
+  ///
+  /// Two passes and exactly one draw, with no cumulative index: a vacancy
+  /// changes with every citizen housed, so an index like [drawJob]'s would
+  /// have to be rebuilt between one draw and the next anyway.
+  int drawVacantHome(TrafficRng rng) {
+    var total = 0;
+    for (var sl = 0; sl < pool.highWater; sl++) {
+      if (!pool.isSlotLive(sl) || served[sl] == 0) continue;
+      total += housingVacancy(sl);
+    }
+    if (total <= 0) return -1;
+    var r = rng.nextInt(total);
+    for (var sl = 0; sl < pool.highWater; sl++) {
+      if (!pool.isSlotLive(sl) || served[sl] == 0) continue;
+      r -= housingVacancy(sl);
+      if (r < 0) return sl;
+    }
+    return -1;
+  }
+
   /// A job building drawn by [rng], weighted by its jobs, among those a
   /// trip can reach — never the one in slot [except] while there is another.
   /// Returns its handle, or −1 when the colony has no reachable jobs.
@@ -652,6 +731,12 @@ class BuildingTable {
 
   /// [hash] with every live building's handle, capacities, access rows and
   /// owed trips folded in, in slot order: for `CityAgents.digest`.
+  ///
+  /// [residents], [workers] and [corpses] are deliberately NOT here. They
+  /// ride `CitizenMatch.digest`, which `CityAgents` folds in only once the
+  /// citizens are wired, so that every digest a colony without citizens
+  /// takes — the determinism test's among them — is the value it was
+  /// before slice 3.
   int digest(int hash) {
     var h = fnv1aU32(hash, pool.highWater);
     for (var sl = 0; sl < pool.highWater; sl++) {
