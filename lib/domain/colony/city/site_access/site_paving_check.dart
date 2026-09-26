@@ -11,13 +11,16 @@
 /// The corridor of a cut join is §3.7a's polyline from the join's kerb point:
 /// along the slot's road normal to the frontage line, or R1's dogleg
 /// `K → T → Q → F` for a `kJoinOffFrontage` slot; `kAccessCorridorHalfM`
-/// either side, no end caps. As built, its last leg runs on past the frontage
-/// line until its whole width is inside the lot (`h·|d·u|/(d·v)` further), so a
-/// drive leaving a skewed kerb is inside the corridor or the parcel at every
-/// point ("restricted to the stretch outside the lot's own polygon"). Past the
-/// frontage line (frame `y > 0`) every leg, the run-on included, is clipped to
-/// the lot's side lines (`0 ≤ x ≤ W`): pave past a side line near the
-/// frontage corner is still reported.
+/// either side, no end caps. A REAR ALLEY slot (§3.2 slot 3, R8) stands BEHIND
+/// the lot, so its one leg runs to the lot's REAR edge instead — read off the
+/// depth profile under the corridor's own width, since a rear edge is a chord
+/// and not a constant frame y. As built, the last leg runs on past the boundary
+/// it crosses until its whole width is inside the lot (`h·|d·u|/(d·v)`
+/// further), so a drive leaving a skewed kerb is inside the corridor or the
+/// parcel at every point ("restricted to the stretch outside the lot's own
+/// polygon"). Past the frontage line (frame `y > 0`) every leg, the run-on
+/// included, is clipped to the lot's side lines (`0 ≤ x ≤ W`): pave past a side
+/// line near the frontage corner is still reported.
 ///
 /// Paving: each ring is sampled (its vertices, its edges every 0.25 m, its
 /// inside on a 1 m grid); a sample inside the parcel polygon or a corridor leg
@@ -119,25 +122,26 @@ List<String> sitePavingViolations(SiteContext ctx, SiteAccessPlan plan) {
     final own = <_Leg>[
       for (var i = 0; i + 1 < line.length; i++) _Leg(line[i], line[i + 1]),
     ];
-    // The last leg runs on until its whole width is past the frontage line.
-    // A kerb on (or behind) the frontage line has no leg of its own; it
-    // gets that extension alone, from the kerb along the slot normal, so a
-    // skewed lot's kerb corners are covered as a set-back lot's are.
+    // The last leg runs on until its whole width is past the boundary it
+    // crosses. A kerb on (or behind) the frontage line has no leg of its own;
+    // it gets that extension alone, from the kerb along the slot normal, so a
+    // skewed lot's kerb corners are covered as a set-back lot's are. A rear
+    // alley slot crosses the lot's rear edge, so `into` reads its own way.
+    final into = slot.flags & kJoinAlley != 0 ? -1.0 : 1.0;
+    double extOf(Vec2 t) {
+      final dv = t.dot(frame.v) * into;
+      return dv > 1e-6 ? kAccessCorridorHalfM * t.dot(frame.u).abs() / dv : 0.0;
+    }
+
     if (line.length == 1) {
       final nrm = Vec2(slot.normE, slot.normN);
-      final dv = nrm.dot(frame.v);
-      final ext = dv > 1e-6
-          ? kAccessCorridorHalfM * nrm.dot(frame.u).abs() / dv
-          : 0.0;
+      final ext = extOf(nrm);
       if (ext > 1e-6) {
         legs.add(_Leg(line[0], line[0] + nrm * ext, sides: frame));
       }
     } else {
       final last = own.last;
-      final dv = last.t.dot(frame.v);
-      final ext = dv > 1e-6
-          ? kAccessCorridorHalfM * last.t.dot(frame.u).abs() / dv
-          : 0.0;
+      final ext = extOf(last.t);
       for (final l in own) {
         legs.add(_Leg(l.a, l.b, sides: frame));
       }
@@ -166,14 +170,41 @@ List<String> sitePavingViolations(SiteContext ctx, SiteAccessPlan plan) {
 }
 
 /// The §3.7a corridor polyline of [slot] in [frame] (world metres): the kerb
-/// point, then the frontage crossing along the slot normal — or R1's dogleg
+/// point, then the crossing of the lot boundary the slot faces along the slot
+/// normal — the frontage line, or for a REAR ALLEY slot (§3.2 slot 3) the lot's
+/// rear edge, since that kerb stands BEHIND the lot — or R1's dogleg
 /// `K → T → Q → F` for a `kJoinOffFrontage` slot. A single point when the
-/// kerb already lies on or behind the frontage line.
+/// kerb already lies on or inside that boundary.
 List<Vec2> corridorLineOf(SiteFrame frame, JoinSlot slot) {
   final k = Vec2(slot.kerbE, slot.kerbN);
   final nrm = Vec2(slot.normE, slot.normN);
   final kl = frame.toLocal(k);
   final u = frame.u, v = frame.v;
+  if (slot.flags & kJoinAlley != 0) {
+    final denom = nrm.dot(v);
+    if (denom > -1e-6) return [k];
+    // The leg runs to where the lot is certainly under it: the SHALLOWEST
+    // reachable depth-profile column within [kAccessCorridorHalfM] of the
+    // kerb's x, the profile's own 0.3 m margin left in as slack. A lot's rear
+    // edge is a CHORD, not a constant frame y — the plat gives each rear corner
+    // its own depth ray — so reading the kerb's column alone would end the leg
+    // behind the edge elsewhere under it and leave a sliver of the throat's
+    // pave covered by nothing. The same line the generator paves to
+    // (`car_park_packer`'s `inLotY`, taken over the throat's narrower width),
+    // so the corridor and the parcel meet with the margin to spare. A column
+    // the profile cannot reach reads 0 and is no rear edge at all.
+    var rear = double.infinity;
+    const step = kDepthProfileStepM / 2;
+    final n = (2 * kAccessCorridorHalfM / step).ceil();
+    for (var i = 0; i <= n; i++) {
+      final d = frame.profile.depthAt(kl.e - kAccessCorridorHalfM + i * step);
+      if (d > 0 && d < rear) rear = d;
+    }
+    if (!rear.isFinite) return [k];
+    final gap = (rear - kl.n) / denom;
+    if (gap <= 1e-3) return [k];
+    return [k, k + nrm * gap];
+  }
   if (slot.flags & kJoinOffFrontage == 0) {
     final denom = nrm.dot(v);
     final gap = denom <= 1e-6 ? 0.0 : -kl.n / denom;
@@ -198,13 +229,16 @@ List<Vec2> corridorLineOf(SiteFrame frame, JoinSlot slot) {
   return pts;
 }
 
-/// The slot plan join [j] uses: packed slot 0 or 1, or the side-street slot;
-/// null when the context has none matching the join's piece and arc.
+/// The slot plan join [j] uses: packed slot 0 or 1, or the side-street or
+/// rear-alley slot; null when the context has none matching the join's piece
+/// and arc.
 JoinSlot? _slotOf(SiteContext ctx, SiteAccessPlan plan, int j) {
   final k = plan.joinSlot(j);
   JoinSlot? s;
   if (k == kJoinSlotSideStreet) {
     s = ctx.sideStreetSlot;
+  } else if (k == kJoinSlotAlley) {
+    s = ctx.alleySlot;
   } else if (k >= 0 && k < ctx.slotCount) {
     s = ctx.slot(k);
   }

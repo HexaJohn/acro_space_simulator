@@ -15,8 +15,15 @@ import 'dart:typed_data';
 
 import 'package:acro_space_simulator/application/snapshot/world_snapshot.dart';
 import 'package:acro_space_simulator/domain/architecture/building_generator.dart';
+import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart';
+import 'package:acro_space_simulator/domain/colony/city/city_layout.dart';
+import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
+import 'package:acro_space_simulator/domain/colony/city/road_graph.dart';
+import 'package:acro_space_simulator/domain/colony/city/site_access/site_access_constants.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_access_plan.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_dressing.dart';
+import 'package:acro_space_simulator/domain/colony/city/site_access/site_plan_builder.dart';
+import 'package:acro_space_simulator/domain/colony/city/site_access/site_plan_generator.dart';
 import 'package:acro_space_simulator/domain/scatter/mesh_builder.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_detail_layer.dart';
@@ -701,6 +708,143 @@ void main() {
           reason: 'the knob is off: the sites in the columns draw nothing');
       // Not vacuous: with the knob ON the same columns draw the plan.
       expect(_byMaterial(tileOf(siteAccess: true, carry: true)), isNot(bare));
+    });
+  });
+
+  group('the sign of an alley-backed lot (§5.5, R8)', () {
+    // The downtown block `alley_car_park_test` cuts: two streets 104 m apart
+    // with a service alley down the midline, so a lot inside the block is
+    // 24 × 41.4 m with its back edge 0.6 m off the alley's carriageway edge
+    // at n = 42. Its car park is F2a — slot 0 the kerbside frontage, slot 3
+    // the alley cut — so its only THROAT is on the alley behind it.
+    final layout =
+        CityLayout(settings: ParcelSettings(frontageM: 24, depthM: 46))
+          ..commitRoad(controls: const [Vec2(0, 0), Vec2(400, 0)])
+          ..commitRoad(controls: const [Vec2(0, 104), Vec2(400, 104)])
+          ..commitRoad(
+              controls: const [Vec2(0, 52), Vec2(400, 52)],
+              roadClass: RoadClass.alley);
+    final graph = RoadGraph.of(layout);
+    final cMed = kZoneSpecs['commercial']![Density.medium]!;
+    SiteAccessPlan? planOf(RoadGraph g, Parcel p) {
+      final ctx = SiteContext.ofLot(g, p, cMed);
+      final b = PlanBuilder(graph: ctx.graph);
+      if (planSite(b, ctx) == null) return null;
+      return b.build(validate: false).plan(0);
+    }
+
+    final f2aRow = [
+      for (final p in layout.autoParcels)
+        if (p.centroid.n > 0 && p.centroid.n < 104) (p, planOf(graph, p)),
+    ].firstWhere((r) => r.$2 != null && r.$2!.joinCount == 2);
+    final f2aParcel = f2aRow.$1;
+    final f2a = f2aRow.$2!;
+
+    double fx(SiteAccessPlan p, double e, double n) =>
+        (e - p.frameE) * p.frameUE + (n - p.frameN) * p.frameUN;
+    double fy(SiteAccessPlan p, double e, double n) =>
+        (e - p.frameE) * p.frameVE + (n - p.frameN) * p.frameVN;
+
+    test('its only throat is the ALLEY\'s, and the sign still stands on the '
+        'frontage beside its footpath', () {
+      expect(f2a.joinSlot(0), 0);
+      expect(f2a.joinThroatSeg(0), -1, reason: 'slot 0 is kerbside: no throat');
+      expect(f2a.joinSlot(1), kJoinSlotAlley);
+      expect(f2a.joinThroatSeg(1), 0, reason: 'the alley drive');
+      // The throat leaves the alley's carriageway edge, 42 m behind the
+      // street: a sign beside THAT stands in the alley, on the wrong side of
+      // the building, where the bin lorry drives. So the rear join is no
+      // sign's throat and the footpath rule takes it.
+      final kerb = f2a.segPoint(0, 0);
+      expect(fy(f2a, f2a.ptE(kerb), f2a.ptN(kerb)), closeTo(42.0, 1e-6));
+      final pose = SiteDressingMesher.signPoseOf(f2a);
+      expect(pose, isNotNull, reason: 'an F2a site keeps its sign');
+      final (e, n, faceE, faceN) = pose!;
+      final x = fx(f2a, e, n), y = fy(f2a, e, n);
+      // One metre inside the STREET lot line, as every other sign is, and
+      // 41 m clear of the alley it is not standing in.
+      expect(y, closeTo(1.0, 1e-6));
+      expect(42.0 - y, greaterThan(40));
+      // Beside the footpath, on the building side, at §5.5's own offsets.
+      final pp = f2a.pavementPt;
+      expect(pp, greaterThanOrEqualTo(0), reason: 'V11: every plan has one');
+      final px = fx(f2a, f2a.ptE(pp), f2a.ptN(pp));
+      final envX = (f2a.envX0 + f2a.envX1) / 2;
+      expect(
+          x - px,
+          closeTo(
+              (envX >= px ? 1 : -1) *
+                  (SiteDressingMesher.pathWidthM / 2 +
+                      SiteDressingMesher.signClearanceM),
+              1e-6));
+      // Facing the way every plan-served sign faces: the frame's own v.
+      expect(faceE, f2a.frameVE);
+      expect(faceN, f2a.frameVN);
+    });
+
+    test('the drive opens the fence at the BACK, so the street frontage keeps '
+        'its run of shopfronts (the footpath aside)', () {
+      // The fence walks the REAL parcel polygon and opens where a segment or
+      // a footpath crosses it (§5.5, `fenceGapsOf`). On an F2a lot the only
+      // thing crossing the frontage is the 1.5 m footpath; the 6 m drive
+      // crosses the REAR edge, which is the whole point of the slice
+      // (parcel.dart's alley: bins, loading and back-of-house parking).
+      final ringE = [for (final v in f2aParcel.polygon) v.e];
+      final ringN = [for (final v in f2aParcel.polygon) v.n];
+      final gaps = SiteDressing.fenceGapsOf(f2a, ringE, ringN);
+      expect(gaps, isNotEmpty);
+      var onFrontage = 0.0, onRear = 0.0;
+      for (final g in gaps) {
+        final i = g.edge, j = i + 1 < ringE.length ? i + 1 : 0;
+        final midY = fy(f2a, (ringE[i] + ringE[j]) / 2,
+            (ringN[i] + ringN[j]) / 2);
+        final len = math.sqrt((ringE[j] - ringE[i]) * (ringE[j] - ringE[i]) +
+            (ringN[j] - ringN[i]) * (ringN[j] - ringN[i]));
+        final open = (g.t1 - g.t0) * len;
+        if (midY.abs() < 0.5) onFrontage += open;
+        if (midY > 40) onRear += open;
+      }
+      // The drive's gap: 6 m of throat and half a metre either side.
+      expect(onRear, greaterThan(6.9));
+      // The footpath's: 1.5 m and the same half metre, and nothing else —
+      // over 20 m of the 24 m frontage stays fenced shopfront.
+      expect(onFrontage, lessThan(3.0));
+      expect(onFrontage, greaterThan(0), reason: 'the way in on foot');
+    });
+
+    test('a lot with no alley behind it signs exactly as it did: by its own '
+        'throat, at the lot line', () {
+      // The same block with the alley drawn 42 m behind 32 m lots: nothing
+      // is capped, so the only plan that moves is one that takes slot 3.
+      final shallow =
+          CityLayout(settings: ParcelSettings(frontageM: 24, depthM: 32))
+            ..commitRoad(controls: const [Vec2(0, 0), Vec2(400, 0)])
+            ..commitRoad(controls: const [Vec2(0, 104), Vec2(400, 104)]);
+      final g2 = RoadGraph.of(shallow);
+      final p = shallow.autoParcels
+          .firstWhere((q) => q.centroid.n > 0 && q.centroid.n < 104);
+      final plan = planOf(g2, p);
+      expect(plan, isNotNull);
+      expect(plan!.joinCount, 1);
+      expect(plan.joinThroatSeg(0), greaterThanOrEqualTo(0));
+      final pose = SiteDressingMesher.signPoseOf(plan);
+      expect(pose, isNotNull);
+      final (e, n, _, _) = pose!;
+      expect(fy(plan, e, n), closeTo(1.0, 1e-6));
+      // Beside the THROAT, not the footpath: half its width plus the
+      // clearance from where it crosses the lot line.
+      final seg = plan.joinThroatSeg(0);
+      final a = plan.segPoint(seg, 0), z = plan.segPoint(seg, 1);
+      final ya = fy(plan, plan.ptE(a), plan.ptN(a));
+      final yz = fy(plan, plan.ptE(z), plan.ptN(z));
+      final t = (0 - ya) / (yz - ya);
+      final cross = fx(plan, plan.ptE(a), plan.ptN(a)) +
+          (fx(plan, plan.ptE(z), plan.ptN(z)) -
+                  fx(plan, plan.ptE(a), plan.ptN(a))) *
+              t;
+      expect((fx(plan, e, n) - cross).abs(),
+          closeTo(plan.segWidthM(seg) / 2 + SiteDressingMesher.signClearanceM,
+              1e-6));
     });
   });
 

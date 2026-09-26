@@ -189,8 +189,31 @@ const int kJoinEasement = 32;
 /// Every corridor candidate hit a manual parcel or a road.
 const int kJoinCorridorBlocked = 64;
 
-/// A rear alley slot (reserved for R8).
+/// A rear alley slot (slot 3, §3.2; slice R8).
 const int kJoinAlley = 128;
+
+// ---- Rear edge and its alley (§3.2 slot 3, §3.8), slice R8 ----
+
+/// cos 45°: the REAR edge of a lot is one whose outward normal lies within
+/// 45° of the frontage's inward normal, so a side line (90° off) is never a
+/// rear edge and the frontage itself (180° off) never is either. A constant,
+/// never trigonometry (C-11).
+const double kCos45 = 0.70710678;
+
+/// Only polygon edges at least this long are rear-edge candidates: the plat's
+/// own floor for an edge that means something rather than a chamfer
+/// (`CityLayout._sideStreetOf`), and the same floor
+/// [kEffectiveFrontageMinEdgeM] uses at the front.
+const double kRearEdgeMinM = 6.0;
+
+/// How far a lot's rear edge may lie from an alley's CARRIAGEWAY EDGE and
+/// still be a rear join. An alley has no pavement (§3.8), so its kerb IS that
+/// edge, and the plat leaves exactly 0.6 m of it behind a lot cut to an alley
+/// (`CityLayout._depthAt`). The tolerance is the side-street search's 12 m,
+/// a fraction of the shallowest block a generated town cuts (`blockDepthM`
+/// 104), so the alley found is the one behind THIS lot and never the next
+/// block's.
+const double kRearAlleyReachM = 12.0;
 
 // ---- Join handles (§2.3), slice R2a ----
 
@@ -205,6 +228,18 @@ const int kJoinRefSideStreetBase = -2;
 /// `SiteAccessChunk.joinSlot` of the side-street slot (not packed on
 /// `RoadGraph`, §3.2 as built).
 const int kJoinSlotSideStreet = 2;
+
+/// A lot's rear alley slot 3 is named `kJoinRefAlleyBase − lot`, so
+/// `lot = kJoinRefAlleyBase − joinRef` (every such handle is ≤
+/// [kJoinRefAlleyBase]). The side-street form fills (−∞, −2] from the TOP;
+/// this one takes the bottom, and the two can only meet on a colony of
+/// 2³⁰ − 2 lots — which no Int32 lot index reaches (the 20-mile sprawl has
+/// 118,823). Slice R8.
+const int kJoinRefAlleyBase = -0x40000000;
+
+/// `SiteAccessChunk.joinSlot` of the rear alley slot (not packed on
+/// `RoadGraph`, §3.2: offered on request by `RoadGraph.rearAlleyJoinOf`).
+const int kJoinSlotAlley = 3;
 
 // ---- Plan flags (§2.3): `SiteAccessPlan.flags` bits, slice R2a ----
 

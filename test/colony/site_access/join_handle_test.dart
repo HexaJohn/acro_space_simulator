@@ -29,21 +29,28 @@ void main() {
   test('every slot round trips, and (lot, slot) <-> ref is a bijection', () {
     final g = SyntheticSites.starterCity().roadGraph;
     final refs = <int>[];
-    var sides = 0;
+    var sides = 0, alleys = 0;
     for (var lot = 0; lot < g.lotCount; lot++) {
       for (var slot = 0; slot <= 3; slot++) {
         final ref = g.joinRefOf(lot, slot);
-        if (slot == 3) {
-          expect(ref, kJoinRefNone, reason: 'slot 3 is reserved');
-          continue;
-        }
         if (ref == kJoinRefNone) {
-          expect(slot == 2 ? g.sideStreetJoinOf(lot) : null, isNull);
+          expect(
+              switch (slot) {
+                kJoinSlotSideStreet => g.sideStreetJoinOf(lot),
+                kJoinSlotAlley => g.rearAlleyJoinOf(lot),
+                _ => null,
+              },
+              isNull);
           continue;
         }
         refs.add(ref);
         final got = g.joinOfRef(ref)!;
-        if (slot == 2) {
+        if (slot == kJoinSlotAlley) {
+          alleys++;
+          expect(ref, kJoinRefAlleyBase - lot);
+          sameSlot(got, g.rearAlleyJoinOf(lot), 'lot $lot rear alley');
+          expect(got.flags & kJoinAlley, isNot(0));
+        } else if (slot == kJoinSlotSideStreet) {
           sides++;
           expect(ref, kJoinRefSideStreetBase - lot);
           sameSlot(got, g.sideStreetJoinOf(lot), 'lot $lot side street');
@@ -61,6 +68,9 @@ void main() {
       }
     }
     expect(sides, greaterThan(0));
+    // The starter kit draws no alley, so slot 3 is offered nowhere on it (the
+    // rear joins have their own fixture, `rear_alley_slot_test`).
+    expect(alleys, 0);
     final sorted = [...refs]..sort();
     for (var i = 1; i < sorted.length; i++) {
       expect(sorted[i], isNot(sorted[i - 1]));
@@ -87,7 +97,7 @@ void main() {
     for (final copy in [lit, renamed]) {
       expect(copy.sharesStructureWith(g), isTrue);
       for (var lot = 0; lot < g.lotCount; lot++) {
-        for (var slot = 0; slot <= 2; slot++) {
+        for (var slot = 0; slot <= 3; slot++) {
           final ref = g.joinRefOf(lot, slot);
           expect(copy.joinRefOf(lot, slot), ref);
           sameSlot(copy.joinOfRef(ref), g.joinOfRef(ref), 'lot $lot slot $slot');
