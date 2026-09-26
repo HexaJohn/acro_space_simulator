@@ -522,7 +522,7 @@ abstract final class SiteAccessMesher {
       // The plan's own stations are its vias — tens of metres apart on an
       // installation's spine. The ease has to be sampled where it bends or
       // the crossing is one long slope from the kerb, so the two knees go in
-      // as stations of their own, as `RoadMesher._withStations` does for a
+      // as stations of their own, as `RoadMesher.withStations` does for a
       // dropped kerb.
       var whole = 0.0;
       for (var i = 1; i < pts.length; i++) {

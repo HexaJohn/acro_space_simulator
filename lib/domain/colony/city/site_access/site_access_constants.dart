@@ -221,7 +221,7 @@ const int kPlanFallback = 4;
 /// Slot 0's corridor is blocked or crosses a built lot (§3.3 row 0c).
 const int kPlanAccessBlocked = 8;
 
-/// Public parking (reserved for R8).
+/// Public parking: designed, not built (site-access.md §3.3, §7.5).
 const int kPlanPublic = 16;
 
 // ---- Node flags (§2.3): `SiteAccessChunk.nodeFlags` bits ----

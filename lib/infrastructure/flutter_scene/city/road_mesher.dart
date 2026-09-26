@@ -785,8 +785,10 @@ class RoadMesher {
 
   /// [pts] with a point inserted at each arc of [arcs] that falls strictly
   /// inside it, in order. The polyline is unchanged; only its stations are
-  /// denser, which is what lets a lift ease across a cut.
-  static List<Vector3> _withStations(List<Vector3> pts, List<double> arcs) {
+  /// denser, which is what lets a lift ease across a cut — the sidewalk's
+  /// dropped kerb, and the pedestrian tube's ramp up over a drive
+  /// ([PedestrianTube], §10.2 Q8).
+  static List<Vector3> withStations(List<Vector3> pts, List<double> arcs) {
     if (arcs.isEmpty) return pts;
     final wanted = [...arcs]..sort();
     final out = <Vector3>[pts.first];
@@ -876,7 +878,7 @@ class RoadMesher {
           if (s > from && s < from + total) stations.add(s - from);
         }
       }
-      kept = _withStations(kept, stations);
+      kept = withStations(kept, stations);
     }
     for (final s in const [-1.0, 1.0]) {
       final sideBit = s > 0 ? 1 : 0;
@@ -1008,7 +1010,7 @@ class RoadMesher {
       for (var i = 1; i < kept.length; i++) {
         total += (kept[i] - kept[i - 1]).length;
       }
-      kept = _withStations(kept, _cutStations(cuts, from, from + total));
+      kept = withStations(kept, _cutStations(cuts, from, from + total));
     }
 
     for (final s in const [-1.0, 1.0]) {

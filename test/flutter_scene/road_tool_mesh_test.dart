@@ -17,6 +17,7 @@ import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_columns.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_tile_mesher.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/city_traffic.dart';
+import 'package:acro_space_simulator/infrastructure/flutter_scene/city/pedestrian_tube.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/rail_vehicles.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/road_deck.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/road_mesher.dart';
@@ -49,7 +50,8 @@ void main() {
           double? hw0,
           double? hw1,
           int decoration = 0,
-          List<double> lifts = const []}) =>
+          List<double> lifts = const [],
+          List<double> cuts = const []}) =>
       RoadSnapshot(
         colonyId: 'c',
         body: body,
@@ -64,6 +66,7 @@ void main() {
         endHalfWidthM: hw1,
         decoration: decoration,
         lifts: lifts,
+        kerbCuts: cuts,
       );
 
   List<(double, double)> line(double y, double x0, double x1, int n) => [
@@ -222,6 +225,166 @@ void main() {
         expect(digest(meshWith(zoo, tier, roadEnds: zooEnds)),
             digest(mesh(c, tier)),
             reason: tier.name);
+      }
+    });
+
+    test('a sealed street with drives carries its tube over them', () {
+      // The zoo's sealed street, this time with the kerb cuts a row of
+      // houses breaks in it (docs/plans/site-access.md §10.2 Q8 option (a)).
+      // A sealed road has NO pavement (`city_tile_mesher.dart`, `walked`), so
+      // the tube is the only thing a cut can break there, and without a case
+      // that carries both flags at once the crossing is untested by
+      // construction: no other fixture in the zoo has a cut at all, and the
+      // one fixture that does (`city_tile_mesher_test`) is not sealed.
+      //
+      // Three drives fifteen metres apart — a terrace, which fuses into one
+      // raised walkway — then a lone one two hundred metres on, which gets a
+      // bridge of its own. A cut on the FAR kerb and a far-swing mask are in
+      // the table too: the tube runs down one verge, so neither may move it.
+      // `(side, c, h, σ, kind)` per entry, ordered as `KerbCuts` orders them;
+      // kind 0 dropped, 1 a home's lot-side kerb, 2 a far-swing mask.
+      const drives = <double>[
+        0, 200, 4, -1, 0,
+        1, 120, 4, 1, 1,
+        1, 135, 4, 1, 1,
+        1, 150, 4, 1, 1,
+        1, 250, 4, 1, 2,
+        1, 350, 4, 1, 0,
+      ];
+      const sealedKnobs = CityMeshKnobs(
+        styleId: 'masonry-street',
+        bucketM: 6,
+        variants: 4,
+        perBuildingLod: true,
+        blockRangeM: 300,
+        interiorRangeM: 50,
+        lodDebug: false,
+        onStreetParking: true,
+        sealedWorld: true,
+        maxParkedCars: 400,
+      );
+      const on = CityMeshKnobs(
+        styleId: 'masonry-street',
+        bucketM: 6,
+        variants: 4,
+        perBuildingLod: true,
+        blockRangeM: 300,
+        interiorRangeM: 50,
+        lodDebug: false,
+        onStreetParking: true,
+        sealedWorld: true,
+        maxParkedCars: 400,
+        siteAccess: true,
+      );
+      // 400 m of sealed street, a station every ten metres.
+      final plain = [road(RoadClass.street, line(900, -200, 200, 41),
+          sealed: true)];
+      final cut = [road(RoadClass.street, line(900, -200, 200, 41),
+          sealed: true, cuts: drives)];
+
+      // Its own pin: the tube, its raised deck, its legs and the kerbside
+      // the cuts re-dress.
+      expect(digest(meshWith(cut, CityTier.near, k: on)), 0x3c455708);
+
+      // With the knob off the cuts are not read at all, so the street is the
+      // street it always was — the §8.1 discipline, checked here rather than
+      // assumed.
+      expect(digest(meshWith(cut, CityTier.near, k: sealedKnobs)),
+          digest(meshWith(plain, CityTier.near, k: sealedKnobs)));
+      // With it on they are read, and the tube moves.
+      expect(digest(meshWith(cut, CityTier.near, k: on)),
+          isNot(digest(meshWith(plain, CityTier.near, k: on))));
+      // Only at near: there is no tube at the coarser tiers to carry.
+      for (final tier in [CityTier.mid, CityTier.far]) {
+        expect(digest(meshWith(cut, tier, k: on)),
+            digest(meshWith(plain, tier, k: on)),
+            reason: tier.name);
+      }
+
+      // And what actually changed, measured in the tile: the barrel's floor
+      // is its lowest vertex, the one on its own axis line — nothing else in
+      // the tile stands at exactly that offset across the street.
+      final across = RoadClass.street.width / 2 +
+          PedestrianTube.radiusM +
+          PedestrianTube.clearOfLaneM;
+      double floorAt(CityTileResult res, double arc) {
+        // The ring NEAREST the arc, not the lowest in a window: the tube
+        // inserts stations of its own for the ramp corners and every post, so
+        // a window wide enough to catch a ring on the plain street also
+        // catches one part way up a ramp on the cut one.
+        var at = double.nan;
+        for (final p in verts(res, CityMaterialKind.glazing)) {
+          // The street runs along +x at y = 900, so its side-1 kerb is at
+          // smaller y, and the road's arc is x + 200.
+          if ((p.y - (900 - across)).abs() > 0.01) continue;
+          if (at.isNaN || (p.x + 200 - arc).abs() < (at - arc).abs()) {
+            at = p.x + 200;
+          }
+        }
+        expect(at.isNaN, isFalse, reason: 'no tube near $arc');
+        expect((at - arc).abs(), lessThan(0.5), reason: 'no ring at $arc');
+        var best = double.infinity;
+        for (final p in verts(res, CityMaterialKind.glazing)) {
+          if ((p.y - (900 - across)).abs() > 0.01) continue;
+          if ((p.x + 200 - at).abs() > 0.01) continue;
+          final h = (p + anchor).length - Vector3(p.x, p.y, r).length;
+          if (h < best) best = h;
+        }
+        return best;
+      }
+
+      final res = meshWith(cut, CityTier.near, k: on);
+      final was = meshWith(plain, CityTier.near, k: on);
+      // The RISE, so the chord bias cancels: this street lies 900 m off the
+      // anchor, and a verge offset along the local horizontal stands a few
+      // millimetres over the sphere under it. The plain tube's own floor
+      // says what the curb line is, bias included.
+      expect(floorAt(was, 120), closeTo(PedestrianTube.curbLiftM, 1e-2));
+      // Three drives fifteen metres apart are ONE structure: level over each
+      // of them and level between them, with no touchdown to sag through
+      // (§10.2 Q8 — the fused form), and a bridge of its own 200 m on at the
+      // lone drive. Measured at the street's own ten-metre stations, which
+      // both meshes carry: 130 and 140 are between drives.
+      for (final at in [120.0, 130.0, 140.0, 150.0, 350.0]) {
+        expect(floorAt(res, at) - floorAt(was, at),
+            closeTo(PedestrianTube.crossLiftM, 2e-3),
+            reason: 'the tube is not up over the drive at $at');
+      }
+      // A far-kerb cut and a swing mask lift nothing: the tube runs down one
+      // verge, and a swing breaks no kerb at all.
+      for (final at in [200.0, 250.0]) {
+        expect(floorAt(res, at) - floorAt(was, at), closeTo(0, 1e-9),
+            reason: 'the tube rose for nothing at $at');
+      }
+
+      // And the raised deck stands on something, in the TILE and not only in
+      // the emitter: the posts go into the facade material (this fixture has
+      // no building), their feet `legFootM` in the ground, and down the whole
+      // fused terrace no two stand further apart than one drive's opening and
+      // its clearance — even though the street itself is drawn at ten-metre
+      // stations, none of which may carry a post.
+      final posts = <double>[];
+      for (final p in verts(res, CityMaterialKind.facade)) {
+        final off = (p.y - (900 - across)).abs();
+        if ((off - PedestrianTube.legOffsetM).abs() >
+            PedestrianTube.legHalfM + 1e-3) {
+          continue;
+        }
+        final h = (p + anchor).length - Vector3(p.x, p.y, r).length;
+        if ((h + PedestrianTube.legFootM).abs() > 1e-2) continue;
+        final s = p.x + 200;
+        if (!posts.any((was) => (was - s).abs() < 0.5)) posts.add(s);
+      }
+      posts.sort();
+      final terrace = posts.where((s) => s < 250).toList();
+      expect(terrace.length, 12, reason: 'the deck stands on nothing');
+      // A leg run into the first approach, a leg run out of the last.
+      expect(terrace.first, closeTo(115 - PedestrianTube.legRunM, 0.3));
+      expect(terrace.last, closeTo(155 + PedestrianTube.legRunM, 0.3));
+      for (var i = 1; i < terrace.length; i++) {
+        expect(terrace[i] - terrace[i - 1],
+            lessThanOrEqualTo(2 * (4.0 + PedestrianTube.legClearM) + 0.5),
+            reason: 'unheld deck at ${terrace[i - 1]}');
       }
     });
 

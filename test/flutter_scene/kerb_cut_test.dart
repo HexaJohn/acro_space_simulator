@@ -5,8 +5,9 @@
 
 /// The kerbside of a road with site access (docs/plans/site-access.md §5.5,
 /// §8.3 R4 `kerb_cut_test`): the dropped kerb the sidewalk lays, the grass
-/// the verge leaves out, the props and lamps a cut moves, and the kerb cars
-/// its mask stands down.
+/// the verge leaves out, the props and lamps a cut moves, the kerb cars its
+/// mask stands down — and, on a sealed world, the pedestrian tube it carries
+/// over the drive on legs (§3.8, §10.2 Q8 option (a)).
 library;
 
 import 'dart:typed_data';
@@ -16,6 +17,7 @@ import 'package:acro_space_simulator/domain/colony/city/site_access/kerb_cuts.da
 import 'package:acro_space_simulator/domain/scatter/mesh_builder.dart';
 import 'package:acro_space_simulator/domain/scatter/prop_mesh.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
+import 'package:acro_space_simulator/infrastructure/flutter_scene/city/pedestrian_tube.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/road_mesher.dart';
 import 'package:acro_space_simulator/infrastructure/flutter_scene/city/street_furniture.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -349,6 +351,356 @@ void main() {
                   with_: cuts([(0, 51.0, 4.0, KerbCuts.kindHomeFarSwing)]))
               .$2),
           plain);
+    });
+  });
+
+  group('the pedestrian tube over a drive', () {
+    // Where the barrel's axis runs: outside the kerb, clear of the lane. The
+    // tube is on ONE verge, the side-1 kerb, so `side` (= −y here) times this
+    // is where every measurement below is taken from.
+    const across = halfWidth +
+        PedestrianTube.radiusM +
+        PedestrianTube.clearOfLaneM;
+    const cutHalf = 4.0;
+
+    (PropMesh, PropMesh) tube(
+        {Float64List? with_, double arcOffset = 0, List<Vector3>? on}) {
+      final solid = MeshBuilder(), glass = MeshBuilder();
+      PedestrianTube.emit(solid, glass,
+          pts: on ?? pts,
+          halfWidthM: halfWidth,
+          anchorBF: anchor,
+          cuts: with_,
+          arcOffset: arcOffset);
+      return (solid.build(), glass.build());
+    }
+
+    /// A straight street [lengthM] long drawn with a vertex every [stationM]:
+    /// how COARSELY a road is drawn is the road tool's business, not the
+    /// tube's, and the zoo's own sealed street is drawn at 100 m stations
+    /// (`road_tool_mesh_test`).
+    List<Vector3> drawn(double lengthM, double stationM) => [
+          for (var i = 0; i <= (lengthM / stationM).round(); i++)
+            Vector3(i * stationM, 0, 0),
+        ];
+
+    /// Metres from the centreline on the tube's own side (side 1 is at −y).
+    double outOf(PropMesh m, int i) => -acrossOf(m, i);
+
+    /// The barrel's floor at [arc]: its lowest vertex is the one on the axis
+    /// line, which is exactly the curb line the whole tube rides.
+    double floorAt(PropMesh glass, double arc) {
+      var best = double.infinity;
+      var found = false;
+      for (var i = 0; i < glass.vertexCount; i++) {
+        if ((outOf(glass, i) - across).abs() > 0.01) continue;
+        // Stations are two metres apart, so the nearest ring to any arc is
+        // within one; every arc asked for below is on a flat stretch of the
+        // profile, where which of the two it finds cannot matter.
+        if ((arcOf(glass, i) - arc).abs() > 1.1) continue;
+        final h = heightOf(glass, i);
+        found = true;
+        if (h < best) best = h;
+      }
+      expect(found, isTrue, reason: 'a ring near $arc');
+      return best;
+    }
+
+    /// Whether [i] is a leg post rather than the beam: the posts stand a
+    /// fixed offset either side of the axis, the beam's edges a radius.
+    bool isLeg(PropMesh m, int i) {
+      final d = outOf(m, i);
+      for (final o in const [-1.0, 1.0]) {
+        if ((d - (across + PedestrianTube.legOffsetM * o)).abs() <=
+            PedestrianTube.legHalfM + 1e-6) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    /// The arc of every pair of posts in [m], ascending: a post is
+    /// `legHalfM` thick along the road too, so its four corners bracket the
+    /// arc its pair stands at.
+    List<double> legPairs(PropMesh m) {
+      final arcs = <double>[];
+      for (var i = 0; i < m.vertexCount; i++) {
+        if (isLeg(m, i)) arcs.add(arcOf(m, i));
+      }
+      arcs.sort();
+      const span = 2 * PedestrianTube.legHalfM + 1e-3;
+      final at = <double>[];
+      var i = 0;
+      while (i < arcs.length) {
+        final lo = arcs[i];
+        var hi = lo;
+        while (i < arcs.length && arcs[i] - lo <= span) {
+          hi = arcs[i];
+          i++;
+        }
+        at.add((lo + hi) / 2);
+      }
+      return at;
+    }
+
+    test('no cut on its own kerb moves the tube, to the byte', () {
+      final glass = positionsOf(tube().$2);
+      final solid = positionsOf(tube().$1);
+      for (final table in <Float64List?>[
+        Float64List(0),
+        // The far kerb: the tube runs down the other verge and crosses
+        // nothing there.
+        cuts([(0, 100.0, cutHalf, KerbCuts.kindDropped)]),
+        // A swing mask breaks no kerb, so it bridges nothing either.
+        cuts([(1, 100.0, cutHalf, KerbCuts.kindHomeFarSwing)]),
+        // And a drive whose whole approach falls off the far end.
+        cuts([(1, 900.0, cutHalf, KerbCuts.kindDropped)]),
+      ]) {
+        expect(positionsOf(tube(with_: table).$2), glass, reason: '$table');
+        expect(positionsOf(tube(with_: table).$1), solid, reason: '$table');
+      }
+    });
+
+    test('the tube rises over the drive at one in twelve, and comes back '
+        'down', () {
+      final (_, glass) =
+          tube(with_: cuts([(1, 100.0, cutHalf, KerbCuts.kindHomeLot)]));
+      // The hold runs a margin past the cut either side; the approaches run a
+      // ramp out from that.
+      const hold = cutHalf + PedestrianTube.crossMarginM; // 5 m
+      expect(floorAt(glass, 100),
+          closeTo(PedestrianTube.curbLiftM + PedestrianTube.crossLiftM, 2e-3),
+          reason: 'level over the drive');
+      expect(floorAt(glass, 100 - hold + 0.3),
+          closeTo(PedestrianTube.curbLiftM + PedestrianTube.crossLiftM, 2e-3));
+      // Clear of the approach it is the curb it always was.
+      expect(floorAt(glass, 100 - hold - PedestrianTube.rampM - 6),
+          closeTo(PedestrianTube.curbLiftM, 2e-3));
+      expect(floorAt(glass, 100 + hold + PedestrianTube.rampM + 6),
+          closeTo(PedestrianTube.curbLiftM, 2e-3));
+      // And the grade between: measured over ten metres of the approach.
+      final rise = floorAt(glass, 90) - floorAt(glass, 80);
+      expect(rise / 10.0, closeTo(PedestrianTube.rampGrade, 1e-3));
+      expect(PedestrianTube.rampGrade, closeTo(1 / 12, 1e-12));
+    });
+
+    test('a rover fits under the soffit, and the drive is clear of it', () {
+      final (solid, _) =
+          tube(with_: cuts([(1, 100.0, cutHalf, KerbCuts.kindDropped)]));
+      // The lowest thing over the drive is the beam's underside.
+      var soffit = double.infinity;
+      for (var i = 0; i < solid.vertexCount; i++) {
+        if ((arcOf(solid, i) - 100).abs() > 0.5) continue;
+        final h = heightOf(solid, i);
+        if (h < soffit) soffit = h;
+      }
+      expect(soffit, closeTo(PedestrianTube.crossClearM, 2e-3));
+      expect(PedestrianTube.crossClearM, greaterThan(1.95),
+          reason: 'a rover is 1.95 m tall');
+    });
+
+    test('the legs stand on the ground, and never in the drive', () {
+      final (solid, _) =
+          tube(with_: cuts([(1, 100.0, cutHalf, KerbCuts.kindDropped)]));
+      final feet = <double, (double, double)>{};
+      for (var i = 0; i < solid.vertexCount; i++) {
+        if (!isLeg(solid, i)) continue;
+        final s = (arcOf(solid, i) * 1000).round() / 1000.0;
+        final h = heightOf(solid, i);
+        final was = feet[s];
+        feet[s] = was == null
+            ? (h, h)
+            : (h < was.$1 ? h : was.$1, h > was.$2 ? h : was.$2);
+      }
+      expect(feet, isNotEmpty, reason: 'nothing holds the deck up');
+      final over = PedestrianTube.crossingsOf(
+          cuts([(1, 100.0, cutHalf, KerbCuts.kindDropped)]));
+      for (final MapEntry(key: s, value: (lo, hi)) in feet.entries) {
+        // A foot in the ground, not in the air, and not hanging in it.
+        expect(lo, closeTo(-PedestrianTube.legFootM, 2e-3),
+            reason: 'the leg at $s does not reach the ground');
+        // And its head under the deck it carries.
+        expect(
+            hi,
+            closeTo(
+                PedestrianTube.curbLiftM +
+                    PedestrianTube.liftAt(over, s) -
+                    PedestrianTube.deckThickM,
+                0.1),
+            reason: 'the leg at $s does not reach the soffit');
+        // Never standing in the drive itself. A post's CENTRE is held
+        // `legClearM` clear of the cut and the post is `legHalfM` thick along
+        // the road too, so its nearest corner stands 1.84 m off the drive's
+        // edge — which is the number this measures, since every vertex here
+        // is a corner.
+        expect(
+            (s - 100).abs(),
+            greaterThanOrEqualTo(cutHalf +
+                PedestrianTube.legClearM -
+                PedestrianTube.legHalfM -
+                2e-3),
+            reason: 'a leg planted in the drive at $s');
+      }
+      expect(
+          PedestrianTube.legClearM - PedestrianTube.legHalfM, closeTo(1.84, 1e-9),
+          reason: 'the clear the doc quotes at the post corner');
+    });
+
+    test('the legs are the structure\'s, not the polyline\'s', () {
+      // The defect this pins: legs used to land only on a vertex the ROAD
+      // TOOL happened to draw, and a post is barred from standing within
+      // `legClearM` of a cut, so a fused terrace drawn at ten metre stations
+      // stood on four posts with 38 m of level deck on nothing, and a lone
+      // crossing on a road drawn at 25 m stations got no post at all.
+      const drives = [120.0, 135.0, 150.0]; // a terrace, fused into one deck
+      final terrace = cuts([
+        for (final c in drives) (1, c, cutHalf, KerbCuts.kindHomeLot),
+      ]);
+      const shut = cutHalf + PedestrianTube.legClearM; // 6 m either side
+      // The same posts at every density the road may be drawn at, including
+      // one coarser than the zoo's own sealed street.
+      List<double>? was;
+      for (final station in const [1.0, 2.0, 10.0, 25.0, 100.0]) {
+        final at = legPairs(tube(with_: terrace, on: drawn(400, station)).$1);
+        if (was == null) {
+          was = at;
+        } else {
+          expect(at.length, was.length, reason: '${station}m stations');
+          for (var i = 0; i < at.length; i++) {
+            expect(at[i], closeTo(was[i], 1e-3), reason: '${station}m stations');
+          }
+        }
+      }
+      final at = was!;
+      // The whole raised run is held: from a leg-run into the first approach
+      // to a leg-run out of the last.
+      expect(at.first, closeTo(drives.first - cutHalf - 1 - PedestrianTube.legRunM,
+          1e-3));
+      expect(at.last,
+          closeTo(drives.last + cutHalf + 1 + PedestrianTube.legRunM, 1e-3));
+      for (var i = 1; i < at.length; i++) {
+        final gap = at[i] - at[i - 1];
+        // Either a step of the regular spacing, or a drive being spanned —
+        // and nothing else. A drive's opening plus its clearance is the ONLY
+        // stretch of deck that stands on nothing.
+        final drive = drives.any((c) =>
+            (at[i - 1] - (c - shut)).abs() < 1e-3 &&
+            (at[i] - (c + shut)).abs() < 1e-3);
+        expect(gap, lessThanOrEqualTo(drive ? 2 * shut + 1e-3 : PedestrianTube.legSpacingM + 1e-3),
+            reason: 'a $gap m gap at ${at[i - 1]}');
+      }
+      // And a post stands at each edge of every drive, so the span over one
+      // is the opening and nothing more.
+      for (final c in drives) {
+        for (final edge in [c - shut, c + shut]) {
+          expect(at.any((s) => (s - edge).abs() < 1e-3), isTrue,
+              reason: 'no post at the drive edge $edge');
+        }
+      }
+      // A lone crossing on a coarsely drawn road is held too — it used to
+      // get nothing at all.
+      final lone = cuts([(1, 200.0, cutHalf, KerbCuts.kindDropped)]);
+      for (final station in const [2.0, 25.0, 100.0]) {
+        final posts = legPairs(tube(with_: lone, on: drawn(400, station)).$1);
+        expect(posts.length, 8, reason: '${station}m stations');
+        expect(posts.first,
+            closeTo(200 - cutHalf - 1 - PedestrianTube.legRunM, 1e-3));
+      }
+    });
+
+    test('drives a house apart fuse into one raised walkway', () {
+      // A cut's spacing IS its lot's frontage, and a house lot is 17–24 m
+      // (§3 C-1; the layout default is 24 m) — so two holds are 7–14 m of
+      // clear apart against 58.8 m of two ramps, and the tube cannot come
+      // down and go back up in that. So it stays up: one continuous walkway
+      // on legs, which is the shape this feature takes rather than a surprise
+      // (§10.2 Q8). The fifteen metres here are the tightest terrace the
+      // layout makes (`minFrontageFraction` 0.6 of the 24 m default is
+      // 14.4 m), so the case is the hardest one and not the typical one.
+      final table = cuts([
+        (1, 100.0, cutHalf, KerbCuts.kindHomeLot),
+        (1, 115.0, cutHalf, KerbCuts.kindHomeLot),
+        (1, 130.0, cutHalf, KerbCuts.kindHomeLot),
+      ]);
+      final over = PedestrianTube.crossingsOf(table);
+      expect(over.length, 1, reason: 'three drives, one structure');
+      expect(over.single.$1, closeTo(100 - cutHalf - 1, 1e-9));
+      expect(over.single.$2, closeTo(130 + cutHalf + 1, 1e-9));
+      final (_, glass) = tube(with_: table);
+      // Level the whole way across, with no sag between the drives.
+      for (final s in const [100.0, 108.0, 115.0, 122.0, 130.0]) {
+        expect(floorAt(glass, s),
+            closeTo(PedestrianTube.curbLiftM + PedestrianTube.crossLiftM, 2e-3),
+            reason: 'a sag at $s');
+      }
+    });
+
+    test('drives far apart each get their own bridge', () {
+      final table = cuts([
+        (1, 40.0, cutHalf, KerbCuts.kindDropped),
+        (1, 160.0, cutHalf, KerbCuts.kindDropped),
+      ]);
+      final over = PedestrianTube.crossingsOf(table);
+      expect(over.length, 2);
+      final (_, glass) = tube(with_: table);
+      // Down on its curb between them: 100 m is more than a ramp from either.
+      expect(floorAt(glass, 100), closeTo(PedestrianTube.curbLiftM, 2e-3));
+      // A lone crossing is still not SHORT: two approaches and the hold, as
+      // §10.2 Q8 quotes it — 2·29.4 + 2·(4.0 + 1.0).
+      expect(
+          2 * PedestrianTube.rampM +
+              2 * (cutHalf + PedestrianTube.crossMarginM),
+          closeTo(68.8, 1e-9));
+    });
+
+    test('what a crossing costs, so §8.4 can be re-derived', () {
+      // The figure §5.5 as built quotes, measured where anyone can re-run it:
+      // `PedestrianTube.emit` alone over 400 m of street drawn at ten metre
+      // stations, against the same call with no cut in the table. The tile
+      // this rides in carries roads, kerbside and parked rovers too, so an
+      // absolute tile total says nothing about the tube; this is the tube.
+      const drives = <(int, double, double, int)>[
+        (1, 120.0, cutHalf, KerbCuts.kindHomeLot),
+        (1, 135.0, cutHalf, KerbCuts.kindHomeLot),
+        (1, 150.0, cutHalf, KerbCuts.kindHomeLot),
+        (1, 350.0, cutHalf, KerbCuts.kindDropped),
+      ];
+      (int, int) cost({Float64List? with_}) {
+        final (solid, glass) = tube(with_: with_, on: drawn(400, 10));
+        return (
+          solid.vertexCount + glass.vertexCount,
+          solid.triangleCount + glass.triangleCount,
+        );
+      }
+
+      expect(cost(), (328, 560), reason: 'the plain tube');
+      expect(cost(with_: cuts(drives)), (1606, 1680),
+          reason: 'four drives: two crossings, one of them a fused terrace');
+    });
+
+    test('a span later in the road reads its crossings through arcOffset', () {
+      // The same drive, drawn by a span that starts 60 m in: the tube is up
+      // over 100 m of the WHOLE road either way.
+      final table = cuts([(1, 100.0, cutHalf, KerbCuts.kindDropped)]);
+      final solid = MeshBuilder(), glass = MeshBuilder();
+      PedestrianTube.emit(solid, glass,
+          pts: pts.sublist(30),
+          halfWidthM: halfWidth,
+          anchorBF: anchor,
+          cuts: table,
+          arcOffset: 60);
+      final m = glass.build();
+      var best = double.infinity;
+      for (var i = 0; i < m.vertexCount; i++) {
+        if ((outOf(m, i) - across).abs() > 0.01) continue;
+        // The span's own points start at 60 m of the road, so the drive is
+        // 40 m along it — and the mesh is still in road coordinates.
+        if ((arcOf(m, i) - 100).abs() > 0.3) continue;
+        final h = heightOf(m, i);
+        if (h < best) best = h;
+      }
+      expect(best,
+          closeTo(PedestrianTube.curbLiftM + PedestrianTube.crossLiftM, 2e-3));
     });
   });
 }
