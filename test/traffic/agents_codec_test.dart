@@ -7,8 +7,15 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:acro_space_simulator/domain/colony/city/traffic/agents_codec.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/building_table.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/citizen_match.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/citizen_population.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/citizen_table.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/city_agents.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/parked_cars.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/population_ledger.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/slot_pool.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/traffic_rng.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/traffic_tuning.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -397,6 +404,275 @@ void main() {
           jsonEncode(block));
     });
 
+    test('the car rows are the T4a rows, whether or not there are citizens',
+        () {
+      // The save-format promise (slice3 §0): slice 3 adds keys to the block
+      // and changes NOTHING about how a car is written. The proof that
+      // matters is the committed pre-citizens fixture; this is the proof
+      // inside one build, and it is the one that fails first when somebody
+      // reaches into `_writeCars`.
+      final (cars, world) = parked();
+      final bare = AgentsCodec.encode(enabled: true, cars: cars, world: world);
+      final folk = _People();
+      final town = CitizenTable(capacity: 8)
+        ..spawn(
+            home: 1,
+            work: 2,
+            car: CitizenTable.carNone,
+            state: CitizenState.atHome,
+            wakeUs: 5000000);
+      final full = AgentsCodec.encode(
+          enabled: true,
+          cars: cars,
+          world: world,
+          citizens: town,
+          census: folk,
+          population: _population(town));
+      expect(jsonEncode(full['cars']), jsonEncode(bare['cars']),
+          reason: 'not one car row moved');
+      expect(full['v'], bare['v']);
+      // The citizen's home and job are sites too, so the string table grows
+      // — sorted, as it always was — and the CAR rows follow it, exactly as
+      // they would if another car had been parked there.
+      expect(full['sites'], ['lot-a', 'lot-b', 'site-1', 'site-2']);
+      expect(bare['sites'], ['lot-a', 'lot-b']);
+      final cit = full['cit']! as Map<String, Object?>;
+      expect(cit['home'], [2], reason: 'site-1, after the sort');
+      expect(cit['work'], [3]);
+    });
+
+    test('the citizens, the budgets and the stream come back as they were',
+        () {
+      final town = CitizenTable(capacity: 8);
+      final a = town.spawn(
+          home: 3,
+          work: 1,
+          car: CitizenTable.carNone,
+          state: CitizenState.atWork,
+          wakeUs: 61000000,
+          flags: CitizenFlags.hasLicence);
+      town.spawn(
+          home: -1,
+          work: -1,
+          car: CitizenTable.carNone,
+          state: CitizenState.atErrand,
+          wakeUs: 1000000);
+      final gone = town.spawn(
+          home: 2,
+          work: -1,
+          car: CitizenTable.carNone,
+          state: CitizenState.atHome,
+          wakeUs: 0);
+      town.remove(gone);
+      expect(a, isNot(gone));
+
+      final people = _population(town)
+        ..ledger.addMigration(1.5)
+        ..ledger.addDeath(0.25);
+      people.ledger.syncExternal(200);
+      people.ledger.writeBack(2);
+      people.rng.nextU32();
+      people.arrivals = 9;
+      people.adopted = 2;
+      people.legacyCars = 1;
+
+      final census = _People()..nowUs = 60000000;
+      final block = jsonDecode(jsonEncode(AgentsCodec.encode(
+          enabled: true,
+          citizens: town,
+          census: census,
+          population: people))) as Map<String, Object?>;
+      expect(block['v'], 2,
+          reason: 'citizens make it a v2 block even with nothing parked: a '
+              'build that reads only the flag must drop it whole (§14.4)');
+      expect(block['cars'], isEmpty);
+      final cit = block['cit']! as Map<String, Object?>;
+      expect(cit['state'],
+          [CitizenState.atWork.index, CitizenState.atErrand.index],
+          reason: 'dense and in slot order: the dead slot is not written');
+      expect(cit['wakeInUs'], [1000000, -59000000],
+          reason: 'relative to the save\'s clock (§14.3)');
+      expect(cit['flags'], [CitizenFlags.hasLicence, 0]);
+
+      final saved = AgentsCodec.decode(block)!;
+      expect(saved.citizens.count, 2);
+      final back = CitizenTable(capacity: 8);
+      final sink = _People();
+      final handles = AgentsCodec.restoreCitizens(saved, back, sink,
+          nowUs: 20000000);
+      expect(handles, hasLength(2));
+      expect(back.liveCount, 2);
+      final sl = SlotPool.slotOf(handles[0]);
+      expect(back.home[sl], 3, reason: 'site-3 is building 3 again');
+      expect(back.work[sl], 1);
+      expect(back.state[sl], CitizenState.atWork.index);
+      expect(back.wakeUs[sl], 21000000);
+      expect(back.flags[sl], CitizenFlags.hasLicence);
+
+      final budgets = PopulationLedger()..restore(saved.ledgerJson);
+      expect(budgets.digest(3), people.ledger.digest(3));
+      final ranAgain = _population(back)..restore(saved.popJson);
+      expect(ranAgain.rng.toJson(), people.rng.toJson(),
+          reason: 'the realisation draws the same cars after a load (§17.4)');
+      expect(ranAgain.digest(11), people.digest(11));
+
+      // And resumed on the clock it was saved on, the town digests to the
+      // town that was saved: the same people, wake for wake (§17.4).
+      final twin = CitizenTable(capacity: 8);
+      AgentsCodec.restoreCitizens(saved, twin, _People(),
+          nowUs: census.nowUs);
+      expect(twin.digest(0), town.digest(0));
+    });
+
+    test('a home the colony no longer has comes back as no home', () {
+      final town = CitizenTable(capacity: 4)
+        ..spawn(
+            home: 7,
+            work: 1,
+            car: CitizenTable.carNone,
+            state: CitizenState.atHome,
+            wakeUs: 0);
+      final saved = AgentsCodec.decode(jsonDecode(jsonEncode(
+          AgentsCodec.encode(
+              enabled: true,
+              citizens: town,
+              census: _People(),
+              population: _population(town)))))!;
+      final back = CitizenTable(capacity: 4);
+      // `site-7` was renamed by a changed plat rule; `site-1` still stands.
+      AgentsCodec.restoreCitizens(saved, back, _People()..gone.add('site-7'),
+          nowUs: 0);
+      expect(back.home[0], -1, reason: '§14.4: dropped, and re-matched');
+      expect(back.work[0], 1);
+    });
+
+    test('a citizen\'s car row carries the dense index, never the handle', () {
+      // §0 Q4: one direction, one source of truth. The runtime column holds
+      // a HANDLE — a generation and a slot — and a handle means nothing to
+      // the colony that reads the save back.
+      final town = CitizenTable(capacity: 8);
+      final first = town.spawn(
+          home: 1,
+          work: -1,
+          car: CitizenTable.carNone,
+          state: CitizenState.atHome,
+          wakeUs: 0);
+      town.remove(first);
+      final owner = town.spawn(
+          home: 1,
+          work: -1,
+          car: CitizenTable.carNone,
+          state: CitizenState.atHome,
+          wakeUs: 0);
+      expect(SlotPool.slotOf(owner), 0);
+      expect(owner, greaterThan(1), reason: 'a handle, not a slot');
+
+      final cars = ParkedCarTable(capacity: 4);
+      final w = _World(sites: const ['site-1']);
+      w.carSite[cars.parkLot(
+          building: 1,
+          row: 0,
+          stall: 0,
+          stallKey: 4,
+          ownerKind: CarOwnerKind.citizen,
+          owner: owner,
+          kind: 0,
+          variant: 0)] = 'site-1';
+      final rows = (AgentsCodec.encode(
+              enabled: true,
+              cars: cars,
+              world: w,
+              citizens: town,
+              census: _People(),
+              population: _population(town))['cars']! as List)
+          .cast<List<num>>();
+      expect(rows.single[0], CarOwnerKind.citizen.index);
+      expect(rows.single[1], 0, reason: 'the dense index of the one citizen');
+
+      // And an owner who died between the trip and the save owns nothing.
+      town.remove(owner);
+      final orphan = (AgentsCodec.encode(
+              enabled: true,
+              cars: cars,
+              world: w,
+              citizens: town,
+              census: _People(),
+              population: _population(town))['cars']! as List)
+          .cast<List<num>>();
+      expect(orphan.single[1], -1);
+    });
+
+    test('an unadopted legacy car is re-saved byte for byte', () {
+      // §0 Q3, and the whole promise the pre-citizens fixture stands for: a
+      // car whose owner is a BUILDING keeps its kind and its owner until
+      // somebody at that building takes it, and a save taken in between is
+      // the save that was loaded.
+      final cars = ParkedCarTable(capacity: 8);
+      final w = _World(sites: const ['home-a', 'home-b']);
+      w.carSite[cars.parkLot(
+          building: 0,
+          row: 0,
+          stall: 0,
+          stallKey: 5,
+          ownerKind: CarOwnerKind.homePool,
+          owner: 0,
+          kind: 0,
+          variant: 1)] = 'home-a';
+      w.carSite[cars.garage(
+          building: 1,
+          ownerKind: CarOwnerKind.commuter,
+          owner: 1,
+          kind: 0,
+          variant: 2)] = 'home-b';
+      final town = CitizenTable(capacity: 8);
+      final people = _population(town);
+      final before = jsonEncode(AgentsCodec.encode(
+          enabled: true, cars: cars, world: w));
+
+      // Nobody lives anywhere yet: both cars stand, and the block is the one
+      // that was loaded.
+      expect(people.adoptLegacy(0, cars), 0);
+      expect(people.legacyCars, 2);
+      expect(
+          jsonEncode(AgentsCodec.encode(
+              enabled: true,
+              cars: cars,
+              world: w,
+              citizens: town,
+              census: _People(),
+              population: people)['cars']),
+          jsonEncode(jsonDecode(before)['cars']));
+
+      // One resident moves into home-a. Their car changes hands and nothing
+      // else does: the other row is written exactly as it was.
+      final c = town.spawn(
+          home: 0,
+          work: -1,
+          car: CitizenTable.carNone,
+          state: CitizenState.atHome,
+          wakeUs: 0);
+      expect(people.adoptLegacy(0, cars), 1);
+      expect(people.legacyCars, 1, reason: 'home-b\'s car is still offered');
+      expect(town.car[SlotPool.slotOf(c)], isNot(CitizenTable.carNone));
+      final after = (AgentsCodec.encode(
+              enabled: true,
+              cars: cars,
+              world: w,
+              citizens: town,
+              census: _People(),
+              population: people)['cars']! as List)
+          .cast<List<num>>();
+      final legacy = (jsonDecode(before) as Map)['cars']! as List;
+      expect(after, hasLength(2));
+      expect(jsonEncode(after[0]), jsonEncode(legacy[0]),
+          reason: 'the commuter row of home-b, untouched');
+      expect(after[1][0], CarOwnerKind.citizen.index);
+      expect(after[1][1], 0, reason: 'the dense index of its new owner');
+      expect(after[1].sublist(2), legacy[1].sublist(2),
+          reason: 'and every other column of it is what it was: the car did '
+              'not move, it changed hands');
+    });
+
     test('a row a build did not write is skipped, not half-read', () {
       final saved = AgentsCodec.decode({
         'v': 2,
@@ -416,6 +692,40 @@ void main() {
       expect(world.restore(saved), (lot: 1, kerb: 0, garaged: 0, dropped: 0));
     });
   });
+}
+
+/// A realisation over [citizens] with nothing but tables behind it: the
+/// citizen half of the save needs the budgets and the stream a
+/// [CitizenPopulation] carries, and the codec asks it for nothing else.
+CitizenPopulation _population(CitizenTable citizens) {
+  final buildings = BuildingTable();
+  return CitizenPopulation(
+      citizens: citizens,
+      buildings: buildings,
+      ledger: PopulationLedger(),
+      match: CitizenMatch(citizens, buildings, TrafficRng(1)),
+      rng: TrafficRng(2));
+}
+
+/// The colony a citizen is written out of and read back into: building slot
+/// `n` is the site `site-n`, and [gone] names the sites a changed plat rule
+/// renamed away while the save sat on disk.
+class _People implements CitizenSaveSource, CitizenRestoreSink {
+  /// The clock the wakes are written against (§14.3).
+  @override
+  int nowUs = 0;
+
+  final List<String> gone = [];
+
+  @override
+  String? siteIdOfBuilding(int buildingSlot) =>
+      buildingSlot < 0 ? null : 'site-$buildingSlot';
+
+  @override
+  int buildingOfSite(String siteId) {
+    if (gone.contains(siteId)) return -1;
+    return int.tryParse(siteId.replaceFirst('site-', '')) ?? -1;
+  }
 }
 
 /// Saved row [i] of [saved] made a live car of [cars] again, with [world]

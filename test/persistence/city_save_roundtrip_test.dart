@@ -187,6 +187,51 @@ void main() {
     expect(restored.byId('redtown')!.agents.enabled, isFalse);
   });
 
+  test('a load that has not settled still saves its citizens', () {
+    // §14.1 as built, and slice 3's half of it. `CityAgents.restore` only
+    // STORES the block — lot ids and site plans exist from the first advance
+    // on — so a save taken in that window is written out of what is held.
+    // Before slice 3 that was the cars; it is now the people, the budgets
+    // and the realisation's stream as well, and losing any of them would
+    // turn a save-load-save into a colony with fewer citizens than the one
+    // it was loaded from.
+    final block = <String, Object?>{
+      'v': 2,
+      'enabled': true,
+      'sites': ['lot-a', 'lot-b'],
+      'cars': [
+        [1, 0, 0, 0, 77, 0, 3],
+      ],
+      'cit': {
+        'home': [0, 1, -1],
+        'work': [1, -1, -1],
+        'state': [0, 2, 3],
+        'wakeInUs': [1500000, -200000, 0],
+        'flags': [4, 0, 0],
+      },
+      'ledger': {'mig': 0.4, 'death': 0.7, 'ext': 0.0, 'last': 203.7},
+      'pop': {
+        'rng': [1, 2, 3, 4],
+        'arr': 203,
+        'dep': 1,
+        'dead': 2,
+        'adopt': 1,
+        'legacy': 1,
+      },
+    };
+    final city = CityStarterKit.found(
+      bodies: bodies().cast(),
+      config: const CityConfig(bodyId: 'earth', gridSize: 20),
+      id: 'holdtown',
+      agentTraffic: true,
+    );
+    city.agents.restore(jsonDecode(jsonEncode(block)));
+    expect(city.agents.enabled, isTrue);
+    expect(jsonEncode(city.agents.toJson()), jsonEncode(block),
+        reason: 'the block that was loaded is the block that is saved, down '
+            'to the byte, while the colony has not put it down yet');
+  });
+
   test('an old save with no cities key loads without complaint', () {
     const codec = GameStateCodec();
     final saved = jsonEncode(codec.encode(
