@@ -463,10 +463,14 @@ abstract final class SiteDressingMesher {
   }
 
   /// Where the sign stands and which way it faces, colony-local: beside the
-  /// primary throat where it crosses the lot line, on the side the building
-  /// is; null when the plan gives nowhere to stand it.
-  static (double, double, double, double)? signPose(SiteDraw d) {
-    final plan = d.plan;
+  /// primary FRONTAGE throat where it crosses the lot line, on the side the
+  /// building is; null when the plan gives nowhere to stand it.
+  static (double, double, double, double)? signPose(SiteDraw d) =>
+      signPoseOf(d.plan);
+
+  /// [signPose] read off the plan alone — it needs nothing else of the draw —
+  /// so an alley-backed plan's sign can be pinned without a capture.
+  static (double, double, double, double)? signPoseOf(SiteAccessPlan plan) {
     // The frame's v runs from the frontage into the lot, so the lot line is
     // y = 0 in frame metres.
     final ve = plan.frameVE, vn = plan.frameVN;
@@ -477,6 +481,14 @@ abstract final class SiteDressingMesher {
     final envX = (plan.envX0 + plan.envX1) / 2;
     var seg = -1;
     for (var j = 0; j < plan.joinCount && seg < 0; j++) {
+      // A REAR join is no sign's throat (§5.5, R8): its drive leaves the
+      // ALLEY behind the lot, tens of metres from the street the sign is
+      // read from, and the whole point of the alley is that the frontage
+      // stays an unbroken run of shopfronts. An F2a site (§3.5) therefore
+      // falls to the footpath rule below and signs its FRONTAGE, exactly as
+      // a kerbside plan does — never nothing, and never a board up the
+      // service alley behind the shops.
+      if (plan.joinSlot(j) == kJoinSlotAlley) continue;
       final t = plan.joinThroatSeg(j);
       if (t >= 0 && t < plan.segCount) seg = t;
     }

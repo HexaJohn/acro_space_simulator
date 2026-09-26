@@ -661,6 +661,69 @@ void main() {
       expect(at(on, CityTier.far), 0xbf7c5994, reason: on.keyTerms);
     });
 
+    test('a join road with NO PAVEMENT lays no dropped kerb: an alley draws '
+        'the same tile with its cut and without it (§3.8, R8)', () {
+      // §3.8's row: "kerb = carriageway edge; no kerb-cut mesh; throat still
+      // ≥ 7 m". An R8 alley join's cut is REAL on the wire — the agents' kerb
+      // masks and a lamp's shift-out read the same table (§5.5, A12) — but
+      // nothing on a road without a pavement draws it: the dropped kerb is
+      // laid by the sidewalk, and `walked` is `paved && cls.hasPavement &&
+      // !road.sealed`. The verge, the lamps, the props and the kerb cars are
+      // gated on the same class bit. The SAME cut on a street moves the tile,
+      // which is what says this case is not vacuous. That the entry EXISTS on
+      // the alley and nowhere else is `alley_car_park_test`'s half of this
+      // (over `KerbCuts.canonicalOf` on a real F2a plan); this half is what
+      // the entry then draws.
+      expect(RoadClass.alley.hasPavement, isFalse);
+      expect(RoadClass.street.hasPavement, isTrue);
+      // One canonical entry in the drawn frame: side 1, arc 100 (mid-road),
+      // an F2a cut half (a 6 m throat and the 1 m flare), σ +1 on the
+      // right-hand kerb of a two-way road, `KerbCuts.kindDropped`.
+      const cut = <double>[1, 100, 4, 1, 0];
+      RoadSnapshot withCuts(RoadSnapshot x) => RoadSnapshot(
+            colonyId: x.colonyId,
+            body: x.body,
+            points: x.points,
+            halfWidthM: x.halfWidthM,
+            roadClassIndex: x.roadClassIndex,
+            sealed: x.sealed,
+            kerbCuts: cut,
+          );
+      CityTileColumns only(RoadSnapshot x) => CityTileColumns.fromSnapshots(
+            buildings: const [],
+            roads: [x],
+            patches: CityPatchColumns.of(const []),
+            ends: const <CityTileEnd>[],
+            roadEnds: const [null, null],
+            transitEnds: const [],
+          );
+      const siteAccessOn = CityMeshKnobs(
+        styleId: 'masonry-street',
+        bucketM: 6,
+        variants: 4,
+        perBuildingLod: true,
+        blockRangeM: 300,
+        interiorRangeM: 50,
+        lodDebug: false,
+        onStreetParking: true,
+        sealedWorld: false,
+        maxParkedCars: 400,
+        siteAccess: true,
+      );
+      CityTileResult meshOf(RoadSnapshot x) => CityTileMesher.mesh(
+          request(CityTier.near, members: only(x), k: siteAccessOn),
+          CityBuildingLibraries());
+      final alley = road(RoadClass.alley, line(0, -100, 100, 11));
+      final street = road(RoadClass.street, line(0, -100, 100, 11));
+      // The alley IS drawn — a carriageway of its own — so "identical" below
+      // is two real tiles and not two empty ones.
+      expect(
+          meshOf(alley).groups.fold<int>(0, (n, g) => n + g.triangleCount),
+          greaterThan(0));
+      expect(digest(meshOf(withCuts(alley))), digest(meshOf(alley)));
+      expect(digest(meshOf(withCuts(street))), isNot(digest(meshOf(street))));
+    });
+
     test('through one scratch, job after job, every tier to the byte', () {
       // The ground and lot builders live in the scratch beside the road
       // builders, and the road pass fills one point list for every road:
