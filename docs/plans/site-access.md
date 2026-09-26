@@ -2490,6 +2490,27 @@ differ at the back, and each is now pinned:
   the cut bit filters nothing; a future plan that wants a routable kerbside join would need one, and that reader
   lives in `building_table.dart` / `city_agents.dart`, which the Agent Traffic session owns. Pinned end to end by
   `alley_car_park_test` over the colony's own book.
+- **Two known interactions on the traffic side of that seam**, raised by the Agent Traffic session when they read
+  the `none` role and recorded here so neither is rediscovered the hard way. Both are theirs to hold; neither is
+  live today.
+  1. **The access row budget overflows silently.** `kAccRows = 8` and `_planAccess` writes a row per join per
+     serving direction, then simply stops at eight. An F2a plan spends four (two for the alley, two for the
+     `none` frontage), so there are four spare — but a plan carrying several `none` joins beside real ones could
+     cross the cap, and the failure would read as *a site quietly losing an entrance*. R8 is the last road slice
+     and nothing is designed that wants a third or fourth join: slots 1 and 2 remain offered-and-unbuilt (§3.5).
+     Should any later slice move toward one, that session is to be told at DESIGN time, not at merge time.
+  2. **`joinAt` / `meetsAt` / `leftOfAt` do not gate on the role.** All three go through `_rowAt(handle, edge, t,
+     tol)`, which takes the nearest row on an edge whatever its bits. Harmless while every caller asks only about
+     a row a goal already chose, and `leftOfAt` is a geometry question the role has no bearing on — but an F2a
+     plan is the FIRST shape where a `none` row can be the nearest one, because its frontage row sits on a street
+     cars really drive. Pinned from their side against `alley_car_park_test`'s recipe rather than guarded here: a
+     speculative gate on this side would be a second opinion about their table.
+- **A trap in `alley_car_park_test`'s town fixture, for whoever writes the next test on it.** The §4.2 case parks
+  its block on a road at `e = 2000` that joins nothing, so every edge of it lies outside the lane graph's main
+  strongly-connected component. That is fine for a PLAN test — a plan is geometry and needs no route — but a
+  traffic test on the same recipe measures nothing, because no car can be sent there. The Agent Traffic session
+  hit exactly this and added a link road to reach it. The fixture is left as it is: adding the link road here
+  would move this slice's pinned plan expectations for a benefit only their side takes.
 - **Not changed, and deliberately.** The throat's own lift ease (§5.4 `throatLiftAt`) still ramps from the
   dropped-kerb lift to the walk's top over its first 3 m on an alley join, as it does for every throat off a road
   with no pavement — a `path` home drive does the same on `dev` today. So the drive crowns at 0.30 m over the drape
