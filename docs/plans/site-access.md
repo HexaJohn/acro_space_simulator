@@ -203,7 +203,8 @@ keeps its meaning. `LotAccess`, `PieceAccess` and `accessOf` (:322-330) keep the
 ```dart
 // Append-only enums: indices are hashed and persisted.
 enum SiteProgram     { none, kerbOnly, homeDriveway, carPark, yard, installation }
-enum SiteJoinRole    { both, inOnly, outOnly }
+enum SiteJoinRole    { both, inOnly, outOnly, none }                          // none (R8): no car uses this join at all
+                                                                              // `joinCanIn`/`joinCanOut` ask POSITIVELY, so `none` is neither
 enum SiteJoinKind    { kerbside, cut }
 enum SiteSegmentKind { driveway, accessRoad, aisle, apron }                   // apron: home pad, truck yard
 enum SiteLaneMode    { twoWay, oneWayForward, oneWayBackward, sharedSingle }  // sharedSingle: one lane, alternating
@@ -345,12 +346,24 @@ it. Limbo plans (§7.6) and cars mid-manoeuvre hold the old chunk and keep readi
   `joinOfRef(joinRef)`, and `joinRef == joinRefOf(graphLot, joinSlot)`.
 - **V4 Roles.** A network plan has ≥ 1 in-capable and ≥ 1 out-capable cut join. Cuts on one edge do not
   overlap and are ≥ 6 m apart, so `(edge, T)` identifies a join. A network plan may also carry a KERBSIDE
-  join: only cuts count toward the two roles. (R8, widened to the spec: the code rejected any kerbside join
+  join, and then that join's role is `none` and every cut's role is not: only cuts count toward the two roles,
+  and **only a cut may say "drive here"**. (R8, widened to the spec: the code rejected any kerbside join
   on a network plan, which R8's alley car park needs — its slot 0 stays the uncut frontage. A census over the
   sprawl audit town's 30,559 planned sites proved the widening moves no existing plan: same program mix, same
   join histogram, every row byte-identical. A kerbside join carries no kerb node or throat, so V5 passes it
   over; it is no lane, so V7 and V13 do; and a plan of kerbside joins ALONE is still rejected, having neither
-  an in-capable nor an out-capable cut — `site_plan_validator_test` pins both sides.)
+  an in-capable nor an out-capable cut — `site_plan_validator_test` pins every side.)
+  - **Why the role half is an invariant and not a nicety (R8 repair):** traffic reads a join's role and nothing
+    else to decide whether a car may turn in there. `AccessPoints.ofPlanJoin` copies `joinCanIn`/`joinCanOut`
+    into the access point, `BuildingTable._addRow` turns them into `kAccIn`/`kAccOut`, and `addGoals` /
+    `addOrigins` / `CityAgents._joinOfArrival` / `SiteTable._orders` all gate on those. A kerbside join left at
+    `both` is therefore a driveway to every one of them: the street frontage is offered as a route goal, a
+    street beats a 20 km/h alley on cost so it usually WINS the goal, and the car that took it arrives at a join
+    with no in-lane behind it, gives up at the gate and kerb-parks — the car park never fills. `kAccCut` is
+    written but has **no reader in `lib/`** (only `test/traffic/access_join_test.dart`), so the cut bit filters
+    nothing; the role is the whole mechanism. `alley_car_park_test` pins the access rows of a real F2a site
+    from the colony's own book: the alley's two rows carry in, out and cut, the frontage's two carry none of
+    them.
 - **V5 Throat (ask 3).** Each cut join's throat is the segment leaving its kerb node:
   - it is straight (every via point within 0.1 m of the kerb-node → far-node chord), ≥ 7 m long, within 10° of
     the road normal, and carries no stall or bay;
@@ -685,6 +698,11 @@ home, and demotes a lot that fails to `kerbOnly` (C-22).
   that reach, not of the whole polygon, because a lot's side line ends ON its rear edge and would tie with it.
   12 m is a fraction of the shallowest block a generated town cuts (`blockDepthM` 104), so the alley found is the
   one behind THIS lot. On the 12-mile sprawl audit town (18 alley roads) 152 of 54,257 lots have a candidate.
+  **Who is refused it:** a lot whose slot 0 is no cut (there is nothing to be a second offer to), and a lot that
+  FRONTS an alley — read off the road's CLASS, not off a flag, since `kJoinAlley` is set by the rear placement
+  itself and a packed slot 0's flags can never carry it (R8 repair). An alley normally plats no lots, but a road
+  may be told to front them (`RoadSpline.frontsLots`) and an alley is an eligible join road (`SiteFrame`), so the
+  shape is real; one alley behind another is not a back-of-house, because there is no street wall to protect.
   **Who takes it:** only §3.5's F2a car park (§3.3), and at most ONE cut join a plan — slot 3 carries both
   directions, so nothing needs a second. **What it draws:** its cut rides the wire and the kerb masks like any
   other (§5.2, §5.5 A12), but an alley has no pavement, so no dropped kerb is meshed on it (§3.8) and the site's
@@ -1028,7 +1046,8 @@ Everything is axis-aligned in the frame. Bays are 2.6 × 5.2 m, two-way aisles 6
     parameter and not a second block: the throat leaves the alley kerb along −`v`, meets the module nearest the
     REAR (F2's module 0, not its front-most aisle), and the rows between that aisle and the alley take the
     throat exclusion. The envelope is in front, full width — no side drive beside it. **The plan keeps slot 0
-    as a KERBSIDE join and slot 3 as the only cut** (V4 as widened above), which is the point: the bins, the
+    as a KERBSIDE join whose role is `none` and slot 3 as the only cut** (V4 as widened above; the role is what
+    keeps the frontage out of the access table, §5.5), which is the point: the bins, the
     loading and the back-of-house parking come off the alley so the street frontage stays an unbroken run of
     shopfronts (`parcel.dart`'s `RoadClass.alley`). Offered wherever slot 3 is (§3.2), scored against F1–F3 on
     §3.5's own formula with F2's street-wall bias and nothing added.
@@ -1790,7 +1809,10 @@ deviations, each local:
   violation list: §2.4's V4 was widened at R8 to say what the spec says (a network plan may carry a kerbside join),
   and a census over the sprawl audit town's 30,559 planned sites showed the widening moved nothing at all — same
   program mix, same join histogram, 0 plans whose `rev` changed, every row byte-identical — precisely because no
-  code path anywhere degrades a plan for failing a V.
+  code path anywhere degrades a plan for failing a V. The same is true of V4's role half (a network plan's kerbside
+  join carries role `none`): it is a guard rail against a future generator, not a runtime filter — what keeps the
+  frontage out of the access table in a release build is the generator emitting the role, and `alley_car_park_test`
+  pins the rows it produces rather than the assertion.
 - The refusal half of `site_easement_test` is `site_easement_refusal_test.dart`, so the two tracks' files do not
   collide.
 
@@ -2458,6 +2480,16 @@ differ at the back, and each is now pinned:
   the plat's own block that is 7 m of opening at the back (the 6 m throat and half a metre either side) and 2.5 m at
   the front for the footpath alone — so over 20 m of the 24 m frontage stays fenced, which is the slice's whole
   thesis stated in the mesh (`site_detail_dressing_test`).
+- **The access table takes only the cut** (R8 repair, and the one consumer that is not a renderer). The plan's
+  kerbside frontage carries role `none` (§2.4 V4), so `AccessPoints.ofPlanJoin` reports it neither in- nor
+  out-capable and `BuildingTable` writes its two rows with neither `kAccIn` nor `kAccOut`: `addGoals` and
+  `addOrigins` pass them over, `CityAgents._joinOfArrival` cannot match them, and every car that comes to an F2a
+  shop comes down the alley. Left at `both` it would be a driveway to all of them — and, since a street beats a
+  20 km/h alley on cost, usually the CHOSEN one, at which point the car arrives where there is no in-lane, gives up
+  at the gate and kerb-parks with the lot empty. `kAccCut` is set on the row but **has no reader in `lib/`**, so
+  the cut bit filters nothing; a future plan that wants a routable kerbside join would need one, and that reader
+  lives in `building_table.dart` / `city_agents.dart`, which the Agent Traffic session owns. Pinned end to end by
+  `alley_car_park_test` over the colony's own book.
 - **Not changed, and deliberately.** The throat's own lift ease (§5.4 `throatLiftAt`) still ramps from the
   dropped-kerb lift to the walk's top over its first 3 m on an alley join, as it does for every throat off a road
   with no pavement — a `path` home drive does the same on `dev` today. So the drive crowns at 0.30 m over the drape
@@ -3359,6 +3391,17 @@ takes no golden value of its own: it compares two tiles, so there is nothing the
 Appendix A therefore gains no row from this slice. The `0x3c455708` zoo pin that R8's OTHER half took is unaffected:
 its street is sealed and carries no alley.
 
+**The repair round moved no pin either, and the census was re-run to say so.** Giving the F2a frontage join role
+`none` (§2.4 V4) changes only the 12 alley plans of the sprawl audit town — every other plan's joins are cuts at
+role `both`, exactly as they were, and `SiteJoinRole` was APPENDED to, so no persisted index moved. The audit map is
+identical demotion for demotion (`site_program_sprawl_audit_test`), `lot_access_is_slot_zero_test` is untouched, and
+no site changed program for any reason. The one bound term the repair examined (`m ≥ 2`'s cross-aisle span) proved
+to have no observable behaviour at all: `_Draft.preCheck` and `_Draft.finish` record tighter bounds over the same
+candidate and `candBound` keeps the smallest, so the pre-allocation number never reaches `scoreBound`, and the
+pruned verdicts and winner come out identical with the term charged either way on six geometries — three of them
+won by a multi-module F2a candidate. It is admissible both ways; it stays as written because it is the true bound,
+and the test beside it says plainly that it is unpinned and why.
+
 **Never move:**
 - road tool `0x5e473abb`, `0x09731332`, `0x07d559a4` — **broken at R7, by this row's own logic** (Appendix A): all
   three are `road_tool_mesh_test`'s "the mesher fixture, its junctions aside" tile, which carries eleven BUILDINGS
@@ -3415,7 +3458,9 @@ its street is sealed and carries no alley.
     F3 7.8 m rejected); a `kJoinMinRoomM` slot (room 2.5 → a 3.0 m `sharedSingle` throat and ≤ 8 stalls, else null);
     SAT non-overlap; triangle/sliver/L; F2 bias;
   - `rear_alley_slot_test` (R8): the rear-edge rule, slot 3 offered on request and kept, its handle, the cache
-    every copy of a graph shares, and the re-plan an alley drawn behind a built lot triggers;
+    every copy of a graph shares, the refusal of a lot that FRONTS an alley (two alleys, the first told to front
+    lots: the candidate is there and the class is what refuses it), and the re-plan an alley drawn behind a built
+    lot triggers;
   - `alley_car_park_test` (R8): a downtown block as the generator cuts one (two streets 104 m apart, an alley down
     the midline, lots 24 × 41.4 m with their back edge 0.6 m off the alley's carriageway). F2a wins with two joins
     — slot 0 kerbside and uncut, slot 3 the only cut — a 9.1 m throat off the alley, NO kerb cut on the street
@@ -3423,7 +3468,13 @@ its street is sealed and carries no alley.
     the 0.9 m rear corridor, no stall in the throat exclusion, and the winner pinned as F1's exact mirror (10
     stalls, the same 470.4 m² envelope, 2.4 m less drive, plus F2's bias: 100.258 against 94.058). Then the other
     half: with the alley absent the plat is identical, every lot that does not take slot 3 plans byte for byte the
-    same, and the lot itself is §3.5's worked example untouched (F1 double, 90.11, no F2a candidate offered);
+    same, and the lot itself is §3.5's worked example untouched (F1 double, 90.11, no F2a candidate offered).
+    Added in the repair round: the frontage join's role is `none` and it is neither in- nor out-capable; the ACCESS
+    ROWS of a real F2a site, read from the colony's own book through `BuildingTable` (the alley's two rows carry
+    in, out and cut, the frontage's two carry none of them — the case fails if the role goes back to `both`); and,
+    on a deeper 40 × 54.4 m lot off an alley, the `m ≥ 2` bound arm, which the plat's own downtown lot never
+    reaches (every multi-module candidate there is refused for envelope room before a bound is recorded) — no
+    valid candidate beats its bound and an alley entry is held to a bound exactly as tight as a street entry's;
   - `installation_access_test`: the four starter sites (56 m throat `K→F` with vias, `Y` at y = 15, 4 bays,
     `G = (x_G, Df)` on the fence line, car park x-range outside `x_G ± 15`, ≥ 12 stalls); **`D = 130`** (no
     `ArgumentError`, `Df = 40`, bays dropped, `kPlanAdmitsTrucks` clear, the plan validates); a spine near a lot side
@@ -3822,7 +3873,7 @@ class DepthProfile { double depthAt(double x); bool containsRect(Rect r); double
 | **R4 as built** | road | tracks A and B merged; `CityNodes.siteAccess` **on by default**; the perf knob `siteAccess` added, and `ext.acro.citygame` takes `knob=<name>:<value>`, so a live A/B needs no rebuild; `installation_parking_test` gained its plan case (§8.2) | the §8.4 measurements above; the mid vertex gate +0.96 %; the near-tile deviation recorded in §8.4; the off-parcel throat heights recorded in §6.4 (an R5 dependency, with the probe R5 inherits); the whole suite green with the knob on, with only the one ON pin of `city_tile_mesher_test` moved at the merge (Appendix A). **One criterion is HELD, not ticked**: "the starter kit's four sites visibly connected" is met on the plan, in the mesh and on screen for the paving, gates, car parks, driveways and dropped kerbs, but the four off-parcel throats stand off an unshaped easement until R5 cuts them (§6.4). The slice is accepted on everything else; that line is R5's to tick. **R5 took it** (the R5 as-built row below) |
 | **R8 Polish** (last road slice) | road | **Two features, each its own commit.** The sealed-world tube crossing, accepted as a SKYWAY (§10.2 Q8, Q13): the pedestrian tube lifts over a driveway rather than the drive ducking under it. Alley rear joins (slot 3, F2a, §3.2), built without an audit gate (§10.2 Q13). **The other four reservations of this row are settled, not scheduled.** Second gates on a second road: CLOSED — nothing the game generates can put a gate on a lot that has a second road, the one hand route that can is written out in §6.1 item 4, and the gate is laid off slot 0 either way; what is left of it is second joins (slots 1–2, §3.5's "Not built"), where the gate stays singular. One-way loops with angled stalls: CLOSED, the stated benefit is negative in this repo's own dimensions and the arithmetic is recorded in §3.5 so it is not re-opened from intuition. Podium garage portals for `mega`: CLOSED — a mega's parking demand is declared already met inside its own podium, so the plan is owed no surface stalls; the governing rule is in §3.3. Public lots (`kPlanPublic`): DEFERRED with its design written down in §3.3 and §7.5; no road-side code lands until the traffic search is scheduled, and the T4b sequencing is a REQUEST to the Agent Traffic session (not acked), with `agent-traffic.md`:1368 raised to them as a cross-session dependency | the tube crossing and the alley joins each per feature; the four settled items need no acceptance, only the reasons above standing |
 | **R8 sealed-world tube crossings, as built** | road | `PedestrianTube` gains `cuts`/`arcOffset`, `crossingsOf`, `liftAt`, the box beam and the legs; `RoadMesher._withStations` → `withStations`; the call site in `city_tile_mesher.dart` passes the `cuts`/`arcOffset` already in scope | §10.2 Q8 option (a): 2.45 m of rise, 1:12 approaches (29.4 m), holds within two ramps merged, so a terrace is one raised walkway on legs and a lone drive is a **68.8 m** bridge (2·29.4 + 2·(4.0 + 1.0)). The fused form is a consequence of the rise and the grade, not a separate user decision — see §10.2 Q8, where option (a)'s word "short" is marked superseded. **No pin moved and no Appendix A row** — the only cut-carrying fixture is not sealed and the zoo's sealed street carries no cut, which is why this slice adds a fixture that carries both (`road_tool_mesh_test`, pin `0x3c455708`). New tests in §8.3 R8; the whole suite green. **Screenshots: NOT shot in the app.** The workspace rule forbids starting `acro_space_simulator.exe`, which is what any windows run of this repo launches, and the city renders through flutter_scene/Impeller, which `flutter test` has no GPU for. The pair attached to the review is an offscreen render of the REAL tile mesh (`CityTileMeshJob.runAll` over a sealed street, with and without the cuts) through a plain perspective camera — the geometry is the shipped geometry, the shading is not the shipped shading |
-| **R8 alley rear joins, as built** | road | Three commits on one branch. **(1) The offer:** `RoadGraph` gains the rear-edge rule (the polygon's deepest edge ≥ 6 m whose outward normal is within 45° of the frontage's inward one), `rearAlleyJoinOf(lot)` (slot 3, on request and kept, like slot 2 and for R-B1's reason), `hasRearAlley(lot)` (the candidate question alone, one cached byte a lot, hashed into every site's `inSig`), and the handle `kJoinRefAlleyBase − lot` at the bottom of the negative space the side-street form fills from the top; `SiteContext.alleySlot` / `hasAlleyCandidate`. **(2) The taker:** §2.4's V4 widened to the spec (a network plan may carry a kerbside join; only cuts count toward the two roles), and F2a in `car_park_packer.dart` — one `_Site` per ENTRY, every y-signed rule read through one `dirY`, the block moved forward off the rear edge where a single-loaded module 0 would give a short throat, `CarParkFamily.rearAlley` for the enumeration, the tie-break and the audit; `site_paving_check.dart` gains the rear corridor, and both it and the pave's on-parcel test read the SHALLOWEST profile column under them, because a rear edge is a chord. **(3) The drawing:** `SiteDressingMesher.signPoseOf` (the pose off the plan alone) passes slot 3 over, so an F2a site signs its FRONTAGE; §3.8's pavement rule pinned in `city_tile_mesher_test`; §2.2 / §3.2 / §3.3 / §3.5 / §3.8 / §3.9 / §5.5 / §8.2 / §8.3 / §9 and §2.4's LATENT note written | **Slot 0 still means the frontage** — the invariant another session's stale-plan fallback rests on. Every plan's join 0 is slot 0 and, on an F2a plan, KERBSIDE: the alley is a second offer and never a move, so a stale or absent plan degrades to kerbside frontage and not to a driveway that no longer exists (`alley_car_park_test` pins slot 0's kind, its zero cut half, its absent kerb node and its absent throat). Exactly one cut join a plan: the 2-cut surface is not opened. The sprawl audit town, re-run per site: 127 of 30,561 built sites have an alley candidate (59 car parks, 58 `kerbOnly`, 10 homes), 30 get a valid F2a and **12 take it**, all 12 from F1 FRONT; **no site changed program**, the §8.3 audit map is identical demotion for demotion, and the family mix moves only by those 12. **No pin moved and no Appendix A row**, checked three ways in §8.2 (the V4 census: 0 plans whose `rev` changed and every row byte-identical; the sign fix is a skip on one slot number; an alley's cut draws no mesh, so no tile digest can move). New tests in §8.3 (`rear_alley_slot_test`, `alley_car_park_test`, three `site_detail_dressing_test` cases and the `city_tile_mesher_test` pavement pin); the whole suite green. **No screenshots, deliberately:** the workspace rule forbids starting `acro_space_simulator.exe` from this worktree, and `flutter test` has no GPU for Impeller — so the alternative is another throwaway offscreen harness, which is what the R8 review rightly objected to. The evidence is committed and re-runnable instead: the fixture block is the plat's own (24 × 41.4 m lots, their back edge 0.6 m off the alley's carriageway), F2a is pinned as F1's exact mirror (10 stalls, the same 470.4 m² envelope, 2.4 m less drive, 100.258 against 94.058), the street carries no kerb cut and the alley carries one, and the drawing is pinned where it differs — the sign at frame `(14.25, 1.00)` rather than `(15.00, 43.00)` out in the alley, and 20 m of a 24 m frontage still fenced shopfront |
+| **R8 alley rear joins, as built** | road | Three commits on one branch. **(1) The offer:** `RoadGraph` gains the rear-edge rule (the polygon's deepest edge ≥ 6 m whose outward normal is within 45° of the frontage's inward one), `rearAlleyJoinOf(lot)` (slot 3, on request and kept, like slot 2 and for R-B1's reason), `hasRearAlley(lot)` (the candidate question alone, one cached byte a lot, hashed into every site's `inSig`), and the handle `kJoinRefAlleyBase − lot` at the bottom of the negative space the side-street form fills from the top; `SiteContext.alleySlot` / `hasAlleyCandidate`. **(2) The taker:** §2.4's V4 widened to the spec (a network plan may carry a kerbside join; only cuts count toward the two roles, the kerbside join's role is `none` and a cut's is not), and F2a in `car_park_packer.dart` — one `_Site` per ENTRY, every y-signed rule read through one `dirY`, the block moved forward off the rear edge where a single-loaded module 0 would give a short throat, `CarParkFamily.rearAlley` for the enumeration, the tie-break and the audit; `site_paving_check.dart` gains the rear corridor, and both it and the pave's on-parcel test read the SHALLOWEST profile column under them, because a rear edge is a chord. **(3) The drawing:** `SiteDressingMesher.signPoseOf` (the pose off the plan alone) passes slot 3 over, so an F2a site signs its FRONTAGE; §3.8's pavement rule pinned in `city_tile_mesher_test`; §2.2 / §3.2 / §3.3 / §3.5 / §3.8 / §3.9 / §5.5 / §8.2 / §8.3 / §9 and §2.4's LATENT note written | **Slot 0 still means the frontage** — the invariant another session's stale-plan fallback rests on. Every plan's join 0 is slot 0 and, on an F2a plan, KERBSIDE: the alley is a second offer and never a move, so a stale or absent plan degrades to kerbside frontage and not to a driveway that no longer exists (`alley_car_park_test` pins slot 0's kind, its zero cut half, its absent kerb node and its absent throat). Exactly one cut join a plan: the 2-cut surface is not opened. The sprawl audit town, re-run per site: 127 of 30,561 built sites have an alley candidate (59 car parks, 58 `kerbOnly`, 10 homes), 30 get a valid F2a and **12 take it**, all 12 from F1 FRONT; **no site changed program**, the §8.3 audit map is identical demotion for demotion, and the family mix moves only by those 12. **No pin moved and no Appendix A row**, checked three ways in §8.2 (the V4 census: 0 plans whose `rev` changed and every row byte-identical; the sign fix is a skip on one slot number; an alley's cut draws no mesh, so no tile digest can move). New tests in §8.3 (`rear_alley_slot_test`, `alley_car_park_test`, three `site_detail_dressing_test` cases and the `city_tile_mesher_test` pavement pin); the whole suite green. **(4) The repair round (one commit):** `SiteJoinRole.none` — appended, so no persisted index moves — for the F2a plan's kerbside frontage, because traffic decides "may a car turn in here" from the role and NOTHING else (`kAccCut` is written with no reader in `lib/`), so a frontage left at `both` would be offered as a route goal, would usually win it against a 20 km/h alley, and would strand the car at a join with no in-lane while the car park stood empty (§5.5's access-table bullet; pinned over the colony's own book in `alley_car_park_test`). V4 now also says a network plan's kerbside join carries no role and its cuts do carry one, so the shape cannot come back by accident. The dead `kJoinAlley` guard in `rearAlleySlot` is replaced by the road's CLASS, which is reachable (a `frontsLots` alley) and now pinned. Coverage: the V4 accept fixture is rebuilt on a real slot-3 handle, the `m ≥ 2` bound arm is exercised on a deeper alley lot, and the mesher pavement case is labelled the characterization pin it is. **No screenshots, deliberately:** the workspace rule forbids starting `acro_space_simulator.exe` from this worktree, and `flutter test` has no GPU for Impeller — so the alternative is another throwaway offscreen harness, which is what the R8 review rightly objected to. The evidence is committed and re-runnable instead: the fixture block is the plat's own (24 × 41.4 m lots, their back edge 0.6 m off the alley's carriageway), F2a is pinned as F1's exact mirror (10 stalls, the same 470.4 m² envelope, 2.4 m less drive, 100.258 against 94.058), the street carries no kerb cut and the alley carries one, and the drawing is pinned where it differs — the sign at frame `(14.25, 1.00)` rather than `(15.00, 43.00)` out in the alley, and 20 m of a 24 m frontage still fenced shopfront |
 | **R8 repair** | road | `PedestrianTube.legArcsOf` and `_fill` (new), the leg placement in `emit` (station-driven → arc-driven), `legRunM`; two new `kerb_cut_test` cases and a post count in the `road_tool_mesh_test` zoo case; §5.5 / §8.2 / §8.3 / §9 / §10.2 prose | the R8 review's six findings. **The blocking one was real and is fixed:** legs landed only on a vertex the ROAD TOOL had drawn and were dropped when that vertex fell in a drive, so the doc's own terrace at the fixture's own ten-metre stations stood on four pairs of posts with 38 m of level deck on nothing, and a lone crossing on a road drawn at 25 m stations got no post at all. `legArcsOf` now computes the post arcs from the STRUCTURE — a pair at each edge of every drive's shut stretch, the clear runs between them divided evenly into steps of at most `legSpacingM` — and `emit` inserts them as stations of its own, so the same twelve pairs carry the terrace at 1, 2, 10, 25 and 100 m stations alike and the longest unheld stretch of deck is one drive's opening and its clearance (12.0 m). **The zoo pin moved with them, `0xa96767cb` → `0x3c455708`** — a pin one slice old that has never been on `dev`, so still a first pin and no Appendix A row; every other digest is unmoved. Five prose findings, all real, all fixed: the kerb-cut spacing "12–17 m" contradicted this document's own "17–24 m house lot" (§3 C-1) and the code's 24 m / 30 m frontage defaults, in three places; "about 68 m end to end" is **68.8 m**, now shown as 2·29.4 + 2·(4.0 + 1.0); "the deck is at least 0.8 m up" is a lift over the CURB LINE, so a deck top 1.0 m over the drape; "never within 2 m of a drive" is 2 m at the post's centre and **1.84 m** at its corner, and §8.3's 1.5 m now agrees; and the cost line's absolute vertex totals could not be re-derived from the fixture they named — they are replaced by the tube's own 328 → 1606 v / 560 → 1680 t, which `kerb_cut_test` now asserts, plus the tile's true 5294 → 6068 v / 3132 → 4000 t. **A wrong claim withdrawn, not restated:** §10.2 Q8 said "the user has accepted this shape explicitly" with no exchange behind it; §10.2 is the ledger later slices build on, so the sentence is gone and the divergence is recorded as what it is — a consequence of the rise and the grade, with option (a)'s "short" marked superseded. **Drawn geometry DID move** — the posts, which is the whole repair: twelve pairs down the terrace where there were four, at different arcs, and eight under the lone bridge where a coarse polyline gave none. Nothing else in the tile moved. **No picture is attached, and that is deliberate.** The workspace rule forbids starting `acro_space_simulator.exe` and `flutter test` has no GPU for Impeller, so the only picture available is another throwaway offscreen harness — which is precisely what the R8 review could not re-run and rightly objected to. The evidence that replaces it is committed and re-runnable: leg arcs measured at five station densities in `kerb_cut_test`, and the tile's own post count in `road_tool_mesh_test`. A screenshot of a 0.32 m post under a 2.45 m deck would settle neither |
 
 ---

@@ -673,9 +673,25 @@ class _Check {
     // node or throat, so V5 passes it over; it is no lane, so V7 and V13 do
     // too; and it contributes to neither role below, so a plan of kerbside
     // joins alone is still rejected (no in-capable and no out-capable cut).
+    //
+    // A kerbside join in a network plan must also carry NO vehicle role. Cars
+    // reach a network plan through its cuts; a kerbside join with a role is
+    // advertised to the access table as a driveway (§5.5), wins the goal
+    // whenever its road is the cheaper one, and strands the car at a join with
+    // no lane behind it. Nothing but a cut may say "drive here".
     var canIn = false, canOut = false;
     for (var j = 0; j < p.joinCount; j++) {
-      if (!p.joinIsCut(j)) continue;
+      if (!p.joinIsCut(j)) {
+        if (p.joinRole(j) != SiteJoinRole.none) {
+          bad(SiteInvariant.v4Roles,
+              'kerbside join $j of a network plan has role '
+              '${p.joinRole(j).name}, not none');
+        }
+        continue;
+      }
+      if (p.joinRole(j) == SiteJoinRole.none) {
+        bad(SiteInvariant.v4Roles, 'cut join $j has no role');
+      }
       canIn |= p.joinCanIn(j);
       canOut |= p.joinCanOut(j);
     }

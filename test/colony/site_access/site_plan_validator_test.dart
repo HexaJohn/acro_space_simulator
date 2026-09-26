@@ -5,6 +5,8 @@
 
 import 'dart:typed_data';
 
+import 'package:acro_space_simulator/domain/colony/city/city_layout.dart';
+import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/colony/city/road_graph.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_access_constants.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_access_plan.dart';
@@ -160,27 +162,78 @@ void main() {
           isEmpty);
     });
 
-    test('ACCEPTED: a kerbside join beside the cut (R8\'s alley plan shape)',
-        () {
-      // §2.4 asks a network plan for ≥ 1 in-capable and ≥ 1 out-capable CUT
-      // join, not that every join be a cut. An alley car park keeps slot 0 as
-      // the frontage, kerbside and uncut, and drives through the cut on slot 3
-      // (`alley_car_park_test` pins the real plan); this is that shape with none
-      // of the geometry — a second join on the same slot, kerbside, which V3
-      // accepts because its values are still slot 0's.
-      final d = draft(SyntheticTemplate.strip);
-      final j0 = d.joins[0];
+    // The strip car park on a lot with an alley behind it, plus a KERBSIDE join
+    // on its real rear-alley slot 3 with role [role]: §2.4's widening, on the
+    // generator's own join handle.
+    //
+    // The second join is `joinRefOf(lot, kJoinSlotAlley)`, its piece, arc, side
+    // and dirs copied from the slot the graph placed, so V3 and V2 have
+    // something real to check and the case would fail if slot 3 were refused
+    // anywhere. The ORIENTATION the generator emits is the mirror of this one
+    // (the kerbside join at slot 0, the cut at slot 3); that shape is pinned on
+    // a real plan, with its geometry, by `alley_car_park_test`. What is isolated
+    // here is V4's rule alone.
+    List<SiteViolation> alleyPlusKerbside(SiteJoinRole role) {
+      final (ga, lotId) = _alleyBlock();
+      final lot = ga.lotNoOf(lotId)!;
+      final s3 = ga.rearAlleyJoinOf(lot)!;
+      final d = SyntheticSites.draftAt(ga, lotId, SyntheticTemplate.strip);
       d.joins.add(DraftJoin(
-        slot: 0,
-        ref: j0.ref,
-        piece: j0.piece,
-        roadS: j0.roadS,
-        right: j0.right,
-        dirs: j0.dirs,
-        roadNo: j0.roadNo,
+        slot: kJoinSlotAlley,
+        ref: ga.joinRefOf(lot, kJoinSlotAlley),
+        piece: s3.piece,
+        roadS: s3.s,
+        right: s3.right,
+        dirs: s3.dirs,
+        roadNo: ga.pieceRoad[s3.piece],
+        role: role,
         kind: SiteJoinKind.kerbside,
       ));
-      accepts(d);
+      expect(d.joins[1].ref, kJoinRefAlleyBase - lot);
+      return SitePlanValidator.validate(
+          SyntheticSites.chunkOf(ga, [d], validate: false).plan(0),
+          graph: ga,
+          laneSpans: SyntheticSites.laneSpansOf(ga));
+    }
+
+    test('ACCEPTED: a kerbside join on the REAR ALLEY SLOT beside the cut '
+        '(R8\'s widening)', () {
+      // §2.4 asks a network plan for ≥ 1 in-capable and ≥ 1 out-capable CUT
+      // join, not that every join be a cut. Its role is `none`: nothing but a
+      // cut may say "drive here".
+      final vs = alleyPlusKerbside(SiteJoinRole.none);
+      expect(vs, isEmpty, reason: vs.join('\n'));
+    });
+
+    test('REJECTED: the same kerbside join claiming a vehicle role', () {
+      // The other half of the widening. A kerbside join with a role is offered
+      // to the access table as a driveway (§5.5): it wins the goal whenever its
+      // road is the cheaper one, and the car that took it arrives at a join
+      // with no lane behind it. Only a cut may carry a role.
+      for (final role in [
+        SiteJoinRole.both,
+        SiteJoinRole.inOnly,
+        SiteJoinRole.outOnly
+      ]) {
+        expect([
+          for (final v in alleyPlusKerbside(role))
+            if (v.invariant == SiteInvariant.v4Roles) v.detail
+        ], [
+          'kerbside join 1 of a network plan has role ${role.name}, not none'
+        ]);
+      }
+    });
+
+    test('REJECTED: a cut join with no role at all', () {
+      // The converse: a cut exists to be driven. A roleless cut contributes to
+      // neither direction, so it is a kerb cut nothing uses.
+      final d = draft(SyntheticTemplate.strip);
+      d.joins[0].role = SiteJoinRole.none;
+      expect([
+        for (final v in violations(d))
+          if (v.invariant == SiteInvariant.v4Roles) v.detail
+      ], ['cut join 0 has no role', 'no in-capable cut join',
+        'no out-capable cut join']);
     });
 
     test('a network plan of kerbside joins alone is still rejected', () {
@@ -189,6 +242,7 @@ void main() {
       final d = draft(SyntheticTemplate.strip);
       d.joins[0]
         ..kind = SiteJoinKind.kerbside
+        ..role = SiteJoinRole.none
         ..cutHalfM = 0;
       final vs = violations(d);
       expect([
@@ -522,4 +576,23 @@ void main() {
     d.fenceGaps = [(0, double.nan, 0.4)];
     rejects(d, SiteInvariant.geometry);
   });
+}
+
+/// A downtown block as the generator cuts one (`blockDepthM` 104, `alleys`
+/// true, `lotDepthM` 46: an alley IS the midline, so a lot runs all the way to
+/// it), and the id of a lot that backs onto the alley — one whose slot 3 the
+/// graph will place.
+(RoadGraph, String) _alleyBlock() {
+  final layout = CityLayout(settings: ParcelSettings(frontageM: 24, depthM: 46))
+    ..commitRoad(controls: const [Vec2(0, 0), Vec2(400, 0)])
+    ..commitRoad(controls: const [Vec2(0, 104), Vec2(400, 104)])
+    ..commitRoad(
+        controls: const [Vec2(0, 52), Vec2(400, 52)],
+        roadClass: RoadClass.alley);
+  final g = RoadGraph.of(layout);
+  for (final p in layout.autoParcels) {
+    final lot = g.lotNoOf(p.id);
+    if (lot != null && g.rearAlleyJoinOf(lot) != null) return (g, p.id);
+  }
+  throw StateError('no lot of the block backs onto its alley');
 }

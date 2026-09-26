@@ -1311,8 +1311,16 @@ class _Draft {
     // Join 0 is slot 0 (V3). On an alley plan it stays the FRONTAGE and stays
     // KERBSIDE — no cut, so the street wall is an unbroken run of shopfronts —
     // and join 1 is the cut on slot 3, carrying in and out (§2.4 V4, §3.2).
+    //
+    // Its role is NONE, and that is not a detail: the frontage is the sign, the
+    // pavement point and the stale-plan fallback, and no car uses it. A role of
+    // `both` would put it in the access table as a routable driveway (§5.5) —
+    // the street beats a 20 km/h alley on cost, so it would usually WIN the
+    // goal — and the car that drove there would arrive at a join with no lane
+    // behind it and give up at the gate, leaving the car park empty.
     final j0 = ctx.addJoin(b, 0,
         kind: alley ? SiteJoinKind.kerbside : SiteJoinKind.cut,
+        role: alley ? SiteJoinRole.none : SiteJoinRole.both,
         cutHalfM: alley ? 0 : site.throatW / 2 + kCutFlareM);
     final j = alley
         ? ctx.addJoin(b, kJoinSlotAlley,

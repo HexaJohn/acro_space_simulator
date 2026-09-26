@@ -106,6 +106,40 @@ void main() {
       }
     });
 
+    test('a lot that FRONTS an alley is offered no slot 3, even with a second '
+        'alley behind it', () {
+      // An alley normally plats no lots, but a road may be told to front them
+      // (`RoadSpline.frontsLots`), and an alley IS an eligible join road
+      // (`SiteFrame`) — so a lot whose own slot 0 sits on an alley is a real
+      // shape. One alley behind another is not a back-of-house: the rear join
+      // exists so a STREET frontage can stay an unbroken run of shopfronts, and
+      // a lot fronting an alley has no such frontage to protect.
+      final layout = CityLayout()
+        ..commitRoad(
+            controls: const [Vec2(0, 0), Vec2(400, 0)],
+            roadClass: RoadClass.alley,
+            frontsLots: true)
+        ..commitRoad(
+            controls: const [Vec2(0, 45), Vec2(400, 45)],
+            roadClass: RoadClass.alley);
+      final g = RoadGraph.of(layout);
+      var fronting = 0;
+      for (final p in layout.autoParcels) {
+        if (p.centroid.n <= 0) continue; // the row between the two alleys
+        final i = g.lotNoOf(p.id)!;
+        expect(g.roads[g.roadNoOf(p.roadId!)!].roadClass, RoadClass.alley,
+            reason: p.id);
+        // The candidate is there — the guard is what refuses it, not the search.
+        expect(g.hasRearAlley(i), isTrue, reason: p.id);
+        expect(g.joinFlags[g.lotJoinStart[i]] & kJoinCut, kJoinCut,
+            reason: '${p.id}: slot 0 is a cut, so only the class refuses it');
+        expect(g.rearAlleyJoinOf(i), isNull, reason: p.id);
+        expect(g.joinRefOf(i, kJoinSlotAlley), kJoinRefNone, reason: p.id);
+        fronting++;
+      }
+      expect(fronting, greaterThan(0));
+    });
+
     test('a street behind a lot is no alley: only the alley class backs one',
         () {
       // The same geometry with a STREET at n = 45. It plats its own lots, so

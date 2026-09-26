@@ -35,8 +35,15 @@ import 'site_access_constants.dart';
 /// What a site's plan is (§3.3).
 enum SiteProgram { none, kerbOnly, homeDriveway, carPark, yard, installation }
 
-/// Which way cars may use a join.
-enum SiteJoinRole { both, inOnly, outOnly }
+/// Which way cars may use a join — [none] for a join NO car uses.
+///
+/// `none` is R8's (§2.4 V4): an alley plan keeps its street frontage as join 0,
+/// because slot 0 is where the sign, the pavement point and the stale-plan
+/// fallback all read the site, but every car comes and goes through the alley
+/// cut behind it. Without it the frontage would be advertised to the access
+/// table as a driveway, offered as a route goal, and the car that took it would
+/// arrive at a join with no lane behind it (§5.5).
+enum SiteJoinRole { both, inOnly, outOnly, none }
 
 /// A join at the kerb (kerbside plans) or a kerb cut into the site.
 enum SiteJoinKind { kerbside, cut }
@@ -732,8 +739,13 @@ class SiteAccessPlan {
   double joinRoadS(int j) => chunk.joinRoadS(_join + j);
   double joinCutHalfM(int j) => chunk.joinCutHalfM(_join + j);
   bool joinIsCut(int j) => joinKind(j) == SiteJoinKind.cut;
-  bool joinCanIn(int j) => joinRole(j) != SiteJoinRole.outOnly;
-  bool joinCanOut(int j) => joinRole(j) != SiteJoinRole.inOnly;
+  // Asked of the role POSITIVELY, never as "not the other one": a
+  // `SiteJoinRole.none` join is neither in-capable nor out-capable, and a
+  // negated test would read it as both.
+  bool joinCanIn(int j) =>
+      joinRole(j) == SiteJoinRole.both || joinRole(j) == SiteJoinRole.inOnly;
+  bool joinCanOut(int j) =>
+      joinRole(j) == SiteJoinRole.both || joinRole(j) == SiteJoinRole.outOnly;
 
   /// The kerb point of join [j] (its kerb node's point); NaN for a join with
   /// no kerb node.

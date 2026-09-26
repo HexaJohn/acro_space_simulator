@@ -658,9 +658,11 @@ class SiteJoinPlacer {
   /// Slot 3 of an auto lot (§3.2): the cut on the ALLEY BEHIND it, the join a
   /// downtown lot's bins, loading and back-of-house parking come off so its
   /// street frontage stays an unbroken run of shopfronts (`RoadClass.alley`).
-  /// Null when the lot has no road of its own, when its slot 0 is not a cut on
-  /// a road that is not already the alley, when no alley lies behind it
-  /// ([hasRearAlley]), or when no cut fits there.
+  /// Null when the lot has no road of its own, when its slot 0 is not a cut,
+  /// when the road slot 0 sits on is ITSELF an alley (an alley is an eligible
+  /// join road, `SiteFrame`, so a lot can front one; one alley behind another is
+  /// not a back-of-house), when no alley lies behind it ([hasRearAlley]), or
+  /// when no cut fits there.
   ///
   /// Offered ON REQUEST, like slot 2: a sprawl's downtown lots would otherwise
   /// pay the rear search on every road graph build (§3.2, R-B1).
@@ -674,9 +676,12 @@ class SiteJoinPlacer {
     int ownLot = -1,
   }) {
     if (roadId == null) return null;
-    if (slot0Flags & kJoinCut == 0 || slot0Flags & kJoinAlley != 0) return null;
+    if (slot0Flags & kJoinCut == 0) return null;
     final own = roadNoOf(roadId);
     if (own == null) return null;
+    // The lot's OWN road, tested by class and not by a flag: `kJoinAlley` is
+    // set by this method alone, so a packed slot 0's flags could never carry it.
+    if (roads[own].roadClass == RoadClass.alley) return null;
     final hit = _rearAlley(polygon, frontage, own);
     if (hit == null) return null;
     final (rear, r) = hit;

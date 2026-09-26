@@ -31,6 +31,12 @@ import 'package:acro_space_simulator/domain/colony/city/site_access/site_paving_
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_plan_builder.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_plan_generator.dart';
 import 'package:acro_space_simulator/domain/colony/city/site_access/site_plan_validator.dart';
+// The traffic tables are READ here and never changed: §5.5's access rows are
+// what say the plan's kerbside frontage is no driveway.
+import 'package:acro_space_simulator/domain/colony/city/traffic/building_table.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/lane_graph_builder.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/site_plan_source.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/slot_pool.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../../traffic/traffic_fixture.dart';
@@ -43,14 +49,20 @@ import 'site_plan_fixtures.dart';
 /// edge (`CityLayout._depthAt`: an alley IS the midline, so a lot runs all the
 /// way to it, less the alley's own 0.6 m setback). With [depthM] 32 nothing is
 /// capped and the plat is the same with or without the alley.
-CityLayout _block({bool alley = true, double depthM = 46}) {
+/// [frontageM], [depthM] and [blockM] widen the block for the cases that need
+/// a bigger lot than the plat's own downtown one.
+CityLayout _block(
+    {bool alley = true,
+    double frontageM = 24,
+    double depthM = 46,
+    double blockM = 104}) {
   final layout = CityLayout(
-      settings: ParcelSettings(frontageM: 24, depthM: depthM))
+      settings: ParcelSettings(frontageM: frontageM, depthM: depthM))
     ..commitRoad(controls: const [Vec2(0, 0), Vec2(400, 0)])
-    ..commitRoad(controls: const [Vec2(0, 104), Vec2(400, 104)]);
+    ..commitRoad(controls: [Vec2(0, blockM), Vec2(400, blockM)]);
   if (alley) {
     layout.commitRoad(
-        controls: const [Vec2(0, 52), Vec2(400, 52)],
+        controls: [Vec2(0, blockM / 2), Vec2(400, blockM / 2)],
         roadClass: RoadClass.alley);
   }
   return layout;
@@ -60,9 +72,9 @@ CityLayout _block({bool alley = true, double depthM = 46}) {
 /// the block: the north row of the n = 0 street and the south row of the n = 104
 /// one. Read off the geometry, never off `hasRearAlley`, so the rear-edge rule
 /// is tested rather than assumed.
-List<Parcel> _backingTheAlley(CityLayout layout) => [
+List<Parcel> _backingTheAlley(CityLayout layout, {double blockM = 104}) => [
       for (final p in layout.autoParcels)
-        if (p.centroid.n > 0 && p.centroid.n < 104) p,
+        if (p.centroid.n > 0 && p.centroid.n < blockM) p,
     ];
 
 /// A plan's content, without the graph it was resolved against: the digest two
@@ -124,6 +136,13 @@ void main() {
       expect(p.joinCutHalfM(0), 0);
       expect(p.joinKerbNode(0), -1);
       expect(p.joinThroatSeg(0), -1);
+      // And NO car uses it: the frontage is the sign, the pavement point and
+      // the stale-plan fallback, never a way in. With a role it would go to the
+      // access table as a driveway (§5.5), beat the 20 km/h alley on cost, and
+      // strand the car that took it at a join with no lane behind it.
+      expect(p.joinRole(0), SiteJoinRole.none);
+      expect(p.joinCanIn(0), isFalse);
+      expect(p.joinCanOut(0), isFalse);
       expect(p.joinRef(0), g.joinRefOf(lot, 0));
       expect(p.joinRoadNo(0), g.pieceRoad[ctx.slot0.piece]);
       // Join 1 is the alley cut, and it is the only one.
@@ -272,6 +291,9 @@ void main() {
     });
 
     test('no valid F2a candidate scores above the bound it was held to', () {
+      // Every candidate a downtown lot this size offers is a single module, so
+      // this exercises the `m == 1` arm of the bound alone; the `m >= 2` arm is
+      // reached on the deeper lot below.
       var checked = 0;
       for (final p in _backingTheAlley(layout)) {
         final c = SiteContext.ofLot(g, p, cMed);
@@ -335,6 +357,85 @@ void main() {
         planned++;
       }
       expect(planned, greaterThan(8));
+    });
+  });
+
+  group('the bound on a block of two modules or more (40 x 54.4 m)', () {
+    // The plat's downtown lot is 24 x 41.4 m, and on it EVERY m ≥ 2 candidate is
+    // refused for envelope room BEFORE a bound is recorded, so the cross-aisle
+    // term of the m ≥ 2 bound is never charged there. This lot reaches it: a
+    // 130 m block with 60 m of configured depth cuts 40 × 54.4 m lots, and the
+    // alley still runs down the midline behind them.
+    final layout = _block(frontageM: 40, depthM: 60, blockM: 130);
+    final g = RoadGraph.of(layout);
+    final parcel = _backingTheAlley(layout, blockM: 130).first;
+    final ctx = SiteContext.ofLot(g, parcel, cMed);
+
+    /// The candidates by (family, modules, whether the last module is single).
+    Map<(CarParkFamily, int, bool), CarParkCandidate> byShape() => {
+          for (final c in carParkCandidatesOf(ctx))
+            (c.family, c.modules, c.singleLast): c,
+        };
+
+    test('the fixture: 40 x 54.4 m off an alley, with m >= 2 candidates that '
+        'reach the bound', () {
+      expect(ctx.frame!.widthM, closeTo(40, 1e-9));
+      expect(ctx.depthM, closeTo(54.4, 1e-9));
+      expect(ctx.alleySlot, isNotNull);
+      var reached = 0;
+      for (final e in byShape().entries) {
+        if (e.key.$1 != CarParkFamily.rearAlley || e.key.$2 < 2) continue;
+        if (!e.value.valid) continue;
+        expect(e.value.scoreBound.isFinite, isTrue, reason: '${e.key}');
+        reached++;
+      }
+      expect(reached, greaterThan(1), reason: 'the m >= 2 bound is charged');
+    });
+
+    test('a multi-module alley entry is bounded exactly as tightly as the same '
+        'block entered from the street', () {
+      // The slack the bound leaves (bound − score) comes out the SAME number
+      // for F1 and for F2a on a lot that is its own mirror: an alley entry is
+      // held to no looser a bound than a street entry.
+      //
+      // What this does NOT pin is the m ≥ 2 PRE-ALLOCATION bound, whose
+      // cross-aisle term is charged over the full aisle span whichever end the
+      // drive meets. That bound is not observable: `_Draft.preCheck` and
+      // `_Draft.finish` record tighter bounds over the same candidate (the
+      // realised drive rather than a lower bound on it), and `candBound` keeps
+      // the smallest, so the pre-allocation number never reaches `scoreBound`.
+      // Nor is its pruning observable — the pruned verdicts and the winner come
+      // out identical with the term charged from the drive's own aisle instead,
+      // on this lot and on five other geometries, three of them won by an F2a
+      // candidate of two modules or more. It is admissible either way (the
+      // ladder the packer builds is exactly 2 × the span), so the term is a
+      // tightening with no behaviour behind it to pin.
+      final all = byShape();
+      var compared = 0;
+      for (final m in [2, 3, 4]) {
+        for (final single in [false, true]) {
+          final f1 = all[(CarParkFamily.front, m, single)];
+          final f2a = all[(CarParkFamily.rearAlley, m, single)];
+          if (f1 == null || f2a == null || !f1.valid || !f2a.valid) continue;
+          expect(f2a.scoreBound - f2a.score!,
+              closeTo(f1.scoreBound - f1.score!, 1e-9),
+              reason: 'm$m ${single ? 'single' : 'double'}: '
+                  'F1 ${f1.scoreBound}/${f1.score}, '
+                  'F2a ${f2a.scoreBound}/${f2a.score}');
+          compared++;
+        }
+      }
+      expect(compared, greaterThan(1));
+    });
+
+    test('and no valid candidate of any family beats its own bound', () {
+      var checked = 0;
+      for (final c in carParkCandidatesOf(ctx)) {
+        if (!c.valid) continue;
+        expect(c.score!, lessThanOrEqualTo(c.scoreBound + 1e-9), reason: '$c');
+        checked++;
+      }
+      expect(checked, greaterThan(4));
     });
   });
 
@@ -460,6 +561,79 @@ void main() {
       drain();
       expect(book.lastSync.generated, 0);
       expect(book.lastSync.chunks, 0);
+    });
+
+    test('the access table offers the ALLEY and not the frontage: an F2a site '
+        'is reached and left through its cut alone (§5.5)', () {
+      // The traffic tables are READ here, never changed (this file is the road
+      // side's), and the case lives with the plan because it is the plan's
+      // statement that it checks: a network plan's kerbside join carries role
+      // `none`, so `AccessPoints.ofPlanJoin` reports it neither in- nor
+      // out-capable and `BuildingTable` writes its rows with neither bit. Were
+      // it `both`, the street frontage would be offered as a route goal
+      // (`addGoals` gates on `kAccIn` alone — `kAccCut` has no reader in lib/),
+      // a street would beat a 20 km/h alley on cost, and the car that took it
+      // would arrive at a join with no lane behind it, give up at the gate and
+      // leave the car park empty.
+      final city = town();
+      final road =
+          commit(city, const FixtureRoad([Vec2(2000, -150), Vec2(2000, 150)]));
+      final shops = [
+        for (final p in city.layout.autoParcels)
+          if (p.roadId == road) p,
+      ];
+      for (final p in shops) {
+        city.placeOnParcel(p.id, cMed);
+      }
+      commit(
+          city,
+          const FixtureRoad([Vec2(2045, -150), Vec2(2045, 150)],
+              roadClass: RoadClass.alley));
+      final book = city.siteAccess;
+      expect(
+          book.sync(city, city.roadGraph,
+              maxUnits: SiteAccessBook.unlimited,
+              maxChecks: SiteAccessBook.unlimited),
+          isTrue);
+      final g = city.roadGraph;
+      final lg = LaneGraphBuilder.build(g);
+      final plans = BookPlanSource(book);
+      final buildings = BuildingTable()..sync(city, lg, plans);
+      var checked = 0;
+      for (final p in shops) {
+        final plan = plans.planOf(p.id);
+        if (plan == null || plan.joinCount < 2) continue;
+        expect(plan.joinSlot(1), kJoinSlotAlley, reason: p.id);
+        final sl = SlotPool.slotOf(buildings.handleOfSite(p.id)!);
+        final base = BuildingTable.accRow0(sl);
+        expect(buildings.accCount[sl], 4,
+            reason: '${p.id}: two joins, each served both ways');
+        var routable = 0, kerbside = 0;
+        for (var i = 0; i < buildings.accCount[sl]; i++) {
+          final r = base + i;
+          final bits = buildings.accBits[r];
+          final onAlleyRoad =
+              g.roads[lg.edgeRoad[buildings.accEdge[r]]].roadClass ==
+                  RoadClass.alley;
+          if (buildings.accJoin[r] == plan.joinRef(1)) {
+            expect(onAlleyRoad, isTrue, reason: p.id);
+            expect(bits & kAccIn, kAccIn, reason: p.id);
+            expect(bits & kAccOut, kAccOut, reason: p.id);
+            expect(bits & kAccCut, kAccCut, reason: p.id);
+            routable++;
+          } else {
+            expect(buildings.accJoin[r], plan.joinRef(0), reason: p.id);
+            expect(onAlleyRoad, isFalse, reason: '${p.id}: the street');
+            expect(bits & (kAccIn | kAccOut), 0,
+                reason: '${p.id}: the frontage is no driveway');
+            expect(bits & kAccCut, 0, reason: p.id);
+            kerbside++;
+          }
+        }
+        expect((routable, kerbside), (2, 2), reason: p.id);
+        checked++;
+      }
+      expect(checked, greaterThan(0));
     });
   });
 }

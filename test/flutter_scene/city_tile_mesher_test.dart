@@ -662,7 +662,13 @@ void main() {
     });
 
     test('a join road with NO PAVEMENT lays no dropped kerb: an alley draws '
-        'the same tile with its cut and without it (§3.8, R8)', () {
+        'the same tile with its cut and without it (§3.8, R8) — a '
+        'CHARACTERIZATION pin of behaviour on dev', () {
+      // CHARACTERIZATION PIN, not coverage of a change: no line of R8 touches
+      // the mesher's kerb-cut path, and this case passes unchanged on dev. It is
+      // here because R8 is the first slice to put a cut on a road without a
+      // pavement, and the assumption it rests on had never been written down.
+      //
       // §3.8's row: "kerb = carriageway edge; no kerb-cut mesh; throat still
       // ≥ 7 m". An R8 alley join's cut is REAL on the wire — the agents' kerb
       // masks and a lamp's shift-out read the same table (§5.5, A12) — but
