@@ -244,7 +244,6 @@ Map<String, Object> _buffers(CityAgents a) {
     'accCount': b.accCount,
     'accEdge': b.accEdge,
     'accT': b.accT,
-    'commuteOwed': b.commuteOwed,
     'home': c.home,
     'job': c.job,
     'vehicle': c.vehicle,

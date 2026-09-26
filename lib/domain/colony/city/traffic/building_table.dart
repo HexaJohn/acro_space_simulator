@@ -81,9 +81,6 @@ const int kAccOut = 2;
 const int kAccLeft = 4;
 const int kAccCut = 8;
 
-/// 2^-32: a 32-bit hash scaled onto [0, 1).
-const double _unit32 = 1.0 / 4294967296.0;
-
 /// Every building, in typed columns. See the library comment.
 class BuildingTable {
   BuildingTable({int capacity = 256}) : pool = SlotPool(capacity) {
@@ -141,21 +138,6 @@ class BuildingTable {
   late Float32List accT;
   late Uint8List accLane, accBits;
   late Int32List accJoin;
-
-  /// `CommuteSynth`'s trips owed and not yet sent (slices 1–2): a fraction
-  /// of a trip carried from one second to the next. It starts at a phase
-  /// hashed from the site id, so a street of identical houses does not
-  /// send its first commuters all in the same second — and a phase that
-  /// comes from the name, not from a draw, is the same whenever a sync
-  /// first sees the building.
-  ///
-  /// **Retired with slice 3's activity loop** (§6.4): demand becomes the
-  /// citizens' own, off the wheel, and a building owes nothing. The column,
-  /// its seeding in [_upsert] and its fold in [digest] all go together the
-  /// day `CitizenTrips._emit` stops reading it — until then the column is
-  /// still what the interim demand runs on, and taking it out now would
-  /// leave the tree uncompilable for every other package.
-  late Float64List commuteOwed;
 
   late Int32List _seen;
 
@@ -223,7 +205,6 @@ class BuildingTable {
     accLane = Uint8List(rows);
     accBits = Uint8List(rows);
     accJoin = Int32List(rows)..fillRange(0, rows, kJoinRefNone);
-    commuteOwed = Float64List(n);
     _seen = Int32List(n);
   }
 
@@ -239,7 +220,7 @@ class BuildingTable {
     final ce = centroidE, cn = centroidN;
     final an = accCount, ae = accEdge, at = accT;
     final al = accLane, ab = accBits, aj = accJoin;
-    final ow = commuteOwed, se = _seen;
+    final se = _seen;
     _alloc(n);
     siteId.setRange(0, old, sid);
     spec.setRange(0, old, sp);
@@ -260,7 +241,6 @@ class BuildingTable {
     accLane.setRange(0, rows, al);
     accBits.setRange(0, rows, ab);
     accJoin.setRange(0, rows, aj);
-    commuteOwed.setRange(0, old, ow);
     _seen.setRange(0, old, se);
   }
 
@@ -369,7 +349,6 @@ class BuildingTable {
       _idOf[id] = h;
       sl = SlotPool.slotOf(h);
       siteId[sl] = id;
-      commuteOwed[sl] = fnv1a32(id) * _unit32;
       _fresh = true;
     } else {
       sl = SlotPool.slotOf(h);
@@ -490,7 +469,6 @@ class BuildingTable {
     corpses[sl] = 0;
     served[sl] = 0;
     _clearAccess(sl);
-    commuteOwed[sl] = 0;
     removals++;
     _jobsDirty = true;
   }
@@ -729,8 +707,8 @@ class BuildingTable {
     _jobsDirty = false;
   }
 
-  /// [hash] with every live building's handle, capacities, access rows and
-  /// owed trips folded in, in slot order: for `CityAgents.digest`.
+  /// [hash] with every live building's handle, capacities and access rows
+  /// folded in, in slot order: for `CityAgents.digest`.
   ///
   /// [residents], [workers] and [corpses] are deliberately NOT here. They
   /// ride `CitizenMatch.digest`, which `CityAgents` folds in only once the
@@ -753,7 +731,6 @@ class BuildingTable {
         h = fnv1aU32(h, accJoin[r]);
         h = fnv1aByte(h, accBits[r] | (accLane[r] << 4));
       }
-      h = fnv1aU32(h, (commuteOwed[sl] * 1e6).round());
     }
     return h;
   }
