@@ -339,7 +339,13 @@ it. Limbo plans (§7.6) and cars mid-manoeuvre hold the old chunk and keep readi
   columns bit for bit in the graph the plan was synced against. For the side-street slot that is
   `joinOfRef(joinRef)`, and `joinRef == joinRefOf(graphLot, joinSlot)`.
 - **V4 Roles.** A network plan has ≥ 1 in-capable and ≥ 1 out-capable cut join. Cuts on one edge do not
-  overlap and are ≥ 6 m apart, so `(edge, T)` identifies a join.
+  overlap and are ≥ 6 m apart, so `(edge, T)` identifies a join. A network plan may also carry a KERBSIDE
+  join: only cuts count toward the two roles. (R8, widened to the spec: the code rejected any kerbside join
+  on a network plan, which R8's alley car park needs — its slot 0 stays the uncut frontage. A census over the
+  sprawl audit town's 30,559 planned sites proved the widening moves no existing plan: same program mix, same
+  join histogram, every row byte-identical. A kerbside join carries no kerb node or throat, so V5 passes it
+  over; it is no lane, so V7 and V13 do; and a plan of kerbside joins ALONE is still rejected, having neither
+  an in-capable nor an out-capable cut — `site_plan_validator_test` pins both sides.)
 - **V5 Throat (ask 3).** Each cut join's throat is the segment leaving its kerb node:
   - it is straight (every via point within 0.1 m of the kerb-node → far-node chord), ≥ 7 m long, within 10° of
     the road normal, and carries no stall or bay;
@@ -646,7 +652,7 @@ home, and demotes a lot that fails to `kerbOnly` (C-22).
 
 - Slot 1 is a second own-road slot at the far end of the span, when `W ≥ 60 m` and `|Δs| ≥ 30 m`.
 - Slot 2 is the side-street slot of a corner lot, unless that is slot 0.
-- Slot 3 is the REAR ALLEY join (R8, machinery landed): the one a downtown lot's bins, loading and back-of-house
+- Slot 3 is the REAR ALLEY join (R8; taken by §3.5's F2a): the one a downtown lot's bins, loading and back-of-house
   parking come off, so its street frontage stays an unbroken run of shopfronts. **Slot 0 stays the frontage and
   stays kerbside** — the alley is a second offer, never a move, so a stale or absent plan degrades to kerbside
   frontage and not to a driveway that no longer exists. Flagged `kJoinCut | kJoinAlley`; offered ON REQUEST like
@@ -979,6 +985,15 @@ Everything is axis-aligned in the frame. Bays are 2.6 × 5.2 m, two-way aisles 6
   - **F2 REAR:** a 6 m side drive runs `[x_J ± 3]` to a block at the back. The drive is the throat segment (V5:
     straight, no stall or branch along it; vias when it exceeds 24 m). The
     envelope sits in front, beside the drive.
+  - **F2a REAR OFF THE ALLEY (R8):** F2's block, reached from the ALLEY BEHIND (slot 3, §3.2) instead of by a
+    long side drive from the street. Identical layout; only the drive's origin moves, so it is one family
+    parameter and not a second block: the throat leaves the alley kerb along −`v`, meets the module nearest the
+    REAR (F2's module 0, not its front-most aisle), and the rows between that aisle and the alley take the
+    throat exclusion. The envelope is in front, full width — no side drive beside it. **The plan keeps slot 0
+    as a KERBSIDE join and slot 3 as the only cut** (V4 as widened above), which is the point: the bins, the
+    loading and the back-of-house parking come off the alley so the street frontage stays an unbroken run of
+    shopfronts (`parcel.dart`'s `RoadClass.alley`). Offered wherever slot 3 is (§3.2), scored against F1–F3 on
+    §3.5's own formula with F2's street-wall bias and nothing added.
   - **F3 SIDE:** the aisles run along y, and the throat continues straight into the first aisle. The first stall
     is at `y ≥ yT`. `k ≥ 2` gets a rear cross aisle and `k = 1` a rear hammerhead. The envelope is on the other
     side.
@@ -1118,6 +1133,44 @@ Everything is axis-aligned in the frame. Bays are 2.6 × 5.2 m, two-way aisles 6
   layouts are built once, and the free-rectangle search keeps its scratch on the site and cuts each blocked rectangle
   over only its own columns. A one-off A/B against the first landing (cf8f8b8) gave identical candidates (549,342) and
   winners (30,926) on every straight site of the starter kit, both towns, the sprawl and the random sites.
+
+**As built (R8, F2a — the alley car park):**
+- **One site per entry.** A car park is packed twice on an alley-backed lot: once from slot 0 (F1–F3) and once
+  from slot 3 (F2a), each with its own `_Site` — the throat's kerb point, its `k` and its drive axis are all the
+  entry's. The winner is §3.5's pick over both lists. §3.6 yards stay on the street.
+  The frame is the SAME for both (x along the street frontage, y into the lot), so F2a's drive runs along −`v`
+  and every y-signed rule reads through one `dirY`: `k` is the kerb to the boundary the drive crosses (the
+  frontage line, or the rear edge = the depth profile's far edge with its 0.3 m margin given back), `yT` is the
+  frame y a 7 m throat reaches, and the throat exclusion is the rows on the drive's side of the aisle it meets.
+- **The 7 m throat.** With the plat's 0.6 m behind a lot cut to an alley, F2a's throat is 0.6 + 0.3 + the
+  8.2 m to a double module's aisle = 9.1 m, which clears V5 on its own. Where module 0 is single-loaded (its
+  aisle only 3 m in) the BLOCK MOVES FORWARD off the rear edge until the drive is 7 m, exactly as F1's moves
+  back off the frontage.
+- **No bend.** §3.8's bend is laid on the frontage line inside the slot's §3.7a corridor; there is no corridor
+  behind a lot, and an alley slot runs no corridor search, so a skewed alley slot 7 m or more off its rear edge
+  gets no F2a (as §3.8's "bend for skews over 10° is not built" refuses a car park on the street). On the
+  sprawl audit town 3 of 59 alley-backed car park lots are refused for skew.
+- **The throat's pave and the rear corridor.** The pave runs from the alley kerb to the aisle, its kerb corners
+  on the kerb LINE through K (the far pair here, not the near one; the slope `nu/nv` is the same either way).
+  Its stretch past the back edge is the slot's §3.7a corridor's (§3.7a as built). A rear edge is a CHORD, not a
+  constant frame y — the plat gives each rear corner its own depth ray — so BOTH the pave's on-parcel test and
+  the corridor's end read the SHALLOWEST profile column under them (the pave's own 6 m, the corridor's 9 m),
+  the profile's 0.3 m margin left in as the slack that makes a 0.5 m column's read safe. Reading the kerb's
+  column alone put a pave corner past the edge on 22 of the sprawl's 59.
+- **The bound.** Unchanged in form. The alley pass starts from the street pass's best valid score, which is
+  admissible for the same reason the street pass's own running best is: `cut` drops a candidate only when its
+  upper bound lies below the 1 % band of a score some valid candidate has reached, the band's floor is monotone in
+  that score, and the final pick is over both lists together. Every term of the bound (the score cap, `A_min`,
+  the envelope region `W × maxDepth`) is the FRAME's, not the entry's, so the two sites' bounds and scores are
+  comparable.
+- **The sprawl audit town** (`blocksAcross 4, seed 5, sprawlMiles 12`), per site: 127 of the 30,561 built sites
+  have an alley candidate — 59 plan a car park, 58 are `kerbOnly` and 10 are homes. 30 of the 59 get a valid F2a
+  candidate and **12 take it**; all 12 took F1 FRONT before, so the mix reads `front 4274 → 4262, rearAlley 0 → 12`
+  with `rear 10`, `side 143` and `yard 40` unmoved. **No site changed program for any reason: the §8.3 audit map is
+  identical** (`kerbOnly 952, homeDriveway 24,996, carPark 4427, yard 40, installation 144`, every demotion count
+  the same), and no site changed its family other than by taking the alley. The 18 that lose keep F1 or F3 on
+  score: on a 30 m frontage F3 SIDE packs 13–14 stalls against F2a's 11 and wins by about 6, which is §3.5's own
+  formula and not a scoring change made here. F2a takes no new bias.
 
 ### 3.6 Yard (industrial)
 
@@ -1287,7 +1340,10 @@ no lot is re-platted: the corridor crosses the fewest UNBUILT auto lots, and tho
 
 **Corridor geometry (tier L, `SiteJoinPlacer`, use-free).** For a candidate `s`, the corridor is the polyline
 `K(s) → T → F` (the §3.7 dogleg polyline for `kJoinOffFrontage`) with half width `kAccessCorridorHalfM = 7/2 + 1 =
-4.5`, restricted to the stretch outside the lot's own polygon. It is tested against:
+4.5`, restricted to the stretch outside the lot's own polygon. A REAR ALLEY slot (§3.2 slot 3) crosses the lot's
+REAR edge instead of its frontage line, since its kerb stands behind the lot; its corridor is one short leg from
+that kerb along the slot normal (0.9 m on the plat's own 0.6 m gap), so §3.7a's clearance rule passes over it as it
+does any kerb crossing under the 3.5 m set-back threshold (R8 as built, §3.5's F2a). It is tested against:
 
 - **Hard obstacles** (a candidate that hits one is discarded): other MANUAL parcels, via a new public
   `CityLayout.parcelsNear(Box2)` over `_lotIndex` (city_layout.dart:148); and the carriageway + pavement of every
@@ -3256,6 +3312,16 @@ starter kit and pass V1–V13 on its graph under all five A2 override kinds. The
     10 stalls at the listed x-ranges, envelope `[1.5, 22.5] × [18.7, 31.7]`, scores 90.11 / 54.25, F2 254.8 m² and
     F3 7.8 m rejected); a `kJoinMinRoomM` slot (room 2.5 → a 3.0 m `sharedSingle` throat and ≤ 8 stalls, else null);
     SAT non-overlap; triangle/sliver/L; F2 bias;
+  - `rear_alley_slot_test` (R8): the rear-edge rule, slot 3 offered on request and kept, its handle, the cache
+    every copy of a graph shares, and the re-plan an alley drawn behind a built lot triggers;
+  - `alley_car_park_test` (R8): a downtown block as the generator cuts one (two streets 104 m apart, an alley down
+    the midline, lots 24 × 41.4 m with their back edge 0.6 m off the alley's carriageway). F2a wins with two joins
+    — slot 0 kerbside and uncut, slot 3 the only cut — a 9.1 m throat off the alley, NO kerb cut on the street
+    (`KerbCuts.canonicalOf`), V1–V13 and V7's lanes through the alley join, `sitePavingViolations` clean against
+    the 0.9 m rear corridor, no stall in the throat exclusion, and the winner pinned as F1's exact mirror (10
+    stalls, the same 470.4 m² envelope, 2.4 m less drive, plus F2's bias: 100.258 against 94.058). Then the other
+    half: with the alley absent the plat is identical, every lot that does not take slot 3 plans byte for byte the
+    same, and the lot itself is §3.5's worked example untouched (F1 double, 90.11, no F2a candidate offered);
   - `installation_access_test`: the four starter sites (56 m throat `K→F` with vias, `Y` at y = 15, 4 bays,
     `G = (x_G, Df)` on the fence line, car park x-range outside `x_G ± 15`, ≥ 12 stalls); **`D = 130`** (no
     `ArgumentError`, `Df = 40`, bays dropped, `kPlanAdmitsTrucks` clear, the plan validates); a spine near a lot side

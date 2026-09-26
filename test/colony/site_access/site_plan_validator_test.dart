@@ -159,6 +159,53 @@ void main() {
       expect(got.difference({SiteInvariant.v4Roles, SiteInvariant.v7Connected}),
           isEmpty);
     });
+
+    test('ACCEPTED: a kerbside join beside the cut (R8\'s alley plan shape)',
+        () {
+      // §2.4 asks a network plan for ≥ 1 in-capable and ≥ 1 out-capable CUT
+      // join, not that every join be a cut. An alley car park keeps slot 0 as
+      // the frontage, kerbside and uncut, and drives through the cut on slot 3
+      // (`alley_car_park_test` pins the real plan); this is that shape with none
+      // of the geometry — a second join on the same slot, kerbside, which V3
+      // accepts because its values are still slot 0's.
+      final d = draft(SyntheticTemplate.strip);
+      final j0 = d.joins[0];
+      d.joins.add(DraftJoin(
+        slot: 0,
+        ref: j0.ref,
+        piece: j0.piece,
+        roadS: j0.roadS,
+        right: j0.right,
+        dirs: j0.dirs,
+        roadNo: j0.roadNo,
+        kind: SiteJoinKind.kerbside,
+      ));
+      accepts(d);
+    });
+
+    test('a network plan of kerbside joins alone is still rejected', () {
+      // The widening above must not become "anything goes": a network with no
+      // CUT join has no way in and no way out, and V4 still says so.
+      final d = draft(SyntheticTemplate.strip);
+      d.joins[0]
+        ..kind = SiteJoinKind.kerbside
+        ..cutHalfM = 0;
+      final vs = violations(d);
+      expect([
+        for (final v in vs)
+          if (v.invariant == SiteInvariant.v4Roles) v.detail
+      ], ['no in-capable cut join', 'no out-capable cut join']);
+      // The rest is the site coming apart once its join lanes are gone (its
+      // throat is nobody's), not V4's business.
+      expect(
+          {for (final v in vs) v.invariant}.difference({
+            SiteInvariant.v4Roles,
+            SiteInvariant.v7Connected,
+            SiteInvariant.v10OrderAndKeys,
+          }),
+          isEmpty,
+          reason: vs.join('\n'));
+    });
   });
 
   group('V5 throat', () {

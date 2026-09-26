@@ -6,20 +6,31 @@
 /// Car parks and yards (docs/plans/site-access.md §3.5, §3.6).
 ///
 /// Everything is axis-aligned in the site frame (x along the frontage, y into
-/// the lot). A car park is a throat from slot 0's kerb point `K`, then a
-/// block of `m` modules. The throat runs along the frame's `v` (so V5's
-/// "within 10° of the road normal" is the slot's skew, checked up front),
-/// except on a set-back site (`k ≥ 7`) whose skew would carry it more than
-/// 0.1 m sideways by the frontage: there it runs along the ROAD normal to a
-/// bend node `B` on the frontage line, inside the slot's §3.7a corridor, and
-/// the drive continues along `v` from `B` (§3.8).
+/// the lot). A car park is a throat from a kerb point `K`, then a block of `m`
+/// modules. The throat runs along the frame's `v` (so V5's "within 10° of the
+/// road normal" is the slot's skew, checked up front), except on a set-back
+/// site (`k ≥ 7`) whose skew would carry it more than 0.1 m sideways by the
+/// frontage: there it runs along the ROAD normal to a bend node `B` on the
+/// frontage line, inside the slot's §3.7a corridor, and the drive continues
+/// along `v` from `B` (§3.8).
 ///
 /// - **F1 front:** aisles along x, the block at the frontage, the envelope
 ///   behind it. The drive meets the first aisle in a T at `J`.
 /// - **F2 rear:** aisles along x, the block at the back, the drive a side
 ///   drive to the front-most aisle, the envelope in front beside the drive.
+/// - **F2a rear off the alley (R8):** F2's block, reached from the ALLEY
+///   BEHIND (slot 3, §3.2) instead of by a long side drive from the street, so
+///   the drive runs along −`v` from the alley kerb to the module nearest the
+///   REAR and the street frontage keeps no cut at all. The plan carries two
+///   joins: slot 0 KERBSIDE (the unbroken shopfront run) and slot 3, the only
+///   cut, carrying in and out.
 /// - **F3 side:** aisles along y, the drive continuing straight into the
 ///   first aisle, the modules toward the side with more room.
+///
+/// F1–F3 leave slot 0; F2a leaves slot 3, and each entry gets its own `_Site`
+/// (the kerb point, `k` and the drive's `dirY` are the entry's; the frame,
+/// spec, seed and every term of the score bound are the site's). The winner is
+/// §3.5's pick over both lists.
 ///
 /// `m = 1` blocks end in V7(b) T ends (F1/F2 arms longer than 8.6 m; shorter
 /// arms are cut to an L); `m ≥ 2` blocks are joined by cross aisles (F1/F2 at
@@ -56,12 +67,18 @@ import 'site_access_constants.dart';
 import 'site_access_plan.dart';
 import 'site_envelope.dart';
 import 'site_frame.dart';
+import 'site_join.dart' show JoinSlot;
 import 'site_plan_builder.dart';
 import 'site_plan_generator.dart';
 import 'site_program.dart';
 
 /// §3.5's families, plus the §3.6 yard spine. The name seeds the tie-break.
-enum CarParkFamily { front, rear, side, yard }
+///
+/// [rearAlley] (F2a, R8) is [rear]'s block, laid by the same code: what differs
+/// is only where the drive comes from — the ALLEY behind (slot 3) instead of a
+/// long side drive from the street. It is named apart so the enumeration, the
+/// tie-break and the audit can tell the two candidates apart.
+enum CarParkFamily { front, rear, rearAlley, side, yard }
 
 /// Margin kept inside cos 10° when the throat is laid along the frame's `v`:
 /// the validator measures the road normal from the road polyline, the slot
@@ -151,13 +168,25 @@ class CarParkPlan implements SiteGeneratedPlan {
       winner._plan!.emit(b, ctx, program, dispatchFlags, envelope);
 }
 
-/// §3.5: the best car park on [ctx] (families F1–F3, `m` modules, the
-/// score), or null when no candidate has a stall and meets the minimums
-/// (throat width, envelope ≥ 8 × 8 m and `A_min`).
+/// §3.5: the best car park on [ctx] (families F1–F3 from the street, F2a from
+/// the alley behind, `m` modules, the score), or null when no candidate has a
+/// stall and meets the minimums (throat width, envelope ≥ 8 × 8 m and `A_min`).
 CarParkPlan? carParkPlanOf(SiteContext ctx) {
-  final s = _Site.of(ctx, truck: false);
-  if (s == null) return null;
-  final best = _best(ctx, _carParkCandidates(s, prune: true));
+  final all = <CarParkCandidate>[];
+  final street = _Site.of(ctx, truck: false);
+  if (street != null) {
+    all.addAll(_carParkCandidates(street, prune: true));
+  }
+  final alley = _Site.of(ctx, truck: false, alley: true);
+  if (alley != null) {
+    // The two sites share one frame, spec and seed, so every term of the bound
+    // (the cap, A_min, the envelope's own region W × maxDepth) is the same on
+    // both: the street pass's best valid score is as good a lower bound here as
+    // it is there, and pruning against it stays admissible (see [_Site.cut]).
+    alley.best = street?.best ?? double.negativeInfinity;
+    all.addAll(_alleyCandidates(alley, prune: true));
+  }
+  final best = _best(ctx, all);
   return best == null
       ? null
       : CarParkPlan._(SiteProgram.carPark, best,
@@ -187,11 +216,16 @@ CarParkPlan? yardPlanOf(SiteContext ctx) {
 }
 
 /// Every §3.5 car park candidate of [ctx], in enumeration order, kept or
-/// rejected (tests pin the §3.5 worked example with it). Empty when the slot
-/// or frame admits no car park at all.
+/// rejected (tests pin the §3.5 worked example with it): the street families
+/// F1–F3 first, then F2a's alley candidates where an alley backs the lot.
+/// Empty when the slot or frame admits no car park at all.
 List<CarParkCandidate> carParkCandidatesOf(SiteContext ctx) {
   final s = _Site.of(ctx, truck: false);
-  return s == null ? const [] : _carParkCandidates(s);
+  final a = _Site.of(ctx, truck: false, alley: true);
+  return [
+    if (s != null) ..._carParkCandidates(s),
+    if (a != null) ..._alleyCandidates(a),
+  ];
 }
 
 /// Every §3.6 yard candidate of [ctx] (empty when slot 0 has no 7 m throat).
@@ -248,6 +282,25 @@ List<CarParkCandidate> _carParkCandidates(_Site s, {bool prune = false}) {
   return out;
 }
 
+/// §3.5's F2a: F2's block, reached from the alley behind. Exactly F2's
+/// enumeration — `m = 1..8`, single or double nearest the building — on a site
+/// whose drive leaves slot 3.
+List<CarParkCandidate> _alleyCandidates(_Site s, {bool prune = false}) {
+  s.prune = prune;
+  final out = <CarParkCandidate>[];
+  for (var m = 1; m <= kMaxModules; m++) {
+    var fitted = false;
+    for (final single in const [false, true]) {
+      s.candBound = double.infinity;
+      final c = _alongX(s, CarParkFamily.rearAlley, m, single);
+      out.add(c);
+      if (c.rejection != _kNoBlock) fitted = true;
+    }
+    if (!fitted) break;
+  }
+  return out;
+}
+
 List<CarParkCandidate> _yardCandidates(_Site s, {bool prune = false}) {
   s.prune = prune;
   final out = <CarParkCandidate>[];
@@ -286,11 +339,14 @@ class _Site {
   _Site._({
     required this.ctx,
     required this.frame,
+    required this.slot,
+    required this.dirY,
     required this.throatW,
     required this.throatMode,
     required this.truck,
     required this.xK,
     required this.xJ,
+    required this.yK,
     required this.k,
     required this.nu,
     required this.nv,
@@ -307,15 +363,25 @@ class _Site {
   /// [truck]: the yard spine (a 7 m two-way throat, room ≥ 4.5); else a car
   /// park throat (§3.3: 6 m two-way, or 3.0–5.5 m `sharedSingle` with at
   /// most 8 stalls).
-  static _Site? of(SiteContext ctx, {required bool truck}) {
+  ///
+  /// [alley]: the drive leaves slot 3 on the ALLEY BEHIND the lot (§3.2, F2a)
+  /// rather than slot 0 at the street, so it runs along −`v` from a kerb point
+  /// past the lot's REAR edge. Null where the lot has no alley slot.
+  static _Site? of(SiteContext ctx, {required bool truck, bool alley = false}) {
     final f = ctx.frame;
     final spec = ctx.spec;
     if (f == null || spec == null || ctx.slotCount == 0) return null;
-    final slot = ctx.slot0;
+    // Slot 0 is emitted either way (kerbside on an alley plan), so a site with
+    // no slot 0 has no plan at all.
+    final slot = alley ? ctx.alleySlot : ctx.slot0;
+    if (slot == null) return null;
+    if (alley && truck) return null; // §3.6 yards stay on the street.
     if (slot.flags & kJoinCut == 0) return null;
     // A site beyond the road end reaches its frontage by the §3.7 dogleg
     // corridor, which no car park throat follows.
     if (slot.flags & kJoinOffFrontage != 0) return null;
+    // The drive runs into the lot: +y from the frontage, −y from the alley.
+    final dirY = alley ? -1.0 : 1.0;
     final programW = truck ? kYardThroatWidthM : kCarParkThroatWidthM;
     final tw = math.min(programW, 2 * (slot.roomM - kCutFlareM));
     SiteLaneMode mode;
@@ -331,22 +397,39 @@ class _Site {
     } else {
       return null;
     }
-    // The drive runs along v: V5 needs v within 10° of the road normal.
+    // The drive runs along the drive axis (`v`, or −`v` from the alley): V5
+    // needs that axis within 10° of the road normal.
     final nu = slot.normE * f.u.e + slot.normN * f.u.n;
     final nv = slot.normE * f.v.e + slot.normN * f.v.n;
-    if (nv < kCos10 + _kSkewMarginCos) return null;
+    final nvD = dirY * nv;
+    if (nvD < kCos10 + _kSkewMarginCos) return null;
     final kl = f.toLocal(Vec2(slot.kerbE, slot.kerbN));
-    final k = -kl.n;
+    // The boundary the drive crosses: the frontage line, or the lot's REAR
+    // edge (the depth profile's far edge with its 0.3 m margin given back).
+    // An alley kerb behind a column the profile cannot reach is no entry.
+    final rear = f.profile.depthAt(kl.e);
+    if (alley && !(rear > 0)) return null;
+    final boundaryY = alley ? rear + kDepthProfileMarginM : 0.0;
+    // k: kerb to that boundary along the drive axis (negative for a kerb
+    // already inside the lot, exactly as a street slot behind its frontage
+    // line reads today).
+    final k = dirY * (boundaryY - kl.n);
     // §3.8: a set-back site whose skew would carry a throat along v off the
     // road normal by more than the straightness tolerance at the frontage
     // takes the normal to a bend node on y = 0 (the corridor's own line).
-    final drift = k * nu / nv;
+    final drift = k * nu / nvD;
     final bend = k >= kThroatMinM - kGenEpsM && drift.abs() > kThroatStraightM;
+    // §3.8's bend is laid on the FRONTAGE line inside the slot's §3.7a
+    // corridor. An alley slot runs no corridor search (it is never set back),
+    // and there is no corridor behind a lot to lay a bend in, so a skewed
+    // alley slot 7 m or more off its rear edge gets no F2a — as §3.8's "bend
+    // for skews over 10° is not built" refuses a car park on the street.
+    if (alley && bend) return null;
     // A straight throat's side edge meets the frontage `tw/2·nv + k·|nu|` off
     // the road normal; past the §3.7a corridor's half width (a 7 m yard
     // throat on a skewed site with k just under 7) there is no throat: a bend
     // would be shorter than 7 m.
-    if (!bend && tw / 2 * nv + k * nu.abs() > kAccessCorridorHalfM - kGenEpsM) {
+    if (!bend && tw / 2 * nvD + k * nu.abs() > kAccessCorridorHalfM - kGenEpsM) {
       return null;
     }
     var lo = double.infinity, hi = double.negativeInfinity;
@@ -364,19 +447,22 @@ class _Site {
     final program = truck ? SiteProgram.yard : SiteProgram.carPark;
     final cap = math.max(capacityScoreCap(spec),
         capacityTarget(program, spec).toDouble());
-    return _Site._(
+    final site = _Site._(
       ctx: ctx,
       frame: f,
+      slot: slot,
+      dirY: dirY,
       throatW: tw,
       throatMode: mode,
       truck: truck,
       xK: kl.e,
       xJ: bend ? kl.e + drift : kl.e,
+      yK: kl.n,
       k: k,
       nu: nu,
       nv: nv,
       bend: bend,
-      yT: bend ? 0.0 : math.max(0.0, kThroatMinM - k),
+      yT: bend ? 0.0 : kl.n + dirY * math.max(k, kThroatMinM),
       lotLo: lo,
       lotHi: hi,
       depths: depths,
@@ -384,16 +470,29 @@ class _Site {
       aMin: minEnvelopeArea(spec),
       maxStalls: maxStalls,
     );
+    // No stretch of lot under the alley throat's pave: no F2a (see [inLotY]).
+    if (alley && !(site.inLotY > 0)) return null;
+    return site;
   }
 
   final SiteContext ctx;
   final SiteFrame frame;
+
+  /// The slot the drive's throat leaves: slot 0, or slot 3 on the alley behind
+  /// ([fromAlley]).
+  final JoinSlot slot;
+
+  /// The way the drive runs into the lot: +1 along `v` from the street, −1
+  /// along −`v` from the alley behind (F2a).
+  final double dirY;
+
   final double throatW;
   final SiteLaneMode throatMode;
   final bool truck;
 
-  /// Slot 0's kerb point's frame x, and k (kerb to frontage).
-  final double xK, k;
+  /// The kerb point's frame x and y, and k (kerb to the boundary the drive
+  /// crosses, along the drive axis).
+  final double xK, yK, k;
 
   /// The frame x of the drive on the lot: `x_K`, or the bend node's.
   final double xJ;
@@ -405,8 +504,10 @@ class _Site {
   /// `(x_J, 0)`.
   final bool bend;
 
-  /// `max(0, 7 − k)`: the nearest frame y the throat may end at (0 with a
-  /// bend, whose throat along the normal is already ≥ 7 m).
+  /// The frame y the drive's far node must REACH for a 7 m throat (V5): `y ≥
+  /// yT` from the street, `y ≤ yT` from the alley. 0 with a bend, whose throat
+  /// along the normal is already ≥ 7 m. §3.5's `yT = max(0, 7 − k)` with the
+  /// frontage line at y = 0.
   final double yT;
 
   /// The polygon's frame x extent: the depth profile's column grid.
@@ -418,11 +519,30 @@ class _Site {
   final double aMin;
   final int maxStalls;
 
+  /// Whether the drive leaves the rear alley (slot 3) rather than the street.
+  bool get fromAlley => dirY < 0;
+
   DepthProfile get profile => frame.profile;
   double get widthM => frame.widthM;
 
+  /// The frame y at which the throat's pave is certainly INSIDE the lot: where
+  /// its on-parcel stretch starts, and where the §3.7a corridor covering the
+  /// rest of it must reach.
+  ///
+  /// At the frontage that is `kContainsInsetM` past the line. At the rear it is
+  /// the SHALLOWEST profile column under the pave, whose own 0.3 m margin is
+  /// the slack that makes the read safe: a lot's rear edge is a CHORD, not a
+  /// constant frame y (the plat gives each rear corner its own depth ray), so
+  /// the kerb's column alone would put a pave corner past the edge elsewhere
+  /// under it. 0 — and so no F2a — where any column under the pave lies outside
+  /// the lot or is unreachable from the frontage.
+  late final double inLotY = fromAlley
+      ? depthOverRange(xJ - throatW / 2, xJ + throatW / 2)
+      : kContainsInsetM;
+
   /// Σ segment lengths from `K` to the drive's point at frame [y] on `x_J`.
-  double throatLenTo(double y) => bend ? k / nv + y : k + y;
+  double throatLenTo(double y) =>
+      bend ? k / nv + y : dirY * (y - yK);
 
   /// How far past the frontage line a bent throat's far end reaches: its
   /// lane rectangle ends square to the road normal, so one far corner stands
@@ -1179,7 +1299,8 @@ class _Draft {
   void emit(PlanBuilder b, SiteContext ctx, SiteProgram program, int flags,
       SiteEnvelope envelope) {
     final f = ctx.frame!;
-    final slot = ctx.slot0;
+    final alley = site.fromAlley;
+    final slot = site.slot;
     final ue = f.u.e, un = f.u.n, ve = f.v.e, vn = f.v.n;
     ctx.beginSite(
         b,
@@ -1187,9 +1308,17 @@ class _Draft {
         flags | kPlanNetwork | (trucks ? kPlanAdmitsTrucks : 0),
         envelope,
         truckTurnRadiusM: trucks ? kYardCircleRadiusM : 0);
-    final j = ctx.addJoin(b, 0,
-        cutHalfM: site.throatW / 2 + kCutFlareM);
-    // Nodes, K first (exactly slot 0's kerb point, V3).
+    // Join 0 is slot 0 (V3). On an alley plan it stays the FRONTAGE and stays
+    // KERBSIDE — no cut, so the street wall is an unbroken run of shopfronts —
+    // and join 1 is the cut on slot 3, carrying in and out (§2.4 V4, §3.2).
+    final j0 = ctx.addJoin(b, 0,
+        kind: alley ? SiteJoinKind.kerbside : SiteJoinKind.cut,
+        cutHalfM: alley ? 0 : site.throatW / 2 + kCutFlareM);
+    final j = alley
+        ? ctx.addJoin(b, kJoinSlotAlley,
+            cutHalfM: site.throatW / 2 + kCutFlareM)
+        : j0;
+    // Nodes, K first (exactly the cut slot's kerb point, V3).
     ctx.kerbNode(b, slot, j);
     for (var i = 1; i < nodeCount; i++) {
       final o = i * nodeStride, oi = i * nodeIntStride;
@@ -1303,21 +1432,24 @@ class _Draft {
       ]);
     }
     // A straight throat's kerb corners sit ON the kerb line through K (square
-    // to the road normal, `y = −k − (x − x_K)·nu/nv`), not on the frame's
-    // `y = −k`: on a skewed site the frame edge would put one corner up to
+    // to the road normal, `y = y_K − (x − x_K)·nu/nv`), not on the frame's
+    // `y = y_K`: on a skewed site the frame edge would put one corner up to
     // `hw·tan 10°` into the carriageway, outside parcel ∪ corridor (§2.4
-    // geometry, `sitePavingViolations`; R2 merge).
+    // geometry, `sitePavingViolations`; R2 merge). An alley entry's kerb edge is
+    // the pave's FAR edge (the drive runs back toward the frontage), and the
+    // kerb line's slope is the same either way — the normal's own sign cancels.
     final kerbSlope = site.nu / site.nv;
+    double kerbY(double x) => site.yK - (x - site.xK) * kerbSlope;
     for (var q = 0; q < paves.length; q++) {
       final r = paves[q];
       final kerbEdge = q == 0 && !hasQuad;
-      final y00 = kerbEdge ? r.y0 - (r.x0 - site.xK) * kerbSlope : r.y0;
-      final y10 = kerbEdge ? r.y0 - (r.x1 - site.xK) * kerbSlope : r.y0;
+      final nearKerb = kerbEdge && !alley;
+      final farKerb = kerbEdge && alley;
       b.pave([
-        corner(r.x0, y00, kerbEdge),
-        corner(r.x1, y10, kerbEdge),
-        corner(r.x1, r.y1, false),
-        corner(r.x0, r.y1, false),
+        corner(r.x0, nearKerb ? kerbY(r.x0) : r.y0, nearKerb),
+        corner(r.x1, nearKerb ? kerbY(r.x1) : r.y0, nearKerb),
+        corner(r.x1, farKerb ? kerbY(r.x1) : r.y1, farKerb),
+        corner(r.x0, farKerb ? kerbY(r.x0) : r.y1, farKerb),
       ]);
     }
     for (var l = 0; l < lamps.length ~/ 2; l++) {
@@ -1347,10 +1479,10 @@ class _Draft {
 _Draft? _throat(_Site s, double y) {
   final p = s.draft();
   final flags = kSegThroat |
-      (s.ctx.crossesPavement(s.ctx.slot0) ? kSegCrossesPavement : 0) |
+      (s.ctx.crossesPavement(s.slot) ? kSegCrossesPavement : 0) |
       (s.truck ? kSegTruck : 0);
   final veh = s.truck ? kTruckMinVehLenM : kSegMinVehLenM;
-  final k = p.node(s.xK, -s.k, flags: kNodeKerb);
+  final k = p.node(s.xK, s.yK, flags: kNodeKerb);
   if (!s.bend) {
     final far = p.node(s.xJ, y);
     p.seg(k, far, SiteSegmentKind.driveway, s.throatMode, s.throatW,
@@ -1382,22 +1514,26 @@ _Draft? _throat(_Site s, double y) {
 bool _throatPave(_Draft p, double y1) {
   final s = p.site;
   final hw = s.throatW / 2;
-  if (y1 > kContainsInsetM + kGenEpsM &&
-      !s.profile.containsRect(
-          SiteRect(s.xJ - hw, kContainsInsetM, s.xJ + hw, y1))) {
+  // The on-parcel stretch, from just inside the boundary the drive crosses to
+  // the drive's far end; nothing to test where the drive ends before it.
+  if (s.dirY * (y1 - s.inLotY) > kGenEpsM &&
+      !s.profile.containsRect(SiteRect(s.xJ - hw, math.min(y1, s.inLotY),
+          s.xJ + hw, math.max(y1, s.inLotY)))) {
     return false;
   }
   if (!s.bend) {
-    p.paves.add(SiteRect(s.xJ - hw, -s.k, s.xJ + hw, y1));
+    p.paves.add(SiteRect(s.xJ - hw, math.min(s.yK, y1), s.xJ + hw,
+        math.max(s.yK, y1)));
     return true;
   }
-  // The normal (nu, nv) turned a quarter clockwise points along +x.
+  // The normal (nu, nv) turned a quarter clockwise points along +x. Only a
+  // street entry bends (§3.8), where `y_K` reads −k.
   final px = s.nv * hw, py = -s.nu * hw;
   p.quad
     ..[0] = s.xK - px
-    ..[1] = -s.k - py
+    ..[1] = s.yK - py
     ..[2] = s.xK + px
-    ..[3] = -s.k + py
+    ..[3] = s.yK + py
     ..[4] = s.xJ + px
     ..[5] = py
     ..[6] = s.xJ - px
@@ -1488,7 +1624,9 @@ _Modules _modulesOf(int m, bool single, {bool firstCentred = false}) {
 // ---- F1 / F2: aisles along x -------------------------------------------------
 
 CarParkCandidate _alongX(_Site s, CarParkFamily fam, int m, bool single) {
-  final rear = fam == CarParkFamily.rear;
+  // F2 and F2a share one block: modules laid from the REAR toward the frontage,
+  // the envelope in front of them. Only the drive's origin differs.
+  final rear = fam != CarParkFamily.front;
   final bias =
       rear && s.widthM < kScoreRearBiasMaxWidthM ? kScoreRearBias : 0.0;
   final mod = _modulesOf(m, single);
@@ -1508,7 +1646,14 @@ CarParkCandidate _alongX(_Site s, CarParkFamily fam, int m, bool single) {
     run = s.runAt(s.xJ, blockY1);
   } else {
     final c = s.columnOf(s.xJ);
-    yRear = c < 0 ? 0 : s.depths[c];
+    final far = c < 0 ? 0.0 : s.depths[c];
+    // An alley drive meets module 0's aisle, so the block moves FORWARD off the
+    // rear edge until that aisle is 7 m of drive from the kerb (V5), exactly as
+    // F1's moves back off the frontage. A street drive runs the length of the
+    // lot and never needs it.
+    yRear = s.fromAlley
+        ? far - math.max(0.0, (far - s.yT) - mod.aisles.first)
+        : far;
     blockY0 = yRear - depth;
     blockY1 = yRear;
     if (blockY0 < kDepthProfileMarginM - kGenEpsM) {
@@ -1519,12 +1664,17 @@ CarParkCandidate _alongX(_Site s, CarParkFamily fam, int m, bool single) {
   if (run == null) return _rejected(fam, m, single, _kNoBlock);
   final (xL, xR) = run;
   // Aisles in ascending frame y (rank 0 nearest the frontage): the modules'
-  // own order at the front, reversed at the rear. The drive meets rank 0.
+  // own order at the front, reversed at the rear.
   int aisleOfRank(int r) => rear ? nA - 1 - r : r;
   int rankOfAisle(int a) => rear ? nA - 1 - a : a;
   double aisleY(int a) => yOf(mod.aisles[a]);
-  final yJ = aisleY(aisleOfRank(0));
-  if (yJ < s.yT - kGenEpsM) return _rejected(fam, m, single, _kNoBlock);
+  // The drive meets the aisle nearest its own entry: the frontage-most one from
+  // the street, the rear-most one from the alley behind.
+  final dr = s.fromAlley ? nA - 1 : 0;
+  final yJ = aisleY(aisleOfRank(dr));
+  if (s.dirY * (yJ - s.yT) < -kGenEpsM) {
+    return _rejected(fam, m, single, _kNoBlock);
+  }
   {
     // The bound before any allocation: the block, its drive and its rows.
     final throatM = s.throatLenTo(yJ);
@@ -1537,9 +1687,10 @@ CarParkCandidate _alongX(_Site s, CarParkFamily fam, int m, bool single) {
       bx0 = hasL ? xL : s.xJ - s.throatW / 2;
       bx1 = hasR ? xR : s.xJ + s.throatW / 2;
     } else {
+      // The two cross aisles span every aisle, whichever one the drive meets.
       drive = throatM +
           (xR - xL - kCrossAisleWidthM) * m +
-          2 * (aisleY(aisleOfRank(nA - 1)) - yJ);
+          2 * (aisleY(aisleOfRank(nA - 1)) - aisleY(aisleOfRank(0)));
       bx0 = xL;
       bx1 = xR;
     }
@@ -1555,7 +1706,7 @@ CarParkCandidate _alongX(_Site s, CarParkFamily fam, int m, bool single) {
   final p = _throat(s, yJ);
   if (p == null) return _rejected(fam, m, single, 'bend under a segment');
   const ha = kAisleTwoWayWidthM / 2;
-  if (!_throatPave(p, yJ - ha)) {
+  if (!_throatPave(p, yJ - s.dirY * ha)) {
     return _rejected(fam, m, single, 'throat leaves the lot', plan: p);
   }
   final j = p.throatFar;
@@ -1566,8 +1717,14 @@ CarParkCandidate _alongX(_Site s, CarParkFamily fam, int m, bool single) {
       SiteLaneMode.twoWay, kAisleTwoWayWidthM,
       flags: aisleFlags, maxVehLenM: veh);
 
+  // The row's frame y edges, and whether it lies in the drive's own zone: the
+  // stretch the drive crosses between its kerb and the aisle it meets, where
+  // §3.5's throat exclusion holds a stall clear of `x_J ± (throatW/2 + 1)`.
   double rowY1(int r) => rear ? yRear - mod.rowQ[2 * r] : base + mod.rowQ[2 * r + 1];
-  bool inFront(int r) => rowY1(r) <= yJ - ha + kGenEpsM;
+  double rowY0(int r) => rear ? yRear - mod.rowQ[2 * r + 1] : base + mod.rowQ[2 * r];
+  bool inFront(int r) => s.dirY > 0
+      ? rowY1(r) <= yJ - ha + kGenEpsM
+      : rowY0(r) >= yJ + ha - kGenEpsM;
   double rowO(int r) => (rear ? -mod.rowSide[r] : mod.rowSide[r]).toDouble();
 
   double paveX0, paveX1;
@@ -1625,8 +1782,8 @@ CarParkCandidate _alongX(_Site s, CarParkFamily fam, int m, bool single) {
     if (s.xJ - xW < kSegMinLenM || xE - s.xJ < kSegMinLenM) {
       return _rejected(fam, m, single, 'throat meets a cross aisle', plan: p);
     }
-    // Nodes by rank: west, east (rank 0's west and east are the ring's first
-    // aisle's ends either side of J).
+    // Nodes by rank: west, east (the drive's rank's west and east are the ends
+    // of the aisle it meets, either side of J).
     final nodeBase = p.nodeCount;
     for (var i = 0; i < nA; i++) {
       final y = aisleY(aisleOfRank(i));
@@ -1636,11 +1793,12 @@ CarParkCandidate _alongX(_Site s, CarParkFamily fam, int m, bool single) {
     }
     int west(int i) => nodeBase + 2 * i;
     int east(int i) => nodeBase + 2 * i + 1;
-    final segBefore = aisle(west(0), j);
-    final segAfter = aisle(j, east(0));
-    final segBase = p.segCount; // rank i ≥ 1: segBase + i − 1
-    for (var i = 1; i < nA; i++) {
-      aisle(west(i), east(i));
+    final segBefore = aisle(west(dr), j);
+    final segAfter = aisle(j, east(dr));
+    final segOfRank = Int32List(nA);
+    for (var i = 0; i < nA; i++) {
+      if (i == dr) continue;
+      segOfRank[i] = aisle(west(i), east(i));
     }
     for (var i = 0; i + 1 < nA; i++) {
       aisle(west(i), west(i + 1));
@@ -1657,7 +1815,7 @@ CarParkCandidate _alongX(_Site s, CarParkFamily fam, int m, bool single) {
       final rank = rankOfAisle(mod.rowAisle[r]);
       final oy = rowO(r);
       final y = aisleY(mod.rowAisle[r]);
-      if (rank == 0) {
+      if (rank == dr) {
         final front = inFront(r);
         final dJ = s.xJ - xW;
         p.pack(
@@ -1683,7 +1841,7 @@ CarParkCandidate _alongX(_Site s, CarParkFamily fam, int m, bool single) {
       } else {
         final len = xE - xW;
         p.pack(
-            seg: segBase + rank - 1, ax: xW, ay: y, tx: 1, ty: 0, ox: 0,
+            seg: segOfRank[rank], ax: xW, ay: y, tx: 1, ty: 0, ox: 0,
             oy: oy, len: len, lo: cross, hi: len - cross, row: r);
       }
     }

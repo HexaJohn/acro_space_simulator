@@ -665,12 +665,17 @@ class _Check {
       }
       return;
     }
+    // §2.4 asks a network plan for ≥ 1 in-capable and ≥ 1 out-capable CUT
+    // join — not that EVERY join be a cut. A kerbside join alongside is a real
+    // plan shape: R8's alley car park keeps slot 0 as the frontage, kerbside
+    // and uncut, so its street wall stays an unbroken run of shopfronts, and
+    // drives in and out through the alley cut on slot 3. It carries no kerb
+    // node or throat, so V5 passes it over; it is no lane, so V7 and V13 do
+    // too; and it contributes to neither role below, so a plan of kerbside
+    // joins alone is still rejected (no in-capable and no out-capable cut).
     var canIn = false, canOut = false;
     for (var j = 0; j < p.joinCount; j++) {
-      if (!p.joinIsCut(j)) {
-        bad(SiteInvariant.v4Roles, 'network plan join $j is kerbside');
-        continue;
-      }
+      if (!p.joinIsCut(j)) continue;
       canIn |= p.joinCanIn(j);
       canOut |= p.joinCanOut(j);
     }
