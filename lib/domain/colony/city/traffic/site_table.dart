@@ -315,12 +315,33 @@ class SiteTable {
   }
 
   /// The first stall in [row]'s order for in-join [join] with neither a car
-  /// nor a reservation, or −1: full, kerbside or not current.
+  /// nor a reservation, or −1: full, kerbside, not current, or no way in.
+  ///
+  /// A join with no LANE behind it answers nothing. [stallOrder] is filled
+  /// for every join of the plan so a read never has to check first, but
+  /// [_orders] puts a block in drive order only where an in-lane stands
+  /// behind the join; the rest are left in plain index order, whose "first"
+  /// stall is the first stall of no approach at all. Handing one back would
+  /// give a caller that forgot to ask the plan a BINDING reservation at a
+  /// gate no car can drive through — which is what R8's alley-backed plan
+  /// invites: its street frontage is a kerbside `SiteJoinRole.none` join
+  /// that exists to be a shopfront (site-access §2.3, §2.4 V4), and the lot
+  /// fills from the alley alone (agent-traffic §3.10). The role is refused
+  /// with it, so a roleless join that somehow carried a lane is refused too.
+  ///
+  /// What is NOT refused is an out-capable join that lost its in role: the
+  /// stalls are still there and the GATE is what turns a car away (§7.6's
+  /// lost-role case). A join past the plan's own joins has no order block at
+  /// all — its offset runs into the next row's.
   int firstFreeStall(int row, int join) {
     if (!isRowLive(row)) return -1;
     if (rowFlags[row] & (kRowLimbo | kRowNotCurrent) != 0) return -1;
     final n = lotCap[row];
     if (n <= 0 || join < 0) return -1;
+    final p = plan[row], g = lanes[row];
+    if (p == null || g == null || join >= p.joinCount) return -1;
+    if (g.inLane(join) < 0) return -1;
+    if (!p.joinCanIn(join) && !p.joinCanOut(join)) return -1;
     final o = orderBase[row] + join * stallCount[row];
     final base = stallBase[row];
     for (var i = 0; i < n; i++) {
