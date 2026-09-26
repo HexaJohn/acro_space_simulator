@@ -59,7 +59,11 @@ import '../parcel.dart';
 import '../site_access/site_access_plan.dart';
 import 'access_events.dart';
 import 'agent_frame.dart';
-import 'agent_kind.dart';
+// `agent_kind.dart` declares a [CitizenState] of its own, member for member
+// the same as `citizen_table.dart`'s. The citizens' own table is the one whose
+// column holds the index, so that is the one this file means (as
+// `citizen_trips.dart` does).
+import 'agent_kind.dart' hide CitizenState;
 import 'agent_traffic_readout.dart';
 import 'agents_codec.dart';
 import 'building_table.dart';
@@ -315,6 +319,14 @@ class CityAgents {
   void collectSiteBuffers(Map<String, Object> into) =>
       _core?.collectSiteBuffers(into);
 
+  /// Every buffer the CITIZEN half keeps from one sub-step to the next, by
+  /// name into [into], for the same gate (§15.2, slice 3): the citizen
+  /// table's columns, its wheel and its per-building lists, the matching's
+  /// two scratch arrays, and the activity loop's own four. A sync may grow
+  /// any of them; a sub-step may not replace one.
+  void collectCitizenBuffers(Map<String, Object> into) =>
+      _core?.collectCitizenBuffers(into);
+
   /// Sends parked car [car] away now: a one-way trip from the building it
   /// stands at to a job drawn on the demand stream, departing from THAT car
   /// (§17's hooks; A9's tandem shuffle). Returns the trip's handle, or
@@ -342,13 +354,18 @@ class CityAgents {
   /// population — §6.2's one-tick contract, behind
   /// `AgentTuning.citizensOwnPopulation` (§0 Q5).
   ///
-  /// FALSE while slice 3 is being built: the ledger and the realisation are
-  /// package D's, and until they land `city_sim`'s own budget must go on
-  /// writing `population` or a colony would stop growing. Package E turns it
-  /// on — `_core != null && AgentTuning.citizensOwnPopulation` — in the same
-  /// commit as the E8 and E9 hooks that read it, so the two sides of the
-  /// contract never disagree.
-  bool get ownsPopulation => false;
+  /// The tables must EXIST for it to be true, because a ledger nobody spends
+  /// is a colony that stops growing: `CitySim`'s mortality and migration
+  /// (E8, E9) read this at the top of a tick, and the tables are built by the
+  /// `agents.advance` further down the same tick. So the very first tick of a
+  /// colony that has just switched its agents on takes the scalar path, and
+  /// the `syncExternal` at the top of that first advance reads what it wrote
+  /// as an outside write — which is exactly §14.4's "citizens reconciled from
+  /// `population`, through the external budget".
+  ///
+  /// With the knob off the citizens still live and still make trips; what
+  /// changes is only WHO writes `population` (§0 Q5's bisect).
+  bool get ownsPopulation => _core != null && AgentTuning.citizensOwnPopulation;
 
   /// Vehicles on the road.
   int get liveVehicles => _core?.table.liveCount ?? 0;
@@ -552,13 +569,22 @@ class CityAgents {
     final held = _saved;
     if (held != null) {
       return AgentsCodec.encode(
-          enabled: _enabled, cars: core?.parked, world: core, held: held);
+          enabled: _enabled,
+          cars: core?.parked,
+          world: core,
+          citizens: core?.citizens,
+          census: core,
+          population: core?.population,
+          held: held);
     }
     if (core == null) return AgentsCodec.encode(enabled: _enabled);
     return AgentsCodec.encode(
         enabled: _enabled,
         cars: core.parked,
         world: core,
+        citizens: core.citizens,
+        census: core,
+        population: core.population,
         held: core.pendingBlock,
         heldRows: core.pendingRows,
         heldCount: core.pendingCount);
@@ -571,12 +597,25 @@ class CityAgents {
   void restore(Object? json) {
     final saved = AgentsCodec.decode(json);
     enabled = saved?.enabled ?? false;
-    _saved = enabled && saved != null && saved.cars.count > 0 ? saved : null;
+    // Anything a load has to PUT DOWN is worth holding, and from slice 3 that
+    // is no longer only cars: a colony saved with people in it and nothing
+    // parked — everyone at home on foot, every car garaged nowhere — would
+    // otherwise be resumed as an empty town, and its budgets with it. The
+    // block goes to the first advance whenever it carries citizens, budgets
+    // or a realisation stream, as well as when it carries cars.
+    _saved = enabled && saved != null && _worthPlacing(saved) ? saved : null;
     // A second load over a colony whose first one had not settled: the rows
     // still waiting belong to the save that is being replaced, so they go
     // with it rather than being placed into the new colony's sites.
     _core?.dropPending();
   }
+
+  /// Whether [saved] holds anything the first advance has to put down.
+  static bool _worthPlacing(SavedAgents saved) =>
+      saved.cars.count > 0 ||
+      saved.citizens.count > 0 ||
+      saved.ledgerJson != null ||
+      saved.popJson != null;
 
   /// The cars a load is still holding, taken once: `null` after. What the
   /// first advance cannot place yet it holds itself, by row, and retries as
@@ -603,6 +642,29 @@ class CityAgents {
     final to = core.buildings.handleOfSite(toSite);
     if (from == null || to == null || from == to) return SlotPool.none;
     return core.commutes.force(from, to, kind: kind, purpose: purpose);
+  }
+
+  /// Settles citizens on the colony (§17's population hook): [share] of the
+  /// homes its buildings offer, plus [people] outright, owed to the
+  /// MIGRATION budget and realised over the advances after this, at §6.2's
+  /// arrival cap. Returns how many were owed, and 0 while the agents are off.
+  ///
+  /// The migration budget and not the external one, because only a migration
+  /// arrival draws `carOwnership` and has a car minted for it (§6.6, and §0's
+  /// "reconciliation never mints a car"). A test that wrote `city.population`
+  /// instead would get a town of people who all walk.
+  ///
+  /// It primes first, so the number can be measured against the buildings as
+  /// the table actually has them — a colony with no houses settles nobody,
+  /// which is what every site and lane fixture wants and gets for free.
+  int debugSettle({double share = 0, double people = 0}) {
+    if (!enabled) return 0;
+    final core = _core ??= _Core(this);
+    core.prime();
+    final owed = core.housingTotal * share + people;
+    if (!(owed > 0)) return 0;
+    core.ledger.addMigration(owed);
+    return owed.floor();
   }
 
   /// Stops vehicle [handle] where it stands, for good (§17's `stall`).
@@ -741,7 +803,10 @@ class _Core
         SiteChangeSink,
         SiteSink,
         CarSaveSource,
-        CarRestoreSink {
+        CarRestoreSink,
+        CitizenWorld,
+        CitizenSaveSource,
+        CitizenRestoreSink {
   _Core(this.agents)
       : city = agents.city,
         source = CityNetSource(agents.city),
@@ -808,17 +873,33 @@ class _Core
 
   // ---- The citizens (slice 3, §6.2–§6.4) --------------------------------------
   //
-  // Built with the core and wired to nothing yet: package E runs the
-  // realisation in `_subStep`, the matching in `_syncBuildings` and the
-  // adoption sweep over legacy-owned cars, and folds all three into
-  // [digest]. Until then they are empty tables, so the colony behaves
-  // exactly as it did — which is what keeps the committed pre-citizens save
-  // fixture passing while the slice is built.
+  // The realisation runs in `_subStep` on each whole agent second, the
+  // matching and the adoption sweep in `_syncBuildings`, and all of them
+  // fold into [digest]. A colony that never settles anybody keeps empty
+  // tables and behaves exactly as it did before the slice, which is what
+  // keeps the committed pre-citizens save fixture passing.
 
   final CitizenTable citizens = CitizenTable();
   final PopulationLedger ledger = PopulationLedger();
   late final CitizenMatch match;
   late final CitizenPopulation population;
+
+  /// Per DENSE index of the block a load is putting down: the citizen handle
+  /// it came back as ([AgentsCodec.restoreCitizens]), which is what a
+  /// restored `citizen`-owned car row's `ownerIdx` names (§0 Q4). Empty
+  /// outside a restore, and dropped as soon as the rows are down.
+  Int32List _denseCitizen = Int32List(0);
+
+  /// The homes the colony's buildings offer, as the table has them now: what
+  /// `CityAgents.debugSettle` sizes a settlement against, and the only place
+  /// the facade sums a building column.
+  int get housingTotal {
+    var n = 0;
+    for (var sl = 0; sl < buildings.highWater; sl++) {
+      if (buildings.isSlotLive(sl)) n += buildings.housing[sl];
+    }
+    return n;
+  }
 
   // ---- The sites (T4a) --------------------------------------------------------
 
@@ -840,6 +921,12 @@ class _Core
   /// site business. Until it has, the digest is exactly what it was before
   /// T4a, so a colony without plans agrees with its own old history.
   bool _siteState = false;
+
+  /// Whether this colony has any CITIZEN state to fold into [digest]: anyone
+  /// who has ever lived here, or a budget that still owes a person. The same
+  /// rule as [_siteState], for the same reason — a colony nobody lives in
+  /// agrees with its own pre-slice-3 history.
+  bool get _peopleState => citizens.highWater > 0 || !ledger.isEmpty;
 
   /// Per vehicle slot, for a car bound for a kerb slot ahead (D17 step 2):
   /// the building it is parking for. `SiteVehicles.row` is a SITE row and
@@ -936,9 +1023,21 @@ class _Core
 
   void advance(double dt) {
     prime();
+    // §6.2's one-tick contract, both ends of it. At the TOP: whatever moved
+    // `population` that the agents did not — a revolt, a disaster, a relief
+    // crew, a test, a load — is taken as one delta, before a sub-step can
+    // spend it, so an outside write is never read twice and never read half
+    // way through being realised.
+    ledger.syncExternal(city.population);
     clock.feed(dt);
     while (clock.takeStep()) {
       _subStep();
+    }
+    // At the END: the people who now exist, plus what the budgets hold below
+    // one of them. Everything `CitySim` read from the agents this tick was
+    // the PREVIOUS advance's; this is what the next tick reads.
+    if (agents.ownsPopulation) {
+      city.population = ledger.writeBack(citizens.liveCount);
     }
   }
 
@@ -1054,10 +1153,33 @@ class _Core
     // reads the log after every sub-step (§5.5).
     events.beginStep();
     commutes.nowUs = now;
+    // Rush hour is the COLONY's clock, read afresh every sub-step: §6.1 has
+    // `dayPhase` modulate the departure rates, and a loop that never read it
+    // would commute at the flat rate all day (§6.4's two divided rows).
+    commutes.dayPhase = city.dayPhase;
     planner.beginStep(now);
     if (now % syncUs == 0) _syncBuildings();
-    // 1. Wake: the demand, once per agent second.
-    if (clock.onWholeSecond) commutes.wake(now);
+    // 1. Wake (§5.2 step 1): the wheel's wake-ups and the ledger's
+    // realisation, both EVERY sub-step. §5.2 puts only the dispatch and the
+    // schedules on the whole second; §6.2 realises "on each sub-step in which
+    // a budget holds a whole person", and it has to, because the write-back
+    // at the end of every advance counts the people who EXIST — a person owed
+    // and not yet realised is not in `population`, so realising a second
+    // behind the write-back would make a colony's population flicker by
+    // whatever the budget was holding.
+    //
+    // Migration before external, so a sub-step that can spawn only a few
+    // people spends the budget that MINTS a car before the one that only
+    // adopts (§0's reconciliation rule). A citizen realised here is due now,
+    // so the activity loop below picks them up in this very sub-step.
+    population.realise(now, this, external: false);
+    population.realise(now, this, external: true);
+    // Then the activity loop. Also every sub-step: the wheel is what says who
+    // is due, and its buckets are half a second (§2.5). Waking only on the
+    // whole second would leave four sub-steps in five unread and throttle the
+    // colony's whole demand five-fold — the wake-ups would still be served,
+    // a second late and in bursts of `maxSpawnsPerStep`.
+    commutes.wake(now);
     // 2. The spawn queue, then the path pump (whose paths spawn too).
     planner.spawnReady(now, commutes);
     if (pending == null) {
@@ -1485,6 +1607,201 @@ class _Core
     _syncUtils = city.utils.length;
     _syncCells = city.grown.length;
     _syncGraph = lg;
+    _syncCitizens();
+  }
+
+  /// Who lives where and who works where, brought back to the buildings the
+  /// sync just found (§6.2's invariants, §6.3), and then the legacy cars
+  /// offered round (§0's adoption).
+  ///
+  /// The order is package B's and it is not interchangeable: the two
+  /// EVICTIONS run first, so that `Σ residents ≤ Σ housing` and
+  /// `Σ workers ≤ Σ jobs` hold before anything is handed out; then the
+  /// re-housing, which is what fills the vacancies the eviction just made;
+  /// then the job matching, which needs a citizen to have a home before it
+  /// will give them a job. Adoption last, because a car is offered to a
+  /// carless RESIDENT and the previous four decide who lives there.
+  ///
+  /// A sync may allocate and a sub-step may not (§15.2): this is a sync, and
+  /// the growth it can cause — the per-building lists, the matching's
+  /// scratch — happens here and nowhere else.
+  void _syncCitizens() {
+    // §6.6's ownership share is the world's, and the colony can be terraformed
+    // under it, so it is read at every sync rather than fixed at the first.
+    population.sealed = !city.breathable;
+    citizens.ensureBuildings(buildings.capacity);
+    match.evictOverHoused();
+    match.layOffOverStaffed();
+    match.rehouse(AgentTuning.rehousePerSync);
+    match.matchJobs(AgentTuning.jobMatchPerSync);
+    population.adoptLegacy(clock.timeUs, parked);
+  }
+
+  // ---- The world the realisation acts in (§6.2, §6.6) -------------------------
+
+  /// §0's adoption for one arrival: the first free legacy car standing at
+  /// [buildingSlot], handed to the person who has just moved in there.
+  ///
+  /// The interface passes a building and not a citizen, and that is enough,
+  /// because of WHEN it is called: `CitizenPopulation._arrive` spawns the
+  /// citizen, which appends them to that home's arrival list, and asks this
+  /// immediately after. So the newest resident of [buildingSlot] IS the
+  /// arrival asking, and they own nothing yet. Re-owning here and not in the
+  /// caller is what keeps §0's "never owned twice": the car's kind becomes
+  /// `citizen` in the same breath, so the next sweep will not offer it again.
+  @override
+  int adoptCarAt(int buildingSlot) {
+    final car = CitizenPopulation.freeLegacyCarAt(parked, buildingSlot);
+    if (car == SlotPool.none) return SlotPool.none;
+    final taker = citizens.newestResident(buildingSlot);
+    if (taker == SlotPool.none) return SlotPool.none;
+    parked.reown(car, CarOwnerKind.citizen, taker);
+    _siteState = true;
+    return car;
+  }
+
+  /// §6.6: [citizen]'s new car, parked at home [buildingSlot] — the home's
+  /// own lot if it has a stall going, else a kerb slot within
+  /// `homeCarRadiusM` of its access, else garaged, which is a car that is
+  /// never drawn and comes back at the access when its owner drives.
+  ///
+  /// The variant is drawn whatever becomes of the car, and before the search,
+  /// so the realisation's stream does not depend on how full the colony's
+  /// lots happen to be (§17.4). Nothing here counts a `SiteStats` parking:
+  /// those count MANOEUVRES — a car that drove in and parked — and a car that
+  /// was bought at home made none.
+  @override
+  int mintCarAt(int citizen, int buildingSlot) {
+    final variant = population.rng.nextU32() & 0xFF;
+    final kind = AgentKind.car.index;
+    final row = sites.rowOfBuilding(buildingSlot);
+    final stall = row < 0 ? -1 : _freeStallOf(row);
+    if (stall >= 0) {
+      final p = sites.plan[row];
+      final key = p != null && stall < p.stallCount ? p.stallKey(stall) : 0;
+      final car = parked.parkLot(
+          building: buildingSlot,
+          row: row,
+          stall: stall,
+          stallKey: key,
+          ownerKind: CarOwnerKind.citizen,
+          owner: citizen,
+          kind: kind,
+          variant: variant);
+      if (car != SlotPool.none) {
+        sites.occupy(row, stall, car);
+        _siteState = true;
+        return car;
+      }
+    }
+    final slot = _homeKerb(buildingSlot);
+    if (slot >= 0) {
+      final car = parked.parkKerb(
+          building: buildingSlot,
+          edge: kerbs.slotEdge(slot),
+          slot: slot,
+          side: kerbs.slotSide(slot),
+          ownerKind: CarOwnerKind.citizen,
+          owner: citizen,
+          kind: kind,
+          variant: variant);
+      if (car != SlotPool.none) {
+        kerbs.occupy(slot, car);
+        _siteState = true;
+        return car;
+      }
+    }
+    final car = parked.garage(
+        building: buildingSlot,
+        ownerKind: CarOwnerKind.citizen,
+        owner: citizen,
+        kind: kind,
+        variant: variant);
+    if (car == SlotPool.none) return SlotPool.none;
+    _siteState = true;
+    return car;
+  }
+
+  /// The first free stall of site [row], in the order of its first in-capable
+  /// join, or −1. A join's order runs over every stall of the lot, so one
+  /// in-join answers for the whole of it; a lot nobody can drive into is a
+  /// lot no car can be parked on by hand either.
+  int _freeStallOf(int row) {
+    if (!sites.isRowLive(row)) return -1;
+    final p = sites.plan[row];
+    if (p == null) return -1;
+    for (var j = 0; j < p.joinCount; j++) {
+      if (!p.joinCanIn(j)) continue;
+      final s = sites.firstFreeStall(row, j);
+      if (s >= 0) return s;
+    }
+    return -1;
+  }
+
+  /// The free kerb slot nearest building slot [buildingSlot]'s access and
+  /// within `homeCarRadiusM` of it, on the kerb that access is on, or −1
+  /// (§6.6's 150 m). Travel arc along one edge, which beside a house IS the
+  /// walk to the car.
+  int _homeKerb(int buildingSlot) {
+    final r = _accessRowOf(buildingSlot);
+    if (r < 0) return -1;
+    final edge = buildings.accEdge[r];
+    if (edge < 0) return -1;
+    final t = buildings.accT[r].toDouble();
+    final side = buildings.accBits[r] & kAccLeft == 0 ? 1 : 0;
+    final slot = kerbs.nearestFree(edge, t, side);
+    if (slot < 0) return -1;
+    return (kerbs.slotT(slot) - t).abs() <= AgentTuning.homeCarRadiusM
+        ? slot
+        : -1;
+  }
+
+  /// An emigrant's or a dead citizen's car out of the world: whatever it held
+  /// — a stall, a kerb slot — goes back with it, or the place would stay
+  /// taken by a car nobody owns.
+  @override
+  void releaseCar(int car) {
+    if (!parked.isLive(car)) return;
+    final i = SlotPool.slotOf(car);
+    switch (CarWhere.values[parked.where[i]]) {
+      case CarWhere.lot:
+        final row = parked.row[i];
+        if (sites.isRowLive(row)) sites.vacate(row, parked.stall[i]);
+      case CarWhere.kerb:
+        final slot = parked.slot[i];
+        if (slot >= 0) kerbs.release(slot);
+      case CarWhere.garaged:
+        break;
+    }
+    parked.remove(car);
+  }
+
+  /// §0 Q6's interim for `movingIn`: the arrival is simply AT their new home
+  /// in the sub-step they were realised, counted as a walked leg, until
+  /// slice 8 drives them in from a stub. The realisation itself sets their
+  /// state and their wake, so there is nothing else to place.
+  @override
+  void placeAtHome(int citizen, int home) => commutes.instantTrips++;
+
+  /// An emigrant is gone at once (§0 Q6), so a vehicle they were driving must
+  /// not be left on the road owned by a row that is about to be freed: it
+  /// leaves where it stands, and its trip closes with it.
+  @override
+  void leftTown(int citizen) {
+    if (!citizens.isLive(citizen)) return;
+    final v = citizens.agent[CitizenTable.slotOf(citizen)];
+    if (v >= 0 && table.isLive(v)) {
+      mover.despawn(v, DespawnReason.edit, this);
+    }
+  }
+
+  /// §6.2: a body on the building the death was drawn at — their home, or,
+  /// for the homeless, the building they slept nearest, which the realisation
+  /// has already chosen between. Slice 5's hearses serve it.
+  @override
+  void corpseAt(int buildingSlot) {
+    if (buildingSlot < 0 || buildingSlot >= buildings.capacity) return;
+    buildings.corpses[buildingSlot] += 1;
   }
 
   // ---- The path queue's ends and results --------------------------------------
@@ -1517,21 +1834,54 @@ class _Core
     return buildings.addGoals(request.dest, ends);
   }
 
-  /// The origin of [commuter]'s trip when its car stands at a KERB: that
-  /// slot's `(edge, T)`, in the lane beside it. False for a trip with no car,
-  /// or one whose car is on a stall or garaged — those leave from the
-  /// building's own access rows.
-  bool _carOrigin(int commuter, LaneGraph g, PathEnds ends) {
-    final car = commutes.carOf(commuter);
+  /// True when [trip]'s own car said where the search starts (slice3 §3).
+  ///
+  /// A car at a KERB leaves from its slot's `(edge, T)` in that slot's lane;
+  /// a car on a STALL leaves by ITS OWN site's out-joins; a GARAGED car from
+  /// the building it is garaged at — never from the trip's origin, which is
+  /// only where the PERSON is. False only for a trip with no live car, and
+  /// then the building's access rows answer as they always did.
+  ///
+  /// It used to answer for the kerb alone, and a car on a stall fell through
+  /// to `buildings.addOrigins(request.origin, …)`. That held only while every
+  /// car parked at a site it belonged to. With citizens it stops holding —
+  /// a car left at work, a car adopted at another home, an errand chain — and
+  /// `TripPlanner._spawn` then found no out-join at the route's first edge,
+  /// removed the parked row and spawned the vehicle at the ORIGIN building's
+  /// access: the car teleported across town and its stall silently freed.
+  /// The two halves close it together: the search starts where the car is,
+  /// and the spawn refuses a route that does not (trip_planner.dart).
+  bool _carOrigin(int trip, LaneGraph g, PathEnds ends) {
+    final car = commutes.carOf(trip);
     if (car < 0 || !parked.isLive(car)) return false;
     final i = SlotPool.slotOf(car);
-    if (parked.where[i] != CarWhere.kerb.index) return false;
-    final slot = parked.slot[i];
-    if (slot < 0 || slot >= kerbs.slotCount) return false;
-    final lane = kerbs.slotLane(slot);
-    if (lane < 0 || lane >= g.laneCount) return false;
-    ends.addOrigin(g.laneEdge[lane], kerbs.slotT(slot), lane: lane);
-    return true;
+    switch (CarWhere.values[parked.where[i]]) {
+      case CarWhere.kerb:
+        final slot = parked.slot[i];
+        if (slot < 0 || slot >= kerbs.slotCount) return false;
+        final lane = kerbs.slotLane(slot);
+        if (lane < 0 || lane >= g.laneCount) return false;
+        ends.addOrigin(g.laneEdge[lane], kerbs.slotT(slot), lane: lane);
+        return true;
+      case CarWhere.lot:
+        // The building the SITE it stands on belongs to, which is the site
+        // whose out-joins the mover will drive it out by.
+        final row = parked.row[i];
+        if (!sites.isRowLive(row)) return false;
+        return _buildingOrigins(sites.building[row], ends);
+      case CarWhere.garaged:
+        // A garaged car appears at the building it is garaged at and at no
+        // other (§5.6), so that building's access rows are its origins.
+        return _buildingOrigins(parked.building[i], ends);
+    }
+  }
+
+  /// Building slot [buildingSlot]'s out-capable access rows as origins of
+  /// [ends]; false when it has none, or has gone.
+  bool _buildingOrigins(int buildingSlot, PathEnds ends) {
+    if (buildingSlot < 0 || buildingSlot >= buildings.highWater) return false;
+    if (!buildings.isSlotLive(buildingSlot)) return false;
+    return buildings.addOrigins(buildings.handleOf(buildingSlot), ends);
   }
 
   @override
@@ -1617,13 +1967,15 @@ class _Core
   ///
   /// Everything the parking needs of the trip is read BEFORE
   /// `CitizenTrips.arrived`, which clocks the traveller in and lets go of its
-  /// vehicle: whose car this is, and which way it was going.
+  /// vehicle: whose car this is, whose PERSON it is, and which way it was
+  /// going.
   void _arrive(int handle, int dest) {
     stats.arrived++;
     final sl = SlotPool.slotOf(handle);
     final commuter = table.owner[sl];
     final homeward = table.purpose[sl] == TripPurpose.homeward.index;
     final home = commutes.homeOf(commuter);
+    final citizen = commutes.citizenOf(commuter);
     final back = commutes.arrived(handle, clock.timeUs);
     if (back >= 0) {
       // An appended leg (§4.6): it waits at its stop, in its lane, while the
@@ -1633,24 +1985,37 @@ class _Core
       _ask(handle, kRetargetTag);
       return;
     }
-    _park(handle, dest, commuter, homeward ? -1 : home, homeward);
+    _park(handle, dest, commuter, citizen, homeward ? -1 : home, homeward);
   }
 
   // ---- Parking (D17 steps 1–2, §7.5) ------------------------------------------
 
-  /// Where [handle]'s car stands from here. [commuter] is whose trip it was,
-  /// [carOwner] and [homeward] the opaque owner the car takes: a car left at
-  /// work belongs to the commuter that drove it, and names the home it came
-  /// from; a car brought home joins that home's pool, which is what the next
-  /// commute out of it takes (§0 Q3).
-  void _park(int handle, int dest, int commuter, int carOwner, bool homeward) {
+  /// Where [handle]'s car stands from here. [commuter] is whose trip row it
+  /// was and [citizen] the person on it (−1 for a forced trip);
+  /// [carOwner] and [homeward] are the LEGACY owner a citizen-less trip's car
+  /// takes: a car left at work belongs to the commuter that drove it and
+  /// names the home it came from; a car brought home joins that home's pool,
+  /// which is what the next commute out of it takes (§0 Q3).
+  ///
+  /// A CITIZEN's car is that citizen's, wherever it stops: `CarOwnerKind`
+  /// `citizen`, with the citizen's own handle. It must not go into the home's
+  /// pool even when it is standing at home, because a pooled car is one a
+  /// forced trip's `takePooled` may drive away — and driving away a car its
+  /// owner is about to leave in would strand them, or hand one car to two
+  /// people at once (§0's "never owned twice").
+  void _park(int handle, int dest, int commuter, int citizen, int carOwner,
+      bool homeward) {
     final g = lg;
     final sl = SlotPool.slotOf(handle);
-    final kind = homeward ? CarOwnerKind.homePool : CarOwnerKind.commuter;
-    siteCols.owner[sl] = carOwner;
+    final mine = citizen >= 0;
+    final kind = mine
+        ? CarOwnerKind.citizen
+        : (homeward ? CarOwnerKind.homePool : CarOwnerKind.commuter);
+    final owner = mine ? citizen : carOwner;
+    siteCols.owner[sl] = owner;
     siteCols.ownerKind[sl] = kind.index;
     if (g == null || !buildings.isLive(dest)) {
-      _garageFor(handle, dest, carOwner, kind, commuter);
+      _garageFor(handle, dest, owner, kind, commuter);
       return;
     }
     // Step 1: the destination's own stalls, reserved at the arrival gate.
@@ -1665,14 +2030,14 @@ class _Core
           siteMover.holdAtGate(handle, row, join, stall);
           // `holdAtGate` clears the site columns first, so the car's owner
           // goes back on after it.
-          siteCols.owner[sl] = carOwner;
+          siteCols.owner[sl] = owner;
           siteCols.ownerKind[sl] = kind.index;
           _siteState = true;
           return;
         }
       }
     }
-    _kerbOrGarage(handle, dest, carOwner, kind, commuter);
+    _kerbOrGarage(handle, dest, owner, kind, commuter);
   }
 
   /// Step 2: the first free, unmasked kerb slot ahead on the arrival edge,
@@ -1826,6 +2191,9 @@ class _Core
     final commuter = table.owner[sl];
     final dest = commutes.destOfVehicle(handle);
     final home = commutes.homeOf(commuter);
+    // Whose person it was, read before the trip is told: a citizen's car is
+    // theirs wherever it ends up, exactly as at a parking (see [_park]).
+    final citizen = commutes.citizenOf(commuter);
     final kind = table.kind[sl], variant = table.variant[sl];
     _releaseSite(sl);
     commutes.despawned(handle, clock.timeUs);
@@ -1835,8 +2203,9 @@ class _Core
     if (!commutes.isLive(commuter) || commutes.carOf(commuter) >= 0) return;
     final car = parked.garage(
         building: buildings.isLive(dest) ? SlotPool.slotOf(dest) : -1,
-        ownerKind: CarOwnerKind.commuter,
-        owner: home,
+        ownerKind:
+            citizen >= 0 ? CarOwnerKind.citizen : CarOwnerKind.commuter,
+        owner: citizen >= 0 ? citizen : home,
         kind: kind,
         variant: variant);
     if (car == SlotPool.none) return;
@@ -1863,12 +2232,20 @@ class _Core
   }
 
   /// Room in the facade's own per-vehicle columns, as the tables grow.
+  ///
+  /// [_gaveUp] is sized here rather than grown where it is written (§15.2:
+  /// buffers sized by capacity, never in the tick). A sub-step can hand back
+  /// as many cars as it has vehicles held at gates, and a busy colony's
+  /// worst sub-step is not knowable from its first: doubling it on demand put
+  /// an allocation inside the window the gate weighs.
   void _ensureCols() {
     final n = table.capacity;
     if (_kerbFor.length >= n) return;
     _kerbFor = Int32List(n)
       ..fillRange(0, n, -1)
       ..setRange(0, _kerbFor.length, _kerbFor);
+    _gaveUp = Int32List(n * _gaveUpStride)
+      ..setRange(0, _gaveUp.length, _gaveUp);
   }
 
   // ---- The spawn sink, for the site mover's lost routes ------------------------
@@ -1942,11 +2319,10 @@ class _Core
     // the step itself runs after the mover's walk ([_drainGiveUps]).
     if (!table.isLive(handle)) return;
     final sl = SlotPool.slotOf(handle);
-    if (_gaveUpCount * _gaveUpStride >= _gaveUp.length) {
-      final n = _gaveUp.isEmpty ? 4 * _gaveUpStride : _gaveUp.length * 2;
-      _gaveUp = Int32List(n)
-        ..setRange(0, _gaveUpCount * _gaveUpStride, _gaveUp);
-    }
+    // One row per vehicle is always enough — a car gives up at most once a
+    // sub-step — and [_ensureCols] has already made room for every slot the
+    // table can hand out.
+    if (_gaveUpCount * _gaveUpStride >= _gaveUp.length) return;
     final o = _gaveUpCount * _gaveUpStride;
     _gaveUp[o] = handle;
     _gaveUp[o + 1] = commutes.destOf(table.owner[sl]);
@@ -2278,10 +2654,55 @@ class _Core
     _pendingCount = 0;
   }
 
-  /// The first pass of a load, over every row of [saved].
+  /// The first pass of a load: the PEOPLE first, then every row of [saved].
+  ///
+  /// The order is forced by §0 Q4's one direction. A `citizen`-owned car row
+  /// carries the DENSE index of the block's `cit` table, and the column that
+  /// says which car a citizen owns is written by whoever places the car —
+  /// so the citizens have to exist, with handles, before the first car row is
+  /// read. The budgets go back at the same moment: a colony resumed without
+  /// its `lastWritten` would read its whole population as an outside write on
+  /// the very first `syncExternal` and reconcile a second town on top of the
+  /// one it just restored (population_ledger.dart).
   void _placeSavedCars(SavedAgents saved) {
     _pendingUntilUs = clock.timeUs + usOf(kRestoreHoldS);
+    _restoreCitizens(saved);
     _restoreRows(saved, null, 0);
+  }
+
+  /// The citizens, the budgets and the realisation's stream of [saved] put
+  /// back (§14.1, §14.3).
+  void _restoreCitizens(SavedAgents saved) {
+    ledger.restore(saved.ledgerJson);
+    population.restore(saved.popJson);
+    final folk = saved.citizens;
+    if (folk.count == 0) {
+      _denseCitizen = Int32List(0);
+      return;
+    }
+    final now = clock.timeUs;
+    _denseCitizen =
+        AgentsCodec.restoreCitizens(saved, citizens, this, nowUs: now);
+    // §14.3: agents in flight are never saved, so nobody comes back on the
+    // road. A citizen the save caught TRAVELLING or RIDING resumes where
+    // their leg began, with a five-second wake — and the only origin a save
+    // can name is the one their state implies, since the `cit` block carries
+    // a state and a wake and no destination at all. Their car is wherever it
+    // was parked, which the car rows below put back under them.
+    final resume = now + 5.0 * kUsPerSecond;
+    for (var k = 0; k < _denseCitizen.length; k++) {
+      final c = _denseCitizen[k];
+      if (c == SlotPool.none || !citizens.isLive(c)) continue;
+      final i = CitizenTable.slotOf(c);
+      final state = citizens.state[i];
+      if (state != CitizenState.travelling.index &&
+          state != CitizenState.riding.index) {
+        continue;
+      }
+      citizens.agent[i] = -1;
+      citizens.state[i] = CitizenState.atHome.index;
+      citizens.schedule(c, resume.toDouble());
+    }
   }
 
   /// Another pass over the rows still waiting, now that their sites may have
@@ -2372,7 +2793,7 @@ class _Core
         variant: s.cars.variant[car]);
     if (made == SlotPool.none) return;
     sites.occupy(row, stall, made);
-    _wakeRestored(made, sites.building[row]);
+    _adoptRestored(made);
   }
 
   @override
@@ -2395,7 +2816,7 @@ class _Core
         variant: s.cars.variant[car]);
     if (made == SlotPool.none) return false;
     kerbs.occupy(slot, made);
-    _wakeRestored(made, -1);
+    _adoptRestored(made);
     return true;
   }
 
@@ -2413,24 +2834,54 @@ class _Core
         owner: s.cars.owner[car],
         kind: s.cars.kind[car],
         variant: s.cars.variant[car]);
-    if (made != SlotPool.none) _wakeRestored(made, b);
+    if (made != SlotPool.none) _adoptRestored(made);
   }
 
-  /// A restored car that belongs to a COMMUTER is a commuter at work: it
-  /// wakes on this side of the return window and drives home in that car
-  /// (§0 Q3, §14.3 — agents in flight are never saved). Its home is the
-  /// building handle the car carries as its opaque owner, which a colony
-  /// loaded from its own save resolves because the building table is rebuilt
-  /// from the same layout in the same order. A home that no longer answers
-  /// leaves the car standing where it is.
-  void _wakeRestored(int car, int buildingSlot) {
+  /// A car just put back down, given to whoever owns it now (§0, §14.1).
+  ///
+  /// Two kinds and two answers:
+  ///
+  /// - **`citizen`.** The row carries the DENSE index of the block's `cit`
+  ///   table, not a handle — cars have no stable save id, so the pointer runs
+  ///   one way and the load rebuilds the other end of it (§0 Q4). The handle
+  ///   the citizen came back as is [_denseCitizen]`[ownerIdx]`, and this is
+  ///   the one place `CitizenTable.car` is written on a load. An owner who did
+  ///   not come back — a home the plat renamed, a table that could not hold
+  ///   them — leaves the car standing, owned by nobody, rather than owned by
+  ///   whoever happens to hold that index now.
+  /// - **`commuter` or `homePool`.** A T4a save's car, whose `ownerIdx` is a
+  ///   BUILDING slot for ever. It is NOT re-owned here: it keeps its legacy
+  ///   kind, stands exactly where the load put it, is re-saved unchanged, and
+  ///   is offered at every building sync to a carless resident of that
+  ///   building (`CitizenPopulation.adoptLegacy`, §0 Q3). Adopting it here
+  ///   instead would mean adopting it before the citizens are matched to
+  ///   their homes, and a car offered twice is the one thing §0 forbids.
+  void _adoptRestored(int car) {
     final i = SlotPool.slotOf(car);
-    if (parked.ownerKind[i] != CarOwnerKind.commuter.index) return;
-    final home = parked.owner[i];
-    if (home < 0 || !buildings.isLive(home) || buildingSlot < 0) return;
-    final job = buildings.handleOf(buildingSlot);
-    if (job == home) return;
-    commutes.restoreAtWork(home, job, car);
+    if (parked.ownerKind[i] != CarOwnerKind.citizen.index) return;
+    final dense = parked.owner[i];
+    final owner = dense >= 0 && dense < _denseCitizen.length
+        ? _denseCitizen[dense]
+        : SlotPool.none;
+    if (owner == SlotPool.none || !citizens.isLive(owner)) {
+      parked.reown(car, CarOwnerKind.none, -1);
+      return;
+    }
+    parked.reown(car, CarOwnerKind.citizen, owner);
+    citizens.car[CitizenTable.slotOf(owner)] = car;
+  }
+
+  // ---- What a save needs of a citizen (§14.1) ---------------------------------
+
+  @override
+  int get nowUs => clock.timeUs;
+
+  @override
+  String? siteIdOfBuilding(int buildingSlot) {
+    if (buildingSlot < 0 || buildingSlot >= buildings.highWater) return null;
+    if (!buildings.isSlotLive(buildingSlot)) return null;
+    final id = buildings.siteId[buildingSlot];
+    return id.isEmpty ? null : id;
   }
 
   /// See [CityAgents.collectSiteBuffers].
@@ -2446,6 +2897,13 @@ class _Core
     into['core.siteReplan'] = _siteReplan;
     into['core.pending'] = _pending;
     into['core.pendingSpare'] = _pendingSpare;
+  }
+
+  /// See [CityAgents.collectCitizenBuffers].
+  void collectCitizenBuffers(Map<String, Object> into) {
+    citizens.collectBuffers(into, 'citizens');
+    match.collectBuffers(into, 'match');
+    commutes.collectBuffers(into, 'commutes');
   }
 
   // ---- Development hooks ------------------------------------------------------
@@ -2567,6 +3025,20 @@ class _Core
     h = fnv1aU32(h, stats.remapNudges);
     h = fnv1aU32(h, (stats.congestionIndex * 1e6).round());
     h = fnv1aU32(h, (stats.tripRatio * 1e6).round());
+    // The people (§17.4, slice 3): who they are, what they own, what the
+    // budgets still owe, where the matching's and the realisation's streams
+    // stand, and the occupancy the match keeps. Folded only once the colony
+    // has citizen state of any kind — as the site half is — so a colony
+    // nobody lives in digests exactly as it did before slice 3.
+    if (_peopleState) {
+      h = citizens.digest(h);
+      h = ledger.digest(h);
+      h = match.digest(h);
+      h = population.digest(h);
+      h = fnv1aU32(h, commutes.sent);
+      h = fnv1aU32(h, commutes.commutesSent);
+      h = fnv1aU32(h, commutes.instantTrips);
+    }
     // The sites, the cars and the kerbs (§7.8 item 11). Folded only once the
     // colony has site state of any kind, so a colony with no plans and
     // nothing parked digests exactly as it did before T4a.

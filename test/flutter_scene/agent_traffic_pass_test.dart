@@ -56,6 +56,10 @@ void main() {
 
   CitySim live(CitySim city) {
     city.agents.enabled = true;
+    // People, so the colony's own demand has somebody to make it: from slice
+    // 3 traffic is citizens, not a rate a building owes (§6.7). A colony with
+    // no houses settles nobody, so the bare road fixtures are unmoved.
+    city.agents.debugSettle(share: kSettled);
     city.agents.advance(0.5);
     return city;
   }

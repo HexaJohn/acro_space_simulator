@@ -1514,7 +1514,18 @@ class CitySim {
     deathRate =
         (hungerDeaths + diseaseDeaths + warDeaths + radDeaths) * forgiveMult;
     final died = deathRate * dt;
-    population = (pop - died).clamp(0, double.infinity);
+    // E8 (docs/plans/agent-traffic.md §12.1 step 12, §6.2's one-tick
+    // contract). The rate above is unchanged; only who SPENDS it moves. With
+    // the citizens owning the population, this tick's dead go into the
+    // ledger and `agents.advance`, later in this very tick, picks whole
+    // people out of it and removes them — so `population` is written once, at
+    // the end, by the people who are left. Without them, today's scalar path.
+    final deaths = agents.ownsPopulation ? agents.ledger : null;
+    if (deaths != null) {
+      deaths.addDeath(died);
+    } else {
+      population = (pop - died).clamp(0, double.infinity);
+    }
     corpses += died;
     // Deathcare processing.
     var careRate = 0.0;
@@ -1595,17 +1606,34 @@ class CitySim {
     // only way on or off the world. A comms blackout also halts arrivals.
     // Without a spaceport the colony is stuck with exactly its landed crew: no
     // immigration in, no emigration out (people can still DIE, handled above).
+    // E9 (§12.1 step 15, §6.2). The target, the rates and the spaceport gate
+    // are exactly what they were; what changes is where the movement goes.
+    // With the citizens owning the population it is the DELTA — this tick's
+    // migration, in people, positive in and negative out — that goes to the
+    // ledger, and `agents.advance` turns whole people of it into arrivals
+    // that draw a car (§6.6) or into emigrants. Without them, today's write.
+    final migrants = agents.ownsPopulation ? agents.ledger : null;
     if (hasSpaceport) {
       if (population < target && !commsDown) {
-        population =
+        final double to =
             (population + (1.5 + 3.0 * happiness) * dt).clamp(0, target);
+        if (migrants != null) {
+          migrants.addMigration(to - population);
+        } else {
+          population = to;
+        }
       } else if (population > target) {
         // Leave faster the bigger the shortfall, but bounded so it can't whip.
         final shortfall = (1 - foodSecurity);
         final leaveRate =
             (1.0 + (1 - happiness) * 1.5 + shortfall * 2.0) * forgiveMult;
-        population =
+        final to =
             (population - leaveRate * dt).clamp(target, double.infinity);
+        if (migrants != null) {
+          migrants.addMigration(to - population);
+        } else {
+          population = to;
+        }
       }
     }
 

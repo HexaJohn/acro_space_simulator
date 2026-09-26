@@ -1137,13 +1137,19 @@ class CitizenTrips implements SpawnSink {
   /// Re-targets [sl] at its citizen's home and answers that handle, or −1
   /// when there is no leg home to append: they were already going there, or
   /// their home has gone as well.
+  ///
+  /// A leg that set off FROM that home is still appended, and must be: §4.7's
+  /// whole case is a commute whose workplace was torn down while it drove, and
+  /// the only place left for it to go is back where it came from. What is
+  /// refused is a re-target at the destination it has just arrived at, which
+  /// would be a trip of no length at all.
   int _legHome(int sl, int c) {
     if (purpose[sl] == TripPurpose.homeward.index) return -1;
     if (!citizens.isLive(c)) return -1;
     final home = citizens.home[CitizenTable.slotOf(c)];
     if (home < 0 || !buildings.isSlotLive(home)) return -1;
     final h = buildings.handleOf(home);
-    if (h == job[sl] || h == this.home[sl]) return -1;
+    if (h == job[sl]) return -1;
     job[sl] = h;
     leg[sl] = _toWork;
     purpose[sl] = TripPurpose.homeward.index;
@@ -1157,6 +1163,35 @@ class CitizenTrips implements SpawnSink {
             usOf(rng.nextBetween(
                 AgentTuning.commuteReturnMinS, AgentTuning.commuteReturnMaxS)))
         .toDouble();
+  }
+
+  /// Every buffer the activity loop keeps from one sub-step to the next, by
+  /// name into [into], for the allocation gate (§15.2).
+  ///
+  /// The four that grow: the wheel's batch and its roll-over queue, sized by
+  /// `maxSpawnsPerStep` and touched only when that knob rises, and the two
+  /// per-citizen columns, sized by the citizen table's capacity and touched
+  /// only when it doubles. None of them is replaced once the colony is warm,
+  /// which is what package E's gate reads this for. The TRIP columns are
+  /// `final` and allocated once in the constructor, so they cannot be
+  /// replaced at all; they are listed too, because a gate that names only
+  /// what it fears would not notice the day one of them stopped being final.
+  void collectBuffers(Map<String, Object> into, String name) {
+    into['$name.home'] = home;
+    into['$name.job'] = job;
+    into['$name.vehicle'] = vehicle;
+    into['$name.citizen'] = citizen;
+    into['$name.car'] = car;
+    into['$name.leg'] = leg;
+    into['$name.stage'] = stage;
+    into['$name.oneWay'] = oneWay;
+    into['$name.kind'] = kind;
+    into['$name.purpose'] = purpose;
+    into['$name.wakeUs'] = wakeUs;
+    into['$name.due'] = _due;
+    into['$name.rolled'] = _rolled;
+    into['$name.tripAt'] = _tripAt;
+    into['$name.errandAt'] = _errandAt;
   }
 
   /// [hash] with every live trip folded in, in slot order, and the demand

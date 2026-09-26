@@ -163,7 +163,17 @@ void main() {
     Map<String, dynamic> cityJson(String id) => (saved['cities'] as List)
         .cast<Map<String, dynamic>>()
         .firstWhere((c) => c['id'] == id);
-    expect(cityJson('agentville')['agents'], {'v': 1, 'enabled': true});
+    // The flag, and from slice 3 the population's own state beside it: the
+    // ledger's budgets and the realisation's stream, which a colony whose
+    // agents own its population always has (docs/plans/agent-traffic.md
+    // §14.1, §6.2). The parked cars and the citizens themselves are there
+    // when it has any; one tick of a bare starter kit has neither.
+    final block = cityJson('agentville')['agents']! as Map<String, dynamic>;
+    expect(block['v'], 2);
+    expect(block['enabled'], isTrue);
+    expect(block.containsKey('ledger'), isTrue,
+        reason: 'the budgets ride the save, so a load does not reconcile a '
+            'second town on top of the one it restored');
     expect(cityJson('redtown').containsKey('agents'), isFalse,
         reason: 'a colony without agents saves exactly as it always has');
 

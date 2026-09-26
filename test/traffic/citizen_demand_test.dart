@@ -107,7 +107,16 @@ void main() {
   // ---- §6.4's rows and their dwells -------------------------------------------
 
   test("each row's dwell falls inside its own interval", () {
+    // §6.3's matching is the facade's from package E, and it would hire the
+    // 40% [settle] leaves unemployed at the first building sync: then no
+    // citizen ever takes §6.4's second row and "atHome idle" is never drawn.
+    // The fixture chooses who works here, so the matching stands aside.
+    AgentTuning.jobMatchPerSync = 0;
     final a = agentsOn(town());
+    // Away from both peaks, so `rush` is exactly 1 and every interval is the
+    // knob's own. Package E publishes the day phase from `CitySim.dayPhase`
+    // at every sub-step (§6.1), and the fixture town is founded at 0.25.
+    a.city.dayPhase = 0;
     runAgents(a, 2);
     settle(a, perHome: 2);
     final seen = _Dwells(a);
@@ -128,6 +137,7 @@ void main() {
     AgentTuning.errandDwellMinS = 10;
     AgentTuning.errandDwellMaxS = 20;
     final a = agentsOn(town());
+    a.city.dayPhase = 0; // rush exactly 1: the knobs and nothing else.
     runAgents(a, 2);
     settle(a, perHome: 2);
     final seen = _Dwells(a);
@@ -140,17 +150,17 @@ void main() {
   });
 
   test('rush hour shortens the two dwells §6.4 divides, and only those', () {
+    // As above: the unrushed rows need citizens the matching has not hired.
+    AgentTuning.jobMatchPerSync = 0;
     final a = agentsOn(town());
     runAgents(a, 2);
     settle(a, perHome: 2);
-    a.commutes!.dayPhase = 0.30;
+    // Package E publishes the day phase from `CitySim.dayPhase` at the top of
+    // every sub-step (§6.1), so the peak is held on the COLONY and the
+    // colony is never advanced: the whole run sits at the morning peak.
+    a.city.dayPhase = 0.30;
     final seen = _Dwells(a);
-    runAgents(a, 1200, each: () {
-      // Package E publishes this from `CitySim.dayPhase`; here it is held at
-      // the morning peak for the whole run.
-      a.commutes!.dayPhase = 0.30;
-      seen.sample();
-    });
+    runAgents(a, 1200, each: seen.sample);
     final peak = CitizenTrips.rush(0.30);
     expect(peak, closeTo(1.6, 1e-9));
     seen.expectWithin('atHome employed', AgentTuning.homeDwellMinS / peak,

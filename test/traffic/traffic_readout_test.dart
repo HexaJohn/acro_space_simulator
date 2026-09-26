@@ -63,7 +63,7 @@ void main() {
 
   test('a picture every congestion epoch from the first, and the count never '
       'goes back', () {
-    final a = agentsOn(town());
+    final a = livedIn();
     final r = a.readout;
     var prevT = a.timeUs, prevP = 0;
     for (var i = 0; i < 600; i++) {
@@ -92,7 +92,18 @@ void main() {
 
   test('the routes through a road are the locked routes of the vehicles '
       'driving it now', () {
-    final a = agentsOn(town());
+    // A town of pure commutes: §6.4's errands would put `shopper` routes on
+    // the same roads, and what is under test is the ROUTES, not the mix.
+    // With the errand rows off, an arrival who is not yet matched to a job
+    // would wait out an idle dwell of up to ten minutes before asking again,
+    // so that dwell is cut to a second or two and the town is commuting
+    // inside the window below.
+    AgentTuning.errandFromHome = 0;
+    AgentTuning.errandFromWork = 0;
+    AgentTuning.errandFromIdle = 0;
+    AgentTuning.idleDwellMinS = 1;
+    AgentTuning.idleDwellMaxS = 2;
+    final a = livedIn();
     runAgents(a, 150);
     final t = a.vehicles!, lg = a.laneGraph!;
     var sl = 0;
@@ -155,7 +166,7 @@ void main() {
   test('live, reach is the agents\' own fields, and noise and land value '
       'are the routed formulas over the measured loads (slice 2)', () {
     final city = town();
-    final a = agentsOn(city);
+    final a = agentsOn(city, settle: kSettled);
     runAgents(a, 200);
     final r = a.readout..settle();
     expect(r.hasRun, isTrue);

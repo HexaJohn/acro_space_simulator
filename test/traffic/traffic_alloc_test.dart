@@ -52,7 +52,7 @@ void main() {
       'arena, the pull-out queue, the path queue and its searches, the '
       'junction books, the delay table and its pools, the readout\'s pass, '
       'the frame sets', () {
-    final a = agentsOn(town());
+    final a = livedIn();
     runAgents(a, 600);
     final before = _buffers(a);
     final arena = a.vehicles!.arena;
@@ -121,7 +121,7 @@ void main() {
     // `buildingSyncS`. Pushed past the window, so what is weighed is the
     // sub-step itself.
     AgentTuning.buildingSyncS = 1e7;
-    final a = agentsOn(town());
+    final a = livedIn();
     for (var i = 0; i < _warmSteps; i++) {
       a.advance(kStepS);
     }
@@ -257,6 +257,10 @@ Map<String, Object> _buffers(CityAgents a) {
   // gates them on a town whose cars are cycling the lots; here they ride
   // along, so a buffer this town replaces shows up wherever it happens.
   a.collectSiteBuffers(out);
+  // The citizen half (slice 3): the people, their wheel and per-building
+  // lists, the matching's scratch, and the activity loop's wake batch and
+  // roll-over queue. A SYNC may grow any of them and a sub-step may not.
+  a.collectCitizenBuffers(out);
   m.collectBuffers(out, 'mover');
   m.arbiter.collectBuffers(out, 'arbiter');
   a.stats.collectBuffers(out, 'stats');

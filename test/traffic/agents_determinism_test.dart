@@ -32,7 +32,7 @@ void main() {
     final dts = _ticks(TrafficRng(2026), 300);
     ({int digest, CityAgents agents}) run() {
       final city = town();
-      final a = agentsOn(city);
+      final a = agentsOn(city, settle: kSettled);
       var t = 0.0;
       var edited = false;
       var mid = 0;
@@ -57,6 +57,15 @@ void main() {
     expect(a.graphRev, 2, reason: 'the road rebuilt the lane graph once');
     expect(a.stats.spawned, greaterThan(20));
     expect(a.stats.arrived, greaterThan(5));
+    // With CITIZENS active (slice 3): the people, their homes and jobs, the
+    // budgets they were realised out of and the cars §6.6 minted them are all
+    // inside the digest, so a history that agreed by having nobody in it
+    // would not have agreed at all.
+    expect(a.citizens!.liveCount, greaterThan(50), reason: 'a town of people');
+    expect(a.populationStats!.arrivals, greaterThan(50));
+    expect(a.parkedCars!.count, greaterThan(20), reason: 'who own cars');
+    expect(a.commutes!.commutesSent, greaterThan(10),
+        reason: 'and commute in them');
   });
 
   group('A11: with site movers active', () {
@@ -93,7 +102,7 @@ void main() {
     ({int digest, CityAgents agents}) drive(List<double> dts,
         {required bool asked}) {
       final city = town();
-      final a = agentsOn(city);
+      final a = agentsOn(city, settle: kSettled);
       final plans = FixturePlanSource(city.roadGraph, byLot());
       a.debugPlans = plans;
       var t = 0.0;
@@ -124,6 +133,8 @@ void main() {
       expect(a.siteStats.enters, greaterThan(0), reason: 'cars turned in');
       expect(a.siteStats.parkedLot, greaterThan(0), reason: 'and parked');
       expect(a.sites!.syncs, greaterThan(1), reason: 'the plan changed');
+      expect(a.citizens!.liveCount, greaterThan(20),
+          reason: 'with people, their cars and their budgets in the digest');
       expect(a.digest(), asked.agents.digest(),
           reason: 'and asking again after the run moves nothing');
     });
@@ -172,7 +183,7 @@ void main() {
 
   test('partition invariance: 3000 ticks of 0.02 s and 120 of 0.5 s run the '
       'same sub-steps and make the same history', () {
-    final fine = agentsOn(town()), coarse = agentsOn(town());
+    final fine = livedIn(), coarse = livedIn();
     for (var i = 0; i < 120; i++) {
       for (var k = 0; k < 25; k++) {
         fine.advance(0.02);
@@ -183,13 +194,18 @@ void main() {
     }
     expect(coarse.timeUs, 60 * kUsPerSecond);
     expect(coarse.stats.spawned, greaterThan(5));
+    // The realisation is a sub-step's work too (§6.2), so a partition that
+    // cut the ticks differently would settle different people at different
+    // moments if anything about it depended on how the tick arrived.
+    expect(coarse.citizens!.liveCount, greaterThan(20));
+    expect(fine.citizens!.liveCount, coarse.citizens!.liveCount);
     expect(fine.digest(), coarse.digest());
   });
 
   test('frame-hold invariance: held to 1, 4 or 12 sub-steps a frame, at '
       'random frame boundaries, the history is the inline one', () {
     final dts = _ticks(TrafficRng(35), 120);
-    final inline = agentsOn(town());
+    final inline = livedIn();
     for (final dt in dts) {
       inline.advance(dt);
     }
@@ -216,7 +232,13 @@ void main() {
       held.flushHeld();
       expect(held.timeUs, inline.timeUs, reason: 'budget $budget');
       expect(held.digest(), inline.digest(), reason: 'budget $budget');
+      // The hold changes only WHEN a tick runs (§5.7, D35), and that holds
+      // for the population as much as for the vehicles: the same people were
+      // settled, in the same homes.
+      expect(held.citizens!.liveCount, inline.citizens!.liveCount,
+          reason: 'budget $budget');
     }
+    expect(inline.citizens!.liveCount, greaterThan(20));
   });
 
   group('the frame hold keeps pace', () {
@@ -301,7 +323,7 @@ const int _tickSteps = 3;
 /// of the test's own driving into them (A11).
 CityAgents _sited() {
   final city = town();
-  final a = agentsOn(city);
+  final a = agentsOn(city, settle: kSettled);
   a.debugPlans = FixturePlanSource(city.roadGraph, {
     lotOf(SyntheticTemplate.strip): SyntheticTemplate.strip,
     lotOf(SyntheticTemplate.loop): SyntheticTemplate.loop,
@@ -322,7 +344,7 @@ CityAgents _heldSited() {
 /// tick as `CitySim.advance` would once E3a and E3b are in: clamped, and
 /// the agents advanced by it.
 CityAgents _held(CitySim city) {
-  final a = agentsOn(city)..frameBudgeted = true;
+  final a = agentsOn(city, settle: kSettled)..frameBudgeted = true;
   a.replayTick = (_, simDt) =>
       a.advance((simDt * a.city.eventSimWarp).clamp(0.0, 0.5));
   return a;

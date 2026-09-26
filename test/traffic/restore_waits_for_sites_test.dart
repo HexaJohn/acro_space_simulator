@@ -43,8 +43,13 @@ import 'traffic_fixture.dart';
 
 void main() {
   // The quiet load the fixture test uses: a colony that spawned a commute in
-  // the same tick would park a car no save here ever held.
-  setUp(() => AgentTuning.commuteRatePerResident = 0);
+  // the same tick would park a car no save here ever held — and, from slice
+  // 3, one that settled a citizen would MINT one (§6.6). Both are off here,
+  // so every car in these colonies is a car this file put there.
+  setUp(() {
+    AgentTuning.commuteRatePerResident = 0;
+    noArrivals();
+  });
   tearDown(AgentTuning.reset);
 
   test('a load whose sites are still being planned keeps every lot car, and '
@@ -167,8 +172,13 @@ void main() {
     final block = again['agents']! as Map<String, dynamic>;
     expect(block['v'], 2);
     expect((block['cars']! as List), hasLength(saved.keys.length));
-    expect(block, _agentsBlockOf(saved.json),
-        reason: 'byte for byte the block it was loaded from: the rows still '
+    // The CAR half, byte for byte. The population's own half — the budgets
+    // and the realisation's stream (§14.1, slice 3) — is the colony's live
+    // state and moves with every tick it runs, which is what it is for.
+    final was = _agentsBlockOf(saved.json);
+    expect(block['sites'], was['sites']);
+    expect(block['cars'], was['cars'],
+        reason: 'byte for byte the rows it was loaded from: the ones still '
             'waiting go out exactly as they came in');
 
     // And the load after it — whose book drains inside `fromJson` — parks

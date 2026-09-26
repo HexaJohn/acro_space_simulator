@@ -62,7 +62,7 @@ void main() {
     expect(idle.stats.commuteEff, 1.0);
 
     AgentTuning.commuteRatePerResident = 0.004;
-    final a = agentsOn(town());
+    final a = livedIn();
     runAgents(a, 60);
     expect(a.liveVehicles, greaterThan(0));
     AgentTuning.agentsOn = false;

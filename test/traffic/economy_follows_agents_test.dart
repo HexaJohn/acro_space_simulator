@@ -17,21 +17,30 @@ import 'traffic_fixture.dart';
 /// takes that as it is.
 ///
 /// Two copies of one City Builder town, each ticked by its own
-/// `CitySim.advance` with its own agents on: one at a tenth of the design's
-/// commute rate, whose crossroads stay clear, and one at five times it. The
-/// starter crossroads are an all-way stop, and a fully built starter town
-/// commuting at the design rate already queues there. Nothing is set by
-/// hand but the population at the very end, so that the two have the same
-/// workforce; their staffing then differs by exactly what their agents
-/// measured.
+/// `CitySim.advance` with its own agents on and each settling its own
+/// citizens as it grows (§6.2): one where a fifth of them own a car, whose
+/// crossroads stay clear, and one where all of them do. The starter
+/// crossroads are an all-way stop, and a fully built starter town where
+/// everybody drives already queues there.
+///
+/// **Car ownership is the contrast, not the demand rate** (slice 3). While
+/// `CommuteSynth` stood in, `commuteRatePerResident` WAS the number of trips
+/// a town made. It is now the demand SCALE (§0 Q1): below the design rate it
+/// turns commutes into errands rather than into fewer trips, so two towns at
+/// different rates put much the same number of cars on the road. What makes
+/// one town's roads busier than another's is how many of its people drive —
+/// which is §6.6's own knob, and the one thing the two copies differ by here.
+///
+/// Nothing else is set by hand but the population at the very end, so that
+/// the two have the same workforce; their staffing then differs by exactly
+/// what their agents measured.
 void main() {
   tearDown(AgentTuning.reset);
 
   test('a congested commute raises the trip ratio, lowers commute '
       'efficiency, and lowers staffing', () {
-    final design = AgentTuning.commuteRatePerResident;
-    final free = _town(design / 10);
-    final jammed = _town(5 * design);
+    final free = _town(0.2);
+    final jammed = _town(1.0);
     final fs = free.agents.stats, js = jammed.agents.stats;
     // ignore: avoid_print
     print('economy follows agents: free town ${fs.tripsDone} commutes, trip '
@@ -61,11 +70,21 @@ void main() {
   });
 }
 
-/// The City Builder town, its own agents on and commuting at [rate] per
-/// resident per second, after fifteen colony minutes.
-CitySim _town(double rate) {
-  AgentTuning.commuteRatePerResident = rate;
+/// The City Builder town, its own agents on, where [ownership] of the people
+/// who move in own a car (§6.6), after two and a half colony minutes.
+///
+/// Five times the design rate, in both: the demand scale sets how often a
+/// citizen who HAS a car uses it, and the same figure in both towns is what
+/// makes the drivers the only difference between them.
+///
+/// The window is 150 s because that is a living town: the starter kit feeds
+/// about two hundred people, and a fully built one grows past that and then
+/// starves, which is the colony economy's own behaviour and no business of
+/// this test.
+CitySim _town(double ownership) {
+  AgentTuning.commuteRatePerResident = 5 * 0.00042;
+  AgentTuning.carOwnership = ownership;
   final city = town(agentTraffic: true);
-  run(city, 900);
+  run(city, 150);
   return city;
 }

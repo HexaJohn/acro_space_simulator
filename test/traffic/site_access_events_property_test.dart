@@ -51,7 +51,7 @@ void main() {
     final city = grid(5);
     zoneAll(city);
     buildAll(city);
-    final a = agentsOn(city);
+    final a = agentsOn(city, settle: kSettled);
     final byLot = _place(city, const [
       SyntheticTemplate.strip,
       SyntheticTemplate.loop,

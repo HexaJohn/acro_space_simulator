@@ -176,7 +176,7 @@ void main() {
     test('every 2 s of agent time a fresh buffer, never the last one, and '
         'the path queue prices by it', () {
       AgentTuning.commuteRatePerResident = 0.004;
-      final a = agentsOn(town());
+      final a = livedIn();
       a.advance(kStepS);
       final t = a.delays!;
       final seen = <Float32List>{};

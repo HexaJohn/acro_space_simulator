@@ -29,6 +29,7 @@ import 'package:acro_space_simulator/domain/colony/city/traffic/agent_kind.dart'
 import 'package:acro_space_simulator/domain/colony/city/traffic/city_agents.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/slot_pool.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/traffic_rng.dart';
+import 'package:acro_space_simulator/domain/colony/city/traffic/traffic_tuning.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/vehicle_table.dart';
 import 'package:acro_space_simulator/domain/universe/celestial_body.dart';
 import 'package:acro_space_simulator/domain/universe/real_solar_system.dart';
@@ -231,7 +232,46 @@ Parcel lotNearest(CitySim city, Vec2 p) {
 /// (which stay off): they read the colony and nothing in the colony reads
 /// them, so the economy stands still while they run — exactly the scope
 /// §17.4's partition test asks for.
-CityAgents agentsOn(CitySim city) => CityAgents(city)..enabled = true;
+///
+/// [settle] is the share of the homes the colony's buildings offer that move
+/// IN, as citizens owed to the migration budget (`CityAgents.debugSettle`,
+/// §6.2). It is 0 by default, because most fixtures here are bare colonies a
+/// test drives with `forceTrip` and want nobody living in them; a test that
+/// wants the colony's OWN demand — which from slice 3 is people, not a rate
+/// a building owes (§6.7) — asks for a share and gets a town that commutes.
+///
+/// Migration and not `city.population`, because only a migration arrival
+/// draws `carOwnership` and has a car minted at home (§6.6, slice3 §0): a
+/// fixture that wrote the population would settle a town of walkers and
+/// never put a car on the road.
+CityAgents agentsOn(CitySim city, {double settle = 0}) {
+  final a = CityAgents(city)..enabled = true;
+  if (settle > 0) a.debugSettle(share: settle);
+  return a;
+}
+
+/// The share of a town's homes the demand fixtures settle: enough people for
+/// every job the mix offers and a few without one, which is what the old
+/// `CommuteSynth` rate stood in for (§6.5's design steady state).
+const double kSettled = 0.5;
+
+/// A headless City Builder [town] PEOPLE LIVE IN, with agents of the test's
+/// own over it: the colony's own demand, from its own citizens.
+CityAgents livedIn({bool grown = false, double settle = kSettled}) =>
+    agentsOn(town(grown: grown), settle: settle);
+
+/// Pins a colony's population where it stands: §6.2's arrival cap at zero,
+/// so no arrival, departure or death is ever realised.
+///
+/// For the tests that count the CARS in a colony. A colony whose agents own
+/// its population settles the people its migration budget owes and mints
+/// each of them a car (§6.6), so a test that places cars by hand and then
+/// asserts how many there are would be counting the colony's as well as its
+/// own. `AgentTuning.reset` puts the cap back.
+void noArrivals() {
+  AgentTuning.arrivalsMin = 0;
+  AgentTuning.arrivalsShare = 0;
+}
 
 /// Advances [agents] by [seconds] of agent time in ticks of [dt], calling
 /// [each] after every tick.

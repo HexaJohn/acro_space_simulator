@@ -35,7 +35,12 @@ void main() {
     // The colony's own agents, on its own site book: the plans are generated
     // while the town warms up, and stand still afterwards, because nothing
     // below ticks `CitySim.advance` again.
-    final city = town(grown: true, agentTraffic: true);
+    //
+    // Its homes are settled before it warms up (slice 3): the colony's own
+    // migration would fill them over colony minutes, and what the window
+    // needs is a town already commuting, with a car on every other stall.
+    final city = town(agentTraffic: true);
+    city.agents.debugSettle(share: kSettled);
     run(city, 120);
     final a = city.agents;
     expect(a.sites!.highWater, greaterThan(10), reason: 'lots with plans');
@@ -80,10 +85,15 @@ void main() {
   });
 }
 
-/// Every buffer the site half keeps from one sub-step to the next, by name.
+/// Every buffer the site half keeps from one sub-step to the next, by name —
+/// and, from slice 3, the citizen half's, which is written in the same
+/// sub-step and under the same rule (§15.2): the citizen table's columns, its
+/// wheel and per-building lists, the matching's scratch, and the activity
+/// loop's wake batch and roll-over queue.
 Map<String, Object> _buffers(CityAgents a) {
   final out = <String, Object>{};
   a.collectSiteBuffers(out);
+  a.collectCitizenBuffers(out);
   a.planner!.collectBuffers(out, 'planner');
   return out;
 }

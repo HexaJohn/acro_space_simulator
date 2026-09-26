@@ -28,7 +28,14 @@ import 'package:flutter_test/flutter_test.dart';
 import 'traffic_fixture.dart';
 
 void main() {
-  setUp(() => AgentTuning.commuteRatePerResident = 0);
+  // No demand and no arrivals: every car in these colonies is one this file
+  // parked by hand, so a count of them is a statement about the re-cut and
+  // the load, not about how many people moved in while the test ran (§6.6
+  // mints a car for each of them).
+  setUp(() {
+    AgentTuning.commuteRatePerResident = 0;
+    noArrivals();
+  });
   tearDown(AgentTuning.reset);
 
   test('a re-cut renames the lots and every parked car stays where it stood, '

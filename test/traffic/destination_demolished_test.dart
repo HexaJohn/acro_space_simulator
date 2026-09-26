@@ -40,14 +40,27 @@ void main() {
       ..setUse(home, ParcelUse.residential)
       ..setUse(work, ParcelUse.industrial);
     buildAll(city);
+    // ONE citizen, who drives and who does nothing but commute: the colony
+    // has one home and one job, so they take that job at the first building
+    // sync and set off for it (§6.3, §6.4 row 1). The idle dwell is cut to a
+    // second or two so the wait between moving in and being hired is not a
+    // wait of minutes; the errand rows are off so the one trip this test is
+    // about is the only trip there is.
+    AgentTuning.carOwnership = 1;
+    AgentTuning.errandFromHome = 0;
+    AgentTuning.errandFromIdle = 0;
+    AgentTuning.errandFromWork = 0;
+    AgentTuning.idleDwellMinS = 1;
+    AgentTuning.idleDwellMaxS = 2;
+    AgentTuning.commuteRatePerResident = 0.6;
     final a = city.agents..enabled = true;
+    a.debugSettle(people: 1);
     a.advance(kStepS);
     final b = a.buildings!;
-    final homeB = b.handleOfSite(home)!, workB = b.handleOfSite(work)!;
+    final workB = b.handleOfSite(work)!;
 
-    // One commute: the home's first, and no other after it.
-    AgentTuning.commuteRatePerResident = 0.6 / b.housing[homeB & 0xFFFFF];
-    for (var i = 0; i < 100 && a.commutes!.sent == 0; i++) {
+    // One commute: theirs, and no other after it.
+    for (var i = 0; i < 200 && a.commutes!.sent == 0; i++) {
       a.advance(kStepS);
     }
     AgentTuning.commuteRatePerResident = 0;

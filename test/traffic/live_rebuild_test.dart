@@ -41,7 +41,7 @@ void main() {
 
   test('rebuilt under moving traffic: every car remapped in place, those '
       'in a junction still on their movement, every list relinked', () {
-    final a = agentsOn(town());
+    final a = livedIn();
     runAgents(a, 240);
     final t = a.vehicles!;
     final lg0 = a.laneGraph!;
