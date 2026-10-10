@@ -30,6 +30,7 @@ import 'package:flutter/foundation.dart' show ChangeNotifier;
 
 import '../../../domain/colony/city/city_control.dart';
 import '../../../domain/colony/city/city_sim.dart';
+import '../../../domain/colony/city/city_term_guard.dart';
 import '../../../domain/colony/city/parcel.dart';
 import '../../../domain/colony/city/road_build.dart';
 import '../../../domain/colony/city/road_catalog.dart';
@@ -691,10 +692,18 @@ mixin RoadToolEditing on ChangeNotifier {
     final snapped = city.snapRoadRequest(
         requestTo(city, shape, end, ground: ground),
         groundAt: ground);
-    final r =
-        city.buildRoad(snapped, groundAt: ground, gradeGate: !ignoreTerrain);
-    lastQuote = r.quote;
+    // On trial under a demolition ban (secession §6.1): a road whose
+    // re-cut would tear a building down is refused, the term on the bar.
+    final r = city.keepingBuiltLots(
+        () => city.buildRoad(snapped,
+            groundAt: ground, gradeGate: !ignoreTerrain),
+        onRefused: (why) => blocked = why);
     preview = null;
+    if (r == null) {
+      changed();
+      return false;
+    }
+    lastQuote = r.quote;
     if (r.roadId == null) {
       blocked = r.quote.reason;
       changed();
@@ -805,7 +814,16 @@ mixin RoadToolEditing on ChangeNotifier {
       changed();
       return null;
     }
-    final q = city.upgradeRoad(id, _type, groundAt: ground);
+    // The wider road re-cuts its lots: on trial under a demolition ban.
+    final q = city.keepingBuiltLots(
+        () => city.upgradeRoad(id, _type, groundAt: ground),
+        onRefused: (why) => blocked = why);
+    if (q == null) {
+      upgradeRoadId = null;
+      upgradeQuote = null;
+      changed();
+      return null;
+    }
     lastQuote = q;
     lastRoadId = id;
     blocked = q.ok ? null : q.reason;
@@ -862,18 +880,26 @@ mixin RoadToolEditing on ChangeNotifier {
       return;
     }
     _applyLotSettings(city);
-    final r = city.buildRoad(
-      RoadBuildRequest(
-        controls: List.of(pending),
-        type: _type,
-        startElevationM: elevationM,
-        endElevationM: elevationM,
-        snapStart: snap.roads,
-        snapEnd: snap.roads,
-      ),
-      groundAt: groundAt,
-      gradeGate: !ignoreTerrain,
-    );
+    // On trial under a demolition ban, as a click's road is ([_build]);
+    // refused, the points are kept, as for any refusal.
+    final r = city.keepingBuiltLots(
+        () => city.buildRoad(
+              RoadBuildRequest(
+                controls: List.of(pending),
+                type: _type,
+                startElevationM: elevationM,
+                endElevationM: elevationM,
+                snapStart: snap.roads,
+                snapEnd: snap.roads,
+              ),
+              groundAt: groundAt,
+              gradeGate: !ignoreTerrain,
+            ),
+        onRefused: (why) => blocked = why);
+    if (r == null) {
+      changed();
+      return;
+    }
     lastQuote = r.quote;
     if (r.roadId == null) {
       blocked = r.quote.reason;
@@ -1117,11 +1143,19 @@ mixin RoadToolEditing on ChangeNotifier {
     movePreview = null;
     final plan = planMoveEnd(city, id, atStart: atStart, to: to, ground: ground);
     final end = plan?.end ?? to;
-    final r = city.moveRoadEnd(id,
-        atStart: atStart,
-        to: end,
-        toHeightM: plan?.toHeightM,
-        groundAt: ground);
+    // A re-laid road gives up the lots along the stretch it left: on trial
+    // under a demolition ban, refused if a building stood on one.
+    final r = city.keepingBuiltLots(
+        () => city.moveRoadEnd(id,
+            atStart: atStart,
+            to: end,
+            toHeightM: plan?.toHeightM,
+            groundAt: ground),
+        onRefused: (why) => blocked = why);
+    if (r == null) {
+      changed();
+      return null;
+    }
     lastQuote = r.quote;
     final newId = r.roadId;
     if (newId == null) {

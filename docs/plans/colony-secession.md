@@ -2,6 +2,7 @@
 
 Status: approved for phase 1, 2026-10-10 (Q6/Q7 answered by the user; Q1–Q5 on the proposed defaults, revisable).
 Phase 1 is built; phase 2 (independence) is built on `feat/secession-p2` — see "Phase 2, as built" under §7.
+Phase 3 (negotiate + win hearts) is built on `feat/secession-p3` — see "Phase 3, as built" under §7.
 
 ## 1. Intent
 
@@ -459,6 +460,170 @@ the same rule.
     no longer says the port is "closed to your craft". It says the port takes no relief and deliveries are
     suspended, and that a craft the player flies can still land, unwelcome. That stays true until the
     player-flown hold above is built.
+
+### Phase 3, as built (2026-10-10)
+
+New files: `city_reclaim.dart` (domain: grievance, terms, petitions, reputation), `city_reclaim_ui.dart`
+(the Reclaim section, the negotiation dialog, the term picker, the binding-terms card), and
+`test/colony/city_reclaim_test.dart`. Edits to the shared files are small: a `reclaim` field, a public
+`notice()`, the grievance at `_secede`, the save key and two warning hooks in `city_loyalty.dart`; one
+guard in `CitySim.autoVote`; one call in `AdvanceSimulationTick`; the term refusals in `city_control.dart`;
+and the gated call sites below.
+
+**State** (`CityReclaim`, held on `CityLoyalty.reclaim`, saved under `loyalty.reclaim`, omitted entirely for
+a colony that never left): the `Grievance` recorded at the declaration (days without orders, rebellion,
+revolts in the window, desperation), the `BindingTerms` in force and the colony second they run out at,
+hearts `pressure`, the dependency holdout clock `dependentS`, and the waiting `Petition`. The grievance is
+saved because by the time anyone negotiates the live state has moved on (the same reason
+`independenceCauses` is). `reputation` is a per-tick input handed in by the world, not saved. Tuning is in
+`ReclaimTuning`.
+
+**Terms (§6.1).** `severity` = 0.3 × neglect (days / 40) + 0.3 × misrule ((rebellion − 0.3) / 0.6) + 0.25 ×
+revolts (out of 3) + 0.15 × desperation, clamped to 0..1. Misrule and revolts outweigh absence, so a
+mistreated colony asks more than a forgotten one. From severity:
+- always a **tax cap**, 25% at severity 0 down to 5% at 1;
+- from 0.3, **kept laws**: 1 to 3 of the laws it holds (`Law.values` order). A colony that holds none
+  names none;
+- from 0.55, **no demolitions**;
+- **duration** 10 + 30 × severity days, plus up to 10 more once it has been independent for 30 days.
+  Time away lengthens the terms but adds none.
+
+Negotiate is always open on an independent colony. "Negotiate" shows the terms; Accept rejoins, Decline
+changes nothing.
+
+**Rejoining** (`_rejoin`): allegiance colonial; loyalty 0.5 (the stage band it lands in, so Restless);
+independence date and causes cleared; the revolt window emptied (three leftover revolts would break it away
+again the next tick); attention stamped (accepting is an act of governance); and the terms start. A tax over
+the cap is pulled to the cap, and the kept laws are enacted. Deliveries resume on their own, since
+`portClosedToPlayer` reads the allegiance. A re-secession drops any terms still running.
+
+**The gate under terms** (`city_control.dart`): `taxCeiling`, `taxRefusal(rate)`, `repealRefusal(law)`,
+`economyRefusal(economy)`, `demolitionRefusal` and `mayDemolish(onRefused)`. Every refusal reads "The
+rejoining terms cap the tax at 10% (12 days left)." Enforced at:
+- the Politics/City panels' tax slider and the HUD Budget slider: held at the cap, the reason said on
+  release, and a standing line under the slider;
+- the law switches: a kept law's switch is greyed with the reason, and turning it off refuses;
+- the economy pills: switching to an economy with a fixed levy (Communism, 50%) over the cap refuses;
+  otherwise the cap could be dodged by changing economy;
+- the in-world editor's bulldozer (picking it up, `applyToLot`, `applyTo`) and its chip;
+- the site sheet's Demolish row (`gatedSiteAction(termRefusal:)`);
+- the flat builder's bulldozer, Clear-all, and any tap, paint or rectangle that would clear a building
+  cell (a road, zone or platform laid over it, a same-type utility tap). A rectangle skips those cells and
+  fills the rest, and a fill refused whole no longer stamps attention.
+
+`CitySim.autoVote` never repeals a kept law, because the term was the colony's own demand. Before this
+guard, its own vote (it is Restless, so self-governing) repealed the law it had just made the player keep.
+When the terms run out, a "terms have run out" notice is raised and normal rule resumes.
+
+**Win hearts (§6.2).** `CityReclaimSim.reputationOf(cities)` is the population-weighted mean of loyalty ×
+mood over **colonial** colonies with people in them. Independent and occupied colonies are excluded, and
+it is null with no such colony. `AdvanceSimulationTick` hands it to every city before the city loop
+(`handOutReputation`), because no colony can see its neighbours from inside its own tick. An independent
+colony's own score is its mood. Pressure fills at `gap / (0.2 × 15 days)` while reputation − mood > 0, and
+drains over 10 days otherwise. Both are linear in dt, so warp is exact. At 1 it petitions on **light
+terms**: the same rule applied to 40% of its grievance and of its time away. The flat sandbox never gets a
+reputation, so it has no hearts route (Q5). Declining empties the pressure, so it asks again only once the
+pressure has refilled.
+
+**Dependency petition (§6.2).** Dependent = `selfSufficiency` < the live, desperation-scaled bar, **or**
+starving while below the undesperate bar (0.9). Deviation: the live bar alone is not enough. Hunger pins
+mood at 0, which drives desperation to 1 and the bar to 0, so a starving colony would measure "sufficient"
+and never ask for the help it is dying without. `dependentS` rises with dependent time and falls with
+sufficient time. Past a holdout of 2 + 12 × (desperation at the declaration) days, it petitions regardless
+of reputation, and outranks a hearts petition already waiting. The player picks the terms from the menu: a
+cap of 5–25% or none, any of the laws it holds, the demolition ban, and 5–40 days. The player may set none.
+Deviation: each term granted adds 0.05 loyalty on top of the 0.5 (goodwill). Without that, nothing makes
+binding your own hand worth choosing. Declining resets the holdout.
+
+**UI.** The independence panel's Reclaim section (`ReclaimSection`, key `independence-reclaim`) has the
+petition card (Accept/Decline, or Set terms…), Negotiate, a goodwill readout (standing against its mood and
+the wish to rejoin, or "none to measure" with no other colony), and **Force** greyed as "Not available yet.".
+The compact HUD card says when a petition is waiting. `BindingTermsCard` shows the running terms and days
+left under the HUD's top bar and in the Politics LOYALTY section. The status list and HUD chip gain
+`petition` and `terms` warnings (icons handshake and gavel). The notices `petition`, `rejoined` and
+`termsExpired` join the loyalty notice queue as good news.
+
+**Carried item closed: the governor's log is saved** (`governorLogJson`/`restoreGovernorLog`, under
+`loyalty.council`), so "its council" survives a load.
+
+**Tests.** `test/colony/city_reclaim_test.dart` (22) covers: terms scaling with each grievance; kept laws
+coming only from laws held; accept at 0.5 with each refusal's wording and days; the auto-vote keeping the
+law; expiry; decline; re-secession dropping terms; reputation pop-weighted over colonial colonies only;
+handed through the real tick, and null for a lone colony; pressure only while worse, petition past 1,
+light terms lighter than stated ones; no reputation means no pressure; warp equivalence; decline and
+re-ask; dependency holdout scaling with desperation; the starving clause; dependency outranking hearts;
+player terms with goodwill; the save round-trip of grievance, pressure, holdout, petition and terms with
+their clock; the governor log save; warnings. The sweep (`city_control_gate_test.dart`) adds term refusals
+for the gate wording, the editor bulldozer (and zoning still allowed), the panels (law, levy, tax), the HUD
+slider, the site sheet, and the flat builder (every tool on a building, Clear-all), plus the Reclaim UI
+(negotiate decline/accept, the dependency term picker, a declined petition, the Force row disabled).
+Mutation-checked: removing the site sheet's term refusal or the flat builder's tap check fails the sweep.
+
+**Review fixes (2026-10-10).** Three reviews of the above; what changed:
+- **The grievance's misrule was measured after the revolt reset it.** A revolt fires at rebellion 1.0 and
+  resets the meter to 0.3 in `socialTick`, which runs before the loyalty step, so every colony driven out by
+  its third revolt recorded misrule 0 and stated milder terms than one merely forgotten. `_secede` now
+  records the meter's peak over the revolt window: 1.0 with any revolt in it, the live reading otherwise.
+  Tests now secede real colonies through `CitySim.advance` by both routes and assert the recorded grievance
+  and that the revolt route states the harsher terms; and a re-secession through the real path.
+- **The demolition ban now holds against every edit that tears a building down**, not only the bulldozer.
+  A road laid, spline-committed, upgraded or re-laid by its end (Traffic > Adjust), and a plot staked for an
+  installation, re-cut the lots, and a lot the re-cut gives up loses its building (one dragged road end
+  cleared 17 buildings in the probe). No corridor test can say which lots a re-cut keeps (a split re-orders
+  the plat), so these edits run **on trial** (`city_term_guard.dart`): under the ban the plat is copied
+  (`CityLayout.copy`/`restoreFrom`, `SegmentIndex.copyFrom`), the edit runs, and at the one place every
+  re-plat carries its lots (`_carryRenamedLots`, `_carryLotsAcross`), before anything else moves,
+  `guardBuiltLots` checks whether a built lot would be lost or doubled up. If so the plat is put back and
+  the edit unwinds (no road, no charge, no attention stamp) with "The rejoining terms forbid demolitions (N
+  days left). This would tear down 3 buildings." An edit that clears nothing still goes ahead. With no ban
+  in force nothing is copied. Also: `_carryLotsAcross` no longer skips `_dropLostLots` when nothing was
+  renamed (a dangling building key).
+- **The reactor's "Disable safety systems" row** (which demolishes the reactor and sets off the meltdown)
+  carries the demolition term, as Demolish does.
+- **Flat builder: a road or platform is built, too.** The bulldozer was refused on a road while the Road
+  tool's toggle and a zone laid over it removed the same road. Now any tool that would clear a road,
+  platform or building is refused under the ban; laying over bare ground still goes ahead.
+- **A fixed levy is held under the cap.** Lowering `taxRate`, all rejoining did, moves nothing under
+  Communism, which kept levying 50% beside "tax at most 5%". `effectiveTax()` now holds a fixed levy under
+  the cap while terms run; the colony keeps its economy, the full levy returns when the terms do, and the
+  cap's line shows under the levy too. Switching ONTO a fixed levy stays refused (it would land the full
+  levy the day the terms end).
+- **Accept binds what was shown.** The colony ticks under the dialog, so the terms recomputed at the tap
+  could differ (more days, other laws). `acceptNegotiation(shown)` binds the dialog's own terms.
+- **Declining restarts both clocks**, so the other petition is not raised on the next tick.
+- **Goodwill (deviation, revised):** each granted term that BINDS adds 0.05 (a cap only below the tax the
+  colony pays now, each kept law, the ban), scaled by days / 40, and never past the Restless return line.
+  Near-free terms bought Loyal outright. Confirm with the user.
+- **Old saves:** an independent colony saved before grievances were (no `reclaim` block) rebuilds one on
+  load: neglect from the frozen attention stamp, the revolts in the window ending at the declaration, the
+  saved desperation.
+- **The council's log is cleared on rejoining**, so a later independence's panel lists only its own acts.
+- **Petitions reach the player wherever they are.** `PetitionWatch` (in `city_reclaim.dart`) lets the flight
+  view announce each new petition once as a toast (`simulation_view.dart`, a few lines). The colony on screen
+  in city mode still says it through its own HUD.
+- **The blockade's price is shown** (`blockadeNote`): on a standoff colony's delivery schedule and in its
+  loyalty explainer, that starving it wins no loyalty, and that its loyalty × mood counts in the reputation
+  that wins independent colonies home, with both figures. It is shown, not modelled further (see below).
+- Tests: `test/colony/city_term_guard_test.dart` (8: each re-plat edit bound and unbound as a control, the
+  plat after a refused edit identical to an untried one, the meltdown row, the flat builder's road), and in
+  `city_reclaim_test.dart` the real-tick secessions, the fixed levy, decline, shown terms, the log, old
+  saves, deliveries resuming (by terms and by petition, the grounded craft released), the blockade note and
+  the petition watch.
+
+**Deviations and open items.**
+- "Demolition" is every act that tears a building down: the bulldozer, the meltdown, any flat-builder tool
+  that clears a building, road or platform, and any plat edit whose re-cut would lose a built lot. On the
+  plat, re-zoning a built lot is not refused (`setUse` leaves the building standing). Changing the road
+  tool's lot frontage/depth re-cuts the whole plat outside the trial, as it always has (a pre-existing gap:
+  that re-cut carries nothing).
+- A petition is state and a warning on its colony, a notice in its queue, and a one-time toast in the flight
+  view. There is no inbox that keeps it after the toast.
+- Blockade as coercion is shown, not modelled: cutting a standoff colony's deliveries has no loyalty effect
+  of its own (it raises none, since hunger leaves nobody content) and no reputation cost beyond what its
+  falling mood already does to loyalty × mood. §6.3 says v1 models nothing beyond cancelling schedules.
+- Desperation is still not eased by independence. Only the starving clause above stops a desperate
+  colony from never petitioning.
+- Force (§6.3) is out of scope; its row is present and disabled.
 
 ## 8. Open questions for the user
 

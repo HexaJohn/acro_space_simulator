@@ -16,13 +16,16 @@
 ///
 /// This file WARNS and STRIKES. What independence then refuses is the
 /// control gate's (`city_control.dart`, phase 2), and how an independent
-/// colony runs itself is its governor's (`independent_governor.dart`).
+/// colony runs itself is its governor's (`independent_governor.dart`), and
+/// how it comes back is `city_reclaim.dart`'s (§6), ticked from here.
 library;
 
 import 'dart:math' as math;
 
+import 'city_reclaim.dart';
 import 'city_sim.dart';
 import 'commodity.dart';
+import 'independent_governor.dart';
 
 /// Whose orders a colony takes (§3.1, §6.3).
 enum Allegiance {
@@ -254,6 +257,15 @@ enum LoyaltyNoticeKind {
   revolt,
   independence,
   recovered,
+
+  /// An independent colony asks to rejoin (§6.2).
+  petition,
+
+  /// It has rejoined (§6.1, §6.2).
+  rejoined,
+
+  /// The terms it rejoined under have run out (§6.1).
+  termsExpired,
 }
 
 /// One announcement for the HUD to raise — a queue a host drains, as it
@@ -274,8 +286,8 @@ enum LoyaltySeverity { warn, danger }
 class LoyaltyWarning {
   const LoyaltyWarning(this.key, this.severity, this.text);
 
-  /// Stable id: 'independent', 'portSeized', 'standoff', 'defiant',
-  /// 'restless' or 'revolt'.
+  /// Stable id: 'independent', 'petition', 'portSeized', 'standoff',
+  /// 'defiant', 'restless', 'revolt' or 'terms'.
   final String key;
   final LoyaltySeverity severity;
   final String text;
@@ -369,6 +381,10 @@ class CityLoyalty {
   /// size a standoff's emigration settles at. Working state, not saved — the
   /// next tick measures it again.
   double localCapacity = double.infinity;
+
+  /// The ways back (§6, `city_reclaim.dart`): what drove it out, the terms
+  /// it rejoined under, its petition. Saved with the rest.
+  final CityReclaim reclaim = CityReclaim();
 
   static const int _maxNotices = 32;
   static const int _maxImpounded = 20;
@@ -472,6 +488,9 @@ class CityLoyalty {
     _notice(LoyaltyNoticeKind.revolt, message);
   }
 
+  /// Raise a notice from outside the loyalty rules (the ways back, §6).
+  void notice(LoyaltyNoticeKind kind, String message) => _notice(kind, message);
+
   void _notice(LoyaltyNoticeKind kind, String message) {
     notices.add(LoyaltyNotice(kind, message, colonyTimeS));
     if (notices.length > _maxNotices) notices.removeAt(0);
@@ -543,7 +562,7 @@ class CityLoyalty {
     final condition = level <= 0 || revolts.length >= t.revoltsToSecede;
     if (condition || stage == LoyaltyStage.standoff) {
       if (selfSufficient && i.populated) {
-        _secede(causes());
+        _secede(causes(), i);
         return;
       }
       if (!condition &&
@@ -623,7 +642,21 @@ class CityLoyalty {
         'The rebels have given the spaceport back.');
   }
 
-  void _secede(String causes) {
+  void _secede(String causes, LoyaltyInputs i) {
+    // What drove it out, while it is still true: the terms it states later
+    // are derived from this (§6.1), and by then its clock no longer counts
+    // the player and its rebellion has settled under its own rule.
+    // Misrule is the meter's PEAK over the revolt window, not its reading
+    // now: a revolt fires only at 1.0 and resets the meter to 0.3 in the
+    // same tick, before this step runs — so a colony driven out by its third
+    // revolt read 0.3, no misrule at all, and stated milder terms than one
+    // that was merely forgotten.
+    reclaim.onSecede(Grievance(
+      neglectDays: sinceAttendedS / tuning.daySec,
+      rebellion: revolts.isNotEmpty ? 1.0 : i.rebellion,
+      revolts: revolts.length,
+      desperation: desperation,
+    ));
     allegiance = Allegiance.independent;
     stage = LoyaltyStage.seceded;
     independentAtS = colonyTimeS;
@@ -659,6 +692,7 @@ class CityLoyalty {
           ],
         if (independentAtS != null) 'independentAt': independentAtS,
         if (independenceCauses != null) 'independentWhy': independenceCauses,
+        'reclaim': ?reclaim.toJson(),
       };
 
   /// Restore from [toJson]'s map. Tolerant: an absent or unreadable field
@@ -704,6 +738,8 @@ class CityLoyalty {
     independentAtS = ind is num ? ind.toDouble() : null;
     final why = json['independentWhy'];
     independenceCauses = why is String ? why : null;
+    reclaim.restore(json['reclaim']);
+    reclaim.recoverGrievance(this);
   }
 }
 
@@ -779,6 +815,13 @@ extension CityLoyaltySim on CitySim {
       starving: starved,
       causes: () => loyaltyCauses().join('; '),
     ));
+    // The ways back (§6): terms running out, petitions building.
+    loyalty.reclaim.tick(loyalty,
+        dt: dt,
+        happiness: happiness,
+        starving: starved,
+        populated: population >= 1,
+        laws: laws);
     if (loyalty.selfGoverning) _taxRevolt(dt);
   }
 
@@ -870,6 +913,7 @@ extension CityLoyaltySim on CitySim {
               ? 'Independent — takes no orders'
               : 'Independent for $days days — takes no orders'));
     }
+    if (reclaimWarning() case final w?) out.add(w);
     if (l.portSeized) {
       final n = l.impounded.length;
       out.add(LoyaltyWarning(
@@ -903,6 +947,7 @@ extension CityLoyaltySim on CitySim {
           'REVOLT — $n in ${l.tuning.revoltWindowDays.round()} days'
           '${n >= l.tuning.revoltsToSecede - 1 && l.allegiance == Allegiance.colonial ? ' (one more and it breaks away)' : ''}'));
     }
+    if (termsWarning() case final w?) out.add(w);
     return out;
   }
 
@@ -911,6 +956,8 @@ extension CityLoyaltySim on CitySim {
     final j = loyalty.toJson();
     final held = heldCraftJson();
     if (held.isNotEmpty) j['held'] = held;
+    final council = governorLogJson();
+    if (council.isNotEmpty) j['council'] = council;
     return j.isEmpty ? null : j;
   }
 
@@ -918,7 +965,10 @@ extension CityLoyaltySim on CitySim {
   /// just-attended colony.
   void restoreLoyalty(Object? json) {
     loyalty.restore(json);
-    if (json is Map) restoreHeldCraft(json['held']);
+    if (json is Map) {
+      restoreHeldCraft(json['held']);
+      restoreGovernorLog(json['council']);
+    }
   }
 
   /// Held craft (§4.1), for the save: craft are otherwise not saved — a

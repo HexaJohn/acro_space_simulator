@@ -19,6 +19,7 @@ import 'package:flutter/material.dart';
 
 import '../../../domain/colony/city/city_building_spec.dart';
 import '../../../domain/colony/city/city_control.dart';
+import '../../../domain/colony/city/city_reclaim.dart';
 import '../../../domain/colony/city/city_sim.dart';
 import '../../../domain/colony/city/city_site_rules.dart';
 import 'app_theme.dart';
@@ -75,7 +76,9 @@ Widget citySiteAction(
 /// [citySiteAction] behind the control gate (docs/plans/colony-secession.md
 /// §5): on a colony that takes no orders the row stays — the player sees
 /// what the building could do — greyed, its subtitle the reason, and a tap
-/// says it instead of acting.
+/// says it instead of acting. [termRefusal] is a binding term's refusal
+/// (secession §6.1) on a colony that does take orders — the demolition
+/// ban on Demolish — shown and said the same way.
 Widget gatedSiteAction(
   BuildContext context,
   CitySim sim,
@@ -83,14 +86,15 @@ Widget gatedSiteAction(
   String label,
   String sub,
   Color color,
-  VoidCallback onTap,
-) {
-  final c = sim.playerControl;
-  if (c.allowed) {
+  VoidCallback onTap, {
+  String? termRefusal,
+}) {
+  final why = sim.playerControl.reason ?? termRefusal;
+  if (why == null) {
     return citySiteAction(context, icon, label, sub, color, onTap);
   }
-  return citySiteAction(context, icon, label, c.reason!, AppTheme.textDim,
-      () => sayRefused(context, c.reason!));
+  return citySiteAction(context, icon, label, why, AppTheme.textDim,
+      () => sayRefused(context, why));
 }
 
 /// A "why did this happen / how to fix" modal for a warning or status.
@@ -323,7 +327,9 @@ void showCitySiteMenu({
           content: Text('☢ MELTDOWN — safety interlocks disabled. Oops.'),
           backgroundColor: Color(0xFF6B1414),
           duration: Duration(seconds: 4)));
-    }));
+      // It tears the reactor down (and the blast more), so a term that
+      // forbids demolition forbids it as it does Demolish (secession §6.1).
+    }, termRefusal: sim.demolitionRefusal));
   }
   // Spaceports + airfields are launch sites: enter the VAB to design a craft
   // and launch it (rockets from spaceports, spaceplanes from airfields).
@@ -440,7 +446,7 @@ void showCitySiteMenu({
     demolishSite(sim, site);
     sim.attend();
     onChanged();
-  }));
+  }, termRefusal: sim.demolitionRefusal));
 
   showModalBottomSheet<void>(
     context: context,
@@ -522,6 +528,15 @@ void showDeliveryConfig({
                     padding: const EdgeInsets.only(bottom: 6),
                     child: Text(control.reason!,
                         style: AppTheme.dim.copyWith(color: AppTheme.danger)),
+                  ),
+                // Before the player cuts a standoff colony's runs: what
+                // starving it costs (secession §6.3).
+                if (sim.blockadeNote() case final b?)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Text(b,
+                        key: const ValueKey('delivery-blockade-note'),
+                        style: AppTheme.dim.copyWith(color: AppTheme.warn)),
                   ),
                 if (list.isEmpty)
                   const Padding(

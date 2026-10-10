@@ -35,6 +35,7 @@ import 'city_config.dart';
 import 'city_layout.dart';
 import 'city_loyalty.dart';
 import 'city_progression.dart';
+import 'city_term_guard.dart';
 import 'independent_governor.dart';
 import 'parcel.dart';
 import 'parcel_network.dart';
@@ -1285,7 +1286,17 @@ class CitySim {
 
   double stockOf(String c) => stock[c] ?? 0;
 
-  double effectiveTax() => economy.taxControllable ? taxRate : 0.5;
+  /// The tax the colony pays: the player's rate, or an uncontrollable
+  /// economy's fixed state levy — held under a rejoining term's tax cap
+  /// while the terms run (secession §6.1). Without the hold, a colony that
+  /// left under Communism rejoined "taxed at most 5%" and went on paying
+  /// 50%, since lowering [taxRate] — all the rejoining did — moves nothing a
+  /// fixed levy reads.
+  double effectiveTax() {
+    if (economy.taxControllable) return taxRate;
+    final cap = loyalty.reclaim.terms?.taxCap;
+    return cap == null ? 0.5 : math.min(0.5, cap);
+  }
 
   bool unlocked(CityBuildingSpec s) => ignoreUnlocks || population >= s.unlockPop;
 
@@ -2241,9 +2252,12 @@ class CitySim {
     // it only when it drops back below a LOWER one. Without the dead band a law
     // that fixes the very metric it reacts to (curfew lowers crime, which then
     // repeals the curfew, which lets crime climb again) flip-flops forever.
+    // A law the colony rejoined on keeping (secession §6.1) is kept by its
+    // own vote too: the term was its demand, not the player's.
+    final kept = loyalty.reclaim.terms?.keptLaws ?? const <Law>{};
     void band(Law l, double value, double onAt, double offAt) {
       if (laws.contains(l)) {
-        if (value < offAt) laws.remove(l);
+        if (value < offAt && !kept.contains(l)) laws.remove(l);
       } else {
         if (value > onAt) laws.add(l);
       }
@@ -4012,6 +4026,12 @@ class CitySim {
   /// reads to put an interchange at an expressway's crossing.
   List<RoadCrossing> lastCommitCrossings = const [];
 
+  /// The plat as it stood before a player's edit run on trial, while one
+  /// runs ([CityTermGuard.keepingBuiltLots]); null otherwise. Every re-plat
+  /// the player can cause carries its lots through [_carryRenamedLots] or
+  /// [_carryLotsAcross], and both ask [CityTermGuard.guardBuiltLots] first.
+  CityLayout? lotGuard;
+
   String? commitRoad(
     List<Vec2> controls,
     RoadClass roadClass, {
@@ -4110,6 +4130,7 @@ class CitySim {
   /// what stood on a lot the re-plat did not carry is torn down with it
   /// ([_dropLostLots]).
   void _carryRenamedLots(Map<String, String> renamed) {
+    guardBuiltLots(renamed);
     agents.onLotsRenamed(renamed);
     siteAccess.onLotsRenamed(renamed);
     for (final e in renamed.entries) {
@@ -5566,7 +5587,13 @@ class CitySim {
         }
       }
     }
-    if (moved.isEmpty) return;
+    guardBuiltLots(moved);
+    // Nothing renamed is not nothing lost: a plot staked over a lot with no
+    // successor still drops it, or its building stays keyed by a dead id.
+    if (moved.isEmpty) {
+      _dropLostLots();
+      return;
+    }
     for (final e in moved.entries) {
       final placed = parcelBuildings.remove(e.key);
       if (placed != null) parcelBuildings[e.value] = placed;

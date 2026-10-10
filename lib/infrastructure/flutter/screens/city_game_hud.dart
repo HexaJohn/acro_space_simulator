@@ -21,6 +21,7 @@ import '../../../domain/colony/city/city_building_spec.dart';
 import '../../../domain/colony/city/city_control.dart';
 import '../../../domain/colony/city/city_loyalty.dart';
 import '../../../domain/colony/city/city_progression.dart';
+import '../../../domain/colony/city/city_reclaim.dart';
 import '../../../domain/colony/city/city_sim.dart';
 import '../../../domain/colony/city/road_build.dart' show formatMoney;
 import '../../../domain/colony/city/road_catalog.dart';
@@ -29,6 +30,7 @@ import '../../../domain/colony/city/traffic/city_agents.dart'
 import 'app_theme.dart';
 import 'city_control_ui.dart';
 import 'city_loyalty_ui.dart';
+import 'city_reclaim_ui.dart';
 import 'traffic_lane_speed_overlay.dart' show TrafficLaneSpeedOverlay;
 
 /// Which drawer is open under the top bar.
@@ -156,6 +158,12 @@ class _CityGameHudState extends State<CityGameHud> {
                   Padding(
                     padding: const EdgeInsets.only(top: 6),
                     child: IndependencePanel(city: city, compact: true),
+                  ),
+                // The terms it rejoined under, while they run (§6.1).
+                if (city.reclaim.terms != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: BindingTermsCard(city: city, compact: true),
                   ),
                 if (_panel != CityGamePanel.none)
                   Padding(
@@ -670,15 +678,29 @@ class _CityGameHudState extends State<CityGameHud> {
         child: Slider(
           value: tax.clamp(0.0, 0.4),
           max: 0.4,
+          // Held at the rejoining terms' cap (secession §6.1), said on
+          // release.
           onChanged:
               controllable && city.playerControl.allowed
                   ? (v) => setState(() {
-                        city.taxRate = v;
+                        city.taxRate = v.clamp(0.0, city.taxCeiling ?? v);
                         city.attend(); // an act of governance (secession §3.3)
                       })
                   : null,
+          onChangeEnd: controllable && city.playerControl.allowed
+              ? (v) {
+                  if (city.taxRefusal(v) case final why?) {
+                    sayRefused(context, why);
+                  }
+                }
+              : null,
         ),
       )),
+      // Shown over a fixed levy too: the cap holds it (secession §6.1).
+      if (city.taxCeiling case final cap?)
+        Text(city.termRefusal('cap the tax at ${BindingTerms.pct(cap)}'),
+            key: const ValueKey('tax-cap-term'),
+            style: AppTheme.dim.copyWith(color: AppTheme.warn, fontSize: 11)),
       Text(
           'Higher tax fills the treasury and empties the mood. '
           '${city.economy.label} decides how much of it is yours to set.',
@@ -751,7 +773,10 @@ class _CityGameHudState extends State<CityGameHud> {
 
   Widget _noticeCard(LoyaltyNotice n) {
     final good = n.kind == LoyaltyNoticeKind.recovered ||
-        n.kind == LoyaltyNoticeKind.portReleased;
+        n.kind == LoyaltyNoticeKind.portReleased ||
+        n.kind == LoyaltyNoticeKind.petition ||
+        n.kind == LoyaltyNoticeKind.rejoined ||
+        n.kind == LoyaltyNoticeKind.termsExpired;
     final colour = good
         ? AppTheme.accent2
         : (n.kind == LoyaltyNoticeKind.restless

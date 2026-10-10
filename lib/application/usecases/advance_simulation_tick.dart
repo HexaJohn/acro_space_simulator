@@ -12,6 +12,7 @@ import '../../domain/autonomy/autopilot_updater.dart';
 import '../../domain/autonomy/cargo_scheduler.dart';
 import '../../domain/autonomy/docking_updater.dart';
 import '../../domain/autonomy/landing_guidance.dart';
+import '../../domain/colony/city/city_reclaim.dart';
 import '../../domain/colony/city/city_sim.dart';
 import '../../domain/colony/city/city_terrain_shaper.dart';
 import '../../domain/colony/city/parcel.dart';
@@ -382,6 +383,10 @@ class AdvanceSimulationTick {
     // into frames; held together, the colony sees what it would inline, only
     // later.
     _lastClock = clock;
+    // Reputation (secession §6.2) is the mean over a colony's neighbours,
+    // which no colony can see from inside its own tick: measured here, over
+    // every colony, and handed to each before any of them moves.
+    CityReclaimSim.handOutReputation(cities.all());
     for (final city in cities.all()) {
       final agents = city.agents;
       if (agents.frameBudgeted) agents.replayTick = _replayCity;

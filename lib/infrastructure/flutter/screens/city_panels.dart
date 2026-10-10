@@ -22,6 +22,7 @@ import 'package:flutter/material.dart';
 
 import '../../../domain/colony/city/city_control.dart';
 import '../../../domain/colony/city/city_loyalty.dart';
+import '../../../domain/colony/city/city_reclaim.dart';
 import '../../../domain/colony/city/city_sim.dart';
 import '../../../domain/colony/city/city_site_rules.dart';
 import '../../../domain/planetary/planet_surface.dart';
@@ -31,6 +32,7 @@ import 'city_atmosphere_panel.dart';
 import 'city_control_ui.dart';
 import 'city_loyalty_ui.dart';
 import 'city_model.dart';
+import 'city_reclaim_ui.dart';
 import 'city_site_actions.dart';
 
 /// Panels over a colony. Mix into a [State]; supply the colony and a rebuild.
@@ -303,7 +305,12 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
         const Text('LOYALTY', style: AppTheme.heading),
         const SizedBox(height: 6),
         if (sim.loyalty.allegiance == Allegiance.independent) ...[
-          IndependencePanel(city: sim),
+          IndependencePanel(
+              city: sim, onRejoined: panelChanged),
+          const SizedBox(height: 6),
+        ],
+        if (sim.reclaim.terms != null) ...[
+          BindingTermsCard(city: sim),
           const SizedBox(height: 6),
         ],
         ..._loyaltyRows(),
@@ -1151,11 +1158,22 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
         runSpacing: 6,
         children: [
           for (final e in Economy.values)
-            _pill(e.label, sim.economy == e, AppTheme.accent,
-                _gated(() => setState(() {
-                      sim.economy = e;
-                      sim.attend(); // an act of governance (secession §3.3)
-                    }))),
+            _pill(
+                e.label,
+                sim.economy == e,
+                AppTheme.accent,
+                _gated(() {
+                  // A fixed levy over the rejoining terms' tax cap (§6.1).
+                  if (sim.economyRefusal(e) case final why?) {
+                    sayRefused(context, why);
+                    return;
+                  }
+                  setState(() {
+                    sim.economy = e;
+                    sim.attend(); // an act of governance (secession §3.3)
+                  });
+                }),
+                refusal: sim.economyRefusal(e)),
         ],
       );
   Widget _govtPicker() => Wrap(
@@ -1171,8 +1189,9 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
                     }))),
         ],
       );
-  Widget _pill(String label, bool sel, Color color, VoidCallback onTap) =>
-      gatedControl(sim, GestureDetector(
+  Widget _pill(String label, bool sel, Color color, VoidCallback onTap,
+          {String? refusal}) =>
+      gatedBy(sim.playerControl.reason ?? refusal, GestureDetector(
         onTap: onTap,
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -1205,13 +1224,26 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
           child: Slider(
               value: tax.clamp(0.0, 0.4),
               max: 0.4,
+              // Held at the rejoining terms' cap (§6.1), and said on release.
               onChanged: controllable
                   ? (v) => setState(() {
-                        sim.taxRate = v;
+                        sim.taxRate = v.clamp(0.0, sim.taxCeiling ?? v);
                         sim.attend();
                       })
+                  : null,
+              onChangeEnd: controllable
+                  ? (v) {
+                      if (sim.taxRefusal(v) case final why?) {
+                        sayRefused(context, why);
+                      }
+                    }
                   : null),
         )),
+        // Shown over a fixed levy too: the cap holds it (§6.1).
+        if (sim.taxCeiling case final cap? when _governs)
+          Text(sim.termRefusal('cap the tax at ${BindingTerms.pct(cap)}'),
+              key: const ValueKey('tax-cap-term'),
+              style: AppTheme.dim.copyWith(color: AppTheme.warn)),
       ]),
     );
   }
@@ -1238,16 +1270,35 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
                 Text(l.effect, style: AppTheme.dim),
               ]),
             ),
+            if (sim.repealRefusal(l) != null)
+              const Padding(
+                padding: EdgeInsets.only(right: 4),
+                child: Tooltip(
+                    message: 'Kept by the rejoining terms',
+                    child: Icon(Icons.gavel, size: 14, color: AppTheme.warn)),
+              ),
             if (!auto)
-              gatedControl(sim, Switch(
-                  value: sim.laws.contains(l),
-                  activeThumbColor: AppTheme.accent2,
-                  onChanged: _governs
-                      ? (v) => setState(() {
-                            v ? sim.laws.add(l) : sim.laws.remove(l);
-                            sim.attend();
-                          })
-                      : null)),
+              gatedBy(
+                  sim.playerControl.reason ??
+                      (sim.laws.contains(l) ? sim.repealRefusal(l) : null),
+                  Switch(
+                      value: sim.laws.contains(l),
+                      activeThumbColor: AppTheme.accent2,
+                      onChanged: _governs
+                          ? (v) {
+                              // A law the colony rejoined on keeping (§6.1).
+                              if (!v) {
+                                if (sim.repealRefusal(l) case final why?) {
+                                  sayRefused(context, why);
+                                  return;
+                                }
+                              }
+                              setState(() {
+                                v ? sim.laws.add(l) : sim.laws.remove(l);
+                                sim.attend();
+                              });
+                            }
+                          : null)),
           ]),
         ),
     ];

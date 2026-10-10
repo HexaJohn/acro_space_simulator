@@ -126,6 +126,51 @@ class CityLayout {
 
   ParcelSettings get settings => _settings;
 
+  /// A copy of the plat and its roads, to put back with [restoreFrom]: a
+  /// player's edit made on trial and undone when it would tear down what a
+  /// colony's rejoining terms protect (secession §6.1,
+  /// `city_term_guard.dart`). Roads and lots are immutable, so it copies the
+  /// collections that hold them, not the objects — cheap next to the re-cut
+  /// it guards.
+  CityLayout copy() => CityLayout(settings: _settings)
+    .._assign(this)
+    ..easementOf = easementOf;
+
+  /// Put back the plat [saved] by [copy]. Every revision moves PAST where
+  /// the trial left it, so no cache keyed on one — an edit's or the one the
+  /// copy was taken at — is taken for the plat put back.
+  void restoreFrom(CityLayout saved) {
+    final v = version, r = revision, u = useRevision;
+    _assign(saved);
+    version = math.max(v, saved.version) + 1;
+    revision = math.max(r, saved.revision) + 1;
+    useRevision = math.max(u, saved.useRevision) + 1;
+  }
+
+  void _assign(CityLayout o) {
+    _roads
+      ..clear()
+      ..addAll(o._roads);
+    _manual
+      ..clear()
+      ..addAll(o._manual);
+    _auto = List.of(o._auto);
+    _settings = o._settings;
+    _nextId = o._nextId;
+    _commitSeq = o._commitSeq;
+    _uses
+      ..clear()
+      ..addAll(o._uses);
+    _autoIndex
+      ..clear()
+      ..addAll(o._autoIndex);
+    _index.copyFrom(o._index);
+    version = o.version;
+    revision = o.revision;
+    useRevision = o.useRevision;
+    _reindex();
+  }
+
   set settings(ParcelSettings value) {
     _settings = value;
     regenerate();

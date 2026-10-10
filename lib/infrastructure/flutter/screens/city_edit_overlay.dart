@@ -19,6 +19,7 @@ import '../../../domain/colony/city/city_building_spec.dart';
 import '../../../domain/colony/city/city_control.dart';
 import '../../../domain/colony/city/city_sim.dart';
 import '../../../domain/colony/city/city_site_rules.dart';
+import '../../../domain/colony/city/city_term_guard.dart';
 import '../../../domain/colony/city/parcel.dart';
 import 'app_theme.dart';
 import 'city_control_ui.dart';
@@ -133,6 +134,7 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
   /// click from wherever it was abandoned.
   void set(CityEditTool t) {
     if (t.acts && !_mayHold()) return;
+    if (t == CityEditTool.bulldoze && !_mayHoldBulldozer()) return;
     if (t != tool) resetRoadTool();
     tool = t;
     blocked = null;
@@ -194,6 +196,22 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
     return false;
   }
 
+  /// The bulldozer under rejoining terms that forbid demolition (secession
+  /// §6.1): refused to be picked up, with the term on the blocked line.
+  bool _mayHoldBulldozer() {
+    final city = gateCity;
+    if (city == null) return true;
+    return _mayDemolishOn(city);
+  }
+
+  /// [mayActOn] for the bulldozer: also refused while the terms forbid
+  /// demolition, the term and its days left on the blocked line.
+  bool _mayDemolishOn(CitySim city) {
+    if (city.mayDemolish((why) => blocked = why)) return true;
+    notifyListeners();
+    return false;
+  }
+
   void setHover(int? cell) {
     if (cell == hoverCell) return;
     hoverCell = cell;
@@ -209,6 +227,7 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
   void applyToLot(CitySim city, String parcelId) {
     blocked = null;
     if (!mayActOn(city)) return;
+    if (tool == CityEditTool.bulldoze && !_mayDemolishOn(city)) return;
     switch (tool) {
       case CityEditTool.utility:
         applyToParcel(city, parcelId);
@@ -258,7 +277,9 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
     }
     // Graded either way: free build drops the slope gate, not the pad
     // (see [ignoreTerrain]).
-    final claimed = city.claimSite(held, centre);
+    // Staking it re-cuts the street lots under it: on trial under a
+    // demolition ban (secession §6.1), refused if a building stood on one.
+    final claimed = city.keepingBuiltLots(() => city.claimSite(held, centre));
     blocked = claimed == null ? city.blocked : null;
     if (claimed != null) city.attend(); // secession §3.3
     notifyListeners();
@@ -313,6 +334,7 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
   void applyTo(CitySim city, int cell) {
     blocked = null;
     if (!mayActOn(city)) return;
+    if (tool == CityEditTool.bulldoze && !_mayDemolishOn(city)) return;
     switch (tool) {
       case CityEditTool.inspect:
       // The road tools work in continuous metres, not cells — they are
@@ -611,7 +633,11 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
         ),
       ),
     );
-    return t.acts ? gatedControl(city, chip) : chip;
+    if (!t.acts) return chip;
+    return gatedBy(
+        city.playerControl.reason ??
+            (t == CityEditTool.bulldoze ? city.demolitionRefusal : null),
+        chip);
   }
 
   Widget _stat(String label, double value) => Padding(

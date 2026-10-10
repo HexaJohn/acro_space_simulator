@@ -33,6 +33,7 @@ import '../../domain/autonomy/pilot_input.dart';
 import '../../domain/autonomy/landing_target.dart';
 import '../../domain/colony/city/city_building_spec.dart';
 import '../../domain/colony/city/city_config.dart';
+import '../../domain/colony/city/city_reclaim.dart' show PetitionWatch;
 import '../../domain/colony/city/city_sim.dart';
 import '../../domain/colony/city/parcel.dart';
 import '../../domain/colony/city/traffic/vehicle_inspection.dart';
@@ -1820,6 +1821,21 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     }
   }
 
+  /// A petition to rejoin raised on any colony (secession §6.2), said once
+  /// wherever the player is. The colony on screen in city mode says its own
+  /// through its HUD's notice queue; it is still marked seen here.
+  final PetitionWatch _petitions = PetitionWatch();
+  void _announcePetitions() {
+    if (!mounted) return;
+    final shown = widget.cityMode ? _editingCity : null;
+    for (final (city, p) in _petitions.fresh(_cities.all())) {
+      if (identical(city, shown)) continue;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(PetitionWatch.headline(city, p)),
+          duration: const Duration(seconds: 6)));
+    }
+  }
+
   void _onFrame(Duration elapsed) {
     final frameDt = (elapsed - _last).inMicroseconds / 1e6;
     _last = elapsed;
@@ -1991,6 +2007,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     // The Lane speed view follows the agents' measurements with no mouse
     // moving over it: redrawn when they publish, at most every 2 s.
     _pollLaneSpeedView();
+    _announcePetitions();
     if (swSteps.elapsedMilliseconds > 500) {
       debugPrint('simSteps: $steps steps in ${swSteps.elapsedMilliseconds}ms');
     }

@@ -223,6 +223,18 @@ class SegmentIndex {
     _dead = 0;
   }
 
+  /// Hold exactly what [other] holds, slot for slot (`CityLayout.copy`): the
+  /// samples are shared — never written after [add] — the cell lists are
+  /// not, since [remove] edits them in place. Both must share a [cellM].
+  void copyFrom(SegmentIndex other) {
+    assert(other.cellM == cellM);
+    clear();
+    _roads.addAll(other._roads);
+    _slotOf.addAll(other._slotOf);
+    other._cells.forEach((k, v) => _cells[k] = List.of(v));
+    _dead = other._dead;
+  }
+
   /// Index [road]. [samples] are its points at [sampleM] when the caller
   /// already has them — the pieces of a split are cut from the parent's own
   /// samples, and re-evaluating the spline through their decimated controls

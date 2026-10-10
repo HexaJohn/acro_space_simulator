@@ -354,6 +354,62 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
         if (_mayAct()) act();
       };
 
+  /// [act] behind the gate for an act that tears down: refused, too, while
+  /// rejoining terms forbid demolition (secession §6.1).
+  VoidCallback _gatedDemolish(VoidCallback act) => () {
+        if (_sim.mayDemolish((why) {
+          setState(() => _sim.blocked = why);
+          sayRefused(context, why);
+        })) {
+          act();
+        }
+      };
+
+  /// Whether the held tool at [k] would tear something built down while
+  /// the rejoining terms forbid demolition (secession §6.1). Built means a
+  /// building, a road or a platform — whatever the bulldozer would clear,
+  /// and the bulldozer is refused outright: a road removed by the Road
+  /// tool's toggle, or cleared under a zone, is the same demolition by
+  /// another tool, and refusing it only to the bulldozer was no rule at all.
+  /// So: the bulldozer always; a road, zone or platform laid over a building
+  /// or a road (the zone and the road keep a platform under them, the
+  /// platform tool clears to bare ground); and a same-type tap that removes
+  /// what it placed. Refused, the term goes on the blocked banner, and [say]
+  /// puts it in a snack bar too. [fill] asks for a rectangle fill, which
+  /// skips a cell it already holds and otherwise clears it as a tap does.
+  bool _demolitionRefused(int k, {bool say = true, bool fill = false}) {
+    final why = _sim.demolitionRefusal;
+    if (why == null) return false;
+    final anchor = _sim.anchorOf(k);
+    final building = anchor != null || _sim.grown.contains(k);
+    final road = _sim.roads.contains(k);
+    final platform = _sim.support.contains(k);
+    final zone = _sim.zones[k];
+    final sameZone = zone != null &&
+        zone.kind == _zoneKind &&
+        zone.density == _density;
+    final tears = switch (_tool) {
+      CityBuilderTool.bulldoze => true,
+      // A tap on a road removes it; a fill over one leaves it.
+      CityBuilderTool.road => building || (road && !fill),
+      // A same-zone tap clears the cell to the ground, platform and all.
+      CityBuilderTool.zone =>
+        building || road || (!fill && sameZone && platform),
+      // A tap on a platform removes it; on bare ground or a fill it
+      // clears the cell first.
+      CityBuilderTool.support =>
+        platform ? !fill : (building || road),
+      CityBuilderTool.utility => fill
+          ? building || road
+          : anchor != null && _sim.utils[anchor]?.type == _selectedUtil.type,
+      CityBuilderTool.retrofit || CityBuilderTool.inspect => false,
+    };
+    if (!tears) return false;
+    _sim.blocked = why;
+    if (say) sayRefused(context, why);
+    return true;
+  }
+
   @override
   void debugUseTool(CityBuilderTool tool, int x, int y) {
     setState(() => _tool = tool);
@@ -417,6 +473,10 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
           _rectHover = null;
         }
       });
+      return;
+    }
+    if (_demolitionRefused(k)) {
+      setState(() {});
       return;
     }
     setState(() {
@@ -524,6 +584,18 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     final k = _sim.key(x, y);
     if (k == _sim.hubKey) return;
     if (_tool.acts && !_mayAct()) return;
+    // A paint SETs, as a fill does: it never toggles away what it lays —
+    // and over its own zone it does nothing at all.
+    final cur = _sim.zones[k];
+    final noop = _tool == CityBuilderTool.utility ||
+        (_tool == CityBuilderTool.zone &&
+            cur != null &&
+            cur.kind == _zoneKind &&
+            cur.density == _density);
+    if (!noop && _demolitionRefused(k, fill: true)) {
+      setState(() {});
+      return;
+    }
     setState(() {
       _sim.blocked = null;
       switch (_tool) {
@@ -568,10 +640,19 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     final x0 = math.min(ax, bx), x1 = math.max(ax, bx);
     final y0 = math.min(ay, by), y1 = math.max(ay, by);
     _sim.blocked = null;
+    String? refused;
+    var acted = false;
     for (var y = y0; y <= y1; y++) {
       for (var x = x0; x <= x1; x++) {
         final k = _sim.key(x, y);
         if (k == _sim.hubKey) continue;
+        // A building inside the rectangle is skipped, not torn down, while
+        // the terms forbid it; the rest of the fill goes ahead.
+        if (_demolitionRefused(k, say: false, fill: true)) {
+          refused = _sim.blocked;
+          continue;
+        }
+        acted = true;
         if (_tool == CityBuilderTool.retrofit) {
           _sim.retrofitCell(k);
         } else if (_tool == CityBuilderTool.support) {
@@ -594,7 +675,13 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
         }
       }
     }
-    _sim.attend();
+    if (refused != null) {
+      _sim.blocked = refused;
+      sayRefused(context, refused);
+    }
+    // An act of governance only if one cell was acted on: a fill refused
+    // whole stamps no attention.
+    if (acted) _sim.attend();
     _sim.recompute();
   }
 
@@ -619,7 +706,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
           IconButton(
             icon: const Icon(Icons.delete_sweep, color: AppTheme.danger),
             tooltip: 'Clear',
-            onPressed: _gated(() => setState(() {
+            onPressed: _gatedDemolish(() => setState(() {
               _sim.zones.clear();
               _sim.utils.clear();
               _sim.footprint.clear();
@@ -1406,12 +1493,19 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     final sel = _tool == tool;
     // An acting tool on a colony that takes no orders (secession §5):
     // greyed, the reason its tooltip, and a tap says it.
-    if (tool.acts && !_sim.playerControl.allowed) {
-      return gatedControl(
-          _sim,
+    final refusal = !tool.acts
+        ? null
+        : (_sim.playerControl.reason ??
+            (tool == CityBuilderTool.bulldoze ? _sim.demolitionRefusal : null));
+    if (refusal != null) {
+      return gatedBy(
+          refusal,
           GestureDetector(
             key: ValueKey('builder-tool-${tool.name}'),
-            onTap: _mayAct,
+            onTap: () {
+              setState(() => _sim.blocked = refusal);
+              sayRefused(context, refusal);
+            },
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
               decoration: BoxDecoration(

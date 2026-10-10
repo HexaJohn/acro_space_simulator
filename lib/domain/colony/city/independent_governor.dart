@@ -36,7 +36,8 @@
 /// boundary sits once — as many small steps over the same span would — not
 /// once per boundary crossed (it is a council, not an integrator: a sitting
 /// that saw a shortage would see it again at the next). The log of what it
-/// did is display state, kept beside the colony and not saved.
+/// did is display state, kept beside the colony, and saved with the loyalty
+/// block so the panel's history survives a load.
 library;
 
 import 'dart:math' as math;
@@ -128,10 +129,42 @@ extension IndependentGovernorSim on CitySim {
       _tunings[this] ?? const IndependentGovernorTuning();
   set governorTuning(IndependentGovernorTuning t) => _tunings[this] = t;
 
-  /// What the governor has done, newest last (bounded; not saved).
+  /// What the governor has done, newest last (bounded; saved with the
+  /// loyalty block, [governorLogJson]).
   List<GovernorAct> get governorLog => _logs[this] ??= <GovernorAct>[];
 
   static const int _maxLog = 24;
+
+  /// The log for the save: the independence panel's "its council" list,
+  /// which a load used to start empty — a colony that had governed itself
+  /// for a year came back with nothing to show for it.
+  List<Map<String, dynamic>> governorLogJson() => [
+        for (final a in governorLog)
+          {
+            'k': a.kind.name,
+            'text': a.text,
+            't': a.atS,
+            if (a.oreSpent != 0) 'ore': a.oreSpent,
+          },
+      ];
+
+  /// Restore [governorLogJson]'s list; unreadable entries are skipped.
+  void restoreGovernorLog(Object? json) {
+    final log = governorLog..clear();
+    if (json is! List) return;
+    for (final e in json) {
+      if (e is! Map) continue;
+      final kind =
+          GovernorActKind.values.where((k) => k.name == e['k']).firstOrNull;
+      final text = e['text'];
+      final t = e['t'];
+      if (kind == null || text is! String || t is! num) continue;
+      final ore = e['ore'];
+      log.add(GovernorAct(kind, text, t.toDouble(),
+          oreSpent: ore is num ? ore.toDouble() : 0));
+    }
+    if (log.length > _maxLog) log.removeRange(0, log.length - _maxLog);
+  }
 
   /// The governor's part of a tick: a sitting when the tick crosses a
   /// [IndependentGovernorTuning.periodDays] boundary since the declaration
