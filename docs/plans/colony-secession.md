@@ -1,6 +1,6 @@
 # Colony loyalty and secession
 
-Status: draft for review, 2026-10-10. Baseline `dev` at `34a83f7`. Paths are relative to the repo root.
+Status: draft for review, 2026-10-10 (revised the same day: independence needs self-sufficiency). Baseline `dev` at `34a83f7`. Paths are relative to the repo root.
 
 ## 1. Intent
 
@@ -19,6 +19,11 @@ Decided by the user, 2026-10-10:
 - **All three** ways back.
 - Loyalty wears down from **both** player absence and bad state. Absence erodes it slowly, misrule speeds that
   up, and attention plus good government restore it.
+- **Independence needs self-sufficiency** (added 2026-10-10). A colony in a hostile environment, which is any
+  body but Earth in practice, lives on the player's supply chains. It can only truly secede if it can keep
+  itself alive (§3.4). A dependent colony that turns against the player cannot leave. It can strike, stall
+  and wither, but it cannot walk away from the shuttles that feed it. (*The Moon Is a Harsh Mistress*: Luna
+  could revolt because it grew its own grain. Antarctic stations never secede.)
 
 ## 2. What exists today
 
@@ -33,6 +38,13 @@ Decided by the user, 2026-10-10:
 | Persistence | `CitySim.toJson`/`fromJson`; world `GameStateCodec` | `taxRate`, `laws`, `rebellion`, `crime`, `corruption`, `inequality` are **not saved**: a save/load wipes misrule |
 | Neglect clock | none | no colony clock, no "last attended" stamp |
 | Force | military specs (`base`, `airfield`, `barracks`, …) feed `safety` only; war deaths | no garrison or strength model |
+
+Supplies reach a colony three ways, and none of them is local:
+- scheduled spaceport deliveries and shuttle cargo write straight into `stock` (`shuttle_cargo.dart:114`);
+- relief missions (`requestRelief`) bring crew and care packages;
+- the spaceport building's own food/water/oxygen output (0.3/s each, fuel-fed) stands for imports.
+
+`supportablePop` (19673a2) counts all of them, so it is not a self-sufficiency measure as it stands.
 
 Treasuries are **per colony** (`CitySim.funds`). There is no player-wide purse. This affects how
 **Negotiate** can work (§6.1).
@@ -81,14 +93,39 @@ An **act of governance**: any player mutation through the control gate (§5), su
 tax, laws or government, or claiming a site. **Opening the editor without acting does not count.** Otherwise
 a player could keep a colony loyal by glancing at it. This is open question Q2.
 
-### 3.4 Stages (with hysteresis)
+### 3.4 Self-sufficiency
+
+`selfSufficiency` is the share of the colony's life-support need that its **own** buildings cover. It is
+computed alongside `lifeNet` in the production loop, but counts only buildings for which `isLifeSupport` is
+true, which already excludes the spaceport. Deliveries, cargo and relief are not counted.
+
+```
+local_c = net output of local life-support buildings of commodity c        // food, water, O2 if managed
+selfSufficiency = min over c of local_c / (population × perPerson_c)       // clamp 0..1; 1 with no population
+```
+
+It is eased over about 5 colony days. A good harvest week should not count as self-sufficient, and a
+disaster day should not cancel it.
+
+- **Earth** (breathable, aquifers, farms) clears 1.0 with the starter kit. The rule is the same everywhere;
+  hostile worlds are simply hard to satisfy.
+- **The Moon / Mars** need hydroponics or lab-grown food, water from ice, sewage recycling or aquifers, and
+  oxygen from electrolysis or a harvester, each at the population's scale. Until then they are dependent.
+- Power and compute are local by construction and do not enter the measure. Fuel and other industrial
+  goods do not either: a colony that can breathe, eat and drink can survive alone, even if it cannot grow
+  without trade.
+
+**Dependent** = `selfSufficiency` < `independenceBar` (proposed 0.9) when the secession condition fires.
+
+### 3.5 Stages (with hysteresis)
 
 | Stage | Loyalty | Effect |
 |---|---|---|
 | Loyal | ≥ 0.6 | none |
 | Restless | < 0.6 (back above 0.65) | status notification + HUD chip; the colony starts **self-governing**: laws auto-vote whatever the government, and an over-high tax is pulled down toward what the mood bears (a tax revolt) |
 | Defiant | < 0.3 (back above 0.35) | **strikes**: `restThrottle` × 0.7 and tax collection halved (non-payment); a louder warning naming the causes (neglect, unrest, revolts) |
-| Seceded | ≤ 0, or 3 revolts within 15 days | `allegiance = independent` (§4) |
+| Seceded | ≤ 0, or 3 revolts within 15 days, **and self-sufficient** (§3.4) | `allegiance = independent` (§4) |
+| Standoff | the secession condition fires, but the colony is **dependent** | it cannot leave. Defiant's strike deepens (`restThrottle` × 0.4, no tax), settlers emigrate at the shortfall rate (the existing emigration path), and the warning reads "would secede, but cannot feed itself". It resolves when loyalty climbs back (attention + good rule), or the colony withers to its crew floor. If it ever becomes self-sufficient while still in standoff, it secedes at once. |
 
 The causes shown are the actual terms of the drift equation, so the warning says *why*, for example "no orders
 for 34 days" or "rebellion 0.82: crime, inequality".
@@ -107,6 +144,12 @@ for 34 days" or "rebellion 0.82: crime, inequality".
 
   It is deliberately dumb. It keeps the place alive and growing slowly, which makes it worth reclaiming.
 - Its treasury is its own (it already is). Vessels and shuttles owned by it: out of scope for v1.
+- **Player deliveries to it stop.** Its schedules are suspended, because it left the supply chain. It lives on
+  local production, which is why it had to be self-sufficient to leave.
+- **Losing self-sufficiency forces the question.** If an independent colony falls below the bar (it outgrew
+  its farms, or a disaster took a plant), its stock runs down and `supportablePop` shrinks. Before that ends
+  in a die-off, it **petitions to rejoin** on the player's terms (§6.2). Dependence drives it back, whatever
+  the player's reputation.
 
 ## 5. The control gate
 
@@ -150,6 +193,10 @@ world (`FlightSession.cities`). An independent colony that is doing worse than t
 **petition** pressure. Past a threshold it asks to rejoin (a notification), on light terms. With no other
 colonies there is no reputation, so this route needs a second colony.
 
+**Dependency petition.** An independent colony whose `selfSufficiency` has fallen below the bar petitions
+regardless of reputation, on terms the player sets. This is the most common way back for an off-world
+colony that seceded at the edge of sufficiency.
+
 ### 6.3 Force
 
 This needs a strength model that does not exist yet:
@@ -168,9 +215,16 @@ A win sets `allegiance = occupied`:
 
 This is the biggest piece and the last phase.
 
+**Blockade** is the cheap alternative to force. An independent colony still needs imports for anything it
+does not make, such as fuel, electronics and medicine. The player refusing trade (all independent colonies
+are refused in v1, see §4) caps its growth, but cannot starve a colony that is truly self-sufficient. Against
+a dependent colony in **standoff**, cutting deliveries is coercion: compliance through hunger. It raises
+loyalty fast but costs heavily in mood and reputation (§6.2), and phase 3 should make that trade-off visible.
+v1 does not model it beyond the player's existing ability to cancel delivery schedules.
+
 ## 7. Phases
 
-1. **Loyalty**: clock, attendance, the drift equation, stages and their effects, warnings in the status list
+1. **Loyalty**: clock, attendance, the drift equation, `selfSufficiency` (§3.4) and the standoff stage, stages and their effects, warnings in the status list
    and the HUD (including the revolt toasts that are missing today), and saving the political state.
    Domain plus HUD. Tests: neglect alone, misrule alone, recovery, hysteresis, and the save round-trip.
 2. **Independence**: the control gate across every call site plus the sweep test, the independent governor,
@@ -190,5 +244,10 @@ Each phase is one commit or a few, shipped behind nothing, since the first phase
 - **Q4 Government.** Should Autocracy and Monarchy resist longer (slower erosion, harsher revolts), or only
   through the existing `rebellionSensitivity`? Proposed: only through sensitivity, plus Autocracy keeps its
   garrison-style suppression in phase 4.
+- **Q6 Standoff.** A dependent colony at the secession threshold cannot leave (§3.5). Is strike + emigration +
+  withering the right shape? Or should rebels seize the spaceport, impounding the next delivery and refusing
+  docking, which makes a dependent revolt hurt the player's logistics?
+- **Q7 The bar.** Should self-sufficiency need 90% of life support from local buildings (proposed), and should
+  oxygen count only where the sim manages it (off breathable worlds, complexity ≥ 0.3)?
 - **Q5 The flat sandbox** `CityBuilderScreen` (`NewCityScreen._found`, never in a world). Does loyalty apply
   there? Proposed: yes, but with no reputation route, since it is the only colony.
