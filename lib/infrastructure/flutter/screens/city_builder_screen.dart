@@ -9,6 +9,7 @@ import 'package:flutter/gestures.dart' show PointerScrollEvent;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
+import '../../../application/usecases/local_colony_atmosphere.dart';
 import '../../../domain/colony/city/city_config.dart';
 import '../../../domain/colony/city/city_control.dart';
 import '../../../domain/colony/city/city_loyalty.dart';
@@ -129,6 +130,11 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
   /// The colony being viewed. All simulation state lives here.
   late final CitySim _sim;
 
+  /// The sandbox's planet: the air a stand-alone colony's towers move, so
+  /// the readouts answer them as they would in the world. Unused when the
+  /// world drives the colony (it integrates the real planet).
+  final LocalColonyAtmosphere _air = LocalColonyAtmosphere();
+
   CityBuilderTool _tool = CityBuilderTool.zone;
   String _zoneKind = 'residential';
   Density _density = Density.low;
@@ -211,7 +217,11 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
   void _onFrame(Duration elapsed) {
     final wallDt = (elapsed - _last).inMicroseconds / 1e6;
     _last = elapsed;
-    if (_driveLocally) _sim.advance(wallDt * _sim.timeWarp);
+    if (_driveLocally) {
+      final dt = wallDt * _sim.timeWarp;
+      _sim.advance(dt);
+      _air.step(_sim, dt);
+    }
     setState(() {});
   }
 

@@ -124,6 +124,9 @@ void main() {
     for (var i = 0; i < state.reservoirs.length; i++) {
       expect(restored.reservoirs[i].moles, state.reservoirs[i].moles,
           reason: state.reservoirs[i].name);
+      // The bound stores only a Regolith Baker reaches; warming moves the
+      // rest.
+      if (restored.reservoirs[i].bakeable) continue;
       expect(restored.reservoirs[i].moles,
           isNot(restored.reservoirs[i].referenceMoles),
           reason: 'the warming moved it');
@@ -135,6 +138,60 @@ void main() {
     expect(lunar.escapeSuppression, 0.5);
     expect(after.universe.current().require(const BodyId('moon')).hasAtmosphere,
         isTrue);
+  });
+
+  test('baked stores, array suppression and a turned biome survive a load',
+      () {
+    // Terraforming phase 3: the bakers' stores, the suppression the arrays
+    // set, the waiting tower flows, and a colony's climate band and biome.
+    final before = freshWorld();
+    final state = before.air.forBody('mars')!;
+    const PlanetAtmosphereService().advance(
+        state,
+        AtmosphereFlows()
+          ..addColony(
+              pollutionRate: 0,
+              oxygenatorRun: 10,
+              towers: TowerRuns()
+                ..baker = 20
+                ..greenhouse = 5
+                ..retention = 2,
+              dt: 5 * 686.98 * 86400,
+              colony: 'c'),
+        dt: 5 * 686.98 * 86400);
+    state.pendingFlows.addColony(
+        pollutionRate: 1,
+        oxygenatorRun: 0,
+        towers: TowerRuns()..sequestrator = 2,
+        dt: 30,
+        colony: 'c',
+        colonyName: 'Carter');
+    final city = CitySim.found(
+        const CityConfig(bodyId: 'mars', gridSize: 12),
+        bodies: before.universe.current().all.where((b) => !b.isStar).toList(),
+        id: 'c')
+      ..advance(0.5);
+    before.cities.add(city);
+    final json = save(before.air, before.cities);
+
+    final after = freshWorld();
+    load(json, after);
+    final restored = after.air.forBody('mars')!;
+    final carbonates = restored.reservoirs.firstWhere((r) => r.name == 'carbonates');
+    expect(carbonates.moles, lessThan(carbonates.referenceMoles));
+    for (var i = 0; i < state.reservoirs.length; i++) {
+      expect(restored.reservoirs[i].moles, state.reservoirs[i].moles,
+          reason: state.reservoirs[i].name);
+    }
+    expect(restored.escapeSuppression, closeTo(0.75, 1e-12));
+    expect(restored.greenhouseAgentMoles, state.greenhouseAgentMoles);
+    final waiting = restored.takePendingFlows()!;
+    expect(waiting.sequestratorRun, 60);
+    expect(waiting.byColony['c']!.name, 'Carter');
+    final back = after.cities.all().single;
+    expect(back.climate.band, city.climate.band);
+    expect(back.climate.bodyId, 'mars');
+    expect(back.biome, city.biome);
   });
 
   test('a save from before the inventory loads with reference air', () {

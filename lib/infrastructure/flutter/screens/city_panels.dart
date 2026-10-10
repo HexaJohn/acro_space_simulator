@@ -27,6 +27,7 @@ import '../../../domain/colony/city/city_site_rules.dart';
 import '../../../domain/planetary/planet_surface.dart';
 import '../../../domain/universe/celestial_body.dart';
 import 'app_theme.dart';
+import 'city_atmosphere_panel.dart';
 import 'city_control_ui.dart';
 import 'city_loyalty_ui.dart';
 import 'city_model.dart';
@@ -177,29 +178,37 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
                   'It clears over time. Build Terraforming Towers to clear it faster, '
                       'and lean on gas/nuclear power + stored food until it lifts.',
                   AppTheme.danger)),
-        // Not "Terraforming": since terraforming phase 2 this meter moves no
-        // air — the towers' oxygen goes into the planet's inventory, which
-        // the readouts above read — and drives only the biome flip at 100%.
-        // Under that name it climbed while Temp, Press and Water stood still
-        // (and in the flat sandbox, which integrates no atmosphere, nothing
-        // else ever moves), as if the towers were doing nothing.
-        if (sim.terraform > 0.01 || sim.terraformers > 0)
-          _meterRow('Biome reclamation',
-              '${(sim.terraform * 100).toStringAsFixed(0)}%', sim.terraform,
-              AppTheme.accent2,
-              onExplain: () => showExplain(
-                  context,
-                  'Biome reclamation',
-                  'Terraforming Towers re-seed the land around the colony; at '
-                      '100% a barren, desert or volcanic biome turns to '
-                      'grassland. The oxygen the towers vent goes into the '
-                      "planet's air, shared by every colony on it, and moves "
-                      'its pressure and breathability only as fast as a '
-                      'whole world fills.',
-                  'Keep the towers powered and connected. A sandbox colony '
-                      'has no planet around it, so there its towers reclaim '
-                      'land but do not change the sky.',
-                  AppTheme.accent2)),
+        // The planet's real air and who is changing it. This replaced the
+        // "Biome reclamation" slider meter (terraforming phase 3): towers
+        // move the planet's gas inventory, the land follows its climate, and
+        // the progress readout here is the derived sky's distance to
+        // breathable — it moves only as the air does.
+        const SizedBox(height: 12),
+        Row(children: [
+          const Expanded(child: Text('ATMOSPHERE', style: AppTheme.heading)),
+          InkWell(
+            onTap: () => showExplain(
+                context,
+                'Atmosphere',
+                "The air is the planet's, shared by every colony on it. Its "
+                    'pressure and temperature follow from the gas in it: '
+                    'Terraforming Towers split CO₂ into oxygen, Greenhouse '
+                    'Factories warm the world with a trace gas, Regolith '
+                    'Bakers free CO₂ and nitrogen from the rock, Carbon '
+                    'Sequestrators take CO₂ out, and Retention Arrays stop a '
+                    'small world leaking its air to space. When the climate '
+                    'crosses into a new band the land turns with it.',
+                'Breathable takes three things at once: oxygen of at least '
+                    '15%, half an atmosphere of pressure, and under 20% CO₂ '
+                    'and methane. The lines below show which colony is '
+                    'adding or removing which gas, per year.',
+                AppTheme.accent2),
+            child: const Icon(Icons.info_outline,
+                size: 14, color: AppTheme.textDim),
+          ),
+        ]),
+        const SizedBox(height: 6),
+        AtmospherePanel(city: sim),
       ];
 
   /// The congestion the status panel shows. With agents on it is theirs —
@@ -483,6 +492,14 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
       ]),
     ]);
   }
+  /// The [CitySim.bodies] entry for the world the colony is on, or null.
+  CelestialBody? _listedBody() {
+    for (final b in sim.bodies) {
+      if (b.id == sim.body.id) return b;
+    }
+    return null;
+  }
+
   Widget _planetPanel() => Container(
         padding: const EdgeInsets.all(10),
         decoration: AppTheme.panelBox(),
@@ -499,8 +516,12 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
               ),
             if (panelCanResite)
               Expanded(
+                // Matched by id, not identity: the sandbox's own air
+                // republishes `sim.body` as a new body that is not in
+                // `sim.bodies`, and a value no item holds fails the
+                // dropdown's assert on every build (the whole side pane).
                 child: DropdownButton<CelestialBody>(
-                value: sim.body,
+                value: _listedBody(),
                 isExpanded: true,
                 dropdownColor: AppTheme.panelLight,
                 underline: const SizedBox.shrink(),
@@ -510,7 +531,13 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
                     DropdownMenuItem(
                         value: b, child: Text(b.name, style: AppTheme.body)),
                 ],
-                onChanged: (b) => setState(() => sim.body = b!),
+                // A re-pick of the world it is on is no change: handing
+                // back the reference body would breathe reference air for
+                // a frame before the sandbox restored its own.
+                onChanged: (b) {
+                  if (b == null || b.id == sim.body.id) return;
+                  setState(() => sim.body = b);
+                },
                 ),
               ),
           ]),

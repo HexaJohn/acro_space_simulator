@@ -36,6 +36,14 @@ enum ReservoirKind {
   /// Gas adsorbed on regolith grains: a smooth isotherm in pressure,
   /// temperature and how much the soil still holds.
   adsorbed,
+
+  /// Gas locked CHEMICALLY in the ground — carbonates, nitrates — that no
+  /// warming the climate can reach frees: it takes a kiln at hundreds of
+  /// degrees. It never exchanges with the sky on its own; only a Regolith
+  /// Baker (docs/plans/terraforming.md §4, phase 3) draws it out. Kept as a
+  /// reservoir so the bake is BOUNDED by what the world really holds, and
+  /// saved and fingerprinted like the caps.
+  bound,
 }
 
 /// One body's store of one volatile, mutable world state.
@@ -87,6 +95,24 @@ class VolatileReservoir {
         triplePointPa = 0,
         triplePointK = 0,
         liquidLatentHeatK = 0;
+
+  /// Gas chemically bound in the ground ([ReservoirKind.bound]): no
+  /// equilibrium with the sky, no lag, released only by baking.
+  VolatileReservoir.bound({
+    required this.name,
+    required this.gas,
+    required double moles,
+  })  : kind = ReservoirKind.bound,
+        referenceMoles = moles,
+        moles = moles,
+        relaxSeconds = double.infinity,
+        latentHeatK = 0,
+        trapOffsetK = 0,
+        triplePointPa = 0,
+        triplePointK = 0,
+        liquidLatentHeatK = 0,
+        isothermExponent = 0,
+        desorptionK = 0;
 
   /// Stable id, saved — never reuse one for a different store.
   final String name;
@@ -172,13 +198,34 @@ class VolatileReservoir {
             math.exp((surfaceK - referenceSurfaceK) /
                 (isothermExponent * desorptionK));
         return (release: p, condense: p);
+      case ReservoirKind.bound:
+        // Never in equilibrium with the sky: nothing it does pulls gas out
+        // of the store, and no sky is ever thick enough to push gas back in.
+        return (release: 0, condense: double.infinity);
     }
   }
+
+  /// Whether a Regolith Baker can draw on this store.
+  bool get bakeable => kind == ReservoirKind.bound;
 
   void resetToReference() => moles = referenceMoles;
 
   /// The reservoirs a body starts with. Empty for every world but Mars for
   /// now (§3.3 "start with Mars").
+  ///
+  /// Phase 3 adds the two stores a Regolith Baker draws on, both
+  /// [ReservoirKind.bound] (no climate reaches them):
+  ///  * **Carbonates, 1.0e18 mol CO2 (~11 mbar)** — the carbonate minerals
+  ///    orbiters and landers have found in the near surface. Jakosky &
+  ///    Edwards (2018) put the CO2 accessible in them at the order of ten
+  ///    millibar, and note it is released only by heating the rock to
+  ///    several hundred degrees: exactly what a kiln does.
+  ///  * **Nitrates, 8.7e15 mol N2** — the 110-1,100 ppm nitrate Curiosity
+  ///    measured in Gale Crater sediments (Stern et al. 2015, PNAS 112,
+  ///    4245), taken at ~500 ppm through the top ten metres of regolith
+  ///    (1.44e14 m² × 10 m × 1500 kg/m³). Mars's sky holds ~1.5e16 mol N2,
+  ///    so all of it would add about half again: the honest answer to
+  ///    "where does a Martian buffer gas come from" is "not from the soil".
   ///
   /// Mars (all magnitudes tunable here; the present atmosphere is 2.4e16 kg,
   /// 5.4e17 mol, and one millibar of CO2 is ~8.8e16 mol):
@@ -217,6 +264,8 @@ class VolatileReservoir {
   static const double marsCapCo2Moles = 6.0e17;
   static const double marsRegolithCo2Moles = 3.5e18;
   static const double marsWaterIceMoles = 1.4e20;
+  static const double marsCarbonateCo2Moles = 1.0e18;
+  static const double marsNitrateN2Moles = 8.7e15;
   static const double _marsYear = 686.98 * 86400;
 
   /// Mars's three stores, with [regolithCo2Moles] overridable for the
@@ -225,6 +274,8 @@ class VolatileReservoir {
     double capCo2Moles = marsCapCo2Moles,
     double regolithCo2Moles = marsRegolithCo2Moles,
     double waterIceMoles = marsWaterIceMoles,
+    double carbonateCo2Moles = marsCarbonateCo2Moles,
+    double nitrateN2Moles = marsNitrateN2Moles,
   }) =>
       [
         VolatileReservoir.ice(
@@ -252,5 +303,20 @@ class VolatileReservoir {
           trapOffsetK: 20,
           relaxSeconds: _marsYear,
         ),
+        VolatileReservoir.bound(
+          name: 'carbonates',
+          gas: AtmosphereGas.carbonDioxide,
+          moles: carbonateCo2Moles,
+        ),
+        VolatileReservoir.bound(
+          name: 'nitrates',
+          gas: AtmosphereGas.nitrogen,
+          moles: nitrateN2Moles,
+        ),
       ];
+
+  /// Whether [bodyId] starts with anything a Regolith Baker can draw on —
+  /// the placement rule's question, asked of the reference stores.
+  static bool hasBakeableStore(String bodyId) =>
+      forBody(bodyId).any((r) => r.bakeable && r.referenceMoles > 0);
 }

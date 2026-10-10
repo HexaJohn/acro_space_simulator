@@ -480,6 +480,26 @@ const List<CityBuildingSpec> kUtilCatalog = [
       computeDraw: 4, outputs: {Commodity.oxygen: 0.5}, pollution: -2.0,
       unlockPop: 300, buildCost: 150,
       siteWidthM: 320, siteDepthM: 320),
+  // The rest of the tower family (docs/plans/terraforming.md §4, phase 3).
+  // Each moves one gas on the planet the colony shares — see
+  // `PlanetAtmosphereService` for what, and the limit each stops at on a
+  // world like Earth. On the cell grid rather than claiming their own plot,
+  // so a generated colony's edge installations are the same as they were.
+  CityBuildingSpec(type: 'greenhousefactory', label: 'Greenhouse Factory',
+      colorArgb: 0xFFFF8A65, group: 'env', jobs: 25, powerDraw: 50,
+      computeDraw: 2, pollution: 0.5, unlockPop: 300, buildCost: 140,
+      footW: 2, footH: 2),
+  CityBuildingSpec(type: 'regolithbaker', label: 'Regolith Baker',
+      colorArgb: 0xFFD7A86E, group: 'env', jobs: 30, powerDraw: 90,
+      pollution: 1.0, unlockPop: 400, buildCost: 160, footW: 2, footH: 2),
+  CityBuildingSpec(type: 'sequestrator', label: 'Carbon Sequestrator',
+      colorArgb: 0xFF78909C, group: 'env', jobs: 20, powerDraw: 70,
+      computeDraw: 2, unlockPop: 400, buildCost: 150, footW: 2, footH: 2),
+  // Late game: a magnetosphere generator and upper-atmosphere containment
+  // over the whole world (§7 Q2), at a power plant's draw.
+  CityBuildingSpec(type: 'retentionarray', label: 'Atmospheric Retention Array',
+      colorArgb: 0xFF7C4DFF, group: 'env', jobs: 60, powerDraw: 600,
+      computeDraw: 20, unlockPop: 1000, buildCost: 600, footW: 3, footH: 3),
   CityBuildingSpec(type: 'shelter', label: 'Fallout Shelter',
       colorArgb: 0xFF78909C, group: 'env', housing: 30, powerDraw: 8,
       buildCost: 60),

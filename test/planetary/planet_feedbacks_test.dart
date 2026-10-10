@@ -114,7 +114,7 @@ void main() {
       final a = seed('mars');
       expect(a.isAtRest, isTrue);
       expect(a.reservoirs.map((r) => r.name),
-          ['polarCo2', 'regolithCo2', 'polarWater']);
+          ['polarCo2', 'regolithCo2', 'polarWater', 'carbonates', 'nitrates']);
       // And integrating it anyway moves nothing that matters.
       service.advance(a, AtmosphereFlows(), dt: 10 * marsYear);
       expect(a.surfacePressurePa, closeTo(610, 610 * 1e-9));
@@ -155,8 +155,10 @@ void main() {
       expect(soil.moles, lessThan(soil.referenceMoles));
       expect(soil.moles, greaterThan(0));
       expect(a.surfacePressurePa, greaterThan(5 * 610));
+      // Against the agent as it now stands: it breaks down over centuries,
+      // and sixty Mars years took a few per cent of it.
       final agentOnly = seed('mars')
-        ..greenhouseAgentMoles = agentFor(seed('mars'), 3);
+        ..greenhouseAgentMoles = a.greenhouseAgentMoles;
       expect(a.surfaceTemperatureK,
           greaterThan(agentOnly.surfaceTemperatureK + 5),
           reason: 'the released CO2 warms it further: the feedback');
@@ -223,12 +225,14 @@ void main() {
     test('the response is smooth: no threshold for warp to oscillate across',
         () {
       // Hold Mars a little warm and watch the pressure settle: monotone,
-      // with no overshoot, at every step size.
+      // with no overshoot, at every step size. HELD: an agent that never
+      // breaks down, or the pressure would (rightly) creep back as it did.
+      const held = PlanetAtmosphereService(agentLifetimeSeconds: 0);
       for (final dt in [marsYear / 50, marsYear, 10 * marsYear]) {
         final a = seed('mars')..greenhouseAgentMoles = agentFor(seed('mars'), 0.3);
         var last = a.surfacePressurePa;
         for (var t = 0.0; t < 100 * marsYear; t += dt) {
-          service.advance(a, AtmosphereFlows(), dt: dt);
+          held.advance(a, AtmosphereFlows(), dt: dt);
           final p = a.surfacePressurePa;
           expect(p, greaterThanOrEqualTo(last - 1e-6), reason: 'dt $dt');
           last = p;

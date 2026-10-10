@@ -561,12 +561,15 @@ class AdvanceSimulationTick {
   void _recordAtmosphereFlows(CitySim city, double dt) {
     final state = atmosphere.forBody(city.body.id.value);
     if (state == null) return; // no air here to change
+    city.planetAir = state; // the atmosphere panel's read handle
     state.pendingFlows.addColony(
       pollutionRate: city.emissionRate,
       oxygenatorRun: city.oxygenatorRun,
       o2HarvestRate: city.o2HarvestRate,
+      towers: city.towerRuns,
       dt: dt,
       colony: city.id,
+      colonyName: city.name,
     );
   }
 
@@ -583,6 +586,14 @@ class AdvanceSimulationTick {
       if (state.isAtRest) continue;
       final flows = state.takePendingFlows();
       planetAtmosphere.advance(state, flows ?? AtmosphereFlows(), dt: dt);
+      // A deleted colony's arrays stop holding the sky (after its last
+      // replayed flows, which report them once more, have landed).
+      if (state.hasColonyArrays) {
+        planetAtmosphere.forgetColonies(state, {
+          for (final c in cities.all())
+            if (c.body.id.value == state.bodyId) c.id,
+        });
+      }
       atmosphere.save(state);
       if (!state.needsPublish()) continue;
       final body = universe.current().body(BodyId(state.bodyId));

@@ -32,6 +32,7 @@ import 'dart:math' as math;
 import '../universe/atmosphere_model.dart';
 import '../universe/celestial_body.dart';
 import 'atmosphere_flows.dart';
+import 'atmosphere_ledger.dart';
 import 'atmospheric_composition.dart';
 import 'planet_climate.dart';
 import 'volatile_reservoir.dart';
@@ -166,17 +167,85 @@ class PlanetAtmosphere {
 
   /// Super-greenhouse agent (a PFC mix) in the air, mol. A trace gas kept
   /// apart from the eight-gas enum (§3.1): it is forcing, not air — it adds
-  /// nothing to the pressure or the mix a craft or a lung sees. Phase 3's
-  /// Greenhouse Factory fills it.
+  /// nothing to the pressure or the mix a craft or a lung sees. The
+  /// Greenhouse Factory fills it; it breaks down over centuries
+  /// (`TerraformTuning.agentLifetimeSeconds`).
   double greenhouseAgentMoles = 0;
 
   /// Molar mass of the agent: octafluoropropane (C3F8), the best single gas
   /// of Gerstell et al. 2001.
   static const double agentMolarMass = 0.188;
 
-  /// Share of escape suppressed, 0..1. The hook the phase-3 Atmospheric
-  /// Retention Array drives (§7 Q2); 0 = the world leaks at its Jeans rate.
+  /// Share of escape suppressed, 0..1, driven by the Atmospheric Retention
+  /// Arrays running on the world (§7 Q2; `TerraformTuning.retentionPerArray`);
+  /// 0 = the world leaks at its Jeans rate. State, saved: set from
+  /// [retentionArrays] whenever a colony reports, and held between.
   double escapeSuppression = 0;
+
+  /// The Retention Arrays each colony on the world last reported running
+  /// (throttle-weighted), by colony id. State, saved.
+  ///
+  /// [escapeSuppression] is set from their SUM, each colony's count held
+  /// until that colony reports again: colonies on one world report on
+  /// different ticks (a frame-budgeted colony's replays all land on the
+  /// first tick of the next frame, an inline one's on every tick) and over
+  /// different spans. Read off whichever flows landed in a step, a world
+  /// where one held colony ran the arrays and an inline one ran none lost
+  /// its suppression on every tick after a frame's first, and a three-tick
+  /// replay diluted a neighbour's arrays threefold.
+  final Map<String, double> _arraysByColony = {};
+
+  /// [_arraysByColony], in id order. Read-only.
+  Map<String, double> get arraysByColony => {
+        for (final id in (_arraysByColony.keys.toList()..sort()))
+          id: _arraysByColony[id]!,
+      };
+
+  /// Retention Arrays running on the world: every colony's last report,
+  /// summed in id order (so the sum, and the suppression it sets, does not
+  /// depend on which colony reported first).
+  double get retentionArrays {
+    var n = 0.0;
+    for (final v in arraysByColony.values) {
+      n += v;
+    }
+    return n;
+  }
+
+  /// Whether any colony has arrays on the record.
+  bool get hasColonyArrays => _arraysByColony.isNotEmpty;
+
+  /// Colony [colony] runs [arrays] Retention Arrays now.
+  void reportArrays(String colony, double arrays) {
+    if (arrays > 0 && arrays.isFinite) {
+      _arraysByColony[colony] = arrays;
+    } else {
+      _arraysByColony.remove(colony);
+    }
+  }
+
+  /// Drop the array count of every colony not in [present] (deleted, or
+  /// founded elsewhere); true if any went.
+  bool forgetColoniesExcept(Set<String> present) {
+    final gone = [
+      for (final id in _arraysByColony.keys)
+        if (!present.contains(id)) id,
+    ];
+    for (final id in gone) {
+      _arraysByColony.remove(id);
+    }
+    return gone.isNotEmpty;
+  }
+
+  /// Where the gas went over the last integration — a readout for the
+  /// atmosphere panel, rebuilt every step, never saved (see
+  /// [AtmosphereLedger]). Null until the world has been integrated.
+  AtmosphereLedger? ledger;
+
+  /// The integrations since [ledger] was last published, accumulating
+  /// toward the next one (see `AtmosphereLedgerWindow`). A readout like the
+  /// ledger: never saved.
+  AtmosphereLedgerWindow? ledgerWindow;
 
   /// What the colonies on this body have produced since its air was last
   /// integrated — usually nothing between ticks, but a frame-budgeted
@@ -314,6 +383,32 @@ class PlanetAtmosphere {
   /// weight, so it reads the same on a thick sky or an empty one.
   double get agentPartialPressurePa =>
       math.max(0.0, greenhouseAgentMoles) * agentMolarMass * pascalsPerKg;
+
+  /// Moles of agent the sky would need for its surface temperature to be
+  /// [targetK], every gas and the haze held — 0 if it is already at least
+  /// that warm. Closed form: the agent's depth is additive and not
+  /// pressure-broadened (`GreenhouseTuning.agentDepthPerRootPascal`), so the
+  /// grey-atmosphere temperature inverts exactly for it, and what a
+  /// Greenhouse Factory's controller stops at does not depend on how time
+  /// was chopped.
+  double agentMolesForTemperature(double targetK) {
+    final teq = PlanetClimate.equilibriumTemperature(
+        solarFlux, climate.effectiveAlbedo(albedo, aerosolBurden));
+    final t = targetK - _calibrationK;
+    if (teq <= 0 || t <= teq) return 0;
+    final tauTarget = (math.pow(t / teq, 4).toDouble() - 1) / 0.75;
+    final p = pressureFor(_moles);
+    final n = _sum(_moles);
+    final tauGas = climate.opticalDepth(
+      pressurePa: p,
+      partialPressurePa: (g) => n <= 0 ? 0 : p * (_moles[g] ?? 0) / n,
+    );
+    final a = climate.tuning.agentDepthPerRootPascal;
+    if (tauTarget <= tauGas || a <= 0) return 0;
+    final rootPa = (tauTarget - tauGas) / a;
+    final perMole = agentMolarMass * pascalsPerKg;
+    return perMole <= 0 ? 0 : rootPa * rootPa / perMole;
+  }
 
   double _modelTemperature(
       Map<AtmosphereGas, double> m, double agentMoles, double aerosol) {
@@ -557,10 +652,13 @@ class PlanetAtmosphere {
     aerosolBurden = 0;
     greenhouseAgentMoles = 0;
     escapeSuppression = 0;
+    _arraysByColony.clear();
     for (final r in reservoirs) {
       r.resetToReference();
     }
     _pending = null;
+    ledger = null;
+    ledgerWindow = null;
   }
 
   /// The inventory as saved. Gases by enum NAME, so reordering or extending
@@ -575,6 +673,7 @@ class PlanetAtmosphere {
         if (aerosolBurden != 0) 'aerosol': aerosolBurden,
         if (greenhouseAgentMoles != 0) 'agent': greenhouseAgentMoles,
         if (escapeSuppression != 0) 'suppression': escapeSuppression,
+        if (_arraysByColony.isNotEmpty) 'arrays': arraysByColony,
         if (reservoirs.isNotEmpty)
           'reservoirs': {for (final r in reservoirs) r.name: r.moles},
         if (_pending case final p? when !p.isEmpty) 'pending': p.toJson(),
@@ -596,6 +695,12 @@ class PlanetAtmosphere {
         math.max(0.0, (json['agent'] as num?)?.toDouble() ?? 0);
     escapeSuppression =
         ((json['suppression'] as num?)?.toDouble() ?? 0).clamp(0.0, 1.0);
+    _arraysByColony.clear();
+    final arrays = (json['arrays'] as Map?) ?? const {};
+    for (final e in arrays.entries) {
+      final v = e.value;
+      if (v is num) reportArrays(e.key as String, v.toDouble());
+    }
     final held = (json['reservoirs'] as Map?) ?? const {};
     for (final r in reservoirs) {
       final v = held[r.name];
@@ -605,6 +710,8 @@ class PlanetAtmosphere {
     _pending = pending is Map
         ? AtmosphereFlows.fromJson(pending.cast<String, dynamic>())
         : null;
+    ledger = null;
+    ledgerWindow = null;
   }
 
   // ---- maths ---------------------------------------------------------------
