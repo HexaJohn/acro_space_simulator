@@ -213,14 +213,16 @@ extension IndependentGovernorSim on CitySim {
     // Life support: a commodity the colony's own buildings (and its sky, for
     // oxygen) make less of than its people use. Oxygen counts only where the
     // sim makes people breathe what is made — the life-support step's own
-    // rule; read here, never changed.
+    // rule; read here, never changed. Its need is [CitySim.o2NeedPerSec],
+    // the very figure the tick charges (the share the sky's partial cover
+    // leaves unmet, terraforming.md §3.4): a council that measured the need
+    // its own way would, on a half-oxygenated sky, build plants for breath
+    // the sky already gives — or miss the breath it does not.
     if (pop > 1e-9) {
       final needs = <String, double>{
         Commodity.food: pop * CitySim.foodPerPersonPerSec,
         Commodity.water: pop * CitySim.waterPerPersonPerSec,
-        if (systemOn(0.3) && !breathable)
-          Commodity.oxygen:
-              pop * CitySim.waterPerPersonPerSec * (1 - airO2.clamp(0.0, 1.0)),
+        if (systemOn(0.3) && !breathable) Commodity.oxygen: o2NeedPerSec,
       };
       final plant = _lifePlant();
       for (final MapEntry(key: c, value: need) in needs.entries) {
@@ -398,6 +400,7 @@ extension IndependentGovernorSim on CitySim {
   _LifePlant _lifePlant() {
     final p = _LifePlant();
     const life = {Commodity.food, Commodity.water, Commodity.oxygen};
+    final skyO2 = o2Harvestable;
     // The production step's own sums, without its throttle: a grid cell runs
     // whole, a lot by its occupancy.
     void tally(CityBuildingSpec s, double uf, double share) {
@@ -405,6 +408,12 @@ extension IndependentGovernorSim on CitySim {
       if (isLife) {
         p.draw += s.powerDraw * (s.housing > 0 || s.jobs > 0 ? uf : 1.0);
       }
+      // A harvester under a sky with too little oxygen to pull stands idle
+      // — the production step's own gate ([CitySim.o2Harvestable]) — so it
+      // makes nothing here either. Counted at its nameplate, the harvesters
+      // that thinned a sky below 2% would read as oxygen "built enough",
+      // and the council would build nothing while the colony suffocated.
+      if (s.type == 'o2harvester' && !skyO2) return;
       s.inputs.forEach((k, v) {
         if (life.contains(k)) p.capacity[k] = (p.capacity[k] ?? 0) - v * share;
       });

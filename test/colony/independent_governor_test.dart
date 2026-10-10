@@ -193,6 +193,50 @@ void main() {
         reason: builds.map((a) => a.text).join('; '));
   });
 
+  // The cross-lane seam (terraforming phase 2 × secession phase 2): an
+  // Atmospheric Harvester stands idle under a sky its intakes have thinned
+  // below 2% oxygen, so the council must not count it as oxygen made.
+  test('harvesters under a sky thinned past 2% oxygen are not counted', () {
+    final mars = fixtureBodies.firstWhere((b) => b.id.value == 'mars');
+    final city = foundFlat();
+    city.ignoreUnlocks = true;
+    city.stock[Commodity.ore] = 400;
+    final hy = city.hubKey ~/ city.grid;
+    for (var x = 0; x < city.grid; x++) {
+      final k = hy * city.grid + x;
+      if (k != city.hubKey) city.addRoad(k);
+    }
+    CityBuildingSpec spec(String type) =>
+        kUtilCatalog.firstWhere((s) => s.type == type);
+    city.placeUtil((hy + 1) * city.grid + 1, spec('fusion'));
+    // Built while the sky held oxygen enough to pull: on its nameplate, one
+    // harvester covers forty colonists' breath (2.0/s against 1.2/s).
+    city.placeUtil((hy + 1) * city.grid + 4, spec('o2harvester'));
+    city.body = mars; // ... which harvesting has since thinned to bare Mars
+    city.recompute();
+    run(city, 5);
+    city.population = 40;
+    city.lifeThrottle = 1;
+    expect(city.o2Harvestable, isFalse);
+    expect(city.o2NeedPerSec, greaterThan(1.0),
+        reason: 'bare Mars covers almost none of a breath');
+    secede(city);
+    final acts = <GovernorAct>[];
+    for (var i = 0; i < 3; i++) {
+      acts.addAll(city.governIndependent(localNet: const {
+        Commodity.food: 1e3,
+        Commodity.water: 1e3,
+        Commodity.oxygen: 0,
+      }));
+    }
+    final builds = acts.where((a) => a.kind == GovernorActKind.lifeSupport);
+    final log = acts.map((a) => a.text).join('; ');
+    expect(builds, isNotEmpty,
+        reason: 'the idle harvester is no oxygen made: $log');
+    expect(builds.where((a) => a.text.contains('Harvester')), isEmpty,
+        reason: 'and another would stand idle too: $log');
+  });
+
   /// Every life commodity in plenty: a sitting then goes past life support.
   const plenty = {
     Commodity.food: 1e3,

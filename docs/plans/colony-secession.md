@@ -437,6 +437,14 @@ the same rule.
   jobs or services, a design question left with the user.
 - Phase 2 leaves `airO2`, oxygen consumption and the sufficiency/breathable rules untouched (the terraforming
   lane owns them); the governor only reads `airO2` and `breathable` to decide whether oxygen is short.
+- **Integration with terraforming phase 2 (integ/phase2).** Once both phase-2 lanes were merged, the governor's
+  oxygen need is `CitySim.o2NeedPerSec`, the figure the tick charges (population × (1 − `airO2`), partial
+  cover), rather than its own copy of the formula. Its full-throttle plant (`_lifePlant`) also no longer
+  counts an Atmospheric Harvester while `o2Harvestable` is false. Terraforming phase 2 idles harvesters under
+  a sky below 2% oxygen, and harvesting itself thins the sky. Counted at nameplate, the harvesters that
+  thinned a sky past that line read as oxygen "built enough", and the council built nothing while the colony
+  suffocated. Pinned by `independent_governor_test.dart` ("harvesters under a sky thinned past 2% oxygen are
+  not counted"), and the test was checked by removing the guard to make sure it fails.
 
 ## 8. Open questions for the user
 
