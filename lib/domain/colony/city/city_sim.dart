@@ -5030,6 +5030,13 @@ class CitySim {
         'bounty': bounty,
         'population': population,
         'happiness': happiness,
+        // The famine latch and the food security it hangs on, each omitted
+        // at its default so a fed colony saves as it always has. Unsaved, a
+        // colony saved starving loaded fed: happiness jumped off its famine
+        // floor, and an independent colony's governor, which reads the same
+        // flag, built differently after a load than it would have without.
+        if (starved) 'starved': true,
+        if (foodSecurity != 1.0) 'foodSecurity': foodSecurity,
         if (taxRate != defaultTaxRate) 'taxRate': taxRate,
         if (laws.isNotEmpty) 'laws': [for (final l in laws) l.name],
         if (rebellion != 0) 'rebellion': rebellion,
@@ -5168,6 +5175,8 @@ class CitySim {
     sim
       ..population = (j['population'] as num).toDouble()
       ..happiness = (j['happiness'] as num).toDouble()
+      ..starved = j['starved'] == true
+      ..foodSecurity = (j['foodSecurity'] as num?)?.toDouble() ?? 1.0
       ..funds = (j['funds'] as num).toDouble()
       ..research = (j['research'] as num).toDouble()
       ..pollution = (j['pollution'] as num).toDouble()

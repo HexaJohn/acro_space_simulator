@@ -18,6 +18,7 @@ import 'package:flutter/material.dart';
 import '../../../domain/colony/city/city_building_spec.dart';
 import '../../../domain/colony/city/city_control.dart';
 import '../../../domain/colony/city/city_sim.dart';
+import '../../../domain/colony/city/city_site_rules.dart';
 import '../../../domain/colony/city/parcel.dart';
 import 'app_theme.dart';
 import 'city_control_ui.dart';
@@ -250,6 +251,11 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
       notifyListeners();
       return false;
     }
+    if (city.placementRefusal(held) case final why?) {
+      blocked = why;
+      notifyListeners();
+      return false;
+    }
     // Graded either way: free build drops the slope gate, not the pad
     // (see [ignoreTerrain]).
     final claimed = city.claimSite(held, centre);
@@ -276,6 +282,13 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
     if (tool != CityEditTool.utility) return;
     if (!city.unlocked(spec)) {
       blocked = '${spec.label} needs ${spec.unlockPop} population.';
+      return;
+    }
+    // A building that would make nothing here (a harvester under a sky with
+    // no oxygen in it) is refused before the ore is spent, as the flat
+    // builder and the governor refuse it ([CitySiteRules]).
+    if (city.placementRefusal(spec) case final why?) {
+      blocked = why;
       return;
     }
     if (city.stockOf('ore') < spec.buildCost) {
@@ -321,6 +334,10 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
         final spec = selectedUtil;
         if (!city.unlocked(spec)) {
           blocked = '${spec.label} needs ${spec.unlockPop} population.';
+          return;
+        }
+        if (city.placementRefusal(spec) case final why?) {
+          blocked = why;
           return;
         }
         if (city.stockOf('ore') < spec.buildCost) {

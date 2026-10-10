@@ -329,7 +329,31 @@ vent cap is kept as it was.
   (`population × rate × (1 − airO2)`, only where O2 is managed). Harvesters under a sky that cannot feed them show no
   output.
 
+**Cross-lane review fixes (integ/phase2, 2026-10-10):**
+- **World drawer oxygen line** (`city_panels.dart`). It was still all-or-nothing on `breathable`, so a Mars
+  vented to 0.17 atm (`airO2 = 1`, no oxygen drawn) showed a mask in warning colour and said "harvest or
+  split water". It now has three cases on `airO2`. Breathable: oxygen free. Partial: "the sky supplies N% of
+  each breath (pO₂ x atm); make the rest", with N rounded down so a near-full sky never reads 100%. Full but
+  thin: "compressors draw every breath; no oxygen plant needed", not in warning colour. The resource
+  detail's oxygen hint follows the same cases, and offers a harvester only where `o2Harvestable`.
+  It keys off `airO2` rather than `o2NeedPerSec > 0`, because an empty colony, or one under COMPLEXITY 0.3,
+  has no need on any sky, and the hint would then call raw Mars free.
+- **Harvester placement, one rule** (`city_site_rules.dart`, `CitySiteRules.placementRefusal`). The in-world
+  editor (`applyToParcel`, `claimOwnSite` and the cell path) placed a harvester on reference Mars and charged
+  its ore, and it then made nothing. The editor, the flat builder and the governor now all ask the same
+  helper, which also carries the flat builder's no-mine-off-the-ground rule. The editor refuses before
+  spending ore. `CitySiteRules.idleForSky` gives the site sheet an "Idle — no oxygen to draw" status, ranked
+  above power, staffing and mood. The detail modal shows +0.0 for an idle harvester instead of its nameplate.
+  The panels' net rates use the same predicate.
+- **Terraform meter renamed "Biome reclamation"** (with an explainer). Since this phase it moves no air and
+  only drives the biome flip at 100%. Under the old name it climbed while Temp, Press and Water stood still.
+
 **Open items:**
+- **The flat sandbox has no planet.** `CityBuilderScreen` with `driveLocally` (its only production use)
+  calls `CitySim.advance` alone. There is no `PlanetAtmosphereService`, so its towers and harvesters move no
+  air, and every readout that now reads the derived sky (Temp, Press, Water, Habitability, breathability)
+  stays at the reference. The meter is relabelled so it no longer promises otherwise. Giving the sandbox a
+  local `PlanetAtmosphere` is the real fix, left for phase 3 with the slider's retirement.
 - **Rayleigh brightening:** the grey model omits it, so bar-level CO2 skies run warm (the 2-bar runaway's 336 K).
   The next physics to add is a pressure-dependent albedo term relative to reference.
 - **No thermal inertia:** temperature responds instantly, and only the reservoir lags delay the response.

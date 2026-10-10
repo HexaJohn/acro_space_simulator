@@ -60,8 +60,9 @@ void explainLoyalty(BuildContext context, CitySim sim) {
     LoyaltyStage.seceded =>
       'It is an independent faction and takes no orders: your tools on it '
           'are greyed, its own council sets its tax and laws and builds what '
-          'it must, its port is closed to your craft and your deliveries to '
-          'it are suspended.',
+          'it must, its port takes no relief and your deliveries to it are '
+          'suspended. A craft you fly yourself can still land there, '
+          'unwelcome.',
   };
   final why = 'Loyalty ${pct(l.level)} — ${l.stage.label}. $causes.\n\n'
       '$drift\n\n'

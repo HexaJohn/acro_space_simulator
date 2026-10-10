@@ -23,6 +23,7 @@ import 'package:flutter/material.dart';
 import '../../../domain/colony/city/city_control.dart';
 import '../../../domain/colony/city/city_loyalty.dart';
 import '../../../domain/colony/city/city_sim.dart';
+import '../../../domain/colony/city/city_site_rules.dart';
 import '../../../domain/planetary/planet_surface.dart';
 import '../../../domain/universe/celestial_body.dart';
 import 'app_theme.dart';
@@ -176,9 +177,29 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
                   'It clears over time. Build Terraforming Towers to clear it faster, '
                       'and lean on gas/nuclear power + stored food until it lifts.',
                   AppTheme.danger)),
+        // Not "Terraforming": since terraforming phase 2 this meter moves no
+        // air — the towers' oxygen goes into the planet's inventory, which
+        // the readouts above read — and drives only the biome flip at 100%.
+        // Under that name it climbed while Temp, Press and Water stood still
+        // (and in the flat sandbox, which integrates no atmosphere, nothing
+        // else ever moves), as if the towers were doing nothing.
         if (sim.terraform > 0.01 || sim.terraformers > 0)
-          _meterRow('Terraforming', '${(sim.terraform * 100).toStringAsFixed(0)}%',
-              sim.terraform, AppTheme.accent2),
+          _meterRow('Biome reclamation',
+              '${(sim.terraform * 100).toStringAsFixed(0)}%', sim.terraform,
+              AppTheme.accent2,
+              onExplain: () => showExplain(
+                  context,
+                  'Biome reclamation',
+                  'Terraforming Towers re-seed the land around the colony; at '
+                      '100% a barren, desert or volcanic biome turns to '
+                      'grassland. The oxygen the towers vent goes into the '
+                      "planet's air, shared by every colony on it, and moves "
+                      'its pressure and breathability only as fast as a '
+                      'whole world fills.',
+                  'Keep the towers powered and connected. A sandbox colony '
+                      'has no planet around it, so there its towers reclaim '
+                      'land but do not change the sky.',
+                  AppTheme.accent2)),
       ];
 
   /// The congestion the status panel shows. With agents on it is theirs —
@@ -550,28 +571,92 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
                   style: AppTheme.dim.copyWith(color: AppTheme.warn)),
             ),
           const SizedBox(height: 2),
-          Row(children: [
-            Icon(sim.breathable ? Icons.air : Icons.masks,
-                size: 14,
-                color: sim.breathable ? AppTheme.accent2 : AppTheme.warn),
-            const SizedBox(width: 4),
-            Expanded(
-              child: Text(
-                sim.breathable
-                    ? 'Breathable air (O₂ ${(sim.o2Fraction * 100).toStringAsFixed(0)}%) — oxygen free.'
-                    : sim.o2Harvestable
-                        ? 'Thin O₂ (${(sim.o2Fraction * 100).toStringAsFixed(0)}%) — harvest or split water.'
-                        : 'No breathable O₂ — split water (electrolysis) or shuttle in.',
-                style: AppTheme.dim.copyWith(
-                    color: sim.breathable ? AppTheme.accent2 : AppTheme.warn,
-                    fontSize: 11),
+          Builder(builder: (_) {
+            final o2 = _oxygenLine();
+            return Row(children: [
+              Icon(o2.ok ? Icons.air : Icons.masks,
+                  size: 14, color: o2.ok ? AppTheme.accent2 : AppTheme.warn),
+              const SizedBox(width: 4),
+              Expanded(
+                child: Text(o2.text,
+                    style: AppTheme.dim.copyWith(
+                        color: o2.ok ? AppTheme.accent2 : AppTheme.warn,
+                        fontSize: 11)),
               ),
-            ),
-          ]),
+            ]);
+          }),
           const Divider(height: 14, color: Color(0xFF223247)),
           _surfaceReadout(),
         ]),
       );
+  /// Whole percent of each breath the sky supplies, rounded DOWN: a sky
+  /// that gives 99.6% must not read as the 100% that needs no plant. (The
+  /// nudge keeps an exact half, computed as 0.4999…, reading 50.)
+  String get _airO2Pct => (sim.airO2 * 100 + 1e-6).floor().toString();
+
+  /// The World drawer's oxygen line, on the sky's partial cover
+  /// ([CitySim.airO2]) rather than all-or-nothing [CitySim.breathable].
+  ///
+  /// Breathable or not used to be the whole story, so on a Mars vented to
+  /// 0.17 atm of near-pure oxygen — whose sky now supplies every breath, and
+  /// whose life support draws nothing — the drawer showed a mask in warning
+  /// colour and told the player to build oxygen plants beside rate figures
+  /// that showed no oxygen draw at all. [ok] is whether anything needs
+  /// making.
+  ({String text, bool ok}) _oxygenLine() {
+    if (sim.breathable) {
+      return (
+        text: 'Breathable air (O₂ ${(sim.o2Fraction * 100).toStringAsFixed(0)}%)'
+            ' — oxygen free.',
+        ok: true,
+      );
+    }
+    final pO2 = sim.sky.o2PressureAtm.toStringAsFixed(2);
+    final cover = sim.airO2;
+    if (cover >= 1) {
+      return (
+        text: 'Thin, oxygen-rich sky (pO₂ $pO2 atm) — compressors draw every '
+            'breath; no oxygen plant needed.',
+        ok: true,
+      );
+    }
+    final rest = sim.o2Harvestable
+        ? 'harvest or split water'
+        : 'split water (electrolysis) or shuttle in';
+    if (cover > 0) {
+      return (
+        text: 'Thin O₂ — the sky supplies $_airO2Pct% of each breath '
+            '(pO₂ $pO2 atm); make the rest: $rest.',
+        ok: false,
+      );
+    }
+    return (
+      text: sim.o2Harvestable
+          ? 'Thin O₂ (${(sim.o2Fraction * 100).toStringAsFixed(0)}%) — $rest.'
+          : 'No breathable O₂ — $rest.',
+      ok: false,
+    );
+  }
+
+  /// How to make oxygen, on the same partial cover as [_oxygenLine]: none
+  /// where the sky gives every breath, the rest where it gives some, and a
+  /// harvester only where there is oxygen in the sky for it to draw.
+  String _oxygenHint() {
+    if (sim.breathable) return 'Breathable world — oxygen is free here.';
+    if (sim.airO2 >= 1) {
+      return 'The sky supplies every breath (compressors draw it) — no '
+          'oxygen plant needed.';
+    }
+    final make = sim.o2Harvestable
+        ? 'Build Electrolysis Plants (split water) or an O₂ Harvester'
+        : 'Build Electrolysis Plants (split water)';
+    if (sim.airO2 > 0) {
+      return 'The sky supplies $_airO2Pct% of each breath. $make for the '
+          'rest.';
+    }
+    return '$make.';
+  }
+
   /// Live physical surface-conditions readout (temp / pressure / water /
   /// habitability) — the scalars that drive flora + colony style.
   Widget _surfaceReadout() {
@@ -726,7 +811,7 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
     for (final e in sim.activeSpecs) {
       final t = throttled ? sim.throttleFor(e.value) : 1.0;
       // A harvester under a sky with no oxygen to take makes nothing.
-      final yields = e.value.type != 'o2harvester' || sim.o2Harvestable;
+      final yields = !sim.idleForSky(e.value);
       if (yields) {
         e.value.outputs.forEach((k, v) => r[k] = (r[k] ?? 0) + v * t);
       }
@@ -757,7 +842,7 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
     final cons = <String, ({double rate, int count})>{};
     for (final e in sim.activeSpecs) {
       final s = e.value;
-      final yields = s.type != 'o2harvester' || sim.o2Harvestable;
+      final yields = !sim.idleForSky(s);
       final out = yields
           ? (s.outputs[c] ?? 0) * sim.biomeMult(c) * sim.throttleFor(s)
           : 0.0;
@@ -1226,9 +1311,7 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
         Commodity.steel => 'Build Steel Mills (need ore) or zone Industrial.',
         Commodity.water => 'Build Water Plants; biome + rain boost it.',
         Commodity.food => 'Build Farms (need water). Avoid nuclear winter.',
-        Commodity.oxygen => sim.breathable
-            ? 'Breathable world — oxygen is free here.'
-            : 'Build Electrolysis Plants (split water) or an O₂ Harvester.',
+        Commodity.oxygen => _oxygenHint(),
         Commodity.electronics => 'Build Electronics Plants (need steel + compute).',
         Commodity.compute => 'Build Data Centers (need electronics + lots of power).',
         Commodity.tubes => 'Steel Mills produce tubes as a byproduct.',

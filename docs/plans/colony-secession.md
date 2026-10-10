@@ -445,6 +445,20 @@ the same rule.
   thinned a sky past that line read as oxygen "built enough", and the council built nothing while the colony
   suffocated. Pinned by `independent_governor_test.dart` ("harvesters under a sky thinned past 2% oxygen are
   not counted"), and the test was checked by removing the guard to make sure it fails.
+- **Cross-lane review fixes (integ/phase2).**
+  - **The famine latch is saved.** `starved` and `foodSecurity` were never in `CitySim.toJson`, so a colony
+    saved starving loaded fed. The governor reads `starved` to call food short, and happiness pins to 0 on
+    it, so after a load an independent colony's council built differently than it would have without one
+    (a probe ran 300 ticks to 32.2 against 35.9 settlers). Both are additive keys omitted at their
+    defaults, so a fed colony saves byte-for-byte as before.
+  - **Placement rules said once.** The governor's `_placeable` now asks `CitySiteRules.placementRefusal`
+    (`city_site_rules.dart`), the same rule the flat builder and the in-world editor use. See
+    `terraforming.md` §9 for the editor half.
+  - **"Target this pad" on a closed port** stays live (§5: the player's own craft is not gated) but now says
+    `Unwelcome — <portHoldReason>. Your craft can still land here.` in warning colour. The loyalty explainer
+    no longer says the port is "closed to your craft". It says the port takes no relief and deliveries are
+    suspended, and that a craft the player flies can still land, unwelcome. That stays true until the
+    player-flown hold above is built.
 
 ## 8. Open questions for the user
 

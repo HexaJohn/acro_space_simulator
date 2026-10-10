@@ -20,6 +20,7 @@ import 'package:flutter/material.dart';
 import '../../../domain/colony/city/city_building_spec.dart';
 import '../../../domain/colony/city/city_control.dart';
 import '../../../domain/colony/city/city_sim.dart';
+import '../../../domain/colony/city/city_site_rules.dart';
 import 'app_theme.dart';
 import 'city_control_ui.dart';
 import 'city_model.dart';
@@ -179,6 +180,22 @@ void showExplain(
       color: AppTheme.danger,
     );
   }
+  // Worse than any shortfall of hands or power: with them all it still
+  // makes nothing. Without this a harvester under a sky its intakes have
+  // thinned (or one that never had oxygen) reported whatever colony mood
+  // came next — "Unhappy" — and its sheet the nameplate yield.
+  if (sim.idleForSky(spec)) {
+    return (
+      label: 'Idle — no oxygen to draw',
+      why: 'The air here holds too little oxygen (under 2%), or too little '
+          'air, for its intakes to draw any. It makes nothing until the sky '
+          'has oxygen in it again.',
+      fix: 'Split water in Electrolysis Plants instead, or vent oxygen into '
+          'the sky with Terraforming Towers. Harvesters on one world share '
+          'its air: every one draws the same sky down.',
+      color: AppTheme.danger,
+    );
+  }
   if (needsPower && powerRatio < 0.95) {
     return (
       label: 'Unpowered',
@@ -236,10 +253,12 @@ void showCitySiteDetail(
     BuildContext context, CitySim sim, String site, CityBuildingSpec spec) {
   final status = citySiteStatus(sim, site, spec);
   final io = <String>[];
+  // An idle building's throughput is what it makes NOW, not its nameplate.
+  final idle = sim.idleForSky(spec);
   spec.inputs.forEach(
       (k, v) => io.add('−${v.toStringAsFixed(1)} ${Commodity.name(k)}/s'));
-  spec.outputs.forEach(
-      (k, v) => io.add('+${v.toStringAsFixed(1)} ${Commodity.name(k)}/s'));
+  spec.outputs.forEach((k, v) =>
+      io.add('+${(idle ? 0.0 : v).toStringAsFixed(1)} ${Commodity.name(k)}/s'));
   if (spec.powerOutput > 0) {
     io.add('+${spec.powerOutput.toStringAsFixed(0)} power');
   }
@@ -341,14 +360,26 @@ void showCitySiteMenu({
     // Point the craft the player is actually flying at this port's pads. This
     // is what "interact with the spaceport" means once you are already in the
     // world — the flat map's answer was to spawn a whole second scene.
+    //
+    // Deliberately live on a port that refuses the player (secession §5:
+    // the player's own craft is not gated, and nothing holds it at a seized
+    // pad yet), but it says the port is closed: the loyalty explainer tells
+    // the player so, and an accent row with no word of it contradicted it.
     if (hooks.onTargetPad != null) {
       final why = hooks.targetPadHint;
+      final closed = sim.loyalty.portHoldReason;
       actions.add(citySiteAction(
           context,
           Icons.my_location,
           'Target this pad',
-          why ?? 'Aim your landing guidance at this spaceport and fly it down.',
-          why == null ? AppTheme.accent2 : AppTheme.textDim,
+          why ??
+              (closed != null
+                  ? 'Unwelcome — $closed. Your craft can still land here.'
+                  : 'Aim your landing guidance at this spaceport and fly it '
+                      'down.'),
+          why != null
+              ? AppTheme.textDim
+              : (closed != null ? AppTheme.warn : AppTheme.accent2),
           why == null ? () => hooks.onTargetPad!(site) : () {}));
     }
     // Anti-soft-lock lifeline: call in a relief mission that lands on a free

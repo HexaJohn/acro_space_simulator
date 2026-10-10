@@ -44,6 +44,7 @@ import 'dart:math' as math;
 import 'city_building_spec.dart';
 import 'city_loyalty.dart';
 import 'city_sim.dart';
+import 'city_site_rules.dart';
 import 'commodity.dart';
 import 'parcel.dart';
 
@@ -485,13 +486,10 @@ extension IndependentGovernorSim on CitySim {
     ];
   }
 
-  /// The flat builder's own refusals, which the domain does not make: a
-  /// harvester where the air holds no oxygen, a mine with no ground.
-  bool _placeable(CityBuildingSpec s) {
-    if (s.type == 'o2harvester' && !o2Harvestable) return false;
-    if (s.type == 'mine' && colonyMode != ColonyStyle.open) return false;
-    return true;
-  }
+  /// The refusals every placement path shares ([CitySiteRules]), which the
+  /// colony's mutators do not make: a harvester where the air holds no
+  /// oxygen, a mine with no ground.
+  bool _placeable(CityBuildingSpec s) => placementRefusal(s) == null;
 
   /// Put [s] down somewhere it works, paying for it. The plat when the
   /// colony has one (every colony founded in the world), else the legacy

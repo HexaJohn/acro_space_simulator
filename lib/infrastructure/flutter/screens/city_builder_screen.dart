@@ -13,6 +13,7 @@ import '../../../domain/colony/city/city_config.dart';
 import '../../../domain/colony/city/city_control.dart';
 import '../../../domain/colony/city/city_loyalty.dart';
 import '../../../domain/colony/city/city_sim.dart';
+import '../../../domain/colony/city/city_site_rules.dart';
 import '../../../domain/planetary/planet_surface.dart';
 import '../../../domain/universe/celestial_body.dart';
 import '../../../domain/universe/real_solar_system.dart';
@@ -436,15 +437,10 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
           if (anchor != null && _sim.utils[anchor]?.type == _selectedUtil.type) {
             // Tapping any tile of an existing same-type building removes it.
             _sim.clearCell(anchor);
-          } else if (_selectedUtil.type == 'o2harvester' && !_sim.o2Harvestable) {
-            _sim.blocked =
-                '${_sim.body.name} has no harvestable oxygen — use Electrolysis instead.';
-          } else if (_selectedUtil.type == 'mine' &&
-              _sim.colonyMode != _ColonyStyle.open) {
-            // No ground to dig on a cloud city / orbital station.
-            _sim.blocked = _sim.colonyMode == _ColonyStyle.orbital
-                ? 'No surface to mine in orbit.'
-                : 'No ground to mine on a cloud city.';
+          } else if (_sim.placementRefusal(_selectedUtil) case final why?) {
+            // No oxygen in the sky for a harvester, no ground to dig on a
+            // cloud city / orbital station ([CitySiteRules]).
+            _sim.blocked = why;
           } else if (!_sim.unlocked(_selectedUtil)) {
             _sim.blocked =
                 '${_selectedUtil.label} unlocks at population ${_selectedUtil.unlockPop}.';
