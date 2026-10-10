@@ -35,7 +35,7 @@ import '../../domain/dynamics/gravity_force.dart';
 import '../../domain/dynamics/state_vector.dart';
 import '../../domain/orbits/body_ephemeris.dart';
 import '../../domain/orbits/soi_transition_service.dart';
-import '../../domain/planetary/atmosphere_pollution.dart';
+import '../../domain/planetary/planet_atmosphere_service.dart';
 import '../../domain/planetary/magnetosphere.dart';
 import '../../domain/planetary/splashdown_service.dart';
 import '../../domain/radiation/radiation_environment.dart';
@@ -91,10 +91,15 @@ class AdvanceSimulationTick {
   /// quarry pits).
   final CityTerrainShaper cityShaper;
 
-  /// Accumulated atmospheric change per body, written by colony emissions.
+  /// Every body's gas inventory: what colony towers and industry change, and
+  /// what each body's published air is derived from
+  /// (docs/plans/terraforming.md). The Null default keeps every body on its
+  /// reference air.
   final AtmosphereRepository atmosphere;
 
-  final AtmospherePollutionService atmospherePollution;
+  /// Integrates the colonies' gas flows into [atmosphere]; carries the
+  /// tunable terraforming rate.
+  final PlanetAtmosphereService planetAtmosphere;
 
   /// Moves goods between a craft standing on a pad and the colony under it.
   final ShuttleCargoService shuttleCargo;
@@ -184,7 +189,7 @@ class AdvanceSimulationTick {
     this.cities = const NullCityRepository(),
     this.cityShaper = const CityTerrainShaper(),
     this.atmosphere = const NullAtmosphereRepository(),
-    this.atmospherePollution = const AtmospherePollutionService(),
+    this.planetAtmosphere = const PlanetAtmosphereService(),
     this.shuttleCargo = const ShuttleCargoService(),
     this.cargo = const NullCargoScheduleRepository(),
     this.converter = const StateVectorOrbitConverter(),
@@ -384,6 +389,12 @@ class AdvanceSimulationTick {
       _cityPhase(city, dt, system, clock);
     }
 
+    // ---- Planetary-atmosphere phase: every colony's gas flows, summed per
+    // body (colonies on one world share its air), integrated into that body's
+    // inventory, and the body republished once its air has moved. After the
+    // city phase because that is where the flows were just produced.
+    _advanceAtmospheres(dt);
+
     // ---- Colony / city phase ----
     for (final colony in colonies.all()) {
       // City-scale mining from a deposit on the colony's body, if any.
@@ -494,9 +505,16 @@ class AdvanceSimulationTick {
   /// world writes into it.
   void _cityPhase(
       CitySim city, double dt, StarSystem system, SimulationClock clock) {
+    // The colony reads its host body for air, sunlight and wind, and holds it
+    // from founding (or from a load). A body republished since — its air
+    // moved by terraforming — would otherwise leave the colony breathing the
+    // sky it was founded under while flight, the renderer and the snapshot
+    // read the new one.
+    final host = system.body(city.body.id);
+    if (host != null && !identical(host, city.body)) city.body = host;
     city.advance(dt);
     _shapeCityTerrain(city, system, clock);
-    _polluteAtmosphere(city, dt);
+    _recordAtmosphereFlows(city, dt);
     _unloadShuttles(city, system, clock);
     _runColonyShuttles(city, system, clock, dt);
   }
@@ -531,20 +549,52 @@ class AdvanceSimulationTick {
     }
   }
 
-  /// Fold a colony's emissions into its host body's air.
+  /// Note a colony's emissions and terraforming towers against its host
+  /// body's air. Integrated, for every colony on the body at once, by
+  /// [_advanceAtmospheres].
+  ///
+  /// Amounts, not rates, so a frame-budgeted colony whose share of a tick is
+  /// replayed after the host loop (and so after this tick's phase) simply
+  /// lands in the next one: late, never lost, never counted twice. They wait
+  /// on the inventory, not on this tick, so a tick rebuild keeps them and a
+  /// save and load carries them (see `AtmosphereFlows`).
+  void _recordAtmosphereFlows(CitySim city, double dt) {
+    final state = atmosphere.forBody(city.body.id.value);
+    if (state == null) return; // no air here to change
+    state.pendingFlows.addColony(
+      pollutionRate: city.emissionRate,
+      oxygenatorRun: city.oxygenatorRun,
+      dt: dt,
+      colony: city.id,
+    );
+  }
+
+  /// Integrate every body's inventory over [dt] under the flows its colonies
+  /// recorded, and republish the body whose derived air has moved.
   ///
   /// Against the real mole count of an atmosphere, so the answer is honest
   /// rather than arbitrary: an Earth-thick sky absorbs a colony without
-  /// noticing, a Mars-thin one does not.
-  void _polluteAtmosphere(CitySim city, double dt) {
-    final state = atmosphere.forBody(city.body.id.value);
-    if (state == null) return;
-    atmospherePollution.advance(
-      state,
-      pollutionRate: city.emissionRate,
-      dt: dt,
-    );
-    atmosphere.save(state);
+  /// noticing, a Mars-thin one does not. Bodies with no colony still advance
+  /// — their haze settles.
+  void _advanceAtmospheres(double dt) {
+    for (final state in atmosphere.all()) {
+      final flows = state.takePendingFlows();
+      if (flows == null && state.aerosolBurden == 0) continue;
+      planetAtmosphere.advance(state, flows ?? AtmosphereFlows(), dt: dt);
+      atmosphere.save(state);
+      if (!state.needsPublish()) continue;
+      final body = universe.current().body(BodyId(state.bodyId));
+      if (body == null) continue;
+      final next = state.applyTo(body);
+      universe.replaceBody(next);
+      state.markPublished();
+      // Re-point the colonies now rather than at their next phase, so a
+      // panel or a snapshot read between ticks sees the colony under the
+      // same sky as the craft above it.
+      for (final city in cities.all()) {
+        if (city.body.id == next.id) city.body = next;
+      }
+    }
   }
 
   static const LandingGuidance _shuttleGuidance = LandingGuidance();

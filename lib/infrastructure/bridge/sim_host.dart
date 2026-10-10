@@ -6,6 +6,7 @@
 import 'dart:typed_data';
 
 import '../../adapters/events/in_memory_event_bus.dart';
+import '../../adapters/repositories/in_memory_atmosphere_repository.dart';
 import '../../adapters/repositories/in_memory_repositories.dart';
 import '../../adapters/repositories/in_memory_world_repositories.dart';
 import '../../adapters/wire/flatbuffer_codec.dart';
@@ -89,6 +90,7 @@ class SimHost {
       deposits: InMemoryDepositRepository(),
       weather: const NullWeatherRepository(),
       terrainEdits: InMemoryTerrainEditsRepository(),
+      atmosphere: InMemoryAtmosphereRepository.seeded(system),
     );
     final session = Session(
       id: 'bridge',

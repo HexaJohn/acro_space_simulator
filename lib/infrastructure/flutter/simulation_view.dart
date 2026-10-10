@@ -2687,7 +2687,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         colonies: _colonies,
         deposits: _deposits,
         clock: _clock,
-        cities: _cities));
+        cities: _cities,
+        atmospheres: _session.atmospheres));
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text('Saved at tick ${_clock.tick}'), duration: const Duration(seconds: 1)));
@@ -2717,6 +2718,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       cities: _cities,
       bodies:
           _universe.current().all.where((b) => !b.isStar).toList(),
+      atmospheres: _session.atmospheres,
+      universe: _universe,
     );
     // The restored colonies are this view's to replay, as its own was.
     for (final c in _cities.all()) {

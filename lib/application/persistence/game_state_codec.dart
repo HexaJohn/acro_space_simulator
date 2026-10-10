@@ -31,8 +31,14 @@ import '../ports/world_repositories.dart';
 /// saved. Pure mapping; the actual file/byte IO is an infrastructure concern.
 ///
 /// Schema is explicit and versioned so saves survive code changes.
+///
+/// Version 2 adds `atmospheres`: each body's gas inventory, the one piece of
+/// planetary state a colony can change (docs/plans/terraforming.md §5.4).
+/// Bodies stay reference data — on load the universe is the one the system
+/// definition built, and the saved inventories are republished onto it. A
+/// version-1 save has no block and gets reference air.
 class GameStateCodec {
-  static const int schemaVersion = 1;
+  static const int schemaVersion = 2;
   const GameStateCodec();
 
   // ---------------- encode ----------------
@@ -43,6 +49,7 @@ class GameStateCodec {
     required DepositRepository deposits,
     required SimulationClock clock,
     CityRepository? cities,
+    AtmosphereRepository? atmospheres,
   }) {
     return {
       'version': schemaVersion,
@@ -57,6 +64,8 @@ class GameStateCodec {
       'deposits': [for (final d in deposits.all()) _deposit(d)],
       if (cities != null)
         'cities': [for (final c in cities.all()) c.toJson()],
+      if (atmospheres != null)
+        'atmospheres': [for (final a in atmospheres.all()) a.toJson()],
     };
   }
 
@@ -216,6 +225,8 @@ class GameStateCodec {
     required SimulationClock clock,
     CityRepository? cities,
     List<CelestialBody> bodies = const [],
+    AtmosphereRepository? atmospheres,
+    UniverseRepository? universe,
   }) {
     // City-builder colonies. Replaced wholesale rather than mutated in place:
     // a CitySim is one aggregate, and half-merging a save into a live one is
@@ -228,6 +239,9 @@ class GameStateCodec {
         cities.add(
             CitySim.fromJson(cj as Map<String, dynamic>, bodies: bodies));
       }
+    }
+    if (atmospheres != null) {
+      _decodeAtmospheres(json, atmospheres, universe, cities);
     }
     final clockJson = json['clock'] as Map<String, dynamic>;
     clock.tick = clockJson['tick'] as int;
@@ -268,6 +282,43 @@ class GameStateCodec {
       // brushes survive the load (terrain edits are append-only), so re-carving
       // would only duplicate them. A fresh session starts at 0 and rebuilds.
       d.extractedTotal = (m['extracted'] as num?)?.toDouble() ?? 0.0;
+    }
+  }
+
+  /// Every inventory back to reference, then the saved ones over it, then
+  /// each body republished with the air its inventory implies.
+  ///
+  /// Reset first so a body the save does not mention — an old save, or a body
+  /// nothing had touched — breathes reference air rather than whatever the
+  /// session that loaded it had made of it. Republished whether or not the
+  /// air moved, for the same reason: the live body may carry the session's
+  /// air, not the save's.
+  void _decodeAtmospheres(Map<String, dynamic> json, AtmosphereRepository repo,
+      UniverseRepository? universe, CityRepository? cities) {
+    for (final state in repo.all()) {
+      state.resetToReference();
+    }
+    for (final aj in (json['atmospheres'] as List?) ?? const []) {
+      final m = (aj as Map).cast<String, dynamic>();
+      final state = repo.forBody(m['body'] as String? ?? '');
+      if (state == null) continue;
+      state.restore(m);
+      repo.save(state);
+    }
+    if (universe == null) return;
+    for (final state in repo.all()) {
+      final body = universe.current().body(BodyId(state.bodyId));
+      if (body == null) continue;
+      universe.replaceBody(state.applyTo(body));
+      state.markPublished();
+    }
+    // The colonies were rebuilt against the bodies as they stood before the
+    // republish. The tick re-points them anyway; doing it here means nothing
+    // that reads a colony between the load and the next tick sees stale air.
+    if (cities == null) return;
+    for (final city in cities.all()) {
+      final body = universe.current().body(city.body.id);
+      if (body != null) city.body = body;
     }
   }
 

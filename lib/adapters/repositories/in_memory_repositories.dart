@@ -42,8 +42,10 @@ class StaticUniverseRepository implements UniverseRepository {
   @override
   StarSystem current() => system;
 
-  /// Swap a body in-place (debug/terraforming re-skin). The presenter reads
-  /// `current()` each frame, so the next render picks up the change.
+  /// Swap a body in-place (terraforming republish, debug re-skin). The
+  /// presenter reads `current()` each frame, so the next render picks up the
+  /// change.
+  @override
   void replaceBody(CelestialBody body) => system = system.withBody(body);
 }
 
