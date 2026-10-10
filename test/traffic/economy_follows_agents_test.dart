@@ -3,6 +3,7 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
+import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/traffic/traffic_tuning.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -77,14 +78,23 @@ void main() {
 /// citizen who HAS a car uses it, and the same figure in both towns is what
 /// makes the drivers the only difference between them.
 ///
-/// The window is 150 s because that is a living town: the starter kit feeds
-/// about two hundred people, and a fully built one grows past that and then
-/// starves, which is the colony economy's own behaviour and no business of
-/// this test.
+/// The starter kit's one pump waters about a hundred and ten people, and a
+/// town settles at what it can supply, which is too few to jam: four more
+/// pumps and three more farms on the first street lots keep about two
+/// hundred, the town this test was written against, and the rest is the
+/// [town] fixture's.
 CitySim _town(double ownership) {
   AgentTuning.commuteRatePerResident = 5 * 0.00042;
   AgentTuning.carOwnership = ownership;
-  final city = town(agentTraffic: true);
+  final city = starterKit(agentTraffic: true);
+  final pump = kUtilCatalog.firstWhere((s) => s.label == 'Aquifer Pump');
+  final farm = kUtilCatalog.firstWhere((s) => s.label == 'Farm');
+  for (final spec in [pump, pump, pump, pump, farm, farm, farm]) {
+    expect(freeLots(city).any((lot) => place(city, lot.id, spec)), isTrue,
+        reason: 'a street lot for the ${spec.label}');
+  }
+  zoneAll(city);
+  buildAll(city);
   run(city, 150);
   return city;
 }

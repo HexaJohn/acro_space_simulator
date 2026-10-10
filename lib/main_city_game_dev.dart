@@ -310,6 +310,18 @@ Map<String, dynamic> _status(CitySim c) => {
       'zoned': c.layout.parcels.where((p) => p.use.name != 'unzoned').length,
       'grown': c.grownParcels.length,
       'trend': c.popTrend,
+      // Life support: whether the colony can keep its people, and why not.
+      'life': {
+        'food': c.stockOf('food'),
+        'water': c.stockOf('water'),
+        'security': c.foodSecurity,
+        'supportable': c.supportablePop.isFinite ? c.supportablePop : null,
+        'starved': c.starved,
+        'corpses': c.corpses,
+        'disease': c.disease,
+        'lifeThrottle': c.lifeThrottle,
+        'restThrottle': c.restThrottle,
+      },
       'agents': _agentsStatus(c.agents),
     };
 

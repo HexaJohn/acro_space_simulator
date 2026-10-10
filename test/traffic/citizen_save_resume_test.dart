@@ -45,9 +45,9 @@ void main() {
     // kerbs, and somebody is out on the road.
     //
     // A hundred and twenty people, not a share of the housing: a fully built
-    // starter town feeds about two hundred, and one settled to its roofline
-    // starves and empties itself while the window runs (the colony economy's
-    // own behaviour, and no business of this test).
+    // starter town waters about a hundred and ten, and one settled to its
+    // roofline spends the window emigrating down to that (the colony
+    // economy's own behaviour, and no business of this test).
     AgentTuning.commuteRatePerResident = 0.004;
     final city = town(agentTraffic: true);
     city.agents.debugSettle(people: 120);

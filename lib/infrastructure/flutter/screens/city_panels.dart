@@ -662,9 +662,9 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
   /// compute / staffing); false gives the full nameplate potential. Life-support
   /// consumption is the same in both.
   Map<String, double> netRates({bool throttled = true}) {
-    final t = throttled ? sim.throttle : 1.0;
     final r = <String, double>{};
     for (final e in sim.activeSpecs) {
+      final t = throttled ? sim.throttleFor(e.value) : 1.0;
       e.value.outputs.forEach((k, v) => r[k] = (r[k] ?? 0) + v * t);
       e.value.inputs.forEach((k, v) => r[k] = (r[k] ?? 0) - v * t);
     }
@@ -692,8 +692,8 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
     final cons = <String, ({double rate, int count})>{};
     for (final e in sim.activeSpecs) {
       final s = e.value;
-      final out = (s.outputs[c] ?? 0) * sim.biomeMult(c) * sim.throttle;
-      final inp = (s.inputs[c] ?? 0) * sim.throttle;
+      final out = (s.outputs[c] ?? 0) * sim.biomeMult(c) * sim.throttleFor(s);
+      final inp = (s.inputs[c] ?? 0) * sim.throttleFor(s);
       if (out > 0) {
         final cur = prod[s.label];
         prod[s.label] =

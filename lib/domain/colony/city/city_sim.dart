@@ -565,6 +565,13 @@ class CitySim {
   int housing = 0, jobs = 0;
   double staffing = 1.0; // filled jobs / required jobs (0..1)
   double throttle = 1.0; // min(power, compute, staffing) production scaler
+  // The throttles production actually runs at: life support is staffed and
+  // powered first, everything else shares what is left (see the tick).
+  double lifeThrottle = 1.0, restThrottle = 1.0;
+  // People the colony can keep fed, watered and breathing: what it makes of
+  // each, net of what its buildings use, plus the stockpile drawn down over
+  // [settleRunwaySec]. Infinite until the first tick has measured it.
+  double supportablePop = double.infinity;
   double powerOut = 0, powerDraw = 0;
   double resTarget = 0, comTarget = 0, indTarget = 0; // RCI demand
   final Map<String, double> services = {};
@@ -1106,10 +1113,7 @@ class CitySim {
   /// so it's 'stable', not 'growing'. With a spaceport it's growing toward the
   /// housing/happiness cap, shrinking past it, or stable at it.
   String get popTrend {
-    final liveHousing = math.max(0.0, housing - corpses);
-    final cap = liveHousing * (0.4 + 0.6 * happiness);
-    final floor = (landerCrew + reliefCrew).toDouble();
-    final target = (hasSpaceport ? math.max(cap, floor) : floor) * foodSecurity;
+    final target = popTarget;
     if (!hasSpaceport) return 'stable'; // no immigration without a spaceport
     if (commsDown) return 'isolated'; // blackout halts arrivals
     const eps = 0.5;
@@ -1288,6 +1292,44 @@ class CitySim {
     this.staffing = staffing;
     this.throttle = throttle;
 
+    // Life support first. The farms, pumps and oxygen plants take the first
+    // workers and the first watts, and every other job shares what is left.
+    // With one pool for everything, a town whose jobs outnumber its people
+    // runs its pump at the same fraction as its shops: water per head is then
+    // fixed by the job mix, whatever the population, and if that is short
+    // there is no town small enough to drink — it dies to the last settler.
+    var lifeJobs = 0.0, lifeDraw = 0.0;
+    void tallyLife(CityBuildingSpec s, double uf) {
+      if (!isLifeSupport(s)) return;
+      lifeJobs += s.jobs * uf;
+      lifeDraw += s.powerDraw * (s.housing > 0 || s.jobs > 0 ? uf : 1.0);
+    }
+
+    for (final e in active) {
+      tallyLife(e.value, utilFactor(e.key));
+    }
+    for (final (s, uf) in parcelActive) {
+      tallyLife(s, uf);
+    }
+    final lifePower =
+        lifeDraw <= 0 ? 1.0 : (powerOut / lifeDraw).clamp(0.0, 1.0);
+    final restDraw = powerDraw - lifeDraw;
+    final restPower = restDraw <= 1e-9
+        ? 1.0
+        : ((powerOut - lifeDraw * lifePower) / restDraw).clamp(0.0, 1.0);
+    final restJobs = jobs - lifeJobs;
+    final lifeStaff = infiniteRobotics || lifeJobs <= 0
+        ? 1.0
+        : (workforce / lifeJobs * commuteEff).clamp(0.0, 1.0);
+    final restStaff = infiniteRobotics || restJobs <= 1e-9
+        ? 1.0
+        : ((workforce - math.min(workforce.toDouble(), lifeJobs)) /
+                restJobs *
+                commuteEff)
+            .clamp(0.0, 1.0);
+    lifeThrottle = math.min(lifePower, math.min(computeRatio, lifeStaff));
+    restThrottle = math.min(restPower, math.min(computeRatio, restStaff));
+
     // Medicine gates HEALTH service: hospitals/clinics consuming medicine only
     // deliver full health coverage when supplied. Scale the health service by
     // how well medicine demand is met (so running dry on medicine quietly
@@ -1309,18 +1351,33 @@ class CitySim {
     //    building's outputs if its inputs can't be met (no free lunch).
     var pollutionRate = 0.0;
     final emissionCut = has(Law.emissionsCap) ? 0.5 : 1.0;
+    // What the buildings make, net of what they use, of each life-support
+    // commodity, per second: the supply side of [supportablePop].
+    final lifeNet = <String, double>{};
+    void flow(String k, double perSec) {
+      if (k == Commodity.food || k == Commodity.water || k == Commodity.oxygen) {
+        lifeNet[k] = (lifeNet[k] ?? 0) + perSec;
+      }
+    }
+
     for (final e in active) {
       final s = e.value;
+      final th = throttleFor(s);
       // Can we afford this building's inputs this tick?
       var canRun = true;
       s.inputs.forEach((k, v) {
-        if (stockOf(k) < v * throttle * dt) canRun = false;
+        if (stockOf(k) < v * th * dt) canRun = false;
       });
-      final run = canRun ? throttle : 0.0;
-      s.inputs.forEach(
-          (k, v) => stock[k] = (stockOf(k) - v * run * dt).clamp(0, 1e12));
-      s.outputs.forEach((k, v) => stock[k] = stockOf(k) +
-          v * run * biomeMult(k) * bountyMult * eventProductionMult * dt);
+      final run = canRun ? th : 0.0;
+      s.inputs.forEach((k, v) {
+        stock[k] = (stockOf(k) - v * run * dt).clamp(0, 1e12);
+        flow(k, -v * run);
+      });
+      s.outputs.forEach((k, v) {
+        final made = v * run * biomeMult(k) * bountyMult * eventProductionMult;
+        stock[k] = stockOf(k) + made * dt;
+        flow(k, made);
+      });
       pollutionRate += s.pollution * (s.powerOutput > 0 ? 1 : run) * emissionCut;
     }
 
@@ -1329,15 +1386,21 @@ class CitySim {
     // under-construction tile produce at full rate — a quirk not worth
     // reproducing.
     for (final (s, uf) in parcelActive) {
+      final th = throttleFor(s);
       var canRun = true;
       s.inputs.forEach((k, v) {
-        if (stockOf(k) < v * throttle * uf * dt) canRun = false;
+        if (stockOf(k) < v * th * uf * dt) canRun = false;
       });
-      final run = canRun ? throttle * uf : 0.0;
-      s.inputs.forEach(
-          (k, v) => stock[k] = (stockOf(k) - v * run * dt).clamp(0, 1e12));
-      s.outputs.forEach((k, v) => stock[k] = stockOf(k) +
-          v * run * biomeMult(k) * bountyMult * eventProductionMult * dt);
+      final run = canRun ? th * uf : 0.0;
+      s.inputs.forEach((k, v) {
+        stock[k] = (stockOf(k) - v * run * dt).clamp(0, 1e12);
+        flow(k, -v * run);
+      });
+      s.outputs.forEach((k, v) {
+        final made = v * run * biomeMult(k) * bountyMult * eventProductionMult;
+        stock[k] = stockOf(k) + made * dt;
+        flow(k, made);
+      });
       pollutionRate += s.pollution * (s.powerOutput > 0 ? 1 : run) * emissionCut;
     }
 
@@ -1387,12 +1450,14 @@ class CitySim {
     oceanPollution = oceanPollution.clamp(0.0, 1.0);
 
     // 1.5 Life support. Population eats food + drinks water. Food SECURITY is
-    //     measured as how many SECONDS of runway the stockpile holds at the
-    //     current consumption rate, mapped to 0..1 over a target runway. This is
-    //     population-INDEPENDENT in shape, so it no longer snaps to "1.0" the
-    //     instant population dips toward zero (the cause of the starve sawtooth):
-    //     a small steady food import keeps a small population's runway high and
-    //     stable instead of toggling the flag every frame.
+    //     the share of the population the colony can keep supplied: what its
+    //     buildings make (net of what they use) plus the stockpile spread over a
+    //     30 s runway, against what the people need. Counting the stockpile
+    //     ALONE read a colony that makes nine tenths of its water as having
+    //     none the moment the tank ran dry — security 0, a target of nobody,
+    //     and hunger deaths on everyone, down to the last settler. Counting
+    //     the supply, it is 0.9: the tenth it cannot water leave or die, and
+    //     the rest live on what it makes.
     final foodPerSec = population * foodPerPersonPerSec;
     final waterPerSec = population * waterPerPersonPerSec;
     stock[Commodity.food] =
@@ -1413,17 +1478,29 @@ class CitySim {
       stock[Commodity.oxygen] =
           (stockOf(Commodity.oxygen) - o2PerSec * dt).clamp(0, 1e12);
     }
-    // Runway (seconds) = stock / consumption. With ~zero consumption (tiny pop)
-    // any stock = effectively infinite runway -> full security, but it gets there
-    // smoothly via the ease, not by a hard pop<=0 branch.
+    // People each commodity can keep supplied, when the stockpile is drawn
+    // down over [runway] seconds. With ~zero consumption (tiny pop) security
+    // is full, but it gets there smoothly via the ease, not by a hard pop<=0
+    // branch.
     const targetRunway = 30.0; // 30 s buffer = "secure"
-    double runwaySec(double stock, double perSec) =>
-        perSec < 1e-6 ? targetRunway : stock / perSec;
-    final secTarget = [
-      runwaySec(stockOf(Commodity.food), foodPerSec) / targetRunway,
-      runwaySec(stockOf(Commodity.water), waterPerSec) / targetRunway,
-      runwaySec(stockOf(Commodity.oxygen), o2PerSec) / targetRunway,
-    ].map((v) => v.clamp(0.0, 1.0)).reduce(math.min);
+    double supported(double runway) {
+      var people = double.infinity;
+      void need(String c, double perPerson, bool managed) {
+        if (!managed) return;
+        final perSec = math.max(0.0, (lifeNet[c] ?? 0) + stockOf(c) / runway);
+        people = math.min(people, perSec / perPerson);
+      }
+
+      need(Commodity.food, foodPerPersonPerSec, true);
+      need(Commodity.water, waterPerPersonPerSec, true);
+      need(Commodity.oxygen, waterPerPersonPerSec, o2Managed);
+      return people;
+    }
+
+    final secTarget = foodPerSec < 1e-6
+        ? 1.0
+        : (supported(targetRunway) / population).clamp(0.0, 1.0);
+    supportablePop = supported(settleRunwaySec);
     // Ease slowly so transient dips don't whip the flag.
     foodSecurity =
         (foodSecurity + (secTarget - foodSecurity) * (0.6 * dt).clamp(0.0, 1.0))
@@ -1485,12 +1562,14 @@ class CitySim {
     // itself — the "no hospital" penalty only bites once the population grows
     // past what the lander's own crew can manage (so the starter crew don't
     // sicken and die in a fed, clean colony). The unmet-health demand is the
-    // population ABOVE that grace size that has no coverage.
+    // SHARE of the population above that grace size that has no coverage — so
+    // the twenty-first settler adds one person's worth of risk, not the whole
+    // no-hospital penalty at once.
     const healthGrace = 20.0; // people who need no formal healthcare
     final needHealth = math.max(0.0, pop - healthGrace);
     final uncovered = needHealth <= 0
         ? 0.0
-        : (1 - ((services['health'] ?? 0) / needHealth)).clamp(0.0, 1.0);
+        : ((needHealth - (services['health'] ?? 0)) / pop).clamp(0.0, 1.0);
     final corpseFrac = pop > 0 ? (corpses / pop).clamp(0.0, 1.0) : 0.0;
     final diseaseTarget = (0.35 * uncovered +
             0.2 * (pollution / 200).clamp(0.0, 1.0) +
@@ -1503,7 +1582,9 @@ class CitySim {
     // background) kills directly — a thin-atmosphere world's faint background
     // shouldn't quietly wipe out the starter crew.
     final radDeaths = pop * math.max(0.0, radiation - 0.25) * 0.013;
-    final hungerDeaths = starved ? pop * 0.02 : 0.0;
+    // The hungry are the share security cannot cover, not everyone: a colony
+    // short a tenth of its food loses its tenth, and the rest eat.
+    final hungerDeaths = pop * (1 - foodSecurity) * 0.02;
     final diseaseDeaths = pop * disease * 0.01;
     var warDeaths = 0.0;
     for (final e in activeSpecs) {
@@ -1528,9 +1609,17 @@ class CitySim {
     }
     corpses += died;
     // Deathcare processing.
-    var careRate = 0.0;
+    // A settlement buries its own dead by hand, a few a minute; deathcare is
+    // for a town whose dying outpaces that. Without it the first settler to
+    // die held a home forever (the living housing is housing − corpses), and
+    // a colony with no cemetery shrank, a death at a time, toward nobody.
+    const handBurialRate = 0.05; // people/s
+    var careRate = handBurialRate;
     for (final e in activeSpecs) {
       careRate += e.value.deathcareRate;
+    }
+    for (final (s, _) in parcelActive) {
+      careRate += s.deathcareRate;
     }
     corpses = (corpses - careRate * dt).clamp(0, double.infinity);
 
@@ -1587,21 +1676,16 @@ class CitySim {
         economy.researchMult *
         dt;
 
-    // 2. Population: needs a spaceport; capped by housing × happiness × food
-    //    SECURITY. Using the smooth security value (not the binary starved flag)
-    //    as a continuous multiplier means a food shortfall gently lowers the
-    //    sustainable population instead of toggling it to 0 and back (the cause
-    //    of the thrash). Immigration/emigration both ease toward that target.
+    // 2. Population: needs a spaceport; capped by housing × happiness, and by
+    //    the people the colony can supply ([supportablePop]) — a carrying
+    //    capacity the town settles at when food or water runs short, instead
+    //    of a security multiplier that, with the tank dry, aimed it at nobody.
+    //    Immigration/emigration both ease toward that target.
     // Unburied corpses still occupy their homes — that housing isn't free for
     // the living until deathcare clears them. So the sustainable LIVING
     // population is the housing capacity MINUS the corpse backlog (corpses don't
     // count toward population; they hold a slot until processed).
-    final liveHousing = math.max(0.0, housing - corpses);
-    final cap = liveHousing * (0.4 + 0.6 * happiness);
-    // The lander always seeds its crew; relief settlers add to that floor; a
-    // spaceport unlocks growth beyond them.
-    final floor = (landerCrew + reliefCrew).toDouble();
-    final target = (hasSpaceport ? math.max(cap, floor) : floor) * foodSecurity;
+    final target = popTarget;
     // Migration BOTH ways needs a working (road-connected) spaceport — it's the
     // only way on or off the world. A comms blackout also halts arrivals.
     // Without a spaceport the colony is stuck with exactly its landed crew: no
@@ -2896,6 +2980,41 @@ class CitySim {
       }
     }
     recompute();
+  }
+
+  /// A building that keeps people alive: it makes food, water or oxygen (and
+  /// is not a generator). Staffed and powered before anything else. Not a
+  /// spaceport, whose supplies are imports and whose forty jobs would take
+  /// every priority worker from the farm, nor a terraformer, whose oxygen is a
+  /// by-product of a planet-scale job.
+  static bool isLifeSupport(CityBuildingSpec s) =>
+      s.powerOutput <= 0 &&
+      s.type != 'spaceport' &&
+      s.group != 'env' &&
+      (s.outputs.containsKey(Commodity.food) ||
+          s.outputs.containsKey(Commodity.water) ||
+          s.outputs.containsKey(Commodity.oxygen));
+
+  /// The production throttle [s] ran at last tick: life support's, or the
+  /// share everything else gets.
+  double throttleFor(CityBuildingSpec s) =>
+      isLifeSupport(s) ? lifeThrottle : restThrottle;
+
+  /// How long a settler counts the stockpile as lasting when deciding whether
+  /// to stay: production sets the colony's size, and the stock only lets it
+  /// run over that for a while, drawn down slowly instead of in one boom.
+  static const double settleRunwaySec = 600.0;
+
+  /// The population the colony is heading for: housing × happiness (or the
+  /// crew floor), no more than it can feed.
+  double get popTarget {
+    final liveHousing = math.max(0.0, housing - corpses);
+    final cap = liveHousing * (0.4 + 0.6 * happiness);
+    // The lander always seeds its crew; relief settlers add to that floor; a
+    // spaceport unlocks growth beyond them.
+    final floor = (landerCrew + reliefCrew).toDouble();
+    return math.min(hasSpaceport ? math.max(cap, floor) : floor,
+        supportablePop);
   }
 
   static const requiredServices = ['safety', 'health', 'leisure'];
