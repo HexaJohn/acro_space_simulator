@@ -168,3 +168,29 @@ play at 1×, but hours under warp. Earth stays effectively immovable at the same
 - **Q3 Industry on the planetary ledger:** yes.
 - **Q4 Flight effects:** yes. Flight reads the republished body.
 - **Q5 Shared air:** yes. Colonies on one body share one atmosphere.
+
+## 8. Phase 1 as built (2026-10-10)
+
+- **State:** `PlanetAtmosphere` (`lib/domain/planetary/planet_atmosphere.dart`) replaces `AtmospherePollution`. It is
+  seeded eagerly per body from the reference air (`InMemoryAtmosphereRepository.seeded`), so a body that was
+  re-skinned before first use cannot seed a false reference. Airless bodies get no inventory until escape exists
+  (phase 2): without it, gas vented onto the Moon would stay forever.
+- **Derived air:** ratios against the reference model (pressure ∝ column mass; ρ ∝ P·μ; H and R_specific ∝ 1/μ; the top
+  of the atmosphere moves to stay at the reference's absolute pressure). An untouched inventory hands back the
+  reference objects identically. **Temperature stays at reference** until the greenhouse model (phase 2).
+- **Flows:** `PlanetAtmosphereService` + `TerraformTuning` (`planet_atmosphere_service.dart`). The tower vents
+  `1000 mol/s × terraformRateScale (2.2e5)` per unit throttle (`CitySim.oxygenatorRun`), which takes Mars to
+  pO2 = 0.16 atm in ~30 Mars years with 50 towers. **The vent stops at `oxygenTargetPa` (0.16 atm, full §3.4 cover)**:
+  that is what makes Earth immovable by towers (it starts at 0.21 atm) and bounds the inventory. Industry CO2 is
+  not scaled. Every term is exact for constant flows, so warp steps are stable.
+- **Timescale note:** 30 Mars years is 1.78e9 s of sim time — about 30 min at 1,000,000× warp, 5 h at 100,000×.
+  The "about a day of play at 1×" estimate in §4 does not hold for a real-time 1× clock.
+- **Tick:** colonies record flow AMOUNTS per body in their city phase; the planetary phase after the city loop
+  integrates them and republishes via `UniverseRepository.replaceBody` (now on the port) past a 1e-6 tolerance,
+  re-pointing the body's colonies. `StarSystem.withBody` now keeps the body's slot. Each colony also re-resolves
+  `CitySim.body` at the start of its phase.
+- **Save:** `GameStateCodec` v2 `atmospheres` block; load resets every inventory to reference, applies the saved
+  ones, republishes every body and re-points the loaded colonies. **Fingerprint:** `WorldSnapshot.atmospheres`
+  (relative 10-significant-figure hashing), captured by `AuthoritativeSimulation`.
+- **Not yet:** the Atmospheric Harvester still does not remove O2 from the inventory (its stock units have no
+  mole conversion yet); the CitySim breathable/o2 getters still read the body (which now carries the derived air).
