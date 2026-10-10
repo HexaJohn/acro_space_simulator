@@ -18,10 +18,12 @@ import 'package:acro_space_simulator/domain/dynamics/mass_properties.dart';
 import 'package:acro_space_simulator/domain/dynamics/state_vector.dart';
 import 'package:acro_space_simulator/domain/orbits/soi_transition_service.dart';
 import 'package:acro_space_simulator/domain/planetary/atmospheric_composition.dart';
+import 'package:acro_space_simulator/domain/planetary/planet_atmosphere_service.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/domain/simulation/simulation_clock.dart';
 import 'package:acro_space_simulator/domain/universe/celestial_body.dart';
 import 'package:acro_space_simulator/domain/universe/real_solar_system.dart';
+import 'package:acro_space_simulator/domain/vessel/vessel.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// The planetary-atmosphere phase (docs/plans/terraforming.md §5.1-5.3): a
@@ -182,6 +184,79 @@ void main() {
     final ratio = thick.atmosphere!.seaLevelPressure /
         reference.atmosphere!.seaLevelPressure;
     expect(ratio, greaterThan(10));
+  });
+
+  test('a craft in Mars\'s sky flies through the air the tick published', () {
+    // Through the vessel path, not a hand-built AeroForce: the flight tick
+    // resolves its body from the universe every tick, so the air the
+    // planetary phase republished is the air the craft meets. 5 km up at
+    // 1200 m/s is ~9 kPa of dynamic pressure in reference air and ~10x that
+    // once thirty years of towers have run — so a 40 kPa max-Q is the
+    // difference between a routine pass and breaking apart.
+    ({
+      AdvanceSimulationTick tick,
+      InMemoryVesselRepository vessels,
+      SimulationClock clock,
+    }) flight(
+        {required bool terraformed}) {
+      final system = RealSolarSystem.build();
+      final body = system.require(mars);
+      final universe = StaticUniverseRepository(system);
+      final air = InMemoryAtmosphereRepository.seeded(system);
+      if (terraformed) {
+        // A tower programme's output, still waiting for the planetary phase
+        // to take it — as a frame-budgeted colony's replays leave it.
+        air.forBody('mars')!.pendingFlows.addColony(
+              pollutionRate: 0,
+              oxygenatorRun: 1e19 / const TerraformTuning().oxygenatorRate,
+              dt: 1,
+            );
+      }
+      final vessels = InMemoryVesselRepository([
+        Vessel(
+          id: const VesselId('glider'),
+          name: 'Glider',
+          ownerId: 'p',
+          state: StateVector(
+            position: Vector3(body.radius + 5000, 0, 0),
+            velocity: const Vector3(0, 1200, 0),
+          ),
+          dominantBody: mars,
+          stages: const [],
+        ),
+      ]);
+      final tick = AdvanceSimulationTick(
+        vessels: vessels,
+        universe: universe,
+        compute: DartCompute(),
+        soi: const SoiTransitionService(),
+        events: InMemoryEventBus(),
+        colonies: InMemoryColonyRepository(),
+        deposits: InMemoryDepositRepository(),
+        weather: const NullWeatherRepository(),
+        atmosphere: air,
+        maxDynamicPressure: 40000,
+      );
+      return (
+        tick: tick,
+        vessels: vessels,
+        clock: SimulationClock(warpFactor: 1, fixedStep: 0.1),
+      );
+    }
+
+    const id = VesselId('glider');
+    final reference = flight(terraformed: false);
+    final thick = flight(terraformed: true);
+    reference.tick.execute(reference.clock);
+    thick.tick.execute(thick.clock);
+    expect(thick.vessels.byId(id), isNotNull,
+        reason: 'the vessels fly before the planetary phase publishes');
+    reference.tick.execute(reference.clock);
+    thick.tick.execute(thick.clock);
+    expect(reference.vessels.byId(id), isNotNull,
+        reason: 'reference Mars air is far below max-Q at this speed');
+    expect(thick.vessels.byId(id), isNull,
+        reason: 'the thickened sky the tick published tears the craft apart');
   });
 
   test('a world with no colonies keeps its reference bodies', () {

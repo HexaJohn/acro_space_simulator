@@ -549,25 +549,24 @@ class AdvanceSimulationTick {
     }
   }
 
-  /// Gas flows recorded by the colonies since the planetary-atmosphere phase
-  /// last ran, per body id.
-  ///
-  /// Amounts, not rates, so a frame-budgeted colony whose share of a tick is
-  /// replayed after the host loop (and so after this tick's phase) simply
-  /// lands in the next one: late, never lost, never counted twice.
-  final Map<String, AtmosphereFlows> _pendingAirFlows = {};
-
   /// Note a colony's emissions and terraforming towers against its host
   /// body's air. Integrated, for every colony on the body at once, by
   /// [_advanceAtmospheres].
+  ///
+  /// Amounts, not rates, so a frame-budgeted colony whose share of a tick is
+  /// replayed after the host loop (and so after this tick's phase) simply
+  /// lands in the next one: late, never lost, never counted twice. They wait
+  /// on the inventory, not on this tick, so a tick rebuild keeps them and a
+  /// save and load carries them (see `AtmosphereFlows`).
   void _recordAtmosphereFlows(CitySim city, double dt) {
-    final id = city.body.id.value;
-    if (atmosphere.forBody(id) == null) return; // no air here to change
-    _pendingAirFlows.putIfAbsent(id, AtmosphereFlows.new).addColony(
-          pollutionRate: city.emissionRate,
-          oxygenatorRun: city.oxygenatorRun,
-          dt: dt,
-        );
+    final state = atmosphere.forBody(city.body.id.value);
+    if (state == null) return; // no air here to change
+    state.pendingFlows.addColony(
+      pollutionRate: city.emissionRate,
+      oxygenatorRun: city.oxygenatorRun,
+      dt: dt,
+      colony: city.id,
+    );
   }
 
   /// Integrate every body's inventory over [dt] under the flows its colonies
@@ -579,7 +578,7 @@ class AdvanceSimulationTick {
   /// — their haze settles.
   void _advanceAtmospheres(double dt) {
     for (final state in atmosphere.all()) {
-      final flows = _pendingAirFlows.remove(state.bodyId);
+      final flows = state.takePendingFlows();
       if (flows == null && state.aerosolBurden == 0) continue;
       planetAtmosphere.advance(state, flows ?? AtmosphereFlows(), dt: dt);
       atmosphere.save(state);

@@ -9,8 +9,11 @@ library;
 
 import 'dart:math' as math;
 
+import 'atmosphere_flows.dart';
 import 'atmospheric_composition.dart';
 import 'planet_atmosphere.dart';
+
+export 'atmosphere_flows.dart';
 
 /// The one documented knob between honest per-tower physics and a timescale a
 /// player can reach (§4 "Rates and time", §7 Q1).
@@ -59,41 +62,6 @@ class TerraformTuning {
 
   /// Moles of O2 per second one tower vents at full throttle.
   double get oxygenatorRate => oxygenatorMolesPerSecond * terraformRateScale;
-}
-
-/// Gas flows on one body, summed over every colony on it during a tick.
-///
-/// Colonies on one body share one atmosphere (§7 Q5), so these are amounts
-/// already integrated over each colony's own step (rate × dt) and simply
-/// added: a frame-budgeted colony whose tick replays late adds its share
-/// late, and nothing is lost or counted twice.
-class AtmosphereFlows {
-  /// Net industrial emissions, in the city's pollution units × seconds.
-  /// Negative where scrubbing (terraformers carry negative pollution) wins.
-  double pollution = 0;
-
-  /// Positive emissions only, pollution units × seconds — what raises haze.
-  /// Kept apart from [pollution] because one colony's scrubbers do not clear
-  /// another colony's smoke.
-  double emission = 0;
-
-  /// Terraforming-tower running time: Σ throttle × seconds.
-  double oxygenatorRun = 0;
-
-  bool get isEmpty => pollution == 0 && emission == 0 && oxygenatorRun == 0;
-
-  /// One colony's step: [pollutionRate] (its `emissionRate`) and
-  /// [oxygenatorRun] (Σ tower throttle) held for [dt] seconds.
-  void addColony({
-    required double pollutionRate,
-    required double oxygenatorRun,
-    required double dt,
-  }) {
-    if (dt <= 0) return;
-    pollution += pollutionRate * dt;
-    emission += math.max(0.0, pollutionRate) * dt;
-    this.oxygenatorRun += math.max(0.0, oxygenatorRun) * dt;
-  }
 }
 
 /// Integrates [AtmosphereFlows] into a [PlanetAtmosphere].
@@ -159,8 +127,12 @@ class PlanetAtmosphereService {
 
     // 2. Haze tracks current activity: it rises with emissions and settles
     // out continuously, so it cannot ratchet upward the way the gases do.
+    // The emission RATE is the flows over the span they were produced in,
+    // not over this step: a frame of held colony ticks lands in one step.
     if (dt > 0) {
-      final riseRate = flows.emission / dt * aerosolRisePerPollution;
+      final span = flows.seconds;
+      final riseRate =
+          span > 0 ? flows.emission / span * aerosolRisePerPollution : 0.0;
       final equilibrium =
           aerosolSettleRate > 0 ? riseRate / aerosolSettleRate : riseRate;
       final decay = math.exp(-aerosolSettleRate * dt);

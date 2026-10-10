@@ -30,6 +30,7 @@ import 'dart:math' as math;
 
 import '../universe/atmosphere_model.dart';
 import '../universe/celestial_body.dart';
+import 'atmosphere_flows.dart';
 import 'atmospheric_composition.dart';
 
 /// One body's mutable gas inventory, seeded from its reference air.
@@ -112,6 +113,23 @@ class PlanetAtmosphere {
   /// a season while its CO2 stays put. Not yet fed into the derived air
   /// (aerosol cooling is phase 2).
   double aerosolBurden = 0;
+
+  /// What the colonies on this body have produced since its air was last
+  /// integrated — usually nothing between ticks, but a frame-budgeted
+  /// colony's replays land after the tick's planetary phase and so always
+  /// wait here for the next one. Part of the state, saved and reset with it
+  /// (see [AtmosphereFlows]).
+  AtmosphereFlows? _pending;
+
+  /// The flows the next integration will take, created on first use.
+  AtmosphereFlows get pendingFlows => _pending ??= AtmosphereFlows();
+
+  /// Hand over the waiting flows (null if none) and start afresh.
+  AtmosphereFlows? takePendingFlows() {
+    final f = _pending;
+    _pending = null;
+    return f;
+  }
 
   /// Moles of [gas] in the whole atmosphere now.
   double molesOf(AtmosphereGas gas) => _moles[gas] ?? 0;
@@ -290,11 +308,13 @@ class PlanetAtmosphere {
 
   /// Back to the reference inventory: a world loaded from a save that predates
   /// the inventory, or that never touched this body, breathes reference air.
+  /// The flows waiting go too: they were the session's, not the save's.
   void resetToReference() {
     _moles
       ..clear()
       ..addAll(_referenceMoles);
     aerosolBurden = 0;
+    _pending = null;
   }
 
   /// The inventory as saved. Gases by enum NAME, so reordering or extending
@@ -306,6 +326,7 @@ class PlanetAtmosphere {
             if (_moles.containsKey(g)) g.name: _moles[g],
         },
         if (aerosolBurden != 0) 'aerosol': aerosolBurden,
+        if (_pending case final p? when !p.isEmpty) 'pending': p.toJson(),
       };
 
   /// Replace the inventory with [json] (from [toJson]). A gas this build does
@@ -318,6 +339,10 @@ class PlanetAtmosphere {
       if (v is num) _moles[g] = math.max(0.0, v.toDouble());
     }
     aerosolBurden = (json['aerosol'] as num?)?.toDouble() ?? 0;
+    final pending = json['pending'];
+    _pending = pending is Map
+        ? AtmosphereFlows.fromJson(pending.cast<String, dynamic>())
+        : null;
   }
 
   // ---- maths ---------------------------------------------------------------

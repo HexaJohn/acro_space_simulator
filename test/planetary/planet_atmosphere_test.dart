@@ -222,8 +222,10 @@ void main() {
     test('two colonies on one world share its air', () {
       final shared = seed('mars');
       final f = AtmosphereFlows()
-        ..addColony(pollutionRate: 10, oxygenatorRun: 2, dt: 1e5)
-        ..addColony(pollutionRate: 30, oxygenatorRun: 1, dt: 1e5);
+        ..addColony(
+            pollutionRate: 10, oxygenatorRun: 2, dt: 1e5, colony: 'a')
+        ..addColony(
+            pollutionRate: 30, oxygenatorRun: 1, dt: 1e5, colony: 'b');
       service.advance(shared, f, dt: 1e5);
       final single = seed('mars');
       service.advance(single, flows(towers: 3, pollutionRate: 40, dt: 1e5),
@@ -232,6 +234,10 @@ void main() {
           single.molesOf(AtmosphereGas.oxygen));
       expect(shared.molesOf(AtmosphereGas.carbonDioxide),
           single.molesOf(AtmosphereGas.carbonDioxide));
+      // Side by side, not one after another: their haze is one sky's worth
+      // of both colonies' smoke over the same 1e5 s.
+      expect(shared.aerosolBurden,
+          closeTo(single.aerosolBurden, single.aerosolBurden * 1e-12));
     });
   });
 
@@ -263,6 +269,27 @@ void main() {
       expect(small.aerosolBurden,
           closeTo(big.aerosolBurden, big.aerosolBurden * 1e-6));
       expect(big.surfacePressurePa.isFinite, isTrue);
+    });
+
+    test('a frame of held ticks landing in one step does not inflate haze',
+        () {
+      // A frame-budgeted colony's whole frame of replayed ticks arrives in
+      // the next tick's flows. Its emission RATE is unchanged, so neither is
+      // the haze it holds the sky at — the long-step equilibrium.
+      const dt = 2e4;
+      final inline = seed('mars');
+      service.advance(inline, flows(pollutionRate: 60, dt: dt), dt: dt);
+      final held = seed('mars');
+      final frame = AtmosphereFlows();
+      for (var i = 0; i < 6; i++) {
+        frame.addColony(
+            pollutionRate: 60, oxygenatorRun: 0, dt: dt, colony: 'held');
+      }
+      expect(frame.seconds, 6 * dt);
+      service.advance(held, frame, dt: dt);
+      expect(held.aerosolBurden, greaterThan(0));
+      expect(held.aerosolBurden,
+          closeTo(inline.aerosolBurden, inline.aerosolBurden * 1e-9));
     });
 
     test('a vast step cannot drive the haze or a gas negative', () {
@@ -350,12 +377,36 @@ void main() {
       expect(b.air.seaLevelPressure, a.air.seaLevelPressure);
     });
 
+    test('flows still waiting are saved with the inventory', () {
+      final a = seed('mars');
+      a.pendingFlows
+        ..addColony(pollutionRate: 40, oxygenatorRun: 2, dt: 300, colony: 'x')
+        ..addColony(pollutionRate: -5, oxygenatorRun: 1, dt: 900, colony: 'y');
+      final b = seed('mars')..restore(a.toJson());
+      final fa = a.takePendingFlows()!;
+      final fb = b.takePendingFlows()!;
+      expect(fb.pollution, fa.pollution);
+      expect(fb.emission, fa.emission);
+      expect(fb.oxygenatorRun, fa.oxygenatorRun);
+      expect(fb.seconds, fa.seconds);
+      expect(b.takePendingFlows(), isNull, reason: 'taken once');
+      expect(seed('mars').toJson().containsKey('pending'), isFalse,
+          reason: 'nothing waiting, nothing saved');
+    });
+
     test('reset goes back to the exact reference air', () {
       final a = seed('mars');
       service.advance(a, flows(towers: 20, dt: marsYear), dt: marsYear);
       a.resetToReference();
       expect(identical(a.air, body('mars').atmosphere), isTrue);
       expect(a.aerosolBurden, 0);
+    });
+
+    test('reset drops the flows the session had waiting', () {
+      final a = seed('mars');
+      a.pendingFlows.addColony(pollutionRate: 1, oxygenatorRun: 1, dt: 10);
+      a.resetToReference();
+      expect(a.takePendingFlows(), isNull);
     });
   });
 
