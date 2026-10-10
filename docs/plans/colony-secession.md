@@ -625,6 +625,17 @@ Mutation-checked: removing the site sheet's term refusal or the flat builder's t
   colony from never petitioning.
 - Force (§6.3) is out of scope; its row is present and disabled.
 
+#### Integrated with terraforming phase 3 (2026-10-10)
+
+Merged without a textual conflict. The governor never builds a terraforming tower, because every tower is
+`group: 'env'`, outside `CitySim.isLifeSupport`, and has no power, garbage or deathcare reading the governor acts on
+(pinned in `test/colony/phase3_cross_lane_seams_test.dart`). Placing a tower can't break the no-demolition term,
+because `footprintFree` refuses any occupied cell. Reputation is measured before the city phase and the planetary
+atmosphere phase runs after it, so the two don't interact within a tick. One item within this lane, not new with the
+merge: a frame-budgeted (held) colony replays its ticks after the hand-out, so all of its held ticks see the latest
+reputation, which was measured on its own state from before the replay. Hearts pressure builds over days, so the
+lag is small, but it is not bit-identical to running inline.
+
 ## 8. Open questions for the user
 
 **Phase 1 proceeds on the proposed answers to Q1–Q5** (2026-10-10, the user asked to start both plans).

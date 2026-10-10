@@ -497,3 +497,22 @@ recorded per colony and integrated in the planetary phase like the oxygenator's.
 - **The new towers use the generic massing,** not bespoke ones like the Oxygenator's stack and tank.
 - **Unchanged from phase 2:** Rayleigh brightening, thermal inertia, other bodies' reservoirs, and the two breathability
   readings.
+
+### 10.1 Integrated with colony secession phase 3 (2026-10-10)
+
+Merged with the secession lane's phase 3 without a textual conflict. The seams were checked by hand:
+
+- **The governor and the towers.** The independent governor builds by what a building makes or takes (life
+  support, watts, garbage, the dead). Every tower is `group: 'env'`, which `CitySim.isLifeSupport` excludes, and none
+  generates power, takes garbage or buries the dead, so an independent council never raises one, a Retention Array
+  or a Greenhouse Factory included. `test/colony/phase3_cross_lane_seams_test.dart` pins the catalogue's shape and runs
+  an ore-rich, desperate council on Mars for 30 sittings.
+- **No demolitions and the towers.** Placing a tower never clears anything: `footprintFree` refuses a cell with a road,
+  zone, rubble or building on it, so a multi-cell tower can't tear anything down under the ban. Tearing a tower
+  down goes through the same refused demolition paths as any other building.
+- **The climate biome.** A biome turn changes only `biome`. The governor (`_lifePlant`) and the starter kit read
+  `biomeMult` live. The kit books its freight once, at founding, when the first climate check only records the band,
+  so nothing it sized has already shifted.
+- **Tick order.** Reputation is handed out before the city phase and reads only loyalty and mood, and the atmosphere
+  phase runs after the city phase. Air reaches reputation one tick later, through mood. The two phases share no
+  state and cannot reorder each other.
