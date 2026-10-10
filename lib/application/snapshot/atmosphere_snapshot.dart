@@ -26,6 +26,9 @@ class AtmosphereSnapshot {
         held: {
           for (final r in a.reservoirs) r.name: r.moles,
           if (a.greenhouseAgentMoles != 0) 'agent': a.greenhouseAgentMoles,
+          // Scales every escape rate: two runs apart only in it agree on
+          // every mole until the leak has already made them differ.
+          if (a.escapeSuppression != 0) 'suppression': a.escapeSuppression,
         },
       );
 
@@ -47,7 +50,8 @@ class AtmosphereSnapshot {
   final Map<String, double> moles;
 
   /// What the world holds back from its air, by reservoir name, plus the
-  /// super-greenhouse agent (`agent`): state that decides where the air goes
+  /// super-greenhouse agent (`agent`) and the escape suppression
+  /// (`suppression`, when set): state that decides where the air goes
   /// next (terraforming phase 2), so two runs that disagree about a polar cap
   /// will soon disagree about the pressure.
   final Map<String, double> held;

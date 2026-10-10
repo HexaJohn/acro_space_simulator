@@ -74,7 +74,11 @@ class TerraformTuning {
   /// (2.2e8 mol/s) into the sky for every 0.5 stock/s it puts in the store,
   /// so one stock unit stands for 4.4e8 mol either way. A harvester (2 stock/s
   /// at full run) then draws 8.8e8 mol/s — it undoes four towers, which is
-  /// what pulling oxygen OUT of a sky someone is filling should cost. On
+  /// what pulling oxygen OUT of a sky someone is filling should cost. Both
+  /// sides are bare throttle: the tower vents on its run, and the colony
+  /// reports its harvesters' run before bounty and events, and only for the
+  /// share its store kept (`CitySim.o2HarvestRate`), so the four holds at
+  /// any bounty and a full tank takes nothing. On
   /// Earth that is ~0.07% of the oxygen per harvester-year; the honest
   /// alternative — a stock unit as the hundredth of a mole a colonist
   /// breathes — would make the harvester invisible to any planet.
@@ -248,6 +252,7 @@ class PlanetAtmosphereService {
       solarFlux: state.solarFlux,
       co2Fraction:
           n <= 0 ? 0 : state.molesOf(AtmosphereGas.carbonDioxide) / n,
+      surfacePressurePa: state.surfacePressurePa,
     );
     for (final g in AtmosphereGas.values) {
       final k = escape.rate(

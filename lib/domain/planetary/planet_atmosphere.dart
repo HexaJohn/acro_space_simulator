@@ -337,10 +337,31 @@ class PlanetAtmosphere {
 
   /// The least surface pressure (Pa) a world that had no air publishes as a
   /// sky — about Pluto's. Below it the body stays airless for flight, the
-  /// renderer and the warp limiter: one lunar colony's industry holds ~0.1
-  /// Pa of CO2 against the leak, and that is not worth an atmosphere shell
-  /// reaching a hundred kilometres up and clamping warp for every low orbit.
+  /// renderer and the warp limiter: a heavy industrial lunar colony holds a
+  /// few tenths of a pascal of CO2 against the leak, and that is not worth
+  /// an atmosphere shell reaching a hundred kilometres up and clamping warp
+  /// for every low orbit.
+  ///
+  /// One Terraforming Tower DOES clear it on the Moon (~2 Pa held against
+  /// the leak), and that is kept on purpose (review, 2026-10-10): a 2 Pa
+  /// sky is twice Pluto's, with a ~43 km scale height, and it really drags —
+  /// at 100 km a circular lunar orbit meets ~4 Pa of dynamic pressure, about
+  /// what Earth's air gives an orbit at 110 km. So a craft there leaving
+  /// rails for drag integration is the honest consequence of the tower, and
+  /// the [vacuumPressurePa] top (~250 km) puts the edge where the orbital
+  /// dynamic pressure has fallen to Earth's at its own top. The tower stops,
+  /// the sky leaks away in months, and the rails come back.
   static const double skyThresholdPa = 1.0;
+
+  /// A built-from-scratch sky whose scale height is more than this share of
+  /// the world's radius is not bound — λ under 3 for its mean gas, the gas
+  /// streaming away rather than resting in a column — and is never
+  /// published, so a small body's transient gas can never become an
+  /// atmosphere shell larger than its orbit about its primary. The escape
+  /// model already drains such a world in minutes (AtmosphericEscape.rate);
+  /// this is the guard that keeps the published air honest whatever the
+  /// inventory holds.
+  static const double maxScaleHeightPerRadius = 1 / 3;
 
   /// The air model this inventory implies (§3.2); null for no sky.
   ///
@@ -387,6 +408,7 @@ class PlanetAtmosphere {
     if (p < skyThresholdPa || mu <= 0 || t <= 0) return null;
     final rSpecific = 8.314462618 / mu;
     final h = rSpecific * t / gravity;
+    if (h > maxScaleHeightPerRadius * bodyRadiusM) return null;
     return AtmosphereModel(
       seaLevelPressure: p,
       seaLevelDensity: p / (rSpecific * t),
@@ -468,9 +490,12 @@ class PlanetAtmosphere {
 
   /// Does the inventory make a sky [air] publishes? Always, for a world with
   /// reference air (its model only thins); for one without, from
-  /// [skyThresholdPa].
+  /// [skyThresholdPa] and only for a bound column
+  /// ([maxScaleHeightPerRadius]) — the same tests [air] makes.
   bool get _hasSky =>
-      referenceAir != null || surfacePressurePa >= skyThresholdPa;
+      referenceAir != null ||
+      (surfacePressurePa >= skyThresholdPa &&
+          _airFromScratch(surfaceTemperatureK) != null);
   final Map<AtmosphereGas, double> _publishedFractions = {};
 
   /// Has the air moved far enough from what was last published to be worth

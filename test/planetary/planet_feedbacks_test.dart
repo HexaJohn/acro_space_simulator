@@ -3,6 +3,8 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
+import 'dart:math' as math;
+
 import 'package:acro_space_simulator/domain/planetary/atmospheric_composition.dart';
 import 'package:acro_space_simulator/domain/planetary/planet_atmosphere.dart';
 import 'package:acro_space_simulator/domain/planetary/planet_atmosphere_service.dart';
@@ -298,6 +300,110 @@ void main() {
       }
     });
 
+    test('lunar industry alone holds a bounded trace, not a growing sky', () {
+      // Review 2026-10-10: the CO2 thermostat read the mole fraction of any
+      // sky, however thin, so a Moon whose only air was industry CO2 got an
+      // eightfold-cooled exobase, a CO2 leak of 4e-22/s and a pressure that
+      // climbed without limit (1.5 Pa at 50 years, 6 Pa at 200).
+      double Function(int) run(double pollution) {
+        final moon = seed('moon');
+        return (years) {
+          for (var y = 0; y < years; y++) {
+            service.advance(
+                moon, flows(pollutionRate: pollution, dt: year), dt: year);
+          }
+          return moon.surfacePressurePa;
+        };
+      }
+
+      final heavy = run(100);
+      final p200 = heavy(200);
+      final p400 = heavy(200);
+      expect(p400, lessThan(PlanetAtmosphere.skyThresholdPa));
+      expect(p400, greaterThan(0));
+      expect(p400, closeTo(p200, p200 * 1e-4),
+          reason: 'a steady state, held against the leak, not a ramp');
+
+      // Ten heavy industrial colonies (pollution ~40 each) still settle on
+      // the leaking branch — a thin published sky, not a runaway.
+      final ten = run(400);
+      final q800 = ten(800);
+      final q1600 = ten(800);
+      expect(q1600, lessThan(4.0));
+      expect(q1600, closeTo(q800, q800 * 1e-3));
+    });
+
+    test('vented lunar oxygen leaks away after the towers, industry or not',
+        () {
+      final moon = seed('moon');
+      for (var y = 0; y < 50; y++) {
+        service.advance(moon, flows(towers: 50, pollutionRate: 100, dt: year),
+            dt: year);
+      }
+      final pumped = moon.molesOf(AtmosphereGas.oxygen);
+      expect(pumped, greaterThan(1e15));
+      for (var y = 0; y < 20; y++) {
+        service.advance(moon, flows(pollutionRate: 100, dt: year), dt: year);
+      }
+      expect(moon.molesOf(AtmosphereGas.oxygen), lessThan(pumped * 1e-6),
+          reason: 'the CO2 left behind is no thermosphere to hold it');
+      expect(moon.surfacePressurePa, lessThan(PlanetAtmosphere.skyThresholdPa));
+    });
+
+    test('a small body cannot hold a sky: its gas is unbound', () {
+      // Review 2026-10-10: with the Jeans column H ≫ R, the rate went to
+      // zero as λ did, and an ordinary Phobos colony built a published sky
+      // whose top reached past Phobos's own orbit of Mars.
+      for (final id in ['phobos', 'deimos', 'eros', 'ryugu']) {
+        final a = seed(id);
+        for (var y = 0; y < 50; y++) {
+          service.advance(
+              a, flows(towers: 50, pollutionRate: 100, dt: year), dt: year);
+        }
+        expect(a.surfacePressurePa,
+            lessThan(PlanetAtmosphere.skyThresholdPa), reason: id);
+        expect(a.applyTo(body(id)).atmosphere, isNull, reason: id);
+        expect(a.needsPublish(), isFalse, reason: '$id stays airless');
+      }
+    });
+
+    test('an unbound inventory never publishes a sky, whatever it holds', () {
+      // The guard behind the escape: even gas forced onto Phobos past the
+      // sky threshold is not an atmosphere shell around Mars's moon.
+      final a = seed('phobos')..add(AtmosphereGas.nitrogen, 1e15);
+      expect(a.surfacePressurePa,
+          greaterThan(PlanetAtmosphere.skyThresholdPa));
+      expect(a.air, isNull);
+      expect(a.applyTo(body('phobos')).hasAtmosphere, isFalse);
+    });
+
+    test('one lunar tower makes a thin sky that honestly drags', () {
+      // Kept on purpose (review 2026-10-10): one tower clears the 1 Pa
+      // threshold, and a craft below the published top leaves rails. The
+      // top sits where a circular orbit's dynamic pressure has fallen to
+      // what Earth's air gives one at Earth's top, and a 100 km orbit meets
+      // real drag — Earth's at ~110 km.
+      final moon = seed('moon');
+      for (var y = 0; y < 2; y++) {
+        service.advance(moon, flows(towers: 1, dt: year), dt: year);
+      }
+      final air = moon.applyTo(body('moon')).atmosphere!;
+      final r = body('moon').radius;
+      final mu = moon.mu;
+      double q(double h) {
+        final v2 = mu / (r + h);
+        return 0.5 *
+            air.seaLevelDensity *
+            math.exp(-h / air.scaleHeight) *
+            v2;
+      }
+
+      expect(air.seaLevelPressure, inInclusiveRange(1.0, 5.0));
+      expect(q(100e3), greaterThan(1.0), reason: 'real drag at 100 km');
+      expect(q(air.atmosphereHeight), lessThan(0.5),
+          reason: 'negligible at the published top');
+    });
+
     test('suppression is the phase-3 hook: it scales every rate', () {
       final a = seed('moon');
       final full = service.escapeRates(a);
@@ -309,6 +415,24 @@ void main() {
       a.escapeSuppression = 1;
       expect(service.escapeRates(a), isEmpty);
     });
+  });
+
+  test('a cap grown past its reference never sublimates over the frost line',
+      () {
+    // Review 2026-10-10: the release taper rose past 1 above the reference
+    // holding, putting the release line over the condense line.
+    final cap = VolatileReservoir.forBody('mars')
+        .firstWhere((r) => r.name == 'polarCo2');
+    cap.moles = 2 * cap.referenceMoles;
+    for (final k in [150.0, 210.0, 260.0]) {
+      final eq = cap.equilibriumPa(
+          surfaceK: k, referenceSurfaceK: 210, referencePartialPa: 600);
+      expect(eq.release, lessThanOrEqualTo(eq.condense), reason: '$k K');
+    }
+    cap.moles = cap.referenceMoles;
+    final atRef = cap.equilibriumPa(
+        surfaceK: 210, referenceSurfaceK: 210, referencePartialPa: 600);
+    expect(atRef.release, closeTo(atRef.condense, atRef.condense * 1e-12));
   });
 
   group('the Atmospheric Harvester', () {

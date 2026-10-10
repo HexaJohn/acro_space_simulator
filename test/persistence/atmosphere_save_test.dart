@@ -9,6 +9,7 @@ import 'package:acro_space_simulator/adapters/repositories/in_memory_atmosphere_
 import 'package:acro_space_simulator/adapters/repositories/in_memory_repositories.dart';
 import 'package:acro_space_simulator/adapters/repositories/in_memory_world_repositories.dart';
 import 'package:acro_space_simulator/application/persistence/game_state_codec.dart';
+import 'package:acro_space_simulator/application/snapshot/atmosphere_snapshot.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_config.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/planetary/atmospheric_composition.dart';
@@ -184,5 +185,23 @@ void main() {
       clock: SimulationClock(),
     );
     expect(json.containsKey('atmospheres'), isFalse);
+  });
+
+  test('the fingerprint tells apart two skies that differ only in suppression',
+      () {
+    // Review 2026-10-10: suppression scales every escape rate, so two runs
+    // apart only in it agree on every mole until the leak has diverged them.
+    String fp(PlanetAtmosphere a) {
+      final buf = StringBuffer();
+      AtmosphereSnapshot.of(a).writeFingerprint(buf);
+      return buf.toString();
+    }
+
+    final moon = RealSolarSystem.build().require(const BodyId('moon'));
+    final open = PlanetAtmosphere.seed(moon)!;
+    final held = PlanetAtmosphere.seed(moon)!..escapeSuppression = 0.9;
+    expect(fp(open), isNot(fp(held)));
+    expect(fp(open), fp(PlanetAtmosphere.seed(moon)!),
+        reason: 'no suppression, no key: old fingerprints unchanged');
   });
 }

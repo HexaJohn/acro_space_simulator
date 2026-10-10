@@ -719,14 +719,19 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
     final r = <String, double>{};
     for (final e in sim.activeSpecs) {
       final t = throttled ? sim.throttleFor(e.value) : 1.0;
-      e.value.outputs.forEach((k, v) => r[k] = (r[k] ?? 0) + v * t);
+      // A harvester under a sky with no oxygen to take makes nothing.
+      final yields = e.value.type != 'o2harvester' || sim.o2Harvestable;
+      if (yields) {
+        e.value.outputs.forEach((k, v) => r[k] = (r[k] ?? 0) + v * t);
+      }
       e.value.inputs.forEach((k, v) => r[k] = (r[k] ?? 0) - v * t);
     }
     r[Commodity.food] = (r[Commodity.food] ?? 0) - sim.population * CitySim.foodPerPersonPerSec;
     r[Commodity.water] = (r[Commodity.water] ?? 0) - sim.population * CitySim.waterPerPersonPerSec;
-    if (!sim.breathable) {
-      r[Commodity.oxygen] =
-          (r[Commodity.oxygen] ?? 0) - sim.population * CitySim.waterPerPersonPerSec;
+    // What life support really draws: the share of the need the sky leaves
+    // unmet, and only where oxygen is managed at all.
+    if (sim.o2NeedPerSec > 0) {
+      r[Commodity.oxygen] = (r[Commodity.oxygen] ?? 0) - sim.o2NeedPerSec;
     }
     // Population GENERATES waste (positive net = it's piling up).
     r[Commodity.garbage] =
@@ -746,7 +751,10 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
     final cons = <String, ({double rate, int count})>{};
     for (final e in sim.activeSpecs) {
       final s = e.value;
-      final out = (s.outputs[c] ?? 0) * sim.biomeMult(c) * sim.throttleFor(s);
+      final yields = s.type != 'o2harvester' || sim.o2Harvestable;
+      final out = yields
+          ? (s.outputs[c] ?? 0) * sim.biomeMult(c) * sim.throttleFor(s)
+          : 0.0;
       final inp = (s.inputs[c] ?? 0) * sim.throttleFor(s);
       if (out > 0) {
         final cur = prod[s.label];
@@ -762,9 +770,7 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
     var life = 0.0;
     if (c == Commodity.food) life = sim.population * CitySim.foodPerPersonPerSec;
     if (c == Commodity.water) life = sim.population * CitySim.waterPerPersonPerSec;
-    if (c == Commodity.oxygen && !sim.breathable) {
-      life = sim.population * CitySim.waterPerPersonPerSec;
-    }
+    if (c == Commodity.oxygen) life = sim.o2NeedPerSec;
     List<({String label, double rate, int count})> rows(
             Map<String, ({double rate, int count})> m) =>
         [for (final e in m.entries) (label: e.key, rate: e.value.rate, count: e.value.count)]

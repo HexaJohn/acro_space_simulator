@@ -685,6 +685,16 @@ class CitySim {
     return s.breathable ? 1.0 : s.oxygenCover;
   }
 
+  /// Oxygen per second life support draws from the colony's own store: the
+  /// share of each colonist's need the sky leaves unmet ([airO2]), and none
+  /// where oxygen is not managed (free air, or COMPLEXITY under 0.3). The
+  /// tick charges exactly this and the resource panels show it, so the HUD
+  /// cannot again show a half-oxygenated Mars a deficit its colony does not
+  /// have.
+  double get o2NeedPerSec => systemOn(0.3) && !breathable
+      ? population * waterPerPersonPerSec * (1 - airO2)
+      : 0.0;
+
   /// Can an atmospheric harvester pull O2 here? (Some breathable-enough O2 in a
   /// real atmosphere, but not free-breathable.) Read off the derived air, so
   /// a sky the harvesters have thinned below 2% oxygen stops yielding.
@@ -697,6 +707,13 @@ class CitySim {
   /// units per second. The planetary-atmosphere phase takes it OUT of the
   /// body's inventory, so harvesting thins the sky everyone on the world
   /// breathes (docs/plans/terraforming.md, phase 2).
+  ///
+  /// Only the share the colony KEPT: a harvester whose tank is full, or on
+  /// a world whose oxygen is not managed (free air, or a gentle COMPLEXITY),
+  /// draws nothing — counted off what it made, one full tank kept thinning
+  /// the sky for every colony on the world at four towers' worth, for
+  /// oxygen that then existed nowhere. And at the bare throttle (2 per
+  /// harvester at full run), before bounty and events, as a tower vents.
   double o2HarvestRate = 0;
 
   /// Per-biome economic buffs/debuffs. Multipliers on food/water/ore/solar
@@ -1443,9 +1460,14 @@ class CitySim {
     var pollutionRate = 0.0;
     var towerRun = 0.0;
     // Atmospheric Harvesters only yield from a sky with oxygen in it, and
-    // what they make they take out of it.
+    // what the colony KEEPS of what they make they take out of it (settled
+    // at the storage cap, step 6). [harvestedRaw] is their bare throttle
+    // output, before bounty and events: the sky pays for that, the way a
+    // tower vents on its bare throttle — the multipliers are how well the
+    // colony uses a harvest, not how much air the intakes swallow.
     final skyO2 = o2Harvestable;
     var harvested = 0.0;
+    var harvestedRaw = 0.0;
     final emissionCut = has(Law.emissionsCap) ? 0.5 : 1.0;
     // What the buildings make, net of what they use, of each life-support
     // commodity, per second: the supply side of [supportablePop].
@@ -1480,7 +1502,10 @@ class CitySim {
         final made = v * run * biomeMult(k) * bountyMult * eventProductionMult;
         stock[k] = stockOf(k) + made * dt;
         flow(k, made, isLifeSupport(s));
-        if (s.type == 'o2harvester' && k == Commodity.oxygen) harvested += made;
+        if (s.type == 'o2harvester' && k == Commodity.oxygen) {
+          harvested += made;
+          harvestedRaw += v * run;
+        }
       });
       pollutionRate += s.pollution * (s.powerOutput > 0 ? 1 : run) * emissionCut;
     }
@@ -1506,14 +1531,16 @@ class CitySim {
         final made = v * run * biomeMult(k) * bountyMult * eventProductionMult;
         stock[k] = stockOf(k) + made * dt;
         flow(k, made, isLifeSupport(s));
-        if (s.type == 'o2harvester' && k == Commodity.oxygen) harvested += made;
+        if (s.type == 'o2harvester' && k == Commodity.oxygen) {
+          harvested += made;
+          harvestedRaw += v * run;
+        }
       });
       pollutionRate += s.pollution * (s.powerOutput > 0 ? 1 : run) * emissionCut;
     }
 
     emissionRate = pollutionRate;
     oxygenatorRun = towerRun;
-    o2HarvestRate = harvested;
 
     // 1.4 Pollution accumulates (industry/power emit, parks + low activity decay).
     var parks = 0.0;
@@ -1583,9 +1610,11 @@ class CitySim {
     // What a colonist needs that the sky does not give (§3.4): a thin,
     // oxygen-rich sky is drawn through compressors and counts for its share.
     final o2PerPerson = waterPerPersonPerSec * (1 - airO2);
-    final o2PerSec = o2Managed ? population * o2PerPerson : 0.0;
+    final o2PerSec = o2NeedPerSec;
     if (!o2Managed) {
       stock[Commodity.oxygen] = stockCap; // free / not tracked
+      // ... and so a harvester's yield is thrown away: the sky keeps it.
+      harvested = 0;
     } else {
       stock[Commodity.oxygen] =
           (stockOf(Commodity.oxygen) - o2PerSec * dt).clamp(0, 1e12);
@@ -1968,6 +1997,13 @@ class CitySim {
 
     // 6. Storage cap.
     final sc = stockCap;
+    // The harvesters are the oxygen the cap clips first: a full tank's
+    // intakes idle rather than pull air out of the sky only to vent it, so
+    // the planet loses only the share of their yield the store kept.
+    final o2Spilled = math.max(0.0, stockOf(Commodity.oxygen) - sc);
+    final o2Kept = math.max(0.0, harvested * dt - o2Spilled);
+    o2HarvestRate =
+        harvested > 0 && dt > 0 ? harvestedRaw * (o2Kept / (harvested * dt)) : 0;
     for (final t in stock.keys.toList()) {
       if (stockOf(t) > sc) stock[t] = sc;
     }

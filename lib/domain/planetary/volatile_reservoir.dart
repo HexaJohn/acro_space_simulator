@@ -115,11 +115,16 @@ class VolatileReservoir {
   /// reference holding, falling smoothly to 0 at empty. Without it a
   /// nearly-empty cap would sublimate at full vapour pressure until the last
   /// mole and then stop dead — a step under warp.
+  ///
+  /// Never above 1: a cap grown past its reference (industry CO2 frozen
+  /// out) would otherwise lift the release line above the frost line, and
+  /// in the band between them the cap would sublimate into a sky already
+  /// past saturation, holding it up to 1% over the frost point.
   double get _taper {
     const eps = 0.01;
     final ref = math.max(referenceMoles, 1.0);
     final m = math.max(0.0, moles);
-    return m / (m + eps * ref) * (1 + eps);
+    return math.min(1.0, m / (m + eps * ref) * (1 + eps));
   }
 
   /// Vapour pressure on the absolute curve (for [ReservoirKind.ice] with no

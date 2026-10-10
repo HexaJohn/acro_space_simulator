@@ -215,6 +215,50 @@ void main() {
       city.advance(0.5);
       expect(city.o2HarvestRate, 0);
     });
+
+    test('a full tank draws only what the colony breathed back out of it',
+        () {
+      // Review 2026-10-10: counted off its output, a harvester whose tank
+      // was full kept pulling 4 stock/s out of the sky while the store sat
+      // at the cap — oxygen that then existed nowhere.
+      final sky = marsWith(pO2Atm: 0.08);
+      final empty = withHarvester(sky)..advance(0.5);
+      final full = withHarvester(sky);
+      full.stock[Commodity.oxygen] = full.stockCap;
+      full.advance(0.5);
+      expect(full.stockOf(Commodity.oxygen), full.stockCap);
+      // The tank keeps only what forty people breathed of the half the sky
+      // does not cover. The empty colony kept everything, so its stock says
+      // what a harvester makes and its rate what that costs the sky.
+      final breathed = 40 * CitySim.waterPerPersonPerSec * (1 - full.airO2);
+      final made = empty.stockOf(Commodity.oxygen) / 0.5 + breathed;
+      expect(full.o2HarvestRate,
+          closeTo(empty.o2HarvestRate * breathed / made, 1e-9));
+      expect(full.o2HarvestRate, lessThan(empty.o2HarvestRate * 0.5));
+    });
+
+    test('on a world whose oxygen is free, it draws nothing', () {
+      final earth = fixtureBodies.firstWhere((b) => b.id.value == 'earth');
+      final city = withHarvester(earth);
+      expect(city.breathable, isTrue);
+      expect(city.o2Harvestable, isTrue);
+      city.advance(0.5);
+      expect(city.o2HarvestRate, 0,
+          reason: 'the store is pinned full; nothing is kept, nothing taken');
+    });
+
+    test('the sky pays the bare throttle, not the bounty', () {
+      // Two stock per second at full run, as the tower's vent is its bare
+      // throttle — so one harvester undoes four towers at any bounty.
+      final sky = marsWith(pO2Atm: 0.08);
+      final rich = withHarvester(sky)..bounty = 1.0;
+      final poor = withHarvester(sky)..bounty = 0.0;
+      rich.advance(0.5);
+      poor.advance(0.5);
+      expect(rich.o2HarvestRate, greaterThan(0));
+      expect(rich.o2HarvestRate, closeTo(poor.o2HarvestRate, 1e-12));
+      expect(rich.o2HarvestRate, lessThanOrEqualTo(2.0));
+    });
   });
 
   test('loyalty measures read the same airO2 the life support does', () {
