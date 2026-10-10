@@ -113,21 +113,18 @@ disaster day should not cancel it.
 - **The Moon / Mars** need hydroponics or lab-grown food, water from ice, sewage recycling or aquifers, and
   oxygen from electrolysis or a harvester, each at the population's scale. Until then they are dependent.
 - **Oxygen always counts** (user, 2026-10-10), whatever the complexity setting and whatever world the colony is
-  on, because the **air itself** is a local source. A breathable atmosphere covers oxygen in full. A world
-  being terraformed covers the share its air has reached:
+  on, because the **air itself** is a local source:
   ```
-  airO2 = breathable ? 1 : terraformBreathability     // 0..1, the terraformed share of a breathable sky
   local_oxygen = O2 buildings' net output + airO2 × need_oxygen
   ```
-  So Earth is covered by its sky, a raw Mars colony needs electrolysis or a harvester for every person, and a
-  half-terraformed Mars needs plants for half of them. Terraforming is literally a road to independence.
-  - **Gap this exposes:** `breathable` (`city_sim.dart:618`) reads only the body's own composition. `terraform`
-    (0..1) shifts the biome, but never makes the air breathable, so life support (`o2Managed`) charges a fully
-    terraformed world's people for oxygen forever. Phase 1 adds `terraformBreathability`, and makes life
-    support (§19673a2's `supported()`) use the same `airO2` share: the people the sky covers breathe for
-    free. Also, today oxygen is only managed at complexity ≥ 0.3. Below that, the sim ignores oxygen for
-    survival but it still counts for independence. The HUD's independence readout must then show it, because
-    the player never sees oxygen elsewhere at that setting.
+  `airO2` is defined in `docs/plans/terraforming.md` §3.4. It is the share of a person's oxygen the sky's real
+  partial pressure supplies, from the body's **actual, mutable** atmosphere, which towers change gas by gas.
+  - Earth's sky covers it.
+  - A raw Mars colony needs electrolysis or a harvester for every person.
+  - As towers thicken Mars's air and raise its O2, the sky covers more.
+
+  Terraforming is a road to independence. Below complexity 0.3 the sim does not manage oxygen for survival,
+  but it still counts here, so the HUD's independence readout must show it.
 - Power and compute are local by construction and do not enter the measure. Fuel and other industrial
   goods do not either: a colony that can breathe, eat and drink can survive alone, even if it cannot grow
   without trade.
@@ -302,6 +299,6 @@ Each phase is one commit or a few, shipped behind nothing, since the first phase
   through the existing `rebellionSensitivity`? Proposed: only through sensitivity, plus Autocracy keeps its
   garrison-style suppression in phase 4.
 - **Q6 Standoff: ANSWERED 2026-10-10:** strike, emigration and withering, plus rebels seize the spaceport (§4.1).
-- **Q7 The bar: ANSWERED 2026-10-10:** 90%, falling toward 0% with desperation (§3.4). Oxygen **always** counts; breathable or terraformed air is a local source (§3.4).
+- **Q7 The bar: ANSWERED 2026-10-10:** 90%, falling toward 0% with desperation (§3.4). Oxygen **always** counts; the real (terraformable) sky is a local source via `airO2` (§3.4, `terraforming.md` §3.4).
 - **Q5 The flat sandbox** `CityBuilderScreen` (`NewCityScreen._found`, never in a world). Does loyalty apply
   there? Proposed: yes, but with no reputation route, since it is the only colony.
