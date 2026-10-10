@@ -654,6 +654,13 @@ class CitySim {
   /// [breathable]; docs/plans/terraforming.md §3.4 replaces it with the
   /// share the body's real, mutable O2 partial pressure supplies, so a
   /// thickening Mars sky counts for more as its towers work.
+  ///
+  /// It stays all-or-nothing until life support itself charges
+  /// `population × (1 − airO2)`: oxygen use below is still full whenever
+  /// O2 is managed, so a partial share here would let a half-terraformed
+  /// colony count sky it cannot breathe — measure itself self-sufficient,
+  /// keep a standoff population its plants cannot feed, and suffocate.
+  /// Switch both together (terraforming phase 2).
   double get airO2 => breathable ? 1.0 : 0.0;
 
   /// Can an atmospheric harvester pull O2 here? (Some breathable-enough O2 in a
