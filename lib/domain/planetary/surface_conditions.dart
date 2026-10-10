@@ -90,15 +90,14 @@ class SurfaceConditions {
   /// (~0..200), [nuclearWinter] 0..1 and [radiationLevel] 0..1 push it toward
   /// hostile.
   ///
-  /// [terraform] is accepted and IGNORED since terraforming phase 2: it used
-  /// to blend pressure, temperature, humidity, oxygen and toxicity toward
-  /// Earth's, which let a colony breathe a sky its own planet did not have.
-  /// The slider itself (and its biome flip) goes in phase 3.
+  /// There is no terraform blend: a colony's old slider used to pull the
+  /// pressure, temperature, humidity, oxygen and toxicity toward Earth's,
+  /// which let it breathe a sky its own planet did not have. Towers change
+  /// the planet's real air now, and the body carries it.
   factory SurfaceConditions.of(
     CelestialBody body, {
     Biome biome = Biome.barren,
     double waterTable = 1.0, // colony aquifer level 0..1 (drains the ground dry)
-    double terraform = 0,
     double pollution = 0,
     double nuclearWinter = 0,
     double radiationLevel = 0,
@@ -181,6 +180,28 @@ class SurfaceConditions {
 
   /// Oxygen partial pressure at the surface, atm.
   double get o2PressureAtm => o2Fraction * pressureAtm;
+
+  /// How far this air has come toward [breathable], 0..1: 1 only when it
+  /// is, and otherwise the geometric mean of its three tests' progress —
+  /// oxygen toward 15%, pressure toward half an atmosphere, toxicity under
+  /// 0.2 (scaled down from 1 as it rises past it).
+  ///
+  /// The colony's terraforming readout since phase 3 (`CitySim.terraform`),
+  /// the honest successor of the slider: it moves only as the planet's air
+  /// does. Geometric, so a sky that passes two tests and fails the third —
+  /// a Mars of thin, pure oxygen — reads well short of done rather than two
+  /// thirds of the way; capped under 1 until the air really is breathable,
+  /// so the meter never claims a full bar the colonists cannot breathe.
+  double get breathableProgress {
+    if (breathable) return 1;
+    final o2 = (o2Fraction / 0.15).clamp(0.0, 1.0);
+    final p = (pressureAtm / 0.5).clamp(0.0, 1.0);
+    final tox = toxicFraction < 0.2
+        ? 1.0
+        : ((1 - toxicFraction) / 0.8).clamp(0.0, 1.0);
+    final g = math.pow(o2 * p * tox, 1 / 3).toDouble();
+    return math.min(g, 0.99);
+  }
 
   /// The oxygen partial pressure (atm) at which the sky supplies ALL of a
   /// person's oxygen (§3.4): about sea-level-equivalent for a lung.

@@ -32,6 +32,7 @@ import 'dart:math' as math;
 import '../universe/atmosphere_model.dart';
 import '../universe/celestial_body.dart';
 import 'atmosphere_flows.dart';
+import 'atmosphere_ledger.dart';
 import 'atmospheric_composition.dart';
 import 'planet_climate.dart';
 import 'volatile_reservoir.dart';
@@ -166,17 +167,26 @@ class PlanetAtmosphere {
 
   /// Super-greenhouse agent (a PFC mix) in the air, mol. A trace gas kept
   /// apart from the eight-gas enum (§3.1): it is forcing, not air — it adds
-  /// nothing to the pressure or the mix a craft or a lung sees. Phase 3's
-  /// Greenhouse Factory fills it.
+  /// nothing to the pressure or the mix a craft or a lung sees. The
+  /// Greenhouse Factory fills it; it breaks down over centuries
+  /// (`TerraformTuning.agentLifetimeSeconds`).
   double greenhouseAgentMoles = 0;
 
   /// Molar mass of the agent: octafluoropropane (C3F8), the best single gas
   /// of Gerstell et al. 2001.
   static const double agentMolarMass = 0.188;
 
-  /// Share of escape suppressed, 0..1. The hook the phase-3 Atmospheric
-  /// Retention Array drives (§7 Q2); 0 = the world leaks at its Jeans rate.
+  /// Share of escape suppressed, 0..1, driven by the Atmospheric Retention
+  /// Arrays running on the world (§7 Q2; `TerraformTuning.retentionPerArray`);
+  /// 0 = the world leaks at its Jeans rate. State, saved: it holds while no
+  /// colony reports (between a frame's replays), and follows the arrays the
+  /// moment one does.
   double escapeSuppression = 0;
+
+  /// Where the gas went over the last integration — a readout for the
+  /// atmosphere panel, rebuilt every step, never saved (see
+  /// [AtmosphereLedger]). Null until the world has been integrated.
+  AtmosphereLedger? ledger;
 
   /// What the colonies on this body have produced since its air was last
   /// integrated — usually nothing between ticks, but a frame-budgeted
@@ -314,6 +324,32 @@ class PlanetAtmosphere {
   /// weight, so it reads the same on a thick sky or an empty one.
   double get agentPartialPressurePa =>
       math.max(0.0, greenhouseAgentMoles) * agentMolarMass * pascalsPerKg;
+
+  /// Moles of agent the sky would need for its surface temperature to be
+  /// [targetK], every gas and the haze held — 0 if it is already at least
+  /// that warm. Closed form: the agent's depth is additive and not
+  /// pressure-broadened (`GreenhouseTuning.agentDepthPerRootPascal`), so the
+  /// grey-atmosphere temperature inverts exactly for it, and what a
+  /// Greenhouse Factory's controller stops at does not depend on how time
+  /// was chopped.
+  double agentMolesForTemperature(double targetK) {
+    final teq = PlanetClimate.equilibriumTemperature(
+        solarFlux, climate.effectiveAlbedo(albedo, aerosolBurden));
+    final t = targetK - _calibrationK;
+    if (teq <= 0 || t <= teq) return 0;
+    final tauTarget = (math.pow(t / teq, 4).toDouble() - 1) / 0.75;
+    final p = pressureFor(_moles);
+    final n = _sum(_moles);
+    final tauGas = climate.opticalDepth(
+      pressurePa: p,
+      partialPressurePa: (g) => n <= 0 ? 0 : p * (_moles[g] ?? 0) / n,
+    );
+    final a = climate.tuning.agentDepthPerRootPascal;
+    if (tauTarget <= tauGas || a <= 0) return 0;
+    final rootPa = (tauTarget - tauGas) / a;
+    final perMole = agentMolarMass * pascalsPerKg;
+    return perMole <= 0 ? 0 : rootPa * rootPa / perMole;
+  }
 
   double _modelTemperature(
       Map<AtmosphereGas, double> m, double agentMoles, double aerosol) {
@@ -561,6 +597,7 @@ class PlanetAtmosphere {
       r.resetToReference();
     }
     _pending = null;
+    ledger = null;
   }
 
   /// The inventory as saved. Gases by enum NAME, so reordering or extending
@@ -605,6 +642,7 @@ class PlanetAtmosphere {
     _pending = pending is Map
         ? AtmosphereFlows.fromJson(pending.cast<String, dynamic>())
         : null;
+    ledger = null;
   }
 
   // ---- maths ---------------------------------------------------------------

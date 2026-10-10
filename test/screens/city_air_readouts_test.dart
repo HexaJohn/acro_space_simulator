@@ -107,12 +107,15 @@ void main() {
           reason: 'no harvester offered where it would sit idle');
     });
 
-    testWidgets('the meter that only flips the biome is not "Terraforming"',
+    testWidgets('the slider meter is gone: the drawer reads the real sky',
         (t) async {
-      final city = marsKit()..terraform = 0.4;
+      // Phase 3 retired the "Biome reclamation" slider; its place is the
+      // atmosphere panel, whose progress readout is the derived sky's.
+      final city = marsKit(marsWith(0.08));
       await pumpWorld(t, city);
-      expect(find.text('Biome reclamation'), findsOneWidget);
-      expect(find.text('Terraforming'), findsNothing);
+      expect(find.text('Biome reclamation'), findsNothing);
+      expect(find.text('ATMOSPHERE'), findsOneWidget);
+      expect(find.text('Progress to breathable'), findsOneWidget);
     });
   });
 

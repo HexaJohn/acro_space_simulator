@@ -1,6 +1,6 @@
 # Terraforming: a planet's real atmosphere
 
-Status: approved for phase 1, 2026-10-10 (decisions in §7); phase 1 built (§8), phase 2 built (§9). Baseline `dev` at `1246d8f`. Paths are relative to the repo root.
+Status: approved for phase 1, 2026-10-10 (decisions in §7); phase 1 built (§8), phase 2 built (§9), phase 3 built (§10). Baseline `dev` at `1246d8f`. Paths are relative to the repo root.
 
 ## 1. Intent
 
@@ -373,3 +373,118 @@ vent cap is kept as it was.
   ~110 km), and the top sits where it has fallen to Earth's at its own top. Pinned by a test. Not playtested.
 - **Phase 3:** methane decay (§6); Retention Array → `escapeSuppression`; Greenhouse Factory → `greenhouseAgentMoles`; retire the slider;
   climate-driven biome; atmosphere panel.
+
+## 10. Phase 3 as built (2026-10-10)
+
+The tower family, the slider's retirement, the climate-driven biome and the atmosphere panel, on branch
+`feat/terraforming-p3` from `34979ea`. Every tower's flow is `physical rate × throttle × terraformRateScale (2.2e5)`,
+recorded per colony and integrated in the planetary phase like the oxygenator's.
+
+| Tower (spec id) | Does | Physical rate at full throttle | Stops at (the Earth limit) |
+|---|---|---|---|
+| Terraforming Tower (`terraformer`, the Oxygenator) | splits the sky's CO2 into O2, a mole for a mole; past the sky's CO2, splits the crust | 1000 mol/s O2 (unchanged) | `oxygenTargetPa` 0.16 atm (unchanged) |
+| Greenhouse Factory (`greenhousefactory`) | emits C3F8 agent into `greenhouseAgentMoles` | 0.5 mol/s (~3,000 t/yr) | `warmingTargetK` 288 K, in closed form |
+| Regolith Baker (`regolithbaker`) | bakes CO2 and N2 out of the soil's carbonates and nitrates | turnover 1e-16 of each store per second | `warmingTargetK`, and the stores themselves |
+| Carbon Sequestrator (`sequestrator`) | takes CO2 into rock | 1000 mol/s | `co2FloorPa`: 42 Pa of CO2 column (Earth's 280 ppm) |
+| Atmospheric Retention Array (`retentionarray`) | suppresses escape on its world: `1 − 0.5^arrays` | — | — (600 power, 20 compute, unlockPop 1000, the top tier) |
+
+- **Oxygenator mass balance.** Phase 1 vented oxygen from nothing. It now takes a mole of the sky's CO2 for each mole of O2 it
+  vents, while there is CO2 above the floor, with the carbon going into the ground. Past the floor it splits the crust: lunar
+  regolith is ~45% oxygen by mass, and molten-regolith electrolysis is the real route. So the Moon still gets its oxygen and
+  the "~30 Mars years" calibration holds (pinned, 28-32). The O2 cap is solved jointly with the split
+  (`PlanetAtmosphereService.oxygenCapMoles`). Splitting keeps the mole count and lightens the column, so solving against the
+  plain mix let the CO2 the vent then took pull the sky back under the target. On Mars the split lightens the column: a
+  year of 50 towers turns the mix over (O2 > 50%) while the pressure barely moves, and the cap frees CO2 as the sky's falls
+  under its frost point.
+- **Greenhouse Factory.** The agent rises toward 288 K. The target is closed form, because the agent's depth is additive and
+  not pressure-broadened (`PlanetAtmosphere.agentMolesForTemperature`). It breaks down over 2,600 years, C3F8's real lifetime,
+  not compressed. Ten factories put the ~1 Pa that warms Mars ~25 K into its sky in about three Mars years. Earth already
+  stands at 288.15 K, so factories never run there. Placement is refused under no sky.
+- **Regolith Baker** (`ReservoirKind.bound`, `volatile_reservoir.dart`). Mars gains two stores that no climate reaches:
+  - carbonates, 1.0e18 mol CO2 (~11 mbar, the order Jakosky & Edwards 2018 allow);
+  - nitrates, 8.7e15 mol N2 (Stern et al. 2015's Gale Crater nitrate at ~500 ppm through the top 10 m).
+
+  A bake is a turnover: every store gives up `1 − e^(−k·run·t)` of what it holds, exact over any step and bounded by the
+  store. Fifty bakers work through an e-fold in ~15 Mars years. The baker stops at the first sub-step that finds the world at
+  288 K. Placement is refused off the ground and where `VolatileReservoir.hasBakeableStore` is false, which today is
+  everywhere but Mars.
+- **Carbon Sequestrator.** It takes CO2 down to the floor and no further. On Earth that takes industrial CO2 back to ~280 ppm
+  and costs about a kelvin. Placement is refused where the CO2 column is at the floor.
+- **Retention Array.** `escapeSuppression` is set from the arrays whenever a colony on the world reports
+  (`AtmosphereFlows.retentionArrays`, throttle-weighted). It holds through a step no colony reported on, such as the ticks
+  between a frame's replays. Six arrays cut the lunar leak to 1/64 exactly, and 50 towers then hold several times the sky.
+- **Methane decay** (moved from phase 2). Methane beyond the reference oxidises over 12 years (Earth's perturbation
+  lifetime): `CH4 + 2 O2 → CO2 + 2 H2O`, exact per sub-step, charging the sky only the O2 it has. A reference Titan has no
+  excess, so it rests.
+- **Planetary ledger** (`atmosphere_ledger.dart`, `PlanetAtmosphere.ledger`). Each integration leaves mol/s per gas, per
+  process (industry, towers, harvesters, escape, caps and soil, chemistry) and per colony. A colony's share of a tower process
+  is its share of the run, applied to what the planet ACTUALLY took after caps, floors and empty stores. Industry is credited
+  at each colony's nominal CO2. It is a readout: not saved, and not fingerprinted. `AtmosphereFlows` now keeps a per-colony
+  breakdown, with names, which is saved additively (`colonies`, plus the new tower keys). A pre-phase-3 save's pending flows
+  integrate unattributed.
+- **Slider retired** (§5.5).
+  - `CitySim.terraform` is a getter: `sky.breathableProgress`, which is 1 only when breathable. Otherwise it is the geometric
+    mean of the oxygen (toward 15%), pressure (toward 0.5 atm) and toxicity tests, capped at 0.99.
+  - `SurfaceConditions.of` lost its `terraform` parameter.
+  - The save no longer writes `terraform`. An old save's value is read past.
+  - The nuclear-winter clearing by towers is kept.
+- **Climate-driven biome** (`climate_biome.dart`, `CitySim.climate`, saved as `climate`).
+  - **Bands.** Five bands from the derived sky: airless (< Armstrong), frozen (< 268 K, the liquid band), temperate
+    dry/wet (humidity 0.05), and scorching (> 330 K).
+  - **Hysteresis.** The margins are ±5 K, ×(1 ± 0.25) on the pressure line and ±0.01 humidity. Inside the frost margin a
+    temperate world keeps its wetness, because humidity reads 0 below the liquid line. Without that, a cooling grassland baked
+    to desert on its way to freezing.
+  - **When it moves.** Only a CHANGE of band moves the biome. The first judgement on a world records it and never judges it,
+    and that includes a re-site, which resets the band. An untouched world never changes band (pinned for every biome on
+    Earth).
+  - **Transitions.** The old slider's barren/desert/volcanic → grassland now needs warm, wet air. Mountains and lava lakes
+    never change.
+- **Atmosphere panel** (`city_atmosphere_panel.dart`). It is the World drawer's ATMOSPHERE section and replaces the "Biome
+  reclamation" meter. It shows:
+  - pressure, temperature and its trend in K/yr, and the progress meter with the tests still failed;
+  - the gas mix with partial pressures, the agent, the loss to space and the share the arrays hold, and the stores;
+  - every process and every colony's flows, in Pa of column per year.
+
+  It reads `CitySim.planetAir`, a transient handle the tick or the sandbox sets. Without one it says nothing integrates the
+  air.
+- **Sandbox air** (`application/usecases/local_colony_atmosphere.dart`). The flat builder with `driveLocally` now runs the same
+  service on one inventory after every advance, records against the step's dt as the tick does, and republishes the body to
+  the colony. Re-siting seeds the new world. Picking the same world again keeps its air.
+- **Shared hot files, kept small:**
+  - `city_sim.dart`: fields, two production lines, the env-tick block and two save keys;
+  - `city_building_spec.dart`: four specs;
+  - `advance_simulation_tick.dart`: three lines;
+  - `city_panels.dart`: the meter swapped for the panel.
+
+  Not touched: `city_loyalty.dart`, `city_control.dart`, `game_state_codec.dart`, `simulation_view.dart`, the HUD.
+
+**Deviations, and why:**
+- **The Oxygenator keeps its label** "Terraforming Tower". A placed building is saved by label (`_specByLabel`), and §4's
+  rename would have dropped every one built. The panel names it as the CO2 → O2 process.
+- **Crust oxygen past the sky's CO2.** "Consume CO2, never create O2" would strip Mars's whole CO2 system (~4.6e18 mol) and
+  stop short of the 1.94e19 mol the 30-year calibration needs, and would leave a lunar tower doing nothing. Splitting the
+  crust is the honest second feedstock.
+- **The CO2 floor is a column weight, not a partial pressure.** A partial pressure's moles move with the rest of the sky: the
+  same 28 Pa is fifteen times the CO2 on an oxygenated Mars. A floor judged once in a long warp step and step by step then left
+  skies 1e-4 apart. A column is a fixed mole count per world.
+- **The bake draws on new bound stores, not the climate's soil.** The regolith-adsorbed CO2 re-adsorbs toward its isotherm, so
+  baking it would be undone over the 20-year soil lag on any cold Mars.
+- **The new towers sit on the cell grid** (2×2, the array 3×3) rather than claiming their own plots. The generator stakes one of
+  every own-site installation at a colony's edge, so a site of their own would have changed every generated colony.
+- **No building emits methane yet.** The decay exists for any excess (a cheat, a later importer) and is pinned. Nothing in the
+  family vents CH4, so in normal play it does not run.
+- **The baker's warming stop is per sub-step,** not closed form. Its stores exist only on Mars, which is always sub-stepped
+  (lag/64), so an overshoot is bounded by about ten days of baking.
+
+**Open items:**
+- **Mars cannot become breathable** under these magnitudes. It needs 0.5 atm with under 20% CO2, and its whole nitrogen
+  supply (sky plus nitrates) is ~2.4e16 mol. At the O2 cap it is a mask world (full `airO2`, about 0.7 progress). A buffer
+  gas has to come from space (phase 4, comet or ammonia imports).
+- **The Oxygenator eats the CO2 the warming towers free.** That is the trade-off the family is built around. It is
+  unplaytested.
+- **A deleted colony's arrays** leave their suppression on the world until another colony there reports.
+- **The ledger is not saved,** so after a load the panel's flow lines are empty until the first integration.
+- **The independent governor builds no towers.** Its options filter on life-support outputs.
+- **The new towers use the generic massing,** not bespoke ones like the Oxygenator's stack and tank.
+- **Unchanged from phase 2:** Rayleigh brightening, thermal inertia, other bodies' reservoirs, and the two breathability
+  readings.

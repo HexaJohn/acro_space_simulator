@@ -217,11 +217,15 @@ void main() {
       ledger.advance(a, flows(towers: 3, pollutionRate: 40, dt: dt), dt: dt);
       final co2In = 40 * dt * service.molesPerPollutionSecond;
       final o2In = 3 * dt * service.tuning.oxygenatorRate;
+      // The towers SPLIT the sky's CO2 into the oxygen they vent (phase 3):
+      // a mole of CO2 out for each mole of O2 in, the carbon into the
+      // ground, so the oxygen is not made from nothing.
       expect(a.molesOf(AtmosphereGas.carbonDioxide) - co2Before,
-          closeTo(co2In, co2In * 1e-9));
+          closeTo(co2In - o2In, o2In * 1e-9));
       expect(a.molesOf(AtmosphereGas.oxygen) - o2Before,
           closeTo(o2In, o2In * 1e-9));
-      expect(a.totalMoles - before, closeTo(co2In + o2In, (co2In + o2In) * 1e-9));
+      expect(a.totalMoles - before, closeTo(co2In, o2In * 1e-9),
+          reason: 'one molecule for one: the count moves by industry alone');
       // No other gas moved.
       for (final g in [AtmosphereGas.nitrogen, AtmosphereGas.argon]) {
         expect(a.molesOf(g), a.referenceMolesOf(g));
@@ -280,9 +284,16 @@ void main() {
       // heavier than the mean and so RAISES the O2 partial pressure, and short
       // steps judge the cap before each step's CO2 lands while one long step
       // judges it after all of it. Every flow on its own is exact.
+      //
+      // CO2 to a few parts per thousand: since phase 3 the towers split the
+      // sky's CO2 down to its floor, so what is left is a trace (the floor
+      // plus the industry CO2 that lands once the towers hold at the cap),
+      // and how much of the step's industry lands before or after the towers
+      // stop is exactly what one long step cannot see.
       for (final g in AtmosphereGas.values) {
         final x = big.molesOf(g);
-        expect(small.molesOf(g), closeTo(x, x.abs() * 1e-5 + 1),
+        final tol = g == AtmosphereGas.carbonDioxide ? 5e-3 : 1e-5;
+        expect(small.molesOf(g), closeTo(x, x.abs() * tol + 1),
             reason: g.name);
       }
       expect(small.aerosolBurden,
@@ -359,8 +370,14 @@ void main() {
     test('Mars measurably moves within a single year', () {
       final a = seed('mars');
       service.advance(a, flows(towers: 50, dt: marsYear), dt: marsYear);
-      expect(a.surfacePressurePa, greaterThan(610 * 1.5),
+      // Not in the pressure: the towers split the CO2 sky into oxygen,
+      // which is lighter, so the column barely moves while the mix turns
+      // over — the cap freeing CO2 as the sky's falls below its frost point.
+      final x = a.composition!.fractions[AtmosphereGas.oxygen]!;
+      expect(x, greaterThan(0.5),
           reason: 'a year of a serious tower programme is a real change');
+      expect(a.partialPressurePa(AtmosphereGas.oxygen),
+          greaterThan(100 * a.referencePartialPressurePa(AtmosphereGas.oxygen)));
     });
 
     test('Earth is effectively immovable at the same scale', () {

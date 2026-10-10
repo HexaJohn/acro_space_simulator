@@ -561,12 +561,15 @@ class AdvanceSimulationTick {
   void _recordAtmosphereFlows(CitySim city, double dt) {
     final state = atmosphere.forBody(city.body.id.value);
     if (state == null) return; // no air here to change
+    city.planetAir = state; // the atmosphere panel's read handle
     state.pendingFlows.addColony(
       pollutionRate: city.emissionRate,
       oxygenatorRun: city.oxygenatorRun,
       o2HarvestRate: city.o2HarvestRate,
+      towers: city.towerRuns,
       dt: dt,
       colony: city.id,
+      colonyName: city.name,
     );
   }
 

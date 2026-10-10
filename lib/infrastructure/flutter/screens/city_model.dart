@@ -98,6 +98,10 @@ const Map<String, IconData> kCityIcons = {
   'Silo Cluster': Icons.storage,
   // Environment + prep
   'Terraforming Tower': Icons.eco,
+  'Greenhouse Factory': Icons.thermostat,
+  'Regolith Baker': Icons.local_fire_department,
+  'Carbon Sequestrator': Icons.compress,
+  'Atmospheric Retention Array': Icons.public,
   'Fallout Shelter': Icons.security,
   'Early-Warning Station': Icons.sensors,
   'Bunker': Icons.shield_moon,

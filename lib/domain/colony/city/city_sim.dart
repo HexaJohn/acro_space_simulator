@@ -19,9 +19,12 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import '../../planetary/atmospheric_composition.dart';
+import '../../planetary/climate_biome.dart';
 import '../../planetary/liquid_mix.dart';
+import '../../planetary/planet_atmosphere.dart';
 import '../../planetary/planet_surface.dart';
 import '../../planetary/surface_conditions.dart';
+import '../../planetary/terraform_towers.dart';
 import '../../universe/celestial_body.dart';
 import '../../shared/vector3.dart';
 import '../building.dart';
@@ -485,6 +488,17 @@ class CitySim {
   /// (docs/plans/terraforming.md §6 phase 1) — a tower counted merely for
   /// EXISTING would oxygenate a planet from a dark, empty building.
   double oxygenatorRun = 0;
+
+  /// Every terraforming tower's throttle this tick, by kind
+  /// (docs/plans/terraforming.md §4, phase 3) — what the planetary phase
+  /// turns into gas. [oxygenatorRun] is its `oxygenator`.
+  final TowerRuns towerRuns = TowerRuns();
+
+  /// The planet's gas inventory this colony breathes, handed over by
+  /// whichever host integrates it (the world tick, or the flat sandbox's
+  /// own atmosphere) — a READ handle for the atmosphere panel, not state:
+  /// never saved, and null where nothing integrates the air.
+  PlanetAtmosphere? planetAir;
   double computeSupply = 0; // current compute capacity
   double computeDemand = 0;
   Economy economy = Economy.capitalism;
@@ -519,7 +533,20 @@ class CitySim {
   double wasteBacklog = 0; // 0..1 unprocessed garbage+sewage nuisance
   double radiation = 0; // 0..1 background radiation (nuke/space/disaster)
   double nuclearWinter = 0; // 0..1 sky-darkening (cuts solar + food + temp)
-  double terraform = 0; // 0..1 terraforming progress (shifts biome toward Earthlike)
+  /// Progress toward breathable air, 0..1: a READOUT of the planet's
+  /// derived sky ([SurfaceConditions.breathableProgress]) since
+  /// terraforming phase 3.
+  ///
+  /// It used to be state — a slider towers pushed up by 5% a second, that
+  /// faked the air and at 100% flipped a harsh biome to grassland. The towers
+  /// change the planet's real air now and the land follows that climate
+  /// ([climate]); this only reports how far the sky has come. An old save's
+  /// `terraform` value is read past and ignored.
+  double get terraform => sky.breathableProgress;
+
+  /// Where the colony's land stands against its world's climate, and so
+  /// when its biome turns (`ClimateBiome`, phase 3). Saved.
+  final ClimateBiome climate = ClimateBiome();
   double waterTable = 1.0; // 0..1 colony aquifer level (pumping dries the ground)
   double oceanPollution = 0; // 0..1 contaminant fraction injected into the sea
 
@@ -744,14 +771,13 @@ class CitySim {
         Biome.volcano => (food: 0.2, water: 0.3, ore: 2.2, solar: 1.0, happy: -0.08, scrub: -2.0),
       };
 
-  /// Live physical surface conditions for THIS body, blended with the colony's
-  /// terraforming progress + environmental damage. Drives habitability, flora,
+  /// Live physical surface conditions for THIS body, with the colony's own
+  /// environmental damage blended in. Drives habitability, flora,
   /// breathability and (later) the colony architecture style.
   SurfaceConditions get surface => SurfaceConditions.of(
         body,
         biome: biome,
         waterTable: waterTable,
-        terraform: terraform,
         pollution: pollution,
         nuclearWinter: nuclearWinter,
         radiationLevel: radiation,
@@ -1462,7 +1488,7 @@ class CitySim {
     // 1. Production: inputs drain, outputs fill, scaled by throttle. Skip a
     //    building's outputs if its inputs can't be met (no free lunch).
     var pollutionRate = 0.0;
-    var towerRun = 0.0;
+    towerRuns.reset();
     // Atmospheric Harvesters only yield from a sky with oxygen in it, and
     // what the colony KEEPS of what they make they take out of it (settled
     // at the storage cap, step 6). [harvestedRaw] is their bare throttle
@@ -1497,7 +1523,7 @@ class CitySim {
         if (stockOf(k) < v * th * dt) canRun = false;
       });
       final run = canRun && (s.type != 'o2harvester' || skyO2) ? th : 0.0;
-      if (s.type == 'terraformer') towerRun += run;
+      towerRuns.add(s.type, run);
       s.inputs.forEach((k, v) {
         stock[k] = (stockOf(k) - v * run * dt).clamp(0, 1e12);
         flow(k, -v * run);
@@ -1526,7 +1552,7 @@ class CitySim {
       });
       final run =
           canRun && (s.type != 'o2harvester' || skyO2) ? th * uf : 0.0;
-      if (s.type == 'terraformer') towerRun += run;
+      towerRuns.add(s.type, run);
       s.inputs.forEach((k, v) {
         stock[k] = (stockOf(k) - v * run * dt).clamp(0, 1e12);
         flow(k, -v * run);
@@ -1549,7 +1575,7 @@ class CitySim {
     imports.forEach((c, perSec) => flow(c, perSec, false));
 
     emissionRate = pollutionRate;
-    oxygenatorRun = towerRun;
+    oxygenatorRun = towerRuns.oxygenator;
 
     // 1.4 Pollution accumulates (industry/power emit, parks + low activity decay).
     var parks = 0.0;
@@ -2850,20 +2876,12 @@ class CitySim {
     final clear = 0.02 + terraformers * 0.03;
     nuclearWinter = (nuclearWinter - clear * dt).clamp(0.0, 1.0);
 
-    // --- Terraforming (FAST for the demo): connected terraformers push progress;
-    //     progress nudges the biome toward a green/breathable state + clears
-    //     nuclear winter. (Real-world this would take ages.)
-    if (terraformers > 0) {
-      terraform = (terraform + terraformers * 0.05 * dt).clamp(0.0, 1.0);
-      // At full terraform, flip a harsh biome to grassland (greened the world).
-      if (terraform >= 1.0 &&
-          (biome == Biome.barren ||
-              biome == Biome.desert ||
-              biome == Biome.volcanic)) {
-        biome = Biome.grassland;
-        terraform = 0;
-      }
-    }
+    // --- The land follows the climate (terraforming phase 3): the biome turns
+    //     when the planet's derived sky crosses a band, with hysteresis, and
+    //     never on a world whose air has not moved.
+    final turned =
+        climate.update(onBody: body.id.value, sky: sky, biome: biome);
+    if (turned != null) biome = turned;
   }
 
   /// Flatten one random building into rubble (disasters). Its footprint cells
@@ -5070,7 +5088,9 @@ class CitySim {
         'milestones': milestonesReached.toList(),
         'research': research,
         'pollution': pollution,
-        'terraform': terraform,
+        // No 'terraform': it is a readout of the sky now. Old saves carry
+        // one, and the load reads past it.
+        'climate': ?climate.toJson(),
         'waterTable': waterTable,
         'timeWarp': timeWarp,
         'stock': Map<String, double>.from(stock),
@@ -5226,6 +5246,9 @@ class CitySim {
       id: j['id'] as String,
       name: j['name'] as String? ?? 'Colony',
     );
+    // The climate band the land was last judged under; a save from before
+    // phase 3 has none and records the band it loads into.
+    sim.climate.restore(j['climate']);
     if (j['sprawl'] is Map) {
       sim.sprawlSpec =
           SprawlSpec.fromJson((j['sprawl'] as Map).cast<String, dynamic>());
@@ -5238,7 +5261,6 @@ class CitySim {
       ..funds = (j['funds'] as num).toDouble()
       ..research = (j['research'] as num).toDouble()
       ..pollution = (j['pollution'] as num).toDouble()
-      ..terraform = (j['terraform'] as num).toDouble()
       ..waterTable = (j['waterTable'] as num).toDouble()
       ..timeWarp = (j['timeWarp'] as num).toDouble()
       ..shuttleIntervalSec = (j['shuttleInterval'] as num).toDouble()
