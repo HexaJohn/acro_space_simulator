@@ -32,6 +32,7 @@ import 'city_config.dart';
 import 'city_layout.dart';
 import 'city_loyalty.dart';
 import 'city_progression.dart';
+import 'independent_governor.dart';
 import 'parcel.dart';
 import 'parcel_network.dart';
 import 'road_build.dart';
@@ -1837,6 +1838,8 @@ class CitySim {
     // the treasury have moved, so the stage the migration below obeys is
     // this tick's.
     loyaltyTick(dt, localNet: localNet, coverage: coverage);
+    // An independent colony's own council (secession §4); nothing otherwise.
+    independentGovernorTick(dt, localNet: localNet);
 
     final target = loyaltyPopCap(popTarget);
     // Migration BOTH ways needs a working (road-connected) spaceport — it's the

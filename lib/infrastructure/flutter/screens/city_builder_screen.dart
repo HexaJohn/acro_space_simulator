@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
 import '../../../domain/colony/city/city_config.dart';
+import '../../../domain/colony/city/city_control.dart';
 import '../../../domain/colony/city/city_loyalty.dart';
 import '../../../domain/colony/city/city_sim.dart';
 import '../../../domain/planetary/planet_surface.dart';
@@ -22,6 +23,7 @@ import 'app_theme.dart';
 import 'ascent_screen.dart';
 import 'craft_assembly_screen.dart';
 import 'city_map_view.dart';
+import 'city_control_ui.dart';
 import 'city_model.dart';
 import 'city_loyalty_ui.dart';
 import 'city_panels.dart';
@@ -64,7 +66,35 @@ class CityBuilderScreen extends StatefulWidget {
   State<CityBuilderScreen> createState() => _CityBuilderScreenState();
 }
 
-enum _Tool { inspect, zone, road, utility, bulldoze, retrofit, support }
+/// The flat builder's tools. [acts]: whether the tool changes the colony —
+/// what the control gate (docs/plans/colony-secession.md §5) refuses on a
+/// colony that takes no orders. True unless said otherwise, so a tool added
+/// later is gated until someone decides it only looks.
+enum CityBuilderTool {
+  inspect(acts: false),
+  zone,
+  road,
+  utility,
+  bulldoze,
+  retrofit,
+  support;
+
+  const CityBuilderTool({this.acts = true});
+  final bool acts;
+}
+
+/// The flat builder's hand on the map, for the control gate's sweep test
+/// (secession §5): every way the screen applies a tool to a cell — a tap, a
+/// drag-paint, a one-cell rectangle — through the screen's own handlers, so
+/// a handler that skips the gate fails the sweep.
+@visibleForTesting
+abstract interface class CityBuilderToolDriver {
+  void debugUseTool(CityBuilderTool tool, int x, int y);
+
+  /// A single Look tap on cell ([x], [y]): the building's site sheet, with
+  /// this screen's own rows (Pilot a landing, Launch in 3D sim), opens.
+  void debugInspect(int x, int y);
+}
 
 /// How the zone/road tools apply: one tile per tap, continuous drag-paint, or
 /// drag a rectangle and fill it on release.
@@ -80,7 +110,8 @@ typedef _ColonyStyle = ColonyStyle;
 typedef _LandedCraft = LandedCraft;
 
 class _CityBuilderScreenState extends State<CityBuilderScreen>
-    with TickerProviderStateMixin, CityPanels {
+    with TickerProviderStateMixin, CityPanels
+    implements CityBuilderToolDriver {
   @override
   CitySim get sim => _sim;
 
@@ -97,7 +128,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
   /// The colony being viewed. All simulation state lives here.
   late final CitySim _sim;
 
-  _Tool _tool = _Tool.zone;
+  CityBuilderTool _tool = CityBuilderTool.zone;
   String _zoneKind = 'residential';
   Density _density = Density.low;
   CitySpec _selectedUtil = kUtilCatalog.first;
@@ -188,11 +219,11 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
   /// Tools that support the single / paint / rect placement styles (Utility is
   /// tap-only since it costs ore + is single-placement).
   bool get _toolPaintable =>
-      _tool == _Tool.zone ||
-      _tool == _Tool.road ||
-      _tool == _Tool.bulldoze ||
-      _tool == _Tool.retrofit ||
-      _tool == _Tool.support;
+      _tool == CityBuilderTool.zone ||
+      _tool == CityBuilderTool.road ||
+      _tool == CityBuilderTool.bulldoze ||
+      _tool == CityBuilderTool.retrofit ||
+      _tool == CityBuilderTool.support;
 
   late final TabController _tabs;
 
@@ -299,6 +330,43 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
   // ---- Simulation tick ----
 
 
+  /// The control gate (secession §5) at a player act: true when the colony
+  /// takes the player's orders; else false, with the reason on the blocked
+  /// banner and in a snack bar.
+  bool _mayAct() => _sim.mayAct((why) {
+        setState(() => _sim.blocked = why);
+        sayRefused(context, why);
+      });
+
+  /// [act] behind [_mayAct].
+  VoidCallback _gated(VoidCallback act) => () {
+        if (_mayAct()) act();
+      };
+
+  @override
+  void debugUseTool(CityBuilderTool tool, int x, int y) {
+    setState(() => _tool = tool);
+    final k = _sim.key(x, y);
+    _onTapCell(x, y);
+    _onPaintCell(x, y);
+    // A rectangle is two taps in Rect style; the fill itself is checked as
+    // well, for a host that ever calls it directly.
+    final style = _paintStyle;
+    _paintStyle = _PaintMode.rect;
+    _onTapCell(x, y);
+    _onTapCell(x, y);
+    _paintStyle = style;
+    _rectStart = null;
+    _rectHover = null;
+    _fillRect(k, k);
+  }
+
+  @override
+  void debugInspect(int x, int y) {
+    setState(() => _tool = CityBuilderTool.inspect);
+    _onTapCell(x, y);
+  }
+
   void _onTapCell(int x, int y) {
     final k = _sim.key(x, y);
     // The hub IS the lander/landing site — tapping it always opens its menu,
@@ -308,7 +376,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
       return;
     }
     // Inspect tool: tap a building (or any covered tile) for its context menu.
-    if (_tool == _Tool.inspect) {
+    if (_tool == CityBuilderTool.inspect) {
       final anchor = _sim.anchorOf(k);
       final spec = anchor == null ? null : _sim.utils[anchor];
       if (anchor != null && spec != null) {
@@ -323,6 +391,8 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
       }
       return;
     }
+    // Every tool from here on acts on the colony.
+    if (!_mayAct()) return;
     // Rect style (Zone/Road tools): first tap sets a corner, second fills the
     // rectangle between them.
     if (_paintStyle == _PaintMode.rect && _toolPaintable) {
@@ -341,27 +411,27 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     setState(() {
       _sim.blocked = null;
       switch (_tool) {
-        case _Tool.inspect:
+        case CityBuilderTool.inspect:
           break; // handled above
-        case _Tool.retrofit:
+        case CityBuilderTool.retrofit:
           _sim.retrofitCell(k);
-        case _Tool.support:
+        case CityBuilderTool.support:
           if (_sim.support.contains(k)) {
             _sim.support.remove(k);
           } else {
             _sim.clearCell(k);
             _sim.support.add(k);
           }
-        case _Tool.bulldoze:
+        case CityBuilderTool.bulldoze:
           _sim.clearCell(k);
-        case _Tool.road:
+        case CityBuilderTool.road:
           if (_sim.roads.contains(k)) {
             _sim.removeRoad(k);
           } else {
             _sim.clearCell(k, keepSupport: true); // road runs ON the platform
             _sim.addRoad(k);
           }
-        case _Tool.utility:
+        case CityBuilderTool.utility:
           final anchor = _sim.anchorOf(k);
           if (anchor != null && _sim.utils[anchor]?.type == _selectedUtil.type) {
             // Tapping any tile of an existing same-type building removes it.
@@ -393,7 +463,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
                 _sim.stockOf(Commodity.ore) - _selectedUtil.buildCost;
             _sim.placeUtil(k, _selectedUtil);
           }
-        case _Tool.zone:
+        case CityBuilderTool.zone:
           final z = ZoneType(_zoneKind, _density);
           final cur = _sim.zones[k];
           if (cur != null && cur.kind == z.kind && cur.density == z.density) {
@@ -407,7 +477,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
           }
       }
       // An act of governance (secession §3.3) — what was refused said so.
-      if (_tool != _Tool.inspect && _sim.blocked == null) _sim.attend();
+      if (_tool != CityBuilderTool.inspect && _sim.blocked == null) _sim.attend();
       _sim.recompute();
     });
   }
@@ -420,7 +490,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     final h = _hoverCell;
     if (h == null) return const {};
     final hx = h % _sim.grid, hy = h ~/ _sim.grid;
-    if (_tool == _Tool.utility) {
+    if (_tool == CityBuilderTool.utility) {
       final spec = _selectedUtil;
       final out = <int>{};
       for (var dy = 0; dy < spec.footH; dy++) {
@@ -431,11 +501,11 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
       }
       return out;
     }
-    if (_tool == _Tool.zone ||
-        _tool == _Tool.road ||
-        _tool == _Tool.support ||
-        _tool == _Tool.bulldoze ||
-        _tool == _Tool.retrofit) {
+    if (_tool == CityBuilderTool.zone ||
+        _tool == CityBuilderTool.road ||
+        _tool == CityBuilderTool.support ||
+        _tool == CityBuilderTool.bulldoze ||
+        _tool == CityBuilderTool.retrofit) {
       return {h};
     }
     return const {};
@@ -447,17 +517,18 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
   void _onPaintCell(int x, int y) {
     final k = _sim.key(x, y);
     if (k == _sim.hubKey) return;
+    if (_tool.acts && !_mayAct()) return;
     setState(() {
       _sim.blocked = null;
       switch (_tool) {
-        case _Tool.bulldoze:
+        case CityBuilderTool.bulldoze:
           _sim.clearCell(k);
-        case _Tool.road:
+        case CityBuilderTool.road:
           if (!_sim.roads.contains(k)) {
             _sim.clearCell(k, keepSupport: true); // road runs ON the platform
             _sim.addRoad(k);
           }
-        case _Tool.zone:
+        case CityBuilderTool.zone:
           final z = ZoneType(_zoneKind, _density);
           final cur = _sim.zones[k];
           if (cur == null || cur.kind != z.kind || cur.density != z.density) {
@@ -465,18 +536,18 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
             _sim.zones[k] = z;
             if (_autoRoads) _sim.autoRoadAround(k);
           }
-        case _Tool.retrofit:
+        case CityBuilderTool.retrofit:
           _sim.retrofitCell(k);
-        case _Tool.support:
+        case CityBuilderTool.support:
           if (!_sim.support.contains(k)) {
             _sim.clearCell(k);
             _sim.support.add(k);
           }
-        case _Tool.utility:
-        case _Tool.inspect:
+        case CityBuilderTool.utility:
+        case CityBuilderTool.inspect:
           break; // tap-only
       }
-      if (_tool != _Tool.utility && _tool != _Tool.inspect) _sim.attend();
+      if (_tool != CityBuilderTool.utility && _tool != CityBuilderTool.inspect) _sim.attend();
       _sim.recompute();
     });
   }
@@ -485,6 +556,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
   /// Fill the rectangle spanning two corner cells with the active Zone or Road
   /// tool (used by the Rect paint style). Bounded to keep the loop cheap.
   void _fillRect(int a, int b) {
+    if (!_mayAct()) return;
     final ax = a % _sim.grid, ay = a ~/ _sim.grid;
     final bx = b % _sim.grid, by = b ~/ _sim.grid;
     final x0 = math.min(ax, bx), x1 = math.max(ax, bx);
@@ -494,16 +566,16 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
       for (var x = x0; x <= x1; x++) {
         final k = _sim.key(x, y);
         if (k == _sim.hubKey) continue;
-        if (_tool == _Tool.retrofit) {
+        if (_tool == CityBuilderTool.retrofit) {
           _sim.retrofitCell(k);
-        } else if (_tool == _Tool.support) {
+        } else if (_tool == CityBuilderTool.support) {
           if (!_sim.support.contains(k)) {
             _sim.clearCell(k);
             _sim.support.add(k);
           }
-        } else if (_tool == _Tool.bulldoze) {
+        } else if (_tool == CityBuilderTool.bulldoze) {
           _sim.clearCell(k);
-        } else if (_tool == _Tool.road) {
+        } else if (_tool == CityBuilderTool.road) {
           if (!_sim.roads.contains(k)) {
             _sim.clearCell(k, keepSupport: true); // road runs ON the platform
             _sim.addRoad(k);
@@ -541,7 +613,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
           IconButton(
             icon: const Icon(Icons.delete_sweep, color: AppTheme.danger),
             tooltip: 'Clear',
-            onPressed: () => setState(() {
+            onPressed: _gated(() => setState(() {
               _sim.zones.clear();
               _sim.utils.clear();
               _sim.footprint.clear();
@@ -558,7 +630,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
                 ..clear()
                 ..add(_sim.hubKey);
               _sim.recompute();
-            }),
+            })),
           ),
       ],
       body: LayoutBuilder(builder: (context, c) {
@@ -728,7 +800,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
                 // Highlight the tile(s) under the cursor while a placement tool
                 // is active — single cell, or the footprint of a large building.
                 hoverCells: _hoverHighlight(),
-                hoverDestructive: _tool == _Tool.bulldoze,
+                hoverDestructive: _tool == CityBuilderTool.bulldoze,
                 onTapCell: _onTapCell,
                 // Drag-paint for Zone/Road/Bulldoze in PAINT style; single + rect
                 // styles use taps so the drag stays free for the camera.
@@ -1168,20 +1240,20 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
         child: SingleChildScrollView(
           scrollDirection: Axis.horizontal,
           child: Row(children: [
-            _toolChip('Inspect', Icons.touch_app, _Tool.inspect, AppTheme.accent),
+            _toolChip('Inspect', Icons.touch_app, CityBuilderTool.inspect, AppTheme.accent),
             const SizedBox(width: 5),
-            _toolChip('Zone', Icons.grid_view, _Tool.zone, AppTheme.accent2),
+            _toolChip('Zone', Icons.grid_view, CityBuilderTool.zone, AppTheme.accent2),
             const SizedBox(width: 5),
-            _toolChip('Util', Icons.bolt, _Tool.utility, AppTheme.warn),
+            _toolChip('Util', Icons.bolt, CityBuilderTool.utility, AppTheme.warn),
             const SizedBox(width: 5),
-            _toolChip('Road', Icons.add_road, _Tool.road, AppTheme.textDim),
+            _toolChip('Road', Icons.add_road, CityBuilderTool.road, AppTheme.textDim),
             const SizedBox(width: 5),
-            _toolChip('Bulldoze', Icons.delete, _Tool.bulldoze, AppTheme.danger),
+            _toolChip('Bulldoze', Icons.delete, CityBuilderTool.bulldoze, AppTheme.danger),
             const SizedBox(width: 5),
-            _toolChip('Retrofit', Icons.sync_alt, _Tool.retrofit, AppTheme.accent),
+            _toolChip('Retrofit', Icons.sync_alt, CityBuilderTool.retrofit, AppTheme.accent),
             if (_sim.colonyNeedsSupport || _sim.isOceanColony) ...[
               const SizedBox(width: 5),
-              _toolChip(_sim.supportLabel, Icons.grid_4x4, _Tool.support,
+              _toolChip(_sim.supportLabel, Icons.grid_4x4, CityBuilderTool.support,
                   AppTheme.accent2),
             ],
             // Paint-style + auto-roads options, only for the Zone/Road tools.
@@ -1193,7 +1265,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
               const SizedBox(width: 4),
               _modeChip('Rect', Icons.select_all, _PaintMode.rect),
               // Auto-roads only makes sense for the Zone tool.
-              if (_tool == _Tool.zone) ...[
+              if (_tool == CityBuilderTool.zone) ...[
               const SizedBox(width: 6),
               GestureDetector(
                 onTap: () => setState(() => _autoRoads = !_autoRoads),
@@ -1247,12 +1319,12 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
             ),
             const SizedBox(width: 8),
             // Rolling-hills relief toggle (flat by default).
-            GestureDetector(
-              onTap: () => setState(() {
+            gatedControl(_sim, GestureDetector(
+              onTap: _gated(() => setState(() {
                 _sim.terrainRelief = !_sim.terrainRelief;
                 _sim.genElevation(); // re-sculpt (or flatten) the height field
                 _sim.recompute();
-              }),
+              })),
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
                 decoration: BoxDecoration(
@@ -1278,12 +1350,12 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
                               : AppTheme.textDim)),
                 ]),
               ),
-            ),
+            )),
             const SizedBox(width: 8),
             // Replant: fill open tiles with biome flora right now (regrowth also
             // does this slowly on its own).
-            GestureDetector(
-              onTap: () => setState(_sim.seedScatter),
+            gatedControl(_sim, GestureDetector(
+              onTap: _gated(() => setState(_sim.seedScatter)),
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
                 decoration: BoxDecoration(
@@ -1296,10 +1368,10 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
                   Text('Plant', style: TextStyle(fontSize: 12, color: AppTheme.text)),
                 ]),
               ),
-            ),
+            )),
             const SizedBox(width: 8),
-            GestureDetector(
-              onTap: _sim.grid >= CitySim.maxGrid ? null : _sim.expandLand,
+            gatedControl(_sim, GestureDetector(
+              onTap: _sim.grid >= CitySim.maxGrid ? null : _gated(_sim.expandLand),
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
                 decoration: BoxDecoration(
@@ -1319,14 +1391,38 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
                       style: const TextStyle(fontSize: 12, color: AppTheme.accent2)),
                 ]),
               ),
-            ),
+            )),
           ]),
         ),
       );
 
-  Widget _toolChip(String label, IconData icon, _Tool tool, Color color) {
+  Widget _toolChip(String label, IconData icon, CityBuilderTool tool, Color color) {
     final sel = _tool == tool;
+    // An acting tool on a colony that takes no orders (secession §5):
+    // greyed, the reason its tooltip, and a tap says it.
+    if (tool.acts && !_sim.playerControl.allowed) {
+      return gatedControl(
+          _sim,
+          GestureDetector(
+            key: ValueKey('builder-tool-${tool.name}'),
+            onTap: _mayAct,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+              decoration: BoxDecoration(
+                  color: AppTheme.panelLight,
+                  borderRadius: BorderRadius.circular(6)),
+              child: Row(children: [
+                Icon(icon, size: 14, color: AppTheme.textDim),
+                const SizedBox(width: 4),
+                Text(label,
+                    style:
+                        const TextStyle(fontSize: 12, color: AppTheme.textDim)),
+              ]),
+            ),
+          ));
+    }
     return GestureDetector(
+      key: ValueKey('builder-tool-${tool.name}'),
       onTap: () => setState(() => _tool = tool),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
@@ -1608,16 +1704,18 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
         onOpenVab: _openVab,
         extra: (site, spec) => [
           if (spec.type == 'spaceport') ...[
-            citySiteAction(
+            gatedSiteAction(
                 context,
+                _sim,
                 Icons.flight_land,
                 'Pilot a landing',
                 'Fly an in-atmo descent over the colony — touch down on a pad, '
                     'or smash into the city.',
                 AppTheme.warn,
                 () => _pilotLanding(anchor)),
-            citySiteAction(
+            gatedSiteAction(
                 context,
+                _sim,
                 Icons.rocket_launch,
                 'Launch in 3D sim',
                 'Fly a staged ascent in the full 3D sim — real planet sphere, '
@@ -1638,7 +1736,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
           _sim.flagPlanted ? 'Flag planted' : 'Plant flag',
           _sim.flagPlanted ? 'Your colours fly over the colony.' : 'Claim this world.',
           _sim.flagPlanted ? AppTheme.textDim : AppTheme.accent2,
-          () => setState(() => _sim.flagPlanted = true)),
+          _gated(() => setState(() => _sim.flagPlanted = true))),
       _ctxAction(
           Icons.flight_takeoff,
           hasFuel ? 'Launch lander' : 'Launch (no fuel)',
@@ -1646,7 +1744,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
               ? 'Burn 10 fuel and ascend back to orbit.'
               : 'Need ≥10 fuel in the stockpile to launch.',
           hasFuel ? AppTheme.warn : AppTheme.textDim,
-          hasFuel ? _launchLander : () {}),
+          hasFuel ? _gated(_launchLander) : () {}),
     ]);
   }
 
@@ -1677,10 +1775,10 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
 
   Widget _zonePicker() {
     Widget kindChip(String kind, String label, Color color) {
-      final sel = _tool == _Tool.zone && _zoneKind == kind;
+      final sel = _tool == CityBuilderTool.zone && _zoneKind == kind;
       return GestureDetector(
         onTap: () => setState(() {
-          _tool = _Tool.zone;
+          _tool = CityBuilderTool.zone;
           _zoneKind = kind;
         }),
         child: Container(
@@ -1698,7 +1796,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
       final sel = _density == d;
       return GestureDetector(
         onTap: () => setState(() {
-          _tool = _Tool.zone;
+          _tool = CityBuilderTool.zone;
           _density = d;
         }),
         child: Container(
@@ -1755,7 +1853,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
   }
 
   Widget _utilRow(CitySpec u) {
-    final sel = _tool == _Tool.utility && _selectedUtil.type == u.type;
+    final sel = _tool == CityBuilderTool.utility && _selectedUtil.type == u.type;
     final locked = !_sim.unlocked(u);
     return Card(
       color: sel ? u.color.withValues(alpha: 0.18) : AppTheme.panel,
@@ -1781,7 +1879,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
         ]),
         subtitle: Text(_specSummary(u), style: AppTheme.dim),
         onExpansionChanged: (_) => setState(() {
-          _tool = _Tool.utility;
+          _tool = CityBuilderTool.utility;
           _selectedUtil = u;
         }),
         childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 10),

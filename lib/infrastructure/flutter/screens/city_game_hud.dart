@@ -18,6 +18,7 @@ library;
 import 'package:flutter/material.dart';
 
 import '../../../domain/colony/city/city_building_spec.dart';
+import '../../../domain/colony/city/city_control.dart';
 import '../../../domain/colony/city/city_loyalty.dart';
 import '../../../domain/colony/city/city_progression.dart';
 import '../../../domain/colony/city/city_sim.dart';
@@ -26,6 +27,7 @@ import '../../../domain/colony/city/road_catalog.dart';
 import '../../../domain/colony/city/traffic/city_agents.dart'
     show AgentLaneSpeeds;
 import 'app_theme.dart';
+import 'city_control_ui.dart';
 import 'city_loyalty_ui.dart';
 import 'traffic_lane_speed_overlay.dart' show TrafficLaneSpeedOverlay;
 
@@ -147,6 +149,14 @@ class _CityGameHudState extends State<CityGameHud> {
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
                 _topBar(narrow),
+                // A colony that has left (secession §4): since when, why,
+                // and what its own council is doing — under the readouts,
+                // which stay live.
+                if (city.loyalty.allegiance == Allegiance.independent)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: IndependencePanel(city: city, compact: true),
+                  ),
                 if (_panel != CityGamePanel.none)
                   Padding(
                     padding: const EdgeInsets.only(top: 6),
@@ -649,7 +659,9 @@ class _CityGameHudState extends State<CityGameHud> {
         Text('${(tax * 100).toStringAsFixed(0)}%',
             style: AppTheme.mono.copyWith(color: AppTheme.accent)),
       ]),
-      SliderTheme(
+      // The control gate (secession §5): an independent colony's tax is its
+      // own council's, greyed here with the reason as the tooltip.
+      gatedControl(city, SliderTheme(
         data: SliderThemeData(
             activeTrackColor: controllable ? AppTheme.accent : AppTheme.textDim,
             thumbColor: controllable ? AppTheme.accent : AppTheme.textDim,
@@ -659,14 +671,14 @@ class _CityGameHudState extends State<CityGameHud> {
           value: tax.clamp(0.0, 0.4),
           max: 0.4,
           onChanged:
-              controllable
+              controllable && city.playerControl.allowed
                   ? (v) => setState(() {
                         city.taxRate = v;
                         city.attend(); // an act of governance (secession §3.3)
                       })
                   : null,
         ),
-      ),
+      )),
       Text(
           'Higher tax fills the treasury and empties the mood. '
           '${city.economy.label} decides how much of it is yours to set.',
@@ -711,7 +723,9 @@ class _CityGameHudState extends State<CityGameHud> {
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 4),
           child: InkWell(
-            onTap: () => explainLoyalty(context, city),
+            onTap: () => l.allegiance == Allegiance.independent
+                ? showIndependence(context, city)
+                : explainLoyalty(context, city),
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
               decoration: BoxDecoration(

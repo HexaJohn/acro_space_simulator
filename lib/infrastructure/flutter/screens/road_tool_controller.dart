@@ -28,6 +28,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart' show ChangeNotifier;
 
+import '../../../domain/colony/city/city_control.dart';
 import '../../../domain/colony/city/city_sim.dart';
 import '../../../domain/colony/city/parcel.dart';
 import '../../../domain/colony/city/road_build.dart';
@@ -237,6 +238,17 @@ mixin RoadToolEditing on ChangeNotifier {
 
   /// Publish a change to the toolbar and the view.
   void changed();
+
+  /// The control gate (docs/plans/colony-secession.md §5) at a road act on
+  /// [city]: true — with the reason on the toolbar — when the colony takes
+  /// no orders and the act must not happen. Asked by every method here that
+  /// changes the colony; the hover previews and quotes only look, and stay
+  /// open.
+  bool refusedOn(CitySim city) {
+    if (city.mayAct((why) => blocked = why)) return false;
+    changed();
+    return true;
+  }
 
   // ---- The tool's state -----------------------------------------------------
 
@@ -623,6 +635,7 @@ mixin RoadToolEditing on ChangeNotifier {
     double scale = 1,
   }) {
     blocked = null;
+    if (refusedOn(city)) return;
     if (mode == RoadToolMode.upgrade) {
       upgradeAt(city, cursor, ground: ground, scale: scale);
       return;
@@ -673,6 +686,7 @@ mixin RoadToolEditing on ChangeNotifier {
   /// where it was and the toolbar says why.
   bool _build(CitySim city, List<Vec2> shape, RoadSnap end,
       {double Function(Vec2)? ground}) {
+    if (refusedOn(city)) return false;
     _applyLotSettings(city);
     final snapped = city.snapRoadRequest(
         requestTo(city, shape, end, ground: ground),
@@ -784,6 +798,7 @@ mixin RoadToolEditing on ChangeNotifier {
     double Function(Vec2)? ground,
     double scale = 1,
   }) {
+    if (refusedOn(city)) return null;
     final id = roadAt(city, p, scale: scale);
     if (id == null) {
       blocked = 'Click a road to make it a ${_type.label}';
@@ -804,6 +819,7 @@ mixin RoadToolEditing on ChangeNotifier {
 
   /// Reverse the one-way road under [p]. A two-way road says why not.
   bool reverseAt(CitySim city, Vec2 p, {double scale = 1}) {
+    if (refusedOn(city)) return false;
     final id = roadAt(city, p, scale: scale);
     if (id == null) return false;
     final ok = city.reverseRoad(id);
@@ -839,6 +855,7 @@ mixin RoadToolEditing on ChangeNotifier {
   /// are KEPT — the player re-routes or drops a tier rather than redrawing
   /// from nothing — and the toolbar says why.
   void commitSpline(CitySim city) {
+    if (refusedOn(city)) return;
     if (pending.length < 2) {
       pending.clear();
       changed();
@@ -911,6 +928,7 @@ mixin RoadToolEditing on ChangeNotifier {
   /// drawn by. What the plan was comes from the road graph — the plan the
   /// tiles draw and the traffic waits at. Whether anything changed.
   bool toggleJunctionAt(CitySim city, Vec2 p, {double pxM = 1}) {
+    if (refusedOn(city)) return false;
     final node = _junctionNear(city.roadGraph, p, JunctionMarks.reachM(pxM));
     if (node == null) {
       blocked = 'Click a junction — a place where three roads or more meet';
@@ -1090,6 +1108,10 @@ mixin RoadToolEditing on ChangeNotifier {
     required Vec2 to,
     double Function(Vec2)? ground,
   }) {
+    if (refusedOn(city)) {
+      movePreview = null;
+      return null;
+    }
     final id = selectedRoadId;
     if (id == null) return null;
     movePreview = null;
@@ -1191,6 +1213,7 @@ mixin RoadToolEditing on ChangeNotifier {
   /// Name the selected road — every piece of it. Blank restores the
   /// generated name.
   bool renameSelected(CitySim city, String name) {
+    if (refusedOn(city)) return false;
     final id = selectedRoadId;
     if (id == null) return false;
     final trimmed = name.trim();
