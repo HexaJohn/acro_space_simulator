@@ -18,8 +18,10 @@ library;
 import 'package:flutter/material.dart';
 
 import '../../../domain/colony/city/city_building_spec.dart';
+import '../../../domain/colony/city/city_control.dart';
 import '../../../domain/colony/city/city_sim.dart';
 import 'app_theme.dart';
+import 'city_control_ui.dart';
 import 'city_model.dart';
 import 'craft_assembly_screen.dart';
 
@@ -68,6 +70,27 @@ Widget citySiteAction(
         onTap();
       },
     );
+
+/// [citySiteAction] behind the control gate (docs/plans/colony-secession.md
+/// §5): on a colony that takes no orders the row stays — the player sees
+/// what the building could do — greyed, its subtitle the reason, and a tap
+/// says it instead of acting.
+Widget gatedSiteAction(
+  BuildContext context,
+  CitySim sim,
+  IconData icon,
+  String label,
+  String sub,
+  Color color,
+  VoidCallback onTap,
+) {
+  final c = sim.playerControl;
+  if (c.allowed) {
+    return citySiteAction(context, icon, label, sub, color, onTap);
+  }
+  return citySiteAction(context, icon, label, c.reason!, AppTheme.textDim,
+      () => sayRefused(context, c.reason!));
+}
 
 /// A "why did this happen / how to fix" modal for a warning or status.
 void showExplain(
@@ -264,8 +287,9 @@ void showCitySiteMenu({
   ];
   // Reactor easter egg: SCRAM the safeties for a meltdown.
   if (spec.type == 'reactor' || spec.type == 'fusion') {
-    actions.add(citySiteAction(
+    actions.add(gatedSiteAction(
         context,
+        sim,
         Icons.warning_amber,
         'Disable safety systems',
         'Override the SCRAM interlocks. What could go wrong?',
@@ -287,8 +311,9 @@ void showCitySiteMenu({
   if ((spec.type == 'spaceport' || spec.type == 'airfield') &&
       hooks.onOpenVab != null) {
     final plane = spec.type == 'airfield';
-    actions.add(citySiteAction(
+    actions.add(gatedSiteAction(
         context,
+        sim,
         Icons.precision_manufacturing,
         'Design & launch craft',
         connected
@@ -300,8 +325,9 @@ void showCitySiteMenu({
   if (spec.type == 'spaceport') {
     // Spaceports double as landing pads: park the lander here (occupied state).
     final parked = sim.landerPad == site;
-    actions.add(citySiteAction(
+    actions.add(gatedSiteAction(
         context,
+        sim,
         parked ? Icons.flight_takeoff : Icons.flight_land,
         parked ? 'Lander is parked here' : 'Land lander on this pad',
         parked
@@ -334,8 +360,9 @@ void showCitySiteMenu({
     // (secession §4.1): say so, rather than offer a button that refuses.
     final shut = sim.loyalty.portHoldReason;
     final canRelief = sim.reliefCooldown <= 0 && hasPad && shut == null;
-    actions.add(citySiteAction(
+    actions.add(gatedSiteAction(
         context,
+        sim,
         Icons.volunteer_activism,
         canRelief
             ? 'Request assistance'
@@ -376,9 +403,9 @@ void showCitySiteMenu({
             context: context, sim: sim, site: site, onChanged: onChanged)));
   }
   if (hooks.extra != null) actions.addAll(hooks.extra!(site, spec));
-  actions.add(citySiteAction(
-      context, Icons.delete, 'Demolish', 'Tear it down (partial ore refund).',
-      AppTheme.danger, () {
+  actions.add(gatedSiteAction(
+      context, sim, Icons.delete, 'Demolish',
+      'Tear it down (partial ore refund).', AppTheme.danger, () {
     demolishSite(sim, site);
     sim.attend();
     onChanged();
@@ -430,6 +457,12 @@ void showDeliveryConfig({
       builder: (ctx, setSheet) {
         final list = sim.deliveries[site] ?? const <DeliverySchedule>[];
         String padLabel(int? p) => p == null ? 'any pad' : 'pad ${p + 1}';
+        // The schedule is the player's logistics, and stays readable; on a
+        // colony that takes no orders (secession §5) it cannot be edited —
+        // not least so a suspended run cannot be "re-enabled" by booking it
+        // again — and says why.
+        final control = sim.playerControl;
+        final may = control.allowed;
         return SafeArea(
           child: Padding(
             padding: const EdgeInsets.all(16),
@@ -453,6 +486,12 @@ void showDeliveryConfig({
                         '${sim.loyalty.impounded.isEmpty ? '' : 'Impounded: ${sim.loyalty.impounded.map((c) => '${c.amount.toStringAsFixed(0)} ${c.resource}').join(', ')}.'}',
                         style: AppTheme.dim.copyWith(color: AppTheme.danger)),
                   ),
+                if (!may)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Text(control.reason!,
+                        style: AppTheme.dim.copyWith(color: AppTheme.danger)),
+                  ),
                 if (list.isEmpty)
                   const Padding(
                     padding: EdgeInsets.symmetric(vertical: 12),
@@ -464,10 +503,11 @@ void showDeliveryConfig({
                     constraints: const BoxConstraints(maxHeight: 320),
                     child: ReorderableListView(
                       shrinkWrap: true,
-                      buildDefaultDragHandles: true,
+                      buildDefaultDragHandles: may,
                       // The index handed back already allows for the
                       // item taken out.
                       onReorderItem: (a, b) => setSheet(() {
+                        if (!sim.mayAct()) return;
                         final s = list.removeAt(a);
                         list.insert(b, s);
                         sim.attend();
@@ -495,7 +535,8 @@ void showDeliveryConfig({
                                   IconButton(
                                     icon: const Icon(Icons.edit,
                                         size: 18, color: AppTheme.accent2),
-                                    onPressed: () => editDelivery(
+                                    tooltip: may ? 'Edit' : control.reason,
+                                    onPressed: !may ? null : () => editDelivery(
                                         context: ctx,
                                         sim: sim,
                                         site: site,
@@ -509,7 +550,8 @@ void showDeliveryConfig({
                                   IconButton(
                                     icon: const Icon(Icons.delete,
                                         size: 18, color: AppTheme.danger),
-                                    onPressed: () => setSheet(() {
+                                    tooltip: may ? 'Remove' : control.reason,
+                                    onPressed: !may ? null : () => setSheet(() {
                                       list.removeAt(i);
                                       if (list.isEmpty) {
                                         sim.deliveries.remove(site);
@@ -530,7 +572,7 @@ void showDeliveryConfig({
                   style: ElevatedButton.styleFrom(
                       backgroundColor: AppTheme.accent2,
                       foregroundColor: AppTheme.bg),
-                  onPressed: () => editDelivery(
+                  onPressed: !may ? null : () => editDelivery(
                     context: ctx,
                     sim: sim,
                     site: site,
@@ -678,6 +720,12 @@ void editDelivery({
                       backgroundColor: AppTheme.accent2,
                       foregroundColor: AppTheme.bg),
                   onPressed: () {
+                    // Asked again at the save: the colony may have left
+                    // while the sheet was open.
+                    if (!sim.mayAct((why) => sayRefused(context, why))) {
+                      Navigator.of(ctx).pop();
+                      return;
+                    }
                     sched
                       ..resource = resource
                       ..intervalSec = interval

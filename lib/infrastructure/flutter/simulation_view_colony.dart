@@ -653,6 +653,9 @@ extension _SimulationViewColony on _SimulationViewState {
     if (_cityEdit.tool == CityEditTool.utility && held.claimsOwnSite) {
       final centre = Vec2(hit.east, hit.north);
       rebuild(() {
+        // The control gate (secession §5), asked here as the editor's own
+        // tools ask it: this path stakes a plot without going through them.
+        if (!_cityEdit.mayActOn(city)) return;
         if (!city.unlocked(held)) {
           _cityEdit.blocked =
               '${held.label} needs ${held.unlockPop} population.';

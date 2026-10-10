@@ -20,11 +20,13 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../../../domain/colony/city/city_control.dart';
 import '../../../domain/colony/city/city_loyalty.dart';
 import '../../../domain/colony/city/city_sim.dart';
 import '../../../domain/planetary/planet_surface.dart';
 import '../../../domain/universe/celestial_body.dart';
 import 'app_theme.dart';
+import 'city_control_ui.dart';
 import 'city_loyalty_ui.dart';
 import 'city_model.dart';
 import 'city_site_actions.dart';
@@ -270,6 +272,10 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
         const SizedBox(height: 12),
         const Text('LOYALTY', style: AppTheme.heading),
         const SizedBox(height: 6),
+        if (sim.loyalty.allegiance == Allegiance.independent) ...[
+          IndependencePanel(city: sim),
+          const SizedBox(height: 6),
+        ],
         ..._loyaltyRows(),
       ];
 
@@ -1012,16 +1018,26 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
       ]),
     );
   }
+  /// Whether the player's hand reaches the colony's levers (the control
+  /// gate, secession §5). Refused, every lever below is greyed with the
+  /// reason as its tooltip, and a tap on one says it; the readouts stay.
+  bool get _governs => sim.playerControl.allowed;
+
+  /// [act] if the colony takes the player's orders; else the reason, said.
+  VoidCallback _gated(VoidCallback act) => () {
+        if (sim.mayAct((why) => sayRefused(context, why))) act();
+      };
+
   Widget _economyPicker() => Wrap(
         spacing: 6,
         runSpacing: 6,
         children: [
           for (final e in Economy.values)
             _pill(e.label, sim.economy == e, AppTheme.accent,
-                () => setState(() {
+                _gated(() => setState(() {
                       sim.economy = e;
                       sim.attend(); // an act of governance (secession §3.3)
-                    })),
+                    }))),
         ],
       );
   Widget _govtPicker() => Wrap(
@@ -1029,15 +1045,16 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
         runSpacing: 6,
         children: [
           for (final g in Govt.values)
-            _pill(g.label, sim.govt == g, AppTheme.accent2, () => setState(() {
-                  sim.govt = g;
-                  sim.attend();
-                  if (g.lawsAutoVoted) sim.autoVote();
-                })),
+            _pill(g.label, sim.govt == g, AppTheme.accent2,
+                _gated(() => setState(() {
+                      sim.govt = g;
+                      sim.attend();
+                      if (g.lawsAutoVoted) sim.autoVote();
+                    }))),
         ],
       );
   Widget _pill(String label, bool sel, Color color, VoidCallback onTap) =>
-      GestureDetector(
+      gatedControl(sim, GestureDetector(
         onTap: onTap,
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -1047,9 +1064,9 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
           child: Text(label,
               style: TextStyle(fontSize: 12, color: sel ? AppTheme.bg : AppTheme.text)),
         ),
-      );
+      ));
   Widget _taxControl() {
-    final controllable = sim.economy.taxControllable;
+    final controllable = sim.economy.taxControllable && _governs;
     final tax = sim.effectiveTax();
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 2),
@@ -1061,7 +1078,7 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
           Text('${(tax * 100).toStringAsFixed(0)}%',
               style: AppTheme.mono.copyWith(color: AppTheme.accent)),
         ]),
-        SliderTheme(
+        gatedControl(sim, SliderTheme(
           data: SliderThemeData(
               activeTrackColor: controllable ? AppTheme.accent : AppTheme.textDim,
               thumbColor: controllable ? AppTheme.accent : AppTheme.textDim,
@@ -1076,7 +1093,7 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
                         sim.attend();
                       })
                   : null),
-        ),
+        )),
       ]),
     );
   }
@@ -1104,13 +1121,15 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
               ]),
             ),
             if (!auto)
-              Switch(
+              gatedControl(sim, Switch(
                   value: sim.laws.contains(l),
                   activeThumbColor: AppTheme.accent2,
-                  onChanged: (v) => setState(() {
-                        v ? sim.laws.add(l) : sim.laws.remove(l);
-                        sim.attend();
-                      })),
+                  onChanged: _governs
+                      ? (v) => setState(() {
+                            v ? sim.laws.add(l) : sim.laws.remove(l);
+                            sim.attend();
+                          })
+                      : null)),
           ]),
         ),
     ];

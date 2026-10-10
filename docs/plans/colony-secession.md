@@ -1,6 +1,7 @@
 # Colony loyalty and secession
 
 Status: approved for phase 1, 2026-10-10 (Q6/Q7 answered by the user; Q1–Q5 on the proposed defaults, revisable).
+Phase 1 is built; phase 2 (independence) is built on `feat/secession-p2` — see "Phase 2, as built" under §7.
 
 ## 1. Intent
 
@@ -287,6 +288,100 @@ v1 does not model it beyond the player's existing ability to cancel delivery sch
 4. **Force**: garrison/projection/resistance, occupation.
 
 Each phase is one commit or a few, shipped behind nothing, since the first phase already only warns.
+
+### Phase 2, as built (2026-10-10)
+
+**The gate (§5).** `CityControl.playerControl` (new `city_control.dart`) answers `ControlState {allowed, reason}`:
+refused for `independent` ("This colony has been independent since day N and takes no orders."), allowed for
+`colonial` (a Restless, Defiant or standing-off colony still takes orders) and for `occupied` until phase 4
+says otherwise. It is an extension on `CitySim` in its own file, not a member, to keep `city_sim.dart` edits to
+three lines; `mayAct(onRefused)` is the ask-and-say form every call site uses. Domain mutators stay ungated.
+
+Gated call sites, each greyed with the reason as its tooltip and saying it (blocked line, banner or snack bar)
+when tapped, never silently dead:
+- `CityEditController`: `applyTo`, `applyToLot`, `applyToParcel`, and picking up an acting tool (`set`,
+  `pickUtil`, `pickZone`). `CityEditTool` gained `acts` (default **true**, so a new tool is gated until someone
+  decides it only looks); Look and Traffic are `acts: false`. The strip shows the reason before anything is tried.
+- `RoadToolEditing.refusedOn` at every method that changes the colony: `clickAt`, `_build`, `upgradeAt`,
+  `reverseAt` (and so `rightClickAt`), `commitSpline`, `toggleJunctionAt`, `moveSelectedEnd`, `renameSelected`.
+  Previews and quotes stay open. The Traffic chip is not greyed (Routes and Lane speed are readouts); its
+  Junctions and Adjust clicks refuse.
+- `CityPanels`: government and economy pills, the tax slider, the law switches.
+- `CityGameHud`: the Budget tax slider.
+- `city_site_actions.dart`: `gatedSiteAction` for meltdown, Design & launch, lander pad, relief and demolish;
+  the delivery sheet stays readable but its add, edit, remove, reorder and save are refused.
+- `simulation_view_colony.dart`: the own-site `claimSite` path, through `CityEditController.mayActOn`.
+- `CityBuilderScreen`: tap, drag-paint and rect fill for every tool, the tool chips, and calls phase 1 missed:
+  the toolbar's Clear-all, Relief, Plant and Buy land, the lander menu's flag and launch, and the host's
+  Pilot a landing / Launch in 3D rows. `_Tool` is now the public `CityBuilderTool` (with `acts`) so the sweep
+  can enumerate it.
+
+Deliberately **not** gated, because they are game settings or the player's own craft, not orders to the colony
+(and they never stamp attention): the World drawer (time warp, difficulty, debug switches, re-siting,
+disaster triggers), the editor's terrain-ignore switch, and "Target this pad".
+
+**Sweep test** (`test/colony/city_control_gate_test.dart`). On an independent colony it tries every
+`CityEditTool`, `RoadToolMode`, `TrafficInfoView` and `CityBuilderTool` value through the real handlers (tap,
+paint, rect, lot, cell, click, right-click, spline commit, junction, adjust, rename, upgrade, reverse), every
+`Govt`, `Economy` and law control, every row of the site sheet and the delivery sheet, and the toolbar chips
+(each must sit under a tooltip carrying the reason). It then asserts the colony's fingerprint is unchanged:
+the save, which includes the loyalty clock, so an act that still stamped attention fails too, plus the
+deliveries, lander pad, flag, relief and craft. A check during the build confirmed it fails when one gate is
+removed (editor zone, flat paint, site demolish).
+
+**Independent governor (§4)**, `independent_governor.dart`, called from `CitySim.advance` right after the
+loyalty step and inert unless `allegiance == independent`:
+- *Calendar*: a sitting on every `periodDays` (3, tunable in `IndependentGovernorTuning`) boundary since
+  `independentAtS`, starting on the declaration's own tick. It is stateless, read off the saved clock, so a
+  load sits on the same days, and one warped step that spans boundaries sits once.
+- *Sitting*: auto-vote the laws (self-government already votes them every tick, so this is mostly a log line);
+  move the tax at most ±0.05 toward the rate whose mood cost leaves happiness at 0.5; then **one** build, the
+  most urgent first: the cheapest affordable life-support building for food, water or (only where the sim
+  makes people breathe made oxygen; read, never changed) oxygen when own production is below need or the
+  colony is starving; then a landfill past waste backlog 0.3 with nothing taking garbage; then the cheapest
+  deathcare past max(3, 2% of the living) corpses with none. With nothing built, it zones up to 2 free served
+  street lots for the use with the highest `demand / (1 + lots already zoned for it)`, and stops while 2
+  zoned lots are still unbuilt. Scoring by raw demand zoned shops forever, because commercial demand sits
+  near 1 with no leisure.
+- *Placement*: an ordinary building goes on the first free served street lot. A building that stakes its own
+  plot (farm, landfill, aquifer) first reuses an empty staked plot big enough, such as the field a burned
+  farm stood on, then searches for a site beside a road: off each side, past each end and at each corner of
+  samples along every road, nearest the centre first, at most 400 checks, through the editor's own
+  `siteBlockedReason`, and never covering a zoned or built street lot. Re-cutting the lots under it would
+  demolish them. A colony with no plat (the flat sandbox) uses the cell grid instead.
+- *Budget*: ore only, since building costs ore, and never below a 10-ore reserve. It spends no money and
+  never lays roads or demolishes.
+- *Log*: `governorLog` (bounded, display only, not saved; kept in an `Expando` beside the colony).
+- Tests (`test/colony/independent_governor_test.dart`): a seceded starter-kit Earth town stays alive and grows
+  over 40 days; it rebuilds a farm when food runs short; it never spends below its reserve or touches funds;
+  it does nothing to a colonial colony; its calendar survives a save.
+
+**Independent HUD state.** `IndependencePanel` (`city_control_ui.dart`) shows "Independent since day N",
+the causes, what its council has done lately, and a placeholder **Reclaim** section saying the routes come in
+phase 3 (negotiate, win hearts) and phase 4 (force). It appears as a compact card under the City Game HUD's top
+bar, in full when the loyalty chip is tapped, and in the Politics drawer's LOYALTY section. Readouts stay live,
+and tools are greyed by the gate. The causes are saved: `CityLoyalty.independenceCauses` (`independentWhy` in
+the save), recorded at the declaration, because the live causes have moved on by the time anyone reads the panel.
+
+**Deliveries.** These stay suspended by phase 1's dispatch rule (`portClosedToPlayer`), and the test checks it:
+no craft for 200 s with a recurring run booked, and relief refused. On an independent colony the delivery
+sheet cannot add, edit, remove or reorder, so a suspended run cannot be booked back on. A *seized* port on a
+still-colonial colony stays editable, because the colony still takes orders, but its runs stay suspended by
+the same rule.
+
+**Deviations and open items.**
+- Stretch not done: a **player-flown vessel** landing at a seized or independent pad has its cargo impounded
+  (phase 1) but is **not held**. Holding it means locking a player vessel's throttle or launch, which is
+  flight-side (input or `advance_simulation_tick.dart`) and invasive, so it is left for a later pass.
+- The governor builds no power, services or housing beyond zoning. A starter-kit town under it grows (6 → ~65
+  settlers in 20 days in a debug run of the test fixture), but its mood sags to ~0.2 as services fall short
+  and the tax goes to 0, and it can still revolt. It is dumb by design. Whether it should build a clinic or a
+  generator is a tuning question for the user.
+- The governor's tax and phase 1's tax revolt both act on an independent colony (stage `seceded` is
+  self-governing). The revolt only pulls down; the governor can also raise it, a step per sitting.
+- The governor's log is not saved; the panel's "its council" list restarts after a load.
+- Phase 2 leaves `airO2`, oxygen consumption and the sufficiency/breathable rules untouched (the terraforming
+  lane owns them); the governor only reads `airO2` and `breathable` to decide whether oxygen is short.
 
 ## 8. Open questions for the user
 

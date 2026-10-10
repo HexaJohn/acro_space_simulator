@@ -16,9 +16,11 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../../../domain/colony/city/city_building_spec.dart';
+import '../../../domain/colony/city/city_control.dart';
 import '../../../domain/colony/city/city_sim.dart';
 import '../../../domain/colony/city/parcel.dart';
 import 'app_theme.dart';
+import 'city_control_ui.dart';
 import 'city_model.dart';
 import 'city_panels.dart';
 import 'road_tool_controller.dart';
@@ -27,8 +29,13 @@ import 'road_tool_panel.dart';
 export 'road_tool_controller.dart';
 
 /// What the editor does with a tap on the ground.
+///
+/// [acts]: whether the tool changes the colony — what the control gate
+/// (docs/plans/colony-secession.md §5) greys on a colony that takes no
+/// orders. True unless said otherwise, so a tool added later is gated until
+/// someone decides it only looks.
 enum CityEditTool {
-  inspect,
+  inspect(acts: false),
   zone,
   road,
   utility,
@@ -46,8 +53,15 @@ enum CityEditTool {
 
   /// The road info views — Traffic Routes, Junctions, Adjust Roads. A tool
   /// rather than a HUD panel because each changes what a click on the
-  /// ground means.
-  traffic,
+  /// ground means. Not an acting tool: Routes and Lane speed only look, and
+  /// the two views that edit (Junctions, Adjust) are refused click by click
+  /// in [RoadToolEditing].
+  traffic(acts: false);
+
+  const CityEditTool({this.acts = true});
+
+  /// Whether picking the tool up means changing the colony.
+  final bool acts;
 }
 
 /// Editor state, held by the flight view so it survives a rebuild and can be
@@ -117,6 +131,7 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
   /// a chain left armed under another tool would build on the next Road
   /// click from wherever it was abandoned.
   void set(CityEditTool t) {
+    if (t.acts && !_mayHold()) return;
     if (t != tool) resetRoadTool();
     tool = t;
     blocked = null;
@@ -124,16 +139,40 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
   }
 
   void pickUtil(CityBuildingSpec s) {
+    if (!_mayHold()) return;
     selectedUtil = s;
     tool = CityEditTool.utility;
     notifyListeners();
   }
 
   void pickZone(String kind, Density d) {
+    if (!_mayHold()) return;
     zoneKind = kind;
     density = d;
     tool = CityEditTool.zone;
     notifyListeners();
+  }
+
+  /// The colony the toolbar was last built over, for [set] to ask the gate
+  /// about: picking a tool up carries no colony of its own, and a tool that
+  /// can be picked up on a colony that takes no orders is a tool that looks
+  /// usable until the click.
+  CitySim? gateCity;
+
+  /// Whether an acting tool may be picked up. Refused, the toolbar's
+  /// blocked line says why.
+  bool _mayHold() {
+    final city = gateCity;
+    if (city == null) return true;
+    return mayActOn(city);
+  }
+
+  /// The control gate (secession §5) at an act on [city]: false, with the
+  /// reason on the blocked line, when the colony takes no orders.
+  bool mayActOn(CitySim city) {
+    if (city.mayAct((why) => blocked = why)) return true;
+    notifyListeners();
+    return false;
   }
 
   void setHover(int? cell) {
@@ -150,6 +189,7 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
   /// does it face — have to be asked.
   void applyToLot(CitySim city, String parcelId) {
     blocked = null;
+    if (!mayActOn(city)) return;
     switch (tool) {
       case CityEditTool.utility:
         applyToParcel(city, parcelId);
@@ -188,6 +228,7 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
   /// own size and frontage, so there is no footprint-fit question to ask.
   void applyToParcel(CitySim city, String parcelId) {
     blocked = null;
+    if (!mayActOn(city)) return;
     final spec = selectedUtil;
     if (tool != CityEditTool.utility) return;
     if (!city.unlocked(spec)) {
@@ -215,6 +256,7 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
   /// fit, support, cost, connectivity refresh) that a raw map write would skip.
   void applyTo(CitySim city, int cell) {
     blocked = null;
+    if (!mayActOn(city)) return;
     switch (tool) {
       case CityEditTool.inspect:
       // The road tools work in continuous metres, not cells — they are
@@ -320,6 +362,7 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
   @override
   Widget build(BuildContext context) {
     _maxWidth = math.max(240.0, MediaQuery.sizeOf(context).width - 24);
+    controller.gateCity = city;
     return AnimatedBuilder(
       animation: controller,
       builder: (context, _) => Align(
@@ -335,11 +378,14 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (controller.blocked != null)
+              // What was refused — or, on a colony that takes no orders,
+              // why every tool is greyed, before anything is tried.
+              if ((controller.blocked ?? city.playerControl.reason)
+                  case final why?)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 4),
                   child: Text(
-                    controller.blocked!,
+                    why,
                     style: const TextStyle(
                         color: Color(0xFFFFB74D), fontSize: 11),
                   ),
@@ -477,7 +523,10 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
 
   Widget _tool(CityEditTool t, IconData icon, String label) {
     final on = controller.tool == t;
-    return Padding(
+    // An acting tool on a colony that takes no orders: greyed, its tooltip
+    // the reason, and a tap puts the reason on the blocked line.
+    final chip = Padding(
+      key: ValueKey('city-tool-${t.name}'),
       padding: const EdgeInsets.symmetric(horizontal: 2),
       child: InkWell(
         onTap: () => controller.set(t),
@@ -502,6 +551,7 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
         ),
       ),
     );
+    return t.acts ? gatedControl(city, chip) : chip;
   }
 
   Widget _stat(String label, double value) => Padding(

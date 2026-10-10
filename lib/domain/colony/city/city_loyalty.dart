@@ -14,10 +14,9 @@
 /// measures those numbers, applies the stage effects the colony can feel
 /// (self-government, the tax revolt) and names the causes a warning shows.
 ///
-/// Phase 1 only WARNS and STRIKES: the control gate that would refuse the
-/// player's commands on an independent colony is phase 2, so here a
-/// secession is recorded and announced, the colony's port closes to the
-/// player, and nothing else is refused.
+/// This file WARNS and STRIKES. What independence then refuses is the
+/// control gate's (`city_control.dart`, phase 2), and how an independent
+/// colony runs itself is its governor's (`independent_governor.dart`).
 library;
 
 import 'dart:math' as math;
@@ -350,6 +349,15 @@ class CityLoyalty {
   /// [colonyTimeS] the colony seceded at, if it has.
   double? independentAtS;
 
+  /// What drove it out, as the warning worded it at the moment it left
+  /// ("no orders for 34 days; 3 revolts in 15 days"). Saved: the
+  /// independence panel names the causes for as long as the colony stays
+  /// gone, and by then the live causes have moved on — its neglect clock
+  /// stops counting the player, its rebellion settles under its own rule —
+  /// so re-deriving them would explain a secession by a colony that no
+  /// longer has the reasons it left for.
+  String? independenceCauses;
+
   /// Announcements for a host to drain (bounded).
   final List<LoyaltyNotice> notices = [];
 
@@ -619,6 +627,7 @@ class CityLoyalty {
     allegiance = Allegiance.independent;
     stage = LoyaltyStage.seceded;
     independentAtS = colonyTimeS;
+    independenceCauses = causes.isEmpty ? null : causes;
     // The port becomes the independent colony's own, and stays shut to the
     // player ([portClosedToPlayer]); it is no longer a rebel holding.
     portSeized = false;
@@ -649,6 +658,7 @@ class CityLoyalty {
               {'res': c.resource, 'amt': c.amount, 't': c.atS},
           ],
         if (independentAtS != null) 'independentAt': independentAtS,
+        if (independenceCauses != null) 'independentWhy': independenceCauses,
       };
 
   /// Restore from [toJson]'s map. Tolerant: an absent or unreadable field
@@ -692,6 +702,8 @@ class CityLoyalty {
     }
     final ind = json['independentAt'];
     independentAtS = ind is num ? ind.toDouble() : null;
+    final why = json['independentWhy'];
+    independenceCauses = why is String ? why : null;
   }
 }
 
