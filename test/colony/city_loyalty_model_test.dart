@@ -24,6 +24,7 @@ void main() {
     double sufficiency = 1,
     bool attend = false,
     bool hasSpaceport = true,
+    bool populated = true,
     double dt = 5,
     bool Function(CityLoyalty)? until,
   }) {
@@ -37,6 +38,7 @@ void main() {
         rebellion: rebellion,
         sufficiency: sufficiency,
         hasSpaceport: hasSpaceport,
+        populated: populated,
       ));
       if (until != null && until(l)) return l.colonyTimeS / day;
     }
@@ -189,6 +191,15 @@ void main() {
       expect(l.independentAtS, isNotNull);
       expect(l.portClosedToPlayer, isTrue,
           reason: "its port is its own now, and shut to the player's craft");
+    });
+
+    test('an empty colony does not secede', () {
+      // Suffocated to its last settler: no need, so no shortfall, so it
+      // measures self-sufficient — and nobody is left to declare anything.
+      final l = CityLoyalty();
+      run(l, 20, rebellion: 1, sufficiency: 1, populated: false);
+      expect(l.level, 0);
+      expect(l.allegiance, Allegiance.colonial);
     });
 
     test('a dependent colony cannot leave: standoff, not secession', () {

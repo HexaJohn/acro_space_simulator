@@ -645,8 +645,15 @@ class CitySim {
 
   /// Breathable worlds (Earth-like O2 + real atmosphere) supply oxygen for free
   /// — no city oxygen production needed.
+  ///
+  /// Half an atmosphere at least, as [SurfaceConditions.breathable] has it:
+  /// with the body's air now mutable, a Mars vented to 0.17 atm of nearly
+  /// pure oxygen passes the density and fraction tests alone, and nobody
+  /// breathes that without a suit.
   bool get breathable =>
-      (body.atmosphere?.seaLevelDensity ?? 0) > 0.3 && o2Fraction >= 0.15;
+      (body.atmosphere?.seaLevelDensity ?? 0) > 0.3 &&
+      (body.atmosphere?.seaLevelPressure ?? 0) >= 0.5 * 101325 &&
+      o2Fraction >= 0.15;
 
   /// The share of a colonist's oxygen the sky supplies, 0..1 — what makes
   /// the air a LOCAL source in the self-sufficiency measure

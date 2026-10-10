@@ -200,8 +200,8 @@ play at 1×, but hours under warp. Earth stays effectively immovable at the same
   is read as a rate over the span the flows were produced in rather than over the one tick that integrates them.
 - **Open for the user:** (a) the `oxygenTargetPa` vent cap is not in §4/§7; it is what keeps 50 towers from adding
   ~11% to Earth's air at the tuned scale, and the phase-3 towers (greenhouse factory, regolith baker) will need their
-  own limits on Earth either way. (b) At the cap Mars reaches ~0.16-0.2 atm, where `CitySim.breathable`
-  (density > 0.3 kg/m³ and O2 ≥ 15%) turns true although §3.4 (p ≥ 0.5 atm) says not breathable; phase 2 must land
-  the §3.4 definition before release, or the getter needs the pressure floor now.
+  own limits on Earth either way. (b) RESOLVED at integration: `CitySim.breathable` now also needs ≥ 0.5 atm (the `SurfaceConditions` floor), so a
+  Mars at the cap (~0.16-0.2 atm of mostly O2) is not breathable. Phase 2 still replaces the getter with the full
+  §3.4 definition and partial `airO2`.
 - **Not yet:** the Atmospheric Harvester still does not remove O2 from the inventory (its stock units have no
   mole conversion yet); the CitySim breathable/o2 getters still read the body (which now carries the derived air).

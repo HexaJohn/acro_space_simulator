@@ -211,6 +211,7 @@ class LoyaltyInputs {
     required this.sufficiency,
     this.hasSpaceport = true,
     this.starving = false,
+    this.populated = true,
     this.causes,
   });
 
@@ -234,6 +235,11 @@ class LoyaltyInputs {
   /// Whether the colony is starving: a seized port being starved out adds
   /// to desperation.
   final bool starving;
+
+  /// Whether anyone lives there. An empty colony measures self-sufficient
+  /// (no need, no shortfall), and one that suffocated to its last settler
+  /// must not then "secede": nobody is left to declare anything.
+  final bool populated;
 
   /// The warning's cause text, built only when a notice needs it.
   final String Function()? causes;
@@ -528,7 +534,7 @@ class CityLoyalty {
     }
     final condition = level <= 0 || revolts.length >= t.revoltsToSecede;
     if (condition || stage == LoyaltyStage.standoff) {
-      if (selfSufficient) {
+      if (selfSufficient && i.populated) {
         _secede(causes());
         return;
       }
@@ -752,6 +758,7 @@ extension CityLoyaltySim on CitySim {
     loyalty.localCapacity = localSupportablePop(localNet);
     loyalty.tick(LoyaltyInputs(
       dt: dt,
+      populated: population >= 1,
       happiness: happiness,
       coverage: coverage,
       rebellion: rebellion,
