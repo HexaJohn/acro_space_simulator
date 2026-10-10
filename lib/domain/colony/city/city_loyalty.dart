@@ -278,10 +278,19 @@ class LoyaltyWarning {
 
 /// A cargo the rebels kept (§4.1): what was taken, so the player sees it.
 class ImpoundedCargo {
-  const ImpoundedCargo(this.resource, this.amount, this.atS);
+  const ImpoundedCargo(this.resource, this.amount, this.atS, {this.source});
   final String resource;
   final double amount;
   final double atS;
+
+  /// The craft it came off, when one craft can be unloaded over many ticks
+  /// (a shuttle on a pad tops up a store as room opens): every top-up from
+  /// it is one record ([CityLoyalty.impound]). Null for a pad craft, which
+  /// drops its payload once. Not saved: shuttle ids restart with each
+  /// session, and a loaded record merging with a new shuttle that reused
+  /// its id would misdate the old cargo; a craft still held across a load
+  /// starts one fresh record instead.
+  final String? source;
 }
 
 /// A colony's loyalty state and its rules (§3).
@@ -340,6 +349,12 @@ class CityLoyalty {
 
   /// Last tick's drift terms, loyalty per day, for the readout.
   double lastErosion = 0, lastMisrule = 0, lastRecovery = 0;
+
+  /// Last tick's people the colony's own life support (and sky) could keep
+  /// alive, measured, not eased (`CityLoyaltySim.localSupportablePop`): the
+  /// size a standoff's emigration settles at. Working state, not saved — the
+  /// next tick measures it again.
+  double localCapacity = double.infinity;
 
   static const int _maxNotices = 32;
   static const int _maxImpounded = 20;
@@ -412,10 +427,25 @@ class CityLoyalty {
     return false;
   }
 
-  /// Record a cargo the rebels kept.
-  void impound(String resource, double amount) {
+  /// Record a cargo the rebels kept. A [source] already on the list for
+  /// the same [resource] adds to its record rather than starting one: a
+  /// shuttle held on a pad is unloaded every tick, as far as the store has
+  /// room, and a record per top-up filled the bounded list with crumbs —
+  /// "20 cargos impounded", "0 food, 0 food, …" — and pushed the delivery
+  /// actually taken off the end of it.
+  void impound(String resource, double amount, {String? source}) {
     if (amount <= 0) return;
-    impounded.add(ImpoundedCargo(resource, amount, colonyTimeS));
+    if (source != null) {
+      final k = impounded.lastIndexWhere(
+          (c) => c.source == source && c.resource == resource);
+      if (k >= 0) {
+        final was = impounded[k];
+        impounded[k] = ImpoundedCargo(resource, was.amount + amount, was.atS,
+            source: source);
+        return;
+      }
+    }
+    impounded.add(ImpoundedCargo(resource, amount, colonyTimeS, source: source));
     if (impounded.length > _maxImpounded) impounded.removeAt(0);
   }
 
@@ -547,7 +577,14 @@ class CityLoyalty {
     }
 
     // The port (§4.1): taken once desperation passes the line in standoff,
-    // given back when loyalty climbs past the Defiant line.
+    // and held for as long as the standoff lasts. Loyalty climbing past the
+    // Defiant line gives it back only by ENDING the standoff (the branch
+    // above, which releases it): a standoff held by three recent revolts
+    // usually sits at loyalty 0.55, over that line, and releasing on the
+    // level alone handed the port back on one tick and re-seized it on the
+    // next — a fresh "next delivery is impounded" each time, so every other
+    // tick let a craft in. The release here is for a port held outside a
+    // standoff at all, which only an inconsistent save can produce.
     if (stage == LoyaltyStage.standoff &&
         !portSeized &&
         i.hasSpaceport &&
@@ -557,7 +594,9 @@ class CityLoyalty {
       _notice(LoyaltyNoticeKind.portSeized,
           'Rebels have seized the spaceport: the next delivery will be '
           'impounded, then docking is refused.');
-    } else if (portSeized && level > t.defiantAbove) {
+    } else if (portSeized &&
+        stage != LoyaltyStage.standoff &&
+        level > t.defiantAbove) {
       _release();
     }
   }
@@ -676,9 +715,41 @@ extension CityLoyaltySim on CitySim {
     ].reduce(math.min);
   }
 
+  /// How many people [localNet] and the sky could keep alive, whoever is
+  /// living there now: for each of food, water and oxygen, what the
+  /// colony's own buildings make over what one person needs of it that the
+  /// sky does not supply, and the fewest of the three. Infinite for a
+  /// commodity the sky covers whole. Oxygen counts here only where the sim
+  /// makes people breathe it (complexity 0.3 and up, as the life-support
+  /// step has it): this is who can LIVE on what is made, and below that
+  /// nobody is living on shipped air — unlike the independence measure,
+  /// where oxygen always counts (§3.4).
+  ///
+  /// This, not [localSufficiency] × population through the eased
+  /// [CityLoyalty.selfSufficiency], is what a standoff's emigration aims at:
+  /// a share of the CURRENT population, re-taken every tick while the eased
+  /// share lagged below 1, kept the target under the population all the way
+  /// down, and a town whose farms fed 60% of it emptied to its crew floor in
+  /// two colony days. A head count does not shrink with the people leaving.
+  double localSupportablePop(Map<String, double> localNet) {
+    double people(String c, double perPerson, {double sky = 0}) {
+      final unmet = perPerson * (1 - sky.clamp(0.0, 1.0));
+      if (unmet <= 1e-12) return double.infinity;
+      return math.max(0.0, localNet[c] ?? 0) / unmet;
+    }
+
+    return [
+      people(Commodity.food, CitySim.foodPerPersonPerSec),
+      people(Commodity.water, CitySim.waterPerPersonPerSec),
+      people(Commodity.oxygen, CitySim.waterPerPersonPerSec,
+          sky: systemOn(0.3) ? airO2 : 1.0),
+    ].reduce(math.min);
+  }
+
   /// The loyalty step of a tick: the model, then the tax revolt.
   void loyaltyTick(double dt,
       {required Map<String, double> localNet, required double coverage}) {
+    loyalty.localCapacity = localSupportablePop(localNet);
     loyalty.tick(LoyaltyInputs(
       dt: dt,
       happiness: happiness,
@@ -712,12 +783,13 @@ extension CityLoyaltySim on CitySim {
   /// The population the colony is heading for, under the loyalty stage:
   /// in a standoff with the port still open, the settlers the colony
   /// cannot keep alive on its own leave by the ordinary emigration path
-  /// (§3.5), down to what its own life support covers or its crew floor.
+  /// (§3.5), down to the head count its own life support covers
+  /// ([CityLoyalty.localCapacity], this tick's) or its crew floor — and
+  /// those it can keep, stay.
   double loyaltyPopCap(double target) {
     if (!loyalty.standoffEmigration) return target;
     final floor = (CitySim.landerCrew + reliefCrew).toDouble();
-    return math.min(
-        target, math.max(floor, population * loyalty.selfSufficiency));
+    return math.min(target, math.max(floor, loyalty.localCapacity));
   }
 
   /// The actual terms of the drift equation, worded for a warning (§3.5):

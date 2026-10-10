@@ -119,9 +119,11 @@ class ShuttleCargoService {
     if (delivered.isEmpty) return null;
     // Unloaded at a port the rebels hold, or an independent colony's: the
     // cargo is theirs now (docs/plans/colony-secession.md §4.1). It is in
-    // the stock all the same; the record is what the player sees taken.
+    // the stock all the same; the record is what the player sees taken —
+    // one per craft and commodity, however many ticks it takes to unload.
     if (city.loyalty.portClosedToPlayer) {
-      delivered.forEach(city.loyalty.impound);
+      delivered.forEach((c, amount) =>
+          city.loyalty.impound(c, amount, source: vessel.id.value));
     }
     return CargoTransfer(padId: padId, delivered: delivered, loaded: const {});
   }

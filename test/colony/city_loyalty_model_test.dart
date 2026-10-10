@@ -290,6 +290,62 @@ void main() {
       expect(l.portSeized, isFalse);
     });
 
+    test('a standoff held by revolts keeps the port: no seize/release flap',
+        () {
+      // Three revolts on a dependent colony: loyalty 0.55, over the Defiant
+      // line, desperation 0.45, over the seizure line. The revolts, not the
+      // level, hold it in standoff.
+      final l = CityLoyalty()..attend();
+      for (var i = 0; i < 3; i++) {
+        l.onRevolt('REVOLT!');
+      }
+      expect(l.level, greaterThan(tuning.defiantAbove));
+      final held = <bool>[];
+      run(l, 3, happiness: 0.5, sufficiency: 0.3, until: (l) {
+        held.add(l.portSeized);
+        return false;
+      });
+      expect(l.stage, LoyaltyStage.standoff);
+      expect(held, everyElement(isTrue),
+          reason: 'seized on the first tick and held from then on');
+      expect(
+          l.notices.where((n) => n.kind == LoyaltyNoticeKind.portSeized),
+          hasLength(1));
+      expect(l.notices.map((n) => n.kind),
+          isNot(contains(LoyaltyNoticeKind.portReleased)));
+      expect(l.admitCraft(), isTrue, reason: 'one admission, once');
+      run(l, 1, happiness: 0.5, sufficiency: 0.3);
+      expect(l.admitCraft(), isFalse,
+          reason: 'not a fresh one every other tick');
+
+      // The revolts age out of the window; at loyalty over the line the
+      // standoff ends, and that is what gives the port back.
+      run(l, tuning.revoltWindowDays, happiness: 0.5, attend: true,
+          sufficiency: 0.3, until: (l) => l.stage != LoyaltyStage.standoff);
+      expect(l.stage, isNot(LoyaltyStage.standoff));
+      expect(l.portSeized, isFalse);
+      expect(
+          l.notices.where((n) => n.kind == LoyaltyNoticeKind.portReleased),
+          hasLength(1));
+    });
+
+    test('impounds from one craft merge; separate craft stay separate', () {
+      final l = CityLoyalty();
+      for (var i = 0; i < 50; i++) {
+        l.impound('food', 0.5, source: 'shuttle-a');
+      }
+      l.impound('fuel', 4, source: 'shuttle-a');
+      l.impound('food', 200);
+      l.impound('food', 200);
+      l.impound('food', 1, source: 'shuttle-a');
+      expect(l.impounded.map((c) => (c.resource, c.amount, c.source)), [
+        ('food', 26.0, 'shuttle-a'),
+        ('fuel', 4.0, 'shuttle-a'),
+        ('food', 200.0, null),
+        ('food', 200.0, null),
+      ]);
+    });
+
     test('given back once loyalty climbs past the Defiant line', () {
       final l = desperateStandoff();
       run(l, 30, happiness: 1, attend: true, sufficiency: 0,

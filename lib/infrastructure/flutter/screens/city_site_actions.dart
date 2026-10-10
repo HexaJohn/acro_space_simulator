@@ -330,22 +330,31 @@ void showCitySiteMenu({
     // needs a free pad (a spaceport has one pad per footprint tile).
     final cd = sim.reliefCooldown.ceil();
     final hasPad = sim.freePad(site) != null;
-    final canRelief = sim.reliefCooldown <= 0 && hasPad;
+    // A port the rebels hold, or an independent colony's, takes no relief
+    // (secession §4.1): say so, rather than offer a button that refuses.
+    final shut = sim.loyalty.portHoldReason;
+    final canRelief = sim.reliefCooldown <= 0 && hasPad && shut == null;
     actions.add(citySiteAction(
         context,
         Icons.volunteer_activism,
         canRelief
             ? 'Request assistance'
-            : (!hasPad ? 'All pads busy' : 'Assistance on cooldown'),
+            : (shut != null
+                ? 'Relief refused'
+                : (!hasPad ? 'All pads busy' : 'Assistance on cooldown')),
         canRelief
             ? 'A relief craft lands here with food, water, ore, fuel, funds + 8 settlers.'
-            : (!hasPad
-                ? 'Every pad on this spaceport is occupied — wait for one to clear.'
-                : 'Recovering — available again in ${cd}s.'),
+            : (shut != null
+                ? 'No relief can land: $shut.'
+                : (!hasPad
+                    ? 'Every pad on this spaceport is occupied — wait for one to clear.'
+                    : 'Recovering — available again in ${cd}s.')),
         canRelief ? AppTheme.accent2 : AppTheme.textDim, () {
       if (!canRelief) return;
-      sim.requestRelief(site);
-      sim.attend();
+      // Only a relief that flies is an act of governance (§3.3): a refused
+      // request stamping attention would keep a standoff "attended" — the
+      // condition for its recovery — by a button that does nothing.
+      if (sim.requestRelief(site)) sim.attend();
       onChanged();
     }));
     // Recurring resource deliveries (a list — a starport runs several).

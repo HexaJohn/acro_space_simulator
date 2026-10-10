@@ -126,6 +126,70 @@ void main() {
       expect(free.loyaltyWarnings().first.key, 'independent');
     });
 
+    test('an Earth town can feed itself and leaves; a raw Mars one cannot',
+        () {
+      // The default bar, measured, not forced: an Earth town once it has
+      // eaten through its founding larder (the first days, when the larder
+      // feeds people its farms do not) lives on its own farms and pumps
+      // and the sky.
+      final earth = town();
+      run(earth, 3000);
+      expect(earth.loyalty.selfSufficiency,
+          greaterThanOrEqualTo(const CityLoyaltyTuning().independenceBar));
+      // The same town on Mars, its air shipped in: alive, and dependent.
+      final mars = starterKit(body: 'mars');
+      zoneAll(mars);
+      buildAll(mars);
+      for (var i = 0; i < 1200; i++) {
+        mars.stock[Commodity.oxygen] = mars.stockCap;
+        mars.advance(0.5);
+      }
+      expect(mars.population, greaterThan(CitySim.landerCrew));
+      expect(mars.loyalty.selfSufficiency, lessThan(0.5));
+
+      for (final c in [earth, mars]) {
+        final t = c.colonyTimeS;
+        c.loyalty.revolts.addAll([t, t, t]);
+        for (var i = 0; i < 4; i++) {
+          c.stock[Commodity.oxygen] = c.stockCap;
+          c.advance(0.5);
+        }
+      }
+      expect(earth.loyalty.allegiance, Allegiance.independent);
+      expect(mars.loyalty.stage, LoyaltyStage.standoff);
+    });
+
+    test('a standoff sheds those living on imports, and keeps the rest', () {
+      final base = town();
+      run(base, 120);
+      final loyal = clone(base);
+      final standoff = clone(base);
+      standoff.loyalty
+        ..tuning = const CityLoyaltyTuning(independenceBar: 5)
+        ..level = 0
+        ..stage = LoyaltyStage.standoff;
+      // Imports keep coming — a larder kept full — so both towns could
+      // live past what their farms feed.
+      for (var i = 0; i < 600; i++) {
+        for (final c in [loyal, standoff]) {
+          c.stock[Commodity.food] = c.stockCap;
+          c.stock[Commodity.water] = c.stockCap;
+          c.advance(0.5);
+        }
+      }
+      expect(standoff.loyalty.stage, LoyaltyStage.standoff);
+      expect(standoff.loyalty.portSeized, isFalse,
+          reason: 'its port open, so its settlers can leave');
+      final local = standoff.loyalty.localCapacity;
+      expect(local, greaterThan(4.0 * (CitySim.landerCrew + standoff.reliefCrew)),
+          reason: 'its own farms and pumps feed a real town');
+      expect(standoff.population, closeTo(local, 0.1 * local),
+          reason: 'it settles at what it can feed itself, not the crew '
+              'floor');
+      expect(loyal.population, greaterThan(1.2 * standoff.population),
+          reason: 'those who lived on imports are the ones who left');
+    });
+
     test('a revolt hits loyalty, and is announced and on the status list',
         () {
       final city = town();
@@ -205,9 +269,39 @@ void main() {
 
       // Relief cannot land either.
       city.reliefCooldown = 0;
-      city.requestRelief(port);
+      expect(city.requestRelief(port), isFalse);
       expect(city.craft, hasLength(1));
       expect(city.blocked, contains('port held by rebels'));
+    });
+
+    test('a delivery grounded for fuel does not spend the one admission',
+        () {
+      final (city, port) = seized();
+      final food = DeliverySchedule(
+          resource: Commodity.food, intervalSec: 30, amount: 200, timer: 1)
+        ..recurring = true
+        ..spareFuel = false;
+      city.deliveries[port] = [food];
+      for (var i = 0; i < 10; i++) {
+        city
+          ..stock[Commodity.fuel] = 0
+          ..stock[Commodity.oxidizer] = 0
+          ..advance(0.5);
+      }
+      expect(city.craft, isEmpty, reason: 'grounded: nothing flew');
+      expect(city.blocked, contains('grounded'));
+      expect(city.loyalty.impoundPending, isTrue,
+          reason: 'the next delivery that flies is still the one impounded');
+
+      for (var i = 0; i < 120; i++) {
+        city
+          ..stock[Commodity.fuel] = 500
+          ..stock[Commodity.oxidizer] = 500
+          ..advance(0.5);
+      }
+      expect(city.craft.single.held, isTrue);
+      expect(city.loyalty.impounded.single.resource, Commodity.food);
+      expect(city.loyalty.impoundPending, isFalse);
     });
 
     test('closes migration both ways', () {

@@ -5591,19 +5591,23 @@ class CitySim {
   /// "Request assistance": dispatch a relief craft to [site] (a spaceport). It
   /// flies in, lands on a free pad, dwells 30 s and drops a care package of
   /// resources + settlers, then leaves — the anti-soft-lock lifeline.
-  void requestRelief(String site) {
-    if (reliefCooldown > 0) return;
+  ///
+  /// True when a craft was sent: the caller stamps attention only then, as
+  /// a refused act is no act of governance (secession §3.3).
+  bool requestRelief(String site) {
+    if (reliefCooldown > 0) return false;
     // A port the rebels hold, or an independent colony's, takes no relief
     // from the player (secession §4.1).
     final shut = loyalty.portHoldReason;
     if (shut != null) {
       blocked = 'No relief can land: $shut.';
-      return;
+      return false;
     }
     final pad = freePad(site);
-    if (pad == null) return; // all pads busy
+    if (pad == null) return false; // all pads busy
     craft.add(LandedCraft(site: site, padIndex: pad, isRelief: true));
     reliefCooldown = reliefCooldownMax;
+    return true;
   }
 
   /// Drop the relief care package: top up life support, add funds + settlers that
@@ -5657,8 +5661,11 @@ class CitySim {
           sched.timer = 0;
           continue;
         }
-        if (!loyalty.admitCraft()) break;
-        dispatchDelivery(site, pad, sched);
+        // The seized port's one admission goes to a craft that actually
+        // flies: a run grounded for want of return fuel launches nothing,
+        // and spending the admission on it left nothing ever impounded and
+        // every later run refused.
+        if (dispatchDelivery(site, pad, sched)) loyalty.admitCraft();
         if (sched.recurring) {
           sched.timer = sched.intervalSec;
         } else {
@@ -5739,7 +5746,8 @@ class CitySim {
   }
 
   /// Send one delivery craft to [pad], applying the schedule's fuel rule.
-  void dispatchDelivery(String site, int pad, DeliverySchedule sched) {
+  /// False when it is grounded for want of fuel and nothing was sent.
+  bool dispatchDelivery(String site, int pad, DeliverySchedule sched) {
     // People are passengers, not cargo: their count isn't cut by return fuel.
     // Commodities are: self-fuelling shaves the return propellant off the load.
     final isPeople = sched.resource == kDeliveryPeople;
@@ -5755,7 +5763,7 @@ class CitySim {
         blocked =
             'A ${sched.resource} delivery is grounded: not enough fuel/oxidizer to refuel it.';
         sched.timer = 0; // retry next frame
-        return;
+        return false;
       }
       stock[Commodity.fuel] = stockOf(Commodity.fuel) - half;
       stock[Commodity.oxidizer] = stockOf(Commodity.oxidizer) - half;
@@ -5770,6 +5778,7 @@ class CitySim {
         isRelief: false,
         resource: sched.resource,
         payload: delivered));
+    return true;
   }
 
   /// Resources that can be flown in on a scheduled delivery. 'people' is a
