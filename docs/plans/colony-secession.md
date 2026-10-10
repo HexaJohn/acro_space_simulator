@@ -59,6 +59,7 @@ Treasuries are **per colony** (`CitySim.funds`). There is no player-wide purse. 
 - `loyalty` ∈ [0, 1]: starts at 1.
 - `allegiance`: `colonial` | `independent` | `occupied` (§6.3).
 - `revolts`: timestamps of recent revolts (a short list, pruned to the window).
+- `desperation` ∈ [0, 1] (§3.4), `selfSufficiency` (eased, §3.4), and `portSeized` plus the impounded craft and cargo (§4.1).
 - Also start saving `taxRate`, `laws`, `rebellion`, `crime`, `corruption` and `inequality`. Without that, loyalty
   is a stat the player can save-scum away. This changes the "save only what the player MADE" rule at
   `city_sim.dart:4840` deliberately, and the doc comment is updated to match.
@@ -115,7 +116,27 @@ disaster day should not cancel it.
   goods do not either: a colony that can breathe, eat and drink can survive alone, even if it cannot grow
   without trade.
 
-**Dependent** = `selfSufficiency` < `independenceBar` (proposed 0.9) when the secession condition fires.
+**Dependent** = `selfSufficiency` < `independenceBar` when the secession condition fires.
+
+The bar is **not fixed**: it falls with the colony's state of mind (user, 2026-10-10). A content but neglected
+colony will not leave until it can feed itself. A colony driven to despair will declare independence even
+if it cannot, choosing liberty or death.
+
+```
+independenceBar = 0.9 × (1 − desperation)
+desperation ∈ [0,1], saved, eased:
+  rises with  time spent in standoff (§3.5), each revolt, rebellion pinned near 1, mood near 0,
+              a seized port being retaken or starved out (§4.1)
+  decays with attended, content rule (the same `content` term as loyalty recovery)
+```
+
+Proposed: a colony that sits in standoff at mood ≈ 0 for about 15 days reaches desperation ≈ 1. Each revolt
+adds 0.15. Decay takes about 10 days of good rule to clear it.
+
+A colony that secedes **below** sufficiency is starving by its own choice. It stops receiving deliveries
+(§4), its `supportablePop` falls, and it either petitions to rejoin (§6.2) before the die-off, or withers.
+Which of the two happens is the desperation that drove it: the more desperate it was, the longer it holds out
+before petitioning.
 
 ### 3.5 Stages (with hysteresis)
 
@@ -125,12 +146,31 @@ disaster day should not cancel it.
 | Restless | < 0.6 (back above 0.65) | status notification + HUD chip; the colony starts **self-governing**: laws auto-vote whatever the government, and an over-high tax is pulled down toward what the mood bears (a tax revolt) |
 | Defiant | < 0.3 (back above 0.35) | **strikes**: `restThrottle` × 0.7 and tax collection halved (non-payment); a louder warning naming the causes (neglect, unrest, revolts) |
 | Seceded | ≤ 0, or 3 revolts within 15 days, **and self-sufficient** (§3.4) | `allegiance = independent` (§4) |
-| Standoff | the secession condition fires, but the colony is **dependent** | it cannot leave. Defiant's strike deepens (`restThrottle` × 0.4, no tax), settlers emigrate at the shortfall rate (the existing emigration path), and the warning reads "would secede, but cannot feed itself". It resolves when loyalty climbs back (attention + good rule), or the colony withers to its crew floor. If it ever becomes self-sufficient while still in standoff, it secedes at once. |
+| Standoff | the secession condition fires, but the colony is **dependent** | it cannot leave. Defiant's strike deepens (`restThrottle` × 0.4, no tax), settlers emigrate at the shortfall rate (the existing emigration path), and the warning reads "would secede, but cannot feed itself". Rebels **seize the spaceport** (§4.1) once
+desperation passes 0.4. It resolves when loyalty climbs back (attention + good rule), or the colony withers to its crew floor. If it ever becomes self-sufficient while still in standoff, it secedes at once. |
 
 The causes shown are the actual terms of the drift equation, so the warning says *why*, for example "no orders
 for 34 days" or "rebellion 0.82: crime, inequality".
 
 ## 4. Independence
+
+### 4.1 Seizing the spaceport (standoff and independence)
+
+The spaceport is a dependent colony's only lever, and rebels take it (user, 2026-10-10):
+
+- **The next delivery is impounded.** Its cargo goes into the colony's own `stock`. This prolongs the standoff,
+  as a real impounding would, and the player sees exactly what was taken.
+- **Docking is refused after that.** Scheduled deliveries to the seized port are suspended and flagged
+  "port held by rebels". A shuttle already en route lands, and is held as well, so its cargo is impounded
+  and the craft stays grounded until the port is retaken.
+- **The port closes both ways.** Immigration stops (it already needs a working port) and emigration stops
+  too. Settlers are trapped, so withering comes from hunger rather than departure. The emigration in §3.5's
+  standoff row applies only before the seizure.
+- **It shows up in the player's logistics,** not just the colony's HUD. A dependent revolt hurts the
+  player's supply network, which gives the player reason to deal with it.
+- The port is released when loyalty climbs back past the Defiant line, on secession (it becomes the
+  independent colony's port, and stays closed to the player), or when it is retaken by force (§6.3, which
+  gives occupation a concrete first target).
 
 - The control gate (§5) refuses every player command on the colony. The HUD shows it as **independent**:
   readouts visible, tools greyed out, with a "Reclaim" panel (§6).
@@ -224,7 +264,8 @@ v1 does not model it beyond the player's existing ability to cancel delivery sch
 
 ## 7. Phases
 
-1. **Loyalty**: clock, attendance, the drift equation, `selfSufficiency` (§3.4) and the standoff stage, stages and their effects, warnings in the status list
+1. **Loyalty**: clock, attendance, the drift equation, `selfSufficiency` and `desperation` (§3.4), the standoff
+   stage and spaceport seizure (§4.1), stages and their effects, warnings in the status list
    and the HUD (including the revolt toasts that are missing today), and saving the political state.
    Domain plus HUD. Tests: neglect alone, misrule alone, recovery, hysteresis, and the save round-trip.
 2. **Independence**: the control gate across every call site plus the sweep test, the independent governor,
@@ -244,10 +285,7 @@ Each phase is one commit or a few, shipped behind nothing, since the first phase
 - **Q4 Government.** Should Autocracy and Monarchy resist longer (slower erosion, harsher revolts), or only
   through the existing `rebellionSensitivity`? Proposed: only through sensitivity, plus Autocracy keeps its
   garrison-style suppression in phase 4.
-- **Q6 Standoff.** A dependent colony at the secession threshold cannot leave (§3.5). Is strike + emigration +
-  withering the right shape? Or should rebels seize the spaceport, impounding the next delivery and refusing
-  docking, which makes a dependent revolt hurt the player's logistics?
-- **Q7 The bar.** Should self-sufficiency need 90% of life support from local buildings (proposed), and should
-  oxygen count only where the sim manages it (off breathable worlds, complexity ≥ 0.3)?
+- **Q6 Standoff: ANSWERED 2026-10-10:** strike, emigration and withering, plus rebels seize the spaceport (§4.1).
+- **Q7 The bar: ANSWERED 2026-10-10:** 90%, falling toward 0% with desperation (§3.4). Still to confirm: oxygen counts only where the sim manages it (proposed yes).
 - **Q5 The flat sandbox** `CityBuilderScreen` (`NewCityScreen._found`, never in a world). Does loyalty apply
   there? Proposed: yes, but with no reputation route, since it is the only colony.
