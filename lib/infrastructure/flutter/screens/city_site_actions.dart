@@ -75,7 +75,9 @@ Widget citySiteAction(
 /// [citySiteAction] behind the control gate (docs/plans/colony-secession.md
 /// §5): on a colony that takes no orders the row stays — the player sees
 /// what the building could do — greyed, its subtitle the reason, and a tap
-/// says it instead of acting.
+/// says it instead of acting. [termRefusal] is a binding term's refusal
+/// (secession §6.1) on a colony that does take orders — the demolition
+/// ban on Demolish — shown and said the same way.
 Widget gatedSiteAction(
   BuildContext context,
   CitySim sim,
@@ -83,14 +85,15 @@ Widget gatedSiteAction(
   String label,
   String sub,
   Color color,
-  VoidCallback onTap,
-) {
-  final c = sim.playerControl;
-  if (c.allowed) {
+  VoidCallback onTap, {
+  String? termRefusal,
+}) {
+  final why = sim.playerControl.reason ?? termRefusal;
+  if (why == null) {
     return citySiteAction(context, icon, label, sub, color, onTap);
   }
-  return citySiteAction(context, icon, label, c.reason!, AppTheme.textDim,
-      () => sayRefused(context, c.reason!));
+  return citySiteAction(context, icon, label, why, AppTheme.textDim,
+      () => sayRefused(context, why));
 }
 
 /// A "why did this happen / how to fix" modal for a warning or status.
@@ -440,7 +443,7 @@ void showCitySiteMenu({
     demolishSite(sim, site);
     sim.attend();
     onChanged();
-  }));
+  }, termRefusal: sim.demolitionRefusal));
 
   showModalBottomSheet<void>(
     context: context,

@@ -9,6 +9,7 @@ import 'dart:math' as math;
 import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_control.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_loyalty.dart';
+import 'package:acro_space_simulator/domain/colony/city/city_reclaim.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/commodity.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
@@ -565,6 +566,317 @@ void main() {
     expect(fingerprint(city), before, reason: 'flat toolbar');
     // Unmount before the screen's ticker outlives the test.
     await t.pumpWidget(const SizedBox());
+  });
+
+  // ---- Binding terms (§6.1, phase 3) ----------------------------------------
+  //
+  // A colony that rejoined on terms takes orders again — all but the ones
+  // that would break a term. Each refusal names the term and its days left,
+  // and a refused act leaves the colony exactly as it was (no attention
+  // stamped either).
+
+  const termDays = 12;
+
+  /// A starter colony that has just rejoined on a tax cap of 10%, Curfew
+  /// kept and no demolitions, under an autocrat's hand-voted laws.
+  CitySim bound() {
+    final city = starterKit();
+    run(city, 30);
+    city
+      ..govt = Govt.autocracy
+      ..laws.add(Law.curfew)
+      ..taxRate = 0.1;
+    city.reclaim
+      ..terms = const BindingTerms(
+          taxCap: 0.1,
+          keptLaws: {Law.curfew},
+          noDemolition: true,
+          days: termDays * 1.0)
+      ..termsUntilS = city.colonyTimeS + termDays * 120.0;
+    return city;
+  }
+
+  test('binding terms: the gate names each term and its days left', () {
+    final city = bound();
+    expect(city.playerControl.allowed, isTrue);
+    expect(city.demolitionRefusal,
+        'The rejoining terms forbid demolitions ($termDays days left).');
+    expect(city.taxRefusal(0.2),
+        'The rejoining terms cap the tax at 10% ($termDays days left).');
+    expect(city.repealRefusal(Law.curfew),
+        'The rejoining terms keep Curfew ($termDays days left).');
+    expect(city.economyRefusal(Economy.communism), contains('Communism'));
+  });
+
+  test('binding terms: the editor bulldozer refuses, the rest still acts', () {
+    final city = bound();
+    final reason = city.demolitionRefusal!;
+    final before = fingerprint(city);
+    final c = CityEditController()..gateCity = city;
+    c.set(CityEditTool.bulldoze);
+    expect(c.tool, CityEditTool.inspect, reason: 'bulldozer picked up');
+    expect(c.blocked, reason);
+    c.tool = CityEditTool.bulldoze; // held anyway
+    final built = city.parcelBuildings.keys.first;
+    // A free lot zoning can take (not an access easement).
+    final free = freeLots(city)
+        .firstWhere((p) => city.lotInspectorNote(p.id) == null)
+        .id;
+    for (final lot in [free, built]) {
+      c.applyToLot(city, lot);
+    }
+    for (final cell in [0, city.hubKey + 1, city.grid * city.grid - 1]) {
+      c.applyTo(city, cell);
+    }
+    expect(c.blocked, reason);
+    expect(fingerprint(city), before, reason: 'the bulldozer reached it');
+    // Not every order is refused: zoning a free lot still goes ahead.
+    c.set(CityEditTool.zone);
+    expect(c.tool, CityEditTool.zone);
+    c.applyToLot(city, free);
+    expect(fingerprint(city), isNot(before), reason: 'the zoning acted');
+    expect(city.loyalty.attendedAtS, city.colonyTimeS,
+        reason: 'and stamped as an act of governance');
+  });
+
+  testWidgets('binding terms: the panels hold the cap, the law, the levy',
+      (t) async {
+    t.view.physicalSize = const Size(1800, 2600);
+    t.view.devicePixelRatio = 1.0;
+    addTearDown(t.view.reset);
+    final city = bound();
+    final c = CityEditController();
+    await t.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: CityEditOverlay(controller: c, city: city, onClose: () {}),
+      ),
+    ));
+    final before = fingerprint(city);
+    // The bulldozer chip is greyed with the term.
+    final dozer = find.byKey(const ValueKey('city-tool-bulldoze'));
+    if (dozer.evaluate().isNotEmpty) {
+      expect(
+          find.ancestor(
+              of: dozer,
+              matching: find.byWidgetPredicate((w) =>
+                  w is Tooltip && w.message == city.demolitionRefusal)),
+          findsOneWidget);
+      await t.tap(dozer, warnIfMissed: false);
+      await t.pump();
+      expect(c.tool, CityEditTool.inspect);
+    }
+
+    // Politics: Curfew cannot be repealed; the terms are shown.
+    await t.tap(find.text('Politics'));
+    await t.pumpAndSettle();
+    expect(find.byKey(const ValueKey('binding-terms')), findsOneWidget);
+    final row = find.ancestor(
+        of: find.text(Law.curfew.label), matching: find.byType(Row));
+    final curfew =
+        find.descendant(of: row.first, matching: find.byType(Switch));
+    expect(curfew, findsOneWidget);
+    await t.tap(curfew, warnIfMissed: false);
+    await t.pump();
+    expect(city.laws, contains(Law.curfew));
+    expect(find.text(city.repealRefusal(Law.curfew)!), findsOneWidget,
+        reason: 'the refusal said');
+    expect(fingerprint(city), before, reason: 'a refused repeal');
+
+    // City: no switching to a levy over the cap; the tax holds at it.
+    await t.tap(find.text('City'));
+    await t.pumpAndSettle();
+    await t.tap(find.text(Economy.communism.label).first, warnIfMissed: false);
+    await t.pump();
+    expect(city.economy, isNot(Economy.communism));
+    expect(fingerprint(city), before, reason: 'a refused economy');
+    expect(find.byKey(const ValueKey('tax-cap-term')), findsOneWidget);
+    await t.drag(find.byType(Slider).first, const Offset(600, 0));
+    await t.pump();
+    expect(city.taxRate, lessThanOrEqualTo(0.1 + 1e-9));
+    await t.pump(const Duration(seconds: 4));
+  });
+
+  testWidgets('binding terms: the HUD tax slider holds the cap', (t) async {
+    t.view.physicalSize = const Size(1600, 1200);
+    t.view.devicePixelRatio = 1.0;
+    addTearDown(t.view.reset);
+    final city = bound()..taxRate = 0.05;
+    await t.pumpWidget(
+        MaterialApp(home: Scaffold(body: CityGameHud(city: city))));
+    await t.pump();
+    expect(find.byKey(const ValueKey('binding-terms')), findsOneWidget,
+        reason: 'the terms and days left under the top bar');
+    await t.tap(find.text('Budget'));
+    await t.pump();
+    await t.drag(find.byType(Slider), const Offset(600, 0));
+    await t.pump();
+    expect(city.taxRate, closeTo(0.1, 1e-9), reason: 'up to the cap, no more');
+    await t.pump(const Duration(seconds: 4));
+  });
+
+  testWidgets('binding terms: the site sheet will not demolish', (t) async {
+    t.view.physicalSize = const Size(1200, 2000);
+    t.view.devicePixelRatio = 1.0;
+    addTearDown(t.view.reset);
+    final city = bound();
+    final reason = city.demolitionRefusal!;
+    final site = portOf(city);
+    final spec = city.siteSpec(site)!;
+    final before = fingerprint(city);
+    await t.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: Builder(
+          builder: (ctx) => TextButton(
+            onPressed: () => showCitySiteMenu(
+                context: ctx,
+                sim: city,
+                site: site,
+                spec: spec,
+                onChanged: () {},
+                hooks: const CitySiteHooks()),
+            child: const Text('open'),
+          ),
+        ),
+      ),
+    ));
+    await t.tap(find.text('open'));
+    await t.pumpAndSettle();
+    final rows = {for (final (l, sub) in sheetRows(t)) l: sub};
+    expect(rows['Demolish'], reason);
+    expect(rows.values.where((s) => s == reason), hasLength(1),
+        reason: 'only demolition is refused');
+    await t.tap(find.text('Demolish').last);
+    await t.pumpAndSettle();
+    expect(city.siteSpec(site), isNotNull);
+    expect(fingerprint(city), before);
+  });
+
+  testWidgets('binding terms: the flat builder tears nothing down',
+      (t) async {
+    t.view.physicalSize = const Size(1600, 1200);
+    t.view.devicePixelRatio = 1.0;
+    addTearDown(t.view.reset);
+    final city = bound();
+    final anchor = gridPort(city);
+    final reason = city.demolitionRefusal!;
+    final before = fingerprint(city);
+    await t.pumpWidget(MaterialApp(
+        home: CityBuilderScreen(sim: city, driveLocally: false)));
+    await t.pump();
+    final driver =
+        t.state(find.byType(CityBuilderScreen)) as CityBuilderToolDriver;
+    final g = city.grid;
+    for (final tool in CityBuilderTool.values) {
+      if (tool == CityBuilderTool.inspect ||
+          tool == CityBuilderTool.retrofit) {
+        continue; // looks; upgrades in place
+      }
+      driver.debugUseTool(tool, anchor % g, anchor ~/ g);
+      await t.pump();
+      expect(fingerprint(city), before, reason: 'flat ${tool.name} on a port');
+    }
+    expect(
+        find.ancestor(
+            of: find.byKey(const ValueKey('builder-tool-bulldoze')),
+            matching: find.byWidgetPredicate(
+                (w) => w is Tooltip && w.message == reason)),
+        findsOneWidget);
+    await t.tap(find.byTooltip('Clear').first, warnIfMissed: false);
+    await t.pump();
+    expect(fingerprint(city), before, reason: 'Clear-all');
+    await t.pumpWidget(const SizedBox());
+  });
+
+  // ---- The ways back on screen (§6) -----------------------------------------
+
+  testWidgets('negotiate: hear the terms, decline, then accept', (t) async {
+    t.view.physicalSize = const Size(1600, 1400);
+    t.view.devicePixelRatio = 1.0;
+    addTearDown(t.view.reset);
+    final city = independent();
+    city.reclaim.grievance = const Grievance(rebellion: 0.9, revolts: 3);
+    await t.pumpWidget(
+        MaterialApp(home: Scaffold(body: CityGameHud(city: city))));
+    await t.pump();
+    await t.tap(find.text('Independent'));
+    await t.pumpAndSettle();
+    final force =
+        t.widget<InkWell>(find.byKey(const ValueKey('reclaim-force')));
+    expect(force.onTap, isNull, reason: 'force is not available yet');
+    expect(find.text('Not available yet.'), findsOneWidget);
+    expect(find.byKey(const ValueKey('reclaim-reputation')), findsOneWidget);
+
+    final terms = city.negotiatedTerms();
+    await t.tap(find.byKey(const ValueKey('reclaim-negotiate')));
+    await t.pumpAndSettle();
+    for (final line in terms.describe()) {
+      expect(find.text('•  $line'), findsOneWidget);
+    }
+    await t.tap(find.byKey(const ValueKey('negotiation-decline')));
+    await t.pumpAndSettle();
+    expect(city.loyalty.allegiance, Allegiance.independent);
+
+    await t.tap(find.byKey(const ValueKey('reclaim-negotiate')));
+    await t.pumpAndSettle();
+    await t.tap(find.byKey(const ValueKey('negotiation-accept')));
+    await t.pumpAndSettle();
+    expect(city.loyalty.allegiance, Allegiance.colonial);
+    expect(city.loyalty.level, 0.5);
+    expect(city.reclaim.terms!.describe(), terms.describe());
+    expect(find.byKey(const ValueKey('independence-reclaim')), findsNothing,
+        reason: 'the panel closed with the colony back');
+    expect(find.textContaining('phase'), findsNothing);
+  });
+
+  testWidgets('a dependency petition: the player sets the terms', (t) async {
+    t.view.physicalSize = const Size(1600, 1400);
+    t.view.devicePixelRatio = 1.0;
+    addTearDown(t.view.reset);
+    final city = independent();
+    city.reclaim.petition = const Petition(PetitionKind.dependency, 0);
+    await t.pumpWidget(
+        MaterialApp(home: Scaffold(body: CityGameHud(city: city))));
+    await t.pump();
+    expect(find.byKey(const ValueKey('independence-petition')), findsOneWidget,
+        reason: 'the compact card says it asks');
+    await t.tap(find.text('Independent'));
+    await t.pumpAndSettle();
+    expect(find.byKey(const ValueKey('reclaim-petition')), findsOneWidget);
+    await t.tap(find.byKey(const ValueKey('reclaim-petition-accept')));
+    await t.pumpAndSettle();
+    await t.tap(find.byKey(const ValueKey('terms-cap-10')));
+    await t.pump();
+    await t.tap(find.byKey(const ValueKey('terms-no-demolition')));
+    await t.pump();
+    await t.tap(find.byKey(const ValueKey('terms-accept')));
+    await t.pumpAndSettle();
+    expect(city.loyalty.allegiance, Allegiance.colonial);
+    final b = city.reclaim.terms!;
+    expect(b.taxCap, 0.1);
+    expect(b.noDemolition, isTrue);
+    expect(b.keptLaws, isEmpty);
+    expect(city.loyalty.level,
+        closeTo(0.5 + 2 * const ReclaimTuning().goodwillPerTerm, 1e-12));
+  });
+
+  testWidgets('a declined petition leaves it independent', (t) async {
+    t.view.physicalSize = const Size(1600, 1400);
+    t.view.devicePixelRatio = 1.0;
+    addTearDown(t.view.reset);
+    final city = independent();
+    city.reclaim.petition = const Petition(PetitionKind.hearts, 0,
+        terms: BindingTerms(taxCap: 0.2, days: 8));
+    await t.pumpWidget(
+        MaterialApp(home: Scaffold(body: CityGameHud(city: city))));
+    await t.pump();
+    await t.tap(find.text('Independent'));
+    await t.pumpAndSettle();
+    expect(find.text('•  tax at most 20%'), findsOneWidget);
+    await t.tap(find.byKey(const ValueKey('reclaim-petition-decline')));
+    await t.pumpAndSettle();
+    expect(city.reclaim.petition, isNull);
+    expect(city.loyalty.allegiance, Allegiance.independent);
+    expect(find.byKey(const ValueKey('reclaim-petition')), findsNothing);
   });
 }
 

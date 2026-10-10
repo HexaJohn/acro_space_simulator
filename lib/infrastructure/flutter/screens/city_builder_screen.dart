@@ -344,6 +344,46 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
         if (_mayAct()) act();
       };
 
+  /// [act] behind the gate for an act that tears down: refused, too, while
+  /// rejoining terms forbid demolition (secession §6.1).
+  VoidCallback _gatedDemolish(VoidCallback act) => () {
+        if (_sim.mayDemolish((why) {
+          setState(() => _sim.blocked = why);
+          sayRefused(context, why);
+        })) {
+          act();
+        }
+      };
+
+  /// Whether the held tool at [k] would tear a building down while the
+  /// rejoining terms forbid demolition (secession §6.1): the bulldozer
+  /// always; a road, zone or platform laid over a building, or a same-type
+  /// tap that removes one. Refused, the term goes on the blocked banner, and
+  /// [say] puts it in a snack bar too. [fill] asks for a rectangle fill,
+  /// which clears every cell it lays on whatever the tool (a held
+  /// installation fills as a zone does), so any building in it is refused.
+  bool _demolitionRefused(int k, {bool say = true, bool fill = false}) {
+    final why = _sim.demolitionRefusal;
+    if (why == null) return false;
+    final anchor = _sim.anchorOf(k);
+    final building = anchor != null || _sim.grown.contains(k);
+    final tears = fill
+        ? _tool == CityBuilderTool.bulldoze ||
+            (building && _tool != CityBuilderTool.retrofit)
+        : switch (_tool) {
+      CityBuilderTool.bulldoze => true,
+      CityBuilderTool.road => building && !_sim.roads.contains(k),
+      CityBuilderTool.zone || CityBuilderTool.support => building,
+      CityBuilderTool.utility =>
+        anchor != null && _sim.utils[anchor]?.type == _selectedUtil.type,
+      CityBuilderTool.retrofit || CityBuilderTool.inspect => false,
+          };
+    if (!tears) return false;
+    _sim.blocked = why;
+    if (say) sayRefused(context, why);
+    return true;
+  }
+
   @override
   void debugUseTool(CityBuilderTool tool, int x, int y) {
     setState(() => _tool = tool);
@@ -407,6 +447,10 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
           _rectHover = null;
         }
       });
+      return;
+    }
+    if (_demolitionRefused(k)) {
+      setState(() {});
       return;
     }
     setState(() {
@@ -514,6 +558,10 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     final k = _sim.key(x, y);
     if (k == _sim.hubKey) return;
     if (_tool.acts && !_mayAct()) return;
+    if (_demolitionRefused(k)) {
+      setState(() {});
+      return;
+    }
     setState(() {
       _sim.blocked = null;
       switch (_tool) {
@@ -558,10 +606,19 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     final x0 = math.min(ax, bx), x1 = math.max(ax, bx);
     final y0 = math.min(ay, by), y1 = math.max(ay, by);
     _sim.blocked = null;
+    String? refused;
+    var acted = false;
     for (var y = y0; y <= y1; y++) {
       for (var x = x0; x <= x1; x++) {
         final k = _sim.key(x, y);
         if (k == _sim.hubKey) continue;
+        // A building inside the rectangle is skipped, not torn down, while
+        // the terms forbid it; the rest of the fill goes ahead.
+        if (_demolitionRefused(k, say: false, fill: true)) {
+          refused = _sim.blocked;
+          continue;
+        }
+        acted = true;
         if (_tool == CityBuilderTool.retrofit) {
           _sim.retrofitCell(k);
         } else if (_tool == CityBuilderTool.support) {
@@ -584,7 +641,13 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
         }
       }
     }
-    _sim.attend();
+    if (refused != null) {
+      _sim.blocked = refused;
+      sayRefused(context, refused);
+    }
+    // An act of governance only if one cell was acted on: a fill refused
+    // whole stamps no attention.
+    if (acted) _sim.attend();
     _sim.recompute();
   }
 
@@ -609,7 +672,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
           IconButton(
             icon: const Icon(Icons.delete_sweep, color: AppTheme.danger),
             tooltip: 'Clear',
-            onPressed: _gated(() => setState(() {
+            onPressed: _gatedDemolish(() => setState(() {
               _sim.zones.clear();
               _sim.utils.clear();
               _sim.footprint.clear();
@@ -1396,12 +1459,19 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     final sel = _tool == tool;
     // An acting tool on a colony that takes no orders (secession §5):
     // greyed, the reason its tooltip, and a tap says it.
-    if (tool.acts && !_sim.playerControl.allowed) {
-      return gatedControl(
-          _sim,
+    final refusal = !tool.acts
+        ? null
+        : (_sim.playerControl.reason ??
+            (tool == CityBuilderTool.bulldoze ? _sim.demolitionRefusal : null));
+    if (refusal != null) {
+      return gatedBy(
+          refusal,
           GestureDetector(
             key: ValueKey('builder-tool-${tool.name}'),
-            onTap: _mayAct,
+            onTap: () {
+              setState(() => _sim.blocked = refusal);
+              sayRefused(context, refusal);
+            },
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
               decoration: BoxDecoration(

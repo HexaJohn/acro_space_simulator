@@ -18,9 +18,11 @@ import 'package:flutter/material.dart';
 
 import '../../../domain/colony/city/city_control.dart';
 import '../../../domain/colony/city/city_loyalty.dart';
+import '../../../domain/colony/city/city_reclaim.dart';
 import '../../../domain/colony/city/city_sim.dart';
 import '../../../domain/colony/city/independent_governor.dart';
 import 'app_theme.dart';
+import 'city_reclaim_ui.dart';
 
 /// Tell the player why a control refused, as a snack bar.
 void sayRefused(BuildContext context, String reason) {
@@ -39,11 +41,15 @@ void sayRefused(BuildContext context, String reason) {
 /// and carrying the refusal as its tooltip when not. The child's own handler
 /// must be disabled by its builder too ([CityControl.mayAct] or a null
 /// callback) — this is the look, not the lock.
-Widget gatedControl(CitySim sim, Widget child) {
-  final c = sim.playerControl;
-  if (c.allowed) return child;
+Widget gatedControl(CitySim sim, Widget child) =>
+    gatedBy(sim.playerControl.reason, child);
+
+/// [child] greyed with [reason] as its tooltip, or itself with no reason:
+/// the look of any refusal — the gate's, or a binding term's (§6.1).
+Widget gatedBy(String? reason, Widget child) {
+  if (reason == null) return child;
   return Tooltip(
-    message: c.reason!,
+    message: reason,
     child: Opacity(opacity: 0.45, child: child),
   );
 }
@@ -52,9 +58,14 @@ Widget gatedControl(CitySim sim, Widget child) {
 /// doing, and where the way back will be. Empty for a colony still the
 /// player's.
 class IndependencePanel extends StatelessWidget {
-  const IndependencePanel({super.key, required this.city, this.compact = false});
+  const IndependencePanel(
+      {super.key, required this.city, this.compact = false, this.onRejoined});
 
   final CitySim city;
+
+  /// Runs once the player has won the colony back from the Reclaim section,
+  /// for the host to close or rebuild.
+  final VoidCallback? onRejoined;
 
   /// The HUD's card: the headline, the causes and the latest act only.
   final bool compact;
@@ -112,15 +123,18 @@ class IndependencePanel extends StatelessWidget {
                   'Day ${(a.atS / l.tuning.daySec).floor() + 1}: ${a.text}',
                   style: AppTheme.dim),
           ],
+          if (compact && city.reclaim.petition != null) ...[
+            const SizedBox(height: 4),
+            Text('It asks to rejoin — open its panel to answer.',
+                key: const ValueKey('independence-petition'),
+                style: AppTheme.dim.copyWith(color: AppTheme.accent2)),
+          ],
           if (!compact) ...[
             const SizedBox(height: 8),
             Text('RECLAIM', style: AppTheme.dim.copyWith(fontSize: 10)),
-            // Player-facing: in-world words, not the plan's phase numbers.
-            Text(
-                'Ways to win it back (negotiation, goodwill, force) are not '
-                'available yet.',
-                key: const ValueKey('independence-reclaim'),
-                style: AppTheme.dim),
+            // Negotiate, the petitions, goodwill and force's empty slot
+            // (§6) — in-world words, not the plan's.
+            ReclaimSection(city: city, onRejoined: onRejoined),
           ],
         ],
       ),
@@ -135,10 +149,11 @@ void showIndependence(BuildContext context, CitySim city) {
     context: context,
     builder: (ctx) => Dialog(
       backgroundColor: AppTheme.panel,
-      child: Padding(
+      child: SingleChildScrollView(
         padding: const EdgeInsets.all(14),
         child: Column(mainAxisSize: MainAxisSize.min, children: [
-          IndependencePanel(city: city),
+          IndependencePanel(
+              city: city, onRejoined: () => Navigator.of(ctx).maybePop()),
           Align(
             alignment: Alignment.centerRight,
             child: TextButton(

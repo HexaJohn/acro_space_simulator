@@ -2215,9 +2215,12 @@ class CitySim {
     // it only when it drops back below a LOWER one. Without the dead band a law
     // that fixes the very metric it reacts to (curfew lowers crime, which then
     // repeals the curfew, which lets crime climb again) flip-flops forever.
+    // A law the colony rejoined on keeping (secession §6.1) is kept by its
+    // own vote too: the term was its demand, not the player's.
+    final kept = loyalty.reclaim.terms?.keptLaws ?? const <Law>{};
     void band(Law l, double value, double onAt, double offAt) {
       if (laws.contains(l)) {
-        if (value < offAt) laws.remove(l);
+        if (value < offAt && !kept.contains(l)) laws.remove(l);
       } else {
         if (value > onAt) laws.add(l);
       }

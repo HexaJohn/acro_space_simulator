@@ -26,6 +26,8 @@ IconData loyaltyIcon(String key) => switch (key) {
       'standoff' => Icons.front_hand,
       'defiant' => Icons.do_not_disturb_on,
       'revolt' => Icons.local_fire_department,
+      'petition' => Icons.handshake,
+      'terms' => Icons.gavel,
       _ => Icons.sentiment_dissatisfied,
     };
 
@@ -62,7 +64,8 @@ void explainLoyalty(BuildContext context, CitySim sim) {
           'are greyed, its own council sets its tax and laws and builds what '
           'it must, its port takes no relief and your deliveries to it are '
           'suspended. A craft you fly yourself can still land there, '
-          'unwelcome.',
+          'unwelcome. Its panel holds the ways back: the terms it would '
+          'rejoin on, and any petition it sends.',
   };
   final why = 'Loyalty ${pct(l.level)} — ${l.stage.label}. $causes.\n\n'
       '$drift\n\n'
