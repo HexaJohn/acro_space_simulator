@@ -30,6 +30,7 @@ import '../city_network.dart';
 import 'city_building_spec.dart';
 import 'city_config.dart';
 import 'city_layout.dart';
+import 'city_loyalty.dart';
 import 'city_progression.dart';
 import 'parcel.dart';
 import 'parcel_network.dart';
@@ -63,6 +64,11 @@ class LandedCraft {
   final double payload; // actual amount delivered (after any spare-fuel cut)
   double phase = 0; // 0..1 PAD timeline (descend / dwell 30 s / ascend)
   bool granted = false; // one-shot payload guard
+
+  /// Grounded by rebels holding the port (docs/plans/colony-secession.md
+  /// §4.1): parked mid-dwell, its cargo impounded, until the port is
+  /// given back.
+  bool held = false;
 
   LandedCraft({
     required this.site,
@@ -481,7 +487,10 @@ class CitySim {
   double computeSupply = 0; // current compute capacity
   double computeDemand = 0;
   Economy economy = Economy.capitalism;
-  double taxRate = 0.15;
+  double taxRate = defaultTaxRate;
+
+  /// A new colony's tax, and the value a save omits.
+  static const double defaultTaxRate = 0.15;
   Govt govt = Govt.democracy;
   final Set<Law> laws = {};
   double crime = 0;
@@ -489,6 +498,20 @@ class CitySim {
   double inequality = 0;
   int homeless = 0;
   double rebellion = 0;
+
+  /// The colony's loyalty to the player, and the strike, standoff and
+  /// secession it leads to (docs/plans/colony-secession.md; the rules are in
+  /// `city_loyalty.dart`, applied from [advance]).
+  final CityLoyalty loyalty = CityLoyalty();
+
+  /// Colony seconds this colony has run: the neglect clock (§3.1).
+  double get colonyTimeS => loyalty.colonyTimeS;
+
+  /// Stamp an act of governance (§3.3). Called by the editor, the road
+  /// tool and the panels after a player act SUCCEEDS — never by the sim
+  /// itself, and never for looking: a colony kept loyal by being glanced at
+  /// would make neglect a stat nobody can lose.
+  void attend() => loyalty.attend();
   double corpses = 0; // unprocessed bodies awaiting deathcare
   double disease = 0; // 0..1 outbreak level
   double deathRate = 0; // people/s dying (display)
@@ -624,6 +647,14 @@ class CitySim {
   /// — no city oxygen production needed.
   bool get breathable =>
       (body.atmosphere?.seaLevelDensity ?? 0) > 0.3 && o2Fraction >= 0.15;
+
+  /// The share of a colonist's oxygen the sky supplies, 0..1 — what makes
+  /// the air a LOCAL source in the self-sufficiency measure
+  /// (docs/plans/colony-secession.md §3.4). All or nothing for now, on
+  /// [breathable]; docs/plans/terraforming.md §3.4 replaces it with the
+  /// share the body's real, mutable O2 partial pressure supplies, so a
+  /// thickening Mars sky counts for more as its towers work.
+  double get airO2 => breathable ? 1.0 : 0.0;
 
   /// Can an atmospheric harvester pull O2 here? (Some breathable-enough O2 in a
   /// real atmosphere, but not free-breathable.)
@@ -1341,6 +1372,9 @@ class CitySim {
             .clamp(0.0, 1.0);
     lifeThrottle = math.min(lifePower, math.min(computeRatio, lifeStaff));
     restThrottle = math.min(restPower, math.min(computeRatio, restStaff));
+    // A Defiant colony strikes (secession §3.5): the farms and pumps are
+    // still worked — the strikers eat too — and everything else slows.
+    restThrottle *= loyalty.strikeThrottle;
 
     // Medicine gates HEALTH service: hospitals/clinics consuming medicine only
     // deliver full health coverage when supplied. Scale the health service by
@@ -1374,9 +1408,15 @@ class CitySim {
     // What the buildings make, net of what they use, of each life-support
     // commodity, per second: the supply side of [supportablePop].
     final lifeNet = <String, double>{};
-    void flow(String k, double perSec) {
+    // The same, counting only what the colony makes ITSELF: outputs of its
+    // life-support buildings, net of every building's draw — the spaceport's
+    // supplies are imports. Self-sufficiency (secession §3.4) is measured on
+    // this, where [supportablePop] rightly counts everything.
+    final localNet = <String, double>{};
+    void flow(String k, double perSec, [bool local = true]) {
       if (k == Commodity.food || k == Commodity.water || k == Commodity.oxygen) {
         lifeNet[k] = (lifeNet[k] ?? 0) + perSec;
+        if (local) localNet[k] = (localNet[k] ?? 0) + perSec;
       }
     }
 
@@ -1397,7 +1437,7 @@ class CitySim {
       s.outputs.forEach((k, v) {
         final made = v * run * biomeMult(k) * bountyMult * eventProductionMult;
         stock[k] = stockOf(k) + made * dt;
-        flow(k, made);
+        flow(k, made, isLifeSupport(s));
       });
       pollutionRate += s.pollution * (s.powerOutput > 0 ? 1 : run) * emissionCut;
     }
@@ -1421,7 +1461,7 @@ class CitySim {
       s.outputs.forEach((k, v) {
         final made = v * run * biomeMult(k) * bountyMult * eventProductionMult;
         stock[k] = stockOf(k) + made * dt;
-        flow(k, made);
+        flow(k, made, isLifeSupport(s));
       });
       pollutionRate += s.pollution * (s.powerOutput > 0 ? 1 : run) * emissionCut;
     }
@@ -1686,6 +1726,8 @@ class CitySim {
         taxPerWorkerPerSec *
         economy.fundsMult *
         (1 - corruption * 0.6) *
+        // Non-payment: a Defiant colony pays half, a standoff nothing.
+        loyalty.taxFactor *
         // Land value: quiet, leafy streets pay more (exactly 1 until the
         // traffic model has valued a built lot).
         trafficReadout.taxLandValueFactor;
@@ -1713,7 +1755,12 @@ class CitySim {
     // the living until deathcare clears them. So the sustainable LIVING
     // population is the housing capacity MINUS the corpse backlog (corpses don't
     // count toward population; they hold a slot until processed).
-    final target = popTarget;
+    // Loyalty (secession §3): drift, stages, the port. Here, after mood and
+    // the treasury have moved, so the stage the migration below obeys is
+    // this tick's.
+    loyaltyTick(dt, localNet: localNet, coverage: coverage);
+
+    final target = loyaltyPopCap(popTarget);
     // Migration BOTH ways needs a working (road-connected) spaceport — it's the
     // only way on or off the world. A comms blackout also halts arrivals.
     // Without a spaceport the colony is stuck with exactly its landed crew: no
@@ -1725,7 +1772,8 @@ class CitySim {
     // ledger, and `agents.advance` turns whole people of it into arrivals
     // that draw a car (§6.6) or into emigrants. Without them, today's write.
     final migrants = agents.ownsPopulation ? agents.ledger : null;
-    if (hasSpaceport) {
+    // A port the rebels hold is shut both ways (secession §4.1).
+    if (hasSpaceport && loyalty.migrationOpen) {
       if (population < target && !commsDown) {
         final double to =
             (population + (1.5 + 3.0 * happiness) * dt).clamp(0, target);
@@ -2030,7 +2078,9 @@ class CitySim {
     if (has(Law.wealthTax)) ineqTarget *= 0.5;
     inequality = ease(inequality, ineqTarget, dt, 0.3);
 
-    if (govt.lawsAutoVoted) autoVote();
+    // A restless colony votes its own laws whatever the government says
+    // (secession §3.5): it has stopped waiting for orders.
+    if (govt.lawsAutoVoted || loyalty.selfGoverning) autoVote();
 
     final unrest = (0.5 * (1 - happiness) +
             0.2 * crime +
@@ -2046,6 +2096,7 @@ class CitySim {
       rebellion = 0.3;
       revoltMsg =
           'REVOLT! $lost citizens fled, treasury raided. Fix crime, inequality + happiness.';
+      loyalty.onRevolt(revoltMsg!);
     }
   }
 
@@ -4852,7 +4903,15 @@ class CitySim {
   /// seconds of ticking, and persisting it would freeze half the schema to a
   /// shape that churns weekly. What is saved is what the player MADE: the
   /// land, the buildings, the stockpile, and the meters that took hours to
-  /// move. `shapedTerrain` is intentionally dropped, so the shaper re-levels
+  /// move — and, since loyalty (docs/plans/colony-secession.md §3.1), how
+  /// the player has RULED: the tax, the laws, the social meters (rebellion,
+  /// crime, corruption, inequality) and the loyalty state itself. Those
+  /// used to be dropped as meters that re-derive, and they do, but only by
+  /// resetting to calm: a save and a load wiped a decade of misrule, and
+  /// loyalty, which misrule drains, became a stat the player could
+  /// save-scum away. Each is omitted at its default, so a colony that was
+  /// never misruled saves as it always has, and an old save loads as one.
+  /// `shapedTerrain` is intentionally dropped, so the shaper re-levels
   /// every site on the first tick after a load — terrain edits are not in the
   /// save, and restoring the "already shaped" set without them would leave
   /// buildings floating over unlevelled ground.
@@ -4874,6 +4933,13 @@ class CitySim {
         'bounty': bounty,
         'population': population,
         'happiness': happiness,
+        if (taxRate != defaultTaxRate) 'taxRate': taxRate,
+        if (laws.isNotEmpty) 'laws': [for (final l in laws) l.name],
+        if (rebellion != 0) 'rebellion': rebellion,
+        if (crime != 0) 'crime': crime,
+        if (corruption != 0) 'corruption': corruption,
+        if (inequality != 0) 'inequality': inequality,
+        'loyalty': ?loyaltySaveJson(),
         'funds': funds,
         'milestones': milestonesReached.toList(),
         'research': research,
@@ -5012,7 +5078,18 @@ class CitySim {
       ..waterTable = (j['waterTable'] as num).toDouble()
       ..timeWarp = (j['timeWarp'] as num).toDouble()
       ..shuttleIntervalSec = (j['shuttleInterval'] as num).toDouble()
-      ..nextShuttleEpoch = (j['nextShuttle'] as num).toDouble();
+      ..nextShuttleEpoch = (j['nextShuttle'] as num).toDouble()
+      // The political state (see [toJson]); absent in an old save, which
+      // loads as a colony never misruled.
+      ..taxRate = (j['taxRate'] as num?)?.toDouble() ?? defaultTaxRate
+      ..rebellion = (j['rebellion'] as num?)?.toDouble() ?? 0
+      ..crime = (j['crime'] as num?)?.toDouble() ?? 0
+      ..corruption = (j['corruption'] as num?)?.toDouble() ?? 0
+      ..inequality = (j['inequality'] as num?)?.toDouble() ?? 0;
+    final savedLaws = j['laws'];
+    if (savedLaws is List) {
+      sim.laws.addAll(Law.values.where((l) => savedLaws.contains(l.name)));
+    }
     sim.stock
       ..clear()
       ..addAll({
@@ -5147,6 +5224,7 @@ class CitySim {
     });
     sim.support.addAll((j['support'] as List).cast<int>());
     sim.recompute();
+    sim.restoreLoyalty(j['loyalty']);
     sim.agents.restore(j['agents']);
     // The loading drain (docs/plans/site-access.md §4.1, §3.10): every plan
     // is re-derived inside the load, not on the first gameplay tick, and
@@ -5524,12 +5602,23 @@ class CitySim {
   /// "Request assistance": dispatch a relief craft to [site] (a spaceport). It
   /// flies in, lands on a free pad, dwells 30 s and drops a care package of
   /// resources + settlers, then leaves — the anti-soft-lock lifeline.
-  void requestRelief(String site) {
-    if (reliefCooldown > 0) return;
+  ///
+  /// True when a craft was sent: the caller stamps attention only then, as
+  /// a refused act is no act of governance (secession §3.3).
+  bool requestRelief(String site) {
+    if (reliefCooldown > 0) return false;
+    // A port the rebels hold, or an independent colony's, takes no relief
+    // from the player (secession §4.1).
+    final shut = loyalty.portHoldReason;
+    if (shut != null) {
+      blocked = 'No relief can land: $shut.';
+      return false;
+    }
     final pad = freePad(site);
-    if (pad == null) return; // all pads busy
+    if (pad == null) return false; // all pads busy
     craft.add(LandedCraft(site: site, padIndex: pad, isRelief: true));
     reliefCooldown = reliefCooldownMax;
+    return true;
   }
 
   /// Drop the relief care package: top up life support, add funds + settlers that
@@ -5570,6 +5659,10 @@ class CitySim {
     deliveries.forEach((site, list) {
       if (siteSpec(site)?.type != 'spaceport' || !siteConnected(site)) return;
       for (final sched in list) {
+        // A port the player cannot use suspends its schedules where they
+        // stand (secession §4.1) — the next due run is let in once, to be
+        // impounded, and then docking is refused.
+        if (loyalty.portClosedToPlayer && !loyalty.impoundPending) break;
         sched.timer -= dt;
         if (sched.timer > 0) continue;
         // Claim its assigned pad (or any free one). If busy, hold the timer at 0
@@ -5579,7 +5672,11 @@ class CitySim {
           sched.timer = 0;
           continue;
         }
-        dispatchDelivery(site, pad, sched);
+        // The seized port's one admission goes to a craft that actually
+        // flies: a run grounded for want of return fuel launches nothing,
+        // and spending the admission on it left nothing ever impounded and
+        // every later run refused.
+        if (dispatchDelivery(site, pad, sched)) loyalty.admitCraft();
         if (sched.recurring) {
           sched.timer = sched.intervalSec;
         } else {
@@ -5605,11 +5702,29 @@ class CitySim {
         done.add(c);
         continue;
       }
+      // A craft the rebels hold stays on its pad until the port is the
+      // player's again (secession §4.1).
+      final closed = loyalty.portClosedToPlayer;
+      if (c.held) {
+        if (closed) continue;
+        c.held = false;
+      }
       // All visiting craft (relief + deliveries) use the simple pad animation:
       // descend -> dwell (drop payload) -> lift off.
       c.phase += dt / craftTotalSec;
+      if (closed && c.phase >= 0.5) {
+        c.phase = 0.5;
+        c.held = true;
+      }
       if (!c.granted && c.phase >= 0.12) {
         c.granted = true;
+        // Landed at a held port: what it brought is the rebels' now. It
+        // still goes into the stock, below — the colony's own — and the
+        // record is what the player sees taken.
+        if (closed) {
+          loyalty.impound(c.isRelief ? 'relief' : (c.resource ?? 'cargo'),
+              c.isRelief ? 1 : c.payload);
+        }
         if (c.isRelief) {
           grantReliefPayload();
         } else if (c.resource == kDeliveryPeople) {
@@ -5642,7 +5757,8 @@ class CitySim {
   }
 
   /// Send one delivery craft to [pad], applying the schedule's fuel rule.
-  void dispatchDelivery(String site, int pad, DeliverySchedule sched) {
+  /// False when it is grounded for want of fuel and nothing was sent.
+  bool dispatchDelivery(String site, int pad, DeliverySchedule sched) {
     // People are passengers, not cargo: their count isn't cut by return fuel.
     // Commodities are: self-fuelling shaves the return propellant off the load.
     final isPeople = sched.resource == kDeliveryPeople;
@@ -5658,7 +5774,7 @@ class CitySim {
         blocked =
             'A ${sched.resource} delivery is grounded: not enough fuel/oxidizer to refuel it.';
         sched.timer = 0; // retry next frame
-        return;
+        return false;
       }
       stock[Commodity.fuel] = stockOf(Commodity.fuel) - half;
       stock[Commodity.oxidizer] = stockOf(Commodity.oxidizer) - half;
@@ -5673,6 +5789,7 @@ class CitySim {
         isRelief: false,
         resource: sched.resource,
         payload: delivered));
+    return true;
   }
 
   /// Resources that can be flown in on a scheduled delivery. 'people' is a

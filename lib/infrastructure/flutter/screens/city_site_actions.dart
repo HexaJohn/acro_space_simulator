@@ -274,6 +274,7 @@ void showCitySiteMenu({
       sim.disasterTime = Disaster.nuke.duration;
       sim.radiation = (sim.radiation + 0.3).clamp(0.0, 1.0);
       demolishSite(sim, site); // the reactor is gone
+      sim.attend(); // an act of governance (secession §3.3), if a rash one
       onChanged();
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
           content: Text('☢ MELTDOWN — safety interlocks disabled. Oops.'),
@@ -308,6 +309,7 @@ void showCitySiteMenu({
             : 'Move the landing site onto this spaceport (marks it occupied).',
         AppTheme.accent2, () {
       sim.landerPad = parked ? null : site;
+      sim.attend();
       onChanged();
     }));
     // Point the craft the player is actually flying at this port's pads. This
@@ -328,33 +330,48 @@ void showCitySiteMenu({
     // needs a free pad (a spaceport has one pad per footprint tile).
     final cd = sim.reliefCooldown.ceil();
     final hasPad = sim.freePad(site) != null;
-    final canRelief = sim.reliefCooldown <= 0 && hasPad;
+    // A port the rebels hold, or an independent colony's, takes no relief
+    // (secession §4.1): say so, rather than offer a button that refuses.
+    final shut = sim.loyalty.portHoldReason;
+    final canRelief = sim.reliefCooldown <= 0 && hasPad && shut == null;
     actions.add(citySiteAction(
         context,
         Icons.volunteer_activism,
         canRelief
             ? 'Request assistance'
-            : (!hasPad ? 'All pads busy' : 'Assistance on cooldown'),
+            : (shut != null
+                ? 'Relief refused'
+                : (!hasPad ? 'All pads busy' : 'Assistance on cooldown')),
         canRelief
             ? 'A relief craft lands here with food, water, ore, fuel, funds + 8 settlers.'
-            : (!hasPad
-                ? 'Every pad on this spaceport is occupied — wait for one to clear.'
-                : 'Recovering — available again in ${cd}s.'),
+            : (shut != null
+                ? 'No relief can land: $shut.'
+                : (!hasPad
+                    ? 'Every pad on this spaceport is occupied — wait for one to clear.'
+                    : 'Recovering — available again in ${cd}s.')),
         canRelief ? AppTheme.accent2 : AppTheme.textDim, () {
       if (!canRelief) return;
-      sim.requestRelief(site);
+      // Only a relief that flies is an act of governance (§3.3): a refused
+      // request stamping attention would keep a standoff "attended" — the
+      // condition for its recovery — by a button that does nothing.
+      if (sim.requestRelief(site)) sim.attend();
       onChanged();
     }));
     // Recurring resource deliveries (a list — a starport runs several).
     final n = sim.deliveries[site]?.length ?? 0;
+    // Suspended while the port is not the player's (secession §4.1) — said
+    // here, in the logistics, and not only on the colony's HUD.
+    final held = sim.loyalty.portHoldReason;
     actions.add(citySiteAction(
         context,
         Icons.local_shipping,
         n == 0 ? 'Schedule deliveries' : 'Deliveries ($n booked)',
-        n == 0
-            ? 'Book recurring resource deliveries to this spaceport.'
-            : 'Manage, reorder + assign deliveries to pads.',
-        AppTheme.accent2,
+        held != null
+            ? 'Suspended — $held.'
+            : (n == 0
+                ? 'Book recurring resource deliveries to this spaceport.'
+                : 'Manage, reorder + assign deliveries to pads.'),
+        held != null ? AppTheme.danger : AppTheme.accent2,
         () => showDeliveryConfig(
             context: context, sim: sim, site: site, onChanged: onChanged)));
   }
@@ -363,6 +380,7 @@ void showCitySiteMenu({
       context, Icons.delete, 'Demolish', 'Tear it down (partial ore refund).',
       AppTheme.danger, () {
     demolishSite(sim, site);
+    sim.attend();
     onChanged();
   }));
 
@@ -427,6 +445,14 @@ void showDeliveryConfig({
                       style: AppTheme.dim),
                 ]),
                 const SizedBox(height: 6),
+                if (sim.loyalty.portHoldReason case final held?)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Text(
+                        'Suspended — $held. '
+                        '${sim.loyalty.impounded.isEmpty ? '' : 'Impounded: ${sim.loyalty.impounded.map((c) => '${c.amount.toStringAsFixed(0)} ${c.resource}').join(', ')}.'}',
+                        style: AppTheme.dim.copyWith(color: AppTheme.danger)),
+                  ),
                 if (list.isEmpty)
                   const Padding(
                     padding: EdgeInsets.symmetric(vertical: 12),
@@ -439,10 +465,12 @@ void showDeliveryConfig({
                     child: ReorderableListView(
                       shrinkWrap: true,
                       buildDefaultDragHandles: true,
-                      onReorder: (a, b) => setSheet(() {
-                        if (b > a) b -= 1;
+                      // The index handed back already allows for the
+                      // item taken out.
+                      onReorderItem: (a, b) => setSheet(() {
                         final s = list.removeAt(a);
                         list.insert(b, s);
+                        sim.attend();
                         onChanged();
                       }),
                       children: [
@@ -486,6 +514,7 @@ void showDeliveryConfig({
                                       if (list.isEmpty) {
                                         sim.deliveries.remove(site);
                                       }
+                                      sim.attend();
                                       onChanged();
                                     }),
                                   ),
@@ -661,6 +690,7 @@ void editDelivery({
                       sched.timer = recurring ? interval : 2.0;
                       (sim.deliveries[site] ??= []).add(sched);
                     }
+                    sim.attend();
                     Navigator.of(ctx).pop();
                     onDone();
                   },

@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
 import '../../../domain/colony/city/city_config.dart';
+import '../../../domain/colony/city/city_loyalty.dart';
 import '../../../domain/colony/city/city_sim.dart';
 import '../../../domain/planetary/planet_surface.dart';
 import '../../../domain/universe/celestial_body.dart';
@@ -22,6 +23,7 @@ import 'ascent_screen.dart';
 import 'craft_assembly_screen.dart';
 import 'city_map_view.dart';
 import 'city_model.dart';
+import 'city_loyalty_ui.dart';
 import 'city_panels.dart';
 import 'city_site_actions.dart';
 
@@ -404,6 +406,8 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
             if (_autoRoads) _sim.autoRoadAround(k);
           }
       }
+      // An act of governance (secession §3.3) — what was refused said so.
+      if (_tool != _Tool.inspect && _sim.blocked == null) _sim.attend();
       _sim.recompute();
     });
   }
@@ -472,6 +476,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
         case _Tool.inspect:
           break; // tap-only
       }
+      if (_tool != _Tool.utility && _tool != _Tool.inspect) _sim.attend();
       _sim.recompute();
     });
   }
@@ -511,6 +516,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
         }
       }
     }
+    _sim.attend();
     _sim.recompute();
   }
 
@@ -825,6 +831,15 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
   List<({IconData icon, String msg, Color color, VoidCallback tap})>
       get _notifications {
     final out = <({IconData icon, String msg, Color color, VoidCallback tap})>[];
+    // Loyalty first: a colony breaking away outranks a fire.
+    for (final w in _sim.loyaltyWarnings()) {
+      out.add((
+        icon: loyaltyIcon(w.key),
+        msg: w.text,
+        color: loyaltyColor(w.severity),
+        tap: () => _explainAlert('loyalty'),
+      ));
+    }
     if (_sim.starved) {
       out.add((
         icon: Icons.no_food,
@@ -1916,6 +1931,8 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
   /// Tap handler for a status alert chip — explains that specific situation.
   void _explainAlert(String key) {
     switch (key) {
+      case 'loyalty':
+        explainLoyalty(context, _sim);
       case 'starving':
         _showExplain(
             'Starving',

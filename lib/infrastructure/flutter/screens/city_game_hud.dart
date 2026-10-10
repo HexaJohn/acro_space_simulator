@@ -18,6 +18,7 @@ library;
 import 'package:flutter/material.dart';
 
 import '../../../domain/colony/city/city_building_spec.dart';
+import '../../../domain/colony/city/city_loyalty.dart';
 import '../../../domain/colony/city/city_progression.dart';
 import '../../../domain/colony/city/city_sim.dart';
 import '../../../domain/colony/city/road_build.dart' show formatMoney;
@@ -25,6 +26,7 @@ import '../../../domain/colony/city/road_catalog.dart';
 import '../../../domain/colony/city/traffic/city_agents.dart'
     show AgentLaneSpeeds;
 import 'app_theme.dart';
+import 'city_loyalty_ui.dart';
 import 'traffic_lane_speed_overlay.dart' show TrafficLaneSpeedOverlay;
 
 /// Which drawer is open under the top bar.
@@ -81,6 +83,27 @@ class _CityGameHudState extends State<CityGameHud> {
 
   CitySim get city => widget.city;
 
+  /// The loyalty notice being shown (a revolt, a seized port, a
+  /// declaration), drained from [CityLoyalty.notices] as the milestones are.
+  LoyaltyNotice? _notice;
+  DateTime _noticeAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  void _drainNotices() {
+    if (!mounted) return;
+    final expired = DateTime.now().difference(_noticeAt) > _bannerHold;
+    if (_notice != null && !expired) return;
+    final queue = city.loyalty.notices;
+    if (queue.isEmpty) {
+      if (_notice != null && expired) setState(() => _notice = null);
+      return;
+    }
+    final next = queue.removeAt(0);
+    setState(() {
+      _notice = next;
+      _noticeAt = DateTime.now();
+    });
+  }
+
   /// Take the next queued tier, if the banner is free.
   ///
   /// Called from a post-frame callback rather than from `build`: draining is a
@@ -105,7 +128,10 @@ class _CityGameHudState extends State<CityGameHud> {
   Widget build(BuildContext context) {
     // The host rebuilds this every frame, so one callback per frame keeps the
     // banner queue moving without a ticker of its own.
-    WidgetsBinding.instance.addPostFrameCallback((_) => _drainToasts());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _drainToasts();
+      _drainNotices();
+    });
 
     final narrow = MediaQuery.sizeOf(context).width < 900;
     return Stack(
@@ -136,6 +162,13 @@ class _CityGameHudState extends State<CityGameHud> {
             left: 0,
             right: 0,
             child: IgnorePointer(child: Center(child: _bannerCard(_banner!))),
+          ),
+        if (_notice != null)
+          Positioned(
+            top: _banner != null ? 200 : 96,
+            left: 0,
+            right: 0,
+            child: IgnorePointer(child: Center(child: _noticeCard(_notice!))),
           ),
       ],
     );
@@ -174,6 +207,7 @@ class _CityGameHudState extends State<CityGameHud> {
                         : AppTheme.danger)),
             _powerChip(),
           ],
+          ..._loyaltyChip(),
           const SizedBox(width: 6),
           _rciCluster(),
           const SizedBox(width: 6),
@@ -625,7 +659,12 @@ class _CityGameHudState extends State<CityGameHud> {
           value: tax.clamp(0.0, 0.4),
           max: 0.4,
           onChanged:
-              controllable ? (v) => setState(() => city.taxRate = v) : null,
+              controllable
+                  ? (v) => setState(() {
+                        city.taxRate = v;
+                        city.attend(); // an act of governance (secession §3.3)
+                      })
+                  : null,
         ),
       ),
       Text(
@@ -655,6 +694,77 @@ class _CityGameHudState extends State<CityGameHud> {
       );
 
   // ---- Banner --------------------------------------------------------------
+
+  /// The colony's loyalty, once it is anything but loyal: the worst
+  /// warning's icon and the stage, every warning in the tooltip, and the
+  /// explanation on a tap. Absent for a loyal, calm colony — the bar is
+  /// for what the player steers by, and loyalty needs no steering then.
+  List<Widget> _loyaltyChip() {
+    final warnings = city.loyaltyWarnings();
+    if (warnings.isEmpty) return const [];
+    final worst = warnings.first;
+    final colour = loyaltyColor(worst.severity);
+    final l = city.loyalty;
+    return [
+      Tooltip(
+        message: warnings.map((w) => w.text).join('\n'),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          child: InkWell(
+            onTap: () => explainLoyalty(context, city),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+              decoration: BoxDecoration(
+                color: colour.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(5),
+                border: Border.all(color: colour),
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(loyaltyIcon(worst.key), size: 14, color: colour),
+                const SizedBox(width: 5),
+                Text(
+                    l.allegiance == Allegiance.independent
+                        ? 'Independent'
+                        : '${l.stage.label} ${(l.level * 100).round()}%',
+                    style: AppTheme.mono.copyWith(fontSize: 11, color: colour)),
+              ]),
+            ),
+          ),
+        ),
+      ),
+    ];
+  }
+
+  Widget _noticeCard(LoyaltyNotice n) {
+    final good = n.kind == LoyaltyNoticeKind.recovered ||
+        n.kind == LoyaltyNoticeKind.portReleased;
+    final colour = good
+        ? AppTheme.accent2
+        : (n.kind == LoyaltyNoticeKind.restless
+            ? AppTheme.warn
+            : AppTheme.danger);
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 520),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xF00B1017),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: colour, width: 2),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(
+            n.kind == LoyaltyNoticeKind.revolt
+                ? Icons.local_fire_department
+                : (good ? Icons.handshake : Icons.campaign),
+            color: colour,
+            size: 20),
+        const SizedBox(width: 8),
+        Flexible(
+            child: Text(n.message,
+                style: AppTheme.body.copyWith(color: colour, fontSize: 13))),
+      ]),
+    );
+  }
 
   Widget _bannerCard(CityMilestoneAward award) {
     final m = award.milestone;

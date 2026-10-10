@@ -158,10 +158,13 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
         if (!city.layout.setUse(parcelId, _useForKind())) {
           final note = city.lotInspectorNote(parcelId);
           if (note != null) blocked = 'This lot is an $note.';
+        } else {
+          city.attend(); // an act of governance (secession §3.3)
         }
         notifyListeners();
       case CityEditTool.bulldoze:
         city.clearParcel(parcelId);
+        city.attend();
         notifyListeners();
       case CityEditTool.inspect:
       case CityEditTool.roadSpline:
@@ -201,6 +204,7 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
       return;
     }
     city.stock['ore'] = city.stockOf('ore') - spec.buildCost;
+    city.attend();
     notifyListeners();
   }
 
@@ -254,6 +258,8 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
         city.support.add(cell);
         city.recompute();
     }
+    // Every refusal above returned: what reaches here was done.
+    city.attend();
     notifyListeners();
   }
 }
