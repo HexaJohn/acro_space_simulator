@@ -288,6 +288,37 @@ void main() {
     });
   });
 
+  group('the ledger at the oxygen cap', () {
+    test('a sky held at the cap books its real leak, not the clip', () {
+      // The Moon under ten arrays, filled to the cap by fifty towers: from
+      // here the towers only top up what leaks. The cap clipping the vent
+      // was booked as escape — several times the real leak, every other
+      // step.
+      final a = seed('moon');
+      AtmosphereFlows held(double dt) =>
+          run(oxygenators: 50, arrays: 10, dt: dt);
+      const month = 30 * 86400.0;
+      for (var i = 0; i < 80 * 12; i++) {
+        service.advance(a, held(month), dt: month);
+      }
+      final o2 = AtmosphereGas.oxygen;
+      expect(a.surfacePressurePa, greaterThan(10000), reason: 'filled');
+      for (final dt in [20.0, 86400.0, month, 86400.0, 20.0]) {
+        final n0 = a.molesOf(o2);
+        final k = service.escapeRates(a)[o2]!;
+        service.advance(a, held(dt), dt: dt);
+        final l = a.ledger!;
+        final escape = l.rate(GasProcess.escape, o2.name);
+        expect(escape, closeTo(-k * n0, 0.01 * k * n0),
+            reason: '$dt s: the Jeans leak');
+        // And the books balance: every gas's net is how its inventory moved.
+        final moved = (a.molesOf(o2) - n0) / dt;
+        expect(l.net(o2.name), closeTo(moved, 0.01 * k * n0),
+            reason: '$dt s: the ledger nets to the inventory');
+      }
+    });
+  });
+
   group('methane', () {
     test('beyond the reference it oxidises to CO2 and water', () {
       final a = seed('earth');
@@ -340,9 +371,11 @@ void main() {
 
     void compare(PlanetAtmosphereService s, String world, double span, int n,
         AtmosphereFlows Function(double dt) flows, double tol,
-        {double? co2Tol}) {
+        {double? co2Tol, void Function(PlanetAtmosphere)? prepare}) {
       final big = seed(world);
       final small = seed(world);
+      prepare?.call(big);
+      prepare?.call(small);
       s.advance(big, flows(span), dt: span);
       for (var i = 0; i < n; i++) {
         s.advance(small, flows(span / n), dt: span / n);
@@ -356,8 +389,14 @@ void main() {
     });
 
     test('the agent breaking down', () {
-      compare(service, 'venus', 5000 * year, 500,
-          (dt) => run(dt: dt), 1e-9);
+      // Seeded with agent to break down: from a fresh sky the comparison
+      // was of nothing against nothing.
+      compare(service, 'venus', 5000 * year, 500, (dt) => run(dt: dt), 1e-9,
+          prepare: (a) => a.greenhouseAgentMoles = 1e14);
+      final a = seed('venus')..greenhouseAgentMoles = 1e14;
+      service.advance(a, run(dt: 5000 * year), dt: 5000 * year);
+      expect(a.greenhouseAgentMoles, inExclusiveRange(1e12, 5e13),
+          reason: 'about two lifetimes: most of it gone, not all');
     });
 
     test('the baker', () {

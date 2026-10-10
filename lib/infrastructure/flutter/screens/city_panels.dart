@@ -492,6 +492,14 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
       ]),
     ]);
   }
+  /// The [CitySim.bodies] entry for the world the colony is on, or null.
+  CelestialBody? _listedBody() {
+    for (final b in sim.bodies) {
+      if (b.id == sim.body.id) return b;
+    }
+    return null;
+  }
+
   Widget _planetPanel() => Container(
         padding: const EdgeInsets.all(10),
         decoration: AppTheme.panelBox(),
@@ -508,8 +516,12 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
               ),
             if (panelCanResite)
               Expanded(
+                // Matched by id, not identity: the sandbox's own air
+                // republishes `sim.body` as a new body that is not in
+                // `sim.bodies`, and a value no item holds fails the
+                // dropdown's assert on every build (the whole side pane).
                 child: DropdownButton<CelestialBody>(
-                value: sim.body,
+                value: _listedBody(),
                 isExpanded: true,
                 dropdownColor: AppTheme.panelLight,
                 underline: const SizedBox.shrink(),
@@ -519,7 +531,13 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
                     DropdownMenuItem(
                         value: b, child: Text(b.name, style: AppTheme.body)),
                 ],
-                onChanged: (b) => setState(() => sim.body = b!),
+                // A re-pick of the world it is on is no change: handing
+                // back the reference body would breathe reference air for
+                // a frame before the sandbox restored its own.
+                onChanged: (b) {
+                  if (b == null || b.id == sim.body.id) return;
+                  setState(() => sim.body = b);
+                },
                 ),
               ),
           ]),

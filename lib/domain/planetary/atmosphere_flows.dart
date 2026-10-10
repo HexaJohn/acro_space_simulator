@@ -135,7 +135,10 @@ class AtmosphereFlows {
   }
 
   /// Retention Arrays running on the body, on average over [seconds]: the
-  /// colonies' arrays run side by side, so their throttles add.
+  /// colonies' arrays run side by side, so their throttles add. Only right
+  /// for flows every colony on the body reported into over the same span;
+  /// the world itself keeps each colony's count apart
+  /// (`PlanetAtmosphere.arraysByColony`).
   double get retentionArrays {
     final s = seconds;
     return s > 0 ? retentionRun / s : 0;

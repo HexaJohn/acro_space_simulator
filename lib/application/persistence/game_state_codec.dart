@@ -305,6 +305,12 @@ class GameStateCodec {
       state.restore(m);
       repo.save(state);
     }
+    // The atmosphere panel's handle, which otherwise only the tick sets: a
+    // save loaded paused runs no tick, and its panel said nothing integrates
+    // the terraformed air it was showing.
+    for (final city in cities?.all() ?? const <CitySim>[]) {
+      city.planetAir = repo.forBody(city.body.id.value);
+    }
     if (universe == null) return;
     for (final state in repo.all()) {
       final body = universe.current().body(BodyId(state.bodyId));

@@ -301,11 +301,17 @@ class PlanetAtmosphereService {
   /// went in [PlanetAtmosphere.ledger].
   void advance(PlanetAtmosphere state, AtmosphereFlows flows,
       {required double dt}) {
-    // The arrays set the world's suppression while they run. A step no
-    // colony reported on (between a frame's replays, or a world nobody is
-    // on) holds what the last report set.
+    // The arrays set the world's suppression while they run: each colony
+    // that reported sets its own count (its arrays over its own span), and
+    // the world is held at their sum. A colony that did not report on this
+    // step (one whose replays land next frame, or a world nobody is on)
+    // keeps the count it last reported.
     if (flows.seconds > 0) {
-      state.escapeSuppression = tuning.suppressionFor(flows.retentionArrays);
+      for (final e in flows.byColony.entries) {
+        final c = e.value;
+        if (c.seconds > 0) state.reportArrays(e.key, c.retention / c.seconds);
+      }
+      state.escapeSuppression = tuning.suppressionFor(state.retentionArrays);
     }
     if (dt <= 0) {
       _applyAmounts(state, flows);
@@ -360,9 +366,33 @@ class PlanetAtmosphereService {
       }
     }
     if (feedbacks) state.pruneTrace(traceMoles);
-    ledger.temperatureRateKPerS = (state.surfaceTemperatureK - t0) / dt;
     _attribute(ledger, flows, dt);
-    state.ledger = ledger;
+    _publishLedger(state, ledger, dt, flows.seconds, t0);
+  }
+
+  /// Fold this integration's [step] into the world's ledger window, and
+  /// publish the window unless the world is waiting on a colony's late
+  /// report (see [AtmosphereLedgerWindow]).
+  void _publishLedger(PlanetAtmosphere state, AtmosphereLedger step,
+      double dt, double flowSeconds, double t0) {
+    final window = state.ledgerWindow ??=
+        AtmosphereLedgerWindow(startTemperatureK: t0);
+    window.absorb(step, dt, flowSeconds);
+    final waiting = flowSeconds <= 0 &&
+        (state.ledger?.coloniesReported ?? false) &&
+        window.steps < AtmosphereLedgerWindow.maxSteps;
+    if (waiting) return;
+    state.ledger = window.publish(state.surfaceTemperatureK);
+    state.ledgerWindow = null;
+  }
+
+  /// Drop the Retention Arrays of every colony on [state]'s world not in
+  /// [present], and let the world's suppression follow at once — a colony
+  /// that is gone runs no arrays, and with nobody left to report the
+  /// suppression would otherwise hold for ever.
+  void forgetColonies(PlanetAtmosphere state, Set<String> present) {
+    if (!state.forgetColoniesExcept(present)) return;
+    state.escapeSuppression = tuning.suppressionFor(state.retentionArrays);
   }
 
   /// Share each process colonies run out among the colonies that ran it, by
@@ -503,7 +533,8 @@ class PlanetAtmosphereService {
     final ko = k[AtmosphereGas.oxygen] ?? 0;
     var o2After = _sourceAndLeak(
         o2Before, (venting ? rates.vent : 0) - rates.harvest, ko, h);
-    if (venting && o2After > cap) o2After = cap;
+    final capped = venting && o2After > cap;
+    if (capped) o2After = cap;
     state.add(AtmosphereGas.oxygen, o2After - o2Before + scrubbedO2);
     if (scrubbedO2 > 0) {
       ledger.addAmount(
@@ -525,8 +556,18 @@ class PlanetAtmosphereService {
       final unvented = _sourceAndLeak(o2Before, -rates.harvest, ko, h);
       final vented = math.max(0.0, o2After - unvented);
       if (ko > 0) {
-        leaked(AtmosphereGas.oxygen, o2Before, rates.vent - rates.harvest,
-            o2After);
+        // Where the cap clipped the vent, the clip is not a leak: the gas
+        // the towers would have put past it was never vented. Measured
+        // against the clipped sky it booked that whole excess as escape —
+        // several times the real leak on a world held at the cap, every
+        // other step. The towers top the sky up to the cap from where it
+        // would have leaked to unvented, so the leak is the unvented path's.
+        if (capped) {
+          leaked(AtmosphereGas.oxygen, o2Before, -rates.harvest, unvented);
+        } else {
+          leaked(AtmosphereGas.oxygen, o2Before, rates.vent - rates.harvest,
+              o2After);
+        }
       }
       if (vented > 0) {
         final fromSky = math.min(vented, aboveFloor);

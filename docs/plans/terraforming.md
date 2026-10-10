@@ -410,14 +410,21 @@ recorded per colony and integrated in the planetary phase like the oxygenator's.
   everywhere but Mars.
 - **Carbon Sequestrator.** It takes CO2 down to the floor and no further. On Earth that takes industrial CO2 back to ~280 ppm
   and costs about a kelvin. Placement is refused where the CO2 column is at the floor.
-- **Retention Array.** `escapeSuppression` is set from the arrays whenever a colony on the world reports
-  (`AtmosphereFlows.retentionArrays`, throttle-weighted). It holds through a step no colony reported on, such as the ticks
-  between a frame's replays. Six arrays cut the lunar leak to 1/64 exactly, and 50 towers then hold several times the sky.
+- **Retention Array.** Each colony's array count (throttle-weighted, over its own span) is kept on the world
+  (`PlanetAtmosphere.arraysByColony`, saved as `arrays`) until that colony reports again, and `escapeSuppression` is set from
+  their sum. Read off whichever flows landed in a step, a held colony's arrays were zeroed on every tick after a frame's first
+  wherever an inline colony shared the world, and a multi-tick replay diluted a neighbour's. The tick drops a deleted colony's
+  count after its last flows land, so its arrays stop holding the sky. Six arrays cut the lunar leak to 1/64 exactly, and 50
+  towers then hold several times the sky.
 - **Methane decay** (moved from phase 2). Methane beyond the reference oxidises over 12 years (Earth's perturbation
   lifetime): `CH4 + 2 O2 → CO2 + 2 H2O`, exact per sub-step, charging the sky only the O2 it has. A reference Titan has no
   excess, so it rests.
 - **Planetary ledger** (`atmosphere_ledger.dart`, `PlanetAtmosphere.ledger`). Each integration leaves mol/s per gas, per
-  process (industry, towers, harvesters, escape, caps and soil, chemistry) and per colony. A colony's share of a tower process
+  process (industry, towers, harvesters, escape, caps and soil, chemistry) and per colony. A world whose last ledger carried
+  colony flows holds it through integrations no colony reports on, and the next report publishes the whole window
+  (`AtmosphereLedgerWindow`), colony processes over the span their flows were produced in. Published per integration, a held
+  colony's lines alternated between twice the real rate and nothing on multi-tick frames, and the repaint saw the empty tick.
+  At the O2 cap, the escape row is the leak, not the vent the cap clipped (which had read as several times the real leak). A colony's share of a tower process
   is its share of the run, applied to what the planet ACTUALLY took after caps, floors and empty stores. Industry is credited
   at each colony's nominal CO2. It is a readout: not saved, and not fingerprinted. `AtmosphereFlows` now keeps a per-colony
   breakdown, with names, which is saved additively (`colonies`, plus the new tower keys). A pre-phase-3 save's pending flows
@@ -445,18 +452,20 @@ recorded per colony and integrated in the planetary phase like the oxygenator's.
   - the gas mix with partial pressures, the agent, the loss to space and the share the arrays hold, and the stores;
   - every process and every colony's flows, in Pa of column per year.
 
-  It reads `CitySim.planetAir`, a transient handle the tick or the sandbox sets. Without one it says nothing integrates the
-  air.
+  It reads `CitySim.planetAir`, a transient handle the tick, the sandbox or a load sets. Without one it says nothing
+  integrates the air.
 - **Sandbox air** (`application/usecases/local_colony_atmosphere.dart`). The flat builder with `driveLocally` now runs the same
   service on one inventory after every advance, records against the step's dt as the tick does, and republishes the body to
-  the colony. Re-siting seeds the new world. Picking the same world again keeps its air.
+  the colony. Re-siting seeds the new world. Picking the same world again is no change. The republished body is not in
+  `CitySim.bodies`, so the planet picker matches it by id (matched by identity, its assert took the whole side pane down).
 - **Shared hot files, kept small:**
   - `city_sim.dart`: fields, two production lines, the env-tick block and two save keys;
   - `city_building_spec.dart`: four specs;
-  - `advance_simulation_tick.dart`: three lines;
-  - `city_panels.dart`: the meter swapped for the panel.
+  - `advance_simulation_tick.dart`: three lines, and the deleted-colony array drop;
+  - `city_panels.dart`: the meter swapped for the panel, and the picker matched by id;
+  - `game_state_codec.dart`: the loaded colonies' `planetAir` handle.
 
-  Not touched: `city_loyalty.dart`, `city_control.dart`, `game_state_codec.dart`, `simulation_view.dart`, the HUD.
+  Not touched: `city_loyalty.dart`, `city_control.dart`, `simulation_view.dart`, the HUD.
 
 **Deviations, and why:**
 - **The Oxygenator keeps its label** "Terraforming Tower". A placed building is saved by label (`_specByLabel`), and §4's
@@ -482,8 +491,8 @@ recorded per colony and integrated in the planetary phase like the oxygenator's.
   gas has to come from space (phase 4, comet or ammonia imports).
 - **The Oxygenator eats the CO2 the warming towers free.** That is the trade-off the family is built around. It is
   unplaytested.
-- **A deleted colony's arrays** leave their suppression on the world until another colony there reports.
-- **The ledger is not saved,** so after a load the panel's flow lines are empty until the first integration.
+- **The ledger is not saved,** so after a load the panel's flow lines are empty until the first integration. A window
+  held for a colony that is gone publishes after 64 integrations.
 - **The independent governor builds no towers.** Its options filter on life-support outputs.
 - **The new towers use the generic massing,** not bespoke ones like the Oxygenator's stack and tank.
 - **Unchanged from phase 2:** Rayleigh brightening, thermal inertia, other bodies' reservoirs, and the two breathability
