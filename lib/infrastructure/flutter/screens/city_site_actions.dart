@@ -22,6 +22,7 @@ import '../../../domain/colony/city/city_control.dart';
 import '../../../domain/colony/city/city_reclaim.dart';
 import '../../../domain/colony/city/city_sim.dart';
 import '../../../domain/colony/city/city_site_rules.dart';
+import '../../../domain/planetary/terraform_towers.dart';
 import 'app_theme.dart';
 import 'city_control_ui.dart';
 import 'city_model.dart';
@@ -200,6 +201,19 @@ void showExplain(
       color: AppTheme.danger,
     );
   }
+  // A terraforming tower at its planet's limit runs, by the colony's books,
+  // at full throttle — and moves no gas. Said here, or its sheet read
+  // "Operating — running at full output" over a building doing nothing.
+  if (sim.towerIdleReason(spec) case final why?) {
+    return (
+      label: 'Idle — planet at its limit',
+      why: '$why It still draws its power and jobs while it stands idle.',
+      fix: 'Demolish it to free the power and the workers, or keep it as a '
+          'reserve: it starts again by itself if the planet drifts back '
+          'past its limit.',
+      color: AppTheme.warn,
+    );
+  }
   if (needsPower && powerRatio < 0.95) {
     return (
       label: 'Unpowered',
@@ -256,7 +270,10 @@ void showExplain(
 void showCitySiteDetail(
     BuildContext context, CitySim sim, String site, CityBuildingSpec spec) {
   final status = citySiteStatus(sim, site, spec);
-  final io = <String>[];
+  final io = <String>[
+    // A tower's planetary effect, which no output line below says.
+    ?TerraformTowers.effectOf(spec.type),
+  ];
   // An idle building's throughput is what it makes NOW, not its nameplate.
   final idle = sim.idleForSky(spec);
   spec.inputs.forEach(

@@ -134,6 +134,80 @@ void main() {
     expect(plat(tried), plat(untried));
   });
 
+  group('the Frontage and Depth sliders re-cut under the trial', () {
+    // Setting the tool's lot settings re-cuts every lot in the colony. Put
+    // on BEFORE the trial copied the plat, the copy was of the plat already
+    // re-cut, and a harmless road far from any lot tore down every building
+    // the new cut gave up — 46 of 82 here — with no refusal.
+    void farRoad(CitySim city, CityEditController c) {
+      c
+        ..set(CityEditTool.roadSpline)
+        ..setMode(RoadToolMode.straight);
+      c.clickAt(city, const Vec2(3000, 3000));
+      c.clickAt(city, const Vec2(3300, 3000));
+    }
+
+    test('a road laid after the frontage moved', () {
+      final free = townOf(bound: false);
+      final freeHad = built(free).length;
+      farRoad(free, editor(free)..frontageM = 60);
+      expect(built(free).length, lessThan(freeHad),
+          reason: 'the control: unbound, the re-cut tears buildings down');
+
+      final city = townOf(bound: true);
+      final before = plat(city);
+      final had = built(city);
+      final frontage = city.layout.settings.frontageM;
+      final c = editor(city)..frontageM = 60;
+      farRoad(city, c);
+      expect(plat(city), before);
+      expect(city.layout.settings.frontageM, frontage,
+          reason: 'the refused re-cut put the old settings back');
+      expect(c.blocked, startsWith(city.demolitionRefusal!));
+      expect(c.blocked, contains('Frontage and Depth'));
+
+      // Set back, the same road builds and tears nothing down.
+      c.frontageM = frontage;
+      farRoad(city, c);
+      expect(c.blocked, isNull);
+      expect(built(city), had);
+    });
+
+    test('a spline committed after the depth moved', () {
+      final city = townOf(bound: true);
+      final before = plat(city);
+      final c = editor(city)
+        ..lotDepthM = 110
+        ..set(CityEditTool.roadSpline);
+      c
+        ..addSplinePoint(const Vec2(3000, 3000))
+        ..addSplinePoint(const Vec2(3150, 3010))
+        ..addSplinePoint(const Vec2(3300, 3000));
+      c.commitSpline(city);
+      expect(plat(city), before);
+      expect(c.blocked, startsWith(city.demolitionRefusal!));
+    });
+
+    test('a road the quote turns down leaves no re-cut standing', () {
+      // Asked only at the road's own carry, a road refused before it (here,
+      // for want of funds) left the new cut in place, its buildings keyed
+      // by dead lots — and the next road's trial, copying that plat,
+      // skipped them as already dangling and tore them down.
+      final city = townOf(bound: true);
+      final had = built(city);
+      final c = editor(city)..frontageM = 60;
+      city.funds = 0;
+      farRoad(city, c);
+      expect(built(city), had);
+      expectNoDangling(city);
+      city.funds = 1e9;
+      c.frontageM = city.layout.settings.frontageM;
+      farRoad(city, c);
+      expect(built(city), had);
+      expectNoDangling(city);
+    });
+  });
+
   test('a spline committed through built lots is refused, points kept', () {
     final city = townOf(bound: true);
     final lot = builtLot(city);

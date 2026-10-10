@@ -688,21 +688,29 @@ mixin RoadToolEditing on ChangeNotifier {
   bool _build(CitySim city, List<Vec2> shape, RoadSnap end,
       {double Function(Vec2)? ground}) {
     if (refusedOn(city)) return false;
-    _applyLotSettings(city);
-    final snapped = city.snapRoadRequest(
-        requestTo(city, shape, end, ground: ground),
-        groundAt: ground);
     // On trial under a demolition ban (secession §6.1): a road whose
     // re-cut would tear a building down is refused, the term on the bar.
-    final r = city.keepingBuiltLots(
-        () => city.buildRoad(snapped,
+    // The lot settings go on INSIDE the trial: setting them re-cuts every
+    // lot in the colony, and applied before it the trial's copy was of the
+    // plat already re-cut — the Frontage slider then tore down every
+    // building the new cut gave up, the ban never asked.
+    final trial = city.keepingBuiltLots(() {
+      _applyLotSettings(city);
+      final snapped = city.snapRoadRequest(
+          requestTo(city, shape, end, ground: ground),
+          groundAt: ground);
+      return (
+        snapped: snapped,
+        built: city.buildRoad(snapped,
             groundAt: ground, gradeGate: !ignoreTerrain),
-        onRefused: (why) => blocked = why);
+      );
+    }, onRefused: (why) => blocked = _lotSettingsHint(city, why));
     preview = null;
-    if (r == null) {
+    if (trial == null) {
       changed();
       return false;
     }
+    final (:snapped, built: r) = trial;
     lastQuote = r.quote;
     if (r.roadId == null) {
       blocked = r.quote.reason;
@@ -733,11 +741,29 @@ mixin RoadToolEditing on ChangeNotifier {
   }
 
   /// The lot settings onto the plat — only when they moved: setting them
-  /// re-cuts every lot in the colony.
+  /// re-cuts every lot in the colony. Called inside the edit's trial
+  /// ([CityTermGuard.keepingBuiltLots]), and asks the trial's question at
+  /// once: the re-cut carries nothing across (no lot is renamed), so a built
+  /// lot it gives up is lost here, whether or not the road after it is ever
+  /// laid. Asked only at the road's own carry, a road the quote then turned
+  /// down left the new cut standing with its buildings keyed by dead lots
+  /// — and the next road's trial, copying that plat, skipped them as
+  /// already dangling and tore them down. Outside a trial it asks nothing.
   void _applyLotSettings(CitySim city) {
     final s = city.layout.settings;
     if (s.frontageM == frontageM && s.depthM == lotDepthM) return;
     city.layout.settings = s.copyWith(frontageM: frontageM, depthM: lotDepthM);
+    city.guardBuiltLots(const {});
+  }
+
+  /// A demolition-ban refusal, told what the player can do about it when
+  /// the tool's lot settings were what tore buildings down: until they go
+  /// back, every road the tool lays re-cuts the colony and is refused.
+  String _lotSettingsHint(CitySim city, String why) {
+    final s = city.layout.settings;
+    if (s.frontageM == frontageM && s.depthM == lotDepthM) return why;
+    return '$why Frontage and Depth re-cut every lot: set them back to '
+        '${s.frontageM.round()} m and ${s.depthM.round()} m.';
   }
 
   /// A right-click. In Upgrade: reverse the one-way road under [cursor].
@@ -879,23 +905,24 @@ mixin RoadToolEditing on ChangeNotifier {
       changed();
       return;
     }
-    _applyLotSettings(city);
-    // On trial under a demolition ban, as a click's road is ([_build]);
-    // refused, the points are kept, as for any refusal.
-    final r = city.keepingBuiltLots(
-        () => city.buildRoad(
-              RoadBuildRequest(
-                controls: List.of(pending),
-                type: _type,
-                startElevationM: elevationM,
-                endElevationM: elevationM,
-                snapStart: snap.roads,
-                snapEnd: snap.roads,
-              ),
-              groundAt: groundAt,
-              gradeGate: !ignoreTerrain,
-            ),
-        onRefused: (why) => blocked = why);
+    // On trial under a demolition ban, as a click's road is ([_build]),
+    // the lot settings' re-cut with it; refused, the points are kept, as
+    // for any refusal.
+    final r = city.keepingBuiltLots(() {
+      _applyLotSettings(city);
+      return city.buildRoad(
+        RoadBuildRequest(
+          controls: List.of(pending),
+          type: _type,
+          startElevationM: elevationM,
+          endElevationM: elevationM,
+          snapStart: snap.roads,
+          snapEnd: snap.roads,
+        ),
+        groundAt: groundAt,
+        gradeGate: !ignoreTerrain,
+      );
+    }, onRefused: (why) => blocked = _lotSettingsHint(city, why));
     if (r == null) {
       changed();
       return;

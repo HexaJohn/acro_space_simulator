@@ -516,3 +516,19 @@ Merged with the secession lane's phase 3 without a textual conflict. The seams w
 - **Tick order.** Reputation is handed out before the city phase and reads only loyalty and mood, and the atmosphere
   phase runs after the city phase. Air reaches reputation one tick later, through mood. The two phases share no
   state and cannot reorder each other.
+
+### 10.2 Cross-lane review fixes (2026-10-10)
+
+- **No warming towers on a world that is already warm.** `placementRefusal` refused the Greenhouse Factory only under
+  no sky. Earth (288.15 K, the default world of both builders) and Venus took one, ran it at full throttle and showed
+  it as "Operating", and it never emitted. `CitySiteRules.warmingWanted` asks whether the world would be colder than
+  the target *without any agent* (`agentMolesForTemperature(target) > 0`, from the live `planetAir`, otherwise the
+  body's published temperature). Mars that factories already hold at the target still wants them. The Regolith Baker
+  is refused on a world already at the target, judged with the agent included, which is its own stop.
+- **A built tower stopped at its limit says so.** `towerIdleReason` covers the factory on a world warm without it,
+  the baker past the target or with every bound store empty, and the sequestrator at the CO2 floor (from
+  `co2AboveFloor` on the live sky). `citySiteStatus` reports "Idle — planet at its limit" with the reason, before
+  the power, staffing and mood checks. Open: the Oxygenator at its O2 cap is not covered yet.
+- **The build menus say what each tower does.** `TerraformTowers.effectOf` holds one line per tower. It leads the
+  summary in the flat palette (`_specSummary`) and the in-world palette (`_summary`), heads both expanded details,
+  and heads the site sheet's Details. Before this a Greenhouse Factory read "25 jobs" and nothing else.

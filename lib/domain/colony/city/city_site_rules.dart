@@ -31,8 +31,10 @@ extension CitySiteRules on CitySim {
   /// city), and the terraforming towers where their gas has nowhere to come
   /// from or go (docs/plans/terraforming.md §4, phase 3): a Regolith Baker
   /// on a world with no carbonates or nitrates in its soil, or off the
-  /// ground; a Greenhouse Factory under no sky to hold its agent; a Carbon
-  /// Sequestrator under air with no CO2 above the floor it stops at.
+  /// ground; a Greenhouse Factory under no sky to hold its agent; either
+  /// warming tower on a world already as warm as they aim for (Earth,
+  /// Venus); a Carbon Sequestrator under air with no CO2 above the floor it
+  /// stops at.
   /// Footprint, cost and unlocks are the callers' own checks.
   String? placementRefusal(CityBuildingSpec spec) {
     if (spec.type == 'o2harvester' && !o2Harvestable) {
@@ -51,10 +53,22 @@ extension CitySiteRules on CitySim {
       if (!VolatileReservoir.hasBakeableStore(body.id.value)) {
         return "${body.name}'s soil holds no carbonates or nitrates to bake.";
       }
+      // The baker bakes only while the world is colder than the target.
+      if (!_colderThanTarget) {
+        return '${body.name} is already as warm as Regolith Bakers aim for.';
+      }
     }
-    if (spec.type == TerraformTowers.greenhouseFactory &&
-        !body.hasAtmosphere) {
-      return '${body.name} has no air to hold a greenhouse gas.';
+    if (spec.type == TerraformTowers.greenhouseFactory) {
+      if (!body.hasAtmosphere) {
+        return '${body.name} has no air to hold a greenhouse gas.';
+      }
+      // Earth and Venus already stand at or past the warming target, so a
+      // factory there would never emit — and still cost its ore, power,
+      // hands and smog while the site sheet called it "Operating".
+      if (!warmingWanted) {
+        return '${body.name} is already as warm as Greenhouse Factories '
+            'aim for.';
+      }
     }
     if (spec.type == TerraformTowers.carbonSequestrator && !hasCo2ToTake) {
       return "There is no CO₂ left in ${body.name}'s air to take out.";
@@ -78,6 +92,79 @@ extension CitySiteRules on CitySim {
         AtmosphericComposition.molarMass[AtmosphereGas.carbonDioxide]! /
         mix.meanMolecularWeight;
     return column > const TerraformTuning().co2FloorPa;
+  }
+
+  /// Whether a Greenhouse Factory would ever emit here: the world, every gas
+  /// and haze held but WITHOUT any agent, is colder than
+  /// `TerraformTuning.warmingTargetK` — what the factories' controller tops
+  /// the agent up to (`PlanetAtmosphereService.agentHeadroom`). Judged
+  /// without the agent so a world the factories already hold at the target
+  /// still counts as wanting them (stop them and it cools); a world warm on
+  /// its own — Earth, Venus — never does. Read off the live sky where a host
+  /// integrates one ([CitySim.planetAir]), else the body's published air.
+  bool get warmingWanted {
+    final air = planetAir;
+    if (air != null) {
+      return air.agentMolesForTemperature(
+              const TerraformTuning().warmingTargetK) >
+          0;
+    }
+    return _colderThanTarget;
+  }
+
+  /// Whether the world now — agent and all — is colder than the warming
+  /// target: the Regolith Baker's own stop
+  /// (`PlanetAtmosphereService._warmingWanted`).
+  bool get _colderThanTarget {
+    final target = const TerraformTuning().warmingTargetK;
+    final air = planetAir;
+    if (air != null) return air.surfaceTemperatureK < target;
+    final t = body.atmosphere?.seaLevelTemperature;
+    // No air model at all: an airless world is as cold as its rock.
+    return t == null || t < target;
+  }
+
+  /// Why a built terraforming tower moves no gas right now though it is
+  /// powered and staffed, or null while it works: it has reached the limit
+  /// its planetary process stops at (docs/plans/terraforming.md §4). The
+  /// colony still runs it at full throttle — the throttle is the colony's,
+  /// the stop the planet's — so without this its site sheet read
+  /// "Operating — running at full output" over a building that, for its
+  /// ore, power and jobs, did nothing at all.
+  String? towerIdleReason(CityBuildingSpec spec) {
+    switch (spec.type) {
+      case TerraformTowers.greenhouseFactory:
+        if (!warmingWanted) {
+          return '${body.name} is warm enough without any greenhouse agent, '
+              'so the factory adds none.';
+        }
+      case TerraformTowers.regolithBaker:
+        if (!_colderThanTarget) {
+          return '${body.name} is already as warm as Regolith Bakers aim '
+              'for, so the baker frees nothing.';
+        }
+        if (!_bakeableLeft) {
+          return 'The soil has given up every carbonate and nitrate it held.';
+        }
+      case TerraformTowers.carbonSequestrator:
+        final air = planetAir;
+        final left = air != null
+            ? const PlanetAtmosphereService().co2AboveFloor(air) > 0
+            : hasCo2ToTake;
+        if (!left) {
+          return "${body.name}'s CO₂ is down to the floor the sequestrators "
+              'stop at.';
+        }
+    }
+    return null;
+  }
+
+  /// Whether any bakeable store still holds gas: the live sky's own stores
+  /// where one is integrated, else whether the body has any at all.
+  bool get _bakeableLeft {
+    final air = planetAir;
+    if (air == null) return VolatileReservoir.hasBakeableStore(body.id.value);
+    return air.reservoirs.any((r) => r.bakeable && r.moles > 0);
   }
 
   /// Whether a built [spec] stands idle for want of sky: a harvester under

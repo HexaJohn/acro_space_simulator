@@ -14,6 +14,7 @@ import 'package:acro_space_simulator/domain/planetary/planet_atmosphere.dart';
 import 'package:acro_space_simulator/domain/planetary/planet_atmosphere_service.dart';
 import 'package:acro_space_simulator/domain/universe/celestial_body.dart';
 import 'package:acro_space_simulator/domain/universe/real_solar_system.dart';
+import 'package:acro_space_simulator/infrastructure/flutter/screens/city_site_actions.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// The tower family in a colony, and the slider's retirement
@@ -105,7 +106,34 @@ void main() {
     test('a Greenhouse Factory needs a sky to hold its agent', () {
       final f = spec(TerraformTowers.greenhouseFactory);
       expect(on('mars').placementRefusal(f), isNull);
+      expect(on('titan').placementRefusal(f), isNull);
       expect(on('moon').placementRefusal(f), contains('no air'));
+    });
+
+    test('neither warming tower goes where the world is already warm', () {
+      // Earth stands at 288.15 K and Venus at 737 K, both at or past the
+      // 288 K target: a factory there would never emit — and Earth is the
+      // default world of both builders.
+      final f = spec(TerraformTowers.greenhouseFactory);
+      for (final id in ['earth', 'venus']) {
+        expect(on(id).warmingWanted, isFalse, reason: id);
+        expect(on(id).placementRefusal(f), contains('already as warm'),
+            reason: id);
+      }
+      expect(on('mars').warmingWanted, isTrue);
+
+      // The live sky decides where a host integrates one: Mars warmed past
+      // the target (here, by an agent) still wants factories — stop them
+      // and it cools — but no longer wants bakers.
+      final warmed = on('mars');
+      final air = PlanetAtmosphere.seed(body('mars'))!;
+      air.greenhouseAgentMoles = air.agentMolesForTemperature(300);
+      warmed.planetAir = air;
+      expect(air.surfaceTemperatureK, greaterThan(288));
+      expect(warmed.warmingWanted, isTrue);
+      expect(warmed.placementRefusal(f), isNull);
+      expect(warmed.placementRefusal(spec(TerraformTowers.regolithBaker)),
+          contains('already as warm'));
     });
 
     test('a Carbon Sequestrator needs CO2 above its floor', () {
@@ -115,6 +143,63 @@ void main() {
           reason: "Earth's 400 ppm is above the 280 ppm floor");
       expect(on('moon').placementRefusal(s), isNotNull);
       expect(on('titan').placementRefusal(s), isNotNull);
+    });
+  });
+
+  group("a built tower at its planet's limit says so", () {
+    // The colony runs a tower at full throttle whatever the planet does
+    // with it; the planet stops it at its limit. Unsaid, its site sheet
+    // read "Operating — running at full output" over a building that, for
+    // its ore, power and jobs, moved no gas.
+    test('a factory on a world warm without it', () {
+      final f = spec(TerraformTowers.greenhouseFactory);
+      final earth = towered('earth', [TerraformTowers.greenhouseFactory]);
+      for (var i = 0; i < 4; i++) {
+        earth.advance(0.5);
+      }
+      expect(earth.towerRuns.greenhouse, greaterThan(0.5),
+          reason: 'the colony still runs it');
+      expect(earth.towerIdleReason(f), contains('warm enough'));
+      expect(citySiteStatus(earth, CitySim.siteIdOfCell(earth.hubKey + 1), f)
+          .label, startsWith('Idle'));
+
+      final mars = towered('mars', [TerraformTowers.greenhouseFactory]);
+      expect(mars.towerIdleReason(f), isNull);
+      expect(citySiteStatus(mars, CitySim.siteIdOfCell(mars.hubKey + 1), f)
+          .label, isNot(startsWith('Idle')));
+    });
+
+    test('a sequestrator at the floor, a baker with nothing left to bake',
+        () {
+      final s = spec(TerraformTowers.carbonSequestrator);
+      final b = spec(TerraformTowers.regolithBaker);
+      final city = towered('mars', [
+        TerraformTowers.carbonSequestrator,
+        TerraformTowers.regolithBaker,
+      ]);
+      final air = PlanetAtmosphere.seed(body('mars'))!;
+      city.planetAir = air;
+      expect(city.towerIdleReason(s), isNull);
+      expect(city.towerIdleReason(b), isNull);
+
+      air.add(AtmosphereGas.carbonDioxide,
+          -const PlanetAtmosphereService().co2AboveFloor(air));
+      expect(city.towerIdleReason(s), contains('floor'));
+
+      for (final r in air.reservoirs) {
+        if (r.bakeable) r.moles = 0;
+      }
+      expect(city.towerIdleReason(b), contains('soil'));
+      // Not a tower with a limit: never idle by this rule.
+      expect(city.towerIdleReason(spec(TerraformTowers.retentionArray)),
+          isNull);
+    });
+
+    test('every menu and the site sheet say what each tower does', () {
+      for (final t in TerraformTowers.all) {
+        expect(TerraformTowers.effectOf(t), isNotEmpty, reason: t);
+      }
+      expect(TerraformTowers.effectOf('farm'), isNull);
     });
   });
 

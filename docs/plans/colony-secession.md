@@ -613,9 +613,8 @@ Mutation-checked: removing the site sheet's term refusal or the flat builder's t
 **Deviations and open items.**
 - "Demolition" is every act that tears a building down: the bulldozer, the meltdown, any flat-builder tool
   that clears a building, road or platform, and any plat edit whose re-cut would lose a built lot. On the
-  plat, re-zoning a built lot is not refused (`setUse` leaves the building standing). Changing the road
-  tool's lot frontage/depth re-cuts the whole plat outside the trial, as it always has (a pre-existing gap:
-  that re-cut carries nothing).
+  plat, re-zoning a built lot is not refused (`setUse` leaves the building standing). The road tool's lot
+  frontage/depth re-cut now runs inside the trial (see the cross-lane fixes below).
 - A petition is state and a warning on its colony, a notice in its queue, and a one-time toast in the flight
   view. There is no inbox that keeps it after the toast.
 - Blockade as coercion is shown, not modelled: cutting a standoff colony's deliveries has no loyalty effect
@@ -635,6 +634,22 @@ atmosphere phase runs after it, so the two don't interact within a tick. One ite
 merge: a frame-budgeted (held) colony replays its ticks after the hand-out, so all of its held ticks see the latest
 reputation, which was measured on its own state from before the replay. Hearts pressure builds over days, so the
 lag is small, but it is not bit-identical to running inline.
+
+#### Cross-lane review fixes (2026-10-10)
+
+- **The Frontage and Depth sliders broke the ban.** `RoadToolController._applyLotSettings` re-cut the whole plat
+  before `keepingBuiltLots` copied it, so the trial's copy was already re-cut, and `guardBuiltLots` skipped the lost
+  lots as "already dangling". A harmless road laid after the slider moved tore down 46 of 82 buildings in the test
+  town with no refusal. The settings now go on inside the trial in both `_build` and `commitSpline`, and
+  `_applyLotSettings` asks `guardBuiltLots(const {})` right after the re-cut. The re-cut renames nothing, so a lot it
+  gives up is lost there. Without that check, a road the quote then turned down (no funds, say) left the new cut
+  standing, and the next road's trial skipped its dead lots. The refusal tells the player to set Frontage and Depth
+  back, to the values it names. The sliders are not greyed while the ban runs.
+- **Disease and the burial backlog are saved.** `disease` and `corpses` were never in `CitySim.toJson`, so a save
+  and load cured a plague and emptied the morgue. Population then drifted about 0.5% within 40 days off the unsaved
+  run, and reputation, hearts pressure and the dependency check all read population. Both are now written when
+  non-zero and read tolerantly (old saves load healthy, disease clamped to 0..1). This was already broken before
+  this phase. Pinned in `test/colony/city_health_save_test.dart`.
 
 ## 8. Open questions for the user
 

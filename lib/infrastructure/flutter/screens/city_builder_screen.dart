@@ -16,6 +16,7 @@ import '../../../domain/colony/city/city_loyalty.dart';
 import '../../../domain/colony/city/city_sim.dart';
 import '../../../domain/colony/city/city_site_rules.dart';
 import '../../../domain/planetary/planet_surface.dart';
+import '../../../domain/planetary/terraform_towers.dart';
 import '../../../domain/universe/celestial_body.dart';
 import '../../../domain/universe/real_solar_system.dart';
 import '../../../domain/vessel/vessel.dart';
@@ -1990,6 +1991,9 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
 
   String _specSummary(CitySpec s) {
     final bits = <String>[];
+    // A tower makes no commodity and serves no one: its effect on the
+    // planet is what it does, so it leads.
+    if (TerraformTowers.effectOf(s.type) case final effect?) bits.add(effect);
     if (s.jobs > 0) bits.add('${s.jobs} jobs');
     if (s.powerOutput > 0) bits.add('+${s.powerOutput.toStringAsFixed(0)} pwr');
     if (s.computeOutput > 0) bits.add('+${s.computeOutput.toStringAsFixed(0)} compute');
@@ -2009,7 +2013,14 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
             Text(v, style: AppTheme.mono.copyWith(color: c ?? AppTheme.text)),
           ]),
         );
+    final effect = TerraformTowers.effectOf(s.type);
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      if (effect != null)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 2),
+          child: Text(effect,
+              style: AppTheme.mono.copyWith(color: AppTheme.accent2)),
+        ),
       if (s.jobs > 0) line('Jobs', '${s.jobs}'),
       if (s.powerOutput > 0)
         line(

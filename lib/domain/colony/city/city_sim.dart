@@ -5104,6 +5104,13 @@ class CitySim {
         if (crime != 0) 'crime': crime,
         if (corruption != 0) 'corruption': corruption,
         if (inequality != 0) 'inequality': inequality,
+        // The outbreak and the burial backlog that feeds it, omitted at zero.
+        // Unsaved, a save and load cured a plague and emptied the morgue: the
+        // deaths the disease would have taken were never taken, and the
+        // population every later reading weighs by drifted off the run that
+        // was never saved.
+        if (disease != 0) 'disease': disease,
+        if (corpses != 0) 'corpses': corpses,
         'loyalty': ?loyaltySaveJson(),
         'funds': funds,
         'milestones': milestonesReached.toList(),
@@ -5292,7 +5299,11 @@ class CitySim {
       ..rebellion = (j['rebellion'] as num?)?.toDouble() ?? 0
       ..crime = (j['crime'] as num?)?.toDouble() ?? 0
       ..corruption = (j['corruption'] as num?)?.toDouble() ?? 0
-      ..inequality = (j['inequality'] as num?)?.toDouble() ?? 0;
+      ..inequality = (j['inequality'] as num?)?.toDouble() ?? 0
+      // Absent in an old save, which loads healthy, as it always has.
+      ..disease =
+          ((j['disease'] as num?)?.toDouble() ?? 0).clamp(0.0, 1.0).toDouble()
+      ..corpses = math.max(0.0, (j['corpses'] as num?)?.toDouble() ?? 0);
     final savedLaws = j['laws'];
     if (savedLaws is List) {
       sim.laws.addAll(Law.values.where((l) => savedLaws.contains(l.name)));

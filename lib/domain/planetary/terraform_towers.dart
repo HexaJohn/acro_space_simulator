@@ -51,6 +51,20 @@ abstract final class TerraformTowers {
 
   /// Whether [type] is one of the family.
   static bool isTower(String type) => all.contains(type);
+
+  /// What tower [type] does to its planet, in a line the build menus and
+  /// the site sheet show — or null for any other building. The menus speak
+  /// in stats (jobs, power, outputs, services), and the new towers make no
+  /// commodity and serve no one, so without this a Greenhouse Factory read
+  /// "25 jobs" and nothing else wherever the player chose or inspected one.
+  static String? effectOf(String type) => switch (type) {
+        oxygenator => "Turns the planet's CO₂ into breathable O₂",
+        greenhouseFactory => 'Warms the planet (PFC greenhouse agent)',
+        regolithBaker => 'Frees CO₂ + N₂ from the soil',
+        carbonSequestrator => 'Takes CO₂ out of the air into rock',
+        retentionArray => "Holds the planet's air against escape",
+        _ => null,
+      };
 }
 
 /// What a colony's towers ran at in one step: Σ throttle per kind, so two

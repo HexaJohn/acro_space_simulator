@@ -21,6 +21,7 @@ import '../../../domain/colony/city/city_sim.dart';
 import '../../../domain/colony/city/city_site_rules.dart';
 import '../../../domain/colony/city/city_term_guard.dart';
 import '../../../domain/colony/city/parcel.dart';
+import '../../../domain/planetary/terraform_towers.dart';
 import 'app_theme.dart';
 import 'city_control_ui.dart';
 import 'city_model.dart';
@@ -920,6 +921,7 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
     // Power output is shown AS BUILT HERE: solar on Mars is not solar on
     // Earth, and the nameplate figure would be a lie at the point of deciding.
     final pf = city.powerFactor(s.type);
+    final effect = TerraformTowers.effectOf(s.type);
     return Container(
       margin: const EdgeInsets.only(left: 18, right: 4, bottom: 4),
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
@@ -928,6 +930,14 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
         borderRadius: BorderRadius.circular(4),
       ),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        // What a terraforming tower does to its planet: it has no output
+        // or service for the lines below to say it with.
+        if (effect != null)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 2),
+            child: Text(effect,
+                style: const TextStyle(fontSize: 10, color: good)),
+          ),
         if (s.housing > 0) line('Housing', '+${s.housing}', good),
         if (s.jobs > 0) line('Jobs', '${s.jobs}', info),
         if (s.powerOutput > 0)
@@ -975,6 +985,7 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
   /// needing the 2D builder's expandable detail panel.
   String _summary(CityBuildingSpec u) {
     final bits = <String>[];
+    if (TerraformTowers.effectOf(u.type) case final effect?) bits.add(effect);
     if (u.housing > 0) bits.add('+${u.housing} hab');
     if (u.jobs > 0) bits.add('${u.jobs} jobs');
     if (u.powerOutput > 0) bits.add('+${u.powerOutput.round()} pw');
