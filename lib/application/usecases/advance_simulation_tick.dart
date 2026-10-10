@@ -621,7 +621,9 @@ class AdvanceSimulationTick {
           .where((e) => net.lotServed(e.$1.id))
           .map((e) => e.$1)
           .firstOrNull;
-      if (pad != null) {
+      // A port the rebels hold lets one more shuttle in, to impound it,
+      // then refuses docking (docs/plans/colony-secession.md §4.1).
+      if (pad != null && city.loyalty.admitCraft()) {
         final padBF = _shuttlePadBF(city, pad.centroid, body);
         final vessel = _shuttleFactory.build(
           id: 'shuttle-${city.id}-${_shuttleSeq++}',
@@ -685,6 +687,8 @@ class AdvanceSimulationTick {
           vessel.setThrottle(cmd.throttle);
           _pointShuttle(vessel, orientation.rotate(cmd.facing));
         case ShuttleRunPhase.unloading:
+          // Held by rebels: grounded until the port is the player's again.
+          if (city.loyalty.portClosedToPlayer) break;
           // The pad-side cargo service has already emptied the holds — landed
           // craft on pads unload every tick. The dwell is turnaround time.
           run.dwell -= dt;
