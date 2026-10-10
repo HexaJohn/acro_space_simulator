@@ -7,7 +7,7 @@ import '../../domain/autonomy/cargo_schedule.dart';
 import '../../domain/colony/city/city_sim.dart';
 import '../../domain/colony/colony.dart';
 import '../../domain/megastructure/megastructure.dart';
-import '../../domain/planetary/atmosphere_pollution.dart';
+import '../../domain/planetary/planet_atmosphere.dart';
 import '../../domain/terrain/terrain_brush.dart';
 import '../../domain/terrain/terrain_edits.dart';
 import '../../domain/universe/celestial_body.dart';
@@ -37,19 +37,30 @@ abstract class CityRepository {
   void remove(String id);
 }
 
-/// Per-body accumulated atmospheric change from colony emissions.
+/// Every body's gas inventory (docs/plans/terraforming.md §3.1): the air as
+/// world state, which the tick integrates and republishes onto the bodies.
 abstract class AtmosphereRepository {
-  AtmospherePollution? forBody(String bodyId);
-  void save(AtmospherePollution state);
+  /// [bodyId]'s inventory, or null for a body with no air to change.
+  PlanetAtmosphere? forBody(String bodyId);
+
+  /// Every inventory, in body-id order — the tick, the save and the
+  /// fingerprint all walk this, and none of them may depend on insertion
+  /// order.
+  Iterable<PlanetAtmosphere> all();
+
+  void save(PlanetAtmosphere state);
 }
 
-/// Inert default: emissions vanish, as they did before the loop was closed.
+/// Inert default: emissions vanish and every body keeps its reference air, as
+/// before the loop was closed. What a motion-only tick is built with.
 class NullAtmosphereRepository implements AtmosphereRepository {
   const NullAtmosphereRepository();
   @override
-  AtmospherePollution? forBody(String bodyId) => null;
+  PlanetAtmosphere? forBody(String bodyId) => null;
   @override
-  void save(AtmospherePollution state) {}
+  Iterable<PlanetAtmosphere> all() => const [];
+  @override
+  void save(PlanetAtmosphere state) {}
 }
 
 /// Empty default so a tick can be built with no colonies.

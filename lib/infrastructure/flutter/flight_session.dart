@@ -18,6 +18,7 @@
 library;
 
 import '../../adapters/events/in_memory_event_bus.dart';
+import '../../adapters/repositories/in_memory_atmosphere_repository.dart';
 import '../../adapters/repositories/in_memory_repositories.dart';
 import '../../adapters/repositories/in_memory_world_repositories.dart';
 import '../../application/ports/compute_port.dart';
@@ -77,6 +78,7 @@ class FlightSession {
     FlightCheats cheats = const FlightCheats(),
     void Function(DomainEvent)? onEvent,
   })  : universe = StaticUniverseRepository(system),
+        atmospheres = InMemoryAtmosphereRepository.seeded(system),
         vessels = InMemoryVesselRepository(fleet),
         deposits = InMemoryDepositRepository(deposits),
         megastructures = InMemoryMegastructureRepository(megastructures),
@@ -86,6 +88,12 @@ class FlightSession {
   }
 
   final StaticUniverseRepository universe;
+
+  /// Every body's gas inventory, seeded from the starting system's reference
+  /// air. The tick integrates colony flows into it and republishes the bodies
+  /// through [universe], so the flight sees the air a colony made. Survives
+  /// tick rebuilds, as the terrain edits do.
+  final InMemoryAtmosphereRepository atmospheres;
   final InMemoryVesselRepository vessels;
 
   /// Megaprojects under construction in this world. In the tick loop so their
@@ -144,6 +152,7 @@ class FlightSession {
       weather: weather,
       research: research,
       terrainEdits: terrainEdits,
+      atmosphere: atmospheres,
       megastructures: megastructures,
       disableOverheat: _cheats.disableOverheat,
       disableAeroStress: _cheats.disableAeroStress,

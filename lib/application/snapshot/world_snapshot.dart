@@ -29,6 +29,7 @@ import '../../domain/terrain/dem_registry.dart';
 import '../../domain/terrain/terrain_brush.dart';
 import '../../domain/terrain/terrain_edits.dart';
 import '../../domain/terrain/terrain_feature.dart';
+import 'atmosphere_snapshot.dart';
 import 'city_patch_columns.dart';
 import 'city_site_frame.dart';
 import 'city_traffic_frame.dart';
@@ -2598,6 +2599,11 @@ class WorldSnapshot {
   /// Serialised; not in [fingerprint].
   final List<CitySiteFrame> sites;
 
+  /// Every body's gas inventory, in body-id order (see [AtmosphereSnapshot]).
+  /// Authoritative: hashed into [fingerprint]. Empty in a frame captured
+  /// without the atmosphere repository, as the studios' are.
+  final List<AtmosphereSnapshot> atmospheres;
+
   // Not const: the empty patch columns are typed lists, which have no const
   // form, and nothing constructs a frame as a constant.
   WorldSnapshot({
@@ -2616,6 +2622,7 @@ class WorldSnapshot {
     this.junctions = const [],
     this.cityTraffic = const [],
     this.sites = const [],
+    this.atmospheres = const [],
   }) : patches = patches ?? CityPatchColumns.empty;
 
   /// The same frame at a different sim time.
@@ -2641,6 +2648,7 @@ class WorldSnapshot {
         junctions: junctions,
         cityTraffic: cityTraffic,
         sites: sites,
+        atmospheres: atmospheres,
       );
 
   /// The deformations for [bodyId], rebuilt as a domain store ready to hand to
@@ -2668,6 +2676,7 @@ class WorldSnapshot {
     TerrainHeights? terrain,
     TerrainEditsRepository? terrainEdits,
     MegastructureRepository? megastructures,
+    AtmosphereRepository? atmospheres,
     SurfacePlacement placement = const SurfacePlacement(),
     List<EventSnapshot> events = const [],
     // Body descriptors (static render config: kind/atmosphere/composition) are
@@ -3170,6 +3179,9 @@ class WorldSnapshot {
               for (final m in megastructures.all())
                 ?MegastructureSnapshot.of(m, system, ephemeris, epoch),
             ],
+      atmospheres: atmospheres == null
+          ? const []
+          : [for (final a in atmospheres.all()) AtmosphereSnapshot.of(a)],
     );
   }
 
@@ -3191,6 +3203,8 @@ class WorldSnapshot {
         if (megastructures.isNotEmpty)
           'megastructures': [for (final m in megastructures) m.toJson()],
         if (sites.isNotEmpty) 'sites': [for (final s in sites) s.toJson()],
+        if (atmospheres.isNotEmpty)
+          'atmospheres': [for (final a in atmospheres) a.toJson()],
       };
 
   factory WorldSnapshot.fromJson(Map<String, dynamic> j) {
@@ -3254,6 +3268,10 @@ class WorldSnapshot {
       sites: [
         for (final s in (j['sites'] as List?) ?? const [])
           if (s is Map) CitySiteFrame.fromJson(s.cast<String, dynamic>()),
+      ],
+      atmospheres: [
+        for (final a in (j['atmospheres'] as List?) ?? const [])
+          if (a is Map) AtmosphereSnapshot.fromJson(a.cast<String, dynamic>()),
       ],
     );
   }
@@ -3327,6 +3345,14 @@ class WorldSnapshot {
           ..write(',')
           ..write(_q(e.rimHeight))
           ..write(';');
+      }
+    }
+    // Planetary air: it sets the pressure every craft in that sky flies
+    // through. Only when present, so a frame without it hashes as it did.
+    if (atmospheres.isNotEmpty) {
+      buf.write('&');
+      for (final a in atmospheres) {
+        a.writeFingerprint(buf);
       }
     }
     return buf.toString();

@@ -3,9 +3,12 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
-import 'package:acro_space_simulator/domain/planetary/atmosphere_pollution.dart';
 import 'package:acro_space_simulator/domain/planetary/atmospheric_composition.dart';
+import 'package:acro_space_simulator/domain/planetary/planet_atmosphere.dart';
+import 'package:acro_space_simulator/domain/planetary/planet_atmosphere_service.dart';
 import 'package:acro_space_simulator/domain/universe/atmosphere_model.dart';
+import 'package:acro_space_simulator/domain/universe/celestial_body.dart';
+import 'package:acro_space_simulator/domain/universe/real_solar_system.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// Composition used to drive reentry heating and sky colour but not one number
@@ -54,35 +57,31 @@ void main() {
   });
 
   test('colony emissions drive the change end to end', () {
-    final base = AtmosphericComposition.mars();
-    final state = AtmospherePollution(bodyId: 'mars', totalMoles: 1e17);
-    const AtmospherePollutionService().advance(
+    final mars = RealSolarSystem.build().require(const BodyId('mars'));
+    final state = PlanetAtmosphere.seed(mars)!;
+    const PlanetAtmosphereService().advance(
       state,
-      pollutionRate: 3000,
+      AtmosphereFlows()
+        ..addColony(pollutionRate: 3000, oxygenatorRun: 0, dt: 1e8),
       dt: 1e8,
     );
 
-    final after = state.applyTo(base);
-    const marsAir = AtmosphereModel(
-      seaLevelPressure: 610,
-      seaLevelDensity: 0.020,
-      seaLevelTemperature: 210,
-      scaleHeight: 11100,
-      atmosphereHeight: 90000,
-    );
-    final changed = marsAir.withMeanMolarMass(
-      baselineKgPerMol: base.meanMolecularWeight,
-      currentKgPerMol: after.meanMolecularWeight,
-    );
+    final marsAir = mars.atmosphere!;
+    final changed = state.air;
 
     expect(state.isMeasurable, isTrue);
     // Mars is already almost pure CO2, so adding more barely moves the mean
-    // molar mass — the drag change should be real but tiny, not dramatic.
-    expect(changed.seaLevelDensity,
-        greaterThanOrEqualTo(marsAir.seaLevelDensity));
+    // molar mass: what the extra gas does is add PRESSURE, and the density
+    // a wing feels rises with it — by about the share of air added.
+    final added = state.totalMoles / state.referenceTotalMoles - 1;
+    expect(added, greaterThan(0));
+    expect(changed.seaLevelPressure / marsAir.seaLevelPressure - 1,
+        closeTo(added, added * 0.05));
+    expect(changed.seaLevelDensity, greaterThan(marsAir.seaLevelDensity));
     expect(
-        (changed.seaLevelDensity - marsAir.seaLevelDensity).abs() /
-            marsAir.seaLevelDensity,
-        lessThan(0.05));
+        (changed.scaleHeight - marsAir.scaleHeight).abs() /
+            marsAir.scaleHeight,
+        lessThan(0.05),
+        reason: 'the mix is still CO2: scale height barely moves');
   });
 }

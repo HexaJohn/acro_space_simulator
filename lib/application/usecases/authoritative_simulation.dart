@@ -75,6 +75,9 @@ class AuthoritativeSimulation {
         // is hashed into the fingerprint — a client that missed a crater would
         // reconcile onto ground the server does not have.
         terrainEdits: advance.terrainEdits,
+        // Each body's gas inventory: it decides the air every craft flies
+        // through, so it is world state the fingerprint has to cover.
+        atmospheres: advance.atmosphere,
         // Fold the events that fired this tick into the frame (drains the bus).
         events: advance.events.drainRecent().map(EventSnapshot.of).toList(),
         // Static body descriptors are sticky on the engine side; the host gates

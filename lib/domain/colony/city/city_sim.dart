@@ -471,6 +471,13 @@ class CitySim {
   /// the atmosphere model so a colony's industry actually changes the air it
   /// breathes, rather than only its own local pollution number.
   double emissionRate = 0;
+
+  /// Terraforming towers running this tick: the sum of every tower's
+  /// throttle (staffing, power, compute, occupancy), so two half-staffed
+  /// towers count as one. What the planetary-atmosphere phase vents O2 by
+  /// (docs/plans/terraforming.md §6 phase 1) — a tower counted merely for
+  /// EXISTING would oxygenate a planet from a dark, empty building.
+  double oxygenatorRun = 0;
   double computeSupply = 0; // current compute capacity
   double computeDemand = 0;
   Economy economy = Economy.capitalism;
@@ -1362,6 +1369,7 @@ class CitySim {
     // 1. Production: inputs drain, outputs fill, scaled by throttle. Skip a
     //    building's outputs if its inputs can't be met (no free lunch).
     var pollutionRate = 0.0;
+    var towerRun = 0.0;
     final emissionCut = has(Law.emissionsCap) ? 0.5 : 1.0;
     // What the buildings make, net of what they use, of each life-support
     // commodity, per second: the supply side of [supportablePop].
@@ -1381,6 +1389,7 @@ class CitySim {
         if (stockOf(k) < v * th * dt) canRun = false;
       });
       final run = canRun ? th : 0.0;
+      if (s.type == 'terraformer') towerRun += run;
       s.inputs.forEach((k, v) {
         stock[k] = (stockOf(k) - v * run * dt).clamp(0, 1e12);
         flow(k, -v * run);
@@ -1404,6 +1413,7 @@ class CitySim {
         if (stockOf(k) < v * th * uf * dt) canRun = false;
       });
       final run = canRun ? th * uf : 0.0;
+      if (s.type == 'terraformer') towerRun += run;
       s.inputs.forEach((k, v) {
         stock[k] = (stockOf(k) - v * run * dt).clamp(0, 1e12);
         flow(k, -v * run);
@@ -1417,6 +1427,7 @@ class CitySim {
     }
 
     emissionRate = pollutionRate;
+    oxygenatorRun = towerRun;
 
     // 1.4 Pollution accumulates (industry/power emit, parks + low activity decay).
     var parks = 0.0;
