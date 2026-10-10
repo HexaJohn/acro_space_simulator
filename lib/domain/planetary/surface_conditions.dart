@@ -10,9 +10,16 @@ import 'atmospheric_composition.dart';
 import 'planet_surface.dart';
 
 /// Physical surface conditions for a colony, derived from a body's real physics
-/// (insolation, atmosphere, composition, gravity) blended with the colony's
-/// LIVE terraforming + damage state (terraform progress raises it toward
-/// Earthlike; pollution / nuclear winter / radiation drag it down).
+/// (insolation, atmosphere, composition, gravity) and the colony's LIVE damage
+/// state (pollution / nuclear winter / radiation drag it down).
+///
+/// The ONE definition of what the air does for a person
+/// (docs/plans/terraforming.md §3.4): breathable, the sky's oxygen cover and
+/// the toxicity all come from here, and the pressure, temperature and gas mix
+/// come from the body — which carries its DERIVED air (the planet's gas
+/// inventory, its greenhouse temperature) since terraforming phase 2. The
+/// colony's old terraform slider no longer fakes any of them: towers change
+/// the real air, and these read it.
 ///
 /// Biome + flora are then a function of these scalars rather than a hand-picked
 /// enum — so a Martian desert has no cacti until it's warm + wet enough, Earth's
@@ -79,9 +86,14 @@ class SurfaceConditions {
   static const double _earthPressurePa = 101325;
   static const double _earthDensity = 1.225;
 
-  /// Build from a body + the colony's live environment knobs. [terraform] 0..1
-  /// pushes the world toward Earthlike; [pollution] (~0..200), [nuclearWinter]
-  /// 0..1 and [radiationLevel] 0..1 push it the other way.
+  /// Build from a body + the colony's live environment knobs: [pollution]
+  /// (~0..200), [nuclearWinter] 0..1 and [radiationLevel] 0..1 push it toward
+  /// hostile.
+  ///
+  /// [terraform] is accepted and IGNORED since terraforming phase 2: it used
+  /// to blend pressure, temperature, humidity, oxygen and toxicity toward
+  /// Earth's, which let a colony breathe a sky its own planet did not have.
+  /// The slider itself (and its biome flip) goes in phase 3.
   factory SurfaceConditions.of(
     CelestialBody body, {
     Biome biome = Biome.barren,
@@ -98,19 +110,17 @@ class SurfaceConditions {
 
     // --- Pressure ---
     final basePa = atmo?.seaLevelPressure ?? 0;
-    var pressureAtm = basePa / _earthPressurePa;
-    // Terraforming thickens a thin atmosphere toward 1 atm.
-    pressureAtm = pressureAtm + terraform * math.max(0, 1.0 - pressureAtm);
+    final pressureAtm = basePa / _earthPressurePa;
 
     // --- Temperature ---
-    // Equilibrium-ish: from the body's modelled sea-level T if present, else a
-    // crude radiative estimate from insolation. Greenhouse from CO2 + pressure.
+    // The body's modelled surface temperature, which already carries its
+    // greenhouse (the derived air's PlanetClimate temperature, or the
+    // hand-tuned reference); a crude radiative estimate from insolation for
+    // an airless world. A greenhouse term added on top here counted it
+    // twice — Venus read 11,000 K.
     var t = atmo?.seaLevelTemperature ??
         (278.0 * math.pow(insol.clamp(0.0001, 100), 0.25));
     final co2 = comp?.fractions[AtmosphereGas.carbonDioxide] ?? 0;
-    t += co2 * pressureAtm * 120; // greenhouse warming
-    // Terraform nudges temperature toward a comfortable 288 K.
-    t += terraform * (288 - t) * 0.8;
     // Nuclear winter cools.
     t -= nuclearWinter * 40;
 
@@ -120,8 +130,7 @@ class SurfaceConditions {
 
     // --- Atmospheric humidity: condensable water vapour (Option C input #1). ---
     final h2o = comp?.fractions[AtmosphereGas.water] ?? 0;
-    final humidity =
-        ((h2o * 10 + terraform * 0.5) * liquid * pressureOk).clamp(0.0, 1.0);
+    final humidity = (h2o * 10 * liquid * pressureOk).clamp(0.0, 1.0);
 
     // --- Surface moisture: wet GROUND from the biome, dried by a low water
     //     table, and only "wet" if it's warm enough for liquid (Option C #2).
@@ -133,8 +142,7 @@ class SurfaceConditions {
     final water = (surfaceMoisture * 0.7 + humidity * 0.3).clamp(0.0, 1.0);
 
     // --- Composition ---
-    final o2 = (comp?.fractions[AtmosphereGas.oxygen] ?? 0) +
-        terraform * 0.2 * (1 - (comp?.fractions[AtmosphereGas.oxygen] ?? 0));
+    final o2 = comp?.fractions[AtmosphereGas.oxygen] ?? 0;
     final ch4 = comp?.fractions[AtmosphereGas.methane] ?? 0;
     // Pollution adds to toxicity only when EXTREME. The build-style gate flips at
     // toxic >= 0.2, and the UI meter maxes near 200, so ordinary operating smog
@@ -144,8 +152,7 @@ class SurfaceConditions {
     final pollToxic = math.pow(
             ((pollution - 120) / 130).clamp(0.0, 1.0), 2)
         .toDouble();
-    final toxic = ((co2 + ch4).clamp(0.0, 1.0) * (1 - terraform) + pollToxic)
-        .clamp(0.0, 1.0);
+    final toxic = ((co2 + ch4).clamp(0.0, 1.0) + pollToxic).clamp(0.0, 1.0);
 
     final density = (atmo?.seaLevelDensity ?? 0) / _earthDensity;
     final rad = math.max(
@@ -171,6 +178,28 @@ class SurfaceConditions {
   /// + not chemically poisonous. (Pollution can push [toxicFraction] up, so heavy
   /// smog counts as un-breathable — wear a mask / seal the hab.)
   bool get breathable => o2Fraction >= 0.15 && pressureAtm >= 0.5 && toxicFraction < 0.2;
+
+  /// Oxygen partial pressure at the surface, atm.
+  double get o2PressureAtm => o2Fraction * pressureAtm;
+
+  /// The oxygen partial pressure (atm) at which the sky supplies ALL of a
+  /// person's oxygen (§3.4): about sea-level-equivalent for a lung.
+  static const double fullCoverO2Atm = 0.16;
+
+  /// The Armstrong limit, near enough (atm): below ~0.063 atm body fluids
+  /// boil, and no amount of oxygen in the air helps an unsuited person.
+  static const double armstrongAtm = 0.063;
+
+  /// The share of a colonist's oxygen the sky supplies, 0..1 (§3.4):
+  /// `pO2 / 0.16 atm` while the total pressure is above the Armstrong limit
+  /// and the air is not poisonous, else nothing. A thin, oxygen-rich sky is a
+  /// breathing-mask world, not a breathable one — the compressors draw what
+  /// the colony would otherwise have had to make, which is what this
+  /// measures — so it is partial long before [breathable].
+  double get oxygenCover {
+    if (pressureAtm < armstrongAtm || toxicFraction >= 0.2) return 0;
+    return (o2PressureAtm / fullCoverO2Atm).clamp(0.0, 1.0);
+  }
 
   /// STRUCTURALLY hostile air — the world's atmosphere can't physically hold a
   /// person/open building together: near-vacuum OR no breathable oxygen at all.

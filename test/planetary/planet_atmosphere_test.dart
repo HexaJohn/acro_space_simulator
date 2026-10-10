@@ -14,11 +14,17 @@ import 'package:flutter_test/flutter_test.dart';
 /// phase 1). These pin it against the REAL mass of air involved, so the answer
 /// is honest on Earth and on Mars alike — and pin that an untouched world
 /// reads back exactly the hand-tuned air it always had.
+///
+/// The ledger tests use [PlanetAtmosphereService.ledgerOnly]: they pin what
+/// the colonies put in and take out, mole for mole, and since phase 2 the
+/// planet answers back (Mars's cap takes industry CO2, its soil gives some
+/// up as the towers warm it) — that is pinned in planet_feedbacks_test.dart.
 void main() {
   final system = RealSolarSystem.build();
   CelestialBody body(String id) => system.require(BodyId(id));
   PlanetAtmosphere seed(String id) => PlanetAtmosphere.seed(body(id))!;
   const service = PlanetAtmosphereService();
+  const ledger = PlanetAtmosphereService.ledgerOnly();
   const marsYear = 686.98 * 86400.0;
   const atm = 101325.0;
 
@@ -51,26 +57,35 @@ void main() {
       }
     });
 
-    test('an airless body has no inventory to change', () {
-      expect(PlanetAtmosphere.seed(body('moon')), isNull);
-      expect(PlanetAtmosphere.seed(body('mercury')), isNull);
+    test('an airless world starts with an empty sky; a giant has none', () {
+      for (final id in ['moon', 'mercury']) {
+        final a = PlanetAtmosphere.seed(body(id))!;
+        expect(a.totalMoles, 0, reason: id);
+        expect(a.air, isNull, reason: id);
+        expect(a.composition, isNull, reason: id);
+        expect(a.isAtRest, isTrue, reason: id);
+      }
+      expect(PlanetAtmosphere.seed(body('jupiter')), isNull,
+          reason: 'no surface to hold a sky against');
+      expect(PlanetAtmosphere.seed(body('sun')), isNull);
     });
   });
 
   group('derived air', () {
     test('more of the same mix: pressure and density follow the mass', () {
       final a = seed('mars');
-      final ref = a.air;
+      final ref = a.air!;
       for (final e in a.moles.entries) {
         a.add(e.key, e.value); // double every gas
       }
-      final air = a.air;
+      final air = a.air!;
+      final tr = air.seaLevelTemperature / ref.seaLevelTemperature;
       expect(air.seaLevelPressure, closeTo(2 * ref.seaLevelPressure, 1e-9));
-      expect(air.seaLevelDensity, closeTo(2 * ref.seaLevelDensity, 1e-12));
-      expect(air.scaleHeight, closeTo(ref.scaleHeight, 1e-6),
-          reason: 'same molar mass and temperature: same scale height');
-      expect(air.seaLevelTemperature, ref.seaLevelTemperature,
-          reason: 'temperature is held at reference in phase 1');
+      expect(air.seaLevelTemperature, greaterThan(ref.seaLevelTemperature),
+          reason: 'twice the CO2, in twice the pressure: a warmer Mars');
+      expect(air.seaLevelDensity, closeTo(2 * ref.seaLevelDensity / tr, 1e-12));
+      expect(air.scaleHeight, closeTo(ref.scaleHeight * tr, 1e-6),
+          reason: 'same molar mass: scale height follows temperature');
       expect(air.atmosphereHeight, greaterThan(ref.atmosphereHeight),
           reason: 'thicker air reaches higher before it counts as space');
       // The top still sits at the reference's absolute pressure.
@@ -79,19 +94,23 @@ void main() {
               ref.seaLevelPressure);
       expect(air.sampleAt(air.atmosphereHeight - 1).pressure,
           closeTo(pTopRef, pTopRef * 1e-3));
-      expect(a.composition.fractions[AtmosphereGas.carbonDioxide],
+      expect(a.composition!.fractions[AtmosphereGas.carbonDioxide],
           closeTo(body('mars').composition!.fractions[
               AtmosphereGas.carbonDioxide]!, 1e-12));
     });
 
     test('heavier air sits lower: denser at the surface, thinner aloft', () {
       final a = seed('earth');
-      final ref = a.air;
-      // Swap a quarter of the nitrogen for CO2 mole-for-mole: heavier mix.
+      final ref = a.air!;
+      // Swap a quarter of the nitrogen for argon mole-for-mole: a heavier
+      // mix that is no greenhouse gas, so the temperature barely moves (CO2
+      // would cook the planet and lift the air instead).
       final n2 = a.molesOf(AtmosphereGas.nitrogen) * 0.25;
       a.add(AtmosphereGas.nitrogen, -n2);
-      a.add(AtmosphereGas.carbonDioxide, n2);
-      final air = a.air;
+      a.add(AtmosphereGas.argon, n2);
+      final air = a.air!;
+      expect(air.seaLevelTemperature - ref.seaLevelTemperature,
+          lessThan(2.0));
       expect(a.meanMolarMass,
           greaterThan(body('earth').composition!.meanMolecularWeight));
       expect(air.seaLevelDensity, greaterThan(ref.seaLevelDensity));
@@ -123,7 +142,7 @@ void main() {
       // A heavy industrial colony running for a decade of sim time.
       const decade = 3.15e8;
       for (final s in [earth, mars]) {
-        service.advance(s, flows(pollutionRate: 40, dt: decade), dt: decade);
+        ledger.advance(s, flows(pollutionRate: 40, dt: decade), dt: decade);
       }
       expect(earth.isMeasurable, isFalse,
           reason: 'one city cannot move a 1.8e20-mole atmosphere');
@@ -139,7 +158,7 @@ void main() {
       final a = seed('mars');
       final base = body('mars').composition!;
       service.advance(a, flows(pollutionRate: 5000, dt: 1e8), dt: 1e8);
-      final after = a.composition;
+      final after = a.composition!;
       expect(after.fractions[AtmosphereGas.carbonDioxide]!,
           greaterThan(base.fractions[AtmosphereGas.carbonDioxide]!));
       expect(after.fractions[AtmosphereGas.nitrogen]!,
@@ -150,10 +169,10 @@ void main() {
 
     test('scrubbing pulls CO2 back down and releases oxygen', () {
       final a = seed('mars');
-      service.advance(a, flows(pollutionRate: 200, dt: 1e6), dt: 1e6);
+      ledger.advance(a, flows(pollutionRate: 200, dt: 1e6), dt: 1e6);
       final dirty = a.molesOf(AtmosphereGas.carbonDioxide);
       final o2 = a.molesOf(AtmosphereGas.oxygen);
-      service.advance(a, flows(pollutionRate: -200, dt: 1e6), dt: 1e6);
+      ledger.advance(a, flows(pollutionRate: -200, dt: 1e6), dt: 1e6);
       expect(a.molesOf(AtmosphereGas.carbonDioxide), lessThan(dirty));
       expect(a.molesOf(AtmosphereGas.oxygen), greaterThan(o2),
           reason: 'taking the carbon out releases the oxygen');
@@ -173,12 +192,12 @@ void main() {
 
     test('aerosols settle out when the colony cleans up; CO2 does not', () {
       final a = seed('mars');
-      service.advance(a, flows(pollutionRate: 60, dt: 5000), dt: 5000);
+      ledger.advance(a, flows(pollutionRate: 60, dt: 5000), dt: 5000);
       final haze = a.aerosolBurden;
       final co2 = a.molesOf(AtmosphereGas.carbonDioxide);
       expect(haze, greaterThan(0));
       for (var i = 0; i < 200; i++) {
-        service.advance(a, AtmosphereFlows(), dt: 500);
+        ledger.advance(a, AtmosphereFlows(), dt: 500);
       }
       expect(a.aerosolBurden, lessThan(haze * 0.1),
           reason: 'particulates fall out of the sky');
@@ -195,7 +214,7 @@ void main() {
       final co2Before = a.molesOf(AtmosphereGas.carbonDioxide);
       // Industry and towers well below the oxygen target.
       const dt = 1e6;
-      service.advance(a, flows(towers: 3, pollutionRate: 40, dt: dt), dt: dt);
+      ledger.advance(a, flows(towers: 3, pollutionRate: 40, dt: dt), dt: dt);
       final co2In = 40 * dt * service.molesPerPollutionSecond;
       final o2In = 3 * dt * service.tuning.oxygenatorRate;
       expect(a.molesOf(AtmosphereGas.carbonDioxide) - co2Before,
@@ -248,11 +267,11 @@ void main() {
       // Long enough to hit the oxygen cap part-way through, so the cap's
       // closed form is exercised as well as the linear flows and the haze.
       const span = 40 * marsYear;
-      service.advance(big, flows(towers: 50, pollutionRate: 40, dt: span),
+      ledger.advance(big, flows(towers: 50, pollutionRate: 40, dt: span),
           dt: span);
       const n = 4000;
       for (var i = 0; i < n; i++) {
-        service.advance(
+        ledger.advance(
             small, flows(towers: 50, pollutionRate: 40, dt: span / n),
             dt: span / n);
       }
@@ -315,13 +334,26 @@ void main() {
         years += 1;
       }
       expect(years, inInclusiveRange(28, 32));
-      // The towers stop at the target rather than pumping on.
+      // The towers stop at the target rather than pumping on. Not to the
+      // last part in a billion: the warmth the thicker sky holds goes on
+      // freeing CO2 from the cap and soil, which raises the mean molar mass
+      // and with it the O2 partial pressure, a little past where the towers
+      // stopped (the exact stop is pinned on the ledger below).
       service.advance(a, flows(towers: 50, dt: 10 * marsYear),
           dt: 10 * marsYear);
       expect(a.partialPressurePa(AtmosphereGas.oxygen),
-          closeTo(target, target * 1e-9));
+          closeTo(target, target * 1e-2));
       // ~0.16 atm of sky, most of it oxygen.
       expect(a.surfacePressurePa / atm, inInclusiveRange(0.15, 0.2));
+    });
+
+    test('the towers stop exactly at the target', () {
+      final a = seed('mars');
+      final target = ledger.tuning.oxygenTargetPa;
+      ledger.advance(a, flows(towers: 50, dt: 40 * marsYear),
+          dt: 40 * marsYear);
+      expect(a.partialPressurePa(AtmosphereGas.oxygen),
+          closeTo(target, target * 1e-9));
     });
 
     test('Mars measurably moves within a single year', () {
@@ -343,7 +375,7 @@ void main() {
       service.advance(a, flows(pollutionRate: 40, dt: span), dt: span);
       expect((a.surfacePressurePa / p0 - 1).abs(), lessThan(1e-4));
       expect(
-          (a.composition.fractions[AtmosphereGas.oxygen]! - x0).abs(),
+          (a.composition!.fractions[AtmosphereGas.oxygen]! - x0).abs(),
           lessThan(1e-4));
       expect(service.oxygenHeadroom(a), 0,
           reason: "Earth's sky already gives full oxygen cover");
@@ -374,7 +406,12 @@ void main() {
         expect(b.molesOf(g), a.molesOf(g), reason: g.name);
       }
       expect(b.aerosolBurden, a.aerosolBurden);
-      expect(b.air.seaLevelPressure, a.air.seaLevelPressure);
+      expect(b.air!.seaLevelPressure, a.air!.seaLevelPressure);
+      for (var i = 0; i < a.reservoirs.length; i++) {
+        expect(b.reservoirs[i].moles, a.reservoirs[i].moles,
+            reason: a.reservoirs[i].name);
+      }
+      expect(b.surfaceTemperatureK, a.surfaceTemperatureK);
     });
 
     test('flows still waiting are saved with the inventory', () {

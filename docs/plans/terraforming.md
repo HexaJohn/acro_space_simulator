@@ -1,6 +1,6 @@
 # Terraforming: a planet's real atmosphere
 
-Status: approved for phase 1, 2026-10-10 (decisions in §7). Baseline `dev` at `1246d8f`. Paths are relative to the repo root.
+Status: approved for phase 1, 2026-10-10 (decisions in §7); phase 1 built (§8), phase 2 built (§9). Baseline `dev` at `1246d8f`. Paths are relative to the repo root.
 
 ## 1. Intent
 
@@ -151,7 +151,9 @@ play at 1×, but hours under warp. Earth stays effectively immovable at the same
      flight drag on Mars rising with pressure.
 2. **Feedbacks + breathability** (§3.3, §3.4): volatile reservoirs (Mars caps), escape (the Moon leaks),
    greenhouse temperature; `airO2` into life support and into the secession measure; the CitySim getters
-   switched to the derived air.
+   switched to the derived air. **Methane decay moved to phase 3** (review, 2026-10-10): nothing in phase 2
+   puts CH4 into any sky, so a sink would be dead code with an arbitrary lifetime; it lands with the phase-3
+   buildings that can emit methane, anchored so a reference Titan rests.
 3. **The tower family + retiring the slider** (§4, §5.5): new specs, climate-driven biome, the
    progress-to-breathable readout, an atmosphere panel (pressure, gas mix, temperature trend, and which
    colony is doing what to it).
@@ -203,5 +205,147 @@ play at 1×, but hours under warp. Earth stays effectively immovable at the same
   own limits on Earth either way. (b) RESOLVED at integration: `CitySim.breathable` now also needs ≥ 0.5 atm (the `SurfaceConditions` floor), so a
   Mars at the cap (~0.16-0.2 atm of mostly O2) is not breathable. Phase 2 still replaces the getter with the full
   §3.4 definition and partial `airO2`.
-- **Not yet:** the Atmospheric Harvester still does not remove O2 from the inventory (its stock units have no
+- **Not yet (both done in phase 2, §9):** the Atmospheric Harvester still does not remove O2 from the inventory (its stock units have no
   mole conversion yet); the CitySim breathable/o2 getters still read the body (which now carries the derived air).
+
+## 9. Phase 2 as built (2026-10-10)
+
+Feedbacks, breathability and the harvester, on branch `feat/terraforming-p2` from `60a4efd`. The `oxygenTargetPa`
+vent cap is kept as it was.
+
+- **Greenhouse temperature** (`lib/domain/planetary/planet_climate.dart`): `T_eq = (S(1−A)/4σ)^¼` from the body's
+  sunlight and a Bond albedo table, then an Eddington grey atmosphere `T = T_eq (1 + ¾τ)^¼`. The depth τ is
+  `Σ a_i (p_i/P0)^α_i (P/P0)^0.45` for CO2, H2O and CH4, plus a super-greenhouse agent term. Three coefficients do it:
+  CO2 against Earth and Venus, H2O against Earth, CH4 against Titan. The pressure exponent makes present Mars come
+  out a few K warm. On the physics alone the reference skies land within 2.3 K (Earth −0.03, Mars −2.3, Venus −2.2,
+  Titan 0). `PlanetAtmosphere` keeps that residual as a per-body calibration, so an untouched world reads back its
+  reference temperature exactly and still hands back the identical reference objects. Temperature feeds the derived
+  model: ρ ∝ 1/T, H ∝ T, and `seaLevelTemperature` is published, which `SurfaceConditions` reads.
+  - **Agent:** `PlanetAtmosphere.greenhouseAgentMoles` is a trace forcing (C3F8, 0.188 kg/mol). It is not in the
+    pressure or the gas mix. 1 Pa gives about +25 K on Mars. Nothing fills it until the phase-3 Greenhouse Factory.
+  - **Pressure broadening:** this is why venting O2 into Mars warms it (~+12 K at the cap) with no greenhouse gas
+    added.
+- **Volatile reservoirs** (`volatile_reservoir.dart`). Only Mars has them; each is sourced in its doc comment.
+  - **Stores:** south polar CO2 ice, 6.0e17 mol (Phillips 2011 / Bierson 2016). Regolith-adsorbed CO2, 3.5e18 mol,
+    which is 40 mbar, the Jakosky & Edwards 2018 upper bound. Polar water ice, 1.4e20 mol.
+  - **Equilibrium:** ice follows Clausius-Clapeyron at a cold trap (the CO2 cap sits 62 K under the mean, at its
+    frost point). The soil follows the Fanale/Zent-Quinn isotherm. Each is anchored to the reference, so an
+    untouched Mars is at rest. Release is tapered as a store empties, and frost forms at the vapour pressure whether
+    or not ice remains. Between the two lines nothing flows, so there is no threshold to oscillate across.
+  - **Lags:** the cap and the ice relax over one Mars year. The soil relaxes over 20 years, a deliberate compression
+    of a centuries-long thermal soak.
+- **Escape** (`atmospheric_escape.dart`): a Jeans rate per gas, `v₀/(2√π·min(H, R))(1+λ)e^−λ`, at an exobase
+  temperature. The column is capped at the radius because the Jeans form assumes H ≪ R and otherwise goes to zero as
+  λ does (see the review fixes below). The temperature is the skin temperature plus EUV heating, which scales with
+  √flux and is cooled by CO2 in proportion to `x_CO2 · min(1, P / 300 Pa)` (the thermostat needs a collisional
+  thermosphere). It comes
+  out at Earth ~910 K, Mars ~240 K, Venus ~320 K and Titan ~145 K, close to the measured values. The Moon's vented O2
+  has an e-fold of ~80 days and Mercury's ~8 years. Mars keeps everything but H2/He. Earth and Venus lose
+  < 1e-12 per millennium.
+  - **Not compressed:** escape runs at real rates (`EscapeTuning.escapeRateScale = 1`), not `terraformRateScale`.
+    Even so, 50 towers hold the Moon at only ~110 Pa, so lunar colonies stay domed.
+  - **Phase-3 hook:** `PlanetAtmosphere.escapeSuppression` (0..1, saved) scales every rate. It is what the Retention
+    Array will drive.
+  - **Airless worlds:** every airless rocky body now gets an inventory, seeded empty, and the giants and the Sun get
+    none. Such a world publishes a sky only from 1 Pa (`skyThresholdPa`), so one heavy lunar colony's industry (~0.15
+    Pa held against the leak) does not put an atmosphere shell 100 km up and clamp warp for low orbits, and only for
+    a bound column (scale height ≤ R/3, `maxScaleHeightPerRadius`), so a small body never publishes one. A leaked-out
+    world is pruned back to its exact empty reference and rests. `CelestialBody.copyWith` gained `clearAtmosphere` /
+    `clearComposition`.
+- **Integration** (`PlanetAtmosphereService`):
+  - **Flows and escape:** colony flows are rates over the step. Each gas is solved in closed form for source plus
+    leak (`n = S/k + (n₀ − S/k)e^−kh`). The vent cap clamps venting only.
+  - **Exchange:** reservoir exchange is sub-stepped at τ_min/64 (capped at 4096), each sub-step with midpoint targets.
+    The midpoint lends the climate, while store holdings stay at the start: a cap the half-step emptied otherwise read
+    as having nothing to give.
+  - **Warp:** one 40-Mars-year step of a warming, venting, polluted Mars matches 4000 short steps to a part in a
+    thousand (in practice ~1e-5). The Moon's tower-versus-leak case is exact.
+  - **Ledger mode:** `PlanetAtmosphereService.ledgerOnly()` turns the feedbacks off. The phase-1 ledger tests use it.
+- **Breathability, one definition** (§3.4).
+  - **`CitySim.sky`:** this is `SurfaceConditions` of the body's derived air. Through it, `breathable`, `airO2`,
+    `o2Fraction`, `o2Harvestable`, `windFactor` and `hasWeatherAir` all read the planet's air. `isHot` is now by
+    temperature (> 330 K with weather), where it used to be "mostly CO2 with weather", which a CO2-thickened 230 K
+    Mars passed.
+  - **Terraform slider:** `SurfaceConditions.of` no longer lets `terraform` fake pressure, temperature, humidity, O2
+    or toxicity. The parameter is accepted and ignored until phase 3; the slider and its biome flip remain.
+  - **Double-counted greenhouse:** a `+co2 × p × 120` term on top of the body's temperature read Venus at 11,000 K.
+    It is gone.
+  - **Partial cover:** `SurfaceConditions.oxygenCover` is `clamp(pO2 / 0.16 atm)` at P ≥ 0.063 atm with toxicity
+    < 0.2, else 0. `CitySim.airO2` is that value, or 1 where the air is breathable.
+  - **Switched together:** life support now charges `population × (1 − airO2) × rate` and counts the same unmet
+    share in `supportablePop`. The secession measures (`localSufficiency`, `localSupportablePop`) were already written
+    against `airO2`, so `city_loyalty.dart` needed no edit. The complexity ≥ 0.3 rule for whether O2 is managed is
+    unchanged.
+- **Atmospheric Harvester** (user request): `CitySim.o2HarvestRate` records the harvesters' bare throttle output
+  (before bounty and events) for the share of their yield the colony's oxygen store KEPT. It goes through
+  `AtmosphereFlows.o2Harvested` and comes out of the planet's O2 at `TerraformTuning.harvesterMolesPerStockUnit =
+  4.4e8`, chosen for symmetry with the tower: the tower vents 2.2e8 mol/s for its 0.5 stock/s. A full harvester
+  therefore draws 8.8e8 mol/s, undoing four towers. It cannot take more than is there: the sink stops at zero, and a
+  harvester only runs while `o2Harvestable` (≥ 2% O2 in weather-bearing air), so a sky thinned below that stops
+  yielding. A full tank, or a world whose oxygen is not managed (breathable, or COMPLEXITY < 0.3), draws nothing.
+- **Save and fingerprint:** the `atmospheres` block gains `reservoirs`, `agent` and `suppression`, plus `harvest` in
+  the pending flows. The keys are additive, so the version is unbumped, and a phase-1 save loads with reference
+  stores. `AtmosphereSnapshot.held` hashes reservoirs, agent and (when set) suppression into the fingerprint.
+- **Tick:** a body is skipped only while `isAtRest` (reference air, haze and stores, nothing pending). A perturbed
+  body goes on integrating, because its gas leaks and its caps answer the warmth.
+
+**Deviations, and why:**
+- **Aerosol cooling is in the model at an effective ~0** (`aerosolAlbedo = 3e-6`). The burden is one colony's
+  regional haze. At a veil-strength 0.03, one smoky Mars town cooled the whole planet half a kelvin and froze a tenth
+  of its air onto the cap. The term is there for a global aerosol source to drive later.
+- **Escape uses the exposed-column upper bound,** with no collisional saturation. Saturated, the Moon would hold a
+  vented sky for millions of years (Needham & Kring 2017, ~10 kg/s), and §7 Q2 wants small worlds to leak. Mars's
+  heavy gases do not escape at all: only Jeans escape is modelled, not sputtering or photochemistry.
+- **No self-sustaining runaway at the default Mars magnitudes.** The release is amplified and bounded: 1 Pa of agent
+  gives +27 K, 4× the pressure and the cap gone. When the agent goes, the CO2 recondenses. A runaway that persists
+  with the forcing removed needs about 2 bar of CO2 in the soil (`marsDefaults(regolithCo2Moles: 1.76e20)`, the
+  optimistic McKay-era inventories). It then settles near 1.8 bar and 336 K and is bounded by the store. A one-bar
+  soil collapses back. Jakosky & Edwards magnitudes were kept as the default because the request asked for sourced,
+  plausible numbers.
+- **Mars's water** is anchored as the EXCESS over the reference cold-trap vapour pressure, because the hand-tuned
+  Mars mix carries no water.
+- **Life support reads `sky`, not `surface`.** `surface` adds the colony's own smog to the toxicity. On `surface`, an
+  Earth town at pollution ~180 flapped between free air and suffocation every few ticks, which broke the secession
+  standoff test. Smog stays a health matter on `surface` (disease, flora, open/domed style).
+- **Industry CO2 on Mars now mostly freezes onto the cap** within a few years (pressure pinned at the frost point).
+  The phase-1 industry tests pin the ledger alone, and a new test pins the buffering.
+
+**Review fixes (2026-10-10, three reviewers):**
+- **Harvester draw on what was kept.** It drew from the sky by what it produced, so a full tank (step 6 clips to
+  `stockCap`) or a free-O2 world (the store is pinned to the cap) kept thinning the shared sky at four to eight
+  towers' worth for oxygen that then existed nowhere. The cap now clips the harvesters first; the draw is their bare
+  throttle times the kept share, which also restores the documented four-tower symmetry at any bounty.
+- **CO2 thermostat needs a thermosphere.** It read the CO2 mole fraction of any sky, so a Moon whose only air was
+  industry CO2 had an exobase near 315 K, a CO2 leak of 4e-22/s and a pressure that climbed without limit. That CO2
+  also locked in vented O2 after the towers stopped. The cooling now scales with `min(1, P / 300 Pa)`. Pollution 100
+  settles at ~0.39 Pa, and vented O2 leaks away under running industry. The bistability that remains is described in
+  the open items.
+- **Small bodies.** On Phobos, Eros or Ryugu (λ ≪ 1) the Jeans rate underrated the loss by 10⁵-10⁹, and an ordinary
+  colony published a sky whose top lay past Phobos's orbit of Mars. The column is now capped at the radius, so gas
+  leaves in about `R/v₀`, and a from-scratch sky with H > R/3 is never published (`air` and `needsPublish` agree).
+- **Reservoir taper** clamped to ≤ 1, so a cap grown past its reference no longer releases above the frost line.
+- **Fingerprint** now includes `escapeSuppression`.
+- **City panel** oxygen figures read `CitySim.o2NeedPerSec`, the same per-second need the tick charges
+  (`population × rate × (1 − airO2)`, only where O2 is managed). Harvesters under a sky that cannot feed them show no
+  output.
+
+**Open items:**
+- **Rayleigh brightening:** the grey model omits it, so bar-level CO2 skies run warm (the 2-bar runaway's 336 K).
+  The next physics to add is a pressure-dependent albedo term relative to reference.
+- **No thermal inertia:** temperature responds instantly, and only the reservoir lags delay the response.
+- **Unbuilt §3.3 pieces:** other bodies' reservoirs (Titan's lakes, Earth's ocean water vapour feedback) and
+  non-thermal escape. Methane decay is moved to phase 3 (§6).
+- **Harvester on Earth:** RESOLVED in review. It was the same defect as the full-tank draw: the store is pinned full
+  where O2 is free, so the harvester now draws nothing there. It still builds and runs; it is simply pointless.
+- **The CO2 thermostat is bistable on small worlds,** and that is kept. More CO2 cools the exobase and slows the
+  leak, so past ~3.5 Pa of lunar CO2 (pollution ~450, about eleven heavy industrial colonies held for centuries) the
+  sky crosses onto the held branch and keeps growing while the source runs. Ten heavy colonies settle at ~3 Pa.
+- **Two breathability readings remain:** `CitySim.breathable` (planet air) drives life support, agents' sealed
+  transport and disasters. `surface.breathable` (with smog) still decides the open/domed style and road sealing at
+  build. They were mixed the same way before phase 2. Unify them in phase 3 if wanted.
+- **Lunar flight under towers:** a towered Moon (~110 Pa O2, ~43 km scale height) gets a top near 400 km, so low lunar
+  orbits feel drag and the warp limiter's in-atmosphere rules. ONE tower already holds ~2 Pa with a top near 250 km,
+  and that was decided in review to stand: at 100 km a circular orbit meets ~4 Pa of dynamic pressure (Earth's at
+  ~110 km), and the top sits where it has fallen to Earth's at its own top. Pinned by a test. Not playtested.
+- **Phase 3:** methane decay (§6); Retention Array → `escapeSuppression`; Greenhouse Factory → `greenhouseAgentMoles`; retire the slider;
+  climate-driven biome; atmosphere panel.
