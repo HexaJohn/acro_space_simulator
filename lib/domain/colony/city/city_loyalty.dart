@@ -646,9 +646,14 @@ class CityLoyalty {
     // What drove it out, while it is still true: the terms it states later
     // are derived from this (§6.1), and by then its clock no longer counts
     // the player and its rebellion has settled under its own rule.
+    // Misrule is the meter's PEAK over the revolt window, not its reading
+    // now: a revolt fires only at 1.0 and resets the meter to 0.3 in the
+    // same tick, before this step runs — so a colony driven out by its third
+    // revolt read 0.3, no misrule at all, and stated milder terms than one
+    // that was merely forgotten.
     reclaim.onSecede(Grievance(
       neglectDays: sinceAttendedS / tuning.daySec,
-      rebellion: i.rebellion,
+      rebellion: revolts.isNotEmpty ? 1.0 : i.rebellion,
       revolts: revolts.length,
       desperation: desperation,
     ));
@@ -734,6 +739,7 @@ class CityLoyalty {
     final why = json['independentWhy'];
     independenceCauses = why is String ? why : null;
     reclaim.restore(json['reclaim']);
+    reclaim.recoverGrievance(this);
   }
 }
 

@@ -1212,7 +1212,8 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
                     }
                   : null),
         )),
-        if (sim.taxCeiling case final cap? when controllable)
+        // Shown over a fixed levy too: the cap holds it (§6.1).
+        if (sim.taxCeiling case final cap? when _governs)
           Text(sim.termRefusal('cap the tax at ${BindingTerms.pct(cap)}'),
               key: const ValueKey('tax-cap-term'),
               style: AppTheme.dim.copyWith(color: AppTheme.warn)),

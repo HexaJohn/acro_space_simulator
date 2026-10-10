@@ -818,11 +818,16 @@ void main() {
 
     await t.tap(find.byKey(const ValueKey('reclaim-negotiate')));
     await t.pumpAndSettle();
+    // The world ticks under the dialog: what it would state moves on, and
+    // Accept binds what was read.
+    run(city, 10 * 120.0);
+    expect(city.negotiatedTerms().days, isNot(terms.days));
     await t.tap(find.byKey(const ValueKey('negotiation-accept')));
     await t.pumpAndSettle();
     expect(city.loyalty.allegiance, Allegiance.colonial);
     expect(city.loyalty.level, 0.5);
     expect(city.reclaim.terms!.describe(), terms.describe());
+    expect(city.reclaim.terms!.days, terms.days);
     expect(find.byKey(const ValueKey('independence-reclaim')), findsNothing,
         reason: 'the panel closed with the colony back');
     expect(find.textContaining('phase'), findsNothing);
@@ -855,8 +860,10 @@ void main() {
     expect(b.taxCap, 0.1);
     expect(b.noDemolition, isTrue);
     expect(b.keptLaws, isEmpty);
+    // Two terms that bind (the cap is under its tax), for the picker's
+    // default 20 days of the longest 40.
     expect(city.loyalty.level,
-        closeTo(0.5 + 2 * const ReclaimTuning().goodwillPerTerm, 1e-12));
+        closeTo(0.5 + 2 * const ReclaimTuning().goodwillPerTerm * 0.5, 1e-12));
   });
 
   testWidgets('a declined petition leaves it independent', (t) async {

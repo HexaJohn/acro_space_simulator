@@ -114,7 +114,10 @@ extension CityControl on CitySim {
 
   /// Why the player may not switch to [economy], or null if they may: one
   /// whose tax is not the player's to set levies a fixed rate, and a fixed
-  /// rate over the cap is a raise by another name.
+  /// rate over the cap is a raise by another name — held under the cap only
+  /// while the terms run ([CitySim.effectiveTax]), it would land the full
+  /// levy the day they end. The economy the colony rejoined under is kept,
+  /// its levy held under the cap.
   String? economyRefusal(Economy economy) {
     final cap = taxCeiling;
     if (cap == null || economy.taxControllable || economy == this.economy) {

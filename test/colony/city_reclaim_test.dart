@@ -15,6 +15,7 @@ import 'package:acro_space_simulator/domain/colony/city/city_control.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_loyalty.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_reclaim.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
+import 'package:acro_space_simulator/domain/colony/city/commodity.dart';
 import 'package:acro_space_simulator/domain/colony/city/independent_governor.dart';
 import 'package:acro_space_simulator/domain/orbits/soi_transition_service.dart';
 import 'package:acro_space_simulator/domain/simulation/simulation_clock.dart';
@@ -453,7 +454,9 @@ void main() {
       expect(none.loyalty.level, t.rejoinLoyalty);
       expect(none.reclaim.terms, isNull);
 
-      final generous = petitioning()..laws.add(Law.curfew);
+      final generous = petitioning()
+        ..laws.add(Law.curfew)
+        ..taxRate = 0.2;
       expect(
           generous.acceptPetition(const BindingTerms(
               taxCap: 0.1,
@@ -461,11 +464,43 @@ void main() {
               noDemolition: true,
               days: 20)),
           isTrue);
+      // Three terms that bind, for half as long as the longest terms run.
       expect(generous.loyalty.level,
-          closeTo(t.rejoinLoyalty + 3 * t.goodwillPerTerm, 1e-12));
+          closeTo(t.rejoinLoyalty + 3 * t.goodwillPerTerm * 0.5, 1e-12));
       expect(generous.repealRefusal(Law.curfew), isNotNull);
       expect(generous.demolitionRefusal, isNotNull);
       expect(generous.termsDaysLeft, 20);
+    });
+
+    test('near-free terms buy no goodwill, and never Loyal', () {
+      CitySim petitioning() {
+        final city = starterKit();
+        run(city, 30);
+        city.laws
+            .addAll({Law.curfew, Law.freeHealthcare, Law.homelessShelters});
+        city.taxRate = 0.15;
+        secede(city);
+        city.reclaim.petition = const Petition(PetitionKind.dependency, 0);
+        return city;
+      }
+
+      // A cap over the tax it pays binds nothing.
+      final loose = petitioning();
+      expect(loose.goodwillLevel(const BindingTerms(taxCap: 0.25, days: 40)),
+          t.rejoinLoyalty);
+      // Everything the picker offers, for as long as it offers: still
+      // Restless — it comes back self-governing, as every way back does.
+      final all = petitioning();
+      expect(
+          all.acceptPetition(BindingTerms(
+              taxCap: 0.05,
+              keptLaws: {...all.laws},
+              noDemolition: true,
+              days: 40)),
+          isTrue);
+      expect(all.loyalty.level,
+          lessThanOrEqualTo(const CityLoyaltyTuning().restlessAbove));
+      expect(all.loyalty.stage, LoyaltyStage.restless);
     });
 
     test('declined, it holds out again before it asks again', () {
@@ -555,6 +590,255 @@ void main() {
       final w = city.loyaltyWarnings().firstWhere((w) => w.key == 'terms');
       expect(w.text, contains('tax at most 10%'));
       expect(w.text, contains('3 days left'));
+    });
+
+    test('a save from before grievances were kept rebuilds its grievance',
+        () {
+      // Seceded through the real tick, then saved as the base build saved
+      // it: no reclaim block at all.
+      final city = town();
+      run(city, 60);
+      city.loyalty
+        ..tuning = const CityLoyaltyTuning(independenceBar: 0.1)
+        ..attendedAtS = city.colonyTimeS - 50 * day
+        ..revolts.addAll([city.colonyTimeS, city.colonyTimeS])
+        ..level = 0;
+      // Saved on the tick it left: desperation, the one field the save
+      // holds only as it is now, has not moved on yet.
+      city.advance(0.5);
+      expect(city.loyalty.allegiance, Allegiance.independent);
+      final json =
+          jsonDecode(jsonEncode(city.toJson())) as Map<String, dynamic>;
+      (json['loyalty'] as Map).remove('reclaim');
+      final old = CitySim.fromJson(json, bodies: fixtureBodies)
+        ..loyalty.tuning = city.loyalty.tuning;
+      final g = old.reclaim.grievance!;
+      final live = city.reclaim.grievance!;
+      expect(g.neglectDays, closeTo(live.neglectDays, 1e-6));
+      expect(g.revolts, live.revolts);
+      expect(g.rebellion, live.rebellion);
+      expect(g.desperation, closeTo(live.desperation, 1e-9));
+      expect(old.negotiatedTerms().describe(),
+          city.negotiatedTerms().describe());
+      expect(old.negotiatedTerms().days, city.negotiatedTerms().days);
+    });
+  });
+
+  group('through the real tick', () {
+    /// A town that can feed itself, so the condition takes it out.
+    CitySim leaving() {
+      final city = town();
+      run(city, 60);
+      city.loyalty.tuning = const CityLoyaltyTuning(independenceBar: 0.1);
+      return city;
+    }
+
+    /// Drive [city] into its third revolt through `CitySim.advance`.
+    void revolt(CitySim city) {
+      city.govt = Govt.anarchy;
+      final t0 = city.colonyTimeS;
+      city.loyalty.revolts.addAll([t0, t0]);
+      for (var i = 0;
+          i < 400 && city.loyalty.allegiance != Allegiance.independent;
+          i++) {
+        city
+          ..rebellion = 0.999
+          ..happiness = 0
+          ..crime = 1
+          ..inequality = 1
+          ..corruption = 1;
+        city.advance(0.5);
+      }
+    }
+
+    test('a secession records what drove it out; revolts outweigh neglect',
+        () {
+      final rebels = leaving();
+      revolt(rebels);
+      expect(rebels.loyalty.allegiance, Allegiance.independent);
+      final rg = rebels.reclaim.grievance!;
+      expect(rg.revolts, 3);
+      expect(rg.rebellion, 1.0,
+          reason: 'the peak that drove it out, not the reset after it');
+      expect(rg.desperation, greaterThan(0));
+
+      final forgotten = leaving();
+      forgotten.loyalty
+        ..attendedAtS = forgotten.colonyTimeS - 60 * day
+        ..level = 0;
+      run(forgotten, 1);
+      expect(forgotten.loyalty.allegiance, Allegiance.independent);
+      final fg = forgotten.reclaim.grievance!;
+      expect(fg.neglectDays, closeTo(60, 0.1));
+      expect(fg.revolts, 0);
+
+      final rs = rg.severity(t), fs = fg.severity(t);
+      expect(rs, greaterThan(fs + 0.1),
+          reason: 'misrule outweighs absence: $rs vs $fs');
+      final rt = rebels.negotiatedTerms(), ft = forgotten.negotiatedTerms();
+      expect(rt.taxCap!, lessThan(ft.taxCap!));
+      expect(rt.days, greaterThan(ft.days));
+    });
+
+    test('a second secession drops the running terms, records anew', () {
+      final city = leaving();
+      revolt(city);
+      expect(city.acceptNegotiation(), isTrue);
+      expect(city.reclaim.terms, isNotNull);
+      expect(city.reclaim.grievance, isNull);
+      city.loyalty
+        ..attendedAtS = city.colonyTimeS - 20 * day
+        ..level = 0;
+      run(city, 1);
+      expect(city.loyalty.allegiance, Allegiance.independent);
+      expect(city.reclaim.terms, isNull);
+      expect(city.reclaim.grievance!.neglectDays, closeTo(20, 0.1));
+      expect(city.reclaim.grievance!.revolts, 0,
+          reason: 'the revolts it rejoined with were cleared');
+    });
+  });
+
+  group('review fixes', () {
+    test('a fixed levy is held under the cap it rejoined on', () {
+      final city = starterKit();
+      run(city, 30);
+      city.economy = Economy.communism;
+      secede(
+          city,
+          const Grievance(
+              neglectDays: 40, rebellion: 0.95, revolts: 3, desperation: 1));
+      expect(city.effectiveTax(), 0.5);
+      expect(city.acceptNegotiation(), isTrue);
+      expect(city.economy, Economy.communism, reason: 'its economy kept');
+      expect(city.effectiveTax(), lessThanOrEqualTo(city.taxCeiling! + 1e-9));
+      // The terms run out: the full levy again.
+      city.reclaim.termsUntilS = city.colonyTimeS;
+      city.attend();
+      run(city, 1);
+      expect(city.reclaim.terms, isNull);
+      expect(city.effectiveTax(), 0.5);
+    });
+
+    test('declining either petition restarts both clocks', () {
+      final l = independentModel()..reclaim.reputation = 0.9;
+      for (var d = 0; d < 4 && l.reclaim.petition == null; d++) {
+        tickModel(l, day, happiness: 0.1, sufficiency: 0.1);
+      }
+      expect(l.reclaim.petition?.kind, PetitionKind.dependency);
+      l.reclaim.pressure = 1; // the hearts clock filled meanwhile
+      int asked() =>
+          l.notices.where((n) => n.kind == LoyaltyNoticeKind.petition).length;
+      final before = asked();
+      l.reclaim.declinePetition();
+      tickModel(l, 1, happiness: 0.1, sufficiency: 0.1);
+      expect(l.reclaim.petition, isNull, reason: 'the no was heard');
+      expect(asked(), before);
+    });
+
+    test('accepting binds the terms shown, not the ones stated by then', () {
+      final city = starterKit();
+      run(city, 30);
+      city.laws.add(Law.curfew);
+      secede(
+          city,
+          const Grievance(
+              neglectDays: 40, rebellion: 0.9, revolts: 2, desperation: 0.5));
+      final shown = city.negotiatedTerms();
+      run(city, 10 * day); // the dialog left open
+      expect(city.negotiatedTerms().days, isNot(shown.days),
+          reason: 'the stated terms have moved on');
+      expect(city.acceptNegotiation(shown), isTrue);
+      expect(city.reclaim.terms!.describe(), shown.describe());
+      expect(city.reclaim.terms!.days, shown.days);
+    });
+
+    test("rejoining clears its council's log", () {
+      final city = starterKit();
+      run(city, 2 * day);
+      secede(city);
+      run(city, 7 * day);
+      expect(city.governorLog, isNotEmpty);
+      expect(city.acceptNegotiation(), isTrue);
+      expect(city.governorLog, isEmpty);
+      final loyalty = city.toJson()['loyalty'];
+      expect(loyalty is Map ? loyalty['council'] : null, isNull);
+    });
+
+    test('deliveries resume on rejoining, by terms or by petition', () {
+      for (final byPetition in [false, true]) {
+        final city = starterKit();
+        run(city, 30);
+        final port = city.landingPads().first.$1.id;
+        city.deliveries[port] = [
+          DeliverySchedule(
+              resource: Commodity.food, intervalSec: 30, amount: 200, timer: 1)
+            ..recurring = true,
+        ];
+        secede(city);
+        // A craft grounded at the port when it went.
+        city.craft.add(LandedCraft(
+            site: port,
+            padIndex: 0,
+            isRelief: false,
+            resource: Commodity.water,
+            payload: 50)
+          ..granted = true
+          ..phase = 0.5
+          ..held = true);
+        run(city, 200);
+        expect(city.craft.where((c) => !c.held), isEmpty,
+            reason: 'nothing flies to an independent colony');
+        expect(city.craft.single.held, isTrue);
+        if (byPetition) {
+          city.reclaim.petition = const Petition(PetitionKind.dependency, 0);
+          expect(city.acceptPetition(), isTrue);
+        } else {
+          expect(city.acceptNegotiation(), isTrue);
+        }
+        var flew = false;
+        for (var i = 0; i < 240; i++) {
+          city.advance(0.5);
+          if (city.craft.any((c) => c.resource == Commodity.food)) flew = true;
+        }
+        expect(flew, isTrue, reason: 'the booked run dispatched');
+        expect(city.craft.where((c) => c.held), isEmpty,
+            reason: 'the grounded craft was let go');
+      }
+    });
+
+    test('a standoff says what starving it costs; others say nothing', () {
+      final city = starterKit();
+      run(city, 30);
+      expect(city.blockadeNote(), isNull);
+      city.loyalty.stage = LoyaltyStage.standoff;
+      city.reclaim.reputation = 0.42;
+      final note = city.blockadeNote()!;
+      expect(note, contains('reputation'));
+      expect(note, contains('42%'));
+      secede(city);
+      expect(city.blockadeNote(), isNull);
+    });
+
+    test('a petition is announced once, wherever it is raised', () {
+      final a = starterKit(), b = starterKit();
+      final w = PetitionWatch();
+      expect(w.fresh([a, b]), isEmpty);
+      secede(b);
+      b.reclaim.petition = const Petition(PetitionKind.hearts, 5,
+          terms: BindingTerms(taxCap: 0.2, days: 8));
+      final first = w.fresh([a, b]);
+      expect(first, hasLength(1));
+      expect(identical(first.single.$1, b), isTrue);
+      expect(PetitionWatch.headline(b, first.single.$2), contains(b.name));
+      expect(w.fresh([a, b]), isEmpty, reason: 'once');
+      // Outranked by a dependency petition: a new one, said again.
+      b.reclaim.petition = const Petition(PetitionKind.dependency, 9);
+      expect(w.fresh([a, b]), hasLength(1));
+      // Answered, then asked again later: said again.
+      b.reclaim.petition = null;
+      expect(w.fresh([a, b]), isEmpty);
+      b.reclaim.petition = const Petition(PetitionKind.dependency, 9);
+      expect(w.fresh([a, b]), hasLength(1));
     });
   });
 }

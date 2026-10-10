@@ -355,29 +355,45 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
         }
       };
 
-  /// Whether the held tool at [k] would tear a building down while the
-  /// rejoining terms forbid demolition (secession §6.1): the bulldozer
-  /// always; a road, zone or platform laid over a building, or a same-type
-  /// tap that removes one. Refused, the term goes on the blocked banner, and
-  /// [say] puts it in a snack bar too. [fill] asks for a rectangle fill,
-  /// which clears every cell it lays on whatever the tool (a held
-  /// installation fills as a zone does), so any building in it is refused.
+  /// Whether the held tool at [k] would tear something built down while
+  /// the rejoining terms forbid demolition (secession §6.1). Built means a
+  /// building, a road or a platform — whatever the bulldozer would clear,
+  /// and the bulldozer is refused outright: a road removed by the Road
+  /// tool's toggle, or cleared under a zone, is the same demolition by
+  /// another tool, and refusing it only to the bulldozer was no rule at all.
+  /// So: the bulldozer always; a road, zone or platform laid over a building
+  /// or a road (the zone and the road keep a platform under them, the
+  /// platform tool clears to bare ground); and a same-type tap that removes
+  /// what it placed. Refused, the term goes on the blocked banner, and [say]
+  /// puts it in a snack bar too. [fill] asks for a rectangle fill, which
+  /// skips a cell it already holds and otherwise clears it as a tap does.
   bool _demolitionRefused(int k, {bool say = true, bool fill = false}) {
     final why = _sim.demolitionRefusal;
     if (why == null) return false;
     final anchor = _sim.anchorOf(k);
     final building = anchor != null || _sim.grown.contains(k);
-    final tears = fill
-        ? _tool == CityBuilderTool.bulldoze ||
-            (building && _tool != CityBuilderTool.retrofit)
-        : switch (_tool) {
+    final road = _sim.roads.contains(k);
+    final platform = _sim.support.contains(k);
+    final zone = _sim.zones[k];
+    final sameZone = zone != null &&
+        zone.kind == _zoneKind &&
+        zone.density == _density;
+    final tears = switch (_tool) {
       CityBuilderTool.bulldoze => true,
-      CityBuilderTool.road => building && !_sim.roads.contains(k),
-      CityBuilderTool.zone || CityBuilderTool.support => building,
-      CityBuilderTool.utility =>
-        anchor != null && _sim.utils[anchor]?.type == _selectedUtil.type,
+      // A tap on a road removes it; a fill over one leaves it.
+      CityBuilderTool.road => building || (road && !fill),
+      // A same-zone tap clears the cell to the ground, platform and all.
+      CityBuilderTool.zone =>
+        building || road || (!fill && sameZone && platform),
+      // A tap on a platform removes it; on bare ground or a fill it
+      // clears the cell first.
+      CityBuilderTool.support =>
+        platform ? !fill : (building || road),
+      CityBuilderTool.utility => fill
+          ? building || road
+          : anchor != null && _sim.utils[anchor]?.type == _selectedUtil.type,
       CityBuilderTool.retrofit || CityBuilderTool.inspect => false,
-          };
+    };
     if (!tears) return false;
     _sim.blocked = why;
     if (say) sayRefused(context, why);
@@ -558,7 +574,15 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     final k = _sim.key(x, y);
     if (k == _sim.hubKey) return;
     if (_tool.acts && !_mayAct()) return;
-    if (_demolitionRefused(k)) {
+    // A paint SETs, as a fill does: it never toggles away what it lays —
+    // and over its own zone it does nothing at all.
+    final cur = _sim.zones[k];
+    final noop = _tool == CityBuilderTool.utility ||
+        (_tool == CityBuilderTool.zone &&
+            cur != null &&
+            cur.kind == _zoneKind &&
+            cur.density == _density);
+    if (!noop && _demolitionRefused(k, fill: true)) {
       setState(() {});
       return;
     }

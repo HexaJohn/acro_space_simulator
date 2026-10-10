@@ -19,6 +19,7 @@ import '../../../domain/colony/city/city_building_spec.dart';
 import '../../../domain/colony/city/city_control.dart';
 import '../../../domain/colony/city/city_sim.dart';
 import '../../../domain/colony/city/city_site_rules.dart';
+import '../../../domain/colony/city/city_term_guard.dart';
 import '../../../domain/colony/city/parcel.dart';
 import 'app_theme.dart';
 import 'city_control_ui.dart';
@@ -276,7 +277,9 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
     }
     // Graded either way: free build drops the slope gate, not the pad
     // (see [ignoreTerrain]).
-    final claimed = city.claimSite(held, centre);
+    // Staking it re-cuts the street lots under it: on trial under a
+    // demolition ban (secession §6.1), refused if a building stood on one.
+    final claimed = city.keepingBuiltLots(() => city.claimSite(held, centre));
     blocked = claimed == null ? city.blocked : null;
     if (claimed != null) city.attend(); // secession §3.3
     notifyListeners();

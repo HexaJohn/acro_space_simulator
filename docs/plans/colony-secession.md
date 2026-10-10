@@ -559,15 +559,68 @@ slider, the site sheet, and the flat builder (every tool on a building, Clear-al
 (negotiate decline/accept, the dependency term picker, a declined petition, the Force row disabled).
 Mutation-checked: removing the site sheet's term refusal or the flat builder's tap check fails the sweep.
 
+**Review fixes (2026-10-10).** Three reviews of the above; what changed:
+- **The grievance's misrule was measured after the revolt reset it.** A revolt fires at rebellion 1.0 and
+  resets the meter to 0.3 in `socialTick`, which runs before the loyalty step, so every colony driven out by
+  its third revolt recorded misrule 0 and stated milder terms than one merely forgotten. `_secede` now
+  records the meter's peak over the revolt window: 1.0 with any revolt in it, the live reading otherwise.
+  Tests now secede real colonies through `CitySim.advance` by both routes and assert the recorded grievance
+  and that the revolt route states the harsher terms; and a re-secession through the real path.
+- **The demolition ban now holds against every edit that tears a building down**, not only the bulldozer.
+  A road laid, spline-committed, upgraded or re-laid by its end (Traffic > Adjust), and a plot staked for an
+  installation, re-cut the lots, and a lot the re-cut gives up loses its building (one dragged road end
+  cleared 17 buildings in the probe). No corridor test can say which lots a re-cut keeps (a split re-orders
+  the plat), so these edits run **on trial** (`city_term_guard.dart`): under the ban the plat is copied
+  (`CityLayout.copy`/`restoreFrom`, `SegmentIndex.copyFrom`), the edit runs, and at the one place every
+  re-plat carries its lots (`_carryRenamedLots`, `_carryLotsAcross`), before anything else moves,
+  `guardBuiltLots` checks whether a built lot would be lost or doubled up. If so the plat is put back and
+  the edit unwinds (no road, no charge, no attention stamp) with "The rejoining terms forbid demolitions (N
+  days left). This would tear down 3 buildings." An edit that clears nothing still goes ahead. With no ban
+  in force nothing is copied. Also: `_carryLotsAcross` no longer skips `_dropLostLots` when nothing was
+  renamed (a dangling building key).
+- **The reactor's "Disable safety systems" row** (which demolishes the reactor and sets off the meltdown)
+  carries the demolition term, as Demolish does.
+- **Flat builder: a road or platform is built, too.** The bulldozer was refused on a road while the Road
+  tool's toggle and a zone laid over it removed the same road. Now any tool that would clear a road,
+  platform or building is refused under the ban; laying over bare ground still goes ahead.
+- **A fixed levy is held under the cap.** Lowering `taxRate`, all rejoining did, moves nothing under
+  Communism, which kept levying 50% beside "tax at most 5%". `effectiveTax()` now holds a fixed levy under
+  the cap while terms run; the colony keeps its economy, the full levy returns when the terms do, and the
+  cap's line shows under the levy too. Switching ONTO a fixed levy stays refused (it would land the full
+  levy the day the terms end).
+- **Accept binds what was shown.** The colony ticks under the dialog, so the terms recomputed at the tap
+  could differ (more days, other laws). `acceptNegotiation(shown)` binds the dialog's own terms.
+- **Declining restarts both clocks**, so the other petition is not raised on the next tick.
+- **Goodwill (deviation, revised):** each granted term that BINDS adds 0.05 (a cap only below the tax the
+  colony pays now, each kept law, the ban), scaled by days / 40, and never past the Restless return line.
+  Near-free terms bought Loyal outright. Confirm with the user.
+- **Old saves:** an independent colony saved before grievances were (no `reclaim` block) rebuilds one on
+  load: neglect from the frozen attention stamp, the revolts in the window ending at the declaration, the
+  saved desperation.
+- **The council's log is cleared on rejoining**, so a later independence's panel lists only its own acts.
+- **Petitions reach the player wherever they are.** `PetitionWatch` (in `city_reclaim.dart`) lets the flight
+  view announce each new petition once as a toast (`simulation_view.dart`, a few lines). The colony on screen
+  in city mode still says it through its own HUD.
+- **The blockade's price is shown** (`blockadeNote`): on a standoff colony's delivery schedule and in its
+  loyalty explainer, that starving it wins no loyalty, and that its loyalty × mood counts in the reputation
+  that wins independent colonies home, with both figures. It is shown, not modelled further (see below).
+- Tests: `test/colony/city_term_guard_test.dart` (8: each re-plat edit bound and unbound as a control, the
+  plat after a refused edit identical to an untried one, the meltdown row, the flat builder's road), and in
+  `city_reclaim_test.dart` the real-tick secessions, the fixed levy, decline, shown terms, the log, old
+  saves, deliveries resuming (by terms and by petition, the grounded craft released), the blockade note and
+  the petition watch.
+
 **Deviations and open items.**
-- "Demolition" is the explicit tear-down acts plus, in the flat builder, painting over a building. On the
-  plat, re-zoning a built lot is not refused (`setUse` leaves the building standing), and laying a road
-  spline through lots is not treated as demolition.
-- A petition is state and a warning on its colony, and is raised as a notice in that colony's queue. A
-  player looking at another colony sees it only in that colony's status list. There is no world-level
-  inbox.
-- Blockade as coercion (§6.3's note: cutting a standoff colony's deliveries costs mood and reputation) is
-  not modelled. Reputation here reads loyalty × mood only.
+- "Demolition" is every act that tears a building down: the bulldozer, the meltdown, any flat-builder tool
+  that clears a building, road or platform, and any plat edit whose re-cut would lose a built lot. On the
+  plat, re-zoning a built lot is not refused (`setUse` leaves the building standing). Changing the road
+  tool's lot frontage/depth re-cuts the whole plat outside the trial, as it always has (a pre-existing gap:
+  that re-cut carries nothing).
+- A petition is state and a warning on its colony, a notice in its queue, and a one-time toast in the flight
+  view. There is no inbox that keeps it after the toast.
+- Blockade as coercion is shown, not modelled: cutting a standoff colony's deliveries has no loyalty effect
+  of its own (it raises none, since hunger leaves nobody content) and no reputation cost beyond what its
+  falling mood already does to loyalty × mood. §6.3 says v1 models nothing beyond cancelling schedules.
 - Desperation is still not eased by independence. Only the starving clause above stops a desperate
   colony from never petitioning.
 - Force (§6.3) is out of scope; its row is present and disabled.

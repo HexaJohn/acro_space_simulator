@@ -140,7 +140,7 @@ class _ReclaimSectionState extends State<ReclaimSection> {
           ] else
             Text(
                 'On whatever terms you set — or none. Each term you grant '
-                'is goodwill it will remember.',
+                'that binds you is goodwill it will remember.',
                 style: AppTheme.dim),
           const SizedBox(height: 4),
           Row(mainAxisAlignment: MainAxisAlignment.end, children: [
@@ -234,7 +234,8 @@ Future<bool> showNegotiation(BuildContext context, CitySim city) async {
     ),
   );
   if (accepted != true) return false;
-  return city.acceptNegotiation();
+  // Bound to what was read, not to what the colony would state by now.
+  return city.acceptNegotiation(terms);
 }
 
 /// The term menu a dependency petition's player picks from (§6.2): a tax
@@ -263,8 +264,9 @@ Future<BindingTerms?> showTermPicker(BuildContext context, CitySim city) {
               children: [
                 Text(
                     'It rejoins at loyalty '
-                    '${_pct((city.reclaim.tuning.rejoinLoyalty + city.reclaim.tuning.goodwillPerTerm * (terms.isEmpty ? 0 : terms.count)).clamp(0.0, 1.0))}: '
-                    'every term you grant binds you, and is remembered.',
+                    '${_pct(city.goodwillLevel(terms))}: a term that binds '
+                    'you, for longer, is remembered — a cap over the tax it '
+                    'pays binds nothing.',
                     style: AppTheme.dim),
                 const SizedBox(height: 8),
                 Text('TAX CAP', style: AppTheme.dim.copyWith(fontSize: 10)),

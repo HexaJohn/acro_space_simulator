@@ -696,7 +696,8 @@ class _CityGameHudState extends State<CityGameHud> {
               : null,
         ),
       )),
-      if (city.taxCeiling case final cap? when controllable)
+      // Shown over a fixed levy too: the cap holds it (secession §6.1).
+      if (city.taxCeiling case final cap?)
         Text(city.termRefusal('cap the tax at ${BindingTerms.pct(cap)}'),
             key: const ValueKey('tax-cap-term'),
             style: AppTheme.dim.copyWith(color: AppTheme.warn, fontSize: 11)),

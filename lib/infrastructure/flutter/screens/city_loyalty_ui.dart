@@ -15,6 +15,7 @@ library;
 import 'package:flutter/material.dart';
 
 import '../../../domain/colony/city/city_loyalty.dart';
+import '../../../domain/colony/city/city_reclaim.dart';
 import '../../../domain/colony/city/city_sim.dart';
 import 'app_theme.dart';
 import 'city_site_actions.dart' show showExplain;
@@ -67,12 +68,14 @@ void explainLoyalty(BuildContext context, CitySim sim) {
           'unwelcome. Its panel holds the ways back: the terms it would '
           'rejoin on, and any petition it sends.',
   };
+  final blockade = sim.blockadeNote();
   final why = 'Loyalty ${pct(l.level)} — ${l.stage.label}. $causes.\n\n'
       '$drift\n\n'
       'Self-sufficiency ${pct(l.selfSufficiency)} of the '
       '${pct(l.independenceBar)} a secession needs '
       '(desperation ${pct(l.desperation)}).\n\n'
-      '$effects';
+      '$effects'
+      '${blockade == null ? '' : '\n\n$blockade'}';
   const fix = 'Govern it: any act — zoning, building, roads, tax, laws, '
       'government — counts as attention, and attended, content rule (happy '
       'and served) wins loyalty back. Cut rebellion: crime, inequality, '

@@ -27,6 +27,7 @@ import 'dart:math' as math;
 
 import 'city_loyalty.dart';
 import 'city_sim.dart';
+import 'independent_governor.dart';
 
 /// Every number the ways back run on (§6.1, §6.2), in loyalty-calendar days
 /// ([CityLoyaltyTuning.daySec]).
@@ -470,17 +471,15 @@ class CityReclaim {
   }
 
   /// The player turns the petition down: it stays independent, and asks
-  /// again only once its reason has built up again.
+  /// again only once a reason has built up again. BOTH clocks restart,
+  /// whichever it asked on: the other kept filling while the petition
+  /// waited, and left full it raised the other petition on the very next
+  /// tick — a second "asks to rejoin", as if the no had not been heard.
   void declinePetition() {
-    final p = petition;
-    if (p == null) return;
+    if (petition == null) return;
     petition = null;
-    switch (p.kind) {
-      case PetitionKind.hearts:
-        pressure = 0;
-      case PetitionKind.dependency:
-        dependentS = 0;
-    }
+    pressure = 0;
+    dependentS = 0;
   }
 
   bool get _isEmpty =>
@@ -504,6 +503,33 @@ class CityReclaim {
           if (dependentS != 0) 'dependent': dependentS,
           if (petition != null) 'petition': petition!.toJson(),
         };
+
+  /// An independent colony saved before its grievance was (no `why`):
+  /// rebuilt from what the save does hold, so it states the terms its rule
+  /// earned rather than the mildest there are. Neglect is exact — the
+  /// attention stamp stops moving at the declaration, since nothing the
+  /// player may do to an independent colony stamps it; the revolts are the
+  /// stamps inside the window that ended at the declaration (what the tick
+  /// has not pruned since), and any revolt there means the meter peaked at
+  /// 1, as [CityLoyalty]'s own record takes it; desperation is the saved
+  /// one, the nearest the save comes. Run on load, after [restore].
+  void recoverGrievance(CityLoyalty l) {
+    final at = l.independentAtS;
+    if (grievance != null ||
+        at == null ||
+        l.allegiance != Allegiance.independent) {
+      return;
+    }
+    final t = l.tuning;
+    final revolts =
+        l.revolts.where((r) => r <= at && r >= at - t.revoltWindowS).length;
+    grievance = Grievance(
+      neglectDays: math.max(0.0, at - l.attendedAtS) / t.daySec,
+      rebellion: revolts > 0 ? 1.0 : 0.0,
+      revolts: revolts,
+      desperation: l.desperation,
+    );
+  }
 
   /// Restore [toJson]'s map; absent or unreadable fields keep defaults.
   void restore(Object? json) {
@@ -531,6 +557,47 @@ class CityReclaim {
     if (d is num) dependentS = math.max(0.0, d.toDouble());
     petition = Petition.fromJson(json['petition']);
   }
+}
+
+/// Which petitions a host has announced, so a petition raised on a colony
+/// the player is not looking at — and a hearts petition by its nature is
+/// one, since it needs another colony to compare with — reaches them where
+/// they are (§6.2's notification), once. Its colony's own notice queue is
+/// drained only by the HUD mounted on that colony. UI state, not saved: a
+/// loaded save announces the petitions waiting in it once.
+class PetitionWatch {
+  final Map<String, String> _seen = {};
+
+  /// The petitions raised since the last call, over [cities], each with
+  /// its colony; one that was answered, or whose colony rejoined, is
+  /// forgotten, so the next is announced.
+  List<(CitySim, Petition)> fresh(Iterable<CitySim> cities) {
+    final out = <(CitySim, Petition)>[];
+    final live = <String>{};
+    for (final c in cities) {
+      final p = c.loyalty.reclaim.petition;
+      if (p == null || c.loyalty.allegiance != Allegiance.independent) {
+        continue;
+      }
+      live.add(c.id);
+      final key = '${p.kind.name}@${p.atS}';
+      if (_seen[c.id] == key) continue;
+      _seen[c.id] = key;
+      out.add((c, p));
+    }
+    _seen.removeWhere((id, _) => !live.contains(id));
+    return out;
+  }
+
+  /// One line for a toast: who asks, and why.
+  static String headline(CitySim city, Petition p) => switch (p.kind) {
+        PetitionKind.hearts =>
+          '${city.name} asks to rejoin, on light terms — open its panel to '
+              'answer.',
+        PetitionKind.dependency =>
+          '${city.name} cannot keep itself alive and asks to rejoin, on '
+              'your terms — open its panel to answer.',
+      };
 }
 
 /// The ways back on the colony: what reaches past the loyalty model into
@@ -566,11 +633,15 @@ extension CityReclaimSim on CitySim {
       revoltsToSecede: loyalty.tuning.revoltsToSecede);
 
   /// Accept the colony's stated terms (§6.1): it rejoins at
-  /// [ReclaimTuning.rejoinLoyalty], bound by them. False, and nothing
+  /// [ReclaimTuning.rejoinLoyalty], bound by them. [shown] is what the
+  /// player was shown and agreed to — bound exactly, since the colony keeps
+  /// ticking under the dialog: its council votes its laws and its time away
+  /// lengthens the days, and recomputed at the tap the terms bound were not
+  /// always the ones read. Null states them afresh. False, and nothing
   /// changes, for a colony that is not independent.
-  bool acceptNegotiation() {
+  bool acceptNegotiation([BindingTerms? shown]) {
     if (loyalty.allegiance != Allegiance.independent) return false;
-    _rejoin(negotiatedTerms(), reclaim.tuning.rejoinLoyalty,
+    _rejoin(shown ?? negotiatedTerms(), reclaim.tuning.rejoinLoyalty,
         'The colony has rejoined on its terms');
     return true;
   }
@@ -589,12 +660,33 @@ extension CityReclaimSim on CitySim {
             'The colony has rejoined, won back by how you rule the others');
       case PetitionKind.dependency:
         final granted = playerTerms ?? BindingTerms.none;
-        final level = reclaim.tuning.rejoinLoyalty +
-            reclaim.tuning.goodwillPerTerm *
-                (granted.isEmpty ? 0 : granted.count);
-        _rejoin(granted, level, 'The colony has rejoined on your terms');
+        _rejoin(granted, goodwillLevel(granted),
+            'The colony has rejoined on your terms');
     }
     return true;
+  }
+
+  /// The loyalty a dependency petition rejoins at on [granted] terms:
+  /// [ReclaimTuning.rejoinLoyalty] plus [ReclaimTuning.goodwillPerTerm] for
+  /// each term that BINDS — a cap only if it is under the tax the colony
+  /// pays now, a kept law, the demolition ban — scaled by how long they
+  /// bind against the longest terms a colony states (`baseDays` +
+  /// `severityDays`). And never past the Restless return line: counted in
+  /// full, a loose cap, laws it votes for anyway and five days of no
+  /// demolitions bought Loyal outright, skipping the self-government every
+  /// other way back lands in.
+  double goodwillLevel(BindingTerms granted) {
+    final r = reclaim.tuning;
+    final base = r.rejoinLoyalty;
+    if (granted.isEmpty) return base;
+    final cap = granted.taxCap;
+    final binds = (cap != null && cap < effectiveTax() ? 1 : 0) +
+        granted.keptLaws.length +
+        (granted.noDemolition ? 1 : 0);
+    final span = math.max(1e-6, r.baseDays + r.severityDays);
+    final level = base +
+        r.goodwillPerTerm * binds * (granted.days / span).clamp(0.0, 1.0);
+    return math.min(level, loyalty.tuning.restlessAbove);
   }
 
   /// Turn the petition down: the colony stays independent.
@@ -620,6 +712,10 @@ extension CityReclaimSim on CitySim {
     // The revolts it left over are its own business now: kept, three in the
     // window would break it away again on the next tick.
     l.revolts.clear();
+    // What its council did lately is its last independence's story: kept,
+    // a rejoined colony saved it forever, and a second independence's
+    // panel listed the first one's acts among its own.
+    governorLog.clear();
     l.portSeized = false;
     l.impoundPending = false;
     // Accepting is an act of governance: the neglect clock starts now.
@@ -663,6 +759,30 @@ extension CityReclaimSim on CitySim {
           LoyaltySeverity.warn,
           'Cannot keep itself alive and asks to rejoin — on your terms'),
     };
+  }
+
+  /// The blockade's price (§6.3), for a colony in standoff, or null: the
+  /// trade-off the player weighs before cutting the deliveries it lives
+  /// on. Cutting them does not buy loyalty — hunger leaves nobody content,
+  /// and only content, attended rule wins it back — but the mood it costs
+  /// is counted, as this colony's loyalty × mood, in the reputation that
+  /// wins independent colonies home (§6.2). Said where the player would cut
+  /// (the delivery schedule) and where a standoff is explained.
+  String? blockadeNote() {
+    final l = loyalty;
+    if (l.allegiance != Allegiance.colonial ||
+        l.stage != LoyaltyStage.standoff) {
+      return null;
+    }
+    String pct(double v) => '${(v * 100).round()}%';
+    final own = l.level.clamp(0.0, 1.0) * happiness.clamp(0.0, 1.0);
+    final rep = reclaim.reputation;
+    return 'Starving it will not bring it to heel: cut its deliveries and '
+        'those living on imports leave, the rest go hungry, and hunger wins '
+        'no loyalty back. Its mood counts in your reputation — loyalty × '
+        'mood here is ${pct(own)}'
+        '${rep == null ? '' : ', across your colonies ${pct(rep)}'} — and '
+        'reputation is what wins independent colonies home.';
   }
 
   /// The status-list line of the binding terms in force, or null.
