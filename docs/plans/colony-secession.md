@@ -101,7 +101,7 @@ computed alongside `lifeNet` in the production loop, but counts only buildings f
 true, which already excludes the spaceport. Deliveries, cargo and relief are not counted.
 
 ```
-local_c = net output of local life-support buildings of commodity c        // food, water, O2 if managed
+local_c = net output of local life-support buildings of commodity c        // food, water, oxygen (always)
 selfSufficiency = min over c of local_c / (population × perPerson_c)       // clamp 0..1; 1 with no population
 ```
 
@@ -112,6 +112,22 @@ disaster day should not cancel it.
   hostile worlds are simply hard to satisfy.
 - **The Moon / Mars** need hydroponics or lab-grown food, water from ice, sewage recycling or aquifers, and
   oxygen from electrolysis or a harvester, each at the population's scale. Until then they are dependent.
+- **Oxygen always counts** (user, 2026-10-10), whatever the complexity setting and whatever world the colony is
+  on, because the **air itself** is a local source. A breathable atmosphere covers oxygen in full. A world
+  being terraformed covers the share its air has reached:
+  ```
+  airO2 = breathable ? 1 : terraformBreathability     // 0..1, the terraformed share of a breathable sky
+  local_oxygen = O2 buildings' net output + airO2 × need_oxygen
+  ```
+  So Earth is covered by its sky, a raw Mars colony needs electrolysis or a harvester for every person, and a
+  half-terraformed Mars needs plants for half of them. Terraforming is literally a road to independence.
+  - **Gap this exposes:** `breathable` (`city_sim.dart:618`) reads only the body's own composition. `terraform`
+    (0..1) shifts the biome, but never makes the air breathable, so life support (`o2Managed`) charges a fully
+    terraformed world's people for oxygen forever. Phase 1 adds `terraformBreathability`, and makes life
+    support (§19673a2's `supported()`) use the same `airO2` share: the people the sky covers breathe for
+    free. Also, today oxygen is only managed at complexity ≥ 0.3. Below that, the sim ignores oxygen for
+    survival but it still counts for independence. The HUD's independence readout must then show it, because
+    the player never sees oxygen elsewhere at that setting.
 - Power and compute are local by construction and do not enter the measure. Fuel and other industrial
   goods do not either: a colony that can breathe, eat and drink can survive alone, even if it cannot grow
   without trade.
@@ -286,6 +302,6 @@ Each phase is one commit or a few, shipped behind nothing, since the first phase
   through the existing `rebellionSensitivity`? Proposed: only through sensitivity, plus Autocracy keeps its
   garrison-style suppression in phase 4.
 - **Q6 Standoff: ANSWERED 2026-10-10:** strike, emigration and withering, plus rebels seize the spaceport (§4.1).
-- **Q7 The bar: ANSWERED 2026-10-10:** 90%, falling toward 0% with desperation (§3.4). Still to confirm: oxygen counts only where the sim manages it (proposed yes).
+- **Q7 The bar: ANSWERED 2026-10-10:** 90%, falling toward 0% with desperation (§3.4). Oxygen **always** counts; breathable or terraformed air is a local source (§3.4).
 - **Q5 The flat sandbox** `CityBuilderScreen` (`NewCityScreen._found`, never in a world). Does loyalty apply
   there? Proposed: yes, but with no reputation route, since it is the only colony.
