@@ -72,4 +72,22 @@ void main() {
         reason: 'content settlers fill more than 40% of the homes');
     expect(city.starved, isFalse);
   });
+
+  test('settlers keep their own lanes, and a town pays for its roads', () {
+    final city = starterKit();
+    run(city, 1);
+    city.population = 40;
+    final gross = city.roadUpkeepPerWeek / city.weekSec;
+    expect(city.communityRoadPerWeek, greaterThan(0));
+    expect(city.roadUpkeepRate, lessThan(gross));
+    // ignore: avoid_print
+    print('starter roads: gross ${gross.toStringAsFixed(3)} §/s, paid '
+        '${city.roadUpkeepRate.toStringAsFixed(3)} §/s at 40 people');
+    // Gravel-road standard only: the paving above it is still the town's.
+    expect(city.communityRoadPerWeek,
+        lessThan(city.roadUpkeepPerWeek * 0.19 / 0.32 + 1e-9));
+    city.population = CitySim.communityFadePop;
+    expect(city.communityRoadPerWeek, 0.0);
+    expect(city.roadUpkeepRate, closeTo(gross, 1e-12));
+  });
 }

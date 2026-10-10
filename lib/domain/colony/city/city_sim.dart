@@ -428,9 +428,14 @@ class CitySim {
   /// Net §/s the standing laws add (positive) or cost (negative).
   double lawUpkeepRate = 0;
 
+  /// Road upkeep the last tick paid, §/s ([roadUpkeepRate] at its
+  /// population: the settlers' share moves as people come and go).
+  double roadUpkeepPaidRate = 0;
+
   /// What the treasury is actually gaining or losing per second: tax, the
-  /// laws, and the upkeep of every road (see [roadUpkeepRate]).
-  double get netFundsRate => taxIncomeRate + lawUpkeepRate - roadUpkeepRate;
+  /// laws, and the upkeep of every road, as the last tick paid them.
+  double get netFundsRate =>
+      taxIncomeRate + lawUpkeepRate - roadUpkeepPaidRate;
 
   /// Milestone tiers already awarded, by [CityMilestone.tier].
   ///
@@ -1672,7 +1677,8 @@ class CitySim {
     lawUpkeepRate = lawFundsRate();
     // Road upkeep: cached on the road network's revision, so this is a
     // lookup, not a walk of the roads, however many ticks a frame runs.
-    funds += (taxIncomeRate + lawUpkeepRate - roadUpkeepRate) * dt;
+    roadUpkeepPaidRate = roadUpkeepRate;
+    funds += (taxIncomeRate + lawUpkeepRate - roadUpkeepPaidRate) * dt;
     research += population *
         happiness *
         researchPerPopPerSec *
@@ -4512,7 +4518,8 @@ class CitySim {
       // A type per (class, dressing, walls): the catalogue lookup once per
       // kind of road, not once per road.
       final types = <int, RoadType>{};
-      var sum = 0.0;
+      final gravel = RoadType.forClass(RoadClass.path).upkeepPerCellWeek;
+      var sum = 0.0, basic = 0.0, localM = 0.0;
       for (final road in layout.roads) {
         final kind = (road.roadClass.index * RoadDecoration.values.length +
                     road.decoration.index) *
@@ -4520,12 +4527,25 @@ class CitySim {
             (road.soundWalls ? 1 : 0);
         final type = types[kind] ??= RoadType.of(road);
         final deck = road.deck;
+        final lengthM = _roadLengthM(road);
         sum += RoadCosts.upkeepPerWeek(type,
-            lengthM: _roadLengthM(road),
+            lengthM: lengthM,
             structureM: deck?.structureM ?? 0,
             tunnelM: deck?.tunnelM ?? 0);
+        // The share settlers can keep by hand: a local road's ground run,
+        // at a gravel road's rate. Bridges, tunnels and paving are crews'.
+        if (_handKeptClasses.contains(road.roadClass)) {
+          final groundM = math.max(0.0,
+              lengthM - (deck?.structureM ?? 0) - (deck?.tunnelM ?? 0));
+          localM += groundM;
+          basic += groundM /
+              RoadCosts.cellM *
+              math.min(type.upkeepPerCellWeek, gravel);
+        }
       }
       _upkeepPerWeek = sum;
+      _basicUpkeepPerWeek = basic;
+      _localRoadM = localM;
       _upkeepRevision = rev;
       _upkeepVersion = layout.version;
     }
@@ -4533,12 +4553,42 @@ class CitySim {
   }
 
   double _upkeepPerWeek = 0;
+  double _basicUpkeepPerWeek = 0;
+  double _localRoadM = 0;
   int _upkeepRevision = -1;
   int _upkeepVersion = -1;
 
+  /// The local roads a community grades and patches itself.
+  static const _handKeptClasses = {
+    RoadClass.path,
+    RoadClass.street,
+    RoadClass.streetOneWay,
+    RoadClass.alley,
+  };
+
+  /// Metres of local road one settler keeps by hand: the parish statute
+  /// labour of the 1555 Highways Act, a few days' work a year a household,
+  /// was what kept a village's lanes passable.
+  static const double handKeptMPerSettler = 60.0;
+
+  /// The road upkeep the settlers do themselves, § a week: a local road kept
+  /// to gravel-road standard, for as many metres as the community's share of
+  /// the population can walk ([communityShare], [handKeptMPerSettler]). It
+  /// fades with that share, so a town pays for its own roads.
+  double get communityRoadPerWeek {
+    final total = roadUpkeepPerWeek; // refreshes the cache
+    if (_localRoadM <= 0 || total <= 0) return 0;
+    final keptM =
+        population * communityShare(population) * handKeptMPerSettler;
+    final share = (keptM / _localRoadM).clamp(0.0, 1.0);
+    return math.min(total, _basicUpkeepPerWeek * share);
+  }
+
   /// Road upkeep as the treasury pays it: § per second of colony time
-  /// SPENT (never negative) — [roadUpkeepPerWeek] over [weekSec].
-  double get roadUpkeepRate => roadUpkeepPerWeek / weekSec;
+  /// SPENT (never negative) — [roadUpkeepPerWeek], less what the community
+  /// keeps by hand ([communityRoadPerWeek]), over [weekSec].
+  double get roadUpkeepRate =>
+      (roadUpkeepPerWeek - communityRoadPerWeek) / weekSec;
 
   /// Grow (or abandon) buildings on zoned lots under RCI demand.
   ///

@@ -599,7 +599,9 @@ class _CityGameHudState extends State<CityGameHud> {
         child: Text(
             '${formatMoney(city.roadUpkeepPerWeek)} a week for '
             '${city.layout.roads.length} '
-            '${city.layout.roads.length == 1 ? 'road' : 'roads'}',
+            '${city.layout.roads.length == 1 ? 'road' : 'roads'}'
+            '${city.communityRoadPerWeek > 0 ? ', ${formatMoney(city.communityRoadPerWeek)} '
+                'of it kept by the settlers' : ''}',
             style: AppTheme.dim.copyWith(fontSize: 10)),
       ),
       const Divider(height: 14, color: Color(0xFF1E2A38)),
