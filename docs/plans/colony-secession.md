@@ -1,6 +1,6 @@
 # Colony loyalty and secession
 
-Status: draft for review, 2026-10-10 (revised the same day: independence needs self-sufficiency). Baseline `dev` at `34a83f7`. Paths are relative to the repo root.
+Status: approved for phase 1, 2026-10-10 (Q6/Q7 answered by the user; Q1–Q5 on the proposed defaults, revisable).
 
 ## 1. Intent
 
@@ -289,6 +289,9 @@ v1 does not model it beyond the player's existing ability to cancel delivery sch
 Each phase is one commit or a few, shipped behind nothing, since the first phase already only warns.
 
 ## 8. Open questions for the user
+
+**Phase 1 proceeds on the proposed answers to Q1–Q5** (2026-10-10, the user asked to start both plans).
+Every number is in a tuning object, so the user can revise any of them without a redesign.
 
 - **Q1 Negotiate currency.** Terms only (proposed), or add a player-wide purse so a colony can be bought
   back? A purse is a bigger change: today every colony has its own treasury.

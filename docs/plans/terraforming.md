@@ -1,6 +1,6 @@
 # Terraforming: a planet's real atmosphere
 
-Status: draft for review, 2026-10-10. Baseline `dev` at `1246d8f`. Paths are relative to the repo root.
+Status: approved for phase 1, 2026-10-10 (decisions in §7). Baseline `dev` at `1246d8f`. Paths are relative to the repo root.
 
 ## 1. Intent
 
@@ -157,15 +157,14 @@ play at 1×, but hours under warp. Earth stays effectively immovable at the same
    colony is doing what to it).
 4. **Imports from space:** later.
 
-## 7. Open questions for the user
+## 7. Decisions (user, 2026-10-10)
 
-- **Q1 Timescale.** One honest `terraformRateScale` sized so a ~50-tower programme makes Mars breathable in
-  ~30 Mars years (hours under warp), as proposed? Or another target?
-- **Q2 Escape.** Small bodies leak (the Moon cannot keep air without constant pumping). Keep that realism?
-  Proposed: yes.
-- **Q3 Industry on the planetary ledger.** Colony CO2 thickens Mars measurably, and Earth effectively not at
-  all, as the existing `AtmospherePollution` docs intend. Proposed: yes.
-- **Q4 Flight effects.** A thicker Mars means more drag, hotter reentry, and parachutes that work better.
-  That is automatic once the body is republished. Any reason to hold it back? Proposed: no, it is the point.
-- **Q5 Shared air.** Colonies on one body share one atmosphere, so a rival or independent colony's industry
-  works against the player's towers. That pairs with secession. Proposed: yes, inherently.
+- **Q1 Timescale:** yes, as proposed, and **tunable**. `terraformRateScale` lives in a tuning object with the
+  ~50 towers / ~30 Mars years target as its default.
+- **Q2 Escape:** yes. Small bodies leak. Add a **late-game Atmospheric Retention Array**: a magnetosphere
+  generator plus upper-atmosphere containment that suppresses escape on its body, scaled by the number of
+  arrays, power-hungry, unlocked late. It lets the Moon keep air the player pays to hold. Phase 2 (escape)
+  and phase 3 (the building).
+- **Q3 Industry on the planetary ledger:** yes.
+- **Q4 Flight effects:** yes. Flight reads the republished body.
+- **Q5 Shared air:** yes. Colonies on one body share one atmosphere.
